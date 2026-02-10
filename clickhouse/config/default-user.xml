@@ -1,0 +1,11 @@
+<clickhouse>
+  <!-- Allow default user to connect from anywhere (development only) -->
+  <users>
+    <default>
+      <password></password>
+      <networks>
+        <ip>::/0</ip>
+      </networks>
+    </default>
+  </users>
+</clickhouse>

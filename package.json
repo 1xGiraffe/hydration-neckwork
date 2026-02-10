@@ -1,0 +1,39 @@
+{
+  "name": "preis",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "tsx src/cli.ts",
+    "start:backfill": "tsx src/cli.ts",
+    "detect-gaps": "tsx src/cli.ts --detect-gaps",
+    "test": "vitest run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1xGiraffe/hydration-preis.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/1xGiraffe/hydration-preis.git/issues"
+  },
+  "homepage": "https://github.com/1xGiraffe/hydration-preis#readme",
+  "dependencies": {
+    "@clickhouse/client": "^1.16.0",
+    "@polkadot/util": "^14.0.1",
+    "@polkadot/util-crypto": "^14.0.1",
+    "@subsquid/substrate-processor": "^8.6.1",
+    "@subsquid/substrate-runtime": "^2.0.1",
+    "@subsquid/substrate-typegen": "^8.1.0",
+    "tsx": "^4.21.0"
+  },
+  "devDependencies": {
+    "@subsquid/substrate-metadata-explorer": "^3.2.0",
+    "@types/node": "^25.1.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}

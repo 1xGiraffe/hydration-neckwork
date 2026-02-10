@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  clickhouse:
+    build:
+      context: ./clickhouse
+      dockerfile: Dockerfile
+    container_name: preis-clickhouse
+    ports:
+      - "18123:8123"
+      - "19000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    environment:
+      - CLICKHOUSE_DB=price_data
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      - CLICKHOUSE_PASSWORD=dev
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - price-network
+
+  indexer:
+    build: .
+    container_name: preis-indexer
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - RPC_URL=${RPC_URL:-wss://hydration-rpc.dwellir.com}
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - SQUID_PROCESSOR_EXIT_DISABLED=true
+    networks:
+      - price-network
+
+volumes:
+  clickhouse_data:
+
+networks:
+  price-network:
+    driver: bridge
