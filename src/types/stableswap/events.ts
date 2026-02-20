@@ -74,3 +74,41 @@ export const liquidityAdded =  {
         })
     ),
 }
+
+export const sellExecuted =  {
+    name: 'Stableswap.SellExecuted',
+    /**
+     * Sell trade executed. Trade fee paid in asset leaving the pool (already subtracted from amount_out).
+     */
+    v183: new EventType(
+        'Stableswap.SellExecuted',
+        sts.struct({
+            who: v183.AccountId32,
+            poolId: sts.number(),
+            assetIn: sts.number(),
+            assetOut: sts.number(),
+            amountIn: sts.bigint(),
+            amountOut: sts.bigint(),
+            fee: sts.bigint(),
+        })
+    ),
+}
+
+export const buyExecuted =  {
+    name: 'Stableswap.BuyExecuted',
+    /**
+     * Buy trade executed. Trade fee paid in asset entering the pool (already included in amount_in).
+     */
+    v183: new EventType(
+        'Stableswap.BuyExecuted',
+        sts.struct({
+            who: v183.AccountId32,
+            poolId: sts.number(),
+            assetIn: sts.number(),
+            assetOut: sts.number(),
+            amountIn: sts.bigint(),
+            amountOut: sts.bigint(),
+            fee: sts.bigint(),
+        })
+    ),
+}

@@ -40,4 +40,6 @@ export const Tradability: sts.Type<Tradability> = sts.struct(() => {
     }
 })
 
+export const AccountId32 = sts.bytes()
+
 export const FixedU128 = sts.bigint()

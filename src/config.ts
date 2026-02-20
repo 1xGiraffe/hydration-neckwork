@@ -26,9 +26,9 @@ export const config: Config = {
   // SQD archives use the original chain name 'hydradx'
   SQD_GATEWAY: 'https://v2.archive.subsquid.io/network/hydradx',
 
-  // RPC endpoint (fallback to Dwellir public RPC)
-  RPC_URL: process.env.RPC_URL ?? 'wss://hydration-rpc.dwellir.com',
-  RPC_RATE_LIMIT: 10, // requests per second
+  // RPC endpoint (fallback to Dotters network RPC)
+  RPC_URL: process.env.RPC_URL ?? 'wss://hydration.dotters.network',
+  RPC_RATE_LIMIT: 100, // requests per second
 
   // ClickHouse connection (ports remapped to 18123/19000 per Phase 1 decisions)
   CLICKHOUSE_URL: process.env.CLICKHOUSE_HOST ?? 'http://localhost:18123',

@@ -5,7 +5,7 @@ Block-level USDT price indexer for Hydration DEX
 - Indexes every tradeable asset's USDT price at every block from genesis to live
 - Supports Omnipool, XYK, and Stableswap pool types
 - Sub-second query performance (point queries <100ms, range queries <1s)
-- OHLC candlestick data at 5 intervals (5min, 15min, 1h, 4h, 1d)
+- OHLCV candlestick data (with trading volume) at 5 intervals (5min, 15min, 1h, 4h, 1d)
 - Backfills via SQD archive gateway, follows chain head in real-time
 - ClickHouse storage with ReplacingMergeTree deduplication
 
@@ -41,7 +41,7 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| RPC_URL | wss://hydration-rpc.dwellir.com | WebSocket RPC endpoint |
+| RPC_URL | wss://hydration.dotters.network | WebSocket RPC endpoint |
 | CLICKHOUSE_HOST | http://localhost:18123 | ClickHouse HTTP endpoint |
 | CLICKHOUSE_PASSWORD | (empty) | ClickHouse password |
 
@@ -121,6 +121,13 @@ Available intervals:
 
 All timestamps are UTC, aligned to standard interval boundaries.
 
+Each OHLCV query returns volume data alongside OHLC prices:
+- `volume_buy` -- Total USDT value of buy-side volume (asset acquired)
+- `volume_sell` -- Total USDT value of sell-side volume (asset sold)
+- `volume_total` -- Combined USDT volume (buy + sell)
+
+All volume values are denominated in USDT for cross-asset comparability.
+
 ### Cross-Asset Comparison
 
 Pivot query comparing multiple assets across a block range:
@@ -146,16 +153,16 @@ For the complete query reference including cross-pair OHLC derivation and weekly
 
 | Table | Engine | Description |
 |-------|--------|-------------|
-| prices | ReplacingMergeTree | Asset prices by block (asset_id, block_height, usdt_price) |
+| prices | ReplacingMergeTree | Asset prices by block (asset_id, block_height, usdt_price, volume_buy, volume_sell, volume_total) |
 | blocks | MergeTree | Block metadata (block_height, block_timestamp, spec_version) |
 | assets | ReplacingMergeTree | Asset registry (asset_id, symbol, name, decimals) |
 | indexer_state | ReplacingMergeTree | Checkpoint persistence |
 | runtime_upgrades | MergeTree | Runtime version transitions |
-| ohlc_5min | AggregatingMergeTree | Pre-computed 5-minute OHLC candles |
-| ohlc_15min | AggregatingMergeTree | Pre-computed 15-minute OHLC candles |
-| ohlc_1h | AggregatingMergeTree | Pre-computed 1-hour OHLC candles |
-| ohlc_4h | AggregatingMergeTree | Pre-computed 4-hour OHLC candles |
-| ohlc_1d | AggregatingMergeTree | Pre-computed 1-day OHLC candles |
+| ohlc_5min | AggregatingMergeTree | Pre-computed 5-minute OHLCV candles |
+| ohlc_15min | AggregatingMergeTree | Pre-computed 15-minute OHLCV candles |
+| ohlc_1h | AggregatingMergeTree | Pre-computed 1-hour OHLCV candles |
+| ohlc_4h | AggregatingMergeTree | Pre-computed 4-hour OHLCV candles |
+| ohlc_1d | AggregatingMergeTree | Pre-computed 1-day OHLCV candles |
 
 The `prices` table uses `(asset_id, block_height)` ordering for efficient single-asset queries. All OHLC tables are automatically populated via materialized views when new prices are inserted.
 

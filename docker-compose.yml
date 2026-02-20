@@ -31,7 +31,7 @@ services:
       clickhouse:
         condition: service_healthy
     environment:
-      - RPC_URL=${RPC_URL:-wss://hydration-rpc.n.dwellir.com}
+      - RPC_URL=${RPC_URL:-wss://hydration.dotters.network}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       - SQUID_PROCESSOR_EXIT_DISABLED=true

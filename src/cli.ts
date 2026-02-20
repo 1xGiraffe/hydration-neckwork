@@ -74,7 +74,7 @@ Examples:
   npm run detect-gaps
 
 Environment Variables:
-  RPC_URL               WebSocket RPC endpoint (default: wss://hydration-rpc.dwellir.com)
+  RPC_URL               WebSocket RPC endpoint (default: wss://hydration.dotters.network)
   CLICKHOUSE_HOST       ClickHouse HTTP endpoint (default: http://localhost:18123)
   CLICKHOUSE_PASSWORD   ClickHouse password (default: empty)
 `)

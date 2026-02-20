@@ -35,3 +35,43 @@ export const poolDestroyed =  {
         })
     ),
 }
+
+export const sellExecuted =  {
+    name: 'XYK.SellExecuted',
+    /**
+     * Asset sale executed.
+     */
+    v183: new EventType(
+        'XYK.SellExecuted',
+        sts.struct({
+            who: v183.AccountId32,
+            assetIn: sts.number(),
+            assetOut: sts.number(),
+            amount: sts.bigint(),
+            salePrice: sts.bigint(),
+            feeAsset: sts.number(),
+            feeAmount: sts.bigint(),
+            pool: v183.AccountId32,
+        })
+    ),
+}
+
+export const buyExecuted =  {
+    name: 'XYK.BuyExecuted',
+    /**
+     * Asset purchase executed.
+     */
+    v183: new EventType(
+        'XYK.BuyExecuted',
+        sts.struct({
+            who: v183.AccountId32,
+            assetOut: sts.number(),
+            assetIn: sts.number(),
+            amount: sts.bigint(),
+            buyPrice: sts.bigint(),
+            feeAsset: sts.number(),
+            feeAmount: sts.bigint(),
+            pool: v183.AccountId32,
+        })
+    ),
+}

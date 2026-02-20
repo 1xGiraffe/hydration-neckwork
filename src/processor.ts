@@ -6,14 +6,15 @@ export const processor = new SubstrateBatchProcessor()
   .setRpcEndpoint({
     url: config.RPC_URL,
     rateLimit: config.RPC_RATE_LIMIT,
-    capacity: 10,
+    capacity: 20,
   })
 
   // Start from genesis (will be overridden by checkpoint in production)
   .setBlockRange({ from: 0 })
 
-  // Subscribe to pool composition change events
-  // These events trigger cache invalidation in the pool composition cache
+  // Subscribe to pool composition change events and swap events
+  // Pool composition events trigger cache invalidation in the pool composition cache
+  // Swap events are used for volume extraction
   .addEvent({
     name: [
       'Omnipool.TokenAdded',
@@ -23,6 +24,12 @@ export const processor = new SubstrateBatchProcessor()
       'Stableswap.PoolCreated',
       'Stableswap.LiquidityAdded',
       'Tokens.Transfer',
+      'Omnipool.SellExecuted',
+      'Omnipool.BuyExecuted',
+      'XYK.SellExecuted',
+      'XYK.BuyExecuted',
+      'Stableswap.SellExecuted',
+      'Stableswap.BuyExecuted',
     ],
   })
 

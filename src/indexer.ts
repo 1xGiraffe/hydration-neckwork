@@ -10,6 +10,8 @@ import { xxhashAsHex } from '@polkadot/util-crypto'
 import type { OmnipoolAssetState, XYKPool, StableswapPool } from './price/types.ts'
 import type { Block } from './types/support.ts'
 import * as storage from './types/storage.ts'
+import { isSwapEvent } from './registry/swapEvents.js'
+import { extractVolumeFromSwaps, mergePriceAndVolumeRows } from './blocks/extractVolume.js'
 
 // twox128 storage prefixes for pool-related pallets (hex without 0x prefix, 32 chars each)
 // System.set_storage keys starting with these prefixes indicate pool state mutations
@@ -308,6 +310,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
   // Tracking for skip rate logging
   let blocksSkipped = 0
   let blocksProcessed = 0
+  let swapEventsProcessed = 0
 
   // SQD processor owns process lifecycle via runProgram()
   // With HotDatabase, the Runner will enter processHotBlocks() which is an
@@ -319,7 +322,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
 
     // Detect live mode: switch to per-block logging when batch size drops below threshold
     if (!isLiveMode && ctx.blocks.length < 10) {
-      console.log('[Progress] Caught up to chain tip, switching to live mode')
+      console.log('[Progress] Caught up to chain tip, switching to live mode (volumes now active)')
       isLiveMode = true
       currentLogInterval = liveLogInterval
       registry.setSnapshotInterval(config.SNAPSHOT_INTERVAL)
@@ -401,19 +404,24 @@ export async function run(options: RunOptions = {}): Promise<void> {
         }
       }
 
-      // Check if any transfer events affect known pool accounts
+      // Check if any transfer events affect known pool accounts or if there are swap events
       let hasPoolAffectingTransfer = false
+      let hasSwapEvents = false
       for (const event of block.events) {
         if (event.name === 'Tokens.Transfer') {
           const args = event.args as { currencyId: number; from: string; to: string; amount: bigint }
           if (poolAccounts.has(args.from) || poolAccounts.has(args.to)) {
             hasPoolAffectingTransfer = true
-            break
           }
         }
+        if (isSwapEvent(event.name)) {
+          hasSwapEvents = true
+        }
+        // Early exit if both flags already set
+        if (hasPoolAffectingTransfer && hasSwapEvents) break
       }
 
-      if (!hasPoolAffectingTransfer && !hasSetStorageAffectingPools && !compositionChanged && previousPrices !== null) {
+      if (!hasPoolAffectingTransfer && !hasSetStorageAffectingPools && !compositionChanged && !hasSwapEvents && previousPrices !== null) {
         blocksSkipped++
 
         ctx.store.addBlocks([{
@@ -429,15 +437,17 @@ export async function run(options: RunOptions = {}): Promise<void> {
 
       let omnipoolAssets, xykPools, stableswapPools
       try {
-        omnipoolAssets = omnipoolAssetIds
-          ? await readOmnipoolState(block.header, omnipoolAssetIds)
-          : new Map()
-        xykPools = xykPoolEntries
-          ? await readXYKState(block.header, xykPoolEntries)
-          : []
-        stableswapPools = stableswapPoolEntries
-          ? await readStableswapState(block.header, stableswapPoolEntries)
-          : []
+        ;[omnipoolAssets, xykPools, stableswapPools] = await Promise.all([
+          omnipoolAssetIds
+            ? readOmnipoolState(block.header, omnipoolAssetIds)
+            : Promise.resolve(new Map()),
+          xykPoolEntries
+            ? readXYKState(block.header, xykPoolEntries)
+            : Promise.resolve([]),
+          stableswapPoolEntries
+            ? readStableswapState(block.header, stableswapPoolEntries)
+            : Promise.resolve([]),
+        ])
       } catch (error) {
         console.error(
           `[Runtime] Storage read failed at block ${blockHeight} (spec_version: ${specVersion}):`,
@@ -459,12 +469,24 @@ export async function run(options: RunOptions = {}): Promise<void> {
       previousPrices = prices
       pricesCalculated += prices.size
 
+      // Extract volume from swap events in this block
+      const volumeRows = extractVolumeFromSwaps(
+        block.events,
+        blockHeight,
+        prices,
+        decimals
+      )
+      swapEventsProcessed += volumeRows.length / 2  // Each swap = 2 rows
+
       const priceRows = Array.from(prices.entries()).map(([assetId, usdtPrice]) => ({
         asset_id: assetId,
         block_height: blockHeight,
         usdt_price: usdtPrice,
       }))
-      ctx.store.addPrices(priceRows)
+
+      // Merge price rows with volume rows (combines both into single batch)
+      const combinedRows = mergePriceAndVolumeRows(priceRows, volumeRows)
+      ctx.store.addPrices(combinedRows)
 
       ctx.store.addBlocks([{
         block_height: blockHeight,
@@ -481,6 +503,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
         console.log(
           `[${mode}] Block ${blockHeight} | ` +
           `${previousPrices?.size ?? 0} prices/block | ` +
+          `${Math.floor(swapEventsProcessed)} swaps | ` +
           `${assetsTracked} assets tracked | ` +
           `${skipRate}% skipped | ` +
           `spec_version: ${specVersion}`
@@ -489,6 +512,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
         pricesCalculated = 0
         blocksSkipped = 0
         blocksProcessed = 0
+        swapEventsProcessed = 0
       }
     }
   })

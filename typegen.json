@@ -4,15 +4,15 @@
   "pallets": {
     "Omnipool": {
       "storage": ["Assets", "HubAssetImbalance"],
-      "events": ["TokenAdded", "TokenRemoved"]
+      "events": ["TokenAdded", "TokenRemoved", "SellExecuted", "BuyExecuted"]
     },
     "XYK": {
       "storage": ["PoolAssets", "TotalLiquidity", "ShareToken"],
-      "events": ["PoolCreated", "PoolDestroyed"]
+      "events": ["PoolCreated", "PoolDestroyed", "SellExecuted", "BuyExecuted"]
     },
     "Stableswap": {
       "storage": ["Pools", "AssetTradability"],
-      "events": ["PoolCreated", "LiquidityAdded"]
+      "events": ["PoolCreated", "LiquidityAdded", "SellExecuted", "BuyExecuted"]
     },
     "AssetRegistry": {
       "storage": ["Assets", "AssetMetadataMap", "AssetLocations"]
