@@ -38,6 +38,35 @@ services:
     networks:
       - price-network
 
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: preis-api
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+    networks:
+      - price-network
+
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    container_name: preis-ui
+    depends_on:
+      - api
+    ports:
+      - "5173:80"
+    networks:
+      - price-network
+
 volumes:
   clickhouse_data:
 
