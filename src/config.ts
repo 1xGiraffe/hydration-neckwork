@@ -19,6 +19,9 @@ export interface Config {
   // Hydration chain constants
   USDT_ASSET_ID: number
   LRNA_ASSET_ID: number
+  // Stablecoin anchor candidates for LRNA price derivation (≈ $1 each).
+  // resolvePrices picks the one with the highest Omnipool hubReserve.
+  STABLECOIN_ANCHOR_IDS: number[]
 }
 
 export const config: Config = {
@@ -41,6 +44,11 @@ export const config: Config = {
   SNAPSHOT_INTERVAL_BACKFILL: 10_000, // blocks between scans during backfill (archive mode)
 
   // Hydration chain asset IDs
-  USDT_ASSET_ID: 10, // USDT is the price denomination target
-  LRNA_ASSET_ID: 1,  // LRNA is the Omnipool hub token
+  USDT_ASSET_ID: 10, // USDT — price denomination target (historical compatibility)
+  LRNA_ASSET_ID: 1,   // LRNA is the Omnipool hub token
+  // Stablecoin anchor candidates for LRNA derivation (≈ $1, must be in Omnipool).
+  // Stablecoin anchor candidates — must include assets actually in the Omnipool.
+  // 10 (USDT) and 22 (USDC) are in stableswap pools but not directly in Omnipool.
+  // 222 (HOLLAR) is in the Omnipool and pegged via stableswap to 10 and 22.
+  STABLECOIN_ANCHOR_IDS: [10, 22, 222],
 }

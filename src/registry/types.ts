@@ -3,5 +3,6 @@ export interface AssetMetadata {
   symbol: string
   name: string
   decimals: number
-  assetType?: string  // 'Token', 'PoolShare', 'StableSwap', etc.
+  assetType?: string  // 'Token', 'PoolShare', 'StableSwap', 'Erc20', etc.
+  evmAddress?: string // EVM contract address for Erc20 assets (from AssetLocations AccountKey20)
 }

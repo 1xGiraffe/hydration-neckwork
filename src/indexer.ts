@@ -12,6 +12,7 @@ import type { Block } from './types/support.ts'
 import * as storage from './types/storage.ts'
 import { isSwapEvent } from './registry/swapEvents.js'
 import { extractVolumeFromSwaps, mergePriceAndVolumeRows } from './blocks/extractVolume.js'
+import { readErc20Balances, isKnownErc20, updateErc20Registry } from './evm/balances.js'
 
 // twox128 storage prefixes for pool-related pallets (hex without 0x prefix, 32 chars each)
 // System.set_storage keys starting with these prefixes indicate pool state mutations
@@ -101,25 +102,45 @@ async function readOmnipoolState(block: Block, assetIds: number[]): Promise<Map<
       }
     }
 
+    // Collect ERC20 assets that need EVM balance reads
+    const erc20Gaps: Array<{ idx: number; assetId: number }> = []
+
     for (let i = 0; i < assetIds.length; i++) {
       const assetId = assetIds[i]
       const assetState = assetStates[i]
       if (!assetState) continue
 
-      // Use batched balance result or fallback to shares
+      // For ERC20 assets, Tokens.Accounts is stale/empty — always read from EVM.
+      // For native assets, use Tokens.Accounts balance or fall back to shares.
       let reserve = assetState.shares
-      if (balances && balances[i]) {
+      if (isKnownErc20(assetId)) {
+        erc20Gaps.push({ idx: i, assetId })
+      } else if (balances && balances[i] && balances[i]!.free > 0n) {
         reserve = balances[i]!.free
       }
 
       omnipoolAssets.set(assetId, {
         hubReserve: assetState.hubReserve,
-        reserve,  // Real reserve from Tokens.Accounts, or shares as fallback
+        reserve,
         shares: assetState.shares,
         protocolShares: assetState.protocolShares,
         cap: assetState.cap,
         tradable: assetState.tradable.bits,
       })
+    }
+
+    // Fill ERC20 gaps from EVM storage
+    if (erc20Gaps.length > 0) {
+      const erc20AssetIds = erc20Gaps.map(g => g.assetId)
+      const evmBalances = await readErc20Balances(block, erc20AssetIds, omnipoolAccount)
+      for (let g = 0; g < erc20Gaps.length; g++) {
+        if (evmBalances[g] > 0n) {
+          const state = omnipoolAssets.get(erc20Gaps[g].assetId)
+          if (state) {
+            state.reserve = evmBalances[g]
+          }
+        }
+      }
     }
   } catch (error) {
     console.error(`[Omnipool] Failed to read state at block ${block.height}:`, error)
@@ -245,13 +266,34 @@ async function readStableswapState(
           ((finalAmp - initialAmp) * BigInt(elapsedBlocks)) / BigInt(totalBlocks)
       }
 
-      // Extract reserves for this pool using offset
+      // Extract reserves for this pool using offset.
+      // For ERC20 assets (aTokens, HOLLAR), Tokens.Accounts returns null —
+      // fall back to reading EVM.AccountStorages via SQD.
       const startIdx = poolOffsets[i]
       const reserves: bigint[] = []
+      let hasErc20Gap = false
 
       for (let j = 0; j < poolEntry.assets.length; j++) {
         const balance = balances[startIdx + j]
-        reserves.push(balance ? balance.free : 0n)
+        if (balance && balance.free > 0n) {
+          reserves.push(balance.free)
+        } else {
+          reserves.push(0n)
+          if (isKnownErc20(poolEntry.assets[j])) {
+            hasErc20Gap = true
+          }
+        }
+      }
+
+      // Fill ERC20 gaps from EVM storage
+      if (hasErc20Gap) {
+        const poolAccount = getStableswapPoolAccount(poolEntry.poolId)
+        const evmBalances = await readErc20Balances(block, poolEntry.assets, poolAccount)
+        for (let j = 0; j < reserves.length; j++) {
+          if (reserves[j] === 0n && evmBalances[j] > 0n) {
+            reserves[j] = evmBalances[j]
+          }
+        }
       }
 
       stableswapPools.push({
@@ -305,8 +347,10 @@ export async function run(options: RunOptions = {}): Promise<void> {
   let previousBlockHash: string | null = null
   let previousSpecVersion: number | null = null
 
-  // Previous prices for carry-forward optimization
+    // Previous prices for carry-forward optimization
   let previousPrices: Map<number, string> | null = null
+  let atokenEquivalences: [number, number][] = []
+  let atokenIds: Set<number> = new Set()
   // Tracking for skip rate logging
   let blocksSkipped = 0
   let blocksProcessed = 0
@@ -365,6 +409,9 @@ export async function run(options: RunOptions = {}): Promise<void> {
       const newAssets = await registry.maybeSnapshot(blockHeight, block.header)
       if (newAssets.length > 0) {
         ctx.store.addAssets(newAssets)
+        atokenEquivalences = registry.getAtokenEquivalences()
+        atokenIds = registry.getAtokenIds()
+        updateErc20Registry(registry.getErc20Contracts(), atokenIds)
       }
 
       // Update pool composition cache from events
@@ -463,7 +510,9 @@ export async function run(options: RunOptions = {}): Promise<void> {
         stableswapPools,
         decimals,
         config.USDT_ASSET_ID,
-        config.LRNA_ASSET_ID
+        config.LRNA_ASSET_ID,
+        config.STABLECOIN_ANCHOR_IDS,
+        atokenEquivalences
       )
 
       previousPrices = prices
@@ -478,11 +527,23 @@ export async function run(options: RunOptions = {}): Promise<void> {
       )
       swapEventsProcessed += volumeRows.length / 2  // Each swap = 2 rows
 
-      const priceRows = Array.from(prices.entries()).map(([assetId, usdtPrice]) => ({
-        asset_id: assetId,
-        block_height: blockHeight,
-        usdt_price: usdtPrice,
-      }))
+      // Remap aToken volumes to their base tokens and filter aTokens from prices
+      const atokenToBase = new Map(atokenEquivalences.map(([base, aToken]) => [aToken, base]))
+
+      for (const row of volumeRows) {
+        const baseId = atokenToBase.get(row.asset_id)
+        if (baseId !== undefined) {
+          row.asset_id = baseId
+        }
+      }
+
+      const priceRows = Array.from(prices.entries())
+        .filter(([assetId]) => !atokenIds.has(assetId))
+        .map(([assetId, usdtPrice]) => ({
+          asset_id: assetId,
+          block_height: blockHeight,
+          usdt_price: usdtPrice,
+        }))
 
       // Merge price rows with volume rows (combines both into single batch)
       const combinedRows = mergePriceAndVolumeRows(priceRows, volumeRows)

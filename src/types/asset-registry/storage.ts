@@ -5,6 +5,7 @@ import * as v176 from '../v176'
 import * as v222 from '../v222'
 import * as v244 from '../v244'
 import * as v264 from '../v264'
+import * as v394 from '../v394'
 
 export const assets =  {
     /**
@@ -127,6 +128,10 @@ export const assetLocations =  {
      *  Native location of an asset.
      */
     v244: new StorageType('AssetRegistry.AssetLocations', 'Optional', [sts.number()], v244.AssetLocation) as AssetLocationsV244,
+    /**
+     *  Native location of an asset (V5 XCM).
+     */
+    v394: new StorageType('AssetRegistry.AssetLocations', 'Optional', [sts.number()], v394.AssetLocation) as AssetLocationsV394,
 }
 
 /**
@@ -178,6 +183,23 @@ export interface AssetLocationsV244  {
     getPairs(block: Block, key: number): Promise<[k: number, v: (v244.AssetLocation | undefined)][]>
     getPairsPaged(pageSize: number, block: Block): AsyncIterable<[k: number, v: (v244.AssetLocation | undefined)][]>
     getPairsPaged(pageSize: number, block: Block, key: number): AsyncIterable<[k: number, v: (v244.AssetLocation | undefined)][]>
+}
+
+/**
+ *  Native location of an asset (V5 XCM).
+ */
+export interface AssetLocationsV394  {
+    is(block: RuntimeCtx): boolean
+    get(block: Block, key: number): Promise<(v394.AssetLocation | undefined)>
+    getMany(block: Block, keys: number[]): Promise<(v394.AssetLocation | undefined)[]>
+    getKeys(block: Block): Promise<number[]>
+    getKeys(block: Block, key: number): Promise<number[]>
+    getKeysPaged(pageSize: number, block: Block): AsyncIterable<number[]>
+    getKeysPaged(pageSize: number, block: Block, key: number): AsyncIterable<number[]>
+    getPairs(block: Block): Promise<[k: number, v: (v394.AssetLocation | undefined)][]>
+    getPairs(block: Block, key: number): Promise<[k: number, v: (v394.AssetLocation | undefined)][]>
+    getPairsPaged(pageSize: number, block: Block): AsyncIterable<[k: number, v: (v394.AssetLocation | undefined)][]>
+    getPairsPaged(pageSize: number, block: Block, key: number): AsyncIterable<[k: number, v: (v394.AssetLocation | undefined)][]>
 }
 
 export const assetMetadataMap =  {

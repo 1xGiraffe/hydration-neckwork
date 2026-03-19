@@ -56,6 +56,7 @@ export function calculateXYKPrices(
         decimalsB
       );
       newPrices.set(pool.assetB, price);
+
     }
     // Case 2: B is known, A is unknown
     else if (priceB !== undefined && priceA === undefined) {
@@ -67,6 +68,7 @@ export function calculateXYKPrices(
         decimalsA
       );
       newPrices.set(pool.assetA, price);
+
     }
     // Case 3: Both known or both unknown - skip
   }

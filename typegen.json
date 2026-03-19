@@ -20,6 +20,9 @@
     "Tokens": {
       "storage": ["Accounts", "TotalIssuance"],
       "events": ["Transfer"]
+    },
+    "EVM": {
+      "storage": ["AccountStorages"]
     }
   }
 }

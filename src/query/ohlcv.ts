@@ -75,7 +75,7 @@ export async function queryOHLCV(
   // View name comes from fixed constant map (safe for string interpolation)
   // User-controlled values passed via query_params (parameterized injection)
   const result = await client.query({
-    query: `SELECT * FROM price_data.${viewName}`,
+    query: `SELECT * FROM price_data.${viewName}(asset_id={asset_id:UInt32}, start_time={start_time:DateTime}, end_time={end_time:DateTime})`,
     query_params: {
       asset_id: options.asset_id,
       start_time: toClickHouseDateTime(options.start_time),

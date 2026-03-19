@@ -138,7 +138,7 @@ describe('resolvePrices', () => {
     expect(parseFloat(prices.get(4)!)).toBeGreaterThan(0);
   });
 
-  it('returns only USDT price when USDT not in Omnipool', () => {
+  it('returns empty prices when USDT not in Omnipool and no fallback', () => {
     const omnipoolAssets = new Map<number, OmnipoolAssetState>();
     const xykPools: XYKPool[] = [];
     const stableswapPools: StableswapPool[] = [];
@@ -146,9 +146,7 @@ describe('resolvePrices', () => {
 
     const prices = resolvePrices(omnipoolAssets, xykPools, stableswapPools, decimals);
 
-    expect(prices.size).toBe(1);
-    expect(prices.has(10)).toBe(true);
-    expect(prices.get(10)).toBe('1.000000000000');
+    expect(prices.size).toBe(0);
   });
 
   it('handles empty inputs gracefully', () => {
@@ -159,8 +157,7 @@ describe('resolvePrices', () => {
 
     const prices = resolvePrices(omnipoolAssets, xykPools, stableswapPools, decimals);
 
-    expect(prices.size).toBe(1);
-    expect(prices.get(10)).toBe('1.000000000000');
+    expect(prices.size).toBe(0);
   });
 
   it('uses custom USDT and LRNA asset IDs', () => {
@@ -183,7 +180,8 @@ describe('resolvePrices', () => {
       [],
       decimals,
       100,  // Custom USDT ID
-      999   // Custom LRNA ID
+      999,  // Custom LRNA ID
+      [100] // Custom anchor
     );
 
     expect(prices.has(100)).toBe(true);  // Custom USDT

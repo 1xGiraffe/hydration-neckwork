@@ -158,48 +158,48 @@ export function calculateSpotPrice(
   const assetInDecimals = decimals.get(assetInId) || 12;
   const assetOutDecimals = decimals.get(assetOutId) || 12;
 
-  // Calculate current invariant D
-  const d = calculateD(pool.reserves, pool.amplification);
-  if (d === 0n) {
-    return 0n; // Pool has zero reserves
-  }
+  // Normalize all reserves to 18 decimals before stableswap math.
+  // The curve invariant assumes all reserves are in the same unit.
+  // Without normalization, pools with mixed decimals (e.g. HOLLAR 18 + aUSDT 6)
+  // would compute a wildly wrong D and Y.
+  const TARGET_DECIMALS = 18n;
+  const normalizedReserves = pool.reserves.map((r, i) => {
+    const assetDecimals = BigInt(decimals.get(pool.assets[i]) || 12);
+    if (assetDecimals < TARGET_DECIMALS) {
+      return r * (10n ** (TARGET_DECIMALS - assetDecimals));
+    } else if (assetDecimals > TARGET_DECIMALS) {
+      return r / (10n ** (assetDecimals - TARGET_DECIMALS));
+    }
+    return r;
+  });
 
-  // Use a small swap amount: 0.01% of the assetIn reserve
-  // This minimizes slippage and approximates the spot price
-  const swapAmount = pool.reserves[assetInIndex] / 10000n;
-  if (swapAmount === 0n) {
-    // Pool too small, fall back to 1 unit minimum
+  // Calculate invariant D with normalized reserves
+  const d = calculateD(normalizedReserves, pool.amplification);
+  if (d === 0n) {
     return 0n;
   }
 
-  // Simulate adding swap amount to assetIn reserve
-  const newReserves = [...pool.reserves];
-  newReserves[assetInIndex] = pool.reserves[assetInIndex] + swapAmount;
+  // Use a small swap amount: 0.01% of the normalized assetIn reserve
+  const swapAmount = normalizedReserves[assetInIndex] / 10000n;
+  if (swapAmount === 0n) {
+    return 0n;
+  }
+
+  // Simulate adding swap amount to assetIn reserve (in normalized space)
+  const newReserves = [...normalizedReserves];
+  newReserves[assetInIndex] = normalizedReserves[assetInIndex] + swapAmount;
 
   // Calculate new assetOut reserve after the swap
   const newAssetOutReserve = calculateY(newReserves, pool.amplification, assetOutIndex, d);
 
-  // Amount of assetOut received
-  const assetOutReceived = pool.reserves[assetOutIndex] - newAssetOutReserve;
+  // Amount of assetOut received (in normalized 18-decimal units)
+  const assetOutReceived = normalizedReserves[assetOutIndex] - newAssetOutReserve;
 
-  // Calculate spot price: how much assetOut per whole unit of assetIn
-  // assetOutReceived and swapAmount are both in their respective native units
-  // We need to normalize to: (assetOut in whole units) / (assetIn in whole units)
-
-  // Convert to whole units:
-  // assetOutReceived (native) / 10^assetOutDecimals = assetOut in whole units
-  // swapAmount (native) / 10^assetInDecimals = assetIn in whole units
-
-  // Price = (assetOutReceived / 10^outDec) / (swapAmount / 10^inDec)
-  //       = assetOutReceived * 10^inDec / (swapAmount * 10^outDec)
-
+  // Both swapAmount and assetOutReceived are in the same 18-decimal units now,
+  // so the ratio gives the spot price directly (whole units in = whole units out).
   // Scale to 10^12 for storage:
   const scaleFactor = 10n ** 12n;
-  const inDecFactor = 10n ** BigInt(assetInDecimals);
-  const outDecFactor = 10n ** BigInt(assetOutDecimals);
-
-  // price = (assetOutReceived * inDecFactor * scaleFactor) / (swapAmount * outDecFactor)
-  const price = (assetOutReceived * inDecFactor * scaleFactor) / (swapAmount * outDecFactor);
+  const price = (assetOutReceived * scaleFactor) / swapAmount;
 
   return price;
 }
@@ -296,7 +296,8 @@ export function calculateStableswapPrices(
       const resultDec = resultStr.slice(-12);
 
       newPrices.set(unknownAsset.assetId, `${resultInt}.${resultDec}`);
-    }
+
+}
   }
 
   return newPrices;

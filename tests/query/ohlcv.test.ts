@@ -106,7 +106,7 @@ describe('queryOHLCV', () => {
     })
 
     expect(queryFn).toHaveBeenCalledWith({
-      query: 'SELECT * FROM price_data.ohlc_5min_query',
+      query: 'SELECT * FROM price_data.ohlc_5min_query(asset_id={asset_id:UInt32}, start_time={start_time:DateTime}, end_time={end_time:DateTime})',
       query_params: {
         asset_id: 5,
         start_time: '2024-01-15 00:00:00',
@@ -135,7 +135,7 @@ describe('queryOHLCV', () => {
 
     expect(queryFn).toHaveBeenCalledWith(
       expect.objectContaining({
-        query: 'SELECT * FROM price_data.ohlc_1h_query',
+        query: 'SELECT * FROM price_data.ohlc_1h_query(asset_id={asset_id:UInt32}, start_time={start_time:DateTime}, end_time={end_time:DateTime})',
       })
     )
   })
@@ -296,7 +296,7 @@ describe('convenience wrapper delegation', () => {
 
     expect(queryFn).toHaveBeenCalledWith(
       expect.objectContaining({
-        query: 'SELECT * FROM price_data.ohlc_5min_query',
+        query: 'SELECT * FROM price_data.ohlc_5min_query(asset_id={asset_id:UInt32}, start_time={start_time:DateTime}, end_time={end_time:DateTime})',
       })
     )
   })
@@ -319,7 +319,7 @@ describe('convenience wrapper delegation', () => {
 
     expect(queryFn).toHaveBeenCalledWith(
       expect.objectContaining({
-        query: 'SELECT * FROM price_data.ohlc_15min_query',
+        query: 'SELECT * FROM price_data.ohlc_15min_query(asset_id={asset_id:UInt32}, start_time={start_time:DateTime}, end_time={end_time:DateTime})',
       })
     )
   })
@@ -342,7 +342,7 @@ describe('convenience wrapper delegation', () => {
 
     expect(queryFn).toHaveBeenCalledWith(
       expect.objectContaining({
-        query: 'SELECT * FROM price_data.ohlc_1h_query',
+        query: 'SELECT * FROM price_data.ohlc_1h_query(asset_id={asset_id:UInt32}, start_time={start_time:DateTime}, end_time={end_time:DateTime})',
       })
     )
   })
@@ -365,7 +365,7 @@ describe('convenience wrapper delegation', () => {
 
     expect(queryFn).toHaveBeenCalledWith(
       expect.objectContaining({
-        query: 'SELECT * FROM price_data.ohlc_4h_query',
+        query: 'SELECT * FROM price_data.ohlc_4h_query(asset_id={asset_id:UInt32}, start_time={start_time:DateTime}, end_time={end_time:DateTime})',
       })
     )
   })
@@ -388,7 +388,7 @@ describe('convenience wrapper delegation', () => {
 
     expect(queryFn).toHaveBeenCalledWith(
       expect.objectContaining({
-        query: 'SELECT * FROM price_data.ohlc_1d_query',
+        query: 'SELECT * FROM price_data.ohlc_1d_query(asset_id={asset_id:UInt32}, start_time={start_time:DateTime}, end_time={end_time:DateTime})',
       })
     )
   })
