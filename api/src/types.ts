@@ -31,6 +31,20 @@ export interface ApiCandle {
 }
 
 /**
+ * Market statistics for a single asset, returned by GET /market-stats.
+ * All prices and changes are in USDT terms.
+ */
+export interface AssetMarketStats {
+  assetId: number
+  symbol: string
+  price: number | null          // Current USDT price
+  change1h: number | null       // Decimal ratio, e.g. 0.0523 = +5.23%
+  change24h: number | null
+  change7d: number | null
+  sparkline: number[]           // 24-48 hourly close prices (7d, downsampled)
+}
+
+/**
  * Asset metadata from price_data.assets table.
  */
 export interface Asset {
@@ -39,4 +53,5 @@ export interface Asset {
   name: string | null  // null when name matches symbol
   decimals: number
   isStablecoin: boolean
+  parachainId: number | null  // XCM origin parachain ID, null for native Hydration assets
 }

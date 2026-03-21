@@ -19,6 +19,7 @@ export interface AssetRow {
   symbol: string
   name: string
   decimals: number
+  parachain_id: number | null  // XCM origin parachain ID, null for native Hydration assets
 }
 
 export interface IndexerStateRow {

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import type { Asset } from '../types'
 import { getDefaultPairs, searchPairs } from '../utils/pairs'
 import type { PairResult } from '../utils/pairs'
+import PairIcons from './PairIcons'
 
 interface PairModalProps {
   isOpen: boolean
@@ -134,20 +135,34 @@ export default function PairModal({
                   role="option"
                   aria-selected={isCurrent}
                   style={{
-                    display: 'flex', alignItems: 'baseline', gap: '8px',
-                    width: '100%', padding: '12px 16px', fontSize: '14px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    width: '100%',
+                    padding: '12px 16px',
+                    minHeight: '56px',
+                    fontSize: '14px',
                     color: isCurrent ? '#4FFFDF' : '#e2e8f0',
                     background: i === activeIndex ? '#1e293b' : 'transparent',
-                    border: 'none', cursor: 'pointer', textAlign: 'left',
+                    border: 'none',
+                    cursor: 'pointer',
+                    textAlign: 'left',
                     transition: 'background 0.1s ease',
                   }}
                   onMouseEnter={e => { setActiveIndex(i); e.currentTarget.style.background = '#1e293b' }}
                   onMouseLeave={e => { if (i !== activeIndex) e.currentTarget.style.background = 'transparent' }}
                 >
-                  <span>{result.display}</span>
-                  {result.nameHint && (
-                    <span style={{ fontSize: '12px', color: '#576B80' }}>{result.nameHint}</span>
-                  )}
+                  <PairIcons
+                    base={result.base}
+                    quote={result.quote}
+                    isUsdPair={result.quote.isStablecoin}
+                  />
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0 }}>
+                    <span style={{ fontWeight: 600 }}>{result.display}</span>
+                    {result.nameHint && (
+                      <span style={{ fontSize: '12px', color: '#576B80' }}>{result.nameHint}</span>
+                    )}
+                  </div>
                 </button>
               )
             })

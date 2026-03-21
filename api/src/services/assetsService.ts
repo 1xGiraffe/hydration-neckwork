@@ -6,6 +6,7 @@ interface AssetRow {
   symbol: string
   name: string
   decimals: number
+  parachain_id: number | null
 }
 
 // Stablecoin symbols — all variants of these symbols are treated as stablecoins.
@@ -17,11 +18,11 @@ const symbolToId = new Map<string, number>()
 export async function loadAssets(client: ClickHouseClient): Promise<void> {
   const result = await client.query({
     query: `
-      SELECT asset_id, symbol, name, decimals
+      SELECT asset_id, symbol, name, decimals, parachain_id
       FROM price_data.assets FINAL
       WHERE asset_id IN (
         SELECT DISTINCT asset_id FROM price_data.ohlc_1h
-        WHERE interval_start >= now() - INTERVAL 30 DAY
+        WHERE interval_start >= (SELECT max(interval_start) FROM price_data.ohlc_1h) - INTERVAL 30 DAY
       )
     `,
     format: 'JSONEachRow',
@@ -48,6 +49,7 @@ export async function loadAssets(client: ClickHouseClient): Promise<void> {
       name: row.name === row.symbol ? null : row.name,
       decimals: row.decimals,
       isStablecoin: STABLECOIN_SYMBOLS.has(row.symbol),
+      parachainId: row.parachain_id ?? null,
     })
     const key = row.symbol.toUpperCase()
     if (!symbolToId.has(key)) {

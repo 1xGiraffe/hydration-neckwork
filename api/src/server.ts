@@ -5,6 +5,7 @@ import { createClickHouseClient } from './db/client.ts'
 import { loadAssets } from './services/assetsService.ts'
 import { candlesRoutes } from './routes/candles.ts'
 import { assetsRoutes } from './routes/assets.ts'
+import { marketStatsRoutes } from './routes/market-stats.ts'
 
 const fastify = Fastify({ logger: true })
 
@@ -18,6 +19,7 @@ fastify.get('/health', async () => {
 
 await fastify.register(assetsRoutes)
 await fastify.register(candlesRoutes, { client })
+await fastify.register(marketStatsRoutes, { client })
 
 async function start() {
   try {

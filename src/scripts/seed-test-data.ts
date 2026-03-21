@@ -66,6 +66,7 @@ async function main() {
       symbol: a.symbol,
       name: a.name,
       decimals: a.decimals,
+      parachain_id: null,
     }))
 
     // Generate price data with some duplicates for deduplication testing

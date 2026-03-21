@@ -8,7 +8,7 @@ export interface PairResult {
 }
 
 export function pairDisplay(base: Asset, quote: Asset): string {
-  return base.symbol + (quote.isStablecoin ? 'USD' : quote.symbol)
+  return quote.isStablecoin ? base.symbol : base.symbol + quote.symbol
 }
 
 function pairNameHint(base: Asset, quote: Asset): string | null {

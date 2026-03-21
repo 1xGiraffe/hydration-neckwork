@@ -58,6 +58,34 @@ function extractEvmAddress(location: any): string | null {
   return '0x' + Buffer.from(key).toString('hex').toLowerCase()
 }
 
+/**
+ * Extract parachainId from an AssetLocation.
+ * Matches: { parents: 1, interior: X1(Parachain(id)) } or X2(Parachain(id), ...)
+ * Native Hydration assets have no location -> returns null.
+ */
+export function extractParachainId(location: any): number | null {
+  if (!location || location.parents !== 1) return null
+  const interior = location.interior
+  if (!interior || interior.__kind === 'Here') return null
+
+  // Normalize junctions: V5 uses arrays, V3 may use single value
+  let junctions: any[]
+  if (interior.__kind === 'X1') {
+    junctions = Array.isArray(interior.value) ? interior.value : [interior.value]
+  } else {
+    // X2, X3, etc. — value is an array or tuple-like object
+    junctions = Array.isArray(interior.value) ? interior.value : Object.values(interior.value)
+  }
+
+  const parachainJunction = junctions.find((j: any) => j?.__kind === 'Parachain')
+  if (!parachainJunction) return null
+
+  // If the only junction is Parachain, this is a native token of that chain — not bridged
+  if (junctions.length === 1) return null
+
+  return typeof parachainJunction.value === 'number' ? parachainJunction.value : null
+}
+
 export class AssetRegistryTracker {
   private cache: Map<number, AssetMetadata> = new Map()
   private lastSnapshotBlock: number = -1 // Force first scan
@@ -221,6 +249,37 @@ export class AssetRegistryTracker {
       }
     }
 
+    // Read AssetLocations for ALL assets to extract parachainId for origin badges
+    const allAssetIds = [...discoveredAssets.keys()]
+    if (allAssetIds.length > 0) {
+      try {
+        let allLocationPairs: [number, any][] = []
+        if (storage.assetRegistry.assetLocations.v394.is(block)) {
+          allLocationPairs = await storage.assetRegistry.assetLocations.v394.getMany(block, allAssetIds)
+            .then(locs => allAssetIds.map((id, i) => [id, locs[i]] as [number, any]))
+        } else if (storage.assetRegistry.assetLocations.v244.is(block)) {
+          allLocationPairs = await storage.assetRegistry.assetLocations.v244.getMany(block, allAssetIds)
+            .then(locs => allAssetIds.map((id, i) => [id, locs[i]] as [number, any]))
+        } else if (storage.assetRegistry.assetLocations.v160.is(block)) {
+          allLocationPairs = await storage.assetRegistry.assetLocations.v160.getMany(block, allAssetIds)
+            .then(locs => allAssetIds.map((id, i) => [id, locs[i]] as [number, any]))
+        } else if (storage.assetRegistry.assetLocations.v108.is(block)) {
+          allLocationPairs = await storage.assetRegistry.assetLocations.v108.getMany(block, allAssetIds)
+            .then(locs => allAssetIds.map((id, i) => [id, locs[i]] as [number, any]))
+        }
+
+        for (const [assetId, location] of allLocationPairs) {
+          const pId = extractParachainId(location)
+          if (pId != null) {
+            const meta = discoveredAssets.get(assetId)
+            if (meta) meta.parachainId = pId
+          }
+        }
+      } catch (error) {
+        console.warn(`[AssetRegistry] Failed to read asset locations for parachainId:`, error)
+      }
+    }
+
     // Compare with cache and identify new/changed assets
     for (const [assetId, metadata] of discoveredAssets) {
       const existing = this.cache.get(assetId)
@@ -233,11 +292,13 @@ export class AssetRegistryTracker {
           symbol: metadata.symbol,
           name: metadata.name,
           decimals: metadata.decimals,
+          parachain_id: metadata.parachainId ?? null,
         })
       } else if (
         existing.symbol !== metadata.symbol ||
         existing.name !== metadata.name ||
-        existing.decimals !== metadata.decimals
+        existing.decimals !== metadata.decimals ||
+        existing.parachainId !== metadata.parachainId
       ) {
         // Asset metadata changed (rare, but possible)
         console.log(`[AssetRegistry] Asset ${assetId} metadata changed`)
@@ -246,6 +307,7 @@ export class AssetRegistryTracker {
           symbol: metadata.symbol,
           name: metadata.name,
           decimals: metadata.decimals,
+          parachain_id: metadata.parachainId ?? null,
         })
       }
 

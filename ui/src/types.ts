@@ -30,4 +30,19 @@ export interface Asset {
   name: string | null
   decimals: number
   isStablecoin: boolean
+  parachainId: number | null  // XCM origin parachain ID for origin badge
+}
+
+/**
+ * Market statistics for a single asset from GET /market-stats.
+ * Mirrors the API response shape.
+ */
+export interface AssetMarketStats {
+  assetId: number
+  symbol: string
+  price: number | null
+  change1h: number | null
+  change24h: number | null
+  change7d: number | null
+  sparkline: number[]
 }

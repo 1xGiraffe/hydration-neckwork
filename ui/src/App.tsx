@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import Chart from './components/Chart'
 import Topbar from './components/Topbar'
-import PairModal from './components/PairModal'
+import MarketDataModal from './components/MarketDataModal'
 import { useAssets } from './hooks/useAssets'
+import { useMarketStats } from './hooks/useMarketStats'
 import { INTERVALS, INTERVAL_LABELS } from './types'
 import type { OHLCVInterval } from './types'
 import { parseUrlPair, pairDisplay } from './utils/pairs'
@@ -22,6 +23,8 @@ export default function App() {
 
   const assetsQuery = useAssets()
   const assets = assetsQuery.data ?? []
+  // Pre-fetch market stats so data is warm before modal opens; data passed to MarketDataModal
+  const marketStatsQuery = useMarketStats({ refetchInterval: modalOpen ? 60_000 : false })
 
   const [toast, setToast] = useState<string | null>(null)
   const isPopStateRef = useRef(false)
@@ -195,9 +198,11 @@ export default function App() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', width: '100vw', height: '100vh' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', width: '100vw', height: '100dvh' }}>
       <Topbar
         pairDisplay={display}
+        baseAsset={baseAsset}
+        quoteAsset={quoteAsset}
         interval={interval}
         onIntervalChange={setInterval}
         onPairClick={() => { setInitialChar(''); setModalOpen(true) }}
@@ -223,7 +228,7 @@ export default function App() {
           onDataChange={setChartData}
         />
       </div>
-      <PairModal
+      <MarketDataModal
         isOpen={modalOpen}
         onClose={() => setModalOpen(false)}
         onSelect={handleSelect}
@@ -231,6 +236,7 @@ export default function App() {
         currentBaseId={baseId}
         currentQuoteId={quoteId}
         initialChar={initialChar}
+        marketStats={marketStatsQuery.data}
       />
       {toast && (
         <div style={{

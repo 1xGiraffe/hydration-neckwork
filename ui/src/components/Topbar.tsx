@@ -1,10 +1,13 @@
 import { useState } from 'react'
 import IntervalSelector from './IntervalSelector'
+import PairIcons from './PairIcons'
 import { INTERVALS, INTERVAL_LABELS } from '../types'
-import type { OHLCVInterval } from '../types'
+import type { OHLCVInterval, Asset } from '../types'
 
 interface TopbarProps {
   pairDisplay: string
+  baseAsset: Asset | undefined
+  quoteAsset: Asset | undefined
   interval: OHLCVInterval
   onIntervalChange: (interval: OHLCVInterval) => void
   onPairClick: () => void
@@ -15,6 +18,8 @@ interface TopbarProps {
 
 export default function Topbar({
   pairDisplay,
+  baseAsset,
+  quoteAsset,
   interval,
   onIntervalChange,
   onPairClick,
@@ -35,12 +40,14 @@ export default function Topbar({
           .topbar-desktop-separator { display: none !important; }
           .topbar-interval-mobile { display: flex !important; }
           .topbar-export-desktop { display: none !important; }
+          .topbar-screenshot-btn { display: flex !important; }
         }
         @media (min-width: 769px) {
           .topbar-desktop-intervals { display: flex !important; }
           .topbar-desktop-separator { display: block !important; }
           .topbar-interval-mobile { display: none !important; }
           .topbar-export-desktop { display: flex !important; }
+          .topbar-screenshot-btn { display: flex !important; }
         }
       `}</style>
       <div style={{
@@ -68,11 +75,19 @@ export default function Topbar({
               cursor: 'pointer',
               display: 'flex',
               alignItems: 'center',
+              gap: '8px',
               padding: 0,
               minWidth: '100px',
               transition: 'color 0.15s ease',
             }}
           >
+            {baseAsset && quoteAsset && (
+              <PairIcons
+                base={baseAsset}
+                quote={quoteAsset}
+                isUsdPair={quoteAsset.isStablecoin}
+              />
+            )}
             {pairDisplay}
             <span style={{ fontSize: '10px', color: '#576B80', marginLeft: '4px' }}>▾</span>
           </button>
@@ -173,30 +188,6 @@ export default function Topbar({
 
           <button
             className="topbar-export-desktop"
-            onClick={onScreenshot}
-            onMouseEnter={() => setScreenshotHovered(true)}
-            onMouseLeave={() => setScreenshotHovered(false)}
-            aria-label="Copy chart screenshot to clipboard"
-            title="Screenshot"
-            style={{
-              padding: '8px',
-              background: 'transparent',
-              border: 'none',
-              cursor: 'pointer',
-              color: screenshotHovered ? '#4FFFDF' : '#576B80',
-              display: 'flex',
-              alignItems: 'center',
-              transition: 'color 0.15s ease',
-            }}
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.5" fill="none" />
-              <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.5" fill="none" />
-            </svg>
-          </button>
-
-          <button
-            className="topbar-export-desktop"
             onClick={() => { if (canExport) onExport() }}
             onMouseEnter={() => setExportHovered(true)}
             onMouseLeave={() => setExportHovered(false)}
@@ -217,6 +208,30 @@ export default function Topbar({
               <polyline points="4,6 8,10 12,6" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
               <line x1="8" y1="1" x2="8" y2="10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
               <line x1="2" y1="14" x2="14" y2="14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </button>
+
+          <button
+            className="topbar-screenshot-btn"
+            onClick={onScreenshot}
+            onMouseEnter={() => setScreenshotHovered(true)}
+            onMouseLeave={() => setScreenshotHovered(false)}
+            aria-label="Copy chart screenshot to clipboard"
+            title="Screenshot"
+            style={{
+              padding: '8px',
+              background: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              color: screenshotHovered ? '#4FFFDF' : '#576B80',
+              display: 'flex',
+              alignItems: 'center',
+              transition: 'color 0.15s ease',
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.5" fill="none" />
+              <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.5" fill="none" />
             </svg>
           </button>
         </div>
