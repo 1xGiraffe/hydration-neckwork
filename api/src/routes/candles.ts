@@ -4,7 +4,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { INTERVAL_VIEW_MAP, queryOHLCV, candleToResponse } from '../services/ohlcvService.ts'
 import type { OHLCVInterval } from '../services/ohlcvService.ts'
 import { getAssetById } from '../services/assetsService.ts'
-import { deriveCrossPairCandles } from '../services/crossPair.ts'
+import { queryCrossPairCandles } from '../services/crossPair.ts'
 
 const intervalsArray = Object.keys(INTERVAL_VIEW_MAP) as [OHLCVInterval, ...OHLCVInterval[]]
 
@@ -38,7 +38,7 @@ export async function candlesRoutes(fastify: FastifyInstance, opts: { client: Cl
     }
 
     if (quoteAsset.isStablecoin) {
-      // USD-denominated pair — direct query (prices are stored in USDT terms)
+      // USD-denominated pair — direct query (prices are stored in USD terms)
       const candles = await queryOHLCV(opts.client, {
         assetId: baseAsset.assetId,
         startTime,
@@ -47,22 +47,14 @@ export async function candlesRoutes(fastify: FastifyInstance, opts: { client: Cl
       })
       return candles.map(candleToResponse)
     } else {
-      // Cross-pair — fetch both vs USDT and derive
-      const [baseCandles, quoteCandles] = await Promise.all([
-        queryOHLCV(opts.client, {
-          assetId: baseAsset.assetId,
-          startTime,
-          endTime,
-          interval: interval as OHLCVInterval,
-        }),
-        queryOHLCV(opts.client, {
-          assetId: quoteAsset.assetId,
-          startTime,
-          endTime,
-          interval: interval as OHLCVInterval,
-        }),
-      ])
-      return deriveCrossPairCandles(baseCandles, quoteCandles)
+      // Cross-pair — compute ratio per block, then aggregate into OHLCV
+      return queryCrossPairCandles(opts.client, {
+        baseId: baseAsset.assetId,
+        quoteId: quoteAsset.assetId,
+        startTime,
+        endTime,
+        interval: interval as OHLCVInterval,
+      })
     }
   })
 }

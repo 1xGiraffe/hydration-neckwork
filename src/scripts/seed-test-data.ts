@@ -6,7 +6,7 @@ interface TestAsset {
   symbol: string
   name: string
   decimals: number
-  basePrice: number  // Base USDT price for synthetic generation
+  basePrice: number  // Base USD price for synthetic generation
   volatility: number // Price variation factor
 }
 
@@ -87,7 +87,7 @@ async function main() {
         const price: PriceRow = {
           asset_id: asset.asset_id,
           block_height: START_BLOCK + i,
-          usdt_price: priceStr,
+          usd_price: priceStr,
         }
         prices.push(price)
 
@@ -102,7 +102,7 @@ async function main() {
           duplicates.push({
             asset_id: asset.asset_id,
             block_height: START_BLOCK + i,
-            usdt_price: dupPriceStr,
+            usd_price: dupPriceStr,
           })
         }
       }
@@ -139,14 +139,14 @@ async function main() {
 
     // Build INSERT VALUES statement with explicit string formatting for decimals
     const valueStrings = allPrices.map(p => {
-      return `(${p.asset_id}, ${p.block_height}, '${p.usdt_price}')`
+      return `(${p.asset_id}, ${p.block_height}, '${p.usd_price}')`
     })
 
     // Insert in batches to avoid too large queries
     const batchSize = 1000
     for (let i = 0; i < valueStrings.length; i += batchSize) {
       const batchValues = valueStrings.slice(i, i + batchSize).join(',\n')
-      const query = `INSERT INTO prices (asset_id, block_height, usdt_price) VALUES\n${batchValues}`
+      const query = `INSERT INTO prices (asset_id, block_height, usd_price) VALUES\n${batchValues}`
 
       await client.exec({ query })
     }

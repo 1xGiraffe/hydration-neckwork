@@ -59,7 +59,7 @@ async function main() {
     // ===========================================
     console.log('\n📍 Test 1: Point query (specific asset at specific block)')
     const pointQuery = `
-      SELECT usdt_price
+      SELECT usd_price
       FROM prices FINAL
       WHERE asset_id = ${ASSET_HDX} AND block_height = ${MID_BLOCK}
     `
@@ -98,7 +98,7 @@ async function main() {
     // ===========================================
     console.log('\n📊 Test 2: Range query (asset price history over range)')
     const rangeQuery = `
-      SELECT block_height, usdt_price
+      SELECT block_height, usd_price
       FROM prices FINAL
       WHERE asset_id = ${ASSET_DOT}
         AND block_height BETWEEN ${RANGE_START} AND ${RANGE_END}
@@ -140,7 +140,7 @@ async function main() {
     // ===========================================
     console.log('\n🔀 Test 3: Cross-asset query (compare two assets over range)')
     const crossAssetQuery = `
-      SELECT asset_id, block_height, usdt_price
+      SELECT asset_id, block_height, usd_price
       FROM prices FINAL
       WHERE asset_id IN (${ASSET_HDX}, ${ASSET_WBTC})
         AND block_height BETWEEN ${RANGE_START} AND ${RANGE_END}
@@ -182,7 +182,7 @@ async function main() {
     // ===========================================
     console.log('\n⏰ Test 4: Timestamp join (prices with block timestamps)')
     const joinQuery = `
-      SELECT p.asset_id, p.block_height, p.usdt_price, b.block_timestamp
+      SELECT p.asset_id, p.block_height, p.usd_price, b.block_timestamp
       FROM (SELECT * FROM prices FINAL WHERE asset_id = ${ASSET_DOT} AND block_height BETWEEN ${RANGE_START} AND ${RANGE_END}) p
       INNER JOIN blocks b ON p.block_height = b.block_height
       ORDER BY p.block_height

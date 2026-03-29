@@ -1,5 +1,59 @@
 import {sts, Result, Option, Bytes, BitSequence} from './support'
 
+export interface PoolPegInfo {
+    source: PegSource[]
+    updatedAt: number
+    maxPegUpdate: Perbill
+    current: [bigint, bigint][]
+}
+
+export type Perbill = number
+
+export type PegSource = PegSource_MMOracle | PegSource_Oracle | PegSource_Value
+
+export interface PegSource_MMOracle {
+    __kind: 'MMOracle'
+    value: H160
+}
+
+export interface PegSource_Oracle {
+    __kind: 'Oracle'
+    value: [Bytes, OraclePeriod, number]
+}
+
+export interface PegSource_Value {
+    __kind: 'Value'
+    value: [bigint, bigint]
+}
+
+export type OraclePeriod = OraclePeriod_Day | OraclePeriod_Hour | OraclePeriod_LastBlock | OraclePeriod_Short | OraclePeriod_TenMinutes | OraclePeriod_Week
+
+export interface OraclePeriod_Day {
+    __kind: 'Day'
+}
+
+export interface OraclePeriod_Hour {
+    __kind: 'Hour'
+}
+
+export interface OraclePeriod_LastBlock {
+    __kind: 'LastBlock'
+}
+
+export interface OraclePeriod_Short {
+    __kind: 'Short'
+}
+
+export interface OraclePeriod_TenMinutes {
+    __kind: 'TenMinutes'
+}
+
+export interface OraclePeriod_Week {
+    __kind: 'Week'
+}
+
+export type H160 = Bytes
+
 export const PoolPegInfo: sts.Type<PoolPegInfo> = sts.struct(() => {
     return  {
         source: sts.array(() => PegSource),
@@ -30,61 +84,7 @@ export const OraclePeriod: sts.Type<OraclePeriod> = sts.closedEnum(() => {
     }
 })
 
-export type OraclePeriod = OraclePeriod_Day | OraclePeriod_Hour | OraclePeriod_LastBlock | OraclePeriod_Short | OraclePeriod_TenMinutes | OraclePeriod_Week
-
-export interface OraclePeriod_Day {
-    __kind: 'Day'
-}
-
-export interface OraclePeriod_Hour {
-    __kind: 'Hour'
-}
-
-export interface OraclePeriod_LastBlock {
-    __kind: 'LastBlock'
-}
-
-export interface OraclePeriod_Short {
-    __kind: 'Short'
-}
-
-export interface OraclePeriod_TenMinutes {
-    __kind: 'TenMinutes'
-}
-
-export interface OraclePeriod_Week {
-    __kind: 'Week'
-}
-
 export const H160 = sts.bytes()
-
-export type PegSource = PegSource_MMOracle | PegSource_Oracle | PegSource_Value
-
-export interface PegSource_MMOracle {
-    __kind: 'MMOracle'
-    value: H160
-}
-
-export interface PegSource_Oracle {
-    __kind: 'Oracle'
-    value: [Bytes, OraclePeriod, number]
-}
-
-export interface PegSource_Value {
-    __kind: 'Value'
-    value: [bigint, bigint]
-}
-
-export type H160 = Bytes
-
-export interface PoolPegInfo {
-    source: PegSource[]
-    updatedAt: number
-    maxPegUpdate: Perbill
-    current: [bigint, bigint][]
-}
-
-export type Perbill = number
 
 export const Permill = sts.number()
 

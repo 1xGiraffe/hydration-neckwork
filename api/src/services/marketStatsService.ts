@@ -47,6 +47,7 @@ interface PriceRow {
   price_1h_ago: string
   price_24h_ago: string
   price_7d_ago: string
+  hops: string
 }
 
 interface SparklineRow {
@@ -91,10 +92,11 @@ export async function getMarketStats(client: ClickHouseClient): Promise<AssetMar
         query: `
           SELECT
             p.asset_id,
-            argMax(p.usdt_price, b.block_timestamp) AS current_price,
-            argMaxIf(p.usdt_price, b.block_timestamp, b.block_timestamp <= {cutoff_1h:DateTime}) AS price_1h_ago,
-            argMaxIf(p.usdt_price, b.block_timestamp, b.block_timestamp <= {cutoff_24h:DateTime}) AS price_24h_ago,
-            argMaxIf(p.usdt_price, b.block_timestamp, b.block_timestamp <= {cutoff_7d:DateTime}) AS price_7d_ago
+            argMax(p.usd_price, b.block_timestamp) AS current_price,
+            argMaxIf(p.usd_price, b.block_timestamp, b.block_timestamp <= {cutoff_1h:DateTime}) AS price_1h_ago,
+            argMaxIf(p.usd_price, b.block_timestamp, b.block_timestamp <= {cutoff_24h:DateTime}) AS price_24h_ago,
+            argMaxIf(p.usd_price, b.block_timestamp, b.block_timestamp <= {cutoff_7d:DateTime}) AS price_7d_ago,
+            argMax(p.hops, b.block_timestamp) AS hops
           FROM price_data.prices p FINAL
           INNER JOIN price_data.blocks b ON p.block_height = b.block_height
           WHERE p.asset_id IN ({asset_ids:Array(UInt32)})
@@ -152,6 +154,7 @@ export async function getMarketStats(client: ClickHouseClient): Promise<AssetMar
           change24h: null,
           change7d: null,
           sparkline: [],
+          hops: null,
         }
       }
 
@@ -168,6 +171,7 @@ export async function getMarketStats(client: ClickHouseClient): Promise<AssetMar
         change24h: calcChange(priceRow.current_price, priceRow.price_24h_ago),
         change7d: calcChange(priceRow.current_price, priceRow.price_7d_ago),
         sparkline: sparklineCloses,
+        hops: priceRow ? parseInt(priceRow.hops, 10) : null,
       }
     })
 

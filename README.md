@@ -1,8 +1,8 @@
 # preis
 
-Block-level USDT price indexer for Hydration DEX
+Block-level USD price indexer for Hydration DEX
 
-- Indexes every tradeable asset's USDT price at every block from genesis to live
+- Indexes every tradeable asset's USD price at every block from genesis to live
 - Supports Omnipool, XYK, and Stableswap pool types
 - Sub-second query performance (point queries <100ms, range queries <1s)
 - OHLCV candlestick data (with trading volume) at 5 intervals (5min, 15min, 1h, 4h, 1d)
@@ -122,11 +122,11 @@ Available intervals:
 All timestamps are UTC, aligned to standard interval boundaries.
 
 Each OHLCV query returns volume data alongside OHLC prices:
-- `volume_buy` -- Total USDT value of buy-side volume (asset acquired)
-- `volume_sell` -- Total USDT value of sell-side volume (asset sold)
-- `volume_total` -- Combined USDT volume (buy + sell)
+- `volume_buy` -- Total USD value of buy-side volume (asset acquired)
+- `volume_sell` -- Total USD value of sell-side volume (asset sold)
+- `volume_total` -- Combined USD volume (buy + sell)
 
-All volume values are denominated in USDT for cross-asset comparability.
+All volume values are denominated in USD for cross-asset comparability.
 
 ### Cross-Asset Comparison
 
@@ -135,9 +135,9 @@ Pivot query comparing multiple assets across a block range:
 ```sql
 SELECT
   block_height,
-  round(maxIf(usdt_price, asset_id = 5), 8) AS dot_price,
-  round(maxIf(usdt_price, asset_id = 10), 8) AS usdt_value,
-  round(maxIf(usdt_price, asset_id = 0), 8) AS hdx_price
+  round(maxIf(usd_price, asset_id = 5), 8) AS dot_price,
+  round(maxIf(usd_price, asset_id = 10), 8) AS usdt_value,
+  round(maxIf(usd_price, asset_id = 0), 8) AS hdx_price
 FROM price_data.prices FINAL
 WHERE asset_id IN [5, 10, 0]
   AND block_height BETWEEN 7000000 AND 7000500
@@ -153,7 +153,7 @@ For the complete query reference including cross-pair OHLC derivation and weekly
 
 | Table | Engine | Description |
 |-------|--------|-------------|
-| prices | ReplacingMergeTree | Asset prices by block (asset_id, block_height, usdt_price, volume_buy, volume_sell, volume_total) |
+| prices | ReplacingMergeTree | Asset prices by block (asset_id, block_height, usd_price, volume_buy, volume_sell, volume_total) |
 | blocks | MergeTree | Block metadata (block_height, block_timestamp, spec_version) |
 | assets | ReplacingMergeTree | Asset registry (asset_id, symbol, name, decimals) |
 | indexer_state | ReplacingMergeTree | Checkpoint persistence |

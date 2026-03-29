@@ -163,43 +163,66 @@ export function calculateSpotPrice(
   // Without normalization, pools with mixed decimals (e.g. HOLLAR 18 + aUSDT 6)
   // would compute a wildly wrong D and Y.
   const TARGET_DECIMALS = 18n;
+  const PEG_PRECISION = 10n ** 18n;
   const normalizedReserves = pool.reserves.map((r, i) => {
     const assetDecimals = BigInt(decimals.get(pool.assets[i]) || 12);
+    let normalized = r;
     if (assetDecimals < TARGET_DECIMALS) {
-      return r * (10n ** (TARGET_DECIMALS - assetDecimals));
+      normalized = r * (10n ** (TARGET_DECIMALS - assetDecimals));
     } else if (assetDecimals > TARGET_DECIMALS) {
-      return r / (10n ** (assetDecimals - TARGET_DECIMALS));
+      normalized = r / (10n ** (assetDecimals - TARGET_DECIMALS));
     }
-    return r;
+    // Apply peg multiplier: adjusts reserves so the curve treats pegged assets correctly
+    // (e.g. 1 vDOT = 1.618 aDOT in the invariant calculation)
+    if (pool.pegMultipliers && pool.pegMultipliers[i]) {
+      const [num, den] = pool.pegMultipliers[i];
+      if (den > 0n) {
+        normalized = (normalized * num) / den;
+      }
+    }
+    return normalized;
   });
 
-  // Calculate invariant D with normalized reserves
+  // Calculate invariant D with peg-adjusted normalized reserves
   const d = calculateD(normalizedReserves, pool.amplification);
   if (d === 0n) {
     return 0n;
   }
 
-  // Use a small swap amount: 0.01% of the normalized assetIn reserve
+  // Use a small swap amount: 0.01% of the peg-adjusted assetIn reserve
   const swapAmount = normalizedReserves[assetInIndex] / 10000n;
   if (swapAmount === 0n) {
     return 0n;
   }
 
-  // Simulate adding swap amount to assetIn reserve (in normalized space)
+  // Simulate adding swap amount to assetIn reserve (in peg-adjusted space)
   const newReserves = [...normalizedReserves];
   newReserves[assetInIndex] = normalizedReserves[assetInIndex] + swapAmount;
 
   // Calculate new assetOut reserve after the swap
   const newAssetOutReserve = calculateY(newReserves, pool.amplification, assetOutIndex, d);
 
-  // Amount of assetOut received (in normalized 18-decimal units)
+  // Amount of assetOut received (in peg-adjusted units)
   const assetOutReceived = normalizedReserves[assetOutIndex] - newAssetOutReserve;
 
-  // Both swapAmount and assetOutReceived are in the same 18-decimal units now,
-  // so the ratio gives the spot price directly (whole units in = whole units out).
+  // The swap amount and received amount are in peg-adjusted space.
+  // To get the real exchange rate, un-adjust both by their peg multipliers:
+  // realIn = swapAmount / pegIn, realOut = assetOutReceived / pegOut
+  // spotPrice = realOut / realIn = (assetOutReceived / pegOut) / (swapAmount / pegIn)
+  //           = (assetOutReceived * pegIn) / (swapAmount * pegOut)
+  let adjustedOut = assetOutReceived;
+  let adjustedIn = swapAmount;
+  if (pool.pegMultipliers) {
+    const [numIn, denIn] = pool.pegMultipliers[assetInIndex] ?? [1n, 1n];
+    const [numOut, denOut] = pool.pegMultipliers[assetOutIndex] ?? [1n, 1n];
+    // Un-peg: multiply by den/num to reverse the peg adjustment
+    adjustedOut = assetOutReceived * denOut / numOut;
+    adjustedIn = swapAmount * denIn / numIn;
+  }
+
   // Scale to 10^12 for storage:
   const scaleFactor = 10n ** 12n;
-  const price = (assetOutReceived * scaleFactor) / swapAmount;
+  const price = (adjustedOut * scaleFactor) / adjustedIn;
 
   return price;
 }
@@ -209,7 +232,7 @@ export function calculateSpotPrice(
  *
  * For each pool with at least one known-priced asset:
  * - Calculate spot prices for unknown assets using Newton's method
- * - Convert spot prices to USDT prices using the known asset's price
+ * - Convert spot prices to USD prices using the known asset's price
  *
  * This replaces the simple 1:1 propagation with real curve math that
  * accounts for reserve imbalances and amplification parameters.
@@ -277,10 +300,10 @@ export function calculateStableswapPrices(
         continue; // Skip if calculation failed
       }
 
-      // Convert spot price to USDT price
+      // Convert spot price to USD price
       // spotPrice is scaled to 10^12 (how much reference you get per 1 unknown)
       // This IS the price ratio: unknownPrice / referencePrice = spotPrice / 10^12
-      // unknownUSDTPrice = referenceUSDTPrice * spotPrice / 10^12
+      // unknownPrice = referencePrice * spotPrice / 10^12
 
       // Parse reference price (already scaled to 10^12)
       const [intPart, decPart = ''] = referenceAsset.price.split('.');

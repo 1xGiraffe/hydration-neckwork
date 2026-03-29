@@ -14,6 +14,7 @@ const STABLECOIN_SYMBOLS = new Set(['USDT', 'USDC', 'HOLLAR', 'DAI', 'HUSDT', 'H
 
 const assetCache = new Map<number, Asset>()
 const symbolToId = new Map<string, number>()
+let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 export async function loadAssets(client: ClickHouseClient): Promise<void> {
   const result = await client.query({
@@ -57,6 +58,14 @@ export async function loadAssets(client: ClickHouseClient): Promise<void> {
     }
   }
   console.log(`[Assets] Loaded ${assetCache.size} assets into cache`)
+
+  if (!refreshTimer) {
+    refreshTimer = setInterval(() => {
+      loadAssets(client).catch(err =>
+        console.error('[Assets] Cache refresh failed:', err)
+      )
+    }, 60_000)
+  }
 }
 
 export function getAssetBySymbol(symbol: string): Asset | undefined {

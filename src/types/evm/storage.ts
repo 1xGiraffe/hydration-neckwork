@@ -1,4 +1,4 @@
-import {sts, Block, Bytes, StorageType, RuntimeCtx} from '../support'
+import {sts, Block, Bytes, Option, Result, StorageType, RuntimeCtx} from '../support'
 import * as v193 from '../v193'
 
 export const accountStorages =  {

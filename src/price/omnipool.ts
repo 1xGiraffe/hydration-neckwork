@@ -39,24 +39,24 @@ function multiplyPrice(
   return `${integerPart}.${decimalPart}`;
 }
 
-// Calculate LRNA price in USDT from USDT's Omnipool state.
+// Calculate LRNA price in USD from USD anchor asset's Omnipool state.
 // Formula: LRNA price = reserve / hubReserve (adjusted for decimals)
 export function calculateLRNAPrice(
-  usdtState: OmnipoolAssetState,
-  usdtDecimals: number
+  usdState: OmnipoolAssetState,
+  usdDecimals: number
 ): string {
-  if (usdtState.hubReserve === 0n) {
+  if (usdState.hubReserve === 0n) {
     throw new Error('Cannot calculate LRNA price: zero hub reserve');
   }
 
   const lrnaDecimals = 12;
   const lrnaScale = 10n ** BigInt(lrnaDecimals);
-  const usdtScale = 10n ** BigInt(usdtDecimals);
+  const usdScale = 10n ** BigInt(usdDecimals);
 
-  return bigintDivide(usdtState.reserve * lrnaScale, usdtState.hubReserve * usdtScale, 12);
+  return bigintDivide(usdState.reserve * lrnaScale, usdState.hubReserve * usdScale, 12);
 }
 
-// Calculate USDT prices for all assets in the Omnipool.
+// Calculate USD prices for all assets in the Omnipool.
 // Formula: priceInUSDT = (hubReserve / reserve) * lrnaPrice, normalized for decimals.
 export function calculateOmnipoolPrices(
   assets: Map<number, OmnipoolAssetState>,

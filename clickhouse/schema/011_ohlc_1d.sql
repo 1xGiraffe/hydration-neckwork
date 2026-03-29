@@ -37,12 +37,12 @@ TO price_data.ohlc_1d
 AS SELECT
     p.asset_id,
     toStartOfDay(b.block_timestamp) AS interval_start,
-    argMinState(p.usdt_price, b.block_timestamp) AS open_state,
-    maxState(p.usdt_price) AS high_state,
-    minState(p.usdt_price) AS low_state,
-    argMaxState(p.usdt_price, b.block_timestamp) AS close_state,
-    sumState(p.usdt_volume_buy) AS volume_buy_state,
-    sumState(p.usdt_volume_sell) AS volume_sell_state
+    argMinState(p.usd_price, b.block_timestamp) AS open_state,
+    maxState(p.usd_price) AS high_state,
+    minState(p.usd_price) AS low_state,
+    argMaxState(p.usd_price, b.block_timestamp) AS close_state,
+    sumState(p.usd_volume_buy) AS volume_buy_state,
+    sumState(p.usd_volume_sell) AS volume_sell_state
 FROM price_data.prices p
 INNER JOIN price_data.blocks b ON p.block_height = b.block_height
 GROUP BY p.asset_id, interval_start;

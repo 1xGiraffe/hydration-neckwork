@@ -4,7 +4,7 @@ import type { OmnipoolAssetState, AssetDecimals, PriceMap } from '../../src/pric
 
 describe('calculateLRNAPrice', () => {
   it('calculates LRNA price from symmetric USDT reserves', () => {
-    const usdtState: OmnipoolAssetState = {
+    const usdState: OmnipoolAssetState = {
       hubReserve: 1000000000000n,  // 1 LRNA (12 decimals: 1 * 10^12)
       reserve: 1000000n,            // 1 USDT (6 decimals: 1 * 10^6)
       shares: 0n,
@@ -13,7 +13,7 @@ describe('calculateLRNAPrice', () => {
       tradable: 0,
     };
 
-    const lrnaPrice = calculateLRNAPrice(usdtState, 6);
+    const lrnaPrice = calculateLRNAPrice(usdState, 6);
 
     // With 1 USDT per 1 LRNA, LRNA price = 1.0 USDT
     // Formula: (reserve * 10^12) / (hubReserve * 10^6)
@@ -23,7 +23,7 @@ describe('calculateLRNAPrice', () => {
   });
 
   it('calculates LRNA price from asymmetric reserves', () => {
-    const usdtState: OmnipoolAssetState = {
+    const usdState: OmnipoolAssetState = {
       hubReserve: 1000000000000n,  // 1 LRNA (12 decimals)
       reserve: 2000000n,            // 2 USDT (6 decimals: 2 * 10^6)
       shares: 0n,
@@ -32,7 +32,7 @@ describe('calculateLRNAPrice', () => {
       tradable: 0,
     };
 
-    const lrnaPrice = calculateLRNAPrice(usdtState, 6);
+    const lrnaPrice = calculateLRNAPrice(usdState, 6);
 
     // With 2 USDT per 1 LRNA, LRNA price = 2.0 USDT
     // Formula: (2000000 * 10^12) / (1000000000000 * 10^6) = 2.0
@@ -40,7 +40,7 @@ describe('calculateLRNAPrice', () => {
   });
 
   it('handles zero hub reserve', () => {
-    const usdtState: OmnipoolAssetState = {
+    const usdState: OmnipoolAssetState = {
       hubReserve: 0n,
       reserve: 1000000000000n,
       shares: 0n,
@@ -49,7 +49,7 @@ describe('calculateLRNAPrice', () => {
       tradable: 0,
     };
 
-    expect(() => calculateLRNAPrice(usdtState, 6)).toThrow();
+    expect(() => calculateLRNAPrice(usdState, 6)).toThrow();
   });
 });
 

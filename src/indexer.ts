@@ -219,12 +219,13 @@ async function readStableswapState(
     finalBlock: number
     fee: number
   }>
-): Promise<StableswapPool[]> {
+): Promise<{ pools: StableswapPool[]; totalIssuances: Map<number, bigint> }> {
   const stableswapPools: StableswapPool[] = []
+  let totalIssuances = new Map<number, bigint>()
 
   // Check if Tokens.Accounts storage is available at this block
   if (!storage.tokens.accounts.v108.is(block)) {
-    return stableswapPools
+    return { pools: stableswapPools, totalIssuances }
   }
 
   try {
@@ -296,19 +297,48 @@ async function readStableswapState(
         }
       }
 
+      // Read peg info if available (drifting peg pools like GDOT, GETH, GSOL)
+      let pegMultipliers: [bigint, bigint][] | undefined
+      try {
+        let peg: any
+        if (storage.stableswap.poolPegs.v378.is(block)) {
+          peg = await storage.stableswap.poolPegs.v378.get(block, poolEntry.poolId)
+        } else if (storage.stableswap.poolPegs.v323.is(block)) {
+          peg = await storage.stableswap.poolPegs.v323.get(block, poolEntry.poolId)
+        } else if (storage.stableswap.poolPegs.v305.is(block)) {
+          peg = await storage.stableswap.poolPegs.v305.get(block, poolEntry.poolId)
+        }
+        if (peg && peg.current?.length > 0) {
+          pegMultipliers = peg.current
+        }
+      } catch {}
+
       stableswapPools.push({
         poolId: poolEntry.poolId,
         assets: poolEntry.assets,
-        reserves,  // Real reserves from Tokens.Accounts
+        reserves,
         amplification,
         fee: poolEntry.fee,
+        pegMultipliers,
       })
+    }
+
+    // Batch-read TotalIssuance for each pool's LP token (LP assetId == poolId)
+    if (storage.tokens.totalIssuance.v108.is(block)) {
+      const lpAssetIds = pools.map(p => p.poolId)
+      const issuances = await storage.tokens.totalIssuance.v108.getMany(block, lpAssetIds)
+      for (let i = 0; i < lpAssetIds.length; i++) {
+        const val = issuances[i]
+        if (val !== undefined && val > 0n) {
+          totalIssuances.set(lpAssetIds[i], val)
+        }
+      }
     }
   } catch (error) {
     console.error(`[Stableswap] Failed to read state at block ${block.height}:`, error)
   }
 
-  return stableswapPools
+  return { pools: stableswapPools, totalIssuances }
 }
 
 export async function run(options: RunOptions = {}): Promise<void> {
@@ -349,8 +379,12 @@ export async function run(options: RunOptions = {}): Promise<void> {
 
     // Previous prices for carry-forward optimization
   let previousPrices: Map<number, string> | null = null
+  let lastUnpricedKey = ''
   let atokenEquivalences: [number, number][] = []
   let atokenIds: Set<number> = new Set()
+  // LP → wrapper equivalences (e.g. 2-Pool-GDOT(690) → GDOT(69))
+  // Detected from asset registry symbol patterns (N-Pool-X → X)
+  const lpEquivalences = new Map<number, number>()
   // Tracking for skip rate logging
   let blocksSkipped = 0
   let blocksProcessed = 0
@@ -411,7 +445,17 @@ export async function run(options: RunOptions = {}): Promise<void> {
         ctx.store.addAssets(newAssets)
         atokenEquivalences = registry.getAtokenEquivalences()
         atokenIds = registry.getAtokenIds()
-        updateErc20Registry(registry.getErc20Contracts(), atokenIds)
+        // Detect LP → wrapper equivalences from symbol patterns (N-Pool-X → X)
+        // LP wrappers are Aave aToken contracts — add to aaveTokenIds for EVM balance reads
+        const aaveTokenIds = new Set(atokenIds)
+        for (const [lpId, displayId] of registry.getLpAliases()) {
+          if (!lpEquivalences.has(lpId)) {
+            lpEquivalences.set(lpId, displayId)
+            console.log(`[LpAlias] ${lpId} → ${displayId}`)
+          }
+          aaveTokenIds.add(displayId)
+        }
+        updateErc20Registry(registry.getErc20Contracts(), aaveTokenIds)
       }
 
       // Update pool composition cache from events
@@ -482,9 +526,11 @@ export async function run(options: RunOptions = {}): Promise<void> {
 
       blocksProcessed++
 
-      let omnipoolAssets, xykPools, stableswapPools
+      let omnipoolAssets, xykPools, stableswapPools: StableswapPool[]
+      let totalIssuances = new Map<number, bigint>()
       try {
-        ;[omnipoolAssets, xykPools, stableswapPools] = await Promise.all([
+        let stableswapResult: { pools: StableswapPool[]; totalIssuances: Map<number, bigint> }
+        ;[omnipoolAssets, xykPools, stableswapResult] = await Promise.all([
           omnipoolAssetIds
             ? readOmnipoolState(block.header, omnipoolAssetIds)
             : Promise.resolve(new Map()),
@@ -493,8 +539,10 @@ export async function run(options: RunOptions = {}): Promise<void> {
             : Promise.resolve([]),
           stableswapPoolEntries
             ? readStableswapState(block.header, stableswapPoolEntries)
-            : Promise.resolve([]),
+            : Promise.resolve({ pools: [], totalIssuances: new Map() }),
         ])
+        stableswapPools = stableswapResult.pools
+        totalIssuances = stableswapResult.totalIssuances
       } catch (error) {
         console.error(
           `[Runtime] Storage read failed at block ${blockHeight} (spec_version: ${specVersion}):`,
@@ -504,7 +552,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
       }
 
       const decimals = registry.getDecimals()
-      const prices = resolvePrices(
+      const { prices, hopCounts, unpricedConnected } = resolvePrices(
         omnipoolAssets,
         xykPools,
         stableswapPools,
@@ -512,8 +560,21 @@ export async function run(options: RunOptions = {}): Promise<void> {
         config.USDT_ASSET_ID,
         config.LRNA_ASSET_ID,
         config.STABLECOIN_ANCHOR_IDS,
-        atokenEquivalences
+        atokenEquivalences,
+        totalIssuances
       )
+
+      const unpricedKey = unpricedConnected.join(',')
+      if (unpricedKey !== lastUnpricedKey) {
+        if (unpricedConnected.length > 0) {
+          console.log(
+            `[Pricing] Block ${blockHeight}: ${unpricedConnected.length} unpriced assets with pool connections: ${unpricedConnected.join(', ')}`
+          )
+        } else if (lastUnpricedKey !== '') {
+          console.log(`[Pricing] Block ${blockHeight}: all connected assets now priced`)
+        }
+        lastUnpricedKey = unpricedKey
+      }
 
       previousPrices = prices
       pricesCalculated += prices.size
@@ -527,7 +588,17 @@ export async function run(options: RunOptions = {}): Promise<void> {
       )
       swapEventsProcessed += volumeRows.length / 2  // Each swap = 2 rows
 
-      // Remap aToken volumes to their base tokens and filter aTokens from prices
+      // Copy LP token prices to their wrapper tokens (e.g. 2-Pool-GDOT(690) → GDOT(69))
+      // Detected from Aave ReserveInitialized EVM events
+      for (const [lpId, wrapperId] of lpEquivalences) {
+        const lpPrice = prices.get(lpId)
+        if (lpPrice && !prices.has(wrapperId)) {
+          prices.set(wrapperId, lpPrice)
+          hopCounts.set(wrapperId, hopCounts.get(lpId) ?? 0)
+        }
+      }
+
+      // Remap aToken and LP wrapper volumes to their base tokens
       const atokenToBase = new Map(atokenEquivalences.map(([base, aToken]) => [aToken, base]))
 
       for (const row of volumeRows) {
@@ -535,18 +606,25 @@ export async function run(options: RunOptions = {}): Promise<void> {
         if (baseId !== undefined) {
           row.asset_id = baseId
         }
+        const wrapperId = lpEquivalences.get(row.asset_id)
+        if (wrapperId !== undefined) {
+          row.asset_id = wrapperId
+        }
       }
 
+      const lpIds = new Set(lpEquivalences.keys())
       const priceRows = Array.from(prices.entries())
-        .filter(([assetId]) => !atokenIds.has(assetId))
-        .map(([assetId, usdtPrice]) => ({
+        .filter(([assetId, usdPrice]) => !atokenIds.has(assetId) && !lpIds.has(assetId) && parseFloat(usdPrice) > 0)
+        .map(([assetId, usdPrice]) => ({
           asset_id: assetId,
           block_height: blockHeight,
-          usdt_price: usdtPrice,
+          usd_price: usdPrice,
+          hops: hopCounts.get(assetId) ?? 0,
         }))
 
       // Merge price rows with volume rows (combines both into single batch)
       const combinedRows = mergePriceAndVolumeRows(priceRows, volumeRows)
+        .filter(row => parseFloat(row.usd_price) > 0)
       ctx.store.addPrices(combinedRows)
 
       ctx.store.addBlocks([{

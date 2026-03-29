@@ -129,7 +129,7 @@ export const assetLocations =  {
      */
     v244: new StorageType('AssetRegistry.AssetLocations', 'Optional', [sts.number()], v244.AssetLocation) as AssetLocationsV244,
     /**
-     *  Native location of an asset (V5 XCM).
+     *  Native location of an asset.
      */
     v394: new StorageType('AssetRegistry.AssetLocations', 'Optional', [sts.number()], v394.AssetLocation) as AssetLocationsV394,
 }
@@ -186,7 +186,7 @@ export interface AssetLocationsV244  {
 }
 
 /**
- *  Native location of an asset (V5 XCM).
+ *  Native location of an asset.
  */
 export interface AssetLocationsV394  {
     is(block: RuntimeCtx): boolean

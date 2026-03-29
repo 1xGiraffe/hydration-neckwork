@@ -454,3 +454,73 @@ describe('calculateStableswapPrices - full price resolution', () => {
     expect(newPrices.has(100)).toBe(true); // vDOT
   });
 });
+
+describe('calculateSpotPrice - peg-aware pools', () => {
+  it('applies peg multiplier to vDOT/aDOT pool (GDOT-like)', () => {
+    // Pool with vDOT (peg 1.6) and aDOT (peg 1.0), balanced reserves
+    // Without peg: spot price ≈ 1.0 (reserves are equal)
+    // With peg: spot price ≈ 1.6 (1 vDOT = 1.6 aDOT in the curve)
+    const pool: StableswapPool = {
+      poolId: 690,
+      assets: [15, 1001], // vDOT, aDOT
+      reserves: [100000_0000000000n, 100000_000000000000000000n], // 100k each (10 dec, 18 dec)
+      amplification: 22n,
+      fee: 600,
+      pegMultipliers: [
+        [16n, 10n], // vDOT peg = 1.6
+        [1n, 1n],   // aDOT peg = 1.0
+      ],
+    };
+    const decimals = new Map([[15, 10], [1001, 18]]);
+
+    // Spot price of vDOT in aDOT terms: how much aDOT per 1 vDOT
+    const spotPrice = calculateSpotPrice(pool, 0, 1, decimals);
+
+    // With peg 1.6, the curve treats 1 vDOT as 1.6 units.
+    // Spot price should be ≈ 1.6 (scaled to 10^12)
+    expect(spotPrice).toBeGreaterThan(1_500_000_000_000n); // > 1.5
+    expect(spotPrice).toBeLessThan(1_700_000_000_000n);    // < 1.7
+  });
+
+  it('spot price without peg treats assets as 1:1', () => {
+    // Same pool but no peg — spot price should be ≈ 1.0
+    const pool: StableswapPool = {
+      poolId: 690,
+      assets: [15, 1001],
+      reserves: [100000_0000000000n, 100000_000000000000000000n],
+      amplification: 22n,
+      fee: 600,
+      // no pegMultipliers
+    };
+    const decimals = new Map([[15, 10], [1001, 18]]);
+
+    const spotPrice = calculateSpotPrice(pool, 0, 1, decimals);
+
+    // Without peg, balanced reserves → spot price ≈ 1.0
+    expect(spotPrice).toBeGreaterThan(990_000_000_000n);
+    expect(spotPrice).toBeLessThan(1_010_000_000_000n);
+  });
+
+  it('peg-adjusted spot price is symmetric (A→B * B→A ≈ 1)', () => {
+    const pool: StableswapPool = {
+      poolId: 4200,
+      assets: [1000809, 1007], // wstETH, aETH
+      reserves: [50000_000000000000000000n, 50000_000000000000000000n], // 50k each, 18 dec
+      amplification: 50n,
+      fee: 400,
+      pegMultipliers: [
+        [1n, 1n],   // wstETH peg = 1.0
+        [12n, 10n], // aETH peg = 1.2
+      ],
+    };
+    const decimals = new Map([[1000809, 18], [1007, 18]]);
+
+    const priceAB = calculateSpotPrice(pool, 0, 1, decimals); // wstETH → aETH
+    const priceBA = calculateSpotPrice(pool, 1, 0, decimals); // aETH → wstETH
+
+    // priceAB * priceBA should be ≈ 10^24 (1.0 * 10^12 * 1.0 * 10^12)
+    const product = (priceAB * priceBA) / (10n ** 12n);
+    expect(product).toBeGreaterThan(990_000_000_000n);
+    expect(product).toBeLessThan(1_010_000_000_000n);
+  });
+});

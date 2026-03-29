@@ -11,7 +11,7 @@
       "events": ["PoolCreated", "PoolDestroyed", "SellExecuted", "BuyExecuted"]
     },
     "Stableswap": {
-      "storage": ["Pools", "AssetTradability"],
+      "storage": ["Pools", "AssetTradability", "PoolPegs"],
       "events": ["PoolCreated", "LiquidityAdded", "SellExecuted", "BuyExecuted"]
     },
     "AssetRegistry": {

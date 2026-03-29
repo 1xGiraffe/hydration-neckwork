@@ -1,63 +1,100 @@
-import Decimal from 'decimal.js'
-import type { OHLCVCandle, ApiCandle } from '../types.ts'
+import type { ClickHouseClient } from '../db/client.ts'
+import type { ApiCandle } from '../types.ts'
+import type { OHLCVInterval } from './ohlcvService.ts'
+import { toClickHouseDateTime } from './ohlcvService.ts'
 
 /**
- * Derive cross-pair OHLCV candles from two USDT-denominated candle series.
- *
- * Given A/USDT and B/USDT candles, computes A/B candles where:
- * - open  = open_A  / open_B
- * - high  = high_A  / low_B   (NOT high_A / high_B — captures max A price at min B price)
- * - low   = low_A   / high_B  (NOT low_A / low_B — captures min A price at max B price)
- * - close = close_A / close_B
- * - volume = base asset (A) USDT-denominated volume (not divided)
- *
- * Only returns candles where both assets have data at the same interval_start
- * (inner join). Per domain decision: Omnipool prices update every block, so gaps
- * only occur before an asset was listed.
- *
- * All division uses decimal.js to avoid float64 precision loss.
- * toNumber() is called only at the final output step.
- *
- * @param baseCandles  - A/USDT candles (Decimal128 as strings from ClickHouse)
- * @param quoteCandles - B/USDT candles (Decimal128 as strings from ClickHouse)
- * @returns A/B candles with numbers (ready for JSON serialization)
+ * Interval to ClickHouse time-bucketing expression.
  */
-export function deriveCrossPairCandles(
-  baseCandles: OHLCVCandle[],
-  quoteCandles: OHLCVCandle[]
-): ApiCandle[] {
-  const quoteByTime = new Map(quoteCandles.map(c => [c.interval_start, c]))
+const INTERVAL_BUCKET: Record<OHLCVInterval, string> = {
+  '5min':  'toStartOfFiveMinute(b.block_timestamp)',
+  '15min': 'toStartOfInterval(b.block_timestamp, toIntervalMinute(15))',
+  '30min': 'toStartOfInterval(b.block_timestamp, toIntervalMinute(30))',
+  '1h':    'toStartOfHour(b.block_timestamp)',
+  '4h':    'toStartOfInterval(b.block_timestamp, toIntervalHour(4))',
+  '1d':    'toStartOfDay(b.block_timestamp)',
+  '1w':    'toStartOfWeek(b.block_timestamp, 1)',
+  '1M':    'toStartOfMonth(b.block_timestamp)',
+}
 
-  const results: ApiCandle[] = []
-
-  for (const base of baseCandles) {
-    const quote = quoteByTime.get(base.interval_start)
-    if (!quote) continue
-
-    const qOpen  = new Decimal(quote.open)
-    const qHigh  = new Decimal(quote.high)
-    const qLow   = new Decimal(quote.low)
-    const qClose = new Decimal(quote.close)
-
-    // Skip candles where any quote price is zero (would produce Infinity)
-    if (qOpen.isZero() || qHigh.isZero() || qLow.isZero() || qClose.isZero()) continue
-
-    const bOpen  = new Decimal(base.open)
-    const bHigh  = new Decimal(base.high)
-    const bLow   = new Decimal(base.low)
-    const bClose = new Decimal(base.close)
-
-    results.push({
-      intervalStart: Math.floor(new Date(base.interval_start.replace(' ', 'T') + 'Z').getTime() / 1000),
-      open:        bOpen.div(qOpen).toNumber(),
-      high:        bHigh.div(qLow).toNumber(),    // high_A / low_B
-      low:         bLow.div(qHigh).toNumber(),     // low_A / high_B
-      close:       bClose.div(qClose).toNumber(),
-      volumeBuy:   parseFloat(base.volume_buy),
-      volumeSell:  parseFloat(base.volume_sell),
-      volumeTotal: parseFloat(base.volume_total),
-    })
+/**
+ * Compute cross-pair OHLCV candles directly from the prices table.
+ *
+ * Joins base and quote prices at the block level, computes the ratio per block,
+ * then aggregates into OHLCV buckets. This gives the true high/low of the actual
+ * ratio rather than worst-case bounds from independent OHLCV series.
+ */
+export async function queryCrossPairCandles(
+  client: ClickHouseClient,
+  options: {
+    baseId: number
+    quoteId: number
+    startTime: Date
+    endTime: Date
+    interval: OHLCVInterval
   }
+): Promise<ApiCandle[]> {
+  const bucket = INTERVAL_BUCKET[options.interval]
+  const startTime = toClickHouseDateTime(options.startTime)
+  const endTime = toClickHouseDateTime(options.endTime)
 
-  return results
+  const result = await client.query({
+    query: `
+      SELECT
+        ${bucket} AS interval_start,
+        argMin(sub.ratio, b.block_timestamp) AS open,
+        max(sub.ratio) AS high,
+        min(sub.ratio) AS low,
+        argMax(sub.ratio, b.block_timestamp) AS close,
+        sum(sub.usd_volume_buy) AS volume_buy,
+        sum(sub.usd_volume_sell) AS volume_sell,
+        sum(sub.usd_volume_buy) + sum(sub.usd_volume_sell) AS volume_total
+      FROM (
+        SELECT
+          base.block_height,
+          toFloat64(base.usd_price) / toFloat64(quote.usd_price) AS ratio,
+          base.usd_volume_buy,
+          base.usd_volume_sell
+        FROM price_data.prices base
+        INNER JOIN price_data.prices quote ON base.block_height = quote.block_height
+        WHERE base.asset_id = {base_id:UInt32}
+          AND quote.asset_id = {quote_id:UInt32}
+          AND toFloat64(quote.usd_price) > 0
+      ) sub
+      INNER JOIN price_data.blocks b ON sub.block_height = b.block_height
+      WHERE b.block_timestamp >= {start_time:DateTime}
+        AND b.block_timestamp < {end_time:DateTime}
+      GROUP BY interval_start
+      ORDER BY interval_start
+    `,
+    query_params: {
+      base_id: options.baseId,
+      quote_id: options.quoteId,
+      start_time: startTime,
+      end_time: endTime,
+    },
+    format: 'JSONEachRow',
+  })
+
+  const rows = await result.json<{
+    interval_start: string
+    open: number
+    high: number
+    low: number
+    close: number
+    volume_buy: string
+    volume_sell: string
+    volume_total: string
+  }>()
+
+  return rows.map(r => ({
+    intervalStart: Math.floor(new Date(r.interval_start.replace(' ', 'T') + 'Z').getTime() / 1000),
+    open: r.open,
+    high: r.high,
+    low: r.low,
+    close: r.close,
+    volumeBuy: parseFloat(r.volume_buy),
+    volumeSell: parseFloat(r.volume_sell),
+    volumeTotal: parseFloat(r.volume_total),
+  }))
 }

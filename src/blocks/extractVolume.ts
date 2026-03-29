@@ -3,12 +3,12 @@
  *
  * Pure functions for extracting and aggregating trading volume from swap events:
  * - Decodes swap events from Omnipool, XYK, and Stableswap pallets
- * - Calculates USDT-denominated volumes using bigint-only arithmetic
+ * - Calculates USD-denominated volumes using bigint-only arithmetic
  * - Generates bidirectional volume rows (sell + buy for each swap)
  * - Aggregates volumes by asset and merges with price rows
  *
  * All volume calculations use bigint arithmetic to prevent floating-point errors.
- * USDT volumes are stored as Decimal128(12) strings for ClickHouse compatibility.
+ * USD volumes are stored as Decimal128(12) strings for ClickHouse compatibility.
  */
 
 import type { PriceMap, AssetDecimals } from '../price/types.js';
@@ -38,7 +38,7 @@ interface EventLike {
 }
 
 /**
- * Calculate USDT volume from native amount using bigint-only arithmetic
+ * Calculate USD volume from native amount using bigint-only arithmetic
  *
  * Formula: (nativeAmount * price) / (10^(assetDecimals + 12))
  * - nativeAmount: e.g., 1000000000000n for 1 token with 12 decimals
@@ -48,11 +48,11 @@ interface EventLike {
  *
  * @param nativeAmount - Raw token amount in smallest unit
  * @param assetId - Asset ID for price and decimals lookup
- * @param prices - Map of asset ID to USDT price strings
+ * @param prices - Map of asset ID to USD price strings
  * @param decimals - Map of asset ID to decimal places
- * @returns USDT volume as Decimal128(12) string
+ * @returns USD volume as Decimal128(12) string
  */
-export function calculateUsdtVolume(
+export function calculateUsdVolume(
   nativeAmount: bigint,
   assetId: number,
   prices: PriceMap,
@@ -76,9 +76,9 @@ export function calculateUsdtVolume(
   // '2.000000000000' -> 2000000000000n (price with 12 decimal places)
   const priceBigInt = BigInt(priceStr.replace('.', ''));
 
-  // Calculate USDT volume: (nativeAmount * priceBigInt) / (10^assetDecimals)
+  // Calculate USD volume: (nativeAmount * priceBigInt) / (10^assetDecimals)
   // This gives us the volume in the same 12-decimal-place scale as the price
-  // Example: (1000000000000n * 2000000000000n) / 10^12 = 2000000000000n (2.0 USDT with 12 decimals)
+  // Example: (1000000000000n * 2000000000000n) / 10^12 = 2000000000000n (2.0 USD with 12 decimals)
   const volumeBigInt = (nativeAmount * priceBigInt) / (10n ** BigInt(assetDecimals));
 
   // Format as Decimal128(12): split into integer and fractional parts
@@ -95,12 +95,12 @@ export function calculateUsdtVolume(
  * Convert a decoded swap to two PriceRow entries (sell + buy volumes)
  *
  * Each swap generates exactly 2 rows:
- * 1. assetIn: native_volume_sell + usdt_volume_sell (buy volumes = 0)
- * 2. assetOut: native_volume_buy + usdt_volume_buy (sell volumes = 0)
+ * 1. assetIn: native_volume_sell + usd_volume_sell (buy volumes = 0)
+ * 2. assetOut: native_volume_buy + usd_volume_buy (sell volumes = 0)
  *
  * @param swap - Decoded swap event
  * @param blockHeight - Block height for the rows
- * @param prices - Map of asset ID to USDT price
+ * @param prices - Map of asset ID to USD price
  * @param decimals - Map of asset ID to decimal places
  * @returns Array of exactly 2 PriceRow entries
  */
@@ -110,30 +110,30 @@ export function swapToVolumeRows(
   prices: PriceMap,
   decimals: AssetDecimals
 ): PriceRow[] {
-  // Calculate USDT volumes
-  const usdtVolumeSell = calculateUsdtVolume(swap.amountIn, swap.assetIn, prices, decimals);
-  const usdtVolumeBuy = calculateUsdtVolume(swap.amountOut, swap.assetOut, prices, decimals);
+  // Calculate USD volumes
+  const usdVolumeSell = calculateUsdVolume(swap.amountIn, swap.assetIn, prices, decimals);
+  const usdVolumeBuy = calculateUsdVolume(swap.amountOut, swap.assetOut, prices, decimals);
 
   return [
     // assetIn: SELL volume
     {
       asset_id: swap.assetIn,
       block_height: blockHeight,
-      usdt_price: '0', // Price comes from price rows, not volume rows
+      usd_price: '0', // Price comes from price rows, not volume rows
       native_volume_sell: swap.amountIn.toString(),
-      usdt_volume_sell: usdtVolumeSell,
+      usd_volume_sell: usdVolumeSell,
       native_volume_buy: '0',
-      usdt_volume_buy: '0.000000000000',
+      usd_volume_buy: '0.000000000000',
     },
     // assetOut: BUY volume
     {
       asset_id: swap.assetOut,
       block_height: blockHeight,
-      usdt_price: '0',
+      usd_price: '0',
       native_volume_buy: swap.amountOut.toString(),
-      usdt_volume_buy: usdtVolumeBuy,
+      usd_volume_buy: usdVolumeBuy,
       native_volume_sell: '0',
-      usdt_volume_sell: '0.000000000000',
+      usd_volume_sell: '0.000000000000',
     },
   ];
 }
@@ -290,7 +290,7 @@ export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
  *
  * @param events - All events from a block
  * @param blockHeight - Block height for volume rows
- * @param prices - Map of asset ID to USDT price
+ * @param prices - Map of asset ID to USD price
  * @param decimals - Map of asset ID to decimal places
  * @returns Array of volume PriceRow entries (2 per swap)
  */
@@ -334,7 +334,7 @@ export function extractVolumeFromSwaps(
  * 3. Return all rows (price+volume merged + standalone price + standalone volume)
  *
  * Volume summing uses bigint arithmetic for native volumes and decimal string
- * arithmetic for USDT volumes (convert to bigint, sum, reformat).
+ * arithmetic for USD volumes (convert to bigint, sum, reformat).
  *
  * @param priceRows - Price rows from price calculation
  * @param volumeRows - Volume rows from swap events
@@ -376,9 +376,9 @@ export function mergePriceAndVolumeRows(
       result.push({
         ...priceRow,
         native_volume_sell: volumeRow.native_volume_sell,
-        usdt_volume_sell: volumeRow.usdt_volume_sell,
+        usd_volume_sell: volumeRow.usd_volume_sell,
         native_volume_buy: volumeRow.native_volume_buy,
-        usdt_volume_buy: volumeRow.usdt_volume_buy,
+        usd_volume_buy: volumeRow.usd_volume_buy,
       });
       processedAssetIds.add(priceRow.asset_id);
     } else {
@@ -420,17 +420,17 @@ function aggregateVolumeRows(volumeRows: PriceRow[]): PriceRow[] {
           existing.native_volume_sell ?? '0',
           row.native_volume_sell ?? '0'
         ),
-        usdt_volume_sell: sumDecimal128Strings(
-          existing.usdt_volume_sell ?? '0.000000000000',
-          row.usdt_volume_sell ?? '0.000000000000'
+        usd_volume_sell: sumDecimal128Strings(
+          existing.usd_volume_sell ?? '0.000000000000',
+          row.usd_volume_sell ?? '0.000000000000'
         ),
         native_volume_buy: sumBigIntStrings(
           existing.native_volume_buy ?? '0',
           row.native_volume_buy ?? '0'
         ),
-        usdt_volume_buy: sumDecimal128Strings(
-          existing.usdt_volume_buy ?? '0.000000000000',
-          row.usdt_volume_buy ?? '0.000000000000'
+        usd_volume_buy: sumDecimal128Strings(
+          existing.usd_volume_buy ?? '0.000000000000',
+          row.usd_volume_buy ?? '0.000000000000'
         ),
       });
     } else {
@@ -454,7 +454,7 @@ function sumBigIntStrings(a: string, b: string): string {
 }
 
 /**
- * Sum two Decimal128(12) strings (USDT volumes)
+ * Sum two Decimal128(12) strings (USD volumes)
  *
  * Converts to bigint by removing decimal point, sums, then reformats.
  *

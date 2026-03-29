@@ -2,7 +2,7 @@
 
 ## Overview
 
-This guide covers how to query Hydration price data using ClickHouse parameterized views. Price data is stored in the `prices` table ordered by `(asset_id, block_height)`, with corresponding metadata in the `blocks` table (timestamps) and `assets` table (symbols). All prices are USDT-denominated, stored as `Decimal64(12)`, and rounded to 8 decimals in view output.
+This guide covers how to query Hydration price data using ClickHouse parameterized views. Price data is stored in the `prices` table ordered by `(asset_id, block_height)`, with corresponding metadata in the `blocks` table (timestamps) and `assets` table (symbols). All prices are USD-denominated, stored as `Decimal64(12)`, and rounded to 8 decimals in view output.
 
 ## Prerequisites
 
@@ -41,18 +41,18 @@ SELECT * FROM price_data.price_at_block_by_symbol(symbol='DOT', block_height=700
 
 **Expected Output:**
 ```
-┌─asset_id─┬─block_height─┬─usdt_price─┐
+┌─asset_id─┬─block_height─┬─usd_price─┐
 │        5 │      7000000 │  5.23456789 │
 └──────────┴──────────────┴────────────┘
 ```
 
-**Output Format:** `(asset_id, block_height, usdt_price)`
+**Output Format:** `(asset_id, block_height, usd_price)`
 
 **Performance:** <100ms (ClickHouse sparse index reads minimum 8192-row granules even for single-row point queries)
 
 **Direct Table Query (without view):**
 ```sql
-SELECT asset_id, block_height, round(usdt_price, 8) AS usdt_price
+SELECT asset_id, block_height, round(usd_price, 8) AS usd_price
 FROM price_data.prices FINAL
 WHERE asset_id = 5 AND block_height = 7000000;
 ```
@@ -74,7 +74,7 @@ SELECT * FROM price_data.price_range(asset_id=5, start_block=7000000, end_block=
 
 **Expected Output:**
 ```
-┌─block_height─┬─usdt_price─┐
+┌─block_height─┬─usd_price─┐
 │      7000000 │  5.23456789 │
 │      7000001 │  5.23456789 │  -- filled forward (no price update)
 │      7000002 │  5.24012345 │  -- new price recorded
@@ -99,7 +99,7 @@ LIMIT 10000;
 
 **Direct Table Query (without LOCF):**
 ```sql
-SELECT block_height, round(usdt_price, 8) AS usdt_price
+SELECT block_height, round(usd_price, 8) AS usd_price
 FROM price_data.prices FINAL
 WHERE asset_id = 5
   AND block_height BETWEEN 7000000 AND 7001000
@@ -118,9 +118,9 @@ Compare prices for multiple assets across a block range in pivot format. This pa
 ```sql
 SELECT
   block_height,
-  round(maxIf(usdt_price, asset_id = <ASSET_ID_1>), 8) AS <asset_1_symbol>_price,
-  round(maxIf(usdt_price, asset_id = <ASSET_ID_2>), 8) AS <asset_2_symbol>_price,
-  round(maxIf(usdt_price, asset_id = <ASSET_ID_3>), 8) AS <asset_3_symbol>_price
+  round(maxIf(usd_price, asset_id = <ASSET_ID_1>), 8) AS <asset_1_symbol>_price,
+  round(maxIf(usd_price, asset_id = <ASSET_ID_2>), 8) AS <asset_2_symbol>_price,
+  round(maxIf(usd_price, asset_id = <ASSET_ID_3>), 8) AS <asset_3_symbol>_price
 FROM price_data.prices FINAL
 WHERE asset_id IN [<ASSET_ID_1>, <ASSET_ID_2>, <ASSET_ID_3>]
   AND block_height BETWEEN <START_BLOCK> AND <END_BLOCK>
@@ -136,9 +136,9 @@ WITH FILL FROM <START_BLOCK> TO <END_BLOCK> + 1 STEP 1
 ```sql
 SELECT
   block_height,
-  round(maxIf(usdt_price, asset_id = 5), 8) AS dot_price,
-  round(maxIf(usdt_price, asset_id = 10), 8) AS usdt_value,
-  round(maxIf(usdt_price, asset_id = 0), 8) AS hdx_price
+  round(maxIf(usd_price, asset_id = 5), 8) AS dot_price,
+  round(maxIf(usd_price, asset_id = 10), 8) AS usdt_value,
+  round(maxIf(usd_price, asset_id = 0), 8) AS hdx_price
 FROM price_data.prices FINAL
 WHERE asset_id IN [5, 10, 0]
   AND block_height BETWEEN 7000000 AND 7000500
@@ -163,7 +163,7 @@ WITH FILL FROM 7000000 TO 7000501 STEP 1
 
 **How to Customize:**
 To add/remove assets, modify these three parts:
-1. **SELECT columns:** Add/remove `round(maxIf(usdt_price, asset_id = <ID>), 8) AS <name>` for each asset
+1. **SELECT columns:** Add/remove `round(maxIf(usd_price, asset_id = <ID>), 8) AS <name>` for each asset
 2. **WHERE asset_id IN list:** Include all asset IDs you're querying
 3. **INTERPOLATE list:** Include all column aliases from step 1
 
@@ -175,7 +175,7 @@ To add/remove assets, modify these three parts:
 - Use narrower block ranges for more assets to keep result sets manageable
 
 **How it Works:**
-- `maxIf(usdt_price, asset_id = X)` is a ClickHouse conditional aggregator that extracts the price for a specific asset_id within each block_height group
+- `maxIf(usd_price, asset_id = X)` is a ClickHouse conditional aggregator that extracts the price for a specific asset_id within each block_height group
 - `GROUP BY block_height` pivots asset rows into columns
 - `WITH FILL` + `INTERPOLATE` provides LOCF gap-filling across all asset columns
 
@@ -194,12 +194,12 @@ SELECT * FROM price_data.price_at_timestamp(asset_id=5, target_timestamp='2024-1
 
 **Expected Output:**
 ```
-┌─asset_id─┬─block_height─┬──usdt_price──┐
+┌─asset_id─┬─block_height─┬──usd_price──┐
 │        5 │      7000123 │  5.23456789  │
 └──────────┴──────────────┴──────────────┘
 ```
 
-**Output Format:** `(asset_id, block_height, usdt_price)`
+**Output Format:** `(asset_id, block_height, usd_price)`
 
 To also get the block timestamp, join with the blocks table:
 ```sql
@@ -237,7 +237,7 @@ WITH nearest_block AS (
 SELECT
   asset_id,
   block_height,
-  round(usdt_price, 8) AS usdt_price
+  round(usd_price, 8) AS usd_price
 FROM price_data.prices FINAL
 WHERE asset_id = 5
   AND block_height = (SELECT block_height FROM nearest_block);
@@ -332,7 +332,7 @@ The primary key `(asset_id, block_height)` uses sparse indexing with 8192-row gr
 CREATE TABLE price_data.prices (
   asset_id UInt32,
   block_height UInt32,
-  usdt_price Decimal64(12)
+  usd_price Decimal64(12)
 ) ENGINE = ReplacingMergeTree(block_height)
 ORDER BY (asset_id, block_height);
 ```
@@ -340,7 +340,7 @@ ORDER BY (asset_id, block_height);
 **Columns:**
 - `asset_id`: Hydration asset ID (UInt32)
 - `block_height`: Block number (UInt32)
-- `usdt_price`: Price in USDT (Decimal64(12), views round to 8 decimals)
+- `usd_price`: Price in USD (Decimal64(12), views round to 8 decimals)
 
 **Primary Key:** `(asset_id, block_height)` — optimized for single-asset range queries
 

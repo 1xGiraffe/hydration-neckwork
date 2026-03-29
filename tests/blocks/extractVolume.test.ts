@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  calculateUsdtVolume,
+  calculateUsdVolume,
   swapToVolumeRows,
   mergePriceAndVolumeRows,
   type DecodedSwap
@@ -8,13 +8,13 @@ import {
 import type { PriceMap, AssetDecimals } from '../../src/price/types.ts';
 import type { PriceRow } from '../../src/db/schema.ts';
 
-describe('calculateUsdtVolume', () => {
-  it('calculates USDT volume from native amount with price', () => {
+describe('calculateUsdVolume', () => {
+  it('calculates USD volume from native amount with price', () => {
     const prices: PriceMap = new Map([[5, '2.000000000000']]);
     const decimals: AssetDecimals = new Map([[5, 12]]);
 
     // 1 token (12 decimals) * price 2.0 = 2.0 USDT
-    const result = calculateUsdtVolume(1000000000000n, 5, prices, decimals);
+    const result = calculateUsdVolume(1000000000000n, 5, prices, decimals);
     expect(result).toBe('2.000000000000');
   });
 
@@ -23,7 +23,7 @@ describe('calculateUsdtVolume', () => {
     const decimals: AssetDecimals = new Map([[10, 6]]);
 
     // 1 USDT (6 decimals) * price 1.0 = 1.0 USDT
-    const result = calculateUsdtVolume(1000000n, 10, prices, decimals);
+    const result = calculateUsdVolume(1000000n, 10, prices, decimals);
     expect(result).toBe('1.000000000000');
   });
 
@@ -31,7 +31,7 @@ describe('calculateUsdtVolume', () => {
     const prices: PriceMap = new Map();
     const decimals: AssetDecimals = new Map([[5, 12]]);
 
-    const result = calculateUsdtVolume(1000000000000n, 5, prices, decimals);
+    const result = calculateUsdVolume(1000000000000n, 5, prices, decimals);
     expect(result).toBe('0.000000000000');
   });
 
@@ -39,7 +39,7 @@ describe('calculateUsdtVolume', () => {
     const prices: PriceMap = new Map([[5, '2.000000000000']]);
     const decimals: AssetDecimals = new Map([[5, 12]]);
 
-    const result = calculateUsdtVolume(0n, 5, prices, decimals);
+    const result = calculateUsdVolume(0n, 5, prices, decimals);
     expect(result).toBe('0.000000000000');
   });
 
@@ -48,7 +48,7 @@ describe('calculateUsdtVolume', () => {
     const decimals: AssetDecimals = new Map([[5, 12]]);
 
     // 1,000,000 tokens (12 decimals) * price 50.0 = 50,000,000 USDT
-    const result = calculateUsdtVolume(1000000000000000000n, 5, prices, decimals);
+    const result = calculateUsdVolume(1000000000000000000n, 5, prices, decimals);
     expect(result).toBe('50000000.000000000000');
   });
 
@@ -57,7 +57,7 @@ describe('calculateUsdtVolume', () => {
     const decimals: AssetDecimals = new Map([[5, 12]]);
 
     // 0.5 tokens (12 decimals) * price 3.0 = 1.5 USDT
-    const result = calculateUsdtVolume(500000000000n, 5, prices, decimals);
+    const result = calculateUsdVolume(500000000000n, 5, prices, decimals);
     expect(result).toBe('1.500000000000');
   });
 
@@ -66,7 +66,7 @@ describe('calculateUsdtVolume', () => {
     const decimals: AssetDecimals = new Map(); // Asset 5 not in map
 
     // 1 token (default 12 decimals) * price 1.0 = 1.0 USDT
-    const result = calculateUsdtVolume(1000000000000n, 5, prices, decimals);
+    const result = calculateUsdVolume(1000000000000n, 5, prices, decimals);
     expect(result).toBe('1.000000000000');
   });
 });
@@ -102,11 +102,11 @@ describe('swapToVolumeRows', () => {
 
     expect(sellRow.asset_id).toBe(5);
     expect(sellRow.block_height).toBe(100);
-    expect(sellRow.usdt_price).toBe('0');
+    expect(sellRow.usd_price).toBe('0');
     expect(sellRow.native_volume_sell).toBe('1000000000000');
-    expect(sellRow.usdt_volume_sell).toBe('2.000000000000'); // 1 * 2.0
+    expect(sellRow.usd_volume_sell).toBe('2.000000000000'); // 1 * 2.0
     expect(sellRow.native_volume_buy).toBe('0');
-    expect(sellRow.usdt_volume_buy).toBe('0.000000000000');
+    expect(sellRow.usd_volume_buy).toBe('0.000000000000');
   });
 
   it('creates buy volume row for assetOut', () => {
@@ -124,11 +124,11 @@ describe('swapToVolumeRows', () => {
 
     expect(buyRow.asset_id).toBe(10);
     expect(buyRow.block_height).toBe(100);
-    expect(buyRow.usdt_price).toBe('0');
+    expect(buyRow.usd_price).toBe('0');
     expect(buyRow.native_volume_buy).toBe('2000000000000');
-    expect(buyRow.usdt_volume_buy).toBe('3.000000000000'); // 2 * 1.5
+    expect(buyRow.usd_volume_buy).toBe('3.000000000000'); // 2 * 1.5
     expect(buyRow.native_volume_sell).toBe('0');
-    expect(buyRow.usdt_volume_sell).toBe('0.000000000000');
+    expect(buyRow.usd_volume_sell).toBe('0.000000000000');
   });
 
   it('handles missing prices gracefully', () => {
@@ -143,16 +143,16 @@ describe('swapToVolumeRows', () => {
 
     const rows = swapToVolumeRows(swap, 100, prices, decimals);
 
-    expect(rows[0].usdt_volume_sell).toBe('0.000000000000');
-    expect(rows[1].usdt_volume_buy).toBe('0.000000000000');
+    expect(rows[0].usd_volume_sell).toBe('0.000000000000');
+    expect(rows[1].usd_volume_buy).toBe('0.000000000000');
   });
 });
 
 describe('mergePriceAndVolumeRows', () => {
   it('returns price rows unchanged when no volume rows', () => {
     const priceRows: PriceRow[] = [
-      { asset_id: 5, block_height: 100, usdt_price: '2.000000000000' },
-      { asset_id: 10, block_height: 100, usdt_price: '1.500000000000' },
+      { asset_id: 5, block_height: 100, usd_price: '2.000000000000' },
+      { asset_id: 10, block_height: 100, usd_price: '1.500000000000' },
     ];
     const volumeRows: PriceRow[] = [];
 
@@ -167,11 +167,11 @@ describe('mergePriceAndVolumeRows', () => {
       {
         asset_id: 5,
         block_height: 100,
-        usdt_price: '0',
+        usd_price: '0',
         native_volume_sell: '1000',
-        usdt_volume_sell: '2.000000000000',
+        usd_volume_sell: '2.000000000000',
         native_volume_buy: '0',
-        usdt_volume_buy: '0.000000000000',
+        usd_volume_buy: '0.000000000000',
       },
     ];
 
@@ -182,17 +182,17 @@ describe('mergePriceAndVolumeRows', () => {
 
   it('merges volume into matching price row', () => {
     const priceRows: PriceRow[] = [
-      { asset_id: 5, block_height: 100, usdt_price: '2.000000000000' },
+      { asset_id: 5, block_height: 100, usd_price: '2.000000000000' },
     ];
     const volumeRows: PriceRow[] = [
       {
         asset_id: 5,
         block_height: 100,
-        usdt_price: '0',
+        usd_price: '0',
         native_volume_sell: '1000',
-        usdt_volume_sell: '2.500000000000',
+        usd_volume_sell: '2.500000000000',
         native_volume_buy: '0',
-        usdt_volume_buy: '0.000000000000',
+        usd_volume_buy: '0.000000000000',
       },
     ];
 
@@ -202,27 +202,27 @@ describe('mergePriceAndVolumeRows', () => {
     expect(result[0]).toEqual({
       asset_id: 5,
       block_height: 100,
-      usdt_price: '2.000000000000', // Price preserved from price row
+      usd_price: '2.000000000000', // Price preserved from price row
       native_volume_sell: '1000',
-      usdt_volume_sell: '2.500000000000',
+      usd_volume_sell: '2.500000000000',
       native_volume_buy: '0',
-      usdt_volume_buy: '0.000000000000',
+      usd_volume_buy: '0.000000000000',
     });
   });
 
   it('creates standalone row for non-matching volume', () => {
     const priceRows: PriceRow[] = [
-      { asset_id: 5, block_height: 100, usdt_price: '2.000000000000' },
+      { asset_id: 5, block_height: 100, usd_price: '2.000000000000' },
     ];
     const volumeRows: PriceRow[] = [
       {
         asset_id: 10,
         block_height: 100,
-        usdt_price: '0',
+        usd_price: '0',
         native_volume_buy: '500',
-        usdt_volume_buy: '1.000000000000',
+        usd_volume_buy: '1.000000000000',
         native_volume_sell: '0',
-        usdt_volume_sell: '0.000000000000',
+        usd_volume_sell: '0.000000000000',
       },
     ];
 
@@ -239,20 +239,20 @@ describe('mergePriceAndVolumeRows', () => {
       {
         asset_id: 5,
         block_height: 100,
-        usdt_price: '0',
+        usd_price: '0',
         native_volume_sell: '100',
-        usdt_volume_sell: '1.000000000000',
+        usd_volume_sell: '1.000000000000',
         native_volume_buy: '0',
-        usdt_volume_buy: '0.000000000000',
+        usd_volume_buy: '0.000000000000',
       },
       {
         asset_id: 5,
         block_height: 100,
-        usdt_price: '0',
+        usd_price: '0',
         native_volume_sell: '200',
-        usdt_volume_sell: '2.000000000000',
+        usd_volume_sell: '2.000000000000',
         native_volume_buy: '50',
-        usdt_volume_buy: '0.500000000000',
+        usd_volume_buy: '0.500000000000',
       },
     ];
 
@@ -262,37 +262,37 @@ describe('mergePriceAndVolumeRows', () => {
     expect(result[0]).toEqual({
       asset_id: 5,
       block_height: 100,
-      usdt_price: '0',
+      usd_price: '0',
       native_volume_sell: '300', // 100 + 200
-      usdt_volume_sell: '3.000000000000', // 1.0 + 2.0
+      usd_volume_sell: '3.000000000000', // 1.0 + 2.0
       native_volume_buy: '50',
-      usdt_volume_buy: '0.500000000000',
+      usd_volume_buy: '0.500000000000',
     });
   });
 
   it('handles mixed scenario: some assets have price+volume, some only price, some only volume', () => {
     const priceRows: PriceRow[] = [
-      { asset_id: 5, block_height: 100, usdt_price: '2.000000000000' },
-      { asset_id: 10, block_height: 100, usdt_price: '1.500000000000' },
+      { asset_id: 5, block_height: 100, usd_price: '2.000000000000' },
+      { asset_id: 10, block_height: 100, usd_price: '1.500000000000' },
     ];
     const volumeRows: PriceRow[] = [
       {
         asset_id: 5, // Has matching price row
         block_height: 100,
-        usdt_price: '0',
+        usd_price: '0',
         native_volume_sell: '1000',
-        usdt_volume_sell: '3.000000000000',
+        usd_volume_sell: '3.000000000000',
         native_volume_buy: '0',
-        usdt_volume_buy: '0.000000000000',
+        usd_volume_buy: '0.000000000000',
       },
       {
         asset_id: 15, // No matching price row
         block_height: 100,
-        usdt_price: '0',
+        usd_price: '0',
         native_volume_buy: '500',
-        usdt_volume_buy: '1.000000000000',
+        usd_volume_buy: '1.000000000000',
         native_volume_sell: '0',
-        usdt_volume_sell: '0.000000000000',
+        usd_volume_sell: '0.000000000000',
       },
     ];
 
@@ -305,11 +305,11 @@ describe('mergePriceAndVolumeRows', () => {
     expect(asset5).toEqual({
       asset_id: 5,
       block_height: 100,
-      usdt_price: '2.000000000000',
+      usd_price: '2.000000000000',
       native_volume_sell: '1000',
-      usdt_volume_sell: '3.000000000000',
+      usd_volume_sell: '3.000000000000',
       native_volume_buy: '0',
-      usdt_volume_buy: '0.000000000000',
+      usd_volume_buy: '0.000000000000',
     });
 
     // Asset 10: price only (no volume)
@@ -317,7 +317,7 @@ describe('mergePriceAndVolumeRows', () => {
     expect(asset10).toEqual({
       asset_id: 10,
       block_height: 100,
-      usdt_price: '1.500000000000',
+      usd_price: '1.500000000000',
     });
 
     // Asset 15: volume only (no price)
@@ -325,36 +325,36 @@ describe('mergePriceAndVolumeRows', () => {
     expect(asset15).toEqual({
       asset_id: 15,
       block_height: 100,
-      usdt_price: '0',
+      usd_price: '0',
       native_volume_buy: '500',
-      usdt_volume_buy: '1.000000000000',
+      usd_volume_buy: '1.000000000000',
       native_volume_sell: '0',
-      usdt_volume_sell: '0.000000000000',
+      usd_volume_sell: '0.000000000000',
     });
   });
 
   it('sums volumes correctly when multiple swaps and price row both exist', () => {
     const priceRows: PriceRow[] = [
-      { asset_id: 5, block_height: 100, usdt_price: '2.000000000000' },
+      { asset_id: 5, block_height: 100, usd_price: '2.000000000000' },
     ];
     const volumeRows: PriceRow[] = [
       {
         asset_id: 5,
         block_height: 100,
-        usdt_price: '0',
+        usd_price: '0',
         native_volume_sell: '100',
-        usdt_volume_sell: '1.500000000000',
+        usd_volume_sell: '1.500000000000',
         native_volume_buy: '50',
-        usdt_volume_buy: '0.250000000000',
+        usd_volume_buy: '0.250000000000',
       },
       {
         asset_id: 5,
         block_height: 100,
-        usdt_price: '0',
+        usd_price: '0',
         native_volume_sell: '200',
-        usdt_volume_sell: '2.500000000000',
+        usd_volume_sell: '2.500000000000',
         native_volume_buy: '75',
-        usdt_volume_buy: '0.750000000000',
+        usd_volume_buy: '0.750000000000',
       },
     ];
 
@@ -364,11 +364,11 @@ describe('mergePriceAndVolumeRows', () => {
     expect(result[0]).toEqual({
       asset_id: 5,
       block_height: 100,
-      usdt_price: '2.000000000000',
+      usd_price: '2.000000000000',
       native_volume_sell: '300', // 100 + 200
-      usdt_volume_sell: '4.000000000000', // 1.5 + 2.5
+      usd_volume_sell: '4.000000000000', // 1.5 + 2.5
       native_volume_buy: '125', // 50 + 75
-      usdt_volume_buy: '1.000000000000', // 0.25 + 0.75
+      usd_volume_buy: '1.000000000000', // 0.25 + 0.75
     });
   });
 });

@@ -8,7 +8,7 @@
  * Architecture:
  * - Runs independently of main indexer
  * - Tracks progress via 'volume_backfill' checkpoint key
- * - Reads stored prices from ClickHouse for USDT volume calculation
+ * - Reads stored prices from ClickHouse for USD volume calculation
  * - Inserts complete (price+volume) rows that replace price-only rows via ReplacingMergeTree
  * - Only fetches blocks with swap events (much faster than replaying all blocks)
  */
@@ -28,7 +28,7 @@ const VOLUME_CHECKPOINT_KEY = 'volume_backfill'
 /**
  * Read stored prices from ClickHouse for a block range
  *
- * Returns a map of block_height -> (asset_id -> usdt_price)
+ * Returns a map of block_height -> (asset_id -> usd_price)
  */
 async function readStoredPrices(
   client: ClickHouseClient,
@@ -36,7 +36,7 @@ async function readStoredPrices(
   toBlock: number
 ): Promise<Map<number, Map<number, string>>> {
   const result = await client.query({
-    query: `SELECT asset_id, block_height, usdt_price
+    query: `SELECT asset_id, block_height, usd_price
             FROM price_data.prices
             WHERE block_height >= {fromBlock: UInt32} AND block_height <= {toBlock: UInt32}
             ORDER BY block_height`,
@@ -44,7 +44,7 @@ async function readStoredPrices(
     format: 'JSONEachRow',
   })
 
-  const rows = await result.json<{ asset_id: number; block_height: number; usdt_price: string }>()
+  const rows = await result.json<{ asset_id: number; block_height: number; usd_price: string }>()
 
   const pricesByBlock = new Map<number, Map<number, string>>()
   for (const row of rows) {
@@ -53,7 +53,7 @@ async function readStoredPrices(
       blockPrices = new Map()
       pricesByBlock.set(row.block_height, blockPrices)
     }
-    blockPrices.set(row.asset_id, row.usdt_price)
+    blockPrices.set(row.asset_id, row.usd_price)
   }
 
   return pricesByBlock
@@ -139,7 +139,7 @@ export async function backfillVolumes(): Promise<void> {
   const volumeProcessor = createProcessor('volume-only')
   volumeProcessor.setBlockRange({ from: startBlock, to: mainCheckpoint })
 
-  // Registry for decimals lookup (needed for USDT volume calculation)
+  // Registry for decimals lookup (needed for USD volume calculation)
   const registry = new AssetRegistryTracker(config.SNAPSHOT_INTERVAL_BACKFILL)
 
   let lastLogBlock = startBlock
@@ -185,7 +185,7 @@ export async function backfillVolumes(): Promise<void> {
       const priceRows: PriceRow[] = Array.from(blockPrices.entries()).map(([assetId, price]) => ({
         asset_id: assetId,
         block_height: blockHeight,
-        usdt_price: price,
+        usd_price: price,
       }))
 
       const combinedRows = mergePriceAndVolumeRows(priceRows, volumeRows)

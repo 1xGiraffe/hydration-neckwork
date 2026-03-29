@@ -1,11 +1,12 @@
 export interface PriceRow {
   asset_id: number
   block_height: number
-  usdt_price: string  // String for Decimal precision (ClickHouse returns Decimal as string)
+  usd_price: string  // String for Decimal precision (ClickHouse returns Decimal as string)
   native_volume_buy?: string
   native_volume_sell?: string
-  usdt_volume_buy?: string
-  usdt_volume_sell?: string
+  usd_volume_buy?: string
+  usd_volume_sell?: string
+  hops?: number
 }
 
 export interface BlockRow {

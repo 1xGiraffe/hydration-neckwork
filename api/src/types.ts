@@ -32,16 +32,17 @@ export interface ApiCandle {
 
 /**
  * Market statistics for a single asset, returned by GET /market-stats.
- * All prices and changes are in USDT terms.
+ * All prices and changes are in USD terms.
  */
 export interface AssetMarketStats {
   assetId: number
   symbol: string
-  price: number | null          // Current USDT price
+  price: number | null          // Current USD price
   change1h: number | null       // Decimal ratio, e.g. 0.0523 = +5.23%
   change24h: number | null
   change7d: number | null
   sparkline: number[]           // 24-48 hourly close prices (7d, downsampled)
+  hops: number | null           // Hop count from BFS pricing; null if no price data
 }
 
 /**

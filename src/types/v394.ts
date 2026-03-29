@@ -1,4 +1,4 @@
-import {sts, Bytes} from './support'
+import {sts, Result, Option, Bytes, BitSequence} from './support'
 
 export interface AssetLocation {
     parents: number

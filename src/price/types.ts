@@ -28,6 +28,7 @@ export interface StableswapPool {
   reserves: bigint[];    // Reserves for each asset
   amplification: bigint; // Current amplification parameter
   fee: number;          // Permill fee
+  pegMultipliers?: [bigint, bigint][]; // Per-asset peg ratios [numerator, denominator]
 }
 
 /**
@@ -36,6 +37,28 @@ export interface StableswapPool {
 export type AssetDecimals = Map<number, number>;
 
 /**
- * Map of asset ID to USDT price (as decimal string with 12 precision)
+ * Map of asset ID to USD price (as decimal string with 12 precision)
  */
 export type PriceMap = Map<number, string>;
+
+export type EdgeKind = 'xyk' | 'stableswap' | 'atoken';
+
+export interface GraphEdge {
+  toAsset: number;
+  poolId: number | null;        // null for aToken equivalences
+  kind: EdgeKind;
+  liquidity: bigint;            // For tie-breaking: normalized reserve sum
+  computePrice: (knownPrice: bigint, precision: number) => bigint;
+}
+
+export interface QueueEntry {
+  assetId: number;
+  priceBigint: bigint;   // 24-decimal internal representation
+  hopCount: number;       // real pool crossings (aToken edges = 0 cost)
+}
+
+export interface ResolvedPrices {
+  prices: PriceMap;
+  hopCounts: Map<number, number>;
+  unpricedConnected: number[];
+}

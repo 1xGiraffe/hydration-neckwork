@@ -370,6 +370,32 @@ export class AssetRegistryTracker {
   }
 
   /**
+   * Detect stableswap LP → display token aliases via symbol pattern (e.g. 2-Pool-GDOT → GDOT).
+   * Used to seed LP equivalences at startup; Aave EVM events refine at runtime.
+   */
+  getLpAliases(): [number, number][] {
+    const symbolToId = new Map<string, number>()
+    for (const [assetId, meta] of this.cache) {
+      if (!symbolToId.has(meta.symbol)) {
+        symbolToId.set(meta.symbol, assetId)
+      }
+    }
+
+    const aliases: [number, number][] = []
+    for (const [assetId, meta] of this.cache) {
+      const match = meta.symbol.match(/^\d+-Pool-(.+)$/)
+      if (match) {
+        const displayId = symbolToId.get(match[1])
+        if (displayId !== undefined && displayId !== assetId) {
+          aliases.push([assetId, displayId])
+        }
+      }
+    }
+
+    return aliases
+  }
+
+  /**
    * Get all ERC20 asset ID → contract address mappings.
    */
   getErc20Contracts(): Map<number, string> {
