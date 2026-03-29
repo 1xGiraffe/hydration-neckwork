@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { assetIconUrl, chainIconUrl } from '../utils/iconUrls'
+import { assetIconUrl, chainIconUrl, COMPOSITE_ICONS } from '../utils/iconUrls'
 
 interface AssetIconProps {
   assetId: number
@@ -13,11 +13,49 @@ function symbolToColor(symbol: string): string {
   return `hsl(${hue}, 55%, 45%)`
 }
 
+function HalfIcon({ assetId, side, size }: { assetId: number; side: 'left' | 'right'; size: number }) {
+  const [loaded, setLoaded] = useState(false)
+  const [error, setError] = useState(false)
+  const [triedPng, setTriedPng] = useState(false)
+
+  if (error) return null
+
+  const clipPath = side === 'left'
+    ? 'inset(0 50% 0 0)'
+    : 'inset(0 0 0 50%)'
+
+  return (
+    <img
+      src={assetIconUrl(assetId, triedPng ? 'png' : 'svg')}
+      alt=""
+      width={size}
+      height={size}
+      onLoad={() => setLoaded(true)}
+      onError={() => {
+        if (!triedPng) { setTriedPng(true); setLoaded(false) }
+        else setError(true)
+      }}
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width: size,
+        height: size,
+        borderRadius: '50%',
+        objectFit: 'cover',
+        clipPath,
+        opacity: loaded ? 1 : 0,
+      }}
+    />
+  )
+}
+
 function AssetIconInner({ assetId, symbol, size = 24, parachainId }: AssetIconProps) {
   const [imgLoaded, setImgLoaded] = useState(false)
   const [imgError, setImgError] = useState(false)
   const [triedPng, setTriedPng] = useState(false)
   const [badgeError, setBadgeError] = useState(false)
+  const composite = COMPOSITE_ICONS[assetId]
 
   return (
     <div style={{ position: 'relative', width: size, height: size, flexShrink: 0 }}>
@@ -41,8 +79,13 @@ function AssetIconInner({ assetId, symbol, size = 24, parachainId }: AssetIconPr
         {symbol.slice(0, 2)}
       </div>
 
-      {/* Icon image — rendered on top, hidden until loaded */}
-      {!imgError && (
+      {/* Composite icon (half + half) or regular icon */}
+      {composite ? (
+        <>
+          <HalfIcon assetId={composite[0]} side="left" size={size} />
+          <HalfIcon assetId={composite[1]} side="right" size={size} />
+        </>
+      ) : !imgError && (
         <img
           src={assetIconUrl(assetId, triedPng ? 'png' : 'svg')}
           alt={symbol}
@@ -91,5 +134,9 @@ function AssetIconInner({ assetId, symbol, size = 24, parachainId }: AssetIconPr
   )
 }
 
-const AssetIcon = React.memo(AssetIconInner)
+function AssetIconKeyed(props: AssetIconProps) {
+  return <AssetIconInner key={props.assetId} {...props} />
+}
+
+const AssetIcon = React.memo(AssetIconKeyed)
 export default AssetIcon

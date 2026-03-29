@@ -7,6 +7,7 @@ import {
   useReactTable,
   type SortingState,
 } from '@tanstack/react-table'
+import { displayLabel } from '../utils/pairs'
 import type { PairResult } from '../utils/pairs'
 import { formatPrice, formatChange } from '../utils/format'
 import { useWindowWidth } from '../hooks/useWindowWidth'
@@ -79,7 +80,7 @@ export default function MarketTable({
                 fontSize: '14px',
                 color: row.isCurrent ? '#4FFFDF' : '#e2e8f0',
               }}>
-                {row.display}
+                {displayLabel(row.display)}
               </span>
               {row.nameHint && (
                 <span style={{ fontSize: '11px', color: '#576B80', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>

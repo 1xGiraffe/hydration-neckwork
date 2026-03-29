@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import type { Asset } from '../types'
-import { getDefaultPairs, searchPairs } from '../utils/pairs'
+import { getDefaultPairs, searchPairs, displayLabel } from '../utils/pairs'
 import type { PairResult } from '../utils/pairs'
 import PairIcons from './PairIcons'
 
@@ -41,7 +41,7 @@ export default function PairModal({
     : searchPairs(query, assets)
 
   useEffect(() => {
-    setActiveIndex(results.length === 1 ? 0 : -1)
+    setActiveIndex(results.length > 0 && query.trim() ? 0 : -1)
   }, [query])
 
   useEffect(() => {
@@ -122,8 +122,7 @@ export default function PairModal({
         <div ref={listRef} style={{ flex: 1, overflowY: 'auto', background: '#030816' }}>
           {results.length === 0 && query.trim() !== '' ? (
             <div style={{ padding: '24px 16px', color: '#576B80', fontSize: '13px' }}>
-              <div>No pairs found for &ldquo;{query}&rdquo;</div>
-              <div style={{ marginTop: '8px' }}>Try a different symbol, e.g. DOT, HDX, ETH</div>
+              <div>No pairs found for &ldquo;{query}&rdquo;. Try a different symbol, e.g. HDX, SOL, ETH</div>
             </div>
           ) : (
             results.map((result, i) => {
@@ -158,7 +157,7 @@ export default function PairModal({
                     isUsdPair={result.quote.isStablecoin}
                   />
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0 }}>
-                    <span style={{ fontWeight: 600 }}>{result.display}</span>
+                    <span style={{ fontWeight: 600 }}>{displayLabel(result.display)}</span>
                     {result.nameHint && (
                       <span style={{ fontSize: '12px', color: '#576B80' }}>{result.nameHint}</span>
                     )}

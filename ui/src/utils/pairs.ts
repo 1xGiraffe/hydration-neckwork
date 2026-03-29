@@ -30,8 +30,12 @@ export function getDefaultPairs(assets: Asset[]): PairResult[] {
     .sort((a, b) => a.display.localeCompare(b.display))
 }
 
-function matchesPairQuery(display: string, baseSymbol: string, q: string): boolean {
-  return display.toUpperCase().startsWith(q) || baseSymbol.toUpperCase().startsWith(q)
+export function displayLabel(display: string): string {
+  return display.endsWith('USD') ? display.slice(0, -3) : display
+}
+
+function matchesPairQuery(label: string, baseSymbol: string, q: string): boolean {
+  return label.toUpperCase().startsWith(q) || baseSymbol.toUpperCase().startsWith(q)
 }
 
 export function searchPairs(query: string, assets: Asset[]): PairResult[] {
@@ -43,11 +47,12 @@ export function searchPairs(query: string, assets: Asset[]): PairResult[] {
   const usdt = assets.find(a => a.assetId === 10)
 
   for (const base of assets) {
-    // USD pair for non-stablecoins (using USDT id=10 as quote)
-    if (!base.isStablecoin && usdt) {
+    // USD pair (using USDT id=10 as quote)
+    if (usdt && base.assetId !== usdt.assetId) {
       const display = base.symbol + 'USD'
+      const label = displayLabel(display)
       const key = `${base.assetId}-${usdt.assetId}`
-      if (!seen.has(key) && matchesPairQuery(display, base.symbol, q)) {
+      if (!seen.has(key) && matchesPairQuery(label, base.symbol, q)) {
         seen.add(key)
         results.push({ base, quote: usdt, display, nameHint: base.name })
       }
@@ -60,8 +65,9 @@ export function searchPairs(query: string, assets: Asset[]): PairResult[] {
       if (quote.isStablecoin && !base.isStablecoin) continue
 
       const display = base.symbol + quote.symbol
+      const label = displayLabel(display)
       const key = `${base.assetId}-${quote.assetId}`
-      if (!seen.has(key) && matchesPairQuery(display, base.symbol, q)) {
+      if (!seen.has(key) && matchesPairQuery(label, base.symbol, q)) {
         seen.add(key)
         results.push({ base, quote, display, nameHint: pairNameHint(base, quote) })
       }
@@ -69,13 +75,19 @@ export function searchPairs(query: string, assets: Asset[]): PairResult[] {
   }
 
   return results.sort((a, b) => {
-    const aExact = a.display.toUpperCase().startsWith(q) ? 0 : 1
-    const bExact = b.display.toUpperCase().startsWith(q) ? 0 : 1
+    const aLabel = displayLabel(a.display).toUpperCase()
+    const bLabel = displayLabel(b.display).toUpperCase()
+    // Exact match on displayed label first
+    const aExact = aLabel === q ? 0 : 1
+    const bExact = bLabel === q ? 0 : 1
     if (aExact !== bExact) return aExact - bExact
-    const aUsd = a.display.endsWith('USD') ? 0 : 1
-    const bUsd = b.display.endsWith('USD') ? 0 : 1
-    if (aUsd !== bUsd) return aUsd - bUsd
-    return a.display.localeCompare(b.display)
+    // Label starts with query
+    const aStarts = aLabel.startsWith(q) ? 0 : 1
+    const bStarts = bLabel.startsWith(q) ? 0 : 1
+    if (aStarts !== bStarts) return aStarts - bStarts
+    // Shorter label = closer match
+    if (aLabel.length !== bLabel.length) return aLabel.length - bLabel.length
+    return aLabel.localeCompare(bLabel)
   })
 }
 

@@ -18,7 +18,6 @@ export default function App() {
   const [quoteId, setQuoteId] = useState(DEFAULT_QUOTE_ID)
   const [interval, setInterval] = useState<OHLCVInterval>('1h')
   const [modalOpen, setModalOpen] = useState(false)
-  const [initialChar, setInitialChar] = useState('')
   const [chartData, setChartData] = useState<import('./types').ApiCandle[]>([])
 
   const assetsQuery = useAssets()
@@ -103,13 +102,21 @@ export default function App() {
     return () => window.removeEventListener('popstate', handler)
   }, [assets])
 
-  // Global keydown: typing opens pair modal
+  // Global keydown: buffer keystrokes and open pair modal
+  const keyBuffer = useRef('')
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (modalOpen) return
       if (e.ctrlKey || e.metaKey || e.altKey) return
       if (e.key.length === 1 && /[a-zA-Z0-9]/.test(e.key)) {
-        setInitialChar(e.key)
+        // If modal is open but input not focused, buffer the key
+        if (modalOpen) {
+          const active = document.activeElement
+          if (active?.tagName !== 'INPUT') {
+            keyBuffer.current += e.key
+          }
+          return
+        }
+        keyBuffer.current = e.key
         setModalOpen(true)
       }
     }
@@ -205,7 +212,7 @@ export default function App() {
         quoteAsset={quoteAsset}
         interval={interval}
         onIntervalChange={setInterval}
-        onPairClick={() => { setInitialChar(''); setModalOpen(true) }}
+        onPairClick={() => { keyBuffer.current = ''; setModalOpen(true) }}
         onExport={() => {
           if (chartData.length === 0) return
           const range = getVisibleRangeRef.current?.()
@@ -235,7 +242,7 @@ export default function App() {
         assets={assets}
         currentBaseId={baseId}
         currentQuoteId={quoteId}
-        initialChar={initialChar}
+        keyBuffer={keyBuffer}
         marketStats={marketStatsQuery.data}
       />
       {toast && (

@@ -136,8 +136,9 @@ export default function Chart({ baseId, quoteId, interval, base, quote, baseName
       rightPriceScale: { borderVisible: false },
       timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, rightOffset: window.innerWidth < 768 ? 70 : 30 },
       crosshair: {
-        vertLine: { color: '#576B80', width: 1, style: 1 },
-        horzLine: { color: '#576B80', width: 1, style: 1 },
+        mode: 0, // Normal — prevents horzLine from inheriting series color in Magnet mode
+        vertLine: { color: '#576B80', width: 2, style: 1, labelBackgroundColor: '#576B80' },
+        horzLine: { color: '#576B80', width: 2, style: 1, labelBackgroundColor: '#576B80' },
       },
       width: container.clientWidth,
       height: container.clientHeight,
@@ -152,8 +153,10 @@ export default function Chart({ baseId, quoteId, interval, base, quote, baseName
       lastValueVisible: false,
       priceLineVisible: true,
       priceLineColor: '#576B80',
+      priceLineWidth: 2,
       priceLineStyle: 2,
-    })
+      crosshairMarkerVisible: false,
+    } as any)
 
     const volumeSeries = chart.addSeries(HistogramSeries, {
       color: 'rgba(87, 107, 128, 0.5)',

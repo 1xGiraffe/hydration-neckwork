@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, type MutableRefObject } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import type { Asset, AssetMarketStats } from '../types'
-import { getDefaultPairs, searchPairs } from '../utils/pairs'
+import { getDefaultPairs, searchPairs, displayLabel } from '../utils/pairs'
 import type { PairResult } from '../utils/pairs'
 import { useWindowWidth } from '../hooks/useWindowWidth'
 import MarketTable from './MarketTable'
@@ -14,7 +14,7 @@ interface MarketDataModalProps {
   assets: Asset[]
   currentBaseId: number
   currentQuoteId: number
-  initialChar?: string
+  keyBuffer: MutableRefObject<string>
   marketStats: AssetMarketStats[] | undefined
 }
 
@@ -100,7 +100,7 @@ function buildRows(
       sparkline,
       isCurrent: result.base.assetId === currentBaseId && result.quote.assetId === currentQuoteId,
       pairResult: result,
-      display: isUsdPair ? result.base.symbol : result.display,
+      display: displayLabel(result.display),
       nameHint: result.nameHint,
     }
   })
@@ -113,7 +113,7 @@ export default function MarketDataModal({
   assets,
   currentBaseId,
   currentQuoteId,
-  initialChar,
+  keyBuffer,
   marketStats,
 }: MarketDataModalProps) {
   const isMobile = useWindowWidth() <= 768
@@ -122,14 +122,19 @@ export default function MarketDataModal({
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
-  // Seed query and focus on open
+  // Seed query and focus on open — drain key buffer to capture fast typing
   useEffect(() => {
     if (isOpen) {
-      setQuery(initialChar ?? '')
       setActiveIndex(-1)
-      requestAnimationFrame(() => inputRef.current?.focus())
+      const drain = () => {
+        const buffered = keyBuffer.current
+        keyBuffer.current = ''
+        setQuery(buffered)
+        inputRef.current?.focus()
+      }
+      requestAnimationFrame(drain)
     }
-  }, [isOpen, initialChar])
+  }, [isOpen, keyBuffer])
 
   // Memoize results to prevent unnecessary re-renders of table rows
   const results = useMemo(
@@ -253,9 +258,8 @@ export default function MarketDataModal({
           {/* Table area or empty state */}
           {rows.length === 0 && query.trim() !== '' ? (
             <div style={{ padding: '24px 16px', color: '#576B80', fontSize: '13px' }}>
-              <div>No assets found</div>
-              <div style={{ marginTop: '8px' }}>
-                No assets match &ldquo;{query}&rdquo;. Try a different symbol, e.g. DOT, HDX, ETH
+              <div>
+                No assets match &ldquo;{query}&rdquo;. Try a different symbol, e.g. HDX, SOL, ETH
               </div>
             </div>
           ) : (
