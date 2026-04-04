@@ -208,9 +208,14 @@ export default function Chart({ baseId, quoteId, interval, base, quote, baseName
       })
       chart.panes()[1].setHeight(Math.floor(containerRef.current.clientHeight * 0.15))
     }
+    const resizeObserver = new ResizeObserver(handleResize)
+    resizeObserver.observe(container)
     window.addEventListener('resize', handleResize)
+    const settleTimer = setTimeout(handleResize, 300)
 
     return () => {
+      resizeObserver.disconnect()
+      clearTimeout(settleTimer)
       window.removeEventListener('resize', handleResize)
       chart.unsubscribeCrosshairMove(crosshairHandler)
       if (onVisibleRangeReady) onVisibleRangeReady(() => null)
@@ -281,6 +286,7 @@ export default function Chart({ baseId, quoteId, interval, base, quote, baseName
       if (data.length > 0) {
         oldestTimestampRef.current = data[0].intervalStart
       }
+      candleSeriesRef.current?.priceScale().applyOptions({ autoScale: true })
       applyData(data)
       if (isFirstLoadRef.current) {
         chartRef.current?.timeScale().fitContent()

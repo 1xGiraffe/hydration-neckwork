@@ -51,6 +51,14 @@ export default function App() {
     }
   }, [display, chartData])
 
+  // Track orientation to force chart remount (lightweight-charts pane layout breaks)
+  const [orientationKey, setOrientationKey] = useState(0)
+  useEffect(() => {
+    const handler = () => setOrientationKey(k => k + 1)
+    screen.orientation?.addEventListener('change', handler)
+    return () => screen.orientation?.removeEventListener('change', handler)
+  }, [])
+
   // Effect 1: Parse URL on mount (gated on assets loading)
   useEffect(() => {
     if (assets.length === 0) return
@@ -205,7 +213,7 @@ export default function App() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', width: '100vw', height: '100dvh' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', width: '100vw', height: '100svh' }}>
       <Topbar
         pairDisplay={display}
         baseAsset={baseAsset}
@@ -223,6 +231,7 @@ export default function App() {
       />
       <div ref={chartContainerRef} style={{ flex: 1, position: 'relative' }}>
         <Chart
+          key={`${baseId}-${quoteId}-${orientationKey}`}
           baseId={baseId}
           quoteId={quoteId}
           interval={interval}
