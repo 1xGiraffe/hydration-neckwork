@@ -25,6 +25,19 @@ export async function loadAssets(client: ClickHouseClient): Promise<void> {
         SELECT DISTINCT asset_id FROM price_data.ohlc_1h
         WHERE interval_start >= (SELECT max(interval_start) FROM price_data.ohlc_1h) - INTERVAL 30 DAY
       )
+      AND asset_id NOT IN (
+        SELECT asset_id FROM (
+          SELECT asset_id,
+            argMax(hops, block_height) AS latest_hops,
+            sum(native_volume_buy + native_volume_sell) AS total_volume
+          FROM price_data.prices
+          WHERE block_height >= (
+            SELECT min(block_height) FROM price_data.blocks
+            WHERE block_timestamp >= now() - INTERVAL 30 DAY
+          )
+          GROUP BY asset_id
+        ) WHERE latest_hops > 0 AND total_volume = 0
+      )
     `,
     format: 'JSONEachRow',
   })
