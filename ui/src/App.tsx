@@ -124,7 +124,7 @@ export default function App() {
           }
           return
         }
-        keyBuffer.current = e.key
+        keyBuffer.current += e.key
         setModalOpen(true)
       }
     }

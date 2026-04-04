@@ -132,7 +132,10 @@ export default function MarketDataModal({
         setQuery(buffered)
         inputRef.current?.focus()
       }
-      requestAnimationFrame(drain)
+      setTimeout(drain, 50)
+    } else {
+      setQuery('')
+      keyBuffer.current = ''
     }
   }, [isOpen, keyBuffer])
 
