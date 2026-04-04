@@ -10,7 +10,7 @@ interface AssetRow {
 }
 
 // Stablecoin symbols — all variants of these symbols are treated as stablecoins.
-const STABLECOIN_SYMBOLS = new Set(['USDT', 'USDC', 'HOLLAR', 'DAI', 'HUSDT', 'HUSDC'])
+const STABLECOIN_SYMBOLS = new Set(['USDT', 'USDC', 'HOLLAR', 'DAI', 'HUSDT', 'HUSDC', 'EURC', 'HEURC'])
 
 const assetCache = new Map<number, Asset>()
 const symbolToId = new Map<string, number>()

@@ -15,4 +15,5 @@ export const COMPOSITE_ICONS: Record<number, [number, number]> = {
   1111: [222, 10],   // HUSDT = HOLLAR + USDT
   1112: [222, 1112], // HUSDS = HOLLAR + USDS (no icon yet, fallback)
   1113: [222, 1000625], // HUSDe = HOLLAR + sUSDe
+  4444: [222, 44],      // HEURC = HOLLAR + EURC
 }
