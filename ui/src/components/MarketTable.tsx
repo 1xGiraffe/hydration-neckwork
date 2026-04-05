@@ -97,7 +97,8 @@ export default function MarketTable({
       sortingFn: nullLastSortingFn,
       cell: (info) => {
         const price = info.getValue()
-        return price !== null ? formatPrice(price) : '\u2014'
+        const isUsd = info.row.original.pairResult.quote.isStablecoin
+        return price !== null ? formatPrice(price, isUsd) : '\u2014'
       },
     }),
     columnHelper.accessor('change1h', {

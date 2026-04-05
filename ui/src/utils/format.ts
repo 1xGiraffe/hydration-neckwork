@@ -1,21 +1,22 @@
-export function formatPrice(price: number): string {
+export function formatPrice(price: number, usd = true): string {
+  const prefix = usd ? '$' : ''
   if (price >= 10_000) {
-    return '$' + price.toLocaleString('en-US', { maximumFractionDigits: 0 })
+    return prefix + price.toLocaleString('en-US', { maximumFractionDigits: 0 })
   }
   if (price >= 1000) {
-    return '$' + price.toLocaleString('en-US', { maximumFractionDigits: 0 })
+    return prefix + price.toLocaleString('en-US', { maximumFractionDigits: 0 })
   }
   if (price >= 100) {
-    return '$' + price.toFixed(1)
+    return prefix + price.toFixed(1)
   }
   if (price >= 1) {
-    return '$' + price.toFixed(2)
+    return prefix + price.toFixed(2)
   }
   if (price >= 0.01) {
-    return '$' + price.toFixed(4)
+    return prefix + price.toFixed(4)
   }
   // < 0.01: up to 4 significant digits, trailing zeros stripped
-  return '$' + price.toPrecision(4).replace(/\.?0+$/, '')
+  return prefix + price.toPrecision(4).replace(/\.?0+$/, '')
 }
 
 export function formatChange(change: number | null): string {
