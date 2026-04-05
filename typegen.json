@@ -23,6 +23,9 @@
     },
     "EVM": {
       "storage": ["AccountStorages"]
+    },
+    "System": {
+      "storage": ["Account"]
     }
   }
 }

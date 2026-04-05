@@ -129,6 +129,27 @@ async function readOmnipoolState(block: Block, assetIds: number[]): Promise<Map<
       })
     }
 
+    // HDX (asset 0) is the native token — its balance lives in System.Account,
+    // not Tokens.Accounts. Read it separately to get the correct reserve.
+    const hdxState = omnipoolAssets.get(0)
+    if (hdxState) {
+      try {
+        let hdxFree: bigint | undefined
+        if (storage.system.account.v205.is(block)) {
+          const acct = await storage.system.account.v205.get(block, omnipoolAccount)
+          hdxFree = acct?.data.free
+        } else if (storage.system.account.v100.is(block)) {
+          const acct = await storage.system.account.v100.get(block, omnipoolAccount)
+          hdxFree = acct?.data.free
+        }
+        if (hdxFree && hdxFree > 0n) {
+          hdxState.reserve = hdxFree
+        }
+      } catch {
+        // Keep shares fallback if System.Account read fails
+      }
+    }
+
     // Fill ERC20 gaps from EVM storage
     if (erc20Gaps.length > 0) {
       const erc20AssetIds = erc20Gaps.map(g => g.assetId)
