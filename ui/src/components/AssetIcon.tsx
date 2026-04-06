@@ -59,25 +59,27 @@ function AssetIconInner({ assetId, symbol, size = 24, parachainId }: AssetIconPr
 
   return (
     <div style={{ position: 'relative', width: size, height: size, flexShrink: 0 }}>
-      {/* Letter fallback — always rendered as base layer */}
-      <div style={{
-        position: 'absolute',
-        top: 0,
-        left: 0,
-        width: size,
-        height: size,
-        borderRadius: '50%',
-        background: symbolToColor(symbol),
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        fontSize: size * 0.42,
-        fontWeight: 700,
-        color: '#fff',
-        userSelect: 'none',
-      }}>
-        {symbol.slice(0, 2)}
-      </div>
+      {/* Letter fallback — only shown while icon hasn't loaded */}
+      {!imgLoaded && !composite && (
+        <div style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: size,
+          height: size,
+          borderRadius: '50%',
+          background: symbolToColor(symbol),
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: size * 0.42,
+          fontWeight: 700,
+          color: '#fff',
+          userSelect: 'none',
+        }}>
+          {symbol.slice(0, 2)}
+        </div>
+      )}
 
       {/* Composite icon (half + half) or regular icon */}
       {composite ? (
@@ -104,7 +106,6 @@ function AssetIconInner({ assetId, symbol, size = 24, parachainId }: AssetIconPr
             height: size,
             borderRadius: '50%',
             objectFit: 'cover',
-            opacity: imgLoaded ? 1 : 0,
           }}
         />
       )}
