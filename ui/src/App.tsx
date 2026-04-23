@@ -180,17 +180,24 @@ export default function App() {
       ctx.font = `${Math.round(16 * dpr)}px sans-serif`
       ctx.fillText(line2, w / 2, h / 2 + 14 * dpr)
 
-      const blob = await new Promise<Blob | null>(resolve => composite.toBlob(resolve, 'image/png'))
-      if (!blob) return
-
       const utcNow = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + 'Z'
       const filename = `hydration_preis_${baseSymbol}${displayQ}_${INTERVAL_LABELS[interval]}_${utcNow}.png`
+      const blobPromise = new Promise<Blob>((resolve, reject) => {
+        composite.toBlob((blob) => {
+          if (blob) {
+            resolve(blob)
+            return
+          }
+          reject(new Error('Failed to render screenshot'))
+        }, 'image/png')
+      })
 
       // Try clipboard copy, fall back to download
       let copied = false
       if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
         try {
-          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+          // Safari requires clipboard.write() to be called directly from the user gesture.
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blobPromise })])
           copied = true
         } catch {}
       }
@@ -198,6 +205,8 @@ export default function App() {
       if (copied) {
         setToast('Screenshot copied')
       } else {
+        const blob = await blobPromise.catch(() => null)
+        if (!blob) return
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
