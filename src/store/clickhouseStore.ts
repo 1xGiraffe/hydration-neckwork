@@ -22,13 +22,15 @@ export class ClickHouseStore {
   private readonly blocksBatch: BatchAccumulator<BlockRow>
   private readonly assetsBatch: BatchAccumulator<AssetRow>
   private readonly runtimeUpgradesBatch: BatchAccumulator<RuntimeUpgradeRow>
+  private replayNamespace: string
 
-  constructor(client: ClickHouseClient, flushThreshold: number = 10_000) {
+  constructor(client: ClickHouseClient, flushThreshold: number = 10_000, replayNamespace: string = 'bootstrap') {
     this.client = client
     this.pricesBatch = new BatchAccumulator<PriceRow>(flushThreshold)
     this.blocksBatch = new BatchAccumulator<BlockRow>(flushThreshold)
     this.assetsBatch = new BatchAccumulator<AssetRow>(flushThreshold)
     this.runtimeUpgradesBatch = new BatchAccumulator<RuntimeUpgradeRow>(flushThreshold)
+    this.replayNamespace = replayNamespace
   }
 
   addPrices(rows: PriceRow[]): void {
@@ -52,7 +54,7 @@ export class ClickHouseStore {
     if (rows.length === 0) return
 
     const { min: minBlock, max: maxBlock } = minMax(rows)
-    const token = `prices-${minBlock}-${maxBlock}-${rows.length}`
+    const token = `prices-${this.replayNamespace}-${minBlock}-${maxBlock}-${rows.length}`
 
     await this.client.insert({
       table: 'price_data.prices',
@@ -69,7 +71,7 @@ export class ClickHouseStore {
     if (rows.length === 0) return
 
     const { min: minBlock, max: maxBlock } = minMax(rows)
-    const token = `blocks-${minBlock}-${maxBlock}`
+    const token = `blocks-${this.replayNamespace}-${minBlock}-${maxBlock}`
 
     await this.client.insert({
       table: 'price_data.blocks',
@@ -88,7 +90,7 @@ export class ClickHouseStore {
     const assetIds = rows.map(r => r.asset_id).sort((a, b) => a - b)
     const minAssetId = assetIds[0]
     const maxAssetId = assetIds[assetIds.length - 1]
-    const token = `assets-${minAssetId}-${maxAssetId}-${rows.length}`
+    const token = `assets-${this.replayNamespace}-${minAssetId}-${maxAssetId}-${rows.length}`
 
     await this.client.insert({
       table: 'price_data.assets',
@@ -105,7 +107,7 @@ export class ClickHouseStore {
     if (rows.length === 0) return
 
     const { min: minBlock, max: maxBlock } = minMax(rows)
-    const token = `runtime-upgrades-${minBlock}-${maxBlock}`
+    const token = `runtime-upgrades-${this.replayNamespace}-${minBlock}-${maxBlock}`
 
     await this.client.insert({
       table: 'price_data.runtime_upgrades',
@@ -127,10 +129,14 @@ export class ClickHouseStore {
   }
 
   async saveCheckpoint(blockHeight: number): Promise<void> {
-    await saveCheckpoint(this.client, blockHeight)
+    this.replayNamespace = await saveCheckpoint(this.client, blockHeight)
   }
 
-  async getLastProcessedBlock(): Promise<number> {
+  setReplayNamespace(replayNamespace: string): void {
+    this.replayNamespace = replayNamespace
+  }
+
+  async getLastProcessedBlock(): Promise<import('./checkpoint.js').IndexerCheckpointState> {
     return await getLastProcessedBlock(this.client)
   }
 }
