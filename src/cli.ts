@@ -1,11 +1,14 @@
 import { run } from './indexer.js'
 import { createClickHouseClient } from './db/client.js'
 import { saveCheckpoint } from './store/checkpoint.js'
+import { clearOHLCForTimeRange, rebuildOHLCForTimeRange, restoreRollbackOHLCPrefix } from './ohlc/repair.js'
 
 function parseArgs(): {
   fromBlock?: number
   toBlock?: number
   rollbackToBlock?: number
+  repairOhlcFrom?: string
+  repairOhlcTo?: string
   detectGaps: boolean
   help: boolean
 } {
@@ -13,6 +16,8 @@ function parseArgs(): {
     fromBlock: undefined as number | undefined,
     toBlock: undefined as number | undefined,
     rollbackToBlock: undefined as number | undefined,
+    repairOhlcFrom: undefined as string | undefined,
+    repairOhlcTo: undefined as string | undefined,
     detectGaps: false,
     help: false,
   }
@@ -37,10 +42,30 @@ function parseArgs(): {
       if (!isNaN(value) && value >= 0) {
         args.rollbackToBlock = value
       }
+    } else if (arg.startsWith('--repair-ohlc-from=')) {
+      args.repairOhlcFrom = arg.split('=')[1]
+    } else if (arg.startsWith('--repair-ohlc-to=')) {
+      args.repairOhlcTo = arg.split('=')[1]
     }
   }
 
   return args
+}
+
+function toClickHouseDateTime(date: Date): string {
+  return date.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
+}
+
+function parseTimestampArg(value: string): string {
+  const normalized = value.includes('T') ? value : value.replace(' ', 'T')
+  const withTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(normalized) ? normalized : `${normalized}Z`
+  const parsed = new Date(withTimezone)
+
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`Invalid timestamp: ${value}`)
+  }
+
+  return toClickHouseDateTime(parsed)
 }
 
 function printHelp(): void {
@@ -54,6 +79,8 @@ Options:
   --from-block=N           Start indexing from block N (overrides checkpoint)
   --to-block=N             Stop indexing at block N (useful for testing)
   --rollback-to-block=N    Delete all data at or above block N (prices, blocks, OHLC), reset checkpoint, and exit
+  --repair-ohlc-from=TS    Rebuild OHLC tables for intervals overlapping TS..TO from prices
+  --repair-ohlc-to=TS      End timestamp for OHLC repair (ISO 8601 or 'YYYY-MM-DD HH:MM:SS', UTC)
   --detect-gaps            Scan ClickHouse for missing block ranges and exit
   --help, -h               Print this help message
 
@@ -70,6 +97,9 @@ Examples:
   # Rollback data to block 999999 (deletes block 1000000 and above)
   npm start -- --rollback-to-block=1000000
 
+  # Rebuild corrupted OHLC intervals from prices
+  npm start -- --repair-ohlc-from=2024-01-29T00:00:00Z --repair-ohlc-to=2024-02-01T00:00:00Z
+
   # Detect gaps in indexed data
   npm run detect-gaps
 
@@ -83,7 +113,7 @@ Environment Variables:
 /**
  * Detect gaps in indexed block data
  *
- * Queries ClickHouse for all distinct block heights in the prices table,
+ * Queries ClickHouse for all distinct block heights in the blocks table,
  * then finds ranges where consecutive blocks differ by more than 1.
  */
 async function detectGaps(): Promise<void> {
@@ -96,7 +126,7 @@ async function detectGaps(): Promise<void> {
     const result = await client.query({
       query: `
         SELECT DISTINCT block_height
-        FROM price_data.prices
+        FROM price_data.blocks
         ORDER BY block_height ASC
       `,
       format: 'JSONEachRow',
@@ -105,7 +135,7 @@ async function detectGaps(): Promise<void> {
     const rows = await result.json<{ block_height: number }>()
 
     if (rows.length === 0) {
-      console.log('[Gap Detection] No data found in prices table')
+      console.log('[Gap Detection] No data found in blocks table')
       return
     }
 
@@ -149,7 +179,8 @@ async function detectGaps(): Promise<void> {
  * Deletes all rows at or above the target block from prices, blocks, runtime_upgrades, and OHLC tables.
  * Resets checkpoint to targetBlock - 1 to resume indexing from targetBlock.
  * Uses mutations_sync: 1 to ensure synchronous deletion before checkpoint reset.
- * OHLC data rebuilds automatically via materialized views when indexer replays blocks.
+ * Restores the prefix of the first affected candle from preserved prices so replay can
+ * rebuild the rest of each interval without losing earlier trades.
  */
 async function rollbackToBlock(targetBlock: number): Promise<void> {
   console.log(`[Rollback] Rolling back to block ${targetBlock}...`)
@@ -199,23 +230,8 @@ async function rollbackToBlock(targetBlock: number): Promise<void> {
     if (timeRange.length > 0 && timeRange[0].start_time) {
       const { start_time, end_time } = timeRange[0]
       console.log(`[Rollback] Cleaning OHLC tables for time range ${start_time} to ${end_time}...`)
-
-      const ohlcTables = [
-        { table: 'ohlc_5min', interval: '5 MINUTE' },
-        { table: 'ohlc_15min', interval: '15 MINUTE' },
-        { table: 'ohlc_1h', interval: '1 HOUR' },
-        { table: 'ohlc_4h', interval: '4 HOUR' },
-        { table: 'ohlc_1d', interval: '1 DAY' },
-      ]
-
-      for (const { table, interval } of ohlcTables) {
-        await client.command({
-          query: `DELETE FROM price_data.${table}
-                  WHERE interval_start >= toStartOfInterval(toDateTime('${start_time}'), INTERVAL ${interval})
-                    AND interval_start <= toStartOfInterval(toDateTime('${end_time}'), INTERVAL ${interval})`,
-          clickhouse_settings: { mutations_sync: '1' },
-        })
-      }
+      await clearOHLCForTimeRange(client, start_time, end_time)
+      await restoreRollbackOHLCPrefix(client, start_time)
       console.log('[Rollback] OHLC tables cleaned')
     }
 
@@ -227,6 +243,22 @@ async function rollbackToBlock(targetBlock: number): Promise<void> {
     console.log(`[Rollback] Rollback complete. Checkpoint reset to ${newCheckpoint}`)
   } catch (error) {
     console.error('[Rollback] Error during rollback:', error)
+    throw error
+  } finally {
+    await client.close()
+  }
+}
+
+async function repairOHLC(fromTime: string, toTime: string): Promise<void> {
+  console.log(`[OHLC Repair] Rebuilding OHLC tables for ${fromTime} to ${toTime}...`)
+
+  const client = createClickHouseClient()
+
+  try {
+    await rebuildOHLCForTimeRange(client, fromTime, toTime)
+    console.log('[OHLC Repair] OHLC tables rebuilt successfully')
+  } catch (error) {
+    console.error('[OHLC Repair] Error rebuilding OHLC tables:', error)
     throw error
   } finally {
     await client.close()
@@ -265,6 +297,15 @@ async function main(): Promise<void> {
 
   if (args.detectGaps) {
     await detectGaps()
+    process.exit(0)
+  }
+
+  if ((args.repairOhlcFrom && !args.repairOhlcTo) || (!args.repairOhlcFrom && args.repairOhlcTo)) {
+    throw new Error('Both --repair-ohlc-from and --repair-ohlc-to are required')
+  }
+
+  if (args.repairOhlcFrom && args.repairOhlcTo) {
+    await repairOHLC(parseTimestampArg(args.repairOhlcFrom), parseTimestampArg(args.repairOhlcTo))
     process.exit(0)
   }
 
