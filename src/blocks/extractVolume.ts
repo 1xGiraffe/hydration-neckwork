@@ -17,6 +17,7 @@ import { isSwapEvent } from '../registry/swapEvents.js';
 import * as omnipool from '../types/omnipool/events.js';
 import * as xyk from '../types/xyk/events.js';
 import * as stableswap from '../types/stableswap/events.js';
+import * as broadcast from '../types/broadcast/events.js';
 
 /**
  * Unified swap event structure across all pool types
@@ -26,6 +27,16 @@ export interface DecodedSwap {
   assetOut: number;
   amountIn: bigint;
   amountOut: bigint;
+}
+
+interface DecodedTradeAssetAmount {
+  assetId: number;
+  amount: bigint;
+}
+
+interface DecodedTrade {
+  inputs: DecodedTradeAssetAmount[];
+  outputs: DecodedTradeAssetAmount[];
 }
 
 /**
@@ -110,32 +121,50 @@ export function swapToVolumeRows(
   prices: PriceMap,
   decimals: AssetDecimals
 ): PriceRow[] {
-  // Calculate USD volumes
-  const usdVolumeSell = calculateUsdVolume(swap.amountIn, swap.assetIn, prices, decimals);
-  const usdVolumeBuy = calculateUsdVolume(swap.amountOut, swap.assetOut, prices, decimals);
-
-  return [
-    // assetIn: SELL volume
+  return tradeToVolumeRows(
     {
-      asset_id: swap.assetIn,
+      inputs: [{ assetId: swap.assetIn, amount: swap.amountIn }],
+      outputs: [{ assetId: swap.assetOut, amount: swap.amountOut }],
+    },
+    blockHeight,
+    prices,
+    decimals
+  );
+}
+
+function tradeToVolumeRows(
+  trade: DecodedTrade,
+  blockHeight: number,
+  prices: PriceMap,
+  decimals: AssetDecimals
+): PriceRow[] {
+  const rows: PriceRow[] = [];
+
+  for (const input of trade.inputs) {
+    rows.push({
+      asset_id: input.assetId,
       block_height: blockHeight,
       usd_price: '0', // Price comes from price rows, not volume rows
-      native_volume_sell: swap.amountIn.toString(),
-      usd_volume_sell: usdVolumeSell,
+      native_volume_sell: input.amount.toString(),
+      usd_volume_sell: calculateUsdVolume(input.amount, input.assetId, prices, decimals),
       native_volume_buy: '0',
       usd_volume_buy: '0.000000000000',
-    },
-    // assetOut: BUY volume
-    {
-      asset_id: swap.assetOut,
+    });
+  }
+
+  for (const output of trade.outputs) {
+    rows.push({
+      asset_id: output.assetId,
       block_height: blockHeight,
       usd_price: '0',
-      native_volume_buy: swap.amountOut.toString(),
-      usd_volume_buy: usdVolumeBuy,
+      native_volume_buy: output.amount.toString(),
+      usd_volume_buy: calculateUsdVolume(output.amount, output.assetId, prices, decimals),
       native_volume_sell: '0',
       usd_volume_sell: '0.000000000000',
-    },
-  ];
+    });
+  }
+
+  return rows;
 }
 
 /**
@@ -155,6 +184,17 @@ export function swapToVolumeRows(
  */
 export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
   const { name } = event;
+  const isLegacySwapName =
+    name === 'Omnipool.SellExecuted' ||
+    name === 'Omnipool.BuyExecuted' ||
+    name === 'XYK.SellExecuted' ||
+    name === 'XYK.BuyExecuted' ||
+    name === 'Stableswap.SellExecuted' ||
+    name === 'Stableswap.BuyExecuted';
+
+  if (!isLegacySwapName) {
+    return null;
+  }
 
   try {
     // Omnipool.SellExecuted
@@ -282,6 +322,93 @@ export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
   }
 }
 
+function decodeTradeEvent(event: EventLike): DecodedTrade | null {
+  const legacySwap = decodeSwapEvent(event);
+  if (legacySwap) {
+    return {
+      inputs: [{ assetId: legacySwap.assetIn, amount: legacySwap.amountIn }],
+      outputs: [{ assetId: legacySwap.assetOut, amount: legacySwap.amountOut }],
+    };
+  }
+
+  const { name } = event;
+
+  try {
+    if (name === 'Broadcast.Swapped' && broadcast.swapped.v282.is(event)) {
+      const decoded = broadcast.swapped.v282.decode(event);
+      return decorateLegacyBroadcastTrade({
+        eventName: name,
+        fillerType: decoded.fillerType.__kind,
+        operation: decoded.operation.__kind,
+        inputs: decoded.inputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
+        outputs: decoded.outputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
+      });
+    }
+
+    if (name === 'Broadcast.Swapped2' && broadcast.swapped2.v305.is(event)) {
+      const decoded = broadcast.swapped2.v305.decode(event);
+      return {
+        inputs: decoded.inputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
+        outputs: decoded.outputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
+      };
+    }
+
+    if (name === 'Broadcast.Swapped3') {
+      if (broadcast.swapped3.v323.is(event)) {
+        const decoded = broadcast.swapped3.v323.decode(event);
+        return {
+          inputs: decoded.inputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
+          outputs: decoded.outputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
+        };
+      }
+
+      if (broadcast.swapped3.v313.is(event)) {
+        const decoded = broadcast.swapped3.v313.decode(event);
+        return {
+          inputs: decoded.inputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
+          outputs: decoded.outputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
+        };
+      }
+    }
+
+    console.warn(`[extractVolume] Unable to decode swap event: ${name} (no matching version)`);
+    return null;
+  } catch (error) {
+    console.warn(`[extractVolume] Error decoding swap event ${name}:`, error);
+    return null;
+  }
+}
+
+function decorateLegacyBroadcastTrade({
+  eventName,
+  fillerType,
+  operation,
+  inputs,
+  outputs,
+}: {
+  eventName: string;
+  fillerType: string;
+  operation: string;
+  inputs: DecodedTradeAssetAmount[];
+  outputs: DecodedTradeAssetAmount[];
+}): DecodedTrade {
+  // Broadcast.Swapped had inverted exact-out XYK/LBP amounts. Swapped2+ fixed it.
+  if (
+    eventName === 'Broadcast.Swapped' &&
+    operation === 'ExactOut' &&
+    (fillerType === 'XYK' || fillerType === 'LBP') &&
+    inputs.length === 1 &&
+    outputs.length === 1
+  ) {
+    return {
+      inputs: [{ assetId: inputs[0].assetId, amount: outputs[0].amount }],
+      outputs: [{ assetId: outputs[0].assetId, amount: inputs[0].amount }],
+    };
+  }
+
+  return { inputs, outputs };
+}
+
 /**
  * Extract volume rows from all swap events in a block
  *
@@ -297,6 +424,7 @@ export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
 export function extractVolumeFromSwaps(
   events: Array<EventLike>,
   blockHeight: number,
+  specVersion: number,
   prices: PriceMap,
   decimals: AssetDecimals
 ): PriceRow[] {
@@ -304,19 +432,19 @@ export function extractVolumeFromSwaps(
 
   for (const event of events) {
     // Filter to swap events only
-    if (!isSwapEvent(event.name)) {
+    if (!isSwapEvent(event.name, specVersion)) {
       continue;
     }
 
     // Decode swap event
-    const swap = decodeSwapEvent(event);
-    if (!swap) {
+    const trade = decodeTradeEvent(event);
+    if (!trade) {
       console.warn(`[extractVolume] Skipping event ${event.name} at block ${blockHeight} (decode failed)`);
       continue;
     }
 
-    // Generate volume rows
-    const rows = swapToVolumeRows(swap, blockHeight, prices, decimals);
+    // Generate volume rows from all input and output asset legs
+    const rows = tradeToVolumeRows(trade, blockHeight, prices, decimals);
     volumeRows.push(...rows);
   }
 

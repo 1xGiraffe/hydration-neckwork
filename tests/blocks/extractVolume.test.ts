@@ -1,12 +1,29 @@
 import { describe, it, expect } from 'vitest';
 import {
   calculateUsdVolume,
+  extractVolumeFromSwaps,
   swapToVolumeRows,
   mergePriceAndVolumeRows,
   type DecodedSwap
 } from '../../src/blocks/extractVolume.ts';
 import type { PriceMap, AssetDecimals } from '../../src/price/types.ts';
 import type { PriceRow } from '../../src/db/schema.ts';
+import { isSwapEvent } from '../../src/registry/swapEvents.ts';
+
+function createMockEvent(name: string, args: unknown) {
+  const runtime = {
+    events: {
+      checkType: (eventName: string) => eventName === name,
+    },
+    decodeJsonEventRecordArguments: (event: { args: unknown }) => event.args,
+  };
+
+  return {
+    name,
+    args,
+    block: { _runtime: runtime },
+  };
+}
 
 describe('calculateUsdVolume', () => {
   it('calculates USD volume from native amount with price', () => {
@@ -369,6 +386,113 @@ describe('mergePriceAndVolumeRows', () => {
       usd_volume_sell: '4.000000000000', // 1.5 + 2.5
       native_volume_buy: '125', // 50 + 75
       usd_volume_buy: '1.000000000000', // 0.25 + 0.75
+    });
+  });
+});
+
+describe('isSwapEvent', () => {
+  it('uses legacy swap events before unified runtime support', () => {
+    expect(isSwapEvent('Omnipool.SellExecuted', 201)).toBe(true);
+    expect(isSwapEvent('Broadcast.Swapped3', 201)).toBe(false);
+  });
+
+  it('switches to unified broadcast events from spec 282 onward', () => {
+    expect(isSwapEvent('Omnipool.SellExecuted', 282)).toBe(false);
+    expect(isSwapEvent('Broadcast.Swapped3', 323)).toBe(true);
+  });
+});
+
+describe('extractVolumeFromSwaps', () => {
+  const prices: PriceMap = new Map([
+    [5, '2.000000000000'],
+    [10, '1.500000000000'],
+  ]);
+  const decimals: AssetDecimals = new Map([
+    [5, 12],
+    [10, 12],
+  ]);
+
+  it('extracts legacy swap events before the unified swap cutoff', () => {
+    const event = createMockEvent('Omnipool.SellExecuted', {
+      assetIn: 5,
+      assetOut: 10,
+      amountIn: 1000000000000n,
+      amountOut: 2000000000000n,
+    });
+
+    const rows = extractVolumeFromSwaps([event], 100, 201, prices, decimals);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0].asset_id).toBe(5);
+    expect(rows[0].native_volume_sell).toBe('1000000000000');
+    expect(rows[1].asset_id).toBe(10);
+    expect(rows[1].native_volume_buy).toBe('2000000000000');
+  });
+
+  it('ignores legacy swap events after the unified swap cutoff', () => {
+    const event = createMockEvent('Omnipool.SellExecuted', {
+      assetIn: 5,
+      assetOut: 10,
+      amountIn: 1000000000000n,
+      amountOut: 2000000000000n,
+    });
+
+    const rows = extractVolumeFromSwaps([event], 100, 282, prices, decimals);
+
+    expect(rows).toEqual([]);
+  });
+
+  it('extracts unified broadcast swap events after the cutoff', () => {
+    const event = createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Omnipool' },
+      operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 5, amount: 1000000000000n }],
+      outputs: [{ asset: 10, amount: 2000000000000n }],
+      fees: [],
+      swapper: 'alice',
+      filler: 'pool',
+      operationStack: [],
+    });
+
+    const rows = extractVolumeFromSwaps([event], 100, 323, prices, decimals);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      asset_id: 5,
+      native_volume_sell: '1000000000000',
+      usd_volume_sell: '2.000000000000',
+    });
+    expect(rows[1]).toMatchObject({
+      asset_id: 10,
+      native_volume_buy: '2000000000000',
+      usd_volume_buy: '3.000000000000',
+    });
+  });
+
+  it('applies the v282 Broadcast.Swapped exact-out XYK amount correction', () => {
+    const event = createMockEvent('Broadcast.Swapped', {
+      fillerType: { __kind: 'XYK', value: 123 },
+      operation: { __kind: 'ExactOut' },
+      inputs: [{ asset: 5, amount: 1000000000000n }],
+      outputs: [{ asset: 10, amount: 2000000000000n }],
+      fees: [],
+      swapper: 'alice',
+      filler: 'pool',
+      operationStack: [],
+    });
+
+    const rows = extractVolumeFromSwaps([event], 100, 282, prices, decimals);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      asset_id: 5,
+      native_volume_sell: '2000000000000',
+      usd_volume_sell: '4.000000000000',
+    });
+    expect(rows[1]).toMatchObject({
+      asset_id: 10,
+      native_volume_buy: '1000000000000',
+      usd_volume_buy: '1.500000000000',
     });
   });
 });

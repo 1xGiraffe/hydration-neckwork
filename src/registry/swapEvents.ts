@@ -16,6 +16,9 @@
 import * as omnipool from '../types/omnipool/events'
 import * as xyk from '../types/xyk/events'
 import * as stableswap from '../types/stableswap/events'
+import * as broadcast from '../types/broadcast/events'
+
+export const UNIFIED_SWAP_EVENTS_SPEC_VERSION = 282
 
 /**
  * Schema version with first-appearance block height
@@ -138,6 +141,25 @@ export const STABLESWAP_SWAP_EVENTS: SwapEventEntry[] = [
 ]
 
 /**
+ * Unified swap events emitted by the Broadcast pallet.
+ *
+ * These events supersede the legacy per-pallet *Executed events from spec v282
+ * onward. We keep their metadata separate because the curated first-block
+ * catalog above only tracks legacy pool-specific events today.
+ */
+export const UNIFIED_SWAP_EVENT_NAMES = [
+  'Broadcast.Swapped',
+  'Broadcast.Swapped2',
+  'Broadcast.Swapped3',
+] as const
+
+export const UNIFIED_SWAP_EVENT_CODECS = {
+  'Broadcast.Swapped': broadcast.swapped,
+  'Broadcast.Swapped2': broadcast.swapped2,
+  'Broadcast.Swapped3': broadcast.swapped3,
+} as const
+
+/**
  * Unified swap event catalog across all pool types
  *
  * Total: 6 swap events (2 per pool type × 3 pool types)
@@ -150,6 +172,9 @@ export const SWAP_EVENT_CATALOG: SwapEventEntry[] = [
   ...XYK_SWAP_EVENTS,
   ...STABLESWAP_SWAP_EVENTS,
 ]
+
+const LEGACY_SWAP_EVENT_NAMES = new Set(SWAP_EVENT_CATALOG.map(event => event.name))
+const UNIFIED_SWAP_EVENT_NAME_SET = new Set<string>(UNIFIED_SWAP_EVENT_NAMES)
 
 /**
  * Event classification map
@@ -179,6 +204,11 @@ export const EVENT_CLASSIFICATION: Record<string, EventCategory> = {
   'Stableswap.SellExecuted': EventCategory.SWAP,
   'Stableswap.BuyExecuted': EventCategory.SWAP,
 
+  // Unified swap events
+  'Broadcast.Swapped': EventCategory.SWAP,
+  'Broadcast.Swapped2': EventCategory.SWAP,
+  'Broadcast.Swapped3': EventCategory.SWAP,
+
   // Stableswap lifecycle and liquidity events
   'Stableswap.PoolCreated': EventCategory.LIFECYCLE,
   'Stableswap.LiquidityAdded': EventCategory.LIQUIDITY,
@@ -188,13 +218,26 @@ export const EVENT_CLASSIFICATION: Record<string, EventCategory> = {
  * Check if an event name represents a swap event
  *
  * @param eventName - Full qualified event name (e.g., 'Omnipool.SellExecuted')
- * @returns True if the event is classified as a swap event
+ * Runtime-aware behavior:
+ * - pre-v282: legacy Omnipool / XYK / Stableswap *Executed events are swaps
+ * - v282+: Broadcast.Swapped* events are swaps
+ *
+ * @param specVersion - Runtime spec version for the block being processed
+ * @returns True if the event is classified as a swap event for that runtime
  *
  * @example
- * isSwapEvent('Omnipool.SellExecuted') // true
- * isSwapEvent('XYK.PoolCreated') // false
- * isSwapEvent('Stableswap.LiquidityAdded') // false
+ * isSwapEvent('Omnipool.SellExecuted', 201) // true
+ * isSwapEvent('Omnipool.SellExecuted', 282) // false
+ * isSwapEvent('Broadcast.Swapped3', 323) // true
  */
-export function isSwapEvent(eventName: string): boolean {
+export function isSwapEvent(eventName: string, specVersion?: number): boolean {
+  if (specVersion != null && specVersion >= UNIFIED_SWAP_EVENTS_SPEC_VERSION) {
+    return UNIFIED_SWAP_EVENT_NAME_SET.has(eventName)
+  }
+
+  if (specVersion != null) {
+    return LEGACY_SWAP_EVENT_NAMES.has(eventName)
+  }
+
   return EVENT_CLASSIFICATION[eventName] === EventCategory.SWAP
 }
