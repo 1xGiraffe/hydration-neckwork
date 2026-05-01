@@ -490,7 +490,10 @@ export async function run(options: RunOptions = {}): Promise<void> {
         historicalSnapshotStream = null
       }
     }
-    const shouldLoadHistoricalSnapshots = !isLiveMode && !ctx.isHead && ctx.blocks.length > 0
+    // Use stored raw snapshots whenever they exist, even if this batch reaches head.
+    // Falling back to RPC should be a per-block missing-snapshot case, not a whole-batch
+    // decision based on ctx.isHead.
+    const shouldLoadHistoricalSnapshots = !isLiveMode && ctx.blocks.length > 0
     if (shouldLoadHistoricalSnapshots) {
       try {
         historicalSnapshotStream = snapshotReader.streamRange(firstBatchBlock, lastBatchBlock)
