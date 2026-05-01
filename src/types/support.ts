@@ -3,8 +3,8 @@ import * as sts from '@subsquid/substrate-runtime/lib/sts'
 import assert from 'assert'
 
 
-// Option and Result defined locally to avoid ESM import issue with
-// '@subsquid/substrate-runtime/lib/sts' (does not provide named exports in ESM mode)
+// Option and Result defined locally to avoid ESM import issues with
+// '@subsquid/substrate-runtime/lib/sts' at runtime.
 export type Option<T> = T | undefined
 export type Result<T, E> = { __kind: 'Ok'; value: T } | { __kind: 'Err'; value: E }
 

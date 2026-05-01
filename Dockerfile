@@ -11,5 +11,6 @@ RUN npm ci --omit=dev
 # Copy source code
 COPY src/ ./src/
 
-# Run the indexer using tsx (TypeScript executor)
-ENTRYPOINT ["npx", "tsx", "src/cli.ts"]
+# Default to the price indexer CLI, but allow compose to override the script path.
+ENTRYPOINT ["npx", "tsx"]
+CMD ["src/cli.ts"]

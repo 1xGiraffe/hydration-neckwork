@@ -6,7 +6,7 @@
   "main": "index.js",
   "scripts": {
     "start": "tsx src/cli.ts",
-    "start:backfill": "tsx src/cli.ts",
+    "start:raw": "tsx src/raw/cli.ts",
     "detect-gaps": "tsx src/cli.ts --detect-gaps",
     "test": "vitest run"
   },
@@ -23,6 +23,7 @@
   "homepage": "https://github.com/1xGiraffe/hydration-preis#readme",
   "dependencies": {
     "@clickhouse/client": "^1.16.0",
+    "@galacticcouncil/math-stableswap": "^2.5.0",
     "@polkadot/util": "^14.0.1",
     "@polkadot/util-crypto": "^14.0.1",
     "@subsquid/substrate-processor": "^8.6.1",

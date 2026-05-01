@@ -14,6 +14,9 @@
       "storage": ["Pools", "AssetTradability", "PoolPegs"],
       "events": ["PoolCreated", "LiquidityAdded", "SellExecuted", "BuyExecuted"]
     },
+    "Broadcast": {
+      "events": ["Swapped", "Swapped2", "Swapped3"]
+    },
     "AssetRegistry": {
       "storage": ["Assets", "AssetMetadataMap", "AssetLocations"]
     },

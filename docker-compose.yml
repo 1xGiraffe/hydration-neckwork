@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   clickhouse:
     build:
@@ -34,7 +32,27 @@ services:
       - RPC_URL=${RPC_URL:-wss://hydration.dotters.network}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
-      - SQUID_PROCESSOR_EXIT_DISABLED=true
+      - RPC_RATE_LIMIT=${INDEXER_RPC_RATE_LIMIT:-100}
+      - BATCH_SIZE=${INDEXER_BATCH_SIZE:-10000}
+    networks:
+      - preis
+
+  raw-indexer:
+    build: .
+    container_name: preis-raw-indexer
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - RPC_URL=${RPC_URL:-wss://hydration.dotters.network}
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - RPC_RATE_LIMIT=${RAW_RPC_RATE_LIMIT:-200}
+      - BATCH_SIZE=${RAW_BATCH_SIZE:-10000}
+      - RAW_ASSET_SNAPSHOT_INTERVAL=${RAW_ASSET_SNAPSHOT_INTERVAL:-1000}
+      - RAW_PIPELINE_ID=${RAW_PIPELINE_ID:-raw-main}
+    command: ["src/raw/cli.ts"]
     networks:
       - preis
 
