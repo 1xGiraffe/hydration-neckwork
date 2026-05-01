@@ -1,4 +1,5 @@
 import { processor } from './processor.js'
+import { calculate_amplification } from '@galacticcouncil/math-stableswap'
 import { Database } from './db/database.js'
 import { AssetRegistryTracker } from './registry/tracker.js'
 import { PoolCompositionCache } from './pool/compositionCache.js'
@@ -13,6 +14,19 @@ import * as storage from './types/storage.ts'
 import { isSwapEvent } from './registry/swapEvents.js'
 import { extractVolumeFromSwaps, mergePriceAndVolumeRows } from './blocks/extractVolume.js'
 import { readErc20Balances, isKnownErc20, updateErc20Registry } from './evm/balances.js'
+import {
+  ClickHouseSnapshotReader,
+  diffAssetRows,
+  type HistoricalSnapshotEntry,
+  type HistoricalSnapshotState,
+} from './history/clickhouseSnapshotReader.js'
+import {
+  loadNativeAssetInfo,
+  nativeAssetInfoToMetadata,
+  nativeAssetInfoToRow,
+} from './nativeAsset.js'
+
+const BACKFILL_ASSET_SNAPSHOT_INTERVAL = 10_000
 
 // twox128 storage prefixes for pool-related pallets (hex without 0x prefix, 32 chars each)
 // System.set_storage keys starting with these prefixes indicate pool state mutations
@@ -23,6 +37,16 @@ const POOL_STORAGE_PREFIXES = [
 export interface RunOptions {
   fromBlock?: number
   toBlock?: number
+}
+
+function getHistoricalSnapshotEntry(
+  result: IteratorResult<HistoricalSnapshotEntry, void> | null,
+): HistoricalSnapshotEntry | null {
+  if (result == null || result.done === true) {
+    return null
+  }
+
+  return result.value
 }
 
 // Derive and cache the Omnipool sovereign account (constant across all blocks)
@@ -264,28 +288,48 @@ async function readStableswapState(
 
     const balances = await storage.tokens.accounts.v108.getMany(block, keys)
 
+    // Batch-read TotalIssuance for each pool's LP token (LP assetId == poolId)
+    if (storage.tokens.totalIssuance.v108.is(block)) {
+      const lpAssetIds = pools.map(p => p.poolId)
+      const issuances = await storage.tokens.totalIssuance.v108.getMany(block, lpAssetIds)
+      for (let i = 0; i < lpAssetIds.length; i++) {
+        const val = issuances[i]
+        if (val !== undefined && val > 0n) {
+          totalIssuances.set(lpAssetIds[i], val)
+        }
+      }
+    }
+
     // Map results back to per-pool reserves using offsets
     for (let i = 0; i < pools.length; i++) {
       const poolEntry = pools[i]
 
-      // Calculate current amplification parameter
-      // Amplification can change over time (ramping)
+      // Calculate current amplification parameter using the official stableswap math package.
+      // This keeps ramp periods aligned with the protocol implementation.
       const currentBlock = block.height
       let amplification: bigint
+      try {
+        amplification = BigInt(calculate_amplification(
+          poolEntry.initialAmplification.toString(),
+          poolEntry.finalAmplification.toString(),
+          poolEntry.initialBlock.toString(),
+          poolEntry.finalBlock.toString(),
+          currentBlock.toString(),
+        ))
+      } catch {
+        if (currentBlock >= poolEntry.finalBlock) {
+          amplification = BigInt(poolEntry.finalAmplification)
+        } else if (currentBlock <= poolEntry.initialBlock) {
+          amplification = BigInt(poolEntry.initialAmplification)
+        } else {
+          const totalBlocks = poolEntry.finalBlock - poolEntry.initialBlock
+          const elapsedBlocks = currentBlock - poolEntry.initialBlock
+          const initialAmp = BigInt(poolEntry.initialAmplification)
+          const finalAmp = BigInt(poolEntry.finalAmplification)
 
-      if (currentBlock >= poolEntry.finalBlock) {
-        amplification = BigInt(poolEntry.finalAmplification)
-      } else if (currentBlock <= poolEntry.initialBlock) {
-        amplification = BigInt(poolEntry.initialAmplification)
-      } else {
-        // Linear interpolation between initial and final
-        const totalBlocks = poolEntry.finalBlock - poolEntry.initialBlock
-        const elapsedBlocks = currentBlock - poolEntry.initialBlock
-        const initialAmp = BigInt(poolEntry.initialAmplification)
-        const finalAmp = BigInt(poolEntry.finalAmplification)
-
-        amplification = initialAmp +
-          ((finalAmp - initialAmp) * BigInt(elapsedBlocks)) / BigInt(totalBlocks)
+          amplification = initialAmp +
+            ((finalAmp - initialAmp) * BigInt(elapsedBlocks)) / BigInt(totalBlocks)
+        }
       }
 
       // Extract reserves for this pool using offset.
@@ -340,20 +384,9 @@ async function readStableswapState(
         reserves,
         amplification,
         fee: poolEntry.fee,
+        totalIssuance: totalIssuances.get(poolEntry.poolId),
         pegMultipliers,
       })
-    }
-
-    // Batch-read TotalIssuance for each pool's LP token (LP assetId == poolId)
-    if (storage.tokens.totalIssuance.v108.is(block)) {
-      const lpAssetIds = pools.map(p => p.poolId)
-      const issuances = await storage.tokens.totalIssuance.v108.getMany(block, lpAssetIds)
-      for (let i = 0; i < lpAssetIds.length; i++) {
-        const val = issuances[i]
-        if (val !== undefined && val > 0n) {
-          totalIssuances.set(lpAssetIds[i], val)
-        }
-      }
     }
   } catch (error) {
     console.error(`[Stableswap] Failed to read state at block ${block.height}:`, error)
@@ -364,6 +397,16 @@ async function readStableswapState(
 
 export async function run(options: RunOptions = {}): Promise<void> {
   const database = new Database()
+  const nativeAssetInfo = await loadNativeAssetInfo()
+  if (nativeAssetInfo) {
+    console.log(
+      `[NativeAsset] Loaded ${nativeAssetInfo.symbol} from chain properties ` +
+      `(asset_id=${nativeAssetInfo.assetId}, decimals=${nativeAssetInfo.decimals})`,
+    )
+  }
+  const nativeAssetMetadata = nativeAssetInfo ? nativeAssetInfoToMetadata(nativeAssetInfo) : undefined
+  const nativeAssetRow = nativeAssetInfo ? nativeAssetInfoToRow(nativeAssetInfo) : undefined
+  const snapshotReader = new ClickHouseSnapshotReader({ nativeAssetRow })
 
   const { height: lastProcessedBlock } = await database.connect()
 
@@ -384,8 +427,9 @@ export async function run(options: RunOptions = {}): Promise<void> {
     to: options.toBlock,
   })
 
-  const registry = new AssetRegistryTracker(config.SNAPSHOT_INTERVAL_BACKFILL)
+  const registry = new AssetRegistryTracker(BACKFILL_ASSET_SNAPSHOT_INTERVAL, nativeAssetMetadata)
   const compositionCache = new PoolCompositionCache()
+  let previousHistoricalSnapshot: HistoricalSnapshotState | null = null
 
   let lastLogBlock = startBlock
   let pricesCalculated = 0
@@ -411,9 +455,6 @@ export async function run(options: RunOptions = {}): Promise<void> {
   let blocksProcessed = 0
   let swapEventsProcessed = 0
 
-  // SQD processor owns process lifecycle via runProgram()
-  // With HotDatabase, the Runner will enter processHotBlocks() which is an
-  // infinite loop that subscribes to new blocks and keeps the process alive
   processor.run(database, async (ctx) => {
     // Reset parent hash validation state at batch boundaries
     // (prevents false positives across batch boundaries per RESEARCH.md Pitfall 4)
@@ -425,6 +466,41 @@ export async function run(options: RunOptions = {}): Promise<void> {
       isLiveMode = true
       currentLogInterval = liveLogInterval
       registry.setSnapshotInterval(config.SNAPSHOT_INTERVAL)
+    }
+
+    let historicalSnapshotStream: AsyncGenerator<HistoricalSnapshotEntry, void, unknown> | null = null
+    let nextHistoricalSnapshot: IteratorResult<HistoricalSnapshotEntry, void> | null = null
+    let matchedHistoricalSnapshots = 0
+    let historicalSnapshotStreamFailed = false
+    const firstBatchBlock = ctx.blocks[0]?.header.height
+    const lastBatchBlock = ctx.blocks[ctx.blocks.length - 1]?.header.height
+    const advanceHistoricalSnapshot = async (): Promise<void> => {
+      if (historicalSnapshotStream == null || historicalSnapshotStreamFailed) return
+
+      try {
+        nextHistoricalSnapshot = await historicalSnapshotStream.next()
+      } catch (error) {
+        historicalSnapshotStreamFailed = true
+        nextHistoricalSnapshot = null
+        console.error(
+          `[History] Failed while streaming raw snapshots for batch ${firstBatchBlock}-${lastBatchBlock}, falling back to RPC for remaining blocks:`,
+          error,
+        )
+        await historicalSnapshotStream.return(undefined)
+        historicalSnapshotStream = null
+      }
+    }
+    const shouldLoadHistoricalSnapshots = !isLiveMode && !ctx.isHead && ctx.blocks.length > 0
+    if (shouldLoadHistoricalSnapshots) {
+      try {
+        historicalSnapshotStream = snapshotReader.streamRange(firstBatchBlock, lastBatchBlock)
+        await advanceHistoricalSnapshot()
+      } catch (error) {
+        console.error(
+          `[History] Failed to load raw snapshots for batch ${firstBatchBlock}-${lastBatchBlock}, falling back to RPC:`,
+          error
+        )
+      }
     }
 
     for (const block of ctx.blocks) {
@@ -460,80 +536,181 @@ export async function run(options: RunOptions = {}): Promise<void> {
       }
       previousSpecVersion = specVersion
 
-      // Asset registry snapshot (every N blocks)
-      const newAssets = await registry.maybeSnapshot(blockHeight, block.header)
-      if (newAssets.length > 0) {
-        ctx.store.addAssets(newAssets)
-        atokenEquivalences = registry.getAtokenEquivalences()
-        atokenIds = registry.getAtokenIds()
-        // Detect LP → wrapper equivalences from symbol patterns (N-Pool-X → X)
-        // LP wrappers are Aave aToken contracts — add to aaveTokenIds for EVM balance reads
-        const aaveTokenIds = new Set(atokenIds)
-        for (const [lpId, displayId] of registry.getLpAliases()) {
-          if (!lpEquivalences.has(lpId)) {
-            lpEquivalences.set(lpId, displayId)
-            console.log(`[LpAlias] ${lpId} → ${displayId}`)
-          }
-          aaveTokenIds.add(displayId)
-        }
-        updateErc20Registry(registry.getErc20Contracts(), aaveTokenIds)
-      }
-
-      // Update pool composition cache from events
-      const compositionChanges = compositionCache.processEvents(block.events)
-      const compositionChanged = compositionChanges.omnipoolChanged ||
-        compositionChanges.xykChanged ||
-        compositionChanges.stableswapChanged
-
-      // Detect System.set_storage calls that modify pool storage
       const hasSetStorageAffectingPools = detectPoolAffectingSetStorage(block.calls)
-      if (hasSetStorageAffectingPools) {
-        console.warn(`[SetStorage] Pool-affecting System.set_storage detected at block ${blockHeight}`)
-        compositionCache.invalidateAll()
-      }
-
-      const omnipoolAssetIds = await compositionCache.getOmnipoolAssets(block.header)
-      const xykPoolEntries = await compositionCache.getXYKPools(block.header)
-      const stableswapPoolEntries = await compositionCache.getStableswapPools(block.header)
-
-      // Build set of known pool accounts for transfer event filtering
-      const poolAccounts = new Set<string>()
-
-      // Omnipool sovereign account (constant)
-      poolAccounts.add(omnipoolAccount)
-
-      // XYK pool accounts (from cache)
-      if (xykPoolEntries) {
-        for (const pool of xykPoolEntries) {
-          poolAccounts.add(pool.poolAccount)
+      let currentAtokenEquivalences = atokenEquivalences
+      let currentAtokenIds = atokenIds
+      let currentLpEquivalences = lpEquivalences
+      let decimals = registry.getDecimals()
+      let assetsTracked = registry.getCacheSize()
+      let shouldProcess = true
+      let omnipoolAssets = new Map<number, OmnipoolAssetState>()
+      let xykPools: XYKPool[] = []
+      let stableswapPools: StableswapPool[] = []
+      let totalIssuances = new Map<number, bigint>()
+      let historicalSnapshot: HistoricalSnapshotState | null = null
+      while (true) {
+        const currentHistoricalEntry = getHistoricalSnapshotEntry(nextHistoricalSnapshot)
+        if (currentHistoricalEntry == null || currentHistoricalEntry.blockHeight >= blockHeight) {
+          break
         }
+        await advanceHistoricalSnapshot()
+      }
+      const currentHistoricalEntry = getHistoricalSnapshotEntry(nextHistoricalSnapshot)
+      if (currentHistoricalEntry != null && currentHistoricalEntry.blockHeight === blockHeight) {
+        historicalSnapshot = currentHistoricalEntry.snapshot
+        matchedHistoricalSnapshots += 1
+        await advanceHistoricalSnapshot()
       }
 
-      // Stableswap pool accounts (derived from pool IDs)
-      if (stableswapPoolEntries) {
-        for (const pool of stableswapPoolEntries) {
-          poolAccounts.add(getStableswapPoolAccount(pool.poolId))
+      if (historicalSnapshot) {
+        if (hasSetStorageAffectingPools) {
+          console.warn(`[SetStorage] Pool-affecting System.set_storage detected at block ${blockHeight}`)
         }
-      }
 
-      // Check if any transfer events affect known pool accounts or if there are swap events
-      let hasPoolAffectingTransfer = false
-      let hasSwapEvents = false
-      for (const event of block.events) {
-        if (event.name === 'Tokens.Transfer') {
-          const args = event.args as { currencyId: number; from: string; to: string; amount: bigint }
-          if (poolAccounts.has(args.from) || poolAccounts.has(args.to)) {
-            hasPoolAffectingTransfer = true
+        currentAtokenEquivalences = historicalSnapshot.atokenEquivalences
+        currentAtokenIds = historicalSnapshot.atokenIds
+        currentLpEquivalences = historicalSnapshot.lpEquivalences
+        decimals = historicalSnapshot.decimals
+        assetsTracked = historicalSnapshot.assetsTracked
+
+        const assetsChanged = previousHistoricalSnapshot == null ||
+          historicalSnapshot.assetsKey !== previousHistoricalSnapshot.assetsKey
+        if (assetsChanged) {
+          const changedAssets = diffAssetRows(previousHistoricalSnapshot?.assetRows ?? null, historicalSnapshot.assetRows)
+          if (changedAssets.length > 0) {
+            ctx.store.addAssets(changedAssets)
           }
         }
-        if (isSwapEvent(event.name)) {
-          hasSwapEvents = true
+
+        const compositionChanged = previousHistoricalSnapshot != null &&
+          historicalSnapshot.compositionKey !== previousHistoricalSnapshot.compositionKey
+
+        let hasPoolAffectingTransfer = false
+        let hasSwapEvents = false
+        for (const event of block.events) {
+          if (event.name === 'Tokens.Transfer') {
+            const args = event.args as { currencyId: number; from: string; to: string; amount: bigint }
+            if (historicalSnapshot.poolAccounts.has(args.from) || historicalSnapshot.poolAccounts.has(args.to)) {
+              hasPoolAffectingTransfer = true
+            }
+          }
+          if (isSwapEvent(event.name, specVersion)) {
+            hasSwapEvents = true
+          }
+          if (hasPoolAffectingTransfer && hasSwapEvents) break
         }
-        // Early exit if both flags already set
-        if (hasPoolAffectingTransfer && hasSwapEvents) break
+
+        if (!hasPoolAffectingTransfer && !hasSetStorageAffectingPools && !compositionChanged && !hasSwapEvents && previousPrices !== null) {
+          shouldProcess = false
+        } else {
+          omnipoolAssets = historicalSnapshot.omnipoolAssets
+          xykPools = historicalSnapshot.xykPools
+          stableswapPools = historicalSnapshot.stableswapPools
+          totalIssuances = historicalSnapshot.totalIssuances
+        }
+
+        previousHistoricalSnapshot = historicalSnapshot
+      } else {
+        // Asset registry snapshot (every N blocks)
+        const newAssets = await registry.maybeSnapshot(blockHeight, block.header)
+        if (newAssets.length > 0) {
+          ctx.store.addAssets(newAssets)
+          atokenEquivalences = registry.getAtokenEquivalences()
+          atokenIds = registry.getAtokenIds()
+          // Detect LP → wrapper equivalences from symbol patterns (N-Pool-X → X)
+          // LP wrappers are Aave aToken contracts — add to aaveTokenIds for EVM balance reads
+          const aaveTokenIds = new Set(atokenIds)
+          for (const [lpId, displayId] of registry.getLpAliases()) {
+            if (!lpEquivalences.has(lpId)) {
+              lpEquivalences.set(lpId, displayId)
+              console.log(`[LpAlias] ${lpId} → ${displayId}`)
+            }
+            aaveTokenIds.add(displayId)
+          }
+          updateErc20Registry(registry.getErc20Contracts(), aaveTokenIds)
+        }
+
+        currentAtokenEquivalences = atokenEquivalences
+        currentAtokenIds = atokenIds
+        currentLpEquivalences = lpEquivalences
+        decimals = registry.getDecimals()
+        assetsTracked = registry.getCacheSize()
+
+        // Update pool composition cache from events
+        const compositionChanges = compositionCache.processEvents(block.events)
+        const compositionChanged = compositionChanges.omnipoolChanged ||
+          compositionChanges.xykChanged ||
+          compositionChanges.stableswapChanged
+
+        if (hasSetStorageAffectingPools) {
+          console.warn(`[SetStorage] Pool-affecting System.set_storage detected at block ${blockHeight}`)
+          compositionCache.invalidateAll()
+        }
+
+        const omnipoolAssetIds = await compositionCache.getOmnipoolAssets(block.header)
+        const xykPoolEntries = await compositionCache.getXYKPools(block.header)
+        const stableswapPoolEntries = await compositionCache.getStableswapPools(block.header)
+
+        // Build set of known pool accounts for transfer event filtering
+        const poolAccounts = new Set<string>()
+        poolAccounts.add(omnipoolAccount)
+
+        if (xykPoolEntries) {
+          for (const pool of xykPoolEntries) {
+            poolAccounts.add(pool.poolAccount)
+          }
+        }
+
+        if (stableswapPoolEntries) {
+          for (const pool of stableswapPoolEntries) {
+            poolAccounts.add(getStableswapPoolAccount(pool.poolId))
+          }
+        }
+
+        let hasPoolAffectingTransfer = false
+        let hasSwapEvents = false
+        for (const event of block.events) {
+          if (event.name === 'Tokens.Transfer') {
+            const args = event.args as { currencyId: number; from: string; to: string; amount: bigint }
+            if (poolAccounts.has(args.from) || poolAccounts.has(args.to)) {
+              hasPoolAffectingTransfer = true
+            }
+          }
+          if (isSwapEvent(event.name, specVersion)) {
+            hasSwapEvents = true
+          }
+          if (hasPoolAffectingTransfer && hasSwapEvents) break
+        }
+
+        if (!hasPoolAffectingTransfer && !hasSetStorageAffectingPools && !compositionChanged && !hasSwapEvents && previousPrices !== null) {
+          shouldProcess = false
+        } else {
+          try {
+            let stableswapResult: { pools: StableswapPool[]; totalIssuances: Map<number, bigint> }
+            ;[omnipoolAssets, xykPools, stableswapResult] = await Promise.all([
+              omnipoolAssetIds
+                ? readOmnipoolState(block.header, omnipoolAssetIds)
+                : Promise.resolve(new Map()),
+              xykPoolEntries
+                ? readXYKState(block.header, xykPoolEntries)
+                : Promise.resolve([]),
+              stableswapPoolEntries
+                ? readStableswapState(block.header, stableswapPoolEntries)
+                : Promise.resolve({ pools: [], totalIssuances: new Map() }),
+            ])
+            stableswapPools = stableswapResult.pools
+            totalIssuances = stableswapResult.totalIssuances
+          } catch (error) {
+            console.error(
+              `[Runtime] Storage read failed at block ${blockHeight} (spec_version: ${specVersion}):`,
+              error
+            )
+            continue
+          }
+        }
       }
 
-      if (!hasPoolAffectingTransfer && !hasSetStorageAffectingPools && !compositionChanged && !hasSwapEvents && previousPrices !== null) {
+      if (!shouldProcess) {
         blocksSkipped++
 
         ctx.store.addBlocks([{
@@ -547,42 +724,17 @@ export async function run(options: RunOptions = {}): Promise<void> {
 
       blocksProcessed++
 
-      let omnipoolAssets, xykPools, stableswapPools: StableswapPool[]
-      let totalIssuances = new Map<number, bigint>()
-      try {
-        let stableswapResult: { pools: StableswapPool[]; totalIssuances: Map<number, bigint> }
-        ;[omnipoolAssets, xykPools, stableswapResult] = await Promise.all([
-          omnipoolAssetIds
-            ? readOmnipoolState(block.header, omnipoolAssetIds)
-            : Promise.resolve(new Map()),
-          xykPoolEntries
-            ? readXYKState(block.header, xykPoolEntries)
-            : Promise.resolve([]),
-          stableswapPoolEntries
-            ? readStableswapState(block.header, stableswapPoolEntries)
-            : Promise.resolve({ pools: [], totalIssuances: new Map() }),
-        ])
-        stableswapPools = stableswapResult.pools
-        totalIssuances = stableswapResult.totalIssuances
-      } catch (error) {
-        console.error(
-          `[Runtime] Storage read failed at block ${blockHeight} (spec_version: ${specVersion}):`,
-          error
-        )
-        continue
-      }
-
-      const decimals = registry.getDecimals()
       const { prices, hopCounts, unpricedConnected } = resolvePrices(
         omnipoolAssets,
         xykPools,
         stableswapPools,
         decimals,
-        config.USDT_ASSET_ID,
+        config.USD_REFERENCE_IDS[0] ?? 10,
         config.LRNA_ASSET_ID,
-        config.STABLECOIN_ANCHOR_IDS,
-        atokenEquivalences,
-        totalIssuances
+        config.OMNIPOOL_BRIDGE_IDS,
+        currentAtokenEquivalences,
+        totalIssuances,
+        config.USD_REFERENCE_IDS,
       )
 
       const unpricedKey = unpricedConnected.join(',')
@@ -604,14 +756,15 @@ export async function run(options: RunOptions = {}): Promise<void> {
       const volumeRows = extractVolumeFromSwaps(
         block.events,
         blockHeight,
+        specVersion,
         prices,
         decimals
       )
-      swapEventsProcessed += volumeRows.length / 2  // Each swap = 2 rows
+      swapEventsProcessed += block.events.filter(event => isSwapEvent(event.name, specVersion)).length
 
       // Copy LP token prices to their wrapper tokens (e.g. 2-Pool-GDOT(690) → GDOT(69))
       // Detected from Aave ReserveInitialized EVM events
-      for (const [lpId, wrapperId] of lpEquivalences) {
+      for (const [lpId, wrapperId] of currentLpEquivalences) {
         const lpPrice = prices.get(lpId)
         if (lpPrice && !prices.has(wrapperId)) {
           prices.set(wrapperId, lpPrice)
@@ -620,22 +773,22 @@ export async function run(options: RunOptions = {}): Promise<void> {
       }
 
       // Remap aToken and LP wrapper volumes to their base tokens
-      const atokenToBase = new Map(atokenEquivalences.map(([base, aToken]) => [aToken, base]))
+      const atokenToBase = new Map(currentAtokenEquivalences.map(([base, aToken]) => [aToken, base]))
 
       for (const row of volumeRows) {
         const baseId = atokenToBase.get(row.asset_id)
         if (baseId !== undefined) {
           row.asset_id = baseId
         }
-        const wrapperId = lpEquivalences.get(row.asset_id)
+        const wrapperId = currentLpEquivalences.get(row.asset_id)
         if (wrapperId !== undefined) {
           row.asset_id = wrapperId
         }
       }
 
-      const lpIds = new Set(lpEquivalences.keys())
+      const lpIds = new Set(currentLpEquivalences.keys())
       const priceRows = Array.from(prices.entries())
-        .filter(([assetId, usdPrice]) => !atokenIds.has(assetId) && !lpIds.has(assetId) && parseFloat(usdPrice) > 0)
+        .filter(([assetId, usdPrice]) => !currentAtokenIds.has(assetId) && !lpIds.has(assetId) && parseFloat(usdPrice) > 0)
         .map(([assetId, usdPrice]) => ({
           asset_id: assetId,
           block_height: blockHeight,
@@ -655,7 +808,6 @@ export async function run(options: RunOptions = {}): Promise<void> {
       }])
 
       if (blockHeight - lastLogBlock >= currentLogInterval) {
-        const assetsTracked = registry.getCacheSize()
         const mode = isLiveMode ? 'LIVE' : 'ARCHIVE'
         const skipRate = blocksSkipped + blocksProcessed > 0
           ? ((blocksSkipped / (blocksSkipped + blocksProcessed)) * 100).toFixed(1)
@@ -674,6 +826,16 @@ export async function run(options: RunOptions = {}): Promise<void> {
         blocksProcessed = 0
         swapEventsProcessed = 0
       }
+    }
+
+    if (historicalSnapshotStream != null) {
+      const missingSnapshots = ctx.blocks.length - matchedHistoricalSnapshots
+      if (missingSnapshots > 0) {
+        console.log(
+          `[History] Missing ${missingSnapshots} raw snapshots in batch ${firstBatchBlock}-${lastBatchBlock}, falling back to RPC for those blocks`
+        )
+      }
+      await historicalSnapshotStream.return(undefined)
     }
   })
 }

@@ -90,9 +90,20 @@ export class AssetRegistryTracker {
   private cache: Map<number, AssetMetadata> = new Map()
   private lastSnapshotBlock: number = -1 // Force first scan
   private snapshotInterval: number
+  private seededAssetRows: AssetRow[] = []
 
-  constructor(snapshotInterval?: number) {
+  constructor(snapshotInterval?: number, nativeAssetMetadata?: AssetMetadata) {
     this.snapshotInterval = snapshotInterval ?? config.SNAPSHOT_INTERVAL
+    if (nativeAssetMetadata) {
+      this.cache.set(nativeAssetMetadata.assetId, { ...nativeAssetMetadata })
+      this.seededAssetRows.push({
+        asset_id: nativeAssetMetadata.assetId,
+        symbol: nativeAssetMetadata.symbol,
+        name: nativeAssetMetadata.name,
+        decimals: nativeAssetMetadata.decimals,
+        parachain_id: nativeAssetMetadata.parachainId ?? null,
+      })
+    }
   }
 
   /**
@@ -315,6 +326,16 @@ export class AssetRegistryTracker {
       this.cache.set(assetId, metadata)
     }
 
+    if (this.seededAssetRows.length > 0) {
+      const seenIds = new Set(newAssets.map(asset => asset.asset_id))
+      for (const row of this.seededAssetRows) {
+        if (!seenIds.has(row.asset_id)) {
+          newAssets.push(row)
+        }
+      }
+      this.seededAssetRows = []
+    }
+
     this.lastSnapshotBlock = blockHeight
 
     console.log(`[AssetRegistry] Scan complete: ${discoveredAssets.size} total assets, ${newAssets.length} new/changed`)
@@ -410,6 +431,12 @@ export class AssetRegistryTracker {
 
   getCacheSize(): number {
     return this.cache.size
+  }
+
+  getAssetsMetadata(): AssetMetadata[] {
+    return [...this.cache.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, metadata]) => ({ ...metadata }))
   }
 
   /**
