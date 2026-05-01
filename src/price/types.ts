@@ -28,6 +28,7 @@ export interface StableswapPool {
   reserves: bigint[];    // Reserves for each asset
   amplification: bigint; // Current amplification parameter
   fee: number;          // Permill fee
+  totalIssuance?: bigint; // LP share issuance, used by package math for spot pricing
   pegMultipliers?: [bigint, bigint][]; // Per-asset peg ratios [numerator, denominator]
 }
 

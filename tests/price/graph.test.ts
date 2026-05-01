@@ -182,7 +182,7 @@ describe('resolvePrices', () => {
     expect(parseFloat(prices.get(4)!)).toBeGreaterThan(0);
   });
 
-  it('returns empty prices when USDT not in Omnipool and no fallback', () => {
+  it('seeds the USD reference when USDT is not in Omnipool and no fallback exists', () => {
     const omnipoolAssets = new Map<number, OmnipoolAssetState>();
     const xykPools: XYKPool[] = [];
     const stableswapPools: StableswapPool[] = [];
@@ -190,10 +190,11 @@ describe('resolvePrices', () => {
 
     const { prices } = resolvePrices(omnipoolAssets, xykPools, stableswapPools, decimals);
 
-    expect(prices.size).toBe(0);
+    expect(prices.size).toBe(1);
+    expect(prices.get(10)).toBe('1.000000000000');
   });
 
-  it('handles empty inputs gracefully', () => {
+  it('handles empty inputs gracefully while preserving the USD reference seed', () => {
     const omnipoolAssets = new Map<number, OmnipoolAssetState>();
     const xykPools: XYKPool[] = [];
     const stableswapPools: StableswapPool[] = [];
@@ -201,7 +202,8 @@ describe('resolvePrices', () => {
 
     const { prices } = resolvePrices(omnipoolAssets, xykPools, stableswapPools, decimals);
 
-    expect(prices.size).toBe(0);
+    expect(prices.size).toBe(1);
+    expect(prices.get(10)).toBe('1.000000000000');
   });
 
   it('uses custom USDT and LRNA asset IDs', () => {
@@ -342,6 +344,81 @@ describe('resolvePrices', () => {
     const glmrPrice = parseFloat(prices.get(2)!);
     expect(glmrPrice).toBeGreaterThan(0);
   });
+
+  it('prefers direct aToken-backed stable routes over lower-quality multi-hop stable routes', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [10, {
+        hubReserve: 1_000_000_000000n,
+        reserve: 1_000_000n,
+        shares: 0n,
+        protocolShares: 0n,
+        cap: 0n,
+        tradable: 0,
+      }],
+    ]);
+
+    const stableswapPools: StableswapPool[] = [
+      {
+        poolId: 100,
+        assets: [10, 18, 21, 23],
+        reserves: [
+          41_681_324_477n,
+          22_921_469_584_006_683_293_354n,
+          1_650_693_048n,
+          20_951_574_085n,
+        ],
+        amplification: 222n,
+        fee: 400,
+      },
+      {
+        poolId: 105,
+        assets: [21, 23, 222],
+        reserves: [
+          203_408_205_640n,
+          196_605_335_095n,
+          200_565_529_848_829_528_030_425n,
+        ],
+        amplification: 222n,
+        fee: 400,
+      },
+      {
+        poolId: 111,
+        assets: [222, 1002],
+        reserves: [
+          2_615_020_525_325_694_170_244_965n,
+          2_630_635_074_770n,
+        ],
+        amplification: 222n,
+        fee: 400,
+      },
+    ];
+
+    const atokenEquivalences: [number, number][] = [[10, 1002]];
+    const decimals = new Map<number, number>([
+      [10, 6],
+      [18, 18],
+      [21, 6],
+      [23, 6],
+      [222, 18],
+      [1002, 6],
+    ]);
+
+    const { prices, hopCounts } = resolvePrices(
+      omnipoolAssets,
+      [],
+      stableswapPools,
+      decimals,
+      10,
+      1,
+      [10],
+      atokenEquivalences,
+    );
+
+    expect(parseFloat(prices.get(21)!)).toBeGreaterThan(1.2);
+    expect(parseFloat(prices.get(222)!)).toBeGreaterThan(0.99);
+    expect(parseFloat(prices.get(222)!)).toBeLessThan(1.01);
+    expect(hopCounts.get(222)).toBe(1);
+  });
 });
 
 describe('buildGraph', () => {
@@ -411,13 +488,19 @@ describe('buildGraph', () => {
     expect(graph.get(105)![0].toAsset).toBe(5);
   });
 
-  it('aToken edges have max safe bigint liquidity', () => {
+  it('aToken edges outrank pool routes by liquidity', () => {
+    const xykPools: XYKPool[] = [
+      { assetA: 5, assetB: 2, reserveA: 1_000_000_000000n, reserveB: 1_000_000_000000n },
+    ];
     const atokenEquivalences: [number, number][] = [[5, 105]];
-    const decimals: AssetDecimals = new Map([[5, 10], [105, 10]]);
+    const decimals: AssetDecimals = new Map([[2, 12], [5, 12], [105, 12]]);
 
-    const graph = buildGraph([], [], atokenEquivalences, decimals);
+    const graph = buildGraph(xykPools, [], atokenEquivalences, decimals);
+    const edges = graph.get(5)!;
 
-    expect(graph.get(5)![0].liquidity).toBe(BigInt(Number.MAX_SAFE_INTEGER));
+    expect(edges[0].kind).toBe('atoken');
+    expect(edges[0].toAsset).toBe(105);
+    expect(edges[0].liquidity).toBeGreaterThan(edges[1].liquidity);
   });
 
   it('edge sorting: higher-liquidity edge appears first in adjacency list', () => {
@@ -1002,5 +1085,386 @@ describe('computeLpNavPrices - pegged pools (spot-price-based)', () => {
     // with market price, only the base asset (aDOT) price matters
     const lpChange = Math.abs(lp2 - lp1) / lp1;
     expect(lpChange).toBeLessThan(0.01); // < 1% change despite 12.5% vDOT move
+  });
+});
+
+describe('Fallback 2: non-USDT anchor with stableswap spot price', () => {
+  it('treats USDT and USDC as a peer USD basket when both are references', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [10, { // USDT in Omnipool
+        hubReserve: 1000000000000n,
+        reserve: 1000000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+      [0, {
+        hubReserve: 50000000000000n,
+        reserve: 100000000000000000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+    ]);
+
+    const stableswapPools: StableswapPool[] = [{
+      poolId: 100,
+      assets: [10, 22],
+      reserves: [
+        550000_000000n,
+        500000_000000n,
+      ],
+      amplification: 2000n,
+      fee: 5000,
+    }];
+
+    const decimals = new Map<number, number>([
+      [0, 12], [10, 6], [22, 6],
+    ]);
+
+    const { prices } = resolvePrices(
+      omnipoolAssets, [], stableswapPools, decimals,
+      10, 1, [10, 22, 222], [], new Map(), [10, 22],
+    );
+
+    const usdtPrice = parseFloat(prices.get(10)!);
+    const usdcPrice = parseFloat(prices.get(22)!);
+
+    expect(Math.abs(((usdtPrice + usdcPrice) / 2) - 1)).toBeLessThan(0.000001);
+    expect(Math.abs(usdtPrice - usdcPrice)).toBeGreaterThan(0.000001);
+  });
+
+  it('uses stableswap spot price to derive anchor USD value instead of assuming $1', () => {
+    // HOLLAR (222, 18 dec) is the only anchor in Omnipool.
+    // Stableswap pool 100 contains both HOLLAR and USDT (10, 6 dec).
+    // HOLLAR has depegged to ~$0.95 in the stableswap pool.
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [222, { // HOLLAR in Omnipool
+        hubReserve: 100000_000000000000n,  // 100k LRNA
+        reserve: 1000000_000000000000000000n, // 1M HOLLAR (18 dec)
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+      [0, { // HDX in Omnipool
+        hubReserve: 50000_000000000000n,     // 50k LRNA
+        reserve: 5000000_000000000000n,      // 5M HDX (12 dec)
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+    ]);
+
+    // Stableswap pool with imbalanced reserves simulating HOLLAR depeg
+    // More HOLLAR than USDT = HOLLAR is worth less than USDT
+    const stableswapPools: StableswapPool[] = [{
+      poolId: 100,
+      assets: [10, 222],  // USDT, HOLLAR
+      reserves: [
+        500000_000000n,                // 500k USDT (6 dec)
+        600000_000000000000000000n,    // 600k HOLLAR (18 dec) — more HOLLAR = depeg
+      ],
+      amplification: 2000n,
+      fee: 5000,
+    }];
+
+    const decimals = new Map<number, number>([
+      [0, 12], [10, 6], [222, 18], [100, 18],
+    ]);
+
+    const { prices } = resolvePrices(
+      omnipoolAssets, [], stableswapPools, decimals,
+      10, 1, [10, 22, 222], [], new Map(), [10, 22],
+    );
+
+    // HOLLAR should NOT be $1.00 — it should reflect the depeg
+    const hollarPrice = parseFloat(prices.get(222)!);
+    expect(hollarPrice).toBeLessThan(1.0);
+    expect(hollarPrice).toBeGreaterThan(0.80); // reasonable depeg range
+
+    // USDT should still be $1
+    expect(prices.get(10)).toBe('1.000000000000');
+
+    // HDX should be priced and reasonable
+    expect(prices.has(0)).toBe(true);
+  });
+
+  it('does not anchor LRNA from an Omnipool stable LP token when HOLLAR is quoted through aUSDT', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [102, { // 2-Pool LP in Omnipool — this used to be forced to $1
+        hubReserve: 100_000000000000n,
+        reserve: 1450_000000000000000000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+      [222, { // HOLLAR in Omnipool, fair LRNA anchor should come from here
+        hubReserve: 100_000000000000n,
+        reserve: 1400_000000000000000000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+      [0, { // HDX
+        hubReserve: 50_000000000000n,
+        reserve: 5000_000000000000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+    ]);
+
+    const stableswapPools: StableswapPool[] = [
+      {
+        poolId: 102,
+        assets: [10, 22],
+        reserves: [
+          500000_000000n,
+          500000_000000n,
+        ],
+        amplification: 2000n,
+        fee: 5000,
+      },
+      {
+        poolId: 110,
+        assets: [1002, 222],
+        reserves: [
+          500000_000000n,
+          500000_000000000000000000n,
+        ],
+        amplification: 2000n,
+        fee: 5000,
+      },
+    ];
+
+    const decimals = new Map<number, number>([
+      [0, 12], [10, 6], [22, 6], [102, 18], [222, 18], [1002, 6],
+    ]);
+
+    const { prices } = resolvePrices(
+      omnipoolAssets, [], stableswapPools, decimals,
+      10, 1, [10, 22, 222], [[10, 1002]], new Map(), [10, 22],
+    );
+
+    const lrnaPrice = parseFloat(prices.get(1)!);
+    const hollarPrice = parseFloat(prices.get(222)!);
+
+    expect(lrnaPrice).toBeGreaterThan(13.9);
+    expect(lrnaPrice).toBeLessThan(14.1);
+    expect(hollarPrice).toBeGreaterThan(0.99);
+    expect(hollarPrice).toBeLessThan(1.01);
+    expect(prices.get(102)).not.toBe('1.000000000000');
+  });
+
+  it('uses a stable LP NAV bridge when direct USD references leave Omnipool', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [102, {
+        hubReserve: 100_000000000000n,
+        reserve: 1400_000000000000000000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+      [5, {
+        hubReserve: 40_000000000000n,
+        reserve: 50_0000000000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+    ]);
+
+    const stableswapPools: StableswapPool[] = [{
+      poolId: 102,
+      assets: [10, 22],
+      reserves: [
+        400000_000000n,
+        400000_000000n,
+      ],
+      amplification: 2000n,
+      fee: 5000,
+      totalIssuance: 1000000_000000000000000000n,
+    }];
+
+    const decimals = new Map<number, number>([
+      [5, 10], [10, 6], [22, 6], [102, 18],
+    ]);
+
+    const { prices } = resolvePrices(
+      omnipoolAssets, [], stableswapPools, decimals,
+      10, 1, [10, 22, 222], [], new Map(), [10, 22],
+    );
+
+    expect(prices.get(102)).toBe('0.800000000000');
+    expect(prices.has(1)).toBe(true);
+    expect(prices.has(5)).toBe(true);
+    expect(parseFloat(prices.get(5)!)).toBeGreaterThan(7);
+    expect(parseFloat(prices.get(5)!)).toBeLessThan(9);
+  });
+
+  it('keeps the USD references even when only a non-reference bridge exists and no anchor path is available', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [222, {
+        hubReserve: 100000_000000000000n,
+        reserve: 1000000_000000000000000000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+    ]);
+
+    const decimals = new Map<number, number>([[222, 18], [10, 6]]);
+
+    // No stableswap pools at all
+    const { prices } = resolvePrices(
+      omnipoolAssets, [], [], decimals,
+      10, 1, [222], [], new Map(), [10, 22],
+    );
+
+    expect(prices.size).toBe(2);
+    expect(prices.get(10)).toBe('1.000000000000');
+    expect(prices.get(22)).toBe('1.000000000000');
+    expect(prices.has(1)).toBe(false);
+    expect(prices.has(222)).toBe(false);
+  });
+
+  it('seeds USD references even when no Omnipool anchor exists yet', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>();
+
+    const xykPools: XYKPool[] = [{
+      assetA: 10,
+      assetB: 5,
+      reserveA: 1000000n,
+      reserveB: 10000000000n,
+    }];
+
+    const stableswapPools: StableswapPool[] = [{
+      poolId: 100,
+      assets: [10, 22],
+      reserves: [500000_000000n, 500000_000000n],
+      amplification: 2000n,
+      fee: 5000,
+    }];
+
+    const decimals = new Map<number, number>([
+      [5, 10], [10, 6], [22, 6],
+    ]);
+
+    const { prices } = resolvePrices(
+      omnipoolAssets, xykPools, stableswapPools, decimals,
+      10, 1, [10, 22, 222], [], new Map(), [10, 22],
+    );
+
+    expect(prices.get(10)).toBeDefined();
+    expect(prices.get(22)).toBeDefined();
+    expect(prices.has(5)).toBe(true);
+    expect(prices.has(1)).toBe(false);
+  });
+
+  it('forces an Omnipool-priced aToken back to its base price before LP NAV pricing', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [10, {
+        hubReserve: 100_000000000000n,
+        reserve: 100_000000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+      [5, {
+        hubReserve: 100_000000000000n,
+        reserve: 53_9000000000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+      [15, {
+        hubReserve: 100_000000000000n,
+        reserve: 34_4000000000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+      [1001, {
+        hubReserve: 100_000000000000n,
+        reserve: 53_6800000000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+    ]);
+
+    const stableswapPools: StableswapPool[] = [{
+      poolId: 690,
+      assets: [15, 1001],
+      reserves: [
+        53_376831020814900n,
+        31_712098211339538n,
+      ],
+      amplification: 2000n,
+      fee: 5000,
+      totalIssuance: 11_074035652408871725027224n,
+      pegMultipliers: [
+        [269525411758856986134707303700258859773n, 169177326230681708477916662131920746817n],
+        [1n, 1n],
+      ],
+    }];
+
+    const decimals = new Map<number, number>([
+      [1, 12], [5, 10], [10, 6], [15, 10], [1001, 10], [690, 18],
+    ]);
+
+    const { prices } = resolvePrices(
+      omnipoolAssets, [], stableswapPools, decimals,
+      10, 1, [10, 22, 222], [[5, 1001]], new Map([[690, 11_074035652408871725027224n]]), [10, 22],
+    );
+
+    expect(prices.get(5)).toBeDefined();
+    expect(prices.get(1001)).toBe(prices.get(5));
+    expect(prices.get(690)).toBeDefined();
+    expect(parseFloat(prices.get(690)!)).toBeLessThan(parseFloat(prices.get(15)!));
+  });
+
+  it('canonicalizes exact wrapper pairs even when only one side is directly seeded', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [10, {
+        hubReserve: 100_000000000000n,
+        reserve: 100_000000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+      [15, {
+        hubReserve: 100_000000000000n,
+        reserve: 32_6844254400n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+      [1001, {
+        hubReserve: 100_000000000000n,
+        reserve: 51_0268520000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+      [222, {
+        hubReserve: 100_000000000000n,
+        reserve: 99_000000000000000000000n,
+        shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+      }],
+    ]);
+
+    const xykPools: XYKPool[] = [{
+      assetA: 5,
+      assetB: 10,
+      reserveA: 981_0000000000n,
+      reserveB: 19_240_000000n,
+    }];
+
+    const stableswapPools: StableswapPool[] = [
+      {
+        poolId: 100,
+        assets: [10, 22],
+        reserves: [500_000000n, 500_000000n],
+        amplification: 2000n,
+        fee: 5000,
+      },
+      {
+        poolId: 690,
+        assets: [15, 1001],
+        reserves: [
+          53_376831020814900n,
+          31_712098211339538n,
+        ],
+        amplification: 2000n,
+        fee: 5000,
+        totalIssuance: 11_074035652408871725027224n,
+        pegMultipliers: [
+          [269525411758856986134707303700258859773n, 169177326230681708477916662131920746817n],
+          [1n, 1n],
+        ],
+      },
+    ];
+
+    const decimals = new Map<number, number>([
+      [1, 12], [5, 10], [10, 6], [15, 10], [22, 6], [1001, 10], [222, 18], [690, 18],
+    ]);
+
+    const { prices, hopCounts } = resolvePrices(
+      omnipoolAssets, xykPools, stableswapPools, decimals,
+      10, 1, [10, 22, 222], [[5, 1001]], new Map([[690, 11_074035652408871725027224n]]), [10, 22],
+    );
+
+    expect(prices.get(1001)).toBeDefined();
+    expect(prices.get(5)).toBe(prices.get(1001));
+    expect(hopCounts.get(5)).toBe(0);
+    expect(prices.get(690)).toBeDefined();
+    expect(prices.get(69)).toBeUndefined();
   });
 });

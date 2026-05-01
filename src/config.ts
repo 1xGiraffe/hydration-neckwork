@@ -14,14 +14,20 @@ export interface Config {
   // Processing parameters
   BATCH_SIZE: number
   SNAPSHOT_INTERVAL: number
-  SNAPSHOT_INTERVAL_BACKFILL: number
 
   // Hydration chain constants
-  USDT_ASSET_ID: number
   LRNA_ASSET_ID: number
-  // Stablecoin anchor candidates for LRNA price derivation (≈ $1 each).
-  // resolvePrices picks the one with the highest Omnipool hubReserve.
-  STABLECOIN_ANCHOR_IDS: number[]
+  // Assets that can bridge Omnipool state into USD pricing.
+  OMNIPOOL_BRIDGE_IDS: number[]
+  // Canonical USD references. These are treated as a peer basket.
+  USD_REFERENCE_IDS: number[]
+}
+
+function intFromEnv(name: string, fallback: number): number {
+  const value = process.env[name]
+  if (value == null || value === '') return fallback
+  const parsed = Number.parseInt(value, 10)
+  return Number.isFinite(parsed) ? parsed : fallback
 }
 
 export const config: Config = {
@@ -31,7 +37,7 @@ export const config: Config = {
 
   // RPC endpoint (fallback to Dotters network RPC)
   RPC_URL: process.env.RPC_URL ?? 'wss://hydration.dotters.network',
-  RPC_RATE_LIMIT: 100, // requests per second
+  RPC_RATE_LIMIT: intFromEnv('RPC_RATE_LIMIT', 100), // requests per second
 
   // ClickHouse connection (ports remapped to 18123/19000 per Phase 1 decisions)
   CLICKHOUSE_URL: process.env.CLICKHOUSE_HOST ?? 'http://localhost:18123',
@@ -39,16 +45,15 @@ export const config: Config = {
   CLICKHOUSE_PASSWORD: process.env.CLICKHOUSE_PASSWORD ?? '',
 
   // Processing tuning parameters
-  BATCH_SIZE: 10_000, // rows per ClickHouse insert (tunable based on performance)
-  SNAPSHOT_INTERVAL: 1000, // blocks between full asset registry scans (live mode)
-  SNAPSHOT_INTERVAL_BACKFILL: 10_000, // blocks between scans during backfill (archive mode)
+  BATCH_SIZE: intFromEnv('BATCH_SIZE', 10_000), // rows per ClickHouse insert (tunable based on performance)
+  SNAPSHOT_INTERVAL: intFromEnv('SNAPSHOT_INTERVAL', 1000), // blocks between full asset registry scans (live mode)
 
   // Hydration chain asset IDs
-  USDT_ASSET_ID: 10, // USDT — price denomination target (historical compatibility)
   LRNA_ASSET_ID: 1,   // LRNA is the Omnipool hub token
-  // Stablecoin anchor candidates for LRNA derivation (≈ $1, must be in Omnipool).
-  // Stablecoin anchor candidates — must include assets actually in the Omnipool.
-  // 10 (USDT) and 22 (USDC) are in stableswap pools but not directly in Omnipool.
-  // 222 (HOLLAR) is in the Omnipool and pegged via stableswap to 10 and 22.
-  STABLECOIN_ANCHOR_IDS: [10, 22, 222],
+  // Assets that can bridge Omnipool pricing into the stable basket.
+  // 222 is deliberately treated as a bridge, not as a canonical USD reference.
+  OMNIPOOL_BRIDGE_IDS: [10, 22, 222],
+  // USD references are treated symmetrically: the basket stays centered on $1,
+  // while any 10/22 deviation is split across both assets instead of privileging 10.
+  USD_REFERENCE_IDS: [10, 22],
 }

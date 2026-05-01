@@ -1,8 +1,31 @@
+import { calculate_spot_price_with_fee } from '@galacticcouncil/math-stableswap';
 import type { StableswapPool, PriceMap, AssetDecimals } from './types.ts';
 
 const MAX_D_ITERATIONS = 64;
 const MAX_Y_ITERATIONS = 128;
 const PRECISION = 1n;
+const SPOT_PRICE_SCALE = 10n ** 12n;
+const PACKAGE_SPOT_SCALE = 10n ** 18n;
+
+function jsonBigintReplacer(_key: string, value: unknown): unknown {
+  return typeof value === 'bigint' ? value.toString() : value;
+}
+
+function serializePoolReserves(pool: StableswapPool, decimals: AssetDecimals): string {
+  const reserves = pool.assets.map((assetId, index) => ({
+    asset_id: assetId,
+    amount: pool.reserves[index],
+    decimals: decimals.get(assetId) ?? 12,
+  }));
+
+  return JSON.stringify(reserves, jsonBigintReplacer);
+}
+
+function serializePoolPegs(pool: StableswapPool): string {
+  const pegs = (pool.pegMultipliers ?? pool.assets.map(() => [1n, 1n] as [bigint, bigint]))
+    .map(([num, den]) => [num.toString(), den.toString()]);
+  return JSON.stringify(pegs);
+}
 
 // Calculate the stableswap invariant D using Newton's method.
 // The invariant D represents the total value in the pool at equal price.
@@ -155,76 +178,26 @@ export function calculateSpotPrice(
   const assetInId = pool.assets[assetInIndex];
   const assetOutId = pool.assets[assetOutIndex];
 
-  const assetInDecimals = decimals.get(assetInId) || 12;
-  const assetOutDecimals = decimals.get(assetOutId) || 12;
+  try {
+    const rawSpot = BigInt(calculate_spot_price_with_fee(
+      pool.poolId.toString(),
+      serializePoolReserves(pool, decimals),
+      pool.amplification.toString(),
+      assetInId.toString(),
+      assetOutId.toString(),
+      (pool.totalIssuance ?? 1n).toString(),
+      '0',
+      serializePoolPegs(pool),
+    ));
 
-  // Normalize all reserves to 18 decimals before stableswap math.
-  // The curve invariant assumes all reserves are in the same unit.
-  // Without normalization, pools with mixed decimals (e.g. HOLLAR 18 + aUSDT 6)
-  // would compute a wildly wrong D and Y.
-  const TARGET_DECIMALS = 18n;
-  const PEG_PRECISION = 10n ** 18n;
-  const normalizedReserves = pool.reserves.map((r, i) => {
-    const assetDecimals = BigInt(decimals.get(pool.assets[i]) || 12);
-    let normalized = r;
-    if (assetDecimals < TARGET_DECIMALS) {
-      normalized = r * (10n ** (TARGET_DECIMALS - assetDecimals));
-    } else if (assetDecimals > TARGET_DECIMALS) {
-      normalized = r / (10n ** (assetDecimals - TARGET_DECIMALS));
+    if (rawSpot <= 0n) {
+      return 0n;
     }
-    // Apply peg multiplier: adjusts reserves so the curve treats pegged assets correctly
-    // (e.g. 1 vDOT = 1.618 aDOT in the invariant calculation)
-    if (pool.pegMultipliers && pool.pegMultipliers[i]) {
-      const [num, den] = pool.pegMultipliers[i];
-      if (den > 0n) {
-        normalized = (normalized * num) / den;
-      }
-    }
-    return normalized;
-  });
 
-  // Calculate invariant D with peg-adjusted normalized reserves
-  const d = calculateD(normalizedReserves, pool.amplification);
-  if (d === 0n) {
+    return rawSpot / (PACKAGE_SPOT_SCALE / SPOT_PRICE_SCALE);
+  } catch {
     return 0n;
   }
-
-  // Use a small swap amount: 0.01% of the peg-adjusted assetIn reserve
-  const swapAmount = normalizedReserves[assetInIndex] / 10000n;
-  if (swapAmount === 0n) {
-    return 0n;
-  }
-
-  // Simulate adding swap amount to assetIn reserve (in peg-adjusted space)
-  const newReserves = [...normalizedReserves];
-  newReserves[assetInIndex] = normalizedReserves[assetInIndex] + swapAmount;
-
-  // Calculate new assetOut reserve after the swap
-  const newAssetOutReserve = calculateY(newReserves, pool.amplification, assetOutIndex, d);
-
-  // Amount of assetOut received (in peg-adjusted units)
-  const assetOutReceived = normalizedReserves[assetOutIndex] - newAssetOutReserve;
-
-  // The swap amount and received amount are in peg-adjusted space.
-  // To get the real exchange rate, un-adjust both by their peg multipliers:
-  // realIn = swapAmount / pegIn, realOut = assetOutReceived / pegOut
-  // spotPrice = realOut / realIn = (assetOutReceived / pegOut) / (swapAmount / pegIn)
-  //           = (assetOutReceived * pegIn) / (swapAmount * pegOut)
-  let adjustedOut = assetOutReceived;
-  let adjustedIn = swapAmount;
-  if (pool.pegMultipliers) {
-    const [numIn, denIn] = pool.pegMultipliers[assetInIndex] ?? [1n, 1n];
-    const [numOut, denOut] = pool.pegMultipliers[assetOutIndex] ?? [1n, 1n];
-    // Un-peg: multiply by den/num to reverse the peg adjustment
-    adjustedOut = assetOutReceived * denOut / numOut;
-    adjustedIn = swapAmount * denIn / numIn;
-  }
-
-  // Scale to 10^12 for storage:
-  const scaleFactor = 10n ** 12n;
-  const price = (adjustedOut * scaleFactor) / adjustedIn;
-
-  return price;
 }
 
 /**

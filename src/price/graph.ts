@@ -2,36 +2,50 @@ import type { OmnipoolAssetState, XYKPool, StableswapPool, AssetDecimals, PriceM
 import { calculateLRNAPrice, calculateOmnipoolPrices } from './omnipool.ts';
 import { calculateSpotPrice } from './stableswap.ts';
 
-// Find the most liquid stableswap LP token in Omnipool that contains the anchor.
-function findMostLiquidStableLPToken(
-  stableswapPools: StableswapPool[],
-  omnipoolAssets: Map<number, OmnipoolAssetState>,
-  anchorAssetId: number
-): number | null {
-  let bestPoolId: number | null = null;
-  let bestHubReserve: bigint = 0n;
+const PRICE_SCALE = 10n ** 12n;
 
-  for (const pool of stableswapPools) {
-    if (!pool.assets.includes(anchorAssetId)) continue;
-    const omnipoolState = omnipoolAssets.get(pool.poolId);
-    if (!omnipoolState) continue;
-    if (omnipoolState.hubReserve > bestHubReserve) {
-      bestHubReserve = omnipoolState.hubReserve;
-      bestPoolId = pool.poolId;
-    }
-  }
-
-  return bestPoolId;
+interface SpotQuote {
+  price: bigint
+  liquidity: bigint
 }
 
-// Find the best LRNA anchor from the candidate list.
-function findBestLRNAAnchor(
+interface WeightedObservation {
+  value: bigint
+  weight: bigint
+}
+
+function priceStringTo12(price: string): bigint {
+  const [intPart, decPart = ''] = price.split('.');
+  return BigInt(intPart + decPart.padEnd(12, '0'));
+}
+
+function price12ToString(value: bigint): string {
+  const s = value.toString().padStart(13, '0');
+  return `${s.slice(0, -12) || '0'}.${s.slice(-12)}`;
+}
+
+function multiplyPriceStrings(left: string, right: string): string {
+  const product = (priceStringTo12(left) * priceStringTo12(right)) / PRICE_SCALE;
+  return price12ToString(product);
+}
+
+function normalizeReserve(reserve: bigint, assetId: number, decimals: AssetDecimals): bigint {
+  const assetDecimals = decimals.get(assetId) ?? 12;
+  if (assetDecimals === 18) return reserve;
+  if (assetDecimals < 18) {
+    return reserve * (10n ** BigInt(18 - assetDecimals));
+  }
+  return reserve / (10n ** BigInt(assetDecimals - 18));
+}
+
+// Find the best Omnipool bridge asset from the candidate list.
+function findBestOmnipoolBridge(
   omnipoolAssets: Map<number, OmnipoolAssetState>,
-  anchorIds: number[]
+  bridgeIds: number[]
 ): { assetId: number; state: OmnipoolAssetState } | null {
   let best: { assetId: number; state: OmnipoolAssetState } | null = null;
 
-  for (const id of anchorIds) {
+  for (const id of bridgeIds) {
     const state = omnipoolAssets.get(id);
     if (!state || state.hubReserve === 0n) continue;
     if (!best || state.hubReserve > best.state.hubReserve) {
@@ -40,6 +54,238 @@ function findBestLRNAAnchor(
   }
 
   return best;
+}
+
+function getBestStableQuote(
+  assetInId: number,
+  assetOutId: number,
+  stableswapPools: StableswapPool[],
+  decimals: AssetDecimals
+): SpotQuote | null {
+  let bestPool: StableswapPool | null = null;
+  let bestLiquidity = 0n;
+
+  for (const pool of stableswapPools) {
+    const assetInIdx = pool.assets.indexOf(assetInId);
+    const assetOutIdx = pool.assets.indexOf(assetOutId);
+    if (assetInIdx === -1 || assetOutIdx === -1) continue;
+    if (pool.reserves[assetInIdx] === 0n || pool.reserves[assetOutIdx] === 0n) continue;
+
+    const liq = normalizeReserve(pool.reserves[assetOutIdx], assetOutId, decimals);
+    if (liq > bestLiquidity) {
+      bestLiquidity = liq;
+      bestPool = pool;
+    }
+  }
+
+  if (!bestPool) return null;
+
+  const assetInIdx = bestPool.assets.indexOf(assetInId);
+  const assetOutIdx = bestPool.assets.indexOf(assetOutId);
+
+  const spotPrice = calculateSpotPrice(bestPool, assetInIdx, assetOutIdx, decimals);
+  if (spotPrice === 0n) return null;
+
+  return {
+    price: spotPrice,
+    liquidity: bestLiquidity,
+  };
+}
+
+function findStableLpOmnipoolBridgeIds(
+  stableswapPools: StableswapPool[],
+  omnipoolAssets: Map<number, OmnipoolAssetState>,
+  referenceAssetIds: number[],
+): number[] {
+  const referenceIdSet = new Set(referenceAssetIds);
+  const bridgeIds: number[] = [];
+
+  for (const pool of stableswapPools) {
+    if (!omnipoolAssets.has(pool.poolId)) continue;
+    if (!pool.assets.some(assetId => referenceIdSet.has(assetId))) continue;
+    bridgeIds.push(pool.poolId);
+  }
+
+  return bridgeIds;
+}
+
+function getUsdObservationsFromReferences(
+  assetId: number,
+  referenceUsdPrices: Map<number, string>,
+  stableswapPools: StableswapPool[],
+  decimals: AssetDecimals,
+  atokenEquivalences: [number, number][] = [],
+): SpotQuote[] {
+  const directPrice = referenceUsdPrices.get(assetId);
+  if (directPrice) {
+    return [{
+      price: priceStringTo12(directPrice),
+      liquidity: 0n,
+    }];
+  }
+
+  const assetAliases = new Map<number, Set<number>>();
+  for (const [baseId, aTokenId] of atokenEquivalences) {
+    if (!assetAliases.has(baseId)) assetAliases.set(baseId, new Set([baseId]));
+    if (!assetAliases.has(aTokenId)) assetAliases.set(aTokenId, new Set([aTokenId]));
+    assetAliases.get(baseId)!.add(aTokenId);
+    assetAliases.get(aTokenId)!.add(baseId);
+  }
+
+  const observations: SpotQuote[] = [];
+  for (const [referenceId, referenceUsdPrice] of referenceUsdPrices.entries()) {
+    const referenceCandidates = [...(assetAliases.get(referenceId) ?? new Set([referenceId]))];
+    for (const referenceCandidateId of referenceCandidates) {
+      const quote = getBestStableQuote(assetId, referenceCandidateId, stableswapPools, decimals);
+      if (!quote) continue;
+
+      observations.push({
+        price: (quote.price * priceStringTo12(referenceUsdPrice)) / PRICE_SCALE,
+        liquidity: quote.liquidity,
+      });
+    }
+  }
+
+  return observations;
+}
+
+function buildUsdReferencePrices(
+  referenceIds: number[],
+  stableswapPools: StableswapPool[],
+  decimals: AssetDecimals,
+): Map<number, string> {
+  const uniqueIds = [...new Set(referenceIds)];
+  const prices = new Map<number, string>();
+
+  for (const id of uniqueIds) {
+    prices.set(id, '1.000000000000');
+  }
+
+  if (uniqueIds.length < 2) {
+    return prices;
+  }
+
+  const [primaryId, secondaryId] = uniqueIds;
+  const quote = getBestStableQuote(primaryId, secondaryId, stableswapPools, decimals);
+  if (!quote) {
+    return prices;
+  }
+
+  const denominator = PRICE_SCALE + quote.price;
+  if (denominator === 0n) {
+    return prices;
+  }
+
+  const primaryPrice = (2n * quote.price * PRICE_SCALE) / denominator;
+  const secondaryPrice = (2n * PRICE_SCALE * PRICE_SCALE) / denominator;
+
+  prices.set(primaryId, price12ToString(primaryPrice));
+  prices.set(secondaryId, price12ToString(secondaryPrice));
+
+  return prices;
+}
+
+function getUsdPriceFromReferences(
+  assetId: number,
+  referenceUsdPrices: Map<number, string>,
+  stableswapPools: StableswapPool[],
+  decimals: AssetDecimals,
+  atokenEquivalences: [number, number][] = [],
+): string | null {
+  const observations = getUsdObservationsFromReferences(
+    assetId,
+    referenceUsdPrices,
+    stableswapPools,
+    decimals,
+    atokenEquivalences,
+  );
+  if (observations.length === 0) {
+    return null;
+  }
+
+  if (observations.length === 1) {
+    return price12ToString(observations[0].price);
+  }
+
+  let weightedSum = 0n;
+  let totalLiquidity = 0n;
+  for (const observation of observations) {
+    weightedSum += observation.price * observation.liquidity;
+    totalLiquidity += observation.liquidity;
+  }
+
+  if (totalLiquidity === 0n) {
+    return price12ToString(observations[0].price);
+  }
+
+  return price12ToString(weightedSum / totalLiquidity);
+}
+
+function getStableLpUsdQuote(
+  assetId: number,
+  referenceUsdPrices: Map<number, string>,
+  stableswapPools: StableswapPool[],
+  decimals: AssetDecimals,
+  atokenEquivalences: [number, number][] = [],
+): SpotQuote | null {
+  const pool = stableswapPools.find(candidate => candidate.poolId === assetId);
+  if (!pool) return null;
+
+  const lpDecimals = decimals.get(assetId) ?? 18;
+  const normalizedTotalSupply = normalizeReserve(pool.totalIssuance ?? 0n, assetId, new Map([[assetId, lpDecimals]]));
+  if (normalizedTotalSupply === 0n) return null;
+
+  let totalValue = 0n;
+  for (let index = 0; index < pool.assets.length; index++) {
+    const underlyingAssetId = pool.assets[index];
+    const underlyingPrice = getUsdPriceFromReferences(
+      underlyingAssetId,
+      referenceUsdPrices,
+      stableswapPools,
+      decimals,
+      atokenEquivalences,
+    );
+    if (!underlyingPrice) {
+      return null;
+    }
+
+    totalValue += normalizeReserve(pool.reserves[index], underlyingAssetId, decimals) * priceStringTo12(underlyingPrice);
+  }
+
+  if (totalValue === 0n) return null;
+
+  return {
+    price: totalValue / normalizedTotalSupply,
+    liquidity: totalValue / PRICE_SCALE,
+  };
+}
+
+function weightedMedian(observations: WeightedObservation[]): bigint | null {
+  if (observations.length === 0) {
+    return null;
+  }
+
+  const sorted = [...observations].sort((left, right) => {
+    if (left.value < right.value) return -1;
+    if (left.value > right.value) return 1;
+    return 0;
+  });
+
+  let totalWeight = 0n;
+  for (const observation of sorted) {
+    totalWeight += observation.weight > 0n ? observation.weight : 1n;
+  }
+
+  const threshold = (totalWeight + 1n) / 2n;
+  let runningWeight = 0n;
+  for (const observation of sorted) {
+    runningWeight += observation.weight > 0n ? observation.weight : 1n;
+    if (runningWeight >= threshold) {
+      return observation.value;
+    }
+  }
+
+  return sorted[sorted.length - 1].value;
 }
 
 const MAX_HOPS = 3;
@@ -212,21 +458,6 @@ export function collectUnpricedConnectedAssets(
   return unpriced.sort((a, b) => a - b);
 }
 
-// Normalize all prices so that USDT = $1.
-function normalizeToUsdt(prices: PriceMap, usdtAssetId: number): void {
-  const usdPrice = prices.get(usdtAssetId);
-  if (!usdPrice) return;
-
-  const usdFloat = parseFloat(usdPrice);
-  if (usdFloat === 0 || usdFloat === 1) return;
-
-  for (const [assetId, price] of prices.entries()) {
-    const normalized = parseFloat(price) / usdFloat;
-    prices.set(assetId, normalized.toFixed(12));
-  }
-  prices.set(usdtAssetId, '1.000000000000');
-}
-
 // Convert 12-decimal price string to 24-decimal bigint for BFS intermediate math
 export function priceTo24(priceStr: string): bigint {
   const [intPart, decPart = ''] = priceStr.split('.');
@@ -249,6 +480,7 @@ export function buildGraph(
   totalIssuances: Map<number, bigint> = new Map(),
 ): Map<number, GraphEdge[]> {
   const graph = new Map<number, GraphEdge[]>();
+  let maxPoolLiquidity = 0n;
 
   const addEdge = (from: number, edge: GraphEdge) => {
     if (!graph.has(from)) graph.set(from, []);
@@ -267,6 +499,9 @@ export function buildGraph(
     const normA = pool.reserveA * (10n ** BigInt(18 - decimalsA));
     const normB = pool.reserveB * (10n ** BigInt(18 - decimalsB));
     const liquidity = normA + normB;
+    if (liquidity > maxPoolLiquidity) {
+      maxPoolLiquidity = liquidity;
+    }
 
     // Edge: assetA -> assetB (knowing A's price, compute B's)
     addEdge(pool.assetA, {
@@ -310,6 +545,9 @@ export function buildGraph(
     for (let i = 0; i < pool.assets.length; i++) {
       const d = decimals.get(pool.assets[i]) || 12;
       liquiditySum += pool.reserves[i] * (10n ** BigInt(18 - d));
+    }
+    if (liquiditySum > maxPoolLiquidity) {
+      maxPoolLiquidity = liquiditySum;
     }
 
     for (let i = 0; i < pool.assets.length; i++) {
@@ -389,14 +627,14 @@ export function buildGraph(
   }
 
   // aToken equivalence edges (zero-cost, bidirectional, 1:1 price copy)
+  // These are exact wrapper relations, so they must outrank any market route.
+  const atokenLiquidity = maxPoolLiquidity + 1n;
   for (const [base, aToken] of atokenEquivalences) {
-    const maxLiquidity = BigInt(Number.MAX_SAFE_INTEGER);
-
     addEdge(base, {
       toAsset: aToken,
       poolId: null,
       kind: 'atoken',
-      liquidity: maxLiquidity,
+      liquidity: atokenLiquidity,
       computePrice: (knownPrice: bigint, _precision: number): bigint => knownPrice,
     });
 
@@ -404,7 +642,7 @@ export function buildGraph(
       toAsset: base,
       poolId: null,
       kind: 'atoken',
-      liquidity: maxLiquidity,
+      liquidity: atokenLiquidity,
       computePrice: (knownPrice: bigint, _precision: number): bigint => knownPrice,
     });
   }
@@ -424,69 +662,140 @@ export function buildGraph(
 // Resolve all asset prices denominated in USD.
 //
 // Strategy:
-// 1. If USDT is in the Omnipool, use it directly as $1 anchor (historical path)
-// 2. Fallback: stableswap LP token containing USDT
-// 3. Fallback: most liquid stablecoin from anchor list → compute all prices →
-//    resolve USDT through stableswap/XYK + aToken equivalences → normalize to USDT
-// 4. Compute all Omnipool prices via LRNA
-// 5. Iteratively resolve XYK + Stableswap + aToken equivalences
-// 6. Normalize so USDT = $1 (USD anchor)
+// 1. Prefer a direct Omnipool USD reference (10/22 basket)
+// 2. Fallback: externally priced Omnipool bridge assets, including stable LP bridges priced by NAV
+// 3. Compute all Omnipool prices via LRNA
+// 4. Iteratively resolve XYK + Stableswap + aToken equivalences
 export function resolvePrices(
   omnipoolAssets: Map<number, OmnipoolAssetState>,
   xykPools: XYKPool[],
   stableswapPools: StableswapPool[],
   decimals: AssetDecimals,
-  usdtAssetId: number = 10,
+  _legacyUsdReferenceAssetId: number = 10,
   lrnaAssetId: number = 1,
-  stablecoinAnchorIds: number[] = [10],
+  omnipoolBridgeIds: number[] = [10],
   atokenEquivalences: [number, number][] = [],
   totalIssuances: Map<number, bigint> = new Map(),
+  usdReferenceIds: number[] = [_legacyUsdReferenceAssetId],
 ): ResolvedPrices {
   const prices = new Map<number, string>();
   const hopCounts = new Map<number, number>();
 
-  let lrnaPrice: string | null = null;
-  let needsNormalization = false;
+  const canonicalizeExactWrapperPairs = (): void => {
+    for (const [baseId, aTokenId] of atokenEquivalences) {
+      const basePrice = prices.get(baseId);
+      const aTokenPrice = prices.get(aTokenId);
+      const canonicalPrice = basePrice ?? aTokenPrice;
+      if (!canonicalPrice) continue;
 
-  // Primary: USDT directly in Omnipool
-  const usdState = omnipoolAssets.get(usdtAssetId);
-  if (usdState) {
+      const baseHop = hopCounts.get(baseId);
+      const aTokenHop = hopCounts.get(aTokenId);
+      const canonicalHop =
+        baseHop != null && aTokenHop != null ? Math.min(baseHop, aTokenHop)
+          : baseHop ?? aTokenHop;
+
+      prices.set(baseId, canonicalPrice);
+      prices.set(aTokenId, canonicalPrice);
+      if (canonicalHop != null) {
+        hopCounts.set(baseId, canonicalHop);
+        hopCounts.set(aTokenId, canonicalHop);
+      }
+    }
+  };
+
+  let lrnaPrice: string | null = null;
+  const referenceUsdPrices = buildUsdReferencePrices(usdReferenceIds, stableswapPools, decimals);
+
+  const seedReferencePrices = () => {
+    for (const [assetId, price] of referenceUsdPrices.entries()) {
+      prices.set(assetId, price);
+    }
+  };
+
+  // Keep the stable USD basket available even when Omnipool has no safe USD anchor yet.
+  seedReferencePrices();
+
+  const directReferenceBridge = findBestOmnipoolBridge(omnipoolAssets, usdReferenceIds);
+  if (directReferenceBridge) {
     try {
-      const usdDecimals = decimals.get(usdtAssetId) || 6;
-      lrnaPrice = calculateLRNAPrice(usdState, usdDecimals);
-      prices.set(usdtAssetId, '1.000000000000');
+      const bridgeDecimals = decimals.get(directReferenceBridge.assetId) || 6;
+      const bridgeUsdPrice = referenceUsdPrices.get(directReferenceBridge.assetId) ?? '1.000000000000';
+      lrnaPrice = calculateLRNAPrice(directReferenceBridge.state, bridgeDecimals);
+      lrnaPrice = multiplyPriceStrings(lrnaPrice, bridgeUsdPrice);
     } catch {
     }
   }
 
-  // Fallback 1: stableswap LP token containing USDT
   if (!lrnaPrice) {
-    const stablePoolLPId = findMostLiquidStableLPToken(stableswapPools, omnipoolAssets, usdtAssetId);
-    if (stablePoolLPId !== null) {
-      const stablePoolState = omnipoolAssets.get(stablePoolLPId);
-      if (stablePoolState) {
-        try {
-          const lpDecimals = decimals.get(stablePoolLPId) || 18;
-          lrnaPrice = calculateLRNAPrice(stablePoolState, lpDecimals);
-          prices.set(stablePoolLPId, '1.000000000000');
-          prices.set(usdtAssetId, '1.000000000000');
-        } catch {
+    const bridgeCandidates: WeightedObservation[] = [];
+    const selectedBridgePrices = new Map<number, string>();
+    const nonReferenceBridgeIds = omnipoolBridgeIds.filter(id => !usdReferenceIds.includes(id));
+    const stableLpBridgeIds = findStableLpOmnipoolBridgeIds(stableswapPools, omnipoolAssets, usdReferenceIds);
+    const candidateBridgeIds = [
+      ...(nonReferenceBridgeIds.length > 0 ? nonReferenceBridgeIds : omnipoolBridgeIds),
+      ...stableLpBridgeIds,
+    ].filter((assetId, index, ids) => ids.indexOf(assetId) === index);
+
+    for (const assetId of candidateBridgeIds) {
+      const state = omnipoolAssets.get(assetId);
+      if (!state || state.hubReserve === 0n || state.reserve === 0n) continue;
+
+      try {
+        const usdObservations = getUsdObservationsFromReferences(
+          assetId,
+          referenceUsdPrices,
+          stableswapPools,
+          decimals,
+          atokenEquivalences,
+        );
+        const stableLpQuote = usdObservations.length === 0
+          ? getStableLpUsdQuote(
+            assetId,
+            referenceUsdPrices,
+            stableswapPools,
+            decimals,
+            atokenEquivalences,
+          )
+          : null;
+        const candidateUsdObservations = stableLpQuote ? [stableLpQuote] : usdObservations;
+        if (candidateUsdObservations.length === 0) continue;
+
+        let weightedUsdSum = 0n;
+        let totalExternalLiquidity = 0n;
+        let totalExternalLiquidityUsd = 0n;
+        for (const observation of candidateUsdObservations) {
+          weightedUsdSum += observation.price * observation.liquidity;
+          totalExternalLiquidity += observation.liquidity;
+          totalExternalLiquidityUsd += (observation.liquidity * observation.price) / PRICE_SCALE;
         }
+
+        const assetUsdPrice = totalExternalLiquidity > 0n
+          ? weightedUsdSum / totalExternalLiquidity
+          : candidateUsdObservations[0].price;
+        const assetReserveUsd =
+          (normalizeReserve(state.reserve, assetId, decimals) * assetUsdPrice) / PRICE_SCALE;
+        const anchorWeight = totalExternalLiquidityUsd > 0n
+          ? (assetReserveUsd < totalExternalLiquidityUsd ? assetReserveUsd : totalExternalLiquidityUsd)
+          : assetReserveUsd;
+        if (anchorWeight === 0n) continue;
+
+        const bridgeDecimals = decimals.get(assetId)
+          ?? (stableswapPools.some(pool => pool.poolId === assetId) ? 18 : 6);
+        const bridgeLrnaPrice = priceStringTo12(calculateLRNAPrice(state, bridgeDecimals));
+        bridgeCandidates.push({
+          value: (bridgeLrnaPrice * assetUsdPrice) / PRICE_SCALE,
+          weight: anchorWeight,
+        });
+        selectedBridgePrices.set(assetId, price12ToString(assetUsdPrice));
+      } catch {
       }
     }
-  }
 
-  // Fallback 2: most liquid stablecoin from anchor list.
-  // Prices will be in anchor terms — normalized to USDT after iteration.
-  if (!lrnaPrice) {
-    const bestAnchor = findBestLRNAAnchor(omnipoolAssets, stablecoinAnchorIds);
-    if (bestAnchor) {
-      try {
-        const anchorDecimals = decimals.get(bestAnchor.assetId) || 6;
-        lrnaPrice = calculateLRNAPrice(bestAnchor.state, anchorDecimals);
-        prices.set(bestAnchor.assetId, '1.000000000000');
-        needsNormalization = true;
-      } catch {
+    const medianLrnaPrice = weightedMedian(bridgeCandidates);
+    if (medianLrnaPrice !== null) {
+      lrnaPrice = price12ToString(medianLrnaPrice);
+      for (const [assetId, price] of selectedBridgePrices.entries()) {
+        prices.set(assetId, price);
       }
     }
   }
@@ -503,10 +812,16 @@ export function resolvePrices(
     }
   }
 
+  // Exact wrapper pairs must stay identical even if only one side is directly
+  // seeded (for example, because only one wrapper is present in Omnipool).
+  canonicalizeExactWrapperPairs();
+
   // Set hop count 0 for all Omnipool-priced assets
   for (const assetId of prices.keys()) {
     hopCounts.set(assetId, 0);
   }
+
+  canonicalizeExactWrapperPairs();
 
   // Track Omnipool-priced assets for routing preference
   const omnipoolPricedAssets = new Set(prices.keys());
@@ -531,14 +846,11 @@ export function resolvePrices(
     }
   }
 
+  canonicalizeExactWrapperPairs();
+
     // LP NAV pricing: price stableswap share tokens via TVL / totalSupply,
   // then seed a second BFS pass with newly priced LP tokens (D-01, D-03)
   computeLpNavPrices(prices, stableswapPools, totalIssuances, decimals, graph, omnipoolPricedAssets, hopCounts);
-
-  // Normalize to USDT if we used a non-USDT anchor
-  if (needsNormalization) {
-    normalizeToUsdt(prices, usdtAssetId);
-  }
 
   // Collect unpriced assets that have pool connections in the graph
   const unpricedConnected = collectUnpricedConnectedAssets(graph, prices);
