@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS price_data.raw_blocks
     extrinsics_root Nullable(String),
     block_timestamp DateTime,
     spec_version UInt32,
+    author Nullable(String),
     ingest_source LowCardinality(String) DEFAULT 'sqd',
     ingested_at DateTime DEFAULT now()
 )

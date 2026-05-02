@@ -8,6 +8,7 @@ export interface RawBlockRow {
   extrinsics_root: string | null
   block_timestamp: string
   spec_version: number
+  author: string | null
   ingest_source: string
 }
 

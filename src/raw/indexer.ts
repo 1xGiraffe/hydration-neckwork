@@ -49,6 +49,7 @@ function serializeBlock(
     extrinsicsRoot?: string
     timestamp?: number
     specVersion: number
+    validator?: string
   },
   ingestSource: string
 ): RawBlockRow {
@@ -60,6 +61,7 @@ function serializeBlock(
     extrinsics_root: header.extrinsicsRoot ?? null,
     block_timestamp: toClickHouseDateTime(header.timestamp),
     spec_version: header.specVersion,
+    author: header.validator ?? null,
     ingest_source: ingestSource,
   }
 }

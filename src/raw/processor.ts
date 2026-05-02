@@ -32,6 +32,7 @@ export const rawProcessor = new SubstrateBatchProcessor()
       timestamp: true,
       stateRoot: true,
       extrinsicsRoot: true,
+      validator: true,
     },
     extrinsic: {
       hash: true,
