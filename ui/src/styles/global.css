@@ -15,3 +15,13 @@ html, body, #root {
 ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #475569; }
 * { scrollbar-width: thin; scrollbar-color: #334155 transparent; }
+
+/* Visible focus ring for keyboard navigation, but not on mouse-click focus */
+button:focus-visible,
+input:focus-visible,
+[role="option"]:focus-visible,
+[role="dialog"] :focus-visible {
+  outline: 2px solid #4FFFDF;
+  outline-offset: 2px;
+}
+

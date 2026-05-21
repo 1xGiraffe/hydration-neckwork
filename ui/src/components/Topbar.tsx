@@ -16,6 +16,12 @@ interface TopbarProps {
   onScreenshot: () => void
 }
 
+function pairLabel(baseAsset: Asset | undefined, quoteAsset: Asset | undefined, fallback: string): { base: string; quote: string } {
+  if (!baseAsset || !quoteAsset) return { base: fallback, quote: '' }
+  const quote = quoteAsset.isStablecoin ? 'USD' : quoteAsset.symbol
+  return { base: baseAsset.symbol, quote }
+}
+
 export default function Topbar({
   pairDisplay,
   baseAsset,
@@ -31,6 +37,7 @@ export default function Topbar({
   const [pairHovered, setPairHovered] = useState(false)
   const [screenshotHovered, setScreenshotHovered] = useState(false)
   const [exportHovered, setExportHovered] = useState(false)
+  const { base: baseLabel, quote: quoteLabel } = pairLabel(baseAsset, quoteAsset, pairDisplay)
 
   return (
     <>
@@ -64,21 +71,22 @@ export default function Topbar({
             onClick={onPairClick}
             onMouseEnter={() => setPairHovered(true)}
             onMouseLeave={() => setPairHovered(false)}
-            aria-label="Select trading pair"
+            aria-label={`Select trading pair. Current pair: ${baseLabel} ${quoteLabel}`}
             aria-haspopup="dialog"
+            title="Change pair (or just start typing)"
             style={{
               fontSize: '14px',
               fontWeight: 600,
-              color: pairHovered ? '#4FFFDF' : '#e2e8f0',
-              background: 'transparent',
-              border: 'none',
+              color: '#e2e8f0',
+              background: pairHovered ? '#0d1b2a' : 'transparent',
+              border: `1px solid ${pairHovered ? '#1e293b' : 'transparent'}`,
               cursor: 'pointer',
               display: 'flex',
               alignItems: 'center',
               gap: '8px',
-              padding: 0,
-              minWidth: '100px',
-              transition: 'color 0.15s ease',
+              padding: '4px 10px 4px 6px',
+              borderRadius: '6px',
+              transition: 'background 0.15s ease, border-color 0.15s ease',
             }}
           >
             {baseAsset && quoteAsset && (
@@ -88,8 +96,14 @@ export default function Topbar({
                 isUsdPair={quoteAsset.isStablecoin}
               />
             )}
-            {pairDisplay}
-            <span style={{ fontSize: '10px', color: '#576B80', marginLeft: '4px' }}>▾</span>
+            <span>{baseLabel}</span>
+            {quoteLabel && (
+              <>
+                <span style={{ color: '#576B80', fontWeight: 400 }}>/</span>
+                <span style={{ color: '#94a3b8', fontWeight: 500 }}>{quoteLabel}</span>
+              </>
+            )}
+            <span style={{ fontSize: '10px', color: pairHovered ? '#4FFFDF' : '#576B80', marginLeft: '2px', transition: 'color 0.15s ease' }}>▾</span>
           </button>
 
           <div
@@ -138,10 +152,12 @@ export default function Topbar({
                   right: 0,
                   top: '36px',
                   background: '#030816',
-                  border: '1px solid #0d1b2a',
+                  border: '1px solid #1e293b',
                   borderRadius: '6px',
                   zIndex: 50,
-                  minWidth: '140px',
+                  minWidth: '160px',
+                  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.5)',
+                  overflow: 'hidden',
                 }}>
                   {INTERVALS.map((iv) => (
                     <button
@@ -192,16 +208,18 @@ export default function Topbar({
             onMouseEnter={() => setExportHovered(true)}
             onMouseLeave={() => setExportHovered(false)}
             aria-label="Export visible candles as CSV"
-            title="Download CSV"
+            aria-disabled={!canExport}
+            title="Download visible candles as CSV"
             style={{
-              padding: '8px',
-              background: 'transparent',
+              padding: '6px',
+              background: canExport && exportHovered ? '#0d1b2a' : 'transparent',
               border: 'none',
+              borderRadius: '6px',
               cursor: canExport ? 'pointer' : 'not-allowed',
               color: canExport ? (exportHovered ? '#4FFFDF' : '#576B80') : '#334155',
               display: 'flex',
               alignItems: 'center',
-              transition: 'color 0.15s ease',
+              transition: 'color 0.15s ease, background 0.15s ease',
             }}
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -217,16 +235,17 @@ export default function Topbar({
             onMouseEnter={() => setScreenshotHovered(true)}
             onMouseLeave={() => setScreenshotHovered(false)}
             aria-label="Copy chart screenshot to clipboard"
-            title="Screenshot"
+            title="Copy screenshot to clipboard"
             style={{
-              padding: '8px',
-              background: 'transparent',
+              padding: '6px',
+              background: screenshotHovered ? '#0d1b2a' : 'transparent',
               border: 'none',
+              borderRadius: '6px',
               cursor: 'pointer',
               color: screenshotHovered ? '#4FFFDF' : '#576B80',
               display: 'flex',
               alignItems: 'center',
-              transition: 'color 0.15s ease',
+              transition: 'color 0.15s ease, background 0.15s ease',
             }}
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">

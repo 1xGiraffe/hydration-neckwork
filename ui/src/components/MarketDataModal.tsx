@@ -235,35 +235,79 @@ export default function MarketDataModal({
           <div style={{
             padding: '16px',
             background: '#030816',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
           }}>
-            <input
-              ref={inputRef}
-              type="text"
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              placeholder="Search assets and pairs..."
-              aria-label="Search assets"
+            <div style={{ position: 'relative', flex: 1 }}>
+              <svg
+                aria-hidden="true"
+                width="14" height="14" viewBox="0 0 16 16" fill="none"
+                style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: '#576B80', pointerEvents: 'none' }}
+              >
+                <circle cx="7" cy="7" r="5" stroke="currentColor" strokeWidth="1.5" />
+                <line x1="11" y1="11" x2="14" y2="14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+              <input
+                ref={inputRef}
+                type="text"
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                placeholder="Search assets and pairs…"
+                aria-label="Search assets"
+                style={{
+                  width: '100%',
+                  fontSize: '14px',
+                  background: '#1e293b',
+                  color: '#e2e8f0',
+                  border: `1px solid ${query ? '#576B80' : '#334155'}`,
+                  borderRadius: '6px',
+                  padding: '12px 16px 12px 36px',
+                  outline: 'none',
+                }}
+                onFocus={e => { e.currentTarget.style.border = '1px solid #576B80' }}
+                onBlur={e => { e.currentTarget.style.border = query ? '1px solid #576B80' : '1px solid #334155' }}
+              />
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close pair selector"
+              title="Close (Esc)"
               style={{
-                width: '100%',
-                fontSize: '14px',
-                background: '#1e293b',
-                color: '#e2e8f0',
-                border: `1px solid ${query ? '#576B80' : '#334155'}`,
+                flexShrink: 0,
+                width: '40px',
+                height: '40px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'transparent',
+                color: '#576B80',
+                border: '1px solid #334155',
                 borderRadius: '6px',
-                padding: '12px 16px',
-                outline: 'none',
+                cursor: 'pointer',
+                transition: 'background 0.15s ease, color 0.15s ease, border-color 0.15s ease',
               }}
-              onFocus={e => { e.currentTarget.style.border = '1px solid #576B80' }}
-              onBlur={e => { e.currentTarget.style.border = query ? '1px solid #576B80' : '1px solid #334155' }}
-            />
+              onMouseEnter={e => { e.currentTarget.style.background = '#0d1b2a'; e.currentTarget.style.color = '#e2e8f0'; e.currentTarget.style.borderColor = '#576B80' }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#576B80'; e.currentTarget.style.borderColor = '#334155' }}
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <line x1="3" y1="3" x2="13" y2="13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                <line x1="13" y1="3" x2="3" y2="13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+            </button>
           </div>
 
           {/* Table area or empty state */}
           {rows.length === 0 && query.trim() !== '' ? (
-            <div style={{ padding: '24px 16px', color: '#576B80', fontSize: '13px' }}>
-              <div>
-                No assets match &ldquo;{query}&rdquo;. Try a different symbol, e.g. HDX, SOL, ETH
-              </div>
+            <div style={{
+              flex: 1, display: 'flex', flexDirection: 'column',
+              alignItems: 'center', justifyContent: 'flex-start',
+              padding: '48px 24px', color: '#576B80', fontSize: '14px', textAlign: 'center', gap: '8px',
+            }}>
+              <div style={{ fontSize: '32px', lineHeight: 1, opacity: 0.6 }}>🔍</div>
+              <div style={{ color: '#94a3b8', fontWeight: 500 }}>No matches for &ldquo;{query}&rdquo;</div>
+              <div>Try a different symbol — e.g. HDX, SOL, ETH</div>
             </div>
           ) : (
             <MarketTable

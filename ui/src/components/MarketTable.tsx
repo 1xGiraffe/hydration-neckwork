@@ -40,6 +40,14 @@ interface MarketTableProps {
 
 const columnHelper = createColumnHelper<MarketRow>()
 
+const UP_COLOR = '#4FFFDF'
+const NEUTRAL_COLOR = '#576B80'
+
+function changeColor(change: number | null): string {
+  if (change !== null && change > 0) return UP_COLOR
+  return NEUTRAL_COLOR
+}
+
 function nullLastSortingFn(
   rowA: { getValue: (id: string) => unknown },
   rowB: { getValue: (id: string) => unknown },
@@ -98,7 +106,11 @@ export default function MarketTable({
       cell: (info) => {
         const price = info.getValue()
         const isUsd = info.row.original.pairResult.quote.isStablecoin
-        return price !== null ? formatPrice(price, isUsd) : '\u2014'
+        return (
+          <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+            {price !== null ? formatPrice(price, isUsd) : '\u2014'}
+          </span>
+        )
       },
     }),
     columnHelper.accessor('change1h', {
@@ -107,9 +119,7 @@ export default function MarketTable({
       cell: (info) => {
         const change = info.getValue()
         return (
-          <span style={{
-            color: change !== null && change > 0 ? '#4FFFDF' : '#576B80',
-          }}>
+          <span style={{ color: changeColor(change), fontVariantNumeric: 'tabular-nums' }}>
             {formatChange(change)}
           </span>
         )
@@ -121,9 +131,7 @@ export default function MarketTable({
       cell: (info) => {
         const change = info.getValue()
         return (
-          <span style={{
-            color: change !== null && change > 0 ? '#4FFFDF' : '#576B80',
-          }}>
+          <span style={{ color: changeColor(change), fontVariantNumeric: 'tabular-nums' }}>
             {formatChange(change)}
           </span>
         )
@@ -135,20 +143,18 @@ export default function MarketTable({
       cell: (info) => {
         const change = info.getValue()
         return (
-          <span style={{
-            color: change !== null && change > 0 ? '#4FFFDF' : '#576B80',
-          }}>
+          <span style={{ color: changeColor(change), fontVariantNumeric: 'tabular-nums' }}>
             {formatChange(change)}
           </span>
         )
       },
     }),
     columnHelper.accessor('sparkline', {
-      header: 'Last 7 Days',
+      header: isMobile ? '7D' : 'Last 7 Days',
       enableSorting: false,
       cell: (info) => {
         const row = info.row.original
-        return <Sparkline data={info.getValue()} change7d={row.change7d} />
+        return <Sparkline data={info.getValue()} change7d={row.change7d} width={isMobile ? 56 : 80} />
       },
     }),
   ], [isMobile])
@@ -199,7 +205,7 @@ export default function MarketTable({
                   fontSize: '12px',
                   fontWeight: 600,
                   color: '#e2e8f0',
-                  padding: '0 16px',
+                  padding: isMobile ? '0 8px' : '0 16px',
                   cursor: isSortable ? 'pointer' : 'default',
                   userSelect: 'none',
                   textAlign: 'left',
@@ -210,15 +216,16 @@ export default function MarketTable({
                 }
 
                 if (isSymbol) {
-                  thStyle = { ...thStyle, minWidth: isMobile ? '80px' : '120px' }
+                  // Asset col stretches; on mobile let it take all remaining width
+                  thStyle = { ...thStyle, width: isMobile ? 'auto' : 'auto', minWidth: isMobile ? '0' : '120px' }
                 } else if (isPrice) {
-                  thStyle = { ...thStyle, width: '100px', textAlign: 'right' }
+                  thStyle = { ...thStyle, width: isMobile ? '88px' : '100px', textAlign: 'right' }
                 } else if (isChange1h) {
                   thStyle = { ...thStyle, width: '64px', textAlign: 'right' }
                 } else if (header.column.id === 'change24h' || header.column.id === 'change7d') {
-                  thStyle = { ...thStyle, width: '64px', textAlign: 'right' }
+                  thStyle = { ...thStyle, width: isMobile ? '60px' : '64px', textAlign: 'right' }
                 } else if (isSparkline) {
-                  thStyle = { ...thStyle, width: '112px', textAlign: 'center' }
+                  thStyle = { ...thStyle, width: isMobile ? '72px' : '112px', textAlign: 'center' }
                 }
 
                 return (
@@ -249,22 +256,28 @@ export default function MarketTable({
         <tbody>
           {table.getRowModel().rows.map((row, rowIndex) => {
             const isActive = rowIndex === activeIndex
-            const change24h = row.original.change24h
-            const accentColor = change24h !== null && change24h > 0 ? '#4FFFDF' : '#576B80'
+            const isCurrent = row.original.isCurrent
+            // Active highlight (keyboard/hover) uses neutral accent so the bar is "where am I?",
+            // not "this is up/down".
+            const borderLeft = isCurrent
+              ? `3px solid ${UP_COLOR}`
+              : isActive
+                ? '3px solid #334155'
+                : '3px solid transparent'
             return (
               <tr
                 key={row.id}
                 role="option"
-                aria-selected={row.original.isCurrent}
+                aria-selected={isCurrent}
                 onClick={() => onRowClick(row.original)}
                 onMouseEnter={() => onRowMouseEnter(rowIndex)}
                 style={{
                   minHeight: '56px',
-                  background: isActive ? '#1e293b' : 'transparent',
+                  background: isActive ? '#1e293b' : isCurrent ? 'rgba(79, 255, 223, 0.05)' : 'transparent',
                   borderBottom: '1px solid #0d1b2a',
                   cursor: 'pointer',
                   transition: 'background 0.1s ease',
-                  borderLeft: isActive ? `3px solid ${accentColor}` : '3px solid transparent',
+                  borderLeft,
                 }}
               >
                 {row.getVisibleCells().map(cell => {
@@ -276,7 +289,7 @@ export default function MarketTable({
                   const isSparklineCell = cell.column.id === 'sparkline'
 
                   let tdStyle: React.CSSProperties = {
-                    padding: '8px 16px',
+                    padding: isMobile ? '8px' : '8px 16px',
                     fontSize: '14px',
                     color: '#e2e8f0',
                     display: hideCellOnMobile ? 'none' : 'table-cell',
@@ -284,15 +297,15 @@ export default function MarketTable({
                   }
 
                   if (isSymbolCell) {
-                    tdStyle = { ...tdStyle, minWidth: isMobile ? '80px' : '120px' }
+                    tdStyle = { ...tdStyle, width: isMobile ? 'auto' : 'auto', minWidth: isMobile ? '0' : '120px' }
                   } else if (isPriceCell) {
-                    tdStyle = { ...tdStyle, width: '100px', textAlign: 'right' }
+                    tdStyle = { ...tdStyle, width: isMobile ? '88px' : '100px', textAlign: 'right' }
                   } else if (isChange1hCell) {
                     tdStyle = { ...tdStyle, width: '64px', textAlign: 'right' }
                   } else if (cell.column.id === 'change24h' || cell.column.id === 'change7d') {
-                    tdStyle = { ...tdStyle, width: '64px', textAlign: 'right' }
+                    tdStyle = { ...tdStyle, width: isMobile ? '60px' : '64px', textAlign: 'right' }
                   } else if (isSparklineCell) {
-                    tdStyle = { ...tdStyle, width: '112px', textAlign: 'center' }
+                    tdStyle = { ...tdStyle, width: isMobile ? '72px' : '112px', textAlign: 'center' }
                   }
 
                   return (

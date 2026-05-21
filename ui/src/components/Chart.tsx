@@ -415,24 +415,35 @@ export default function Chart({ baseId, quoteId, interval, base, quote, baseName
       {loading && (
         <div style={{
           position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-          color: '#576B80', fontSize: '13px',
+          color: '#576B80', fontSize: '13px', pointerEvents: 'none', zIndex: 6,
         }}>
-          Loading...
+          Loading…
+        </div>
+      )}
+      {!loading && data.length === 0 && (
+        <div style={{
+          position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          color: '#576B80', fontSize: '13px', pointerEvents: 'none', zIndex: 6, textAlign: 'center',
+        }}>
+          <div style={{ maxWidth: '320px' }}>
+            No candles available for this pair and interval yet. Try a different interval or check back later.
+          </div>
         </div>
       )}
       {displayLegend && (
         <div style={{
-          position: 'absolute', top: '8px', left: '12px', zIndex: 10,
+          position: 'absolute', top: '8px', left: '12px', right: '72px', zIndex: 10,
           pointerEvents: 'none', fontSize: '12px', color: '#94a3b8',
-          display: 'flex', gap: '10px',
+          display: 'flex', flexWrap: 'wrap', columnGap: '10px', rowGap: '2px',
+          fontVariantNumeric: 'tabular-nums',
         }}>
-          <span>O {formatPrice(displayLegend.open)}</span>
-          <span>H {formatPrice(displayLegend.high)}</span>
-          <span>L {formatPrice(displayLegend.low)}</span>
-          <span style={{ color: displayLegend.close >= displayLegend.open ? '#4FFFDF' : '#576B80' }}>
+          <span style={{ whiteSpace: 'nowrap' }}>O {formatPrice(displayLegend.open)}</span>
+          <span style={{ whiteSpace: 'nowrap' }}>H {formatPrice(displayLegend.high)}</span>
+          <span style={{ whiteSpace: 'nowrap' }}>L {formatPrice(displayLegend.low)}</span>
+          <span style={{ whiteSpace: 'nowrap', color: displayLegend.close >= displayLegend.open ? '#4FFFDF' : '#576B80' }}>
             C {formatPrice(displayLegend.close)}
           </span>
-          <span>V {formatVolume(displayLegend.volume)} {base}</span>
+          <span style={{ whiteSpace: 'nowrap' }}>V {formatVolume(displayLegend.volume)} {base}</span>
         </div>
       )}
     </div>
