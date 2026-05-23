@@ -3,6 +3,7 @@ import IntervalSelector from './IntervalSelector'
 import PairIcons from './PairIcons'
 import { INTERVALS, INTERVAL_LABELS } from '../types'
 import type { OHLCVInterval, Asset } from '../types'
+import type { Theme } from '../hooks/useTheme'
 
 interface TopbarProps {
   pairDisplay: string
@@ -14,13 +15,28 @@ interface TopbarProps {
   onExport: () => void
   canExport: boolean
   onScreenshot: () => void
+  theme: Theme
+  onThemeToggle: () => void
+  showMobileSidebarButton: boolean
+  onOpenMobileSidebar: () => void
+  isFavorite: boolean
+  onToggleFavorite: () => void
 }
 
-function pairLabel(baseAsset: Asset | undefined, quoteAsset: Asset | undefined, fallback: string): { base: string; quote: string } {
-  if (!baseAsset || !quoteAsset) return { base: fallback, quote: '' }
-  const quote = quoteAsset.isStablecoin ? 'USD' : quoteAsset.symbol
-  return { base: baseAsset.symbol, quote }
+// Single, slashless label everywhere — matches the sidebar/picker format:
+//   USD pair  → BASE       (e.g. "HDX")
+//   cross pair → BASE+QUOTE (e.g. "HDXDOT")
+function pairLabel(baseAsset: Asset | undefined, quoteAsset: Asset | undefined, fallback: string): string {
+  if (!baseAsset || !quoteAsset) return fallback
+  if (quoteAsset.isStablecoin) return baseAsset.symbol
+  return baseAsset.symbol + quoteAsset.symbol
 }
+
+const HydrationLogo = () => (
+  <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" style={{ width: 20, height: 20, color: 'var(--accent)' }}>
+    <path d="M18.0532 11.3604C18.2827 11.1319 18.5778 10.8381 18.8718 10.5463C19.5265 9.89543 19.5265 8.83853 18.8718 8.18664L18.1782 7.49598C15.6959 9.96786 11.982 10.4637 9.00484 8.98646C11.017 9.35678 13.1028 9.06807 14.951 8.0785C16.1876 7.41641 16.4222 5.74741 15.4295 4.75886L11.3366 0.683262C10.4217 -0.227754 8.93928 -0.227754 8.02542 0.683262L3.61392 5.07613C6.51941 3.84682 10.0089 4.4171 12.3714 6.78594C8.76716 5.04349 4.30136 5.66171 1.3088 8.64164C1.07931 8.87016 0.78323 9.16499 0.490223 9.45676C-0.163408 10.1086 -0.163408 11.1645 0.490223 11.8154L1.18279 12.505C3.66515 10.0332 7.37896 9.53735 10.3562 11.0146C8.34404 10.6442 6.25816 10.933 4.40996 11.9225C3.17339 12.5846 2.93878 14.2536 3.93152 15.2422L8.0244 19.3178C8.93928 20.2288 10.4217 20.2288 11.3356 19.3178L15.7471 14.9249C12.8416 16.1542 9.35215 15.5839 6.98965 13.2151C10.5938 14.9575 15.0596 14.3393 18.0522 11.3594L18.0532 11.3604Z" />
+  </svg>
+)
 
 export default function Topbar({
   pairDisplay,
@@ -32,226 +48,245 @@ export default function Topbar({
   onExport,
   canExport,
   onScreenshot,
+  theme,
+  onThemeToggle,
+  showMobileSidebarButton,
+  onOpenMobileSidebar,
+  isFavorite,
+  onToggleFavorite,
 }: TopbarProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
-  const [pairHovered, setPairHovered] = useState(false)
-  const [screenshotHovered, setScreenshotHovered] = useState(false)
-  const [exportHovered, setExportHovered] = useState(false)
-  const { base: baseLabel, quote: quoteLabel } = pairLabel(baseAsset, quoteAsset, pairDisplay)
+  const label = pairLabel(baseAsset, quoteAsset, pairDisplay)
 
   return (
     <>
       <style>{`
-        @media (max-width: 768px) {
-          .topbar-desktop-intervals { display: none !important; }
-          .topbar-desktop-separator { display: none !important; }
-          .topbar-interval-mobile { display: flex !important; }
-          .topbar-export-desktop { display: none !important; }
-          .topbar-screenshot-btn { display: flex !important; }
+        .topbar {
+          display: flex; align-items: center; gap: 12px;
+          padding: 0 16px;
+          height: 56px;
+          min-height: 56px;
+          border-bottom: 1px solid var(--separator);
+          background: var(--bg);
         }
-        @media (min-width: 769px) {
-          .topbar-desktop-intervals { display: flex !important; }
-          .topbar-desktop-separator { display: block !important; }
-          .topbar-interval-mobile { display: none !important; }
-          .topbar-export-desktop { display: flex !important; }
-          .topbar-screenshot-btn { display: flex !important; }
+        .brand { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; line-height: 1; }
+        .brand .logo { color: var(--accent); }
+        .brand .wordmark { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 18px; letter-spacing: -0.01em; color: var(--text-high); line-height: 1; }
+        .brand .product { font-family: 'Gazpacho', serif; font-style: italic; font-weight: 400; font-size: 18px; color: var(--accent); line-height: 1; }
+
+        .vdiv { width: 1px; height: 24px; background: var(--separator); flex-shrink: 0; }
+
+        .pair-pill {
+          display: inline-flex; align-items: center; gap: 10px;
+          height: 36px; padding: 0 12px 0 8px;
+          border-radius: 9999px;
+          background: var(--panel); border: 1px solid var(--border);
+          color: var(--text-high);
+          transition: background 160ms, border-color 160ms;
+          flex-shrink: 0;
+        }
+        .pair-pill:hover { background: var(--panel-hover); border-color: var(--accent); }
+        .pair-pill .name { font-size: 13px; font-weight: 600; letter-spacing: -0.005em; white-space: nowrap; }
+        .pair-pill .caret { color: var(--text-low); font-size: 10px; }
+
+        /* Mobile-only favorite button — sits beside the pair pill so the
+           current-pair star is reachable when the hero is collapsed. */
+        .fav-btn-mobile {
+          display: none;
+          width: 36px; height: 36px; border-radius: 9999px;
+          align-items: center; justify-content: center;
+          color: var(--text-medium); flex-shrink: 0;
+          transition: color 120ms, background 120ms;
+        }
+        .fav-btn-mobile:hover { color: var(--amber); background: var(--panel-hover); }
+        .fav-btn-mobile.on { color: var(--amber); }
+        .fav-btn-mobile svg { width: 18px; height: 18px; }
+
+
+        .topbar-right { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+        .icon-btn {
+          width: 36px; height: 36px; border-radius: 9999px;
+          display: inline-flex; align-items: center; justify-content: center;
+          color: var(--text-medium);
+          transition: color 160ms, background 160ms;
+        }
+        .icon-btn:hover { color: var(--text-high); background: var(--panel-hover); }
+        .icon-btn[aria-disabled="true"] { opacity: 0.35; cursor: not-allowed; }
+        .icon-btn svg { width: 16px; height: 16px; }
+        .theme-toggle {
+          width: 36px; height: 36px; border-radius: 9999px;
+          display: inline-flex; align-items: center; justify-content: center;
+          color: var(--text-medium); margin-left: 2px;
+          transition: color 120ms, background 120ms;
+        }
+        .theme-toggle:hover { color: var(--text-high); background: var(--panel-hover); }
+        .theme-toggle svg { width: 16px; height: 16px; }
+
+        .interval-mobile { display: none; position: relative; }
+        .interval-mobile-trigger {
+          padding: 0 12px; height: 32px;
+          font-family: 'GeistMono', monospace; font-size: 11px; font-weight: 500;
+          text-transform: uppercase; letter-spacing: 0.04em;
+          background: var(--panel); color: var(--text-high); border: 1px solid var(--border);
+          border-radius: 9999px;
+          display: inline-flex; align-items: center; gap: 6px;
+        }
+        .interval-mobile-trigger:hover { background: var(--panel-hover); }
+        .interval-mobile-menu {
+          position: absolute; right: 0; top: 36px; z-index: 50;
+          background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px;
+          min-width: 160px; box-shadow: 0 12px 32px rgba(0,0,0,0.4); overflow: hidden;
+        }
+        .interval-mobile-menu button {
+          display: block; width: 100%; padding: 12px 16px;
+          font-family: 'Geist', sans-serif; font-size: 14px;
+          color: var(--text-high); background: transparent; text-align: left;
+        }
+        .interval-mobile-menu button:hover { background: var(--panel-hover); }
+        .interval-mobile-menu button.active { color: var(--accent); }
+        .interval-mobile-menu button:disabled { color: var(--text-lowest); cursor: not-allowed; }
+        .interval-mobile-menu .menu-divider { height: 1px; background: var(--separator); margin: 6px 0; }
+        .interval-mobile-menu .menu-action { display: flex; align-items: center; gap: 12px; }
+        .interval-mobile-menu .menu-action svg { width: 16px; height: 16px; flex-shrink: 0; color: var(--text-medium); }
+
+        @media (max-width: 880px) {
+          .topbar-desktop-intervals { display: none !important; }
+          .topbar-vdiv-intervals { display: none !important; }
+          .interval-mobile { display: inline-flex !important; }
+          /* The brand block (Hydration logo + wordmark + "preis") is dropped on
+             mobile — the pair pill carries enough identity. Padding matches the
+             hero/sidebar's 14px so columns line up vertically. */
+          .brand, .vdiv { display: none !important; }
+          .topbar { gap: 8px; padding: 0 14px; }
+          .pair-pill .kbd { display: none; }
+          /* Download, screenshot, and theme controls move into the mobile dropdown */
+          .topbar-export-btn, .topbar-screenshot-btn, .theme-toggle { display: none !important; }
+          .fav-btn-mobile { display: inline-flex !important; }
+          /* Push the interval picker to the right edge so it sits next to the
+             burger. Both .interval-mobile and .topbar-right would otherwise
+             have margin-left:auto and split the free space — kill the auto on
+             topbar-right on mobile so the interval picker owns the push. */
+          .interval-mobile { margin-left: auto; }
+          .topbar-right { margin-left: 0; }
+        }
+        @media (max-width: 520px) {
+          .pair-pill { padding: 0 10px 0 6px; height: 32px; }
         }
       `}</style>
-      <div style={{
-        height: '48px',
-        minHeight: '48px',
-        padding: '0 16px',
-        borderBottom: '1px solid #0d1b2a',
-        display: 'flex',
-        alignItems: 'center',
-      }}>
-        {/* Left group: pair + separator + intervals (desktop) */}
-        <div style={{ display: 'flex', alignItems: 'center', flex: 1, minWidth: 0 }}>
-          <button
-            onClick={onPairClick}
-            onMouseEnter={() => setPairHovered(true)}
-            onMouseLeave={() => setPairHovered(false)}
-            aria-label={`Select trading pair. Current pair: ${baseLabel} ${quoteLabel}`}
-            aria-haspopup="dialog"
-            title="Change pair (or just start typing)"
-            style={{
-              fontSize: '14px',
-              fontWeight: 600,
-              color: '#e2e8f0',
-              background: pairHovered ? '#0d1b2a' : 'transparent',
-              border: `1px solid ${pairHovered ? '#1e293b' : 'transparent'}`,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '4px 10px 4px 6px',
-              borderRadius: '6px',
-              transition: 'background 0.15s ease, border-color 0.15s ease',
-            }}
-          >
-            {baseAsset && quoteAsset && (
-              <PairIcons
-                base={baseAsset}
-                quote={quoteAsset}
-                isUsdPair={quoteAsset.isStablecoin}
-              />
-            )}
-            <span>{baseLabel}</span>
-            {quoteLabel && (
-              <>
-                <span style={{ color: '#576B80', fontWeight: 400 }}>/</span>
-                <span style={{ color: '#94a3b8', fontWeight: 500 }}>{quoteLabel}</span>
-              </>
-            )}
-            <span style={{ fontSize: '10px', color: pairHovered ? '#4FFFDF' : '#576B80', marginLeft: '2px', transition: 'color 0.15s ease' }}>▾</span>
-          </button>
+      <div className="topbar">
+        <span className="brand">
+          <HydrationLogo />
+          <span className="wordmark">Hydration</span>
+          <span className="product">preis</span>
+        </span>
 
-          <div
-            className="topbar-desktop-separator"
-            style={{
-              width: '1px',
-              height: '24px',
-              background: '#0d1b2a',
-              margin: '0 16px',
-              flexShrink: 0,
-            }}
-          />
+        <span className="vdiv" />
 
-          <div className="topbar-desktop-intervals" style={{ display: 'flex' }}>
-            <IntervalSelector value={interval} onChange={onIntervalChange} />
-          </div>
+        <button
+          className="pair-pill"
+          onClick={onPairClick}
+          aria-haspopup="dialog"
+          aria-label={`Select trading pair. Current pair: ${label}`}
+          title="Change pair (or just start typing)"
+        >
+          {baseAsset && quoteAsset && (
+            <PairIcons base={baseAsset} quote={quoteAsset} isUsdPair={quoteAsset.isStablecoin} size={22} />
+          )}
+          <span className="name">{label}</span>
+          <span className="caret">▾</span>
+          <span className="kbd">/</span>
+        </button>
+
+        <button
+          type="button"
+          className={'fav-btn-mobile' + (isFavorite ? ' on' : '')}
+          onClick={onToggleFavorite}
+          aria-pressed={isFavorite}
+          aria-label={isFavorite ? `Remove ${label} from favorites` : `Add ${label} to favorites`}
+          title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+        >
+          {isFavorite
+            ? <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5l2.96 6.36 7.04.71-5.2 4.75 1.42 6.93L12 17.77l-6.22 3.48 1.42-6.93L2 9.57l7.04-.71L12 2.5z"/></svg>
+            : <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M12 2.5l2.96 6.36 7.04.71-5.2 4.75 1.42 6.93L12 17.77l-6.22 3.48 1.42-6.93L2 9.57l7.04-.71L12 2.5z"/></svg>}
+        </button>
+
+        <span className="vdiv topbar-vdiv-intervals" />
+
+        <div className="topbar-desktop-intervals" style={{ display: 'flex' }}>
+          <IntervalSelector value={interval} onChange={onIntervalChange} />
         </div>
 
-        {/* Right group: mobile interval + export */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-          <div className="topbar-interval-mobile" style={{ display: 'none', position: 'relative' }}>
-            <button
-              onClick={() => setMobileMenuOpen(prev => !prev)}
-              aria-label={`Current interval: ${INTERVAL_LABELS[interval]}. Tap to change interval`}
-              style={{
-                padding: '4px 10px',
-                fontSize: '12px',
-                fontWeight: 500,
-                background: '#1e293b',
-                color: '#4FFFDF',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer',
-              }}
-            >
-              {INTERVAL_LABELS[interval]} ▾
-            </button>
-            {mobileMenuOpen && (
-              <>
-                <div
-                  onClick={() => setMobileMenuOpen(false)}
-                  style={{ position: 'fixed', inset: 0, zIndex: 49 }}
-                />
-                <div style={{
-                  position: 'absolute',
-                  right: 0,
-                  top: '36px',
-                  background: '#030816',
-                  border: '1px solid #1e293b',
-                  borderRadius: '6px',
-                  zIndex: 50,
-                  minWidth: '160px',
-                  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.5)',
-                  overflow: 'hidden',
-                }}>
-                  {INTERVALS.map((iv) => (
-                    <button
-                      key={iv}
-                      onClick={() => { onIntervalChange(iv); setMobileMenuOpen(false) }}
-                      style={{
-                        display: 'block',
-                        width: '100%',
-                        padding: '12px 16px',
-                        fontSize: '14px',
-                        minHeight: '44px',
-                        background: 'transparent',
-                        color: iv === interval ? '#4FFFDF' : '#e2e8f0',
-                        border: 'none',
-                        cursor: 'pointer',
-                        textAlign: 'left',
-                      }}
-                    >
-                      {INTERVAL_LABELS[iv]}
-                    </button>
-                  ))}
-                  <button
-                    onClick={() => { if (canExport) { onExport(); } setMobileMenuOpen(false) }}
-                    style={{
-                      display: 'block',
-                      width: '100%',
-                      padding: '12px 16px',
-                      fontSize: '14px',
-                      minHeight: '44px',
-                      background: 'transparent',
-                      color: canExport ? '#e2e8f0' : '#334155',
-                      border: 'none',
-                      borderTop: '1px solid #0d1b2a',
-                      cursor: canExport ? 'pointer' : 'not-allowed',
-                      textAlign: 'left',
-                    }}
-                  >
-                    Export CSV
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-
+        <div className="interval-mobile">
           <button
-            className="topbar-export-desktop"
-            onClick={() => { if (canExport) onExport() }}
-            onMouseEnter={() => setExportHovered(true)}
-            onMouseLeave={() => setExportHovered(false)}
-            aria-label="Export visible candles as CSV"
-            aria-disabled={!canExport}
-            title="Download visible candles as CSV"
-            style={{
-              padding: '6px',
-              background: canExport && exportHovered ? '#0d1b2a' : 'transparent',
-              border: 'none',
-              borderRadius: '6px',
-              cursor: canExport ? 'pointer' : 'not-allowed',
-              color: canExport ? (exportHovered ? '#4FFFDF' : '#576B80') : '#334155',
-              display: 'flex',
-              alignItems: 'center',
-              transition: 'color 0.15s ease, background 0.15s ease',
-            }}
+            type="button"
+            className="interval-mobile-trigger"
+            onClick={() => setMobileMenuOpen(v => !v)}
+            aria-haspopup="menu"
+            aria-expanded={mobileMenuOpen}
           >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <polyline points="4,6 8,10 12,6" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-              <line x1="8" y1="1" x2="8" y2="10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-              <line x1="2" y1="14" x2="14" y2="14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
+            {INTERVAL_LABELS[interval]}<span className="caret" style={{ color: 'var(--text-low)' }}>▾</span>
           </button>
+          {mobileMenuOpen && (
+            <>
+              <div onClick={() => setMobileMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 49 }} />
+              <div role="menu" className="interval-mobile-menu">
+                {INTERVALS.map(iv => (
+                  <button
+                    key={iv}
+                    type="button"
+                    role="menuitem"
+                    className={iv === interval ? 'active' : ''}
+                    onClick={() => { onIntervalChange(iv); setMobileMenuOpen(false) }}
+                  >
+                    {INTERVAL_LABELS[iv]}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
 
+        <div className="topbar-right">
           <button
-            className="topbar-screenshot-btn"
-            onClick={onScreenshot}
-            onMouseEnter={() => setScreenshotHovered(true)}
-            onMouseLeave={() => setScreenshotHovered(false)}
-            aria-label="Copy chart screenshot to clipboard"
-            title="Copy screenshot to clipboard"
-            style={{
-              padding: '6px',
-              background: screenshotHovered ? '#0d1b2a' : 'transparent',
-              border: 'none',
-              borderRadius: '6px',
-              cursor: 'pointer',
-              color: screenshotHovered ? '#4FFFDF' : '#576B80',
-              display: 'flex',
-              alignItems: 'center',
-              transition: 'color 0.15s ease, background 0.15s ease',
-            }}
+            type="button"
+            className="icon-btn topbar-export-btn"
+            onClick={() => { if (canExport) onExport() }}
+            aria-label="Download visible candles as CSV"
+            aria-disabled={!canExport}
+            title="Download CSV"
           >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.5" fill="none" />
-              <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.5" fill="none" />
-            </svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </button>
+          <button
+            type="button"
+            className="icon-btn topbar-screenshot-btn"
+            onClick={onScreenshot}
+            aria-label="Copy chart screenshot to clipboard"
+            title="Screenshot"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+          </button>
+          {showMobileSidebarButton && (
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={onOpenMobileSidebar}
+              aria-label="Open markets and favorites"
+              title="Markets"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            </button>
+          )}
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={onThemeToggle}
+            aria-label={theme === 'dark' ? 'Lights on' : 'Lights off'}
+            title={theme === 'dark' ? 'Lights on' : 'Lights off'}
+          >
+            {theme === 'dark'
+              ? <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+              : <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>}
           </button>
         </div>
       </div>

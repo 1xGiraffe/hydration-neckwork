@@ -43,6 +43,7 @@ export interface AssetMarketStats {
   change7d: number | null
   sparkline: number[]           // 24-48 hourly close prices (7d, downsampled)
   hops: number | null           // Hop count from BFS pricing; null if no price data
+  volumeUsd24h: number          // 24h USD volume across both buy + sell sides
 }
 
 /**

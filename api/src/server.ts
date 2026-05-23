@@ -6,6 +6,7 @@ import { loadAssets } from './services/assetsService.ts'
 import { candlesRoutes } from './routes/candles.ts'
 import { assetsRoutes } from './routes/assets.ts'
 import { marketStatsRoutes } from './routes/market-stats.ts'
+import { indexerRoutes } from './routes/indexer.ts'
 
 const fastify = Fastify({ logger: true })
 
@@ -20,6 +21,7 @@ fastify.get('/health', async () => {
 await fastify.register(assetsRoutes)
 await fastify.register(candlesRoutes, { client })
 await fastify.register(marketStatsRoutes, { client })
+await fastify.register(indexerRoutes, { client })
 
 async function start() {
   try {

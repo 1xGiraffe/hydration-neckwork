@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { INTERVALS, INTERVAL_LABELS } from '../types'
 import type { OHLCVInterval } from '../types'
 
@@ -8,37 +7,38 @@ interface IntervalSelectorProps {
 }
 
 export default function IntervalSelector({ value, onChange }: IntervalSelectorProps) {
-  const [hovered, setHovered] = useState<OHLCVInterval | null>(null)
   return (
-    <div style={{ display: 'flex', gap: '2px' }} role="tablist" aria-label="Chart interval">
-      {INTERVALS.map((interval) => {
-        const isActive = interval === value
-        const isHovered = hovered === interval
-        return (
+    <>
+      <style>{`
+        .intervals {
+          display: inline-flex; align-items: center; gap: 2px;
+          background: var(--panel); border-radius: 9999px; padding: 3px;
+          border: 1px solid var(--border);
+        }
+        .intervals button {
+          height: 26px; padding: 0 12px;
+          font-family: 'GeistMono', monospace; font-size: 11px; font-weight: 500;
+          text-transform: uppercase; letter-spacing: 0.04em;
+          color: var(--text-medium); border-radius: 9999px;
+          transition: color 160ms, background 160ms;
+        }
+        .intervals button:hover { color: var(--text-high); }
+        .intervals button.active { background: var(--accent); color: var(--accent-on); }
+      `}</style>
+      <div className="intervals" role="tablist" aria-label="Chart interval">
+        {INTERVALS.map(iv => (
           <button
-            key={interval}
-            onClick={() => onChange(interval)}
-            onMouseEnter={() => setHovered(interval)}
-            onMouseLeave={() => setHovered(null)}
+            key={iv}
+            type="button"
             role="tab"
-            aria-selected={isActive}
-            aria-label={`${INTERVAL_LABELS[interval]} interval`}
-            style={{
-              padding: '4px 10px',
-              fontSize: '12px',
-              fontWeight: 500,
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              transition: 'background 0.15s, color 0.15s',
-              background: isActive ? '#1e293b' : isHovered ? '#0d1b2a' : 'transparent',
-              color: isActive ? '#4FFFDF' : isHovered ? '#e2e8f0' : '#576B80',
-            }}
+            aria-selected={iv === value}
+            className={iv === value ? 'active' : ''}
+            onClick={() => onChange(iv)}
           >
-            {INTERVAL_LABELS[interval]}
+            {INTERVAL_LABELS[iv]}
           </button>
-        )
-      })}
-    </div>
+        ))}
+      </div>
+    </>
   )
 }

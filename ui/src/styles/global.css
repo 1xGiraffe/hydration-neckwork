@@ -1,27 +1,155 @@
-* { margin: 0; padding: 0; box-sizing: border-box; }
+/* ============== FONTS ============== */
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoRegular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoMedium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoBold.woff2') format('woff2'); font-weight: 600; font-display: swap; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistRegular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistMedium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistSemiBold.woff2') format('woff2'); font-weight: 600; font-display: swap; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoRegular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoMedium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoSemiBold.woff2') format('woff2'); font-weight: 600; font-display: swap; }
+
+/* ============== TOKENS ============== */
+:root[data-theme="dark"] {
+  --bg: #030816;
+  --bg-elev: #0d1525;
+  --bg-deep: #010410;
+  --panel: rgba(255, 255, 255, 0.03);
+  --panel-hover: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.08);
+  --separator: rgba(255, 255, 255, 0.05);
+
+  --text-high: #f5f1f8;
+  --text-medium: #a59cab;
+  --text-low: #6e6776;
+  --text-lowest: #4a414f;
+
+  --accent: #e53e76;
+  --accent-soft: rgba(229, 62, 118, 0.16);
+  --accent-on: #ffffff;
+
+  --lavender: #dfb1f3;
+  --lavender-deep: #cc6ef4;
+  --lavender-soft: rgba(204, 110, 244, 0.16);
+
+  --sky: #95caff;
+  --sky-deep: #2C89E9;
+  --sky-soft: rgba(83, 164, 243, 0.14);
+
+  --green: #74C742;
+  --green-deep: #45AC1F;
+  --green-soft: rgba(116, 199, 66, 0.16);
+
+  --red: #ff6868;
+  --red-soft: rgba(255, 104, 104, 0.14);
+
+  --amber: #F7BF06;
+  --amber-soft: rgba(247, 191, 6, 0.14);
+
+  --kbd-bg: rgba(255, 255, 255, 0.06);
+}
+:root[data-theme="light"] {
+  --bg: #EFEDEA;
+  --bg-elev: #ffffff;
+  --bg-deep: #e5e1dc;
+  --panel: rgba(36, 14, 50, 0.04);
+  --panel-hover: rgba(36, 14, 50, 0.08);
+  --border: rgba(36, 14, 50, 0.14);
+  --separator: rgba(36, 14, 50, 0.08);
+
+  --text-high: #232226;
+  --text-medium: #6b6770;
+  --text-low: #8d8995;
+  --text-lowest: #c5b9cf;
+
+  --accent: #e53e76;
+  --accent-soft: rgba(229, 62, 118, 0.10);
+  --accent-on: #ffffff;
+
+  --lavender: #b454da;
+  --lavender-deep: #823fa1;
+  --lavender-soft: rgba(204, 110, 244, 0.18);
+
+  --sky: #2C89E9;
+  --sky-deep: #1f5cab;
+  --sky-soft: rgba(83, 164, 243, 0.10);
+
+  --green: #45AC1F;
+  --green-deep: #2e7c12;
+  --green-soft: rgba(116, 199, 66, 0.16);
+
+  --red: #d83b3b;
+  --red-soft: rgba(216, 59, 59, 0.10);
+
+  --amber: #b58800;
+  --amber-soft: rgba(247, 191, 6, 0.16);
+
+  --kbd-bg: rgba(36, 14, 50, 0.06);
+}
+
+/* ============== RESET ============== */
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; padding: 0; }
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  background: var(--bg);
+  color: var(--text-high);
+  font-family: 'Geist', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+html { overflow: hidden; }
+body { overflow: hidden; }
+button { all: unset; box-sizing: border-box; cursor: pointer; font-family: inherit; }
+svg { display: block; }
+::selection { background: var(--accent); color: var(--accent-on); }
+
 /* Hide Lightweight Charts TradingView branding */
 #tv-attr-logo { display: none !important; }
-html, body, #root {
-  width: 100%;
-  height: 100svh;
-  background: #030816;
-  color: #94a3b8;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  overflow: hidden;
-}
-/* Thin scrollbar matching dark theme */
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #475569; }
-* { scrollbar-width: thin; scrollbar-color: #334155 transparent; }
 
-/* Visible focus ring for keyboard navigation, but not on mouse-click focus */
+/* Scrollbars */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-low); }
+* { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+
+/* Focus rings */
 button:focus-visible,
 input:focus-visible,
 [role="option"]:focus-visible,
 [role="dialog"] :focus-visible {
-  outline: 2px solid #4FFFDF;
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--kbd-bg);
+  border: 1px solid var(--border);
+  color: var(--text-medium);
+  font-family: 'GeistMono', monospace;
+  font-size: 10px;
+  line-height: 1;
+}
+
+/* Live pulse used in topbar */
+@keyframes preis-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+  animation: preis-pulse 1.6s ease-in-out infinite;
+}

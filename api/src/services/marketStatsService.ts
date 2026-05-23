@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import type { AssetMarketStats } from '../types.ts'
 import { getAllAssets } from './assetsService.ts'
 import { toClickHouseDateTime } from './ohlcvService.ts'
+import { getVolume24h } from './volumeService.ts'
 
 const CACHE_TTL_MS = 45_000
 
@@ -77,32 +78,40 @@ export async function getMarketStats(client: ClickHouseClient): Promise<AssetMar
     ? new Date(maxTsRows[0].max_ts + 'Z')
     : new Date()
 
-  const cutoff1h = new Date(dataHead.getTime() - 60 * 60 * 1000)
-  const cutoff24h = new Date(dataHead.getTime() - 24 * 60 * 60 * 1000)
   const cutoff7d = new Date(dataHead.getTime() - 7 * 24 * 60 * 60 * 1000)
+  const start_7d = toClickHouseDateTime(cutoff7d)
 
-  const cutoff_1h = toClickHouseDateTime(cutoff1h)
-  const cutoff_24h = toClickHouseDateTime(cutoff24h)
-  const cutoff_7d = toClickHouseDateTime(cutoff7d)
-  const start_7d = cutoff_7d
+  // Block-height based cutoffs assume ~12-second blocks. This avoids the expensive
+  // JOIN against price_data.blocks for timestamp resolution.
+  const BLOCKS_1H = 300
+  const BLOCKS_24H = 7200
+  const BLOCKS_7D = 50400
+  const LOOKBACK_BLOCKS = BLOCKS_7D + 600  // small buffer for sparse-pricing assets
 
   try {
-    const [pricesResult, sparklineResult] = await Promise.all([
+    const [pricesResult, sparklineResult, volumes] = await Promise.all([
       client.query({
         query: `
+          WITH (SELECT max(block_height) FROM price_data.blocks) AS head
           SELECT
-            p.asset_id,
-            argMax(p.usd_price, b.block_timestamp) AS current_price,
-            argMaxIf(p.usd_price, b.block_timestamp, b.block_timestamp <= {cutoff_1h:DateTime}) AS price_1h_ago,
-            argMaxIf(p.usd_price, b.block_timestamp, b.block_timestamp <= {cutoff_24h:DateTime}) AS price_24h_ago,
-            argMaxIf(p.usd_price, b.block_timestamp, b.block_timestamp <= {cutoff_7d:DateTime}) AS price_7d_ago,
-            argMax(p.hops, b.block_timestamp) AS hops
-          FROM price_data.prices p FINAL
-          INNER JOIN price_data.blocks b ON p.block_height = b.block_height
-          WHERE p.asset_id IN ({asset_ids:Array(UInt32)})
-          GROUP BY p.asset_id
+            asset_id,
+            argMax(usd_price, block_height) AS current_price,
+            argMaxIf(usd_price, block_height, block_height <= head - {blocks_1h:UInt32}) AS price_1h_ago,
+            argMaxIf(usd_price, block_height, block_height <= head - {blocks_24h:UInt32}) AS price_24h_ago,
+            argMaxIf(usd_price, block_height, block_height <= head - {blocks_7d:UInt32}) AS price_7d_ago,
+            argMax(hops, block_height) AS hops
+          FROM price_data.prices
+          WHERE asset_id IN ({asset_ids:Array(UInt32)})
+            AND block_height >= head - {lookback:UInt32}
+          GROUP BY asset_id
         `,
-        query_params: { asset_ids: assetIds, cutoff_1h, cutoff_24h, cutoff_7d },
+        query_params: {
+          asset_ids: assetIds,
+          blocks_1h: BLOCKS_1H,
+          blocks_24h: BLOCKS_24H,
+          blocks_7d: BLOCKS_7D,
+          lookback: LOOKBACK_BLOCKS,
+        },
         format: 'JSONEachRow',
       }),
       client.query({
@@ -120,10 +129,12 @@ export async function getMarketStats(client: ClickHouseClient): Promise<AssetMar
         query_params: { asset_ids: assetIds, start_7d },
         format: 'JSONEachRow',
       }),
+      getVolume24h(client),
     ])
 
     const priceRows = await pricesResult.json<PriceRow>()
     const sparklineRows = await sparklineResult.json<SparklineRow>()
+    const volumeMap = new Map(volumes.map(v => [v.assetId, v.volumeUsd24h]))
 
     // Build price map keyed by asset_id
     const priceMap = new Map<number, PriceRow>()
@@ -155,6 +166,7 @@ export async function getMarketStats(client: ClickHouseClient): Promise<AssetMar
           change7d: null,
           sparkline: [],
           hops: null,
+          volumeUsd24h: volumeMap.get(asset.assetId) ?? 0,
         }
       }
 
@@ -172,6 +184,7 @@ export async function getMarketStats(client: ClickHouseClient): Promise<AssetMar
         change7d: calcChange(priceRow.current_price, priceRow.price_7d_ago),
         sparkline: sparklineCloses,
         hops: priceRow ? parseInt(priceRow.hops, 10) : null,
+        volumeUsd24h: volumeMap.get(asset.assetId) ?? 0,
       }
     })
 

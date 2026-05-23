@@ -1,8 +1,15 @@
-<svg viewBox="0 0 1200 630" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect width="1200" height="630" fill="#000000"/>
-  <svg x="400" y="201" width="400" height="228" viewBox="0 0 80 28">
-    <rect width="80" height="28" fill="#040F0C"/>
-    <text x="8" y="18" font-family="'Courier New', Courier, monospace" font-size="13" font-weight="700" letter-spacing="2" fill="#4FFFDF">preis</text>
-    <rect x="62" y="21" width="6" height="1.5" fill="#4FFFDF" opacity="0.6"/>
-  </svg>
+<svg viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="630" fill="#030816"/>
+
+  <!-- Centered brand: logo + "Hydration" + italic "preis" -->
+  <g transform="translate(345 280)">
+    <!-- Hydration logo, scaled up -->
+    <g transform="translate(0 -10) scale(4.2)" fill="#e53e76">
+      <path d="M18.0532 11.3604C18.2827 11.1319 18.5778 10.8381 18.8718 10.5463C19.5265 9.89543 19.5265 8.83853 18.8718 8.18664L18.1782 7.49598C15.6959 9.96786 11.982 10.4637 9.00484 8.98646C11.017 9.35678 13.1028 9.06807 14.951 8.0785C16.1876 7.41641 16.4222 5.74741 15.4295 4.75886L11.3366 0.683262C10.4217 -0.227754 8.93928 -0.227754 8.02542 0.683262L3.61392 5.07613C6.51941 3.84682 10.0089 4.4171 12.3714 6.78594C8.76716 5.04349 4.30136 5.66171 1.3088 8.64164C1.07931 8.87016 0.78323 9.16499 0.490223 9.45676C-0.163408 10.1086 -0.163408 11.1645 0.490223 11.8154L1.18279 12.505C3.66515 10.0332 7.37896 9.53735 10.3562 11.0146C8.34404 10.6442 6.25816 10.933 4.40996 11.9225C3.17339 12.5846 2.93878 14.2536 3.93152 15.2422L8.0244 19.3178C8.93928 20.2288 10.4217 20.2288 11.3356 19.3178L15.7471 14.9249C12.8416 16.1542 9.35215 15.5839 6.98965 13.2151C10.5938 14.9575 15.0596 14.3393 18.0522 11.3594L18.0532 11.3604Z"/>
+    </g>
+    <text x="120" y="60" fill="#f5f1f8" font-family="'Gazpacho','Times New Roman',serif" font-size="80" font-weight="500" letter-spacing="-1">Hydration</text>
+    <text x="552" y="60" fill="#e53e76" font-family="'Gazpacho','Times New Roman',serif" font-style="italic" font-size="80" font-weight="400">preis</text>
+  </g>
+
+  <text x="600" y="430" fill="#a59cab" font-family="'Geist',system-ui,sans-serif" font-size="22" letter-spacing="6" text-anchor="middle">REAL-TIME PRICE EXPLORER · HYDRATION DEX</text>
 </svg>

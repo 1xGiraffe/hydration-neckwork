@@ -16,10 +16,10 @@ function pairNameHint(base: Asset, quote: Asset): string | null {
   return names.length > 0 ? names.join(' | ') : null
 }
 
-export function getDefaultPairs(assets: Asset[]): PairResult[] {
+export function getDefaultPairs(assets: Asset[], volumeByAssetId?: Map<number, number>): PairResult[] {
   const usdt = assets.find(a => a.assetId === 10)
   if (!usdt) return []
-  return assets
+  const list: PairResult[] = assets
     .filter(a => !a.isStablecoin)
     .map(a => ({
       base: a,
@@ -27,7 +27,17 @@ export function getDefaultPairs(assets: Asset[]): PairResult[] {
       display: a.symbol + 'USD',
       nameHint: a.name,
     }))
-    .sort((a, b) => a.display.localeCompare(b.display))
+  if (volumeByAssetId && volumeByAssetId.size > 0) {
+    list.sort((a, b) => {
+      const va = volumeByAssetId.get(a.base.assetId) ?? 0
+      const vb = volumeByAssetId.get(b.base.assetId) ?? 0
+      if (va !== vb) return vb - va
+      return a.display.localeCompare(b.display)
+    })
+  } else {
+    list.sort((a, b) => a.display.localeCompare(b.display))
+  }
+  return list
 }
 
 export function displayLabel(display: string): string {

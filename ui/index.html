@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
@@ -8,7 +8,32 @@
     <meta name="theme-color" content="#030816" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('preis-theme');
+          if (t === 'light' || t === 'dark') {
+            document.documentElement.setAttribute('data-theme', t);
+          }
+        } catch (e) {}
+        // Polyfill Element.toggleAttribute for headless renderers (Obscura) missing it.
+        if (typeof Element !== 'undefined' && !Element.prototype.toggleAttribute) {
+          Element.prototype.toggleAttribute = function (name, force) {
+            var has = this.hasAttribute(name);
+            if (force === true || (force === undefined && !has)) {
+              this.setAttribute(name, '');
+              return true;
+            }
+            if (force === false || (force === undefined && has)) {
+              this.removeAttribute(name);
+              return false;
+            }
+            return has;
+          };
+        }
+      })();
+    </script>
     <meta property="og:title" content="preis" />
     <meta property="og:description" content="Real-time price charts for Hydration assets" />
     <meta property="og:image" content="/og-image.png" />

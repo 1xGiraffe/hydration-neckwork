@@ -37,6 +37,9 @@ export interface Asset {
  * Market statistics for a single asset from GET /market-stats.
  * Mirrors the API response shape.
  */
+export const PERIODS = ['1h', '24h', '7d'] as const
+export type Period = typeof PERIODS[number]
+
 export interface AssetMarketStats {
   assetId: number
   symbol: string
@@ -45,4 +48,5 @@ export interface AssetMarketStats {
   change24h: number | null
   change7d: number | null
   sparkline: number[]
+  volumeUsd24h: number
 }

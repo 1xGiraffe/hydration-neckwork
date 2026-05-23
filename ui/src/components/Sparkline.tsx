@@ -28,9 +28,20 @@ function SparklineInner({ data, change7d, width = 80, height = 28 }: SparklinePr
     return null
   }
 
-  const isBullish = change7d !== null && change7d > 0
-  const color = isBullish ? '#4FFFDF' : '#576B80'
-  const fillOpacity = isBullish ? 0.5 : 0.6
+  // Match the up/down semantics used elsewhere (change chips, hero stats):
+  // up → green, down → red. Null falls back to neutral gray (no signal).
+  let color: string
+  let fillOpacity: number
+  if (change7d === null) {
+    color = 'var(--text-low)'
+    fillOpacity = 0.3
+  } else if (change7d >= 0) {
+    color = 'var(--green)'
+    fillOpacity = 0.45
+  } else {
+    color = 'var(--red)'
+    fillOpacity = 0.4
+  }
   const linePoints = buildPoints(data, width, height)
   const fillPoints = `${linePoints} ${width},${height} 0,${height}`
 
