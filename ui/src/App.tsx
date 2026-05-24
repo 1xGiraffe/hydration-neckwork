@@ -21,6 +21,7 @@ const DEFAULT_BASE_ID = 0   // HDX
 const DEFAULT_QUOTE_ID = 10  // USDT
 const EMPTY_ASSETS: Asset[] = []
 const DESKTOP_SIDEBAR_STORAGE_KEY = 'preis-desktop-sidebar-open'
+const INSPECTION_QUERY_PARAM = 'inspect'
 
 function parseIntervalSlug(slug: string | undefined): OHLCVInterval {
   return INTERVALS.includes(slug as OHLCVInterval) ? (slug as OHLCVInterval) : '1h'
@@ -28,6 +29,23 @@ function parseIntervalSlug(slug: string | undefined): OHLCVInterval {
 
 function buildPath(baseId: number, quoteId: number, interval: OHLCVInterval) {
   return `/${baseId}-${quoteId}/${interval}`
+}
+
+function buildUrl(baseId: number, quoteId: number, interval: OHLCVInterval, inspectionTime: number | null) {
+  const path = buildPath(baseId, quoteId, interval)
+  return inspectionTime == null ? path : `${path}?${INSPECTION_QUERY_PARAM}=${inspectionTime}`
+}
+
+function currentUrl() {
+  return `${window.location.pathname}${window.location.search}`
+}
+
+function readInspectionTime(): number | null {
+  if (typeof window === 'undefined') return null
+  const raw = new URLSearchParams(window.location.search).get(INSPECTION_QUERY_PARAM)
+  if (raw == null) return null
+  const value = Number(raw)
+  return Number.isInteger(value) && value > 0 ? value : null
 }
 
 function readInitialRoute() {
@@ -61,6 +79,7 @@ export default function App() {
   const [baseId, setBaseId] = useState(() => readInitialRoute().baseId)
   const [quoteId, setQuoteId] = useState(() => readInitialRoute().quoteId)
   const [interval, setInterval] = useState<OHLCVInterval>(() => readInitialRoute().interval)
+  const [inspectionTime, setInspectionTime] = useState<number | null>(() => readInspectionTime())
   const [modalOpen, setModalOpen] = useState(false)
   const [chartData, setChartData] = useState<import('./types').ApiCandle[]>([])
   const [drawerOpen, setDrawerOpen] = useState(false)
@@ -137,9 +156,11 @@ export default function App() {
     const [, pairSlug, intervalSlug] = window.location.pathname.split('/')
     const parsed = pairSlug ? parseUrlPair(pairSlug) : null
     const nextInterval = parseIntervalSlug(intervalSlug)
+    const nextInspectionTime = readInspectionTime()
     if (parsed && assets.some(a => a.assetId === parsed.baseId) && assets.some(a => a.assetId === parsed.quoteId)) {
-      const cleanPath = buildPath(parsed.baseId, parsed.quoteId, nextInterval)
-      if (window.location.pathname !== cleanPath) window.history.replaceState(null, '', cleanPath)
+      const cleanUrl = buildUrl(parsed.baseId, parsed.quoteId, nextInterval, nextInspectionTime)
+      if (currentUrl() !== cleanUrl) window.history.replaceState(null, '', cleanUrl)
+      setInspectionTime(nextInspectionTime)
     } else {
       const defaultPath = buildPath(DEFAULT_BASE_ID, DEFAULT_QUOTE_ID, '1h')
       if (window.location.pathname !== defaultPath) window.history.replaceState(null, '', defaultPath)
@@ -147,6 +168,7 @@ export default function App() {
         setBaseId(DEFAULT_BASE_ID)
         setQuoteId(DEFAULT_QUOTE_ID)
         setInterval('1h')
+        setInspectionTime(null)
       })
     }
     urlParsedRef.current = true
@@ -155,10 +177,11 @@ export default function App() {
   useEffect(() => {
     if (!urlParsedRef.current) return
     if (isPopStateRef.current) { isPopStateRef.current = false; return }
-    const newPath = buildPath(baseId, quoteId, interval)
-    if (window.location.pathname !== newPath) {
-      window.history.pushState(null, '', newPath)
+    const newUrl = buildUrl(baseId, quoteId, interval, null)
+    if (currentUrl() !== newUrl) {
+      window.history.pushState(null, '', newUrl)
     }
+    setInspectionTime(current => current == null ? current : null)
   }, [baseId, quoteId, interval])
 
   useEffect(() => {
@@ -167,6 +190,7 @@ export default function App() {
       const [, pairSlug, intervalSlug] = window.location.pathname.split('/')
       const parsed = pairSlug ? parseUrlPair(pairSlug) : null
       isPopStateRef.current = true
+      window.setTimeout(() => { isPopStateRef.current = false }, 0)
       if (parsed && assets.some(a => a.assetId === parsed.baseId) && assets.some(a => a.assetId === parsed.quoteId)) {
         setBaseId(parsed.baseId)
         setQuoteId(parsed.quoteId)
@@ -175,10 +199,23 @@ export default function App() {
         setQuoteId(DEFAULT_QUOTE_ID)
       }
       setInterval(parseIntervalSlug(intervalSlug))
+      setInspectionTime(readInspectionTime())
     }
     window.addEventListener('popstate', handler)
     return () => window.removeEventListener('popstate', handler)
   }, [assets])
+
+  const handleInspectionTimeChange = useCallback((nextInspectionTime: number | null) => {
+    setInspectionTime(nextInspectionTime)
+    const nextUrl = buildUrl(baseId, quoteId, interval, nextInspectionTime)
+    if (currentUrl() === nextUrl) return
+
+    if (nextInspectionTime == null) {
+      window.history.replaceState(null, '', nextUrl)
+    } else {
+      window.history.pushState(null, '', nextUrl)
+    }
+  }, [baseId, quoteId, interval])
 
   const keyBuffer = useRef('')
   useEffect(() => {
@@ -359,6 +396,8 @@ export default function App() {
               showVolumeSource={quoteAsset ? !quoteAsset.isStablecoin : false}
               onVisibleRangeReady={handleVisibleRangeReady}
               onDataChange={setChartData}
+              inspectionTime={inspectionTime}
+              onInspectionTimeChange={handleInspectionTimeChange}
               theme={theme}
             />
           </div>

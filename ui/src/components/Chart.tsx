@@ -15,6 +15,7 @@ import type {
   HistogramData,
   IPriceLine,
 } from 'lightweight-charts'
+import { INTERVAL_LABELS } from '../types'
 import type { ApiCandle, OHLCVInterval, OmniwatchTrader, OmniwatchVolumeDetails } from '../types'
 import { fetchCandles, fetchVolumeDetails } from '../api/candles'
 import { formatCountdown } from '../utils/format'
@@ -42,6 +43,8 @@ interface ChartProps {
   onVisibleRangeReady?: (getter: () => { from: number; to: number } | null) => void
   onDataChange?: (data: ApiCandle[]) => void
   onCountdownChange?: (label: string) => void
+  inspectionTime?: number | null
+  onInspectionTimeChange?: (time: number | null) => void
   theme: 'dark' | 'light'
 }
 
@@ -230,7 +233,8 @@ function isLight(p: ChartPalette): boolean { return p.bg === CHART_PALETTES.ligh
 
 export default function Chart({
   baseId, quoteId, interval, base, showVolumeSource = false,
-  onVisibleRangeReady, onDataChange, onCountdownChange, theme,
+  onVisibleRangeReady, onDataChange, onCountdownChange,
+  inspectionTime = null, onInspectionTimeChange, theme,
 }: ChartProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -242,6 +246,7 @@ export default function Chart({
   const openVolumeModalRef = useRef<(candle: ApiCandle) => void>(() => undefined)
   const volumeRowsRef = useRef<HTMLDivElement>(null)
   const volumeDetailsPageRequestRef = useRef<string | null>(null)
+  const inspectionRequestIdRef = useRef(0)
 
   const allDataRef = useRef<ApiCandle[]>([])
   const oldestTimestampRef = useRef<number>(Infinity)
@@ -254,6 +259,7 @@ export default function Chart({
   const [loadingVisible, setLoadingVisible] = useState(true)
   const [omniwatchMarkers, setOmniwatchMarkers] = useState<OmniwatchMarker[]>([])
   const [volumeModal, setVolumeModal] = useState<VolumeModalState | null>(null)
+  const currentVolumeModalTime = volumeModal?.candle.intervalStart ?? null
   // Mirror the latest theme into a ref so callbacks/intervals read the live
   // value without needing to be rebuilt (and without depending on document
   // attribute order-of-application).
@@ -373,14 +379,19 @@ export default function Chart({
       })
   }, [baseId, quoteId, interval])
 
-  const openVolumeModal = useCallback((candle: ApiCandle) => {
+  const openVolumeModal = useCallback((candle: ApiCandle, options: { syncUrl?: boolean } = {}) => {
     setVolumeModal({ candle, details: null, loading: true, loadingMore: false, error: null })
     loadVolumeDetailsPage(candle, 0)
-  }, [loadVolumeDetailsPage])
+    if (options.syncUrl !== false) onInspectionTimeChange?.(candle.intervalStart)
+  }, [loadVolumeDetailsPage, onInspectionTimeChange])
 
-  const closeVolumeModal = useCallback(() => setVolumeModal(null), [])
+  const closeVolumeModal = useCallback(() => {
+    setVolumeModal(null)
+    onInspectionTimeChange?.(null)
+  }, [onInspectionTimeChange])
 
   useEffect(() => {
+    inspectionRequestIdRef.current += 1
     setVolumeModal(null)
     volumeDetailsPageRequestRef.current = null
   }, [baseId, quoteId, interval])
@@ -408,6 +419,40 @@ export default function Chart({
   useEffect(() => {
     openVolumeModalRef.current = openVolumeModal
   }, [openVolumeModal])
+
+  useEffect(() => {
+    if (inspectionTime == null) {
+      inspectionRequestIdRef.current += 1
+      setVolumeModal(null)
+      volumeDetailsPageRequestRef.current = null
+      return
+    }
+
+    if (currentVolumeModalTime === inspectionTime) return
+
+    const existing = allDataRef.current.find(candle => candle.intervalStart === inspectionTime)
+    if (existing) {
+      openVolumeModal(existing, { syncUrl: false })
+      return
+    }
+
+    const requestId = inspectionRequestIdRef.current + 1
+    inspectionRequestIdRef.current = requestId
+    setVolumeModal(current => (
+      current?.candle.intervalStart === inspectionTime ? current : null
+    ))
+    volumeDetailsPageRequestRef.current = null
+
+    fetchData(inspectionTime, inspectionTime + INTERVAL_SECONDS[interval])
+      .then(candles => {
+        if (inspectionRequestIdRef.current !== requestId) return
+        const candle = normalizeCandles(candles).find(item => item.intervalStart === inspectionTime)
+        if (candle) openVolumeModal(candle, { syncUrl: false })
+      })
+      .catch(() => {
+        // Keep the chart usable if a stale or unavailable inspection link fails.
+      })
+  }, [currentVolumeModalTime, fetchData, inspectionTime, interval, openVolumeModal])
 
   useEffect(() => {
     if (!volumeModal) return
@@ -1020,7 +1065,7 @@ export default function Chart({
             <div className="omniwatch-modal-head">
               <div className="omniwatch-modal-title">
                 <span className="pair">{base}</span>
-                <span className="sub">{INTERVAL_SECONDS[interval] >= 3600 ? interval : interval.replace('min', 'm')} candle · {formatCandleDate(modalCandle.intervalStart)}</span>
+                <span className="sub">{INTERVAL_LABELS[interval]} candle · {formatCandleDate(modalCandle.intervalStart)}</span>
               </div>
               <button type="button" className="omniwatch-close" onClick={closeVolumeModal} aria-label="Close">×</button>
             </div>
