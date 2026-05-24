@@ -1,5 +1,5 @@
 import { type ClickHouseClient } from '../db/client.js'
-import { type PriceRow, type BlockRow, type AssetRow, type RuntimeUpgradeRow } from '../db/schema.js'
+import { type PriceRow, type TradeVolumeRow, type BlockRow, type AssetRow, type RuntimeUpgradeRow } from '../db/schema.js'
 import { BatchAccumulator } from './batch.js'
 import { getLastProcessedBlock, saveCheckpoint } from './checkpoint.js'
 
@@ -19,6 +19,7 @@ function minMax(rows: { block_height: number }[]): { min: number; max: number } 
 export class ClickHouseStore {
   private readonly client: ClickHouseClient
   private readonly pricesBatch: BatchAccumulator<PriceRow>
+  private readonly tradeVolumesBatch: BatchAccumulator<TradeVolumeRow>
   private readonly blocksBatch: BatchAccumulator<BlockRow>
   private readonly assetsBatch: BatchAccumulator<AssetRow>
   private readonly runtimeUpgradesBatch: BatchAccumulator<RuntimeUpgradeRow>
@@ -27,6 +28,7 @@ export class ClickHouseStore {
   constructor(client: ClickHouseClient, flushThreshold: number = 10_000, replayNamespace: string = 'bootstrap') {
     this.client = client
     this.pricesBatch = new BatchAccumulator<PriceRow>(flushThreshold)
+    this.tradeVolumesBatch = new BatchAccumulator<TradeVolumeRow>(flushThreshold)
     this.blocksBatch = new BatchAccumulator<BlockRow>(flushThreshold)
     this.assetsBatch = new BatchAccumulator<AssetRow>(flushThreshold)
     this.runtimeUpgradesBatch = new BatchAccumulator<RuntimeUpgradeRow>(flushThreshold)
@@ -35,6 +37,10 @@ export class ClickHouseStore {
 
   addPrices(rows: PriceRow[]): void {
     this.pricesBatch.add(rows)
+  }
+
+  addTradeVolumes(rows: TradeVolumeRow[]): void {
+    this.tradeVolumesBatch.add(rows)
   }
 
   addBlocks(rows: BlockRow[]): void {
@@ -58,6 +64,23 @@ export class ClickHouseStore {
 
     await this.client.insert({
       table: 'price_data.prices',
+      values: rows,
+      format: 'JSONEachRow',
+      clickhouse_settings: {
+        insert_deduplication_token: token,
+      },
+    })
+  }
+
+  async flushTradeVolumes(): Promise<void> {
+    const rows = this.tradeVolumesBatch.flush()
+    if (rows.length === 0) return
+
+    const { min: minBlock, max: maxBlock } = minMax(rows)
+    const token = `trade-volumes-${this.replayNamespace}-${minBlock}-${maxBlock}-${rows.length}`
+
+    await this.client.insert({
+      table: 'price_data.trade_volume_by_account',
       values: rows,
       format: 'JSONEachRow',
       clickhouse_settings: {
@@ -124,6 +147,7 @@ export class ClickHouseStore {
   async flushAll(): Promise<void> {
     await this.flushBlocks()
     await this.flushPrices()
+    await this.flushTradeVolumes()
     await this.flushAssets()
     await this.flushRuntimeUpgrades()
   }

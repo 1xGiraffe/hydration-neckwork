@@ -12,7 +12,7 @@
  */
 
 import type { PriceMap, AssetDecimals } from '../price/types.js';
-import type { PriceRow } from '../db/schema.js';
+import type { PriceRow, TradeVolumeRow } from '../db/schema.js';
 import { isSwapEvent } from '../registry/swapEvents.js';
 import * as omnipool from '../types/omnipool/events.js';
 import * as xyk from '../types/xyk/events.js';
@@ -27,6 +27,7 @@ export interface DecodedSwap {
   assetOut: number;
   amountIn: bigint;
   amountOut: bigint;
+  trader?: string | null;
 }
 
 interface DecodedTradeAssetAmount {
@@ -37,6 +38,7 @@ interface DecodedTradeAssetAmount {
 interface DecodedTrade {
   inputs: DecodedTradeAssetAmount[];
   outputs: DecodedTradeAssetAmount[];
+  trader?: string | null;
 }
 
 /**
@@ -46,6 +48,19 @@ interface EventLike {
   name: string;
   block: { _runtime: any };
   args: unknown;
+}
+
+function normalizeAccount(value: unknown): string | null {
+  if (typeof value === 'string' && value.length > 0) {
+    return value;
+  }
+  if (value && typeof value === 'object' && 'value' in value) {
+    const nested = (value as { value?: unknown }).value;
+    if (typeof nested === 'string' && nested.length > 0) {
+      return nested;
+    }
+  }
+  return null;
 }
 
 /**
@@ -203,6 +218,7 @@ export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
       if (omnipool.sellExecuted.v201.is(event)) {
         const decoded = omnipool.sellExecuted.v201.decode(event);
         return {
+          trader: normalizeAccount(decoded.who),
           assetIn: decoded.assetIn,
           assetOut: decoded.assetOut,
           amountIn: decoded.amountIn,
@@ -212,6 +228,7 @@ export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
       if (omnipool.sellExecuted.v170.is(event)) {
         const decoded = omnipool.sellExecuted.v170.decode(event);
         return {
+          trader: normalizeAccount(decoded.who),
           assetIn: decoded.assetIn,
           assetOut: decoded.assetOut,
           amountIn: decoded.amountIn,
@@ -221,6 +238,7 @@ export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
       if (omnipool.sellExecuted.v115.is(event)) {
         const decoded = omnipool.sellExecuted.v115.decode(event);
         return {
+          trader: normalizeAccount(decoded.who),
           assetIn: decoded.assetIn,
           assetOut: decoded.assetOut,
           amountIn: decoded.amountIn,
@@ -235,6 +253,7 @@ export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
       if (omnipool.buyExecuted.v201.is(event)) {
         const decoded = omnipool.buyExecuted.v201.decode(event);
         return {
+          trader: normalizeAccount(decoded.who),
           assetIn: decoded.assetIn,
           assetOut: decoded.assetOut,
           amountIn: decoded.amountIn,
@@ -244,6 +263,7 @@ export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
       if (omnipool.buyExecuted.v170.is(event)) {
         const decoded = omnipool.buyExecuted.v170.decode(event);
         return {
+          trader: normalizeAccount(decoded.who),
           assetIn: decoded.assetIn,
           assetOut: decoded.assetOut,
           amountIn: decoded.amountIn,
@@ -253,6 +273,7 @@ export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
       if (omnipool.buyExecuted.v115.is(event)) {
         const decoded = omnipool.buyExecuted.v115.decode(event);
         return {
+          trader: normalizeAccount(decoded.who),
           assetIn: decoded.assetIn,
           assetOut: decoded.assetOut,
           amountIn: decoded.amountIn,
@@ -266,6 +287,7 @@ export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
       if (xyk.sellExecuted.v183.is(event)) {
         const decoded = xyk.sellExecuted.v183.decode(event);
         return {
+          trader: normalizeAccount(decoded.who),
           assetIn: decoded.assetIn,
           assetOut: decoded.assetOut,
           amountIn: decoded.amount,      // XYK: amount -> amountIn
@@ -279,6 +301,7 @@ export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
       if (xyk.buyExecuted.v183.is(event)) {
         const decoded = xyk.buyExecuted.v183.decode(event);
         return {
+          trader: normalizeAccount(decoded.who),
           assetIn: decoded.assetIn,
           assetOut: decoded.assetOut,
           amountIn: decoded.buyPrice,    // XYK: buyPrice -> amountIn
@@ -292,6 +315,7 @@ export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
       if (stableswap.sellExecuted.v183.is(event)) {
         const decoded = stableswap.sellExecuted.v183.decode(event);
         return {
+          trader: normalizeAccount(decoded.who),
           assetIn: decoded.assetIn,
           assetOut: decoded.assetOut,
           amountIn: decoded.amountIn,
@@ -305,6 +329,7 @@ export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
       if (stableswap.buyExecuted.v183.is(event)) {
         const decoded = stableswap.buyExecuted.v183.decode(event);
         return {
+          trader: normalizeAccount(decoded.who),
           assetIn: decoded.assetIn,
           assetOut: decoded.assetOut,
           amountIn: decoded.amountIn,
@@ -326,6 +351,7 @@ function decodeTradeEvent(event: EventLike): DecodedTrade | null {
   const legacySwap = decodeSwapEvent(event);
   if (legacySwap) {
     return {
+      trader: legacySwap.trader,
       inputs: [{ assetId: legacySwap.assetIn, amount: legacySwap.amountIn }],
       outputs: [{ assetId: legacySwap.assetOut, amount: legacySwap.amountOut }],
     };
@@ -338,6 +364,7 @@ function decodeTradeEvent(event: EventLike): DecodedTrade | null {
       const decoded = broadcast.swapped.v282.decode(event);
       return decorateLegacyBroadcastTrade({
         eventName: name,
+        trader: normalizeAccount(decoded.swapper),
         fillerType: decoded.fillerType.__kind,
         operation: decoded.operation.__kind,
         inputs: decoded.inputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
@@ -348,6 +375,7 @@ function decodeTradeEvent(event: EventLike): DecodedTrade | null {
     if (name === 'Broadcast.Swapped2' && broadcast.swapped2.v305.is(event)) {
       const decoded = broadcast.swapped2.v305.decode(event);
       return {
+        trader: normalizeAccount(decoded.swapper),
         inputs: decoded.inputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
         outputs: decoded.outputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
       };
@@ -357,6 +385,7 @@ function decodeTradeEvent(event: EventLike): DecodedTrade | null {
       if (broadcast.swapped3.v323.is(event)) {
         const decoded = broadcast.swapped3.v323.decode(event);
         return {
+          trader: normalizeAccount(decoded.swapper),
           inputs: decoded.inputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
           outputs: decoded.outputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
         };
@@ -365,6 +394,7 @@ function decodeTradeEvent(event: EventLike): DecodedTrade | null {
       if (broadcast.swapped3.v313.is(event)) {
         const decoded = broadcast.swapped3.v313.decode(event);
         return {
+          trader: normalizeAccount(decoded.swapper),
           inputs: decoded.inputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
           outputs: decoded.outputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
         };
@@ -381,12 +411,14 @@ function decodeTradeEvent(event: EventLike): DecodedTrade | null {
 
 function decorateLegacyBroadcastTrade({
   eventName,
+  trader,
   fillerType,
   operation,
   inputs,
   outputs,
 }: {
   eventName: string;
+  trader?: string | null;
   fillerType: string;
   operation: string;
   inputs: DecodedTradeAssetAmount[];
@@ -401,12 +433,13 @@ function decorateLegacyBroadcastTrade({
     outputs.length === 1
   ) {
     return {
+      trader,
       inputs: [{ assetId: inputs[0].assetId, amount: outputs[0].amount }],
       outputs: [{ assetId: outputs[0].assetId, amount: inputs[0].amount }],
     };
   }
 
-  return { inputs, outputs };
+  return { trader, inputs, outputs };
 }
 
 /**
@@ -449,6 +482,89 @@ export function extractVolumeFromSwaps(
   }
 
   return volumeRows;
+}
+
+function tradeToAccountVolumeRows(
+  trade: DecodedTrade,
+  blockHeight: number,
+  prices: PriceMap,
+  decimals: AssetDecimals
+): TradeVolumeRow[] {
+  const account = normalizeAccount(trade.trader);
+  if (!account) {
+    return [];
+  }
+
+  const rowsByAsset = new Map<number, TradeVolumeRow>();
+
+  const rowForAsset = (assetId: number): TradeVolumeRow => {
+    let row = rowsByAsset.get(assetId);
+    if (!row) {
+      row = {
+        asset_id: assetId,
+        block_height: blockHeight,
+        account,
+        native_volume_buy: '0',
+        native_volume_sell: '0',
+        usd_volume_buy: '0.000000000000',
+        usd_volume_sell: '0.000000000000',
+        trade_count: 1,
+      };
+      rowsByAsset.set(assetId, row);
+    }
+    return row;
+  };
+
+  for (const input of trade.inputs) {
+    const row = rowForAsset(input.assetId);
+    row.native_volume_sell = sumBigIntStrings(row.native_volume_sell ?? '0', input.amount.toString());
+    row.usd_volume_sell = sumDecimal128Strings(
+      row.usd_volume_sell ?? '0.000000000000',
+      calculateUsdVolume(input.amount, input.assetId, prices, decimals)
+    );
+  }
+
+  for (const output of trade.outputs) {
+    const row = rowForAsset(output.assetId);
+    row.native_volume_buy = sumBigIntStrings(row.native_volume_buy ?? '0', output.amount.toString());
+    row.usd_volume_buy = sumDecimal128Strings(
+      row.usd_volume_buy ?? '0.000000000000',
+      calculateUsdVolume(output.amount, output.assetId, prices, decimals)
+    );
+  }
+
+  return Array.from(rowsByAsset.values());
+}
+
+/**
+ * Extract per-account trade volume from all swap events in a block.
+ *
+ * This mirrors extractVolumeFromSwaps but preserves the trader account so
+ * candles can expose Omniwatch-style top trader and contributor details.
+ */
+export function extractTradeVolumeFromSwaps(
+  events: Array<EventLike>,
+  blockHeight: number,
+  specVersion: number,
+  prices: PriceMap,
+  decimals: AssetDecimals
+): TradeVolumeRow[] {
+  const tradeRows: TradeVolumeRow[] = [];
+
+  for (const event of events) {
+    if (!isSwapEvent(event.name, specVersion)) {
+      continue;
+    }
+
+    const trade = decodeTradeEvent(event);
+    if (!trade) {
+      continue;
+    }
+
+    tradeRows.push(...tradeToAccountVolumeRows(trade, blockHeight, prices, decimals));
+  }
+
+  return aggregateTradeVolumeRows(tradeRows);
 }
 
 /**
@@ -564,6 +680,42 @@ function aggregateVolumeRows(volumeRows: PriceRow[]): PriceRow[] {
     } else {
       // First entry for this asset
       aggregated.set(row.asset_id, { ...row });
+    }
+  }
+
+  return Array.from(aggregated.values());
+}
+
+function aggregateTradeVolumeRows(volumeRows: TradeVolumeRow[]): TradeVolumeRow[] {
+  const aggregated = new Map<string, TradeVolumeRow>();
+
+  for (const row of volumeRows) {
+    const key = `${row.asset_id}:${row.block_height}:${row.account}`;
+    const existing = aggregated.get(key);
+
+    if (existing) {
+      aggregated.set(key, {
+        ...existing,
+        native_volume_sell: sumBigIntStrings(
+          existing.native_volume_sell ?? '0',
+          row.native_volume_sell ?? '0'
+        ),
+        usd_volume_sell: sumDecimal128Strings(
+          existing.usd_volume_sell ?? '0.000000000000',
+          row.usd_volume_sell ?? '0.000000000000'
+        ),
+        native_volume_buy: sumBigIntStrings(
+          existing.native_volume_buy ?? '0',
+          row.native_volume_buy ?? '0'
+        ),
+        usd_volume_buy: sumDecimal128Strings(
+          existing.usd_volume_buy ?? '0.000000000000',
+          row.usd_volume_buy ?? '0.000000000000'
+        ),
+        trade_count: existing.trade_count + row.trade_count,
+      });
+    } else {
+      aggregated.set(key, { ...row });
     }
   }
 

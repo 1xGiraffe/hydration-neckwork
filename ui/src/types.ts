@@ -1,3 +1,41 @@
+export interface OmniwatchTrader {
+  account: string
+  shortAccount: string
+  subscanUrl: string
+  emoji: string
+  emojiName?: string
+  emojiUrl?: string
+  volumeBuy: number
+  volumeSell: number
+  volumeTotal: number
+  netVolume: number
+  tradeCount: number
+}
+
+export interface OmniwatchCandleSummary {
+  topTrader: OmniwatchTrader
+  accountCount: number
+  tradeCount: number
+  volumeBuy: number
+  volumeSell: number
+  volumeTotal: number
+  netVolume: number
+}
+
+export interface OmniwatchVolumeDetails {
+  accounts: OmniwatchTrader[]
+  accountCount: number
+  tradeCount: number
+  volumeBuy: number
+  volumeSell: number
+  volumeTotal: number
+  netVolume: number
+  limit: number
+  offset: number
+  hasMore: boolean
+  nextOffset: number | null
+}
+
 export interface ApiCandle {
   intervalStart: number  // Unix seconds
   open: number
@@ -7,6 +45,7 @@ export interface ApiCandle {
   volumeBuy: number
   volumeSell: number
   volumeTotal: number
+  omniwatch?: OmniwatchCandleSummary
 }
 
 export const INTERVALS = ['5min', '15min', '30min', '1h', '4h', '1d', '1w', '1M'] as const

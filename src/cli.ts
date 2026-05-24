@@ -68,6 +68,10 @@ function parseTimestampArg(value: string): string {
   return toClickHouseDateTime(parsed)
 }
 
+function isMissingTradeVolumeTable(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('trade_volume_by_account')
+}
+
 function printHelp(): void {
   console.log(`
 Hydration Price Indexer
@@ -78,7 +82,7 @@ Usage:
 Options:
   --from-block=N           Start indexing from block N (overrides checkpoint)
   --to-block=N             Stop indexing at block N (useful for testing)
-  --rollback-to-block=N    Delete all data at or above block N (prices, blocks, OHLC), reset checkpoint, and exit
+  --rollback-to-block=N    Delete all data at or above block N, reset checkpoint, and exit
   --repair-ohlc-from=TS    Rebuild OHLC tables for intervals overlapping TS..TO from prices
   --repair-ohlc-to=TS      End timestamp for OHLC repair (ISO 8601 or 'YYYY-MM-DD HH:MM:SS', UTC)
   --detect-gaps            Scan ClickHouse for missing block ranges and exit
@@ -176,7 +180,8 @@ async function detectGaps(): Promise<void> {
 /**
  * Rollback all data to a specific block height
  *
- * Deletes all rows at or above the target block from prices, blocks, runtime_upgrades, and OHLC tables.
+ * Deletes all rows at or above the target block from prices, blocks, trade volumes,
+ * runtime_upgrades, and OHLC tables.
  * Resets checkpoint to targetBlock - 1 to resume indexing from targetBlock.
  * Uses mutations_sync: 1 to ensure synchronous deletion before checkpoint reset.
  * Restores the prefix of the first affected candle from preserved prices so replay can
@@ -207,6 +212,19 @@ async function rollbackToBlock(targetBlock: number): Promise<void> {
         mutations_sync: '1',
       },
     })
+
+    console.log(`[Rollback] Deleting trade volumes at or above block ${targetBlock}...`)
+    try {
+      await client.command({
+        query: `DELETE FROM price_data.trade_volume_by_account WHERE block_height >= ${targetBlock}`,
+        clickhouse_settings: {
+          mutations_sync: '1',
+        },
+      })
+    } catch (error) {
+      if (!isMissingTradeVolumeTable(error)) throw error
+      console.log('[Rollback] trade_volume_by_account table not found; skipping')
+    }
 
     // Delete from blocks table
     console.log(`[Rollback] Deleting blocks at or above block ${targetBlock}...`)

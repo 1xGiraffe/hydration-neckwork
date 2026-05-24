@@ -9,6 +9,17 @@ export interface PriceRow {
   hops?: number
 }
 
+export interface TradeVolumeRow {
+  asset_id: number
+  block_height: number
+  account: string
+  native_volume_buy?: string
+  native_volume_sell?: string
+  usd_volume_buy?: string
+  usd_volume_sell?: string
+  trade_count: number
+}
+
 export interface BlockRow {
   block_height: number
   block_timestamp: string  // ISO datetime string

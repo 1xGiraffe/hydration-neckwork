@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   calculateUsdVolume,
+  extractTradeVolumeFromSwaps,
   extractVolumeFromSwaps,
   swapToVolumeRows,
   mergePriceAndVolumeRows,
@@ -493,6 +494,115 @@ describe('extractVolumeFromSwaps', () => {
       asset_id: 10,
       native_volume_buy: '1000000000000',
       usd_volume_buy: '1.500000000000',
+    });
+  });
+});
+
+describe('extractTradeVolumeFromSwaps', () => {
+  const prices: PriceMap = new Map([
+    [5, '2.000000000000'],
+    [10, '1.500000000000'],
+  ]);
+  const decimals: AssetDecimals = new Map([
+    [5, 12],
+    [10, 12],
+  ]);
+
+  it('preserves legacy trader accounts in per-account volume rows', () => {
+    const event = createMockEvent('Omnipool.SellExecuted', {
+      who: 'alice',
+      assetIn: 5,
+      assetOut: 10,
+      amountIn: 1000000000000n,
+      amountOut: 2000000000000n,
+    });
+
+    const rows = extractTradeVolumeFromSwaps([event], 100, 201, prices, decimals);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      asset_id: 5,
+      account: 'alice',
+      native_volume_sell: '1000000000000',
+      usd_volume_sell: '2.000000000000',
+      trade_count: 1,
+    });
+    expect(rows[1]).toMatchObject({
+      asset_id: 10,
+      account: 'alice',
+      native_volume_buy: '2000000000000',
+      usd_volume_buy: '3.000000000000',
+      trade_count: 1,
+    });
+  });
+
+  it('aggregates repeated broadcast trades by asset, block, and account', () => {
+    const first = createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Omnipool' },
+      operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 5, amount: 1000000000000n }],
+      outputs: [{ asset: 10, amount: 2000000000000n }],
+      fees: [],
+      swapper: 'bob',
+      filler: 'pool',
+      operationStack: [],
+    });
+    const second = createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Omnipool' },
+      operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 5, amount: 500000000000n }],
+      outputs: [{ asset: 10, amount: 1000000000000n }],
+      fees: [],
+      swapper: 'bob',
+      filler: 'pool',
+      operationStack: [],
+    });
+
+    const rows = extractTradeVolumeFromSwaps([first, second], 100, 323, prices, decimals);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      asset_id: 5,
+      account: 'bob',
+      native_volume_sell: '1500000000000',
+      usd_volume_sell: '3.000000000000',
+      trade_count: 2,
+    });
+    expect(rows[1]).toMatchObject({
+      asset_id: 10,
+      account: 'bob',
+      native_volume_buy: '3000000000000',
+      usd_volume_buy: '4.500000000000',
+      trade_count: 2,
+    });
+  });
+
+  it('counts a trade once per account and asset when duplicate legs are present', () => {
+    const event = createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Omnipool' },
+      operation: { __kind: 'ExactIn' },
+      inputs: [
+        { asset: 5, amount: 1000000000000n },
+        { asset: 5, amount: 500000000000n },
+      ],
+      outputs: [{ asset: 5, amount: 250000000000n }],
+      fees: [],
+      swapper: 'carol',
+      filler: 'pool',
+      operationStack: [],
+    });
+
+    const rows = extractTradeVolumeFromSwaps([event], 100, 323, prices, decimals);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      asset_id: 5,
+      account: 'carol',
+      native_volume_sell: '1500000000000',
+      usd_volume_sell: '3.000000000000',
+      native_volume_buy: '250000000000',
+      usd_volume_buy: '0.500000000000',
+      trade_count: 1,
     });
   });
 });

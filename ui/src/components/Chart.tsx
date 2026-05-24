@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
+import { useEffect, useMemo, useRef, useState, useCallback, type SyntheticEvent, type UIEvent } from 'react'
 import {
   createChart,
   CandlestickSeries,
@@ -7,6 +7,7 @@ import {
 } from 'lightweight-charts'
 import type {
   UTCTimestamp,
+  Time,
   MouseEventParams,
   IChartApi,
   ISeriesApi,
@@ -14,8 +15,8 @@ import type {
   HistogramData,
   IPriceLine,
 } from 'lightweight-charts'
-import type { ApiCandle, OHLCVInterval } from '../types'
-import { fetchCandles } from '../api/candles'
+import type { ApiCandle, OHLCVInterval, OmniwatchTrader, OmniwatchVolumeDetails } from '../types'
+import { fetchCandles, fetchVolumeDetails } from '../api/candles'
 import { formatCountdown } from '../utils/format'
 
 const INTERVAL_SECONDS: Record<OHLCVInterval, number> = {
@@ -28,6 +29,9 @@ const LOAD_MORE_THRESHOLD = 50
 const LOAD_MORE_COUNT = 500
 const POLL_INTERVAL_MS = 10_000
 const PINNED_SCROLL_TOLERANCE = 2
+const OMNIWATCH_MARKER_MIN_BAR_WIDTH = 48
+const OMNIWATCH_MARKER_ACCOUNT_MIN_BAR_WIDTH = 60
+const VOLUME_DETAILS_PAGE_SIZE = 200
 
 interface ChartProps {
   baseId: number
@@ -49,10 +53,27 @@ interface Legend {
   volume: number
 }
 
+interface OmniwatchMarker {
+  candle: ApiCandle
+  x: number
+  y: number
+  showAccount: boolean
+}
+
+interface VolumeModalState {
+  candle: ApiCandle
+  details: OmniwatchVolumeDetails | null
+  loading: boolean
+  loadingMore: boolean
+  error: string | null
+}
+
 function formatPriceFixed(value: number): string {
-  if (value >= 1000) return value.toFixed(2)
-  if (value >= 1) return value.toFixed(4)
-  return value.toFixed(6)
+  const digits = value >= 1000 ? 2 : value >= 1 ? 4 : 6
+  return value.toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })
 }
 
 function formatUsdVolume(value: number): string {
@@ -63,6 +84,76 @@ function formatUsdVolume(value: number): string {
 
 function formatUsdVolumeAxis(value: number): string {
   return `$${formatUsdVolume(value)}`
+}
+
+function formatSignedUsdVolume(value: number): string {
+  const sign = value >= 0 ? '+' : '-'
+  return `${sign}$${formatUsdVolume(Math.abs(value))}`
+}
+
+function formatSignedPriceChange(value: number): string {
+  const sign = value >= 0 ? '+' : '-'
+  return `${sign}${formatPriceFixed(Math.abs(value))}`
+}
+
+function formatPercent(value: number): string {
+  const sign = value >= 0 ? '+' : ''
+  return `${sign}${value.toFixed(2)}%`
+}
+
+function formatCount(value: number): string {
+  return value.toLocaleString(undefined, { maximumFractionDigits: 0 })
+}
+
+function formatShortCount(value: number): string {
+  if (value >= 999_500_000) return `${Math.round(value / 1_000_000_000)}b`
+  if (value >= 999_500) return `${Math.round(value / 1_000_000)}m`
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`
+  return formatCount(value)
+}
+
+function formatCandleDate(ts: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'UTC',
+    timeZoneName: 'short',
+  }).format(new Date(ts * 1000))
+}
+
+function formatAddressLabel(address: string): string {
+  if (address.length <= 14) return address
+  return `${address.slice(0, 7)}...${address.slice(-4)}`
+}
+
+function showIconFallback(event: SyntheticEvent<HTMLImageElement>) {
+  event.currentTarget.style.display = 'none'
+  const fallback = event.currentTarget.nextElementSibling
+  if (fallback instanceof HTMLElement) fallback.style.display = 'inline'
+}
+
+function OmniwatchIcon({ trader }: { trader: OmniwatchTrader }) {
+  if (!trader.emojiUrl) return <span className="emoji">{trader.emoji}</span>
+
+  return (
+    <>
+      <img
+        className="emoji-img"
+        src={trader.emojiUrl}
+        alt={trader.emojiName ?? trader.emoji}
+        title={trader.emojiName}
+        onError={showIconFallback}
+      />
+      <span className="emoji icon-fallback">{trader.emoji}</span>
+    </>
+  )
+}
+
+function timeToSeconds(time: Time | undefined): number | null {
+  return typeof time === 'number' ? time : null
 }
 
 function getPriceFormat(data: ApiCandle[]) {
@@ -146,6 +237,11 @@ export default function Chart({
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const countdownLineRef = useRef<IPriceLine | null>(null)
+  const volumePaneTopRef = useRef(0)
+  const markerFrameRef = useRef<number | null>(null)
+  const openVolumeModalRef = useRef<(candle: ApiCandle) => void>(() => undefined)
+  const volumeRowsRef = useRef<HTMLDivElement>(null)
+  const volumeDetailsPageRequestRef = useRef<string | null>(null)
 
   const allDataRef = useRef<ApiCandle[]>([])
   const oldestTimestampRef = useRef<number>(Infinity)
@@ -156,6 +252,8 @@ export default function Chart({
   const [legend, setLegend] = useState<Legend | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadingVisible, setLoadingVisible] = useState(true)
+  const [omniwatchMarkers, setOmniwatchMarkers] = useState<OmniwatchMarker[]>([])
+  const [volumeModal, setVolumeModal] = useState<VolumeModalState | null>(null)
   // Mirror the latest theme into a ref so callbacks/intervals read the live
   // value without needing to be rebuilt (and without depending on document
   // attribute order-of-application).
@@ -176,6 +274,170 @@ export default function Chart({
   const fetchData = useCallback(async (from: number, to: number) => {
     return fetchCandles({ baseId, quoteId, interval, from, to })
   }, [baseId, quoteId, interval])
+
+  const updateOmniwatchMarkers = useCallback(() => {
+    const chart = chartRef.current
+    const container = containerRef.current
+    if (!chart || !container) {
+      setOmniwatchMarkers([])
+      return
+    }
+
+    const data = allDataRef.current
+    if (data.length === 0) {
+      setOmniwatchMarkers([])
+      return
+    }
+
+    const range = chart.timeScale().getVisibleLogicalRange()
+    const visibleBars = range ? Math.max(1, range.to - range.from) : 40
+    const xStep = container.clientWidth / visibleBars
+    const barWidth = xStep * 0.62
+    const volumePaneHeight = Math.floor(container.clientHeight * 0.15)
+    volumePaneTopRef.current = container.clientHeight - volumePaneHeight
+    if (barWidth < OMNIWATCH_MARKER_MIN_BAR_WIDTH) {
+      setOmniwatchMarkers([])
+      return
+    }
+
+    const y = volumePaneTopRef.current + 7
+    const showAccount = barWidth >= OMNIWATCH_MARKER_ACCOUNT_MIN_BAR_WIDTH
+
+    const next: OmniwatchMarker[] = []
+    for (const candle of data) {
+      if (!candle.omniwatch) continue
+      const x = chart.timeScale().timeToCoordinate(candle.intervalStart as UTCTimestamp)
+      if (x == null || x < -20 || x > container.clientWidth + 20) continue
+      next.push({ candle, x, y, showAccount })
+    }
+    setOmniwatchMarkers(next)
+  }, [])
+
+  const scheduleOmniwatchMarkers = useCallback(() => {
+    if (markerFrameRef.current != null) {
+      window.cancelAnimationFrame(markerFrameRef.current)
+    }
+    markerFrameRef.current = window.requestAnimationFrame(() => {
+      markerFrameRef.current = null
+      updateOmniwatchMarkers()
+    })
+  }, [updateOmniwatchMarkers])
+
+  const loadVolumeDetailsPage = useCallback((candle: ApiCandle, offset: number) => {
+    const requestKey = `${baseId}:${quoteId}:${interval}:${candle.intervalStart}:${offset}`
+    if (volumeDetailsPageRequestRef.current === requestKey) return
+    volumeDetailsPageRequestRef.current = requestKey
+
+    setVolumeModal(current => (
+      current?.candle.intervalStart === candle.intervalStart
+        ? { ...current, loading: offset === 0, loadingMore: offset > 0, error: null }
+        : current
+    ))
+
+    fetchVolumeDetails({
+      baseId,
+      quoteId,
+      interval,
+      time: candle.intervalStart,
+      limit: VOLUME_DETAILS_PAGE_SIZE,
+      offset,
+    })
+      .then(details => setVolumeModal(current => (
+        current?.candle.intervalStart === candle.intervalStart
+          ? {
+              ...current,
+              details: offset === 0 || !current.details
+                ? details
+                : { ...details, accounts: [...current.details.accounts, ...details.accounts] },
+              loading: false,
+              loadingMore: false,
+              error: null,
+            }
+          : current
+      )))
+      .catch(error => setVolumeModal(current => (
+        current?.candle.intervalStart === candle.intervalStart
+          ? {
+              ...current,
+              details: offset === 0 ? null : current.details,
+              loading: false,
+              loadingMore: false,
+              error: error instanceof Error ? error.message : 'Failed to load volume details',
+          }
+          : current
+      )))
+      .finally(() => {
+        if (volumeDetailsPageRequestRef.current === requestKey) {
+          volumeDetailsPageRequestRef.current = null
+        }
+      })
+  }, [baseId, quoteId, interval])
+
+  const openVolumeModal = useCallback((candle: ApiCandle) => {
+    setVolumeModal({ candle, details: null, loading: true, loadingMore: false, error: null })
+    loadVolumeDetailsPage(candle, 0)
+  }, [loadVolumeDetailsPage])
+
+  const closeVolumeModal = useCallback(() => setVolumeModal(null), [])
+
+  useEffect(() => {
+    setVolumeModal(null)
+    volumeDetailsPageRequestRef.current = null
+  }, [baseId, quoteId, interval])
+
+  const loadMoreVolumeDetails = useCallback(() => {
+    if (
+      !volumeModal?.details ||
+      volumeModal.loading ||
+      volumeModal.loadingMore ||
+      !volumeModal.details.hasMore ||
+      volumeModal.details.nextOffset == null
+    ) {
+      return
+    }
+    loadVolumeDetailsPage(volumeModal.candle, volumeModal.details.nextOffset)
+  }, [loadVolumeDetailsPage, volumeModal])
+
+  const handleVolumeRowsScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    const el = event.currentTarget
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 240) {
+      loadMoreVolumeDetails()
+    }
+  }, [loadMoreVolumeDetails])
+
+  useEffect(() => {
+    openVolumeModalRef.current = openVolumeModal
+  }, [openVolumeModal])
+
+  useEffect(() => {
+    if (!volumeModal) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeVolumeModal()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [volumeModal, closeVolumeModal])
+
+  useEffect(() => {
+    const el = volumeRowsRef.current
+    if (
+      !el ||
+      !volumeModal?.details?.hasMore ||
+      volumeModal.loading ||
+      volumeModal.loadingMore
+    ) {
+      return
+    }
+    if (el.scrollHeight <= el.clientHeight + 24) {
+      loadMoreVolumeDetails()
+    }
+  }, [
+    volumeModal?.details?.accounts.length,
+    volumeModal?.details?.hasMore,
+    volumeModal?.loading,
+    volumeModal?.loadingMore,
+    loadMoreVolumeDetails,
+  ])
 
   const applyData = useCallback((data: ApiCandle[]) => {
     const candleSeries = candleSeriesRef.current
@@ -201,7 +463,8 @@ export default function Chart({
     candleSeries.setData(candleData)
     volumeSeries.setData(volumeData)
     onDataChange?.(data)
-  }, [onDataChange])
+    scheduleOmniwatchMarkers()
+  }, [onDataChange, scheduleOmniwatchMarkers])
 
   const replaceAllData = useCallback((data: ApiCandle[]) => {
     const normalized = normalizeCandles(data)
@@ -282,7 +545,9 @@ export default function Chart({
       borderVisible: false,
       visible: false,
     })
-    chart.panes()[1].setHeight(Math.floor(container.clientHeight * 0.15))
+    const initialVolumePaneHeight = Math.floor(container.clientHeight * 0.15)
+    volumePaneTopRef.current = container.clientHeight - initialVolumePaneHeight
+    chart.panes()[1].setHeight(initialVolumePaneHeight)
 
     chartRef.current = chart
     candleSeriesRef.current = candleSeries
@@ -306,10 +571,34 @@ export default function Chart({
     }
     chart.subscribeCrosshairMove(crosshairHandler)
 
+    const clickHandler = (param: MouseEventParams) => {
+      if (!param.point) return
+
+      const data = allDataRef.current
+      const time = timeToSeconds(param.time ?? chart.timeScale().coordinateToTime(param.point.x) ?? undefined)
+      let candle = time == null ? undefined : data.find(item => item.intervalStart === time)
+
+      if (!candle) {
+        const logical = param.logical ?? chart.timeScale().coordinateToLogical(param.point.x)
+        if (logical == null) return
+        const index = Math.round(logical)
+        if (Math.abs(logical - index) <= 0.5) candle = data[index]
+      }
+
+      if (candle?.omniwatch) openVolumeModalRef.current(candle)
+    }
+    chart.subscribeClick(clickHandler)
+
+    const markerRangeHandler = () => scheduleOmniwatchMarkers()
+    chart.timeScale().subscribeVisibleLogicalRangeChange(markerRangeHandler)
+
     const handleResize = () => {
       if (!containerRef.current) return
       chart.applyOptions({ width: containerRef.current.clientWidth, height: containerRef.current.clientHeight })
-      chart.panes()[1].setHeight(Math.floor(containerRef.current.clientHeight * 0.15))
+      const volumePaneHeight = Math.floor(containerRef.current.clientHeight * 0.15)
+      volumePaneTopRef.current = containerRef.current.clientHeight - volumePaneHeight
+      chart.panes()[1].setHeight(volumePaneHeight)
+      scheduleOmniwatchMarkers()
     }
     const resizeObserver = new ResizeObserver(handleResize)
     resizeObserver.observe(container)
@@ -321,6 +610,12 @@ export default function Chart({
       clearTimeout(settleTimer)
       window.removeEventListener('resize', handleResize)
       chart.unsubscribeCrosshairMove(crosshairHandler)
+      chart.unsubscribeClick(clickHandler)
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(markerRangeHandler)
+      if (markerFrameRef.current != null) {
+        window.cancelAnimationFrame(markerFrameRef.current)
+        markerFrameRef.current = null
+      }
       if (onVisibleRangeReady) onVisibleRangeReady(() => null)
       chartRef.current = null
       candleSeriesRef.current = null
@@ -328,7 +623,7 @@ export default function Chart({
       countdownLineRef.current = null
       chart.remove()
     }
-  }, [onVisibleRangeReady]) // create once; theme changes are handled by applyOptions below
+  }, [onVisibleRangeReady, scheduleOmniwatchMarkers]) // create once; theme changes are handled by applyOptions below
 
   // Theme changes: re-apply colors on the existing chart instance so the
   // canvas doesn't get torn down and re-mounted (which used to blank out
@@ -519,6 +814,15 @@ export default function Chart({
   } : null)
 
   const upColor = useMemo(() => paletteForTheme(themeKey).green, [themeKey])
+  const modalCandle = volumeModal?.candle ?? null
+  const modalDetails = volumeModal?.details ?? null
+  const modalPriceChange = modalCandle ? modalCandle.close - modalCandle.open : 0
+  const modalChangePct = modalCandle && modalCandle.open !== 0
+    ? (modalPriceChange / modalCandle.open) * 100
+    : 0
+  const modalTotalVolume = modalDetails
+    ? Math.max(1, modalDetails.volumeTotal)
+    : 1
 
   return (
     <>
@@ -535,14 +839,150 @@ export default function Chart({
           opacity: 1; transition: opacity 180ms ease;
         }
         .chart-loading.out { opacity: 0; }
+        .omniwatch-marker {
+          position: absolute; z-index: 5; transform: translate(-50%, 0);
+          display: inline-flex; align-items: center; gap: 4px;
+          height: 28px; padding: 0 9px 0 6px; border-radius: 9999px;
+          border: 1px solid var(--border); background: var(--bg-elev);
+          box-shadow: 0 6px 18px rgba(0,0,0,0.22);
+          font-family: 'GeistMono', monospace; font-size: 12px; font-weight: 700; line-height: 1;
+          cursor: pointer; color: var(--text-high);
+        }
+        .omniwatch-marker.net-buy { background: var(--green-soft); border-color: rgba(116, 199, 66, 0.55); }
+        .omniwatch-marker.net-sell { background: var(--red-soft); border-color: rgba(255, 104, 104, 0.55); }
+        .omniwatch-marker .emoji { font-size: 18px; line-height: 1; }
+        .omniwatch-marker .emoji-img {
+          width: 20px; height: 20px; object-fit: contain; border-radius: 4px; flex: 0 0 auto;
+        }
+        .omniwatch-marker .id { color: var(--text-high); margin-left: 1px; }
+        .omniwatch-marker .more { margin-left: 2px; color: var(--text-medium); }
+        .omniwatch-marker.net-buy .more, .omniwatch-marker.net-buy .id { color: var(--green); }
+        .omniwatch-marker.net-sell .more, .omniwatch-marker.net-sell .id { color: var(--red); }
+        .omniwatch-scrim {
+          position: fixed; inset: 0; z-index: 100; display: flex; align-items: flex-start; justify-content: center;
+          padding: 8vh 16px 24px; background: rgba(3, 8, 22, 0.78);
+          backdrop-filter: blur(8px) saturate(140%); -webkit-backdrop-filter: blur(8px) saturate(140%);
+        }
+        [data-theme="light"] .omniwatch-scrim { background: rgba(36, 14, 50, 0.34); }
+        .omniwatch-modal {
+          width: min(860px, calc(100vw - 32px)); max-height: min(820px, calc(100vh - 64px));
+          background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+          box-shadow: 0 24px 72px rgba(0,0,0,0.42); overflow: hidden;
+          display: flex; flex-direction: column;
+        }
+        .omniwatch-modal-head {
+          display: flex; align-items: flex-start; gap: 18px; padding: 22px 28px 18px;
+          border-bottom: 1px solid var(--separator);
+        }
+        .omniwatch-modal-title { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+        .omniwatch-modal-title .pair {
+          font-family: 'Gazpacho', serif; font-weight: 500; font-size: 30px; line-height: 1; color: var(--text-high);
+        }
+        .omniwatch-modal-title .sub { font-family: 'GeistMono', monospace; font-size: 13px; color: var(--text-medium); }
+        .omniwatch-close {
+          margin-left: auto; width: 38px; height: 38px; display: inline-flex; align-items: center; justify-content: center;
+          border-radius: 9999px; color: var(--text-medium); font-size: 24px; line-height: 1;
+        }
+        .omniwatch-close:hover { background: var(--panel-hover); color: var(--text-high); }
+        .omniwatch-stats {
+          display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1px; background: var(--separator);
+          border-bottom: 1px solid var(--separator); padding: 0;
+        }
+        .omniwatch-stat { background: var(--bg-elev); padding: 15px 16px; min-width: 0; }
+        .omniwatch-stat:first-child { padding-left: 28px; }
+        .omniwatch-stat .k {
+          display: block; margin-bottom: 6px; font-family: 'GeistMono', monospace; font-size: 11px;
+          text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-low);
+        }
+        .omniwatch-stat .v {
+          display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+          font-family: 'GeistMono', monospace; font-size: 16px; font-weight: 600; color: var(--text-high);
+        }
+        .omniwatch-stat .v.up { color: var(--green); }
+        .omniwatch-stat .v.down { color: var(--red); }
+        .omniwatch-summary {
+          display: flex; align-items: center; justify-content: space-between; gap: 12px;
+          padding: 18px 28px 10px; font-family: 'GeistMono', monospace; font-size: 12px;
+          text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-medium);
+        }
+        .omniwatch-summary .price-change.up { color: var(--green); }
+        .omniwatch-summary .price-change.down { color: var(--red); }
+        .omniwatch-summary .net.up { color: var(--green); }
+        .omniwatch-summary .net.down { color: var(--red); }
+        .omniwatch-rows { padding: 0 28px 22px; overflow-y: auto; }
+        .omniwatch-row {
+          display: grid; grid-template-columns: 240px 1fr 150px; gap: 22px; align-items: center;
+          padding: 18px 0; border-bottom: 1px solid var(--separator);
+        }
+        .omniwatch-row:last-child { border-bottom: 0; }
+        .omniwatch-account { display: flex; align-items: center; gap: 12px; min-width: 0; }
+        .omniwatch-pill {
+          display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px 0 8px;
+          border-radius: 6px; border: 1px solid var(--border); background: var(--panel);
+          font-family: 'GeistMono', monospace; font-size: 13px; font-weight: 700; color: var(--text-high);
+          text-decoration: none;
+        }
+        .omniwatch-pill:hover { border-color: var(--accent); color: var(--accent); }
+        .omniwatch-pill .emoji { font-size: 22px; line-height: 1; }
+        .omniwatch-pill .emoji-img {
+          width: 24px; height: 24px; object-fit: contain; border-radius: 5px; flex: 0 0 auto;
+        }
+        .icon-fallback { display: none; }
+        .omniwatch-count { font-family: 'GeistMono', monospace; font-size: 13px; color: var(--text-low); }
+        .omniwatch-flow { min-width: 0; display: flex; flex-direction: column; gap: 9px; }
+        .omniwatch-flow-track { width: 100%; height: 9px; border-radius: 5px; background: var(--panel); overflow: hidden; }
+        .omniwatch-flow-bar { display: flex; height: 100%; min-width: 20px; }
+        .omniwatch-flow-bar .buy { background: var(--green); }
+        .omniwatch-flow-bar .sell { background: var(--red); }
+        .omniwatch-flow-nums { display: flex; flex-wrap: wrap; gap: 16px; font-family: 'GeistMono', monospace; font-size: 12px; }
+        .omniwatch-flow-nums .buy { color: var(--green); }
+        .omniwatch-flow-nums .sell { color: var(--red); }
+        .omniwatch-net { display: flex; flex-direction: column; gap: 4px; text-align: right; min-width: 0; }
+        .omniwatch-net .value { font-family: 'GeistMono', monospace; font-size: 18px; font-weight: 700; line-height: 1.2; }
+        .omniwatch-net .label {
+          font-family: 'GeistMono', monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low);
+        }
+        .omniwatch-net.buyer .value { color: var(--green); }
+        .omniwatch-net.seller .value { color: var(--red); }
+        .omniwatch-more {
+          padding: 18px 0 2px; font-family: 'GeistMono', monospace; font-size: 12px;
+          text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-low); text-align: center;
+        }
+        .omniwatch-empty { padding: 32px 28px 36px; color: var(--text-low); font-size: 15px; text-align: center; }
         /* On narrow viewports the price-axis labels crowd the top-right corner.
            Push the legend down so it does not overlap axis labels. */
         @media (max-width: 768px) {
           .chart-legend { left: 12px; right: 12px; top: 48px; }
+          .omniwatch-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .omniwatch-stat:nth-child(2n + 1) { padding-left: 28px; }
+          .omniwatch-row { grid-template-columns: 1fr; gap: 12px; }
+          .omniwatch-net { text-align: left; }
         }
       `}</style>
       <div className="chart-area">
         <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
+
+        {omniwatchMarkers.map(marker => {
+          const summary = marker.candle.omniwatch
+          if (!summary) return null
+          const more = Math.max(0, summary.accountCount - 1)
+          const direction = summary.netVolume >= 0 ? 'net-buy' : 'net-sell'
+          return (
+            <button
+              key={marker.candle.intervalStart}
+              type="button"
+              className={`omniwatch-marker ${direction}`}
+              style={{ left: marker.x, top: marker.y }}
+              onClick={() => openVolumeModal(marker.candle)}
+              aria-label={`Volume contributors for ${formatCandleDate(marker.candle.intervalStart)}`}
+              title={`${summary.topTrader.shortAccount} ${formatSignedUsdVolume(summary.netVolume)}`}
+            >
+              <OmniwatchIcon trader={summary.topTrader} />
+              {marker.showAccount && more === 0 && <span className="id">{summary.topTrader.shortAccount}</span>}
+              {more > 0 && <span className="more">+{formatShortCount(more)}</span>}
+            </button>
+          )
+        })}
 
         {loadingVisible && (
           <div className={'chart-loading' + (!loading ? ' out' : '')}>
@@ -573,6 +1013,96 @@ export default function Chart({
           </div>
         )}
       </div>
+
+      {volumeModal && modalCandle && (
+        <div className="omniwatch-scrim" onClick={(event) => { if (event.target === event.currentTarget) closeVolumeModal() }}>
+          <div className="omniwatch-modal" role="dialog" aria-modal="true" aria-label="Candle details">
+            <div className="omniwatch-modal-head">
+              <div className="omniwatch-modal-title">
+                <span className="pair">{base}</span>
+                <span className="sub">{INTERVAL_SECONDS[interval] >= 3600 ? interval : interval.replace('min', 'm')} candle · {formatCandleDate(modalCandle.intervalStart)}</span>
+              </div>
+              <button type="button" className="omniwatch-close" onClick={closeVolumeModal} aria-label="Close">×</button>
+            </div>
+
+            <div className="omniwatch-stats">
+              <div className="omniwatch-stat"><span className="k">Open</span><span className="v">{formatPriceFixed(modalCandle.open)}</span></div>
+              <div className="omniwatch-stat"><span className="k">High</span><span className="v">{formatPriceFixed(modalCandle.high)}</span></div>
+              <div className="omniwatch-stat"><span className="k">Low</span><span className="v">{formatPriceFixed(modalCandle.low)}</span></div>
+              <div className="omniwatch-stat"><span className="k">Close</span><span className={`v ${modalCandle.close >= modalCandle.open ? 'up' : 'down'}`}>{formatPriceFixed(modalCandle.close)}</span></div>
+              <div className="omniwatch-stat"><span className="k">Change</span><span className={`v ${modalChangePct >= 0 ? 'up' : 'down'}`}>{formatPercent(modalChangePct)}</span></div>
+              <div className="omniwatch-stat"><span className="k">Volume</span><span className="v">${formatUsdVolume(modalCandle.volumeTotal)}</span></div>
+            </div>
+
+            <div className="omniwatch-summary">
+              <span className={`price-change ${modalPriceChange >= 0 ? 'up' : 'down'}`}>
+                Price {formatSignedPriceChange(modalPriceChange)} ({formatPercent(modalChangePct)})
+              </span>
+              {volumeModal.loading && <span>Loading accounts</span>}
+              {volumeModal.error && <span>{volumeModal.error}</span>}
+              {modalDetails && (
+                <>
+                  <span>{formatCount(modalDetails.tradeCount)} trades · {formatCount(modalDetails.accountCount)} accounts</span>
+                  <span className={`net ${modalDetails.netVolume >= 0 ? 'up' : 'down'}`}>Net {formatSignedUsdVolume(modalDetails.netVolume)}</span>
+                </>
+              )}
+            </div>
+
+            {modalDetails && modalDetails.accounts.length > 0 && (
+              <div className="omniwatch-rows" ref={volumeRowsRef} onScroll={handleVolumeRowsScroll}>
+                {modalDetails.accounts.map(account => {
+                  const denom = account.volumeBuy + account.volumeSell || 1
+                  const buyPct = (account.volumeBuy / denom) * 100
+                  const sellPct = 100 - buyPct
+                  const rowWidth = Math.max(4, (account.volumeTotal / modalTotalVolume) * 100)
+                  const isBuyer = account.netVolume >= 0
+                  const hasBuy = account.volumeBuy > 0
+                  const hasSell = account.volumeSell > 0
+                  return (
+                    <div className="omniwatch-row" key={account.account}>
+                      <div className="omniwatch-account">
+                        <a
+                          className="omniwatch-pill"
+                          href={account.subscanUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={account.account}
+                        >
+                          <OmniwatchIcon trader={account} />{formatAddressLabel(account.account)}
+                        </a>
+                        <span className="omniwatch-count">×{formatCount(account.tradeCount)}</span>
+                      </div>
+                      <div className="omniwatch-flow">
+                        <div className="omniwatch-flow-track">
+                          <div className="omniwatch-flow-bar" style={{ width: `${rowWidth}%` }}>
+                            {hasBuy && <span className="buy" style={{ width: hasSell ? `${buyPct}%` : '100%' }} />}
+                            {hasSell && <span className="sell" style={{ width: hasBuy ? `${sellPct}%` : '100%' }} />}
+                          </div>
+                        </div>
+                        <div className="omniwatch-flow-nums">
+                          {hasBuy && <span className="buy">+${formatUsdVolume(account.volumeBuy)} bought</span>}
+                          {hasSell && <span className="sell">-${formatUsdVolume(account.volumeSell)} sold</span>}
+                        </div>
+                      </div>
+                      <div className={`omniwatch-net ${isBuyer ? 'buyer' : 'seller'}`}>
+                        <span className="value">{formatSignedUsdVolume(account.netVolume)}</span>
+                        <span className="label">{isBuyer ? 'Net buyer' : 'Net seller'}</span>
+                      </div>
+                    </div>
+                  )
+                })}
+                {volumeModal.loadingMore && (
+                  <div className="omniwatch-more">Loading more accounts</div>
+                )}
+              </div>
+            )}
+
+            {modalDetails && modalDetails.accounts.length === 0 && (
+              <div className="omniwatch-empty">No account-level volume for this candle.</div>
+            )}
+          </div>
+        </div>
+      )}
     </>
   )
 }

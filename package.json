@@ -8,6 +8,7 @@
     "start": "tsx src/cli.ts",
     "start:raw": "tsx src/raw/cli.ts",
     "detect-gaps": "tsx src/cli.ts --detect-gaps",
+    "migrate:trade-volume": "tsx src/scripts/migrate-trade-volume.ts",
     "test": "vitest run"
   },
   "repository": {

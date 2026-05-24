@@ -14,6 +14,30 @@ export interface OHLCVCandle {
   volume_total: string
 }
 
+export interface OmniwatchTrader {
+  account: string
+  shortAccount: string
+  subscanUrl: string
+  emoji: string
+  emojiName?: string
+  emojiUrl?: string
+  volumeBuy: number
+  volumeSell: number
+  volumeTotal: number
+  netVolume: number
+  tradeCount: number
+}
+
+export interface OmniwatchCandleSummary {
+  topTrader: OmniwatchTrader
+  accountCount: number
+  tradeCount: number
+  volumeBuy: number
+  volumeSell: number
+  volumeTotal: number
+  netVolume: number
+}
+
 /**
  * OHLCV candle formatted for API JSON response.
  * All values converted to JavaScript numbers.
@@ -28,6 +52,7 @@ export interface ApiCandle {
   volumeBuy: number
   volumeSell: number
   volumeTotal: number
+  omniwatch?: OmniwatchCandleSummary
 }
 
 /**

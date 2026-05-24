@@ -12,7 +12,7 @@ import type { OmnipoolAssetState, XYKPool, StableswapPool } from './price/types.
 import type { Block } from './types/support.ts'
 import * as storage from './types/storage.ts'
 import { isSwapEvent } from './registry/swapEvents.js'
-import { extractVolumeFromSwaps, mergePriceAndVolumeRows } from './blocks/extractVolume.js'
+import { extractTradeVolumeFromSwaps, extractVolumeFromSwaps, mergePriceAndVolumeRows } from './blocks/extractVolume.js'
 import { readErc20Balances, isKnownErc20, updateErc20Registry } from './evm/balances.js'
 import {
   ClickHouseSnapshotReader,
@@ -763,6 +763,13 @@ export async function run(options: RunOptions = {}): Promise<void> {
         prices,
         decimals
       )
+      const tradeVolumeRows = extractTradeVolumeFromSwaps(
+        block.events,
+        blockHeight,
+        specVersion,
+        prices,
+        decimals
+      )
       swapEventsProcessed += block.events.filter(event => isSwapEvent(event.name, specVersion)).length
 
       // Copy LP token prices to their wrapper tokens (e.g. 2-Pool-GDOT(690) → GDOT(69))
@@ -778,7 +785,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
       // Remap aToken and LP wrapper volumes to their base tokens
       const atokenToBase = new Map(currentAtokenEquivalences.map(([base, aToken]) => [aToken, base]))
 
-      for (const row of volumeRows) {
+      for (const row of [...volumeRows, ...tradeVolumeRows]) {
         const baseId = atokenToBase.get(row.asset_id)
         if (baseId !== undefined) {
           row.asset_id = baseId
@@ -803,6 +810,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
       const combinedRows = mergePriceAndVolumeRows(priceRows, volumeRows)
         .filter(row => parseFloat(row.usd_price) > 0)
       ctx.store.addPrices(combinedRows)
+      ctx.store.addTradeVolumes(tradeVolumeRows)
 
       ctx.store.addBlocks([{
         block_height: blockHeight,
