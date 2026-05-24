@@ -155,11 +155,21 @@ export default function Chart({
 
   const [legend, setLegend] = useState<Legend | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadingVisible, setLoadingVisible] = useState(true)
   // Mirror the latest theme into a ref so callbacks/intervals read the live
   // value without needing to be rebuilt (and without depending on document
   // attribute order-of-application).
   const themeRef = useRef(theme)
   useEffect(() => { themeRef.current = theme }, [theme])
+
+  useEffect(() => {
+    if (loading) {
+      setLoadingVisible(true)
+      return
+    }
+    const timer = window.setTimeout(() => setLoadingVisible(false), 180)
+    return () => window.clearTimeout(timer)
+  }, [loading])
 
   const themeKey = theme
 
@@ -519,6 +529,12 @@ export default function Chart({
           display: flex; flex-wrap: wrap; column-gap: 10px; row-gap: 2px;
           font-family: 'GeistMono', monospace; font-size: 11px; color: var(--text-medium);
         }
+        .chart-loading {
+          position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+          color: var(--text-low); font-size: 13px; pointer-events: none; z-index: 6;
+          opacity: 1; transition: opacity 180ms ease;
+        }
+        .chart-loading.out { opacity: 0; }
         /* On narrow viewports the price-axis labels crowd the top-right corner.
            Push the legend down so it does not overlap axis labels. */
         @media (max-width: 768px) {
@@ -528,11 +544,8 @@ export default function Chart({
       <div className="chart-area">
         <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
 
-        {loading && (
-          <div style={{
-            position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-            color: 'var(--text-low)', fontSize: 13, pointerEvents: 'none', zIndex: 6,
-          }}>
+        {loadingVisible && (
+          <div className={'chart-loading' + (!loading ? ' out' : '')}>
             Loading…
           </div>
         )}

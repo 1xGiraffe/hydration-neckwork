@@ -105,6 +105,11 @@ button { all: unset; box-sizing: border-box; cursor: pointer; font-family: inher
 svg { display: block; }
 ::selection { background: var(--accent); color: var(--accent-on); }
 
+:root {
+  --ease-out-soft: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+}
+
 /* Hide Lightweight Charts TradingView branding */
 #tv-attr-logo { display: none !important; }
 
@@ -145,6 +150,52 @@ input:focus-visible,
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
+@keyframes preis-value-up {
+  0% { background: var(--green-soft); color: var(--green); box-shadow: 0 0 0 1px var(--green-soft); }
+  100% { background: transparent; box-shadow: 0 0 0 1px transparent; }
+}
+@keyframes preis-value-down {
+  0% { background: var(--red-soft); color: var(--red); box-shadow: 0 0 0 1px var(--red-soft); }
+  100% { background: transparent; box-shadow: 0 0 0 1px transparent; }
+}
+@keyframes preis-value-flat {
+  0% { background: var(--panel-hover); box-shadow: 0 0 0 1px var(--border); }
+  100% { background: transparent; box-shadow: 0 0 0 1px transparent; }
+}
+@keyframes preis-favorite-pop {
+  0% { transform: scale(0.86); }
+  65% { transform: scale(1.08); }
+  100% { transform: scale(1); }
+}
+@keyframes preis-dialog-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes preis-dialog-panel-in {
+  from { opacity: 0; transform: translate(-50%, 6px) scale(0.985); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+@keyframes preis-dialog-panel-mobile-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes preis-list-row-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes preis-drawer-scrim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes preis-drawer-panel-in {
+  from { transform: translateX(16px); }
+  to { transform: translateX(0); }
+}
+@keyframes preis-toast-life {
+  0% { opacity: 0; transform: translate(-50%, 8px); }
+  10%, 82% { opacity: 1; transform: translate(-50%, 0); }
+  100% { opacity: 0; transform: translate(-50%, -4px); }
+}
 .live-dot {
   width: 8px;
   height: 8px;
@@ -152,4 +203,13 @@ input:focus-visible,
   background: var(--green);
   box-shadow: 0 0 8px var(--green);
   animation: preis-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0ms !important;
+    scroll-behavior: auto !important;
+  }
 }

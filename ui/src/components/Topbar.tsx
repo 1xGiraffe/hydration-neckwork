@@ -88,10 +88,11 @@ export default function Topbar({
           border-radius: 9999px;
           background: var(--panel); border: 1px solid var(--border);
           color: var(--text-high);
-          transition: background 160ms, border-color 160ms;
+          transition: background 160ms, border-color 160ms, transform 140ms var(--ease-out-soft);
           flex-shrink: 0;
         }
-        .pair-pill:hover { background: var(--panel-hover); border-color: var(--accent); }
+        .pair-pill:hover { background: var(--panel-hover); border-color: var(--accent); transform: translateY(-1px); }
+        .pair-pill:active { transform: translateY(0) scale(0.99); }
         .pair-pill .name { font-size: 13px; font-weight: 600; letter-spacing: -0.005em; white-space: nowrap; }
         .pair-pill .caret { color: var(--text-low); font-size: 10px; }
 
@@ -102,11 +103,13 @@ export default function Topbar({
           width: 36px; height: 36px; border-radius: 9999px;
           align-items: center; justify-content: center;
           color: var(--text-medium); flex-shrink: 0;
-          transition: color 120ms, background 120ms;
+          transition: color 140ms, background 140ms, transform 140ms var(--ease-out-soft);
         }
+        .fav-btn-mobile:active { transform: scale(0.94); }
         .fav-btn-mobile:hover { color: var(--amber); background: var(--panel-hover); }
         .fav-btn-mobile.on { color: var(--amber); }
-        .fav-btn-mobile svg { width: 18px; height: 18px; }
+        .fav-btn-mobile svg { width: 18px; height: 18px; transition: transform 160ms var(--ease-out-soft); }
+        .fav-btn-mobile.on svg { animation: preis-favorite-pop 220ms var(--ease-out-soft); }
 
 
         .topbar-right { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
@@ -114,19 +117,22 @@ export default function Topbar({
           width: 36px; height: 36px; border-radius: 9999px;
           display: inline-flex; align-items: center; justify-content: center;
           color: var(--text-medium);
-          transition: color 160ms, background 160ms;
+          transition: color 160ms, background 160ms, transform 140ms var(--ease-out-soft);
         }
-        .icon-btn:hover { color: var(--text-high); background: var(--panel-hover); }
+        .icon-btn:hover { color: var(--text-high); background: var(--panel-hover); transform: translateY(-1px); }
+        .icon-btn:active { transform: translateY(0) scale(0.94); }
         .icon-btn[aria-disabled="true"] { opacity: 0.35; cursor: not-allowed; }
         .icon-btn svg { width: 16px; height: 16px; }
         .theme-toggle {
           width: 36px; height: 36px; border-radius: 9999px;
           display: inline-flex; align-items: center; justify-content: center;
           color: var(--text-medium); margin-left: 2px;
-          transition: color 120ms, background 120ms;
+          transition: color 140ms, background 140ms, transform 140ms var(--ease-out-soft);
         }
-        .theme-toggle:hover { color: var(--text-high); background: var(--panel-hover); }
-        .theme-toggle svg { width: 16px; height: 16px; }
+        .theme-toggle:hover { color: var(--text-high); background: var(--panel-hover); transform: translateY(-1px); }
+        .theme-toggle:active { transform: translateY(0) scale(0.94); }
+        .theme-toggle svg { width: 16px; height: 16px; transition: transform 180ms var(--ease-out-soft); }
+        .theme-toggle:hover svg { transform: rotate(8deg); }
 
         .interval-mobile { display: none; position: relative; }
         .interval-mobile-trigger {
@@ -136,12 +142,15 @@ export default function Topbar({
           background: var(--panel); color: var(--text-high); border: 1px solid var(--border);
           border-radius: 9999px;
           display: inline-flex; align-items: center; gap: 6px;
+          transition: background 140ms, transform 140ms var(--ease-out-soft);
         }
-        .interval-mobile-trigger:hover { background: var(--panel-hover); }
+        .interval-mobile-trigger:hover { background: var(--panel-hover); transform: translateY(-1px); }
+        .interval-mobile-trigger:active { transform: translateY(0) scale(0.98); }
         .interval-mobile-menu {
           position: absolute; right: 0; top: 36px; z-index: 50;
           background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px;
           min-width: 160px; box-shadow: 0 12px 32px rgba(0,0,0,0.4); overflow: hidden;
+          animation: preis-list-row-in 160ms var(--ease-out-soft);
         }
         .interval-mobile-menu button {
           display: block; width: 100%; padding: 12px 16px;

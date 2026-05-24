@@ -294,11 +294,20 @@ export default function App() {
         /* overflow:hidden + min-width:0 at every level keeps the chart canvas
            contained when the window shrinks. Without it the lightweight-charts canvas
            hangs onto its previous width for a frame and visually overlaps the sidebar. */
-        .main { display: grid; grid-template-columns: 1fr 320px; overflow: hidden; min-height: 0; min-width: 0; }
+        .main { display: grid; grid-template-columns: 1fr 320px; overflow: hidden; min-height: 0; min-width: 0; transition: grid-template-columns 180ms var(--ease-standard); }
         .main.sidebar-collapsed { grid-template-columns: 1fr; }
         .chart-col { display: grid; grid-template-rows: auto 1fr; min-width: 0; min-height: 0; overflow: hidden; }
         .chart-wrap { position: relative; min-height: 0; min-width: 0; overflow: hidden; }
-        .sidebar-host { min-width: 0; overflow: hidden; }
+        .sidebar-host { min-width: 0; overflow: hidden; animation: preis-list-row-in 180ms var(--ease-out-soft); }
+        .toast {
+          position: fixed; bottom: 24px; left: 50%;
+          background: var(--bg-elev); color: var(--text-high);
+          padding: 8px 16px; border-radius: 999px; font-size: 13px;
+          z-index: 200; border: 1px solid var(--border);
+          font-family: 'GeistMono', monospace;
+          box-shadow: 0 12px 32px rgba(0,0,0,0.28);
+          animation: preis-toast-life 2000ms var(--ease-out-soft) both;
+        }
         @media (max-width: 980px) {
           .main { grid-template-columns: 1fr; }
           .sidebar-host { display: none; }
@@ -374,13 +383,15 @@ export default function App() {
       {isMobile && drawerOpen && (
         <div className="mobile-drawer-scrim" onClick={() => setDrawerOpen(false)}>
           <style>{`
-            .mobile-drawer-scrim { position: fixed; inset: 0; z-index: 110; background: rgba(0,0,0,0.6); backdrop-filter: blur(2px); display: flex; justify-content: flex-end; }
-            .mobile-drawer-panel { width: min(360px, 92vw); height: 100%; background: var(--bg); border-left: 1px solid var(--separator); display: flex; flex-direction: column; overflow: hidden; box-shadow: -12px 0 32px rgba(0,0,0,0.4); }
-            .mobile-drawer-close { align-self: flex-end; margin: 8px; width: 36px; height: 36px; border-radius: 9999px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-medium); }
+            .mobile-drawer-scrim { position: fixed; inset: 0; z-index: 110; background: rgba(0,0,0,0.6); backdrop-filter: blur(2px); display: flex; justify-content: flex-end; animation: preis-drawer-scrim-in 160ms ease-out; }
+            .mobile-drawer-panel { width: min(360px, 92vw); height: 100%; background: var(--bg); border-left: 1px solid var(--separator); display: flex; flex-direction: column; overflow: hidden; box-shadow: -12px 0 32px rgba(0,0,0,0.4); animation: preis-drawer-panel-in 190ms var(--ease-out-soft); }
+            .mobile-drawer-close { align-self: flex-end; margin: 8px; width: 36px; height: 36px; border-radius: 9999px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-medium); transition: color 140ms, background 140ms, transform 140ms var(--ease-out-soft); }
             .mobile-drawer-close:hover { background: var(--panel-hover); color: var(--text-high); }
+            .mobile-drawer-close:active { transform: scale(0.94); }
             .mobile-drawer-actions { display: flex; flex-direction: column; border-top: 1px solid var(--separator); padding: 8px 0; background: var(--bg); }
-            .mobile-drawer-actions button { display: flex; align-items: center; gap: 12px; padding: 14px 20px; font-family: 'Geist', sans-serif; font-size: 14px; color: var(--text-high); background: transparent; text-align: left; }
-            .mobile-drawer-actions button:hover { background: var(--panel-hover); }
+            .mobile-drawer-actions button { display: flex; align-items: center; gap: 12px; padding: 14px 20px; font-family: 'Geist', sans-serif; font-size: 14px; color: var(--text-high); background: transparent; text-align: left; transition: background 140ms, transform 140ms var(--ease-out-soft); }
+            .mobile-drawer-actions button:hover { background: var(--panel-hover); transform: translateX(2px); }
+            .mobile-drawer-actions button:active { transform: translateX(1px) scale(0.995); }
             .mobile-drawer-actions button:disabled { color: var(--text-lowest); cursor: not-allowed; }
             .mobile-drawer-actions svg { width: 16px; height: 16px; color: var(--text-medium); flex-shrink: 0; }
             .mobile-drawer-indexer { display: flex; align-items: center; gap: 10px; padding: 14px 20px; border-top: 1px solid var(--separator); font-family: 'GeistMono', monospace; font-size: 11px; color: var(--text-medium); }
@@ -463,13 +474,7 @@ export default function App() {
         marketStats={marketStatsQuery.data}
       />
       {toast && (
-        <div style={{
-          position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
-          background: 'var(--bg-elev)', color: 'var(--text-high)',
-          padding: '8px 16px', borderRadius: 999, fontSize: 13,
-          zIndex: 200, border: '1px solid var(--border)',
-          fontFamily: "'GeistMono', monospace",
-        }}>
+        <div key={toast} className="toast">
           {toast}
         </div>
       )}

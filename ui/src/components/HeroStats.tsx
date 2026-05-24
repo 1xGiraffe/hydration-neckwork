@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import type { Asset, ApiCandle, AssetMarketStats, Period } from '../types'
 import { formatPrice, formatChange, formatCompactUsd } from '../utils/format'
 import PairIcons from './PairIcons'
@@ -49,6 +50,55 @@ function deriveFromCandles(candles: ApiCandle[]): { price: number | null; high24
   }
 }
 
+function useValueFlash(value: number | null): string {
+  const previousRef = useRef<number | null>(null)
+  const timerRef = useRef<number | null>(null)
+  const frameRef = useRef<number | null>(null)
+  const [flash, setFlash] = useState('')
+
+  useEffect(() => {
+    if (value == null) {
+      previousRef.current = value
+      return
+    }
+    const previous = previousRef.current
+    previousRef.current = value
+    if (previous == null || previous === value) return
+
+    if (timerRef.current != null) window.clearTimeout(timerRef.current)
+    if (frameRef.current != null) window.cancelAnimationFrame(frameRef.current)
+    const nextFlash = value > previous ? 'flash-up' : value < previous ? 'flash-down' : 'flash-flat'
+    frameRef.current = window.requestAnimationFrame(() => {
+      setFlash(nextFlash)
+      frameRef.current = null
+      timerRef.current = window.setTimeout(() => {
+        setFlash('')
+        timerRef.current = null
+      }, 650)
+    })
+
+    return () => {
+      if (frameRef.current != null) {
+        window.cancelAnimationFrame(frameRef.current)
+        frameRef.current = null
+      }
+      if (timerRef.current != null) {
+        window.clearTimeout(timerRef.current)
+        timerRef.current = null
+      }
+    }
+  }, [value])
+
+  useEffect(() => {
+    return () => {
+      if (frameRef.current != null) window.cancelAnimationFrame(frameRef.current)
+      if (timerRef.current != null) window.clearTimeout(timerRef.current)
+    }
+  }, [])
+
+  return flash
+}
+
 export default function HeroStats({ baseAsset, quoteAsset, candles, marketStats, period, onCyclePeriod, isFavorite, onToggleFavorite }: HeroStatsProps) {
   const fromCandles = deriveFromCandles(candles)
 
@@ -91,6 +141,12 @@ export default function HeroStats({ baseAsset, quoteAsset, candles, marketStats,
     volume24h: fromCandles.volume24h,
   }
   const change7dForStat = changeFor('7d')
+  const priceFlash = useValueFlash(derived.price)
+  const highFlash = useValueFlash(derived.high24h)
+  const lowFlash = useValueFlash(derived.low24h)
+  const volumeFlash = useValueFlash(derived.volume24h > 0 ? derived.volume24h : null)
+  const changeFlash = useValueFlash(derived.changeForPeriod)
+  const change7dFlash = useValueFlash(change7dForStat)
 
   const quoteSymbol = quoteAsset?.isStablecoin ? 'USD' : (quoteAsset?.symbol ?? '')
   const baseSymbol = baseAsset?.symbol ?? '—'
@@ -117,11 +173,13 @@ export default function HeroStats({ baseAsset, quoteAsset, candles, marketStats,
           width: 36px; height: 36px; border-radius: 9999px;
           display: inline-flex; align-items: center; justify-content: center;
           color: var(--text-medium); flex-shrink: 0;
-          transition: color 120ms, background 120ms;
+          transition: color 140ms, background 140ms, transform 140ms var(--ease-out-soft);
         }
+        .hero-fav-btn:active { transform: scale(0.94); }
         .hero-fav-btn:hover { color: var(--amber); background: var(--panel-hover); }
         .hero-fav-btn.on { color: var(--amber); }
-        .hero-fav-btn svg { width: 18px; height: 18px; }
+        .hero-fav-btn svg { width: 18px; height: 18px; transition: transform 160ms var(--ease-out-soft); }
+        .hero-fav-btn.on svg { animation: preis-favorite-pop 220ms var(--ease-out-soft); }
         .hero-pair-wrap { display: flex; align-items: center; gap: 14px; min-width: 0; }
         .hero-pair { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
         .hero-pair .label { font-family: 'GeistMono', monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--text-low); }
@@ -131,8 +189,16 @@ export default function HeroStats({ baseAsset, quoteAsset, candles, marketStats,
         .hero-price { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
         .hero-price .num { font-family: 'GeistMono', monospace; font-weight: 500; font-size: 30px; line-height: 1; letter-spacing: -0.02em; color: var(--text-high); white-space: nowrap; }
         .hero-price .num .ccy { font-family: 'GeistMono', monospace; font-size: 16px; color: var(--text-medium); margin-left: 8px; }
-        .change-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 9999px; font-family: 'GeistMono', monospace; font-size: 12px; font-weight: 500; white-space: nowrap; cursor: pointer; user-select: none; transition: filter 120ms; border: 1px solid transparent; }
-        .change-chip:hover { filter: brightness(1.1); }
+        .value-flash { display: inline-block; border-radius: 6px; padding: 2px 4px; margin: -2px -4px; }
+        .value-flash.flash-up { animation: preis-value-up 650ms ease-out; }
+        .value-flash.flash-down { animation: preis-value-down 650ms ease-out; }
+        .value-flash.flash-flat { animation: preis-value-flat 650ms ease-out; }
+        .change-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 9999px; font-family: 'GeistMono', monospace; font-size: 12px; font-weight: 500; white-space: nowrap; cursor: pointer; user-select: none; transition: filter 140ms, transform 140ms var(--ease-out-soft); border: 1px solid transparent; }
+        .change-chip:hover { filter: brightness(1.1); transform: translateY(-1px); }
+        .change-chip:active { transform: translateY(0) scale(0.98); }
+        .change-chip.flash-up { animation: preis-value-up 650ms ease-out; }
+        .change-chip.flash-down { animation: preis-value-down 650ms ease-out; }
+        .change-chip.flash-flat { animation: preis-value-flat 650ms ease-out; }
         .change-chip.up { color: var(--green); background: var(--green-soft); }
         .change-chip.down { color: var(--red); background: var(--red-soft); }
         .change-chip.flat { color: var(--text-low); background: var(--panel); }
@@ -187,13 +253,13 @@ export default function HeroStats({ baseAsset, quoteAsset, candles, marketStats,
         </button>
 
         <div className="hero-price">
-          <span className="num">
+          <span className={`num value-flash ${priceFlash}`}>
             {derived.price != null ? formatPrice(derived.price, false) : '—'}
             <span className="ccy">{quoteSymbol}</span>
           </span>
           <button
             type="button"
-            className={`change-chip ${changeCls}`}
+            className={`change-chip ${changeCls} ${changeFlash}`}
             onClick={onCyclePeriod}
             aria-label={`Toggle change period (current: ${period})`}
             title="Click to cycle 1h / 24h / 7d"
@@ -208,12 +274,12 @@ export default function HeroStats({ baseAsset, quoteAsset, candles, marketStats,
         </div>
 
         <div className="hero-stats">
-          <div className="stat"><span className="k">24h High</span><span className="v">{derived.high24h != null ? formatPrice(derived.high24h, false) : '—'}</span></div>
-          <div className="stat"><span className="k">24h Low</span><span className="v">{derived.low24h != null ? formatPrice(derived.low24h, false) : '—'}</span></div>
-          <div className="stat"><span className="k">24h Vol</span><span className="v">{derived.volume24h > 0 ? formatCompactUsd(derived.volume24h) : '—'}</span></div>
+          <div className="stat"><span className="k">24h High</span><span className={`v value-flash ${highFlash}`}>{derived.high24h != null ? formatPrice(derived.high24h, false) : '—'}</span></div>
+          <div className="stat"><span className="k">24h Low</span><span className={`v value-flash ${lowFlash}`}>{derived.low24h != null ? formatPrice(derived.low24h, false) : '—'}</span></div>
+          <div className="stat"><span className="k">24h Vol</span><span className={`v value-flash ${volumeFlash}`}>{derived.volume24h > 0 ? formatCompactUsd(derived.volume24h) : '—'}</span></div>
           <div className="stat">
             <span className="k">7d</span>
-            <span className={`v ${change7dForStat == null ? 'flat' : change7dForStat >= 0 ? 'up' : 'down'}`}>
+            <span className={`v value-flash ${change7dForStat == null ? 'flat' : change7dForStat >= 0 ? 'up' : 'down'} ${change7dFlash}`}>
               {change7dForStat != null ? formatChange(change7dForStat) : '—'}
             </span>
           </div>

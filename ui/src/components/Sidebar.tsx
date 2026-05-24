@@ -150,17 +150,19 @@ export default function Sidebar({
         .sb-section.sb-indexer .sb-head { margin-bottom: 0; }
         .sb-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
         .sb-title { font-family: 'GeistMono', monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-medium); }
-        button.sb-title { cursor: pointer; transition: color 120ms; }
-        button.sb-title:hover { color: var(--text-high); }
+        button.sb-title { cursor: pointer; transition: color 140ms, transform 140ms var(--ease-out-soft); }
+        button.sb-title:hover { color: var(--text-high); transform: translateY(-1px); }
+        button.sb-title:active { transform: translateY(0); }
         button.sb-title .period-tag { color: var(--accent); }
         .sb-tip { font-family: 'GeistMono', monospace; font-size: 11px; color: var(--text-high); display: inline-flex; align-items: center; gap: 8px; }
 
         .market-row {
           display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 10px;
           padding: 7px 8px; margin: 0 -8px; border-radius: 10px; cursor: pointer;
-          transition: background 140ms ease;
+          transition: background 140ms ease, transform 140ms var(--ease-out-soft);
         }
-        .market-row:hover { background: var(--panel-hover); }
+        .market-row:hover { background: var(--panel-hover); transform: translateX(2px); }
+        .market-row:active { transform: translateX(1px) scale(0.995); }
         .market-row.active { background: var(--accent-soft); }
         .market-row.active .m-sym { color: var(--accent); }
         .m-sym { font-size: 13px; font-weight: 600; color: var(--text-high); display: flex; flex-direction: column; gap: 1px; min-width: 0; }

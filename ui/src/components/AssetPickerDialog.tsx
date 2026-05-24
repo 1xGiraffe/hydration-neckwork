@@ -204,11 +204,11 @@ export default function AssetPickerDialog({
     <Dialog.Root open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
       <Dialog.Portal>
         <style>{`
-          .picker-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(13, 4, 26, 0.74); backdrop-filter: blur(8px) saturate(140%); -webkit-backdrop-filter: blur(8px) saturate(140%); display: flex; align-items: flex-start; justify-content: center; padding-top: 8vh; }
+          .picker-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(13, 4, 26, 0.74); backdrop-filter: blur(8px) saturate(140%); -webkit-backdrop-filter: blur(8px) saturate(140%); display: flex; align-items: flex-start; justify-content: center; padding-top: 8vh; animation: preis-dialog-overlay-in 160ms ease-out; }
           [data-theme="light"] .picker-overlay { background: rgba(36, 14, 50, 0.34); }
-          .picker-modal { width: 880px; max-width: calc(100vw - 32px); max-height: 78vh; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 24px; box-shadow: 0 24px 72px rgba(0,0,0,0.5); overflow: hidden; display: flex; flex-direction: column; outline: none; }
+          .picker-modal { width: 880px; max-width: calc(100vw - 32px); max-height: 78vh; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 24px; box-shadow: 0 24px 72px rgba(0,0,0,0.5); overflow: hidden; display: flex; flex-direction: column; outline: none; animation: preis-dialog-panel-in 190ms var(--ease-out-soft); }
           [data-theme="light"] .picker-modal { box-shadow: 0 24px 72px rgba(36, 14, 50, 0.22); }
-          .picker-modal-mobile { width: 100vw; max-width: 100vw; height: 100svh; max-height: 100svh; border-radius: 0; }
+          .picker-modal-mobile { width: 100vw; max-width: 100vw; height: 100svh; max-height: 100svh; border-radius: 0; animation-name: preis-dialog-panel-mobile-in; }
           .picker-head { padding: 12px 12px 0 12px; background: var(--bg-elev); }
           .picker-head-inner {
             display: flex; align-items: center; gap: 12px;
@@ -232,8 +232,8 @@ export default function AssetPickerDialog({
           .picker-table-head > div.center { text-align: center; }
 
           .picker-table { overflow-y: auto; flex: 1; }
-          .picker-row { display: grid; grid-template-columns: 1fr 100px 70px 70px 70px 110px; gap: 16px; align-items: center; padding: 11px 22px; border-bottom: 1px solid var(--separator); cursor: pointer; border-left: 3px solid transparent; transition: background 140ms ease; }
-          .picker-row:hover { background: var(--panel-hover); }
+          .picker-row { display: grid; grid-template-columns: 1fr 100px 70px 70px 70px 110px; gap: 16px; align-items: center; padding: 11px 22px; border-bottom: 1px solid var(--separator); cursor: pointer; border-left: 3px solid transparent; transition: background 140ms ease, transform 140ms var(--ease-out-soft); animation: preis-list-row-in 180ms var(--ease-out-soft) both; animation-delay: var(--row-delay, 0ms); }
+          .picker-row:hover { background: var(--panel-hover); transform: translateX(2px); }
           .picker-row.active { background: var(--panel-hover); border-left-color: var(--text-medium); }
           .picker-row.current { background: var(--accent-soft); border-left-color: var(--accent); }
           .picker-row.current .picker-sym { color: var(--accent); }
@@ -248,13 +248,15 @@ export default function AssetPickerDialog({
           .picker-foot .hints { display: flex; gap: 16px; flex-wrap: wrap; }
           .picker-foot .hint { display: inline-flex; gap: 6px; align-items: center; }
 
-          .picker-close-btn {
+	          .picker-close-btn {
             display: none; width: 32px; height: 32px; border-radius: 9999px;
             align-items: center; justify-content: center;
             color: var(--text-medium); background: transparent; border: none;
             flex-shrink: 0;
+            transition: color 140ms, background 140ms, transform 140ms var(--ease-out-soft);
           }
           .picker-close-btn:hover { color: var(--text-high); background: var(--panel-hover); }
+          .picker-close-btn:active { transform: scale(0.94); }
           @media (max-width: 768px) {
             .picker-close-btn { display: inline-flex; }
             .picker-foot .hints { display: none; }
@@ -331,8 +333,9 @@ export default function AssetPickerDialog({
                   key={`${r.pairResult.base.assetId}-${r.pairResult.quote.assetId}`}
                   role="option"
                   aria-selected={r.isCurrent}
-                  className={className}
-                  onClick={() => { onSelect(r.pairResult); onClose() }}
+	                  className={className}
+	                  style={{ '--row-delay': `${Math.min(i * 12, 120)}ms` } as React.CSSProperties}
+	                  onClick={() => { onSelect(r.pairResult); onClose() }}
                   onMouseEnter={() => setActiveIndex(i)}
                 >
                   <div className="picker-asset">
