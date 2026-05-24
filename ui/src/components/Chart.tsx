@@ -27,7 +27,7 @@ const INITIAL_CANDLES = 300
 const LOAD_MORE_THRESHOLD = 50
 const LOAD_MORE_COUNT = 500
 const POLL_INTERVAL_MS = 10_000
-const PINNED_SCROLL_THRESHOLD = 5
+const PINNED_SCROLL_TOLERANCE = 2
 
 interface ChartProps {
   baseId: number
@@ -431,10 +431,12 @@ export default function Chart({
         if (recent.length === 0 || !candleSeriesRef.current || !volumeSeriesRef.current) return
         const ts = chartRef.current?.timeScale()
         const visibleRange = ts?.getVisibleLogicalRange() ?? null
-        const wasPinnedToLatest = (ts?.scrollPosition() ?? Infinity) <= PINNED_SCROLL_THRESHOLD
+        const trailingBars = trailingBarsForViewport()
+        const scrollPosition = ts?.scrollPosition() ?? Infinity
+        const wasPinnedToLatest = Math.abs(scrollPosition - trailingBars) <= PINNED_SCROLL_TOLERANCE
         replaceAllData([...allDataRef.current, ...recent])
         if (wasPinnedToLatest) {
-          ts?.scrollToPosition(-trailingBarsForViewport(), false)
+          ts?.scrollToPosition(trailingBars, false)
         } else if (visibleRange) {
           restoreVisibleRange(visibleRange)
         }
