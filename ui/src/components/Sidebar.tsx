@@ -20,7 +20,6 @@ interface SidebarProps {
   period: Period
   onCyclePeriod: () => void
   favorites: FavoritePair[]
-  onToggleFavorite: (baseId: number, quoteId: number) => void
   /** Hide the inline indexer footer (the mobile drawer renders it itself, below the actions). */
   hideIndexer?: boolean
 }
@@ -41,12 +40,6 @@ function changeClass(c: number | null): 'up' | 'down' | 'flat' {
   return 'flat'
 }
 
-function StarIcon({ filled }: { filled: boolean }) {
-  return filled
-    ? <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5l2.96 6.36 7.04.71-5.2 4.75 1.42 6.93L12 17.77l-6.22 3.48 1.42-6.93L2 9.57l7.04-.71L12 2.5z"/></svg>
-    : <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M12 2.5l2.96 6.36 7.04.71-5.2 4.75 1.42 6.93L12 17.77l-6.22 3.48 1.42-6.93L2 9.57l7.04-.71L12 2.5z"/></svg>
-}
-
 export default function Sidebar({
   assets,
   marketStats,
@@ -58,7 +51,6 @@ export default function Sidebar({
   period,
   onCyclePeriod,
   favorites,
-  onToggleFavorite,
   hideIndexer = false,
 }: SidebarProps) {
   const usdt = useMemo(() => assets.find(a => a.assetId === 10), [assets])
@@ -164,13 +156,11 @@ export default function Sidebar({
         .sb-tip { font-family: 'GeistMono', monospace; font-size: 11px; color: var(--text-high); display: inline-flex; align-items: center; gap: 8px; }
 
         .market-row {
-          display: grid; grid-template-columns: auto 1fr auto auto auto; align-items: center; gap: 10px;
+          display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 10px;
           padding: 7px 8px; margin: 0 -8px; border-radius: 10px; cursor: pointer;
           transition: background 140ms ease;
         }
-        .market-row.no-star { grid-template-columns: auto 1fr auto auto; }
         .market-row:hover { background: var(--panel-hover); }
-        .market-row:hover .star-btn { opacity: 1; }
         .market-row.active { background: var(--accent-soft); }
         .market-row.active .m-sym { color: var(--accent); }
         .m-sym { font-size: 13px; font-weight: 600; color: var(--text-high); display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -180,17 +170,6 @@ export default function Sidebar({
         .m-meta.up { color: var(--green); }
         .m-meta.down { color: var(--red); }
         .m-meta.flat { color: var(--text-low); }
-
-        .star-btn {
-          width: 24px; height: 24px; padding: 0; border-radius: 6px;
-          color: var(--text-low);
-          display: inline-flex; align-items: center; justify-content: center;
-          opacity: 0.85;
-          transition: color 120ms, opacity 120ms, background 120ms, transform 120ms;
-        }
-        .star-btn.on { color: var(--amber); opacity: 1; }
-        .star-btn:hover { background: var(--panel-hover); color: var(--amber); opacity: 1; transform: scale(1.05); }
-        .star-btn svg { width: 14px; height: 14px; }
 
         .fav-empty { font-family: 'GeistMono', monospace; font-size: 11px; color: var(--text-low); padding: 4px 0; }
       `}</style>
@@ -234,16 +213,6 @@ export default function Sidebar({
                     </div>
                     <div className="m-price">{price != null ? formatPrice(price, isUsdPair) : '—'}</div>
                     <div className={'m-meta ' + changeClass(change)}>{formatChange(change)}</div>
-                    <button
-                      type="button"
-                      className="star-btn on"
-                      aria-pressed={true}
-                      aria-label={`Remove ${label} from favorites`}
-                      title="Remove from favorites"
-                      onClick={(e) => { e.stopPropagation(); onToggleFavorite(base.assetId, quote.assetId) }}
-                    >
-                      <StarIcon filled={true} />
-                    </button>
                   </div>
                 )
               })}
@@ -274,7 +243,7 @@ export default function Sidebar({
                   role="button"
                   tabIndex={0}
                   aria-label={`Select ${label}`}
-                  className={'market-row no-star' + (isActive ? ' active' : '')}
+                  className={'market-row' + (isActive ? ' active' : '')}
                   onClick={() => usdt && onSelect(asset.assetId, usdt.assetId)}
                 >
                   {usdt && <PairIcons base={asset} quote={usdt} isUsdPair={true} size={22} />}
@@ -312,7 +281,7 @@ export default function Sidebar({
                   role="button"
                   tabIndex={0}
                   aria-label={`Select ${label}`}
-                  className={'market-row no-star' + (isActive ? ' active' : '')}
+                  className={'market-row' + (isActive ? ' active' : '')}
                   onClick={() => usdt && onSelect(asset.assetId, usdt.assetId)}
                 >
                   {usdt && <PairIcons base={asset} quote={usdt} isUsdPair={true} size={22} />}

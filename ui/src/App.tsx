@@ -20,6 +20,7 @@ import { drawBrandWatermark } from './utils/brandWatermark'
 const DEFAULT_BASE_ID = 0   // HDX
 const DEFAULT_QUOTE_ID = 10  // USDT
 const EMPTY_ASSETS: Asset[] = []
+const DESKTOP_SIDEBAR_STORAGE_KEY = 'preis-desktop-sidebar-open'
 
 function parseIntervalSlug(slug: string | undefined): OHLCVInterval {
   return INTERVALS.includes(slug as OHLCVInterval) ? (slug as OHLCVInterval) : '1h'
@@ -43,6 +44,15 @@ function readInitialRoute() {
   }
 }
 
+function readInitialDesktopSidebarOpen() {
+  if (typeof window === 'undefined') return true
+  try {
+    return localStorage.getItem(DESKTOP_SIDEBAR_STORAGE_KEY) !== 'false'
+  } catch {
+    return true
+  }
+}
+
 export default function App() {
   const { theme, toggle: toggleTheme } = useTheme()
   const windowWidth = useWindowWidth()
@@ -54,6 +64,7 @@ export default function App() {
   const [modalOpen, setModalOpen] = useState(false)
   const [chartData, setChartData] = useState<import('./types').ApiCandle[]>([])
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(readInitialDesktopSidebarOpen)
   const [period, setPeriod] = useState<Period>(() => {
     try {
       const saved = localStorage.getItem('preis-period')
@@ -70,6 +81,13 @@ export default function App() {
       // Ignore persistence failures; the in-memory selection still works.
     }
   }, [period])
+  useEffect(() => {
+    try {
+      localStorage.setItem(DESKTOP_SIDEBAR_STORAGE_KEY, desktopSidebarOpen ? 'true' : 'false')
+    } catch {
+      // Ignore persistence failures; the in-memory sidebar state still works.
+    }
+  }, [desktopSidebarOpen])
   const cyclePeriod = () => setPeriod(p => PERIODS[(PERIODS.indexOf(p) + 1) % PERIODS.length])
 
   const assetsQuery = useAssets()
@@ -277,6 +295,7 @@ export default function App() {
            contained when the window shrinks. Without it the lightweight-charts canvas
            hangs onto its previous width for a frame and visually overlaps the sidebar. */
         .main { display: grid; grid-template-columns: 1fr 320px; overflow: hidden; min-height: 0; min-width: 0; }
+        .main.sidebar-collapsed { grid-template-columns: 1fr; }
         .chart-col { display: grid; grid-template-rows: auto 1fr; min-width: 0; min-height: 0; overflow: hidden; }
         .chart-wrap { position: relative; min-height: 0; min-width: 0; overflow: hidden; }
         .sidebar-host { min-width: 0; overflow: hidden; }
@@ -301,12 +320,15 @@ export default function App() {
         onScreenshot={handleScreenshot}
         theme={theme}
         onThemeToggle={toggleTheme}
+        showDesktopSidebarButton={!isMobile}
+        desktopSidebarOpen={desktopSidebarOpen}
+        onToggleDesktopSidebar={() => setDesktopSidebarOpen(open => !open)}
         showMobileSidebarButton={isMobile}
         onOpenMobileSidebar={() => setDrawerOpen(true)}
         isFavorite={favorites.isFavorite(baseId, quoteId)}
         onToggleFavorite={() => favorites.toggle(baseId, quoteId)}
       />
-      <section className="main">
+      <section className={'main' + (!isMobile && !desktopSidebarOpen ? ' sidebar-collapsed' : '')}>
         <div className="chart-col">
           <HeroStats
             baseAsset={baseAsset}
@@ -332,7 +354,7 @@ export default function App() {
             />
           </div>
         </div>
-        {!isMobile && (
+        {!isMobile && desktopSidebarOpen && (
           <div className="sidebar-host" style={{ minHeight: 0 }}>
             <Sidebar
               assets={assets}
@@ -345,7 +367,6 @@ export default function App() {
               period={period}
               onCyclePeriod={cyclePeriod}
               favorites={favorites.favorites}
-              onToggleFavorite={favorites.toggle}
             />
           </div>
         )}
@@ -386,7 +407,6 @@ export default function App() {
               period={period}
               onCyclePeriod={cyclePeriod}
               favorites={favorites.favorites}
-              onToggleFavorite={favorites.toggle}
               hideIndexer
             />
             <div className="mobile-drawer-actions">

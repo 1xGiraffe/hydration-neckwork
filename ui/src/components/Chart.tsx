@@ -27,6 +27,7 @@ const INITIAL_CANDLES = 300
 const LOAD_MORE_THRESHOLD = 50
 const LOAD_MORE_COUNT = 500
 const POLL_INTERVAL_MS = 10_000
+const PINNED_SCROLL_THRESHOLD = 5
 
 interface ChartProps {
   baseId: number
@@ -72,6 +73,25 @@ function getPriceFormat(data: ApiCandle[]) {
   if (median >= 1) return { type: 'price' as const, precision: 4, minMove: 0.0001 }
   if (median >= 0.01) return { type: 'price' as const, precision: 6, minMove: 0.000001 }
   return { type: 'price' as const, precision: 8, minMove: 0.00000001 }
+}
+
+function normalizeCandles(data: ApiCandle[]): ApiCandle[] {
+  const byTime = new Map<number, ApiCandle>()
+  for (const candle of data) byTime.set(candle.intervalStart, candle)
+  return [...byTime.values()].sort((a, b) => a.intervalStart - b.intervalStart)
+}
+
+function trailingBarsForViewport(): number {
+  return window.innerWidth < 768 ? 8 : 3
+}
+
+function latestVisibleRange(dataLength: number) {
+  const isNarrow = window.innerWidth < 768
+  const visibleBars = Math.min(isNarrow ? 32 : 40, dataLength)
+  return {
+    from: Math.max(0, dataLength - visibleBars),
+    to: dataLength - 1 + trailingBarsForViewport(),
+  }
 }
 
 // Chart colors per theme. Lightweight-charts is strict about color formats — keep these
@@ -131,7 +151,7 @@ export default function Chart({
   const oldestTimestampRef = useRef<number>(Infinity)
   const isLoadingMoreRef = useRef(false)
   const reachedBeginningRef = useRef(false)
-  const isFirstLoadRef = useRef(true)
+  const initialLoadRequestIdRef = useRef(0)
 
   const [legend, setLegend] = useState<Legend | null>(null)
   const [loading, setLoading] = useState(true)
@@ -172,6 +192,29 @@ export default function Chart({
     volumeSeries.setData(volumeData)
     onDataChange?.(data)
   }, [onDataChange])
+
+  const replaceAllData = useCallback((data: ApiCandle[]) => {
+    const normalized = normalizeCandles(data)
+    allDataRef.current = normalized
+    oldestTimestampRef.current = normalized[0]?.intervalStart ?? Infinity
+    applyData(normalized)
+    return normalized
+  }, [applyData])
+
+  const showLatestCandles = useCallback(() => {
+    const ts = chartRef.current?.timeScale()
+    const dataLength = allDataRef.current.length
+    if (!ts || dataLength === 0) return
+    ts.setVisibleLogicalRange(latestVisibleRange(dataLength))
+  }, [])
+
+  const restoreVisibleRange = useCallback((range: { from: number; to: number }, shift = 0) => {
+    window.requestAnimationFrame(() => {
+      const ts = chartRef.current?.timeScale()
+      if (!ts) return
+      ts.setVisibleLogicalRange({ from: range.from + shift, to: range.to + shift })
+    })
+  }, [])
 
   // Chart creation
   useEffect(() => {
@@ -329,9 +372,11 @@ export default function Chart({
           const existing = new Set(allDataRef.current.map(c => c.intervalStart))
           const newCandles = older.filter(c => !existing.has(c.intervalStart))
           if (newCandles.length > 0) {
-            allDataRef.current = [...newCandles, ...allDataRef.current].sort((a, b) => a.intervalStart - b.intervalStart)
-            oldestTimestampRef.current = allDataRef.current[0].intervalStart
-            applyData(allDataRef.current)
+            const visibleRange = chart.timeScale().getVisibleLogicalRange()
+            const previousLength = allDataRef.current.length
+            const nextData = replaceAllData([...newCandles, ...allDataRef.current])
+            const prependedCount = nextData.length - previousLength
+            if (visibleRange && prependedCount > 0) restoreVisibleRange(visibleRange, prependedCount)
           } else {
             reachedBeginningRef.current = true
           }
@@ -342,45 +387,38 @@ export default function Chart({
     }
     chart.timeScale().subscribeVisibleLogicalRangeChange(handler)
     return () => chart.timeScale().unsubscribeVisibleLogicalRangeChange(handler)
-  }, [interval, fetchData, applyData])
+  }, [interval, fetchData, replaceAllData, restoreVisibleRange])
 
   // Initial load
   useEffect(() => {
     allDataRef.current = []
     oldestTimestampRef.current = Infinity
     reachedBeginningRef.current = false
-    isFirstLoadRef.current = true
     setLoading(true)
 
+    const requestId = initialLoadRequestIdRef.current + 1
+    initialLoadRequestIdRef.current = requestId
     const now = Math.floor(Date.now() / 1000)
     const from = now - INTERVAL_SECONDS[interval] * INITIAL_CANDLES
 
     fetchData(from, now).then(data => {
-      allDataRef.current = data
-      if (data.length > 0) oldestTimestampRef.current = data[0].intervalStart
+      if (initialLoadRequestIdRef.current !== requestId) return
+      const normalized = replaceAllData(data)
       candleSeriesRef.current?.priceScale().applyOptions({ autoScale: true })
-      applyData(data)
-      if (isFirstLoadRef.current) {
-        // Show only the most recent slice so candles render at a comfortable width
-        // (instead of fitContent() squeezing 300 candles into the canvas).
-        const ts = chartRef.current?.timeScale()
-        if (ts && data.length > 0) {
-          // On mobile the countdown label on the price axis is wide enough that
-          // a tight right-edge crowds it onto the last candles — give it more
-          // breathing room there.
-          const isNarrow = window.innerWidth < 768
-          const trailingBars = isNarrow ? 8 : 3
-          const visibleBars = Math.min(isNarrow ? 32 : 40, data.length)
-          ts.setVisibleLogicalRange({
-            from: Math.max(0, data.length - visibleBars),
-            to: data.length - 1 + trailingBars,
-          })
-        }
-        isFirstLoadRef.current = false
+      if (normalized.length > 0) {
+        // Show only the most recent slice so candles render at a comfortable width.
+        showLatestCandles()
+        window.requestAnimationFrame(showLatestCandles)
       }
       setLoading(false)
-    }).catch(() => setLoading(false))
-  }, [baseId, quoteId, interval, fetchData, applyData])
+    }).catch(() => {
+      if (initialLoadRequestIdRef.current === requestId) setLoading(false)
+    })
+
+    return () => {
+      if (initialLoadRequestIdRef.current === requestId) initialLoadRequestIdRef.current += 1
+    }
+  }, [baseId, quoteId, interval, fetchData, replaceAllData, showLatestCandles])
 
   // Live polling
   useEffect(() => {
@@ -391,24 +429,21 @@ export default function Chart({
       try {
         const recent = await fetchData(lastTime, now)
         if (recent.length === 0 || !candleSeriesRef.current || !volumeSeriesRef.current) return
-        const pal = paletteForTheme(themeRef.current)
-        const green = pal.green.replace('rgb(', 'rgba(').replace(')', ', 0.32)')
-        const red = pal.red.replace('rgb(', 'rgba(').replace(')', ', 0.32)')
-        for (const c of recent) {
-          candleSeriesRef.current.update({ time: c.intervalStart as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close })
-          const volColor = c.close >= c.open ? green : red
-          volumeSeriesRef.current.update({ time: c.intervalStart as UTCTimestamp, value: c.volumeTotal, color: volColor })
-          const idx = allDataRef.current.findIndex(x => x.intervalStart === c.intervalStart)
-          if (idx >= 0) allDataRef.current[idx] = c
-          else allDataRef.current.push(c)
+        const ts = chartRef.current?.timeScale()
+        const visibleRange = ts?.getVisibleLogicalRange() ?? null
+        const wasPinnedToLatest = (ts?.scrollPosition() ?? Infinity) <= PINNED_SCROLL_THRESHOLD
+        replaceAllData([...allDataRef.current, ...recent])
+        if (wasPinnedToLatest) {
+          ts?.scrollToPosition(-trailingBarsForViewport(), false)
+        } else if (visibleRange) {
+          restoreVisibleRange(visibleRange)
         }
-        onDataChange?.(allDataRef.current)
       } catch {
         // Keep the current chart data if a live poll fails.
       }
     }, POLL_INTERVAL_MS)
     return () => window.clearInterval(timer)
-  }, [fetchData, onDataChange])
+  }, [fetchData, replaceAllData, restoreVisibleRange])
 
   // Countdown line on the price axis
   useEffect(() => {
