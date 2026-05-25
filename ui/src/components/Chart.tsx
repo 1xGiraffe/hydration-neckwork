@@ -628,7 +628,7 @@ export default function Chart({
         if (Math.abs(logical - index) <= 0.5) candle = data[index]
       }
 
-      if (candle?.omniwatch) openVolumeModalRef.current(candle)
+      if (candle) openVolumeModalRef.current(candle)
     }
     chart.subscribeClick(clickHandler)
 
