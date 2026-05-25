@@ -41,6 +41,12 @@ interface DecodedTrade {
   trader?: string | null;
 }
 
+export type AssetCanonicalizer = (assetId: number) => number;
+
+interface CanonicalTradeLeg extends DecodedTradeAssetAmount {
+  canonicalAssetId: number;
+}
+
 /**
  * Event-like structure for decoding (subset of Subsquid Event)
  */
@@ -48,6 +54,40 @@ interface EventLike {
   name: string;
   block: { _runtime: any };
   args: unknown;
+}
+
+function canonicalTradeLegs(
+  trade: DecodedTrade,
+  canonicalizeAssetId: AssetCanonicalizer
+): { inputs: CanonicalTradeLeg[]; outputs: CanonicalTradeLeg[] } {
+  return {
+    inputs: trade.inputs.map(input => ({
+      ...input,
+      canonicalAssetId: canonicalizeAssetId(input.assetId),
+    })),
+    outputs: trade.outputs.map(output => ({
+      ...output,
+      canonicalAssetId: canonicalizeAssetId(output.assetId),
+    })),
+  };
+}
+
+function originalsByCanonicalAsset(legs: CanonicalTradeLeg[]): Map<number, Set<number>> {
+  const result = new Map<number, Set<number>>();
+  for (const leg of legs) {
+    const originals = result.get(leg.canonicalAssetId) ?? new Set<number>();
+    originals.add(leg.assetId);
+    result.set(leg.canonicalAssetId, originals);
+  }
+  return result;
+}
+
+function isCanonicalSelfConversion(
+  leg: CanonicalTradeLeg,
+  opposingOriginalsByCanonical: Map<number, Set<number>>
+): boolean {
+  const originals = opposingOriginalsByCanonical.get(leg.canonicalAssetId);
+  return originals ? [...originals].some(opposingAssetId => opposingAssetId !== leg.assetId) : false;
 }
 
 function normalizeAccount(value: unknown): string | null {
@@ -153,13 +193,21 @@ function tradeToVolumeRows(
   trade: DecodedTrade,
   blockHeight: number,
   prices: PriceMap,
-  decimals: AssetDecimals
+  decimals: AssetDecimals,
+  canonicalizeAssetId: AssetCanonicalizer = assetId => assetId
 ): PriceRow[] {
   const rows: PriceRow[] = [];
+  const { inputs, outputs } = canonicalTradeLegs(trade, canonicalizeAssetId);
+  const outputOriginalsByCanonical = originalsByCanonicalAsset(outputs);
+  const inputOriginalsByCanonical = originalsByCanonicalAsset(inputs);
 
-  for (const input of trade.inputs) {
+  for (const input of inputs) {
+    if (isCanonicalSelfConversion(input, outputOriginalsByCanonical)) {
+      continue;
+    }
+
     rows.push({
-      asset_id: input.assetId,
+      asset_id: input.canonicalAssetId,
       block_height: blockHeight,
       usd_price: '0', // Price comes from price rows, not volume rows
       native_volume_sell: input.amount.toString(),
@@ -169,9 +217,13 @@ function tradeToVolumeRows(
     });
   }
 
-  for (const output of trade.outputs) {
+  for (const output of outputs) {
+    if (isCanonicalSelfConversion(output, inputOriginalsByCanonical)) {
+      continue;
+    }
+
     rows.push({
-      asset_id: output.assetId,
+      asset_id: output.canonicalAssetId,
       block_height: blockHeight,
       usd_price: '0',
       native_volume_buy: output.amount.toString(),
@@ -461,7 +513,8 @@ export function extractVolumeFromSwaps(
   blockHeight: number,
   specVersion: number,
   prices: PriceMap,
-  decimals: AssetDecimals
+  decimals: AssetDecimals,
+  canonicalizeAssetId: AssetCanonicalizer = assetId => assetId
 ): PriceRow[] {
   const volumeRows: PriceRow[] = [];
 
@@ -479,7 +532,7 @@ export function extractVolumeFromSwaps(
     }
 
     // Generate volume rows from all input and output asset legs
-    const rows = tradeToVolumeRows(trade, blockHeight, prices, decimals);
+    const rows = tradeToVolumeRows(trade, blockHeight, prices, decimals, canonicalizeAssetId);
     volumeRows.push(...rows);
   }
 
@@ -490,7 +543,8 @@ function tradeToAccountVolumeRows(
   trade: DecodedTrade,
   blockHeight: number,
   prices: PriceMap,
-  decimals: AssetDecimals
+  decimals: AssetDecimals,
+  canonicalizeAssetId: AssetCanonicalizer = assetId => assetId
 ): TradeVolumeRow[] {
   const account = normalizeAccount(trade.trader);
   if (!account) {
@@ -498,6 +552,9 @@ function tradeToAccountVolumeRows(
   }
 
   const rowsByAsset = new Map<number, TradeVolumeRow>();
+  const { inputs, outputs } = canonicalTradeLegs(trade, canonicalizeAssetId);
+  const outputOriginalsByCanonical = originalsByCanonicalAsset(outputs);
+  const inputOriginalsByCanonical = originalsByCanonicalAsset(inputs);
 
   const rowForAsset = (assetId: number): TradeVolumeRow => {
     let row = rowsByAsset.get(assetId);
@@ -517,8 +574,12 @@ function tradeToAccountVolumeRows(
     return row;
   };
 
-  for (const input of trade.inputs) {
-    const row = rowForAsset(input.assetId);
+  for (const input of inputs) {
+    if (isCanonicalSelfConversion(input, outputOriginalsByCanonical)) {
+      continue;
+    }
+
+    const row = rowForAsset(input.canonicalAssetId);
     row.native_volume_sell = sumBigIntStrings(row.native_volume_sell ?? '0', input.amount.toString());
     row.usd_volume_sell = sumDecimal128Strings(
       row.usd_volume_sell ?? '0.000000000000',
@@ -526,8 +587,12 @@ function tradeToAccountVolumeRows(
     );
   }
 
-  for (const output of trade.outputs) {
-    const row = rowForAsset(output.assetId);
+  for (const output of outputs) {
+    if (isCanonicalSelfConversion(output, inputOriginalsByCanonical)) {
+      continue;
+    }
+
+    const row = rowForAsset(output.canonicalAssetId);
     row.native_volume_buy = sumBigIntStrings(row.native_volume_buy ?? '0', output.amount.toString());
     row.usd_volume_buy = sumDecimal128Strings(
       row.usd_volume_buy ?? '0.000000000000',
@@ -549,7 +614,8 @@ export function extractTradeVolumeFromSwaps(
   blockHeight: number,
   specVersion: number,
   prices: PriceMap,
-  decimals: AssetDecimals
+  decimals: AssetDecimals,
+  canonicalizeAssetId: AssetCanonicalizer = assetId => assetId
 ): TradeVolumeRow[] {
   const tradeRows: TradeVolumeRow[] = [];
 
@@ -563,7 +629,7 @@ export function extractTradeVolumeFromSwaps(
       continue;
     }
 
-    tradeRows.push(...tradeToAccountVolumeRows(trade, blockHeight, prices, decimals));
+    tradeRows.push(...tradeToAccountVolumeRows(trade, blockHeight, prices, decimals, canonicalizeAssetId));
   }
 
   return aggregateTradeVolumeRows(tradeRows);

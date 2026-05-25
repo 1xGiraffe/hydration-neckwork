@@ -787,20 +787,29 @@ export async function run(options: RunOptions = {}): Promise<void> {
       previousPrices = prices
       pricesCalculated += prices.size
 
+      const atokenToBase = new Map(currentAtokenEquivalences.map(([base, aToken]) => [aToken, base]))
+      const canonicalVolumeAssetId = (assetId: number): number => {
+        const baseId = atokenToBase.get(assetId)
+        const canonicalId = baseId ?? assetId
+        return currentLpEquivalences.get(canonicalId) ?? canonicalId
+      }
+
       // Extract volume from swap events in this block
       const volumeRows = extractVolumeFromSwaps(
         block.events,
         blockHeight,
         specVersion,
         prices,
-        decimals
+        decimals,
+        canonicalVolumeAssetId
       )
       const tradeVolumeRows = extractTradeVolumeFromSwaps(
         block.events,
         blockHeight,
         specVersion,
         prices,
-        decimals
+        decimals,
+        canonicalVolumeAssetId
       )
       swapEventsProcessed += block.events.filter(event => isSwapEvent(event.name, specVersion)).length
 
@@ -811,20 +820,6 @@ export async function run(options: RunOptions = {}): Promise<void> {
         if (lpPrice && !prices.has(wrapperId)) {
           prices.set(wrapperId, lpPrice)
           hopCounts.set(wrapperId, hopCounts.get(lpId) ?? 0)
-        }
-      }
-
-      // Remap aToken and LP wrapper volumes to their base tokens
-      const atokenToBase = new Map(currentAtokenEquivalences.map(([base, aToken]) => [aToken, base]))
-
-      for (const row of [...volumeRows, ...tradeVolumeRows]) {
-        const baseId = atokenToBase.get(row.asset_id)
-        if (baseId !== undefined) {
-          row.asset_id = baseId
-        }
-        const wrapperId = currentLpEquivalences.get(row.asset_id)
-        if (wrapperId !== undefined) {
-          row.asset_id = wrapperId
         }
       }
 

@@ -495,6 +495,56 @@ describe('extractVolumeFromSwaps', () => {
       usd_volume_buy: '1.500000000000',
     });
   });
+
+  it('canonicalizes wrapper assets before aggregation and skips wrapper self-conversions', () => {
+    const routeWrap = createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'AAVE' },
+      operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 5, amount: 1000000000000n }],
+      outputs: [{ asset: 1001, amount: 1000000000000n }],
+      fees: [],
+      swapper: 'alice',
+      filler: 'aave',
+      operationStack: [],
+    });
+    const routeSwap = createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Omnipool' },
+      operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 1001, amount: 1000000000000n }],
+      outputs: [{ asset: 10, amount: 2000000000000n }],
+      fees: [],
+      swapper: 'alice',
+      filler: 'pool',
+      operationStack: [],
+    });
+    const wrapperPrices: PriceMap = new Map([
+      [5, '2.000000000000'],
+      [1001, '2.000000000000'],
+      [10, '1.500000000000'],
+    ]);
+    const wrapperDecimals: AssetDecimals = new Map([
+      [5, 12],
+      [1001, 12],
+      [10, 12],
+    ]);
+    const canonicalize = (assetId: number) => assetId === 1001 ? 5 : assetId;
+
+    const rows = extractVolumeFromSwaps([routeWrap, routeSwap], 100, 323, wrapperPrices, wrapperDecimals, canonicalize);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      asset_id: 5,
+      native_volume_sell: '1000000000000',
+      usd_volume_sell: '2.000000000000',
+      native_volume_buy: '0',
+      usd_volume_buy: '0.000000000000',
+    });
+    expect(rows[1]).toMatchObject({
+      asset_id: 10,
+      native_volume_buy: '2000000000000',
+      usd_volume_buy: '3.000000000000',
+    });
+  });
 });
 
 describe('extractTradeVolumeFromSwaps', () => {
@@ -601,6 +651,60 @@ describe('extractTradeVolumeFromSwaps', () => {
       usd_volume_sell: '3.000000000000',
       native_volume_buy: '250000000000',
       usd_volume_buy: '0.500000000000',
+      trade_count: 1,
+    });
+  });
+
+  it('does not create same-account buy and sell rows for wrapper conversions', () => {
+    const routeWrap = createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'AAVE' },
+      operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 5, amount: 1000000000000n }],
+      outputs: [{ asset: 1001, amount: 1000000000000n }],
+      fees: [],
+      swapper: 'dave',
+      filler: 'aave',
+      operationStack: [],
+    });
+    const routeSwap = createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Omnipool' },
+      operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 1001, amount: 1000000000000n }],
+      outputs: [{ asset: 10, amount: 2000000000000n }],
+      fees: [],
+      swapper: 'dave',
+      filler: 'pool',
+      operationStack: [],
+    });
+    const wrapperPrices: PriceMap = new Map([
+      [5, '2.000000000000'],
+      [1001, '2.000000000000'],
+      [10, '1.500000000000'],
+    ]);
+    const wrapperDecimals: AssetDecimals = new Map([
+      [5, 12],
+      [1001, 12],
+      [10, 12],
+    ]);
+    const canonicalize = (assetId: number) => assetId === 1001 ? 5 : assetId;
+
+    const rows = extractTradeVolumeFromSwaps([routeWrap, routeSwap], 100, 323, wrapperPrices, wrapperDecimals, canonicalize);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      asset_id: 5,
+      account: 'dave',
+      native_volume_sell: '1000000000000',
+      usd_volume_sell: '2.000000000000',
+      native_volume_buy: '0',
+      usd_volume_buy: '0.000000000000',
+      trade_count: 1,
+    });
+    expect(rows[1]).toMatchObject({
+      asset_id: 10,
+      account: 'dave',
+      native_volume_buy: '2000000000000',
+      usd_volume_buy: '3.000000000000',
       trade_count: 1,
     });
   });
