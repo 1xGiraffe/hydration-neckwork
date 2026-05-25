@@ -11,6 +11,7 @@ import { xxhashAsHex } from '@polkadot/util-crypto'
 import type { OmnipoolAssetState, XYKPool, StableswapPool } from './price/types.ts'
 import type { Block } from './types/support.ts'
 import * as storage from './types/storage.ts'
+import { hasAssetRegistryMetadataEvent } from './registry/events.js'
 import { isSwapEvent } from './registry/swapEvents.js'
 import { extractTradeVolumeFromSwaps, extractVolumeFromSwaps, mergePriceAndVolumeRows } from './blocks/extractVolume.js'
 import { readErc20Balances, isKnownErc20, updateErc20Registry } from './evm/balances.js'
@@ -427,7 +428,10 @@ export async function run(options: RunOptions = {}): Promise<void> {
     to: options.toBlock,
   })
 
-  const registry = new AssetRegistryTracker(BACKFILL_ASSET_SNAPSHOT_INTERVAL, nativeAssetMetadata)
+  const registry = new AssetRegistryTracker(BACKFILL_ASSET_SNAPSHOT_INTERVAL, nativeAssetMetadata, {
+    includeUnresolvedAssets: false,
+  })
+  let historicalRegistryInitialized = false
   const compositionCache = new PoolCompositionCache()
   let previousHistoricalSnapshot: HistoricalSnapshotState | null = null
 
@@ -540,6 +544,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
       previousSpecVersion = specVersion
 
       const hasSetStorageAffectingPools = detectPoolAffectingSetStorage(block.calls)
+      const hasAssetRegistryChange = hasAssetRegistryMetadataEvent(block.events)
       let currentAtokenEquivalences = atokenEquivalences
       let currentAtokenIds = atokenIds
       let currentLpEquivalences = lpEquivalences
@@ -570,19 +575,36 @@ export async function run(options: RunOptions = {}): Promise<void> {
           console.warn(`[SetStorage] Pool-affecting System.set_storage detected at block ${blockHeight}`)
         }
 
-        currentAtokenEquivalences = historicalSnapshot.atokenEquivalences
-        currentAtokenIds = historicalSnapshot.atokenIds
-        currentLpEquivalences = historicalSnapshot.lpEquivalences
-        decimals = historicalSnapshot.decimals
-        assetsTracked = historicalSnapshot.assetsTracked
+        if (!historicalRegistryInitialized || hasAssetRegistryChange) {
+          await registry.maybeSnapshot(blockHeight, block.header, { force: true })
+          historicalRegistryInitialized = true
+        }
 
-        const assetsChanged = previousHistoricalSnapshot == null ||
-          historicalSnapshot.assetsKey !== previousHistoricalSnapshot.assetsKey
-        if (assetsChanged) {
-          const changedAssets = diffAssetRows(previousHistoricalSnapshot?.assetRows ?? null, historicalSnapshot.assetRows)
-          if (changedAssets.length > 0) {
-            ctx.store.addAssets(changedAssets)
-          }
+        const historicalAssetRows = historicalRegistryInitialized
+          ? registry.getAssetRows()
+          : historicalSnapshot.assetRows
+        const historicalDecimals = historicalRegistryInitialized
+          ? registry.getDecimals()
+          : historicalSnapshot.decimals
+        const historicalAtokenEquivalences = historicalRegistryInitialized
+          ? registry.getAtokenEquivalences()
+          : historicalSnapshot.atokenEquivalences
+        const historicalAtokenIds = historicalRegistryInitialized
+          ? registry.getAtokenIds()
+          : historicalSnapshot.atokenIds
+        const historicalLpEquivalences = historicalRegistryInitialized
+          ? new Map(registry.getLpAliases())
+          : historicalSnapshot.lpEquivalences
+
+        currentAtokenEquivalences = historicalAtokenEquivalences
+        currentAtokenIds = historicalAtokenIds
+        currentLpEquivalences = historicalLpEquivalences
+        decimals = historicalDecimals
+        assetsTracked = historicalAssetRows.length
+
+        const changedAssets = diffAssetRows(previousHistoricalSnapshot?.assetRows ?? null, historicalAssetRows)
+        if (changedAssets.length > 0) {
+          ctx.store.addAssets(changedAssets)
         }
 
         const compositionChanged = previousHistoricalSnapshot != null &&
@@ -612,12 +634,22 @@ export async function run(options: RunOptions = {}): Promise<void> {
           totalIssuances = historicalSnapshot.totalIssuances
         }
 
-        previousHistoricalSnapshot = historicalSnapshot
+        previousHistoricalSnapshot = {
+          ...historicalSnapshot,
+          assetRows: historicalAssetRows,
+          decimals: historicalDecimals,
+          atokenEquivalences: historicalAtokenEquivalences,
+          atokenIds: historicalAtokenIds,
+          lpEquivalences: historicalLpEquivalences,
+          assetsTracked,
+        }
       } else {
         // Asset registry snapshot (every N blocks)
-        const newAssets = await registry.maybeSnapshot(blockHeight, block.header)
+        const newAssets = await registry.maybeSnapshot(blockHeight, block.header, { force: hasAssetRegistryChange })
         if (newAssets.length > 0) {
           ctx.store.addAssets(newAssets)
+        }
+        if (newAssets.length > 0 || hasAssetRegistryChange) {
           atokenEquivalences = registry.getAtokenEquivalences()
           atokenIds = registry.getAtokenIds()
           // Detect LP → wrapper equivalences from symbol patterns (N-Pool-X → X)

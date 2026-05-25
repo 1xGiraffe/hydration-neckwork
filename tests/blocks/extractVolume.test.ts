@@ -79,13 +79,12 @@ describe('calculateUsdVolume', () => {
     expect(result).toBe('1.500000000000');
   });
 
-  it('defaults to 12 decimals when asset not in decimals map', () => {
+  it('returns zero when asset decimals are unknown', () => {
     const prices: PriceMap = new Map([[5, '1.000000000000']]);
     const decimals: AssetDecimals = new Map(); // Asset 5 not in map
 
-    // 1 token (default 12 decimals) * price 1.0 = 1.0 USDT
     const result = calculateUsdVolume(1000000000000n, 5, prices, decimals);
-    expect(result).toBe('1.000000000000');
+    expect(result).toBe('0.000000000000');
   });
 });
 

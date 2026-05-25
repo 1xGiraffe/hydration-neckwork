@@ -69,7 +69,7 @@ function normalizeAccount(value: unknown): string | null {
  * Formula: (nativeAmount * price) / (10^(assetDecimals + 12))
  * - nativeAmount: e.g., 1000000000000n for 1 token with 12 decimals
  * - price: e.g., '2.000000000000' (12 decimal places as string)
- * - assetDecimals: token decimals (default 12)
+ * - assetDecimals: token decimals
  * - Output: Decimal128(12) string with 12 decimal places
  *
  * @param nativeAmount - Raw token amount in smallest unit
@@ -95,8 +95,10 @@ export function calculateUsdVolume(
     return '0.000000000000';
   }
 
-  // Look up decimals (default to 12)
-  const assetDecimals = decimals.get(assetId) ?? 12;
+  const assetDecimals = decimals.get(assetId);
+  if (assetDecimals === undefined) {
+    return '0.000000000000';
+  }
 
   // Convert price string to bigint by removing decimal point
   // '2.000000000000' -> 2000000000000n (price with 12 decimal places)

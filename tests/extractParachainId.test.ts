@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 // This import will fail until Task 1 exports extractParachainId
-import { extractParachainId } from '../src/registry/tracker'
+import { extractParachainId, isPlaceholderAssetMetadata } from '../src/registry/tracker'
 
 describe('extractParachainId', () => {
   it('returns null for null/undefined location', () => {
@@ -61,5 +61,33 @@ describe('extractParachainId', () => {
       }
     }
     expect(extractParachainId(location)).toBeNull()
+  })
+})
+
+describe('isPlaceholderAssetMetadata', () => {
+  it('identifies generated external placeholder metadata', () => {
+    expect(isPlaceholderAssetMetadata({
+      assetId: 1000085,
+      symbol: 'Asset1000085',
+      name: 'Asset 1000085',
+      assetType: 'External',
+    })).toBe(true)
+  })
+
+  it('identifies generated placeholder metadata without an asset type', () => {
+    expect(isPlaceholderAssetMetadata({
+      assetId: 1000085,
+      symbol: 'Asset1000085',
+      name: 'Asset 1000085',
+    })).toBe(true)
+  })
+
+  it('keeps resolved metadata even for external assets', () => {
+    expect(isPlaceholderAssetMetadata({
+      assetId: 1000085,
+      symbol: 'WUD',
+      name: 'Gavun Wud',
+      assetType: 'External',
+    })).toBe(false)
   })
 })

@@ -4,6 +4,16 @@ import type { AssetMetadata } from './types.ts'
 import type { AssetRow } from '../db/schema.ts'
 import { config } from '../config.ts'
 
+interface SnapshotOptions {
+  force?: boolean
+}
+
+interface TrackerOptions {
+  includeUnresolvedAssets?: boolean
+}
+
+const DEFAULT_ASSET_DECIMALS = 12
+
 /**
  * Decode hex-encoded bytes to UTF-8 string
  */
@@ -86,14 +96,22 @@ export function extractParachainId(location: any): number | null {
   return typeof parachainJunction.value === 'number' ? parachainJunction.value : null
 }
 
+export function isPlaceholderAssetMetadata(metadata: Pick<AssetMetadata, 'assetId' | 'symbol' | 'name' | 'assetType'>): boolean {
+  const hasGeneratedLabels = metadata.symbol === `Asset${metadata.assetId}` &&
+    metadata.name === `Asset ${metadata.assetId}`
+  return hasGeneratedLabels && (metadata.assetType == null || metadata.assetType === 'External')
+}
+
 export class AssetRegistryTracker {
   private cache: Map<number, AssetMetadata> = new Map()
   private lastSnapshotBlock: number = -1 // Force first scan
   private snapshotInterval: number
   private seededAssetRows: AssetRow[] = []
+  private includeUnresolvedAssets: boolean
 
-  constructor(snapshotInterval?: number, nativeAssetMetadata?: AssetMetadata) {
+  constructor(snapshotInterval?: number, nativeAssetMetadata?: AssetMetadata, options: TrackerOptions = {}) {
     this.snapshotInterval = snapshotInterval ?? config.SNAPSHOT_INTERVAL
+    this.includeUnresolvedAssets = options.includeUnresolvedAssets ?? true
     if (nativeAssetMetadata) {
       this.cache.set(nativeAssetMetadata.assetId, { ...nativeAssetMetadata })
       this.seededAssetRows.push({
@@ -110,16 +128,24 @@ export class AssetRegistryTracker {
    * Perform snapshot scan if interval has passed
    * Returns AssetRow[] for any new or changed assets (for ClickHouse persistence)
    */
-  async maybeSnapshot(blockHeight: number, block: Block): Promise<AssetRow[]> {
+  async maybeSnapshot(blockHeight: number, block: Block, options: SnapshotOptions = {}): Promise<AssetRow[]> {
     // Check if snapshot is needed
-    if (blockHeight - this.lastSnapshotBlock < this.snapshotInterval) {
+    if (!options.force && blockHeight - this.lastSnapshotBlock < this.snapshotInterval) {
       return []
     }
 
-    console.log(`[AssetRegistry] Scanning at block ${blockHeight}`)
+    console.log(`[AssetRegistry] Scanning at block ${blockHeight}${options.force ? ' (forced)' : ''}`)
 
     const newAssets: AssetRow[] = []
     const discoveredAssets = new Map<number, AssetMetadata>()
+    let unresolvedAssetsSkipped = 0
+    const addDiscoveredAsset = (metadata: AssetMetadata): void => {
+      if (!this.includeUnresolvedAssets && isPlaceholderAssetMetadata(metadata)) {
+        unresolvedAssetsSkipped++
+        return
+      }
+      discoveredAssets.set(metadata.assetId, metadata)
+    }
 
     // Strategy: Try newer versions first (v264 has everything in one place)
     // Fall back to older versions that split AssetDetails and AssetMetadata
@@ -130,16 +156,22 @@ export class AssetRegistryTracker {
 
       for (const [assetId, details] of pairs) {
         if (!details) continue
+        if (details.decimals == null) {
+          if (!this.includeUnresolvedAssets) {
+            unresolvedAssetsSkipped++
+            continue
+          }
+        }
 
         const metadata: AssetMetadata = {
           assetId,
           symbol: decodeBytes(details.symbol).trim() || `Asset${assetId}`,
           name: decodeBytes(details.name).trim() || `Asset ${assetId}`,
-          decimals: details.decimals ?? 12, // Default to 12 if missing
+          decimals: details.decimals ?? DEFAULT_ASSET_DECIMALS,
           assetType: formatAssetType(details.assetType),
         }
 
-        discoveredAssets.set(assetId, metadata)
+        addDiscoveredAsset(metadata)
       }
     } else if (storage.assetRegistry.assets.v222.is(block)) {
       // v222: Similar to v264
@@ -147,16 +179,22 @@ export class AssetRegistryTracker {
 
       for (const [assetId, details] of pairs) {
         if (!details) continue
+        if (details.decimals == null) {
+          if (!this.includeUnresolvedAssets) {
+            unresolvedAssetsSkipped++
+            continue
+          }
+        }
 
         const metadata: AssetMetadata = {
           assetId,
           symbol: decodeBytes(details.symbol).trim() || `Asset${assetId}`,
           name: decodeBytes(details.name).trim() || `Asset ${assetId}`,
-          decimals: details.decimals ?? 12,
+          decimals: details.decimals ?? DEFAULT_ASSET_DECIMALS,
           assetType: formatAssetType(details.assetType),
         }
 
-        discoveredAssets.set(assetId, metadata)
+        addDiscoveredAsset(metadata)
       }
     } else if (
       storage.assetRegistry.assets.v176.is(block) ||
@@ -187,33 +225,46 @@ export class AssetRegistryTracker {
       // Get symbol/decimals from AssetMetadataMap
       if (storage.assetRegistry.assetMetadataMap.v108.is(block)) {
         const metadataPairs = await storage.assetRegistry.assetMetadataMap.v108.getPairs(block)
+        const metadataAssetIds = new Set<number>()
 
         for (const [assetId, metadata] of metadataPairs) {
           if (!metadata) continue
+          metadataAssetIds.add(assetId)
+          if (metadata.decimals == null) {
+            if (!this.includeUnresolvedAssets) {
+              unresolvedAssetsSkipped++
+              continue
+            }
+          }
 
           const details = detailsMap.get(assetId)
           const assetMetadata: AssetMetadata = {
             assetId,
             symbol: decodeBytes(metadata.symbol).trim() || `Asset${assetId}`,
             name: details?.name || `Asset ${assetId}`,
-            decimals: metadata.decimals,
+            decimals: metadata.decimals ?? DEFAULT_ASSET_DECIMALS,
             assetType: details?.assetType,
           }
 
-          discoveredAssets.set(assetId, assetMetadata)
+          addDiscoveredAsset(assetMetadata)
         }
 
         // Handle assets that have details but no metadata entry (shouldn't happen, but be defensive)
         for (const [assetId, details] of detailsMap) {
-          if (!discoveredAssets.has(assetId)) {
-            console.warn(`[AssetRegistry] Asset ${assetId} has details but no metadata, using defaults`)
-            discoveredAssets.set(assetId, {
-              assetId,
-              symbol: `Asset${assetId}`,
-              name: details.name,
-              decimals: 12, // Default
-              assetType: details.assetType,
-            })
+          if (!metadataAssetIds.has(assetId)) {
+            if (!this.includeUnresolvedAssets) {
+              console.warn(`[AssetRegistry] Asset ${assetId} has details but no metadata, skipping until decimals are known`)
+              unresolvedAssetsSkipped++
+            } else {
+              console.warn(`[AssetRegistry] Asset ${assetId} has details but no metadata, using defaults`)
+              addDiscoveredAsset({
+                assetId,
+                symbol: `Asset${assetId}`,
+                name: details.name,
+                decimals: DEFAULT_ASSET_DECIMALS,
+                assetType: details.assetType,
+              })
+            }
           }
         }
       }
@@ -338,7 +389,10 @@ export class AssetRegistryTracker {
 
     this.lastSnapshotBlock = blockHeight
 
-    console.log(`[AssetRegistry] Scan complete: ${discoveredAssets.size} total assets, ${newAssets.length} new/changed`)
+    const skippedSuffix = unresolvedAssetsSkipped > 0
+      ? `, ${unresolvedAssetsSkipped} unresolved assets skipped`
+      : ''
+    console.log(`[AssetRegistry] Scan complete: ${discoveredAssets.size} total assets, ${newAssets.length} new/changed${skippedSuffix}`)
 
     return newAssets
   }
@@ -431,6 +485,18 @@ export class AssetRegistryTracker {
 
   getCacheSize(): number {
     return this.cache.size
+  }
+
+  getAssetRows(): AssetRow[] {
+    return [...this.cache.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, metadata]) => ({
+        asset_id: metadata.assetId,
+        symbol: metadata.symbol,
+        name: metadata.name,
+        decimals: metadata.decimals,
+        parachain_id: metadata.parachainId ?? null,
+      }))
   }
 
   getAssetsMetadata(): AssetMetadata[] {
