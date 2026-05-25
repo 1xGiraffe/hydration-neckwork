@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import type { Asset, AssetMarketStats, Period } from '../types'
 import PairIcons from './PairIcons'
-import { formatPrice, formatChange, formatCompactUsd } from '../utils/format'
+import { formatPrice, formatChange } from '../utils/format'
 import { displayLabel, pairDisplay } from '../utils/pairs'
 
 const TOP_N = 8
@@ -288,9 +288,9 @@ export default function Sidebar({
                 >
                   {usdt && <PairIcons base={asset} quote={usdt} isUsdPair={true} size={22} />}
                   <div className="m-sym">
-                    {label}<small>vol {formatCompactUsd(stats.volumeUsd24h)}</small>
+                    {label}<small>{asset.name ?? ''}</small>
                   </div>
-                  <div></div>
+                  <div className="m-price">{stats.price != null ? formatPrice(stats.price, false) : '—'}</div>
                   <div className={'m-meta ' + changeClass(changeForPeriod(stats, period))}>{formatChange(changeForPeriod(stats, period))}</div>
                 </div>
               )

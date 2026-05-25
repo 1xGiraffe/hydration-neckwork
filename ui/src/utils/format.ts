@@ -46,17 +46,6 @@ export function formatChange(change: number | null): string {
   return formatted + '%'
 }
 
-// Compact USD format used by header stats and sidebars: $1.24M, $4.7K, $812
-export function formatCompactUsd(value: number): string {
-  if (!isFinite(value) || value === 0) return '$0'
-  const abs = Math.abs(value)
-  if (abs >= 1e9) return '$' + (value / 1e9).toFixed(2) + 'B'
-  if (abs >= 1e6) return '$' + (value / 1e6).toFixed(2) + 'M'
-  if (abs >= 1e3) return '$' + (value / 1e3).toFixed(1) + 'K'
-  if (abs >= 1) return '$' + value.toFixed(0)
-  return '$' + value.toFixed(2)
-}
-
 // Smart countdown: short uses MM:SS, longer durations show units like "3d 15h"
 // or "21h 04m" so a weekly close is readable.
 export function formatCountdown(seconds: number): string {

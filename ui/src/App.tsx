@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Chart from './components/Chart'
 import Topbar from './components/Topbar'
-import HeroStats from './components/HeroStats'
+import ChartHeader from './components/ChartHeader'
 import AssetPickerDialog from './components/AssetPickerDialog'
 import Sidebar from './components/Sidebar'
 import { useAssets } from './hooks/useAssets'
@@ -160,7 +160,7 @@ export default function App() {
     if (parsed && assets.some(a => a.assetId === parsed.baseId) && assets.some(a => a.assetId === parsed.quoteId)) {
       const cleanUrl = buildUrl(parsed.baseId, parsed.quoteId, nextInterval, nextInspectionTime)
       if (currentUrl() !== cleanUrl) window.history.replaceState(null, '', cleanUrl)
-      setInspectionTime(nextInspectionTime)
+      queueMicrotask(() => setInspectionTime(nextInspectionTime))
     } else {
       const defaultPath = buildPath(DEFAULT_BASE_ID, DEFAULT_QUOTE_ID, '1h')
       if (window.location.pathname !== defaultPath) window.history.replaceState(null, '', defaultPath)
@@ -181,7 +181,7 @@ export default function App() {
     if (currentUrl() !== newUrl) {
       window.history.pushState(null, '', newUrl)
     }
-    setInspectionTime(current => current == null ? current : null)
+    queueMicrotask(() => setInspectionTime(current => current == null ? current : null))
   }, [baseId, quoteId, interval])
 
   useEffect(() => {
@@ -376,7 +376,7 @@ export default function App() {
       />
       <section className={'main' + (!isMobile && !desktopSidebarOpen ? ' sidebar-collapsed' : '')}>
         <div className="chart-col">
-          <HeroStats
+          <ChartHeader
             baseAsset={baseAsset}
             quoteAsset={quoteAsset}
             candles={chartData}
