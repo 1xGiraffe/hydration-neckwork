@@ -31,6 +31,7 @@ const LOAD_MORE_COUNT = 500
 const POLL_INTERVAL_MS = 10_000
 const PINNED_SCROLL_TOLERANCE = 2
 const OMNIWATCH_MARKER_MIN_BAR_WIDTH = 48
+const OMNIWATCH_MARKER_MOBILE_MIN_BAR_WIDTH = 18
 const OMNIWATCH_MARKER_ACCOUNT_MIN_BAR_WIDTH = 60
 const VOLUME_DETAILS_PAGE_SIZE = 200
 
@@ -125,11 +126,6 @@ function formatCandleDate(ts: number): string {
     timeZone: 'UTC',
     timeZoneName: 'short',
   }).format(new Date(ts * 1000))
-}
-
-function formatAddressLabel(address: string): string {
-  if (address.length <= 14) return address
-  return `${address.slice(0, 7)}...${address.slice(-4)}`
 }
 
 function showIconFallback(event: SyntheticEvent<HTMLImageElement>) {
@@ -299,9 +295,11 @@ export default function Chart({
     const visibleBars = range ? Math.max(1, range.to - range.from) : 40
     const xStep = container.clientWidth / visibleBars
     const barWidth = xStep * 0.62
+    const isMobile = container.clientWidth <= 768
+    const minBarWidth = isMobile ? OMNIWATCH_MARKER_MOBILE_MIN_BAR_WIDTH : OMNIWATCH_MARKER_MIN_BAR_WIDTH
     const volumePaneHeight = Math.floor(container.clientHeight * 0.15)
     volumePaneTopRef.current = container.clientHeight - volumePaneHeight
-    if (barWidth < OMNIWATCH_MARKER_MIN_BAR_WIDTH) {
+    if (barWidth < minBarWidth) {
       setOmniwatchMarkers([])
       return
     }
@@ -954,7 +952,10 @@ export default function Chart({
         .omniwatch-summary .price-change.down { color: var(--red); }
         .omniwatch-summary .net.up { color: var(--green); }
         .omniwatch-summary .net.down { color: var(--red); }
-        .omniwatch-rows { padding: 0 28px 22px; overflow-y: auto; }
+        .omniwatch-rows {
+          flex: 1; min-height: 0; padding: 0 28px 22px; overflow-y: auto;
+          overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+        }
         .omniwatch-row {
           display: grid; grid-template-columns: 240px 1fr 150px; gap: 22px; align-items: center;
           padding: 18px 0; border-bottom: 1px solid var(--separator);
@@ -998,10 +999,69 @@ export default function Chart({
            Push the legend down so it does not overlap axis labels. */
         @media (max-width: 768px) {
           .chart-legend { left: 12px; right: 12px; top: 48px; }
+          .omniwatch-marker {
+            height: 24px; min-width: 24px; padding: 0 4px; justify-content: center; gap: 0;
+          }
+          .omniwatch-marker .emoji { font-size: 16px; }
+          .omniwatch-marker .emoji-img { width: 18px; height: 18px; }
+          .omniwatch-marker .id, .omniwatch-marker .more { display: none; }
+          .omniwatch-scrim {
+            align-items: stretch; padding: 8px; padding-bottom: max(8px, env(safe-area-inset-bottom));
+          }
+          .omniwatch-modal {
+            width: 100%; max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px);
+          }
+          .omniwatch-modal-head { align-items: center; gap: 12px; padding: 16px 16px 14px; }
+          .omniwatch-modal-title { gap: 5px; }
+          .omniwatch-modal-title .pair { font-size: 24px; }
+          .omniwatch-modal-title .sub { font-size: 12px; line-height: 1.3; }
+          .omniwatch-close { width: 40px; height: 40px; flex: 0 0 auto; font-size: 24px; }
           .omniwatch-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-          .omniwatch-stat:nth-child(2n + 1) { padding-left: 28px; }
-          .omniwatch-row { grid-template-columns: 1fr; gap: 12px; }
-          .omniwatch-net { text-align: left; }
+          .omniwatch-stat { padding: 12px; }
+          .omniwatch-stat:first-child,
+          .omniwatch-stat:nth-child(2n + 1) { padding-left: 16px; }
+          .omniwatch-stat .k { margin-bottom: 4px; font-size: 9px; letter-spacing: 0.1em; }
+          .omniwatch-stat .v { font-size: 14px; }
+          .omniwatch-summary {
+            flex-direction: column; align-items: flex-start; gap: 6px;
+            padding: 14px 16px 8px; font-size: 11px; line-height: 1.35; letter-spacing: 0.08em;
+          }
+          .omniwatch-rows { padding: 0 16px 16px; }
+          .omniwatch-row {
+            grid-template-columns: 78px minmax(120px, 1fr) max-content;
+            column-gap: 12px; row-gap: 0; align-items: center; padding: 12px 0;
+          }
+          .omniwatch-account {
+            grid-column: auto; min-width: 0; justify-content: flex-start; align-items: center; gap: 6px; flex-wrap: nowrap;
+          }
+          .omniwatch-pill {
+            flex: 0 0 72px; width: 72px; min-width: 0; max-width: 72px; height: 30px; padding: 0 8px 0 5px;
+            gap: 5px; overflow: hidden; font-size: 12px;
+          }
+          .omniwatch-pill .emoji { font-size: 18px; }
+          .omniwatch-pill .emoji-img { width: 20px; height: 20px; }
+          .omniwatch-count { display: none; }
+          .omniwatch-flow { width: 100%; min-width: 0; gap: 0; }
+          .omniwatch-flow-track { height: 10px; }
+          .omniwatch-flow-nums { display: none; }
+          .omniwatch-net {
+            align-self: center; justify-self: end; flex-direction: row; align-items: center; justify-content: flex-end;
+            gap: 0; text-align: right; min-width: 72px;
+          }
+          .omniwatch-net .value { font-size: 14px; }
+          .omniwatch-net .label { display: none; }
+          .omniwatch-empty { padding: 28px 16px 32px; font-size: 14px; }
+        }
+        @media (max-width: 420px) {
+          .omniwatch-scrim { padding: 0; }
+          .omniwatch-modal {
+            width: 100%; height: 100vh; height: 100dvh; max-height: 100vh; max-height: 100dvh;
+            border-radius: 0; border-left: 0; border-right: 0;
+          }
+          .omniwatch-row { grid-template-columns: 72px minmax(96px, 1fr) max-content; column-gap: 9px; }
+          .omniwatch-pill { flex-basis: 66px; width: 66px; max-width: 66px; padding: 0 6px 0 5px; }
+          .omniwatch-net { min-width: 66px; }
+          .omniwatch-net .value { font-size: 13px; }
         }
       `}</style>
       <div className="chart-area">
@@ -1113,7 +1173,7 @@ export default function Chart({
                           rel="noopener noreferrer"
                           title={account.account}
                         >
-                          <OmniwatchIcon trader={account} />{formatAddressLabel(account.account)}
+                          <OmniwatchIcon trader={account} />{account.shortAccount}
                         </a>
                         <span className="omniwatch-count">×{formatCount(account.tradeCount)}</span>
                       </div>
