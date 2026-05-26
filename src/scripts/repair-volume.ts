@@ -73,6 +73,12 @@ export interface AliasState {
   decimals: Map<number, number>
 }
 
+interface AssetAliasRow {
+  asset_id: number
+  symbol: string
+  decimals: number
+}
+
 export interface PriceVolumeRow {
   asset_id: number
   block_height: number
@@ -230,6 +236,29 @@ function calculateUsdVolume(nativeAmount: bigint, price: string | undefined, dec
   return formatDecimal128((nativeAmount * decimalToScaledBigInt(price)) / (10n ** BigInt(decimals)))
 }
 
+function positivePrice(prices: Map<string, string>, blockHeight: number, assetId: number): string | undefined {
+  const price = prices.get(priceKey(blockHeight, assetId))
+  return price != null && Number(price) > 0 ? price : undefined
+}
+
+function calculateLegUsdVolume(
+  leg: TradeLeg,
+  blockHeight: number,
+  aliases: AliasState,
+  prices: Map<string, string>
+): string {
+  const originalPrice = positivePrice(prices, blockHeight, leg.assetId)
+  if (originalPrice) {
+    return calculateUsdVolume(leg.amount, originalPrice, aliases.decimals.get(leg.assetId))
+  }
+
+  return calculateUsdVolume(
+    leg.amount,
+    positivePrice(prices, blockHeight, leg.canonicalAssetId),
+    aliases.decimals.get(leg.canonicalAssetId),
+  )
+}
+
 function sumBigIntStrings(a: string | undefined, b: string | undefined): string {
   return (BigInt(a ?? '0') + BigInt(b ?? '0')).toString()
 }
@@ -338,20 +367,71 @@ function parseEquivalenceList(value: unknown): [number, number][] {
   return pairs.filter(([left, right]) => Number.isFinite(left) && Number.isFinite(right))
 }
 
+function aliasStateFromAssetRows(rows: AssetAliasRow[]): AliasState {
+  const atokenToBase = new Map<number, number>()
+  const lpToDisplay = new Map<number, number>()
+  const decimals = new Map<number, number>()
+  const symbolToId = new Map<string, number>()
+
+  for (const item of rows) {
+    if (Number.isInteger(item.asset_id) && Number.isInteger(item.decimals)) {
+      decimals.set(item.asset_id, item.decimals)
+    }
+    if (!symbolToId.has(item.symbol)) {
+      symbolToId.set(item.symbol, item.asset_id)
+    }
+  }
+
+  for (const item of rows) {
+    if (item.symbol.startsWith('a') && item.symbol.length > 1) {
+      const baseId = symbolToId.get(item.symbol.slice(1))
+      if (baseId !== undefined && baseId !== item.asset_id) {
+        atokenToBase.set(item.asset_id, baseId)
+      }
+    }
+
+    const lpMatch = item.symbol.match(/^\d+-Pool-(.+)$/)
+    if (lpMatch) {
+      const displayId = symbolToId.get(lpMatch[1])
+      if (displayId !== undefined && displayId !== item.asset_id) {
+        lpToDisplay.set(item.asset_id, displayId)
+      }
+    }
+  }
+
+  return { atokenToBase, lpToDisplay, decimals }
+}
+
+function mergeAliasStates(fallback: AliasState, snapshot: AliasState): AliasState {
+  return {
+    atokenToBase: new Map([...fallback.atokenToBase, ...snapshot.atokenToBase]),
+    lpToDisplay: new Map([...fallback.lpToDisplay, ...snapshot.lpToDisplay]),
+    decimals: new Map([...fallback.decimals, ...snapshot.decimals]),
+  }
+}
+
 export function aliasStateFromSnapshot(payloadJson: string): AliasState {
   const payload = JSON.parse(payloadJson) as {
     assets?: {
-      items?: Array<{ assetId: number; decimals: number }>
+      items?: Array<{ assetId: number; symbol?: string; decimals: number }>
       atoken_equivalences?: unknown
       lp_equivalences?: unknown
     }
   }
-  const atokenToBase = new Map<number, number>()
+
+  const inferred = aliasStateFromAssetRows((payload.assets?.items ?? []).flatMap(item => {
+    if (typeof item.symbol !== 'string') return []
+    return [{ asset_id: item.assetId, symbol: item.symbol, decimals: item.decimals }]
+  }))
+  const atokenToBase = new Map(inferred.atokenToBase)
   for (const [baseId, aTokenId] of parseEquivalenceList(payload.assets?.atoken_equivalences)) {
     atokenToBase.set(aTokenId, baseId)
   }
 
-  const lpToDisplay = new Map<number, number>(parseEquivalenceList(payload.assets?.lp_equivalences))
+  const lpToDisplay = new Map(inferred.lpToDisplay)
+  for (const [lpId, displayId] of parseEquivalenceList(payload.assets?.lp_equivalences)) {
+    lpToDisplay.set(lpId, displayId)
+  }
   const decimals = new Map<number, number>()
   for (const item of payload.assets?.items ?? []) {
     if (Number.isInteger(item.assetId) && Number.isInteger(item.decimals)) {
@@ -441,11 +521,7 @@ export function rowsForTrade(
   for (const input of inputs) {
     if (isCanonicalSelfConversion(input, outputOriginalsByCanonical)) continue
 
-    const usdVolume = calculateUsdVolume(
-      input.amount,
-      prices.get(priceKey(blockHeight, input.assetId)),
-      aliases.decimals.get(input.assetId),
-    )
+    const usdVolume = calculateLegUsdVolume(input, blockHeight, aliases, prices)
     const priceRow = priceRowForAsset(input.canonicalAssetId)
     priceRow.native_volume_sell = sumBigIntStrings(priceRow.native_volume_sell, input.amount.toString())
     priceRow.usd_volume_sell = sumDecimal128Strings(priceRow.usd_volume_sell, usdVolume)
@@ -460,11 +536,7 @@ export function rowsForTrade(
   for (const output of outputs) {
     if (isCanonicalSelfConversion(output, inputOriginalsByCanonical)) continue
 
-    const usdVolume = calculateUsdVolume(
-      output.amount,
-      prices.get(priceKey(blockHeight, output.assetId)),
-      aliases.decimals.get(output.assetId),
-    )
+    const usdVolume = calculateLegUsdVolume(output, blockHeight, aliases, prices)
     const priceRow = priceRowForAsset(output.canonicalAssetId)
     priceRow.native_volume_buy = sumBigIntStrings(priceRow.native_volume_buy, output.amount.toString())
     priceRow.usd_volume_buy = sumDecimal128Strings(priceRow.usd_volume_buy, usdVolume)
@@ -568,6 +640,18 @@ async function getSafeTip(client: ClickHouseClient, safetyLagBlocks: number): Pr
   return Math.max(0, Number(rows[0]?.max_block) - safetyLagBlocks)
 }
 
+async function queryCurrentAliasState(client: ClickHouseClient): Promise<AliasState> {
+  const result = await client.query({
+    query: `
+      SELECT asset_id, symbol, decimals
+      FROM price_data.assets FINAL
+    `,
+    format: 'JSONEachRow',
+  })
+  const rows = await result.json<AssetAliasRow>()
+  return aliasStateFromAssetRows(rows)
+}
+
 async function getRawSwapHistoryRange(client: ClickHouseClient): Promise<{ from: number; to: number }> {
   const result = await client.query({
     query: `
@@ -663,7 +747,11 @@ async function queryRawEvents(client: ClickHouseClient, from: number, to: number
   return await result.json<RawEventRow>()
 }
 
-async function querySnapshots(client: ClickHouseClient, blockHeights: number[]): Promise<Map<number, AliasState>> {
+async function querySnapshots(
+  client: ClickHouseClient,
+  blockHeights: number[],
+  fallbackAliases: AliasState
+): Promise<Map<number, AliasState>> {
   if (blockHeights.length === 0) return new Map()
 
   const result = await client.query({
@@ -676,7 +764,7 @@ async function querySnapshots(client: ClickHouseClient, blockHeights: number[]):
     format: 'JSONEachRow',
   })
   const rows = await result.json<SnapshotRow>()
-  return new Map(rows.map(row => [row.block_height, aliasStateFromSnapshot(row.payload_json)]))
+  return new Map(rows.map(row => [row.block_height, mergeAliasStates(fallbackAliases, aliasStateFromSnapshot(row.payload_json))]))
 }
 
 async function queryPricesForAssets(client: ClickHouseClient, from: number, to: number, assetIds: number[]): Promise<Map<string, string>> {
@@ -799,7 +887,7 @@ async function insertPriceRows(client: ClickHouseClient, rows: PriceRow[], from:
 
 async function repairChunk(
   client: ClickHouseClient,
-  options: { from: number; to: number; unifiedSwapFromBlock: number; targets: Set<RepairTarget>; apply: boolean; runId: string }
+  options: { from: number; to: number; unifiedSwapFromBlock: number; targets: Set<RepairTarget>; apply: boolean; runId: string; fallbackAliases: AliasState }
 ): Promise<RepairChunkResult> {
   const events = await queryRawEvents(client, options.from, options.to, options.unifiedSwapFromBlock)
   const trades = events.flatMap(row => {
@@ -807,17 +895,22 @@ async function repairChunk(
     return trade && (trade.inputs.length > 0 || trade.outputs.length > 0) ? [{ blockHeight: row.block_height, trade }] : []
   })
   const eventBlocks = [...new Set(trades.map(row => row.blockHeight))]
-  const snapshots = await querySnapshots(client, eventBlocks)
+  const snapshots = await querySnapshots(client, eventBlocks, options.fallbackAliases)
   const missingSnapshots = eventBlocks.filter(blockHeight => !snapshots.has(blockHeight))
   if (missingSnapshots.length > 0) {
     throw new Error(`Missing raw snapshots for ${missingSnapshots.length} event blocks, first missing block: ${missingSnapshots[0]}`)
   }
 
-  const sourceAssetIds = [...new Set(trades.flatMap(({ trade }) => [
-    ...trade.inputs.map(input => input.assetId),
-    ...trade.outputs.map(output => output.assetId),
-  ]))].sort((a, b) => a - b)
-  const prices = await queryPricesForAssets(client, options.from, options.to, sourceAssetIds)
+  const sourceAssetIds = new Set<number>()
+  for (const { blockHeight, trade } of trades) {
+    const aliases = snapshots.get(blockHeight)
+    if (!aliases) throw new Error(`Missing aliases for block ${blockHeight}`)
+    for (const leg of [...trade.inputs, ...trade.outputs]) {
+      sourceAssetIds.add(leg.assetId)
+      sourceAssetIds.add(canonicalAssetId(leg.assetId, aliases))
+    }
+  }
+  const prices = await queryPricesForAssets(client, options.from, options.to, [...sourceAssetIds].sort((a, b) => a - b))
 
   const generated = trades.map(({ blockHeight, trade }) => {
     const aliases = snapshots.get(blockHeight)
@@ -896,6 +989,9 @@ async function main(): Promise<void> {
 
     const targets = [...args.targets].join(', ')
     const unifiedSwapFromBlock = await getUnifiedSwapFromBlock(client)
+    const fallbackAliases = args.targets.has('trade-volume') || args.targets.has('prices')
+      ? await queryCurrentAliasState(client)
+      : { atokenToBase: new Map(), lpToDisplay: new Map(), decimals: new Map() }
     const runId = new Date().toISOString().replace(/[-:.TZ]/g, '')
     console.log(`[volume-repair] ${args.apply ? 'APPLY' : 'DRY RUN'} ${from}..${to} (${targets}), chunk=${args.chunkSize}, safe_tip=${safeTip}`)
     if (!args.apply) console.log('[volume-repair] Pass --apply to mutate ClickHouse.')
@@ -914,6 +1010,7 @@ async function main(): Promise<void> {
           targets: args.targets,
           apply: args.apply,
           runId,
+          fallbackAliases,
         })
         totalEvents += result.events
         totalTradeRows += result.tradeRows

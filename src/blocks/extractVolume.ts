@@ -90,6 +90,20 @@ function isCanonicalSelfConversion(
   return originals ? [...originals].some(opposingAssetId => opposingAssetId !== leg.assetId) : false;
 }
 
+function hasPositivePrice(prices: PriceMap, assetId: number): boolean {
+  const price = prices.get(assetId);
+  return price != null && Number(price) > 0;
+}
+
+function calculateLegUsdVolume(
+  leg: CanonicalTradeLeg,
+  prices: PriceMap,
+  decimals: AssetDecimals
+): string {
+  const priceAssetId = hasPositivePrice(prices, leg.assetId) ? leg.assetId : leg.canonicalAssetId;
+  return calculateUsdVolume(leg.amount, priceAssetId, prices, decimals);
+}
+
 function normalizeAccount(value: unknown): string | null {
   if (typeof value === 'string' && value.length > 0) {
     return value;
@@ -211,7 +225,7 @@ function tradeToVolumeRows(
       block_height: blockHeight,
       usd_price: '0', // Price comes from price rows, not volume rows
       native_volume_sell: input.amount.toString(),
-      usd_volume_sell: calculateUsdVolume(input.amount, input.assetId, prices, decimals),
+      usd_volume_sell: calculateLegUsdVolume(input, prices, decimals),
       native_volume_buy: '0',
       usd_volume_buy: '0.000000000000',
     });
@@ -227,7 +241,7 @@ function tradeToVolumeRows(
       block_height: blockHeight,
       usd_price: '0',
       native_volume_buy: output.amount.toString(),
-      usd_volume_buy: calculateUsdVolume(output.amount, output.assetId, prices, decimals),
+      usd_volume_buy: calculateLegUsdVolume(output, prices, decimals),
       native_volume_sell: '0',
       usd_volume_sell: '0.000000000000',
     });
@@ -583,7 +597,7 @@ function tradeToAccountVolumeRows(
     row.native_volume_sell = sumBigIntStrings(row.native_volume_sell ?? '0', input.amount.toString());
     row.usd_volume_sell = sumDecimal128Strings(
       row.usd_volume_sell ?? '0.000000000000',
-      calculateUsdVolume(input.amount, input.assetId, prices, decimals)
+      calculateLegUsdVolume(input, prices, decimals)
     );
   }
 
@@ -596,7 +610,7 @@ function tradeToAccountVolumeRows(
     row.native_volume_buy = sumBigIntStrings(row.native_volume_buy ?? '0', output.amount.toString());
     row.usd_volume_buy = sumDecimal128Strings(
       row.usd_volume_buy ?? '0.000000000000',
-      calculateUsdVolume(output.amount, output.assetId, prices, decimals)
+      calculateLegUsdVolume(output, prices, decimals)
     );
   }
 

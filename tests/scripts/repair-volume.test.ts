@@ -33,6 +33,21 @@ describe('volume repair helpers', () => {
     expect(aliases.decimals.get(1001)).toBe(10)
   })
 
+  it('infers LP aliases from snapshot asset symbols when explicit equivalences are absent', () => {
+    const aliases = aliasStateFromSnapshot(JSON.stringify({
+      assets: {
+        items: [
+          { assetId: 69, symbol: 'GDOT', decimals: 18 },
+          { assetId: 690, symbol: '2-Pool-GDOT', decimals: 18 },
+        ],
+        atoken_equivalences: [],
+        lp_equivalences: [],
+      },
+    }))
+
+    expect(canonicalAssetId(690, aliases)).toBe(69)
+  })
+
   it('skips wrapper self-conversions before account and price aggregation', () => {
     const aliases: AliasState = {
       atokenToBase: new Map([[1001, 5]]),
@@ -76,6 +91,40 @@ describe('volume repair helpers', () => {
       asset_id: 10,
       native_volume_buy: '20000000',
       usd_volume_buy: '20.000000000000',
+    })
+  })
+
+  it('falls back to canonical prices for priced wrapper repair rows', () => {
+    const aliases: AliasState = {
+      atokenToBase: new Map(),
+      lpToDisplay: new Map([[690, 69]]),
+      decimals: new Map([
+        [69, 18],
+        [690, 18],
+        [10, 6],
+      ]),
+    }
+    const prices = new Map([
+      ['123:69', '1.250000000000'],
+      ['123:10', '1.000000000000'],
+    ])
+    const trade: DecodedTrade = {
+      account: 'alice',
+      inputs: [{ assetId: 690, amount: 2_000_000_000_000_000_000n }],
+      outputs: [{ assetId: 10, amount: 2_500_000n }],
+    }
+
+    const result = rowsForTrade(trade, 123, aliases, prices)
+
+    expect(result.tradeRows[0]).toMatchObject({
+      asset_id: 69,
+      native_volume_sell: '2000000000000000000',
+      usd_volume_sell: '2.500000000000',
+    })
+    expect(result.priceRows[0]).toMatchObject({
+      asset_id: 69,
+      native_volume_sell: '2000000000000000000',
+      usd_volume_sell: '2.500000000000',
     })
   })
 

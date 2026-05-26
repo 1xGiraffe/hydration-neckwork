@@ -545,6 +545,37 @@ describe('extractVolumeFromSwaps', () => {
       usd_volume_buy: '3.000000000000',
     });
   });
+
+  it('uses the canonical asset price when a wrapper leg has no direct price', () => {
+    const event = createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Stableswap', value: 690 },
+      operation: { __kind: 'LiquidityRemove' },
+      inputs: [{ asset: 690, amount: 2000000000000000000n }],
+      outputs: [{ asset: 10, amount: 2500000n }],
+      fees: [],
+      swapper: 'alice',
+      filler: 'pool',
+      operationStack: [],
+    });
+    const wrapperPrices: PriceMap = new Map([
+      [69, '1.250000000000'],
+      [10, '1.000000000000'],
+    ]);
+    const wrapperDecimals: AssetDecimals = new Map([
+      [69, 18],
+      [690, 18],
+      [10, 6],
+    ]);
+    const canonicalize = (assetId: number) => assetId === 690 ? 69 : assetId;
+
+    const rows = extractVolumeFromSwaps([event], 100, 323, wrapperPrices, wrapperDecimals, canonicalize);
+
+    expect(rows[0]).toMatchObject({
+      asset_id: 69,
+      native_volume_sell: '2000000000000000000',
+      usd_volume_sell: '2.500000000000',
+    });
+  });
 });
 
 describe('extractTradeVolumeFromSwaps', () => {
