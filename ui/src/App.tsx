@@ -253,44 +253,47 @@ export default function App() {
     const container = chartContainerRef.current
     if (!container) return
     try {
-      const rect = container.getBoundingClientRect()
-      const dpr = window.devicePixelRatio || 1
-      const w = Math.round(rect.width * dpr)
-      const h = Math.round(rect.height * dpr)
-      const composite = document.createElement('canvas')
-      composite.width = w
-      composite.height = h
-      const ctx = composite.getContext('2d')
-      if (!ctx) return
-
-      const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#030816'
-      ctx.fillStyle = bg
-      ctx.fillRect(0, 0, w, h)
-
       const displayQ = quoteAsset?.isStablecoin ? 'USD' : quoteSymbol
       const isLight = document.documentElement.getAttribute('data-theme') === 'light'
-
-      // Composite the chart series first (background area is already filled).
-      const canvases = container.querySelectorAll('canvas')
-      for (const canvas of canvases) {
-        const cRect = canvas.getBoundingClientRect()
-        const x = Math.round((cRect.left - rect.left) * dpr)
-        const y = Math.round((cRect.top - rect.top) * dpr)
-        ctx.drawImage(canvas, x, y)
-      }
-
-      // Brand + pair watermark in the TOP-LEFT corner. Brand on the first row,
-      // pair + interval beneath it, asset names in a smaller line below.
       const pairLine = `${baseSymbol}${displayQ}, ${INTERVAL_LABELS[interval]}`
       const nameParts = [baseAsset?.name ?? baseSymbol, quoteAsset?.isStablecoin ? 'USD' : (quoteAsset?.name ?? quoteSymbol)]
       const subLine = nameParts.join(' / ')
-      await drawBrandWatermark(ctx, dpr, isLight, { pairLine, subLine })
-
       const utcNow = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + 'Z'
       const filename = `hydration_preis_${baseSymbol}${displayQ}_${INTERVAL_LABELS[interval]}_${utcNow}.png`
-      const blobPromise = new Promise<Blob>((resolve, reject) => {
-        composite.toBlob((blob) => blob ? resolve(blob) : reject(new Error('render failed')), 'image/png')
-      })
+
+      const blobPromise = (async () => {
+        const rect = container.getBoundingClientRect()
+        const dpr = window.devicePixelRatio || 1
+        const w = Math.round(rect.width * dpr)
+        const h = Math.round(rect.height * dpr)
+        const composite = document.createElement('canvas')
+        composite.width = w
+        composite.height = h
+        const ctx = composite.getContext('2d')
+        if (!ctx) throw new Error('render failed')
+
+        const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#030816'
+        ctx.fillStyle = bg
+        ctx.fillRect(0, 0, w, h)
+
+        // Composite the chart series first (background area is already filled).
+        const canvases = container.querySelectorAll('canvas')
+        for (const canvas of canvases) {
+          const cRect = canvas.getBoundingClientRect()
+          const x = Math.round((cRect.left - rect.left) * dpr)
+          const y = Math.round((cRect.top - rect.top) * dpr)
+          ctx.drawImage(canvas, x, y)
+        }
+
+        // Brand + pair watermark in the TOP-LEFT corner. Brand on the first row,
+        // pair + interval beneath it, asset names in a smaller line below.
+        await drawBrandWatermark(ctx, dpr, isLight, { pairLine, subLine })
+
+        return new Promise<Blob>((resolve, reject) => {
+          composite.toBlob((blob) => blob ? resolve(blob) : reject(new Error('render failed')), 'image/png')
+        })
+      })()
+
       let copied = false
       if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
         try {
