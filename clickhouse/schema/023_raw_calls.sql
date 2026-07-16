@@ -15,5 +15,9 @@ CREATE TABLE IF NOT EXISTS price_data.raw_calls
 )
 ENGINE = ReplacingMergeTree(ingested_at)
 PARTITION BY toYYYYMM(block_timestamp)
-ORDER BY (block_height, call_address)
+-- Subsquid call addresses ('root', '0', '1.2', …) are unique only WITHIN an
+-- extrinsic, so extrinsic_index must be part of the key — without it the
+-- ReplacingMergeTree collapses same-address calls of different extrinsics in a
+-- block to one survivor (ifNull keeps the sort key non-nullable).
+ORDER BY (block_height, ifNull(extrinsic_index, 4294967295), call_address)
 SETTINGS index_granularity = 8192;

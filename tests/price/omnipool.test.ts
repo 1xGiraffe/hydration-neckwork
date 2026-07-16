@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { calculateLRNAPrice, calculateOmnipoolPrices } from '../../src/price/omnipool.ts';
-import type { OmnipoolAssetState, AssetDecimals, PriceMap } from '../../src/price/types.ts';
+import type { OmnipoolAssetState } from '../../src/price/types.ts';
 
 describe('calculateLRNAPrice', () => {
   it('calculates LRNA price from symmetric USDT reserves', () => {

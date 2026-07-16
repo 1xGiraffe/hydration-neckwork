@@ -9,22 +9,45 @@ import { queryTradeVolumeDetails, queryTradeVolumeSummaries } from '../services/
 import type { ApiCandle } from '../types.ts'
 
 const intervalsArray = Object.keys(INTERVAL_VIEW_MAP) as [OHLCVInterval, ...OHLCVInterval[]]
+const uint32 = z.coerce.number().int().min(0).max(0xffff_ffff)
+const unixTime = z.coerce.number().int().min(1).max(0xffff_ffff)
+const MAX_CANDLES_PER_REQUEST = 5_000
+const MAX_INTERVAL_SECONDS: Record<OHLCVInterval, number> = {
+  '5min': 5 * 60,
+  '15min': 15 * 60,
+  '30min': 30 * 60,
+  '1h': 60 * 60,
+  '4h': 4 * 60 * 60,
+  '1d': 24 * 60 * 60,
+  '1w': 7 * 24 * 60 * 60,
+  // Use the longest calendar month so valid month-aligned requests are not
+  // rejected at a 31-day boundary.
+  '1M': 31 * 24 * 60 * 60,
+}
 
 const querySchema = z.object({
-  baseId:   z.coerce.number().int().nonnegative(),
-  quoteId:  z.coerce.number().int().nonnegative(),
+  baseId:   uint32,
+  quoteId:  uint32,
   interval: z.enum(intervalsArray),
-  from:     z.coerce.number().int().positive(),
-  to:       z.coerce.number().int().positive(),
+  from:     unixTime,
+  to:       unixTime,
+}).superRefine(({ interval, from, to }, ctx) => {
+  if (to <= from) {
+    ctx.addIssue({ code: 'custom', path: ['to'], message: '`to` must be later than `from`' })
+    return
+  }
+  if (to - from > MAX_INTERVAL_SECONDS[interval] * MAX_CANDLES_PER_REQUEST) {
+    ctx.addIssue({ code: 'custom', path: ['from'], message: `Range exceeds ${MAX_CANDLES_PER_REQUEST} candles` })
+  }
 })
 
 const detailQuerySchema = z.object({
-  baseId:   z.coerce.number().int().nonnegative(),
-  quoteId:  z.coerce.number().int().nonnegative(),
+  baseId:   uint32,
+  quoteId:  uint32,
   interval: z.enum(intervalsArray),
-  time:     z.coerce.number().int().positive(),
+  time:     unixTime,
   limit:    z.coerce.number().int().min(1).max(500).optional(),
-  offset:   z.coerce.number().int().nonnegative().optional(),
+  offset:   z.coerce.number().int().min(0).max(100_000).optional(),
 })
 
 function attachOmniwatchSummaries(

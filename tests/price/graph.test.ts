@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { resolvePrices, priceTo24, price24ToString, buildGraph, bfsResolvePrices, computeLpNavPrices, collectUnpricedConnectedAssets } from '../../src/price/graph.ts';
-import type { OmnipoolAssetState, XYKPool, StableswapPool, AssetDecimals, PriceMap } from '../../src/price/types.ts';
+import { resolvePrices, priceTo24, price24ToString, buildGraph, bfsResolvePrices, resolveGraphPricesByWeightedMedian, computeLpNavPrices, collectUnpricedConnectedAssets } from '../../src/price/graph.ts';
+import type { OmnipoolAssetState, XYKPool, StableswapPool, AssetDecimals, PriceMap, GraphEdge } from '../../src/price/types.ts';
 
 describe('priceTo24', () => {
   it('converts "1.000000000000" to 10^24', () => {
@@ -120,7 +120,7 @@ describe('resolvePrices', () => {
     expect(prices.get(10)).toBe('1.000000000000');
 
     // All prices should be valid numbers
-    for (const [assetId, price] of prices.entries()) {
+    for (const price of prices.values()) {
       expect(parseFloat(price)).toBeGreaterThan(0);
       expect(parseFloat(price)).toBeLessThan(1000000);
     }
@@ -192,6 +192,29 @@ describe('resolvePrices', () => {
 
     expect(prices.size).toBe(1);
     expect(prices.get(10)).toBe('1.000000000000');
+  });
+
+  it('honors zero-decimal USD reference assets', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([[
+      10,
+      {
+        hubReserve: 1_000_000_000_000n,
+        reserve: 2n,
+        shares: 0n,
+        protocolShares: 0n,
+        cap: 0n,
+        tradable: 0,
+      },
+    ]]);
+
+    const { prices } = resolvePrices(
+      omnipoolAssets,
+      [],
+      [],
+      new Map([[10, 0]]),
+    );
+
+    expect(prices.get(1)).toBe('2.000000000000');
   });
 
   it('handles empty inputs gracefully while preserving the USD reference seed', () => {
@@ -414,10 +437,153 @@ describe('resolvePrices', () => {
       atokenEquivalences,
     );
 
-    expect(parseFloat(prices.get(21)!)).toBeGreaterThan(1.2);
+    expect(parseFloat(prices.get(21)!)).toBeGreaterThan(0.99);
+    expect(parseFloat(prices.get(21)!)).toBeLessThan(1.01);
     expect(parseFloat(prices.get(222)!)).toBeGreaterThan(0.99);
     expect(parseFloat(prices.get(222)!)).toBeLessThan(1.01);
     expect(hopCounts.get(222)).toBe(1);
+  });
+
+  it('filters thin graph paths before they price downstream assets', () => {
+    const xykPools: XYKPool[] = [
+      {
+        assetA: 10,
+        assetB: 1000081,
+        reserveA: 500_000000n,
+        reserveB: 1000_000000000000000000n,
+      },
+      {
+        assetA: 1000081,
+        assetB: 1007,
+        reserveA: 1000_000000000000000000n,
+        reserveB: 1_000000000000000000n,
+      },
+    ];
+    const decimals = new Map<number, number>([
+      [10, 6],
+      [34, 18],
+      [1007, 18],
+      [1000081, 18],
+    ]);
+
+    const { prices } = resolvePrices(
+      new Map(),
+      xykPools,
+      [],
+      decimals,
+      10,
+      1,
+      [10],
+      [[34, 1007]],
+      new Map(),
+      [10],
+      { minGraphPathLiquidityUsd: 12_000 },
+    );
+
+    expect(prices.get(10)).toBe('1.000000000000');
+    expect(prices.has(1000081)).toBe(false);
+    expect(prices.has(1007)).toBe(false);
+    expect(prices.has(34)).toBe(false);
+  });
+
+  it('uses LP display aliases as exact graph seeds for underlying assets', () => {
+    const one6 = 10n ** 6n;
+    const one18 = 10n ** 18n;
+
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [10, { hubReserve: 1_000000000000n, reserve: one6, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 }],
+      [420, { hubReserve: 2_000000000000000n, reserve: one18, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 }],
+    ]);
+
+    const xykPools: XYKPool[] = [
+      { assetA: 1007, assetB: 20, reserveA: 100n * one18, reserveB: 100n * one18 },
+    ];
+
+    const stableswapPools: StableswapPool[] = [
+      {
+        poolId: 4200,
+        assets: [1007, 1000809],
+        reserves: [50n * one18, 50n * one18],
+        amplification: 2000n,
+        fee: 400,
+        totalIssuance: 100n * one18,
+      },
+    ];
+
+    const decimals = new Map<number, number>([
+      [10, 6],
+      [20, 18],
+      [34, 18],
+      [420, 18],
+      [1007, 18],
+      [4200, 18],
+      [1000809, 18],
+    ]);
+
+    const { prices } = resolvePrices(
+      omnipoolAssets,
+      xykPools,
+      stableswapPools,
+      decimals,
+      10,
+      1,
+      [10],
+      [[34, 1007]],
+      new Map([[4200, 100n * one18]]),
+      [10],
+      {
+        minGraphPathLiquidityUsd: 12_000,
+        lpEquivalences: new Map([[4200, 420]]),
+      },
+    );
+
+    expect(prices.get(4200)).toBe(prices.get(420));
+    expect(prices.get(1007)).toBeDefined();
+    expect(prices.get(34)).toBe(prices.get(1007));
+    expect(prices.get(20)).toBeDefined();
+  });
+});
+
+describe('resolveGraphPricesByWeightedMedian', () => {
+  it('uses weighted median across sufficiently liquid graph observations', () => {
+    const usd18 = (value: number): bigint => BigInt(value) * (10n ** 18n);
+    const graph: Map<number, GraphEdge[]> = new Map([
+      [10, [
+        {
+          toAsset: 99,
+          poolId: 1,
+          kind: 'xyk',
+          liquidity: 1n,
+          computePrice: () => priceTo24('1.000000000000'),
+          computeLiquidityUsd: () => usd18(1_000),
+        },
+        {
+          toAsset: 99,
+          poolId: 2,
+          kind: 'xyk',
+          liquidity: 1n,
+          computePrice: () => priceTo24('1.020000000000'),
+          computeLiquidityUsd: () => usd18(3_000),
+        },
+        {
+          toAsset: 99,
+          poolId: 3,
+          kind: 'xyk',
+          liquidity: 1n,
+          computePrice: () => priceTo24('10.000000000000'),
+          computeLiquidityUsd: () => usd18(1_000),
+        },
+      ]],
+    ]);
+
+    const result = resolveGraphPricesByWeightedMedian(
+      new Map([[10, priceTo24('1.000000000000')]]),
+      new Set([10]),
+      graph,
+      { minGraphPathLiquidityUsd: 500 },
+    );
+
+    expect(price24ToString(result.get(99)!.priceBigint)).toBe('1.020000000000');
   });
 });
 
@@ -471,6 +637,38 @@ describe('buildGraph', () => {
     // Total edges = 6
     const totalEdges = [...graph.values()].reduce((sum, edges) => sum + edges.length, 0);
     expect(totalEdges).toBe(6);
+  });
+
+  it('LP to underlying edges invert NAV using stableswap spot ratios', () => {
+    const one18 = 10n ** 18n;
+    const stableswapPools: StableswapPool[] = [
+      {
+        poolId: 4200,
+        assets: [1007, 1000809],
+        reserves: [800n * one18, 600n * one18],
+        amplification: 100000n,
+        fee: 0,
+        totalIssuance: 2000n * one18,
+        pegMultipliers: [
+          [1n, 1n],
+          [2n, 1n],
+        ],
+      },
+    ];
+    const decimals: AssetDecimals = new Map([
+      [1007, 18],
+      [4200, 18],
+      [1000809, 18],
+    ]);
+    const totalIssuances = new Map([[4200, 2000n * one18]]);
+
+    const graph = buildGraph([], stableswapPools, [], decimals, totalIssuances);
+    const lpEdges = graph.get(4200)!;
+    const aEthPrice = lpEdges.find(edge => edge.toAsset === 1007)!.computePrice(priceTo24('1.000000000000'), 24);
+    const wstEthPrice = lpEdges.find(edge => edge.toAsset === 1000809)!.computePrice(priceTo24('1.000000000000'), 24);
+
+    expect(parseFloat(price24ToString(aEthPrice))).toBeCloseTo(1, 3);
+    expect(parseFloat(price24ToString(wstEthPrice))).toBeCloseTo(2, 3);
   });
 
   it('aToken equivalence produces bidirectional edges with kind "atoken"', () => {
@@ -581,7 +779,7 @@ describe('bfsResolvePrices', () => {
     expect(result.get(1)!.hopCount).toBe(1);
   });
 
-  it('aToken equivalences do not increment hop count (D-04)', () => {
+  it('aToken equivalences do not increment hop count', () => {
     // Setup: Omnipool prices HDX(0). XYK: HDX(0) -> AssetA(50).
     // aToken: [50, 150] (AssetA and its aToken).
     // XYK: AssetA-aToken(150) -> AssetB(60).
@@ -628,7 +826,7 @@ describe('bfsResolvePrices', () => {
     expect(bfsResult.get(60)?.hopCount).toBe(2);
   });
 
-  it('liquidity tiebreaker picks higher-liquidity path (D-06)', () => {
+  it('liquidity tiebreaker picks the higher-liquidity path', () => {
     // Two XYK pools both connecting HDX(0) to AssetX(99):
     // Pool 1 (low liq): 1000 HDX / 500 AssetX => price ratio 2:1
     // Pool 2 (high liq): 10000 HDX / 2000 AssetX => price ratio 5:1
@@ -663,7 +861,7 @@ describe('bfsResolvePrices', () => {
     expect(Math.abs(assetXPrice - pool1DerivedPrice)).toBeGreaterThan(Math.abs(assetXPrice - pool2DerivedPrice));
   });
 
-  it('24-decimal precision preserves accuracy in multi-hop chains (HOP-04)', () => {
+  it('24-decimal precision preserves accuracy in multi-hop chains', () => {
     // Chain: USDT -> A -> B via two XYK pools
     // Use very small price ratios to test that 24-decimal intermediates avoid precision loss
     const omnipoolAssets = new Map<number, OmnipoolAssetState>([
@@ -712,7 +910,7 @@ describe('bfsResolvePrices', () => {
     expect(assetBPrice).toBeCloseTo(assetAPrice * 2, 5);
   });
 
-  it('Omnipool prices are not overridden by BFS (D-02)', () => {
+  it('Omnipool prices are not overridden by graph expansion', () => {
     // DOT (5) is priced in Omnipool at $50.
     // There's also an XYK pool that would imply a different DOT price.
     // BFS must NOT override the Omnipool price for DOT.
@@ -1183,7 +1381,7 @@ describe('Fallback 2: non-USDT anchor with stableswap spot price', () => {
 
   it('does not anchor LRNA from an Omnipool stable LP token when HOLLAR is quoted through aUSDT', () => {
     const omnipoolAssets = new Map<number, OmnipoolAssetState>([
-      [102, { // 2-Pool LP in Omnipool — this used to be forced to $1
+      [102, { // 2-Pool LP in Omnipool must not become a synthetic $1 anchor.
         hubReserve: 100_000000000000n,
         reserve: 1450_000000000000000000n,
         shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,

@@ -1,0 +1,1300 @@
+/* ============================================================
+   Hydration Explorer — design-system styles
+   Fonts: Gazpacho (display), Geist (UI), Geist Mono (data)
+   ============================================================ */
+
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoRegular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoMedium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoBold.woff2') format('woff2'); font-weight: 600; font-display: swap; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistRegular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistMedium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistSemiBold.woff2') format('woff2'); font-weight: 600; font-display: swap; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoRegular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoMedium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoSemiBold.woff2') format('woff2'); font-weight: 600; font-display: swap; }
+
+:root {
+  /* shared easings (aligned with preis-ui) for consistent micro-interactions */
+  --ease-out-soft: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+}
+:root[data-theme="dark"] {
+  --bg: #030816;
+  --bg-elev: #0d1525;
+  --bg-elev2: #131d30;
+  --panel: rgba(255,255,255,0.03);
+  --panel-hover: rgba(255,255,255,0.06);
+  --border: rgba(255,255,255,0.09);
+  --separator: rgba(255,255,255,0.055);
+
+  --text-high: #f5f1f8;
+  --text-medium: #a4abbd;
+  --text-low: #6a7187;
+  --text-lowest: #454c5e;
+
+  --accent: #e53e76;
+  --accent-soft: rgba(229,62,118,0.14);
+  --accent-on: #ffffff;
+
+  --lavender: #dfb1f3;
+  --lavender-deep: #cc6ef4;
+  --lavender-soft: rgba(204,110,244,0.15);
+
+  --sky: #95caff;
+  --sky-deep: #2C89E9;
+  --sky-soft: rgba(83,164,243,0.13);
+
+  --green: #74C742;
+  --green-deep: #45AC1F;
+  --green-soft: rgba(116,199,66,0.15);
+
+  --red: #ff6868;
+  --red-soft: rgba(255,104,104,0.13);
+
+  --amber: #F7BF06;
+  --amber-soft: rgba(247,191,6,0.13);
+
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --bg: #EFEDEA;
+  --bg-elev: #ffffff;
+  --bg-elev2: #f6f4f1;
+  --panel: rgba(36,14,50,0.035);
+  --panel-hover: rgba(36,14,50,0.07);
+  --border: rgba(36,14,50,0.13);
+  --separator: rgba(36,14,50,0.08);
+
+  --text-high: #232226;
+  --text-medium: #5f5b67;
+  --text-low: #8a8693;
+  --text-lowest: #bdb8c6;
+
+  --accent: #e53e76;
+  --accent-soft: rgba(229,62,118,0.10);
+  --accent-on: #ffffff;
+
+  --lavender: #b454da;
+  --lavender-deep: #823fa1;
+  --lavender-soft: rgba(204,110,244,0.16);
+
+  --sky: #2C89E9;
+  --sky-deep: #1f5cab;
+  --sky-soft: rgba(83,164,243,0.10);
+
+  --green: #45AC1F;
+  --green-deep: #2e7c12;
+  --green-soft: rgba(116,199,66,0.16);
+
+  --red: #d83b3b;
+  --red-soft: rgba(216,59,59,0.10);
+
+  --amber: #b58800;
+  --amber-soft: rgba(247,191,6,0.16);
+
+  color-scheme: light;
+}
+
+* , *::before, *::after { box-sizing: border-box; }
+* { margin: 0; }
+html { font-size: 16px; -webkit-font-smoothing: antialiased; scroll-behavior: smooth; }
+body {
+  font-family: 'Geist', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text-high);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+a { color: inherit; text-decoration: none; }
+button { all: unset; box-sizing: border-box; cursor: pointer; font-family: inherit; }
+svg { display: block; }
+/* `all: unset` also removes the browser's keyboard focus ring. Restore one
+   consistently for every native or explicitly focusable control. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--sky);
+  outline-offset: 2px;
+}
+::selection { background: var(--accent); color: var(--accent-on); }
+
+/* scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ============ LAYOUT ============ */
+.wrap { max-width: 1280px; margin: 0 auto; padding: 0 24px; }
+@media (max-width: 720px){ .wrap { padding: 0 16px; } }
+
+/* ============ TOPBAR ============ */
+.topbar {
+  position: sticky; top: 0; z-index: 50;
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border-bottom: 1px solid var(--separator);
+}
+.topbar-inner { display: flex; align-items: center; gap: 20px; height: 60px; min-width: 0; }
+.brand { display: inline-flex; align-items: baseline; gap: 9px; flex-shrink: 0; }
+.brand .logo { width: 22px; height: 22px; color: var(--accent); transform: translateY(3px); }
+.brand .wm { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 18px; letter-spacing: 0; }
+.brand .pr { font-family: 'Gazpacho', serif; font-style: italic; font-weight: 400; font-size: 18px; color: var(--accent); }
+
+/* grouped nav: two dropdown groups (Activity, Chain) + direct links */
+.nav { display: flex; gap: 4px; margin-left: 8px; min-width: 0; flex: 0 0 auto; align-items: center; }
+.nav-group { position: relative; }
+/* invisible bridge so the pointer can cross the gap to the menu without it closing */
+.nav-group.open::after { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: 10px; }
+.nav-trigger, .nav-link {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 7px 13px; border-radius: 9999px;
+  font-size: 13px; font-weight: 500; color: var(--text-medium);
+  transition: color 150ms, background 150ms, transform 90ms ease;
+}
+.nav-trigger .caret { font-size: 9px; color: var(--text-low); transition: transform 150ms; }
+.nav-link:hover, .nav-group:hover > .nav-trigger, .nav-group.open > .nav-trigger { color: var(--text-high); background: var(--panel-hover); }
+.nav-group.open > .nav-trigger .caret { transform: rotate(180deg); }
+.nav-trigger.active, .nav-link.active { color: var(--accent); background: var(--accent-soft); }
+.nav-menu {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 120;
+  min-width: 176px; padding: 6px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+  opacity: 0; visibility: hidden; transform: translateY(-4px);
+  transition: opacity 140ms var(--ease-out-soft), transform 140ms var(--ease-out-soft), visibility 140ms;
+}
+.nav-group.open > .nav-menu { opacity: 1; visibility: visible; transform: translateY(0); }
+.nav-menu a { display: block; padding: 9px 12px; border-radius: 9px; font-size: 13px; color: var(--text-medium); white-space: nowrap; transition: color 130ms, background 130ms; }
+.nav-menu a:hover { color: var(--text-high); background: var(--panel-hover); }
+.nav-menu a.active { color: var(--accent); background: var(--accent-soft); }
+
+/* hamburger (mobile only) + right-hand drawer (preis-style) */
+.nav-burger { display: none; width: 34px; height: 34px; padding: 0; align-items: center; justify-content: center; border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); color: var(--text-medium); transition: color 150ms, background 150ms; }
+.nav-burger:hover { color: var(--text-high); background: var(--panel-hover); }
+.nav-burger svg { width: 17px; height: 17px; }
+.drawer-scrim { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,0.55); animation: ov 0.18s ease; }
+.drawer {
+  position: fixed; top: 0; right: 0; height: 100%; width: min(320px, 88vw); z-index: 201;
+  display: flex; flex-direction: column; overflow-y: auto;
+  background: var(--bg-elev); border-left: 1px solid var(--border);
+  box-shadow: -16px 0 44px rgba(0,0,0,0.5);
+  animation: drawerIn 0.2s var(--ease-out-soft);
+}
+@keyframes drawerIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+.drawer-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--separator); }
+.drawer-head .brand { display: inline-flex; align-items: baseline; gap: 5px; }
+.drawer-head .theme-toggle svg { width: 15px; height: 15px; }
+.drawer-sec { padding: 10px 10px; border-bottom: 1px solid var(--separator); }
+.drawer-sec:last-child { border-bottom: 0; }
+.drawer-sec .sec-lbl { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); padding: 6px 12px 8px; }
+.drawer-sec > a { display: block; padding: 11px 12px; border-radius: 10px; font-size: 15px; font-weight: 500; color: var(--text-medium); transition: color 130ms, background 130ms; }
+.drawer-sec > a:hover { color: var(--text-high); background: var(--panel-hover); }
+.drawer-sec > a.active { color: var(--accent); background: var(--accent-soft); }
+/* bottom drawer section: the live + theme controls (moved out of the topbar
+   on mobile) sit side by side as regular pills */
+.drawer-sec.drawer-controls { display: flex; align-items: center; gap: 10px; padding: 14px 12px; }
+.drawer .live-toggle { width: auto; height: 34px; padding: 0 14px; justify-content: flex-start; }
+.drawer .live-toggle .lab { display: inline; }
+
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.net-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 34px; padding: 0 12px; border-radius: 9999px;
+  background: var(--panel); border: 1px solid var(--border);
+  font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium);
+  letter-spacing: 0.02em;
+}
+.net-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 1.8s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.4;} }
+.theme-toggle {
+  width: 34px; height: 34px; padding: 0; justify-content: center;
+  display: inline-flex; align-items: center;
+  border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); color: var(--text-medium);
+  transition: color 150ms, background 150ms;
+}
+.theme-toggle:hover { color: var(--text-high); background: var(--panel-hover); }
+.theme-toggle .ic-sun { display: block; }
+.theme-toggle .ic-moon { display: none; }
+.theme-toggle svg { width: 16px; height: 16px; }
+
+/* live-refresh toggle */
+.live-toggle { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 12px; border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-medium); }
+.live-toggle:hover { color: var(--text-high); }
+.live-toggle .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-low); }
+.live-toggle.on { color: var(--green); border-color: color-mix(in srgb, var(--green) 38%, var(--border)); }
+.live-toggle.on .dot { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 1.6s ease-in-out infinite; }
+
+/* collapsible filter zone */
+.filter-zone { margin-bottom: 14px; }
+.filter-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+/* "smol" toggle — hides sub-$10 activity; while hiding, the word itself wears
+   the dim+strike treatment the rows it hides would get. */
+.smol-toggle { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 13px; border: 1px solid var(--border); border-radius: 9999px; background: var(--panel); font-family: 'GeistMono'; font-size: 11px; letter-spacing: 0.06em; color: var(--text-medium); }
+.smol-toggle:hover { color: var(--text-high); }
+.smol-toggle svg { width: 13px; height: 13px; }
+.smol-toggle.hiding .smol-word { opacity: .5; text-decoration: line-through; }
+.filter-toggle { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px; border: 1px solid var(--border); border-radius: 9999px; background: var(--panel); font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-medium); }
+.filter-toggle:hover { color: var(--text-high); }
+.filter-toggle.open, .filter-toggle.has { color: var(--text-high); border-color: var(--sky); }
+.filter-toggle svg { width: 13px; height: 13px; }
+.filter-toggle .fb { background: var(--accent); color: #fff; border-radius: 9999px; padding: 1px 6px; font-size: 10px; }
+.filter-toggle .chev { color: var(--text-low); }
+.filters.hidden { display: none; }
+.filters { margin-top: 12px; }
+[data-theme="light"] .theme-toggle .ic-sun { display: none; }
+[data-theme="light"] .theme-toggle .ic-moon { display: block; }
+
+/* Mid-width fold: between the mobile drawer (≤860px) and full desktop, the six
+   nav items would squeeze the topbar search to its minimum — Assets/HDX/HOLLAR
+   collapse into the Assets dropdown instead. */
+.nav .nav-fold-group { display: none; }
+@media (min-width: 861px) and (max-width: 1119px) {
+  .nav > .nav-link.nav-fold { display: none; }
+  .nav .nav-fold-group { display: block; }
+}
+/* At the narrowest desktop widths even the folded nav pinches the search —
+   drop the wordmark and keep the logo. */
+@media (min-width: 861px) and (max-width: 989px) {
+  .brand .wm, .brand .pr { display: none; }
+}
+
+/* compact search in topbar (inner pages) */
+.topbar-search { flex: 1 1 120px; min-width: 0; max-width: 300px; margin-left: 8px; }
+.topbar-search.hidden { display: none; }
+/* Desktop: the dropdown is wider than the compact input and anchored to its
+   right edge. Keep this before the ≤860px block so the mobile override wins. */
+.topbar-search .search-results { left: auto; right: 0; width: min(440px, calc(100vw - 24px)); }
+@media (max-width: 860px) {
+  /* single-line top chrome: [search ………] [burger]. The brand and the live /
+     theme toggles move into the drawer; the wordmark lives in its head. */
+  .topbar-inner { gap: 10px; height: auto; min-height: 60px; padding-top: 10px; padding-bottom: 10px; }
+  .brand { display: none; }
+  /* The start page has no topbar search (hero search instead), so the logo
+     keeps its spot there; sub pages still trade it for the full-width search. */
+  .topbar-dash .brand { display: inline-flex; margin-right: auto; }
+  .nav { display: none; }
+  .nav-burger { display: inline-flex; }
+  .topbar-right { margin-left: auto; }
+  .topbar-right .live-toggle, .topbar-right .theme-toggle { display: none; }
+  .topbar-search { flex: 1 1 auto; max-width: none; margin-left: 0; }
+  .topbar-search.hidden { display: none; }
+  /* Full-bleed dropdown: unposition the wrap so the absolute dropdown anchors
+     to the sticky .topbar itself (sticky = positioned) — left/right then span
+     the full bar width and top:100%+8px sits right under it. (position:fixed
+     is NOT reliable here: backdrop-filter's containing block isn't honored for
+     it in Chromium, which dropped the panel below the viewport.) */
+  .topbar-search .search-wrap { position: static; }
+  .topbar-search .search-results { left: 12px; right: 12px; width: auto; }
+}
+@media (max-width: 640px) {
+  /* tighten the top chrome so content/lists start higher on phones */
+  #view { padding-top: 20px; }
+  .page-head { margin-bottom: 16px; }
+  .page-title { font-size: 27px; }
+  .hero h1 { font-size: 34px; }
+  /* detail-page tabs sit closer under the pinned header */
+  .detail-tabs { margin-top: 16px; }
+}
+
+/* search results dropdown */
+.search-wrap { position: relative; }
+.search-results { position: absolute; top: calc(100% + 8px); left: 0; right: 0; z-index: 120; box-sizing: border-box; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 14px; padding: 6px; box-shadow: 0 16px 40px rgba(0,0,0,0.45); max-height: 360px; overflow-y: auto; }
+.search-results[hidden] { display: none; }
+.sr-item { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border-radius: 9px; cursor: pointer; min-width: 0; }
+.sr-item.on, .sr-item:hover { background: var(--panel-hover); }
+.sr-type { font-family: 'GeistMono'; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-low); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 2px 7px; min-width: 64px; text-align: center; }
+.sr-val { font-family: 'GeistMono'; font-size: 12.5px; color: var(--text-high); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-empty { padding: 12px 11px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-low); }
+/* account / asset search-result pill */
+.sr-acct { display: inline-flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; flex: 1 1 auto; }
+.sr-emoji { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; background: var(--panel); border: 1px solid var(--border); }
+/* Tag search-result icon (TagIcon's .emoji span) — match the account avatar so
+   the tag's logo/emoji glyph reads as a 22px bordered circle in front of the row. */
+.sr-acct .emoji { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; background: var(--panel); border: 1px solid var(--border); overflow: hidden; }
+.sr-acct-name { font-size: 12.5px; color: var(--text-high); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sr-acct-identity { min-width: 0; font-size: 12.5px; color: var(--text-medium); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sr-acct .id-verified { color: var(--green); font-weight: 700; font-size: 11px; }
+.sr-acct .sr-val { color: var(--sky); flex: 0 0 auto; }
+
+/* ============ SEARCH ============ */
+.search {
+  display: flex; align-items: center; gap: 10px;
+  height: 40px; padding: 0 14px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 9999px; transition: border-color 160ms, background 160ms;
+}
+.search:focus-within { border-color: var(--sky); background: color-mix(in srgb, var(--panel) 60%, transparent); }
+.search svg { width: 15px; height: 15px; color: var(--text-medium); flex-shrink: 0; }
+.search input {
+  all: unset; flex: 1; min-width: 0; text-align: left;
+  font-family: 'Geist'; font-size: 13px; color: var(--text-high);
+}
+.search input::placeholder { color: var(--text-low); }
+.search .hint { font-family: 'GeistMono'; font-size: 10px; color: var(--text-lowest); text-transform: uppercase; letter-spacing: 0.08em; }
+.kbd-slash { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: var(--text-medium); font-family: 'GeistMono'; font-size: 11px; line-height: 1; }
+@media (max-width: 768px) { .kbd-slash { display: none; } }
+
+/* Shared-element morph between the start page's hero search and the topbar
+   search when a navigation crosses the "/" boundary (see shouldMorphSearch in
+   router.tsx) — every viewport; reduced motion keeps the instant swap. The two
+   bars never coexist, so they can share one view-transition-name. */
+#heroSearch, .topbar-search .search { view-transition-name: searchbar; }
+::view-transition-group(searchbar) { animation-duration: 320ms; animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1); }
+/* Stretch both snapshots to the morphing group box — the bars' aspect ratios
+   differ (760×60 vs ~300×40), and the UA default (width 100%, height auto)
+   would let the taller snapshot poke out mid-flight. */
+::view-transition-old(searchbar), ::view-transition-new(searchbar) { width: 100%; height: 100%; }
+
+/* ============ VIEW / PAGE ============ */
+#view { padding: 32px 0 80px; min-height: 60vh; }
+/* Subtle micro-motion (all killed by the prefers-reduced-motion block):
+   page content rises in on navigation (pages remount per route; query-only
+   changes like tab switches keep the instance, so they don't replay it). */
+#view .wrap { animation: pageIn 240ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+@keyframes pageIn { from { opacity: 0; transform: translateY(6px); } }
+/* Overlays ease in instead of popping. */
+.search-results, .hovercard { animation: dropIn 140ms ease-out; }
+.apx-tip, .hdx-tip { animation: tipIn 120ms ease-out; }
+@keyframes dropIn { from { opacity: 0; transform: translateY(-4px); } }
+@keyframes tipIn { from { opacity: 0; } }
+/* Tactile press feedback on tappable pills/buttons (matters most on touch).
+   Elements with their own transition lists get `transform` appended in place —
+   transitions aren't additive, a shared rule here would clobber them. */
+.pager .btns button { transition: transform 90ms ease; }
+.bal-chip:active, .tabs button:active, .nav-trigger:active, .nav-link:active, .pager .btns button:active, .activity-chip:active, .exp-btn:active { transform: scale(0.96); }
+.page-head { margin-bottom: 24px; }
+.crumbs { display: flex; align-items: center; gap: 8px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-bottom: 14px; text-transform: uppercase; letter-spacing: 0.08em; }
+.crumbs a:hover { color: var(--accent); }
+.crumbs .sep { color: var(--text-lowest); }
+.page-title { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 34px; letter-spacing: 0; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; row-gap: 2px; }
+.page-title .sub { font-family: 'GeistMono'; font-size: 13px; color: var(--text-medium); font-weight: 400; letter-spacing: 0; }
+
+/* ============ DASHBOARD HERO (search-first) ============ */
+.hero { padding: 40px 0 36px; text-align: center; border-bottom: 1px solid var(--separator); margin-bottom: 32px; }
+.hero h1 { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 56px; line-height: 1.02; letter-spacing: 0; margin-bottom: 8px; }
+@media (max-width: 720px) { .hero h1 { font-size: 38px; } }
+.hero h1 em { font-style: italic; font-weight: 400; color: var(--accent); }
+.hero p { color: var(--text-medium); font-size: 15px; margin-bottom: 26px; }
+.hero .search { max-width: 720px; margin: 0 auto; height: 52px; padding: 0 20px; border-radius: 16px; }
+.hero .search input { font-size: 15px; }
+.hero .search svg { width: 18px; height: 18px; }
+.hero .quick { display: flex; gap: 8px; justify-content: center; margin-top: 16px; flex-wrap: wrap; }
+.hero .quick span { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.hero .quick a { font-family: 'GeistMono'; font-size: 11px; color: var(--sky); padding: 3px 9px; border-radius: 9999px; background: var(--sky-soft); }
+.hero .quick a:hover { color: var(--text-high); }
+
+/* search-first variant: bigger search, breathing room, slim ribbon */
+.hero-search { padding: 64px 0 28px; }
+.hero-kicker { display: inline-flex; align-items: center; gap: 8px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-low); margin-bottom: 18px; }
+.hero-kicker .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 1.8s ease-in-out infinite; }
+.hero-search h1 { margin-bottom: 24px; }
+.search.xl { max-width: 760px; margin: 0 auto; height: 60px; padding: 0 22px; border-radius: 18px; }
+.search.xl input { font-size: 16px; }
+.search.xl svg { width: 20px; height: 20px; }
+.search.xl .hint { font-size: 12px; }
+
+/* slim stat ribbon (replaces dense cards) */
+.ribbon { display: inline-flex; align-items: center; gap: 0; margin-top: 26px; padding: 12px 8px; flex-wrap: wrap; justify-content: center; }
+.ribbon .cell { display: inline-flex; flex-direction: column; gap: 3px; padding: 0 20px; align-items: center; }
+.ribbon .cell .k { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
+.ribbon .cell .v { font-family: 'GeistMono'; font-size: 16px; font-weight: 600; color: var(--text-high); }
+.ribbon .rs { width: 1px; height: 26px; background: var(--separator); }
+.ribbon.standalone { display: flex; justify-content: flex-start; border: 1px solid var(--separator); border-radius: 14px; background: var(--bg-elev); margin: 0 0 24px; padding: 14px 8px; }
+.ribbon.standalone .cell { align-items: flex-start; }
+@media (max-width: 620px){ .ribbon .rs { display: none; } .ribbon .cell { padding: 8px 14px; } }
+
+/* ============ TWO-COLUMN PANELS ============ */
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 920px){ .cols { grid-template-columns: 1fr; } }
+.panel { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 18px; overflow: hidden; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--separator); }
+.panel-head .t { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 17px; letter-spacing: 0; }
+.panel-head a { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+.panel-head a:hover { color: var(--accent); }
+
+/* ============ TABLE ============ */
+.panel:has(> .tbl) { overflow-x: auto; }
+.tbl { width: 100%; min-width: 760px; border-collapse: collapse; }
+.tbl thead th {
+  font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--text-low); font-weight: 500; text-align: left;
+  padding: 11px 16px; border-bottom: 1px solid var(--separator); white-space: nowrap;
+}
+.tbl thead th.r { text-align: right; }
+.tbl tbody td { padding: 12px 16px; border-bottom: 1px solid var(--separator); font-size: 13px; vertical-align: middle; }
+.tbl tbody tr:last-child td { border-bottom: 0; }
+.tbl tbody tr { transition: background 120ms; }
+.tbl tbody tr.clickable { cursor: pointer; }
+.tbl tbody tr.clickable:hover { background: var(--panel-hover); }
+/* Low-/zero-value Activity is de-emphasised so high-value rows stand out;
+   hovering restores full opacity for readability. */
+.tbl tbody tr.dim { opacity: .5; transition: opacity 120ms, background 120ms; }
+.tbl tbody tr.dim:hover { opacity: 1; }
+.tbl td.r { text-align: right; }
+.tbl td.mono { font-family: 'GeistMono'; }
+.accounts-tbl { min-width: 1180px; }
+
+/* compact dashboard list rows */
+.mini-row { display: flex; align-items: center; gap: 12px; padding: 11px 18px; border-bottom: 1px solid var(--separator); cursor: pointer; transition: background 120ms; }
+.mini-row:last-child { border-bottom: 0; }
+.mini-row:hover { background: var(--panel-hover); }
+.mini-row .box {
+  width: 38px; height: 38px; border-radius: 11px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent);
+  font-family: 'GeistMono'; font-size: 11px; font-weight: 600;
+}
+.mini-row .box.sky { background: var(--sky-soft); color: var(--sky); }
+.mini-row .main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mini-row .main .l1 { font-family: 'GeistMono'; font-size: 13px; font-weight: 500; color: var(--text-high); }
+.mini-row .main .l1 a { color: var(--sky); }
+.mini-row .main .l2 { font-size: 11px; color: var(--text-low); font-family: 'GeistMono'; }
+.mini-row .right { text-align: right; display: flex; flex-direction: column; gap: 2px; flex-shrink: 0; }
+.mini-row .right .r1 { font-family: 'GeistMono'; font-size: 12px; color: var(--text-medium); }
+.mini-row .right .r2 { font-size: 11px; color: var(--text-low); font-family: 'GeistMono'; }
+
+/* ============ ATOMS ============ */
+.hash { font-family: 'GeistMono'; color: var(--sky); }
+.hash:hover { text-decoration: underline; text-underline-offset: 2px; }
+.muted { color: var(--text-low); }
+/* Global utility: `mono` means GeistMono wherever it appears. Without this,
+   spans marked mono outside the scoped rules (td.mono, .dd.mono, …) silently
+   rendered in the sans font — e.g. placeholder dashes and flow amounts. */
+.mono { font-family: 'GeistMono'; }
+.num { font-family: 'GeistMono'; }
+
+/* asset list row (preis-style) */
+.asset-row { display: flex; align-items: center; gap: 12px; }
+.ar-meta { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+/* weight 400: asset symbols read the same in every table (chips in flows/holders
+   are regular too); hierarchy here comes from size + the muted name line below. */
+.ar-sym { font-family: 'Geist', sans-serif; font-weight: 400; font-size: 14px; color: var(--text-high); }
+.ar-name { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.assets-tbl td { padding-top: 10px; padding-bottom: 10px; }
+.assets-tbl .ar-price { font-size: 14px; color: var(--text-high); }
+.assets-tbl .spark-cell { width: 120px; }
+.asset-active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.asset-active .ar-sym { color: var(--accent); }
+
+/* combined activity */
+.pill-badge { display: inline-block; font-family: 'GeistMono'; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; padding: 3px 9px; border-radius: 9999px; white-space: nowrap; }
+.asset-flow { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.activity-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.activity-chip { font-family: 'GeistMono'; font-size: 11px; letter-spacing: 0.04em; padding: 6px 13px; border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); color: var(--text-medium); transition: color .14s, background .14s, border-color .14s, transform 90ms ease; }
+.activity-chip:hover { color: var(--text-high); }
+.activity-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.activity-action {
+  all: unset; box-sizing: border-box; height: 29px; line-height: 27px; padding: 0 13px;
+  border: 1px solid var(--border); border-radius: 9999px; background: var(--panel);
+  font-family: 'GeistMono'; font-size: 11px; letter-spacing: 0.04em;
+  color: var(--text-medium); cursor: pointer;
+}
+.activity-action:hover, .activity-action:focus { border-color: var(--sky); color: var(--text-high); }
+
+.th-sort { cursor: pointer; user-select: none; white-space: nowrap; }
+.th-sort:hover { color: var(--text-high); }
+.th-sort.on { color: var(--accent); }
+
+/* inline row expand (extrinsics / events) */
+.exp-toggle { width: 34px; text-align: center; }
+.exp-btn { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 6px; color: var(--text-low); font-family: 'GeistMono'; font-size: 12px; transition: transform .15s, color .15s, background .15s; }
+.exp-btn:hover { color: var(--text-high); background: var(--panel-hover); }
+.exp-btn.open { transform: rotate(90deg); color: var(--accent); }
+.exp-host.open { background: var(--panel-hover); }
+.exp-row > td { padding: 0 !important; background: var(--bg); border-bottom: 1px solid var(--separator); }
+.exp { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; border-left: 2px solid var(--accent); }
+.exp-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+@media (max-width: 720px) { .exp-cols { grid-template-columns: 1fr; } }
+.exp-h { font-family: 'GeistMono'; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-low); margin-bottom: 8px; }
+.exp-kv { display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; font-family: 'GeistMono'; font-size: 12px; }
+.exp-kv .kk { color: var(--text-medium); }
+.exp-kv .vv { color: var(--text-high); word-break: break-all; }
+.exp-evs { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* hovercards */
+.hovercard { position: absolute; z-index: 300; width: min(360px, calc(100vw - 24px)); background: var(--bg-elev); border: 1px solid var(--border); border-radius: 14px; padding: 14px; box-shadow: 0 16px 40px rgba(0,0,0,0.5); font-family: 'Geist', sans-serif; pointer-events: auto; }
+/* The call renders as a pill on its own full-width line; it never wraps, and an
+   over-long name (e.g. OmnipoolLiquidityMining.add_liquidity_and_join_farms) is
+   ellipsised inside the pill (full name on title-hover) rather than overflowing. */
+.hovercard .hc-call { padding: 2px 0 8px; }
+.hovercard .hc-call .call { display: inline-block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hovercard[hidden] { display: none; }
+.hovercard .hc-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+.hovercard .hc-emoji { width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 16px; background: var(--panel); border: 1px solid var(--border); }
+.hovercard .hc-title { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 16px; }
+.hovercard .hc-sub { font-size: 11px; color: var(--text-medium); }
+.hovercard .hc-identity { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; color: var(--green); margin-bottom: 10px; }
+.hovercard .hc-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-medium); padding: 4px 0; }
+.hovercard .hc-row .mono { font-family: 'GeistMono'; color: var(--text-high); }
+.hovercard .hc-route { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--separator); display: flex; flex-direction: column; gap: 7px; }
+.hovercard .hc-route-title { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-medium); }
+.hovercard .hc-route-title .mono { font-family: 'GeistMono'; color: var(--text-high); }
+.hovercard .hc-hop { display: grid; grid-template-columns: minmax(68px, auto) 1fr; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
+.hovercard .hc-hop .badge { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hovercard .hc-hop-assets { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
+.hovercard .hc-hop-assets .trade-leg { gap: 5px; min-width: 0; }
+.hovercard .hc-bals { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--separator); display: flex; flex-direction: column; gap: 6px; }
+.hovercard .hc-bal { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.hovercard .hc-bal .muted { margin-left: auto; }
+.hovercard .hc-go { display: inline-flex; align-items: center; gap: 4px; margin-top: 12px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--sky); }
+.hovercard .hc-go:hover { color: var(--text-high); }
+.addr-pill, .asset-chip { cursor: pointer; }
+
+/* address pill */
+.addr-wrap { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.addr-pill { display: inline-flex; align-items: center; gap: 7px; font-family: 'GeistMono'; font-size: 12.5px; white-space: nowrap; }
+.addr-pill .emoji {
+  width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 13px;
+  background: var(--panel); border: 1px solid var(--border);
+}
+.addr-pill .emoji.id { border-color: var(--border); }
+/* Custom omniwatch image icon (e.g. a Discord avatar) — fills its rounded
+   container (.emoji / .sr-emoji / .hc-emoji), with an emoji-glyph fallback span
+   revealed on load error (see showIconFallback). */
+.emoji-img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
+.icon-fallback { display: inline-flex; align-items: center; justify-content: center; }
+.acct-avatar-img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
+.addr-pill .a { color: var(--sky); }
+.addr-pill:hover .a { text-decoration: underline; text-underline-offset: 2px; }
+.addr-pill .tag { color: var(--lavender); font-weight: 500; }
+.ext-site {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--text-low);
+  font-size: 9px;
+  line-height: 1.25;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.addr-pill.ext-account:hover .ext-site, .ref-link:hover .ext-site { color: var(--text-medium); border-color: var(--text-low); }
+/* trailing tag-name chip (emoji + address THEN tag name) */
+.addr-pill .tag-chip {
+  padding: 1px 7px; border-radius: 9999px; font-size: 11px; line-height: 1.4;
+  border: 1px solid currentColor; background: color-mix(in srgb, currentColor 12%, transparent);
+}
+.addr-pill .id-verified { color: var(--green); font-weight: 700; font-size: 11px; }
+
+/* status badge */
+.badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 10.5px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
+.badge svg { width: 11px; height: 11px; }
+.badge.ok { background: var(--green-soft); color: var(--green); }
+.badge.fail { background: var(--red-soft); color: var(--red); }
+.badge.finalized { background: var(--sky-soft); color: var(--sky); }
+.badge.pending { background: var(--amber-soft); color: var(--amber); }
+
+/* call pill — pallet.method, color by pallet */
+.call { display: inline-flex; align-items: baseline; gap: 0; font-family: 'GeistMono'; font-size: 12px; padding: 3px 9px; border-radius: 7px; background: var(--panel); border: 1px solid var(--border); white-space: nowrap; }
+.call .pallet { font-weight: 600; }
+.call .dot { color: var(--text-lowest); margin: 0 1px; }
+.call .method { color: var(--text-medium); }
+.call.omnipool .pallet { color: var(--accent); }
+.call.tokens .pallet, .call.balances .pallet, .call.currencies .pallet { color: var(--sky); }
+.call.xtokens .pallet, .call.polkadotxcm .pallet, .call.xcmpqueue .pallet { color: var(--lavender); }
+.call.staking .pallet { color: var(--green); }
+.call.router .pallet { color: var(--amber); }
+.call.stableswap .pallet { color: var(--lavender-deep); }
+.call.dca .pallet { color: var(--amber); }
+.call.evm .pallet { color: var(--lavender-deep); }
+.call.moneymarket .pallet { color: var(--lavender-deep); }
+.call.system .pallet, .call.timestamp .pallet, .call.utility .pallet { color: var(--text-medium); }
+.call.multitransactionpayment .pallet { color: var(--sky); }
+
+/* asset chip */
+/* vertical-align matters only when the chip sits in flowing text (e.g. the HSM
+   "Last intervention … via aUSDC" note): an inline-flex box baseline-aligns on
+   its first item — the 20px icon — riding high next to 13px prose. */
+.asset-chip { display: inline-flex; align-items: center; gap: 6px; font-family: 'GeistMono'; font-size: 12px; vertical-align: middle; }
+.asset-logo { width: 20px; height: 20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 8px; font-weight: 600; color: #fff; flex-shrink: 0; }
+
+/* copy button */
+.copy { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 6px; color: var(--text-low); transition: color 140ms, background 140ms; vertical-align: middle; }
+.copy:hover { color: var(--text-high); background: var(--panel-hover); }
+.copy svg { width: 12px; height: 12px; }
+
+/* ============ DETAIL CARD ============ */
+.detail-card { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 18px; overflow: hidden; }
+.dl { display: grid; grid-template-columns: 200px 1fr; }
+@media (max-width: 720px){ .dl { grid-template-columns: 1fr; } }
+.dl .dt { padding: 14px 18px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); border-bottom: 1px solid var(--separator); display: flex; align-items: center; }
+.dl .dd { padding: 14px 18px; border-bottom: 1px solid var(--separator); font-size: 13px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.dl .dd.mono { font-family: 'GeistMono'; }
+.dl .dt:nth-last-child(2), .dl .dd:last-child { border-bottom: 0; }
+@media (max-width: 720px){ .dl .dt { border-bottom: 0; padding-bottom: 2px; } }
+
+.detail-header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
+.detail-header .nav-btns { display: inline-flex; gap: 4px; margin-left: auto; }
+.detail-header .nav-btns a, .detail-header .nav-btns button { width: 34px; height: 34px; border-radius: 9px; border: 1px solid var(--border); background: var(--panel); display: inline-flex; align-items: center; justify-content: center; color: var(--text-medium); }
+.detail-header .nav-btns a:hover, .detail-header .nav-btns button:hover { color: var(--text-high); background: var(--panel-hover); }
+.detail-header .nav-btns a:focus-visible, .detail-header .nav-btns button:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+.detail-header .nav-btns a svg, .detail-header .nav-btns button svg { width: 14px; height: 14px; }
+
+/* ============ TABS ============ */
+.tabs { display: flex; gap: 4px; margin: 24px 0 16px; border-bottom: 1px solid var(--separator); overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tabs button { padding: 10px 16px; font-size: 13px; font-weight: 500; color: var(--text-medium); border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color 140ms, border-color 140ms, transform 90ms ease; }
+.tabs button { flex: 0 0 auto; }
+.tabs button:hover { color: var(--text-high); }
+.tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tabs button .cnt { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-left: 6px; }
+.tabs button.active .cnt { color: var(--accent); }
+
+/* ============ JSON / params ============ */
+.kv-params { background: var(--bg); border: 1px solid var(--separator); border-radius: 12px; overflow: hidden; }
+.kv-row { display: grid; grid-template-columns: 220px 1fr; border-bottom: 1px solid var(--separator); }
+.kv-row:last-child { border-bottom: 0; }
+@media (max-width: 720px){ .kv-row { grid-template-columns: 1fr; } }
+.kv-row .kk { padding: 11px 16px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-medium); display: flex; gap: 8px; align-items: center; }
+.kv-row .kk .ty { font-size: 9px; padding: 1px 5px; border-radius: 4px; background: var(--panel); color: var(--text-low); text-transform: uppercase; letter-spacing: 0.06em; }
+.kv-row .vv { padding: 11px 16px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-high); word-break: break-all; }
+
+.json { font-family: 'GeistMono'; font-size: 12px; line-height: 1.7; background: var(--bg); border: 1px solid var(--separator); border-radius: 12px; padding: 16px 18px; overflow-x: auto; white-space: pre; color: var(--text-medium); }
+.json .key { color: var(--sky); }
+.json .str { color: var(--green); }
+.json .numb { color: var(--lavender); }
+.json .punc { color: var(--text-lowest); }
+
+/* event row */
+.event-row { display: grid; grid-template-columns: 56px 1fr; gap: 0; border-bottom: 1px solid var(--separator); }
+.event-row:last-child { border-bottom: 0; }
+.event-row .ei { padding: 14px 16px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-low); border-right: 1px solid var(--separator); }
+.event-row .ec { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+
+/* ============ ACCOUNT HEADER ============ */
+.acct-head { display: flex; align-items: center; gap: 18px; background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 18px; padding: 22px 24px; margin-bottom: 16px; flex-wrap: wrap; }
+.acct-avatar { width: 60px; height: 60px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 30px; background: var(--panel); border: 1px solid var(--border); flex-shrink: 0; }
+.acct-avatar.plain { background: var(--panel); border-color: var(--border); }
+.acct-meta { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+/* Flex row so the pure-proxy / multisig badges sit centred on the name (not
+   baseline-low) and, when they wrap below it, align to the name's left edge
+   instead of keeping a stray indent. `gap` replaces the badges' left margin. */
+.acct-meta .tag { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 22px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.acct-meta .tag .em { color: var(--lavender); font-style: italic; }
+.acct-meta .full { font-family: 'GeistMono'; font-size: 12.5px; color: var(--text-medium); word-break: break-all; display: flex; align-items: center; gap: 8px; }
+/* Header stats render as a column-flow grid so the labels of every stat share
+   row 1 and the amounts share row 2 on a common baseline — otherwise the 26px
+   value and the 14px volumes float at unrelated heights. Each .acct-bal is
+   display:contents so its children land in the shared rows. Equal-width (1fr)
+   columns give the stats an even horizontal rhythm across a fixed region on
+   the right, rather than each column hugging its own (unequal) content width. */
+.acct-stats { margin-left: auto; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; align-items: baseline; column-gap: 28px; text-align: right; width: min(520px, 58%); }
+.acct-stats .acct-bal { display: contents; }
+.acct-stats .acct-bal .lab { grid-row: 1; }
+.acct-stats .acct-bal .amt { grid-row: 2; }
+.acct-stats .acct-bal .hint { grid-row: 3; }
+.acct-bal { text-align: right; }
+.acct-bal .lab { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
+.acct-bal .amt { font-family: 'GeistMono'; font-size: 26px; font-weight: 600; }
+.acct-bal .hint { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.acct-bal.subtle .amt { font-size: 14px; font-weight: 500; color: var(--text-medium); }
+.acct-bal.subtle .lab { font-size: 9px; color: var(--text-lowest); }
+/* On phones the stats grid unwraps into the header's own flex flow
+   (display:contents): the value joins the top row, right of the identity at
+   avatar height, and the volume pair drops to ONE shared line below — the
+   ::before pseudo flex-item is a full-width line break, added only when there
+   are volumes so volume-less headers don't gain an empty (gap-padded) row. */
+@media (max-width: 720px){
+  .acct-stats { display: contents; }
+  /* zero flex-basis: the meta's hypothetical width (one-line address) would
+     otherwise overflow the row and wrap the value onto its own line */
+  .acct-head .acct-meta { flex: 1 1 0; }
+  .acct-stats .acct-bal { display: block; text-align: right; }
+  .acct-stats .acct-bal:not(.subtle) { order: 0; margin-left: auto; }
+  .acct-stats .acct-bal:not(.subtle) .amt { font-size: 20px; }
+  .acct-head:has(.acct-bal.subtle)::before { content: ''; order: 1; flex-basis: 100%; }
+  .acct-stats .acct-bal.subtle { order: 2; }
+  .acct-stats .acct-bal.subtle:first-of-type { margin-left: auto; }
+  .acct-stats .acct-bal.subtle .lab { display: inline; }
+  .acct-stats .acct-bal.subtle .amt { display: inline; margin-left: 6px; }
+}
+
+/* progress bar (sync etc) */
+.bar { height: 5px; background: var(--panel); border-radius: 9999px; overflow: hidden; }
+.bar .fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--lavender-deep)); }
+
+/* pagination */
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; }
+.pager .info { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.pager .btns { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
+.pager .btns button { min-width: 30px; height: 30px; padding: 0 7px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); display: inline-flex; align-items: center; justify-content: center; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); white-space: nowrap; flex-shrink: 0; }
+.pager .btns button:hover:not(:disabled) { color: var(--text-high); background: var(--panel-hover); }
+.pager .btns button.on { background: var(--accent); color: var(--accent-on); border-color: var(--accent); }
+.pager .btns button:disabled { opacity: 0.35; cursor: not-allowed; }
+.pager-jump { all: unset; box-sizing: border-box; width: 64px; height: 30px; padding: 0 10px; margin-left: 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); font-family: 'GeistMono'; font-size: 11px; color: var(--text-high); }
+.pager-jump:focus { border-color: var(--sky); }
+.pager-jump::placeholder { color: var(--text-low); }
+@media (max-width: 520px) {
+  .pager { flex-direction: column; align-items: stretch; padding: 12px 14px; }
+  .pager .btns { justify-content: flex-start; }
+  .pager-jump { margin-left: 0; }
+  /* Five wide page-number buttons + arrows + Go-to wrap into broken rows at
+     large page counts — keep only the current page; « ‹ › » and the jump box
+     cover navigation. (Window buttons carry aria-label="Page N", arrows don't.) */
+  .pager .btns button[aria-label^="Page "]:not(.on) { display: none; }
+}
+
+/* small section title */
+.sec-title { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-medium); margin: 24px 0 12px; }
+
+/* footer */
+.foot { border-top: 1px solid var(--separator); padding: 28px 0; margin-top: 40px; }
+.foot-inner { display: flex; align-items: center; gap: 16px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); flex-wrap: wrap; }
+.foot-inner .grow { flex: 1; }
+.foot-inner .v { color: var(--text-medium); }
+.foot-inner .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+/* toast */
+.toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--bg-elev2); border: 1px solid var(--border); color: var(--text-high); padding: 10px 18px; border-radius: 10px; font-size: 13px; z-index: 200; opacity: 0; transition: opacity 200ms, transform 200ms; pointer-events: none; box-shadow: 0 12px 30px rgba(0,0,0,0.4); }
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ============ EXPLORER: SPEC ADDITIONS ============ */
+
+/* identity / alias card (EVM-primary accounts) */
+.id-card { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 16px; overflow: hidden; margin-bottom: 16px; }
+.id-card-head { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); padding: 13px 18px; border-bottom: 1px solid var(--separator); }
+/* nowrap + no shrink: inside the flex .full row the badge would otherwise
+   inherit word-break: break-all and wrap letter-by-letter under pressure */
+.id-kind { font-family: 'GeistMono'; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 5px; white-space: nowrap; flex-shrink: 0; }
+.id-kind.evm { background: var(--lavender-soft); color: var(--lavender); }
+.acct-meta .full .id-kind { margin-right: 4px; }
+
+/* balance source chip */
+.src-chip { font-family: 'GeistMono'; font-size: 10px; color: var(--text-medium); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 2px 7px; white-space: nowrap; }
+
+/* proxy & multisig relations (Overview cards) */
+.dl .dd.proxy-dd, .dl .dd .proxy-rel { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.proxy-rel { padding: 2px 0; }
+
+/* Lazy behavioral relationship analysis on account overview. */
+/* Symmetric vertical margins: collapses against neighbours that bring their
+   own, and keeps clearance from flush panels (tag page's member list). */
+.close-accounts { margin-top: 16px; margin-bottom: 16px; border: 1px solid var(--separator); border-radius: 16px; background: var(--bg-elev); overflow: hidden; }
+.close-accounts > summary { display: flex; align-items: center; gap: 14px; padding: 15px 18px; cursor: pointer; list-style: none; }
+.close-accounts > summary::-webkit-details-marker { display: none; }
+.close-accounts > summary:hover { background: var(--panel-hover); }
+.close-accounts > summary:focus-visible { outline: 2px solid var(--sky); outline-offset: -2px; border-radius: 16px; }
+.close-accounts-summary-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.close-accounts-title { font-family: 'GeistMono'; font-size: 11px; font-weight: 600; color: var(--text-medium); text-transform: uppercase; letter-spacing: 0.1em; }
+.close-accounts-subtitle { font-size: 11px; color: var(--text-low); }
+.close-accounts-chevron { margin-left: auto; color: var(--text-low); font-size: 18px; transition: transform 150ms var(--ease-standard); }
+.close-accounts[open] .close-accounts-chevron { transform: rotate(180deg); }
+.close-accounts-body { padding: 16px 18px 18px; border-top: 1px solid var(--separator); }
+.close-accounts-context { margin-bottom: 10px; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); text-transform: uppercase; letter-spacing: 0.06em; }
+.close-accounts-list, .close-account-reasons { padding: 0; list-style: none; }
+.close-account-match { padding: 13px 0; border-bottom: 1px solid var(--separator); }
+.close-account-match:first-child { padding-top: 4px; }
+.close-account-match:last-child { border-bottom: 0; }
+.close-account-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.close-account-confidence { display: inline-flex; align-items: center; padding: 3px 7px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; }
+.close-account-confidence.strong { color: var(--green); background: var(--green-soft); }
+.close-account-confidence.moderate { color: var(--amber); background: var(--amber-soft); }
+.close-account-seen { margin-left: auto; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); white-space: nowrap; }
+.close-account-reasons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.close-account-reasons li { padding: 4px 8px; border: 1px solid var(--separator); border-radius: 7px; background: var(--panel); color: var(--text-medium); font-size: 11px; }
+.close-accounts-disclaimer { margin-top: 12px; padding: 10px 12px; border-left: 2px solid var(--amber); border-radius: 0 8px 8px 0; background: var(--amber-soft); color: var(--text-medium); font-size: 11px; }
+.close-accounts-state { display: flex; min-height: 96px; flex-direction: column; align-items: flex-start; justify-content: center; gap: 4px; color: var(--text-medium); font-size: 12px; }
+.close-accounts-state strong { color: var(--text-high); font-size: 13px; }
+.close-accounts-retry { margin-top: 8px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--sky); font-family: 'GeistMono'; font-size: 11px; }
+.close-accounts-retry:hover { background: var(--panel-hover); color: var(--text-high); }
+.close-accounts-loading { display: grid; gap: 8px; color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; }
+.close-account-skeleton { display: flex; justify-content: space-between; gap: 20px; padding: 9px 0; }
+.close-account-skeleton span { width: 160px; height: 11px; border-radius: 6px; background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%); background-size: 400% 100%; animation: sk 1.4s ease infinite; }
+.close-account-skeleton span:last-child { width: 240px; }
+@media (max-width: 720px) {
+  .close-accounts > summary, .close-accounts-body { padding-left: 14px; padding-right: 14px; }
+  .close-account-head { align-items: flex-start; flex-wrap: wrap; }
+  .close-account-seen { width: 100%; margin-left: 0; }
+  .close-account-reasons { flex-direction: column; }
+  .close-account-skeleton span:last-child { width: 45%; }
+}
+
+/* money market card */
+.mm-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.mm-title { font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; }
+/* inline-flex + centered items: a market-logo icon inside the note (GIGAHDX)
+   would otherwise sit on the text baseline and push the whole note upward
+   relative to the primary market's plain-text note. */
+.mm-title-note { display: inline-flex; align-items: center; gap: 4px; color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+.mm-defisim-link { margin-left: auto; text-transform: none; letter-spacing: 0; }
+.mm-card { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 16px; padding: 18px 20px; margin-bottom: 8px; }
+.mm-summary { display: flex; flex-wrap: wrap; gap: 28px; padding-bottom: 16px; border-bottom: 1px solid var(--separator); }
+.mm-stat { display: flex; flex-direction: column; gap: 4px; }
+.mm-stat .k { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
+.mm-stat .v { font-family: 'GeistMono'; font-size: 18px; font-weight: 600; }
+.hf { font-family: 'GeistMono'; font-weight: 600; padding: 1px 8px; border-radius: 6px; }
+.hf.hf-ok { background: var(--green-soft); color: var(--green); }
+.hf.hf-warn { background: var(--amber-soft); color: var(--amber); }
+.hf.hf-bad { background: var(--red-soft); color: var(--red); }
+/* trade detail — route flow */
+.trade-route { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.trade-hop { display: inline-flex; align-items: center; gap: 10px; }
+.hop-arrow { display: inline-flex; flex-direction: column; align-items: center; gap: 1px; color: var(--text-low); }
+.hop-arrow svg { width: 26px; height: 12px; }
+.hop-pool { font-family: 'GeistMono'; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-medium); white-space: nowrap; }
+
+/* two-sided health badge: color-coded factor | DefiSim, the whole thing one link */
+.hf-badge { display: inline-flex; align-items: stretch; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; font-family: 'GeistMono'; font-size: 11px; line-height: 1; white-space: nowrap; vertical-align: middle; }
+.hf-badge .hfv { padding: 5px 8px; font-weight: 600; color: var(--text-medium); }
+.hf-badge .hfv.hf-ok { background: var(--green-soft); color: var(--green); }
+.hf-badge .hfv.hf-warn { background: var(--amber-soft); color: var(--amber); }
+.hf-badge .hfv.hf-bad { background: var(--red-soft); color: var(--red); }
+.hf-badge .sim { padding: 5px 8px; border-left: 1px solid var(--border); color: var(--text-medium); background: var(--panel); }
+.hf-badge:hover .sim { color: var(--text-high); }
+.mm-bar { padding: 16px 0; border-bottom: 1px solid var(--separator); }
+.mm-bar-track { position: relative; height: 8px; background: var(--panel); border-radius: 9999px; overflow: hidden; }
+.mm-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--amber)); border-radius: 9999px; }
+.mm-bar-liq { position: absolute; top: -2px; bottom: -2px; left: 100%; width: 2px; background: var(--red); transform: translateX(-1px); }
+.mm-bar-lab { display: flex; justify-content: space-between; margin-top: 8px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); }
+.mm-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding-top: 16px; }
+@media (max-width: 720px){ .mm-cols { grid-template-columns: 1fr; } }
+.mm-col-head { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); margin-bottom: 10px; }
+.mm-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--separator); font-size: 12px; }
+.mm-row:last-child { border-bottom: 0; }
+.mm-row .mono { font-family: 'GeistMono'; }
+.mm-row .asset-chip { min-width: 86px; }
+.mm-row > .mono:nth-child(2) { margin-left: auto; }
+.mm-collateral-badge { font-size: 9px; }
+.mm-empty { color: var(--text-low); font-family: 'GeistMono'; font-size: 12px; padding: 8px 0; }
+
+/* Supplemental GIGAHDX credit line: compact until the user asks for detail. */
+.mm-secondary { margin-bottom: 8px; border: 1px solid var(--separator); border-radius: 14px; background: color-mix(in srgb, var(--bg-elev) 72%, var(--lavender-soft)); overflow: hidden; }
+.mm-secondary > summary { display: grid; grid-template-columns: minmax(190px, 1fr) auto 18px; gap: 18px; align-items: center; padding: 15px 18px; cursor: pointer; list-style: none; }
+.mm-secondary > summary::-webkit-details-marker { display: none; }
+.mm-secondary > summary:hover { background: var(--panel-hover); }
+.mm-secondary > summary:focus-visible { outline: 2px solid var(--sky); outline-offset: -2px; border-radius: 14px; }
+.mm-secondary-identity { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.mm-secondary-title { font-family: 'GeistMono'; font-size: 12px; font-weight: 600; color: var(--text-high); }
+.mm-secondary-subtitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-low); }
+.mm-secondary-stats { display: flex; align-items: center; gap: 22px; }
+.mm-secondary-stat { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.mm-secondary-stat > span { font-family: 'GeistMono'; font-size: 9px; color: var(--text-low); text-transform: uppercase; letter-spacing: 0.06em; }
+.mm-secondary-stat > strong { font-family: 'GeistMono'; font-size: 12px; font-weight: 500; white-space: nowrap; }
+.mm-secondary-stat > .hf { font-size: 11px; }
+.mm-secondary-toggle { color: var(--text-low); font-size: 18px; transition: transform 150ms var(--ease-standard); }
+.mm-secondary[open] .mm-secondary-toggle { transform: rotate(180deg); }
+.mm-secondary-body { padding: 16px 18px 18px; border-top: 1px solid var(--separator); }
+.mm-secondary-explainer { max-width: 760px; color: var(--text-medium); font-size: 12px; }
+.mm-secondary-available { display: flex; justify-content: space-between; gap: 12px; max-width: 320px; margin-top: 14px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.mm-secondary-available strong { color: var(--text-high); font-weight: 500; }
+.mm-secondary-debt { color: var(--lavender); }
+.mm-activity-market { display: inline-flex; align-items: center; border: 1px solid color-mix(in srgb, var(--lavender) 30%, transparent); border-radius: 9999px; background: var(--lavender-soft); color: var(--lavender); font-family: 'GeistMono'; font-size: 9px; font-weight: 600; line-height: 1; letter-spacing: 0.04em; white-space: nowrap; }
+/* Top-holding token icons in the Holdings column (accounts list) and hover cards. */
+.holdings-cell { vertical-align: middle; white-space: nowrap; }
+.token-icons { display: inline-flex; align-items: center; gap: 3px; }
+.token-icons-item { display: inline-flex; line-height: 0; }
+.activity-badge-group { display: inline-flex; align-items: center; gap: 5px; }
+.mm-activity-market { padding: 4px 6px; }
+@media (max-width: 720px) {
+  .mm-secondary > summary { grid-template-columns: 1fr 18px; gap: 10px; }
+  .mm-secondary-stats { grid-column: 1 / -1; grid-row: 2; justify-content: space-between; gap: 12px; }
+  .mm-secondary-stat { align-items: flex-start; }
+  .mm-secondary-toggle { grid-column: 2; grid-row: 1; }
+  .mm-secondary-subtitle { white-space: normal; }
+  .mm-defisim-link { margin-left: 0; }
+}
+
+/* cross-chain chips */
+.chain-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 18px; padding: 0 6px; border-radius: 6px; font-family: 'GeistMono'; font-size: 9px; font-weight: 600; color: #fff; letter-spacing: 0.04em; flex-shrink: 0; }
+.dest { display: inline-flex; align-items: center; gap: 7px; }
+.trade-leg { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.trade-leg .mono { color: var(--text-high); }
+.ext-link { font-family: 'GeistMono'; font-size: 11px; color: var(--sky); padding: 2px 7px; border-radius: 6px; background: var(--sky-soft); margin-left: 4px; white-space: nowrap; }
+.ext-link:hover { color: var(--text-high); }
+.ref-link { display: inline-flex; align-items: center; gap: 7px; font-family: 'GeistMono'; font-size: 12px; color: var(--sky); white-space: nowrap; }
+.ref-link:hover .mono { text-decoration: underline; text-underline-offset: 2px; }
+
+/* operation trace */
+.trace { display: flex; flex-direction: column; gap: 0; }
+.trace-step { display: grid; grid-template-columns: 40px 1fr; gap: 12px; position: relative; }
+.trace-step .tnode { display: flex; justify-content: center; position: relative; }
+.trace-step .tnode .tn { width: 24px; height: 24px; border-radius: 50%; background: var(--lavender-soft); color: var(--lavender); border: 1px solid var(--lavender-deep); display: inline-flex; align-items: center; justify-content: center; font-family: 'GeistMono'; font-size: 11px; z-index: 1; }
+.trace-step:not(:last-child) .tnode::after { content: ''; position: absolute; top: 24px; bottom: -12px; left: 50%; width: 1px; background: var(--separator); transform: translateX(-50%); }
+.trace-step .tbody { display: flex; align-items: center; gap: 10px; padding: 4px 0 20px; }
+.trace-step .tdetail { font-family: 'GeistMono'; font-size: 12px; color: var(--text-medium); }
+
+/* start page (search only) — centered */
+.hero-search.start { border-bottom: 0; padding: 14vh 0 0; margin-bottom: 0; min-height: 70vh; }
+.hero-search.start h1 { font-size: 68px; }
+@media (max-width: 720px) { .hero-search.start h1 { font-size: 42px; } }
+
+/* Native <select> popups follow the control's color-scheme, which `all: unset`
+   resets — restore the active theme's scheme and give options explicit surface
+   colors so the dropdown list is readable in dark mode. */
+:root[data-theme="dark"] .filters select, :root[data-theme="dark"] .activity-action { color-scheme: dark; }
+:root[data-theme="light"] .filters select, :root[data-theme="light"] .activity-action { color-scheme: light; }
+.filters select option, .activity-action option { background: var(--bg-elev); color: var(--text-high); }
+
+/* Mobile-only sort control for lists whose sortable column headers vanish in
+   the stacked-card view (accounts). Same look as the filter selects. */
+.mobile-sort { display: none; }
+@media (max-width: 720px) {
+  .mobile-sort { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .mobile-sort label { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+  .mobile-sort select {
+    all: unset; box-sizing: border-box; height: 34px; line-height: 32px; padding: 0 12px;
+    border: 1px solid var(--border); border-radius: 9999px; background: var(--panel);
+    font-family: 'GeistMono'; font-size: 12px; color: var(--text-high); cursor: pointer;
+  }
+  :root[data-theme="dark"] .mobile-sort select { color-scheme: dark; }
+  :root[data-theme="light"] .mobile-sort select { color-scheme: light; }
+  .mobile-sort select option { background: var(--bg-elev); color: var(--text-high); }
+}
+
+/* list filters */
+.filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+.filters .combo-input, .filters select, .filters input {
+  all: unset; box-sizing: border-box; height: 34px; line-height: 32px; padding: 0 12px;
+  border: 1px solid var(--border); border-radius: 9999px; background: var(--panel);
+  font-family: 'GeistMono'; font-size: 12px; color: var(--text-high); cursor: pointer;
+}
+.filters input { cursor: text; }
+.filters input[type="number"] { width: 92px; }
+.filters input[type="date"] { color: var(--text-medium); }
+.filters input::placeholder { color: var(--text-low); }
+.filters select:hover, .filters input:hover { border-color: var(--sky); }
+.filters select:focus, .filters input:focus { border-color: var(--sky); background: var(--panel-hover); }
+.filters .fclear {
+  height: 34px; padding: 0 14px; border-radius: 9999px; border: 1px solid var(--border);
+  background: var(--panel); cursor: pointer;
+  font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-medium);
+}
+.filters .fclear:hover { color: var(--text-high); background: var(--panel-hover); }
+.filters .fcount { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-left: auto; }
+
+/* highlight last-3 chars of any address */
+.last3 { color: var(--accent); }
+/* ShortAddr full: desktop shows the whole address, phones the middle-ellipsis
+   form — long EVM/SS58 strings otherwise wrap detail headers to 2–3 lines. */
+.addr-short { display: none; }
+@media (max-width: 720px) {
+  .addr-full { display: none; }
+  .addr-short { display: inline; }
+}
+
+/* account portfolio chart */
+.pf-card { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 16px; padding: 18px 20px; margin-bottom: 16px; }
+.pf-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 12px; }
+.pf-head .pf-now { font-family: 'GeistMono'; font-size: 26px; font-weight: 600; }
+.pf-head .pf-chg { font-family: 'GeistMono'; font-size: 13px; }
+.pf-chart { width: 100%; height: 180px; display: block; }
+.apx-chart { width: 100%; height: 220px; display: block; margin-top: 8px; overflow: visible; }
+/* touch-action pan-y: horizontal touch drags scrub the crosshair (pointer events
+   keep firing) while vertical swipes still scroll the page. */
+.apx-wrap { position: relative; margin-top: 8px; touch-action: pan-y; }
+.apx-wrap .apx-chart { margin-top: 0; }
+.apx-cross { position: absolute; inset: 0; pointer-events: none; }
+.apx-vline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--text-medium); opacity: .55; transform: translateX(-.5px); }
+.apx-dot { position: absolute; width: 9px; height: 9px; border-radius: 50%; background: var(--text-high); border: 2px solid var(--bg-elev); transform: translate(-50%, -50%); }
+.apx-tip { position: absolute; top: 4px; transform: translateX(-50%); display: flex; gap: 8px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-family: 'GeistMono'; font-size: 11px; white-space: nowrap; pointer-events: none; box-shadow: 0 8px 20px rgba(0,0,0,.4); z-index: 4; }
+.apx-tip .t-d { color: var(--text-low); }
+.apx-tip .t-p { color: var(--text-high); font-weight: 600; }
+.apx-tip .t-e { color: var(--lavender); }
+.ema-now { font-family: 'GeistMono'; font-size: 12px; color: var(--lavender); font-weight: 500; margin-left: 8px; }
+.ema-tag { color: var(--lavender); margin-left: 8px; }
+.pf-head-asset { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.perf-row { display: flex; gap: 22px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
+/* Portfolio-value header (account/tag): push the 24H/1W/1M/1Y items to the right
+   edge, matching the asset price-history header (.pf-head-asset). */
+.pf-head .perf-row { margin-left: auto; }
+.perf { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; min-width: 52px; }
+@media (max-width: 520px) {
+  .pf-head-asset { align-items: flex-start; }
+  .perf-row { gap: 10px 14px; max-width: 100%; }
+}
+.bt-chart { width: 100%; height: auto; display: block; margin-top: 8px; }
+.day-chart { width: 100%; height: auto; display: block; }
+.day-chart .ax-lbl { font-family: 'GeistMono'; font-size: 9px; }
+.day-bar { fill: var(--bar, var(--accent)); opacity: 0.4; cursor: pointer; transition: opacity 0.12s; }
+.day-bar:hover { opacity: 0.78; }
+.day-bar.on { opacity: 1; }
+/* Loading placeholder for the responsive .day-chart charts: same box (width:100%)
+   with the svg's viewBox aspect ratio (set inline per chart), so the card height
+   matches the loaded chart exactly at any width — no layout jump when data resolves
+   (e.g. the daily query refetching on a tab switch). */
+.day-chart-sk { display: flex; align-items: flex-end; gap: 3px; padding-top: 8px; box-sizing: border-box; }
+.day-sk-bar {
+  flex: 1 1 0; min-width: 2px; border-radius: 3px 3px 1px 1px; opacity: 0.7;
+  background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%);
+  background-size: 400% 100%; animation: sk 1.4s ease infinite;
+}
+
+/* per-asset balance history widget */
+.bal-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.bal-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px 5px 6px; border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); cursor: pointer; font-family: 'GeistMono'; font-size: 12px; color: var(--text-medium); transition: border-color 140ms, color 140ms, background 140ms, transform 90ms ease; }
+.bal-chip:hover { color: var(--text-high); }
+.bal-chip.on { border-color: var(--sky); background: var(--sky-soft); color: var(--text-high); }
+.bal-chart { width: 100%; height: auto; display: block; margin-top: 8px; overflow: visible; }
+.bal-mk { cursor: pointer; }
+.bal-mk circle { transition: r 120ms; }
+.bal-mk:hover circle { r: 6.5; }
+.bal-xaxis { display: flex; justify-content: space-between; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); margin-top: 4px; }
+.bal-legend { display: flex; gap: 16px; align-items: center; margin-top: 14px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); flex-wrap: wrap; }
+.bal-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+
+.dca-tag { font-family: 'GeistMono'; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 6px; border-radius: 5px; background: var(--amber-soft); color: var(--amber); margin-left: 2px; }
+
+.perf .pk { font-family: 'GeistMono'; font-size: 10px; letter-spacing: 0.1em; color: var(--text-low); text-transform: uppercase; }
+.perf .pv { font-family: 'GeistMono'; font-size: 15px; font-weight: 600; }
+.identity-badge { display: inline-flex; align-items: center; gap: 5px; font-family: 'Geist'; font-size: 13px; font-weight: 500; color: var(--green); }
+.identity-badge svg { width: 12px; height: 12px; }
+
+/* portfolio sparkline */
+.spark { display: inline-block; vertical-align: middle; }
+
+/* searchable token combobox */
+.combo { position: relative; }
+.combo-input { width: 150px; cursor: text; }
+.combo-input::placeholder { color: var(--text-low); }
+.combo-pop { position: absolute; top: 40px; left: 0; z-index: 30; min-width: 220px; max-height: 280px; overflow-y: auto; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px; padding: 6px; box-shadow: 0 14px 34px rgba(0,0,0,0.45); }
+.combo-opt { padding: 8px 10px; border-radius: 8px; font-family: 'GeistMono'; font-size: 12px; cursor: pointer; color: var(--text-high); white-space: nowrap; }
+.combo-opt:hover, .combo-opt.active { background: var(--panel-hover); }
+.combo-opt .muted { font-size: 11px; margin-left: 4px; }
+/* Token lookup rows: symbol, then a muted "name #id" detail so duplicate symbols
+   (e.g. the four USDCs) are distinguishable on one line. */
+.combo-opt-sub { color: var(--text-low); font-size: 11px; margin-left: 8px; }
+.combo-opt-sub::before { content: '— '; }
+.combo-empty { color: var(--text-low); cursor: default; }
+.combo-empty:hover { background: transparent; }
+
+/* utility */
+.row { display: flex; align-items: center; gap: 10px; }
+.gap6 { gap: 6px; } .gap16 { gap: 16px; }
+.mt8 { margin-top: 8px; } .mt16 { margin-top: 16px; } .mt24 { margin-top: 24px; }
+.wrap-anywhere { word-break: break-all; }
+.spacer { flex: 1; }
+
+/* utility */
+
+/* ============================================================
+   explorer-ui additions (loading states, label editor, buttons)
+   — not in the static design; required for the live React app
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 0ms !important; scroll-behavior: auto !important; }
+}
+.skeleton-row { height: 49px; border-bottom: 1px solid var(--separator); background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%); background-size: 400% 100%; animation: sk 1.4s ease infinite; }
+@keyframes sk { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+.sk-pill,
+.sk-avatar,
+.chart-sk-bar {
+  background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%);
+  background-size: 400% 100%;
+  animation: sk 1.4s ease infinite;
+}
+/* Table-body skeleton: real <tr>/<td> so the header + column grid stay put while
+   data loads. Each cell holds a shimmer bar of varying width. */
+.tbl tbody tr.sk-tr { cursor: default; }
+.tbl tbody tr.sk-tr:hover { background: transparent; }
+.sk-bar {
+  display: inline-block; height: 11px; min-width: 22px; border-radius: 6px; vertical-align: middle;
+  background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%);
+  background-size: 400% 100%; animation: sk 1.4s ease infinite;
+}
+.sk-pill { display: inline-block; width: 72px; height: 22px; border-radius: 9999px; vertical-align: middle; }
+.dl-skeleton .dt .sk-bar { height: 9px; min-width: 54px; }
+.dl-skeleton .dd { min-height: 49px; }
+.dl-skeleton .dd .sk-bar { height: 12px; max-width: min(680px, 70%); }
+/* Chart-card skeleton: fills the space an unresolved chart would occupy. */
+.chart-skeleton {
+  position: relative; display: flex; flex-direction: column; gap: 12px; overflow: hidden;
+  border-radius: 16px; margin-bottom: 16px; border: 1px solid var(--separator); padding: 14px 16px;
+  background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%);
+  background-size: 400% 100%; animation: sk 1.4s ease infinite;
+}
+.chart-sk-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 16px; }
+.chart-sk-now { width: 92px; height: 18px; }
+.chart-sk-metrics { display: flex; gap: 14px; margin-left: auto; }
+.chart-sk-metrics .sk-bar { width: 44px; height: 10px; }
+.chart-sk-plot { position: relative; flex: 1 1 auto; min-height: 34px; display: flex; align-items: flex-end; gap: 8px; padding-top: 10px; }
+.chart-sk-bar { flex: 1 1 0; min-width: 5px; max-width: 28px; border-radius: 5px 5px 2px 2px; opacity: .78; }
+.tabs-skeleton { align-items: center; min-height: 43px; }
+.tabs-skeleton .sk-bar { height: 12px; border-radius: 9999px; margin: 0 12px 0 4px; }
+.acct-head-skeleton { align-items: center; }
+.sk-avatar { width: 60px; height: 60px; border-radius: 50%; flex-shrink: 0; }
+.acct-head-skeleton .acct-meta { flex: 1 1 0; max-width: 620px; min-width: 0; }
+.acct-head-skeleton .acct-meta .sk-bar { max-width: 100%; }
+.acct-head-skeleton .sk-name { width: 190px; height: 20px; }
+.acct-head-skeleton .sk-address { width: min(560px, 100%); height: 12px; }
+.acct-head-skeleton .sk-hint { width: 240px; height: 10px; }
+.acct-head-skeleton .acct-bal { margin-left: auto; min-width: 180px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.acct-head-skeleton .sk-bal-label { width: 54px; height: 9px; }
+.acct-head-skeleton .sk-bal-value { width: 132px; height: 24px; }
+.sec-title-skeleton .sk-bar { width: 104px; height: 10px; }
+.activity-chips-skeleton .sk-bar { height: 29px; border-radius: 9999px; }
+.exp-skeleton .exp-h .sk-bar { width: 86px; height: 9px; }
+.exp-kv-skeleton { grid-template-columns: 120px 1fr; }
+.exp-kv-skeleton .sk-bar { height: 11px; }
+.exp-evs-skeleton .sk-pill { height: 24px; }
+.exp-link-skeleton { width: 128px; height: 11px; }
+@media (max-width: 720px) {
+  /* On stacked mobile cards, one shimmer bar per row reads cleaner than N. */
+  .tbl tbody tr.sk-tr td:not(:first-child) { display: none; }
+  .tbl tbody tr.sk-tr td:first-child { padding: 12px 14px; }
+  .chart-sk-metrics { display: none; }
+  .acct-head-skeleton .acct-bal { margin-left: 0; align-items: flex-start; min-width: 0; width: 100%; }
+  .dl-skeleton .dd .sk-bar { max-width: 86%; }
+}
+.empty-state { padding: 48px 16px; text-align: center; color: var(--text-low); font-size: 13px; font-family: 'GeistMono'; }
+.btn { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; background: var(--panel); border: 1px solid var(--border); color: var(--text-medium); transition: background 140ms, color 140ms; }
+.btn:hover { color: var(--text-high); background: var(--panel-hover); }
+.btn.sm { height: 26px; padding: 0 10px; font-size: 10px; }
+.btn.primary { background: var(--accent); color: var(--accent-on); border-color: transparent; }
+.btn.primary:hover { filter: brightness(1.06); }
+.btn.danger { color: var(--red); }
+.dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); animation: ov 0.18s ease; z-index: 100; }
+@keyframes ov { from { opacity: 0; } to { opacity: 1; } }
+.dialog { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(560px, 94vw); max-height: 88vh; overflow-y: auto; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 18px; z-index: 101; box-shadow: 0 24px 60px rgba(0,0,0,0.45); }
+.dialog-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; border-bottom: 1px solid var(--separator); }
+.dialog-head h2 { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 19px; }
+.dialog-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 16px; }
+.dialog-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 20px; border-top: 1px solid var(--separator); }
+.field { display: flex; flex-direction: column; gap: 7px; }
+.field label { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+.field input, .field textarea { all: unset; box-sizing: border-box; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text-high); padding: 10px 12px; font-family: 'Geist'; font-size: 13px; }
+.field input:focus, .field textarea:focus { border-color: var(--sky); }
+.field textarea { resize: vertical; min-height: 84px; font-family: 'GeistMono'; font-size: 12px; line-height: 1.6; }
+.member-check { font-family: 'GeistMono'; font-size: 11px; margin-top: 6px; }
+.swatches { display: flex; gap: 8px; flex-wrap: wrap; }
+.swatch { width: 26px; height: 26px; border-radius: 8px; border: 2px solid transparent; }
+.swatch.on { border-color: var(--text-high); }
+
+/* Live mode: briefly highlight rows that were just added so it's clear which /
+   how many arrived. Background pulses from an accent tint to transparent. */
+@keyframes rowEnter {
+  0%   { background-color: color-mix(in srgb, var(--sky) 14%, transparent); }
+  55%  { background-color: color-mix(in srgb, var(--sky) 8%, transparent); }
+  100% { background-color: transparent; }
+}
+.tbl tbody tr.row-new > td { animation: rowEnter 1.25s ease-out; }
+.tbl tbody tr.row-new > td:first-child { box-shadow: inset 2px 0 0 0 var(--sky); animation: rowEnter 1.25s ease-out, edgeFade 1.25s ease-out; }
+@keyframes edgeFade { 0% { box-shadow: inset 2px 0 0 0 var(--sky); } 100% { box-shadow: inset 2px 0 0 0 transparent; } }
+
+/* Asset search result: symbol then a muted descriptive name (e.g. DOT · Polkadot). */
+.sr-desc { color: var(--text-low); margin-left: 6px; font-size: 11.5px; }
+
+/* HDX dashboard */
+.hdx-chart-wrap { position: relative; }
+.hdx-tip { position: absolute; transform: translateX(-50%); display: flex; flex-direction: column; gap: 3px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-family: 'GeistMono'; font-size: 11px; white-space: nowrap; pointer-events: none; box-shadow: 0 8px 20px rgba(0,0,0,.4); z-index: 4; }
+.hdx-tip .t-d { color: var(--text-low); }
+.hdx-tip .t-row { display: flex; align-items: center; gap: 6px; color: var(--text-medium); }
+.hdx-tip .t-row i { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.hdx-tip .t-row .tv { margin-left: auto; padding-left: 12px; color: var(--text-high); font-weight: 600; }
+.hdx-ax { font-family: 'GeistMono'; font-size: 10px; fill: var(--text-low); }
+.ribbon .cell .s { font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); }
+.hdx-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 14px; }
+/* HOLLAR liquidity pools: cap at 4 per row. The min track is a quarter of the
+   container (minus its share of the 3 gaps), so a 5th never fits on desktop,
+   while the 160px floor still collapses the grid to fewer columns on phones. */
+.pool-cards { grid-template-columns: repeat(auto-fit, minmax(max(160px, calc(25% - 8px)), 1fr)); }
+.hdx-card { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--separator); border-radius: 12px; background: var(--panel); padding: 12px 14px; min-width: 0; }
+.hdx-card .hk { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500; color: var(--text-high); }
+.hdx-card .hk i { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.hdx-card .hk .cohort-threshold { margin-left: auto; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); white-space: nowrap; }
+.hdx-card .hv { font-family: 'GeistMono'; font-size: 17px; font-weight: 600; }
+.hdx-card .hs { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.hdx-note { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-top: 12px; }
+.hdx-flow-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; align-items: stretch; margin-bottom: 16px; }
+@media (max-width: 920px) { .hdx-flow-grid { grid-template-columns: 1fr; } }
+.hdx-dca { display: flex; flex-direction: column; gap: 18px; justify-content: center; }
+.hdx-dca .mm-stat .s { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+/* movers tables sit two-up in .cols — relax the global 760px table min-width.
+   Desktop-only: below 720px the stacked-card rule (.tbl { min-width: 0 }) must win. */
+@media (min-width: 721px) { .hdx-movers .tbl { min-width: 420px; } }
+@media (max-width: 720px) { .hdx-card .hk .cohort-threshold { display: none; } }
+
+/* ---- chart reveal: line and area gently fade in on mount. Plays once (React
+   reuses the node on hover/data re-renders, so it never re-triggers).
+   Deliberately NOT the stroke-dasharray/pathLength "draw" trick: with
+   vector-effect: non-scaling-stroke and a container wider than the viewBox,
+   Chromium resolves the dash in screen space while pathLength normalizes in
+   user space — the dash comes up short and the line's tail vanishes. ---- */
+@keyframes areaIn { from { opacity: 0; } to { opacity: 1; } }
+.chart-line { animation: areaIn 0.9s var(--ease-out-soft) both; }
+.chart-area { animation: areaIn 1s ease both; }
+
+/* ---- page content settles in with a soft rise on mount / route change. The
+   staggered delays give a light top-to-bottom cascade. ---- */
+@keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.wrap > .page-head, .wrap > .sec-title, .wrap > .pf-card, .wrap > .chart-skeleton,
+.wrap > .panel, .wrap > .filters, .wrap > .activity-chips, .wrap > .detail-card,
+.wrap > .tabs, .wrap > .acct-head {
+  animation: fadeUp 0.42s var(--ease-out-soft) both;
+}
+.wrap > *:nth-child(2) { animation-delay: 45ms; }
+.wrap > *:nth-child(3) { animation-delay: 90ms; }
+.wrap > *:nth-child(4) { animation-delay: 130ms; }
+.wrap > *:nth-child(n+5) { animation-delay: 160ms; }
+
+/* ============================================================
+   MOBILE (≤720px): data tables → stacked cards
+   The wide .tbl tables set min-width:760px and scroll horizontally
+   inside their panel, so on a phone only the first 2–3 columns show
+   and the most important right-hand ones (value, result, activity)
+   are hidden behind a sideways scroll. Below 720px each row becomes a
+   self-contained card and every cell shows its column label (from the
+   td's data-label) beside the value — nothing is hidden, no h-scroll.
+   Desktop rendering is unchanged. Cells that only make sense in a grid
+   (decorative arrows, the expand toggle) carry .col-hide-mobile.
+   ============================================================ */
+@media (max-width: 720px) {
+  .panel:has(> .tbl) { overflow: hidden; }
+  .tbl, .tbl tbody, .tbl tbody tr, .tbl tbody td { display: block; }
+  .tbl { min-width: 0; width: 100%; }
+  .tbl thead { display: none; }
+  .tbl tbody tr { padding: 8px 2px; border-bottom: 1px solid var(--separator); }
+  .tbl tbody tr:last-child { border-bottom: 0; }
+  .tbl tbody td { padding: 5px 14px; border: 0; font-size: 13px; min-height: 0; }
+  .tbl tbody td.col-hide-mobile { display: none; }
+
+  /* a labelled cell: column name floats left, value stays right */
+  .tbl tbody td[data-label] { text-align: right; overflow: hidden; line-height: 1.5; }
+  .tbl tbody td[data-label]::before {
+    content: attr(data-label);
+    float: left; margin-right: 14px;
+    color: var(--text-low);
+    font-family: 'GeistMono'; font-size: 10px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    white-space: nowrap; line-height: 1.85;
+  }
+  /* first cell reads as the card's title — a little breathing room on top */
+  .tbl tbody td[data-label]:first-child { padding-top: 9px; }
+  /* asset icon+name cells align to the right edge like other values */
+  .tbl tbody td[data-label] .asset-row { justify-content: flex-end; }
+  /* let any fixed-width desktop cells (e.g. sparkline) fill the card row */
+  .tbl tbody td.spark-cell { width: auto; }
+
+  /* expanded extrinsic/event panel: full-width, never card-ified */
+  .tbl tbody tr.exp-row, .tbl tbody tr.exp-row > td { padding: 0; text-align: left; }
+
+  /* empty-state / loading rows: keep them centered, no floated label */
+  .tbl tbody td[colspan] { text-align: center; }
+
+  /* horizontally-scrolling tab bars (detail tabs, topbar nav) get a right-edge
+     fade so a clipped last item (e.g. "Raw JSON") reads as "scroll for more". */
+  .tabs {
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
+  }
+
+  /* raw JSON wraps instead of scrolling sideways — a single hex blob can be
+     hundreds of thousands of px wide (same treatment as .kv-row .vv). */
+  .json { white-space: pre-wrap; overflow-wrap: anywhere; }
+}
+@media (max-width: 640px) {
+  /* tight enough that the standard 4-tab sets (detail pages, account/tag
+     views) fit a 360px phone without the sideways scroll + edge fade. */
+  .tabs { gap: 2px; }
+  .tabs button { padding: 10px 6px; font-size: 12.5px; }
+  .tabs button .cnt { margin-left: 4px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

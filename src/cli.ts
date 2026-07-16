@@ -1,4 +1,5 @@
 import { run } from './indexer.js'
+import { parseBlockHeight, validateBlockRange } from './blockRange.js'
 import { createClickHouseClient } from './db/client.js'
 import { saveCheckpoint } from './store/checkpoint.js'
 import { clearOHLCForTimeRange, rebuildOHLCForTimeRange, restoreRollbackOHLCPrefix } from './ohlc/repair.js'
@@ -7,8 +8,11 @@ function parseArgs(): {
   fromBlock?: number
   toBlock?: number
   rollbackToBlock?: number
+  applyRollback: boolean
   repairOhlcFrom?: string
   repairOhlcTo?: string
+  pipelineId?: string
+  allowUnfinalizedRaw: boolean
   detectGaps: boolean
   help: boolean
 } {
@@ -16,8 +20,11 @@ function parseArgs(): {
     fromBlock: undefined as number | undefined,
     toBlock: undefined as number | undefined,
     rollbackToBlock: undefined as number | undefined,
+    applyRollback: false,
     repairOhlcFrom: undefined as string | undefined,
     repairOhlcTo: undefined as string | undefined,
+    pipelineId: undefined as string | undefined,
+    allowUnfinalizedRaw: false,
     detectGaps: false,
     help: false,
   }
@@ -27,28 +34,33 @@ function parseArgs(): {
       args.help = true
     } else if (arg === '--detect-gaps') {
       args.detectGaps = true
+    } else if (arg === '--allow-unfinalized-raw') {
+      args.allowUnfinalizedRaw = true
+    } else if (arg === '--apply-rollback') {
+      args.applyRollback = true
     } else if (arg.startsWith('--from-block=')) {
-      const value = parseInt(arg.split('=')[1], 10)
-      if (!isNaN(value)) {
-        args.fromBlock = value
-      }
+      args.fromBlock = parseBlockHeight(arg.slice('--from-block='.length), '--from-block')
     } else if (arg.startsWith('--to-block=')) {
-      const value = parseInt(arg.split('=')[1], 10)
-      if (!isNaN(value)) {
-        args.toBlock = value
-      }
+      args.toBlock = parseBlockHeight(arg.slice('--to-block='.length), '--to-block')
     } else if (arg.startsWith('--rollback-to-block=')) {
-      const value = parseInt(arg.split('=')[1], 10)
-      if (!isNaN(value) && value >= 0) {
-        args.rollbackToBlock = value
+      const raw = arg.split('=')[1]
+      const value = Number(raw)
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error('--rollback-to-block must be a positive integer')
       }
+      args.rollbackToBlock = value
     } else if (arg.startsWith('--repair-ohlc-from=')) {
       args.repairOhlcFrom = arg.split('=')[1]
     } else if (arg.startsWith('--repair-ohlc-to=')) {
       args.repairOhlcTo = arg.split('=')[1]
+    } else if (arg.startsWith('--pipeline-id=')) {
+      args.pipelineId = arg.split('=')[1]
+    } else {
+      throw new Error(`Unknown option: ${arg}`)
     }
   }
 
+  validateBlockRange(args)
   return args
 }
 
@@ -82,9 +94,12 @@ Usage:
 Options:
   --from-block=N           Start indexing from block N (overrides checkpoint)
   --to-block=N             Stop indexing at block N (useful for testing)
-  --rollback-to-block=N    Delete all data at or above block N, reset checkpoint, and exit
+  --rollback-to-block=N    Delete all data at or above positive block N, reset checkpoint, and exit
+  --apply-rollback         Required confirmation for --rollback-to-block
   --repair-ohlc-from=TS    Rebuild OHLC tables for intervals overlapping TS..TO from prices
   --repair-ohlc-to=TS      End timestamp for OHLC repair (ISO 8601 or 'YYYY-MM-DD HH:MM:SS', UTC)
+  --pipeline-id=ID         Override main indexer checkpoint id
+  --allow-unfinalized-raw  Allow historical fallback to direct RPC/state reads
   --detect-gaps            Scan ClickHouse for missing block ranges and exit
   --help, -h               Print this help message
 
@@ -99,7 +114,7 @@ Examples:
   npm start -- --from-block=1000000 --to-block=1100000
 
   # Rollback data to block 999999 (deletes block 1000000 and above)
-  npm start -- --rollback-to-block=1000000
+  npm start -- --rollback-to-block=1000000 --apply-rollback
 
   # Rebuild corrupted OHLC intervals from prices
   npm start -- --repair-ohlc-from=2024-01-29T00:00:00Z --repair-ohlc-to=2024-02-01T00:00:00Z
@@ -108,9 +123,12 @@ Examples:
   npm run detect-gaps
 
 Environment Variables:
-  RPC_URL               WebSocket RPC endpoint (default: wss://hydration.dotters.network)
+  RPC_URL               HTTP(S) or WebSocket RPC endpoint (default: https://rpc.hydradx.cloud)
+  RPC_CAPACITY          Max concurrent RPC requests (default: 20)
+  INDEXER_PIPELINE_ID   Main indexer checkpoint id (default: main)
+  MAIN_REQUIRE_FINALIZED_RAW  Require finalized raw ranges for historical mode (default: true)
   CLICKHOUSE_HOST       ClickHouse HTTP endpoint (default: http://localhost:18123)
-  CLICKHOUSE_PASSWORD   ClickHouse password (default: empty)
+  CLICKHOUSE_PASSWORD   ClickHouse password (default: empty; Docker Compose uses dev)
 `)
 }
 
@@ -126,47 +144,81 @@ async function detectGaps(): Promise<void> {
   const client = createClickHouseClient()
 
   try {
-    // Query all distinct block heights, ordered
-    const result = await client.query({
+    const summaryResult = await client.query({
       query: `
-        SELECT DISTINCT block_height
-        FROM price_data.blocks
-        ORDER BY block_height ASC
+        SELECT
+          count() AS indexed_blocks,
+          min(block_height) AS min_block,
+          max(block_height) AS max_block
+        FROM (SELECT DISTINCT block_height FROM price_data.blocks)
       `,
       format: 'JSONEachRow',
     })
+    const summaryRows = await summaryResult.json<{
+      indexed_blocks: string | number
+      min_block: number | null
+      max_block: number | null
+    }>()
+    const summary = summaryRows[0]
+    const indexedBlocks = Number(summary?.indexed_blocks ?? 0)
 
-    const rows = await result.json<{ block_height: number }>()
-
-    if (rows.length === 0) {
+    if (indexedBlocks === 0) {
       console.log('[Gap Detection] No data found in blocks table')
       return
     }
 
-    console.log(`[Gap Detection] Found ${rows.length} indexed blocks`)
-    console.log(`[Gap Detection] Range: ${rows[0].block_height} to ${rows[rows.length - 1].block_height}`)
+    console.log(`[Gap Detection] Found ${indexedBlocks} indexed blocks`)
+    console.log(`[Gap Detection] Range: ${summary?.min_block} to ${summary?.max_block}`)
 
-    // Find gaps
-    const gaps: { start: number; end: number; count: number }[] = []
-    for (let i = 0; i < rows.length - 1; i++) {
-      const current = rows[i].block_height
-      const next = rows[i + 1].block_height
+    const gapsSql = `
+      WITH
+        ordered AS (
+          SELECT
+            block_height,
+            block_height - row_number() OVER (ORDER BY block_height) AS gap_group
+          FROM (SELECT DISTINCT block_height FROM price_data.blocks)
+        ),
+        ranges AS (
+          SELECT min(block_height) AS from_block, max(block_height) AS to_block
+          FROM ordered
+          GROUP BY gap_group
+        ),
+        gaps AS (
+          SELECT
+            from_block,
+            lagInFrame(to_block, 1, 0) OVER (
+              ORDER BY from_block ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS previous_to
+          FROM ranges
+        )
+      SELECT
+        previous_to + 1 AS start,
+        from_block - 1 AS end,
+        from_block - previous_to - 1 AS count
+      FROM gaps
+      WHERE previous_to > 0 AND from_block > previous_to + 1
+    `
+    const countResult = await client.query({
+      query: `SELECT count() AS c FROM (${gapsSql})`,
+      format: 'JSONEachRow',
+    })
+    const countRows = await countResult.json<{ c: string | number }>()
+    const gapCount = Number(countRows[0]?.c ?? 0)
 
-      if (next - current > 1) {
-        gaps.push({
-          start: current + 1,
-          end: next - 1,
-          count: next - current - 1,
-        })
-      }
-    }
-
-    if (gaps.length === 0) {
+    if (gapCount === 0) {
       console.log('[Gap Detection] No gaps found - all blocks indexed sequentially')
     } else {
-      console.log(`[Gap Detection] Found ${gaps.length} gap(s):`)
+      const gapsResult = await client.query({
+        query: `${gapsSql} ORDER BY start ASC LIMIT 100`,
+        format: 'JSONEachRow',
+      })
+      const gaps = await gapsResult.json<{ start: number; end: number; count: number }>()
+      console.log(`[Gap Detection] Found ${gapCount} gap(s):`)
       for (const gap of gaps) {
         console.log(`  Gap: blocks ${gap.start} to ${gap.end} (${gap.count} blocks missing)`)
+      }
+      if (gapCount > gaps.length) {
+        console.log(`  ... ${gapCount - gaps.length} more gap(s) omitted`)
       }
     }
   } catch (error) {
@@ -187,7 +239,7 @@ async function detectGaps(): Promise<void> {
  * Restores the prefix of the first affected candle from preserved prices so replay can
  * rebuild the rest of each interval without losing earlier trades.
  */
-async function rollbackToBlock(targetBlock: number): Promise<void> {
+async function rollbackToBlock(targetBlock: number, checkpointId = 'main'): Promise<void> {
   console.log(`[Rollback] Rolling back to block ${targetBlock}...`)
 
   const client = createClickHouseClient()
@@ -255,10 +307,10 @@ async function rollbackToBlock(targetBlock: number): Promise<void> {
 
     // Reset checkpoint to targetBlock - 1
     const newCheckpoint = targetBlock - 1
-    console.log(`[Rollback] Resetting checkpoint to block ${newCheckpoint}...`)
-    await saveCheckpoint(client, newCheckpoint)
+    console.log(`[Rollback] Resetting checkpoint ${checkpointId} to block ${newCheckpoint}...`)
+    await saveCheckpoint(client, newCheckpoint, checkpointId)
 
-    console.log(`[Rollback] Rollback complete. Checkpoint reset to ${newCheckpoint}`)
+    console.log(`[Rollback] Rollback complete. Checkpoint ${checkpointId} reset to ${newCheckpoint}`)
   } catch (error) {
     console.error('[Rollback] Error during rollback:', error)
     throw error
@@ -328,7 +380,10 @@ async function main(): Promise<void> {
   }
 
   if (args.rollbackToBlock !== undefined) {
-    await rollbackToBlock(args.rollbackToBlock)
+    if (!args.applyRollback) {
+      throw new Error('Rollback is destructive; re-run with --apply-rollback to confirm')
+    }
+    await rollbackToBlock(args.rollbackToBlock, args.pipelineId)
     process.exit(0)
   }
 
@@ -340,6 +395,8 @@ async function main(): Promise<void> {
     await run({
       fromBlock: args.fromBlock,
       toBlock: args.toBlock,
+      pipelineId: args.pipelineId,
+      requireFinalizedRaw: !args.allowUnfinalizedRaw,
     })
   } catch (error) {
     console.error('[CLI] Fatal error:', error)

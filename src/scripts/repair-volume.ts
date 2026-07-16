@@ -2,27 +2,12 @@ import { pathToFileURL } from 'node:url'
 import { createClickHouseClient, type ClickHouseClient } from '../db/client.js'
 import type { PriceRow, TradeVolumeRow } from '../db/schema.js'
 import { rebuildOHLCForTimeRange } from '../ohlc/repair.js'
-
-const LEGACY_SWAP_EVENT_NAMES = [
-  'Omnipool.SellExecuted',
-  'Omnipool.BuyExecuted',
-  'XYK.SellExecuted',
-  'XYK.BuyExecuted',
-  'Stableswap.SellExecuted',
-  'Stableswap.BuyExecuted',
-] as const
-
-const BROADCAST_SWAP_EVENT_NAMES = [
-  'Broadcast.Swapped',
-  'Broadcast.Swapped2',
-  'Broadcast.Swapped3',
-] as const
-
-const ALL_SWAP_EVENT_NAMES = [...LEGACY_SWAP_EVENT_NAMES, ...BROADCAST_SWAP_EVENT_NAMES]
+import { ALL_SWAP_EVENT_NAMES, BROADCAST_SWAP_EVENT_NAMES, LEGACY_SWAP_EVENT_NAMES, decodeRawTrade, type DecodedRawTrade, type RawTradeEventRow, type TradeAssetAmount } from './tradeEventDecoder.js'
+import { aggregateTradeVolumeRows, decimalToScaledBigInt, formatDecimal128, sumBigIntStrings, sumDecimal128Strings, sumVolumeFields } from '../blocks/volumeMath.js'
+export { decimalToScaledBigInt, formatDecimal128 } from '../blocks/volumeMath.js'
 const DEFAULT_CHUNK_SIZE = 5_000
 const DEFAULT_SAFETY_LAG_BLOCKS = 100
 const DEFAULT_KEY_DELETE_BATCH_SIZE = 5_000
-const FALLBACK_UNIFIED_SWAP_FROM_BLOCK = 6_837_786
 
 type RepairTarget = 'trade-volume' | 'prices' | 'ohlc'
 
@@ -35,35 +20,23 @@ interface Args {
   lastDays?: number
   allHistory: boolean
   targets: Set<RepairTarget>
+  assetIds?: Set<number>
   chunkSize: number
   safetyLagBlocks: number
   apply: boolean
   help: boolean
 }
 
-export interface RawEventRow {
-  block_height: number
-  event_name: string
-  args_json: string
-}
+export type RawEventRow = RawTradeEventRow
 
 interface SnapshotRow {
   block_height: number
   payload_json: string
 }
 
-interface AssetAmount {
-  assetId: number
-  amount: bigint
-}
+export type DecodedTrade = DecodedRawTrade
 
-export interface DecodedTrade {
-  account: string | null
-  inputs: AssetAmount[]
-  outputs: AssetAmount[]
-}
-
-interface TradeLeg extends AssetAmount {
+interface TradeLeg extends TradeAssetAmount {
   canonicalAssetId: number
 }
 
@@ -89,6 +62,7 @@ export interface PriceVolumeRow {
 }
 
 interface ExistingPriceRow extends PriceRow {
+  block_timestamp: string
   native_volume_buy: string
   native_volume_sell: string
   usd_volume_buy: string
@@ -131,6 +105,17 @@ function parseTargets(value: string): Set<RepairTarget> {
   return targets
 }
 
+function parseAssetIds(value: string): Set<number> {
+  const ids = new Set<number>()
+  for (const part of value.split(',')) {
+    const id = parsePositiveInt(part.trim())
+    if (id == null) throw new Error(`Invalid asset id: ${part}`)
+    ids.add(id)
+  }
+  if (ids.size === 0) throw new Error('--asset-ids requires at least one asset id')
+  return ids
+}
+
 export function parseArgs(argv = process.argv.slice(2)): Args {
   const args: Args = {
     allHistory: false,
@@ -162,6 +147,8 @@ export function parseArgs(argv = process.argv.slice(2)): Args {
       args.lastDays = parsePositiveNumber(arg.split('=')[1])
     } else if (arg.startsWith('--targets=')) {
       args.targets = parseTargets(arg.slice('--targets='.length))
+    } else if (arg.startsWith('--asset-ids=')) {
+      args.assetIds = parseAssetIds(arg.slice('--asset-ids='.length))
     } else if (arg === '--skip-ohlc') {
       args.targets.delete('ohlc')
     } else if (arg.startsWith('--chunk-size=')) {
@@ -191,6 +178,7 @@ Ranges, choose one:
 Options:
   --targets=all|trade-volume,prices,ohlc
                                       What to repair. Default: all.
+  --asset-ids=A,B,C                   Limit mutations to these canonical asset IDs.
   --skip-ohlc                         Shortcut for --targets=trade-volume,prices.
   --chunk-size=N                      Blocks per repair chunk. Default: ${DEFAULT_CHUNK_SIZE}.
   --safety-lag-blocks=N               Do not repair the latest N blocks. Default: ${DEFAULT_SAFETY_LAG_BLOCKS}.
@@ -200,7 +188,7 @@ Options:
 Examples:
   npm run repair:volume -- --last-days=1
   npm run repair:volume -- --last-days=1 --apply
-  npm run repair:volume -- --from-time="2026-05-25 20:00:00" --to-time="2026-05-25 21:00:00" --apply
+  npm run repair:volume -- --from-time="2026-01-01 00:00:00" --to-time="2026-01-01 01:00:00" --apply
 `)
 }
 
@@ -214,25 +202,10 @@ function normalizeDateTime(value: string): string {
   return parsed.toISOString().slice(0, 19).replace('T', ' ')
 }
 
-export function decimalToScaledBigInt(value: string | number | null | undefined): bigint {
-  const normalized = String(value ?? '0')
-  const sign = normalized.startsWith('-') ? '-' : ''
-  const unsigned = sign ? normalized.slice(1) : normalized
-  const [integerPart, rawFraction = ''] = unsigned.split('.')
-  const fraction = rawFraction.padEnd(12, '0').slice(0, 12)
-  return BigInt(`${sign}${integerPart || '0'}${fraction}`)
-}
-
-export function formatDecimal128(value: bigint): string {
-  const sign = value < 0n ? '-' : ''
-  const unsigned = value < 0n ? -value : value
-  const integerPart = unsigned / 1_000_000_000_000n
-  const fractionalPart = unsigned % 1_000_000_000_000n
-  return `${sign}${integerPart}.${fractionalPart.toString().padStart(12, '0')}`
-}
-
 function calculateUsdVolume(nativeAmount: bigint, price: string | undefined, decimals: number | undefined): string {
-  if (nativeAmount === 0n || !price || decimals == null) return '0.000000000000'
+  if (nativeAmount === 0n) return '0.000000000000'
+  if (!price) throw new Error('Cannot repair non-zero trade volume without an indexed event-time price')
+  if (decimals == null) throw new Error('Cannot repair non-zero trade volume without snapshot asset decimals')
   return formatDecimal128((nativeAmount * decimalToScaledBigInt(price)) / (10n ** BigInt(decimals)))
 }
 
@@ -259,14 +232,6 @@ function calculateLegUsdVolume(
   )
 }
 
-function sumBigIntStrings(a: string | undefined, b: string | undefined): string {
-  return (BigInt(a ?? '0') + BigInt(b ?? '0')).toString()
-}
-
-function sumDecimal128Strings(a: string | undefined, b: string | undefined): string {
-  return formatDecimal128(decimalToScaledBigInt(a) + decimalToScaledBigInt(b))
-}
-
 function zeroPriceVolume(blockHeight: number, assetId: number): PriceVolumeRow {
   return {
     asset_id: assetId,
@@ -278,80 +243,8 @@ function zeroPriceVolume(blockHeight: number, assetId: number): PriceVolumeRow {
   }
 }
 
-function normalizeAccount(value: unknown): string | null {
-  if (typeof value === 'string' && value.length > 0) return value
-  if (value && typeof value === 'object' && 'value' in value) {
-    const nested = (value as { value?: unknown }).value
-    if (typeof nested === 'string' && nested.length > 0) return nested
-  }
-  return null
-}
-
-function parseAssetAmounts(value: unknown): AssetAmount[] {
-  if (!Array.isArray(value)) return []
-  return value.flatMap(item => {
-    if (!item || typeof item !== 'object') return []
-    const asset = (item as { asset?: unknown }).asset
-    const amount = (item as { amount?: unknown }).amount
-    if (typeof asset !== 'number' || (typeof amount !== 'string' && typeof amount !== 'number' && typeof amount !== 'bigint')) {
-      return []
-    }
-    return [{ assetId: asset, amount: BigInt(amount) }]
-  })
-}
-
 export function decodeTrade(row: RawEventRow): DecodedTrade | null {
-  const args = JSON.parse(row.args_json) as Record<string, unknown>
-
-  if (row.event_name === 'Omnipool.SellExecuted' || row.event_name === 'Omnipool.BuyExecuted' || row.event_name === 'Stableswap.SellExecuted' || row.event_name === 'Stableswap.BuyExecuted') {
-    return {
-      account: normalizeAccount(args.who),
-      inputs: [{ assetId: Number(args.assetIn), amount: BigInt(args.amountIn as string) }],
-      outputs: [{ assetId: Number(args.assetOut), amount: BigInt(args.amountOut as string) }],
-    }
-  }
-
-  if (row.event_name === 'XYK.SellExecuted') {
-    return {
-      account: normalizeAccount(args.who),
-      inputs: [{ assetId: Number(args.assetIn), amount: BigInt(args.amount as string) }],
-      outputs: [{ assetId: Number(args.assetOut), amount: BigInt(args.salePrice as string) }],
-    }
-  }
-
-  if (row.event_name === 'XYK.BuyExecuted') {
-    return {
-      account: normalizeAccount(args.who),
-      inputs: [{ assetId: Number(args.assetIn), amount: BigInt(args.buyPrice as string) }],
-      outputs: [{ assetId: Number(args.assetOut), amount: BigInt(args.amount as string) }],
-    }
-  }
-
-  if (row.event_name.startsWith('Broadcast.Swapped')) {
-    const fillerType = (args.fillerType as { __kind?: string } | undefined)?.__kind
-    const operation = (args.operation as { __kind?: string } | undefined)?.__kind
-    const inputs = parseAssetAmounts(args.inputs)
-    const outputs = parseAssetAmounts(args.outputs)
-    const account = normalizeAccount(args.swapper)
-
-    if (
-      row.event_name === 'Broadcast.Swapped' &&
-      operation === 'ExactOut' &&
-      (fillerType === 'XYK' || fillerType === 'LBP') &&
-      inputs.length === 1 &&
-      outputs.length === 1
-    ) {
-      return {
-        account,
-        inputs: [{ assetId: inputs[0].assetId, amount: outputs[0].amount }],
-        outputs: [{ assetId: outputs[0].assetId, amount: inputs[0].amount }],
-      }
-    }
-
-    return { account, inputs, outputs }
-  }
-
-  return null
+  return decodeRawTrade(row)
 }
 
 function parseEquivalenceList(value: unknown): [number, number][] {
@@ -400,14 +293,6 @@ function aliasStateFromAssetRows(rows: AssetAliasRow[]): AliasState {
   }
 
   return { atokenToBase, lpToDisplay, decimals }
-}
-
-function mergeAliasStates(fallback: AliasState, snapshot: AliasState): AliasState {
-  return {
-    atokenToBase: new Map([...fallback.atokenToBase, ...snapshot.atokenToBase]),
-    lpToDisplay: new Map([...fallback.lpToDisplay, ...snapshot.lpToDisplay]),
-    decimals: new Map([...fallback.decimals, ...snapshot.decimals]),
-  }
 }
 
 export function aliasStateFromSnapshot(payloadJson: string): AliasState {
@@ -472,6 +357,19 @@ function isCanonicalSelfConversion(leg: TradeLeg, opposingOriginalsByCanonical: 
 
 function priceKey(blockHeight: number, assetId: number): string {
   return `${blockHeight}:${assetId}`
+}
+
+function sortedAssetIds(assetIds: Set<number> | undefined): number[] | undefined {
+  return assetIds ? [...assetIds].sort((a, b) => a - b) : undefined
+}
+
+function matchesAssetFilter(assetIds: Set<number> | undefined, assetId: number): boolean {
+  return !assetIds || assetIds.has(assetId)
+}
+
+function assetFilterSql(assetIds: Set<number> | undefined, column: string): string {
+  const ids = sortedAssetIds(assetIds)
+  return ids && ids.length > 0 ? ` AND ${column} IN (${ids.join(', ')})` : ''
 }
 
 function tradeKey(row: TradeVolumeRow): string {
@@ -555,25 +453,7 @@ export function rowsForTrade(
 }
 
 export function aggregateTradeRows(rows: TradeVolumeRow[]): TradeVolumeRow[] {
-  const byKey = new Map<string, TradeVolumeRow>()
-  for (const row of rows) {
-    const key = tradeKey(row)
-    const existing = byKey.get(key)
-    if (!existing) {
-      byKey.set(key, { ...row })
-      continue
-    }
-
-    byKey.set(key, {
-      ...existing,
-      native_volume_buy: sumBigIntStrings(existing.native_volume_buy, row.native_volume_buy),
-      native_volume_sell: sumBigIntStrings(existing.native_volume_sell, row.native_volume_sell),
-      usd_volume_buy: sumDecimal128Strings(existing.usd_volume_buy, row.usd_volume_buy),
-      usd_volume_sell: sumDecimal128Strings(existing.usd_volume_sell, row.usd_volume_sell),
-      trade_count: existing.trade_count + row.trade_count,
-    })
-  }
-  return [...byKey.values()]
+  return aggregateTradeVolumeRows(rows)
 }
 
 export function aggregatePriceVolumeRows(rows: PriceVolumeRow[]): PriceVolumeRow[] {
@@ -588,10 +468,7 @@ export function aggregatePriceVolumeRows(rows: PriceVolumeRow[]): PriceVolumeRow
 
     byKey.set(key, {
       ...existing,
-      native_volume_buy: sumBigIntStrings(existing.native_volume_buy, row.native_volume_buy),
-      native_volume_sell: sumBigIntStrings(existing.native_volume_sell, row.native_volume_sell),
-      usd_volume_buy: sumDecimal128Strings(existing.usd_volume_buy, row.usd_volume_buy),
-      usd_volume_sell: sumDecimal128Strings(existing.usd_volume_sell, row.usd_volume_sell),
+      ...sumVolumeFields(existing, row),
     })
   }
   return [...byKey.values()]
@@ -606,12 +483,16 @@ export function buildRepairedPriceRows(existingRows: ExistingPriceRow[], correct
     const existing = existingByKey.get(key)
     const corrected = correctedByKey.get(key)
     const [blockHeight, assetId] = key.split(':').map(Number)
-    const usdPrice = existing?.usd_price ?? '0'
-    if (Number(usdPrice) <= 0) return []
+    const usdPrice = existing?.usd_price
+    if (!usdPrice || Number(usdPrice) <= 0) {
+      if (corrected) throw new Error(`Cannot repair volume for ${key} without a positive indexed USD price`)
+      return []
+    }
 
     return [{
       asset_id: assetId,
       block_height: blockHeight,
+      block_timestamp: existing?.block_timestamp,
       usd_price: usdPrice,
       native_volume_buy: corrected?.native_volume_buy ?? '0',
       native_volume_sell: corrected?.native_volume_sell ?? '0',
@@ -628,7 +509,11 @@ async function getUnifiedSwapFromBlock(client: ClickHouseClient): Promise<number
     format: 'JSONEachRow',
   })
   const rows = await result.json<{ block_height: number }>()
-  return Number(rows[0]?.block_height) || FALLBACK_UNIFIED_SWAP_FROM_BLOCK
+  const blockHeight = Number(rows[0]?.block_height)
+  if (!Number.isInteger(blockHeight) || blockHeight <= 0) {
+    throw new Error('Cannot locate the unified swap runtime upgrade in price_data.runtime_upgrades')
+  }
+  return blockHeight
 }
 
 async function getSafeTip(client: ClickHouseClient, safetyLagBlocks: number): Promise<number> {
@@ -638,18 +523,6 @@ async function getSafeTip(client: ClickHouseClient, safetyLagBlocks: number): Pr
   })
   const rows = await result.json<{ max_block: number }>()
   return Math.max(0, Number(rows[0]?.max_block) - safetyLagBlocks)
-}
-
-async function queryCurrentAliasState(client: ClickHouseClient): Promise<AliasState> {
-  const result = await client.query({
-    query: `
-      SELECT asset_id, symbol, decimals
-      FROM price_data.assets FINAL
-    `,
-    format: 'JSONEachRow',
-  })
-  const rows = await result.json<AssetAliasRow>()
-  return aliasStateFromAssetRows(rows)
 }
 
 async function getRawSwapHistoryRange(client: ClickHouseClient): Promise<{ from: number; to: number }> {
@@ -750,7 +623,6 @@ async function queryRawEvents(client: ClickHouseClient, from: number, to: number
 async function querySnapshots(
   client: ClickHouseClient,
   blockHeights: number[],
-  fallbackAliases: AliasState
 ): Promise<Map<number, AliasState>> {
   if (blockHeights.length === 0) return new Map()
 
@@ -764,7 +636,7 @@ async function querySnapshots(
     format: 'JSONEachRow',
   })
   const rows = await result.json<SnapshotRow>()
-  return new Map(rows.map(row => [row.block_height, mergeAliasStates(fallbackAliases, aliasStateFromSnapshot(row.payload_json))]))
+  return new Map(rows.map(row => [row.block_height, aliasStateFromSnapshot(row.payload_json)]))
 }
 
 async function queryPricesForAssets(client: ClickHouseClient, from: number, to: number, assetIds: number[]): Promise<Map<string, string>> {
@@ -784,12 +656,19 @@ async function queryPricesForAssets(client: ClickHouseClient, from: number, to: 
   return new Map(rows.map(row => [priceKey(row.block_height, row.asset_id), row.usd_price]))
 }
 
-async function queryExistingNonZeroPriceRows(client: ClickHouseClient, from: number, to: number): Promise<ExistingPriceRow[]> {
+async function queryExistingNonZeroPriceRows(
+  client: ClickHouseClient,
+  from: number,
+  to: number,
+  assetIds?: Set<number>,
+): Promise<ExistingPriceRow[]> {
+  const ids = sortedAssetIds(assetIds)
   const result = await client.query({
     query: `
       SELECT
-        block_height,
-        asset_id,
+        p.block_height AS block_height,
+        p.asset_id AS asset_id,
+        toString(b.block_timestamp) AS block_timestamp,
         toString(usd_price) AS usd_price,
         toString(native_volume_buy) AS native_volume_buy,
         toString(native_volume_sell) AS native_volume_sell,
@@ -797,7 +676,9 @@ async function queryExistingNonZeroPriceRows(client: ClickHouseClient, from: num
         toString(usd_volume_sell) AS usd_volume_sell,
         hops
       FROM (SELECT * FROM price_data.prices FINAL) AS p
+      INNER JOIN price_data.blocks AS b ON b.block_height = p.block_height
       WHERE p.block_height BETWEEN {from:UInt32} AND {to:UInt32}
+        ${ids && ids.length > 0 ? 'AND p.asset_id IN ({asset_ids:Array(UInt32)})' : ''}
         AND (
           p.native_volume_buy != 0
           OR p.native_volume_sell != 0
@@ -805,7 +686,7 @@ async function queryExistingNonZeroPriceRows(client: ClickHouseClient, from: num
           OR p.usd_volume_sell != 0
         )
     `,
-    query_params: { from, to },
+    query_params: ids && ids.length > 0 ? { from, to, asset_ids: ids } : { from, to },
     format: 'JSONEachRow',
   })
   return await result.json<ExistingPriceRow>()
@@ -822,17 +703,19 @@ async function queryExistingPriceRowsForCorrectedKeys(
   const result = await client.query({
     query: `
       SELECT
-        block_height,
-        asset_id,
+        p.block_height AS block_height,
+        p.asset_id AS asset_id,
+        toString(b.block_timestamp) AS block_timestamp,
         toString(usd_price) AS usd_price,
         toString(native_volume_buy) AS native_volume_buy,
         toString(native_volume_sell) AS native_volume_sell,
         toString(usd_volume_buy) AS usd_volume_buy,
         toString(usd_volume_sell) AS usd_volume_sell,
         hops
-      FROM price_data.prices FINAL
-      WHERE block_height IN ({blocks:Array(UInt32)})
-        AND asset_id IN ({asset_ids:Array(UInt32)})
+      FROM (SELECT * FROM price_data.prices FINAL) AS p
+      INNER JOIN price_data.blocks AS b ON b.block_height = p.block_height
+      WHERE p.block_height IN ({blocks:Array(UInt32)})
+        AND p.asset_id IN ({asset_ids:Array(UInt32)})
     `,
     query_params: { blocks: blockHeights, asset_ids: assetIds },
     format: 'JSONEachRow',
@@ -887,7 +770,15 @@ async function insertPriceRows(client: ClickHouseClient, rows: PriceRow[], from:
 
 async function repairChunk(
   client: ClickHouseClient,
-  options: { from: number; to: number; unifiedSwapFromBlock: number; targets: Set<RepairTarget>; apply: boolean; runId: string; fallbackAliases: AliasState }
+  options: {
+    from: number
+    to: number
+    unifiedSwapFromBlock: number
+    targets: Set<RepairTarget>
+    targetAssetIds?: Set<number>
+    apply: boolean
+    runId: string
+  }
 ): Promise<RepairChunkResult> {
   const events = await queryRawEvents(client, options.from, options.to, options.unifiedSwapFromBlock)
   const trades = events.flatMap(row => {
@@ -895,7 +786,7 @@ async function repairChunk(
     return trade && (trade.inputs.length > 0 || trade.outputs.length > 0) ? [{ blockHeight: row.block_height, trade }] : []
   })
   const eventBlocks = [...new Set(trades.map(row => row.blockHeight))]
-  const snapshots = await querySnapshots(client, eventBlocks, options.fallbackAliases)
+  const snapshots = await querySnapshots(client, eventBlocks)
   const missingSnapshots = eventBlocks.filter(blockHeight => !snapshots.has(blockHeight))
   if (missingSnapshots.length > 0) {
     throw new Error(`Missing raw snapshots for ${missingSnapshots.length} event blocks, first missing block: ${missingSnapshots[0]}`)
@@ -918,13 +809,15 @@ async function repairChunk(
     return rowsForTrade(trade, blockHeight, aliases, prices)
   })
   const tradeRows = aggregateTradeRows(generated.flatMap(item => item.tradeRows))
+    .filter(row => matchesAssetFilter(options.targetAssetIds, row.asset_id))
   const correctedPriceRows = aggregatePriceVolumeRows(generated.flatMap(item => item.priceRows))
+    .filter(row => matchesAssetFilter(options.targetAssetIds, row.asset_id))
 
   let repairedPriceRows: PriceRow[] = []
   let priceKeysToDelete: string[] = []
   if (options.targets.has('prices')) {
     const [nonZeroExisting, correctedExisting] = await Promise.all([
-      queryExistingNonZeroPriceRows(client, options.from, options.to),
+      queryExistingNonZeroPriceRows(client, options.from, options.to, options.targetAssetIds),
       queryExistingPriceRowsForCorrectedKeys(client, correctedPriceRows),
     ])
     const existingRows = mergeExistingPriceRows([...nonZeroExisting, ...correctedExisting])
@@ -938,7 +831,7 @@ async function repairChunk(
   if (options.apply) {
     if (options.targets.has('trade-volume')) {
       await client.command({
-        query: `DELETE FROM price_data.trade_volume_by_account WHERE block_height BETWEEN ${options.from} AND ${options.to}`,
+        query: `DELETE FROM price_data.trade_volume_by_account WHERE block_height BETWEEN ${options.from} AND ${options.to}${assetFilterSql(options.targetAssetIds, 'asset_id')}`,
         clickhouse_settings: { mutations_sync: '1' },
       })
       await insertTradeRows(client, tradeRows, options.from, options.to, options.runId)
@@ -988,12 +881,11 @@ async function main(): Promise<void> {
     }
 
     const targets = [...args.targets].join(', ')
+    const targetAssetIds = sortedAssetIds(args.assetIds)
     const unifiedSwapFromBlock = await getUnifiedSwapFromBlock(client)
-    const fallbackAliases = args.targets.has('trade-volume') || args.targets.has('prices')
-      ? await queryCurrentAliasState(client)
-      : { atokenToBase: new Map(), lpToDisplay: new Map(), decimals: new Map() }
     const runId = new Date().toISOString().replace(/[-:.TZ]/g, '')
     console.log(`[volume-repair] ${args.apply ? 'APPLY' : 'DRY RUN'} ${from}..${to} (${targets}), chunk=${args.chunkSize}, safe_tip=${safeTip}`)
+    if (targetAssetIds) console.log(`[volume-repair] asset filter: ${targetAssetIds.join(', ')}`)
     if (!args.apply) console.log('[volume-repair] Pass --apply to mutate ClickHouse.')
 
     let totalEvents = 0
@@ -1008,9 +900,9 @@ async function main(): Promise<void> {
           to: end,
           unifiedSwapFromBlock,
           targets: args.targets,
+          targetAssetIds: args.assetIds,
           apply: args.apply,
           runId,
-          fallbackAliases,
         })
         totalEvents += result.events
         totalTradeRows += result.tradeRows
@@ -1023,7 +915,7 @@ async function main(): Promise<void> {
       const { startTime, endTime } = await blockTimeBounds(client, from, to)
       if (args.apply) {
         console.log(`[volume-repair] Rebuilding OHLC intervals for ${startTime}..${endTime}`)
-        await rebuildOHLCForTimeRange(client, startTime, endTime)
+        await rebuildOHLCForTimeRange(client, startTime, endTime, targetAssetIds)
       } else {
         console.log(`[volume-repair] Would rebuild OHLC intervals for ${startTime}..${endTime}`)
       }

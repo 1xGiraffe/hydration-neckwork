@@ -18,6 +18,37 @@ interface StableswapPoolEntry {
   fee: number
 }
 
+function eventArgs(value: unknown, eventName: string): Record<string, unknown> {
+  if (value == null || typeof value !== 'object') {
+    throw new Error(`${eventName} has no decodable arguments`)
+  }
+  return value as Record<string, unknown>
+}
+
+function numberArg(args: Record<string, unknown>, name: string, eventName: string): number {
+  const value = args[name]
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new Error(`${eventName}.${name} is not a non-negative integer`)
+  }
+  return value as number
+}
+
+function stringArg(args: Record<string, unknown>, name: string, eventName: string): string {
+  const value = args[name]
+  if (typeof value !== 'string' || value === '') {
+    throw new Error(`${eventName}.${name} is not a non-empty string`)
+  }
+  return value
+}
+
+function numberArrayArg(args: Record<string, unknown>, name: string, eventName: string): number[] {
+  const value = args[name]
+  if (!Array.isArray(value) || !value.every(item => Number.isSafeInteger(item) && item >= 0)) {
+    throw new Error(`${eventName}.${name} is not an array of non-negative integers`)
+  }
+  return value
+}
+
 export class PoolCompositionCache {
   // Omnipool: set of asset IDs
   private omnipoolAssets: number[] | null = null
@@ -30,13 +61,19 @@ export class PoolCompositionCache {
   private omnipoolBootstrapped = false
   private xykBootstrapped = false
   private stableswapBootstrapped = false
+  // A pallet can legitimately be absent before launch. Once a codec has worked,
+  // however, losing compatibility after a runtime upgrade must fail closed
+  // instead of turning a live pool family into an empty/stale snapshot.
+  private omnipoolSupported = false
+  private xykSupported = false
+  private stableswapSupported = false
 
   /**
    * Process events from a block to update cache.
    * Call this BEFORE reading pool state for the block.
    * Returns flags indicating which caches were invalidated.
    */
-  processEvents(events: { name: string; args: any }[]): {
+  processEvents(events: Array<{ name: string; args: unknown }>): {
     omnipoolChanged: boolean
     xykChanged: boolean
     stableswapChanged: boolean
@@ -47,60 +84,82 @@ export class PoolCompositionCache {
 
     for (const event of events) {
       switch (event.name) {
-        case 'Omnipool.TokenAdded':
+        case 'Omnipool.TokenAdded': {
+          const assetId = numberArg(eventArgs(event.args, event.name), 'assetId', event.name)
           // Surgical add: push new asset ID to cached array
-          if (this.omnipoolAssets !== null) {
-            this.omnipoolAssets.push(event.args.assetId)
-            console.log(`[PoolCache] Incremental: Omnipool asset added (assetId=${event.args.assetId})`)
+          if (this.omnipoolAssets !== null && !this.omnipoolAssets.includes(assetId)) {
+            this.omnipoolAssets.push(assetId)
+            console.log(`[PoolCache] Incremental: Omnipool asset added (assetId=${assetId})`)
           }
           // If cache not bootstrapped yet, do nothing -- bootstrap will pick it up
           omnipoolChanged = true
           break
-        case 'Omnipool.TokenRemoved':
+        }
+        case 'Omnipool.TokenRemoved': {
+          const assetId = numberArg(eventArgs(event.args, event.name), 'assetId', event.name)
           // Surgical remove: filter out asset ID
           if (this.omnipoolAssets !== null) {
-            this.omnipoolAssets = this.omnipoolAssets.filter(id => id !== event.args.assetId)
-            console.log(`[PoolCache] Incremental: Omnipool asset removed (assetId=${event.args.assetId})`)
+            this.omnipoolAssets = this.omnipoolAssets.filter(id => id !== assetId)
+            console.log(`[PoolCache] Incremental: Omnipool asset removed (assetId=${assetId})`)
           }
           omnipoolChanged = true
           break
-        case 'XYK.PoolCreated':
+        }
+        case 'XYK.PoolCreated': {
+          const args = eventArgs(event.args, event.name)
           // Surgical add: push new pool entry
           if (this.xykPools !== null) {
-            this.xykPools.push({
-              poolAccount: event.args.pool as string,
-              assetA: event.args.assetA,
-              assetB: event.args.assetB,
-            })
-            console.log(`[PoolCache] Incremental: XYK pool created (assetA=${event.args.assetA}, assetB=${event.args.assetB})`)
+            const entry = {
+              poolAccount: stringArg(args, 'pool', event.name),
+              assetA: numberArg(args, 'assetA', event.name),
+              assetB: numberArg(args, 'assetB', event.name),
+            }
+            const existingIndex = this.xykPools.findIndex(pool => pool.poolAccount === entry.poolAccount)
+            if (existingIndex < 0) {
+              this.xykPools.push(entry)
+              console.log(`[PoolCache] Incremental: XYK pool created (assetA=${entry.assetA}, assetB=${entry.assetB})`)
+            } else {
+              this.xykPools[existingIndex] = entry
+            }
           }
           xykChanged = true
           break
-        case 'XYK.PoolDestroyed':
+        }
+        case 'XYK.PoolDestroyed': {
+          const args = eventArgs(event.args, event.name)
+          const poolAccount = stringArg(args, 'pool', event.name)
           // Surgical remove: filter out pool by account
           if (this.xykPools !== null) {
-            const poolAccount = event.args.pool as string
             this.xykPools = this.xykPools.filter(p => p.poolAccount !== poolAccount)
-            console.log(`[PoolCache] Incremental: XYK pool destroyed (assetA=${event.args.assetA}, assetB=${event.args.assetB})`)
+            console.log(`[PoolCache] Incremental: XYK pool destroyed (assetA=${numberArg(args, 'assetA', event.name)}, assetB=${numberArg(args, 'assetB', event.name)})`)
           }
           xykChanged = true
           break
-        case 'Stableswap.PoolCreated':
+        }
+        case 'Stableswap.PoolCreated': {
+          const args = eventArgs(event.args, event.name)
           // Surgical add: push new pool entry with metadata
           if (this.stableswapPools !== null) {
-            this.stableswapPools.push({
-              poolId: event.args.poolId,
-              assets: event.args.assets,
-              initialAmplification: event.args.amplification,
-              finalAmplification: event.args.amplification,
+            const entry = {
+              poolId: numberArg(args, 'poolId', event.name),
+              assets: numberArrayArg(args, 'assets', event.name),
+              initialAmplification: numberArg(args, 'amplification', event.name),
+              finalAmplification: numberArg(args, 'amplification', event.name),
               initialBlock: 0,
               finalBlock: 0,
-              fee: event.args.fee,
-            })
-            console.log(`[PoolCache] Incremental: Stableswap pool created (poolId=${event.args.poolId}, assets=[${event.args.assets.join(',')}])`)
+              fee: numberArg(args, 'fee', event.name),
+            }
+            const existingIndex = this.stableswapPools.findIndex(pool => pool.poolId === entry.poolId)
+            if (existingIndex < 0) {
+              this.stableswapPools.push(entry)
+              console.log(`[PoolCache] Incremental: Stableswap pool created (poolId=${entry.poolId}, assets=[${entry.assets.join(',')}])`)
+            } else {
+              this.stableswapPools[existingIndex] = entry
+            }
           }
           stableswapChanged = true
           break
+        }
         case 'Stableswap.LiquidityAdded':
           // LiquidityAdded doesn't change composition, ignore
           break
@@ -130,7 +189,11 @@ export class PoolCompositionCache {
    * Returns null if Omnipool storage is not available at this block.
    */
   async getOmnipoolAssets(block: Block): Promise<number[] | null> {
-    if (!storage.omnipool.assets.v115.is(block)) return null
+    if (!storage.omnipool.assets.v115.is(block)) {
+      if (this.omnipoolSupported) throw new Error(`Unsupported Omnipool.Assets storage at block ${block.height}`)
+      return null
+    }
+    this.omnipoolSupported = true
     if (!this.omnipoolBootstrapped) {
       const pairs = await storage.omnipool.assets.v115.getPairs(block)
 
@@ -147,7 +210,11 @@ export class PoolCompositionCache {
    * Get XYK pool entries. Bootstraps from storage on first call.
    */
   async getXYKPools(block: Block): Promise<XYKPoolEntry[] | null> {
-    if (!storage.xyk.poolAssets.v183.is(block)) return null
+    if (!storage.xyk.poolAssets.v183.is(block)) {
+      if (this.xykSupported) throw new Error(`Unsupported XYK.PoolAssets storage at block ${block.height}`)
+      return null
+    }
+    this.xykSupported = true
     if (!this.xykBootstrapped) {
       const pairs = await storage.xyk.poolAssets.v183.getPairs(block)
       this.xykPools = pairs
@@ -167,7 +234,11 @@ export class PoolCompositionCache {
    * Get Stableswap pool entries. Bootstraps from storage on first call.
    */
   async getStableswapPools(block: Block): Promise<StableswapPoolEntry[] | null> {
-    if (!storage.stableswap.pools.v183.is(block)) return null
+    if (!storage.stableswap.pools.v183.is(block)) {
+      if (this.stableswapSupported) throw new Error(`Unsupported Stableswap.Pools storage at block ${block.height}`)
+      return null
+    }
+    this.stableswapSupported = true
     if (!this.stableswapBootstrapped) {
       const pairs = await storage.stableswap.pools.v183.getPairs(block)
       this.stableswapPools = pairs

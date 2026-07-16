@@ -5,9 +5,9 @@ import {
   clearSnakewatchEmojiSourceForTest,
   hydrationAddress,
   parseSnakewatchEmojiSource,
+  parseSuffixEmojiQuery,
   polkadotAddress,
   shortAccount,
-  subscanAccountUrl,
 } from '../src/services/omniwatchIdentity.ts'
 
 afterEach(() => {
@@ -22,11 +22,9 @@ describe('omniwatch identity helpers', () => {
       .toBe('13UVJyLnbVp9RBZYFwFGyDvVd1y27Tt8tkntv6Q7JVPhFsTB')
   })
 
-  it('uses the SS58 address for short labels and Subscan links', () => {
+  it('uses the SS58 address for short labels', () => {
     const address = '13UVJyLnbVp9RBZYFwFGyDvVd1y27Tt8tkntv6Q7JVPhFsTB'
     expect(shortAccount(address)).toBe('sTB')
-    expect(subscanAccountUrl('0x6d6f646c70792f74727372790000000000000000000000000000000000000000'))
-      .toBe(`https://hydration.subscan.io/account/${address}`)
   })
 
   it('honors Snakewatch custom emoji overrides where renderable', () => {
@@ -83,5 +81,34 @@ describe('omniwatch identity helpers', () => {
       emojiUrl: 'https://cdn.discordapp.com/emojis/123456789012345678.webp?size=32',
     })
     expect(accountIcon('7Hsq5RH9xUtPWFZMGXtoVWNd4CEjpJWsidf7bcGwNwdxp9Ha')).toEqual({ emoji: '🍸' })
+  })
+})
+
+describe('parseSuffixEmojiQuery — combined "3-letter code + emoji name" queries', () => {
+  it('parses "pmo pig" as suffix pmo + the pig glyphs', () => {
+    const combos = parseSuffixEmojiQuery('pmo pig')
+    expect(combos).toHaveLength(1)
+    expect(combos[0].suffix).toBe('pmo')
+    expect(combos[0].glyphs).toContain('🐷')
+    expect(combos[0].glyphs).toContain('🐽')
+  })
+
+  it('accepts either token order', () => {
+    const combos = parseSuffixEmojiQuery('pig pmo')
+    expect(combos).toHaveLength(1)
+    expect(combos[0].suffix).toBe('pmo')
+    expect(combos[0].glyphs).toContain('🐷')
+  })
+
+  it('keeps both readings when both tokens are emoji names', () => {
+    const combos = parseSuffixEmojiQuery('cat dog')
+    expect(combos.map(c => c.suffix).sort()).toEqual(['cat', 'dog'])
+  })
+
+  it('rejects single tokens, 3+ tokens, and non-matching pairs', () => {
+    expect(parseSuffixEmojiQuery('pig')).toEqual([])
+    expect(parseSuffixEmojiQuery('a b c')).toEqual([])
+    expect(parseSuffixEmojiQuery('x7K zzzzz')).toEqual([])
+    expect(parseSuffixEmojiQuery('toolongcode pig')).toEqual([])
   })
 })

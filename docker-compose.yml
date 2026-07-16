@@ -1,66 +1,296 @@
+name: hydration-neckwork
+
 services:
   clickhouse:
     build:
       context: ./clickhouse
       dockerfile: Dockerfile
-    container_name: preis-clickhouse
+    container_name: hydration-neckwork-clickhouse
     ports:
-      - "18123:8123"
-      - "19000:9000"
+      - "127.0.0.1:18123:8123"
+      - "127.0.0.1:19000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
     environment:
       - CLICKHOUSE_DB=price_data
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
-      - CLICKHOUSE_PASSWORD=dev
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      test: ["CMD-SHELL", "clickhouse-client --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - preis
+      - neckwork
 
   indexer:
+    image: hydration-neckwork-indexer:latest
     build: .
-    container_name: preis-indexer
+    container_name: hydration-neckwork-indexer
+    profiles:
+      - worker
     restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
     environment:
-      - RPC_URL=${RPC_URL:-wss://hydration.dotters.network}
+      - RPC_URL=${RPC_URL:-https://rpc.hydradx.cloud}
+      - SQD_GATEWAY=${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}
+      - SQD_GATEWAY_API_KEY=${SQD_GATEWAY_API_KEY:-}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       - RPC_RATE_LIMIT=${INDEXER_RPC_RATE_LIMIT:-100}
+      - RPC_CAPACITY=${INDEXER_RPC_CAPACITY:-20}
       - BATCH_SIZE=${INDEXER_BATCH_SIZE:-10000}
     networks:
-      - preis
+      - neckwork
 
   raw-indexer:
+    image: hydration-neckwork-indexer:latest
     build: .
-    container_name: preis-raw-indexer
+    container_name: hydration-neckwork-raw-indexer
+    profiles:
+      - worker
     restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
     environment:
-      - RPC_URL=${RPC_URL:-wss://hydration.dotters.network}
+      - RPC_URL=${RAW_RPC_URL:-https://rpc.coke.hydration.cloud}
+      - SQD_GATEWAY=${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}
+      - SQD_GATEWAY_API_KEY=${SQD_GATEWAY_API_KEY:-}
+      - RAW_EVM_RPC_URL=${RAW_EVM_RPC_URL:-https://rpc.coke.hydration.cloud}
+      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://rpc.hydradx.cloud}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
-      - RPC_RATE_LIMIT=${RAW_RPC_RATE_LIMIT:-200}
-      - BATCH_SIZE=${RAW_BATCH_SIZE:-10000}
+      - RPC_RATE_LIMIT=${RAW_RPC_RATE_LIMIT:-50}
+      - RPC_CAPACITY=${RAW_RPC_CAPACITY:-10}
+      - RAW_BALANCE_READ_CONCURRENCY=${RAW_BALANCE_READ_CONCURRENCY:-20}
+      - RAW_BALANCE_READ_BATCH_ENABLED=${RAW_BALANCE_READ_BATCH_ENABLED:-true}
+      - RAW_BALANCE_READ_BATCH_SIZE=${RAW_BALANCE_READ_BATCH_SIZE:-250}
+      - RAW_BALANCE_READ_BATCH_CONCURRENCY=${RAW_BALANCE_READ_BATCH_CONCURRENCY:-4}
+      - RAW_SNAPSHOT_READ_BATCH_SIZE=${RAW_SNAPSHOT_READ_BATCH_SIZE:-100}
+      - RAW_SNAPSHOT_READ_BATCH_CONCURRENCY=${RAW_SNAPSHOT_READ_BATCH_CONCURRENCY:-2}
+      - RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS=${RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS:-20000}
+      - RAW_MONEY_MARKET_POSITION_CONCURRENCY=${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}
+      - RAW_MONEY_MARKET_BATCH_SIZE=${RAW_MONEY_MARKET_BATCH_SIZE:-50}
+      - RAW_MM_PERIODIC_SNAPSHOT_ENABLED=${RAW_MM_PERIODIC_SNAPSHOT_ENABLED:-true}
+      - RAW_MM_SNAPSHOT_INTERVAL_BLOCKS=${RAW_MM_SNAPSHOT_INTERVAL_BLOCKS:-7200}
+      - BATCH_SIZE=${RAW_BATCH_SIZE:-50000}
       - RAW_ASSET_SNAPSHOT_INTERVAL=${RAW_ASSET_SNAPSHOT_INTERVAL:-1000}
       - RAW_PIPELINE_ID=${RAW_PIPELINE_ID:-raw-main}
     command: ["src/raw/cli.ts"]
     networks:
-      - preis
+      - neckwork
+
+  raw-live:
+    image: hydration-neckwork-indexer:latest
+    build: .
+    container_name: hydration-neckwork-raw-live
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - RPC_URL=${RAW_LIVE_RPC_URL:-https://rpc.hydradx.cloud}
+      - SQD_GATEWAY=${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}
+      - SQD_GATEWAY_API_KEY=${SQD_GATEWAY_API_KEY:-}
+      - RAW_EVM_RPC_URL=${RAW_LIVE_EVM_RPC_URL:-https://rpc.hydradx.cloud}
+      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://rpc.hydradx.cloud}
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - RPC_RATE_LIMIT=${RAW_LIVE_RPC_RATE_LIMIT:-50}
+      - RPC_CAPACITY=${RAW_LIVE_RPC_CAPACITY:-10}
+      - RAW_BALANCE_READ_CONCURRENCY=${RAW_BALANCE_READ_CONCURRENCY:-20}
+      - RAW_BALANCE_READ_BATCH_ENABLED=${RAW_BALANCE_READ_BATCH_ENABLED:-true}
+      - RAW_BALANCE_READ_BATCH_SIZE=${RAW_BALANCE_READ_BATCH_SIZE:-250}
+      - RAW_BALANCE_READ_BATCH_CONCURRENCY=${RAW_BALANCE_READ_BATCH_CONCURRENCY:-4}
+      - RAW_SNAPSHOT_READ_BATCH_SIZE=${RAW_SNAPSHOT_READ_BATCH_SIZE:-100}
+      - RAW_SNAPSHOT_READ_BATCH_CONCURRENCY=${RAW_SNAPSHOT_READ_BATCH_CONCURRENCY:-2}
+      - RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS=${RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS:-20000}
+      - RAW_MONEY_MARKET_POSITION_CONCURRENCY=${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}
+      - RAW_MONEY_MARKET_BATCH_SIZE=${RAW_MONEY_MARKET_BATCH_SIZE:-50}
+      - RAW_MM_PERIODIC_SNAPSHOT_ENABLED=${RAW_MM_PERIODIC_SNAPSHOT_ENABLED:-true}
+      - RAW_MM_SNAPSHOT_INTERVAL_BLOCKS=${RAW_MM_SNAPSHOT_INTERVAL_BLOCKS:-7200}
+      - BATCH_SIZE=${RAW_LIVE_BATCH_SIZE:-50000}
+      - RAW_ASSET_SNAPSHOT_INTERVAL=${RAW_ASSET_SNAPSHOT_INTERVAL:-1000}
+      - RAW_PIPELINE_ID=raw-live
+    command: ["src/raw/cli.ts", "--pipeline-id=raw-live"]
+    networks:
+      - neckwork
+
+  # Populates price_data.account_identities from the chain's Identity.IdentityOf on
+  # startup, then refreshes on an interval. Self-seeding so a fresh `docker compose up`
+  # gets identities with no manual step.
+  identity-snapshot:
+    image: hydration-neckwork-indexer:latest
+    build: .
+    container_name: hydration-neckwork-identity-snapshot
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - RPC_URL=${IDENTITY_RPC_URL:-https://rpc.hydradx.cloud}
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - RPC_RATE_LIMIT=${IDENTITY_RPC_RATE_LIMIT:-20}
+      - RPC_CAPACITY=${IDENTITY_RPC_CAPACITY:-5}
+    command: ["src/scripts/snapshot-identities.ts", "--loop", "--refresh-hours=${IDENTITY_REFRESH_HOURS:-24}"]
+    networks:
+      - neckwork
+
+  # Seed current balances for every account, including dormant accounts with no
+  # events in the indexed range, and refresh them on an interval.
+  balance-snapshot:
+    image: hydration-neckwork-indexer:latest
+    build: .
+    container_name: hydration-neckwork-balance-snapshot
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - RPC_URL=${BALANCES_SNAPSHOT_RPC_URL:-https://rpc.hydradx.cloud}
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - RPC_RATE_LIMIT=${BALANCES_SNAPSHOT_RPC_RATE_LIMIT:-20}
+      - RPC_CAPACITY=${BALANCES_SNAPSHOT_RPC_CAPACITY:-5}
+    command: ["src/scripts/snapshot-balances.ts", "--loop", "--refresh-hours=${BALANCES_REFRESH_HOURS:-24}"]
+    networks:
+      - neckwork
+
+  # Money-market sweep: after the balance snapshot has seeded all accounts, calls
+  # getUserAccountData for every account in the primary pool and for the bounded
+  # observed participant set in supplemental pools. This keeps core coverage
+  # exhaustive without multiplying the RPC workload for sparse isolated markets.
+  mm-snapshot:
+    image: hydration-neckwork-indexer:latest
+    build: .
+    container_name: hydration-neckwork-mm-snapshot
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - RPC_URL=${MM_SNAPSHOT_RPC_URL:-https://rpc.hydradx.cloud}
+      - RAW_EVM_RPC_URL=${MM_SNAPSHOT_EVM_RPC_URL:-https://rpc.hydradx.cloud}
+      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://rpc.hydradx.cloud}
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - RPC_RATE_LIMIT=${MM_SNAPSHOT_RPC_RATE_LIMIT:-20}
+      - RPC_CAPACITY=${MM_SNAPSHOT_RPC_CAPACITY:-5}
+      - RAW_MONEY_MARKET_POSITION_CONCURRENCY=${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}
+      - RAW_MONEY_MARKET_BATCH_SIZE=${RAW_MONEY_MARKET_BATCH_SIZE:-50}
+      - RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS=${RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS:-20000}
+    command: ["src/scripts/snapshot-money-market.ts", "--market=core", "--loop", "--refresh-hours=${MM_SNAPSHOT_REFRESH_HOURS:-6}"]
+    networks:
+      - neckwork
+
+  # Refresh sparse GIGAHDX positions more often than the exhaustive primary sweep.
+  mm-supplemental-snapshot:
+    image: hydration-neckwork-indexer:latest
+    build: .
+    container_name: hydration-neckwork-mm-supplemental-snapshot
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - RPC_URL=${MM_SNAPSHOT_RPC_URL:-https://rpc.hydradx.cloud}
+      - RAW_EVM_RPC_URL=${MM_SNAPSHOT_EVM_RPC_URL:-https://rpc.hydradx.cloud}
+      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://rpc.hydradx.cloud}
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - RAW_MONEY_MARKET_POSITION_CONCURRENCY=${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}
+      - RAW_MONEY_MARKET_BATCH_SIZE=${RAW_MONEY_MARKET_BATCH_SIZE:-50}
+      - RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS=${RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS:-20000}
+    command:
+      - src/scripts/snapshot-money-market.ts
+      - --market=gigahdx
+      - --loop
+      - --refresh-minutes=${MM_SUPPLEMENTAL_SNAPSHOT_MINUTES:-15}
+    networks:
+      - neckwork
+
+  # aToken / variable-debt scaled-balance anchor (see clickhouse/schema/041_atoken_anchors.sql).
+  # Refreshes the reserve map each cycle and self-re-establishes the balanceOf@B0 anchor
+  # whenever the anchor table is empty (e.g. after a wipe & reindex). One-time bounded RPC.
+  atoken-anchor:
+    image: hydration-neckwork-indexer:latest
+    build: .
+    container_name: hydration-neckwork-atoken-anchor
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - RPC_URL=${MM_SNAPSHOT_RPC_URL:-https://rpc.hydradx.cloud}
+      - RAW_ATOKEN_ANCHOR_RPC_URL=${MM_SNAPSHOT_RPC_URL:-https://rpc.hydradx.cloud}
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+    command: ["src/scripts/snapshot-atoken-anchors.ts", "--loop", "--refresh-hours=${ATOKEN_ANCHOR_REFRESH_HOURS:-6}"]
+    networks:
+      - neckwork
+
+  ingestion-supervisor:
+    build:
+      context: .
+      dockerfile: ops/supervisor.Dockerfile
+    container_name: hydration-neckwork-ingestion-supervisor
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      raw-live:
+        condition: service_started
+    environment:
+      - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-hydration-neckwork}
+      - ROOT_DIR=/etc/hydration-neckwork
+      - CLICKHOUSE_DATABASE=price_data
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - SQD_GATEWAY=${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}
+      - SQD_GATEWAY_API_KEY=${SQD_GATEWAY_API_KEY:-}
+      - RAW_RPC_URL=${RAW_RPC_URL:-}
+      - RAW_EVM_RPC_URL=${RAW_EVM_RPC_URL:-}
+      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://rpc.hydradx.cloud}
+      - RAW_WORKERS=${RAW_WORKERS:-6}
+      - RAW_FAILED_RETRY_LIMIT=${RAW_FAILED_RETRY_LIMIT:-3}
+      - RAW_BLOCKED_RETRY_AFTER_SECONDS=${RAW_BLOCKED_RETRY_AFTER_SECONDS:-21600}
+      - RANGE_SIZE=${RANGE_SIZE:-1000}
+      - MAIN_MAX_RANGES=${MAIN_MAX_RANGES:-3}
+      - MAIN_WORKERS=${MAIN_WORKERS:-3}
+      - POLL_SECONDS=${POLL_SECONDS:-60}
+      - RAW_RATE_LIMIT=${RAW_RATE_LIMIT:-50}
+      - RAW_CAPACITY=${RAW_CAPACITY:-10}
+      - RAW_BALANCE_READ_CONCURRENCY=${RAW_BALANCE_READ_CONCURRENCY:-20}
+      - RAW_BALANCE_READ_BATCH_SIZE=${RAW_BALANCE_READ_BATCH_SIZE:-250}
+      - RAW_BALANCE_READ_BATCH_CONCURRENCY=${RAW_BALANCE_READ_BATCH_CONCURRENCY:-4}
+      - RAW_SNAPSHOT_READ_BATCH_SIZE=${RAW_SNAPSHOT_READ_BATCH_SIZE:-100}
+      - RAW_SNAPSHOT_READ_BATCH_CONCURRENCY=${RAW_SNAPSHOT_READ_BATCH_CONCURRENCY:-2}
+      - RAW_MONEY_MARKET_POSITION_CONCURRENCY=${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}
+      - RAW_MONEY_MARKET_BATCH_SIZE=${RAW_MONEY_MARKET_BATCH_SIZE:-50}
+      - MAIN_RPC_URL=${MAIN_RPC_URL:-https://rpc.hydradx.cloud}
+      - MAIN_RATE_LIMIT=${MAIN_RATE_LIMIT:-40}
+      - MAIN_CAPACITY=${MAIN_CAPACITY:-8}
+      - LIVE_MAIN_ENABLED=${LIVE_MAIN_ENABLED:-true}
+      - LIVE_MAIN_NAME=${LIVE_MAIN_NAME:-hydration-neckwork-main-live}
+      - LIVE_MAIN_PIPELINE_ID=${LIVE_MAIN_PIPELINE_ID:-main-live}
+      - LIVE_MAIN_RPC_URL=${LIVE_MAIN_RPC_URL:-https://rpc.hydradx.cloud}
+      - LIVE_MAIN_RATE_LIMIT=${LIVE_MAIN_RATE_LIMIT:-100}
+      - LIVE_MAIN_CAPACITY=${LIVE_MAIN_CAPACITY:-20}
+      - LIVE_MAIN_BATCH_SIZE=${LIVE_MAIN_BATCH_SIZE:-50000}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /etc/hydration-neckwork
+    networks:
+      - neckwork
 
   api:
     build:
       context: ./api
       dockerfile: Dockerfile
-    container_name: preis-api
+    container_name: hydration-neckwork-api
     restart: unless-stopped
     depends_on:
       clickhouse:
@@ -70,24 +300,50 @@ services:
     environment:
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      # Live money-market reads use a Hydration RPC reachable from the container.
+      - RAW_EVM_RPC_URL=${RAW_EVM_RPC_URL:-https://rpc.hydradx.cloud}
+      - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
+      - EXPLORER_OCELLOIDS_TOKEN=${EXPLORER_OCELLOIDS_TOKEN:-}
     networks:
-      - preis
+      - neckwork
 
-  ui:
+  preis-ui:
     build:
-      context: ./ui
+      context: ./preis-ui
       dockerfile: Dockerfile
-    container_name: preis-ui
+      args:
+        # Public URL of the Explorer UI, baked into the bundle at build time
+        # (Vite). Set VITE_EXPLORER_URL in .env, then rebuild preis-ui.
+        VITE_EXPLORER_URL: ${VITE_EXPLORER_URL:-}
+    container_name: hydration-neckwork-preis-ui
     depends_on:
       - api
     ports:
       - "5173:80"
     networks:
-      - preis
+      - neckwork
+
+  explorer-ui:
+    build:
+      context: ./explorer-ui
+      dockerfile: Dockerfile
+      args:
+        # Public URL of the Preis price-chart UI, baked into the bundle at build time
+        # (Vite). Set VITE_PREIS_URL in .env, then rebuild explorer-ui.
+        VITE_PREIS_URL: ${VITE_PREIS_URL:-}
+    container_name: hydration-neckwork-explorer-ui
+    depends_on:
+      - api
+    ports:
+      - "5174:80"
+    networks:
+      - neckwork
 
 volumes:
   clickhouse_data:
+    name: ${CLICKHOUSE_VOLUME_NAME:-hydration-neckwork-clickhouse-data}
 
 networks:
-  preis:
+  neckwork:
+    name: hydration-neckwork-network
     driver: bridge

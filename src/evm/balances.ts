@@ -46,57 +46,6 @@ function substrateToEvmAddress(accountHex: string): string {
 }
 
 /**
- * Read ERC20 token balance from EVM.AccountStorages via SQD.
- *
- * For standard ERC20: reads _balances[account] at slot 3.
- * For Aave aTokens: reads _userState[account] at slot 52,
- * extracts scaledBalance (lower 128 bits) and cached liquidity index
- * (upper 128 bits), then computes: scaledBalance * index / 1e27.
- *
- * Returns the balance in native token units, or 0n if not readable.
- */
-export async function readErc20Balance(
-  block: Block,
-  assetId: number,
-  poolAccountHex: string
-): Promise<bigint> {
-  const contractAddr = erc20Contracts.get(assetId)
-  if (!contractAddr) return 0n
-
-  if (!storage.evm.accountStorages.v193.is(block)) return 0n
-
-  const evmAddr = substrateToEvmAddress(poolAccountHex)
-  const isAToken = atokenIds.has(assetId)
-  const slot = isAToken ? AAVE_USER_STATE_SLOT : ERC20_BALANCE_SLOT
-
-  const storageKey = mappingStorageKey(evmAddr, slot)
-
-  try {
-    const raw = await storage.evm.accountStorages.v193.get(block, contractAddr, storageKey)
-    if (!raw) return 0n
-
-    const hex = typeof raw === 'string' ? raw.replace('0x', '') : ''
-    if (!hex || hex === '0'.repeat(64)) return 0n
-
-    if (isAToken) {
-      // Aave V3 UserState packing: lower 128 bits = scaledBalance, upper 128 bits = cached data
-      // The upper 128 bits contain the liquidity index at time of last interaction
-      const fullValue = BigInt('0x' + hex)
-      const scaledBalance = fullValue & ((1n << 128n) - 1n)
-      const cachedIndex = fullValue >> 128n
-
-      if (cachedIndex === 0n) return scaledBalance
-      return (scaledBalance * cachedIndex) / RAY
-    } else {
-      // Standard ERC20: direct balance value
-      return BigInt('0x' + hex)
-    }
-  } catch {
-    return 0n
-  }
-}
-
-/**
  * Batch-read ERC20 balances for multiple assets in a pool.
  * Returns an array of balances in the same order as assetIds.
  */
@@ -106,8 +55,9 @@ export async function readErc20Balances(
   poolAccountHex: string
 ): Promise<bigint[]> {
   // For efficiency, batch all storage reads
-  const queries: Array<{ assetId: number; contract: string; storageKey: string; isAToken: boolean }> = []
+  const queries: Array<{ index: number; contract: string; storageKey: string; isAToken: boolean }> = []
   const results: bigint[] = new Array(assetIds.length).fill(0n)
+  const evmAddr = substrateToEvmAddress(poolAccountHex)
 
   for (let i = 0; i < assetIds.length; i++) {
     const contract = erc20Contracts.get(assetIds[i])
@@ -115,13 +65,13 @@ export async function readErc20Balances(
 
     const isAToken = atokenIds.has(assetIds[i])
     const slot = isAToken ? AAVE_USER_STATE_SLOT : ERC20_BALANCE_SLOT
-    const evmAddr = substrateToEvmAddress(poolAccountHex)
     const storageKey = mappingStorageKey(evmAddr, slot)
-    queries.push({ assetId: assetIds[i], contract, storageKey, isAToken })
+    queries.push({ index: i, contract, storageKey, isAToken })
   }
 
-  if (queries.length === 0 || !storage.evm.accountStorages.v193.is(block)) {
-    return results
+  if (queries.length === 0) return results
+  if (!storage.evm.accountStorages.v193.is(block)) {
+    throw new Error(`Unsupported EVM.AccountStorages storage at block ${block.height}`)
   }
 
   try {
@@ -136,20 +86,18 @@ export async function readErc20Balances(
       if (!hex || hex === '0'.repeat(64)) continue
 
       const query = queries[qi]
-      const idx = assetIds.indexOf(query.assetId)
-      if (idx < 0) continue
 
       if (query.isAToken) {
         const fullValue = BigInt('0x' + hex)
         const scaledBalance = fullValue & ((1n << 128n) - 1n)
         const cachedIndex = fullValue >> 128n
-        results[idx] = cachedIndex === 0n ? scaledBalance : (scaledBalance * cachedIndex) / RAY
+        results[query.index] = cachedIndex === 0n ? scaledBalance : (scaledBalance * cachedIndex) / RAY
       } else {
-        results[idx] = BigInt('0x' + hex)
+        results[query.index] = BigInt('0x' + hex)
       }
     }
   } catch (error) {
-    console.error(`[EVM] Failed to read ERC20 balances at block ${block.height}:`, error)
+    throw new Error(`Failed to read ERC20 balances at block ${block.height}`, { cause: error })
   }
 
   return results

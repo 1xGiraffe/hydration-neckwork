@@ -50,6 +50,7 @@ export interface GraphEdge {
   kind: EdgeKind;
   liquidity: bigint;            // For tie-breaking: normalized reserve sum
   computePrice: (knownPrice: bigint, precision: number) => bigint;
+  computeLiquidityUsd?: (knownPrice: bigint, computedPrice: bigint) => bigint;
 }
 
 export interface QueueEntry {

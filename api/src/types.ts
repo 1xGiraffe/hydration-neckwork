@@ -17,7 +17,6 @@ export interface OHLCVCandle {
 export interface OmniwatchTrader {
   account: string
   shortAccount: string
-  subscanUrl: string
   emoji: string
   emojiName?: string
   emojiUrl?: string
@@ -66,7 +65,7 @@ export interface AssetMarketStats {
   change1h: number | null       // Decimal ratio, e.g. 0.0523 = +5.23%
   change24h: number | null
   change7d: number | null
-  sparkline: number[]           // 24-48 hourly close prices (7d, downsampled)
+  sparkline: number[]           // ~42 four-hourly close prices over the last 7d
   hops: number | null           // Hop count from BFS pricing; null if no price data
   volumeUsd24h: number          // 24h USD volume across both buy + sell sides
 }
@@ -81,4 +80,5 @@ export interface Asset {
   decimals: number
   isStablecoin: boolean
   parachainId: number | null  // XCM origin parachain ID, null for native Hydration assets
+  origin?: { ecosystem: string; chainId: string; assetId: string | null } | null
 }

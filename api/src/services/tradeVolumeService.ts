@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import type { OmniwatchCandleSummary, OmniwatchTrader } from '../types.ts'
-import { accountIcon, ensureSnakewatchEmojiSourceLoaded, polkadotAddress, shortAccount, subscanAccountUrl } from './omniwatchIdentity.ts'
+import { accountIcon, ensureSnakewatchEmojiSourceLoaded, polkadotAddress, shortAccount } from './omniwatchIdentity.ts'
 import { toClickHouseDateTime, type OHLCVInterval } from './ohlcvService.ts'
 
 const INTERVAL_BUCKET: Record<OHLCVInterval, string> = {
@@ -98,7 +98,6 @@ function toTrader(row: {
   return {
     account: address,
     shortAccount: shortAccount(address),
-    subscanUrl: subscanAccountUrl(row.account),
     emoji: icon.emoji,
     ...(icon.emojiName ? { emojiName: icon.emojiName } : {}),
     ...(icon.emojiUrl ? { emojiUrl: icon.emojiUrl } : {}),
@@ -122,6 +121,13 @@ export async function queryTradeVolumeSummaries(
     const emojiSourceReady = ensureSnakewatchEmojiSourceLoaded()
     const result = await client.query({
       query: `
+        WITH
+          (SELECT min(block_height) FROM price_data.blocks
+            WHERE block_timestamp >= {start_time:DateTime}
+              AND block_timestamp < {end_time:DateTime}) AS from_block,
+          (SELECT max(block_height) FROM price_data.blocks
+            WHERE block_timestamp >= {start_time:DateTime}
+              AND block_timestamp < {end_time:DateTime}) AS to_block
         SELECT
           interval_start,
           tupleElement(top_trader, 1) AS account,
@@ -155,9 +161,10 @@ export async function queryTradeVolumeSummaries(
               sum(tv.usd_volume_buy) + sum(tv.usd_volume_sell) AS volume_total,
               sum(tv.usd_volume_buy) - sum(tv.usd_volume_sell) AS net_volume,
               sum(tv.trade_count) AS trade_count
-            FROM price_data.trade_volume_by_account AS tv FINAL
+            FROM price_data.trade_volume_by_account AS tv
             INNER JOIN price_data.blocks b ON tv.block_height = b.block_height
             WHERE tv.asset_id = {asset_id:UInt32}
+              AND tv.block_height BETWEEN from_block AND to_block
               AND b.block_timestamp >= {start_time:DateTime}
               AND b.block_timestamp < {end_time:DateTime}
             GROUP BY interval_start, tv.account
@@ -198,7 +205,7 @@ export async function queryTradeVolumeSummaries(
   }
 }
 
-export function intervalEnd(start: Date, interval: OHLCVInterval): Date {
+function intervalEnd(start: Date, interval: OHLCVInterval): Date {
   if (interval === '1M') {
     return new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, start.getUTCDate(), start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds()))
   }
@@ -214,6 +221,13 @@ export async function queryTradeVolumeDetails(
   const limit = options.limit ?? 200
   const offset = options.offset ?? 0
   const perAccountQuery = `
+    WITH
+      (SELECT min(block_height) FROM price_data.blocks
+        WHERE block_timestamp >= {start_time:DateTime}
+          AND block_timestamp < {end_time:DateTime}) AS from_block,
+      (SELECT max(block_height) FROM price_data.blocks
+        WHERE block_timestamp >= {start_time:DateTime}
+          AND block_timestamp < {end_time:DateTime}) AS to_block
     SELECT
       tv.account AS account,
       sum(tv.usd_volume_buy) AS volume_buy,
@@ -221,9 +235,10 @@ export async function queryTradeVolumeDetails(
       sum(tv.usd_volume_buy) + sum(tv.usd_volume_sell) AS volume_total,
       sum(tv.usd_volume_buy) - sum(tv.usd_volume_sell) AS net_volume,
       sum(tv.trade_count) AS trade_count
-    FROM price_data.trade_volume_by_account AS tv FINAL
+    FROM price_data.trade_volume_by_account AS tv
     INNER JOIN price_data.blocks b ON tv.block_height = b.block_height
     WHERE tv.asset_id = {asset_id:UInt32}
+      AND tv.block_height BETWEEN from_block AND to_block
       AND b.block_timestamp >= {start_time:DateTime}
       AND b.block_timestamp < {end_time:DateTime}
     GROUP BY tv.account

@@ -1,5 +1,4 @@
 import type {
-  Block,
   Call,
   Event,
   Extrinsic,
@@ -9,11 +8,14 @@ import { SubstrateBatchProcessor } from '@subsquid/substrate-processor'
 import { config } from '../config.js'
 
 export const rawProcessor = new SubstrateBatchProcessor()
-  .setGateway(config.SQD_GATEWAY)
+  .setGateway({
+    url: config.SQD_GATEWAY,
+    apiKey: config.SQD_GATEWAY_API_KEY,
+  })
   .setRpcEndpoint({
     url: config.RPC_URL,
     rateLimit: config.RPC_RATE_LIMIT,
-    capacity: 20,
+    capacity: config.RPC_CAPACITY,
   })
   .setBlockRange({ from: 0 })
   .addEvent({
@@ -57,8 +59,7 @@ export const rawProcessor = new SubstrateBatchProcessor()
     },
   })
 
-export type RawProcessorFields = SubstrateBatchProcessorFields<typeof rawProcessor>
-export type RawBlock = Block<RawProcessorFields>
+type RawProcessorFields = SubstrateBatchProcessorFields<typeof rawProcessor>
 export type RawExtrinsic = Extrinsic<RawProcessorFields>
 export type RawCall = Call<RawProcessorFields>
 export type RawEvent = Event<RawProcessorFields>

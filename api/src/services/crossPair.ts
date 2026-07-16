@@ -40,6 +40,13 @@ export async function queryCrossPairCandles(
 
   const result = await client.query({
     query: `
+      WITH
+        (SELECT min(block_height) FROM price_data.blocks
+          WHERE block_timestamp >= {start_time:DateTime}
+            AND block_timestamp < {end_time:DateTime}) AS from_block,
+        (SELECT max(block_height) FROM price_data.blocks
+          WHERE block_timestamp >= {start_time:DateTime}
+            AND block_timestamp < {end_time:DateTime}) AS to_block
       SELECT
         ${bucket} AS interval_start,
         argMin(sub.ratio, b.block_timestamp) AS open,
@@ -59,6 +66,8 @@ export async function queryCrossPairCandles(
         INNER JOIN price_data.prices quote ON base.block_height = quote.block_height
         WHERE base.asset_id = {base_id:UInt32}
           AND quote.asset_id = {quote_id:UInt32}
+          AND base.block_height BETWEEN from_block AND to_block
+          AND quote.block_height BETWEEN from_block AND to_block
           AND toFloat64(quote.usd_price) > 0
       ) sub
       INNER JOIN price_data.blocks b ON sub.block_height = b.block_height

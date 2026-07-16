@@ -3,6 +3,10 @@ import { createClickHouseClient, type ClickHouseClient } from '../db/client.js'
 import type { AssetRow } from '../db/schema.ts'
 import type { OmnipoolAssetState, StableswapPool, XYKPool } from '../price/types.ts'
 import type { SnapshotPayload } from '../raw/types.ts'
+import {
+  assertFinalizedRawCoverage,
+  getCompletedRawRanges,
+} from '../raw/ranges.js'
 import { deriveStableswapPoolAccount } from '../util/account.js'
 import { u8aToHex } from '@polkadot/util'
 
@@ -22,13 +26,11 @@ export interface HistoricalSnapshotEntry {
 
 export interface HistoricalSnapshotState {
   assetRows: AssetRow[]
-  assetsKey: string
   compositionKey: string
   decimals: Map<number, number>
   atokenEquivalences: [number, number][]
   atokenIds: Set<number>
   lpEquivalences: Map<number, number>
-  assetsTracked: number
   poolAccounts: Set<string>
   omnipoolAssets: Map<number, OmnipoolAssetState>
   xykPools: XYKPool[]
@@ -49,7 +51,12 @@ function getStableswapPoolAccount(poolId: number): string {
 
 function toBigInt(value: string | number | bigint | null | undefined): bigint {
   if (typeof value === 'bigint') return value
-  if (typeof value === 'number') return BigInt(value)
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) {
+      throw new Error(`Snapshot integer is not safe: ${value}`)
+    }
+    return BigInt(value)
+  }
   if (value == null || value === '') return 0n
   return BigInt(value)
 }
@@ -60,9 +67,17 @@ function asArray<T>(value: T[] | '0x' | null | undefined): T[] {
 }
 
 function toNumber(value: string | number | bigint): number {
-  if (typeof value === 'number') return value
-  if (typeof value === 'bigint') return Number(value)
-  return Number.parseInt(value, 10)
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'bigint'
+      ? Number(value)
+      : /^\d+$/.test(value)
+        ? Number(value)
+        : Number.NaN
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`Snapshot asset id is not a non-negative safe integer: ${String(value)}`)
+  }
+  return parsed
 }
 
 function hashFields(parts: Array<string | number | bigint | null | undefined>): string {
@@ -71,36 +86,6 @@ function hashFields(parts: Array<string | number | bigint | null | undefined>): 
     hash.update(String(part ?? ''))
     hash.update('\0')
   }
-  return hash.digest('hex')
-}
-
-function buildAssetsKey(
-  assetRows: AssetRow[],
-  atokenEquivalences: [number, number][],
-  lpEquivalenceEntries: [number, number][],
-): string {
-  const hash = createHash('sha256')
-
-  for (const row of assetRows) {
-    hash.update(hashFields([
-      row.asset_id,
-      row.symbol,
-      row.name,
-      row.decimals,
-      row.parachain_id,
-    ]))
-  }
-
-  hash.update(hashFields(['atokens']))
-  for (const [baseId, aTokenId] of atokenEquivalences) {
-    hash.update(hashFields([baseId, aTokenId]))
-  }
-
-  hash.update(hashFields(['lp']))
-  for (const [lpId, displayId] of lpEquivalenceEntries) {
-    hash.update(hashFields([lpId, displayId]))
-  }
-
   return hash.digest('hex')
 }
 
@@ -147,6 +132,9 @@ export function normalizeAssetIdList(value: unknown): number[] {
   if (typeof value === 'string' && value.startsWith('0x')) {
     const hex = value.slice(2)
     if (hex.length === 0) return []
+    if (!/^(?:[0-9a-f]{2})+$/i.test(hex)) {
+      throw new Error(`Malformed hex snapshot asset id list: ${value}`)
+    }
 
     const assetIds: number[] = []
     for (let i = 0; i < hex.length; i += 2) {
@@ -155,7 +143,7 @@ export function normalizeAssetIdList(value: unknown): number[] {
     return assetIds
   }
 
-  return []
+  throw new Error(`Unsupported snapshot asset id list: ${String(value)}`)
 }
 
 export function normalizeEquivalenceList(value: unknown): [number, number][] {
@@ -164,6 +152,9 @@ export function normalizeEquivalenceList(value: unknown): [number, number][] {
   const result: [number, number][] = []
 
   const pushPairs = (assetIds: number[]): void => {
+    if (assetIds.length % 2 !== 0) {
+      throw new Error('Snapshot equivalence list contains an unpaired asset id')
+    }
     for (let i = 0; i + 1 < assetIds.length; i += 2) {
       result.push([assetIds[i], assetIds[i + 1]])
     }
@@ -217,6 +208,9 @@ function parseSnapshot(payloadJson: string, options: ParseSnapshotOptions = {}):
     name: asset.name,
     decimals: asset.decimals,
     parachain_id: asset.parachainId ?? null,
+    origin_ecosystem: asset.originEcosystem ?? null,
+    origin_chain_id: asset.originChainId ?? null,
+    origin_asset_id: asset.originAssetId ?? null,
   }))
 
   const nativeAssetRow = options.nativeAssetRow
@@ -280,13 +274,11 @@ function parseSnapshot(payloadJson: string, options: ParseSnapshotOptions = {}):
 
   return {
     assetRows,
-    assetsKey: buildAssetsKey(assetRows, atokenEquivalences, lpEquivalenceEntries),
     compositionKey,
     decimals,
     atokenEquivalences,
     atokenIds,
     lpEquivalences,
-    assetsTracked: assetRows.length,
     poolAccounts,
     omnipoolAssets,
     xykPools,
@@ -312,42 +304,57 @@ export function diffAssetRows(
       previous.name !== row.name ||
       previous.decimals !== row.decimals ||
       previous.parachain_id !== row.parachain_id
+      || previous.origin_ecosystem !== row.origin_ecosystem
+      || previous.origin_chain_id !== row.origin_chain_id
+      || previous.origin_asset_id !== row.origin_asset_id
   })
 }
 
 export class ClickHouseSnapshotReader {
   private readonly client: ClickHouseClient
   private readonly nativeAssetRow?: AssetRow
+  private readonly finalizedOnly: boolean
 
-  constructor(options: { client?: ClickHouseClient; nativeAssetRow?: AssetRow } = {}) {
+  constructor(options: { client?: ClickHouseClient; nativeAssetRow?: AssetRow; finalizedOnly?: boolean } = {}) {
     this.client = options.client ?? createClickHouseClient()
     this.nativeAssetRow = options.nativeAssetRow
+    this.finalizedOnly = options.finalizedOnly ?? false
+  }
+
+  async assertFinalizedCoverage(fromBlock: number, toBlock: number): Promise<void> {
+    await assertFinalizedRawCoverage(this.client, fromBlock, toBlock)
   }
 
   async *streamRange(fromBlock: number, toBlock: number): AsyncGenerator<HistoricalSnapshotEntry> {
-    const result = await this.client.query({
-      query: `
-        SELECT block_height, payload_json
-        FROM price_data.raw_block_snapshots FINAL
-        WHERE block_height >= ${fromBlock}
-          AND block_height <= ${toBlock}
-        ORDER BY block_height ASC
-      `,
-      format: 'JSONEachRow',
-    })
+    const ranges = this.finalizedOnly
+      ? await getCompletedRawRanges(this.client, fromBlock, toBlock)
+      : [{ fromBlock, toBlock }]
 
-    try {
-      for await (const rows of result.stream<SnapshotRow>()) {
-        for (const row of rows) {
-          const snapshotRow = row.json<SnapshotRow>()
-          yield {
-            blockHeight: snapshotRow.block_height,
-            snapshot: parseSnapshot(snapshotRow.payload_json, { nativeAssetRow: this.nativeAssetRow }),
+    for (const range of ranges) {
+      const result = await this.client.query({
+        query: `
+          SELECT block_height, payload_json
+          FROM price_data.raw_block_snapshots FINAL
+          WHERE block_height >= ${range.fromBlock}
+            AND block_height <= ${range.toBlock}
+          ORDER BY block_height ASC
+        `,
+        format: 'JSONEachRow',
+      })
+
+      try {
+        for await (const rows of result.stream<SnapshotRow>()) {
+          for (const row of rows) {
+            const snapshotRow = row.json<SnapshotRow>()
+            yield {
+              blockHeight: snapshotRow.block_height,
+              snapshot: parseSnapshot(snapshotRow.payload_json, { nativeAssetRow: this.nativeAssetRow }),
+            }
           }
         }
+      } finally {
+        result.close()
       }
-    } finally {
-      result.close()
     }
   }
 

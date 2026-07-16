@@ -14,6 +14,29 @@ interface TrackerOptions {
 
 const DEFAULT_ASSET_DECIMALS = 12
 
+function assetRow(metadata: AssetMetadata): AssetRow {
+  return {
+    asset_id: metadata.assetId,
+    symbol: metadata.symbol,
+    name: metadata.name,
+    decimals: metadata.decimals,
+    parachain_id: metadata.parachainId ?? null,
+    origin_ecosystem: metadata.originEcosystem ?? null,
+    origin_chain_id: metadata.originChainId ?? null,
+    origin_asset_id: metadata.originAssetId ?? null,
+  }
+}
+
+function assetMetadataChanged(previous: AssetMetadata, current: AssetMetadata): boolean {
+  return previous.symbol !== current.symbol
+    || previous.name !== current.name
+    || previous.decimals !== current.decimals
+    || previous.parachainId !== current.parachainId
+    || previous.originEcosystem !== current.originEcosystem
+    || previous.originChainId !== current.originChainId
+    || previous.originAssetId !== current.originAssetId
+}
+
 /**
  * Decode hex-encoded bytes to UTF-8 string
  */
@@ -38,8 +61,8 @@ function decodeBytes(bytes: Uint8Array | string | undefined): string {
 /**
  * Format asset type discriminant as string
  */
-function formatAssetType(assetType: { __kind: string, value?: any }): string {
-  if (assetType.__kind === 'PoolShare' && assetType.value) {
+function formatAssetType(assetType: { __kind: string; value?: unknown }): string {
+  if (assetType.__kind === 'PoolShare' && Array.isArray(assetType.value)) {
     const [asset1, asset2] = assetType.value
     return `PoolShare(${asset1},${asset2})`
   }
@@ -51,21 +74,95 @@ function formatAssetType(assetType: { __kind: string, value?: any }): string {
  * Matches: { parents: 0, interior: X1(AccountKey20 { key }) }
  * Handles both V3 (X1 = single junction) and V5 (X1 = array of junctions).
  */
-function extractEvmAddress(location: any): string | null {
-  if (!location || location.parents !== 0) return null
-  const interior = location.interior
-  if (!interior || interior.__kind !== 'X1') return null
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value != null && typeof value === 'object'
+    ? value as Record<string, unknown>
+    : null
+}
+
+function locationJunctions(location: unknown): Record<string, unknown>[] {
+  const locationRecord = objectRecord(location)
+  const interior = objectRecord(locationRecord?.interior)
+  if (interior == null || interior.__kind === 'Here') return []
+  const valueRecord = objectRecord(interior.value)
+  const values = Array.isArray(interior.value)
+    ? interior.value
+    : interior.__kind === 'X1'
+      ? [interior.value]
+      : valueRecord == null ? [] : Object.values(valueRecord)
+  return values.map(objectRecord).filter((v): v is Record<string, unknown> => v != null)
+}
+
+function junctionPayload(junction: Record<string, unknown>): Record<string, unknown> | null {
+  return objectRecord(junction.value)
+}
+
+function normalizedHex(value: unknown, bytes?: number): string | null {
+  const direct = typeof value === 'string' ? value : value instanceof Uint8Array ? Buffer.from(value).toString('hex') : null
+  if (direct == null) return null
+  const hex = direct.startsWith('0x') ? direct.toLowerCase() : `0x${direct.toLowerCase()}`
+  return /^0x[0-9a-f]+$/.test(hex) && (bytes == null || hex.length === 2 + bytes * 2) ? hex : null
+}
+
+export interface AssetOrigin {
+  ecosystem: 'polkadot' | 'ethereum'
+  chainId: string
+  assetId: string | null
+}
+
+// Decode the same generic origin tuple Hydration UI uses for icon lookup:
+// ecosystem + chain + origin-chain asset key. This preserves Ethereum
+// GlobalConsensus/AccountKey20 locations instead of reducing every origin to a
+// nullable parachain id.
+export function extractAssetOrigin(location: unknown): AssetOrigin | null {
+  const junctions = locationJunctions(location)
+  const consensus = junctions.find(j => j.__kind === 'GlobalConsensus')
+  const network = consensus ? (junctionPayload(consensus) ?? consensus) : null
+  const networkKind = String(network?.__kind ?? network?.type ?? '')
+  if (networkKind === 'Ethereum') {
+    const details = objectRecord(network?.value) ?? network
+    const rawChainId = details?.chainId ?? details?.chain_id ?? details?.value
+    const chainId = typeof rawChainId === 'bigint' || typeof rawChainId === 'number' || typeof rawChainId === 'string'
+      ? String(rawChainId) : ''
+    const account = junctions.find(j => j.__kind === 'AccountKey20')
+    const accountDetails = account ? (junctionPayload(account) ?? account) : null
+    const assetId = normalizedHex(accountDetails?.key, 20)
+    return chainId && assetId ? { ecosystem: 'ethereum', chainId, assetId } : null
+  }
+
+  const parachainId = extractParachainId(location)
+  if (parachainId == null) return null
+  const originJunction = junctions.find(j => j.__kind !== 'Parachain')
+  let assetId: string | null = null
+  if (originJunction?.__kind === 'GeneralIndex') assetId = String(originJunction.value)
+  else if (originJunction?.__kind === 'AccountKey20') {
+    const details = junctionPayload(originJunction) ?? originJunction
+    assetId = normalizedHex(details.key, 20)
+  } else if (originJunction?.__kind === 'GeneralKey') {
+    const details = junctionPayload(originJunction) ?? originJunction
+    assetId = normalizedHex(details.data)
+  }
+  return { ecosystem: 'polkadot', chainId: String(parachainId), assetId }
+}
+
+function extractEvmAddress(location: unknown): string | null {
+  const locationRecord = objectRecord(location)
+  if (locationRecord?.parents !== 0) return null
+  const interior = objectRecord(locationRecord.interior)
+  if (interior?.__kind !== 'X1') return null
 
   // V5: X1 is an array, V3: X1 is a single junction
-  const junction = Array.isArray(interior.value) ? interior.value[0] : interior.value
-  if (!junction || junction.__kind !== 'AccountKey20') return null
+  const junction = objectRecord(Array.isArray(interior.value) ? interior.value[0] : interior.value)
+  if (junction?.__kind !== 'AccountKey20') return null
   const key = junction.key
-  if (!key) return null
   // key may be Uint8Array or hex string
   if (typeof key === 'string') {
-    return key.startsWith('0x') ? key.toLowerCase() : ('0x' + key).toLowerCase()
+    const normalized = key.startsWith('0x') ? key.toLowerCase() : `0x${key.toLowerCase()}`
+    return /^0x[0-9a-f]{40}$/.test(normalized) ? normalized : null
   }
-  return '0x' + Buffer.from(key).toString('hex').toLowerCase()
+  if (!(key instanceof Uint8Array)) return null
+  const normalized = `0x${Buffer.from(key).toString('hex').toLowerCase()}`
+  return normalized.length === 42 ? normalized : null
 }
 
 /**
@@ -73,27 +170,56 @@ function extractEvmAddress(location: any): string | null {
  * Matches: { parents: 1, interior: X1(Parachain(id)) } or X2(Parachain(id), ...)
  * Native Hydration assets have no location -> returns null.
  */
-export function extractParachainId(location: any): number | null {
-  if (!location || location.parents !== 1) return null
-  const interior = location.interior
-  if (!interior || interior.__kind === 'Here') return null
+export function extractParachainId(location: unknown): number | null {
+  const locationRecord = objectRecord(location)
+  if (locationRecord?.parents !== 1) return null
+  const interior = objectRecord(locationRecord.interior)
+  if (interior == null || interior.__kind === 'Here') return null
 
   // Normalize junctions: V5 uses arrays, V3 may use single value
-  let junctions: any[]
+  let junctions: unknown[]
   if (interior.__kind === 'X1') {
     junctions = Array.isArray(interior.value) ? interior.value : [interior.value]
   } else {
     // X2, X3, etc. — value is an array or tuple-like object
-    junctions = Array.isArray(interior.value) ? interior.value : Object.values(interior.value)
+    const valueRecord = objectRecord(interior.value)
+    junctions = Array.isArray(interior.value)
+      ? interior.value
+      : valueRecord == null
+        ? []
+        : Object.values(valueRecord)
   }
 
-  const parachainJunction = junctions.find((j: any) => j?.__kind === 'Parachain')
+  const parachainJunction = junctions
+    .map(objectRecord)
+    .find(junction => junction?.__kind === 'Parachain')
   if (!parachainJunction) return null
 
   // If the only junction is Parachain, this is a native token of that chain — not bridged
   if (junctions.length === 1) return null
 
-  return typeof parachainJunction.value === 'number' ? parachainJunction.value : null
+  return typeof parachainJunction.value === 'number' &&
+    Number.isSafeInteger(parachainJunction.value) &&
+    parachainJunction.value >= 0
+    ? parachainJunction.value
+    : null
+}
+
+async function readAssetLocations(block: Block, assetIds: number[]): Promise<Array<[number, unknown]>> {
+  let locations: unknown[]
+  if (storage.assetRegistry.assetLocations.v394.is(block)) {
+    locations = await storage.assetRegistry.assetLocations.v394.getMany(block, assetIds)
+  } else if (storage.assetRegistry.assetLocations.v244.is(block)) {
+    locations = await storage.assetRegistry.assetLocations.v244.getMany(block, assetIds)
+  } else if (storage.assetRegistry.assetLocations.v160.is(block)) {
+    locations = await storage.assetRegistry.assetLocations.v160.getMany(block, assetIds)
+  } else if (storage.assetRegistry.assetLocations.v108.is(block)) {
+    locations = await storage.assetRegistry.assetLocations.v108.getMany(block, assetIds)
+  } else {
+    return []
+  }
+
+  return assetIds.map((assetId, index) => [assetId, locations[index]])
 }
 
 export function isPlaceholderAssetMetadata(metadata: Pick<AssetMetadata, 'assetId' | 'symbol' | 'name' | 'assetType'>): boolean {
@@ -120,6 +246,9 @@ export class AssetRegistryTracker {
         name: nativeAssetMetadata.name,
         decimals: nativeAssetMetadata.decimals,
         parachain_id: nativeAssetMetadata.parachainId ?? null,
+        origin_ecosystem: nativeAssetMetadata.originEcosystem ?? null,
+        origin_chain_id: nativeAssetMetadata.originChainId ?? null,
+        origin_asset_id: nativeAssetMetadata.originAssetId ?? null,
       })
     }
   }
@@ -146,56 +275,35 @@ export class AssetRegistryTracker {
       }
       discoveredAssets.set(metadata.assetId, metadata)
     }
+    const addModernAssets = (pairs: Array<[number, {
+      symbol?: Uint8Array | string
+      name?: Uint8Array | string
+      decimals?: number | null
+      assetType: { __kind: string; value?: unknown }
+    } | undefined]>): void => {
+      for (const [assetId, details] of pairs) {
+        if (!details) continue
+        if (details.decimals == null && !this.includeUnresolvedAssets) {
+          unresolvedAssetsSkipped++
+          continue
+        }
+        addDiscoveredAsset({
+          assetId,
+          symbol: decodeBytes(details.symbol).trim() || `Asset${assetId}`,
+          name: decodeBytes(details.name).trim() || `Asset ${assetId}`,
+          decimals: details.decimals ?? DEFAULT_ASSET_DECIMALS,
+          assetType: formatAssetType(details.assetType),
+        })
+      }
+    }
 
     // Strategy: Try newer versions first (v264 has everything in one place)
     // Fall back to older versions that split AssetDetails and AssetMetadata
 
     if (storage.assetRegistry.assets.v264.is(block)) {
-      // v264+: All metadata in AssetDetails (symbol, decimals, name all in one)
-      const pairs = await storage.assetRegistry.assets.v264.getPairs(block)
-
-      for (const [assetId, details] of pairs) {
-        if (!details) continue
-        if (details.decimals == null) {
-          if (!this.includeUnresolvedAssets) {
-            unresolvedAssetsSkipped++
-            continue
-          }
-        }
-
-        const metadata: AssetMetadata = {
-          assetId,
-          symbol: decodeBytes(details.symbol).trim() || `Asset${assetId}`,
-          name: decodeBytes(details.name).trim() || `Asset ${assetId}`,
-          decimals: details.decimals ?? DEFAULT_ASSET_DECIMALS,
-          assetType: formatAssetType(details.assetType),
-        }
-
-        addDiscoveredAsset(metadata)
-      }
+      addModernAssets(await storage.assetRegistry.assets.v264.getPairs(block))
     } else if (storage.assetRegistry.assets.v222.is(block)) {
-      // v222: Similar to v264
-      const pairs = await storage.assetRegistry.assets.v222.getPairs(block)
-
-      for (const [assetId, details] of pairs) {
-        if (!details) continue
-        if (details.decimals == null) {
-          if (!this.includeUnresolvedAssets) {
-            unresolvedAssetsSkipped++
-            continue
-          }
-        }
-
-        const metadata: AssetMetadata = {
-          assetId,
-          symbol: decodeBytes(details.symbol).trim() || `Asset${assetId}`,
-          name: decodeBytes(details.name).trim() || `Asset ${assetId}`,
-          decimals: details.decimals ?? DEFAULT_ASSET_DECIMALS,
-          assetType: formatAssetType(details.assetType),
-        }
-
-        addDiscoveredAsset(metadata)
-      }
+      addModernAssets(await storage.assetRegistry.assets.v222.getPairs(block))
     } else if (
       storage.assetRegistry.assets.v176.is(block) ||
       storage.assetRegistry.assets.v160.is(block) ||
@@ -272,73 +380,30 @@ export class AssetRegistryTracker {
       console.warn(`[AssetRegistry] No matching storage version at block ${blockHeight}`)
     }
 
-    // Read AssetLocations to discover EVM contract addresses for Erc20 assets.
-    // Location with parents=0, interior=X1(AccountKey20{key}) → key is the EVM address.
-    const erc20AssetIds = [...discoveredAssets.entries()]
-      .filter(([, m]) => m.assetType === 'Erc20')
-      .map(([id]) => id)
-
-    if (erc20AssetIds.length > 0) {
-      try {
-        let locationPairs: [number, any][] = []
-        if (storage.assetRegistry.assetLocations.v394.is(block)) {
-          locationPairs = await storage.assetRegistry.assetLocations.v394.getMany(block, erc20AssetIds)
-            .then(locs => erc20AssetIds.map((id, i) => [id, locs[i]] as [number, any]))
-        } else if (storage.assetRegistry.assetLocations.v244.is(block)) {
-          locationPairs = await storage.assetRegistry.assetLocations.v244.getMany(block, erc20AssetIds)
-            .then(locs => erc20AssetIds.map((id, i) => [id, locs[i]] as [number, any]))
-        } else if (storage.assetRegistry.assetLocations.v160.is(block)) {
-          locationPairs = await storage.assetRegistry.assetLocations.v160.getMany(block, erc20AssetIds)
-            .then(locs => erc20AssetIds.map((id, i) => [id, locs[i]] as [number, any]))
-        } else if (storage.assetRegistry.assetLocations.v108.is(block)) {
-          locationPairs = await storage.assetRegistry.assetLocations.v108.getMany(block, erc20AssetIds)
-            .then(locs => erc20AssetIds.map((id, i) => [id, locs[i]] as [number, any]))
-        }
-
-        for (const [assetId, location] of locationPairs) {
-          const evmAddr = extractEvmAddress(location)
-          if (evmAddr) {
-            const meta = discoveredAssets.get(assetId)
-            if (meta) meta.evmAddress = evmAddr
-          }
-        }
-        const resolved = [...discoveredAssets.values()].filter(m => m.evmAddress)
-        if (resolved.length > 0) {
-          console.log(`[AssetRegistry] ERC20 addresses resolved: ${resolved.map(m => `${m.symbol}(${m.assetId})=${m.evmAddress!.slice(0, 10)}…`).join(', ')}`)
-        }
-      } catch (error) {
-        console.warn(`[AssetRegistry] Failed to read asset locations:`, error)
-      }
-    }
-
-    // Read AssetLocations for ALL assets to extract parachainId for origin badges
+    // Read every location once, then derive ERC-20 contracts and origin parachains.
     const allAssetIds = [...discoveredAssets.keys()]
     if (allAssetIds.length > 0) {
       try {
-        let allLocationPairs: [number, any][] = []
-        if (storage.assetRegistry.assetLocations.v394.is(block)) {
-          allLocationPairs = await storage.assetRegistry.assetLocations.v394.getMany(block, allAssetIds)
-            .then(locs => allAssetIds.map((id, i) => [id, locs[i]] as [number, any]))
-        } else if (storage.assetRegistry.assetLocations.v244.is(block)) {
-          allLocationPairs = await storage.assetRegistry.assetLocations.v244.getMany(block, allAssetIds)
-            .then(locs => allAssetIds.map((id, i) => [id, locs[i]] as [number, any]))
-        } else if (storage.assetRegistry.assetLocations.v160.is(block)) {
-          allLocationPairs = await storage.assetRegistry.assetLocations.v160.getMany(block, allAssetIds)
-            .then(locs => allAssetIds.map((id, i) => [id, locs[i]] as [number, any]))
-        } else if (storage.assetRegistry.assetLocations.v108.is(block)) {
-          allLocationPairs = await storage.assetRegistry.assetLocations.v108.getMany(block, allAssetIds)
-            .then(locs => allAssetIds.map((id, i) => [id, locs[i]] as [number, any]))
+        for (const [assetId, location] of await readAssetLocations(block, allAssetIds)) {
+          const metadata = discoveredAssets.get(assetId)
+          if (metadata == null) continue
+
+          if (metadata.assetType === 'Erc20') {
+            metadata.evmAddress = extractEvmAddress(location) ?? undefined
+          }
+          metadata.parachainId = extractParachainId(location) ?? undefined
+          const origin = extractAssetOrigin(location)
+          metadata.originEcosystem = origin?.ecosystem
+          metadata.originChainId = origin?.chainId
+          metadata.originAssetId = origin?.assetId ?? undefined
         }
 
-        for (const [assetId, location] of allLocationPairs) {
-          const pId = extractParachainId(location)
-          if (pId != null) {
-            const meta = discoveredAssets.get(assetId)
-            if (meta) meta.parachainId = pId
-          }
+        const resolved = [...discoveredAssets.values()].filter(metadata => metadata.evmAddress != null)
+        if (resolved.length > 0) {
+          console.log(`[AssetRegistry] ERC20 addresses resolved: ${resolved.map(metadata => `${metadata.symbol}(${metadata.assetId})=${metadata.evmAddress!.slice(0, 10)}…`).join(', ')}`)
         }
       } catch (error) {
-        console.warn(`[AssetRegistry] Failed to read asset locations for parachainId:`, error)
+        console.warn('[AssetRegistry] Failed to read asset locations:', error)
       }
     }
 
@@ -347,33 +412,13 @@ export class AssetRegistryTracker {
       const existing = this.cache.get(assetId)
 
       if (!existing) {
-        // New asset discovered
         console.log(`[AssetRegistry] New asset discovered: ${assetId} (${metadata.symbol})`)
-        newAssets.push({
-          asset_id: assetId,
-          symbol: metadata.symbol,
-          name: metadata.name,
-          decimals: metadata.decimals,
-          parachain_id: metadata.parachainId ?? null,
-        })
-      } else if (
-        existing.symbol !== metadata.symbol ||
-        existing.name !== metadata.name ||
-        existing.decimals !== metadata.decimals ||
-        existing.parachainId !== metadata.parachainId
-      ) {
-        // Asset metadata changed (rare, but possible)
+        newAssets.push(assetRow(metadata))
+      } else if (assetMetadataChanged(existing, metadata)) {
         console.log(`[AssetRegistry] Asset ${assetId} metadata changed`)
-        newAssets.push({
-          asset_id: assetId,
-          symbol: metadata.symbol,
-          name: metadata.name,
-          decimals: metadata.decimals,
-          parachain_id: metadata.parachainId ?? null,
-        })
+        newAssets.push(assetRow(metadata))
       }
 
-      // Update cache
       this.cache.set(assetId, metadata)
     }
 
@@ -496,6 +541,9 @@ export class AssetRegistryTracker {
         name: metadata.name,
         decimals: metadata.decimals,
         parachain_id: metadata.parachainId ?? null,
+        origin_ecosystem: metadata.originEcosystem ?? null,
+        origin_chain_id: metadata.originChainId ?? null,
+        origin_asset_id: metadata.originAssetId ?? null,
       }))
   }
 

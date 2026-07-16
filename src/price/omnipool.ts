@@ -15,30 +15,6 @@ function bigintDivide(numerator: bigint, denominator: bigint, precision: number 
   return `${integerPart}.${decimalPart}`;
 }
 
-function multiplyPrice(
-  price: string,
-  numerator: bigint,
-  denominator: bigint,
-  decimalAdjustment: bigint,
-  precision: number = 12
-): string {
-  if (denominator === 0n) {
-    throw new Error('Division by zero');
-  }
-
-  const [intPart, decPart = ''] = price.split('.');
-  const priceDigits = intPart + decPart.padEnd(precision, '0');
-  const priceBigint = BigInt(priceDigits);
-
-  const result = (priceBigint * numerator * decimalAdjustment) / denominator;
-
-  const resultStr = result.toString().padStart(precision + 1, '0');
-  const integerPart = resultStr.slice(0, -precision) || '0';
-  const decimalPart = resultStr.slice(-precision);
-
-  return `${integerPart}.${decimalPart}`;
-}
-
 // Calculate LRNA price in USD from USD anchor asset's Omnipool state.
 // Formula: LRNA price = reserve / hubReserve (adjusted for decimals)
 export function calculateLRNAPrice(

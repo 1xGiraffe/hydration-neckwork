@@ -6,7 +6,7 @@
 -- Time function: toStartOfInterval(b.block_timestamp, INTERVAL 15 MINUTE)
 --
 -- This view automatically creates/updates OHLCV candles whenever prices are inserted.
--- Uses wall-clock UTC timestamps from blocks table via JOIN.
+-- Uses the wall-clock UTC timestamp stored with each price row.
 
 -- ============================================================================
 -- Target Table: 15-Minute OHLCV Candles
@@ -36,13 +36,13 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.ohlc_15min_mv
 TO price_data.ohlc_15min
 AS SELECT
     p.asset_id,
-    toStartOfInterval(b.block_timestamp, INTERVAL 15 MINUTE) AS interval_start,
-    argMinState(p.usd_price, b.block_timestamp) AS open_state,
+    toStartOfInterval(p.block_timestamp, INTERVAL 15 MINUTE) AS interval_start,
+    argMinState(p.usd_price, p.block_timestamp) AS open_state,
     maxState(p.usd_price) AS high_state,
     minState(p.usd_price) AS low_state,
-    argMaxState(p.usd_price, b.block_timestamp) AS close_state,
+    argMaxState(p.usd_price, p.block_timestamp) AS close_state,
     sumState(p.usd_volume_buy) AS volume_buy_state,
     sumState(p.usd_volume_sell) AS volume_sell_state
 FROM price_data.prices p
-INNER JOIN price_data.blocks b ON p.block_height = b.block_height
+WHERE p.block_timestamp > toDateTime(0)
 GROUP BY p.asset_id, interval_start;

@@ -1,18 +1,13 @@
 import { type ClickHouseClient } from '../db/client.js'
+import { toClickHouseDateTime64 } from '../db/timestamp.js'
+import { escapeSqlString } from '../db/sql.js'
 import { type RawIngestionStateRow } from './types.js'
-
-function escapeSqlString(value: string): string {
-  return value.replace(/'/g, "''")
-}
 
 export interface RawCheckpointState {
   height: number
   hash: string
   replayNamespace: string
-}
-
-function checkpointTimestamp(): string {
-  return new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
+  hasCheckpoint: boolean
 }
 
 function buildReplayNamespace(
@@ -45,6 +40,7 @@ export async function getRawIngestionState(
       height: 0,
       hash: '0x',
       replayNamespace: buildReplayNamespace(pipelineId, 0, '0x', '1970-01-01 00:00:00'),
+      hasCheckpoint: false,
     }
   }
 
@@ -54,6 +50,7 @@ export async function getRawIngestionState(
     height: rows[0].last_block,
     hash: rows[0].last_hash,
     replayNamespace: buildReplayNamespace(pipelineId, rows[0].last_block, rows[0].last_hash, updatedAt),
+    hasCheckpoint: true,
   }
 }
 
@@ -64,7 +61,7 @@ export async function saveRawCheckpoint(
   blockHash: string,
   mode: string
 ): Promise<string> {
-  const updatedAt = checkpointTimestamp()
+  const updatedAt = toClickHouseDateTime64()
   await client.insert({
     table: 'price_data.raw_ingestion_state',
     values: [{

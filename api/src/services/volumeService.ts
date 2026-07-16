@@ -9,12 +9,23 @@ export interface AssetVolume24h {
 }
 
 let volumeCache: { data: AssetVolume24h[]; fetchedAt: number } | null = null
+let inflight: Promise<AssetVolume24h[]> | null = null
 
 export async function getVolume24h(client: ClickHouseClient): Promise<AssetVolume24h[]> {
   if (volumeCache && Date.now() - volumeCache.fetchedAt < VOLUME_CACHE_TTL_MS) return volumeCache.data
+  if (inflight) return inflight
   const assets = getAllAssets()
   const ids = assets.map(a => a.assetId)
   if (ids.length === 0) return []
+
+  const request = loadVolume24h(client, ids).finally(() => {
+    if (inflight === request) inflight = null
+  })
+  inflight = request
+  return request
+}
+
+async function loadVolume24h(client: ClickHouseClient, ids: number[]): Promise<AssetVolume24h[]> {
   const res = await client.query({
     query: `
       WITH (SELECT max(interval_start) FROM price_data.ohlc_1h) AS head
@@ -31,7 +42,10 @@ export async function getVolume24h(client: ClickHouseClient): Promise<AssetVolum
     format: 'JSONEachRow',
   })
   const rows = await res.json<{ asset_id: number; volume_usd: string }>()
-  const out = rows.map(r => ({ assetId: Number(r.asset_id), volumeUsd24h: parseFloat(r.volume_usd) || 0 }))
+  const out = rows.map(r => {
+    const volume = Number(r.volume_usd)
+    return { assetId: Number(r.asset_id), volumeUsd24h: Number.isFinite(volume) ? volume : 0 }
+  })
   out.sort((a, b) => b.volumeUsd24h - a.volumeUsd24h)
   volumeCache = { data: out, fetchedAt: Date.now() }
   return out

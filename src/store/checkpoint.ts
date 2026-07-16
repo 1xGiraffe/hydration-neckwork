@@ -1,22 +1,20 @@
 import { type ClickHouseClient } from '../db/client.js'
 import { type IndexerStateRow } from '../db/schema.js'
+import { toClickHouseDateTime64 } from '../db/timestamp.js'
+import { escapeSqlString } from '../db/sql.js'
 
 export interface IndexerCheckpointState {
   lastBlock: number
   replayNamespace: string
 }
 
-function checkpointTimestamp(): string {
-  return new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
-}
-
 function buildReplayNamespace(blockHeight: number, updatedAt: string): string {
   return `${blockHeight}@${updatedAt}`
 }
 
-export async function getLastProcessedBlock(client: ClickHouseClient): Promise<IndexerCheckpointState> {
+export async function getLastProcessedBlock(client: ClickHouseClient, id = 'main'): Promise<IndexerCheckpointState> {
   const result = await client.query({
-    query: "SELECT last_block, updated_at FROM price_data.indexer_state FINAL WHERE id = 'main'",
+    query: `SELECT last_block, updated_at FROM price_data.indexer_state FINAL WHERE id = '${escapeSqlString(id)}'`,
     format: 'JSONEachRow',
   })
 
@@ -38,11 +36,11 @@ export async function getLastProcessedBlock(client: ClickHouseClient): Promise<I
 }
 
 // ReplacingMergeTree handles deduplication based on updated_at.
-export async function saveCheckpoint(client: ClickHouseClient, blockHeight: number): Promise<string> {
-  const updatedAt = checkpointTimestamp()
+export async function saveCheckpoint(client: ClickHouseClient, blockHeight: number, id = 'main'): Promise<string> {
+  const updatedAt = toClickHouseDateTime64()
   await client.insert({
     table: 'price_data.indexer_state',
-    values: [{ id: 'main', last_block: blockHeight, updated_at: updatedAt }],
+    values: [{ id, last_block: blockHeight, updated_at: updatedAt }],
     format: 'JSONEachRow',
   })
 

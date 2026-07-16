@@ -13,6 +13,15 @@ import {
 import type { ClickHouseClient } from '../../src/db/client.ts'
 import type { PriceRow } from '../../src/db/schema.ts'
 
+type ExistingPriceRowFixture = PriceRow & {
+  block_timestamp: string
+  native_volume_buy: string
+  native_volume_sell: string
+  usd_volume_buy: string
+  usd_volume_sell: string
+  hops: number
+}
+
 describe('volume repair helpers', () => {
   it('builds generic canonical asset aliases from raw snapshots', () => {
     const aliases = aliasStateFromSnapshot(JSON.stringify({
@@ -129,15 +138,10 @@ describe('volume repair helpers', () => {
   })
 
   it('clears stale price volumes when a touched priced key has no corrected volume', () => {
-    const existing: Array<PriceRow & {
-      native_volume_buy: string
-      native_volume_sell: string
-      usd_volume_buy: string
-      usd_volume_sell: string
-      hops: number
-    }> = [{
+    const existing: ExistingPriceRowFixture[] = [{
       asset_id: 5,
       block_height: 123,
+      block_timestamp: '2026-06-21 00:00:00',
       usd_price: '2.000000000000',
       native_volume_buy: '10000000000',
       native_volume_sell: '10000000000',
@@ -150,6 +154,7 @@ describe('volume repair helpers', () => {
     expect(buildRepairedPriceRows(existing, corrected)).toEqual([{
       asset_id: 5,
       block_height: 123,
+      block_timestamp: '2026-06-21 00:00:00',
       usd_price: '2.000000000000',
       native_volume_buy: '0',
       native_volume_sell: '0',
@@ -159,16 +164,11 @@ describe('volume repair helpers', () => {
     }])
   })
 
-  it('does not insert repaired price rows when no positive price exists', () => {
-    const existing: Array<PriceRow & {
-      native_volume_buy: string
-      native_volume_sell: string
-      usd_volume_buy: string
-      usd_volume_sell: string
-      hops: number
-    }> = [{
+  it('fails when corrected volume has no positive indexed price', () => {
+    const existing: ExistingPriceRowFixture[] = [{
       asset_id: 5,
       block_height: 123,
+      block_timestamp: '2026-06-21 00:00:00',
       usd_price: '0',
       native_volume_buy: '10000000000',
       native_volume_sell: '0',
@@ -185,7 +185,7 @@ describe('volume repair helpers', () => {
       usd_volume_sell: '0.000000000000',
     }]
 
-    expect(buildRepairedPriceRows(existing, corrected)).toEqual([])
+    expect(() => buildRepairedPriceRows(existing, corrected)).toThrow('without a positive indexed USD price')
   })
 
   it('defaults --from-block repairs through the current safe tip', async () => {
@@ -200,5 +200,11 @@ describe('volume repair helpers', () => {
       to: 900,
       safeTip: 900,
     })
+  })
+
+  it('parses asset filters for scoped repair runs', () => {
+    const args = parseArgs(['--from-block=123', '--asset-ids=34,20,34'])
+
+    expect([...(args.assetIds ?? [])]).toEqual([34, 20])
   })
 })

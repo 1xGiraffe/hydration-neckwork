@@ -34,4 +34,15 @@ describe('OHLC repair helpers', () => {
     expect(query).toContain("toStartOfMonth(b.block_timestamp) <= toStartOfMonth(toDateTime('2024-02-01 00:00:00'))")
     expect(query).toContain('argMinState(p.usd_price, b.block_timestamp) AS open_state')
   })
+
+  it('can scope delete and rebuild queries to selected assets', () => {
+    const spec = OHLC_TABLE_SPECS.find(entry => entry.table === 'ohlc_1h')
+    expect(spec).toBeDefined()
+
+    const deleteQuery = buildDeleteOHLCQuery(spec!, '2024-02-01 00:00:00', '2024-02-02 00:00:00', [34, 20, 34])
+    const rebuildQuery = buildRebuildOHLCQuery(spec!, '2024-02-01 00:00:00', '2024-02-02 00:00:00', [34, 20, 34])
+
+    expect(deleteQuery).toContain('AND asset_id IN (34, 20)')
+    expect(rebuildQuery).toContain('AND p.asset_id IN (34, 20)')
+  })
 })

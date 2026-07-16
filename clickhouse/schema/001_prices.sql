@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS price_data.prices
 (
     asset_id UInt32,
     block_height UInt32,
+    block_timestamp DateTime DEFAULT toDateTime(0),
     usd_price Decimal128(12),
     native_volume_buy Decimal128(0) DEFAULT 0,
     native_volume_sell Decimal128(0) DEFAULT 0,

@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer'
+import { toClickHouseBlockTime } from '../db/timestamp.js'
 
 function isPlainBytesArray(value: unknown): value is number[] {
   return Array.isArray(value) &&
@@ -28,11 +29,8 @@ export function toJsonString(value: unknown): string {
   }) ?? 'null'
 }
 
-export function toClickHouseDateTime(timestamp?: number): string {
-  return new Date(timestamp ?? 0)
-    .toISOString()
-    .replace('T', ' ')
-    .replace(/\.\d{3}Z$/, '')
+export function toClickHouseDateTime(timestamp?: number, blockHeight?: number): string {
+  return toClickHouseBlockTime(timestamp, blockHeight)
 }
 
 export function callAddressToString(address?: number[] | null): string | null {
@@ -61,4 +59,15 @@ function extractAddressLike(value: unknown): string | null {
 
 export function extractSigner(signature: { address?: unknown } | undefined): string | null {
   return extractAddressLike(signature?.address)
+}
+
+// H160 EVM address -> its truncated AccountId32 form (0x45544800 + 20-byte H160 +
+// zero pad to 32 bytes), the canonical key under which Hydration indexes an EVM
+// account's substrate-side activity. Returns null for anything that isn't a 20-byte
+// hex address. Mirrors evmAccountForm in the API's explorerService.
+export function evmAccountForm(h160: unknown): string | null {
+  if (typeof h160 !== 'string') return null
+  const h = h160.toLowerCase().replace(/^0x/, '')
+  if (!/^[0-9a-f]{40}$/.test(h)) return null
+  return `0x45544800${h}0000000000000000`
 }

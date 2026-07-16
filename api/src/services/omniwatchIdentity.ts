@@ -14,6 +14,61 @@ const EMOJIS = [
   '🌿', '☘', '🍀', '🍁', '🍂', '🍃', '🍄',
 ] as const
 
+// Spelled-out names for the deterministic emoji set (plus the custom-override
+// glyphs), so an account can be found by the name the UI shows — e.g. 🍄 →
+// "Mushroom", 🦈 → "Shark". Mirrors explorer-ui's EMOJI_NAMES.
+const EMOJI_NAMES: Record<string, string> = {
+  '🐵': 'Monkey', '🐒': 'Monkey', '🦍': 'Gorilla', '🦧': 'Orangutan', '🐶': 'Dog', '🐕': 'Dog', '🦮': 'Guide Dog', '🐕‍🦺': 'Service Dog', '🐩': 'Poodle', '🐺': 'Wolf', '🦊': 'Fox', '🦝': 'Raccoon',
+  '🐱': 'Cat', '🐈': 'Cat', '🐈‍⬛': 'Black Cat', '🦁': 'Lion', '🐯': 'Tiger', '🐅': 'Tiger', '🐆': 'Leopard', '🐴': 'Horse', '🐎': 'Horse', '🦄': 'Unicorn', '🦓': 'Zebra', '🦌': 'Deer',
+  '🐮': 'Cow', '🐂': 'Ox', '🐃': 'Buffalo', '🐄': 'Cow', '🐷': 'Pig', '🐖': 'Pig', '🐗': 'Boar', '🐽': 'Pig', '🐏': 'Ram', '🐑': 'Sheep', '🐐': 'Goat', '🐪': 'Camel',
+  '🐫': 'Camel', '🦙': 'Llama', '🦒': 'Giraffe', '🐘': 'Elephant', '🦏': 'Rhino', '🦛': 'Hippo', '🐭': 'Mouse', '🐁': 'Mouse', '🐀': 'Rat', '🐹': 'Hamster', '🐰': 'Rabbit', '🐇': 'Rabbit',
+  '🐿': 'Chipmunk', '🦔': 'Hedgehog', '🦇': 'Bat', '🐻': 'Bear', '🐻‍❄️': 'Polar Bear', '🐨': 'Koala', '🐼': 'Panda', '🦥': 'Sloth', '🦦': 'Otter', '🦨': 'Skunk', '🦘': 'Kangaroo', '🦡': 'Badger',
+  '🐾': 'Paws', '🦃': 'Turkey', '🐔': 'Chicken', '🐓': 'Rooster', '🐣': 'Chick', '🐤': 'Chick', '🐥': 'Chick', '🐦': 'Bird', '🐧': 'Penguin', '🕊': 'Dove', '🦅': 'Eagle', '🦆': 'Duck',
+  '🦢': 'Swan', '🦉': 'Owl', '🦩': 'Flamingo', '🦚': 'Peacock', '🦜': 'Parrot', '🐸': 'Frog', '🐊': 'Crocodile', '🐢': 'Turtle', '🦎': 'Lizard', '🐍': 'Snake', '🐲': 'Dragon', '🐉': 'Dragon',
+  '🦕': 'Sauropod', '🦖': 'T-Rex', '🐬': 'Dolphin', '🐟': 'Fish', '🐠': 'Fish', '🐡': 'Pufferfish', '🦈': 'Shark', '🐙': 'Octopus', '🐚': 'Shell', '🐌': 'Snail', '🦋': 'Butterfly', '🐛': 'Bug',
+  '🐜': 'Ant', '🐝': 'Bee', '🐞': 'Ladybug', '🦗': 'Cricket', '🕷': 'Spider', '🦂': 'Scorpion', '🦟': 'Mosquito', '🦠': 'Microbe', '💐': 'Bouquet', '🌸': 'Blossom', '💮': 'Flower', '🏵': 'Rosette',
+  '🌹': 'Rose', '🥀': 'Wilted Rose', '🌺': 'Hibiscus', '🌻': 'Sunflower', '🌼': 'Daisy', '🌷': 'Tulip', '🌱': 'Seedling', '🌲': 'Evergreen', '🌳': 'Tree', '🌴': 'Palm Tree', '🌵': 'Cactus', '🌾': 'Rice',
+  '🌿': 'Herb', '☘': 'Shamrock', '🍀': 'Clover', '🍁': 'Maple Leaf', '🍂': 'Fallen Leaf', '🍃': 'Leaf', '🍄': 'Mushroom', '🍺': 'Beer', '🏦': 'Bank',
+}
+
+// The spelled-out name for an emoji glyph (variation selectors ignored), or null.
+export function emojiNameFor(emoji: string): string | null {
+  return EMOJI_NAMES[emoji] ?? EMOJI_NAMES[emoji.replace(/️/g, '')] ?? null
+}
+
+// Reverse lookup for search: every emoji glyph whose spelled-out name matches the
+// query (case-insensitive), ranked exact → prefix → substring — so "Mushroom"
+// and "mush" both resolve to 🍄, and "dog" surfaces Dog before Guide/Service Dog.
+// Substring matching needs ≥3 chars to avoid noise (e.g. "at" → Cat/Rat/Bat).
+export function emojisMatchingName(query: string): string[] {
+  const ql = query.trim().toLowerCase()
+  if (ql.length < 2) return []
+  const exact: string[] = [], prefix: string[] = [], sub: string[] = []
+  for (const [emoji, name] of Object.entries(EMOJI_NAMES)) {
+    const nl = name.toLowerCase()
+    if (nl === ql) exact.push(emoji)
+    else if (nl.startsWith(ql)) prefix.push(emoji)
+    else if (ql.length >= 3 && nl.includes(ql)) sub.push(emoji)
+  }
+  return [...new Set([...exact, ...prefix, ...sub])]
+}
+
+// Two-token account queries combining the pill's colored 3-letter code with the
+// avatar's spelled-out emoji name, in either order ("pmo pig" / "pig pmo").
+// Returns every plausible (suffix, glyphs) reading — both when both tokens are
+// emoji names ("cat dog") — so the search can try each against its indexes.
+export function parseSuffixEmojiQuery(query: string): { suffix: string; glyphs: string[] }[] {
+  const tokens = query.trim().split(/\s+/)
+  if (tokens.length !== 2) return []
+  const out: { suffix: string; glyphs: string[] }[] = []
+  for (const [suffix, name] of [[tokens[0], tokens[1]], [tokens[1], tokens[0]]] as const) {
+    if (!/^[0-9A-Za-z]{2,6}$/.test(suffix)) continue
+    const glyphs = emojisMatchingName(name)
+    if (glyphs.length) out.push({ suffix, glyphs })
+  }
+  return out
+}
+
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 const POLKADOT_SS58_PREFIX = 0
 const HYDRATION_SS58_PREFIX = 63
@@ -80,7 +135,7 @@ function accountIdBytes(account: string): Uint8Array | null {
   return Uint8Array.from(Buffer.from(hex, 'hex'))
 }
 
-function accountIdHex(account: string): string | null {
+export function accountIdHex(account: string): string | null {
   const bytes = accountIdBytes(account) ?? ss58AccountIdBytes(account)
   return bytes ? `0x${Buffer.from(bytes).toString('hex')}` : null
 }
@@ -180,10 +235,6 @@ export function hydrationAddress(account: string): string {
 
 export function polkadotAddress(account: string): string {
   return ss58Address(account, POLKADOT_SS58_PREFIX)
-}
-
-export function subscanAccountUrl(account: string): string {
-  return `https://hydration.subscan.io/account/${encodeURIComponent(polkadotAddress(account))}`
 }
 
 function defaultAccountEmoji(account: string, emojis: readonly string[] = snakewatchEmojiSource?.emojis ?? EMOJIS): string {
@@ -305,8 +356,4 @@ export function accountIcon(account: string): AccountIcon {
   }
 
   return { emoji: fallback }
-}
-
-export function accountEmoji(account: string): string {
-  return accountIcon(account).emoji
 }

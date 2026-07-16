@@ -7,19 +7,22 @@ interface AssetRow {
   name: string
   decimals: number
   parachain_id: number | null
+  origin_ecosystem: string | null
+  origin_chain_id: string | null
+  origin_asset_id: string | null
 }
 
 // Stablecoin symbols — all variants of these symbols are treated as stablecoins.
 const STABLECOIN_SYMBOLS = new Set(['USDT', 'USDC', 'HOLLAR', 'DAI', 'HUSDT', 'HUSDC', 'EURC', 'HEURC'])
 
 const assetCache = new Map<number, Asset>()
-const symbolToId = new Map<string, number>()
 let refreshTimer: ReturnType<typeof setInterval> | null = null
+let loadInflight: Promise<void> | null = null
 
-export async function loadAssets(client: ClickHouseClient): Promise<void> {
+async function loadAssetsUncached(client: ClickHouseClient): Promise<void> {
   const result = await client.query({
     query: `
-      SELECT asset_id, symbol, name, decimals, parachain_id
+      SELECT asset_id, symbol, name, decimals, parachain_id, origin_ecosystem, origin_chain_id, origin_asset_id
       FROM price_data.assets FINAL
       WHERE asset_id IN (
         SELECT DISTINCT asset_id FROM price_data.ohlc_1h
@@ -50,7 +53,6 @@ export async function loadAssets(client: ClickHouseClient): Promise<void> {
   }
 
   assetCache.clear()
-  symbolToId.clear()
   for (const row of rows) {
     // Skip unnamed assets, LP tokens, and aTokens
     if (row.symbol.startsWith('Asset')) continue
@@ -64,11 +66,10 @@ export async function loadAssets(client: ClickHouseClient): Promise<void> {
       decimals: row.decimals,
       isStablecoin: STABLECOIN_SYMBOLS.has(row.symbol),
       parachainId: row.parachain_id ?? null,
+      origin: row.origin_ecosystem && row.origin_chain_id
+        ? { ecosystem: row.origin_ecosystem, chainId: row.origin_chain_id, assetId: row.origin_asset_id ?? null }
+        : null,
     })
-    const key = row.symbol.toUpperCase()
-    if (!symbolToId.has(key)) {
-      symbolToId.set(key, row.asset_id)
-    }
   }
   console.log(`[Assets] Loaded ${assetCache.size} assets into cache`)
 
@@ -78,12 +79,23 @@ export async function loadAssets(client: ClickHouseClient): Promise<void> {
         console.error('[Assets] Cache refresh failed:', err)
       )
     }, 60_000)
+    refreshTimer.unref()
   }
 }
 
-export function getAssetBySymbol(symbol: string): Asset | undefined {
-  const id = symbolToId.get(symbol.toUpperCase())
-  return id !== undefined ? assetCache.get(id) : undefined
+export function loadAssets(client: ClickHouseClient): Promise<void> {
+  if (loadInflight) return loadInflight
+  const request = loadAssetsUncached(client).finally(() => {
+    if (loadInflight === request) loadInflight = null
+  })
+  loadInflight = request
+  return request
+}
+
+export function stopAssetsRefresh(): void {
+  if (!refreshTimer) return
+  clearInterval(refreshTimer)
+  refreshTimer = null
 }
 
 export function getAssetById(assetId: number): Asset | undefined {

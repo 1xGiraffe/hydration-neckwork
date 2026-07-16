@@ -1,42 +1,49 @@
 {
-  "name": "preis",
+  "name": "hydration-neckwork",
   "version": "1.0.0",
-  "description": "",
+  "description": "Hydration Neckwork explorer and Preis data platform",
+  "private": true,
   "type": "module",
-  "main": "index.js",
   "scripts": {
     "start": "tsx src/cli.ts",
     "start:raw": "tsx src/raw/cli.ts",
     "detect-gaps": "tsx src/cli.ts --detect-gaps",
-    "migrate:trade-volume": "tsx src/scripts/migrate-trade-volume.ts",
+    "migrate:schema": "tsx src/scripts/migrate-schema.ts",
     "repair:volume": "tsx src/scripts/repair-volume.ts",
-    "test": "vitest run"
+    "repair:raw-money-market": "tsx src/scripts/repair-raw-money-market-positions.ts",
+    "backfill:money-market": "tsx src/scripts/backfill-money-market.ts",
+    "validate:raw-balances": "tsx src/scripts/validate-raw-balances.ts",
+    "snapshot:balances": "tsx src/scripts/snapshot-balances.ts",
+    "snapshot:identities": "tsx src/scripts/snapshot-identities.ts",
+    "snapshot:money-market": "tsx src/scripts/snapshot-money-market.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
+    "check:all": "npm run check && npm --prefix api run check && npm --prefix explorer-ui run check && npm --prefix preis-ui run check"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/1xGiraffe/hydration-preis.git"
+    "url": "git+https://github.com/1xGiraffe/hydration-neckwork.git"
   },
-  "keywords": [],
-  "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/1xGiraffe/hydration-preis.git/issues"
+    "url": "https://github.com/1xGiraffe/hydration-neckwork/issues"
   },
-  "homepage": "https://github.com/1xGiraffe/hydration-preis#readme",
+  "homepage": "https://github.com/1xGiraffe/hydration-neckwork#readme",
   "dependencies": {
     "@clickhouse/client": "^1.16.0",
     "@galacticcouncil/math-stableswap": "^2.5.0",
     "@polkadot/util": "^14.0.1",
     "@polkadot/util-crypto": "^14.0.1",
-    "@subsquid/substrate-processor": "^8.6.1",
+    "@subsquid/rpc-client": "4.15.0",
+    "@subsquid/substrate-processor": "^8.8.1",
     "@subsquid/substrate-runtime": "^2.0.1",
-    "@subsquid/substrate-typegen": "^8.1.0",
-    "tsx": "^4.21.0"
+    "@subsquid/util-internal-processor-tools": "4.4.0",
+    "tsx": "^4.23.0"
   },
   "devDependencies": {
-    "@subsquid/substrate-metadata-explorer": "^3.2.0",
     "@types/node": "^25.1.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.10"
   }
 }

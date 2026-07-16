@@ -49,13 +49,26 @@ export const OHLC_TABLE_SPECS: readonly OHLCTableSpec[] = [
   },
 ] as const
 
-export function buildDeleteOHLCQuery(spec: OHLCTableSpec, startTime: string, endTime: string): string {
+function assetIdPredicate(alias: string, assetIds?: readonly number[]): string {
+  if (!assetIds || assetIds.length === 0) return ''
+  const ids = [...new Set(assetIds)].filter(Number.isInteger)
+  if (ids.length === 0) return ''
+  const column = alias.length > 0 ? `${alias}.asset_id` : 'asset_id'
+  return `\n  AND ${column} IN (${ids.join(', ')})`
+}
+
+export function buildDeleteOHLCQuery(
+  spec: OHLCTableSpec,
+  startTime: string,
+  endTime: string,
+  assetIds?: readonly number[],
+): string {
   const startExpr = spec.literalExpr(startTime)
   const endExpr = spec.literalExpr(endTime)
 
   return `DELETE FROM price_data.${spec.table}
 WHERE interval_start >= ${startExpr}
-  AND interval_start <= ${endExpr}`
+  AND interval_start <= ${endExpr}${assetIdPredicate('', assetIds)}`
 }
 
 export function buildRestoreRollbackPrefixQuery(spec: OHLCTableSpec, startTime: string): string {
@@ -78,7 +91,12 @@ WHERE ${spec.bucketExpr} = ${startExpr}
 GROUP BY p.asset_id, interval_start`
 }
 
-export function buildRebuildOHLCQuery(spec: OHLCTableSpec, startTime: string, endTime: string): string {
+export function buildRebuildOHLCQuery(
+  spec: OHLCTableSpec,
+  startTime: string,
+  endTime: string,
+  assetIds?: readonly number[],
+): string {
   const startExpr = spec.literalExpr(startTime)
   const endExpr = spec.literalExpr(endTime)
 
@@ -95,18 +113,19 @@ SELECT
 FROM price_data.prices p
 INNER JOIN price_data.blocks b ON p.block_height = b.block_height
 WHERE ${spec.bucketExpr} >= ${startExpr}
-  AND ${spec.bucketExpr} <= ${endExpr}
+  AND ${spec.bucketExpr} <= ${endExpr}${assetIdPredicate('p', assetIds)}
 GROUP BY p.asset_id, interval_start`
 }
 
 export async function clearOHLCForTimeRange(
   client: ClickHouseClient,
   startTime: string,
-  endTime: string
+  endTime: string,
+  assetIds?: readonly number[],
 ): Promise<void> {
   for (const spec of OHLC_TABLE_SPECS) {
     await client.command({
-      query: buildDeleteOHLCQuery(spec, startTime, endTime),
+      query: buildDeleteOHLCQuery(spec, startTime, endTime, assetIds),
       clickhouse_settings: { mutations_sync: '1' },
     })
   }
@@ -126,13 +145,14 @@ export async function restoreRollbackOHLCPrefix(
 export async function rebuildOHLCForTimeRange(
   client: ClickHouseClient,
   startTime: string,
-  endTime: string
+  endTime: string,
+  assetIds?: readonly number[],
 ): Promise<void> {
-  await clearOHLCForTimeRange(client, startTime, endTime)
+  await clearOHLCForTimeRange(client, startTime, endTime, assetIds)
 
   for (const spec of OHLC_TABLE_SPECS) {
     await client.command({
-      query: buildRebuildOHLCQuery(spec, startTime, endTime),
+      query: buildRebuildOHLCQuery(spec, startTime, endTime, assetIds),
     })
   }
 }

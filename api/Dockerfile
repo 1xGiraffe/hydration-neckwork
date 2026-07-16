@@ -2,12 +2,13 @@ FROM node:22-slim
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
+COPY --chown=node:node package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY src/ ./src/
-COPY tsconfig.json ./
+COPY --chown=node:node src/ ./src/
+COPY --chown=node:node tsconfig.json ./
 
 EXPOSE 3000
 
-CMD ["npx", "tsx", "src/server.ts"]
+USER node
+CMD ["./node_modules/.bin/tsx", "src/server.ts"]

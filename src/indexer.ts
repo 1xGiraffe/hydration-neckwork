@@ -5,9 +5,9 @@ import { AssetRegistryTracker } from './registry/tracker.js'
 import { PoolCompositionCache } from './pool/compositionCache.js'
 import { resolvePrices } from './price/graph.js'
 import { config } from './config.js'
+import { validateBlockRange } from './blockRange.js'
 import { deriveOmnipoolAccount, deriveStableswapPoolAccount } from './util/account.js'
 import { u8aToHex } from '@polkadot/util'
-import { xxhashAsHex } from '@polkadot/util-crypto'
 import type { OmnipoolAssetState, XYKPool, StableswapPool } from './price/types.ts'
 import type { Block } from './types/support.ts'
 import * as storage from './types/storage.ts'
@@ -26,18 +26,17 @@ import {
   nativeAssetInfoToMetadata,
   nativeAssetInfoToRow,
 } from './nativeAsset.js'
+import { toClickHouseBlockTime } from './db/timestamp.js'
+import { fetchChainHead } from './rpc/head.js'
+import { detectPoolAffectingSetStorage } from './raw/snapshot.js'
 
 const BACKFILL_ASSET_SNAPSHOT_INTERVAL = 10_000
-
-// twox128 storage prefixes for pool-related pallets (hex without 0x prefix, 32 chars each)
-// System.set_storage keys starting with these prefixes indicate pool state mutations
-const POOL_STORAGE_PREFIXES = [
-  'Omnipool', 'Tokens', 'XYK', 'Stableswap'
-].map(name => xxhashAsHex(name, 128).slice(2))  // 32 hex chars each
 
 export interface RunOptions {
   fromBlock?: number
   toBlock?: number
+  pipelineId?: string
+  requireFinalizedRaw?: boolean
 }
 
 function getHistoricalSnapshotEntry(
@@ -67,49 +66,44 @@ function getStableswapPoolAccount(poolId: number): string {
   return account
 }
 
-/**
- * Detect System.set_storage calls that modify pool-related storage
- *
- * System.set_storage is a sudo/governance call that directly writes arbitrary storage keys,
- * bypassing normal pallet logic and therefore not emitting events. If it modifies pool-related
- * storage (Omnipool, Tokens, XYK, Stableswap), we need to detect it and invalidate caches.
- *
- * Storage keys start with twox128(PalletName) = 16 bytes = 32 hex chars.
- * We compare the first 32 hex chars of each key against our known pool pallet prefixes.
- */
-function detectPoolAffectingSetStorage(calls: { name?: string; args?: any }[]): boolean {
-  for (const call of calls) {
-    if (call.name !== 'System.set_storage') continue
+function syncRegistryPricingState(
+  registry: AssetRegistryTracker,
+  existingLpEquivalences: Map<number, number>,
+): {
+  atokenEquivalences: [number, number][]
+  atokenIds: Set<number>
+  lpEquivalences: Map<number, number>
+} {
+  const atokenEquivalences = registry.getAtokenEquivalences()
+  const atokenIds = registry.getAtokenIds()
+  const lpEquivalences = new Map(existingLpEquivalences)
+  const aaveTokenIds = new Set(atokenIds)
 
-    // args.items is Vec<(Vec<u8>, Vec<u8>)> decoded as array of [key, value] hex strings
-    const items = call.args?.items as Array<[string, string]> | undefined
-    if (!items) continue
-
-    for (const [key] of items) {
-      // Storage key starts with twox128(PalletName) = 16 bytes = 32 hex chars
-      // The key may have 0x prefix from SQD decoding
-      const prefix = key.startsWith('0x') ? key.slice(2, 34) : key.slice(0, 32)
-
-      if (POOL_STORAGE_PREFIXES.some(p => prefix === p)) {
-        return true
-      }
+  for (const [lpId, displayId] of registry.getLpAliases()) {
+    if (!lpEquivalences.has(lpId)) {
+      lpEquivalences.set(lpId, displayId)
+      console.log(`[LpAlias] ${lpId} → ${displayId}`)
     }
+    aaveTokenIds.add(displayId)
   }
-  return false
+
+  updateErc20Registry(registry.getErc20Contracts(), aaveTokenIds)
+
+  return { atokenEquivalences, atokenIds, lpEquivalences }
 }
 
 /**
  * Read Omnipool asset states from chain storage using cached asset IDs
  *
  * Reads real token reserves from Tokens.Accounts storage for the Omnipool sovereign account.
- * Falls back to shares proxy if Tokens.Accounts read fails.
+ * Fails closed when a required storage codec/read is unavailable so an unknown
+ * runtime cannot be checkpointed with plausible-looking fallback reserves.
  */
 async function readOmnipoolState(block: Block, assetIds: number[]): Promise<Map<number, OmnipoolAssetState>> {
   const omnipoolAssets = new Map<number, OmnipoolAssetState>()
 
-  // Check if Omnipool storage is available at this block
   if (!storage.omnipool.assets.v115.is(block)) {
-    return omnipoolAssets
+    throw new Error(`Unsupported Omnipool.Assets storage at block ${block.height}`)
   }
 
   try {
@@ -117,14 +111,15 @@ async function readOmnipoolState(block: Block, assetIds: number[]): Promise<Map<
     const assetStates = await storage.omnipool.assets.v115.getMany(block, assetIds)
 
     // Batch-read all Tokens.Accounts reserves in one call
-    let balances: (typeof storage.tokens.accounts.v108 extends { getMany: (...args: any[]) => Promise<infer R> } ? R : never) | undefined
-    if (storage.tokens.accounts.v108.is(block)) {
-      try {
-        const keys = assetIds.map(id => [omnipoolAccount, id] as [string, number])
-        balances = await storage.tokens.accounts.v108.getMany(block, keys)
-      } catch {
-        // Fallback to shares proxy for ALL assets if batch read fails
-      }
+    let balances: Awaited<ReturnType<typeof storage.tokens.accounts.v108.getMany>> | undefined
+    if (!storage.tokens.accounts.v108.is(block)) {
+      throw new Error(`Unsupported Tokens.Accounts storage at block ${block.height}`)
+    }
+    try {
+      const keys = assetIds.map(id => [omnipoolAccount, id] as [string, number])
+      balances = await storage.tokens.accounts.v108.getMany(block, keys)
+    } catch (error) {
+      throw new Error(`Tokens.Accounts reserve read failed at block ${block.height}`, { cause: error })
     }
 
     // Collect ERC20 assets that need EVM balance reads
@@ -166,12 +161,14 @@ async function readOmnipoolState(block: Block, assetIds: number[]): Promise<Map<
         } else if (storage.system.account.v100.is(block)) {
           const acct = await storage.system.account.v100.get(block, omnipoolAccount)
           hdxFree = acct?.data.free
+        } else {
+          throw new Error(`Unsupported System.Account storage at block ${block.height}`)
         }
         if (hdxFree && hdxFree > 0n) {
           hdxState.reserve = hdxFree
         }
-      } catch {
-        // Keep shares fallback if System.Account read fails
+      } catch (error) {
+        throw new Error(`System.Account HDX reserve read failed at block ${block.height}`, { cause: error })
       }
     }
 
@@ -189,7 +186,7 @@ async function readOmnipoolState(block: Block, assetIds: number[]): Promise<Map<
       }
     }
   } catch (error) {
-    console.error(`[Omnipool] Failed to read state at block ${block.height}:`, error)
+    throw new Error(`Failed to read Omnipool state at block ${block.height}`, { cause: error })
   }
 
   return omnipoolAssets
@@ -208,9 +205,8 @@ async function readXYKState(
 ): Promise<XYKPool[]> {
   const xykPools: XYKPool[] = []
 
-  // Check if Tokens.Accounts storage is available at this block
   if (!storage.tokens.accounts.v108.is(block)) {
-    return xykPools
+    throw new Error(`Unsupported Tokens.Accounts storage for XYK pools at block ${block.height}`)
   }
 
   try {
@@ -239,11 +235,13 @@ async function readXYKState(
       }
     }
   } catch (error) {
-    console.error(`[XYK] Failed to read state at block ${block.height}:`, error)
+    throw new Error(`Failed to read XYK state at block ${block.height}`, { cause: error })
   }
 
   return xykPools
 }
+
+let stableswapPegStorageSeen = false
 
 /**
  * Read Stableswap pool states from chain storage using cached pool entries
@@ -269,9 +267,8 @@ async function readStableswapState(
   const stableswapPools: StableswapPool[] = []
   let totalIssuances = new Map<number, bigint>()
 
-  // Check if Tokens.Accounts storage is available at this block
   if (!storage.tokens.accounts.v108.is(block)) {
-    return { pools: stableswapPools, totalIssuances }
+    throw new Error(`Unsupported Tokens.Accounts storage for Stableswap pools at block ${block.height}`)
   }
 
   try {
@@ -290,14 +287,15 @@ async function readStableswapState(
     const balances = await storage.tokens.accounts.v108.getMany(block, keys)
 
     // Batch-read TotalIssuance for each pool's LP token (LP assetId == poolId)
-    if (storage.tokens.totalIssuance.v108.is(block)) {
-      const lpAssetIds = pools.map(p => p.poolId)
-      const issuances = await storage.tokens.totalIssuance.v108.getMany(block, lpAssetIds)
-      for (let i = 0; i < lpAssetIds.length; i++) {
-        const val = issuances[i]
-        if (val !== undefined && val > 0n) {
-          totalIssuances.set(lpAssetIds[i], val)
-        }
+    if (!storage.tokens.totalIssuance.v108.is(block)) {
+      throw new Error(`Unsupported Tokens.TotalIssuance storage at block ${block.height}`)
+    }
+    const lpAssetIds = pools.map(p => p.poolId)
+    const issuances = await storage.tokens.totalIssuance.v108.getMany(block, lpAssetIds)
+    for (let i = 0; i < lpAssetIds.length; i++) {
+      const val = issuances[i]
+      if (val !== undefined && val > 0n) {
+        totalIssuances.set(lpAssetIds[i], val)
       }
     }
 
@@ -366,18 +364,29 @@ async function readStableswapState(
       // Read peg info if available (drifting peg pools like GDOT, GETH, GSOL)
       let pegMultipliers: [bigint, bigint][] | undefined
       try {
-        let peg: any
+        let peg: { current?: Array<[bigint, bigint]> } | undefined
+        let pegStorageSupported = false
         if (storage.stableswap.poolPegs.v378.is(block)) {
+          pegStorageSupported = true
           peg = await storage.stableswap.poolPegs.v378.get(block, poolEntry.poolId)
         } else if (storage.stableswap.poolPegs.v323.is(block)) {
+          pegStorageSupported = true
           peg = await storage.stableswap.poolPegs.v323.get(block, poolEntry.poolId)
         } else if (storage.stableswap.poolPegs.v305.is(block)) {
+          pegStorageSupported = true
           peg = await storage.stableswap.poolPegs.v305.get(block, poolEntry.poolId)
         }
-        if (peg && peg.current?.length > 0) {
-          pegMultipliers = peg.current
+        if (!pegStorageSupported && stableswapPegStorageSeen) {
+          throw new Error(`Unsupported Stableswap.PoolPegs storage at block ${block.height}`)
         }
-      } catch {}
+        stableswapPegStorageSeen ||= pegStorageSupported
+        const currentPeg = peg?.current
+        if (currentPeg != null && currentPeg.length > 0) {
+          pegMultipliers = currentPeg
+        }
+      } catch (error) {
+        throw new Error(`Failed to read stableswap peg at block ${block.height} for pool ${poolEntry.poolId}`, { cause: error })
+      }
 
       stableswapPools.push({
         poolId: poolEntry.poolId,
@@ -390,14 +399,22 @@ async function readStableswapState(
       })
     }
   } catch (error) {
-    console.error(`[Stableswap] Failed to read state at block ${block.height}:`, error)
+    throw new Error(`Failed to read Stableswap state at block ${block.height}`, { cause: error })
   }
 
   return { pools: stableswapPools, totalIssuances }
 }
 
 export async function run(options: RunOptions = {}): Promise<void> {
-  const database = new Database()
+  validateBlockRange(options)
+  const pipelineId = options.pipelineId ?? process.env.INDEXER_PIPELINE_ID ?? 'main'
+  const requireFinalizedRaw = options.requireFinalizedRaw ?? process.env.MAIN_REQUIRE_FINALIZED_RAW !== 'false'
+  const deferHistoricalPublication = options.toBlock != null && requireFinalizedRaw
+  const database = new Database(pipelineId, {
+    deferPublication: deferHistoricalPublication,
+    publishAtBlock: options.toBlock,
+    startAtGenesis: options.fromBlock === 0,
+  })
   const nativeAssetInfo = await loadNativeAssetInfo()
   if (nativeAssetInfo) {
     console.log(
@@ -407,7 +424,10 @@ export async function run(options: RunOptions = {}): Promise<void> {
   }
   const nativeAssetMetadata = nativeAssetInfo ? nativeAssetInfoToMetadata(nativeAssetInfo) : undefined
   const nativeAssetRow = nativeAssetInfo ? nativeAssetInfoToRow(nativeAssetInfo) : undefined
-  const snapshotReader = new ClickHouseSnapshotReader({ nativeAssetRow })
+  const snapshotReader = new ClickHouseSnapshotReader({
+    nativeAssetRow,
+    finalizedOnly: requireFinalizedRaw,
+  })
 
   const { height: lastProcessedBlock } = await database.connect()
 
@@ -416,10 +436,28 @@ export async function run(options: RunOptions = {}): Promise<void> {
     // Resume from last checkpoint
     startBlock = lastProcessedBlock
     if (startBlock > 0) {
-      console.log(`[Main] Resuming from checkpoint: block ${startBlock}`)
+      console.log(`[Main] Resuming ${pipelineId} from checkpoint: block ${startBlock}`)
+    } else if (options.toBlock == null) {
+      // Fresh, unbounded run (the live follower): default to chain head and go
+      // forward; backfill fills history downward. Avoids re-indexing from genesis
+      // on a clean database. Falls back to 0 if the head can't be resolved.
+      const head = await fetchChainHead(config.RPC_URL)
+      if (head != null) {
+        startBlock = head
+        console.log(`[Main] Fresh ${pipelineId}: starting live at chain head ${head} (backfill fills history downward)`)
+      } else {
+        console.warn(`[Main] Fresh ${pipelineId}: could not resolve chain head from ${config.RPC_URL}; starting from block 0`)
+      }
     }
   } else {
-    console.log(`[Main] Starting from block ${startBlock} (--from-block override)`)
+    console.log(`[Main] Starting ${pipelineId} from block ${startBlock} (--from-block override)`)
+  }
+
+  if (requireFinalizedRaw) {
+    console.log('[Main] Historical raw snapshot reads require finalized raw ranges')
+  }
+  if (deferHistoricalPublication) {
+    console.log('[Main] Deferring historical publication until the bounded range completes')
   }
 
   // Override processor's block range
@@ -436,7 +474,6 @@ export async function run(options: RunOptions = {}): Promise<void> {
   let previousHistoricalSnapshot: HistoricalSnapshotState | null = null
 
   let lastLogBlock = startBlock
-  let pricesCalculated = 0
   const archiveLogInterval = 1000
   const liveLogInterval = 1
   let currentLogInterval = archiveLogInterval
@@ -444,6 +481,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
 
   // State tracking for parent hash validation and runtime upgrades
   let previousBlockHash: string | null = null
+  let previousBlockHeight: number | null = null
   let previousSpecVersion: number | null = null
 
     // Previous prices for carry-forward optimization
@@ -453,19 +491,29 @@ export async function run(options: RunOptions = {}): Promise<void> {
   let atokenIds: Set<number> = new Set()
   // LP → wrapper equivalences (e.g. 2-Pool-GDOT(690) → GDOT(69))
   // Detected from asset registry symbol patterns (N-Pool-X → X)
-  const lpEquivalences = new Map<number, number>()
+  let lpEquivalences = new Map<number, number>()
   // Tracking for skip rate logging
   let blocksSkipped = 0
   let blocksProcessed = 0
   let swapEventsProcessed = 0
 
-  processor.run(database, async (ctx) => {
-    // Reset parent hash validation state at batch boundaries
-    // (prevents false positives across batch boundaries per RESEARCH.md Pitfall 4)
-    previousBlockHash = null
+  await processor.run(database, async (ctx) => {
+    // Preserve continuity across sequential batches. A retry/backward replay
+    // resets the boundary state; a forward gap is an integrity failure. Every
+    // block inside the batch is checked below as well.
+    const firstHeight = ctx.blocks[0]?.header.height
+    if (firstHeight != null && previousBlockHeight != null) {
+      if (firstHeight <= previousBlockHeight) {
+        previousBlockHash = null
+        previousBlockHeight = null
+      } else if (firstHeight > previousBlockHeight + 1) {
+        throw new Error(`[Integrity] Processor gap between blocks ${previousBlockHeight} and ${firstHeight}`)
+      }
+    }
 
-    // Detect live mode: switch to per-block logging when batch size drops below threshold
-    if (!isLiveMode && ctx.blocks.length < 10) {
+    // Detect live mode from the processor context. Small bounded historical ranges
+    // must still use finalized raw snapshots and must not be treated as live.
+    if (!isLiveMode && ctx.isHead && options.toBlock == null) {
       console.log('[Progress] Caught up to chain tip, switching to live mode (volumes now active)')
       isLiveMode = true
       currentLogInterval = liveLogInterval
@@ -484,6 +532,12 @@ export async function run(options: RunOptions = {}): Promise<void> {
       try {
         nextHistoricalSnapshot = await historicalSnapshotStream.next()
       } catch (error) {
+        if (requireFinalizedRaw) {
+          throw new Error(
+            `Failed while streaming finalized raw snapshots for batch ${firstBatchBlock}-${lastBatchBlock}: ` +
+            (error instanceof Error ? error.message : String(error)),
+          )
+        }
         historicalSnapshotStreamFailed = true
         nextHistoricalSnapshot = null
         console.error(
@@ -500,9 +554,15 @@ export async function run(options: RunOptions = {}): Promise<void> {
     const shouldLoadHistoricalSnapshots = !isLiveMode && ctx.blocks.length > 0
     if (shouldLoadHistoricalSnapshots) {
       try {
+        if (requireFinalizedRaw) {
+          await snapshotReader.assertFinalizedCoverage(firstBatchBlock, lastBatchBlock)
+        }
         historicalSnapshotStream = snapshotReader.streamRange(firstBatchBlock, lastBatchBlock)
         await advanceHistoricalSnapshot()
       } catch (error) {
+        if (requireFinalizedRaw) {
+          throw error
+        }
         console.error(
           `[History] Failed to load raw snapshots for batch ${firstBatchBlock}-${lastBatchBlock}, falling back to RPC:`,
           error
@@ -512,20 +572,18 @@ export async function run(options: RunOptions = {}): Promise<void> {
 
     for (const block of ctx.blocks) {
       const blockHeight = block.header.height
-      const blockTimestamp = new Date(block.header.timestamp ?? 0)
-        .toISOString()
-        .replace('T', ' ')
-        .replace(/\.\d{3}Z$/, '')
+      const blockTimestamp = toClickHouseBlockTime(block.header.timestamp, blockHeight)
       const specVersion = block.header.specVersion ?? 0
 
       // Parent hash validation (data integrity check)
       if (previousBlockHash !== null && block.header.parentHash !== previousBlockHash) {
-        console.warn(
+        throw new Error(
           `[Integrity] Parent hash mismatch at block ${blockHeight}: ` +
           `expected ${previousBlockHash}, got ${block.header.parentHash}`
         )
       }
       previousBlockHash = block.header.hash
+      previousBlockHeight = blockHeight
 
       // Runtime upgrade detection
       if (previousSpecVersion !== null && specVersion !== previousSpecVersion) {
@@ -570,6 +628,10 @@ export async function run(options: RunOptions = {}): Promise<void> {
         await advanceHistoricalSnapshot()
       }
 
+      if (historicalSnapshot == null && shouldLoadHistoricalSnapshots && requireFinalizedRaw) {
+        throw new Error(`Missing finalized raw snapshot for historical block ${blockHeight}`)
+      }
+
       if (historicalSnapshot) {
         if (hasSetStorageAffectingPools) {
           console.warn(`[SetStorage] Pool-affecting System.set_storage detected at block ${blockHeight}`)
@@ -577,6 +639,8 @@ export async function run(options: RunOptions = {}): Promise<void> {
 
         if (!historicalRegistryInitialized || hasAssetRegistryChange) {
           await registry.maybeSnapshot(blockHeight, block.header, { force: true })
+          ;({ atokenEquivalences, atokenIds, lpEquivalences } =
+            syncRegistryPricingState(registry, lpEquivalences))
           historicalRegistryInitialized = true
         }
 
@@ -587,13 +651,13 @@ export async function run(options: RunOptions = {}): Promise<void> {
           ? registry.getDecimals()
           : historicalSnapshot.decimals
         const historicalAtokenEquivalences = historicalRegistryInitialized
-          ? registry.getAtokenEquivalences()
+          ? atokenEquivalences
           : historicalSnapshot.atokenEquivalences
         const historicalAtokenIds = historicalRegistryInitialized
-          ? registry.getAtokenIds()
+          ? atokenIds
           : historicalSnapshot.atokenIds
         const historicalLpEquivalences = historicalRegistryInitialized
-          ? new Map(registry.getLpAliases())
+          ? lpEquivalences
           : historicalSnapshot.lpEquivalences
 
         currentAtokenEquivalences = historicalAtokenEquivalences
@@ -641,7 +705,6 @@ export async function run(options: RunOptions = {}): Promise<void> {
           atokenEquivalences: historicalAtokenEquivalences,
           atokenIds: historicalAtokenIds,
           lpEquivalences: historicalLpEquivalences,
-          assetsTracked,
         }
       } else {
         // Asset registry snapshot (every N blocks)
@@ -650,19 +713,8 @@ export async function run(options: RunOptions = {}): Promise<void> {
           ctx.store.addAssets(newAssets)
         }
         if (newAssets.length > 0 || hasAssetRegistryChange) {
-          atokenEquivalences = registry.getAtokenEquivalences()
-          atokenIds = registry.getAtokenIds()
-          // Detect LP → wrapper equivalences from symbol patterns (N-Pool-X → X)
-          // LP wrappers are Aave aToken contracts — add to aaveTokenIds for EVM balance reads
-          const aaveTokenIds = new Set(atokenIds)
-          for (const [lpId, displayId] of registry.getLpAliases()) {
-            if (!lpEquivalences.has(lpId)) {
-              lpEquivalences.set(lpId, displayId)
-              console.log(`[LpAlias] ${lpId} → ${displayId}`)
-            }
-            aaveTokenIds.add(displayId)
-          }
-          updateErc20Registry(registry.getErc20Contracts(), aaveTokenIds)
+          ;({ atokenEquivalences, atokenIds, lpEquivalences } =
+            syncRegistryPricingState(registry, lpEquivalences))
         }
 
         currentAtokenEquivalences = atokenEquivalences
@@ -736,11 +788,10 @@ export async function run(options: RunOptions = {}): Promise<void> {
             stableswapPools = stableswapResult.pools
             totalIssuances = stableswapResult.totalIssuances
           } catch (error) {
-            console.error(
-              `[Runtime] Storage read failed at block ${blockHeight} (spec_version: ${specVersion}):`,
-              error
+            throw new Error(
+              `[Runtime] Storage read failed at block ${blockHeight} (spec_version: ${specVersion})`,
+              { cause: error },
             )
-            continue
           }
         }
       }
@@ -770,6 +821,10 @@ export async function run(options: RunOptions = {}): Promise<void> {
         currentAtokenEquivalences,
         totalIssuances,
         config.USD_REFERENCE_IDS,
+        {
+          minGraphPathLiquidityUsd: config.GRAPH_MIN_PATH_LIQUIDITY_USD,
+          lpEquivalences: currentLpEquivalences,
+        },
       )
 
       const unpricedKey = unpricedConnected.join(',')
@@ -785,7 +840,6 @@ export async function run(options: RunOptions = {}): Promise<void> {
       }
 
       previousPrices = prices
-      pricesCalculated += prices.size
 
       const atokenToBase = new Map(currentAtokenEquivalences.map(([base, aToken]) => [aToken, base]))
       const canonicalVolumeAssetId = (assetId: number): number => {
@@ -836,6 +890,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
       // Merge price rows with volume rows (combines both into single batch)
       const combinedRows = mergePriceAndVolumeRows(priceRows, volumeRows)
         .filter(row => parseFloat(row.usd_price) > 0)
+        .map(row => ({ ...row, block_timestamp: blockTimestamp }))
       ctx.store.addPrices(combinedRows)
       ctx.store.addTradeVolumes(tradeVolumeRows)
 
@@ -859,7 +914,6 @@ export async function run(options: RunOptions = {}): Promise<void> {
           `spec_version: ${specVersion}`
         )
         lastLogBlock = blockHeight
-        pricesCalculated = 0
         blocksSkipped = 0
         blocksProcessed = 0
         swapEventsProcessed = 0
@@ -876,4 +930,5 @@ export async function run(options: RunOptions = {}): Promise<void> {
       await historicalSnapshotStream.return(undefined)
     }
   })
+
 }

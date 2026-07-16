@@ -79,6 +79,22 @@ describe('calculateUsdVolume', () => {
     expect(result).toBe('1.500000000000');
   });
 
+  it('normalizes compact price strings to 12 decimal places', () => {
+    const prices: PriceMap = new Map([[5, '1.5']]);
+    const decimals: AssetDecimals = new Map([[5, 12]]);
+
+    expect(calculateUsdVolume(1_000_000_000_000n, 5, prices, decimals))
+      .toBe('1.500000000000');
+  });
+
+  it('rejects malformed prices instead of silently mis-scaling volume', () => {
+    const prices: PriceMap = new Map([[5, '1.2.3']]);
+    const decimals: AssetDecimals = new Map([[5, 12]]);
+
+    expect(() => calculateUsdVolume(1_000_000_000_000n, 5, prices, decimals))
+      .toThrow('Invalid non-negative USD price');
+  });
+
   it('returns zero when asset decimals are unknown', () => {
     const prices: PriceMap = new Map([[5, '1.000000000000']]);
     const decimals: AssetDecimals = new Map(); // Asset 5 not in map

@@ -18,6 +18,7 @@ import * as omnipool from '../types/omnipool/events.js';
 import * as xyk from '../types/xyk/events.js';
 import * as stableswap from '../types/stableswap/events.js';
 import * as broadcast from '../types/broadcast/events.js';
+import { aggregateTradeVolumeRows, sumBigIntStrings, sumDecimal128Strings, sumVolumeFields } from './volumeMath.js';
 
 /**
  * Unified swap event structure across all pool types
@@ -117,6 +118,27 @@ function normalizeAccount(value: unknown): string | null {
   return null;
 }
 
+function broadcastTrade(decoded: {
+  swapper: unknown;
+  inputs: Array<{ asset: number; amount: bigint }>;
+  outputs: Array<{ asset: number; amount: bigint }>;
+}): DecodedTrade {
+  return {
+    trader: normalizeAccount(decoded.swapper),
+    inputs: decoded.inputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
+    outputs: decoded.outputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
+  };
+}
+
+function priceToDecimal128(value: string): bigint {
+  const match = /^(\d+)(?:\.(\d{1,12}))?$/.exec(value);
+  if (match == null) {
+    throw new Error(`Invalid non-negative USD price: ${value}`);
+  }
+
+  return BigInt(`${match[1]}${(match[2] ?? '').padEnd(12, '0')}`);
+}
+
 /**
  * Calculate USD volume from native amount using bigint-only arithmetic
  *
@@ -154,9 +176,8 @@ export function calculateUsdVolume(
     return '0.000000000000';
   }
 
-  // Convert price string to bigint by removing decimal point
-  // '2.000000000000' -> 2000000000000n (price with 12 decimal places)
-  const priceBigInt = BigInt(priceStr.replace('.', ''));
+  // Normalize both compact and fixed-width prices to Decimal128(12).
+  const priceBigInt = priceToDecimal128(priceStr);
 
   // Calculate USD volume: (nativeAmount * priceBigInt) / (10^assetDecimals)
   // This gives us the volume in the same 12-decimal-place scale as the price
@@ -265,7 +286,7 @@ function tradeToVolumeRows(
  * @param event - Event-like object with name, block, and args
  * @returns DecodedSwap or null if event is not a swap or decoding fails
  */
-export function decodeSwapEvent(event: EventLike): DecodedSwap | null {
+function decodeSwapEvent(event: EventLike): DecodedSwap | null {
   const { name } = event;
   const isLegacySwapName =
     name === 'Omnipool.SellExecuted' ||
@@ -441,31 +462,16 @@ function decodeTradeEvent(event: EventLike): DecodedTrade | null {
     }
 
     if (name === 'Broadcast.Swapped2' && broadcast.swapped2.v305.is(event)) {
-      const decoded = broadcast.swapped2.v305.decode(event);
-      return {
-        trader: normalizeAccount(decoded.swapper),
-        inputs: decoded.inputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
-        outputs: decoded.outputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
-      };
+      return broadcastTrade(broadcast.swapped2.v305.decode(event));
     }
 
     if (name === 'Broadcast.Swapped3') {
       if (broadcast.swapped3.v323.is(event)) {
-        const decoded = broadcast.swapped3.v323.decode(event);
-        return {
-          trader: normalizeAccount(decoded.swapper),
-          inputs: decoded.inputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
-          outputs: decoded.outputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
-        };
+        return broadcastTrade(broadcast.swapped3.v323.decode(event));
       }
 
       if (broadcast.swapped3.v313.is(event)) {
-        const decoded = broadcast.swapped3.v313.decode(event);
-        return {
-          trader: normalizeAccount(decoded.swapper),
-          inputs: decoded.inputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
-          outputs: decoded.outputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
-        };
+        return broadcastTrade(broadcast.swapped3.v313.decode(event));
       }
     }
 
@@ -739,25 +745,9 @@ function aggregateVolumeRows(volumeRows: PriceRow[]): PriceRow[] {
     const existing = aggregated.get(row.asset_id);
 
     if (existing) {
-      // Sum volumes
       aggregated.set(row.asset_id, {
         ...existing,
-        native_volume_sell: sumBigIntStrings(
-          existing.native_volume_sell ?? '0',
-          row.native_volume_sell ?? '0'
-        ),
-        usd_volume_sell: sumDecimal128Strings(
-          existing.usd_volume_sell ?? '0.000000000000',
-          row.usd_volume_sell ?? '0.000000000000'
-        ),
-        native_volume_buy: sumBigIntStrings(
-          existing.native_volume_buy ?? '0',
-          row.native_volume_buy ?? '0'
-        ),
-        usd_volume_buy: sumDecimal128Strings(
-          existing.usd_volume_buy ?? '0.000000000000',
-          row.usd_volume_buy ?? '0.000000000000'
-        ),
+        ...sumVolumeFields(existing, row),
       });
     } else {
       // First entry for this asset
@@ -766,76 +756,4 @@ function aggregateVolumeRows(volumeRows: PriceRow[]): PriceRow[] {
   }
 
   return Array.from(aggregated.values());
-}
-
-function aggregateTradeVolumeRows(volumeRows: TradeVolumeRow[]): TradeVolumeRow[] {
-  const aggregated = new Map<string, TradeVolumeRow>();
-
-  for (const row of volumeRows) {
-    const key = `${row.asset_id}:${row.block_height}:${row.account}`;
-    const existing = aggregated.get(key);
-
-    if (existing) {
-      aggregated.set(key, {
-        ...existing,
-        native_volume_sell: sumBigIntStrings(
-          existing.native_volume_sell ?? '0',
-          row.native_volume_sell ?? '0'
-        ),
-        usd_volume_sell: sumDecimal128Strings(
-          existing.usd_volume_sell ?? '0.000000000000',
-          row.usd_volume_sell ?? '0.000000000000'
-        ),
-        native_volume_buy: sumBigIntStrings(
-          existing.native_volume_buy ?? '0',
-          row.native_volume_buy ?? '0'
-        ),
-        usd_volume_buy: sumDecimal128Strings(
-          existing.usd_volume_buy ?? '0.000000000000',
-          row.usd_volume_buy ?? '0.000000000000'
-        ),
-        trade_count: existing.trade_count + row.trade_count,
-      });
-    } else {
-      aggregated.set(key, { ...row });
-    }
-  }
-
-  return Array.from(aggregated.values());
-}
-
-/**
- * Sum two bigint strings (native volumes)
- *
- * @param a - First bigint string
- * @param b - Second bigint string
- * @returns Sum as string
- */
-function sumBigIntStrings(a: string, b: string): string {
-  return (BigInt(a) + BigInt(b)).toString();
-}
-
-/**
- * Sum two Decimal128(12) strings (USD volumes)
- *
- * Converts to bigint by removing decimal point, sums, then reformats.
- *
- * @param a - First Decimal128(12) string
- * @param b - Second Decimal128(12) string
- * @returns Sum as Decimal128(12) string
- */
-function sumDecimal128Strings(a: string, b: string): string {
-  // Convert to bigint (remove decimal point)
-  const aBigInt = BigInt(a.replace('.', ''));
-  const bBigInt = BigInt(b.replace('.', ''));
-
-  // Sum
-  const sumBigInt = aBigInt + bBigInt;
-
-  // Format as Decimal128(12)
-  const integerPart = sumBigInt / 1000000000000n;
-  const fractionalPart = sumBigInt % 1000000000000n;
-  const fractionalStr = fractionalPart.toString().padStart(12, '0');
-
-  return `${integerPart}.${fractionalStr}`;
 }

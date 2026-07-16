@@ -16,14 +16,13 @@
 import * as omnipool from '../types/omnipool/events'
 import * as xyk from '../types/xyk/events'
 import * as stableswap from '../types/stableswap/events'
-import * as broadcast from '../types/broadcast/events'
 
-export const UNIFIED_SWAP_EVENTS_SPEC_VERSION = 282
+const UNIFIED_SWAP_EVENTS_SPEC_VERSION = 282
 
 /**
  * Schema version with first-appearance block height
  */
-export interface SwapEventVersion {
+interface SwapEventVersion {
   /** Runtime spec version where this schema was introduced */
   specVersion: number
   /** Block height where this spec version first appeared */
@@ -33,7 +32,7 @@ export interface SwapEventVersion {
 /**
  * Complete swap event catalog entry
  */
-export interface SwapEventEntry {
+interface SwapEventEntry {
   /** Full qualified event name, e.g. 'Omnipool.SellExecuted' */
   name: string
   /** Pallet that emits this event */
@@ -49,7 +48,7 @@ export interface SwapEventEntry {
 /**
  * Event classification categories
  */
-export enum EventCategory {
+enum EventCategory {
   SWAP = 'SWAP',
   LIQUIDITY = 'LIQUIDITY',
   LIFECYCLE = 'LIFECYCLE',
@@ -61,7 +60,7 @@ export enum EventCategory {
  * First appeared in v115 (block 1475996) when Omnipool pallet was introduced.
  * Schema changes at v170 (fee tracking) and v201 (hub amount tracking).
  */
-export const OMNIPOOL_SWAP_EVENTS: SwapEventEntry[] = [
+const OMNIPOOL_SWAP_EVENTS: SwapEventEntry[] = [
   {
     name: 'Omnipool.SellExecuted',
     pallet: 'Omnipool',
@@ -92,7 +91,7 @@ export const OMNIPOOL_SWAP_EVENTS: SwapEventEntry[] = [
  * First appeared in v183 (block 3632973) when XYK pallet was upgraded.
  * No schema changes detected by typegen after initial version.
  */
-export const XYK_SWAP_EVENTS: SwapEventEntry[] = [
+const XYK_SWAP_EVENTS: SwapEventEntry[] = [
   {
     name: 'XYK.SellExecuted',
     pallet: 'XYK',
@@ -119,7 +118,7 @@ export const XYK_SWAP_EVENTS: SwapEventEntry[] = [
  * First appeared in v183 (block 3632973) when Stableswap pallet was introduced.
  * No schema changes detected by typegen after initial version.
  */
-export const STABLESWAP_SWAP_EVENTS: SwapEventEntry[] = [
+const STABLESWAP_SWAP_EVENTS: SwapEventEntry[] = [
   {
     name: 'Stableswap.SellExecuted',
     pallet: 'Stableswap',
@@ -147,17 +146,11 @@ export const STABLESWAP_SWAP_EVENTS: SwapEventEntry[] = [
  * onward. We keep their metadata separate because the curated first-block
  * catalog above only tracks legacy pool-specific events today.
  */
-export const UNIFIED_SWAP_EVENT_NAMES = [
+const UNIFIED_SWAP_EVENT_NAMES = [
   'Broadcast.Swapped',
   'Broadcast.Swapped2',
   'Broadcast.Swapped3',
 ] as const
-
-export const UNIFIED_SWAP_EVENT_CODECS = {
-  'Broadcast.Swapped': broadcast.swapped,
-  'Broadcast.Swapped2': broadcast.swapped2,
-  'Broadcast.Swapped3': broadcast.swapped3,
-} as const
 
 /**
  * Unified swap event catalog across all pool types
@@ -167,7 +160,7 @@ export const UNIFIED_SWAP_EVENT_CODECS = {
  * - XYK: SellExecuted, BuyExecuted (1 schema version)
  * - Stableswap: SellExecuted, BuyExecuted (1 schema version)
  */
-export const SWAP_EVENT_CATALOG: SwapEventEntry[] = [
+const SWAP_EVENT_CATALOG: SwapEventEntry[] = [
   ...OMNIPOOL_SWAP_EVENTS,
   ...XYK_SWAP_EVENTS,
   ...STABLESWAP_SWAP_EVENTS,
@@ -183,7 +176,7 @@ const UNIFIED_SWAP_EVENT_NAME_SET = new Set<string>(UNIFIED_SWAP_EVENT_NAMES)
  * across all three pool pallets. This enables filtering and categorization at
  * runtime without hardcoding event names in the indexer.
  */
-export const EVENT_CLASSIFICATION: Record<string, EventCategory> = {
+const EVENT_CLASSIFICATION: Record<string, EventCategory> = {
   // Omnipool swap events
   'Omnipool.SellExecuted': EventCategory.SWAP,
   'Omnipool.BuyExecuted': EventCategory.SWAP,

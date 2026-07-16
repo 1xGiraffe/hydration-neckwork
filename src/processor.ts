@@ -2,11 +2,14 @@ import { SubstrateBatchProcessor } from '@subsquid/substrate-processor'
 import { config } from './config.js'
 
 export const processor = new SubstrateBatchProcessor()
-  .setGateway(config.SQD_GATEWAY)
+  .setGateway({
+    url: config.SQD_GATEWAY,
+    apiKey: config.SQD_GATEWAY_API_KEY,
+  })
   .setRpcEndpoint({
     url: config.RPC_URL,
     rateLimit: config.RPC_RATE_LIMIT,
-    capacity: 20,
+    capacity: config.RPC_CAPACITY,
   })
 
   // Start from genesis (will be overridden by checkpoint in production)

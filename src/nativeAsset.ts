@@ -23,17 +23,24 @@ interface JsonRpcSuccess {
 }
 
 function firstString(value: unknown): string | null {
-  if (typeof value === 'string') return value
-  if (Array.isArray(value) && typeof value[0] === 'string') return value[0]
-  return null
+  const candidate = typeof value === 'string'
+    ? value
+    : Array.isArray(value) && typeof value[0] === 'string'
+      ? value[0]
+      : null
+  if (candidate == null || candidate.trim() === '') return null
+  return candidate.trim()
 }
 
 function firstNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (Array.isArray(value) && typeof value[0] === 'number' && Number.isFinite(value[0])) {
-    return value[0]
-  }
-  return null
+  const candidate = typeof value === 'number'
+    ? value
+    : Array.isArray(value) && typeof value[0] === 'number'
+      ? value[0]
+      : null
+  return candidate != null && Number.isSafeInteger(candidate) && candidate >= 0
+    ? candidate
+    : null
 }
 
 async function requestOverHttp(url: string): Promise<unknown> {
@@ -46,6 +53,7 @@ async function requestOverHttp(url: string): Promise<unknown> {
       method: 'system_properties',
       params: [],
     }),
+    signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
   })
 
   if (!response.ok) {
@@ -63,46 +71,72 @@ async function requestOverHttp(url: string): Promise<unknown> {
 async function requestOverWebSocket(url: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url)
+    let settled = false
     const timer = setTimeout(() => {
-      socket.close()
-      reject(new Error('system_properties timed out'))
+      fail(new Error('system_properties timed out'))
     }, RPC_TIMEOUT_MS)
 
-    const cleanup = () => clearTimeout(timer)
+    const closeSocket = (): void => {
+      if (socket.readyState >= WebSocket.CLOSING) return
+      try {
+        socket.close()
+      } catch {
+        // The original request result is more useful than a close failure.
+      }
+    }
+
+    const fail = (error: unknown): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      closeSocket()
+      reject(error)
+    }
+
+    const succeed = (result: unknown): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      closeSocket()
+      resolve(result)
+    }
 
     socket.addEventListener('open', () => {
-      socket.send(JSON.stringify({
-        id: 1,
-        jsonrpc: '2.0',
-        method: 'system_properties',
-        params: [],
-      }))
+      try {
+        socket.send(JSON.stringify({
+          id: 1,
+          jsonrpc: '2.0',
+          method: 'system_properties',
+          params: [],
+        }))
+      } catch (error) {
+        fail(error)
+      }
     })
 
     socket.addEventListener('message', (event) => {
-      cleanup()
       try {
         const json = JSON.parse(String(event.data)) as JsonRpcSuccess
         if (json.id !== 1) return
-        socket.close()
         if (json.error) {
-          reject(new Error(`system_properties failed: ${json.error.message}`))
+          fail(new Error(`system_properties failed: ${json.error.message}`))
           return
         }
-        resolve(json.result)
+        succeed(json.result)
       } catch (error) {
-        socket.close()
-        reject(error)
+        fail(error)
       }
     })
 
     socket.addEventListener('error', () => {
-      cleanup()
-      reject(new Error('WebSocket request failed'))
+      fail(new Error('WebSocket request failed'))
     })
 
     socket.addEventListener('close', () => {
-      cleanup()
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      reject(new Error('WebSocket closed before system_properties responded'))
     })
   })
 }
@@ -155,5 +189,8 @@ export function nativeAssetInfoToRow(nativeAsset: NativeAssetInfo): AssetRow {
     name: nativeAsset.name,
     decimals: nativeAsset.decimals,
     parachain_id: null,
+    origin_ecosystem: null,
+    origin_chain_id: null,
+    origin_asset_id: null,
   }
 }

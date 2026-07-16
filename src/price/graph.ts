@@ -3,6 +3,10 @@ import { calculateLRNAPrice, calculateOmnipoolPrices } from './omnipool.ts';
 import { calculateSpotPrice } from './stableswap.ts';
 
 const PRICE_SCALE = 10n ** 12n;
+const PRICE_24_SCALE = 10n ** 24n;
+const USD_LIQUIDITY_SCALE = 10n ** 18n;
+const UNBOUNDED_PATH_LIQUIDITY = 10n ** 60n;
+const DEFAULT_MAX_OBSERVATIONS_PER_ASSET = 64;
 
 interface SpotQuote {
   price: bigint
@@ -12,6 +16,23 @@ interface SpotQuote {
 interface WeightedObservation {
   value: bigint
   weight: bigint
+}
+
+export interface ResolvePriceOptions {
+  minGraphPathLiquidityUsd?: number | bigint
+  maxObservationsPerAsset?: number
+  lpEquivalences?: Map<number, number> | ReadonlyArray<readonly [number, number]>
+}
+
+interface PricePathObservation {
+  priceBigint: bigint
+  hopCount: number
+  pathLiquidityUsd: bigint
+  path: number[]
+}
+
+interface PathQueueEntry extends PricePathObservation {
+  assetId: number
 }
 
 function priceStringTo12(price: string): bigint {
@@ -36,6 +57,69 @@ function normalizeReserve(reserve: bigint, assetId: number, decimals: AssetDecim
     return reserve * (10n ** BigInt(18 - assetDecimals));
   }
   return reserve / (10n ** BigInt(assetDecimals - 18));
+}
+
+function minBigint(left: bigint, right: bigint): bigint {
+  return left < right ? left : right;
+}
+
+function maxBigint(left: bigint, right: bigint): bigint {
+  return left > right ? left : right;
+}
+
+function lpEquivalenceEntries(
+  value: ResolvePriceOptions['lpEquivalences'],
+): Array<[number, number]> {
+  if (!value) return [];
+  return value instanceof Map
+    ? [...value.entries()]
+    : value.map(([lpId, displayId]) => [lpId, displayId]);
+}
+
+function usdValue18(normalizedReserve: bigint, price24: bigint): bigint {
+  return (normalizedReserve * price24) / PRICE_24_SCALE;
+}
+
+function conservativePoolLiquidityUsd(
+  knownNormalizedReserve: bigint,
+  unknownNormalizedReserve: bigint,
+  knownPrice24: bigint,
+  computedPrice24: bigint,
+): bigint {
+  const knownSideUsd = usdValue18(knownNormalizedReserve, knownPrice24);
+  const unknownSideUsd = usdValue18(unknownNormalizedReserve, computedPrice24);
+  return minBigint(knownSideUsd, unknownSideUsd);
+}
+
+function poolValueInAssetUnits(
+  pool: StableswapPool,
+  targetIndex: number,
+  decimals: AssetDecimals,
+): bigint {
+  const targetAsset = pool.assets[targetIndex];
+  const targetScale = 10n ** BigInt(decimals.get(targetAsset) ?? 12);
+  let total = 0n;
+
+  for (let i = 0; i < pool.assets.length; i++) {
+    const assetScale = 10n ** BigInt(decimals.get(pool.assets[i]) ?? 12);
+    if (i === targetIndex) {
+      total += pool.reserves[i] * targetScale / assetScale;
+      continue;
+    }
+
+    const spotPrice = calculateSpotPrice(pool, i, targetIndex, decimals);
+    if (spotPrice === 0n) return 0n;
+    total += (pool.reserves[i] * spotPrice * targetScale) / (assetScale * PRICE_SCALE);
+  }
+
+  return total;
+}
+
+function usdThresholdTo18(value: number | bigint | undefined): bigint {
+  if (value == null) return 0n;
+  if (typeof value === 'bigint') return value <= 0n ? 0n : value * USD_LIQUIDITY_SCALE;
+  if (!Number.isFinite(value) || value <= 0) return 0n;
+  return BigInt(Math.trunc(value)) * USD_LIQUIDITY_SCALE;
 }
 
 // Find the best Omnipool bridge asset from the candidate list.
@@ -288,6 +372,38 @@ function weightedMedian(observations: WeightedObservation[]): bigint | null {
   return sorted[sorted.length - 1].value;
 }
 
+function weightedMedianPathObservation(observations: PricePathObservation[]): PricePathObservation | null {
+  if (observations.length === 0) {
+    return null;
+  }
+
+  const sorted = [...observations].sort((left, right) => {
+    if (left.priceBigint < right.priceBigint) return -1;
+    if (left.priceBigint > right.priceBigint) return 1;
+    if (left.hopCount !== right.hopCount) return left.hopCount - right.hopCount;
+    if (left.pathLiquidityUsd !== right.pathLiquidityUsd) {
+      return left.pathLiquidityUsd > right.pathLiquidityUsd ? -1 : 1;
+    }
+    return 0;
+  });
+
+  let totalWeight = 0n;
+  for (const observation of sorted) {
+    totalWeight += maxBigint(observation.pathLiquidityUsd, 1n);
+  }
+
+  const threshold = (totalWeight + 1n) / 2n;
+  let runningWeight = 0n;
+  for (const observation of sorted) {
+    runningWeight += maxBigint(observation.pathLiquidityUsd, 1n);
+    if (runningWeight >= threshold) {
+      return observation;
+    }
+  }
+
+  return sorted[sorted.length - 1];
+}
+
 const MAX_HOPS = 3;
 const BFS_PRECISION = 24;
 
@@ -319,14 +435,14 @@ export function bfsResolvePrices(
     // Edges are pre-sorted by liquidity desc + pool-type rank from buildGraph()
 
     for (const edge of edges) {
-      // D-02: Never override Omnipool prices
+      // Omnipool prices remain authoritative.
       if (omnipoolPricedAssets.has(edge.toAsset)) continue;
       // First-arrival wins (edges sorted by liquidity, so best path wins)
       if (resolved.has(edge.toAsset)) continue;
 
-      // D-04: aToken edges don't increment hop count
+      // Wrapper equivalences do not add a real pool crossing.
       const nextHopCount = edge.kind === 'atoken' ? hopCount : hopCount + 1;
-      // D-05: Cap at maxHops real pool crossings
+      // Limit the number of real pool crossings.
       if (nextHopCount > maxHops) continue;
 
       const nextPrice = edge.computePrice(priceBigint, BFS_PRECISION);
@@ -340,9 +456,130 @@ export function bfsResolvePrices(
   return resolved;
 }
 
+export function resolveGraphPricesByWeightedMedian(
+  seeds: Map<number, bigint>,
+  omnipoolPricedAssets: Set<number>,
+  graph: Map<number, GraphEdge[]>,
+  options: ResolvePriceOptions = {},
+  maxHops: number = MAX_HOPS,
+): Map<number, { priceBigint: bigint; hopCount: number; pathLiquidityUsd: bigint }> {
+  const minPathLiquidityUsd = usdThresholdTo18(options.minGraphPathLiquidityUsd);
+  const maxObservationsPerAsset = Math.max(1, options.maxObservationsPerAsset ?? DEFAULT_MAX_OBSERVATIONS_PER_ASSET);
+  const observations = new Map<number, PricePathObservation[]>();
+  const observationKeys = new Map<number, Map<string, PricePathObservation>>();
+  const queue: PathQueueEntry[] = [];
+
+  for (const [assetId, price] of seeds) {
+    queue.push({
+      assetId,
+      priceBigint: price,
+      hopCount: 0,
+      pathLiquidityUsd: UNBOUNDED_PATH_LIQUIDITY,
+      path: [assetId],
+    });
+  }
+
+  const addObservation = (assetId: number, observation: PricePathObservation): boolean => {
+    let list = observations.get(assetId);
+    if (!list) {
+      list = [];
+      observations.set(assetId, list);
+    }
+    let keyed = observationKeys.get(assetId);
+    if (!keyed) {
+      keyed = new Map();
+      observationKeys.set(assetId, keyed);
+    }
+
+    const key = `${observation.priceBigint}:${observation.hopCount}:${observation.path.join(',')}`;
+    const existing = keyed.get(key);
+    if (existing) {
+      existing.pathLiquidityUsd += observation.pathLiquidityUsd;
+      return false;
+    }
+
+    list.push(observation);
+    keyed.set(key, observation);
+    list.sort((left, right) => {
+      if (left.pathLiquidityUsd !== right.pathLiquidityUsd) {
+        return left.pathLiquidityUsd > right.pathLiquidityUsd ? -1 : 1;
+      }
+      if (left.hopCount !== right.hopCount) return left.hopCount - right.hopCount;
+      if (left.priceBigint < right.priceBigint) return -1;
+      if (left.priceBigint > right.priceBigint) return 1;
+      return 0;
+    });
+
+    if (list.length > maxObservationsPerAsset) {
+      const removed = list.splice(maxObservationsPerAsset);
+      for (const item of removed) {
+        keyed.delete(`${item.priceBigint}:${item.hopCount}:${item.path.join(',')}`);
+      }
+      return !removed.includes(observation);
+    }
+
+    return true;
+  };
+
+  let head = 0;
+  while (head < queue.length) {
+    const entry = queue[head++];
+    const edges = graph.get(entry.assetId) ?? [];
+
+    for (const edge of edges) {
+      if (omnipoolPricedAssets.has(edge.toAsset)) continue;
+      if (entry.path.includes(edge.toAsset)) continue;
+
+      const nextHopCount = edge.kind === 'atoken' ? entry.hopCount : entry.hopCount + 1;
+      if (nextHopCount > maxHops) continue;
+
+      const nextPrice = edge.computePrice(entry.priceBigint, BFS_PRECISION);
+      if (nextPrice === 0n) continue;
+
+      const edgeLiquidityUsd = edge.computeLiquidityUsd
+        ? edge.computeLiquidityUsd(entry.priceBigint, nextPrice)
+        : UNBOUNDED_PATH_LIQUIDITY;
+      const nextPathLiquidityUsd = minBigint(entry.pathLiquidityUsd, edgeLiquidityUsd);
+      if (nextPathLiquidityUsd < minPathLiquidityUsd) continue;
+
+      const observation: PricePathObservation = {
+        priceBigint: nextPrice,
+        hopCount: nextHopCount,
+        pathLiquidityUsd: nextPathLiquidityUsd,
+        path: [...entry.path, edge.toAsset],
+      };
+
+      if (addObservation(edge.toAsset, observation)) {
+        queue.push({ assetId: edge.toAsset, ...observation });
+      }
+    }
+  }
+
+  const resolved = new Map<number, { priceBigint: bigint; hopCount: number; pathLiquidityUsd: bigint }>();
+  for (const [assetId, assetObservations] of observations.entries()) {
+    const selected = weightedMedianPathObservation(assetObservations);
+    if (!selected) continue;
+    resolved.set(assetId, {
+      priceBigint: selected.priceBigint,
+      hopCount: selected.hopCount,
+      pathLiquidityUsd: selected.pathLiquidityUsd,
+    });
+  }
+
+  for (const [assetId, price] of seeds) {
+    resolved.set(assetId, {
+      priceBigint: price,
+      hopCount: 0,
+      pathLiquidityUsd: UNBOUNDED_PATH_LIQUIDITY,
+    });
+  }
+
+  return resolved;
+}
+
 // Price stableswap LP share tokens via NAV (TVL / totalSupply).
-// LP tokens with any unpriced underlying are skipped (all-or-nothing, D-02).
-// Newly priced LP tokens seed a second BFS pass to expand pricing further (D-03).
+// LP tokens with any unpriced underlying are skipped. Newly priced LP tokens
+// seed a second graph pass so their connected assets can also be resolved.
 export function computeLpNavPrices(
   prices: PriceMap,
   stableswapPools: StableswapPool[],
@@ -351,6 +588,7 @@ export function computeLpNavPrices(
   graph: Map<number, GraphEdge[]>,
   omnipoolPricedAssets: Set<number>,
   hopCounts: Map<number, number> = new Map(),
+  options: ResolvePriceOptions = {},
 ): void {
   const newLpSeeds = new Map<number, bigint>();
 
@@ -360,7 +598,7 @@ export function computeLpNavPrices(
     // Skip if LP token already priced (e.g., via Omnipool)
     if (prices.has(lpAssetId)) continue;
 
-    // D-02: all-or-nothing — skip if any underlying is unpriced
+    // NAV is only valid when every underlying has a price.
     if (!pool.assets.every(id => prices.has(id))) continue;
 
     const totalSupply = totalIssuances.get(lpAssetId);
@@ -433,9 +671,9 @@ export function computeLpNavPrices(
     newLpSeeds.set(lpAssetId, lpPrice24);
   }
 
-  // D-03: second BFS pass seeded with newly priced LP tokens
+  // Expand the graph from newly priced LP tokens.
   if (newLpSeeds.size > 0) {
-    const bfsResults = bfsResolvePrices(newLpSeeds, omnipoolPricedAssets, graph);
+    const bfsResults = resolveGraphPricesByWeightedMedian(newLpSeeds, omnipoolPricedAssets, graph, options);
     for (const [assetId, { priceBigint, hopCount }] of bfsResults) {
       if (!omnipoolPricedAssets.has(assetId) && !prices.has(assetId)) {
         prices.set(assetId, price24ToString(priceBigint));
@@ -496,8 +734,8 @@ export function buildGraph(
     if (decimalsA === undefined || decimalsB === undefined) continue;
 
     // Normalize reserves to 18 decimals for liquidity comparison
-    const normA = pool.reserveA * (10n ** BigInt(18 - decimalsA));
-    const normB = pool.reserveB * (10n ** BigInt(18 - decimalsB));
+    const normA = normalizeReserve(pool.reserveA, pool.assetA, decimals);
+    const normB = normalizeReserve(pool.reserveB, pool.assetB, decimals);
     const liquidity = normA + normB;
     if (liquidity > maxPoolLiquidity) {
       maxPoolLiquidity = liquidity;
@@ -515,6 +753,8 @@ export function buildGraph(
         const unknownScale = 10n ** BigInt(decimalsB);
         return (pool.reserveA * unknownScale * knownPrice) / (pool.reserveB * knownScale);
       },
+      computeLiquidityUsd: (knownPrice: bigint, computedPrice: bigint): bigint =>
+        conservativePoolLiquidityUsd(normA, normB, knownPrice, computedPrice),
     });
 
     // Edge: assetB -> assetA (knowing B's price, compute A's)
@@ -529,6 +769,8 @@ export function buildGraph(
         const unknownScale = 10n ** BigInt(decimalsA);
         return (pool.reserveB * unknownScale * knownPrice) / (pool.reserveA * knownScale);
       },
+      computeLiquidityUsd: (knownPrice: bigint, computedPrice: bigint): bigint =>
+        conservativePoolLiquidityUsd(normB, normA, knownPrice, computedPrice),
     });
   }
 
@@ -543,8 +785,7 @@ export function buildGraph(
     // Normalize reserves to 18 decimals for liquidity metric
     let liquiditySum = 0n;
     for (let i = 0; i < pool.assets.length; i++) {
-      const d = decimals.get(pool.assets[i]) || 12;
-      liquiditySum += pool.reserves[i] * (10n ** BigInt(18 - d));
+      liquiditySum += normalizeReserve(pool.reserves[i], pool.assets[i], decimals);
     }
     if (liquiditySum > maxPoolLiquidity) {
       maxPoolLiquidity = liquiditySum;
@@ -557,23 +798,34 @@ export function buildGraph(
         const toAsset = pool.assets[j];
         const fromIndex = i;
         const toIndex = j;
+        const fromNormalizedReserve = normalizeReserve(pool.reserves[fromIndex], fromAsset, decimals);
+        const toNormalizedReserve = normalizeReserve(pool.reserves[toIndex], toAsset, decimals);
 
         // Edge: fromAsset -> toAsset
         // "Knowing fromAsset price, compute toAsset price"
         // spotPrice(toIndex, fromIndex) = "how much fromAsset per 1 toAsset"
         // toAssetPrice = fromAssetPrice * spotPrice(toIndex, fromIndex) / 10^12
+        let cachedSpotPrice: bigint | null = null;
+        const getSpotPrice = (): bigint => {
+          if (cachedSpotPrice == null) {
+            cachedSpotPrice = calculateSpotPrice(pool, toIndex, fromIndex, decimals);
+          }
+          return cachedSpotPrice;
+        };
         addEdge(fromAsset, {
           toAsset,
           poolId: pool.poolId,
           kind: 'stableswap',
           liquidity: liquiditySum,
           computePrice: (knownPrice: bigint, _precision: number): bigint => {
-            const spotPrice = calculateSpotPrice(pool, toIndex, fromIndex, decimals);
+            const spotPrice = getSpotPrice();
             if (spotPrice === 0n) return 0n;
             // knownPrice is 24-decimal, spotPrice is 12-decimal
             // result = knownPrice * spotPrice / 10^12 = 24-decimal
             return (knownPrice * spotPrice) / (10n ** 12n);
           },
+          computeLiquidityUsd: (knownPrice: bigint, computedPrice: bigint): bigint =>
+            conservativePoolLiquidityUsd(fromNormalizedReserve, toNormalizedReserve, knownPrice, computedPrice),
         });
       }
     }
@@ -593,13 +845,11 @@ export function buildGraph(
 
     const lpDec = decimals.get(lpAssetId) ?? 18;
     const lpDecScale = 10n ** BigInt(lpDec);
-    const numAssets = BigInt(pool.assets.length);
 
     // Normalize reserves to 18 decimals for liquidity metric
     let liquiditySum = 0n;
     for (let i = 0; i < pool.assets.length; i++) {
-      const d = decimals.get(pool.assets[i]) || 12;
-      liquiditySum += pool.reserves[i] * (10n ** BigInt(18 - d));
+      liquiditySum += normalizeReserve(pool.reserves[i], pool.assets[i], decimals);
     }
 
     for (let i = 0; i < pool.assets.length; i++) {
@@ -607,11 +857,15 @@ export function buildGraph(
       const reserve = pool.reserves[i];
       const underlyingDec = BigInt(decimals.get(underlyingAsset) ?? 12);
       const underlyingDecScale = 10n ** underlyingDec;
+      const totalUnderlyingEquivalent = poolValueInAssetUnits(pool, i, decimals);
+      if (totalUnderlyingEquivalent === 0n) continue;
+      const normalizedSupply = normalizeReserve(totalSupply, lpAssetId, decimals);
+      const normalizedUnderlyingReserve = normalizeReserve(reserve, underlyingAsset, decimals);
 
       // Edge: LP token → underlying asset
-      // Inverse NAV assuming equal value split (valid for stableswap):
-      // underlyingPrice = lpPrice * totalSupply / (numAssets * reserve_i)
-      // adjusted for decimal differences
+      // Inverse NAV using the pool's own spot/peg ratios:
+      // underlyingPrice = lpPrice * totalSupply / poolValueInUnderlyingUnits
+      // adjusted for decimal differences.
       addEdge(lpAssetId, {
         toAsset: underlyingAsset,
         poolId: pool.poolId,
@@ -619,9 +873,10 @@ export function buildGraph(
         liquidity: liquiditySum,
         computePrice: (knownPrice: bigint, _precision: number): bigint => {
           // knownPrice = LP price in 24-decimal (per 1 whole LP token)
-          // result = knownPrice * totalSupply * underlyingDecScale / (numAssets * reserve * lpDecScale)
-          return (knownPrice * totalSupply * underlyingDecScale) / (numAssets * reserve * lpDecScale);
+          return (knownPrice * totalSupply * underlyingDecScale) / (totalUnderlyingEquivalent * lpDecScale);
         },
+        computeLiquidityUsd: (knownPrice: bigint, computedPrice: bigint): bigint =>
+          conservativePoolLiquidityUsd(normalizedSupply, normalizedUnderlyingReserve, knownPrice, computedPrice),
       });
     }
   }
@@ -677,6 +932,7 @@ export function resolvePrices(
   atokenEquivalences: [number, number][] = [],
   totalIssuances: Map<number, bigint> = new Map(),
   usdReferenceIds: number[] = [_legacyUsdReferenceAssetId],
+  options: ResolvePriceOptions = {},
 ): ResolvedPrices {
   const prices = new Map<number, string>();
   const hopCounts = new Map<number, number>();
@@ -702,6 +958,28 @@ export function resolvePrices(
       }
     }
   };
+  const lpAliasEntries = lpEquivalenceEntries(options.lpEquivalences);
+  const canonicalizeLpAliasPairs = (): void => {
+    for (const [lpId, displayId] of lpAliasEntries) {
+      const lpPrice = prices.get(lpId);
+      const displayPrice = prices.get(displayId);
+      const canonicalPrice = displayPrice ?? lpPrice;
+      if (!canonicalPrice) continue;
+
+      const lpHop = hopCounts.get(lpId);
+      const displayHop = hopCounts.get(displayId);
+      const canonicalHop =
+        lpHop != null && displayHop != null ? Math.min(lpHop, displayHop)
+          : displayHop ?? lpHop;
+
+      prices.set(lpId, canonicalPrice);
+      prices.set(displayId, canonicalPrice);
+      if (canonicalHop != null) {
+        hopCounts.set(lpId, canonicalHop);
+        hopCounts.set(displayId, canonicalHop);
+      }
+    }
+  };
 
   let lrnaPrice: string | null = null;
   const referenceUsdPrices = buildUsdReferencePrices(usdReferenceIds, stableswapPools, decimals);
@@ -718,7 +996,7 @@ export function resolvePrices(
   const directReferenceBridge = findBestOmnipoolBridge(omnipoolAssets, usdReferenceIds);
   if (directReferenceBridge) {
     try {
-      const bridgeDecimals = decimals.get(directReferenceBridge.assetId) || 6;
+      const bridgeDecimals = decimals.get(directReferenceBridge.assetId) ?? 6;
       const bridgeUsdPrice = referenceUsdPrices.get(directReferenceBridge.assetId) ?? '1.000000000000';
       lrnaPrice = calculateLRNAPrice(directReferenceBridge.state, bridgeDecimals);
       lrnaPrice = multiplyPriceStrings(lrnaPrice, bridgeUsdPrice);
@@ -815,6 +1093,7 @@ export function resolvePrices(
   // Exact wrapper pairs must stay identical even if only one side is directly
   // seeded (for example, because only one wrapper is present in Omnipool).
   canonicalizeExactWrapperPairs();
+  canonicalizeLpAliasPairs();
 
   // Set hop count 0 for all Omnipool-priced assets
   for (const assetId of prices.keys()) {
@@ -822,6 +1101,7 @@ export function resolvePrices(
   }
 
   canonicalizeExactWrapperPairs();
+  canonicalizeLpAliasPairs();
 
   // Track Omnipool-priced assets for routing preference
   const omnipoolPricedAssets = new Set(prices.keys());
@@ -835,8 +1115,8 @@ export function resolvePrices(
     seeds.set(assetId, priceTo24(priceStr));
   }
 
-  // Multi-source BFS from all priced assets outward
-  const bfsResults = bfsResolvePrices(seeds, omnipoolPricedAssets, graph);
+  // Multi-source weighted observations from all priced assets outward
+  const bfsResults = resolveGraphPricesByWeightedMedian(seeds, omnipoolPricedAssets, graph, options);
 
   // Write BFS-resolved prices to PriceMap (12-decimal strings)
   for (const [assetId, { priceBigint, hopCount }] of bfsResults) {
@@ -847,10 +1127,12 @@ export function resolvePrices(
   }
 
   canonicalizeExactWrapperPairs();
+  canonicalizeLpAliasPairs();
 
-    // LP NAV pricing: price stableswap share tokens via TVL / totalSupply,
-  // then seed a second BFS pass with newly priced LP tokens (D-01, D-03)
-  computeLpNavPrices(prices, stableswapPools, totalIssuances, decimals, graph, omnipoolPricedAssets, hopCounts);
+  // Price stableswap share tokens via TVL / total supply, then expand the graph
+  // from the newly priced LP tokens.
+  computeLpNavPrices(prices, stableswapPools, totalIssuances, decimals, graph, omnipoolPricedAssets, hopCounts, options);
+  canonicalizeLpAliasPairs();
 
   // Collect unpriced assets that have pool connections in the graph
   const unpricedConnected = collectUnpricedConnectedAssets(graph, prices);

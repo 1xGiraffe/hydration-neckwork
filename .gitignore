@@ -1,5 +1,14 @@
 node_modules
+__pycache__/
+*.py[cod]
 clickhouse_data
 .env
 .papi
 hydration-metadata.json
+logs/
+
+docker-compose.override.yml
+test-results/
+.playwright-mcp/
+
+/*.png

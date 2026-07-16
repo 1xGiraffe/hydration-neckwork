@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest'
-// This import will fail until Task 1 exports extractParachainId
-import { extractParachainId, isPlaceholderAssetMetadata } from '../src/registry/tracker'
+import { extractAssetOrigin, extractParachainId, isPlaceholderAssetMetadata } from '../src/registry/tracker'
 
 describe('extractParachainId', () => {
   it('returns null for null/undefined location', () => {
@@ -61,6 +60,38 @@ describe('extractParachainId', () => {
       }
     }
     expect(extractParachainId(location)).toBeNull()
+  })
+})
+
+describe('extractAssetOrigin', () => {
+  it('extracts an Ethereum chain and canonical ERC-20 contract', () => {
+    expect(extractAssetOrigin({
+      parents: 2,
+      interior: {
+        __kind: 'X2',
+        value: [
+          { __kind: 'GlobalConsensus', value: { __kind: 'Ethereum', value: { chainId: 1n } } },
+          { __kind: 'AccountKey20', key: '0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48' },
+        ],
+      },
+    })).toEqual({
+      ecosystem: 'ethereum',
+      chainId: '1',
+      assetId: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+    })
+  })
+
+  it('extracts a Polkadot parachain origin and GeneralIndex', () => {
+    expect(extractAssetOrigin({
+      parents: 1,
+      interior: {
+        __kind: 'X2',
+        value: [
+          { __kind: 'Parachain', value: 1000 },
+          { __kind: 'GeneralIndex', value: 1337n },
+        ],
+      },
+    })).toEqual({ ecosystem: 'polkadot', chainId: '1000', assetId: '1337' })
   })
 })
 

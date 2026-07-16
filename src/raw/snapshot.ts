@@ -14,6 +14,7 @@ import type {
   SnapshotStableswapPoolState,
   SnapshotXykPoolState,
 } from './types.js'
+import { forEachConcurrent } from '../util/collections.js'
 
 const POOL_STORAGE_PREFIXES = [
   'Omnipool', 'Tokens', 'XYK', 'Stableswap',
@@ -21,6 +22,40 @@ const POOL_STORAGE_PREFIXES = [
 
 const omnipoolAccount = u8aToHex(deriveOmnipoolAccount())
 const stableswapAccountCache = new Map<number, string>()
+
+function snapshotReadBatchSize(): number {
+  const configured = Number.parseInt(process.env.RAW_SNAPSHOT_READ_BATCH_SIZE ?? '100', 10)
+  return Number.isSafeInteger(configured) && configured > 0 ? Math.min(configured, 500) : 100
+}
+
+function snapshotReadBatchConcurrency(): number {
+  const configured = Number.parseInt(process.env.RAW_SNAPSHOT_READ_BATCH_CONCURRENCY ?? '2', 10)
+  return Number.isSafeInteger(configured) && configured > 0 ? Math.min(configured, 8) : 2
+}
+
+function chunkIndexed<T>(items: T[], size: number): Array<Array<{ item: T; index: number }>> {
+  const chunks: Array<Array<{ item: T; index: number }>> = []
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size).map((item, offset) => ({ item, index: index + offset })))
+  }
+  return chunks
+}
+
+async function getManyChunked<K, V>(
+  keys: K[],
+  read: (keys: K[]) => Promise<V[]>,
+): Promise<V[]> {
+  if (keys.length === 0) return []
+  const results = new Array<V>(keys.length)
+  const chunks = chunkIndexed(keys, snapshotReadBatchSize())
+  await forEachConcurrent(chunks, snapshotReadBatchConcurrency(), async (chunk) => {
+    const values = await read(chunk.map(({ item }) => item))
+    for (let index = 0; index < chunk.length; index++) {
+      results[chunk[index].index] = values[index]
+    }
+  })
+  return results
+}
 
 export function getOmnipoolAccount(): string {
   return omnipoolAccount
@@ -54,22 +89,25 @@ export function detectPoolAffectingSetStorage(calls: Array<{ name?: string; args
 }
 
 export async function readOmnipoolState(block: Block, assetIds: number[]): Promise<SnapshotOmnipoolAsset[]> {
-  if (!storage.omnipool.assets.v115.is(block)) return []
-
-  const assetStates = await storage.omnipool.assets.v115.getMany(block, assetIds)
-
-  let balances:
-    | (typeof storage.tokens.accounts.v108 extends { getMany: (...args: any[]) => Promise<infer R> } ? R : never)
-    | undefined
-
-  if (storage.tokens.accounts.v108.is(block)) {
-    try {
-      const keys = assetIds.map(assetId => [omnipoolAccount, assetId] as [string, number])
-      balances = await storage.tokens.accounts.v108.getMany(block, keys)
-    } catch {
-      balances = undefined
-    }
+  if (!storage.omnipool.assets.v115.is(block)) {
+    throw new Error(`Unsupported Omnipool.Assets storage at block ${block.height}`)
   }
+
+  type AccountBalances = Awaited<ReturnType<typeof storage.tokens.accounts.v108.getMany>>
+
+  // Asset states and pool balances are independent batched reads — fetch concurrently
+  // so their RPC round-trips overlap instead of running back-to-back.
+  const balancesSupported = storage.tokens.accounts.v108.is(block)
+  if (!balancesSupported) {
+    throw new Error(`Unsupported Tokens.Accounts storage at block ${block.height}`)
+  }
+  const [assetStates, balances] = await Promise.all([
+    storage.omnipool.assets.v115.getMany(block, assetIds),
+    getManyChunked(
+      assetIds.map(assetId => [omnipoolAccount, assetId] as [string, number]),
+      page => storage.tokens.accounts.v108.getMany(block, page),
+    ).then(value => value as AccountBalances),
+  ])
 
   const erc20Gaps: Array<{ index: number; assetId: number }> = []
   const assets: SnapshotOmnipoolAsset[] = []
@@ -107,12 +145,14 @@ export async function readOmnipoolState(block: Block, assetIds: number[]): Promi
       } else if (storage.system.account.v100.is(block)) {
         const account = await storage.system.account.v100.get(block, omnipoolAccount)
         hdxFree = account?.data.free
+      } else {
+        throw new Error(`Unsupported System.Account storage at block ${block.height}`)
       }
       if (hdxFree != null && hdxFree > 0n) {
         hdxState.reserve = hdxFree.toString()
       }
-    } catch {
-      // Keep fallback reserve if System.Account read fails.
+    } catch (error) {
+      throw new Error(`System.Account HDX reserve read failed at block ${block.height}`, { cause: error })
     }
   }
 
@@ -133,7 +173,9 @@ export async function readXYKState(
   block: Block,
   pools: Array<{ poolAccount: string; assetA: number; assetB: number }>
 ): Promise<SnapshotXykPoolState[]> {
-  if (!storage.tokens.accounts.v108.is(block)) return []
+  if (!storage.tokens.accounts.v108.is(block)) {
+    throw new Error(`Unsupported Tokens.Accounts storage for XYK pools at block ${block.height}`)
+  }
 
   const keys: [string, number][] = []
   for (const pool of pools) {
@@ -141,7 +183,7 @@ export async function readXYKState(
     keys.push([pool.poolAccount, pool.assetB])
   }
 
-  const balances = await storage.tokens.accounts.v108.getMany(block, keys)
+  const balances = await getManyChunked(keys, page => storage.tokens.accounts.v108.getMany(block, page))
   return pools.map((pool, index) => {
     const balanceA = balances[index * 2]
     const balanceB = balances[index * 2 + 1]
@@ -155,6 +197,8 @@ export async function readXYKState(
   })
 }
 
+let stableswapPegStorageSeen = false
+
 export async function readStableswapState(
   block: Block,
   pools: Array<{
@@ -167,7 +211,9 @@ export async function readStableswapState(
     fee: number
   }>
 ): Promise<SnapshotStableswapPoolState[]> {
-  if (!storage.tokens.accounts.v108.is(block)) return []
+  if (!storage.tokens.accounts.v108.is(block)) {
+    throw new Error(`Unsupported Tokens.Accounts storage for Stableswap pools at block ${block.height}`)
+  }
 
   const keys: [string, number][] = []
   const poolOffsets: number[] = []
@@ -180,24 +226,28 @@ export async function readStableswapState(
     }
   }
 
-  const balances = await storage.tokens.accounts.v108.getMany(block, keys)
+  const balances = await getManyChunked(keys, page => storage.tokens.accounts.v108.getMany(block, page))
 
   const totalIssuances = new Map<number, bigint>()
-  if (storage.tokens.totalIssuance.v108.is(block)) {
-    const lpAssetIds = pools.map(pool => pool.poolId)
-    const issuances = await storage.tokens.totalIssuance.v108.getMany(block, lpAssetIds)
-    for (let i = 0; i < lpAssetIds.length; i++) {
-      if (issuances[i] != null) {
-        totalIssuances.set(lpAssetIds[i], issuances[i]!)
-      }
+  if (!storage.tokens.totalIssuance.v108.is(block)) {
+    throw new Error(`Unsupported Tokens.TotalIssuance storage at block ${block.height}`)
+  }
+  const lpAssetIds = pools.map(pool => pool.poolId)
+  const issuances = await getManyChunked(lpAssetIds, page => storage.tokens.totalIssuance.v108.getMany(block, page))
+  for (let i = 0; i < lpAssetIds.length; i++) {
+    if (issuances[i] != null) {
+      totalIssuances.set(lpAssetIds[i], issuances[i]!)
     }
   }
 
-  const result: SnapshotStableswapPoolState[] = []
-  for (let i = 0; i < pools.length; i++) {
+  // Per-pool reads (erc20 reserve gaps + pegs) are independent across pools. Running them
+  // sequentially serializes ~one RPC round-trip per pool, which dominates near-head
+  // ingestion (no archive gateway to batch from). Fan out with bounded concurrency.
+  const result = new Array<SnapshotStableswapPoolState>(pools.length)
+  await forEachConcurrent(Array.from(pools.keys()), snapshotReadBatchConcurrency(), async (i) => {
     const pool = pools[i]
     const start = poolOffsets[i]
-    const reserves = pool.assets.map((assetId, reserveIndex) => {
+    const reserves = pool.assets.map((_, reserveIndex) => {
       const balance = balances[start + reserveIndex]
       if (balance?.free != null && balance.free > 0n) {
         return balance.free
@@ -238,25 +288,34 @@ export async function readStableswapState(
 
     let pegMultipliers: [string, string][] | undefined
     try {
-      let peg: any
+      let peg: { current?: Array<[bigint, bigint]> } | undefined
+      let pegStorageSupported = false
       if (storage.stableswap.poolPegs.v378.is(block)) {
+        pegStorageSupported = true
         peg = await storage.stableswap.poolPegs.v378.get(block, pool.poolId)
       } else if (storage.stableswap.poolPegs.v323.is(block)) {
+        pegStorageSupported = true
         peg = await storage.stableswap.poolPegs.v323.get(block, pool.poolId)
       } else if (storage.stableswap.poolPegs.v305.is(block)) {
+        pegStorageSupported = true
         peg = await storage.stableswap.poolPegs.v305.get(block, pool.poolId)
       }
-      if (peg?.current?.length > 0) {
-        pegMultipliers = peg.current.map(([numerator, denominator]: [bigint, bigint]) => [
+      if (!pegStorageSupported && stableswapPegStorageSeen) {
+        throw new Error(`Unsupported Stableswap.PoolPegs storage at block ${block.height}`)
+      }
+      stableswapPegStorageSeen ||= pegStorageSupported
+      const currentPeg = peg?.current
+      if (currentPeg != null && currentPeg.length > 0) {
+        pegMultipliers = currentPeg.map(([numerator, denominator]) => [
           numerator.toString(),
           denominator.toString(),
         ])
       }
-    } catch {
-      pegMultipliers = undefined
+    } catch (error) {
+      throw new Error(`Stableswap peg read failed at block ${block.height} for pool ${pool.poolId}`, { cause: error })
     }
 
-    result.push({
+    result[i] = {
       pool_id: pool.poolId,
       assets: [...pool.assets],
       reserves: reserves.map(reserve => reserve.toString()),
@@ -268,8 +327,8 @@ export async function readStableswapState(
       final_amplification: pool.finalAmplification,
       initial_block: pool.initialBlock,
       final_block: pool.finalBlock,
-    })
-  }
+    }
+  })
 
   return result.sort((a, b) => a.pool_id - b.pool_id)
 }
@@ -302,7 +361,7 @@ export function buildSnapshotPayload(
     block: {
       height: block.height,
       hash: block.hash,
-      timestamp: toClickHouseDateTime(block.timestamp),
+      timestamp: toClickHouseDateTime(block.timestamp, block.height),
       spec_version: block.specVersion,
     },
     assets: {
