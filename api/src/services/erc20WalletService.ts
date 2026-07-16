@@ -22,6 +22,8 @@ const erc20Precompile = (assetId: number) => '0x' + '0'.repeat(31) + '1' + asset
 const ERC20_BALANCE_OF = '70a08231' // keccak256("balanceOf(address)")[:4]
 
 let client: ClickHouseClient
+let erc20TransferDeltasReady = false
+export function setErc20WalletTransferDeltasReady(): void { erc20TransferDeltasReady = true }
 
 async function ethCallBalances(assetId: number, h160s: string[]): Promise<Map<string, bigint>> {
   const out = new Map<string, bigint>()
@@ -54,8 +56,11 @@ async function ethCallBalances(assetId: number, h160s: string[]): Promise<Map<st
 async function refresh(): Promise<void> {
   for (const a of ERC20_WALLET_ASSETS) {
     const holderRes = await client.query({
-      query: `SELECT DISTINCT arrayJoin(participants) AS h FROM price_data.raw_evm_logs
-              WHERE contract_address = {c:String} AND event_name = 'Transfer' AND h != '0x0000000000000000000000000000000000000000'`,
+      query: erc20TransferDeltasReady
+        ? `SELECT DISTINCT holder AS h FROM price_data.erc20_transfer_deltas
+           WHERE contract_address = {c:String} AND holder != '0x0000000000000000000000000000000000000000'`
+        : `SELECT DISTINCT arrayJoin(participants) AS h FROM price_data.raw_evm_logs
+           WHERE contract_address = {c:String} AND event_name = 'Transfer' AND h != '0x0000000000000000000000000000000000000000'`,
       query_params: { c: a.contract }, format: 'JSONEachRow',
     })
     const h160s = (await holderRes.json<{ h: string }>()).map(r => r.h.toLowerCase())

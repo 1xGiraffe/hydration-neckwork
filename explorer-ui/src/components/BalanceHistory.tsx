@@ -20,7 +20,11 @@ export function BalanceHistory({ history }: { history: AssetBalanceHistory[] }) 
   // the chips compares the same window. Assets with shorter histories zero-fill
   // before their first observation — the same convention the API's aligned
   // histories use — and forward-fill between points.
-  const axisTs = usable.reduce((a, h) => (h.points.length > a.length ? h.points.map(p => p.ts) : a), [] as string[])
+  const fullAxisTs = usable.reduce((a, h) => (h.points.length > a.length ? h.points.map(p => p.ts) : a), [] as string[])
+  // aToken history is authoritative only from its node-sourced anchor. Keep the
+  // shared axis inside that exact coverage window instead of implying a zero
+  // balance during the explicitly unavailable pre-anchor period.
+  const axisTs = cur.availableFrom ? fullAxisTs.filter(ts => ts >= cur.availableFrom!) : fullAxisTs
   const balByTs = new Map(cur.points.map(p => [p.ts, p.balance]))
   const onAxis = cur.points.some(p => balByTs.has(p.ts) && axisTs.includes(p.ts))
   let last = 0
@@ -41,6 +45,7 @@ export function BalanceHistory({ history }: { history: AssetBalanceHistory[] }) 
         </div>
         <div className="pf-head" style={{ marginTop: 14 }}>
           <div className="pf-now">{fmtBal(cur.current)}</div>
+          {cur.availableFrom && <div className="muted mono" style={{ fontSize: 11, marginLeft: 'auto' }}>Indexed from {cur.availableFrom.slice(0, 10)}</div>}
         </div>
         <AreaChart data={series} h={200} color="var(--sky)" floor={0} dates={dates} valueFmt={fmtBal} />
       </div>

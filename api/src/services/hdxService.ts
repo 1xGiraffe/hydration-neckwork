@@ -14,6 +14,8 @@ import { accountRef, ensurePrices, getGigaMarketStats, getGigaLiquidationLevels,
 // handlers only read the in-memory snapshot.
 
 let client: ClickHouseClient
+let hdxHolderLifetimeReady = false
+export function setHdxHolderLifetimeReady(): void { hdxHolderLifetimeReady = true }
 
 const HDX_DECIMALS = 12n
 // GigaHdx unstakes mature 403,200 parachain blocks after the unstake block.
@@ -596,9 +598,32 @@ async function loadDcaFlows(): Promise<HdxDashboard['flows']['dca']> {
 }
 
 async function loadChurn(): Promise<HdxDashboard['churn']> {
-  return cached('explorer:hdx-churn', 1_800_000, async () => {
+  return cached(`explorer:hdx-churn:${hdxHolderLifetimeReady ? 'model' : 'raw'}`, 1_800_000, async () => {
     const res = await client.query({
-      query: `
+      query: hdxHolderLifetimeReady ? `
+        WITH lifetime AS (
+          SELECT account_id,
+            minMerge(first_nonzero_state) AS first_nonzero,
+            maxMerge(last_nonzero_state) AS last_nonzero
+          FROM price_data.hdx_holder_lifetime
+          GROUP BY account_id
+        ), current_balances AS (
+          SELECT account_id, toUInt256OrZero(argMaxMerge(total_state)) AS current
+          FROM price_data.account_asset_latest_balances
+          WHERE asset_id = '0'
+          GROUP BY account_id
+        )
+        SELECT toStartOfWeek(first_nonzero) AS wk_new, count() AS n, 0 AS is_exit
+        FROM lifetime
+        WHERE first_nonzero >= now() - INTERVAL 12 WEEK
+        GROUP BY wk_new
+        UNION ALL
+        SELECT toStartOfWeek(last_nonzero) AS wk_new, count() AS n, 1 AS is_exit
+        FROM lifetime
+        LEFT JOIN current_balances USING account_id
+        WHERE ifNull(current, toUInt256(0)) = 0
+          AND last_nonzero >= now() - INTERVAL 12 WEEK
+        GROUP BY wk_new` : `
         WITH per_account AS (
           SELECT account_id,
             minIf(block_timestamp, toUInt256OrZero(total) > 0) AS first_nonzero,

@@ -275,7 +275,7 @@ export interface AddressDetail {
 }
 
 export interface AssetBalancePoint { ts: string; blockHeight: number; balance: number }
-export interface AssetBalanceHistory { asset: AssetRef; current: number; points: AssetBalancePoint[] }
+export interface AssetBalanceHistory { asset: AssetRef; current: number; points: AssetBalancePoint[]; availableFrom?: string }
 export interface AccountHistoryResponse { portfolioSeries: number[]; portfolioDates: string[]; balanceHistory: AssetBalanceHistory[] }
 
 export type CloseAccountReason =

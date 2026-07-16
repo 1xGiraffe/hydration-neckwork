@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { alignBalanceHistoryDailyPoints, hasNonZeroVisibleBalance } from '../src/services/explorerService.ts'
+import { alignBalanceHistoryDailyPoints, hasNonZeroVisibleBalance, reconstructATokenBalanceBuckets } from '../src/services/explorerService.ts'
 import type { AssetBalanceHistory, AssetBalancePoint, AssetRef } from '../src/services/explorerService.ts'
 
 const point = (balance: number): AssetBalancePoint => ({ ts: '2026-07-07 00:00:00', blockHeight: 1, balance })
@@ -50,5 +50,37 @@ describe('alignBalanceHistoryDailyPoints', () => {
     ])
 
     expect(aligned.map(h => h.asset.symbol)).toEqual(['BBB'])
+  })
+})
+
+describe('reconstructATokenBalanceBuckets', () => {
+  it('applies signed scaled deltas and each historical RAY index with integer precision', () => {
+    const ray = 10n ** 27n
+    const scaled = 12_345_678_901_234_567_890n
+    const history = reconstructATokenBalanceBuckets(
+      2,
+      5,
+      scaled.toString(),
+      [
+        { b: 3, value: '1000000000000000000' },
+        { b: 5, value: '-2000000000000000000' },
+      ],
+      [
+        { b: 2, value: ray.toString() },
+        { b: 4, value: (ray + ray / 10n).toString() },
+      ],
+    )
+
+    expect(history).toEqual([
+      { b: 2, value: scaled.toString() },
+      { b: 3, value: (scaled + 10n ** 18n).toString() },
+      { b: 4, value: ((scaled + 10n ** 18n) * 11n / 10n).toString() },
+      { b: 5, value: ((scaled - 10n ** 18n) * 11n / 10n).toString() },
+    ])
+  })
+
+  it('never exposes negative rounding dust as a negative balance', () => {
+    expect(reconstructATokenBalanceBuckets(0, 1, '0', [{ b: 0, value: '-1' }], [{ b: 0, value: (10n ** 27n).toString() }]))
+      .toEqual([{ b: 0, value: '0' }, { b: 1, value: '0' }])
   })
 })

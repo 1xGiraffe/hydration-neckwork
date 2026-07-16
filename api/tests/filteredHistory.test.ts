@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { accountTransferWindowSaturated, fetchFilteredDeep, activitySourceCoversCutoff } from '../src/services/explorerService.ts'
+import { accountTransferWindowSaturated, fetchFilteredDeep, activitySourceCoversCutoff, activitySourcesNeedingMore, completeActivityPageCutoff, activityCutoffFromDate, activitySourceSeedSize, historicalPriceHour } from '../src/services/explorerService.ts'
 
 describe('deep filtered history', () => {
   it('preserves saturation when indexed refs outlive a filtered raw page', () => {
@@ -16,6 +16,50 @@ describe('deep filtered history', () => {
     expect(activitySourceCoversCutoff(25, 25, { blockHeight: 100, eventIndex: 20 }, cutoff)).toBe(true)
     expect(activitySourceCoversCutoff(25, 25, { blockHeight: 99, eventIndex: 99 }, cutoff)).toBe(true)
     expect(activitySourceCoversCutoff(25, 25, null, cutoff)).toBe(false)
+  })
+
+  it('deepens only the source that has not crossed the merged cutoff', () => {
+    const pages = [
+      { key: 'trade', rawSize: 10, fetchSize: 10, oldest: { blockHeight: 99, eventIndex: 1 } },
+      { key: 'transfer', rawSize: 10, fetchSize: 10, oldest: { blockHeight: 101, eventIndex: 1 } },
+      { key: 'dca', rawSize: 0, fetchSize: 10, oldest: null, valueIrrelevant: true },
+    ]
+    expect(activitySourcesNeedingMore(pages, { blockHeight: 100, eventIndex: 5 }, true).map(page => page.key))
+      .toEqual(['transfer'])
+    expect(activitySourcesNeedingMore(pages, null, true).map(page => page.key))
+      .toEqual(['trade', 'transfer'])
+  })
+
+  it('does not treat a partial filtered page as a complete cutoff', () => {
+    const rows = [
+      { blockHeight: 100, eventIndex: 3 },
+      { blockHeight: 99, eventIndex: 2 },
+    ]
+    expect(completeActivityPageCutoff(rows, 3)).toBeNull()
+    expect(completeActivityPageCutoff(rows, 2)).toEqual(rows[1])
+  })
+
+  it('bounds other activity sources to the complete cutoff day', () => {
+    const rows = [
+      { timestamp: '2026-07-16 11:00:00' },
+      { timestamp: '2026-07-15 23:59:59' },
+    ]
+    expect(activityCutoffFromDate(undefined, rows, 2)).toBe('2026-07-15')
+    expect(activityCutoffFromDate('2026-07-16', rows, 2)).toBe('2026-07-16')
+    expect(activityCutoffFromDate('2026-07-01', rows, 2)).toBe('2026-07-15')
+    expect(activityCutoffFromDate(undefined, rows, 3)).toBeUndefined()
+  })
+
+  it('shares the exact completed close within an event hour', () => {
+    expect(historicalPriceHour('2026-07-16 20:00:00')).toBe('2026-07-16 20:00:00')
+    expect(historicalPriceHour('2026-07-16T20:59:59.123Z')).toBe('2026-07-16 20:00:00')
+  })
+
+  it('shares source cache buckets across adjacent activity pages', () => {
+    expect(activitySourceSeedSize(25)).toBe(16)
+    expect(activitySourceSeedSize(50)).toBe(16)
+    expect(activitySourceSeedSize(75)).toBe(32)
+    expect(activitySourceSeedSize(100)).toBe(32)
   })
 
   it('continues until it finds a match or exhausts history', async () => {

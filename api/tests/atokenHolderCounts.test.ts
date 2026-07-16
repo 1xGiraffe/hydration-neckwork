@@ -164,3 +164,59 @@ describe('groupATokenHolderRows — tag grouping for aToken holder lists', () =>
     expect(rows[0].tag).toMatchObject({ memberCount: 2 })
   })
 })
+
+describe('groupHolderBalanceClaims — folded display holders', () => {
+  it('merges wallet and aToken claims for one canonical account without double-counting tag members', async () => {
+    const { groupHolderBalanceClaims } = await import('../src/services/explorerService.ts')
+    const ref = (accountId: string) => ({
+      accountId,
+      address: accountId,
+      emoji: '•', emojiName: null, emojiUrl: null,
+      tag: accountId.startsWith('pool-')
+        ? { id: 'pools', name: 'Pools', color: '#123456', icon: '💧' }
+        : null,
+      identity: null,
+    })
+    const rows = groupHolderBalanceClaims([
+      { accountId: 'alice', bal: 40n, lastBlock: 10 },
+      { accountId: 'alice', bal: 60n, lastBlock: 0 },
+      { accountId: 'pool-a', bal: 70n, lastBlock: 9 },
+      { accountId: 'pool-a', bal: 30n, lastBlock: 0 },
+      { accountId: 'pool-b', bal: 50n, lastBlock: 8 },
+    ], ref as never)
+
+    expect(rows.map(row => row.balance)).toEqual(['150', '100'])
+    expect(rows[0].tag).toMatchObject({ tagId: 'pools', memberCount: 2 })
+    expect(rows[1].account?.accountId).toBe('alice')
+    expect(rows[1].lastBlock).toBe(10)
+  })
+
+  it('keeps module-held claims and only retains the unattributed custody remainder', async () => {
+    const { groupHolderBalanceClaims, unattributedCustodyBalance } = await import('../src/services/explorerService.ts')
+    const ref = (accountId: string) => ({
+      accountId,
+      address: accountId,
+      emoji: '•', emojiName: null, emojiUrl: null,
+      tag: accountId === 'omnipool'
+        ? { id: 'omnipool', name: 'Omnipool', color: '#123456', icon: '💧' }
+        : accountId === 'custody'
+          ? { id: 'supply-borrow', name: 'Supply & Borrow', color: '#654321', icon: '🏦' }
+          : null,
+      identity: null,
+    })
+    const remainder = unattributedCustodyBalance(1_000n, 750n)
+    const rows = groupHolderBalanceClaims([
+      { accountId: 'omnipool', bal: 600n, lastBlock: 0 },
+      { accountId: 'alice', bal: 150n, lastBlock: 0 },
+      { accountId: 'custody', bal: remainder, lastBlock: 99 },
+    ], ref as never)
+
+    expect(remainder).toBe(250n)
+    expect(rows.map(row => row.balance)).toEqual(['600', '250', '150'])
+    expect(rows[0].tag).toMatchObject({ tagId: 'omnipool' })
+    expect(rows[1].tag).toMatchObject({ tagId: 'supply-borrow' })
+    expect(rows.reduce((sum, row) => sum + BigInt(row.balance), 0n)).toBe(1_000n)
+    expect(unattributedCustodyBalance(1_000n, 1_000n)).toBe(0n)
+    expect(unattributedCustodyBalance(1_000n, 1_001n)).toBe(0n)
+  })
+})

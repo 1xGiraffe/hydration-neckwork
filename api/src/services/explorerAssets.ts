@@ -269,10 +269,10 @@ export function priceAssetId(assetId: number): number {
 // a held Stableswap pool-share token (2-Pool-GDOT, …) is shown as its underlying
 // main asset (GDOT), mirroring preis-ui which hides "-Pool" tokens. Unlike
 // priceAssetId this folds ONLY share tokens, never aTokens (aToken / money-market
-// collateral is folded separately via the MM path). Use for per-account balances
-// only — NOT for aggregate/supply views (asset directory totals, holder lists),
-// where folding a pool's TVL into the Giga token would double-count the vault that
-// backs it.
+// collateral is folded separately via the MM path). Aggregate holder/supply views
+// may fold these only when the hidden share id is removed from presentation and a
+// money-market custody balance is replaced—not added to—its beneficial aToken
+// holders; otherwise the vault would be double-counted.
 export function displayAssetId(assetId: number): number {
   return SHARE_TOKEN_UNDERLYING_ID[assetId] ?? assetId
 }

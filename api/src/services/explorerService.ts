@@ -1,7 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached, cachedSwr } from './cache.ts'
 import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
-import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord } from './tagService.ts'
+import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags } from './tagService.ts'
 import { identityForAccount, searchIdentitiesByDisplay, type AccountIdentity } from './identityService.ts'
 import { normalizeAddress, hydrationAddress, polkadotAddress, reservedH160AccountId, type NormalizedAddress } from './addressIdentity.ts'
 import { accountIcon, emojisMatchingName, emojiNameFor, parseSuffixEmojiQuery } from './omniwatchIdentity.ts'
@@ -10,6 +10,8 @@ import { hexToU8a } from '@polkadot/util'
 import { proxyInfoFor, multisigCompositionFor, multisigMembershipsFor, pendingMultisigOps, type ProxyRelation, type PendingMultisigOp } from './proxyMultisigService.ts'
 import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
 import { xcmJourneySourcesFor, xcmJourneysByOriginTx } from './xcmJourneyService.ts'
+import { ATOKEN_DELTA_ARRAYJOIN, ATOKEN_RAY_SQL } from '../db/atokenDeltas.ts'
+import { createHash } from 'node:crypto'
 
 let client: ClickHouseClient
 export function initExplorerService(c: ClickHouseClient): void { client = c }
@@ -202,12 +204,113 @@ let accountActivityReady = false
 export function setAccountActivityReady(): void { accountActivityReady = true }
 export function isAccountActivityReady(): boolean { return accountActivityReady }
 
+// Enabled only after every active raw_events partition has been copied into
+// account_transfer_activity. Until then the raw_events path remains
+// authoritative, so an online upgrade never makes older transfers disappear.
+let accountTransferActivityReady = false
+export function setAccountTransferActivityReady(): void { accountTransferActivityReady = true }
+
+// The asset-first transfer model powers asset-scoped transfer feeds after its
+// complete partition backfill (never while it is partial).
+let transferActivityReady = false
+export function setTransferActivityReady(): void { transferActivityReady = true }
+
+// Unfiltered global activity orders transfers by time, so it uses a separately
+// keyed compact model only after complete historical coverage.
+let transferActivityByTimeReady = false
+export function setTransferActivityByTimeReady(): void { transferActivityByTimeReady = true }
+
+let swapActivityReady = false
+export function setSwapActivityReady(): void { swapActivityReady = true }
+
+let otcActivityReady = false
+export function setOtcActivityReady(): void { otcActivityReady = true }
+function otcActivityTable(alias = ''): string {
+  return otcActivityReady
+    ? `price_data.otc_activity${alias ? ` AS ${alias}` : ''} FINAL`
+    : `price_data.raw_events${alias ? ` AS ${alias}` : ''}`
+}
+
+let liquidityActivityReady = false
+export function setLiquidityActivityReady(): void { liquidityActivityReady = true }
+
+let xcmEventActivityReady = false
+export function setXcmEventActivityReady(): void { xcmEventActivityReady = true }
+function xcmEventActivityTable(alias = ''): string {
+  return xcmEventActivityReady
+    // Every XCM consumer collapses stable (block,event) identities while
+    // decoding. Avoid FINAL here: it disables primary-key pruning on this
+    // 55M-row replacing model and turns bounded block/asset lookups into
+    // multi-gigabyte partition merges during request handling.
+    ? `price_data.xcm_event_activity${alias ? ` AS ${alias}` : ''}`
+    : `price_data.raw_events${alias ? ` AS ${alias}` : ''}`
+}
+
+let stakingActivityReady = false
+export function setStakingActivityReady(): void { stakingActivityReady = true }
+
+let voteActivityReady = false
+export function setVoteActivityReady(): void { voteActivityReady = true }
+
+let activityDailyReady = false
+export function setActivityDailyReady(): void { activityDailyReady = true }
+
+let dailyChainIdentityCountsReady = false
+export function setDailyChainIdentityCountsReady(): void { dailyChainIdentityCountsReady = true }
+
+let rewardClaimActivityReady = false
+export function setRewardClaimActivityReady(): void { rewardClaimActivityReady = true }
+
+let erc20TransferDeltasReady = false
+export function setErc20TransferDeltasReady(): void { erc20TransferDeltasReady = true }
+
+let assetSwapActivityReady = false
+export function setAssetSwapActivityReady(): void { assetSwapActivityReady = true }
+
+let accountSwapActivityReady = false
+export function setAccountSwapActivityReady(): void { accountSwapActivityReady = true }
+
+// raw_money_market_events is ordered by block. This account-first model is only
+// used once its resumable backfill has caught up, preserving complete history.
+let accountMoneyMarketActivityReady = false
+export function setAccountMoneyMarketActivityReady(): void { accountMoneyMarketActivityReady = true }
+
+let atokenScaledDeltasReady = false
+export function setAtokenScaledDeltasReady(): void { atokenScaledDeltasReady = true }
+
+let atokenScaledDeltasByContractReady = false
+export function setAtokenScaledDeltasByContractReady(): void { atokenScaledDeltasByContractReady = true }
+
+let moneyMarketReserveIndicesReady = false
+export function setMoneyMarketReserveIndicesReady(): void { moneyMarketReserveIndicesReady = true }
+
 // price_data.account_balance_weekly is enabled only after its resumable
 // historical backfill covers every active raw-balance partition. Until then the
 // accounts directory keeps the authoritative raw query, so a partial aggregate
 // can never produce a deceptively incomplete sparkline or activity count.
 let accountBalanceWeeklyReady = false
 export function setAccountBalanceWeeklyReady(): void { accountBalanceWeeklyReady = true }
+
+let accountBalanceHistoryReady = false
+export function setAccountBalanceHistoryReady(): void { accountBalanceHistoryReady = true }
+
+let accountBalanceHourlyReady = false
+export function setAccountBalanceHourlyReady(): void { accountBalanceHourlyReady = true }
+
+let omnipoolPositionCreatedReady = false
+export function setOmnipoolPositionCreatedReady(): void { omnipoolPositionCreatedReady = true }
+
+// Published only after a complete, count-checked generation of every current
+// bare/farmed Omnipool NFT position has been written. Until then `/accounts`
+// keeps its previous wallet/MM-only semantics instead of reading partial claims.
+let omnipoolAccountClaimsReady = false
+export function setOmnipoolAccountClaimsReady(): void { omnipoolAccountClaimsReady = true }
+
+// Published only after a complete generation has combined every configured
+// market's scaled reserve balances, latest indices, and aggregate risk state.
+// Until then the directory retains its previous aggregate-position query.
+let moneyMarketAccountValuesReady = false
+export function setMoneyMarketAccountValuesReady(): void { moneyMarketAccountValuesReady = true }
 
 // (block_height, event_index) IN-prefilter from the account-activity index. The
 // surrounding query keeps its precise conditions — this only shrinks the scanned
@@ -231,7 +334,10 @@ const FEED_WINDOW_BLOCKS = 100_800 // ~7 days at 6s blocks
 // A Hydration block targets roughly six seconds. Keep hot feed results for most
 // of that interval so staggered clients share one ClickHouse read per block.
 const LIVE_CACHE_MS = 5_000
-const MAX_ACTIVITY_SOURCE_ROWS = 250_000
+// Keep candidate walks below the API client's 100k result-row guard. Sparse
+// filters fail explicitly with 413 instead of leaking a ClickHouse 500 after a
+// power-of-four widening step crosses the transport limit.
+const MAX_ACTIVITY_SOURCE_ROWS = 90_000
 function activityQueryTooBroad(): Error {
   return Object.assign(new Error('Requested activity page requires too many candidate rows; narrow the filters or date range'), {
     code: 'ACTIVITY_QUERY_TOO_BROAD',
@@ -323,6 +429,57 @@ export function activitySourceCoversCutoff(
   if (!oldest || !cutoff) return false
   return oldest.blockHeight < cutoff.blockHeight ||
     (oldest.blockHeight === cutoff.blockHeight && oldest.eventIndex <= (cutoff.eventIndex ?? -1))
+}
+
+export function activitySourcesNeedingMore<T extends {
+  rawSize: number
+  fetchSize: number
+  oldest: { blockHeight: number; eventIndex: number } | null
+  valueIrrelevant?: boolean
+}>(
+  sources: T[],
+  cutoff: { blockHeight: number; eventIndex?: number | null } | null,
+  skipValueIrrelevant: boolean,
+): T[] {
+  return sources.filter(source => {
+    if (skipValueIrrelevant && source.valueIrrelevant) return false
+    return cutoff
+      ? !activitySourceCoversCutoff(source.rawSize, source.fetchSize, source.oldest, cutoff)
+      : source.rawSize >= source.fetchSize
+  })
+}
+
+export function completeActivityPageCutoff<T extends { blockHeight: number; eventIndex?: number | null }>(
+  visibleRows: T[],
+  want: number,
+): T | null {
+  return visibleRows.length >= want ? visibleRows[want - 1] ?? null : null
+}
+
+// Once one independently complete activity family supplies a merged-page
+// cutoff, every other family only needs to prove coverage back to that point.
+// Source readers accept day bounds rather than timestamps, so include the
+// cutoff's entire UTC day (rows earlier on that day are harmless and make the
+// boundary proof conservative). Preserve a caller's later explicit bound.
+export function activityCutoffFromDate<T extends { timestamp: string }>(
+  requestedFrom: string | undefined,
+  cutoffRows: T[],
+  want: number,
+): string | undefined {
+  if (cutoffRows.length < want) return requestedFrom
+  const cutoffDay = cutoffRows[want - 1]?.timestamp.slice(0, 10)
+  if (!cutoffDay || !/^\d{4}-\d{2}-\d{2}$/.test(cutoffDay)) return requestedFrom
+  return requestedFrom && requestedFrom > cutoffDay ? requestedFrom : cutoffDay
+}
+
+// Adjacent UI pages should reuse the same source-prefix cache whenever that
+// prefix already proves the deeper merged cutoff. Power-of-two buckets keep
+// page 1/2 (16 rows per family), page 3/4 (32), etc. on identical source keys.
+export function activitySourceSeedSize(want: number): number {
+  const target = Math.max(10, Math.ceil(want / 4))
+  let bucket = 16
+  while (bucket < target && bucket < MAX_ACTIVITY_SOURCE_ROWS) bucket *= 2
+  return Math.min(bucket, MAX_ACTIVITY_SOURCE_ROWS)
 }
 
 export function accountTransferWindowSaturated(rawRows: number, rawLimit: number, olderIndexedRefs: boolean): boolean {
@@ -667,6 +824,11 @@ export interface PriceInfo { price: number; change24h: number; priceRaw?: string
 let priceMap = new Map<number, PriceInfo>()
 let priceLoadedAt = 0
 let priceRefreshInflight: Promise<Map<number, PriceInfo>> | null = null
+// Account directory/detail values share one pinned price generation. It advances
+// atomically with the five-minute MM account-value generation, preventing two
+// adjacent page requests from straddling the general 30-second price refresh.
+let accountValuePriceMap = new Map<number, PriceInfo>()
+let accountValueGenerationEpoch = 0
 
 // `prices` contains one row per asset per block, so asking it for max(block_height)
 // scans the entire table. The much smaller `blocks` table advances atomically with
@@ -689,6 +851,16 @@ export async function ensurePrices(): Promise<Map<number, PriceInfo>> {
   // stale map is served meanwhile (only a cold start ever waits).
   priceRefreshInflight ??= refreshPrices().finally(() => { priceRefreshInflight = null })
   return priceMap.size ? priceMap : priceRefreshInflight
+}
+
+async function loadFreshPrices(): Promise<Map<number, PriceInfo>> {
+  priceRefreshInflight ??= refreshPrices().finally(() => { priceRefreshInflight = null })
+  return priceRefreshInflight
+}
+
+async function ensureAccountValuePrices(): Promise<Map<number, PriceInfo>> {
+  if (!accountValuePriceMap.size) accountValuePriceMap = new Map(await loadFreshPrices())
+  return accountValuePriceMap
 }
 async function refreshPrices(): Promise<Map<number, PriceInfo>> {
   try {
@@ -868,23 +1040,48 @@ export function historicalVolumeSql(legsCte: string, outName: string): string {
 function normalizeTs(ts: string): string {
   return ts.replace('T', ' ').replace('Z', '').replace(/\.\d+$/, '').trim()
 }
+export function historicalPriceHour(ts: string): string {
+  const normalized = normalizeTs(ts)
+  return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(normalized)
+    ? `${normalized.slice(0, 13)}:00:00`
+    : normalized
+}
 function historicalPriceKey(assetId: number, ts: string): string {
   return `${historicalPriceAssetId(assetId)}|${normalizeTs(ts)}`
 }
 
+// Completed hourly closes are immutable. Candidate walkers repeatedly value
+// different events from the same asset/hour; retaining a bounded process cache
+// avoids reopening the full aggregate price table for those identical lookups.
+const HISTORICAL_CLOSE_CACHE_LIMIT = 50_000
+const historicalCloseByHour = new Map<string, string | null>()
+function cacheHistoricalClose(key: string, close: string | null): void {
+  if (historicalCloseByHour.has(key)) historicalCloseByHour.delete(key)
+  historicalCloseByHour.set(key, close)
+  while (historicalCloseByHour.size > HISTORICAL_CLOSE_CACHE_LIMIT) {
+    const oldest = historicalCloseByHour.keys().next().value as string | undefined
+    if (oldest == null) break
+    historicalCloseByHour.delete(oldest)
+  }
+}
+
 async function historicalCloses(pairs: { assetId: number; ts: string }[]): Promise<Map<string, string>> {
-  const uniq = new Map<string, { priceId: number; ts: string }>()
+  const requested = new Map<string, { priceId: number; hour: string; hourKey: string }>()
+  const missingHours = new Map<string, { priceId: number; ts: string }>()
   for (const p of pairs) {
     const priceId = historicalPriceAssetId(p.assetId)
     const ts = normalizeTs(p.ts)
-    uniq.set(`${priceId}|${ts}`, { priceId, ts })
+    const hour = historicalPriceHour(ts)
+    const hourKey = `${priceId}|${hour}`
+    requested.set(`${priceId}|${ts}`, { priceId, hour, hourKey })
+    if (!historicalCloseByHour.has(hourKey)) missingHours.set(hourKey, { priceId, ts: hour })
   }
-  if (!uniq.size) return new Map()
+  if (!requested.size) return new Map()
   const out = new Map<string, string>()
-  const values = [...uniq.values()]
+  const values = [...missingHours.values()]
   // Candidate widening can value several thousand rows at once. Keep tuple SQL
-  // comfortably below ClickHouse's max_query_size while retaining one batched
-  // lookup per chunk instead of falling back to per-row price reads.
+  // comfortably below ClickHouse's max_query_size. Events in one asset/hour
+  // share the same completed close, so the tuple list is hour-deduplicated.
   for (let start = 0; start < values.length; start += 2_000) {
     const batch = values.slice(start, start + 2_000)
     const priceIds = [...new Set(batch.map(p => p.priceId))]
@@ -905,8 +1102,13 @@ async function historicalCloses(pairs: { assetId: number; ts: string }[]): Promi
       format: 'JSONEachRow',
     })
     for (const r of await res.json<{ asset_id: number; ts: string; close: string }>()) {
-      if (Number(r.close) > 0) out.set(`${r.asset_id}|${r.ts}`, r.close)
+      const key = `${r.asset_id}|${r.ts}`
+      cacheHistoricalClose(key, Number(r.close) > 0 ? r.close : null)
     }
+  }
+  for (const [key, request] of requested) {
+    const close = historicalCloseByHour.get(request.hourKey)
+    if (close) out.set(key, close)
   }
   return out
 }
@@ -972,6 +1174,12 @@ async function applyHistoricalUsd<T>(rows: T[], pick: (r: T) => { assetId: numbe
     const amt = Number(p.raw) / 10 ** p.decimals
     ;(r as { valueUsd: number | null }).valueUsd = leg != null && Number.isFinite(amt) ? amt * Number(leg.closeRaw) : null
   })
+}
+
+function rowMeetsExactUsdMinimum(row: object & { valueUsd: number | null }, minimum: number): boolean {
+  const exact = exactHistoricalValues.get(row)
+  if (exact) return exactUsdMeetsMinimum(exact, minimum)
+  return row.valueUsd != null && Number.isFinite(row.valueUsd) && row.valueUsd >= minimum
 }
 
 // stableswap share-token NAV pricing
@@ -1434,16 +1642,27 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
   return cached(`explorer:transfers:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${userOnly}:${filterKey(filters)}:${suppressMoneyMarket}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
-    const assetExpr = transferAssetIdSql()
-    const amountExpr = `JSONExtractString(args_json, 'amount')`
+    const useAssetTransferReadModel = transferActivityReady && tokenIds != null
+    const useTimeTransferReadModel = transferActivityByTimeReady && tokenIds == null
+    const useTransferReadModel = useAssetTransferReadModel || useTimeTransferReadModel
+    const transferTable = useAssetTransferReadModel ? 'transfer_activity' : 'transfer_activity_by_time'
+    const assetExpr = useTransferReadModel ? 'asset_id' : transferAssetIdSql()
+    const amountExpr = useTransferReadModel ? 'amount' : `JSONExtractString(args_json, 'amount')`
     const tokenFilter = assetIdFilterSql(assetExpr, tokenIds)
-    const tokenRefsFilter = eventAssetRefsFilterSql(tokenIds, `'Balances.Transfer','Tokens.Transfer','Currencies.Transferred'`)
-    const amountFilter = eventValueFilterSql(assetExpr, amountExpr, 'block_timestamp', filters, prices, 'transfer_price')
+    const tokenRefsFilter = useTransferReadModel ? '' : eventAssetRefsFilterSql(tokenIds, `'Balances.Transfer','Tokens.Transfer','Currencies.Transferred'`)
+    const postUsdFilter = filters.min != null && filters.unit !== 'token'
+    const amountFilter = eventValueFilterSql(assetExpr, amountExpr, 'block_timestamp',
+      postUsdFilter ? { ...filters, min: undefined, unit: undefined } : filters, prices, 'transfer_price')
     // userOnly drops pallet/pool/fee legs (module accounts 0x6d6f646c…) so the
     // Activity's "Transfers" tab shows genuine user↔user transfers, not swap noise.
     const plumbing = [...ammPoolAccounts(), ...(await mmReserveAccountIds())]
     const plumbingList = plumbing.length ? plumbing.map(a => `'${a}'`).join(',') : "''"
-    const userFilter = userOnly
+    const userFilter = userOnly && useTransferReadModel
+      ? `AND NOT match(from_account, '^0x(6d6f646c|7369626c|70617261|506172656e74)')
+         AND NOT match(to_account, '^0x(6d6f646c|7369626c|70617261|506172656e74)')
+         AND from_account NOT IN (${plumbingList})
+         AND to_account NOT IN (${plumbingList})`
+      : userOnly
       ? `AND NOT match(JSONExtractString(args_json,'from'), '^0x(6d6f646c|7369626c|70617261|506172656e74)')
          AND NOT match(JSONExtractString(args_json,'to'), '^0x(6d6f646c|7369626c|70617261|506172656e74)')
          AND JSONExtractString(args_json,'from') NOT IN (${plumbingList})
@@ -1452,7 +1671,25 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
     const want = offset + limit
     const scanLimit = suppressMoneyMarket ? Math.max(want * 4, limit + 250) : limit
     const scanOffset = suppressMoneyMarket ? 0 : offset
-    const rows = await withFeedWindow(tw, scanLimit, scanOffset + scanLimit, async (bound) => {
+    const buildTransferRows = async (rawRows: RawTransferEventRow[]): Promise<TransferRow[]> => {
+      const raw = dedupeTransferEvents(rawRows)
+      const seen = new Set<string>()
+      const out: TransferRow[] = []
+      for (const r of raw) {
+        const key = `${r.block_height}:${r.event_index}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        const a = asset(r.asset_id)
+        out.push({
+          blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
+          from: accountRef(r.from_acc), to: accountRef(r.to_acc), amount: r.amount, asset: a,
+          valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
+        })
+      }
+      await applyHistoricalUsd(out, transferHistPick)
+      return out
+    }
+    const fetchPage = async (bound: string, pageLimit: number, pageOffset: number): Promise<TransferRow[]> => {
       const res = await client.query({
         query: `
           SELECT block_height, ts, event_index, extrinsic_index,
@@ -1462,15 +1699,15 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
           (
             SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index,
               event_name,
-              JSONExtractString(args_json, 'from') AS from_acc,
-              JSONExtractString(args_json, 'to') AS to_acc,
-              JSONExtractString(args_json, 'amount') AS amount,
+              ${useTransferReadModel ? 'from_account' : "JSONExtractString(args_json, 'from')"} AS from_acc,
+              ${useTransferReadModel ? 'to_account' : "JSONExtractString(args_json, 'to')"} AS to_acc,
+              ${amountExpr} AS amount,
               ${assetExpr} AS asset_id,
               multiIf(event_name = 'Currencies.Transferred', 3, event_name = 'Tokens.Transfer', 2, 1) AS priority
-            FROM price_data.raw_events
+            FROM price_data.${useTransferReadModel ? transferTable : 'raw_events'}
             ${amountFilter.joinSql}
             WHERE ${bound}
-              AND event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')
+              ${useTransferReadModel ? '' : "AND event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')"}
               ${userFilter}
               ${tokenRefsFilter}
               ${tokenFilter}
@@ -1480,28 +1717,63 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
           )
           ORDER BY block_height DESC, event_index DESC
           LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
-        query_params: { limit: scanLimit, offset: scanOffset }, format: 'JSONEachRow',
+        query_params: { limit: pageLimit, offset: pageOffset }, format: 'JSONEachRow',
       })
-      return res.json<RawTransferEventRow>()
-    })
-    const seen = new Set<string>()
-    const out: TransferRow[] = []
-    for (const r of rows) {
-      const key = `${r.block_height}:${r.event_index}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      const a = asset(r.asset_id)
-      out.push({
-        blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
-        from: accountRef(r.from_acc), to: accountRef(r.to_acc), amount: r.amount, asset: a,
-        valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
-      })
+      return buildTransferRows(await res.json<RawTransferEventRow>())
     }
-    await applyHistoricalUsd(out, transferHistPick)
+    if (postUsdFilter) {
+      let pageState: { scanned: number; cursor: { blockHeight: number; eventIndex: number } | null } = { scanned: 0, cursor: null }
+      const fetchValuePage = async (bound: string, pageLimit: number): Promise<TransferRow[]> => {
+        const runRaw = async (rawBound: string, rawLimit: number): Promise<RawTransferEventRow[]> => {
+          const res = await client.query({
+            query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+                      ${useTransferReadModel ? 'from_account' : "JSONExtractString(args_json, 'from')"} AS from_acc,
+                      ${useTransferReadModel ? 'to_account' : "JSONExtractString(args_json, 'to')"} AS to_acc,
+                      ${amountExpr} AS amount, ${assetExpr} AS asset_id
+                    FROM price_data.${useTransferReadModel ? transferTable : 'raw_events'}
+                    ${amountFilter.joinSql}
+                    WHERE ${rawBound}
+                      ${useTransferReadModel ? '' : "AND event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')"}
+                      ${userFilter} ${tokenRefsFilter} ${tokenFilter} ${amountFilter.predicateSql}
+                    ORDER BY block_height DESC, event_index DESC
+                    LIMIT {limit:UInt32}`,
+            query_params: { limit: rawLimit }, format: 'JSONEachRow',
+          })
+          return res.json<RawTransferEventRow>()
+        }
+        let raw = await runRaw(bound, pageLimit)
+        pageState = {
+          scanned: raw.length,
+          cursor: raw.length ? { blockHeight: raw.at(-1)!.block_height, eventIndex: raw.at(-1)!.event_index } : null,
+        }
+        // Complete the boundary block before collapsing pallet mirror events;
+        // otherwise a LIMIT split could keep a lower-priority mirror on one
+        // page and its canonical Currencies.Transferred sibling on the next.
+        if (raw.length >= pageLimit) {
+          const boundary = raw.at(-1)!.block_height
+          const boundaryRows = await runRaw(`(${tw ?? '1'}) AND block_height = ${boundary}`, 25_000)
+          const byEvent = new Map(raw.map(row => [`${row.block_height}:${row.event_index}`, row]))
+          for (const row of boundaryRows) byEvent.set(`${row.block_height}:${row.event_index}`, row)
+          raw = [...byEvent.values()].sort((left, right) =>
+            right.block_height - left.block_height || right.event_index - left.event_index)
+          pageState.cursor = { blockHeight: boundary, eventIndex: 0 }
+        }
+        return buildTransferRows(raw)
+      }
+      const deep = await fetchFilteredDeep(tw, want,
+        fetchValuePage,
+        row => rowMeetsExactUsdMinimum(row, filters.min!),
+        row => row.blockHeight, row => row.eventIndex,
+        row => `${row.blockHeight}:${row.eventIndex}`,
+        { pageSize: 25_000, pageState: () => pageState })
+      return deep.slice(offset, offset + limit)
+    }
+    const out = await withFeedWindow(tw, scanLimit, scanOffset + scanLimit,
+      bound => fetchPage(bound, scanLimit, scanOffset))
     if (suppressMoneyMarket) {
       const mmExtrinsics = await moneyMarketExtrinsicsForTransfers(out)
       const filtered = out.filter(t => !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)))
-      if (filtered.length < want && rows.length >= scanLimit) throw activityQueryTooBroad()
+      if (filtered.length < want && out.length >= scanLimit) throw activityQueryTooBroad()
       return filtered.slice(offset, offset + limit)
     }
     return out
@@ -1530,6 +1802,25 @@ export async function getHolders(assetId: number, limit: number, offset = 0): Pr
     const valueUsd = usdValue(prices, assetId, h.balance, a.decimals)
     return { ...h, valueUsd, share: totalUsd > 0 ? (valueUsd ?? 0) / totalUsd : 0 }
   })
+
+  // Giga/display assets are backed by hidden stableswap-share ids (GDOT←690,
+  // GETH←4200, …). Their economic holder list combines direct display/share
+  // balances and replaces each money-market aToken custody row with its actual
+  // suppliers; otherwise the visible asset has zero holders or names the vault.
+  const foldedShareIds = Object.entries(SHARE_TOKEN_UNDERLYING_ID)
+    .filter(([, displayId]) => displayId === assetId)
+    .map(([shareId]) => Number(shareId))
+  if (foldedShareIds.length) {
+    return cached(`explorer:holders:${assetId}:${limit}:${offset}`, 30000, async () => {
+      const prices = await ensurePrices()
+      const all = await getFoldedDisplayAssetHolders(assetId, foldedShareIds)
+      const totalRaw = all.reduce((sum, row) => sum + BigInt(row.balance), 0n)
+      const totalUsd = usdValue(prices, assetId, totalRaw.toString(), a.decimals) ?? 0
+      const page = all.slice(offset, limit > 0 ? offset + limit : all.length)
+        .map((holder, index) => ({ ...holder, rank: offset + index + 1 }))
+      return { asset: a, holders: enrichShare(page, prices, totalUsd), total: all.length, totalUsd }
+    })
+  }
 
   // aTokens never hit substrate balances — their true holders are the money-market
   // suppliers reconstructed from indexed anchors and event deltas. Those
@@ -1932,7 +2223,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
   // the expensive extras it never renders (LP positions, DCA, proxy/multisig live
   // reads) so the preview loads fast; the detail page still requests the full object.
   const summary = opts.summary === true
-  return cached(`explorer:address:${norm.accountId}${summary ? ':summary' : ''}`, 8000, async () => {
+  return cached(`explorer:address:${accountValueGenerationEpoch}:${norm.accountId}${summary ? ':summary' : ''}`, 8000, async () => {
     // 1. Aliases — discover all account_ids belonging to the same entity.
     const related = new Set<string>(resolved.related)
     const list = sqlAccountList([...related])
@@ -1942,23 +2233,23 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
 
     const [balanceRows, mmRes, prices] = await Promise.all([
       queryAggregatedBalances(list),
-      client.query({
+      moneyMarketAccountValuesReady ? Promise.resolve(null) : client.query({
         query: `
           SELECT pool_address,
                  max(block_height) AS lb,
-                 toString(argMax(block_timestamp, block_height)) AS ts,
-                 argMax(total_collateral_base, block_height) AS total_collateral_base,
-                 argMax(total_debt_base, block_height) AS total_debt_base,
-                 argMax(available_borrows_base, block_height) AS available_borrows_base,
-                 argMax(current_liquidation_threshold, block_height) AS current_liquidation_threshold,
-                 argMax(ltv, block_height) AS ltv,
-                 argMax(health_factor, block_height) AS health_factor
+                 toString(argMax(block_timestamp, ${moneyMarketPositionOrderSql()})) AS ts,
+                 argMax(total_collateral_base, ${moneyMarketPositionOrderSql()}) AS total_collateral_base,
+                 argMax(total_debt_base, ${moneyMarketPositionOrderSql()}) AS total_debt_base,
+                 argMax(available_borrows_base, ${moneyMarketPositionOrderSql()}) AS available_borrows_base,
+                 argMax(current_liquidation_threshold, ${moneyMarketPositionOrderSql()}) AS current_liquidation_threshold,
+                 argMax(ltv, ${moneyMarketPositionOrderSql()}) AS ltv,
+                 argMax(health_factor, ${moneyMarketPositionOrderSql()}) AS health_factor
           FROM price_data.raw_money_market_positions
           WHERE account_id IN (${mmList})
           GROUP BY pool_address`,
         format: 'JSONEachRow',
       }),
-      ensurePrices(),
+      ensureAccountValuePrices(),
     ])
 
     const rawBalances = valueAccountBalances(balanceRows, prices)
@@ -1968,7 +2259,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     let balances: AddressBalance[] = foldShareBalances(rawBalances)
 
     // Latest indexed position per market (pool_address). Unknown pools are ignored.
-    const mmRows = await mmRes.json<{ pool_address: string; lb: number; ts: string; total_collateral_base: string; total_debt_base: string; available_borrows_base: string; current_liquidation_threshold: string; ltv: string; health_factor: string }>()
+    const mmRows = mmRes ? await mmRes.json<{ pool_address: string; lb: number; ts: string; total_collateral_base: string; total_debt_base: string; available_borrows_base: string; current_liquidation_threshold: string; ltv: string; health_factor: string }>() : []
     const storedByMarket = new Map<string, MoneyMarketPosition>()
     for (const r of mmRows) {
       if (r.total_collateral_base === '0' && r.total_debt_base === '0') continue
@@ -2111,7 +2402,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
 export async function getAddressHistory(addressInput: string): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; balanceHistory: AssetBalanceHistory[] } | null> {
   const detail = await getAddress(addressInput)
   if (!detail) return null
-  return cached(`explorer:address-history:${detail.accountId}`, 120000, async () => {
+  return cached(`explorer:address-history:${accountValueGenerationEpoch}:${detail.accountId}`, 120000, async () => {
     const history = await getAccountHistory(detail.relatedAccountIds)
     const debtUsd = detail.moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
     const portfolioSeries = history.portfolioSeries.slice()
@@ -2267,12 +2558,39 @@ export function mergeErc20Balances(balances: AddressBalance[], holdings: { asset
 // Explorer requests never call getUserAccountData directly.
 async function getMoneyMarketPositions(h160: string): Promise<MoneyMarketPosition[]> {
   if (!/^0x[0-9a-fA-F]{40}$/.test(h160)) return []
-  return cached(`explorer:mm-positions:${h160.toLowerCase()}`, 15000, async () => {
+  return cached(`explorer:mm-positions:${accountValueGenerationEpoch}:${h160.toLowerCase()}`, 15000, async () => {
+    const accountId = evmAccountIdFromAddress(h160.toLowerCase())
+    if (moneyMarketAccountValuesReady && accountId) {
+      const current = await client.query({
+        query: `SELECT pool_address,block_height AS lb,toString(block_timestamp) AS ts,
+            toString(total_collateral_base) AS c,toString(total_debt_base) AS d,
+            toString(available_borrows_base) AS ab,toString(liquidation_threshold) AS lt,
+            toString(ltv) AS ltv,toString(health_factor) AS hf
+          FROM price_data.money_market_account_value_snapshots
+          WHERE snapshot_id=(SELECT argMax(snapshot_id,computed_at)
+            FROM price_data.money_market_account_value_snapshot_state WHERE snapshot_key='current')
+            AND account_id={accountId:String} AND reserve_present=0`,
+        query_params: { accountId }, format: 'JSONEachRow',
+      })
+      const out: MoneyMarketPosition[]=[]
+      for (const row of await current.json<{ pool_address: string; lb: number; ts: string; c: string; d: string; ab: string; lt: string; ltv: string; hf: string }>()) {
+        if (row.c==='0' && row.d==='0') continue
+        const market=MM_MARKET_BY_POOL.get(row.pool_address.toLowerCase())
+        if (!market) continue
+        out.push({
+          ...moneyMarketFields(market),blockHeight:row.lb,timestamp:row.ts,
+          totalCollateralBase:row.c,totalSuppliedBase:row.c,totalDebtBase:row.d,
+          availableBorrowsBase:row.ab,liquidationThreshold:row.lt,ltv:row.ltv,
+          healthFactor:row.hf===MAX_UINT256?'inf':row.hf,
+        })
+      }
+      return orderMoneyMarkets(out)
+    }
     const res = await client.query({
-      query: `SELECT pool_address, max(block_height) AS lb, toString(argMax(block_timestamp, block_height)) AS ts,
-                argMax(total_collateral_base, block_height) AS c, argMax(total_debt_base, block_height) AS d,
-                argMax(available_borrows_base, block_height) AS ab, argMax(current_liquidation_threshold, block_height) AS lt,
-                argMax(ltv, block_height) AS ltv, argMax(health_factor, block_height) AS hf
+      query: `SELECT pool_address, max(block_height) AS lb, toString(argMax(block_timestamp, ${moneyMarketPositionOrderSql()})) AS ts,
+                argMax(total_collateral_base, ${moneyMarketPositionOrderSql()}) AS c, argMax(total_debt_base, ${moneyMarketPositionOrderSql()}) AS d,
+                argMax(available_borrows_base, ${moneyMarketPositionOrderSql()}) AS ab, argMax(current_liquidation_threshold, ${moneyMarketPositionOrderSql()}) AS lt,
+                argMax(ltv, ${moneyMarketPositionOrderSql()}) AS ltv, argMax(health_factor, ${moneyMarketPositionOrderSql()}) AS hf
               FROM price_data.raw_money_market_positions
               WHERE user_address = {h:String} GROUP BY pool_address`,
       query_params: { h: h160.toLowerCase() }, format: 'JSONEachRow',
@@ -2352,7 +2670,7 @@ export function foldShareReserves(reserves: MmReserve[]): MmReserve[] {
 // Reserve set, per-account balances, and totals come from the indexed anchor table
 // and event deltas. The shared reserve configuration is cached and reused by the
 // per-account reserve read and aToken holder derivation.
-interface MmReserveToken { asset: string; aToken: string; vDebt: string; poolProxy: string; marketKey: string }
+export interface MmReserveToken { asset: string; aToken: string; vDebt: string; poolProxy: string; marketKey: string }
 // Reserve → aToken/vDebt/pool map from atoken_reserve_map, refreshed by
 // snapshot-atoken-anchors.ts from on-chain reserve data.
 async function getMmReserveTokens(): Promise<MmReserveToken[]> {
@@ -2375,20 +2693,6 @@ async function getMmReserveTokens(): Promise<MmReserveToken[]> {
 // See clickhouse/schema/041_atoken_anchors.sql. B0 is read from the anchor table so a
 // re-anchor at a new block is picked up automatically; 0 ⇒ anchor missing (guard).
 const ATOKEN_RAY = 10n ** 27n
-const ATOKEN_RAY_SQL = `toInt256(toUInt256('1000000000000000000000000000'))`
-// Signed per-event scaled delta (Aave: Mint.value = amount + balanceIncrease,
-// Burn.value = amount − balanceIncrease, but scaled changes by amount.rayDiv(index);
-// BalanceTransfer.value is already scaled). Signed subtraction handles the rare
-// burn-that-emits-Mint (balanceIncrease > amount) case. `ar` = decoded_args_json alias.
-const ATOKEN_DELTA_ARRAYJOIN = `
-  ARRAY JOIN
-    [ if(event_name='Mint', JSONExtractString(ar,'onBehalfOf'), if(event_name='Burn', JSONExtractString(ar,'from'), JSONExtractString(ar,'to'))),
-      if(event_name='BalanceTransfer', JSONExtractString(ar,'from'), '') ] AS holder,
-    [ multiIf(
-        event_name='Mint',  intDiv((toInt256(toUInt256OrZero(JSONExtractString(ar,'value'))) - toInt256(toUInt256OrZero(JSONExtractString(ar,'balanceIncrease')))) * ${ATOKEN_RAY_SQL}, greatest(toInt256(toUInt256OrZero(JSONExtractString(ar,'index'))), toInt256(1))),
-        event_name='Burn', -intDiv((toInt256(toUInt256OrZero(JSONExtractString(ar,'value'))) + toInt256(toUInt256OrZero(JSONExtractString(ar,'balanceIncrease')))) * ${ATOKEN_RAY_SQL}, greatest(toInt256(toUInt256OrZero(JSONExtractString(ar,'index'))), toInt256(1))),
-        toInt256(toUInt256OrZero(JSONExtractString(ar,'value')))),
-      if(event_name='BalanceTransfer', -toInt256(toUInt256OrZero(JSONExtractString(ar,'value'))), toInt256(0)) ] AS sdelta`
 
 async function aTokenAnchorBlock(): Promise<number> {
   return cached('explorer:atoken-b0', 60000, async () => {
@@ -2402,12 +2706,18 @@ async function aTokenAnchorBlock(): Promise<number> {
 async function reserveIndicesNow(): Promise<Map<string, { liq: bigint; vbi: bigint }>> {
   return cached('explorer:mm-reserve-indices', 30000, async () => {
     const res = await client.query({
-      query: `SELECT lower(if(pool_address = '', contract_address, pool_address)) AS pool,
-                lower(reserve_address) AS reserve,
-                argMax(JSONExtractString(decoded_args_json,'liquidityIndex'), block_height) AS liq,
-                argMax(JSONExtractString(decoded_args_json,'variableBorrowIndex'), block_height) AS vbi
-              FROM price_data.raw_money_market_reserves
-              WHERE event_name='ReserveDataUpdated' GROUP BY pool, reserve`,
+      query: moneyMarketReserveIndicesReady
+        ? `SELECT pool_address AS pool, reserve_address AS reserve,
+              toString(argMax(liquidity_index, tuple(block_height,event_index,ingested_at))) AS liq,
+              toString(argMax(variable_borrow_index, tuple(block_height,event_index,ingested_at))) AS vbi
+            FROM price_data.money_market_reserve_indices FINAL
+            GROUP BY pool, reserve`
+        : `SELECT lower(if(pool_address = '', contract_address, pool_address)) AS pool,
+              lower(reserve_address) AS reserve,
+              argMax(JSONExtractString(decoded_args_json,'liquidityIndex'), block_height) AS liq,
+              argMax(JSONExtractString(decoded_args_json,'variableBorrowIndex'), block_height) AS vbi
+            FROM price_data.raw_money_market_reserves
+            WHERE event_name='ReserveDataUpdated' GROUP BY pool, reserve`,
       format: 'JSONEachRow',
     })
     const m = new Map<string, { liq: bigint; vbi: bigint }>()
@@ -2448,8 +2758,21 @@ async function getATokenReserves(): Promise<ATokenReserve[]> {
 // Scaled balance per holder for ONE token contract (aToken or vDebt): anchor + Σ delta.
 // Module/pallet accounts are included (caller filters them from a displayed list).
 async function reconstructHolderScaled(contract: string, b0: number): Promise<{ holder: string; scaled: bigint }[]> {
+  const deltaTable = atokenScaledDeltasByContractReady
+    ? 'price_data.atoken_scaled_deltas_by_contract'
+    : 'price_data.atoken_scaled_deltas'
   const res = await client.query({
-    query: `
+    query: atokenScaledDeltasReady ? `
+      SELECT holder, toString(sum(anchor) + sum(delta)) AS scaled FROM (
+        SELECT holder, toInt256(scaled_balance) AS anchor, toInt256(0) AS delta
+        FROM price_data.atoken_scaled_anchor FINAL
+        WHERE contract_address = {c:String} AND holder != ''
+        UNION ALL
+        SELECT holder, toInt256(0) AS anchor, sum(scaled_delta) AS delta
+        FROM ${deltaTable} FINAL
+        WHERE contract_address = {c:String} AND block_height > {b0:UInt32}
+        GROUP BY holder
+      ) GROUP BY holder HAVING (sum(anchor) + sum(delta)) > 0` : `
       SELECT holder, toString(sum(a) + sum(d)) AS scaled FROM (
         SELECT holder, toInt256(scaled_balance) AS a, toInt256(0) AS d
         FROM price_data.atoken_scaled_anchor FINAL WHERE contract_address = {c:String} AND holder != ''
@@ -2478,8 +2801,29 @@ export async function reconstructATokenHolderCounts(
 ): Promise<Map<string, number>> {
   const normalized = [...new Set(contracts.map(contract => contract.toLowerCase()).filter(contract => /^0x[0-9a-f]{40}$/.test(contract)))]
   if (!normalized.length) return new Map()
+  const deltaTable = atokenScaledDeltasByContractReady
+    ? 'price_data.atoken_scaled_deltas_by_contract'
+    : 'price_data.atoken_scaled_deltas'
   const res = await db.query({
-    query: `
+    query: atokenScaledDeltasReady ? `
+      SELECT contract, count() AS holders
+      FROM (
+        SELECT contract, holder, sum(anchor) + sum(delta) AS scaled
+        FROM (
+          SELECT lower(contract_address) AS contract, lower(holder) AS holder,
+            toInt256(scaled_balance) AS anchor, toInt256(0) AS delta
+          FROM price_data.atoken_scaled_anchor FINAL
+          WHERE contract_address IN ({contracts:Array(String)}) AND holder != ''
+          UNION ALL
+          SELECT contract_address AS contract, holder, toInt256(0) AS anchor,
+            sum(scaled_delta) AS delta
+          FROM ${deltaTable} FINAL
+          WHERE contract_address IN ({contracts:Array(String)}) AND block_height > {b0:UInt32}
+          GROUP BY contract, holder
+        )
+        GROUP BY contract, holder
+        HAVING scaled > 0 AND NOT startsWith(holder, '0x6d6f646c')
+      ) GROUP BY contract` : `
       SELECT contract, count() AS holders
       FROM (
         SELECT contract, holder, sum(anchor) + sum(delta) AS scaled
@@ -2589,9 +2933,9 @@ export async function getGigaLiquidationLevels(): Promise<GigaLiquidations | nul
     if (!pool || !(currentPrice != null && currentPrice > 0)) return null
     // Latest snapshot per borrower; the snapshot loop keeps these current.
     const res = await client.query({
-      query: `SELECT argMax(total_collateral_base, block_height) AS total_collateral_base,
-                     argMax(total_debt_base, block_height) AS total_debt_base,
-                     argMax(health_factor, block_height) AS health_factor
+      query: `SELECT argMax(total_collateral_base, ${moneyMarketPositionOrderSql()}) AS total_collateral_base,
+                     argMax(total_debt_base, ${moneyMarketPositionOrderSql()}) AS total_debt_base,
+                     argMax(health_factor, ${moneyMarketPositionOrderSql()}) AS health_factor
               FROM price_data.raw_money_market_positions
               WHERE lower(pool_address) = {pool:String}
               GROUP BY user_address
@@ -2609,8 +2953,26 @@ export async function getGigaLiquidationLevels(): Promise<GigaLiquidations | nul
 async function reconstructTotalScaled(contracts: string[], b0: number): Promise<Map<string, bigint>> {
   const normalized = [...new Set(contracts.map(c => c.toLowerCase()).filter(c => /^0x[0-9a-f]{40}$/.test(c)))]
   if (!normalized.length) return new Map()
+  const deltaTable = atokenScaledDeltasByContractReady
+    ? 'price_data.atoken_scaled_deltas_by_contract'
+    : 'price_data.atoken_scaled_deltas'
   const res = await client.query({
-    query: `
+    query: atokenScaledDeltasReady ? `
+      SELECT contract, toString(sum(anchor) + sum(delta)) AS scaled
+      FROM (
+        SELECT contract_address AS contract,
+          toInt256(argMax(scaled_balance, updated_at)) AS anchor,
+          toInt256(0) AS delta
+        FROM price_data.atoken_scaled_anchor
+        WHERE holder = '' AND contract_address IN ({contracts:Array(String)})
+        GROUP BY contract
+        UNION ALL
+        SELECT contract_address AS contract, toInt256(0) AS anchor,
+          sum(scaled_delta) AS delta
+        FROM ${deltaTable} FINAL
+        WHERE contract_address IN ({contracts:Array(String)}) AND block_height > {b0:UInt32}
+        GROUP BY contract
+      ) GROUP BY contract` : `
       SELECT contract, toString(sum(anchor) + sum(delta)) AS scaled
       FROM (
         SELECT contract_address AS contract,
@@ -2647,7 +3009,16 @@ async function reconstructTotalScaled(contracts: string[], b0: number): Promise<
 async function reconstructAccountScaled(h160: string, b0: number): Promise<Map<string, bigint>> {
   const h = h160.toLowerCase()
   const res = await client.query({
-    query: `
+    query: atokenScaledDeltasReady ? `
+      SELECT contract, toString(sum(anchor) + sum(delta)) AS scaled FROM (
+        SELECT lower(contract_address) AS contract, toInt256(scaled_balance) AS anchor, toInt256(0) AS delta
+        FROM price_data.atoken_scaled_anchor FINAL WHERE holder = {h:String}
+        UNION ALL
+        SELECT contract_address AS contract, toInt256(0) AS anchor, sum(scaled_delta) AS delta
+        FROM price_data.atoken_scaled_deltas FINAL
+        WHERE holder = {h:String} AND block_height > {b0:UInt32}
+        GROUP BY contract
+      ) GROUP BY contract HAVING (sum(anchor) + sum(delta)) > 0` : `
       SELECT contract, toString(sum(a) + sum(d)) AS scaled FROM (
         SELECT lower(contract_address) AS contract, toInt256(scaled_balance) AS a, toInt256(0) AS d
         FROM price_data.atoken_scaled_anchor FINAL WHERE holder = {h:String}
@@ -2671,11 +3042,41 @@ async function reconstructAccountScaled(h160: string, b0: number): Promise<Map<s
 // and indexed event deltas without request-time RPC.
 export async function getMoneyMarketReserves(h160: string): Promise<MmReserve[]> {
   if (!/^0x[0-9a-fA-F]{40}$/.test(h160)) return []
-  return cached(`explorer:mm-reserves:${h160.toLowerCase()}`, 15000, async () => {
+  return cached(`explorer:mm-reserves:${accountValueGenerationEpoch}:${h160.toLowerCase()}`, 15000, async () => {
+    const accountId=evmAccountIdFromAddress(h160.toLowerCase())
+    if (moneyMarketAccountValuesReady && accountId) {
+      const [prices,result]=await Promise.all([
+        ensureAccountValuePrices(),
+        client.query({
+          query: `SELECT market_key,asset_id,toString(supplied) AS supplied,toString(debt) AS debt
+            FROM price_data.money_market_account_value_snapshots
+            WHERE snapshot_id=(SELECT argMax(snapshot_id,computed_at)
+              FROM price_data.money_market_account_value_snapshot_state WHERE snapshot_key='current')
+              AND account_id={accountId:String} AND reserve_present=1`,
+          query_params:{accountId},format:'JSONEachRow',
+        }),
+      ])
+      const out: MmReserve[]=[]
+      for (const row of await result.json<{ market_key:string;asset_id:number;supplied:string;debt:string }>()) {
+        const underlying=asset(row.asset_id)
+        const supplied=BigInt(row.supplied||'0')
+        const displayId=supplied>0n ? UNDERLYING_TO_ATOKEN_ID[underlying.assetId] : undefined
+        const display=displayId!=null ? asset(displayId) : underlying
+        out.push({
+          assetId:display.assetId,symbol:display.symbol,decimals:underlying.decimals,
+          iconAssetId:display.iconAssetId,parachainId:display.parachainId,origin:display.origin,
+          supplied:row.supplied,debt:row.debt,
+          suppliedUsd:usdValue(prices,underlying.assetId,row.supplied,underlying.decimals),
+          debtUsd:usdValue(prices,underlying.assetId,row.debt,underlying.decimals),
+          collateral:supplied>0n,marketKey:row.market_key,
+        })
+      }
+      return out.sort((a,b)=>(b.suppliedUsd??b.debtUsd??0)-(a.suppliedUsd??a.debtUsd??0))
+    }
     const b0 = await aTokenAnchorBlock()
     if (!b0) return []
     const [prices, tokens, indices, byContract] = await Promise.all([
-      ensurePrices(), getMmReserveTokens(), reserveIndicesNow(), reconstructAccountScaled(h160, b0),
+      ensureAccountValuePrices(), getMmReserveTokens(), reserveIndicesNow(), reconstructAccountScaled(h160, b0),
     ])
     if (!byContract.size || !tokens.length) return []
     const out: MmReserve[] = []
@@ -2720,7 +3121,18 @@ async function reconstructAccountsScaled(h160s: string[], b0: number): Promise<M
   const out = new Map<string, Map<string, bigint>>()
   if (!hs.length || !b0) return out
   const res = await client.query({
-    query: `
+    query: atokenScaledDeltasReady ? `
+      SELECT holder, contract, toString(sum(anchor) + sum(delta)) AS scaled FROM (
+        SELECT lower(holder) AS holder, lower(contract_address) AS contract,
+          toInt256(scaled_balance) AS anchor, toInt256(0) AS delta
+        FROM price_data.atoken_scaled_anchor FINAL WHERE lower(holder) IN {hs:Array(String)}
+        UNION ALL
+        SELECT holder, contract_address AS contract, toInt256(0) AS anchor,
+          sum(scaled_delta) AS delta
+        FROM price_data.atoken_scaled_deltas FINAL
+        WHERE holder IN {hs:Array(String)} AND block_height > {b0:UInt32}
+        GROUP BY holder, contract
+      ) GROUP BY holder, contract HAVING (sum(anchor) + sum(delta)) > 0` : `
       SELECT holder, contract, toString(sum(a) + sum(d)) AS scaled FROM (
         SELECT lower(holder) AS holder, lower(contract_address) AS contract, toInt256(scaled_balance) AS a, toInt256(0) AS d
         FROM price_data.atoken_scaled_anchor FINAL WHERE lower(holder) IN {hs:Array(String)}
@@ -2753,7 +3165,7 @@ async function mmReservesByHolder(h160s: string[]): Promise<Map<string, MmReserv
   if (!hs.length) return out
   const b0 = await aTokenAnchorBlock()
   if (!b0) return out
-  const [prices, tokens, indices] = await Promise.all([ensurePrices(), getMmReserveTokens(), reserveIndicesNow()])
+  const [prices, tokens, indices] = await Promise.all([ensureAccountValuePrices(), getMmReserveTokens(), reserveIndicesNow()])
   // Reconstruct in small holder chunks: hasAny(participants, …) over the whole
   // raw_evm_logs table blows ClickHouse's per-query memory once the holder set is
   // large, so cap each scan's matched rows AND how many scans run at once.
@@ -2801,6 +3213,352 @@ async function mmReservesByHolder(h160s: string[]): Promise<Map<string, MmReserv
     if (reserves.length) out.set(h, reserves)
   }
   return out
+}
+
+export interface MoneyMarketScaledHolding {
+  holder: string
+  contract: string
+  scaled: bigint
+}
+
+export interface LatestMoneyMarketAggregate {
+  holder: string
+  poolAddress: string
+  marketKey: string
+  totalCollateralBase: bigint
+  totalDebtBase: bigint
+  availableBorrowsBase: bigint
+  liquidationThreshold: number
+  ltv: bigint
+  healthFactor: bigint
+  blockHeight: number
+  blockTimestamp: string
+}
+
+export interface MoneyMarketAccountValueClaim {
+  accountId: string
+  holder: string
+  poolAddress: string
+  marketKey: string
+  reservePresent: boolean
+  assetId: number
+  supplied: bigint
+  debt: bigint
+  totalCollateralBase: bigint
+  totalDebtBase: bigint
+  availableBorrowsBase: bigint
+  liquidationThreshold: number
+  ltv: bigint
+  healthFactor: bigint
+  blockHeight: number
+  blockTimestamp: string
+}
+
+// Convert a complete current scaled-balance generation into compact raw reserve
+// claims. Aggregate Aave base values stay on one header row per account/market;
+// reserve rows retain integer principal so request-time valuation can use the
+// same current Explorer prices as account detail.
+export function buildMoneyMarketAccountValueClaims(
+  holdings: MoneyMarketScaledHolding[],
+  tokens: MmReserveToken[],
+  indices: Map<string, { liq: bigint; vbi: bigint }>,
+  aggregates: LatestMoneyMarketAggregate[],
+): MoneyMarketAccountValueClaim[] {
+  const contractMap = new Map<string, { token: MmReserveToken; side: 'supplied' | 'debt' }>()
+  for (const token of tokens) {
+    const poolAddress = token.poolProxy.toLowerCase()
+    const normalized = { ...token, asset: token.asset.toLowerCase(), poolProxy: poolAddress }
+    for (const [contract, side] of [[token.aToken, 'supplied'], [token.vDebt, 'debt']] as const) {
+      const key = contract.toLowerCase()
+      if (contractMap.has(key)) throw new Error(`duplicate money-market reserve contract ${key}`)
+      contractMap.set(key, { token: normalized, side })
+    }
+  }
+
+  type ReserveClaim = { supplied: bigint; debt: bigint; token: MmReserveToken }
+  const reserves = new Map<string, ReserveClaim>()
+  const holderMarkets = new Set<string>()
+  const seenHoldings = new Set<string>()
+  for (const holding of holdings) {
+    if (holding.scaled <= 0n) continue
+    const holder = holding.holder.toLowerCase()
+    const holdingKey = `${holder}|${holding.contract.toLowerCase()}`
+    if (seenHoldings.has(holdingKey)) throw new Error(`duplicate money-market scaled holding ${holdingKey}`)
+    seenHoldings.add(holdingKey)
+    const mapped = contractMap.get(holding.contract.toLowerCase())
+    if (!mapped) throw new Error(`unmapped positive money-market contract ${holding.contract}`)
+    const idx = indices.get(`${mapped.token.poolProxy}:${mapped.token.asset}`)
+    if (!idx) throw new Error(`missing money-market reserve index ${mapped.token.poolProxy}:${mapped.token.asset}`)
+    const assetId = assetIdFromMmAddress(mapped.token.asset)
+    if (assetId == null) throw new Error(`unmapped money-market reserve asset ${mapped.token.asset}`)
+    const actual = holding.scaled * (mapped.side === 'supplied' ? idx.liq : idx.vbi) / ATOKEN_RAY
+    const holderMarket = `${holder}|${mapped.token.poolProxy}`
+    holderMarkets.add(holderMarket)
+    if (actual <= 0n) continue
+    const key = `${holderMarket}|${assetId}`
+    const current = reserves.get(key) ?? { supplied: 0n, debt: 0n, token: mapped.token }
+    current[mapped.side] += actual
+    reserves.set(key, current)
+  }
+
+  const aggregateByHolderMarket = new Map<string, LatestMoneyMarketAggregate>()
+  for (const aggregate of aggregates) {
+    const holder = aggregate.holder.toLowerCase()
+    const poolAddress = aggregate.poolAddress.toLowerCase()
+    const key = `${holder}|${poolAddress}`
+    if (aggregateByHolderMarket.has(key)) throw new Error(`duplicate money-market aggregate ${key}`)
+    aggregateByHolderMarket.set(key, { ...aggregate, holder, poolAddress })
+    holderMarkets.add(key)
+  }
+
+  const claims: MoneyMarketAccountValueClaim[] = []
+  const sortedHolderMarkets = [...holderMarkets].sort()
+  for (const holderMarket of sortedHolderMarkets) {
+    const separator = holderMarket.lastIndexOf('|')
+    const holder = holderMarket.slice(0, separator)
+    const poolAddress = holderMarket.slice(separator + 1)
+    const accountId = evmAccountIdFromAddress(holder)
+    if (!accountId) throw new Error(`invalid money-market holder ${holder}`)
+    const aggregate = aggregateByHolderMarket.get(holderMarket)
+    const marketKey = aggregate?.marketKey ?? tokens.find(token => token.poolProxy.toLowerCase() === poolAddress)?.marketKey
+    if (!marketKey) throw new Error(`unknown money-market pool ${poolAddress}`)
+    claims.push({
+      accountId, holder, poolAddress, marketKey, reservePresent: false, assetId: 0,
+      supplied: 0n, debt: 0n,
+      totalCollateralBase: aggregate?.totalCollateralBase ?? 0n,
+      totalDebtBase: aggregate?.totalDebtBase ?? 0n,
+      availableBorrowsBase: aggregate?.availableBorrowsBase ?? 0n,
+      liquidationThreshold: aggregate?.liquidationThreshold ?? 0,
+      ltv: aggregate?.ltv ?? 0n, healthFactor: aggregate?.healthFactor ?? 0n,
+      blockHeight: aggregate?.blockHeight ?? 0,
+      blockTimestamp: aggregate?.blockTimestamp ?? '1970-01-01 00:00:00',
+    })
+    const prefix = `${holderMarket}|`
+    for (const [key, reserve] of [...reserves.entries()].filter(([key]) => key.startsWith(prefix)).sort(([a], [b]) => a.localeCompare(b))) {
+      const assetId = Number(key.slice(prefix.length))
+      claims.push({
+        accountId, holder, poolAddress, marketKey, reservePresent: true, assetId,
+        supplied: reserve.supplied, debt: reserve.debt,
+        totalCollateralBase: 0n, totalDebtBase: 0n, availableBorrowsBase: 0n,
+        liquidationThreshold: 0, ltv: 0n, healthFactor: 0n,
+        blockHeight: 0, blockTimestamp: '1970-01-01 00:00:00',
+      })
+    }
+  }
+  return claims
+}
+
+// Position snapshots can be emitted several times in one block. Event-derived
+// observations order by their event index; a periodic full-block observation is
+// state after all events and therefore wins the same-block tie. Ingest time only
+// resolves a replay of the same stable observation identity.
+function moneyMarketPositionOrderSql(prefix = ''): string {
+  const observation = `${prefix}observation_id`
+  return `tuple(${prefix}block_height,
+    if(startsWith(${observation}, 'money-market-periodic:'), toUInt32(4294967295),
+      toUInt32OrZero(arrayElement(splitByChar(':', ${observation}), 3))),
+    ${observation}, ${prefix}ingested_at)`
+}
+
+async function reconstructAllActiveMoneyMarketScaled(
+  contracts: string[],
+  anchorBlock: number,
+): Promise<MoneyMarketScaledHolding[]> {
+  const normalized = [...new Set(contracts.map(contract => contract.toLowerCase()))]
+  if (!normalized.length || !anchorBlock) return []
+  const result = await client.query({
+    query: `SELECT holder,contract,toString(sum(anchor)+sum(delta)) AS scaled
+      FROM (
+        SELECT lower(holder) AS holder,lower(contract_address) AS contract,
+          toInt256(argMax(scaled_balance,updated_at)) AS anchor,toInt256(0) AS delta
+        FROM price_data.atoken_scaled_anchor FINAL
+        WHERE holder!='' AND lower(contract_address) IN {contracts:Array(String)}
+        GROUP BY holder,contract
+        UNION ALL
+        SELECT holder,contract_address AS contract,toInt256(0) AS anchor,
+          sum(scaled_delta) AS delta
+        FROM price_data.atoken_scaled_deltas FINAL
+        WHERE block_height>{anchorBlock:UInt32} AND contract_address IN {contracts:Array(String)}
+        GROUP BY holder,contract
+      )
+      GROUP BY holder,contract HAVING sum(anchor)+sum(delta)>0`,
+    query_params: { contracts: normalized, anchorBlock }, format: 'JSONEachRow',
+  })
+  return (await result.json<{ holder: string; contract: string; scaled: string }>()).map(row => ({
+    holder: row.holder, contract: row.contract, scaled: BigInt(row.scaled),
+  }))
+}
+
+async function loadAllLatestMoneyMarketAggregates(): Promise<LatestMoneyMarketAggregate[]> {
+  const order = moneyMarketPositionOrderSql()
+  const result = await client.query({
+    query: `SELECT lower(user_address) AS holder,lower(pool_address) AS pool,
+        toString(argMax(toUInt256OrZero(total_collateral_base),${order})) AS collateral,
+        toString(argMax(toUInt256OrZero(total_debt_base),${order})) AS debt,
+        toString(argMax(toUInt256OrZero(available_borrows_base),${order})) AS available_borrows,
+        toUInt32(argMax(toUInt256OrZero(current_liquidation_threshold),${order})) AS liquidation_threshold,
+        toString(argMax(toUInt256OrZero(ltv),${order})) AS ltv,
+        toString(argMax(toUInt256OrZero(health_factor),${order})) AS health_factor,
+        argMax(block_height,${order}) AS latest_block,
+        toString(argMax(block_timestamp,${order})) AS latest_timestamp
+      FROM price_data.raw_money_market_positions
+      WHERE user_address!='' AND lower(pool_address) IN (${configuredMmPoolsSql()})
+      GROUP BY holder,pool
+      HAVING toUInt256OrZero(collateral)>0 OR toUInt256OrZero(debt)>0`,
+    format: 'JSONEachRow',
+  })
+  return (await result.json<{ holder: string; pool: string; collateral: string; debt: string; available_borrows: string; liquidation_threshold: number; ltv: string; health_factor: string; latest_block: number; latest_timestamp: string }>()).map(row => {
+    const market = MM_MARKET_BY_POOL.get(row.pool)
+    if (!market) throw new Error(`unknown configured money-market pool ${row.pool}`)
+    return {
+      holder: row.holder, poolAddress: row.pool, marketKey: market.key,
+      totalCollateralBase: BigInt(row.collateral || '0'), totalDebtBase: BigInt(row.debt || '0'),
+      availableBorrowsBase: BigInt(row.available_borrows || '0'),
+      liquidationThreshold: Number(row.liquidation_threshold || 0),
+      ltv: BigInt(row.ltv || '0'), healthFactor: BigInt(row.health_factor || '0'),
+      blockHeight: Number(row.latest_block || 0), blockTimestamp: row.latest_timestamp,
+    }
+  })
+}
+
+const MONEY_MARKET_ACCOUNT_VALUES_REFRESH_MS = 5 * 60_000
+let moneyMarketAccountValuesRefreshTimer: ReturnType<typeof setInterval> | null = null
+let moneyMarketAccountValuesRefreshInflight: Promise<void> | null = null
+
+export async function moneyMarketAccountValueSnapshotReady(): Promise<boolean> {
+  try {
+    const result = await client.query({
+      query: `WITH current AS (
+          SELECT argMax(snapshot_id,computed_at) AS snapshot_id,
+            argMax(claim_count,computed_at) AS claim_count
+          FROM price_data.money_market_account_value_snapshot_state
+          WHERE snapshot_key='current'
+        )
+        SELECT current.snapshot_id AS snapshot_id,current.claim_count AS claim_count,
+          count(c.account_id) AS stored_count,
+          uniqExact((c.account_id,c.pool_address,c.reserve_present,c.asset_id)) AS unique_count
+        FROM current
+        LEFT JOIN price_data.money_market_account_value_snapshots c ON c.snapshot_id=current.snapshot_id
+        GROUP BY current.snapshot_id,current.claim_count`,
+      format: 'JSONEachRow',
+    })
+    const row = (await result.json<{ snapshot_id: string; claim_count: number; stored_count: string; unique_count: string }>())[0]
+    return Boolean(row?.snapshot_id)
+      && Number(row.claim_count) === Number(row.stored_count)
+      && Number(row.stored_count) === Number(row.unique_count)
+  } catch { return false }
+}
+
+async function refreshMoneyMarketAccountValuesUncached(): Promise<void> {
+  if (!atokenScaledDeltasReady || !moneyMarketReserveIndicesReady) {
+    throw new Error('complete aToken deltas and reserve indices are required')
+  }
+  const [anchorBlock, tokens, indices, aggregates] = await Promise.all([
+    aTokenAnchorBlock(), getMmReserveTokens(), reserveIndicesNow(), loadAllLatestMoneyMarketAggregates(),
+  ])
+  if (!anchorBlock || !tokens.length) throw new Error('money-market anchor or reserve map missing')
+  const holdings = await reconstructAllActiveMoneyMarketScaled(tokens.flatMap(token => [token.aToken, token.vDebt]), anchorBlock)
+  const claims = buildMoneyMarketAccountValueClaims(holdings, tokens, indices, aggregates)
+  if (!claims.length) throw new Error('money-market account value generation is empty')
+
+  const snapshotId = String(Date.now())
+  const now = new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
+  const checksum = createHash('sha256')
+  for (const claim of claims) {
+    checksum.update(`${claim.accountId}|${claim.poolAddress}|${claim.reservePresent ? 1 : 0}|${claim.assetId}|${claim.supplied}|${claim.debt}|${claim.totalCollateralBase}|${claim.totalDebtBase}|${claim.availableBorrowsBase}|${claim.liquidationThreshold}|${claim.ltv}|${claim.healthFactor}|${claim.blockHeight}|${claim.blockTimestamp}\n`)
+  }
+  const batchSize = 1_000
+  for (let offset = 0; offset < claims.length; offset += batchSize) {
+    await client.insert({
+      table: 'price_data.money_market_account_value_snapshots',
+      values: claims.slice(offset,offset + batchSize).map(claim => ({
+        snapshot_id: snapshotId, account_id: claim.accountId, holder: claim.holder,
+        pool_address: claim.poolAddress, market_key: claim.marketKey,
+        reserve_present: claim.reservePresent ? 1 : 0, asset_id: claim.assetId,
+        supplied: claim.supplied.toString(), debt: claim.debt.toString(),
+        total_collateral_base: claim.totalCollateralBase.toString(),
+        total_debt_base: claim.totalDebtBase.toString(), available_borrows_base: claim.availableBorrowsBase.toString(),
+        liquidation_threshold: claim.liquidationThreshold, ltv: claim.ltv.toString(),
+        health_factor: claim.healthFactor.toString(), block_height: claim.blockHeight,
+        block_timestamp: claim.blockTimestamp,
+        computed_at: now,
+      })),
+      format: 'JSONEachRow',
+    })
+  }
+  const verify = await client.query({
+    query: `SELECT count() AS c,uniqExact((account_id,pool_address,reserve_present,asset_id)) AS u
+      FROM price_data.money_market_account_value_snapshots WHERE snapshot_id={snapshotId:String}`,
+    query_params: { snapshotId }, format: 'JSONEachRow',
+  })
+  const counts = (await verify.json<{ c: string; u: string }>())[0]
+  if (Number(counts?.c) !== claims.length || Number(counts?.u) !== claims.length) {
+    throw new Error(`incomplete money-market account value generation ${counts?.c ?? 0}/${claims.length}`)
+  }
+  // Prices and raw principal publish as one account-value generation. General
+  // Explorer prices may continue refreshing every 30 seconds, but account list
+  // and detail stay pinned together until the next bounded five-minute rebuild.
+  const nextAccountValuePrices = new Map(await loadFreshPrices())
+  await client.insert({
+    table: 'price_data.money_market_account_value_snapshot_state',
+    values: [{
+      snapshot_key: 'current', snapshot_id: snapshotId,
+      source_holding_count: holdings.length, source_position_count: aggregates.length,
+      claim_count: claims.length, source_checksum: checksum.digest('hex'), computed_at: now,
+    }],
+    format: 'JSONEachRow',
+  })
+  accountValuePriceMap = nextAccountValuePrices
+  accountValueGenerationEpoch++
+  if (!(await moneyMarketAccountValueSnapshotReady())) throw new Error('published money-market account value generation failed parity check')
+  setMoneyMarketAccountValuesReady()
+
+  const parts = await client.query({
+    query: `SELECT DISTINCT partition FROM system.parts
+      WHERE database='price_data' AND table='money_market_account_value_snapshots'
+        AND active AND partition!={snapshotId:String}`,
+    query_params: { snapshotId }, format: 'JSONEachRow',
+  })
+  for (const row of await parts.json<{ partition: string }>()) {
+    await client.command({
+      query: `ALTER TABLE price_data.money_market_account_value_snapshots DROP PARTITION {partition:String}`,
+      query_params: { partition: row.partition },
+    })
+  }
+
+  // v1/v2 payloads use aggregate-oracle MM value and can no longer serve once
+  // both exact LP and reserve-principal generations are available.
+  if (omnipoolAccountClaimsReady) {
+    const legacy = await client.query({
+      query: `SELECT count() AS c FROM price_data.account_directory_snapshots
+        WHERE startsWith(snapshot_key,'v1:') OR startsWith(snapshot_key,'v2:')`,
+      format: 'JSONEachRow',
+    })
+    if (Number((await legacy.json<{ c: string }>())[0]?.c ?? 0)>0) {
+      await client.command({
+        query: `ALTER TABLE price_data.account_directory_snapshots
+          DELETE WHERE startsWith(snapshot_key,'v1:') OR startsWith(snapshot_key,'v2:')`,
+        clickhouse_settings: { mutations_sync: '1' },
+      })
+    }
+  }
+}
+
+export function refreshMoneyMarketAccountValues(): Promise<void> {
+  if (moneyMarketAccountValuesRefreshInflight) return moneyMarketAccountValuesRefreshInflight
+  const request = refreshMoneyMarketAccountValuesUncached().finally(() => {
+    if (moneyMarketAccountValuesRefreshInflight===request) moneyMarketAccountValuesRefreshInflight=null
+  })
+  moneyMarketAccountValuesRefreshInflight=request
+  return request
+}
+
+export function startMoneyMarketAccountValuesRefresh(): void {
+  if (moneyMarketAccountValuesRefreshTimer) return
+  moneyMarketAccountValuesRefreshTimer=setInterval(() => {
+    void refreshMoneyMarketAccountValues().catch(error => console.error('[accounts] money-market value refresh failed',error))
+  },MONEY_MARKET_ACCOUNT_VALUES_REFRESH_MS)
+  moneyMarketAccountValuesRefreshTimer.unref()
 }
 
 function usdBase8(value: number): string {
@@ -2912,6 +3670,162 @@ async function getATokenHolders(aTokenAssetId: number, limit: number): Promise<H
   })
 }
 
+interface HolderBalanceClaim { accountId: string; bal: bigint; lastBlock: number; memberKey?: string }
+
+// Keep the on-chain custody row for any share balance that cannot be assigned
+// to reconstructed aToken holders. This is deliberately a subtraction, not a
+// fallback estimate: attributed claims replace the same custody balance, while
+// an incomplete historical holder anchor remains visible under its real
+// Supply & Borrow account instead of silently disappearing from total supply.
+export function unattributedCustodyBalance(custody: bigint, attributed: bigint): bigint {
+  return custody > attributed ? custody - attributed : 0n
+}
+
+// Combine wallet and receipt-token claims by their canonical displayed account,
+// then collapse tagged members exactly once. This is the shared beneficial-owner
+// grouping used when a displayed Giga asset spans direct, pool-share, and aToken
+// storage locations.
+export function groupHolderBalanceClaims(
+  claims: HolderBalanceClaim[],
+  refFor: (accountId: string) => AccountRef,
+): HolderRow[] {
+  const singles = new Map<string, { account: AccountRef; bal: bigint; lastBlock: number }>()
+  const tagGroups = new Map<string, {
+    tag: NonNullable<AccountRef['tag']>
+    bal: bigint
+    lastBlock: number
+    members: Set<string>
+  }>()
+  for (const claim of claims) {
+    if (claim.bal <= 0n) continue
+    const account = refFor(claim.accountId)
+    if (account.tag) {
+      const group = tagGroups.get(account.tag.id) ?? {
+        tag: account.tag, bal: 0n, lastBlock: 0, members: new Set<string>(),
+      }
+      group.bal += claim.bal
+      group.lastBlock = Math.max(group.lastBlock, claim.lastBlock)
+      group.members.add(claim.memberKey ?? account.accountId)
+      tagGroups.set(account.tag.id, group)
+      continue
+    }
+    const current = singles.get(account.accountId)
+    if (current) {
+      current.bal += claim.bal
+      current.lastBlock = Math.max(current.lastBlock, claim.lastBlock)
+    } else {
+      singles.set(account.accountId, { account, bal: claim.bal, lastBlock: claim.lastBlock })
+    }
+  }
+  const rows: (Omit<HolderRow, 'rank'> & { bal: bigint })[] = [
+    ...[...singles.values()].map(row => ({
+      account: row.account, tag: null, balance: row.bal.toString(), lastBlock: row.lastBlock, bal: row.bal,
+    })),
+    ...[...tagGroups.values()].map(group => ({
+      account: null,
+      tag: {
+        tagId: group.tag.id, name: group.tag.name, color: group.tag.color,
+        icon: group.tag.icon, memberCount: group.members.size,
+      },
+      balance: group.bal.toString(), lastBlock: group.lastBlock, bal: group.bal,
+    })),
+  ]
+  return rows
+    .sort((left, right) => left.bal < right.bal ? 1 : left.bal > right.bal ? -1 : 0)
+    .map(({ bal: _bal, ...row }, index) => ({ ...row, rank: index + 1 }))
+}
+
+async function getFoldedDisplayAssetHolders(displayAssetId: number, shareAssetIds: number[]): Promise<HolderRow[]> {
+  return cached(`explorer:folded-display-holders:${displayAssetId}`, 30000, async () => {
+    const normalizedShareIds = [...new Set(shareAssetIds.filter(id => SHARE_TOKEN_UNDERLYING_ID[id] === displayAssetId))]
+    if (!normalizedShareIds.length) return []
+    const sourceIds = [displayAssetId, ...normalizedShareIds]
+    const [tokens, indices, b0] = await Promise.all([getMmReserveTokens(), reserveIndicesNow(), aTokenAnchorBlock()])
+    const shareSet = new Set(normalizedShareIds)
+    const reserveTokens = tokens.filter(token => {
+      const reserveId = assetIdFromMmAddress(token.asset)
+      const market = MM_MARKET_BY_KEY.get(token.marketKey)
+      return reserveId != null && shareSet.has(reserveId) && !market?.stakingBacked &&
+        (indices.get(`${token.poolProxy.toLowerCase()}:${token.asset.toLowerCase()}`)?.liq ?? 0n) > 0n
+    })
+
+    const directPromise = client.query({
+      query: `SELECT account_id,asset_id,toString(latest_bal) AS balance,last_block FROM (
+                SELECT account_id,asset_id,
+                  toUInt256OrZero(argMaxMerge(total_state)) AS latest_bal,
+                  maxMerge(last_block_state) AS last_block
+                FROM price_data.account_asset_latest_balances
+                WHERE asset_id IN ({assetIds:Array(String)})
+                GROUP BY account_id,asset_id
+              ) WHERE latest_bal > 0`,
+      query_params: { assetIds: sourceIds.map(String) }, format: 'JSONEachRow',
+    })
+    const reconstructedPromise = b0 > 0
+      ? Promise.all(reserveTokens.map(async token => ({
+          token,
+          holders: await reconstructHolderScaled(token.aToken, b0),
+        })))
+      : Promise.resolve([])
+    const [directRes, reconstructed] = await Promise.all([directPromise, reconstructedPromise])
+
+    // The aToken contract is the on-chain custodian of supplied pool shares. Its
+    // direct Tokens balance is replaced only to the extent that the indexed
+    // holder anchor + deltas can assign that balance to beneficial owners.
+    const tokenByCustody = new Map<string, MmReserveToken>()
+    for (const token of reserveTokens) {
+      const reserveId = assetIdFromMmAddress(token.asset)
+      const custody = accountIdFromH160(token.aToken)
+      if (reserveId == null || !custody) continue
+      tokenByCustody.set(`${reserveId}:${custody.toLowerCase()}`, token)
+    }
+
+    const claims: HolderBalanceClaim[] = []
+    const custodyByContract = new Map<string, HolderBalanceClaim>()
+    for (const row of await directRes.json<{ account_id: string; asset_id: string; balance: string; last_block: number }>()) {
+      const sourceId = Number(row.asset_id)
+      const raw = rescaleRaw(row.balance, asset(sourceId).decimals, asset(displayAssetId).decimals)
+      const bal = BigInt(raw || '0')
+      if (bal <= 0n) continue
+      const custodyToken = tokenByCustody.get(`${sourceId}:${row.account_id.toLowerCase()}`)
+      if (custodyToken) {
+        custodyByContract.set(custodyToken.aToken.toLowerCase(), {
+          accountId: row.account_id, bal, lastBlock: Number(row.last_block),
+        })
+      } else {
+        claims.push({ accountId: row.account_id, bal, lastBlock: Number(row.last_block) })
+      }
+    }
+    for (const { token, holders } of reconstructed) {
+      const reserveId = assetIdFromMmAddress(token.asset)
+      if (reserveId == null) continue
+      const liquidityIndex = indices.get(`${token.poolProxy.toLowerCase()}:${token.asset.toLowerCase()}`)?.liq ?? 0n
+      let attributed = 0n
+      for (const holder of holders) {
+        const accountId = accountIdFromH160(holder.holder)
+        if (!accountId) continue
+        const actual = holder.scaled > 0n ? (holder.scaled * liquidityIndex) / ATOKEN_RAY : 0n
+        const raw = rescaleRaw(actual.toString(), asset(reserveId).decimals, asset(displayAssetId).decimals)
+        const bal = BigInt(raw || '0')
+        if (bal > 0n) {
+          attributed += bal
+          claims.push({ accountId, bal, lastBlock: 0 })
+        }
+      }
+      const custody = custodyByContract.get(token.aToken.toLowerCase())
+      if (custody) {
+        const residual = unattributedCustodyBalance(custody.bal, attributed)
+        if (residual > 0n) claims.push({ ...custody, bal: residual })
+        custodyByContract.delete(token.aToken.toLowerCase())
+      }
+    }
+    // If the pinned holder anchor is not established yet, retain the entire
+    // real custody balance. An unavailable reconstruction must never turn a
+    // known on-chain holder into zero.
+    claims.push(...custodyByContract.values())
+    return groupHolderBalanceClaims(claims, accountRef)
+  })
+}
+
 // Turn per-H160 aToken balances into display rows. Holders resolving (via
 // accountRef → resolveDisplayAccountId) to a TAGGED account collapse into one
 // tag group row — matching the substrate-side holders query, where e.g. all
@@ -2922,33 +3836,12 @@ export function groupATokenHolderRows(
   refFor: (accountId: string) => AccountRef,
   toAccountId: (h160: string) => string | null,
 ): HolderRow[] {
-  const tagGroups = new Map<string, { tag: NonNullable<AccountRef['tag']>; bal: bigint; members: number }>()
-  const singles: { account: AccountRef | null; bal: bigint }[] = []
-  for (const h of held) {
-    const accId = toAccountId(h.h160)
-    const account = accId ? refFor(accId) : null
-    if (account?.tag) {
-      const g = tagGroups.get(account.tag.id) ?? { tag: account.tag, bal: 0n, members: 0 }
-      g.bal += h.bal
-      g.members++
-      tagGroups.set(account.tag.id, g)
-    } else {
-      singles.push({ account, bal: h.bal })
-    }
+  const claims: HolderBalanceClaim[] = []
+  for (const holder of held) {
+    const accountId = toAccountId(holder.h160)
+    if (accountId) claims.push({ accountId, bal: holder.bal, lastBlock: 0, memberKey: holder.h160 })
   }
-  const rows: (Omit<HolderRow, 'rank'> & { bal: bigint })[] = [
-    ...singles.map(s => ({ account: s.account, tag: null, balance: s.bal.toString(), lastBlock: 0, bal: s.bal })),
-    ...[...tagGroups.values()].map(g => ({
-      account: null,
-      tag: { tagId: g.tag.id, name: g.tag.name, color: g.tag.color, icon: g.tag.icon, memberCount: g.members },
-      balance: g.bal.toString(),
-      lastBlock: 0,
-      bal: g.bal,
-    })),
-  ]
-  return rows
-    .sort((a, b) => (a.bal < b.bal ? 1 : a.bal > b.bal ? -1 : 0))
-    .map(({ bal: _bal, ...row }, i) => ({ ...row, rank: i + 1 }))
+  return groupHolderBalanceClaims(claims, refFor)
 }
 
 // Rank a health factor for "riskiest first" sorting: lower = more at risk; 'inf'
@@ -3078,12 +3971,12 @@ function mmCollateralShortfallUsd(moneyMarket: MoneyMarketPosition | null, folde
 // hubAmount: the position's H2O (LRNA hub) leg, present for Omnipool positions
 // whose withdraw value includes a hub component (already folded into valueUsd).
 export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string }
-interface DecodedPosition { assetId: number; amount: bigint; shares: bigint; priceNum: bigint; priceDen: bigint }
+export interface DecodedPosition { assetId: number; amount: bigint; shares: bigint; priceNum: bigint; priceDen: bigint }
 
 // Omnipool state (per-asset reserve/hub/shares) for LP withdraw value
 // Reads the latest per-block stableswap/omnipool snapshot (raw_block_snapshots →
 // omnipool.assets[]). Used by the omnipool remove-liquidity math below.
-interface OmnipoolAssetState { reserve: bigint; hub: bigint; shares: bigint }
+export interface OmnipoolAssetState { reserve: bigint; hub: bigint; shares: bigint }
 let omniState = new Map<number, OmnipoolAssetState>()
 let omniStateAt = 0
 async function loadOmnipoolState(): Promise<Map<number, OmnipoolAssetState>> {
@@ -3190,7 +4083,7 @@ interface DecodedLpPosition { positionId: string; dec: DecodedPosition; venue: '
 async function reconstructOmnipoolPositions(accounts: string[]): Promise<DecodedLpPosition[]> {
   const accs = [...new Set(accounts.map(a => a.toLowerCase()))].filter(a => /^0x[0-9a-f]{64}$/.test(a))
   if (!accs.length) return []
-  return cached(`explorer:lp-recon:${accs.sort().join(',')}`, 15000, async () => {
+  return cached(`explorer:lp-recon:${accountValueGenerationEpoch}:${accs.sort().join(',')}`, 15000, async () => {
     // Fast lookup on the maintained aggregate tables (schema 042): nft_owner_latest
     // (current NFT owner), omnipool_position_latest (latest position state),
     // farm_deposit_latest (deposit → position). Empty '' owner = burned/withdrawn.
@@ -3217,13 +4110,252 @@ async function reconstructOmnipoolPositions(accounts: string[]): Promise<Decoded
   })
 }
 
+export interface OwnedDecodedLpPosition extends DecodedLpPosition { accountId: string }
+export interface OmnipoolAccountClaim {
+  positionId: string
+  accountId: string
+  assetId: number
+  amount: bigint
+  hubAmount: bigint
+  venue: 'Omnipool' | 'Omnipool Farm'
+}
+
+// One row per economically owned position. An active farm has both a collection
+// 1337 NFT held by the LM pallet and a collection 2584 deposit NFT held by the
+// user; exclude that custody NFT and keep only the deposit owner so a position
+// can never be counted as both bare and farmed.
+async function reconstructAllOmnipoolPositions(): Promise<OwnedDecodedLpPosition[]> {
+  const res = await client.query({
+    query: `
+      WITH
+      own AS (
+        SELECT collection, item, argMaxMerge(owner) AS owner
+        FROM price_data.nft_owner_latest GROUP BY collection, item
+      ),
+      posn AS (
+        SELECT position_id, argMaxMerge(asset_id) AS asset_id,
+          argMaxMerge(shares) AS shares, argMaxMerge(amount) AS amount,
+          argMaxMerge(price) AS price
+        FROM price_data.omnipool_position_latest GROUP BY position_id
+      ),
+      dep AS (
+        SELECT deposit_id, argMaxMerge(position_id) AS position_id
+        FROM price_data.farm_deposit_latest GROUP BY deposit_id
+      ),
+      farm AS (
+        SELECT dep.position_id AS position_id, own.owner AS owner
+        FROM own INNER JOIN dep ON own.item = dep.deposit_id
+        WHERE own.collection = '2584' AND own.owner != ''
+      )
+      SELECT 'Omnipool' AS venue, own.owner AS accountId, own.item AS positionId,
+        posn.asset_id AS assetId, posn.shares AS shares, posn.amount AS amount,
+        posn.price AS price
+      FROM own
+      INNER JOIN posn ON own.item = posn.position_id
+      LEFT JOIN farm ON farm.position_id = own.item
+      WHERE own.collection = '1337' AND own.owner != '' AND farm.position_id = ''
+      UNION ALL
+      SELECT 'Omnipool Farm' AS venue, farm.owner AS accountId,
+        farm.position_id AS positionId, posn.asset_id AS assetId,
+        posn.shares AS shares, posn.amount AS amount, posn.price AS price
+      FROM farm INNER JOIN posn ON farm.position_id = posn.position_id`,
+    format: 'JSONEachRow',
+  })
+  const rows = await res.json<{
+    venue: 'Omnipool' | 'Omnipool Farm'; accountId: string; positionId: string
+    assetId: number; shares: string; amount: string; price: string
+  }>()
+  return rows.map(row => ({
+    positionId: row.positionId,
+    // Resolve EVM pots/bindings while building the background generation. Doing
+    // this here avoids another request-time pass over raw_account_aliases.
+    accountId: resolveDisplayAccountId(row.accountId.toLowerCase()),
+    venue: row.venue,
+    dec: {
+      assetId: row.assetId,
+      amount: BigInt(row.amount || '0'),
+      shares: BigInt(row.shares || '0'),
+      priceNum: BigInt(row.price || '0'),
+      priceDen: OMNI_FIXED,
+    },
+  }))
+}
+
+// Shared exact claim builder for the detail page's withdrawal semantics and the
+// directory snapshot. Missing pool state or duplicate position identities abort
+// publication rather than silently undervaluing/double-counting the directory.
+export function buildOmnipoolAccountClaims(
+  positions: OwnedDecodedLpPosition[],
+  state: Map<number, OmnipoolAssetState>,
+): OmnipoolAccountClaim[] {
+  const seen = new Set<string>()
+  return positions.map(position => {
+    if (seen.has(position.positionId)) throw new Error(`duplicate current Omnipool position ${position.positionId}`)
+    seen.add(position.positionId)
+    const assetState = state.get(position.dec.assetId)
+    if (!assetState) throw new Error(`missing current Omnipool state for asset ${position.dec.assetId}`)
+    const { liquidity, hub } = omnipoolRemoveLiquidity(assetState, position.dec)
+    return {
+      positionId: position.positionId,
+      accountId: position.accountId,
+      assetId: position.dec.assetId,
+      amount: liquidity,
+      hubAmount: hub,
+      venue: position.venue,
+    }
+  })
+}
+
+const OMNIPOOL_ACCOUNT_CLAIMS_REFRESH_MS = 5 * 60_000
+let omnipoolAccountClaimsRefreshTimer: ReturnType<typeof setInterval> | null = null
+let omnipoolAccountClaimsRefreshInflight: Promise<void> | null = null
+
+export async function omnipoolAccountClaimsSnapshotReady(): Promise<boolean> {
+  try {
+    const result = await client.query({
+      query: `
+        WITH current AS (
+          SELECT argMax(snapshot_id, computed_at) AS snapshot_id,
+            argMax(source_position_count, computed_at) AS source_count,
+            argMax(claim_count, computed_at) AS claim_count
+          FROM price_data.omnipool_account_claim_snapshot_state
+          WHERE snapshot_key = 'current'
+        )
+        SELECT current.snapshot_id AS snapshot_id, current.source_count AS source_count,
+          current.claim_count AS claim_count, count(c.position_id) AS stored_count,
+          uniqExact(c.position_id) AS unique_count
+        FROM current
+        LEFT JOIN price_data.omnipool_account_claim_snapshots c
+          ON c.snapshot_id = current.snapshot_id
+        GROUP BY current.snapshot_id, current.source_count, current.claim_count`,
+      format: 'JSONEachRow',
+    })
+    const row = (await result.json<{
+      snapshot_id: string; source_count: number; claim_count: number
+      stored_count: string; unique_count: string
+    }>())[0]
+    return Boolean(row?.snapshot_id)
+      && Number(row.source_count) === Number(row.claim_count)
+      && Number(row.claim_count) === Number(row.stored_count)
+      && Number(row.stored_count) === Number(row.unique_count)
+  } catch { return false }
+}
+
+async function refreshOmnipoolAccountClaimsUncached(): Promise<void> {
+  const [positions, state] = await Promise.all([
+    reconstructAllOmnipoolPositions(),
+    loadOmnipoolState(),
+  ])
+  const claims = buildOmnipoolAccountClaims(positions, state)
+  if (claims.length !== positions.length) throw new Error('Omnipool claim/source count mismatch')
+
+  const snapshotId = String(Date.now())
+  const now = new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
+  const checksum = createHash('sha256')
+  for (const position of [...positions].sort((a, b) => a.positionId.localeCompare(b.positionId))) {
+    checksum.update(`${position.positionId}|${position.accountId}|${position.venue}|${position.dec.assetId}|${position.dec.shares}|${position.dec.amount}|${position.dec.priceNum}\n`)
+  }
+
+  // Bounded batches make a failed refresh cheap to retry. The state marker is
+  // deliberately written last, so partial generations are never request-visible.
+  const batchSize = 1_000
+  for (let offset = 0; offset < claims.length; offset += batchSize) {
+    await client.insert({
+      table: 'price_data.omnipool_account_claim_snapshots',
+      values: claims.slice(offset, offset + batchSize).map(claim => ({
+        snapshot_id: snapshotId,
+        position_id: claim.positionId,
+        account_id: claim.accountId,
+        asset_id: claim.assetId,
+        amount: claim.amount.toString(),
+        hub_amount: claim.hubAmount.toString(),
+        venue: claim.venue,
+        computed_at: now,
+      })),
+      format: 'JSONEachRow',
+    })
+  }
+
+  const verify = await client.query({
+    query: `SELECT count() AS c, uniqExact(position_id) AS u
+      FROM price_data.omnipool_account_claim_snapshots
+      WHERE snapshot_id = {snapshotId:String}`,
+    query_params: { snapshotId }, format: 'JSONEachRow',
+  })
+  const counts = (await verify.json<{ c: string; u: string }>())[0]
+  if (Number(counts?.c) !== claims.length || Number(counts?.u) !== claims.length) {
+    throw new Error(`incomplete Omnipool claim generation ${counts?.c ?? 0}/${claims.length}`)
+  }
+
+  await client.insert({
+    table: 'price_data.omnipool_account_claim_snapshot_state',
+    values: [{
+      snapshot_key: 'current', snapshot_id: snapshotId,
+      source_position_count: positions.length, claim_count: claims.length,
+      source_checksum: checksum.digest('hex'), computed_at: now,
+    }],
+    format: 'JSONEachRow',
+  })
+  if (!(await omnipoolAccountClaimsSnapshotReady())) throw new Error('published Omnipool claim generation failed parity check')
+  setOmnipoolAccountClaimsReady()
+  accountValueGenerationEpoch++
+
+  // A completed generation is self-contained. Drop every superseded/orphaned
+  // partition so retries and regular refreshes leave no unused snapshot data.
+  const parts = await client.query({
+    query: `SELECT DISTINCT partition FROM system.parts
+      WHERE database = 'price_data' AND table = 'omnipool_account_claim_snapshots'
+        AND active AND partition != {snapshotId:String}`,
+    query_params: { snapshotId }, format: 'JSONEachRow',
+  })
+  for (const row of await parts.json<{ partition: string }>()) {
+    await client.command({
+      query: `ALTER TABLE price_data.omnipool_account_claim_snapshots DROP PARTITION {partition:String}`,
+      query_params: { partition: row.partition },
+    })
+  }
+
+  // v1 directory payloads were computed without Omnipool claims. Remove them
+  // only after v2's complete claim generation is published; the count guard
+  // keeps periodic refreshes from creating empty mutations.
+  const legacy = await client.query({
+    query: `SELECT count() AS c FROM price_data.account_directory_snapshots
+      WHERE startsWith(snapshot_key, 'v1:')`,
+    format: 'JSONEachRow',
+  })
+  if (Number((await legacy.json<{ c: string }>())[0]?.c ?? 0) > 0) {
+    await client.command({
+      query: `ALTER TABLE price_data.account_directory_snapshots
+        DELETE WHERE startsWith(snapshot_key, 'v1:')`,
+      clickhouse_settings: { mutations_sync: '1' },
+    })
+  }
+}
+
+export function refreshOmnipoolAccountClaims(): Promise<void> {
+  if (omnipoolAccountClaimsRefreshInflight) return omnipoolAccountClaimsRefreshInflight
+  const request = refreshOmnipoolAccountClaimsUncached().finally(() => {
+    if (omnipoolAccountClaimsRefreshInflight === request) omnipoolAccountClaimsRefreshInflight = null
+  })
+  omnipoolAccountClaimsRefreshInflight = request
+  return request
+}
+
+export function startOmnipoolAccountClaimsRefresh(): void {
+  if (omnipoolAccountClaimsRefreshTimer) return
+  omnipoolAccountClaimsRefreshTimer = setInterval(() => {
+    void refreshOmnipoolAccountClaims().catch(error => console.error('[accounts] Omnipool claim refresh failed', error))
+  }, OMNIPOOL_ACCOUNT_CLAIMS_REFRESH_MS)
+  omnipoolAccountClaimsRefreshTimer.unref()
+}
+
 // Bare Omnipool LP positions (NFTs the account itself owns — collection 1337).
 // Farmed positions live under the LM pallet, so they never appear here and are
 // surfaced separately by getFarmingPositions (no double-count). Valued at the
 // current withdraw value (asset + hub legs).
 async function getOmnipoolPositions(accounts: string[]): Promise<LpPosition[]> {
   if (!accounts.length) return []
-  const [recon, prices, st] = await Promise.all([reconstructOmnipoolPositions(accounts), ensurePrices(), loadOmnipoolState()])
+  const [recon, prices, st] = await Promise.all([reconstructOmnipoolPositions(accounts), ensureAccountValuePrices(), loadOmnipoolState()])
   const out: LpPosition[] = []
   for (const { positionId, dec } of recon.filter(r => r.venue === 'Omnipool')) {
     const state = st.get(dec.assetId); if (!state) continue
@@ -3238,7 +4370,7 @@ async function getOmnipoolPositions(accounts: string[]): Promise<LpPosition[]> {
 // like a bare position. (XYK farms, collection 5389, are negligible and not yet valued.)
 async function getFarmingPositions(accounts: string[]): Promise<LpPosition[]> {
   if (!accounts.length) return []
-  const [recon, prices, st] = await Promise.all([reconstructOmnipoolPositions(accounts), ensurePrices(), loadOmnipoolState()])
+  const [recon, prices, st] = await Promise.all([reconstructOmnipoolPositions(accounts), ensureAccountValuePrices(), loadOmnipoolState()])
   const out: LpPosition[] = []
   for (const { positionId, dec } of recon.filter(r => r.venue === 'Omnipool Farm')) {
     const state = st.get(dec.assetId); if (!state) continue
@@ -3411,7 +4543,7 @@ function explorerAssetType(asset: AssetRef): ExplorerAssetType {
 // balance semantics: use the current latest balance only. Older non-zero
 // observations are historical and must not resurrect current zero-balance holders.
 // ERC-20-backed assets also include their separate ERC-20 wallet table.
-async function getAssetTotals(): Promise<Map<number, number>> {
+async function getAssetTotals(): Promise<Map<number, bigint>> {
   return cached('explorer:asset-totals', 60000, async () => {
     const res = await client.query({
       query: `
@@ -3427,9 +4559,19 @@ async function getAssetTotals(): Promise<Map<number, number>> {
         ) GROUP BY asset_id`,
       format: 'JSONEachRow',
     })
-    const m = new Map<number, number>()
-    for (const r of await res.json<{ asset_id: string; raw: string }>()) m.set(parseInt(r.asset_id, 10), Number(r.raw))
-    for (const [assetId, raw] of await getATokenTotalSupplies()) m.set(assetId, Number(raw))
+    const m = new Map<number, bigint>()
+    for (const r of await res.json<{ asset_id: string; raw: string }>()) m.set(parseInt(r.asset_id, 10), BigInt(r.raw || '0'))
+    for (const [assetId, raw] of await getATokenTotalSupplies()) m.set(assetId, raw)
+    // Pool-share assets are hidden from the directory and displayed as their Giga
+    // underlying. Move—not duplicate—their held total onto that visible id. The
+    // raw total already includes the aToken custody row exactly once.
+    for (const [shareIdText, displayId] of Object.entries(SHARE_TOKEN_UNDERLYING_ID)) {
+      const shareId = Number(shareIdText)
+      const shareRaw = m.get(shareId) ?? 0n
+      if (shareRaw <= 0n) continue
+      const normalized = BigInt(rescaleRaw(shareRaw.toString(), asset(shareId).decimals, asset(displayId).decimals))
+      m.set(displayId, (m.get(displayId) ?? 0n) + normalized)
+    }
     return m
   })
 }
@@ -3557,8 +4699,8 @@ export async function getAssets(): Promise<AssetListItem[]> {
         // to the asset they're priced through (a bond redeems 1:1 for its underlying).
         const p = prices.get(a.assetId) ?? prices.get(priceAssetId(a.assetId))
         const type = explorerAssetType(a)
-        const raw = totals.get(a.assetId) ?? 0
-        const amountUsd = p ? (raw / 10 ** a.decimals) * p.price : null
+        const raw = totals.get(a.assetId) ?? 0n
+        const amountUsd = p ? (Number(raw) / 10 ** a.decimals) * p.price : null
         const holderCount = holderCounts.get(a.assetId)
         const spark = samples.get(a.assetId)
         const change7d = spark && spark.length >= 2 && spark[0] > 0 ? (spark[spark.length - 1] - spark[0]) / spark[0] : null
@@ -3770,85 +4912,133 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
     const prices = await ensurePrices()
     const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
     const tokenIds = assetIdsForToken(filters.token)
+    const useAssetSwapReadModel = assetSwapActivityReady && tokenIds != null
+    const useSwapReadModel = useAssetSwapReadModel || swapActivityReady
+    const swapTable = useAssetSwapReadModel ? 'asset_swap_activity' : 'swap_activity'
     const tokenFilter = tokenIds == null ? '' : tokenIds.length
-      ? `AND (JSONExtractInt(args_json,'assetIn') IN (${tokenIds.join(',')}) OR JSONExtractInt(args_json,'assetOut') IN (${tokenIds.join(',')}))`
+      ? useSwapReadModel
+        ? useAssetSwapReadModel
+          ? `AND asset_id IN (${tokenIds.join(',')})`
+          : `AND (asset_in IN (${tokenIds.join(',')}) OR asset_out IN (${tokenIds.join(',')}))`
+        : `AND (JSONExtractInt(args_json,'assetIn') IN (${tokenIds.join(',')}) OR JSONExtractInt(args_json,'assetOut') IN (${tokenIds.join(',')}))`
       : 'AND 0'
-    const tokenRefsFilter = eventAssetRefsFilterSql(tokenIds, names)
-    const amountFilter = eventValueFilterSql(`JSONExtractInt(args_json,'assetOut')`, `JSONExtractString(args_json,'amountOut')`, 'block_timestamp', filters, prices, 'trade_price')
+    const tokenRefsFilter = useSwapReadModel ? '' : eventAssetRefsFilterSql(tokenIds, names)
+    const assetOutExpr = useSwapReadModel ? 'asset_out' : `JSONExtractInt(args_json,'assetOut')`
+    const amountOutExpr = useSwapReadModel ? 'amount_out' : `JSONExtractString(args_json,'amountOut')`
+    const postUsdFilter = filters.min != null && filters.unit !== 'token'
+    const amountFilter = eventValueFilterSql(assetOutExpr, amountOutExpr, 'block_timestamp',
+      postUsdFilter ? { ...filters, min: undefined, unit: undefined } : filters, prices, 'trade_price')
+    const notRouterHop = useSwapReadModel
+      ? `AND who != '${ROUTER_PALLET_ACCT}'`
+      : NOT_ROUTER_HOP
+    const notDcaFeeLeg = useSwapReadModel
+      ? `AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%')`
+      : NOT_DCA_FEE_LEG
     const want = offset + limit
     const scanLimit = Math.max(want * 8, 200)
-    const rows = await withFeedWindow(tw, scanLimit, scanLimit, async (bound) => {
+    const fetchRaw = async (bound: string, pageLimit: number): Promise<RawSwapEventRow[]> => {
       const res = await client.query({
         query: `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-            JSONExtractString(args_json, 'who') AS who,
-            JSONExtractInt(args_json, 'assetIn') AS asset_in,
-            JSONExtractInt(args_json, 'assetOut') AS asset_out,
-            JSONExtractString(args_json, 'amountIn') AS amount_in,
-            JSONExtractString(args_json, 'amountOut') AS amount_out
-          FROM price_data.raw_events
+            ${useSwapReadModel ? 'who' : `JSONExtractString(args_json, 'who')`} AS who,
+            ${useSwapReadModel ? 'asset_in' : `JSONExtractInt(args_json, 'assetIn')`} AS asset_in,
+            ${useSwapReadModel ? 'asset_out' : `JSONExtractInt(args_json, 'assetOut')`} AS asset_out,
+            ${useSwapReadModel ? 'amount_in' : `JSONExtractString(args_json, 'amountIn')`} AS amount_in,
+            ${useSwapReadModel ? 'amount_out' : `JSONExtractString(args_json, 'amountOut')`} AS amount_out
+          FROM price_data.${useSwapReadModel ? swapTable : 'raw_events'}
           ${amountFilter.joinSql}
-          WHERE ${bound} AND event_name IN (${names}) ${NOT_ROUTER_HOP} ${NOT_DCA_FEE_LEG}
+          WHERE ${bound} AND event_name IN (${names}) ${notRouterHop} ${notDcaFeeLeg}
             ${tokenRefsFilter}
             ${tokenFilter}
             ${amountFilter.predicateSql}
           ORDER BY block_height DESC, event_index DESC
           LIMIT {limit:UInt32}`,
-        query_params: { limit: scanLimit }, format: 'JSONEachRow',
+        query_params: { limit: pageLimit }, format: 'JSONEachRow',
       })
       return res.json<RawSwapEventRow>()
-    })
-    if (!rows.length) return []
-
-    // DCA: executions are unsigned (block hooks) and the AMM `who` is a pallet
-    // account. DCA.TradeExecuted carries the real owner + schedule id (match on
-    // block+amountIn); DCA.Scheduled maps id → its scheduling extrinsic for links.
-    const dcaBlocks = [...new Set(rows.map(r => r.block_height))].join(',')
-    const dcaRes = await client.query({
-      query: `SELECT block_height, who, toString(id) AS id, amount_in
-              FROM price_data.dca_events
-              WHERE event_name='DCA.TradeExecuted' AND block_height IN (${dcaBlocks})`,
-      format: 'JSONEachRow',
-    })
-    const dcaByAmount = new Map<string, { who: string; id: string }>()
-    for (const d of await dcaRes.json<{ block_height: number; who: string; id: string; amount_in: string }>()) dcaByAmount.set(`${d.block_height}:${d.amount_in}`, { who: d.who, id: d.id })
-    const dcaIds = [...new Set([...dcaByAmount.values()].map(d => d.id))].filter(Boolean)
-    const schedById = await getDcaScheduleLinks(dcaIds)
-
-    // Group by extrinsic (signed) or by event (pallet-internal); within a group
-    // prefer Router.Executed (the net summary) over individual AMM hop events.
-    const { groups, order } = groupSwapRows(rows)
-    const pairs = rows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null])
-    const [signers, liqExt] = await Promise.all([signersFor(pairs), liquidationExtrinsics(pairs)])
-    const out: TradeRow[] = []
-    for (const key of order) {
-      if (out.length >= want) break
-      const g = groups.get(key)!
-      const rep = g.find(r => r.event_name === 'Router.Executed') ?? g[0]
-      // Drop DCA keeper-fee legs (the SQL filter already excludes them; this is a
-      // defensive net so a fee leg never becomes a phantom trade even if scanned).
-      if (isDcaFeeLegSwap(rep.extrinsic_index, rep.who)) continue
-      // A liquidation's internal collateral→debt swap is not a user trade — it's
-      // surfaced as the LiquidationCall (mm) row instead.
-      if (rep.extrinsic_index != null && liqExt.has(`${rep.block_height}:${rep.extrinsic_index}`)) continue
-      const venue = rep.event_name.split('.')[0]
-      const signer = rep.extrinsic_index != null ? signers.get(`${rep.block_height}:${rep.extrinsic_index}`) : undefined
-      const dcaHit = rep.extrinsic_index == null ? dcaByAmount.get(`${rep.block_height}:${rep.amount_in}`) : undefined
-      const sched = dcaHit ? schedById.get(dcaHit.id) : undefined
-      const actor = signer ?? dcaHit?.who ?? (rep.who && ACCOUNT_RE.test(rep.who) ? rep.who : null)
-      const aOut = asset(rep.asset_out)
-      out.push({
-        blockHeight: rep.block_height, timestamp: rep.ts, eventIndex: rep.event_index, extrinsicIndex: rep.extrinsic_index,
-        who: actor ? accountRef(actor) : null,
-        assetIn: asset(rep.asset_in), assetOut: aOut, amountIn: rep.amount_in, amountOut: rep.amount_out,
-        valueUsd: usdValue(prices, aOut.assetId, rep.amount_out, aOut.decimals),
-        venue: venue === 'Router' ? 'Router' : venue, dca: !!dcaHit,
-        dcaScheduleId: dcaHit ? Number(dcaHit.id) || undefined : undefined,
-        linkBlock: sched ? sched.block : rep.extrinsic_index != null ? rep.block_height : null,
-        linkIndex: sched ? sched.idx : rep.extrinsic_index,
-      })
     }
-    await applyHistoricalUsd(out, tradeHistPick)
+    const buildRows = async (rows: RawSwapEventRow[], maxRows?: number): Promise<TradeRow[]> => {
+      if (!rows.length) return []
+      // DCA: executions are unsigned (block hooks) and the AMM `who` is a pallet
+      // account. DCA.TradeExecuted carries the real owner + schedule id (match on
+      // block+amountIn); DCA.Scheduled maps id → its scheduling extrinsic for links.
+      const dcaBlocks = [...new Set(rows.map(r => r.block_height))]
+      const dcaRows: { block_height: number; who: string; id: string; amount_in: string }[] = []
+      for (let start = 0; start < dcaBlocks.length; start += 2_000) {
+        const dcaRes = await client.query({
+          query: `SELECT block_height, who, toString(id) AS id, amount_in
+                  FROM price_data.dca_events
+                  WHERE event_name='DCA.TradeExecuted' AND block_height IN {dcaBlocks:Array(UInt32)}`,
+          query_params: { dcaBlocks: dcaBlocks.slice(start, start + 2_000) },
+          format: 'JSONEachRow',
+        })
+        dcaRows.push(...await dcaRes.json<{ block_height: number; who: string; id: string; amount_in: string }>())
+      }
+      const dcaByAmount = new Map<string, { who: string; id: string }>()
+      for (const d of dcaRows) dcaByAmount.set(`${d.block_height}:${d.amount_in}`, { who: d.who, id: d.id })
+      const dcaIds = [...new Set([...dcaByAmount.values()].map(d => d.id))].filter(Boolean)
+      const schedById = await getDcaScheduleLinks(dcaIds)
+
+      // Group by extrinsic (signed) or by event (pallet-internal); within a group
+      // prefer Router.Executed (the net summary) over individual AMM hop events.
+      const { groups, order } = groupSwapRows(rows)
+      const pairs = rows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null])
+      const [signers, liqExt] = await Promise.all([signersFor(pairs), liquidationExtrinsics(pairs)])
+      const out: TradeRow[] = []
+      for (const key of order) {
+        if (maxRows != null && out.length >= maxRows) break
+        const g = groups.get(key)!
+        const rep = g.find(r => r.event_name === 'Router.Executed') ?? g[0]
+        if (isDcaFeeLegSwap(rep.extrinsic_index, rep.who)) continue
+        if (rep.extrinsic_index != null && liqExt.has(`${rep.block_height}:${rep.extrinsic_index}`)) continue
+        const venue = rep.event_name.split('.')[0]
+        const signer = rep.extrinsic_index != null ? signers.get(`${rep.block_height}:${rep.extrinsic_index}`) : undefined
+        const dcaHit = rep.extrinsic_index == null ? dcaByAmount.get(`${rep.block_height}:${rep.amount_in}`) : undefined
+        const sched = dcaHit ? schedById.get(dcaHit.id) : undefined
+        const actor = signer ?? dcaHit?.who ?? (rep.who && ACCOUNT_RE.test(rep.who) ? rep.who : null)
+        const aOut = asset(rep.asset_out)
+        out.push({
+          blockHeight: rep.block_height, timestamp: rep.ts, eventIndex: rep.event_index, extrinsicIndex: rep.extrinsic_index,
+          who: actor ? accountRef(actor) : null,
+          assetIn: asset(rep.asset_in), assetOut: aOut, amountIn: rep.amount_in, amountOut: rep.amount_out,
+          valueUsd: usdValue(prices, aOut.assetId, rep.amount_out, aOut.decimals),
+          venue: venue === 'Router' ? 'Router' : venue, dca: !!dcaHit,
+          dcaScheduleId: dcaHit ? Number(dcaHit.id) || undefined : undefined,
+          linkBlock: sched ? sched.block : rep.extrinsic_index != null ? rep.block_height : null,
+          linkIndex: sched ? sched.idx : rep.extrinsic_index,
+        })
+      }
+      await applyHistoricalUsd(out, tradeHistPick)
+      return out
+    }
+    if (postUsdFilter) {
+      let pageState: { scanned: number; cursor: { blockHeight: number; eventIndex: number } | null } = { scanned: 0, cursor: null }
+      const deep = await fetchFilteredDeep(tw, want, async (bound, pageLimit) => {
+        let raw = await fetchRaw(bound, pageLimit)
+        pageState = {
+          scanned: raw.length,
+          cursor: raw.length ? { blockHeight: raw.at(-1)!.block_height, eventIndex: raw.at(-1)!.event_index } : null,
+        }
+        // A cursor page may split the swap events of its last extrinsic. Complete
+        // that boundary block and advance past the whole block so grouping stays
+        // identical to the unpaged feed.
+        if (raw.length >= pageLimit) {
+          const boundary = raw.at(-1)!.block_height
+          const boundaryRows = await fetchRaw(`(${tw ?? '1'}) AND block_height = ${boundary}`, 25_000)
+          const byEvent = new Map(raw.map(row => [`${row.block_height}:${row.event_index}`, row]))
+          for (const row of boundaryRows) byEvent.set(`${row.block_height}:${row.event_index}`, row)
+          raw = [...byEvent.values()].sort((a, b) => b.block_height - a.block_height || b.event_index - a.event_index)
+          pageState.cursor = { blockHeight: boundary, eventIndex: 0 }
+        }
+        return buildRows(raw)
+      }, row => rowMeetsExactUsdMinimum(row, filters.min!),
+      row => row.blockHeight, row => row.eventIndex,
+      row => `${row.blockHeight}:${row.extrinsicIndex == null ? `e${row.eventIndex}` : `x${row.extrinsicIndex}`}`,
+      { pageSize: 25_000, pageState: () => pageState })
+      return deep.slice(offset, offset + limit)
+    }
+    const rows = await withFeedWindow(tw, scanLimit, scanLimit, bound => fetchRaw(bound, scanLimit))
+    const out = await buildRows(rows, want)
     if (out.length < want && rows.length >= scanLimit) throw activityQueryTooBroad()
     return out.slice(offset, offset + limit)
   })
@@ -4170,12 +5360,14 @@ async function signersFor(pairs: [number, number | null][]): Promise<Map<string,
   const out = new Map<string, string>()
   const keys = [...new Set(pairs.filter(([, i]) => i != null).map(([h, i]) => `${h}:${i}`))]
   if (!keys.length) return out
-  const tuples = keys.map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
-  const res = await client.query({
-    query: `SELECT block_height, extrinsic_index, coalesce(signer, effective_signer) AS signer FROM price_data.raw_extrinsics WHERE (block_height, extrinsic_index) IN (${tuples}) AND coalesce(signer, effective_signer) IS NOT NULL AND coalesce(signer, effective_signer) != ''`,
-    format: 'JSONEachRow',
-  })
-  for (const r of await res.json<{ block_height: number; extrinsic_index: number; signer: string }>()) out.set(`${r.block_height}:${r.extrinsic_index}`, r.signer)
+  for (let start = 0; start < keys.length; start += 5_000) {
+    const tuples = keys.slice(start, start + 5_000).map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
+    const res = await client.query({
+      query: `SELECT block_height, extrinsic_index, coalesce(signer, effective_signer) AS signer FROM price_data.raw_extrinsics WHERE (block_height, extrinsic_index) IN (${tuples}) AND coalesce(signer, effective_signer) IS NOT NULL AND coalesce(signer, effective_signer) != ''`,
+      format: 'JSONEachRow',
+    })
+    for (const r of await res.json<{ block_height: number; extrinsic_index: number; signer: string }>()) out.set(`${r.block_height}:${r.extrinsic_index}`, r.signer)
+  }
   return out
 }
 
@@ -4190,13 +5382,15 @@ async function liquidationExtrinsics(pairs: [number, number | null][]): Promise<
   const out = new Set<string>()
   const keys = [...new Set(pairs.filter(([, i]) => i != null).map(([h, i]) => `${h}:${i}`))]
   if (!keys.length) return out
-  const tuples = keys.map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
-  const res = await client.query({
-    query: `SELECT DISTINCT block_height, extrinsic_index FROM price_data.raw_events
-            WHERE (block_height, extrinsic_index) IN (${tuples}) AND event_name = 'Liquidation.Liquidated'`,
-    format: 'JSONEachRow',
-  })
-  for (const r of await res.json<{ block_height: number; extrinsic_index: number }>()) out.add(`${r.block_height}:${r.extrinsic_index}`)
+  for (let start = 0; start < keys.length; start += 5_000) {
+    const tuples = keys.slice(start, start + 5_000).map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
+    const res = await client.query({
+      query: `SELECT DISTINCT block_height, extrinsic_index FROM price_data.raw_events
+              WHERE (block_height, extrinsic_index) IN (${tuples}) AND event_name = 'Liquidation.Liquidated'`,
+      format: 'JSONEachRow',
+    })
+    for (const r of await res.json<{ block_height: number; extrinsic_index: number }>()) out.add(`${r.block_height}:${r.extrinsic_index}`)
+  }
   return out
 }
 
@@ -4287,7 +5481,6 @@ export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFi
     if (!rowIds.some(id => tokenIds.includes(id))) return false
   }
   if (filters.min != null) {
-    const value = row.valueUsd
     if (filters.unit === 'token') {
       const picks = [
         row.amount != null && row.asset ? { amt: row.amount, a: row.asset } : null,
@@ -4300,10 +5493,7 @@ export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFi
         return threshold != null && BigInt(pick.amt) >= threshold
       })
     }
-    const exact = exactHistoricalValues.get(row)
-    if (exact) return exactUsdMeetsMinimum(exact, filters.min)
-    if (value == null || !Number.isFinite(value)) return false
-    if (value < filters.min) return false
+    if (!rowMeetsExactUsdMinimum(row, filters.min)) return false
   }
   return true
 }
@@ -4327,16 +5517,17 @@ async function fillMissingLiquidityAmounts(rows: LiquidityAmountCandidate[]): Pr
   const transferRows: { block_height: number; event_index: number; extrinsic_index: number; asset_id: number; to_acc: string; from_acc: string; amount: string }[] = []
   for (let i = 0; i < keys.length; i += 5000) {
     const tuples = keys.slice(i, i + 5000).map(k => { const [h, j] = k.split(':'); return `(${h},${j})` }).join(',')
+    const useTransferLookup = transferActivityByTimeReady
     const res = await client.query({
       query: `
         SELECT block_height, event_index, extrinsic_index,
-          if(event_name = 'Balances.Transfer', 0, JSONExtractInt(args_json,'currencyId')) AS asset_id,
-          JSONExtractString(args_json,'to') AS to_acc,
-          JSONExtractString(args_json,'from') AS from_acc,
-          JSONExtractString(args_json,'amount') AS amount
-        FROM price_data.raw_events
+          ${useTransferLookup ? 'asset_id' : "if(event_name = 'Balances.Transfer', 0, JSONExtractInt(args_json,'currencyId'))"} AS asset_id,
+          ${useTransferLookup ? 'to_account' : "JSONExtractString(args_json,'to')"} AS to_acc,
+          ${useTransferLookup ? 'from_account' : "JSONExtractString(args_json,'from')"} AS from_acc,
+          ${useTransferLookup ? 'amount' : "JSONExtractString(args_json,'amount')"} AS amount
+        FROM price_data.${useTransferLookup ? 'transfer_activity_by_time' : 'raw_events'}
         WHERE (block_height, extrinsic_index) IN (${tuples})
-          AND event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')`,
+          ${useTransferLookup ? '' : "AND event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')"}`,
       format: 'JSONEachRow',
     })
     transferRows.push(...await res.json<{ block_height: number; event_index: number; extrinsic_index: number; asset_id: number; to_acc: string; from_acc: string; amount: string }>())
@@ -4386,27 +5577,31 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
   return cached(`explorer:liquidity:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
-    const assetExpr = `multiIf(JSONHas(args_json,'rewardCurrency'), JSONExtractInt(args_json,'rewardCurrency'),
+    const useLiquidityReadModel = liquidityActivityReady
+    const assetExpr = useLiquidityReadModel ? 'asset_id' : `multiIf(JSONHas(args_json,'rewardCurrency'), JSONExtractInt(args_json,'rewardCurrency'),
                   JSONHas(args_json,'assetId'), JSONExtractInt(args_json,'assetId'),
                   JSONHas(args_json,'poolId'), JSONExtractInt(args_json,'poolId'),
                   JSONHas(args_json,'assetA'), JSONExtractInt(args_json,'assetA'),
                   JSONExtractInt(args_json,'asset_id'))`
-    const amountExpr = `multiIf(JSONHas(args_json,'claimed'), JSONExtractString(args_json,'claimed'), JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'shares'))`
+    const amountExpr = useLiquidityReadModel ? 'amount' : `multiIf(JSONHas(args_json,'claimed'), JSONExtractString(args_json,'claimed'), JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'shares'))`
     // Match against every asset the event references (Omnipool assetId, XYK
     // assetA/assetB, Stableswap nested assets[]), not just the representative
     // assetExpr used for the displayed asset_id — else a HOLLAR filter drops most
     // of its Stableswap/XYK liquidity rows.
-    const tokenFilter = liquidityTokenFilterSql(tokenIds)
-    const tokenRefsFilter = eventAssetRefsFilterSql(tokenIds, sqlEventNameList(liqEvents))
-    // Min-value prefilter: exact for rows whose amount is SQL-readable; rows
-    // valued only after fetch (empty amount → filled from sibling transfers,
-    // PoolCreated → combined legs from enrichment) stay candidates and are
-    // decided by the exact post-match below.
+    const tokenFilter = useLiquidityReadModel
+      ? tokenIds == null ? '' : tokenIds.length ? `AND hasAny(asset_refs, [${tokenIds.join(',')}])` : 'AND 0'
+      : liquidityTokenFilterSql(tokenIds)
+    const tokenRefsFilter = useLiquidityReadModel ? '' : eventAssetRefsFilterSql(tokenIds, sqlEventNameList(liqEvents))
+    // Token-unit thresholds are integer predicates and remain safe to push down.
+    // USD thresholds are deliberately candidate-first: an ASOF price join ahead
+    // of LIMIT scanned the entire compact liquidity history on every cold page.
+    // Bounded candidates are valued at their exact event timestamps below and
+    // the deep walker widens until it has a complete qualifying page.
     let amountFilter: EventValueFilterSql = { joinSql: '', predicateSql: '' }
-    if (filters.min != null) {
+    if (filters.min != null && filters.unit === 'token') {
       // XYK adds carry only amountA/amountB — the display amount is filled from
       // the matching transfer leg (≈ amountA), so amountA stands in here.
-      const preAmountExpr = `multiIf(${amountExpr} != '', ${amountExpr}, JSONExtractString(args_json,'amountA'))`
+      const preAmountExpr = `multiIf(${amountExpr} != '', ${amountExpr}, ${useLiquidityReadModel ? 'amount_a' : "JSONExtractString(args_json,'amountA')"})`
       const directFilter = eventValueFilterSql(assetExpr, preAmountExpr, 'block_timestamp', filters, prices, 'liquidity_price')
       const valueOk = directFilter.predicateSql.replace(/^AND\s+/, '')
       amountFilter = {
@@ -4420,17 +5615,17 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
       const res = await client.query({
         query: `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-            JSONExtractString(args_json, 'who') AS who,
+            ${useLiquidityReadModel ? 'who' : "JSONExtractString(args_json, 'who')"} AS who,
             ${assetExpr} AS asset_id,
             ${amountExpr} AS amount,
-            JSONExtractInt(args_json,'assetB') AS asset_b,
-            JSONExtractString(args_json,'pool') AS pool_acc
-          FROM price_data.raw_events
+            ${useLiquidityReadModel ? 'asset_b' : "JSONExtractInt(args_json,'assetB')"} AS asset_b,
+            ${useLiquidityReadModel ? 'pool_account' : "JSONExtractString(args_json,'pool')"} AS pool_acc
+          FROM price_data.${useLiquidityReadModel ? 'liquidity_activity' : 'raw_events'}
           ${amountFilter.joinSql}
           WHERE ${bound}
             AND event_name IN (${sqlEventNameList(liqEvents)})
             ${tokenRefsFilter}
-            AND JSONExtractString(args_json,'who') NOT LIKE '0x6d6f646c%'
+            AND ${useLiquidityReadModel ? 'who' : "JSONExtractString(args_json,'who')"} NOT LIKE '0x6d6f646c%'
             ${tokenFilter}
             ${amountFilter.predicateSql}
           ORDER BY block_height DESC, event_index DESC
@@ -4712,10 +5907,12 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
       const blocks = [...new Set(evs.map(event => event.block_height))].join(',')
       const [wRes, legacyRes] = await Promise.all([
         client.query({
-          query: `SELECT block_height, extrinsic_index, JSONExtractInt(args_json,'currencyId') AS cid, JSONExtractString(args_json,'amount') AS amount
-                  FROM price_data.raw_events
+          query: `SELECT block_height, extrinsic_index,
+                    ${xcmEventActivityReady ? 'asset_id' : "JSONExtractInt(args_json,'currencyId')"} AS cid,
+                    ${xcmEventActivityReady ? 'amount' : "JSONExtractString(args_json,'amount')"} AS amount
+                  FROM ${xcmEventActivityTable()}
                   WHERE event_name='Currencies.Withdrawn' AND block_height IN (${blocks})
-                    ${assetIdFilterSql(currencyIdSql(), tokenIds)}`,
+                    ${assetIdFilterSql(xcmEventActivityReady ? 'asset_id' : currencyIdSql(), tokenIds)}`,
           format: 'JSONEachRow',
         }),
         client.query({
@@ -4793,14 +5990,14 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
   const [barRes, famRes] = await Promise.all([
     client.query({
       query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, args_json
-              FROM price_data.raw_events
+              FROM ${xcmEventActivityTable()}
               WHERE block_height IN (${list}) AND event_name = 'MessageQueue.Processed' AND extrinsic_index IS NULL
               ORDER BY block_height DESC, event_index DESC`,
       format: 'JSONEachRow',
     }),
     client.query({
       query: `SELECT block_height, event_index, event_name, args_json
-              FROM price_data.raw_events
+              FROM ${xcmEventActivityTable()}
               WHERE block_height IN (${list}) AND event_name IN (${sqlEventNameList(XCM_IN_WALK_EVENTS)}) AND extrinsic_index IS NULL`,
       format: 'JSONEachRow',
     }),
@@ -4856,14 +6053,14 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
   const [barRes, wdRes] = await Promise.all([
     client.query({
       query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, args_json
-              FROM price_data.raw_events
+              FROM ${xcmEventActivityTable()}
               WHERE block_height IN (${list}) AND event_name = 'MessageQueue.Processed' AND extrinsic_index IS NULL
               ORDER BY block_height DESC, event_index ASC`,
       format: 'JSONEachRow',
     }),
     client.query({
       query: `SELECT block_height, event_index, args_json
-              FROM price_data.raw_events
+              FROM ${xcmEventActivityTable()}
               WHERE block_height IN (${list}) AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NULL`,
       format: 'JSONEachRow',
     }),
@@ -4938,14 +6135,22 @@ async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, 
     const prices = await ensurePrices()
     const bound = tw ?? '1'
     const want = offset + limit
+    const tokenIds = assetIdsForToken(filters.token)
+    const candidateAsset = xcmEventActivityReady ? 'asset_id' : currencyIdSql()
+    const candidateAmount = xcmEventActivityReady ? 'amount' : `JSONExtractString(args_json,'amount')`
+    const candidateWho = xcmEventActivityReady ? 'who' : `JSONExtractString(args_json,'who')`
+    const candidateValue = eventValueFilterSql(candidateAsset, candidateAmount, 'block_timestamp', filters, prices, 'xcm_remote_price')
+    const candidateToken = assetIdFilterSql(candidateAsset, tokenIds)
     const fetchBlocks = acctList && accountActivityReady
       ? async (pageBound: string, pageLimit: number) => {
         const refsFilter = `AND ${accountActivityRefsSql(acctList, `event_name = 'Currencies.Withdrawn'`, pageBound, pageLimit)}`
         const res = await client.query({
-          query: `SELECT block_height FROM price_data.raw_events
+          query: `SELECT block_height FROM ${xcmEventActivityTable()}
+                  ${candidateValue.joinSql}
                   WHERE ${pageBound} ${refsFilter}
                     AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NULL
-                    AND JSONExtractString(args_json,'who') IN (${acctList})
+                    AND ${candidateWho} IN (${acctList})
+                    ${candidateToken} ${candidateValue.predicateSql}
                   ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
           query_params: { limit: pageLimit }, format: 'JSONEachRow',
         })
@@ -4953,8 +6158,12 @@ async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, 
       }
       : async (pageBound: string, pageLimit: number) => {
         const res = await client.query({
-          query: `SELECT block_height FROM price_data.raw_xcm_activity
-                  WHERE ${pageBound} AND source_kind='event' AND name = 'MessageQueue.Processed'
+          query: `SELECT block_height FROM ${xcmEventActivityTable()}
+                  ${candidateValue.joinSql}
+                  WHERE ${pageBound}
+                    AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NULL
+                    AND NOT match(${candidateWho}, '${RESERVED_ACCOUNT_RE.source}')
+                    ${candidateToken} ${candidateValue.predicateSql}
                   ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
           query_params: { limit: pageLimit }, format: 'JSONEachRow',
         })
@@ -4983,16 +6192,24 @@ async function getRecentXcmIn(limit: number, from?: string, to?: string, account
     const prices = await ensurePrices()
     const bound = tw ?? '1'
     const want = offset + limit
+    const tokenIds = assetIdsForToken(filters.token)
+    const candidateAsset = xcmEventActivityReady ? 'asset_id' : currencyIdSql()
+    const candidateAmount = xcmEventActivityReady ? 'amount' : `JSONExtractString(args_json,'amount')`
+    const candidateWho = xcmEventActivityReady ? 'who' : `JSONExtractString(args_json,'who')`
+    const candidateValue = eventValueFilterSql(candidateAsset, candidateAmount, 'block_timestamp', filters, prices, 'xcm_in_price')
+    const candidateToken = assetIdFilterSql(candidateAsset, tokenIds)
     // Candidate blocks: account-scoped from the account's own hook-context deposit
     // events (activity-index pruned), global from the newest processed messages.
     const fetchBlocks = acctList && accountActivityReady
       ? async (pageBound: string, pageLimit: number) => {
         const refsFilter = `AND ${accountActivityRefsSql(acctList, `event_name IN (${sqlEventNameList(XCM_IN_DEPOSIT_EVENTS)})`, pageBound, pageLimit)}`
         const res = await client.query({
-          query: `SELECT block_height FROM price_data.raw_events
+          query: `SELECT block_height FROM ${xcmEventActivityTable()}
+                  ${candidateValue.joinSql}
                   WHERE ${pageBound} ${refsFilter}
                     AND event_name IN (${sqlEventNameList(XCM_IN_DEPOSIT_EVENTS)}) AND extrinsic_index IS NULL
-                    AND JSONExtractString(args_json,'who') IN (${acctList})
+                    AND ${candidateWho} IN (${acctList})
+                    ${candidateToken} ${candidateValue.predicateSql}
                   ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
           query_params: { limit: pageLimit }, format: 'JSONEachRow',
         })
@@ -5000,8 +6217,12 @@ async function getRecentXcmIn(limit: number, from?: string, to?: string, account
       }
       : async (pageBound: string, pageLimit: number) => {
         const res = await client.query({
-          query: `SELECT block_height FROM price_data.raw_xcm_activity
-                  WHERE ${pageBound} AND source_kind='event' AND name = 'MessageQueue.Processed'
+          query: `SELECT block_height FROM ${xcmEventActivityTable()}
+                  ${candidateValue.joinSql}
+                  WHERE ${pageBound}
+                    AND event_name IN (${sqlEventNameList(XCM_IN_DEPOSIT_EVENTS)}) AND extrinsic_index IS NULL
+                    AND NOT match(${candidateWho}, '${RESERVED_ACCOUNT_RE.source}')
+                    ${candidateToken} ${candidateValue.predicateSql}
                   ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
           query_params: { limit: pageLimit }, format: 'JSONEachRow',
         })
@@ -5376,7 +6597,11 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
     const want = offset + limit
     const scanLimit = postFilter ? Math.max(want * 8, limit + 250) : limit
     const scanOffset = postFilter ? 0 : offset
-    const selectedNames = action && STAKING_ACTION_EVENTS[action] ? STAKING_ACTION_EVENTS[action] : STAKING_EVENT_NAMES
+    const selectedNames = action && STAKING_ACTION_EVENTS[action]
+      ? STAKING_ACTION_EVENTS[action]
+      : preferredAssetId === 670
+        ? ['GigaHdx.Staked', 'GigaHdx.Unstaked', 'GigaHdx.UnstakeCancelled', 'GigaHdx.MigratedFromLegacy', 'GigaHdxRewards.RewardsClaimed']
+        : STAKING_EVENT_NAMES
     // A subordinate-only filter still needs its possible parent events as
     // classification context. They are removed again after hierarchy folding,
     // so filtering for "Giga stake" does not resurrect reward/migration plumbing.
@@ -5389,12 +6614,32 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
     const accountRefsFilter = acctList && accountActivityReady && !postFilter
       ? `AND ${accountActivityRefsSql(acctList, `event_name IN (${names})`, bound, scanOffset + scanLimit)}`
       : ''
-    const accountFilter = acctList ? `AND JSONExtractString(args_json,'who') IN (${acctList})` : ''
+    const accountFilter = acctList
+      ? stakingActivityReady ? `AND who IN (${acctList})` : `AND JSONExtractString(args_json,'who') IN (${acctList})`
+      : ''
+    const gigaAssetId = preferredAssetId === 670 ? 670 : 0
+    const stakingAssetExpr = `multiIf(event_name='CollatorRewards.CollatorRewarded', greatest(0, JSONExtractInt(args_json,'currency')), event_name LIKE 'GigaHdx%', ${gigaAssetId}, 0)`
+    const stakingAmountExpr = `multiIf(
+      event_name='CollatorRewards.CollatorRewarded', JSONExtractString(args_json,'amount'),
+      event_name='GigaHdx.Staked', JSONExtractString(args_json,'${gigaAssetId === 670 ? 'gigahdx' : 'amount'}'),
+      event_name='GigaHdx.Unstaked', JSONExtractString(args_json,'${gigaAssetId === 670 ? 'gigahdxAmount' : 'payout'}'),
+      event_name='GigaHdx.UnstakeCancelled', JSONExtractString(args_json,'${gigaAssetId === 670 ? 'gigahdx' : 'amount'}'),
+      event_name='GigaHdx.MigratedFromLegacy', JSONExtractString(args_json,'${gigaAssetId === 670 ? 'gigahdxReceived' : 'hdxUnlocked'}'),
+      event_name='GigaHdxRewards.RewardsClaimed', JSONExtractString(args_json,'${gigaAssetId === 670 ? 'gigahdxReceived' : 'totalHdx'}'),
+      event_name='Staking.PositionCreated', if(JSONHas(args_json,'stake'), JSONExtractString(args_json,'stake'), JSONExtractString(args_json,'amount')),
+      event_name IN ('Staking.StakeAdded','Staking.Unstaked'), if(JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'stake')),
+      event_name='Staking.ForceUnstaked', if(JSONHas(args_json,'paidRewards'), JSONExtractString(args_json,'paidRewards'), JSONExtractString(args_json,'stake')),
+      event_name='Staking.RewardsClaimed', JSONExtractString(args_json,'paidRewards'), '')`
+    const stakingValueFilter = stakingActivityReady
+      ? eventValueFilterSql(stakingAssetExpr, stakingAmountExpr, 'block_timestamp', filters, prices, 'staking_price')
+      : { joinSql: '', predicateSql: '' }
     const runStaking = async (b: string, pageLimit: number, pageOffset: number) => {
       const res = await client.query({
         query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
-                FROM price_data.raw_events
+                FROM price_data.${stakingActivityReady ? 'staking_activity FINAL' : 'raw_events'}
+                ${stakingValueFilter.joinSql}
                 WHERE ${b} ${accountRefsFilter} AND event_name IN (${names}) ${accountFilter}
+                ${stakingValueFilter.predicateSql}
                 ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         query_params: { limit: pageLimit, offset: pageOffset }, format: 'JSONEachRow',
       })
@@ -5479,7 +6724,7 @@ async function getOtcPlacedLegsByOrderId(orderIds: Array<string | number>): Prom
   const out = new Map<string, OtcPlacedLeg>()
   if (!list) return out
   const res = await client.query({
-    query: `SELECT args_json FROM price_data.raw_events WHERE event_name = 'OTC.Placed' AND JSONExtractUInt(args_json,'orderId') IN (${list})`,
+    query: `SELECT args_json FROM ${otcActivityTable()} WHERE event_name = 'OTC.Placed' AND JSONExtractUInt(args_json,'orderId') IN (${list})`,
     format: 'JSONEachRow',
   })
   for (const r of await res.json<{ args_json: string }>()) {
@@ -5576,11 +6821,32 @@ async function getRecentOtc(limit: number, from?: string, to?: string, offset = 
     const resolvedAction = resolveOtcAction(action)
     const names = (resolvedAction && OTC_ACTION_EVENTS[resolvedAction] ? OTC_ACTION_EVENTS[resolvedAction] : OTC_EVENT_NAMES).map(n => `'${n}'`).join(',')
     const fetchPage = async (bound: string, pageLimit: number, pageOffset: number): Promise<ActivityRow[]> => {
+      // An account OTC feed used to start at every OTC event, then resolve
+      // signers and discard almost all rows in JS. Filled events expose `who`
+      // and are already in account_activity; Placed/Cancelled are owned by the
+      // signing extrinsic. Combine those two account-first reference sets before
+      // reading raw event payloads, preserving the exact later row builder.
+      const accountRefs = accountSet
+        ? `AND ((e.block_height, e.event_index) IN (
+              SELECT block_height, event_index FROM price_data.account_activity
+              WHERE account IN (${sqlAccountList(accounts!)}) AND ${bound}
+                AND event_name IN (${names})
+              GROUP BY block_height, event_index
+            ) OR (e.block_height, e.extrinsic_index) IN (
+              SELECT block_height, extrinsic_index FROM price_data.raw_extrinsics
+              WHERE signer IN (${sqlAccountList(accounts!)}) OR effective_signer IN (${sqlAccountList(accounts!)})
+            ))`
+        : ''
       const res = await client.query({
-        query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
-                FROM price_data.raw_events
-                WHERE ${bound} AND event_name IN (${names})
-                ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
+        query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index, e.extrinsic_index, e.event_name, e.args_json
+                FROM (
+                  SELECT block_height, block_timestamp, event_index, extrinsic_index, event_name, args_json
+                  FROM ${otcActivityTable()}
+                  WHERE ${bound}
+                ) AS e
+                WHERE e.event_name IN (${names})
+                ${accountRefs}
+                ORDER BY e.block_height DESC, e.event_index DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         query_params: { limit: pageLimit, offset: pageOffset }, format: 'JSONEachRow',
       })
       const rawOtc = await res.json<RawOtcActivityEvent>()
@@ -5747,7 +7013,7 @@ async function getRecentVotes(limit: number, from?: string, to?: string, offset 
     const runVotes = async (b: string, pageLimit: number, pageOffset: number) => {
       const res = await client.query({
         query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, ifNull(call_address, '') AS call_address, event_name, args_json
-                FROM price_data.raw_events
+                FROM price_data.${voteActivityReady ? 'vote_activity FINAL' : 'raw_events'}
                 ${amountFilter.joinSql}
                 WHERE ${b} ${accountRefsFilter} ${eventFilter} ${accountFilter} ${amountFilter.predicateSql}
                 ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
@@ -5902,6 +7168,182 @@ async function suppressActivityPlumbing<T extends ActivityRow>(rows: T[]): Promi
   return suppressDustTransferRows(suppressSubordinateActivityRows(rows))
 }
 
+// Transfer-only pages still need the same semantic ownership decision as the
+// merged feed, but they must not enumerate every unrelated activity source far
+// enough back to cover a sparse value filter. Resolve ownership only for the
+// bounded transfer candidates. Signed rows are matched by exact
+// (block,extrinsic); hook rows use the same block+account rule as
+// suppressSubordinateActivityRows.
+async function suppressTransferCandidates(transfers: TransferRow[]): Promise<TransferRow[]> {
+  if (!transfers.length) return []
+  const signedKeys = [...new Set(transfers
+    .filter(row => row.extrinsicIndex != null)
+    .map(row => `${row.blockHeight}:${row.extrinsicIndex}`))]
+  const hookBlocks = [...new Set(transfers
+    .filter(row => row.extrinsicIndex == null)
+    .map(row => row.blockHeight))]
+  const semanticExtrinsics = new Set<string>()
+  const hookAccounts = new Map<number, Set<string>>()
+  const addHookAccount = (blockHeight: number, account: string | null | undefined) => {
+    if (!account || !ACCOUNT_RE.test(account)) return
+    const accounts = hookAccounts.get(blockHeight) ?? new Set<string>()
+    accounts.add(account.toLowerCase())
+    hookAccounts.set(blockHeight, accounts)
+  }
+
+  type SemanticEvent = {
+    block_height: number
+    extrinsic_index: number | null
+    event_name: string
+    args_json: string
+  }
+  const semanticNames = [...new Set([
+    ...SWAP_EVENTS,
+    ...LIQUIDITY_EVENTS,
+    ...STAKING_EVENT_NAMES,
+    ...VOTE_EVENTS,
+    'DCA.TradeExecuted', 'DCA.TradeFailed', 'Referrals.Claimed',
+    ...OTC_EVENT_NAMES,
+  ])]
+  const semanticEvents: SemanticEvent[] = []
+  for (let start = 0; start < signedKeys.length; start += 5_000) {
+    const tuples = signedKeys.slice(start, start + 5_000)
+      .map(key => { const [height, index] = key.split(':'); return `(${height},${index})` })
+    const result = await client.query({
+      query: `SELECT block_height, extrinsic_index, event_name, args_json
+              FROM price_data.raw_events
+              WHERE (block_height, extrinsic_index) IN (${tuples.join(',')})
+                AND event_name IN (${sqlEventNameList(semanticNames)})
+                AND NOT (event_name IN (${sqlEventNameList(SWAP_EVENTS)})
+                  AND JSONExtractString(args_json,'who') = '${ROUTER_PALLET_ACCT}')
+                AND NOT (event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
+                  AND JSONExtractString(args_json,'who') LIKE '0x6d6f646c%')`,
+      format: 'JSONEachRow',
+    })
+    semanticEvents.push(...await result.json<SemanticEvent>())
+  }
+  for (let start = 0; start < hookBlocks.length; start += 5_000) {
+    const blocks = hookBlocks.slice(start, start + 5_000).join(',')
+    const result = await client.query({
+      query: `SELECT block_height, extrinsic_index, event_name, args_json
+              FROM price_data.raw_events
+              WHERE block_height IN (${blocks}) AND extrinsic_index IS NULL
+                AND event_name IN (${sqlEventNameList(semanticNames)})
+                AND NOT (event_name IN (${sqlEventNameList(SWAP_EVENTS)})
+                  AND (JSONExtractString(args_json,'who') = '${ROUTER_PALLET_ACCT}'
+                    OR (JSONExtractString(args_json,'who') != ''
+                      AND JSONExtractString(args_json,'who') NOT LIKE '0x6d6f646c%')))
+                AND NOT (event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
+                  AND JSONExtractString(args_json,'who') LIKE '0x6d6f646c%')`,
+      format: 'JSONEachRow',
+    })
+    semanticEvents.push(...await result.json<SemanticEvent>())
+  }
+  for (const event of semanticEvents) {
+    const args = (safeJson(event.args_json) ?? {}) as Record<string, unknown>
+    // Staking builders reject empty/zero amount events; do not let one own a
+    // transfer that would otherwise remain visible.
+    if (STAKING_EVENT_NAMES.includes(event.event_name)) {
+      const staking = stakingAmountAndAsset(event.event_name, args)
+      if (!staking?.amount || staking.amount === '0') continue
+    }
+    if (event.event_name === 'Referrals.Claimed') {
+      const amount = BigInt(argStr(args, 'referrerRewards') || '0') + BigInt(argStr(args, 'tradeRewards') || '0')
+      if (amount === 0n) continue
+    }
+    if (event.extrinsic_index != null) {
+      semanticExtrinsics.add(`${event.block_height}:${event.extrinsic_index}`)
+      continue
+    }
+    addHookAccount(event.block_height, argStr(args, 'who') || argStr(args, 'voter'))
+  }
+
+  // Money-market logs do not store the substrate extrinsic directly. Resolve
+  // only logs in candidate blocks, then apply the same configured-pool and
+  // module-user conditions as getRecentMoneyMarket.
+  const candidateBlocks = [...new Set(transfers.map(row => row.blockHeight))]
+  type SemanticMm = { block_height: number; event_index: number; account_id: string | null }
+  const mmRows: SemanticMm[] = []
+  for (let start = 0; start < candidateBlocks.length; start += 5_000) {
+    const blocks = candidateBlocks.slice(start, start + 5_000).join(',')
+    const result = await client.query({
+      query: `SELECT block_height, event_index, account_id
+              FROM price_data.raw_money_market_events
+              WHERE block_height IN (${blocks})
+                AND event_name IN ('Supply','Borrow','Repay','Withdraw','LiquidationCall')
+                AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
+                AND user_address NOT LIKE '0x6d6f646c%'`,
+      format: 'JSONEachRow',
+    })
+    mmRows.push(...await result.json<SemanticMm>())
+  }
+  const mmExtrinsics = await extrinsicIndexFor(mmRows.map(row => [row.block_height, row.event_index] as [number, number]))
+  for (const row of mmRows) {
+    const index = mmExtrinsics.get(`${row.block_height}:${row.event_index}`)
+    if (index != null) semanticExtrinsics.add(`${row.block_height}:${index}`)
+    else addHookAccount(row.block_height, row.account_id)
+  }
+
+  // XCM ownership is based on successfully decoded economic rows, not merely
+  // the presence of a similarly named event. Decode the bounded candidate
+  // blocks in chunks using the shared global/block builders.
+  if (hookBlocks.length) {
+    const prices = await ensurePrices()
+    for (let start = 0; start < hookBlocks.length; start += 1_000) {
+      const blocks = hookBlocks.slice(start, start + 1_000)
+      const [incoming, outgoing] = await Promise.all([
+        xcmInRowsForBlocks(blocks, prices),
+        xcmOutRemoteRowsForBlocks(blocks, prices),
+      ])
+      for (const row of [...incoming, ...outgoing]) addHookAccount(row.blockHeight, row.who?.accountId)
+    }
+  }
+  if (signedKeys.length) {
+    for (let start = 0; start < signedKeys.length; start += 5_000) {
+      const tuples = signedKeys.slice(start, start + 5_000)
+        .map(key => { const [height, index] = key.split(':'); return `(${height},${index})` })
+      const result = await client.query({
+        query: `SELECT DISTINCT block_height, extrinsic_index
+                FROM price_data.raw_xcm_activity
+                WHERE (block_height, extrinsic_index) IN (${tuples.join(',')})
+                  AND source_kind='event'
+                  AND name IN ('XTokens.TransferredAssets','PolkadotXcm.Sent')`,
+        format: 'JSONEachRow',
+      })
+      for (const row of await result.json<{ block_height: number; extrinsic_index: number | null }>()) {
+        if (row.extrinsic_index != null) semanticExtrinsics.add(`${row.block_height}:${row.extrinsic_index}`)
+      }
+    }
+  }
+
+  // Incentive claims own their reward-pot transfer even though the semantic
+  // evidence lives in the compact call model rather than an event.
+  const incentiveKeys = transfers
+    .filter(row => row.extrinsicIndex != null && row.from.accountId.toLowerCase() === INCENTIVES_REWARD_POT)
+    .map(row => `${row.blockHeight}:${row.extrinsicIndex}`)
+  for (let start = 0; start < incentiveKeys.length; start += 5_000) {
+    const tuples = [...new Set(incentiveKeys.slice(start, start + 5_000))]
+      .map(key => { const [height, index] = key.split(':'); return `(${height},${index})` })
+    const result = await client.query({
+      query: `SELECT DISTINCT block_height, extrinsic_index
+              FROM price_data.${rewardClaimActivityReady ? 'incentive_claim_calls' : 'raw_calls'}
+              WHERE (block_height, extrinsic_index) IN (${tuples.join(',')})
+                ${rewardClaimActivityReady ? '' : `AND position(args_json, '${INCENTIVES_CONTROLLER}') > 0
+                  AND (${INCENTIVE_CLAIM_SELECTORS.map(selector => `position(args_json, '${selector}') > 0`).join(' OR ')})`}`,
+      format: 'JSONEachRow',
+    })
+    for (const row of await result.json<{ block_height: number; extrinsic_index: number }>()) {
+      semanticExtrinsics.add(`${row.block_height}:${row.extrinsic_index}`)
+    }
+  }
+
+  return transfers.filter(row => {
+    if (row.extrinsicIndex != null) return !semanticExtrinsics.has(`${row.blockHeight}:${row.extrinsicIndex}`)
+    const owners = hookAccounts.get(row.blockHeight)
+    return !owners || (!owners.has(row.from.accountId.toLowerCase()) && !owners.has(row.to.accountId.toLowerCase()))
+  })
+}
+
 const INCENTIVES_CONTROLLER = '7472a3d0891df2401d981a5954d07e364f05060f'
 const INCENTIVE_CLAIM_SELECTORS = ['bb492bf5', '236300dc']
 const INCENTIVES_REWARD_POT = '0x45544800112c208b900bcfc9ff8131d0f45769cb6c7c7d8d0000000000000000'
@@ -5918,7 +7360,6 @@ async function getRecentRewardClaims(limit: number, from?: string, to?: string, 
   const rawBound = height != null
     ? `block_height = {height:UInt32}${extrinsicIndex != null ? ' AND extrinsic_index = {extrinsicIndex:UInt32}' : ''}`
     : (tw ?? '1')
-  const bound = rawBound.replaceAll('block_height', 'e.block_height').replaceAll('extrinsic_index', 'e.extrinsic_index').replaceAll('block_timestamp', 'e.block_timestamp')
   const accountList = accounts?.length ? sqlAccountList(accounts) : null
   const accountFilter = accountList ? `AND JSONExtractString(e.args_json,'who') IN (${accountList})` : ''
   const referralAssetFilter = assetIds != null && !assetIds.includes(0) ? 'AND 0' : ''
@@ -5926,9 +7367,13 @@ async function getRecentRewardClaims(limit: number, from?: string, to?: string, 
   const referralValueFilter = eventValueFilterSql('0', referralAmountExpr, 'e.block_timestamp', filters, prices, 'referral_claim_price')
   const referralRes = await client.query({
     query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index, e.extrinsic_index, e.args_json
-            FROM price_data.raw_events e
+            FROM (
+              SELECT block_height, block_timestamp, event_index, extrinsic_index, event_name, args_json
+              FROM price_data.${rewardClaimActivityReady ? 'referral_claim_activity FINAL' : 'raw_events'}
+              WHERE ${rawBound}
+            ) AS e
             ${referralValueFilter.joinSql}
-            WHERE ${bound} AND e.event_name = 'Referrals.Claimed'
+            WHERE e.event_name = 'Referrals.Claimed'
               ${accountFilter} ${referralAssetFilter} ${referralValueFilter.predicateSql}
             ORDER BY e.block_height DESC, e.event_index DESC LIMIT {limit:UInt32}`,
     query_params: { limit, height: height ?? 0, extrinsicIndex: extrinsicIndex ?? 0 }, format: 'JSONEachRow',
@@ -5953,17 +7398,19 @@ async function getRecentRewardClaims(limit: number, from?: string, to?: string, 
   const incentiveValueFilter = eventValueFilterSql(transferAssetExpr, `JSONExtractString(e.args_json,'amount')`, 'e.block_timestamp', filters, prices, 'incentive_claim_price')
   type IncentiveTransfer = RawTransferEventRow & { call_address: string }
   const fetchIncentiveCandidates = async (candidateBound: string, pageLimit: number): Promise<IncentiveTransfer[]> => {
-    const eventBound = candidateBound.replaceAll('block_height', 'e.block_height').replaceAll('extrinsic_index', 'e.extrinsic_index')
-      .replaceAll('event_index', 'e.event_index').replaceAll('block_timestamp', 'e.block_timestamp')
     const res = await client.query({
       query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index, e.extrinsic_index, e.event_name, ifNull(e.call_address,'') AS call_address,
                 JSONExtractString(e.args_json,'from') AS from_acc,
                 JSONExtractString(e.args_json,'to') AS to_acc,
                 JSONExtractString(e.args_json,'amount') AS amount,
                 ${transferAssetExpr} AS asset_id
-              FROM price_data.raw_events e
+              FROM (
+                SELECT block_height, block_timestamp, event_index, extrinsic_index, event_name, call_address, args_json
+                FROM price_data.${rewardClaimActivityReady ? 'incentive_reward_transfers FINAL' : 'raw_events'}
+                WHERE ${candidateBound}
+              ) AS e
               ${incentiveValueFilter.joinSql}
-              WHERE ${eventBound} AND e.event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')
+              WHERE e.event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')
                 AND JSONExtractString(e.args_json,'from') = '${INCENTIVES_REWARD_POT}'
                 ${incentiveAccountFilter} ${incentiveAssetFilter} ${incentiveValueFilter.predicateSql}
               ORDER BY e.block_height DESC, e.event_index DESC LIMIT {candidateLimit:UInt32}`,
@@ -5983,10 +7430,10 @@ async function getRecentRewardClaims(limit: number, from?: string, to?: string, 
     for (let start = 0; start < candidateTuples.length; start += 5000) {
       const callRes = await client.query({
         query: `SELECT block_height, extrinsic_index, call_address
-                FROM price_data.raw_calls
+                FROM price_data.${rewardClaimActivityReady ? 'incentive_claim_calls FINAL' : 'raw_calls'}
                 PREWHERE (block_height, ifNull(extrinsic_index, 4294967295), call_address) IN (${candidateTuples.slice(start, start + 5000).join(',')})
-                WHERE position(lower(ifNull(args_json,'')), '${INCENTIVES_CONTROLLER}') > 0
-                  AND (${INCENTIVE_CLAIM_SELECTORS.map(s => `position(lower(ifNull(args_json,'')), '${s}') > 0`).join(' OR ')})`,
+                ${rewardClaimActivityReady ? '' : `WHERE position(args_json, '${INCENTIVES_CONTROLLER}') > 0
+                  AND (${INCENTIVE_CLAIM_SELECTORS.map(s => `position(args_json, '${s}') > 0`).join(' OR ')})`}`,
         format: 'JSONEachRow',
       })
       for (const c of await callRes.json<{ block_height: number; extrinsic_index: number; call_address: string }>()) confirmedCalls.add(`${c.block_height}:${c.extrinsic_index}:${c.call_address}`)
@@ -6021,7 +7468,7 @@ async function getRecentRewardClaims(limit: number, from?: string, to?: string, 
 
 async function getRecentDcaFailures(limit: number, from?: string, to?: string, accounts?: string[], assetIds?: number[], height?: number): Promise<ActivityRow[]> {
   if (assetIds != null && !assetIds.length) return []
-  const accountFilter = accounts?.length ? `AND JSONExtractString(e.args_json,'who') IN (${sqlAccountList(accounts)})` : ''
+  const accountFilter = accounts?.length ? `AND e.who IN (${sqlAccountList(accounts)})` : ''
   const assetFilter = assetIds != null
     ? `AND (s.asset_in IN (${assetIds.join(',')}) OR s.asset_out IN (${assetIds.join(',')}))`
     : ''
@@ -6030,14 +7477,13 @@ async function getRecentDcaFailures(limit: number, from?: string, to?: string, a
     : (timeWindow(from, to)?.replaceAll('block_timestamp', 'e.block_timestamp') ?? '1')
   const res = await client.query({
     query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index,
-              JSONExtractString(e.args_json,'who') AS who,
-              toString(JSONExtractInt(e.args_json,'id')) AS id,
+              e.who, toString(e.id) AS id,
               toNullable(s.asset_in) AS asset_in, toNullable(s.asset_out) AS asset_out,
               ifNull(s.amount_per, '') AS amount_in,
               s.block_height AS schedule_block, s.extrinsic_index AS schedule_index,
-              JSONExtractRaw(e.args_json,'error') AS error
-            FROM price_data.raw_events e
-            LEFT JOIN price_data.dca_schedules s ON s.id = toUInt64(JSONExtractInt(e.args_json,'id'))
+              '' AS error
+            FROM price_data.dca_events AS e FINAL
+            LEFT JOIN price_data.dca_schedules s ON s.id = e.id
             WHERE ${bound} AND e.event_name = 'DCA.TradeFailed'
               ${accountFilter} ${assetFilter}
             ORDER BY e.block_height DESC, e.event_index DESC
@@ -6045,6 +7491,21 @@ async function getRecentDcaFailures(limit: number, from?: string, to?: string, a
     query_params: { limit, height: height ?? 0 }, format: 'JSONEachRow',
   })
   const rows = await res.json<{ block_height: number; ts: string; event_index: number; who: string; id: string; asset_in: number | null; asset_out: number | null; amount_in: string; schedule_block: number; schedule_index: number | null; error: string }>()
+  // dca_events intentionally stays narrow; fetch error detail only for the
+  // bounded page instead of JSON-decoding every historical failure in raw_events.
+  const keys = rows.map(row => `(${row.block_height},${row.event_index})`)
+  const errors = new Map<string, string>()
+  if (keys.length) {
+    const errorRes = await client.query({
+      query: `SELECT block_height, event_index, JSONExtractRaw(args_json, 'error') AS error
+              FROM price_data.raw_events
+              WHERE (block_height, event_index) IN (${keys.join(',')}) AND event_name='DCA.TradeFailed'`,
+      format: 'JSONEachRow',
+    })
+    for (const row of await errorRes.json<{ block_height: number; event_index: number; error: string }>()) {
+      errors.set(`${row.block_height}:${row.event_index}`, row.error)
+    }
+  }
   return rows.map(r => ({
     type: 'trade' as const,
     blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: null,
@@ -6052,7 +7513,7 @@ async function getRecentDcaFailures(limit: number, from?: string, to?: string, a
     assetIn: r.asset_in != null ? asset(r.asset_in) : null,
     assetOut: r.asset_out != null ? asset(r.asset_out) : null,
     amount: null, amountIn: r.amount_in || null, amountOut: null, valueUsd: null,
-    dca: true, dcaStatus: 'failed' as const, dcaError: r.error || undefined,
+    dca: true, dcaStatus: 'failed' as const, dcaError: errors.get(`${r.block_height}:${r.event_index}`) || undefined,
     dcaScheduleId: Number(r.id) || undefined,
     linkBlock: r.schedule_block || r.block_height, linkIndex: r.schedule_index,
   }))
@@ -6074,15 +7535,18 @@ async function liquidityExtrinsicsForShareTrades(trades: TradeRow[]): Promise<Se
     .filter(t => t.extrinsicIndex != null && ((t.assetIn && isShareAssetId(t.assetIn.assetId)) || (t.assetOut && isShareAssetId(t.assetOut.assetId))))
     .map(t => `(${t.blockHeight},${t.extrinsicIndex})`))]
   if (!tuples.length) return new Set()
-  const res = await client.query({
-    query: `SELECT DISTINCT block_height, extrinsic_index
-            FROM price_data.raw_events
-            WHERE (block_height, extrinsic_index) IN (${tuples.join(',')})
-              AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})`,
-    format: 'JSONEachRow',
-  })
-  return new Set((await res.json<{ block_height: number; extrinsic_index: number }>())
-    .map(row => `${row.block_height}:${row.extrinsic_index}`))
+  const out = new Set<string>()
+  for (let start = 0; start < tuples.length; start += 5_000) {
+    const res = await client.query({
+      query: `SELECT DISTINCT block_height, extrinsic_index
+              FROM price_data.raw_events
+              WHERE (block_height, extrinsic_index) IN (${tuples.slice(start, start + 5_000).join(',')})
+                AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})`,
+      format: 'JSONEachRow',
+    })
+    for (const row of await res.json<{ block_height: number; extrinsic_index: number }>()) out.add(`${row.block_height}:${row.extrinsic_index}`)
+  }
+  return out
 }
 // 'dca' is categorized under the Trade chip (rows keep their dca flag for the badge).
 function normalizeActivityTypeKey(type: string): string { return type === 'dca' ? 'trade' : type }
@@ -6141,7 +7605,53 @@ export async function getRecentActivity(limit: number, from?: string, to?: strin
     let locallyPaged = classified
     let sourceSaturated = false
     let plumbingApplied = false
-    if (classified) {
+    const otcOnlyAction = type === 'trade' && !!resolveOtcAction(action) && !!OTC_ACTION_EVENTS[resolveOtcAction(action)!]
+    if (type === 'trade' && action === 'dca-failed') {
+      // Failed executions are a self-contained indexed DCA family.  Routing this
+      // action through the shared Trade classifier also paged swaps and OTC rows
+      // that can never match it, turning a small failure page into a multi-source
+      // full-history search.
+      rows = (await getRecentDcaFailures(want, from, to, undefined, assetIdsForToken(filters.token)))
+        .slice(offset, want)
+      locallyPaged = false
+    } else if (otcOnlyAction) {
+      // OTC actions are already exact, independently pageable event families.
+      // Sending them through the shared Trade classifier widens the unrelated
+      // swap source forever because no swap can satisfy an otc-* action.
+      rows = await getRecentOtc(limit, from, to, offset, filters, action)
+      locallyPaged = false
+    } else if (type === 'transfer') {
+      // Pull only transfer candidates, then resolve semantic ownership by their
+      // exact identities. Widening the swap/liquidity/XCM/etc. feeds alongside
+      // a sparse transfer filter made a 25-row page enumerate >100k unrelated
+      // rows and could never complete under the ClickHouse result guard.
+      const deferredValueFilter = filters.min != null && filters.unit !== 'token'
+      const sourceFilters = deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
+      for (;;) {
+        const transfers = await getRecentTransfers(fetchN, from, to, 0, true, sourceFilters)
+        const classifiedTransfers = await suppressTransferCandidates(transfers)
+        rows = await suppressDustTransferRows(classifiedTransfers.map(toTransferRow))
+        plumbingApplied = true
+        sourceSaturated = transfers.length >= fetchN
+        if (deferredValueFilter && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
+        const visibleRows = rows
+          .filter(row => activityRowMatchesFilters(row, filters) && activityRowMatchesAction(row, action))
+          .sort((left, right) => right.blockHeight - left.blockHeight || (right.eventIndex ?? -1) - (left.eventIndex ?? -1))
+        const cutoff = completeActivityPageCutoff(visibleRows, want)
+        const oldest = transfers.reduce<{ blockHeight: number; eventIndex: number } | null>((current, row) => {
+          const candidate = { blockHeight: row.blockHeight, eventIndex: row.eventIndex }
+          return current == null || candidate.blockHeight < current.blockHeight ||
+            (candidate.blockHeight === current.blockHeight && candidate.eventIndex < current.eventIndex)
+            ? candidate : current
+        }, null)
+        const complete = cutoff
+          ? activitySourceCoversCutoff(transfers.length, fetchN, oldest, cutoff)
+          : transfers.length < fetchN
+        if (complete) break
+        if (fetchN >= MAX_ACTIVITY_SOURCE_ROWS) throw activityQueryTooBroad()
+        fetchN = Math.min(fetchN * 4, MAX_ACTIVITY_SOURCE_ROWS)
+      }
+    } else if (classified) {
       // Transfers, trades and the merged feed share ONE classification pass so a
       // row never appears in a category the merged feed assigned elsewhere.
       // The Trade-only view needs liquidity context to reject share-token router
@@ -6152,26 +7662,90 @@ export async function getRecentActivity(limit: number, from?: string, to?: strin
       // entire raw table before LIMIT can help. Fetch recent candidates without
       // the threshold, value them in batches, and widen only sources that have
       // not yet produced a complete page of qualifying rows.
+      // Asset-keyed swap reads can apply the exact event-time USD predicate
+      // before LIMIT more cheaply than repeatedly widening a sparse candidate
+      // window. Other activity families still defer USD filtering until their
+      // bounded candidates have been classified and valued below.
       const deferredValueFilter = filters.min != null
-      const sourceFilters = deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
+        && filters.unit !== 'token'
+        && !(type === 'trade' && filters.token)
+      // A four-figure USD floor is sparse enough that the cheap unfiltered
+      // probe cannot normally fill a page; go straight to bounded exact source
+      // reads. Lower/default floors retain the recent probe, which usually wins.
+      const directExactValueFilter = deferredValueFilter && filters.min! >= 1_000
+      let sourceValueFiltered = directExactValueFilter
+      let sourceFilters = sourceValueFiltered
+        ? filters
+        : deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
+      type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'staking' | 'vote'
+      const classifiedSourceKeys: ClassifiedSourceKey[] = [
+        'transfer', 'trade', 'dca', 'reward', 'liquidity', 'mm', 'otc',
+        'xcm', 'xcmIn', 'xcmOutRemote', 'staking', 'vote',
+      ]
+      const exactSeedSize = activitySourceSeedSize(want)
+      const exactSourceLimits = Object.fromEntries(classifiedSourceKeys.map(key => [key, sourceValueFiltered ? exactSeedSize : fetchN])) as Record<ClassifiedSourceKey, number>
+      const exactSourceCache = new Map<ClassifiedSourceKey, unknown[]>()
+      let exactSourceFrom = from
+      const loadClassifiedSource = <T>(
+        key: ClassifiedSourceKey,
+        load: (sourceLimit: number, sourceFrom: string | undefined) => Promise<T[]>,
+      ): Promise<T[]> => {
+        if (!sourceValueFiltered) return load(fetchN, from)
+        const previous = exactSourceCache.get(key)
+        if (previous) return Promise.resolve(previous as T[])
+        return load(exactSourceLimits[key], exactSourceFrom).then(sourceRows => {
+          exactSourceCache.set(key, sourceRows)
+          return sourceRows
+        })
+      }
       for (;;) {
         const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, staking, votes] = await Promise.all([
-          needsFullClassification ? getRecentTransfers(fetchN, from, to, 0, true, sourceFilters) : Promise.resolve([]),
-          getRecentTrades(fetchN, from, to, 0, sourceFilters),
-          getRecentDcaFailures(fetchN, from, to, undefined, assetIdsForToken(filters.token)),
-          needsFullClassification ? getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token)) : Promise.resolve([]),
-          needsFullClassification ? getRecentLiquidity(fetchN, from, to, 0, sourceFilters) : Promise.resolve([]),
-          needsFullClassification ? getRecentMoneyMarket(fetchN, from, to, 0, sourceFilters) : Promise.resolve([]),
-          getRecentOtc(fetchN, from, to, 0, sourceFilters),
-          needsFullClassification ? getRecentXcm(fetchN, from, to, undefined, 0, sourceFilters) : Promise.resolve([]),
-          needsFullClassification ? getRecentXcmIn(fetchN, from, to, undefined, 0, sourceFilters) : Promise.resolve([]),
-          needsFullClassification ? getRecentXcmOutRemote(fetchN, from, to, undefined, 0, sourceFilters) : Promise.resolve([]),
-          needsFullClassification ? getRecentStaking(fetchN, from, to, undefined, 0, sourceFilters) : Promise.resolve([]),
-          needsFullClassification ? getRecentVotes(fetchN, from, to, 0, {}, undefined, sourceFilters) : Promise.resolve([]),
+          needsFullClassification
+            ? loadClassifiedSource('transfer', (sourceLimit, sourceFrom) => getRecentTransfers(sourceLimit, sourceFrom, to, 0, true, sourceFilters))
+            : Promise.resolve([]),
+          loadClassifiedSource('trade', (sourceLimit, sourceFrom) => getRecentTrades(sourceLimit, sourceFrom, to, 0, sourceFilters)),
+          // Failed schedules have no executed USD value and cannot survive a
+          // USD minimum. Do not widen their error-payload lookup alongside a
+          // sparse qualifying-swap walk (that used to reopen millions of raw
+          // rows for candidates guaranteed to be filtered out).
+          deferredValueFilter
+            ? Promise.resolve([])
+            : loadClassifiedSource('dca', (sourceLimit, sourceFrom) => getRecentDcaFailures(sourceLimit, sourceFrom, to, undefined, assetIdsForToken(filters.token))),
+          needsFullClassification
+            ? loadClassifiedSource('reward', (sourceLimit, sourceFrom) => getRecentRewardClaims(sourceLimit, sourceFrom, to, undefined, assetIdsForToken(filters.token)))
+            : Promise.resolve([]),
+          needsFullClassification
+            ? loadClassifiedSource('liquidity', (sourceLimit, sourceFrom) => getRecentLiquidity(sourceLimit, sourceFrom, to, 0, sourceFilters))
+            : Promise.resolve([]),
+          needsFullClassification
+            ? loadClassifiedSource('mm', (sourceLimit, sourceFrom) => getRecentMoneyMarket(sourceLimit, sourceFrom, to, 0, sourceFilters))
+            : Promise.resolve([]),
+          loadClassifiedSource('otc', (sourceLimit, sourceFrom) => getRecentOtc(sourceLimit, sourceFrom, to, 0, sourceFilters)),
+          needsFullClassification
+            ? loadClassifiedSource('xcm', (sourceLimit, sourceFrom) => getRecentXcm(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
+            : Promise.resolve([]),
+          needsFullClassification
+            ? loadClassifiedSource('xcmIn', (sourceLimit, sourceFrom) => getRecentXcmIn(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
+            : Promise.resolve([]),
+          needsFullClassification
+            ? loadClassifiedSource('xcmOutRemote', (sourceLimit, sourceFrom) => getRecentXcmOutRemote(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
+            : Promise.resolve([]),
+          needsFullClassification
+            ? loadClassifiedSource('staking', (sourceLimit, sourceFrom) => getRecentStaking(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
+            : Promise.resolve([]),
+          needsFullClassification
+            ? loadClassifiedSource('vote', (sourceLimit, sourceFrom) => getRecentVotes(sourceLimit, sourceFrom, to, 0, {}, undefined, sourceFilters))
+            : Promise.resolve([]),
         ])
-        const liquidityExtrinsics = needsFullClassification
+        const sourceFilteredTransfers = sourceValueFiltered
+          ? await suppressTransferCandidates(transfers)
+          : transfers
+        const liquidityExtrinsics = needsFullClassification && !sourceValueFiltered
           ? activityExtrinsicSet(liquidity)
-          : await liquidityExtrinsicsForShareTrades(trades)
+          : new Set([
+              ...activityExtrinsicSet(liquidity),
+              ...await liquidityExtrinsicsForShareTrades(trades),
+            ])
         const userTrades = dropShareRoutedTrades(trades, liquidityExtrinsics)
         // Drop swap-internal transfer legs: any transfer in a trade's extrinsic, or
         // touching a pallet/pool account (hops, fees, referral pot). OTC fills
@@ -6182,7 +7756,7 @@ export async function getRecentActivity(limit: number, from?: string, to?: strin
         const stakingExtrinsics = activityExtrinsicSet(staking)
         const mmExtrinsics = activityExtrinsicSet(mm)
         const otcExtrinsics = activityExtrinsicSet(otc)
-        const userTransfers = transfers.filter(t =>
+        const userTransfers = sourceFilteredTransfers.filter(t =>
           !(t.extrinsicIndex != null && tradeExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
           !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
           !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
@@ -6191,7 +7765,7 @@ export async function getRecentActivity(limit: number, from?: string, to?: strin
         // Module-account MM rows are pool-proxy internals, not user activity.
         const userMm = mm.filter(r => !isModuleAcct(r.who))
         type SourceCursor = { blockHeight: number; eventIndex: number }
-        type SourcePage = { rawSize: number; rows: ActivityRow[]; oldest: SourceCursor | null; valueIrrelevant?: boolean }
+        type SourcePage = { key: ClassifiedSourceKey; fetchSize: number; rawSize: number; rows: ActivityRow[]; oldest: SourceCursor | null; valueIrrelevant?: boolean }
         const oldestOf = <T extends { blockHeight: number; eventIndex?: number | null }>(source: T[]): SourceCursor | null => {
           let oldest: SourceCursor | null = null
           for (const row of source) {
@@ -6201,25 +7775,26 @@ export async function getRecentActivity(limit: number, from?: string, to?: strin
           }
           return oldest
         }
+        const sourceFetchSize = (key: ClassifiedSourceKey): number => sourceValueFiltered ? exactSourceLimits[key] : fetchN
         const allSources: SourcePage[] = [
-          { rawSize: transfers.length, rows: userTransfers.map(toTransferRow), oldest: oldestOf(transfers) },
-          { rawSize: trades.length, rows: userTrades.map(toTradeRow), oldest: oldestOf(trades) },
+          { key: 'transfer', fetchSize: sourceFetchSize('transfer'), rawSize: transfers.length, rows: userTransfers.map(toTransferRow), oldest: oldestOf(transfers) },
+          { key: 'trade', fetchSize: sourceFetchSize('trade'), rawSize: trades.length, rows: userTrades.map(toTradeRow), oldest: oldestOf(trades) },
           // Failed DCA rows have no executed value and can never pass a minimum.
-          { rawSize: dcaFailures.length, rows: dcaFailures, oldest: oldestOf(dcaFailures), valueIrrelevant: true },
-          { rawSize: rewards.length, rows: rewards, oldest: oldestOf(rewards) },
-          { rawSize: liquidity.length, rows: liquidity, oldest: oldestOf(liquidity) },
-          { rawSize: staking.length, rows: staking, oldest: oldestOf(staking) },
-          { rawSize: votes.length, rows: votes.map(toVoteRow), oldest: oldestOf(votes) },
-          { rawSize: mm.length, rows: userMm, oldest: oldestOf(mm) },
-          { rawSize: otc.length, rows: otc, oldest: oldestOf(otc) },
-          { rawSize: xcm.length, rows: xcm, oldest: oldestOf(xcm) },
-          { rawSize: xcmIn.length, rows: xcmIn, oldest: oldestOf(xcmIn) },
-          { rawSize: xcmOutRemote.length, rows: xcmOutRemote, oldest: oldestOf(xcmOutRemote) },
+          { key: 'dca', fetchSize: sourceFetchSize('dca'), rawSize: dcaFailures.length, rows: dcaFailures, oldest: oldestOf(dcaFailures), valueIrrelevant: true },
+          { key: 'reward', fetchSize: sourceFetchSize('reward'), rawSize: rewards.length, rows: rewards, oldest: oldestOf(rewards) },
+          { key: 'liquidity', fetchSize: sourceFetchSize('liquidity'), rawSize: liquidity.length, rows: liquidity, oldest: oldestOf(liquidity) },
+          { key: 'staking', fetchSize: sourceFetchSize('staking'), rawSize: staking.length, rows: staking, oldest: oldestOf(staking) },
+          { key: 'vote', fetchSize: sourceFetchSize('vote'), rawSize: votes.length, rows: votes.map(toVoteRow), oldest: oldestOf(votes) },
+          { key: 'mm', fetchSize: sourceFetchSize('mm'), rawSize: mm.length, rows: userMm, oldest: oldestOf(mm) },
+          { key: 'otc', fetchSize: sourceFetchSize('otc'), rawSize: otc.length, rows: otc, oldest: oldestOf(otc) },
+          { key: 'xcm', fetchSize: sourceFetchSize('xcm'), rawSize: xcm.length, rows: xcm, oldest: oldestOf(xcm) },
+          { key: 'xcmIn', fetchSize: sourceFetchSize('xcmIn'), rawSize: xcmIn.length, rows: xcmIn, oldest: oldestOf(xcmIn) },
+          { key: 'xcmOutRemote', fetchSize: sourceFetchSize('xcmOutRemote'), rawSize: xcmOutRemote.length, rows: xcmOutRemote, oldest: oldestOf(xcmOutRemote) },
         ]
         const sourcePages = type === 'trade'
           ? [allSources[1], allSources[2], allSources[8]]
           : type === 'transfer' ? [allSources[0]] : allSources
-        sourceSaturated = sourcePages.some(source => source.rawSize >= fetchN)
+        sourceSaturated = sourcePages.some(source => source.rawSize >= source.fetchSize)
         // A transfer-only result still needs the other categories as
         // classification context. Otherwise the transfer leg of an LP action,
         // reward claim, vote, or XCM journey can reappear merely because the
@@ -6231,14 +7806,46 @@ export async function getRecentActivity(limit: number, from?: string, to?: strin
         if (deferredValueFilter && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
         const visibleRows = rows.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
           .sort((a, b) => b.blockHeight - a.blockHeight || (b.eventIndex ?? -1) - (a.eventIndex ?? -1))
-        const cutoff = visibleRows[Math.min(want, visibleRows.length) - 1]
+        const cutoff = completeActivityPageCutoff(visibleRows, want)
         const coveragePages = type === 'transfer' ? allSources : sourcePages
-        const complete = cutoff
-          ? coveragePages.every(source =>
-              (deferredValueFilter && source.valueIrrelevant)
-              || activitySourceCoversCutoff(source.rawSize, fetchN, source.oldest, cutoff))
-          : sourcePages.every(source => (deferredValueFilter && source.valueIrrelevant) || source.rawSize < fetchN)
+        const incompletePages = activitySourcesNeedingMore(
+          cutoff ? coveragePages : sourcePages,
+          cutoff,
+          deferredValueFilter,
+        )
+        const complete = incompletePages.length === 0
         if (complete) break
+        // A low USD threshold usually completes from the first small unfiltered
+        // window and avoids an ASOF join below every source LIMIT. A sparse
+        // threshold is the opposite: repeatedly widening every family can cross
+        // the client's 100k row guard before finding 25 qualifying rows. After
+        // the first incomplete window, let each source apply its exact event-time
+        // predicate and resolve transfer/share-token ownership only for those
+        // bounded candidates. This retains complete-history classification while
+        // avoiding an all-family raw-history walk.
+        if (deferredValueFilter && !sourceValueFiltered) {
+          sourceValueFiltered = true
+          sourceFilters = filters
+          // Start each exact source at a fraction of the merged target. The
+          // common case fills the union from several activity families; sources
+          // that have not crossed the resulting cutoff are deepened separately.
+          fetchN = exactSeedSize
+          for (const key of classifiedSourceKeys) exactSourceLimits[key] = fetchN
+          exactSourceCache.clear()
+          exactSourceFrom = from
+          continue
+        }
+        if (sourceValueFiltered) {
+          if (!incompletePages.length) throw activityQueryTooBroad()
+          exactSourceFrom = cutoff ? activityCutoffFromDate(from, visibleRows, want) : from
+          for (const source of incompletePages) {
+            if (source.fetchSize >= MAX_ACTIVITY_SOURCE_ROWS) throw activityQueryTooBroad()
+            exactSourceLimits[source.key] = Math.min(source.fetchSize * 4, MAX_ACTIVITY_SOURCE_ROWS)
+            exactSourceCache.delete(source.key)
+          }
+          fetchN = Math.max(...Object.values(exactSourceLimits))
+          continue
+        }
         if (fetchN >= MAX_ACTIVITY_SOURCE_ROWS) throw activityQueryTooBroad()
         fetchN = Math.min(fetchN * 4, MAX_ACTIVITY_SOURCE_ROWS)
       }
@@ -7059,7 +8666,14 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
     // rows. This count is therefore pagination/classification capacity, never
     // probabilistic headroom for a post-filter.
     const fetchN = Math.max(want * 5, 1000)
-    const fixedAssetFilters: ValueListFilters = { ...filters, token: undefined }
+    // Event-time USD filters are exact post-filters over bounded, asset-indexed
+    // candidates. Pushing the ASOF price join below each source LIMIT makes a
+    // cold asset page value its complete source history before it can stop.
+    // Token-unit thresholds remain safe and selective in the source query.
+    const queryFilters = filters.min != null && filters.unit !== 'token'
+      ? { ...filters, min: undefined, unit: undefined }
+      : filters
+    const fixedAssetFilters: ValueListFilters = { ...queryFilters, token: undefined }
 
     // Transfers: filter by asset and user-facing accounts in SQL before limiting,
     // otherwise busy module/pool activity can fill a page and hide real transfers.
@@ -7079,10 +8693,21 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
     const wantVotes = (type === 'all' || type === 'vote' || wantTransfers) && assetId === 0
 
     const transfersP: Promise<ActivityRow[]> = wantTransfers ? (async () => {
-      const transferAssetExpr = transferAssetIdSql()
-      const transferValueFilter = eventValueFilterSql('{assetId:UInt32}', `JSONExtractString(args_json,'amount')`, 'block_timestamp', filters, prices, 'asset_transfer_price')
+      const useTransferReadModel = transferActivityReady
+      const transferAssetExpr = useTransferReadModel ? 'asset_id' : transferAssetIdSql()
+      const transferValueFilter = eventValueFilterSql('{assetId:UInt32}', useTransferReadModel ? 'amount' : `JSONExtractString(args_json,'amount')`, 'block_timestamp', queryFilters, prices, 'asset_transfer_price')
       const res = await client.query({
-        query: `
+        query: useTransferReadModel ? `
+          SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+            from_account AS from_acc, to_account AS to_acc, amount
+          FROM price_data.transfer_activity
+          ${transferValueFilter.joinSql}
+          WHERE ${bound} AND asset_id = {assetId:UInt32}
+            AND from_account NOT LIKE '0x6d6f646c%'
+            AND to_account NOT LIKE '0x6d6f646c%'
+            ${transferValueFilter.predicateSql}
+          ORDER BY block_height DESC, event_index DESC
+          LIMIT {n:UInt32}` : `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
             JSONExtractString(args_json,'from') AS from_acc,
             JSONExtractString(args_json,'to') AS to_acc,
@@ -7126,9 +8751,21 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
     // per event (pallet-internal), preferring Router.Executed (the net summary).
     const tradesP: Promise<ActivityRow[]> = wantTrades ? (async () => {
       const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
-      const tradeValueFilter = eventValueFilterSql(`JSONExtractInt(args_json,'assetOut')`, `JSONExtractString(args_json,'amountOut')`, 'block_timestamp', fixedAssetFilters, prices, 'asset_trade_price')
+      const useAssetSwapReadModel = assetSwapActivityReady
+      const tradeValueFilter = eventValueFilterSql(useAssetSwapReadModel ? 'asset_out' : `JSONExtractInt(args_json,'assetOut')`, useAssetSwapReadModel ? 'amount_out' : `JSONExtractString(args_json,'amountOut')`, 'block_timestamp', fixedAssetFilters, prices, 'asset_trade_price')
       const res = await client.query({
-        query: `
+        query: useAssetSwapReadModel ? `
+          SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+            who, asset_in, asset_out, amount_in, amount_out
+          FROM price_data.asset_swap_activity
+          ${tradeValueFilter.joinSql}
+          WHERE ${bound} AND asset_id = {assetId:UInt32}
+            AND who != '${ROUTER_PALLET_ACCT}'
+            AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%')
+            ${tradeValueFilter.predicateSql}
+          ORDER BY block_height DESC, extrinsic_index DESC, event_name = 'Router.Executed' DESC, event_index DESC
+          LIMIT 1 BY block_height, ifNull(toString(extrinsic_index), concat('event:', toString(event_index)))
+          LIMIT {n:UInt32}` : `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
             JSONExtractString(args_json,'who') AS who,
             JSONExtractInt(args_json,'assetIn') AS asset_in,
@@ -7144,7 +8781,7 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
           ORDER BY block_height DESC, extrinsic_index DESC, event_name = 'Router.Executed' DESC, event_index DESC
           LIMIT 1 BY block_height, ifNull(toString(extrinsic_index), concat('event:', toString(event_index)))
           LIMIT {n:UInt32}`,
-        query_params: { n: fetchN }, format: 'JSONEachRow',
+        query_params: { n: fetchN, assetId }, format: 'JSONEachRow',
       })
       const rows = await res.json<RawSwapEventRow>()
       if (!rows.length) return []
@@ -7189,21 +8826,22 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
     // Liquidity: add/remove where the provided/pool asset matches.
     const liquidityP: Promise<ActivityRow[]> = wantLiquidity ? (async () => {
       const fetchPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
+        const useLiquidityReadModel = liquidityActivityReady
         const res = await client.query({
           query: `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-            JSONExtractString(args_json,'who') AS who,
-            multiIf(JSONHas(args_json,'claimed'), JSONExtractString(args_json,'claimed'), JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'shares')) AS amount,
-            JSONExtractInt(args_json,'assetB') AS asset_b,
-            JSONExtractString(args_json,'pool') AS pool_acc
-          FROM price_data.raw_events
+            ${useLiquidityReadModel ? 'who' : "JSONExtractString(args_json,'who')"} AS who,
+            ${useLiquidityReadModel ? 'amount' : "multiIf(JSONHas(args_json,'claimed'), JSONExtractString(args_json,'claimed'), JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'shares'))"} AS amount,
+            ${useLiquidityReadModel ? 'asset_b' : "JSONExtractInt(args_json,'assetB')"} AS asset_b,
+            ${useLiquidityReadModel ? 'pool_account' : "JSONExtractString(args_json,'pool')"} AS pool_acc
+          FROM price_data.${useLiquidityReadModel ? 'liquidity_activity' : 'raw_events'}
           WHERE ${pageBound}
             AND event_name IN ('Omnipool.LiquidityAdded','Omnipool.LiquidityRemoved','Stableswap.LiquidityAdded','Stableswap.LiquidityRemoved','XYK.LiquidityAdded','XYK.LiquidityRemoved','XYK.PoolCreated','OmnipoolLiquidityMining.RewardClaimed','XYKLiquidityMining.RewardClaimed')
-            AND JSONExtractString(args_json,'who') NOT LIKE '0x6d6f646c%'
-            AND ${liquidityAssetMatchExpr(String(assetId))}
+            AND ${useLiquidityReadModel ? 'who' : "JSONExtractString(args_json,'who')"} NOT LIKE '0x6d6f646c%'
+            AND ${useLiquidityReadModel ? 'has(asset_refs, {assetId:UInt32})' : liquidityAssetMatchExpr(String(assetId))}
           ORDER BY block_height DESC, event_index DESC
           LIMIT {n:UInt32}`,
-          query_params: { n: pageLimit }, format: 'JSONEachRow',
+          query_params: { n: pageLimit, assetId }, format: 'JSONEachRow',
         })
         const rows = (await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; amount: string; asset_b: number; pool_acc: string }>())
           .map(r => ({ ...r, asset_id: assetId }))
@@ -7232,7 +8870,7 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
         await applyHistoricalUsd(out, activityHistPick)
         return out
       }
-      if (filters.min != null) {
+      if (fixedAssetFilters.min != null) {
         return fetchFilteredDeep(tw, want, fetchPage,
           row => activityRowMatchesFilters(row, fixedAssetFilters),
           row => row.blockHeight, row => row.eventIndex ?? -1,
@@ -7247,14 +8885,15 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
     // XCM history. An extrinsic emitting both events joins twice but collapses in
     // the block:ext:amount:sender dedup below.
     const xcmP: Promise<ActivityRow[]> = wantXcm ? (async () => {
-      const cidExpr = currencyIdSql('w.args_json')
-      const xcmValueFilter = eventValueFilterSql('{assetId:UInt32}', `JSONExtractString(w.args_json,'amount')`, 'w.block_timestamp', fixedAssetFilters, prices, 'asset_xcm_price')
+      const cidExpr = xcmEventActivityReady ? 'w.asset_id' : currencyIdSql('w.args_json')
+      const withdrawalAmountExpr = xcmEventActivityReady ? 'w.amount' : `JSONExtractString(w.args_json,'amount')`
+      const xcmValueFilter = eventValueFilterSql('{assetId:UInt32}', withdrawalAmountExpr, 'w.block_timestamp', fixedAssetFilters, prices, 'asset_xcm_price')
       const res = await client.query({
         query: `
           SELECT w.block_height, toString(w.block_timestamp) AS ts, w.extrinsic_index,
-            x.event_index, x.args_json AS x_args, JSONExtractString(w.args_json,'amount') AS amount
-          FROM price_data.raw_events w
-          INNER JOIN price_data.raw_events x
+            x.event_index, x.args_json AS x_args, ${withdrawalAmountExpr} AS amount
+          FROM ${xcmEventActivityTable('w')}
+          INNER JOIN ${xcmEventActivityTable('x')}
             ON x.block_height = w.block_height
            AND x.extrinsic_index = w.extrinsic_index
            AND x.event_name IN ('XTokens.TransferredAssets','PolkadotXcm.Sent')
@@ -7291,18 +8930,19 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
     // XCM inbound: hook-context deposits of this asset seed the candidate blocks;
     // the barrier walk-back keeps only genuine inbound-message credits.
     const xcmInP: Promise<ActivityRow[]> = wantXcm ? (async () => {
-      const xcmInValueFilter = eventValueFilterSql('{assetId:UInt32}', `JSONExtractString(args_json,'amount')`, 'block_timestamp', fixedAssetFilters, prices, 'asset_xcm_in_price')
+      const depositAmountExpr = xcmEventActivityReady ? 'amount' : `JSONExtractString(args_json,'amount')`
+      const xcmInValueFilter = eventValueFilterSql('{assetId:UInt32}', depositAmountExpr, 'block_timestamp', fixedAssetFilters, prices, 'asset_xcm_in_price')
       return fetchDecodedXcmDeep(
         bound,
         fetchN,
         async (pageBound, pageLimit) => {
           const res = await client.query({
-            query: `SELECT DISTINCT block_height FROM price_data.raw_events
+            query: `SELECT DISTINCT block_height FROM ${xcmEventActivityTable()}
                     ${xcmInValueFilter.joinSql}
                     WHERE ${pageBound}
                       AND event_name IN ('Currencies.Deposited','Tokens.Deposited') AND extrinsic_index IS NULL
-                      AND ${currencyIdSql()} = {assetId:UInt32}
-                      AND NOT match(JSONExtractString(args_json,'who'), '${RESERVED_ACCOUNT_RE.source}')
+                      AND ${xcmEventActivityReady ? 'asset_id' : currencyIdSql()} = {assetId:UInt32}
+                      AND NOT match(${xcmEventActivityReady ? 'who' : "JSONExtractString(args_json,'who')"}, '${RESERVED_ACCOUNT_RE.source}')
                       ${xcmInValueFilter.predicateSql}
                     ORDER BY block_height DESC LIMIT {n:UInt32}`,
             query_params: { n: pageLimit, assetId }, format: 'JSONEachRow',
@@ -7343,7 +8983,7 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
                   AND lower(ifNull(asset_address, '')) IN ({reserves:Array(String)})
                   ${mmValueFilter.predicateSql}
                 ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
-        query_params: { n: fetchN, reserves: reserveAddrs }, format: 'JSONEachRow',
+        query_params: { n: fetchN, assetId, reserves: reserveAddrs }, format: 'JSONEachRow',
       })
       const mmEv = await res.json<{ block_height: number; event_index: number; ts: string; event_name: string; account_id: string | null; asset_address: string; pool_address: string | null; amount: string }>()
       const mmExt = await extrinsicIndexFor(mmEv.map(r => [r.block_height, r.event_index] as [number, number | null]))
@@ -7369,12 +9009,12 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
       const fetchPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
         const res = await client.query({
           query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
-                  FROM price_data.raw_events
+                  FROM ${otcActivityTable()}
                   WHERE ${pageBound}
                     AND event_name IN (${sqlEventNameList(OTC_EVENT_NAMES)})
                     AND JSONExtractUInt(args_json,'orderId') IN (
                       SELECT JSONExtractUInt(args_json,'orderId')
-                      FROM price_data.raw_events
+                      FROM ${otcActivityTable()}
                       WHERE event_name = 'OTC.Placed'
                         AND (JSONExtractInt(args_json,'assetIn') = {assetId:UInt32}
                           OR JSONExtractInt(args_json,'assetOut') = {assetId:UInt32})
@@ -7397,7 +9037,7 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
         await applyHistoricalUsd(out, activityHistPick)
         return out
       }
-      if (filters.min != null) {
+      if (fixedAssetFilters.min != null) {
         return fetchFilteredDeep(tw, want, fetchPage,
           row => activityRowMatchesFilters(row, fixedAssetFilters),
           row => row.blockHeight, row => row.eventIndex ?? -1,
@@ -7406,11 +9046,11 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
       return fetchPage(bound, fetchN)
     })() : Promise.resolve([])
 
-    const stakingP: Promise<ActivityRow[]> = wantStaking ? getRecentStaking(fetchN, from, to, undefined, 0, filters, assetId) : Promise.resolve([])
+    const stakingP: Promise<ActivityRow[]> = wantStaking ? getRecentStaking(fetchN, from, to, undefined, 0, queryFilters, assetId) : Promise.resolve([])
     const rewardsP: Promise<ActivityRow[]> = (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')
       ? getRecentRewardClaims(fetchN, from, to, undefined, [assetId], undefined, undefined, fixedAssetFilters)
       : Promise.resolve([])
-    const votesP: Promise<ActivityRow[]> = wantVotes ? getRecentVotes(fetchN, from, to, 0, {}, undefined, filters).then(rows => rows.map(v => ({
+    const votesP: Promise<ActivityRow[]> = wantVotes ? getRecentVotes(fetchN, from, to, 0, {}, undefined, queryFilters).then(rows => rows.map(v => ({
       type: 'vote' as const,
       blockHeight: v.blockHeight,
       timestamp: v.timestamp,
@@ -7475,7 +9115,155 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
 // same block-range buckets (≈180 across the indexed window) so the portfolio is
 // valued with period prices, and each asset gets a downsampled balance series.
 export interface AssetBalancePoint { ts: string; blockHeight: number; balance: number }
-export interface AssetBalanceHistory { asset: AssetRef; current: number; points: AssetBalancePoint[] }
+export interface AssetBalanceHistory { asset: AssetRef; current: number; points: AssetBalancePoint[]; availableFrom?: string }
+
+interface HistoryBalanceRow { account_id: string; asset_id: string; b: number; bal: string }
+export interface ScaledBalanceBucket { b: number; value: string }
+
+// Reconstruct end-of-bucket aToken balances without losing integer precision.
+// The anchor is authoritative at anchorBucket; each later scaled-principal delta
+// is applied before multiplying by that bucket's latest liquidity index.
+export function reconstructATokenBalanceBuckets(
+  anchorBucket: number,
+  lastBucket: number,
+  anchorScaled: string,
+  deltas: ScaledBalanceBucket[],
+  indices: ScaledBalanceBucket[],
+): ScaledBalanceBucket[] {
+  const deltaByBucket = new Map<number, bigint>()
+  for (const row of deltas) deltaByBucket.set(row.b, (deltaByBucket.get(row.b) ?? 0n) + BigInt(row.value || '0'))
+  const indexByBucket = new Map<number, bigint>()
+  for (const row of indices) indexByBucket.set(row.b, BigInt(row.value || '0'))
+
+  let scaled = BigInt(anchorScaled || '0')
+  let liquidityIndex = 0n
+  const out: ScaledBalanceBucket[] = []
+  for (let b = Math.max(0, anchorBucket); b <= lastBucket; b++) {
+    scaled += deltaByBucket.get(b) ?? 0n
+    const nextIndex = indexByBucket.get(b)
+    if (nextIndex != null && nextIndex > 0n) liquidityIndex = nextIndex
+    if (liquidityIndex <= 0n) continue
+    const actual = scaled > 0n ? (scaled * liquidityIndex) / ATOKEN_RAY : 0n
+    out.push({ b, value: actual.toString() })
+  }
+  return out
+}
+
+function historyH160(accountId: string): string | null {
+  const id = accountId.toLowerCase()
+  return evmFromAccountId(id)?.toLowerCase() ?? (/^0x[0-9a-f]{64}$/.test(id) ? `0x${id.slice(2, 42)}` : null)
+}
+
+// Add supplied money-market collateral to the per-asset history only. Portfolio
+// value continues to use the indexed per-market collateral/debt snapshots below,
+// avoiding a double count while making the balance tabs agree with live balances.
+async function appendMoneyMarketBalanceRows(
+  accounts: string[],
+  minBlock: number,
+  bucketSize: number,
+  lastBucket: number,
+  rows: HistoryBalanceRow[],
+): Promise<Map<string, number>> {
+  const availableFromBucket = new Map<string, number>()
+  // Partial projections must never masquerade as complete history. Existing
+  // wallet/portfolio history remains available while either bounded backfill runs.
+  if (!atokenScaledDeltasReady || !moneyMarketReserveIndicesReady) return availableFromBucket
+  const holders = [...new Set(accounts.map(historyH160).filter(Boolean) as string[])]
+  if (!holders.length) return availableFromBucket
+  const anchorBlock = await aTokenAnchorBlock()
+  if (!anchorBlock) return availableFromBucket
+
+  const tokens = (await getMmReserveTokens()).filter(token => {
+    const market = MM_MARKET_BY_KEY.get(token.marketKey)
+    // The staking-backed market's supplied stHDX is already represented by the
+    // locked HDX wallet curve, matching getAddress's current-balance semantics.
+    return !market?.stakingBacked && assetIdFromMmAddress(token.asset) != null
+  })
+  const contracts = [...new Set(tokens.map(token => token.aToken.toLowerCase()))]
+  if (!contracts.length) return availableFromBucket
+  const anchorBucket = Math.max(0, Math.min(lastBucket, Math.floor((Math.max(anchorBlock, minBlock) - minBlock) / bucketSize)))
+
+  const [anchorRes, deltaRes] = await Promise.all([
+    client.query({
+      query: `SELECT lower(holder) AS holder, lower(contract_address) AS contract,
+                toString(scaled_balance) AS scaled
+              FROM price_data.atoken_scaled_anchor FINAL
+              WHERE holder IN ({holders:Array(String)})
+                AND contract_address IN ({contracts:Array(String)})
+                AND anchor_block = {anchorBlock:UInt32}`,
+      query_params: { holders, contracts, anchorBlock }, format: 'JSONEachRow',
+    }),
+    client.query({
+      query: `SELECT holder, contract_address AS contract,
+                toUInt32(least(intDiv(greatest(block_height, {minBlock:UInt32}) - {minBlock:UInt32}, {bucketSize:UInt32}), {lastBucket:UInt32})) AS b,
+                toString(sum(scaled_delta)) AS delta
+              FROM price_data.atoken_scaled_deltas FINAL
+              WHERE holder IN ({holders:Array(String)})
+                AND contract_address IN ({contracts:Array(String)})
+                AND block_height > {anchorBlock:UInt32}
+              GROUP BY holder, contract, b ORDER BY holder, contract, b`,
+      query_params: { holders, contracts, anchorBlock, minBlock, bucketSize, lastBucket }, format: 'JSONEachRow',
+    }),
+  ])
+  const anchors = await anchorRes.json<{ holder: string; contract: string; scaled: string }>()
+  const deltaRows = await deltaRes.json<{ holder: string; contract: string; b: number; delta: string }>()
+  const state = new Map<string, { holder: string; contract: string; anchor: string; deltas: ScaledBalanceBucket[] }>()
+  for (const row of anchors) {
+    if (BigInt(row.scaled || '0') === 0n) continue
+    const key = `${row.holder}:${row.contract}`
+    state.set(key, { holder: row.holder, contract: row.contract, anchor: row.scaled, deltas: [] })
+  }
+  for (const row of deltaRows) {
+    const key = `${row.holder}:${row.contract}`
+    const entry = state.get(key) ?? { holder: row.holder, contract: row.contract, anchor: '0', deltas: [] }
+    entry.deltas.push({ b: Number(row.b), value: row.delta })
+    state.set(key, entry)
+  }
+  if (!state.size) return availableFromBucket
+
+  const tokenByContract = new Map(tokens.map(token => [token.aToken.toLowerCase(), token]))
+  const usedTokens = [...new Set([...state.values()].map(entry => tokenByContract.get(entry.contract)).filter(Boolean) as MmReserveToken[])]
+  const pools = [...new Set(usedTokens.map(token => token.poolProxy.toLowerCase()))]
+  const reserves = [...new Set(usedTokens.map(token => token.asset.toLowerCase()))]
+  const indexCut = Math.max(anchorBlock, minBlock)
+  const indexRes = await client.query({
+    query: `SELECT pool_address AS pool, reserve_address AS reserve,
+              toUInt32(least(intDiv(greatest(block_height, {indexCut:UInt32}, {minBlock:UInt32}) - {minBlock:UInt32}, {bucketSize:UInt32}), {lastBucket:UInt32})) AS b,
+              toString(argMax(liquidity_index, tuple(block_height,event_index,ingested_at))) AS liquidity_index
+            FROM price_data.money_market_reserve_indices FINAL
+            WHERE pool_address IN ({pools:Array(String)}) AND reserve_address IN ({reserves:Array(String)})
+            GROUP BY pool, reserve, b ORDER BY pool, reserve, b`,
+    query_params: { pools, reserves, indexCut, minBlock, bucketSize, lastBucket }, format: 'JSONEachRow',
+  })
+  const indicesByReserve = new Map<string, ScaledBalanceBucket[]>()
+  for (const row of await indexRes.json<{ pool: string; reserve: string; b: number; liquidity_index: string }>()) {
+    const key = `${row.pool}:${row.reserve}`
+    const series = indicesByReserve.get(key) ?? []
+    series.push({ b: Number(row.b), value: row.liquidity_index })
+    indicesByReserve.set(key, series)
+  }
+
+  for (const entry of state.values()) {
+    const token = tokenByContract.get(entry.contract)
+    if (!token) continue
+    const reserveId = assetIdFromMmAddress(token.asset)
+    if (reserveId == null) continue
+    const receiptId = UNDERLYING_TO_ATOKEN_ID[reserveId] ?? reserveId
+    const displayId = displayAssetId(receiptId)
+    const indexSeries = indicesByReserve.get(`${token.poolProxy.toLowerCase()}:${token.asset.toLowerCase()}`)
+    if (!indexSeries?.length) continue
+    availableFromBucket.set(String(displayId), anchorBucket)
+    for (const point of reconstructATokenBalanceBuckets(anchorBucket, lastBucket, entry.anchor, entry.deltas, indexSeries)) {
+      rows.push({
+        account_id: `${entry.holder}#mm:${entry.contract}`,
+        asset_id: String(displayId),
+        b: point.b,
+        bal: rescaleRaw(point.value, asset(reserveId).decimals, asset(displayId).decimals),
+      })
+    }
+  }
+  return availableFromBucket
+}
 
 // MM positions are re-snapshotted periodically by the raw indexer (every N
 // blocks, every borrower — not just on the borrower's own MM events), so the
@@ -7484,9 +9272,23 @@ export interface AssetBalanceHistory { asset: AssetRef; current: number; points:
 async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; balanceHistory: AssetBalanceHistory[] }> {
   const list = sqlAccountList(accounts)
   if (list === "''") return { portfolioSeries: [], portfolioDates: [], balanceHistory: [] }
+  // Single ordinary accounts are already selective in the account-first exact
+  // history and avoid the merge overhead of the hourly model. Multi-member tags
+  // and dense structural accounts are the shapes for which hourly compaction is
+  // materially smaller.
+  const useAccountBalanceHourly = accountBalanceHourlyReady &&
+    (accounts.length > 4 || accounts.some(account => /^0x(6d6f646c|7369626c|70617261)/.test(account)))
   const prices = await ensurePrices()
   const rangeRes = await client.query({
-    query: `SELECT min(block_height) AS minb, max(block_height) AS maxb, toUnixTimestamp(min(block_timestamp)) AS mint, toUnixTimestamp(max(block_timestamp)) AS maxt FROM price_data.raw_balance_observations WHERE account_id IN (${list})`,
+    query: useAccountBalanceHourly
+      ? `SELECT minMerge(first_block_state) AS minb, maxMerge(last_block_state) AS maxb,
+          toUnixTimestamp(minMerge(first_timestamp_state)) AS mint,
+          toUnixTimestamp(maxMerge(last_timestamp_state)) AS maxt
+        FROM price_data.account_balance_hourly WHERE account_id IN (${list})`
+      : `SELECT min(block_height) AS minb, max(block_height) AS maxb,
+          toUnixTimestamp(min(block_timestamp)) AS mint, toUnixTimestamp(max(block_timestamp)) AS maxt
+        FROM price_data.${accountBalanceHistoryReady ? 'account_balance_history' : 'raw_balance_observations'}
+        WHERE account_id IN (${list})`,
     format: 'JSONEachRow',
   })
   const rng = (await rangeRes.json<{ minb: number; maxb: number; mint: number; maxt: number }>())[0]
@@ -7509,6 +9311,32 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   const tsInterpolated = (b: number) => { const frac = N > 0 ? b / N : 0; const sec = rng.mint + frac * (rng.maxt - rng.mint); return new Date(sec * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '') }
   const tsAt = (b: number) => tsByBucket.get(b) ?? tsInterpolated(b)
 
+  // An hourly close is sufficient unless a dynamic block bucket boundary splits
+  // that hour. Fetch the exact block span of only those boundary hours; the
+  // balance query below unions their raw observations with hourly closes, so the
+  // winner of every original block bucket remains bit-for-bit identical.
+  let boundaryBalancePredicate = '0'
+  if (useAccountBalanceHourly) {
+    const boundaryHeights = Array.from({ length: N }, (_, i) => rng.minb + (i + 1) * BUCKET)
+      .filter(height => height <= rng.maxb)
+    if (boundaryHeights.length) {
+      const boundaryRes = await client.query({
+        query: `WITH boundary_hours AS (
+            SELECT DISTINCT toStartOfHour(block_timestamp) AS hour FROM price_data.blocks
+            WHERE block_height IN (${boundaryHeights.join(',')})
+          )
+          SELECT min(block_height) AS first,max(block_height) AS last
+          FROM price_data.blocks WHERE toStartOfHour(block_timestamp) IN boundary_hours
+          GROUP BY toStartOfHour(block_timestamp) ORDER BY first`,
+        format: 'JSONEachRow',
+      })
+      const ranges = await boundaryRes.json<{ first: number; last: number }>()
+      if (ranges.length) boundaryBalancePredicate = ranges
+        .map(range => `(block_height>=${range.first} AND block_height<=${range.last})`)
+        .join(' OR ')
+    }
+  }
+
   // Bucket per (account, asset): for a multi-account tag each account's balance
   // must be forward-filled INDEPENDENTLY and only THEN summed per bucket. A single
   // argMax(total) across the whole account list would pick just one account's
@@ -7516,16 +9344,38 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   // making the combined series sawtooth as the "winning" account flips bucket to
   // bucket. (For the single-account case this collapses to the original behaviour.)
   const balRes = await client.query({
-    query: `SELECT account_id, asset_id, toUInt32(least(intDiv(block_height - ${rng.minb}, ${BUCKET}), ${N})) AS b,
-              toString(argMax(toUInt256OrZero(total), block_height)) AS bal
-            FROM price_data.raw_balance_observations WHERE account_id IN (${list})
-            GROUP BY account_id, asset_id, b ORDER BY asset_id, account_id, b`,
+    query: useAccountBalanceHourly
+      ? `SELECT account_id, asset_id,
+          toUInt32(least(intDiv(candidate_block - ${rng.minb}, ${BUCKET}), ${N})) AS b,
+          toString(argMax(balance, candidate_block)) AS bal
+        FROM (
+          SELECT account_id, asset_id, interval_start,
+            argMaxMerge(balance_state) AS balance,
+            argMaxMerge(block_state) AS candidate_block
+          FROM price_data.account_balance_hourly
+          WHERE account_id IN (${list})
+          GROUP BY account_id, asset_id, interval_start
+          UNION ALL
+          SELECT account_id,asset_id,toDateTime(0) AS interval_start,
+            toString(argMax(toUInt256OrZero(total),tuple(block_height,observation_id,ingested_at))) AS balance,
+            argMax(block_height,tuple(block_height,observation_id,ingested_at)) AS candidate_block
+          FROM price_data.account_balance_history
+          WHERE account_id IN (${list}) AND (${boundaryBalancePredicate})
+          GROUP BY account_id,asset_id,
+            toUInt32(least(intDiv(block_height - ${rng.minb}, ${BUCKET}), ${N}))
+        )
+        GROUP BY account_id, asset_id, b ORDER BY asset_id, account_id, b`
+      : `SELECT account_id, asset_id, toUInt32(least(intDiv(block_height - ${rng.minb}, ${BUCKET}), ${N})) AS b,
+          toString(argMax(toUInt256OrZero(total), ${accountBalanceHistoryReady ? 'tuple(block_height, observation_id, ingested_at)' : 'tuple(block_height, ifNull(source_event_index, toUInt32(4294967295)), observation_id, ingested_at)'})) AS bal
+        FROM price_data.${accountBalanceHistoryReady ? 'account_balance_history' : 'raw_balance_observations'}
+        WHERE account_id IN (${list})
+        GROUP BY account_id, asset_id, b ORDER BY asset_id, account_id, b`,
     format: 'JSONEachRow',
   })
   // Fold pool-share series into their underlying main asset (2-Pool-GDOT → GDOT),
   // same per-account display rule as foldShareBalances, so no "-Pool" history chart
   // appears and the underlying's series carries the combined balance.
-  const balRows = (await balRes.json<{ account_id: string; asset_id: string; b: number; bal: string }>())
+  const balRows: HistoryBalanceRow[] = (await balRes.json<{ account_id: string; asset_id: string; b: number; bal: string }>())
     .map(r => {
       const did = displayAssetId(Number(r.asset_id))
       // Share token and underlying can differ in decimals (2-Pool-PRIME 18 vs PRIME 6);
@@ -7542,12 +9392,17 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   for (const ea of ERC20_WALLET_ASSETS) {
     const h160For = new Map<string, string>()
     for (const a of accounts) {
-      const id = a.toLowerCase()
-      const isEth = id.startsWith('0x45544800') && id.endsWith('0000000000000000')
-      h160For.set(isEth ? '0x' + id.slice(10, 50) : '0x' + id.slice(2, 42), a)
+      const h160 = historyH160(a)
+      if (h160) h160For.set(h160, a)
     }
     const logRes = await client.query({
-      query: `
+      query: erc20TransferDeltasReady ? `
+        SELECT holder AS w,
+          toUInt32(least(intDiv(greatest(block_height, ${rng.minb}) - ${rng.minb}, ${BUCKET}), ${N})) AS b,
+          toString(sum(balance_delta)) AS net
+        FROM price_data.erc20_transfer_deltas FINAL
+        WHERE contract_address = {c:String} AND holder IN ({ws:Array(String)})
+        GROUP BY w, b ORDER BY w, b` : `
         SELECT p.1 AS w, toUInt32(least(intDiv(greatest(block_height, ${rng.minb}) - ${rng.minb}, ${BUCKET}), ${N})) AS b, toString(sum(p.2)) AS net
         FROM (
           SELECT block_height,
@@ -7575,6 +9430,7 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
       if (accountId) balRows.push({ account_id: `${accountId}#erc20`, asset_id: String(ea.assetId), b: r.b, bal: (cum < 0n ? 0n : cum).toString() })
     }
   }
+  const mmAvailableFromBucket = await appendMoneyMarketBalanceRows(accounts, rng.minb, BUCKET, N, balRows)
   const assetIds = [...new Set(balRows.map(r => r.asset_id))]
   if (!assetIds.length) return { portfolioSeries: [], portfolioDates: [], balanceHistory: [] }
   // Open omnipool LP positions (bare + farmed) for the period LP-value reconstruction
@@ -7586,18 +9442,47 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   const priceIdFor = new Map(assetIds.map(id => [id, String(priceAssetId(Number(id)))]))
   const lpPriceIds = openPositions.length ? [...new Set(openPositions.map(p => String(priceAssetId(p.dec.assetId))))].concat(String(LRNA_ASSET_ID)) : []
   const priceIds = [...new Set([...priceIdFor.values(), ...lpPriceIds])]
-  // NOTE: prices.asset_id is UInt32 (returns as a JSON number) while balance
-  // asset_ids are Strings. toString() here keeps the price map keys string-typed
-  // so the priceIdFor lookup below actually hits.
+  // The daily close states are a replay-safe compact projection of prices. The
+  // raw table contains a row for every asset at every indexed block; grouping it
+  // here used to read hundreds of millions of rows for a single account/tag
+  // history.  Use only candles which have fully closed by the bucket timestamp,
+  // so a chart point can never see a future price.  This differs by at most one
+  // UTC day from the latest raw observation and retains historical (never current)
+  // valuation for every bucket.
   const pxRes = await client.query({
-    query: `SELECT toString(asset_id) AS asset_id, toUInt32(least(intDiv(block_height - ${rng.minb}, ${BUCKET}), ${N})) AS b, argMax(toFloat64(usd_price), block_height) AS px
-            FROM price_data.prices WHERE block_height >= ${rng.minb} AND usd_price > 0 AND asset_id IN (${priceIds.map(a => `'${a}'`).join(',')})
-            GROUP BY asset_id, b ORDER BY asset_id, b`,
+    query: `SELECT toString(asset_id) AS asset_id, toString(interval_start) AS ts,
+              toFloat64(argMaxMerge(close_state)) AS px
+            FROM price_data.ohlc_1d
+            WHERE asset_id IN (${priceIds.join(',')})
+              AND interval_start >= toStartOfDay({priceStart:DateTime})
+              AND interval_start <= toStartOfDay({priceEnd:DateTime})
+            GROUP BY asset_id, interval_start ORDER BY asset_id, interval_start`,
+    query_params: { priceStart: tsAt(0), priceEnd: tsAt(N) },
     format: 'JSONEachRow',
   })
-  const pxRows = await pxRes.json<{ asset_id: string; b: number; px: number }>()
+  const pxRows = await pxRes.json<{ asset_id: string; ts: string; px: number }>()
   const pxByPriceId = new Map<string, Map<number, number>>()
-  for (const r of pxRows) { if (!pxByPriceId.has(r.asset_id)) pxByPriceId.set(r.asset_id, new Map()); pxByPriceId.get(r.asset_id)!.set(r.b, r.px) }
+  const dailyByPriceId = new Map<string, { closedAt: number; px: number }[]>()
+  const utcMillis = (ts: string) => Date.parse(`${ts.replace(' ', 'T')}Z`)
+  for (const r of pxRows) {
+    if (!dailyByPriceId.has(r.asset_id)) dailyByPriceId.set(r.asset_id, [])
+    dailyByPriceId.get(r.asset_id)!.push({ closedAt: utcMillis(r.ts) + 86_400_000, px: Number(r.px) })
+  }
+  for (const id of priceIds) {
+    const candles = dailyByPriceId.get(id) ?? []
+    const byBucket = new Map<number, number>()
+    let cursor = 0
+    let lastPrice: number | undefined
+    for (let b = 0; b <= N; b++) {
+      const bucketEnd = utcMillis(tsAt(b))
+      while (cursor < candles.length && candles[cursor].closedAt <= bucketEnd) {
+        lastPrice = candles[cursor].px
+        cursor++
+      }
+      if (lastPrice != null && lastPrice > 0) byBucket.set(b, lastPrice)
+    }
+    pxByPriceId.set(id, byBucket)
+  }
   // Key the per-bucket price series back by the original (possibly aToken) id.
   const pxByAsset = new Map<string, Map<number, number>>()
   for (const id of assetIds) pxByAsset.set(id, pxByPriceId.get(priceIdFor.get(id)!) ?? new Map())
@@ -7638,19 +9523,23 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
     // Combined (summed) forward-filled balance per bucket, and a flag for whether
     // ANY account had an observation in that bucket (drives the downsampled points).
     const combined = new Array(N + 1).fill(0)
+    const portfolioCombined = new Array(N + 1).fill(0)
     const observedBucket = new Array(N + 1).fill(false)
-    for (const [, balMap] of byAcct) {
+    for (const [accountId, balMap] of byAcct) {
       let lastBal = 0
       for (let b = 0; b <= N; b++) {
         if (balMap.has(b)) { lastBal = Number(balMap.get(b)) / 10 ** a.decimals; observedBucket[b] = true }
         combined[b] += lastBal
+        // Supplied MM reserves are already present in the aggregate collateral
+        // snapshots added below; these pseudo-accounts are display-history only.
+        if (!accountId.includes('#mm:')) portfolioCombined[b] += lastBal
       }
     }
     let lastPx = earliestPx
     const points: AssetBalancePoint[] = []
     for (let b = 0; b <= N; b++) {
       if (pxMap.has(b)) lastPx = pxMap.get(b)!
-      portfolio[b] += combined[b] * (lastPx || 0)
+      portfolio[b] += portfolioCombined[b] * (lastPx || 0)
       // Plot every observed bucket, plus the final bucket so the line is forward-
       // filled to "now" (the balance persists after its last change). This also
       // gives sparsely-observed assets a 2nd point, so they render a real line.
@@ -7661,7 +9550,12 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
     // than buckets) never plots multiple points on the same date.
     if (points.length) {
       const dailyPoints = downsampleDailyPoints(points)
-      if (hasNonZeroVisibleBalance(dailyPoints)) balanceHistory.push({ asset: a, current: combined[N], points: dailyPoints })
+      if (hasNonZeroVisibleBalance(dailyPoints)) balanceHistory.push({
+        asset: a,
+        current: combined[N],
+        points: dailyPoints,
+        ...(mmAvailableFromBucket.has(id) ? { availableFrom: tsAt(mmAvailableFromBucket.get(id)!) } : {}),
+      })
     }
   }
 
@@ -7678,8 +9572,8 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   const mmRes = await client.query({
     query: `SELECT account_id, lower(pool_address) AS pool,
               toUInt32(least(intDiv(block_height - ${rng.minb}, ${BUCKET}), ${N})) AS b,
-              argMax(toFloat64(total_collateral_base), block_height) / 1e8 AS collat,
-              argMax(toFloat64(total_debt_base), block_height) / 1e8 AS debt
+              argMax(toFloat64(total_collateral_base), ${moneyMarketPositionOrderSql()}) / 1e8 AS collat,
+              argMax(toFloat64(total_debt_base), ${moneyMarketPositionOrderSql()}) / 1e8 AS debt
             FROM price_data.raw_money_market_positions
             WHERE account_id IN (${list}) AND block_height >= ${rng.minb} AND block_height <= ${rng.maxb}
               AND lower(pool_address) IN (${configuredMmPoolsSql()})
@@ -7697,8 +9591,8 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
     // Carry-in per account: last position established before the window opens.
     const carryRes = await client.query({
       query: `SELECT account_id, lower(pool_address) AS pool,
-                argMax(toFloat64(total_collateral_base), block_height) / 1e8 AS collat,
-                argMax(toFloat64(total_debt_base), block_height) / 1e8 AS debt
+                argMax(toFloat64(total_collateral_base), ${moneyMarketPositionOrderSql()}) / 1e8 AS collat,
+                argMax(toFloat64(total_debt_base), ${moneyMarketPositionOrderSql()}) / 1e8 AS debt
               FROM price_data.raw_money_market_positions
               WHERE account_id IN (${list}) AND block_height < ${rng.minb}
                 AND lower(pool_address) IN (${configuredMmPoolsSql()})
@@ -7739,10 +9633,14 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   if (openPositions.length) {
     const { omni: bucketOmni } = await loadBucketedPoolState(rng.minb, BUCKET, N)
     const createdRes = await client.query({
-      query: `SELECT toString(JSONExtractInt(args_json,'positionId')) AS pid, min(block_height) AS created
-              FROM price_data.raw_events WHERE event_name='Omnipool.PositionCreated'
-                AND toString(JSONExtractInt(args_json,'positionId')) IN (${openPositions.map(p => `'${p.positionId}'`).join(',')})
-              GROUP BY pid`,
+      query: omnipoolPositionCreatedReady
+        ? `SELECT position_id AS pid, block_height AS created
+           FROM price_data.omnipool_position_created FINAL
+           WHERE position_id IN (${openPositions.map(position => `'${position.positionId}'`).join(',')})`
+        : `SELECT toString(JSONExtractInt(args_json,'positionId')) AS pid, min(block_height) AS created
+           FROM price_data.raw_events WHERE event_name='Omnipool.PositionCreated'
+             AND toString(JSONExtractInt(args_json,'positionId')) IN (${openPositions.map(position => `'${position.positionId}'`).join(',')})
+           GROUP BY pid`,
       format: 'JSONEachRow',
     })
     const createdAt = new Map<string, number>()
@@ -7870,6 +9768,13 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   const related = new Set(accounts.map(a => a.toLowerCase()))
   const prices = await ensurePrices()
   const tokenIds = assetIdsForToken(filters.token)
+  // Joining hourly prices below each source's LIMIT forces ClickHouse to value
+  // the entire account history. Pull bounded account-first candidates first;
+  // applyHistoricalUsd then records the same exact Decimal/BigInt value used by
+  // activityRowMatchesFilters.
+  const queryFilters = filters.min != null && filters.unit !== 'token'
+    ? { ...filters, min: undefined, unit: undefined }
+    : filters
   // When a single category is requested we paginate within it, so fetch enough
   // rows to cover the requested page (offset+limit) plus headroom for de-dup.
   const want = offset + limit
@@ -7899,25 +9804,41 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   if (wantTrades || wantTransfers) {
     const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
     const swapTokenFilter = tokenIds == null ? '' : tokenIds.length
-      ? `AND (JSONExtractInt(e.args_json,'assetIn') IN (${tokenIds.join(',')}) OR JSONExtractInt(e.args_json,'assetOut') IN (${tokenIds.join(',')}))`
+      ? accountSwapActivityReady
+        ? `AND (asset_in IN (${tokenIds.join(',')}) OR asset_out IN (${tokenIds.join(',')}))`
+        : `AND (JSONExtractInt(e.args_json,'assetIn') IN (${tokenIds.join(',')}) OR JSONExtractInt(e.args_json,'assetOut') IN (${tokenIds.join(',')}))`
       : 'AND 0'
-    const swapAmountFilter = eventValueFilterSql(`JSONExtractInt(e.args_json,'assetOut')`, `JSONExtractString(e.args_json,'amountOut')`, 'e.block_timestamp', filters, prices, 'account_trade_price')
+    const swapAssetExpr = accountSwapActivityReady ? 'asset_out' : `JSONExtractInt(e.args_json,'assetOut')`
+    const swapAmountExpr = accountSwapActivityReady ? 'amount_out' : `JSONExtractString(e.args_json,'amountOut')`
+    const swapTimeExpr = accountSwapActivityReady ? 'block_timestamp' : 'e.block_timestamp'
+    const swapAmountFilter = eventValueFilterSql(swapAssetExpr, swapAmountExpr, swapTimeExpr, queryFilters, prices, 'account_trade_price')
     const swapRes = await client.query({
-      query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index, e.extrinsic_index, e.event_name,
-        JSONExtractInt(e.args_json,'assetIn') AS asset_in, JSONExtractInt(e.args_json,'assetOut') AS asset_out,
-        JSONExtractString(e.args_json,'amountIn') AS amount_in, JSONExtractString(e.args_json,'amountOut') AS amount_out,
-        coalesce(x.signer, x.effective_signer) AS signer
-        FROM price_data.raw_events e
-        ANY INNER JOIN price_data.raw_extrinsics x
-          ON x.block_height = e.block_height AND x.extrinsic_index = e.extrinsic_index
-        ${swapAmountFilter.joinSql}
-        WHERE ${bound.replaceAll('block_height', 'e.block_height').replaceAll('block_timestamp', 'e.block_timestamp')}
-          AND (x.signer IN (${list}) OR x.effective_signer IN (${list}))
-          AND e.event_name IN (${names})
-        ${swapTokenFilter}
-        ${swapAmountFilter.predicateSql}
-        ORDER BY e.block_height DESC, e.extrinsic_index DESC, e.event_name = 'Router.Executed' DESC, e.event_index DESC
-        LIMIT 1 BY e.block_height, e.extrinsic_index
+      query: accountSwapActivityReady
+        ? `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+          asset_in, asset_out, amount_in, amount_out, signer
+          FROM price_data.account_swap_activity FINAL
+          ${swapAmountFilter.joinSql}
+          WHERE ${bound} AND account IN (${list})
+          ${swapTokenFilter}
+          ${swapAmountFilter.predicateSql}
+          ORDER BY block_height DESC, extrinsic_index DESC, event_name = 'Router.Executed' DESC, event_index DESC
+          LIMIT 1 BY block_height, extrinsic_index
+          LIMIT {n:UInt32}`
+        : `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index, e.extrinsic_index, e.event_name,
+          JSONExtractInt(e.args_json,'assetIn') AS asset_in, JSONExtractInt(e.args_json,'assetOut') AS asset_out,
+          JSONExtractString(e.args_json,'amountIn') AS amount_in, JSONExtractString(e.args_json,'amountOut') AS amount_out,
+          coalesce(x.signer, x.effective_signer) AS signer
+          FROM price_data.raw_events e
+          ANY INNER JOIN price_data.raw_extrinsics x
+            ON x.block_height = e.block_height AND x.extrinsic_index = e.extrinsic_index
+          ${swapAmountFilter.joinSql}
+          WHERE ${bound.replaceAll('block_height', 'e.block_height').replaceAll('block_timestamp', 'e.block_timestamp')}
+            AND (x.signer IN (${list}) OR x.effective_signer IN (${list}))
+            AND e.event_name IN (${names})
+          ${swapTokenFilter}
+          ${swapAmountFilter.predicateSql}
+          ORDER BY e.block_height DESC, e.extrinsic_index DESC, e.event_name = 'Router.Executed' DESC, e.event_index DESC
+          LIMIT 1 BY e.block_height, e.extrinsic_index
         LIMIT {n:UInt32}`,
       query_params: { n: catFetch }, format: 'JSONEachRow',
     })
@@ -7949,7 +9870,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
     }
   }
 
-  const otc = wantOtc ? await getRecentOtc(catFetch, from, to, 0, filters, type === 'otc' ? action : undefined, accounts) : []
+  const otc = wantOtc ? await getRecentOtc(catFetch, from, to, 0, queryFilters, type === 'otc' ? action : undefined, accounts) : []
   const otcExt = activityExtrinsicSet(otc)
 
   // 2. Genuine user↔user transfers, queried directly from the transfer events
@@ -7967,13 +9888,14 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
     const accList = accCond.map(a => `'${a}'`).join(',')
     const transferAssetExpr = transferAssetIdSql()
     const transferTokenFilter = assetIdFilterSql(transferAssetExpr, tokenIds)
-    const transferAmountFilter = eventValueFilterSql(transferAssetExpr, `JSONExtractString(args_json,'amount')`, 'block_timestamp', filters, prices, 'account_transfer_price')
+    const transferAmountFilter = eventValueFilterSql(transferAssetExpr, `JSONExtractString(args_json,'amount')`, 'block_timestamp', queryFilters, prices, 'account_transfer_price')
     // Prune to the account's own (block, event) refs before the JSON conditions
     // — turns the per-account full scan of raw_events into a point-range read.
     // Module transfers stay in the refs: pot legs are filtered per-pot below
     // (a treasury donation IS the account's transfer; only swap/fee plumbing
     // pots are dropped).
-    const transferRefsFilter = accountActivityReady && tokenIds == null && filters.min == null
+    const useTransferReadModel = accountTransferActivityReady && tokenIds == null && queryFilters.min == null
+    const transferRefsFilter = !useTransferReadModel && accountActivityReady && tokenIds == null && queryFilters.min == null
       ? `AND ${accountActivityRefsSql(accList, `event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')`, bound, catFetch * 3)}`
       : ''
     // Supply/withdraw/borrow/repay move tokens between the user and a money-
@@ -7986,13 +9908,32 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
     const mmLegFilter = !viewingMmContract && mmList
       ? `AND JSONExtractString(args_json,'from') NOT IN (${mmList}) AND JSONExtractString(args_json,'to') NOT IN (${mmList})`
       : ''
+    const transferReadModelMmLegFilter = !viewingMmContract && mmList
+      ? `AND from_account NOT IN (${mmList}) AND to_account NOT IN (${mmList})`
+      : ''
     const poolAccs = ammPoolAccounts()
     const viewingPool = accCond.some(a => poolAccs.has(a))
     const poolLegFilter = !viewingPool && poolAccs.size
       ? `AND JSONExtractString(args_json,'from') NOT IN (${[...poolAccs].map(a => `'${a}'`).join(',')}) AND JSONExtractString(args_json,'to') NOT IN (${[...poolAccs].map(a => `'${a}'`).join(',')})`
       : ''
+    const transferReadModelPoolLegFilter = !viewingPool && poolAccs.size
+      ? `AND from_account NOT IN (${[...poolAccs].map(a => `'${a}'`).join(',')}) AND to_account NOT IN (${[...poolAccs].map(a => `'${a}'`).join(',')})`
+      : ''
     const trRes = await client.query({
-      query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+      query: useTransferReadModel
+        ? `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+                from_account AS from_acc, to_account AS to_acc, amount, asset_id
+              FROM price_data.account_transfer_activity
+              WHERE account IN (${accList}) AND ${bound}
+                AND (from_account IN (${accList}) OR to_account IN (${accList}))
+                AND from_account NOT IN (${noisyPotList()})
+                AND to_account NOT IN (${noisyPotList()})
+                AND NOT match(from_account, '^0x(7369626c|70617261|506172656e74)')
+                AND NOT match(to_account, '^0x(7369626c|70617261|506172656e74)')
+                ${transferReadModelPoolLegFilter}
+                ${transferReadModelMmLegFilter}
+              ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`
+        : `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
                 JSONExtractString(args_json,'from') AS from_acc,
                 JSONExtractString(args_json,'to') AS to_acc,
                 JSONExtractString(args_json,'amount') AS amount,
@@ -8073,9 +10014,9 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
     const dcaTokenFilter = tokenIds == null ? '' : tokenIds.length
       ? `AND (s.asset_in IN (${tokenIds.join(',')}) OR s.asset_out IN (${tokenIds.join(',')}))`
       : 'AND 0'
-    const dcaValueFilter = eventValueFilterSql('s.asset_out', 'e.amount_out', 'e.block_timestamp', filters, prices, 'account_dca_price')
+    const dcaValueFilter = eventValueFilterSql('s.asset_out', 'e.amount_out', 'e.block_timestamp', queryFilters, prices, 'account_dca_price')
     const dcaExecRes = await client.query({
-      query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.who,
+      query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.who AS who,
                 toString(e.id) AS id, e.amount_in, e.amount_out
               FROM price_data.dca_events e
               ANY LEFT JOIN price_data.dca_schedules s ON s.id = e.id
@@ -8134,26 +10075,29 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   // rule catches them; keying on the extrinsic does.
   const liqCreateExt = new Set<string>()
   if (wantLiquidity) {
-    const liquidityAssetExpr = `multiIf(JSONHas(args_json,'rewardCurrency'), JSONExtractInt(args_json,'rewardCurrency'),
+    const useLiquidityReadModel = liquidityActivityReady
+    const liquidityAssetExpr = useLiquidityReadModel ? 'asset_id' : `multiIf(JSONHas(args_json,'rewardCurrency'), JSONExtractInt(args_json,'rewardCurrency'),
                         JSONHas(args_json,'assetId'), JSONExtractInt(args_json,'assetId'),
                         JSONHas(args_json,'poolId'), JSONExtractInt(args_json,'poolId'),
                         JSONExtractInt(args_json,'assetA'))`
     // Row inclusion matches every asset the event references (XYK assetB, Stableswap
     // nested assets[]), even though the displayed asset_id stays the representative
     // liquidityAssetExpr — else this account's HOLLAR Stableswap LP rows drop out.
-    const liquidityTokenFilter = liquidityTokenFilterSql(tokenIds)
+    const liquidityTokenFilter = useLiquidityReadModel
+      ? tokenIds == null ? '' : tokenIds.length ? `AND hasAny(asset_refs, [${tokenIds.join(',')}])` : 'AND 0'
+      : liquidityTokenFilterSql(tokenIds)
     const fetchLiquidityPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
       const liqRes = await client.query({
         query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-                JSONExtractString(args_json,'who') AS who,
+                ${useLiquidityReadModel ? 'who' : "JSONExtractString(args_json,'who')"} AS who,
                 ${liquidityAssetExpr} AS asset_id,
-                multiIf(JSONHas(args_json,'claimed'), JSONExtractString(args_json,'claimed'), JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'shares')) AS amount,
-                JSONExtractInt(args_json,'assetB') AS asset_b,
-                JSONExtractString(args_json,'pool') AS pool_acc
-              FROM price_data.raw_events
+                ${useLiquidityReadModel ? 'amount' : "multiIf(JSONHas(args_json,'claimed'), JSONExtractString(args_json,'claimed'), JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'shares'))"} AS amount,
+                ${useLiquidityReadModel ? 'asset_b' : "JSONExtractInt(args_json,'assetB')"} AS asset_b,
+                ${useLiquidityReadModel ? 'pool_account' : "JSONExtractString(args_json,'pool')"} AS pool_acc
+              FROM price_data.${useLiquidityReadModel ? 'liquidity_activity' : 'raw_events'}
               WHERE ${pageBound}
                 AND event_name IN ('Omnipool.LiquidityAdded','Omnipool.LiquidityRemoved','Stableswap.LiquidityAdded','Stableswap.LiquidityRemoved','XYK.LiquidityAdded','XYK.LiquidityRemoved','XYK.PoolCreated','OmnipoolLiquidityMining.RewardClaimed','XYKLiquidityMining.RewardClaimed')
-                AND JSONExtractString(args_json,'who') IN (${list})
+                AND ${useLiquidityReadModel ? 'who' : "JSONExtractString(args_json,'who')"} IN (${list})
                 ${liquidityTokenFilter}
               ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
         query_params: { n: pageLimit },
@@ -8179,9 +10123,9 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
       await applyHistoricalUsd(built, activityHistPick)
       return built
     }
-    const liqRows = filters.min != null
+    const liqRows = queryFilters.min != null
       ? await fetchFilteredDeep(tw, want, fetchLiquidityPage,
-        row => activityRowMatchesFilters(row, { min: filters.min, unit: filters.unit }),
+        row => activityRowMatchesFilters(row, { min: queryFilters.min, unit: queryFilters.unit }),
         row => row.blockHeight, row => row.eventIndex ?? -1,
         row => `${row.blockHeight}:${row.eventIndex}`)
       : await fetchLiquidityPage(bound, catFetch)
@@ -8202,12 +10146,14 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
       ? `AND asset_address IN (${[...new Set(tokenIds.flatMap(mmReserveAddressForAsset))].map(a => `'${a}'`).join(',')})`
       : 'AND 0'
     const mmAssetExpr = mmAssetIdSql('asset_address')
-    const mmAmountExpr = `if(event_name='LiquidationCall', JSONExtractString(decoded_args_json,'liquidatedCollateralAmount'), amount)`
-    const mmValueFilter = eventValueFilterSql(mmAssetExpr, mmAmountExpr, 'block_timestamp', filters, prices, 'account_mm_price')
+    const mmAmountExpr = accountMoneyMarketActivityReady
+      ? `if(event_name='LiquidationCall', liquidated_collateral_amount, amount)`
+      : `if(event_name='LiquidationCall', JSONExtractString(decoded_args_json,'liquidatedCollateralAmount'), amount)`
+    const mmValueFilter = eventValueFilterSql(mmAssetExpr, mmAmountExpr, 'block_timestamp', queryFilters, prices, 'account_mm_price')
     const mmTxRes = await client.query({
       query: `SELECT block_height, event_index, toString(block_timestamp) AS ts, event_name, account_id, asset_address, pool_address,
-                if(event_name='LiquidationCall', JSONExtractString(decoded_args_json,'liquidatedCollateralAmount'), amount) AS amount
-              FROM price_data.raw_money_market_events
+                ${mmAmountExpr} AS amount
+              FROM price_data.${accountMoneyMarketActivityReady ? 'account_money_market_activity FINAL' : 'raw_money_market_events'}
               ${mmValueFilter.joinSql}
               WHERE ${bound} AND account_id IN (${mmList}) AND event_name IN (${mmEventNames.map(n => `'${n}'`).join(',')})
                 AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
@@ -8238,17 +10184,17 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
 
   // 6. Cross-chain (XCM) transfers sent (outbound) or received (inbound) by this account.
   const xcm = wantXcm
-    ? (await Promise.all([getRecentXcm(catFetch, from, to, accounts, 0, filters), getRecentXcmIn(catFetch, from, to, accounts, 0, filters), getRecentXcmOutRemote(catFetch, from, to, accounts, 0, filters)])).flat()
+    ? (await Promise.all([getRecentXcm(catFetch, from, to, accounts, 0, queryFilters), getRecentXcmIn(catFetch, from, to, accounts, 0, queryFilters), getRecentXcmOutRemote(catFetch, from, to, accounts, 0, queryFilters)])).flat()
     : []
-  const staking = wantStaking ? await getRecentStaking(catFetch, from, to, accounts, 0, filters, undefined, action) : []
-  const voteRows: ActivityRow[] = wantVotes ? (await getRecentVotes(catFetch, from, to, 0, {}, accounts, filters)).map(v => ({
+  const staking = wantStaking ? await getRecentStaking(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
+  const voteRows: ActivityRow[] = wantVotes ? (await getRecentVotes(catFetch, from, to, 0, {}, accounts, queryFilters)).map(v => ({
     type: 'vote', blockHeight: v.blockHeight, timestamp: v.timestamp, eventIndex: v.eventIndex, extrinsicIndex: v.extrinsicIndex,
     who: v.account, to: null, asset: v.asset, assetIn: null, assetOut: null, amount: v.amount, amountIn: null, amountOut: null, valueUsd: v.valueUsd,
     votePallet: v.pallet, voteAction: v.action, voteRef: v.referendum, voteSide: v.side, voteConviction: v.conviction,
     linkBlock: v.blockHeight, linkIndex: v.extrinsicIndex,
   })) : []
   const rewards = (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')
-    ? await getRecentRewardClaims(catFetch, from, to, accounts, tokenIds, undefined, undefined, filters)
+    ? await getRecentRewardClaims(catFetch, from, to, accounts, tokenIds, undefined, undefined, queryFilters)
     : []
   if (filters.min != null && filters.unit !== 'token') {
     await applyHistoricalUsd([...trades, ...transfers, ...dcaTrades, ...rewards, ...liq, ...voteRows, ...mmTx, ...otc], activityHistPick)
@@ -8379,16 +10325,16 @@ async function getAccountTabCounts(accounts: string[], cacheKey: string): Promis
     const mmList = sqlAccountList([...new Set(accounts.map(evmAccountForm).filter(Boolean) as string[])])
     const indexedHits = `
       SELECT block_height, event_index, extrinsic_index, event_name, is_module_transfer
-      FROM price_data.account_activity FINAL
+      FROM price_data.account_activity
       WHERE account IN (${list})`
-    // FINAL collapses replayed rows in key order. Only related-account sets can
-    // expose the same event through multiple account keys, so deduplicate those sets.
+    // Collapse both replayed rows and events referenced through multiple tag
+    // members by stable event identity. This preserves exact counts without
+    // FINAL, whose partition-wide merge made the two-member Treasury count read
+    // 32M rows / 2.55 GiB for six seconds.
     const activityHits = accountActivityReady
-      ? accounts.length > 1
-        ? `SELECT block_height, event_index, extrinsic_index, event_name, is_module_transfer
-           FROM (${indexedHits})
-           GROUP BY block_height, event_index, extrinsic_index, event_name, is_module_transfer`
-        : indexedHits
+      ? `SELECT block_height, event_index, extrinsic_index, event_name, is_module_transfer
+         FROM (${indexedHits})
+         GROUP BY block_height, event_index, extrinsic_index, event_name, is_module_transfer`
       : `SELECT block_height, event_index, extrinsic_index, event_name,
            toUInt8(JSONExtractString(args_json,'from') LIKE '0x6d6f646c%'
              OR JSONExtractString(args_json,'to') LIKE '0x6d6f646c%') AS is_module_transfer
@@ -8431,10 +10377,13 @@ async function getAccountTabCounts(accounts: string[], cacheKey: string): Promis
         format: 'JSONEachRow',
         // Mega accounts (router bots) have tens of millions of activity rows —
         // spill the aggregation to disk instead of hitting the memory ceiling.
-        // Exactness matters here: these counts drive pager last-page jumps.
-        clickhouse_settings: { max_bytes_before_external_group_by: '1500000000' },
+        // Exactness matters here: these counts drive pager last-page jumps. Keep
+        // the background snapshot refresh to one worker thread as well: a hot
+        // structural tag can otherwise consume the host while its already-valid
+        // snapshot is being refreshed, delaying unrelated Explorer requests.
+        clickhouse_settings: { max_bytes_before_external_group_by: '1500000000', max_threads: 1 },
       }),
-      client.query({ query: `SELECT count() AS c FROM price_data.raw_money_market_events WHERE account_id IN (${mmList}) AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})`, format: 'JSONEachRow' }),
+      client.query({ query: `SELECT count() AS c FROM price_data.${accountMoneyMarketActivityReady ? 'account_money_market_activity FINAL' : 'raw_money_market_events'} WHERE account_id IN (${mmList}) AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})`, format: 'JSONEachRow' }),
       client.query({ query: `SELECT count() AS c FROM price_data.raw_xcm_activity WHERE sender IN (${list}) OR recipient IN (${list})`, format: 'JSONEachRow' }),
       client.query({ query: `SELECT count() AS c FROM price_data.dca_events WHERE event_name = 'DCA.TradeExecuted' AND who IN (${list})`, format: 'JSONEachRow' }),
       // OTC: Filled/PartiallyFilled carry `who` (the taker) directly; Placed/Cancelled
@@ -8465,10 +10414,49 @@ export async function getAddressTabCounts(addressInput: string): Promise<{ extri
   if (!resolved) return null
   return getAccountTabCounts(resolved.related, `addr:${resolved.norm.accountId}`)
 }
+const TAG_COUNT_REFRESH_MS = 10 * 60_000
+const tagCountRefreshes = new Map<string, Promise<{ extrinsics: number; events: number; activity: number }>>()
+const hotTagCounts = new Set<string>()
+async function refreshTagTabCounts(tagId: string, members: string[], membershipKey: string): Promise<{ extrinsics: number; events: number; activity: number }> {
+  const existing = tagCountRefreshes.get(tagId)
+  if (existing) return existing
+  const refresh = (async () => {
+    const counts = await getAccountTabCounts(members, `tag:${tagId}:${membershipKey}`)
+    await client.insert({
+      table: 'price_data.tag_activity_counts',
+      values: [{ tag_id: tagId, membership_key: membershipKey, ...counts, computed_at: new Date().toISOString().replace('T', ' ').slice(0, 19) }],
+      format: 'JSONEachRow',
+    })
+    return counts
+  })().finally(() => {
+    if (tagCountRefreshes.get(tagId) === refresh) tagCountRefreshes.delete(tagId)
+  })
+  tagCountRefreshes.set(tagId, refresh)
+  return refresh
+}
 export async function getTagTabCounts(tagId: string): Promise<{ extrinsics: number; events: number; activity: number } | null> {
   const members = tagMembers(tagId)
   if (!members) return null
-  return getAccountTabCounts(members, `tag:${tagId}`)
+  hotTagCounts.add(tagId)
+  const membershipKey = [...members].map(member => member.toLowerCase()).sort().join(',')
+  const result = await client.query({
+    query: `SELECT membership_key, extrinsics, events, activity,
+              dateDiff('second', computed_at, now()) AS age
+            FROM price_data.tag_activity_counts FINAL
+            WHERE tag_id = {tagId:String}
+            LIMIT 1`,
+    query_params: { tagId }, format: 'JSONEachRow',
+  })
+  const snapshot = (await result.json<{ membership_key: string; extrinsics: string; events: string; activity: string; age: number }>())[0]
+  if (snapshot?.membership_key === membershipKey) {
+    // Never attach a full-history refresh to the request that discovers an aged
+    // snapshot. The ten-minute prewarmer owns refresh scheduling; this endpoint
+    // always returns the last complete snapshot immediately. A request-triggered
+    // refresh used to contend with the activity feed on the same cold page even
+    // though the counts response itself had already completed.
+    return { extrinsics: Number(snapshot.extrinsics), events: Number(snapshot.events), activity: Number(snapshot.activity) }
+  }
+  return refreshTagTabCounts(tagId, members, membershipKey)
 }
 export async function getTagActivityCountAtMin(tagId: string, minUsd: number): Promise<number | null> {
   const members = tagMembers(tagId)
@@ -8520,7 +10508,7 @@ async function getAccountActivityCountAtMin(accounts: string[], cacheKey: string
         format: 'JSONEachRow',
       }),
       client.query({
-        query: `SELECT count() AS c FROM price_data.raw_money_market_events
+        query: `SELECT count() AS c FROM price_data.${accountMoneyMarketActivityReady ? 'account_money_market_activity FINAL' : 'raw_money_market_events'}
                 WHERE account_id IN (${mmList}) AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})`,
         format: 'JSONEachRow',
       }),
@@ -8689,9 +10677,9 @@ export async function getMoneyMarket(limit: number): Promise<{ totalSupplyUsd: n
       query: `
         WITH primary_positions AS (
           SELECT account_id,
-            argMax(total_collateral_base, block_height) AS col,
-            argMax(total_debt_base, block_height) AS debt,
-            argMax(health_factor, block_height) AS hf,
+            argMax(total_collateral_base, ${moneyMarketPositionOrderSql()}) AS col,
+            argMax(total_debt_base, ${moneyMarketPositionOrderSql()}) AS debt,
+            argMax(health_factor, ${moneyMarketPositionOrderSql()}) AS hf,
             max(block_height) AS lb
           FROM price_data.raw_money_market_positions
           WHERE account_id != '' AND lower(pool_address) = '${CORE_MM_MARKET.poolProxy}'
@@ -8855,6 +10843,49 @@ export function buildValueSparkline(
 }
 export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'activity' | 'volume' | 'liquidation'
 export interface AccountsPage { rows: TopAccountRow[]; total: number }
+const ACCOUNT_DIRECTORY_SNAPSHOT_MAX_AGE_SECONDS = 10 * 60
+
+async function loadAccountDirectorySnapshot(snapshotKey: string): Promise<AccountsPage | null> {
+  const res = await client.query({
+    query: `SELECT payload_json,dateDiff('second',computed_at,now()) AS age,
+        ${omnipoolAccountClaimsReady
+          ? `computed_at >= (SELECT max(computed_at)
+              FROM price_data.omnipool_account_claim_snapshot_state FINAL
+              WHERE snapshot_key = 'current')`
+          : '1'} AS covers_claims,
+        ${moneyMarketAccountValuesReady
+          ? `computed_at >= (SELECT max(computed_at)
+              FROM price_data.money_market_account_value_snapshot_state FINAL
+              WHERE snapshot_key = 'current')`
+          : '1'} AS covers_money_market
+      FROM price_data.account_directory_snapshots FINAL
+      WHERE snapshot_key={snapshotKey:String} LIMIT 1`,
+    query_params: { snapshotKey }, format: 'JSONEachRow',
+  })
+  const row = (await res.json<{ payload_json: string; age: number; covers_claims: number; covers_money_market: number }>())[0]
+  if (!row || Number(row.age) > ACCOUNT_DIRECTORY_SNAPSHOT_MAX_AGE_SECONDS || Number(row.covers_claims) !== 1 || Number(row.covers_money_market) !== 1) return null
+  try {
+    const page = JSON.parse(row.payload_json) as AccountsPage
+    return Array.isArray(page?.rows) && Number.isSafeInteger(page.total) ? page : null
+  } catch { return null }
+}
+
+function accountDirectoryModelVersion(): string {
+  if (omnipoolAccountClaimsReady && moneyMarketAccountValuesReady) return 'v3'
+  return omnipoolAccountClaimsReady ? 'v2' : 'v1'
+}
+
+async function persistAccountDirectorySnapshot(snapshotKey: string, page: AccountsPage): Promise<void> {
+  await client.insert({
+    table: 'price_data.account_directory_snapshots',
+    values: [{
+      snapshot_key: snapshotKey,
+      payload_json: JSON.stringify(page),
+      computed_at: new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ''),
+    }],
+    format: 'JSONEachRow',
+  })
+}
 
 // ORDER BY clause per sort mode. Rows with no displayed value for the chosen
 // column sort last; ties fall back to portfolio value.
@@ -8877,13 +10908,23 @@ const ACCOUNT_SORT_SQL: Record<AccountSort, string> = {
 // collapsed into one). Offset-independent, so it's cached on its own key and
 // reused across pages.
 async function getAccountsTotal(): Promise<number> {
-  return cachedSwr('explorer:accounts-total', 60_000, 30 * 60_000, async () => {
+  const modelVersion = accountDirectoryModelVersion()
+  return cachedSwr(`explorer:accounts-total:${accountValueGenerationEpoch}:${modelVersion}`, 60_000, 30 * 60_000, async () => {
     const res = await client.query({
       query: `
         WITH tags AS (SELECT account_id, any(label_id) AS lid
                         FROM price_data.account_tags FINAL WHERE deleted = 0 GROUP BY account_id)
         SELECT uniqExact(if(t.lid = '', o.account_id, t.lid)) AS total
-        FROM (SELECT account_id FROM price_data.account_asset_latest_balances GROUP BY account_id) o
+        FROM (
+          SELECT account_id FROM price_data.account_asset_latest_balances GROUP BY account_id
+          ${omnipoolAccountClaimsReady ? `UNION ALL
+          SELECT account_id FROM price_data.omnipool_account_claim_snapshots
+          WHERE snapshot_id = (
+            SELECT argMax(snapshot_id, computed_at)
+            FROM price_data.omnipool_account_claim_snapshot_state
+            WHERE snapshot_key = 'current'
+          ) GROUP BY account_id` : ''}
+        ) o
         LEFT JOIN tags t ON t.account_id = o.account_id`,
       format: 'JSONEachRow',
     })
@@ -8902,14 +10943,36 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
   // page — seconds of ClickHouse time. Serve stale-while-revalidating so only a
   // truly cold first hit ever waits; the prewarmer below keeps the default view
   // from ever being cold.
-  return cachedSwr(`explorer:accounts:${sort}:${offset}:${limit}`, 60_000, 30 * 60_000, async () => {
-    const prices = await ensurePrices()
+  const modelVersion = accountDirectoryModelVersion()
+  return cachedSwr(`explorer:accounts:${accountValueGenerationEpoch}:${modelVersion}:${sort}:${offset}:${limit}`, 60_000, 30 * 60_000, async () => {
+    const snapshotKey = `${modelVersion}:${sort}:${offset}:${limit}`
+    const snapshot = await loadAccountDirectorySnapshot(snapshotKey).catch(() => null)
+    if (snapshot) return snapshot
+    const prices = await ensureAccountValuePrices()
     const { idsSql, unitsSql } = priceTransformArrays(prices)
     const orderBy = ACCOUNT_SORT_SQL[sort] ?? ACCOUNT_SORT_SQL.value
     const includeActivitySort = sort === 'activity'
     const includeVolumeSort = sort === 'volume'
     const includeLiquidationSort = sort === 'liquidation'
-    const activityCte = includeActivitySort ? `,
+    const activityCte = includeActivitySort ? accountBalanceWeeklyReady ? `,
+            activity AS (
+              SELECT if(t.lid = '', a.account_id, t.lid) AS gkey,
+                toUInt64(uniqMerge(a.activity_state)) AS activity
+              FROM (
+                SELECT
+                  coalesce(b.owner, if(
+                    substring(w.account_id, 3, 8) = '45544800' AND substring(w.account_id, 11, 8) IN ('6d6f646c', '7369626c', '70617261'),
+                    concat('0x', substring(w.account_id, 11, 40), '000000000000000000000000'),
+                    w.account_id)) AS account_id,
+                  w.activity_state
+                FROM price_data.account_balance_weekly w
+                LEFT JOIN bind b ON b.eth_id = w.account_id
+                WHERE w.account_id != ''
+              ) a
+              LEFT JOIN tags t ON t.account_id = a.account_id
+              WHERE NOT match(a.account_id, '^0x(6d6f646c|7369626c|70617261)')
+              GROUP BY gkey
+            )` : `,
             activity AS (
               SELECT if(t.lid = '', a.account_id, t.lid) AS gkey,
                 toUInt64(uniq((a.account_id, a.block_height, a.source_event_index))) AS activity
@@ -8977,6 +11040,60 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
             )` : ''
     const liquidationJoin = includeLiquidationSort ? 'LEFT JOIN liquidation_volume lv ON lv.gkey = g.gkey' : ''
     const liquidationSelect = includeLiquidationSort ? 'ifNull(lv.volume_usd, 0.)' : '0.'
+    const lpClaimsCte = omnipoolAccountClaimsReady ? `,
+            lp_claims AS (
+              SELECT s.account_id, s.asset_id, s.amount, s.hub_amount
+              FROM price_data.omnipool_account_claim_snapshots s
+              WHERE s.snapshot_id = (
+                SELECT argMax(snapshot_id, computed_at)
+                FROM price_data.omnipool_account_claim_snapshot_state
+                WHERE snapshot_key = 'current'
+              )
+            )` : ''
+    const lpActors = omnipoolAccountClaimsReady ? `
+                UNION ALL
+                -- Position-only accounts must remain in the directory even when
+                -- they currently have no fungible wallet balance.
+                SELECT account_id, '0' AS asset_id, toUInt256(0) AS bal, toUInt32(0) AS lb
+                FROM lp_claims GROUP BY account_id` : ''
+    const lpGroupedCte = omnipoolAccountClaimsReady ? `,
+            lp_grouped AS (
+              SELECT if(t.lid = '', p.account_id, t.lid) AS gkey,
+                sum(toFloat64(p.amount) * transform(toString(p.asset_id), ${idsSql}, ${unitsSql}, 0.)
+                  + toFloat64(p.hub_amount) * transform('1', ${idsSql}, ${unitsSql}, 0.)) AS usd
+              FROM lp_claims p LEFT JOIN tags t ON t.account_id = p.account_id
+              GROUP BY gkey
+            )` : ''
+    const lpJoin = omnipoolAccountClaimsReady ? 'LEFT JOIN lp_grouped lp ON lp.gkey = g.gkey' : ''
+    const lpValue = omnipoolAccountClaimsReady ? 'ifNull(lp.usd, 0)' : '0.'
+    const mmLatestCte = moneyMarketAccountValuesReady ? `mm_latest AS (
+              SELECT account_id,lower(pool_address) AS pool_address,
+                greatest(max(toFloat64(total_collateral_base)),
+                  sumIf(toFloat64(supplied) * transform(toString(asset_id), ${idsSql}, ${unitsSql}, 0.) * 1e8, reserve_present=1)) AS col,
+                greatest(max(toFloat64(total_debt_base)),
+                  sumIf(toFloat64(debt) * transform(toString(asset_id), ${idsSql}, ${unitsSql}, 0.) * 1e8, reserve_present=1)) AS debt,
+                max(toFloat64(total_collateral_base)) AS risk_col,
+                max(toFloat64(total_debt_base)) AS risk_debt,
+                max(toFloat64(liquidation_threshold)) AS liqthr
+              FROM price_data.money_market_account_value_snapshots
+              WHERE snapshot_id=(
+                SELECT argMax(snapshot_id,computed_at)
+                FROM price_data.money_market_account_value_snapshot_state
+                WHERE snapshot_key='current'
+              )
+              GROUP BY account_id,pool_address
+              HAVING col>0 OR debt>0
+            )` : `mm_latest AS (
+              SELECT account_id,lower(pool_address) AS pool_address,
+                argMax(toFloat64OrZero(total_collateral_base),${moneyMarketPositionOrderSql()}) AS col,
+                argMax(toFloat64OrZero(total_debt_base),${moneyMarketPositionOrderSql()}) AS debt,
+                col AS risk_col,debt AS risk_debt,
+                argMax(toFloat64OrZero(current_liquidation_threshold),${moneyMarketPositionOrderSql()}) AS liqthr
+              FROM price_data.raw_money_market_positions
+              WHERE account_id!='' AND lower(pool_address) IN (${configuredMmPoolsSql()})
+              GROUP BY account_id,pool_address
+              HAVING col>0 OR debt>0
+            )`
 
     const [res, total] = await Promise.all([
       client.query({
@@ -8989,7 +11106,8 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
             -- entity's EVM-side pot).
             bind AS (
               ${bindCteSql()}
-            ),
+            )
+            ${lpClaimsCte},
             latest AS (
               -- ETH-prefixed rows that stand for a real account are remapped onto
               -- it before grouping: module/sovereign truncations ('modl', 'sibl',
@@ -9017,20 +11135,14 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
                 FROM price_data.erc20_wallet_balances
                 GROUP BY account_id, asset_id
                 HAVING bal > 0
+                ${lpActors}
               ) l
               LEFT JOIN bind b ON b.eth_id = l.account_id
             ),
-            -- One latest row per configured isolated market. Unknown/stale pools
-            -- never affect public totals. Presentation below keeps primary risk
-            -- separate while mm_value_grouped still nets every configured debt.
-            mm_latest AS (SELECT account_id, lower(pool_address) AS pool_address,
-                     argMax(total_collateral_base, block_height) AS col,
-                     argMax(total_debt_base, block_height) AS debt,
-                     argMax(current_liquidation_threshold, block_height) AS liqthr
-                   FROM price_data.raw_money_market_positions
-                   WHERE account_id != '' AND lower(pool_address) IN (${configuredMmPoolsSql()})
-                   GROUP BY account_id, pool_address
-                   HAVING toUInt256OrZero(col) > 0 OR toUInt256OrZero(debt) > 0),
+            -- One latest row per configured isolated market. With complete
+            -- reserve-principal coverage this is a tiny published generation;
+            -- the raw aggregate remains the correctness-first upgrade fallback.
+            ${mmLatestCte},
             ident AS (SELECT lower(account_id) AS account_id, any(display) AS display FROM price_data.account_identities FINAL GROUP BY account_id),
             grouped AS (
               SELECT
@@ -9046,7 +11158,8 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
                 sumMap([latest.asset_id], [toFloat64(latest.bal) * transform(latest.asset_id, ${idsSql}, ${unitsSql}, 0.)]) AS asset_usd_map
               FROM latest LEFT JOIN tags t ON t.account_id = latest.account_id
               GROUP BY gkey, label_id
-            ),
+            )
+            ${lpGroupedCte},
             actors AS (SELECT DISTINCT account_id FROM latest),
             -- One pass over the tiny latest-position set computes three separate
             -- concerns: PRIMARY-only columns/risk/DefiSim, all-market net value,
@@ -9054,17 +11167,18 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
             mm_grouped AS (
               SELECT
                 if(t.lid = '', a.account_id, t.lid) AS gkey,
-                sumIf(toFloat64OrZero(m.col), m.pool_address = '${CORE_MM_MARKET.poolProxy}') AS col,
-                sumIf(toFloat64OrZero(m.debt), m.pool_address = '${CORE_MM_MARKET.poolProxy}') AS debt,
-                minIf(toFloat64OrZero(m.col) * toFloat64OrZero(m.liqthr) / 10000. / toFloat64OrZero(m.debt),
-                  m.pool_address = '${CORE_MM_MARKET.poolProxy}' AND toFloat64OrZero(m.debt) > 0) AS worst_hf,
-                argMinIf(a.account_id, toFloat64OrZero(m.col) * toFloat64OrZero(m.liqthr) / 10000. / toFloat64OrZero(m.debt),
-                  m.pool_address = '${CORE_MM_MARKET.poolProxy}' AND toFloat64OrZero(m.debt) > 0) AS worst_acct,
-                sum(if(m.pool_address IN (${countedMmPoolsSql()}), toFloat64OrZero(m.col), 0.)) - sum(toFloat64OrZero(m.debt)) AS value_delta,
+                sumIf(toFloat64(m.col), m.pool_address = '${CORE_MM_MARKET.poolProxy}') AS col,
+                sumIf(toFloat64(m.debt), m.pool_address = '${CORE_MM_MARKET.poolProxy}') AS debt,
+                sumIf(toFloat64(m.risk_debt), m.pool_address = '${CORE_MM_MARKET.poolProxy}') AS risk_debt,
+                minIf(toFloat64(m.risk_col) * toFloat64(m.liqthr) / 10000. / toFloat64(m.risk_debt),
+                  m.pool_address = '${CORE_MM_MARKET.poolProxy}' AND toFloat64(m.risk_debt) > 0) AS worst_hf,
+                argMinIf(a.account_id, toFloat64(m.risk_col) * toFloat64(m.liqthr) / 10000. / toFloat64(m.risk_debt),
+                  m.pool_address = '${CORE_MM_MARKET.poolProxy}' AND toFloat64(m.risk_debt) > 0) AS worst_acct,
+                sum(if(m.pool_address IN (${countedMmPoolsSql()}), toFloat64(m.col), 0.)) - sum(toFloat64(m.debt)) AS value_delta,
                 countIf(m.pool_address IN (${supplementalMmPoolsSql()})) AS supplemental_positions,
-                sumIf(toFloat64OrZero(m.debt), m.pool_address IN (${supplementalMmPoolsSql()})) AS supplemental_debt,
-                minIf(toFloat64OrZero(m.col) * toFloat64OrZero(m.liqthr) / 10000. / toFloat64OrZero(m.debt),
-                  m.pool_address IN (${supplementalMmPoolsSql()}) AND toFloat64OrZero(m.debt) > 0) AS supplemental_worst_hf
+                sumIf(toFloat64(m.debt), m.pool_address IN (${supplementalMmPoolsSql()})) AS supplemental_debt,
+                minIf(toFloat64(m.risk_col) * toFloat64(m.liqthr) / 10000. / toFloat64(m.risk_debt),
+                  m.pool_address IN (${supplementalMmPoolsSql()}) AND toFloat64(m.risk_debt) > 0) AS supplemental_worst_hf
               FROM actors a
               LEFT JOIN tags t ON t.account_id = a.account_id
               INNER JOIN mm_latest m ON lower(m.account_id) = if(
@@ -9086,10 +11200,10 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
             -- 1e18-scaled WORST per-position health factor (string); MAX_UINT256 for a
             -- pure supplier so the UI renders "No debt". mm_hf_num is the numeric key
             -- the health sort orders by (riskiest position first).
-            multiIf(ifNull(mg.debt, 0) > 0, toString(toUInt256(mg.worst_hf * 1e18)),
+            multiIf(ifNull(mg.risk_debt, 0) > 0, toString(toUInt256(mg.worst_hf * 1e18)),
                     ifNull(mg.col, 0) > 0, '${MAX_UINT256}', '') AS mm_hf,
-            multiIf(ifNull(mg.debt, 0) > 0, mg.worst_hf * 1e18, ifNull(mg.col, 0) > 0, 1e30, 1e31) AS mm_hf_num,
-            g.usd + ifNull(mg.value_delta, 0) / 1e8 AS usd_total,
+            multiIf(ifNull(mg.risk_debt, 0) > 0, mg.worst_hf * 1e18, ifNull(mg.col, 0) > 0, 1e30, 1e31) AS mm_hf_num,
+            g.usd + ${lpValue} + ifNull(mg.value_delta, 0) / 1e8 AS usd_total,
             if(g.label_id != '' OR ident.account_id != '', 1, 0) AS has_identity,
             multiIf(g.label_id != '', g.lname, ident.display != '', ident.display, '') AS disp_name,
             ${activitySelect} AS activity_count,
@@ -9104,6 +11218,7 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
               1, 4) AS top_assets
           FROM grouped g
           LEFT JOIN mm_grouped mg ON mg.gkey = g.gkey
+          ${lpJoin}
           LEFT JOIN ident ON g.label_id = '' AND lower(g.sample) = ident.account_id
           ${activityJoin}
           ${volumeJoin}
@@ -9173,7 +11288,9 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
       console.error('[accounts] top-asset enrichment failed:', err)
     }
 
-    return { rows, total }
+    const page = { rows, total }
+    await persistAccountDirectorySnapshot(snapshotKey, page).catch(err => console.error('[accounts] snapshot persist failed:', err))
+    return page
   })
 }
 
@@ -9417,7 +11534,14 @@ async function enrichAccountRows(
       let earliest = 0
       for (let b = 0; b < SPARK_WEEKS; b++) { const p = pxMap.get(b); if (p != null) { earliest = p; break } }
       const logRes = await client.query({
-        query: `SELECT w, b, toString(sum(net)) AS net FROM (
+        query: erc20TransferDeltasReady
+          ? `SELECT holder AS w,
+                toInt32(greatest(least(dateDiff('week', {ws:Date}, toDate(block_timestamp)), ${SPARK_WEEKS - 1}), -1)) AS b,
+                toString(sum(balance_delta)) AS net
+              FROM price_data.erc20_transfer_deltas FINAL
+              WHERE contract_address = {c:String} AND holder IN ({ws2:Array(String)})
+              GROUP BY w, b ORDER BY w, b`
+          : `SELECT w, b, toString(sum(net)) AS net FROM (
                   SELECT p.1 AS w,
                     toInt32(greatest(least(dateDiff('week', {ws:Date}, toDate(block_timestamp)), ${SPARK_WEEKS - 1}), -1)) AS b,
                     p.2 AS net
@@ -9538,18 +11662,58 @@ function tagMembers(tagId: string): string[] | null {
   return tag.members.filter(m => ACCOUNT_RE.test(m))
 }
 
-export async function getTag(tagId: string, opts: { summary?: boolean } = {}): Promise<TagDetail | null> {
+const TAG_DETAIL_SNAPSHOT_MAX_AGE_SECONDS = 2 * 60
+const TAG_DETAIL_REQUEST_MAX_AGE_SECONDS = 10 * 60
+const hotTagDetails = new Set<string>(['treasury', 'money-market'])
+
+async function loadTagDetailSnapshot(tagId: string, membershipKey: string): Promise<TagDetail | null> {
+  const res = await client.query({
+    query: `SELECT membership_key,payload_json,dateDiff('second',computed_at,now()) AS age,
+      ${omnipoolAccountClaimsReady ? `computed_at>=(SELECT max(computed_at) FROM price_data.omnipool_account_claim_snapshot_state FINAL WHERE snapshot_key='current')` : '1'} AS covers_claims,
+      ${moneyMarketAccountValuesReady ? `computed_at>=(SELECT max(computed_at) FROM price_data.money_market_account_value_snapshot_state FINAL WHERE snapshot_key='current')` : '1'} AS covers_money_market
+      FROM price_data.tag_detail_snapshots FINAL WHERE tag_id={tagId:String} LIMIT 1`,
+    query_params: { tagId }, format: 'JSONEachRow',
+  })
+  const row = (await res.json<{ membership_key: string; payload_json: string; age: number; covers_claims: number; covers_money_market: number }>())[0]
+  if (!row || row.membership_key !== membershipKey || Number(row.age) > TAG_DETAIL_REQUEST_MAX_AGE_SECONDS || Number(row.covers_claims)!==1 || Number(row.covers_money_market)!==1) return null
+  try {
+    const detail = JSON.parse(row.payload_json) as TagDetail
+    return detail?.tagId === tagId && Array.isArray(detail.members) ? detail : null
+  } catch { return null }
+}
+
+async function persistTagDetailSnapshot(tagId: string, membershipKey: string, detail: TagDetail): Promise<void> {
+  await client.insert({
+    table: 'price_data.tag_detail_snapshots',
+    values: [{
+      tag_id: tagId,
+      membership_key: membershipKey,
+      payload_json: JSON.stringify(detail),
+      computed_at: new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ''),
+    }],
+    format: 'JSONEachRow',
+  })
+}
+
+export async function getTag(tagId: string, opts: { summary?: boolean; refresh?: boolean } = {}): Promise<TagDetail | null> {
   const tag = getTagRecord(tagId)
   if (!tag || !tag.members.length) return null
   // `summary` (hover card) skips the portfolio-history reconstruction — which for a
   // large tag walks every member's transfer log and dominates the response — plus LP
   // and DCA, none of which the card shows. The detail page still gets the full object.
   const summary = opts.summary === true
-  return cached(`explorer:tag:${tagId}${summary ? ':summary' : ''}`, 8000, async () => {
+  const refresh = opts.refresh === true
+  const membershipKey = [...tag.members].map(member => member.toLowerCase()).sort().join(',')
+  if (!summary) hotTagDetails.add(tagId)
+  return cached(`explorer:tag:${accountValueGenerationEpoch}:${tagId}${summary ? ':summary' : refresh ? ':refresh' : ''}`, 8000, async () => {
+    if (!summary && !refresh) {
+      const snapshot = await loadTagDetailSnapshot(tagId, membershipKey).catch(() => null)
+      if (snapshot) return snapshot
+    }
     const list = sqlAccountList(tag.members)
     const [balanceRows, prices] = await Promise.all([
       queryAggregatedBalances(list),
-      ensurePrices(),
+      ensureAccountValuePrices(),
     ])
     const rawBalances = valueAccountBalances(balanceRows, prices)
     // Wallet-held pool shares double as LP display rows (see stableswapLpPositions).
@@ -9605,7 +11769,7 @@ export async function getTag(tagId: string, opts: { summary?: boolean } = {}): P
       tradingVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
       liquidationVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
     ])
-    return {
+    const detail: TagDetail = {
       tagId: tag.tagId, name: tag.name, color: tag.color, note: tag.note, icon: tag.icon,
       members: tag.members.map(accountRef), balances, topAssets: topHeldTokens(balances), portfolioUsd,
       ...(tradingVolumeUsd > 0 ? { tradingVolumeUsd } : {}),
@@ -9616,6 +11780,9 @@ export async function getTag(tagId: string, opts: { summary?: boolean } = {}): P
       // than being projected backward from their current balance.
       balanceHistory: summary ? [] : history.balanceHistory,
     }
+    if (!summary) await persistTagDetailSnapshot(tagId, membershipKey, detail)
+      .catch(error => console.error('[tag-detail] snapshot persist failed', error))
+    return detail
   })
 }
 
@@ -9674,7 +11841,46 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
     const mmAddrs = tokenIds ? [...new Set(tokenIds.flatMap(mmReserveAddressForAsset))] : []
     const mmTok = tokenIds == null ? '' : mmAddrs.length ? `AND asset_address IN (${mmAddrs.map(a => `'${a}'`).join(',')})` : 'AND 0'
     let query: string
-    if (scope === 'extrinsics')
+    if (scope === 'activity' && activityDailyReady && type !== 'mm' && type !== 'xcm') {
+      let names: readonly string[]
+      let ignoreToken = false
+      if (type === 'transfer') names = TRANSFER_EVENTS
+      else if (type === 'trade') {
+        const otcAction = resolveOtcAction(filters.action)
+        if (filters.action === 'dca-failed') { names = ['DCA.TradeFailed']; ignoreToken = true }
+        else if (filters.action === 'dca') { names = ['DCA.TradeExecuted', 'DCA.TradeFailed']; ignoreToken = true }
+        else if (otcAction && OTC_ACTION_EVENTS[otcAction]) { names = OTC_ACTION_EVENTS[otcAction]; ignoreToken = true }
+        else if (filters.action === 'swap') names = SWAP_EVENTS
+        else names = [...SWAP_EVENTS, ...OTC_EVENT_NAMES, 'DCA.TradeFailed']
+      } else if (type === 'liquidity') {
+        if (filters.action === 'Claim') names = [...LIQUIDITY_EVENTS.filter(n => n.endsWith('RewardClaimed')), 'Referrals.Claimed']
+        else if (filters.action === 'Add') names = LIQUIDITY_EVENTS.filter(n => n.endsWith('Added'))
+        else if (filters.action === 'Remove') names = LIQUIDITY_EVENTS.filter(n => n.endsWith('Removed'))
+        else if (filters.action === 'Create') names = LIQUIDITY_EVENTS.filter(n => n.endsWith('PoolCreated'))
+        else names = LIQUIDITY_EVENTS
+      } else if (type === 'staking') {
+        names = filters.action && STAKING_ACTION_EVENTS[filters.action] ? STAKING_ACTION_EVENTS[filters.action] : STAKING_EVENT_NAMES
+      } else if (type === 'vote') names = VOTE_EVENTS
+      else if (type === 'otc') {
+        const otcAction = resolveOtcAction(filters.action)
+        names = otcAction && OTC_ACTION_EVENTS[otcAction] ? OTC_ACTION_EVENTS[otcAction] : OTC_EVENT_NAMES
+        ignoreToken = true
+      } else {
+        names = [...TRANSFER_EVENTS, ...SWAP_EVENTS, ...LIQUIDITY_EVENTS, ...VOTE_EVENTS, ...STAKING_EVENT_NAMES, ...OTC_EVENT_NAMES]
+      }
+      const assetFilter = ignoreToken || tokenIds == null ? '' : !tokenIds.length
+        ? 'AND 0'
+        : `AND hasAny(asset_refs, [${tokenIds.join(',')}])`
+      query = `SELECT toString(day) AS d, toUInt64(uniqExact(tuple(block_height, activity_index))) AS v
+               FROM price_data.activity_histogram_events
+               WHERE day > today() - 90 AND event_name IN (${sqlNames(names)}) ${assetFilter}
+               GROUP BY day ORDER BY day`
+    } else if (dailyChainIdentityCountsReady && (scope === 'events' || scope === 'extrinsics'))
+      query = `SELECT toString(day) AS d, toUInt64(groupBitmapMerge(identity_state)) AS v
+               FROM price_data.daily_chain_identity_counts_v2
+               WHERE kind='${scope}' AND day > today() - 90
+               GROUP BY day ORDER BY day`
+    else if (scope === 'extrinsics')
       query = daily('raw_extrinsics', `coalesce(signer, effective_signer) IS NOT NULL`, '(block_height, extrinsic_index)')
     else if (scope === 'events')
       query = daily('raw_events', '')
@@ -9723,7 +11929,11 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
         query = daily('raw_events', `event_name IN (${sqlNames(VOTE_EVENTS)})${side}${sp(voteTok)}`)
       } else if (type === 'mm') {
         if (filters.action === 'ClaimRewards') {
-          query = daily('raw_events', `event_name = 'Currencies.Transferred' AND JSONExtractString(args_json,'from') = '${INCENTIVES_REWARD_POT}'${sp(transferTok)}`)
+          // Reward claims already have a replay-safe sparse transfer model. The
+          // former histogram reopened 35.8M recent raw events (7.9 GiB) merely
+          // to find this one pot's Currencies.Transferred rows.
+          query = daily(rewardClaimActivityReady ? 'incentive_reward_transfers FINAL' : 'raw_events',
+            `event_name = 'Currencies.Transferred' AND JSONExtractString(args_json,'from') = '${INCENTIVES_REWARD_POT}'${sp(transferTok)}`)
         } else {
           const actionNames = moneyMarketEventNames(filters.action)
           const act = actionNames.length ? ` AND event_name IN (${sqlNames(actionNames)})` : ' AND 0'
@@ -9838,6 +12048,11 @@ let acctEmojiIndex = new Map<string, string[]>()
 let accountSuffixRefreshTimer: ReturnType<typeof setInterval> | null = null
 let accountSuffixInflight: Promise<void> | null = null
 let accountsPrewarmTimer: ReturnType<typeof setInterval> | null = null
+let accountsPrewarmInflight: Promise<void> | null = null
+let tagCountsPrewarmTimer: ReturnType<typeof setInterval> | null = null
+let tagCountsPrewarmInflight: Promise<void> | null = null
+let tagDetailsPrewarmTimer: ReturnType<typeof setInterval> | null = null
+let tagDetailsPrewarmInflight: Promise<void> | null = null
 
 async function loadAccountSuffixIndexUncached(): Promise<void> {
   try {
@@ -9896,24 +12111,98 @@ export function startAccountSuffixRefresh(): void {
   accountSuffixRefreshTimer = setInterval(() => { void loadAccountSuffixIndex().catch(() => {}) }, 5 * 60_000)
   accountSuffixRefreshTimer.unref()
 }
-// Keep the Accounts landing view (page 1, default sort) warm so its ~10s
-// whole-directory aggregation never runs on a user's request — combined with
-// the SWR cache, visitors always get a sub-freshness-window stale page in ms.
-// Only the default view is warmed: rarer sorts refresh on demand via SWR.
+async function prewarmAccountDirectoryUncached(): Promise<void> {
+  const sorts: AccountSort[] = ['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'volume', 'liquidation']
+  for (const sort of sorts) await getAccounts(0, 50, sort)
+  await getAccounts(50, 50, 'value')
+}
+
+function prewarmAccountDirectory(): Promise<void> {
+  if (accountsPrewarmInflight) return accountsPrewarmInflight
+  const request = prewarmAccountDirectoryUncached().finally(() => {
+    if (accountsPrewarmInflight === request) accountsPrewarmInflight = null
+  })
+  accountsPrewarmInflight = request
+  return request
+}
+
+// Persist every public sort plus page two in a bounded sequential background
+// pass. Process restarts and browser-cold loads then read one tiny snapshot;
+// stale-while-revalidate keeps the previous page available during refresh.
 export function startAccountsPrewarm(): void {
   if (accountsPrewarmTimer) return
-  void getAccounts(0, 50, 'value').catch(() => {})
-  accountsPrewarmTimer = setInterval(() => { void getAccounts(0, 50, 'value').catch(() => {}) }, 5 * 60_000)
+  void prewarmAccountDirectory().catch(() => {})
+  accountsPrewarmTimer = setInterval(() => { void prewarmAccountDirectory().catch(() => {}) }, 5 * 60_000)
   accountsPrewarmTimer.unref()
+}
+
+async function prewarmTagTabCountsUncached(): Promise<void> {
+  // Sequential by tag: the exact aggregation can be large for structural tags,
+  // and concurrent full-history unions would contend with live ingestion.
+  for (const tag of allTags()) {
+    const membershipKey = [...tag.members].map(member => member.toLowerCase()).sort().join(',')
+    const result = await client.query({
+      query: `SELECT membership_key, dateDiff('second', computed_at, now()) AS age
+              FROM price_data.tag_activity_counts FINAL
+              WHERE tag_id = {tagId:String} LIMIT 1`,
+      query_params: { tagId: tag.tagId }, format: 'JSONEachRow',
+    })
+    const snapshot = (await result.json<{ membership_key: string; age: number }>())[0]
+    const membershipMatches = snapshot?.membership_key === membershipKey
+    // Establish complete coverage for every reproducible tag once. Thereafter
+    // only tags actually requested by this API process need ten-minute refresh;
+    // rescanning every structural tag forever would create continuous load.
+    if (membershipMatches && (!hotTagCounts.has(tag.tagId) || Number(snapshot.age) < TAG_COUNT_REFRESH_MS / 1000)) continue
+    await refreshTagTabCounts(tag.tagId, tag.members, membershipKey)
+  }
+}
+
+function prewarmTagTabCounts(): Promise<void> {
+  if (tagCountsPrewarmInflight) return tagCountsPrewarmInflight
+  const request = prewarmTagTabCountsUncached().finally(() => {
+    if (tagCountsPrewarmInflight === request) tagCountsPrewarmInflight = null
+  })
+  tagCountsPrewarmInflight = request
+  return request
+}
+
+export function startTagCountsPrewarm(): void {
+  if (tagCountsPrewarmTimer) return
+  void prewarmTagTabCounts().catch(error => console.error('[tag-counts] prewarm failed', error))
+  tagCountsPrewarmTimer = setInterval(() => { void prewarmTagTabCounts().catch(error => console.error('[tag-counts] refresh failed', error)) }, TAG_COUNT_REFRESH_MS)
+  tagCountsPrewarmTimer.unref()
+  const prewarmDetails = (): Promise<void> => {
+    if (tagDetailsPrewarmInflight) return tagDetailsPrewarmInflight
+    const request = (async () => {
+      // A distinct cache key keeps foreground requests on the last complete
+      // snapshot instead of joining this exact, multi-second reconstruction.
+      for (const tagId of hotTagDetails) await getTag(tagId, { refresh: true })
+    })().finally(() => {
+      if (tagDetailsPrewarmInflight === request) tagDetailsPrewarmInflight = null
+    })
+    tagDetailsPrewarmInflight = request
+    return request
+  }
+  void prewarmDetails().catch(error => console.error('[tag-detail] prewarm failed', error))
+  tagDetailsPrewarmTimer = setInterval(() => { void prewarmDetails().catch(error => console.error('[tag-detail] refresh failed', error)) }, TAG_DETAIL_SNAPSHOT_MAX_AGE_SECONDS * 1000)
+  tagDetailsPrewarmTimer.unref()
 }
 
 export function stopExplorerBackgroundTasks(): void {
   if (evmBindingsRefreshTimer) clearInterval(evmBindingsRefreshTimer)
   if (accountSuffixRefreshTimer) clearInterval(accountSuffixRefreshTimer)
   if (accountsPrewarmTimer) clearInterval(accountsPrewarmTimer)
+  if (tagCountsPrewarmTimer) clearInterval(tagCountsPrewarmTimer)
+  if (tagDetailsPrewarmTimer) clearInterval(tagDetailsPrewarmTimer)
+  if (omnipoolAccountClaimsRefreshTimer) clearInterval(omnipoolAccountClaimsRefreshTimer)
+  if (moneyMarketAccountValuesRefreshTimer) clearInterval(moneyMarketAccountValuesRefreshTimer)
   evmBindingsRefreshTimer = null
   accountSuffixRefreshTimer = null
   accountsPrewarmTimer = null
+  tagCountsPrewarmTimer = null
+  tagDetailsPrewarmTimer = null
+  omnipoolAccountClaimsRefreshTimer = null
+  moneyMarketAccountValuesRefreshTimer = null
 }
 
 function accountsBySuffix(suffix: string): string[] {

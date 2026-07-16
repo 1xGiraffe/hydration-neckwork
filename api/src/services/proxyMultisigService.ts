@@ -20,6 +20,8 @@ import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
 // from indexed Multisig events.
 
 let client: ClickHouseClient
+let multisigActivityReady = false
+let initialized = false
 
 export interface ProxyRelation { accountId: string; proxyType: string; delay: number }
 export interface PureProxyInfo { creator: string; proxyType: string; blockHeight: number; timestamp: string }
@@ -140,33 +142,31 @@ async function refreshPureProxies(): Promise<void> {
 }
 
 async function refreshMultisigs(): Promise<void> {
+  if (!multisigActivityReady) return
   // Every historical multisig call, paired with its extrinsic's Multisig event:
   // the event's `multisig` and `approving` come from the runtime, the call args
   // carry threshold + other signatories.
   const res = await client.query({
-    query: `SELECT c.args_json AS call_args, c.call_name, e.args_json AS event_args
-            FROM (SELECT block_height, extrinsic_index, call_name, args_json FROM price_data.raw_calls
-                  WHERE call_name IN ('Multisig.as_multi', 'Multisig.approve_as_multi', 'Multisig.as_multi_threshold_1', 'Multisig.cancel_as_multi')) c
-            INNER JOIN (SELECT block_height, extrinsic_index, args_json FROM price_data.raw_events
-                  WHERE event_name IN ('Multisig.NewMultisig', 'Multisig.MultisigApproval', 'Multisig.MultisigExecuted', 'Multisig.MultisigCancelled')) e
+    query: `SELECT c.args_json AS call_args, c.call_name,
+                   e.multisig, e.actor
+            FROM price_data.multisig_call_activity AS c FINAL
+            INNER JOIN price_data.multisig_event_activity AS e FINAL
             ON e.block_height = c.block_height AND e.extrinsic_index = c.extrinsic_index`,
     format: 'JSONEachRow',
   })
   const compositions = new Map<string, MultisigComposition>()
-  for (const r of await res.json<{ call_args: string; call_name: string; event_args: string }>()) {
+  for (const r of await res.json<{ call_args: string; call_name: string; multisig: string; actor: string }>()) {
     try {
       const call = JSON.parse(r.call_args) as { threshold?: number; otherSignatories?: string[] }
-      const ev = JSON.parse(r.event_args) as { approving?: string; cancelling?: string; multisig?: string }
-      const approving = ev.approving ?? ev.cancelling
-      if (!ev.multisig || !approving || !Array.isArray(call.otherSignatories)) continue
+      if (!r.multisig || !r.actor || !Array.isArray(call.otherSignatories)) continue
       const threshold = r.call_name === 'Multisig.as_multi_threshold_1' ? 1 : call.threshold
       if (!threshold || threshold < 1) continue
-      const signatories = [...new Set([approving, ...call.otherSignatories])].sort()
+      const signatories = [...new Set([r.actor, ...call.otherSignatories])].sort()
       if (signatories.length < threshold) continue
       // An extrinsic can hold several multisig calls (batch); the derivation
       // check keeps only correctly-paired rows.
-      if (deriveMultisigAccountId(signatories, threshold) !== ev.multisig) continue
-      compositions.set(ev.multisig, { threshold, signatories })
+      if (deriveMultisigAccountId(signatories, threshold) !== r.multisig) continue
+      compositions.set(r.multisig, { threshold, signatories })
     } catch { /* skip malformed row */ }
   }
   const memberships = new Map<string, string[]>()
@@ -202,6 +202,7 @@ function runRefresh(label: 'initial load' | 'refresh'): Promise<void> {
 export function initProxyMultisigService(c: ClickHouseClient): void {
   if (refreshTimer) return
   client = c
+  initialized = true
   void runRefresh('initial load')
   refreshTimer = setInterval(() => { void runRefresh('refresh') }, REFRESH_MS)
   refreshTimer.unref()
@@ -211,6 +212,12 @@ export function stopProxyMultisigService(): void {
   if (!refreshTimer) return
   clearInterval(refreshTimer)
   refreshTimer = null
+  initialized = false
+}
+
+export function setMultisigActivityReady(): void {
+  multisigActivityReady = true
+  if (initialized) void runRefresh('refresh')
 }
 
 // lookups (in-memory, resolved per related-account set)
@@ -261,18 +268,16 @@ export function multisigMembershipsFor(accountIds: string[]): { accountId: strin
 // latest NewMultisig is not followed by a MultisigExecuted/MultisigCancelled; approvals
 // are the distinct approvers since that NewMultisig; depositor is its creator.
 export async function pendingMultisigOps(accountId: string): Promise<PendingMultisigOp[]> {
-  if (!/^0x[0-9a-fA-F]{64}$/.test(accountId)) return []
+  if (!multisigActivityReady || !/^0x[0-9a-fA-F]{64}$/.test(accountId)) return []
   const res = await client.query({
     query: `
       WITH ev AS (
-        SELECT JSONExtractString(args_json,'callHash') AS callHash, 'new' AS kind, lower(JSONExtractString(args_json,'approving')) AS who, block_height AS b
-        FROM price_data.raw_events WHERE event_name='Multisig.NewMultisig' AND JSONExtractString(args_json,'multisig') = {m:String}
-        UNION ALL
-        SELECT JSONExtractString(args_json,'callHash'), 'approval', lower(JSONExtractString(args_json,'approving')), block_height
-        FROM price_data.raw_events WHERE event_name='Multisig.MultisigApproval' AND JSONExtractString(args_json,'multisig') = {m:String}
-        UNION ALL
-        SELECT JSONExtractString(args_json,'callHash'), 'done', '', block_height
-        FROM price_data.raw_events WHERE event_name IN ('Multisig.MultisigExecuted','Multisig.MultisigCancelled') AND JSONExtractString(args_json,'multisig') = {m:String}
+        SELECT call_hash AS callHash,
+               multiIf(event_name='Multisig.NewMultisig', 'new',
+                 event_name='Multisig.MultisigApproval', 'approval', 'done') AS kind,
+               lower(actor) AS who, block_height AS b
+        FROM price_data.multisig_event_activity FINAL
+        WHERE multisig = {m:String}
       ),
       life AS (
         SELECT callHash, max(if(kind='new', b, 0)) AS newBlock, max(if(kind='done', b, 0)) AS doneBlock, argMaxIf(who, b, kind='new') AS depositor
