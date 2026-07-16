@@ -4,7 +4,8 @@ import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, Copy, ShortAddr, ProfilePageSkeleton, DetailTabs, moduleName, emojiName, TagIcon, showIconFallback as avatarImgFallback } from '../components/ui'
-import { PortfolioChart, ProfileStats, BalancesTable, MoneyMarketPositions, moneyMarketDebtUsd, profileTabs, ActiveDcaTable, LiquidityPositionsTable, BalanceHistorySection, ProxyMultisigSection } from '../components/AccountSections'
+import { PortfolioChart, ProfileStats, MoneyMarketPositions, moneyMarketDebtUsd, profileTabs, ActiveDcaTable, LiquidityPositionsTable, BalanceHistorySection, ProxyMultisigSection } from '../components/AccountSections'
+import { BalancesTreemap } from '../components/BalancesTreemap'
 import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
 
@@ -120,8 +121,8 @@ export function Account({ address }: { address: string }) {
               </>)}
 
               {activeView === 'balances' && (<>
+              <BalancesTreemap balances={data.balances} />
               <BalanceHistorySection history={history.data?.balanceHistory ?? data.balanceHistory} />
-              <BalancesTable balances={data.balances} />
               </>)}
 
               {activeView === 'positions' && (<>

@@ -5,7 +5,8 @@ import { paths, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, AddrPill, Copy, ProfilePageSkeleton, DetailTabs, TagIcon, accountHref, rowNav } from '../components/ui'
 import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
-import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, BalancesTable, MoneyMarketPositions, ActiveDcaTable, LiquidityPositionsTable, BalanceHistorySection } from '../components/AccountSections'
+import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, MoneyMarketPositions, ActiveDcaTable, LiquidityPositionsTable, BalanceHistorySection } from '../components/AccountSections'
+import { BalancesTreemap } from '../components/BalancesTreemap'
 
 export function TagDetail({ tagId }: { tagId: string }) {
   const { data, isLoading, isError } = useTag(tagId)
@@ -81,8 +82,8 @@ export function TagDetail({ tagId }: { tagId: string }) {
               </>)}
 
               {activeView === 'balances' && (<>
+              <BalancesTreemap balances={balances} />
               <BalanceHistorySection history={balanceHistory} />
-              <BalancesTable balances={balances} />
               </>)}
 
               {activeView === 'positions' && (<>

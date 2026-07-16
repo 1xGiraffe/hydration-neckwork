@@ -475,6 +475,70 @@ svg { display: block; }
 .asset-active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
 .asset-active .ar-sym { color: var(--accent); }
 
+/* Balances treemap — value-weighted tiles (see BalancesTreemap.tsx). Neutral
+   panels sized by USD value, each with a thin brand-accent share-bar; the docked
+   detail card is the tooltip for the hovered/focused/tapped tile. */
+.tm-panel { padding: 12px; }
+/* The chart is one rounded, clipped block with its own border, so the outer edge
+   has a continuous rounded outline (the square inner tiles' borders can't round
+   the corners). Tiles inside are square and their hairline borders do the
+   internal separating. */
+.tm { position: relative; width: 100%; border-radius: 14px; overflow: hidden; }
+/* The outer frame is an overlay sharing the container's exact radius, not a real
+   border. A real border makes overflow:hidden clip tiles to the inner radius
+   (border-radius − border-width), leaving a 1px mismatch that reads as a slightly
+   cut-off corner; the overlay avoids that. */
+.tm::after { content: ''; position: absolute; inset: 0; border: 1px solid var(--text-lowest); border-radius: 14px; pointer-events: none; z-index: 2; }
+.tm-tile {
+  --tile: var(--accent);
+  position: absolute; overflow: hidden; box-sizing: border-box;
+  padding: 0; min-width: 0; text-align: left; border-radius: 0;
+  background: color-mix(in srgb, var(--tile) 12%, var(--bg-elev2));
+  border: 1px solid color-mix(in srgb, var(--tile) 30%, var(--separator));
+  color: var(--text-high); cursor: pointer; appearance: none;
+  transition: background .14s ease, border-color .14s ease, box-shadow .14s ease;
+}
+/* Hover/active emphasis is fill + a taller colour bar, never a square border or
+   inset ring — those have square corners that the rounded clip cuts on the edge
+   tiles. */
+.tm-tile:hover { background: color-mix(in srgb, var(--tile) 24%, var(--bg-elev2)); }
+.tm-tile.active { background: color-mix(in srgb, var(--tile) 30%, var(--bg-elev2)); }
+.tm-tile.active .tm-bar { height: 4px; }
+.tm-tile:focus-visible { outline: 2px solid var(--tile); outline-offset: -3px; z-index: 1; }
+/* Absolutely positioned so its padding never forces a minimum tile width — a tiny
+   tile stays tiny (and clips its content) instead of ballooning past the edge. */
+.tm-face { position: absolute; inset: 0; box-sizing: border-box; padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.tm-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.tm-sym { font-family: 'Geist', sans-serif; font-weight: 600; font-size: 14px; color: var(--text-high); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-name { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-val { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text-high); margin-top: auto; }
+.tm-pct { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-medium); }
+.tm-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--tile); }
+
+/* Docked detail card for the active tile. */
+.tm-detail { margin-top: 12px; padding: 12px 14px; border-radius: 12px; background: var(--bg-elev); border: 1px solid var(--separator); }
+.tm-detail-head { display: flex; align-items: center; gap: 10px; }
+.tm-detail-id { display: flex; flex-direction: column; min-width: 0; }
+.tm-detail-sym { font-family: 'Geist', sans-serif; font-weight: 600; font-size: 15px; color: var(--text-high); }
+.tm-detail-name { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-detail-link { margin-left: auto; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); white-space: nowrap; }
+.tm-detail-link:hover { color: var(--accent); }
+.tm-detail-grid { display: flex; flex-wrap: wrap; gap: 10px 26px; margin-top: 12px; }
+.tm-metric { display: flex; flex-direction: column; gap: 3px; }
+.tm-metric-label { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+.tm-metric-value { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text-medium); }
+.tm-metric-value.strong { color: var(--text-high); }
+
+/* Unpriced / zero-value assets — can't be sized by value, so listed as chips. */
+.tm-unpriced { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--separator); }
+.tm-unpriced-cap { display: block; font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); margin-bottom: 8px; }
+.tm-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.tm-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 6px; border-radius: 9999px; background: var(--bg-elev2); border: 1px solid var(--separator); font-family: 'Geist', sans-serif; font-size: 13px; color: var(--text-medium); }
+.tm-chip:hover { border-color: var(--text-lowest); color: var(--text-high); }
+.tm-chip-val { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-low); }
+.tm-chips-scroll { max-height: 148px; overflow-y: auto; margin-top: 4px; }
+.tm-empty { padding: 22px; color: var(--text-low); font-family: 'GeistMono'; font-size: 13px; text-align: center; }
+
 /* combined activity */
 .pill-badge { display: inline-block; font-family: 'GeistMono'; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; padding: 3px 9px; border-radius: 9999px; white-space: nowrap; }
 .asset-flow { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }

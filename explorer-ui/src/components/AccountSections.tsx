@@ -1,10 +1,10 @@
 /* eslint-disable react-refresh/only-export-components -- shared account-section components + their count helper */
-import { F, AssetIcon, AssetAmount, AreaChart, ChartSkeleton, healthFactorDisplay, EmptyRow, AddrPill, rowNav, Dash } from './ui'
+import { F, AssetIcon, AssetAmount, AreaChart, ChartSkeleton, healthFactorDisplay, AddrPill, rowNav, Dash } from './ui'
 import { Link, paths } from '../router'
 import { BalanceHistory } from './BalanceHistory'
 import { performancePoints } from './performance'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
-import type { AddressBalance, MoneyMarketPosition, LpPosition, ActiveDca, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation } from '../types'
+import type { MoneyMarketPosition, LpPosition, ActiveDca, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation } from '../types'
 import type { ReactNode } from 'react'
 
 // Render helpers shared by the Account and Tag detail pages so both surface the
@@ -79,37 +79,6 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
         <div className="pf-head"><div className="pf-now">{F.usd(netUsd)}</div>{perfItems.length > 0 && <div className="perf-row">{perfItems.map(p => perf(p.label, p.value))}</div>}</div>
         <AreaChart data={series} h={180} dates={dates} />
       </div>
-    </>
-  )
-}
-
-export function BalancesTable({ balances }: { balances: AddressBalance[] }) {
-  return (
-    <>
-      <div className="sec-title">Balances · {balances.length} assets</div>
-      <div className="panel"><table className="tbl assets-tbl">
-        <thead><tr><th>Asset</th><th className="r">Free</th><th className="r">Reserved</th><th className="r">Price</th><th className="r">Value</th></tr></thead>
-        <tbody>
-          {balances.length ? balances.map(b => {
-            const tokens = F.num(b.total, b.asset.decimals)
-            const price = b.valueUsd != null && tokens > 0 ? b.valueUsd / tokens : null
-            return (
-              <tr key={b.asset.assetId} {...rowNav(paths.asset(b.asset.assetId))}>
-                <td data-label="Asset">
-                  <div className="asset-row">
-                    <AssetIcon assetId={b.asset.assetId} iconAssetId={b.asset.iconAssetId} symbol={b.asset.symbol} size={30} parachainId={b.asset.parachainId} origin={b.asset.origin} />
-                    <div className="ar-meta"><span className="ar-sym">{b.asset.symbol}</span><span className="ar-name">{b.asset.name ?? `#${b.asset.assetId}`}</span></div>
-                  </div>
-                </td>
-                <td data-label="Free" className="r mono">{F.amount(b.free, b.asset.decimals)}</td>
-                <td data-label="Reserved" className="r mono muted">{F.amount(b.reserved, b.asset.decimals)}</td>
-                <td data-label="Price" className="r mono muted">{F.priceUsd(price)}</td>
-                <td data-label="Value" className="r mono">{F.usd(b.valueUsd)}</td>
-              </tr>
-            )
-          }) : <EmptyRow cols={5}>No balances observed</EmptyRow>}
-        </tbody>
-      </table></div>
     </>
   )
 }

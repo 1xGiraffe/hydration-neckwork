@@ -177,6 +177,13 @@ function assetGradient(symbol: string): [string, string] {
   let h = 0; for (let i = 0; i < symbol.length; i++) h = (h + symbol.charCodeAt(i)) % PALETTE.length
   return PALETTE[h]
 }
+
+// A single brand-ish color per asset — the curated color for known tokens, else a
+// deterministic palette pick by symbol. Used as the treemap tile fallback when a
+// logo's dominant color can't be sampled (see utils/iconColor).
+export function assetBrandColor(symbol: string): string {
+  return assetGradient(symbol)[0]
+}
 function AssetLogo({ symbol, size = 20 }: { symbol: string; size?: number }) {
   const [c1, c2] = assetGradient(symbol)
   return <span className="asset-logo" style={{ width: size, height: size, fontSize: size * 0.4, background: `linear-gradient(135deg,${c1},${c2})` }}>{symbol.slice(0, 3)}</span>
@@ -220,6 +227,13 @@ function initialIconMode(srcId: number): 'svg' | 'png' | 'fail' {
   if (NO_CDN_ICON_IDS.has(srcId)) return 'fail'
   if (PNG_ICON_IDS.has(srcId)) return 'png'
   return 'svg'
+}
+
+// Composite (Hollar-wrapped) and locally-known-missing assets have no single CDN
+// icon to sample a color from — callers should skip them and use a fallback color
+// rather than firing a request that only 404s.
+export function iconIsSampleable(assetId: number): boolean {
+  return !(assetId in COMPOSITE_ICONS) && !NO_CDN_ICON_IDS.has(assetId)
 }
 
 // A single CDN <img> with the svg→png→letter fallback chain. The load state is
