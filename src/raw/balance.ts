@@ -342,20 +342,46 @@ function isAdministrativeCall(name: string): boolean {
     /^(Sudo|Utility|Scheduler|Democracy|Referenda|Whitelist|Preimage|Council|TechnicalCommittee)\./.test(name)
 }
 
+// Pallets whose balance events/calls are native-only by construction: their
+// args never carry an asset id because there is only ever one asset (HDX) in
+// play. Everything else admitted by isBalanceEvent/isBalanceCall (Tokens.,
+// Currencies., EVM., EVMAccounts.) can in principle touch any asset, so an
+// empty collectAssets() result there means the shape genuinely couldn't be
+// decoded — not that the asset must be native.
+function isNativeImpliedEventSource(name: string): boolean {
+  return name.startsWith('Balances.') || name.startsWith('System.')
+}
+
+function isNativeImpliedCallSource(name: string): boolean {
+  return name.startsWith('Balances.')
+}
+
+// Event candidates have no per-row warning channel (candidatesFromEvent only
+// returns BalanceCandidate[]), so anomalies are logged instead. Deduped per
+// event name per process to avoid flooding logs on a hot path.
+const warnedUndecodedAssetEventNames = new Set<string>()
+
+function warnUndecodedAssetEvent(name: string): void {
+  if (warnedUndecodedAssetEventNames.has(name)) return
+  warnedUndecodedAssetEventNames.add(name)
+  console.warn(`[RawBalance] ${name} carried an account but no decodable asset id; skipping balance candidate(s) instead of assuming the native asset`)
+}
+
 function candidatesFromEvent(event: RawEvent): BalanceCandidate[] {
   const name = event.name ?? ''
   if (!isBalanceEvent(name)) return []
   const accounts = collectAccounts(event.args)
   if (accounts.length === 0) return []
 
-  const assets = name.startsWith('Balances.') || name.startsWith('System.')
-    ? [NATIVE_ASSET_ID]
-    : collectAssets(event.args)
-  const resolvedAssets = assets.length === 0 ? [NATIVE_ASSET_ID] : assets
+  const assets = isNativeImpliedEventSource(name) ? [NATIVE_ASSET_ID] : collectAssets(event.args)
+  if (assets.length === 0) {
+    warnUndecodedAssetEvent(name)
+    return []
+  }
 
   const candidates: BalanceCandidate[] = []
   for (const accountId of accounts) {
-    for (const assetId of resolvedAssets) {
+    for (const assetId of assets) {
       candidates.push({
         accountId,
         assetId,
@@ -375,15 +401,33 @@ function candidatesFromEvent(event: RawEvent): BalanceCandidate[] {
   return candidates
 }
 
-function candidatesFromCall(call: RawCall): { candidates: BalanceCandidate[]; warningNeeded: boolean } {
+interface CallCandidateResult {
+  candidates: BalanceCandidate[]
+  warningNeeded: boolean
+  // Set only for the new undecodable-multi-asset-shape case below, so the
+  // caller can surface an accurate warning without changing the meaning of
+  // warningNeeded for the pre-existing branches (administrative calls / no
+  // accounts decoded), whose warning wiring is untouched.
+  warningCode?: string
+  warningMessage?: string
+}
+
+function candidatesFromCall(call: RawCall): CallCandidateResult {
   const name = call.name ?? ''
   if (!isBalanceCall(name)) return { candidates: [], warningNeeded: isAdministrativeCall(name) }
 
   const accounts = collectAccounts(call.args)
   if (accounts.length === 0) return { candidates: [], warningNeeded: true }
 
-  const assets = name.startsWith('Balances.') ? [NATIVE_ASSET_ID] : collectAssets(call.args)
-  const resolvedAssets = assets.length === 0 ? [NATIVE_ASSET_ID] : assets
+  const assets = isNativeImpliedCallSource(name) ? [NATIVE_ASSET_ID] : collectAssets(call.args)
+  if (assets.length === 0) {
+    return {
+      candidates: [],
+      warningNeeded: true,
+      warningCode: 'undecoded_multi_asset_call',
+      warningMessage: `${name} did not include a decodable asset id; skipping balance candidate(s) instead of assuming the native asset`,
+    }
+  }
   const callAddress = callAddressToString(call.address)
   const evidenceArgs = name === 'Balances.upgrade_accounts'
     ? { accounts_count: accounts.length, args_omitted: true, reason: 'large account list stored in raw_calls.args_json' }
@@ -391,7 +435,7 @@ function candidatesFromCall(call: RawCall): { candidates: BalanceCandidate[]; wa
 
   const candidates: BalanceCandidate[] = []
   for (const accountId of accounts) {
-    for (const assetId of resolvedAssets) {
+    for (const assetId of assets) {
       candidates.push({
         accountId,
         assetId,
@@ -984,9 +1028,21 @@ export async function extractBalanceObservations(
       continue
     }
 
-    const { candidates: callCandidates, warningNeeded } = candidatesFromCall(call)
+    const { candidates: callCandidates, warningNeeded, warningCode, warningMessage } = candidatesFromCall(call)
     candidates.push(...callCandidates)
-    if (warningNeeded && isAdministrativeCall(name)) {
+    if (warningCode != null) {
+      warnings.push(parserWarning(
+        call.block.height,
+        blockTimestamp,
+        ingestSource,
+        'call',
+        name,
+        callAddress,
+        warningCode,
+        warningMessage ?? 'Balance call could not be fully parsed',
+        { call: name, call_address: callAddress, args: call.args ?? null },
+      ))
+    } else if (warningNeeded && isAdministrativeCall(name)) {
       warnings.push(parserWarning(
         call.block.height,
         blockTimestamp,
