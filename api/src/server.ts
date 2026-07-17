@@ -9,7 +9,6 @@ import {
   startAccountSwapActivityQueueDrain,
   stopAccountSwapActivityQueueDrain,
 } from './db/accountSwapQueue.ts'
-import { applySchema } from './db/schemaBootstrap.ts'
 import { loadAssets, stopAssetsRefresh } from './services/assetsService.ts'
 import { candlesRoutes } from './routes/candles.ts'
 import { assetsRoutes } from './routes/assets.ts'
@@ -116,16 +115,16 @@ await fastify.register(tagRoutes)
 
 async function start() {
   try {
-    // Schema upgrades can include bounded historical INSERT…SELECT work. Keep
-    // them off the public request client, whose 20s timeout and 4 GB cap are
-    // intentionally tuned for HTTP queries rather than maintenance.
-    const migrationClient = createLongOpClickHouseClient()
+    // The schema is created by the schema-bootstrap service before this process
+    // starts (Compose depends_on: service_completed_successfully), so no schema
+    // work runs here. Seed/drain the account-swap-activity queue on a long-op
+    // client, off the public request client (20s timeout, 4 GB cap).
+    const bootstrapClient = createLongOpClickHouseClient()
     try {
-      await applySchema(migrationClient)
-      await seedAccountSwapActivityQueue(migrationClient)
-      await drainAccountSwapActivityQueue(migrationClient, { maxBatches: 100 })
+      await seedAccountSwapActivityQueue(bootstrapClient)
+      await drainAccountSwapActivityQueue(bootstrapClient, { maxBatches: 100 })
     } finally {
-      await migrationClient.close()
+      await bootstrapClient.close()
     }
     await loadAssets(client)
     initExplorerService(client)
