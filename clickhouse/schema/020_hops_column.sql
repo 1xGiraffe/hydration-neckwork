@@ -1,1 +1,0 @@
-ALTER TABLE price_data.prices ADD COLUMN IF NOT EXISTS hops UInt8 DEFAULT 0;
