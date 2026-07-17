@@ -45,13 +45,18 @@ function sleep(ms: number): Promise<void> {
 export interface DerivationJob {
   model: string
   run: (client: ClickHouseClient) => Promise<DerivationResult>
+  // The job's SQL is BUILT from the asset registry (decimal factors, price
+  // aliases). Running it against a stale/failed registry would bake wrong
+  // valuations into computed partitions, so it is skipped for the cycle when
+  // the registry refresh failed rather than run with bad inputs.
+  needsAssets?: boolean
 }
 
 // Static model labels line up with the `model` field each job returns on
 // success, so a failure log (`<model> failed`) and a success log (`<model>=N`
 // rows) name the same thing regardless of which path a job took.
 const JOBS: DerivationJob[] = [
-  { model: 'account_trade_volume', run: runAccountTradeVolume },
+  { model: 'account_trade_volume', run: runAccountTradeVolume, needsAssets: true },
   { model: 'omnipool_owner_intervals', run: runOmnipoolOwnerIntervals },
   { model: 'xyk_farm_intervals', run: runXykFarmIntervals },
   { model: 'xyk_total_shares', run: runXykTotalShares },
@@ -71,17 +76,28 @@ export interface RunCycleDeps {
 export async function runCycle({ jobs, loadAssets, makeClient }: RunCycleDeps): Promise<void> {
   const client = makeClient()
   const results: DerivationResult[] = []
+  const skipped = new Set<string>()
   try {
-    // The ATV job's valuation reads the asset registry (per-asset decimals +
-    // price aliases); refresh it first, every cycle, so a newly-registered
-    // asset is picked up without a restart. Guarded on its own: a registry
-    // load failure should not stop the other jobs, which don't need it.
+    // The ATV job's valuation SQL is built from the asset registry (per-asset
+    // decimals + price aliases); refresh it first, every cycle, so a newly-
+    // registered asset is picked up without a restart. Guarded on its own: a
+    // registry load failure must not stop the registry-independent jobs — but
+    // jobs marked needsAssets are SKIPPED for the cycle, because running them
+    // against a failed/stale registry would bake wrong valuations into
+    // computed partitions that no later signal re-marks stale.
+    let assetsOk = true
     try {
       await loadAssets(client)
     } catch (err) {
+      assetsOk = false
       console.error('[derivations] asset registry refresh failed', err)
     }
-    for (const { model, run } of jobs) {
+    for (const { model, run, needsAssets } of jobs) {
+      if (needsAssets && !assetsOk) {
+        skipped.add(model)
+        console.log(`[derivations] ${model} skipped: asset registry refresh failed this cycle`)
+        continue
+      }
       try {
         results.push(await run(client))
       } catch (err) {
@@ -92,6 +108,7 @@ export async function runCycle({ jobs, loadAssets, makeClient }: RunCycleDeps): 
     await client.close().catch(() => {})
   }
   const summary = jobs.map(({ model }) => {
+    if (skipped.has(model)) return `${model}=SKIPPED`
     const result = results.find(r => r.model === model)
     return `${model}=${result ? result.rows : 'FAILED'}`
   }).join(' ')

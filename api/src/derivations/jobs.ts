@@ -12,8 +12,9 @@
 // and EXCHANGE it with the live table (see atomicFullReplace below) — the live
 // table is always exactly the latest full run, with no stale rows left behind by
 // a shifted ReplacingMergeTree key and no unbounded run_id growth. account_trade_volume
-// instead drops+rebuilds whole CH partitions in place. Target tables already exist
-// in clickhouse/schema/001_tables.sql — nothing here creates tables (beyond the
+// rebuilds stale month-partitions in its own `_staging` twin and publishes each via
+// atomic REPLACE PARTITION. Target tables already exist in
+// clickhouse/schema/001_tables.sql — nothing here creates tables (beyond the
 // on-demand staging twins) or writes the (retired) lp_history_model_coverage gate rows.
 
 import type { ClickHouseClient } from '../db/client.ts'
@@ -21,6 +22,7 @@ import {
   buildPartitionInsertSql,
   swapEventFilterSql,
 } from '../services/accountTradeVolume.ts'
+import { allExplorerAssets } from '../services/explorerAssets.ts'
 import {
   buildOmnipoolOwnerIntervals,
   type OwnerLifecycleEvent,
@@ -72,12 +74,14 @@ async function atomicFullReplace(
 // Per-account NET trade volume: routed/DCA trades collapsed to their net
 // input/output so intermediate routing hops are not double-counted. The netting
 // is a per-trade cross-row aggregation with a block-time ohlc valuation, so it
-// cannot be a plain per-row MV. Whole CH month-partitions are dropped and rebuilt
-// from source, so re-runs are idempotent. The netting/valuation SQL and the
-// swap-row filter live in services/accountTradeVolume.ts (single source of truth,
-// imported above) — this module only decides which partitions to rebuild.
+// cannot be a plain per-row MV. Whole CH month-partitions are rebuilt in a
+// staging twin and published atomically (REPLACE PARTITION), so re-runs are
+// idempotent and readers never observe a missing month. The netting/valuation
+// SQL and the swap-row filter live in services/accountTradeVolume.ts (single
+// source of truth, imported above) — this module only decides which partitions
+// to rebuild and how they are published.
 
-// Ingest-time incremental partition selection.
+// Ingest-time incremental partition selection, gated on price coverage.
 //
 // A DISTINCT-block / row COUNT comparison is wrong here: derived rows are a
 // filtered SUBSET of source blocks — the netting SELECT drops unpriced, net-zero
@@ -85,7 +89,8 @@ async function atomicFullReplace(
 // block count is (almost) always > its derived block count. Counts therefore
 // never match and every partition would rebuild every cycle.
 //
-// Instead we compare ingest-time watermarks. A month-partition is stale when:
+// Instead we compare ingest-time watermarks. A month-partition is a rebuild
+// candidate when:
 //   - it has NO derived rows yet (LEFT JOIN miss), OR
 //   - the newest raw swap row (max ingested_at) is newer than the newest derived
 //     row (max computed_at) in that partition.
@@ -93,13 +98,26 @@ async function atomicFullReplace(
 // and correct under out-of-order backward backfill: freshly backfilled raw rows
 // carry a newer ingested_at than the partition's derived computed_at, re-triggering
 // it; steady-state partitions (no new/rewritten raw) have max ingested_at <=
-// max computed_at and are skipped. The swap-row filter comes from the service so it
-// matches the exact source rows the netting consumes.
+// max computed_at and are skipped.
+//
+// Price-coverage gate: the valuation depends on ohlc prices, which the main
+// (price) pipeline writes on its own schedule — behind raw on a fresh database
+// and during backward backfill. Computing a partition before its prices exist
+// would bake in dropped (unpriced → HAVING) trades, and no later signal would
+// re-mark it stale. So a candidate is only returned once the priced range
+// covers it: min(blocks) at-or-below the partition's first block AND max(blocks)
+// at-or-past the partition's last source swap block. Price backfill descends
+// contiguously (supervisor), so coverage is monotone and each partition
+// computes exactly once it is priceable — and an empty blocks table (brand-new
+// DB) yields no candidates at all. The swap-row filter comes from the service
+// so it matches the exact source rows the netting consumes.
 export function stalePartitionsSql(): string {
   return `
     SELECT toString(src.p) AS p
     FROM (
-      SELECT toYYYYMM(toDateTime(block_height * 12)) AS p, max(ingested_at) AS src_ingest
+      SELECT toYYYYMM(toDateTime(block_height * 12)) AS p,
+             max(ingested_at) AS src_ingest,
+             max(block_height) AS src_maxb
       FROM price_data.raw_events
       WHERE ${swapEventFilterSql()}
       GROUP BY p
@@ -109,7 +127,13 @@ export function stalePartitionsSql(): string {
       FROM price_data.account_trade_volume
       GROUP BY p
     ) AS der ON src.p = der.p
-    WHERE der.der_computed IS NULL OR src.src_ingest > der.der_computed
+    CROSS JOIN (
+      SELECT min(block_height) AS priced_from, max(block_height) AS priced_to
+      FROM price_data.blocks
+    ) AS pc
+    WHERE (der.der_computed IS NULL OR src.src_ingest > der.der_computed)
+      AND pc.priced_from <= intDiv(toUnixTimestamp(parseDateTimeBestEffort(concat(toString(src.p), '01'))), 12)
+      AND pc.priced_to >= src.src_maxb
     ORDER BY src.p`
 }
 
@@ -119,20 +143,35 @@ async function stalePartitions(client: ClickHouseClient): Promise<string[]> {
   return (await res.json<{ p: string }>()).map(r => r.p)
 }
 
-// Recompute only the partitions whose source/derived coverage diverges. Assumes
-// the explorer asset registry is loaded (loadExplorerAssets) — the netting SQL
-// bakes in per-asset decimal factors and the price-alias universe.
+// Recompute only the partitions whose source/derived coverage diverges. The
+// netting SQL bakes in per-asset decimal factors and the price-alias universe,
+// so an empty registry (fresh DB before assets are indexed, or a failed
+// loadExplorerAssets — the runner also skips this job on load failure) must
+// not bake wrongly-valued partitions: bail out instead.
+//
+// Publication is atomic per partition: the rebuild lands in the `_staging`
+// twin first, then REPLACE PARTITION swaps it into the live table in one
+// operation — readers see the old partition until the swap, never a gap
+// (the old DROP PARTITION + INSERT exposed an empty month mid-rebuild).
 export async function runAccountTradeVolume(client: ClickHouseClient): Promise<DerivationResult> {
   const model = 'account_trade_volume'
-  const stale = await stalePartitions(client)
-  for (const p of stale) {
-    await client.command({
-      query: `ALTER TABLE price_data.account_trade_volume DROP PARTITION ${p}`,
-      clickhouse_settings: { mutations_sync: '1' },
-    })
-    await client.command({ query: buildPartitionInsertSql(p) })
+  if (!allExplorerAssets().length) {
+    console.log('[derivations] account_trade_volume skipped: asset registry empty')
+    return { model, rows: 0 }
   }
+  const live = 'price_data.account_trade_volume'
+  const staging = `${live}_staging`
+  const stale = await stalePartitions(client)
   if (!stale.length) return { model, rows: 0 }
+  await client.command({ query: `CREATE TABLE IF NOT EXISTS ${staging} AS ${live}` })
+  for (const p of stale) {
+    // Clean slate in staging for this partition (a prior crashed run may have
+    // left rows); DROP PARTITION on an absent partition is a no-op.
+    await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
+    await client.command({ query: buildPartitionInsertSql(p, staging) })
+    await client.command({ query: `ALTER TABLE ${live} REPLACE PARTITION ${p} FROM ${staging}` })
+    await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
+  }
   const res = await client.query({
     query: `SELECT count() AS n FROM price_data.account_trade_volume
             WHERE toYYYYMM(toDateTime(block_height * 12)) IN (${stale.join(',')})`,

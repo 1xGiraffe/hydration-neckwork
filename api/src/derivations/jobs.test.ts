@@ -45,4 +45,17 @@ describe('stalePartitionsSql', () => {
     expect(sql).toContain('price_data.account_trade_volume')
     expect(sql).toContain('toYYYYMM(toDateTime(block_height * 12))')
   })
+
+  it('gates candidates on price coverage so unpriced partitions are never baked', () => {
+    const sql = stalePartitionsSql()
+    // The priced range (main pipeline's blocks) must span the partition: from
+    // at-or-below its first block to at-or-past its last source swap block.
+    // Computing earlier would drop unpriced trades (HAVING volume_usd > 0)
+    // with no later signal to re-mark the partition stale.
+    expect(sql).toContain('price_data.blocks')
+    expect(sql).toContain('pc.priced_from <=')
+    expect(sql).toContain('pc.priced_to >= src.src_maxb')
+    // Partition → first-block inversion of toYYYYMM(toDateTime(h * 12)).
+    expect(sql).toContain("parseDateTimeBestEffort(concat(toString(src.p), '01'))")
+  })
 })

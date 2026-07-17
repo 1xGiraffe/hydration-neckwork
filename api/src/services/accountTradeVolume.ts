@@ -4,9 +4,9 @@
 // trade-volume-dedup-design.md.
 //
 // The netting is a per-trade cross-row aggregation with a block-time ohlc
-// valuation, so it cannot be a plain per-row MV. History is backfilled once and
-// recent partitions are recomputed on a timer to stay fresh. Whole CH partitions
-// are dropped and rebuilt, so re-runs are idempotent.
+// valuation, so it cannot be a plain per-row MV. The derivations runner rebuilds
+// whole CH month-partitions in a staging twin and publishes them atomically
+// (REPLACE PARTITION), so re-runs are idempotent and readers never see a gap.
 
 import { allExplorerAssets, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, priceAssetId } from './explorerAssets.ts'
 
@@ -69,9 +69,25 @@ export function swapEventFilterSql(): string {
 // The per-partition netting + valuation INSERT. Groups a partition's swap legs
 // into net trades, values each surviving asset at its block-time ohlc close, and
 // stores volume_usd = max(net_in_usd, net_out_usd). Exported as the single source
-// of truth for the netting SQL (reused by the derivations recompute job).
-export function buildPartitionInsertSql(partition: string): string {
+// of truth for the netting SQL (reused by the derivations recompute job, which
+// writes into the staging twin and publishes via REPLACE PARTITION).
+//
+// Replay safety: raw_events is ReplacingMergeTree(ingested_at) keyed on
+// (block_height, event_index), so a replayed range holds duplicate row versions
+// until background merges collapse them. Every raw_events read below uses FINAL
+// so a recompute between replay and merge nets each leg exactly once; the reads
+// stay bounded by the partition filter + event-name set.
+//
+// Valuation stays in Decimal end-to-end: prices are Decimal(38,12) at the source
+// (ohlc close states), so converting through Float64 would be the only lossy
+// stage — amounts × norm-factor × close and the /10^md rescale all use
+// multiplyDecimal/divideDecimal, and per-trade sums aggregate Decimal256(12).
+export function buildPartitionInsertSql(
+  partition: string,
+  targetTable = 'price_data.account_trade_volume',
+): string {
   const md = maxDecimals()
+  const usdDivisor = (10n ** BigInt(md)).toString()
   const anchor = EVENT_ANCHOR_OFFSET.toString()
   const pf = `toYYYYMM(toDateTime(block_height * 12)) = ${partition}`
   const rid = `toUInt64OrZero(extractGroups(args_json, '"__kind":"Router","value":(\\\\d+)')[1])`
@@ -84,7 +100,7 @@ export function buildPartitionInsertSql(partition: string): string {
   const outAmount = `if(${inv}, JSONExtractString(JSONExtractArrayRaw(args_json,'inputs')[1],'amount'), JSONExtractString(leg,'amount'))`
   const inAmount = `if(${inv}, JSONExtractString(JSONExtractArrayRaw(args_json,'outputs')[1],'amount'), JSONExtractString(leg,'amount'))`
   return `
-INSERT INTO price_data.account_trade_volume
+INSERT INTO ${targetTable}
   (account, block_height, trade_key, volume_usd, net_in_usd, net_out_usd, trade_count, computed_at)
 WITH
 legs AS (
@@ -92,13 +108,13 @@ legs AS (
          block_timestamp AS block_time, JSONExtractInt(leg,'asset') AS asset_id,
          toDecimal256(${outAmount}, 0) AS samt
   FROM (SELECT block_height, event_index, block_timestamp, event_name, args_json, ${rid} AS rid
-        FROM price_data.raw_events WHERE event_name IN (${BROADCAST_EVENTS}) AND block_height >= ${BROADCAST_MIN_BLOCK} AND ${pf})
+        FROM price_data.raw_events FINAL WHERE event_name IN (${BROADCAST_EVENTS}) AND block_height >= ${BROADCAST_MIN_BLOCK} AND ${pf})
   ARRAY JOIN JSONExtractArrayRaw(args_json,'outputs') AS leg
   UNION ALL
   SELECT JSONExtractString(args_json,'swapper'), block_height, ${bcastKey},
          block_timestamp, JSONExtractInt(leg,'asset'), -toDecimal256(${inAmount}, 0)
   FROM (SELECT block_height, event_index, block_timestamp, event_name, args_json, ${rid} AS rid
-        FROM price_data.raw_events WHERE event_name IN (${BROADCAST_EVENTS}) AND block_height >= ${BROADCAST_MIN_BLOCK} AND ${pf})
+        FROM price_data.raw_events FINAL WHERE event_name IN (${BROADCAST_EVENTS}) AND block_height >= ${BROADCAST_MIN_BLOCK} AND ${pf})
   ARRAY JOIN JSONExtractArrayRaw(args_json,'inputs') AS leg
   UNION ALL
   SELECT JSONExtractString(args_json,'who') AS account, block_height, ${legacyKey} AS trade_key,
@@ -106,14 +122,14 @@ legs AS (
          -toDecimal256(multiIf(event_name='XYK.SellExecuted', JSONExtractString(args_json,'amount'),
                                event_name='XYK.BuyExecuted', JSONExtractString(args_json,'buyPrice'),
                                JSONExtractString(args_json,'amountIn')), 0)
-  FROM price_data.raw_events WHERE event_name IN (${LEGACY_EVENTS}) AND block_height < ${BROADCAST_MIN_BLOCK} AND ${pf}
+  FROM price_data.raw_events FINAL WHERE event_name IN (${LEGACY_EVENTS}) AND block_height < ${BROADCAST_MIN_BLOCK} AND ${pf}
   UNION ALL
   SELECT JSONExtractString(args_json,'who'), block_height, ${legacyKey},
          block_timestamp, toUInt32(greatest(0, JSONExtractInt(args_json,'assetOut'))),
          toDecimal256(multiIf(event_name='XYK.SellExecuted', JSONExtractString(args_json,'salePrice'),
                               event_name='XYK.BuyExecuted', JSONExtractString(args_json,'amount'),
                               JSONExtractString(args_json,'amountOut')), 0)
-  FROM price_data.raw_events WHERE event_name IN (${LEGACY_EVENTS}) AND block_height < ${BROADCAST_MIN_BLOCK} AND ${pf}
+  FROM price_data.raw_events FINAL WHERE event_name IN (${LEGACY_EVENTS}) AND block_height < ${BROADCAST_MIN_BLOCK} AND ${pf}
 ),
 net AS (
   SELECT account, block_height, trade_key, any(block_time) AS block_time, asset_id, sum(samt) AS net_amt
@@ -122,7 +138,7 @@ net AS (
 ),
 valued AS (
   SELECT n.account AS account, n.block_height AS block_height, n.trade_key AS trade_key,
-         toFloat64(multiplyDecimal(multiplyDecimal(n.net_amt, ${normFactorSql('n.asset_id', md)}, 0), toDecimal256(p.close, 12), 12)) / 1e${md} AS net_usd
+         divideDecimal(multiplyDecimal(multiplyDecimal(n.net_amt, ${normFactorSql('n.asset_id', md)}, 0), toDecimal256(p.close, 12), 12), toDecimal256('${usdDivisor}', 0), 12) AS net_usd
   FROM net n
   ASOF LEFT JOIN (
     SELECT asset_id, interval_start + INTERVAL 1 HOUR AS price_time, argMaxMerge(close_state) AS close
@@ -130,9 +146,9 @@ valued AS (
   ) p ON p.asset_id = ${priceAliasSql('n.asset_id')} AND p.price_time <= n.block_time
 )
 SELECT account, block_height, trade_key,
-       toDecimal128(greatest(sum(greatest(net_usd, 0)), sum(greatest(-net_usd, 0))), 12) AS volume_usd,
-       toDecimal128(sum(greatest(-net_usd, 0)), 12) AS net_in_usd,
-       toDecimal128(sum(greatest(net_usd, 0)), 12) AS net_out_usd,
+       toDecimal128(greatest(sum(greatest(net_usd, toDecimal256(0, 12))), sum(greatest(-net_usd, toDecimal256(0, 12)))), 12) AS volume_usd,
+       toDecimal128(sum(greatest(-net_usd, toDecimal256(0, 12))), 12) AS net_in_usd,
+       toDecimal128(sum(greatest(net_usd, toDecimal256(0, 12))), 12) AS net_out_usd,
        toUInt32(1) AS trade_count, now() AS computed_at
 FROM valued
 GROUP BY account, block_height, trade_key

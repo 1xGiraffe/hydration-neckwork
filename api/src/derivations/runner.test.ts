@@ -65,6 +65,46 @@ describe('runCycle', () => {
     expect(run).toHaveBeenCalledTimes(1)
     expect(close).toHaveBeenCalledTimes(1)
   })
+
+  it('skips needsAssets jobs when the registry load fails, but runs the rest', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    // A registry-dependent job must not run against a failed/stale registry —
+    // it would bake wrong valuations into partitions nothing re-marks stale.
+    const runAtv = vi.fn(async () => ({ model: 'atv', rows: 1 }))
+    const runOther = vi.fn(async () => ({ model: 'other', rows: 2 }))
+    const jobs: DerivationJob[] = [
+      { model: 'atv', run: runAtv, needsAssets: true },
+      { model: 'other', run: runOther },
+    ]
+    const { asClient } = makeFakeClient()
+
+    await runCycle({
+      jobs,
+      loadAssets: vi.fn(async () => { throw new Error('registry down') }),
+      makeClient: () => asClient,
+    })
+
+    expect(runAtv).not.toHaveBeenCalled()
+    expect(runOther).toHaveBeenCalledTimes(1)
+    const summary = log.mock.calls.map(c => String(c[0])).find(l => l.includes('cycle complete'))
+    expect(summary).toContain('atv=SKIPPED')
+    expect(summary).toContain('other=2')
+  })
+
+  it('runs needsAssets jobs normally when the registry load succeeds', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    const runAtv = vi.fn(async () => ({ model: 'atv', rows: 3 }))
+    const jobs: DerivationJob[] = [{ model: 'atv', run: runAtv, needsAssets: true }]
+    const { asClient } = makeFakeClient()
+
+    await runCycle({ jobs, loadAssets: vi.fn(async () => {}), makeClient: () => asClient })
+
+    expect(runAtv).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('parsePollSeconds', () => {
