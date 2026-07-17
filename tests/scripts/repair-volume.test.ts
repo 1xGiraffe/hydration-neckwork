@@ -207,4 +207,22 @@ describe('volume repair helpers', () => {
 
     expect([...(args.assetIds ?? [])]).toEqual([34, 20])
   })
+
+  it('forces the ohlc target back on when --skip-ohlc is combined with an explicit prices target', () => {
+    const args = parseArgs(['--from-block=123', '--targets=prices', '--skip-ohlc'])
+
+    expect([...args.targets].sort()).toEqual(['ohlc', 'prices'])
+  })
+
+  it('forces the ohlc target back on when --skip-ohlc is combined with the default targets', () => {
+    const args = parseArgs(['--from-block=123', '--skip-ohlc'])
+
+    expect([...args.targets].sort()).toEqual(['ohlc', 'prices', 'trade-volume'])
+  })
+
+  it('honors --skip-ohlc when prices are not among the requested targets', () => {
+    const args = parseArgs(['--from-block=123', '--targets=trade-volume', '--skip-ohlc'])
+
+    expect([...args.targets]).toEqual(['trade-volume'])
+  })
 })

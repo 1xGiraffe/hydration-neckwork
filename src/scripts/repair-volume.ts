@@ -158,6 +158,17 @@ export function parseArgs(argv = process.argv.slice(2)): Args {
     }
   }
 
+  // A prices repair DELETEs and re-INSERTs price_data.prices rows. The ohlc_* tables are fed by
+  // materialized views that only fire on INSERT, so the DELETE never reverses their existing
+  // sumState/argMinState contributions and the re-INSERT adds new state on top: affected candles
+  // end up with old+new volume and corrupted open/close extremes. An OHLC rebuild for the repaired
+  // range is therefore mandatory whenever prices are touched, regardless of --skip-ohlc or a custom
+  // --targets= list that omits 'ohlc'.
+  if (args.targets.has('prices') && !args.targets.has('ohlc')) {
+    args.targets.add('ohlc')
+    console.log('[volume-repair] prices repair rewrites rows feeding the OHLC materialized views; forcing OHLC rebuild for the repaired range (--skip-ohlc ignored)')
+  }
+
   return args
 }
 
@@ -179,7 +190,15 @@ Options:
   --targets=all|trade-volume,prices,ohlc
                                       What to repair. Default: all.
   --asset-ids=A,B,C                   Limit mutations to these canonical asset IDs.
-  --skip-ohlc                         Shortcut for --targets=trade-volume,prices.
+  --skip-ohlc                         Skip the OHLC rebuild. Only takes effect when
+                                      'prices' is not also a target: a prices repair
+                                      deletes and re-inserts price_data.prices rows,
+                                      and the ohlc_* materialized views are insert-only,
+                                      so skipping the rebuild would leave candles with
+                                      old+new volume double-counted. If 'prices' is
+                                      targeted (the default, or via --targets=...,prices),
+                                      'ohlc' is added back automatically and --skip-ohlc
+                                      is ignored.
   --chunk-size=N                      Blocks per repair chunk. Default: ${DEFAULT_CHUNK_SIZE}.
   --safety-lag-blocks=N               Do not repair the latest N blocks. Default: ${DEFAULT_SAFETY_LAG_BLOCKS}.
   --apply                             Mutate ClickHouse. Without this, the script is a dry run.
