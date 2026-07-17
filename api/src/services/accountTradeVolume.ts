@@ -8,7 +8,6 @@
 // recent partitions are recomputed on a timer to stay fresh. Whole CH partitions
 // are dropped and rebuilt, so re-runs are idempotent.
 
-import type { ClickHouseClient } from '../db/client.ts'
 import { allExplorerAssets, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, priceAssetId } from './explorerAssets.ts'
 
 // First block emitting Broadcast.Swapped (the unified swap-event era). At/above
@@ -138,46 +137,4 @@ SELECT account, block_height, trade_key,
 FROM valued
 GROUP BY account, block_height, trade_key
 HAVING volume_usd > 0`
-}
-
-// Partitions (months) that contain swap events, ordered oldest→newest.
-async function activeSwapPartitions(client: ClickHouseClient): Promise<string[]> {
-  const res = await client.query({
-    query: `SELECT DISTINCT toYYYYMM(toDateTime(block_height * 12)) AS p
-            FROM price_data.raw_events WHERE event_name IN (${BROADCAST_EVENTS}, ${LEGACY_EVENTS}) ORDER BY p`,
-    format: 'JSONEachRow',
-  })
-  return (await res.json<{ p: number }>()).map(r => String(r.p))
-}
-
-async function coveredPartitions(client: ClickHouseClient): Promise<Set<string>> {
-  const res = await client.query({ query: `SELECT partition FROM price_data.account_trade_volume_backfill FINAL`, format: 'JSONEachRow' })
-  return new Set((await res.json<{ partition: string }>()).map(r => r.partition))
-}
-
-export async function accountTradeVolumeCovered(client: ClickHouseClient): Promise<boolean> {
-  const [active, covered] = await Promise.all([activeSwapPartitions(client), coveredPartitions(client)])
-  return active.length > 0 && active.every(p => covered.has(p))
-}
-
-async function rebuildPartition(client: ClickHouseClient, partition: string): Promise<void> {
-  await client.command({ query: `ALTER TABLE price_data.account_trade_volume DROP PARTITION ${partition}`, clickhouse_settings: { mutations_sync: '1' } })
-  await client.command({ query: buildPartitionInsertSql(partition) })
-  await client.command({ query: `INSERT INTO price_data.account_trade_volume_backfill (partition) VALUES ('${partition}')` })
-}
-
-// Rebuild every partition missing a completion marker (resumable full backfill).
-export async function backfillAccountTradeVolume(client: ClickHouseClient): Promise<void> {
-  const [active, covered] = await Promise.all([activeSwapPartitions(client), coveredPartitions(client)])
-  for (const p of active) {
-    if (covered.has(p)) continue
-    await rebuildPartition(client, p)
-  }
-}
-
-// Recompute the most recent partitions so the metric tracks live trading. The
-// netting has no MV, so this timer is what keeps recent volume current.
-export async function refreshRecentAccountTradeVolume(client: ClickHouseClient, recent = 2): Promise<void> {
-  const active = await activeSwapPartitions(client)
-  for (const p of active.slice(-recent)) await rebuildPartition(client, p)
 }

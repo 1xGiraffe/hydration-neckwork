@@ -4999,35 +4999,30 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
     const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
     const tokenIds = assetIdsForToken(filters.token)
     const useAssetSwapReadModel = tokenIds != null
-    const useSwapReadModel = true
     const swapTable = useAssetSwapReadModel ? 'asset_swap_activity' : 'swap_activity'
     const tokenFilter = tokenIds == null ? '' : tokenIds.length
       ? `AND asset_id IN (${tokenIds.join(',')})`
       : 'AND 0'
-    const tokenRefsFilter = useSwapReadModel ? '' : eventAssetRefsFilterSql(tokenIds, names)
-    const assetOutExpr = useSwapReadModel ? 'asset_out' : `JSONExtractInt(args_json,'assetOut')`
-    const amountOutExpr = useSwapReadModel ? 'amount_out' : `JSONExtractString(args_json,'amountOut')`
+    const tokenRefsFilter = ''
+    const assetOutExpr = 'asset_out'
+    const amountOutExpr = 'amount_out'
     const postUsdFilter = filters.min != null && filters.unit !== 'token'
     const amountFilter = eventValueFilterSql(assetOutExpr, amountOutExpr, 'block_timestamp',
       postUsdFilter ? { ...filters, min: undefined, unit: undefined } : filters, prices, 'trade_price')
-    const notRouterHop = useSwapReadModel
-      ? `AND who != '${ROUTER_PALLET_ACCT}'`
-      : NOT_ROUTER_HOP
-    const notDcaFeeLeg = useSwapReadModel
-      ? `AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%')`
-      : NOT_DCA_FEE_LEG
+    const notRouterHop = `AND who != '${ROUTER_PALLET_ACCT}'`
+    const notDcaFeeLeg = `AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%')`
     const want = offset + limit
     const scanLimit = Math.max(want * 8, 200)
     const fetchRaw = async (bound: string, pageLimit: number): Promise<RawSwapEventRow[]> => {
       const res = await client.query({
         query: `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-            ${useSwapReadModel ? 'who' : `JSONExtractString(args_json, 'who')`} AS who,
-            ${useSwapReadModel ? 'asset_in' : `JSONExtractInt(args_json, 'assetIn')`} AS asset_in,
-            ${useSwapReadModel ? 'asset_out' : `JSONExtractInt(args_json, 'assetOut')`} AS asset_out,
-            ${useSwapReadModel ? 'amount_in' : `JSONExtractString(args_json, 'amountIn')`} AS amount_in,
-            ${useSwapReadModel ? 'amount_out' : `JSONExtractString(args_json, 'amountOut')`} AS amount_out
-          FROM price_data.${useSwapReadModel ? swapTable : 'raw_events'}
+            who AS who,
+            asset_in AS asset_in,
+            asset_out AS asset_out,
+            amount_in AS amount_in,
+            amount_out AS amount_out
+          FROM price_data.${swapTable}
           ${amountFilter.joinSql}
           WHERE ${bound} AND event_name IN (${names}) ${notRouterHop} ${notDcaFeeLeg}
             ${tokenRefsFilter}
@@ -5599,17 +5594,15 @@ async function fillMissingLiquidityAmounts(rows: LiquidityAmountCandidate[]): Pr
   const transferRows: { block_height: number; event_index: number; extrinsic_index: number; asset_id: number; to_acc: string; from_acc: string; amount: string }[] = []
   for (let i = 0; i < keys.length; i += 5000) {
     const tuples = keys.slice(i, i + 5000).map(k => { const [h, j] = k.split(':'); return `(${h},${j})` }).join(',')
-    const useTransferLookup = true
     const res = await client.query({
       query: `
         SELECT block_height, event_index, extrinsic_index,
-          ${useTransferLookup ? 'asset_id' : "if(event_name = 'Balances.Transfer', 0, JSONExtractInt(args_json,'currencyId'))"} AS asset_id,
-          ${useTransferLookup ? 'to_account' : "JSONExtractString(args_json,'to')"} AS to_acc,
-          ${useTransferLookup ? 'from_account' : "JSONExtractString(args_json,'from')"} AS from_acc,
-          ${useTransferLookup ? 'amount' : "JSONExtractString(args_json,'amount')"} AS amount
-        FROM price_data.${useTransferLookup ? 'transfer_activity_by_time' : 'raw_events'}
-        WHERE (block_height, extrinsic_index) IN (${tuples})
-          ${useTransferLookup ? '' : "AND event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')"}`,
+          asset_id AS asset_id,
+          to_account AS to_acc,
+          from_account AS from_acc,
+          amount AS amount
+        FROM price_data.transfer_activity_by_time
+        WHERE (block_height, extrinsic_index) IN (${tuples})`,
       format: 'JSONEachRow',
     })
     transferRows.push(...await res.json<{ block_height: number; event_index: number; extrinsic_index: number; asset_id: number; to_acc: string; from_acc: string; amount: string }>())
@@ -5659,21 +5652,14 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
   return cached(`explorer:liquidity:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
-    const useLiquidityReadModel = true
-    const assetExpr = useLiquidityReadModel ? 'asset_id' : `multiIf(JSONHas(args_json,'rewardCurrency'), JSONExtractInt(args_json,'rewardCurrency'),
-                  JSONHas(args_json,'assetId'), JSONExtractInt(args_json,'assetId'),
-                  JSONHas(args_json,'poolId'), JSONExtractInt(args_json,'poolId'),
-                  JSONHas(args_json,'assetA'), JSONExtractInt(args_json,'assetA'),
-                  JSONExtractInt(args_json,'asset_id'))`
-    const amountExpr = useLiquidityReadModel ? 'amount' : `multiIf(JSONHas(args_json,'claimed'), JSONExtractString(args_json,'claimed'), JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'shares'))`
+    const assetExpr = 'asset_id'
+    const amountExpr = 'amount'
     // Match against every asset the event references (Omnipool assetId, XYK
     // assetA/assetB, Stableswap nested assets[]), not just the representative
     // assetExpr used for the displayed asset_id — else a HOLLAR filter drops most
     // of its Stableswap/XYK liquidity rows.
-    const tokenFilter = useLiquidityReadModel
-      ? tokenIds == null ? '' : tokenIds.length ? `AND hasAny(asset_refs, [${tokenIds.join(',')}])` : 'AND 0'
-      : liquidityTokenFilterSql(tokenIds)
-    const tokenRefsFilter = useLiquidityReadModel ? '' : eventAssetRefsFilterSql(tokenIds, sqlEventNameList(liqEvents))
+    const tokenFilter = tokenIds == null ? '' : tokenIds.length ? `AND hasAny(asset_refs, [${tokenIds.join(',')}])` : 'AND 0'
+    const tokenRefsFilter = ''
     // Token-unit thresholds are integer predicates and remain safe to push down.
     // USD thresholds are deliberately candidate-first: an ASOF price join ahead
     // of LIMIT scanned the entire compact liquidity history on every cold page.
@@ -5683,7 +5669,7 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
     if (filters.min != null && filters.unit === 'token') {
       // XYK adds carry only amountA/amountB — the display amount is filled from
       // the matching transfer leg (≈ amountA), so amountA stands in here.
-      const preAmountExpr = `multiIf(${amountExpr} != '', ${amountExpr}, ${useLiquidityReadModel ? 'amount_a' : "JSONExtractString(args_json,'amountA')"})`
+      const preAmountExpr = `multiIf(${amountExpr} != '', ${amountExpr}, amount_a)`
       const directFilter = eventValueFilterSql(assetExpr, preAmountExpr, 'block_timestamp', filters, prices, 'liquidity_price')
       const valueOk = directFilter.predicateSql.replace(/^AND\s+/, '')
       amountFilter = {
@@ -5697,17 +5683,17 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
       const res = await client.query({
         query: `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-            ${useLiquidityReadModel ? 'who' : "JSONExtractString(args_json, 'who')"} AS who,
+            who AS who,
             ${assetExpr} AS asset_id,
             ${amountExpr} AS amount,
-            ${useLiquidityReadModel ? 'asset_b' : "JSONExtractInt(args_json,'assetB')"} AS asset_b,
-            ${useLiquidityReadModel ? 'pool_account' : "JSONExtractString(args_json,'pool')"} AS pool_acc
-          FROM price_data.${useLiquidityReadModel ? 'liquidity_activity' : 'raw_events'}
+            asset_b AS asset_b,
+            pool_account AS pool_acc
+          FROM price_data.liquidity_activity
           ${amountFilter.joinSql}
           WHERE ${bound}
             AND event_name IN (${sqlEventNameList(liqEvents)})
             ${tokenRefsFilter}
-            AND ${useLiquidityReadModel ? 'who' : "JSONExtractString(args_json,'who')"} NOT LIKE '0x6d6f646c%'
+            AND who NOT LIKE '0x6d6f646c%'
             ${tokenFilter}
             ${amountFilter.predicateSql}
           ORDER BY block_height DESC, event_index DESC
@@ -8900,19 +8886,18 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
     // Liquidity: add/remove where the provided/pool asset matches.
     const liquidityP: Promise<ActivityRow[]> = wantLiquidity ? (async () => {
       const fetchPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
-        const useLiquidityReadModel = true
         const res = await client.query({
           query: `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-            ${useLiquidityReadModel ? 'who' : "JSONExtractString(args_json,'who')"} AS who,
-            ${useLiquidityReadModel ? 'amount' : "multiIf(JSONHas(args_json,'claimed'), JSONExtractString(args_json,'claimed'), JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'shares'))"} AS amount,
-            ${useLiquidityReadModel ? 'asset_b' : "JSONExtractInt(args_json,'assetB')"} AS asset_b,
-            ${useLiquidityReadModel ? 'pool_account' : "JSONExtractString(args_json,'pool')"} AS pool_acc
-          FROM price_data.${useLiquidityReadModel ? 'liquidity_activity' : 'raw_events'}
+            who AS who,
+            amount AS amount,
+            asset_b AS asset_b,
+            pool_account AS pool_acc
+          FROM price_data.liquidity_activity
           WHERE ${pageBound}
             AND event_name IN ('Omnipool.LiquidityAdded','Omnipool.LiquidityRemoved','Stableswap.LiquidityAdded','Stableswap.LiquidityRemoved','XYK.LiquidityAdded','XYK.LiquidityRemoved','XYK.PoolCreated','OmnipoolLiquidityMining.RewardClaimed','XYKLiquidityMining.RewardClaimed')
-            AND ${useLiquidityReadModel ? 'who' : "JSONExtractString(args_json,'who')"} NOT LIKE '0x6d6f646c%'
-            AND ${useLiquidityReadModel ? 'has(asset_refs, {assetId:UInt32})' : liquidityAssetMatchExpr(String(assetId))}
+            AND who NOT LIKE '0x6d6f646c%'
+            AND has(asset_refs, {assetId:UInt32})
           ORDER BY block_height DESC, event_index DESC
           LIMIT {n:UInt32}`,
           query_params: { n: pageLimit, assetId }, format: 'JSONEachRow',
@@ -10141,29 +10126,23 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   // rule catches them; keying on the extrinsic does.
   const liqCreateExt = new Set<string>()
   if (wantLiquidity) {
-    const useLiquidityReadModel = true
-    const liquidityAssetExpr = useLiquidityReadModel ? 'asset_id' : `multiIf(JSONHas(args_json,'rewardCurrency'), JSONExtractInt(args_json,'rewardCurrency'),
-                        JSONHas(args_json,'assetId'), JSONExtractInt(args_json,'assetId'),
-                        JSONHas(args_json,'poolId'), JSONExtractInt(args_json,'poolId'),
-                        JSONExtractInt(args_json,'assetA'))`
+    const liquidityAssetExpr = 'asset_id'
     // Row inclusion matches every asset the event references (XYK assetB, Stableswap
     // nested assets[]), even though the displayed asset_id stays the representative
     // liquidityAssetExpr — else this account's HOLLAR Stableswap LP rows drop out.
-    const liquidityTokenFilter = useLiquidityReadModel
-      ? tokenIds == null ? '' : tokenIds.length ? `AND hasAny(asset_refs, [${tokenIds.join(',')}])` : 'AND 0'
-      : liquidityTokenFilterSql(tokenIds)
+    const liquidityTokenFilter = tokenIds == null ? '' : tokenIds.length ? `AND hasAny(asset_refs, [${tokenIds.join(',')}])` : 'AND 0'
     const fetchLiquidityPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
       const liqRes = await client.query({
         query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-                ${useLiquidityReadModel ? 'who' : "JSONExtractString(args_json,'who')"} AS who,
+                who AS who,
                 ${liquidityAssetExpr} AS asset_id,
-                ${useLiquidityReadModel ? 'amount' : "multiIf(JSONHas(args_json,'claimed'), JSONExtractString(args_json,'claimed'), JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'shares'))"} AS amount,
-                ${useLiquidityReadModel ? 'asset_b' : "JSONExtractInt(args_json,'assetB')"} AS asset_b,
-                ${useLiquidityReadModel ? 'pool_account' : "JSONExtractString(args_json,'pool')"} AS pool_acc
-              FROM price_data.${useLiquidityReadModel ? 'liquidity_activity' : 'raw_events'}
+                amount AS amount,
+                asset_b AS asset_b,
+                pool_account AS pool_acc
+              FROM price_data.liquidity_activity
               WHERE ${pageBound}
                 AND event_name IN ('Omnipool.LiquidityAdded','Omnipool.LiquidityRemoved','Stableswap.LiquidityAdded','Stableswap.LiquidityRemoved','XYK.LiquidityAdded','XYK.LiquidityRemoved','XYK.PoolCreated','OmnipoolLiquidityMining.RewardClaimed','XYKLiquidityMining.RewardClaimed')
-                AND ${useLiquidityReadModel ? 'who' : "JSONExtractString(args_json,'who')"} IN (${list})
+                AND who IN (${list})
                 ${liquidityTokenFilter}
               ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
         query_params: { n: pageLimit },
@@ -11974,10 +11953,6 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
                FROM price_data.daily_chain_identity_counts_v2
                WHERE kind='${scope}' AND day > today() - 90
                GROUP BY day ORDER BY day`
-    else if (scope === 'extrinsics')
-      query = daily('raw_extrinsics', `coalesce(signer, effective_signer) IS NOT NULL`, '(block_height, extrinsic_index)')
-    else if (scope === 'events')
-      query = daily('raw_events', '')
     else {
       // activity — per selected type; 'all' approximates the merged feed.
       if (type === 'transfer')
