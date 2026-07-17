@@ -62,10 +62,22 @@ function priceIdUniverse(): string {
   return [...ids].join(',') || '0'
 }
 
+// The combined swap-row filter: every raw event that could contribute to a netted
+// trade — unified-era Broadcast.Swapped* at/above the cutover, legacy pallet
+// *Executed below it. This is the same row set buildPartitionInsertSql consumes
+// (its two era legs), factored out so the incremental staleness check can select
+// exactly the source rows the netting SELECT does. Single source of truth for the
+// era split.
+export function swapEventFilterSql(): string {
+  return `((event_name IN (${BROADCAST_EVENTS}) AND block_height >= ${BROADCAST_MIN_BLOCK})`
+    + ` OR (event_name IN (${LEGACY_EVENTS}) AND block_height < ${BROADCAST_MIN_BLOCK}))`
+}
+
 // The per-partition netting + valuation INSERT. Groups a partition's swap legs
 // into net trades, values each surviving asset at its block-time ohlc close, and
-// stores volume_usd = max(net_in_usd, net_out_usd).
-function buildPartitionInsertSql(partition: string): string {
+// stores volume_usd = max(net_in_usd, net_out_usd). Exported as the single source
+// of truth for the netting SQL (reused by the derivations recompute job).
+export function buildPartitionInsertSql(partition: string): string {
   const md = maxDecimals()
   const anchor = EVENT_ANCHOR_OFFSET.toString()
   const pf = `toYYYYMM(toDateTime(block_height * 12)) = ${partition}`
