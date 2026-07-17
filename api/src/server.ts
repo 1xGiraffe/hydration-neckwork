@@ -3,6 +3,7 @@ import cors from '@fastify/cors'
 import compress from '@fastify/compress'
 import { config } from './config.ts'
 import { createClickHouseClient, createLongOpClickHouseClient } from './db/client.ts'
+import { accountTradeVolumeCovered, backfillAccountTradeVolume, refreshRecentAccountTradeVolume, setAccountTradeVolumeReady } from './services/accountTradeVolume.ts'
 import {
   drainAccountSwapActivityQueue,
   seedAccountSwapActivityQueue,
@@ -70,6 +71,17 @@ import {
   backfillAccountActivityValues,
   omnipoolPositionCreatedBackfillComplete,
   backfillOmnipoolPositionCreated,
+  backfillOmnipoolPositionStateEvents,
+  omnipoolPositionStateEventsBackfillComplete,
+  backfillOmnipoolPoolStateHistory,
+  omnipoolPoolStateHistoryBackfillComplete,
+  omnipoolOwnerIntervalsCoverageComplete,
+  backfillXykPoolRegistry,
+  xykPoolRegistryBackfillComplete,
+  backfillXykPoolReserveHistory,
+  xykPoolReserveHistoryBackfillComplete,
+  xykTotalSharesCoverageComplete,
+  xykFarmIntervalsCoverageComplete,
   multisigActivityBackfillComplete,
   backfillMultisigActivity,
 } from './db/migrations.ts'
@@ -112,6 +124,8 @@ import {
   setAccountBalanceHistoryReady,
   setAccountBalanceHourlyReady,
   setOmnipoolPositionCreatedReady,
+  setOmnipoolHistoryReady,
+  setXykHistoryReady,
   setOmnipoolAccountClaimsReady,
   omnipoolAccountClaimsSnapshotReady,
   refreshOmnipoolAccountClaims,
@@ -201,6 +215,25 @@ await fastify.register(marketStatsRoutes, { client })
 await fastify.register(indexerRoutes, { client })
 await fastify.register(explorerRoutes)
 await fastify.register(tagRoutes)
+
+// Recompute the newest account_trade_volume partitions on a timer (the netting
+// has no MV). Uses its own long-op client per run so a slow rebuild never holds
+// a connection between ticks.
+function startAccountTradeVolumeRefresh(): void {
+  const run = async () => {
+    const refreshClient = createLongOpClickHouseClient()
+    try {
+      await refreshRecentAccountTradeVolume(refreshClient, 2)
+    } catch (err) {
+      console.error('[API] account_trade_volume refresh failed', err)
+    } finally {
+      await refreshClient.close().catch(() => {})
+    }
+  }
+  void run() // catch up trades since the last backfill immediately, then on a timer
+  const timer = setInterval(() => { void run() }, 10 * 60_000)
+  timer.unref()
+}
 
 async function start() {
   try {
@@ -653,6 +686,55 @@ async function start() {
         }
 
         try {
+          if (!(await omnipoolPositionStateEventsBackfillComplete(client))) {
+            console.log('[API] omnipool_position_state_events backfill starting (background)')
+            await backfillOmnipoolPositionStateEvents(maintenanceClient())
+          }
+          if (!(await omnipoolPoolStateHistoryBackfillComplete(client))) {
+            console.log('[API] omnipool_pool_state_history backfill starting (background)')
+            await backfillOmnipoolPoolStateHistory(maintenanceClient())
+          }
+          const [stateReady, poolReady, intervalsReady] = await Promise.all([
+            omnipoolPositionStateEventsBackfillComplete(client),
+            omnipoolPoolStateHistoryBackfillComplete(client),
+            omnipoolOwnerIntervalsCoverageComplete(client),
+          ])
+          if (stateReady && poolReady && intervalsReady) {
+            setOmnipoolHistoryReady()
+            console.log('[API] omnipool history models ready — historical LP principal path enabled')
+          } else {
+            console.log('[API] omnipool history: MV projections done; awaiting owner-interval builder coverage before enabling')
+          }
+        } catch (err) {
+          console.error('[API] omnipool history backfill failed; value-history keeps the current-shares approximation', err)
+        }
+
+        try {
+          if (!(await xykPoolRegistryBackfillComplete(client))) {
+            console.log('[API] xyk_pool_registry backfill starting (background)')
+            await backfillXykPoolRegistry(maintenanceClient())
+          }
+          if (!(await xykPoolReserveHistoryBackfillComplete(client))) {
+            console.log('[API] xyk_pool_reserve_history backfill starting (background)')
+            await backfillXykPoolReserveHistory(maintenanceClient())
+          }
+          const [regReady, resvReady, sharesReady, farmReady] = await Promise.all([
+            xykPoolRegistryBackfillComplete(client),
+            xykPoolReserveHistoryBackfillComplete(client),
+            xykTotalSharesCoverageComplete(client),
+            xykFarmIntervalsCoverageComplete(client),
+          ])
+          if (regReady && resvReady && sharesReady && farmReady) {
+            setXykHistoryReady()
+            console.log('[API] xyk history models ready — historical XYK LP principal path enabled')
+          } else {
+            console.log('[API] xyk history: MV projections done; awaiting total-shares reconstruction + farm-interval builder coverage before enabling')
+          }
+        } catch (err) {
+          console.error('[API] xyk history backfill failed; value-history leaves XYK LP unvalued', err)
+        }
+
+        try {
           if (!(await multisigActivityBackfillComplete(client))) {
             console.log('[API] multisig activity backfill starting (background)')
             await backfillMultisigActivity(maintenanceClient())
@@ -662,6 +744,18 @@ async function start() {
           console.log('[API] multisig activity ready — account polls and composition refreshes use sparse models')
         } catch (err) {
           console.error('[API] multisig activity backfill failed; multisig enrichment stays disabled', err)
+        }
+
+        try {
+          if (!(await accountTradeVolumeCovered(client))) {
+            console.log('[API] account_trade_volume backfill starting (background)')
+            await backfillAccountTradeVolume(maintenanceClient())
+          }
+          if (!(await accountTradeVolumeCovered(client))) throw new Error('active raw_events swap partitions remain unmarked')
+          setAccountTradeVolumeReady()
+          console.log('[API] account_trade_volume ready — per-account trading volume de-duplicates routing hops')
+        } catch (err) {
+          console.error('[API] account_trade_volume backfill failed; per-account volume keeps the legacy per-leg sum', err)
         }
       } finally {
         await longOp?.close().catch(err => console.error('[API] maintenance ClickHouse client close failed', err))
@@ -691,6 +785,9 @@ async function start() {
         // with the bounded backfills above.
         startAccountsPrewarm()
         startTagCountsPrewarm()
+        // The net-trade volume model has no MV; recompute recent partitions on a
+        // timer so per-account volume tracks live trading.
+        startAccountTradeVolumeRefresh()
       }
     })()
   } catch (err) {

@@ -1,6 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached, cachedSwr } from './cache.ts'
 import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
+import { accountVolumeSource } from './accountTradeVolume.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags } from './tagService.ts'
 import { identityForAccount, searchIdentitiesByDisplay, type AccountIdentity } from './identityService.ts'
 import { normalizeAddress, hydrationAddress, polkadotAddress, reservedH160AccountId, type NormalizedAddress } from './addressIdentity.ts'
@@ -297,8 +298,28 @@ export function setAccountBalanceHistoryReady(): void { accountBalanceHistoryRea
 let accountBalanceHourlyReady = false
 export function setAccountBalanceHourlyReady(): void { accountBalanceHourlyReady = true }
 
+// omnipool_position_created is retained/maintained but no longer read on the request path
+// (its only consumer, the old current-shares history approximation, was removed at the LP
+// history cutover). Slated for full removal (server wiring + migration + table) as a bounded
+// follow-up; the getter keeps the readiness signal meaningful until then.
 let omnipoolPositionCreatedReady = false
 export function setOmnipoolPositionCreatedReady(): void { omnipoolPositionCreatedReady = true }
+export function isOmnipoolPositionCreatedReady(): boolean { return omnipoolPositionCreatedReady }
+
+// Published only after all three historical Omnipool models — position state events, pool
+// state history, and account ownership intervals — are complete for the full history. Until
+// then the value-history chart keeps its current-shares Omnipool approximation instead of
+// the true historical-principal path, so partial coverage can never read as zero ownership.
+let omnipoolHistoryReady = false
+export function setOmnipoolHistoryReady(): void { omnipoolHistoryReady = true }
+export function isOmnipoolHistoryReady(): boolean { return omnipoolHistoryReady }
+
+// Published only after all XYK history models — pool registry, sampled reserves, reconstructed
+// total LP supply, and farm-deposit principal intervals — are complete + parity-checked. Until
+// then the value-history chart leaves XYK LP unvalued (its prior behaviour), never a partial.
+let xykHistoryReady = false
+export function setXykHistoryReady(): void { xykHistoryReady = true }
+export function isXykHistoryReady(): boolean { return xykHistoryReady }
 
 // Published only after a complete, count-checked generation of every current
 // bare/farmed Omnipool NFT position has been written. Until then `/accounts`
@@ -2330,9 +2351,10 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // LP positions stay even in summary — they count toward the displayed value, so
     // dropping them would make the hover's value disagree with the detail page. Only
     // DCA/proxy/multisig (below), which the card never shows, are skipped.
-    const [bareLp, farmLp, activeDcas] = await Promise.all([
+    const [bareLp, farmLp, xykLp, activeDcas] = await Promise.all([
       getOmnipoolPositions([...related]),
       getFarmingPositions([...related]),
+      isXykHistoryReady() ? getXykPositions([...related], balances) : Promise.resolve([] as LpPosition[]),
       summary ? Promise.resolve([]) : getActiveDcas([...related]),
     ])
     // Proxy & multisig relations (in-memory indexes refreshed by the
@@ -2359,7 +2381,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // added: the staked HDX principal is already counted (it's locked-but-free HDX in
     // the wallet balance), and the official Hydration net worth excludes the
     // pot-held, loyalty-slashable pending rewards.
-    const lpPositions = [...bareLp, ...farmLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
+    const lpPositions = [...bareLp, ...farmLp, ...xykLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
     // Only NFT-held positions add value here — stableLp rows are wallet balances
     // already counted in portfolioUsd, they're appended for display only.
     const lpUsd = lpPositions.reduce((s, p) => s + (p.valueUsd ?? 0), 0)
@@ -3997,57 +4019,11 @@ async function loadOmnipoolState(): Promise<Map<number, OmnipoolAssetState>> {
   } catch { /* keep last good */ }
   return omniState
 }
-function parseOmniAssets(raw: string | undefined): Map<number, OmnipoolAssetState> {
-  const m = new Map<number, OmnipoolAssetState>()
-  const assets = (safeJson(raw) as { assets?: { asset_id: number; reserve: string; hub_reserve: string; shares: string }[] } | null)?.assets ?? []
-  for (const a of assets) { try { m.set(a.asset_id, { reserve: BigInt(a.reserve), hub: BigInt(a.hub_reserve), shares: BigInt(a.shares) }) } catch { /* skip */ } }
-  return m
-}
-function parseStablePools(raw: string | undefined): Map<number, SnapshotPool> {
-  const m = new Map<number, SnapshotPool>()
-  const pools = (safeJson(raw) as { pools?: SnapshotPool[] } | null)?.pools ?? []
-  for (const p of pools) m.set(p.pool_id, p)
-  return m
-}
-// Per-bucket omnipool + stableswap pool state for HISTORICAL valuation: one
-// representative snapshot per bucket (the latest within it), forward-filled across
-// buckets that have no snapshot. Lets the history value LP positions at withdraw
-// value and share tokens at NAV with period-accurate pool state, mirroring the live
-// path. `n` buckets over [minb, minb + n*bucket].
-async function loadBucketedPoolState(minb: number, bucket: number, n: number): Promise<{ omni: Map<number, OmnipoolAssetState>[]; stable: Map<number, SnapshotPool>[] }> {
-  const omni: Map<number, OmnipoolAssetState>[] = new Array(n + 1)
-  const stable: Map<number, SnapshotPool>[] = new Array(n + 1)
-  try {
-    // Extract JSON only for the representative (latest) snapshot of each bucket —
-    // not all ~125k rows — by first picking max(block_height) per bucket cheaply.
-    const res = await client.query({
-      query: `SELECT toUInt32(intDiv(block_height - ${minb}, ${bucket})) AS b,
-                JSONExtractRaw(payload_json, 'omnipool') AS o,
-                JSONExtractRaw(payload_json, 'stableswap') AS s
-              FROM price_data.raw_block_snapshots
-              WHERE block_height IN (
-                SELECT max(block_height) FROM price_data.raw_block_snapshots
-                WHERE block_height >= ${minb} GROUP BY intDiv(block_height - ${minb}, ${bucket})
-              )
-              ORDER BY b`,
-      format: 'JSONEachRow',
-    })
-    const rows = await res.json<{ b: number; o: string; s: string }>()
-    for (const r of rows) { if (r.b >= 0 && r.b <= n) { omni[r.b] = parseOmniAssets(r.o); stable[r.b] = parseStablePools(r.s) } }
-  } catch { /* leave empty; callers forward-fill / skip */ }
-  // Forward-fill buckets with no snapshot (carry the last known state).
-  let lastO = new Map<number, OmnipoolAssetState>(), lastS = new Map<number, SnapshotPool>()
-  for (let b = 0; b <= n; b++) {
-    if (omni[b]?.size) lastO = omni[b]; else omni[b] = lastO
-    if (stable[b]?.size) lastS = stable[b]; else stable[b] = lastS
-  }
-  return { omni, stable }
-}
 // Omnipool remove-liquidity (full position) → (asset out, hub/LRNA out), mirroring
 // the node's calculate_remove_liquidity_state_changes (withdrawalFee = 0). Verified
 // bit-exact against the official indexer's per-position liquidityAmount.
 const OMNI_FIXED = 10n ** 18n
-function omnipoolRemoveLiquidity(st: OmnipoolAssetState, pos: DecodedPosition): { liquidity: bigint; hub: bigint } {
+export function omnipoolRemoveLiquidity(st: OmnipoolAssetState, pos: DecodedPosition): { liquidity: bigint; hub: bigint } {
   const { reserve: R, hub: Q, shares: S } = st
   if (S <= 0n || pos.priceDen === 0n) return { liquidity: 0n, hub: 0n }
   const price = pos.priceNum * OMNI_FIXED / pos.priceDen
@@ -4070,6 +4046,34 @@ function valueOmnipoolPosition(pos: DecodedPosition, st: OmnipoolAssetState, pri
   const hubUsd = lrnaPx != null ? Number(hub) / 10 ** (asset(LRNA_ASSET_ID).decimals) * lrnaPx : 0
   const valueUsd = assetUsd == null ? null : assetUsd + hubUsd
   return { amount: liquidity, hub, valueUsd }
+}
+
+// Raw withdraw legs for the positions economically owned at a single historical chart
+// bucket. Dedupes by positionId so a position is valued exactly once regardless of whether
+// it is held bare or farmed; skips positions with no pool state (never fabricates a zero
+// leg) or non-positive shares. Returns raw integer legs — callers apply the bucket's
+// event-time price. Shared by the historical value path (see valueOmnipoolPrincipalHistory).
+export interface HistoricalOwnedPosition { positionId: string; assetId: number; state: DecodedPosition; pool: OmnipoolAssetState | undefined }
+export function omnipoolLegsForBucket(positions: HistoricalOwnedPosition[]): { positionId: string; assetId: number; liquidity: bigint; hub: bigint }[] {
+  const out: { positionId: string; assetId: number; liquidity: bigint; hub: bigint }[] = []
+  const seen = new Set<string>()
+  for (const { positionId, assetId, state, pool } of positions) {
+    if (seen.has(positionId)) continue
+    seen.add(positionId)
+    if (!pool || state.shares <= 0n) continue
+    const { liquidity, hub } = omnipoolRemoveLiquidity(pool, state)
+    out.push({ positionId, assetId, liquidity, hub })
+  }
+  return out
+}
+
+// XYK LP redeemable reserve legs for `shares` of a pool with raw reserves `reserveA/B` and
+// `totalShares` outstanding — amountX = floor(reserveX * shares / totalShares). Integer/
+// bigint throughout (values exceed 2^53); callers convert to USD only after this. Shared by
+// direct wallet LP balances and collection-5389 farm-deposit principal (Phase 2, XYK).
+export function xykShareLegs(shares: bigint, reserveA: bigint, reserveB: bigint, totalShares: bigint): { amountA: bigint; amountB: bigint } {
+  if (totalShares <= 0n || shares <= 0n) return { amountA: 0n, amountB: 0n }
+  return { amountA: (reserveA * shares) / totalShares, amountB: (reserveB * shares) / totalShares }
 }
 
 // Current open omnipool positions owned by a set of accounts, reconstructed from
@@ -4380,17 +4384,308 @@ async function getFarmingPositions(accounts: string[]): Promise<LpPosition[]> {
   return out.sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
 }
 
-// All currently-open omnipool positions an account holds (bare 1337 + farmed 2584),
-// decoded. Used by the history path to value LP over time via the withdraw math
-// against per-bucket pool state. (Current shares/price; mid-window add/remove is not
-// reconstructed — a bounded approximation, consistent with the live figure.)
-async function openOmnipoolPositionsDecoded(accounts: string[]): Promise<{ positionId: string; dec: DecodedPosition }[]> {
-  if (!accounts.length) return []
-  const recon = await reconstructOmnipoolPositions(accounts)
-  // Dedupe by positionId (an account holds a position either bare or farmed, not both).
-  const byId = new Map<string, DecodedPosition>()
-  for (const { positionId, dec } of recon) if (!byId.has(positionId)) byId.set(positionId, dec)
-  return [...byId].map(([positionId, dec]) => ({ positionId, dec }))
+// Current XYK pool state (reserves from the latest snapshot, total supply from the latest
+// reconstructed step point) for the given LP tokens, to value XYK LP at current NAV. Mirrors
+// loadOmnipoolState but for the fungible XYK share tokens.
+interface XykCurrentPool { assetA: number; assetB: number; reserveA: bigint; reserveB: bigint; totalShares: bigint }
+async function loadXykCurrentState(lpAssetIds: number[]): Promise<Map<number, XykCurrentPool>> {
+  const out = new Map<number, XykCurrentPool>()
+  if (!lpAssetIds.length) return out
+  const regRes = await client.query({ query: `SELECT lp_asset_id, pool_account, asset_a, asset_b FROM price_data.xyk_pool_registry FINAL WHERE lp_asset_id IN {lps:Array(Int32)}`, query_params: { lps: lpAssetIds }, format: 'JSONEachRow' })
+  const reg = await regRes.json<{ lp_asset_id: number; pool_account: string; asset_a: number; asset_b: number }>()
+  if (!reg.length) return out
+  const pools = [...new Set(reg.map(r => r.pool_account))]
+  const resvRes = await client.query({
+    query: `SELECT JSONExtractString(p,'pool_account') AS pool,
+              toInt32(JSONExtractInt(p,'asset_a')) AS aa, toInt32(JSONExtractInt(p,'asset_b')) AS ab,
+              JSONExtractString(p,'reserve_a') AS ra, JSONExtractString(p,'reserve_b') AS rb
+            FROM price_data.raw_block_snapshots
+            ARRAY JOIN JSONExtractArrayRaw(JSONExtractRaw(payload_json,'xyk'),'pools') AS p
+            WHERE block_height = (SELECT max(block_height) FROM price_data.raw_block_snapshots) AND JSONExtractString(p,'pool_account') IN {pools:Array(String)}`,
+    query_params: { pools }, format: 'JSONEachRow',
+  })
+  const reserveByPool = new Map<string, { aa: number; ab: number; ra: bigint; rb: bigint }>()
+  for (const r of await resvRes.json<{ pool: string; aa: number; ab: number; ra: string; rb: string }>()) reserveByPool.set(r.pool, { aa: r.aa, ab: r.ab, ra: BigInt(r.ra || '0'), rb: BigInt(r.rb || '0') })
+  const tsRes = await client.query({ query: `SELECT lp_asset_id, argMax(total_shares_raw, block_height) AS total FROM price_data.xyk_lp_total_shares_history WHERE lp_asset_id IN {lps:Array(Int32)} GROUP BY lp_asset_id`, query_params: { lps: lpAssetIds }, format: 'JSONEachRow' })
+  const totalByLp = new Map<number, bigint>()
+  for (const r of await tsRes.json<{ lp_asset_id: number; total: string }>()) totalByLp.set(r.lp_asset_id, BigInt(r.total || '0'))
+  for (const r of reg) {
+    const rv = reserveByPool.get(r.pool_account); const ts = totalByLp.get(r.lp_asset_id)
+    if (rv && ts && ts > 0n) {
+      // Pair reserves with the snapshot's own asset order, which can differ from the
+      // registry's PoolCreated order (see loadXykPrincipalHistory); registry fallback for
+      // legacy snapshot rows without asset ids.
+      const [assetA, assetB] = rv.aa > 0 && rv.ab > 0 ? [rv.aa, rv.ab] : [r.asset_a, r.asset_b]
+      out.set(r.lp_asset_id, { assetA, assetB, reserveA: rv.ra, reserveB: rv.rb, totalShares: ts })
+    }
+  }
+  return out
+}
+
+// Current XYK LP positions (direct wallet shareToken balances + open collection-5389 farm
+// deposits) valued at pool NAV, so the account's headline value and the history's pinned
+// final point include XYK. Direct LP token balances contribute NAV here, not their (null)
+// token price in `balances` — no double count.
+async function getXykPositions(accounts: string[], balances: AddressBalance[]): Promise<LpPosition[]> {
+  const accs = [...new Set(accounts.map(a => a.toLowerCase()))].filter(a => /^0x[0-9a-f]{64}$/.test(a))
+  if (!accs.length) return []
+  const farmedByLp = new Map<number, bigint>()
+  const fRes = await client.query({ query: `SELECT lp_asset_id, toString(sum(toInt256(principal_shares_raw))) AS shares FROM price_data.xyk_farm_principal_intervals FINAL WHERE account_id IN {accs:Array(String)} AND valid_to_block = 0 GROUP BY lp_asset_id`, query_params: { accs }, format: 'JSONEachRow' })
+  for (const r of await fRes.json<{ lp_asset_id: number; shares: string }>()) farmedByLp.set(r.lp_asset_id, BigInt(r.shares || '0'))
+  const directByLp = new Map<number, bigint>()
+  for (const b of balances) directByLp.set(b.asset.assetId, (directByLp.get(b.asset.assetId) ?? 0n) + BigInt(b.total || '0'))
+  const candidates = [...new Set([...directByLp.keys(), ...farmedByLp.keys()])]
+  const [state, prices] = await Promise.all([loadXykCurrentState(candidates), ensureAccountValuePrices()])
+  const out: LpPosition[] = []
+  for (const [lp, st] of state) {
+    for (const [shares, venue] of [[directByLp.get(lp) ?? 0n, 'XYK'], [farmedByLp.get(lp) ?? 0n, 'XYK Farm']] as const) {
+      if (shares <= 0n) continue
+      const { amountA, amountB } = xykShareLegs(shares, st.reserveA, st.reserveB, st.totalShares)
+      const usdA = usdValue(prices, st.assetA, amountA.toString(), asset(st.assetA).decimals)
+      const usdB = usdValue(prices, st.assetB, amountB.toString(), asset(st.assetB).decimals)
+      const valueUsd = usdA == null || usdB == null ? null : usdA + usdB
+      out.push({ positionId: `xyk:${lp}:${venue === 'XYK Farm' ? 'farm' : 'direct'}`, asset: asset(lp), amount: amountA.toString(), shares: shares.toString(), valueUsd, venue })
+    }
+  }
+  return out.sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
+}
+
+// Historical Omnipool principal for the value-history chart: for every position the account
+// economically owned at each bucket (bare or farmed), the raw withdraw legs from its TRUE
+// per-block state — not current shares, never request-time snapshot JSON. Account-bounded:
+// ownership intervals by account, position state by referenced positions, pool state by
+// referenced assets. Callers apply the bucket's event-time price to the raw legs.
+// Gated behind isOmnipoolHistoryReady() — see the value-history path in getAccountHistory.
+export interface OmnipoolHistoryLeg { assetId: number; liquidity: bigint; hub: bigint }
+export interface OmnipoolPrincipalHistory { legsByBucket: OmnipoolHistoryLeg[][]; assetIds: number[]; fromBucket: number | null }
+export async function loadOmnipoolPrincipalHistory(accounts: string[], minb: number, bucket: number, n: number): Promise<OmnipoolPrincipalHistory> {
+  const empty: OmnipoolPrincipalHistory = { legsByBucket: Array.from({ length: n + 1 }, () => []), assetIds: [], fromBucket: null }
+  const accs = [...new Set(accounts.map(a => a.toLowerCase()))].filter(a => /^0x[0-9a-f]{64}$/.test(a))
+  if (!accs.length) return empty
+  const maxb = minb + bucket * n
+  const bucketEndBlock = (b: number) => Math.min(maxb, minb + (b + 1) * bucket - 1)
+
+  // 1) Ownership intervals overlapping the range (account-bounded).
+  const ivRes = await client.query({
+    query: `SELECT position_id, valid_from_block, valid_to_block
+            FROM price_data.omnipool_position_owner_intervals FINAL
+            WHERE account_id IN {accs:Array(String)}
+              AND valid_from_block <= ${maxb}
+              AND (valid_to_block = 0 OR valid_to_block >= ${minb})`,
+    query_params: { accs }, format: 'JSONEachRow',
+  })
+  const intervals = await ivRes.json<{ position_id: string; valid_from_block: number; valid_to_block: number }>()
+  if (!intervals.length) return empty
+  const positionIds = [...new Set(intervals.map(i => i.position_id))]
+
+  // 2) Position state events for those positions (position-bounded); forward-fill the
+  //    latest active state to each bucket end, dropping the position once destroyed.
+  const stRes = await client.query({
+    query: `SELECT position_id, block_height, event_kind, asset_id, amount_raw, shares_raw, price_raw, active
+            FROM price_data.omnipool_position_state_events FINAL
+            WHERE position_id IN {pids:Array(String)}
+            ORDER BY position_id, block_height, event_index`,
+    query_params: { pids: positionIds }, format: 'JSONEachRow',
+  })
+  const stRows = await stRes.json<{ position_id: string; block_height: number; event_kind: string; asset_id: number; amount_raw: string; shares_raw: string; price_raw: string; active: number }>()
+  const eventsByPosition = new Map<string, typeof stRows>()
+  for (const r of stRows) { if (!eventsByPosition.has(r.position_id)) eventsByPosition.set(r.position_id, []); eventsByPosition.get(r.position_id)!.push(r) }
+  const stateByPosition = new Map<string, (DecodedPosition | null)[]>()
+  const assetByPosition = new Map<string, number>()
+  for (const pid of positionIds) {
+    const evs = eventsByPosition.get(pid) ?? []
+    const series: (DecodedPosition | null)[] = new Array(n + 1).fill(null)
+    let cursor = 0
+    let last: DecodedPosition | null = null
+    for (let b = 0; b <= n; b++) {
+      const be = bucketEndBlock(b)
+      while (cursor < evs.length && evs[cursor].block_height <= be) {
+        const e = evs[cursor]
+        if (e.event_kind === 'destroyed' || e.active === 0) last = null
+        else { last = { assetId: e.asset_id, amount: BigInt(e.amount_raw || '0'), shares: BigInt(e.shares_raw || '0'), priceNum: BigInt(e.price_raw || '0'), priceDen: OMNI_FIXED }; assetByPosition.set(pid, e.asset_id) }
+        cursor++
+      }
+      series[b] = last
+    }
+    stateByPosition.set(pid, series)
+  }
+
+  // 3) Pool state per (asset, bucket): the latest snapshot at/before each bucket end,
+  //    forward-filled (b = -1 carries the pre-range state). Asset-bounded.
+  const assetIds = [...new Set([...assetByPosition.values()])]
+  const poolByAssetBucket = new Map<number, (OmnipoolAssetState | undefined)[]>()
+  if (assetIds.length) {
+    const poolRes = await client.query({
+      query: `SELECT asset_id,
+                toInt32(greatest(-1, least(${n}, intDiv(toInt64(block_height) - ${minb}, ${bucket})))) AS b,
+                argMax(reserve_raw, block_height) AS reserve,
+                argMax(hub_reserve_raw, block_height) AS hub_reserve,
+                argMax(shares_raw, block_height) AS shares
+              FROM price_data.omnipool_pool_state_history
+              WHERE asset_id IN {aids:Array(Int32)} AND block_height <= ${maxb}
+              GROUP BY asset_id, b ORDER BY asset_id, b`,
+      query_params: { aids: assetIds }, format: 'JSONEachRow',
+    })
+    const poolRows = await poolRes.json<{ asset_id: number; b: number; reserve: string; hub_reserve: string; shares: string }>()
+    const byAsset = new Map<number, Map<number, OmnipoolAssetState>>()
+    for (const r of poolRows) {
+      if (!byAsset.has(r.asset_id)) byAsset.set(r.asset_id, new Map())
+      byAsset.get(r.asset_id)!.set(r.b, { reserve: BigInt(r.reserve || '0'), hub: BigInt(r.hub_reserve || '0'), shares: BigInt(r.shares || '0') })
+    }
+    for (const aid of assetIds) {
+      const perBucket = byAsset.get(aid) ?? new Map<number, OmnipoolAssetState>()
+      const series: (OmnipoolAssetState | undefined)[] = new Array(n + 1).fill(undefined)
+      let last: OmnipoolAssetState | undefined = perBucket.get(-1)
+      for (let b = 0; b <= n; b++) { if (perBucket.has(b)) last = perBucket.get(b); series[b] = last }
+      poolByAssetBucket.set(aid, series)
+    }
+  }
+
+  // 4) Per bucket: positions active at the bucket end (dedup by positionId), raw legs.
+  const legsByBucket: OmnipoolHistoryLeg[][] = Array.from({ length: n + 1 }, () => [])
+  let fromBucket: number | null = null
+  for (let b = 0; b <= n; b++) {
+    const be = bucketEndBlock(b)
+    const owned: HistoricalOwnedPosition[] = []
+    for (const iv of intervals) {
+      if (iv.valid_from_block <= be && (iv.valid_to_block === 0 || iv.valid_to_block > be)) {
+        const state = stateByPosition.get(iv.position_id)?.[b] ?? null
+        if (!state) continue
+        owned.push({ positionId: iv.position_id, assetId: state.assetId, state, pool: poolByAssetBucket.get(state.assetId)?.[b] })
+      }
+    }
+    const legs = omnipoolLegsForBucket(owned)
+    if (legs.length && fromBucket === null) fromBucket = b
+    legsByBucket[b] = legs.map(l => ({ assetId: l.assetId, liquidity: l.liquidity, hub: l.hub }))
+  }
+  return { legsByBucket, assetIds, fromBucket }
+}
+
+// Historical XYK principal for the value-history chart (Phase 2). For the account's LP holdings
+// — direct wallet shareToken balances AND collection-5389 farm-deposit principal — this loads
+// the per-bucket pool state needed to value each at NAV (reserves × shares / total supply).
+// Total supply is the reconstructed step function; reserves are the sampled snapshot. All
+// account/pool/asset-bounded. Callers combine direct + farmed shares and apply xykShareLegs.
+export interface XykBucketState { assetA: number; assetB: number; reserveA: bigint; reserveB: bigint; totalShares: bigint }
+export interface XykPrincipalHistory {
+  lpAssetIds: Set<number>
+  underlyingAssetIds: number[]
+  stateByLp: Map<number, (XykBucketState | undefined)[]>
+  farmSharesByLp: Map<number, bigint[]>
+}
+export async function loadXykPrincipalHistory(accounts: string[], candidateAssetIds: number[], minb: number, bucket: number, n: number): Promise<XykPrincipalHistory> {
+  const empty: XykPrincipalHistory = { lpAssetIds: new Set(), underlyingAssetIds: [], stateByLp: new Map(), farmSharesByLp: new Map() }
+  const accs = [...new Set(accounts.map(a => a.toLowerCase()))].filter(a => /^0x[0-9a-f]{64}$/.test(a))
+  const maxb = minb + bucket * n
+  const bucketEndBlock = (b: number) => Math.min(maxb, minb + (b + 1) * bucket - 1)
+
+  // 1) Farm principal intervals → per (lp, bucket) summed active principal.
+  const farmSharesByLp = new Map<number, bigint[]>()
+  const farmedLps = new Set<number>()
+  if (accs.length) {
+    const fRes = await client.query({
+      query: `SELECT lp_asset_id, principal_shares_raw, valid_from_block, valid_to_block
+              FROM price_data.xyk_farm_principal_intervals FINAL
+              WHERE account_id IN {accs:Array(String)} AND valid_from_block <= ${maxb} AND (valid_to_block = 0 OR valid_to_block >= ${minb})`,
+      query_params: { accs }, format: 'JSONEachRow',
+    })
+    for (const r of await fRes.json<{ lp_asset_id: number; principal_shares_raw: string; valid_from_block: number; valid_to_block: number }>()) {
+      farmedLps.add(r.lp_asset_id)
+      if (!farmSharesByLp.has(r.lp_asset_id)) farmSharesByLp.set(r.lp_asset_id, new Array(n + 1).fill(0n))
+      const arr = farmSharesByLp.get(r.lp_asset_id)!
+      const principal = BigInt(r.principal_shares_raw || '0')
+      for (let b = 0; b <= n; b++) { const be = bucketEndBlock(b); if (r.valid_from_block <= be && (r.valid_to_block === 0 || r.valid_to_block > be)) arr[b] += principal }
+    }
+  }
+
+  // 2) Which candidate assets (+ farmed lps) are XYK LP tokens? → registry mapping.
+  const lpCandidates = [...new Set([...candidateAssetIds, ...farmedLps])]
+  if (!lpCandidates.length) return empty
+  const rRes = await client.query({
+    query: `SELECT lp_asset_id, pool_account, asset_a, asset_b FROM price_data.xyk_pool_registry FINAL WHERE lp_asset_id IN {lps:Array(Int32)}`,
+    query_params: { lps: lpCandidates }, format: 'JSONEachRow',
+  })
+  const regRows = await rRes.json<{ lp_asset_id: number; pool_account: string; asset_a: number; asset_b: number }>()
+  if (!regRows.length) return empty
+  const lpAssetIds = new Set(regRows.map(r => r.lp_asset_id))
+  const poolByLp = new Map(regRows.map(r => [r.lp_asset_id, r]))
+  const pools = [...new Set(regRows.map(r => r.pool_account))]
+
+  // 3) Reserves per (pool, bucket) — sampled, forward-filled (b=-1 carry-in). Carry the
+  // snapshot's own asset order (aa/ab), taken from the SAME latest row as the reserves
+  // (all argMax by block_height): it can differ from — and even flips across blocks
+  // within — the registry's PoolCreated order, so reserves must be paired by it (step 5).
+  const reserveByPoolBucket = new Map<string, ({ aa: number; ab: number; ra: bigint; rb: bigint } | undefined)[]>()
+  {
+    const resvRes = await client.query({
+      query: `SELECT pool_account,
+                toInt32(greatest(-1, least(${n}, intDiv(toInt64(block_height) - ${minb}, ${bucket})))) AS b,
+                argMax(asset_a, block_height) AS aa, argMax(asset_b, block_height) AS ab,
+                argMax(reserve_a_raw, block_height) AS ra, argMax(reserve_b_raw, block_height) AS rb
+              FROM price_data.xyk_pool_reserve_history WHERE pool_account IN {pools:Array(String)} AND block_height <= ${maxb}
+              GROUP BY pool_account, b ORDER BY pool_account, b`,
+      query_params: { pools }, format: 'JSONEachRow',
+    })
+    const byPool = new Map<string, Map<number, { aa: number; ab: number; ra: bigint; rb: bigint }>>()
+    for (const r of await resvRes.json<{ pool_account: string; b: number; aa: number; ab: number; ra: string; rb: string }>()) {
+      if (!byPool.has(r.pool_account)) byPool.set(r.pool_account, new Map())
+      byPool.get(r.pool_account)!.set(r.b, { aa: r.aa, ab: r.ab, ra: BigInt(r.ra || '0'), rb: BigInt(r.rb || '0') })
+    }
+    for (const pool of pools) {
+      const per = byPool.get(pool) ?? new Map<number, { aa: number; ab: number; ra: bigint; rb: bigint }>()
+      const arr: ({ aa: number; ab: number; ra: bigint; rb: bigint } | undefined)[] = new Array(n + 1).fill(undefined)
+      let last = per.get(-1)
+      for (let b = 0; b <= n; b++) { if (per.has(b)) last = per.get(b); arr[b] = last }
+      reserveByPoolBucket.set(pool, arr)
+    }
+  }
+
+  // 4) Total shares per (lp, bucket) — reconstructed step function, forward-filled.
+  const totalByLpBucket = new Map<number, (bigint | undefined)[]>()
+  {
+    const tRes = await client.query({
+      query: `SELECT lp_asset_id,
+                toInt32(greatest(-1, least(${n}, intDiv(toInt64(block_height) - ${minb}, ${bucket})))) AS b,
+                argMax(total_shares_raw, block_height) AS total
+              FROM price_data.xyk_lp_total_shares_history WHERE lp_asset_id IN {lps:Array(Int32)} AND block_height <= ${maxb}
+              GROUP BY lp_asset_id, b ORDER BY lp_asset_id, b`,
+      query_params: { lps: [...lpAssetIds] }, format: 'JSONEachRow',
+    })
+    const byLp = new Map<number, Map<number, bigint>>()
+    for (const r of await tRes.json<{ lp_asset_id: number; b: number; total: string }>()) {
+      if (!byLp.has(r.lp_asset_id)) byLp.set(r.lp_asset_id, new Map())
+      byLp.get(r.lp_asset_id)!.set(r.b, BigInt(r.total || '0'))
+    }
+    for (const lp of lpAssetIds) {
+      const per = byLp.get(lp) ?? new Map<number, bigint>()
+      const arr: (bigint | undefined)[] = new Array(n + 1).fill(undefined)
+      let last = per.get(-1)
+      for (let b = 0; b <= n; b++) { if (per.has(b)) last = per.get(b); arr[b] = last }
+      totalByLpBucket.set(lp, arr)
+    }
+  }
+
+  // 5) Assemble per-lp per-bucket state (only where reserves + positive total supply exist).
+  const stateByLp = new Map<number, (XykBucketState | undefined)[]>()
+  for (const lp of lpAssetIds) {
+    const reg = poolByLp.get(lp)!
+    const reserves = reserveByPoolBucket.get(reg.pool_account)
+    const totals = totalByLpBucket.get(lp)
+    const arr: (XykBucketState | undefined)[] = new Array(n + 1).fill(undefined)
+    for (let b = 0; b <= n; b++) {
+      const rv = reserves?.[b]; const ts = totals?.[b]
+      if (rv && ts && ts > 0n) {
+        // Pair each reserve with the asset it belongs to via the snapshot's own
+        // (asset_a↔reserve_a) order; fall back to the registry order only for legacy
+        // rows that predate the snapshot asset columns.
+        const [assetA, assetB] = rv.aa > 0 && rv.ab > 0 ? [rv.aa, rv.ab] : [reg.asset_a, reg.asset_b]
+        arr[b] = { assetA, assetB, reserveA: rv.ra, reserveB: rv.rb, totalShares: ts }
+      }
+    }
+    stateByLp.set(lp, arr)
+  }
+  const underlyingAssetIds = [...new Set(regRows.flatMap(r => [r.asset_a, r.asset_b]))]
+  return { lpAssetIds, underlyingAssetIds, stateByLp, farmSharesByLp }
 }
 
 // active DCA schedules (reconstructed from indexed events, no RPC)
@@ -4854,10 +5149,11 @@ async function tradingVolumeByAccount(accounts: string[]): Promise<Map<string, n
   const safe = [...new Set(accounts.map(a => a.toLowerCase()).filter(a => ACCOUNT_RE.test(a)))]
   if (!safe.length) return new Map()
   const list = sqlAccountList(safe)
+  const src = accountVolumeSource()
   const res = await client.query({
     query: `
-      SELECT account AS account_id, toFloat64(sum(usd_volume_buy)) AS volume_usd
-      FROM price_data.trade_volume_by_account
+      SELECT account AS account_id, toFloat64(sum(${src.col})) AS volume_usd
+      FROM ${src.table}
       WHERE account IN (${list})
       GROUP BY account_id`,
     format: 'JSONEachRow',
@@ -9436,12 +9732,22 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   // Open omnipool LP positions (bare + farmed) for the period LP-value reconstruction
   // below, plus the per-bucket pool state to value them. Fetched here so the position
   // assets + LRNA(1) can be added to the historical price query.
-  const openPositions = await openOmnipoolPositionsDecoded(accounts)
+  // True historical Omnipool principal (per-block state + ownership intervals), used
+  // instead of the current-shares approximation once its models are complete for the
+  // full history. Loaded before the price query so the assets of historically-owned
+  // (incl. since-closed) positions are priced, and before openPositions so the
+  // fallback reconstruction query is skipped entirely when the new path is active.
+  const omniHist = isOmnipoolHistoryReady() ? await loadOmnipoolPrincipalHistory(accounts, rng.minb, BUCKET, N) : null
+  const omniAssetIds = omniHist ? omniHist.assetIds : []
+  // Historical XYK LP principal (direct wallet shareToken balances + collection-5389 farm
+  // deposits) valued at pool NAV. Loaded before the price query so both pool assets are priced.
+  const xykHist = isXykHistoryReady() ? await loadXykPrincipalHistory(accounts, assetIds.map(Number), rng.minb, BUCKET, N) : null
   // aTokens have no price feed of their own — query the underlying reserve's
   // historical prices for them (priceAssetId maps aPRIME→PRIME, etc.).
   const priceIdFor = new Map(assetIds.map(id => [id, String(priceAssetId(Number(id)))]))
-  const lpPriceIds = openPositions.length ? [...new Set(openPositions.map(p => String(priceAssetId(p.dec.assetId))))].concat(String(LRNA_ASSET_ID)) : []
-  const priceIds = [...new Set([...priceIdFor.values(), ...lpPriceIds])]
+  const lpPriceIds = omniAssetIds.length ? [...new Set(omniAssetIds.map(id => String(priceAssetId(id))))].concat(String(LRNA_ASSET_ID)) : []
+  const xykPriceIds = xykHist ? xykHist.underlyingAssetIds.map(id => String(priceAssetId(id))) : []
+  const priceIds = [...new Set([...priceIdFor.values(), ...lpPriceIds, ...xykPriceIds])]
   // The daily close states are a replay-safe compact projection of prices. The
   // raw table contains a row for every asset at every indexed block; grouping it
   // here used to read hundreds of millions of rows for a single account/tag
@@ -9520,6 +9826,9 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
     const byAcct = balByAcctAsset.get(id) ?? new Map<string, Map<number, string>>()
     const pxMap = pxByAsset.get(id) ?? new Map<number, number>()
     const earliestPx = earliestPxByAsset.get(id) ?? 0
+    // XYK LP token: its balance is decomposed to underlying NAV below, so it must not also
+    // contribute a token price to portfolio value (no double count). Still charted for display.
+    const suppressPortfolioValue = xykHist?.lpAssetIds.has(Number(id)) ?? false
     // Combined (summed) forward-filled balance per bucket, and a flag for whether
     // ANY account had an observation in that bucket (drives the downsampled points).
     const combined = new Array(N + 1).fill(0)
@@ -9539,7 +9848,7 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
     const points: AssetBalancePoint[] = []
     for (let b = 0; b <= N; b++) {
       if (pxMap.has(b)) lastPx = pxMap.get(b)!
-      portfolio[b] += portfolioCombined[b] * (lastPx || 0)
+      if (!suppressPortfolioValue) portfolio[b] += portfolioCombined[b] * (lastPx || 0)
       // Plot every observed bucket, plus the final bucket so the line is forward-
       // filled to "now" (the balance persists after its last change). This also
       // gives sparsely-observed assets a 2nd point, so they render a real line.
@@ -9556,6 +9865,39 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
         points: dailyPoints,
         ...(mmAvailableFromBucket.has(id) ? { availableFrom: tsAt(mmAvailableFromBucket.get(id)!) } : {}),
       })
+    }
+  }
+
+  // XYK LP principal on the historical curve, valued at pool NAV: combine the account's
+  // direct wallet shareToken balance and its collection-5389 farm-deposit principal per
+  // bucket, decompose to underlying reserve legs (integer), value at the bucket's closed
+  // price. Replaces the (null) direct-token contribution suppressed above — no double count.
+  if (xykHist && xykHist.lpAssetIds.size) {
+    const earliestPrice = (m: Map<number, number> | undefined) => { if (m) for (let b = 0; b <= N; b++) if (m.has(b)) return m.get(b)!; return 0 }
+    for (const lp of xykHist.lpAssetIds) {
+      const state = xykHist.stateByLp.get(lp)
+      if (!state) continue
+      const farm = xykHist.farmSharesByLp.get(lp) ?? new Array<bigint>(N + 1).fill(0n)
+      // Direct wallet shares per bucket: forward-fill the raw shareToken balance across the
+      // account's own (non-MM-pseudo) balance series, summed.
+      const directRaw = new Array<bigint>(N + 1).fill(0n)
+      for (const [accountId, balMap] of balByAcctAsset.get(String(lp)) ?? new Map<string, Map<number, string>>()) {
+        if (accountId.includes('#mm:')) continue
+        let last = 0n
+        for (let b = 0; b <= N; b++) { const v = balMap.get(b); if (v !== undefined) last = BigInt(v); directRaw[b] += last }
+      }
+      for (let b = 0; b <= N; b++) {
+        const st = state[b]
+        if (!st) continue
+        const shares = directRaw[b] + farm[b]
+        if (shares <= 0n) continue
+        const { amountA, amountB } = xykShareLegs(shares, st.reserveA, st.reserveB, st.totalShares)
+        const pxA = pxByPriceId.get(String(priceAssetId(st.assetA)))
+        const pxB = pxByPriceId.get(String(priceAssetId(st.assetB)))
+        const priceA = pxA?.get(b) ?? earliestPrice(pxA)
+        const priceB = pxB?.get(b) ?? earliestPrice(pxB)
+        portfolio[b] += (Number(amountA) / 10 ** asset(st.assetA).decimals) * priceA + (Number(amountB) / 10 ** asset(st.assetB).decimals) * priceB
+      }
     }
   }
 
@@ -9624,45 +9966,26 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
     for (let b = 0; b <= N; b++) portfolio[b] += mmNet[b]
   }
 
-  // Omnipool LP positions on the historical curve, valued at WITHDRAW value (asset +
-  // LRNA/hub legs) per bucket using the period pool state — consistent with the live
-  // figure (supersedes the old amount×price reconstruction). Each currently-open
-  // position (bare + farmed) is contributed from the bucket it was created in
-  // (PositionCreated; positions older than the window contribute throughout). Shares
-  // are taken as current — mid-window add/remove isn't reconstructed (bounded approx).
-  if (openPositions.length) {
-    const { omni: bucketOmni } = await loadBucketedPoolState(rng.minb, BUCKET, N)
-    const createdRes = await client.query({
-      query: omnipoolPositionCreatedReady
-        ? `SELECT position_id AS pid, block_height AS created
-           FROM price_data.omnipool_position_created FINAL
-           WHERE position_id IN (${openPositions.map(position => `'${position.positionId}'`).join(',')})`
-        : `SELECT toString(JSONExtractInt(args_json,'positionId')) AS pid, min(block_height) AS created
-           FROM price_data.raw_events WHERE event_name='Omnipool.PositionCreated'
-             AND toString(JSONExtractInt(args_json,'positionId')) IN (${openPositions.map(position => `'${position.positionId}'`).join(',')})
-           GROUP BY pid`,
-      format: 'JSONEachRow',
-    })
-    const createdAt = new Map<string, number>()
-    for (const r of await createdRes.json<{ pid: string; created: number }>()) createdAt.set(r.pid, r.created)
+  // Omnipool LP principal on the historical curve, valued at WITHDRAW value (asset +
+  // LRNA/hub legs) per bucket from true per-block position state, ownership intervals,
+  // and compact pool state — never current shares or request-time snapshot JSON. When the
+  // history models are not yet complete (isOmnipoolHistoryReady false), Omnipool value is
+  // omitted rather than approximated (explicit incompleteness).
+  if (omniHist) {
     const lrnaPx = pxByPriceId.get(String(LRNA_ASSET_ID))
     const lrnaDec = asset(LRNA_ASSET_ID).decimals
     const earliest = (m: Map<number, number> | undefined) => { if (m) for (let b = 0; b <= N; b++) if (m.has(b)) return m.get(b)!; return 0 }
     const fallbackLrna = earliest(lrnaPx)
-    for (const { positionId, dec } of openPositions) {
-      const px = pxByPriceId.get(String(priceAssetId(dec.assetId)))
-      const aDec = asset(dec.assetId).decimals
-      const created = createdAt.get(positionId)
-      const fromBucket = created != null ? Math.max(0, Math.min(N, Math.floor((created - rng.minb) / BUCKET))) : 0
-      const fallbackPx = earliest(px)
-      let lastPx = fallbackPx, lastLrna = fallbackLrna
-      for (let b = fromBucket; b <= N; b++) {
-        if (px?.has(b)) lastPx = px.get(b)!
-        if (lrnaPx?.has(b)) lastLrna = lrnaPx.get(b)!
-        const st = bucketOmni[b]?.get(dec.assetId)
-        if (!st) continue
-        const { liquidity, hub } = omnipoolRemoveLiquidity(st, dec)
-        portfolio[b] += (Number(liquidity) / 10 ** aDec) * (lastPx || fallbackPx) + (Number(hub) / 10 ** lrnaDec) * (lastLrna || fallbackLrna)
+    const earliestByPrice = new Map<string, number>()
+    const earliestFor = (priceId: string) => { const c = earliestByPrice.get(priceId); if (c !== undefined) return c; const e = earliest(pxByPriceId.get(priceId)); earliestByPrice.set(priceId, e); return e }
+    for (let b = 0; b <= N; b++) {
+      const lrna = lrnaPx?.get(b) ?? fallbackLrna
+      for (const leg of omniHist.legsByBucket[b]) {
+        const priceId = String(priceAssetId(leg.assetId))
+        const px = pxByPriceId.get(priceId)
+        const price = px?.get(b) ?? earliestFor(priceId)
+        const aDec = asset(leg.assetId).decimals
+        portfolio[b] += (Number(leg.liquidity) / 10 ** aDec) * price + (Number(leg.hub) / 10 ** lrnaDec) * lrna
       }
     }
   }
@@ -10375,13 +10698,15 @@ async function getAccountTabCounts(accounts: string[], cacheKey: string): Promis
             GROUP BY block_height, extrinsic_index
           )`,
         format: 'JSONEachRow',
-        // Mega accounts (router bots) have tens of millions of activity rows —
-        // spill the aggregation to disk instead of hitting the memory ceiling.
-        // Exactness matters here: these counts drive pager last-page jumps. Keep
-        // the background snapshot refresh to one worker thread as well: a hot
-        // structural tag can otherwise consume the host while its already-valid
-        // snapshot is being refreshed, delaying unrelated Explorer requests.
-        clickhouse_settings: { max_bytes_before_external_group_by: '1500000000', max_threads: 1 },
+        // Mega structural accounts (router/referral/treasury pots) have tens of
+        // millions of activity rows — spill the aggregation to disk instead of
+        // hitting the memory ceiling. Exactness matters here: these counts drive
+        // pager last-page jumps. Single-threaded, the biggest of these (~28M rows,
+        // the referral pot) ran ~20s and tripped the client's execution ceiling
+        // under concurrent directory load; four threads bring it to ~5s / ~1.8 GiB
+        // — a brief, bounded burst on a cache miss (10-min TTL), not a hot loop,
+        // so it no longer times out while still leaving cores for live requests.
+        clickhouse_settings: { max_bytes_before_external_group_by: '1500000000', max_threads: 4 },
       }),
       client.query({ query: `SELECT count() AS c FROM price_data.${accountMoneyMarketActivityReady ? 'account_money_market_activity FINAL' : 'raw_money_market_events'} WHERE account_id IN (${mmList}) AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})`, format: 'JSONEachRow' }),
       client.query({ query: `SELECT count() AS c FROM price_data.raw_xcm_activity WHERE sender IN (${list}) OR recipient IN (${list})`, format: 'JSONEachRow' }),
@@ -10970,7 +11295,6 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
                 WHERE w.account_id != ''
               ) a
               LEFT JOIN tags t ON t.account_id = a.account_id
-              WHERE NOT match(a.account_id, '^0x(6d6f646c|7369626c|70617261)')
               GROUP BY gkey
             )` : `,
             activity AS (
@@ -10989,17 +11313,15 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
                 WHERE r.account_id != ''
               ) a
               LEFT JOIN tags t ON t.account_id = a.account_id
-              WHERE NOT match(a.account_id, '^0x(6d6f646c|7369626c|70617261)')
               GROUP BY gkey
             )` : ''
     const activityJoin = includeActivitySort ? 'LEFT JOIN activity act ON act.gkey = g.gkey' : ''
     const activitySelect = includeActivitySort ? 'ifNull(act.activity, 0)' : 'toUInt64(0)'
     const volumeCte = includeVolumeSort ? `,
             trade_volume_raw AS (
-              SELECT account AS account_id, toFloat64(sum(usd_volume_buy)) AS volume_usd
-              FROM price_data.trade_volume_by_account
+              SELECT account AS account_id, toFloat64(sum(${accountVolumeSource().col})) AS volume_usd
+              FROM ${accountVolumeSource().table}
               WHERE match(account, '^0x[0-9a-f]{64}$')
-                AND NOT match(account, '^0x(6d6f646c|7369626c|70617261)')
               GROUP BY account_id
             ),
             trade_volume AS (
@@ -11191,7 +11513,11 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
             ${volumeCte}
             ${liquidationCte}
           SELECT
-            g.label_id, g.lname, g.color, g.icon, g.members, g.sample, g.last_block, g.usd,
+            -- Alias the wallet value explicitly: the lp_grouped join (v3) also exposes a
+            -- usd column, so a bare g.usd serialises as the qualified name g.usd in
+            -- JSONEachRow -- raw[i].usd then read undefined and the sparkline final-bucket
+            -- pin silently became 0 (every sparkline cliffed to zero at the end).
+            g.label_id, g.lname, g.color, g.icon, g.members, g.sample, g.last_block, g.usd AS usd,
             ifNull(mg.col, 0) AS mm_col, ifNull(mg.debt, 0) AS mm_debt, mg.worst_acct AS mm_worst_acct,
             if(ifNull(mg.col, 0) > 0 OR ifNull(mg.debt, 0) > 0, 1, 0) AS mm_present,
             ifNull(mg.supplemental_positions, 0) AS supplemental_present,
@@ -11276,6 +11602,14 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
       await enrichAccountRows(raw, rows)
     } catch (err) {
       console.error('[accounts] row enrichment failed:', err)
+    }
+
+    // Overwrite the wallet-only sparkline with the full-portfolio series the detail
+    // page shows (parity). Best-effort — on failure the wallet-only fallback stands.
+    try {
+      await enrichAccountSparklines(raw, rows)
+    } catch (err) {
+      console.error('[accounts] sparkline parity enrichment failed:', err)
     }
 
     // Top-holding icons: refine the fast SQL wallet approximation into the exact set
@@ -11631,6 +11965,80 @@ async function enrichAccountRows(
   })
 }
 
+// Resample a full-history value series (portfolioSeries + its ascending dates) onto
+// the accounts-list sparkline's fixed trailing-year grid: SPARK_WEEKS weekly buckets
+// ending at the current (partial) week, forward-filled. Buckets before the account's
+// first data are 0 — young accounts are LEFT-PADDED to a full year; data older than a
+// year is clamped in (bucket 0 carries the value as of ~1Y ago). Every row's sparkline
+// therefore spans the same 1Y window and start positions are comparable across rows.
+export function resampleValueSeriesToTrailingYear(values: number[], dates: string[], now: Date = new Date()): number[] {
+  const winStartMs = sparklineCalendarWindowStart(now).getTime()
+  const pts: { t: number; v: number }[] = []
+  for (let i = 0; i < dates.length && i < values.length; i++) {
+    const t = Date.parse(dates[i].replace(' ', 'T') + 'Z')
+    if (Number.isFinite(t)) pts.push({ t, v: values[i] })
+  }
+  const out = new Array<number>(SPARK_WEEKS).fill(0)
+  let cursor = 0, last = 0, seen = false
+  for (let b = 0; b < SPARK_WEEKS; b++) {
+    const bucketEnd = winStartMs + (b + 1) * WEEK_MS - 1
+    while (cursor < pts.length && pts[cursor].t <= bucketEnd) { last = pts[cursor].v; seen = true; cursor++ }
+    out[b] = seen ? +last.toFixed(2) : 0
+  }
+  return out
+}
+
+// Full-portfolio sparkline for the accounts directory. Reuses the detail page's own
+// getAccountHistory so the row sparkline and the account/tag value-history chart are
+// computed by the SAME code path (wallet + HOLLAR + money-market net worth +
+// Omnipool/XYK LP principal, historical closes) and therefore cannot diverge — the
+// earlier wallet-only weekly approximation understated LP/MM-heavy accounts by ~2-3×.
+// Overwrites the wallet-only series enrichAccountRows produced, which stays as the
+// fallback when the history reconstruction yields nothing (a row never regresses to
+// blank). Module/sovereign accounts are excluded — reconstructing their millions of
+// pallet observations per directory refresh is far too heavy — so they keep no list
+// sparkline (their detail pages still chart in full), matching prior behaviour.
+async function enrichAccountSparklines(
+  raw: { label_id: string; sample: string; usd_total: number }[],
+  rows: TopAccountRow[],
+): Promise<void> {
+  const isModuleAccount = (a: string) => /^0x(6d6f646c|7369626c|70617261)/.test(a)
+  // Row account set = substrate members (module/sovereign dropped) + their EVM twins,
+  // i.e. the same relatedAccountIds the detail page feeds getAccountHistory.
+  const rowAccounts: string[][] = raw.map(r => {
+    const members = r.label_id !== '' ? (getTagRecord(r.label_id)?.members ?? []) : [r.sample]
+    const base = members.filter(m => ACCOUNT_RE.test(m) && !isModuleAccount(m))
+    const set = new Set<string>(base)
+    for (const m of base) { const twin = evmAccountForm(m); if (twin) set.add(twin) }
+    return [...set]
+  })
+  // Each row is an independent multi-query getAccountHistory; bound the fan-out the
+  // same way enrichTopAssets does so one page can't stampede ClickHouse.
+  const CONCURRENCY = 8
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (next < rows.length) {
+      const i = next++
+      const accounts = rowAccounts[i]
+      if (!accounts.length) continue   // module-only/tagless → keep enrichAccountRows' fallback
+      try {
+        const { portfolioSeries, portfolioDates } = await getAccountHistory(accounts)
+        if (portfolioSeries.length > 1) {
+          // Resample the full-history series onto the fixed trailing-year grid: every
+          // row's sparkline spans the same 1Y window, left-padded with 0 for younger
+          // accounts so start positions are comparable across rows.
+          const series = resampleValueSeriesToTrailingYear(portfolioSeries, portfolioDates)
+          // Pin the final bucket to the row's authoritative current value (the Value
+          // column; already nets debt) — the same rule getAddressHistory applies.
+          series[SPARK_WEEKS - 1] = +Number(raw[i].usd_total ?? 0).toFixed(2)
+          rows[i].sparkline = series
+        }
+      } catch { /* keep the wallet-only fallback from enrichAccountRows */ }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, rows.length) }, worker))
+}
+
 // tag detail — combined portfolio of all members
 export interface TagDetail {
   tagId: string
@@ -11735,15 +12143,16 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
     let moneyMarket = await aggregateMoneyMarket(mmMembers)
     // LP stays (it feeds the displayed value); only the heavy portfolio-history walk
     // and DCA — neither shown on the card — are skipped in summary.
-    const [history, bareLp, farmLp, activeDcas] = await Promise.all([
+    const [history, bareLp, farmLp, xykLp, activeDcas] = await Promise.all([
       summary
         ? Promise.resolve({ portfolioSeries: [] as number[], portfolioDates: [] as string[], balanceHistory: [] as AssetBalanceHistory[] })
         : getAccountHistory(tagHistoryAccounts),
       getOmnipoolPositions(tag.members),
       getFarmingPositions(tag.members),
+      isXykHistoryReady() ? getXykPositions(tag.members, balances) : Promise.resolve([] as LpPosition[]),
       summary ? Promise.resolve([]) : getActiveDcas(tag.members),
     ])
-    const lpPositions = [...bareLp, ...farmLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
+    const lpPositions = [...bareLp, ...farmLp, ...xykLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
     // Staking-backed markets (GIGAHDX): collateral is the already-counted locked HDX,
     // so don't fold it into balances/portfolio (see getAddress). Debt still counts.
     const countedMm = moneyMarket.filter(p => !p.stakingBacked)

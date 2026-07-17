@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   buildValueSparkline,
   sparklineCalendarWindowStart,
+  resampleValueSeriesToTrailingYear,
   SPARK_WEEKS,
 } from '../src/services/explorerService.ts'
 
@@ -70,5 +71,31 @@ describe('buildValueSparkline', () => {
   it('returns explicit incompleteness when an asset has no weekly closes', () => {
     const base = new Map([['0xa|5', '10000000000']])
     expect(buildValueSparkline([], base, { '5': new Map() }, new Map([['5', 10]]))).toBeNull()
+  })
+})
+
+describe('resampleValueSeriesToTrailingYear', () => {
+  // now anchored mid-week; window start is the Monday 52 weeks earlier (2025-07-07).
+  const now = new Date('2026-07-08T12:00:00Z')
+
+  it('always returns SPARK_WEEKS buckets', () => {
+    expect(resampleValueSeriesToTrailingYear([100], ['2026-06-15 00:00:00'], now)).toHaveLength(SPARK_WEEKS)
+  })
+
+  it('left-pads a young account with zeros to a full year, then forward-fills', () => {
+    const out = resampleValueSeriesToTrailingYear([100], ['2026-06-15 00:00:00'], now)
+    expect(out[0]).toBe(0)                       // a year ago the account held nothing
+    expect(out.some(v => v === 0)).toBe(true)    // left-padded
+    expect(out[SPARK_WEEKS - 1]).toBe(100)       // forward-filled to now
+  })
+
+  it('clamps an older-than-1Y account: bucket 0 carries the value as of ~1Y ago', () => {
+    const out = resampleValueSeriesToTrailingYear([10, 50], ['2024-01-01 00:00:00', '2026-07-01 00:00:00'], now)
+    expect(out[0]).toBe(10)                       // pre-window value carried into the first bucket (not 0)
+    expect(out[SPARK_WEEKS - 1]).toBe(50)         // latest value at the end
+  })
+
+  it('is empty-safe', () => {
+    expect(resampleValueSeriesToTrailingYear([], [], now)).toEqual(new Array(SPARK_WEEKS).fill(0))
   })
 })
