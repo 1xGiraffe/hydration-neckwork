@@ -164,7 +164,7 @@ function ArbitrageChart({ d, now }: { d: HollarDashboard; now: number }) {
         <MirroredBarChart data={bars} xTicks={ticks} upColor="var(--green)" downColor="var(--amber)" />
         <div className="hdx-note">
           {lastArb
-            ? <>Last intervention <Ago ts={lastArb.ts} now={now} /> — {lastArb.direction === 'in' ? 'bought back & burned' : 'minted & sold'} {fmtAmt(lastArb.hollarAmount)} HOLLAR via <AssetChip asset={lastArb.asset} /></>
+            ? <>Last intervention <Ago ts={lastArb.ts} now={now} /></>
             : 'No arbitrage recorded in the last 60 days.'}
         </div>
       </div>
@@ -248,7 +248,7 @@ function PoolCard({ p }: { p: HollarPool }) {
 function LiquiditySection({ d }: { d: HollarDashboard }) {
   const segs: ShareSegment[] = [
     { key: 'stablepools', label: 'Stablepools', color: 'var(--sky)', value: d.supply.inStablepools, tip: <><span className="t-d">Stablepools</span><TipRow label="HOLLAR" value={fmtAmt(d.supply.inStablepools) + ' HOLLAR'} /></> },
-    { key: 'omnipool', label: 'Omnipool', color: 'var(--lavender)', value: d.supply.inOmnipool, tip: <><span className="t-d">Omnipool</span><TipRow label="HOLLAR" value={fmtAmt(d.supply.inOmnipool) + ' HOLLAR'} /></> },
+    { key: 'omnipool', label: 'Omnipool', color: 'var(--sky-deep)', value: d.supply.inOmnipool, tip: <><span className="t-d">Omnipool</span><TipRow label="HOLLAR" value={fmtAmt(d.supply.inOmnipool) + ' HOLLAR'} /></> },
     { key: 'other', label: 'Other (wallets & protocol)', color: 'var(--text-low)', value: d.supply.other, tip: <><span className="t-d">Other</span><TipRow label="HOLLAR" value={fmtAmt(d.supply.other) + ' HOLLAR'} /></> },
   ]
   return (

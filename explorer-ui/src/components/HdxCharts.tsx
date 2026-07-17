@@ -27,7 +27,7 @@ export const LOCK_ORDER = ['vote', 'staking', 'gigahdx', 'vesting', 'other'] as 
 const LOCK_COLORS: Record<string, string> = {
   vote: '#3f88dd',
   staking: '#9c5cc4',
-  gigahdx: '#d63d70',
+  gigahdx: '#000000', // GIGAHDX brand black
   vesting: '#639e33',
   other: 'var(--text-low)',
 }
@@ -277,8 +277,8 @@ export function GigaLiquidationChart({ currentPrice, points, h = 190 }: { curren
       {hover != null && (
         <div className="hdx-tip" style={{ left: tipLeft((padL + hover * bw + bw / 2) / W * 100), top: 2 }}>
           <span className="t-d">if HDX falls to {fmtP(priceAt(hover))} ({dropPct(priceAt(hover))})</span>
-          <span className="t-row"><i style={{ background: 'var(--red)' }} />at this level<span className="tv">{fmt(sums[hover])} stHDX</span></span>
-          <span className="t-row">cumulative<span className="tv">{fmt(cum[hover])} stHDX ({totalAtRisk > 0 ? (cum[hover] / totalAtRisk * 100).toFixed(0) : 0}% of at-risk)</span></span>
+          <span className="t-row"><i style={{ background: 'var(--red)' }} />at this level<span className="tv">{fmt(sums[hover])} GIGAHDX</span></span>
+          <span className="t-row">cumulative<span className="tv">{fmt(cum[hover])} GIGAHDX ({totalAtRisk > 0 ? (cum[hover] / totalAtRisk * 100).toFixed(0) : 0}% of at-risk)</span></span>
         </div>
       )}
     </div>
@@ -306,18 +306,32 @@ export function MirroredBarChart({ data, h = 190, xTicks, upColor = 'var(--green
   if (!n) return <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, padding: '12px 0' }}>No data.</div>
   const half = (h - padT - padB) / 2
   const zeroY = padT + half
-  const max = Math.max(...bars.map(d => Math.max(d.up, d.down)), 1)
+  // Cap the axis at the outlier-aware max (same detection as the stacked chart)
+  // so a single huge day doesn't flatten every other bar into invisibility. Bars
+  // above the cap clamp to full height and carry a break mark; the exact value
+  // stays in the hover tooltip.
+  const max = stackedColumnMax(bars.flatMap(d => [d.up, d.down]))
   const bw = (W - 2 * padX) / n
+  const barW = Math.max(0.75, bw - 2)
   return (
     <div className="hdx-chart-wrap" onMouseLeave={() => setHover(null)}>
       <svg className="day-chart" viewBox={`0 0 ${W} ${h}`}>
         {bars.map((d, i) => {
           const x = padX + i * bw
-          const uh = d.up / max * (half - 2), dh = d.down / max * (half - 2)
+          const uh = Math.min(d.up, max) / max * (half - 2), dh = Math.min(d.down, max) / max * (half - 2)
+          const upTop = zeroY - 1 - uh, downBot = zeroY + 1 + dh
           return (
             <g key={d.key} opacity={hover == null || hover === i ? 1 : 0.65}>
-              {d.up > 0 && <rect x={x.toFixed(1)} y={(zeroY - 1 - uh).toFixed(1)} width={Math.max(0.75, bw - 2).toFixed(1)} height={Math.max(0.75, uh).toFixed(1)} fill={upColor} rx="1.5" />}
-              {d.down > 0 && <rect x={x.toFixed(1)} y={(zeroY + 1).toFixed(1)} width={Math.max(0.75, bw - 2).toFixed(1)} height={Math.max(0.75, dh).toFixed(1)} fill={downColor} rx="1.5" />}
+              {d.up > 0 && <rect x={x.toFixed(1)} y={upTop.toFixed(1)} width={barW.toFixed(1)} height={Math.max(0.75, uh).toFixed(1)} fill={upColor} rx="1.5" />}
+              {d.down > 0 && <rect x={x.toFixed(1)} y={(zeroY + 1).toFixed(1)} width={barW.toFixed(1)} height={Math.max(0.75, dh).toFixed(1)} fill={downColor} rx="1.5" />}
+              {d.up > max && <g stroke="var(--bg-elev)" strokeWidth="2.5">
+                <line x1={x.toFixed(1)} x2={(x + barW).toFixed(1)} y1={(upTop + 5).toFixed(1)} y2={(upTop + 2).toFixed(1)} />
+                <line x1={x.toFixed(1)} x2={(x + barW).toFixed(1)} y1={(upTop + 9).toFixed(1)} y2={(upTop + 6).toFixed(1)} />
+              </g>}
+              {d.down > max && <g stroke="var(--bg-elev)" strokeWidth="2.5">
+                <line x1={x.toFixed(1)} x2={(x + barW).toFixed(1)} y1={(downBot - 5).toFixed(1)} y2={(downBot - 2).toFixed(1)} />
+                <line x1={x.toFixed(1)} x2={(x + barW).toFixed(1)} y1={(downBot - 9).toFixed(1)} y2={(downBot - 6).toFixed(1)} />
+              </g>}
               <rect x={x.toFixed(1)} y={padT} width={bw.toFixed(1)} height={h - padT - padB} fill="transparent" onMouseEnter={() => setHover(i)} />
             </g>
           )

@@ -58,29 +58,34 @@ function GigaMarketSection({ d }: { d: HdxDashboard }) {
       <SecTitle title="GIGAHDX Money Market" subtitle="supply & borrow against staked HDX" />
       <div className="pf-card">
         <div className="hdx-cards">
-          {rows.map(r => (
+          {rows.map(r => {
+            // The GIGAHDX money market's collateral is stHDX (the internal vehicle);
+            // users know it 1:1 as GIGAHDX, so surface the branded name (icon included).
+            const sym = r.asset.symbol === 'stHDX' ? 'GIGAHDX' : r.asset.symbol
+            return (
             <span key={r.asset.assetId} style={{ display: 'contents' }}>
               {r.supplied > 0 && (
                 <div className="hdx-card">
-                  <div className="hk"><AssetIcon assetId={r.asset.assetId} iconAssetId={r.asset.iconAssetId} symbol={r.asset.symbol} size={16} parachainId={r.asset.parachainId} origin={r.asset.origin} /> {r.asset.symbol} supplied</div>
-                  <div className="hv">{fmtAmt(r.supplied)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{r.asset.symbol}</span></div>
+                  <div className="hk"><AssetIcon assetId={r.asset.assetId} iconAssetId={r.asset.iconAssetId} symbol={sym} size={16} parachainId={r.asset.parachainId} origin={r.asset.origin} /> {sym} supplied</div>
+                  <div className="hv">{fmtAmt(r.supplied)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{sym}</span></div>
                   <div className="hs">{r.suppliedUsd != null ? F.usd(r.suppliedUsd) : '—'} · {F.int(r.suppliers)} suppliers</div>
                 </div>
               )}
               {r.debt > 0 && (
                 <div className="hdx-card">
-                  <div className="hk"><AssetIcon assetId={r.asset.assetId} iconAssetId={r.asset.iconAssetId} symbol={r.asset.symbol} size={16} parachainId={r.asset.parachainId} origin={r.asset.origin} /> {r.asset.symbol} borrowed</div>
-                  <div className="hv">{fmtAmt(r.debt)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{r.asset.symbol}</span></div>
+                  <div className="hk"><AssetIcon assetId={r.asset.assetId} iconAssetId={r.asset.iconAssetId} symbol={sym} size={16} parachainId={r.asset.parachainId} origin={r.asset.origin} /> {sym} borrowed</div>
+                  <div className="hv">{fmtAmt(r.debt)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{sym}</span></div>
                   <div className="hs">{r.debtUsd != null ? F.usd(r.debtUsd) : '—'} · {F.int(r.borrowers)} borrowers</div>
                 </div>
               )}
             </span>
-          ))}
+            )
+          })}
         </div>
         {d.gigaLiquidations && (
           <div style={{ marginTop: 18 }}>
             <div className="sec-title" style={{ marginBottom: 6 }}>Liquidation levels <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}>
-              · {fmtHdx(d.gigaLiquidations.points.reduce((a, p) => a + p.stHdx, 0))} stHDX at risk across {d.gigaLiquidations.points.length} borrowers — how much becomes liquidatable as the HDX price falls
+              · {fmtHdx(d.gigaLiquidations.points.reduce((a, p) => a + p.stHdx, 0))} GIGAHDX at risk across {d.gigaLiquidations.points.length} borrowers — how much becomes liquidatable as the HDX price falls
             </span></div>
             <GigaLiquidationChart currentPrice={d.gigaLiquidations.currentPrice} points={d.gigaLiquidations.points} />
           </div>

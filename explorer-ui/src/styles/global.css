@@ -609,7 +609,7 @@ svg { display: block; }
 .exp-evs { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* hovercards */
-.hovercard { position: absolute; z-index: 300; width: min(360px, calc(100vw - 24px)); background: var(--bg-elev); border: 1px solid var(--border); border-radius: 14px; padding: 14px; box-shadow: 0 16px 40px rgba(0,0,0,0.5); font-family: 'Geist', sans-serif; pointer-events: auto; }
+.hovercard { position: fixed; z-index: 300; width: min(360px, calc(100vw - 24px)); background: var(--bg-elev); border: 1px solid var(--border); border-radius: 14px; padding: 14px; box-shadow: 0 16px 40px rgba(0,0,0,0.5); font-family: 'Geist', sans-serif; pointer-events: auto; }
 /* The call renders as a pill on its own full-width line; it never wraps, and an
    over-long name (e.g. OmnipoolLiquidityMining.add_liquidity_and_join_farms) is
    ellipsised inside the pill (full name on title-hover) rather than overflowing. */

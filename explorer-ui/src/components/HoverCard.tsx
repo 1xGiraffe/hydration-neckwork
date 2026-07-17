@@ -8,7 +8,7 @@ import type { AssetRef } from '../types'
 // /dca/…), extrinsic (a.hash / [data-ext] → /extrinsic/…) and block
 // (/block/…) links. Each card mirrors the basic-info block of its detail page.
 // Mounted once in App.
-type Target = { kind: 'account' | 'tag' | 'asset' | 'trade' | 'extrinsic' | 'block'; id: string; x: number; y: number }
+type Target = { kind: 'account' | 'tag' | 'asset' | 'trade' | 'extrinsic' | 'block'; id: string; left: number; top: number; bottom: number }
 const SELECTOR = '.addr-pill:not([data-no-hover]), .asset-chip, a.hash, a[href*="/swap/"], a[href*="/dca/"], a[href*="/block/"], [data-activity], [data-ext]'
 const HOVER_DWELL_MS = 180
 
@@ -29,7 +29,7 @@ function ProfileMetrics({ portfolioUsd, debtUsd, tradingVolumeUsd, liquidationVo
   )
 }
 
-function parseTarget(el: Element): Omit<Target, 'x' | 'y'> | null {
+function parseTarget(el: Element): Omit<Target, 'left' | 'top' | 'bottom'> | null {
   if (el.closest('[data-no-hover]')) return null
   const act = el.getAttribute('data-activity')
   if (act) {
@@ -77,7 +77,7 @@ export function HoverCards() {
       showTimer.current = window.setTimeout(() => {
         if (!el.isConnected) return
         const r = el.getBoundingClientRect()
-        setTarget({ ...parsed, x: r.left + window.scrollX, y: r.bottom + window.scrollY })
+        setTarget({ ...parsed, left: r.left, top: r.top, bottom: r.bottom })
       }, HOVER_DWELL_MS)
     }
     function onOut(e: MouseEvent) {
@@ -111,13 +111,21 @@ export function HoverCards() {
   if (!target) return null
   const W = 360
   const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 9999
-  const scrollX = typeof window !== 'undefined' ? window.scrollX : 0
+  const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 9999
   const cardWidth = Math.min(W, Math.max(0, viewportWidth - 24))
-  const viewportX = target.x - scrollX
-  const maxLeft = Math.max(12, viewportWidth - cardWidth - 12)
-  const left = scrollX + Math.max(12, Math.min(viewportX, maxLeft))
+  const left = Math.max(12, Math.min(target.left, viewportWidth - cardWidth - 12))
+  // The card is `position: fixed` and placed in viewport coordinates, so it never
+  // extends the document height. An absolutely-positioned card dropped below a
+  // pill near the page bottom grew the page, which flip-flopped the layout and
+  // made the card flicker. Flip above the anchor when there isn't room below, and
+  // cap the height so the card always fits the viewport.
+  const spaceBelow = viewportHeight - target.bottom
+  const placeAbove = spaceBelow < 240 && target.top > spaceBelow
+  const vStyle = placeAbove
+    ? { bottom: Math.round(viewportHeight - target.top + 8), maxHeight: Math.max(96, Math.round(target.top - 16)) }
+    : { top: Math.round(target.bottom + 8), maxHeight: Math.max(96, Math.round(spaceBelow - 16)) }
   return (
-    <div className="hovercard" style={{ top: target.y + 8, left }}
+    <div className="hovercard" style={{ left, overflowY: 'auto', ...vStyle }}
       onMouseEnter={() => window.clearTimeout(hideTimer.current)}
       onMouseLeave={() => setTarget(null)}>
       {target.kind === 'account' ? <AccountHover id={target.id} />

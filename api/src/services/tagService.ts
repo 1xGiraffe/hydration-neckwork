@@ -145,7 +145,7 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     ],
   },
   {
-    tagId: 'polkadot-fellowship', name: 'Polkadot Fellowship', color: '#552bbf', note: 'Polkadot Technical Fellowship account', icon: '',
+    tagId: 'polkadot-fellowship', name: 'Polkadot Fellowship', color: '#e6007a', note: 'Polkadot Technical Fellowship account', icon: '',
     addresses: ['16VcQSRcMFy6ZHVjBvosKmo7FKqTb8ZATChDYo8ibutzLnos'],
   },
   {
@@ -158,7 +158,7 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     // over XCM, so our chain sees this contract as the origin rather than the real
     // sender. One contract fans out to 100+ Hydration recipients — labelling it
     // makes clear the transfer came through the Moonbeam/Wormhole bridge.
-    tagId: 'moonbeam-wormhole', name: 'Moonbeam Wormhole', color: '#8b5cf6', note: 'Moonbeam-side Wormhole bridge forwarding contract — inbound cross-chain assets (e.g. Solana → Wormhole → Moonbeam) arrive from here before the XCM hop to Hydration', icon: '🌉',
+    tagId: 'moonbeam-wormhole', name: 'Moonbeam Wormhole', color: '#2ba69c', note: 'Moonbeam-side Wormhole bridge forwarding contract — inbound cross-chain assets (e.g. Solana → Wormhole → Moonbeam) arrive from here before the XCM hop to Hydration', icon: '🌉',
     addresses: ['0xf1db8c4bfbb3d6a97c9b669a2ffc0b70f41f3547'],
   },
   {
@@ -169,19 +169,19 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
   // ---- pallet accounts (accounts with no extrinsics, decoded from their
   // "modl" + PalletId structure and matched to hydration-node constants) ----
   {
-    tagId: 'omnipool', name: 'Omnipool', color: '#3fb6c9', note: 'Omnipool pallet account — the AMM counterparty holding all Omnipool liquidity', icon: '',
+    tagId: 'omnipool', name: 'Omnipool', color: '#2b7de6', note: 'Omnipool pallet account — the AMM counterparty holding all Omnipool liquidity', icon: '',
     addresses: [modlAccountId('omnipool')],
   },
   {
-    tagId: 'staking-pot', name: 'Staking Pot', color: '#9c5cc4', note: 'HDX staking pallet pot (PalletId staking#)', icon: '',
+    tagId: 'staking-pot', name: 'Staking Pot', color: 'var(--accent)', note: 'HDX staking pallet pot (PalletId staking#)', icon: '',
     addresses: [modlAccountId('staking#')],
   },
   {
-    tagId: 'fee-processor', name: 'Fee Processor', color: '#f7bf06', note: 'Collected transaction fees awaiting conversion/distribution (PalletId feeproc/)', icon: '',
+    tagId: 'fee-processor', name: 'Fee Processor', color: 'var(--accent)', note: 'Collected transaction fees awaiting conversion/distribution (PalletId feeproc/)', icon: '',
     addresses: [modlAccountId('feeproc/')],
   },
   {
-    tagId: 'gigahdx-pots', name: 'GIGAHDX Pots', color: '#d63d70', note: 'GigaHdx staking pallet pots — the stHDX gigapot and reward pools', icon: '',
+    tagId: 'gigahdx-pots', name: 'GIGAHDX Pots', color: 'var(--accent)', note: 'GIGAHDX staking pallet pots — the stHDX gigapot and reward pools', icon: '',
     addresses: [modlAccountId('gigahdx!'), modlAccountId('gigarwd!'), modlAccountId('gigarwd!', Buffer.from('alc', 'latin1').toString('hex'))],
   },
   {
@@ -282,10 +282,10 @@ export async function syncMoneyMarketTag(): Promise<void> {
 //    by their account-id structure alone (prefix scan over known balances).
 const LM_PREFIXES = ['OmniWhLM', 'Omni//LM', 'XYK///LM', 'xykLMpID'].map(id => ('0x' + Buffer.from('modl' + id, 'latin1').toString('hex')).toLowerCase())
 const STRUCTURAL_TAGS = [
-  { tagId: 'xyk-pools', name: 'XYK Pool', color: '#74a842', note: 'XYK AMM pair account — holds the pool reserves', icon: '💧' },
-  { tagId: 'stableswap-pools', name: 'Stableswap Pool', color: '#38a3d8', note: 'Stableswap pool account — holds the pool reserves', icon: '💧' },
-  { tagId: 'liquidity-mining', name: 'Liquidity Mining', color: '#2fa48a', note: 'Liquidity-mining pallet pots (global/yield farm sub-accounts)', icon: '🚜' },
-  { tagId: 'sovereigns', name: 'Parachain Sovereign', color: '#c084fc', note: 'Sibling parachain sovereign account (sibl + para id) — holds assets on behalf of that chain', icon: '🛰️' },
+  { tagId: 'xyk-pools', name: 'XYK Pool', color: '#86c4f5', note: 'XYK AMM pair account — holds the pool reserves', icon: '💧' },
+  { tagId: 'stableswap-pools', name: 'Stableswap Pool', color: '#57a5ec', note: 'Stableswap pool account — holds the pool reserves', icon: '💧' },
+  { tagId: 'liquidity-mining', name: 'Liquidity Mining', color: 'var(--accent)', note: 'Liquidity-mining pallet pots (global/yield farm sub-accounts)', icon: '🚜' },
+  { tagId: 'sovereigns', name: 'Parachain Sovereign', color: '#e6007a', note: 'Sibling parachain sovereign account (sibl + para id) — holds assets on behalf of that chain', icon: '🛰️' },
 ] as const
 
 export async function syncStructuralTags(): Promise<void> {
@@ -361,4 +361,34 @@ export async function seedDefaultTags(): Promise<void> {
   await client.insert({ table: 'price_data.account_tags', values: rows, format: 'JSONEachRow' })
   await loadTags()
   console.log(`[tags] synced ${rows.length} tag membership(s) from DEFAULT_TAGS`)
+}
+
+// A tag's color is canonical in code (DEFAULT_TAGS / STRUCTURAL_TAGS / MM_TAG) —
+// there is no edit API. But membership rows are only ever INSERTED (seed and the
+// structural/MM syncs skip accounts that already exist), so editing a color in
+// code would otherwise never reach an already-seeded database: loadTags() reads
+// color from the table, and the Accounts/Holders aggregates read it straight
+// from SQL. Reconcile the stored color to the code definition with an in-place
+// mutation. Idempotent — the `color != …` guard makes it a no-op once the table
+// already matches, so it costs nothing on subsequent starts.
+export async function reconcileTagColors(): Promise<void> {
+  const want = new Map<string, string>()
+  for (const d of DEFAULT_TAGS) want.set(d.tagId, d.color)
+  for (const d of STRUCTURAL_TAGS) want.set(d.tagId, d.color)
+  want.set(MM_TAG.tagId, MM_TAG.color)
+  let changed = 0
+  for (const [tagId, color] of want) {
+    const tag = byTag.get(tagId)
+    if (!tag || tag.color === color) continue
+    await client.command({
+      query: `ALTER TABLE price_data.account_tags UPDATE color = {color:String} WHERE label_id = {tagId:String} AND color != {color:String}`,
+      query_params: { color, tagId },
+      clickhouse_settings: { mutations_sync: '1' },
+    })
+    changed++
+  }
+  if (changed) {
+    await loadTags()
+    console.log(`[tags] reconciled color for ${changed} tag(s) from code definitions`)
+  }
 }

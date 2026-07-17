@@ -293,7 +293,7 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now }: { dcas: Activ
 
 // Venue → badge colour, so the LP products read apart at a glance: NFT-held
 // Omnipool positions (bare / farmed) vs wallet-held stableswap pool shares.
-const LP_VENUE_COLORS: Record<string, string> = { Omnipool: 'var(--sky)', 'Omnipool Farm': 'var(--green)', Stablepool: 'var(--lavender)' }
+const LP_VENUE_COLORS: Record<string, string> = { Omnipool: 'var(--sky-deep)', 'Omnipool Farm': 'var(--green)', Stablepool: 'var(--sky)' }
 
 export function LiquidityPositionsTable({ positions }: { positions: LpPosition[] }) {
   if (!positions.length) return null
