@@ -71,6 +71,33 @@ async function insertRangeState(
   })
 }
 
+// Append-only failure log: raw_ingestion_ranges is a ReplacingMergeTree keyed on
+// range_id, so repeated failed attempts for the same range collapse to a single
+// physical row once merges run, making a row-count-based retry limit
+// merge-dependent and nondeterministic. raw_ingestion_range_failures is a plain
+// MergeTree with no replacement semantics, so every attempt is an immutable row
+// and counts stay exact. Volume is tiny, so no cleanup is needed.
+async function insertRangeFailure(
+  client: ClickHouseClient,
+  pipelineId: string,
+  fromBlock: number,
+  toBlock: number,
+  reason: string,
+): Promise<void> {
+  await client.insert({
+    table: 'price_data.raw_ingestion_range_failures',
+    values: [{
+      range_id: rawRangeId(pipelineId, fromBlock, toBlock),
+      pipeline_id: pipelineId,
+      from_block: fromBlock,
+      to_block: toBlock,
+      reason,
+      failed_at: toClickHouseDateTime(),
+    }],
+    format: 'JSONEachRow',
+  })
+}
+
 async function loadExistingStartedAt(
   client: ClickHouseClient,
   pipelineId: string,
@@ -139,14 +166,18 @@ export async function markRawRangeFailed(
     return
   }
 
+  const message = error instanceof Error ? error.message : String(error)
+
   await insertRangeState(client, {
     pipelineId,
     fromBlock,
     toBlock,
     status: 'failed',
     startedAt: await loadExistingStartedAt(client, pipelineId, fromBlock, toBlock),
-    error: error instanceof Error ? error.message : String(error),
+    error: message,
   })
+
+  await insertRangeFailure(client, pipelineId, fromBlock, toBlock, message)
 }
 
 async function readRawRangeStats(client: ClickHouseClient, fromBlock: number, toBlock: number): Promise<RawRangeStats> {

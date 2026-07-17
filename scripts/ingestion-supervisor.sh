@@ -183,6 +183,25 @@ SELECT
 "; then
     log "failed to mark raw range $from-$to as failed"
   fi
+
+  # Append-only failure log: raw_ingestion_ranges is a ReplacingMergeTree keyed on
+  # range_id, so every attempt for the same range collapses to one physical row
+  # once merges run, making a "count failed rows for this range" query
+  # merge-dependent and nondeterministic. raw_ingestion_range_failures is a plain
+  # MergeTree with no replacement semantics, so every attempt is an immutable row
+  # and counts stay exact forever. Volume is tiny (one row per failed attempt), so
+  # no cleanup/TTL is needed.
+  if ! ch_query "
+INSERT INTO raw_ingestion_range_failures (range_id, pipeline_id, from_block, to_block, reason)
+SELECT
+  '$(sql_escape "$range_id")' AS range_id,
+  '$(sql_escape "$pipeline")' AS pipeline_id,
+  toUInt32($from) AS from_block,
+  toUInt32($to) AS to_block,
+  '$escaped_reason' AS reason
+"; then
+    log "failed to record raw range failure $from-$to in failure log"
+  fi
 }
 
 mark_raw_range_blocked_from_supervisor() {
@@ -225,15 +244,19 @@ SELECT
   fi
 }
 
+# Counts from the append-only raw_ingestion_range_failures log (see the comment
+# in mark_raw_range_failed_from_supervisor), not from raw_ingestion_ranges: that
+# table is a ReplacingMergeTree keyed on range_id, so counting rows with
+# status = 'failed' there is merge-dependent and can silently collapse to a
+# single row, letting a permanently failing range retry forever.
 failed_raw_attempt_count() {
   local from="$1"
   local to="$2"
   ch_query "
 SELECT count()
-FROM raw_ingestion_ranges
+FROM raw_ingestion_range_failures
 WHERE from_block = $from
   AND to_block = $to
-  AND status = 'failed'
 FORMAT TSV" |
     awk 'NR == 1 { print $1 + 0 }'
 }
@@ -704,6 +727,22 @@ FORMAT TSV" || true)"
   main_rows="$(ch_query "SELECT count() FROM blocks FORMAT TSV" || true)"
   log "snapshot live=${live:-unknown} live_main=${live_main:-unknown} main_min=${main_min:-unknown} main_blocks=${main_rows:-unknown} raw_active=$(active_raw_count) main_active=$(active_main_count)"
 }
+
+# Bootstrap the append-only failure log for databases created before this table
+# was added to the schema; idempotent and safe to run on every supervisor start.
+ch_query "
+CREATE TABLE IF NOT EXISTS raw_ingestion_range_failures (
+  \`range_id\` String,
+  \`pipeline_id\` String,
+  \`from_block\` UInt32,
+  \`to_block\` UInt32,
+  \`reason\` String,
+  \`failed_at\` DateTime DEFAULT now()
+) ENGINE = MergeTree
+PARTITION BY toYYYYMM(failed_at)
+ORDER BY (from_block, to_block, failed_at)
+SETTINGS index_granularity = 8192
+"
 
 log "starting ingestion supervisor in $ROOT_DIR"
 
