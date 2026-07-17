@@ -1,18 +1,20 @@
 // Idempotent, range-aware recompute jobs for the four read models that a plain
 // materialized view cannot express (they need cross-row netting or a stateful
-// lifecycle walk). The runner (Task 5) calls each every cycle; every function
-// here is safe to call repeatedly.
+// lifecycle walk). The runner (derivations/runner.ts) calls each every cycle;
+// every function here is safe to call repeatedly.
 //
-//   - account_trade_volume            partition-diff incremental (no tracking table)
-//   - omnipool_position_owner_intervals  bounded full recompute, fresh run_id
-//   - xyk_farm_principal_intervals       bounded full recompute, fresh run_id
-//   - xyk_lp_total_shares_history         bounded full recompute, fresh run_id
+//   - account_trade_volume               partition-diff incremental (no tracking table)
+//   - omnipool_position_owner_intervals  bounded full recompute, atomic staging swap
+//   - xyk_farm_principal_intervals       bounded full recompute, atomic staging swap
+//   - xyk_lp_total_shares_history        bounded full recompute, atomic staging swap
 //
-// The three reconstructions write with a fresh run_id and their target tables are
-// ReplacingMergeTree(run_id) keyed on stable business keys, so a later run simply
-// supersedes prior rows. account_trade_volume drops+rebuilds whole CH partitions.
-// Target tables already exist in clickhouse/schema/001_tables.sql — nothing here
-// creates tables or writes the (retired) lp_history_model_coverage gate rows.
+// The three reconstructions write their full result into a `<table>_staging` twin
+// and EXCHANGE it with the live table (see atomicFullReplace below) — the live
+// table is always exactly the latest full run, with no stale rows left behind by
+// a shifted ReplacingMergeTree key and no unbounded run_id growth. account_trade_volume
+// instead drops+rebuilds whole CH partitions in place. Target tables already exist
+// in clickhouse/schema/001_tables.sql — nothing here creates tables (beyond the
+// on-demand staging twins) or writes the (retired) lp_history_model_coverage gate rows.
 
 import type { ClickHouseClient } from '../db/client.ts'
 import {
@@ -33,6 +35,37 @@ import {
 export interface DerivationResult {
   model: string
   rows: number
+}
+
+// ───────────────────── atomic full-replace helper ─────────────────────
+// The three reconstruction jobs below (omnipool owner intervals, xyk farm
+// intervals, xyk total shares) each recompute their whole read model from
+// scratch every run. They used to append rows with a fresh run_id, relying on
+// ReplacingMergeTree(run_id) + FINAL to collapse old rows on their stable
+// business key. That breaks under out-of-order backward backfill: a corrected
+// event can shift a row's `valid_from_block`/`valid_from_event`, which is part
+// of the ORDER BY key, so the new row lands at a *different* key than the old
+// one — FINAL has no key collision to collapse, and the stale row lingers
+// forever (plus run_id rows accumulate without bound).
+//
+// Instead, write the full recompute into a `<table>_staging` twin (same DDL,
+// created on demand) and EXCHANGE it with the live table — a single atomic
+// rename swap with no reader-visible gap. The live table is then always
+// exactly the latest full run: no stale keys, no unbounded run_id growth.
+// Truncate staging both before writing (clean slate if a prior run crashed
+// mid-way) and after the swap (drop the now-superseded old data promptly
+// rather than let it double the table's disk footprint until the next run).
+async function atomicFullReplace(
+  client: ClickHouseClient,
+  liveTable: string,
+  write: (stagingTable: string) => Promise<void>,
+): Promise<void> {
+  const stagingTable = `${liveTable}_staging`
+  await client.command({ query: `CREATE TABLE IF NOT EXISTS ${stagingTable} AS ${liveTable}` })
+  await client.command({ query: `TRUNCATE TABLE ${stagingTable}` })
+  await write(stagingTable)
+  await client.command({ query: `EXCHANGE TABLES ${liveTable} AND ${stagingTable}` })
+  await client.command({ query: `TRUNCATE TABLE ${stagingTable}` })
 }
 
 // ───────────────────────── account_trade_volume ─────────────────────────
@@ -111,8 +144,8 @@ export async function runAccountTradeVolume(client: ClickHouseClient): Promise<D
 // ─────────────────── omnipool_position_owner_intervals ───────────────────
 // Bounded full recompute: load the complete Omnipool NFT + liquidity-mining
 // lifecycle (~1M rows), reconstruct account-first ownership intervals with the
-// pure buildOmnipoolOwnerIntervals domain function, and write with a fresh
-// run_id (ReplacingMergeTree(run_id) supersedes prior rows on their stable keys).
+// pure buildOmnipoolOwnerIntervals domain function, and swap the result into
+// the live table atomically (see atomicFullReplace).
 
 const OMNIPOOL_EVENT_KIND: Record<string, OwnerLifecycleKind> = {
   'Uniques.Issued': 'nft_issue',
@@ -219,20 +252,23 @@ export async function runOmnipoolOwnerIntervals(client: ClickHouseClient): Promi
     run_id: runId,
   }))
 
-  const BATCH = 50_000
-  for (let i = 0; i < intervalRows.length; i += BATCH) {
-    await client.insert({
-      table: 'price_data.omnipool_position_owner_intervals',
-      values: intervalRows.slice(i, i + BATCH),
-      format: 'JSONEachRow',
-    })
-  }
+  await atomicFullReplace(client, 'price_data.omnipool_position_owner_intervals', async stagingTable => {
+    const BATCH = 50_000
+    for (let i = 0; i < intervalRows.length; i += BATCH) {
+      await client.insert({
+        table: stagingTable,
+        values: intervalRows.slice(i, i + BATCH),
+        format: 'JSONEachRow',
+      })
+    }
+  })
   return { model: 'omnipool_owner_intervals', rows: intervalRows.length }
 }
 
 // ─────────────────── xyk_farm_principal_intervals ───────────────────
 // Bounded full recompute of collection-5389 farm deposits via the pure
-// buildXykFarmIntervals domain function; fresh run_id supersedes prior rows.
+// buildXykFarmIntervals domain function; result is swapped into the live
+// table atomically (see atomicFullReplace).
 
 const XYK_FARM_EVENT_KIND: Record<string, XykFarmLifecycleKind> = {
   'Uniques.Issued': 'nft_issue',
@@ -323,14 +359,16 @@ export async function runXykFarmIntervals(client: ClickHouseClient): Promise<Der
     run_id: runId,
   }))
 
-  const BATCH = 50_000
-  for (let i = 0; i < intervalRows.length; i += BATCH) {
-    await client.insert({
-      table: 'price_data.xyk_farm_principal_intervals',
-      values: intervalRows.slice(i, i + BATCH),
-      format: 'JSONEachRow',
-    })
-  }
+  await atomicFullReplace(client, 'price_data.xyk_farm_principal_intervals', async stagingTable => {
+    const BATCH = 50_000
+    for (let i = 0; i < intervalRows.length; i += BATCH) {
+      await client.insert({
+        table: stagingTable,
+        values: intervalRows.slice(i, i + BATCH),
+        format: 'JSONEachRow',
+      })
+    }
+  })
   return { model: 'xyk_farm_intervals', rows: intervalRows.length }
 }
 
@@ -340,9 +378,12 @@ export async function runXykFarmIntervals(client: ClickHouseClient): Promise<Der
 // token issuance == sum of all holder balances, and substrate Tokens balances are
 // captured from genesis, so cumulative net balance deltas reproduce issuance
 // exactly. XYK.LiquidityAdded omits the minted-share amount, so events alone
-// cannot do this. A fresh run_id replaces prior rows per (lp_asset_id, block).
+// cannot do this. The result is swapped into the live table atomically (see
+// atomicFullReplace) rather than appended per (lp_asset_id, block).
 
 // The single INSERT…SELECT for the total-shares reconstruction, keyed by run id.
+// Targets the staging twin (never the live table directly) so the run's
+// result becomes visible only via the atomic EXCHANGE in runXykTotalShares.
 // Exported so its shape can be unit-tested without a live ClickHouse.
 export function xykTotalSharesInsertSql(runId: number): string {
   const stepSelect = `
@@ -361,19 +402,22 @@ export function xykTotalSharesInsertSql(runId: number): string {
       SELECT lp AS lp_asset_id, block_height,
         toString(sum(bd) OVER (PARTITION BY lp ORDER BY block_height ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS total_shares_raw
       FROM per_block`
-  return `INSERT INTO price_data.xyk_lp_total_shares_history
+  return `INSERT INTO price_data.xyk_lp_total_shares_history_staging
         SELECT lp_asset_id, block_height, total_shares_raw, ${runId} AS run_id, now() AS ingested_at
         FROM (${stepSelect})`
 }
 
 export async function runXykTotalShares(client: ClickHouseClient): Promise<DerivationResult> {
   const runId = Date.now()
-  await client.command({
-    query: xykTotalSharesInsertSql(runId),
-    clickhouse_settings: { max_threads: 4, max_insert_threads: '2', max_execution_time: 3600, max_memory_usage: '8000000000' },
+  const liveTable = 'price_data.xyk_lp_total_shares_history'
+  await atomicFullReplace(client, liveTable, async () => {
+    await client.command({
+      query: xykTotalSharesInsertSql(runId),
+      clickhouse_settings: { max_threads: 4, max_insert_threads: '2', max_execution_time: 3600, max_memory_usage: '8000000000' },
+    })
   })
   const res = await client.query({
-    query: `SELECT count() AS n FROM price_data.xyk_lp_total_shares_history WHERE run_id = ${runId}`,
+    query: `SELECT count() AS n FROM ${liveTable} WHERE run_id = ${runId}`,
     format: 'JSONEachRow',
   })
   return { model: 'xyk_total_shares', rows: Number((await res.json<{ n: string }>())[0]?.n ?? 0) }

@@ -3,9 +3,11 @@ import { xykTotalSharesInsertSql, stalePartitionsSql } from './jobs.ts'
 import { swapEventFilterSql } from '../services/accountTradeVolume.ts'
 
 describe('xykTotalSharesInsertSql', () => {
-  it('is a single idempotent INSERT keyed by run id', () => {
+  it('is a single idempotent INSERT keyed by run id, targeting the staging twin', () => {
     const sql = xykTotalSharesInsertSql(12345)
-    expect(sql).toContain('INSERT INTO price_data.xyk_lp_total_shares_history')
+    // Writes land in the staging table; the live table is only updated by the
+    // atomic EXCHANGE in runXykTotalShares (see jobs.ts atomicFullReplace).
+    expect(sql).toContain('INSERT INTO price_data.xyk_lp_total_shares_history_staging')
     expect(sql).toContain('12345 AS run_id')
   })
 
