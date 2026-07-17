@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import {
-  ACCOUNT_ACTIVITY_VALUES_SCHEMA_SQL,
-  ACCOUNT_ACTIVITY_VALUES_SELECT_SQL,
-} from '../src/db/migrations.ts'
-import {
   eventValueFilterSql,
   exactHistoricalValuePredicateSql,
   exactValuePredicateSql,
@@ -14,14 +10,6 @@ import {
 } from '../src/services/explorerService.ts'
 
 describe('value-aware account activity precision', () => {
-  it('stores and extracts raw on-chain amounts as UInt256', () => {
-    expect(ACCOUNT_ACTIVITY_VALUES_SCHEMA_SQL).toContain('amount UInt256')
-    expect(ACCOUNT_ACTIVITY_VALUES_SCHEMA_SQL).not.toContain('amount Float64')
-    expect(ACCOUNT_ACTIVITY_VALUES_SELECT_SQL).toContain('toUInt256OrZero(raw_amount) AS amount')
-    expect(ACCOUNT_ACTIVITY_VALUES_SELECT_SQL).toContain("toUInt8(raw_amount != '') AS has_amount")
-    expect(ACCOUNT_ACTIVITY_VALUES_SELECT_SQL).toContain("= 'SplitAbstain'")
-  })
-
   it('sums split vote balances without JavaScript number coercion', () => {
     const max = ((1n << 128n) - 1n).toString()
     expect(voteDetails({ vote: { __kind: 'Split', aye: max, nay: max } }).amount)

@@ -8,7 +8,6 @@ import {
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressActivityCountAtMin, getTagActivityCountAtMin,
   getTagActivity, getTagExtrinsics, getTagEvents,
-  isAccountActivityReady,
   type EventListFilters,
   type ExtrinsicListFilters,
   type ValueListFilters,
@@ -92,10 +91,6 @@ function eventFilters(query: Record<string, unknown>): EventListFilters {
 }
 
 async function closeAccountsResponse<T>(reply: FastifyReply, load: () => Promise<T | null>, notFoundError: string): Promise<T | FastifyReply> {
-  if (!isAccountActivityReady()) {
-    reply.header('Retry-After', '30')
-    return reply.status(503).send({ error: 'Close-account analysis is still preparing its activity index' })
-  }
   try {
     const result = await load()
     return result ?? reply.status(404).send({ error: notFoundError })

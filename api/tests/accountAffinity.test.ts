@@ -222,19 +222,12 @@ describe('/explorer/address/:address/close-accounts', () => {
       getCloseAccounts,
     }))
 
-    const [{ default: Fastify }, { explorerRoutes }, { setAccountActivityReady }] = await Promise.all([
+    const [{ default: Fastify }, { explorerRoutes }] = await Promise.all([
       import('fastify'),
       import('../src/routes/explorer.ts'),
-      import('../src/services/explorerService.ts'),
     ])
     const app = Fastify()
     await app.register(explorerRoutes)
-
-    const preparing = await app.inject(`/explorer/address/${TARGET}/close-accounts`)
-    expect(preparing.statusCode).toBe(503)
-    expect(preparing.headers['retry-after']).toBe('30')
-    expect(getCloseAccounts).not.toHaveBeenCalled()
-    setAccountActivityReady()
 
     const ok = await app.inject(`/explorer/address/${TARGET}/close-accounts`)
     expect(ok.statusCode).toBe(200)

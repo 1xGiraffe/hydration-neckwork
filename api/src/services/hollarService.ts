@@ -12,8 +12,6 @@ import { assetDescriptor } from './explorerAssets.ts'
 
 let client: ClickHouseClient
 export function initHollarService(c: ClickHouseClient): void { client = c }
-let hsmActivityReady = false
-export function setHsmActivityReady(): void { hsmActivityReady = true }
 
 const HOLLAR_ASSET_ID = 222
 // modl + "py/hsmod" — the HSM pallet's holding account for approved collaterals.
@@ -270,7 +268,7 @@ async function loadHollarStablePools(): Promise<HollarStablePool[]> {
 async function loadHsmCollateralEvents(): Promise<RawHsmCollateralEvent[]> {
   const res = await client.query({
     query: `SELECT block_height AS block, args_json
-            FROM price_data.${hsmActivityReady ? 'hsm_activity FINAL' : 'raw_events'}
+            FROM price_data.hsm_activity FINAL
             WHERE event_name IN ('HSM.CollateralAdded', 'HSM.CollateralUpdated')
             ORDER BY block_height ASC, event_index ASC`,
     format: 'JSONEachRow',
@@ -325,7 +323,7 @@ async function loadLastArbByAsset(): Promise<Map<number, LastArb>> {
               argMax(toString(block_timestamp), block_height) AS ts,
               argMax(JSONExtractInt(args_json, 'arbitrage'), block_height) AS dir,
               argMax(JSONExtractString(args_json, 'hollarAmount'), block_height) AS amt
-            FROM price_data.${hsmActivityReady ? 'hsm_activity FINAL' : 'raw_events'} WHERE event_name = 'HSM.ArbitrageExecuted'
+            FROM price_data.hsm_activity FINAL WHERE event_name = 'HSM.ArbitrageExecuted'
             GROUP BY asset_id`,
     format: 'JSONEachRow',
   })
@@ -341,7 +339,7 @@ async function loadArbitrageDaily(): Promise<HollarArbDay[]> {
   const res = await client.query({
     query: `SELECT toString(toDate(block_timestamp)) AS d, JSONExtractInt(args_json, 'arbitrage') AS dir,
               toString(sum(toUInt256OrZero(JSONExtractString(args_json, 'hollarAmount')))) AS raw
-            FROM price_data.${hsmActivityReady ? 'hsm_activity FINAL' : 'raw_events'}
+            FROM price_data.hsm_activity FINAL
             WHERE event_name = 'HSM.ArbitrageExecuted' AND block_timestamp >= now() - INTERVAL ${CHART_WINDOW_DAYS} DAY
             GROUP BY d, dir`,
     format: 'JSONEachRow',
@@ -361,7 +359,7 @@ async function loadArbitrageDaily(): Promise<HollarArbDay[]> {
 async function loadTradesDaily(): Promise<HollarTradeDay[]> {
   const res = await client.query({
     query: `SELECT toString(toDate(block_timestamp)) AS d, args_json
-            FROM price_data.${hsmActivityReady ? 'hsm_activity FINAL' : 'raw_events'}
+            FROM price_data.hsm_activity FINAL
             WHERE event_name = 'Broadcast.Swapped3' AND block_timestamp >= now() - INTERVAL ${CHART_WINDOW_DAYS} DAY
               AND args_json LIKE '%"HSM"%'`,
     format: 'JSONEachRow',
@@ -382,7 +380,7 @@ async function loadTradesDaily(): Promise<HollarTradeDay[]> {
 // dashboard payload
 
 export async function getHollarDashboard(): Promise<HollarDashboard> {
-  return cached(`explorer:hollar-dashboard:${hsmActivityReady ? 'model' : 'raw'}`, 300_000, async () => {
+  return cached(`explorer:hollar-dashboard:model`, 300_000, async () => {
     const [prices, peg, supplyRaw, stablePools, collateralEvents, lastArbByAsset, arbitrageDaily, tradesDaily] = await Promise.all([
       ensurePrices(), loadPeg(), loadSupply(), loadHollarStablePools(), loadHsmCollateralEvents(), loadLastArbByAsset(), loadArbitrageDaily(), loadTradesDaily(),
     ])

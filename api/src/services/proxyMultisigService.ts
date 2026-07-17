@@ -20,8 +20,6 @@ import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
 // from indexed Multisig events.
 
 let client: ClickHouseClient
-let multisigActivityReady = false
-let initialized = false
 
 export interface ProxyRelation { accountId: string; proxyType: string; delay: number }
 export interface PureProxyInfo { creator: string; proxyType: string; blockHeight: number; timestamp: string }
@@ -142,7 +140,6 @@ async function refreshPureProxies(): Promise<void> {
 }
 
 async function refreshMultisigs(): Promise<void> {
-  if (!multisigActivityReady) return
   // Every historical multisig call, paired with its extrinsic's Multisig event:
   // the event's `multisig` and `approving` come from the runtime, the call args
   // carry threshold + other signatories.
@@ -202,7 +199,6 @@ function runRefresh(label: 'initial load' | 'refresh'): Promise<void> {
 export function initProxyMultisigService(c: ClickHouseClient): void {
   if (refreshTimer) return
   client = c
-  initialized = true
   void runRefresh('initial load')
   refreshTimer = setInterval(() => { void runRefresh('refresh') }, REFRESH_MS)
   refreshTimer.unref()
@@ -212,12 +208,6 @@ export function stopProxyMultisigService(): void {
   if (!refreshTimer) return
   clearInterval(refreshTimer)
   refreshTimer = null
-  initialized = false
-}
-
-export function setMultisigActivityReady(): void {
-  multisigActivityReady = true
-  if (initialized) void runRefresh('refresh')
 }
 
 // lookups (in-memory, resolved per related-account set)
@@ -268,7 +258,7 @@ export function multisigMembershipsFor(accountIds: string[]): { accountId: strin
 // latest NewMultisig is not followed by a MultisigExecuted/MultisigCancelled; approvals
 // are the distinct approvers since that NewMultisig; depositor is its creator.
 export async function pendingMultisigOps(accountId: string): Promise<PendingMultisigOp[]> {
-  if (!multisigActivityReady || !/^0x[0-9a-fA-F]{64}$/.test(accountId)) return []
+  if (!/^0x[0-9a-fA-F]{64}$/.test(accountId)) return []
   const res = await client.query({
     query: `
       WITH ev AS (

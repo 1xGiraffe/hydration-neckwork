@@ -20,17 +20,11 @@ const EVENT_ANCHOR_OFFSET = 1_099_511_627_776n // 2^40 — event-index anchors c
 const LEGACY_EVENTS = "'Omnipool.SellExecuted','Omnipool.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted'"
 const BROADCAST_EVENTS = "'Broadcast.Swapped','Broadcast.Swapped2','Broadcast.Swapped3'"
 
-let ready = false
-export function setAccountTradeVolumeReady(): void { ready = true }
-export function isAccountTradeVolumeReady(): boolean { return ready }
-
-// Source for per-account trading volume: the de-duped net-trade model once its
-// backfill covers every active partition, else the legacy per-leg buy-sum. Both
-// expose one summable USD column per account, so callers only swap table+column.
+// Source for per-account trading volume: the de-duped net-trade model, whose
+// derivations job keeps every partition covered. One summable USD column per
+// account.
 export function accountVolumeSource(): { table: string; col: string } {
-  return ready
-    ? { table: 'price_data.account_trade_volume', col: 'volume_usd' }
-    : { table: 'price_data.trade_volume_by_account', col: 'usd_volume_buy' }
+  return { table: 'price_data.account_trade_volume', col: 'volume_usd' }
 }
 
 function maxDecimals(): number {

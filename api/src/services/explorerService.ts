@@ -11,7 +11,6 @@ import { hexToU8a } from '@polkadot/util'
 import { proxyInfoFor, multisigCompositionFor, multisigMembershipsFor, pendingMultisigOps, type ProxyRelation, type PendingMultisigOp } from './proxyMultisigService.ts'
 import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
 import { xcmJourneySourcesFor, xcmJourneysByOriginTx } from './xcmJourneyService.ts'
-import { ATOKEN_DELTA_ARRAYJOIN, ATOKEN_RAY_SQL } from '../db/atokenDeltas.ts'
 import { createHash } from 'node:crypto'
 
 let client: ClickHouseClient
@@ -196,130 +195,20 @@ function evmAccountIdFromAddress(evmAddress: string): string | null {
   return EVM_RE.test(evmAddress) ? '0x45544800' + evmAddress.slice(2) + '0000000000000000' : null
 }
 
-// price_data.account_activity (see migrations.ts) maps account → (block, event)
-// refs so account-scoped queries prune by primary key instead of substring-
-// scanning all of raw_events. It is only authoritative once the historical
-// backfill has covered every raw_events partition; until server.ts flips this
-// flag, the fast paths below keep using the original full-scan shapes.
-let accountActivityReady = false
-export function setAccountActivityReady(): void { accountActivityReady = true }
-export function isAccountActivityReady(): boolean { return accountActivityReady }
-
-// Enabled only after every active raw_events partition has been copied into
-// account_transfer_activity. Until then the raw_events path remains
-// authoritative, so an online upgrade never makes older transfers disappear.
-let accountTransferActivityReady = false
-export function setAccountTransferActivityReady(): void { accountTransferActivityReady = true }
-
-// The asset-first transfer model powers asset-scoped transfer feeds after its
-// complete partition backfill (never while it is partial).
-let transferActivityReady = false
-export function setTransferActivityReady(): void { transferActivityReady = true }
-
-// Unfiltered global activity orders transfers by time, so it uses a separately
-// keyed compact model only after complete historical coverage.
-let transferActivityByTimeReady = false
-export function setTransferActivityByTimeReady(): void { transferActivityByTimeReady = true }
-
-let swapActivityReady = false
-export function setSwapActivityReady(): void { swapActivityReady = true }
-
-let otcActivityReady = false
-export function setOtcActivityReady(): void { otcActivityReady = true }
+// The compact read models below fully cover history (their materialized views
+// populate them for every raw range as it is ingested), so the request path
+// reads them unconditionally. These two helpers centralize the model table
+// names their callers embed in SQL.
 function otcActivityTable(alias = ''): string {
-  return otcActivityReady
-    ? `price_data.otc_activity${alias ? ` AS ${alias}` : ''} FINAL`
-    : `price_data.raw_events${alias ? ` AS ${alias}` : ''}`
+  return `price_data.otc_activity${alias ? ` AS ${alias}` : ''} FINAL`
 }
-
-let liquidityActivityReady = false
-export function setLiquidityActivityReady(): void { liquidityActivityReady = true }
-
-let xcmEventActivityReady = false
-export function setXcmEventActivityReady(): void { xcmEventActivityReady = true }
+// Every XCM consumer collapses stable (block,event) identities while decoding.
+// Avoid FINAL here: it disables primary-key pruning on this 55M-row replacing
+// model and turns bounded block/asset lookups into multi-gigabyte partition
+// merges during request handling.
 function xcmEventActivityTable(alias = ''): string {
-  return xcmEventActivityReady
-    // Every XCM consumer collapses stable (block,event) identities while
-    // decoding. Avoid FINAL here: it disables primary-key pruning on this
-    // 55M-row replacing model and turns bounded block/asset lookups into
-    // multi-gigabyte partition merges during request handling.
-    ? `price_data.xcm_event_activity${alias ? ` AS ${alias}` : ''}`
-    : `price_data.raw_events${alias ? ` AS ${alias}` : ''}`
+  return `price_data.xcm_event_activity${alias ? ` AS ${alias}` : ''}`
 }
-
-let stakingActivityReady = false
-export function setStakingActivityReady(): void { stakingActivityReady = true }
-
-let voteActivityReady = false
-export function setVoteActivityReady(): void { voteActivityReady = true }
-
-let activityDailyReady = false
-export function setActivityDailyReady(): void { activityDailyReady = true }
-
-let dailyChainIdentityCountsReady = false
-export function setDailyChainIdentityCountsReady(): void { dailyChainIdentityCountsReady = true }
-
-let rewardClaimActivityReady = false
-export function setRewardClaimActivityReady(): void { rewardClaimActivityReady = true }
-
-let erc20TransferDeltasReady = false
-export function setErc20TransferDeltasReady(): void { erc20TransferDeltasReady = true }
-
-let assetSwapActivityReady = false
-export function setAssetSwapActivityReady(): void { assetSwapActivityReady = true }
-
-let accountSwapActivityReady = false
-export function setAccountSwapActivityReady(): void { accountSwapActivityReady = true }
-
-// raw_money_market_events is ordered by block. This account-first model is only
-// used once its resumable backfill has caught up, preserving complete history.
-let accountMoneyMarketActivityReady = false
-export function setAccountMoneyMarketActivityReady(): void { accountMoneyMarketActivityReady = true }
-
-let atokenScaledDeltasReady = false
-export function setAtokenScaledDeltasReady(): void { atokenScaledDeltasReady = true }
-
-let atokenScaledDeltasByContractReady = false
-export function setAtokenScaledDeltasByContractReady(): void { atokenScaledDeltasByContractReady = true }
-
-let moneyMarketReserveIndicesReady = false
-export function setMoneyMarketReserveIndicesReady(): void { moneyMarketReserveIndicesReady = true }
-
-// price_data.account_balance_weekly is enabled only after its resumable
-// historical backfill covers every active raw-balance partition. Until then the
-// accounts directory keeps the authoritative raw query, so a partial aggregate
-// can never produce a deceptively incomplete sparkline or activity count.
-let accountBalanceWeeklyReady = false
-export function setAccountBalanceWeeklyReady(): void { accountBalanceWeeklyReady = true }
-
-let accountBalanceHistoryReady = false
-export function setAccountBalanceHistoryReady(): void { accountBalanceHistoryReady = true }
-
-let accountBalanceHourlyReady = false
-export function setAccountBalanceHourlyReady(): void { accountBalanceHourlyReady = true }
-
-// omnipool_position_created is retained/maintained but no longer read on the request path
-// (its only consumer, the old current-shares history approximation, was removed at the LP
-// history cutover). Slated for full removal (server wiring + migration + table) as a bounded
-// follow-up; the getter keeps the readiness signal meaningful until then.
-let omnipoolPositionCreatedReady = false
-export function setOmnipoolPositionCreatedReady(): void { omnipoolPositionCreatedReady = true }
-export function isOmnipoolPositionCreatedReady(): boolean { return omnipoolPositionCreatedReady }
-
-// Published only after all three historical Omnipool models — position state events, pool
-// state history, and account ownership intervals — are complete for the full history. Until
-// then the value-history chart keeps its current-shares Omnipool approximation instead of
-// the true historical-principal path, so partial coverage can never read as zero ownership.
-let omnipoolHistoryReady = false
-export function setOmnipoolHistoryReady(): void { omnipoolHistoryReady = true }
-export function isOmnipoolHistoryReady(): boolean { return omnipoolHistoryReady }
-
-// Published only after all XYK history models — pool registry, sampled reserves, reconstructed
-// total LP supply, and farm-deposit principal intervals — are complete + parity-checked. Until
-// then the value-history chart leaves XYK LP unvalued (its prior behaviour), never a partial.
-let xykHistoryReady = false
-export function setXykHistoryReady(): void { xykHistoryReady = true }
-export function isXykHistoryReady(): boolean { return xykHistoryReady }
 
 // Published only after a complete, count-checked generation of every current
 // bare/farmed Omnipool NFT position has been written. Until then `/accounts`
@@ -1663,8 +1552,8 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
   return cached(`explorer:transfers:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${userOnly}:${filterKey(filters)}:${suppressMoneyMarket}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
-    const useAssetTransferReadModel = transferActivityReady && tokenIds != null
-    const useTimeTransferReadModel = transferActivityByTimeReady && tokenIds == null
+    const useAssetTransferReadModel = tokenIds != null
+    const useTimeTransferReadModel = tokenIds == null
     const useTransferReadModel = useAssetTransferReadModel || useTimeTransferReadModel
     const transferTable = useAssetTransferReadModel ? 'transfer_activity' : 'transfer_activity_by_time'
     const assetExpr = useTransferReadModel ? 'asset_id' : transferAssetIdSql()
@@ -2354,7 +2243,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     const [bareLp, farmLp, xykLp, activeDcas] = await Promise.all([
       getOmnipoolPositions([...related]),
       getFarmingPositions([...related]),
-      isXykHistoryReady() ? getXykPositions([...related], balances) : Promise.resolve([] as LpPosition[]),
+      getXykPositions([...related], balances),
       summary ? Promise.resolve([]) : getActiveDcas([...related]),
     ])
     // Proxy & multisig relations (in-memory indexes refreshed by the
@@ -2728,18 +2617,11 @@ async function aTokenAnchorBlock(): Promise<number> {
 async function reserveIndicesNow(): Promise<Map<string, { liq: bigint; vbi: bigint }>> {
   return cached('explorer:mm-reserve-indices', 30000, async () => {
     const res = await client.query({
-      query: moneyMarketReserveIndicesReady
-        ? `SELECT pool_address AS pool, reserve_address AS reserve,
+      query: `SELECT pool_address AS pool, reserve_address AS reserve,
               toString(argMax(liquidity_index, tuple(block_height,event_index,ingested_at))) AS liq,
               toString(argMax(variable_borrow_index, tuple(block_height,event_index,ingested_at))) AS vbi
             FROM price_data.money_market_reserve_indices FINAL
-            GROUP BY pool, reserve`
-        : `SELECT lower(if(pool_address = '', contract_address, pool_address)) AS pool,
-              lower(reserve_address) AS reserve,
-              argMax(JSONExtractString(decoded_args_json,'liquidityIndex'), block_height) AS liq,
-              argMax(JSONExtractString(decoded_args_json,'variableBorrowIndex'), block_height) AS vbi
-            FROM price_data.raw_money_market_reserves
-            WHERE event_name='ReserveDataUpdated' GROUP BY pool, reserve`,
+            GROUP BY pool, reserve`,
       format: 'JSONEachRow',
     })
     const m = new Map<string, { liq: bigint; vbi: bigint }>()
@@ -2780,11 +2662,9 @@ async function getATokenReserves(): Promise<ATokenReserve[]> {
 // Scaled balance per holder for ONE token contract (aToken or vDebt): anchor + Σ delta.
 // Module/pallet accounts are included (caller filters them from a displayed list).
 async function reconstructHolderScaled(contract: string, b0: number): Promise<{ holder: string; scaled: bigint }[]> {
-  const deltaTable = atokenScaledDeltasByContractReady
-    ? 'price_data.atoken_scaled_deltas_by_contract'
-    : 'price_data.atoken_scaled_deltas'
+  const deltaTable = 'price_data.atoken_scaled_deltas_by_contract'
   const res = await client.query({
-    query: atokenScaledDeltasReady ? `
+    query: `
       SELECT holder, toString(sum(anchor) + sum(delta)) AS scaled FROM (
         SELECT holder, toInt256(scaled_balance) AS anchor, toInt256(0) AS delta
         FROM price_data.atoken_scaled_anchor FINAL
@@ -2794,19 +2674,7 @@ async function reconstructHolderScaled(contract: string, b0: number): Promise<{ 
         FROM ${deltaTable} FINAL
         WHERE contract_address = {c:String} AND block_height > {b0:UInt32}
         GROUP BY holder
-      ) GROUP BY holder HAVING (sum(anchor) + sum(delta)) > 0` : `
-      SELECT holder, toString(sum(a) + sum(d)) AS scaled FROM (
-        SELECT holder, toInt256(scaled_balance) AS a, toInt256(0) AS d
-        FROM price_data.atoken_scaled_anchor FINAL WHERE contract_address = {c:String} AND holder != ''
-        UNION ALL
-        SELECT holder, toInt256(0) AS a, sum(sdelta) AS d FROM (
-          SELECT block_height, event_index, event_name, anyLast(decoded_args_json) AS ar
-          FROM price_data.raw_evm_logs
-          WHERE contract_address = {c:String} AND event_name IN ('Mint','Burn','BalanceTransfer') AND block_height > {b0:UInt32}
-          GROUP BY block_height, event_index, event_name
-        ) ${ATOKEN_DELTA_ARRAYJOIN}
-        WHERE holder != '' GROUP BY holder
-      ) GROUP BY holder HAVING (sum(a) + sum(d)) > 0`,
+      ) GROUP BY holder HAVING (sum(anchor) + sum(delta)) > 0`,
     query_params: { c: contract.toLowerCase(), b0 }, format: 'JSONEachRow',
   })
   return (await res.json<{ holder: string; scaled: string }>()).map(r => ({ holder: r.holder.toLowerCase(), scaled: BigInt(r.scaled) }))
@@ -2823,11 +2691,9 @@ export async function reconstructATokenHolderCounts(
 ): Promise<Map<string, number>> {
   const normalized = [...new Set(contracts.map(contract => contract.toLowerCase()).filter(contract => /^0x[0-9a-f]{40}$/.test(contract)))]
   if (!normalized.length) return new Map()
-  const deltaTable = atokenScaledDeltasByContractReady
-    ? 'price_data.atoken_scaled_deltas_by_contract'
-    : 'price_data.atoken_scaled_deltas'
+  const deltaTable = 'price_data.atoken_scaled_deltas_by_contract'
   const res = await db.query({
-    query: atokenScaledDeltasReady ? `
+    query: `
       SELECT contract, count() AS holders
       FROM (
         SELECT contract, holder, sum(anchor) + sum(delta) AS scaled
@@ -2845,32 +2711,7 @@ export async function reconstructATokenHolderCounts(
         )
         GROUP BY contract, holder
         HAVING scaled > 0 AND NOT startsWith(holder, '0x6d6f646c')
-      ) GROUP BY contract` : `
-      SELECT contract, count() AS holders
-      FROM (
-        SELECT contract, holder, sum(anchor) + sum(delta) AS scaled
-        FROM (
-          SELECT lower(contract_address) AS contract, lower(holder) AS holder,
-            toInt256(scaled_balance) AS anchor, toInt256(0) AS delta
-          FROM price_data.atoken_scaled_anchor FINAL
-          WHERE contract_address IN ({contracts:Array(String)}) AND holder != ''
-          UNION ALL
-          SELECT contract, lower(holder) AS holder, toInt256(0) AS anchor, sum(sdelta) AS delta
-          FROM (
-            SELECT lower(contract_address) AS contract, block_height, event_index, event_name,
-              anyLast(decoded_args_json) AS ar
-            FROM price_data.raw_evm_logs
-            WHERE contract_address IN ({contracts:Array(String)})
-              AND event_name IN ('Mint','Burn','BalanceTransfer') AND block_height > {b0:UInt32}
-            GROUP BY contract, block_height, event_index, event_name
-          ) ${ATOKEN_DELTA_ARRAYJOIN}
-          WHERE holder != ''
-          GROUP BY contract, holder
-        )
-        GROUP BY contract, holder
-        HAVING scaled > 0 AND NOT startsWith(holder, '0x6d6f646c')
-      )
-      GROUP BY contract`,
+      ) GROUP BY contract`,
     query_params: { contracts: normalized, b0 },
     format: 'JSONEachRow',
     // Folding all core aToken contracts in one pass avoids rescanning the large
@@ -2975,11 +2816,9 @@ export async function getGigaLiquidationLevels(): Promise<GigaLiquidations | nul
 async function reconstructTotalScaled(contracts: string[], b0: number): Promise<Map<string, bigint>> {
   const normalized = [...new Set(contracts.map(c => c.toLowerCase()).filter(c => /^0x[0-9a-f]{40}$/.test(c)))]
   if (!normalized.length) return new Map()
-  const deltaTable = atokenScaledDeltasByContractReady
-    ? 'price_data.atoken_scaled_deltas_by_contract'
-    : 'price_data.atoken_scaled_deltas'
+  const deltaTable = 'price_data.atoken_scaled_deltas_by_contract'
   const res = await client.query({
-    query: atokenScaledDeltasReady ? `
+    query: `
       SELECT contract, toString(sum(anchor) + sum(delta)) AS scaled
       FROM (
         SELECT contract_address AS contract,
@@ -2994,29 +2833,7 @@ async function reconstructTotalScaled(contracts: string[], b0: number): Promise<
         FROM ${deltaTable} FINAL
         WHERE contract_address IN ({contracts:Array(String)}) AND block_height > {b0:UInt32}
         GROUP BY contract
-      ) GROUP BY contract` : `
-      SELECT contract, toString(sum(anchor) + sum(delta)) AS scaled
-      FROM (
-        SELECT contract_address AS contract,
-          toInt256(argMax(scaled_balance, updated_at)) AS anchor,
-          toInt256(0) AS delta
-        FROM price_data.atoken_scaled_anchor
-        WHERE holder = '' AND contract_address IN ({contracts:Array(String)})
-        GROUP BY contract
-        UNION ALL
-        SELECT contract, toInt256(0) AS anchor, sum(multiIf(
-          event_name='Mint', intDiv((toInt256(toUInt256OrZero(JSONExtractString(ar,'value'))) - toInt256(toUInt256OrZero(JSONExtractString(ar,'balanceIncrease')))) * ${ATOKEN_RAY_SQL}, greatest(toInt256(toUInt256OrZero(JSONExtractString(ar,'index'))), toInt256(1))),
-          -intDiv((toInt256(toUInt256OrZero(JSONExtractString(ar,'value'))) + toInt256(toUInt256OrZero(JSONExtractString(ar,'balanceIncrease')))) * ${ATOKEN_RAY_SQL}, greatest(toInt256(toUInt256OrZero(JSONExtractString(ar,'index'))), toInt256(1))))) AS delta
-        FROM (
-          SELECT contract_address AS contract, event_name, anyLast(decoded_args_json) AS ar
-          FROM price_data.raw_evm_logs
-          WHERE contract_address IN ({contracts:Array(String)})
-            AND event_name IN ('Mint','Burn') AND block_height > {b0:UInt32}
-          GROUP BY contract, block_height, event_index, event_name
-        )
-        GROUP BY contract
-      )
-      GROUP BY contract`,
+      ) GROUP BY contract`,
     query_params: { contracts: normalized, b0 }, format: 'JSONEachRow',
   })
   const totals = new Map<string, bigint>()
@@ -3031,7 +2848,7 @@ async function reconstructTotalScaled(contracts: string[], b0: number): Promise<
 async function reconstructAccountScaled(h160: string, b0: number): Promise<Map<string, bigint>> {
   const h = h160.toLowerCase()
   const res = await client.query({
-    query: atokenScaledDeltasReady ? `
+    query: `
       SELECT contract, toString(sum(anchor) + sum(delta)) AS scaled FROM (
         SELECT lower(contract_address) AS contract, toInt256(scaled_balance) AS anchor, toInt256(0) AS delta
         FROM price_data.atoken_scaled_anchor FINAL WHERE holder = {h:String}
@@ -3040,19 +2857,7 @@ async function reconstructAccountScaled(h160: string, b0: number): Promise<Map<s
         FROM price_data.atoken_scaled_deltas FINAL
         WHERE holder = {h:String} AND block_height > {b0:UInt32}
         GROUP BY contract
-      ) GROUP BY contract HAVING (sum(anchor) + sum(delta)) > 0` : `
-      SELECT contract, toString(sum(a) + sum(d)) AS scaled FROM (
-        SELECT lower(contract_address) AS contract, toInt256(scaled_balance) AS a, toInt256(0) AS d
-        FROM price_data.atoken_scaled_anchor FINAL WHERE holder = {h:String}
-        UNION ALL
-        SELECT contract, toInt256(0) AS a, sum(sdelta) AS d FROM (
-          SELECT lower(contract_address) AS contract, block_height, event_index, event_name, anyLast(decoded_args_json) AS ar
-          FROM price_data.raw_evm_logs
-          WHERE event_name IN ('Mint','Burn','BalanceTransfer') AND block_height > {b0:UInt32} AND has(participants, {h:String})
-          GROUP BY contract, block_height, event_index, event_name
-        ) ${ATOKEN_DELTA_ARRAYJOIN}
-        WHERE holder = {h:String} GROUP BY contract
-      ) GROUP BY contract HAVING (sum(a) + sum(d)) > 0`,
+      ) GROUP BY contract HAVING (sum(anchor) + sum(delta)) > 0`,
     query_params: { h, b0 }, format: 'JSONEachRow',
   })
   const m = new Map<string, bigint>()
@@ -3143,7 +2948,7 @@ async function reconstructAccountsScaled(h160s: string[], b0: number): Promise<M
   const out = new Map<string, Map<string, bigint>>()
   if (!hs.length || !b0) return out
   const res = await client.query({
-    query: atokenScaledDeltasReady ? `
+    query: `
       SELECT holder, contract, toString(sum(anchor) + sum(delta)) AS scaled FROM (
         SELECT lower(holder) AS holder, lower(contract_address) AS contract,
           toInt256(scaled_balance) AS anchor, toInt256(0) AS delta
@@ -3154,19 +2959,7 @@ async function reconstructAccountsScaled(h160s: string[], b0: number): Promise<M
         FROM price_data.atoken_scaled_deltas FINAL
         WHERE holder IN {hs:Array(String)} AND block_height > {b0:UInt32}
         GROUP BY holder, contract
-      ) GROUP BY holder, contract HAVING (sum(anchor) + sum(delta)) > 0` : `
-      SELECT holder, contract, toString(sum(a) + sum(d)) AS scaled FROM (
-        SELECT lower(holder) AS holder, lower(contract_address) AS contract, toInt256(scaled_balance) AS a, toInt256(0) AS d
-        FROM price_data.atoken_scaled_anchor FINAL WHERE lower(holder) IN {hs:Array(String)}
-        UNION ALL
-        SELECT holder, contract, toInt256(0) AS a, sum(sdelta) AS d FROM (
-          SELECT lower(contract_address) AS contract, block_height, event_index, event_name, anyLast(decoded_args_json) AS ar
-          FROM price_data.raw_evm_logs
-          WHERE event_name IN ('Mint','Burn','BalanceTransfer') AND block_height > {b0:UInt32} AND hasAny(participants, {hs:Array(String)})
-          GROUP BY contract, block_height, event_index, event_name
-        ) ${ATOKEN_DELTA_ARRAYJOIN}
-        WHERE holder IN {hs:Array(String)} GROUP BY holder, contract
-      ) GROUP BY holder, contract HAVING (sum(a) + sum(d)) > 0`,
+      ) GROUP BY holder, contract HAVING (sum(anchor) + sum(delta)) > 0`,
     query_params: { hs, b0 }, format: 'JSONEachRow',
   })
   for (const r of await res.json<{ holder: string; contract: string; scaled: string }>()) {
@@ -3472,9 +3265,6 @@ export async function moneyMarketAccountValueSnapshotReady(): Promise<boolean> {
 }
 
 async function refreshMoneyMarketAccountValuesUncached(): Promise<void> {
-  if (!atokenScaledDeltasReady || !moneyMarketReserveIndicesReady) {
-    throw new Error('complete aToken deltas and reserve indices are required')
-  }
   const [anchorBlock, tokens, indices, aggregates] = await Promise.all([
     aTokenAnchorBlock(), getMmReserveTokens(), reserveIndicesNow(), loadAllLatestMoneyMarketAggregates(),
   ])
@@ -4455,7 +4245,7 @@ async function getXykPositions(accounts: string[], balances: AddressBalance[]): 
 // per-block state — not current shares, never request-time snapshot JSON. Account-bounded:
 // ownership intervals by account, position state by referenced positions, pool state by
 // referenced assets. Callers apply the bucket's event-time price to the raw legs.
-// Gated behind isOmnipoolHistoryReady() — see the value-history path in getAccountHistory.
+// See the value-history path in getAccountHistory.
 export interface OmnipoolHistoryLeg { assetId: number; liquidity: bigint; hub: bigint }
 export interface OmnipoolPrincipalHistory { legsByBucket: OmnipoolHistoryLeg[][]; assetIds: number[]; fromBucket: number | null }
 export async function loadOmnipoolPrincipalHistory(accounts: string[], minb: number, bucket: number, n: number): Promise<OmnipoolPrincipalHistory> {
@@ -5208,15 +4998,11 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
     const prices = await ensurePrices()
     const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
     const tokenIds = assetIdsForToken(filters.token)
-    const useAssetSwapReadModel = assetSwapActivityReady && tokenIds != null
-    const useSwapReadModel = useAssetSwapReadModel || swapActivityReady
+    const useAssetSwapReadModel = tokenIds != null
+    const useSwapReadModel = true
     const swapTable = useAssetSwapReadModel ? 'asset_swap_activity' : 'swap_activity'
     const tokenFilter = tokenIds == null ? '' : tokenIds.length
-      ? useSwapReadModel
-        ? useAssetSwapReadModel
-          ? `AND asset_id IN (${tokenIds.join(',')})`
-          : `AND (asset_in IN (${tokenIds.join(',')}) OR asset_out IN (${tokenIds.join(',')}))`
-        : `AND (JSONExtractInt(args_json,'assetIn') IN (${tokenIds.join(',')}) OR JSONExtractInt(args_json,'assetOut') IN (${tokenIds.join(',')}))`
+      ? `AND asset_id IN (${tokenIds.join(',')})`
       : 'AND 0'
     const tokenRefsFilter = useSwapReadModel ? '' : eventAssetRefsFilterSql(tokenIds, names)
     const assetOutExpr = useSwapReadModel ? 'asset_out' : `JSONExtractInt(args_json,'assetOut')`
@@ -5813,7 +5599,7 @@ async function fillMissingLiquidityAmounts(rows: LiquidityAmountCandidate[]): Pr
   const transferRows: { block_height: number; event_index: number; extrinsic_index: number; asset_id: number; to_acc: string; from_acc: string; amount: string }[] = []
   for (let i = 0; i < keys.length; i += 5000) {
     const tuples = keys.slice(i, i + 5000).map(k => { const [h, j] = k.split(':'); return `(${h},${j})` }).join(',')
-    const useTransferLookup = transferActivityByTimeReady
+    const useTransferLookup = true
     const res = await client.query({
       query: `
         SELECT block_height, event_index, extrinsic_index,
@@ -5873,7 +5659,7 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
   return cached(`explorer:liquidity:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
-    const useLiquidityReadModel = liquidityActivityReady
+    const useLiquidityReadModel = true
     const assetExpr = useLiquidityReadModel ? 'asset_id' : `multiIf(JSONHas(args_json,'rewardCurrency'), JSONExtractInt(args_json,'rewardCurrency'),
                   JSONHas(args_json,'assetId'), JSONExtractInt(args_json,'assetId'),
                   JSONHas(args_json,'poolId'), JSONExtractInt(args_json,'poolId'),
@@ -6184,7 +5970,7 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
     const want = offset + limit
     let pageState: { scanned: number; cursor: { blockHeight: number; eventIndex: number } | null } = { scanned: 0, cursor: null }
     const fetchPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
-      const senderRefsFilter = acctList && accountActivityReady
+      const senderRefsFilter = acctList
         ? `AND ${accountActivityRefsSql(acctList, `event_name IN ('XTokens.TransferredAssets','PolkadotXcm.Sent')`, pageBound, pageLimit)}`
         : ''
       const res = await client.query({
@@ -6204,11 +5990,11 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
       const [wRes, legacyRes] = await Promise.all([
         client.query({
           query: `SELECT block_height, extrinsic_index,
-                    ${xcmEventActivityReady ? 'asset_id' : "JSONExtractInt(args_json,'currencyId')"} AS cid,
-                    ${xcmEventActivityReady ? 'amount' : "JSONExtractString(args_json,'amount')"} AS amount
+                    asset_id AS cid,
+                    amount AS amount
                   FROM ${xcmEventActivityTable()}
                   WHERE event_name='Currencies.Withdrawn' AND block_height IN (${blocks})
-                    ${assetIdFilterSql(xcmEventActivityReady ? 'asset_id' : currencyIdSql(), tokenIds)}`,
+                    ${assetIdFilterSql('asset_id', tokenIds)}`,
           format: 'JSONEachRow',
         }),
         client.query({
@@ -6432,12 +6218,12 @@ async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, 
     const bound = tw ?? '1'
     const want = offset + limit
     const tokenIds = assetIdsForToken(filters.token)
-    const candidateAsset = xcmEventActivityReady ? 'asset_id' : currencyIdSql()
-    const candidateAmount = xcmEventActivityReady ? 'amount' : `JSONExtractString(args_json,'amount')`
-    const candidateWho = xcmEventActivityReady ? 'who' : `JSONExtractString(args_json,'who')`
+    const candidateAsset = 'asset_id'
+    const candidateAmount = 'amount'
+    const candidateWho = 'who'
     const candidateValue = eventValueFilterSql(candidateAsset, candidateAmount, 'block_timestamp', filters, prices, 'xcm_remote_price')
     const candidateToken = assetIdFilterSql(candidateAsset, tokenIds)
-    const fetchBlocks = acctList && accountActivityReady
+    const fetchBlocks = acctList
       ? async (pageBound: string, pageLimit: number) => {
         const refsFilter = `AND ${accountActivityRefsSql(acctList, `event_name = 'Currencies.Withdrawn'`, pageBound, pageLimit)}`
         const res = await client.query({
@@ -6489,14 +6275,14 @@ async function getRecentXcmIn(limit: number, from?: string, to?: string, account
     const bound = tw ?? '1'
     const want = offset + limit
     const tokenIds = assetIdsForToken(filters.token)
-    const candidateAsset = xcmEventActivityReady ? 'asset_id' : currencyIdSql()
-    const candidateAmount = xcmEventActivityReady ? 'amount' : `JSONExtractString(args_json,'amount')`
-    const candidateWho = xcmEventActivityReady ? 'who' : `JSONExtractString(args_json,'who')`
+    const candidateAsset = 'asset_id'
+    const candidateAmount = 'amount'
+    const candidateWho = 'who'
     const candidateValue = eventValueFilterSql(candidateAsset, candidateAmount, 'block_timestamp', filters, prices, 'xcm_in_price')
     const candidateToken = assetIdFilterSql(candidateAsset, tokenIds)
     // Candidate blocks: account-scoped from the account's own hook-context deposit
     // events (activity-index pruned), global from the newest processed messages.
-    const fetchBlocks = acctList && accountActivityReady
+    const fetchBlocks = acctList
       ? async (pageBound: string, pageLimit: number) => {
         const refsFilter = `AND ${accountActivityRefsSql(acctList, `event_name IN (${sqlEventNameList(XCM_IN_DEPOSIT_EVENTS)})`, pageBound, pageLimit)}`
         const res = await client.query({
@@ -6907,11 +6693,11 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
     const sourceNames = [...new Set([...selectedNames, ...contextNames])]
     const names = sourceNames.map(n => `'${n}'`).join(',')
     // Account-scoped: prune via the activity index; global: recency window.
-    const accountRefsFilter = acctList && accountActivityReady && !postFilter
+    const accountRefsFilter = acctList && !postFilter
       ? `AND ${accountActivityRefsSql(acctList, `event_name IN (${names})`, bound, scanOffset + scanLimit)}`
       : ''
     const accountFilter = acctList
-      ? stakingActivityReady ? `AND who IN (${acctList})` : `AND JSONExtractString(args_json,'who') IN (${acctList})`
+      ? `AND who IN (${acctList})`
       : ''
     const gigaAssetId = preferredAssetId === 670 ? 670 : 0
     const stakingAssetExpr = `multiIf(event_name='CollatorRewards.CollatorRewarded', greatest(0, JSONExtractInt(args_json,'currency')), event_name LIKE 'GigaHdx%', ${gigaAssetId}, 0)`
@@ -6926,13 +6712,11 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
       event_name IN ('Staking.StakeAdded','Staking.Unstaked'), if(JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'stake')),
       event_name='Staking.ForceUnstaked', if(JSONHas(args_json,'paidRewards'), JSONExtractString(args_json,'paidRewards'), JSONExtractString(args_json,'stake')),
       event_name='Staking.RewardsClaimed', JSONExtractString(args_json,'paidRewards'), '')`
-    const stakingValueFilter = stakingActivityReady
-      ? eventValueFilterSql(stakingAssetExpr, stakingAmountExpr, 'block_timestamp', filters, prices, 'staking_price')
-      : { joinSql: '', predicateSql: '' }
+    const stakingValueFilter = eventValueFilterSql(stakingAssetExpr, stakingAmountExpr, 'block_timestamp', filters, prices, 'staking_price')
     const runStaking = async (b: string, pageLimit: number, pageOffset: number) => {
       const res = await client.query({
         query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
-                FROM price_data.${stakingActivityReady ? 'staking_activity FINAL' : 'raw_events'}
+                FROM price_data.staking_activity FINAL
                 ${stakingValueFilter.joinSql}
                 WHERE ${b} ${accountRefsFilter} AND event_name IN (${names}) ${accountFilter}
                 ${stakingValueFilter.predicateSql}
@@ -7302,14 +7086,14 @@ async function getRecentVotes(limit: number, from?: string, to?: string, offset 
     const want = offset + limit
     const scanLimit = postFilter ? Math.max(want * 8, limit + 500) : limit
     const scanOffset = postFilter ? 0 : offset
-    const accountRefsFilter = acctList && accountActivityReady && !postFilter && tokenIds == null && valueFilters.min == null
+    const accountRefsFilter = acctList && !postFilter && tokenIds == null && valueFilters.min == null
       ? `AND ${accountActivityRefsSql(acctList, `event_name IN ('ConvictionVoting.Voted','Democracy.Voted')`, bound, scanOffset + scanLimit)}`
       : ''
     const accountFilter = acctList ? `AND (JSONExtractString(args_json,'who') IN (${acctList}) OR JSONExtractString(args_json,'voter') IN (${acctList}))` : ''
     const runVotes = async (b: string, pageLimit: number, pageOffset: number) => {
       const res = await client.query({
         query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, ifNull(call_address, '') AS call_address, event_name, args_json
-                FROM price_data.${voteActivityReady ? 'vote_activity FINAL' : 'raw_events'}
+                FROM price_data.vote_activity FINAL
                 ${amountFilter.joinSql}
                 WHERE ${b} ${accountRefsFilter} ${eventFilter} ${accountFilter} ${amountFilter.predicateSql}
                 ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
@@ -7622,10 +7406,8 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
       .map(key => { const [height, index] = key.split(':'); return `(${height},${index})` })
     const result = await client.query({
       query: `SELECT DISTINCT block_height, extrinsic_index
-              FROM price_data.${rewardClaimActivityReady ? 'incentive_claim_calls' : 'raw_calls'}
-              WHERE (block_height, extrinsic_index) IN (${tuples.join(',')})
-                ${rewardClaimActivityReady ? '' : `AND position(args_json, '${INCENTIVES_CONTROLLER}') > 0
-                  AND (${INCENTIVE_CLAIM_SELECTORS.map(selector => `position(args_json, '${selector}') > 0`).join(' OR ')})`}`,
+              FROM price_data.incentive_claim_calls
+              WHERE (block_height, extrinsic_index) IN (${tuples.join(',')})`,
       format: 'JSONEachRow',
     })
     for (const row of await result.json<{ block_height: number; extrinsic_index: number }>()) {
@@ -7640,8 +7422,6 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
   })
 }
 
-const INCENTIVES_CONTROLLER = '7472a3d0891df2401d981a5954d07e364f05060f'
-const INCENTIVE_CLAIM_SELECTORS = ['bb492bf5', '236300dc']
 const INCENTIVES_REWARD_POT = '0x45544800112c208b900bcfc9ff8131d0f45769cb6c7c7d8d0000000000000000'
 
 // Reward claims whose payout is otherwise indistinguishable from an ordinary
@@ -7665,7 +7445,7 @@ async function getRecentRewardClaims(limit: number, from?: string, to?: string, 
     query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index, e.extrinsic_index, e.args_json
             FROM (
               SELECT block_height, block_timestamp, event_index, extrinsic_index, event_name, args_json
-              FROM price_data.${rewardClaimActivityReady ? 'referral_claim_activity FINAL' : 'raw_events'}
+              FROM price_data.referral_claim_activity FINAL
               WHERE ${rawBound}
             ) AS e
             ${referralValueFilter.joinSql}
@@ -7702,7 +7482,7 @@ async function getRecentRewardClaims(limit: number, from?: string, to?: string, 
                 ${transferAssetExpr} AS asset_id
               FROM (
                 SELECT block_height, block_timestamp, event_index, extrinsic_index, event_name, call_address, args_json
-                FROM price_data.${rewardClaimActivityReady ? 'incentive_reward_transfers FINAL' : 'raw_events'}
+                FROM price_data.incentive_reward_transfers FINAL
                 WHERE ${candidateBound}
               ) AS e
               ${incentiveValueFilter.joinSql}
@@ -7726,10 +7506,8 @@ async function getRecentRewardClaims(limit: number, from?: string, to?: string, 
     for (let start = 0; start < candidateTuples.length; start += 5000) {
       const callRes = await client.query({
         query: `SELECT block_height, extrinsic_index, call_address
-                FROM price_data.${rewardClaimActivityReady ? 'incentive_claim_calls FINAL' : 'raw_calls'}
-                PREWHERE (block_height, ifNull(extrinsic_index, 4294967295), call_address) IN (${candidateTuples.slice(start, start + 5000).join(',')})
-                ${rewardClaimActivityReady ? '' : `WHERE position(args_json, '${INCENTIVES_CONTROLLER}') > 0
-                  AND (${INCENTIVE_CLAIM_SELECTORS.map(s => `position(args_json, '${s}') > 0`).join(' OR ')})`}`,
+                FROM price_data.incentive_claim_calls FINAL
+                PREWHERE (block_height, ifNull(extrinsic_index, 4294967295), call_address) IN (${candidateTuples.slice(start, start + 5000).join(',')})`,
         format: 'JSONEachRow',
       })
       for (const c of await callRes.json<{ block_height: number; extrinsic_index: number; call_address: string }>()) confirmedCalls.add(`${c.block_height}:${c.extrinsic_index}:${c.call_address}`)
@@ -8989,7 +8767,7 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
     const wantVotes = (type === 'all' || type === 'vote' || wantTransfers) && assetId === 0
 
     const transfersP: Promise<ActivityRow[]> = wantTransfers ? (async () => {
-      const useTransferReadModel = transferActivityReady
+      const useTransferReadModel = true
       const transferAssetExpr = useTransferReadModel ? 'asset_id' : transferAssetIdSql()
       const transferValueFilter = eventValueFilterSql('{assetId:UInt32}', useTransferReadModel ? 'amount' : `JSONExtractString(args_json,'amount')`, 'block_timestamp', queryFilters, prices, 'asset_transfer_price')
       const res = await client.query({
@@ -9047,7 +8825,7 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
     // per event (pallet-internal), preferring Router.Executed (the net summary).
     const tradesP: Promise<ActivityRow[]> = wantTrades ? (async () => {
       const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
-      const useAssetSwapReadModel = assetSwapActivityReady
+      const useAssetSwapReadModel = true
       const tradeValueFilter = eventValueFilterSql(useAssetSwapReadModel ? 'asset_out' : `JSONExtractInt(args_json,'assetOut')`, useAssetSwapReadModel ? 'amount_out' : `JSONExtractString(args_json,'amountOut')`, 'block_timestamp', fixedAssetFilters, prices, 'asset_trade_price')
       const res = await client.query({
         query: useAssetSwapReadModel ? `
@@ -9122,7 +8900,7 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
     // Liquidity: add/remove where the provided/pool asset matches.
     const liquidityP: Promise<ActivityRow[]> = wantLiquidity ? (async () => {
       const fetchPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
-        const useLiquidityReadModel = liquidityActivityReady
+        const useLiquidityReadModel = true
         const res = await client.query({
           query: `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
@@ -9181,8 +8959,8 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
     // XCM history. An extrinsic emitting both events joins twice but collapses in
     // the block:ext:amount:sender dedup below.
     const xcmP: Promise<ActivityRow[]> = wantXcm ? (async () => {
-      const cidExpr = xcmEventActivityReady ? 'w.asset_id' : currencyIdSql('w.args_json')
-      const withdrawalAmountExpr = xcmEventActivityReady ? 'w.amount' : `JSONExtractString(w.args_json,'amount')`
+      const cidExpr = 'w.asset_id'
+      const withdrawalAmountExpr = 'w.amount'
       const xcmValueFilter = eventValueFilterSql('{assetId:UInt32}', withdrawalAmountExpr, 'w.block_timestamp', fixedAssetFilters, prices, 'asset_xcm_price')
       const res = await client.query({
         query: `
@@ -9226,7 +9004,7 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
     // XCM inbound: hook-context deposits of this asset seed the candidate blocks;
     // the barrier walk-back keeps only genuine inbound-message credits.
     const xcmInP: Promise<ActivityRow[]> = wantXcm ? (async () => {
-      const depositAmountExpr = xcmEventActivityReady ? 'amount' : `JSONExtractString(args_json,'amount')`
+      const depositAmountExpr = 'amount'
       const xcmInValueFilter = eventValueFilterSql('{assetId:UInt32}', depositAmountExpr, 'block_timestamp', fixedAssetFilters, prices, 'asset_xcm_in_price')
       return fetchDecodedXcmDeep(
         bound,
@@ -9237,8 +9015,8 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
                     ${xcmInValueFilter.joinSql}
                     WHERE ${pageBound}
                       AND event_name IN ('Currencies.Deposited','Tokens.Deposited') AND extrinsic_index IS NULL
-                      AND ${xcmEventActivityReady ? 'asset_id' : currencyIdSql()} = {assetId:UInt32}
-                      AND NOT match(${xcmEventActivityReady ? 'who' : "JSONExtractString(args_json,'who')"}, '${RESERVED_ACCOUNT_RE.source}')
+                      AND asset_id = {assetId:UInt32}
+                      AND NOT match(who, '${RESERVED_ACCOUNT_RE.source}')
                       ${xcmInValueFilter.predicateSql}
                     ORDER BY block_height DESC LIMIT {n:UInt32}`,
             query_params: { n: pageLimit, assetId }, format: 'JSONEachRow',
@@ -9461,9 +9239,6 @@ async function appendMoneyMarketBalanceRows(
   rows: HistoryBalanceRow[],
 ): Promise<Map<string, number>> {
   const availableFromBucket = new Map<string, number>()
-  // Partial projections must never masquerade as complete history. Existing
-  // wallet/portfolio history remains available while either bounded backfill runs.
-  if (!atokenScaledDeltasReady || !moneyMarketReserveIndicesReady) return availableFromBucket
   const holders = [...new Set(accounts.map(historyH160).filter(Boolean) as string[])]
   if (!holders.length) return availableFromBucket
   const anchorBlock = await aTokenAnchorBlock()
@@ -9572,7 +9347,7 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   // history and avoid the merge overhead of the hourly model. Multi-member tags
   // and dense structural accounts are the shapes for which hourly compaction is
   // materially smaller.
-  const useAccountBalanceHourly = accountBalanceHourlyReady &&
+  const useAccountBalanceHourly =
     (accounts.length > 4 || accounts.some(account => /^0x(6d6f646c|7369626c|70617261)/.test(account)))
   const prices = await ensurePrices()
   const rangeRes = await client.query({
@@ -9583,7 +9358,7 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
         FROM price_data.account_balance_hourly WHERE account_id IN (${list})`
       : `SELECT min(block_height) AS minb, max(block_height) AS maxb,
           toUnixTimestamp(min(block_timestamp)) AS mint, toUnixTimestamp(max(block_timestamp)) AS maxt
-        FROM price_data.${accountBalanceHistoryReady ? 'account_balance_history' : 'raw_balance_observations'}
+        FROM price_data.account_balance_history
         WHERE account_id IN (${list})`,
     format: 'JSONEachRow',
   })
@@ -9662,8 +9437,8 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
         )
         GROUP BY account_id, asset_id, b ORDER BY asset_id, account_id, b`
       : `SELECT account_id, asset_id, toUInt32(least(intDiv(block_height - ${rng.minb}, ${BUCKET}), ${N})) AS b,
-          toString(argMax(toUInt256OrZero(total), ${accountBalanceHistoryReady ? 'tuple(block_height, observation_id, ingested_at)' : 'tuple(block_height, ifNull(source_event_index, toUInt32(4294967295)), observation_id, ingested_at)'})) AS bal
-        FROM price_data.${accountBalanceHistoryReady ? 'account_balance_history' : 'raw_balance_observations'}
+          toString(argMax(toUInt256OrZero(total), tuple(block_height, observation_id, ingested_at))) AS bal
+        FROM price_data.account_balance_history
         WHERE account_id IN (${list})
         GROUP BY account_id, asset_id, b ORDER BY asset_id, account_id, b`,
     format: 'JSONEachRow',
@@ -9692,24 +9467,12 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
       if (h160) h160For.set(h160, a)
     }
     const logRes = await client.query({
-      query: erc20TransferDeltasReady ? `
+      query: `
         SELECT holder AS w,
           toUInt32(least(intDiv(greatest(block_height, ${rng.minb}) - ${rng.minb}, ${BUCKET}), ${N})) AS b,
           toString(sum(balance_delta)) AS net
         FROM price_data.erc20_transfer_deltas FINAL
         WHERE contract_address = {c:String} AND holder IN ({ws:Array(String)})
-        GROUP BY w, b ORDER BY w, b` : `
-        SELECT p.1 AS w, toUInt32(least(intDiv(greatest(block_height, ${rng.minb}) - ${rng.minb}, ${BUCKET}), ${N})) AS b, toString(sum(p.2)) AS net
-        FROM (
-          SELECT block_height,
-            arrayJoin([
-              (lower(JSONExtractString(decoded_args_json,'to')), toInt256OrZero(JSONExtractString(decoded_args_json,'value'))),
-              (lower(JSONExtractString(decoded_args_json,'from')), -toInt256OrZero(JSONExtractString(decoded_args_json,'value')))
-            ]) AS p
-          FROM price_data.raw_evm_logs
-          WHERE contract_address = {c:String} AND event_name = 'Transfer'
-        )
-        WHERE p.1 IN ({ws:Array(String)})
         GROUP BY w, b ORDER BY w, b`,
       query_params: { c: ea.contract, ws: [...h160For.keys()] }, format: 'JSONEachRow',
     }).catch(() => null)
@@ -9737,11 +9500,11 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   // full history. Loaded before the price query so the assets of historically-owned
   // (incl. since-closed) positions are priced, and before openPositions so the
   // fallback reconstruction query is skipped entirely when the new path is active.
-  const omniHist = isOmnipoolHistoryReady() ? await loadOmnipoolPrincipalHistory(accounts, rng.minb, BUCKET, N) : null
+  const omniHist = await loadOmnipoolPrincipalHistory(accounts, rng.minb, BUCKET, N)
   const omniAssetIds = omniHist ? omniHist.assetIds : []
   // Historical XYK LP principal (direct wallet shareToken balances + collection-5389 farm
   // deposits) valued at pool NAV. Loaded before the price query so both pool assets are priced.
-  const xykHist = isXykHistoryReady() ? await loadXykPrincipalHistory(accounts, assetIds.map(Number), rng.minb, BUCKET, N) : null
+  const xykHist = await loadXykPrincipalHistory(accounts, assetIds.map(Number), rng.minb, BUCKET, N)
   // aTokens have no price feed of their own — query the underlying reserve's
   // historical prices for them (priceAssetId maps aPRIME→PRIME, etc.).
   const priceIdFor = new Map(assetIds.map(id => [id, String(priceAssetId(Number(id)))]))
@@ -9968,9 +9731,9 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
 
   // Omnipool LP principal on the historical curve, valued at WITHDRAW value (asset +
   // LRNA/hub legs) per bucket from true per-block position state, ownership intervals,
-  // and compact pool state — never current shares or request-time snapshot JSON. When the
-  // history models are not yet complete (isOmnipoolHistoryReady false), Omnipool value is
-  // omitted rather than approximated (explicit incompleteness).
+  // and compact pool state — never current shares or request-time snapshot JSON. When
+  // loadOmnipoolPrincipalHistory returns null, Omnipool value is omitted rather than
+  // approximated (explicit incompleteness).
   if (omniHist) {
     const lrnaPx = pxByPriceId.get(String(LRNA_ASSET_ID))
     const lrnaDec = asset(LRNA_ASSET_ID).decimals
@@ -10125,19 +9888,15 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   const tradeExt = new Set<string>()
   const trades: ActivityRow[] = []
   if (wantTrades || wantTransfers) {
-    const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
     const swapTokenFilter = tokenIds == null ? '' : tokenIds.length
-      ? accountSwapActivityReady
-        ? `AND (asset_in IN (${tokenIds.join(',')}) OR asset_out IN (${tokenIds.join(',')}))`
-        : `AND (JSONExtractInt(e.args_json,'assetIn') IN (${tokenIds.join(',')}) OR JSONExtractInt(e.args_json,'assetOut') IN (${tokenIds.join(',')}))`
+      ? `AND (asset_in IN (${tokenIds.join(',')}) OR asset_out IN (${tokenIds.join(',')}))`
       : 'AND 0'
-    const swapAssetExpr = accountSwapActivityReady ? 'asset_out' : `JSONExtractInt(e.args_json,'assetOut')`
-    const swapAmountExpr = accountSwapActivityReady ? 'amount_out' : `JSONExtractString(e.args_json,'amountOut')`
-    const swapTimeExpr = accountSwapActivityReady ? 'block_timestamp' : 'e.block_timestamp'
+    const swapAssetExpr = 'asset_out'
+    const swapAmountExpr = 'amount_out'
+    const swapTimeExpr = 'block_timestamp'
     const swapAmountFilter = eventValueFilterSql(swapAssetExpr, swapAmountExpr, swapTimeExpr, queryFilters, prices, 'account_trade_price')
     const swapRes = await client.query({
-      query: accountSwapActivityReady
-        ? `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+      query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
           asset_in, asset_out, amount_in, amount_out, signer
           FROM price_data.account_swap_activity FINAL
           ${swapAmountFilter.joinSql}
@@ -10146,23 +9905,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
           ${swapAmountFilter.predicateSql}
           ORDER BY block_height DESC, extrinsic_index DESC, event_name = 'Router.Executed' DESC, event_index DESC
           LIMIT 1 BY block_height, extrinsic_index
-          LIMIT {n:UInt32}`
-        : `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index, e.extrinsic_index, e.event_name,
-          JSONExtractInt(e.args_json,'assetIn') AS asset_in, JSONExtractInt(e.args_json,'assetOut') AS asset_out,
-          JSONExtractString(e.args_json,'amountIn') AS amount_in, JSONExtractString(e.args_json,'amountOut') AS amount_out,
-          coalesce(x.signer, x.effective_signer) AS signer
-          FROM price_data.raw_events e
-          ANY INNER JOIN price_data.raw_extrinsics x
-            ON x.block_height = e.block_height AND x.extrinsic_index = e.extrinsic_index
-          ${swapAmountFilter.joinSql}
-          WHERE ${bound.replaceAll('block_height', 'e.block_height').replaceAll('block_timestamp', 'e.block_timestamp')}
-            AND (x.signer IN (${list}) OR x.effective_signer IN (${list}))
-            AND e.event_name IN (${names})
-          ${swapTokenFilter}
-          ${swapAmountFilter.predicateSql}
-          ORDER BY e.block_height DESC, e.extrinsic_index DESC, e.event_name = 'Router.Executed' DESC, e.event_index DESC
-          LIMIT 1 BY e.block_height, e.extrinsic_index
-        LIMIT {n:UInt32}`,
+          LIMIT {n:UInt32}`,
       query_params: { n: catFetch }, format: 'JSONEachRow',
     })
     const swapRows = await swapRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number; event_name: string; asset_in: number; asset_out: number; amount_in: string; amount_out: string; signer: string }>()
@@ -10217,8 +9960,8 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
     // Module transfers stay in the refs: pot legs are filtered per-pot below
     // (a treasury donation IS the account's transfer; only swap/fee plumbing
     // pots are dropped).
-    const useTransferReadModel = accountTransferActivityReady && tokenIds == null && queryFilters.min == null
-    const transferRefsFilter = !useTransferReadModel && accountActivityReady && tokenIds == null && queryFilters.min == null
+    const useTransferReadModel = tokenIds == null && queryFilters.min == null
+    const transferRefsFilter = !useTransferReadModel && tokenIds == null && queryFilters.min == null
       ? `AND ${accountActivityRefsSql(accList, `event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')`, bound, catFetch * 3)}`
       : ''
     // Supply/withdraw/borrow/repay move tokens between the user and a money-
@@ -10398,7 +10141,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   // rule catches them; keying on the extrinsic does.
   const liqCreateExt = new Set<string>()
   if (wantLiquidity) {
-    const useLiquidityReadModel = liquidityActivityReady
+    const useLiquidityReadModel = true
     const liquidityAssetExpr = useLiquidityReadModel ? 'asset_id' : `multiIf(JSONHas(args_json,'rewardCurrency'), JSONExtractInt(args_json,'rewardCurrency'),
                         JSONHas(args_json,'assetId'), JSONExtractInt(args_json,'assetId'),
                         JSONHas(args_json,'poolId'), JSONExtractInt(args_json,'poolId'),
@@ -10469,14 +10212,12 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
       ? `AND asset_address IN (${[...new Set(tokenIds.flatMap(mmReserveAddressForAsset))].map(a => `'${a}'`).join(',')})`
       : 'AND 0'
     const mmAssetExpr = mmAssetIdSql('asset_address')
-    const mmAmountExpr = accountMoneyMarketActivityReady
-      ? `if(event_name='LiquidationCall', liquidated_collateral_amount, amount)`
-      : `if(event_name='LiquidationCall', JSONExtractString(decoded_args_json,'liquidatedCollateralAmount'), amount)`
+    const mmAmountExpr = `if(event_name='LiquidationCall', liquidated_collateral_amount, amount)`
     const mmValueFilter = eventValueFilterSql(mmAssetExpr, mmAmountExpr, 'block_timestamp', queryFilters, prices, 'account_mm_price')
     const mmTxRes = await client.query({
       query: `SELECT block_height, event_index, toString(block_timestamp) AS ts, event_name, account_id, asset_address, pool_address,
                 ${mmAmountExpr} AS amount
-              FROM price_data.${accountMoneyMarketActivityReady ? 'account_money_market_activity FINAL' : 'raw_money_market_events'}
+              FROM price_data.account_money_market_activity FINAL
               ${mmValueFilter.joinSql}
               WHERE ${bound} AND account_id IN (${mmList}) AND event_name IN (${mmEventNames.map(n => `'${n}'`).join(',')})
                 AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
@@ -10644,7 +10385,6 @@ async function getAccountTabCounts(accounts: string[], cacheKey: string): Promis
   const list = sqlAccountList(accounts)
   if (list === "''") return { extrinsics: 0, events: 0, activity: 0 }
   return cached(`explorer:tab-counts:${cacheKey}`, 600_000, async () => {
-    const needles = accounts.filter(a => ACCOUNT_RE.test(a)).map(a => `'${a.slice(2)}'`)
     const mmList = sqlAccountList([...new Set(accounts.map(evmAccountForm).filter(Boolean) as string[])])
     const indexedHits = `
       SELECT block_height, event_index, extrinsic_index, event_name, is_module_transfer
@@ -10654,15 +10394,9 @@ async function getAccountTabCounts(accounts: string[], cacheKey: string): Promis
     // members by stable event identity. This preserves exact counts without
     // FINAL, whose partition-wide merge made the two-member Treasury count read
     // 32M rows / 2.55 GiB for six seconds.
-    const activityHits = accountActivityReady
-      ? `SELECT block_height, event_index, extrinsic_index, event_name, is_module_transfer
+    const activityHits = `SELECT block_height, event_index, extrinsic_index, event_name, is_module_transfer
          FROM (${indexedHits})
          GROUP BY block_height, event_index, extrinsic_index, event_name, is_module_transfer`
-      : `SELECT block_height, event_index, extrinsic_index, event_name,
-           toUInt8(JSONExtractString(args_json,'from') LIKE '0x6d6f646c%'
-             OR JSONExtractString(args_json,'to') LIKE '0x6d6f646c%') AS is_module_transfer
-         FROM price_data.raw_events
-         WHERE multiSearchAnyCaseInsensitive(args_json, [${needles.join(',')}])`
     const [extRes, evRes, mmRes, xcmRes, dcaRes, otcRes] = await Promise.all([
       client.query({
         query: `SELECT count() AS c FROM price_data.raw_extrinsics WHERE signer IN (${list}) OR effective_signer IN (${list})`,
@@ -10708,7 +10442,7 @@ async function getAccountTabCounts(accounts: string[], cacheKey: string): Promis
         // so it no longer times out while still leaving cores for live requests.
         clickhouse_settings: { max_bytes_before_external_group_by: '1500000000', max_threads: 4 },
       }),
-      client.query({ query: `SELECT count() AS c FROM price_data.${accountMoneyMarketActivityReady ? 'account_money_market_activity FINAL' : 'raw_money_market_events'} WHERE account_id IN (${mmList}) AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})`, format: 'JSONEachRow' }),
+      client.query({ query: `SELECT count() AS c FROM price_data.account_money_market_activity FINAL WHERE account_id IN (${mmList}) AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})`, format: 'JSONEachRow' }),
       client.query({ query: `SELECT count() AS c FROM price_data.raw_xcm_activity WHERE sender IN (${list}) OR recipient IN (${list})`, format: 'JSONEachRow' }),
       client.query({ query: `SELECT count() AS c FROM price_data.dca_events WHERE event_name = 'DCA.TradeExecuted' AND who IN (${list})`, format: 'JSONEachRow' }),
       // OTC: Filled/PartiallyFilled carry `who` (the taker) directly; Placed/Cancelled
@@ -10790,18 +10524,14 @@ export async function getTagActivityCountAtMin(tagId: string, minUsd: number): P
 }
 
 // value-filtered activity count (last-page jumps under the smol filter)
-let accountActivityValuesReady = false
-export function setAccountActivityValuesReady(): void { accountActivityValuesReady = true }
-
 // How many activity rows survive a `min` USD value filter — the count behind the
 // pager's last-page jump while smol-hiding (or a custom $-minimum) is active.
 // Runs on account_activity_v3, which carries each event's value-relevant
 // (asset_id, UInt256 amount, block_timestamp) tuple. The same hourly event-time
 // close and exact UInt256 threshold used by feed queries is applied here.
-  // Returns null until the v3 backfill completes, or when a category needs
-  // enrichment/classification that this compact index cannot reproduce exactly.
+  // Returns null when a category needs enrichment/classification that this
+  // compact index cannot reproduce exactly.
 async function getAccountActivityCountAtMin(accounts: string[], cacheKey: string, minUsd: number): Promise<number | null> {
-  if (!accountActivityValuesReady) return null
   const list = sqlAccountList(accounts)
   if (list === "''") return 0
   return cached(`explorer:tab-counts-min:${cacheKey}:${minUsd}`, 600_000, async () => {
@@ -10833,7 +10563,7 @@ async function getAccountActivityCountAtMin(accounts: string[], cacheKey: string
         format: 'JSONEachRow',
       }),
       client.query({
-        query: `SELECT count() AS c FROM price_data.${accountMoneyMarketActivityReady ? 'account_money_market_activity FINAL' : 'raw_money_market_events'}
+        query: `SELECT count() AS c FROM price_data.account_money_market_activity FINAL
                 WHERE account_id IN (${mmList}) AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})`,
         format: 'JSONEachRow',
       }),
@@ -10940,7 +10670,7 @@ async function getAccountEvents(accounts: string[], limit = 25, offset = 0, cach
     const eventFilter = filters.event?.trim() ? textNameFilter('event_name', 'eventName') : ''
     const list = sqlAccountList(accounts)
     let rows: EventSourceRow[]
-    if (accountActivityReady && list !== "''") {
+    if (list !== "''") {
       // Page over (block, event) references through the account-activity index,
       // then fetch only those rows from raw_events.
       const refsRes = await client.query({
@@ -11279,7 +11009,7 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
     const includeActivitySort = sort === 'activity'
     const includeVolumeSort = sort === 'volume'
     const includeLiquidationSort = sort === 'liquidation'
-    const activityCte = includeActivitySort ? accountBalanceWeeklyReady ? `,
+    const activityCte = includeActivitySort ? `,
             activity AS (
               SELECT if(t.lid = '', a.account_id, t.lid) AS gkey,
                 toUInt64(uniqMerge(a.activity_state)) AS activity
@@ -11293,24 +11023,6 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
                 FROM price_data.account_balance_weekly w
                 LEFT JOIN bind b ON b.eth_id = w.account_id
                 WHERE w.account_id != ''
-              ) a
-              LEFT JOIN tags t ON t.account_id = a.account_id
-              GROUP BY gkey
-            )` : `,
-            activity AS (
-              SELECT if(t.lid = '', a.account_id, t.lid) AS gkey,
-                toUInt64(uniq((a.account_id, a.block_height, a.source_event_index))) AS activity
-              FROM (
-                SELECT
-                  coalesce(b.owner, if(
-                    substring(r.account_id, 3, 8) = '45544800' AND substring(r.account_id, 11, 8) IN ('6d6f646c', '7369626c', '70617261'),
-                    concat('0x', substring(r.account_id, 11, 40), '000000000000000000000000'),
-                    r.account_id)) AS account_id,
-                  r.block_height,
-                  r.source_event_index
-                FROM price_data.raw_balance_observations r
-                LEFT JOIN bind b ON b.eth_id = r.account_id
-                WHERE r.account_id != ''
               ) a
               LEFT JOIN tags t ON t.account_id = a.account_id
               GROUP BY gkey
@@ -11741,8 +11453,7 @@ async function enrichAccountRows(
   let allObs: { account_id: string; asset_id: string; b: number; bal: string; n_ev: number }[] = []
   if (all.length) {
     const obsRes = await client.query({
-      query: accountBalanceWeeklyReady
-        ? `SELECT
+      query: `SELECT
               account_id,
               asset_id,
               toInt32(greatest(dateDiff('week', {ws:Date}, week_start), -1)) AS b,
@@ -11761,17 +11472,7 @@ async function enrichAccountRows(
               toUInt32(uniqMerge(activity_state)) AS n_ev
             FROM price_data.account_balance_weekly
             WHERE account_id IN (${list})
-            GROUP BY account_id`
-        : `SELECT account_id, asset_id,
-              toInt32(greatest(least(dateDiff('week', {ws:Date}, toDate(block_timestamp)), ${SPARK_WEEKS - 1}), -1)) AS b,
-              argMax(
-                coalesce(total, '0'),
-                tuple(block_height, ifNull(source_event_index, toUInt32(4294967295)), observation_id, ingested_at)
-              ) AS bal,
-              toUInt32(uniq((block_height, source_event_index))) AS n_ev
-            FROM price_data.raw_balance_observations
-            WHERE account_id IN (${list})
-            GROUP BY GROUPING SETS ((account_id, asset_id, b), (account_id))`,
+            GROUP BY account_id`,
       query_params: { ws: winStart },
       format: 'JSONEachRow',
     })
@@ -11868,28 +11569,12 @@ async function enrichAccountRows(
       let earliest = 0
       for (let b = 0; b < SPARK_WEEKS; b++) { const p = pxMap.get(b); if (p != null) { earliest = p; break } }
       const logRes = await client.query({
-        query: erc20TransferDeltasReady
-          ? `SELECT holder AS w,
+        query: `SELECT holder AS w,
                 toInt32(greatest(least(dateDiff('week', {ws:Date}, toDate(block_timestamp)), ${SPARK_WEEKS - 1}), -1)) AS b,
                 toString(sum(balance_delta)) AS net
               FROM price_data.erc20_transfer_deltas FINAL
               WHERE contract_address = {c:String} AND holder IN ({ws2:Array(String)})
-              GROUP BY w, b ORDER BY w, b`
-          : `SELECT w, b, toString(sum(net)) AS net FROM (
-                  SELECT p.1 AS w,
-                    toInt32(greatest(least(dateDiff('week', {ws:Date}, toDate(block_timestamp)), ${SPARK_WEEKS - 1}), -1)) AS b,
-                    p.2 AS net
-                  FROM (
-                    SELECT block_timestamp,
-                      arrayJoin([
-                        (lower(JSONExtractString(decoded_args_json,'to')), toInt256OrZero(JSONExtractString(decoded_args_json,'value'))),
-                        (lower(JSONExtractString(decoded_args_json,'from')), -toInt256OrZero(JSONExtractString(decoded_args_json,'value')))
-                      ]) AS p
-                    FROM price_data.raw_evm_logs
-                    WHERE contract_address = {c:String} AND event_name = 'Transfer'
-                      AND hasAny(participants, {ws2:Array(String)})
-                  ) WHERE p.1 IN ({ws2:Array(String)})
-                ) GROUP BY w, b ORDER BY w, b`,
+              GROUP BY w, b ORDER BY w, b`,
         query_params: { c: ea.contract, ws: winStart, ws2: h160s }, format: 'JSONEachRow',
       }).catch(() => null)
       if (!logRes) continue
@@ -12149,7 +11834,7 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
         : getAccountHistory(tagHistoryAccounts),
       getOmnipoolPositions(tag.members),
       getFarmingPositions(tag.members),
-      isXykHistoryReady() ? getXykPositions(tag.members, balances) : Promise.resolve([] as LpPosition[]),
+      getXykPositions(tag.members, balances),
       summary ? Promise.resolve([]) : getActiveDcas(tag.members),
     ])
     const lpPositions = [...bareLp, ...farmLp, ...xykLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
@@ -12250,7 +11935,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
     const mmAddrs = tokenIds ? [...new Set(tokenIds.flatMap(mmReserveAddressForAsset))] : []
     const mmTok = tokenIds == null ? '' : mmAddrs.length ? `AND asset_address IN (${mmAddrs.map(a => `'${a}'`).join(',')})` : 'AND 0'
     let query: string
-    if (scope === 'activity' && activityDailyReady && type !== 'mm' && type !== 'xcm') {
+    if (scope === 'activity' && type !== 'mm' && type !== 'xcm') {
       let names: readonly string[]
       let ignoreToken = false
       if (type === 'transfer') names = TRANSFER_EVENTS
@@ -12284,7 +11969,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
                FROM price_data.activity_histogram_events
                WHERE day > today() - 90 AND event_name IN (${sqlNames(names)}) ${assetFilter}
                GROUP BY day ORDER BY day`
-    } else if (dailyChainIdentityCountsReady && (scope === 'events' || scope === 'extrinsics'))
+    } else if (scope === 'events' || scope === 'extrinsics')
       query = `SELECT toString(day) AS d, toUInt64(groupBitmapMerge(identity_state)) AS v
                FROM price_data.daily_chain_identity_counts_v2
                WHERE kind='${scope}' AND day > today() - 90
@@ -12341,7 +12026,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
           // Reward claims already have a replay-safe sparse transfer model. The
           // former histogram reopened 35.8M recent raw events (7.9 GiB) merely
           // to find this one pot's Currencies.Transferred rows.
-          query = daily(rewardClaimActivityReady ? 'incentive_reward_transfers FINAL' : 'raw_events',
+          query = daily('incentive_reward_transfers FINAL',
             `event_name = 'Currencies.Transferred' AND JSONExtractString(args_json,'from') = '${INCENTIVES_REWARD_POT}'${sp(transferTok)}`)
         } else {
           const actionNames = moneyMarketEventNames(filters.action)

@@ -96,7 +96,7 @@ describe('aToken asset-list holder counts', () => {
           market_key: 'core',
         }] }
       }
-      if (sql.includes('FROM price_data.raw_money_market_reserves')) {
+      if (sql.includes('FROM price_data.money_market_reserve_indices')) {
         return { json: async () => [{
           pool,
           reserve,
