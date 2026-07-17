@@ -12,3 +12,6 @@ test-results/
 .playwright-mcp/
 
 /*.png
+
+# planning/spec/report scratch (AGENTS: do not commit task plans, agent reports)
+docs/superpowers/
