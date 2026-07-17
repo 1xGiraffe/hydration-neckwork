@@ -57,7 +57,7 @@ SQD archive + Hydration RPC
 ```
 
 - `src/` contains the price and raw-data indexers, ingestion utilities, and maintenance scripts.
-- `clickhouse/schema/` contains ordered, idempotent schema initialization and migrations.
+- `clickhouse/schema/` is the single declarative schema (tables + materialized views), applied once to an empty database by the `schema-bootstrap` service — see [Database model](#database-model). There are no migrations.
 - `api/` serves indexed data through cached read models; Compose snapshot services refresh bounded current-state datasets.
 - `explorer-ui/` is the block explorer; `preis-ui/` is the price-chart application.
 - `ops/` contains the ingestion supervisor image.
@@ -174,67 +174,35 @@ npm run detect-gaps
 npm run snapshot:balances -- --dry-run
 ```
 
-## Upgrading existing installations
+## Database model
 
-The project and default container/image names changed from `hydration-preis` to
-`hydration-neckwork`. Before starting the renamed stack, preserve an existing
-ClickHouse volume by selecting its current name in `.env`; the conventional old
-default was:
+The blockchain is the source of truth; every table is a reproducible projection of
+it, so the database is disposable and rebuildable — **there are no migrations**.
 
-```bash
-CLICKHOUSE_VOLUME_NAME=hydration-preis_clickhouse_data
-```
+- **Schema is declarative.** `clickhouse/schema/*.sql` defines every table and
+  materialized view (MV). The `schema-bootstrap` service applies it — in numeric
+  order, idempotently (`CREATE ... IF NOT EXISTS`) — to an empty database **before**
+  ingestion starts. Because the MVs exist first, every MV-backed read model populates
+  itself as raw data is indexed, in any order, with **no backfill**.
+- **Derived data comes from three places.** Most read models are MVs (automatic). The
+  few an MV cannot express — per-trade netting (`account_trade_volume`) and the stateful
+  LP-history reconstructions — are recomputed continuously and idempotently by the
+  `derivations` service. A small set of current-state snapshots (account-directory
+  values) are refreshed on API timers.
+- **To change a model, edit the declaration and rebuild the projection** — drop the
+  table/MV and let it refill from raw, or reset the derived layer and let it rebuild.
+  Never write an in-place migration; there is no version ledger.
 
-The renamed stack mounts that volume directly; no copy is required. A fresh
-installation should leave the variable unset and will use
-`hydration-neckwork-clickhouse-data`. Stop the old Compose project before bringing
-up the renamed one so its host ports do not overlap. Stop the supervisor first,
-then the remaining containers carrying the old project label:
-
-```bash
-OLD_COMPOSE_PROJECT=hydration-preis
-docker ps -q --filter "label=com.docker.compose.project=$OLD_COMPOSE_PROJECT" \
-  --filter "label=com.docker.compose.service=ingestion-supervisor" \
-  | xargs -r docker stop
-docker ps -q --filter "label=com.docker.compose.project=$OLD_COMPOSE_PROJECT" \
-  | xargs -r docker stop
-docker compose up -d clickhouse
-```
-
-Keep the stopped old containers until the renamed stack and preserved ClickHouse
-volume have been validated; remove them only as a separate cleanup step.
-
-Installations created before the Explorer schemas must run the offline migrator
-before starting the new services. It discovers every checked-in schema from the
-selected baseline onward, rebuilds derived indexes from existing raw data,
-validates the result, and upgrades checkpoint precision without discarding indexed
-data. Back up the ClickHouse volume before scheduling the migration.
-
-```bash
-docker compose --profile worker stop \
-  ingestion-supervisor api raw-live indexer raw-indexer \
-  identity-snapshot balance-snapshot mm-snapshot \
-  mm-supplemental-snapshot atoken-anchor
-docker ps --format '{{.Names}}' \
-  | grep -E '(main-live|main-backfill-|raw-backfill-)' \
-  | xargs -r docker stop
-
-docker compose build indexer
-docker compose --profile worker run --rm --no-deps indexer \
-  src/scripts/migrate-schema.ts --apply-offline --from-schema=29
-```
-
-Restart application services only after the command reports
-`[schema-migrations] complete`. The command is idempotent and keeps replaced
-checkpoint tables as `*_datetime64_backup` rollback copies. Then resume the normal
-stack with `docker compose up --build -d`.
+Fresh-install order (enforced by Compose `depends_on`):
+`schema-bootstrap` → ingestion (raw) → `derivations` → `api`. Applying the schema to a
+non-empty database is a safe no-op, so redeploying never risks existing data.
 
 ## Operational safety
 
 - Keep ClickHouse data and checkpoints together; do not wipe tables to resolve an ingestion problem.
 - Let `ingestion-supervisor` own its dynamically created historical workers. Do not manually start or stop those containers.
 - Use bounded, explicit block ranges and distinct pipeline IDs for manual backfills.
-- Stop writers before offline schema migrations, and validate the migration result before restarting services.
+- Change a model by editing `clickhouse/schema/` and rebuilding that projection from raw; never patch derived data in place, and never wipe raw to fix a derived model.
 - Back up the ClickHouse volume before production schema or checkpoint maintenance.
 
 ## License

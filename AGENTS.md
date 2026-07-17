@@ -29,21 +29,39 @@ Hydration Neckwork indexes Hydration into ClickHouse and serves the Explorer and
 - Large raw event, EVM-log, balance, position, and price tables are ingestion sources, not request-time indexes. When a proven page shape repeatedly scans them, build the smallest projection whose `ORDER BY` starts with the request's selective dimensions (for example account-first, asset-first, reserve-first, or time-first).
 - Store the decoded fields and exact integer values the response needs. Avoid reparsing JSON, broad joins, global `FINAL`, or float conversion on hot paths. Use `FINAL` only where replacement deduplication is required and the primary-key predicate keeps it bounded.
 - Prefer stable event/observation/leg identities in `ReplacingMergeTree` projections. For aggregate projections, use mergeable states whose result is idempotent under replay. Never feed replayable rows into an additive sum/count materialized view without first establishing unique replacement semantics.
-- Keep schema creation idempotent for both fresh and upgraded databases. Create the destination before its materialized view, use a stable replacement key, and give every historical projection a completion-marker table.
-- Backfill from authoritative raw data in bounded time or height partitions with restricted threads/memory. Mark a partition complete only after its insert succeeds; retries and overlap with the live materialized view must converge to the same rows. Do not pause ingestion for a backfill.
-- Gate a new read path until every active source partition has coverage. Until then, retain an authoritative fallback only when it is safe for live requests; otherwise expose explicit incompleteness instead of silently returning a partial model.
-- Validate coverage before enabling: compare source/model stable identities, boundary blocks/timestamps, relevant counts or integer sums, and several real responses. A matching total row count alone is insufficient.
+- Define every table and materialized view in `clickhouse/schema/` — the single declarative schema, applied to an empty database before ingestion. Create the destination table before its MV and use a stable replacement key. Do not add completion-marker or backfill tables; there are no migrations or backfills (see **Schema and derivations**).
+- Prefer an MV so a model populates automatically as raw is indexed, in any order. Reach for a continuous recompute job (the `derivations` service) only when an MV cannot express the model (cross-row netting, stateful reconstruction). Make jobs idempotent: partition-incremental where the computation is order-independent, bounded full-replace (staging table + `EXCHANGE TABLES`) for stateful reconstructions — a forward high-water cursor is wrong while backward backfill fills lower blocks.
+- Do not gate read paths on backfill or readiness. Under schema-first a model is correct-by-construction — it reflects exactly the raw indexed so far — so there is no coverage gate and no divergent raw-scan fallback to maintain.
+- Validate a new model against raw before relying on it: rebuild it on a scratch database and compare stable identities, boundary blocks/timestamps, and counts or integer sums, plus several real responses. A matching total row count alone is insufficient.
 - For custody, receipt-token, wrapper, and folded-asset views, write and verify an integer conservation equation before routing traffic: direct holdings plus custody must equal displayed beneficial claims plus any explicitly unattributed custody remainder. Replace attributed custody—never add it—and never hide a holder-anchor gap by proportionally scaling known owners.
 - Match price compaction to semantics. Historical flows use the latest price known at the event, and bucketed histories use only candles fully closed by the bucket boundary—never a future or current price. Current holdings use current prices.
 - Do not gain speed by limiting before exact filters, valuation, classification, or de-duplication. If sources are fetched independently, each source needs a proven saturation/cutoff rule; otherwise rare matches and older pages can disappear.
 - Design pagination and caching together. Candidate caches may reuse an exact source prefix, but pages must remain deterministic over the full filtered ordering. Verify at least consecutive pages and a cold later page for the expected row count, stable identities, no overlap, and no gaps at the boundaries.
 - Data-skipping indexes help only when their predicate is selective and expressed in a form ClickHouse can use. Adding an index is metadata-only for new parts; materializing it across old parts is a broad mutation and requires separate justification rather than being hidden in startup.
 
+### Schema and derivations
+
+The database is a rebuildable projection of the chain; there are no migrations. Two layers:
+
+- **Declarative schema** — `clickhouse/schema/*.sql` is the single source of truth for every table and MV. It is regenerated from a known-good database (`SHOW CREATE`), then applied in numeric order and idempotently by the `schema-bootstrap` service to an empty database before ingestion. Add or change a model by editing these files; never define schema in application code.
+- **Derivations** — three mechanisms, in order of preference:
+  1. **Materialized views** for row-wise models; they populate automatically from raw in any insertion order (live-forward and backward backfill alike), so a model's completeness tracks raw's completeness for free.
+  2. **The `derivations` service** (`api/src/derivations/`) for models an MV cannot express. `account_trade_volume` is partition-incremental — it recomputes only the month-partitions whose raw changed, detected by an ingest-time watermark (`max(raw.ingested_at) > max(derived.computed_at)`), which is subset-safe and correct under backward backfill. The LP reconstructions (`omnipool_position_owner_intervals`, `xyk_farm_principal_intervals`, `xyk_lp_total_shares_history`) do a bounded full recompute with atomic replace (staging table + `EXCHANGE TABLES`), because a forward cursor is wrong while backfill fills lower blocks and shifted keys would otherwise leave stale rows.
+  3. **API-timer snapshots** for current-state directory values (account-directory Omnipool claims, money-market account values) that neither MVs nor the derivations service compute.
+
+Keep in mind for new models:
+- Prefer an MV; add a recompute job only for genuine cross-row or stateful needs.
+- Every derived table must be reproducible from raw — no derived-only state.
+- MVs must exist before ingestion (add to the schema, then rebuild) — never rely on a one-time backfill to fill history.
+- Recompute jobs must be idempotent and correct under out-of-order raw (partition-diff or atomic full-replace — never a forward high-water cursor).
+- Evolving a model means editing the declaration and rebuilding the projection (drop and let it refill, or reset the derived layer) — never a version-numbered migration or an in-place data patch.
+- Keep raw ingestion and derivation as separate concerns.
+
 ### Verify and deploy
 
-- Add focused tests for durable invariants: replay/deduplication, integer arithmetic, event-time valuation, model readiness, classification parity, filter completeness, pagination boundaries, and explicit history-coverage markers.
+- Add focused tests for durable invariants: replay/deduplication, integer arithmetic, event-time valuation, classification parity, filter completeness, and pagination boundaries.
 - Rebuild and recreate only touched Compose services, normally with `docker compose build <services>` followed by `docker compose up -d --no-deps <services>`. Do not recreate ClickHouse or supervisor-owned ingestion as an incidental dependency update.
-- After deployment, wait for bounded backfills and readiness gates, then repeat the same cache-controlled Playwright/API profile against the live stack. Check affected service logs, ClickHouse health, raw ingestion progress, and the supervisor before declaring success.
+- After deployment, let MVs catch up as raw is indexed and the `derivations` service compute the non-MV models, then repeat the same cache-controlled Playwright/API profile against the live stack. Check affected service logs, ClickHouse health, raw ingestion progress, the derivations service, and the supervisor before declaring success.
 - Once the new path is verified, remove superseded views, tables, caches, feature flags, fallback code, and migrations when safe. Do not leave two divergent implementations or unused ClickHouse data behind.
 - Report before/after measurements with the exact route and parameters, cache state, viewport, API status/time, material ClickHouse reads, coverage/parity evidence, checks run, services rebuilt, and any remaining bottleneck with a safe implementation path.
 
