@@ -1,7 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- shared account-section components + their count helper */
 import { F, AssetIcon, AssetAmount, AreaChart, ChartSkeleton, healthFactorDisplay, AddrPill, rowNav, Dash } from './ui'
 import { Link, paths } from '../router'
-import { BalanceHistory } from './BalanceHistory'
 import { performancePoints } from './performance'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import type { MoneyMarketPosition, LpPosition, ActiveDca, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation } from '../types'
@@ -329,13 +328,6 @@ export function LiquidityPositionsTable({ positions }: { positions: LpPosition[]
       </table></div>
     </>
   )
-}
-
-// Balance-history section (per-asset). Thin wrapper so detail pages import all
-// account sections from one place.
-export function BalanceHistorySection({ history }: { history?: AssetBalanceHistory[] }) {
-  if (!history || history.length === 0) return null
-  return <BalanceHistory history={history} />
 }
 
 /* ============ proxy & multisig ============ */

@@ -1,18 +1,22 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { F, AssetIcon, assetBrandColor } from './ui'
-import { Link, paths } from '../router'
+import { F, AssetIcon } from './ui'
+import { AssetBalanceChart } from './BalanceHistory'
+import { useQueryValue, setQuery } from '../router'
 import { squarify } from '../utils/squarify'
-import { useIconColor } from '../utils/iconColor'
-import type { AddressBalance } from '../types'
+import { useAssetColor } from '../utils/iconColor'
+import type { AddressBalance, AssetBalanceHistory, AssetRef } from '../types'
 
-// Balances rendered as a value-weighted treemap: each holding is a tile sized by
-// its USD value and tinted with its own brand color (sampled from the token's
-// icon), so the wallet's composition reads at a glance. Tiles carry the asset
-// icon, symbol, value and share; hovering or focusing one (and tapping on touch)
-// previews its full breakdown — free, reserved, price — in the detail card below.
-// A long tail of dust holdings collapses into one "Other" tile so it never clumps
-// into unreadable slivers, and assets with no market price sit in a chip strip.
-// Replaces the old balances table on the account and tag detail pages.
+// Balances rendered as a value-weighted treemap that doubles as the selector for
+// the per-asset balance history: each holding is a tile sized by its USD value
+// and tinted with its own brand color (sampled from the token's icon), so the
+// wallet's composition reads at a glance. Focusing a tile (or a row below the
+// map) shows that asset — its value, amount and reserved lock, then its
+// balance-history graph. Hovering a tile previews it; clicking locks the focus so
+// hovering elsewhere no longer changes it (click the locked tile again to unlock).
+// A long tail of dust holdings collapses into one "Other" tile; assets with no
+// market price and assets held only in the past sit in the selectable rows
+// beneath. The locked asset deep-links via ?asset=<assetId>.
+// Replaces the old balances table + separate balance-history section.
 
 // Keep tiles that carry real weight; fold the dust tail into a single "Other"
 // tile rather than a corner full of unreadable slivers.
@@ -27,6 +31,12 @@ type Box = { left: number; top: number; w: number; h: number }
 type Cell =
   | { kind: 'asset'; value: number; balance: AddressBalance }
   | { kind: 'other'; value: number; members: AddressBalance[] }
+// The focused selection: a concrete asset, or the aggregated "Other" dust tile.
+type Sel = { kind: 'asset'; id: number } | { kind: 'other' }
+function selEq(a: Sel | null, b: Sel | null): boolean {
+  if (!a || !b || a.kind !== b.kind) return false
+  return a.kind === 'asset' ? a.id === (b as { id: number }).id : true
+}
 
 // Share as a compact percentage. Tiny holdings collapse to "<0.1%" rather than a
 // misleading "0.0%"; larger ones drop the decimal to stay short on small tiles.
@@ -36,8 +46,26 @@ function pctStr(share: number): string {
   return p.toFixed(p < 10 ? 1 : 0) + '%'
 }
 
-function assetName(b: AddressBalance): string {
-  return b.asset.name ?? `#${b.asset.assetId}`
+function assetName(a: AssetRef): string {
+  return a.name ?? `#${a.assetId}`
+}
+
+// A raw integer amount string is non-zero (has a reserved/held portion) when it
+// carries any non-zero digit — avoids Number() precision loss on 128-bit values.
+function isPositiveRaw(raw: string | null | undefined): boolean {
+  return raw != null && /[1-9]/.test(raw)
+}
+
+// Small padlock — hover reveals the reserved amount. Only shown when the asset
+// actually has a reserved balance.
+function LockIcon({ title }: { title: string }) {
+  return (
+    <span className="tm-lock" title={title} role="img" aria-label={title}>
+      <svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true">
+        <path fill="currentColor" d="M12 1a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2h-1V6a5 5 0 0 0-5-5Zm3 8H9V6a3 3 0 0 1 6 0v3Z" />
+      </svg>
+    </span>
+  )
 }
 
 // Progressive tile-face content, revealed only when it comfortably fits so text is
@@ -55,12 +83,16 @@ function TileFace({ balance, share, w, h }: { balance: AddressBalance; share: nu
       {canIcon
         ? <span className="tm-top">
             <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} symbol={a.symbol} size={iconSize} parachainId={a.parachainId} origin={a.origin} />
-            {showSym && <span className="tm-sym">{a.symbol}</span>}
+            {showSym && (
+              <span className="tm-id">
+                <span className="tm-sym">{a.symbol}</span>
+                {big && <span className="tm-name">{assetName(a)}</span>}
+              </span>
+            )}
           </span>
         : showSym && <span className="tm-sym">{a.symbol}</span>}
-      {big && <span className="tm-name">{assetName(balance)}</span>}
-      {(big || med) && <span className="tm-val">{F.usd(balance.valueUsd)}</span>}
       {(big || med) && <span className="tm-pct">{pctStr(share)}</span>}
+      {(big || med) && <span className="tm-val">{F.usd(balance.valueUsd)}</span>}
     </span>
   )
 }
@@ -72,21 +104,26 @@ function OtherFace({ count, value, share, w, h }: { count: number; value: number
   if (!showSym) return null
   return (
     <span className="tm-face">
-      <span className="tm-top"><span className="tm-sym">Other</span></span>
-      {big && <span className="tm-name">{count} smaller assets</span>}
-      {(big || med) && <span className="tm-val">{F.usd(value)}</span>}
+      <span className="tm-top">
+        <span className="tm-id">
+          <span className="tm-sym">Other</span>
+          {big && <span className="tm-name">{count} smaller assets</span>}
+        </span>
+      </span>
       {(big || med) && <span className="tm-pct">{pctStr(share)}</span>}
+      {(big || med) && <span className="tm-val">{F.usd(value)}</span>}
     </span>
   )
 }
 
-type TileHandlers = { active: boolean; pinned: boolean; onHover: () => void; onLeave: () => void; onSelect: () => void }
+type TileHandlers = { active: boolean; locked: boolean; onSelect: () => void; onHover: () => void; onLeave: () => void }
 
 // Shared presentational shell. Content is absolutely positioned (see `.tm-face`)
 // so a tile can shrink to any width without its padding forcing a minimum size
 // and spilling past the map edge; the color drives tint, border and share-bar
-// through the `--tile` custom property.
-function TileButton({ color, isOther, label, box, active, pinned, onHover, onLeave, onSelect, children }: {
+// through the `--tile` custom property. Hovering (or keyboard-focusing) previews;
+// clicking locks — `aria-pressed` tracks the lock, `active` the visible focus.
+function TileButton({ color, isOther, label, box, active, locked, onSelect, onHover, onLeave, children }: {
   color: string; isOther?: boolean; label: string; box: Box; children: React.ReactNode
 } & TileHandlers) {
   return (
@@ -95,7 +132,7 @@ function TileButton({ color, isOther, label, box, active, pinned, onHover, onLea
       className={'tm-tile' + (isOther ? ' tm-other' : '') + (active ? ' active' : '')}
       style={{ left: box.left, top: box.top, width: box.w, height: box.h, ['--tile' as string]: color }}
       aria-label={label}
-      aria-pressed={pinned}
+      aria-pressed={locked}
       onMouseEnter={onHover}
       onMouseLeave={onLeave}
       onFocus={onHover}
@@ -111,7 +148,7 @@ function TileButton({ color, isOther, label, box, active, pinned, onHover, onLea
 // Asset tile — its own component so it can resolve its icon-derived color via the
 // hook (which must run unconditionally).
 function AssetTile({ balance, share, box, ...handlers }: { balance: AddressBalance; share: number; box: Box } & TileHandlers) {
-  const color = useIconColor(balance.asset, assetBrandColor(balance.asset.symbol))
+  const color = useAssetColor(balance.asset)
   const label = `${balance.asset.symbol} — ${F.usd(balance.valueUsd)}, ${pctStr(share)} of valued holdings`
   return (
     <TileButton color={color} label={label} box={box} {...handlers}>
@@ -130,7 +167,7 @@ function OtherTile({ value, share, count, box, ...handlers }: { value: number; s
   )
 }
 
-function Metric({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
+function Metric({ label, value, strong }: { label: string; value: React.ReactNode; strong?: boolean }) {
   return (
     <div className="tm-metric">
       <span className="tm-metric-label">{label}</span>
@@ -139,48 +176,79 @@ function Metric({ label, value, strong }: { label: string; value: string; strong
   )
 }
 
-function AssetChip({ balance, value }: { balance: AddressBalance; value?: string }) {
-  const a = balance.asset
+// A selectable asset chip (rows below the map, and the "Other" breakdown). Clicking
+// focuses the asset above rather than navigating away.
+function SelectChip({ asset, value, active, onSelect }: { asset: AssetRef; value?: string; active: boolean; onSelect: () => void }) {
   return (
-    <Link to={paths.asset(a.assetId)} className="tm-chip">
-      <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} symbol={a.symbol} size={18} parachainId={a.parachainId} origin={a.origin} />
-      {a.symbol}
+    <button type="button" className={'tm-chip' + (active ? ' on' : '')} aria-pressed={active} onClick={onSelect}>
+      <AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} symbol={asset.symbol} size={18} parachainId={asset.parachainId} origin={asset.origin} />
+      {asset.symbol}
       {value && <span className="tm-chip-val">{value}</span>}
-    </Link>
+    </button>
   )
 }
 
-// The docked inspector for the active tile — the treemap's tooltip, kept below the
-// map (rather than floating) so it never clips at a container edge on mobile and
-// reads the same on hover, keyboard focus, and tap.
-function TileDetail({ balance, share }: { balance: AddressBalance; share: number }) {
-  const a = balance.asset
-  const tokens = F.num(balance.total, a.decimals)
-  const price = balance.valueUsd != null && tokens > 0 ? balance.valueUsd / tokens : null
+// Latest timestamp at which the asset still had a non-zero balance (points are
+// time-ordered), used to label a historically-held asset in the detail.
+function lastHeldDate(hist: AssetBalanceHistory | null): string | null {
+  if (!hist) return null
+  let ts: string | null = null
+  for (const p of hist.points) if (p.balance > 0) ts = p.ts
+  return ts
+}
+
+// The docked inspector for the focused asset — value, the free+reserved amount
+// (with a reserved lock), then that asset's balance-history graph. Kept below the
+// map so it never clips at a container edge and reads the same on click and tap.
+// Adapts when value/amount don't apply: unpriced holdings omit value, and assets
+// held only in the past show a "last held" note in place of a live amount.
+function FocusedDetail({ balance, hist, allHistory }: {
+  balance: AddressBalance | null; hist: AssetBalanceHistory | null; allHistory: AssetBalanceHistory[]
+}) {
+  const asset = balance?.asset ?? hist?.asset
+  if (!asset) return null
+  const priced = balance != null && balance.valueUsd != null && balance.valueUsd > 0
+  const hasReserved = isPositiveRaw(balance?.reserved)
+  const lastHeld = balance == null ? lastHeldDate(hist) : null
   return (
     <div className="tm-detail" aria-live="polite">
       <div className="tm-detail-head">
-        <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} symbol={a.symbol} size={26} parachainId={a.parachainId} origin={a.origin} />
+        <AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} symbol={asset.symbol} size={26} parachainId={asset.parachainId} origin={asset.origin} />
         <div className="tm-detail-id">
-          <span className="tm-detail-sym">{a.symbol}</span>
-          <span className="tm-detail-name">{assetName(balance)}</span>
+          <span className="tm-detail-sym">{asset.symbol}</span>
+          <span className="tm-detail-name">{assetName(asset)}</span>
         </div>
-        <Link to={paths.asset(a.assetId)} className="tm-detail-link">View asset →</Link>
       </div>
-      <div className="tm-detail-grid">
-        <Metric label="Value" value={F.usd(balance.valueUsd)} strong />
-        <Metric label="Share" value={pctStr(share)} />
-        <Metric label="Free" value={F.amount(balance.free, a.decimals)} />
-        <Metric label="Reserved" value={F.amount(balance.reserved, a.decimals)} />
-        <Metric label="Price" value={F.priceUsd(price)} />
-      </div>
+      {balance != null ? (
+        <div className="tm-detail-grid">
+          {priced && <Metric label="Value" value={F.usd(balance.valueUsd)} strong />}
+          <Metric
+            label="Amount"
+            strong={!priced}
+            value={<span className="tm-amt">
+              {F.amount(balance.total, asset.decimals)}<span className="tm-amt-sym">{asset.symbol}</span>
+              {hasReserved && <LockIcon title={`Reserved ${F.amount(balance.reserved, asset.decimals)} ${asset.symbol}`} />}
+            </span>}
+          />
+        </div>
+      ) : (
+        <div className="tm-detail-note">Not currently held{lastHeld ? ` · last held ${lastHeld.slice(0, 10)}` : ''}</div>
+      )}
+      {hist
+        ? <AssetBalanceChart selected={hist} all={allHistory} />
+        : <div className="tm-hist">
+            <div className="tm-hist-head"><span className="tm-metric-label">Balance history</span></div>
+            <div className="muted" style={{ padding: '16px 0', fontFamily: 'GeistMono', fontSize: 12 }}>No balance history indexed.</div>
+          </div>}
     </div>
   )
 }
 
-// Detail for the aggregated "Other" tile: the smaller holdings listed as chips so
-// none of them is hidden.
-function OtherDetail({ members, value, share }: { members: AddressBalance[]; value: number; share: number }) {
+// Detail for the aggregated "Other" tile: the smaller holdings as selectable chips
+// so none is hidden and any can be focused (it has no single history of its own).
+function OtherDetail({ members, value, share, selectedId, onSelect }: {
+  members: AddressBalance[]; value: number; share: number; selectedId: number | null; onSelect: (id: number) => void
+}) {
   return (
     <div className="tm-detail" aria-live="polite">
       <div className="tm-detail-head">
@@ -190,30 +258,63 @@ function OtherDetail({ members, value, share }: { members: AddressBalance[]; val
         </div>
       </div>
       <div className="tm-chips tm-chips-scroll">
-        {members.map(b => <AssetChip key={b.asset.assetId} balance={b} value={F.usd(b.valueUsd)} />)}
+        {members.map(b => (
+          <SelectChip key={b.asset.assetId} asset={b.asset} value={F.usd(b.valueUsd)} active={selectedId === b.asset.assetId} onSelect={() => onSelect(b.asset.assetId)} />
+        ))}
       </div>
     </div>
   )
 }
 
-function UnpricedStrip({ balances }: { balances: AddressBalance[] }) {
+// Selectable rows beneath the map + graph: current holdings that have no market
+// price (can't be sized by value), and assets held only in the past (have a
+// balance history but no current holding). Selecting one focuses it above.
+function BalanceRows({ unpriced, historical, selectedId, onSelect }: {
+  unpriced: AddressBalance[]; historical: AssetBalanceHistory[]; selectedId: number | null; onSelect: (id: number) => void
+}) {
   return (
     <div className="tm-unpriced">
-      <span className="tm-unpriced-cap">{balances.length} asset{balances.length === 1 ? '' : 's'} without a market price</span>
-      <div className="tm-chips">
-        {balances.map(b => <AssetChip key={b.asset.assetId} balance={b} />)}
-      </div>
+      {unpriced.length > 0 && (
+        <div className="tm-rowgroup">
+          <span className="tm-unpriced-cap">{unpriced.length} asset{unpriced.length === 1 ? '' : 's'} without a market price</span>
+          <div className="tm-chips">
+            {unpriced.map(b => (
+              <SelectChip key={b.asset.assetId} asset={b.asset} active={selectedId === b.asset.assetId} onSelect={() => onSelect(b.asset.assetId)} />
+            ))}
+          </div>
+        </div>
+      )}
+      {historical.length > 0 && (
+        <div className="tm-rowgroup">
+          <span className="tm-unpriced-cap">{historical.length} historically held asset{historical.length === 1 ? '' : 's'}</span>
+          <div className="tm-chips">
+            {historical.map(h => (
+              <SelectChip key={h.asset.assetId} asset={h.asset} active={selectedId === h.asset.assetId} onSelect={() => onSelect(h.asset.assetId)} />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
-export function BalancesTreemap({ balances }: { balances: AddressBalance[] }) {
+export function BalancesTreemap({ balances, balanceHistory = [] }: { balances: AddressBalance[]; balanceHistory?: AssetBalanceHistory[] }) {
   const priced = useMemo(
     () => balances.filter(b => b.valueUsd != null && b.valueUsd > 0).sort((a, b) => (b.valueUsd ?? 0) - (a.valueUsd ?? 0)),
     [balances],
   )
   const unpriced = useMemo(() => balances.filter(b => !(b.valueUsd != null && b.valueUsd > 0)), [balances])
   const total = useMemo(() => priced.reduce((s, b) => s + (b.valueUsd ?? 0), 0), [priced])
+
+  // Historically held: an asset with a balance history but no current holding —
+  // it dropped out of the treemap, so it only reachable through its own row.
+  const currentIds = useMemo(() => new Set(balances.map(b => b.asset.assetId)), [balances])
+  const historical = useMemo(
+    () => balanceHistory.filter(h => !currentIds.has(h.asset.assetId) && h.points.length >= 1),
+    [balanceHistory, currentIds],
+  )
+  const historyById = useMemo(() => new Map(balanceHistory.map(h => [h.asset.assetId, h])), [balanceHistory])
+  const balanceById = useMemo(() => new Map(balances.map(b => [b.asset.assetId, b])), [balances])
 
   // Split into the significant head and a dust tail; the tail (any size) becomes
   // one "Other" cell so the map stays readable. Shares are always of the full
@@ -229,6 +330,7 @@ export function BalancesTreemap({ balances }: { balances: AddressBalance[] }) {
     if (tail.length) out.push({ kind: 'other', value: tail.reduce((s, b) => s + (b.valueUsd as number), 0), members: tail })
     return out
   }, [priced, total])
+  const otherCell = cells.find(c => c.kind === 'other') as Extract<Cell, { kind: 'other' }> | undefined
 
   const ref = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(0)
@@ -247,24 +349,52 @@ export function BalancesTreemap({ balances }: { balances: AddressBalance[] }) {
   const height = width === 0 ? 0 : width < 560 ? Math.round(Math.max(width * 1.05, 420)) : Math.round(Math.min(Math.max(width * 0.5, 340), 560))
   const rects = useMemo(() => squarify(cells.map(c => c.value), width, height), [cells, width, height])
 
-  const [hover, setHover] = useState<number | null>(null)
-  const [pinned, setPinned] = useState<number | null>(null)
-  const active = hover ?? pinned ?? (cells.length ? 0 : null)
-  const activeCell = active != null ? cells[active] : null
+  // The LOCKED asset is deep-linked via ?asset= (clicking a tile locks it, so it
+  // survives a hover elsewhere and is shareable). Hover is a transient preview
+  // that only applies while nothing is locked. The visible focus is the lock, else
+  // the hover, else the default (largest priced holding, else the first asset in
+  // any group).
+  const rawParam = useQueryValue('asset', '')
+  const defaultId = priced[0]?.asset.assetId ?? unpriced[0]?.asset.assetId ?? historical[0]?.asset.assetId ?? null
+  const selectableIds = useMemo(
+    () => new Set<number>([...balances.map(b => b.asset.assetId), ...historical.map(h => h.asset.assetId)]),
+    [balances, historical],
+  )
+  const locked: Sel | null = useMemo(() => {
+    if (rawParam === 'other' && otherCell) return { kind: 'other' }
+    const id = Number(rawParam)
+    if (rawParam !== '' && Number.isFinite(id) && selectableIds.has(id)) return { kind: 'asset', id }
+    return null
+  }, [rawParam, otherCell, selectableIds])
+  const [hover, setHover] = useState<Sel | null>(null)
+  const active: Sel | null = locked ?? hover ?? (defaultId != null ? { kind: 'asset', id: defaultId } : null)
+  const lockedVal: number | 'other' | null = locked?.kind === 'other' ? 'other' : locked?.kind === 'asset' ? locked.id : null
 
-  if (priced.length === 0 && unpriced.length === 0) {
-    return (
-      <>
-        <div className="sec-title">Balances · 0 assets</div>
-        <div className="panel tm-panel tm-empty">No balances observed</div>
-      </>
-    )
+  // Click toggles the lock: clicking the locked cell unlocks it (and keeps it
+  // previewed under the pointer); clicking any other cell locks that one.
+  const select = (v: number | 'other', cell: Sel) => {
+    if (v === lockedVal) setHover(cell)
+    setQuery({ asset: v === lockedVal ? null : String(v) })
+  }
+  // While something is locked, hovering must not change the focus. "Other" is an
+  // aggregate with no single graph, so it isn't hover-previewed — that would swap
+  // the (fixed-height) graph for a short chip list and make the section jump as
+  // the pointer crosses the small dust tile. It stays inspectable on click.
+  const preview = (cell: Sel) => { if (locked == null && cell.kind !== 'other') setHover(cell) }
+  const unpreview = (cell: Sel) => { if (locked == null) setHover(h => (selEq(h, cell) ? null : h)) }
+
+  if (priced.length === 0 && unpriced.length === 0 && historical.length === 0) {
+    // No section heading — the Balances tab already labels this view and its count.
+    return <div className="panel tm-panel tm-empty">No balances observed</div>
   }
 
+  const activeId = active?.kind === 'asset' ? active.id : null
+  // Rows/chips lock on click (no hover preview), so their toggle passes their own
+  // cell for the unlock-keeps-preview path.
+  const selectAsset = (id: number) => select(id, { kind: 'asset', id })
+
   return (
-    <>
-      <div className="sec-title">Balances · {balances.length} assets</div>
-      <div className="panel tm-panel">
+    <div className="panel tm-panel">
         {cells.length > 0 && (
           <div className="tm" ref={ref} style={{ height: height || undefined, minHeight: 320 }} role="group" aria-label="Balances by value">
             {width > 0 && cells.map((cell, i) => {
@@ -276,12 +406,14 @@ export function BalancesTreemap({ balances }: { balances: AddressBalance[] }) {
               const top = r.y
               const box: Box = { left, top, w: Math.max(0, Math.min(r.w, width - left)), h: Math.max(0, Math.min(r.h, height - top)) }
               if (box.w < MIN_TILE_PX || box.h < MIN_TILE_PX) return null
+              const cellSel: Sel = cell.kind === 'other' ? { kind: 'other' } : { kind: 'asset', id: cell.balance.asset.assetId }
+              const cellVal: number | 'other' = cell.kind === 'other' ? 'other' : cell.balance.asset.assetId
               const handlers = {
-                active: active === i,
-                pinned: pinned === i,
-                onHover: () => setHover(i),
-                onLeave: () => setHover(h => (h === i ? null : h)),
-                onSelect: () => setPinned(p => (p === i ? null : i)),
+                active: selEq(active, cellSel),
+                locked: selEq(locked, cellSel),
+                onSelect: () => select(cellVal, cellSel),
+                onHover: () => preview(cellSel),
+                onLeave: () => unpreview(cellSel),
               }
               return cell.kind === 'other'
                 ? <OtherTile key="__other" value={cell.value} share={cell.value / total} count={cell.members.length} box={box} {...handlers} />
@@ -289,10 +421,14 @@ export function BalancesTreemap({ balances }: { balances: AddressBalance[] }) {
             })}
           </div>
         )}
-        {activeCell?.kind === 'asset' && <TileDetail balance={activeCell.balance} share={activeCell.value / total} />}
-        {activeCell?.kind === 'other' && <OtherDetail members={activeCell.members} value={activeCell.value} share={activeCell.value / total} />}
-        {unpriced.length > 0 && <UnpricedStrip balances={unpriced} />}
-      </div>
-    </>
+        {active?.kind === 'other' && otherCell
+          ? <OtherDetail members={otherCell.members} value={otherCell.value} share={otherCell.value / total} selectedId={activeId} onSelect={selectAsset} />
+          : active?.kind === 'asset' && (
+            <FocusedDetail balance={balanceById.get(active.id) ?? null} hist={historyById.get(active.id) ?? null} allHistory={balanceHistory} />
+          )}
+        {(unpriced.length > 0 || historical.length > 0) && (
+          <BalanceRows unpriced={unpriced} historical={historical} selectedId={activeId} onSelect={selectAsset} />
+        )}
+    </div>
   )
 }

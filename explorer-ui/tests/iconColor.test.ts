@@ -47,4 +47,15 @@ describe('vibrantColor — dominant saturated color from icon pixels', () => {
     expect(g).toBeGreaterThan(r + 60)
     expect(g).toBeGreaterThan(b + 60)
   })
+
+  it('falls back to the icon grey for a monochrome (greyscale) logo', () => {
+    // sUSDe-style: transparent padding + opaque mid/light greys, no saturated
+    // pixel. Rather than null (→ arbitrary hashed color), return the logo's grey.
+    const c = vibrantColor(rgba([...rep([0, 0, 0, 0], 40), ...rep([190, 190, 190, 255], 40), ...rep([225, 225, 225, 255], 20)]))
+    expect(c).not.toBeNull()
+    const [r, g, b] = channels(c!)
+    expect(Math.max(r, g, b) - Math.min(r, g, b)).toBeLessThan(24) // grey (near-neutral)
+    expect(Math.min(r, g, b)).toBeGreaterThan(150) // visible, not black
+    expect(Math.max(r, g, b)).toBeLessThan(232)    // not near-white
+  })
 })

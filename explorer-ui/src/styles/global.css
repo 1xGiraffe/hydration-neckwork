@@ -360,7 +360,7 @@ svg { display: block; }
    Elements with their own transition lists get `transform` appended in place —
    transitions aren't additive, a shared rule here would clobber them. */
 .pager .btns button { transition: transform 90ms ease; }
-.bal-chip:active, .tabs button:active, .nav-trigger:active, .nav-link:active, .pager .btns button:active, .activity-chip:active, .exp-btn:active { transform: scale(0.96); }
+.tabs button:active, .nav-trigger:active, .nav-link:active, .pager .btns button:active, .activity-chip:active, .exp-btn:active { transform: scale(0.96); }
 .page-head { margin-bottom: 24px; }
 .crumbs { display: flex; align-items: center; gap: 8px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-bottom: 14px; text-transform: uppercase; letter-spacing: 0.08em; }
 .crumbs a:hover { color: var(--accent); }
@@ -432,6 +432,15 @@ svg { display: block; }
 .tbl td.r { text-align: right; }
 .tbl td.mono { font-family: 'GeistMono'; }
 .accounts-tbl { min-width: 1180px; }
+/* Cap the Account column so a long on-chain identity or tag name can't widen the
+   10-column table past its min-width and force the whole panel to scroll
+   horizontally. The identity/tag/module label truncates with an ellipsis (the
+   full value stays in the pill's title + on the detail page). */
+.accounts-tbl td[data-label="Account"] { max-width: 232px; }
+.accounts-tbl td[data-label="Account"] .addr-wrap,
+.accounts-tbl td[data-label="Account"] .addr-pill { min-width: 0; max-width: 100%; }
+.accounts-tbl td[data-label="Account"] .addr-pill .tag,
+.accounts-tbl td[data-label="Account"] .addr-pill .a { overflow: hidden; text-overflow: ellipsis; }
 
 /* compact dashboard list rows */
 .mini-row { display: flex; align-items: center; gap: 12px; padding: 11px 18px; border-bottom: 1px solid var(--separator); cursor: pointer; transition: background 120ms; }
@@ -479,16 +488,12 @@ svg { display: block; }
    panels sized by USD value, each with a thin brand-accent share-bar; the docked
    detail card is the tooltip for the hovered/focused/tapped tile. */
 .tm-panel { padding: 12px; }
-/* The chart is one rounded, clipped block with its own border, so the outer edge
-   has a continuous rounded outline (the square inner tiles' borders can't round
-   the corners). Tiles inside are square and their hairline borders do the
-   internal separating. */
-.tm { position: relative; width: 100%; border-radius: 14px; overflow: hidden; }
-/* The outer frame is an overlay sharing the container's exact radius, not a real
-   border. A real border makes overflow:hidden clip tiles to the inner radius
-   (border-radius − border-width), leaving a 1px mismatch that reads as a slightly
-   cut-off corner; the overlay avoids that. */
-.tm::after { content: ''; position: absolute; inset: 0; border: 1px solid var(--text-lowest); border-radius: 14px; pointer-events: none; z-index: 2; }
+/* The treemap is full-bleed: it breaks out of the panel's padding on the top and
+   sides (negative margins) so it merges into the outer container. The panel's own
+   border and rounded top corners (via its overflow:hidden) frame it; the bottom
+   stays square because the detail card docks directly below. Tiles inside are
+   square and their hairline borders do the internal separating. */
+.tm { position: relative; margin: -12px -12px 0; overflow: hidden; }
 .tm-tile {
   --tile: var(--accent);
   position: absolute; overflow: hidden; box-sizing: border-box;
@@ -509,32 +514,52 @@ svg { display: block; }
    tile stays tiny (and clips its content) instead of ballooning past the edge. */
 .tm-face { position: absolute; inset: 0; box-sizing: border-box; padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
 .tm-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+/* Symbol over name, stacked to the right of the icon, so the name sits directly
+   below the symbol. */
+.tm-id { display: flex; flex-direction: column; min-width: 0; }
 .tm-sym { font-family: 'Geist', sans-serif; font-weight: 600; font-size: 14px; color: var(--text-high); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tm-name { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tm-val { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text-high); margin-top: auto; }
-.tm-pct { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-medium); }
+/* The %/value pair is pinned to the tile bottom as a group, % above value. */
+.tm-pct { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-medium); margin-top: auto; }
+.tm-val { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text-high); }
 .tm-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--tile); }
 
 /* Docked detail card for the active tile. */
-.tm-detail { margin-top: 12px; padding: 12px 14px; border-radius: 12px; background: var(--bg-elev); border: 1px solid var(--separator); }
+/* The focused-asset detail flows directly inside the panel — no nested card
+   (border/background/radius), which read as a box inside a box. Horizontal
+   alignment comes from the panel's own padding. */
+.tm-detail { margin-top: 14px; }
 .tm-detail-head { display: flex; align-items: center; gap: 10px; }
 .tm-detail-id { display: flex; flex-direction: column; min-width: 0; }
 .tm-detail-sym { font-family: 'Geist', sans-serif; font-weight: 600; font-size: 15px; color: var(--text-high); }
 .tm-detail-name { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tm-detail-link { margin-left: auto; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); white-space: nowrap; }
-.tm-detail-link:hover { color: var(--accent); }
 .tm-detail-grid { display: flex; flex-wrap: wrap; gap: 10px 26px; margin-top: 12px; }
 .tm-metric { display: flex; flex-direction: column; gap: 3px; }
 .tm-metric-label { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
 .tm-metric-value { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text-medium); }
 .tm-metric-value.strong { color: var(--text-high); }
+/* Amount = free + reserved; the lock reveals the reserved portion on hover. */
+.tm-amt { display: inline-flex; align-items: center; gap: 5px; }
+.tm-amt-sym { color: var(--text-low); }
+.tm-lock { display: inline-flex; align-items: center; color: var(--text-low); cursor: help; }
+.tm-lock:hover { color: var(--text-medium); }
+/* Shown when the focused asset is held only in the past (no live amount/value). */
+.tm-detail-note { margin-top: 10px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-low); }
+/* Balance-history graph for the focused asset, docked inside the detail card. The
+   slot holds a stable height (matching the chart) so an asset with no indexed
+   history doesn't collapse it and shift the rows below as the pointer sweeps. */
+.tm-hist { margin-top: 14px; min-height: 243px; }
+.tm-hist-head { display: flex; align-items: center; margin-bottom: 6px; }
 
-/* Unpriced / zero-value assets — can't be sized by value, so listed as chips. */
+/* Selectable rows: unpriced current holdings + historically held assets. Each
+   chip focuses its asset above rather than navigating away. */
 .tm-unpriced { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--separator); }
+.tm-rowgroup + .tm-rowgroup { margin-top: 14px; }
 .tm-unpriced-cap { display: block; font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); margin-bottom: 8px; }
 .tm-chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.tm-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 6px; border-radius: 9999px; background: var(--bg-elev2); border: 1px solid var(--separator); font-family: 'Geist', sans-serif; font-size: 13px; color: var(--text-medium); }
+.tm-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 6px; border-radius: 9999px; background: var(--bg-elev2); border: 1px solid var(--separator); font-family: 'Geist', sans-serif; font-size: 13px; color: var(--text-medium); cursor: pointer; appearance: none; text-align: left; transition: border-color 140ms, color 140ms, background 140ms; }
 .tm-chip:hover { border-color: var(--text-lowest); color: var(--text-high); }
+.tm-chip.on { border-color: var(--sky); background: var(--sky-soft); color: var(--text-high); }
 .tm-chip-val { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-low); }
 .tm-chips-scroll { max-height: 148px; overflow-y: auto; margin-top: 4px; }
 .tm-empty { padding: 22px; color: var(--text-low); font-family: 'GeistMono'; font-size: 13px; text-align: center; }
@@ -1083,15 +1108,6 @@ svg { display: block; }
   background-size: 400% 100%; animation: sk 1.4s ease infinite;
 }
 
-/* per-asset balance history widget */
-.bal-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.bal-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px 5px 6px; border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); cursor: pointer; font-family: 'GeistMono'; font-size: 12px; color: var(--text-medium); transition: border-color 140ms, color 140ms, background 140ms, transform 90ms ease; }
-.bal-chip:hover { color: var(--text-high); }
-.bal-chip.on { border-color: var(--sky); background: var(--sky-soft); color: var(--text-high); }
-.bal-chart { width: 100%; height: auto; display: block; margin-top: 8px; overflow: visible; }
-.bal-mk { cursor: pointer; }
-.bal-mk circle { transition: r 120ms; }
-.bal-mk:hover circle { r: 6.5; }
 .bal-xaxis { display: flex; justify-content: space-between; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); margin-top: 4px; }
 .bal-legend { display: flex; gap: 16px; align-items: center; margin-top: 14px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); flex-wrap: wrap; }
 .bal-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }

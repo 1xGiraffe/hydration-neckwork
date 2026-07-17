@@ -71,29 +71,34 @@ test('tag detail activity tabs expose and send the account-level filters', async
   await expect.poll(() => requests.some(url => url.includes('/events?') && url.includes('event=transfer'))).toBe(true)
 })
 
-// Balance-history chart: the selected asset deep-links via ?asset=<assetId>.
+// The treemap selects the focused asset + its balance history, deep-linked via
+// ?asset=<assetId>.
 test('balance history selection is shareable via the asset query param', async ({ page }) => {
   const ACCOUNT = '1L53bUTBopXqDXSXjBdQXFV7jZ8FtdRZS5JoMjGq5z3Cv2zr'
   await page.goto(`/account/${ACCOUNT}?view=balances`)
-  const chips = page.locator('.bal-chips .bal-chip')
-  await expect(chips.first()).toBeVisible()
-  expect(await chips.count()).toBeGreaterThan(1)
+  const tiles = page.locator('.tm-tile:not(.tm-other)')
+  await expect(tiles.first()).toBeVisible()
+  expect(await tiles.count()).toBeGreaterThan(1)
 
-  // clicking a non-default chip writes the param and switches the chart
-  const second = chips.nth(1)
-  const symbol = (await second.locator('.mono').textContent())!
+  // The largest holding is focused by default, with a clean URL.
+  await expect(tiles.first()).toHaveClass(/active/)
+  await expect(page).not.toHaveURL(/asset=/)
+
+  // clicking a tile locks it — writes the param and focuses that asset
+  const second = tiles.nth(1)
+  const symbol = (await second.getAttribute('aria-label'))!.split(' — ')[0]
   await second.click()
   await expect(page).toHaveURL(new RegExp(`asset=\\d+`))
-  await expect(second).toHaveClass(/on/)
-  await expect(page.locator('.pf-now')).toContainText(symbol)
+  await expect(second).toHaveClass(/active/)
+  await expect(page.locator('.tm-detail-sym')).toHaveText(symbol)
 
   // deep link restores the same selection
   const url = page.url()
   await page.goto(url)
-  await expect(page.locator('.bal-chips .bal-chip.on .mono')).toHaveText(symbol)
+  await expect(page.locator('.tm-detail-sym')).toHaveText(symbol)
+  await expect(tiles.nth(1)).toHaveClass(/active/)
 
-  // Returning to the default chip clears the optional deep-link parameter.
-  await chips.first().click()
+  // clicking the locked tile again unlocks it → the deep-link parameter clears.
+  await tiles.nth(1).click()
   await expect(page).not.toHaveURL(/asset=/)
-  await expect(chips.first()).toHaveClass(/on/)
 })

@@ -4,9 +4,10 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useNow } from '../hooks/useNow'
 import { paths } from '../router'
 import { AssetAmount, Crumbs, F, AssetChip, Ago, AreaChart, ChartSkeleton, TableSkeleton, EmptyRow } from '../components/ui'
+import { useAssetColors } from '../utils/iconColor'
 import { ChartLegend, ShareBar, MirroredBarChart } from '../components/HdxCharts'
 import type { ShareSegment, MirrorBar } from '../components/HdxCharts'
-import type { HollarDashboard, HollarCollateral, HollarPool } from '../types'
+import type { AssetRef, HollarDashboard, HollarCollateral, HollarPool } from '../types'
 import { ChartTooltipRow as TipRow, DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
 import { monthDayLabel as mdLabel } from '../utils/dashboardDates'
 
@@ -208,7 +209,9 @@ function HsmSection({ d, now }: { d: HollarDashboard; now: number }) {
 }
 
 // 4. liquidity
-const PARTNER_COLORS = ['var(--lavender)', 'var(--amber)', 'var(--sky-deep)']
+// Minimal AssetRef for HOLLAR (asset 222) so its pool segment samples the same
+// icon color as everywhere else, rather than a hard-coded token.
+const HOLLAR_ASSET: AssetRef = { assetId: 222, iconAssetId: 222, symbol: 'HOLLAR', name: 'HOLLAR', decimals: 18, parachainId: null }
 function poolLabel(p: HollarPool): string {
   return 'HOLLAR / ' + p.partners.map(pt => pt.asset.symbol).join(' + ')
 }
@@ -216,13 +219,17 @@ function PoolCard({ p }: { p: HollarPool }) {
   // 50% balance only holds for a 2-asset pool — for N partners the balanced
   // reference is 100/(N+1)% for HOLLAR plus N partner assets.
   const balancedPct = 100 / (p.partners.length + 1)
+  // Each segment uses its token's icon-sampled brand color (central useAssetColors),
+  // so a pool's composition reads by asset — consistent with the icons/legend — and
+  // every asset (incl. ones with no curated color) gets its real hue automatically.
+  const colorFor = useAssetColors([HOLLAR_ASSET, ...p.partners.map(pt => pt.asset)])
   const segs: ShareSegment[] = [
     {
-      key: 'hollar', label: 'HOLLAR', color: 'var(--sky)', value: p.hollar.usd ?? 0,
+      key: 'hollar', label: 'HOLLAR', color: colorFor(HOLLAR_ASSET), value: p.hollar.usd ?? 0,
       tip: <><span className="t-d">HOLLAR</span><TipRow label="Amount" value={fmtAmt(p.hollar.amount) + ' HOLLAR'} /><TipRow label="Value" value={F.usd(p.hollar.usd)} /></>,
     },
     ...p.partners.map((pt, i) => ({
-      key: `p${i}`, label: pt.asset.symbol, color: PARTNER_COLORS[i % PARTNER_COLORS.length], value: pt.usd ?? 0,
+      key: `p${i}`, label: pt.asset.symbol, color: colorFor(pt.asset), value: pt.usd ?? 0,
       tip: <><span className="t-d">{pt.asset.symbol}</span><TipRow label="Amount" value={fmtAmt(pt.amount) + ' ' + pt.asset.symbol} /><TipRow label="Value" value={F.usd(pt.usd)} /></>,
     })),
   ]

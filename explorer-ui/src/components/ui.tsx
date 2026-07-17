@@ -172,9 +172,17 @@ const ASSET_COLORS: Record<string, [string, string]> = {
   ASTR: ['#ff6868', '#d83b3b'], CFG: ['#dfb1f3', '#cc6ef4'],
 }
 const PALETTE: [string, string][] = [['#e53e76', '#b454da'], ['#2C89E9', '#95caff'], ['#74C742', '#45AC1F'], ['#cc6ef4', '#dfb1f3'], ['#F7BF06', '#e3ae00'], ['#ff6868', '#d83b3b'], ['#6e7588', '#a8afc0'], ['#b3cf92', '#74C742']]
+// Aave aTokens (aUSDC, aUSDT, aEURC…) wrap an underlying token — color them as the
+// underlying (aUSDC reads like USDC) rather than hashing the wrapped symbol to a
+// distinct color. A curated entry for the aToken itself (e.g. aDOT) still wins.
+function underlyingColorSymbol(symbol: string): string {
+  return /^a[A-Z]/.test(symbol) ? symbol.slice(1) : symbol
+}
 function assetGradient(symbol: string): [string, string] {
   if (ASSET_COLORS[symbol]) return ASSET_COLORS[symbol]
-  let h = 0; for (let i = 0; i < symbol.length; i++) h = (h + symbol.charCodeAt(i)) % PALETTE.length
+  const base = underlyingColorSymbol(symbol)
+  if (ASSET_COLORS[base]) return ASSET_COLORS[base]
+  let h = 0; for (let i = 0; i < base.length; i++) h = (h + base.charCodeAt(i)) % PALETTE.length
   return PALETTE[h]
 }
 

@@ -2,7 +2,7 @@
 import type {
   ExplorerStats, IndexerStatus, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   TransferRow, EventRow, TradeRow, ActivityRow, MoneyMarketResponse, AssetDetail, HoldersResponse,
-  AddressDetail, CloseAccountsResponse, TagDetail, SearchResult, AssetListItem, TopAccountRow, AccountsPage, DailyPoint, Tag,
+  AddressDetail, AddressBalance, CloseAccountsResponse, TagDetail, SearchResult, AssetListItem, TopAccountRow, AccountsPage, DailyPoint, Tag,
   AccountRef, AssetRef, HdxDashboard, HdxCohort, HdxLockType, HdxUnlockBucket, HdxDailyFlow, HdxMover,
   HollarDashboard, HollarCollateral, HollarArbDay, HollarTradeDay, HollarPool, HollarPegPoint,
   TradeDetail as TradeDetailResponse,
@@ -268,10 +268,25 @@ function buildAccounts(offset: number, limit: number, sort: string): AccountsPag
 function buildAddress(accountId: string): AddressDetail {
   const a = ACCS.find(x => x.accountId === accountId || x.address.toLowerCase() === accountId.toLowerCase()) ?? A.fox
   const r = rng(a.accountId.length * 17)
-  const balances = ASSETS.filter((_, i) => (r() > 0.4) || i < 2).slice(0, 6).map(as => {
+  const priced = ASSETS.filter((_, i) => (r() > 0.4) || i < 2).slice(0, 6).map(as => {
     const bal = +(r() * (as.price > 1000 ? 3 : as.price > 1 ? 6000 : 2_000_000)).toFixed(4)
     return { asset: aref(as), total: raw(bal, as.decimals), free: raw(bal * 0.92, as.decimals), reserved: raw(bal * 0.08, as.decimals), lastBlock: TIP - Math.floor(r() * 40000), valueUsd: bal * as.price }
   }).sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
+  // The fox additionally holds one asset with no market price, so the "without a
+  // market price" rows beneath the treemap are exercised.
+  const unpricedHoldings: AddressBalance[] = a === A.fox
+    ? [{ asset: { assetId: 424242, symbol: 'MYST', name: 'Mystery Token', decimals: 12, parachainId: null }, total: raw(150_000, 12), free: raw(150_000, 12), reserved: '0', lastBlock: TIP - 5000, valueUsd: null }]
+    : []
+  // The owl carries a long tail of sub-threshold dust (no market history), so its
+  // treemap folds into an "Other" tile — the fixture for the Other/no-history
+  // hover behaviour.
+  const dustHoldings: AddressBalance[] = a === A.owl
+    ? Array.from({ length: 12 }, (_, i) => ({
+        asset: { assetId: 700001 + i, symbol: `DUST${i + 1}`, name: `Dust asset ${i + 1}`, decimals: 12, parachainId: null },
+        total: raw(10 + i, 12), free: raw(10 + i, 12), reserved: '0', lastBlock: TIP - 100 * i, valueUsd: 0.2 + i * 0.05,
+      }))
+    : []
+  const balances = [...priced, ...unpricedHoldings, ...dustHoldings]
   const portfolioUsd = balances.reduce((s, b) => s + (b.valueUsd ?? 0), 0)
   const isEvm = a.address.startsWith('0x')
   const mm = mmFor(a.accountId.length * 7)
@@ -293,11 +308,20 @@ function buildAddress(accountId: string): AddressDetail {
       { id: 33546, assetIn: aref(assetById.get(0)!), assetOut: aref(assetById.get(10)!), direction: 'Sell', amountPerTrade: raw(60000, 12), totalAmount: raw(1_200_000, 12), filledAmount: raw(480_000, 12), remainingAmount: raw(720_000, 12), executionsDone: 8, period: 180, nextExecutionBlock: TIP + 90, valueUsd: 3080, scheduleBlock: TIP - 40000, scheduleIndex: 2 },
       { id: 30104, assetIn: aref(assetById.get(5)!), assetOut: aref(assetById.get(0)!), direction: 'Sell', amountPerTrade: raw(1.04, 10), totalAmount: '0', filledAmount: raw(101_818, 10), remainingAmount: null, executionsDone: 97902, period: 10, nextExecutionBlock: TIP + 4, valueUsd: 4.6, scheduleBlock: TIP - 500000, scheduleIndex: 3 },
     ],
-    balanceHistory: balances.slice(0, 5).map(b => {
-      const tokens = Number(b.total) / 10 ** b.asset.decimals
-      const ser = series(b.asset.assetId * 17 + 3, 30, Math.max(tokens, 1))
-      return { asset: b.asset, current: tokens, points: ser.map((v, i) => ({ ts: tsAt(TIP - (29 - i) * 18000), blockHeight: TIP - (29 - i) * 18000, balance: v })) }
-    }),
+    balanceHistory: [
+      ...balances.slice(0, 5).map(b => {
+        const tokens = Number(b.total) / 10 ** b.asset.decimals
+        const ser = series(b.asset.assetId * 17 + 3, 30, Math.max(tokens, 1))
+        return { asset: b.asset, current: tokens, points: ser.map((v, i) => ({ ts: tsAt(TIP - (29 - i) * 18000), blockHeight: TIP - (29 - i) * 18000, balance: v })) }
+      }),
+      // A holding the fox has since exited: it has a balance history but no
+      // current balance, so it appears only in the "historically held" rows.
+      ...(a === A.fox ? [{
+        asset: { assetId: 313131, symbol: 'PAST', name: 'Former Holding', decimals: 10, parachainId: null } as AssetRef,
+        current: 0,
+        points: series(313131, 20, 5000).map((v, i, arr) => ({ ts: tsAt(TIP - (19 - i) * 18000), blockHeight: TIP - (19 - i) * 18000, balance: i >= arr.length - 3 ? 0 : v })),
+      }] : []),
+    ],
     moneyMarket: hasMm ? [{
       marketKey: 'core', market: 'Money Market', role: 'primary', defiSimSupported: true,
       blockHeight: TIP - 8, timestamp: tsAt(TIP - 8),
@@ -741,6 +765,10 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
     },
   },
   { re: /^\/explorer\/address\/(.+)\/counts$/, fn: () => ({ extrinsics: 1451, events: 26787, activity: 2143 }) },
+  // Per-account balance/portfolio history. Must sit before the generic address
+  // route below, whose greedy `(.+)` would otherwise swallow this sub-path and
+  // fall back to the default account — leaking one account's history onto another.
+  { re: /^\/explorer\/address\/(.+)\/history$/, fn: (m) => { const built = buildAddress(decodeURIComponent(m[1])); return { portfolioSeries: built.portfolioSeries ?? [], portfolioDates: built.portfolioDates ?? [], balanceHistory: built.balanceHistory ?? [] } } },
   // value-filtered activity count: 1600 of the 2143 rows are ≥ the requested $-min
   { re: /^\/explorer\/address\/(.+)\/activity-count$/, fn: (_m, qs) => ({ activity: qs.get('min') != null ? 1600 : null }) },
   {

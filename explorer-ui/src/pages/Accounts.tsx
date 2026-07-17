@@ -15,7 +15,7 @@ export function HealthSimBadge({ hf, addr }: { hf: { label: string; cls: string 
       title="Money-market health factor · opens DefiSim" onClick={e => e.stopPropagation()}
     >
       <span className={`hfv ${hf.cls}`}>{hf.label}</span>
-      <span className="sim">DefiSim ↗</span>
+      <span className="sim" title="Open in DefiSim">DS ↗</span>
     </a>
   )
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { assetIconCandidates, iconIsSampleable } from '../components/ui'
+import { assetIconCandidates, iconIsSampleable, assetBrandColor } from '../components/ui'
 import type { AssetRef } from '../types'
 
 // Derive a representative brand color from a token's icon. The dominant-color
@@ -17,28 +17,34 @@ export function vibrantColor(rgba: Uint8ClampedArray): string | null {
   // Coarse RGB buckets (5 bits/channel) accumulate the vivid pixels; the bucket
   // with the highest chroma-weighted mass wins.
   const buckets = new Map<number, { r: number; g: number; b: number; n: number; score: number }>()
+  // Opaque low-chroma "ink" (a monochrome logo's body). Used only when no vibrant
+  // color exists, so a greyscale icon (e.g. sUSDe) resolves to its own grey rather
+  // than an arbitrary hashed color.
+  let neutral = { r: 0, g: 0, b: 0, n: 0 }
   for (let i = 0; i < rgba.length; i += 4) {
     const a = rgba[i + 3]
     if (a < 128) continue
     const r = rgba[i], g = rgba[i + 1], b = rgba[i + 2]
     const max = Math.max(r, g, b), min = Math.min(r, g, b)
+    if (max < 30 || min > 232) continue // near-black outline / near-white fill — background
     const chroma = max - min
-    if (chroma < 40) continue      // grey / white / black — background
-    if (max < 30 || min > 232) continue // near-black outline / near-white fill
+    if (chroma < 40) { neutral = { r: neutral.r + r, g: neutral.g + g, b: neutral.b + b, n: neutral.n + 1 }; continue } // grey ink
     const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3)
     const bkt = buckets.get(key) ?? { r: 0, g: 0, b: 0, n: 0, score: 0 }
     bkt.r += r; bkt.g += g; bkt.b += b; bkt.n += 1; bkt.score += 0.4 + chroma / 255
     buckets.set(key, bkt)
   }
+  const hex = (r: number, g: number, b: number) => '#' + [r, g, b].map(x => Math.round(x).toString(16).padStart(2, '0')).join('')
   let best: { r: number; g: number; b: number; n: number; score: number } | null = null
   for (const bkt of buckets.values()) if (!best || bkt.score > best.score) best = bkt
-  if (!best) return null
-  const r = Math.round(best.r / best.n), g = Math.round(best.g / best.n), b = Math.round(best.b / best.n)
-  return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('')
+  if (best) return hex(best.r / best.n, best.g / best.n, best.b / best.n)
+  // No vibrant hue: fall back to the monochrome ink's grey, if the icon had any.
+  if (neutral.n) return hex(neutral.r / neutral.n, neutral.g / neutral.n, neutral.b / neutral.n)
+  return null
 }
 
 const cache = new Map<string, string>()
-const inflight = new Map<string, Promise<string | null>>()
+const inflight = new Map<string, Promise<string>>()
 
 function iconKey(asset: AssetRef): string {
   const o = asset.origin
@@ -85,23 +91,55 @@ async function extract(asset: AssetRef): Promise<string | null> {
   return null
 }
 
-// Resolve to the icon's dominant color, updating from `fallback` once sampled.
-export function useIconColor(asset: AssetRef, fallback: string): string {
+// Central asset-color resolver: kick off (once) the icon sample for `asset`,
+// deduped/cached, with the app's curated per-asset color as the fallback.
+function ensureSample(asset: AssetRef): Promise<string> {
   const key = iconKey(asset)
-  const [color, setColor] = useState<string>(() => cache.get(key) ?? fallback)
+  const cached = cache.get(key)
+  if (cached != null) return Promise.resolve(cached)
+  let p = inflight.get(key)
+  if (!p) {
+    const fallback = assetBrandColor(asset.symbol)
+    p = extract(asset).then(c => { const v = c ?? fallback; cache.set(key, v); inflight.delete(key); return v })
+    inflight.set(key, p)
+  }
+  return p
+}
+
+// THE way to get a single asset's brand color anywhere in the app: the icon's
+// dominant sampled color, or the curated fallback until the sample lands. The
+// color is read straight from the cache each render (so it's correct the instant
+// the asset changes); the effect only samples and nudges a re-render on resolve.
+export function useAssetColor(asset: AssetRef): string {
+  const key = iconKey(asset)
+  const [, bump] = useState(0)
   useEffect(() => {
-    // The state initializer already applied any cached color for this key.
     if (cache.has(key)) return
     let cancelled = false
-    let p = inflight.get(key)
-    if (!p) {
-      p = extract(asset).then(c => { const v = c ?? fallback; cache.set(key, v); inflight.delete(key); return v })
-      inflight.set(key, p)
-    }
-    p.then(c => { if (!cancelled && c) setColor(c) })
+    ensureSample(asset).then(() => { if (!cancelled) bump(n => n + 1) })
     return () => { cancelled = true }
-    // fallback is derived from the same asset; keying on the icon identity is enough.
+    // key captures the icon identity; asset is only read to sample it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key])
-  return color
+  return cache.get(key) ?? assetBrandColor(asset.symbol)
+}
+
+// Batch resolver for charts/lists with several asset segments (respects hook
+// rules — one call resolves N assets). Returns a lookup yielding each asset's
+// sampled color, or its curated fallback until the sample lands; re-renders as
+// samples resolve.
+export function useAssetColors(assets: readonly (AssetRef | null | undefined)[]): (asset: AssetRef) => string {
+  const list = assets.filter((a): a is AssetRef => !!a)
+  const keys = list.map(iconKey).join('|')
+  const [, bump] = useState(0)
+  useEffect(() => {
+    let cancelled = false
+    for (const asset of list) {
+      if (cache.has(iconKey(asset))) continue
+      ensureSample(asset).then(() => { if (!cancelled) bump(n => n + 1) })
+    }
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keys])
+  return (asset: AssetRef) => cache.get(iconKey(asset)) ?? assetBrandColor(asset.symbol)
 }
