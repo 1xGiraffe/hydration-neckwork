@@ -1,7 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { ClickHouseClient } from './client.ts'
+import { createDefaultDatabaseClickHouseClient, type ClickHouseClient } from './client.ts'
 
 const DEFAULT_SCHEMA_DIRECTORY = fileURLToPath(new URL('../../../clickhouse/schema/', import.meta.url))
 
@@ -110,4 +110,43 @@ export async function applySchema(
     }
   }
   return { files, statements }
+}
+
+// Resolves the schema directory for the CLI entrypoint: `SCHEMA_DIR` env var
+// first (the compose service sets this to the read-only `/schema` mount),
+// then a `--schema-dir=<path>` CLI arg, then `applySchema`'s own built-in
+// relative default (undefined here defers to that default).
+function resolveSchemaDirArg(): string | undefined {
+  const envDir = process.env.SCHEMA_DIR?.trim()
+  if (envDir) return envDir
+  const argPrefix = '--schema-dir='
+  const argDir = process.argv.find(arg => arg.startsWith(argPrefix))?.slice(argPrefix.length).trim()
+  return argDir || undefined
+}
+
+// One-shot CLI entrypoint for the `schema-bootstrap` compose service: applies
+// every schema file to a fresh ClickHouse server (before `price_data` exists)
+// and exits 0, or exits nonzero so `depends_on: service_completed_successfully`
+// blocks `api`/`indexer`/`raw-live`/`ingestion-supervisor`/`derivations` on failure.
+async function main(): Promise<void> {
+  const client = createDefaultDatabaseClickHouseClient()
+  try {
+    const result = await applySchema(client, {
+      schemaDir: resolveSchemaDirArg(),
+      onFile: fileName => console.log('[schema-bootstrap] ' + fileName),
+    })
+    console.log(`[schema-bootstrap] applied ${result.files.length} file(s), ${result.statements} statement(s)`)
+  } finally {
+    await client.close()
+  }
+}
+
+const isMainModule = import.meta.url === `file://${process.argv[1]}`
+if (isMainModule && process.argv.includes('--apply')) {
+  main()
+    .then(() => process.exit(0))
+    .catch(error => {
+      console.error('[schema-bootstrap] failed', error)
+      process.exit(1)
+    })
 }

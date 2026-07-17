@@ -8,7 +8,6 @@
     "start": "tsx src/cli.ts",
     "start:raw": "tsx src/raw/cli.ts",
     "detect-gaps": "tsx src/cli.ts --detect-gaps",
-    "migrate:schema": "tsx src/scripts/migrate-schema.ts",
     "repair:volume": "tsx src/scripts/repair-volume.ts",
     "repair:raw-money-market": "tsx src/scripts/repair-raw-money-market-positions.ts",
     "backfill:money-market": "tsx src/scripts/backfill-money-market.ts",

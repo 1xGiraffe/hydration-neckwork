@@ -23,6 +23,27 @@ services:
     networks:
       - neckwork
 
+  # Applies clickhouse/schema/*.sql to a fresh server before any ingestion or
+  # API service starts. Runs once and exits 0 (nonzero on failure); everything
+  # downstream gates on `service_completed_successfully` so nothing races an
+  # empty/partial schema.
+  schema-bootstrap:
+    image: hydration-neckwork-api
+    container_name: hydration-neckwork-schema-bootstrap
+    restart: "no"
+    command: ["./node_modules/.bin/tsx", "src/db/schemaBootstrap.ts", "--apply"]
+    volumes:
+      - ./clickhouse/schema:/schema:ro
+    environment:
+      - SCHEMA_DIR=/schema
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    networks:
+      - neckwork
+
   indexer:
     image: hydration-neckwork-indexer:latest
     build: .
@@ -33,6 +54,8 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+      schema-bootstrap:
+        condition: service_completed_successfully
     environment:
       - RPC_URL=${RPC_URL:-https://rpc.hydradx.cloud}
       - SQD_GATEWAY=${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}
@@ -91,6 +114,8 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+      schema-bootstrap:
+        condition: service_completed_successfully
     environment:
       - RPC_URL=${RAW_LIVE_RPC_URL:-https://rpc.hydradx.cloud}
       - SQD_GATEWAY=${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}
@@ -244,6 +269,8 @@ services:
         condition: service_healthy
       raw-live:
         condition: service_started
+      schema-bootstrap:
+        condition: service_completed_successfully
     environment:
       - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-hydration-neckwork}
       - ROOT_DIR=/etc/hydration-neckwork
@@ -295,8 +322,32 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+      schema-bootstrap:
+        condition: service_completed_successfully
     ports:
       - "3000:3000"
+    environment:
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      # Live money-market reads use a Hydration RPC reachable from the container.
+      - RAW_EVM_RPC_URL=${RAW_EVM_RPC_URL:-https://rpc.hydradx.cloud}
+      - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
+      - EXPLORER_OCELLOIDS_TOKEN=${EXPLORER_OCELLOIDS_TOKEN:-}
+    networks:
+      - neckwork
+
+  # Long-running recompute loop for the four derivation jobs in
+  # api/src/derivations/jobs.ts (read models a plain materialized view can't
+  # express). Same image/env as `api`; gated on schema-bootstrap like every
+  # other schema consumer.
+  derivations:
+    image: hydration-neckwork-api
+    container_name: hydration-neckwork-derivations
+    restart: unless-stopped
+    depends_on:
+      schema-bootstrap:
+        condition: service_completed_successfully
+    command: ["./node_modules/.bin/tsx", "src/derivations/runner.ts"]
     environment:
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}

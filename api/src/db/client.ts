@@ -43,4 +43,16 @@ export function createLongOpClickHouseClient() {
   })
 }
 
+// For schema bootstrap on a fresh ClickHouse server: `000_database.sql` creates
+// the `price_data` database and every schema statement is fully qualified with
+// it, so bootstrap must connect without selecting `price_data` (it doesn't
+// exist yet). Binds to ClickHouse's built-in `default` database instead.
+export function createDefaultDatabaseClickHouseClient() {
+  return createClient({
+    url: config.clickhouse.url,
+    database: 'default',
+    password: config.clickhouse.password,
+  })
+}
+
 export type { ClickHouseClient } from '@clickhouse/client'
