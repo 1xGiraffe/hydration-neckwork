@@ -26,8 +26,12 @@ import {
   startEvmBindingsRefresh,
   refreshOmnipoolAccountClaims,
   startOmnipoolAccountClaimsRefresh,
+  omnipoolAccountClaimsSnapshotReady,
+  setOmnipoolAccountClaimsReady,
   refreshMoneyMarketAccountValues,
   startMoneyMarketAccountValuesRefresh,
+  moneyMarketAccountValueSnapshotReady,
+  setMoneyMarketAccountValuesReady,
   startAccountsPrewarm,
   startTagCountsPrewarm,
   stopExplorerBackgroundTasks,
@@ -169,6 +173,13 @@ async function start() {
     // a timer. Each publishes its own readiness after a complete, parity-checked
     // generation lands, so the directory upgrades from aggregate to exact values
     // in place. Fire-and-forget after listen so startup stays fast.
+    //
+    // On restart a prior snapshot may already satisfy the DB-parity check, so
+    // pre-flip readiness up front — otherwise the directory would serve
+    // degraded values until the (potentially long) regeneration below finishes,
+    // even though an exact snapshot is already sitting in ClickHouse.
+    if (await omnipoolAccountClaimsSnapshotReady()) setOmnipoolAccountClaimsReady()
+    if (await moneyMarketAccountValueSnapshotReady()) setMoneyMarketAccountValuesReady()
     void refreshOmnipoolAccountClaims().catch(err => console.error('[API] Omnipool account claim refresh failed; directory keeps wallet/MM-only values', err))
     startOmnipoolAccountClaimsRefresh()
     void refreshMoneyMarketAccountValues().catch(err => console.error('[API] money-market account value refresh failed; directory keeps aggregate MM values', err))

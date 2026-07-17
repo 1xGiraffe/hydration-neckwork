@@ -1,13 +1,11 @@
 // Continuous background process for the four derivation jobs in jobs.ts (the
 // read models a plain materialized view cannot express). Entrypoint:
-// `tsx src/derivations/runner.ts` — a standalone process/container, distinct
-// from the API's own timer-driven startAccountTradeVolumeRefresh (server.ts),
-// which only covers the newest account_trade_volume partitions between full
-// runner cycles.
+// `tsx src/derivations/runner.ts` — a standalone process/container that owns
+// these jobs exclusively; the API itself no longer runs any timer-driven
+// equivalent.
 //
-// Each cycle mirrors startAccountTradeVolumeRefresh's per-run client
-// lifecycle: open a fresh long-op client (a slow rebuild must never hold a
-// connection open between ticks), do the work, close it in `finally`
+// Each cycle opens a fresh long-op client (a slow rebuild must never hold a
+// connection open between ticks), does the work, and closes it in `finally`
 // regardless of outcome. The four jobs share one client per cycle but are
 // each wrapped in their own try/catch so one failing job (e.g. a transient
 // ClickHouse hiccup) never stalls the other three.
