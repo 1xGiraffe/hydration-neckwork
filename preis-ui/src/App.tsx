@@ -373,10 +373,19 @@ export default function App() {
     <div className="app">
       <style>{`
         .app {
-          height: 100svh;
+          /* Fill the full screen off the html>body>#root 100% chain rather than
+             a viewport unit: iOS home-screen (standalone) PWAs under-report
+             svh/dvh (they exclude the top+bottom safe areas), which left the shell
+             ~93px short on a notched iPhone and a ~10% dead strip below the chart.
+             100% resolves to the true edge-to-edge viewport. */
+          height: 100%;
           display: grid;
           grid-template-rows: 56px 1fr;
           background: var(--bg);
+          /* Offset the whole app below the status bar. The padding strip shows the
+             app's own --bg (== the topbar's), so the bar reads as a seamless
+             extension. 0 on Android/desktop. */
+          padding-top: var(--safe-top);
         }
         /* overflow:hidden + min-width:0 at every level keeps the chart canvas
            contained when the window shrinks. Without it the lightweight-charts canvas
@@ -473,7 +482,7 @@ export default function App() {
         <div className="mobile-drawer-scrim" onClick={() => setDrawerOpen(false)}>
           <style>{`
             .mobile-drawer-scrim { position: fixed; inset: 0; z-index: 110; background: rgba(0,0,0,0.6); backdrop-filter: blur(2px); display: flex; justify-content: flex-end; animation: preis-drawer-scrim-in 160ms ease-out; }
-            .mobile-drawer-panel { width: min(360px, 92vw); height: 100%; background: var(--bg); border-left: 1px solid var(--separator); display: flex; flex-direction: column; overflow: hidden; box-shadow: -12px 0 32px rgba(0,0,0,0.4); animation: preis-drawer-panel-in 190ms var(--ease-out-soft); }
+            .mobile-drawer-panel { width: min(360px, 92vw); height: 100%; background: var(--bg); border-left: 1px solid var(--separator); display: flex; flex-direction: column; overflow: hidden; box-shadow: -12px 0 32px rgba(0,0,0,0.4); animation: preis-drawer-panel-in 190ms var(--ease-out-soft); padding-top: var(--safe-top); }
             .mobile-drawer-close { align-self: flex-end; margin: 8px; width: 36px; height: 36px; border-radius: 9999px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-medium); transition: color 140ms, background 140ms, transform 140ms var(--ease-out-soft); }
             .mobile-drawer-close:hover { background: var(--panel-hover); color: var(--text-high); }
             .mobile-drawer-close:active { transform: scale(0.94); }

@@ -108,6 +108,10 @@ svg { display: block; }
 :root {
   --ease-out-soft: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  /* iOS home-screen PWA safe-area inset (0 everywhere else, incl. Android).
+     Top-anchored surfaces pad by this so content clears the status bar when
+     the app runs full-bleed under a black-translucent bar. */
+  --safe-top: env(safe-area-inset-top, 0px);
 }
 
 /* Hide Lightweight Charts TradingView branding */

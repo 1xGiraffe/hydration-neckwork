@@ -1173,10 +1173,17 @@ export default function Chart({
           .omniwatch-marker .emoji-img { width: 18px; height: 18px; }
           .omniwatch-marker .id, .omniwatch-marker .more { display: none; }
           .omniwatch-scrim {
-            align-items: stretch; padding: 8px; padding-bottom: max(8px, env(safe-area-inset-bottom));
+            /* Float the card inside the safe area: clear the status bar / Dynamic
+               Island up top and the home indicator at the bottom. */
+            align-items: flex-start; padding: 8px;
+            padding-top: max(8px, env(safe-area-inset-top));
+            padding-bottom: max(8px, env(safe-area-inset-bottom));
           }
           .omniwatch-modal {
-            width: 100%; max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px);
+            /* Cap at the padded (safe) scrim height. 100% resolves against the
+               fixed full-screen scrim — avoids iOS standalone's under-reported dvh,
+               which capped the card short and left a dead strip below it. */
+            width: 100%; max-height: 100%;
           }
           .omniwatch-modal-head { align-items: center; gap: 12px; padding: 16px 16px 14px; }
           .omniwatch-modal-title { gap: 5px; }
@@ -1222,9 +1229,14 @@ export default function Chart({
         @media (max-width: 420px) {
           .omniwatch-scrim { padding: 0; }
           .omniwatch-modal {
-            width: 100%; height: 100vh; height: 100dvh; max-height: 100vh; max-height: 100dvh;
+            /* Full-bleed sheet: 100% of the fixed full-screen scrim (not dvh, which
+               iOS standalone under-reports), with its own top safe-area padding so
+               the header clears the status bar. */
+            width: 100%; height: 100%; max-height: 100%;
             border-radius: 0; border-left: 0; border-right: 0;
+            padding-top: env(safe-area-inset-top);
           }
+          .omniwatch-rows { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
           .omniwatch-row { grid-template-columns: 72px minmax(96px, 1fr) max-content; column-gap: 9px; }
           .omniwatch-pill { flex-basis: 66px; width: 66px; max-width: 66px; padding: 0 6px 0 5px; }
           .omniwatch-net { min-width: 66px; }

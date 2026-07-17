@@ -209,7 +209,10 @@ export default function AssetPickerDialog({
           [data-theme="light"] .picker-overlay { background: rgba(36, 14, 50, 0.34); }
           .picker-modal { width: 880px; max-width: calc(100vw - 32px); max-height: 78vh; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 24px; box-shadow: 0 24px 72px rgba(0,0,0,0.5); overflow: hidden; display: flex; flex-direction: column; outline: none; animation: preis-dialog-panel-in 190ms var(--ease-out-soft); }
           [data-theme="light"] .picker-modal { box-shadow: 0 24px 72px rgba(36, 14, 50, 0.22); }
-          .picker-modal-mobile { width: 100vw; max-width: 100vw; height: 100svh; max-height: 100svh; border-radius: 0; animation-name: preis-dialog-panel-mobile-in; }
+          /* height:100% (not 100svh) — a fixed, top:0 dialog fills the real
+             viewport; iOS standalone under-reports svh, which would leave a strip
+             at the bottom. padding-top keeps the header clear of the status bar. */
+          .picker-modal-mobile { width: 100vw; max-width: 100vw; height: 100%; max-height: 100%; border-radius: 0; animation-name: preis-dialog-panel-mobile-in; padding-top: var(--safe-top); }
           .picker-head { padding: 12px 12px 0 12px; background: var(--bg-elev); }
           .picker-head-inner {
             display: flex; align-items: center; gap: 12px;

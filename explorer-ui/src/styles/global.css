@@ -17,6 +17,10 @@
   /* shared easings (aligned with preis-ui) for consistent micro-interactions */
   --ease-out-soft: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  /* iOS home-screen PWA safe-area inset (0 everywhere else, incl. Android).
+     Top-anchored surfaces pad by this so content clears the status bar when
+     the app runs full-bleed under a black-translucent bar. */
+  --safe-top: env(safe-area-inset-top, 0px);
 }
 :root[data-theme="dark"] {
   --bg: #030816;
@@ -132,6 +136,9 @@ svg { display: block; }
   backdrop-filter: blur(18px) saturate(140%);
   -webkit-backdrop-filter: blur(18px) saturate(140%);
   border-bottom: 1px solid var(--separator);
+  /* extend the frosted bar up behind the iOS status bar and push the nav row
+     below it (0 on Android/desktop, so no visual change there) */
+  padding-top: var(--safe-top);
 }
 .topbar-inner { display: flex; align-items: center; gap: 20px; height: 60px; min-width: 0; }
 .brand { display: inline-flex; align-items: baseline; gap: 9px; flex-shrink: 0; }
@@ -178,6 +185,8 @@ svg { display: block; }
   background: var(--bg-elev); border-left: 1px solid var(--border);
   box-shadow: -16px 0 44px rgba(0,0,0,0.5);
   animation: drawerIn 0.2s var(--ease-out-soft);
+  /* keep the drawer head below the iOS status bar */
+  padding-top: var(--safe-top);
 }
 @keyframes drawerIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
 .drawer-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--separator); }
