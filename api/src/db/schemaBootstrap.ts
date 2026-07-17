@@ -116,7 +116,7 @@ export async function applySchema(
 // first (the compose service sets this to the read-only `/schema` mount),
 // then a `--schema-dir=<path>` CLI arg, then `applySchema`'s own built-in
 // relative default (undefined here defers to that default).
-function resolveSchemaDirArg(): string | undefined {
+export function resolveSchemaDirArg(): string | undefined {
   const envDir = process.env.SCHEMA_DIR?.trim()
   if (envDir) return envDir
   const argPrefix = '--schema-dir='
@@ -137,7 +137,7 @@ async function main(): Promise<void> {
     })
     console.log(`[schema-bootstrap] applied ${result.files.length} file(s), ${result.statements} statement(s)`)
   } finally {
-    await client.close()
+    await client.close().catch(() => {})
   }
 }
 

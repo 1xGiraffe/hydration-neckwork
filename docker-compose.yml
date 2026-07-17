@@ -28,6 +28,9 @@ services:
   # downstream gates on `service_completed_successfully` so nothing races an
   # empty/partial schema.
   schema-bootstrap:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
     image: hydration-neckwork-api
     container_name: hydration-neckwork-schema-bootstrap
     restart: "no"
@@ -341,6 +344,9 @@ services:
   # express). Same image/env as `api`; gated on schema-bootstrap like every
   # other schema consumer.
   derivations:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
     image: hydration-neckwork-api
     container_name: hydration-neckwork-derivations
     restart: unless-stopped
