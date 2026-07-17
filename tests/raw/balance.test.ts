@@ -175,6 +175,59 @@ describe('raw balance event extraction', () => {
     }
   })
 
+  it('still assumes the native asset for EVMAccounts events, which never carry an asset id', async () => {
+    // EVMAccounts.Bound is native-implied by construction (binding touches the
+    // account's native balance via fees/deposits; ERC20 movement arrives through
+    // the EVM-log path). It must keep producing a native observation — only
+    // Tokens./Currencies. shapes without a decodable asset id are skipped.
+    const block = { height: 6, hash: '0x05' } as unknown as StorageBlock
+    const originalIs = systemStorage.account.v205.is
+    const originalGet = systemStorage.account.v205.get
+    const originalDefault = systemStorage.account.v205.getDefault
+
+    ;(systemStorage.account.v205 as unknown as { is: typeof originalIs }).is = () => true
+    ;(systemStorage.account.v205 as unknown as { get: typeof originalGet }).get = async () => ({
+      nonce: 0,
+      consumers: 0,
+      providers: 0,
+      sufficients: 0,
+      data: { free: 7n, reserved: 0n, frozen: 0n, flags: 0n },
+    } as never)
+    ;(systemStorage.account.v205 as unknown as { getDefault: typeof originalDefault }).getDefault = () => ({
+      nonce: 0,
+      consumers: 0,
+      providers: 0,
+      sufficients: 0,
+      data: { free: 0n, reserved: 0n, frozen: 0n, flags: 0n },
+    } as never)
+
+    try {
+      const bound = {
+        name: 'EVMAccounts.Bound',
+        index: 9,
+        callAddress: [0],
+        args: { account: ACCOUNT },
+      } as unknown as RawEvent
+
+      const result = await extractBalanceObservations(
+        block,
+        '2026-06-19 00:00:00',
+        [bound],
+        [],
+        'sqd',
+      )
+
+      expect(result.warnings).toEqual([])
+      expect(result.observations).toHaveLength(1)
+      expect(result.observations[0].asset_id).toBe('0')
+      expect(result.observations[0].account_id).toBe(ACCOUNT)
+    } finally {
+      ;(systemStorage.account.v205 as unknown as { is: typeof originalIs }).is = originalIs
+      ;(systemStorage.account.v205 as unknown as { get: typeof originalGet }).get = originalGet
+      ;(systemStorage.account.v205 as unknown as { getDefault: typeof originalDefault }).getDefault = originalDefault
+    }
+  })
+
   it('still resolves the asset for a Tokens event whose currency id is decodable', async () => {
     const block = { height: 5, hash: '0x04' } as unknown as StorageBlock
     const originalIs = tokensStorage.accounts.v108.is

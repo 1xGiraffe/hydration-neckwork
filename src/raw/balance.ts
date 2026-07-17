@@ -342,18 +342,23 @@ function isAdministrativeCall(name: string): boolean {
     /^(Sudo|Utility|Scheduler|Democracy|Referenda|Whitelist|Preimage|Council|TechnicalCommittee)\./.test(name)
 }
 
-// Pallets whose balance events/calls are native-only by construction: their
-// args never carry an asset id because there is only ever one asset (HDX) in
-// play. Everything else admitted by isBalanceEvent/isBalanceCall (Tokens.,
-// Currencies., EVM., EVMAccounts.) can in principle touch any asset, so an
-// empty collectAssets() result there means the shape genuinely couldn't be
-// decoded — not that the asset must be native.
+// Pallets whose balance events/calls imply the native asset by construction:
+// their args never carry a substrate asset id. Balances./System. are native-
+// only; EVM./EVMAccounts. events (Executed, Bound, …) also never encode a
+// substrate asset — the intended observation there is the account's NATIVE
+// balance (gas fees, binding deposits), and ERC20 movements arrive through the
+// dedicated EVM-log path instead. Only Tokens./Currencies. genuinely encode an
+// asset id in their args, so an empty collectAssets() result there means the
+// shape couldn't be decoded (runtime change) — skip + warn rather than
+// fabricate a native observation for an unknown asset.
 function isNativeImpliedEventSource(name: string): boolean {
-  return name.startsWith('Balances.') || name.startsWith('System.')
+  return name.startsWith('Balances.') || name.startsWith('System.') ||
+    name.startsWith('EVM.') || name.startsWith('EVMAccounts.')
 }
 
 function isNativeImpliedCallSource(name: string): boolean {
-  return name.startsWith('Balances.')
+  return name.startsWith('Balances.') ||
+    name.startsWith('EVM.') || name.startsWith('EVMAccounts.')
 }
 
 // Event candidates have no per-row warning channel (candidatesFromEvent only
