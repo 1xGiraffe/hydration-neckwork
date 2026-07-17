@@ -381,6 +381,13 @@ export async function runXykFarmIntervals(client: ClickHouseClient): Promise<Der
 // cannot do this. The result is swapped into the live table atomically (see
 // atomicFullReplace) rather than appended per (lp_asset_id, block).
 
+// Single source of truth for the live table name: runXykTotalShares passes
+// this to atomicFullReplace as `liveTable`, and xykTotalSharesInsertSql derives
+// its staging INSERT target from the same constant. Keeping these structurally
+// tied (rather than two hand-matched literals) means a future rename can't
+// silently orphan the INSERT from the table atomicFullReplace actually swaps.
+const XYK_TOTAL_SHARES_TABLE = 'price_data.xyk_lp_total_shares_history'
+
 // The single INSERT…SELECT for the total-shares reconstruction, keyed by run id.
 // Targets the staging twin (never the live table directly) so the run's
 // result becomes visible only via the atomic EXCHANGE in runXykTotalShares.
@@ -402,14 +409,14 @@ export function xykTotalSharesInsertSql(runId: number): string {
       SELECT lp AS lp_asset_id, block_height,
         toString(sum(bd) OVER (PARTITION BY lp ORDER BY block_height ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS total_shares_raw
       FROM per_block`
-  return `INSERT INTO price_data.xyk_lp_total_shares_history_staging
+  return `INSERT INTO ${XYK_TOTAL_SHARES_TABLE}_staging
         SELECT lp_asset_id, block_height, total_shares_raw, ${runId} AS run_id, now() AS ingested_at
         FROM (${stepSelect})`
 }
 
 export async function runXykTotalShares(client: ClickHouseClient): Promise<DerivationResult> {
   const runId = Date.now()
-  const liveTable = 'price_data.xyk_lp_total_shares_history'
+  const liveTable = XYK_TOTAL_SHARES_TABLE
   await atomicFullReplace(client, liveTable, async () => {
     await client.command({
       query: xykTotalSharesInsertSql(runId),
