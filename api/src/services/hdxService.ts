@@ -5,7 +5,7 @@ import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
 import { decodeCompact } from './proxyMultisigService.ts'
 import { cached } from './cache.ts'
 import { allTags, economicModuleAccounts } from './tagService.ts'
-import { accountRef, ensurePrices, getGigaMarketStats, getGigaLiquidationLevels, type AccountRef, type GigaMarketReserveStat, type GigaLiquidations } from './explorerService.ts'
+import { accountRef, ensurePrices, cutoffHeightForWindow, getGigaMarketStats, getGigaLiquidationLevels, type AccountRef, type GigaMarketReserveStat, type GigaLiquidations } from './explorerService.ts'
 
 // HDX-dashboard chain snapshots: balance locks by lock id, GIGAHDX pending
 // unstakes, vesting schedules and conviction-voting prior locks — everything the
@@ -305,8 +305,6 @@ export function stopHdxService(): void {
 
 // dashboard payload (ClickHouse aggregates + chain snapshot)
 
-const HDX_BLOCKS_PER_DAY = 14_400 // 6s blocks
-
 export interface HdxCohort { key: string; label: string; minPct: number; minHdx: number; accounts: number; totalHdx: number }
 export interface HdxUnlockBucket { label: string; fromTs: string; toTs: string; gigahdx: number; vesting: number; vote: number }
 export interface HdxDailyFlow { date: string; buyHdx: number; sellHdx: number; buyers: number; sellers: number }
@@ -529,16 +527,20 @@ async function loadSupplyCohorts(): Promise<HdxDashboard['supply'] & { cohorts: 
 
 async function loadDailyFlows(): Promise<HdxDailyFlow[]> {
   const head = await loadHead()
-  const from = head.height - 60 * HDX_BLOCKS_PER_DAY
+  // Wall-clock 60d window; the volume table has no timestamp, so join blocks for
+  // the real per-block date instead of extrapolating from a fixed block time
+  // (which drifts now that blocks run ~5.6s, not the assumed 6s).
+  const from = await cutoffHeightForWindow(60 * 24, head.height)
   const res = await client.query({
     query: `
-      SELECT toDate(subtractSeconds(fromUnixTimestamp({headTs:UInt64}), ({head:UInt32} - block_height) * 6)) AS d,
-        toFloat64(sum(native_volume_buy)) / 1e12 AS buy, toFloat64(sum(native_volume_sell)) / 1e12 AS sell,
-        uniqExactIf(account, native_volume_buy > 0) AS buyers, uniqExactIf(account, native_volume_sell > 0) AS sellers
-      FROM price_data.trade_volume_by_account
-      WHERE asset_id = 0 AND block_height >= {from:UInt32} AND NOT startsWith(account, '0x6d6f646c')
+      SELECT toDate(b.block_timestamp) AS d,
+        toFloat64(sum(t.native_volume_buy)) / 1e12 AS buy, toFloat64(sum(t.native_volume_sell)) / 1e12 AS sell,
+        uniqExactIf(t.account, t.native_volume_buy > 0) AS buyers, uniqExactIf(t.account, t.native_volume_sell > 0) AS sellers
+      FROM price_data.trade_volume_by_account t
+      INNER JOIN price_data.blocks b ON b.block_height = t.block_height
+      WHERE t.asset_id = 0 AND t.block_height >= {from:UInt32} AND NOT startsWith(t.account, '0x6d6f646c')
       GROUP BY d ORDER BY d`,
-    query_params: { headTs: Math.floor(head.ts / 1000), head: head.height, from },
+    query_params: { from },
     format: 'JSONEachRow',
   })
   return (await res.json<{ d: string; buy: number; sell: number; buyers: number; sellers: number }>())
@@ -645,7 +647,8 @@ export function moverAccountFilterSql(taggedModuleAccounts: string[]): string {
 
 async function loadTopMovers(): Promise<HdxDashboard['topMovers']> {
   const head = await loadHead()
-  const from = head.height - 7 * HDX_BLOCKS_PER_DAY
+  // Wall-clock 7d window (fixed block-count offsets undersize it at ~5.6s/block).
+  const from = await cutoffHeightForWindow(7 * 24, head.height)
   const taggedModl = economicModuleAccounts(allTags())
   const res = await client.query({
     query: `

@@ -753,6 +753,43 @@ async function latestPriceBlock(): Promise<number> {
   })
 }
 
+// "24h"/"7d"-style windows were historically fixed block-count offsets that
+// assumed a constant block time (12s, later 6s), so `head - 7200` was taken to
+// mean "24h ago". The chain now produces ~5.6s blocks, so those offsets cover
+// far LESS wall-clock than their names imply (7200 blocks ≈ 11h, not 24h).
+// These helpers resolve a cutoff HEIGHT from a wall-clock window via the blocks
+// table, keeping the reading queries height-predicated — so the
+// (asset_id, block_height) / block_height sort keys still prune the scan —
+// while the window means an actual span of time.
+
+// SQL returning the lowest block_height produced within the last `hours`
+// (NULL / 0 rows when the table is empty). Kept pure so a unit test can assert
+// the INTERVAL literal without a live ClickHouse.
+export function cutoffWindowSql(hours: number): string {
+  return `SELECT min(block_height) AS h FROM price_data.blocks WHERE block_timestamp >= now() - INTERVAL ${Math.max(1, Math.round(hours))} HOUR`
+}
+
+// Fallback cutoff when the blocks table can't answer (empty/error): assume 6s
+// blocks (600/hour), which reproduces the exact pre-fix constant (24h → head −
+// 14400, 7d → head − 100800) so behaviour degrades to the old windows.
+export function fallbackCutoffHeight(head: number, hours: number): number {
+  return Math.max(0, head - Math.round(hours * 600))
+}
+
+// Resolve the block height that was the chain head `hours` ago. Cached briefly:
+// it advances slowly relative to a 24h/7d window and is read on hot paths, and a
+// timer-driven refresher should resolve it once per pass rather than per asset.
+export async function cutoffHeightForWindow(hours: number, head: number): Promise<number> {
+  return cached(`explorer:cutoff:${hours}`, 30_000, async () => {
+    try {
+      const res = await client.query({ query: cutoffWindowSql(hours), format: 'JSONEachRow' })
+      const h = Number((await res.json<{ h: number | null }>())[0]?.h ?? 0)
+      if (h > 0) return h
+    } catch { /* fall through to the 6s-block estimate */ }
+    return fallbackCutoffHeight(head, hours)
+  })
+}
+
 export async function ensurePrices(): Promise<Map<number, PriceInfo>> {
   if (priceMap.size && Date.now() - priceLoadedAt < 30_000) return priceMap
   // Single-flight: ensurePrices is on the hot path of nearly every endpoint, so
@@ -776,8 +813,18 @@ async function refreshPrices(): Promise<Map<number, PriceInfo>> {
   try {
     const head = await latestPriceBlock()
     if (!head) return priceMap
-    const dayStart = Math.max(0, head - 7_200)
-    const weekStart = Math.max(0, head - 100_800)
+    // Timestamp-derived cutoffs so "24h"/"7d" track wall-clock as block time
+    // drifts (~5.6s now). Resolved once per refresh, not per asset.
+    const [dayStart, weekStart, cut72] = await Promise.all([
+      cutoffHeightForWindow(24, head),
+      cutoffHeightForWindow(168, head),
+      cutoffHeightForWindow(72, head),
+    ])
+    // The fallback "price then" window is a block SPAN relative to each asset's
+    // own latest tick (the ~24h→72h band before it), so express both edges as
+    // the real block count spanning those windows at the current rate.
+    const span24h = Math.max(1, head - dayStart)
+    const span72h = Math.max(1, head - cut72)
     const res = await client.query({
       query: `
         SELECT asset_id,
@@ -818,12 +865,12 @@ async function refreshPrices(): Promise<Map<number, PriceInfo>> {
           SELECT p.asset_id AS asset_id, any(l.latest_block) AS latest_block,
             toString(any(l.price)) AS price_raw,
             toString(argMaxIf(p.usd_price, p.block_height,
-              p.block_height <= l.latest_block - 14400 AND p.block_height > l.latest_block - 43200)) AS price_then_raw
+              p.block_height <= l.latest_block - {span24h:UInt32} AND p.block_height > l.latest_block - {span72h:UInt32})) AS price_then_raw
           FROM price_data.prices p
           INNER JOIN latest l ON l.asset_id = p.asset_id
           WHERE p.asset_id IN ({ids:Array(UInt32)}) AND p.block_height > {weekStart:UInt32} AND p.usd_price > 0
           GROUP BY p.asset_id`,
-        query_params: { ids: missing, weekStart }, format: 'JSONEachRow',
+        query_params: { ids: missing, weekStart, span24h, span72h }, format: 'JSONEachRow',
       })
       for (const r of await fbRes.json<{ asset_id: number; price_raw: string; price_then_raw: string }>()) {
         const price = Number(r.price_raw)
@@ -1160,6 +1207,11 @@ export interface ExplorerStats {
 
 export async function getStats(): Promise<ExplorerStats> {
   return cached('explorer:stats', 3000, async () => {
+    // Wall-clock 24h cutoff height (blocks now run ~5.6s, so the old head−7200
+    // covered only ~11h). The counts read replayable ReplacingMergeTree raw
+    // tables, so they dedup by row identity: a replay before the next merge
+    // would otherwise double-count events/extrinsics.
+    const cutoff24h = await cutoffHeightForWindow(24, await latestPriceBlock())
     const [mainRes, prices] = await Promise.all([
       client.query({
         query: `
@@ -1169,13 +1221,14 @@ export async function getStats(): Promise<ExplorerStats> {
             (SELECT toString(max(block_timestamp)) FROM price_data.raw_blocks WHERE block_height = head) AS head_time,
             (SELECT toFloat64(dateDiff('second', min(block_timestamp), max(block_timestamp)) / greatest(count() - 1, 1))
                FROM (SELECT block_timestamp FROM price_data.raw_blocks ORDER BY block_height DESC LIMIT 100)) AS avg_block,
-            toUInt64((SELECT count() FROM price_data.raw_events
-               WHERE block_height > head - 7200 AND event_name IN ('Balances.Transfer','Tokens.Transfer'))) AS transfers_24h,
-            toUInt64((SELECT count() FROM price_data.raw_extrinsics
-               WHERE block_height > head - 7200 AND coalesce(signer, effective_signer) IS NOT NULL)) AS extrinsics_24h,
+            toUInt64((SELECT uniqExact((block_height, event_index)) FROM price_data.raw_events
+               WHERE block_height > {cutoff24h:UInt32} AND event_name IN ('Balances.Transfer','Tokens.Transfer'))) AS transfers_24h,
+            toUInt64((SELECT uniqExact((block_height, extrinsic_index)) FROM price_data.raw_extrinsics
+               WHERE block_height > {cutoff24h:UInt32} AND coalesce(signer, effective_signer) IS NOT NULL)) AS extrinsics_24h,
             toUInt64((SELECT uniqExact(account_id) FROM price_data.raw_balance_observations
-               WHERE block_height > head - 7200)) AS active_accounts_24h
+               WHERE block_height > {cutoff24h:UInt32})) AS active_accounts_24h
         `,
+        query_params: { cutoff24h },
         format: 'JSONEachRow',
       }),
       ensurePrices(),
