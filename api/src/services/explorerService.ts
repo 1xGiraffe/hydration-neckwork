@@ -10023,6 +10023,16 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
     const transferReadModelPoolLegFilter = !viewingPool && poolAccs.size
       ? `AND from_account NOT IN (${[...poolAccs].map(a => `'${a}'`).join(',')}) AND to_account NOT IN (${[...poolAccs].map(a => `'${a}'`).join(',')})`
       : ''
+    // The noisy-pot legs are plumbing on a NORMAL account's page, but when the
+    // viewed account IS one of those pots (fee processor, omnipool, router) they
+    // ARE its activity — otherwise every row is dropped and the page is empty
+    // while the tab count is large. Mirror the viewingPool/viewingMmContract
+    // exception and skip the noisy-pot exclusion in that case.
+    const viewingNoisyPot = accCond.some(a => NOISY_TRANSFER_POTS.includes(a))
+    const rawNoisyPotFilter = viewingNoisyPot ? '' :
+      `AND JSONExtractString(args_json,'from') NOT IN (${noisyPotList()}) AND JSONExtractString(args_json,'to') NOT IN (${noisyPotList()})`
+    const readModelNoisyPotFilter = viewingNoisyPot ? '' :
+      `AND from_account NOT IN (${noisyPotList()}) AND to_account NOT IN (${noisyPotList()})`
     const trRes = await client.query({
       query: useTransferReadModel
         ? `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
@@ -10030,8 +10040,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
               FROM price_data.account_transfer_activity
               WHERE account IN (${accList}) AND ${bound}
                 AND (from_account IN (${accList}) OR to_account IN (${accList}))
-                AND from_account NOT IN (${noisyPotList()})
-                AND to_account NOT IN (${noisyPotList()})
+                ${readModelNoisyPotFilter}
                 AND NOT match(from_account, '^0x(7369626c|70617261|506172656e74)')
                 AND NOT match(to_account, '^0x(7369626c|70617261|506172656e74)')
                 ${transferReadModelPoolLegFilter}
@@ -10048,8 +10057,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
                 ${transferRefsFilter}
                 AND event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')
                 AND (JSONExtractString(args_json,'from') IN (${accList}) OR JSONExtractString(args_json,'to') IN (${accList}))
-                AND JSONExtractString(args_json,'from') NOT IN (${noisyPotList()})
-                AND JSONExtractString(args_json,'to') NOT IN (${noisyPotList()})
+                ${rawNoisyPotFilter}
                 AND NOT match(JSONExtractString(args_json,'from'), '^0x(7369626c|70617261|506172656e74)')
                 AND NOT match(JSONExtractString(args_json,'to'), '^0x(7369626c|70617261|506172656e74)')
                 ${poolLegFilter}
