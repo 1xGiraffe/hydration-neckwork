@@ -8,6 +8,7 @@ import {
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressActivityCountAtMin, getTagActivityCountAtMin,
   getTagActivity, getTagExtrinsics, getTagEvents,
+  getAddressVotes, getTagVotes,
   type EventListFilters,
   type ExtrinsicListFilters,
   type ValueListFilters,
@@ -320,6 +321,17 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return rows
   })
 
+  fastify.get('/explorer/tag/:tagId/votes', async (req, reply) => {
+    const params = tagParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
+    const q = req.query as Record<string, unknown>
+    const offset = activityOffsetParam(q)
+    if (offset == null) return reply.status(400).send({ error: `Votes offset must be between 0 and ${MAX_ACTIVITY_OFFSET}` })
+    const rows = await getTagVotes(params.data.tagId, limitParam(q, 25), offset, dateParam(q, 'from'), dateParam(q, 'to'))
+    if (!rows) return reply.status(404).send({ error: 'Tag not found' })
+    return rows
+  })
+
   fastify.get('/explorer/address/:address', async (req, reply) => {
     const params = addressParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
@@ -368,6 +380,17 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
     const q = req.query as Record<string, unknown>
     const rows = await getAddressEvents(params.data.address, limitParam(q, 25), offsetParam(q), eventFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
+    if (!rows) return reply.status(404).send({ error: 'Address not recognized' })
+    return rows
+  })
+
+  fastify.get('/explorer/address/:address/votes', async (req, reply) => {
+    const params = addressParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const q = req.query as Record<string, unknown>
+    const offset = activityOffsetParam(q)
+    if (offset == null) return reply.status(400).send({ error: `Votes offset must be between 0 and ${MAX_ACTIVITY_OFFSET}` })
+    const rows = await getAddressVotes(params.data.address, limitParam(q, 25), offset, dateParam(q, 'from'), dateParam(q, 'to'))
     if (!rows) return reply.status(404).send({ error: 'Address not recognized' })
     return rows
   })

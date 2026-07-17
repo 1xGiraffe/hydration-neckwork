@@ -99,6 +99,7 @@ export function profileTabs(
   dcaCount: number,
   liquidityPositionCount: number,
   activityCount?: number,
+  votesCount?: number,
 ): { key: string; label: string; count?: number }[] {
   const positionCount = mmPositionCount(markets) + dcaCount + liquidityPositionCount
   return [
@@ -106,6 +107,7 @@ export function profileTabs(
     { key: 'balances', label: 'Balances', count: balanceCount },
     ...(positionCount > 0 ? [{ key: 'positions', label: 'Positions', count: positionCount }] : []),
     { key: 'activity', label: 'Activity', ...(activityCount == null ? {} : { count: activityCount }) },
+    ...(votesCount && votesCount > 0 ? [{ key: 'votes', label: 'Votes', count: votesCount }] : []),
   ]
 }
 

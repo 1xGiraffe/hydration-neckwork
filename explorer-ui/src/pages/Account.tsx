@@ -8,6 +8,7 @@ import { PortfolioChart, ProfileStats, MoneyMarketPositions, moneyMarketDebtUsd,
 import { BalancesTreemap } from '../components/BalancesTreemap'
 import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
+import { VotesTab } from '../components/VotesTab'
 
 export function Account({ address }: { address: string }) {
   const { data, isLoading, isError } = useAddress(address)
@@ -47,7 +48,7 @@ export function Account({ address }: { address: string }) {
           const explicitEvmBinding = data.aliases.find(alias => alias.relationship === 'explicit_binding' && alias.evmAddress)?.evmAddress
           // Debt counts from every market and is netted out of the portfolio Value.
           const debtUsd = moneyMarketDebtUsd(mmList)
-          const tabs = profileTabs(data.balances.length, mmList, data.activeDcas?.length ?? 0, data.liquidityPositions?.length ?? 0, counts.data?.activity)
+          const tabs = profileTabs(data.balances.length, mmList, data.activeDcas?.length ?? 0, data.liquidityPositions?.length ?? 0, counts.data?.activity, counts.data?.votes)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
@@ -131,6 +132,8 @@ export function Account({ address }: { address: string }) {
               </>)}
 
               {activeView === 'activity' && <ScopedActivity scope={{ kind: 'account', address }} />}
+
+              {activeView === 'votes' && <VotesTab scope={{ kind: 'account', address }} />}
             </>
           )
         })()}

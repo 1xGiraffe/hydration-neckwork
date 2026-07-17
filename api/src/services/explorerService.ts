@@ -7216,6 +7216,98 @@ async function getRecentVotes(limit: number, from?: string, to?: string, offset 
   })
 }
 
+// Collective (Council / Technical Committee) votes are too sparse (~3k events
+// all-time) to justify extending the vote_activity model: read raw_events
+// directly — the event-name set index plus the tiny row volume keep the scan
+// bounded. These events carry no conviction, balance, or referendum index; the
+// proposal hash (shortened) stands in for the referendum and the row carries no
+// token amount.
+const COLLECTIVE_VOTE_EVENTS = ['Council.Voted', 'TechnicalCommittee.Voted']
+function shortProposalHash(hash: string): string {
+  return /^0x[0-9a-f]+$/i.test(hash) && hash.length > 18 ? `${hash.slice(0, 8)}…${hash.slice(-6)}` : hash
+}
+async function getCollectiveVotes(accounts: string[], limit: number, from?: string, to?: string): Promise<VoteRow[]> {
+  const list = sqlAccountList(accounts)
+  if (list === "''") return []
+  const bound = timeWindow(from, to) ?? '1'
+  const res = await client.query({
+    query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
+            FROM price_data.raw_events
+            WHERE ${bound}
+              AND event_name IN (${sqlEventNameList(COLLECTIVE_VOTE_EVENTS)})
+              AND JSONExtractString(args_json,'account') IN (${list})
+            ORDER BY block_height DESC, event_index DESC
+            LIMIT {limit:UInt32}`,
+    query_params: { limit }, format: 'JSONEachRow',
+  })
+  const events = await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; args_json: string }>()
+  const hdx = asset(0)
+  // raw_events is a ReplacingMergeTree read without FINAL; dedup any re-ingested
+  // rows by (block, event_index) so a re-index can't emit a duplicate vote.
+  const seen = new Set<string>()
+  const out: VoteRow[] = []
+  for (const e of events) {
+    const key = `${e.block_height}:${e.event_index}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
+    const account = argStr(args, 'account')
+    const hash = argStr(args, 'proposalHash')
+    out.push({
+      blockHeight: e.block_height, timestamp: e.ts, eventIndex: e.event_index, extrinsicIndex: e.extrinsic_index,
+      account: account && ACCOUNT_RE.test(account) ? accountRef(account) : null,
+      pallet: e.event_name === 'Council.Voted' ? 'Council' : 'Technical Committee',
+      action: 'Voted', referendum: hash ? shortProposalHash(hash) : null,
+      side: args.voted === true ? 'Aye' : args.voted === false ? 'Nay' : 'Vote',
+      conviction: null, amount: null, asset: hdx, valueUsd: 0,
+    })
+  }
+  return out
+}
+
+// Account/tag Votes tab: OpenGov + Democracy rows come from the indexed
+// vote_activity path (getRecentVotes recovers referendum/conviction from the
+// joined vote call), collective rows from raw_events. Each source is fetched to
+// offset+limit depth, merged newest-first, and paged after the merge.
+async function getScopedVotes(accounts: string[], cacheScope: string, limit: number, offset: number, from?: string, to?: string, filters: VoteListFilters = {}): Promise<VoteRow[]> {
+  const window = timeWindow(from, to)
+  return cached(`explorer:${cacheScope}:votes:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, window ? 30_000 : 8_000, async () => {
+    const want = offset + limit
+    const [gov, collective] = await Promise.all([
+      getRecentVotes(want, from, to, 0, filters, accounts),
+      getCollectiveVotes(accounts, want, from, to),
+    ])
+    return [...gov, ...collective.filter(row => voteRowMatchesFilters(row, filters))]
+      .sort((a, b) => b.blockHeight - a.blockHeight || b.eventIndex - a.eventIndex)
+      .slice(offset, offset + limit)
+  })
+}
+
+// Total governance votes for an account set: conviction/democracy votes from
+// the account-activity index plus the (rare) collective votes from raw_events.
+// Feeds the Votes tab badge — cached like the neighbouring tab counts.
+async function getScopedVotesCount(accounts: string[], cacheKey: string): Promise<number> {
+  const list = sqlAccountList(accounts)
+  if (list === "''") return 0
+  return cached(`explorer:votes-count:${cacheKey}`, 600_000, async () => {
+    const [govRes, collectiveRes] = await Promise.all([
+      client.query({
+        query: `SELECT uniqExact((block_height, event_index)) AS c FROM price_data.account_activity
+                WHERE account IN (${list}) AND event_name IN ('ConvictionVoting.Voted','Democracy.Voted')`,
+        format: 'JSONEachRow',
+      }),
+      client.query({
+        query: `SELECT uniqExact((block_height, event_index)) AS c FROM price_data.raw_events
+                WHERE event_name IN (${sqlEventNameList(COLLECTIVE_VOTE_EVENTS)})
+                  AND JSONExtractString(args_json,'account') IN (${list})`,
+        format: 'JSONEachRow',
+      }),
+    ])
+    const n = (v: unknown) => Number(v ?? 0)
+    return n((await govRes.json<{ c: string }>())[0]?.c) + n((await collectiveRes.json<{ c: string }>())[0]?.c)
+  })
+}
+
 const isModuleAcct = (a: AccountRef | null | undefined): boolean => !!a && a.accountId.startsWith('0x6d6f646c')
 function activityExtrinsicSet(rows: ActivityRow[]): Set<string> {
   return new Set(rows.filter(r => r.extrinsicIndex != null).map(r => `${r.blockHeight}:${r.extrinsicIndex}`))
@@ -10417,13 +10509,22 @@ export async function getAddressExtrinsics(addressInput: string, limit = 25, off
   return getAccountExtrinsics(resolved.related, limit, offset, `addr-extrinsics:${resolved.norm.accountId}`, filters, from, to)
 }
 
+// Every governance vote cast by the account (OpenGov + Democracy + collectives),
+// scoped to the same related-account set as the other detail feeds.
+export async function getAddressVotes(addressInput: string, limit = 25, offset = 0, from?: string, to?: string, filters: VoteListFilters = {}): Promise<VoteRow[] | null> {
+  const resolved = await resolveRelatedAccounts(addressInput)
+  if (!resolved) return null
+  return getScopedVotes(resolved.related, `account:${resolved.norm.accountId}`, limit, offset, from, to, filters)
+}
+
 // Tab counts for an account/tag detail page: total signed extrinsics and total
 // events mentioning any related account. The events count is a full args scan
 // (~2.5s), so it is served from its own lazily-fetched endpoint under a long
 // cache rather than blocking the page payload.
-async function getAccountTabCounts(accounts: string[], cacheKey: string): Promise<{ extrinsics: number; events: number; activity: number }> {
+export interface TabCounts { extrinsics: number; events: number; activity: number; votes: number }
+async function getAccountTabCounts(accounts: string[], cacheKey: string): Promise<TabCounts> {
   const list = sqlAccountList(accounts)
-  if (list === "''") return { extrinsics: 0, events: 0, activity: 0 }
+  if (list === "''") return { extrinsics: 0, events: 0, activity: 0, votes: 0 }
   return cached(`explorer:tab-counts:${cacheKey}`, 600_000, async () => {
     const mmList = sqlAccountList([...new Set(accounts.map(evmAccountForm).filter(Boolean) as string[])])
     const indexedHits = `
@@ -10437,7 +10538,7 @@ async function getAccountTabCounts(accounts: string[], cacheKey: string): Promis
     const activityHits = `SELECT block_height, event_index, extrinsic_index, event_name, is_module_transfer
          FROM (${indexedHits})
          GROUP BY block_height, event_index, extrinsic_index, event_name, is_module_transfer`
-    const [extRes, evRes, mmRes, xcmRes, dcaRes, otcRes] = await Promise.all([
+    const [extRes, evRes, mmRes, xcmRes, dcaRes, otcRes, votes] = await Promise.all([
       client.query({
         query: `SELECT count() AS c FROM price_data.raw_extrinsics WHERE signer IN (${list}) OR effective_signer IN (${list})`,
         format: 'JSONEachRow',
@@ -10495,6 +10596,10 @@ async function getAccountTabCounts(accounts: string[], cacheKey: string): Promis
                     OR (block_height, extrinsic_index) IN (SELECT block_height, extrinsic_index FROM price_data.raw_extrinsics WHERE signer IN (${list}) OR effective_signer IN (${list})))`,
         format: 'JSONEachRow',
       }),
+      // Votes-tab badge: conviction/democracy plus the collective votes the
+      // activity index does not carry (its own 10-min cache is shared with the
+      // tag snapshot path).
+      getScopedVotesCount(accounts, cacheKey),
     ])
     const ev = (await evRes.json<Record<string, string>>())[0] ?? {}
     const n = (v: unknown) => Number(v ?? 0)
@@ -10505,25 +10610,29 @@ async function getAccountTabCounts(accounts: string[], cacheKey: string): Promis
       extrinsics: n((await extRes.json<{ c: string }>())[0]?.c),
       events: n(ev.events),
       activity,
+      votes,
     }
   })
 }
-export async function getAddressTabCounts(addressInput: string): Promise<{ extrinsics: number; events: number; activity: number } | null> {
+export async function getAddressTabCounts(addressInput: string): Promise<TabCounts | null> {
   const resolved = await resolveRelatedAccounts(addressInput)
   if (!resolved) return null
   return getAccountTabCounts(resolved.related, `addr:${resolved.norm.accountId}`)
 }
 const TAG_COUNT_REFRESH_MS = 10 * 60_000
-const tagCountRefreshes = new Map<string, Promise<{ extrinsics: number; events: number; activity: number }>>()
+const tagCountRefreshes = new Map<string, Promise<TabCounts>>()
 const hotTagCounts = new Set<string>()
-async function refreshTagTabCounts(tagId: string, members: string[], membershipKey: string): Promise<{ extrinsics: number; events: number; activity: number }> {
+async function refreshTagTabCounts(tagId: string, members: string[], membershipKey: string): Promise<TabCounts> {
   const existing = tagCountRefreshes.get(tagId)
   if (existing) return existing
   const refresh = (async () => {
     const counts = await getAccountTabCounts(members, `tag:${tagId}:${membershipKey}`)
+    // The snapshot table predates the votes badge and stays schema-stable; the
+    // votes count is recomputed cheaply (and cached) on the read path instead.
+    const { votes: _votes, ...persisted } = counts
     await client.insert({
       table: 'price_data.tag_activity_counts',
-      values: [{ tag_id: tagId, membership_key: membershipKey, ...counts, computed_at: new Date().toISOString().replace('T', ' ').slice(0, 19) }],
+      values: [{ tag_id: tagId, membership_key: membershipKey, ...persisted, computed_at: new Date().toISOString().replace('T', ' ').slice(0, 19) }],
       format: 'JSONEachRow',
     })
     return counts
@@ -10533,7 +10642,7 @@ async function refreshTagTabCounts(tagId: string, members: string[], membershipK
   tagCountRefreshes.set(tagId, refresh)
   return refresh
 }
-export async function getTagTabCounts(tagId: string): Promise<{ extrinsics: number; events: number; activity: number } | null> {
+export async function getTagTabCounts(tagId: string): Promise<TabCounts | null> {
   const members = tagMembers(tagId)
   if (!members) return null
   hotTagCounts.add(tagId)
@@ -10552,8 +10661,10 @@ export async function getTagTabCounts(tagId: string): Promise<{ extrinsics: numb
     // snapshot. The ten-minute prewarmer owns refresh scheduling; this endpoint
     // always returns the last complete snapshot immediately. A request-triggered
     // refresh used to contend with the activity feed on the same cold page even
-    // though the counts response itself had already completed.
-    return { extrinsics: Number(snapshot.extrinsics), events: Number(snapshot.events), activity: Number(snapshot.activity) }
+    // though the counts response itself had already completed. Votes aren't in
+    // the snapshot table — they're recomputed via their own cheap cached query.
+    const votes = await getScopedVotesCount(members, `tag:${tagId}:${membershipKey}`)
+    return { extrinsics: Number(snapshot.extrinsics), events: Number(snapshot.events), activity: Number(snapshot.activity), votes }
   }
   return refreshTagTabCounts(tagId, members, membershipKey)
 }
@@ -11935,6 +12046,11 @@ export async function getTagEvents(tagId: string, limit = 25, offset = 0, filter
   const members = tagMembers(tagId)
   if (!members) return null
   return getAccountEvents(members, limit, offset, `tag-events:${tagId}`, filters, from, to)
+}
+export async function getTagVotes(tagId: string, limit = 25, offset = 0, from?: string, to?: string, filters: VoteListFilters = {}): Promise<VoteRow[] | null> {
+  const members = tagMembers(tagId)
+  if (!members) return null
+  return getScopedVotes(members, `tag:${tagId}`, limit, offset, from, to, filters)
 }
 
 // daily activity (bar charts)

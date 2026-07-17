@@ -145,6 +145,10 @@ export function useAccountEvents(address: string | null, offset = 0, from?: stri
   const ri = useInterval()
   return useQuery({ queryKey: ['account-events', address, offset, from, to, filters], queryFn: ({ signal }) => api.accountEvents(address as string, offset, undefined, from, to, filters, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000 })
 }
+export function useAccountVotes(address: string | null, offset = 0, from?: string, to?: string) {
+  const ri = useInterval()
+  return useQuery({ queryKey: ['account-votes', address, offset, from, to], queryFn: ({ signal }) => api.accountVotes(address as string, offset, undefined, from, to, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000 })
+}
 // Lazy per-account / per-tag activity totals (extrinsic + event counts). The
 // first hit can take a few seconds server-side, so no live polling and a long
 // staleTime — badges simply appear once the count query resolves.
@@ -182,6 +186,10 @@ export function useTagExtrinsics(tagId: string | null, offset = 0, from?: string
 export function useTagEvents(tagId: string | null, offset = 0, from?: string, to?: string, filters?: EventFilters) {
   const ri = useInterval()
   return useQuery({ queryKey: ['tag-events', tagId, offset, from, to, filters], queryFn: ({ signal }) => api.tagEvents(tagId as string, offset, undefined, from, to, filters, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000 })
+}
+export function useTagVotes(tagId: string | null, offset = 0, from?: string, to?: string) {
+  const ri = useInterval()
+  return useQuery({ queryKey: ['tag-votes', tagId, offset, from, to], queryFn: ({ signal }) => api.tagVotes(tagId as string, offset, undefined, from, to, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000 })
 }
 export function useTagActivityCount(tagId: string | null, min: number | null) {
   return useQuery({ queryKey: ['tag-activity-count', tagId, min], queryFn: ({ signal }) => api.tagActivityCount(tagId as string, min as number, signal), enabled: !!tagId && min != null, staleTime: 600_000 })

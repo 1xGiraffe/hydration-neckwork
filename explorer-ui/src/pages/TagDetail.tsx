@@ -5,6 +5,7 @@ import { paths, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, AddrPill, Copy, ProfilePageSkeleton, DetailTabs, TagIcon, accountHref, rowNav } from '../components/ui'
 import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
+import { VotesTab } from '../components/VotesTab'
 import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, MoneyMarketPositions, ActiveDcaTable, LiquidityPositionsTable } from '../components/AccountSections'
 import { BalancesTreemap } from '../components/BalancesTreemap'
 
@@ -37,7 +38,7 @@ export function TagDetail({ tagId }: { tagId: string }) {
           const primarySupplyUsd = Number(primaryMarket?.totalSuppliedBase ?? primaryMarket?.totalCollateralBase ?? 0) / 1e8
           const primaryDebtUsd = Number(primaryMarket?.totalDebtBase ?? 0) / 1e8
           const supplementalDebtUsd = mmList.filter(p => p !== primaryMarket).reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
-          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, counts.data?.activity)
+          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, counts.data?.activity, counts.data?.votes)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
@@ -92,6 +93,8 @@ export function TagDetail({ tagId }: { tagId: string }) {
               </>)}
 
               {activeView === 'activity' && <ScopedActivity scope={{ kind: 'tag', tagId }} />}
+
+              {activeView === 'votes' && <VotesTab scope={{ kind: 'tag', tagId }} />}
             </>
           )
         })()}
