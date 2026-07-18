@@ -1088,6 +1088,39 @@ svg { display: block; }
 .apx-tip .t-d { color: var(--text-low); }
 .apx-tip .t-p { color: var(--text-high); font-weight: 600; }
 .apx-tip .t-e { color: var(--lavender); }
+/* value-history event markers: per-marker --mk carries the kind color. The
+   dashed drop-line stays faint so the value line keeps reading first; the cap
+   is the interactive bit (hover → clamped tooltip, click → activity detail). */
+.apx-marks { position: absolute; inset: 0; pointer-events: none; }
+.apx-mark { position: absolute; top: 0; bottom: 0; width: 0; pointer-events: none; }
+.apx-mark-line { position: absolute; top: 11px; bottom: 0; left: -0.5px; width: 0; border-left: 1px dashed var(--mk); opacity: 0.3; }
+.apx-mark:hover .apx-mark-line, .apx-mark.open .apx-mark-line { opacity: 0.75; }
+.apx-mark-cap {
+  position: absolute; top: 0; left: 0; transform: translateX(-50%); box-sizing: border-box;
+  min-width: 11px; height: 11px; border-radius: 9999px;
+  background: var(--mk); border: 2px solid var(--bg-elev);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--mk) 40%, transparent);
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'GeistMono'; font-size: 9px; font-weight: 700; line-height: 1; text-decoration: none;
+  pointer-events: auto; cursor: pointer; transition: transform 120ms ease;
+}
+.apx-mark-cap:hover, .apx-mark-cap:focus-visible { transform: translateX(-50%) scale(1.25); }
+/* Cluster cap: an outlined ×N pill (panel background + kind-colored text reads
+   in both themes, unlike text on the raw kind color). */
+.apx-mark-cap.multi { min-width: 0; height: 15px; padding: 0 5px; border-radius: 8px; background: var(--bg-elev); border: 1px solid var(--mk); box-shadow: none; color: var(--mk); }
+.apx-mark-tip {
+  position: absolute; top: 18px; left: 0; transform: translateX(-50%); z-index: 6;
+  display: flex; flex-direction: column; gap: 4px; padding: 6px 9px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+  font-family: 'GeistMono'; font-size: 11px; white-space: nowrap;
+  box-shadow: 0 8px 20px rgba(0,0,0,.4); pointer-events: auto;
+  animation: tipIn 120ms ease-out;
+}
+.apx-mark-row { display: flex; align-items: center; gap: 8px; color: var(--text-medium); text-decoration: none; }
+.apx-mark-row .t-d { color: var(--text-low); }
+.apx-mark-row .t-k { font-weight: 600; }
+.apx-mark-row .t-p { color: var(--text-high); font-weight: 600; margin-left: auto; }
+a.apx-mark-row:hover .t-p { text-decoration: underline; }
 .ema-now { font-family: 'GeistMono'; font-size: 12px; color: var(--lavender); font-weight: 500; margin-left: 8px; }
 .ema-tag { color: var(--lavender); margin-left: 8px; }
 .pf-head-asset { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }

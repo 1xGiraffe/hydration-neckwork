@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { useAddress, useAddressHistory, useAccountActivityCounts, useStats } from '../hooks/useExplorerData'
+import { useAddress, useAddressHistory, useAddressValueEvents, useAccountActivityCounts, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, useQueryValue, setQuery } from '../router'
@@ -16,6 +16,7 @@ export function Account({ address }: { address: string }) {
   const { data: stats } = useStats(!!data?.activeDcas?.length)
   const canonicalAddress = data ? (data.evmAddress ?? data.ss58Polkadot) : null
   const history = useAddressHistory(canonicalAddress)
+  const valueEvents = useAddressValueEvents(canonicalAddress)
   const counts = useAccountActivityCounts(canonicalAddress)
   const headBlock = stats?.headBlock ?? 0
   const view = useQueryValue('view', 'overview')
@@ -118,7 +119,7 @@ export function Account({ address }: { address: string }) {
 
               <CloseAccountsSection address={canonicalAddress ?? address} />
 
-              <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={history.data?.portfolioSeries ?? data.portfolioSeries ?? []} dates={history.data?.portfolioDates ?? data.portfolioDates} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} loading={history.isLoading || (history.isFetching && !history.data)} />
+              <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={history.data?.portfolioSeries ?? data.portfolioSeries ?? []} dates={history.data?.portfolioDates ?? data.portfolioDates} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} loading={history.isLoading || (history.isFetching && !history.data)} valueEvents={valueEvents.data} />
               </>)}
 
               {activeView === 'balances' && (

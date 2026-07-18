@@ -278,6 +278,19 @@ export interface AssetBalancePoint { ts: string; blockHeight: number; balance: n
 export interface AssetBalanceHistory { asset: AssetRef; current: number; points: AssetBalancePoint[]; availableFrom?: string }
 export interface AccountHistoryResponse { portfolioSeries: number[]; portfolioDates: string[]; balanceHistory: AssetBalanceHistory[] }
 
+// One of the account/tag's largest value-changing events (big transfers in/out,
+// swaps, liquidity moves, liquidations) — the value chart's clickable markers.
+export interface ValueEvent {
+  blockHeight: number
+  eventIndex: number
+  extrinsicIndex: number | null
+  timestamp: string
+  kind: 'transfer-in' | 'transfer-out' | 'swap' | 'liquidity' | 'liquidation' | 'other'
+  valueUsd: number
+  asset: AssetRef
+  counterparty: AccountRef | null
+}
+
 export type CloseAccountReason =
   | { type: 'direct_transfers'; count: number; days: number; valueUsd: number | null; bidirectional: boolean }
   | { type: 'near_signing'; days: number }

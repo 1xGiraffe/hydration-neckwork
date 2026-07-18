@@ -1,9 +1,11 @@
 /* eslint-disable react-refresh/only-export-components -- shared account-section components + their count helper */
 import { F, AssetIcon, AssetAmount, AreaChart, ChartSkeleton, healthFactorDisplay, AddrPill, rowNav, Dash } from './ui'
+import type { ChartMarker } from './ui'
 import { Link, paths } from '../router'
+import type { ActivitySlug } from '../router'
 import { performancePoints } from './performance'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
-import type { MoneyMarketPosition, LpPosition, ActiveDca, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation } from '../types'
+import type { MoneyMarketPosition, LpPosition, ActiveDca, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent } from '../types'
 import type { ReactNode } from 'react'
 
 // Render helpers shared by the Account and Tag detail pages so both surface the
@@ -39,12 +41,55 @@ function fmtCountdown(total: number): string {
   return `${sec}s`
 }
 
+// Value-event marker presentation: kind → badge label, marker link slug and the
+// hover-card body. The slug only needs to resolve (SLUG_TYPES groups action-level
+// slugs by family); the detail page canonicalizes add- vs remove-liquidity etc.
+const VALUE_EVENT_LABELS: Record<ValueEvent['kind'], string> = {
+  'transfer-in': 'Transfer in', 'transfer-out': 'Transfer out', swap: 'Swap',
+  liquidity: 'Liquidity', liquidation: 'Liquidation', other: 'Transfer',
+}
+const VALUE_EVENT_SLUGS: Record<ValueEvent['kind'], ActivitySlug> = {
+  'transfer-in': 'transfer', 'transfer-out': 'transfer', swap: 'swap',
+  liquidity: 'add-liquidity', liquidation: 'liquidate', other: 'transfer',
+}
+// Single-marker hover card: date + kind + value, then the asset and (for
+// transfers) the counterparty. The kind keeps the marker's --mk color.
+function valueEventTip(ev: ValueEvent): ReactNode {
+  const dir = ev.kind === 'transfer-in' ? 'from' : ev.kind === 'transfer-out' ? 'to' : null
+  return <>
+    <div className="apx-mark-row">
+      <span className="t-d">{ev.timestamp.slice(0, 10)}</span>
+      <span className="t-k" style={{ color: 'var(--mk)' }}>{VALUE_EVENT_LABELS[ev.kind]}</span>
+      <span className="t-p">{F.usd(ev.valueUsd)}</span>
+    </div>
+    <div className="apx-mark-row">
+      <span className="trade-leg">
+        <AssetIcon assetId={ev.asset.assetId} iconAssetId={ev.asset.iconAssetId} symbol={ev.asset.symbol} size={16} parachainId={ev.asset.parachainId} origin={ev.asset.origin} />
+        {' '}<span className="mono">{ev.asset.symbol}</span>
+      </span>
+      {dir && ev.counterparty && <><span className="muted">{dir}</span><AddrPill account={ev.counterparty} noCopy /></>}
+    </div>
+  </>
+}
+function valueEventMarker(ev: ValueEvent): ChartMarker {
+  return {
+    ts: ev.timestamp,
+    kind: ev.kind,
+    label: VALUE_EVENT_LABELS[ev.kind],
+    valueUsd: ev.valueUsd,
+    href: paths.activityDetail(VALUE_EVENT_SLUGS[ev.kind], `${ev.blockHeight}-e${ev.eventIndex}`),
+    tip: valueEventTip(ev),
+  }
+}
+
 // Portfolio value area chart. `netUsd` is the value shown at the top of the
 // card (portfolio minus any borrowed debt); the series carries no dates of its
 // own, so we borrow the first asset's balance-history point timestamps when the
-// lengths line up (else a value-only tooltip).
-export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanceHistory, loading }: {
-  title: string; netUsd: number; series: number[]; dates?: string[]; balanceHistory?: AssetBalanceHistory[]; loading?: boolean
+// lengths line up (else a value-only tooltip). `valueEvents` (scope-agnostic —
+// the parent fetches per account or tag) flag the largest transfers/swaps/
+// liquidations as clickable markers on the chart's time axis.
+export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanceHistory, loading, valueEvents }: {
+  title: string; netUsd: number; series: number[]; dates?: string[]; balanceHistory?: AssetBalanceHistory[]; loading?: boolean; valueEvents?: ValueEvent[] | null
 }) {
   if (!series || series.length <= 1) {
     return loading ? (
@@ -71,12 +116,13 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
     { label: '1M', days: 30 },
     { label: '1Y', days: 365 },
   ], { minBase: 1, maxRatio: 20 })
+  const markers = valueEvents?.length ? valueEvents.map(valueEventMarker) : undefined
   return (
     <>
       <div className="sec-title">{title}</div>
       <div className="pf-card">
         <div className="pf-head"><div className="pf-now">{F.usd(netUsd)}</div>{perfItems.length > 0 && <div className="perf-row">{perfItems.map(p => perf(p.label, p.value))}</div>}</div>
-        <AreaChart data={series} h={180} dates={dates} />
+        <AreaChart data={series} h={180} dates={dates} markers={markers} />
       </div>
     </>
   )

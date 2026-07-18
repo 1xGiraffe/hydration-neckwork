@@ -1,4 +1,4 @@
-import { useTag, useTagActivityCounts, useStats } from '../hooks/useExplorerData'
+import { useTag, useTagActivityCounts, useTagValueEvents, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, useQueryValue, setQuery } from '../router'
@@ -12,6 +12,7 @@ import { BalancesTreemap } from '../components/BalancesTreemap'
 export function TagDetail({ tagId }: { tagId: string }) {
   const { data, isLoading, isError } = useTag(tagId)
   const counts = useTagActivityCounts(tagId)
+  const valueEvents = useTagValueEvents(tagId)
   useDocumentTitle(data?.name)
   const now = useNow()
   const { data: stats } = useStats(!!data?.activeDcas?.length)
@@ -79,7 +80,7 @@ export function TagDetail({ tagId }: { tagId: string }) {
 
               <CloseAccountsSection tagId={tagId} />
 
-              <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} />
+              <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data} />
               </>)}
 
               {activeView === 'balances' && (

@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- shared atoms + formatters module */
 import { useId, useLayoutEffect, useRef, useState } from 'react'
-import type { ReactNode, KeyboardEvent, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
+import type { CSSProperties, FocusEvent as ReactFocusEvent, ReactNode, KeyboardEvent, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { Link, paths, navigate } from '../router'
 import type { AccountRef, AssetOrigin, AssetRef } from '../types'
 import { parseUtcTimestamp } from '../utils/time'
@@ -116,17 +116,25 @@ function tsDate(ts: string): string {
   return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 10) : ''
 }
 
-// Per-point x fraction (0..1) for a chart. Proportional to time when every point
-// has a parseable, non-decreasing date with a positive overall span; otherwise
-// evenly spaced by index.
-function timeFractions(n: number, dates?: string[]): number[] {
-  const byIndex = Array.from({ length: n }, (_, i) => i / (n - 1))
-  if (!dates || dates.length !== n) return byIndex
+// The chart's time axis: parsed timestamps and [t0, span], but ONLY when every
+// point has a parseable, non-decreasing date with a positive overall span. Null
+// tells the caller to fall back to index spacing. timeFractions (the line) and
+// the event markers both key off this one guard so they always share an x axis.
+function timeAxisSpan(n: number, dates?: string[]): { ts: number[]; t0: number; span: number } | null {
+  if (!dates || dates.length !== n) return null
   const ts = dates.map(parseUtcTimestamp)
   const span = ts[n - 1] - ts[0]
-  if (!(span > 0)) return byIndex
-  for (let i = 0; i < n; i++) if (!Number.isFinite(ts[i]) || (i > 0 && ts[i] < ts[i - 1])) return byIndex
-  return ts.map(t => (t - ts[0]) / span)
+  if (!(span > 0)) return null
+  for (let i = 0; i < n; i++) if (!Number.isFinite(ts[i]) || (i > 0 && ts[i] < ts[i - 1])) return null
+  return { ts, t0: ts[0], span }
+}
+
+// Per-point x fraction (0..1) for a chart. Proportional to time when the dates
+// form a usable axis; otherwise evenly spaced by index.
+function timeFractions(n: number, dates?: string[]): number[] {
+  const axis = timeAxisSpan(n, dates)
+  if (!axis) return Array.from({ length: n }, (_, i) => i / (n - 1))
+  return axis.ts.map(t => (t - axis.t0) / axis.span)
 }
 
 // Relative time ("3m ago") that reveals the absolute UTC timestamp on hover.
@@ -569,15 +577,116 @@ export function ChartTip({ xPct, children }: { xPct: number; children: ReactNode
   return <div className="apx-tip" ref={ref}>{children}</div>
 }
 
+/* ============ chart event markers ============ */
+// One flagged event on an AreaChart: positioned by `ts` on the same time axis
+// the crosshair uses, colored by `kind`, navigating to `href` on click. `tip`
+// is the single-marker hover card; clusters list label/value rows instead.
+export interface ChartMarker { ts: string; kind: string; label: string; valueUsd: number; href: string | null; tip: ReactNode }
+
+// kind → theme token, legible in both the dark and light palettes.
+const CHART_MARKER_COLORS: Record<string, string> = {
+  'transfer-in': 'var(--green)',
+  'transfer-out': 'var(--red)',
+  swap: 'var(--sky)',
+  liquidity: 'var(--lavender)',
+  liquidation: 'var(--red)',
+  other: 'var(--text-low)',
+}
+function markerColor(kind: string): string { return CHART_MARKER_COLORS[kind] ?? 'var(--text-low)' }
+
+export interface ChartMarkerCluster { frac: number; items: ChartMarker[] }
+
+// Group markers that would land within `threshold` of the chart width of a
+// cluster's leftmost member into one flag (rendered with a ×N cap), so near-
+// coincident events never stack into an unreadable pile. Anchoring on the first
+// member bounds each cluster's width — chaining on neighbors would let a run of
+// closely spaced events collapse months into one flag. Out-of-range events are
+// dropped (a whisker of slack absorbs cache skew at the span's edges); items
+// are value-sorted so a cluster's largest event drives its color and click.
+export function clusterChartMarkers(markers: ChartMarker[], t0: number, span: number, threshold = 0.015): ChartMarkerCluster[] {
+  const pts = markers
+    .map(m => ({ m, frac: (parseUtcTimestamp(m.ts) - t0) / span }))
+    .filter(p => Number.isFinite(p.frac) && p.frac >= -0.01 && p.frac <= 1.01)
+    .map(p => ({ m: p.m, frac: Math.min(1, Math.max(0, p.frac)) }))
+    .sort((a, b) => a.frac - b.frac)
+  const groups: { fracs: number[]; items: ChartMarker[] }[] = []
+  for (const p of pts) {
+    const last = groups[groups.length - 1]
+    if (last && p.frac - last.fracs[0] < threshold) { last.fracs.push(p.frac); last.items.push(p.m) }
+    else groups.push({ fracs: [p.frac], items: [p.m] })
+  }
+  return groups.map(g => ({
+    frac: g.fracs.reduce((s, f) => s + f, 0) / g.fracs.length,
+    items: [...g.items].sort((a, b) => b.valueUsd - a.valueUsd),
+  }))
+}
+
+// One marker flag: a subtle dashed drop-line + a clickable cap at the top.
+// Hovering (or keyboard-focusing) the cap opens a tooltip clamped inside the
+// chart like ChartTip; a cluster's tooltip lists every event as its own link.
+function ChartMarkerFlag({ cluster, open, onOpen, onClose }: {
+  cluster: ChartMarkerCluster; open: boolean; onOpen: () => void; onClose: () => void
+}) {
+  const tipRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const el = tipRef.current
+    const wrap = el?.closest('.apx-wrap') as HTMLElement | null
+    if (!el || !wrap) return
+    // Same edge-clamping as ChartTip, expressed as a shift from the marker's x
+    // (the marker's own box is a zero-width column at the event's time).
+    const half = el.offsetWidth / 2, w = wrap.clientWidth, x = cluster.frac * w
+    const shift = (w <= half * 2 ? w / 2 : Math.min(Math.max(x, half), w - half)) - x
+    el.style.transform = `translateX(calc(-50% + ${shift.toFixed(1)}px))`
+  })
+  const top = cluster.items[0]
+  const count = cluster.items.length
+  const capLabel = count > 1 ? `×${count}` : null
+  const title = count > 1 ? `${count} events` : `${top.label} · ${F.usd(top.valueUsd)}`
+  // Keep the tip open while focus moves between its links; close on focus-out.
+  const onBlur = (e: ReactFocusEvent<HTMLDivElement>) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onClose()
+  }
+  return (
+    <div className={`apx-mark${open ? ' open' : ''}`} style={{ left: `${(cluster.frac * 100).toFixed(3)}%`, '--mk': markerColor(top.kind) } as CSSProperties}
+      onMouseEnter={onOpen} onMouseLeave={onClose} onFocus={onOpen} onBlur={onBlur}>
+      <span className="apx-mark-line" aria-hidden="true" />
+      {top.href
+        ? <Link className={`apx-mark-cap${capLabel ? ' multi' : ''}`} to={top.href} title={title}>{capLabel}</Link>
+        : <span className={`apx-mark-cap${capLabel ? ' multi' : ''}`} title={title} tabIndex={0}>{capLabel}</span>}
+      {open && (
+        <div className="apx-mark-tip" ref={tipRef}>
+          {count > 1
+            ? cluster.items.map((m, i) => {
+              const row = <>
+                <span className="t-d">{tsDate(m.ts)}</span>
+                <span className="t-k" style={{ color: markerColor(m.kind) }}>{m.label}</span>
+                <span className="t-p">{F.usd(m.valueUsd)}</span>
+              </>
+              return m.href
+                ? <Link key={i} className="apx-mark-row" to={m.href}>{row}</Link>
+                : <div key={i} className="apx-mark-row">{row}</div>
+            })
+            : top.tip}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // Area/line chart with an optional target line and a crosshair tooltip on hover.
 // `dates` (parallel to `data`) makes the tooltip show the point's date; `valueFmt`
 // formats the displayed value (default F.usd, used by the portfolio charts).
-export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt = F.usd }: {
+// `markers` flags notable events on the same time axis (see ChartMarker).
+export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt = F.usd, markers }: {
   data: number[]; h?: number; target?: number; color?: string; floor?: number
-  dates?: string[]; valueFmt?: (v: number) => string
+  dates?: string[]; valueFmt?: (v: number) => string; markers?: ChartMarker[]
 }) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const [hover, setHover] = useState<{ xPct: number; yPct: number; val: string; date: string } | null>(null)
+  const [openMark, setOpenMark] = useState<number | null>(null)
+  // On phones 1.5% of the chart is a few px — caps would collide, so cluster
+  // wider there. Same breakpoint as the stylesheet's table→card switch.
+  const narrow = useMediaQuery('(max-width: 720px)')
   if (!data || data.length < 2) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>Not enough history.</div>
   const W = 820, padT = 14, padB = 14
   // `floor` pins the baseline (e.g. 0) so small values don't glue to the bottom.
@@ -596,6 +705,11 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
   const up = data[data.length - 1] >= data[0]
   const col = color ?? (up ? 'var(--green)' : 'var(--red)')
   const gid = 'ag' + Math.round(min * 1000 + max)
+  // Markers key off the EXACT axis the line uses (timeAxisSpan is the same guard
+  // as timeFractions): render only when the line is time-proportional, so a flag
+  // never drifts off a curve that fell back to index spacing.
+  const markAxis = markers?.length ? timeAxisSpan(data.length, dates) : null
+  const markClusters = markers && markAxis ? clusterChartMarkers(markers, markAxis.t0, markAxis.span, narrow ? 0.045 : 0.015) : []
 
   function onMove(e: ReactPointerEvent) {
     const wrap = wrapRef.current; if (!wrap) return
@@ -621,8 +735,18 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
         {target != null && <line x1={0} x2={W} y1={sy(target).toFixed(1)} y2={sy(target).toFixed(1)} stroke="var(--text-low)" strokeDasharray="3 4" strokeOpacity="0.6" vectorEffect="non-scaling-stroke" />}
         <path className="chart-line" d={line} fill="none" stroke={col} strokeWidth="2" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
       </svg>
+      {markClusters.length > 0 && (
+        <div className="apx-marks">
+          {markClusters.map((c, i) => (
+            <ChartMarkerFlag key={`${c.frac}:${c.items.length}`} cluster={c} open={openMark === i}
+              onOpen={() => setOpenMark(i)} onClose={() => setOpenMark(cur => (cur === i ? null : cur))} />
+          ))}
+        </div>
+      )}
       {hover && <div className="apx-cross"><div className="apx-vline" style={{ left: `${hover.xPct}%` }} /><div className="apx-dot" style={{ left: `${hover.xPct}%`, top: `${hover.yPct}%` }} /></div>}
-      {hover && (
+      {/* The crosshair value tip yields while a marker tip is open — the two
+          would otherwise overlap at the top edge. */}
+      {hover && openMark == null && (
         <ChartTip xPct={hover.xPct}>
           {hover.date && <span className="t-d">{hover.date}</span>}
           <span className="t-p">{hover.val}</span>

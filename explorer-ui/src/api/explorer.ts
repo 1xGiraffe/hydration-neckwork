@@ -3,6 +3,7 @@ import type {
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem,
   AccountsPage, AccountSort, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, MoneyMarketResponse, AssetDetail, TagDetail,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail,
+  ValueEvent,
 } from '../types'
 
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -72,6 +73,12 @@ export const api = {
   accountVotes: (address: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<VoteRow[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/votes`, { offset, limit, from, to }), signal),
   accountActivityCounts: (address: string, signal?: AbortSignal) => getJson<{ extrinsics: number; events: number; activity: number; votes: number }>(`/explorer/address/${encodeURIComponent(address)}/counts`, signal),
+  // Largest value-changing events (big transfers/swaps/liquidations) for the
+  // value-history chart's markers; defaults to the account's full indexed range.
+  accountValueEvents: (address: string, from?: string, to?: string, signal?: AbortSignal) =>
+    getJson<ValueEvent[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/value-events`, { from, to }), signal),
+  tagValueEvents: (tagId: string, from?: string, to?: string, signal?: AbortSignal) =>
+    getJson<ValueEvent[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/value-events`, { from, to }), signal),
   // Activity rows surviving a $-value filter (smol threshold) — null while the value index backfills.
   accountActivityCount: (address: string, min: number, signal?: AbortSignal) => getJson<{ activity: number | null }>(withQuery(`/explorer/address/${encodeURIComponent(address)}/activity-count`, { min }), signal),
   tag: (tagId: string, signal?: AbortSignal) => getJson<TagDetail>(`/explorer/tag/${encodeURIComponent(tagId)}`, signal),

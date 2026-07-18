@@ -165,6 +165,14 @@ export function useAccountActivityCount(address: string | null, min: number | nu
     staleTime: 600_000,
   })
 }
+// Value-history chart markers: the account/tag's largest transfers, swaps and
+// liquidations. Server-cached top-N; no live polling — the set moves slowly.
+export function useAddressValueEvents(address: string | null) {
+  return useQuery({ queryKey: ['address-value-events', address], queryFn: ({ signal }) => api.accountValueEvents(address as string, undefined, undefined, signal), enabled: !!address, staleTime: 600_000 })
+}
+export function useTagValueEvents(tagId: string | null) {
+  return useQuery({ queryKey: ['tag-value-events', tagId], queryFn: ({ signal }) => api.tagValueEvents(tagId as string, undefined, undefined, signal), enabled: !!tagId, staleTime: 600_000 })
+}
 export function useTagActivityCounts(tagId: string | null) {
   return useQuery({ queryKey: ['tag-activity-counts', tagId], queryFn: ({ signal }) => api.tagActivityCounts(tagId as string, signal), enabled: !!tagId, staleTime: 600_000 })
 }

@@ -7,6 +7,7 @@ import {
   getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getMoneyMarket, getAssetDetail, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag,
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressActivityCountAtMin, getTagActivityCountAtMin,
+  getAddressValueEvents, getTagValueEvents,
   getTagActivity, getTagExtrinsics, getTagEvents,
   getAddressVotes, getTagVotes,
   type EventListFilters,
@@ -428,6 +429,27 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const query = activityCountQuery.safeParse(req.query)
     if (!params.success || !query.success) return reply.status(400).send({ error: 'Invalid request' })
     return { activity: await getTagActivityCountAtMin(params.data.tagId, query.data.min) }
+  })
+
+  // Largest value-changing events (big transfers/swaps/liquidations) for the
+  // value-history chart's markers. Optional from/to day bounds; the default is
+  // the account's full indexed range — the same span the chart draws.
+  fastify.get('/explorer/address/:address/value-events', async (req, reply) => {
+    const params = addressParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const q = req.query as Record<string, unknown>
+    const rows = await getAddressValueEvents(params.data.address, dateParam(q, 'from'), dateParam(q, 'to'))
+    if (!rows) return reply.status(404).send({ error: 'Address not recognized' })
+    return rows
+  })
+
+  fastify.get('/explorer/tag/:tagId/value-events', async (req, reply) => {
+    const params = tagParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
+    const q = req.query as Record<string, unknown>
+    const rows = await getTagValueEvents(params.data.tagId, dateParam(q, 'from'), dateParam(q, 'to'))
+    if (!rows) return reply.status(404).send({ error: 'Tag not found' })
+    return rows
   })
 
   fastify.get('/explorer/hdx', async () => {

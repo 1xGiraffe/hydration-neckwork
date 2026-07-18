@@ -10773,6 +10773,255 @@ export async function getAddressActivityCountAtMin(addressInput: string, minUsd:
   return getAccountActivityCountAtMin(resolved.related, `addr:${resolved.norm.accountId}`, minUsd)
 }
 
+// value-event markers (the "Value" chart's flagged big events)
+// The largest value-changing events across the account set's history: user
+// transfers (in/out), swaps, liquidity moves, and money-market liquidations,
+// each valued at its block-time hourly close — never the current price.
+export interface ValueEvent {
+  blockHeight: number
+  eventIndex: number
+  extrinsicIndex: number | null
+  timestamp: string
+  kind: 'transfer-in' | 'transfer-out' | 'swap' | 'liquidity' | 'liquidation' | 'other'
+  valueUsd: number
+  asset: AssetRef
+  counterparty: AccountRef | null
+}
+
+const VALUE_EVENT_TRANSFER_NAMES = ['Balances.Transfer', 'Tokens.Transfer', 'Currencies.Transferred']
+const VALUE_EVENT_LIQUIDITY_NAMES = [
+  'Omnipool.LiquidityAdded', 'Omnipool.LiquidityRemoved',
+  'Stableswap.LiquidityAdded', 'Stableswap.LiquidityRemoved',
+  'XYK.LiquidityAdded', 'XYK.LiquidityRemoved',
+]
+const VALUE_EVENT_DEFAULT_LIMIT = 12
+
+// SQL: per-asset raw→token scale (10^decimals) for exact-index value ranking.
+function assetDecimalsPowSql(assetIdExpr: string): string {
+  const assets = allExplorerAssets()
+  const ids = assets.map(a => a.assetId).join(',')
+  const decimals = assets.map(a => a.decimals).join(',')
+  return `pow(10, transform(toUInt32(${assetIdExpr}), [${ids || '0'}], [${decimals || '12'}], 12))`
+}
+
+function valueEventKind(eventName: string): ValueEvent['kind'] {
+  if (SWAP_EVENTS.includes(eventName)) return 'swap'
+  if (VALUE_EVENT_LIQUIDITY_NAMES.includes(eventName)) return 'liquidity'
+  if (/Liquidat/.test(eventName)) return 'liquidation'
+  return 'other'
+}
+
+interface ValueEventCandidateRow {
+  block_height: number
+  event_index: number
+  extrinsic_index: number | null
+  event_name: string
+  ts: string
+  asset_id: number
+  amount: string
+  value_usd: number
+}
+
+// Top-N largest-USD value events for an explicit account set, bounded to the
+// optional day window (default: the full indexed range, matching the value-
+// history chart's span). One bounded read of the compact account_activity_v3
+// index (sort key leads with account) valued via the ASOF hourly-close join the
+// value filters use, plus one LiquidationCall read of the MM read model —
+// liquidations are EVM-side and never hit the substrate event index.
+async function getAccountValueEvents(accounts: string[], cacheKey: string, from?: string, to?: string, limit = VALUE_EVENT_DEFAULT_LIMIT): Promise<ValueEvent[]> {
+  const list = sqlAccountList(accounts)
+  if (list === "''") return []
+  return cached(`explorer:value-events:${cacheKey}:${from ?? ''}:${to ?? ''}:${limit}`, 600_000, async () => {
+    const bound = timeWindow(from, to) ?? '1'
+    // Fetch well past the requested markers: mirror legs (~half the transfer
+    // candidates), pool/MM-leg counterparties and same-extrinsic swap echoes are
+    // dropped below and must not leave the chart short.
+    const fetch = limit * 4
+    const closes = historicalClosesRelationSql()
+    const namedEvents = [...SWAP_EVENTS, ...VALUE_EVENT_LIQUIDITY_NAMES].map(n => `'${n}'`).join(',')
+    const transferNames = VALUE_EVENT_TRANSFER_NAMES.map(n => `'${n}'`).join(',')
+    const mmList = sqlAccountList([...new Set(accounts.map(evmAccountForm).filter(Boolean) as string[])])
+    const mmAssetExpr = mmAssetIdSql('m.asset_address')
+    const [eventRes, liqRes] = await Promise.all([
+      client.query({
+        query: `
+          SELECT block_height, event_index, any(extrinsic_index) AS extrinsic_index, any(event_name) AS event_name,
+                 any(ts) AS ts, any(asset_id) AS asset_id, any(amount) AS amount, any(value_usd) AS value_usd
+          FROM (
+            SELECT a.block_height AS block_height, a.event_index AS event_index, a.extrinsic_index AS extrinsic_index,
+                   a.event_name AS event_name, toString(a.block_timestamp) AS ts,
+                   a.asset_id AS asset_id, toString(a.amount) AS amount,
+                   toFloat64(a.amount) / ${assetDecimalsPowSql('a.asset_id')} * value_price.close AS value_usd
+            FROM price_data.account_activity_v3 AS a FINAL
+            ASOF LEFT JOIN ${closes} value_price
+              ON value_price.asof_join_key = toUInt8(isNotNull(a.block_timestamp))
+             AND value_price.asset_id = ${priceAliasIdSql('a.asset_id')}
+             AND value_price.price_time <= a.block_timestamp
+            WHERE a.account IN (${list}) AND ${bound}
+              AND a.has_amount = 1
+              AND (a.event_name IN (${namedEvents})
+                OR (a.event_name IN (${transferNames}) AND NOT a.is_module_transfer))
+          )
+          GROUP BY block_height, event_index
+          HAVING value_usd > 0
+          ORDER BY value_usd DESC
+          LIMIT {fetch:UInt32}`,
+        query_params: { fetch }, format: 'JSONEachRow',
+        // Whale/structural accounts carry millions of indexed rows; spill the
+        // event-identity dedup to disk instead of hitting the memory ceiling.
+        clickhouse_settings: { max_bytes_before_external_group_by: '1500000000' },
+      }),
+      mmList === "''" ? Promise.resolve(null) : client.query({
+        query: `
+          SELECT block_height, event_index, any(ts) AS ts, any(asset_id) AS asset_id, any(value_usd) AS value_usd
+          FROM (
+            SELECT m.block_height AS block_height, m.event_index AS event_index, toString(m.block_timestamp) AS ts,
+                   ${mmAssetExpr} AS asset_id,
+                   toFloat64OrZero(m.liquidated_collateral_amount) / ${assetDecimalsPowSql(mmAssetExpr)} * liq_price.close AS value_usd
+            FROM price_data.account_money_market_activity AS m FINAL
+            ASOF LEFT JOIN ${closes} liq_price
+              ON liq_price.asof_join_key = toUInt8(isNotNull(m.block_timestamp))
+             AND liq_price.asset_id = ${priceAliasIdSql(mmAssetExpr)}
+             AND liq_price.price_time <= m.block_timestamp
+            WHERE m.account_id IN (${mmList}) AND ${bound}
+              AND m.event_name = 'LiquidationCall'
+              AND lower(ifNull(m.pool_address, '')) IN (${configuredMmPoolsSql()})
+          )
+          GROUP BY block_height, event_index
+          ORDER BY value_usd DESC
+          LIMIT {fetch:UInt32}`,
+        query_params: { fetch }, format: 'JSONEachRow',
+      }),
+    ])
+    const rows = await eventRes.json<ValueEventCandidateRow>()
+    const liqRows = liqRes ? await liqRes.json<{ block_height: number; event_index: number; ts: string; asset_id: number; value_usd: number }>() : []
+
+    // Transfer direction + counterparty from the transfer read model (the v3
+    // index carries no from/to): a bounded point lookup for at most `fetch` refs.
+    const transferRows = rows.filter(r => VALUE_EVENT_TRANSFER_NAMES.includes(r.event_name))
+    const legByRef = new Map<string, { from: string; to: string }>()
+    if (transferRows.length) {
+      const tuples = transferRows.map(r => `(${r.block_height},${r.event_index})`).join(',')
+      const legRes = await client.query({
+        query: `SELECT block_height, event_index, any(from_account) AS from_account, any(to_account) AS to_account
+                FROM price_data.account_transfer_activity
+                WHERE account IN (${list}) AND (block_height, event_index) IN (${tuples})
+                GROUP BY block_height, event_index`,
+        format: 'JSONEachRow',
+      })
+      for (const r of await legRes.json<{ block_height: number; event_index: number; from_account: string; to_account: string }>()) {
+        legByRef.set(`${r.block_height}:${r.event_index}`, { from: r.from_account.toLowerCase(), to: r.to_account.toLowerCase() })
+      }
+    }
+    const scoped = new Set(accounts.map(a => a.toLowerCase()))
+    const plumbing = new Set([...ammPoolAccounts(), ...(await mmReserveAccountIds())])
+    // The same movement is often indexed twice (Currencies.Transferred mirrors
+    // Tokens.Transfer): keep the highest-priority mirror per movement identity —
+    // the dedupeTransferEvents rule, applied post-lookup since identity needs from/to.
+    const mirrorKey = (r: ValueEventCandidateRow, leg: { from: string; to: string }) =>
+      `${r.block_height}|${r.extrinsic_index ?? -1}|${r.asset_id}|${leg.from}|${leg.to}|${r.amount}`
+    const mirrorPriority = new Map<string, number>()
+    for (const r of transferRows) {
+      const leg = legByRef.get(`${r.block_height}:${r.event_index}`)
+      if (!leg) continue
+      const key = mirrorKey(r, leg)
+      const p = transferEventPriority(r.event_name)
+      if (p > (mirrorPriority.get(key) ?? 0)) mirrorPriority.set(key, p)
+    }
+
+    const out: ValueEvent[] = []
+    const seenSwapExtrinsics = new Set<string>()
+    for (const r of rows) {
+      const base = {
+        blockHeight: Number(r.block_height), eventIndex: Number(r.event_index),
+        extrinsicIndex: r.extrinsic_index == null ? null : Number(r.extrinsic_index),
+        timestamp: r.ts, valueUsd: +Number(r.value_usd).toFixed(2), asset: asset(r.asset_id),
+      }
+      if (VALUE_EVENT_TRANSFER_NAMES.includes(r.event_name)) {
+        const leg = legByRef.get(`${r.block_height}:${r.event_index}`)
+        // Read-model miss: still a real transfer, direction just unknown.
+        if (!leg) { out.push({ ...base, kind: 'other', counterparty: null }); continue }
+        if (transferEventPriority(r.event_name) !== mirrorPriority.get(mirrorKey(r, leg))) continue
+        const fromIn = scoped.has(leg.from), toIn = scoped.has(leg.to)
+        // Internal shuffles between the scoped accounts change no value; a pool/
+        // MM-contract COUNTERPARTY marks a swap or MM leg represented elsewhere
+        // (the viewed set itself may be such an account — its legs are its
+        // activity, the feed's viewingPool exception).
+        if (fromIn && toIn) continue
+        const counterparty = toIn ? leg.from : leg.to
+        if (plumbing.has(counterparty)) continue
+        out.push({ ...base, kind: toIn ? 'transfer-in' : 'transfer-out', counterparty: accountRef(counterparty) })
+        continue
+      }
+      const kind = valueEventKind(r.event_name)
+      if (kind === 'swap' && r.extrinsic_index != null) {
+        // Router.Executed and the pool's own *Executed describe one trade; rows
+        // arrive value-sorted, so the largest leg per extrinsic wins.
+        const key = `${r.block_height}:${r.extrinsic_index}`
+        if (seenSwapExtrinsics.has(key)) continue
+        seenSwapExtrinsics.add(key)
+      }
+      out.push({ ...base, kind, counterparty: null })
+    }
+    // Share-token collateral (2-Pool-*) has no historical NAV, valuing those
+    // seizures at 0. Fall back to the DEBT side (debtToCover at the debt
+    // asset's close) — for GigaHDX liquidations that's HOLLAR, which prices.
+    const unpricedLiq = liqRows.filter(r => !(Number(r.value_usd) > 0))
+    const liqDebtValue = new Map<string, { assetId: number; valueUsd: number }>()
+    if (unpricedLiq.length) {
+      const tuples = unpricedLiq.map(r => `(${r.block_height},${r.event_index})`).join(',')
+      const debtRes = await client.query({
+        query: `SELECT block_height, event_index, any(decoded_args_json) AS args
+                FROM price_data.raw_money_market_events
+                WHERE (block_height, event_index) IN (${tuples}) AND event_name = 'LiquidationCall'
+                GROUP BY block_height, event_index`,
+        format: 'JSONEachRow',
+      })
+      const debtLegs = (await debtRes.json<{ block_height: number; event_index: number; args: string }>())
+        .flatMap(r => {
+          const args = (safeJson(r.args) ?? {}) as Record<string, unknown>
+          const assetId = assetIdFromMmAddress(typeof args.debtAsset === 'string' ? args.debtAsset : '')
+          const raw = typeof args.debtToCover === 'string' ? args.debtToCover : ''
+          const row = unpricedLiq.find(l => l.block_height === r.block_height && l.event_index === r.event_index)
+          return assetId != null && raw && row ? [{ key: `${r.block_height}:${r.event_index}`, assetId, raw, ts: row.ts }] : []
+        })
+      const closes = await historicalCloses(debtLegs.map(leg => ({ assetId: leg.assetId, ts: leg.ts })))
+      for (const leg of debtLegs) {
+        const close = closes.get(historicalPriceKey(leg.assetId, leg.ts))
+        if (!close) continue
+        const value = Number(leg.raw) / 10 ** asset(leg.assetId).decimals * Number(close)
+        if (Number.isFinite(value) && value > 0) liqDebtValue.set(leg.key, { assetId: leg.assetId, valueUsd: value })
+      }
+    }
+    for (const r of liqRows) {
+      const priced = Number(r.value_usd) > 0
+      const fallback = priced ? undefined : liqDebtValue.get(`${r.block_height}:${r.event_index}`)
+      const valueUsd = priced ? Number(r.value_usd) : fallback?.valueUsd ?? 0
+      if (!(valueUsd > 0)) continue
+      out.push({
+        blockHeight: Number(r.block_height), eventIndex: Number(r.event_index), extrinsicIndex: null,
+        timestamp: r.ts, kind: 'liquidation', valueUsd: +valueUsd.toFixed(2),
+        asset: asset(fallback ? fallback.assetId : r.asset_id), counterparty: null,
+      })
+    }
+    out.sort((x, y) => y.valueUsd - x.valueUsd)
+    // Chronological order for rendering; value already decided membership.
+    return out.slice(0, limit).sort((x, y) => x.blockHeight - y.blockHeight || x.eventIndex - y.eventIndex)
+  })
+}
+
+export async function getAddressValueEvents(addressInput: string, from?: string, to?: string): Promise<ValueEvent[] | null> {
+  const resolved = await resolveRelatedAccounts(addressInput)
+  if (!resolved) return null
+  return getAccountValueEvents(resolved.related, `addr:${resolved.norm.accountId}`, from, to)
+}
+
+export async function getTagValueEvents(tagId: string, from?: string, to?: string): Promise<ValueEvent[] | null> {
+  const members = tagMembers(tagId)
+  if (!members) return null
+  return getAccountValueEvents(members, `tag:${tagId}`, from, to)
+}
+
 // Signed extrinsics for an explicit account-id set (related-account set, or a
 // tag's members). Shared by getAddressExtrinsics and the tag extrinsics endpoint.
 async function getAccountExtrinsics(accounts: string[], limit = 25, offset = 0, cacheKey?: string, filters: ExtrinsicListFilters = {}, from?: string, to?: string): Promise<ExtrinsicSummary[]> {
