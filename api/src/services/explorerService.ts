@@ -5962,9 +5962,16 @@ export function parseOutboundXcm(argsRaw: unknown): { sender: string; amounts: s
         : null
     if (!senderId) return null
     const amounts: string[] = []
+    const feeAmounts = new Set<string>()
     for (const ins of args.message) {
-      // Asset-carrying instructions only — BuyExecution names the same funds
-      // again as fees and must not produce a second candidate.
+      // BuyExecution names the asset consumed as the XCM execution fee (it is
+      // withdrawn by WithdrawAsset too, so it would otherwise become a candidate).
+      if (ins.__kind === 'BuyExecution') {
+        const fee = (ins as { fees?: { fun?: { value?: string } } }).fees?.fun?.value
+        if (typeof fee === 'string') feeAmounts.add(fee)
+        continue
+      }
+      // Asset-carrying instructions only.
       const legs = ins.__kind === 'WithdrawAsset' || ins.__kind === 'ReserveAssetDeposited' ? ins.value
         : ins.__kind === 'TransferReserveAsset' ? ins.assets
         : null
@@ -5973,6 +5980,12 @@ export function parseOutboundXcm(argsRaw: unknown): { sender: string; amounts: s
         if (amount && !amounts.includes(amount)) amounts.push(amount)
       }
     }
+    // Drop a fee-only leg: when the message withdraws more than one asset and one
+    // of them is exactly the BuyExecution fee, that asset is plumbing (e.g. DOT
+    // withdrawn only to pay for bridging USDC), not a transfer — so it must not
+    // appear as its own cross-chain activity. A single-asset message keeps its
+    // asset (it both transfers and pays its own fee).
+    const transferAmounts = amounts.length > 1 ? amounts.filter(a => !feeAmounts.has(a)) : amounts
     const dest = xcmDestination({ dest: args.destination })
     // Sent's destination names only the chain; the beneficiary account lives in
     // the message's DepositAsset instruction.
@@ -5985,7 +5998,7 @@ export function parseOutboundXcm(argsRaw: unknown): { sender: string; amounts: s
       const id = typeof b32?.id === 'string' ? b32.id : typeof b20?.key === 'string' ? b20.key : undefined
       dest.destAccount = externalAccountRef(id, meta)
     }
-    return { sender: senderId, amounts, dest }
+    return { sender: senderId, amounts: transferAmounts.length ? transferAmounts : amounts, dest }
   }
 
   return null
