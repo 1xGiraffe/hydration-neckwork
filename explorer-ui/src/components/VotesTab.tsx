@@ -23,6 +23,15 @@ function referendumLabel(referendum: string | null): string | null {
   return /^\d+$/.test(referendum) ? `Ref ${referendum}` : referendum
 }
 
+// The conviction the voter actually used, as its OpenGov vote-weight multiplier
+// (None = no lock = 0.1x; Locked{n}x = nx), rather than the raw lock label.
+function convictionLabel(conviction: string | null): string | null {
+  if (!conviction) return null
+  if (conviction === 'None') return '0.1x'
+  const m = /^Locked(\d)x$/.exec(conviction)
+  return m ? `${m[1]}x` : conviction
+}
+
 // Governance votes cast by the account (or every member of a tag): OpenGov and
 // Democracy referendum votes plus Council / Technical Committee collective
 // votes. Same paginated-table shell as ScopedActivity, with its own `vpage`
@@ -64,7 +73,7 @@ export function VotesTab({ scope }: { scope: VotesScope }) {
         <td data-label="Type"><span className="muted">{palletLabel(v.pallet)}</span></td>
         {showVoter && <td data-label="Account">{v.account ? <AddrPill account={v.account} noCopy /> : <Dash />}</td>}
         <td data-label="Side"><VoteSideBadge side={v.side} /></td>
-        <td data-label="Conviction" className="mono muted">{v.conviction ?? <Dash />}</td>
+        <td data-label="Conviction" className="mono muted">{convictionLabel(v.conviction) ?? <Dash />}</td>
         <td data-label="Amount" className="r">{v.amount != null ? <AssetAmount asset={v.asset} raw={v.amount} /> : <Dash />}</td>
         <td data-label="Value" className="r mono">{v.amount != null && v.valueUsd != null ? F.usd(v.valueUsd) : <Dash />}</td>
         <td data-label="Time" className="r mono muted"><Ago ts={v.timestamp} now={now} /></td>
