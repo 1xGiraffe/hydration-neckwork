@@ -241,7 +241,7 @@ export const paths = {
   holders: (assetId: number) => `/holders/${assetId}`,
 }
 
-export function Link({ to, children, className, title, onClick, style }: { to: string; children: ReactNode; className?: string; title?: string; onClick?: (e: MouseEvent) => void; style?: CSSProperties }) {
+export function Link({ to, children, className, title, ariaLabel, onClick, style }: { to: string; children: ReactNode; className?: string; title?: string; ariaLabel?: string; onClick?: (e: MouseEvent) => void; style?: CSSProperties }) {
   const href = normalize(to)
   const handle = useCallback((e: MouseEvent) => {
     onClick?.(e)
@@ -255,5 +255,5 @@ export function Link({ to, children, className, title, onClick, style }: { to: s
     e.preventDefault()
     navigate(href)
   }, [onClick, href])
-  return <a href={href} className={className} title={title} style={style} onClick={handle}>{children}</a>
+  return <a href={href} className={className} title={title} aria-label={ariaLabel} style={style} onClick={handle}>{children}</a>
 }

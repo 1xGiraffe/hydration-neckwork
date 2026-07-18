@@ -660,6 +660,8 @@ function ChartMarkerFlag({ cluster, open, onOpen, onClose }: {
   const top = cluster.items[0]
   const count = cluster.items.length
   const capLabel = count > 1 ? `×${count}` : null
+  // aria-label, not title: the custom tip already opens on hover/focus, and a
+  // native title tooltip would pop up overlapping it.
   const title = count > 1 ? `${count} events` : `${top.label} · ${F.usd(top.valueUsd)}`
   const capCls = `apx-mark-cap${capLabel ? ' multi' : ''}`
   // Keep the tip open while focus moves between its links; close on focus-out.
@@ -672,10 +674,10 @@ function ChartMarkerFlag({ cluster, open, onOpen, onClose }: {
       onFocus={coarse ? undefined : onOpen} onBlur={coarse ? undefined : onBlur}>
       <span className="apx-mark-line" aria-hidden="true" />
       {coarse
-        ? <button type="button" className={capCls} title={title} aria-expanded={open} onClick={() => (open ? onClose() : onOpen())}>{capLabel}</button>
+        ? <button type="button" className={capCls} aria-label={title} aria-expanded={open} onClick={() => (open ? onClose() : onOpen())}>{capLabel}</button>
         : top.href
-          ? <Link className={capCls} to={top.href} title={title}>{capLabel}</Link>
-          : <span className={capCls} title={title} tabIndex={0}>{capLabel}</span>}
+          ? <Link className={capCls} to={top.href} ariaLabel={title}>{capLabel}</Link>
+          : <span className={capCls} aria-label={title} tabIndex={0}>{capLabel}</span>}
       {open && (
         <div className="apx-mark-tip" ref={tipRef}>
           {count > 1
