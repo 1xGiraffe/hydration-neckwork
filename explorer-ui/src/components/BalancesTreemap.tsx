@@ -266,14 +266,26 @@ function OtherDetail({ members, value, share, selectedId, onSelect }: {
   )
 }
 
-// Selectable rows beneath the map + graph: current holdings that have no market
-// price (can't be sized by value), and assets held only in the past (have a
-// balance history but no current holding). Selecting one focuses it above.
-function BalanceRows({ unpriced, historical, selectedId, onSelect }: {
-  unpriced: AddressBalance[]; historical: AssetBalanceHistory[]; selectedId: number | null; onSelect: (id: number) => void
+// Selectable rows beneath the map + graph: priced holdings too small to draw as
+// a tile (a portfolio dominated by one asset squeezes the rest below a pixel),
+// current holdings that have no market price (can't be sized by value), and
+// assets held only in the past (have a balance history but no current holding).
+// Selecting one focuses it above.
+function BalanceRows({ hidden, unpriced, historical, selectedId, onSelect }: {
+  hidden: AddressBalance[]; unpriced: AddressBalance[]; historical: AssetBalanceHistory[]; selectedId: number | null; onSelect: (id: number) => void
 }) {
   return (
     <div className="tm-unpriced">
+      {hidden.length > 0 && (
+        <div className="tm-rowgroup">
+          <span className="tm-unpriced-cap">{hidden.length} smaller holding{hidden.length === 1 ? '' : 's'}</span>
+          <div className="tm-chips">
+            {hidden.map(b => (
+              <SelectChip key={b.asset.assetId} asset={b.asset} value={F.usd(b.valueUsd)} active={selectedId === b.asset.assetId} onSelect={() => onSelect(b.asset.assetId)} />
+            ))}
+          </div>
+        </div>
+      )}
       {unpriced.length > 0 && (
         <div className="tm-rowgroup">
           <span className="tm-unpriced-cap">{unpriced.length} asset{unpriced.length === 1 ? '' : 's'} without a market price</span>
@@ -348,6 +360,25 @@ export function BalancesTreemap({ balances, balanceHistory = [] }: { balances: A
   // desktop. Squarify runs on the real measured box, so aspect ratios stay sane.
   const height = width === 0 ? 0 : width < 560 ? Math.round(Math.max(width * 1.05, 420)) : Math.round(Math.min(Math.max(width * 0.5, 340), 560))
   const rects = useMemo(() => squarify(cells.map(c => c.value), width, height), [cells, width, height])
+
+  // Priced holdings whose tile is a sub-pixel sliver (below MIN_TILE_PX in either
+  // dimension) never get drawn — with one asset dominating the portfolio, every
+  // other holding, and a lone-dust "Other" cell, collapses to nothing. Recover
+  // them so a real balance is never silently dropped: surfaced as selectable
+  // chips below the map, matching the render loop's own drop condition.
+  const hidden = useMemo<AddressBalance[]>(() => {
+    if (!width || !height) return []
+    const out: AddressBalance[] = []
+    cells.forEach((cell, i) => {
+      const r = rects[i]
+      const w = r ? Math.max(0, Math.min(r.w, width - r.x)) : 0
+      const h = r ? Math.max(0, Math.min(r.h, height - r.y)) : 0
+      if (w >= MIN_TILE_PX && h >= MIN_TILE_PX) return
+      if (cell.kind === 'asset') out.push(cell.balance)
+      else out.push(...cell.members)
+    })
+    return out
+  }, [cells, rects, width, height])
 
   // The LOCKED asset is deep-linked via ?asset= (clicking a tile locks it, so it
   // survives a hover elsewhere and is shareable). Hover is a transient preview
@@ -426,8 +457,8 @@ export function BalancesTreemap({ balances, balanceHistory = [] }: { balances: A
           : active?.kind === 'asset' && (
             <FocusedDetail balance={balanceById.get(active.id) ?? null} hist={historyById.get(active.id) ?? null} allHistory={balanceHistory} />
           )}
-        {(unpriced.length > 0 || historical.length > 0) && (
-          <BalanceRows unpriced={unpriced} historical={historical} selectedId={activeId} onSelect={selectAsset} />
+        {(hidden.length > 0 || unpriced.length > 0 || historical.length > 0) && (
+          <BalanceRows hidden={hidden} unpriced={unpriced} historical={historical} selectedId={activeId} onSelect={selectAsset} />
         )}
     </div>
   )
