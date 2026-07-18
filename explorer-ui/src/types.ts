@@ -279,17 +279,23 @@ export interface AssetBalanceHistory { asset: AssetRef; current: number; points:
 export interface AccountHistoryResponse { portfolioSeries: number[]; portfolioDates: string[]; balanceHistory: AssetBalanceHistory[] }
 
 // One of the account/tag's largest value-changing events (big transfers in/out,
-// swaps, liquidity moves, liquidations) — the value chart's clickable markers.
-// A 'dca' marker stands for a whole schedule (its executions summed), not one swap.
+// swaps, liquidity moves, cross-chain flows, liquidations) — the value chart's
+// clickable markers. A 'dca' marker stands for a whole schedule (its executions
+// summed), not one swap; a 'price' marker annotates a big value-line jump no
+// discrete event explains (its valueUsd is the SIGNED delta, asset is null).
 export interface ValueEvent {
   blockHeight: number
   eventIndex: number
   extrinsicIndex: number | null
   timestamp: string
-  kind: 'transfer-in' | 'transfer-out' | 'swap' | 'liquidity' | 'liquidation' | 'dca' | 'other'
+  kind: 'transfer-in' | 'transfer-out' | 'swap' | 'liquidity' | 'liquidation' | 'dca' | 'cross-chain' | 'price' | 'other'
   valueUsd: number
-  asset: AssetRef
+  asset: AssetRef | null
   counterparty: AccountRef | null
+  // Cross-chain flow direction (inbound credit vs outbound send).
+  direction?: 'in' | 'out'
+  // false when a cross-chain marker has no resolvable detail row → render unlinked.
+  linkable?: boolean
   // A 'dca' marker summarizes a whole schedule: id links to /dca/:id, trades is
   // the execution count behind valueUsd; block/event point at the peak execution.
   dcaScheduleId?: number

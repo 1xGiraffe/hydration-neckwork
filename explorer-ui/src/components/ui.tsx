@@ -72,9 +72,13 @@ export const F = {
   },
   usd: (v: number | null | undefined) => {
     if (v == null || !Number.isFinite(v)) return '—'
-    if (v >= 1e6) return '$' + compact(v)
-    if (v >= 1e3) return '$' + (v / 1e3).toFixed(1) + 'k'
-    return '$' + v.toFixed(2)
+    // Signed values render "-$1.2k", not "$-1200.00" (price-move markers carry
+    // a signed delta; debt-heavy nets can dip below zero).
+    const sign = v < 0 ? '-' : ''
+    const a = Math.abs(v)
+    if (a >= 1e6) return sign + '$' + compact(a)
+    if (a >= 1e3) return sign + '$' + (a / 1e3).toFixed(1) + 'k'
+    return sign + '$' + a.toFixed(2)
   },
   priceUsd: (v: number | null | undefined) => {
     if (v == null || !Number.isFinite(v)) return '—'
@@ -591,6 +595,8 @@ const CHART_MARKER_COLORS: Record<string, string> = {
   liquidity: 'var(--lavender)',
   liquidation: 'var(--red)',
   dca: 'var(--amber)', // matches the .dca-tag / DCA-pallet accent
+  'cross-chain': 'var(--sky-deep)', // deeper blue than swap's --sky in both themes
+  price: 'var(--text-low)', // neutral: a market move, not an on-chain event
   other: 'var(--text-low)',
 }
 function markerColor(kind: string): string { return CHART_MARKER_COLORS[kind] ?? 'var(--text-low)' }

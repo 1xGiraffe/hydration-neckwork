@@ -1575,6 +1575,34 @@ async function mmReserveAccountIds(): Promise<Set<string>> {
   return out
 }
 
+// Truncated-account form of EVERY indexed money-market contract (aToken, variable-
+// debt token, pool proxy) across ALL markets — not just the configured ones
+// getMmReserveTokens filters to. A supply/withdraw/borrow/repay leg's counterparty
+// is one of these; suppressing them keeps an MM leg from being mislabeled a
+// transfer marker (its value change is the position curve, represented elsewhere).
+// Reads the same atoken_reserve_map the reserve reconstruction uses; cached.
+async function mmContractAccountIds(): Promise<Set<string>> {
+  return cached('explorer:mm-contract-accounts', 60_000, async () => {
+    const res = await client.query({
+      query: `SELECT DISTINCT lower(c) AS h160 FROM (
+                SELECT arrayJoin([atoken, vdebt, pool_proxy]) AS c FROM price_data.atoken_reserve_map FINAL
+              ) WHERE match(h160, '^0x[0-9a-f]{40}$')`,
+      format: 'JSONEachRow',
+    })
+    const out = new Set<string>()
+    for (const r of await res.json<{ h160: string }>()) out.add('0x45544800' + r.h160.slice(2) + '0000000000000000')
+    return out
+  })
+}
+
+// An asset the value reconstruction cannot price on the wallet curve (share
+// tokens have no historical NAV feed — they're valued via LP decomposition, not
+// a token close). A swap only MOVES reconstructed value when it trades into such
+// an asset; a swap between two priced assets is value-neutral churn.
+function isUnpricedAsset(assetId: number): boolean {
+  return SHARE_TOKEN_UNDERLYING_ID[assetId] != null
+}
+
 async function moneyMarketExtrinsicsForTransfers(rows: TransferRow[]): Promise<Set<string>> {
   const pairs = [...new Set(rows
     .filter(r => r.extrinsicIndex != null)
@@ -2366,17 +2394,18 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
 export async function getAddressHistory(addressInput: string): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; balanceHistory: AssetBalanceHistory[] } | null> {
   const detail = await getAddress(addressInput)
   if (!detail) return null
-  return cached(`explorer:address-history:${accountValueGenerationEpoch}:${detail.accountId}`, 120000, async () => {
-    const history = await getAccountHistory(detail.relatedAccountIds)
-    const debtUsd = detail.moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
-    const portfolioSeries = history.portfolioSeries.slice()
-    if (portfolioSeries.length) portfolioSeries[portfolioSeries.length - 1] = +(detail.portfolioUsd - debtUsd).toFixed(2)
-    return {
-      portfolioSeries,
-      portfolioDates: history.portfolioDates,
-      balanceHistory: history.balanceHistory,
-    }
-  })
+  // The reconstruction is cached under the same scope key the value-event jump
+  // detection uses, so chart and markers share one heavy walk. Only the trivial
+  // final-point pin is recomputed per request.
+  const history = await getAccountHistoryShared(detail.relatedAccountIds, `addr:${detail.accountId}`)
+  const debtUsd = detail.moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
+  const portfolioSeries = history.portfolioSeries.slice()
+  if (portfolioSeries.length) portfolioSeries[portfolioSeries.length - 1] = +(detail.portfolioUsd - debtUsd).toFixed(2)
+  return {
+    portfolioSeries,
+    portfolioDates: history.portfolioDates,
+    balanceHistory: history.balanceHistory,
+  }
 }
 
 // indexed Money Market positions
@@ -9470,9 +9499,9 @@ async function appendMoneyMarketBalanceRows(
 // blocks, every borrower — not just on the borrower's own MM events), so the
 // stored net is dense and the series forward-fills only across a short gap before
 // the caller pins the final point to the live net worth.
-async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; balanceHistory: AssetBalanceHistory[] }> {
+async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] }> {
   const list = sqlAccountList(accounts)
-  if (list === "''") return { portfolioSeries: [], portfolioDates: [], balanceHistory: [] }
+  if (list === "''") return { portfolioSeries: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
   // Single ordinary accounts are already selective in the account-first exact
   // history and avoid the merge overhead of the hourly model. Multi-member tags
   // and dense structural accounts are the shapes for which hourly compaction is
@@ -9493,7 +9522,7 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
     format: 'JSONEachRow',
   })
   const rng = (await rangeRes.json<{ minb: number; maxb: number; mint: number; maxt: number }>())[0]
-  if (!rng || !rng.maxb || rng.maxb <= rng.minb) return { portfolioSeries: [], portfolioDates: [], balanceHistory: [] }
+  if (!rng || !rng.maxb || rng.maxb <= rng.minb) return { portfolioSeries: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
   const N = 180
   const BUCKET = Math.max(1, Math.floor((rng.maxb - rng.minb) / N))
   // Real end-of-bucket timestamps from the blocks table. Block time changed from
@@ -9621,7 +9650,7 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   }
   const mmAvailableFromBucket = await appendMoneyMarketBalanceRows(accounts, rng.minb, BUCKET, N, balRows)
   const assetIds = [...new Set(balRows.map(r => r.asset_id))]
-  if (!assetIds.length) return { portfolioSeries: [], portfolioDates: [], balanceHistory: [] }
+  if (!assetIds.length) return { portfolioSeries: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
   // Open omnipool LP positions (bare + farmed) for the period LP-value reconstruction
   // below, plus the per-bucket pool state to value them. Fetched here so the position
   // assets + LRNA(1) can be added to the historical price query.
@@ -9889,27 +9918,41 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   alignedBalanceHistory.sort((x, y) => (y.current * (prices.get(y.asset.assetId)?.price ?? 0)) - (x.current * (prices.get(x.asset.assetId)?.price ?? 0)))
   const rawSeries = portfolio.slice(start).map(v => +v.toFixed(2))
   const rawDates = Array.from({ length: portfolio.length - start }, (_, k) => tsAt(start + k))
+  // End-of-bucket block per point: bucket b covers [minb + b·BUCKET, minb + (b+1)·BUCKET)
+  // (the final bucket absorbs the tail to maxb), so the events a point-to-point
+  // delta reflects live in the half-open block span between the two end blocks.
+  const rawBlocks = Array.from({ length: portfolio.length - start }, (_, k) => {
+    const b = start + k
+    return b >= N ? rng.maxb : rng.minb + (b + 1) * BUCKET - 1
+  })
   // Collapse to one point per calendar day (keep the latest of each day) so the
   // chart never shows the same date on adjacent points when the window spans
   // fewer days than buckets. Long windows (≫70 days) are unaffected.
-  const { series: portfolioSeries, dates: portfolioDates } = downsampleDaily(rawSeries, rawDates)
+  const { series: portfolioSeries, dates: portfolioDates, blocks: portfolioBlocks } = downsampleDaily(rawSeries, rawDates, rawBlocks)
   // Return every asset that has a historical balance (sorted by current value),
   // not just the top N — the per-asset chip list should be complete.
-  return { portfolioSeries, portfolioDates, balanceHistory: alignedBalanceHistory }
+  return { portfolioSeries, portfolioDates, portfolioBlocks, balanceHistory: alignedBalanceHistory }
 }
 
 // One point per calendar day (the last bucket of each day), preserving order.
-function downsampleDaily(series: number[], dates: string[]): { series: number[]; dates: string[] } {
-  const outS: number[] = [], outD: string[] = []
+function downsampleDaily(series: number[], dates: string[], blocks: number[]): { series: number[]; dates: string[]; blocks: number[] } {
+  const outS: number[] = [], outD: string[] = [], outB: number[] = []
   for (let i = 0; i < series.length; i++) {
     const day = (dates[i] ?? '').slice(0, 10)
     if (outD.length && outD[outD.length - 1].slice(0, 10) === day) {
-      outS[outS.length - 1] = series[i]; outD[outD.length - 1] = dates[i]
+      outS[outS.length - 1] = series[i]; outD[outD.length - 1] = dates[i]; outB[outB.length - 1] = blocks[i]
     } else {
-      outS.push(series[i]); outD.push(dates[i])
+      outS.push(series[i]); outD.push(dates[i]); outB.push(blocks[i])
     }
   }
-  return { series: outS, dates: outD }
+  return { series: outS, dates: outD, blocks: outB }
+}
+
+// One bucketed value-series reconstruction per scope (`addr:<id>` / `tag:<id>`),
+// shared by the value-history chart and the value-event jump detection so the
+// heavy per-asset walk runs once per TTL, not once per consumer.
+function getAccountHistoryShared(accounts: string[], scopeKey: string): Promise<Awaited<ReturnType<typeof getAccountHistory>>> {
+  return cached(`explorer:account-history:${accountValueGenerationEpoch}:${scopeKey}`, 120_000, () => getAccountHistory(accounts))
 }
 
 // Per-asset analogue of downsampleDaily: one balance point per calendar day (the
@@ -10774,20 +10817,31 @@ export async function getAddressActivityCountAtMin(addressInput: string, minUsd:
 }
 
 // value-event markers (the "Value" chart's flagged big events)
-// The largest value-changing events across the account set's history: user
-// transfers (in/out), swaps, liquidity moves, and money-market liquidations,
-// each valued at its block-time hourly close — never the current price. A DCA
-// schedule's many block-hook executions collapse into one marker for the whole
-// schedule (summed value, linked to /dca/:id) instead of flooding the chart.
+// The largest value-changing events across the account set's history — user
+// transfers (in/out), swaps, liquidity moves, cross-chain (XCM) flows and
+// money-market liquidations, each valued at its block-time hourly close, never
+// the current price — PLUS one marker per big jump of the value line itself,
+// so every large move the chart draws carries an annotation of its most likely
+// cause (or an explicit 'price' marker when nothing discrete explains it). A
+// DCA schedule's many block-hook executions collapse into one marker for the
+// whole schedule (summed value, linked to /dca/:id) instead of flooding the chart.
 export interface ValueEvent {
   blockHeight: number
   eventIndex: number
   extrinsicIndex: number | null
   timestamp: string
-  kind: 'transfer-in' | 'transfer-out' | 'swap' | 'liquidity' | 'liquidation' | 'dca' | 'other'
+  kind: 'transfer-in' | 'transfer-out' | 'swap' | 'liquidity' | 'liquidation' | 'dca' | 'cross-chain' | 'price' | 'other'
+  // 'price' markers carry the SIGNED bucket delta (no discrete event to value).
   valueUsd: number
-  asset: AssetRef
+  // null only for 'price' markers — a market move has no single asset.
+  asset: AssetRef | null
   counterparty: AccountRef | null
+  // Cross-chain flow direction (inbound credit vs outbound send).
+  direction?: 'in' | 'out'
+  // false when a cross-chain marker's (block,eventIndex) has no matching row in
+  // the XCM activity feed (reserved-account credits, non-contiguous walk-backs):
+  // the marker still annotates the jump but renders WITHOUT a dead detail link.
+  linkable?: boolean
   // A 'dca' marker summarizes a whole schedule: id links to /dca/:id, trades is
   // the execution count behind valueUsd; block/event point at the peak execution.
   dcaScheduleId?: number
@@ -10800,11 +10854,75 @@ const VALUE_EVENT_LIQUIDITY_NAMES = [
   'Stableswap.LiquidityAdded', 'Stableswap.LiquidityRemoved',
   'XYK.LiquidityAdded', 'XYK.LiquidityRemoved',
 ]
+// Cross-chain movements are indexed as deposit/withdraw events, not transfers:
+// an inbound XCM credit is a hook-context Currencies/Tokens.Deposited in a
+// MessageQueue.Processed block; an outbound send is the Currencies/Tokens.
+// Withdrawn of an XTokens/PolkadotXcm extrinsic (user-sent) or a hook-context
+// one in a barrier block (remote-initiated pull).
+const VALUE_EVENT_XCM_IN_NAMES = ['Currencies.Deposited', 'Tokens.Deposited']
+const VALUE_EVENT_XCM_OUT_NAMES = ['Currencies.Withdrawn', 'Tokens.Withdrawn']
 const VALUE_EVENT_DEFAULT_LIMIT = 12
 // A liquidation is a high-signal event even when a routine transfer moved more
 // value, so guarantee the top few always surface rather than letting a whale's
 // larger transfers crowd every liquidation out of the value-ranked budget.
 const VALUE_EVENT_LIQUIDATION_SLOTS = 3
+// DCA schedules are a shipped, first-class marker (one flag per schedule, linked
+// to /dca/:id). Like liquidations, reserve slots for the largest ones so the
+// jump-driven price/cross-chain markers can't crowd every schedule off the chart.
+const VALUE_EVENT_DCA_SLOTS = 3
+// Jump detection: a point-to-point move of the reconstructed value series is
+// "big" when it clears both an absolute floor and a fraction of the series'
+// peak — dust accounts don't spam markers, whale noise doesn't drown them. The
+// same threshold gates the value-fill so a flat account never surfaces its dust.
+const VALUE_JUMP_MIN_USD = 1_000
+const VALUE_JUMP_PEAK_FRACTION = 0.05
+// A jump is "explained" by its window's dominant cause when that cause's summed
+// USD reaches this fraction of |Δ|; below it the marker degrades to an honest
+// 'price' annotation instead of blaming an incidental small event. Calibrated
+// on real accounts: a drip-style LP unwind sums to ~40% of its bucket's drop.
+const VALUE_JUMP_EXPLAIN_FRACTION = 0.3
+// Top candidate rows fetched per jump window. Per-kind sums saturate well below
+// this for real accounts; it bounds the read on whale windows.
+const VALUE_JUMP_WINDOW_ROWS = 40
+
+// Threshold below which a value-line move (or a fill event) is not "significant"
+// for this account: an absolute floor OR a fraction of the series' peak.
+function valueJumpThreshold(series: number[]): number {
+  let peak = 0
+  for (const v of series) peak = Math.max(peak, Math.abs(v))
+  return Math.max(VALUE_JUMP_MIN_USD, peak * VALUE_JUMP_PEAK_FRACTION)
+}
+
+// The value line's biggest point-to-point moves: |Δ| over the threshold, ranked
+// by |Δ|, capped at the marker budget. Each jump's block window is the half-open
+// span between its two points' end-of-bucket blocks — exactly the blocks whose
+// events the delta reflects. The FINAL segment is skipped: the chart pins its
+// last point to live net worth (getAddressHistory/getTag overwrite it), so a
+// delta computed here against the un-pinned cached series could disagree with
+// the drawn line.
+interface ValueJumpWindow { delta: number; startBlock: number; endBlock: number; timestamp: string }
+function selectValueJumps(
+  history: { portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks: number[] } | null,
+  from: string | undefined,
+  to: string | undefined,
+  maxJumps: number,
+): ValueJumpWindow[] {
+  if (!history) return []
+  const { portfolioSeries: series, portfolioDates: dates, portfolioBlocks: blocks } = history
+  if (series.length < 2 || blocks.length !== series.length) return []
+  const threshold = valueJumpThreshold(series)
+  const jumps: ValueJumpWindow[] = []
+  // i < length-1: the last delta lands on the pinned point — don't flag it.
+  for (let i = 1; i < series.length - 1; i++) {
+    const delta = series[i] - series[i - 1]
+    if (Math.abs(delta) < threshold || !(blocks[i] > blocks[i - 1])) continue
+    const day = (dates[i] ?? '').slice(0, 10)
+    if ((from && day < from) || (to && day > to)) continue
+    jumps.push({ delta, startBlock: blocks[i - 1], endBlock: blocks[i], timestamp: dates[i] })
+  }
+  jumps.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+  return jumps.slice(0, maxJumps)
+}
 
 // SQL: per-asset raw→token scale (10^decimals) for exact-index value ranking.
 function assetDecimalsPowSql(assetIdExpr: string): string {
@@ -10832,17 +10950,32 @@ interface ValueEventCandidateRow {
   value_usd: number
 }
 
-// Top-N largest-USD value events for an explicit account set, bounded to the
-// optional day window (default: the full indexed range, matching the value-
-// history chart's span). One bounded read of the compact account_activity_v3
-// index (sort key leads with account) valued via the ASOF hourly-close join the
-// value filters use, plus one LiquidationCall read of the MM read model —
-// liquidations are EVM-side and never hit the substrate event index.
-async function getAccountValueEvents(accounts: string[], cacheKey: string, from?: string, to?: string, limit = VALUE_EVENT_DEFAULT_LIMIT): Promise<ValueEvent[]> {
+// Value-chart markers for an explicit account set, bounded to the optional day
+// window (default: the full indexed range, matching the value-history chart's
+// span). Two selection passes share one candidate machinery:
+//  - the globally largest-USD events (transfers, swaps, liquidity, collapsed
+//    DCA schedules, liquidations), each valued at its block-time hourly close;
+//  - one marker per big JUMP of the reconstructed value series itself, so a
+//    large move never renders unannotated: each jump's block window is scored
+//    per cause (transfer / cross-chain / liquidity / DCA / liquidation / swap)
+//    and the dominant one wins, or an explicit 'price' marker when no discrete
+//    activity plausibly explains the move.
+// All event reads are bounded account_activity_v3 scans (sort key leads with
+// account) valued via the ASOF hourly-close join the value filters use, plus
+// one LiquidationCall read of the MM read model — liquidations are EVM-side
+// and never hit the substrate event index.
+async function getAccountValueEvents(accounts: string[], cacheKey: string, from?: string, to?: string, limit = VALUE_EVENT_DEFAULT_LIMIT, historyAccounts: string[] = accounts): Promise<ValueEvent[]> {
   const list = sqlAccountList(accounts)
   if (list === "''") return []
   return cached(`explorer:value-events:${cacheKey}:${from ?? ''}:${to ?? ''}:${limit}`, 600_000, async () => {
     const bound = timeWindow(from, to) ?? '1'
+    // The value series the chart draws (cache shared with getAddressHistory/
+    // getTag): its biggest deltas are the jumps that must end up annotated.
+    const history = await getAccountHistoryShared(historyAccounts, cacheKey).catch(() => null)
+    const jumps = selectValueJumps(history, from, to, limit)
+    const windows = [...jumps].sort((x, y) => x.startBlock - y.startBlock)
+    const windowId = new Map(windows.map((w, i) => [w, i + 1]))
+    const windowCondFor = (col: string) => windows.map(w => `(${col} > ${w.startBlock} AND ${col} <= ${w.endBlock})`).join(' OR ') || '0'
     // Fetch well past the requested markers: mirror legs (~half the transfer
     // candidates), pool/MM-leg counterparties and same-extrinsic swap echoes are
     // dropped below and must not leave the chart short.
@@ -10850,6 +10983,18 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
     const closes = historicalClosesRelationSql()
     const namedEvents = [...SWAP_EVENTS, ...VALUE_EVENT_LIQUIDITY_NAMES].map(n => `'${n}'`).join(',')
     const transferNames = VALUE_EVENT_TRANSFER_NAMES.map(n => `'${n}'`).join(',')
+    const xcmInNames = VALUE_EVENT_XCM_IN_NAMES.map(n => `'${n}'`).join(',')
+    const xcmOutNames = VALUE_EVENT_XCM_OUT_NAMES.map(n => `'${n}'`).join(',')
+    // Cross-chain gates, bounded to the jump windows: inbound credits and
+    // remote-initiated pulls execute in hook context inside a MessageQueue.
+    // Processed block; user-sent outbound withdrawals live in an XTokens/
+    // pallet-xcm extrinsic (see VALUE_EVENT_XCM_* above).
+    const xcmSentEventNames = `'XTokens.TransferredAssets','PolkadotXcm.Sent'`
+    const xcmBarrierBlocksSql = `SELECT block_height FROM ${xcmEventActivityTable()}
+                    WHERE event_name = 'MessageQueue.Processed' AND extrinsic_index IS NULL AND (${windowCondFor('block_height')})`
+    const xcmSentPairsSql = `SELECT block_height, assumeNotNull(extrinsic_index) FROM price_data.raw_xcm_activity
+                    WHERE source_kind = 'event' AND name IN (${xcmSentEventNames})
+                      AND extrinsic_index IS NOT NULL AND (${windowCondFor('block_height')})`
     const mmList = sqlAccountList([...new Set(accounts.map(evmAccountForm).filter(Boolean) as string[])])
     const mmAssetExpr = mmAssetIdSql('m.asset_address')
     // A DCA schedule executes as many small block-hook trades; each would rank as
@@ -10860,7 +11005,7 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
     // signed swap the account happens to make in the same block still surfaces).
     const dcaExecsSql = `SELECT id, block_height, event_index, block_timestamp, who, amount_out FROM price_data.dca_events
                     WHERE event_name = 'DCA.TradeExecuted' AND who IN (${list}) AND ${bound}`
-    const [eventRes, liqRes, dcaRes] = await Promise.all([
+    const [eventRes, liqRes, dcaRes, windowRes, xcmSentRes, dcaWindowRes] = await Promise.all([
       client.query({
         query: `
           SELECT block_height, event_index, any(extrinsic_index) AS extrinsic_index, any(event_name) AS event_name,
@@ -10970,17 +11115,75 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
         query_params: { fetch }, format: 'JSONEachRow',
         clickhouse_settings: { max_bytes_before_external_group_by: '1500000000' },
       }),
+      // Per-jump-window candidates: the same families the global pass ranks,
+      // EXTENDED with the cross-chain deposit/withdraw events (gated to real
+      // XCM contexts) and WITHOUT the DCA-block exclusion — hook executions are
+      // classified (and collapsed) per schedule in the scoring below. Top rows
+      // per window; the per-cause sums drive the jump attribution.
+      !windows.length ? Promise.resolve(null) : client.query({
+        query: `
+          SELECT w, block_height, event_index, any(extrinsic_index) AS extrinsic_index, any(event_name) AS event_name,
+                 any(ts) AS ts, any(asset_id) AS asset_id, any(amount) AS amount, any(value_usd) AS value_usd
+          FROM (
+            SELECT multiIf(${windows.map((w, i) => `a.block_height <= ${w.endBlock}, ${i + 1}`).join(', ')}, 0) AS w,
+                   a.block_height AS block_height, a.event_index AS event_index, a.extrinsic_index AS extrinsic_index,
+                   a.event_name AS event_name, toString(a.block_timestamp) AS ts,
+                   a.asset_id AS asset_id, toString(a.amount) AS amount,
+                   toFloat64(a.amount) / ${assetDecimalsPowSql('a.asset_id')} * value_price.close AS value_usd
+            FROM price_data.account_activity_v3 AS a FINAL
+            ASOF LEFT JOIN ${closes} value_price
+              ON value_price.asof_join_key = toUInt8(isNotNull(a.block_timestamp))
+             AND value_price.asset_id = ${priceAliasIdSql('a.asset_id')}
+             AND value_price.price_time <= a.block_timestamp
+            WHERE a.account IN (${list}) AND (${windowCondFor('a.block_height')})
+              AND a.has_amount = 1
+              AND (a.event_name IN (${namedEvents})
+                OR (a.event_name IN (${transferNames}) AND NOT a.is_module_transfer)
+                OR (a.event_name IN (${xcmInNames}) AND a.extrinsic_index IS NULL AND a.block_height IN (${xcmBarrierBlocksSql}))
+                OR (a.event_name IN (${xcmOutNames}) AND ((a.extrinsic_index IS NULL AND a.block_height IN (${xcmBarrierBlocksSql}))
+                  OR (a.extrinsic_index IS NOT NULL AND (a.block_height, assumeNotNull(a.extrinsic_index)) IN (${xcmSentPairsSql})))))
+          )
+          GROUP BY w, block_height, event_index
+          HAVING value_usd > 0
+          ORDER BY w, value_usd DESC
+          LIMIT ${VALUE_JUMP_WINDOW_ROWS} BY w`,
+        format: 'JSONEachRow',
+        clickhouse_settings: { max_bytes_before_external_group_by: '1500000000' },
+      }),
+      // Sent-event refs of the windows' outbound XCM extrinsics: a cross-chain
+      // marker links to the XCM activity row, which the feed keys by this event.
+      !windows.length ? Promise.resolve(null) : client.query({
+        query: `SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index,
+                       assumeNotNull(event_index) AS event_index, name
+                FROM price_data.raw_xcm_activity
+                WHERE source_kind = 'event' AND name IN (${xcmSentEventNames})
+                  AND extrinsic_index IS NOT NULL AND event_index IS NOT NULL AND (${windowCondFor('block_height')})`,
+        format: 'JSONEachRow',
+      }),
+      // Which windows' blocks are DCA executions, and of which schedule — the
+      // scoring collapses their hook swaps under the schedule, not 'swap'.
+      !windows.length ? Promise.resolve(null) : client.query({
+        query: `SELECT toUInt32(id) AS schedule_id, block_height FROM price_data.dca_events
+                WHERE event_name = 'DCA.TradeExecuted' AND who IN (${list}) AND (${windowCondFor('block_height')})
+                GROUP BY schedule_id, block_height`,
+        format: 'JSONEachRow',
+      }),
     ])
     const rows = await eventRes.json<ValueEventCandidateRow>()
     const liqRows = liqRes ? await liqRes.json<{ block_height: number; event_index: number; ts: string; asset_id: number; value_usd: number }>() : []
     const dcaRows = await dcaRes.json<{ schedule_id: number; total_value_usd: number; trades: number; block_height: number; event_index: number; ts: string; asset_id: number }>()
+    const windowRows = windowRes ? await windowRes.json<ValueEventCandidateRow & { w: number }>() : []
+    const xcmSentRows = xcmSentRes ? await xcmSentRes.json<{ block_height: number; extrinsic_index: number; event_index: number; name: string }>() : []
+    const dcaWindowRows = dcaWindowRes ? await dcaWindowRes.json<{ schedule_id: number; block_height: number }>() : []
 
     // Transfer direction + counterparty from the transfer read model (the v3
-    // index carries no from/to): a bounded point lookup for at most `fetch` refs.
+    // index carries no from/to): a bounded point lookup for at most `fetch`
+    // plus the window candidates' refs.
     const transferRows = rows.filter(r => VALUE_EVENT_TRANSFER_NAMES.includes(r.event_name))
+    const windowTransferRows = windowRows.filter(r => VALUE_EVENT_TRANSFER_NAMES.includes(r.event_name))
     const legByRef = new Map<string, { from: string; to: string }>()
-    if (transferRows.length) {
-      const tuples = transferRows.map(r => `(${r.block_height},${r.event_index})`).join(',')
+    if (transferRows.length || windowTransferRows.length) {
+      const tuples = [...new Set([...transferRows, ...windowTransferRows].map(r => `(${r.block_height},${r.event_index})`))].join(',')
       const legRes = await client.query({
         query: `SELECT block_height, event_index, any(from_account) AS from_account, any(to_account) AS to_account
                 FROM price_data.account_transfer_activity
@@ -10993,19 +11196,46 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
       }
     }
     const scoped = new Set(accounts.map(a => a.toLowerCase()))
-    const plumbing = new Set([...ammPoolAccounts(), ...(await mmReserveAccountIds())])
+    // Pool + money-market contracts (all markets): a transfer whose counterparty
+    // is one of these is a swap/LP/MM leg represented elsewhere, never a user
+    // transfer marker (and never a cross-chain one).
+    const plumbing = new Set([...ammPoolAccounts(), ...(await mmReserveAccountIds()), ...(await mmContractAccountIds())])
     // The same movement is often indexed twice (Currencies.Transferred mirrors
     // Tokens.Transfer): keep the highest-priority mirror per movement identity —
-    // the dedupeTransferEvents rule, applied post-lookup since identity needs from/to.
+    // the dedupeTransferEvents rule, applied post-lookup since identity needs
+    // from/to. Global and window candidates keep separate maps: a mirror that
+    // only cleared one fetch's value cut must not suppress the other's row.
     const mirrorKey = (r: ValueEventCandidateRow, leg: { from: string; to: string }) =>
       `${r.block_height}|${r.extrinsic_index ?? -1}|${r.asset_id}|${leg.from}|${leg.to}|${r.amount}`
-    const mirrorPriority = new Map<string, number>()
-    for (const r of transferRows) {
+    const buildMirrorPriority = (candidates: ValueEventCandidateRow[]) => {
+      const priority = new Map<string, number>()
+      for (const r of candidates) {
+        const leg = legByRef.get(`${r.block_height}:${r.event_index}`)
+        if (!leg) continue
+        const key = mirrorKey(r, leg)
+        const p = transferEventPriority(r.event_name)
+        if (p > (priority.get(key) ?? 0)) priority.set(key, p)
+      }
+      return priority
+    }
+    const mirrorPriority = buildMirrorPriority(transferRows)
+    // Direction/counterparty resolution shared by the global markers and the
+    // window scoring: null = drop (mirror echo, internal shuffle, plumbing leg),
+    // 'other' = real transfer whose legs the read model missed.
+    const resolveTransfer = (r: ValueEventCandidateRow, priority: Map<string, number>): { kind: 'transfer-in' | 'transfer-out'; counterparty: string } | 'other' | null => {
       const leg = legByRef.get(`${r.block_height}:${r.event_index}`)
-      if (!leg) continue
-      const key = mirrorKey(r, leg)
-      const p = transferEventPriority(r.event_name)
-      if (p > (mirrorPriority.get(key) ?? 0)) mirrorPriority.set(key, p)
+      // Read-model miss: still a real transfer, direction just unknown.
+      if (!leg) return 'other'
+      if (transferEventPriority(r.event_name) !== priority.get(mirrorKey(r, leg))) return null
+      const fromIn = scoped.has(leg.from), toIn = scoped.has(leg.to)
+      // Internal shuffles between the scoped accounts change no value; a pool/
+      // MM-contract COUNTERPARTY marks a swap or MM leg represented elsewhere
+      // (the viewed set itself may be such an account — its legs are its
+      // activity, the feed's viewingPool exception).
+      if (fromIn && toIn) return null
+      const counterparty = toIn ? leg.from : leg.to
+      if (plumbing.has(counterparty)) return null
+      return { kind: toIn ? 'transfer-in' : 'transfer-out', counterparty }
     }
 
     const out: ValueEvent[] = []
@@ -11017,19 +11247,10 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
         timestamp: r.ts, valueUsd: +Number(r.value_usd).toFixed(2), asset: asset(r.asset_id),
       }
       if (VALUE_EVENT_TRANSFER_NAMES.includes(r.event_name)) {
-        const leg = legByRef.get(`${r.block_height}:${r.event_index}`)
-        // Read-model miss: still a real transfer, direction just unknown.
-        if (!leg) { out.push({ ...base, kind: 'other', counterparty: null }); continue }
-        if (transferEventPriority(r.event_name) !== mirrorPriority.get(mirrorKey(r, leg))) continue
-        const fromIn = scoped.has(leg.from), toIn = scoped.has(leg.to)
-        // Internal shuffles between the scoped accounts change no value; a pool/
-        // MM-contract COUNTERPARTY marks a swap or MM leg represented elsewhere
-        // (the viewed set itself may be such an account — its legs are its
-        // activity, the feed's viewingPool exception).
-        if (fromIn && toIn) continue
-        const counterparty = toIn ? leg.from : leg.to
-        if (plumbing.has(counterparty)) continue
-        out.push({ ...base, kind: toIn ? 'transfer-in' : 'transfer-out', counterparty: accountRef(counterparty) })
+        const resolved = resolveTransfer(r, mirrorPriority)
+        if (!resolved) continue
+        if (resolved === 'other') { out.push({ ...base, kind: 'other', counterparty: null }); continue }
+        out.push({ ...base, kind: resolved.kind, counterparty: accountRef(resolved.counterparty) })
         continue
       }
       const kind = valueEventKind(r.event_name)
@@ -11042,8 +11263,8 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
       }
       out.push({ ...base, kind, counterparty: null })
     }
-    // The collapsed DCA schedules rank against everything else by their summed
-    // value: a large schedule earns a marker, a dust one doesn't crowd anything out.
+    // One collapsed marker per DCA schedule (summed value, /dca/:id link, at the
+    // peak execution). Reserved slots below guarantee the largest surface.
     for (const r of dcaRows) {
       out.push({
         blockHeight: Number(r.block_height), eventIndex: Number(r.event_index), extrinsicIndex: null,
@@ -11082,23 +11303,227 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
         if (Number.isFinite(value) && value > 0) liqDebtValue.set(leg.key, { assetId: leg.assetId, valueUsd: value })
       }
     }
+    const liqEvents: ValueEvent[] = []
     for (const r of liqRows) {
       const priced = Number(r.value_usd) > 0
       const fallback = priced ? undefined : liqDebtValue.get(`${r.block_height}:${r.event_index}`)
       const valueUsd = priced ? Number(r.value_usd) : fallback?.valueUsd ?? 0
       if (!(valueUsd > 0)) continue
-      out.push({
+      liqEvents.push({
         blockHeight: Number(r.block_height), eventIndex: Number(r.event_index), extrinsicIndex: null,
         timestamp: r.ts, kind: 'liquidation', valueUsd: +valueUsd.toFixed(2),
         asset: asset(fallback ? fallback.assetId : r.asset_id), counterparty: null,
       })
     }
+    out.push(...liqEvents)
+
+    // Jump attribution: score every window candidate under its cause (mirror-
+    // deduped, echo-collapsed), then give each selected jump ONE marker — the
+    // direction-consistent cause with the largest summed USD when it plausibly
+    // explains |Δ|, an explicit 'price' marker otherwise.
+    const jumpMarkers: ValueEvent[] = []
+    if (jumps.length) {
+      const isXcmCandidate = (name: string) => VALUE_EVENT_XCM_IN_NAMES.includes(name) || VALUE_EVENT_XCM_OUT_NAMES.includes(name)
+      const xcmDirOf = (name: string): 'in' | 'out' => VALUE_EVENT_XCM_IN_NAMES.includes(name) ? 'in' : 'out'
+      // Currencies.* mirrors Tokens.* for the same movement — Currencies wins,
+      // and its event index matches the row the XCM activity feed keeps.
+      const xcmMirrorKey = (r: ValueEventCandidateRow) => `${r.block_height}|${r.extrinsic_index ?? -1}|${r.asset_id}|${r.amount}|${xcmDirOf(r.event_name)}`
+      const xcmEventPriority = (name: string) => name.startsWith('Currencies.') ? 2 : 1
+      const windowMirrorPriority = buildMirrorPriority(windowTransferRows)
+      const xcmPriority = new Map<string, number>()
+      for (const r of windowRows) {
+        if (!isXcmCandidate(r.event_name)) continue
+        const key = xcmMirrorKey(r)
+        const p = xcmEventPriority(r.event_name)
+        if (p > (xcmPriority.get(key) ?? 0)) xcmPriority.set(key, p)
+      }
+      const dcaScheduleByBlock = new Map<number, number>()
+      for (const r of dcaWindowRows) dcaScheduleByBlock.set(Number(r.block_height), Number(r.schedule_id))
+      // Outbound markers point at the XTokens/pallet-xcm Sent event — the row
+      // the activity feed keeps (the legacy event wins over its mirror), so the
+      // marker's link resolves; the withdrawal is just its funding leg.
+      const xcmSentByExtrinsic = new Map<string, { eventIndex: number; name: string }>()
+      for (const r of xcmSentRows) {
+        const key = `${r.block_height}:${r.extrinsic_index}`
+        const cur = xcmSentByExtrinsic.get(key)
+        if (!cur || (cur.name !== 'XTokens.TransferredAssets' && r.name === 'XTokens.TransferredAssets')) {
+          xcmSentByExtrinsic.set(key, { eventIndex: Number(r.event_index), name: r.name })
+        }
+      }
+
+      interface JumpCause { score: number; best: ValueEvent | null; bestValue: number; hits: number }
+      const causes = new Map<string, JumpCause>() // `${w}:<class>` / `${w}:dca:<scheduleId>`
+      const bump = (key: string, value: number, event: ValueEvent, mode: 'sum' | 'max') => {
+        const cur = causes.get(key) ?? { score: 0, best: null, bestValue: 0, hits: 0 }
+        cur.score = mode === 'sum' ? cur.score + value : Math.max(cur.score, value)
+        cur.hits += 1
+        if (value > cur.bestValue) { cur.best = event; cur.bestValue = value }
+        causes.set(key, cur)
+      }
+      const seenWindowSwaps = new Set<string>()
+      const seenDcaBlocks = new Set<string>()
+      // Value-descending so per-trade/per-execution dedup keeps the largest leg.
+      const sortedWindowRows = [...windowRows].sort((x, y) => Number(y.value_usd) - Number(x.value_usd))
+      for (const r of sortedWindowRows) {
+        const w = Number(r.w)
+        if (!w) continue
+        const value = Number(r.value_usd)
+        const base: ValueEvent = {
+          blockHeight: Number(r.block_height), eventIndex: Number(r.event_index),
+          extrinsicIndex: r.extrinsic_index == null ? null : Number(r.extrinsic_index),
+          timestamp: r.ts, kind: 'other', valueUsd: +value.toFixed(2), asset: asset(r.asset_id), counterparty: null,
+        }
+        if (VALUE_EVENT_TRANSFER_NAMES.includes(r.event_name)) {
+          const resolved = resolveTransfer(r, windowMirrorPriority)
+          if (!resolved || resolved === 'other') continue
+          bump(`${w}:${resolved.kind}`, value, { ...base, kind: resolved.kind, counterparty: accountRef(resolved.counterparty) }, 'sum')
+          continue
+        }
+        if (isXcmCandidate(r.event_name)) {
+          if (xcmEventPriority(r.event_name) !== xcmPriority.get(xcmMirrorKey(r))) continue
+          const direction = xcmDirOf(r.event_name)
+          const sent = direction === 'out' && r.extrinsic_index != null
+            ? xcmSentByExtrinsic.get(`${r.block_height}:${r.extrinsic_index}`) : undefined
+          bump(`${w}:cross-chain-${direction}`, value,
+            { ...base, ...(sent ? { eventIndex: sent.eventIndex } : {}), kind: 'cross-chain', direction }, 'sum')
+          continue
+        }
+        if (SWAP_EVENTS.includes(r.event_name)) {
+          const scheduleId = r.extrinsic_index == null ? dcaScheduleByBlock.get(Number(r.block_height)) : undefined
+          if (scheduleId != null) {
+            // DCA executions sum under their schedule — tracked so a schedule-
+            // driven jump doesn't get a bogus 'price' marker, but they surface
+            // through the DCA reservation (below), never as a jump marker.
+            const blockKey = `${w}:${r.block_height}`
+            if (seenDcaBlocks.has(blockKey)) continue
+            seenDcaBlocks.add(blockKey)
+            bump(`${w}:dca:${scheduleId}`, value, { ...base, kind: 'dca', dcaScheduleId: scheduleId }, 'sum')
+            continue
+          }
+          // A swap between priced assets is value-neutral churn and must never
+          // "explain" a jump. Only a swap INTO an unpriced asset (a share token,
+          // valued off the wallet curve) actually moves the reconstructed line.
+          if (!isUnpricedAsset(Number(r.asset_id))) continue
+          const tradeKey = `${w}:${r.block_height}:${r.extrinsic_index ?? `e${r.event_index}`}`
+          if (seenWindowSwaps.has(tradeKey)) continue
+          seenWindowSwaps.add(tradeKey)
+          bump(`${w}:swap`, value, { ...base, kind: 'swap' }, 'max')
+          continue
+        }
+        // Liquidity add/remove — direction-agnostic: LP flows are value shuffles
+        // whose reconstructed line can move either way (drip unwinds, principal
+        // entering/leaving the LP-valued curve).
+        bump(`${w}:liquidity`, value, { ...base, kind: 'liquidity' }, 'sum')
+      }
+      for (const e of liqEvents) {
+        const i = windows.findIndex(win => e.blockHeight > win.startBlock && e.blockHeight <= win.endBlock)
+        if (i >= 0) bump(`${i + 1}:liquidation`, e.valueUsd, e, 'sum')
+      }
+
+      for (const jump of jumps) {
+        const w = windowId.get(jump)!
+        // Direction-consistent causes only: an inflow can't explain a drop.
+        const allowed = jump.delta > 0
+          ? [`${w}:transfer-in`, `${w}:cross-chain-in`, `${w}:liquidity`, `${w}:swap`]
+          : [`${w}:transfer-out`, `${w}:cross-chain-out`, `${w}:liquidity`, `${w}:liquidation`, `${w}:swap`]
+        // DCA is a candidate cause only to WIN (and thereby suppress a 'price'
+        // marker) — a schedule that dominates the window annotates it via the
+        // reservation, not a duplicate jump marker.
+        const candidateKeys = [...allowed, ...[...causes.keys()].filter(k => k.startsWith(`${w}:dca:`))]
+        let winner: { key: string; cause: JumpCause } | null = null
+        for (const key of candidateKeys) {
+          const cause = causes.get(key)
+          if (cause && (!winner || cause.score > winner.cause.score)) winner = { key, cause }
+        }
+        const explained = winner != null && winner.cause.score >= Math.abs(jump.delta) * VALUE_JUMP_EXPLAIN_FRACTION
+        if (explained && winner!.key.startsWith(`${w}:dca:`)) {
+          // Schedule covers this jump via its reserved /dca/:id marker — no
+          // extra marker here.
+          continue
+        }
+        if (explained && winner!.cause.best) {
+          jumpMarkers.push(winner!.cause.best)
+        } else {
+          // Nothing discrete accounts for the move — an honest market-move
+          // marker carrying the signed delta, pinned to the jump's own point.
+          jumpMarkers.push({
+            blockHeight: jump.endBlock, eventIndex: 0, extrinsicIndex: null, timestamp: jump.timestamp,
+            kind: 'price', valueUsd: +jump.delta.toFixed(2), asset: null, counterparty: null,
+          })
+        }
+      }
+
+      // Cross-chain link verification: an inbound credit / remote-initiated
+      // outbound pull marker links to /cross-chain/<block>-e<idx>, which
+      // ActivityDetail resolves against the XCM feed's reconstruction
+      // (xcmInRowsForBlocks / xcmOutRemoteRowsForBlocks) — NOT the raw deposit/
+      // withdraw event. That reconstruction skips reserved accounts, walks back
+      // contiguously from the barrier, and mirror-dedups, so the raw event index
+      // often has no feed row (deterministic for treasury/sovereign tags). Verify
+      // each such marker against the actual feed rows; keep the link only on a
+      // match (re-pointing the index to the feed's), else render it unlinked.
+      const inBlocks = [...new Set(jumpMarkers.filter(m => m.kind === 'cross-chain' && m.direction === 'in').map(m => m.blockHeight))]
+      const outBlocks = [...new Set(jumpMarkers.filter(m => m.kind === 'cross-chain' && m.direction === 'out' && m.extrinsicIndex == null).map(m => m.blockHeight))]
+      if (inBlocks.length || outBlocks.length) {
+        const prices = await ensurePrices()
+        const whoIn = new Set(accounts)
+        const [inRows, outRows] = await Promise.all([
+          inBlocks.length ? xcmInRowsForBlocks(inBlocks, prices, whoIn) : Promise.resolve([]),
+          outBlocks.length ? xcmOutRemoteRowsForBlocks(outBlocks, prices, whoIn) : Promise.resolve([]),
+        ])
+        // Feed row index keyed by block+asset (one credit per asset per block in
+        // practice); re-point the marker to that index so the detail link resolves.
+        const feedIndex = new Map<string, number>()
+        for (const r of [...inRows, ...outRows]) {
+          if (r.eventIndex != null && r.asset) feedIndex.set(`${r.blockHeight}:${r.asset.assetId}`, r.eventIndex)
+        }
+        for (const m of jumpMarkers) {
+          if (m.kind !== 'cross-chain') continue
+          if (m.direction === 'out' && m.extrinsicIndex != null) continue // user-sent path already resolves
+          const idx = m.asset ? feedIndex.get(`${m.blockHeight}:${m.asset.assetId}`) : undefined
+          if (idx != null) m.eventIndex = idx
+          else m.linkable = false
+        }
+      }
+    }
+
     out.sort((x, y) => y.valueUsd - x.valueUsd)
-    // Reserve a few slots for the largest liquidations so they always surface,
-    // then fill the rest of the budget by value; value already decided membership.
-    const reserved = out.filter(e => e.kind === 'liquidation').slice(0, VALUE_EVENT_LIQUIDATION_SLOTS)
-    const reservedRefs = new Set(reserved.map(e => `${e.blockHeight}:${e.eventIndex}`))
-    const chosen = [...reserved, ...out.filter(e => !reservedRefs.has(`${e.blockHeight}:${e.eventIndex}`))].slice(0, limit)
+    // Selection order: reserve the largest liquidations and DCA schedules (both
+    // shipped, high-signal markers that raw jumps must not crowd out), then one
+    // marker per big jump (largest |Δ| first — annotating distinct moves beats
+    // raw event size), then a value-fill of the remaining budget. The fill is
+    // GATED to the account's own significance threshold, so a flat account never
+    // surfaces its dust; a jump that IS a top event dedups by identity, and a
+    // DCA schedule never renders twice.
+    const fillThreshold = history ? valueJumpThreshold(history.portfolioSeries) : VALUE_JUMP_MIN_USD
+    const reservedLiq = out.filter(e => e.kind === 'liquidation').slice(0, VALUE_EVENT_LIQUIDATION_SLOTS)
+    const reservedDca = out.filter(e => e.kind === 'dca').slice(0, VALUE_EVENT_DCA_SLOTS)
+    const chosen: ValueEvent[] = []
+    const usedRefs = new Set<string>()
+    const usedSchedules = new Set<number>()
+    const take = (e: ValueEvent) => {
+      if (chosen.length >= limit) return
+      // DCA markers dedup by SCHEDULE, not by (block,event): paired buy/sell
+      // schedules argMax to the same peak swap leg, so they legitimately share a
+      // ref — collapsing on it would drop a distinct schedule.
+      if (e.kind === 'dca' && e.dcaScheduleId != null) {
+        if (usedSchedules.has(e.dcaScheduleId)) return
+        usedSchedules.add(e.dcaScheduleId)
+        chosen.push(e)
+        return
+      }
+      const ref = `${e.blockHeight}:${e.eventIndex}`
+      if (usedRefs.has(ref)) return
+      usedRefs.add(ref)
+      chosen.push(e)
+    }
+    for (const e of reservedLiq) take(e)
+    for (const e of reservedDca) take(e)
+    for (const e of jumpMarkers) take(e)
+    // Value-fill: only genuinely significant events (≥ this account's jump
+    // threshold). 'price'/'cross-chain' jump markers already annotate the moves;
+    // this backfills large discrete events that weren't themselves a jump.
+    for (const e of out) if (e.valueUsd >= fillThreshold) take(e)
     // Chronological order for rendering.
     return chosen.sort((x, y) => x.blockHeight - y.blockHeight || x.eventIndex - y.eventIndex)
   })
@@ -11113,7 +11538,10 @@ export async function getAddressValueEvents(addressInput: string, from?: string,
 export async function getTagValueEvents(tagId: string, from?: string, to?: string): Promise<ValueEvent[] | null> {
   const members = tagMembers(tagId)
   if (!members) return null
-  return getAccountValueEvents(members, `tag:${tagId}`, from, to)
+  // Jump detection reads the SAME series getTag charts: members plus their
+  // truncated-EVM twins (and the same shared cache key).
+  const historyAccounts = [...new Set([...members, ...members.map(evmAccountForm).filter(Boolean) as string[]])]
+  return getAccountValueEvents(members, `tag:${tagId}`, from, to, VALUE_EVENT_DEFAULT_LIMIT, historyAccounts)
 }
 
 // Signed extrinsics for an explicit account-id set (related-account set, or a
@@ -12325,7 +12753,7 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
     const [history, bareLp, farmLp, xykLp, activeDcas] = await Promise.all([
       summary
         ? Promise.resolve({ portfolioSeries: [] as number[], portfolioDates: [] as string[], balanceHistory: [] as AssetBalanceHistory[] })
-        : getAccountHistory(tagHistoryAccounts),
+        : getAccountHistoryShared(tagHistoryAccounts, `tag:${tagId}`),
       getOmnipoolPositions(tag.members),
       getFarmingPositions(tag.members),
       getXykPositions(tag.members, balances),

@@ -46,44 +46,59 @@ function fmtCountdown(total: number): string {
 // slugs by family); the detail page canonicalizes add- vs remove-liquidity etc.
 const VALUE_EVENT_LABELS: Record<ValueEvent['kind'], string> = {
   'transfer-in': 'Transfer in', 'transfer-out': 'Transfer out', swap: 'Swap',
-  liquidity: 'Liquidity', liquidation: 'Liquidation', dca: 'DCA', other: 'Transfer',
+  liquidity: 'Liquidity', liquidation: 'Liquidation', dca: 'DCA',
+  'cross-chain': 'Cross-chain', price: 'Price move', other: 'Transfer',
 }
 const VALUE_EVENT_SLUGS: Record<ValueEvent['kind'], ActivitySlug> = {
   'transfer-in': 'transfer', 'transfer-out': 'transfer', swap: 'swap',
-  liquidity: 'add-liquidity', liquidation: 'liquidate', dca: 'dca', other: 'transfer',
+  liquidity: 'add-liquidity', liquidation: 'liquidate', dca: 'dca',
+  'cross-chain': 'cross-chain', price: 'transfer' /* unlinked */, other: 'transfer',
+}
+// Cross-chain markers carry the flow direction alongside the kind.
+function valueEventLabel(ev: ValueEvent): string {
+  if (ev.kind === 'cross-chain' && ev.direction) return ev.direction === 'in' ? 'Cross-chain in' : 'Cross-chain out'
+  return VALUE_EVENT_LABELS[ev.kind]
 }
 // Single-marker hover card: date + kind + value, then the asset and (for
 // transfers) the counterparty. The kind keeps the marker's --mk color. A DCA
-// marker is a whole schedule, so its card names the schedule and trade count.
+// marker is a whole schedule, so its card names the schedule and trade count;
+// a 'price' marker has no asset/event row — just the signed move.
 function valueEventTip(ev: ValueEvent): ReactNode {
-  const dir = ev.kind === 'transfer-in' ? 'from' : ev.kind === 'transfer-out' ? 'to' : null
-  const kindLabel = ev.kind === 'dca' && ev.dcaScheduleId != null ? `DCA #${ev.dcaScheduleId}` : VALUE_EVENT_LABELS[ev.kind]
+  const dir = ev.kind === 'transfer-in' || (ev.kind === 'cross-chain' && ev.direction === 'in') ? 'from'
+    : ev.kind === 'transfer-out' || (ev.kind === 'cross-chain' && ev.direction === 'out') ? 'to' : null
+  const kindLabel = ev.kind === 'dca' && ev.dcaScheduleId != null ? `DCA #${ev.dcaScheduleId}` : valueEventLabel(ev)
   return <>
     <div className="apx-mark-row">
       <span className="t-d">{ev.timestamp.slice(0, 10)}</span>
       <span className="t-k" style={{ color: 'var(--mk)' }}>{kindLabel}</span>
       <span className="t-p">{F.usd(ev.valueUsd)}</span>
     </div>
-    <div className="apx-mark-row">
-      <span className="trade-leg">
-        <AssetIcon assetId={ev.asset.assetId} iconAssetId={ev.asset.iconAssetId} symbol={ev.asset.symbol} size={16} parachainId={ev.asset.parachainId} origin={ev.asset.origin} />
-        {' '}<span className="mono">{ev.asset.symbol}</span>
-      </span>
-      {dir && ev.counterparty && <><span className="muted">{dir}</span><AddrPill account={ev.counterparty} noCopy /></>}
-      {ev.kind === 'dca' && ev.dcaTrades != null && <span className="muted">{F.int(ev.dcaTrades)} trades</span>}
-    </div>
+    {(ev.asset || (dir && ev.counterparty) || (ev.kind === 'dca' && ev.dcaTrades != null)) && (
+      <div className="apx-mark-row">
+        {ev.asset && <span className="trade-leg">
+          <AssetIcon assetId={ev.asset.assetId} iconAssetId={ev.asset.iconAssetId} symbol={ev.asset.symbol} size={16} parachainId={ev.asset.parachainId} origin={ev.asset.origin} />
+          {' '}<span className="mono">{ev.asset.symbol}</span>
+        </span>}
+        {dir && ev.counterparty && <><span className="muted">{dir}</span><AddrPill account={ev.counterparty} noCopy /></>}
+        {ev.kind === 'dca' && ev.dcaTrades != null && <span className="muted">{F.int(ev.dcaTrades)} trades</span>}
+      </div>
+    )}
   </>
 }
 function valueEventMarker(ev: ValueEvent): ChartMarker {
   return {
     ts: ev.timestamp,
     kind: ev.kind,
-    label: VALUE_EVENT_LABELS[ev.kind],
+    label: valueEventLabel(ev),
     valueUsd: ev.valueUsd,
-    // A DCA marker links to its schedule page; everything else to the event.
+    // A DCA marker links to its schedule page; a 'price' marker (and a cross-
+    // chain marker the server couldn't match to a feed row) annotates a move
+    // with no detail row to open; everything else links to the event.
     href: ev.kind === 'dca' && ev.dcaScheduleId != null
       ? paths.dcaSchedule(ev.dcaScheduleId)
-      : paths.activityDetail(VALUE_EVENT_SLUGS[ev.kind], `${ev.blockHeight}-e${ev.eventIndex}`),
+      : ev.kind === 'price' || ev.linkable === false
+        ? null
+        : paths.activityDetail(VALUE_EVENT_SLUGS[ev.kind], `${ev.blockHeight}-e${ev.eventIndex}`),
     tip: valueEventTip(ev),
   }
 }
