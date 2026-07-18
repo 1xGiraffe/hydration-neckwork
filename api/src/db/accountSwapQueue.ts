@@ -155,8 +155,12 @@ export async function seedAccountSwapActivityQueue(client: ClickHouseClient): Pr
           block_timestamp, event_name,
           toUInt32(greatest(0, JSONExtractInt(args_json, 'assetIn'))) AS asset_in,
           toUInt32(greatest(0, JSONExtractInt(args_json, 'assetOut'))) AS asset_out,
-          JSONExtractString(args_json, 'amountIn') AS amount_in,
-          JSONExtractString(args_json, 'amountOut') AS amount_out, ingested_at
+          multiIf(event_name = 'XYK.SellExecuted', JSONExtractString(args_json, 'amount'),
+                  event_name = 'XYK.BuyExecuted', JSONExtractString(args_json, 'buyPrice'),
+                  JSONExtractString(args_json, 'amountIn')) AS amount_in,
+          multiIf(event_name = 'XYK.SellExecuted', JSONExtractString(args_json, 'salePrice'),
+                  event_name = 'XYK.BuyExecuted', JSONExtractString(args_json, 'amount'),
+                  JSONExtractString(args_json, 'amountOut')) AS amount_out, ingested_at
         FROM price_data.raw_events
         WHERE ingested_at >= {lastIngested:DateTime} - INTERVAL 2 MINUTE
           AND event_name IN (${SWAP_EVENTS_SQL}) AND extrinsic_index IS NOT NULL`,
