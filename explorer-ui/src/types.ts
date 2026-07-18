@@ -280,15 +280,20 @@ export interface AccountHistoryResponse { portfolioSeries: number[]; portfolioDa
 
 // One of the account/tag's largest value-changing events (big transfers in/out,
 // swaps, liquidity moves, liquidations) — the value chart's clickable markers.
+// A 'dca' marker stands for a whole schedule (its executions summed), not one swap.
 export interface ValueEvent {
   blockHeight: number
   eventIndex: number
   extrinsicIndex: number | null
   timestamp: string
-  kind: 'transfer-in' | 'transfer-out' | 'swap' | 'liquidity' | 'liquidation' | 'other'
+  kind: 'transfer-in' | 'transfer-out' | 'swap' | 'liquidity' | 'liquidation' | 'dca' | 'other'
   valueUsd: number
   asset: AssetRef
   counterparty: AccountRef | null
+  // A 'dca' marker summarizes a whole schedule: id links to /dca/:id, trades is
+  // the execution count behind valueUsd; block/event point at the peak execution.
+  dcaScheduleId?: number
+  dcaTrades?: number
 }
 
 export type CloseAccountReason =

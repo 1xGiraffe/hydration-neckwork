@@ -10776,16 +10776,22 @@ export async function getAddressActivityCountAtMin(addressInput: string, minUsd:
 // value-event markers (the "Value" chart's flagged big events)
 // The largest value-changing events across the account set's history: user
 // transfers (in/out), swaps, liquidity moves, and money-market liquidations,
-// each valued at its block-time hourly close — never the current price.
+// each valued at its block-time hourly close — never the current price. A DCA
+// schedule's many block-hook executions collapse into one marker for the whole
+// schedule (summed value, linked to /dca/:id) instead of flooding the chart.
 export interface ValueEvent {
   blockHeight: number
   eventIndex: number
   extrinsicIndex: number | null
   timestamp: string
-  kind: 'transfer-in' | 'transfer-out' | 'swap' | 'liquidity' | 'liquidation' | 'other'
+  kind: 'transfer-in' | 'transfer-out' | 'swap' | 'liquidity' | 'liquidation' | 'dca' | 'other'
   valueUsd: number
   asset: AssetRef
   counterparty: AccountRef | null
+  // A 'dca' marker summarizes a whole schedule: id links to /dca/:id, trades is
+  // the execution count behind valueUsd; block/event point at the peak execution.
+  dcaScheduleId?: number
+  dcaTrades?: number
 }
 
 const VALUE_EVENT_TRANSFER_NAMES = ['Balances.Transfer', 'Tokens.Transfer', 'Currencies.Transferred']
@@ -10846,7 +10852,15 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
     const transferNames = VALUE_EVENT_TRANSFER_NAMES.map(n => `'${n}'`).join(',')
     const mmList = sqlAccountList([...new Set(accounts.map(evmAccountForm).filter(Boolean) as string[])])
     const mmAssetExpr = mmAssetIdSql('m.asset_address')
-    const [eventRes, liqRes] = await Promise.all([
+    // A DCA schedule executes as many small block-hook trades; each would rank as
+    // its own swap (+ mirrored liquidity leg) and a long-running schedule floods
+    // the chart with identical markers. Its executions collapse into ONE 'dca'
+    // marker instead: the blocks holding a DCA.TradeExecuted for a scoped account
+    // are excluded from the per-event candidates below (extrinsic-null only, so a
+    // signed swap the account happens to make in the same block still surfaces).
+    const dcaExecsSql = `SELECT id, block_height, event_index, block_timestamp, who, amount_out FROM price_data.dca_events
+                    WHERE event_name = 'DCA.TradeExecuted' AND who IN (${list}) AND ${bound}`
+    const [eventRes, liqRes, dcaRes] = await Promise.all([
       client.query({
         query: `
           SELECT block_height, event_index, any(extrinsic_index) AS extrinsic_index, any(event_name) AS event_name,
@@ -10865,6 +10879,9 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
               AND a.has_amount = 1
               AND (a.event_name IN (${namedEvents})
                 OR (a.event_name IN (${transferNames}) AND NOT a.is_module_transfer))
+              AND NOT (a.extrinsic_index IS NULL
+                AND a.event_name IN (${namedEvents})
+                AND a.block_height IN (SELECT block_height FROM (${dcaExecsSql})))
           )
           GROUP BY block_height, event_index
           HAVING value_usd > 0
@@ -10896,9 +10913,67 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
           LIMIT {fetch:UInt32}`,
         query_params: { fetch }, format: 'JSONEachRow',
       }),
+      // One row per DCA schedule: total = SUM of its executions' USD value at the
+      // same ASOF hourly close the swap markers use, marker at the single
+      // highest-value execution. Two eras value differently: OLD-format
+      // executions index their AMM events under the OWNER's account (and their
+      // dca_schedules row carries no asset/direction), so they're valued from
+      // that swap leg — max per block, since Router.Executed and its hop events
+      // describe one trade. NEW-format executions route through the router pallet
+      // account (nothing valued lands under the owner), but their dca_schedules
+      // row reliably carries asset_out — those value dca_events.amount_out at
+      // asset_out's close, gated on direction != '' so an old unknown-asset
+      // schedule can never be mis-valued as asset 0 (HDX).
+      client.query({
+        query: `
+          SELECT schedule_id, sum(exec_value) AS total_value_usd, count() AS trades,
+                 argMax(block_height, exec_value) AS block_height, argMax(event_index, exec_value) AS event_index,
+                 argMax(ts, exec_value) AS ts, argMax(asset_id, exec_value) AS asset_id
+          FROM (
+            SELECT d.schedule_id AS schedule_id, d.block_height AS block_height,
+                   if(max(s.value_usd) > 0, max(s.value_usd), any(d.event_value)) AS exec_value,
+                   if(max(s.value_usd) > 0, argMax(s.event_index, s.value_usd), any(d.event_index)) AS event_index,
+                   if(max(s.value_usd) > 0, argMax(s.asset_id, s.value_usd), any(d.sched_asset_out)) AS asset_id,
+                   any(d.ts) AS ts
+            FROM (
+              SELECT toUInt32(d0.id) AS schedule_id, d0.block_height AS block_height, d0.event_index AS event_index,
+                     toString(d0.block_timestamp) AS ts, d0.who AS who, sched.asset_out AS sched_asset_out,
+                     if(sched.direction != '',
+                        toFloat64OrZero(d0.amount_out) / ${assetDecimalsPowSql('sched.asset_out')} * out_price.close, 0) AS event_value
+              FROM (${dcaExecsSql}) AS d0
+              LEFT JOIN (SELECT id, asset_out, direction FROM price_data.dca_schedules FINAL WHERE who IN (${list})) AS sched
+                ON sched.id = d0.id
+              ASOF LEFT JOIN ${closes} out_price
+                ON out_price.asof_join_key = toUInt8(isNotNull(d0.block_timestamp))
+               AND out_price.asset_id = ${priceAliasIdSql('sched.asset_out')}
+               AND out_price.price_time <= d0.block_timestamp
+            ) AS d
+            LEFT JOIN (
+              SELECT a.block_height AS block_height, a.account AS account, a.event_index AS event_index,
+                     a.asset_id AS asset_id,
+                     toFloat64(a.amount) / ${assetDecimalsPowSql('a.asset_id')} * value_price.close AS value_usd
+              FROM price_data.account_activity_v3 AS a FINAL
+              ASOF LEFT JOIN ${closes} value_price
+                ON value_price.asof_join_key = toUInt8(isNotNull(a.block_timestamp))
+               AND value_price.asset_id = ${priceAliasIdSql('a.asset_id')}
+               AND value_price.price_time <= a.block_timestamp
+              WHERE a.account IN (${list}) AND ${bound}
+                AND a.has_amount = 1 AND a.extrinsic_index IS NULL
+                AND a.event_name IN (${SWAP_EVENTS.map(n => `'${n}'`).join(',')})
+            ) AS s ON s.block_height = d.block_height AND s.account = d.who
+            GROUP BY schedule_id, block_height
+          )
+          GROUP BY schedule_id
+          HAVING total_value_usd > 0
+          ORDER BY total_value_usd DESC
+          LIMIT {fetch:UInt32}`,
+        query_params: { fetch }, format: 'JSONEachRow',
+        clickhouse_settings: { max_bytes_before_external_group_by: '1500000000' },
+      }),
     ])
     const rows = await eventRes.json<ValueEventCandidateRow>()
     const liqRows = liqRes ? await liqRes.json<{ block_height: number; event_index: number; ts: string; asset_id: number; value_usd: number }>() : []
+    const dcaRows = await dcaRes.json<{ schedule_id: number; total_value_usd: number; trades: number; block_height: number; event_index: number; ts: string; asset_id: number }>()
 
     // Transfer direction + counterparty from the transfer read model (the v3
     // index carries no from/to): a bounded point lookup for at most `fetch` refs.
@@ -10966,6 +11041,16 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
         seenSwapExtrinsics.add(key)
       }
       out.push({ ...base, kind, counterparty: null })
+    }
+    // The collapsed DCA schedules rank against everything else by their summed
+    // value: a large schedule earns a marker, a dust one doesn't crowd anything out.
+    for (const r of dcaRows) {
+      out.push({
+        blockHeight: Number(r.block_height), eventIndex: Number(r.event_index), extrinsicIndex: null,
+        timestamp: r.ts, kind: 'dca', valueUsd: +Number(r.total_value_usd).toFixed(2),
+        asset: asset(r.asset_id), counterparty: null,
+        dcaScheduleId: Number(r.schedule_id), dcaTrades: Number(r.trades),
+      })
     }
     // Share-token collateral (2-Pool-*) has no historical NAV, valuing those
     // seizures at 0. Fall back to the DEBT side (debtToCover at the debt

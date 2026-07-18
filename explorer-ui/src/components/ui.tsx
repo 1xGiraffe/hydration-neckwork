@@ -590,6 +590,7 @@ const CHART_MARKER_COLORS: Record<string, string> = {
   swap: 'var(--sky)',
   liquidity: 'var(--lavender)',
   liquidation: 'var(--red)',
+  dca: 'var(--amber)', // matches the .dca-tag / DCA-pallet accent
   other: 'var(--text-low)',
 }
 function markerColor(kind: string): string { return CHART_MARKER_COLORS[kind] ?? 'var(--text-low)' }
@@ -658,7 +659,7 @@ function ChartMarkerFlag({ cluster, open, onOpen, onClose }: {
     if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onClose()
   }
   return (
-    <div ref={rootRef} className={`apx-mark${open ? ' open' : ''}`} style={{ left: `${(cluster.frac * 100).toFixed(3)}%`, '--mk': markerColor(top.kind) } as CSSProperties}
+    <div ref={rootRef} data-no-hover className={`apx-mark${open ? ' open' : ''}`} style={{ left: `${(cluster.frac * 100).toFixed(3)}%`, '--mk': markerColor(top.kind) } as CSSProperties}
       onMouseEnter={coarse ? undefined : onOpen} onMouseLeave={coarse ? undefined : onClose}
       onFocus={coarse ? undefined : onOpen} onBlur={coarse ? undefined : onBlur}>
       <span className="apx-mark-line" aria-hidden="true" />

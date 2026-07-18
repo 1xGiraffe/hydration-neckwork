@@ -46,20 +46,22 @@ function fmtCountdown(total: number): string {
 // slugs by family); the detail page canonicalizes add- vs remove-liquidity etc.
 const VALUE_EVENT_LABELS: Record<ValueEvent['kind'], string> = {
   'transfer-in': 'Transfer in', 'transfer-out': 'Transfer out', swap: 'Swap',
-  liquidity: 'Liquidity', liquidation: 'Liquidation', other: 'Transfer',
+  liquidity: 'Liquidity', liquidation: 'Liquidation', dca: 'DCA', other: 'Transfer',
 }
 const VALUE_EVENT_SLUGS: Record<ValueEvent['kind'], ActivitySlug> = {
   'transfer-in': 'transfer', 'transfer-out': 'transfer', swap: 'swap',
-  liquidity: 'add-liquidity', liquidation: 'liquidate', other: 'transfer',
+  liquidity: 'add-liquidity', liquidation: 'liquidate', dca: 'dca', other: 'transfer',
 }
 // Single-marker hover card: date + kind + value, then the asset and (for
-// transfers) the counterparty. The kind keeps the marker's --mk color.
+// transfers) the counterparty. The kind keeps the marker's --mk color. A DCA
+// marker is a whole schedule, so its card names the schedule and trade count.
 function valueEventTip(ev: ValueEvent): ReactNode {
   const dir = ev.kind === 'transfer-in' ? 'from' : ev.kind === 'transfer-out' ? 'to' : null
+  const kindLabel = ev.kind === 'dca' && ev.dcaScheduleId != null ? `DCA #${ev.dcaScheduleId}` : VALUE_EVENT_LABELS[ev.kind]
   return <>
     <div className="apx-mark-row">
       <span className="t-d">{ev.timestamp.slice(0, 10)}</span>
-      <span className="t-k" style={{ color: 'var(--mk)' }}>{VALUE_EVENT_LABELS[ev.kind]}</span>
+      <span className="t-k" style={{ color: 'var(--mk)' }}>{kindLabel}</span>
       <span className="t-p">{F.usd(ev.valueUsd)}</span>
     </div>
     <div className="apx-mark-row">
@@ -68,6 +70,7 @@ function valueEventTip(ev: ValueEvent): ReactNode {
         {' '}<span className="mono">{ev.asset.symbol}</span>
       </span>
       {dir && ev.counterparty && <><span className="muted">{dir}</span><AddrPill account={ev.counterparty} noCopy /></>}
+      {ev.kind === 'dca' && ev.dcaTrades != null && <span className="muted">{F.int(ev.dcaTrades)} trades</span>}
     </div>
   </>
 }
@@ -77,7 +80,10 @@ function valueEventMarker(ev: ValueEvent): ChartMarker {
     kind: ev.kind,
     label: VALUE_EVENT_LABELS[ev.kind],
     valueUsd: ev.valueUsd,
-    href: paths.activityDetail(VALUE_EVENT_SLUGS[ev.kind], `${ev.blockHeight}-e${ev.eventIndex}`),
+    // A DCA marker links to its schedule page; everything else to the event.
+    href: ev.kind === 'dca' && ev.dcaScheduleId != null
+      ? paths.dcaSchedule(ev.dcaScheduleId)
+      : paths.activityDetail(VALUE_EVENT_SLUGS[ev.kind], `${ev.blockHeight}-e${ev.eventIndex}`),
     tip: valueEventTip(ev),
   }
 }
