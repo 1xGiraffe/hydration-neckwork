@@ -8217,7 +8217,25 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
     const life = await lifeRes.json<{ event_name: string; ts: string }>()
     const totals = (await totalRes.json<{ n: string; failed: string; attempts: string; tin: string; tout: string }>())[0]
     const latestExecution = (await latestExecutionRes.json<{ event_name: string }>())[0]?.event_name
-    const aIn = asset(sched.asset_in), aOut = asset(sched.asset_out)
+    // Pre-router-era schedules recorded no order in the DCA.Scheduled event, so
+    // dca_schedules stores assetIn=assetOut=0 — which renders as a nonsensical
+    // HDX→HDX schedule. Recover the real traded pair from the first execution's
+    // swap leg (same block + owner) when the stored order is empty.
+    let aInId = sched.asset_in, aOutId = sched.asset_out
+    if (aInId === 0 && aOutId === 0) {
+      const swapRes = await client.query({
+        query: `SELECT JSONExtractInt(args_json,'assetIn') AS ain, JSONExtractInt(args_json,'assetOut') AS aout
+                FROM price_data.raw_events
+                WHERE event_name IN ('Router.Executed','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted')
+                  AND block_height = (SELECT min(block_height) FROM price_data.dca_events WHERE id = {sid:UInt64} AND event_name = 'DCA.TradeExecuted')
+                  AND JSONExtractString(args_json,'who') = {who:String}
+                ORDER BY event_index ASC LIMIT 1`,
+        query_params: { sid: scheduleId, who: sched.who }, format: 'JSONEachRow',
+      })
+      const sw = (await swapRes.json<{ ain: number; aout: number }>())[0]
+      if (sw && (sw.ain || sw.aout)) { aInId = sw.ain; aOutId = sw.aout }
+    }
+    const aIn = asset(aInId), aOut = asset(aOutId)
     const terminated = life.find(l => l.event_name === 'DCA.Terminated')
     const completed = life.find(l => l.event_name === 'DCA.Completed')
     const executionRows = await exRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; amount_in: string; amount_out: string }>()
