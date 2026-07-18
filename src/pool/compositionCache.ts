@@ -160,6 +160,35 @@ export class PoolCompositionCache {
           stableswapChanged = true
           break
         }
+        case 'Stableswap.AmplificationChanging': {
+          // An amplification ramp re-parameterizes the pool's invariant math
+          // from startBlock to endBlock; without applying it the cached ramp
+          // stays stale until an incidental re-bootstrap and every spot price
+          // computed from the pool would use the wrong amplification.
+          const args = eventArgs(event.args, event.name)
+          const poolId = numberArg(args, 'poolId', event.name)
+          const entry = this.stableswapPools?.find(pool => pool.poolId === poolId)
+          if (entry) {
+            entry.initialAmplification = numberArg(args, 'currentAmplification', event.name)
+            entry.finalAmplification = numberArg(args, 'finalAmplification', event.name)
+            entry.initialBlock = numberArg(args, 'startBlock', event.name)
+            entry.finalBlock = numberArg(args, 'endBlock', event.name)
+            console.log(`[PoolCache] Incremental: Stableswap amplification ramp (poolId=${poolId}, ${entry.initialAmplification}→${entry.finalAmplification} over blocks ${entry.initialBlock}-${entry.finalBlock})`)
+          }
+          stableswapChanged = true
+          break
+        }
+        case 'Stableswap.FeeUpdated': {
+          const args = eventArgs(event.args, event.name)
+          const poolId = numberArg(args, 'poolId', event.name)
+          const entry = this.stableswapPools?.find(pool => pool.poolId === poolId)
+          if (entry) {
+            entry.fee = numberArg(args, 'fee', event.name)
+            console.log(`[PoolCache] Incremental: Stableswap fee updated (poolId=${poolId}, fee=${entry.fee})`)
+          }
+          stableswapChanged = true
+          break
+        }
         case 'Stableswap.LiquidityAdded':
           // LiquidityAdded doesn't change composition, ignore
           break

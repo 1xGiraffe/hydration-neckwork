@@ -25,6 +25,8 @@ export const processor = new SubstrateBatchProcessor()
       'XYK.PoolCreated',
       'XYK.PoolDestroyed',
       'Stableswap.PoolCreated',
+      'Stableswap.AmplificationChanging',
+      'Stableswap.FeeUpdated',
       'Stableswap.LiquidityAdded',
       'Tokens.Transfer',
       'Omnipool.SellExecuted',
