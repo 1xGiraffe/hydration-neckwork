@@ -5137,20 +5137,38 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
       // account. DCA.TradeExecuted carries the real owner + schedule id (match on
       // block+amountIn); DCA.Scheduled maps id → its scheduling extrinsic for links.
       const dcaBlocks = [...new Set(rows.map(r => r.block_height))]
-      const dcaRows: { block_height: number; who: string; id: string; amount_in: string }[] = []
+      const dcaRows: { block_height: number; event_index: number; who: string; id: string; amount_in: string }[] = []
       for (let start = 0; start < dcaBlocks.length; start += 2_000) {
         const dcaRes = await client.query({
-          query: `SELECT block_height, who, toString(id) AS id, amount_in
+          query: `SELECT block_height, event_index, who, toString(id) AS id, amount_in
                   FROM price_data.dca_events
                   WHERE event_name='DCA.TradeExecuted' AND block_height IN {dcaBlocks:Array(UInt32)}`,
           query_params: { dcaBlocks: dcaBlocks.slice(start, start + 2_000) },
           format: 'JSONEachRow',
         })
-        dcaRows.push(...await dcaRes.json<{ block_height: number; who: string; id: string; amount_in: string }>())
+        dcaRows.push(...await dcaRes.json<{ block_height: number; event_index: number; who: string; id: string; amount_in: string }>())
       }
-      const dcaByAmount = new Map<string, { who: string; id: string }>()
-      for (const d of dcaRows) dcaByAmount.set(`${d.block_height}:${d.amount_in}`, { who: d.who, id: d.id })
-      const dcaIds = [...new Set([...dcaByAmount.values()].map(d => d.id))].filter(Boolean)
+      // Same-block executions with the same per-trade amount are common (popular
+      // round DCA sizes), so (block, amountIn) alone collides across schedules.
+      // Keep every candidate and claim by adjacency: DCA.TradeExecuted follows
+      // its swap's events, so the swap claims the nearest candidate after its
+      // own event index and consumes it — two swaps can never share one.
+      const dcaByAmount = new Map<string, { who: string; id: string; event_index: number }[]>()
+      for (const d of dcaRows) {
+        const k = `${d.block_height}:${d.amount_in}`
+        const list = dcaByAmount.get(k) ?? []
+        list.push({ who: d.who, id: d.id, event_index: Number(d.event_index) })
+        dcaByAmount.set(k, list)
+      }
+      for (const list of dcaByAmount.values()) list.sort((a, b) => a.event_index - b.event_index)
+      const claimDca = (block: number, amountIn: string, eventIndex: number) => {
+        const list = dcaByAmount.get(`${block}:${amountIn}`)
+        if (!list?.length) return undefined
+        let idx = list.findIndex(d => d.event_index > eventIndex)
+        if (idx === -1) idx = list.length - 1
+        return list.splice(idx, 1)[0]
+      }
+      const dcaIds = [...new Set(dcaRows.map(d => d.id))].filter(Boolean)
       const schedById = await getDcaScheduleLinks(dcaIds)
 
       // Group by extrinsic (signed) or by event (pallet-internal); within a group
@@ -5167,7 +5185,7 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
         if (rep.extrinsic_index != null && liqExt.has(`${rep.block_height}:${rep.extrinsic_index}`)) continue
         const venue = rep.event_name.split('.')[0]
         const signer = rep.extrinsic_index != null ? signers.get(`${rep.block_height}:${rep.extrinsic_index}`) : undefined
-        const dcaHit = rep.extrinsic_index == null ? dcaByAmount.get(`${rep.block_height}:${rep.amount_in}`) : undefined
+        const dcaHit = rep.extrinsic_index == null ? claimDca(rep.block_height, rep.amount_in, rep.event_index) : undefined
         const sched = dcaHit ? schedById.get(dcaHit.id) : undefined
         const actor = signer ?? dcaHit?.who ?? (rep.who && ACCOUNT_RE.test(rep.who) ? rep.who : null)
         const aOut = asset(rep.asset_out)
@@ -5495,13 +5513,18 @@ export async function getTradeDetailByEvent(height: number, eventIndex: number):
     const netWho = String(args.who ?? '')
 
     const dcaRes = await client.query({
-      query: `SELECT who, amount_in
+      query: `SELECT who, amount_in, event_index
               FROM price_data.dca_events
               WHERE block_height = {h:UInt32} AND event_name = 'DCA.TradeExecuted'
               LIMIT 1000`,
       query_params: { h: height }, format: 'JSONEachRow',
     })
-    const dca = (await dcaRes.json<{ who: string; amount_in: string }>()).find(d => d.amount_in === netAmts.amountIn)
+    // Same-amount executions can share a block; DCA.TradeExecuted follows its
+    // swap's events, so prefer the nearest matching row after this event.
+    const dcaCandidates = (await dcaRes.json<{ who: string; amount_in: string; event_index: number }>())
+      .filter(d => d.amount_in === netAmts.amountIn)
+      .sort((a, b) => Number(a.event_index) - Number(b.event_index))
+    const dca = dcaCandidates.find(d => Number(d.event_index) > eventIndex) ?? dcaCandidates.at(-1)
     const actorId = dca?.who || (ACCOUNT_RE.test(netWho) && netWho !== ROUTER_PALLET_ACCT ? netWho : null)
 
     const route: TradeHop[] = isRouterNet(ev.event_name)
