@@ -1103,6 +1103,7 @@ svg { display: block; }
   display: flex; align-items: center; justify-content: center;
   font-family: 'GeistMono'; font-size: 9px; font-weight: 700; line-height: 1; text-decoration: none;
   pointer-events: auto; cursor: pointer; transition: transform 120ms ease;
+  appearance: none; -webkit-appearance: none; padding: 0; margin: 0;
 }
 .apx-mark-cap:hover, .apx-mark-cap:focus-visible { transform: translateX(-50%) scale(1.25); }
 /* Cluster cap: an outlined ×N pill (panel background + kind-colored text reads
@@ -1121,6 +1122,15 @@ svg { display: block; }
 .apx-mark-row .t-k { font-weight: 600; }
 .apx-mark-row .t-p { color: var(--text-high); font-weight: 600; margin-left: auto; }
 a.apx-mark-row:hover .t-p { text-decoration: underline; }
+.apx-mark-go { align-self: flex-start; margin-top: 3px; color: var(--mk); font-weight: 600; text-decoration: none; }
+a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
+/* Touch: no hover to reveal the tip, and a fingertip needs a bigger target, so
+   enlarge the caps (the cap toggles the tip on tap — see ChartMarkerFlag). */
+@media (hover: none) {
+  .apx-mark-cap { min-width: 20px; height: 20px; font-size: 10px; }
+  .apx-mark-cap.multi { height: 20px; padding: 0 8px; }
+  .apx-mark-tip { font-size: 12px; }
+}
 .ema-now { font-family: 'GeistMono'; font-size: 12px; color: var(--lavender); font-weight: 500; margin-left: 8px; }
 .ema-tag { color: var(--lavender); margin-left: 8px; }
 .pf-head-asset { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }

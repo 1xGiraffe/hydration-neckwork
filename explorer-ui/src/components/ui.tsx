@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- shared atoms + formatters module */
-import { useId, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, FocusEvent as ReactFocusEvent, ReactNode, KeyboardEvent, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { Link, paths, navigate } from '../router'
 import type { AccountRef, AssetOrigin, AssetRef } from '../types'
@@ -621,13 +621,16 @@ export function clusterChartMarkers(markers: ChartMarker[], t0: number, span: nu
   }))
 }
 
-// One marker flag: a subtle dashed drop-line + a clickable cap at the top.
-// Hovering (or keyboard-focusing) the cap opens a tooltip clamped inside the
-// chart like ChartTip; a cluster's tooltip lists every event as its own link.
+// One marker flag: a subtle dashed drop-line + a cap at the top. With a mouse the
+// cap navigates and hover opens the tooltip; on touch (no hover, and a link cap
+// would navigate before the tip is ever seen) tapping the cap TOGGLES the tip,
+// which carries the link(s). A cluster's tooltip lists every event as its own link.
 function ChartMarkerFlag({ cluster, open, onOpen, onClose }: {
   cluster: ChartMarkerCluster; open: boolean; onOpen: () => void; onClose: () => void
 }) {
+  const rootRef = useRef<HTMLDivElement>(null)
   const tipRef = useRef<HTMLDivElement>(null)
+  const coarse = useMediaQuery('(hover: none)')
   useLayoutEffect(() => {
     const el = tipRef.current
     const wrap = el?.closest('.apx-wrap') as HTMLElement | null
@@ -638,21 +641,32 @@ function ChartMarkerFlag({ cluster, open, onOpen, onClose }: {
     const shift = (w <= half * 2 ? w / 2 : Math.min(Math.max(x, half), w - half)) - x
     el.style.transform = `translateX(calc(-50% + ${shift.toFixed(1)}px))`
   })
+  // Touch: dismiss the open tip when the next tap lands outside this marker.
+  useEffect(() => {
+    if (!open || !coarse) return
+    const onDown = (e: Event) => { if (!rootRef.current?.contains(e.target as Node)) onClose() }
+    document.addEventListener('pointerdown', onDown)
+    return () => document.removeEventListener('pointerdown', onDown)
+  }, [open, coarse, onClose])
   const top = cluster.items[0]
   const count = cluster.items.length
   const capLabel = count > 1 ? `×${count}` : null
   const title = count > 1 ? `${count} events` : `${top.label} · ${F.usd(top.valueUsd)}`
+  const capCls = `apx-mark-cap${capLabel ? ' multi' : ''}`
   // Keep the tip open while focus moves between its links; close on focus-out.
   const onBlur = (e: ReactFocusEvent<HTMLDivElement>) => {
     if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onClose()
   }
   return (
-    <div className={`apx-mark${open ? ' open' : ''}`} style={{ left: `${(cluster.frac * 100).toFixed(3)}%`, '--mk': markerColor(top.kind) } as CSSProperties}
-      onMouseEnter={onOpen} onMouseLeave={onClose} onFocus={onOpen} onBlur={onBlur}>
+    <div ref={rootRef} className={`apx-mark${open ? ' open' : ''}`} style={{ left: `${(cluster.frac * 100).toFixed(3)}%`, '--mk': markerColor(top.kind) } as CSSProperties}
+      onMouseEnter={coarse ? undefined : onOpen} onMouseLeave={coarse ? undefined : onClose}
+      onFocus={coarse ? undefined : onOpen} onBlur={coarse ? undefined : onBlur}>
       <span className="apx-mark-line" aria-hidden="true" />
-      {top.href
-        ? <Link className={`apx-mark-cap${capLabel ? ' multi' : ''}`} to={top.href} title={title}>{capLabel}</Link>
-        : <span className={`apx-mark-cap${capLabel ? ' multi' : ''}`} title={title} tabIndex={0}>{capLabel}</span>}
+      {coarse
+        ? <button type="button" className={capCls} title={title} aria-expanded={open} onClick={() => (open ? onClose() : onOpen())}>{capLabel}</button>
+        : top.href
+          ? <Link className={capCls} to={top.href} title={title}>{capLabel}</Link>
+          : <span className={capCls} title={title} tabIndex={0}>{capLabel}</span>}
       {open && (
         <div className="apx-mark-tip" ref={tipRef}>
           {count > 1
@@ -666,7 +680,7 @@ function ChartMarkerFlag({ cluster, open, onOpen, onClose }: {
                 ? <Link key={i} className="apx-mark-row" to={m.href}>{row}</Link>
                 : <div key={i} className="apx-mark-row">{row}</div>
             })
-            : top.tip}
+            : <>{top.tip}{coarse && top.href && <Link className="apx-mark-go" to={top.href}>View activity →</Link>}</>}
         </div>
       )}
     </div>
