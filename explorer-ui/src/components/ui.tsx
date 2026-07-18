@@ -584,8 +584,10 @@ export function ChartTip({ xPct, children }: { xPct: number; children: ReactNode
 /* ============ chart event markers ============ */
 // One flagged event on an AreaChart: positioned by `ts` on the same time axis
 // the crosshair uses, colored by `kind`, navigating to `href` on click. `tip`
-// is the single-marker hover card; clusters list label/value rows instead.
-export interface ChartMarker { ts: string; kind: string; label: string; valueUsd: number; href: string | null; tip: ReactNode }
+// is the single-marker hover card; clusters list label/value rows instead,
+// each carrying the marker's compact `detail` (traded pair / token amount) so
+// aggregation never hides the asset context.
+export interface ChartMarker { ts: string; kind: string; label: string; valueUsd: number; href: string | null; tip: ReactNode; detail?: ReactNode }
 
 // kind → theme token, legible in both the dark and light palettes.
 const CHART_MARKER_COLORS: Record<string, string> = {
@@ -681,6 +683,7 @@ function ChartMarkerFlag({ cluster, open, onOpen, onClose }: {
               const row = <>
                 <span className="t-d">{tsDate(m.ts)}</span>
                 <span className="t-k" style={{ color: markerColor(m.kind) }}>{m.label}</span>
+                {m.detail && <span className="t-a">{m.detail}</span>}
                 <span className="t-p">{F.usd(m.valueUsd)}</span>
               </>
               return m.href

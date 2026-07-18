@@ -97,12 +97,34 @@ function valueEventTip(ev: ValueEvent): ReactNode {
     )}
   </>
 }
+// Compact asset context for a cluster row: the traded pair for swap/DCA
+// markers, else the (amount +) symbol of the value-bearing asset. Price-move
+// markers have no asset and stay bare.
+function valueEventDetail(ev: ValueEvent): ReactNode | undefined {
+  if (ev.assetIn && ev.assetOut) {
+    return <span className="trade-leg">
+      <AssetIcon assetId={ev.assetIn.assetId} iconAssetId={ev.assetIn.iconAssetId} symbol={ev.assetIn.symbol} size={13} parachainId={ev.assetIn.parachainId} origin={ev.assetIn.origin} />
+      <span className="mono">{ev.assetIn.symbol}</span>
+      <span className="muted">→</span>
+      <AssetIcon assetId={ev.assetOut.assetId} iconAssetId={ev.assetOut.iconAssetId} symbol={ev.assetOut.symbol} size={13} parachainId={ev.assetOut.parachainId} origin={ev.assetOut.origin} />
+      <span className="mono">{ev.assetOut.symbol}</span>
+    </span>
+  }
+  if (ev.asset) {
+    return <span className="trade-leg">
+      <AssetIcon assetId={ev.asset.assetId} iconAssetId={ev.asset.iconAssetId} symbol={ev.asset.symbol} size={13} parachainId={ev.asset.parachainId} origin={ev.asset.origin} />
+      <span className="mono">{ev.amount != null ? `${F.amount(ev.amount, ev.asset.decimals)} ` : ''}{ev.asset.symbol}</span>
+    </span>
+  }
+  return undefined
+}
 function valueEventMarker(ev: ValueEvent): ChartMarker {
   return {
     ts: ev.timestamp,
     kind: ev.kind,
     label: valueEventLabel(ev),
     valueUsd: ev.valueUsd,
+    detail: valueEventDetail(ev),
     // A DCA marker links to its schedule page; a 'price' marker (and a cross-
     // chain marker the server couldn't match to a feed row) annotates a move
     // with no detail row to open; everything else links to the event.

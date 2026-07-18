@@ -1129,6 +1129,10 @@ svg { display: block; }
 .apx-mark-row .t-d { color: var(--text-low); }
 .apx-mark-row .t-k { font-weight: 600; }
 .apx-mark-row .t-p { color: var(--text-high); font-weight: 600; margin-left: auto; }
+/* Compact asset context (pair / amount) inside cluster rows; tighter than the
+   single-marker card so multi-row tips stay narrow. */
+.apx-mark-row .t-a { color: var(--text-medium); font-size: 11px; }
+.apx-mark-row .t-a .trade-leg { gap: 4px; }
 a.apx-mark-row:hover .t-p { text-decoration: underline; }
 .apx-mark-go { align-self: flex-start; margin-top: 3px; color: var(--mk); font-weight: 600; text-decoration: none; }
 a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
