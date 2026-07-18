@@ -4986,7 +4986,14 @@ function groupSwapRows(rows: RawSwapEventRow[]): { groups: Map<string, RawSwapEv
   }
   return { groups, order }
 }
-const SWAP_EVENTS = ['Router.Executed', 'Omnipool.SellExecuted', 'Omnipool.BuyExecuted', 'Stableswap.SellExecuted', 'Stableswap.BuyExecuted', 'XYK.SellExecuted', 'XYK.BuyExecuted']
+const SWAP_EVENTS = ['Router.Executed', 'Router.RouteExecuted', 'Omnipool.SellExecuted', 'Omnipool.BuyExecuted', 'Stableswap.SellExecuted', 'Stableswap.BuyExecuted', 'XYK.SellExecuted', 'XYK.BuyExecuted']
+// The router's net-trade summary was emitted as Router.RouteExecuted before the
+// pallet renamed it to Router.Executed (block ~4,542,080); both carry the same
+// {assetIn, assetOut, amountIn, amountOut} args and an empty `who`.
+const ROUTER_NET_EVENTS_SQL = `'Router.Executed','Router.RouteExecuted'`
+function isRouterNet(eventName: string): boolean {
+  return eventName === 'Router.Executed' || eventName === 'Router.RouteExecuted'
+}
 // The route-executor pallet account ("modlrouterex"). Per-hop AMM events of a routed
 // swap are emitted with who=routerex; they're internal legs, not standalone trades —
 // the net is captured by the accompanying Router.Executed (who=''). Exclude these hops
@@ -5147,7 +5154,7 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
       for (const key of order) {
         if (maxRows != null && out.length >= maxRows) break
         const g = groups.get(key)!
-        const rep = g.find(r => r.event_name === 'Router.Executed') ?? g[0]
+        const rep = g.find(r => isRouterNet(r.event_name)) ?? g[0]
         if (isDcaFeeLegSwap(rep.extrinsic_index, rep.who)) continue
         if (rep.extrinsic_index != null && liqExt.has(`${rep.block_height}:${rep.extrinsic_index}`)) continue
         const venue = rep.event_name.split('.')[0]
@@ -5320,13 +5327,13 @@ function swapEventToHop(e: { name: string; args: Record<string, unknown> }): Tra
 }
 
 async function inferredRouterRoute(height: number, eventIndex: number, netAmts: SwapAmounts): Promise<TradeHop[]> {
-  const names = SWAP_EVENTS.filter(n => n !== 'Router.Executed').map(n => `'${n}'`).join(',')
+  const names = SWAP_EVENTS.filter(n => !isRouterNet(n)).map(n => `'${n}'`).join(',')
   const res = await client.query({
     query: `
       WITH (
         SELECT ifNull(max(event_index), -1) AS idx
         FROM price_data.raw_events
-        WHERE block_height = {h:UInt32} AND event_index < {e:UInt32} AND event_name = 'Router.Executed'
+        WHERE block_height = {h:UInt32} AND event_index < {e:UInt32} AND event_name IN (${ROUTER_NET_EVENTS_SQL})
       ) AS prev_router
       SELECT event_index, event_name, args_json
       FROM price_data.raw_events
@@ -5406,14 +5413,14 @@ export async function getTradeDetail(height: number, index: number): Promise<Tra
 
     // Net trade: the Router.Executed summary when routed, else the first event
     // that isn't a router-internal hop.
-    const routerNet = evs.find(e => e.name === 'Router.Executed')
-    const nonHop = evs.filter(e => e.name !== 'Router.Executed' && String(e.args.who ?? '') !== ROUTER_PALLET_ACCT)
+    const routerNet = evs.find(e => isRouterNet(e.name))
+    const nonHop = evs.filter(e => !isRouterNet(e.name) && String(e.args.who ?? '') !== ROUTER_PALLET_ACCT)
     const net = routerNet ?? nonHop[0] ?? evs[0]
     const netAmts = swapEventAmounts(net.name, net.args)
     const direction: 'Sell' | 'Buy' = net.name.includes('Buy') ? 'Buy'
-      : net.name === 'Router.Executed' && /\.buy$/.test(callName) ? 'Buy' : 'Sell'
+      : isRouterNet(net.name) && /\.buy$/.test(callName) ? 'Buy' : 'Sell'
 
-    const hopEvents = evs.filter(e => e.name !== 'Router.Executed')
+    const hopEvents = evs.filter(e => !isRouterNet(e.name))
     const routeSpecs = parseRouteHops(callArgs)
     const route: TradeHop[] = routeSpecs.length
       ? routeSpecs.map(spec => {
@@ -5489,7 +5496,7 @@ export async function getTradeDetailByEvent(height: number, eventIndex: number):
     const dca = (await dcaRes.json<{ who: string; amount_in: string }>()).find(d => d.amount_in === netAmts.amountIn)
     const actorId = dca?.who || (ACCOUNT_RE.test(netWho) && netWho !== ROUTER_PALLET_ACCT ? netWho : null)
 
-    const route: TradeHop[] = ev.event_name === 'Router.Executed'
+    const route: TradeHop[] = isRouterNet(ev.event_name)
       ? await inferredRouterRoute(height, eventIndex, netAmts)
       : [swapEventToHop({ name: ev.event_name, args })]
 
@@ -8239,7 +8246,7 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
       const swapRes = await client.query({
         query: `SELECT JSONExtractInt(args_json,'assetIn') AS ain, JSONExtractInt(args_json,'assetOut') AS aout
                 FROM price_data.raw_events
-                WHERE event_name IN ('Router.Executed','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted')
+                WHERE event_name IN ('Router.Executed','Router.RouteExecuted','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted')
                   AND block_height = (SELECT min(block_height) FROM price_data.dca_events WHERE id = {sid:UInt64} AND event_name = 'DCA.TradeExecuted')
                   AND JSONExtractString(args_json,'who') = {who:String}
                 ORDER BY event_index ASC LIMIT 1`,
@@ -8337,7 +8344,7 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
     const swapEvents = events.filter(e => SWAP_EVENTS.includes(e.event_name))
     const dcaExec = events.find(e => e.event_name === 'DCA.TradeExecuted')
     if (swapEvents.length) {
-      const rep = swapEvents.find(e => e.event_name === 'Router.Executed') ?? swapEvents[0]
+      const rep = swapEvents.find(e => isRouterNet(e.event_name)) ?? swapEvents[0]
       const args = (safeJson(rep.args_json) ?? {}) as Record<string, unknown>
       const aIn = asset(Number(args.assetIn ?? 0))
       const aOut = asset(Number(args.assetOut ?? 0))
@@ -9028,7 +9035,7 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
             AND who != '${ROUTER_PALLET_ACCT}'
             AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%')
             ${tradeValueFilter.predicateSql}
-          ORDER BY block_height DESC, extrinsic_index DESC, event_name = 'Router.Executed' DESC, event_index DESC
+          ORDER BY block_height DESC, extrinsic_index DESC, event_name IN (${ROUTER_NET_EVENTS_SQL}) DESC, event_index DESC
           LIMIT 1 BY block_height, ifNull(toString(extrinsic_index), concat('event:', toString(event_index)))
           LIMIT {n:UInt32}` : `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
@@ -9043,7 +9050,7 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
             AND event_name IN (${names}) ${NOT_ROUTER_HOP} ${NOT_DCA_FEE_LEG}
             AND (JSONExtractInt(args_json,'assetIn') = ${assetId} OR JSONExtractInt(args_json,'assetOut') = ${assetId})
             ${tradeValueFilter.predicateSql}
-          ORDER BY block_height DESC, extrinsic_index DESC, event_name = 'Router.Executed' DESC, event_index DESC
+          ORDER BY block_height DESC, extrinsic_index DESC, event_name IN (${ROUTER_NET_EVENTS_SQL}) DESC, event_index DESC
           LIMIT 1 BY block_height, ifNull(toString(extrinsic_index), concat('event:', toString(event_index)))
           LIMIT {n:UInt32}`,
         query_params: { n: fetchN, assetId }, format: 'JSONEachRow',
@@ -9067,7 +9074,7 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
         const g = groups.get(key)!
         // Prefer the Router.Executed net summary, but only if it touches the asset
         // (a multi-hop route's net legs may not include it even when a hop does).
-        const rep = g.find(r => r.event_name === 'Router.Executed' && (r.asset_in === assetId || r.asset_out === assetId)) ?? g[0]
+        const rep = g.find(r => isRouterNet(r.event_name) && (r.asset_in === assetId || r.asset_out === assetId)) ?? g[0]
         // Drop DCA keeper-fee legs (SQL already excludes them; defensive net so a
         // fee leg never surfaces as a phantom "Swap" next to its "DCA" row).
         if (isDcaFeeLegSwap(rep.extrinsic_index, rep.who)) continue
@@ -10107,7 +10114,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
           WHERE ${bound} AND account IN (${list})
           ${swapTokenFilter}
           ${swapAmountFilter.predicateSql}
-          ORDER BY block_height DESC, extrinsic_index DESC, event_name = 'Router.Executed' DESC, event_index DESC
+          ORDER BY block_height DESC, extrinsic_index DESC, event_name IN (${ROUTER_NET_EVENTS_SQL}) DESC, event_index DESC
           LIMIT 1 BY block_height, extrinsic_index
           LIMIT {n:UInt32}`,
       query_params: { n: catFetch }, format: 'JSONEachRow',
@@ -10126,7 +10133,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
       if (liqExt.has(k)) continue
       if (!wantTrades) continue
       const g = groups.get(k)!
-      const rep = g.find(r => r.event_name === 'Router.Executed') ?? g[0]
+      const rep = g.find(r => isRouterNet(r.event_name)) ?? g[0]
       const who = signerByExt.get(k)
       const aOut = asset(rep.asset_out)
       const row: ActivityRow = {
@@ -10323,7 +10330,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
     const swapByKey = new Map<string, { event_index: number; asset_in: number; asset_out: number }>()
     for (const s of await swapRes.json<{ block_height: number; event_index: number; event_name: string; asset_in: number; asset_out: number; amount_in: string }>()) {
       const k = `${s.block_height}:${s.amount_in}`
-      if (!swapByKey.has(k) || s.event_name === 'Router.Executed') swapByKey.set(k, { event_index: s.event_index, asset_in: s.asset_in, asset_out: s.asset_out })
+      if (!swapByKey.has(k) || isRouterNet(s.event_name)) swapByKey.set(k, { event_index: s.event_index, asset_in: s.asset_in, asset_out: s.asset_out })
     }
     for (const d of dcaExecs) {
       const sw = swapByKey.get(`${d.block_height}:${d.amount_in}`)

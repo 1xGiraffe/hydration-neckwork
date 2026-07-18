@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from './client.ts'
 
-const SWAP_EVENTS_SQL = `'Router.Executed','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted'`
+const SWAP_EVENTS_SQL = `'Router.Executed','Router.RouteExecuted','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted'`
 
 export interface AccountSwapQueueRow {
   queued_at: string
