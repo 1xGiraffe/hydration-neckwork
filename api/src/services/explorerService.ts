@@ -8187,6 +8187,9 @@ export interface DcaScheduleDetail {
   maxRetries: number
   status: 'active' | 'completed' | 'terminated' | 'cancelled'
   statusAt: string | null
+  // Named DispatchError reason for hook (error) terminations, null when the
+  // error is a metadata-indexed module error or the schedule wasn't terminated.
+  statusReason: string | null
   executions: { count: number; failed: number; attempts: number; totalIn: string; totalOut: string }
   rows: ActivityRow[]
 }
@@ -8213,19 +8216,37 @@ export async function getDcaScheduleIdAt(height: number, index: number, kind: 'e
   return hit ? Number(hit.id) : null
 }
 
+// A DCA.Terminated event from a signed extrinsic is the owner's own
+// dca.terminate call ("cancelled"); one from a block hook is the pallet ending
+// the schedule on an error ("terminated"). The previous latest-execution-event
+// heuristic mislabelled error terminations that left a pending plan.
 export function dcaScheduleStatus(
   terminated: boolean,
   completed: boolean,
-  latestExecutionEvent?: string,
+  manualTerminate: boolean,
 ): DcaScheduleDetail['status'] {
-  if (terminated) return latestExecutionEvent === 'DCA.ExecutionPlanned' ? 'cancelled' : 'terminated'
+  if (terminated) return manualTerminate ? 'cancelled' : 'terminated'
   return completed ? 'completed' : 'active'
+}
+
+// Human-readable termination reason for the named DispatchError kinds
+// ("token frozen"). Module errors carry only a pallet index and error byte —
+// naming them needs runtime metadata, so they are omitted rather than shown
+// as opaque numbers.
+export function dcaTerminationReason(errorJson: string | null | undefined): string | null {
+  const err = (safeJson(errorJson ?? '') ?? null) as Record<string, unknown> | null
+  const kind = typeof err?.__kind === 'string' ? err.__kind : null
+  if (!kind || kind === 'Module') return null
+  const value = err?.value as Record<string, unknown> | undefined
+  const sub = typeof value?.__kind === 'string' ? value.__kind : null
+  if (sub) return `${kind.toLowerCase()} ${sub.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()}`
+  return kind === 'Other' ? 'runtime error' : kind.toLowerCase()
 }
 
 export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25): Promise<DcaScheduleDetail | null> {
   return cached(`explorer:dca-schedule:${scheduleId}:${offset}:${limit}`, 8000, async () => {
     const prices = await ensurePrices()
-    const [schedRes, lifeRes, totalRes, exRes, latestExecutionRes] = await Promise.all([
+    const [schedRes, lifeRes, totalRes, exRes] = await Promise.all([
       client.query({
         query: `SELECT block_height, toString(block_timestamp) AS ts, extrinsic_index, who, asset_in, asset_out,
                        toString(amount_per) AS amount_per, toString(total_amount) AS total_amount, period, max_retries
@@ -8233,7 +8254,11 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
         query_params: { sid: scheduleId }, format: 'JSONEachRow',
       }),
       client.query({
-        query: `SELECT event_name, toString(max(block_timestamp)) AS ts FROM price_data.dca_events
+        query: `SELECT event_name, toString(max(block_timestamp)) AS ts,
+                       argMax(block_height, block_timestamp) AS bh,
+                       argMax(event_index, block_timestamp) AS ei,
+                       argMax(ifNull(toInt64(extrinsic_index), -1), block_timestamp) AS xi
+                FROM price_data.dca_events
                 WHERE id = {sid:UInt64} AND event_name IN ('DCA.Completed','DCA.Terminated') GROUP BY event_name`,
         query_params: { sid: scheduleId }, format: 'JSONEachRow',
       }),
@@ -8255,19 +8280,11 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
                 ORDER BY block_height DESC, event_index DESC LIMIT {lim:UInt32} OFFSET {off:UInt32}`,
         query_params: { sid: scheduleId, lim: limit, off: offset }, format: 'JSONEachRow',
       }),
-      client.query({
-        query: `SELECT event_name FROM price_data.dca_events
-                WHERE id = {sid:UInt64}
-                  AND event_name IN ('DCA.ExecutionPlanned','DCA.TradeExecuted','DCA.TradeFailed')
-                ORDER BY block_height DESC, event_index DESC LIMIT 1`,
-        query_params: { sid: scheduleId }, format: 'JSONEachRow',
-      }),
     ])
     const sched = (await schedRes.json<{ block_height: number; ts: string; extrinsic_index: number | null; who: string; asset_in: number; asset_out: number; amount_per: string; total_amount: string; period: number; max_retries: number }>())[0]
     if (!sched) return null
-    const life = await lifeRes.json<{ event_name: string; ts: string }>()
+    const life = await lifeRes.json<{ event_name: string; ts: string; bh: number; ei: number; xi: number }>()
     const totals = (await totalRes.json<{ n: string; failed: string; attempts: string; tin: string; tout: string }>())[0]
-    const latestExecution = (await latestExecutionRes.json<{ event_name: string }>())[0]?.event_name
     // Pre-router-era schedules recorded no order in the DCA.Scheduled event, so
     // dca_schedules stores assetIn=assetOut=0 — which renders as a nonsensical
     // HDX→HDX schedule. Recover the real traded pair from the first execution's
@@ -8314,14 +8331,24 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
       }
     })
     await applyHistoricalUsd(rows, activityHistPick)
+    let statusReason: string | null = null
+    if (terminated && Number(terminated.xi) < 0) {
+      const errRes = await client.query({
+        query: `SELECT JSONExtractRaw(args_json,'error') AS error FROM price_data.raw_events
+                WHERE event_name = 'DCA.Terminated' AND block_height = {bh:UInt32} AND event_index = {ei:UInt32} LIMIT 1`,
+        query_params: { bh: terminated.bh, ei: terminated.ei }, format: 'JSONEachRow',
+      })
+      statusReason = dcaTerminationReason((await errRes.json<{ error: string }>())[0]?.error)
+    }
     return {
       scheduleId,
       who: ACCOUNT_RE.test(sched.who) ? accountRef(sched.who) : null,
       createdAt: { blockHeight: sched.block_height, timestamp: sched.ts, extrinsicIndex: sched.extrinsic_index },
       assetIn: aIn, assetOut: aOut,
       amountPer: sched.amount_per, totalAmount: sched.total_amount, period: sched.period, maxRetries: sched.max_retries,
-      status: dcaScheduleStatus(!!terminated, !!completed, latestExecution),
+      status: dcaScheduleStatus(!!terminated, !!completed, terminated != null && Number(terminated.xi) >= 0),
       statusAt: (terminated ?? completed)?.ts ?? null,
+      statusReason,
       executions: {
         count: Number(totals?.n ?? 0), failed: Number(totals?.failed ?? 0), attempts: Number(totals?.attempts ?? 0),
         totalIn: totals?.tin ?? '0', totalOut: totals?.tout ?? '0',

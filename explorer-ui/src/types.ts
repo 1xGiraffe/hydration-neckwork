@@ -602,6 +602,8 @@ export interface DcaScheduleDetail {
   maxRetries: number
   status: 'active' | 'completed' | 'terminated' | 'cancelled'
   statusAt: string | null
+  // Named termination reason for error terminations (e.g. "token frozen").
+  statusReason: string | null
   executions: { count: number; failed: number; attempts: number; totalIn: string; totalOut: string }
   rows: ActivityRow[]
 }

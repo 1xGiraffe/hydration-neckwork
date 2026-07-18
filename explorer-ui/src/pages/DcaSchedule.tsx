@@ -22,7 +22,7 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Activity', to: paths.activity() + '?tab=trade' }, { label: `DCA #${scheduleId}` }]} />
         <div className="page-title">DCA #{scheduleId}
-          {data && <span className="sub">{data.status === 'active' ? 'active' : `${data.status}${data.statusAt ? ' · ' + data.statusAt.slice(0, 10) : ''}`}</span>}
+          {data && <span className="sub">{data.status === 'active' ? 'active' : `${data.status}${data.statusReason ? ' · ' + data.statusReason : ''}${data.statusAt ? ' · ' + data.statusAt.slice(0, 10) : ''}`}</span>}
         </div>
       </div>
       {isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>DCA schedule not found</div>
