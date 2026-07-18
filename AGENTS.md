@@ -105,3 +105,8 @@ Playwright is separate: `npm --prefix explorer-ui run test:e2e` and `npm --prefi
 - Do not commit task plans, agent reports, screenshots, generated logs/results, ad hoc probes, or one-account repair scripts.
 - Add focused regression coverage for durable behavior, not fixtures coupled to one transient production example.
 - Keep shared domain logic centralized; avoid near-duplicate helpers or divergent activity builders.
+
+## Commits
+
+- Use Conventional Commits, matching the existing history: `type(scope): subject`, with the subject in lowercase imperative and no trailing period. Types: `feat`, `fix`, `refactor`, `perf`, `style`, `chore`, `docs`. Common scopes: `explorer`, `api`, `ui`, `prices`, `indexer`, `raw`, `preis`, `schema`, `compose`. Keep each commit focused on a single change.
+- Never add co-author trailers or tool/assistant attribution to commit messages.
