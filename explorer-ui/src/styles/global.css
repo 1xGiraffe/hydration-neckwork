@@ -409,7 +409,15 @@ svg { display: block; }
 .ribbon .rs { width: 1px; height: 26px; background: var(--separator); }
 .ribbon.standalone { display: flex; justify-content: flex-start; border: 1px solid var(--separator); border-radius: 14px; background: var(--bg-elev); margin: 0 0 24px; padding: 14px 8px; }
 .ribbon.standalone .cell { align-items: flex-start; }
-@media (max-width: 620px){ .ribbon .rs { display: none; } .ribbon .cell { padding: 8px 14px; } }
+@media (max-width: 620px){
+  .ribbon .rs { display: none; }
+  .ribbon .cell { padding: 8px 14px; }
+  /* Standalone stat ribbon (e.g. /hdx header): a content-width flex wrap leaves
+     the columns ragged on a phone — lay the cells out on an even grid instead so
+     labels and values line up. */
+  .ribbon.standalone { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px 10px; padding: 14px; }
+  .ribbon.standalone .cell { padding: 0; }
+}
 
 /* ============ TWO-COLUMN PANELS ============ */
 .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -1395,6 +1403,14 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
   .tbl tbody td[data-label] .asset-row { justify-content: flex-end; }
   /* let any fixed-width desktop cells (e.g. sparkline) fill the card row */
   .tbl tbody td.spark-cell { width: auto; }
+  /* accounts list: the account name/tag is the card's first cell — align it to
+     the right edge like every other value (its desktop max-width would otherwise
+     pin the pill mid-row). Flex row: label left, pill right, shrink-to-ellipsis. */
+  .accounts-tbl td[data-label="Account"] {
+    max-width: none; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .accounts-tbl td[data-label="Account"]::before { float: none; margin-right: 0; flex: none; }
+  .accounts-tbl td[data-label="Account"] .addr-wrap { min-width: 0; }
 
   /* expanded extrinsic/event panel: full-width, never card-ified */
   .tbl tbody tr.exp-row, .tbl tbody tr.exp-row > td { padding: 0; text-align: left; }
