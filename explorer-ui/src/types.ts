@@ -300,6 +300,11 @@ export interface ValueEvent {
   // the execution count behind valueUsd; block/event point at the peak execution.
   dcaScheduleId?: number
   dcaTrades?: number
+  // Traded pair for swap/DCA markers; `asset` stays the value-bearing leg.
+  assetIn?: AssetRef | null
+  assetOut?: AssetRef | null
+  // Raw token amount in `asset` decimals — only on single-event markers.
+  amount?: string
 }
 
 export type CloseAccountReason =

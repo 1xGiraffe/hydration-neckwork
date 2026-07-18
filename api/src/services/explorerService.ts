@@ -10892,6 +10892,13 @@ export interface ValueEvent {
   // the execution count behind valueUsd; block/event point at the peak execution.
   dcaScheduleId?: number
   dcaTrades?: number
+  // Traded pair for swap/DCA markers (resolved for the chosen markers only);
+  // `asset` stays the value-bearing leg the marker was scored on.
+  assetIn?: AssetRef | null
+  assetOut?: AssetRef | null
+  // Raw token amount in `asset` decimals — only on markers whose USD value is
+  // exactly one event's leg (summed markers would pair a total with one leg).
+  amount?: string
 }
 
 const VALUE_EVENT_TRANSFER_NAMES = ['Balances.Transfer', 'Tokens.Transfer', 'Currencies.Transferred']
@@ -11291,6 +11298,7 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
         blockHeight: Number(r.block_height), eventIndex: Number(r.event_index),
         extrinsicIndex: r.extrinsic_index == null ? null : Number(r.extrinsic_index),
         timestamp: r.ts, valueUsd: +Number(r.value_usd).toFixed(2), asset: asset(r.asset_id),
+        ...(r.amount && r.amount !== '0' ? { amount: r.amount } : {}),
       }
       if (VALUE_EVENT_TRANSFER_NAMES.includes(r.event_name)) {
         const resolved = resolveTransfer(r, mirrorPriority)
@@ -11418,6 +11426,7 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
           blockHeight: Number(r.block_height), eventIndex: Number(r.event_index),
           extrinsicIndex: r.extrinsic_index == null ? null : Number(r.extrinsic_index),
           timestamp: r.ts, kind: 'other', valueUsd: +value.toFixed(2), asset: asset(r.asset_id), counterparty: null,
+          ...(r.amount && r.amount !== '0' ? { amount: r.amount } : {}),
         }
         if (VALUE_EVENT_TRANSFER_NAMES.includes(r.event_name)) {
           const resolved = resolveTransfer(r, windowMirrorPriority)
@@ -11488,7 +11497,10 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
           continue
         }
         if (explained && winner!.cause.best) {
-          jumpMarkers.push(winner!.cause.best)
+          // A multi-event cause sums its USD but `amount` belongs to one leg —
+          // drop it rather than pair a window total with a single leg's tokens.
+          const best = winner!.cause.best
+          jumpMarkers.push(winner!.cause.hits === 1 ? best : { ...best, amount: undefined })
         } else {
           // Nothing discrete accounts for the move — an honest market-move
           // marker carrying the signed delta, pinned to the jump's own point.
@@ -11570,6 +11582,51 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
     // threshold). 'price'/'cross-chain' jump markers already annotate the moves;
     // this backfills large discrete events that weren't themselves a jump.
     for (const e of out) if (e.valueUsd >= fillThreshold) take(e)
+
+    // Pair enrichment for the few chosen markers: a swap hover should say which
+    // asset traded for which, a DCA hover its schedule's pair. Swap markers were
+    // scored on one leg row; re-read the trade's rows and prefer the router net
+    // summary so multi-hop routes show the true end-to-end pair.
+    const swapMarkers = chosen.filter(e => e.kind === 'swap')
+    if (swapMarkers.length) {
+      const blocks = [...new Set(swapMarkers.map(e => e.blockHeight))]
+      const res = await client.query({
+        query: `SELECT block_height, event_index, extrinsic_index, event_name, asset_in, asset_out
+                FROM price_data.swap_activity WHERE block_height IN (${blocks.join(',')})`,
+        format: 'JSONEachRow',
+      })
+      const rows = await res.json<{ block_height: number; event_index: number; extrinsic_index: number | null; event_name: string; asset_in: number; asset_out: number }>()
+      for (const e of swapMarkers) {
+        const inTrade = rows.filter(r => Number(r.block_height) === e.blockHeight && (e.extrinsicIndex != null
+          ? r.extrinsic_index != null && Number(r.extrinsic_index) === e.extrinsicIndex
+          : Number(r.event_index) === e.eventIndex))
+        const rep = inTrade.find(r => isRouterNet(r.event_name))
+          ?? inTrade.find(r => Number(r.event_index) === e.eventIndex)
+          ?? inTrade[0]
+        if (rep) { e.assetIn = asset(Number(rep.asset_in)); e.assetOut = asset(Number(rep.asset_out)) }
+      }
+    }
+    const dcaMarkers = chosen.filter(e => e.kind === 'dca' && e.dcaScheduleId != null)
+    if (dcaMarkers.length) {
+      const res = await client.query({
+        query: `SELECT id, any(asset_in) AS asset_in, any(asset_out) AS asset_out
+                FROM price_data.dca_schedules WHERE id IN (${dcaMarkers.map(e => e.dcaScheduleId).join(',')})
+                GROUP BY id`,
+        format: 'JSONEachRow',
+      })
+      const byId = new Map((await res.json<{ id: string; asset_in: number; asset_out: number }>())
+        .map(r => [Number(r.id), r]))
+      for (const e of dcaMarkers) {
+        const s = byId.get(e.dcaScheduleId!)
+        // Legacy schedules created before the order landed in the event store
+        // asset_in = asset_out = 0 — no honest pair to show.
+        if (s && !(Number(s.asset_in) === 0 && Number(s.asset_out) === 0)) {
+          e.assetIn = asset(Number(s.asset_in))
+          e.assetOut = asset(Number(s.asset_out))
+        }
+      }
+    }
+
     // Chronological order for rendering.
     return chosen.sort((x, y) => x.blockHeight - y.blockHeight || x.eventIndex - y.eventIndex)
   })
