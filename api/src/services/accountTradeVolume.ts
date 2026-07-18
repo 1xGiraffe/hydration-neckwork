@@ -16,7 +16,7 @@ import { allExplorerAssets, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, priceAsse
 // extrinsic index).
 const BROADCAST_MIN_BLOCK = 6_837_788
 const EVENT_ANCHOR_OFFSET = 1_099_511_627_776n // 2^40 — event-index anchors clear of real router ids
-const LEGACY_EVENTS = "'Omnipool.SellExecuted','Omnipool.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted'"
+const LEGACY_EVENTS = "'Omnipool.SellExecuted','Omnipool.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','LBP.SellExecuted','LBP.BuyExecuted'"
 const BROADCAST_EVENTS = "'Broadcast.Swapped','Broadcast.Swapped2','Broadcast.Swapped3'"
 
 // Source for per-account trading volume: the de-duped net-trade model, whose
@@ -119,15 +119,15 @@ legs AS (
   UNION ALL
   SELECT JSONExtractString(args_json,'who') AS account, block_height, ${legacyKey} AS trade_key,
          block_timestamp, toUInt32(greatest(0, JSONExtractInt(args_json,'assetIn'))),
-         -toDecimal256(multiIf(event_name='XYK.SellExecuted', JSONExtractString(args_json,'amount'),
-                               event_name='XYK.BuyExecuted', JSONExtractString(args_json,'buyPrice'),
+         -toDecimal256(multiIf(event_name IN ('XYK.SellExecuted','LBP.SellExecuted'), JSONExtractString(args_json,'amount'),
+                               event_name IN ('XYK.BuyExecuted','LBP.BuyExecuted'), JSONExtractString(args_json,'buyPrice'),
                                JSONExtractString(args_json,'amountIn')), 0)
   FROM price_data.raw_events FINAL WHERE event_name IN (${LEGACY_EVENTS}) AND block_height < ${BROADCAST_MIN_BLOCK} AND ${pf}
   UNION ALL
   SELECT JSONExtractString(args_json,'who'), block_height, ${legacyKey},
          block_timestamp, toUInt32(greatest(0, JSONExtractInt(args_json,'assetOut'))),
-         toDecimal256(multiIf(event_name='XYK.SellExecuted', JSONExtractString(args_json,'salePrice'),
-                              event_name='XYK.BuyExecuted', JSONExtractString(args_json,'amount'),
+         toDecimal256(multiIf(event_name IN ('XYK.SellExecuted','LBP.SellExecuted'), JSONExtractString(args_json,'salePrice'),
+                              event_name IN ('XYK.BuyExecuted','LBP.BuyExecuted'), JSONExtractString(args_json,'amount'),
                               JSONExtractString(args_json,'amountOut')), 0)
   FROM price_data.raw_events FINAL WHERE event_name IN (${LEGACY_EVENTS}) AND block_height < ${BROADCAST_MIN_BLOCK} AND ${pf}
 ),

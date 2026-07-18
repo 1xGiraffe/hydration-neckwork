@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from './client.ts'
 
-const SWAP_EVENTS_SQL = `'Router.Executed','Router.RouteExecuted','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted'`
+const SWAP_EVENTS_SQL = `'Router.Executed','Router.RouteExecuted','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted','LBP.SellExecuted','LBP.BuyExecuted'`
 
 export interface AccountSwapQueueRow {
   queued_at: string
@@ -155,11 +155,11 @@ export async function seedAccountSwapActivityQueue(client: ClickHouseClient): Pr
           block_timestamp, event_name,
           toUInt32(greatest(0, JSONExtractInt(args_json, 'assetIn'))) AS asset_in,
           toUInt32(greatest(0, JSONExtractInt(args_json, 'assetOut'))) AS asset_out,
-          multiIf(event_name = 'XYK.SellExecuted', JSONExtractString(args_json, 'amount'),
-                  event_name = 'XYK.BuyExecuted', JSONExtractString(args_json, 'buyPrice'),
+          multiIf(event_name IN ('XYK.SellExecuted','LBP.SellExecuted'), JSONExtractString(args_json, 'amount'),
+                  event_name IN ('XYK.BuyExecuted','LBP.BuyExecuted'), JSONExtractString(args_json, 'buyPrice'),
                   JSONExtractString(args_json, 'amountIn')) AS amount_in,
-          multiIf(event_name = 'XYK.SellExecuted', JSONExtractString(args_json, 'salePrice'),
-                  event_name = 'XYK.BuyExecuted', JSONExtractString(args_json, 'amount'),
+          multiIf(event_name IN ('XYK.SellExecuted','LBP.SellExecuted'), JSONExtractString(args_json, 'salePrice'),
+                  event_name IN ('XYK.BuyExecuted','LBP.BuyExecuted'), JSONExtractString(args_json, 'amount'),
                   JSONExtractString(args_json, 'amountOut')) AS amount_out, ingested_at
         FROM price_data.raw_events
         WHERE ingested_at >= {lastIngested:DateTime} - INTERVAL 2 MINUTE

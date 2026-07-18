@@ -4986,7 +4986,7 @@ function groupSwapRows(rows: RawSwapEventRow[]): { groups: Map<string, RawSwapEv
   }
   return { groups, order }
 }
-const SWAP_EVENTS = ['Router.Executed', 'Router.RouteExecuted', 'Omnipool.SellExecuted', 'Omnipool.BuyExecuted', 'Stableswap.SellExecuted', 'Stableswap.BuyExecuted', 'XYK.SellExecuted', 'XYK.BuyExecuted']
+const SWAP_EVENTS = ['Router.Executed', 'Router.RouteExecuted', 'Omnipool.SellExecuted', 'Omnipool.BuyExecuted', 'Stableswap.SellExecuted', 'Stableswap.BuyExecuted', 'XYK.SellExecuted', 'XYK.BuyExecuted', 'LBP.SellExecuted', 'LBP.BuyExecuted']
 // The router's net-trade summary was emitted as Router.RouteExecuted before the
 // pallet renamed it to Router.Executed (block ~4,542,080); both carry the same
 // {assetIn, assetOut, amountIn, amountOut} args and an empty `who`.
@@ -5230,8 +5230,8 @@ export function swapEventAmounts(name: string, args: Record<string, unknown>): S
   const s = (v: unknown) => typeof v === 'string' ? v : typeof v === 'number' ? String(v) : ''
   const n = (v: unknown) => Number(v ?? NaN)
   const base = { assetIn: n(args.assetIn), assetOut: n(args.assetOut) }
-  if (name === 'XYK.SellExecuted') return { ...base, amountIn: s(args.amount), amountOut: s(args.salePrice) }
-  if (name === 'XYK.BuyExecuted') return { ...base, amountIn: s(args.buyPrice), amountOut: s(args.amount) }
+  if (name === 'XYK.SellExecuted' || name === 'LBP.SellExecuted') return { ...base, amountIn: s(args.amount), amountOut: s(args.salePrice) }
+  if (name === 'XYK.BuyExecuted' || name === 'LBP.BuyExecuted') return { ...base, amountIn: s(args.buyPrice), amountOut: s(args.amount) }
   return { ...base, amountIn: s(args.amountIn), amountOut: s(args.amountOut) }
 }
 
@@ -5307,7 +5307,7 @@ export interface TradeDetail {
 
 function tradeHopFee(name: string, args: Record<string, unknown>, outId: number): TradeHop['fee'] {
   const sv = (v: unknown) => (typeof v === 'string' && v !== '0') ? v : null
-  if (name.startsWith('XYK.')) {
+  if (name.startsWith('XYK.') || name.startsWith('LBP.')) {
     const amt = sv(args.feeAmount); const fa = Number(args.feeAsset)
     return amt && Number.isFinite(fa) ? { amount: amt, asset: asset(fa) } : null
   }
@@ -8254,7 +8254,7 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
       const swapRes = await client.query({
         query: `SELECT JSONExtractInt(args_json,'assetIn') AS ain, JSONExtractInt(args_json,'assetOut') AS aout
                 FROM price_data.raw_events
-                WHERE event_name IN ('Router.Executed','Router.RouteExecuted','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted')
+                WHERE event_name IN ('Router.Executed','Router.RouteExecuted','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted','LBP.SellExecuted','LBP.BuyExecuted')
                   AND block_height = (SELECT min(block_height) FROM price_data.dca_events WHERE id = {sid:UInt64} AND event_name = 'DCA.TradeExecuted')
                   AND JSONExtractString(args_json,'who') = {who:String}
                 ORDER BY event_index ASC LIMIT 1`,
