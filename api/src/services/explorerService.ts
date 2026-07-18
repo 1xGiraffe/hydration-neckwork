@@ -5015,6 +5015,14 @@ export function isDcaFeeLegSwap(extrinsicIndex: number | null, who: string): boo
   return extrinsicIndex == null && who !== '' && !who.startsWith('0x6d6f646c')
 }
 const NOT_DCA_FEE_LEG = `AND NOT (extrinsic_index IS NULL AND JSONExtractString(args_json,'who') != '' AND JSONExtractString(args_json,'who') NOT LIKE '0x6d6f646c%')`
+// Before the router event rename (block 4,542,080) the AMM legs of a DCA
+// execution ran with the owner's account — including module pots (treasury
+// buyback DCAs), which the who-based fee-leg triple can't catch. In that era a
+// DCA execution always emits the Router.RouteExecuted net summary, so hide
+// unsigned non-net hops in blocks where a DCA trade actually executed; pot
+// hook swaps in DCA-free blocks keep surfacing as their own trades.
+const ROUTER_NET_RENAME_BLOCK = 4_542_080
+const NOT_LEGACY_DCA_HOP = `AND NOT (extrinsic_index IS NULL AND block_height < ${ROUTER_NET_RENAME_BLOCK} AND event_name NOT IN (${ROUTER_NET_EVENTS_SQL}) AND block_height IN (SELECT block_height FROM price_data.dca_events WHERE event_name = 'DCA.TradeExecuted' AND block_height < ${ROUTER_NET_RENAME_BLOCK}))`
 const HOLLAR_ASSET_ID = 222
 function positiveAccountVolumes(rows: Array<{ account_id: string; volume_usd: number }>): Map<string, number> {
   const volumes = new Map<string, number>()
@@ -5099,7 +5107,7 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
     const amountFilter = eventValueFilterSql(assetOutExpr, amountOutExpr, 'block_timestamp',
       postUsdFilter ? { ...filters, min: undefined, unit: undefined } : filters, prices, 'trade_price')
     const notRouterHop = `AND who != '${ROUTER_PALLET_ACCT}'`
-    const notDcaFeeLeg = `AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%')`
+    const notDcaFeeLeg = `AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%') ${NOT_LEGACY_DCA_HOP}`
     const want = offset + limit
     const scanLimit = Math.max(want * 8, 200)
     const fetchRaw = async (bound: string, pageLimit: number): Promise<RawSwapEventRow[]> => {
@@ -9033,7 +9041,7 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
           ${tradeValueFilter.joinSql}
           WHERE ${bound} AND asset_id = {assetId:UInt32}
             AND who != '${ROUTER_PALLET_ACCT}'
-            AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%')
+            AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%') ${NOT_LEGACY_DCA_HOP}
             ${tradeValueFilter.predicateSql}
           ORDER BY block_height DESC, extrinsic_index DESC, event_name IN (${ROUTER_NET_EVENTS_SQL}) DESC, event_index DESC
           LIMIT 1 BY block_height, ifNull(toString(extrinsic_index), concat('event:', toString(event_index)))
