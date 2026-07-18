@@ -225,6 +225,7 @@ function TradeHover({ id }: { id: string }) {
         </div>
       </div>
       <div className="hc-row"><span>Result</span><StatusBadge ok={data.success} /></div>
+      {data.valueUsd != null && <div className="hc-row"><span>Value</span><span className="mono">{F.usd(data.valueUsd)}</span></div>}
       <div className="hc-route">
         <div className="hc-route-title"><span>Route</span><span className="mono">{hops.length} hop{hops.length === 1 ? '' : 's'}</span></div>
         {hops.map((h, i) => (
