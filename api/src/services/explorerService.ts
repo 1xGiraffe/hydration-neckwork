@@ -11539,9 +11539,12 @@ export async function getTagValueEvents(tagId: string, from?: string, to?: strin
   const members = tagMembers(tagId)
   if (!members) return null
   // Jump detection reads the SAME series getTag charts: members plus their
-  // truncated-EVM twins (and the same shared cache key).
+  // truncated-EVM twins (and the same shared cache key). Attribute jumps over
+  // that twin-inclusive set too, so money-market/aToken flows that sit under a
+  // twin are matched to their jump instead of falling back to a bogus `price`
+  // marker — mirrors the address path passing its twin-inclusive `related` set.
   const historyAccounts = [...new Set([...members, ...members.map(evmAccountForm).filter(Boolean) as string[]])]
-  return getAccountValueEvents(members, `tag:${tagId}`, from, to, VALUE_EVENT_DEFAULT_LIMIT, historyAccounts)
+  return getAccountValueEvents(historyAccounts, `tag:${tagId}`, from, to, VALUE_EVENT_DEFAULT_LIMIT, historyAccounts)
 }
 
 // Signed extrinsics for an explicit account-id set (related-account set, or a
