@@ -176,7 +176,8 @@ export async function explorerRoutes(fastify: FastifyInstance) {
 
   // Design routes extrinsics as height-index (#/extrinsic/12345-2).
   fastify.get('/explorer/dca/:scheduleId', async (req, reply) => {
-    const params = z.object({ scheduleId: z.coerce.number().int().positive() }).safeParse(req.params)
+    // Schedule ids start at 0 on-chain.
+    const params = z.object({ scheduleId: z.coerce.number().int().nonnegative() }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid schedule id' })
     const q = req.query as Record<string, unknown>
     const detail = await getDcaSchedule(params.data.scheduleId, offsetParam(q), limitParam(q, 25))
