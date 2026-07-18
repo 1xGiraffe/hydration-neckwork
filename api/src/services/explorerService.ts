@@ -10795,6 +10795,10 @@ const VALUE_EVENT_LIQUIDITY_NAMES = [
   'XYK.LiquidityAdded', 'XYK.LiquidityRemoved',
 ]
 const VALUE_EVENT_DEFAULT_LIMIT = 12
+// A liquidation is a high-signal event even when a routine transfer moved more
+// value, so guarantee the top few always surface rather than letting a whale's
+// larger transfers crowd every liquidation out of the value-ranked budget.
+const VALUE_EVENT_LIQUIDATION_SLOTS = 3
 
 // SQL: per-asset raw→token scale (10^decimals) for exact-index value ranking.
 function assetDecimalsPowSql(assetIdExpr: string): string {
@@ -11005,8 +11009,13 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
       })
     }
     out.sort((x, y) => y.valueUsd - x.valueUsd)
-    // Chronological order for rendering; value already decided membership.
-    return out.slice(0, limit).sort((x, y) => x.blockHeight - y.blockHeight || x.eventIndex - y.eventIndex)
+    // Reserve a few slots for the largest liquidations so they always surface,
+    // then fill the rest of the budget by value; value already decided membership.
+    const reserved = out.filter(e => e.kind === 'liquidation').slice(0, VALUE_EVENT_LIQUIDATION_SLOTS)
+    const reservedRefs = new Set(reserved.map(e => `${e.blockHeight}:${e.eventIndex}`))
+    const chosen = [...reserved, ...out.filter(e => !reservedRefs.has(`${e.blockHeight}:${e.eventIndex}`))].slice(0, limit)
+    // Chronological order for rendering.
+    return chosen.sort((x, y) => x.blockHeight - y.blockHeight || x.eventIndex - y.eventIndex)
   })
 }
 
