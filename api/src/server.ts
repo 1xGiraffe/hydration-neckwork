@@ -4,6 +4,7 @@ import compress from '@fastify/compress'
 import { config } from './config.ts'
 import { createClickHouseClient, createLongOpClickHouseClient } from './db/client.ts'
 import {
+  backfillAccountSwapNetRows,
   drainAccountSwapActivityQueue,
   seedAccountSwapActivityQueue,
   startAccountSwapActivityQueueDrain,
@@ -169,6 +170,22 @@ async function start() {
     startAccountSwapActivityQueueDrain(client)
     await fastify.listen({ port: config.port, host: config.host })
     console.log(`[API] Server listening on ${config.host}:${config.port}`)
+    // One-time historical repair (background, off the request client): routed
+    // swaps ingested before the queue MV lack their Router net row in
+    // account_swap_activity, so the activity feed shows an internal hop
+    // (e.g. aDOT→vDOT) instead of the true pair (DOT→SOL). Idempotent + flag-
+    // gated, so it runs once and is a no-op on every subsequent boot.
+    void (async () => {
+      const backfillClient = createLongOpClickHouseClient()
+      try {
+        const n = await backfillAccountSwapNetRows(backfillClient)
+        if (n) console.log(`[API] account-swap net backfill processed ${n} router-net events`)
+      } catch (err) {
+        console.error('[API] account-swap net backfill failed', err)
+      } finally {
+        await backfillClient.close()
+      }
+    })()
     // Account-directory value snapshots (bare/farmed Omnipool claims and current
     // money-market reserve principal) have no materialized view or derivation
     // job, so the API still computes them: generate once now, then keep fresh on

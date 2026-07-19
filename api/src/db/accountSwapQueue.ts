@@ -71,6 +71,71 @@ export function accountSwapDestinationRows(
   return out
 }
 
+// One-time historical repair. Routed swaps ingested before the queue MV existed
+// are missing their Router.Executed/RouteExecuted *net* row in
+// account_swap_activity — only an internal hop (e.g. Stableswap aDOT→vDOT) was
+// stored. The activity feed prefers the net row per extrinsic (see the swap
+// query's `event_name IN (ROUTER_NET) DESC … LIMIT 1 BY extrinsic`), so without
+// it the swap renders as the hop (aDOT→vDOT) instead of the true pair (DOT→SOL).
+// This backfills every net event as its signer's row, exactly as the live drain
+// attributes them. Idempotent: account_swap_activity is a ReplacingMergeTree, so
+// re-inserting present rows is a no-op and only the missing net rows are added.
+const NET_BACKFILL_FLAG_ID = 2
+
+export async function backfillAccountSwapNetRows(
+  client: ClickHouseClient,
+  options: { batchSize?: number; maxBatches?: number } = {},
+): Promise<number> {
+  const flag = await client.query({
+    query: `SELECT 1 FROM price_data.account_swap_activity_queue_seed FINAL WHERE id = ${NET_BACKFILL_FLAG_ID} LIMIT 1`,
+    format: 'JSONEachRow',
+  })
+  if ((await flag.json<Record<string, number>>()).length) return 0
+
+  const batchSize = options.batchSize ?? 10_000
+  const maxBatches = options.maxBatches ?? 1_000_000
+  let lastBlock = 0
+  let lastEvent = 0
+  let processed = 0
+  for (let batch = 0; batch < maxBatches; batch++) {
+    const res = await client.query({
+      query: `SELECT block_height, event_index, toUInt32(extrinsic_index) AS extrinsic_index,
+                toString(block_timestamp) AS block_timestamp, event_name,
+                toUInt32(greatest(0, JSONExtractInt(args_json, 'assetIn'))) AS asset_in,
+                toUInt32(greatest(0, JSONExtractInt(args_json, 'assetOut'))) AS asset_out,
+                JSONExtractString(args_json, 'amountIn') AS amount_in,
+                JSONExtractString(args_json, 'amountOut') AS amount_out,
+                toString(ingested_at) AS ingested_at
+              FROM price_data.raw_events
+              WHERE event_name IN ('Router.Executed', 'Router.RouteExecuted')
+                AND extrinsic_index IS NOT NULL
+                AND tuple(block_height, event_index) > tuple({block:UInt32}, {event:UInt32})
+              ORDER BY block_height, event_index
+              LIMIT {limit:UInt32}`,
+      query_params: { block: lastBlock, event: lastEvent, limit: batchSize },
+      format: 'JSONEachRow',
+    })
+    const rows = (await res.json<Omit<AccountSwapQueueRow, 'queued_at'>>())
+      .map(row => ({ ...row, queued_at: '' } as AccountSwapQueueRow))
+    if (!rows.length) break
+    const destination = accountSwapDestinationRows(rows, await queueExtrinsics(client, rows))
+    if (destination.length) {
+      await client.insert({ table: 'price_data.account_swap_activity', values: destination, format: 'JSONEachRow' })
+    }
+    const last = rows.at(-1)!
+    lastBlock = last.block_height
+    lastEvent = last.event_index
+    processed += rows.length
+    if (rows.length < batchSize) break
+  }
+  await client.insert({
+    table: 'price_data.account_swap_activity_queue_seed',
+    values: [{ id: NET_BACKFILL_FLAG_ID }],
+    format: 'JSONEachRow',
+  })
+  return processed
+}
+
 interface QueueCursor {
   queued_at: string
   block_height: number
