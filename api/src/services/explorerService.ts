@@ -482,6 +482,23 @@ const NOISY_TRANSFER_POTS = [
 ]
 const noisyPotList = () => NOISY_TRANSFER_POTS.map(a => `'${a}'`).join(',')
 
+// The treasury pot receives every extrinsic's transaction fee — and deposits such
+// as a referral-code registration — as a Balances/Currencies transfer. Those are
+// fees/deposits, not user transfers: a routed swap's fee leg is already dropped as
+// trade noise, but non-swap fees/deposits (Referrals.register_code, XCM inherents
+// like ParachainSystem.set_validation_data, plain batches) are not. So on a normal
+// account's transfer feed a transfer *to* the treasury is surfaced only when its
+// originating extrinsic is itself a token-transfer call (a genuine donation);
+// payouts *from* the treasury stay visible.
+const TREASURY_POT = '0x6d6f646c70792f74727372790000000000000000000000000000000000000000'
+const TRANSFER_CALL_NAMES = new Set([
+  'Balances.transfer', 'Balances.transfer_keep_alive', 'Balances.transfer_all', 'Balances.transfer_allow_death',
+  'Tokens.transfer', 'Tokens.transfer_all', 'Tokens.transfer_keep_alive',
+  'Currencies.transfer', 'Currencies.transfer_native_currency',
+  'XTokens.transfer', 'XTokens.transfer_multiasset', 'XTokens.transfer_multicurrencies',
+  'XTokens.transfer_multiassets', 'XTokens.transfer_with_fee', 'XTokens.transfer_multiasset_with_fee',
+])
+
 // The `bind` CTE body shared by grouped rankings: ETH-prefixed rows standing
 // for a real account map onto it — explicit EVMAccounts bindings plus
 // truncations of TAGGED derived accounts (a stableswap pool's aToken pot must
@@ -5591,6 +5608,28 @@ async function liquidationExtrinsics(pairs: [number, number | null][]): Promise<
   return out
 }
 
+// The subset of (block, extrinsic) pairs whose call is a genuine token-transfer
+// call. Used to keep only real donations to the treasury pot on a transfer feed:
+// a transfer *to* py/trsry emitted by any other call (a batch/swap fee, a
+// Referrals.register_code deposit, an XCM inherent's fee) is a fee/deposit, not a
+// user transfer.
+async function transferCallExtrinsics(pairs: [number, number | null][]): Promise<Set<string>> {
+  const out = new Set<string>()
+  const keys = [...new Set(pairs.filter(([, i]) => i != null).map(([h, i]) => `${h}:${i}`))]
+  if (!keys.length) return out
+  const callList = [...TRANSFER_CALL_NAMES].map(c => `'${c}'`).join(',')
+  for (let start = 0; start < keys.length; start += 5_000) {
+    const tuples = keys.slice(start, start + 5_000).map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
+    const res = await client.query({
+      query: `SELECT block_height, extrinsic_index FROM price_data.raw_extrinsics
+              WHERE (block_height, extrinsic_index) IN (${tuples}) AND call_name IN (${callList})`,
+      format: 'JSONEachRow',
+    })
+    for (const r of await res.json<{ block_height: number; extrinsic_index: number }>()) out.add(`${r.block_height}:${r.extrinsic_index}`)
+  }
+  return out
+}
+
 // Map (block_height, event_index) → extrinsic_index, so balance-observation
 // activity rows can link to their originating extrinsic (h-i) rather than the block.
 async function extrinsicIndexFor(pairs: [number, number | null][]): Promise<Map<string, number>> {
@@ -10325,6 +10364,13 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
         (await moreRefs.json<Record<string, number>>()).length > 0,
       )
     }
+    // Transfers *to* the treasury pot are fees/deposits unless the originating
+    // extrinsic is itself a token-transfer call — surface only genuine donations
+    // (payouts *from* the treasury are unaffected). Skipped when the viewed
+    // account IS the treasury, whose page is exactly those legs.
+    const viewingTreasury = accCond.includes(TREASURY_POT)
+    const treasuryTransferOk = viewingTreasury ? new Set<string>()
+      : await transferCallExtrinsics(rawTransferRows.filter(r => r.to_acc === TREASURY_POT).map(r => [r.block_height, r.extrinsic_index] as [number, number | null]))
     const seenTr = new Set<string>()
     for (const r of dedupeTransferEvents(rawTransferRows)) {
       const key = `${r.block_height}:${r.event_index}`
@@ -10333,6 +10379,11 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
       // Drop transfers that are a leg of one of our own signed trades or OTC
       // fills (swap/settlement noise).
       if (r.extrinsic_index != null && (tradeExt.has(`${r.block_height}:${r.extrinsic_index}`) || otcExt.has(`${r.block_height}:${r.extrinsic_index}`))) continue
+      // A transfer to the treasury that is not itself a transfer call is a
+      // fee/deposit (register_code, an XCM inherent, a non-swap batch fee), not a
+      // user transfer.
+      if (!viewingTreasury && r.to_acc === TREASURY_POT
+        && !(r.extrinsic_index != null && treasuryTransferOk.has(`${r.block_height}:${r.extrinsic_index}`))) continue
       const a = asset(r.asset_id)
       transfers.push({
         type: 'transfer', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
