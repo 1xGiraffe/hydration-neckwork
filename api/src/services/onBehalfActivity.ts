@@ -179,7 +179,7 @@ export function buildMultisigOperations(events: MultisigLifecycleEvent[], calls:
       ops.set(key, op)
     }
     op.touchpoints.push({ block: ev.block, extrinsic: ev.extrinsic, actor: ev.actor })
-    if (!op.row.initiator) op.row.initiator = ev.actor
+    if (!op.row.initiator && ev.kind === 'new') op.row.initiator = ev.actor
     op.row.timeline_actors.push(ev.actor)
     op.row.timeline_actions.push(ev.kind === 'new' ? 'initiated' : ev.kind === 'approval' ? 'approved' : ev.kind)
     op.row.timeline_ts.push(ev.ts)

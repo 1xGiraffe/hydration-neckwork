@@ -204,4 +204,14 @@ describe('buildMultisigOperations', () => {
     expect(ops).toHaveLength(3)
     expect(byState).toEqual({ pending: 1, executed: 1, cancelled: 1 })
   })
+
+  it('leaves initiator empty when the founding NewMultisig was never observed', () => {
+    const events = [
+      msEvent({ kind: 'approval', actor: SIG_C, block: 105, extrinsic: 4, eventIndex: 2, timepointHeight: 100, timepointIndex: 2 }),
+      msEvent({ kind: 'executed', actor: SIG_B, block: 110, extrinsic: 3, eventIndex: 9, timepointHeight: 100, timepointIndex: 2, ok: true }),
+    ]
+    const [op] = buildMultisigOperations(events, [], 7)
+    expect(op.initiator).toBe('')
+    expect(op.timeline_actions).toEqual(['approved', 'executed'])
+  })
 })
