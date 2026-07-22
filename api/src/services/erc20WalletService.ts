@@ -109,31 +109,19 @@ async function refresh(): Promise<void> {
   }
 }
 
-const REFRESH_MS = 10 * 60_000
-let refreshTimer: ReturnType<typeof setInterval> | null = null
 let refreshInflight: Promise<void> | null = null
 
-function runRefresh(label: 'initial load' | 'refresh'): Promise<void> {
+// Cadence is owned by the coordinated background scheduler
+// (backgroundRefresh.ts); this keeps only the single-flight guard.
+export function refreshErc20Wallets(): Promise<void> {
   if (refreshInflight) return refreshInflight
   const request = refresh()
-    .catch(err => console.error(`[erc20-wallet] ${label} failed`, err))
-    .finally(() => {
-      if (refreshInflight === request) refreshInflight = null
-    })
+    .catch(err => console.error('[erc20-wallet] refresh failed', err))
+    .finally(() => { if (refreshInflight === request) refreshInflight = null })
   refreshInflight = request
   return request
 }
 
 export function initErc20WalletService(c: ClickHouseClient): void {
-  if (refreshTimer) return
   client = c
-  void runRefresh('initial load')
-  refreshTimer = setInterval(() => { void runRefresh('refresh') }, REFRESH_MS)
-  refreshTimer.unref()
-}
-
-export function stopErc20WalletService(): void {
-  if (!refreshTimer) return
-  clearInterval(refreshTimer)
-  refreshTimer = null
 }

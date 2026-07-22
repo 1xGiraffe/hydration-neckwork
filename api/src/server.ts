@@ -38,10 +38,11 @@ import {
 } from './services/explorerService.ts'
 import { initTagService, loadTags, seedDefaultTags, syncMoneyMarketTag, startMoneyMarketTagRefresh, syncStructuralTags, startStructuralTagRefresh, reconcileTagColors } from './services/tagService.ts'
 import { initIdentityService, loadIdentities, startIdentityRefresh, stopIdentityRefresh } from './services/identityService.ts'
-import { initProxyMultisigService, stopProxyMultisigService } from './services/proxyMultisigService.ts'
-import { initHdxService, stopHdxService } from './services/hdxService.ts'
+import { initProxyMultisigService } from './services/proxyMultisigService.ts'
+import { initHdxService } from './services/hdxService.ts'
 import { initHollarService } from './services/hollarService.ts'
-import { initErc20WalletService, stopErc20WalletService } from './services/erc20WalletService.ts'
+import { initErc20WalletService } from './services/erc20WalletService.ts'
+import { startBackgroundRefresh, stopBackgroundRefresh } from './services/backgroundRefresh.ts'
 import { initAccountAffinityService } from './services/accountAffinityService.ts'
 import { ensureSnakewatchEmojiSourceLoaded } from './services/omniwatchIdentity.ts'
 import { initXcmJourneyService } from './services/xcmJourneyService.ts'
@@ -99,9 +100,7 @@ fastify.addHook('onClose', async () => {
   stopAssetsRefresh()
   stopExplorerAssetsRefresh()
   stopIdentityRefresh()
-  stopProxyMultisigService()
-  stopHdxService()
-  stopErc20WalletService()
+  stopBackgroundRefresh()
   stopAccountSwapActivityQueueDrain()
   stopExplorerBackgroundTasks()
   await client.close()
@@ -139,6 +138,10 @@ async function start() {
     initHdxService(client)
     initHollarService(client)
     initErc20WalletService(client)
+    // The node-full refreshers (lock breakdown, proxy/multisig, ERC-20 wallets)
+    // share one coordinated scheduler so they never stack concurrent RPC bursts
+    // on the archive node; started after their clients are set.
+    startBackgroundRefresh()
     initAccountAffinityService(client)
     initXcmJourneyService(client)
     // Tag icons can derive from a member's omniwatch emoji, so the snakewatch

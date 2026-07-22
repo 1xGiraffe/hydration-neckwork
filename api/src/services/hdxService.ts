@@ -309,33 +309,22 @@ async function refresh(): Promise<void> {
   }
 }
 
-const REFRESH_MS = 15 * 60_000
-let refreshTimer: ReturnType<typeof setInterval> | null = null
 let refreshInflight: Promise<void> | null = null
 
-function runRefresh(label: 'initial load' | 'refresh'): Promise<void> {
+// The coordinated background scheduler (backgroundRefresh.ts) owns the cadence
+// and serializes this against the other node-full refreshers; here we only keep
+// the single-flight guard so a re-entrant call collapses onto the in-flight run.
+export function refreshHdxSnapshot(): Promise<void> {
   if (refreshInflight) return refreshInflight
   const request = refresh()
-    .catch(err => console.error(`[hdx] ${label} failed`, err))
-    .finally(() => {
-      if (refreshInflight === request) refreshInflight = null
-    })
+    .catch(err => console.error('[hdx] refresh failed', err))
+    .finally(() => { if (refreshInflight === request) refreshInflight = null })
   refreshInflight = request
   return request
 }
 
 export function initHdxService(c: ClickHouseClient): void {
-  if (refreshTimer) return
   client = c
-  void runRefresh('initial load')
-  refreshTimer = setInterval(() => { void runRefresh('refresh') }, REFRESH_MS)
-  refreshTimer.unref()
-}
-
-export function stopHdxService(): void {
-  if (!refreshTimer) return
-  clearInterval(refreshTimer)
-  refreshTimer = null
 }
 
 // dashboard payload (ClickHouse aggregates + chain snapshot)

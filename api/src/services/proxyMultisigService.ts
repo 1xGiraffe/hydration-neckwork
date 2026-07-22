@@ -181,33 +181,21 @@ async function refresh(): Promise<void> {
   await Promise.all([refreshPureProxies(), refreshMultisigs()])
 }
 
-const REFRESH_MS = 10 * 60_000
-let refreshTimer: ReturnType<typeof setInterval> | null = null
 let refreshInflight: Promise<void> | null = null
 
-function runRefresh(label: 'initial load' | 'refresh'): Promise<void> {
+// Cadence is owned by the coordinated background scheduler
+// (backgroundRefresh.ts); this keeps only the single-flight guard.
+export function refreshProxyMultisig(): Promise<void> {
   if (refreshInflight) return refreshInflight
   const request = refresh()
-    .catch(err => console.error(`[proxy-multisig] ${label} failed`, err))
-    .finally(() => {
-      if (refreshInflight === request) refreshInflight = null
-    })
+    .catch(err => console.error('[proxy-multisig] refresh failed', err))
+    .finally(() => { if (refreshInflight === request) refreshInflight = null })
   refreshInflight = request
   return request
 }
 
 export function initProxyMultisigService(c: ClickHouseClient): void {
-  if (refreshTimer) return
   client = c
-  void runRefresh('initial load')
-  refreshTimer = setInterval(() => { void runRefresh('refresh') }, REFRESH_MS)
-  refreshTimer.unref()
-}
-
-export function stopProxyMultisigService(): void {
-  if (!refreshTimer) return
-  clearInterval(refreshTimer)
-  refreshTimer = null
 }
 
 // lookups (in-memory, resolved per related-account set)
