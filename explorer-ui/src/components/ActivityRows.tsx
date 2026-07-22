@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, Fragment, type KeyboardEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { useExtrinsic } from '../hooks/useExplorerData'
 import { Link, paths } from '../router'
 import { F, AddrPill, CallPill, StatusBadge, JsonView, Ago, ExpandedRowSkeleton, Dash } from './ui'
@@ -74,6 +75,15 @@ function MultisigBadge({ origin }: { origin: ExtrinsicOrigin }) {
 // Positioned exactly like HoverCard.tsx's global card (fixed, flipped above
 // the anchor when there's no room below, height-capped to the viewport) but
 // anchored to the badge's own rect rather than a pointer-tracked target.
+// Portalled to document.body: unlike HoverCard.tsx (which mounts at the App
+// root, outside any wrapper), this card is authored inside row/panel
+// ancestors, and a `.panel`/`.wrap` transform (even the identity matrix a
+// reveal animation leaves behind) turns that ancestor into the containing
+// block for `position: fixed`, resolving our viewport coordinates against it
+// instead of the viewport. The portal escapes that regardless of ancestor
+// styling; React still delivers events through the component tree, so the
+// row's onClick toggle would otherwise still fire on a card click without
+// the stopPropagation below.
 function MultisigHoverCard({ origin, rect, onMouseEnter, onMouseLeave, onClose }: {
   origin: ExtrinsicOrigin
   rect: DOMRect
@@ -91,7 +101,7 @@ function MultisigHoverCard({ origin, rect, onMouseEnter, onMouseLeave, onClose }
     ? { bottom: Math.round(viewportHeight - rect.top + 8), maxHeight: Math.max(96, Math.round(rect.top - 16)) }
     : { top: Math.round(rect.bottom + 8), maxHeight: Math.max(96, Math.round(spaceBelow - 16)) }
   const state = origin.state ?? 'executed'
-  return (
+  return createPortal(
     <div className="hovercard" style={{ left, width: cardWidth, overflowY: 'auto', ...vStyle }}
       onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} onClick={e => { e.stopPropagation(); onClose() }}>
       <div className="hc-title" style={{ marginBottom: 8 }}>
@@ -103,7 +113,8 @@ function MultisigHoverCard({ origin, rect, onMouseEnter, onMouseLeave, onClose }
           <span><Link to={paths.extrinsic(entry.extrinsicId)} className="hash">{entry.action}</Link> <span className="mono muted">{entry.timestamp}</span></span>
         </div>
       ))}
-    </div>
+    </div>,
+    document.body,
   )
 }
 
