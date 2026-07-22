@@ -111,10 +111,10 @@ function MultisigHoverCard({ origin, rect, onMouseEnter, onMouseLeave, onClose }
         Multisig operation · {state}{origin.threshold ? ` · ${origin.threshold}/${origin.signatories}` : ''}
       </div>
       {origin.timeline?.map((entry, i) => (
-        <div className="hc-row" key={`${entry.extrinsicId}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
-          <span style={{ minWidth: 0, overflow: 'hidden' }}><AddrPill account={entry.account} noCopy /></span>
-          <Link to={paths.extrinsic(entry.extrinsicId)} className="hash" style={{ flexShrink: 0 }}>{entry.action}</Link>
-          <span className="mono muted" style={{ marginLeft: 'auto', flexShrink: 0 }}>{entry.timestamp}</span>
+        <div key={`${entry.extrinsicId}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, whiteSpace: 'nowrap' }}>
+          <AddrPill account={entry.account} noCopy />
+          <Link to={paths.extrinsic(entry.extrinsicId)} className="hash" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>{entry.action}</Link>
+          <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>· {entry.timestamp}</span>
         </div>
       ))}
     </div>,
