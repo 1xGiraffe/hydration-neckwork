@@ -50,7 +50,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const activityType = normalizeActivityType(useQueryValue('type', 'all'))
   const filterOptions = { reservedKeys: ['page', 'tab', 'view', 'atab', 'type', 'apage'], pageKey: 'apage' }
   const activityFilters = useFilters({ ...filterOptions, keys: ['action', 'token', 'from', 'to', 'min'] })
-  const extrinsicFilters = useFilters({ ...filterOptions, keys: ['call', 'result', 'from', 'to'] })
+  const extrinsicFilters = useFilters({ ...filterOptions, keys: ['call', 'result', 'origin', 'from', 'to'] })
   const eventFilters = useFilters({ ...filterOptions, keys: ['event', 'from', 'to'] })
   const activityAction = normalizeActivityAction(activityType, activityFilters.values.action ?? '')
   const assets = useAssets()
@@ -98,14 +98,14 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
     offset,
     extrinsicFilters.values.from,
     extrinsicFilters.values.to,
-    { call: extrinsicFilters.values.call, result: extrinsicFilters.values.result },
+    { call: extrinsicFilters.values.call, result: extrinsicFilters.values.result, origin: extrinsicFilters.values.origin },
   )
   const tagExtrinsics = useTagExtrinsics(
     activeTab === 'extrinsics' ? tagId : null,
     offset,
     extrinsicFilters.values.from,
     extrinsicFilters.values.to,
-    { call: extrinsicFilters.values.call, result: extrinsicFilters.values.result },
+    { call: extrinsicFilters.values.call, result: extrinsicFilters.values.result, origin: extrinsicFilters.values.origin },
   )
   const extrinsics = scope.kind === 'account' ? accountExtrinsics : tagExtrinsics
   const accountEvents = useAccountEvents(
@@ -128,8 +128,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   // accounts keep the compact layout. Count-driven (not row-presence) so it
   // stays stable across pages/filters and doesn't flash while the rows query
   // resolves before the slower counts query.
-  const onBehalfCount = counts.data ? (counts.data as { extrinsicsOnBehalf?: number }).extrinsicsOnBehalf ?? 0 : 0
-  const showOrigin = onBehalfCount > 0
+  const showOrigin = (counts.data?.extrinsicsOnBehalf ?? 0) > 0
   const showSigner = scope.kind === 'tag' || showOrigin
   const extrinsicColumns = 7 + (showSigner ? 1 : 0) + (showOrigin ? 1 : 0)
 
@@ -160,7 +159,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
       </>}
 
       {activeTab === 'extrinsics' && <>
-        <FilterZone fields={extrinsicFilterFields} values={extrinsicFilters.values} onChange={extrinsicFilters.onChange} onClear={extrinsicFilters.onClear} />
+        <FilterZone fields={extrinsicFilterFields(showOrigin)} values={extrinsicFilters.values} onChange={extrinsicFilters.onChange} onClear={extrinsicFilters.onClear} />
         <div className="panel"><table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Call</th>{showSigner && <th>Sender</th>}{showOrigin && <th>Origin</th>}<th className="r">Fee</th><th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody>

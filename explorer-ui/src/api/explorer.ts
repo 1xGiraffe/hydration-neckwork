@@ -25,7 +25,7 @@ function withQuery(path: string, values: Record<string, QueryValue>): string {
 }
 
 export interface ValueFilters { token?: string; min?: string }
-export interface ExtrinsicFilters { call?: string; result?: string }
+export interface ExtrinsicFilters { call?: string; result?: string; origin?: string }
 export interface EventFilters { event?: string }
 
 export const api = {
@@ -72,7 +72,7 @@ export const api = {
   // Governance votes cast by the account (OpenGov + Democracy + collectives).
   accountVotes: (address: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<VoteRow[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/votes`, { offset, limit, from, to }), signal),
-  accountActivityCounts: (address: string, signal?: AbortSignal) => getJson<{ extrinsics: number; events: number; activity: number; votes: number }>(`/explorer/address/${encodeURIComponent(address)}/counts`, signal),
+  accountActivityCounts: (address: string, signal?: AbortSignal) => getJson<{ extrinsics: number; extrinsicsOnBehalf?: number; events: number; activity: number; votes: number }>(`/explorer/address/${encodeURIComponent(address)}/counts`, signal),
   // Largest value-changing events (big transfers/swaps/liquidations) for the
   // value-history chart's markers; defaults to the account's full indexed range.
   accountValueEvents: (address: string, from?: string, to?: string, signal?: AbortSignal) =>
@@ -92,7 +92,7 @@ export const api = {
     getJson<EventRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/events`, { offset, limit, from, to, ...filters }), signal),
   tagVotes: (tagId: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<VoteRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/votes`, { offset, limit, from, to }), signal),
-  tagActivityCounts: (tagId: string, signal?: AbortSignal) => getJson<{ extrinsics: number; events: number; activity: number; votes: number }>(`/explorer/tag/${encodeURIComponent(tagId)}/counts`, signal),
+  tagActivityCounts: (tagId: string, signal?: AbortSignal) => getJson<{ extrinsics: number; extrinsicsOnBehalf?: number; events: number; activity: number; votes: number }>(`/explorer/tag/${encodeURIComponent(tagId)}/counts`, signal),
   tagActivityCount: (tagId: string, min: number, signal?: AbortSignal) => getJson<{ activity: number | null }>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/activity-count`, { min }), signal),
   search: (query: string, signal?: AbortSignal) => getJson<SearchResult[]>(withQuery('/explorer/search', { q: query }), signal),
   assets: (signal?: AbortSignal) => getJson<AssetListItem[]>('/explorer/assets', signal),

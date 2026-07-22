@@ -21,19 +21,31 @@ export function activityFilterFields(type: string, assets: AssetListItem[], incl
   ]
 }
 
-export const extrinsicFilterFields: FilterField[] = [
-  { kind: 'text', key: 'call', placeholder: 'Call name', width: 210 },
-  {
-    kind: 'select',
-    key: 'result',
-    options: [
-      { value: '', label: 'All results' },
-      { value: 'success', label: 'Success' },
-      { value: 'failed', label: 'Failed' },
-    ],
-  },
-  ...DATE_FIELDS,
-]
+export function extrinsicFilterFields(includeOrigin = false): FilterField[] {
+  return [
+    { kind: 'text', key: 'call', placeholder: 'Call name', width: 210 },
+    ...(includeOrigin ? [{
+      kind: 'select' as const,
+      key: 'origin',
+      options: [
+        { value: '', label: 'All origins' },
+        { value: 'signed', label: 'Signed' },
+        { value: 'proxy', label: 'Via proxy' },
+        { value: 'multisig', label: 'Multisig' },
+      ],
+    }] : []),
+    {
+      kind: 'select',
+      key: 'result',
+      options: [
+        { value: '', label: 'All results' },
+        { value: 'success', label: 'Success' },
+        { value: 'failed', label: 'Failed' },
+      ],
+    },
+    ...DATE_FIELDS,
+  ]
+}
 
 export const eventFilterFields: FilterField[] = [
   { kind: 'text', key: 'event', placeholder: 'Event name', width: 230 },

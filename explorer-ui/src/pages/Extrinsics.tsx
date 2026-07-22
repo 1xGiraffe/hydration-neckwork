@@ -29,7 +29,7 @@ export function Extrinsics() {
         <div className="page-title">Extrinsics <span className="sub">signed calls</span></div>
       </div>
       <DayBarChart data={daily ?? []} label="Daily signed extrinsics" selected={f.from === f.to ? f.from : undefined} onSelect={setDay} fmt={F.int} loading={!daily} />
-      <FilterZone fields={extrinsicFilterFields} values={f} onChange={(k, v) => { onChange(k, v); setPage(0) }} onClear={onClear} />
+      <FilterZone fields={extrinsicFilterFields()} values={f} onChange={(k, v) => { onChange(k, v); setPage(0) }} onClear={onClear} />
       <div className="panel">
         <table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Call</th><th>Signer</th><th className="r">Fee</th><th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
