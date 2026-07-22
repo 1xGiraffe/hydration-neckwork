@@ -145,7 +145,8 @@ function ExpandPanel({ id, origin }: { id: string; origin?: ExtrinsicOrigin }) {
             {origin.timeline?.map((entry, i) => (
               <div key={`${entry.action}-${entry.timestamp}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                 <AddrPill account={entry.account} noCopy />
-                <Link to={paths.extrinsic(entry.extrinsicId)} className="hash" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>{entry.action} · {entry.timestamp}</Link>
+                <Link to={paths.extrinsic(entry.extrinsicId)} className="hash" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>{entry.action}</Link>
+                <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>· {entry.timestamp}</span>
               </div>
             ))}
           </div>
