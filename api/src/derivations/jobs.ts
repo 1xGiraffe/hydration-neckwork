@@ -1,4 +1,4 @@
-// Idempotent, range-aware recompute jobs for the four read models that a plain
+// Idempotent, range-aware recompute jobs for the six read models that a plain
 // materialized view cannot express (they need cross-row netting or a stateful
 // lifecycle walk). The runner (derivations/runner.ts) calls each every cycle;
 // every function here is safe to call repeatedly.
@@ -7,8 +7,10 @@
 //   - omnipool_position_owner_intervals  bounded full recompute, atomic staging swap
 //   - xyk_farm_principal_intervals       bounded full recompute, atomic staging swap
 //   - xyk_lp_total_shares_history        bounded full recompute, atomic staging swap
+//   - proxy_call_activity                bounded full recompute, atomic staging swap
+//   - multisig_operation_activity        bounded full recompute, atomic staging swap
 //
-// The three reconstructions write their full result into a `<table>_staging` twin
+// The five reconstructions write their full result into a `<table>_staging` twin
 // and EXCHANGE it with the live table (see atomicFullReplace below) — the live
 // table is always exactly the latest full run, with no stale rows left behind by
 // a shifted ReplacingMergeTree key and no unbounded run_id growth. account_trade_volume
@@ -33,6 +35,15 @@ import {
   type XykFarmLifecycleEvent,
   type XykFarmLifecycleKind,
 } from '../services/xykFarmIntervals.ts'
+import {
+  buildProxyCallRows,
+  buildMultisigOperations,
+  proxyChildAddress,
+  type ProxyCallSource,
+  type ExtrinsicCallRow,
+  type MultisigLifecycleEvent,
+  type MultisigCallInfo,
+} from '../services/onBehalfActivity.ts'
 
 export interface DerivationResult {
   model: string
@@ -467,4 +478,209 @@ export async function runXykTotalShares(client: ClickHouseClient): Promise<Deriv
     format: 'JSONEachRow',
   })
   return { model: 'xyk_total_shares', rows: Number((await res.json<{ n: string }>())[0]?.n ?? 0) }
+}
+
+// ───────────────────── proxy_call_activity ─────────────────────
+// One row per Proxy.proxy / Proxy.proxy_announced call at any nesting depth,
+// keyed by the proxied ("real") account. Global source is ~4.6k calls, so a
+// bounded full recompute + atomic swap (same mechanism as the interval jobs)
+// is cheaper and more robust than incremental bookkeeping. Raw inputs are
+// replayable ReplacingMergeTree rows — dedupe by stable identity first.
+
+const CALL_DEDUPE = 'ORDER BY ingested_at DESC LIMIT 1 BY block_height, assumeNotNull(extrinsic_index), call_address'
+
+interface RawCallRow {
+  block: number
+  extrinsic: number
+  callAddress: string
+  ts: number
+  callName: string
+  argsJson: string
+  originJson: string | null
+  success: number | null
+}
+
+const RAW_CALL_SELECT = `
+  SELECT block_height AS block, assumeNotNull(extrinsic_index) AS extrinsic, call_address AS callAddress,
+         toUInt32(toUnixTimestamp(block_timestamp)) AS ts, call_name AS callName,
+         args_json AS argsJson, origin_json AS originJson, success
+  FROM price_data.raw_calls`
+
+// Extract real account from Proxy.proxy args JSON, with graceful fallback on parse error.
+function proxyRealAccount(argsJson: string): string {
+  try {
+    const args = JSON.parse(argsJson) as { real?: string }
+    return args.real?.toLowerCase() ?? ''
+  } catch { return '' }
+}
+
+// Member calls of a set of extrinsics, loaded tuple-chunked so the IN list
+// stays bounded; used to find the dispatched child of each wrapper call.
+async function loadExtrinsicCalls(client: ClickHouseClient, tuples: Set<string>): Promise<RawCallRow[]> {
+  const list = [...tuples]
+  const out: RawCallRow[] = []
+  const CHUNK = 10_000
+  for (let i = 0; i < list.length; i += CHUNK) {
+    const inList = list.slice(i, i + CHUNK).map(t => `(${t})`).join(',')
+    const res = await client.query({
+      query: `${RAW_CALL_SELECT} WHERE (block_height, assumeNotNull(extrinsic_index)) IN (${inList}) AND extrinsic_index IS NOT NULL ${CALL_DEDUPE}`,
+      format: 'JSONEachRow',
+    })
+    out.push(...await res.json<RawCallRow>())
+  }
+  return out
+}
+
+export async function runProxyCallActivity(client: ClickHouseClient): Promise<DerivationResult> {
+  const runId = Date.now()
+  const res = await client.query({
+    query: `${RAW_CALL_SELECT}
+      WHERE call_name IN ('Proxy.proxy', 'Proxy.proxy_announced') AND extrinsic_index IS NOT NULL
+      ${CALL_DEDUPE}`,
+    format: 'JSONEachRow',
+  })
+  const proxyRows = await res.json<RawCallRow>()
+  const proxies: ProxyCallSource[] = proxyRows.map(r => ({
+    block: r.block, extrinsic: r.extrinsic, callAddress: r.callAddress, ts: r.ts,
+    proxyCallName: r.callName,
+    realAccount: proxyRealAccount(r.argsJson),
+  }))
+  const memberCalls = await loadExtrinsicCalls(client, new Set(proxies.map(p => `${p.block},${p.extrinsic}`)))
+  const children: ExtrinsicCallRow[] = memberCalls.map(c => ({
+    block: c.block, extrinsic: c.extrinsic, callAddress: c.callAddress, callName: c.callName, success: c.success,
+  }))
+  const rows = buildProxyCallRows(proxies, children, runId)
+  await atomicFullReplace(client, 'price_data.proxy_call_activity', async stagingTable => {
+    const BATCH = 50_000
+    for (let i = 0; i < rows.length; i += BATCH) {
+      await client.insert({ table: stagingTable, values: rows.slice(i, i + BATCH), format: 'JSONEachRow' })
+    }
+  })
+  return { model: 'proxy_call_activity', rows: rows.length }
+}
+
+// ─────────────────── multisig_operation_activity ───────────────────
+// One row per multisig OPERATION at its latest state, reconstructed from the
+// four Multisig.* lifecycle events (timepoint identity) joined with the
+// Multisig.* calls (threshold / signatories / inner call) via the same
+// createKeyMulti derive-check refreshMultisigs uses. as_multi_threshold_1
+// emits no events and becomes an executed op directly from its call.
+
+function signedOrigin(originJson: string | null): string | null {
+  if (!originJson) return null
+  try {
+    const o = JSON.parse(originJson) as { value?: { __kind?: string; value?: string } }
+    return o.value?.__kind === 'Signed' && typeof o.value.value === 'string' ? o.value.value.toLowerCase() : null
+  } catch { return null }
+}
+
+interface MultisigEventRow {
+  block: number
+  eventIndex: number
+  extrinsic: number
+  ts: number
+  event_name: string
+  multisig: string
+  callHash: string
+  actor: string
+  tpHeight: number
+  tpIndex: number
+  hasTp: number
+  resultKind: string
+}
+
+const MS_EVENT_KIND: Record<string, MultisigLifecycleEvent['kind']> = {
+  'Multisig.NewMultisig': 'new',
+  'Multisig.MultisigApproval': 'approval',
+  'Multisig.MultisigExecuted': 'executed',
+  'Multisig.MultisigCancelled': 'cancelled',
+}
+
+export async function runMultisigOperations(client: ClickHouseClient): Promise<DerivationResult> {
+  const runId = Date.now()
+  const evRes = await client.query({
+    query: `
+      SELECT block_height AS block, event_index AS eventIndex, assumeNotNull(extrinsic_index) AS extrinsic,
+             toUInt32(toUnixTimestamp(block_timestamp)) AS ts, event_name,
+             lower(JSONExtractString(args_json, 'multisig')) AS multisig,
+             lower(JSONExtractString(args_json, 'callHash')) AS callHash,
+             lower(multiIf(JSONHas(args_json, 'approving'), JSONExtractString(args_json, 'approving'),
+                           JSONExtractString(args_json, 'cancelling'))) AS actor,
+             toUInt32(JSONExtractInt(args_json, 'timepoint', 'height')) AS tpHeight,
+             toUInt32(JSONExtractInt(args_json, 'timepoint', 'index')) AS tpIndex,
+             JSONHas(args_json, 'timepoint') AS hasTp,
+             JSONExtractString(args_json, 'result', '__kind') AS resultKind
+      FROM price_data.raw_events
+      WHERE event_name IN ('Multisig.NewMultisig', 'Multisig.MultisigApproval', 'Multisig.MultisigExecuted', 'Multisig.MultisigCancelled')
+        AND extrinsic_index IS NOT NULL
+      ORDER BY ingested_at DESC
+      LIMIT 1 BY block_height, event_index`,
+    format: 'JSONEachRow',
+  })
+  const eventRows = await evRes.json<MultisigEventRow>()
+  const events: MultisigLifecycleEvent[] = eventRows.map(r => ({
+    kind: MS_EVENT_KIND[r.event_name],
+    multisig: r.multisig, callHash: r.callHash,
+    timepointHeight: r.hasTp ? r.tpHeight : null,
+    timepointIndex: r.hasTp ? r.tpIndex : null,
+    actor: r.actor, block: r.block, extrinsic: r.extrinsic, eventIndex: r.eventIndex, ts: r.ts,
+    ok: r.event_name === 'Multisig.MultisigExecuted' ? r.resultKind === 'Ok' : null,
+  }))
+
+  const callRes = await client.query({
+    query: `${RAW_CALL_SELECT}
+      WHERE call_name IN ('Multisig.as_multi', 'Multisig.approve_as_multi', 'Multisig.as_multi_threshold_1', 'Multisig.cancel_as_multi')
+        AND extrinsic_index IS NOT NULL
+      ${CALL_DEDUPE}`,
+    format: 'JSONEachRow',
+  })
+  const callRows = await callRes.json<RawCallRow>()
+  const tuples = new Set(callRows.map(c => `${c.block},${c.extrinsic}`))
+  const memberCalls = await loadExtrinsicCalls(client, tuples)
+  const byAddress = new Map<string, RawCallRow>()
+  for (const c of memberCalls) byAddress.set(`${c.block}:${c.extrinsic}:${c.callAddress}`, c)
+  // origin_json is unset on some historical rows — fall back to the extrinsic
+  // signer (correct for root-level calls, which is all real traffic so far).
+  const signerRes = tuples.size ? await client.query({
+    query: `
+      SELECT block_height AS block, extrinsic_index AS extrinsic, lower(coalesce(signer, effective_signer)) AS signer
+      FROM price_data.raw_extrinsics
+      WHERE (block_height, extrinsic_index) IN (${[...tuples].map(t => `(${t})`).join(',')})
+      ORDER BY ingested_at DESC
+      LIMIT 1 BY block_height, extrinsic_index`,
+    format: 'JSONEachRow',
+  }) : null
+  const signers = new Map<string, string>()
+  if (signerRes) for (const s of await signerRes.json<{ block: number; extrinsic: number; signer: string | null }>()) {
+    if (s.signer) signers.set(`${s.block}:${s.extrinsic}`, s.signer)
+  }
+
+  const calls: MultisigCallInfo[] = callRows.map(c => {
+    let threshold: number | null = null
+    let otherSignatories: string[] = []
+    try {
+      const args = JSON.parse(c.argsJson) as { threshold?: number; otherSignatories?: string[] }
+      threshold = typeof args.threshold === 'number' ? args.threshold : null
+      otherSignatories = Array.isArray(args.otherSignatories) ? args.otherSignatories.map(s => s.toLowerCase()) : []
+    } catch { /* keep defaults — the derive-check will simply not match */ }
+    const child = byAddress.get(`${c.block}:${c.extrinsic}:${proxyChildAddress(c.callAddress)}`)
+    return {
+      block: c.block, extrinsic: c.extrinsic, callAddress: c.callAddress, callName: c.callName,
+      threshold, otherSignatories,
+      originAccount: signedOrigin(c.originJson) ?? signers.get(`${c.block}:${c.extrinsic}`) ?? null,
+      callSuccess: c.success,
+      innerCallName: child?.callName ?? null,
+      innerSuccess: child?.success ?? null,
+      ts: c.ts,
+    }
+  })
+
+  const rows = buildMultisigOperations(events, calls, runId)
+  await atomicFullReplace(client, 'price_data.multisig_operation_activity', async stagingTable => {
+    const BATCH = 50_000
+    for (let i = 0; i < rows.length; i += BATCH) {
+      await client.insert({ table: stagingTable, values: rows.slice(i, i + BATCH), format: 'JSONEachRow' })
+    }
+  })
+  return { model: 'multisig_operations', rows: rows.length }
 }
