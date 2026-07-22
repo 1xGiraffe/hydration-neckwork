@@ -10881,8 +10881,9 @@ export async function getAddressVotes(addressInput: string, limit = 25, offset =
   return getScopedVotes(resolved.related, `account:${resolved.norm.accountId}`, limit, offset, from, to, filters)
 }
 
-// Tab counts for an account/tag detail page: total signed extrinsics and total
-// events mentioning any related account. The events count is a full args scan
+// Tab counts for an account/tag detail page: extrinsics is the deduplicated
+// union of signed and on-behalf (proxy/multisig) extrinsics, and events is any
+// event mentioning a related account. The events count is a full args scan
 // (~2.5s), so it is served from its own lazily-fetched endpoint under a long
 // cache rather than blocking the page payload.
 

@@ -531,6 +531,30 @@ async function loadExtrinsicCalls(client: ClickHouseClient, tuples: Set<string>)
   return out
 }
 
+// Deduped extrinsic signer for a tuple set, chunked the same way as
+// loadExtrinsicCalls so the IN list stays bounded.
+async function loadExtrinsicSigners(client: ClickHouseClient, tuples: Set<string>): Promise<Map<string, string>> {
+  const list = [...tuples]
+  const out = new Map<string, string>()
+  const CHUNK = 10_000
+  for (let i = 0; i < list.length; i += CHUNK) {
+    const inList = list.slice(i, i + CHUNK).map(t => `(${t})`).join(',')
+    const res = await client.query({
+      query: `
+        SELECT block_height AS block, extrinsic_index AS extrinsic, lower(coalesce(signer, effective_signer)) AS signer
+        FROM price_data.raw_extrinsics
+        WHERE (block_height, extrinsic_index) IN (${inList})
+        ORDER BY ingested_at DESC
+        LIMIT 1 BY block_height, extrinsic_index`,
+      format: 'JSONEachRow',
+    })
+    for (const s of await res.json<{ block: number; extrinsic: number; signer: string | null }>()) {
+      if (s.signer) out.set(`${s.block}:${s.extrinsic}`, s.signer)
+    }
+  }
+  return out
+}
+
 export async function runProxyCallActivity(client: ClickHouseClient): Promise<DerivationResult> {
   const runId = Date.now()
   const res = await client.query({
@@ -641,19 +665,7 @@ export async function runMultisigOperations(client: ClickHouseClient): Promise<D
   for (const c of memberCalls) byAddress.set(`${c.block}:${c.extrinsic}:${c.callAddress}`, c)
   // origin_json is unset on some historical rows — fall back to the extrinsic
   // signer (correct for root-level calls, which is all real traffic so far).
-  const signerRes = tuples.size ? await client.query({
-    query: `
-      SELECT block_height AS block, extrinsic_index AS extrinsic, lower(coalesce(signer, effective_signer)) AS signer
-      FROM price_data.raw_extrinsics
-      WHERE (block_height, extrinsic_index) IN (${[...tuples].map(t => `(${t})`).join(',')})
-      ORDER BY ingested_at DESC
-      LIMIT 1 BY block_height, extrinsic_index`,
-    format: 'JSONEachRow',
-  }) : null
-  const signers = new Map<string, string>()
-  if (signerRes) for (const s of await signerRes.json<{ block: number; extrinsic: number; signer: string | null }>()) {
-    if (s.signer) signers.set(`${s.block}:${s.extrinsic}`, s.signer)
-  }
+  const signers = await loadExtrinsicSigners(client, tuples)
 
   const calls: MultisigCallInfo[] = callRows.map(c => {
     let threshold: number | null = null
