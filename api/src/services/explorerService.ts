@@ -10868,10 +10868,33 @@ export async function getAddressVotes(addressInput: string, limit = 25, offset =
 // events mentioning any related account. The events count is a full args scan
 // (~2.5s), so it is served from its own lazily-fetched endpoint under a long
 // cache rather than blocking the page payload.
-export interface TabCounts { extrinsics: number; events: number; activity: number; votes: number }
+
+// Distinct on-behalf extrinsics (proxy targets ∪ multisig operation anchors)
+// for a related-account set. Cheap: both projections are account-first and
+// tiny. Cached on its own so the tag snapshot read path (which serves counts
+// from a table that predates this field) can attach it without a recompute.
+async function onBehalfExtrinsicCount(accounts: string[], cacheKey: string): Promise<number> {
+  const list = sqlAccountList(accounts)
+  if (list === "''") return 0
+  return cached(`explorer:onbehalf-count:${cacheKey}`, 600_000, async () => {
+    const res = await client.query({
+      query: `
+        SELECT count() AS c FROM (
+          SELECT block_height, extrinsic_index FROM price_data.proxy_call_activity WHERE real_account IN (${list})
+          UNION DISTINCT
+          SELECT anchor_block_height AS block_height, anchor_extrinsic_index AS extrinsic_index
+          FROM price_data.multisig_operation_activity WHERE multisig IN (${list})
+        )`,
+      format: 'JSONEachRow',
+    })
+    return Number((await res.json<{ c: string }>())[0]?.c ?? 0)
+  })
+}
+
+export interface TabCounts { extrinsics: number; extrinsicsOnBehalf: number; events: number; activity: number; votes: number }
 async function getAccountTabCounts(accounts: string[], cacheKey: string): Promise<TabCounts> {
   const list = sqlAccountList(accounts)
-  if (list === "''") return { extrinsics: 0, events: 0, activity: 0, votes: 0 }
+  if (list === "''") return { extrinsics: 0, extrinsicsOnBehalf: 0, events: 0, activity: 0, votes: 0 }
   return cached(`explorer:tab-counts:${cacheKey}`, 600_000, async () => {
     const mmList = sqlAccountList([...new Set(accounts.map(evmAccountForm).filter(Boolean) as string[])])
     const indexedHits = `
@@ -10885,9 +10908,23 @@ async function getAccountTabCounts(accounts: string[], cacheKey: string): Promis
     const activityHits = `SELECT block_height, event_index, extrinsic_index, event_name, is_module_transfer
          FROM (${indexedHits})
          GROUP BY block_height, event_index, extrinsic_index, event_name, is_module_transfer`
-    const [extRes, evRes, mmRes, xcmRes, dcaRes, otcRes, votes] = await Promise.all([
+    const [extRes, onBehalf, overlapRes, evRes, mmRes, xcmRes, dcaRes, otcRes, votes] = await Promise.all([
       client.query({
         query: `SELECT count() AS c FROM price_data.raw_extrinsics WHERE signer IN (${list}) OR effective_signer IN (${list})`,
+        format: 'JSONEachRow',
+      }),
+      onBehalfExtrinsicCount(accounts, cacheKey),
+      // Signed ∩ on-behalf overlap (e.g. self-proxy): the merged list shows
+      // such an extrinsic once, so the total subtracts it. PK-pruned by the
+      // small on-behalf anchor set.
+      client.query({
+        query: `
+          SELECT count() AS c FROM price_data.raw_extrinsics
+          WHERE (block_height, extrinsic_index) IN (
+              SELECT block_height, extrinsic_index FROM price_data.proxy_call_activity WHERE real_account IN (${list})
+              UNION DISTINCT
+              SELECT anchor_block_height, anchor_extrinsic_index FROM price_data.multisig_operation_activity WHERE multisig IN (${list}))
+            AND (signer IN (${list}) OR effective_signer IN (${list}))`,
         format: 'JSONEachRow',
       }),
       // Aggregate the hit activity once into per-event flags, then compute the tab
@@ -10953,8 +10990,10 @@ async function getAccountTabCounts(accounts: string[], cacheKey: string): Promis
     const activity = n(ev.trades) + n(ev.transfers) + n(ev.liq) + n(ev.staking) + n(ev.votes) + n(ev.xcm_in)
       + n((await mmRes.json<{ c: string }>())[0]?.c) + n((await xcmRes.json<{ c: string }>())[0]?.c) + n((await dcaRes.json<{ c: string }>())[0]?.c)
       + n((await otcRes.json<{ c: string }>())[0]?.c)
+    const overlap = n((await overlapRes.json<{ c: string }>())[0]?.c)
     return {
-      extrinsics: n((await extRes.json<{ c: string }>())[0]?.c),
+      extrinsics: n((await extRes.json<{ c: string }>())[0]?.c) + onBehalf - overlap,
+      extrinsicsOnBehalf: onBehalf,
       events: n(ev.events),
       activity,
       votes,
@@ -10976,7 +11015,7 @@ async function refreshTagTabCounts(tagId: string, members: string[], membershipK
     const counts = await getAccountTabCounts(members, `tag:${tagId}:${membershipKey}`)
     // The snapshot table predates the votes badge and stays schema-stable; the
     // votes count is recomputed cheaply (and cached) on the read path instead.
-    const { votes: _votes, ...persisted } = counts
+    const { votes: _votes, extrinsicsOnBehalf: _onBehalf, ...persisted } = counts
     await client.insert({
       table: 'price_data.tag_activity_counts',
       values: [{ tag_id: tagId, membership_key: membershipKey, ...persisted, computed_at: new Date().toISOString().replace('T', ' ').slice(0, 19) }],
@@ -11011,7 +11050,8 @@ export async function getTagTabCounts(tagId: string): Promise<TabCounts | null> 
     // though the counts response itself had already completed. Votes aren't in
     // the snapshot table — they're recomputed via their own cheap cached query.
     const votes = await getScopedVotesCount(members, `tag:${tagId}:${membershipKey}`)
-    return { extrinsics: Number(snapshot.extrinsics), events: Number(snapshot.events), activity: Number(snapshot.activity), votes }
+    const extrinsicsOnBehalf = await onBehalfExtrinsicCount(members, `tag:${tagId}:${membershipKey}`)
+    return { extrinsics: Number(snapshot.extrinsics), extrinsicsOnBehalf, events: Number(snapshot.events), activity: Number(snapshot.activity), votes }
   }
   return refreshTagTabCounts(tagId, members, membershipKey)
 }
