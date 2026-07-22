@@ -1,23 +1,21 @@
 /* eslint-disable react-refresh/only-export-components -- chart primitives + shared fmtHdx/color-token module (mirrors ui.tsx) */
 import { useId, useState } from 'react'
 import type { ReactNode } from 'react'
-import { F } from './ui'
+import { compactAmount } from './ui'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 
 /* ============ formatting ============ */
-// Compact HDX amount: 1.56B · 797M · 1.4M · 12,600. Mirrors F's M/B/T/Q collapse
-// for ≥1e6 but keeps thousands as plain grouped integers.
+// Compact HDX amount — the shared explorer-wide rough scale (1.56B · 797M ·
+// 12.6k · 537 · 0.0₅7191), centralized in ui.tsx.
 export function fmtHdx(v: number): string {
-  if (!Number.isFinite(v)) return '—'
-  const sign = v < 0 ? '-' : ''
-  const abs = Math.abs(v)
-  if (abs >= 1e6) {
-    const UNITS = ['M', 'B', 'T', 'Q']
-    let n = abs / 1e6, u = 0
-    while (n >= 1000 && u < UNITS.length - 1) { n /= 1000; u++ }
-    return sign + n.toFixed(2).replace(/\.?0+$/, '') + UNITS[u]
-  }
-  return sign + F.int(Math.round(abs))
+  return compactAmount(v)
+}
+
+// Compact form for on-bar clamp labels: whole millions once past ~10M, so the
+// value labels on adjacent clamped columns keep clear space between them
+// (147.94M → "148M"). Billions still collapse via fmtHdx (1.61B).
+export function fmtHdxTick(v: number): string {
+  return Math.abs(v) >= 1e7 ? fmtHdx(Math.round(v / 1e6) * 1e6) : fmtHdx(v)
 }
 
 /* ============ chart color system (CVD-validated — fixed, never cycled) ============ */
@@ -121,11 +119,14 @@ export function stackedColumnMax(totals: number[], outlierRatio = 2.5): number {
   const positive = totals.filter(v => Number.isFinite(v) && v > 0).sort((a, b) => b - a)
   if (positive.length === 0) return 1
 
-  // A small high-end cluster can contain several related unlock buckets. Find
-  // the strongest separation in the upper third and scale from the first
-  // representative bucket below it. Every value above the scale is still
-  // labelled directly and marked as clamped by the chart.
-  const maxHighCluster = Math.max(1, Math.floor(positive.length / 3))
+  // A high-end cluster can contain several related tall buckets. Find the
+  // strongest separation within the top third and scale from the first
+  // representative bucket below it, so the tall cluster clamps and the smaller
+  // bars keep a visible, readable height. Every value above the scale is still
+  // labelled directly and marked as clamped by the chart. `ceil` (not `floor`)
+  // so a cluster of just over a third — e.g. five tall unlock buckets amongst
+  // fourteen — is still recognised rather than left to flatten the rest.
+  const maxHighCluster = Math.max(1, Math.ceil(positive.length / 3))
   let split = -1
   let strongestRatio = outlierRatio
   for (let i = 0; i < positive.length - 1 && i < maxHighCluster; i++) {
@@ -140,17 +141,37 @@ export function stackedColumnMax(totals: number[], outlierRatio = 2.5): number {
   return Math.max(base, 1) * 1.05
 }
 
+// Round a cap up to a tidy axis ceiling. Only two gridlines are drawn — the top
+// and its midpoint — so we round the MIDPOINT up to a clean unit (a quarter of
+// the leading decade: 25M at the 100M scale, 2.5M at the 10M scale, …) and set
+// the top to exactly twice it. Both lines then land on round numbers that step
+// evenly with no gaps (midpoints 75M · 100M · 125M · 150M …, tops 150M · 200M ·
+// 250M · 300M …), and the rule scales to any magnitude.
+export function niceAxisMax(v: number): number {
+  if (!(v > 0)) return 1
+  const decade = 10 ** Math.floor(Math.log10(v) + 1e-9)
+  const unit = decade / 4
+  const mid = Math.ceil(v / 2 / unit - 1e-9) * unit
+  return mid * 2
+}
+
 // Segments stack bottom-up in the order given, separated by 2px gaps; 3 y-gridlines
 // with compact labels; optional dashed separator (weekly → monthly) before a column.
 export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCaption, yFmt = fmtHdx }: {
   columns: StackColumn[]; h?: number; separatorAt?: number; separatorCaption?: string; yFmt?: (v: number) => string
 }) {
   const [hover, setHover] = useState<number | null>(null)
+  const n = columns.length
+  const totals = columns.map(c => c.segments.reduce((s, x) => s + x.value, 0))
+  // Single shared axis for weekly and monthly. Detect the tall-bucket cluster
+  // across all columns and cap just above the representative smaller bars,
+  // rounded up to a tidy ceiling: the tall buckets clamp (break marks + their
+  // true value) while the smaller bars keep a readable height instead of being
+  // flattened.
+  const split = separatorAt != null && separatorAt > 0 && separatorAt < n ? separatorAt : null
+  const max = niceAxisMax(stackedColumnMax(totals))
   const W = 860, padL = 46, padR = 6, padT = 16, padB = 18
   const plotH = h - padT - padB
-  const totals = columns.map(c => c.segments.reduce((s, x) => s + x.value, 0))
-  const max = stackedColumnMax(totals)
-  const n = columns.length
   const bw = n ? (W - padL - padR) / n : 0
   const colX = (i: number) => padL + i * bw
   const gy = (t: number) => padT + (1 - t) * plotH
@@ -163,10 +184,10 @@ export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCap
             <text className="hdx-ax" x={padL - 8} y={(gy(t) + 3).toFixed(1)} textAnchor="end">{yFmt(max * t)}</text>
           </g>
         ))}
-        {separatorAt != null && separatorAt > 0 && separatorAt < n && (
+        {split != null && (
           <g>
-            <line x1={colX(separatorAt).toFixed(1)} x2={colX(separatorAt).toFixed(1)} y1={padT - 4} y2={h - padB} stroke="var(--text-low)" strokeDasharray="3 4" strokeOpacity="0.5" />
-            {separatorCaption && <text className="hdx-ax" x={(colX(separatorAt) + 5).toFixed(1)} y={padT - 6}>{separatorCaption}</text>}
+            <line x1={colX(split).toFixed(1)} x2={colX(split).toFixed(1)} y1={padT - 4} y2={h - padB} stroke="var(--text-low)" strokeDasharray="3 4" strokeOpacity="0.5" />
+            {separatorCaption && <text className="hdx-ax" x={(colX(split) - 5).toFixed(1)} y={padT - 6} textAnchor="end">{separatorCaption}</text>}
           </g>
         )}
         {columns.map((c, i) => {
@@ -196,7 +217,7 @@ export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCap
                 <g>
                   <line x1={(bx - 2).toFixed(1)} x2={(bx + bwid + 2).toFixed(1)} y1={padT + 9} y2={padT + 4} stroke="var(--bg-elev)" strokeWidth="3" />
                   <line x1={(bx - 2).toFixed(1)} x2={(bx + bwid + 2).toFixed(1)} y1={padT + 15} y2={padT + 10} stroke="var(--bg-elev)" strokeWidth="3" />
-                  <text className="hdx-ax" x={(bx + bwid / 2).toFixed(1)} y={padT - 5} textAnchor="middle" style={{ fill: 'var(--text-medium)' }}>{yFmt(totals[i])}</text>
+                  <text className="hdx-ax" x={(bx + bwid / 2).toFixed(1)} y={padT - 5} textAnchor="middle" style={{ fill: 'var(--text-medium)' }}>{fmtHdxTick(totals[i])}</text>
                 </g>
               )}
               <text className="hdx-ax" x={(bx + bwid / 2).toFixed(1)} y={h - 4} textAnchor="middle">{c.label}</text>
