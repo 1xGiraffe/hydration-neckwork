@@ -19,7 +19,7 @@ afterEach(() => vi.unstubAllGlobals())
 describe('close-account reason copy', () => {
   it('states concrete evidence without claiming common ownership', () => {
     expect(closeAccountReasonText({ type: 'direct_transfers', count: 7, days: 4, valueUsd: 128_400, bidirectional: true }))
-      .toBe('7 direct transfers · $128.4k across 4 days · both directions')
+      .toBe('7 direct transfers · $128k across 4 days · both directions')
     expect(closeAccountReasonText({ type: 'direct_transfers', count: 3, days: 3, valueUsd: null, bidirectional: false }))
       .toBe('3 direct transfers across 3 days')
     expect(closeAccountReasonText({ type: 'near_signing', days: 1 })).toBe('Signed near each other on 1 distinct day')

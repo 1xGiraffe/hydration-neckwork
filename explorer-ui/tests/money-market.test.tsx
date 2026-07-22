@@ -59,7 +59,7 @@ describe('primary-first Money Market presentation', () => {
 
   it('uses debt divided by collateral for current LTV and exposes an accessible meter', () => {
     const html = renderToStaticMarkup(<MoneyMarketPositions markets={[position({ totalSuppliedBase: '15000000000' })]} defisimAddress="0xabc" />)
-    expect(html).toContain('$150.00')
+    expect(html).toContain('$150')
     expect(html).toContain('Current LTV 40.0%')
     expect(html).not.toContain('Current LTV 26.7%')
     expect(html).not.toContain('Current LTV 65.0%')

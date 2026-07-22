@@ -67,7 +67,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
               <div className="dt">Action</div><div className="dd">{row.otcAction ?? '—'}</div>
               {row.otcAction === 'Place' && <><div className="dt">Partially fillable</div><div className="dd">{row.otcPartiallyFillable ? 'Yes' : 'No'}</div></>}
               {row.otcAction === 'Fill' && <><div className="dt">Partial fill</div><div className="dd">{row.otcPartial ? 'Yes' : 'No'}</div></>}
-              {row.otcAction === 'Fill' && row.otcFee != null && row.assetOut && <><div className="dt">Fee</div><div className="dd mono">{F.amount(row.otcFee, row.assetOut.decimals)} <AssetChip asset={row.assetOut} /></div></>}
+              {row.otcAction === 'Fill' && row.otcFee != null && row.assetOut && <><div className="dt">Fee</div><div className="dd mono">{F.exact(row.otcFee, row.assetOut.decimals)} <AssetChip asset={row.assetOut} /></div></>}
             </>}
             {row.dca && row.dcaStatus === 'failed' && <><div className="dt">Result</div><div className="dd"><StatusBadge ok={false} /></div></>}
             <div className="dt">Timestamp</div><div className="dd mono">{F.datetime(row.timestamp)}</div>
@@ -77,7 +77,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {ext && <>
               <div className="dt">Call</div><div className="dd"><CallPill name={ext.callName} /></div>
               <div className="dt">Result</div><div className="dd"><StatusBadge ok={ext.success} /></div>
-              {ext.fee && <><div className="dt">Fee</div><div className="dd mono">{F.amount(ext.fee, 12)} HDX</div></>}
+              {ext.fee && <><div className="dt">Fee</div><div className="dd mono">{F.exact(ext.fee, 12)} HDX</div></>}
             </>}
           </div></div>
         )}

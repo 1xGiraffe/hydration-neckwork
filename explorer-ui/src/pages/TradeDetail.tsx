@@ -65,7 +65,7 @@ function displayRoute(hops: TradeHop[], totalAmountIn: string, totalAmountOut: s
 
 function RouteAmount({ asset, amount }: { asset: TradeHop['assetIn']; amount: string | null }) {
   return amount
-    ? <AssetValue asset={asset}>{F.amount(amount, asset.decimals)}</AssetValue>
+    ? <AssetValue asset={asset}>{F.exact(amount, asset.decimals)}</AssetValue>
     : <span className="muted mono">—</span>
 }
 
@@ -74,7 +74,7 @@ function AssetValue({ asset, children }: { asset: TradeHop['assetIn']; children:
 }
 
 function AssetAmount({ asset, amount }: { asset: TradeHop['assetIn']; amount: string | null | undefined }) {
-  return amount ? <AssetValue asset={asset}>{F.amount(amount, asset.decimals)}</AssetValue> : <span className="muted mono">—</span>
+  return amount ? <AssetValue asset={asset}>{F.exact(amount, asset.decimals)}</AssetValue> : <span className="muted mono">—</span>
 }
 
 export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swap' | 'dca' }) {

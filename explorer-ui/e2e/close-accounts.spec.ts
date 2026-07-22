@@ -68,7 +68,7 @@ test('close accounts loads only after keyboard disclosure and resets on address 
   await summary.press('Enter')
   await expect(disclosure).toHaveAttribute('open', '')
   await expect(page.getByText('Comparing activity signals…')).toBeVisible()
-  await expect(page.getByText('7 direct transfers · $128.4k across 4 days · both directions')).toBeVisible()
+  await expect(page.getByText('7 direct transfers · $128k across 4 days · both directions')).toBeVisible()
   await expect(page.getByText('strong signal')).toBeVisible()
   await expect(page.getByText('Behavioral signals are not proof of common ownership.')).toBeVisible()
   expect(requested).toEqual([ACCOUNT])

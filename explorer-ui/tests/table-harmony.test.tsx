@@ -39,7 +39,7 @@ describe('ActivityTable — Value column emphasis', () => {
   it('shows USD values bright (not muted), matching the accounts/holders tables', () => {
     const html = renderToStaticMarkup(<ActivityTable rows={[row(1234)]} now={0} noActor />)
     expect(html).toMatch(/data-label="Value" class="r mono"/)
-    expect(html).toContain('$1.2k')
+    expect(html).toContain('$1.23k')
   })
 
   it('keeps a null value as the shared muted dash', () => {

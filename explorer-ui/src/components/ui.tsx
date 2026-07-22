@@ -33,15 +33,41 @@ function priceStr(price: number): string {
   return tinyPrice(price)
 }
 
-// Collapse large magnitudes (≥ 1e6) into M/B/T/Q suffixes: 44.07B, 1.2T.
+// Collapse large magnitudes (≥ 1e6) into M/B/T/Q suffixes: 44.1B, 1.2T.
 // Beyond quadrillion, fall back to scientific notation (e.g. 1.05e+18).
 const BIG_UNITS = ['M', 'B', 'T', 'Q']
+// ~3 significant digits: 4.87 · 40 · 112 · 537 (trailing zeros trimmed).
+const sig3 = (n: number) => (n >= 100 ? n.toFixed(0) : n >= 10 ? n.toFixed(1) : n.toFixed(2)).replace(/\.0+$|(\.\d*[1-9])0+$/, '$1')
+// Round to 3 significant digits BEFORE picking a unit tier, so a value in the
+// carry band tiers up (999.6M → "1B") instead of rendering as "1000M".
+const round3 = (n: number) => Number(n.toPrecision(3))
 function compact(v: number): string {
-  let n = v / 1e6
+  let n = round3(v / 1e6)
   let u = 0
   while (n >= 1000 && u < BIG_UNITS.length - 1) { n /= 1000; u++ }
   if (n >= 1000) return v.toExponential(2)
-  return n.toFixed(2).replace(/\.?0+$/, '') + BIG_UNITS[u]
+  return sig3(n) + BIG_UNITS[u]
+}
+
+// The explorer-wide rough display scale for rounded numbers: ~3 significant
+// digits with k/M/B/T/Q compaction — 500 · 537 · 4.87k · 40k · 112k · 4.59M.
+// Values below 1 keep ~3 significant decimals (0.12 · 0.0034), and very small
+// fractions collapse into the subscript-zero price notation (0.0₅7191) so
+// high-decimal assets stay readable. Precision belongs in F.exact (tooltips,
+// detail surfaces).
+export function compactAmount(v: number): string {
+  if (!Number.isFinite(v)) return '—'
+  const sign = v < 0 ? '-' : ''
+  const a = Math.abs(v)
+  if (a === 0) return '0'
+  // Tier on the rounded value so 999.6k reads "1M", not "1000k" (round3 stays
+  // off the sub-1 paths — tinyPrice needs the unrounded fraction).
+  const r = a >= 1 ? round3(a) : a
+  if (r >= 1e6) return sign + compact(r)
+  if (r >= 1000) return sign + sig3(r / 1000) + 'k'
+  if (r >= 1) return sign + sig3(r)
+  if (a >= 0.001) return sign + parseFloat(a.toPrecision(3)).toString()
+  return sign + tinyPrice(a)
 }
 function compactCount(v: number): string {
   if (!Number.isFinite(v)) return '0'
@@ -55,11 +81,17 @@ export const F = {
   count: compactCount,
   shortHash: (h?: string | null) => !h ? '—' : h.length > 18 ? h.slice(0, 8) + '…' + h.slice(-6) : h,
   shortAddr: (a?: string | null) => !a ? '—' : a.length > 14 ? a.slice(0, 6) + '…' + a.slice(-5) : a,
+  // Rough display amount (see compactAmount). Reach for F.exact only where a
+  // surface exists to show precision (tooltips, copyable detail values).
   amount: (raw: string | null | undefined, dec: number) => {
+    if (raw == null || raw === '') return '—'
+    return compactAmount(Number(raw) / 10 ** dec)
+  },
+  // Full-precision counterpart for tooltips/detail: grouped, decimals kept.
+  exact: (raw: string | null | undefined, dec: number) => {
     if (raw == null || raw === '') return '—'
     const v = Number(raw) / 10 ** dec
     if (!Number.isFinite(v)) return '—'
-    if (v >= 1e6) return compact(v)
     if (v >= 1e3) return v.toLocaleString('en-US', { maximumFractionDigits: 2 })
     if (v === 0) return '0'
     if (v >= 1) return v.toFixed(4)
@@ -76,8 +108,11 @@ export const F = {
     // a signed delta; debt-heavy nets can dip below zero).
     const sign = v < 0 ? '-' : ''
     const a = Math.abs(v)
-    if (a >= 1e6) return sign + '$' + compact(a)
-    if (a >= 1e3) return sign + '$' + (a / 1e3).toFixed(1) + 'k'
+    // Tier on the rounded value so $999.6k reads "$1M", not "$1000k".
+    const r = a >= 100 ? round3(a) : a
+    if (r >= 1e6) return sign + '$' + compact(r)
+    if (r >= 1e3) return sign + '$' + sig3(r / 1e3) + 'k'
+    if (r >= 100) return sign + '$' + r.toFixed(0)
     return sign + '$' + a.toFixed(2)
   },
   priceUsd: (v: number | null | undefined) => {

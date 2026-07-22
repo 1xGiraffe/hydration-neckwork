@@ -80,13 +80,27 @@ describe('ExternalAccountPill — tag/identity precedence on external-chain acco
 })
 
 describe('ui formatters', () => {
-  it('formats amounts from raw integer + decimals', () => {
-    expect(F.amount('2844406322428427', 10)).toBe('284,440.63')
-    expect(F.amount('232622974490774586525', 12)).toBe('232.62M')
+  it('formats amounts on the shared rough scale (~3 significant digits)', () => {
+    expect(F.amount('2844406322428427', 10)).toBe('284k')
+    expect(F.amount('232622974490774586525', 12)).toBe('233M')
+    expect(F.amount('500000000000', 9)).toBe('500')
+    expect(F.amount('5371344', 4)).toBe('537')
+    expect(F.amount('4870870000', 6)).toBe('4.87k')
+    expect(F.amount('120000', 6)).toBe('0.12')
+    // very small fractions collapse into the subscript-zero notation
+    expect(F.amount('7191', 13)).toBe('0.0₈7191')
     expect(F.amount('0', 12)).toBe('0')
+    // carry band tiers up: 999.6k is "1M", never "1000k"
+    expect(F.amount('999600000', 3)).toBe('1M')
+    expect(F.amount('999600', 3)).toBe('1k')
+    expect(F.amount('999600000000', 3)).toBe('1B')
+    // the exact counterpart keeps full precision (tooltips, detail surfaces)
+    expect(F.exact('2844406322428427', 10)).toBe('284,440.63')
   })
   it('formats usd and percentages', () => {
     expect(F.usd(1088487)).toBe('$1.09M')
+    expect(F.usd(999600)).toBe('$1M')
+    expect(F.usd(999.6)).toBe('$1k')
     expect(F.pct(0.0428)).toBe('+4.28%')
     expect(F.priceUsd(0.003967)).toBe('$0.003967')
   })

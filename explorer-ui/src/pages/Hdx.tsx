@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { useHdxDashboard } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths } from '../router'
-import { Crumbs, F, AddrPill, AssetIcon, ChartSkeleton, EmptyRow } from '../components/ui'
+import { Crumbs, F, AddrPill, AssetIcon, ChartSkeleton, EmptyRow, compactAmount } from '../components/ui'
 import {
   fmtHdx, lockColor, cohortColor, LOCK_ORDER,
   ChartLegend, ShareBar, StackedColumnChart, MirroredBarChart, GigaLiquidationChart,
@@ -52,7 +52,7 @@ function Ribbon({ d }: { d: HdxDashboard }) {
 function GigaMarketSection({ d }: { d: HdxDashboard }) {
   const rows = d.gigaMarket
   if (!rows?.length) return null
-  const fmtAmt = (v: number) => v >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(1)}k` : v.toFixed(v < 10 ? 2 : 0)
+  const fmtAmt = compactAmount
   return (
     <>
       <SecTitle title="GIGAHDX Money Market" subtitle="supply & borrow against staked HDX" />

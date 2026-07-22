@@ -78,8 +78,8 @@ describe('Hollar dashboard page', () => {
     expect(html).toContain('+13 bps') // peg deviation, amber band (>10, <=50)
     expect(html).toContain('10.3M HOLLAR') // total supply
     expect(html).toContain('4,215') // holders
-    expect(html).toContain('$272.8k') // HSM reserves USD
-    expect(html).toContain('$12.57M') // stablepool TVL (sum of pool tvlUsd)
+    expect(html).toContain('$273k') // HSM reserves USD
+    expect(html).toContain('$12.6M') // stablepool TVL (sum of pool tvlUsd)
 
     // HSM collateral table and multi-partner pool labelling.
     expect(html).toContain('aUSDC')

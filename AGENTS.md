@@ -80,6 +80,7 @@ Keep in mind for new models:
 ## UI
 
 - Reuse existing components, formatting conventions, tokens, and interaction patterns before adding variants.
+- Rounded display numbers use the shared rough scale (`compactAmount` / `F.amount` / `F.usd` in `explorer-ui/src/components/ui.tsx`): ~3 significant digits with k/M/B compaction — 500 · 537 · 4.87k · 40k · 112k · 4.59M. Values below 1 keep ~3 significant decimals ($0.12), and very small fractions use the subscript-zero notation (0.0₅7191) so high-decimal assets stay readable. Use `F.exact` only on surfaces that exist to show precision (tooltips, copyable detail values). Never hand-roll number compaction.
 - Verify desktop and 390px mobile layouts, including horizontal overflow, long addresses, tables, dialogs, and charts. Respect `prefers-reduced-motion`.
 - Mock data must be deterministic and preserve the same row identity across feeds, blocks, and detail pages.
 - Keep nested controls usable inside clickable rows and preserve canonical navigation, keyboard behavior, and address-only copy actions.
