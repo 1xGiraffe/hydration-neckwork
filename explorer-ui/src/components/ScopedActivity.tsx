@@ -123,8 +123,15 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
     { event: eventFilters.values.event },
   )
   const events = scope.kind === 'account' ? accountEvents : tagEvents
-  const showSigner = scope.kind === 'tag'
-  const extrinsicColumns = showSigner ? 8 : 7
+  // On-behalf rows (proxy/multisig) carry a real sender and an origin badge;
+  // both columns appear only when the account has such history, so ordinary
+  // accounts keep the compact layout. Count-driven (not row-presence) so it
+  // stays stable across pages/filters and doesn't flash while the rows query
+  // resolves before the slower counts query.
+  const onBehalfCount = counts.data ? (counts.data as { extrinsicsOnBehalf?: number }).extrinsicsOnBehalf ?? 0 : 0
+  const showOrigin = onBehalfCount > 0
+  const showSigner = scope.kind === 'tag' || showOrigin
+  const extrinsicColumns = 7 + (showSigner ? 1 : 0) + (showOrigin ? 1 : 0)
 
   const setActiveTab = (tab: string | null) => setQuery({ atab: tab, apage: null })
   const setActivityType = (value: string) => setQuery({ type: value === 'all' ? null : value, action: null, apage: null })
@@ -155,11 +162,11 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
       {activeTab === 'extrinsics' && <>
         <FilterZone fields={extrinsicFilterFields} values={extrinsicFilters.values} onChange={extrinsicFilters.onChange} onClear={extrinsicFilters.onClear} />
         <div className="panel"><table className="tbl">
-          <thead><tr><th>ID</th><th>Block</th><th>Call</th>{showSigner && <th>Signer</th>}<th className="r">Fee</th><th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
+          <thead><tr><th>ID</th><th>Block</th><th>Call</th>{showSigner && <th>Sender</th>}{showOrigin && <th>Origin</th>}<th className="r">Fee</th><th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody>
             {extrinsics.isFetching && !extrinsics.data?.length ? <TableSkeleton cols={extrinsicColumns} />
               : !extrinsics.data?.length ? <EmptyRow cols={extrinsicColumns}>No extrinsics</EmptyRow>
-                : extrinsics.data.map(extrinsic => <ExtRow key={`${extrinsic.blockHeight}-${extrinsic.index}`} x={extrinsic} now={now} noSigner={!showSigner} />)}
+                : extrinsics.data.map(extrinsic => <ExtRow key={`${extrinsic.blockHeight}-${extrinsic.index}`} x={extrinsic} now={now} noSigner={!showSigner} showOrigin={showOrigin} />)}
           </tbody>
         </table></div>
         <Pager page={page} totalPages={extrinsicPages} hasNext={(extrinsics.data?.length ?? 0) === PAGE_SIZE} onPage={setPage} />

@@ -133,6 +133,20 @@ export interface BlockSummary {
   eventCount: number
 }
 
+export interface ExtrinsicOrigin {
+  kind: 'proxy' | 'multisig'
+  state?: 'pending' | 'executed' | 'cancelled'
+  threshold?: number
+  signatories?: number
+  approvals?: number
+  callHash?: string
+  // The operation's initiator — the signatory who proposed/sent it (not
+  // necessarily the executing signer shown on 'executed' rows).
+  initiator?: AccountRef
+  // Chronological approval history: who did what, and when.
+  timeline?: { account: AccountRef; action: 'initiated' | 'approved' | 'executed' | 'cancelled'; timestamp: string }[]
+}
+
 export interface ExtrinsicSummary {
   blockHeight: number
   index: number
@@ -142,6 +156,7 @@ export interface ExtrinsicSummary {
   success: boolean
   callName: string
   fee: string | null
+  origin?: ExtrinsicOrigin
 }
 
 export interface BlockEvent { eventIndex: number; extrinsicIndex: number | null; name: string; args: unknown }
