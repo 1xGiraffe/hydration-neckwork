@@ -143,8 +143,9 @@ export interface ExtrinsicOrigin {
   // The operation's initiator — the signatory who proposed/sent it (not
   // necessarily the executing signer shown on 'executed' rows).
   initiator?: AccountRef
-  // Chronological approval history: who did what, and when.
-  timeline?: { account: AccountRef; action: 'initiated' | 'approved' | 'executed' | 'cancelled'; timestamp: string }[]
+  // Chronological approval history: who did what, and when. `extrinsicId` is
+  // the "block-extrinsic" of that timeline event, for linking to it directly.
+  timeline?: { account: AccountRef; action: 'initiated' | 'approved' | 'executed' | 'cancelled'; timestamp: string; extrinsicId: string }[]
 }
 
 export interface ExtrinsicSummary {

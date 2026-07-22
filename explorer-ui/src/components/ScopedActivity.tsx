@@ -165,7 +165,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
           <tbody>
             {extrinsics.isFetching && !extrinsics.data?.length ? <TableSkeleton cols={extrinsicColumns} />
               : !extrinsics.data?.length ? <EmptyRow cols={extrinsicColumns}>No extrinsics</EmptyRow>
-                : extrinsics.data.map(extrinsic => <ExtRow key={`${extrinsic.blockHeight}-${extrinsic.index}`} x={extrinsic} now={now} noSigner={!showSigner} showOrigin={showOrigin} />)}
+                : extrinsics.data.map(extrinsic => <ExtRow key={`${extrinsic.blockHeight}-${extrinsic.index}`} x={extrinsic} now={now} noSigner={!showSigner} showOrigin={showOrigin} senderLabel />)}
           </tbody>
         </table></div>
         <Pager page={page} totalPages={extrinsicPages} hasNext={(extrinsics.data?.length ?? 0) === PAGE_SIZE} onPage={setPage} />

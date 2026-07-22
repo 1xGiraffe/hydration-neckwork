@@ -1,5 +1,4 @@
-/* eslint-disable react-refresh/only-export-components -- exports the pure originTitle helper alongside its row components */
-import { useState, Fragment, type KeyboardEvent } from 'react'
+import { useEffect, useRef, useState, Fragment, type KeyboardEvent } from 'react'
 import { useExtrinsic } from '../hooks/useExplorerData'
 import { Link, paths } from '../router'
 import { F, AddrPill, CallPill, StatusBadge, JsonView, Ago, ExpandedRowSkeleton, Dash } from './ui'
@@ -8,28 +7,47 @@ import type { ExtrinsicSummary, ExtrinsicOrigin, EventRow } from '../types'
 // Expandable extrinsic / event rows shared by the list pages (Extrinsics, Events)
 // and the account detail tabs. Kept here so the markup stays identical everywhere.
 
-// Multi-line hover summary for the origin badge. Proxy explains itself in one
-// line; multisig lists the operation state then every timeline entry in order
-// (initiated/approved/executed/cancelled) so approvers and the executor are
-// visible without opening the row. '\n'-joined lines render as a multi-line
-// native tooltip.
-export function originTitle(origin: ExtrinsicOrigin): string {
-  if (origin.kind === 'proxy') return 'Executed on behalf of this account by a proxy'
-  const lines = [`Multisig operation · ${origin.state ?? 'executed'}`]
-  for (const entry of origin.timeline ?? []) {
-    const who = entry.account.identity?.display || `${entry.account.address.slice(0, 6)}…${entry.account.address.slice(-4)}`
-    lines.push(`${entry.action} by ${who} · ${entry.timestamp}`)
-  }
-  return lines.join('\n')
-}
+const HOVER_DWELL_MS = 180
+const HOVER_HIDE_MS = 160
+const HOVER_FLIP_THRESHOLD = 240
 
 // Origin marker for extrinsics executed on behalf of the viewed account.
-// Executed multisigs show threshold/members ("2/3"); pending ones show
-// progress ("1/3"). Colors follow ProxyTypeBadge's pill-badge pattern.
+// Proxy explains itself in a plain one-line tooltip; multisig gets a rich
+// hover card (see MultisigBadge) listing the operation state and the full
+// approval timeline, since approvers and the executor aren't otherwise
+// visible without opening the row.
 function OriginBadge({ origin }: { origin: ExtrinsicOrigin }) {
-  const title = originTitle(origin)
   if (origin.kind === 'proxy') {
-    return <span className="pill-badge" title={title} style={{ color: 'var(--sky)', background: 'color-mix(in srgb, var(--sky) 15%, transparent)' }}>proxy</span>
+    return <span className="pill-badge" title="Executed on behalf of this account by a proxy" style={{ color: 'var(--sky)', background: 'color-mix(in srgb, var(--sky) 15%, transparent)' }}>proxy</span>
+  }
+  return <MultisigBadge origin={origin} />
+}
+
+// Executed multisigs show threshold/members ("2/3"); pending ones show
+// progress ("1/3"). Colors follow ProxyTypeBadge's pill-badge pattern. The
+// hover card mirrors HoverCard.tsx's dwell/hide timers and bottom-flip, but
+// anchors to this badge's own rect instead of the globally tracked pointer
+// target. It renders the shared `.hovercard` class, so it inherits that
+// component's styling and the global listener's nested-card suppression —
+// hovering an AddrPill inside this card never also pops the account card.
+function MultisigBadge({ origin }: { origin: ExtrinsicOrigin }) {
+  const [rect, setRect] = useState<DOMRect | null>(null)
+  const badgeRef = useRef<HTMLSpanElement>(null)
+  const showTimer = useRef<number | undefined>(undefined)
+  const hideTimer = useRef<number | undefined>(undefined)
+  useEffect(() => () => {
+    window.clearTimeout(showTimer.current)
+    window.clearTimeout(hideTimer.current)
+  }, [])
+  const show = () => {
+    window.clearTimeout(hideTimer.current)
+    showTimer.current = window.setTimeout(() => {
+      if (badgeRef.current) setRect(badgeRef.current.getBoundingClientRect())
+    }, HOVER_DWELL_MS)
+  }
+  const hide = () => {
+    window.clearTimeout(showTimer.current)
+    hideTimer.current = window.setTimeout(() => setRect(null), HOVER_HIDE_MS)
   }
   const state = origin.state ?? 'executed'
   const col = state === 'cancelled' ? 'var(--red)' : state === 'pending' ? 'var(--amber)' : 'var(--sky)'
@@ -37,9 +55,55 @@ function OriginBadge({ origin }: { origin: ExtrinsicOrigin }) {
   const k = state === 'pending' ? origin.approvals : origin.threshold
   const kn = k && origin.signatories ? ` ${k}/${origin.signatories}` : ''
   return (
-    <span className="pill-badge" title={title} style={{ color: col, background: `color-mix(in srgb, ${col} 15%, transparent)` }}>
+    <span ref={badgeRef} className="pill-badge" onMouseEnter={show} onMouseLeave={hide}
+      style={{ color: col, background: `color-mix(in srgb, ${col} 15%, transparent)` }}>
       multisig{kn} {mark}
+      {rect && (
+        <MultisigHoverCard
+          origin={origin}
+          rect={rect}
+          onMouseEnter={() => window.clearTimeout(hideTimer.current)}
+          onMouseLeave={hide}
+          onClose={() => setRect(null)}
+        />
+      )}
     </span>
+  )
+}
+
+// Positioned exactly like HoverCard.tsx's global card (fixed, flipped above
+// the anchor when there's no room below, height-capped to the viewport) but
+// anchored to the badge's own rect rather than a pointer-tracked target.
+function MultisigHoverCard({ origin, rect, onMouseEnter, onMouseLeave, onClose }: {
+  origin: ExtrinsicOrigin
+  rect: DOMRect
+  onMouseEnter: () => void
+  onMouseLeave: () => void
+  onClose: () => void
+}) {
+  const viewportWidth = window.innerWidth
+  const viewportHeight = window.innerHeight
+  const cardWidth = Math.min(340, Math.max(0, viewportWidth - 24))
+  const left = Math.max(12, Math.min(rect.left, viewportWidth - cardWidth - 12))
+  const spaceBelow = viewportHeight - rect.bottom
+  const placeAbove = spaceBelow < HOVER_FLIP_THRESHOLD && rect.top > spaceBelow
+  const vStyle = placeAbove
+    ? { bottom: Math.round(viewportHeight - rect.top + 8), maxHeight: Math.max(96, Math.round(rect.top - 16)) }
+    : { top: Math.round(rect.bottom + 8), maxHeight: Math.max(96, Math.round(spaceBelow - 16)) }
+  const state = origin.state ?? 'executed'
+  return (
+    <div className="hovercard" style={{ left, width: cardWidth, overflowY: 'auto', ...vStyle }}
+      onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} onClick={e => { e.stopPropagation(); onClose() }}>
+      <div className="hc-title" style={{ marginBottom: 8 }}>
+        Multisig operation · {state}{origin.threshold ? ` · ${origin.threshold}/${origin.signatories}` : ''}
+      </div>
+      {origin.timeline?.map((entry, i) => (
+        <div className="hc-row" key={`${entry.extrinsicId}-${i}`}>
+          <AddrPill account={entry.account} noCopy />
+          <span><Link to={paths.extrinsic(entry.extrinsicId)} className="hash">{entry.action}</Link> <span className="mono muted">{entry.timestamp}</span></span>
+        </div>
+      ))}
+    </div>
   )
 }
 
@@ -61,18 +125,18 @@ function ExpandPanel({ id, origin }: { id: string; origin?: ExtrinsicOrigin }) {
           <div className="exp-evs">{data.events.map(ev => <CallPill key={ev.eventIndex} name={ev.name} />)}</div>
         </div>
         {origin?.kind === 'multisig' && (
-          <div>
+          <div style={{ gridColumn: '1 / -1' }}>
             <div className="exp-h">Multisig operation · {origin.state ?? 'executed'}{origin.threshold ? ` · ${origin.threshold}/${origin.signatories}` : ''}</div>
             {origin.timeline?.map((entry, i) => (
               <div key={`${entry.action}-${entry.timestamp}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                 <AddrPill account={entry.account} noCopy />
-                <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>{entry.action} · {entry.timestamp}</span>
+                <Link to={paths.extrinsic(entry.extrinsicId)} className="hash" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>{entry.action} · {entry.timestamp}</Link>
               </div>
             ))}
           </div>
         )}
         {origin?.kind === 'proxy' && (
-          <div>
+          <div style={{ gridColumn: '1 / -1' }}>
             <div className="exp-h">Proxy</div>
             <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>Executed via proxy — the signer is the delegate acting for this account</div>
           </div>
@@ -94,7 +158,7 @@ function useExpandableRow() {
   return { open, toggle, onKeyDown }
 }
 
-export function ExtRow({ x, now, isNew, noSigner, showOrigin }: { x: ExtrinsicSummary; now: number; isNew?: boolean; noSigner?: boolean; showOrigin?: boolean }) {
+export function ExtRow({ x, now, isNew, noSigner, showOrigin, senderLabel }: { x: ExtrinsicSummary; now: number; isNew?: boolean; noSigner?: boolean; showOrigin?: boolean; senderLabel?: boolean }) {
   const { open, toggle, onKeyDown } = useExpandableRow()
   const id = `${x.blockHeight}-${x.index}`
   const cols = 7 + (noSigner ? 0 : 1) + (showOrigin ? 1 : 0)
@@ -116,7 +180,7 @@ export function ExtRow({ x, now, isNew, noSigner, showOrigin }: { x: ExtrinsicSu
         <td data-label="Call">{showOrigin && x.origin?.callHash
           ? <span className="mono muted" title={`Call hash ${x.origin.callHash} — call body not published on-chain`}>{F.shortHash(x.origin.callHash)}</span>
           : <CallPill name={x.callName} />}</td>
-        {!noSigner && <td data-label="Sender">{sender ? <AddrPill account={sender} noCopy /> : <span className="muted mono">— inherent</span>}</td>}
+        {!noSigner && <td data-label={senderLabel ? 'Sender' : 'Signer'}>{sender ? <AddrPill account={sender} noCopy /> : <span className="muted mono">— inherent</span>}</td>}
         {showOrigin && <td data-label="Origin">{x.origin ? <OriginBadge origin={x.origin} /> : <Dash />}</td>}
         <td data-label="Fee" className="r mono muted">{F.hdxFee(x.fee)}</td>
         <td data-label="Result" className="r">{showOrigin && x.origin?.state === 'pending'
