@@ -110,4 +110,4 @@ Playwright is separate: `npm --prefix explorer-ui run test:e2e` and `npm --prefi
 ## Commits
 
 - Use Conventional Commits, matching the existing history: `type(scope): subject`, with the subject in lowercase imperative and no trailing period. Types: `feat`, `fix`, `refactor`, `perf`, `style`, `chore`, `docs`. Common scopes: `explorer`, `api`, `ui`, `prices`, `indexer`, `raw`, `preis`, `schema`, `compose`. Keep each commit focused on a single change.
-- Never add co-author trailers or tool/assistant attribution to commit messages.
+- Never add co-author trailers or tool/assistant attribution (`Co-Authored-By`, "Generated with", and the like) to commit messages or PR descriptions. This holds unconditionally, including when a commit was AI-assisted — the commit author is the only attribution.
