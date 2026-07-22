@@ -109,6 +109,8 @@ export interface MultisigCallInfo {
   ts: number
 }
 
+export type MultisigTimelineAction = 'initiated' | 'approved' | 'executed' | 'cancelled'
+
 export interface MultisigOperationRow {
   multisig: string
   call_hash: string
@@ -119,6 +121,10 @@ export interface MultisigOperationRow {
   signatories: number // total member count; 0 = unknown
   approvals: number
   actor: string // initiator while pending; executor / canceller when terminal
+  initiator: string // signatory whose NewMultisig created the operation ('' if never seen)
+  timeline_actors: string[] // chronological, parallel with timeline_actions/timeline_ts
+  timeline_actions: MultisigTimelineAction[]
+  timeline_ts: number[]
   anchor_block_height: number
   anchor_extrinsic_index: number
   anchor_timestamp: number
@@ -158,6 +164,8 @@ export function buildMultisigOperations(events: MultisigLifecycleEvent[], calls:
           timepoint_height: tpH, timepoint_index: tpI,
           state: 'pending', threshold: 0, signatories: 0, approvals: 0,
           actor: ev.actor,
+          initiator: ev.kind === 'new' ? ev.actor : '',
+          timeline_actors: [], timeline_actions: [], timeline_ts: [],
           anchor_block_height: ev.kind === 'new' ? ev.block : tpH,
           anchor_extrinsic_index: ev.kind === 'new' ? ev.extrinsic : tpI,
           anchor_timestamp: ev.ts,
@@ -168,6 +176,10 @@ export function buildMultisigOperations(events: MultisigLifecycleEvent[], calls:
       ops.set(key, op)
     }
     op.touchpoints.push({ block: ev.block, extrinsic: ev.extrinsic, actor: ev.actor })
+    if (!op.row.initiator) op.row.initiator = ev.actor
+    op.row.timeline_actors.push(ev.actor)
+    op.row.timeline_actions.push(ev.kind === 'new' ? 'initiated' : ev.kind === 'approval' ? 'approved' : ev.kind)
+    op.row.timeline_ts.push(ev.ts)
     if (ev.kind === 'new' || ev.kind === 'approval' || ev.kind === 'executed') op.row.approvals += 1
     if (ev.kind === 'executed') {
       op.row.state = 'executed'
@@ -229,6 +241,8 @@ export function buildMultisigOperations(events: MultisigLifecycleEvent[], calls:
       timepoint_height: c.block, timepoint_index: c.extrinsic,
       state: 'executed', threshold: 1, signatories: signatories.length, approvals: 1,
       actor: c.originAccount,
+      initiator: c.originAccount,
+      timeline_actors: [c.originAccount], timeline_actions: ['executed'], timeline_ts: [c.ts],
       anchor_block_height: c.block, anchor_extrinsic_index: c.extrinsic, anchor_timestamp: c.ts,
       inner_call_name: c.innerCallName ?? '',
       inner_success: c.innerSuccess ?? c.callSuccess ?? null,

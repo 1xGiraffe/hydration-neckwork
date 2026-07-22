@@ -103,6 +103,8 @@ describe('buildMultisigOperations', () => {
       state: 'executed', threshold: 2, signatories: 3, approvals: 2, actor: SIG_B,
       anchor_block_height: 110, anchor_extrinsic_index: 3, anchor_timestamp: 1100,
       inner_call_name: 'Omnipool.sell', inner_success: 1, run_id: 7,
+      initiator: SIG_A,
+      timeline_actors: [SIG_A, SIG_B], timeline_actions: ['initiated', 'executed'], timeline_ts: [1000, 1100],
     })
   })
 
@@ -122,7 +124,10 @@ describe('buildMultisigOperations', () => {
       msEvent({ kind: 'approval', actor: SIG_C, block: 105, extrinsic: 4, eventIndex: 2, timepointHeight: 100, timepointIndex: 2 }),
     ]
     const [op] = buildMultisigOperations(events, [msCall({ threshold: 3, otherSignatories: [SIG_B, SIG_C] })], 7)
-    expect(op).toMatchObject({ state: 'pending', approvals: 2, actor: SIG_A, anchor_block_height: 100, anchor_extrinsic_index: 2 })
+    expect(op).toMatchObject({
+      state: 'pending', approvals: 2, actor: SIG_A, anchor_block_height: 100, anchor_extrinsic_index: 2,
+      initiator: SIG_A, timeline_actions: ['initiated', 'approved'], timeline_actors: [SIG_A, SIG_C],
+    })
     // threshold/signatories resolve only via the derive-check; {A,B,C}@3 is a
     // different address than MS_2OF3, so they stay unknown (0) here.
     expect(op.threshold).toBe(0)
@@ -134,7 +139,10 @@ describe('buildMultisigOperations', () => {
       msEvent({ kind: 'cancelled', actor: SIG_A, block: 120, extrinsic: 6, eventIndex: 3, ts: 1200, timepointHeight: 100, timepointIndex: 2 }),
     ]
     const [op] = buildMultisigOperations(events, [], 7)
-    expect(op).toMatchObject({ state: 'cancelled', actor: SIG_A, anchor_block_height: 120, anchor_extrinsic_index: 6, inner_success: null })
+    expect(op).toMatchObject({
+      state: 'cancelled', actor: SIG_A, anchor_block_height: 120, anchor_extrinsic_index: 6, inner_success: null,
+      initiator: SIG_A, timeline_actions: ['initiated', 'cancelled'],
+    })
   })
 
   it('resolves threshold and member count via the createKeyMulti derive-check', () => {
@@ -176,6 +184,7 @@ describe('buildMultisigOperations', () => {
       state: 'executed', threshold: 1, signatories: 2, approvals: 1,
       anchor_block_height: 300, anchor_extrinsic_index: 1, call_hash: '',
       inner_call_name: 'Proxy.proxy', inner_success: 1,
+      initiator: SIG_A, timeline_actors: [SIG_A], timeline_actions: ['executed'], timeline_ts: [3000],
     })
   })
 
