@@ -185,7 +185,23 @@ export interface HolderRow {
 }
 export interface HoldersResponse { asset: AssetRef; holders: HolderRow[]; total: number; totalUsd: number }
 
-export interface AddressBalance { asset: AssetRef; total: string; free: string; reserved: string; lastBlock: number; valueUsd: number | null }
+// A lock decomposed by WHEN it can release: already releasable (an unlock or
+// claim call away), scheduled for an estimated time, or open-ended while votes,
+// delegations or staking stay active. Tranche amounts sum to the lock amount.
+export interface BalanceLockTranche { state: 'releasable' | 'scheduled' | 'active'; amount: string; until?: string; linear?: boolean }
+// One lock/reserve/hold/deposit component of an asset balance. Locks OVERLAP
+// (the largest one is the binding amount); reserve-side kinds add up to the
+// reserved figure.
+export interface BalanceLockComponent { kind: 'lock' | 'reserve' | 'hold' | 'deposit'; source: string; amount: string; claimable?: string; tranches?: BalanceLockTranche[] }
+// The binding unlock timeline across ALL of the account's locks: when how much
+// of the frozen balance actually becomes transferable, and which lock causes it
+// ('cause'; ties join with '+'). Act-now semantics: `conditional` marks slices
+// that only free if the owner acts now (GIGAHDX staked → 28d after unstaking).
+// Slice amounts sum to `frozen`.
+export interface BalanceUnlockSlice { state: 'releasable' | 'scheduled' | 'active'; cause: string; amount: string; until?: string; linear?: boolean; conditional?: boolean }
+// `frozen` is the non-transferable part of `free` (per-account max lock, summed
+// across the account set for tags).
+export interface AddressBalance { asset: AssetRef; total: string; free: string; reserved: string; frozen?: string; breakdown?: BalanceLockComponent[]; timeline?: BalanceUnlockSlice[]; lastBlock: number; valueUsd: number | null }
 export interface MmReserve {
   assetId: number
   iconAssetId?: number

@@ -58,6 +58,10 @@
   --amber: #F7BF06;
   --amber-soft: rgba(247,191,6,0.13);
 
+  /* balance-breakdown: transferable = light blue, clearable deposits/orders = blue */
+  --bd-free: #95caff;
+  --bd-clear: #3f88dd;
+
   color-scheme: dark;
 }
 :root[data-theme="light"] {
@@ -95,6 +99,10 @@
 
   --amber: #b58800;
   --amber-soft: rgba(247,191,6,0.16);
+
+  /* balance-breakdown: transferable = light blue, clearable deposits/orders = blue */
+  --bd-free: #7fb0ea;
+  --bd-clear: #2C89E9;
 
   color-scheme: light;
 }
@@ -555,13 +563,28 @@ svg { display: block; }
 .tm-metric-label { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
 .tm-metric-value { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text-medium); }
 .tm-metric-value.strong { color: var(--text-high); }
-/* Amount = free + reserved; the lock reveals the reserved portion on hover. */
+/* Amount = free + reserved; the lock/reserve breakdown below spells out the split. */
 .tm-amt { display: inline-flex; align-items: center; gap: 5px; }
 .tm-amt-sym { color: var(--text-low); }
-.tm-lock { display: inline-flex; align-items: center; color: var(--text-low); cursor: help; }
-.tm-lock:hover { color: var(--text-medium); }
 /* Shown when the focused asset is held only in the past (no live amount/value). */
 .tm-detail-note { margin-top: 10px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-low); }
+
+/* per-asset lock/reserve breakdown (BalanceBreakdown) — compact: one
+   aggregated bar + the unlock schedule (when · how much · why). */
+.tm-breakdown { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+.bd-agg { position: relative; height: 16px; border-radius: 8px; background: var(--panel-hover); overflow: hidden; }
+/* the faint inset ring keeps brand-black (GIGAHDX) slices legible between dark neighbors */
+.bd-agg-seg { position: absolute; top: 0; height: 100%; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-high) 9%, transparent); }
+.bd-sched { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
+.bd-sched-row { display: grid; grid-template-columns: 8px 96px 104px 1fr; gap: 8px; align-items: baseline; font-family: 'GeistMono'; font-size: 11.5px; line-height: 1.35; }
+/* the faint ring keeps dark dots (GIGAHDX brand black) legible on dark surfaces */
+.bd-dot { width: 8px; height: 8px; border-radius: 50%; align-self: center; box-shadow: 0 0 0 1px color-mix(in srgb, var(--text-low) 60%, transparent); }
+.bd-cause { color: var(--text-high); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bd-sched-amt { color: var(--text-high); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.bd-note { color: var(--text-low); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 480px) {
+  .bd-sched-row { grid-template-columns: 8px 82px 92px 1fr; gap: 6px; font-size: 11px; }
+}
 /* Balance-history graph for the focused asset, docked inside the detail card. The
    slot holds a stable height (matching the chart) so an asset with no indexed
    history doesn't collapse it and shift the rows below as the pointer sweeps. */

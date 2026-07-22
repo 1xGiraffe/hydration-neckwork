@@ -1,6 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { F, AssetIcon } from './ui'
 import { AssetBalanceChart } from './BalanceHistory'
+import { BalanceBreakdown } from './BalanceBreakdown'
 import { useQueryValue, setQuery } from '../router'
 import { squarify } from '../utils/squarify'
 import { useAssetColor } from '../utils/iconColor'
@@ -48,24 +49,6 @@ function pctStr(share: number): string {
 
 function assetName(a: AssetRef): string {
   return a.name ?? `#${a.assetId}`
-}
-
-// A raw integer amount string is non-zero (has a reserved/held portion) when it
-// carries any non-zero digit — avoids Number() precision loss on 128-bit values.
-function isPositiveRaw(raw: string | null | undefined): boolean {
-  return raw != null && /[1-9]/.test(raw)
-}
-
-// Small padlock — hover reveals the reserved amount. Only shown when the asset
-// actually has a reserved balance.
-function LockIcon({ title }: { title: string }) {
-  return (
-    <span className="tm-lock" title={title} role="img" aria-label={title}>
-      <svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true">
-        <path fill="currentColor" d="M12 1a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2h-1V6a5 5 0 0 0-5-5Zm3 8H9V6a3 3 0 0 1 6 0v3Z" />
-      </svg>
-    </span>
-  )
 }
 
 // Progressive tile-face content, revealed only when it comfortably fits so text is
@@ -208,7 +191,6 @@ function FocusedDetail({ balance, hist, allHistory }: {
   const asset = balance?.asset ?? hist?.asset
   if (!asset) return null
   const priced = balance != null && balance.valueUsd != null && balance.valueUsd > 0
-  const hasReserved = isPositiveRaw(balance?.reserved)
   const lastHeld = balance == null ? lastHeldDate(hist) : null
   return (
     <div className="tm-detail" aria-live="polite">
@@ -227,13 +209,13 @@ function FocusedDetail({ balance, hist, allHistory }: {
             strong={!priced}
             value={<span className="tm-amt">
               {F.amount(balance.total, asset.decimals)}<span className="tm-amt-sym">{asset.symbol}</span>
-              {hasReserved && <LockIcon title={`Reserved ${F.amount(balance.reserved, asset.decimals)} ${asset.symbol}`} />}
             </span>}
           />
         </div>
       ) : (
         <div className="tm-detail-note">Not currently held{lastHeld ? ` · last held ${lastHeld.slice(0, 10)}` : ''}</div>
       )}
+      {balance != null && <BalanceBreakdown balance={balance} />}
       {hist
         ? <AssetBalanceChart selected={hist} all={allHistory} />
         : <div className="tm-hist">

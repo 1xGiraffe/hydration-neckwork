@@ -11,6 +11,7 @@ import { hexToU8a } from '@polkadot/util'
 import { proxyInfoFor, multisigCompositionFor, multisigMembershipsFor, pendingMultisigOps, type ProxyRelation, type PendingMultisigOp } from './proxyMultisigService.ts'
 import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
 import { xcmJourneySourcesFor, xcmJourneysByOriginTx } from './xcmJourneyService.ts'
+import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
 import { createHash } from 'node:crypto'
 
 let client: ClickHouseClient
@@ -1937,7 +1938,12 @@ export async function getHolders(assetId: number, limit: number, offset = 0): Pr
 }
 
 // address detail
-export interface AddressBalance { asset: AssetRef; total: string; free: string; reserved: string; lastBlock: number; valueUsd: number | null }
+// `frozen` is the non-transferable part of `free` (per-account max lock, summed
+// across the account set); `breakdown` lists the lock/reserve/hold/deposit
+// components and `timeline` the binding unlock schedule (when how much of the
+// frozen balance actually unlocks, and which lock causes it) — both from the
+// background lock snapshot (see lockBreakdownService).
+export interface AddressBalance { asset: AssetRef; total: string; free: string; reserved: string; frozen?: string; breakdown?: BalanceLockComponent[]; timeline?: BalanceUnlockSlice[]; lastBlock: number; valueUsd: number | null }
 interface AggregatedBalanceRow { asset_id: string; total: string; free: string; reserved: string; last_block: number }
 
 async function queryAggregatedBalances(accountListSql: string): Promise<AggregatedBalanceRow[]> {
@@ -2026,6 +2032,63 @@ export function foldShareBalances(balances: AddressBalance[]): AddressBalance[] 
     }
   }
   return [...byId.values()].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
+}
+
+// Attach the background lock-snapshot components to the final displayed balance
+// rows. Components are keyed by on-chain asset id; folding may have merged a
+// source asset into its display asset (share tokens), so components map through
+// displayAssetId with a decimal rescale, merging additively when several source
+// assets land on one display row.
+export function attachLockBreakdowns(balances: AddressBalance[], breakdowns: Map<number, AssetLockBreakdown>): AddressBalance[] {
+  if (!breakdowns.size) return balances
+  interface ComponentAgg { kind: BalanceLockComponent['kind']; source: string; amount: bigint; claimable: bigint; tranches?: BalanceLockTranche[]; mixed: boolean }
+  const byDisplay = new Map<number, { frozen: bigint; components: Map<string, ComponentAgg>; timeline?: BalanceUnlockSlice[] }>()
+  for (const [assetId, b] of breakdowns) {
+    const did = displayAssetId(assetId)
+    const fromDec = asset(assetId).decimals
+    const toDec = did === assetId ? fromDec : asset(did).decimals
+    const scale = (v: string) => BigInt(rescaleRaw(v, fromDec, toDec) || '0')
+    const agg = byDisplay.get(did) ?? { frozen: 0n, components: new Map<string, ComponentAgg>() }
+    agg.frozen += scale(b.frozen)
+    if (b.timeline?.length && !agg.timeline) agg.timeline = b.timeline.map(s => ({ ...s, amount: scale(s.amount).toString() }))
+    for (const c of b.components) {
+      const key = `${c.kind}|${c.source}`
+      const cur = agg.components.get(key)
+      const tranches = c.tranches?.map(t => ({ ...t, amount: scale(t.amount).toString() }))
+      if (cur) {
+        // Two source assets folded onto one display row: amounts add, but the
+        // tranche timelines would interleave misleadingly — drop them.
+        cur.amount += scale(c.amount)
+        cur.claimable += scale(c.claimable ?? '0')
+        cur.mixed = true
+      } else {
+        agg.components.set(key, { kind: c.kind, source: c.source, amount: scale(c.amount), claimable: scale(c.claimable ?? '0'), tranches, mixed: false })
+      }
+    }
+    byDisplay.set(did, agg)
+  }
+  return balances.map(b => {
+    const agg = byDisplay.get(b.asset.assetId)
+    if (!agg?.components.size) return b
+    const breakdown = [...agg.components.values()]
+      .sort((x, y) => (y.amount > x.amount ? 1 : y.amount < x.amount ? -1 : 0))
+      .map(c => ({
+        kind: c.kind, source: c.source, amount: c.amount.toString(),
+        ...(c.claimable > 0n ? { claimable: c.claimable.toString() } : {}),
+        ...(c.tranches?.length && !c.mixed ? { tranches: c.tranches } : {}),
+      }))
+    return { ...b, frozen: agg.frozen.toString(), breakdown, ...(agg.timeline?.length ? { timeline: agg.timeline } : {}) }
+  })
+}
+
+async function queryLockBreakdownsSafe(accountListSql: string): Promise<Map<number, AssetLockBreakdown>> {
+  try {
+    return await queryLockBreakdowns(client, accountListSql)
+  } catch (err) {
+    // Balances render without the breakdown rather than failing the page.
+    console.error('[locks] breakdown read failed', err)
+    return new Map()
+  }
 }
 
 // Wallet-held stableswap pool-share tokens (2-Pool-GDOT, 4-Pool, …) ARE liquidity
@@ -2239,8 +2302,9 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // its full AccountId, so the stored-position fallback must look them up there.
     const mmList = sqlAccountList([...new Set([...related].map(evmAccountForm).filter(Boolean) as string[])])
 
-    const [balanceRows, mmRes, prices] = await Promise.all([
+    const [balanceRows, lockBreakdowns, mmRes, prices] = await Promise.all([
       queryAggregatedBalances(list),
+      summary ? Promise.resolve(new Map<number, AssetLockBreakdown>()) : queryLockBreakdownsSafe(list),
       moneyMarketAccountValuesReady ? Promise.resolve(null) : client.query({
         query: `
           SELECT pool_address,
@@ -2318,6 +2382,8 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // ERC-20-side wallet holdings (HOLLAR): read from the bounded snapshot and
     // summed onto any Tokens-side balance — the two pots are separate on-chain.
     balances = mergeErc20Balances(balances, await erc20WalletHoldings(mmH160), prices)
+    // Attach the lock/reserve components once the display rows are final.
+    balances = attachLockBreakdowns(balances, lockBreakdowns)
     // Fold each market's borrow-position display the same way (2-Pool-GETH → GETH);
     // done now, after applyMmCollateralToBalances has consumed the unfolded reserves.
     moneyMarket = moneyMarket.map(p => p.reserves?.length ? { ...p, reserves: foldShareReserves(p.reserves) } : p)
@@ -12966,8 +13032,9 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
       if (snapshot) return snapshot
     }
     const list = sqlAccountList(tag.members)
-    const [balanceRows, prices] = await Promise.all([
+    const [balanceRows, lockBreakdowns, prices] = await Promise.all([
       queryAggregatedBalances(list),
+      summary ? Promise.resolve(new Map<number, AssetLockBreakdown>()) : queryLockBreakdownsSafe(list),
       ensureAccountValuePrices(),
     ])
     const rawBalances = valueAccountBalances(balanceRows, prices)
@@ -13010,6 +13077,8 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
       await erc20WalletHoldingsForAccounts(mmMembers.map(member => member.h160)),
       prices,
     )
+    // Attach the lock/reserve components once the display rows are final.
+    balances = attachLockBreakdowns(balances, lockBreakdowns)
     // Fold each market's borrow-position display too (2-Pool-GETH → GETH), after the line above.
     moneyMarket = moneyMarket.map(p => p.reserves?.length ? { ...p, reserves: foldShareReserves(p.reserves) } : p)
     const lpUsd = lpPositions.reduce((s, p) => s + (p.valueUsd ?? 0), 0)

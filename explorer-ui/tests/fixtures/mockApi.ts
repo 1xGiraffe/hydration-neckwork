@@ -265,12 +265,54 @@ function buildAccounts(offset: number, limit: number, sort: string): AccountsPag
   })
   return { rows: sorted.slice(offset, offset + limit), total: sorted.length }
 }
+// Deterministic HDX lock/reserve breakdown for a balance of `bal` tokens (free =
+// 92%, reserved = 8%, matching the mock balance split): overlapping vesting /
+// governance / staking / GIGAHDX locks, a binding unlock timeline whose slices
+// sum exactly to `frozen`, and reserve components that deliberately cover only
+// part of `reserved` so the "other" remainder row is exercised.
+function hdxBreakdown(bal: number, dec: number): Pick<AddressBalance, 'frozen' | 'breakdown' | 'timeline'> {
+  const f = (x: number) => raw(bal * x, dec)
+  // Unlock `until` dates anchor to WALL-CLOCK now, not MOCK_NOW_MS: the panel
+  // renders them relative to the real Date.now(), so a fixed anchor would make
+  // the "in Nd" text drift and eventually flip to "now" as real time overtakes
+  // it. Anchoring to now keeps the relative display (what tests assert) stable.
+  const inDays = (n: number) => tsMs(Date.now() + n * 86400e3)
+  return {
+    frozen: f(0.566), // the binding lock envelope across the overlapping locks
+    breakdown: [
+      { kind: 'lock', source: 'vesting', amount: f(0.506), claimable: f(0.138) },
+      { kind: 'lock', source: 'vote', amount: f(0.414) },
+      { kind: 'lock', source: 'staking', amount: f(0.276) },
+      { kind: 'lock', source: 'gigahdx', amount: f(0.166) },
+      { kind: 'reserve', source: 'dca', amount: f(0.03) },
+      { kind: 'deposit', source: 'identity', amount: f(0.012) },
+      { kind: 'deposit', source: 'multisig', amount: f(0.008) },
+    ],
+    // when · how much · why (act-now semantics) — sums to frozen
+    // (0.08+0.055+0.1+0.09+0.211+0.03 = 0.566)
+    timeline: [
+      { state: 'releasable', cause: 'staking', amount: f(0.08) },
+      { state: 'scheduled', cause: 'gigahdx', amount: f(0.055), until: inDays(21) },
+      { state: 'scheduled', cause: 'gigahdx', amount: f(0.1), until: inDays(28), conditional: true },
+      { state: 'scheduled', cause: 'vote', amount: f(0.09), until: inDays(36) },
+      { state: 'scheduled', cause: 'vesting', amount: f(0.211), until: inDays(230), linear: true },
+      { state: 'active', cause: 'vote', amount: f(0.03) },
+    ],
+  }
+}
+
 function buildAddress(accountId: string): AddressDetail {
   const a = ACCS.find(x => x.accountId === accountId || x.address.toLowerCase() === accountId.toLowerCase()) ?? A.fox
   const r = rng(a.accountId.length * 17)
   const priced = ASSETS.filter((_, i) => (r() > 0.4) || i < 2).slice(0, 6).map(as => {
     const bal = +(r() * (as.price > 1000 ? 3 : as.price > 1 ? 6000 : 2_000_000)).toFixed(4)
-    return { asset: aref(as), total: raw(bal, as.decimals), free: raw(bal * 0.92, as.decimals), reserved: raw(bal * 0.08, as.decimals), lastBlock: TIP - Math.floor(r() * 40000), valueUsd: bal * as.price }
+    return {
+      asset: aref(as), total: raw(bal, as.decimals), free: raw(bal * 0.92, as.decimals), reserved: raw(bal * 0.08, as.decimals), lastBlock: TIP - Math.floor(r() * 40000), valueUsd: bal * as.price,
+      // HDX carries the full lock breakdown; DOT shows the single-component
+      // shape (an OTC order reserve) for a non-native asset.
+      ...(as.assetId === 0 ? hdxBreakdown(bal, as.decimals) : {}),
+      ...(as.assetId === 5 ? { breakdown: [{ kind: 'reserve' as const, source: 'otc', amount: raw(bal * 0.08, as.decimals) }] } : {}),
+    }
   }).sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
   // The fox additionally holds one asset with no market price, so the "without a
   // market price" rows beneath the treemap are exercised.
@@ -879,7 +921,15 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   {
     re: /^\/explorer\/tag\/(.+)$/, fn: () => {
       const members = [A.krakenEvm, A.krakenSub]
-      const balances = ASSETS.slice(0, 5).map((as, i) => { const bal = (i + 2) * 40000 / as.price; return { asset: aref(as), total: raw(bal, as.decimals), free: raw(bal, as.decimals), reserved: '0', lastBlock: TIP - i * 80, valueUsd: bal * as.price } })
+      const balances = ASSETS.slice(0, 5).map((as, i) => {
+        const bal = (i + 2) * 40000 / as.price
+        // The tag's HDX row carries the members' summed lock breakdown so the
+        // tag balances view exercises the same panel as accounts.
+        if (as.assetId === 0) {
+          return { asset: aref(as), total: raw(bal, as.decimals), free: raw(bal * 0.92, as.decimals), reserved: raw(bal * 0.08, as.decimals), lastBlock: TIP - i * 80, valueUsd: bal * as.price, ...hdxBreakdown(bal, as.decimals) }
+        }
+        return { asset: aref(as), total: raw(bal, as.decimals), free: raw(bal, as.decimals), reserved: '0', lastBlock: TIP - i * 80, valueUsd: bal * as.price }
+      })
       const portfolioUsd = balances.reduce((s, b) => s + (b.valueUsd ?? 0), 0)
       const built = buildAddress(A.krakenEvm.accountId)
       const moneyMarket = built.moneyMarket.map(p => p.role === 'primary' ? { ...p, simAccount: A.krakenEvm.address } : p)

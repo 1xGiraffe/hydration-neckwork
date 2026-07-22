@@ -3,9 +3,12 @@ import { xxhashAsU8a } from '@polkadot/util-crypto'
 import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
 import { decodeCompact } from './proxyMultisigService.ts'
+import { collectLockBreakdownRows, persistLockSnapshot, GIGA_UNBONDING_BLOCKS, type LockRow } from './lockBreakdownService.ts'
 import { cached } from './cache.ts'
 import { allTags, economicModuleAccounts } from './tagService.ts'
 import { accountRef, ensurePrices, cutoffHeightForWindow, getGigaMarketStats, getGigaLiquidationLevels, type AccountRef, type GigaMarketReserveStat, type GigaLiquidations } from './explorerService.ts'
+
+export { GIGA_UNBONDING_BLOCKS }
 
 // HDX-dashboard chain snapshots: balance locks by lock id, GIGAHDX pending
 // unstakes, vesting schedules and conviction-voting prior locks — everything the
@@ -16,8 +19,6 @@ import { accountRef, ensurePrices, cutoffHeightForWindow, getGigaMarketStats, ge
 let client: ClickHouseClient
 
 const HDX_DECIMALS = 12n
-// GigaHdx unstakes mature 403,200 parachain blocks after the unstake block.
-export const GIGA_UNBONDING_BLOCKS = 403_200
 
 const prefix = (p: string, s: string) => u8aToHex(u8aConcat(xxhashAsU8a(p, 128), xxhashAsU8a(s, 128)))
 const LOCKS_PREFIX = prefix('Balances', 'Locks')
@@ -55,7 +56,7 @@ export function decodeCompactBig(b: Uint8Array, off: number): [bigint, number] {
 }
 
 export interface LockTypeTotal { id: string; accounts: number; totalHdx: number }
-export interface PendingUnstake { accountId: string; startBlock: number; expiryBlock: number; payoutHdx: number }
+export interface PendingUnstake { accountId: string; startBlock: number; expiryBlock: number; payoutHdx: number; payoutRaw: bigint }
 export interface VestingScheduleAgg { accountId: string; start: number; period: number; periodCount: number; perPeriod: bigint }
 // Per-account lock overlap: the largest non-vesting lock and the raw ormlvest
 // amount (which goes stale between claims — see correctVestingLocks).
@@ -80,8 +81,9 @@ let snapshot: HdxChainSnapshot | null = null
 
 const toHdx = (raw: bigint) => Number(raw / 10n ** (HDX_DECIMALS - 4n)) / 1e4
 
-// Balances.Locks value: Vec<{id: [u8;8], amount: u128, reasons: u8}>.
-async function loadLocks(): Promise<{ lockTypes: LockTypeTotal[]; lockAccounts: Map<string, LockAccount>; voteLockByAccount: Map<string, number> } | null> {
+// Balances.Locks value: Vec<{id: [u8;8], amount: u128, reasons: u8}>. Keeps the
+// raw per-account rows too — they feed the per-account breakdown snapshot.
+async function loadLocks(): Promise<{ lockTypes: LockTypeTotal[]; lockAccounts: Map<string, LockAccount>; voteLockByAccount: Map<string, number>; rows: LockRow[] } | null> {
   const keys = await substrateAllKeys(LOCKS_PREFIX)
   if (!keys.length) return null
   const values = await substrateStorageBatch(keys)
@@ -89,6 +91,7 @@ async function loadLocks(): Promise<{ lockTypes: LockTypeTotal[]; lockAccounts: 
   const byId = new Map<string, { accounts: number; total: bigint }>()
   const voteLockByAccount = new Map<string, number>()
   const lockAccounts = new Map<string, LockAccount>()
+  const rows: LockRow[] = []
   for (let ki = 0; ki < keys.length; ki++) {
     const raw = values[ki]
     if (!raw) continue
@@ -101,6 +104,7 @@ async function loadLocks(): Promise<{ lockTypes: LockTypeTotal[]; lockAccounts: 
       const id = Buffer.from(b.slice(off, off + 8)).toString('latin1').replace(/\0+$/, '')
       const amount = u128At(b, off + 8)
       off += 25
+      rows.push({ accountId, id, amount })
       const e = byId.get(id) ?? { accounts: 0, total: 0n }
       e.accounts++
       e.total += amount
@@ -114,7 +118,7 @@ async function loadLocks(): Promise<{ lockTypes: LockTypeTotal[]; lockAccounts: 
   const lockTypes = [...byId.entries()]
     .map(([id, e]) => ({ id, accounts: e.accounts, totalHdx: toHdx(e.total) }))
     .sort((a, b) => b.totalHdx - a.totalHdx)
-  return { lockTypes, lockAccounts, voteLockByAccount }
+  return { lockTypes, lockAccounts, voteLockByAccount, rows }
 }
 
 // GigaHdx.PendingUnstakes: double map Blake2_128Concat(account) →
@@ -134,7 +138,7 @@ async function loadPendingUnstakes(): Promise<PendingUnstake[] | null> {
     const accountId = u8aToHex(tail.slice(16, 48))
     const startBlock = u32At(tail, 56)
     const payout = u128At(hexToU8a(raw), 0)
-    out.push({ accountId, startBlock, expiryBlock: startBlock + GIGA_UNBONDING_BLOCKS, payoutHdx: toHdx(payout) })
+    out.push({ accountId, startBlock, expiryBlock: startBlock + GIGA_UNBONDING_BLOCKS, payoutHdx: toHdx(payout), payoutRaw: payout })
   }
   return keys.length && !out.length ? null : out.sort((a, b) => a.expiryBlock - b.expiryBlock)
 }
@@ -200,14 +204,18 @@ export function correctVestingLocks(
 // ConvictionVoting.VotingFor: Casting{votes: Vec<(poll u32, AccountVote)>,
 // delegations{votes u128, capital u128}, prior(unlockAt u32, balance u128)} |
 // Delegating{balance u128, target 32B, conviction u8, delegations, prior}.
-// Returns per-ACCOUNT (merged across classes): the latest scheduled prior
-// unlock and whether any active vote/delegation keeps the lock open-ended.
-async function loadVoteLocks(): Promise<Map<string, { maxUnlockBlock: number; hasActive: boolean }> | null> {
+// Returns per-ACCOUNT the per-CLASS lock state: the open-ended amount held by
+// active votes/delegations, the date-bound prior lock, and whether anything is
+// still actively voting. The dashboard merges these across classes; the
+// per-account breakdown decomposes the pyconvot lock into duration tranches
+// from the same data (see voteLockTranches).
+export interface VoteClassState { activeAmount: bigint; hasActiveVotes: boolean; priorUnlock: number; priorBalance: bigint }
+async function loadVoteLocks(): Promise<Map<string, VoteClassState[]> | null> {
   const keys = await substrateAllKeys(VOTING_FOR_PREFIX)
   if (!keys.length) return null
   const values = await substrateStorageBatch(keys)
   if (!values.some(Boolean)) return null
-  const byAccount = new Map<string, { maxUnlockBlock: number; hasActive: boolean }>()
+  const byAccount = new Map<string, VoteClassState[]>()
   for (let ki = 0; ki < keys.length; ki++) {
     const raw = values[ki]
     if (!raw) continue
@@ -216,29 +224,34 @@ async function loadVoteLocks(): Promise<Map<string, { maxUnlockBlock: number; ha
     if (tail.length < 40) continue
     const accountId = u8aToHex(tail.slice(8, 40))
     const b = hexToU8a(raw)
-    let unlockBlock = 0
-    let hasActive = false
+    const state: VoteClassState = { activeAmount: 0n, hasActiveVotes: false, priorUnlock: 0, priorBalance: 0n }
     try {
       if (b[0] === 0) { // Casting
         let [n, off] = decodeCompact(b, 1)
-        if (n > 0) hasActive = true
+        if (n > 0) state.hasActiveVotes = true
         for (let i = 0; i < n; i++) {
           off += 4 // poll index
           const kind = b[off]; off += 1
+          // The class lock covers the largest single vote (locks overlap within
+          // a class); Split/SplitAbstain lock the sum of their parts.
+          const amount = kind === 0 ? u128At(b, off + 1)
+            : kind === 1 ? u128At(b, off) + u128At(b, off + 16)
+            : u128At(b, off) + u128At(b, off + 16) + u128At(b, off + 32)
+          if (amount > state.activeAmount) state.activeAmount = amount
           off += kind === 0 ? 17 : kind === 1 ? 32 : 48
         }
         off += 32 // delegations (votes, capital)
-        if (u128At(b, off + 4) > 0n) unlockBlock = u32At(b, off)
+        if (u128At(b, off + 4) > 0n) { state.priorUnlock = u32At(b, off); state.priorBalance = u128At(b, off + 4) }
       } else if (b[0] === 1) { // Delegating
-        if (u128At(b, 1) > 0n) hasActive = true
+        const balance = u128At(b, 1)
+        if (balance > 0n) { state.hasActiveVotes = true; state.activeAmount = balance }
         const off = 1 + 16 + 32 + 1 + 32
-        if (u128At(b, off + 4) > 0n) unlockBlock = u32At(b, off)
-      }
+        if (u128At(b, off + 4) > 0n) { state.priorUnlock = u32At(b, off); state.priorBalance = u128At(b, off + 4) }
+      } else continue
     } catch { continue }
-    const e = byAccount.get(accountId) ?? { maxUnlockBlock: 0, hasActive: false }
-    e.maxUnlockBlock = Math.max(e.maxUnlockBlock, unlockBlock)
-    e.hasActive = e.hasActive || hasActive
-    byAccount.set(accountId, e)
+    const list = byAccount.get(accountId)
+    if (list) list.push(state)
+    else byAccount.set(accountId, [state])
   }
   return byAccount
 }
@@ -260,8 +273,12 @@ async function refresh(): Promise<void> {
   // Classify each account's authoritative pyconvot lock amount exactly once.
   const voteLockAccounts: VoteLockAccount[] = []
   for (const [accountId, hdx] of locks.voteLockByAccount) {
-    const v = votes.get(accountId)
-    voteLockAccounts.push({ hdx, maxUnlockBlock: v?.maxUnlockBlock ?? 0, hasActive: v?.hasActive ?? false })
+    const classes = votes.get(accountId) ?? []
+    voteLockAccounts.push({
+      hdx,
+      maxUnlockBlock: classes.reduce((m, c) => Math.max(m, c.priorBalance > 0n ? c.priorUnlock : 0), 0),
+      hasActive: classes.some(c => c.hasActiveVotes),
+    })
   }
   snapshot = {
     at: Date.now(),
@@ -271,6 +288,24 @@ async function refresh(): Promise<void> {
     pendingUnstakes: pending,
     vestingSchedules: vesting,
     voteLockAccounts,
+  }
+  // Persist the per-account breakdown snapshot (account/tag balance pages read
+  // it from ClickHouse). Failures keep the previous published generation and
+  // never invalidate the in-memory dashboard snapshot above.
+  try {
+    const head = await loadHead()
+    const rows = await collectLockBreakdownRows({
+      nativeLockRows: locks.rows,
+      vestingSchedules: vesting,
+      relayHeight,
+      voteStates: votes,
+      pendingUnstakes: pending.map(p => ({ accountId: p.accountId, expiryBlock: p.expiryBlock, payoutRaw: p.payoutRaw })),
+      headBlock: head.height,
+      headTsMs: head.ts,
+    })
+    await persistLockSnapshot(client, rows, { blockHeight: head.height, relayHeight })
+  } catch (err) {
+    console.error('[hdx] lock breakdown snapshot failed', err)
   }
 }
 

@@ -69,10 +69,10 @@ test.describe('balances treemap — desktop', () => {
     await expect(detail).not.toContainText('Price')
     await expect(detail).not.toContainText('Share')
     await expect(page.locator('.tm-detail-link')).toHaveCount(0)
-    // Mock holdings carry a reserved portion, so the lock icon is present and its
-    // tooltip names the reserved amount.
-    await expect(detail.locator('.tm-lock')).toBeVisible()
-    await expect(detail.locator('.tm-lock')).toHaveAttribute('title', /Reserved/)
+    // No padlock next to the amount — the lock/reserve breakdown below the
+    // metrics fully replaces it.
+    await expect(detail.locator('.tm-lock')).toHaveCount(0)
+    await expect(detail.locator('[data-testid="balance-breakdown"]')).toBeVisible()
     // The focused asset's balance-history graph is docked in the same card.
     await expect(detail.locator('.tm-hist svg')).toBeVisible()
 
@@ -100,6 +100,57 @@ test.describe('balances treemap — desktop', () => {
     await expect(page).not.toHaveURL(/asset=/)
     await tiles.nth(2).hover()
     await expect(page.locator('.tm-detail-sym')).toHaveText(sym2)
+  })
+
+  test('focusing HDX shows the aggregated bar and the unlock schedule', async ({ page }) => {
+    await page.goto(`/account/${FOX}?view=balances&asset=0`)
+    const bd = page.locator('[data-testid="balance-breakdown"]')
+    await expect(bd).toBeVisible()
+
+    // One aggregated bar, no separate totals line.
+    await expect(bd.locator('.bd-agg')).toHaveCount(1)
+    await expect(bd).toContainText('Locks & reserves')
+
+    // The compact schedule: reason · amount · duration, sorted by time to
+    // liquidity — transferable first, dated ascending (days, not dates), then
+    // the open residual and the static "until …" reserves.
+    const rows = bd.locator('.bd-sched-row')
+    expect(await rows.count()).toBe(9)
+    await expect(rows.nth(0)).toContainText('transferable')
+    await expect(rows.nth(1)).toContainText('staking')
+    await expect(rows.nth(1)).toContainText('unstake to free')
+    await expect(rows.nth(2)).toContainText('DCA')
+    await expect(rows.nth(2)).toContainText('until cancelled')
+    await expect(rows.nth(3)).toContainText('deposits')
+    await expect(rows.nth(3)).toContainText('until cleared')
+    await expect(rows.nth(4)).toContainText('votes')
+    await expect(rows.nth(4)).toContainText('while voting/delegating')
+    await expect(rows.nth(5)).toContainText('GHDX unstake')
+    await expect(rows.nth(5)).toContainText(/in \d+(h|d)/)
+    await expect(rows.nth(6)).toContainText('GHDX')
+    await expect(rows.nth(6)).not.toContainText('GHDX unstake')
+    await expect(rows.nth(6)).toContainText('if unstaked now')
+    await expect(rows.nth(7)).toContainText('votes')
+    await expect(rows.nth(7)).toContainText(/in \d+(h|d)/)
+    await expect(rows.nth(8)).toContainText('vesting')
+    await expect(rows.nth(8)).toContainText('vests linearly')
+    // days, never dates
+    await expect(bd).not.toContainText(/Aug|Sep|Nov|Mar/)
+
+    // A non-native asset (DOT) shows its reserve-only schedule.
+    await page.goto(`/account/${FOX}?view=balances&asset=5`)
+    await expect(bd).toContainText('OTC')
+    await expect(bd).toContainText('until pulled')
+    await expect(bd).not.toContainText('unstake')
+  })
+
+  test('the tag balances view shows the aggregated schedule', async ({ page }) => {
+    await page.goto('/tag/kraken?view=balances&asset=0')
+    const bd = page.locator('[data-testid="balance-breakdown"]')
+    await expect(bd).toBeVisible()
+    await expect(bd.locator('.bd-agg')).toHaveCount(1)
+    await expect(bd).toContainText(/in \d+(h|d)/)
+    await expect(bd).toContainText('votes')
   })
 
   test('switching assets clears a lingering balance-history tooltip', async ({ page }) => {
