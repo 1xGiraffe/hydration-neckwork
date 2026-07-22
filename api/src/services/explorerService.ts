@@ -500,6 +500,31 @@ const TRANSFER_CALL_NAMES = new Set([
   'XTokens.transfer_multiassets', 'XTokens.transfer_with_fee', 'XTokens.transfer_multiasset_with_fee',
 ])
 
+// XCM sovereign / system accounts — sibling-parachain (`sibl`), sovereign
+// parachain (`para`) and relay (`Parent`) — are bridge plumbing, never a user's
+// own transfer. Distinct from the `modl` pallet pots, which include genuine
+// payout sources such as the treasury.
+const XCM_SOVEREIGN_PREFIXES = ['7369626c', '70617261', '506172656e74']
+
+// Non-plumbing transfer-leg filter shared by user-facing surfaces: keep a leg
+// only when NEITHER side is a pure-plumbing account — a noisy swap/fee pot
+// (router/omnipool/feeproc), an XCM sovereign/system account, or an AMM pool /
+// money-market reserve (`plumbingList`). Unlike the GLOBAL feed's blanket
+// `0x6d6f646c…` module exclusion, this keeps genuine pallet-pot payouts
+// (treasury funding, vesting, LM rewards) — the account's real value movements.
+// Block activity, the superset that re-derives every /transfer detail link, must
+// classify with this so a treasury payout shown on an account page also resolves
+// on its own detail page.
+export function nonPlumbingTransferLegSql(fromExpr: string, toExpr: string, plumbingList: string): string {
+  const xcm = XCM_SOVEREIGN_PREFIXES.join('|')
+  return `AND ${fromExpr} NOT IN (${noisyPotList()})
+                AND ${toExpr} NOT IN (${noisyPotList()})
+                AND NOT match(${fromExpr}, '^0x(${xcm})')
+                AND NOT match(${toExpr}, '^0x(${xcm})')
+                AND ${fromExpr} NOT IN (${plumbingList})
+                AND ${toExpr} NOT IN (${plumbingList})`
+}
+
 // The `bind` CTE body shared by grouped rankings: ETH-prefixed rows standing
 // for a real account map onto it — explicit EVMAccounts bindings plus
 // truncations of TAGGED derived accounts (a stableswap pool's aToken pot must
@@ -8860,6 +8885,8 @@ export async function getBlockActivity(height: number): Promise<ActivityRow[]> {
 async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
   const prices = await ensurePrices()
   const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
+  const transferPlumbing = [...ammPoolAccounts(), ...(await mmReserveAccountIds())]
+  const transferPlumbingList = transferPlumbing.length ? transferPlumbing.map(a => `'${a}'`).join(',') : "''"
   const [swapRes, dcaRes, xcmInRows, xcmOutRemoteRows, stakingRes, transferRes, liquidityRes, mmRes, otcRes] = await Promise.all([
     client.query({
       query: `SELECT event_index, event_name, args_json, toString(block_timestamp) AS ts
@@ -8894,11 +8921,13 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
       query_params: { h: height },
       format: 'JSONEachRow',
     }),
-    // Extrinsic-less transfers (e.g. hook-driven treasury/reward payouts) — same
-    // event list + module-account exclusion as getRecentTransfers's userOnly
-    // filter (source of truth). Cross-event-name de-dup (a single transfer often
-    // emits both Currencies.Transferred and a Tokens.Transfer/Balances.Transfer)
-    // is handled afterwards by the shared dedupeTransferEvents helper.
+    // Extrinsic-less transfers (hook-driven treasury/vesting/reward payouts and
+    // user↔user moves). Classified with the shared non-plumbing leg filter — NOT
+    // a blanket module exclusion — so genuine pallet-pot payouts stay visible and
+    // resolve on their detail page, mirroring the account feed. Cross-event-name
+    // de-dup (a single transfer often emits both Currencies.Transferred and a
+    // Tokens.Transfer/Balances.Transfer) is handled afterwards by the shared
+    // dedupeTransferEvents helper.
     client.query({
       query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
                 JSONExtractString(args_json, 'from') AS from_acc,
@@ -8908,8 +8937,7 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
               FROM price_data.raw_events
               WHERE block_height = {h:UInt32} AND extrinsic_index IS NULL
                 AND event_name IN (${sqlEventNameList(TRANSFER_EVENTS)})
-                AND JSONExtractString(args_json,'from') NOT LIKE '0x6d6f646c%'
-                AND JSONExtractString(args_json,'to') NOT LIKE '0x6d6f646c%'
+                ${nonPlumbingTransferLegSql("JSONExtractString(args_json,'from')", "JSONExtractString(args_json,'to')", transferPlumbingList)}
               ORDER BY event_index`,
       query_params: { h: height },
       format: 'JSONEachRow',
