@@ -93,7 +93,10 @@ function MultisigHoverCard({ origin, rect, onMouseEnter, onMouseLeave, onClose }
 }) {
   const viewportWidth = window.innerWidth
   const viewportHeight = window.innerHeight
-  const cardWidth = Math.min(340, Math.max(0, viewportWidth - 24))
+  // Wider than the global HoverCards card (360): a timeline row packs an
+  // AddrPill, an action link, and a timestamp on one line, which needs more
+  // room than an account/asset summary before it wraps awkwardly.
+  const cardWidth = Math.min(460, Math.max(0, viewportWidth - 24))
   const left = Math.max(12, Math.min(rect.left, viewportWidth - cardWidth - 12))
   const spaceBelow = viewportHeight - rect.bottom
   const placeAbove = spaceBelow < HOVER_FLIP_THRESHOLD && rect.top > spaceBelow
@@ -104,13 +107,14 @@ function MultisigHoverCard({ origin, rect, onMouseEnter, onMouseLeave, onClose }
   return createPortal(
     <div className="hovercard" style={{ left, width: cardWidth, overflowY: 'auto', ...vStyle }}
       onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} onClick={e => { e.stopPropagation(); onClose() }}>
-      <div className="hc-title" style={{ marginBottom: 8 }}>
+      <div className="hc-title" style={{ marginBottom: 8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         Multisig operation · {state}{origin.threshold ? ` · ${origin.threshold}/${origin.signatories}` : ''}
       </div>
       {origin.timeline?.map((entry, i) => (
-        <div className="hc-row" key={`${entry.extrinsicId}-${i}`}>
-          <AddrPill account={entry.account} noCopy />
-          <span><Link to={paths.extrinsic(entry.extrinsicId)} className="hash">{entry.action}</Link> <span className="mono muted">{entry.timestamp}</span></span>
+        <div className="hc-row" key={`${entry.extrinsicId}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
+          <span style={{ minWidth: 0, overflow: 'hidden' }}><AddrPill account={entry.account} noCopy /></span>
+          <Link to={paths.extrinsic(entry.extrinsicId)} className="hash" style={{ flexShrink: 0 }}>{entry.action}</Link>
+          <span className="mono muted" style={{ marginLeft: 'auto', flexShrink: 0 }}>{entry.timestamp}</span>
         </div>
       ))}
     </div>,
