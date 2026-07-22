@@ -85,7 +85,8 @@ function activityOffsetParam(query: Record<string, unknown>): number | null {
 
 function extrinsicFilters(query: Record<string, unknown>): ExtrinsicListFilters {
   const result = query.result === 'success' || query.result === 'failed' ? query.result : undefined
-  return { call: textParam(query, 'call', 128), result }
+  const origin = query.origin === 'signed' || query.origin === 'proxy' || query.origin === 'multisig' ? query.origin : undefined
+  return { call: textParam(query, 'call', 128), result, origin }
 }
 
 function eventFilters(query: Record<string, unknown>): EventListFilters {

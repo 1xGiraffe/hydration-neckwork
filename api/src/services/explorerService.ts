@@ -407,7 +407,7 @@ function timeWindow(from?: string, to?: string): string | null {
   return parts.length ? parts.join(' AND ') : null
 }
 
-export interface ExtrinsicListFilters { call?: string; result?: 'success' | 'failed' }
+export interface ExtrinsicListFilters { call?: string; result?: 'success' | 'failed'; origin?: 'signed' | 'proxy' | 'multisig' }
 export interface EventListFilters { event?: string }
 export interface ValueListFilters { token?: string; min?: number; unit?: 'usd' | 'token' }
 export interface VoteListFilters { referendum?: string; conviction?: string }
@@ -1347,6 +1347,14 @@ export async function getRecentBlocks(limit: number, offset = 0): Promise<BlockS
 }
 
 // single block
+export interface ExtrinsicOrigin {
+  kind: 'proxy' | 'multisig'
+  state?: 'pending' | 'executed' | 'cancelled'
+  threshold?: number
+  signatories?: number
+  approvals?: number
+  callHash?: string
+}
 export interface ExtrinsicSummary {
   blockHeight: number
   index: number
@@ -1356,6 +1364,7 @@ export interface ExtrinsicSummary {
   success: boolean
   callName: string
   fee: string | null
+  origin?: ExtrinsicOrigin
 }
 interface ExtrinsicSummaryRow {
   block_height: number
@@ -1366,19 +1375,40 @@ interface ExtrinsicSummaryRow {
   success: number
   call_name: string
   fee: string | null
+  display_call_name?: string
+  display_success?: number | null
+  origin_kind?: string
+  ms_state?: string
+  ms_threshold?: number
+  ms_signatories?: number
+  ms_approvals?: number
+  ms_call_hash?: string
 }
 
 function extrinsicSummary(row: ExtrinsicSummaryRow): ExtrinsicSummary {
-  return {
+  const summary: ExtrinsicSummary = {
     blockHeight: row.block_height,
     index: row.extrinsic_index,
     hash: row.extrinsic_hash,
     timestamp: row.ts,
     signer: row.signer ? accountRef(row.signer) : null,
-    success: row.success === 1,
-    callName: row.call_name,
+    success: row.display_success != null ? row.display_success === 1 : row.success === 1,
+    callName: row.display_call_name || row.call_name,
     fee: row.fee,
   }
+  if (row.origin_kind === 'proxy') {
+    summary.origin = { kind: 'proxy' }
+  } else if (row.origin_kind === 'multisig') {
+    summary.origin = {
+      kind: 'multisig',
+      state: (row.ms_state as ExtrinsicOrigin['state']) ?? 'executed',
+      threshold: row.ms_threshold || undefined,
+      signatories: row.ms_signatories || undefined,
+      approvals: row.ms_approvals || undefined,
+      callHash: row.ms_call_hash || undefined,
+    }
+  }
+  return summary
 }
 
 function uniqueExtrinsicSummaries(rows: ExtrinsicSummaryRow[]): ExtrinsicSummary[] {
@@ -11878,27 +11908,91 @@ export async function getTagValueEvents(tagId: string, from?: string, to?: strin
   return getAccountValueEvents(historyAccounts, `tag:${tagId}`, from, to, VALUE_EVENT_DEFAULT_LIMIT, historyAccounts)
 }
 
-// Signed extrinsics for an explicit account-id set (related-account set, or a
-// tag's members). Shared by getAddressExtrinsics and the tag extrinsics endpoint.
+// The account's extrinsics feed: extrinsics it SIGNED, plus extrinsics
+// executed ON ITS BEHALF — Proxy.proxy calls whose `real` is the account
+// (proxy_call_activity) and multisig operations of a multisig it is
+// (multisig_operation_activity), one row per operation at its anchor
+// extrinsic. Branches are unioned, deduplicated per extrinsic (on-behalf
+// wins so the badge survives self-proxy), sorted, then sliced — pagination
+// stays deterministic over the full filtered ordering. `call`/`result`
+// filters match the DISPLAYED call name / result (the inner call for
+// on-behalf rows); pending operations match neither result value.
 async function getAccountExtrinsics(accounts: string[], limit = 25, offset = 0, cacheKey?: string, filters: ExtrinsicListFilters = {}, from?: string, to?: string): Promise<ExtrinsicSummary[]> {
   const list = sqlAccountList(accounts)
   if (list === "''") return []
   const tw = timeWindow(from, to)
   const bound = tw ?? '1'
   return cached(`explorer:${cacheKey ?? `acct-extrinsics:${[...accounts].sort().join(',')}`}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : 8000, async () => {
-    const callFilter = filters.call?.trim() ? textNameFilter('call_name', 'callName') : ''
-    const resultFilter = filters.result === 'success' ? 'AND success = 1' : filters.result === 'failed' ? 'AND success = 0' : ''
+    const hasCallFilter = Boolean(filters.call?.trim())
+    const displayCallFilter = hasCallFilter ? textNameFilter('display_call_name', 'callName') : ''
+    const displayResultFilter = filters.result === 'success' ? 'AND display_success = 1'
+      : filters.result === 'failed' ? 'AND display_success = 0' : ''
+    const summaryCols = `x.block_height AS block_height, x.extrinsic_index AS extrinsic_index, x.extrinsic_hash AS extrinsic_hash,
+             toString(x.block_timestamp) AS ts, coalesce(x.signer, x.effective_signer) AS signer, x.success AS success,
+             x.call_name AS call_name, x.fee AS fee`
+    const branches: string[] = []
+    if (!filters.origin || filters.origin === 'signed') {
+      branches.push(`
+        SELECT ${summaryCols},
+               x.call_name AS display_call_name, toNullable(x.success) AS display_success,
+               'signed' AS origin_kind, '' AS ms_state, toUInt16(0) AS ms_threshold, toUInt16(0) AS ms_signatories,
+               toUInt16(0) AS ms_approvals, '' AS ms_call_hash
+        FROM price_data.raw_extrinsics AS x
+        WHERE ${bound} AND (x.signer IN (${list}) OR x.effective_signer IN (${list}))
+          ${displayCallFilter} ${displayResultFilter}
+        ORDER BY x.block_height DESC, x.extrinsic_index DESC
+        LIMIT {branchLimit:UInt32}`)
+    }
+    if (!filters.origin || filters.origin === 'proxy') {
+      branches.push(`
+        SELECT ${summaryCols},
+               if(p.inner_call_name != '', p.inner_call_name, p.proxy_call_name) AS display_call_name,
+               coalesce(p.inner_success, x.success) AS display_success,
+               'proxy' AS origin_kind, '' AS ms_state, toUInt16(0) AS ms_threshold, toUInt16(0) AS ms_signatories,
+               toUInt16(0) AS ms_approvals, '' AS ms_call_hash
+        FROM price_data.raw_extrinsics AS x
+        INNER JOIN (
+          SELECT block_height, extrinsic_index, call_address, proxy_call_name, inner_call_name, inner_success
+          FROM price_data.proxy_call_activity
+          WHERE real_account IN (${list})
+        ) AS p ON p.block_height = x.block_height AND p.extrinsic_index = x.extrinsic_index
+        WHERE (x.block_height, x.extrinsic_index) IN (
+            SELECT block_height, extrinsic_index FROM price_data.proxy_call_activity WHERE real_account IN (${list}))
+          AND ${bound} ${displayCallFilter} ${displayResultFilter}
+        ORDER BY x.block_height DESC, x.extrinsic_index DESC, p.call_address
+        LIMIT 1 BY x.block_height, x.extrinsic_index
+        LIMIT {branchLimit:UInt32}`)
+    }
+    if (!filters.origin || filters.origin === 'multisig') {
+      branches.push(`
+        SELECT ${summaryCols},
+               if(m.inner_call_name != '', m.inner_call_name, x.call_name) AS display_call_name,
+               if(m.state = 'pending', NULL, m.inner_success) AS display_success,
+               'multisig' AS origin_kind, toString(m.state) AS ms_state, m.threshold AS ms_threshold,
+               m.signatories AS ms_signatories, m.approvals AS ms_approvals,
+               if(m.inner_call_name = '', m.call_hash, '') AS ms_call_hash
+        FROM price_data.raw_extrinsics AS x
+        INNER JOIN (
+          SELECT multisig, call_hash, state, threshold, signatories, approvals,
+                 anchor_block_height, anchor_extrinsic_index, inner_call_name, inner_success
+          FROM price_data.multisig_operation_activity
+          WHERE multisig IN (${list})
+        ) AS m ON m.anchor_block_height = x.block_height AND m.anchor_extrinsic_index = x.extrinsic_index
+        WHERE (x.block_height, x.extrinsic_index) IN (
+            SELECT anchor_block_height, anchor_extrinsic_index FROM price_data.multisig_operation_activity WHERE multisig IN (${list}))
+          AND ${bound} ${displayCallFilter} ${displayResultFilter}
+        ORDER BY x.block_height DESC, x.extrinsic_index DESC, m.call_hash
+        LIMIT 1 BY x.block_height, x.extrinsic_index
+        LIMIT {branchLimit:UInt32}`)
+    }
     const res = await client.query({
       query: `
-        SELECT block_height, extrinsic_index, extrinsic_hash, toString(block_timestamp) AS ts, coalesce(signer, effective_signer) AS signer, success, call_name, fee
-        FROM price_data.raw_extrinsics
-        WHERE ${bound}
-          AND (signer IN (${list}) OR effective_signer IN (${list}))
-          ${callFilter}
-          ${resultFilter}
-        ORDER BY block_height DESC, extrinsic_index DESC
+        SELECT * FROM (${branches.join(' UNION ALL ')})
+        ORDER BY block_height DESC, extrinsic_index DESC, origin_kind = 'signed' ASC, origin_kind ASC
+        LIMIT 1 BY block_height, extrinsic_index
         LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
-      query_params: { limit, offset, ...textNameParams('callName', filters.call) }, format: 'JSONEachRow',
+      query_params: { limit, offset, branchLimit: offset + limit, ...textNameParams('callName', filters.call) },
+      format: 'JSONEachRow',
     })
     const rows = await res.json<ExtrinsicSummaryRow>()
     return uniqueExtrinsicSummaries(rows)
