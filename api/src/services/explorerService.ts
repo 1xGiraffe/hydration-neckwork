@@ -5734,7 +5734,7 @@ export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFi
   return true
 }
 
-interface LiquidityAmountCandidate {
+export interface LiquidityAmountCandidate {
   block_height: number
   event_index: number
   extrinsic_index: number | null
@@ -5744,49 +5744,51 @@ interface LiquidityAmountCandidate {
   amount: string
 }
 
-async function fillMissingLiquidityAmounts(rows: LiquidityAmountCandidate[]): Promise<void> {
-  const missing = rows.filter(r => !r.amount && r.extrinsic_index != null && r.who && r.asset_id != null)
-  if (!missing.length) return
-  const keys = [...new Set(missing.map(r => `${r.block_height}:${r.extrinsic_index}`))]
-  // Chunked: a deep-walk page can carry tens of thousands of fill candidates,
-  // and one unchunked IN-list lookup would blow the client's result-row cap.
-  const transferRows: { block_height: number; event_index: number; extrinsic_index: number; asset_id: number; to_acc: string; from_acc: string; amount: string }[] = []
-  for (let i = 0; i < keys.length; i += 5000) {
-    const tuples = keys.slice(i, i + 5000).map(k => { const [h, j] = k.split(':'); return `(${h},${j})` }).join(',')
-    const res = await client.query({
-      query: `
-        SELECT block_height, event_index, extrinsic_index,
-          asset_id AS asset_id,
-          to_account AS to_acc,
-          from_account AS from_acc,
-          amount AS amount
-        FROM price_data.transfer_activity_by_time
-        WHERE (block_height, extrinsic_index) IN (${tuples})`,
-      format: 'JSONEachRow',
-    })
-    transferRows.push(...await res.json<{ block_height: number; event_index: number; extrinsic_index: number; asset_id: number; to_acc: string; from_acc: string; amount: string }>())
-  }
-  const transfersByKey = new Map<string, { event_index: number; amount: string; used: boolean }[]>()
+export interface LiquidityTransferLeg {
+  block_height: number
+  event_index: number
+  extrinsic_index: number | null
+  asset_id: number
+  from_account: string
+  to_account: string
+  amount: string
+}
+
+// Omnipool/Stableswap liquidity events carry only shares (sharesRemoved / shares),
+// never the underlying token amount — that lives on the paired pool↔who transfer
+// leg. Recover it by matching each amount-less row to a leg with the same asset +
+// account and the nearest preceding event index, consuming each leg once.
+//
+// Legs are matched within the same DISPATCH SCOPE: signed user actions scope to
+// their extrinsic, while scheduler/hook-dispatched events (an Omnipool asset being
+// offboarded force-removes every position from a runtime hook) carry no extrinsic
+// and scope to the block's out-of-extrinsic legs. Isolating the scopes stops a
+// signed same-block transfer from being mistaken for an offboarding leg.
+export function matchLiquidityAmounts(missing: LiquidityAmountCandidate[], legs: LiquidityTransferLeg[]): void {
+  const scopeOf = (ext: number | null | undefined): string => ext == null ? 'blk' : String(ext)
+  const byTo = new Map<string, { event_index: number; amount: string; used: boolean }[]>()
   // Pool creation legs run who→pool (the opposite direction of a removal's
   // pool→who), so they're additionally indexed by the SENDER.
-  const transfersByFromKey = new Map<string, { event_index: number; amount: string; used: boolean }[]>()
-  for (const t of transferRows) {
+  const byFrom = new Map<string, { event_index: number; amount: string; used: boolean }[]>()
+  const push = (map: Map<string, { event_index: number; amount: string; used: boolean }[]>, key: string, entry: { event_index: number; amount: string; used: boolean }): void => {
+    const list = map.get(key) ?? []
+    list.push(entry)
+    map.set(key, list)
+  }
+  for (const t of legs) {
     if (!t.amount) continue
     const entry = { event_index: t.event_index, amount: t.amount, used: false }
-    const key = `${t.block_height}:${t.extrinsic_index}:${t.asset_id}:${t.to_acc.toLowerCase()}`
-    const list = transfersByKey.get(key) ?? []
-    list.push(entry)
-    transfersByKey.set(key, list)
-    const fromKey = `${t.block_height}:${t.extrinsic_index}:${t.asset_id}:${t.from_acc.toLowerCase()}`
-    const fromList = transfersByFromKey.get(fromKey) ?? []
-    fromList.push(entry)
-    transfersByFromKey.set(fromKey, fromList)
+    const scope = scopeOf(t.extrinsic_index)
+    push(byTo, `${t.block_height}:${scope}:${t.asset_id}:${t.to_account.toLowerCase()}`, entry)
+    push(byFrom, `${t.block_height}:${scope}:${t.asset_id}:${t.from_account.toLowerCase()}`, entry)
   }
-  for (const list of transfersByKey.values()) list.sort((a, b) => a.event_index - b.event_index)
-  for (const list of transfersByFromKey.values()) list.sort((a, b) => a.event_index - b.event_index)
+  for (const list of byTo.values()) list.sort((a, b) => a.event_index - b.event_index)
+  for (const list of byFrom.values()) list.sort((a, b) => a.event_index - b.event_index)
   for (const row of missing) {
-    const lookup = row.event_name === 'XYK.PoolCreated' ? transfersByFromKey : transfersByKey
-    const transfers = lookup.get(`${row.block_height}:${row.extrinsic_index}:${row.asset_id}:${row.who.toLowerCase()}`)
+    if (row.amount || !row.who || row.asset_id == null) continue
+    const scope = scopeOf(row.extrinsic_index)
+    const lookup = row.event_name === 'XYK.PoolCreated' ? byFrom : byTo
+    const transfers = lookup.get(`${row.block_height}:${scope}:${row.asset_id}:${row.who.toLowerCase()}`)
     if (!transfers?.length) continue
     const before = transfers
       .filter(t => !t.used && t.event_index < row.event_index)
@@ -5796,6 +5798,37 @@ async function fillMissingLiquidityAmounts(rows: LiquidityAmountCandidate[]): Pr
     match.used = true
     row.amount = match.amount
   }
+}
+
+async function fillMissingLiquidityAmounts(rows: LiquidityAmountCandidate[]): Promise<void> {
+  const missing = rows.filter(r => !r.amount && r.who && r.asset_id != null)
+  if (!missing.length) return
+  // Signed actions carry an extrinsic index; offboarding-style force-removals are
+  // dispatched from a runtime hook and carry none. Fetch the transfer legs for
+  // each: the touched extrinsics, plus the whole block's out-of-extrinsic legs.
+  const extKeys = [...new Set(missing.filter(r => r.extrinsic_index != null).map(r => `${r.block_height}:${r.extrinsic_index}`))]
+  const nullExtBlocks = [...new Set(missing.filter(r => r.extrinsic_index == null).map(r => r.block_height))]
+  const columns = `block_height, event_index, extrinsic_index, asset_id, from_account, to_account, amount`
+  const legs: LiquidityTransferLeg[] = []
+  // Chunked: a deep-walk page can carry tens of thousands of fill candidates,
+  // and one unchunked IN-list lookup would blow the client's result-row cap.
+  for (let i = 0; i < extKeys.length; i += 5000) {
+    const tuples = extKeys.slice(i, i + 5000).map(k => { const [h, j] = k.split(':'); return `(${h},${j})` }).join(',')
+    const res = await client.query({
+      query: `SELECT ${columns} FROM price_data.transfer_activity_by_time WHERE (block_height, extrinsic_index) IN (${tuples})`,
+      format: 'JSONEachRow',
+    })
+    legs.push(...await res.json<LiquidityTransferLeg>())
+  }
+  for (let i = 0; i < nullExtBlocks.length; i += 5000) {
+    const blocks = nullExtBlocks.slice(i, i + 5000).join(',')
+    const res = await client.query({
+      query: `SELECT ${columns} FROM price_data.transfer_activity_by_time WHERE block_height IN (${blocks}) AND extrinsic_index IS NULL`,
+      format: 'JSONEachRow',
+    })
+    legs.push(...await res.json<LiquidityTransferLeg>())
+  }
+  matchLiquidityAmounts(missing, legs)
 }
 
 // Liquidity provision/removal/creation events for Activity. The
