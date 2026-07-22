@@ -105,6 +105,7 @@ describe('buildMultisigOperations', () => {
       inner_call_name: 'Omnipool.sell', inner_success: 1, run_id: 7,
       initiator: SIG_A,
       timeline_actors: [SIG_A, SIG_B], timeline_actions: ['initiated', 'executed'], timeline_ts: [1000, 1100],
+      timeline_blocks: [100, 110], timeline_extrinsics: [2, 3],
     })
   })
 
@@ -185,6 +186,7 @@ describe('buildMultisigOperations', () => {
       anchor_block_height: 300, anchor_extrinsic_index: 1, call_hash: '',
       inner_call_name: 'Proxy.proxy', inner_success: 1,
       initiator: SIG_A, timeline_actors: [SIG_A], timeline_actions: ['executed'], timeline_ts: [3000],
+      timeline_blocks: [300], timeline_extrinsics: [1],
     })
   })
 

@@ -1355,7 +1355,7 @@ export interface ExtrinsicOrigin {
   approvals?: number
   callHash?: string
   initiator?: AccountRef
-  timeline?: { account: AccountRef; action: 'initiated' | 'approved' | 'executed' | 'cancelled'; timestamp: string }[]
+  timeline?: { account: AccountRef; action: 'initiated' | 'approved' | 'executed' | 'cancelled'; timestamp: string; extrinsicId: string }[]
 }
 export interface ExtrinsicSummary {
   blockHeight: number
@@ -1389,6 +1389,8 @@ interface ExtrinsicSummaryRow {
   ms_timeline_actors?: string[]
   ms_timeline_actions?: string[]
   ms_timeline_ts?: string[]
+  ms_timeline_blocks?: number[]
+  ms_timeline_extrinsics?: number[]
 }
 
 function extrinsicSummary(row: ExtrinsicSummaryRow): ExtrinsicSummary {
@@ -1418,6 +1420,7 @@ function extrinsicSummary(row: ExtrinsicSummaryRow): ExtrinsicSummary {
           account: accountRef(account),
           action: (row.ms_timeline_actions?.[i] ?? 'approved') as 'initiated' | 'approved' | 'executed' | 'cancelled',
           timestamp: row.ms_timeline_ts?.[i] ?? '',
+          extrinsicId: `${row.ms_timeline_blocks?.[i] ?? 0}-${row.ms_timeline_extrinsics?.[i] ?? 0}`,
         }))
         : undefined,
     }
@@ -11990,7 +11993,7 @@ async function getAccountExtrinsics(accounts: string[], limit = 25, offset = 0, 
         SELECT ${summaryCols},
                x.call_name AS display_call_name, toNullable(x.success) AS display_success,
                'signed' AS origin_kind, '' AS ms_state, toUInt16(0) AS ms_threshold, toUInt16(0) AS ms_signatories,
-               toUInt16(0) AS ms_approvals, '' AS ms_call_hash, '' AS ms_initiator, CAST([], 'Array(String)') AS ms_timeline_actors, CAST([], 'Array(String)') AS ms_timeline_actions, CAST([], 'Array(String)') AS ms_timeline_ts
+               toUInt16(0) AS ms_approvals, '' AS ms_call_hash, '' AS ms_initiator, CAST([], 'Array(String)') AS ms_timeline_actors, CAST([], 'Array(String)') AS ms_timeline_actions, CAST([], 'Array(String)') AS ms_timeline_ts, CAST([], 'Array(UInt32)') AS ms_timeline_blocks, CAST([], 'Array(UInt32)') AS ms_timeline_extrinsics
         FROM price_data.raw_extrinsics AS x
         WHERE ${bound} AND (x.signer IN (${list}) OR x.effective_signer IN (${list}))
           ${displayCallFilter} ${displayResultFilter}
@@ -12003,7 +12006,7 @@ async function getAccountExtrinsics(accounts: string[], limit = 25, offset = 0, 
                if(p.inner_call_name != '', p.inner_call_name, p.proxy_call_name) AS display_call_name,
                coalesce(p.inner_success, x.success) AS display_success,
                'proxy' AS origin_kind, '' AS ms_state, toUInt16(0) AS ms_threshold, toUInt16(0) AS ms_signatories,
-               toUInt16(0) AS ms_approvals, '' AS ms_call_hash, '' AS ms_initiator, CAST([], 'Array(String)') AS ms_timeline_actors, CAST([], 'Array(String)') AS ms_timeline_actions, CAST([], 'Array(String)') AS ms_timeline_ts
+               toUInt16(0) AS ms_approvals, '' AS ms_call_hash, '' AS ms_initiator, CAST([], 'Array(String)') AS ms_timeline_actors, CAST([], 'Array(String)') AS ms_timeline_actions, CAST([], 'Array(String)') AS ms_timeline_ts, CAST([], 'Array(UInt32)') AS ms_timeline_blocks, CAST([], 'Array(UInt32)') AS ms_timeline_extrinsics
         FROM price_data.raw_extrinsics AS x
         INNER JOIN (
           SELECT block_height, extrinsic_index, call_address, proxy_call_name, inner_call_name, inner_success
@@ -12025,12 +12028,12 @@ async function getAccountExtrinsics(accounts: string[], limit = 25, offset = 0, 
                'multisig' AS origin_kind, toString(m.state) AS ms_state, m.threshold AS ms_threshold,
                m.signatories AS ms_signatories, m.approvals AS ms_approvals,
                if(m.inner_call_name = '', m.call_hash, '') AS ms_call_hash,
-               m.initiator AS ms_initiator, m.timeline_actors AS ms_timeline_actors, CAST(m.timeline_actions, 'Array(String)') AS ms_timeline_actions, arrayMap(t -> toString(t), m.timeline_ts) AS ms_timeline_ts
+               m.initiator AS ms_initiator, m.timeline_actors AS ms_timeline_actors, CAST(m.timeline_actions, 'Array(String)') AS ms_timeline_actions, arrayMap(t -> toString(t), m.timeline_ts) AS ms_timeline_ts, m.timeline_blocks AS ms_timeline_blocks, m.timeline_extrinsics AS ms_timeline_extrinsics
         FROM price_data.raw_extrinsics AS x
         INNER JOIN (
           SELECT multisig, call_hash, state, threshold, signatories, approvals,
                  anchor_block_height, anchor_extrinsic_index, inner_call_name, inner_success,
-                 initiator, timeline_actors, timeline_actions, timeline_ts
+                 initiator, timeline_actors, timeline_actions, timeline_ts, timeline_blocks, timeline_extrinsics
           FROM price_data.multisig_operation_activity
           WHERE multisig IN (${list})
         ) AS m ON m.anchor_block_height = x.block_height AND m.anchor_extrinsic_index = x.extrinsic_index

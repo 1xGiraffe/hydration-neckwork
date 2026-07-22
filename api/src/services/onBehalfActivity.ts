@@ -125,6 +125,8 @@ export interface MultisigOperationRow {
   timeline_actors: string[] // chronological, parallel with timeline_actions/timeline_ts
   timeline_actions: MultisigTimelineAction[]
   timeline_ts: number[]
+  timeline_blocks: number[]
+  timeline_extrinsics: number[]
   anchor_block_height: number
   anchor_extrinsic_index: number
   anchor_timestamp: number
@@ -166,6 +168,7 @@ export function buildMultisigOperations(events: MultisigLifecycleEvent[], calls:
           actor: ev.actor,
           initiator: ev.kind === 'new' ? ev.actor : '',
           timeline_actors: [], timeline_actions: [], timeline_ts: [],
+          timeline_blocks: [], timeline_extrinsics: [],
           anchor_block_height: ev.kind === 'new' ? ev.block : tpH,
           anchor_extrinsic_index: ev.kind === 'new' ? ev.extrinsic : tpI,
           anchor_timestamp: ev.ts,
@@ -180,6 +183,8 @@ export function buildMultisigOperations(events: MultisigLifecycleEvent[], calls:
     op.row.timeline_actors.push(ev.actor)
     op.row.timeline_actions.push(ev.kind === 'new' ? 'initiated' : ev.kind === 'approval' ? 'approved' : ev.kind)
     op.row.timeline_ts.push(ev.ts)
+    op.row.timeline_blocks.push(ev.block)
+    op.row.timeline_extrinsics.push(ev.extrinsic)
     if (ev.kind === 'new' || ev.kind === 'approval' || ev.kind === 'executed') op.row.approvals += 1
     if (ev.kind === 'executed') {
       op.row.state = 'executed'
@@ -243,6 +248,7 @@ export function buildMultisigOperations(events: MultisigLifecycleEvent[], calls:
       actor: c.originAccount,
       initiator: c.originAccount,
       timeline_actors: [c.originAccount], timeline_actions: ['executed'], timeline_ts: [c.ts],
+      timeline_blocks: [c.block], timeline_extrinsics: [c.extrinsic],
       anchor_block_height: c.block, anchor_extrinsic_index: c.extrinsic, anchor_timestamp: c.ts,
       inner_call_name: c.innerCallName ?? '',
       inner_success: c.innerSuccess ?? c.callSuccess ?? null,
