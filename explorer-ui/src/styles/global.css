@@ -736,11 +736,12 @@ svg { display: block; }
 /* Table cells: same treatment as the hovercard's .hc-call (above) — keep the
    pill one line and ellipsize an over-long method name (e.g.
    OmnipoolLiquidityMining.add_liquidity_and_join_farms) instead of wrapping
-   the row. Scoped to .tbl td so the plain `.call` pill elsewhere (chips,
-   expanded-row details) keeps its intrinsic width. The pallet name (color-
-   coded, most scannable) always shows in full; only .method truncates. */
-.tbl td .call { display: inline-flex; max-width: 100%; min-width: 0; white-space: nowrap; overflow: hidden; }
-.tbl td .call .method { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+   the row. Scoped to the Call/Event cell's own pill (a direct child of its
+   td) so a `.call` pill nested deeper — e.g. inside the expanded-row panel's
+   `.exp-evs` — keeps its intrinsic width. The pallet name (color-coded, most
+   scannable) always shows in full; only .method truncates. */
+.tbl td > .call { display: inline-flex; max-width: 100%; min-width: 0; white-space: nowrap; overflow: hidden; }
+.tbl td > .call .method { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* asset chip */
 /* vertical-align matters only when the chip sits in flowing text (e.g. the HSM
