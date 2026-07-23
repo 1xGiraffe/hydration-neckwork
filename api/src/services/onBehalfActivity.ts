@@ -1,15 +1,25 @@
-// Pure reconstruction logic for the two on-behalf extrinsic projections:
+// Pure reconstruction logic for the two on-behalf extrinsic surfaces,
+// reused at request time from MV-fed tables (no more derivation jobs):
 //
 //   proxy_call_activity        one row per Proxy.proxy / Proxy.proxy_announced
 //                              call (any nesting depth), keyed by the proxied
-//                              ("real") account
-//   multisig_operation_activity one row per multisig OPERATION at its latest
-//                              state (pending / executed / cancelled), keyed by
-//                              the derived multisig account
+//                              ("real") account. The MV records the call row
+//                              itself; the dispatched child's name/success is
+//                              resolved per request via resolveProxyInner,
+//                              bounded to the page's candidate anchors.
+//   multisig operations        reconstructed per request from an account's
+//                              multisig_event_activity rows via
+//                              buildMultisigOperations, then enriched with
+//                              call-derived facts (threshold, member count,
+//                              inner call) via enrichMultisigOperations,
+//                              bounded to the page's candidates. as_multi_
+//                              threshold_1 calls (no lifecycle events) are
+//                              synthesized separately by threshold1Operations
+//                              from a snapshot refreshed alongside the shared
+//                              proxy/multisig directory.
 //
-// The derivation jobs in derivations/jobs.ts load deduplicated raw rows and
-// feed them through these functions; keeping them pure lets the lifecycle
-// walk and the call-tree matching be unit-tested without ClickHouse.
+// Keeping this pure lets the lifecycle walk and the call-tree matching be
+// unit-tested without ClickHouse.
 
 import { deriveMultisigAccountId } from './proxyMultisigService.ts'
 
@@ -26,15 +36,6 @@ export function proxyChildAddress(callAddress: string): string {
 
 // ───────────────────────── proxy_call_activity ─────────────────────────
 
-export interface ProxyCallSource {
-  block: number
-  extrinsic: number
-  callAddress: string
-  ts: number // unix seconds
-  proxyCallName: string // 'Proxy.proxy' | 'Proxy.proxy_announced'
-  realAccount: string // lowercase 0x-hex pubkey from args_json.real
-}
-
 export interface ExtrinsicCallRow {
   block: number
   extrinsic: number
@@ -43,41 +44,27 @@ export interface ExtrinsicCallRow {
   success: number | null
 }
 
-export interface ProxyCallActivityRow {
-  real_account: string
-  block_height: number
-  extrinsic_index: number
-  call_address: string
-  block_timestamp: number // unix seconds; job converts on insert
-  proxy_call_name: string
-  inner_call_name: string // '' = inner call never dispatched (e.g. failed extrinsic)
-  inner_success: number | null
-  run_id: number
+export interface ProxyInnerInfo {
+  innerCallName: string
+  innerSuccess: number | null
 }
 
-export function buildProxyCallRows(proxies: ProxyCallSource[], calls: ExtrinsicCallRow[], runId: number): ProxyCallActivityRow[] {
+export function resolveProxyInner(
+  anchors: { block: number; extrinsic: number; callAddress: string }[],
+  calls: ExtrinsicCallRow[],
+): Map<string, ProxyInnerInfo> {
   const byAddress = new Map<string, ExtrinsicCallRow>()
   for (const c of calls) byAddress.set(`${c.block}:${c.extrinsic}:${c.callAddress}`, c)
-  const rows: ProxyCallActivityRow[] = []
-  for (const p of proxies) {
-    if (!ACCOUNT_RE.test(p.realAccount)) continue
-    const child = byAddress.get(`${p.block}:${p.extrinsic}:${proxyChildAddress(p.callAddress)}`)
-    rows.push({
-      real_account: p.realAccount,
-      block_height: p.block,
-      extrinsic_index: p.extrinsic,
-      call_address: p.callAddress,
-      block_timestamp: p.ts,
-      proxy_call_name: p.proxyCallName,
-      inner_call_name: child?.callName ?? '',
-      inner_success: child?.success ?? null,
-      run_id: runId,
-    })
+  const result = new Map<string, ProxyInnerInfo>()
+  for (const a of anchors) {
+    const child = byAddress.get(`${a.block}:${a.extrinsic}:${proxyChildAddress(a.callAddress)}`)
+    if (!child) continue
+    result.set(`${a.block}:${a.extrinsic}:${a.callAddress}`, { innerCallName: child.callName, innerSuccess: child.success })
   }
-  return rows
+  return result
 }
 
-// ─────────────────────── multisig_operation_activity ───────────────────────
+// ─────────────────────── multisig operations ───────────────────────
 
 export interface MultisigLifecycleEvent {
   kind: 'new' | 'approval' | 'executed' | 'cancelled'
@@ -132,26 +119,17 @@ export interface MultisigOperationRow {
   anchor_timestamp: number
   inner_call_name: string // '' = only the call hash is known
   inner_success: number | null // dispatch result when executed; null otherwise
-  run_id: number
 }
 
-interface OpState {
+export interface MultisigOperationState {
   row: MultisigOperationRow
   // extrinsics this op's events touched, with the acting signatory — the
   // derive-check needs the actor paired with each candidate extrinsic.
   touchpoints: { block: number; extrinsic: number; actor: string }[]
 }
 
-export function buildMultisigOperations(events: MultisigLifecycleEvent[], calls: MultisigCallInfo[], runId: number): MultisigOperationRow[] {
-  const callsByExtrinsic = new Map<string, MultisigCallInfo[]>()
-  for (const c of calls) {
-    const key = `${c.block}:${c.extrinsic}`
-    const list = callsByExtrinsic.get(key) ?? []
-    list.push(c)
-    callsByExtrinsic.set(key, list)
-  }
-
-  const ops = new Map<string, OpState>()
+export function buildMultisigOperations(events: MultisigLifecycleEvent[]): MultisigOperationState[] {
+  const ops = new Map<string, MultisigOperationState>()
   const sorted = [...events].sort((a, b) => a.block - b.block || a.eventIndex - b.eventIndex)
   for (const ev of sorted) {
     const tpH = ev.kind === 'new' ? ev.block : ev.timepointHeight
@@ -172,7 +150,7 @@ export function buildMultisigOperations(events: MultisigLifecycleEvent[], calls:
           anchor_block_height: ev.kind === 'new' ? ev.block : tpH,
           anchor_extrinsic_index: ev.kind === 'new' ? ev.extrinsic : tpI,
           anchor_timestamp: ev.ts,
-          inner_call_name: '', inner_success: null, run_id: runId,
+          inner_call_name: '', inner_success: null,
         },
         touchpoints: [],
       }
@@ -202,12 +180,24 @@ export function buildMultisigOperations(events: MultisigLifecycleEvent[], calls:
     }
   }
 
-  // Attach call-derived facts (threshold, member count, inner call). A call
-  // belongs to an op only when createKeyMulti over {event actor} ∪
-  // otherSignatories at the call's threshold reproduces the op's multisig —
-  // the same authoritative pairing refreshMultisigs uses. Anchor extrinsic
-  // first so the executing as_multi (which carries the call body) wins.
-  for (const op of ops.values()) {
+  return [...ops.values()]
+}
+
+// Attach call-derived facts (threshold, member count, inner call). A call
+// belongs to an op only when createKeyMulti over {event actor} ∪
+// otherSignatories at the call's threshold reproduces the op's multisig —
+// the same authoritative pairing refreshMultisigs uses. Anchor extrinsic
+// first so the executing as_multi (which carries the call body) wins.
+export function enrichMultisigOperations(states: MultisigOperationState[], calls: MultisigCallInfo[]): void {
+  const callsByExtrinsic = new Map<string, MultisigCallInfo[]>()
+  for (const c of calls) {
+    const key = `${c.block}:${c.extrinsic}`
+    const list = callsByExtrinsic.get(key) ?? []
+    list.push(c)
+    callsByExtrinsic.set(key, list)
+  }
+
+  for (const op of states) {
     const candidates = [...op.touchpoints].sort((a, b) =>
       Number(b.block === op.row.anchor_block_height && b.extrinsic === op.row.anchor_extrinsic_index)
       - Number(a.block === op.row.anchor_block_height && a.extrinsic === op.row.anchor_extrinsic_index))
@@ -229,13 +219,15 @@ export function buildMultisigOperations(events: MultisigLifecycleEvent[], calls:
       break
     }
   }
+}
 
-  // as_multi_threshold_1 dispatches immediately and emits no Multisig events —
-  // each call is its own executed operation, addressed via createKeyMulti at
-  // threshold 1. The runtime call hash is not recomputable from decoded JSON;
-  // the inner call name is always known (the child was dispatched), so the
-  // hash stays empty.
-  const rows = [...ops.values()].map(o => o.row)
+// as_multi_threshold_1 dispatches immediately and emits no Multisig events —
+// each call is its own executed operation, addressed via createKeyMulti at
+// threshold 1. The runtime call hash is not recomputable from decoded JSON;
+// the inner call name is always known (the child was dispatched), so the
+// hash stays empty.
+export function threshold1Operations(calls: MultisigCallInfo[]): MultisigOperationRow[] {
+  const rows: MultisigOperationRow[] = []
   for (const c of calls) {
     if (c.callName !== 'Multisig.as_multi_threshold_1') continue
     if (!c.originAccount || !ACCOUNT_RE.test(c.originAccount)) continue
@@ -252,7 +244,6 @@ export function buildMultisigOperations(events: MultisigLifecycleEvent[], calls:
       anchor_block_height: c.block, anchor_extrinsic_index: c.extrinsic, anchor_timestamp: c.ts,
       inner_call_name: c.innerCallName ?? '',
       inner_success: c.innerSuccess ?? c.callSuccess ?? null,
-      run_id: runId,
     })
   }
   return rows
