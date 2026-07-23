@@ -1442,7 +1442,9 @@ function extrinsicSummary(row: ExtrinsicSummaryRow): ExtrinsicSummary {
     success: row.display_success != null ? row.display_success === 1 : row.success === 1,
     callName: row.display_call_name || row.call_name,
     fee: row.fee,
-    errorReason: row.success === 0 ? (dispatchErrorReason(row.error_json ?? null, row.spec_version ?? 0, resolveModuleError) ?? undefined) : undefined,
+    errorReason: (row.display_success != null ? row.display_success === 0 : row.success === 0)
+      ? (dispatchErrorReason(row.error_json ?? null, row.spec_version ?? 0, resolveModuleError) ?? undefined)
+      : undefined,
   }
   if (row.origin_kind === 'proxy') {
     summary.origin = { kind: 'proxy' }
@@ -11025,7 +11027,7 @@ async function accountMultisigOps(accounts: string[]): Promise<MultisigOperation
                toUInt32(toUnixTimestamp(block_timestamp)) AS ts, event_name,
                multisig, lower(actor) AS actor, call_hash AS callHash,
                timepoint_height AS timepointHeight, timepoint_index AS timepointIndex,
-               has_timepoint AS hasTimepoint, result_ok AS resultOk
+               has_timepoint AS hasTimepoint, result_ok AS resultOk, result_error_json AS resultErrorJson
         FROM price_data.multisig_event_activity FINAL
         WHERE multisig IN (${list}) AND extrinsic_index IS NOT NULL`,
       format: 'JSONEachRow',
@@ -11034,6 +11036,7 @@ async function accountMultisigOps(accounts: string[]): Promise<MultisigOperation
       block: number; eventIndex: number; extrinsic: number; ts: number; event_name: string
       multisig: string; actor: string; callHash: string
       timepointHeight: number; timepointIndex: number; hasTimepoint: number; resultOk: number | null
+      resultErrorJson: string | null
     }>()
     const events: MultisigLifecycleEvent[] = rows.map(r => ({
       kind: MS_EVENT_KIND[r.event_name],
@@ -11042,6 +11045,7 @@ async function accountMultisigOps(accounts: string[]): Promise<MultisigOperation
       timepointIndex: r.hasTimepoint ? r.timepointIndex : null,
       actor: r.actor, block: r.block, extrinsic: r.extrinsic, eventIndex: r.eventIndex, ts: r.ts,
       ok: r.event_name === 'Multisig.MultisigExecuted' ? r.resultOk === 1 : null,
+      errorJson: r.resultErrorJson ?? null,
     }))
     const states = buildMultisigOperations(events)
     for (const row of threshold1OpsFor(accounts)) states.push({ row, touchpoints: [] })
@@ -12209,7 +12213,7 @@ function msAnchorWindow(from?: string, to?: string): ((ts: number) => boolean) |
 // ReplacingMergeTree read here. Shared by proxy inner-call resolution and
 // multisig call/child/origin resolution — both need every call address inside
 // their candidate extrinsics, not just the wrapper's own row.
-interface RawCallLookupRow { block: number; extrinsic: number; callAddress: string; callName: string; success: number | null; originJson: string | null }
+interface RawCallLookupRow { block: number; extrinsic: number; callAddress: string; callName: string; success: number | null; originJson: string | null; errorJson: string | null }
 async function loadRawCallsForTuples(tuples: Set<string>): Promise<RawCallLookupRow[]> {
   const out: RawCallLookupRow[] = []
   const keys = [...tuples]
@@ -12217,7 +12221,7 @@ async function loadRawCallsForTuples(tuples: Set<string>): Promise<RawCallLookup
     const inList = keys.slice(i, i + 10_000).map(k => `(${k})`).join(',')
     const res = await client.query({
       query: `SELECT block_height AS block, assumeNotNull(extrinsic_index) AS extrinsic, call_address AS callAddress,
-                     call_name AS callName, success, origin_json AS originJson
+                     call_name AS callName, success, origin_json AS originJson, error_json AS errorJson
               FROM price_data.raw_calls
               WHERE (block_height, assumeNotNull(extrinsic_index)) IN (${inList}) AND extrinsic_index IS NOT NULL
               ORDER BY ingested_at DESC
@@ -12300,6 +12304,7 @@ async function loadMultisigCallInfo(tupleKeys: Set<string>): Promise<MultisigCal
         callSuccess: own?.success ?? null,
         innerCallName: child?.callName ?? null,
         innerSuccess: child?.success ?? null,
+        innerErrorJson: child?.errorJson ?? null,
         ts: r.ts,
       })
     }
@@ -12312,7 +12317,7 @@ async function enrichProxyCandidates(scoped: OnBehalfCandidate[]): Promise<Map<s
   if (!proxyCands.length) return new Map()
   const tuples = new Set(proxyCands.map(c => `${c.block},${c.extrinsic}`))
   const rawCalls = await loadRawCallsForTuples(tuples)
-  const calls: ExtrinsicCallRow[] = rawCalls.map(c => ({ block: c.block, extrinsic: c.extrinsic, callAddress: c.callAddress, callName: c.callName, success: c.success }))
+  const calls: ExtrinsicCallRow[] = rawCalls.map(c => ({ block: c.block, extrinsic: c.extrinsic, callAddress: c.callAddress, callName: c.callName, success: c.success, errorJson: c.errorJson }))
   return resolveProxyInner(proxyCands.map(c => ({ block: c.block, extrinsic: c.extrinsic, callAddress: c.callAddress! })), calls)
 }
 
@@ -12368,6 +12373,7 @@ function buildOnBehalfRow(c: OnBehalfCandidate, hydrate: ExtrinsicHydrationRow |
       ...base,
       display_call_name: inner?.innerCallName || c.proxyCallName!,
       display_success: inner?.innerSuccess ?? hydrate.success,
+      error_json: inner?.innerSuccess === 0 ? inner.innerErrorJson : hydrate.error_json,
       origin_kind: 'proxy',
     }
   }
@@ -12376,6 +12382,7 @@ function buildOnBehalfRow(c: OnBehalfCandidate, hydrate: ExtrinsicHydrationRow |
     ...base,
     display_call_name: op.inner_call_name || hydrate.callName,
     display_success: op.state === 'pending' ? null : op.inner_success,
+    error_json: op.state === 'executed' && op.inner_success === 0 ? op.inner_error_json : hydrate.error_json,
     origin_kind: 'multisig',
     ms_state: op.state,
     ms_threshold: op.threshold,

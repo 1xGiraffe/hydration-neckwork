@@ -21,19 +21,19 @@ const HASH_1 = `0x${'11'.repeat(32)}`
 const HASH_2 = `0x${'22'.repeat(32)}`
 
 function call(over: Partial<ExtrinsicCallRow>): ExtrinsicCallRow {
-  return { block: 100, extrinsic: 1, callAddress: '0', callName: 'Balances.transfer', success: 1, ...over }
+  return { block: 100, extrinsic: 1, callAddress: '0', callName: 'Balances.transfer', success: 1, errorJson: null, ...over }
 }
 function msEvent(over: Partial<MultisigLifecycleEvent>): MultisigLifecycleEvent {
   return {
     kind: 'new', multisig: MS_2OF3, callHash: HASH_1, timepointHeight: null, timepointIndex: null,
-    actor: SIG_A, block: 100, extrinsic: 2, eventIndex: 5, ts: 1000, ok: null, ...over,
+    actor: SIG_A, block: 100, extrinsic: 2, eventIndex: 5, ts: 1000, ok: null, errorJson: null, ...over,
   }
 }
 function msCall(over: Partial<MultisigCallInfo>): MultisigCallInfo {
   return {
     block: 100, extrinsic: 2, callAddress: 'root', callName: 'Multisig.as_multi',
     threshold: 2, otherSignatories: [SIG_B, SIG_C], originAccount: SIG_A, callSuccess: 1,
-    innerCallName: 'Omnipool.sell', innerSuccess: 1, ts: 1000, ...over,
+    innerCallName: 'Omnipool.sell', innerSuccess: 1, innerErrorJson: null, ts: 1000, ...over,
   }
 }
 
@@ -52,7 +52,16 @@ describe('resolveProxyInner', () => {
       [{ block: 100, extrinsic: 1, callAddress: 'root' }],
       [call({ callAddress: '0', callName: 'PolkadotXcm.transfer_assets', success: 1 })],
     )
-    expect(map.get(`100:1:root`)).toEqual({ innerCallName: 'PolkadotXcm.transfer_assets', innerSuccess: 1 })
+    expect(map.get(`100:1:root`)).toEqual({ innerCallName: 'PolkadotXcm.transfer_assets', innerSuccess: 1, innerErrorJson: null })
+  })
+
+  it('attaches the dispatched child call error payload when the child failed', () => {
+    const errorJson = '{"__kind":"Module","value":{"index":65,"error":"0x04000000"}}'
+    const map = resolveProxyInner(
+      [{ block: 100, extrinsic: 1, callAddress: 'root' }],
+      [call({ callAddress: '0', callName: 'Omnipool.sell', success: 0, errorJson })],
+    )
+    expect(map.get(`100:1:root`)).toEqual({ innerCallName: 'Omnipool.sell', innerSuccess: 0, innerErrorJson: errorJson })
   })
 
   it('matches a batch-nested proxy to its own child, not the batch sibling', () => {
@@ -63,7 +72,7 @@ describe('resolveProxyInner', () => {
         call({ callAddress: '1.0', callName: 'Omnipool.sell', success: 0 }),
       ],
     )
-    expect(map.get(`100:1:1`)).toEqual({ innerCallName: 'Omnipool.sell', innerSuccess: 0 })
+    expect(map.get(`100:1:1`)).toEqual({ innerCallName: 'Omnipool.sell', innerSuccess: 0, innerErrorJson: null })
   })
 
   it('has no entry when the inner call was never dispatched (failed extrinsic)', () => {
@@ -89,7 +98,7 @@ describe('buildMultisigOperations / enrichMultisigOperations', () => {
       multisig: MS_2OF3, call_hash: HASH_1, timepoint_height: 100, timepoint_index: 2,
       state: 'executed', threshold: 2, signatories: 3, approvals: 2, actor: SIG_B,
       anchor_block_height: 110, anchor_extrinsic_index: 3, anchor_timestamp: 1100,
-      inner_call_name: 'Omnipool.sell', inner_success: 1,
+      inner_call_name: 'Omnipool.sell', inner_success: 1, inner_error_json: null,
       initiator: SIG_A,
       timeline_actors: [SIG_A, SIG_B], timeline_actions: ['initiated', 'executed'], timeline_ts: [1000, 1100],
       timeline_blocks: [100, 110], timeline_extrinsics: [2, 3],
@@ -97,15 +106,17 @@ describe('buildMultisigOperations / enrichMultisigOperations', () => {
   })
 
   it('records a failed inner dispatch from the executed event result', () => {
+    const errorJson = '{"__kind":"Module","value":{"index":65,"error":"0x04000000"}}'
     const events = [
       msEvent({ kind: 'new' }),
-      msEvent({ kind: 'executed', actor: SIG_B, block: 110, extrinsic: 3, eventIndex: 9, timepointHeight: 100, timepointIndex: 2, ok: false }),
+      msEvent({ kind: 'executed', actor: SIG_B, block: 110, extrinsic: 3, eventIndex: 9, timepointHeight: 100, timepointIndex: 2, ok: false, errorJson }),
     ]
     const states = buildMultisigOperations(events)
     enrichMultisigOperations(states, [msCall({ block: 110, extrinsic: 3, originAccount: SIG_B, innerSuccess: 0 })])
     const [op] = states.map(s => s.row)
     expect(op.state).toBe('executed')
     expect(op.inner_success).toBe(0)
+    expect(op.inner_error_json).toBe(errorJson)
   })
 
   it('keeps a not-yet-approved operation pending, anchored at the initiating extrinsic', () => {
@@ -204,9 +215,20 @@ describe('threshold1Operations', () => {
       multisig: deriveMultisigAccountId([SIG_A, SIG_B].sort(), 1),
       state: 'executed', threshold: 1, signatories: 2, approvals: 1,
       anchor_block_height: 300, anchor_extrinsic_index: 1, call_hash: '',
-      inner_call_name: 'Proxy.proxy', inner_success: 1,
+      inner_call_name: 'Proxy.proxy', inner_success: 1, inner_error_json: null,
       initiator: SIG_A, timeline_actors: [SIG_A], timeline_actions: ['executed'], timeline_ts: [3000],
       timeline_blocks: [300], timeline_extrinsics: [1],
     })
+  })
+
+  it('sets inner_error_json from the child call error payload when the inner dispatch failed', () => {
+    const errorJson = '{"__kind":"Module","value":{"index":65,"error":"0x04000000"}}'
+    const t1 = msCall({
+      block: 300, extrinsic: 1, callName: 'Multisig.as_multi_threshold_1', threshold: null,
+      otherSignatories: [SIG_B], originAccount: SIG_A, innerCallName: 'Omnipool.sell', innerSuccess: 0,
+      innerErrorJson: errorJson, ts: 3000,
+    })
+    const [op] = threshold1Operations([t1])
+    expect(op.inner_error_json).toBe(errorJson)
   })
 })

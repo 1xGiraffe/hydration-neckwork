@@ -202,7 +202,7 @@ async function refreshThreshold1Ops(): Promise<void> {
 
   const keys = [...new Set(t1Rows.map(r => `${r.block}:${r.extrinsic}`))]
 
-  const callsByKeyAddress = new Map<string, { callName: string; success: number | null; originJson: string }>()
+  const callsByKeyAddress = new Map<string, { callName: string; success: number | null; originJson: string; errorJson: string | null }>()
   const signerByKey = new Map<string, string>()
   for (let start = 0; start < keys.length; start += 10_000) {
     const chunk = keys.slice(start, start + 10_000)
@@ -210,14 +210,15 @@ async function refreshThreshold1Ops(): Promise<void> {
 
     const callsRes = await client.query({
       query: `SELECT block_height AS block, assumeNotNull(extrinsic_index) AS extrinsic,
-                     call_address AS callAddress, call_name AS callName, success, origin_json AS originJson
+                     call_address AS callAddress, call_name AS callName, success, origin_json AS originJson,
+                     error_json AS errorJson
               FROM price_data.raw_calls
               WHERE (block_height, assumeNotNull(extrinsic_index)) IN (${tuples}) AND extrinsic_index IS NOT NULL
               ORDER BY ingested_at DESC LIMIT 1 BY block_height, assumeNotNull(extrinsic_index), call_address`,
       format: 'JSONEachRow',
     })
-    for (const r of await callsRes.json<{ block: number; extrinsic: number; callAddress: string; callName: string; success: number | null; originJson: string }>()) {
-      callsByKeyAddress.set(`${r.block}:${r.extrinsic}:${r.callAddress}`, { callName: r.callName, success: r.success, originJson: r.originJson })
+    for (const r of await callsRes.json<{ block: number; extrinsic: number; callAddress: string; callName: string; success: number | null; originJson: string; errorJson: string | null }>()) {
+      callsByKeyAddress.set(`${r.block}:${r.extrinsic}:${r.callAddress}`, { callName: r.callName, success: r.success, originJson: r.originJson, errorJson: r.errorJson })
     }
 
     const signersRes = await client.query({
@@ -264,6 +265,7 @@ async function refreshThreshold1Ops(): Promise<void> {
       callSuccess: own?.success ?? null,
       innerCallName: child?.callName ?? null,
       innerSuccess: child?.success ?? null,
+      innerErrorJson: child?.errorJson ?? null,
       ts: r.ts,
     })
   }

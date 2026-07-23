@@ -42,11 +42,13 @@ export interface ExtrinsicCallRow {
   callAddress: string
   callName: string
   success: number | null
+  errorJson: string | null
 }
 
 export interface ProxyInnerInfo {
   innerCallName: string
   innerSuccess: number | null
+  innerErrorJson: string | null
 }
 
 export function resolveProxyInner(
@@ -59,7 +61,7 @@ export function resolveProxyInner(
   for (const a of anchors) {
     const child = byAddress.get(`${a.block}:${a.extrinsic}:${proxyChildAddress(a.callAddress)}`)
     if (!child) continue
-    result.set(`${a.block}:${a.extrinsic}:${a.callAddress}`, { innerCallName: child.callName, innerSuccess: child.success })
+    result.set(`${a.block}:${a.extrinsic}:${a.callAddress}`, { innerCallName: child.callName, innerSuccess: child.success, innerErrorJson: child.errorJson })
   }
   return result
 }
@@ -80,6 +82,7 @@ export interface MultisigLifecycleEvent {
   eventIndex: number
   ts: number
   ok: boolean | null // 'executed' only: result.__kind === 'Ok'
+  errorJson: string | null // 'executed' only: result.value when result.__kind === 'Err'
 }
 
 export interface MultisigCallInfo {
@@ -93,6 +96,7 @@ export interface MultisigCallInfo {
   callSuccess: number | null
   innerCallName: string | null // dispatched child call, when present
   innerSuccess: number | null
+  innerErrorJson: string | null // dispatched child call's error_json, when it failed
   ts: number
 }
 
@@ -119,6 +123,7 @@ export interface MultisigOperationRow {
   anchor_timestamp: number
   inner_call_name: string // '' = only the call hash is known
   inner_success: number | null // dispatch result when executed; null otherwise
+  inner_error_json: string | null // decoded inner DispatchError when the executed dispatch failed; null otherwise
 }
 
 export interface MultisigOperationState {
@@ -150,7 +155,7 @@ export function buildMultisigOperations(events: MultisigLifecycleEvent[]): Multi
           anchor_block_height: ev.kind === 'new' ? ev.block : tpH,
           anchor_extrinsic_index: ev.kind === 'new' ? ev.extrinsic : tpI,
           anchor_timestamp: ev.ts,
-          inner_call_name: '', inner_success: null,
+          inner_call_name: '', inner_success: null, inner_error_json: null,
         },
         touchpoints: [],
       }
@@ -171,6 +176,7 @@ export function buildMultisigOperations(events: MultisigLifecycleEvent[]): Multi
       op.row.anchor_extrinsic_index = ev.extrinsic
       op.row.anchor_timestamp = ev.ts
       op.row.inner_success = ev.ok == null ? null : ev.ok ? 1 : 0
+      op.row.inner_error_json = ev.ok === false ? ev.errorJson : null
     } else if (ev.kind === 'cancelled') {
       op.row.state = 'cancelled'
       op.row.actor = ev.actor
@@ -244,6 +250,7 @@ export function threshold1Operations(calls: MultisigCallInfo[]): MultisigOperati
       anchor_block_height: c.block, anchor_extrinsic_index: c.extrinsic, anchor_timestamp: c.ts,
       inner_call_name: c.innerCallName ?? '',
       inner_success: c.innerSuccess ?? c.callSuccess ?? null,
+      inner_error_json: c.innerSuccess === 0 ? c.innerErrorJson : null,
     })
   }
   return rows
