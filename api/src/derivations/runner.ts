@@ -18,9 +18,7 @@ import { createLongOpClickHouseClient, type ClickHouseClient } from '../db/clien
 import { loadExplorerAssets } from '../services/explorerAssets.ts'
 import {
   runAccountTradeVolume,
-  runMultisigOperations,
   runOmnipoolOwnerIntervals,
-  runProxyCallActivity,
   runXykFarmIntervals,
   runXykTotalShares,
   type DerivationResult,
@@ -62,8 +60,6 @@ const JOBS: DerivationJob[] = [
   { model: 'omnipool_owner_intervals', run: runOmnipoolOwnerIntervals },
   { model: 'xyk_farm_intervals', run: runXykFarmIntervals },
   { model: 'xyk_total_shares', run: runXykTotalShares },
-  { model: 'proxy_call_activity', run: runProxyCallActivity },
-  { model: 'multisig_operations', run: runMultisigOperations },
 ]
 
 export interface RunCycleDeps {
