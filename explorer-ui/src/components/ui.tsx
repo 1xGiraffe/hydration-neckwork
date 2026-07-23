@@ -547,7 +547,14 @@ export function CallPill({ name }: { name: string }) {
     </span>
   )
 }
-export function StatusBadge({ ok, reason }: { ok: boolean; reason?: string }) {
+export function StatusBadge({ ok, reason, compact }: { ok: boolean; reason?: string; compact?: boolean }) {
+  if (compact) {
+    const title = ok ? 'Success' : (reason || 'Failed')
+    const label = ok ? 'Success' : 'Failed'
+    return ok
+      ? <span className="badge ok badge-icon" title={title} aria-label={label}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg></span>
+      : <span className="badge fail badge-icon" title={title} aria-label={label}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg></span>
+  }
   return ok
     ? <span className="badge ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>Success</span>
     : <span className="badge fail" title={reason || undefined}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>Failed</span>

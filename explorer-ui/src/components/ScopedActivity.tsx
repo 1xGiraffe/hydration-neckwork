@@ -130,7 +130,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   // resolves before the slower counts query.
   const showOrigin = (counts.data?.extrinsicsOnBehalf ?? 0) > 0
   const showSigner = scope.kind === 'tag' || showOrigin
-  const extrinsicColumns = 7 + (showSigner ? 1 : 0) + (showOrigin ? 1 : 0)
+  const extrinsicColumns = 6 + (showSigner ? 1 : 0) + (showOrigin ? 1 : 0)
 
   const setActiveTab = (tab: string | null) => setQuery({ atab: tab, apage: null })
   const setActivityType = (value: string) => setQuery({ type: value === 'all' ? null : value, action: null, apage: null })
@@ -161,7 +161,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
       {activeTab === 'extrinsics' && <>
         <FilterZone fields={extrinsicFilterFields(showOrigin)} values={extrinsicFilters.values} onChange={extrinsicFilters.onChange} onClear={extrinsicFilters.onClear} />
         <div className="panel"><table className="tbl">
-          <thead><tr><th>ID</th><th>Block</th><th>Call</th>{showSigner && <th>Sender</th>}{showOrigin && <th>Origin</th>}<th className="r">Fee</th><th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
+          <thead><tr><th>ID</th><th>Block</th><th>Call</th>{showSigner && <th>Sender</th>}{showOrigin && <th>Origin</th>}<th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody>
             {extrinsics.isFetching && !extrinsics.data?.length ? <TableSkeleton cols={extrinsicColumns} />
               : !extrinsics.data?.length ? <EmptyRow cols={extrinsicColumns}>No extrinsics</EmptyRow>

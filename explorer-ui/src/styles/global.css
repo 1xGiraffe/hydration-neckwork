@@ -717,6 +717,9 @@ svg { display: block; }
 .badge.fail { background: var(--red-soft); color: var(--red); }
 .badge.finalized { background: var(--sky-soft); color: var(--sky); }
 .badge.pending { background: var(--amber-soft); color: var(--amber); }
+/* icon-only badge (compact lists) — even padding keeps the pill round instead
+   of the text variant's wider oval. */
+.badge-icon { padding: 4px; gap: 0; }
 
 /* call pill — pallet.method, color by pallet */
 .call { display: inline-flex; align-items: baseline; gap: 0; font-family: 'GeistMono'; font-size: 12px; padding: 3px 9px; border-radius: 7px; background: var(--panel); border: 1px solid var(--border); white-space: nowrap; }

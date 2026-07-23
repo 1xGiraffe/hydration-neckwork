@@ -54,11 +54,11 @@ function MultisigBadge({ origin }: { origin: ExtrinsicOrigin }) {
   const col = state === 'cancelled' ? 'var(--red)' : state === 'pending' ? 'var(--amber)' : 'var(--sky)'
   const mark = state === 'cancelled' ? '✕' : state === 'pending' ? '⏳' : '✓'
   const k = state === 'pending' ? origin.approvals : origin.threshold
-  const kn = k && origin.signatories ? ` ${k}/${origin.signatories}` : ''
+  const kn = k && origin.signatories ? `${k}/${origin.signatories} ` : ''
   return (
     <span ref={badgeRef} className="pill-badge" onMouseEnter={show} onMouseLeave={hide}
       style={{ color: col, background: `color-mix(in srgb, ${col} 15%, transparent)` }}>
-      multisig{kn} {mark}
+      {kn}{mark}
       {rect && (
         <MultisigHoverCard
           origin={origin}
@@ -177,7 +177,7 @@ function useExpandableRow() {
 export function ExtRow({ x, now, isNew, noSigner, showOrigin, senderLabel }: { x: ExtrinsicSummary; now: number; isNew?: boolean; noSigner?: boolean; showOrigin?: boolean; senderLabel?: boolean }) {
   const { open, toggle, onKeyDown } = useExpandableRow()
   const id = `${x.blockHeight}-${x.index}`
-  const cols = 7 + (noSigner ? 0 : 1) + (showOrigin ? 1 : 0)
+  const cols = 6 + (noSigner ? 0 : 1) + (showOrigin ? 1 : 0)
   // The action's sender: a multisig operation's initiator (the person who
   // proposed it) rather than the anchor/executing signer, when known.
   const sender = showOrigin && x.origin?.kind === 'multisig' && x.origin.initiator ? x.origin.initiator : x.signer
@@ -198,10 +198,9 @@ export function ExtRow({ x, now, isNew, noSigner, showOrigin, senderLabel }: { x
           : <CallPill name={x.callName} />}</td>
         {!noSigner && <td data-label={senderLabel ? 'Sender' : 'Signer'}>{sender ? <AddrPill account={sender} noCopy /> : <span className="muted mono">— inherent</span>}</td>}
         {showOrigin && <td data-label="Origin">{x.origin ? <OriginBadge origin={x.origin} /> : <Dash />}</td>}
-        <td data-label="Fee" className="r mono muted">{F.hdxFee(x.fee)}</td>
         <td data-label="Result" className="r">{showOrigin && x.origin?.state === 'pending'
-          ? <span className="badge pending"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>Pending</span>
-          : <StatusBadge ok={x.success} reason={failureReasonText(x.errorReason)} />}</td>
+          ? <span className="badge pending badge-icon" title="Pending" aria-label="Pending"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg></span>
+          : <StatusBadge ok={x.success} reason={failureReasonText(x.errorReason)} compact />}</td>
         <td data-label="Time" className="r mono muted"><Ago ts={x.timestamp} now={now} /></td>
         <td className="r exp-toggle col-hide-mobile"><button className={`exp-btn${open ? ' open' : ''}`} onClick={event => { event.stopPropagation(); toggle() }} aria-label={`${open ? 'Collapse' : 'Expand'} extrinsic ${id}`} aria-expanded={open}>▸</button></td>
       </tr>

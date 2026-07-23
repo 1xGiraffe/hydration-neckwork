@@ -32,9 +32,9 @@ export function Extrinsics() {
       <FilterZone fields={extrinsicFilterFields()} values={f} onChange={(k, v) => { onChange(k, v); setPage(0) }} onClear={onClear} />
       <div className="panel">
         <table className="tbl">
-          <thead><tr><th>ID</th><th>Block</th><th>Call</th><th>Signer</th><th className="r">Fee</th><th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
+          <thead><tr><th>ID</th><th>Block</th><th>Call</th><th>Signer</th><th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody>
-            {isFetching && !rows.length ? <TableSkeleton cols={8} /> : !rows.length ? <EmptyRow cols={8}>No extrinsics</EmptyRow> : rows.map(x => <ExtRow key={`${x.blockHeight}-${x.index}`} x={x} now={now} isNew={fresh.has(`${x.blockHeight}-${x.index}`)} />)}
+            {isFetching && !rows.length ? <TableSkeleton cols={7} /> : !rows.length ? <EmptyRow cols={7}>No extrinsics</EmptyRow> : rows.map(x => <ExtRow key={`${x.blockHeight}-${x.index}`} x={x} now={now} isNew={fresh.has(`${x.blockHeight}-${x.index}`)} />)}
           </tbody>
         </table>
         <Pager page={page} totalPages={totalPages} hasNext={(data?.length ?? 0) === PAGE} onPage={setPage} />
