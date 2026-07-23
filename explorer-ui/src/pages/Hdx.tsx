@@ -146,11 +146,15 @@ function orderedLockTypes(types: HdxLockType[]): HdxLockType[] {
 function LocksSection({ d }: { d: HdxDashboard }) {
   const types = orderedLockTypes(d.locks.types)
   const sum = types.reduce((s, t) => s + t.totalHdx, 0) || 1
+  // Singular, spelled-out names from the shared label map (parity with the
+  // unlock legend and the account balance breakdown); the API label is only a
+  // fallback for any unmapped folded type.
+  const lockLabel = (t: HdxLockType) => LOCK_LABELS[t.key] ?? t.label
   const segs: ShareSegment[] = types.map(t => ({
-    key: t.key, label: t.label, color: lockColor(t.key), value: t.totalHdx,
+    key: t.key, label: lockLabel(t), color: lockColor(t.key), value: t.totalHdx,
     tip: (
       <>
-        <span className="t-d">{t.label}</span>
+        <span className="t-d">{lockLabel(t)}</span>
         <TipRow label="Accounts" value={F.int(t.accounts)} />
         <TipRow label="HDX" value={fmtHdx(t.totalHdx)} />
         <TipRow label="Of locked" value={(t.totalHdx / sum * 100).toFixed(1) + '%'} />
@@ -166,7 +170,7 @@ function LocksSection({ d }: { d: HdxDashboard }) {
         <div className="hdx-cards">
           {types.map(t => (
             <div className="hdx-card" key={t.key}>
-              <div className="hk"><i style={{ background: lockColor(t.key) }} />{t.label}</div>
+              <div className="hk"><i style={{ background: lockColor(t.key) }} />{lockLabel(t)}</div>
               <div className="hv">{fmtHdx(t.totalHdx)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
               <div className="hs">{F.int(t.accounts)} accounts</div>
             </div>
@@ -182,33 +186,43 @@ function LocksSection({ d }: { d: HdxDashboard }) {
 }
 
 // 4. unlock timeline
+// GIGAHDX unstakes carry a fixed 28-day unbond, so they can only ever land in
+// the first four weekly buckets (≤28d) — never later ones. Drop it from those
+// tooltips (and the "later" bucket) so we don't imply a lock type that can
+// never have a value there.
+const GIGA_UNLOCK_WEEKS = 4
+const NON_GIGA_KEYS = UNLOCK_KEYS.filter(k => k !== 'gigahdx')
 function UnlocksSection({ d }: { d: HdxDashboard }) {
   const { buckets, laterHdx, gigaPending } = d.unlocks
   const weeklyN = Math.min(8, buckets.length)
   // 30-day monthly buckets can straddle month boundaries — blank out a label
   // that would repeat its neighbour ("Dec Dec") instead of showing it twice.
   const monthLabels = buckets.map((b, i) => (i < weeklyN ? mdLabel(b.fromTs) : monLabel(b.fromTs)))
-  const columns: StackColumn[] = buckets.map((b, i) => ({
-    key: `${b.fromTs}-${i}`,
-    label: i > 0 && monthLabels[i] === monthLabels[i - 1] ? '' : monthLabels[i],
-    segments: UNLOCK_KEYS.map(k => ({ key: k, label: LOCK_LABELS[k], color: lockColor(k), value: b[k] })),
-    tip: (
-      <>
-        <span className="t-d">{mdLabel(b.fromTs)} – {mdLabel(b.toTs)}</span>
-        {UNLOCK_KEYS.map(k => <TipRow key={k} color={lockColor(k)} label={LOCK_LABELS[k]} value={fmtHdx(b[k]) + ' HDX'} />)}
-        <TipRow label="Total" value={fmtHdx(b.gigahdx + b.vesting + b.vote) + ' HDX'} />
-      </>
-    ),
-  }))
+  const keysFor = (i: number) => (i < GIGA_UNLOCK_WEEKS ? UNLOCK_KEYS : NON_GIGA_KEYS)
+  const columns: StackColumn[] = buckets.map((b, i) => {
+    const keys = keysFor(i)
+    return {
+      key: `${b.fromTs}-${i}`,
+      label: i > 0 && monthLabels[i] === monthLabels[i - 1] ? '' : monthLabels[i],
+      segments: keys.map(k => ({ key: k, label: LOCK_LABELS[k], color: lockColor(k), value: b[k] })),
+      tip: (
+        <>
+          <span className="t-d">{mdLabel(b.fromTs)} – {mdLabel(b.toTs)}</span>
+          {keys.map(k => <TipRow key={k} color={lockColor(k)} label={LOCK_LABELS[k]} value={fmtHdx(b[k]) + ' HDX'} />)}
+          <TipRow label="Total" value={fmtHdx(keys.reduce((s, k) => s + b[k], 0)) + ' HDX'} />
+        </>
+      ),
+    }
+  })
   columns.push({
     key: 'later',
     label: 'later',
-    segments: UNLOCK_KEYS.map(k => ({ key: k, label: LOCK_LABELS[k], color: lockColor(k), value: laterHdx[k] })),
+    segments: NON_GIGA_KEYS.map(k => ({ key: k, label: LOCK_LABELS[k], color: lockColor(k), value: laterHdx[k] })),
     tip: (
       <>
         <span className="t-d">Later{buckets.length ? ` (after ${mdLabel(buckets[buckets.length - 1].toTs)})` : ''}</span>
-        {UNLOCK_KEYS.map(k => <TipRow key={k} color={lockColor(k)} label={LOCK_LABELS[k]} value={fmtHdx(laterHdx[k]) + ' HDX'} />)}
-        <TipRow label="Total" value={fmtHdx(laterHdx.gigahdx + laterHdx.vesting + laterHdx.vote) + ' HDX'} />
+        {NON_GIGA_KEYS.map(k => <TipRow key={k} color={lockColor(k)} label={LOCK_LABELS[k]} value={fmtHdx(laterHdx[k]) + ' HDX'} />)}
+        <TipRow label="Total" value={fmtHdx(NON_GIGA_KEYS.reduce((s, k) => s + laterHdx[k], 0)) + ' HDX'} />
       </>
     ),
   })

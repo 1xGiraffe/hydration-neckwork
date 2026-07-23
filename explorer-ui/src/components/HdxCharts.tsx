@@ -20,13 +20,15 @@ export function fmtHdxTick(v: number): string {
 
 /* ============ chart color system (CVD-validated — fixed, never cycled) ============ */
 // Lock types: the SAME entity keeps the SAME hue on every chart, in fixed
-// categorical order vote / staking / gigahdx / vesting / other.
+// categorical order vote / staking / gigahdx / vesting / other. This is the
+// single source of truth for lock colors across the /hdx dashboard AND the
+// per-account balance breakdown bar — they must stay in parity.
 export const LOCK_ORDER = ['vote', 'staking', 'gigahdx', 'vesting', 'other'] as const
 const LOCK_COLORS: Record<string, string> = {
-  vote: '#3f88dd',
-  staking: '#9c5cc4',
+  vote: 'var(--lavender-deep)',
+  staking: '#9c5cc4', // staking purple
   gigahdx: '#000000', // GIGAHDX brand black
-  vesting: '#639e33',
+  vesting: 'var(--red)',
   other: 'var(--text-low)',
 }
 export function lockColor(key: string): string { return LOCK_COLORS[key] ?? LOCK_COLORS.other }

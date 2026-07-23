@@ -98,7 +98,7 @@ describe('BalanceBreakdown', () => {
       timeline: [{ state: 'active', cause: 'democracy', amount: raw(500), until: inDays(210) }],
     }))
     expect(html).toMatch(/≥ \d+d/)
-    expect(html).toContain('votes (old)')
+    expect(html).toContain('vote (old)')
   })
 
   it('distinguishes running GHDX unstake batches from the staked part', () => {

@@ -19,15 +19,17 @@ const big = (v: string | undefined | null) => { try { return BigInt(v || '0') } 
 const min = (a: bigint, b: bigint) => (a < b ? a : b)
 
 interface SourceMeta { label: string; color: string }
-// User-specified palette: transferable light blue, votes (new + old) lavender,
-// staking purple, vesting red (gradient when linear), GHDX brand black with
-// dark-grey unstake batches, and ONE blue for every clearable deposit/order.
+// Lock hues come from the shared lock palette (lockColor) so this bar and the
+// /hdx dashboard stay in parity: transferable light blue, vote (new + old)
+// lavender, staking purple, vesting red (gradient when linear), GHDX brand
+// black with dark-grey unstake batches, and ONE blue for every clearable
+// deposit/order. Names are singular; GHDX is abbreviated to fit the dense bar.
 const SOURCE_META: Record<string, SourceMeta> = {
-  vesting: { label: 'vesting', color: 'var(--red)' },
+  vesting: { label: 'vesting', color: lockColor('vesting') },
   staking: { label: 'staking', color: lockColor('staking') },
-  vote: { label: 'votes', color: 'var(--lavender-deep)' },
+  vote: { label: 'vote', color: lockColor('vote') },
   gigahdx: { label: 'GHDX', color: lockColor('gigahdx') },
-  democracy: { label: 'votes (old)', color: 'var(--lavender-deep)' },
+  democracy: { label: 'vote (old)', color: lockColor('vote') },
   elections: { label: 'council elections (legacy)', color: 'var(--text-low)' },
   sufficiency: { label: 'ED cover', color: 'var(--text-low)' },
   dca: { label: 'DCA budget', color: 'var(--bd-clear)' },
