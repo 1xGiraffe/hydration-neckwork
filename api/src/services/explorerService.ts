@@ -1417,6 +1417,8 @@ interface ExtrinsicSummaryRow {
 // Format a unix-seconds timestamp the same way ClickHouse's toString(DateTime)
 // does on this (UTC-configured) server, for on-behalf timeline entries built
 // in application code rather than read straight out of a DateTime column.
+// server.ts asserts `SELECT timezone() = 'UTC'` at startup and exits if not, so
+// this UTC assumption holds by construction rather than by convention.
 function chTimestampString(ts: number): string {
   const d = new Date(ts * 1000)
   const pad = (n: number) => String(n).padStart(2, '0')
@@ -12112,7 +12114,8 @@ function mergeOnBehalfCandidates(proxyRows: ProxyCandidateRow[], msStates: Multi
 // Bounds an account's multisig ops by the request's date window, comparing
 // against each op's anchor_timestamp (unix seconds). block_timestamp — and so
 // this server's ClickHouse session — runs UTC (verified against the parity
-// captures' timeline strings), so Date.parse(`${date}T00:00:00Z`) reproduces
+// captures' timeline strings; server.ts asserts `SELECT timezone() = 'UTC'` at
+// startup and exits if not), so Date.parse(`${date}T00:00:00Z`) reproduces
 // the same boundary the SQL timeWindow() applies to raw block_timestamp.
 function msAnchorWindow(from?: string, to?: string): ((ts: number) => boolean) | null {
   const fromTs = from && DATE_RE.test(from) ? Math.floor(Date.parse(`${from}T00:00:00Z`) / 1000) : null

@@ -115,6 +115,19 @@ await fastify.register(tagRoutes)
 
 async function start() {
   try {
+    // Request-time on-behalf timestamp formatting (chTimestampString) and multisig
+    // date-window bounds (msAnchorWindow), both in explorerService.ts, reproduce
+    // ClickHouse's session-timezone semantics only when this server runs UTC.
+    // Fail fast rather than silently desynchronizing on-behalf rows from
+    // SQL-sourced rows if that configuration ever drifts.
+    const tzRes = await client.query({ query: 'SELECT timezone() AS tz', format: 'JSONEachRow' })
+    const [{ tz }] = await tzRes.json<{ tz: string }>()
+    if (tz !== 'UTC') {
+      fastify.log.error(
+        `[API] ClickHouse session timezone is '${tz}', not 'UTC'. chTimestampString and msAnchorWindow in explorerService.ts assume UTC and would silently desynchronize on-behalf rows from SQL-sourced rows.`,
+      )
+      process.exit(1)
+    }
     // The schema is created by the schema-bootstrap service before this process
     // starts (Compose depends_on: service_completed_successfully), so no schema
     // work runs here. Seed/drain the account-swap-activity queue on a long-op
