@@ -133,6 +133,13 @@ export interface BlockSummary {
   eventCount: number
 }
 
+export interface FailureReason { label: string; docs: string | null }
+
+export function failureReasonText(r: FailureReason | null | undefined): string | undefined {
+  if (!r) return undefined
+  return r.docs ? `${r.label} — ${r.docs}` : r.label
+}
+
 export interface ExtrinsicOrigin {
   kind: 'proxy' | 'multisig'
   state?: 'pending' | 'executed' | 'cancelled'
@@ -158,6 +165,10 @@ export interface ExtrinsicSummary {
   callName: string
   fee: string | null
   origin?: ExtrinsicOrigin
+  // Optional here (list rows omit it on success); ExtrinsicDetail narrows this to
+  // `FailureReason | null` always-present, hence the `| null` so the override
+  // stays assignable to the base property type.
+  errorReason?: FailureReason | null
 }
 
 export interface BlockEvent { eventIndex: number; extrinsicIndex: number | null; name: string; args: unknown }
@@ -175,6 +186,7 @@ export interface ExtrinsicDetail extends ExtrinsicSummary {
   tip: string | null
   callArgs: unknown
   error: unknown
+  errorReason: FailureReason | null
   events: ExtrinsicEvent[]
 }
 

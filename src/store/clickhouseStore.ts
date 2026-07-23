@@ -1,5 +1,5 @@
 import { type ClickHouseClient } from '../db/client.js'
-import { type PriceRow, type TradeVolumeRow, type BlockRow, type AssetRow, type RuntimeUpgradeRow } from '../db/schema.js'
+import { type PriceRow, type TradeVolumeRow, type BlockRow, type AssetRow, type RuntimeUpgradeRow, type RuntimeErrorNameRow } from '../db/schema.js'
 import { BatchAccumulator, chunkRows } from './batch.js'
 import { buildInsertDedupeToken } from './dedupeToken.js'
 import { getLastProcessedBlock, saveCheckpoint } from './checkpoint.js'
@@ -60,6 +60,10 @@ function runtimeUpgradeKey(row: RuntimeUpgradeKeyRow): string {
   return `${row.block_height}:${row.spec_version}:${row.prev_spec_version}`
 }
 
+function runtimeErrorNameKey(row: Pick<RuntimeErrorNameRow, 'spec_version' | 'pallet_index' | 'error_index'>): string {
+  return `${row.spec_version}:${row.pallet_index}:${row.error_index}`
+}
+
 export class ClickHouseStore {
   private readonly client: ClickHouseClient
   private readonly pricesBatch: BatchAccumulator<PriceRow>
@@ -67,6 +71,7 @@ export class ClickHouseStore {
   private readonly blocksBatch: BatchAccumulator<BlockRow>
   private readonly assetsBatch: BatchAccumulator<AssetRow>
   private readonly runtimeUpgradesBatch: BatchAccumulator<RuntimeUpgradeRow>
+  private readonly runtimeErrorNamesBatch: BatchAccumulator<RuntimeErrorNameRow>
   private replayNamespace: string
   private readonly checkpointId: string
   private readonly deferPublication: boolean
@@ -76,6 +81,7 @@ export class ClickHouseStore {
   private readonly deferredBlocks: BlockRow[] = []
   private readonly deferredAssets: AssetRow[] = []
   private readonly deferredRuntimeUpgrades: RuntimeUpgradeRow[] = []
+  private readonly deferredRuntimeErrorNames: RuntimeErrorNameRow[] = []
 
   constructor(
     client: ClickHouseClient,
@@ -90,6 +96,7 @@ export class ClickHouseStore {
     this.blocksBatch = new BatchAccumulator<BlockRow>(flushThreshold)
     this.assetsBatch = new BatchAccumulator<AssetRow>(flushThreshold)
     this.runtimeUpgradesBatch = new BatchAccumulator<RuntimeUpgradeRow>(flushThreshold)
+    this.runtimeErrorNamesBatch = new BatchAccumulator<RuntimeErrorNameRow>(flushThreshold)
     this.replayNamespace = replayNamespace
     this.checkpointId = checkpointId
     this.deferPublication = options.deferPublication === true
@@ -114,6 +121,10 @@ export class ClickHouseStore {
 
   addRuntimeUpgrades(rows: RuntimeUpgradeRow[]): void {
     this.runtimeUpgradesBatch.add(rows)
+  }
+
+  addRuntimeErrorNames(rows: RuntimeErrorNameRow[]): void {
+    this.runtimeErrorNamesBatch.add(rows)
   }
 
   private async existingBlockHeights(rows: BlockHeightRow[]): Promise<Set<string>> {
@@ -331,12 +342,31 @@ export class ClickHouseStore {
     }
   }
 
+  private async insertRuntimeErrorNameRows(rowsToInsert: RuntimeErrorNameRow[]): Promise<void> {
+    const rows = uniqueRowsByKey(rowsToInsert, runtimeErrorNameKey)
+    if (rows.length === 0) return
+    const token = buildInsertDedupeToken('runtime-error-names', this.replayNamespace, rows)
+    await this.client.insert({
+      table: 'price_data.runtime_error_names',
+      values: rows,
+      format: 'JSONEachRow',
+      clickhouse_settings: { insert_deduplication_token: token },
+    })
+  }
+
+  async flushRuntimeErrorNames(): Promise<void> {
+    for (const rows of this.runtimeErrorNamesBatch.flushChunks()) {
+      await this.insertRuntimeErrorNameRows(rows)
+    }
+  }
+
   private stageCurrentBatches(): void {
     appendAll(this.deferredBlocks, this.blocksBatch.flush())
     appendAll(this.deferredPrices, this.pricesBatch.flush())
     appendAll(this.deferredTradeVolumes, this.tradeVolumesBatch.flush())
     appendAll(this.deferredAssets, this.assetsBatch.flush())
     appendAll(this.deferredRuntimeUpgrades, this.runtimeUpgradesBatch.flush())
+    appendAll(this.deferredRuntimeErrorNames, this.runtimeErrorNamesBatch.flush())
   }
 
   async publishDeferred(): Promise<void> {
@@ -357,12 +387,16 @@ export class ClickHouseStore {
     for (const rows of chunkRows(this.deferredRuntimeUpgrades, this.publicationChunkSize)) {
       await this.insertRuntimeUpgradeRows(rows)
     }
+    for (const rows of chunkRows(this.deferredRuntimeErrorNames, this.publicationChunkSize)) {
+      await this.insertRuntimeErrorNameRows(rows)
+    }
 
     this.deferredBlocks.length = 0
     this.deferredPrices.length = 0
     this.deferredTradeVolumes.length = 0
     this.deferredAssets.length = 0
     this.deferredRuntimeUpgrades.length = 0
+    this.deferredRuntimeErrorNames.length = 0
   }
 
   // Keep blocks and prices visible in block order. Price rows now contain their
@@ -379,6 +413,7 @@ export class ClickHouseStore {
     await this.flushTradeVolumes()
     await this.flushAssets()
     await this.flushRuntimeUpgrades()
+    await this.flushRuntimeErrorNames()
   }
 
   async saveCheckpoint(blockHeight: number): Promise<void> {

@@ -29,8 +29,28 @@ import {
 import { toClickHouseBlockTime } from './db/timestamp.js'
 import { fetchChainHead } from './rpc/head.js'
 import { detectPoolAffectingSetStorage } from './raw/snapshot.js'
+import { createSnapshotRpcClient, loadRuntimeAt } from './scripts/snapshotRuntime.js'
+import { extractRuntimeErrorNames } from './raw/runtimeErrorNames.js'
+import type { RpcClient } from '@subsquid/rpc-client'
+import type { ClickHouseStore } from './store/clickhouseStore.js'
 
 const BACKFILL_ASSET_SNAPSHOT_INTERVAL = 10_000
+
+let errorNamesRpc: RpcClient | null = null
+// Snapshot a spec version's pallet error names into runtime_error_names. Loads
+// metadata over RPC only at baseline + each runtime upgrade (rare), never per
+// block. Non-fatal: a fetch failure is logged and left to the next restart /
+// the one-time backfill — it must never stall indexing.
+async function snapshotRuntimeErrorNames(store: ClickHouseStore, hash: string, specVersion: number): Promise<void> {
+  try {
+    errorNamesRpc ??= createSnapshotRpcClient()
+    const runtime = await loadRuntimeAt(errorNamesRpc, hash)
+    const rows = extractRuntimeErrorNames(runtime.metadata, specVersion)
+    if (rows.length) store.addRuntimeErrorNames(rows)
+  } catch (error) {
+    console.error(`[Runtime] error-name snapshot failed at ${hash} (spec_version ${specVersion}):`, error)
+  }
+}
 
 export interface RunOptions {
   fromBlock?: number
@@ -585,6 +605,12 @@ export async function run(options: RunOptions = {}): Promise<void> {
       previousBlockHash = block.header.hash
       previousBlockHeight = blockHeight
 
+      // First block of this run: ensure the baseline spec version's error names
+      // exist (no upgrade event fires for the initial version, e.g. at genesis).
+      if (previousSpecVersion === null) {
+        await snapshotRuntimeErrorNames(ctx.store, block.header.hash, specVersion)
+      }
+
       // Runtime upgrade detection
       if (previousSpecVersion !== null && specVersion !== previousSpecVersion) {
         console.log(
@@ -596,6 +622,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
           spec_version: specVersion,
           prev_spec_version: previousSpecVersion,
         }])
+        await snapshotRuntimeErrorNames(ctx.store, block.header.hash, specVersion)
         // Re-bootstrap pool caches: storage migrations may change pool compositions without emitting events
         compositionCache.invalidateAll()
       }

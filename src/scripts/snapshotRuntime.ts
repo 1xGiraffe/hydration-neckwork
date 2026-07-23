@@ -33,12 +33,16 @@ export async function resolveSnapshotAnchor(rpc: RpcClient, blockOverride: numbe
   return { hash, height: Number.parseInt(header.number, 16) }
 }
 
-export async function loadSnapshotRuntime(rpc: RpcClient, hash: string): Promise<{ runtime: Runtime; timestamp: string }> {
+export async function loadRuntimeAt(rpc: RpcClient, hash: string): Promise<Runtime> {
   const [runtimeVersion, metadata] = await Promise.all([
     rpc.call<RuntimeVersion>('state_getRuntimeVersion', [hash]),
     rpc.call<string>('state_getMetadata', [hash]),
   ])
-  const runtime = new Runtime(runtimeVersion, metadata, undefined, rpc)
+  return new Runtime(runtimeVersion, metadata, undefined, rpc)
+}
+
+export async function loadSnapshotRuntime(rpc: RpcClient, hash: string): Promise<{ runtime: Runtime; timestamp: string }> {
+  const runtime = await loadRuntimeAt(rpc, hash)
   const timestamp = await runtime.getStorage(hash, 'Timestamp.Now')
   if (timestamp == null) throw new Error(`Timestamp.Now is unavailable at snapshot block ${hash}`)
   const timestampMs = Number(timestamp)

@@ -18,6 +18,7 @@ import { indexerRoutes } from './routes/indexer.ts'
 import { explorerRoutes } from './routes/explorer.ts'
 import { tagRoutes } from './routes/tags.ts'
 import { loadExplorerAssets, stopExplorerAssetsRefresh } from './services/explorerAssets.ts'
+import { loadRuntimeErrorNames, stopRuntimeErrorNamesRefresh } from './services/runtimeErrorNames.ts'
 import {
   initExplorerService,
   loadAccountSuffixIndex,
@@ -99,6 +100,7 @@ fastify.get('/health', async () => {
 fastify.addHook('onClose', async () => {
   stopAssetsRefresh()
   stopExplorerAssetsRefresh()
+  stopRuntimeErrorNamesRefresh()
   stopIdentityRefresh()
   stopBackgroundRefresh()
   stopAccountSwapActivityQueueDrain()
@@ -159,7 +161,7 @@ async function start() {
     initXcmJourneyService(client)
     // Tag icons can derive from a member's omniwatch emoji, so the snakewatch
     // source must be loaded before tags are indexed.
-    await Promise.all([loadExplorerAssets(client), ensureSnakewatchEmojiSourceLoaded()])
+    await Promise.all([loadExplorerAssets(client), ensureSnakewatchEmojiSourceLoaded(), loadRuntimeErrorNames(client)])
     await Promise.all([loadTags(), loadIdentities()])
     // Seed the fixed default tag set on a fresh database (no-op once tags exist),
     // so a clean `docker compose up` reaches the expected state with no manual step.

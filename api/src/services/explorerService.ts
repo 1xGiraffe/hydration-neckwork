@@ -18,6 +18,7 @@ import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletServic
 import { xcmJourneySourcesFor, xcmJourneysByOriginTx } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
 import { createHash } from 'node:crypto'
+import { resolveModuleError } from './runtimeErrorNames.ts'
 
 let client: ClickHouseClient
 export function initExplorerService(c: ClickHouseClient): void { client = c }
@@ -1388,6 +1389,10 @@ export interface ExtrinsicSummary {
   callName: string
   fee: string | null
   origin?: ExtrinsicOrigin
+  // Optional here (list rows omit it on success); ExtrinsicDetail narrows this
+  // to `FailureReason | null` always-present, hence the `| null` so the
+  // override stays assignable to the base property type.
+  errorReason?: FailureReason | null
 }
 interface ExtrinsicSummaryRow {
   block_height: number
@@ -1412,6 +1417,8 @@ interface ExtrinsicSummaryRow {
   ms_timeline_ts?: string[]
   ms_timeline_blocks?: number[]
   ms_timeline_extrinsics?: number[]
+  error_json?: string | null
+  spec_version?: number
 }
 
 // Format a unix-seconds timestamp the same way ClickHouse's toString(DateTime)
@@ -1435,6 +1442,7 @@ function extrinsicSummary(row: ExtrinsicSummaryRow): ExtrinsicSummary {
     success: row.display_success != null ? row.display_success === 1 : row.success === 1,
     callName: row.display_call_name || row.call_name,
     fee: row.fee,
+    errorReason: row.success === 0 ? (dispatchErrorReason(row.error_json ?? null, row.spec_version ?? 0, resolveModuleError) ?? undefined) : undefined,
   }
   if (row.origin_kind === 'proxy') {
     summary.origin = { kind: 'proxy' }
@@ -1551,18 +1559,30 @@ export async function getRecentExtrinsics(limit: number, signedOnly: boolean, fr
     const resultFilter = filters.result === 'success' ? 'AND success = 1' : filters.result === 'failed' ? 'AND success = 0' : ''
     const rows = await withFeedWindow(tw, limit, offset + limit, async (bound) => {
       const res = await client.query({
+        // The extrinsics-only select below keeps `bound`/filters unqualified and
+        // ambiguity-free (single table in scope); the spec_version join happens
+        // one level up, against the already-paginated page, since `bound` may
+        // reference `block_height`/`block_timestamp` which also exist on
+        // price_data.blocks and would otherwise resolve ambiguously.
         query: `
-          SELECT block_height, extrinsic_index, extrinsic_hash, toString(block_timestamp) AS ts, coalesce(signer, effective_signer) AS signer, success, call_name, fee
-          FROM price_data.raw_extrinsics
-          WHERE ${bound}
-            ${signedOnly ? 'AND coalesce(signer, effective_signer) IS NOT NULL' : ''}
-            ${callFilter}
-            ${resultFilter}
-          ORDER BY block_height DESC, extrinsic_index DESC
-          LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
+          SELECT ext.block_height AS block_height, ext.extrinsic_index AS extrinsic_index, ext.extrinsic_hash AS extrinsic_hash,
+                 ext.ts AS ts, ext.signer AS signer, ext.success AS success, ext.call_name AS call_name, ext.fee AS fee,
+                 ext.error_json AS error_json, b.spec_version AS spec_version
+          FROM (
+            SELECT block_height, extrinsic_index, extrinsic_hash, toString(block_timestamp) AS ts, coalesce(signer, effective_signer) AS signer, success, call_name, fee, error_json
+            FROM price_data.raw_extrinsics
+            WHERE ${bound}
+              ${signedOnly ? 'AND coalesce(signer, effective_signer) IS NOT NULL' : ''}
+              ${callFilter}
+              ${resultFilter}
+            ORDER BY block_height DESC, extrinsic_index DESC
+            LIMIT {limit:UInt32} OFFSET {offset:UInt32}
+          ) AS ext
+          LEFT JOIN price_data.blocks b ON b.block_height = ext.block_height
+          ORDER BY ext.block_height DESC, ext.extrinsic_index DESC`,
         query_params: { limit, offset, ...textNameParams('callName', filters.call) }, format: 'JSONEachRow',
       })
-      return res.json<ExtrinsicSummaryRow>()
+      return res.json<ExtrinsicSummaryRow & { error_json: string | null; spec_version: number }>()
     })
     return uniqueExtrinsicSummaries(rows)
   })
@@ -1574,6 +1594,7 @@ export interface ExtrinsicDetail extends ExtrinsicSummary {
   tip: string | null
   callArgs: unknown
   error: unknown
+  errorReason: FailureReason | null
   events: { eventIndex: number; name: string; args: unknown }[]
 }
 
@@ -1590,6 +1611,7 @@ interface ExtrinsicDetailRow {
   tip: string | null
   call_args_json: string
   error_json: string | null
+  spec_version: number
 }
 
 async function hydrateExtrinsicDetail(row: ExtrinsicDetailRow): Promise<ExtrinsicDetail> {
@@ -1621,6 +1643,7 @@ async function hydrateExtrinsicDetail(row: ExtrinsicDetailRow): Promise<Extrinsi
     tip: row.tip,
     callArgs: safeJson(row.call_args_json),
     error: row.error_json ? safeJson(row.error_json) : null,
+    errorReason: row.success === 1 ? null : dispatchErrorReason(row.error_json, row.spec_version, resolveModuleError),
     events,
   }
 }
@@ -1629,8 +1652,14 @@ export async function getExtrinsic(hash: string): Promise<ExtrinsicDetail | null
   if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) return null
   return cached(`explorer:extrinsic:${hash.toLowerCase()}`, 10000, async () => {
     const res = await client.query({
-      query: `SELECT block_height, extrinsic_index, extrinsic_hash, toString(block_timestamp) AS ts, version, coalesce(signer, effective_signer) AS signer, success, call_name, fee, tip, call_args_json, error_json
-              FROM price_data.raw_extrinsics WHERE extrinsic_hash = {hash:String} ORDER BY block_height DESC LIMIT 1`,
+      query: `SELECT e.block_height AS block_height, e.extrinsic_index AS extrinsic_index, e.extrinsic_hash AS extrinsic_hash,
+                     toString(e.block_timestamp) AS ts, e.version AS version,
+                     coalesce(e.signer, e.effective_signer) AS signer, e.success AS success, e.call_name AS call_name,
+                     e.fee AS fee, e.tip AS tip, e.call_args_json AS call_args_json, e.error_json AS error_json,
+                     b.spec_version AS spec_version
+              FROM price_data.raw_extrinsics e
+              LEFT JOIN price_data.blocks b ON b.block_height = e.block_height
+              WHERE e.extrinsic_hash = {hash:String} ORDER BY e.block_height DESC LIMIT 1`,
       query_params: { hash: hash.toLowerCase() }, format: 'JSONEachRow',
     })
     const row = (await res.json<ExtrinsicDetailRow>())[0]
@@ -4829,8 +4858,14 @@ async function getActiveDcas(accounts: string[]): Promise<ActiveDca[]> {
 export async function getExtrinsicAt(height: number, index: number): Promise<ExtrinsicDetail | null> {
   return cached(`explorer:extrinsic-at:${height}:${index}`, 10000, async () => {
     const res = await client.query({
-      query: `SELECT block_height, extrinsic_index, extrinsic_hash, toString(block_timestamp) AS ts, version, coalesce(signer, effective_signer) AS signer, success, call_name, fee, tip, call_args_json, error_json
-              FROM price_data.raw_extrinsics WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32} LIMIT 1`,
+      query: `SELECT e.block_height AS block_height, e.extrinsic_index AS extrinsic_index, e.extrinsic_hash AS extrinsic_hash,
+                     toString(e.block_timestamp) AS ts, e.version AS version,
+                     coalesce(e.signer, e.effective_signer) AS signer, e.success AS success, e.call_name AS call_name,
+                     e.fee AS fee, e.tip AS tip, e.call_args_json AS call_args_json, e.error_json AS error_json,
+                     b.spec_version AS spec_version
+              FROM price_data.raw_extrinsics e
+              LEFT JOIN price_data.blocks b ON b.block_height = e.block_height
+              WHERE e.block_height = {h:UInt32} AND e.extrinsic_index = {i:UInt32} LIMIT 1`,
       query_params: { h: height, i: index }, format: 'JSONEachRow',
     })
     const row = (await res.json<ExtrinsicDetailRow>())[0]
@@ -8471,18 +8506,64 @@ export function dcaScheduleStatus(
   return completed ? 'completed' : 'active'
 }
 
+export interface FailureReason { label: string; docs: string | null }
+
+// camelCase → "spaced lower" (BuyLimitNotReached → "buy limit not reached").
+function humanizeKind(s: string): string {
+  return s.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase()
+}
+
+// Shared DispatchError → human reason. `resolve` names Module errors from the
+// runtime_error_names lookup (spec-version keyed); a miss yields an honest
+// `pallet <i> · error #<j>` label rather than a fabricated name. Named kinds
+// (Token/Arithmetic/BadOrigin/…) are self-describing and carry no docs.
+export function dispatchErrorReason(
+  error: unknown,
+  specVersion: number,
+  resolve: (specVersion: number, palletIndex: number, errorIndex: number) => { pallet: string; name: string; docs: string } | null,
+): FailureReason | null {
+  const err = (typeof error === 'string' ? safeJson(error) : error) as Record<string, unknown> | null
+  const kind = typeof err?.__kind === 'string' ? err.__kind : null
+  if (!kind) return null
+  if (kind === 'Module') {
+    const value = err?.value as { index?: number; error?: string } | undefined
+    const palletIndex = Number(value?.index)
+    const hex = typeof value?.error === 'string' ? value.error : '0x00'
+    const errorIndex = parseInt(hex.slice(2, 4) || '0', 16)
+    if (!Number.isInteger(palletIndex)) return null
+    const hit = resolve(specVersion, palletIndex, errorIndex)
+    return hit
+      ? { label: `${hit.pallet}.${hit.name}`, docs: hit.docs || null }
+      : { label: `pallet ${palletIndex} · error #${errorIndex}`, docs: null }
+  }
+  const value = err?.value as Record<string, unknown> | undefined
+  const sub = typeof value?.__kind === 'string' ? value.__kind : null
+  const label = sub ? `${kind} · ${humanizeKind(sub)}` : kind === 'Other' ? 'runtime error' : humanizeKind(kind)
+  return { label, docs: null }
+}
+
 // Human-readable termination reason for the named DispatchError kinds
 // ("token frozen"). Module errors carry only a pallet index and error byte —
 // naming them needs runtime metadata, so they are omitted rather than shown
 // as opaque numbers.
 export function dcaTerminationReason(errorJson: string | null | undefined): string | null {
-  const err = (safeJson(errorJson ?? '') ?? null) as Record<string, unknown> | null
-  const kind = typeof err?.__kind === 'string' ? err.__kind : null
-  if (!kind || kind === 'Module') return null
-  const value = err?.value as Record<string, unknown> | undefined
-  const sub = typeof value?.__kind === 'string' ? value.__kind : null
-  if (sub) return `${kind.toLowerCase()} ${sub.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()}`
-  return kind === 'Other' ? 'runtime error' : kind.toLowerCase()
+  const reason = dispatchErrorReason(errorJson ?? null, 0, () => null)
+  if (!reason) return null
+  // Module errors were previously omitted here (only named kinds returned).
+  if (reason.label.startsWith('pallet ')) return null
+  // dispatchErrorReason keeps the top-level kind's original casing and joins
+  // kind/sub with " · " (e.g. "Token · frozen"); this pre-existing format
+  // lowercases the whole label and uses a single space for nested kinds
+  // (e.g. "token frozen").
+  if (reason.label.includes(' · ')) return reason.label.toLowerCase().replace(' · ', ' ')
+  // 'Other' is the one bare kind with a bespoke label; pass it through as-is.
+  if (reason.label === 'runtime error') return reason.label
+  // Every other bare kind arrives already humanized/spaced/lowercased (e.g.
+  // "BadOrigin" → "bad origin"); this pre-existing format instead collapses
+  // it to the raw kind's lowercase form with no separating space (e.g.
+  // "badorigin"). humanizeKind only ever inserts spaces, so stripping them
+  // back out reconstructs kind.toLowerCase() exactly.
+  return reason.label.replace(/ /g, '')
 }
 
 export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25): Promise<DcaScheduleDetail | null> {
@@ -12244,20 +12325,26 @@ async function enrichMultisigCandidates(scoped: OnBehalfCandidate[]): Promise<vo
   enrichMultisigOperations(states, calls)
 }
 
-interface ExtrinsicHydrationRow { block: number; extrinsic: number; hash: string; ts: string; signer: string | null; success: number; callName: string; fee: string | null }
+interface ExtrinsicHydrationRow { block: number; extrinsic: number; hash: string; ts: string; signer: string | null; success: number; callName: string; fee: string | null; error_json: string | null; spec_version: number }
 async function hydrateOnBehalfExtrinsics(tuples: Set<string>): Promise<Map<string, ExtrinsicHydrationRow>> {
   const out = new Map<string, ExtrinsicHydrationRow>()
   const keys = [...tuples]
   for (let i = 0; i < keys.length; i += 10_000) {
     const inList = keys.slice(i, i + 10_000).map(k => `(${k})`).join(',')
     const res = await client.query({
-      query: `SELECT block_height AS block, extrinsic_index AS extrinsic, extrinsic_hash AS hash,
-                     toString(block_timestamp) AS ts, coalesce(signer, effective_signer) AS signer,
-                     success, call_name AS callName, fee
-              FROM price_data.raw_extrinsics
-              WHERE (block_height, extrinsic_index) IN (${inList})
-              ORDER BY ingested_at DESC
-              LIMIT 1 BY block_height, extrinsic_index`,
+      // spec_version joins one level up (see the signed select) so a failed
+      // anchor extrinsic's error_json can be decoded into a failure reason.
+      query: `SELECT ext.*, b.spec_version AS spec_version
+              FROM (
+                SELECT block_height AS block, extrinsic_index AS extrinsic, extrinsic_hash AS hash,
+                       toString(block_timestamp) AS ts, coalesce(signer, effective_signer) AS signer,
+                       success, call_name AS callName, fee, error_json
+                FROM price_data.raw_extrinsics
+                WHERE (block_height, extrinsic_index) IN (${inList})
+                ORDER BY ingested_at DESC
+                LIMIT 1 BY block_height, extrinsic_index
+              ) AS ext
+              LEFT JOIN price_data.blocks b ON b.block_height = ext.block`,
       format: 'JSONEachRow',
     })
     for (const r of await res.json<ExtrinsicHydrationRow>()) out.set(`${r.block}:${r.extrinsic}`, r)
@@ -12273,6 +12360,7 @@ function buildOnBehalfRow(c: OnBehalfCandidate, hydrate: ExtrinsicHydrationRow |
   const base = {
     block_height: c.block, extrinsic_index: c.extrinsic, extrinsic_hash: hydrate.hash,
     ts: hydrate.ts, signer: hydrate.signer, success: hydrate.success, call_name: hydrate.callName, fee: hydrate.fee,
+    error_json: hydrate.error_json, spec_version: hydrate.spec_version,
   }
   if (c.kind === 'proxy') {
     const inner = proxyInner.get(`${c.block}:${c.extrinsic}:${c.callAddress}`)
@@ -12360,21 +12448,32 @@ async function getAccountExtrinsics(accounts: string[], limit = 25, offset = 0, 
     if (filters.result === 'success') onBehalfRows = onBehalfRows.filter(r => r.display_success === 1)
     if (filters.result === 'failed') onBehalfRows = onBehalfRows.filter(r => r.display_success === 0)
 
-    const displayCallFilter = hasCallFilter ? textNameFilter('display_call_name', 'callName') : ''
-    const displayResultFilter = filters.result === 'success' ? 'AND display_success = 1'
-      : filters.result === 'failed' ? 'AND display_success = 0' : ''
+    const signedCallFilter = hasCallFilter ? textNameFilter('call_name', 'callName') : ''
+    const signedResultFilter = filters.result === 'success' ? 'AND success = 1'
+      : filters.result === 'failed' ? 'AND success = 0' : ''
     const signedRows: ExtrinsicSummaryRow[] = wantSigned ? await (async () => {
       const res = await client.query({
+        // The extrinsics-only inner select keeps bound/filters unqualified and
+        // ambiguity-free (single table in scope); the spec_version join for
+        // failure-reason decoding happens one level up, against the already
+        // bounded candidate set (signed display name/result == call_name/success).
         query: `
-          SELECT x.block_height AS block_height, x.extrinsic_index AS extrinsic_index, x.extrinsic_hash AS extrinsic_hash,
-                 toString(x.block_timestamp) AS ts, coalesce(x.signer, x.effective_signer) AS signer, x.success AS success,
-                 x.call_name AS call_name, x.fee AS fee,
-                 x.call_name AS display_call_name, toNullable(x.success) AS display_success
-          FROM price_data.raw_extrinsics AS x
-          WHERE ${bound} AND (x.signer IN (${list}) OR x.effective_signer IN (${list}))
-            ${displayCallFilter} ${displayResultFilter}
-          ORDER BY x.block_height DESC, x.extrinsic_index DESC
-          LIMIT {branchLimit:UInt32}`,
+          SELECT ext.block_height AS block_height, ext.extrinsic_index AS extrinsic_index, ext.extrinsic_hash AS extrinsic_hash,
+                 ext.ts AS ts, ext.signer AS signer, ext.success AS success, ext.call_name AS call_name, ext.fee AS fee,
+                 ext.call_name AS display_call_name, toNullable(ext.success) AS display_success,
+                 ext.error_json AS error_json, b.spec_version AS spec_version
+          FROM (
+            SELECT block_height, extrinsic_index, extrinsic_hash, toString(block_timestamp) AS ts, coalesce(signer, effective_signer) AS signer, success, call_name, fee, error_json
+            FROM price_data.raw_extrinsics
+            WHERE ${bound}
+              AND (signer IN (${list}) OR effective_signer IN (${list}))
+              ${signedCallFilter}
+              ${signedResultFilter}
+            ORDER BY block_height DESC, extrinsic_index DESC
+            LIMIT {branchLimit:UInt32}
+          ) AS ext
+          LEFT JOIN price_data.blocks b ON b.block_height = ext.block_height
+          ORDER BY ext.block_height DESC, ext.extrinsic_index DESC`,
         query_params: { branchLimit: offset + limit, ...textNameParams('callName', filters.call) },
         format: 'JSONEachRow',
       })

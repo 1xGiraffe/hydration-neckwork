@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { useExtrinsic } from '../hooks/useExplorerData'
 import { Link, paths } from '../router'
 import { F, AddrPill, CallPill, StatusBadge, JsonView, Ago, ExpandedRowSkeleton, Dash } from './ui'
-import type { ExtrinsicSummary, ExtrinsicOrigin, EventRow } from '../types'
+import { failureReasonText, type ExtrinsicSummary, type ExtrinsicOrigin, type EventRow } from '../types'
 
 // Expandable extrinsic / event rows shared by the list pages (Extrinsics, Events)
 // and the account detail tabs. Kept here so the markup stays identical everywhere.
@@ -201,7 +201,7 @@ export function ExtRow({ x, now, isNew, noSigner, showOrigin, senderLabel }: { x
         <td data-label="Fee" className="r mono muted">{F.hdxFee(x.fee)}</td>
         <td data-label="Result" className="r">{showOrigin && x.origin?.state === 'pending'
           ? <span className="badge pending"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>Pending</span>
-          : <StatusBadge ok={x.success} />}</td>
+          : <StatusBadge ok={x.success} reason={failureReasonText(x.errorReason)} />}</td>
         <td data-label="Time" className="r mono muted"><Ago ts={x.timestamp} now={now} /></td>
         <td className="r exp-toggle col-hide-mobile"><button className={`exp-btn${open ? ' open' : ''}`} onClick={event => { event.stopPropagation(); toggle() }} aria-label={`${open ? 'Collapse' : 'Expand'} extrinsic ${id}`} aria-expanded={open}>▸</button></td>
       </tr>

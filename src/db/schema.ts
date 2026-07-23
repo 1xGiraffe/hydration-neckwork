@@ -51,3 +51,12 @@ export interface RuntimeUpgradeRow {
   spec_version: number
   prev_spec_version: number
 }
+
+export interface RuntimeErrorNameRow {
+  spec_version: number
+  pallet_index: number
+  error_index: number
+  pallet_name: string
+  error_name: string
+  docs: string
+}
