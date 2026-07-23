@@ -456,6 +456,9 @@ svg { display: block; }
 .tbl tbody tr.dim:hover { opacity: 1; }
 .tbl td.r { text-align: right; }
 .tbl td.mono { font-family: 'GeistMono'; }
+/* Row ids (e.g. 13184944-3) must stay on one line — a break at the hyphen
+   reads as two unrelated numbers rather than one block-extrinsic/event index. */
+.tbl td.mono .hash { white-space: nowrap; }
 .accounts-tbl { min-width: 1180px; }
 /* Cap the Account column so a long on-chain identity or tag name can't widen the
    10-column table past its min-width and force the whole panel to scroll
@@ -729,6 +732,15 @@ svg { display: block; }
 .call.moneymarket .pallet { color: var(--lavender-deep); }
 .call.system .pallet, .call.timestamp .pallet, .call.utility .pallet { color: var(--text-medium); }
 .call.multitransactionpayment .pallet { color: var(--sky); }
+
+/* Table cells: same treatment as the hovercard's .hc-call (above) — keep the
+   pill one line and ellipsize an over-long method name (e.g.
+   OmnipoolLiquidityMining.add_liquidity_and_join_farms) instead of wrapping
+   the row. Scoped to .tbl td so the plain `.call` pill elsewhere (chips,
+   expanded-row details) keeps its intrinsic width. The pallet name (color-
+   coded, most scannable) always shows in full; only .method truncates. */
+.tbl td .call { display: inline-flex; max-width: 100%; min-width: 0; white-space: nowrap; overflow: hidden; }
+.tbl td .call .method { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* asset chip */
 /* vertical-align matters only when the chip sits in flowing text (e.g. the HSM

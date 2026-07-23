@@ -542,7 +542,7 @@ export function AddrPill({ account, full, noCopy, noTag }: { account: AccountRef
 export function CallPill({ name }: { name: string }) {
   const [pallet, method = ''] = name.split('.')
   return (
-    <span className={`call ${pallet.toLowerCase()}`}>
+    <span className={`call ${pallet.toLowerCase()}`} title={name}>
       <span className="pallet">{pallet}</span><span className="dot">.</span><span className="method">{method}</span>
     </span>
   )
