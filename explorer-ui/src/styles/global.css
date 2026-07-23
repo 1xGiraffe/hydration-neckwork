@@ -459,6 +459,8 @@ svg { display: block; }
 /* Row ids (e.g. 13184944-3) must stay on one line — a break at the hyphen
    reads as two unrelated numbers rather than one block-extrinsic/event index. */
 .tbl td.mono .hash { white-space: nowrap; }
+/* Fee ("1.295 HDX") and Time ("5d 18h ago") must stay on one line in their narrow columns. */
+.tbl td[data-label="Fee"], .tbl td[data-label="Time"] { white-space: nowrap; }
 .accounts-tbl { min-width: 1180px; }
 /* Cap the Account column so a long on-chain identity or tag name can't widen the
    10-column table past its min-width and force the whole panel to scroll
