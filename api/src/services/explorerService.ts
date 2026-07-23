@@ -8,7 +8,12 @@ import { normalizeAddress, hydrationAddress, polkadotAddress, reservedH160Accoun
 import { accountIcon, emojisMatchingName, emojiNameFor, parseSuffixEmojiQuery } from './omniwatchIdentity.ts'
 import { encodeAddress, base58Encode } from '@polkadot/util-crypto'
 import { hexToU8a } from '@polkadot/util'
-import { proxyInfoFor, multisigCompositionFor, multisigMembershipsFor, pendingMultisigOps, type ProxyRelation, type PendingMultisigOp } from './proxyMultisigService.ts'
+import { proxyInfoFor, multisigCompositionFor, multisigMembershipsFor, pendingMultisigOps, threshold1OpsFor, type ProxyRelation, type PendingMultisigOp } from './proxyMultisigService.ts'
+import {
+  resolveProxyInner, buildMultisigOperations, enrichMultisigOperations, proxyChildAddress,
+  type ExtrinsicCallRow, type ProxyInnerInfo, type MultisigLifecycleEvent, type MultisigCallInfo,
+  type MultisigOperationState,
+} from './onBehalfActivity.ts'
 import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
 import { xcmJourneySourcesFor, xcmJourneysByOriginTx } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
@@ -436,6 +441,22 @@ function filterKey(filters?: object): string {
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([k, v]) => `${k}=${String(v)}`)
     .join('&')
+}
+
+// TS-side replica of textNameFilter's four match rules, for filtering rows
+// that are assembled in application code (on-behalf extrinsic candidates)
+// rather than selected straight out of ClickHouse. `String.includes('')` is
+// true for every haystack, matching ClickHouse's `position(x, '') > 0`, so an
+// empty derived needle (e.g. a filter with no alnum characters) still behaves
+// like the SQL version.
+function matchesCallFilter(name: string, filter: string): boolean {
+  const raw = filter.trim()
+  if (name === raw) return true
+  if (name.toLowerCase().includes(raw.toLowerCase())) return true
+  const visible = raw.replace(/\s*\.\s*/g, ' ').trim()
+  if (name.replace(/\./g, ' ').toLowerCase().includes(visible.toLowerCase())) return true
+  const compact = raw.toLowerCase().replace(/[^0-9a-z]+/g, '')
+  return name.toLowerCase().replace(/[^0-9a-z]+/g, '').includes(compact)
 }
 
 function assetIdsForToken(token?: string): number[] | undefined {
@@ -1391,6 +1412,15 @@ interface ExtrinsicSummaryRow {
   ms_timeline_ts?: string[]
   ms_timeline_blocks?: number[]
   ms_timeline_extrinsics?: number[]
+}
+
+// Format a unix-seconds timestamp the same way ClickHouse's toString(DateTime)
+// does on this (UTC-configured) server, for on-behalf timeline entries built
+// in application code rather than read straight out of a DateTime column.
+function chTimestampString(ts: number): string {
+  const d = new Date(ts * 1000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`
 }
 
 function extrinsicSummary(row: ExtrinsicSummaryRow): ExtrinsicSummary {
@@ -10887,26 +10917,105 @@ export async function getAddressVotes(addressInput: string, limit = 25, offset =
 // (~2.5s), so it is served from its own lazily-fetched endpoint under a long
 // cache rather than blocking the page payload.
 
-// Distinct on-behalf extrinsics (proxy targets ∪ multisig operation anchors)
-// for a related-account set. Cheap: both projections are account-first and
-// tiny. Cached on its own so the tag snapshot read path (which serves counts
-// from a table that predates this field) can attach it without a recompute.
-async function onBehalfExtrinsicCount(accounts: string[], cacheKey: string): Promise<number> {
+// Multisig lifecycle event → MultisigLifecycleEvent.kind, exactly the map the
+// retired multisig_operations derivation job used.
+const MS_EVENT_KIND: Record<string, MultisigLifecycleEvent['kind']> = {
+  'Multisig.NewMultisig': 'new',
+  'Multisig.MultisigApproval': 'approval',
+  'Multisig.MultisigExecuted': 'executed',
+  'Multisig.MultisigCancelled': 'cancelled',
+}
+
+// An account's multisig operations, reconstructed per request from its own
+// (account-first, PK-bounded FINAL) lifecycle events — the same precedent as
+// pendingMultisigOps — plus the as_multi_threshold_1 ops from the in-memory
+// snapshot the shared proxy/multisig refresher keeps. Short-TTL cached: the
+// extrinsics feed, its count, and the tab-counts overlap query all want the
+// same reconstruction within one request burst.
+async function accountMultisigOps(accounts: string[]): Promise<MultisigOperationState[]> {
   const list = sqlAccountList(accounts)
-  if (list === "''") return 0
-  return cached(`explorer:onbehalf-count:${cacheKey}`, 600_000, async () => {
+  if (list === "''") return []
+  return cached(`explorer:ms-ops:${[...accounts].sort().join(',')}`, 10_000, async () => {
     const res = await client.query({
       query: `
-        SELECT count() AS c FROM (
-          SELECT block_height, extrinsic_index FROM price_data.proxy_call_activity WHERE real_account IN (${list})
-          UNION DISTINCT
-          SELECT anchor_block_height AS block_height, anchor_extrinsic_index AS extrinsic_index
-          FROM price_data.multisig_operation_activity WHERE multisig IN (${list})
-        )`,
+        SELECT block_height AS block, event_index AS eventIndex, assumeNotNull(extrinsic_index) AS extrinsic,
+               toUInt32(toUnixTimestamp(block_timestamp)) AS ts, event_name,
+               multisig, lower(actor) AS actor, call_hash AS callHash,
+               timepoint_height AS timepointHeight, timepoint_index AS timepointIndex,
+               has_timepoint AS hasTimepoint, result_ok AS resultOk
+        FROM price_data.multisig_event_activity FINAL
+        WHERE multisig IN (${list}) AND extrinsic_index IS NOT NULL`,
       format: 'JSONEachRow',
     })
-    return Number((await res.json<{ c: string }>())[0]?.c ?? 0)
+    const rows = await res.json<{
+      block: number; eventIndex: number; extrinsic: number; ts: number; event_name: string
+      multisig: string; actor: string; callHash: string
+      timepointHeight: number; timepointIndex: number; hasTimepoint: number; resultOk: number | null
+    }>()
+    const events: MultisigLifecycleEvent[] = rows.map(r => ({
+      kind: MS_EVENT_KIND[r.event_name],
+      multisig: r.multisig, callHash: r.callHash,
+      timepointHeight: r.hasTimepoint ? r.timepointHeight : null,
+      timepointIndex: r.hasTimepoint ? r.timepointIndex : null,
+      actor: r.actor, block: r.block, extrinsic: r.extrinsic, eventIndex: r.eventIndex, ts: r.ts,
+      ok: r.event_name === 'Multisig.MultisigExecuted' ? r.resultOk === 1 : null,
+    }))
+    const states = buildMultisigOperations(events)
+    for (const row of threshold1OpsFor(accounts)) states.push({ row, touchpoints: [] })
+    return states
   })
+}
+
+// Distinct on-behalf extrinsics (proxy targets ∪ multisig operation anchors)
+// for a related-account set, as a (block,extrinsic) tuple set — the shared
+// basis for both the count below and the tab-counts overlap query. Cheap:
+// both sources are account-first and tiny. Cached on its own so the tag
+// snapshot read path (which serves counts from a table that predates this
+// field) can attach it without a recompute.
+async function onBehalfExtrinsicTuples(accounts: string[], cacheKey: string): Promise<Set<string>> {
+  const list = sqlAccountList(accounts)
+  if (list === "''") return new Set()
+  return cached(`explorer:onbehalf-tuples:${cacheKey}`, 600_000, async () => {
+    const [proxyRes, msStates] = await Promise.all([
+      client.query({
+        query: `SELECT DISTINCT block_height, extrinsic_index FROM price_data.proxy_call_activity WHERE real_account IN (${list})`,
+        format: 'JSONEachRow',
+      }),
+      accountMultisigOps(accounts),
+    ])
+    const keys = new Set<string>()
+    for (const t of await proxyRes.json<{ block_height: number; extrinsic_index: number }>()) keys.add(`${t.block_height}:${t.extrinsic_index}`)
+    for (const s of msStates) keys.add(`${s.row.anchor_block_height}:${s.row.anchor_extrinsic_index}`)
+    return keys
+  })
+}
+
+async function onBehalfExtrinsicCount(accounts: string[], cacheKey: string): Promise<number> {
+  return (await onBehalfExtrinsicTuples(accounts, cacheKey)).size
+}
+
+// Signed ∩ on-behalf overlap (e.g. self-proxy): the merged extrinsics list
+// shows such an extrinsic once, so getAccountTabCounts subtracts it from the
+// naive sum. Driven by the same account-bounded tuple union as the count
+// above, as an explicit chunked IN list (the source tables no longer exist as
+// a single joinable projection once on-behalf ops are reconstructed at
+// request time).
+async function onBehalfOverlapCount(accounts: string[], cacheKey: string, list: string): Promise<number> {
+  const tuples = await onBehalfExtrinsicTuples(accounts, cacheKey)
+  if (!tuples.size) return 0
+  const tupleList = [...tuples].map(k => { const [h, e] = k.split(':'); return `(${h},${e})` })
+  let total = 0
+  for (let i = 0; i < tupleList.length; i += 10_000) {
+    const chunk = tupleList.slice(i, i + 10_000).join(',')
+    const res = await client.query({
+      query: `SELECT count() AS c FROM price_data.raw_extrinsics
+              WHERE (block_height, extrinsic_index) IN (${chunk})
+                AND (signer IN (${list}) OR effective_signer IN (${list}))`,
+      format: 'JSONEachRow',
+    })
+    total += Number((await res.json<{ c: string }>())[0]?.c ?? 0)
+  }
+  return total
 }
 
 export interface TabCounts { extrinsics: number; extrinsicsOnBehalf: number; events: number; activity: number; votes: number }
@@ -10926,25 +11035,13 @@ async function getAccountTabCounts(accounts: string[], cacheKey: string): Promis
     const activityHits = `SELECT block_height, event_index, extrinsic_index, event_name, is_module_transfer
          FROM (${indexedHits})
          GROUP BY block_height, event_index, extrinsic_index, event_name, is_module_transfer`
-    const [extRes, onBehalf, overlapRes, evRes, mmRes, xcmRes, dcaRes, otcRes, votes] = await Promise.all([
+    const [extRes, onBehalf, overlap, evRes, mmRes, xcmRes, dcaRes, otcRes, votes] = await Promise.all([
       client.query({
         query: `SELECT count() AS c FROM price_data.raw_extrinsics WHERE signer IN (${list}) OR effective_signer IN (${list})`,
         format: 'JSONEachRow',
       }),
       onBehalfExtrinsicCount(accounts, cacheKey),
-      // Signed ∩ on-behalf overlap (e.g. self-proxy): the merged list shows
-      // such an extrinsic once, so the total subtracts it. PK-pruned by the
-      // small on-behalf anchor set.
-      client.query({
-        query: `
-          SELECT count() AS c FROM price_data.raw_extrinsics
-          WHERE (block_height, extrinsic_index) IN (
-              SELECT block_height, extrinsic_index FROM price_data.proxy_call_activity WHERE real_account IN (${list})
-              UNION DISTINCT
-              SELECT anchor_block_height, anchor_extrinsic_index FROM price_data.multisig_operation_activity WHERE multisig IN (${list}))
-            AND (signer IN (${list}) OR effective_signer IN (${list}))`,
-        format: 'JSONEachRow',
-      }),
+      onBehalfOverlapCount(accounts, cacheKey, list),
       // Aggregate the hit activity once into per-event flags, then compute the tab
       // counts without expanding separate reference sets.
       client.query({
@@ -11008,7 +11105,6 @@ async function getAccountTabCounts(accounts: string[], cacheKey: string): Promis
     const activity = n(ev.trades) + n(ev.transfers) + n(ev.liq) + n(ev.staking) + n(ev.votes) + n(ev.xcm_in)
       + n((await mmRes.json<{ c: string }>())[0]?.c) + n((await xcmRes.json<{ c: string }>())[0]?.c) + n((await dcaRes.json<{ c: string }>())[0]?.c)
       + n((await otcRes.json<{ c: string }>())[0]?.c)
-    const overlap = n((await overlapRes.json<{ c: string }>())[0]?.c)
     return {
       extrinsics: n((await extRes.json<{ c: string }>())[0]?.c) + onBehalf - overlap,
       extrinsicsOnBehalf: onBehalf,
@@ -11966,96 +12062,329 @@ export async function getTagValueEvents(tagId: string, from?: string, to?: strin
   return getAccountValueEvents(historyAccounts, `tag:${tagId}`, from, to, VALUE_EVENT_DEFAULT_LIMIT, historyAccounts)
 }
 
+// ───────────────── on-behalf extrinsic candidates (request-time) ─────────────────
+// Proxy.proxy/proxy_announced calls whose `real` is the account
+// (proxy_call_activity, MV-fed) and this account's multisig operations
+// (accountMultisigOps), merged into a single per-(block,extrinsic) candidate:
+// multisig beats proxy when both land on the same extrinsic (matches the old
+// union's `origin_kind ASC` tiebreak, since 'multisig' < 'proxy'), and within
+// a kind the lowest call_address / call_hash wins (matches the old per-branch
+// `LIMIT 1 BY` after `ORDER BY ..., call_address|call_hash`).
+interface ProxyCandidateRow { block: number; extrinsic: number; callAddress: string; proxyCallName: string }
+interface OnBehalfCandidate {
+  block: number
+  extrinsic: number
+  kind: 'proxy' | 'multisig'
+  callAddress?: string
+  proxyCallName?: string
+  opState?: MultisigOperationState
+}
+
+async function fetchProxyCandidates(list: string, bound: string): Promise<ProxyCandidateRow[]> {
+  const res = await client.query({
+    query: `SELECT block_height AS block, extrinsic_index AS extrinsic, call_address AS callAddress, proxy_call_name AS proxyCallName
+            FROM price_data.proxy_call_activity
+            WHERE real_account IN (${list}) AND ${bound}
+            ORDER BY ingested_at DESC
+            LIMIT 1 BY block_height, extrinsic_index, call_address`,
+    format: 'JSONEachRow',
+  })
+  return res.json<ProxyCandidateRow>()
+}
+
+function mergeOnBehalfCandidates(proxyRows: ProxyCandidateRow[], msStates: MultisigOperationState[]): Map<string, OnBehalfCandidate> {
+  const map = new Map<string, OnBehalfCandidate>()
+  for (const p of proxyRows) {
+    const key = `${p.block}:${p.extrinsic}`
+    const existing = map.get(key)
+    if (existing && (existing.kind === 'multisig' || existing.callAddress! <= p.callAddress)) continue
+    map.set(key, { block: p.block, extrinsic: p.extrinsic, kind: 'proxy', callAddress: p.callAddress, proxyCallName: p.proxyCallName })
+  }
+  for (const s of msStates) {
+    const key = `${s.row.anchor_block_height}:${s.row.anchor_extrinsic_index}`
+    const existing = map.get(key)
+    if (existing?.kind === 'multisig' && existing.opState!.row.call_hash <= s.row.call_hash) continue
+    map.set(key, { block: s.row.anchor_block_height, extrinsic: s.row.anchor_extrinsic_index, kind: 'multisig', opState: s })
+  }
+  return map
+}
+
+// Bounds an account's multisig ops by the request's date window, comparing
+// against each op's anchor_timestamp (unix seconds). block_timestamp — and so
+// this server's ClickHouse session — runs UTC (verified against the parity
+// captures' timeline strings), so Date.parse(`${date}T00:00:00Z`) reproduces
+// the same boundary the SQL timeWindow() applies to raw block_timestamp.
+function msAnchorWindow(from?: string, to?: string): ((ts: number) => boolean) | null {
+  const fromTs = from && DATE_RE.test(from) ? Math.floor(Date.parse(`${from}T00:00:00Z`) / 1000) : null
+  const toTs = to && DATE_RE.test(to) ? Math.floor(Date.parse(`${to}T00:00:00Z`) / 1000) + 86400 : null
+  if (fromTs == null && toTs == null) return null
+  return ts => (fromTs == null || ts >= fromTs) && (toTs == null || ts < toTs)
+}
+
+// raw_calls rows for a (block,extrinsic) tuple set, deduped like every other
+// ReplacingMergeTree read here. Shared by proxy inner-call resolution and
+// multisig call/child/origin resolution — both need every call address inside
+// their candidate extrinsics, not just the wrapper's own row.
+interface RawCallLookupRow { block: number; extrinsic: number; callAddress: string; callName: string; success: number | null; originJson: string | null }
+async function loadRawCallsForTuples(tuples: Set<string>): Promise<RawCallLookupRow[]> {
+  const out: RawCallLookupRow[] = []
+  const keys = [...tuples]
+  for (let i = 0; i < keys.length; i += 10_000) {
+    const inList = keys.slice(i, i + 10_000).map(k => `(${k})`).join(',')
+    const res = await client.query({
+      query: `SELECT block_height AS block, assumeNotNull(extrinsic_index) AS extrinsic, call_address AS callAddress,
+                     call_name AS callName, success, origin_json AS originJson
+              FROM price_data.raw_calls
+              WHERE (block_height, assumeNotNull(extrinsic_index)) IN (${inList}) AND extrinsic_index IS NOT NULL
+              ORDER BY ingested_at DESC
+              LIMIT 1 BY block_height, assumeNotNull(extrinsic_index), call_address`,
+      format: 'JSONEachRow',
+    })
+    out.push(...await res.json<RawCallLookupRow>())
+  }
+  return out
+}
+
+async function loadSignersForTuples(tuples: Set<string>): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  const keys = [...tuples]
+  for (let i = 0; i < keys.length; i += 10_000) {
+    const inList = keys.slice(i, i + 10_000).map(k => `(${k})`).join(',')
+    const res = await client.query({
+      query: `SELECT block_height AS block, extrinsic_index AS extrinsic, lower(coalesce(signer, effective_signer)) AS signer
+              FROM price_data.raw_extrinsics
+              WHERE (block_height, extrinsic_index) IN (${inList})
+              ORDER BY ingested_at DESC
+              LIMIT 1 BY block_height, extrinsic_index`,
+      format: 'JSONEachRow',
+    })
+    for (const s of await res.json<{ block: number; extrinsic: number; signer: string | null }>()) {
+      if (s.signer) out.set(`${s.block}:${s.extrinsic}`, s.signer)
+    }
+  }
+  return out
+}
+
+// origin_json's Signed variant, exactly as the retired multisig_operations
+// derivation job parsed it (raw_extrinsics signer is the fallback for the
+// historical rows that predate origin_json).
+function signedOrigin(originJson: string | null): string | null {
+  if (!originJson) return null
+  try {
+    const o = JSON.parse(originJson) as { value?: { __kind?: string; value?: string } }
+    return o.value?.__kind === 'Signed' && typeof o.value.value === 'string' ? o.value.value.toLowerCase() : null
+  } catch { return null }
+}
+
+// MultisigCallInfo[] for a set of multisig op touchpoints, built exactly like
+// the deleted derivation job did: multisig_call_activity for the wrapper call
+// (threshold/otherSignatories), raw_calls for every call in those same
+// extrinsics (own success/origin + the dispatched child's name/success).
+async function loadMultisigCallInfo(tupleKeys: Set<string>): Promise<MultisigCallInfo[]> {
+  const calls: MultisigCallInfo[] = []
+  const keys = [...tupleKeys]
+  for (let i = 0; i < keys.length; i += 10_000) {
+    const chunk = keys.slice(i, i + 10_000)
+    const tuples = chunk.map(k => `(${k})`).join(',')
+    const callRes = await client.query({
+      query: `SELECT block_height AS block, assumeNotNull(extrinsic_index) AS extrinsic, call_address AS callAddress,
+                     call_name AS callName, args_json AS argsJson, toUInt32(toUnixTimestamp(block_timestamp)) AS ts
+              FROM price_data.multisig_call_activity FINAL
+              WHERE (block_height, assumeNotNull(extrinsic_index)) IN (${tuples}) AND extrinsic_index IS NOT NULL`,
+      format: 'JSONEachRow',
+    })
+    const rows = await callRes.json<{ block: number; extrinsic: number; callAddress: string; callName: string; argsJson: string; ts: number }>()
+    if (!rows.length) continue
+    const extrinsicKeys = new Set(rows.map(r => `${r.block},${r.extrinsic}`))
+    const [rawCalls, signers] = await Promise.all([loadRawCallsForTuples(extrinsicKeys), loadSignersForTuples(extrinsicKeys)])
+    const byAddress = new Map<string, RawCallLookupRow>()
+    for (const c of rawCalls) byAddress.set(`${c.block}:${c.extrinsic}:${c.callAddress}`, c)
+    for (const r of rows) {
+      let threshold: number | null = null
+      let otherSignatories: string[] = []
+      try {
+        const args = JSON.parse(r.argsJson) as { threshold?: number; otherSignatories?: string[] }
+        threshold = typeof args.threshold === 'number' ? args.threshold : null
+        otherSignatories = Array.isArray(args.otherSignatories) ? args.otherSignatories.map(s => s.toLowerCase()) : []
+      } catch { /* keep defaults — the derive-check will simply not match */ }
+      const own = byAddress.get(`${r.block}:${r.extrinsic}:${r.callAddress}`)
+      const child = byAddress.get(`${r.block}:${r.extrinsic}:${proxyChildAddress(r.callAddress)}`)
+      calls.push({
+        block: r.block, extrinsic: r.extrinsic, callAddress: r.callAddress, callName: r.callName,
+        threshold, otherSignatories,
+        originAccount: signedOrigin(own?.originJson ?? null) ?? signers.get(`${r.block}:${r.extrinsic}`) ?? null,
+        callSuccess: own?.success ?? null,
+        innerCallName: child?.callName ?? null,
+        innerSuccess: child?.success ?? null,
+        ts: r.ts,
+      })
+    }
+  }
+  return calls
+}
+
+async function enrichProxyCandidates(scoped: OnBehalfCandidate[]): Promise<Map<string, ProxyInnerInfo>> {
+  const proxyCands = scoped.filter(c => c.kind === 'proxy')
+  if (!proxyCands.length) return new Map()
+  const tuples = new Set(proxyCands.map(c => `${c.block},${c.extrinsic}`))
+  const rawCalls = await loadRawCallsForTuples(tuples)
+  const calls: ExtrinsicCallRow[] = rawCalls.map(c => ({ block: c.block, extrinsic: c.extrinsic, callAddress: c.callAddress, callName: c.callName, success: c.success }))
+  return resolveProxyInner(proxyCands.map(c => ({ block: c.block, extrinsic: c.extrinsic, callAddress: c.callAddress! })), calls)
+}
+
+async function enrichMultisigCandidates(scoped: OnBehalfCandidate[]): Promise<void> {
+  const states = scoped.filter(c => c.kind === 'multisig').map(c => c.opState!)
+  const tuples = new Set<string>()
+  for (const s of states) for (const tp of s.touchpoints) tuples.add(`${tp.block},${tp.extrinsic}`)
+  if (!tuples.size) return
+  const calls = await loadMultisigCallInfo(tuples)
+  enrichMultisigOperations(states, calls)
+}
+
+interface ExtrinsicHydrationRow { block: number; extrinsic: number; hash: string; ts: string; signer: string | null; success: number; callName: string; fee: string | null }
+async function hydrateOnBehalfExtrinsics(tuples: Set<string>): Promise<Map<string, ExtrinsicHydrationRow>> {
+  const out = new Map<string, ExtrinsicHydrationRow>()
+  const keys = [...tuples]
+  for (let i = 0; i < keys.length; i += 10_000) {
+    const inList = keys.slice(i, i + 10_000).map(k => `(${k})`).join(',')
+    const res = await client.query({
+      query: `SELECT block_height AS block, extrinsic_index AS extrinsic, extrinsic_hash AS hash,
+                     toString(block_timestamp) AS ts, coalesce(signer, effective_signer) AS signer,
+                     success, call_name AS callName, fee
+              FROM price_data.raw_extrinsics
+              WHERE (block_height, extrinsic_index) IN (${inList})
+              ORDER BY ingested_at DESC
+              LIMIT 1 BY block_height, extrinsic_index`,
+      format: 'JSONEachRow',
+    })
+    for (const r of await res.json<ExtrinsicHydrationRow>()) out.set(`${r.block}:${r.extrinsic}`, r)
+  }
+  return out
+}
+
+// Builds the same ExtrinsicSummaryRow shape extrinsicSummary() has always
+// consumed, so the on-behalf → ExtrinsicSummary mapping (origin kind/state/
+// threshold/timeline/…) stays byte-identical to the retired SQL union.
+function buildOnBehalfRow(c: OnBehalfCandidate, hydrate: ExtrinsicHydrationRow | undefined, proxyInner: Map<string, ProxyInnerInfo>): ExtrinsicSummaryRow | null {
+  if (!hydrate) return null // extrinsic row missing (shouldn't happen for a real anchor) — drop rather than fabricate
+  const base = {
+    block_height: c.block, extrinsic_index: c.extrinsic, extrinsic_hash: hydrate.hash,
+    ts: hydrate.ts, signer: hydrate.signer, success: hydrate.success, call_name: hydrate.callName, fee: hydrate.fee,
+  }
+  if (c.kind === 'proxy') {
+    const inner = proxyInner.get(`${c.block}:${c.extrinsic}:${c.callAddress}`)
+    return {
+      ...base,
+      display_call_name: inner?.innerCallName || c.proxyCallName!,
+      display_success: inner?.innerSuccess ?? hydrate.success,
+      origin_kind: 'proxy',
+    }
+  }
+  const op = c.opState!.row
+  return {
+    ...base,
+    display_call_name: op.inner_call_name || hydrate.callName,
+    display_success: op.state === 'pending' ? null : op.inner_success,
+    origin_kind: 'multisig',
+    ms_state: op.state,
+    ms_threshold: op.threshold,
+    ms_signatories: op.signatories,
+    ms_approvals: op.approvals,
+    ms_call_hash: op.inner_call_name === '' ? op.call_hash : '',
+    ms_initiator: op.initiator,
+    ms_timeline_actors: op.timeline_actors,
+    ms_timeline_actions: op.timeline_actions,
+    ms_timeline_ts: op.timeline_ts.map(chTimestampString),
+    ms_timeline_blocks: op.timeline_blocks,
+    ms_timeline_extrinsics: op.timeline_extrinsics,
+  }
+}
+
+function dedupeSummaryRows(rows: ExtrinsicSummaryRow[]): ExtrinsicSummaryRow[] {
+  const seen = new Set<string>()
+  const out: ExtrinsicSummaryRow[] = []
+  for (const r of rows) {
+    const key = `${r.block_height}:${r.extrinsic_index}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(r)
+  }
+  return out
+}
+
 // The account's extrinsics feed: extrinsics it SIGNED, plus extrinsics
-// executed ON ITS BEHALF — Proxy.proxy calls whose `real` is the account
-// (proxy_call_activity) and multisig operations of a multisig it is
-// (multisig_operation_activity), one row per operation at its anchor
-// extrinsic. Branches are unioned, deduplicated per extrinsic (on-behalf
-// wins so the badge survives self-proxy), sorted, then sliced — pagination
-// stays deterministic over the full filtered ordering. `call`/`result`
-// filters match the DISPLAYED call name / result (the inner call for
-// on-behalf rows); pending operations match neither result value.
+// executed ON ITS BEHALF — Proxy.proxy calls whose `real` is the account and
+// multisig operations of a multisig it is, reconstructed at request time from
+// MV-fed sources (see the on-behalf candidate helpers above). Sources are
+// merged, deduplicated per extrinsic (on-behalf wins so the badge survives
+// self-proxy), sorted, then sliced — pagination stays deterministic over the
+// full filtered ordering. `call`/`result` filters match the DISPLAYED call
+// name / result (the inner call for on-behalf rows); pending operations match
+// neither result value. A call/result filter forces full enrichment of every
+// on-behalf candidate (filter completeness); otherwise only the top
+// (offset+limit) candidates are enriched.
 async function getAccountExtrinsics(accounts: string[], limit = 25, offset = 0, cacheKey?: string, filters: ExtrinsicListFilters = {}, from?: string, to?: string): Promise<ExtrinsicSummary[]> {
   const list = sqlAccountList(accounts)
   if (list === "''") return []
   const tw = timeWindow(from, to)
   const bound = tw ?? '1'
   return cached(`explorer:${cacheKey ?? `acct-extrinsics:${[...accounts].sort().join(',')}`}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : 8000, async () => {
+    const wantSigned = !filters.origin || filters.origin === 'signed'
+    const wantProxy = !filters.origin || filters.origin === 'proxy'
+    const wantMs = !filters.origin || filters.origin === 'multisig'
     const hasCallFilter = Boolean(filters.call?.trim())
+    const hasResultFilter = filters.result === 'success' || filters.result === 'failed'
+    const enrichAll = hasCallFilter || hasResultFilter
+
+    const [proxyRows, msStatesAll] = await Promise.all([
+      wantProxy ? fetchProxyCandidates(list, bound) : Promise.resolve([] as ProxyCandidateRow[]),
+      wantMs ? accountMultisigOps(accounts) : Promise.resolve([] as MultisigOperationState[]),
+    ])
+    const msWindow = msAnchorWindow(from, to)
+    const msStates = msWindow ? msStatesAll.filter(s => msWindow(s.row.anchor_timestamp)) : msStatesAll
+
+    const mergedMap = mergeOnBehalfCandidates(proxyRows, msStates)
+    let scoped = [...mergedMap.values()].sort((a, b) => b.block - a.block || b.extrinsic - a.extrinsic)
+    if (!enrichAll) scoped = scoped.slice(0, offset + limit)
+
+    const [proxyInnerMap] = await Promise.all([enrichProxyCandidates(scoped), enrichMultisigCandidates(scoped)])
+    const hydration = await hydrateOnBehalfExtrinsics(new Set(scoped.map(c => `${c.block},${c.extrinsic}`)))
+
+    let onBehalfRows = scoped
+      .map(c => buildOnBehalfRow(c, hydration.get(`${c.block}:${c.extrinsic}`), proxyInnerMap))
+      .filter((r): r is ExtrinsicSummaryRow => r != null)
+    if (hasCallFilter) onBehalfRows = onBehalfRows.filter(r => matchesCallFilter(r.display_call_name!, filters.call!))
+    if (filters.result === 'success') onBehalfRows = onBehalfRows.filter(r => r.display_success === 1)
+    if (filters.result === 'failed') onBehalfRows = onBehalfRows.filter(r => r.display_success === 0)
+
     const displayCallFilter = hasCallFilter ? textNameFilter('display_call_name', 'callName') : ''
     const displayResultFilter = filters.result === 'success' ? 'AND display_success = 1'
       : filters.result === 'failed' ? 'AND display_success = 0' : ''
-    const summaryCols = `x.block_height AS block_height, x.extrinsic_index AS extrinsic_index, x.extrinsic_hash AS extrinsic_hash,
-             toString(x.block_timestamp) AS ts, coalesce(x.signer, x.effective_signer) AS signer, x.success AS success,
-             x.call_name AS call_name, x.fee AS fee`
-    const branches: string[] = []
-    if (!filters.origin || filters.origin === 'signed') {
-      branches.push(`
-        SELECT ${summaryCols},
-               x.call_name AS display_call_name, toNullable(x.success) AS display_success,
-               'signed' AS origin_kind, '' AS ms_state, toUInt16(0) AS ms_threshold, toUInt16(0) AS ms_signatories,
-               toUInt16(0) AS ms_approvals, '' AS ms_call_hash, '' AS ms_initiator, CAST([], 'Array(String)') AS ms_timeline_actors, CAST([], 'Array(String)') AS ms_timeline_actions, CAST([], 'Array(String)') AS ms_timeline_ts, CAST([], 'Array(UInt32)') AS ms_timeline_blocks, CAST([], 'Array(UInt32)') AS ms_timeline_extrinsics
-        FROM price_data.raw_extrinsics AS x
-        WHERE ${bound} AND (x.signer IN (${list}) OR x.effective_signer IN (${list}))
-          ${displayCallFilter} ${displayResultFilter}
-        ORDER BY x.block_height DESC, x.extrinsic_index DESC
-        LIMIT {branchLimit:UInt32}`)
-    }
-    if (!filters.origin || filters.origin === 'proxy') {
-      branches.push(`
-        SELECT ${summaryCols},
-               if(p.inner_call_name != '', p.inner_call_name, p.proxy_call_name) AS display_call_name,
-               coalesce(p.inner_success, x.success) AS display_success,
-               'proxy' AS origin_kind, '' AS ms_state, toUInt16(0) AS ms_threshold, toUInt16(0) AS ms_signatories,
-               toUInt16(0) AS ms_approvals, '' AS ms_call_hash, '' AS ms_initiator, CAST([], 'Array(String)') AS ms_timeline_actors, CAST([], 'Array(String)') AS ms_timeline_actions, CAST([], 'Array(String)') AS ms_timeline_ts, CAST([], 'Array(UInt32)') AS ms_timeline_blocks, CAST([], 'Array(UInt32)') AS ms_timeline_extrinsics
-        FROM price_data.raw_extrinsics AS x
-        INNER JOIN (
-          SELECT block_height, extrinsic_index, call_address, proxy_call_name, inner_call_name, inner_success
-          FROM price_data.proxy_call_activity
-          WHERE real_account IN (${list})
-        ) AS p ON p.block_height = x.block_height AND p.extrinsic_index = x.extrinsic_index
-        WHERE (x.block_height, x.extrinsic_index) IN (
-            SELECT block_height, extrinsic_index FROM price_data.proxy_call_activity WHERE real_account IN (${list}))
-          AND ${bound} ${displayCallFilter} ${displayResultFilter}
-        ORDER BY x.block_height DESC, x.extrinsic_index DESC, p.call_address
-        LIMIT 1 BY x.block_height, x.extrinsic_index
-        LIMIT {branchLimit:UInt32}`)
-    }
-    if (!filters.origin || filters.origin === 'multisig') {
-      branches.push(`
-        SELECT ${summaryCols},
-               if(m.inner_call_name != '', m.inner_call_name, x.call_name) AS display_call_name,
-               if(m.state = 'pending', NULL, m.inner_success) AS display_success,
-               'multisig' AS origin_kind, toString(m.state) AS ms_state, m.threshold AS ms_threshold,
-               m.signatories AS ms_signatories, m.approvals AS ms_approvals,
-               if(m.inner_call_name = '', m.call_hash, '') AS ms_call_hash,
-               m.initiator AS ms_initiator, m.timeline_actors AS ms_timeline_actors, CAST(m.timeline_actions, 'Array(String)') AS ms_timeline_actions, arrayMap(t -> toString(t), m.timeline_ts) AS ms_timeline_ts, m.timeline_blocks AS ms_timeline_blocks, m.timeline_extrinsics AS ms_timeline_extrinsics
-        FROM price_data.raw_extrinsics AS x
-        INNER JOIN (
-          SELECT multisig, call_hash, state, threshold, signatories, approvals,
-                 anchor_block_height, anchor_extrinsic_index, inner_call_name, inner_success,
-                 initiator, timeline_actors, timeline_actions, timeline_ts, timeline_blocks, timeline_extrinsics
-          FROM price_data.multisig_operation_activity
-          WHERE multisig IN (${list})
-        ) AS m ON m.anchor_block_height = x.block_height AND m.anchor_extrinsic_index = x.extrinsic_index
-        WHERE (x.block_height, x.extrinsic_index) IN (
-            SELECT anchor_block_height, anchor_extrinsic_index FROM price_data.multisig_operation_activity WHERE multisig IN (${list}))
-          AND ${bound} ${displayCallFilter} ${displayResultFilter}
-        ORDER BY x.block_height DESC, x.extrinsic_index DESC, m.call_hash
-        LIMIT 1 BY x.block_height, x.extrinsic_index
-        LIMIT {branchLimit:UInt32}`)
-    }
-    const res = await client.query({
-      query: `
-        SELECT * FROM (${branches.join(' UNION ALL ')})
-        ORDER BY block_height DESC, extrinsic_index DESC, origin_kind = 'signed' ASC, origin_kind ASC
-        LIMIT 1 BY block_height, extrinsic_index
-        LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
-      query_params: { limit, offset, branchLimit: offset + limit, ...textNameParams('callName', filters.call) },
-      format: 'JSONEachRow',
-    })
-    const rows = await res.json<ExtrinsicSummaryRow>()
-    return uniqueExtrinsicSummaries(rows)
+    const signedRows: ExtrinsicSummaryRow[] = wantSigned ? await (async () => {
+      const res = await client.query({
+        query: `
+          SELECT x.block_height AS block_height, x.extrinsic_index AS extrinsic_index, x.extrinsic_hash AS extrinsic_hash,
+                 toString(x.block_timestamp) AS ts, coalesce(x.signer, x.effective_signer) AS signer, x.success AS success,
+                 x.call_name AS call_name, x.fee AS fee,
+                 x.call_name AS display_call_name, toNullable(x.success) AS display_success
+          FROM price_data.raw_extrinsics AS x
+          WHERE ${bound} AND (x.signer IN (${list}) OR x.effective_signer IN (${list}))
+            ${displayCallFilter} ${displayResultFilter}
+          ORDER BY x.block_height DESC, x.extrinsic_index DESC
+          LIMIT {branchLimit:UInt32}`,
+        query_params: { branchLimit: offset + limit, ...textNameParams('callName', filters.call) },
+        format: 'JSONEachRow',
+      })
+      return res.json<ExtrinsicSummaryRow>()
+    })() : []
+
+    // on-behalf rows first: a stable sort preserves their precedence over a
+    // same-(block,extrinsic) signed row, reproducing the old union's
+    // "on-behalf wins" tiebreak without needing a second sort key.
+    const combined = [...onBehalfRows, ...signedRows]
+    combined.sort((a, b) => b.block_height - a.block_height || b.extrinsic_index - a.extrinsic_index)
+    const page = dedupeSummaryRows(combined).slice(offset, offset + limit)
+    return uniqueExtrinsicSummaries(page)
   })
 }
 
