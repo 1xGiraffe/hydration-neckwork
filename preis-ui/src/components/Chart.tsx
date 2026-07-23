@@ -21,6 +21,9 @@ import { fetchCandles, fetchVolumeDetails } from '../api/candles'
 import { formatCountdown } from '../utils/format'
 import { candleEndTimestamp, previousCandleRange, recentCandleRange } from '../utils/candleTime'
 import { keepTabFocusInside } from '../utils/focus'
+import { ToolController } from '../chart-tools/ToolController'
+import type { ToolState } from '../chart-tools/ToolController'
+import ChartToolbar from './ChartToolbar'
 
 // Account pills link into the sibling explorer app (mirrors the explorer's
 // VITE_PREIS_URL wiring). Build-time env; falls back to the local docker UI.
@@ -51,6 +54,7 @@ interface ChartProps {
   inspectionTime?: number | null
   onInspectionTimeChange?: (time: number | null) => void
   theme: 'dark' | 'light'
+  toolsEnabled?: boolean
 }
 
 interface Legend {
@@ -237,7 +241,7 @@ function isLight(p: ChartPalette): boolean { return p.bg === CHART_PALETTES.ligh
 export default function Chart({
   baseId, quoteId, interval, base, showVolumeSource = false,
   onVisibleRangeReady, onDataChange, onCountdownChange,
-  inspectionTime = null, onInspectionTimeChange, theme,
+  inspectionTime = null, onInspectionTimeChange, theme, toolsEnabled = true,
 }: ChartProps) {
   const dataScopeKey = `${baseId}:${quoteId}:${interval}`
   const containerRef = useRef<HTMLDivElement>(null)
@@ -264,6 +268,18 @@ export default function Chart({
   const oldestTimestampRef = useRef<number>(Infinity)
   const isLoadingMoreRef = useRef(false)
   const reachedBeginningRef = useRef(false)
+
+  // Drawing tools (trendline, channel, measure). The controller lives for the
+  // chart instance; the pair key is mirrored into a ref so the chart-creation
+  // effect does not need baseId/quoteId deps (App remounts this per pair).
+  const toolsRef = useRef<ToolController | null>(null)
+  const pairKeyRef = useRef(`${baseId}-${quoteId}`)
+  useEffect(() => { pairKeyRef.current = `${baseId}-${quoteId}` }, [baseId, quoteId])
+  const [toolState, setToolState] = useState<ToolState>({ tool: 'cursor', hasSelection: false })
+  // Hiding the toolbar (menu toggle) must never strand a drawing tool.
+  useEffect(() => {
+    if (!toolsEnabled) toolsRef.current?.setTool('cursor')
+  }, [toolsEnabled])
 
   const [legend, setLegend] = useState<Legend | null>(null)
   const [loading, setLoading] = useState(true)
@@ -701,6 +717,13 @@ export default function Chart({
     candleSeriesRef.current = candleSeries
     volumeSeriesRef.current = volumeSeries
 
+    toolsRef.current = new ToolController({
+      chart,
+      series: candleSeries,
+      pairKey: pairKeyRef.current,
+      onStateChange: setToolState,
+    })
+
     if (onVisibleRangeReady) {
       onVisibleRangeReady(() => {
         const range = chartRef.current?.timeScale().getVisibleLogicalRange()
@@ -720,6 +743,7 @@ export default function Chart({
     chart.subscribeCrosshairMove(crosshairHandler)
 
     const clickHandler = (param: MouseEventParams) => {
+      if (toolsRef.current?.isCapturing()) return
       if (!param.point) return
 
       const data = allDataRef.current
@@ -765,6 +789,8 @@ export default function Chart({
         markerFrameRef.current = null
       }
       if (onVisibleRangeReady) onVisibleRangeReady(() => null)
+      toolsRef.current?.dispose()
+      toolsRef.current = null
       chartRef.current = null
       candleSeriesRef.current = null
       volumeSeriesRef.current = null
@@ -1245,6 +1271,15 @@ export default function Chart({
       `}</style>
       <div className="chart-area">
         <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
+
+        {toolsEnabled && (
+          <ChartToolbar
+            tool={toolState.tool}
+            onTool={t => toolsRef.current?.setTool(t)}
+            hasSelection={toolState.hasSelection}
+            onDelete={() => toolsRef.current?.deleteSelection()}
+          />
+        )}
 
         {omniwatchMarkers.map(marker => {
           const summary = marker.candle.omniwatch

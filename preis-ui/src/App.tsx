@@ -102,6 +102,21 @@ export default function App() {
       // Ignore persistence failures; the in-memory selection still works.
     }
   }, [period])
+  const [toolsEnabled, setToolsEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('preis-tools') !== 'off'
+    } catch {
+      // localStorage can be unavailable in private or hardened contexts.
+      return true
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem('preis-tools', toolsEnabled ? 'on' : 'off')
+    } catch {
+      // Ignore persistence failures; the in-memory preference still works.
+    }
+  }, [toolsEnabled])
   useEffect(() => {
     try {
       localStorage.setItem(DESKTOP_SIDEBAR_STORAGE_KEY, desktopSidebarOpen ? 'true' : 'false')
@@ -458,6 +473,7 @@ export default function App() {
               inspectionTime={inspectionTime}
               onInspectionTimeChange={handleInspectionTimeChange}
               theme={theme}
+              toolsEnabled={toolsEnabled}
             />
           </div>
         </div>
@@ -486,8 +502,8 @@ export default function App() {
             .mobile-drawer-close { align-self: flex-end; margin: 8px; width: 36px; height: 36px; border-radius: 9999px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-medium); transition: color 140ms, background 140ms, transform 140ms var(--ease-out-soft); }
             .mobile-drawer-close:hover { background: var(--panel-hover); color: var(--text-high); }
             .mobile-drawer-close:active { transform: scale(0.94); }
-            .mobile-drawer-actions { display: flex; flex-direction: column; border-top: 1px solid var(--separator); padding: 8px 0; background: var(--bg); }
-            .mobile-drawer-actions button { display: flex; align-items: center; gap: 12px; padding: 14px 20px; font-family: 'Geist', sans-serif; font-size: 14px; color: var(--text-high); background: transparent; text-align: left; transition: background 140ms, transform 140ms var(--ease-out-soft); }
+            .mobile-drawer-actions { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--separator); padding: 8px 12px; gap: 2px; background: var(--bg); }
+            .mobile-drawer-actions button { display: flex; align-items: center; gap: 10px; padding: 14px 12px; border-radius: 8px; font-family: 'Geist', sans-serif; font-size: 14px; color: var(--text-high); background: transparent; text-align: left; white-space: nowrap; transition: background 140ms, transform 140ms var(--ease-out-soft); }
             .mobile-drawer-actions button:hover { background: var(--panel-hover); transform: translateX(2px); }
             .mobile-drawer-actions button:active { transform: translateX(1px) scale(0.995); }
             .mobile-drawer-actions button:disabled { color: var(--text-lowest); cursor: not-allowed; }
@@ -522,6 +538,13 @@ export default function App() {
             <div className="mobile-drawer-actions">
               <button
                 type="button"
+                onClick={() => { handleScreenshot(); setDrawerOpen(false) }}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                Screenshot
+              </button>
+              <button
+                type="button"
                 disabled={chartData.length === 0}
                 onClick={() => {
                   if (chartData.length === 0) return
@@ -535,10 +558,11 @@ export default function App() {
               </button>
               <button
                 type="button"
-                onClick={() => { handleScreenshot(); setDrawerOpen(false) }}
+                aria-pressed={toolsEnabled}
+                onClick={() => { setToolsEnabled(enabled => !enabled); setDrawerOpen(false) }}
               >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-                Screenshot
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="7.5" y1="16.5" x2="16.5" y2="7.5"/><circle cx="5.5" cy="18.5" r="2"/><circle cx="18.5" cy="5.5" r="2"/></svg>
+                {toolsEnabled ? 'Hide toolbar' : 'Show toolbar'}
               </button>
               <button
                 type="button"
