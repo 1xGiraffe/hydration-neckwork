@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { F, compactAmount } from './ui'
 import { lockColor } from './HdxCharts'
@@ -97,9 +97,11 @@ function mergeStatics(statics: BalanceLockComponent[]): { label: string; color: 
   return out
 }
 
+type Segment = { key: string; background: string; value: number; tip: ReactNode }
+
 // The aggregated composition bar: div-based so slices can carry gradients;
 // 2px surface gaps between slices; per-slice hover tooltip below the bar.
-function AggregateBar({ segments }: { segments: { key: string; background: string; value: number; tip: ReactNode }[] }) {
+function AggregateBar({ segments }: { segments: Segment[] }) {
   const [hover, setHover] = useState<{ leftPct: number; tip: ReactNode } | null>(null)
   const totalPct = segments.reduce((s, x) => s + x.value, 0)
   if (totalPct <= 0) return null
@@ -120,6 +122,87 @@ function AggregateBar({ segments }: { segments: { key: string; background: strin
         ))}
       </div>
       {hover && <div className="hdx-tip" style={{ left: `${Math.min(88, Math.max(12, hover.leftPct))}%`, top: 22 }}>{hover.tip}</div>}
+    </div>
+  )
+}
+
+// Desktop-only floor: how wide the bar must stay to still read as a useful
+// composition bar (a few legible segments) when it shares a line with the
+// legend in Variant A, rather than being squeezed to a sliver.
+const MIN_BAR_PX = 240
+// Gap between the bar and the legend when they share a line (Variant A).
+const BAND_GAP_PX = 14
+
+// Adaptive desktop layout: Variant A puts the bar and the (single-line)
+// legend on one row below a lone "Locks" label when there's room; Variant B
+// (today's layout) keeps the label beside the bar and drops the legend to
+// its own row when the legend is too wide to share a line with a useful bar.
+// Decided by measuring the legend's real single-line width (item count and
+// note lengths both affect it) against the available container width — not
+// a fixed breakpoint — and re-measured whenever that content changes or the
+// container resizes. Mobile (≤720px) always renders the Variant B markup;
+// CSS alone forces both variants into the same stacked mobile look, so the
+// measurement result never matters there.
+function BreakdownBand({ rows, segments, legendContent }: {
+  rows: ScheduleRow[]; segments: Segment[]; legendContent: (r: ScheduleRow) => ReactNode
+}) {
+  const bandRef = useRef<HTMLDivElement>(null)
+  const measureRef = useRef<HTMLDivElement>(null)
+  // Optimistic default (share the line); corrected synchronously by the
+  // layout effect below before the browser paints, so there's no flicker.
+  const [shareLine, setShareLine] = useState(true)
+
+  // A stable signature of the legend's actual content — changes only when
+  // the item set itself changes (not on every unrelated re-render), so the
+  // measurement effect re-runs exactly when it needs to (in addition to
+  // container resizes, handled by the ResizeObserver below).
+  const legendKey = rows.map(r => `${r.key}:${r.cause}:${r.amount}:${r.desc ?? ''}`).join('|')
+
+  useLayoutEffect(() => {
+    const el = bandRef.current
+    if (!el) return
+    const measure = () => {
+      const legendWidth = measureRef.current?.scrollWidth ?? 0
+      setShareLine(legendWidth + MIN_BAR_PX + BAND_GAP_PX <= el.clientWidth)
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+    // legendKey covers content changes; the observer covers container resize.
+  }, [legendKey])
+
+  const legend = rows.length > 0 && (
+    <div className="bd-sched" role="list" aria-label="Unlock schedule">
+      {rows.map(r => <div className="bd-sched-row" role="listitem" key={r.key}>{legendContent(r)}</div>)}
+    </div>
+  )
+
+  return (
+    <div ref={bandRef} className="tm-breakdown" data-testid="balance-breakdown">
+      {/* Off-screen, non-wrapping clone of the legend — rendered only to
+          measure its true single-line width via scrollWidth; never shown. */}
+      <div ref={measureRef} className="bd-legend-measure" aria-hidden="true">
+        {rows.map(r => <span className="bd-sched-row" key={r.key}>{legendContent(r)}</span>)}
+      </div>
+      {shareLine ? (
+        <>
+          <span className="tm-metric-label">Locks</span>
+          <div className="bd-row2">
+            <AggregateBar segments={segments} />
+            {legend}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="bd-row1">
+            <span className="tm-metric-label">Locks</span>
+            <AggregateBar segments={segments} />
+          </div>
+          {legend}
+        </>
+      )}
     </div>
   )
 }
@@ -158,13 +241,6 @@ export function BalanceBreakdown({ balance }: { balance: AddressBalance }) {
   const timeline: BalanceUnlockSlice[] = balance.timeline?.length
     ? balance.timeline
     : frozen > 0n ? [{ state: 'active', cause: largestLock?.source ?? 'other', amount: frozen.toString() }] : []
-
-  const usdPerUnit = balance.valueUsd != null && total > 0n
-    ? balance.valueUsd / Math.max(F.num(balance.total, dec), Number.MIN_VALUE)
-    : null
-  const usdOf = (amount: bigint) => (usdPerUnit != null ? F.num(amount.toString(), dec) * usdPerUnit : null)
-  // Tooltips carry the exact figure; the rows use the rough shared scale.
-  const amt = (v: bigint) => F.exact(v.toString(), dec)
 
   // Schedule rows in the reading order: releasable now → the "until …" group
   // (merged deposits, orders, open-ended floors) → dated releases ascending, so
@@ -223,44 +299,39 @@ export function BalanceBreakdown({ balance }: { balance: AddressBalance }) {
   // everything the owner can clear by acting now (releasable, deposits and
   // orders, still-cast votes), then the hard time locks in date order.
   const rows: ScheduleRow[] = [
-    { key: 'free', cause: 'transferable', amount: transferable, color: 'var(--bd-free)' },
+    { key: 'free', cause: 'free', amount: transferable, color: 'var(--bd-free)' },
     ...releasableRows,
     ...staticRows,
     ...openRows,
     ...datedRows,
   ]
 
+  // A row's color: the tone-shaded shade when there is one (dated/releasable
+  // slices), the plain cause color otherwise (transferable, statics).
+  const rowColor = (r: ScheduleRow) => (r.toneOverride && !r.gradient ? r.toneOverride : r.color)
+  // Row content is shared between the legend list and each bar segment's
+  // hover tip, so a hover always reads exactly like its legend row — same
+  // dot, name and compact amount, same muted note, and (unlike the old
+  // tooltip) no USD figure.
+  const legendContent = (r: ScheduleRow): ReactNode => (
+    <>
+      <i className="bd-dot" style={{ background: rowColor(r) }} aria-hidden="true" />
+      <span className="bd-cause">{r.cause}</span>
+      <span className="bd-sched-amt">{compactAmount(F.num(r.amount.toString(), dec))}</span>
+      {r.desc && <span className="bd-note">{r.desc}</span>}
+    </>
+  )
+
   // The aggregated bar mirrors the schedule rows 1:1. A div bar (not SVG) so
   // the linear-vesting slice can fade with a CSS gradient.
-  const tip = (label: string, amount: bigint, extra?: string): ReactNode => {
-    const usd = usdOf(amount)
-    return <span className="t-row">{label}<span className="tv">{amt(amount)} {asset.symbol}{usd != null && usd >= 0.005 ? ` · ${F.usd(usd)}` : ''}{extra ? ` · ${extra}` : ''}</span></span>
-  }
   const segments = rows.map(r => ({
     key: r.key,
     background: r.gradient
       ? `linear-gradient(90deg, ${tone(r.color, 72)}, ${tone(r.color, 24)})`
       : (r.toneOverride ?? r.color),
     value: Number(r.amount * 10_000n / (total || 1n)) / 100,
-    tip: tip(r.cause, r.amount, r.desc),
+    tip: <span className="bd-tip-row">{legendContent(r)}</span>,
   })).filter(s => s.value > 0)
 
-  return (
-    <div className="tm-breakdown" data-testid="balance-breakdown">
-      <div className="tm-metric-label">Locks &amp; reserves</div>
-      <AggregateBar segments={segments} />
-      {rows.length > 0 && (
-        <div className="bd-sched" role="list" aria-label="Unlock schedule">
-          {rows.map(r => (
-            <div className="bd-sched-row" role="listitem" key={r.key}>
-              <i className="bd-dot" style={{ background: r.toneOverride && !r.gradient ? r.toneOverride : r.color }} aria-hidden="true" />
-              <span className="bd-cause">{r.cause}</span>
-              <span className="bd-sched-amt">{compactAmount(F.num(r.amount.toString(), dec))}</span>
-              {r.desc && <span className="bd-note">{r.desc}</span>}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
+  return <BreakdownBand rows={rows} segments={segments} legendContent={legendContent} />
 }

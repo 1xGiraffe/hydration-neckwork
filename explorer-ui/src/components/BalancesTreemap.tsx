@@ -194,28 +194,31 @@ function FocusedDetail({ balance, hist, allHistory }: {
   const lastHeld = balance == null ? lastHeldDate(hist) : null
   return (
     <div className="tm-detail" aria-live="polite">
-      <div className="tm-detail-head">
-        <AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} symbol={asset.symbol} size={26} parachainId={asset.parachainId} origin={asset.origin} />
-        <div className="tm-detail-id">
-          <span className="tm-detail-sym">{asset.symbol}</span>
-          <span className="tm-detail-name">{assetName(asset)}</span>
+      <div className="tm-detail-band">
+        <div className="tm-detail-head">
+          <AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} symbol={asset.symbol} size={26} parachainId={asset.parachainId} origin={asset.origin} />
+          <div className="tm-detail-id">
+            <span className="tm-detail-sym">{asset.symbol}</span>
+            <span className="tm-detail-name">{assetName(asset)}</span>
+          </div>
         </div>
+        {balance != null && (
+          <div className="tm-detail-grid">
+            {priced && <Metric label="Value" value={F.usd(balance.valueUsd)} strong />}
+            <Metric
+              label="Amount"
+              strong={!priced}
+              value={<span className="tm-amt">
+                {F.amount(balance.total, asset.decimals)}<span className="tm-amt-sym">{asset.symbol}</span>
+              </span>}
+            />
+          </div>
+        )}
+        {balance != null && <BalanceBreakdown balance={balance} />}
       </div>
-      {balance != null ? (
-        <div className="tm-detail-grid">
-          {priced && <Metric label="Value" value={F.usd(balance.valueUsd)} strong />}
-          <Metric
-            label="Amount"
-            strong={!priced}
-            value={<span className="tm-amt">
-              {F.amount(balance.total, asset.decimals)}<span className="tm-amt-sym">{asset.symbol}</span>
-            </span>}
-          />
-        </div>
-      ) : (
+      {balance == null && (
         <div className="tm-detail-note">Not currently held{lastHeld ? ` · last held ${lastHeld.slice(0, 10)}` : ''}</div>
       )}
-      {balance != null && <BalanceBreakdown balance={balance} />}
       {hist
         ? <AssetBalanceChart selected={hist} all={allHistory} />
         : <div className="tm-hist">
