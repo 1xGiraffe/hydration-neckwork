@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { xxhashAsU8a, createKeyMulti } from '@polkadot/util-crypto'
 import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
+import { threshold1Operations, proxyChildAddress, type MultisigCallInfo, type MultisigOperationRow } from './onBehalfActivity.ts'
 
 // Proxy & multisig relations for account pages.
 //
@@ -17,7 +18,10 @@ import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
 // Multisig.* event, whose `multisig`/`approving` fields are authoritative. A
 // composition is only kept when createKeyMulti over the reconstructed signatory
 // set reproduces the event's multisig account. Pending operations are derived
-// from indexed Multisig events.
+// from indexed Multisig events. Multisig.as_multi_threshold_1 dispatches
+// immediately and emits no such event — those ops are reconstructed from
+// raw_calls/raw_extrinsics and kept as an in-memory snapshot, refreshed
+// alongside everything else here (see refreshThreshold1Ops).
 
 let client: ClickHouseClient
 
@@ -39,6 +43,7 @@ const state = {
   pureByAccount: new Map<string, PureProxyInfo>(),
   multisigByAccount: new Map<string, MultisigComposition>(),
   membershipsByAccount: new Map<string, string[]>(),          // member → multisig account ids
+  threshold1Ops: new Map<string, MultisigOperationRow[]>(),   // multisig → as_multi_threshold_1 ops
 }
 
 // SCALE compact<u32> — enough for vec lengths seen here.
@@ -176,9 +181,106 @@ async function refreshMultisigs(): Promise<void> {
   state.membershipsByAccount = memberships
 }
 
+// Multisig.as_multi_threshold_1 dispatches immediately and emits no Multisig.*
+// lifecycle event, so it can't be picked up from the event table like the
+// pending/executed ops above — and its multisig address needs the same
+// TS-side createKeyMulti derivation used elsewhere in this file. Global
+// volume is tiny (a handful of calls), so the whole set is reconstructed
+// from raw_calls/raw_extrinsics and held in memory, refreshed alongside the
+// rest of this file's state on the shared background scheduler.
+async function refreshThreshold1Ops(): Promise<void> {
+  const res = await client.query({
+    query: `SELECT block_height AS block, assumeNotNull(extrinsic_index) AS extrinsic,
+                   call_address AS callAddress, toUInt32(toUnixTimestamp(block_timestamp)) AS ts,
+                   args_json AS argsJson
+            FROM price_data.multisig_call_activity FINAL
+            WHERE call_name = 'Multisig.as_multi_threshold_1' AND extrinsic_index IS NOT NULL`,
+    format: 'JSONEachRow',
+  })
+  const t1Rows = await res.json<{ block: number; extrinsic: number; callAddress: string; ts: number; argsJson: string }>()
+  if (!t1Rows.length) { state.threshold1Ops = new Map(); return }
+
+  const keys = [...new Set(t1Rows.map(r => `${r.block}:${r.extrinsic}`))]
+
+  const callsByKeyAddress = new Map<string, { callName: string; success: number | null; originJson: string }>()
+  const signerByKey = new Map<string, string>()
+  for (let start = 0; start < keys.length; start += 10_000) {
+    const chunk = keys.slice(start, start + 10_000)
+    const tuples = chunk.map(k => { const [h, e] = k.split(':'); return `(${h},${e})` }).join(',')
+
+    const callsRes = await client.query({
+      query: `SELECT block_height AS block, assumeNotNull(extrinsic_index) AS extrinsic,
+                     call_address AS callAddress, call_name AS callName, success, origin_json AS originJson
+              FROM price_data.raw_calls
+              WHERE (block_height, assumeNotNull(extrinsic_index)) IN (${tuples}) AND extrinsic_index IS NOT NULL
+              ORDER BY ingested_at DESC LIMIT 1 BY block_height, assumeNotNull(extrinsic_index), call_address`,
+      format: 'JSONEachRow',
+    })
+    for (const r of await callsRes.json<{ block: number; extrinsic: number; callAddress: string; callName: string; success: number | null; originJson: string }>()) {
+      callsByKeyAddress.set(`${r.block}:${r.extrinsic}:${r.callAddress}`, { callName: r.callName, success: r.success, originJson: r.originJson })
+    }
+
+    const signersRes = await client.query({
+      query: `SELECT block_height AS block, extrinsic_index AS extrinsic,
+                     lower(coalesce(signer, effective_signer)) AS signer
+              FROM price_data.raw_extrinsics
+              WHERE (block_height, extrinsic_index) IN (${tuples})
+              ORDER BY ingested_at DESC LIMIT 1 BY block_height, extrinsic_index`,
+      format: 'JSONEachRow',
+    })
+    for (const r of await signersRes.json<{ block: number; extrinsic: number; signer: string }>()) {
+      signerByKey.set(`${r.block}:${r.extrinsic}`, r.signer)
+    }
+  }
+
+  const calls: MultisigCallInfo[] = []
+  for (const r of t1Rows) {
+    let otherSignatories: string[]
+    try {
+      const args = JSON.parse(r.argsJson) as { otherSignatories?: string[] }
+      if (!Array.isArray(args.otherSignatories)) continue
+      otherSignatories = args.otherSignatories.map(s => s.toLowerCase())
+    } catch { continue }
+
+    const key = `${r.block}:${r.extrinsic}`
+    const own = callsByKeyAddress.get(`${key}:${r.callAddress}`)
+    let originAccount: string | null = null
+    if (own) {
+      try {
+        const origin = JSON.parse(own.originJson) as { __kind?: string; value?: string }
+        if (origin.__kind === 'Signed' && origin.value) originAccount = origin.value.toLowerCase()
+      } catch { /* fall through to signer fallback */ }
+    }
+    originAccount = originAccount ?? signerByKey.get(key) ?? null
+
+    const child = callsByKeyAddress.get(`${key}:${proxyChildAddress(r.callAddress)}`)
+
+    calls.push({
+      block: r.block, extrinsic: r.extrinsic, callAddress: r.callAddress,
+      callName: 'Multisig.as_multi_threshold_1',
+      threshold: null,
+      otherSignatories,
+      originAccount,
+      callSuccess: own?.success ?? null,
+      innerCallName: child?.callName ?? null,
+      innerSuccess: child?.success ?? null,
+      ts: r.ts,
+    })
+  }
+
+  const ops = threshold1Operations(calls)
+  const byMultisig = new Map<string, MultisigOperationRow[]>()
+  for (const op of ops) {
+    const list = byMultisig.get(op.multisig) ?? []
+    list.push(op)
+    byMultisig.set(op.multisig, list)
+  }
+  state.threshold1Ops = byMultisig
+}
+
 async function refresh(): Promise<void> {
   await refreshProxies()
-  await Promise.all([refreshPureProxies(), refreshMultisigs()])
+  await Promise.all([refreshPureProxies(), refreshMultisigs(), refreshThreshold1Ops()])
 }
 
 let refreshInflight: Promise<void> | null = null
@@ -271,4 +373,12 @@ export async function pendingMultisigOps(accountId: string): Promise<PendingMult
   })
   return (await res.json<{ callHash: string; sinceBlock: number; depositor: string; approvals: string[] }>())
     .map(r => ({ callHash: r.callHash, depositor: r.depositor, approvals: r.approvals, sinceBlock: Number(r.sinceBlock) }))
+}
+
+// Executed as_multi_threshold_1 operations for a multisig account, from the
+// in-memory snapshot kept by refreshThreshold1Ops (no per-request query).
+export function threshold1OpsFor(accountIds: string[]): MultisigOperationRow[] {
+  const out: MultisigOperationRow[] = []
+  for (const id of accountIds) out.push(...(state.threshold1Ops.get(id) ?? []))
+  return out
 }
