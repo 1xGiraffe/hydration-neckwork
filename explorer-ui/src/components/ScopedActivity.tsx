@@ -18,18 +18,11 @@ import { EvRow, ExtRow } from './ActivityRows'
 import { ActivityTable } from './ActivityTable'
 import { eventFilterFields, extrinsicFilterFields, activityFilterFields } from './activityFilters'
 import { EmptyRow, ErrorRow, F, Pager, ActivityChips, TableSkeleton, normalizeActivityAction, normalizeActivityType } from './ui'
-
-const PAGE_SIZE = 25
-const MAX_FORWARD_OFFSET = 2_000
-const MAX_TAIL_OFFSET = 6_000
+import { PAGE_SIZE, activityTailOffset, pageCount } from '../utils/activityPaging'
 
 type ActivityScope =
   | { kind: 'account'; address: string }
   | { kind: 'tag'; tagId: string }
-
-function pageCount(rowCount?: number | null): number | undefined {
-  return rowCount != null && rowCount > 0 ? Math.ceil(rowCount / PAGE_SIZE) : undefined
-}
 
 function hasNoValues(values: Record<string, string | undefined>): boolean {
   return Object.values(values).every(value => !value)
@@ -73,13 +66,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const activityRowCount = activityHasCount
     ? (minimumUsd != null ? minimumCount.data?.activity : counts.data?.activity)
     : undefined
-  const tailOffset = activityRowCount != null ? Math.max(0, activityRowCount - offset - PAGE_SIZE) : null
-  const activityTail = activityRowCount != null
-    && offset + PAGE_SIZE > MAX_FORWARD_OFFSET
-    && tailOffset != null
-    && tailOffset + PAGE_SIZE <= MAX_TAIL_OFFSET
-    ? tailOffset
-    : undefined
+  const activityTail = activityTailOffset(activityRowCount, offset)
 
   const commonActivityArgs = [
     activityType,
