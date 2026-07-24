@@ -6,9 +6,25 @@ import type {
   ValueEvent,
 } from '../types'
 
+// A failed request carries the API's own explanation (Fastify puts it in
+// `message`, hand-written rejections in `error`). Keeping it on the error lets a
+// list surface actionable guidance — "narrow the filters" for a too-broad
+// activity window — instead of a bare status.
+export class ApiError extends Error {
+  status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`/api${path}`, { signal })
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { error?: string; message?: string } | null
+    throw new ApiError(response.status, body?.message || body?.error || `${response.status} ${response.statusText}`)
+  }
   return response.json() as Promise<T>
 }
 

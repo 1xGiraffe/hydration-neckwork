@@ -1088,6 +1088,20 @@ export function ExpandedRowSkeleton() {
 export function EmptyRow({ cols, children }: { cols: number; children: ReactNode }) {
   return <tr><td colSpan={cols} style={{ textAlign: 'center', padding: 32, color: 'var(--text-low)' }}>{children}</td></tr>
 }
+// A failed list request is not an empty list. The API's own message is shown
+// when it carries one — a too-broad activity window is a "narrow your filters"
+// signal, not a transient failure — so the row stays distinguishable from the
+// "No activity" state a successful empty response renders.
+export function ErrorRow({ cols, title, error, onRetry }: { cols: number; title: string; error: unknown; onRetry?: () => void }) {
+  const detail = error instanceof Error && error.name === 'ApiError' && error.message ? error.message : 'The request failed.'
+  return (
+    <tr><td colSpan={cols} className="table-error" role="alert">
+      <strong>{title}</strong>
+      <span>{detail}</span>
+      {onRetry && <button type="button" onClick={onRetry}>Try again</button>}
+    </td></tr>
+  )
+}
 // Deep-linkable pager. `hasNext` disables forward nav at the end; a sliding
 // window of page numbers plus a jump box reach arbitrary depth (totalPages,
 // when known, enables a Last button). Lists are newest-first, so higher pages

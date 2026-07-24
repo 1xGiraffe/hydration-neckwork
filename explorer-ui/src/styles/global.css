@@ -456,6 +456,16 @@ svg { display: block; }
 .tbl tbody tr.dim:hover { opacity: 1; }
 .tbl td.r { text-align: right; }
 .tbl td.mono { font-family: 'GeistMono'; }
+/* Failed list request — deliberately louder than the "No activity" empty cell so
+   an error is never read as "there is nothing here". */
+.tbl td.table-error { padding: 32px 16px; text-align: center; color: var(--text-medium); font-size: 12px; }
+.tbl td.table-error strong { display: block; margin-bottom: 4px; color: var(--text-high); font-size: 13px; }
+.tbl td.table-error span { display: block; }
+.tbl td.table-error button {
+  display: inline-block; margin-top: 10px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel); color: var(--sky); font-family: 'GeistMono'; font-size: 11px;
+}
+.tbl td.table-error button:hover { background: var(--panel-hover); color: var(--text-high); }
 /* Row ids (e.g. 13184944-3) must stay on one line — a break at the hyphen
    reads as two unrelated numbers rather than one block-extrinsic/event index. */
 .tbl td.mono .hash { white-space: nowrap; }

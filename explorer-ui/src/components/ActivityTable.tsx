@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- activity table exports slug/id/label helpers alongside its components */
 import { paths } from '../router'
 import type { ActivitySlug } from '../router'
-import { F, AddrPill, AssetChip, rowNav, Ago, AccountEmoji, ShortAddr, TagIcon, VoteSideBadge, TableSkeleton, Dash } from './ui'
+import { F, AddrPill, AssetChip, rowNav, Ago, AccountEmoji, ShortAddr, TagIcon, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
 import type { ActivityRow } from '../types'
 
@@ -195,7 +195,7 @@ function activityKey(r: ActivityRow): string {
     r.assetOut?.assetId ?? '', r.amountIn ?? r.amount ?? '', r.who?.accountId ?? '', r.mmMarketKey ?? ''].join('|')
 }
 
-export function ActivityTable({ rows, noActor, now, live, loading, dcaExecutionLinks }: { rows: ActivityRow[]; noActor?: boolean; now: number; live?: boolean; loading?: boolean; dcaExecutionLinks?: boolean }) {
+export function ActivityTable({ rows, noActor, now, live, loading, error, onRetry, dcaExecutionLinks }: { rows: ActivityRow[]; noActor?: boolean; now: number; live?: boolean; loading?: boolean; error?: unknown; onRetry?: () => void; dcaExecutionLinks?: boolean }) {
   const cols = noActor ? 4 : 5
   // Deduped stable keys: same row → same key across renders (so prepended live rows
   // are detected as new without remounting the rest); duplicates get a suffix.
@@ -206,25 +206,28 @@ export function ActivityTable({ rows, noActor, now, live, loading, dcaExecutionL
     <div className="panel"><table className="tbl">
       <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
       <tbody>
-        {loading && !rows.length ? <TableSkeleton cols={cols} /> : rows.length ? rows.map((r, i) => {
-          const slug = activitySlug(r)
-          const aid = activityId(r, dcaExecutionLinks)
-          // De-emphasise low-/zero-value activity (null treated as low) so high-value rows stand out. Not hidden — just muted via the .dim class.
-          const dim = r.valueUsd == null || r.valueUsd < 10
-          const nav = aid ? rowNav(paths.activityDetail(slug, aid)) : null
-          const k = keys[i]
-          const className = [nav?.className, dim ? 'dim' : null, fresh.has(k) ? 'row-new' : null].filter(Boolean).join(' ') || undefined
-          const showExt = slug !== 'swap' && slug !== 'dca' && r.extrinsicIndex != null
-          return (
-            <tr key={k} {...(nav ?? {})} className={className} {...(aid ? { 'data-activity': `${slug}/${aid}` } : {})} {...(showExt ? { 'data-ext': `${r.blockHeight}-${r.extrinsicIndex}` } : {})}>
-              <td data-label="Type"><ActivityBadge r={r} /></td>
-              {!noActor && <td data-label="Account">{r.who ? <AddrPill account={r.who} noCopy /> : <Dash />}</td>}
-              <td data-label="Activity"><ActivityDesc r={r} /></td>
-              <td data-label="Value" className="r mono">{r.valueUsd != null ? F.usd(r.valueUsd) : <Dash />}</td>
-              <td data-label="Time" className="r mono muted"><Ago ts={r.timestamp} now={now} /></td>
-            </tr>
-          )
-        }) : <tr><td colSpan={cols} style={{ textAlign: 'center', padding: 32, color: 'var(--text-low)' }}>No activity</td></tr>}
+        {loading && !rows.length ? <TableSkeleton cols={cols} />
+          : error && !rows.length ? <ErrorRow cols={cols} title="Couldn’t load activity" error={error} onRetry={onRetry} />
+            : !rows.length ? <EmptyRow cols={cols}>No activity</EmptyRow>
+              : rows.map((r, i) => {
+                const slug = activitySlug(r)
+                const aid = activityId(r, dcaExecutionLinks)
+                // De-emphasise low-/zero-value activity (null treated as low) so high-value rows stand out. Not hidden — just muted via the .dim class.
+                const dim = r.valueUsd == null || r.valueUsd < 10
+                const nav = aid ? rowNav(paths.activityDetail(slug, aid)) : null
+                const k = keys[i]
+                const className = [nav?.className, dim ? 'dim' : null, fresh.has(k) ? 'row-new' : null].filter(Boolean).join(' ') || undefined
+                const showExt = slug !== 'swap' && slug !== 'dca' && r.extrinsicIndex != null
+                return (
+                  <tr key={k} {...(nav ?? {})} className={className} {...(aid ? { 'data-activity': `${slug}/${aid}` } : {})} {...(showExt ? { 'data-ext': `${r.blockHeight}-${r.extrinsicIndex}` } : {})}>
+                    <td data-label="Type"><ActivityBadge r={r} /></td>
+                    {!noActor && <td data-label="Account">{r.who ? <AddrPill account={r.who} noCopy /> : <Dash />}</td>}
+                    <td data-label="Activity"><ActivityDesc r={r} /></td>
+                    <td data-label="Value" className="r mono">{r.valueUsd != null ? F.usd(r.valueUsd) : <Dash />}</td>
+                    <td data-label="Time" className="r mono muted"><Ago ts={r.timestamp} now={now} /></td>
+                  </tr>
+                )
+              })}
       </tbody>
     </table></div>
   )

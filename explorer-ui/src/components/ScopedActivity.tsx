@@ -17,7 +17,7 @@ import { FilterZone, useFilters } from './Filters'
 import { EvRow, ExtRow } from './ActivityRows'
 import { ActivityTable } from './ActivityTable'
 import { eventFilterFields, extrinsicFilterFields, activityFilterFields } from './activityFilters'
-import { EmptyRow, F, Pager, ActivityChips, TableSkeleton, normalizeActivityAction, normalizeActivityType } from './ui'
+import { EmptyRow, ErrorRow, F, Pager, ActivityChips, TableSkeleton, normalizeActivityAction, normalizeActivityType } from './ui'
 
 const PAGE_SIZE = 25
 const MAX_FORWARD_OFFSET = 2_000
@@ -154,7 +154,8 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
           onChange={activityFilters.onChange}
           onClear={activityFilters.onClear}
         />
-        <ActivityTable rows={activity.data ?? []} now={now} live={page === 0} loading={activity.isFetching && !activity.data?.length} />
+        <ActivityTable rows={activity.data ?? []} now={now} live={page === 0} loading={activity.isFetching && !activity.data?.length}
+          error={activity.error} onRetry={() => { void activity.refetch() }} />
         <Pager page={page} totalPages={pageCount(activityRowCount)} hasNext={(activity.data?.length ?? 0) === PAGE_SIZE} onPage={setPage} />
       </>}
 
@@ -164,8 +165,10 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
           <thead><tr><th>ID</th><th>Block</th><th>Call</th>{showSigner && <th>Sender</th>}{showOrigin && <th>Origin</th>}<th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody>
             {extrinsics.isFetching && !extrinsics.data?.length ? <TableSkeleton cols={extrinsicColumns} />
-              : !extrinsics.data?.length ? <EmptyRow cols={extrinsicColumns}>No extrinsics</EmptyRow>
-                : extrinsics.data.map(extrinsic => <ExtRow key={`${extrinsic.blockHeight}-${extrinsic.index}`} x={extrinsic} now={now} noSigner={!showSigner} showOrigin={showOrigin} senderLabel />)}
+              : extrinsics.error && !extrinsics.data?.length
+                ? <ErrorRow cols={extrinsicColumns} title="Couldn’t load extrinsics" error={extrinsics.error} onRetry={() => { void extrinsics.refetch() }} />
+                : !extrinsics.data?.length ? <EmptyRow cols={extrinsicColumns}>No extrinsics</EmptyRow>
+                  : extrinsics.data.map(extrinsic => <ExtRow key={`${extrinsic.blockHeight}-${extrinsic.index}`} x={extrinsic} now={now} noSigner={!showSigner} showOrigin={showOrigin} senderLabel />)}
           </tbody>
         </table></div>
         <Pager page={page} totalPages={extrinsicPages} hasNext={(extrinsics.data?.length ?? 0) === PAGE_SIZE} onPage={setPage} />
@@ -177,8 +180,10 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
           <thead><tr><th>ID</th><th>Block</th><th>Extrinsic</th><th>Event</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody>
             {events.isFetching && !events.data?.length ? <TableSkeleton cols={6} />
-              : !events.data?.length ? <EmptyRow cols={6}>No events</EmptyRow>
-                : events.data.map(event => <EvRow key={`${event.blockHeight}-${event.eventIndex}`} e={event} now={now} />)}
+              : events.error && !events.data?.length
+                ? <ErrorRow cols={6} title="Couldn’t load events" error={events.error} onRetry={() => { void events.refetch() }} />
+                : !events.data?.length ? <EmptyRow cols={6}>No events</EmptyRow>
+                  : events.data.map(event => <EvRow key={`${event.blockHeight}-${event.eventIndex}`} e={event} now={now} />)}
           </tbody>
         </table></div>
         <Pager page={page} totalPages={eventPages} hasNext={(events.data?.length ?? 0) === PAGE_SIZE} onPage={setPage} />

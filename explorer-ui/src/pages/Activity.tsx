@@ -59,7 +59,7 @@ export function Activity() {
   const activityMin = (action === 'dca' || action === 'dca-failed') && !f.min
     ? undefined
     : effectiveMin(f.min, hideSmol)
-  const { data, isFetching } = useActivity(PAGE, f.from, f.to, page * PAGE, type, { token: f.token, min: activityMin }, action || undefined)  // filters applied server-side
+  const { data, isFetching, error, refetch } = useActivity(PAGE, f.from, f.to, page * PAGE, type, { token: f.token, min: activityMin }, action || undefined)  // filters applied server-side
   // The daily histogram mirrors the active tab + action/token filters.
   const { data: daily } = useDaily('activity', { type, action: action || undefined, token: f.token || undefined })
   const assets = useAssets()
@@ -77,7 +77,7 @@ export function Activity() {
       <ActivityChips value={type} onChange={v => setQuery({ tab: v === 'all' ? null : v, action: null, page: null })} />
       <FilterZone fields={activityFilterFields(type, assets.data ?? [])} values={f} onChange={onChange} onClear={onClear}
         extra={<SmolToggle hiding={hideSmol} onToggle={() => { toggleSmol(); setQuery({ page: null }) }} />} />
-      <ActivityTable rows={rows} now={now} live={page === 0} loading={isFetching && rows.length === 0} />
+      <ActivityTable rows={rows} now={now} live={page === 0} loading={isFetching && rows.length === 0} error={error} onRetry={() => { void refetch() }} />
       <Pager page={page} hasNext={(data?.length ?? 0) === PAGE} onPage={setPage} />
     </div>
   )
