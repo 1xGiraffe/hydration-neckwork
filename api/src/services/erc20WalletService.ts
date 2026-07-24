@@ -23,6 +23,9 @@ const ERC20_BALANCE_OF = '70a08231' // keccak256("balanceOf(address)")[:4]
 
 let client: ClickHouseClient
 
+// Balances for the addresses the node actually answered for. A dropped batch or
+// an unparseable item leaves its addresses out of the map — the caller must treat
+// them as unknown, never as zero.
 async function ethCallBalances(assetId: number, h160s: string[]): Promise<Map<string, bigint>> {
   const out = new Map<string, bigint>()
   const to = erc20Precompile(assetId)
@@ -45,6 +48,28 @@ async function ethCallBalances(assetId: number, h160s: string[]): Promise<Map<st
     } catch { /* chunk skipped; next refresh retries */ } finally { clearTimeout(timer) }
   }
   return out
+}
+
+// Rows for one refresh cycle. A holder missing from `balances` could not be read
+// this cycle — that is unknown, not zero — so it gets no row and keeps its last
+// published one. Every holder's anchor still counts as current, so the stale-key
+// pass only zeroes keys that no longer belong to any holder.
+export function walletBalanceRows(
+  assetId: number,
+  h160s: string[],
+  balances: Map<string, bigint>,
+  anchorOf: (h160: string) => string,
+  previousNonZeroAccounts: string[],
+): { account_id: string; asset_id: string; total: string }[] {
+  const asset_id = String(assetId)
+  const rows = h160s
+    .filter(h => balances.has(h))
+    .map(h => ({ account_id: anchorOf(h), asset_id, total: balances.get(h)!.toString() }))
+  const current = new Set(h160s.map(anchorOf))
+  for (const account_id of previousNonZeroAccounts) {
+    if (!current.has(account_id)) rows.push({ account_id, asset_id, total: '0' })
+  }
+  return rows
 }
 
 // Refresh candidates are every address that ever appeared in a Transfer log of
@@ -87,13 +112,12 @@ async function refresh(): Promise<void> {
     }
     const balances = await ethCallBalances(a.assetId, h160s)
     if (!balances.size) continue // RPC down — keep previous rows
-    const rows = h160s.map(h => ({
-      // Module/sovereign truncations resolve deterministically; then alias/
-      // truncation anchors; genuine EVM accounts keep the ETH-prefixed form.
-      account_id: reservedH160AccountId(h.slice(2)) ?? anchor.get(h) ?? `0x45544800${h.slice(2)}0000000000000000`,
-      asset_id: String(a.assetId),
-      total: (balances.get(h) ?? 0n).toString(),
-    }))
+    if (balances.size < h160s.length) {
+      console.warn(`[erc20-wallet] partial refresh for asset ${a.assetId}: ${balances.size}/${h160s.length} balances read; unread holders keep their previous rows`)
+    }
+    // Module/sovereign truncations resolve deterministically; then alias/
+    // truncation anchors; genuine EVM accounts keep the ETH-prefixed form.
+    const anchorOf = (h: string) => reservedH160AccountId(h.slice(2)) ?? anchor.get(h) ?? `0x45544800${h.slice(2)}0000000000000000`
     // Zero keys that no longer belong to the current account anchor so stale
     // rows cannot double count a wallet balance.
     const prevRes = await client.query({
@@ -101,11 +125,12 @@ async function refresh(): Promise<void> {
               GROUP BY account_id HAVING toUInt256OrZero(argMax(total, updated_at)) > 0`,
       query_params: { a: String(a.assetId) }, format: 'JSONEachRow',
     })
-    const current = new Set(rows.map(r => r.account_id))
-    for (const r of await prevRes.json<{ account_id: string }>()) {
-      if (!current.has(r.account_id)) rows.push({ account_id: r.account_id, asset_id: String(a.assetId), total: '0' })
-    }
-    await client.insert({ table: 'price_data.erc20_wallet_balances', values: rows, format: 'JSONEachRow' })
+    const previous = (await prevRes.json<{ account_id: string }>()).map(r => r.account_id)
+    await client.insert({
+      table: 'price_data.erc20_wallet_balances',
+      values: walletBalanceRows(a.assetId, h160s, balances, anchorOf, previous),
+      format: 'JSONEachRow',
+    })
   }
 }
 
