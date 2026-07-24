@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { useAddressSummary, useAsset, useExtrinsic, useBlock, useTagSummary, useTrade, useStats } from '../hooks/useExplorerData'
-import { F, AssetIcon, AddrPill, CallPill, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow } from './ui'
+import { useAddressSummary, useAsset, useExtrinsic, useBlock, useTagSummary, useTrade, useStats, useDcaSchedule, useDcaExecution } from '../hooks/useExplorerData'
+import { F, AssetIcon, AssetChip, AssetAmount, AddrPill, CallPill, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow } from './ui'
 import type { AssetRef } from '../types'
 
 // Global hover preview cards for account (.addr-pill), tag (/tag/… links),
-// asset (.asset-chip), trade ([data-activity] with slug swap|dca / /swap/…,
-// /dca/…), extrinsic (a.hash / [data-ext] → /extrinsic/…) and block
-// (/block/…) links. Each card mirrors the basic-info block of its detail page.
-// Mounted once in App.
-type Target = { kind: 'account' | 'tag' | 'asset' | 'trade' | 'extrinsic' | 'block'; id: string; left: number; top: number; bottom: number }
+// asset (.asset-chip), trade ([data-activity] with slug swap / /swap/…), DCA
+// schedule and execution (slug dca / /dca/…), extrinsic (a.hash / [data-ext] →
+// /extrinsic/…) and block (/block/…) links. Each card mirrors the basic-info
+// block of its detail page. Mounted once in App.
+type Target = { kind: 'account' | 'tag' | 'asset' | 'trade' | 'dca-schedule' | 'dca-exec' | 'extrinsic' | 'block'; id: string; left: number; top: number; bottom: number }
 const SELECTOR = '.addr-pill:not([data-no-hover]), .asset-chip, a.hash, a[href*="/swap/"], a[href*="/dca/"], a[href*="/block/"], [data-activity], [data-ext]'
 const HOVER_DWELL_MS = 180
 
@@ -29,12 +29,20 @@ function ProfileMetrics({ portfolioUsd, debtUsd, tradingVolumeUsd, liquidationVo
   )
 }
 
+// DCA ids come in two shapes: a bare schedule id (feed rows link to the
+// schedule) and <block>-e<eventIndex> (schedule-page rows link to one
+// execution). Neither resolves through the trade endpoints.
+function dcaKind(id: string): Target['kind'] {
+  return /^\d+-e\d+$/.test(id) ? 'dca-exec' : 'dca-schedule'
+}
+
 function parseTarget(el: Element): Omit<Target, 'left' | 'top' | 'bottom'> | null {
   if (el.closest('[data-no-hover]')) return null
   const act = el.getAttribute('data-activity')
   if (act) {
     const [slug, id] = act.split('/')
-    if (slug === 'swap' || slug === 'dca') return { kind: 'trade', id }
+    if (slug === 'dca') return { kind: dcaKind(id), id }
+    if (slug === 'swap') return { kind: 'trade', id }
     const ext = el.getAttribute('data-ext')
     return ext ? { kind: 'extrinsic', id: ext } : null
   }
@@ -49,7 +57,8 @@ function parseTarget(el: Element): Omit<Target, 'left' | 'top' | 'bottom'> | nul
   const am = href.match(/\/account\/([^?#]+)$/); if (am) return { kind: 'account', id: decodeURIComponent(am[1]) }
   const tm = href.match(/\/tag\/([^?#]+)$/); if (tm) return { kind: 'tag', id: decodeURIComponent(tm[1]) }
   const sm = href.match(/\/asset\/(\d+)$/); if (sm) return { kind: 'asset', id: sm[1] }
-  const trm = href.match(/\/(?:trade|swap|dca)\/([^?#]+)$/); if (trm) return { kind: 'trade', id: decodeURIComponent(trm[1]) }
+  const dm = href.match(/\/dca\/([^?#]+)$/); if (dm) { const id = decodeURIComponent(dm[1]); return { kind: dcaKind(id), id } }
+  const trm = href.match(/\/(?:trade|swap)\/([^?#]+)$/); if (trm) return { kind: 'trade', id: decodeURIComponent(trm[1]) }
   const xm = href.match(/\/extrinsic\/([^?#]+)$/); if (xm) return { kind: 'extrinsic', id: decodeURIComponent(xm[1]) }
   const bm = href.match(/\/block\/(\d+)(?:[?#]|$)/); if (bm) return { kind: 'block', id: bm[1] }
   return null
@@ -132,6 +141,8 @@ export function HoverCards() {
         : target.kind === 'tag' ? <TagHover id={target.id} />
         : target.kind === 'asset' ? <AssetHover id={Number(target.id)} />
         : target.kind === 'trade' ? <TradeHover id={target.id} />
+        : target.kind === 'dca-schedule' ? <DcaScheduleHover id={target.id} />
+        : target.kind === 'dca-exec' ? <DcaExecutionHover id={target.id} />
         : target.kind === 'block' ? <BlockHover id={Number(target.id)} />
         : <ExtrinsicHover id={target.id} />}
     </div>
@@ -239,6 +250,65 @@ function TradeHover({ id }: { id: string }) {
           </div>
         ))}
       </div>
+    </>
+  )
+}
+
+// DCA feed rows link to their schedule: show the order (amount-per sits on the
+// sold leg for Sell orders, the bought leg for Buy orders), cadence and totals —
+// the schedule page's basic-info block in miniature.
+function DcaScheduleHover({ id }: { id: string }) {
+  const { data, isError } = useDcaSchedule(Number(id))
+  if (isError) return <div className="hc-sub mono">DCA schedule not found</div>
+  if (!data) return <div className="hc-sub mono">Loading…</div>
+  return (
+    <>
+      <div className="hc-head">
+        <span className="hc-emoji">⏱</span>
+        <div>
+          <div className="hc-title">DCA <span className="num">#{data.scheduleId}</span></div>
+          <div className="hc-sub mono">{data.status}{data.statusReason ? ` · ${data.statusReason}` : ''}</div>
+        </div>
+      </div>
+      <div className="hc-row"><span>Order</span><span className="asset-flow">
+        {data.direction === 'Buy'
+          ? <>buys <AssetAmount asset={data.assetOut} raw={data.amountPer} /> with <AssetChip asset={data.assetIn} /></>
+          : <>sells <AssetAmount asset={data.assetIn} raw={data.amountPer} /> → <AssetChip asset={data.assetOut} /></>}
+      </span></div>
+      <div className="hc-row"><span>Cadence</span><span className="mono">every {F.int(data.period)} blocks</span></div>
+      <div className="hc-row"><span>Budget</span>{data.totalAmount === '0'
+        ? <span className="mono">open-ended</span>
+        : <AssetAmount asset={data.assetIn} raw={data.totalAmount} />}</div>
+      <div className="hc-row"><span>Executed</span><span className="mono">{F.int(data.executions.count)} trade{data.executions.count === 1 ? '' : 's'}{data.executions.failed > 0 ? ` · ${F.int(data.executions.failed)} failed` : ''}</span></div>
+      {data.who && <div className="hc-row"><span>Owner</span><AddrPill account={data.who} noCopy /></div>}
+    </>
+  )
+}
+
+// Schedule-page execution rows link to one attempt (/dca/<block>-e<index>):
+// result, the traded (or intended) legs, value and the failure reason.
+function DcaExecutionHover({ id }: { id: string }) {
+  const m = /^(\d+)-e(\d+)$/.exec(id)
+  const { data, isError } = useDcaExecution(Number(m?.[1] ?? 0), Number(m?.[2] ?? 0))
+  if (isError) return <div className="hc-sub mono">No DCA execution at this event</div>
+  if (!data) return <div className="hc-sub mono">Loading…</div>
+  return (
+    <>
+      <div className="hc-head">
+        <span className="hc-emoji">⏱</span>
+        <div>
+          <div className="hc-title">DCA execution</div>
+          <div className="hc-sub mono">{id} · DCA #{data.scheduleId}</div>
+        </div>
+      </div>
+      <div className="hc-row"><span>Result</span><StatusBadge ok={data.status === 'executed'} /></div>
+      {data.failureReason && <div className="hc-row"><span>Reason</span><span className="mono">{data.failureReason.label}</span></div>}
+      <div className="hc-row"><span>{data.status === 'failed' ? 'Attempted' : 'Swap'}</span><span className="asset-flow">
+        <AssetAmount asset={data.assetIn} raw={data.amountIn} />
+        {data.amountOut != null && <> → <AssetAmount asset={data.assetOut} raw={data.amountOut} /></>}
+      </span></div>
+      {data.valueUsd != null && <div className="hc-row"><span>Value</span><span className="mono">{F.usd(data.valueUsd)}</span></div>}
+      <div className="hc-row"><span>Time</span><span className="mono">{F.datetime(data.timestamp)}</span></div>
     </>
   )
 }

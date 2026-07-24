@@ -55,6 +55,25 @@ test('a failed attempt detail names the failure reason', async ({ page }) => {
   await expect(page.getByText('Failure reason')).toBeVisible()
 })
 
+test('hovering a DCA activity row previews its schedule', async ({ page }) => {
+  await page.goto('/activity?tab=trade')
+  const dcaRow = page.locator('tr[data-activity^="dca/"]').first()
+  await expect(dcaRow).toBeVisible()
+  // the Type cell has no nested hover targets, so the row's schedule id wins
+  await dcaRow.locator('td').first().hover()
+  await expect(page.locator('.hovercard')).toContainText('DCA #')
+  await expect(page.locator('.hovercard')).toContainText('Order')
+})
+
+test('hovering a schedule execution row previews the attempt', async ({ page }) => {
+  await page.goto('/dca/33573')
+  const row = page.locator('.tbl tbody tr').first()
+  await expect(row).toBeVisible()
+  await row.locator('td').first().hover()
+  await expect(page.locator('.hovercard')).toContainText('DCA execution')
+  await expect(page.locator('.hovercard')).toContainText('Failed')
+})
+
 test('legacy per-execution DCA links resolve to the schedule page', async ({ page }) => {
   // The extrinsic form is the scheduling extrinsic; the event form carried the
   // swap event index (not the DCA event), so both resolve to the schedule.
