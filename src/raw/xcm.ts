@@ -1,5 +1,5 @@
 import type { RawCall, RawEvent } from './processor.js'
-import { callAddressToString, toJsonString } from './json.js'
+import { callAddressToString, callSourceIndex, toJsonString } from './json.js'
 import { deriveTruncatedAccountId, extractHexLike, normalizeAccountId, normalizeH160 } from './accountIdentity.js'
 import type { RawBridgeEvidenceRow, RawOperationTraceRow, RawXcmActivityRow } from './types.js'
 
@@ -237,15 +237,14 @@ function sourceFromEvent(event: RawEvent): SourceItem {
 }
 
 function sourceFromCall(call: RawCall): SourceItem {
-  const callAddress = callAddressToString(call.address)
   return {
     kind: 'call',
     name: call.name ?? '',
     blockHeight: call.block.height,
     eventIndex: null,
     extrinsicIndex: call.extrinsicIndex,
-    callAddress,
-    sourceIndex: callAddress ?? call.id,
+    callAddress: callAddressToString(call.address),
+    sourceIndex: callSourceIndex(call),
     payload: call.args ?? null,
   }
 }

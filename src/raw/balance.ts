@@ -3,7 +3,7 @@ import type { Block as StorageBlock } from '../types/support.js'
 import * as systemStorage from '../types/system/storage.js'
 import * as tokensStorage from '../types/tokens/storage.js'
 import type { RawCall, RawEvent } from './processor.js'
-import { callAddressToString, toJsonString } from './json.js'
+import { callAddressToString, callSourceIndex, toJsonString } from './json.js'
 import { deriveTruncatedAccountId, extractHexLike, normalizeAccountId, normalizeH160 } from './accountIdentity.js'
 import type { RawBalanceObservationRow, RawParserWarningRow } from './types.js'
 import { chunk, forEachConcurrent } from '../util/collections.js'
@@ -131,7 +131,7 @@ function extractStorageBalanceCandidate(
 ): { candidate: BalanceCandidate | null; warning: RawParserWarningRow | null } {
   const normalized = lowerHex(key)
   const callAddress = callAddressToString(call.address)
-  const sourceIndex = callAddress ?? call.id
+  const sourceIndex = callSourceIndex(call)
   const baseWarning = (warningCode: string, warning: string): RawParserWarningRow => ({
     block_height: call.block.height,
     block_timestamp: blockTimestamp,
@@ -1006,6 +1006,10 @@ export async function extractBalanceObservations(
   for (const call of calls) {
     const name = call.name ?? ''
     const callAddress = callAddressToString(call.address) ?? call.id
+    // Warning rows replace on (block, parser, source_kind, source_index, code),
+    // so the index has to identify the call, not just its path within one
+    // extrinsic.
+    const sourceIndex = callSourceIndex(call)
 
     if (name === 'System.set_storage') {
       let matched = false
@@ -1024,7 +1028,7 @@ export async function extractBalanceObservations(
           ingestSource,
           'call',
           name,
-          callAddress,
+          sourceIndex,
           'unmatched_set_storage',
           'System.set_storage did not include a decodable System.Account or Tokens.Accounts key',
           { call: name, call_address: callAddress, args: call.args ?? null },
@@ -1042,7 +1046,7 @@ export async function extractBalanceObservations(
         ingestSource,
         'call',
         name,
-        callAddress,
+        sourceIndex,
         warningCode,
         warningMessage ?? 'Balance call could not be fully parsed',
         { call: name, call_address: callAddress, args: call.args ?? null },
@@ -1054,7 +1058,7 @@ export async function extractBalanceObservations(
         ingestSource,
         'call',
         name,
-        callAddress,
+        sourceIndex,
         'administrative_balance_surface',
         'Administrative call may affect balances through nested dispatch or governance execution; raw call arguments are preserved for targeted validation',
         { call: name, call_address: callAddress, args: call.args ?? null },

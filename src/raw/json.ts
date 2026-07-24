@@ -39,6 +39,16 @@ export function callAddressToString(address?: number[] | null): string | null {
   return address.join('.')
 }
 
+// A call's identity within its block, for rows whose replacement key must not
+// merge unrelated calls. The call path alone is not unique — every extrinsic's
+// top-level call has the empty path ('root') and nested paths repeat per
+// extrinsic — so the extrinsic index qualifies it. The ':' separator keeps these
+// values distinguishable from a bare call path.
+export function callSourceIndex(call: { address?: number[] | null; extrinsicIndex?: number | null; id: string }): string {
+  const callAddress = callAddressToString(call.address)
+  return callAddress == null ? call.id : `${call.extrinsicIndex ?? 'none'}:${callAddress}`
+}
+
 function extractAddressLike(value: unknown): string | null {
   if (value == null) return null
   if (typeof value === 'string') return value

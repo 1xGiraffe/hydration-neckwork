@@ -106,3 +106,68 @@ describe('PolkadotXcm.Sent account extraction', () => {
     expect(sent.recipient).toBe(recipient)
   })
 })
+
+// Every extrinsic's top-level call has the empty call path, which
+// callAddressToString renders as 'root'. Since raw_xcm_activity replaces on
+// (block_height, source_kind, source_index, name) — and raw_operation_traces on
+// a trace_id built from the same index — a per-extrinsic call source index is
+// what keeps two independent root-level calls of the same name in one block from
+// destroying each other.
+describe('call source identity', () => {
+  const rootCall = (extrinsicIndex: number, name: string, args: unknown) => ({
+    id: `0000000010-00000${extrinsicIndex}-abcde`,
+    name,
+    address: [],
+    extrinsicIndex,
+    block: { height: 10 },
+    args,
+  })
+
+  it('keeps two root-level XCM calls in one block distinct', () => {
+    const args = {
+      dest: { parents: 1, interior: { __kind: 'X1', value: { __kind: 'Parachain', value: 1000 } } },
+      assets: [{ id: 5, fun: { Fungible: '12' } }],
+    }
+    const calls = [
+      rootCall(2, 'PolkadotXcm.transfer_assets_using_type_and_then', args),
+      rootCall(3, 'PolkadotXcm.transfer_assets_using_type_and_then', args),
+    ] as never
+
+    const rows = extractXcmBridgeAndOperationRows([], calls, '2026-01-01 00:00:00', 'test')
+    const indexes = rows.xcmActivity.filter(r => r.source_kind === 'call').map(r => r.source_index)
+
+    expect(indexes).toHaveLength(2)
+    expect(new Set(indexes).size).toBe(2)
+  })
+
+  it('keeps operation traces of same-named root calls distinct', () => {
+    const calls = [
+      rootCall(2, 'Router.sell', { route: [{ pool: 'Omnipool' }], amountIn: '1' }),
+      rootCall(4, 'Router.sell', { route: [{ pool: 'Omnipool' }], amountIn: '2' }),
+      rootCall(6, 'Router.sell', { route: [{ pool: 'Omnipool' }], amountIn: '3' }),
+    ] as never
+
+    const rows = extractXcmBridgeAndOperationRows([], calls, '2026-01-01 00:00:00', 'test')
+    const traceIds = rows.operationTraces.map(r => r.trace_id)
+
+    expect(traceIds).toHaveLength(3)
+    expect(new Set(traceIds).size).toBe(3)
+  })
+
+  it('separates a nested call from the same path in another extrinsic', () => {
+    const nested = (extrinsicIndex: number) => ({
+      id: `0000000010-00000${extrinsicIndex}-nested`,
+      name: 'PolkadotXcm.send',
+      address: [0, 1],
+      extrinsicIndex,
+      block: { height: 10 },
+      args: { dest: { parents: 1, interior: { __kind: 'Here' } } },
+    })
+    const calls = [nested(2), nested(5)] as never
+
+    const rows = extractXcmBridgeAndOperationRows([], calls, '2026-01-01 00:00:00', 'test')
+    const indexes = rows.xcmActivity.filter(r => r.source_kind === 'call').map(r => r.source_index)
+
+    expect(new Set(indexes).size).toBe(2)
+  })
+})
