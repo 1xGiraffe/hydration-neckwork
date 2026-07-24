@@ -148,6 +148,13 @@ export class ToolController {
     this.primitive.setDrawings(this.drawings)
 
     this.chartElement.addEventListener('pointerdown', this.onPointerDown, true)
+    // Non-passive touch handlers claim (preventDefault + stopPropagation) only
+    // the touches we own — a tool that owns the pane, or a touch landing on a
+    // drawing — so the browser cannot scroll and the library cannot pan them out
+    // from under our pointer drag (which otherwise fires pointercancel). Touches
+    // on empty chart still fall through to the library for normal panning.
+    this.chartElement.addEventListener('touchstart', this.onTouchStart, { capture: true, passive: false })
+    this.chartElement.addEventListener('touchmove', this.onTouchMove, { capture: true, passive: false })
     // Window-level so moves/releases outside the chart (or window) still end
     // interactions; handlers early-exit when nothing is live. The capture-phase
     // pointerdown only records the pointer type (it also sees toolbar presses,
@@ -303,6 +310,8 @@ export class ToolController {
 
   dispose(): void {
     this.chartElement.removeEventListener('pointerdown', this.onPointerDown, true)
+    this.chartElement.removeEventListener('touchstart', this.onTouchStart, true)
+    this.chartElement.removeEventListener('touchmove', this.onTouchMove, true)
     window.removeEventListener('pointerdown', this.onGlobalPointerDown, true)
     window.removeEventListener('pointermove', this.onPointerMove)
     window.removeEventListener('pointerup', this.onPointerUp)
@@ -353,6 +362,11 @@ export class ToolController {
 
   private clampXToPane(x: number): number {
     return Math.min(Math.max(x, 0), this.paneWidth())
+  }
+
+  /** With Shift held, snap a point level with `base` so the segment is horizontal. */
+  private constrainHorizontal(point: AnchorPoint, base: AnchorPoint, shiftKey: boolean): AnchorPoint {
+    return shiftKey ? { time: point.time, price: base.price } : point
   }
 
   /** Anchor at pane-0 (x, y); time may be extrapolated beyond the data edges. */
@@ -521,6 +535,31 @@ export class ToolController {
     this.lastPointerType = event.pointerType
   }
 
+  /** Whether a single touch at pane (x, y) is one the drawing tools should own. */
+  private touchClaims(x: number, y: number): boolean {
+    if (this.tool !== 'cursor' || this.placement != null) return true
+    return this.primitive.hitTestAt(x, y, TOUCH_HIT_SLOP) != null
+  }
+
+  private readonly onTouchStart = (event: TouchEvent): void => {
+    // Leave multi-touch (pinch-zoom) to the library.
+    if (event.touches.length !== 1) return
+    const touch = event.touches[0]
+    const rect = this.chartElement.getBoundingClientRect()
+    if (this.touchClaims(touch.clientX - rect.left, touch.clientY - rect.top)) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+  }
+
+  private readonly onTouchMove = (event: TouchEvent): void => {
+    // Keep the browser/library out of a live drag for its whole duration.
+    if (this.interaction && event.touches.length === 1) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+  }
+
   private readonly onPointerDown = (event: PointerEvent): void => {
     const { x, y } = this.toPaneXY(event)
     const hitSlop = event.pointerType === 'mouse' ? 1 : TOUCH_HIT_SLOP
@@ -585,7 +624,7 @@ export class ToolController {
         kind: 'place', pointerId: event.pointerId, tool: this.tool, p1, fromPending,
         lastAnchor: anchor, startX: x, startY: y, moved: false,
       })
-      if (fromPending) this.primitive.setPending({ p1, cursor: anchor })
+      if (fromPending) this.primitive.setPending({ p1, cursor: this.constrainHorizontal(anchor, p1, event.shiftKey) })
       return
     }
 
@@ -657,7 +696,9 @@ export class ToolController {
         const { x, y } = this.toPaneXY(event)
         if (!this.inPane0(x, y)) return
         const anchor = this.anchorAtXY(x, y)
-        if (anchor) this.primitive.setPending({ p1: this.pending.p1, cursor: anchor })
+        if (anchor) {
+          this.primitive.setPending({ p1: this.pending.p1, cursor: this.constrainHorizontal(anchor, this.pending.p1, event.shiftKey) })
+        }
         return
       }
       if (this.measurePending && this.measure) {
@@ -682,9 +723,11 @@ export class ToolController {
       case 'place': {
         const anchor = this.anchorAtXY(x, clampedY)
         if (!anchor) return
+        // Store the raw anchor as the release fallback; constrain only for the
+        // live preview, so releasing Shift is honoured even over a data gap.
         interaction.lastAnchor = anchor
         if (interaction.fromPending || interaction.moved) {
-          this.primitive.setPending({ p1: interaction.p1, cursor: anchor })
+          this.primitive.setPending({ p1: interaction.p1, cursor: this.constrainHorizontal(anchor, interaction.p1, event.shiftKey) })
         }
         return
       }
@@ -716,13 +759,13 @@ export class ToolController {
         // No anchor mutation below the movement threshold (a jittery click
         // must not displace the line in memory).
         if (!interaction.moved) return
-        this.applyDrag(interaction, x, clampedY)
+        this.applyDrag(interaction, x, clampedY, event.shiftKey)
         return
       }
     }
   }
 
-  private applyDrag(interaction: Extract<Interaction, { kind: 'drag' }>, x: number, y: number): void {
+  private applyDrag(interaction: Extract<Interaction, { kind: 'drag' }>, x: number, y: number, shiftKey: boolean): void {
     const index = this.drawings.findIndex(d => d.id === interaction.id)
     if (index < 0) return
     const current = this.drawings[index]
@@ -753,10 +796,13 @@ export class ToolController {
     } else {
       const pointIndex = interaction.part === 'p0' ? 0 : 1
       const previous = current.points[pointIndex]
-      const next: AnchorPoint = {
+      const other = current.points[pointIndex === 0 ? 1 : 0]
+      const raw: AnchorPoint = {
         time: cursorTime ?? previous.time,
         price: cursorPrice ?? previous.price,
       }
+      // Shift keeps the dragged endpoint level with the other one (horizontal).
+      const next = this.constrainHorizontal(raw, other, shiftKey)
       points = pointIndex === 0 ? [next, current.points[1]] : [current.points[0], next]
     }
 
@@ -781,7 +827,8 @@ export class ToolController {
 
     switch (interaction.kind) {
       case 'place': {
-        const release = this.anchorAtXY(x, clampedY) ?? interaction.lastAnchor
+        const raw = this.anchorAtXY(x, clampedY) ?? interaction.lastAnchor
+        const release = this.constrainHorizontal(raw, interaction.p1, event.shiftKey)
         if (interaction.fromPending || interaction.moved) {
           if (anchorsEqual(release, interaction.p1)) {
             // Zero-length line: drag-draw discards; a repeated tap keeps waiting.
