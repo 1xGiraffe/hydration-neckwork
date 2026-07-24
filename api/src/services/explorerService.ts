@@ -8636,17 +8636,26 @@ export function dcaExecutionOutcome(
 
 // Pre-router-era schedules recorded no order in DCA.Scheduled, so dca_schedules
 // stores asset_in=asset_out=0 — which would render as a nonsensical HDX→HDX
-// pair. Recover the real traded pair from the first execution's swap leg
-// (same block + owner) when the stored order is empty.
+// pair. Recover the real traded pair from the first execution's swap leg when
+// the stored order is empty. A DCA.TradeExecuted follows its own swap's events,
+// so the schedule's swap is the nearest owner-matching one BEFORE that event —
+// an owner running several DCAs in the same block has several swaps there, and
+// the first one in the block may belong to a different schedule.
 async function resolveDcaTradedPair(scheduleId: number, storedIn: number, storedOut: number, who: string): Promise<{ assetIn: number; assetOut: number }> {
   if (storedIn !== 0 || storedOut !== 0) return { assetIn: storedIn, assetOut: storedOut }
   const swapRes = await client.query({
-    query: `SELECT JSONExtractInt(args_json,'assetIn') AS ain, JSONExtractInt(args_json,'assetOut') AS aout
+    query: `WITH (
+              SELECT (min(block_height), argMin(event_index, (block_height, event_index)))
+              FROM price_data.dca_events
+              WHERE id = {sid:UInt64} AND event_name = 'DCA.TradeExecuted'
+            ) AS first_exec
+            SELECT JSONExtractInt(args_json,'assetIn') AS ain, JSONExtractInt(args_json,'assetOut') AS aout
             FROM price_data.raw_events
             WHERE event_name IN ('Router.Executed','Router.RouteExecuted','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted','LBP.SellExecuted','LBP.BuyExecuted')
-              AND block_height = (SELECT min(block_height) FROM price_data.dca_events WHERE id = {sid:UInt64} AND event_name = 'DCA.TradeExecuted')
+              AND block_height = first_exec.1
+              AND event_index < first_exec.2
               AND JSONExtractString(args_json,'who') = {who:String}
-            ORDER BY event_index ASC LIMIT 1`,
+            ORDER BY event_index DESC LIMIT 1`,
     query_params: { sid: scheduleId, who }, format: 'JSONEachRow',
   })
   const sw = (await swapRes.json<{ ain: number; aout: number }>())[0]
