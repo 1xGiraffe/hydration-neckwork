@@ -8568,6 +8568,131 @@ export function dcaTerminationReason(errorJson: string | null | undefined): stri
   return reason.label.replace(/ /g, '')
 }
 
+// A single DCA execution attempt: an executed trade (both legs + a derived
+// price) or a failed attempt (no output; its intended sell is the schedule's
+// amount-per, and it carries a decoded failure reason).
+export interface DcaExecutionDetail {
+  scheduleId: number
+  status: 'executed' | 'failed'
+  who: AccountRef | null
+  blockHeight: number
+  timestamp: string
+  eventIndex: number
+  extrinsicIndex: number | null
+  assetIn: AssetRef
+  assetOut: AssetRef
+  amountIn: string
+  amountOut: string | null
+  valueUsd: number | null
+  executionPrice: number | null
+  period: number
+  failureReason: FailureReason | null
+}
+
+// Pure per-execution outcome: a DCA.TradeFailed event has no amounts, so the
+// intended sell is the schedule's amount-per with no output or price; a
+// DCA.TradeExecuted carries both legs and an execution price (out per in).
+export function dcaExecutionOutcome(
+  eventName: string,
+  amountPer: string,
+  eventAmountIn: string,
+  eventAmountOut: string,
+  inDecimals: number,
+  outDecimals: number,
+): { status: 'executed' | 'failed'; amountIn: string; amountOut: string | null; executionPrice: number | null } {
+  if (eventName === 'DCA.TradeFailed') {
+    return { status: 'failed', amountIn: amountPer, amountOut: null, executionPrice: null }
+  }
+  const inNum = Number(eventAmountIn) / 10 ** inDecimals
+  const outNum = Number(eventAmountOut) / 10 ** outDecimals
+  return {
+    status: 'executed', amountIn: eventAmountIn, amountOut: eventAmountOut,
+    executionPrice: inNum > 0 && outNum > 0 ? outNum / inNum : null,
+  }
+}
+
+// Pre-router-era schedules recorded no order in DCA.Scheduled, so dca_schedules
+// stores asset_in=asset_out=0 — which would render as a nonsensical HDX→HDX
+// pair. Recover the real traded pair from the first execution's swap leg
+// (same block + owner) when the stored order is empty.
+async function resolveDcaTradedPair(scheduleId: number, storedIn: number, storedOut: number, who: string): Promise<{ assetIn: number; assetOut: number }> {
+  if (storedIn !== 0 || storedOut !== 0) return { assetIn: storedIn, assetOut: storedOut }
+  const swapRes = await client.query({
+    query: `SELECT JSONExtractInt(args_json,'assetIn') AS ain, JSONExtractInt(args_json,'assetOut') AS aout
+            FROM price_data.raw_events
+            WHERE event_name IN ('Router.Executed','Router.RouteExecuted','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted','LBP.SellExecuted','LBP.BuyExecuted')
+              AND block_height = (SELECT min(block_height) FROM price_data.dca_events WHERE id = {sid:UInt64} AND event_name = 'DCA.TradeExecuted')
+              AND JSONExtractString(args_json,'who') = {who:String}
+            ORDER BY event_index ASC LIMIT 1`,
+    query_params: { sid: scheduleId, who }, format: 'JSONEachRow',
+  })
+  const sw = (await swapRes.json<{ ain: number; aout: number }>())[0]
+  return sw && (sw.ain || sw.aout) ? { assetIn: sw.ain, assetOut: sw.aout } : { assetIn: storedIn, assetOut: storedOut }
+}
+
+// A single DCA execution, addressed by its DCA.TradeExecuted / DCA.TradeFailed
+// event (block_height + event_index). Bounded primary-key lookups only; the
+// failure reason is decoded on demand from the raw event, like extrinsics.
+export async function getDcaExecution(height: number, eventIndex: number): Promise<DcaExecutionDetail | null> {
+  return cached(`explorer:dca-exec:${height}:${eventIndex}`, 60_000, async () => {
+    const evRes = await client.query({
+      query: `SELECT toString(id) AS id, event_name, extrinsic_index, toString(block_timestamp) AS ts,
+                     toString(amount_in) AS amount_in, toString(amount_out) AS amount_out
+              FROM price_data.dca_events
+              WHERE block_height = {h:UInt32} AND event_index = {i:UInt32}
+                AND event_name IN ('DCA.TradeExecuted','DCA.TradeFailed')
+              ORDER BY block_height DESC LIMIT 1`,
+      query_params: { h: height, i: eventIndex }, format: 'JSONEachRow',
+    })
+    const ev = (await evRes.json<{ id: string; event_name: string; extrinsic_index: number | null; ts: string; amount_in: string; amount_out: string }>())[0]
+    if (!ev) return null
+    const scheduleId = Number(ev.id)
+    const schedRes = await client.query({
+      query: `SELECT who, asset_in, asset_out, toString(amount_per) AS amount_per, period
+              FROM price_data.dca_schedules WHERE id = {sid:UInt64} ORDER BY block_height DESC LIMIT 1`,
+      query_params: { sid: scheduleId }, format: 'JSONEachRow',
+    })
+    const sched = (await schedRes.json<{ who: string; asset_in: number; asset_out: number; amount_per: string; period: number }>())[0]
+    if (!sched) return null
+    const pair = await resolveDcaTradedPair(scheduleId, sched.asset_in, sched.asset_out, sched.who)
+    const aIn = asset(pair.assetIn), aOut = asset(pair.assetOut)
+    const outcome = dcaExecutionOutcome(ev.event_name, sched.amount_per, ev.amount_in, ev.amount_out, aIn.decimals, aOut.decimals)
+
+    let failureReason: FailureReason | null = null
+    if (outcome.status === 'failed') {
+      const [errRes, specRes] = await Promise.all([
+        client.query({
+          query: `SELECT JSONExtractRaw(args_json,'error') AS error FROM price_data.raw_events
+                  WHERE event_name = 'DCA.TradeFailed' AND block_height = {h:UInt32} AND event_index = {i:UInt32} LIMIT 1`,
+          query_params: { h: height, i: eventIndex }, format: 'JSONEachRow',
+        }),
+        client.query({
+          query: `SELECT spec_version FROM price_data.blocks WHERE block_height = {h:UInt32} LIMIT 1`,
+          query_params: { h: height }, format: 'JSONEachRow',
+        }),
+      ])
+      const errJson = (await errRes.json<{ error: string }>())[0]?.error ?? null
+      const specVersion = (await specRes.json<{ spec_version: number }>())[0]?.spec_version ?? 0
+      failureReason = dispatchErrorReason(errJson, specVersion, resolveModuleError)
+    }
+
+    const detail: DcaExecutionDetail = {
+      scheduleId, status: outcome.status,
+      who: ACCOUNT_RE.test(sched.who) ? accountRef(sched.who) : null,
+      blockHeight: height, timestamp: ev.ts, eventIndex, extrinsicIndex: ev.extrinsic_index,
+      assetIn: aIn, assetOut: aOut,
+      amountIn: outcome.amountIn, amountOut: outcome.amountOut,
+      valueUsd: null, executionPrice: outcome.executionPrice, period: sched.period, failureReason,
+    }
+    // Value the flow at event-time prices (the out leg when executed, the
+    // intended in leg when failed) — parity with the schedule's execution rows.
+    await applyHistoricalUsd([detail], d => d.status === 'failed'
+      ? { assetId: aIn.assetId, decimals: aIn.decimals, raw: d.amountIn, ts: d.timestamp }
+      : { assetId: aOut.assetId, decimals: aOut.decimals, raw: d.amountOut ?? '0', ts: d.timestamp })
+    return detail
+  })
+}
+
 export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25): Promise<DcaScheduleDetail | null> {
   return cached(`explorer:dca-schedule:${scheduleId}:${offset}:${limit}`, 8000, async () => {
     const prices = await ensurePrices()
@@ -8610,25 +8735,8 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
     if (!sched) return null
     const life = await lifeRes.json<{ event_name: string; ts: string; bh: number; ei: number; xi: number }>()
     const totals = (await totalRes.json<{ n: string; failed: string; attempts: string; tin: string; tout: string }>())[0]
-    // Pre-router-era schedules recorded no order in the DCA.Scheduled event, so
-    // dca_schedules stores assetIn=assetOut=0 — which renders as a nonsensical
-    // HDX→HDX schedule. Recover the real traded pair from the first execution's
-    // swap leg (same block + owner) when the stored order is empty.
-    let aInId = sched.asset_in, aOutId = sched.asset_out
-    if (aInId === 0 && aOutId === 0) {
-      const swapRes = await client.query({
-        query: `SELECT JSONExtractInt(args_json,'assetIn') AS ain, JSONExtractInt(args_json,'assetOut') AS aout
-                FROM price_data.raw_events
-                WHERE event_name IN ('Router.Executed','Router.RouteExecuted','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted','LBP.SellExecuted','LBP.BuyExecuted')
-                  AND block_height = (SELECT min(block_height) FROM price_data.dca_events WHERE id = {sid:UInt64} AND event_name = 'DCA.TradeExecuted')
-                  AND JSONExtractString(args_json,'who') = {who:String}
-                ORDER BY event_index ASC LIMIT 1`,
-        query_params: { sid: scheduleId, who: sched.who }, format: 'JSONEachRow',
-      })
-      const sw = (await swapRes.json<{ ain: number; aout: number }>())[0]
-      if (sw && (sw.ain || sw.aout)) { aInId = sw.ain; aOutId = sw.aout }
-    }
-    const aIn = asset(aInId), aOut = asset(aOutId)
+    const pair = await resolveDcaTradedPair(scheduleId, sched.asset_in, sched.asset_out, sched.who)
+    const aIn = asset(pair.assetIn), aOut = asset(pair.assetOut)
     const terminated = life.find(l => l.event_name === 'DCA.Terminated')
     const completed = life.find(l => l.event_name === 'DCA.Completed')
     const executionRows = await exRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; amount_in: string; amount_out: string }>()

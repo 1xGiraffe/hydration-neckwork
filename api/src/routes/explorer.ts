@@ -3,7 +3,7 @@ import { z } from 'zod'
 import {
   getStats, getRecentBlocks, getBlock, getRecentExtrinsics, getExtrinsic, getExtrinsicAt,
   getExtrinsicActivity, getBlockActivity,
-  getHolders, getAddress, getAddressHistory, search, getAssets, getAccounts, getDcaSchedule, getDcaScheduleIdAt,
+  getHolders, getAddress, getAddressHistory, search, getAssets, getAccounts, getDcaSchedule, getDcaScheduleIdAt, getDcaExecution,
   getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getMoneyMarket, getAssetDetail, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag,
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressActivityCountAtMin, getTagActivityCountAtMin,
@@ -183,6 +183,16 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const q = req.query as Record<string, unknown>
     const detail = await getDcaSchedule(params.data.scheduleId, offsetParam(q), limitParam(q, 25))
     if (!detail) return reply.status(404).send({ error: 'DCA schedule not found' })
+    return detail
+  })
+
+  // A single DCA execution, addressed by its execution event (block + event
+  // index). Reached from the schedule page's per-execution rows.
+  fastify.get('/explorer/dca/exec/:height/:index', async (req, reply) => {
+    const params = z.object({ height: uint32Param, index: uint32Param }).safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid execution reference' })
+    const detail = await getDcaExecution(params.data.height, params.data.index)
+    if (!detail) return reply.status(404).send({ error: 'DCA execution not found' })
     return detail
   })
 
