@@ -840,6 +840,36 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   },
   { re: /^\/explorer\/dca-at\/(\d+)\/(\d+)/, fn: () => ({ scheduleId: 33546 }) },
   {
+    // One DCA execution attempt by its event: the failed-attempt rows of the
+    // cancelled schedule (33573) live at TIP-20/TIP-40 — same identity as its
+    // schedule-page rows; other eventIndex-4 addresses are executed 33546 rows.
+    // Anything else 404s (legacy event-form links must fall back to the
+    // schedule resolver, mirroring the real API).
+    re: /^\/explorer\/dca\/exec\/(\d+)\/(\d+)$/, fn: (m) => {
+      const h = Number(m[1]), i = Number(m[2])
+      if (i !== 4) return undefined
+      const failed = h === TIP - 20 || h === TIP - 40
+      if (failed) {
+        const assetIn = aref(assetById.get(5)!), assetOut = aref(assetById.get(10)!)
+        return {
+          scheduleId: 33573, status: 'failed', who: A.fox,
+          blockHeight: h, timestamp: tsAt(h), eventIndex: i, extrinsicIndex: null,
+          assetIn, assetOut, amountIn: raw(975, assetIn.decimals), amountOut: null,
+          valueUsd: 975, executionPrice: null, period: 6,
+          failureReason: { label: 'pool trade limit reached', docs: 'The trade exceeds the pool trade volume limit for this block.' },
+        }
+      }
+      const assetIn = aref(assetById.get(5)!), assetOut = aref(assetById.get(0)!)
+      return {
+        scheduleId: 33546, status: 'executed', who: A.fox,
+        blockHeight: h, timestamp: tsAt(h), eventIndex: i, extrinsicIndex: null,
+        assetIn, assetOut, amountIn: raw(12.5, 10), amountOut: raw(12.5 * 4.4422 / 0.02184, 12),
+        valueUsd: 55.5, executionPrice: 4.4422 / 0.02184, period: 300,
+        failureReason: null,
+      }
+    },
+  },
+  {
     re: /^\/explorer\/dca\/(\d+)/, fn: (m) => {
       const scheduleId = Number(m[1])
       if (scheduleId === 33573) {

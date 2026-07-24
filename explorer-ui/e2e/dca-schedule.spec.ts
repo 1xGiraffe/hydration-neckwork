@@ -42,7 +42,8 @@ test('a schedule execution row opens its own execution detail', async ({ page })
   await row.locator('td').first().click()
   await expect(page).toHaveURL(/\/dca\/\d+-e\d+$/)
   await expect(page.getByText('Schedule', { exact: true })).toBeVisible()
-  await expect(page.getByText('DCA #33546')).toBeVisible()
+  // the schedule link appears in both the crumbs and the detail card
+  await expect(page.locator('.detail-card a.hash', { hasText: 'DCA #33546' })).toBeVisible()
 })
 
 test('a failed attempt detail names the failure reason', async ({ page }) => {
