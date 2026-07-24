@@ -1501,6 +1501,13 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
   .tbl tbody td[data-label]:first-child { padding-top: 9px; }
   /* asset icon+name cells align to the right edge like other values */
   .tbl tbody td[data-label] .asset-row { justify-content: flex-end; }
+  /* …except the Assets list, where the icon+name is the card's title: keep it
+     left-aligned so the name sits directly behind the icon (needs .tbl.assets-tbl
+     to outrank the flex-end rule above). */
+  .tbl.assets-tbl tbody td[data-label="Asset"] { text-align: left; }
+  .tbl.assets-tbl tbody td[data-label="Asset"] .asset-row { justify-content: flex-start; }
+  /* The icon+name is self-evidently the asset; drop the redundant "ASSET" label. */
+  .tbl.assets-tbl tbody td[data-label="Asset"]::before { display: none; }
   /* let any fixed-width desktop cells (e.g. sparkline) fill the card row */
   .tbl tbody td.spark-cell { width: auto; }
   /* accounts list: the account name/tag is the card's first cell — align it to
