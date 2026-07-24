@@ -37,7 +37,11 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
                   {' '}· <Ago ts={data.createdAt.timestamp} now={now} />
                 </div>
                 <div className="dt">Order</div><div className="dd">
-                  sells <AssetAmount asset={data.assetIn} raw={data.amountPer} /> → <AssetChip asset={data.assetOut} /> every <span className="mono">{data.period}</span> blocks
+                  {/* amountPer follows the order type: a Sell fixes the sold
+                      amount, a Buy fixes the bought amount. */}
+                  {data.direction === 'Buy'
+                    ? <>buys <AssetAmount asset={data.assetOut} raw={data.amountPer} /> with <AssetChip asset={data.assetIn} /> every <span className="mono">{data.period}</span> blocks</>
+                    : <>sells <AssetAmount asset={data.assetIn} raw={data.amountPer} /> → <AssetChip asset={data.assetOut} /> every <span className="mono">{data.period}</span> blocks</>}
                 </div>
                 <div className="dt">Budget</div><div className="dd">{data.totalAmount === '0'
                   ? <span className="mono">open-ended (runs until stopped or unfunded)</span>

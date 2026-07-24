@@ -640,6 +640,9 @@ export interface DcaScheduleDetail {
   createdAt: { blockHeight: number; timestamp: string; extrinsicIndex: number | null }
   assetIn: AssetRef
   assetOut: AssetRef
+  // 'Sell' | 'Buy' ('' for pre-router schedules). amountPer follows it: the
+  // sold (in) amount for Sell orders, the bought (out) amount for Buy orders.
+  direction: string
   amountPer: string
   totalAmount: string
   period: number
@@ -654,7 +657,8 @@ export interface DcaScheduleDetail {
 
 // A single DCA execution attempt (one row on the schedule page), addressed by
 // its execution event. Executed attempts carry both legs and a price; failed
-// attempts carry the intended sell and a decoded failure reason.
+// attempts carry only the schedule's fixed per-trade leg (the sold amount for
+// Sell orders, the bought amount for Buy orders) and a decoded failure reason.
 export interface DcaExecutionDetail {
   scheduleId: number
   status: 'executed' | 'failed'
@@ -665,7 +669,7 @@ export interface DcaExecutionDetail {
   extrinsicIndex: number | null
   assetIn: AssetRef
   assetOut: AssetRef
-  amountIn: string
+  amountIn: string | null
   amountOut: string | null
   valueUsd: number | null
   executionPrice: number | null

@@ -853,7 +853,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
         return {
           scheduleId, who: A.fox,
           createdAt: { blockHeight: TIP - 60, timestamp: tsAt(TIP - 60), extrinsicIndex: 2 },
-          assetIn, assetOut, amountPer: raw(975, assetIn.decimals), totalAmount: raw(3900, assetIn.decimals), period: 6, maxRetries: 0,
+          assetIn, assetOut, direction: 'Sell', amountPer: raw(975, assetIn.decimals), totalAmount: raw(3900, assetIn.decimals), period: 6, maxRetries: 0,
           status: 'cancelled', statusAt: tsAt(TIP - 1),
           executions: { count: 0, failed: 2, attempts: 2, totalIn: '0', totalOut: '0' }, rows,
         }
@@ -869,7 +869,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
         who: A.fox,
         createdAt: { blockHeight: TIP - 40000, timestamp: tsAt(TIP - 40000), extrinsicIndex: 2 },
         assetIn: aref(assetById.get(5)!), assetOut: aref(assetById.get(0)!),
-        amountPer: raw(12.5, 10), totalAmount: raw(5000, 10), period: 300, maxRetries: 3,
+        direction: 'Sell', amountPer: raw(12.5, 10), totalAmount: raw(5000, 10), period: 300, maxRetries: 3,
         status: 'active', statusAt: null,
         executions: { count: 132, failed: 0, attempts: 132, totalIn: raw(1650, 10), totalOut: raw(1650 * 4.4422 / 0.02184, 12) },
         rows: execs,
