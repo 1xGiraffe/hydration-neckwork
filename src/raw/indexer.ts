@@ -3,6 +3,7 @@ import { validateBlockRange } from '../blockRange.js'
 import { config } from '../config.js'
 import { isSwapEvent } from '../registry/swapEvents.js'
 import { AssetRegistryTracker } from '../registry/tracker.js'
+import { AtokenReserveMap } from '../registry/atokenReserves.js'
 import { PoolCompositionCache } from '../pool/compositionCache.js'
 import { updateErc20Registry } from '../evm/balances.js'
 import { rawProcessor } from './processor.js'
@@ -406,6 +407,10 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
 
   const mmSnapshotEnabled = mmPeriodicSnapshotEnabled()
   const mmSnapshotInterval = mmSnapshotIntervalBlocks()
+  // Authoritative wrapper↔base relation for the snapshot payload the price
+  // pipeline replays; reloaded when the asset registry changes.
+  const atokenReserves = new AtokenReserveMap()
+  await atokenReserves.refresh()
   let knownBorrowers = new Map<string, number>()
   if (mmSnapshotEnabled) {
     try {
@@ -562,8 +567,9 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       }
 
       const changedAssets = await tracePhase(blockHeight, 'asset_registry', () => registry.maybeSnapshot(blockHeight, block.header))
-      const atokenEquivalences = registry.getAtokenEquivalences()
-      const atokenIds = registry.getAtokenIds()
+      if (changedAssets.length > 0) await atokenReserves.refresh()
+      const atokenEquivalences = registry.getAtokenEquivalences(atokenReserves.underlyings)
+      const atokenIds = registry.getAtokenIds(atokenReserves.underlyings)
       const lpEquivalences = registry.getLpAliases()
       const aaveTokenIds = new Set(atokenIds)
       for (const [, displayId] of lpEquivalences) {

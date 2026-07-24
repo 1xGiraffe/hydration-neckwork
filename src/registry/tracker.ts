@@ -228,12 +228,76 @@ export function isPlaceholderAssetMetadata(metadata: Pick<AssetMetadata, 'assetI
   return hasGeneratedLabels && (metadata.assetType == null || metadata.assetType === 'External')
 }
 
+type AmbiguityReporter = (assetId: number, symbol: string, candidates: number[]) => void
+
+function idsBySymbol(assets: Iterable<[number, AssetMetadata]>): Map<string, number[]> {
+  const ids = new Map<string, number[]>()
+  for (const [assetId, meta] of assets) {
+    const known = ids.get(meta.symbol)
+    if (known) known.push(assetId)
+    else ids.set(meta.symbol, [assetId])
+  }
+  return ids
+}
+
+// Wrapper → base pairs, which carry the base's price and volume attribution onto
+// the wrapper. Aave's initialized reserves (aToken contract → underlying asset id)
+// decide whenever they know the wrapper. Otherwise the base is matched by symbol
+// (aDOT → DOT), but only when that symbol resolves to exactly one asset: several
+// live symbols do not (four USDC ids, two EURC), and resolving one of those by
+// registry iteration order attributed the wrapper's price and volume to whichever
+// duplicate happened to be cached first — an unpaired wrapper keeps its own.
+export function atokenEquivalencesFor(
+  assets: Iterable<[number, AssetMetadata]>,
+  underlyingByAtokenContract: Map<string, number> = new Map(),
+  onAmbiguous?: AmbiguityReporter,
+): [number, number][] {
+  const entries = [...assets]
+  const known = new Set(entries.map(([assetId]) => assetId))
+  const bySymbol = idsBySymbol(entries)
+
+  const equivalences: [number, number][] = []
+  for (const [assetId, meta] of entries) {
+    if (!meta.symbol.startsWith('a') || meta.symbol.length <= 1) continue
+    const mapped = meta.evmAddress ? underlyingByAtokenContract.get(meta.evmAddress.toLowerCase()) : undefined
+    if (mapped !== undefined) {
+      if (mapped !== assetId && known.has(mapped)) equivalences.push([mapped, assetId])
+      continue
+    }
+    const candidates = bySymbol.get(meta.symbol.slice(1)) ?? []
+    if (candidates.length === 1 && candidates[0] !== assetId) equivalences.push([candidates[0], assetId])
+    else if (candidates.length > 1) onAmbiguous?.(assetId, meta.symbol, candidates)
+  }
+  return equivalences
+}
+
+// Stableswap LP → display token aliases (2-Pool-GDOT → GDOT), with the same
+// duplicate-symbol rule as the aToken pairing.
+export function lpAliasesFor(
+  assets: Iterable<[number, AssetMetadata]>,
+  onAmbiguous?: AmbiguityReporter,
+): [number, number][] {
+  const entries = [...assets]
+  const bySymbol = idsBySymbol(entries)
+
+  const aliases: [number, number][] = []
+  for (const [assetId, meta] of entries) {
+    const match = meta.symbol.match(/^\d+-Pool-(.+)$/)
+    if (!match) continue
+    const candidates = bySymbol.get(match[1]) ?? []
+    if (candidates.length === 1 && candidates[0] !== assetId) aliases.push([assetId, candidates[0]])
+    else if (candidates.length > 1) onAmbiguous?.(assetId, meta.symbol, candidates)
+  }
+  return aliases
+}
+
 export class AssetRegistryTracker {
   private cache: Map<number, AssetMetadata> = new Map()
   private lastSnapshotBlock: number = -1 // Force first scan
   private snapshotInterval: number
   private seededAssetRows: AssetRow[] = []
   private includeUnresolvedAssets: boolean
+  private ambiguousWrappersLogged = new Set<number>()
 
   constructor(snapshotInterval?: number, nativeAssetMetadata?: AssetMetadata, options: TrackerOptions = {}) {
     this.snapshotInterval = snapshotInterval ?? config.SNAPSHOT_INTERVAL
@@ -454,39 +518,29 @@ export class AssetRegistryTracker {
   }
 
   /**
-   * Auto-detect aToken ↔ base token equivalences (1:1 pairs).
-   * Matches assets whose symbol starts with "a" to a base asset with the
-   * remaining symbol (e.g. aDOT → DOT, aUSDT → USDT, avDOT → vDOT).
+   * aToken ↔ base token equivalences (1:1 pairs), which carry the base's price
+   * and volume attribution onto the wrapper.
    */
-  getAtokenEquivalences(): [number, number][] {
-    // Build symbol → assetId lookup (first match wins for duplicate symbols)
-    const symbolToId = new Map<string, number>()
-    for (const [assetId, meta] of this.cache) {
-      if (!symbolToId.has(meta.symbol)) {
-        symbolToId.set(meta.symbol, assetId)
-      }
-    }
+  getAtokenEquivalences(underlyingByAtokenContract: Map<string, number> = new Map()): [number, number][] {
+    return atokenEquivalencesFor(this.cache, underlyingByAtokenContract, (assetId, symbol, candidates) =>
+      this.logAmbiguousWrapper(assetId, symbol, candidates))
+  }
 
-    const equivalences: [number, number][] = []
-    for (const [assetId, meta] of this.cache) {
-      if (meta.symbol.startsWith('a') && meta.symbol.length > 1) {
-        const baseSymbol = meta.symbol.slice(1)
-        const baseId = symbolToId.get(baseSymbol)
-        if (baseId !== undefined && baseId !== assetId) {
-          equivalences.push([baseId, assetId])
-        }
-      }
-    }
-
-    return equivalences
+  // An unpaired wrapper keeps its own price and volume rather than borrowing a
+  // duplicate's — surfaced once per wrapper so a missing reserve mapping is
+  // visible instead of silently resolving to an arbitrary asset.
+  private logAmbiguousWrapper(assetId: number, symbol: string, candidates: number[]): void {
+    if (this.ambiguousWrappersLogged.has(assetId)) return
+    this.ambiguousWrappersLogged.add(assetId)
+    console.warn(`[AssetRegistry] ${symbol}(${assetId}) cannot be paired: no reserve mapping and its base symbol is ambiguous (${candidates.join(', ')}); leaving it unpaired`)
   }
 
   /**
    * Get the set of aToken asset IDs (derived from equivalences).
    * These are wrapper tokens whose prices should not be indexed separately.
    */
-  getAtokenIds(): Set<number> {
-    return new Set(this.getAtokenEquivalences().map(([, aTokenId]) => aTokenId))
+  getAtokenIds(underlyingByAtokenContract: Map<string, number> = new Map()): Set<number> {
+    return new Set(this.getAtokenEquivalences(underlyingByAtokenContract).map(([, aTokenId]) => aTokenId))
   }
 
   /**
@@ -494,25 +548,8 @@ export class AssetRegistryTracker {
    * Used to seed LP equivalences at startup; Aave EVM events refine at runtime.
    */
   getLpAliases(): [number, number][] {
-    const symbolToId = new Map<string, number>()
-    for (const [assetId, meta] of this.cache) {
-      if (!symbolToId.has(meta.symbol)) {
-        symbolToId.set(meta.symbol, assetId)
-      }
-    }
-
-    const aliases: [number, number][] = []
-    for (const [assetId, meta] of this.cache) {
-      const match = meta.symbol.match(/^\d+-Pool-(.+)$/)
-      if (match) {
-        const displayId = symbolToId.get(match[1])
-        if (displayId !== undefined && displayId !== assetId) {
-          aliases.push([assetId, displayId])
-        }
-      }
-    }
-
-    return aliases
+    return lpAliasesFor(this.cache, (assetId, symbol, candidates) =>
+      this.logAmbiguousWrapper(assetId, symbol, candidates))
   }
 
   /**

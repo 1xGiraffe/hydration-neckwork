@@ -2,6 +2,7 @@ import { processor } from './processor.js'
 import { calculate_amplification } from '@galacticcouncil/math-stableswap'
 import { Database } from './db/database.js'
 import { AssetRegistryTracker } from './registry/tracker.js'
+import { AtokenReserveMap } from './registry/atokenReserves.js'
 import { PoolCompositionCache } from './pool/compositionCache.js'
 import { resolvePrices } from './price/graph.js'
 import { config } from './config.js'
@@ -89,13 +90,14 @@ function getStableswapPoolAccount(poolId: number): string {
 function syncRegistryPricingState(
   registry: AssetRegistryTracker,
   existingLpEquivalences: Map<number, number>,
+  atokenUnderlyings: Map<string, number>,
 ): {
   atokenEquivalences: [number, number][]
   atokenIds: Set<number>
   lpEquivalences: Map<number, number>
 } {
-  const atokenEquivalences = registry.getAtokenEquivalences()
-  const atokenIds = registry.getAtokenIds()
+  const atokenEquivalences = registry.getAtokenEquivalences(atokenUnderlyings)
+  const atokenIds = registry.getAtokenIds(atokenUnderlyings)
   const lpEquivalences = new Map(existingLpEquivalences)
   const aaveTokenIds = new Set(atokenIds)
 
@@ -509,6 +511,11 @@ export async function run(options: RunOptions = {}): Promise<void> {
   let lastUnpricedKey = ''
   let atokenEquivalences: [number, number][] = []
   let atokenIds: Set<number> = new Set()
+  // Authoritative wrapper↔base relation from Aave's initialized reserves; a
+  // duplicated symbol (four USDC ids) cannot be resolved without it. Reloaded on
+  // registry changes, which is when a new wrapper can appear.
+  const atokenReserves = new AtokenReserveMap()
+  await atokenReserves.refresh()
   // LP → wrapper equivalences (e.g. 2-Pool-GDOT(690) → GDOT(69))
   // Detected from asset registry symbol patterns (N-Pool-X → X)
   let lpEquivalences = new Map<number, number>()
@@ -666,8 +673,9 @@ export async function run(options: RunOptions = {}): Promise<void> {
 
         if (!historicalRegistryInitialized || hasAssetRegistryChange) {
           await registry.maybeSnapshot(blockHeight, block.header, { force: true })
+          await atokenReserves.refresh()
           ;({ atokenEquivalences, atokenIds, lpEquivalences } =
-            syncRegistryPricingState(registry, lpEquivalences))
+            syncRegistryPricingState(registry, lpEquivalences, atokenReserves.underlyings))
           historicalRegistryInitialized = true
         }
 
@@ -740,8 +748,9 @@ export async function run(options: RunOptions = {}): Promise<void> {
           ctx.store.addAssets(newAssets)
         }
         if (newAssets.length > 0 || hasAssetRegistryChange) {
+          await atokenReserves.refresh()
           ;({ atokenEquivalences, atokenIds, lpEquivalences } =
-            syncRegistryPricingState(registry, lpEquivalences))
+            syncRegistryPricingState(registry, lpEquivalences, atokenReserves.underlyings))
         }
 
         currentAtokenEquivalences = atokenEquivalences
