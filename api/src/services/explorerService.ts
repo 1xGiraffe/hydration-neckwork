@@ -8043,7 +8043,8 @@ async function getRecentDcaFailures(limit: number, from?: string, to?: string, a
     query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index,
               e.who, toString(e.id) AS id,
               toNullable(s.asset_in) AS asset_in, toNullable(s.asset_out) AS asset_out,
-              ifNull(s.amount_per, '') AS amount_in,
+              ifNull(s.direction, '') AS direction,
+              ifNull(s.amount_per, '') AS amount_per,
               s.block_height AS schedule_block, s.extrinsic_index AS schedule_index,
               '' AS error
             FROM price_data.dca_events AS e FINAL
@@ -8054,7 +8055,7 @@ async function getRecentDcaFailures(limit: number, from?: string, to?: string, a
             LIMIT {limit:UInt32}`,
     query_params: { limit, height: height ?? 0 }, format: 'JSONEachRow',
   })
-  const rows = await res.json<{ block_height: number; ts: string; event_index: number; who: string; id: string; asset_in: number | null; asset_out: number | null; amount_in: string; schedule_block: number; schedule_index: number | null; error: string }>()
+  const rows = await res.json<{ block_height: number; ts: string; event_index: number; who: string; id: string; asset_in: number | null; asset_out: number | null; direction: string; amount_per: string; schedule_block: number; schedule_index: number | null; error: string }>()
   // dca_events intentionally stays narrow; fetch error detail only for the
   // bounded page instead of JSON-decoding every historical failure in raw_events.
   const keys = rows.map(row => `(${row.block_height},${row.event_index})`)
@@ -8070,17 +8071,22 @@ async function getRecentDcaFailures(limit: number, from?: string, to?: string, a
       errors.set(`${row.block_height}:${row.event_index}`, row.error)
     }
   }
-  return rows.map(r => ({
-    type: 'trade' as const,
-    blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: null,
-    who: r.who && ACCOUNT_RE.test(r.who) ? accountRef(r.who) : null, to: null, asset: null,
-    assetIn: r.asset_in != null ? asset(r.asset_in) : null,
-    assetOut: r.asset_out != null ? asset(r.asset_out) : null,
-    amount: null, amountIn: r.amount_in || null, amountOut: null, valueUsd: null,
-    dca: true, dcaStatus: 'failed' as const, dcaError: errors.get(`${r.block_height}:${r.event_index}`) || undefined,
-    dcaScheduleId: Number(r.id) || undefined,
-    linkBlock: r.schedule_block || r.block_height, linkIndex: r.schedule_index,
-  }))
+  return rows.map(r => {
+    // The failed attempt only knows the schedule's fixed per-trade leg (the
+    // sold amount for Sell orders, the bought amount for Buy orders).
+    const legs = dcaPerTradeLegs(r.direction, r.amount_per)
+    return {
+      type: 'trade' as const,
+      blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: null,
+      who: r.who && ACCOUNT_RE.test(r.who) ? accountRef(r.who) : null, to: null, asset: null,
+      assetIn: r.asset_in != null ? asset(r.asset_in) : null,
+      assetOut: r.asset_out != null ? asset(r.asset_out) : null,
+      amount: null, amountIn: legs.amountIn, amountOut: legs.amountOut, valueUsd: null,
+      dca: true, dcaStatus: 'failed' as const, dcaError: errors.get(`${r.block_height}:${r.event_index}`) || undefined,
+      dcaScheduleId: Number(r.id) || undefined,
+      linkBlock: r.schedule_block || r.block_height, linkIndex: r.schedule_index,
+    }
+  })
 }
 
 // single-assignment activity classification
@@ -8460,6 +8466,9 @@ export interface DcaScheduleDetail {
   createdAt: { blockHeight: number; timestamp: string; extrinsicIndex: number | null }
   assetIn: AssetRef
   assetOut: AssetRef
+  // 'Sell' | 'Buy' ('' for pre-router schedules). amountPer follows it: the
+  // sold (in) amount for Sell orders, the bought (out) amount for Buy orders.
+  direction: string
   amountPer: string
   totalAmount: string
   period: number
@@ -8569,8 +8578,8 @@ export function dcaTerminationReason(errorJson: string | null | undefined): stri
 }
 
 // A single DCA execution attempt: an executed trade (both legs + a derived
-// price) or a failed attempt (no output; its intended sell is the schedule's
-// amount-per, and it carries a decoded failure reason).
+// price) or a failed attempt (only the intended leg — see dcaPerTradeLegs —
+// and a decoded failure reason).
 export interface DcaExecutionDetail {
   scheduleId: number
   status: 'executed' | 'failed'
@@ -8581,7 +8590,7 @@ export interface DcaExecutionDetail {
   extrinsicIndex: number | null
   assetIn: AssetRef
   assetOut: AssetRef
-  amountIn: string
+  amountIn: string | null
   amountOut: string | null
   valueUsd: number | null
   executionPrice: number | null
@@ -8589,19 +8598,33 @@ export interface DcaExecutionDetail {
   failureReason: FailureReason | null
 }
 
+// A schedule's amount-per denomination follows its order type: a Sell order
+// fixes the sold (in) amount, a Buy order fixes the bought (out) amount. The
+// other leg varies per execution, so an attempt that never traded has no value
+// for it. Pre-router schedules stored no direction ('') and no amount-per —
+// their intended trade is unknown, so both legs stay empty.
+export function dcaPerTradeLegs(direction: string, amountPer: string): { amountIn: string | null; amountOut: string | null } {
+  if (!amountPer) return { amountIn: null, amountOut: null }
+  return direction === 'Buy'
+    ? { amountIn: null, amountOut: amountPer }
+    : { amountIn: amountPer, amountOut: null }
+}
+
 // Pure per-execution outcome: a DCA.TradeFailed event has no amounts, so the
-// intended sell is the schedule's amount-per with no output or price; a
-// DCA.TradeExecuted carries both legs and an execution price (out per in).
+// intended trade is the schedule's amount-per on its fixed leg (see
+// dcaPerTradeLegs); a DCA.TradeExecuted carries both legs and an execution
+// price (out per in).
 export function dcaExecutionOutcome(
   eventName: string,
+  direction: string,
   amountPer: string,
   eventAmountIn: string,
   eventAmountOut: string,
   inDecimals: number,
   outDecimals: number,
-): { status: 'executed' | 'failed'; amountIn: string; amountOut: string | null; executionPrice: number | null } {
+): { status: 'executed' | 'failed'; amountIn: string | null; amountOut: string | null; executionPrice: number | null } {
   if (eventName === 'DCA.TradeFailed') {
-    return { status: 'failed', amountIn: amountPer, amountOut: null, executionPrice: null }
+    return { status: 'failed', ...dcaPerTradeLegs(direction, amountPer), executionPrice: null }
   }
   const inNum = Number(eventAmountIn) / 10 ** inDecimals
   const outNum = Number(eventAmountOut) / 10 ** outDecimals
@@ -8648,15 +8671,15 @@ export async function getDcaExecution(height: number, eventIndex: number): Promi
     if (!ev) return null
     const scheduleId = Number(ev.id)
     const schedRes = await client.query({
-      query: `SELECT who, asset_in, asset_out, toString(amount_per) AS amount_per, period
+      query: `SELECT who, asset_in, asset_out, direction, toString(amount_per) AS amount_per, period
               FROM price_data.dca_schedules WHERE id = {sid:UInt64} ORDER BY block_height DESC LIMIT 1`,
       query_params: { sid: scheduleId }, format: 'JSONEachRow',
     })
-    const sched = (await schedRes.json<{ who: string; asset_in: number; asset_out: number; amount_per: string; period: number }>())[0]
+    const sched = (await schedRes.json<{ who: string; asset_in: number; asset_out: number; direction: string; amount_per: string; period: number }>())[0]
     if (!sched) return null
     const pair = await resolveDcaTradedPair(scheduleId, sched.asset_in, sched.asset_out, sched.who)
     const aIn = asset(pair.assetIn), aOut = asset(pair.assetOut)
-    const outcome = dcaExecutionOutcome(ev.event_name, sched.amount_per, ev.amount_in, ev.amount_out, aIn.decimals, aOut.decimals)
+    const outcome = dcaExecutionOutcome(ev.event_name, sched.direction, sched.amount_per, ev.amount_in, ev.amount_out, aIn.decimals, aOut.decimals)
 
     let failureReason: FailureReason | null = null
     if (outcome.status === 'failed') {
@@ -8685,10 +8708,13 @@ export async function getDcaExecution(height: number, eventIndex: number): Promi
       valueUsd: null, executionPrice: outcome.executionPrice, period: sched.period, failureReason,
     }
     // Value the flow at event-time prices (the out leg when executed, the
-    // intended in leg when failed) — parity with the schedule's execution rows.
-    await applyHistoricalUsd([detail], d => d.status === 'failed'
+    // schedule's fixed leg when failed) — parity with the schedule's rows. A
+    // pre-router failure has no known leg at all and stays unvalued.
+    await applyHistoricalUsd([detail], d => d.status === 'failed' && d.amountIn != null
       ? { assetId: aIn.assetId, decimals: aIn.decimals, raw: d.amountIn, ts: d.timestamp }
-      : { assetId: aOut.assetId, decimals: aOut.decimals, raw: d.amountOut ?? '0', ts: d.timestamp })
+      : d.amountOut != null
+        ? { assetId: aOut.assetId, decimals: aOut.decimals, raw: d.amountOut, ts: d.timestamp }
+        : null)
     return detail
   })
 }
@@ -8698,7 +8724,7 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
     const prices = await ensurePrices()
     const [schedRes, lifeRes, totalRes, exRes] = await Promise.all([
       client.query({
-        query: `SELECT block_height, toString(block_timestamp) AS ts, extrinsic_index, who, asset_in, asset_out,
+        query: `SELECT block_height, toString(block_timestamp) AS ts, extrinsic_index, who, asset_in, asset_out, direction,
                        toString(amount_per) AS amount_per, toString(total_amount) AS total_amount, period, max_retries
                 FROM price_data.dca_schedules WHERE id = {sid:UInt64} ORDER BY block_height DESC LIMIT 1`,
         query_params: { sid: scheduleId }, format: 'JSONEachRow',
@@ -8731,7 +8757,7 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
         query_params: { sid: scheduleId, lim: limit, off: offset }, format: 'JSONEachRow',
       }),
     ])
-    const sched = (await schedRes.json<{ block_height: number; ts: string; extrinsic_index: number | null; who: string; asset_in: number; asset_out: number; amount_per: string; total_amount: string; period: number; max_retries: number }>())[0]
+    const sched = (await schedRes.json<{ block_height: number; ts: string; extrinsic_index: number | null; who: string; asset_in: number; asset_out: number; direction: string; amount_per: string; total_amount: string; period: number; max_retries: number }>())[0]
     if (!sched) return null
     const life = await lifeRes.json<{ event_name: string; ts: string; bh: number; ei: number; xi: number }>()
     const totals = (await totalRes.json<{ n: string; failed: string; attempts: string; tin: string; tout: string }>())[0]
@@ -8753,12 +8779,16 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
     }
     const rows: ActivityRow[] = executionRows.map(x => {
       const failed = x.event_name === 'DCA.TradeFailed'
-      const amountIn = failed ? sched.amount_per : x.amount_in
+      // A failed attempt only knows the schedule's fixed per-trade leg; value
+      // it on that leg. Executed attempts are valued on the received leg.
+      const legs = failed ? dcaPerTradeLegs(sched.direction, sched.amount_per) : { amountIn: x.amount_in, amountOut: x.amount_out }
       return {
         type: 'dca', blockHeight: x.block_height, timestamp: x.ts, eventIndex: x.event_index, extrinsicIndex: x.extrinsic_index,
         who: ACCOUNT_RE.test(sched.who) ? accountRef(sched.who) : null, to: null, asset: null, assetIn: aIn, assetOut: aOut,
-        amount: null, amountIn, amountOut: failed ? null : x.amount_out,
-        valueUsd: failed ? usdValue(prices, aIn.assetId, amountIn, aIn.decimals) : usdValue(prices, aOut.assetId, x.amount_out, aOut.decimals),
+        amount: null, amountIn: legs.amountIn, amountOut: legs.amountOut,
+        valueUsd: legs.amountOut != null
+          ? usdValue(prices, aOut.assetId, legs.amountOut, aOut.decimals)
+          : legs.amountIn != null ? usdValue(prices, aIn.assetId, legs.amountIn, aIn.decimals) : null,
         dca: true, dcaStatus: failed ? 'failed' : undefined, dcaError: errors.get(`${x.block_height}:${x.event_index}`),
         dcaScheduleId: scheduleId, linkBlock: x.block_height, linkIndex: x.extrinsic_index,
       }
@@ -8778,6 +8808,7 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
       who: ACCOUNT_RE.test(sched.who) ? accountRef(sched.who) : null,
       createdAt: { blockHeight: sched.block_height, timestamp: sched.ts, extrinsicIndex: sched.extrinsic_index },
       assetIn: aIn, assetOut: aOut,
+      direction: sched.direction,
       amountPer: sched.amount_per, totalAmount: sched.total_amount, period: sched.period, maxRetries: sched.max_retries,
       status: dcaScheduleStatus(!!terminated, !!completed, terminated != null && Number(terminated.xi) >= 0),
       statusAt: (terminated ?? completed)?.ts ?? null,
