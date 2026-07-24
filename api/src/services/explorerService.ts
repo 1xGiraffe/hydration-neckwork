@@ -5868,6 +5868,11 @@ export interface ActivityRow {
   amountIn: string | null
   amountOut: string | null
   valueUsd: number | null
+  // Every asset the source event references, beyond the representative
+  // asset/assetIn/assetOut the row displays (Stableswap nested `assets[]`, XYK
+  // `assetB`). Token filters match against these too, so a pool-side asset the
+  // row does not display still keeps its row.
+  assetRefs?: number[]
   liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim'   // Create = pool creation; Claim = LM reward claim
   mmAction?: string          // money-market: Supply/Borrow/Repay/Withdraw/LiquidationCall
   mmMarketKey?: string       // absent for legacy/unknown pools; `core` is primary
@@ -5920,7 +5925,10 @@ function moneyMarketActivityFields(poolAddress: string | null | undefined): Pick
 export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFilters): boolean {
   const tokenIds = assetIdsForToken(filters.token)
   if (tokenIds != null) {
-    const rowIds = [row.asset?.assetId, row.assetIn?.assetId, row.assetOut?.assetId].filter((id): id is number => id != null)
+    // assetRefs carries the pool-side assets a liquidity row references but does
+    // not display, matching the SQL sources' `hasAny(asset_refs, …)` predicate.
+    const rowIds = [row.asset?.assetId, row.assetIn?.assetId, row.assetOut?.assetId, ...(row.assetRefs ?? [])]
+      .filter((id): id is number => id != null)
     if (!rowIds.some(id => tokenIds.includes(id))) return false
   }
   if (filters.min != null) {
@@ -6086,7 +6094,8 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
             ${assetExpr} AS asset_id,
             ${amountExpr} AS amount,
             asset_b AS asset_b,
-            pool_account AS pool_acc
+            pool_account AS pool_acc,
+            asset_refs AS asset_refs
           FROM price_data.liquidity_activity
           ${amountFilter.joinSql}
           WHERE ${bound}
@@ -6099,7 +6108,7 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
           LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         query_params: { limit: pageLimit, offset: pageOffset }, format: 'JSONEachRow',
       })
-      const raw = await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; asset_id: number; amount: string; asset_b: number; pool_acc: string }>()
+      const raw = await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; asset_id: number; amount: string; asset_b: number; pool_acc: string; asset_refs: number[] }>()
       await fillMissingLiquidityAmounts(raw)
       const seen = new Set<string>()
       const out: ActivityRow[] = []
@@ -6113,6 +6122,7 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
           type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
           who: r.who ? accountRef(r.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
           amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
+          assetRefs: r.asset_refs,
           liqAction: liqActionFor(r.event_name),
         }
         if (r.event_name === 'XYK.PoolCreated') createCands.push({ row, pool: r.pool_acc, assetB: r.asset_b })
@@ -6123,8 +6133,8 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
       return out
     }
     if (postFilter) {
-      // Token stays SQL-side only (it matches nested pool assets the built row
-      // may not carry) — the post-match re-checks just the value threshold.
+      // Token is already enforced SQL-side over asset_refs — the post-match
+      // re-checks just the value threshold.
       const minOnly: ValueListFilters = { min: filters.min, unit: filters.unit }
       const rows = await fetchFilteredDeep(tw, want, (bound, pageLimit) => fetchPage(bound, pageLimit, 0),
         r => activityRowMatchesFilters(r, minOnly), r => r.blockHeight, r => r.eventIndex ?? -1, r => `${r.blockHeight}:${r.eventIndex}`)
@@ -10918,7 +10928,8 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
                 ${liquidityAssetExpr} AS asset_id,
                 amount AS amount,
                 asset_b AS asset_b,
-                pool_account AS pool_acc
+                pool_account AS pool_acc,
+                asset_refs AS asset_refs
               FROM price_data.liquidity_activity
               WHERE ${pageBound}
                 AND event_name IN ('Omnipool.LiquidityAdded','Omnipool.LiquidityRemoved','Stableswap.LiquidityAdded','Stableswap.LiquidityRemoved','XYK.LiquidityAdded','XYK.LiquidityRemoved','XYK.PoolCreated','OmnipoolLiquidityMining.RewardClaimed','XYKLiquidityMining.RewardClaimed')
@@ -10928,7 +10939,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
         query_params: { n: pageLimit },
         format: 'JSONEachRow',
       })
-      const liqRows = await liqRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; asset_id: number; amount: string; asset_b: number; pool_acc: string }>()
+      const liqRows = await liqRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; asset_id: number; amount: string; asset_b: number; pool_acc: string; asset_refs: number[] }>()
       await fillMissingLiquidityAmounts(liqRows)
       const built: ActivityRow[] = []
       const liqCreateCands: { row: ActivityRow; pool: string; assetB: number }[] = []
@@ -10938,6 +10949,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
           type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
           who: r.who ? accountRef(r.who) : accounts[0] ? accountRef(accounts[0]) : null, to: null, asset: a, assetIn: null, assetOut: null,
           amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
+          assetRefs: r.asset_refs,
           liqAction: liqActionFor(r.event_name),
           linkBlock: r.block_height, linkIndex: r.extrinsic_index,
         }
