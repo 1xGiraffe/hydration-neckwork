@@ -45,11 +45,12 @@ describe('activity detail routes', () => {
       expect(p(`/${slug}/13072380-e2`)).toEqual({ name: 'activity-detail', slug, id: '13072380-e2' })
       expect(p(`/${slug}/13072380-4`)).toEqual({ name: 'activity-detail', slug, id: '13072380-4' })
     }
-    // DCA is a schedule page: numeric ids open it, legacy per-execution links
-    // redirect to the underlying extrinsic.
+    // DCA is a schedule page: numeric ids open it. The event-form id opens a
+    // single execution's detail; the extrinsic-form id (the scheduling
+    // extrinsic) still resolves to the owning schedule.
     expect(p('/dca/33546')).toEqual({ name: 'dca-schedule', scheduleId: 33546 })
     expect(p('/dca/13072380-4')).toEqual({ name: 'dca-resolve', height: 13072380, index: 4, kind: 'extrinsic' })
-    expect(p('/dca/13072380-e2')).toEqual({ name: 'dca-resolve', height: 13072380, index: 2, kind: 'event' })
+    expect(p('/dca/13072380-e2')).toEqual({ name: 'dca-execution', height: 13072380, eventIndex: 2 })
   })
   it('rejects malformed activity ids', () => {
     expect(p('/swap/abc')).toEqual({ name: 'legacy', to: '/activity?tab=trade' })

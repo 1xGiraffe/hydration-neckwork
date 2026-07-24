@@ -47,7 +47,7 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
             </div>
 
             <div className="sec-title" style={{ marginTop: 22 }}>Executions <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}>· newest first</span></div>
-            <ActivityTable rows={data.rows} now={now} noActor />
+            <ActivityTable rows={data.rows} now={now} noActor dcaExecutionLinks />
             <Pager page={page} totalPages={Math.max(1, Math.ceil(data.executions.attempts / PAGE))} hasNext={(page + 1) * PAGE < data.executions.attempts} onPage={setPage} />
           </>
         )}

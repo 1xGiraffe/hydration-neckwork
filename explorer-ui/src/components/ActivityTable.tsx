@@ -108,9 +108,11 @@ export function activitySlug(r: ActivityRow): ActivitySlug {
     default: return 'transfer'
   }
 }
-export function activityId(r: ActivityRow): string | null {
-  // DCA rows link to their owning SCHEDULE page, not a single fill.
-  if ((r.type === 'dca' || r.dca) && r.dcaScheduleId != null) return String(r.dcaScheduleId)
+export function activityId(r: ActivityRow, dcaExecutionLink = false): string | null {
+  // DCA rows link to their owning SCHEDULE page, not a single fill — except on
+  // the schedule page itself, where each row IS one execution and links to its
+  // own execution detail (/dca/<block>-e<eventIndex>).
+  if (!dcaExecutionLink && (r.type === 'dca' || r.dca) && r.dcaScheduleId != null) return String(r.dcaScheduleId)
   if (r.eventIndex != null) return `${r.blockHeight}-e${r.eventIndex}`
   if (r.extrinsicIndex != null) return `${r.blockHeight}-${r.extrinsicIndex}`
   return null
@@ -193,7 +195,7 @@ function activityKey(r: ActivityRow): string {
     r.assetOut?.assetId ?? '', r.amountIn ?? r.amount ?? '', r.who?.accountId ?? '', r.mmMarketKey ?? ''].join('|')
 }
 
-export function ActivityTable({ rows, noActor, now, live, loading }: { rows: ActivityRow[]; noActor?: boolean; now: number; live?: boolean; loading?: boolean }) {
+export function ActivityTable({ rows, noActor, now, live, loading, dcaExecutionLinks }: { rows: ActivityRow[]; noActor?: boolean; now: number; live?: boolean; loading?: boolean; dcaExecutionLinks?: boolean }) {
   const cols = noActor ? 4 : 5
   // Deduped stable keys: same row → same key across renders (so prepended live rows
   // are detected as new without remounting the rest); duplicates get a suffix.
@@ -206,7 +208,7 @@ export function ActivityTable({ rows, noActor, now, live, loading }: { rows: Act
       <tbody>
         {loading && !rows.length ? <TableSkeleton cols={cols} /> : rows.length ? rows.map((r, i) => {
           const slug = activitySlug(r)
-          const aid = activityId(r)
+          const aid = activityId(r, dcaExecutionLinks)
           // De-emphasise low-/zero-value activity (null treated as low) so high-value rows stand out. Not hidden — just muted via the .dim class.
           const dim = r.valueUsd == null || r.valueUsd < 10
           const nav = aid ? rowNav(paths.activityDetail(slug, aid)) : null

@@ -30,6 +30,7 @@ export type Route =
   | { name: 'extrinsic'; id: string } // "height-index"
   | { name: 'activity-detail'; slug: ActivitySlug; id: string } // "height-index"
   | { name: 'dca-schedule'; scheduleId: number }
+  | { name: 'dca-execution'; height: number; eventIndex: number }
   | { name: 'dca-resolve'; height: number; index: number; kind: 'event' | 'extrinsic' }
   | { name: 'events' }
   | { name: 'event'; id: string } // "height-index"
@@ -101,14 +102,15 @@ export function parseRoute(loc: string): Route {
       if ((ACTIVITY_SLUGS as readonly string[]).includes(parts[0])) {
         const slug = parts[0] as ActivitySlug
         // A DCA is a SCHEDULE, not a single fill: /dca/<scheduleId> is its page.
-        // Legacy per-execution links (/dca/<height-index>) land on the extrinsic.
         if (slug === 'dca' && parts[1]) {
           if (/^\d+$/.test(parts[1])) return { name: 'dca-schedule', scheduleId: Number(parts[1]) }
-          // Legacy per-execution ids resolve to their owning SCHEDULE via the
-          // API (extrinsic form = the scheduling extrinsic; event form = the
-          // execution's block), falling back to the event/extrinsic page.
           const m = /^(\d+)-(e)?(\d+)$/.exec(parts[1])
-          if (m) return { name: 'dca-resolve', height: Number(m[1]), index: Number(m[3]), kind: m[2] ? 'event' : 'extrinsic' }
+          // Event form (/dca/<height>-e<index>) is one execution's detail. The
+          // extrinsic form is the scheduling extrinsic — it resolves to the
+          // owning schedule via the API, falling back to the extrinsic page.
+          if (m) return m[2]
+            ? { name: 'dca-execution', height: Number(m[1]), eventIndex: Number(m[3]) }
+            : { name: 'dca-resolve', height: Number(m[1]), index: Number(m[3]), kind: 'extrinsic' }
         }
         return parts[1] && ACTIVITY_ID_RE.test(parts[1])
           ? { name: 'activity-detail', slug, id: parts[1] }

@@ -32,6 +32,12 @@ describe('activityId', () => {
   it('prefers the event index', () => expect(activityId(base)).toBe('100-e7'))
   it('falls back to the extrinsic index', () => expect(activityId({ ...base, eventIndex: null })).toBe('100-2'))
   it('returns null with neither', () => expect(activityId({ ...base, eventIndex: null, extrinsicIndex: null })).toBe(null))
+  it('links a DCA row to its owning schedule by default', () => {
+    expect(activityId({ ...base, type: 'dca', dca: true, dcaScheduleId: 42, eventIndex: 7 })).toBe('42')
+  })
+  it('links a DCA row to its own execution when the execution flag is set', () => {
+    expect(activityId({ ...base, type: 'dca', dca: true, dcaScheduleId: 42, eventIndex: 7 }, true)).toBe('100-e7')
+  })
 })
 
 describe('canonicalTarget', () => {

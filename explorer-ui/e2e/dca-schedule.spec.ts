@@ -34,7 +34,29 @@ test('cancelled schedule includes failed attempts in its execution timeline', as
   await expect(page.getByText('Failed attempt', { exact: true })).toHaveCount(2)
 })
 
+test('a schedule execution row opens its own execution detail', async ({ page }) => {
+  await page.goto('/dca/33546')
+  const row = page.locator('.tbl tbody tr').first()
+  await expect(row).toBeVisible()
+  expect(await row.getAttribute('data-activity')).toMatch(/^dca\/\d+-e\d+$/)
+  await row.locator('td').first().click()
+  await expect(page).toHaveURL(/\/dca\/\d+-e\d+$/)
+  await expect(page.getByText('Schedule', { exact: true })).toBeVisible()
+  await expect(page.getByText('DCA #33546')).toBeVisible()
+})
+
+test('a failed attempt detail names the failure reason', async ({ page }) => {
+  // Schedule 33573 was cancelled with failed attempts in its timeline.
+  await page.goto('/dca/33573')
+  await page.locator('.tbl tbody tr').first().locator('td').first().click()
+  await expect(page).toHaveURL(/\/dca\/\d+-e\d+$/)
+  await expect(page.getByText('Failed', { exact: true })).toBeVisible()
+  await expect(page.getByText('Failure reason')).toBeVisible()
+})
+
 test('legacy per-execution DCA links resolve to the schedule page', async ({ page }) => {
+  // The extrinsic form is the scheduling extrinsic; the event form carried the
+  // swap event index (not the DCA event), so both resolve to the schedule.
   await page.goto('/dca/12848613-4')
   await expect(page).toHaveURL(/\/dca\/33546$/)
   await expect(page.locator('.page-title')).toContainText('DCA #33546')

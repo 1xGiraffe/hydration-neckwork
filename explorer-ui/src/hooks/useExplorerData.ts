@@ -57,6 +57,9 @@ export function useExtrinsic(id: string | null) {
 export function useDcaSchedule(scheduleId: number, offset = 0) {
   return useQuery({ queryKey: ['dca-schedule', scheduleId, offset], queryFn: ({ signal }) => api.dcaSchedule(scheduleId, offset, 25, signal), staleTime: 8000 })
 }
+export function useDcaExecution(height: number, eventIndex: number) {
+  return useQuery({ queryKey: ['dca-execution', height, eventIndex], queryFn: ({ signal }) => api.dcaExecution(height, eventIndex, signal), retry: false, staleTime: 60_000 })
+}
 export function useExtrinsicActivity(id: string | null, enabled = true) {
   return useQuery({
     queryKey: ['extrinsic-activity', id],

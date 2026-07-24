@@ -651,3 +651,24 @@ export interface DcaScheduleDetail {
   executions: { count: number; failed: number; attempts: number; totalIn: string; totalOut: string }
   rows: ActivityRow[]
 }
+
+// A single DCA execution attempt (one row on the schedule page), addressed by
+// its execution event. Executed attempts carry both legs and a price; failed
+// attempts carry the intended sell and a decoded failure reason.
+export interface DcaExecutionDetail {
+  scheduleId: number
+  status: 'executed' | 'failed'
+  who: AccountRef | null
+  blockHeight: number
+  timestamp: string
+  eventIndex: number
+  extrinsicIndex: number | null
+  assetIn: AssetRef
+  assetOut: AssetRef
+  amountIn: string
+  amountOut: string | null
+  valueUsd: number | null
+  executionPrice: number | null
+  period: number
+  failureReason: FailureReason | null
+}

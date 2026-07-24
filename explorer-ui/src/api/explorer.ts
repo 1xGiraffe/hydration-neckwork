@@ -2,7 +2,7 @@ import type {
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem,
   AccountsPage, AccountSort, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, MoneyMarketResponse, AssetDetail, TagDetail,
-  AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail,
+  AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail,
   ValueEvent,
 } from '../types'
 
@@ -42,6 +42,7 @@ export const api = {
   extrinsicAtActivity: (height: number, index: number, signal?: AbortSignal) => getJson<ActivityRow[]>(`/explorer/extrinsic-at/${height}/${index}/activity`, signal),
   dcaSchedule: (scheduleId: number, offset = 0, limit = 25, signal?: AbortSignal) => getJson<DcaScheduleDetail>(withQuery(`/explorer/dca/${scheduleId}`, { offset, limit }), signal),
   dcaScheduleAt: (height: number, index: number, kind: 'event' | 'extrinsic', signal?: AbortSignal) => getJson<{ scheduleId: number }>(withQuery(`/explorer/dca-at/${height}/${index}`, { kind }), signal),
+  dcaExecution: (height: number, index: number, signal?: AbortSignal) => getJson<DcaExecutionDetail>(`/explorer/dca/exec/${height}/${index}`, signal),
   trade: (height: number, index: number, signal?: AbortSignal) => getJson<TradeDetail>(`/explorer/trade/${height}/${index}`, signal),
   tradeEvent: (height: number, index: number, signal?: AbortSignal) => getJson<TradeDetail>(`/explorer/trade-event/${height}/${index}`, signal),
   events: (limit = 25, from?: string, to?: string, offset = 0, filters?: EventFilters, signal?: AbortSignal) => getJson<EventRow[]>(withQuery('/explorer/events', { limit, offset, from, to, ...filters }), signal),

@@ -68,7 +68,7 @@ Keep in mind for new models:
 ## Explorer semantics
 
 - Render the user's highest-level economic action and suppress internal plumbing legs. Classification must remain symmetric across global, block, extrinsic, account, asset, and tag activity surfaces.
-- Every activity needs a stable event identity and canonical URL. DCA links represent schedules rather than individual executions. OTC cancellation is called **Pull** in product copy. Always write **HOLLAR** in uppercase.
+- Every activity needs a stable event identity and canonical URL. DCA activity links represent schedules; an individual execution is addressable from the schedule page via its execution event (`/dca/<block>-e<eventIndex>`). OTC cancellation is called **Pull** in product copy. Always write **HOLLAR** in uppercase.
 - Activity is the sole domain and API term; do not restore Stream names, routes, or compatibility aliases.
 - Display and copy user addresses as canonical SS58 or H160 forms, never raw AccountId public-key hex. Preserve real identity/tag context across local and cross-chain account pills.
 - The primary and GIGAHDX money markets are isolated. Never blend their health factors. Primary-market directory/DefiSim figures stay primary-only; supplemental collateral backing must not be counted twice; tag risk uses the lowest real member health factor.
