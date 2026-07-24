@@ -214,22 +214,39 @@ function mmSnapshotIntervalBlocks(): number {
 
 // Seed the borrower set from positions already in ClickHouse so a freshly started
 // worker re-snapshots accounts opened before its range (a fresh wipe just yields an
-// empty set, which then grows from event-driven positions as blocks are processed).
-async function loadKnownBorrowers(): Promise<Set<string>> {
-  const borrowers = new Set<string>()
+// empty map, which then grows from event-driven positions as blocks are processed).
+// Each borrower carries the earliest block it is known at, so a worker below the
+// money market's deployment — or below an individual account's first position —
+// does not read positions that cannot exist yet.
+async function loadKnownBorrowers(): Promise<Map<string, number>> {
+  const borrowers = new Map<string, number>()
   const client = createClickHouseClient()
   try {
     const res = await client.query({
-      query: `SELECT DISTINCT user_address FROM price_data.raw_money_market_positions WHERE user_address != ''`,
+      query: `SELECT user_address, min(block_height) AS first_block
+              FROM price_data.raw_money_market_positions
+              WHERE user_address != ''
+              GROUP BY user_address`,
       format: 'JSONEachRow',
     })
-    for (const row of await res.json<{ user_address: string }>()) {
-      if (row.user_address) borrowers.add(row.user_address)
+    for (const row of await res.json<{ user_address: string; first_block: number | string }>()) {
+      if (row.user_address) borrowers.set(row.user_address, Number(row.first_block))
     }
   } finally {
     await client.close()
   }
   return borrowers
+}
+
+// Borrowers whose first known position is at or below the snapshot height. Reading
+// the rest would ask the pool contract for accounts that do not exist yet, which
+// answers with a decode failure per borrower rather than a position.
+export function borrowersAtHeight(borrowers: Map<string, number>, blockHeight: number): string[] {
+  const at: string[] = []
+  for (const [address, firstBlock] of borrowers) {
+    if (firstBlock <= blockHeight) at.push(address)
+  }
+  return at
 }
 
 function phaseTraceEnabled(): boolean {
@@ -389,7 +406,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
 
   const mmSnapshotEnabled = mmPeriodicSnapshotEnabled()
   const mmSnapshotInterval = mmSnapshotIntervalBlocks()
-  let knownBorrowers = new Set<string>()
+  let knownBorrowers = new Map<string, number>()
   if (mmSnapshotEnabled) {
     try {
       knownBorrowers = await loadKnownBorrowers()
@@ -524,17 +541,22 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       // failures degrade to parser warnings, never abort the block.
       if (mmSnapshotEnabled) {
         for (const position of moneyMarket.positions) {
-          if (position.user_address) knownBorrowers.add(position.user_address)
+          if (!position.user_address) continue
+          const firstBlock = knownBorrowers.get(position.user_address)
+          if (firstBlock == null || blockHeight < firstBlock) knownBorrowers.set(position.user_address, blockHeight)
         }
-        if (blockHeight % mmSnapshotInterval === 0 && knownBorrowers.size > 0) {
-          const mmSnapshot = await tracePhase(blockHeight, 'mm_periodic_snapshot', () =>
-            snapshotMoneyMarketPositions(knownBorrowers, blockHeight, blockTimestamp, ingestSource))
-          ctx.store.addMoneyMarketPositions(mmSnapshot.positions)
-          ctx.store.addParserWarnings(mmSnapshot.warnings)
-          moneyMarketRowsPersisted += mmSnapshot.positions.length
-          parserWarningsPersisted += mmSnapshot.warnings.length
-          if (mmSnapshot.positions.length > 0 || mmSnapshot.warnings.length > 0) {
-            console.log(`[Raw][MM] Periodic snapshot @${blockHeight}: ${mmSnapshot.positions.length} positions, ${mmSnapshot.warnings.length} warnings (${knownBorrowers.size} borrowers)`)
+        if (blockHeight % mmSnapshotInterval === 0) {
+          const borrowers = borrowersAtHeight(knownBorrowers, blockHeight)
+          if (borrowers.length > 0) {
+            const mmSnapshot = await tracePhase(blockHeight, 'mm_periodic_snapshot', () =>
+              snapshotMoneyMarketPositions(borrowers, blockHeight, blockTimestamp, ingestSource))
+            ctx.store.addMoneyMarketPositions(mmSnapshot.positions)
+            ctx.store.addParserWarnings(mmSnapshot.warnings)
+            moneyMarketRowsPersisted += mmSnapshot.positions.length
+            parserWarningsPersisted += mmSnapshot.warnings.length
+            if (mmSnapshot.positions.length > 0 || mmSnapshot.warnings.length > 0) {
+              console.log(`[Raw][MM] Periodic snapshot @${blockHeight}: ${mmSnapshot.positions.length} positions, ${mmSnapshot.warnings.length} warnings (${borrowers.length} borrowers)`)
+            }
           }
         }
       }
