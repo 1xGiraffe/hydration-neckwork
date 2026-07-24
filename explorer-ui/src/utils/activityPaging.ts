@@ -20,3 +20,15 @@ export function activityTailOffset(rowCount: number | null | undefined, offset: 
   const tail = Math.max(0, rowCount - offset - PAGE_SIZE)
   return tail + PAGE_SIZE <= MAX_TAIL_ROWS ? tail : undefined
 }
+
+// The last page holds the remainder of the count, not a full window. Tail 0 is
+// the oldest window, so its leading rows are the ones the previous page already
+// showed — drop them rather than repeating them, which also lets the pager stop
+// on a short page instead of advertising another one. Row counts are category
+// sums and may overshoot the classified feed, so this trims to what the page can
+// hold at most.
+export function trimFinalTailPage<T>(rows: T[], rowCount: number | null | undefined, offset: number, tail: number | undefined): T[] {
+  if (tail !== 0 || rowCount == null) return rows
+  const remainder = rowCount - offset
+  return remainder >= PAGE_SIZE ? rows : rows.slice(Math.max(0, rows.length - remainder))
+}

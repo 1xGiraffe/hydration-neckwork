@@ -18,7 +18,7 @@ import { EvRow, ExtRow } from './ActivityRows'
 import { ActivityTable } from './ActivityTable'
 import { eventFilterFields, extrinsicFilterFields, activityFilterFields } from './activityFilters'
 import { EmptyRow, ErrorRow, F, Pager, ActivityChips, TableSkeleton, normalizeActivityAction, normalizeActivityType } from './ui'
-import { PAGE_SIZE, activityTailOffset, pageCount } from '../utils/activityPaging'
+import { PAGE_SIZE, activityTailOffset, pageCount, trimFinalTailPage } from '../utils/activityPaging'
 
 type ActivityScope =
   | { kind: 'account'; address: string }
@@ -80,6 +80,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const accountActivity = useAccountActivity(activeTab === 'activity' ? accountAddress : null, ...commonActivityArgs)
   const tagActivity = useTagActivity(activeTab === 'activity' ? tagId : null, ...commonActivityArgs)
   const activity = scope.kind === 'account' ? accountActivity : tagActivity
+  const activityRows = trimFinalTailPage(activity.data ?? [], activityRowCount, offset, activityTail)
   const accountExtrinsics = useAccountExtrinsics(
     activeTab === 'extrinsics' ? accountAddress : null,
     offset,
@@ -141,9 +142,9 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
           onChange={activityFilters.onChange}
           onClear={activityFilters.onClear}
         />
-        <ActivityTable rows={activity.data ?? []} now={now} live={page === 0} loading={activity.isFetching && !activity.data?.length}
+        <ActivityTable rows={activityRows} now={now} live={page === 0} loading={activity.isFetching && !activity.data?.length}
           error={activity.error} onRetry={() => { void activity.refetch() }} />
-        <Pager page={page} totalPages={pageCount(activityRowCount)} hasNext={(activity.data?.length ?? 0) === PAGE_SIZE} onPage={setPage} />
+        <Pager page={page} totalPages={pageCount(activityRowCount)} hasNext={activityRows.length === PAGE_SIZE} onPage={setPage} />
       </>}
 
       {activeTab === 'extrinsics' && <>

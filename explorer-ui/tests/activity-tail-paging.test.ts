@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { activityTailOffset } from '../src/utils/activityPaging'
+import { activityTailOffset, trimFinalTailPage } from '../src/utils/activityPaging'
 
 const PAGE_SIZE = 25
 
@@ -34,5 +34,37 @@ describe('activity tail offset', () => {
   it('has no tail without a known row count', () => {
     expect(activityTailOffset(null, 5_000)).toBeUndefined()
     expect(activityTailOffset(undefined, 5_000)).toBeUndefined()
+  })
+})
+
+// Tail 0 is the oldest window, so the last page — which holds only the remainder
+// of the count — must not re-serve the rows the page before it already showed.
+describe('final tail page', () => {
+  const window = Array.from({ length: PAGE_SIZE }, (_, i) => `row-${i}`)
+
+  it('keeps only the remainder of the count', () => {
+    // 8752 rows, page 351: offset 8750 leaves 2 rows, which are the oldest two.
+    expect(trimFinalTailPage(window, 8752, 8_750, 0)).toEqual(['row-23', 'row-24'])
+  })
+
+  it('leaves an exactly full final page untouched', () => {
+    expect(trimFinalTailPage(window, 8_775, 8_750, 0)).toEqual(window)
+  })
+
+  it('leaves earlier tail pages untouched', () => {
+    expect(trimFinalTailPage(window, 8752, 4_275, 4_452)).toEqual(window)
+  })
+
+  it('leaves forward-offset pages untouched', () => {
+    expect(trimFinalTailPage(window, 8752, 0, undefined)).toEqual(window)
+    expect(trimFinalTailPage(window, undefined, 8_750, 0)).toEqual(window)
+  })
+
+  it('empties a page past the end of the count', () => {
+    expect(trimFinalTailPage(window, 8752, 8_800, 0)).toEqual([])
+  })
+
+  it('never over-trims a window shorter than the remainder', () => {
+    expect(trimFinalTailPage(window.slice(0, 3), 8752, 8_740, 0)).toEqual(['row-0', 'row-1', 'row-2'])
   })
 })
