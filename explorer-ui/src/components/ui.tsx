@@ -2,7 +2,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, FocusEvent as ReactFocusEvent, ReactNode, KeyboardEvent, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { Link, paths, navigate } from '../router'
-import type { AccountRef, AssetOrigin, AssetRef } from '../types'
+import type { AccountRef, AssetOrigin, AssetRef, FailureReason } from '../types'
 import { parseUtcTimestamp } from '../utils/time'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 
@@ -547,6 +547,19 @@ export function CallPill({ name }: { name: string }) {
     </span>
   )
 }
+// A `.dl` row (dt + dd) for a decoded dispatch-error reason. The label and its
+// docs stack in a column wrapper so they share a left edge — the parent `.dd`
+// is a centered flex row, which would otherwise place them side by side.
+export function FailureReasonRow({ reason }: { reason: FailureReason }) {
+  return <>
+    <div className="dt">Failure reason</div>
+    <div className="dd"><div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+      <span className="mono">{reason.label}</span>
+      {reason.docs && <span className="muted">{reason.docs}</span>}
+    </div></div>
+  </>
+}
+
 export function StatusBadge({ ok, reason, compact }: { ok: boolean; reason?: string; compact?: boolean }) {
   if (compact) {
     const title = ok ? 'Success' : (reason || 'Failed')

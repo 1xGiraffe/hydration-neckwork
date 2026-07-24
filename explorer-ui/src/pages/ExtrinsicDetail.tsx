@@ -3,7 +3,7 @@ import { useBlock, useExtrinsic, useExtrinsicActivity, useStats } from '../hooks
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, redirect } from '../router'
-import { Crumbs, F, AddrPill, CallPill, StatusBadge, FinalizedBadge, Copy, JsonView, ParamsTable, SkeletonRows } from '../components/ui'
+import { Crumbs, F, AddrPill, CallPill, StatusBadge, FinalizedBadge, FailureReasonRow, Copy, JsonView, ParamsTable, SkeletonRows } from '../components/ui'
 import { ActivityTable } from '../components/ActivityTable'
 
 export function ExtrinsicDetail({ id }: { id: string }) {
@@ -51,13 +51,7 @@ export function ExtrinsicDetail({ id }: { id: string }) {
               <div className="dt">Extrinsic hash</div><div className="dd mono wrap-anywhere">{data.hash} <Copy text={data.hash} /></div>
               <div className="dt">Module / Call</div><div className="dd"><CallPill name={data.callName} /></div>
               <div className="dt">Result</div><div className="dd"><StatusBadge ok={data.success} /></div>
-              {!data.success && data.errorReason && <>
-                <div className="dt">Failure reason</div>
-                <div className="dd">
-                  <span className="mono">{data.errorReason.label}</span>
-                  {data.errorReason.docs && <div className="muted" style={{ marginTop: 4 }}>{data.errorReason.docs}</div>}
-                </div>
-              </>}
+              {!data.success && data.errorReason && <FailureReasonRow reason={data.errorReason} />}
               {data.signer
                 ? <><div className="dt">Signer</div><div className="dd"><AddrPill account={data.signer} /></div>
                   <div className="dt">Fee</div><div className="dd mono">{F.hdxFee(data.fee)}</div>
