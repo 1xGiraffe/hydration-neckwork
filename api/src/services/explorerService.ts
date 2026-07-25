@@ -598,6 +598,33 @@ function liqActionFor(eventName: string): 'Add' | 'Remove' | 'Create' | 'Claim' 
   return eventName.endsWith('PoolCreated') ? 'Create' : eventName.endsWith('Removed') ? 'Remove' : 'Add'
 }
 
+// Which event arg holds the amount a liquidity row displays AGAINST ITS asset_id,
+// decided per event name because the denominations don't line up. A generic
+// presence chain (claimed → amount → shares) silently mixes them: `shares` is the
+// displayed amount only for Stableswap, whose asset_id is the poolId share token,
+// while XYK.LiquidityRemoved carries `shares` next to assetA — reading it renders
+// LP-share units at assetA's price. '' means the event has no field in the
+// displayed denomination at all; those rows stay empty on purpose and
+// fillMissingLiquidityAmounts recovers the real amount from the paired pool↔who
+// transfer leg in the same dispatch scope. Mirrored by the `amount` expressions of
+// liquidity_activity_mv and account_activity_v3_mv (see liquidityAmountPairing).
+export const LIQUIDITY_AMOUNT_ARG: Record<string, string> = {
+  'Omnipool.LiquidityAdded': 'amount',                     // assetId + amount
+  'Omnipool.LiquidityRemoved': '',                         // sharesRemoved vs assetId
+  'Stableswap.LiquidityAdded': 'shares',                   // asset_id IS the share token
+  'Stableswap.LiquidityRemoved': 'shares',
+  'XYK.LiquidityAdded': '',                                // amountA/amountB vs assetA
+  'XYK.LiquidityRemoved': '',                              // shares vs assetA
+  'XYK.PoolCreated': '',                                   // initialSharesAmount vs assetA
+  'OmnipoolLiquidityMining.RewardClaimed': 'claimed',      // claimed + rewardCurrency
+  'XYKLiquidityMining.RewardClaimed': 'claimed',
+}
+
+export function liquidityAmountFromArgs(eventName: string, args: Record<string, unknown>): string {
+  const arg = LIQUIDITY_AMOUNT_ARG[eventName]
+  return arg ? argStr(args, arg) : ''
+}
+
 // Enrich Create-pool activity rows with BOTH seed legs (the same-extrinsic
 // transfers into the new pool account), so feeds show "A x + B y" like the
 // extrinsic page — not just the first asset. Rows whose legs can't be found
@@ -6089,6 +6116,12 @@ export function matchLiquidityAmounts(missing: LiquidityAmountCandidate[], legs:
   }
   for (const t of legs) {
     if (!t.amount) continue
+    // A payout leg always comes from the pool. The Treasury only appears in a
+    // liquidity extrinsic to refund the XYK pool-creation deposit when the last
+    // LP exits and the pool is destroyed — and that refund is emitted AFTER the
+    // pool's own payout, so adjacency would pick the 1 HDX deposit over the real
+    // withdrawal on every HDX-paired final removal.
+    if (t.from_account.toLowerCase() === TREASURY_POT) continue
     const entry = { event_index: t.event_index, amount: t.amount, used: false }
     const scope = scopeOf(t.extrinsic_index)
     push(byTo, `${t.block_height}:${scope}:${t.asset_id}:${t.to_account.toLowerCase()}`, entry)
@@ -9196,7 +9229,7 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
           asset_id: Number(args.rewardCurrency ?? args.assetId ?? args.poolId ?? args.assetA ?? args.asset_id ?? 0),
           asset_b: Number(args.assetB ?? 0),
           pool_acc: argStr(args, 'pool'),
-          amount: argStr(args, 'claimed') || argStr(args, 'amount') || argStr(args, 'shares'),
+          amount: liquidityAmountFromArgs(e.event_name, args),
           ts: e.ts,
           event_index: e.event_index,
         }

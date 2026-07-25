@@ -5,6 +5,7 @@ import { matchLiquidityAmounts, type LiquidityAmountCandidate, type LiquidityTra
 // the underlying token amount — that lives on the paired pool↔who transfer leg.
 // matchLiquidityAmounts recovers it by dispatch scope + event-index adjacency.
 const POOL = '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000'
+const TREASURY_POT = '0x6d6f646c70792f74727372790000000000000000000000000000000000000000'
 const ALICE = `0x${'a1'.repeat(32)}`
 const BOB = `0x${'b0'.repeat(32)}`
 const SOL = 1000752
@@ -65,6 +66,18 @@ describe('matchLiquidityAmounts', () => {
       leg({ to_account: BOB, event_index: 13, amount: '420957264' }),
     ])
     expect(rows.map(r => r.amount)).toEqual(['40815636', '420957264'])
+  })
+
+  it('ignores the Treasury pool-deposit refund on a final XYK removal', () => {
+    // The last LP out destroys the pool, so the Treasury refunds the 1 HDX
+    // creation deposit AFTER the pool's own HDX payout. Adjacency alone would
+    // report the deposit as the withdrawn amount.
+    const rows = [removal({ event_name: 'XYK.LiquidityRemoved', asset_id: 0, event_index: 15, extrinsic_index: 2 })]
+    matchLiquidityAmounts(rows, [
+      leg({ asset_id: 0, event_index: 7, extrinsic_index: 2, amount: '496652773590136308' }),
+      leg({ asset_id: 0, event_index: 13, extrinsic_index: 2, from_account: TREASURY_POT, amount: '1000000000000' }),
+    ])
+    expect(rows[0].amount).toBe('496652773590136308')
   })
 
   it('matches XYK.PoolCreated from the sender side (who→pool)', () => {
