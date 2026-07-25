@@ -557,6 +557,24 @@ export function nonPlumbingTransferLegSql(fromExpr: string, toExpr: string, plum
 // truncations of TAGGED derived accounts (a stableswap pool's aToken pot must
 // fold into the pool's row, not rank as its own "Stableswap Pool" lookalike).
 // LIMIT 1 BY guards the join against a same-eth_id pair from both sources.
+// An account's directory key: its bound substrate owner when the row is that owner's
+// EVM-side pot, otherwise the account itself (module/sovereign truncations remapped
+// onto the full id). The `bind` LEFT JOIN fills unmatched rows with the owner column's
+// DEFAULT, so "no bound owner" looks different depending on that column's type: read out
+// of raw_account_aliases (Nullable(String)) it arrived as NULL and coalesce fell through,
+// but account_alias_directory stores it as a plain String, so it arrived as '' and
+// coalesce returned the empty owner — which collapsed every unbound account into a single
+// ''-keyed group (114,045 directory rows became 3,217, with one $135M row holding every
+// HDX on the chain). Test emptiness explicitly so the fallback cannot depend on the
+// column's nullability, this join's algorithm, or join_use_nulls.
+function boundAccountSql(alias: string): string {
+  const account = `${alias}.account_id`
+  return `if(ifNull(b.owner, '') != '', ifNull(b.owner, ''), if(
+                substring(${account}, 3, 8) = '45544800' AND substring(${account}, 11, 8) IN ('6d6f646c', '7369626c', '70617261'),
+                concat('0x', substring(${account}, 11, 40), '000000000000000000000000'),
+                ${account}))`
+}
+
 function bindCteSql(): string {
   const pairs = taggedTruncationPairs()
     .map(([h160, owner]) => `('0x45544800${h160.slice(2).toLowerCase()}0000000000000000', '${owner.toLowerCase()}')`)
@@ -2031,10 +2049,7 @@ export async function getHolders(assetId: number, limit: number, offset = 0): Pr
             -- ETH-prefixed rows standing for a real account (module/sovereign
             -- truncations, bound H160s) are remapped onto it, like the accounts list.
             SELECT
-              coalesce(b.owner, if(
-                substring(l.account_id, 3, 8) = '45544800' AND substring(l.account_id, 11, 8) IN ('6d6f646c', '7369626c', '70617261'),
-                concat('0x', substring(l.account_id, 11, 40), '000000000000000000000000'),
-                l.account_id)) AS account_id,
+              ${boundAccountSql('l')} AS account_id,
               sum(l.bal) AS bal, max(l.last_block) AS last_block FROM (
               ${ERC20_WALLET_ASSET_IDS.includes(assetId) ? `
               -- ERC-20-backed asset: the plain latest Tokens-side balance plus
@@ -13169,10 +13184,7 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
                 toUInt64(uniqMerge(a.activity_state)) AS activity
               FROM (
                 SELECT
-                  coalesce(b.owner, if(
-                    substring(w.account_id, 3, 8) = '45544800' AND substring(w.account_id, 11, 8) IN ('6d6f646c', '7369626c', '70617261'),
-                    concat('0x', substring(w.account_id, 11, 40), '000000000000000000000000'),
-                    w.account_id)) AS account_id,
+                  ${boundAccountSql('w')} AS account_id,
                   w.activity_state
                 FROM price_data.account_balance_weekly w
                 LEFT JOIN bind b ON b.eth_id = w.account_id
@@ -13194,10 +13206,7 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
               SELECT if(t.lid = '', v.account_id, t.lid) AS gkey, sum(v.volume_usd) AS volume_usd
               FROM (
                 SELECT
-                  coalesce(b.owner, if(
-                    substring(vr.account_id, 3, 8) = '45544800' AND substring(vr.account_id, 11, 8) IN ('6d6f646c', '7369626c', '70617261'),
-                    concat('0x', substring(vr.account_id, 11, 40), '000000000000000000000000'),
-                    vr.account_id)) AS account_id,
+                  ${boundAccountSql('vr')} AS account_id,
                   sum(vr.volume_usd) AS volume_usd
                 FROM trade_volume_raw vr
                 LEFT JOIN bind b ON b.eth_id = vr.account_id
@@ -13214,10 +13223,7 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
               SELECT if(t.lid = '', v.account_id, t.lid) AS gkey, sum(v.volume_usd) AS volume_usd
               FROM (
                 SELECT
-                  coalesce(b.owner, if(
-                    substring(vr.account_id, 3, 8) = '45544800' AND substring(vr.account_id, 11, 8) IN ('6d6f646c', '7369626c', '70617261'),
-                    concat('0x', substring(vr.account_id, 11, 40), '000000000000000000000000'),
-                    vr.account_id)) AS account_id,
+                  ${boundAccountSql('vr')} AS account_id,
                   sum(vr.volume_usd) AS volume_usd
                 FROM liquidation_volume_raw vr
                 LEFT JOIN bind b ON b.eth_id = vr.account_id
@@ -13302,10 +13308,7 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
               -- 'para' — full id = the 20 bytes + zero padding) and bound H160s.
               -- Only genuine, unbound EVM accounts keep the ETH-prefixed key.
               SELECT
-                coalesce(b.owner, if(
-                  substring(l.account_id, 3, 8) = '45544800' AND substring(l.account_id, 11, 8) IN ('6d6f646c', '7369626c', '70617261'),
-                  concat('0x', substring(l.account_id, 11, 40), '000000000000000000000000'),
-                  l.account_id)) AS account_id,
+                ${boundAccountSql('l')} AS account_id,
                 l.asset_id AS asset_id, l.bal AS bal, l.lb AS lb
               FROM (
                 SELECT
