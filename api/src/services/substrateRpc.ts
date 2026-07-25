@@ -31,37 +31,47 @@ export async function substrateStorageBatch(keys: string[]): Promise<(string | n
   return out
 }
 
-// One page of storage keys under `prefix` (state_getKeysPaged).
-export async function substrateKeysPaged(prefix: string, count: number, startKey: string | null): Promise<string[]> {
+// One page of storage keys under `prefix` (state_getKeysPaged). null distinguishes
+// a failed read from a genuinely empty page, which the paged enumeration below needs
+// in order to tell "no more keys" from "the node stopped answering".
+export async function substrateKeysPaged(prefix: string, count: number, startKey: string | null): Promise<string[] | null> {
   if (!Number.isSafeInteger(count) || count <= 0) return []
   const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 6000)
   try {
     const params = startKey ? [prefix, count, startKey] : [prefix, count]
     const res = await fetch(SUBSTRATE_RPC_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctrl.signal, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'state_getKeysPaged', params }) })
-    if (!res.ok) return []
+    if (!res.ok) return null
     const json = await res.json() as { result?: unknown }
-    return Array.isArray(json.result) ? json.result.filter((key): key is string => typeof key === 'string') : []
-  } catch { return [] } finally { clearTimeout(timer) }
+    return Array.isArray(json.result) ? json.result.filter((key): key is string => typeof key === 'string') : null
+  } catch { return null } finally { clearTimeout(timer) }
 }
 
-// Every key under `prefix` (paged enumeration, bounded).
-export async function substrateAllKeys(prefix: string, maxPages = 40, pageSize = 1000): Promise<string[]> {
+// Every key under `prefix` (paged enumeration, bounded). Throws rather than
+// returning a short list when the enumeration did not provably reach the end: a
+// truncated key set is indistinguishable from a smaller map, and callers publish it
+// as current state — a half-read Balances.Locks would report accounts as unlocked.
+// Every caller already keeps its previous snapshot when a refresh throws. The page
+// bound leaves headroom above the largest live map (Balances.Locks, ~18k keys) so
+// growth raises the error rather than quietly cutting the tail off.
+export async function substrateAllKeys(prefix: string, maxPages = 200, pageSize = 1000): Promise<string[]> {
   const all: string[] = []
   const seen = new Set<string>()
   let startKey: string | null = null
   for (let page = 0; page < maxPages; page++) {
     const keys = await substrateKeysPaged(prefix, pageSize, startKey)
-    if (!keys.length) break
+    if (keys == null) throw new Error(`state_getKeysPaged failed for ${prefix} at page ${page}`)
+    if (!keys.length) return all
     for (const key of keys) {
       if (!seen.has(key)) {
         seen.add(key)
         all.push(key)
       }
     }
-    if (keys.length < pageSize) break
+    if (keys.length < pageSize) return all
     const nextStartKey = keys[keys.length - 1]
-    if (nextStartKey === startKey) break
+    if (nextStartKey === startKey) return all
     startKey = nextStartKey
   }
-  return all
+  // Ran out of pages on a full page: there are more keys than this bound can read.
+  throw new Error(`state_getKeysPaged exceeded ${maxPages} pages for ${prefix}; raise the page bound`)
 }

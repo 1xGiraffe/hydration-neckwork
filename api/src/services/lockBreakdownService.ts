@@ -430,8 +430,10 @@ const accountFromKeyTail = (key: string) => '0x' + key.slice(-64)
 
 interface StorageEntry { key: string; value: Uint8Array }
 
-async function loadEntries(storagePrefix: string, maxPages = 40): Promise<StorageEntry[]> {
-  const keys = await substrateAllKeys(storagePrefix, maxPages)
+// Enumeration failures propagate: collectLockBreakdownRows' caller keeps the
+// previously published generation, which is what a partial read must not replace.
+async function loadEntries(storagePrefix: string, maxPages?: number): Promise<StorageEntry[]> {
+  const keys = maxPages == null ? await substrateAllKeys(storagePrefix) : await substrateAllKeys(storagePrefix, maxPages)
   if (!keys.length) return []
   const values = await substrateStorageBatch(keys)
   const out: StorageEntry[] = []
