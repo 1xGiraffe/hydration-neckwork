@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
 import { getReferenda, getReferendum, parseReferendumPallet } from '../services/governanceService.ts'
+import { extrinsicEncoded } from '../services/extrinsicBytes.ts'
 import {
   getStats, getRecentBlocks, getBlock, getRecentExtrinsics, getExtrinsic, getExtrinsicAt,
   getExtrinsicActivity, getBlockActivity,
@@ -251,6 +252,17 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const ext = await getExtrinsicAt(params.data.height, params.data.index)
     if (!ext) return reply.status(404).send({ error: 'Extrinsic not found' })
     return ext
+  })
+
+  // The extrinsic's own SCALE bytes. Not indexed (extrinsics are stored decoded), so
+  // they come from the chain — one targeted lookup, cached, and only when a reader asks
+  // for the encoded form. 404 rather than a guess when the node cannot answer.
+  fastify.get('/explorer/extrinsic-at/:height/:index/encoded', async (req, reply) => {
+    const params = z.object({ height: uint32Param, index: uint32Param }).safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid extrinsic reference' })
+    const encoded = await extrinsicEncoded(params.data.height, params.data.index)
+    if (!encoded) return reply.status(404).send({ error: 'Encoded extrinsic unavailable' })
+    return { encoded }
   })
 
   fastify.get('/explorer/extrinsic-at/:height/:index/activity', async (req, reply) => {

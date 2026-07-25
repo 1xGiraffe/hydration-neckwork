@@ -591,6 +591,33 @@ export function Copy({ text }: { text: string }) {
   )
 }
 
+// A labelled copy button, for values worth taking away whole: an encoded call, a JSON
+// document. Confirms in place so a click is visibly acknowledged (the clipboard gives no
+// other feedback).
+export function CopyTextButton({ label, text }: { label: string; text: string }) {
+  const [done, setDone] = useState(false)
+  return (
+    <button
+      type="button"
+      className={`copy-text-btn${done ? ' done' : ''}`}
+      title={`Copy ${label}`}
+      onClick={e => {
+        e.stopPropagation(); e.preventDefault()
+        void navigator.clipboard?.writeText(text)
+        setDone(true)
+        setTimeout(() => setDone(false), 1200)
+      }}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+        {done
+          ? <path d="M20 6L9 17l-5-5" />
+          : <><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></>}
+      </svg>
+      {done ? 'copied' : label}
+    </button>
+  )
+}
+
 /* ============ charts ============ */
 export function Sparkline({ data, w = 110, h = 30, change7d }: { data: number[]; w?: number; h?: number; change7d?: number | null }) {
   const id = useId()

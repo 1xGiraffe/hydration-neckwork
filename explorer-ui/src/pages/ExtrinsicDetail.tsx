@@ -1,10 +1,27 @@
+import { useQuery } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { useBlock, useExtrinsic, useExtrinsicActivity, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, redirect } from '../router'
-import { Crumbs, F, AddrPill, CallPill, StatusBadge, FinalizedBadge, FailureReasonRow, Copy, JsonView, ParamsTable, SkeletonRows } from '../components/ui'
+import { Crumbs, F, AddrPill, CallPill, StatusBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows } from '../components/ui'
+import { api } from '../api/explorer'
 import { ActivityTable } from '../components/ActivityTable'
+
+// Copies the extrinsic's SCALE bytes, fetched on demand: extrinsics are stored decoded,
+// so the encoded form comes from the chain (see extrinsicBytes.ts — re-encoding from
+// normalised args could produce subtly wrong bytes, which is worse than none). The button
+// is enabled only once those bytes are in hand.
+function CallDataCopy({ height, index }: { height: number; index: number }) {
+  const { data } = useQuery({
+    queryKey: ['extrinsic-encoded', height, index],
+    queryFn: ({ signal }) => api.extrinsicEncoded(height, index, signal),
+    staleTime: 3_600_000,
+    retry: false,
+  })
+  if (!data?.encoded) return null
+  return <CopyTextButton label="call data" text={data.encoded} />
+}
 
 export function ExtrinsicDetail({ id }: { id: string }) {
   const { data, isLoading, isError } = useExtrinsic(id)
@@ -49,7 +66,7 @@ export function ExtrinsicDetail({ id }: { id: string }) {
               <div className="dt">Block</div><div className="dd mono"><Link to={paths.block(data.blockHeight)} className="hash">{F.int(data.blockHeight)}</Link> <FinalizedBadge finalized={data.blockHeight <= (stats?.finalizedBlock ?? -1)} /></div>
               <div className="dt">Timestamp</div><div className="dd mono">{F.datetime(data.timestamp)}</div>
               <div className="dt">Extrinsic hash</div><div className="dd mono wrap-anywhere">{data.hash} <Copy text={data.hash} /></div>
-              <div className="dt">Module / Call</div><div className="dd"><CallPill name={data.callName} /></div>
+              <div className="dt">Module / Call</div><div className="dd"><CallPill name={data.callName} /> <CallDataCopy height={data.blockHeight} index={data.index} /></div>
               <div className="dt">Result</div><div className="dd"><StatusBadge ok={data.success} /></div>
               {!data.success && data.errorReason && <FailureReasonRow reason={data.errorReason} />}
               {data.signer
@@ -84,7 +101,13 @@ export function ExtrinsicDetail({ id }: { id: string }) {
               </div>
             )}
 
-            {tab === 'json' && <JsonView value={{ block_height: data.blockHeight, extrinsic_index: data.index, extrinsic_hash: data.hash, call_name: data.callName, signer: data.signer?.address ?? null, success: data.success, fee: data.fee, tip: data.tip, call_args: data.callArgs }} />}
+            {tab === 'json' && (() => {
+              const json = { block_height: data.blockHeight, extrinsic_index: data.index, extrinsic_hash: data.hash, call_name: data.callName, signer: data.signer?.address ?? null, success: data.success, fee: data.fee, tip: data.tip, call_args: data.callArgs }
+              return <>
+                <div className="json-copy-row"><CopyTextButton label="copy JSON" text={JSON.stringify(json, null, 2)} /></div>
+                <JsonView value={json} />
+              </>
+            })()}
           </>
         )}
     </div>

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { CopyTextButton } from './ui'
 
 // The referendum's actual proposal, decoded from its preimage.
 //
@@ -126,32 +126,10 @@ function callJson(call: ProposalCallData): string {
 function CopyRow({ call, hash }: { call: ProposalCallData; hash: string | null }) {
   return (
     <div className="pc-copy">
-      {hash && <CopyButton label="hash" text={hash} />}
-      {call.encoded && <CopyButton label="encoded call" text={call.encoded} />}
-      {!call.decodeError && <CopyButton label="JSON" text={callJson(call)} />}
+      {hash && <CopyTextButton label="hash" text={hash} />}
+      {call.encoded && <CopyTextButton label="encoded call" text={call.encoded} />}
+      {!call.decodeError && <CopyTextButton label="JSON" text={callJson(call)} />}
     </div>
-  )
-}
-
-function CopyButton({ label, text }: { label: string; text: string }) {
-  const [done, setDone] = useState(false)
-  return (
-    <button
-      type="button"
-      className={`pc-copy-btn${done ? ' done' : ''}`}
-      onClick={() => {
-        void navigator.clipboard?.writeText(text)
-        setDone(true)
-        setTimeout(() => setDone(false), 1200)
-      }}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-        {done
-          ? <path d="M20 6L9 17l-5-5" />
-          : <><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></>}
-      </svg>
-      {done ? 'copied' : label}
-    </button>
   )
 }
 
