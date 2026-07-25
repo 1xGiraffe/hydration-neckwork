@@ -82,6 +82,23 @@ export function swapEventFilterSql(): string {
 // (ohlc close states), so converting through Float64 would be the only lossy
 // stage — amounts × norm-factor × close and the /10^md rescale all use
 // multiplyDecimal/divideDecimal, and per-trade sums aggregate Decimal256(12).
+// Block bounds of a derived-table partition, i.e. the inverse of the
+// `toYYYYMM(toDateTime(block_height * 12))` expression the partition key uses.
+// A block is 12 synthetic seconds, so the month's first block is its UTC epoch
+// second divided by 12, and the bound is exclusive at the next month's first block.
+export function partitionBlockRange(partition: string): { fromBlock: number; toBlock: number } {
+  const year = Number(partition.slice(0, 4))
+  const month = Number(partition.slice(4, 6))
+  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+    throw new Error(`invalid derived partition ${JSON.stringify(partition)}`)
+  }
+  const MS_PER_BLOCK = 12_000
+  return {
+    fromBlock: Math.floor(Date.UTC(year, month - 1, 1) / MS_PER_BLOCK),
+    toBlock: Math.floor(Date.UTC(month === 12 ? year + 1 : year, month === 12 ? 0 : month, 1) / MS_PER_BLOCK),
+  }
+}
+
 export function buildPartitionInsertSql(
   partition: string,
   targetTable = 'price_data.account_trade_volume',
@@ -89,7 +106,13 @@ export function buildPartitionInsertSql(
   const md = maxDecimals()
   const usdDivisor = (10n ** BigInt(md)).toString()
   const anchor = EVENT_ANCHOR_OFFSET.toString()
-  const pf = `toYYYYMM(toDateTime(block_height * 12)) = ${partition}`
+  // The derived table's partition is a synthetic month over `block_height * 12`
+  // seconds. ClickHouse cannot invert that function chain into a primary-key range,
+  // so filtering raw_events (ORDER BY block_height, event_index) on the expression
+  // alone read every granule of the table for each rebuild. Hand the sort key the
+  // equivalent explicit range and keep the expression for exactness.
+  const { fromBlock, toBlock } = partitionBlockRange(partition)
+  const pf = `block_height >= ${fromBlock} AND block_height < ${toBlock} AND toYYYYMM(toDateTime(block_height * 12)) = ${partition}`
   const rid = `toUInt64OrZero(extractGroups(args_json, '"__kind":"Router","value":(\\\\d+)')[1])`
   const bcastKey = `if(rid > 0, rid, ${anchor} + event_index)`
   const legacyKey = `if(extrinsic_index IS NULL, ${anchor} + event_index, toUInt64(extrinsic_index))`
