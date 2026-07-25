@@ -9,11 +9,12 @@ export const WIDTH = 720
 export const HEIGHT = 720   // square: the cluster reads as one population, not a band
 export const MIN_R = 3
 
-// A bubble carries its account label only once the label fits inside it. Emoji plus
-// a shortened address needs roughly 80 units of the 720-wide space; the emoji alone
-// about 28. Below that a label would spill past its own circle, so the bubble stays
-// bare and the hover card does the identifying.
-export const LABEL_FULL_R = 42
+// A bubble carries its account label only once the label fits inside it. Laid out in a
+// row like a list pill, icon plus shortened address needs roughly 88 units of the
+// 720-wide space, and a circle only offers about 1.8r of usable chord width — hence
+// r >= 50. The icon alone needs about 28. Below that a label would spill past its own
+// circle, so the bubble stays bare and the hover card does the identifying.
+export const LABEL_FULL_R = 50
 export const LABEL_EMOJI_R = 15
 
 export type BubbleSide = 'aye' | 'nay' | 'split'

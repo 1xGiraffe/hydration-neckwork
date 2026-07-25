@@ -10,7 +10,7 @@ import type { AssetRef } from '../types'
 // schedule and execution (slug dca / /dca/…), extrinsic (a.hash / [data-ext] →
 // /extrinsic/…) and block (/block/…) links. Each card mirrors the basic-info
 // block of its detail page. Mounted once in App.
-type VoteContext = { side: string; conviction: string; weighted: string; locked: string }
+type VoteContext = { side: string; conviction: string; weighted: string }
 type Target = { kind: 'account' | 'tag' | 'asset' | 'trade' | 'dca-schedule' | 'dca-exec' | 'extrinsic' | 'block' | 'referendum'; id: string; vote?: VoteContext; left: number; top: number; bottom: number }
 const SELECTOR = '.addr-pill:not([data-no-hover]), .asset-chip, a.hash, a[href*="/swap/"], a[href*="/dca/"], a[href*="/block/"], a[href*="/referendum/"], [data-activity], [data-ext]'
 const HOVER_DWELL_MS = 180
@@ -48,7 +48,6 @@ function voteContext(el: Element): VoteContext | undefined {
     side: host.getAttribute('data-vote-side') ?? '',
     conviction: host.getAttribute('data-vote-conviction') ?? '',
     weighted: host.getAttribute('data-vote-weighted') ?? '',
-    locked: host.getAttribute('data-vote-locked') ?? '',
   }
 }
 
@@ -194,9 +193,9 @@ function ReferendumHover({ id }: { id: string }) {
         <div className="tally-aye" style={{ width: `${ayePct}%` }} />
         <div className="tally-nay" style={{ width: `${100 - ayePct}%` }} />
       </div>}
-      {ayePct != null && <div className="hc-row"><span>Aye</span><span className="mono">{ayePct.toFixed(1)}%</span></div>}
+      {ayePct != null && <div className="hc-row"><span>AYE</span><span className="mono">{ayePct.toFixed(1)}%</span></div>}
       <div className="hc-row"><span>Voters</span><span className="mono">{F.int(data.directTally.voters)}</span></div>
-      <div className="hc-row"><span>Aye / nay</span><span className="mono">{F.int(data.directTally.ayeVoters)} / {F.int(data.directTally.nayVoters)}</span></div>
+      <div className="hc-row"><span>AYE / NAY</span><span className="mono">{F.int(data.directTally.ayeVoters)} / {F.int(data.directTally.nayVoters)}</span></div>
     </>
   )
 }
@@ -225,10 +224,11 @@ function AccountHover({ id, vote }: { id: string; vote?: VoteContext }) {
               : ident?.verified && <span className="id-verified" title="Verified identity" style={{ marginLeft: 5 }}>✓</span>}</div>
         </div>
       </div>
+      {/* Same two facts the referendum's votes table keeps: the vote itself and the
+          conviction-weighted votes it carries. */}
       {vote && <>
         <div className="hc-row"><span>Vote</span><span className="mono">{vote.side}{vote.conviction ? ` · ${vote.conviction}` : ''}</span></div>
-        <div className="hc-row"><span>Weighted</span><span className="mono">{vote.weighted}</span></div>
-        {vote.locked && <div className="hc-row"><span>Locked</span><span className="mono">{vote.locked}</span></div>}
+        <div className="hc-row"><span>Votes</span><span className="mono">{vote.weighted}</span></div>
       </>}
       <ProfileMetrics {...data} debtUsd={debtUsd} topAssets={topAssets} />
     </>

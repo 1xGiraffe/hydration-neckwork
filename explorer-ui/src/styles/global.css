@@ -1581,23 +1581,27 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .vb-canvas { position: relative; width: 100%; }
 .vb-bubble {
   position: absolute; transform: translate(-50%, -50%); aspect-ratio: 1; border-radius: 50%;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  /* Row, like a list pill: icon first, then the name/address. */
+  display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 5px;
   overflow: hidden; text-decoration: none; color: var(--text-high);
   /* Brightness rather than an outline: a stroke on hover fought the packed edges. */
   transition: filter .12s ease, opacity .12s ease;
-  opacity: .82;
 }
 /* addr-pill brings inline-row styling (inline-flex, gap, nowrap, emoji chrome);
    inside a circle the bubble's own layout has to win. */
 .vb-bubble.addr-pill { display: flex; gap: 1px; font-size: inherit; }
 .vb-bubble.addr-pill .emoji { border: 0; background: none; padding: 0; width: auto; height: auto; }
-.vb-bubble.vb-aye { background: var(--green); }
-.vb-bubble.vb-nay { background: var(--red); }
-.vb-bubble.vb-split { background: var(--accent); }
+/* Muted fills so a packed chart is not a wall of saturated colour, and so ordinary
+   text colours stay readable on top of them. */
+.vb-bubble.vb-aye { background: color-mix(in srgb, var(--green) 34%, transparent); }
+.vb-bubble.vb-nay { background: color-mix(in srgb, var(--red) 34%, transparent); }
+.vb-bubble.vb-split { background: color-mix(in srgb, var(--accent) 32%, transparent); }
 .vb-bubble:hover, .vb-bubble.on { opacity: 1; filter: brightness(1.22); z-index: 2; }
 .vb-bubble .vb-emoji { font-size: clamp(9px, 1.5vw, 17px); line-height: 1; background: none; border: 0; padding: 0; }
 .vb-bubble .vb-emoji-img { width: 1em; height: 1em; display: block; }
-.vb-bubble .vb-addr { font-size: clamp(7px, .82vw, 10px); line-height: 1.05; color: color-mix(in srgb, #000 72%, transparent); white-space: nowrap; max-width: 88%; overflow: hidden; text-overflow: ellipsis; }
+/* Same type treatment as an address in a table, just scaled to the bubble. */
+.vb-bubble .vb-addr { font-size: clamp(7px, .8vw, 11px); line-height: 1.05; color: var(--text-high); white-space: nowrap; max-width: 74%; overflow: hidden; text-overflow: ellipsis; }
+.vb-bubble .vb-addr .last3 { color: var(--text-medium); }
 /* An identity or tag name is free text, so it gets the ellipsis treatment a
    fixed-width shortened address never needs. */
 .vb-bubble .vb-name { font-family: inherit; font-weight: 600; }

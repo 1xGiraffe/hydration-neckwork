@@ -1190,7 +1190,8 @@ export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = 
   liquidity: [{ v: 'Add', label: 'Add liquidity' }, { v: 'Remove', label: 'Remove liquidity' }, { v: 'Create', label: 'Create pool' }, { v: 'Claim', label: 'Claim rewards' }],
   mm: [{ v: 'Supply', label: 'Supply' }, { v: 'Withdraw', label: 'Withdraw' }, { v: 'Borrow', label: 'Borrow' }, { v: 'Repay', label: 'Repay' }, { v: 'LiquidationCall', label: 'Liquidate' }, { v: 'ClaimRewards', label: 'Claim rewards' }],
   staking: [{ v: 'Stake', label: 'Stake' }, { v: 'Add stake', label: 'Add stake' }, { v: 'Unstake', label: 'Unstake' }, { v: 'Force unstake', label: 'Force unstake' }, { v: 'Staking reward', label: 'Staking reward' }, { v: 'Giga stake', label: 'Giga stake' }, { v: 'Giga unstake', label: 'Giga unstake' }, { v: 'Unstake cancelled', label: 'Unstake cancelled' }, { v: 'Giga migration', label: 'Giga migration' }, { v: 'Giga reward', label: 'Giga reward' }, { v: 'Collator payout', label: 'Collator payout' }],
-  vote: [{ v: 'Aye', label: 'Aye' }, { v: 'Nay', label: 'Nay' }],
+  // The value is the chain's own term; the label is how this app writes a side.
+  vote: [{ v: 'Aye', label: 'AYE' }, { v: 'Nay', label: 'NAY' }],
 }
 // Clamp a deep-linked action to the active type's known actions ('' = all).
 export function normalizeActivityAction(type: string, action: string): string {

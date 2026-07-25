@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/explorer'
 import { useNow } from '../hooks/useNow'
@@ -6,6 +7,7 @@ import { Link, paths } from '../router'
 import { Crumbs, F, AddrPill, SkeletonRows, Ago } from '../components/ui'
 import { VoteBubbles } from '../components/VoteBubbles'
 import type { ReferendumDetail, ReferendumVoter } from '../types'
+import { orderVoters, type SideFilter, type VoteSort } from '../utils/referendumVotes'
 
 const PALLET_LABEL: Record<string, string> = { opengov: 'OpenGov', democracy: 'Democracy' }
 
@@ -31,7 +33,7 @@ function TallyBar({ ayes, nays }: { ayes: string; nays: string }) {
   const ayePct = sharePct(ayes, nays)
   if (ayePct == null) return <div className="empty-note">No votes counted yet</div>
   return (
-    <div className="tally-bar" title={`${ayePct.toFixed(2)}% aye`}>
+    <div className="tally-bar" title={`${ayePct.toFixed(2)}% AYE`}>
       <div className="tally-aye" style={{ width: `${ayePct}%` }} />
       <div className="tally-nay" style={{ width: `${100 - ayePct}%` }} />
     </div>
@@ -43,21 +45,29 @@ function SideBadge({ side }: { side: ReferendumVoter['side'] }) {
   return <span className={`badge ${cls}`}>{side.toUpperCase()}</span>
 }
 
-function VoterRows({ detail, now }: { detail: ReferendumDetail; now: number }) {
+function SortHead({ label, value, sort, onSort }: { label: string; value: VoteSort; sort: VoteSort; onSort: (v: VoteSort) => void }) {
+  return (
+    <button type="button" className={`th-sort${sort === value ? ' on' : ''}`} onClick={() => onSort(value)}>
+      {label}{sort === value ? ' ▼' : ''}
+    </button>
+  )
+}
+
+function VoterRows({ voters, detail, now }: { voters: ReferendumVoter[]; detail: ReferendumDetail; now: number }) {
   const { decimals, symbol } = detail.asset
   return (
     <>
-      {detail.voters.map(voter => (
+      {voters.map(voter => (
         <tr key={`${voter.blockHeight}-${voter.eventIndex}`} className={voter.removed ? 'row-muted' : undefined}>
           <td data-label="Account">{voter.account ? <AddrPill account={voter.account} /> : <span className="muted">unknown</span>}</td>
           <td data-label="Vote"><SideBadge side={voter.side} />{voter.conviction ? <span className="muted"> {voter.conviction}</span> : null}
             {voter.removed && <span className="badge badge-quiet" title="Withdrawn before the referendum closed, so it is not counted">withdrawn</span>}</td>
-          <td data-label="Locked" className="r mono">{F.amount(voter.balance, decimals)}</td>
-          <td data-label="Weighted" className="r mono">{F.amount(voter.weighted, decimals)} <span className="muted">{symbol}</span></td>
-          <td data-label="Value" className="r mono">{voter.valueUsd == null ? '—' : F.usd(voter.valueUsd)}</td>
-          <td data-label="When" className="r">
-            <Link to={paths.block(voter.blockHeight)} className="hash">{F.int(voter.blockHeight)}</Link>{' '}
-            <Ago ts={voter.timestamp} now={now} />
+          <td data-label="Votes" className="r mono">{F.amount(voter.weighted, decimals)} <span className="muted">{symbol}</span></td>
+          <td data-label="Time" className="r">
+            {/* The vote's own extrinsic, so a row leads to the transaction that cast it. */}
+            {voter.extrinsicIndex != null
+              ? <Link to={paths.extrinsic(`${voter.blockHeight}-${voter.extrinsicIndex}`)} className="hash"><Ago ts={voter.timestamp} now={now} /></Link>
+              : <Ago ts={voter.timestamp} now={now} />}
           </td>
         </tr>
       ))}
@@ -69,7 +79,11 @@ function VoterRows({ detail, now }: { detail: ReferendumDetail; now: number }) {
 // conviction-weighted power.
 export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy'; index: number }) {
   const { data, isLoading, isError } = useReferendum(pallet, index)
+  const [sort, setSort] = useState<VoteSort>('time')
+  const [side, setSide] = useState<SideFilter>('all')
   const now = useNow()
+  const shown = useMemo(() => orderVoters(data?.voters ?? [], sort, side), [data?.voters, sort, side])
+
   const label = `${PALLET_LABEL[pallet] ?? pallet} #${index}`
   useDocumentTitle(data?.title ? `${data.title} · ${label}` : label)
 
@@ -104,9 +118,9 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
                   <div className="dd">
                     <TallyBar ayes={data.onChainTally.ayes} nays={data.onChainTally.nays} />
                     <div className="mono" style={{ marginTop: 6 }}>
-                      <span className="vb-aye-text">{F.amount(data.onChainTally.ayes, data.asset.decimals)} aye</span>
+                      <span className="vb-aye-text">{F.amount(data.onChainTally.ayes, data.asset.decimals)} AYE</span>
                       {' · '}
-                      <span className="vb-nay-text">{F.amount(data.onChainTally.nays, data.asset.decimals)} nay</span>
+                      <span className="vb-nay-text">{F.amount(data.onChainTally.nays, data.asset.decimals)} NAY</span>
                       {data.onChainTally.support && <span className="muted"> · support {F.amount(data.onChainTally.support, data.asset.decimals)}</span>}
                     </div>
                   </div>
@@ -117,7 +131,7 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
                 {data.indirectTally && <>
                   <div className="dt">Delegated / unattributed</div>
                   <div className="dd mono">
-                    {F.amount(data.indirectTally.ayes, data.asset.decimals)} aye · {F.amount(data.indirectTally.nays, data.asset.decimals)} nay
+                    {F.amount(data.indirectTally.ayes, data.asset.decimals)} AYE · {F.amount(data.indirectTally.nays, data.asset.decimals)} NAY
                     <span className="muted"> — in the chain tally, with no Voted event of its own</span>
                   </div>
                 </>}
@@ -151,16 +165,24 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
 
             <div className="sec-title" style={{ marginTop: 22 }}>Votes
               <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}>
-                {' '}· {F.int(data.votesTotal)} {data.votesTotal === 1 ? 'account' : 'accounts'}, heaviest first
-                {data.votesShown < data.votesTotal ? ` · showing ${F.int(data.votesShown)}` : ''}
+                {' '}· {F.int(shown.length)}{shown.length !== data.votesTotal ? ` of ${F.int(data.votesTotal)}` : ''} {data.votesTotal === 1 ? 'account' : 'accounts'}
+                {data.votesShown < data.votesTotal ? ` · loaded ${F.int(data.votesShown)}` : ''}
               </span>
+            </div>
+            <div className="activity-chips">
+              {(['all', 'aye', 'nay'] as SideFilter[]).map(value => (
+                <button key={value} className={`activity-chip${side === value ? ' on' : ''}`} onClick={() => setSide(value)}>
+                  {value === 'all' ? 'All' : value.toUpperCase()}
+                </button>
+              ))}
             </div>
             <div className="panel"><table className="tbl">
               <thead><tr>
-                <th>Account</th><th>Vote</th><th className="r">Locked</th>
-                <th className="r">Weighted</th><th className="r">Value</th><th className="r">When</th>
+                <th>Account</th><th>Vote</th>
+                <th className="r"><SortHead label="Votes" value="votes" sort={sort} onSort={setSort} /></th>
+                <th className="r"><SortHead label="Time" value="time" sort={sort} onSort={setSort} /></th>
               </tr></thead>
-              <tbody><VoterRows detail={data} now={now} /></tbody>
+              <tbody><VoterRows voters={shown} detail={data} now={now} /></tbody>
             </table></div>
           </>
         )}

@@ -43,7 +43,9 @@ export function VoteBubbles({ voters, decimals, symbol }: { voters: ReferendumVo
 
   if (!bubbles.length) return <div className="empty-note">No conviction-weighted votes to plot</div>
 
-  const sideWord = (bubble: Bubble) => (bubble.side === 'split' ? 'Split' : bubble.side === 'aye' ? 'Aye' : 'Nay')
+  // A side is always written in caps in this app (see VoteSideBadge), including in
+  // the hover card rows these attributes feed.
+  const sideWord = (bubble: Bubble) => (bubble.side === 'split' ? 'SPLIT' : bubble.side === 'aye' ? 'AYE' : 'NAY')
 
   return (
     <div className="vote-bubbles">
@@ -62,7 +64,6 @@ export function VoteBubbles({ voters, decimals, symbol }: { voters: ReferendumVo
               'data-vote-side': sideWord(bubble),
               'data-vote-conviction': bubble.voter.conviction ?? '',
               'data-vote-weighted': `${F.amount(bubble.voter.weighted, decimals)} ${symbol}`,
-              'data-vote-locked': `${F.amount(bubble.voter.balance, decimals)} ${symbol}`,
             },
             style: {
               left: `${(bubble.x / WIDTH) * 100}%`,
