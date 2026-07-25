@@ -135,6 +135,10 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     ],
   },
   {
+    tagId: 'hdx-kraken-lp', name: 'HDX Kraken LP', color: 'var(--accent)', note: '', icon: HDX_ICON,
+    addresses: ['121VfWrMN1DwrHu1Jc8UE7Cppp7YHcZxtnFDZnZCztpdeHDX'],
+  },
+  {
     tagId: 'polkadot-treasury', name: 'Polkadot Treasury', color: '#e6007a', note: 'Polkadot relay-chain treasury accounts', icon: '',
     addresses: [
       '12pPnA1aFic3ibBh9xMwssM1779vfrJBxqD4mDy8d18r4g95',
