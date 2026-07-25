@@ -92,8 +92,10 @@ async function refresh(): Promise<void> {
     // observed), (3) the ETH-prefixed AccountId32 form (genuine EVM accounts).
     const [aliasRes, truncRes] = await Promise.all([
       client.query({
-        query: `SELECT DISTINCT lower(evm_address) AS evm, account_id FROM price_data.raw_account_aliases
-                WHERE lower(evm_address) IN ({evms:Array(String)}) AND account_id != ''`,
+        // account_alias_directory holds one row per distinct alias identity (19,867)
+        // instead of raw_account_aliases' one row per observation (16.2M).
+        query: `SELECT DISTINCT evm_address AS evm, account_id FROM price_data.account_alias_directory
+                WHERE evm_address IN ({evms:Array(String)}) AND account_id != ''`,
         query_params: { evms: h160s }, format: 'JSONEachRow',
       }),
       client.query({

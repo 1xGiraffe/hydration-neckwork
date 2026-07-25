@@ -121,8 +121,13 @@ let evmBindingsInflight: Promise<void> | null = null
 
 async function loadEvmBindingsUncached(): Promise<void> {
   const res = await client.query({
-    query: `SELECT DISTINCT lower(evm_address) AS evm, lower(account_id) AS account_id
-            FROM price_data.raw_account_aliases
+    // raw_account_aliases re-records every alias on every block it is observed, so
+    // 19,867 distinct identities sit behind 16.2M rows and its ORDER BY starts with
+    // block_height — no alias predicate can use it. account_alias_directory is the
+    // MV-maintained set (min/max block per identity, so replay is idempotent);
+    // confidence stays in its key, which keeps every reader's DISTINCT set intact.
+    query: `SELECT DISTINCT evm_address AS evm, account_id
+            FROM price_data.account_alias_directory
             WHERE relationship = 'explicit_binding' AND alias_type = 'substrate_account_id'
               AND account_id != '' AND evm_address != ''`,
     format: 'JSONEachRow',
@@ -556,9 +561,9 @@ function bindCteSql(): string {
   const pairs = taggedTruncationPairs()
     .map(([h160, owner]) => `('0x45544800${h160.slice(2).toLowerCase()}0000000000000000', '${owner.toLowerCase()}')`)
   return `SELECT eth_id, owner FROM (
-              SELECT DISTINCT concat('0x45544800', substring(lower(evm_address), 3, 40), '0000000000000000') AS eth_id,
-                     lower(account_id) AS owner
-              FROM price_data.raw_account_aliases
+              SELECT DISTINCT concat('0x45544800', substring(evm_address, 3, 40), '0000000000000000') AS eth_id,
+                     account_id AS owner
+              FROM price_data.account_alias_directory
               WHERE relationship = 'explicit_binding' AND alias_type = 'substrate_account_id'
                 AND account_id != '' AND evm_address != ''${pairs.length ? `
               UNION DISTINCT
@@ -2365,13 +2370,17 @@ export function boundSubstrateAccount(
   return null
 }
 
+// The two alias queries below are ORDER BY'd because their rows reach the client as
+// an array. Reading raw_account_aliases they came back in part order, which changed
+// under merges; the directory is small enough to sort outright, so `aliases` is now
+// stable across requests instead of merely usually-stable.
 // Like normalizeAddress, but re-anchors a bound EVM H160 to its substrate account
 // (see boundSubstrateAccount). For callers that don't already hold the alias rows.
 async function canonicalizeAddress(input: string): Promise<NormalizedAddress | null> {
   const norm = normalizeAddress(input)
   if (!norm || norm.kind !== 'evm' || !norm.evmAddress) return norm
   const res = await client.query({
-    query: `SELECT account_id FROM price_data.raw_account_aliases
+    query: `SELECT account_id FROM price_data.account_alias_directory
             WHERE primary_profile = {pp:String}
               AND alias_type = 'substrate_account_id' AND relationship = 'explicit_binding'
             LIMIT 1`,
@@ -2387,8 +2396,9 @@ export async function resolveRelatedAccounts(addressInput: string): Promise<Rela
   if (!norm0 || !norm0.accountId) return null
   const aliasRes = await client.query({
     query: `SELECT DISTINCT account_id, evm_address, primary_profile, relationship, confidence
-            FROM price_data.raw_account_aliases
-            WHERE account_id = {acc:String} OR evm_address = {evm:String}`,
+            FROM price_data.account_alias_directory
+            WHERE account_id = {acc:String} OR evm_address = {evm:String}
+            ORDER BY account_id, evm_address, primary_profile, relationship, confidence`,
     query_params: { acc: norm0.accountId, evm: norm0.evmAddress ?? '' }, format: 'JSONEachRow',
   })
   let aliasRows = await aliasRes.json<AccountAliasRow>()
@@ -2404,8 +2414,9 @@ export async function resolveRelatedAccounts(addressInput: string): Promise<Rela
   if (evmsToLoad.length) {
     const evmAliasRes = await client.query({
       query: `SELECT DISTINCT account_id, evm_address, primary_profile, relationship, confidence
-              FROM price_data.raw_account_aliases
-              WHERE evm_address IN ({evms:Array(String)})`,
+              FROM price_data.account_alias_directory
+              WHERE evm_address IN ({evms:Array(String)})
+              ORDER BY account_id, evm_address, primary_profile, relationship, confidence`,
       query_params: { evms: evmsToLoad }, format: 'JSONEachRow',
     })
     const seen = new Set(aliasRows.map(a => JSON.stringify(a)))
