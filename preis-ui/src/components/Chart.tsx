@@ -562,6 +562,10 @@ export default function Chart({
     const previousOverflow = document.body.style.overflow
     const focusFrame = window.requestAnimationFrame(() => volumeModalCloseRef.current?.focus())
     const onKeyDown = (event: KeyboardEvent) => {
+      // A dialog stacked on top of this one (the asset picker) consumes Escape
+      // first; without this guard one press would also tear down the volume
+      // modal and drop its `?inspect=` URL state.
+      if (event.defaultPrevented) return
       if (event.key === 'Escape') {
         event.preventDefault()
         closeVolumeModal()
