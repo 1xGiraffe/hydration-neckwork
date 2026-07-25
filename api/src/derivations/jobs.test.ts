@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { xykTotalSharesInsertSql, stalePartitionsSql } from './jobs.ts'
+import { xykTotalSharesInsertSql, stalePartitionsSql, partitionsNeedingRebuild } from './jobs.ts'
 import { swapEventFilterSql } from '../services/accountTradeVolume.ts'
 
 describe('xykTotalSharesInsertSql', () => {
@@ -57,5 +57,40 @@ describe('stalePartitionsSql', () => {
     expect(sql).toContain('pc.priced_to >= src.src_maxb')
     // Partition → first-block inversion of toYYYYMM(toDateTime(h * 12)).
     expect(sql).toContain("parseDateTimeBestEffort(concat(toString(src.p), '01'))")
+  })
+})
+
+// A partition whose valuation nets to nothing writes zero derived rows, so the
+// staleness LEFT JOIN misses forever and the partition is rebuilt on every cycle —
+// three pre-2026 pseudo-partitions read terabytes per cycle to write nothing.
+describe('partitionsNeedingRebuild', () => {
+  it('rebuilds a candidate the process has not built yet', () => {
+    const candidates = [{ p: '197008', src_ingest: '2026-07-01 00:00:00' }]
+
+    expect(partitionsNeedingRebuild(candidates, new Map())).toEqual(['197008'])
+  })
+
+  it('skips a candidate whose source has not advanced since its rebuild', () => {
+    const candidates = [{ p: '197008', src_ingest: '2026-07-01 00:00:00' }]
+    const built = new Map([['197008', '2026-07-01 00:00:00']])
+
+    expect(partitionsNeedingRebuild(candidates, built)).toEqual([])
+  })
+
+  it('rebuilds again once a backfilled row raises the source watermark', () => {
+    const candidates = [{ p: '197008', src_ingest: '2026-07-02 00:00:00' }]
+    const built = new Map([['197008', '2026-07-01 00:00:00']])
+
+    expect(partitionsNeedingRebuild(candidates, built)).toEqual(['197008'])
+  })
+
+  it('keeps the live month moving while empty history stays skipped', () => {
+    const candidates = [
+      { p: '197008', src_ingest: '2026-07-01 00:00:00' },
+      { p: '197501', src_ingest: '2026-07-25 09:00:00' },
+    ]
+    const built = new Map([['197008', '2026-07-01 00:00:00'], ['197501', '2026-07-25 08:00:00']])
+
+    expect(partitionsNeedingRebuild(candidates, built)).toEqual(['197501'])
   })
 })

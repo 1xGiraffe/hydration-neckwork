@@ -113,7 +113,7 @@ async function atomicFullReplace(
 // so it matches the exact source rows the netting consumes.
 export function stalePartitionsSql(): string {
   return `
-    SELECT toString(src.p) AS p
+    SELECT toString(src.p) AS p, toString(src.src_ingest) AS src_ingest
     FROM (
       SELECT toYYYYMM(toDateTime(block_height * 12)) AS p,
              max(ingested_at) AS src_ingest,
@@ -137,10 +137,32 @@ export function stalePartitionsSql(): string {
     ORDER BY src.p`
 }
 
+// A partition whose valuation legitimately nets to nothing writes zero rows, so
+// the derived side never gets a computed_at and the LEFT JOIN miss marks it stale
+// forever — three pre-2026 pseudo-partitions were rebuilt on every cycle, reading
+// terabytes to write nothing. Remember the source watermark each rebuild consumed
+// (in memory, not a completion-marker table) and skip a candidate whose source has
+// not advanced since. A restart costs one extra pass per such partition, not one
+// per cycle; a backfilled row raises src_ingest and re-marks it stale, so this
+// stays correct under backward backfill.
+const rebuiltSourceWatermark = new Map<string, string>()
+
+export function resetRebuiltSourceWatermarkForTest(): void {
+  rebuiltSourceWatermark.clear()
+}
+
+// Candidates whose source actually moved since the last rebuild this process did.
+export function partitionsNeedingRebuild(
+  candidates: { p: string; src_ingest: string }[],
+  lastRebuilt: ReadonlyMap<string, string>,
+): string[] {
+  return candidates.filter(c => lastRebuilt.get(c.p) !== c.src_ingest).map(c => c.p)
+}
+
 // src is ORDER BY p ascending → rebuild oldest partition first.
-async function stalePartitions(client: ClickHouseClient): Promise<string[]> {
+async function stalePartitions(client: ClickHouseClient): Promise<{ p: string; src_ingest: string }[]> {
   const res = await client.query({ query: stalePartitionsSql(), format: 'JSONEachRow' })
-  return (await res.json<{ p: string }>()).map(r => r.p)
+  return res.json<{ p: string; src_ingest: string }>()
 }
 
 // Recompute only the partitions whose source/derived coverage diverges. The
@@ -161,8 +183,10 @@ export async function runAccountTradeVolume(client: ClickHouseClient): Promise<D
   }
   const live = 'price_data.account_trade_volume'
   const staging = `${live}_staging`
-  const stale = await stalePartitions(client)
+  const candidates = await stalePartitions(client)
+  const stale = partitionsNeedingRebuild(candidates, rebuiltSourceWatermark)
   if (!stale.length) return { model, rows: 0 }
+  const ingestByPartition = new Map(candidates.map(c => [c.p, c.src_ingest]))
   await client.command({ query: `CREATE TABLE IF NOT EXISTS ${staging} AS ${live}` })
   for (const p of stale) {
     // Clean slate in staging for this partition (a prior crashed run may have
@@ -171,6 +195,9 @@ export async function runAccountTradeVolume(client: ClickHouseClient): Promise<D
     await client.command({ query: buildPartitionInsertSql(p, staging) })
     await client.command({ query: `ALTER TABLE ${live} REPLACE PARTITION ${p} FROM ${staging}` })
     await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
+    // Only after the swap succeeded: a failed rebuild must stay a candidate.
+    const consumed = ingestByPartition.get(p)
+    if (consumed != null) rebuiltSourceWatermark.set(p, consumed)
   }
   const res = await client.query({
     query: `SELECT count() AS n FROM price_data.account_trade_volume
