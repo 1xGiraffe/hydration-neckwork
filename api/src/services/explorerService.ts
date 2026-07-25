@@ -6408,33 +6408,44 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
       const last = evs.at(-1)
       pageState = { scanned: evs.length, cursor: last ? { blockHeight: last.block_height, eventIndex: last.event_index } : null }
       if (!evs.length) return []
-      const blocks = [...new Set(evs.map(event => event.block_height))].join(',')
-      const [wRes, legacyRes] = await Promise.all([
-        client.query({
-          query: `SELECT block_height, extrinsic_index,
-                    asset_id AS cid,
-                    amount AS amount
-                  FROM ${xcmEventActivityTable()}
-                  WHERE event_name='Currencies.Withdrawn' AND block_height IN (${blocks})
-                    ${assetIdFilterSql('asset_id', tokenIds)}`,
-          format: 'JSONEachRow',
-        }),
-        client.query({
-          query: `SELECT DISTINCT block_height, extrinsic_index
-                  FROM price_data.raw_xcm_activity
-                  WHERE block_height IN (${blocks}) AND source_kind='event'
-                    AND name='XTokens.TransferredAssets'`,
-          format: 'JSONEachRow',
-        }),
-      ])
+      // Bound-parameter chunks: a widened deep-walk page can carry tens of
+      // thousands of blocks, and an interpolated list would exceed max_query_size.
+      const blocks = [...new Set(evs.map(event => event.block_height))]
+      type WithdrawalRow = { block_height: number; extrinsic_index: number | null; cid: number; amount: string }
+      const withdrawals: WithdrawalRow[] = []
+      const legacyPairs: { block_height: number; extrinsic_index: number | null }[] = []
+      for (let start = 0; start < blocks.length; start += 2_000) {
+        const chunk = blocks.slice(start, start + 2_000)
+        const [wRes, legacyRes] = await Promise.all([
+          client.query({
+            query: `SELECT block_height, extrinsic_index,
+                      asset_id AS cid,
+                      amount AS amount
+                    FROM ${xcmEventActivityTable()}
+                    WHERE event_name='Currencies.Withdrawn' AND block_height IN {blocks:Array(UInt32)}
+                      ${assetIdFilterSql('asset_id', tokenIds)}`,
+            query_params: { blocks: chunk },
+            format: 'JSONEachRow',
+          }),
+          client.query({
+            query: `SELECT DISTINCT block_height, extrinsic_index
+                    FROM price_data.raw_xcm_activity
+                    WHERE block_height IN {blocks:Array(UInt32)} AND source_kind='event'
+                      AND name='XTokens.TransferredAssets'`,
+            query_params: { blocks: chunk },
+            format: 'JSONEachRow',
+          }),
+        ])
+        withdrawals.push(...await wRes.json<WithdrawalRow>())
+        legacyPairs.push(...await legacyRes.json<{ block_height: number; extrinsic_index: number | null }>())
+      }
       const wmap = new Map<string, number>()
-      for (const withdrawal of await wRes.json<{ block_height: number; extrinsic_index: number | null; cid: number; amount: string }>()) {
+      for (const withdrawal of withdrawals) {
         wmap.set(`${withdrawal.block_height}:${withdrawal.extrinsic_index}:${withdrawal.amount}`, withdrawal.cid)
       }
       // The rare extrinsic emitting both events yields one row set: the legacy
       // event wins and the pallet_xcm mirror is suppressed.
-      const xtokensExts = new Set((await legacyRes.json<{ block_height: number; extrinsic_index: number | null }>())
-        .map(event => `${event.block_height}:${event.extrinsic_index}`))
+      const xtokensExts = new Set(legacyPairs.map(event => `${event.block_height}:${event.extrinsic_index}`))
       const out: ActivityRow[] = []
       for (const event of evs) {
         if (event.name === 'PolkadotXcm.Sent' && xtokensExts.has(`${event.block_height}:${event.extrinsic_index}`)) continue
@@ -10887,20 +10898,28 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
     })
     const dcaExecs = await dcaExecRes.json<{ block_height: number; ts: string; who: string; id: string; amount_in: string; amount_out: string }>()
     if (dcaExecs.length) {
-    const blocks = [...new Set(dcaExecs.map(d => d.block_height))].join(',')
+    const blocks = [...new Set(dcaExecs.map(d => d.block_height))]
     const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
-    const [swapRes, schedById] = await Promise.all([
-      client.query({
-        query: `SELECT block_height, event_index, event_name, JSONExtractInt(args_json,'assetIn') AS asset_in, JSONExtractInt(args_json,'assetOut') AS asset_out,
-                  JSONExtractString(args_json,'amountIn') AS amount_in
-                FROM price_data.raw_events WHERE block_height IN (${blocks}) AND event_name IN (${names})`,
-        format: 'JSONEachRow',
-      }),
-      getDcaScheduleLinks(dcaExecs.map(d => d.id)),
-    ])
+    // Bound-parameter chunks, not an interpolated list: a deep page carries tens
+    // of thousands of blocks and the literal would exceed max_query_size.
+    type DcaSwapLegRow = { block_height: number; event_index: number; event_name: string; asset_in: number; asset_out: number; amount_in: string }
+    const swapLegs: DcaSwapLegRow[] = []
+    const fetchSwapLegs = async (): Promise<void> => {
+      for (let start = 0; start < blocks.length; start += 2_000) {
+        const res = await client.query({
+          query: `SELECT block_height, event_index, event_name, JSONExtractInt(args_json,'assetIn') AS asset_in, JSONExtractInt(args_json,'assetOut') AS asset_out,
+                    JSONExtractString(args_json,'amountIn') AS amount_in
+                  FROM price_data.raw_events WHERE block_height IN {blocks:Array(UInt32)} AND event_name IN (${names})`,
+          query_params: { blocks: blocks.slice(start, start + 2_000) },
+          format: 'JSONEachRow',
+        })
+        swapLegs.push(...await res.json<DcaSwapLegRow>())
+      }
+    }
+    const [, schedById] = await Promise.all([fetchSwapLegs(), getDcaScheduleLinks(dcaExecs.map(d => d.id))])
     // Match the swap leg by block+amountIn (prefer Router.Executed — the net summary).
     const swapByKey = new Map<string, { event_index: number; asset_in: number; asset_out: number }>()
-    for (const s of await swapRes.json<{ block_height: number; event_index: number; event_name: string; asset_in: number; asset_out: number; amount_in: string }>()) {
+    for (const s of swapLegs) {
       const k = `${s.block_height}:${s.amount_in}`
       if (!swapByKey.has(k) || isRouterNet(s.event_name)) swapByKey.set(k, { event_index: s.event_index, asset_in: s.asset_in, asset_out: s.asset_out })
     }
