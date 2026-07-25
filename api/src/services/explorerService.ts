@@ -13578,6 +13578,8 @@ async function enrichAccountRows(
   const moduleAccounts = [...new Set(rowModuleAccounts.flat())]
   if (!all.length && !moduleAccounts.length) return
   const list = all.length ? sqlAccountList(all) : "''"
+  const activityAccounts = [...new Set([...all, ...moduleAccounts])]
+  const activityList = activityAccounts.length ? sqlAccountList(activityAccounts) : "''"
 
   const winStart = sparklineCalendarWindowStart().toISOString().slice(0, 10)
 
@@ -13606,7 +13608,12 @@ async function enrichAccountRows(
               '' AS bal,
               toUInt32(uniqMerge(activity_state)) AS n_ev
             FROM price_data.account_balance_weekly
-            WHERE account_id IN (${list})
+            -- Every member, module/sovereign forms included. Those are excluded from
+            -- the balance-history scan above because they carry millions of
+            -- observations, but this is one aggregate per account: leaving them out
+            -- blanked the Activity cell for the busiest accounts on the chain and
+            -- silently undercounted any tag that mixes module and user members.
+            WHERE account_id IN (${activityList})
             GROUP BY account_id`,
       query_params: { ws: winStart },
       format: 'JSONEachRow',
@@ -13775,7 +13782,15 @@ async function enrichAccountRows(
       spark[SPARK_WEEKS - 1] = +Number(raw[i].usd ?? 0).toFixed(2)
       row.sparkline = spark
     }
-    if (accs.length) row.activityCount = accs.reduce((s, a) => s + (actByAcc.get(a) ?? 0), 0)
+    // Only fill a gap, never overwrite: the page query's grouped uniqMerge is the
+    // same expression sort=activity orders by, so replacing it with this per-member
+    // sum would let a displayed number exceed the row above it. Where that query did
+    // not run (any other sort) the sum stands in, and it now covers module/sovereign
+    // members too — the busiest accounts on the chain used to show no value at all.
+    if (row.activityCount == null) {
+      const counted = [...accs, ...moduleAccs].reduce((sum, a) => sum + (actByAcc.get(a) ?? 0), 0)
+      if (counted > 0) row.activityCount = counted
+    }
     if (accs.length) {
       const volume = accs.reduce((s, a) => s + (volumeByAccount.get(a) ?? 0), 0)
       if (volume > 0) row.tradingVolumeUsd = volume
