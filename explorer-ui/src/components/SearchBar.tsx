@@ -68,26 +68,33 @@ export function SearchBar({ variant }: { variant: 'hero' | 'topbar' }) {
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(0)
   const [searched, setSearched] = useState(false)
+  // The query `results` describes. While it differs from the input, the hits belong
+  // to text the user has already replaced: they must not render, be clickable, or be
+  // what Enter opens.
+  const [resultsQuery, setResultsQuery] = useState('')
   const debounce = useRef<number | undefined>(undefined)
   const blurTimeout = useRef<number | undefined>(undefined)
   const searchAbort = useRef<AbortController | null>(null)
   const searchSequence = useRef(0)
   const resultsId = useId()
 
-  async function runSearch(qRaw: string) {
+  // `openFirst` is Enter's path: the hits on screen belong to older text, so the
+  // search runs first and navigates to what the typed query actually resolves to.
+  async function runSearch(qRaw: string, options: { openFirst?: boolean } = {}) {
     const q = qRaw.trim()
     const sequence = ++searchSequence.current
     searchAbort.current?.abort()
-    if (!q) { setResults([]); setOpen(false); setSearched(false); return }
+    if (!q) { setResults([]); setResultsQuery(''); setOpen(false); setSearched(false); return }
     const controller = new AbortController()
     searchAbort.current = controller
     try {
       const r = await api.search(q, controller.signal)
       if (controller.signal.aborted || sequence !== searchSequence.current) return
-      setResults(r); setActive(0); setOpen(true); setSearched(true)
+      if (options.openFirst && r[0]) { go(r[0]); return }
+      setResults(r); setResultsQuery(q); setActive(0); setOpen(true); setSearched(true)
     } catch {
       if (controller.signal.aborted || sequence !== searchSequence.current) return
-      setResults([]); setOpen(true); setSearched(true)
+      setResults([]); setResultsQuery(q); setOpen(true); setSearched(true)
     } finally {
       if (searchAbort.current === controller) searchAbort.current = null
     }
@@ -100,20 +107,24 @@ export function SearchBar({ variant }: { variant: 'hero' | 'topbar' }) {
     searchAbort.current?.abort()
     window.clearTimeout(debounce.current)
     if (!v.trim()) {
-      setResults([]); setOpen(false); setSearched(false)
+      setResults([]); setResultsQuery(''); setOpen(false); setSearched(false)
       return
     }
+    setSearched(false)
     debounce.current = window.setTimeout(() => runSearch(v), 180)
   }
   function go(r: SearchResult) {
     searchSequence.current++
     searchAbort.current?.abort()
-    navigate(routeFor(r)); setOpen(false); setValue(''); setResults([]); setSearched(false)
+    navigate(routeFor(r)); setOpen(false); setValue(''); setResults([]); setResultsQuery(''); setSearched(false)
   }
+  // Hits for the text currently in the box; empty while a keystroke is still
+  // debouncing, so Enter re-runs the search instead of opening a stale hit.
+  const currentResults = resultsQuery === value.trim() ? results : []
   function onKey(e: React.KeyboardEvent) {
-    if (e.key === 'ArrowDown') { e.preventDefault(); setActive(a => Math.min(a + 1, results.length - 1)) }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive(a => Math.min(a + 1, currentResults.length - 1)) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(a => Math.max(a - 1, 0)) }
-    else if (e.key === 'Enter') { if (results[active]) go(results[active]); else runSearch(value) }
+    else if (e.key === 'Enter') { if (currentResults[active]) go(currentResults[active]); else void runSearch(value, { openFirst: true }) }
     else if (e.key === 'Escape') { setOpen(false) }
   }
 
@@ -132,7 +143,7 @@ export function SearchBar({ variant }: { variant: 'hero' | 'topbar' }) {
         value={value}
         onChange={e => onChange(e.target.value)}
         onKeyDown={onKey}
-        onFocus={() => { window.clearTimeout(blurTimeout.current); if (results.length) setOpen(true) }}
+        onFocus={() => { window.clearTimeout(blurTimeout.current); if (currentResults.length) setOpen(true) }}
         onBlur={() => { blurTimeout.current = window.setTimeout(() => setOpen(false), 160) }}
         placeholder="Account, Asset, Hash, Block, Tag"
         aria-label="Search explorer"
@@ -140,14 +151,14 @@ export function SearchBar({ variant }: { variant: 'hero' | 'topbar' }) {
         aria-autocomplete="list"
         aria-expanded={open && !!value.trim()}
         aria-controls={resultsId}
-        aria-activedescendant={open && results[active] ? `${resultsId}-option-${active}` : undefined}
+        aria-activedescendant={open && currentResults[active] ? `${resultsId}-option-${active}` : undefined}
         autoComplete="off"
         spellCheck={false}
       />
       {variant === 'hero' && <span className="hint">↵</span>}
       {variant === 'topbar' && <span className="kbd-slash" title="Press / to search">/</span>}
       <div id={resultsId} className="search-results" role="listbox" aria-label="Search results" hidden={!open || !value.trim()}>
-        {results.length ? results.map((r, i) => (
+        {currentResults.length ? currentResults.map((r, i) => (
           <a key={`${r.type}:${r.value}`} id={`${resultsId}-option-${i}`} role="option" aria-selected={i === active} className={`sr-item${i === active ? ' on' : ''}`} href={routeFor(r)}
             onMouseDown={e => { e.preventDefault(); go(r) }} onMouseEnter={() => setActive(i)}>
             <span className="sr-type">{TYPE_LABEL[r.type]}</span>
