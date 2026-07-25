@@ -1029,6 +1029,9 @@ svg { display: block; }
    relative to the primary market's plain-text note. */
 .mm-title-note { display: inline-flex; align-items: center; gap: 4px; color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; }
 .mm-defisim-link { margin-left: auto; text-transform: none; letter-spacing: 0; }
+/* Stays right-aligned once the title row wraps, so it lines up with the other
+   "Open in …" links instead of sliding under the heading on narrow screens. */
+.ext-link-row { display: flex; justify-content: flex-end; margin-bottom: 8px; }
 .mm-card { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 16px; padding: 18px 20px; margin-bottom: 8px; }
 .mm-summary { display: flex; flex-wrap: wrap; gap: 28px; padding-bottom: 16px; border-bottom: 1px solid var(--separator); }
 .mm-stat { display: flex; flex-direction: column; gap: 4px; }
@@ -1103,7 +1106,6 @@ svg { display: block; }
   .mm-secondary-stat { align-items: flex-start; }
   .mm-secondary-toggle { grid-column: 2; grid-row: 1; }
   .mm-secondary-subtitle { white-space: normal; }
-  .mm-defisim-link { margin-left: 0; }
 }
 
 /* cross-chain chips */
@@ -1565,22 +1567,46 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 }
 
 /* Referendum: tally bar, vote bubbles, and the ref link on vote rows. */
-.ref-link { color: var(--accent); text-decoration: none; border-bottom: 1px dotted color-mix(in srgb, var(--accent) 55%, transparent); }
-.ref-link:hover { border-bottom-style: solid; }
+.ref-link { color: var(--sky); text-decoration: none; }
+.ref-link:hover { text-decoration: underline; }
+.ref-num { margin-right: 2px; }
 .tally-bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--surface-2); }
 .tally-aye { background: var(--green); }
 .tally-nay { background: var(--red); }
 .vb-aye-text { color: var(--green); }
 .vb-nay-text { color: var(--red); }
-.vote-bubbles svg { width: 100%; height: auto; display: block; }
-.vb-axis { fill: var(--text-low); font-size: 11px; letter-spacing: .08em; }
-/* Area encodes power, so bubbles overlap-check but still sit close; the stroke keeps
-   neighbouring circles legible where they touch. */
-.vb-bubble { stroke: var(--surface-1); stroke-width: 1; opacity: .78; cursor: pointer; transition: opacity .12s ease; }
-.vb-bubble.vb-aye { fill: var(--green); }
-.vb-bubble.vb-nay { fill: var(--red); }
-.vb-bubble:hover, .vb-bubble.on { opacity: 1; stroke: var(--text-high); }
-.vb-legend { margin-top: 8px; font-size: 12px; color: var(--text-medium); min-height: 18px; }
+
+/* One cluster, both sides. Bubbles are anchors so the app's global hover card and
+   click-through work exactly as they do on any other account pill. */
+.vb-canvas { position: relative; width: 100%; }
+.vb-bubble {
+  position: absolute; transform: translate(-50%, -50%); aspect-ratio: 1; border-radius: 50%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  overflow: hidden; text-decoration: none; color: var(--text-high);
+  /* Brightness rather than an outline: a stroke on hover fought the packed edges. */
+  transition: filter .12s ease, opacity .12s ease;
+  opacity: .82;
+}
+/* addr-pill brings inline-row styling (inline-flex, gap, nowrap, emoji chrome);
+   inside a circle the bubble's own layout has to win. */
+.vb-bubble.addr-pill { display: flex; gap: 1px; font-size: inherit; }
+.vb-bubble.addr-pill .emoji { border: 0; background: none; padding: 0; width: auto; height: auto; }
+.vb-bubble.vb-aye { background: var(--green); }
+.vb-bubble.vb-nay { background: var(--red); }
+.vb-bubble.vb-split { background: var(--accent); }
+.vb-bubble:hover, .vb-bubble.on { opacity: 1; filter: brightness(1.22); z-index: 2; }
+.vb-bubble .vb-emoji { font-size: clamp(9px, 1.5vw, 17px); line-height: 1; background: none; border: 0; padding: 0; }
+.vb-bubble .vb-emoji-img { width: 1em; height: 1em; display: block; }
+.vb-bubble .vb-addr { font-size: clamp(7px, .82vw, 10px); line-height: 1.05; color: color-mix(in srgb, #000 72%, transparent); white-space: nowrap; max-width: 88%; overflow: hidden; text-overflow: ellipsis; }
+/* An identity or tag name is free text, so it gets the ellipsis treatment a
+   fixed-width shortened address never needs. */
+.vb-bubble .vb-name { font-family: inherit; font-weight: 600; }
+.vb-bubble .id-verified { margin-left: 2px; }
+.vb-legend { margin-top: 10px; font-size: 12px; color: var(--text-medium); min-height: 18px; display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
+.vb-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin: 0 5px 0 2px; }
+.vb-dot.vb-aye { background: var(--green); }
+.vb-dot.vb-nay { background: var(--red); }
+.vb-dot.vb-split { background: var(--accent); }
 .badge.vote-split { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
 .badge.badge-quiet { background: var(--surface-2); color: var(--text-low); margin-left: 6px; }
 tr.row-muted td { opacity: .55; }

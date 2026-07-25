@@ -90,6 +90,11 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
       {isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Referendum not found</div>
         : isLoading || !data ? <div className="detail-card"><SkeletonRows rows={5} /></div> : (
           <>
+            {/* Above the card and right-aligned, matching "Open in preis" on the
+                asset page rather than sitting in the detail list. */}
+            <div className="ext-link-row">
+              <a href={data.subsquareUrl} target="_blank" rel="noopener" className="ext-link">Open in Subsquare ↗</a>
+            </div>
             <div className="detail-card">
               <div className="dl">
                 {/* The chain's own tally is authoritative: it is already
@@ -106,17 +111,6 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
                     </div>
                   </div>
                 </>}
-                <div className="dt">Indexed votes</div>
-                <div className="dd">
-                  <span className="mono">{F.int(data.directTally.voters)}</span> accounts ·{' '}
-                  <span className="vb-aye-text mono">{F.int(data.directTally.ayeVoters)} aye</span> ·{' '}
-                  <span className="vb-nay-text mono">{F.int(data.directTally.nayVoters)} nay</span>
-                  {data.directTally.splitVoters > 0 && <> · <span className="mono">{F.int(data.directTally.splitVoters)} split</span></>}
-                  <div className="mono" style={{ marginTop: 4 }}>
-                    {F.amount(data.directTally.ayes, data.asset.decimals)} / {F.amount(data.directTally.nays, data.asset.decimals)} weighted
-                    <span className="muted"> (from {F.amount(data.directTally.rawAyes, data.asset.decimals)} / {F.amount(data.directTally.rawNays, data.asset.decimals)} locked)</span>
-                  </div>
-                </div>
                 {/* Delegated power casts no vote of its own, so it can only appear as
                     the gap between the chain's tally and the votes we can attribute.
                     Stated rather than folded into someone's weight. */}
@@ -145,12 +139,6 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
                   <div className="dt">Proposal</div>
                   <div className="dd mono hash-cell">{data.proposalHash}</div>
                 </>}
-                <div className="dt">Discussion</div>
-                <div className="dd">
-                  <a href={data.subsquareUrl} target="_blank" rel="noopener" className="ext-link">
-                    SubSquare <span className="ext-site">subsquare.io</span>
-                  </a>
-                </div>
               </div>
             </div>
 

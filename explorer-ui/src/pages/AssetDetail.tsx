@@ -77,7 +77,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
             {data.priceSeries.length > 1 && (
               <>
                 <div className="sec-title" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>Price
-                  <a className="ext-link" style={{ marginLeft: 'auto', textTransform: 'none', letterSpacing: 0 }} href={preisPairUrl(assetId)} target="_blank" rel="noopener">Open in preis</a>
+                  <a className="ext-link" style={{ marginLeft: 'auto', textTransform: 'none', letterSpacing: 0 }} href={preisPairUrl(assetId)} target="_blank" rel="noopener">Open in preis ↗</a>
                 </div>
                 <PriceChart data={data.priceSeries} dates={data.priceDates} price={a.price} change24h={a.change24h} />
               </>

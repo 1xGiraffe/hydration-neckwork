@@ -1,65 +1,80 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
+import { Link, paths } from '../router'
 import type { ReferendumVoter } from '../types'
-import { HEIGHT, WIDTH, pack, type Bubble } from './voteBubbleLayout'
-import { F } from './ui'
+import { HEIGHT, WIDTH, packVoters, type Bubble } from './voteBubbleLayout'
+import { AccountEmoji, F, ShortAddr, TagIcon, moduleName } from './ui'
+import type { AccountRef } from '../types'
 
-// Conviction-weighted vote power as a bubble map.
+// Conviction-weighted vote power as ONE bubble map, aye and nay in the same cluster
+// so the balance of the vote reads as a colour mix rather than two charts to compare.
 //
-// Hand-rolled SVG, like every other chart in this app (the sparkline, the daily
-// histogram, the portfolio chart) — a packed-circle layout needs no library.
-//
-// AREA encodes power, not radius: a 6x-conviction whale outweighs a small voter by
-// several orders of magnitude, and scaling the radius linearly would make everyone
-// else a dot. Aye and Nay are laid out as two opposed clusters so the balance of the
-// vote is legible at a glance.
+// Laid out in plain HTML rather than SVG on purpose: each bubble is an `.addr-pill`
+// anchor to its account, so it inherits the app's global hover card and click-through
+// for free, and the emoji and shortened address render with the very same components
+// every table uses. Positions come from voteBubbleLayout in a fixed 720x340 space and
+// are converted to percentages, so the chart scales with its container.
+// A bubble's label follows the very same precedence AddrPill uses in every list —
+// tag group, then module account, then on-chain identity, then shortened address — so
+// an account reads identically here and in the tables. AddrPill itself cannot be
+// nested inside the bubble (it carries its own link and copy button, and an anchor
+// inside an anchor is invalid), so its content is mirrored with the same components
+// and classes.
+function BubbleLabel({ account, label }: { account: AccountRef | null; label: 'full' | 'emoji' | 'none' }) {
+  if (!account || label === 'none') return null
+  const tag = account.tag
+  const mod = moduleName(account.accountId)
+  const identity = account.identity
+  const icon = tag
+    ? <TagIcon icon={tag.icon} color={tag.color} title={tag.name} />
+    : mod ? <span className="vb-emoji">⚙️</span>
+      : <AccountEmoji account={account} className="vb-emoji" imgClass="vb-emoji-img" title="identity" />
+  if (label === 'emoji') return icon
+  const name = tag
+    ? <span className="vb-addr vb-name" style={{ color: tag.color }}>{tag.name}</span>
+    : mod ? <span className="vb-addr vb-name">{mod}</span>
+      : identity?.display
+        ? <span className="vb-addr vb-name">{identity.display}{identity.verified && <span className="id-verified" title="Verified identity">✓</span>}</span>
+        : <span className="vb-addr mono"><ShortAddr addr={account.address} /></span>
+  return <>{icon}{name}</>
+}
+
 export function VoteBubbles({ voters, decimals, symbol }: { voters: ReferendumVoter[]; decimals: number; symbol: string }) {
-  const [hover, setHover] = useState<Bubble | null>(null)
-
-  const bubbles = useMemo(() => {
-    // Withdrawn votes back nothing, so they are not drawn — the tally excludes them too.
-    const live = voters.filter(voter => !voter.removed)
-    const weights = live.flatMap(voter => [Number(voter.weightedAye), Number(voter.weightedNay)])
-    const maxWeight = Math.max(1, ...weights)
-    // Largest first: big circles claim the centre, small ones fill around them.
-    const byWeight = (pick: (v: ReferendumVoter) => string) =>
-      [...live].sort((a, b) => Number(pick(b)) - Number(pick(a)))
-    return [
-      ...pack(byWeight(v => v.weightedAye), 'aye', maxWeight, WIDTH * 0.28),
-      ...pack(byWeight(v => v.weightedNay), 'nay', maxWeight, WIDTH * 0.74),
-    ]
-  }, [voters])
+  const bubbles = useMemo(() => packVoters(voters), [voters])
 
   if (!bubbles.length) return <div className="empty-note">No conviction-weighted votes to plot</div>
 
-  const power = (bubble: Bubble) => (bubble.side === 'aye' ? bubble.voter.weightedAye : bubble.voter.weightedNay)
+  const sideWord = (bubble: Bubble) => (bubble.side === 'split' ? 'Split' : bubble.side === 'aye' ? 'Aye' : 'Nay')
 
   return (
     <div className="vote-bubbles">
-      <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img" aria-label="Conviction-weighted votes by account">
-        <text x={WIDTH * 0.28} y={16} className="vb-axis" textAnchor="middle">AYE</text>
-        <text x={WIDTH * 0.74} y={16} className="vb-axis" textAnchor="middle">NAY</text>
-        {bubbles.map(bubble => (
-          <circle
-            key={`${bubble.side}-${bubble.voter.blockHeight}-${bubble.voter.eventIndex}`}
-            cx={bubble.x} cy={bubble.y} r={bubble.r}
-            className={`vb-bubble vb-${bubble.side}${hover === bubble ? ' on' : ''}`}
-            onMouseEnter={() => setHover(bubble)}
-            onMouseLeave={() => setHover(current => (current === bubble ? null : current))}
-          />
-        ))}
-      </svg>
-      <div className="vb-legend">
-        {hover ? (
-          <>
-            <span className="mono">{hover.voter.account?.address ? `${hover.voter.account.address.slice(0, 6)}…${hover.voter.account.address.slice(-5)}` : 'unknown'}</span>
-            {' · '}<span className={hover.side === 'aye' ? 'vb-aye-text' : 'vb-nay-text'}>{hover.side.toUpperCase()}</span>
-            {hover.voter.conviction ? <> · {hover.voter.conviction}</> : null}
-            {' · '}<span className="mono">{F.amount(power(hover), decimals)} {symbol}</span>
-            <span className="muted"> weighted from {F.amount(hover.voter.balance, decimals)}</span>
-          </>
-        ) : (
-          <span className="muted">Area is conviction-weighted voting power · hover a bubble for the account</span>
-        )}
+      <div className="vb-canvas" style={{ aspectRatio: `${WIDTH} / ${HEIGHT}` }}>
+        {bubbles.map(bubble => {
+          const account = bubble.voter.account
+          const key = `${bubble.voter.blockHeight}-${bubble.voter.eventIndex}`
+          const body = <BubbleLabel account={account} label={bubble.label} />
+          const common = {
+            // addr-pill is what the global hover card hooks on, so a bubble shows the
+            // same account card as any pill in a table (HoverCard.tsx SELECTOR). The
+            // vote itself rides along in data attributes, so that card can add this
+            // account's side, conviction and weighted power to its own rows.
+            className: `vb-bubble addr-pill vb-${bubble.side}`,
+            data: {
+              'data-vote-side': sideWord(bubble),
+              'data-vote-conviction': bubble.voter.conviction ?? '',
+              'data-vote-weighted': `${F.amount(bubble.voter.weighted, decimals)} ${symbol}`,
+              'data-vote-locked': `${F.amount(bubble.voter.balance, decimals)} ${symbol}`,
+            },
+            style: {
+              left: `${(bubble.x / WIDTH) * 100}%`,
+              top: `${(bubble.y / HEIGHT) * 100}%`,
+              width: `${(bubble.r * 2 / WIDTH) * 100}%`,
+            },
+          }
+          // An unattributable vote (no account id) is still plotted, just not linkable.
+          return account
+            ? <Link key={key} to={paths.account(account.address)} {...common}>{body}</Link>
+            : <span key={key} {...{ ...common, data: undefined }} {...common.data}>{body}</span>
+        })}
       </div>
     </div>
   )

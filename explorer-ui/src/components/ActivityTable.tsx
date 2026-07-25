@@ -187,11 +187,15 @@ export function ActivityDesc({ r }: { r: ActivityRow }) {
     // title comes from SubSquare and may not be fetched yet, so the index is the
     // fallback rather than a placeholder. Only ConvictionVoting/Democracy rows have a
     // referendum page — Council/TC votes carry a proposal hash instead.
-    const ref = r.voteRef ? `Ref ${r.voteRef}` : 'Referendum'
-    const label = r.voteRefTitle ?? ref
-    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span> {r.voteRefPallet && r.voteRef
-      ? <Link to={paths.referendum(r.voteRefPallet, r.voteRef)} className="ref-link" title={r.voteRefTitle ? `${ref} · ${r.voteRefTitle}` : ref} data-no-hover="true">{label}</Link>
-      : <span className="muted">{label}</span>}<VoteSideBadge side={r.voteSide} />{r.voteConviction ? <span className="muted">{r.voteConviction}</span> : null}</span>
+    // The index identifies the referendum, the title says what it is: show the index
+    // muted ahead of a plain link on the title, which carries the referendum hover card.
+    const label = r.voteRefTitle ?? (r.voteRef ? `Referendum #${r.voteRef}` : 'Referendum')
+    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span>
+      {r.voteRef && <span className="muted mono ref-num">#{r.voteRef}</span>}
+      {r.voteRefPallet && r.voteRef
+        ? <Link to={paths.referendum(r.voteRefPallet, r.voteRef)} className="ref-link">{r.voteRefTitle ?? 'Referendum'}</Link>
+        : <span className="muted">{label}</span>}
+      <VoteSideBadge side={r.voteSide} />{r.voteConviction ? <span className="muted">{r.voteConviction}</span> : null}</span>
   }
   return null
 }

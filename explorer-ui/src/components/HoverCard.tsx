@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { api } from '../api/explorer'
 import { useAddressSummary, useAsset, useExtrinsic, useBlock, useTagSummary, useTrade, useStats, useDcaSchedule, useDcaExecution } from '../hooks/useExplorerData'
 import { F, AssetIcon, AssetChip, AssetAmount, AddrPill, CallPill, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow } from './ui'
 import type { AssetRef } from '../types'
@@ -8,8 +10,9 @@ import type { AssetRef } from '../types'
 // schedule and execution (slug dca / /dca/…), extrinsic (a.hash / [data-ext] →
 // /extrinsic/…) and block (/block/…) links. Each card mirrors the basic-info
 // block of its detail page. Mounted once in App.
-type Target = { kind: 'account' | 'tag' | 'asset' | 'trade' | 'dca-schedule' | 'dca-exec' | 'extrinsic' | 'block'; id: string; left: number; top: number; bottom: number }
-const SELECTOR = '.addr-pill:not([data-no-hover]), .asset-chip, a.hash, a[href*="/swap/"], a[href*="/dca/"], a[href*="/block/"], [data-activity], [data-ext]'
+type VoteContext = { side: string; conviction: string; weighted: string; locked: string }
+type Target = { kind: 'account' | 'tag' | 'asset' | 'trade' | 'dca-schedule' | 'dca-exec' | 'extrinsic' | 'block' | 'referendum'; id: string; vote?: VoteContext; left: number; top: number; bottom: number }
+const SELECTOR = '.addr-pill:not([data-no-hover]), .asset-chip, a.hash, a[href*="/swap/"], a[href*="/dca/"], a[href*="/block/"], a[href*="/referendum/"], [data-activity], [data-ext]'
 const HOVER_DWELL_MS = 180
 
 function ProfileMetrics({ portfolioUsd, debtUsd, tradingVolumeUsd, liquidationVolumeUsd, topAssets }: {
@@ -36,6 +39,19 @@ function dcaKind(id: string): Target['kind'] {
   return /^\d+-e\d+$/.test(id) ? 'dca-exec' : 'dca-schedule'
 }
 
+// A vote bubble is an account pill that also knows how that account voted, so the
+// card can add the side, conviction and weighted power to the usual account rows.
+function voteContext(el: Element): VoteContext | undefined {
+  const host = el.closest('[data-vote-side]')
+  if (!host) return undefined
+  return {
+    side: host.getAttribute('data-vote-side') ?? '',
+    conviction: host.getAttribute('data-vote-conviction') ?? '',
+    weighted: host.getAttribute('data-vote-weighted') ?? '',
+    locked: host.getAttribute('data-vote-locked') ?? '',
+  }
+}
+
 function parseTarget(el: Element): Omit<Target, 'left' | 'top' | 'bottom'> | null {
   if (el.closest('[data-no-hover]')) return null
   const act = el.getAttribute('data-activity')
@@ -54,7 +70,8 @@ function parseTarget(el: Element): Omit<Target, 'left' | 'top' | 'bottom'> | nul
       if (url.origin !== window.location.origin) return null
     } catch { return null }
   }
-  const am = href.match(/\/account\/([^?#]+)$/); if (am) return { kind: 'account', id: decodeURIComponent(am[1]) }
+  const rm = href.match(/\/referendum\/(opengov|democracy)\/(\d+)$/); if (rm) return { kind: 'referendum', id: `${rm[1]}/${rm[2]}` }
+  const am = href.match(/\/account\/([^?#]+)$/); if (am) return { kind: 'account', id: decodeURIComponent(am[1]), vote: voteContext(el) }
   const tm = href.match(/\/tag\/([^?#]+)$/); if (tm) return { kind: 'tag', id: decodeURIComponent(tm[1]) }
   const sm = href.match(/\/asset\/(\d+)$/); if (sm) return { kind: 'asset', id: sm[1] }
   const dm = href.match(/\/dca\/([^?#]+)$/); if (dm) { const id = decodeURIComponent(dm[1]); return { kind: dcaKind(id), id } }
@@ -137,21 +154,56 @@ export function HoverCards() {
     <div className="hovercard" style={{ left, overflowY: 'auto', ...vStyle }}
       onMouseEnter={() => window.clearTimeout(hideTimer.current)}
       onMouseLeave={() => setTarget(null)}>
-      {target.kind === 'account' ? <AccountHover id={target.id} />
+      {target.kind === 'account' ? <AccountHover id={target.id} vote={target.vote} />
         : target.kind === 'tag' ? <TagHover id={target.id} />
         : target.kind === 'asset' ? <AssetHover id={Number(target.id)} />
         : target.kind === 'trade' ? <TradeHover id={target.id} />
         : target.kind === 'dca-schedule' ? <DcaScheduleHover id={target.id} />
         : target.kind === 'dca-exec' ? <DcaExecutionHover id={target.id} />
+        : target.kind === 'referendum' ? <ReferendumHover id={target.id} />
         : target.kind === 'block' ? <BlockHover id={Number(target.id)} />
         : <ExtrinsicHover id={target.id} />}
     </div>
   )
 }
 
+// Referendum card: what the vote was and where it stands. Asks for limit=1 because
+// only the tallies and counts are shown here — the full voter list belongs to the
+// page, and the endpoint caches its vote scan for a minute either way.
+function ReferendumHover({ id }: { id: string }) {
+  const [pallet, index] = id.split('/')
+  const { data } = useQuery({
+    queryKey: ['referendum-hover', pallet, index],
+    queryFn: ({ signal }) => api.referendum(pallet as 'opengov' | 'democracy', Number(index), signal, 1),
+    staleTime: 60_000,
+  })
+  if (!data) return <div className="hc-sub mono">Loading…</div>
+  const tally = data.onChainTally ?? { ayes: data.directTally.ayes, nays: data.directTally.nays, support: null }
+  const ayes = Number(tally.ayes), nays = Number(tally.nays)
+  const ayePct = ayes + nays > 0 ? (ayes / (ayes + nays)) * 100 : null
+  return (
+    <>
+      <div className="hc-head">
+        <span className="hc-emoji">🗳️</span>
+        <div style={{ minWidth: 0 }}>
+          <div className="hc-title">{data.title ?? `Referendum #${data.index}`}</div>
+          <div className="hc-sub mono">{pallet === 'democracy' ? 'Democracy' : 'OpenGov'} #{data.index} · {data.status}{data.track != null ? ` · track ${data.track}` : ''}</div>
+        </div>
+      </div>
+      {ayePct != null && <div className="tally-bar" style={{ marginBottom: 8 }}>
+        <div className="tally-aye" style={{ width: `${ayePct}%` }} />
+        <div className="tally-nay" style={{ width: `${100 - ayePct}%` }} />
+      </div>}
+      {ayePct != null && <div className="hc-row"><span>Aye</span><span className="mono">{ayePct.toFixed(1)}%</span></div>}
+      <div className="hc-row"><span>Voters</span><span className="mono">{F.int(data.directTally.voters)}</span></div>
+      <div className="hc-row"><span>Aye / nay</span><span className="mono">{F.int(data.directTally.ayeVoters)} / {F.int(data.directTally.nayVoters)}</span></div>
+    </>
+  )
+}
+
 // Compact account card: display name (tag / identity / pallet / emoji name) and
 // the value. No address — the pill being hovered already shows it.
-function AccountHover({ id }: { id: string }) {
+function AccountHover({ id, vote }: { id: string; vote?: VoteContext }) {
   const { data } = useAddressSummary(id)
   if (!data) return <div className="hc-sub mono">Loading…</div>
   const mod = moduleName(data.accountId)
@@ -173,6 +225,11 @@ function AccountHover({ id }: { id: string }) {
               : ident?.verified && <span className="id-verified" title="Verified identity" style={{ marginLeft: 5 }}>✓</span>}</div>
         </div>
       </div>
+      {vote && <>
+        <div className="hc-row"><span>Vote</span><span className="mono">{vote.side}{vote.conviction ? ` · ${vote.conviction}` : ''}</span></div>
+        <div className="hc-row"><span>Weighted</span><span className="mono">{vote.weighted}</span></div>
+        {vote.locked && <div className="hc-row"><span>Locked</span><span className="mono">{vote.locked}</span></div>}
+      </>}
       <ProfileMetrics {...data} debtUsd={debtUsd} topAssets={topAssets} />
     </>
   )
