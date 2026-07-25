@@ -10616,10 +10616,24 @@ function downsampleDaily(series: number[], dates: string[], blocks: number[]): {
 }
 
 // One bucketed value-series reconstruction per scope (`addr:<id>` / `tag:<id>`),
-// shared by the value-history chart and the value-event jump detection so the
-// heavy per-asset walk runs once per TTL, not once per consumer.
+// shared by the value-history chart, the value-event jump detection and the
+// accounts-directory sparkline so the heavy per-asset walk runs once per consumer
+// set rather than once per consumer. The account-value generation in the key
+// advances every five minutes, so nothing survives longer than that regardless of
+// this TTL; it only has to outlast a single directory prewarm pass, whose eight
+// sorts repeat ~30% of their rows between them.
+const ACCOUNT_HISTORY_TTL_MS = 5 * 60_000
+
+// The account set is part of the key, not just the scope: the directory sparkline
+// covers a row's members without their module/sovereign forms while the detail page
+// covers every related account, and the two must never be served each other's series.
+function accountSetFingerprint(accounts: string[]): string {
+  return createHash('sha1').update([...accounts].map(a => a.toLowerCase()).sort().join(',')).digest('hex').slice(0, 12)
+}
+
 function getAccountHistoryShared(accounts: string[], scopeKey: string): Promise<Awaited<ReturnType<typeof getAccountHistory>>> {
-  return cached(`explorer:account-history:${accountValueGenerationEpoch}:${scopeKey}`, 120_000, () => getAccountHistory(accounts))
+  const key = `explorer:account-history:${accountValueGenerationEpoch}:${scopeKey}:${accountSetFingerprint(accounts)}`
+  return cached(key, ACCOUNT_HISTORY_TTL_MS, () => getAccountHistory(accounts))
 }
 
 // Per-asset analogue of downsampleDaily: one balance point per calendar day (the
@@ -13811,7 +13825,10 @@ async function enrichAccountSparklines(
       const accounts = rowAccounts[i]
       if (!accounts.length) continue   // module-only/tagless → keep enrichAccountRows' fallback
       try {
-        const { portfolioSeries, portfolioDates } = await getAccountHistory(accounts)
+        // Same scope key the detail page uses, so a row's reconstruction is shared
+        // with its account page and with the other sorts this row appears under.
+        const scopeKey = raw[i].label_id !== '' ? `tag:${raw[i].label_id}` : `addr:${raw[i].sample}`
+        const { portfolioSeries, portfolioDates } = await getAccountHistoryShared(accounts, scopeKey)
         if (portfolioSeries.length > 1) {
           // Resample the full-history series onto the fixed trailing-year grid: every
           // row's sparkline spans the same 1Y window, left-padded with 0 for younger
