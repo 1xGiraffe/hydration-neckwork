@@ -13,6 +13,26 @@ export function pageCount(rowCount?: number | null): number | undefined {
   return rowCount != null && rowCount > 0 ? Math.ceil(rowCount / PAGE_SIZE) : undefined
 }
 
+// The row count the pager sizes itself from is a sum of per-category counts, so it can
+// exceed the classified feed it is paging: one live account reported 1,209 activity rows
+// while the feed ends at 646, and the pager offered 49 pages when 26 exist. Pages past
+// the real end loaded empty and the user had no way to tell which were real.
+//
+// A page that has SETTLED short (fewer than PAGE_SIZE rows) is proof of the end: the
+// current page is the last one when it holds rows, and the previous one was when it is
+// empty. Clamp to that and never above the count, so the pager only ever shrinks toward
+// the truth and stays stable while a page is still loading.
+export function shownPageCount(
+  countedPages: number | undefined,
+  rowsOnPage: number,
+  page: number,
+  loading: boolean,
+): number | undefined {
+  if (loading || rowsOnPage >= PAGE_SIZE) return countedPages
+  const lastRealPage = rowsOnPage > 0 ? page + 1 : page
+  return countedPages == null ? (lastRealPage > 0 ? lastRealPage : undefined) : Math.min(countedPages, lastRealPage)
+}
+
 // Deep pages are cheaper to reach from the oldest end, but only within the API's
 // tail budget — beyond it a forward offset is the servable form.
 export function activityTailOffset(rowCount: number | null | undefined, offset: number): number | undefined {

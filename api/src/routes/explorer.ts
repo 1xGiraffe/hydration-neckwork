@@ -33,8 +33,24 @@ const activityCountQuery = z.object({ min: z.coerce.number().min(0).max(1e12) })
 // bounded; account/tag last-page navigation uses the independently bounded tail
 // mode instead of allocating every preceding semantic row in Node.
 const MAX_ACTIVITY_OFFSET = 10_000
+// A single bound across every category either starves the cheap tabs or lets the
+// expensive ones time out. Measured warm at /explorer/activity?limit=25&offset=10000:
+//   otc 0.007s  staking 0.027s  vote 0.051s  trade 0.093s  liquidity 0.267s
+//   dca 0.319s  mm 0.413s  all 1.153s  transfer 4.233s  xcm 37.806s
+// The deep set is the categories whose whole feed is reachable because the source
+// itself is small — vote_activity 121,078 rows, staking_activity 192,006, otc_activity
+// 4,473 — so a deep offset cannot explode no matter how far it is pushed. The wide
+// feeds read multi-million-row sources (transfer_activity 78.5M, xcm 55.8M), where the
+// cost does grow with depth, and keep the conservative bound.
+//
+// This is what withheld /activity?tab=vote&page=490: the vote feed is 4,843 pages of
+// 25 and 92% of them sat behind a cap that costs it 51ms to serve.
+const MAX_NARROW_ACTIVITY_OFFSET = 250_000
+const NARROW_ACTIVITY_TYPES = new Set(['vote', 'staking', 'otc'])
+const maxActivityOffsetFor = (type: string) =>
+  NARROW_ACTIVITY_TYPES.has(type) ? MAX_NARROW_ACTIVITY_OFFSET : MAX_ACTIVITY_OFFSET
 const MAX_ACTIVITY_TAIL = 6_000
-const activityOffsetSchema = z.coerce.number().int().min(0).max(MAX_ACTIVITY_OFFSET).optional()
+const activityOffsetSchema = z.coerce.number().int().min(0).max(MAX_NARROW_ACTIVITY_OFFSET).optional()
 const tailSchema = z.coerce.number().int().min(0).max(MAX_ACTIVITY_TAIL).optional()
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
 function dateParam(q: Record<string, unknown>, key: string): string | undefined {
@@ -78,9 +94,13 @@ function tailParam(query: Record<string, unknown>): number | undefined | null {
   return parsed.success ? parsed.data : null
 }
 
-function activityOffsetParam(query: Record<string, unknown>): number | null {
+// null = out of range for this feed. The bound depends on the category, so callers
+// that know their type pass it; the rest get the conservative wide-feed bound.
+function activityOffsetParam(query: Record<string, unknown>, type = 'all'): number | null {
   const parsed = activityOffsetSchema.safeParse(query.offset)
-  return parsed.success ? parsed.data ?? 0 : null
+  if (!parsed.success) return null
+  const offset = parsed.data ?? 0
+  return offset <= maxActivityOffsetFor(type) ? offset : null
 }
 
 function extrinsicFilters(query: Record<string, unknown>): ExtrinsicListFilters {
@@ -262,8 +282,8 @@ export async function explorerRoutes(fastify: FastifyInstance) {
   fastify.get('/explorer/activity', async (req, reply) => {
     const q = req.query as Record<string, unknown>
     const type = activityTypeParam(q)
-    const offset = activityOffsetParam(q)
-    if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${MAX_ACTIVITY_OFFSET}` })
+    const offset = activityOffsetParam(q, type)
+    if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${maxActivityOffsetFor(type)} for type '${type}'` })
     const asset = z.coerce.number().int().min(0).max(0xffff_ffff).optional().safeParse(q.asset)
     if (asset.success && asset.data != null) {
       return getAssetActivity(asset.data, type, limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
@@ -309,9 +329,10 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
     const q = req.query as Record<string, unknown>
     const tail = tailParam(q)
-    const offset = tail == null ? activityOffsetParam(q) : 0
-    if (tail === null || offset == null) return reply.status(400).send({ error: `Activity offset/tail exceeds the supported ${MAX_ACTIVITY_OFFSET}/${MAX_ACTIVITY_TAIL} row window` })
-    const rows = await getTagActivity(params.data.tagId, activityTypeParam(q), limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'), tail)
+    const activityType = activityTypeParam(q)
+    const offset = tail == null ? activityOffsetParam(q, activityType) : 0
+    if (tail === null || offset == null) return reply.status(400).send({ error: `Activity offset/tail exceeds the supported ${maxActivityOffsetFor(activityType)}/${MAX_ACTIVITY_TAIL} row window for type '${activityType}'` })
+    const rows = await getTagActivity(params.data.tagId, activityType, limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'), tail)
     if (!rows) return reply.status(404).send({ error: 'Tag not found' })
     return rows
   })
@@ -338,8 +359,8 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = tagParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
     const q = req.query as Record<string, unknown>
-    const offset = activityOffsetParam(q)
-    if (offset == null) return reply.status(400).send({ error: `Votes offset must be between 0 and ${MAX_ACTIVITY_OFFSET}` })
+    const offset = activityOffsetParam(q, 'vote')
+    if (offset == null) return reply.status(400).send({ error: `Votes offset must be between 0 and ${maxActivityOffsetFor('vote')}` })
     const rows = await getTagVotes(params.data.tagId, limitParam(q, 25), offset, dateParam(q, 'from'), dateParam(q, 'to'))
     if (!rows) return reply.status(404).send({ error: 'Tag not found' })
     return rows
@@ -372,9 +393,10 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
     const q = req.query as Record<string, unknown>
     const tail = tailParam(q)
-    const offset = tail == null ? activityOffsetParam(q) : 0
-    if (tail === null || offset == null) return reply.status(400).send({ error: `Activity offset/tail exceeds the supported ${MAX_ACTIVITY_OFFSET}/${MAX_ACTIVITY_TAIL} row window` })
-    const rows = await getAddressActivity(params.data.address, activityTypeParam(q), limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'), tail)
+    const activityType = activityTypeParam(q)
+    const offset = tail == null ? activityOffsetParam(q, activityType) : 0
+    if (tail === null || offset == null) return reply.status(400).send({ error: `Activity offset/tail exceeds the supported ${maxActivityOffsetFor(activityType)}/${MAX_ACTIVITY_TAIL} row window for type '${activityType}'` })
+    const rows = await getAddressActivity(params.data.address, activityType, limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'), tail)
     if (!rows) return reply.status(404).send({ error: 'Address not recognized' })
     return rows
   })
@@ -401,8 +423,8 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = addressParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
     const q = req.query as Record<string, unknown>
-    const offset = activityOffsetParam(q)
-    if (offset == null) return reply.status(400).send({ error: `Votes offset must be between 0 and ${MAX_ACTIVITY_OFFSET}` })
+    const offset = activityOffsetParam(q, 'vote')
+    if (offset == null) return reply.status(400).send({ error: `Votes offset must be between 0 and ${maxActivityOffsetFor('vote')}` })
     const rows = await getAddressVotes(params.data.address, limitParam(q, 25), offset, dateParam(q, 'from'), dateParam(q, 'to'))
     if (!rows) return reply.status(404).send({ error: 'Address not recognized' })
     return rows

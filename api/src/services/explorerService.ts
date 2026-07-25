@@ -8852,6 +8852,63 @@ export async function getDcaExecution(height: number, eventIndex: number): Promi
   })
 }
 
+// Pre-router runtimes emitted DCA.Scheduled with only {id, who}: no order, period,
+// totalAmount or maxRetries. dca_schedules_mv reads that event, so 2,354 of 33,903
+// schedules (every one below block ~4.3M) stored asset_in = asset_out = 0 and blank
+// amounts — and asset 0 is HDX, so a DOT->HDX schedule rendered as "HDX -> HDX".
+//
+// The DCA.schedule CALL args carry the whole order; only the id is event-only, so no
+// materialized view can join the two. Reconstruct the missing half per request instead:
+// one raw_calls row addressed by (block_height, extrinsic_index), which is that table's
+// primary-key prefix. Returns null when there is nothing to recover, so a genuinely
+// zero-asset schedule is never invented.
+interface DcaScheduleOrder {
+  asset_in: number
+  asset_out: number
+  direction: string
+  amount_per: string
+  total_amount: string
+  period: number
+  max_retries: number
+}
+
+export function dcaOrderFromCallArgs(argsJson: string): DcaScheduleOrder | null {
+  let parsed: unknown
+  try { parsed = JSON.parse(argsJson) } catch { return null }
+  const schedule = (parsed as { schedule?: Record<string, unknown> } | null)?.schedule
+  if (!schedule || typeof schedule !== 'object') return null
+  const order = (schedule as { order?: Record<string, unknown> }).order
+  if (!order || typeof order !== 'object') return null
+  const num = (v: unknown) => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null)
+  const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  const assetIn = num((order as { assetIn?: unknown }).assetIn)
+  const assetOut = num((order as { assetOut?: unknown }).assetOut)
+  const kind = str((order as { __kind?: unknown }).__kind)
+  if (assetIn == null || assetOut == null || !kind) return null
+  return {
+    asset_in: assetIn,
+    asset_out: assetOut,
+    direction: kind,
+    // A Sell order fixes amountIn per trade, a Buy order fixes amountOut.
+    amount_per: str((order as { amountIn?: unknown }).amountIn) || str((order as { amountOut?: unknown }).amountOut),
+    total_amount: str((schedule as { totalAmount?: unknown }).totalAmount),
+    period: num((schedule as { period?: unknown }).period) ?? 0,
+    max_retries: num((schedule as { maxRetries?: unknown }).maxRetries) ?? 0,
+  }
+}
+
+async function recoverDcaScheduleOrder(blockHeight: number, extrinsicIndex: number | null): Promise<DcaScheduleOrder | null> {
+  if (extrinsicIndex == null) return null
+  const res = await client.query({
+    query: `SELECT args_json FROM price_data.raw_calls
+            WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32} AND call_name = 'DCA.schedule'
+            LIMIT 1`,
+    query_params: { h: blockHeight, i: extrinsicIndex }, format: 'JSONEachRow',
+  })
+  const row = (await res.json<{ args_json: string }>())[0]
+  return row ? dcaOrderFromCallArgs(row.args_json) : null
+}
+
 export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25): Promise<DcaScheduleDetail | null> {
   return cached(`explorer:dca-schedule:${scheduleId}:${offset}:${limit}`, 8000, async () => {
     const prices = await ensurePrices()
@@ -8904,6 +8961,11 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
     ])
     const sched = (await schedRes.json<{ block_height: number; ts: string; extrinsic_index: number | null; who: string; asset_in: number; asset_out: number; direction: string; amount_per: string; total_amount: string; period: number; max_retries: number }>())[0]
     if (!sched) return null
+    // A blank direction is the pre-router marker: the event carried no order at all.
+    if (sched.direction === '') {
+      const recovered = await recoverDcaScheduleOrder(sched.block_height, sched.extrinsic_index)
+      if (recovered) Object.assign(sched, recovered)
+    }
     const life = await lifeRes.json<{ event_name: string; ts: string; bh: number; ei: number; xi: number }>()
     const totals = (await totalRes.json<{ n: string; failed: string; attempts: string; tin: string; tout: string }>())[0]
     const pair = await resolveDcaTradedPair(scheduleId, sched.asset_in, sched.asset_out, sched.who)
