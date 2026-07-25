@@ -57,3 +57,20 @@ describe('HOLLAR supply', () => {
     expect(sql.slice(groupAfterUnion)).toContain('WHERE bal > 0')
   })
 })
+
+// money_market_reserve_indices is a ReplacingMergeTree, but both readers resolve
+// duplicates themselves with argMax over (block_height, event_index, ingested_at) —
+// the full replacement key plus the version column — so FINAL only added a part
+// merge. Proven output-identical on the live table (1,875 rows / same checksum,
+// 84 -> 39 ms; and 25 rows / same checksum, 98 -> 44 ms).
+describe('money-market reserve indices', () => {
+  it('resolves duplicates with argMax instead of FINAL', () => {
+    const reads = explorerService.match(/FROM price_data\.money_market_reserve_indices[^\n]*/g) ?? []
+
+    expect(reads.length).toBe(2)
+    for (const read of reads) expect(read, read).not.toContain('FINAL')
+    // The dedup must still be explicit wherever the table is read.
+    expect((explorerService.match(/argMax\([a-z_]+, tuple\(block_height,event_index,ingested_at\)\)/g) ?? []).length)
+      .toBeGreaterThanOrEqual(3)
+  })
+})

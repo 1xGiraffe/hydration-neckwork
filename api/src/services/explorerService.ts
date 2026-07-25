@@ -2939,7 +2939,11 @@ async function reserveIndicesNow(): Promise<Map<string, { liq: bigint; vbi: bigi
       query: `SELECT pool_address AS pool, reserve_address AS reserve,
               toString(argMax(liquidity_index, tuple(block_height,event_index,ingested_at))) AS liq,
               toString(argMax(variable_borrow_index, tuple(block_height,event_index,ingested_at))) AS vbi
-            FROM price_data.money_market_reserve_indices FINAL
+            -- No FINAL: argMax over (block_height, event_index, ingested_at) is the
+            -- table's full replacement key plus its version column, so a replayed
+            -- duplicate already resolves to the same winner. FINAL only added a
+            -- 26-part merge on top of that.
+            FROM price_data.money_market_reserve_indices
             GROUP BY pool, reserve`,
       format: 'JSONEachRow',
     })
@@ -10127,7 +10131,9 @@ async function appendMoneyMarketBalanceRows(
     query: `SELECT pool_address AS pool, reserve_address AS reserve,
               toUInt32(least(intDiv(greatest(block_height, {indexCut:UInt32}, {minBlock:UInt32}) - {minBlock:UInt32}, {bucketSize:UInt32}), {lastBucket:UInt32})) AS b,
               toString(argMax(liquidity_index, tuple(block_height,event_index,ingested_at))) AS liquidity_index
-            FROM price_data.money_market_reserve_indices FINAL
+            -- No FINAL, same reason as reserveIndicesNow: the argMax key already
+            -- covers the replacement key and version column.
+            FROM price_data.money_market_reserve_indices
             WHERE pool_address IN ({pools:Array(String)}) AND reserve_address IN ({reserves:Array(String)})
             GROUP BY pool, reserve, b ORDER BY pool, reserve, b`,
     query_params: { pools, reserves, indexCut, minBlock, bucketSize, lastBucket }, format: 'JSONEachRow',
