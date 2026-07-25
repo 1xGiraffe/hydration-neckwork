@@ -407,8 +407,12 @@ function buildAddress(accountId: string): AddressDetail {
   }
 }
 
+// A finite, deterministic account/tag activity feed. The detail pagers publish an
+// exact row total, so the fixture needs a real end to page to: 137 rows is 6 pages
+// of 25 with a partial last one.
+const MOCK_ACTIVITY_ROWS = 137
 function mockAccountActivity(a: AccountRef, r: () => number): ActivityRow[] {
-  return Array.from({ length: 12 }, (_, i) => {
+  return Array.from({ length: MOCK_ACTIVITY_ROWS }, (_, i) => {
     const h = TIP - i * 90 - Math.floor(r() * 30)
     const t = (['trade', 'transfer', 'dca', 'trade'] as const)[Math.floor(r() * 4)]
     const aIn = ASSETS[Math.floor(r() * ASSETS.length)], aOut = ASSETS[Math.floor(r() * ASSETS.length)]
@@ -417,6 +421,34 @@ function mockAccountActivity(a: AccountRef, r: () => number): ActivityRow[] {
     if (t === 'transfer') return { ...base, type: t, to: ACCS[Math.floor(r() * ACCS.length)], asset: aref(aIn), amount: raw(amt, aIn.decimals) }
     return { ...base, type: t, assetIn: aref(aIn), assetOut: aref(aOut), amountIn: raw(amt, aIn.decimals), amountOut: raw(amt * aIn.price / aOut.price, aOut.decimals), dca: t === 'dca', ...(t === 'dca' ? { dcaScheduleId: 33546 } : {}) }
   })
+}
+
+// The account/tag detail feeds and their exact totals must be two views of ONE set
+// of rows, or a pager would offer a page the feed cannot fill. Both go through these.
+function accountActivityRows(rawAddress: string): ActivityRow[] {
+  const wanted = decodeURIComponent(rawAddress)
+  const account = ACCS.find(candidate => candidate.accountId === wanted || candidate.address.toLowerCase() === wanted.toLowerCase()) ?? A.fox
+  return mockAccountActivity(account, rng(account.accountId.length * 17))
+}
+function tagActivityRows(): ActivityRow[] {
+  return mockAccountActivity(A.krakenEvm, rng(A.krakenEvm.accountId.length * 17))
+}
+function filteredMockActivity(rows: ActivityRow[], qs: URLSearchParams): ActivityRow[] {
+  const type = qs.get('type') ?? 'all'
+  const min = qs.get('min') == null ? null : Number(qs.get('min'))
+  return rows
+    .filter(row => type === 'all' || row.type === type)
+    .filter(row => min == null || (row.valueUsd ?? 0) >= min)
+}
+// Each tab's total counts the rows ITS feed serves. The extrinsics and events
+// fixtures are recency generators without an end, so those two keep a stated length.
+function mockListTotal(qs: URLSearchParams, activityRows: () => ActivityRow[]): number {
+  switch (qs.get('tab')) {
+    case 'activity': return filteredMockActivity(activityRows(), qs).length
+    case 'extrinsics': return qs.get('call') || qs.get('result') || qs.get('origin') ? 87 : 1451
+    case 'events': return qs.get('event') ? 312 : 26787
+    default: return 0
+  }
 }
 
 /* ---------- HDX dashboard ---------- */
@@ -786,13 +818,15 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   },
   {
     re: /^\/explorer\/address\/(.+)\/activity$/, fn: (m, qs) => {
-      const activityType = qs.get('type') ?? 'all'
-      const limit = Number(qs.get('limit') ?? 25)
-      const account = ACCS.find(candidate => candidate.accountId === decodeURIComponent(m[1]) || candidate.address.toLowerCase() === decodeURIComponent(m[1]).toLowerCase()) ?? A.fox
-      const rows = mockAccountActivity(account, rng(account.accountId.length * 17))
-      return (activityType === 'all' ? rows : rows.filter(r => r.type === activityType)).slice(0, limit)
+      const rows = filteredMockActivity(accountActivityRows(m[1]), qs)
+      const offset = Number(qs.get('offset') ?? 0)
+      return rows.slice(offset, offset + Number(qs.get('limit') ?? 25))
     },
   },
+  // The exact length of whichever list a pager is sizing itself against, under the
+  // filters it is showing. Counted from the same rows the feed above returns, so the
+  // fixture cannot advertise a page the mocked feed does not hold.
+  { re: /^\/explorer\/address\/(.+)\/list-count$/, fn: (m, qs) => ({ total: mockListTotal(qs, () => accountActivityRows(m[1])) }) },
   { re: /^\/explorer\/address\/(.+)\/extrinsics$/, fn: (_m, qs) => recentExtrinsics(Number(qs.get('limit') ?? 25), true) },
   {
     re: /^\/explorer\/address\/(.+)\/events$/, fn: (_m, qs) => {
@@ -806,13 +840,11 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       return out.slice(0, limit)
     },
   },
-  { re: /^\/explorer\/address\/(.+)\/counts$/, fn: () => ({ extrinsics: 1451, events: 26787, activity: 2143 }) },
+  { re: /^\/explorer\/address\/(.+)\/counts$/, fn: () => ({ extrinsics: 1451, extrinsicsOnBehalf: 0, events: 26787, votes: 0 }) },
   // Per-account balance/portfolio history. Must sit before the generic address
   // route below, whose greedy `(.+)` would otherwise swallow this sub-path and
   // fall back to the default account — leaking one account's history onto another.
   { re: /^\/explorer\/address\/(.+)\/history$/, fn: (m) => { const built = buildAddress(decodeURIComponent(m[1])); return { portfolioSeries: built.portfolioSeries ?? [], portfolioDates: built.portfolioDates ?? [], balanceHistory: built.balanceHistory ?? [] } } },
-  // value-filtered activity count: 1600 of the 2143 rows are ≥ the requested $-min
-  { re: /^\/explorer\/address\/(.+)\/activity-count$/, fn: (_m, qs) => ({ activity: qs.get('min') != null ? 1600 : null }) },
   {
     re: /^\/explorer\/address\/(.+)\/close-accounts$/, fn: () => ({
       accounts: [
@@ -907,8 +939,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
     },
   },
   { re: /^\/explorer\/address\/(.+)$/, fn: (m) => buildAddress(decodeURIComponent(m[1])) },
-  { re: /^\/explorer\/tag\/(.+)\/counts$/, fn: () => ({ extrinsics: 1451, events: 26787, activity: 2143 }) },
-  { re: /^\/explorer\/tag\/(.+)\/activity-count$/, fn: () => ({ activity: 640 }) },
+  { re: /^\/explorer\/tag\/(.+)\/counts$/, fn: () => ({ extrinsics: 1451, extrinsicsOnBehalf: 0, events: 26787, votes: 0 }) },
   {
     re: /^\/explorer\/tag\/(.+)\/close-accounts$/, fn: () => ({
       accounts: [
@@ -934,7 +965,14 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       disclaimer: 'Behavioral signals are not proof of common ownership. System and high-volume protocol accounts are excluded.',
     } satisfies CloseAccountsResponse),
   },
-  { re: /^\/explorer\/tag\/(.+)\/activity$/, fn: () => mockAccountActivity(A.krakenEvm, rng(A.krakenEvm.accountId.length * 17)) },
+  {
+    re: /^\/explorer\/tag\/(.+)\/activity$/, fn: (_m, qs) => {
+      const rows = filteredMockActivity(tagActivityRows(), qs)
+      const offset = Number(qs.get('offset') ?? 0)
+      return rows.slice(offset, offset + Number(qs.get('limit') ?? 25))
+    },
+  },
+  { re: /^\/explorer\/tag\/(.+)\/list-count$/, fn: (_m, qs) => ({ total: mockListTotal(qs, tagActivityRows) }) },
   { re: /^\/explorer\/tag\/(.+)\/extrinsics$/, fn: (_m, qs) => recentExtrinsics(Number(qs.get('limit') ?? 25), true) },
   {
     re: /^\/explorer\/tag\/(.+)\/events$/, fn: (_m, qs) => {

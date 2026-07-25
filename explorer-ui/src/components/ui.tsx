@@ -1129,49 +1129,45 @@ export function ErrorRow({ cols, title, error, onRetry }: { cols: number; title:
     </td></tr>
   )
 }
-// Deep-linkable pager. `hasNext` disables forward nav at the end; a sliding
-// window of page numbers plus a jump box reach arbitrary depth (totalPages,
-// when known, enables a Last button). Lists are newest-first, so higher pages
-// go further back toward the very first block.
-export function Pager({ page, hasNext, totalPages, pastEnd, onPage, onFirst, onPrev, onNext, onLast, label }: { page: number; hasNext?: boolean; totalPages?: number; pastEnd?: boolean; onPage: (p: number) => void; onFirst?: () => void; onPrev?: () => void; onNext?: () => void; onLast?: () => void; label?: string }) {
+// Deep-linkable pager. Lists are newest-first, so higher pages go further back
+// toward the very first block. With `totalPages` it numbers real pages and offers
+// a Last jump; without one it numbers only up to the current page and lets
+// `hasNext` drive the › arrow, so no page is offered before it is known to hold
+// rows. `note` states WHY a total is missing when the caller knows.
+export function Pager({ page, hasNext, totalPages, note, onPage }: { page: number; hasNext?: boolean; totalPages?: number; note?: string; onPage: (p: number) => void }) {
   const [jump, setJump] = useState('')
   const last = totalPages != null ? totalPages - 1 : undefined
   const canNext = hasNext ?? (last != null ? page < last : true)
   const maxButtons = 5
   const windowStart = last != null ? Math.max(0, Math.min(page - 2, Math.max(0, last - maxButtons + 1))) : Math.max(0, page - 2)
-  // Without a known page count we only number pages up to the current one — a full
-  // page means "there may be more" (the › arrow, driven by hasNext), not "there
-  // are two more pages". Speculative page+N buttons produced phantom trailing
-  // pages that render empty when the data ends on a page boundary.
+  // Without a known page count a full page means "there may be more" (the › arrow,
+  // driven by hasNext), not "there are two more pages". Speculative page+N buttons
+  // produced phantom trailing pages that rendered empty when the data ended on a
+  // page boundary.
   const windowEnd = last != null ? Math.min(last, windowStart + maxButtons - 1) : page
-  const window: number[] = []
-  for (let n = windowStart; n <= windowEnd; n++) window.push(n)
-  // A page that settled with no rows proves nothing about the pages before it either, so
-  // numbering page-2..page there would keep offering pages that do not exist: a deep link
-  // to ?apage=48 on a 26-page feed still listed 47, 48, 49. Offer only the way back.
-  const numbered = pastEnd ? [] : window
-  // hasNext stays authoritative past a known last page: totals derived from
-  // approximate counts (e.g. activity tab badges) may undershoot, and › must not
-  // dead-end there.
+  const numbered: number[] = []
+  for (let n = windowStart; n <= windowEnd; n++) numbered.push(n)
+  // hasNext stays authoritative one page past a known last page: a total is only as
+  // fresh as its cache, and a newest-first list that has grown since must not
+  // dead-end before its new last page.
   const go = (n: number) => { if (n >= 0 && (last == null || n <= last || (n === page + 1 && canNext))) onPage(n) }
+  // A deep link can still name a page the list does not reach (an old bookmark, a
+  // hand-edited number). Saying "Page 27 of 26" would read as a contradiction, so
+  // name the position instead; the numbered buttons already only offer real pages.
+  const info = last != null && page > last
+    ? `Page ${(page + 1).toLocaleString('en-US')} · past the last page (${(last + 1).toLocaleString('en-US')})`
+    : `Page ${(page + 1).toLocaleString('en-US')}${last != null ? ` of ${(last + 1).toLocaleString('en-US')}` : ''}`
   return (
     <div className="pager">
-      {/* `label` names a position the page number cannot, e.g. a page reached from the
-          oldest end where the total is unknown. */}
-      <div className="info">{label ?? `Page ${(page + 1).toLocaleString('en-US')}${last != null ? ` of ${(last + 1).toLocaleString('en-US')}` : ''}`}</div>
+      <div className="info">{info}{note && <> · {note}</>}</div>
       <div className="btns">
-        {/* onFirst/onPrev exist for callers whose position is not a page NUMBER — paging
-            back from the oldest end, where "previous" means one page newer and the
-            absolute page index is unknown. */}
-        <button onClick={() => (onFirst ? onFirst() : go(0))} disabled={!onFirst && page === 0} title="First" aria-label="First page">«</button>
-        <button onClick={() => (onPrev ? onPrev() : go(page - 1))} disabled={!onPrev && page === 0} title="Previous" aria-label="Previous page">‹</button>
+        <button onClick={() => go(0)} disabled={page === 0} title="First" aria-label="First page">«</button>
+        <button onClick={() => go(page - 1)} disabled={page === 0} title="Previous" aria-label="Previous page">‹</button>
         {numbered.map(n => <button key={n} className={n === page ? 'on' : ''} onClick={() => go(n)} aria-label={`Page ${n + 1}`} aria-current={n === page ? 'page' : undefined}>{n + 1}</button>)}
-        <button onClick={() => (onNext ? onNext() : go(page + 1))} disabled={!canNext} title="Next" aria-label="Next page">›</button>
-        {/* onLast reaches the end without a known total (the API's tail mode walks back
-            from the oldest row); a known total keeps the plain jump. */}
-        {onLast
-          ? <button onClick={onLast} title="Last" aria-label="Last page">»</button>
-          : last != null && <button onClick={() => go(last)} disabled={page >= last} title="Last" aria-label="Last page">»</button>}
+        <button onClick={() => go(page + 1)} disabled={!canNext} title="Next" aria-label="Next page">›</button>
+        {/* Enabled from a page PAST the last one too — that is where a stale deep link
+            lands, and » is the way back to real rows. */}
+        {last != null && <button onClick={() => go(last)} disabled={page === last} title="Last" aria-label="Last page">»</button>}
         <form onSubmit={e => { e.preventDefault(); const n = parseInt(jump, 10); if (Number.isFinite(n) && n >= 1) go(n - 1); setJump('') }}>
           <input className="pager-jump" placeholder="Go to…" value={jump} onChange={e => setJump(e.target.value)} inputMode="numeric" aria-label="Go to page" />
         </form>

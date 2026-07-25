@@ -1,12 +1,11 @@
-import { useAccountActivityCounts, useAccountVotes, useTagActivityCounts, useTagVotes } from '../hooks/useExplorerData'
+import { useAccountListCount, useAccountVotes, useTagListCount, useTagVotes } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { setQuery, useQuery } from '../router'
 import { Pager } from './ui'
 import { VotesTable, type VoteTableRow } from './VotesTable'
 import { assetDescriptorFallback } from '../utils/voteRows'
+import { PAGE_SIZE, hasNextPage, pageCount, voteListCount } from '../utils/activityPaging'
 import type { VoteRow } from '../types'
-
-const PAGE_SIZE = 25
 
 type VotesScope =
   | { kind: 'account'; address: string }
@@ -32,9 +31,6 @@ export function VotesTab({ scope }: { scope: VotesScope }) {
   const accountAddress = scope.kind === 'account' ? scope.address : null
   const tagId = scope.kind === 'tag' ? scope.tagId : null
   const now = useNow()
-  const accountCounts = useAccountActivityCounts(accountAddress)
-  const tagCounts = useTagActivityCounts(tagId)
-  const counts = scope.kind === 'account' ? accountCounts : tagCounts
   const query = useQuery()
   const requestedPage = Number.parseInt(query.get('vpage') ?? '', 10)
   const page = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 0
@@ -43,8 +39,11 @@ export function VotesTab({ scope }: { scope: VotesScope }) {
   const tagVotes = useTagVotes(tagId, offset)
   const votes = scope.kind === 'account' ? accountVotes : tagVotes
   const rows = (votes.data ?? []).map(toTableRow)
-  const voteCount = counts.data?.votes
-  const totalPages = voteCount != null && voteCount > 0 ? Math.ceil(voteCount / PAGE_SIZE) : undefined
+  // The list exposes no filters, so its total is the whole vote history — counted
+  // from the same sources the list merges (OpenGov/Democracy plus collectives).
+  const accountTotal = useAccountListCount(accountAddress, voteListCount())
+  const tagTotal = useTagListCount(tagId, voteListCount())
+  const totalPages = pageCount((scope.kind === 'account' ? accountTotal : tagTotal).data?.total)
   const setPage = (nextPage: number) => setQuery({ vpage: nextPage > 0 ? String(nextPage) : null })
 
   return (
@@ -62,7 +61,7 @@ export function VotesTab({ scope }: { scope: VotesScope }) {
         error={votes.error}
         onRetry={() => { void votes.refetch() }}
       />
-      <Pager page={page} totalPages={totalPages} hasNext={rows.length === PAGE_SIZE} onPage={setPage} />
+      <Pager page={page} totalPages={totalPages} hasNext={hasNextPage(totalPages, page, rows.length)} onPage={setPage} />
     </>
   )
 }

@@ -3,13 +3,13 @@ import {
   useAccountExtrinsics,
   useAccountActivity,
   useAccountActivityCounts,
-  useAccountActivityCount,
+  useAccountListCount,
   useAssets,
   useTagActivityCounts,
   useTagEvents,
   useTagExtrinsics,
   useTagActivity,
-  useTagActivityCount,
+  useTagListCount,
 } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { setQuery, useQuery, useQueryValue } from '../router'
@@ -18,19 +18,16 @@ import { EvRow, ExtRow } from './ActivityRows'
 import { ActivityTable } from './ActivityTable'
 import { eventFilterFields, extrinsicFilterFields, activityFilterFields } from './activityFilters'
 import { EmptyRow, ErrorRow, F, Pager, ActivityChips, TableSkeleton, normalizeActivityAction, normalizeActivityType } from './ui'
-import { PAGE_SIZE, activityTailOffset, pageCount, provenPageCount, tailOffsetForPage, tailPageParam, trimFinalTailPage } from '../utils/activityPaging'
+import { PAGE_SIZE, activityListCount, eventListCount, extrinsicListCount, hasNextPage, pageCount } from '../utils/activityPaging'
+import type { ListCountQuery } from '../api/explorer'
 
 type ActivityScope =
   | { kind: 'account'; address: string }
   | { kind: 'tag'; tagId: string }
 
-function hasNoValues(values: Record<string, string | undefined>): boolean {
-  return Object.values(values).every(value => !value)
-}
-
 // Account and tag detail pages expose the same activity controls. Both APIs are
 // queried through disabled hooks here so one implementation owns their filtering,
-// pagination, tail paging, and table layout.
+// pagination, totals, and table layout.
 export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const accountAddress = scope.kind === 'account' ? scope.address : null
   const tagId = scope.kind === 'tag' ? scope.tagId : null
@@ -41,7 +38,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const rawTab = useQueryValue('atab', 'activity')
   const activeTab = rawTab === 'extrinsics' || rawTab === 'events' ? rawTab : 'activity'
   const activityType = normalizeActivityType(useQueryValue('type', 'all'))
-  const filterOptions = { reservedKeys: ['page', 'tab', 'view', 'atab', 'type', 'apage', 'atail'], pageKey: 'apage' }
+  const filterOptions = { reservedKeys: ['page', 'tab', 'view', 'atab', 'type', 'apage'], pageKey: 'apage' }
   const activityFilters = useFilters({ ...filterOptions, keys: ['action', 'token', 'from', 'to', 'min'] })
   const extrinsicFilters = useFilters({ ...filterOptions, keys: ['call', 'result', 'origin', 'from', 'to'] })
   const eventFilters = useFilters({ ...filterOptions, keys: ['event', 'from', 'to'] })
@@ -50,27 +47,30 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const query = useQuery()
   const requestedPage = Number.parseInt(query.get('apage') ?? '', 10)
   const page = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 0
-  // `atail` pages from the OLDEST end (0 = last page). It exists because the row count
-  // overshoots the feed, so a count-derived last page misses; tail mode walks back from
-  // the true oldest row instead. When set it takes over from the forward offset.
-  const tailPage = tailPageParam(query.get('atail'))
-  const offset = tailPage == null ? page * PAGE_SIZE : 0
+  const offset = page * PAGE_SIZE
   const minimumUsd = activityFilters.values.min || undefined
-  const activityHasCount = activityType === 'all'
-    && !activityAction
-    && !activityFilters.values.token
-    && !activityFilters.values.from
-    && !activityFilters.values.to
 
-  const countAccount = activeTab === 'activity' && activityHasCount && minimumUsd != null ? accountAddress : null
-  const countTag = activeTab === 'activity' && activityHasCount && minimumUsd != null ? tagId : null
-  const accountMinimumCount = useAccountActivityCount(countAccount, minimumUsd != null ? Number(minimumUsd) : null)
-  const tagMinimumCount = useTagActivityCount(countTag, minimumUsd != null ? Number(minimumUsd) : null)
-  const minimumCount = scope.kind === 'account' ? accountMinimumCount : tagMinimumCount
-  const activityRowCount = activityHasCount
-    ? (minimumUsd != null ? minimumCount.data?.activity : counts.data?.activity)
-    : undefined
-  const activityTail = tailPage != null ? tailOffsetForPage(tailPage) : activityTailOffset(activityRowCount, offset)
+  // One exact total per list, under exactly the filters that list is showing —
+  // the same builder that produces the rows counts them, so "Page N of M" and the
+  // » jump land on real pages. Only the visible tab's total is requested; the
+  // activity one walks the whole classified feed and is the page's costliest read.
+  const activeCountQuery: ListCountQuery = activeTab === 'activity'
+    ? activityListCount(activityType, activityAction, activityFilters.values)
+    : activeTab === 'extrinsics'
+      ? extrinsicListCount(extrinsicFilters.values)
+      : eventListCount(eventFilters.values)
+  const accountTotal = useAccountListCount(accountAddress, activeCountQuery)
+  const tagTotal = useTagListCount(tagId, activeCountQuery)
+  const total = (scope.kind === 'account' ? accountTotal : tagTotal).data?.total
+  const totalPages = pageCount(total)
+  // null (not undefined) is the API saying this feed is too deep to walk to its
+  // end. Say so, rather than leaving the missing "of M" unexplained.
+  const countNote = total === null ? 'too much history to count exactly' : undefined
+  // The unfiltered activity length doubles as the tab badge. When no filter is
+  // set it IS the total above, so the two share one request.
+  const accountActivityTotal = useAccountListCount(accountAddress, activityListCount('all', '', {}))
+  const tagActivityTotal = useTagListCount(tagId, activityListCount('all', '', {}))
+  const activityTotal = (scope.kind === 'account' ? accountActivityTotal : tagActivityTotal).data?.total
 
   const commonActivityArgs = [
     activityType,
@@ -79,18 +79,11 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
     activityFilters.values.from,
     activityFilters.values.to,
     { token: activityFilters.values.token, min: minimumUsd },
-    activityTail,
   ] as const
   const accountActivity = useAccountActivity(activeTab === 'activity' ? accountAddress : null, ...commonActivityArgs)
   const tagActivity = useTagActivity(activeTab === 'activity' ? tagId : null, ...commonActivityArgs)
   const activity = scope.kind === 'account' ? accountActivity : tagActivity
-  const activityRows = tailPage != null
-    ? (activity.data ?? [])
-    : trimFinalTailPage(activity.data ?? [], activityRowCount, offset, activityTail)
-  // Only ever advertise a page count the feed has proven; activityRowCount overshoots it
-  // (see provenPageCount). Its other uses stay: the tab badge is an activity tally, and
-  // activityTail/trimFinalTailPage already treat it as approximate.
-  const activityTotalPages = tailPage == null ? provenPageCount(activityRows.length, page, activity.isFetching) : undefined
+  const activityRows = activity.data ?? []
   const accountExtrinsics = useAccountExtrinsics(
     activeTab === 'extrinsics' ? accountAddress : null,
     offset,
@@ -132,15 +125,12 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
 
   const setActiveTab = (tab: string | null) => setQuery({ atab: tab, apage: null })
   const setActivityType = (value: string) => setQuery({ type: value === 'all' ? null : value, action: null, apage: null })
-  const setPage = (nextPage: number) => setQuery({ apage: nextPage > 0 ? String(nextPage) : null, atail: null })
-  const setTailPage = (nextTail: number) => setQuery({ apage: null, atail: String(Math.max(0, nextTail)) })
-  const extrinsicPages = hasNoValues(extrinsicFilters.values) ? pageCount(counts.data?.extrinsics) : undefined
-  const eventPages = hasNoValues(eventFilters.values) ? pageCount(counts.data?.events) : undefined
+  const setPage = (nextPage: number) => setQuery({ apage: nextPage > 0 ? String(nextPage) : null })
 
   return (
     <>
       <div className="tabs">
-        <button className={activeTab === 'activity' ? 'active' : ''} onClick={() => setActiveTab(null)}>Activity{counts.data ? <> <span className="cnt">{F.int(counts.data.activity)}</span></> : null}</button>
+        <button className={activeTab === 'activity' ? 'active' : ''} onClick={() => setActiveTab(null)}>Activity{activityTotal != null ? <> <span className="cnt">{F.int(activityTotal)}</span></> : null}</button>
         <button className={activeTab === 'extrinsics' ? 'active' : ''} onClick={() => setActiveTab('extrinsics')}>Extrinsics{counts.data ? <> <span className="cnt">{F.int(counts.data.extrinsics)}</span></> : null}</button>
         <button className={activeTab === 'events' ? 'active' : ''} onClick={() => setActiveTab('events')}>Events{counts.data ? <> <span className="cnt">{F.int(counts.data.events)}</span></> : null}</button>
       </div>
@@ -155,23 +145,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
         />
         <ActivityTable rows={activityRows} now={now} live={page === 0} loading={activity.isFetching && !activity.data?.length}
           error={activity.error} onRetry={() => { void activity.refetch() }} />
-        {/* Two axes, one pager. Forward paging counts from the newest row; tail paging
-            counts back from the oldest, which is how the last page is reachable at all
-            (the row count overshoots the feed, so it cannot locate the end). In tail
-            mode "previous" is one page NEWER and "next" one page older, and the numbered
-            buttons step out of tail mode entirely. */}
-        <Pager
-          page={page}
-          totalPages={activityTotalPages}
-          hasNext={tailPage != null ? tailPage > 0 : activityRows.length === PAGE_SIZE}
-          pastEnd={tailPage == null && !activity.isFetching && !activity.error && page > 0 && activityRows.length === 0}
-          label={tailPage == null ? undefined : tailPage === 0 ? 'Last page' : `${tailPage === 1 ? '1 page' : `${tailPage} pages`} from last`}
-          onPage={setPage}
-          onFirst={tailPage == null ? undefined : () => setPage(0)}
-          onPrev={tailPage == null ? undefined : () => setTailPage(tailPage + 1)}
-          onNext={tailPage == null ? undefined : () => setTailPage(Math.max(0, tailPage - 1))}
-          onLast={() => setTailPage(0)}
-        />
+        <Pager page={page} totalPages={totalPages} hasNext={hasNextPage(totalPages, page, activityRows.length)} note={countNote} onPage={setPage} />
       </>}
 
       {activeTab === 'extrinsics' && <>
@@ -186,7 +160,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
                   : extrinsics.data.map(extrinsic => <ExtRow key={`${extrinsic.blockHeight}-${extrinsic.index}`} x={extrinsic} now={now} noSigner={!showSigner} showOrigin={showOrigin} senderLabel />)}
           </tbody>
         </table></div>
-        <Pager page={page} totalPages={extrinsicPages} hasNext={(extrinsics.data?.length ?? 0) === PAGE_SIZE} onPage={setPage} />
+        <Pager page={page} totalPages={totalPages} hasNext={hasNextPage(totalPages, page, extrinsics.data?.length ?? 0)} note={countNote} onPage={setPage} />
       </>}
 
       {activeTab === 'events' && <>
@@ -201,7 +175,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
                   : events.data.map(event => <EvRow key={`${event.blockHeight}-${event.eventIndex}`} e={event} now={now} />)}
           </tbody>
         </table></div>
-        <Pager page={page} totalPages={eventPages} hasNext={(events.data?.length ?? 0) === PAGE_SIZE} onPage={setPage} />
+        <Pager page={page} totalPages={totalPages} hasNext={hasNextPage(totalPages, page, events.data?.length ?? 0)} note={countNote} onPage={setPage} />
       </>}
     </>
   )

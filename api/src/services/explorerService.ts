@@ -7838,22 +7838,32 @@ async function getScopedVotes(accounts: string[], cacheScope: string, limit: num
   })
 }
 
-// Total governance votes for an account set: conviction/democracy votes from
-// the account-activity index plus the (rare) collective votes from raw_events.
-// Feeds the Votes tab badge — cached like the neighbouring tab counts.
-async function getScopedVotesCount(accounts: string[], cacheKey: string): Promise<number> {
+// How many rows the Votes list holds — its tab badge and its pager's total.
+// Counts each source the list merges, over exactly the source's own predicate:
+// conviction/democracy rows out of vote_activity restricted to the account's
+// activity-index references (the pair of conditions the feed reads them under),
+// plus the rare collective votes from raw_events. Both sides count DISTINCT
+// (block, event) because both tables are replayable and the list dedupes.
+async function countScopedVotes(accounts: string[], cacheKey: string, from?: string, to?: string): Promise<number> {
   const list = sqlAccountList(accounts)
   if (list === "''") return 0
-  return cached(`explorer:votes-count:${cacheKey}`, 600_000, async () => {
+  const bound = timeWindow(from, to) ?? '1'
+  return cached(`explorer:votes-count:${cacheKey}:${from ?? ''}:${to ?? ''}`, 600_000, async () => {
     const [govRes, collectiveRes] = await Promise.all([
       client.query({
-        query: `SELECT uniqExact((block_height, event_index)) AS c FROM price_data.account_activity
-                WHERE account IN (${list}) AND event_name IN ('ConvictionVoting.Voted','Democracy.Voted')`,
+        query: `SELECT uniqExact((block_height, event_index)) AS c FROM price_data.vote_activity FINAL
+                WHERE ${bound}
+                  AND event_name IN ('ConvictionVoting.Voted','Democracy.Voted')
+                  AND (block_height, event_index) IN (
+                    SELECT block_height, event_index FROM price_data.account_activity
+                    WHERE account IN (${list}) AND event_name IN ('ConvictionVoting.Voted','Democracy.Voted'))
+                  AND (JSONExtractString(args_json,'who') IN (${list}) OR JSONExtractString(args_json,'voter') IN (${list}))`,
         format: 'JSONEachRow',
       }),
       client.query({
         query: `SELECT uniqExact((block_height, event_index)) AS c FROM price_data.raw_events
-                WHERE event_name IN (${sqlEventNameList(COLLECTIVE_VOTE_EVENTS)})
+                WHERE ${bound}
+                  AND event_name IN (${sqlEventNameList(COLLECTIVE_VOTE_EVENTS)})
                   AND JSONExtractString(args_json,'account') IN (${list})`,
         format: 'JSONEachRow',
       }),
@@ -10888,16 +10898,44 @@ export function alignBalanceHistoryDailyPoints(history: AssetBalanceHistory[]): 
   }).filter(h => hasNonZeroVisibleBalance(h.points))
 }
 
+// One assembled, classified and filtered account feed over a bounded candidate
+// window. `complete` is false when a contributing source filled its window, so
+// older rows exist beyond it and the feed is only a prefix of the account's
+// history.
+interface AccountActivityWindow { rows: ActivityRow[]; complete: boolean }
+
+// Which sources' windows have to be exhausted before a feed of this category can
+// be called complete — the categories that actually contribute its rows. Mirrors
+// what the page path has always treated as saturation, so a page and the exact
+// total derived from the same window can never disagree.
+type ActivitySourceKey = 'trade' | 'dca' | 'transfer' | 'liquidity' | 'mm' | 'xcm' | 'staking' | 'vote' | 'otc' | 'reward'
+const ACTIVITY_COMPLETENESS_SOURCES: Record<string, ActivitySourceKey[]> = {
+  all: ['trade', 'dca', 'transfer', 'liquidity', 'mm', 'xcm', 'staking', 'vote', 'otc', 'reward'],
+  transfer: ['transfer'],
+  trade: ['trade', 'dca', 'otc'],
+  liquidity: ['liquidity', 'reward'],
+  mm: ['mm', 'reward'],
+  otc: ['otc'],
+  xcm: ['xcm'],
+  staking: ['staking'],
+  vote: ['vote'],
+}
+
 // Account-scoped activity: the account's own trades (summarized per extrinsic) +
 // genuine transfers (from balance observations, excluding swap legs / pool
 // counterparties). Used on the account & tag pages instead of raw per-asset
 // balance-change rows.
-async function getAccountActivity(accounts: string[], limit: number, type = 'all', offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[]> {
+//
+// Returns the WHOLE classified feed for the candidate window rather than a page:
+// the page slice and the exact row total are both taken from this one result, so
+// the number the pager sizes itself from is by construction the number of rows
+// the feed renders.
+async function collectAccountActivity(accounts: string[], type: string, catFetch: number, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<AccountActivityWindow> {
   type = normalizeActivityTypeKey(type)
   const tw = timeWindow(from, to)
   const bound = tw ?? '1'
   const list = sqlAccountList(accounts)
-  if (list === "''") return []
+  if (list === "''") return { rows: [], complete: true }
   const related = new Set(accounts.map(a => a.toLowerCase()))
   const prices = await ensurePrices()
   const tokenIds = assetIdsForToken(filters.token)
@@ -10908,10 +10946,16 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   const queryFilters = filters.min != null && filters.unit !== 'token'
     ? { ...filters, min: undefined, unit: undefined }
     : filters
-  // When a single category is requested we paginate within it, so fetch enough
-  // rows to cover the requested page (offset+limit) plus headroom for de-dup.
-  const want = offset + limit
-  const catFetch = Math.max(want * 5, 1000)
+  // Window saturation is recorded per source AT FETCH TIME. A built array can be
+  // shorter than the window it came from (a liquidation's internal swap is
+  // dropped, reward claims fold into other categories) or longer (the three XCM
+  // legs are concatenated), so measuring the built rows would either miss a
+  // filled window or invent one — and an exact total stands or falls on knowing
+  // whether older candidates remain.
+  const filledSources = new Set<ActivitySourceKey>()
+  const noteSource = (key: ActivitySourceKey, fetched: number): void => {
+    if (fetched >= catFetch) filledSources.add(key)
+  }
   const wantTransfers = type === 'all' || type === 'transfer'
   // Classification context: Transfers excludes trade/staking/MM legs, Trades
   // yields share-routed legs to Liquidity — fetch what the exclusions need.
@@ -10956,6 +11000,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
       query_params: { n: catFetch }, format: 'JSONEachRow',
     })
     const swapRows = await swapRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number; event_name: string; asset_in: number; asset_out: number; amount_in: string; amount_out: string; signer: string }>()
+    noteSource('trade', swapRows.length)
     const liqExt = await liquidationExtrinsics(swapRows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null]))
     const signerByExt = new Map(swapRows.map(e => [`${e.block_height}:${e.extrinsic_index}`, e.signer]))
     const groups = new Map<string, typeof swapRows>()
@@ -10984,6 +11029,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   }
 
   const otc = wantOtc ? await getRecentOtc(catFetch, from, to, 0, queryFilters, type === 'otc' ? action : undefined, accounts) : []
+  noteSource('otc', otc.length)
   const otcExt = activityExtrinsicSet(otc)
 
   // 2. Genuine user↔user transfers, queried directly from the transfer events
@@ -10995,7 +11041,6 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   // keyed on the account, surfaces them regardless of how active the account is.
   // Balances.Transfer is the native asset (id 0); Tokens/Currencies carry currencyId.
   const transfers: ActivityRow[] = []
-  let transferSourceSaturated = false
   const accCond = [...related].filter(a => ACCOUNT_RE.test(a))
   if (wantTransfers && accCond.length) {
     const accList = accCond.map(a => `'${a}'`).join(',')
@@ -11078,7 +11123,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
       query_params: { n: catFetch }, format: 'JSONEachRow',
     })
     const rawTransferRows = await trRes.json<RawTransferEventRow>()
-    transferSourceSaturated = accountTransferWindowSaturated(rawTransferRows.length, catFetch, false)
+    let transferSourceSaturated = accountTransferWindowSaturated(rawTransferRows.length, catFetch, false)
     // The activity-index prefilter is intentionally wider than the requested
     // semantic page. If all of those refs were plumbing, the filtered raw read
     // can underfill even though older account transfer refs remain; preserve
@@ -11103,6 +11148,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
         (await moreRefs.json<Record<string, number>>()).length > 0,
       )
     }
+    if (transferSourceSaturated) filledSources.add('transfer')
     // Transfers *to* the treasury pot are fees/deposits unless the originating
     // extrinsic is itself a token-transfer call — surface only genuine donations
     // (payouts *from* the treasury are unaffected). Skipped when the viewed
@@ -11143,6 +11189,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   const dcaTrades: ActivityRow[] = wantDca
     ? await getRecentDcaFailures(catFetch, from, to, accounts, tokenIds)
     : []
+  noteSource('dca', dcaTrades.length)
   if (wantDca) {
     const dcaTokenFilter = tokenIds == null ? '' : tokenIds.length
       ? `AND (s.asset_in IN (${tokenIds.join(',')}) OR s.asset_out IN (${tokenIds.join(',')}))`
@@ -11162,6 +11209,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
       format: 'JSONEachRow',
     })
     const dcaExecs = await dcaExecRes.json<{ block_height: number; ts: string; who: string; id: string; amount_in: string; amount_out: string }>()
+    noteSource('dca', dcaExecs.length)
     if (dcaExecs.length) {
     const blocks = [...new Set(dcaExecs.map(d => d.block_height))]
     const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
@@ -11261,11 +11309,12 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
       return built
     }
     const liqRows = queryFilters.min != null
-      ? await fetchFilteredDeep(tw, want, fetchLiquidityPage,
+      ? await fetchFilteredDeep(tw, catFetch, fetchLiquidityPage,
         row => activityRowMatchesFilters(row, { min: queryFilters.min, unit: queryFilters.unit }),
         row => row.blockHeight, row => row.eventIndex ?? -1,
         row => `${row.blockHeight}:${row.eventIndex}`)
       : await fetchLiquidityPage(bound, catFetch)
+    noteSource('liquidity', liqRows.length)
     for (const row of liqRows) {
       if (row.extrinsicIndex != null) liqCreateExt.add(`${row.blockHeight}:${row.extrinsicIndex}`)
       liq.push(row)
@@ -11299,6 +11348,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
       format: 'JSONEachRow',
     })
     const mmEv = await mmTxRes.json<{ block_height: number; event_index: number; ts: string; event_name: string; account_id: string | null; asset_address: string; pool_address: string | null; amount: string }>()
+    noteSource('mm', mmEv.length)
     // MM events are EVM logs (Ethereum.transact); resolve the substrate extrinsic
     // that emitted them so the row links/hovers to its extrinsic like the others.
     const mmExt = await extrinsicIndexFor(mmEv.map(r => [r.block_height, r.event_index] as [number, number | null]))
@@ -11318,10 +11368,15 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   }
 
   // 6. Cross-chain (XCM) transfers sent (outbound) or received (inbound) by this account.
-  const xcm = wantXcm
-    ? (await Promise.all([getRecentXcm(catFetch, from, to, accounts, 0, queryFilters), getRecentXcmIn(catFetch, from, to, accounts, 0, queryFilters), getRecentXcmOutRemote(catFetch, from, to, accounts, 0, queryFilters)])).flat()
+  // Each XCM leg has its own window, so saturation is per leg: the concatenation
+  // reaching catFetch says nothing about whether any single leg was exhausted.
+  const xcmLegs = wantXcm
+    ? await Promise.all([getRecentXcm(catFetch, from, to, accounts, 0, queryFilters), getRecentXcmIn(catFetch, from, to, accounts, 0, queryFilters), getRecentXcmOutRemote(catFetch, from, to, accounts, 0, queryFilters)])
     : []
+  for (const leg of xcmLegs) noteSource('xcm', leg.length)
+  const xcm = xcmLegs.flat()
   const staking = wantStaking ? await getRecentStaking(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
+  noteSource('staking', staking.length)
   const voteRows: ActivityRow[] = wantVotes ? (await getRecentVotes(catFetch, from, to, 0, {}, accounts, queryFilters)).map(v => ({
     type: 'vote', blockHeight: v.blockHeight, timestamp: v.timestamp, eventIndex: v.eventIndex, extrinsicIndex: v.extrinsicIndex,
     who: v.account, to: null, asset: v.asset, assetIn: null, assetOut: null, amount: v.amount, amountIn: null, amountOut: null, valueUsd: v.valueUsd,
@@ -11329,9 +11384,11 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
     ...referendumRefFields(v.pallet, v.referendum),
     linkBlock: v.blockHeight, linkIndex: v.extrinsicIndex,
   })) : []
+  noteSource('vote', voteRows.length)
   const rewards = (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')
     ? await getRecentRewardClaims(catFetch, from, to, accounts, tokenIds, undefined, undefined, queryFilters)
     : []
+  noteSource('reward', rewards.length)
   if (filters.min != null && filters.unit !== 'token') {
     await applyHistoricalUsd([...trades, ...transfers, ...dcaTrades, ...rewards, ...liq, ...voteRows, ...mmTx, ...otc], activityHistPick)
   }
@@ -11350,64 +11407,74 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   let merged = await suppressActivityPlumbing([...userTrades, ...scopedTransfers, ...dcaTrades, ...rewards, ...liq, ...staking, ...voteRows, ...userMm, ...otc, ...xcm])
   if (type && type !== 'all') merged = merged.filter(r => activityTypeMatchesFamily(r.type, type))
   merged = merged.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
-  const saturationSources = type === 'all' ? [trades, dcaTrades, rewards, liq, staking, voteRows, mmTx, otc, xcm]
-    : type === 'trade' ? [trades, dcaTrades, otc]
-      : type === 'liquidity' ? [liq, rewards]
-        : type === 'mm' ? [mmTx, rewards]
-          : type === 'otc' ? [otc]
-            : type === 'xcm' ? [xcm]
-              : type === 'staking' ? [staking]
-                : type === 'vote' ? [voteRows]
-                  : []
-  const sourceSaturated = ((type === 'all' || type === 'transfer') && transferSourceSaturated)
-    || saturationSources.some(source => source.length >= catFetch)
-  if (merged.length < want && sourceSaturated) throw activityQueryTooBroad()
-  const page = merged.sort(compareActivityRowsNewestFirst).slice(offset, offset + limit)
+  const complete = !(ACTIVITY_COMPLETENESS_SOURCES[type] ?? []).some(key => filledSources.has(key))
+  return { rows: merged.sort(compareActivityRowsNewestFirst), complete }
+}
+
+// A page never asks for a narrower window than this, so page 1 of a small account
+// costs exactly what it always did. A count starts one step wider because it has
+// no page depth to scale from, and the overwhelming majority of accounts (7.0M of
+// the 7.05M with any activity hold under a thousand indexed references) then
+// complete on its first pass.
+const ACTIVITY_WINDOW_FLOOR = 1_000
+const ACTIVITY_COUNT_WINDOW_SEED = 2_000
+
+// Grow the candidate window until the feed is complete — no source still had
+// older rows behind its window — or the source ceiling is reached. Completeness
+// is what makes an exact total possible AND what makes a deep page reachable, so
+// both paths grow the same window: whatever depth the total was counted at, a
+// page at that depth is servable for the same cost.
+async function growAccountActivityWindow(
+  accounts: string[],
+  type: string,
+  seedFetch: number,
+  action: string | undefined,
+  filters: ValueListFilters,
+  from: string | undefined,
+  to: string | undefined,
+  enough: (window: AccountActivityWindow) => boolean,
+): Promise<AccountActivityWindow> {
+  let catFetch = Math.min(Math.max(seedFetch, ACTIVITY_WINDOW_FLOOR), MAX_ACTIVITY_SOURCE_ROWS)
+  for (;;) {
+    const window = await collectAccountActivity(accounts, type, catFetch, action, filters, from, to)
+    if (window.complete || enough(window) || catFetch >= MAX_ACTIVITY_SOURCE_ROWS) return window
+    catFetch = Math.min(catFetch * 4, MAX_ACTIVITY_SOURCE_ROWS)
+  }
+}
+
+// One page of the account feed. `offset+limit` rows must exist inside a complete
+// window, otherwise the page would silently omit older history.
+async function getAccountActivity(accounts: string[], limit: number, type = 'all', offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[]> {
+  const want = offset + limit
+  const window = await growAccountActivityWindow(accounts, type, want * 5, action, filters, from, to,
+    built => built.rows.length >= want)
+  if (!window.complete && window.rows.length < want) throw activityQueryTooBroad()
+  const page = window.rows.slice(offset, offset + limit)
   await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page)])
   return page
 }
 
-// Tail pages of an account feed: rows counted from the account's OLDEST
-// activity (tailOffset 0 = the very first rows). Forward pagination cannot
-// reach them — every source fetches a bounded newest-first window. Instead of
-// teaching all nine sources to sort ascending, bound the normal builder to an
-// early date window: find the day by which the account had accumulated enough
-// activity (indexed ASC read on account_activity), fetch that window whole,
-// and slice from its oldest end. The estimate is a proxy (raw activity rows ≠
-// activity rows, value filters drop more), so the window widens adaptively.
-async function getAccountActivityTail(accounts: string[], limit: number, type: string, tailOffset: number, action: string | undefined, filters: ValueListFilters): Promise<ActivityRow[]> {
-  const list = sqlAccountList(accounts)
-  if (list === "''") return []
-  const need = tailOffset + limit
-  let fetchLimit = Math.max(need * 4, 3000)
-  // Widen the window step by step: raw activity rows over-estimate activity rows
-  // (classification and value filters drop some), so a tight first window can
-  // underfill. Dense boundary days increase the semantic fetch until it is no
-  // longer saturated; sparse histories keep widening until the full history is
-  // reached. No depth is treated as an artificial end of history.
-  for (let mult = 8; ; mult *= 4) {
-    const cutRes = await client.query({
-      query: `SELECT toString(toDate(block_timestamp)) AS d FROM (
-                SELECT block_timestamp FROM price_data.account_activity
-                WHERE account IN (${list})
-                ORDER BY block_height ASC
-                LIMIT 1 OFFSET {skip:UInt32}
-              )`,
-      query_params: { skip: Math.min(need * mult, 4_294_967_295) }, format: 'JSONEachRow',
-    })
-    // No row that deep → the whole (small) account history is the window.
-    const cutoff = (await cutRes.json<{ d: string }>())[0]?.d
-    if (fetchLimit * 5 > MAX_ACTIVITY_SOURCE_ROWS) throw activityQueryTooBroad()
-    const rows = await getAccountActivity(accounts, fetchLimit, type, 0, action, filters, undefined, cutoff)
-    if (rows.length >= fetchLimit) {
-      fetchLimit *= 2
-      continue
-    }
-    if (rows.length >= need || cutoff == null) {
-      // Window fully fetched (newest-first) — the requested rows sit at its end.
-      const endExclusive = rows.length - tailOffset
-      return endExclusive > 0 ? rows.slice(Math.max(0, endExclusive - limit), endExclusive) : []
-    }
+// A cold count is the most expensive read on the page and the widening passes are
+// what make it exact, so cap how long it may keep widening. Past the deadline the
+// answer is "not countable" — the same honest answer the candidate ceiling gives —
+// instead of an ever-growing wait or a ClickHouse execution timeout.
+const ACTIVITY_COUNT_DEADLINE_MS = 15_000
+
+// How many rows the account/tag activity feed holds under exactly these filters —
+// the number the pager sizes itself from. null when the feed cannot be walked to
+// its end (structural pots hold tens of millions of activity rows), which the page
+// states rather than replacing with an estimate.
+async function countAccountActivity(accounts: string[], type: string, action: string | undefined, filters: ValueListFilters, from?: string, to?: string): Promise<number | null> {
+  const deadline = Date.now() + ACTIVITY_COUNT_DEADLINE_MS
+  try {
+    const window = await growAccountActivityWindow(accounts, type, ACTIVITY_COUNT_WINDOW_SEED, action, filters, from, to,
+      () => Date.now() > deadline)
+    return window.complete ? window.rows.length : null
+  } catch (error) {
+    // A window too wide to assemble is exactly the "cannot be counted" case, and a
+    // pager with no total still pages. Logged rather than swallowed silently.
+    console.warn('[explorer] activity total unavailable', { type, action, accounts: accounts.length }, error)
+    return null
   }
 }
 
@@ -11421,12 +11488,7 @@ async function getScopedAccountActivity(
   filters: ValueListFilters,
   from?: string,
   to?: string,
-  tail?: number,
 ): Promise<ActivityRow[]> {
-  if (tail != null && !from && !to) {
-    return cached(`explorer:${cacheScope}:activity-tail:${type}:${limit}:${tail}:${action ?? ''}:${filterKey(filters)}`, 30_000,
-      () => getAccountActivityTail(accounts, limit, type, tail, action, filters))
-  }
   const window = timeWindow(from, to)
   return cached(`explorer:${cacheScope}:activity:${type}:${limit}:${offset}:${action ?? ''}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, window ? 30_000 : 8_000,
     () => getAccountActivity(accounts, limit, type, offset, action, filters, from, to))
@@ -11435,10 +11497,10 @@ async function getScopedAccountActivity(
 // Account detail feeds resolve the address to the same related-account set used
 // by getAddress. Unknown addresses return null so routes can distinguish them
 // from recognized accounts with no activity.
-export async function getAddressActivity(addressInput: string, type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string, tail?: number): Promise<ActivityRow[] | null> {
+export async function getAddressActivity(addressInput: string, type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[] | null> {
   const resolved = await resolveRelatedAccounts(addressInput)
   if (!resolved) return null
-  return getScopedAccountActivity(resolved.related, `account:${resolved.norm.accountId}`, type, limit, offset, action, filters, from, to, tail)
+  return getScopedAccountActivity(resolved.related, `account:${resolved.norm.accountId}`, type, limit, offset, action, filters, from, to)
 }
 
 // The account's signed extrinsics (paginated). Same shape as getRecentExtrinsics
@@ -11542,23 +11604,34 @@ async function onBehalfExtrinsicCount(accounts: string[], cacheKey: string): Pro
   return (await onBehalfExtrinsicTuples(accounts, cacheKey)).size
 }
 
+// The signed side of the extrinsics list as SQL, so the page query and the exact
+// total cannot read one filter two ways. `call`/`result` match the same columns
+// the signed rows display.
+function signedExtrinsicPredicateSql(list: string, filters: ExtrinsicListFilters): string {
+  const call = filters.call?.trim() ? textNameFilter('call_name', 'callName') : ''
+  const result = filters.result === 'success' ? 'AND success = 1'
+    : filters.result === 'failed' ? 'AND success = 0' : ''
+  return `AND (signer IN (${list}) OR effective_signer IN (${list})) ${call} ${result}`
+}
+
 // Signed ∩ on-behalf overlap (e.g. self-proxy): the merged extrinsics list
-// shows such an extrinsic once, so getAccountTabCounts subtracts it from the
-// naive sum. Driven by the same account-bounded tuple union as the count
-// above, as an explicit chunked IN list (the source tables no longer exist as
-// a single joinable projection once on-behalf ops are reconstructed at
-// request time).
-async function onBehalfOverlapCount(accounts: string[], cacheKey: string, list: string): Promise<number> {
-  const tuples = await onBehalfExtrinsicTuples(accounts, cacheKey)
+// shows such an extrinsic once, so the total subtracts it from the naive sum.
+// Driven by an explicit chunked IN list over the given tuple set (the source
+// tables no longer exist as a single joinable projection once on-behalf ops are
+// reconstructed at request time). Counts DISTINCT extrinsics, because
+// raw_extrinsics is replayable and the list itself dedupes per extrinsic.
+async function signedOverlapCount(tuples: Set<string>, list: string, bound: string, filters: ExtrinsicListFilters): Promise<number> {
   if (!tuples.size) return 0
   const tupleList = [...tuples].map(k => { const [h, e] = k.split(':'); return `(${h},${e})` })
   let total = 0
   for (let i = 0; i < tupleList.length; i += 10_000) {
     const chunk = tupleList.slice(i, i + 10_000).join(',')
     const res = await client.query({
-      query: `SELECT count() AS c FROM price_data.raw_extrinsics
+      query: `SELECT uniqExact((block_height, extrinsic_index)) AS c FROM price_data.raw_extrinsics
               WHERE (block_height, extrinsic_index) IN (${chunk})
-                AND (signer IN (${list}) OR effective_signer IN (${list}))`,
+                AND ${bound}
+                ${signedExtrinsicPredicateSql(list, filters)}`,
+      query_params: { ...textNameParams('callName', filters.call) },
       format: 'JSONEachRow',
     })
     total += Number((await res.json<{ c: string }>())[0]?.c ?? 0)
@@ -11566,100 +11639,22 @@ async function onBehalfOverlapCount(accounts: string[], cacheKey: string, list: 
   return total
 }
 
-export interface TabCounts { extrinsics: number; extrinsicsOnBehalf: number; events: number; activity: number; votes: number }
+// Tab badges for an account/tag detail page. Each number is the exact length of
+// the list behind that tab, produced by the same counters the pagers use.
+export interface TabCounts { extrinsics: number; extrinsicsOnBehalf: number; events: number; votes: number }
 async function getAccountTabCounts(accounts: string[], cacheKey: string): Promise<TabCounts> {
   const list = sqlAccountList(accounts)
-  if (list === "''") return { extrinsics: 0, extrinsicsOnBehalf: 0, events: 0, activity: 0, votes: 0 }
+  if (list === "''") return { extrinsics: 0, extrinsicsOnBehalf: 0, events: 0, votes: 0 }
   return cached(`explorer:tab-counts:${cacheKey}`, 600_000, async () => {
-    const mmList = sqlAccountList([...new Set(accounts.map(evmAccountForm).filter(Boolean) as string[])])
-    const indexedHits = `
-      SELECT block_height, event_index, extrinsic_index, event_name, is_module_transfer
-      FROM price_data.account_activity
-      WHERE account IN (${list})`
-    // Collapse both replayed rows and events referenced through multiple tag
-    // members by stable event identity. This preserves exact counts without
-    // FINAL, whose partition-wide merge made the two-member Treasury count read
-    // 32M rows / 2.55 GiB for six seconds.
-    const activityHits = `SELECT block_height, event_index, extrinsic_index, event_name, is_module_transfer
-         FROM (${indexedHits})
-         GROUP BY block_height, event_index, extrinsic_index, event_name, is_module_transfer`
-    const [extRes, onBehalf, overlap, evRes, mmRes, xcmRes, dcaRes, otcRes, votes] = await Promise.all([
-      client.query({
-        query: `SELECT count() AS c FROM price_data.raw_extrinsics WHERE signer IN (${list}) OR effective_signer IN (${list})`,
-        format: 'JSONEachRow',
-      }),
+    const [extrinsics, onBehalf, events, votes] = await Promise.all([
+      countAccountExtrinsics(accounts, cacheKey, {}),
       onBehalfExtrinsicCount(accounts, cacheKey),
-      onBehalfOverlapCount(accounts, cacheKey, list),
-      // Aggregate the hit activity once into per-event flags, then compute the tab
-      // counts without expanding separate reference sets.
-      client.query({
-        query: `
-          SELECT
-            sum(event_count) AS events,
-            countIf(has_trade) AS trades,
-            sum(if(has_trade OR has_staking, 0, transfer_count)) AS transfers,
-            sum(liq_count) AS liq,
-            sum(staking_count) AS staking,
-            sum(vote_count) AS votes,
-            sum(xcm_in_count) AS xcm_in
-          FROM (
-            SELECT
-              block_height,
-              extrinsic_index,
-              count() AS event_count,
-              max(event_name IN (${SWAP_EVENTS.map(n => `'${n}'`).join(',')})) AS has_trade,
-              max(event_name LIKE 'Staking.%' OR event_name LIKE 'GigaHdx%') AS has_staking,
-              countIf(event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred') AND NOT is_module_transfer) AS transfer_count,
-              countIf(event_name IN ('Omnipool.LiquidityAdded','Omnipool.LiquidityRemoved','Stableswap.LiquidityAdded','Stableswap.LiquidityRemoved','XYK.LiquidityAdded','XYK.LiquidityRemoved','XYK.PoolCreated','OmnipoolLiquidityMining.RewardClaimed','XYKLiquidityMining.RewardClaimed')) AS liq_count,
-              countIf(event_name LIKE 'Staking.%' OR event_name LIKE 'GigaHdx.%') AS staking_count,
-              countIf(event_name IN ('ConvictionVoting.Voted','Democracy.Voted')) AS vote_count,
-              -- Inbound XCM credits: hook-context Currencies.Deposited only;
-              -- token/balance mirrors are excluded so a credit is counted once.
-              countIf(event_name = 'Currencies.Deposited' AND extrinsic_index IS NULL) AS xcm_in_count
-            FROM (${activityHits})
-            GROUP BY block_height, extrinsic_index
-          )`,
-        format: 'JSONEachRow',
-        // Mega structural accounts (router/referral/treasury pots) have tens of
-        // millions of activity rows — spill the aggregation to disk instead of
-        // hitting the memory ceiling. Exactness matters here: these counts drive
-        // pager last-page jumps. Single-threaded, the biggest of these (~28M rows,
-        // the referral pot) ran ~20s and tripped the client's execution ceiling
-        // under concurrent directory load; four threads bring it to ~5s / ~1.8 GiB
-        // — a brief, bounded burst on a cache miss (10-min TTL), not a hot loop,
-        // so it no longer times out while still leaving cores for live requests.
-        clickhouse_settings: { max_bytes_before_external_group_by: '1500000000', max_threads: 4 },
-      }),
-      client.query({ query: `SELECT count() AS c FROM price_data.account_money_market_activity FINAL WHERE account_id IN (${mmList}) AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})`, format: 'JSONEachRow' }),
-      client.query({ query: `SELECT count() AS c FROM price_data.raw_xcm_activity WHERE sender IN (${list}) OR recipient IN (${list})`, format: 'JSONEachRow' }),
-      client.query({ query: `SELECT count() AS c FROM price_data.dca_events WHERE event_name = 'DCA.TradeExecuted' AND who IN (${list})`, format: 'JSONEachRow' }),
-      // OTC: Filled/PartiallyFilled carry `who` (the taker) directly; Placed/Cancelled
-      // don't, so they're matched via the account's own signed extrinsics instead
-      // (same signer-join precedent the activity builders use for those two events).
-      client.query({
-        query: `SELECT count() AS c FROM price_data.raw_events
-                WHERE event_name IN (${sqlEventNameList(OTC_EVENT_NAMES)})
-                  AND (JSONExtractString(args_json,'who') IN (${list})
-                    OR (block_height, extrinsic_index) IN (SELECT block_height, extrinsic_index FROM price_data.raw_extrinsics WHERE signer IN (${list}) OR effective_signer IN (${list})))`,
-        format: 'JSONEachRow',
-      }),
-      // Votes-tab badge: conviction/democracy plus the collective votes the
-      // activity index does not carry (its own 10-min cache is shared with the
-      // tag snapshot path).
-      getScopedVotesCount(accounts, cacheKey),
+      countAccountEvents(accounts, cacheKey, {}),
+      // Conviction/democracy plus the collective votes the activity index does
+      // not carry (its own 10-min cache is shared with the tag snapshot path).
+      countScopedVotes(accounts, cacheKey),
     ])
-    const ev = (await evRes.json<Record<string, string>>())[0] ?? {}
-    const n = (v: unknown) => Number(v ?? 0)
-    const activity = n(ev.trades) + n(ev.transfers) + n(ev.liq) + n(ev.staking) + n(ev.votes) + n(ev.xcm_in)
-      + n((await mmRes.json<{ c: string }>())[0]?.c) + n((await xcmRes.json<{ c: string }>())[0]?.c) + n((await dcaRes.json<{ c: string }>())[0]?.c)
-      + n((await otcRes.json<{ c: string }>())[0]?.c)
-    return {
-      extrinsics: n((await extRes.json<{ c: string }>())[0]?.c) + onBehalf - overlap,
-      extrinsicsOnBehalf: onBehalf,
-      events: n(ev.events),
-      activity,
-      votes,
-    }
+    return { extrinsics, extrinsicsOnBehalf: onBehalf, events, votes }
   })
 }
 export async function getAddressTabCounts(addressInput: string): Promise<TabCounts | null> {
@@ -11678,6 +11673,8 @@ async function refreshTagTabCounts(tagId: string, members: string[], membershipK
     // The snapshot table predates the votes badge and stays schema-stable; the
     // votes count is recomputed cheaply (and cached) on the read path instead.
     const { votes: _votes, extrinsicsOnBehalf: _onBehalf, ...persisted } = counts
+    // `activity` is no longer a tab badge — the activity list reports its own
+    // exact, filter-aware total — so the retained column keeps its default.
     await client.insert({
       table: 'price_data.tag_activity_counts',
       values: [{ tag_id: tagId, membership_key: membershipKey, ...persisted, computed_at: new Date().toISOString().replace('T', ' ').slice(0, 19) }],
@@ -11696,14 +11693,14 @@ export async function getTagTabCounts(tagId: string): Promise<TabCounts | null> 
   hotTagCounts.add(tagId)
   const membershipKey = [...members].map(member => member.toLowerCase()).sort().join(',')
   const result = await client.query({
-    query: `SELECT membership_key, extrinsics, events, activity,
+    query: `SELECT membership_key, extrinsics, events,
               dateDiff('second', computed_at, now()) AS age
             FROM price_data.tag_activity_counts FINAL
             WHERE tag_id = {tagId:String}
             LIMIT 1`,
     query_params: { tagId }, format: 'JSONEachRow',
   })
-  const snapshot = (await result.json<{ membership_key: string; extrinsics: string; events: string; activity: string; age: number }>())[0]
+  const snapshot = (await result.json<{ membership_key: string; extrinsics: string; events: string; age: number }>())[0]
   if (snapshot?.membership_key === membershipKey) {
     // Never attach a full-history refresh to the request that discovers an aged
     // snapshot. The ten-minute prewarmer owns refresh scheduling; this endpoint
@@ -11711,115 +11708,171 @@ export async function getTagTabCounts(tagId: string): Promise<TabCounts | null> 
     // refresh used to contend with the activity feed on the same cold page even
     // though the counts response itself had already completed. Votes aren't in
     // the snapshot table — they're recomputed via their own cheap cached query.
-    const votes = await getScopedVotesCount(members, `tag:${tagId}:${membershipKey}`)
+    const votes = await countScopedVotes(members, `tag:${tagId}:${membershipKey}`)
     const extrinsicsOnBehalf = await onBehalfExtrinsicCount(members, `tag:${tagId}:${membershipKey}`)
-    return { extrinsics: Number(snapshot.extrinsics), extrinsicsOnBehalf, events: Number(snapshot.events), activity: Number(snapshot.activity), votes }
+    return { extrinsics: Number(snapshot.extrinsics), extrinsicsOnBehalf, events: Number(snapshot.events), votes }
   }
   return refreshTagTabCounts(tagId, members, membershipKey)
 }
-export async function getTagActivityCountAtMin(tagId: string, minUsd: number): Promise<number | null> {
-  const members = tagMembers(tagId)
-  if (!members) return null
-  return getAccountActivityCountAtMin(members, `tag:${tagId}`, minUsd)
+// exact list totals (real numbered paging)
+// Every paginated list on an account/tag detail page publishes how many rows it
+// actually holds UNDER THE ACTIVE FILTERS, so "Page N of M", the numbered pages
+// and the last-page jump are real rather than guesses. Each total runs the same
+// code path that builds its list: the activity total is the classified feed's own
+// length, never a sum of per-category counts. That sum was the bug — a DCA
+// execution IS a swap, so trades 588 + dca 584 both counted the same 613 trade
+// rows and the pager advertised 49 pages of a 26-page feed.
+export type ScopedListTab = 'activity' | 'extrinsics' | 'events' | 'votes'
+export interface ScopedListQuery {
+  tab: ScopedListTab
+  type?: string
+  action?: string
+  value?: ValueListFilters
+  extrinsic?: ExtrinsicListFilters
+  event?: EventListFilters
+  from?: string
+  to?: string
 }
 
-// value-filtered activity count (last-page jumps under the smol filter)
-// How many activity rows survive a `min` USD value filter — the count behind the
-// pager's last-page jump while smol-hiding (or a custom $-minimum) is active.
-// Runs on account_activity_v3, which carries each event's value-relevant
-// (asset_id, UInt256 amount, block_timestamp) tuple. The same hourly event-time
-// close and exact UInt256 threshold used by feed queries is applied here.
-  // Returns null when a category needs enrichment/classification that this
-  // compact index cannot reproduce exactly.
-async function getAccountActivityCountAtMin(accounts: string[], cacheKey: string, minUsd: number): Promise<number | null> {
+// Every filter that changes the answer belongs in the key; a missing one serves
+// one filter's total under another's.
+export function scopedListTotalKey(scope: string, query: ScopedListQuery): string {
+  return [
+    'explorer', scope, 'list-total', query.tab,
+    query.type ?? '', query.action ?? '',
+    filterKey(query.value), filterKey(query.extrinsic), filterKey(query.event),
+    query.from ?? '', query.to ?? '',
+  ].join(':')
+}
+
+// The activity total walks the entire classified feed, so it is far the most
+// expensive of the four — served stale-while-revalidate: only a cold first hit
+// waits, and an open page refreshes at most once per fresh window. A real total
+// must stay close to a feed that keeps growing, hence the short fresh window.
+const LIST_TOTAL_FRESH_MS = 120_000
+const LIST_TOTAL_STALE_MS = 900_000
+// Discovering that a feed CANNOT be walked to its end is the most expensive read
+// on any detail page — the Omnipool pot's 72.5M activity references cost 1.15
+// billion rows / 88 GiB to fail on — and an hour of new blocks cannot turn such a
+// feed countable. So the refusal is remembered far longer than a total, instead of
+// being re-established every fresh window while the page sits open.
+const LIST_TOTAL_UNCOUNTABLE_MS = 3_600_000
+const uncountableLists = new Map<string, number>()
+
+async function scopedListTotal(accounts: string[], scope: string, query: ScopedListQuery): Promise<number | null> {
+  const key = scopedListTotalKey(scope, query)
+  const refusedUntil = uncountableLists.get(key)
+  if (refusedUntil != null && refusedUntil > Date.now()) return null
+  const total = await cachedSwr(key, LIST_TOTAL_FRESH_MS, LIST_TOTAL_STALE_MS, async () => {
+    switch (query.tab) {
+      case 'activity':
+        return countAccountActivity(accounts, query.type ?? 'all', query.action, query.value ?? {}, query.from, query.to)
+      case 'extrinsics':
+        return countAccountExtrinsics(accounts, scope, query.extrinsic ?? {}, query.from, query.to)
+      case 'events':
+        return countAccountEvents(accounts, scope, query.event ?? {}, query.from, query.to)
+      case 'votes':
+        return countScopedVotes(accounts, scope, query.from, query.to)
+    }
+  })
+  if (total == null) {
+    const now = Date.now()
+    for (const [refused, until] of uncountableLists) if (until <= now) uncountableLists.delete(refused)
+    uncountableLists.set(key, now + LIST_TOTAL_UNCOUNTABLE_MS)
+  }
+  return total
+}
+
+// undefined = unknown account/tag (404); null = the list is real but its length
+// is not establishable inside the candidate ceiling.
+export async function getAddressListTotal(addressInput: string, query: ScopedListQuery): Promise<number | null | undefined> {
+  const resolved = await resolveRelatedAccounts(addressInput)
+  if (!resolved) return undefined
+  return scopedListTotal(resolved.related, `addr:${resolved.norm.accountId}`, query)
+}
+
+export async function getTagListTotal(tagId: string, query: ScopedListQuery): Promise<number | null | undefined> {
+  const members = tagMembers(tagId)
+  if (!members) return undefined
+  return scopedListTotal(members, `tag:${tagId}`, query)
+}
+
+// How many rows the extrinsics list holds: extrinsics the account SIGNED ∪
+// extrinsics executed on its behalf, deduplicated per extrinsic exactly as the
+// list does (which is why the overlap is subtracted rather than the sum taken).
+// Mirrors getAccountExtrinsics' sources and filters; `call`/`result` match the
+// DISPLAYED name/result, so on-behalf candidates are enriched here for the same
+// reason the list enriches them.
+async function countAccountExtrinsics(accounts: string[], cacheKey: string, filters: ExtrinsicListFilters, from?: string, to?: string): Promise<number> {
   const list = sqlAccountList(accounts)
   if (list === "''") return 0
-  return cached(`explorer:tab-counts-min:${cacheKey}:${minUsd}`, 600_000, async () => {
-    const prices = await ensurePrices()
-    const minFilter: ValueListFilters = { min: minUsd, unit: 'usd' }
-    const activityValue = eventValueFilterSql('a.asset_id', 'a.amount', 'a.block_timestamp', minFilter, prices, 'activity_price', { amountIsUInt256: true, hasAmountExpr: 'a.has_amount' })
-    const valueOk = activityValue.predicateSql.replace(/^AND\s+/, '')
-    const mmList = sqlAccountList([...new Set(accounts.map(evmAccountForm).filter(Boolean) as string[])])
-    const swapNames = SWAP_EVENTS.map(n => `'${n}'`).join(',')
-    // Related-account sets can expose the same event through multiple keys —
-    // dedup exactly like getAccountTabCounts. Same-key rows carry the same
-    // amount, so any(value_ok) is deterministic.
-    const hits = accounts.length > 1
-      ? `SELECT block_height, event_index, extrinsic_index, event_name, is_module_transfer, any(value_ok) AS value_ok
-         FROM (SELECT a.block_height, a.event_index, a.extrinsic_index, a.event_name, a.is_module_transfer, ${valueOk} AS value_ok
-               FROM price_data.account_activity_v3 AS a FINAL
-               ${activityValue.joinSql}
-               WHERE a.account IN (${list}))
-         GROUP BY block_height, event_index, extrinsic_index, event_name, is_module_transfer`
-      : `SELECT a.block_height, a.event_index, a.extrinsic_index, a.event_name, a.is_module_transfer, ${valueOk} AS value_ok
-         FROM price_data.account_activity_v3 AS a FINAL
-         ${activityValue.joinSql}
-         WHERE a.account IN (${list})`
-    const [liqRes, mmRes, xcmRes, dcaRes, otcRes] = await Promise.all([
-      client.query({
-        query: `SELECT count() AS c FROM price_data.account_activity_v3 FINAL
-                WHERE account IN (${list})
-                  AND event_name IN ('Omnipool.LiquidityAdded','Omnipool.LiquidityRemoved','Stableswap.LiquidityAdded','Stableswap.LiquidityRemoved','XYK.LiquidityAdded','XYK.LiquidityRemoved','XYK.PoolCreated','OmnipoolLiquidityMining.RewardClaimed','XYKLiquidityMining.RewardClaimed')`,
-        format: 'JSONEachRow',
-      }),
-      client.query({
-        query: `SELECT count() AS c FROM price_data.account_money_market_activity FINAL
-                WHERE account_id IN (${mmList}) AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})`,
-        format: 'JSONEachRow',
-      }),
-      client.query({ query: `SELECT count() AS c FROM price_data.raw_xcm_activity WHERE sender IN (${list}) OR recipient IN (${list})`, format: 'JSONEachRow' }),
-      client.query({
-        query: `SELECT count() AS c FROM price_data.dca_events
-                WHERE event_name IN ('DCA.TradeExecuted','DCA.TradeFailed') AND who IN (${list})`,
-        format: 'JSONEachRow',
-      }),
-      client.query({
-        query: `SELECT count() AS c FROM price_data.raw_events
-                WHERE event_name IN (${sqlEventNameList(OTC_EVENT_NAMES)})
-                  AND (JSONExtractString(args_json,'who') IN (${list})
-                    OR (block_height, extrinsic_index) IN (SELECT block_height, extrinsic_index FROM price_data.raw_extrinsics WHERE signer IN (${list}) OR effective_signer IN (${list})))`,
-        format: 'JSONEachRow',
-      }),
+  const bound = timeWindow(from, to) ?? '1'
+  return cached(`explorer:extrinsics-total:${cacheKey}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, 600_000, async () => {
+    const wantSigned = !filters.origin || filters.origin === 'signed'
+    const wantProxy = !filters.origin || filters.origin === 'proxy'
+    const wantMs = !filters.origin || filters.origin === 'multisig'
+    const hasCallFilter = Boolean(filters.call?.trim())
+    const hasResultFilter = filters.result === 'success' || filters.result === 'failed'
+    const [proxyRows, msStatesAll] = await Promise.all([
+      wantProxy ? fetchProxyCandidates(list, bound) : Promise.resolve([] as ProxyCandidateRow[]),
+      wantMs ? accountMultisigOps(accounts) : Promise.resolve([] as MultisigOperationState[]),
     ])
-    const n = (v: unknown) => Number(v ?? 0)
-    const ambiguityCounts = await Promise.all([liqRes, mmRes, xcmRes, dcaRes, otcRes].map(async result => n((await result.json<{ c: string }>())[0]?.c)))
-    if (ambiguityCounts.some(count => count > 0)) return null
-
-    const evRes = await client.query({
-        query: `
-          SELECT
-            countIf(has_passing_trade) AS trades,
-            sum(if(has_trade OR has_staking, 0, transfer_ok)) AS transfers,
-            sum(liq_ok) AS liq,
-            sum(staking_ok) AS staking,
-            sum(vote_ok) AS votes,
-            sum(xcm_in_ok) AS xcm_in
-          FROM (
-            SELECT
-              block_height,
-              extrinsic_index,
-              max(event_name IN (${swapNames})) AS has_trade,
-              max((event_name IN (${swapNames})) AND value_ok) AS has_passing_trade,
-              max(event_name LIKE 'Staking.%' OR event_name LIKE 'GigaHdx%') AS has_staking,
-              countIf(event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred') AND NOT is_module_transfer AND value_ok) AS transfer_ok,
-              countIf(event_name IN ('Omnipool.LiquidityAdded','Omnipool.LiquidityRemoved','Stableswap.LiquidityAdded','Stableswap.LiquidityRemoved','XYK.LiquidityAdded','XYK.LiquidityRemoved','XYK.PoolCreated','OmnipoolLiquidityMining.RewardClaimed','XYKLiquidityMining.RewardClaimed') AND value_ok) AS liq_ok,
-              countIf((event_name LIKE 'Staking.%' OR event_name LIKE 'GigaHdx.%') AND value_ok) AS staking_ok,
-              countIf(event_name IN ('ConvictionVoting.Voted','Democracy.Voted') AND value_ok) AS vote_ok,
-              countIf(event_name = 'Currencies.Deposited' AND extrinsic_index IS NULL AND value_ok) AS xcm_in_ok
-            FROM (${hits})
-            GROUP BY block_height, extrinsic_index
-          )`,
-        format: 'JSONEachRow',
-        clickhouse_settings: { max_bytes_before_external_group_by: '1500000000' },
-      })
-    const ev = (await evRes.json<Record<string, string>>())[0] ?? {}
-    return n(ev.trades) + n(ev.transfers) + n(ev.liq) + n(ev.staking) + n(ev.votes) + n(ev.xcm_in)
+    const msWindow = msAnchorWindow(from, to)
+    const msStates = msWindow ? msStatesAll.filter(s => msWindow(s.row.anchor_timestamp)) : msStatesAll
+    const candidates = [...mergeOnBehalfCandidates(proxyRows, msStates).values()]
+    let onBehalfKeys = new Set(candidates.map(c => `${c.block}:${c.extrinsic}`))
+    if (hasCallFilter || hasResultFilter) {
+      const [proxyInnerMap] = await Promise.all([enrichProxyCandidates(candidates), enrichMultisigCandidates(candidates)])
+      const hydration = await hydrateOnBehalfExtrinsics(new Set(candidates.map(c => `${c.block},${c.extrinsic}`)))
+      let rows = candidates
+        .map(c => buildOnBehalfRow(c, hydration.get(`${c.block}:${c.extrinsic}`), proxyInnerMap))
+        .filter((r): r is ExtrinsicSummaryRow => r != null)
+      if (hasCallFilter) rows = rows.filter(r => matchesCallFilter(r.display_call_name!, filters.call!))
+      if (filters.result === 'success') rows = rows.filter(r => r.display_success === 1)
+      if (filters.result === 'failed') rows = rows.filter(r => r.display_success === 0)
+      onBehalfKeys = new Set(rows.map(r => `${r.block_height}:${r.extrinsic_index}`))
+    }
+    if (!wantSigned) return onBehalfKeys.size
+    const res = await client.query({
+      query: `SELECT uniqExact((block_height, extrinsic_index)) AS c FROM price_data.raw_extrinsics
+              WHERE ${bound} ${signedExtrinsicPredicateSql(list, filters)}`,
+      query_params: { ...textNameParams('callName', filters.call) },
+      format: 'JSONEachRow',
+    })
+    const signed = Number((await res.json<{ c: string }>())[0]?.c ?? 0)
+    return signed + onBehalfKeys.size - await signedOverlapCount(onBehalfKeys, list, bound, filters)
   })
 }
-export async function getAddressActivityCountAtMin(addressInput: string, minUsd: number): Promise<number | null> {
-  const resolved = await resolveRelatedAccounts(addressInput)
-  if (!resolved) return null
-  return getAccountActivityCountAtMin(resolved.related, `addr:${resolved.norm.accountId}`, minUsd)
+
+// The events list pages distinct (block, event) references out of the account
+// activity index, so its total is that same reference query without the LIMIT. The
+// GROUP BY collapses both replayed index rows and events reached through several
+// tag members, exactly as the list's own reference read does.
+async function countAccountEvents(accounts: string[], cacheKey: string, filters: EventListFilters, from?: string, to?: string): Promise<number> {
+  const list = sqlAccountList(accounts)
+  if (list === "''") return 0
+  const bound = timeWindow(from, to) ?? '1'
+  return cached(`explorer:events-total:${cacheKey}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, 600_000, async () => {
+    const eventFilter = filters.event?.trim() ? textNameFilter('event_name', 'eventName') : ''
+    const res = await client.query({
+      query: `SELECT count() AS c FROM (
+                SELECT block_height, event_index
+                FROM price_data.account_activity
+                WHERE ${bound} AND account IN (${list})
+                  ${eventFilter}
+                GROUP BY block_height, event_index
+              )`,
+      query_params: { ...textNameParams('eventName', filters.event) },
+      format: 'JSONEachRow',
+      // Structural pots (router/Omnipool/treasury/referral) hold tens of millions
+      // of activity references — the Omnipool pot's 72.5M. Grouping spills to disk
+      // there; uniqExact cannot spill and died on the memory ceiling instead. Four
+      // threads keep the biggest of these near five seconds on a cache miss (10-min
+      // TTL) while leaving cores for live requests.
+      clickhouse_settings: { max_bytes_before_external_group_by: '1500000000', max_threads: 4 },
+    })
+    return Number((await res.json<{ c: string }>())[0]?.c ?? 0)
+  })
 }
 
 // value-event markers (the "Value" chart's flagged big events)
@@ -12905,6 +12958,14 @@ async function getAccountExtrinsics(accounts: string[], limit = 25, offset = 0, 
     const mergedMap = mergeOnBehalfCandidates(proxyRows, msStates)
     let scoped = [...mergedMap.values()].sort((a, b) => b.block - a.block || b.extrinsic - a.extrinsic)
     if (!enrichAll) scoped = scoped.slice(0, offset + limit)
+    // With nothing to merge, the merged ordering IS the signed ordering, so the page
+    // can be taken in SQL instead of allocating every row before it. That is what
+    // makes a real page count usable at depth: one live account signs 945,640
+    // extrinsics, and reading the 945,650-row prefix for its last page tripped the
+    // client's 100k result-row guard. Accounts that DO have on-behalf history are
+    // orders of magnitude smaller (the largest signs 16,320), so the prefix form
+    // stays well inside the guard there.
+    const signedPageInSql = mergedMap.size === 0
 
     const [proxyInnerMap] = await Promise.all([enrichProxyCandidates(scoped), enrichMultisigCandidates(scoped)])
     const hydration = await hydrateOnBehalfExtrinsics(new Set(scoped.map(c => `${c.block},${c.extrinsic}`)))
@@ -12916,9 +12977,6 @@ async function getAccountExtrinsics(accounts: string[], limit = 25, offset = 0, 
     if (filters.result === 'success') onBehalfRows = onBehalfRows.filter(r => r.display_success === 1)
     if (filters.result === 'failed') onBehalfRows = onBehalfRows.filter(r => r.display_success === 0)
 
-    const signedCallFilter = hasCallFilter ? textNameFilter('call_name', 'callName') : ''
-    const signedResultFilter = filters.result === 'success' ? 'AND success = 1'
-      : filters.result === 'failed' ? 'AND success = 0' : ''
     const signedRows: ExtrinsicSummaryRow[] = wantSigned ? await (async () => {
       const res = await client.query({
         // The extrinsics-only inner select keeps bound/filters unqualified and
@@ -12934,15 +12992,20 @@ async function getAccountExtrinsics(accounts: string[], limit = 25, offset = 0, 
             SELECT block_height, extrinsic_index, extrinsic_hash, toString(block_timestamp) AS ts, coalesce(signer, effective_signer) AS signer, success, call_name, fee, error_json
             FROM price_data.raw_extrinsics
             WHERE ${bound}
-              AND (signer IN (${list}) OR effective_signer IN (${list}))
-              ${signedCallFilter}
-              ${signedResultFilter}
+              ${signedExtrinsicPredicateSql(list, filters)}
             ORDER BY block_height DESC, extrinsic_index DESC
-            LIMIT {branchLimit:UInt32}
+            LIMIT 1 BY block_height, extrinsic_index
+            LIMIT {branchLimit:UInt32} OFFSET {branchOffset:UInt32}
           ) AS ext
           LEFT JOIN price_data.blocks b ON b.block_height = ext.block_height
           ORDER BY ext.block_height DESC, ext.extrinsic_index DESC`,
-        query_params: { branchLimit: offset + limit, ...textNameParams('callName', filters.call) },
+        // LIMIT 1 BY drops replayed rows BEFORE the window, so a re-ingested
+        // extrinsic cannot shift or shorten a page the way TS-side dedup would.
+        query_params: {
+          branchLimit: signedPageInSql ? limit : offset + limit,
+          branchOffset: signedPageInSql ? offset : 0,
+          ...textNameParams('callName', filters.call),
+        },
         format: 'JSONEachRow',
       })
       return res.json<ExtrinsicSummaryRow>()
@@ -12953,7 +13016,7 @@ async function getAccountExtrinsics(accounts: string[], limit = 25, offset = 0, 
     // "on-behalf wins" tiebreak without needing a second sort key.
     const combined = [...onBehalfRows, ...signedRows]
     combined.sort((a, b) => b.block_height - a.block_height || b.extrinsic_index - a.extrinsic_index)
-    const page = dedupeSummaryRows(combined).slice(offset, offset + limit)
+    const page = signedPageInSql ? combined : dedupeSummaryRows(combined).slice(offset, offset + limit)
     return uniqueExtrinsicSummaries(page)
   })
 }
@@ -14226,10 +14289,10 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
 }
 
 // Tag feeds use the same account-set implementations as account detail feeds.
-export async function getTagActivity(tagId: string, type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string, tail?: number): Promise<ActivityRow[] | null> {
+export async function getTagActivity(tagId: string, type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[] | null> {
   const members = tagMembers(tagId)
   if (!members) return null
-  return getScopedAccountActivity(members, `tag:${tagId}`, type, limit, offset, action, filters, from, to, tail)
+  return getScopedAccountActivity(members, `tag:${tagId}`, type, limit, offset, action, filters, from, to)
 }
 export async function getTagExtrinsics(tagId: string, limit = 25, offset = 0, filters: ExtrinsicListFilters = {}, from?: string, to?: string): Promise<ExtrinsicSummary[] | null> {
   const members = tagMembers(tagId)

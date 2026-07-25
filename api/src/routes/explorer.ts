@@ -8,12 +8,14 @@ import {
   getHolders, getAddress, getAddressHistory, search, getAssets, getAccounts, getDcaSchedule, getDcaScheduleIdAt, getDcaExecution,
   getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getMoneyMarket, getAssetDetail, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag,
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
-  getAddressActivityCountAtMin, getTagActivityCountAtMin,
+  getAddressListTotal, getTagListTotal,
   getAddressValueEvents, getTagValueEvents,
   getTagActivity, getTagExtrinsics, getTagEvents,
   getAddressVotes, getTagVotes,
   type EventListFilters,
   type ExtrinsicListFilters,
+  type ScopedListQuery,
+  type ScopedListTab,
   type ValueListFilters,
 } from '../services/explorerService.ts'
 import { getHdxDashboard } from '../services/hdxService.ts'
@@ -30,10 +32,8 @@ const accountSortSchema = z.enum(['value', 'supplied', 'borrowed', 'health', 'id
 const addressParam = z.object({ address: z.string().min(1).max(128) })
 const analyzableAddressParam = z.object({ address: z.string().min(3).max(128) })
 const tagParam = z.object({ tagId: z.string().min(1).max(64) })
-const activityCountQuery = z.object({ min: z.coerce.number().min(0).max(1e12) })
 // Activity builders classify several indexed sources together. Keep offset pages
-// bounded; account/tag last-page navigation uses the independently bounded tail
-// mode instead of allocating every preceding semantic row in Node.
+// bounded so one request cannot allocate every preceding semantic row in Node.
 const MAX_ACTIVITY_OFFSET = 10_000
 // A single bound across every category either starves the cheap tabs or lets the
 // expensive ones time out. Measured warm at /explorer/activity?limit=25&offset=10000:
@@ -51,9 +51,14 @@ const MAX_NARROW_ACTIVITY_OFFSET = 250_000
 const NARROW_ACTIVITY_TYPES = new Set(['vote', 'staking', 'otc'])
 const maxActivityOffsetFor = (type: string) =>
   NARROW_ACTIVITY_TYPES.has(type) ? MAX_NARROW_ACTIVITY_OFFSET : MAX_ACTIVITY_OFFSET
-const MAX_ACTIVITY_TAIL = 6_000
-const activityOffsetSchema = z.coerce.number().int().min(0).max(MAX_NARROW_ACTIVITY_OFFSET).optional()
-const tailSchema = z.coerce.number().int().min(0).max(MAX_ACTIVITY_TAIL).optional()
+// Account and tag activity is bounded by the builder's candidate ceiling instead:
+// it grows ONE window until the classified feed is complete, so the depth of a
+// page only changes which slice of that window is returned — and it is the same
+// window the exact row total is counted from. Every page a real total implies is
+// therefore servable. The bound here only has to stay above any countable feed
+// length: ten sources at the 90k candidate ceiling each.
+const MAX_SCOPED_ACTIVITY_OFFSET = 900_000
+const activityOffsetSchema = z.coerce.number().int().min(0).max(MAX_SCOPED_ACTIVITY_OFFSET).optional()
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
 function dateParam(q: Record<string, unknown>, key: string): string | undefined {
   const v = q[key]
@@ -90,19 +95,34 @@ function activityTypeParam(query: Record<string, unknown>): string {
   return typeof query.type === 'string' && activityTypes.includes(query.type) ? query.type : 'all'
 }
 
-function tailParam(query: Record<string, unknown>): number | undefined | null {
-  if (query.tail == null || query.tail === '') return undefined
-  const parsed = tailSchema.safeParse(query.tail)
-  return parsed.success ? parsed.data : null
-}
-
 // null = out of range for this feed. The bound depends on the category, so callers
 // that know their type pass it; the rest get the conservative wide-feed bound.
 function activityOffsetParam(query: Record<string, unknown>, type = 'all'): number | null {
+  return boundedActivityOffset(query, maxActivityOffsetFor(type))
+}
+
+function boundedActivityOffset(query: Record<string, unknown>, max: number): number | null {
   const parsed = activityOffsetSchema.safeParse(query.offset)
   if (!parsed.success) return null
   const offset = parsed.data ?? 0
-  return offset <= maxActivityOffsetFor(type) ? offset : null
+  return offset <= max ? offset : null
+}
+
+// The list a detail-page pager is sizing itself against.
+const listTabSchema = z.enum(['activity', 'extrinsics', 'events', 'votes'])
+function scopedListQuery(q: Record<string, unknown>): ScopedListQuery | null {
+  const tab = listTabSchema.safeParse(q.tab)
+  if (!tab.success) return null
+  return {
+    tab: tab.data satisfies ScopedListTab,
+    type: activityTypeParam(q),
+    action: textParam(q, 'action', 32),
+    value: valueFilters(q),
+    extrinsic: extrinsicFilters(q),
+    event: eventFilters(q),
+    from: dateParam(q, 'from'),
+    to: dateParam(q, 'to'),
+  }
 }
 
 function extrinsicFilters(query: Record<string, unknown>): ExtrinsicListFilters {
@@ -360,11 +380,10 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = tagParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
     const q = req.query as Record<string, unknown>
-    const tail = tailParam(q)
     const activityType = activityTypeParam(q)
-    const offset = tail == null ? activityOffsetParam(q, activityType) : 0
-    if (tail === null || offset == null) return reply.status(400).send({ error: `Activity offset/tail exceeds the supported ${maxActivityOffsetFor(activityType)}/${MAX_ACTIVITY_TAIL} row window for type '${activityType}'` })
-    const rows = await getTagActivity(params.data.tagId, activityType, limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'), tail)
+    const offset = boundedActivityOffset(q, MAX_SCOPED_ACTIVITY_OFFSET)
+    if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${MAX_SCOPED_ACTIVITY_OFFSET}` })
+    const rows = await getTagActivity(params.data.tagId, activityType, limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
     if (!rows) return reply.status(404).send({ error: 'Tag not found' })
     return rows
   })
@@ -424,11 +443,10 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = addressParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
     const q = req.query as Record<string, unknown>
-    const tail = tailParam(q)
     const activityType = activityTypeParam(q)
-    const offset = tail == null ? activityOffsetParam(q, activityType) : 0
-    if (tail === null || offset == null) return reply.status(400).send({ error: `Activity offset/tail exceeds the supported ${maxActivityOffsetFor(activityType)}/${MAX_ACTIVITY_TAIL} row window for type '${activityType}'` })
-    const rows = await getAddressActivity(params.data.address, activityType, limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'), tail)
+    const offset = boundedActivityOffset(q, MAX_SCOPED_ACTIVITY_OFFSET)
+    if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${MAX_SCOPED_ACTIVITY_OFFSET}` })
+    const rows = await getAddressActivity(params.data.address, activityType, limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
     if (!rows) return reply.status(404).send({ error: 'Address not recognized' })
     return rows
   })
@@ -478,23 +496,28 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return counts
   })
 
-  // Activity row count under a value filter (the smol threshold / custom $-min),
-  // powering exact last-page jumps while the filter hides rows. `activity` is
-  // null until the value-aware activity index finishes its backfill.
-  fastify.get('/explorer/address/:address/activity-count', async (req, reply) => {
+  // How many rows one of the detail page's lists holds under exactly the filters
+  // it is showing — the total its pager numbers pages from. `total: null` means the
+  // list is real but too deep to walk to its end, which the page states instead of
+  // publishing an estimate.
+  fastify.get('/explorer/address/:address/list-count', async (req, reply) => {
     const params = analyzableAddressParam.safeParse(req.params)
-    const query = activityCountQuery.safeParse(req.query)
-    if (!params.success || !query.success) return reply.status(400).send({ error: 'Invalid request' })
-    // null covers both "index not ready" and "unknown address" — the pager
-    // simply has no total in either case.
-    return { activity: await getAddressActivityCountAtMin(params.data.address, query.data.min) }
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const query = scopedListQuery(req.query as Record<string, unknown>)
+    if (!query) return reply.status(400).send({ error: `List tab must be one of ${listTabSchema.options.join(', ')}` })
+    const total = await getAddressListTotal(params.data.address, query)
+    if (total === undefined) return reply.status(404).send({ error: 'Address not recognized' })
+    return { total }
   })
 
-  fastify.get('/explorer/tag/:tagId/activity-count', async (req, reply) => {
+  fastify.get('/explorer/tag/:tagId/list-count', async (req, reply) => {
     const params = tagParam.safeParse(req.params)
-    const query = activityCountQuery.safeParse(req.query)
-    if (!params.success || !query.success) return reply.status(400).send({ error: 'Invalid request' })
-    return { activity: await getTagActivityCountAtMin(params.data.tagId, query.data.min) }
+    if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
+    const query = scopedListQuery(req.query as Record<string, unknown>)
+    if (!query) return reply.status(400).send({ error: `List tab must be one of ${listTabSchema.options.join(', ')}` })
+    const total = await getTagListTotal(params.data.tagId, query)
+    if (total === undefined) return reply.status(404).send({ error: 'Tag not found' })
+    return { total }
   })
 
   // Largest value-changing events (big transfers/swaps/liquidations) for the

@@ -43,6 +43,19 @@ function withQuery(path: string, values: Record<string, QueryValue>): string {
 export interface ValueFilters { token?: string; min?: string }
 export interface ExtrinsicFilters { call?: string; result?: string; origin?: string }
 export interface EventFilters { event?: string }
+// Which list on an account/tag detail page a total is being asked for, plus the
+// filters that list is showing. The total must move with the filters, so every
+// filter field a list can apply travels with the request.
+export type ListTab = 'activity' | 'extrinsics' | 'events' | 'votes'
+// Tab badges: the exact length of each list, unfiltered.
+export interface TabCounts { extrinsics: number; extrinsicsOnBehalf?: number; events: number; votes: number }
+export interface ListCountQuery extends ValueFilters, ExtrinsicFilters, EventFilters {
+  tab: ListTab
+  type?: string
+  action?: string
+  from?: string
+  to?: string
+}
 
 export const api = {
   stats: (signal?: AbortSignal) => getJson<ExplorerStats>('/explorer/stats', signal),
@@ -82,10 +95,8 @@ export const api = {
   addressHistory: (address: string, signal?: AbortSignal) => getJson<AccountHistoryResponse>(`/explorer/address/${encodeURIComponent(address)}/history`, signal),
   closeAccounts: (address: string, signal?: AbortSignal) => getJson<CloseAccountsResponse>(`/explorer/address/${encodeURIComponent(address)}/close-accounts`, signal),
   tagCloseAccounts: (tagId: string, signal?: AbortSignal) => getJson<CloseAccountsResponse>(`/explorer/tag/${encodeURIComponent(tagId)}/close-accounts`, signal),
-  // `tail` pages from the account's OLDEST activity (tail=0 → first rows ever);
-  // the pager uses it for pages beyond forward-offset reach.
-  accountActivity: (address: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, tail?: number, signal?: AbortSignal) =>
-    getJson<ActivityRow[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/activity`, { type, offset, limit, action, from, to, ...filters, tail }), signal),
+  accountActivity: (address: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
+    getJson<ActivityRow[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/activity`, { type, offset, limit, action, from, to, ...filters }), signal),
   accountExtrinsics: (address: string, offset = 0, limit = 25, from?: string, to?: string, filters?: ExtrinsicFilters, signal?: AbortSignal) =>
     getJson<ExtrinsicSummary[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/extrinsics`, { offset, limit, from, to, ...filters }), signal),
   accountEvents: (address: string, offset = 0, limit = 25, from?: string, to?: string, filters?: EventFilters, signal?: AbortSignal) =>
@@ -93,28 +104,31 @@ export const api = {
   // Governance votes cast by the account (OpenGov + Democracy + collectives).
   accountVotes: (address: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<VoteRow[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/votes`, { offset, limit, from, to }), signal),
-  accountActivityCounts: (address: string, signal?: AbortSignal) => getJson<{ extrinsics: number; extrinsicsOnBehalf?: number; events: number; activity: number; votes: number }>(`/explorer/address/${encodeURIComponent(address)}/counts`, signal),
+  accountActivityCounts: (address: string, signal?: AbortSignal) => getJson<TabCounts>(`/explorer/address/${encodeURIComponent(address)}/counts`, signal),
+  // How many rows one list holds under exactly the filters it is showing.
+  // `total: null` = the list is real but too deep to walk to its end.
+  accountListCount: (address: string, query: ListCountQuery, signal?: AbortSignal) =>
+    getJson<{ total: number | null }>(withQuery(`/explorer/address/${encodeURIComponent(address)}/list-count`, { ...query }), signal),
   // Largest value-changing events (big transfers/swaps/liquidations) for the
   // value-history chart's markers; defaults to the account's full indexed range.
   accountValueEvents: (address: string, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<ValueEvent[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/value-events`, { from, to }), signal),
   tagValueEvents: (tagId: string, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<ValueEvent[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/value-events`, { from, to }), signal),
-  // Activity rows surviving a $-value filter (smol threshold) — null while the value index backfills.
-  accountActivityCount: (address: string, min: number, signal?: AbortSignal) => getJson<{ activity: number | null }>(withQuery(`/explorer/address/${encodeURIComponent(address)}/activity-count`, { min }), signal),
   tag: (tagId: string, signal?: AbortSignal) => getJson<TagDetail>(`/explorer/tag/${encodeURIComponent(tagId)}`, signal),
   // Lightweight variant for the hover card (skips the heavy portfolio-history walk).
   tagSummary: (tagId: string, signal?: AbortSignal) => getJson<TagDetail>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}`, { summary: '1' }), signal),
-  tagActivity: (tagId: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, tail?: number, signal?: AbortSignal) =>
-    getJson<ActivityRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/activity`, { type, offset, limit, action, from, to, ...filters, tail }), signal),
+  tagActivity: (tagId: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
+    getJson<ActivityRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/activity`, { type, offset, limit, action, from, to, ...filters }), signal),
   tagExtrinsics: (tagId: string, offset = 0, limit = 25, from?: string, to?: string, filters?: ExtrinsicFilters, signal?: AbortSignal) =>
     getJson<ExtrinsicSummary[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/extrinsics`, { offset, limit, from, to, ...filters }), signal),
   tagEvents: (tagId: string, offset = 0, limit = 25, from?: string, to?: string, filters?: EventFilters, signal?: AbortSignal) =>
     getJson<EventRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/events`, { offset, limit, from, to, ...filters }), signal),
   tagVotes: (tagId: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<VoteRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/votes`, { offset, limit, from, to }), signal),
-  tagActivityCounts: (tagId: string, signal?: AbortSignal) => getJson<{ extrinsics: number; extrinsicsOnBehalf?: number; events: number; activity: number; votes: number }>(`/explorer/tag/${encodeURIComponent(tagId)}/counts`, signal),
-  tagActivityCount: (tagId: string, min: number, signal?: AbortSignal) => getJson<{ activity: number | null }>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/activity-count`, { min }), signal),
+  tagActivityCounts: (tagId: string, signal?: AbortSignal) => getJson<TabCounts>(`/explorer/tag/${encodeURIComponent(tagId)}/counts`, signal),
+  tagListCount: (tagId: string, query: ListCountQuery, signal?: AbortSignal) =>
+    getJson<{ total: number | null }>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/list-count`, { ...query }), signal),
   search: (query: string, signal?: AbortSignal) => getJson<SearchResult[]>(withQuery('/explorer/search', { q: query }), signal),
   assets: (signal?: AbortSignal) => getJson<AssetListItem[]>('/explorer/assets', signal),
   hdx: (signal?: AbortSignal) => getJson<HdxDashboard>('/explorer/hdx', signal),

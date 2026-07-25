@@ -1,6 +1,6 @@
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { api } from '../api/explorer'
-import type { EventFilters, ExtrinsicFilters, ValueFilters } from '../api/explorer'
+import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
 import { useLive, LIVE_MS } from '../live'
 import type { AccountSort } from '../types'
 
@@ -136,9 +136,9 @@ export function useTagCloseAccounts(tagId: string | null, enabled = false) {
     retry: false,
   })
 }
-export function useAccountActivity(address: string | null, type = 'all', offset = 0, action?: string, from?: string, to?: string, filters?: ValueFilters, tail?: number) {
+export function useAccountActivity(address: string | null, type = 'all', offset = 0, action?: string, from?: string, to?: string, filters?: ValueFilters) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['account-activity', address, type, offset, action, from, to, filters, tail], queryFn: ({ signal }) => api.accountActivity(address as string, type, offset, undefined, action, from, to, filters, tail, signal), enabled: !!address, refetchInterval: offset === 0 && tail == null ? ri : false, staleTime: 6000 })
+  return useQuery({ queryKey: ['account-activity', address, type, offset, action, from, to, filters], queryFn: ({ signal }) => api.accountActivity(address as string, type, offset, undefined, action, from, to, filters, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000 })
 }
 export function useAccountExtrinsics(address: string | null, offset = 0, from?: string, to?: string, filters?: ExtrinsicFilters) {
   const ri = useInterval()
@@ -158,14 +158,25 @@ export function useAccountVotes(address: string | null, offset = 0, from?: strin
 export function useAccountActivityCounts(address: string | null) {
   return useQuery({ queryKey: ['account-activity-counts', address], queryFn: ({ signal }) => api.accountActivityCounts(address as string, signal), enabled: !!address, staleTime: 600_000 })
 }
-// Value-filtered activity count for the pager's last-page jump while the smol
-// filter (or a custom $-minimum) hides rows server-side.
-export function useAccountActivityCount(address: string | null, min: number | null) {
+// The exact length of one detail-page list under exactly the filters it shows —
+// what its pager numbers pages from, and what the Activity tab badge reports.
+// Walking a classified feed to its end is the expensive part of the page, so this
+// never polls; the total appears (and the pager grows numbered pages) once it
+// resolves. `total: null` means the list is too deep to count.
+export function useAccountListCount(address: string | null, query: ListCountQuery | null) {
   return useQuery({
-    queryKey: ['account-activity-count', address, min],
-    queryFn: ({ signal }) => api.accountActivityCount(address as string, min as number, signal),
-    enabled: !!address && min != null,
-    staleTime: 600_000,
+    queryKey: ['account-list-count', address, query],
+    queryFn: ({ signal }) => api.accountListCount(address as string, query as ListCountQuery, signal),
+    enabled: !!address && !!query,
+    staleTime: 120_000,
+  })
+}
+export function useTagListCount(tagId: string | null, query: ListCountQuery | null) {
+  return useQuery({
+    queryKey: ['tag-list-count', tagId, query],
+    queryFn: ({ signal }) => api.tagListCount(tagId as string, query as ListCountQuery, signal),
+    enabled: !!tagId && !!query,
+    staleTime: 120_000,
   })
 }
 // Value-history chart markers: the account/tag's largest transfers, swaps and
@@ -186,9 +197,9 @@ export function useTag(tagId: string | null) {
 export function useTagSummary(tagId: string | null) {
   return useQuery({ queryKey: ['tag-summary', tagId], queryFn: ({ signal }) => api.tagSummary(tagId as string, signal), enabled: !!tagId, staleTime: 30_000 })
 }
-export function useTagActivity(tagId: string | null, type = 'all', offset = 0, action?: string, from?: string, to?: string, filters?: ValueFilters, tail?: number) {
+export function useTagActivity(tagId: string | null, type = 'all', offset = 0, action?: string, from?: string, to?: string, filters?: ValueFilters) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['tag-activity', tagId, type, offset, action, from, to, filters, tail], queryFn: ({ signal }) => api.tagActivity(tagId as string, type, offset, undefined, action, from, to, filters, tail, signal), enabled: !!tagId, refetchInterval: offset === 0 && tail == null ? ri : false, staleTime: 6000 })
+  return useQuery({ queryKey: ['tag-activity', tagId, type, offset, action, from, to, filters], queryFn: ({ signal }) => api.tagActivity(tagId as string, type, offset, undefined, action, from, to, filters, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000 })
 }
 export function useTagExtrinsics(tagId: string | null, offset = 0, from?: string, to?: string, filters?: ExtrinsicFilters) {
   const ri = useInterval()
@@ -201,9 +212,6 @@ export function useTagEvents(tagId: string | null, offset = 0, from?: string, to
 export function useTagVotes(tagId: string | null, offset = 0, from?: string, to?: string) {
   const ri = useInterval()
   return useQuery({ queryKey: ['tag-votes', tagId, offset, from, to], queryFn: ({ signal }) => api.tagVotes(tagId as string, offset, undefined, from, to, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000 })
-}
-export function useTagActivityCount(tagId: string | null, min: number | null) {
-  return useQuery({ queryKey: ['tag-activity-count', tagId, min], queryFn: ({ signal }) => api.tagActivityCount(tagId as string, min as number, signal), enabled: !!tagId && min != null, staleTime: 600_000 })
 }
 // The asset directory is 74 KB (20 KB gzipped), 57% of it sparklines. The Assets page
 // renders those and wants them fresh; the activity filters only read symbols out of the

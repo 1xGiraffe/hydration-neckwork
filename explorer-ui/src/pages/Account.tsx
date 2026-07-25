@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { useAddress, useAddressHistory, useAddressValueEvents, useAccountActivityCounts, useStats } from '../hooks/useExplorerData'
+import { useAddress, useAddressHistory, useAddressValueEvents, useAccountListCount, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, useQueryValue, setQuery } from '../router'
@@ -8,6 +8,7 @@ import { PortfolioChart, ProfileStats, MoneyMarketPositions, moneyMarketDebtUsd,
 import { BalancesTreemap } from '../components/BalancesTreemap'
 import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
+import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 
 export function Account({ address }: { address: string }) {
@@ -17,7 +18,11 @@ export function Account({ address }: { address: string }) {
   const canonicalAddress = data ? (data.evmAddress ?? data.ss58Polkadot) : null
   const history = useAddressHistory(canonicalAddress)
   const valueEvents = useAddressValueEvents(canonicalAddress)
-  const counts = useAccountActivityCounts(canonicalAddress)
+  // The Activity tab badge is the exact length of the activity list, shared with
+  // the list's own unfiltered total; absent while it resolves, and absent for good
+  // on a feed too deep to count (rather than showing an overshooting estimate).
+  const activityTotal = useAccountListCount(canonicalAddress, activityListCount('all', '', {}))
+  const votesTotal = useAccountListCount(canonicalAddress, voteListCount())
   const headBlock = stats?.headBlock ?? 0
   const view = useQueryValue('view', 'overview')
 
@@ -49,7 +54,7 @@ export function Account({ address }: { address: string }) {
           const explicitEvmBinding = data.aliases.find(alias => alias.relationship === 'explicit_binding' && alias.evmAddress)?.evmAddress
           // Debt counts from every market and is netted out of the portfolio Value.
           const debtUsd = moneyMarketDebtUsd(mmList)
-          const tabs = profileTabs(data.balances.length, mmList, data.activeDcas?.length ?? 0, data.liquidityPositions?.length ?? 0, counts.data?.activity, counts.data?.votes)
+          const tabs = profileTabs(data.balances.length, mmList, data.activeDcas?.length ?? 0, data.liquidityPositions?.length ?? 0, activityTotal.data?.total ?? undefined, votesTotal.data?.total ?? undefined)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>

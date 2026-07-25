@@ -1,11 +1,68 @@
 import { expect, test } from './fixtures/test'
+import { mockSync } from '../tests/fixtures/mockApi'
 
-// Every pagination must offer quick first/last jumps. Finite lists know their
-// total (« ‹ 1…N › » + Go-to); account/tag activity tabs derive it from the
-// tab-count badges — but only while unfiltered, since the counts describe the
-// unfiltered feed. Fixture counts: extrinsics 1451 → 59 pages, events 26787 →
-// 1072 pages, activity 2143 → 86 pages (PAGE = 25).
+// Every detail-page list pages against an exact row total for the filters it is
+// showing, so « ‹ 1…N › » and the Go-to box always name real pages. Fixture lengths:
+// activity 137 rows → 6 pages, extrinsics 1451 → 59, events 26787 → 1072 (PAGE = 25).
 const ACCOUNT = '1L53bUTBopXqDXSXjBdQXFV7jZ8FtdRZS5JoMjGq5z3Cv2zr'
+const PAGE = 25
+
+// Read the fixture's own total for a filter, so these assertions stay pinned to the
+// mocked FEED rather than to a number copied out of it.
+function fixtureTotal(query: string): number {
+  return mockSync<{ total: number }>(`/explorer/address/${ACCOUNT}/list-count?${query}`)!.total
+}
+
+test('account activity pages the whole feed and stops on its real last page', async ({ page }) => {
+  await page.goto(`/account/${ACCOUNT}?view=activity`)
+  const pager = page.locator('.pager')
+  const total = fixtureTotal('tab=activity&type=all')
+  const pages = Math.ceil(total / PAGE)
+
+  await expect(pager.locator('.info')).toHaveText(`Page 1 of ${pages}`)
+  // The Activity tab badge is that same total, so the badge and the pager agree.
+  await expect(page.locator('.detail-tabs')).toContainText(String(total))
+
+  await pager.getByRole('button', { name: 'Last page' }).click()
+  await expect(pager.locator('.info')).toHaveText(`Page ${pages} of ${pages}`)
+  await expect(page).toHaveURL(new RegExp(`apage=${pages - 1}`))
+  // The last page holds the remainder and offers nothing after it.
+  await expect(page.locator('.panel table.tbl tbody tr')).toHaveCount(total - (pages - 1) * PAGE)
+  await expect(pager.getByRole('button', { name: 'Next page' })).toBeDisabled()
+  await expect(pager.getByRole('button', { name: `Page ${pages + 1}` })).toHaveCount(0)
+
+  await pager.getByRole('button', { name: 'First page' }).click()
+  await expect(pager.locator('.info')).toHaveText(`Page 1 of ${pages}`)
+})
+
+test('filtering the activity list re-counts it, and its last page still holds rows', async ({ page }) => {
+  await page.goto(`/account/${ACCOUNT}?view=activity`)
+  const pager = page.locator('.pager')
+  const all = Math.ceil(fixtureTotal('tab=activity&type=all') / PAGE)
+  await expect(pager.locator('.info')).toHaveText(`Page 1 of ${all}`)
+
+  const transferPages = Math.ceil(fixtureTotal('tab=activity&type=transfer') / PAGE)
+  expect(transferPages, 'the fixture must make this filter change the total').toBeLessThan(all)
+  await page.getByRole('button', { name: 'Transfer', exact: true }).click()
+  await expect(pager.locator('.info')).toHaveText(`Page 1 of ${transferPages}`)
+  await pager.getByRole('button', { name: 'Last page' }).click()
+  await expect(pager.locator('.info')).toHaveText(`Page ${transferPages} of ${transferPages}`)
+  await expect(page.locator('.panel table.tbl tbody tr').first()).toBeVisible()
+})
+
+test('a value filter re-counts the activity list too', async ({ page }) => {
+  await page.goto(`/account/${ACCOUNT}?view=activity`)
+  const pager = page.locator('.pager')
+  const minPages = Math.ceil(fixtureTotal('tab=activity&type=all&min=1000') / PAGE)
+  expect(minPages, 'the fixture must make a $-min change the total')
+    .toBeLessThan(Math.ceil(fixtureTotal('tab=activity&type=all') / PAGE))
+
+  await page.getByRole('button', { name: /Filters/ }).click()
+  await page.getByPlaceholder('$ from').fill('1000')
+  await expect(pager.locator('.info')).toHaveText(`Page 1 of ${minPages}`)
+  await pager.getByRole('button', { name: 'Last page' }).click()
+  await expect(pager.locator('.info')).toHaveText(`Page ${minPages} of ${minPages}`)
+})
 
 test('account extrinsics pager jumps straight to the last and first page', async ({ page }) => {
   await page.goto(`/account/${ACCOUNT}?view=activity&atab=extrinsics`)
@@ -18,6 +75,15 @@ test('account extrinsics pager jumps straight to the last and first page', async
   await expect(pager.locator('.info')).toHaveText('Page 1 of 59')
 })
 
+test('filtering an account list keeps a real last-page jump', async ({ page }) => {
+  await page.goto(`/account/${ACCOUNT}?view=activity&atab=extrinsics&call=transfer`)
+  const pager = page.locator('.pager')
+  // 87 of the fixture's 1451 extrinsics match — the filtered total, not the whole one.
+  await expect(pager.locator('.info')).toHaveText('Page 1 of 4')
+  await pager.getByRole('button', { name: 'Last page' }).click()
+  await expect(pager.locator('.info')).toHaveText('Page 4 of 4')
+})
+
 test('account events pager exposes its full page count', async ({ page }) => {
   await page.goto(`/account/${ACCOUNT}?view=activity&atab=events`)
   const pager = page.locator('.pager')
@@ -25,25 +91,16 @@ test('account events pager exposes its full page count', async ({ page }) => {
   await expect(pager.locator('.info')).toHaveText('Page 1,072 of 1,072')
 })
 
-test('filtering an account list drops the last-page jump (counts are unfiltered)', async ({ page }) => {
-  await page.goto(`/account/${ACCOUNT}?view=activity&atab=extrinsics&call=transfer`)
+test('a page past the end names its position instead of claiming "of" a smaller total', async ({ page }) => {
+  const pages = Math.ceil(fixtureTotal('tab=activity&type=all') / PAGE)
+  await page.goto(`/account/${ACCOUNT}?view=activity&apage=${pages + 14}`)
   const pager = page.locator('.pager')
-  await expect(pager.locator('.info')).toHaveText('Page 1')
-  await expect(pager.getByRole('button', { name: 'Last page' })).toHaveCount(0)
-})
 
-test('account activity shows the full feed (no smol filter) with an exact last page', async ({ page }) => {
-  await page.goto(`/account/${ACCOUNT}?view=activity`)
-  const pager = page.locator('.pager')
-  // Account Activity has no smol toggle — the unfiltered total applies directly.
-  await expect(page.getByTitle(/click to show|click to hide/)).toHaveCount(0)
-  await expect(pager.locator('.info')).toHaveText('Page 1 of 86')
-  // an explicit "$ from" filter switches to the value-aware count (1600 rows ≥ $10)
-  await page.getByRole('button', { name: /Filters/ }).click()
-  await page.getByPlaceholder('$ from').fill('10')
-  await expect(pager.locator('.info')).toHaveText('Page 1 of 64')
+  await expect(pager.locator('.info')).toHaveText(`Page ${pages + 15} · past the last page (${pages})`)
+  // Only pages that exist are offered, and the way back is one click.
+  await expect(pager.getByRole('button', { name: `Page ${pages + 1}` })).toHaveCount(0)
   await pager.getByRole('button', { name: 'Last page' }).click()
-  await expect(pager.locator('.info')).toHaveText('Page 64 of 64')
+  await expect(pager.locator('.info')).toHaveText(`Page ${pages} of ${pages}`)
 })
 
 test('tag activity pagers know their totals', async ({ page }) => {

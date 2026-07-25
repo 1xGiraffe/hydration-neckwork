@@ -1,17 +1,20 @@
-import { useTag, useTagActivityCounts, useTagValueEvents, useStats } from '../hooks/useExplorerData'
+import { useTag, useTagListCount, useTagValueEvents, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, AddrPill, Copy, ProfilePageSkeleton, DetailTabs, TagIcon, accountHref, rowNav } from '../components/ui'
 import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
+import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, MoneyMarketPositions, ActiveDcaTable, LiquidityPositionsTable } from '../components/AccountSections'
 import { BalancesTreemap } from '../components/BalancesTreemap'
 
 export function TagDetail({ tagId }: { tagId: string }) {
   const { data, isLoading, isError } = useTag(tagId)
-  const counts = useTagActivityCounts(tagId)
+  // Exact list lengths for the tab badges, shared with the lists' own totals.
+  const activityTotal = useTagListCount(tagId, activityListCount('all', '', {}))
+  const votesTotal = useTagListCount(tagId, voteListCount())
   const valueEvents = useTagValueEvents(tagId)
   useDocumentTitle(data?.name)
   const now = useNow()
@@ -39,7 +42,7 @@ export function TagDetail({ tagId }: { tagId: string }) {
           const primarySupplyUsd = Number(primaryMarket?.totalSuppliedBase ?? primaryMarket?.totalCollateralBase ?? 0) / 1e8
           const primaryDebtUsd = Number(primaryMarket?.totalDebtBase ?? 0) / 1e8
           const supplementalDebtUsd = mmList.filter(p => p !== primaryMarket).reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
-          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, counts.data?.activity, counts.data?.votes)
+          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data?.total ?? undefined, votesTotal.data?.total ?? undefined)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
@@ -51,7 +54,7 @@ export function TagDetail({ tagId }: { tagId: string }) {
                 </div>
                 <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} valueUsd={data.portfolioUsd - debtUsd} valueHint={
                   (primaryDebtUsd > 0 || supplementalDebtUsd > 0) && <div className="hint">
-                      {primaryDebtUsd > 0 && <>primary {F.usd(primarySupplyUsd)} supplied · −{F.usd(primaryDebtUsd)} borrowed</>}
+                      {primaryDebtUsd > 0 && <>primary {F.usd(primarySupplyUsd)} lent · −{F.usd(primaryDebtUsd)} borrowed</>}
                       {primaryDebtUsd > 0 && supplementalDebtUsd > 0 && <span aria-hidden="true"> · </span>}
                       {supplementalDebtUsd > 0 && <span className="mm-secondary-debt">GIGAHDX debt −{F.usd(supplementalDebtUsd)}</span>}
                     </div>
