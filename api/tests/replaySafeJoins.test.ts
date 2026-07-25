@@ -25,9 +25,11 @@ describe('dca_schedules joins are replay-safe', () => {
 // extrinsic and event counts.
 describe('block list reads are replay-safe', () => {
   it('pages the block list from a deduplicated source', () => {
-    const at = explorerService.indexOf('FROM price_data.raw_blocks')
+    const at = explorerService.indexOf('SELECT block_height, toString(block_timestamp) AS ts, block_hash, author, spec_version')
     expect(at).toBeGreaterThan(-1)
-    expect(explorerService.slice(at, at + 40)).toContain('raw_blocks FINAL')
+    const paged = explorerService.slice(at, explorerService.indexOf('OFFSET {offset:UInt32}', at))
+
+    expect(paged).toContain('FROM price_data.raw_blocks FINAL')
   })
 
   it('counts extrinsic and event identities per block, not rows', () => {
