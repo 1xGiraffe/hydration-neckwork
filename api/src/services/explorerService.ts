@@ -1973,9 +1973,17 @@ export async function getHolders(assetId: number, limit: number, offset = 0): Pr
   // sets are small, so fetch all and page in memory.
   if (ATOKEN_UNDERLYING_ID[assetId] != null) {
     return cached(`explorer:holders:${assetId}:${limit}:${offset}`, 30000, async () => {
-      const prices = await ensurePrices()
-      const all = await getATokenHolders(assetId, 1_000_000)
-      const totalUsd = all.reduce((s, h) => s + (usdValue(prices, assetId, h.balance, a.decimals) ?? 0), 0)
+      const [prices, all, supplies] = await Promise.all([ensurePrices(), getATokenHolders(assetId, 1_000_000), getATokenTotalSupplies()])
+      // Value the asset at its reconstructed total supply — the same figure the
+      // assets list shows. Summing the displayed rows instead would shrink the TVL
+      // by whatever pallet accounts hold (35% of aDOT sits in the Omnipool), so the
+      // two surfaces reported different TVLs for one asset and every share was
+      // measured against the reduced denominator. Pallet holders stay out of the
+      // displayed list, so the shares of what IS displayed sum to below 100%.
+      const supply = supplies.get(assetId)
+      const totalUsd = supply != null
+        ? usdValue(prices, assetId, supply.toString(), a.decimals) ?? 0
+        : all.reduce((sum, h) => sum + (usdValue(prices, assetId, h.balance, a.decimals) ?? 0), 0)
       const page = all.slice(offset, limit > 0 ? offset + limit : all.length)
         .map((h, i) => ({ ...h, rank: offset + i + 1 }))
       return { asset: a, holders: enrichShare(page, prices, totalUsd), total: all.length, totalUsd }

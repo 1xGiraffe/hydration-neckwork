@@ -33,3 +33,18 @@ describe('assets directory holder counts', () => {
     expect(Object.keys(SHARE_TOKEN_UNDERLYING_ID).length).toBeGreaterThan(0)
   })
 })
+
+// An aToken's TVL is its reconstructed total supply. Summing only the displayed
+// holders drops whatever pallet accounts hold — 35% of aDOT sits in the Omnipool —
+// so the asset detail page and the assets list disagreed on one asset's TVL, and
+// every holder share was measured against the reduced denominator.
+describe('aToken totals', () => {
+  it('values the holder page at the reconstructed total supply', () => {
+    const at = explorerService.indexOf('const [prices, all, supplies] = await Promise.all([ensurePrices(), getATokenHolders(')
+    expect(at).toBeGreaterThan(-1)
+    const branch = explorerService.slice(at, explorerService.indexOf('return { asset: a, holders: enrichShare(page, prices, totalUsd)', at))
+
+    expect(branch).toContain('getATokenTotalSupplies()')
+    expect(branch).toContain('const supply = supplies.get(assetId)')
+  })
+})
