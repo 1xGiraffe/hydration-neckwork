@@ -189,10 +189,6 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     addresses: [modlAccountId('routerex'), modlAccountId('lqdation'), modlAccountId('pltbonds'), modlAccountId('py/vstng'), modlAccountId('otcsettl'), modlAccountId('curreser')],
   },
   {
-    tagId: 'fee-staking-rewards', name: 'Fee (Staking Rewards)', color: 'var(--accent)', note: '', icon: HDX_ICON,
-    addresses: ['13UVJyLkaPAE2HDTAaSadmwptPVwzY621KiKZ1ZrKYaXga2w'],
-  },
-  {
     tagId: 'fee-referrals', name: 'Fee (Referrals)', color: 'var(--accent)', note: '', icon: HDX_ICON,
     addresses: ['13UVJyLnyqpyNGDQwYM5WAYntAQ1paUYsH1hhiwjqRcREWYM'],
   },
@@ -354,6 +350,15 @@ export async function seedDefaultTags(): Promise<void> {
         continue
       }
       if (existing?.members.includes(n.accountId)) continue
+      // One account, one tag. Two definitions naming the same pot made its label
+      // depend on insertion order — byAccount kept the last label_id, the grouped
+      // SQL aggregates kept any() — and let a system pot escape the suppression the
+      // other tag exists to apply. syncStructuralTags guards the same way.
+      const claimed = tagForAccount(n.accountId)
+      if (claimed && claimed.tagId !== def.tagId) {
+        console.warn(`[tags] seed: ${n.accountId} is already tagged ${claimed.tagId}; skipping ${def.tagId}`)
+        continue
+      }
       rows.push({ label_id: def.tagId, label_name: def.name, color: def.color, note: def.note, icon: def.icon, account_id: n.accountId, deleted: 0 })
     }
   }
@@ -371,6 +376,25 @@ export async function seedDefaultTags(): Promise<void> {
 // from SQL. Reconcile the stored color to the code definition with an in-place
 // mutation. Idempotent — the `color != …` guard makes it a no-op once the table
 // already matches, so it costs nothing on subsequent starts.
+// Membership rows are only ever INSERTED, so removing a tag from code leaves its
+// rows behind and loadTags keeps serving them — a retired tag would go on labelling
+// its account (and, when two tags named one pot, keep winning by label_id order).
+// Tombstone the rows of any label_id no code definition claims. Idempotent: the
+// deleted = 0 guard makes it a no-op once the table matches.
+export async function retireUnknownTagMemberships(): Promise<void> {
+  const known = new Set<string>([...DEFAULT_TAGS, ...STRUCTURAL_TAGS].map(d => d.tagId))
+  known.add(MM_TAG.tagId)
+  const stale = [...byTag.keys()].filter(tagId => !known.has(tagId))
+  if (!stale.length) return
+  await client.command({
+    query: `ALTER TABLE price_data.account_tags UPDATE deleted = 1 WHERE label_id IN {tagIds:Array(String)} AND deleted = 0`,
+    query_params: { tagIds: stale },
+    clickhouse_settings: { mutations_sync: '1' },
+  })
+  await loadTags()
+  console.log(`[tags] retired ${stale.length} tag(s) no longer defined in code: ${stale.join(', ')}`)
+}
+
 export async function reconcileTagColors(): Promise<void> {
   const want = new Map<string, string>()
   for (const d of DEFAULT_TAGS) want.set(d.tagId, d.color)

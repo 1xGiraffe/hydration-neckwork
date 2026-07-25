@@ -37,7 +37,7 @@ import {
   startTagCountsPrewarm,
   stopExplorerBackgroundTasks,
 } from './services/explorerService.ts'
-import { initTagService, loadTags, seedDefaultTags, syncMoneyMarketTag, startMoneyMarketTagRefresh, syncStructuralTags, startStructuralTagRefresh, reconcileTagColors } from './services/tagService.ts'
+import { initTagService, loadTags, seedDefaultTags, syncMoneyMarketTag, startMoneyMarketTagRefresh, syncStructuralTags, startStructuralTagRefresh, reconcileTagColors, retireUnknownTagMemberships } from './services/tagService.ts'
 import { initIdentityService, loadIdentities, startIdentityRefresh, stopIdentityRefresh } from './services/identityService.ts'
 import { initProxyMultisigService } from './services/proxyMultisigService.ts'
 import { initHdxService } from './services/hdxService.ts'
@@ -177,6 +177,7 @@ async function start() {
     // Colors are code-canonical; push any code-side color edits onto already-seeded
     // rows (seed/sync never rewrite existing memberships). No-op when already in sync.
     await reconcileTagColors().catch(e => console.warn('[tags] color reconcile failed', e))
+    await retireUnknownTagMemberships().catch(e => console.warn('[tags] retire reconcile failed', e))
     startIdentityRefresh()
     // H160 → bound substrate owner map for display resolution.
     await loadEvmBindings().catch(() => {})
