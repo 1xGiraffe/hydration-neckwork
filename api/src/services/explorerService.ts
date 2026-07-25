@@ -8058,7 +8058,9 @@ async function getRecentDcaFailures(limit: number, from?: string, to?: string, a
               s.block_height AS schedule_block, s.extrinsic_index AS schedule_index,
               '' AS error
             FROM price_data.dca_events AS e FINAL
-            LEFT JOIN price_data.dca_schedules s ON s.id = e.id
+            -- ANY: dca_schedules replaces on id, so an un-merged replayed
+            -- DCA.Scheduled row would otherwise multiply every failure it joins.
+            ANY LEFT JOIN price_data.dca_schedules s ON s.id = e.id
             WHERE ${bound} AND e.event_name = 'DCA.TradeFailed'
               ${accountFilter} ${assetFilter}
             ORDER BY e.block_height DESC, e.event_index DESC
