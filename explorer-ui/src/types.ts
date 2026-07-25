@@ -404,6 +404,9 @@ export interface IndexerStatus {
   lagSeconds: number
   chainBlockHeight: number
   blocksBehindHead: number
+  // false when the API could not sample the chain head — blocksBehindHead is then
+  // measured against raw ingestion's own head, so 0 does not mean "in sync".
+  chainHeadSampled?: boolean
 }
 
 export interface EventRow {

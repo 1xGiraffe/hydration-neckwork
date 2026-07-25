@@ -6,6 +6,7 @@ import Sidebar from './components/Sidebar'
 import { useAssets } from './hooks/useAssets'
 import { useMarketStats } from './hooks/useMarketStats'
 import { useIndexerStatus } from './hooks/useIndexerStatus'
+import { indexerLiveDot } from './api/indexer'
 import { useTheme } from './hooks/useTheme'
 import { useWindowWidth } from './hooks/useWindowWidth'
 import { useFavorites } from './hooks/useFavorites'
@@ -493,7 +494,7 @@ export default function App() {
               currentQuoteId={quoteId}
               onSelect={(b, q) => { setBaseId(b); setQuoteId(q) }}
               blockHeight={indexerQuery.data?.blockHeight ?? null}
-              indexerLive={(indexerQuery.data?.blocksBehindHead ?? 9999) <= 2}
+              indexerLive={indexerLiveDot(indexerQuery.data)}
               period={period}
               onCyclePeriod={cyclePeriod}
               favorites={favorites.favorites}
@@ -536,7 +537,7 @@ export default function App() {
               currentQuoteId={quoteId}
               onSelect={(b, q) => { setBaseId(b); setQuoteId(q); setDrawerOpen(false) }}
               blockHeight={indexerQuery.data?.blockHeight ?? null}
-              indexerLive={(indexerQuery.data?.blocksBehindHead ?? 9999) <= 2}
+              indexerLive={indexerLiveDot(indexerQuery.data)}
               period={period}
               onCyclePeriod={cyclePeriod}
               favorites={favorites.favorites}
@@ -583,7 +584,7 @@ export default function App() {
             </div>
             <div className="mobile-drawer-indexer">
               <span className="live-dot" style={{
-                background: (indexerQuery.data?.blocksBehindHead ?? 9999) <= 2 ? 'var(--green)' : 'var(--amber)',
+                background: indexerLiveDot(indexerQuery.data) ? 'var(--green)' : 'var(--amber)',
               }} />
               <span className="lbl">Indexer</span>
               <span className="val">

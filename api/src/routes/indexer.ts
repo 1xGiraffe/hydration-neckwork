@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import type { ClickHouseClient } from '../db/client.ts'
+import { SUBSTRATE_RPC_URL } from '../services/substrateRpc.ts'
 
 interface IndexerStatus {
   blockHeight: number
@@ -7,6 +8,11 @@ interface IndexerStatus {
   lagSeconds: number
   chainBlockHeight: number
   blocksBehindHead: number
+  // false when the chain-head RPC sample is unavailable: chainBlockHeight then
+  // falls back to the raw pipeline's own head, so "behind by 0" means "not behind
+  // raw ingestion", not "in sync with the chain". A liveness indicator has to know
+  // the difference — both pipelines stall together.
+  chainHeadSampled: boolean
   rawFinalizedRangeCount: number
   rawFinalizedFromBlock: number
   rawFinalizedToBlock: number
@@ -21,7 +27,9 @@ function uintValue(value: unknown): number {
 }
 
 async function fetchChainBlockHeight(): Promise<number | null> {
-  const rpcUrl = process.env.CHAIN_RPC_URL ?? process.env.RPC_URL ?? 'https://rpc.hydradx.cloud'
+  // The node the rest of the api already reads chain state from; the public
+  // endpoint is a last resort and is not reachable from inside the compose network.
+  const rpcUrl = process.env.CHAIN_RPC_URL?.trim() || process.env.RPC_URL?.trim() || SUBSTRATE_RPC_URL
   try {
     const response = await fetch(rpcUrl, {
       method: 'POST',
@@ -175,6 +183,7 @@ async function loadIndexerStatus(client: ClickHouseClient, sampledChainBlockHeig
     lagSeconds,
     chainBlockHeight,
     blocksBehindHead: Math.max(0, chainBlockHeight - blockHeight),
+    chainHeadSampled: sampledChainBlockHeight != null,
     rawFinalizedRangeCount: uintValue(rawCoverage?.range_count),
     rawFinalizedFromBlock: uintValue(rawCoverage?.from_block),
     rawFinalizedToBlock: uintValue(rawCoverage?.to_block),

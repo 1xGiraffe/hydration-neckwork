@@ -83,6 +83,20 @@ describe('/indexer route', () => {
     })
   })
 
+  it('marks the status as chain-sampled only when the RPC answered', async () => {
+    // Without a sample the height falls back to raw ingestion's own head, so
+    // "behind by 0" would otherwise read as "in sync" while both pipelines stall.
+    const sampled = await makeApp({ mainHeight: 100, rawHeight: 105, chainHeight: 120 })
+    const sampledResponse = await sampled.app.inject('/indexer')
+    await sampled.app.close()
+    expect(sampledResponse.json()).toMatchObject({ chainHeadSampled: true, blocksBehindHead: 20 })
+
+    const unsampled = await makeApp({ mainHeight: 100, rawHeight: 100 })
+    const unsampledResponse = await unsampled.app.inject('/indexer')
+    await unsampled.app.close()
+    expect(unsampledResponse.json()).toMatchObject({ chainHeadSampled: false, blocksBehindHead: 0 })
+  })
+
   it('rejects malformed RPC heights instead of partially parsing them', async () => {
     const { app } = await makeApp({ mainHeight: 100, rawHeight: 112, chainHeader: '0x78junk' })
     const response = await app.inject('/indexer')
