@@ -13,24 +13,30 @@ export function pageCount(rowCount?: number | null): number | undefined {
   return rowCount != null && rowCount > 0 ? Math.ceil(rowCount / PAGE_SIZE) : undefined
 }
 
-// The row count the pager sizes itself from is a sum of per-category counts, so it can
-// exceed the classified feed it is paging: one live account reported 1,209 activity rows
-// while the feed ends at 646, and the pager offered 49 pages when 26 exist. Pages past
-// the real end loaded empty and the user had no way to tell which were real.
+// The activity count the pager used to size itself from is a SUM OF OVERLAPPING
+// per-category counts, so it is an upper bound on the feed, not its length. For one live
+// account it reported 1,209 where the classified feed holds 646: trades 588 + dca 584 were
+// both counted for the same 613 trade rows (a DCA execution IS a swap), plus xcm 3 for 1,
+// transfers 20 for 19, staking 5 for 4. At 25 a page that advertised 49 pages when 26
+// exist, and pages 26-48 all loaded empty.
 //
-// A page that has SETTLED short (fewer than PAGE_SIZE rows) is proof of the end: the
-// current page is the last one when it holds rows, and the previous one was when it is
-// empty. Clamp to that and never above the count, so the pager only ever shrinks toward
-// the truth and stays stable while a page is still loading.
-export function shownPageCount(
-  countedPages: number | undefined,
+// So this never converts the count into a total. It reports a page count only when the
+// feed itself has PROVEN one — a settled page holding fewer than PAGE_SIZE rows is the
+// last page, and nothing else proves anything:
+//   - a full page: there may be more, which is what the next arrow is for
+//   - an empty page past the start: the end is somewhere EARLIER, but we do not know
+//     where, so claiming `page` pages would still advertise pages that do not exist
+//     (landing directly on ?apage=48 used to render "Page 49 of 48")
+// An unknown total makes Pager number pages only up to the current one, which is exactly
+// its documented no-count behaviour, so no page is ever offered before it is known to hold
+// rows.
+export function provenPageCount(
   rowsOnPage: number,
   page: number,
   loading: boolean,
 ): number | undefined {
-  if (loading || rowsOnPage >= PAGE_SIZE) return countedPages
-  const lastRealPage = rowsOnPage > 0 ? page + 1 : page
-  return countedPages == null ? (lastRealPage > 0 ? lastRealPage : undefined) : Math.min(countedPages, lastRealPage)
+  if (loading || rowsOnPage === 0 || rowsOnPage >= PAGE_SIZE) return undefined
+  return page + 1
 }
 
 // Deep pages are cheaper to reach from the oldest end, but only within the API's

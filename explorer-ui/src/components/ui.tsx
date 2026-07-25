@@ -1106,7 +1106,7 @@ export function ErrorRow({ cols, title, error, onRetry }: { cols: number; title:
 // window of page numbers plus a jump box reach arbitrary depth (totalPages,
 // when known, enables a Last button). Lists are newest-first, so higher pages
 // go further back toward the very first block.
-export function Pager({ page, hasNext, totalPages, onPage }: { page: number; hasNext?: boolean; totalPages?: number; onPage: (p: number) => void }) {
+export function Pager({ page, hasNext, totalPages, pastEnd, onPage }: { page: number; hasNext?: boolean; totalPages?: number; pastEnd?: boolean; onPage: (p: number) => void }) {
   const [jump, setJump] = useState('')
   const last = totalPages != null ? totalPages - 1 : undefined
   const canNext = hasNext ?? (last != null ? page < last : true)
@@ -1119,6 +1119,10 @@ export function Pager({ page, hasNext, totalPages, onPage }: { page: number; has
   const windowEnd = last != null ? Math.min(last, windowStart + maxButtons - 1) : page
   const window: number[] = []
   for (let n = windowStart; n <= windowEnd; n++) window.push(n)
+  // A page that settled with no rows proves nothing about the pages before it either, so
+  // numbering page-2..page there would keep offering pages that do not exist: a deep link
+  // to ?apage=48 on a 26-page feed still listed 47, 48, 49. Offer only the way back.
+  const numbered = pastEnd ? [] : window
   // hasNext stays authoritative past a known last page: totals derived from
   // approximate counts (e.g. activity tab badges) may undershoot, and › must not
   // dead-end there.
@@ -1129,7 +1133,7 @@ export function Pager({ page, hasNext, totalPages, onPage }: { page: number; has
       <div className="btns">
         <button onClick={() => go(0)} disabled={page === 0} title="First" aria-label="First page">«</button>
         <button onClick={() => go(page - 1)} disabled={page === 0} title="Previous" aria-label="Previous page">‹</button>
-        {window.map(n => <button key={n} className={n === page ? 'on' : ''} onClick={() => go(n)} aria-label={`Page ${n + 1}`} aria-current={n === page ? 'page' : undefined}>{n + 1}</button>)}
+        {numbered.map(n => <button key={n} className={n === page ? 'on' : ''} onClick={() => go(n)} aria-label={`Page ${n + 1}`} aria-current={n === page ? 'page' : undefined}>{n + 1}</button>)}
         <button onClick={() => go(page + 1)} disabled={!canNext} title="Next" aria-label="Next page">›</button>
         {last != null && <button onClick={() => go(last)} disabled={page >= last} title="Last" aria-label="Last page">»</button>}
         <form onSubmit={e => { e.preventDefault(); const n = parseInt(jump, 10); if (Number.isFinite(n) && n >= 1) go(n - 1); setJump('') }}>

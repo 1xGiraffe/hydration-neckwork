@@ -18,7 +18,7 @@ import { EvRow, ExtRow } from './ActivityRows'
 import { ActivityTable } from './ActivityTable'
 import { eventFilterFields, extrinsicFilterFields, activityFilterFields } from './activityFilters'
 import { EmptyRow, ErrorRow, F, Pager, ActivityChips, TableSkeleton, normalizeActivityAction, normalizeActivityType } from './ui'
-import { PAGE_SIZE, activityTailOffset, pageCount, shownPageCount, trimFinalTailPage } from '../utils/activityPaging'
+import { PAGE_SIZE, activityTailOffset, pageCount, provenPageCount, trimFinalTailPage } from '../utils/activityPaging'
 
 type ActivityScope =
   | { kind: 'account'; address: string }
@@ -81,14 +81,10 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const tagActivity = useTagActivity(activeTab === 'activity' ? tagId : null, ...commonActivityArgs)
   const activity = scope.kind === 'account' ? accountActivity : tagActivity
   const activityRows = trimFinalTailPage(activity.data ?? [], activityRowCount, offset, activityTail)
-
-  // activityRowCount is a sum of per-category counts, so it OVERSHOOTS the classified
-  // feed the pager walks: one live account reported 1,209 rows but the feed ends at 646,
-  // and the pager advertised 49 pages when 26 exist — every page past 25 loaded empty.
-  // A settled short page is proof of where the feed actually ends, so believe it over
-  // the count. (trimFinalTailPage already assumed the count can overshoot; the pager
-  // just never acted on it.)
-  const activityTotalPages = shownPageCount(pageCount(activityRowCount), activityRows.length, page, activity.isFetching)
+  // Only ever advertise a page count the feed has proven; activityRowCount overshoots it
+  // (see provenPageCount). Its other uses stay: the tab badge is an activity tally, and
+  // activityTail/trimFinalTailPage already treat it as approximate.
+  const activityTotalPages = provenPageCount(activityRows.length, page, activity.isFetching)
   const accountExtrinsics = useAccountExtrinsics(
     activeTab === 'extrinsics' ? accountAddress : null,
     offset,
@@ -152,7 +148,8 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
         />
         <ActivityTable rows={activityRows} now={now} live={page === 0} loading={activity.isFetching && !activity.data?.length}
           error={activity.error} onRetry={() => { void activity.refetch() }} />
-        <Pager page={page} totalPages={activityTotalPages} hasNext={activityRows.length === PAGE_SIZE} onPage={setPage} />
+        <Pager page={page} totalPages={activityTotalPages} hasNext={activityRows.length === PAGE_SIZE}
+          pastEnd={!activity.isFetching && !activity.error && page > 0 && activityRows.length === 0} onPage={setPage} />
       </>}
 
       {activeTab === 'extrinsics' && <>
