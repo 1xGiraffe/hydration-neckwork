@@ -8787,20 +8787,32 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
         query_params: { sid: scheduleId }, format: 'JSONEachRow',
       }),
       client.query({
+        // dca_events replaces on (event_name, block_height, event_index, id); a
+        // re-inserted raw range holds each execution twice until its parts merge,
+        // so counting and summing rows overstates both the attempts and the amount
+        // traded. LIMIT 1 BY collapses on the replacement key itself.
         query: `SELECT countIf(event_name = 'DCA.TradeExecuted') AS n,
                        countIf(event_name = 'DCA.TradeFailed') AS failed,
                        count() AS attempts,
                        toString(sumIf(toUInt256OrZero(amount_in), event_name = 'DCA.TradeExecuted')) AS tin,
                        toString(sumIf(toUInt256OrZero(amount_out), event_name = 'DCA.TradeExecuted')) AS tout
-                FROM price_data.dca_events
-                WHERE id = {sid:UInt64} AND event_name IN ('DCA.TradeExecuted','DCA.TradeFailed')`,
+                FROM (
+                  SELECT event_name, block_height, event_index, id, amount_in, amount_out
+                  FROM price_data.dca_events
+                  WHERE id = {sid:UInt64} AND event_name IN ('DCA.TradeExecuted','DCA.TradeFailed')
+                  LIMIT 1 BY event_name, block_height, event_index, id
+                )`,
         query_params: { sid: scheduleId }, format: 'JSONEachRow',
       }),
       client.query({
-        query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-                       toString(amount_in) AS amount_in, toString(amount_out) AS amount_out
-                FROM price_data.dca_events
-                WHERE id = {sid:UInt64} AND event_name IN ('DCA.TradeExecuted','DCA.TradeFailed')
+        query: `SELECT block_height, ts, event_index, extrinsic_index, event_name, amount_in, amount_out
+                FROM (
+                  SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, id,
+                         toString(amount_in) AS amount_in, toString(amount_out) AS amount_out
+                  FROM price_data.dca_events
+                  WHERE id = {sid:UInt64} AND event_name IN ('DCA.TradeExecuted','DCA.TradeFailed')
+                  LIMIT 1 BY event_name, block_height, event_index, id
+                )
                 ORDER BY block_height DESC, event_index DESC LIMIT {lim:UInt32} OFFSET {off:UInt32}`,
         query_params: { sid: scheduleId, lim: limit, off: offset }, format: 'JSONEachRow',
       }),
