@@ -13877,12 +13877,21 @@ async function enrichAccountSparklines(
   raw: { label_id: string; sample: string; usd_total: number }[],
   rows: TopAccountRow[],
 ): Promise<void> {
-  const isModuleAccount = (a: string) => /^0x(6d6f646c|7369626c|70617261)/.test(a)
-  // Row account set = substrate members (module/sovereign dropped) + their EVM twins,
-  // i.e. the same relatedAccountIds the detail page feeds getAccountHistory.
+  // Row account set = the row's members + their EVM twins, i.e. exactly the
+  // relatedAccountIds the detail page feeds getAccountHistory.
+  //
+  // Pallet/sovereign members (modl/sibl/para) are kept. enrichAccountRows drops them
+  // from its raw-observation scan because the omnipool pallet alone owns ~60M balance
+  // events, but this path is the detail page's own reconstruction, which already charts
+  // those accounts: /explorer/address/<pallet>/history returns a full 180-bucket series
+  // for the treasury and omnipool pallets in 2.1 s each, and account_balance_weekly
+  // covers them back to 2022 (6,954 and 3,727 weeks). Dropping them here only made the
+  // sparkline disagree with the Value column beside it, which sums every member — so
+  // Treasury, Omnipool, HOLLAR Stability Module, Liquidity Mining, Parachain Sovereign,
+  // Staking Pot and Pallet Pots showed a value with no series at all.
   const rowAccounts: string[][] = raw.map(r => {
     const members = r.label_id !== '' ? (getTagRecord(r.label_id)?.members ?? []) : [r.sample]
-    const base = members.filter(m => ACCOUNT_RE.test(m) && !isModuleAccount(m))
+    const base = members.filter(m => ACCOUNT_RE.test(m))
     const set = new Set<string>(base)
     for (const m of base) { const twin = evmAccountForm(m); if (twin) set.add(twin) }
     return [...set]
