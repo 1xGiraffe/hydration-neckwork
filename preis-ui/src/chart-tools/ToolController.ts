@@ -923,7 +923,10 @@ export class ToolController {
     // (their handlers preventDefault); never act behind an open modal.
     if (event.defaultPrevented) return
     if (event.key !== 'Escape' && event.key !== 'Delete' && event.key !== 'Backspace') return
-    if (document.querySelector('.omniwatch-modal, .picker-modal')) return
+    // Any open dialog, not a hardcoded list: only Escape is marked handled by
+    // those surfaces, so Delete/Backspace would otherwise destroy the selected
+    // drawing behind one of them — invisibly, since the dialog covers the chart.
+    if (document.querySelector('[role="dialog"]')) return
 
     if (event.key === 'Escape') {
       if (this.interaction) {
