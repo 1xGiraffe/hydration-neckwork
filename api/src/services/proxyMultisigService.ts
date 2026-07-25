@@ -3,6 +3,7 @@ import { xxhashAsU8a, createKeyMulti } from '@polkadot/util-crypto'
 import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
 import { threshold1Operations, proxyChildAddress, type MultisigCallInfo, type MultisigOperationRow } from './onBehalfActivity.ts'
+import { signedOrigin } from './explorerService.ts'
 
 // Proxy & multisig relations for account pages.
 //
@@ -245,14 +246,13 @@ async function refreshThreshold1Ops(): Promise<void> {
 
     const key = `${r.block}:${r.extrinsic}`
     const own = callsByKeyAddress.get(`${key}:${r.callAddress}`)
-    let originAccount: string | null = null
-    if (own) {
-      try {
-        const origin = JSON.parse(own.originJson) as { __kind?: string; value?: string }
-        if (origin.__kind === 'Signed' && origin.value) originAccount = origin.value.toLowerCase()
-      } catch { /* fall through to signer fallback */ }
-    }
-    originAccount = originAccount ?? signerByKey.get(key) ?? null
+    // raw_calls.origin_json nests the variant one level down
+    // ({"__kind":"system","value":{"__kind":"Signed","value":"0x…"}}), so reading
+    // __kind off the outer object never matched and the extrinsic signer always won.
+    // For an origin-changing wrapper (Proxy.proxy, Utility.dispatch_as, an outer
+    // as_multi) that signer is the delegate, and deriveMultisigAccountId would file
+    // the executed operation under an address no multisig ever had.
+    const originAccount = signedOrigin(own?.originJson ?? null) ?? signerByKey.get(key) ?? null
 
     const child = callsByKeyAddress.get(`${key}:${proxyChildAddress(r.callAddress)}`)
 

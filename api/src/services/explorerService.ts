@@ -12540,7 +12540,7 @@ async function loadSignersForTuples(tuples: Set<string>): Promise<Map<string, st
 // origin_json's Signed variant, exactly as the retired multisig_operations
 // derivation job parsed it (raw_extrinsics signer is the fallback for the
 // historical rows that predate origin_json).
-function signedOrigin(originJson: string | null): string | null {
+export function signedOrigin(originJson: string | null): string | null {
   if (!originJson) return null
   try {
     const o = JSON.parse(originJson) as { value?: { __kind?: string; value?: string } }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { decodeCompact, decodeProxiesValue, decodeMultisigOpValue, deriveMultisigAccountId, proxyTypeName } from '../src/services/proxyMultisigService.ts'
+import { signedOrigin } from '../src/services/explorerService.ts'
 
 describe('decodeProxiesValue', () => {
   it('decodes a real Proxy.Proxies storage value (3 proxies + deposit)', () => {
@@ -80,5 +81,27 @@ describe('decodeMultisigOpValue', () => {
 
     const partial = `0x${'00'.repeat(4 + 4 + 16)}${depositor}08${'bb'.repeat(32)}`
     expect(decodeMultisigOpValue(partial)).toBeNull()
+  })
+})
+
+// raw_calls.origin_json nests the variant one level down, so a parse that reads
+// __kind off the outer object never matches and the extrinsic signer wins instead.
+// Under an origin-changing wrapper that signer is the delegate, and the derived
+// multisig address would be one no multisig ever had.
+describe('signed origin parsing', () => {
+  it('reads the nested Signed variant raw_calls actually stores', () => {
+    const json = '{"__kind":"system","value":{"__kind":"Signed","value":"0x00EB31BDC552780B1100DDC2B83CF73E4"}}'
+
+    expect(signedOrigin(json)).toBe('0x00eb31bdc552780b1100ddc2b83cf73e4')
+  })
+
+  it('does not match the un-nested shape, which never occurs', () => {
+    expect(signedOrigin('{"__kind":"Signed","value":"0xabc"}')).toBeNull()
+  })
+
+  it('returns null for a non-signed origin, absent json, or malformed json', () => {
+    expect(signedOrigin('{"__kind":"system","value":{"__kind":"Root"}}')).toBeNull()
+    expect(signedOrigin(null)).toBeNull()
+    expect(signedOrigin('not json')).toBeNull()
   })
 })
