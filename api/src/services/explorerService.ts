@@ -7077,7 +7077,7 @@ async function getRecentMoneyMarket(limit: number, from?: string, to?: string, o
   })
 }
 
-const STAKING_EVENT_NAMES = [
+export const STAKING_EVENT_NAMES = [
   'CollatorRewards.CollatorRewarded',
   'GigaHdx.Staked',
   'GigaHdx.Unstaked',
@@ -7131,7 +7131,7 @@ export function suppressGigaCompanionEvents<T extends RawStakingActivityEvent>(r
     return !migrationKeys.has(key)
   })
 }
-function stakingAmountAndAsset(eventName: string, args: Record<string, unknown>, preferredAssetId?: number): { amount: string; assetId: number; action: string } | null {
+export function stakingAmountAndAsset(eventName: string, args: Record<string, unknown>, preferredAssetId?: number): { amount: string; assetId: number; action: string } | null {
   const wantStHdx = preferredAssetId === 670
   if (eventName === 'CollatorRewards.CollatorRewarded') {
     const assetId = Number(args.currency ?? 0)
@@ -7146,7 +7146,10 @@ function stakingAmountAndAsset(eventName: string, args: Record<string, unknown>,
   if (preferredAssetId != null && preferredAssetId !== 0) return null
   if (eventName === 'Staking.PositionCreated') return { assetId: 0, amount: argStr(args, 'stake') || argStr(args, 'amount'), action: 'Stake' }
   if (eventName === 'Staking.StakeAdded') return { assetId: 0, amount: argStr(args, 'amount') || argStr(args, 'stake'), action: 'Add stake' }
-  if (eventName === 'Staking.Unstaked') return { assetId: 0, amount: argStr(args, 'amount') || argStr(args, 'stake'), action: 'Unstake' }
+  // Staking.Unstaked reports the released principal as `unlockedStake` in both
+  // shapes it has had (early blocks add rewards/unlockedRewards); it never
+  // carries `amount` or `stake`, so reading those dropped every unstake row.
+  if (eventName === 'Staking.Unstaked') return { assetId: 0, amount: argStr(args, 'unlockedStake'), action: 'Unstake' }
   if (eventName === 'Staking.ForceUnstaked') return { assetId: 0, amount: argStr(args, 'paidRewards') || argStr(args, 'stake'), action: 'Force unstake' }
   if (eventName === 'Staking.RewardsClaimed') return { assetId: 0, amount: argStr(args, 'paidRewards'), action: 'Staking reward' }
   return null
@@ -7191,6 +7194,25 @@ const STAKING_ACTION_EVENTS: Record<string, string[]> = {
   'Giga reward': ['GigaHdxRewards.RewardsClaimed'],
   'Collator payout': ['CollatorRewards.CollatorRewarded'],
 }
+// SQL mirror of stakingAmountAndAsset for the value push-down: the min-USD
+// filter runs in ClickHouse, so it must read the same per-event amount field the
+// rendered row does or a matching row is filtered away (and vice versa).
+export function stakingAmountSql(gigaAssetId: number): string {
+  const giga = (stHdxField: string, hdxField: string) =>
+    `JSONExtractString(args_json,'${gigaAssetId === 670 ? stHdxField : hdxField}')`
+  return `multiIf(
+      event_name='CollatorRewards.CollatorRewarded', JSONExtractString(args_json,'amount'),
+      event_name='GigaHdx.Staked', ${giga('gigahdx', 'amount')},
+      event_name='GigaHdx.Unstaked', ${giga('gigahdxAmount', 'payout')},
+      event_name='GigaHdx.UnstakeCancelled', ${giga('gigahdx', 'amount')},
+      event_name='GigaHdx.MigratedFromLegacy', ${giga('gigahdxReceived', 'hdxUnlocked')},
+      event_name='GigaHdxRewards.RewardsClaimed', ${giga('gigahdxReceived', 'totalHdx')},
+      event_name='Staking.PositionCreated', if(JSONHas(args_json,'stake'), JSONExtractString(args_json,'stake'), JSONExtractString(args_json,'amount')),
+      event_name='Staking.StakeAdded', if(JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'stake')),
+      event_name='Staking.Unstaked', JSONExtractString(args_json,'unlockedStake'),
+      event_name='Staking.ForceUnstaked', if(JSONHas(args_json,'paidRewards'), JSONExtractString(args_json,'paidRewards'), JSONExtractString(args_json,'stake')),
+      event_name='Staking.RewardsClaimed', JSONExtractString(args_json,'paidRewards'), '')`
+}
 async function getRecentStaking(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}, assetId?: number, action?: string): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
@@ -7228,18 +7250,7 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
       : ''
     const gigaAssetId = preferredAssetId === 670 ? 670 : 0
     const stakingAssetExpr = `multiIf(event_name='CollatorRewards.CollatorRewarded', greatest(0, JSONExtractInt(args_json,'currency')), event_name LIKE 'GigaHdx%', ${gigaAssetId}, 0)`
-    const stakingAmountExpr = `multiIf(
-      event_name='CollatorRewards.CollatorRewarded', JSONExtractString(args_json,'amount'),
-      event_name='GigaHdx.Staked', JSONExtractString(args_json,'${gigaAssetId === 670 ? 'gigahdx' : 'amount'}'),
-      event_name='GigaHdx.Unstaked', JSONExtractString(args_json,'${gigaAssetId === 670 ? 'gigahdxAmount' : 'payout'}'),
-      event_name='GigaHdx.UnstakeCancelled', JSONExtractString(args_json,'${gigaAssetId === 670 ? 'gigahdx' : 'amount'}'),
-      event_name='GigaHdx.MigratedFromLegacy', JSONExtractString(args_json,'${gigaAssetId === 670 ? 'gigahdxReceived' : 'hdxUnlocked'}'),
-      event_name='GigaHdxRewards.RewardsClaimed', JSONExtractString(args_json,'${gigaAssetId === 670 ? 'gigahdxReceived' : 'totalHdx'}'),
-      event_name='Staking.PositionCreated', if(JSONHas(args_json,'stake'), JSONExtractString(args_json,'stake'), JSONExtractString(args_json,'amount')),
-      event_name IN ('Staking.StakeAdded','Staking.Unstaked'), if(JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'stake')),
-      event_name='Staking.ForceUnstaked', if(JSONHas(args_json,'paidRewards'), JSONExtractString(args_json,'paidRewards'), JSONExtractString(args_json,'stake')),
-      event_name='Staking.RewardsClaimed', JSONExtractString(args_json,'paidRewards'), '')`
-    const stakingValueFilter = eventValueFilterSql(stakingAssetExpr, stakingAmountExpr, 'block_timestamp', filters, prices, 'staking_price')
+    const stakingValueFilter = eventValueFilterSql(stakingAssetExpr, stakingAmountSql(gigaAssetId), 'block_timestamp', filters, prices, 'staking_price')
     const runStaking = async (b: string, pageLimit: number, pageOffset: number) => {
       const res = await client.query({
         query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
