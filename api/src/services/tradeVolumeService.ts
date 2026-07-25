@@ -168,6 +168,10 @@ export async function queryTradeVolumeSummaries(
               AND b.block_timestamp >= {start_time:DateTime}
               AND b.block_timestamp < {end_time:DateTime}
             GROUP BY interval_start, tv.account
+            -- The bucket straddling the window start holds only the trades after it,
+            -- so its totals would depend on the request window. Candle rows drop that
+            -- leading partial bucket; a summary must not outlive its candle.
+            HAVING interval_start >= {start_time:DateTime}
           )
           GROUP BY interval_start
         )

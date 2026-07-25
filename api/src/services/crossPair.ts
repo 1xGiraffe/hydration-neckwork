@@ -74,6 +74,12 @@ export async function queryCrossPairCandles(
       WHERE b.block_timestamp >= {start_time:DateTime}
         AND b.block_timestamp < {end_time:DateTime}
       GROUP BY interval_start
+      -- A bucket straddling the window start would otherwise be emitted under its
+      -- full bucket timestamp while holding only the trades inside the window, so its
+      -- open/low/volume would depend on the request. The USD candle views drop that
+      -- leading partial bucket; match them so both chart paths answer one request with
+      -- the same first candle.
+      HAVING interval_start >= {start_time:DateTime}
       ORDER BY interval_start
     `,
     query_params: {

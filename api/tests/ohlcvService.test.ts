@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
 import { candleToResponse, toClickHouseDateTime, INTERVAL_VIEW_MAP } from '../src/services/ohlcvService.ts'
 import type { OHLCVCandle } from '../src/types.ts'
@@ -71,5 +72,28 @@ describe('candleToResponse', () => {
     expect('volumeBuy' in result).toBe(true)
     expect('volumeSell' in result).toBe(true)
     expect('volumeTotal' in result).toBe(true)
+  })
+})
+
+// A bucket that straddles the requested window start holds only the rows inside the
+// window, so emitting it under its full bucket timestamp makes its open/low/volume
+// depend on the request. The USD candle views drop that leading partial bucket; the
+// cross-pair path and the volume summaries must do the same, or one request answers
+// with a bar whose own volume-details modal contradicts it.
+describe('leading partial buckets', () => {
+  const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8')
+
+  it('drops the partial bucket from cross-pair candles', () => {
+    const source = read('../src/services/crossPair.ts')
+    const at = source.indexOf('GROUP BY interval_start')
+
+    expect(source.slice(at, at + 700)).toContain('HAVING interval_start >= {start_time:DateTime}')
+  })
+
+  it('drops the partial bucket from trade-volume summaries', () => {
+    const source = read('../src/services/tradeVolumeService.ts')
+    const at = source.indexOf('GROUP BY interval_start, tv.account')
+
+    expect(source.slice(at, at + 700)).toContain('HAVING interval_start >= {start_time:DateTime}')
   })
 })
