@@ -1028,7 +1028,10 @@ svg { display: block; }
    would otherwise sit on the text baseline and push the whole note upward
    relative to the primary market's plain-text note. */
 .mm-title-note { display: inline-flex; align-items: center; gap: 4px; color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; }
-.mm-defisim-link { margin-left: auto; text-transform: none; letter-spacing: 0; }
+/* Compound selector on purpose: the generic `.ext-link` rule is declared later with
+   equal specificity, so a bare `.mm-defisim-link { margin-left: auto }` lost to its
+   `margin-left: 4px` and the link sat mid-row instead of right-aligned. */
+.ext-link.mm-defisim-link { margin-left: auto; text-transform: none; letter-spacing: 0; }
 /* Stays right-aligned once the title row wraps, so it lines up with the other
    "Open in …" links instead of sliding under the heading on narrow screens. */
 .ext-link-row { display: flex; justify-content: flex-end; margin-bottom: 8px; }
@@ -1567,10 +1570,15 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 }
 
 /* Referendum: tally bar, vote bubbles, and the ref link on vote rows. */
-.ref-link { color: var(--sky); text-decoration: none; }
+.ref-link { color: var(--sky); text-decoration: none; max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; }
 .ref-link:hover { text-decoration: underline; }
 .ref-num { margin-right: 2px; }
-.tally-bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--surface-2); }
+/* Wider screens have the room for more of the title before the ellipsis. */
+@media (min-width: 1100px) { .ref-link { max-width: 40ch; } }
+@media (max-width: 720px) { .ref-link { max-width: 18ch; } }
+/* Stacks a value under a full-width element (a tally bar) inside the flex-row .dd. */
+.dl .dd.dd-stack { flex-direction: column; align-items: stretch; gap: 6px; }
+.tally-bar { display: flex; width: 100%; height: 10px; border-radius: 5px; overflow: hidden; background: var(--surface-2); }
 .tally-aye { background: var(--green); }
 .tally-nay { background: var(--red); }
 .vb-aye-text { color: var(--green); }
@@ -1615,3 +1623,25 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .badge.badge-quiet { background: var(--surface-2); color: var(--text-low); margin-left: 6px; }
 tr.row-muted td { opacity: .55; }
 .empty-note { padding: 14px; text-align: center; color: var(--text-low); font-size: 12px; }
+
+/* Decoded referendum proposal: a call tree, not raw JSON. */
+.pc-panel { padding: 14px 16px; }
+.pc-call { min-width: 0; }
+.pc-head { display: flex; align-items: baseline; gap: 1px; font-family: 'GeistMono'; font-size: 13px; margin-bottom: 8px; }
+.pc-pallet { color: var(--text-medium); }
+.pc-dot { color: var(--text-low); }
+.pc-name { color: var(--sky); font-weight: 600; }
+/* Nested calls step in with a rule, so a batch of batches stays readable. */
+.pc-nested { border-left: 2px solid var(--border); padding-left: 12px; margin: 6px 0; }
+.pc-args { display: grid; grid-template-columns: minmax(90px, max-content) 1fr; gap: 4px 14px; align-items: baseline; }
+.pc-key { font-size: 11px; color: var(--text-low); text-transform: uppercase; letter-spacing: .04em; }
+.pc-val { min-width: 0; font-size: 12px; color: var(--text-high); overflow-wrap: anywhere; }
+.pc-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.pc-list > li::marker { color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; }
+.pc-variant { font-family: 'GeistMono'; font-size: 12px; color: var(--accent); }
+.pc-foot { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 11px; }
+.pc-hash-toggle { background: none; border: 0; color: var(--sky); font-size: 11px; cursor: pointer; padding: 0; }
+.pc-hash-toggle:hover { text-decoration: underline; }
+.pc-hash { color: var(--text-medium); font-size: 10.5px; overflow-wrap: anywhere; }
+.pc-unavailable { color: var(--text-medium); font-size: 12px; }
+.pc-error { color: var(--red); font-size: 11px; margin-top: 4px; }

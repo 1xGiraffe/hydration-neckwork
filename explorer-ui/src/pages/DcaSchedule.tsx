@@ -31,10 +31,12 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
             <div className="detail-card">
               <div className="dl">
                 <div className="dt">Owner</div><div className="dd">{data.who ? <AddrPill account={data.who} /> : '—'}</div>
+                {/* Time, linked to the extrinsic that scheduled it: the block number is
+                    noise beside those two, and the extrinsic page links to its block. */}
                 <div className="dt">Initiated</div><div className="dd mono">
-                  <Link to={paths.block(data.createdAt.blockHeight)} className="hash">{F.int(data.createdAt.blockHeight)}</Link>
-                  {data.createdAt.extrinsicIndex != null && <> · <Link to={paths.extrinsic(`${data.createdAt.blockHeight}-${data.createdAt.extrinsicIndex}`)} className="hash">{data.createdAt.blockHeight}-{data.createdAt.extrinsicIndex}</Link></>}
-                  {' '}· <Ago ts={data.createdAt.timestamp} now={now} />
+                  {data.createdAt.extrinsicIndex != null
+                    ? <Link to={paths.extrinsic(`${data.createdAt.blockHeight}-${data.createdAt.extrinsicIndex}`)} className="hash"><Ago ts={data.createdAt.timestamp} now={now} /></Link>
+                    : <Ago ts={data.createdAt.timestamp} now={now} />}
                 </div>
                 <div className="dt">Order</div><div className="dd">
                   {/* amountPer follows the order type: a Sell fixes the sold

@@ -26,7 +26,9 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
   }, [row, slug, id])
 
   const eventId = row?.eventIndex != null ? `${row.blockHeight}-${row.eventIndex}` : null
-  const voteSub = row?.type === 'vote' ? [row.voteSide, row.voteRefTitle ?? (row.voteRef ? `Ref ${row.voteRef}` : null)].filter(Boolean).join(' · ') : ''
+  const voteSub = row?.type === 'vote'
+    ? [row.voteSide?.toUpperCase(), row.voteConviction, row.voteRefTitle ?? (row.voteRef ? `Referendum #${row.voteRef}` : null)].filter(Boolean).join(' · ')
+    : ''
   return (
     <div className="wrap">
       <div className="page-head">
@@ -59,13 +61,12 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {row.type === 'liquidity' && <><div className="dt">Action</div><div className="dd">{row.liqAction === 'Remove' ? 'Remove liquidity' : row.liqAction === 'Create' ? 'Create pool' : row.liqAction === 'Claim' ? 'Claim rewards' : 'Add liquidity'}</div></>}
             {row.type === 'staking' && <><div className="dt">Action</div><div className="dd">{row.stakingAction ?? '—'}</div></>}
             {row.type === 'vote' && <>
-              {row.voteRef && <><div className="dt">Referendum</div><div className="dd">
-                {row.voteRefPallet
-                  ? <Link to={paths.referendum(row.voteRefPallet, row.voteRef)} className="ref-link">{row.voteRefTitle ?? `Ref ${row.voteRef}`}</Link>
-                  : <span className="mono">{row.voteRef}</span>}
-                {row.voteRefTitle && <span className="muted mono"> · #{row.voteRef}</span>}
-              </div></>}
-              <div className="dt">Side</div><div className="dd">{row.voteSide ?? '—'}{row.voteConviction ? <span className="muted" style={{ marginLeft: 8 }}>{row.voteConviction}</span> : null}</div>
+              {/* The referendum and the side already head this page (see voteSub), so they
+                  are not repeated in the list; the referendum stays reachable as a link. */}
+              {row.voteRef && row.voteRefPallet && <>
+                <div className="dt">Referendum</div>
+                <div className="dd"><Link to={paths.referendum(row.voteRefPallet, row.voteRef)} className="ref-link">Open referendum #{row.voteRef}</Link></div>
+              </>}
             </>}
             {row.type === 'otc' && <>
               <div className="dt">Order ID</div><div className="dd mono">#{row.otcOrderId}</div>

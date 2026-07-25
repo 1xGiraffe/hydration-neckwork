@@ -7485,6 +7485,10 @@ async function getRecentOtc(limit: number, from?: string, to?: string, offset = 
 }
 
 export interface VoteRow {
+  // Referendum identity + off-chain title, exactly as activity rows carry them, so the
+  // votes tab renders through the same table instead of a look-alike of its own.
+  voteRefPallet?: 'opengov' | 'democracy' | null
+  voteRefTitle?: string | null
   blockHeight: number
   timestamp: string
   eventIndex: number
@@ -7697,6 +7701,7 @@ async function getRecentVotes(limit: number, from?: string, to?: string, offset 
           blockHeight: e.block_height, timestamp: e.ts, eventIndex: e.event_index, extrinsicIndex: e.extrinsic_index,
           account: account && ACCOUNT_RE.test(account) ? accountRef(account) : null,
           pallet, action: 'Voted', referendum: ref, side: details.side, conviction: details.conviction, amount: details.amount,
+          ...referendumRefFields(pallet, ref),
           asset: hdx, valueUsd: details.amount ? usdValue(prices, hdx.assetId, details.amount, hdx.decimals) : null,
         }
         out.push(row)

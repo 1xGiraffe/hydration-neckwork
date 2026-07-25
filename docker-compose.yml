@@ -168,6 +168,34 @@ services:
     networks:
       - neckwork
 
+  # Referendum proposal calls. A referendum names its proposal by hash and the call
+  # itself lives in a preimage as SCALE bytes, which only runtime metadata can read —
+  # hence an indexer-side decoder rather than API-side. A hash IS its content, so a
+  # decoded proposal is never revisited and this goes quiet once caught up.
+  referendum-proposals:
+    image: hydration-neckwork-indexer:latest
+    build: .
+    container_name: hydration-neckwork-referendum-proposals
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      schema-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      # Metadata fetches are heavy and the public endpoints throttle hard when the other
+      # snapshot services are busy; this one is not rate limited.
+      - RPC_URL=${REFERENDUM_PROPOSAL_RPC_URL:-https://hydration-rpc.neckwork.net}
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - RPC_RATE_LIMIT=${REFERENDUM_PROPOSAL_RPC_RATE_LIMIT:-20}
+      - RPC_CAPACITY=${REFERENDUM_PROPOSAL_RPC_CAPACITY:-4}
+    command: ["src/scripts/decode-referendum-proposals.ts", "--loop",
+      "--cycle-minutes=${REFERENDUM_PROPOSAL_CYCLE_MINUTES:-30}",
+      "--max=${REFERENDUM_PROPOSAL_MAX:-200}"]
+    networks:
+      - neckwork
+
   # Referendum titles from SubSquare. The chain has no human title for a
   # referendum, so "#369" is all the explorer could show without this. Live
   # referenda are re-read every LIVE_REFRESH_MINUTES (Hydration usually has 0-2

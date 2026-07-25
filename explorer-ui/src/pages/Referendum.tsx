@@ -4,8 +4,9 @@ import { api } from '../api/explorer'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
-import { Crumbs, F, AddrPill, SkeletonRows, Ago } from '../components/ui'
+import { Crumbs, F, AddrPill, SkeletonRows, Ago, VoteSideBadge } from '../components/ui'
 import { VoteBubbles } from '../components/VoteBubbles'
+import { ProposalCall } from '../components/ProposalCall'
 import type { ReferendumDetail, ReferendumVoter } from '../types'
 import { orderVoters, type SideFilter, type VoteSort } from '../utils/referendumVotes'
 
@@ -40,9 +41,15 @@ function TallyBar({ ayes, nays }: { ayes: string; nays: string }) {
   )
 }
 
-function SideBadge({ side }: { side: ReferendumVoter['side'] }) {
-  const cls = side === 'Aye' ? 'vote-aye' : side === 'Nay' ? 'vote-nay' : 'vote-split'
-  return <span className={`badge ${cls}`}>{side.toUpperCase()}</span>
+// A moment on a detail page: the time it happened, linked to the extrinsic that did it.
+// The block number adds nothing next to those two, and the extrinsic page links onward
+// to its block anyway. Falls back to a plain timestamp when no extrinsic exists — a
+// block hook (a referendum concluding, say) is not an extrinsic.
+function MomentLink({ at, now }: { at: { blockHeight: number; extrinsicIndex: number | null; timestamp: string }; now: number }) {
+  const ago = <Ago ts={at.timestamp} now={now} />
+  return at.extrinsicIndex == null
+    ? ago
+    : <Link to={paths.extrinsic(`${at.blockHeight}-${at.extrinsicIndex}`)} className="hash">{ago}</Link>
 }
 
 function SortHead({ label, value, sort, onSort }: { label: string; value: VoteSort; sort: VoteSort; onSort: (v: VoteSort) => void }) {
@@ -60,7 +67,7 @@ function VoterRows({ voters, detail, now }: { voters: ReferendumVoter[]; detail:
       {voters.map(voter => (
         <tr key={`${voter.blockHeight}-${voter.eventIndex}`} className={voter.removed ? 'row-muted' : undefined}>
           <td data-label="Account">{voter.account ? <AddrPill account={voter.account} /> : <span className="muted">unknown</span>}</td>
-          <td data-label="Vote"><SideBadge side={voter.side} />{voter.conviction ? <span className="muted"> {voter.conviction}</span> : null}
+          <td data-label="Vote"><VoteSideBadge side={voter.side} />{voter.conviction ? <span className="muted"> {voter.conviction}</span> : null}
             {voter.removed && <span className="badge badge-quiet" title="Withdrawn before the referendum closed, so it is not counted">withdrawn</span>}</td>
           <td data-label="Votes" className="r mono">{F.amount(voter.weighted, decimals)} <span className="muted">{symbol}</span></td>
           <td data-label="Time" className="r">
@@ -115,9 +122,11 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
                     conviction-weighted and includes delegated power. */}
                 {data.onChainTally && <>
                   <div className="dt">On-chain tally</div>
-                  <div className="dd">
+                  {/* dd-stack: .dd is a flex ROW, which put the bar beside the numbers
+                      and collapsed it to zero width (its children are percentages). */}
+                  <div className="dd dd-stack">
                     <TallyBar ayes={data.onChainTally.ayes} nays={data.onChainTally.nays} />
-                    <div className="mono" style={{ marginTop: 6 }}>
+                    <div className="mono">
                       <span className="vb-aye-text">{F.amount(data.onChainTally.ayes, data.asset.decimals)} AYE</span>
                       {' · '}
                       <span className="vb-nay-text">{F.amount(data.onChainTally.nays, data.asset.decimals)} NAY</span>
@@ -137,24 +146,28 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
                 </>}
                 {data.submittedAt && <>
                   <div className="dt">Submitted</div>
-                  <div className="dd mono">
-                    <Link to={paths.block(data.submittedAt.blockHeight)} className="hash">{F.int(data.submittedAt.blockHeight)}</Link>{' '}
-                    <Ago ts={data.submittedAt.timestamp} now={now} />
-                  </div>
+                  <div className="dd mono"><MomentLink at={data.submittedAt} now={now} /></div>
                 </>}
                 {data.concludedAt && <>
                   <div className="dt">Concluded</div>
-                  <div className="dd mono">
-                    <Link to={paths.block(data.concludedAt.blockHeight)} className="hash">{F.int(data.concludedAt.blockHeight)}</Link>{' '}
-                    <Ago ts={data.concludedAt.timestamp} now={now} />
-                  </div>
+                  <div className="dd mono"><MomentLink at={data.concludedAt} now={now} /></div>
                 </>}
-                {data.proposalHash && <>
-                  <div className="dt">Proposal</div>
-                  <div className="dd mono hash-cell">{data.proposalHash}</div>
-                </>}
+
               </div>
             </div>
+
+            {/* What the referendum would actually DO. Only place a reader can see it: the
+                chain stores it as SCALE bytes behind the hash. */}
+            {(data.proposalCall || data.proposalHash) && <>
+              <div className="sec-title" style={{ marginTop: 22 }}>Proposal
+                {data.proposalCall && !data.proposalCall.decodeError && <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}>
+                  {' '}· {data.proposalCall.pallet}.{data.proposalCall.callName}
+                </span>}
+              </div>
+              {data.proposalCall
+                ? <ProposalCall call={data.proposalCall} hash={data.proposalHash} />
+                : <div className="panel pc-panel"><div className="pc-unavailable">Preimage not indexed yet{data.proposalHash && <div className="pc-hash mono">{data.proposalHash}</div>}</div></div>}
+            </>}
 
             <div className="sec-title" style={{ marginTop: 22 }}>Voting power
               <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · one bubble per account, area = conviction-weighted power</span>

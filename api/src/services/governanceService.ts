@@ -84,9 +84,14 @@ export interface ReferendumDetail {
   subsquareUrl: string
   track: number | null
   proposalHash: string | null
+  // The proposal's actual call, decoded from its preimage by the referendum-proposals
+  // service (SCALE bytes need runtime metadata, which only the indexer has). Null when
+  // the preimage has not been decoded yet — the page then shows the hash alone rather
+  // than implying the referendum has no proposal.
+  proposalCall: { pallet: string; callName: string; args: unknown; byteLength: number; decodeError: string | null } | null
   status: string
-  submittedAt: { blockHeight: number; timestamp: string } | null
-  concludedAt: { blockHeight: number; timestamp: string } | null
+  submittedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
+  concludedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
   asset: AssetRef
   // The chain's own tally from the lifecycle event, already conviction-weighted and
   // inclusive of delegated power. Authoritative when present.
@@ -163,6 +168,7 @@ const CONCLUDING_EVENTS = new Set([
 interface LifecycleRow {
   event_name: string
   block_height: number
+  extrinsic_index: number | null
   ts: string
   args_json: string
 }
@@ -174,7 +180,7 @@ async function loadLifecycle(pallet: ReferendumPallet, index: number): Promise<L
   const indexField = pallet === 'opengov' ? 'index' : 'refIndex'
   const prefix = pallet === 'opengov' ? 'Referenda.' : 'Democracy.'
   const res = await client.query({
-    query: `SELECT event_name, block_height, toString(block_timestamp) AS ts, args_json
+    query: `SELECT event_name, block_height, extrinsic_index, toString(block_timestamp) AS ts, args_json
             FROM price_data.raw_events
             WHERE event_name LIKE {prefix:String}
               AND event_name != 'Democracy.Voted'
@@ -495,6 +501,34 @@ export function indirectTallyFrom(onChain: ReferendumTally | null, direct: Refer
   return ayes === '0' && nays === '0' ? null : { ayes, nays, support: null }
 }
 
+interface ProposalCallRow {
+  pallet: string
+  call_name: string
+  args_json: string
+  byte_length: number
+  decode_error: string
+}
+
+async function loadProposalCall(hash: string): Promise<ReferendumDetail['proposalCall']> {
+  const res = await client.query({
+    query: `SELECT pallet, call_name, args_json, byte_length, decode_error
+            FROM price_data.referendum_proposals FINAL
+            WHERE proposal_hash = {hash:String} LIMIT 1`,
+    query_params: { hash: hash.toLowerCase() }, format: 'JSONEachRow',
+  })
+  const row = (await res.json<ProposalCallRow>())[0]
+  if (!row) return null
+  let args: unknown = {}
+  try { args = row.args_json ? JSON.parse(row.args_json) : {} } catch { args = {} }
+  return {
+    pallet: row.pallet,
+    callName: row.call_name,
+    args,
+    byteLength: Number(row.byte_length),
+    decodeError: row.decode_error || null,
+  }
+}
+
 export async function getReferendum(pallet: ReferendumPallet, index: number, limit = 500): Promise<ReferendumDetail | null> {
   return cached(`explorer:referendum:${pallet}:${index}:${limit}`, 60_000, async () => {
     const lifecycle = await loadLifecycle(pallet, index)
@@ -549,6 +583,8 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
     const concludedRow = [...lifecycle].reverse().find(row => CONCLUDING_EVENTS.has(row.event_name))
     const submittedArgs = submitted ? (() => { try { return JSON.parse(submitted.args_json) as Record<string, unknown> } catch { return {} } })() : {}
     const proposal = submittedArgs.proposal as { hash?: unknown } | undefined
+    const proposalHash = typeof proposal?.hash === 'string' ? proposal.hash : null
+    const proposalCall = proposalHash ? await loadProposalCall(proposalHash) : null
 
     return {
       pallet,
@@ -556,10 +592,13 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
       title: titles.get(`${pallet}:${index}`) ?? null,
       subsquareUrl: subsquareUrl(pallet, index),
       track: typeof submittedArgs.track === 'number' ? submittedArgs.track : null,
-      proposalHash: typeof proposal?.hash === 'string' ? proposal.hash : null,
+      proposalHash,
+      proposalCall,
       status: referendumStatusFrom(pallet, lifecycle.map(row => row.event_name)),
-      submittedAt: submitted ? { blockHeight: submitted.block_height, timestamp: submitted.ts } : null,
-      concludedAt: concludedRow ? { blockHeight: concludedRow.block_height, timestamp: concludedRow.ts } : null,
+      submittedAt: submitted ? { blockHeight: submitted.block_height, extrinsicIndex: submitted.extrinsic_index, timestamp: submitted.ts } : null,
+      // A conclusion is usually a block hook rather than an extrinsic, so its extrinsic
+      // index is legitimately null and the UI falls back to a plain timestamp.
+      concludedAt: concludedRow ? { blockHeight: concludedRow.block_height, extrinsicIndex: concludedRow.extrinsic_index, timestamp: concludedRow.ts } : null,
       asset: assetRef,
       onChainTally,
       directTally,
