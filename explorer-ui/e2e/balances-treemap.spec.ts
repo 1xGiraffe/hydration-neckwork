@@ -109,28 +109,30 @@ test.describe('balances treemap — desktop', () => {
 
     // One aggregated bar, no separate totals line.
     await expect(bd.locator('.bd-agg')).toHaveCount(1)
-    await expect(bd).toContainText('Locks & reserves')
+    await expect(bd).toContainText('Locks')
 
     // The compact schedule: reason · amount · duration, sorted by time to
     // liquidity — transferable first, dated ascending (days, not dates), then
     // the open residual and the static "until …" reserves.
-    const rows = bd.locator('.bd-sched-row')
+    // Scope to the rendered legend: the band also holds an aria-hidden clone of it,
+    // used only to measure the legend's single-line width.
+    const rows = bd.locator('.bd-sched .bd-sched-row')
     expect(await rows.count()).toBe(9)
-    await expect(rows.nth(0)).toContainText('transferable')
+    await expect(rows.nth(0)).toContainText('free')
     await expect(rows.nth(1)).toContainText('staking')
     await expect(rows.nth(1)).toContainText('unstake to free')
     await expect(rows.nth(2)).toContainText('DCA')
     await expect(rows.nth(2)).toContainText('until cancelled')
     await expect(rows.nth(3)).toContainText('deposits')
     await expect(rows.nth(3)).toContainText('until cleared')
-    await expect(rows.nth(4)).toContainText('votes')
+    await expect(rows.nth(4)).toContainText('vote')
     await expect(rows.nth(4)).toContainText('while voting/delegating')
     await expect(rows.nth(5)).toContainText('GHDX unstake')
     await expect(rows.nth(5)).toContainText(/in \d+(h|d)/)
     await expect(rows.nth(6)).toContainText('GHDX')
     await expect(rows.nth(6)).not.toContainText('GHDX unstake')
     await expect(rows.nth(6)).toContainText('if unstaked now')
-    await expect(rows.nth(7)).toContainText('votes')
+    await expect(rows.nth(7)).toContainText('vote')
     await expect(rows.nth(7)).toContainText(/in \d+(h|d)/)
     await expect(rows.nth(8)).toContainText('vesting')
     await expect(rows.nth(8)).toContainText('vests linearly')
@@ -150,7 +152,7 @@ test.describe('balances treemap — desktop', () => {
     await expect(bd).toBeVisible()
     await expect(bd.locator('.bd-agg')).toHaveCount(1)
     await expect(bd).toContainText(/in \d+(h|d)/)
-    await expect(bd).toContainText('votes')
+    await expect(bd).toContainText('vote')
   })
 
   test('switching assets clears a lingering balance-history tooltip', async ({ page }) => {
