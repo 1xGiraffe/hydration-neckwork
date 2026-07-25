@@ -5210,6 +5210,13 @@ function groupSwapRows(rows: RawSwapEventRow[]): { groups: Map<string, RawSwapEv
   }
   return { groups, order }
 }
+// activity_histogram_events.activity_index identifies a swap by its extrinsic (so a
+// router hop and its pool leg count as one activity) and every other row by its
+// event index — two identity spaces sharing one integer. Deduplicating on the
+// number alone merges a swap in extrinsic N with an unrelated event at index N in
+// the same block, so the space belongs in the key. This list must stay identical to
+// the swap-event list in clickhouse/schema/003_materialized_views.sql.
+const HISTOGRAM_SWAP_EVENTS_SQL = `'Router.Executed','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted','LBP.SellExecuted','LBP.BuyExecuted'`
 const SWAP_EVENTS = ['Router.Executed', 'Router.RouteExecuted', 'Omnipool.SellExecuted', 'Omnipool.BuyExecuted', 'Stableswap.SellExecuted', 'Stableswap.BuyExecuted', 'XYK.SellExecuted', 'XYK.BuyExecuted', 'LBP.SellExecuted', 'LBP.BuyExecuted']
 // The router's net-trade summary was emitted as Router.RouteExecuted before the
 // pallet renamed it to Router.Executed (block ~4,542,080); both carry the same
@@ -13990,7 +13997,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
       const assetFilter = ignoreToken || tokenIds == null ? '' : !tokenIds.length
         ? 'AND 0'
         : `AND hasAny(asset_refs, [${tokenIds.join(',')}])`
-      query = `SELECT toString(day) AS d, toUInt64(uniqExact(tuple(block_height, activity_index))) AS v
+      query = `SELECT toString(day) AS d, toUInt64(uniqExact(tuple(block_height, event_name IN (${HISTOGRAM_SWAP_EVENTS_SQL}), activity_index))) AS v
                FROM price_data.activity_histogram_events
                WHERE day > today() - 90 AND event_name IN (${sqlNames(names)}) ${assetFilter}
                GROUP BY day ORDER BY day`
