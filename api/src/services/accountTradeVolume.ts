@@ -115,6 +115,18 @@ export function buildPartitionInsertSql(
   const pf = `block_height >= ${fromBlock} AND block_height < ${toBlock} AND toYYYYMM(toDateTime(block_height * 12)) = ${partition}`
   const rid = `toUInt64OrZero(extractGroups(args_json, '"__kind":"Router","value":(\\\\d+)')[1])`
   const bcastKey = `if(rid > 0, rid, ${anchor} + event_index)`
+  // A signed legacy swap is identified by its extrinsic; a block-hook one has no
+  // extrinsic and is identified by its event. A ROUTED legacy DCA execution emits one
+  // swap event per hop before its DCA.TradeExecuted, so this keys each hop separately.
+  // Keying them on the enclosing execution instead (nearest DCA.TradeExecuted for the
+  // same (block, who) after the leg, via ASOF JOIN) was built and measured on the three
+  // partitions holding the most such groups — 197109, 197201, 197208, covering 6,004 of
+  // the 12,971 hop groups: row counts and volume_usd came out identical to the cent
+  // (7,495,082.23 / 2,138,935.39 / 4,385,791.41), because a routed execution never has
+  // two PRICED legs in this era — the other hop's asset has no ohlc close, so valuation
+  // already drops it. Only the trade_key label changed. It is therefore not worth a full
+  // legacy recompute plus a ~20% slower rebuild (0.308s -> 0.371s per partition) to
+  // relabel keys with no effect on any reported figure.
   const legacyKey = `if(extrinsic_index IS NULL, ${anchor} + event_index, toUInt64(extrinsic_index))`
   // Broadcast.Swapped (v1) reported inverted amounts for single-leg ExactOut
   // XYK/LBP fills; Swapped2+ fixed it. Mirror decodeRawTrade: swap the input and
