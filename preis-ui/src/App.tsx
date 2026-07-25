@@ -176,6 +176,9 @@ export default function App() {
     const previousOverflow = document.body.style.overflow
     const focusFrame = window.requestAnimationFrame(() => mobileDrawerCloseRef.current?.focus())
     const handleKeyDown = (event: KeyboardEvent) => {
+      // Only the topmost dialog acts on Escape: a picker opened over the drawer
+      // consumes it first, and closing both on one press loses the drawer too.
+      if (event.defaultPrevented) return
       if (event.key === 'Escape') {
         event.preventDefault()
         setDrawerOpen(false)
@@ -285,6 +288,10 @@ export default function App() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey) return
+      // Another dialog (markets drawer, volume details) owns the keyboard while it
+      // is open — opening the picker on top would stack two focus-trapped surfaces
+      // and leave the one underneath visible after a selection.
+      if (!modalOpen && document.querySelector('[role="dialog"]')) return
       if (e.key === '/' && !modalOpen) {
         e.preventDefault()
         keyBuffer.current = ''
