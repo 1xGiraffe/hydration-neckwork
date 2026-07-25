@@ -4992,9 +4992,15 @@ export async function getAssetHolderCounts(): Promise<Map<number, number>> {
     const m = new Map<number, number>()
     for (const r of await res.json<{ asset_id: string; n: string | number }>()) m.set(parseInt(r.asset_id, 10), Number(r.n))
     const knownATokenIds = Object.keys(ATOKEN_UNDERLYING_ID).map(Number)
+    const withFolded = (counts: Map<number, number>, folded: Map<number, number>) => {
+      for (const [displayId, count] of folded) counts.set(displayId, count)
+      return counts
+    }
+    const foldedPromise = foldedDisplayHolderCounts()
+      .catch(error => { console.error('[Explorer] folded display holder counts failed:', error); return new Map<number, number>() })
     try {
       const b0 = await aTokenAnchorBlock()
-      if (!b0) return mergeATokenHolderCounts(m, knownATokenIds, [], new Map())
+      if (!b0) return withFolded(mergeATokenHolderCounts(m, knownATokenIds, [], new Map()), await foldedPromise)
       const reserves = await getATokenReserves()
       const contracts = reserves.map(entry => entry.token.aToken)
       const countCacheKey = [...contracts].map(contract => contract.toLowerCase()).sort().join(',')
@@ -5003,17 +5009,38 @@ export async function getAssetHolderCounts(): Promise<Map<number, number>> {
         300000,
         () => reconstructATokenHolderCounts(client, contracts, b0),
       )
-      return mergeATokenHolderCounts(
+      return withFolded(mergeATokenHolderCounts(
         m,
         knownATokenIds,
         reserves.map(entry => ({ assetId: entry.assetId, contract: entry.token.aToken })),
         reconstructed,
-      )
+      ), await foldedPromise)
     } catch (error) {
       console.error('[Explorer] aToken holder-count reconstruction failed:', error)
-      return mergeATokenHolderCounts(m, knownATokenIds, [], new Map())
+      return withFolded(mergeATokenHolderCounts(m, knownATokenIds, [], new Map()), await foldedPromise)
     }
   })
+}
+
+// Display assets (GDOT←690, HEURC←10044, …) hold their supply in hidden
+// stableswap-share ids, and a money-market custody row stands in for its suppliers.
+// getAssetTotals already folds those into the display asset, so its holder count has
+// to come from the same folded identity the detail page pages — counting the display
+// id's direct balances alone reports "—" for a $3.7M asset, or names the vault as
+// its one holder.
+async function foldedDisplayHolderCounts(): Promise<Map<number, number>> {
+  const shareIdsByDisplay = new Map<number, number[]>()
+  for (const [shareId, displayId] of Object.entries(SHARE_TOKEN_UNDERLYING_ID)) {
+    const ids = shareIdsByDisplay.get(displayId) ?? []
+    ids.push(Number(shareId))
+    shareIdsByDisplay.set(displayId, ids)
+  }
+  const counts = new Map<number, number>()
+  await Promise.all([...shareIdsByDisplay].map(async ([displayId, shareIds]) => {
+    const holders = await getFoldedDisplayAssetHolders(displayId, shareIds)
+    if (holders.length) counts.set(displayId, holders.length)
+  }))
+  return counts
 }
 
 export function mergeATokenHolderCounts(
