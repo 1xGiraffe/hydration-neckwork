@@ -19,6 +19,25 @@ describe('dca_schedules joins are replay-safe', () => {
   })
 })
 
+// raw_blocks/raw_extrinsics/raw_events all replace on their event identity, so a
+// re-indexed range holds each row twice until its parts merge. The blocks list
+// paged and counted those rows directly, showing a block twice with doubled
+// extrinsic and event counts.
+describe('block list reads are replay-safe', () => {
+  it('pages the block list from a deduplicated source', () => {
+    const at = explorerService.indexOf('FROM price_data.raw_blocks')
+    expect(at).toBeGreaterThan(-1)
+    expect(explorerService.slice(at, at + 40)).toContain('raw_blocks FINAL')
+  })
+
+  it('counts extrinsic and event identities per block, not rows', () => {
+    expect(explorerService).toContain('SELECT block_height, uniqExact(extrinsic_index) AS c FROM price_data.raw_extrinsics')
+    expect(explorerService).toContain('SELECT block_height, uniqExact(event_index) AS c FROM price_data.raw_events')
+    expect(explorerService).toContain('SELECT uniqExact(event_index) AS c FROM price_data.raw_events WHERE block_height = {h:UInt32}')
+    expect(explorerService).not.toContain('SELECT block_height, count() AS c FROM price_data.raw_events')
+  })
+})
+
 // The HOLLAR dashboard and the asset directory count the same holders. HOLLAR sits
 // in two pots (EVM ERC-20 and the Tokens pallet), so counting the rows of their
 // union counts a holder of both twice.

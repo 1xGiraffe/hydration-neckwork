@@ -1329,7 +1329,7 @@ export async function getRecentBlocks(limit: number, offset = 0): Promise<BlockS
     const blocksRes = await client.query({
       query: `
         SELECT block_height, toString(block_timestamp) AS ts, block_hash, author, spec_version
-        FROM price_data.raw_blocks
+        FROM price_data.raw_blocks FINAL
         ORDER BY block_height DESC
         LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
       query_params: { limit, offset },
@@ -1342,12 +1342,14 @@ export async function getRecentBlocks(limit: number, offset = 0): Promise<BlockS
     const maxH = Math.max(...heights)
     const [extRes, evRes] = await Promise.all([
       client.query({
-        query: `SELECT block_height, count() AS c FROM price_data.raw_extrinsics
+        // Count identities, not rows: a re-indexed range holds the same extrinsic
+        // twice until its parts merge, which would double every count on the page.
+        query: `SELECT block_height, uniqExact(extrinsic_index) AS c FROM price_data.raw_extrinsics
                 WHERE block_height >= {min:UInt32} AND block_height <= {max:UInt32} GROUP BY block_height`,
         query_params: { min: minH, max: maxH }, format: 'JSONEachRow',
       }),
       client.query({
-        query: `SELECT block_height, count() AS c FROM price_data.raw_events
+        query: `SELECT block_height, uniqExact(event_index) AS c FROM price_data.raw_events
                 WHERE block_height >= {min:UInt32} AND block_height <= {max:UInt32} GROUP BY block_height`,
         query_params: { min: minH, max: maxH }, format: 'JSONEachRow',
       }),
@@ -1502,7 +1504,7 @@ export async function getBlock(height: number): Promise<BlockDetail | null> {
         query_params: { h: height }, format: 'JSONEachRow',
       }),
       client.query({
-        query: `SELECT count() AS c FROM price_data.raw_events WHERE block_height = {h:UInt32}`,
+        query: `SELECT uniqExact(event_index) AS c FROM price_data.raw_events WHERE block_height = {h:UInt32}`,
         query_params: { h: height }, format: 'JSONEachRow',
       }),
       client.query({
@@ -14133,8 +14135,11 @@ export async function getListCounts(): Promise<{ blocks: number; extrinsics: num
   return cached('explorer:counts', 60000, async () => {
     const q = async (sql: string) => Number((await (await client.query({ query: sql, format: 'JSONEachRow' })).json<{ c: string }>())[0]?.c ?? 0)
     const [blocks, extrinsics, events, transfers] = await Promise.all([
-      q(`SELECT toString(count()) AS c FROM price_data.raw_blocks`),
-      q(`SELECT toString(count()) AS c FROM price_data.raw_extrinsics WHERE coalesce(signer, effective_signer) IS NOT NULL`),
+      q(`SELECT toString(uniqExact(block_height)) AS c FROM price_data.raw_blocks`),
+      q(`SELECT toString(uniqExact((block_height, extrinsic_index))) AS c FROM price_data.raw_extrinsics WHERE coalesce(signer, effective_signer) IS NOT NULL`),
+      // The two event totals stay plain counts: deduplicating 300M rows costs ~12s
+      // per cold call, against an overcount of a couple of hundred replayed rows
+      // (0.0001%) on a value that only sizes the pager.
       q(`SELECT toString(count()) AS c FROM price_data.raw_events`),
       q(`SELECT toString(count()) AS c FROM price_data.raw_events WHERE event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')`),
     ])
