@@ -512,6 +512,7 @@ export interface ActivityRow {
 }
 
 export interface VoteRow {
+  weighted?: string | null
   voteRefPallet?: 'opengov' | 'democracy' | null
   voteRefTitle?: string | null
   blockHeight: number
@@ -717,7 +718,7 @@ export interface ReferendumDetail {
   subsquareUrl: string
   track: number | null
   proposalHash: string | null
-  proposalCall: { pallet: string; callName: string; args: unknown; byteLength: number; decodeError: string | null } | null
+  proposalCall: { pallet: string; callName: string; args: unknown; encoded: string | null; byteLength: number; decodeError: string | null } | null
   status: string
   submittedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
   concludedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null

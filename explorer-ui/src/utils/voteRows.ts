@@ -1,4 +1,4 @@
-import type { ActivityRow, VoteRow } from '../types'
+import type { ActivityRow, AssetRef, VoteRow } from '../types'
 
 // A vote as the activity feed renders it. This tab used to draw its own table —
 // Referendum / Type / Side / Conviction / Amount / Value / Time, linking to the generic
@@ -34,3 +34,7 @@ export function voteToActivityRow(vote: VoteRow): ActivityRow {
   }
 }
 
+
+// Governance locks are denominated in HDX (asset 0, 12 decimals). Only used to render an
+// empty/loading votes table, before any row's own asset is available.
+export const assetDescriptorFallback = { assetId: 0, iconAssetId: 0, symbol: 'HDX', name: 'Hydration', decimals: 12 } as AssetRef

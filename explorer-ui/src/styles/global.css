@@ -1645,3 +1645,8 @@ tr.row-muted td { opacity: .55; }
 .pc-hash { color: var(--text-medium); font-size: 10.5px; overflow-wrap: anywhere; }
 .pc-unavailable { color: var(--text-medium); font-size: 12px; }
 .pc-error { color: var(--red); font-size: 11px; margin-top: 4px; }
+.pc-copy { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+.pc-copy-btn { display: inline-flex; align-items: center; gap: 5px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-medium); font-family: 'GeistMono'; font-size: 10.5px; padding: 3px 8px; border-radius: 6px; cursor: pointer; }
+.pc-copy-btn:hover { color: var(--text-high); border-color: var(--text-low); }
+.pc-copy-btn.done { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+.pc-copy-btn svg { width: 12px; height: 12px; }

@@ -1,5 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached } from './cache.ts'
+import { convictionName, decodeVoteByte, weightedVotePower } from './convictionWeight.ts'
 import { assetDescriptor } from './explorerAssets.ts'
 import { accountRef, ensurePrices, nestedVoteInfos, voteFromPermitData, type AccountRef, type AssetRef } from './explorerService.ts'
 import { referendumTitles } from './referendumTitleService.ts'
@@ -20,33 +21,7 @@ const HDX_ASSET_ID = 0
 // blocks, so referenda decided before this point are only visible through the calls.
 const CONVICTION_VOTED_FIRST_BLOCK = 7_175_436
 
-// Conviction multipliers are 0.1x for a lock-free vote and 1x..6x for the locked
-// classes. 0.1 has no exact binary representation and vote weight is a financial
-// quantity, so weights are carried in TENTHS as integers (BigInt) and only divided
-// for display: None -> 1, Locked1x -> 10, ... Locked6x -> 60.
-const CONVICTION_TENTHS = [1n, 10n, 20n, 30n, 40n, 50n, 60n]
-const CONVICTION_NAMES = ['None', 'Locked1x', 'Locked2x', 'Locked3x', 'Locked4x', 'Locked5x', 'Locked6x']
-
-export function convictionTenths(convictionIndex: number): bigint {
-  return CONVICTION_TENTHS[convictionIndex] ?? 1n
-}
-
-export function convictionName(convictionIndex: number): string {
-  return CONVICTION_NAMES[convictionIndex] ?? `Conviction ${convictionIndex}`
-}
-
-// A Standard AccountVote packs the side into the high bit and the conviction class
-// into the low 7 bits of one byte: >= 128 is Aye.
-export function decodeVoteByte(voteByte: number): { side: 'Aye' | 'Nay'; convictionIndex: number } {
-  return { side: voteByte >= 128 ? 'Aye' : 'Nay', convictionIndex: voteByte & 0x7f }
-}
-
-// Conviction-weighted vote power, in the same planck units as the balance. Integer
-// throughout: (balance * tenths) / 10, so a 0.1x vote of 1 planck floors to 0
-// rather than drifting through a float.
-export function weightedVotePower(balancePlanck: bigint, convictionIndex: number): bigint {
-  return (balancePlanck * convictionTenths(convictionIndex)) / 10n
-}
+export { convictionName, convictionTenths, decodeVoteByte, weightedVotePower } from './convictionWeight.ts'
 
 export type VoteKind = 'Standard' | 'Split' | 'SplitAbstain'
 
@@ -88,7 +63,7 @@ export interface ReferendumDetail {
   // service (SCALE bytes need runtime metadata, which only the indexer has). Null when
   // the preimage has not been decoded yet — the page then shows the hash alone rather
   // than implying the referendum has no proposal.
-  proposalCall: { pallet: string; callName: string; args: unknown; byteLength: number; decodeError: string | null } | null
+  proposalCall: { pallet: string; callName: string; args: unknown; encoded: string | null; byteLength: number; decodeError: string | null } | null
   status: string
   submittedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
   concludedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
@@ -505,13 +480,14 @@ interface ProposalCallRow {
   pallet: string
   call_name: string
   args_json: string
+  encoded: string
   byte_length: number
   decode_error: string
 }
 
 async function loadProposalCall(hash: string): Promise<ReferendumDetail['proposalCall']> {
   const res = await client.query({
-    query: `SELECT pallet, call_name, args_json, byte_length, decode_error
+    query: `SELECT pallet, call_name, args_json, encoded, byte_length, decode_error
             FROM price_data.referendum_proposals FINAL
             WHERE proposal_hash = {hash:String} LIMIT 1`,
     query_params: { hash: hash.toLowerCase() }, format: 'JSONEachRow',
@@ -524,6 +500,7 @@ async function loadProposalCall(hash: string): Promise<ReferendumDetail['proposa
     pallet: row.pallet,
     callName: row.call_name,
     args,
+    encoded: row.encoded || null,
     byteLength: Number(row.byte_length),
     decodeError: row.decode_error || null,
   }

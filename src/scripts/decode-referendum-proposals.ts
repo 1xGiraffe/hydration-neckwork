@@ -34,6 +34,9 @@ interface ProposalRow {
   pallet: string
   call_name: string
   args_json: string
+  // The exact SCALE bytes the chain stored, kept so a reader can copy the encoded call
+  // and not just its decoded form.
+  encoded: string
   byte_length: number
   noted_block: number
   decode_error: string
@@ -62,7 +65,8 @@ async function loadWanted(): Promise<{ hash: string; notedBlock: number }[]> {
 
 async function loadDecoded(): Promise<Set<string>> {
   const res = await client.query({
-    query: `SELECT proposal_hash FROM price_data.referendum_proposals FINAL WHERE decode_error = ''`,
+    // A row missing its encoded bytes is not finished, so it comes back for another pass.
+    query: `SELECT proposal_hash FROM price_data.referendum_proposals FINAL WHERE decode_error = '' AND encoded != ''`,
     format: 'JSONEachRow',
   })
   return new Set((await res.json<{ proposal_hash: string }>()).map(row => row.proposal_hash))
@@ -122,6 +126,7 @@ async function decodeOne(hash: string): Promise<ProposalRow | null> {
       pallet: flat.pallet,
       call_name: flat.callName,
       args_json: JSON.stringify(jsonSafeArgs(flat.args)),
+      encoded: preimage.bytes,
       byte_length: byteLength,
       noted_block: preimage.block,
       decode_error: '',
@@ -134,6 +139,7 @@ async function decodeOne(hash: string): Promise<ProposalRow | null> {
       pallet: '',
       call_name: '',
       args_json: '',
+      encoded: preimage.bytes,
       byte_length: byteLength,
       noted_block: preimage.block,
       decode_error: (err as Error).message.slice(0, 300),

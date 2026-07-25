@@ -2,8 +2,9 @@ import { useAccountActivityCounts, useAccountVotes, useTagActivityCounts, useTag
 import { useNow } from '../hooks/useNow'
 import { setQuery, useQuery } from '../router'
 import { Pager } from './ui'
-import { ActivityTable } from './ActivityTable'
-import { voteToActivityRow } from '../utils/voteRows'
+import { VotesTable, type VoteTableRow } from './VotesTable'
+import { assetDescriptorFallback } from '../utils/voteRows'
+import type { VoteRow } from '../types'
 
 const PAGE_SIZE = 25
 
@@ -11,9 +12,22 @@ type VotesScope =
   | { kind: 'account'; address: string }
   | { kind: 'tag'; tagId: string }
 
-// Governance votes cast by the account (or every member of a tag): OpenGov and Democracy
-// referendum votes plus Council / Technical Committee collective votes. Keeps its own
-// `vpage` query param so it deep-links independently of the activity pager.
+function toTableRow(vote: VoteRow): VoteTableRow {
+  return {
+    key: `${vote.blockHeight}-${vote.eventIndex}`,
+    account: vote.account,
+    referendum: vote.referendum,
+    referendumPallet: vote.voteRefPallet ?? null,
+    referendumTitle: vote.voteRefTitle ?? null,
+    side: vote.side,
+    conviction: vote.conviction,
+    weighted: vote.weighted ?? null,
+    blockHeight: vote.blockHeight,
+    extrinsicIndex: vote.extrinsicIndex,
+    timestamp: vote.timestamp,
+  }
+}
+
 export function VotesTab({ scope }: { scope: VotesScope }) {
   const accountAddress = scope.kind === 'account' ? scope.address : null
   const tagId = scope.kind === 'tag' ? scope.tagId : null
@@ -28,20 +42,22 @@ export function VotesTab({ scope }: { scope: VotesScope }) {
   const accountVotes = useAccountVotes(accountAddress, offset)
   const tagVotes = useTagVotes(tagId, offset)
   const votes = scope.kind === 'account' ? accountVotes : tagVotes
-  const rows = (votes.data ?? []).map(voteToActivityRow)
+  const rows = (votes.data ?? []).map(toTableRow)
   const voteCount = counts.data?.votes
   const totalPages = voteCount != null && voteCount > 0 ? Math.ceil(voteCount / PAGE_SIZE) : undefined
   const setPage = (nextPage: number) => setQuery({ vpage: nextPage > 0 ? String(nextPage) : null })
 
   return (
     <>
-      {/* A tag page shows which member cast each vote; an account page IS that account,
-          so the actor column drops there — the same rule the activity feed follows. */}
-      <ActivityTable
+      {/* Same table the referendum page uses. A tag page shows which member cast each
+          vote; an account page IS that account, so its account column drops — and here the
+          REFERENDUM is the column that matters, which the referendum page in turn omits. */}
+      <VotesTable
         rows={rows}
+        asset={votes.data?.[0]?.asset ?? assetDescriptorFallback}
         now={now}
-        noActor={scope.kind === 'account'}
-        live={page === 0}
+        showAccount={scope.kind === 'tag'}
+        showReferendum
         loading={votes.isFetching && !votes.data?.length}
         error={votes.error}
         onRetry={() => { void votes.refetch() }}

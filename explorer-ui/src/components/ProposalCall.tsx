@@ -108,12 +108,54 @@ export interface ProposalCallData {
   pallet: string
   callName: string
   args: unknown
+  // The exact SCALE bytes the chain stored, so the encoded call is copyable and not just
+  // its decoded form.
+  encoded: string | null
   byteLength: number
   decodeError: string | null
 }
 
+// The decoded call as JSON, in the shape a reader would expect to paste elsewhere: the
+// pallet and call named, then the arguments.
+function callJson(call: ProposalCallData): string {
+  return JSON.stringify({ pallet: call.pallet, call: call.callName, args: call.args }, null, 2)
+}
+
+// Copy buttons for the three forms of a proposal worth taking away: what identifies it
+// (the hash), what the chain stored (the encoded call), and what it means (the JSON).
+function CopyRow({ call, hash }: { call: ProposalCallData; hash: string | null }) {
+  return (
+    <div className="pc-copy">
+      {hash && <CopyButton label="hash" text={hash} />}
+      {call.encoded && <CopyButton label="encoded call" text={call.encoded} />}
+      {!call.decodeError && <CopyButton label="JSON" text={callJson(call)} />}
+    </div>
+  )
+}
+
+function CopyButton({ label, text }: { label: string; text: string }) {
+  const [done, setDone] = useState(false)
+  return (
+    <button
+      type="button"
+      className={`pc-copy-btn${done ? ' done' : ''}`}
+      onClick={() => {
+        void navigator.clipboard?.writeText(text)
+        setDone(true)
+        setTimeout(() => setDone(false), 1200)
+      }}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+        {done
+          ? <path d="M20 6L9 17l-5-5" />
+          : <><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></>}
+      </svg>
+      {done ? 'copied' : label}
+    </button>
+  )
+}
+
 export function ProposalCall({ call, hash }: { call: ProposalCallData; hash: string | null }) {
-  const [showHash, setShowHash] = useState(false)
   // A hash that could not be decoded says so, rather than looking like a referendum with
   // no proposal at all.
   if (call.decodeError) {
@@ -122,7 +164,7 @@ export function ProposalCall({ call, hash }: { call: ProposalCallData; hash: str
         <div className="pc-unavailable">
           Preimage could not be decoded ({call.byteLength.toLocaleString('en-US')} bytes)
           <div className="pc-error mono">{call.decodeError}</div>
-          {hash && <div className="pc-hash mono">{hash}</div>}
+          <CopyRow call={call} hash={hash} />
         </div>
       </div>
     )
@@ -133,10 +175,7 @@ export function ProposalCall({ call, hash }: { call: ProposalCallData; hash: str
       <CallNode pallet={call.pallet} call={call.callName} args={args} depth={0} />
       <div className="pc-foot">
         <span className="muted">{call.byteLength.toLocaleString('en-US')} bytes</span>
-        {hash && <button type="button" className="pc-hash-toggle" onClick={() => setShowHash(v => !v)}>
-          {showHash ? 'hide hash' : 'show hash'}
-        </button>}
-        {showHash && hash && <span className="pc-hash mono">{hash}</span>}
+        <CopyRow call={call} hash={hash} />
       </div>
     </div>
   )

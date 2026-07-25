@@ -1,0 +1,94 @@
+import type { ReactNode } from 'react'
+import { Link, paths } from '../router'
+import { AddrPill, Ago, Dash, EmptyRow, ErrorRow, F, TableSkeleton, VoteSideBadge } from './ui'
+import type { AccountRef, AssetRef } from '../types'
+
+// The one votes table.
+//
+// A referendum page lists who voted on it; an account or tag page lists what they voted
+// on. Same facts either way — the side and conviction, the conviction-weighted votes, and
+// when — so they share a renderer and the two cannot drift apart again. The columns that
+// differ are exactly the ones the context already answers: a referendum page needs the
+// ACCOUNT and knows its own referendum, an account page needs the REFERENDUM and knows
+// its own account.
+export interface VoteTableRow {
+  key: string
+  account: AccountRef | null
+  referendum: string | null
+  referendumPallet: 'opengov' | 'democracy' | null
+  referendumTitle: string | null
+  side: string | null
+  conviction: string | null
+  // Conviction-weighted power, planck. Null when the vote has no weight to report (a
+  // collective vote has neither balance nor conviction).
+  weighted: string | null
+  blockHeight: number
+  extrinsicIndex: number | null
+  timestamp: string
+  withdrawn?: boolean
+}
+
+function ReferendumCell({ row }: { row: VoteTableRow }) {
+  if (!row.referendum) return <Dash />
+  const label = row.referendumTitle ?? `Referendum #${row.referendum}`
+  return (
+    <>
+      <span className="muted mono ref-num">#{row.referendum}</span>
+      {row.referendumPallet
+        ? <Link to={paths.referendum(row.referendumPallet, row.referendum)} className="ref-link">{row.referendumTitle ?? 'Referendum'}</Link>
+        : <span className="muted">{label}</span>}
+    </>
+  )
+}
+
+export function VotesTable({ rows, asset, now, showAccount, showReferendum, sortHeads, loading, error, onRetry }: {
+  rows: VoteTableRow[]
+  asset: AssetRef
+  now: number
+  showAccount?: boolean
+  showReferendum?: boolean
+  // Sortable headers, supplied by a caller that sorts (the referendum page). Absent, the
+  // columns are plain labels, so both tables read the same either way.
+  sortHeads?: { votes: ReactNode; time: ReactNode }
+  loading?: boolean
+  error?: unknown
+  onRetry?: () => void
+}) {
+  const cols = 2 + (showAccount ? 1 : 0) + (showReferendum ? 1 : 0)
+  return (
+    <div className="panel"><table className="tbl">
+      <thead><tr>
+        {showReferendum && <th>Referendum</th>}
+        {showAccount && <th>Account</th>}
+        <th>Vote</th>
+        <th className="r">{sortHeads?.votes ?? 'Votes'}</th>
+        <th className="r">{sortHeads?.time ?? 'Time'}</th>
+      </tr></thead>
+      <tbody>
+        {loading ? <TableSkeleton cols={cols + 1} />
+          : error && !rows.length ? <ErrorRow cols={cols + 1} title="Couldn’t load votes" error={error} onRetry={onRetry} />
+            : !rows.length ? <EmptyRow cols={cols + 1}>No votes</EmptyRow>
+              : rows.map(row => (
+                <tr key={row.key} className={row.withdrawn ? 'row-muted' : undefined}>
+                  {showReferendum && <td data-label="Referendum"><ReferendumCell row={row} /></td>}
+                  {showAccount && <td data-label="Account">{row.account ? <AddrPill account={row.account} /> : <span className="muted">unknown</span>}</td>}
+                  <td data-label="Vote">
+                    <VoteSideBadge side={row.side} />
+                    {row.conviction ? <span className="muted"> {row.conviction}</span> : null}
+                    {row.withdrawn && <span className="badge badge-quiet" title="Withdrawn before the referendum closed, so it is not counted">withdrawn</span>}
+                  </td>
+                  <td data-label="Votes" className="r mono">
+                    {row.weighted == null ? <Dash /> : <>{F.amount(row.weighted, asset.decimals)} <span className="muted">{asset.symbol}</span></>}
+                  </td>
+                  <td data-label="Time" className="r">
+                    {/* The vote's own extrinsic, so a row leads to the transaction that cast it. */}
+                    {row.extrinsicIndex != null
+                      ? <Link to={paths.extrinsic(`${row.blockHeight}-${row.extrinsicIndex}`)} className="hash"><Ago ts={row.timestamp} now={now} /></Link>
+                      : <Ago ts={row.timestamp} now={now} />}
+                  </td>
+                </tr>
+              ))}
+      </tbody>
+    </table></div>
+  )
+}

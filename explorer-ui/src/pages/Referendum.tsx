@@ -4,10 +4,10 @@ import { api } from '../api/explorer'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
-import { Crumbs, F, AddrPill, SkeletonRows, Ago, VoteSideBadge } from '../components/ui'
+import { Crumbs, F, SkeletonRows, Ago } from '../components/ui'
 import { VoteBubbles } from '../components/VoteBubbles'
+import { VotesTable } from '../components/VotesTable'
 import { ProposalCall } from '../components/ProposalCall'
-import type { ReferendumDetail, ReferendumVoter } from '../types'
 import { orderVoters, type SideFilter, type VoteSort } from '../utils/referendumVotes'
 
 const PALLET_LABEL: Record<string, string> = { opengov: 'OpenGov', democracy: 'Democracy' }
@@ -57,28 +57,6 @@ function SortHead({ label, value, sort, onSort }: { label: string; value: VoteSo
     <button type="button" className={`th-sort${sort === value ? ' on' : ''}`} onClick={() => onSort(value)}>
       {label}{sort === value ? ' ▼' : ''}
     </button>
-  )
-}
-
-function VoterRows({ voters, detail, now }: { voters: ReferendumVoter[]; detail: ReferendumDetail; now: number }) {
-  const { decimals, symbol } = detail.asset
-  return (
-    <>
-      {voters.map(voter => (
-        <tr key={`${voter.blockHeight}-${voter.eventIndex}`} className={voter.removed ? 'row-muted' : undefined}>
-          <td data-label="Account">{voter.account ? <AddrPill account={voter.account} /> : <span className="muted">unknown</span>}</td>
-          <td data-label="Vote"><VoteSideBadge side={voter.side} />{voter.conviction ? <span className="muted"> {voter.conviction}</span> : null}
-            {voter.removed && <span className="badge badge-quiet" title="Withdrawn before the referendum closed, so it is not counted">withdrawn</span>}</td>
-          <td data-label="Votes" className="r mono">{F.amount(voter.weighted, decimals)} <span className="muted">{symbol}</span></td>
-          <td data-label="Time" className="r">
-            {/* The vote's own extrinsic, so a row leads to the transaction that cast it. */}
-            {voter.extrinsicIndex != null
-              ? <Link to={paths.extrinsic(`${voter.blockHeight}-${voter.extrinsicIndex}`)} className="hash"><Ago ts={voter.timestamp} now={now} /></Link>
-              : <Ago ts={voter.timestamp} now={now} />}
-          </td>
-        </tr>
-      ))}
-    </>
   )
 }
 
@@ -189,14 +167,29 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
                 </button>
               ))}
             </div>
-            <div className="panel"><table className="tbl">
-              <thead><tr>
-                <th>Account</th><th>Vote</th>
-                <th className="r"><SortHead label="Votes" value="votes" sort={sort} onSort={setSort} /></th>
-                <th className="r"><SortHead label="Time" value="time" sort={sort} onSort={setSort} /></th>
-              </tr></thead>
-              <tbody><VoterRows voters={shown} detail={data} now={now} /></tbody>
-            </table></div>
+            {/* The same table the account/tag votes tab renders; there the referendum is
+                the column that matters, here the account is. */}
+            <VotesTable
+              rows={shown.map(voter => ({
+                key: `${voter.blockHeight}-${voter.eventIndex}`,
+                account: voter.account,
+                referendum: null, referendumPallet: null, referendumTitle: null,
+                side: voter.side,
+                conviction: voter.conviction,
+                weighted: voter.weighted,
+                blockHeight: voter.blockHeight,
+                extrinsicIndex: voter.extrinsicIndex,
+                timestamp: voter.timestamp,
+                withdrawn: voter.removed,
+              }))}
+              asset={data.asset}
+              now={now}
+              showAccount
+              sortHeads={{
+                votes: <SortHead label="Votes" value="votes" sort={sort} onSort={setSort} />,
+                time: <SortHead label="Time" value="time" sort={sort} onSort={setSort} />,
+              }}
+            />
           </>
         )}
     </div>

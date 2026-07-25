@@ -1,6 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached, cachedSwr } from './cache.ts'
 import { referendumTitleFor } from './referendumTitleService.ts'
+import { weightedFromLabels } from './convictionWeight.ts'
 import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags } from './tagService.ts'
@@ -7485,6 +7486,9 @@ async function getRecentOtc(limit: number, from?: string, to?: string, offset = 
 }
 
 export interface VoteRow {
+  // Conviction-weighted power, planck. Null for a collective vote, which has neither a
+  // balance nor a conviction — no weight to report rather than a misleading zero.
+  weighted?: string | null
   // Referendum identity + off-chain title, exactly as activity rows carry them, so the
   // votes tab renders through the same table instead of a look-alike of its own.
   voteRefPallet?: 'opengov' | 'democracy' | null
@@ -7702,6 +7706,7 @@ async function getRecentVotes(limit: number, from?: string, to?: string, offset 
           account: account && ACCOUNT_RE.test(account) ? accountRef(account) : null,
           pallet, action: 'Voted', referendum: ref, side: details.side, conviction: details.conviction, amount: details.amount,
           ...referendumRefFields(pallet, ref),
+          weighted: weightedFromLabels(details.amount, details.conviction),
           asset: hdx, valueUsd: details.amount ? usdValue(prices, hdx.assetId, details.amount, hdx.decimals) : null,
         }
         out.push(row)
