@@ -74,7 +74,7 @@ export default function ChartHeader({ baseAsset, quoteAsset, candles, marketStat
 
   const baseStats = marketStats?.find(s => s.assetId === baseAsset?.assetId)
   const quoteStats = marketStats?.find(s => s.assetId === quoteAsset?.assetId)
-  const isUsdQuote = quoteAsset?.isStablecoin ?? false
+  const isUsdQuote = quoteAsset?.isUsdPegged ?? false
 
   function changeFor(window: '1h' | '24h' | '7d'): number | null {
     if (!baseStats || !baseStats.price) return null
@@ -100,12 +100,12 @@ export default function ChartHeader({ baseAsset, quoteAsset, candles, marketStat
   const priceFlash = useValueFlash(fromCandles.price)
   const changeFlash = useValueFlash(changeForPeriod)
 
-  const quoteSymbol = quoteAsset?.isStablecoin ? 'USD' : (quoteAsset?.symbol ?? '')
+  const quoteSymbol = quoteAsset?.isUsdPegged ? 'USD' : (quoteAsset?.symbol ?? '')
   const baseSymbol = baseAsset?.symbol ?? '-'
   const baseName = baseAsset?.name ?? null
-  const quoteName = quoteAsset?.isStablecoin ? 'USD' : (quoteAsset?.name ?? quoteSymbol)
+  const quoteName = quoteAsset?.isUsdPegged ? 'USD' : (quoteAsset?.name ?? quoteSymbol)
   const subLine = baseName ? `${baseName} / ${quoteName}` : `${baseSymbol} / ${quoteName}`
-  const pairLabel = quoteAsset?.isStablecoin ? baseSymbol : (baseSymbol + quoteSymbol)
+  const pairLabel = quoteAsset?.isUsdPegged ? baseSymbol : (baseSymbol + quoteSymbol)
   const changeCls = changeForPeriod == null ? 'flat' : changeForPeriod >= 0 ? 'up' : 'down'
 
   return (

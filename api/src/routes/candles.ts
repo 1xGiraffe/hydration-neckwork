@@ -81,7 +81,7 @@ export async function candlesRoutes(fastify: FastifyInstance, opts: { client: Cl
       return reply.status(404).send({ error: `Asset not found: ${quoteId}` })
     }
 
-    if (quoteAsset.isStablecoin) {
+    if (quoteAsset.isUsdPegged) {
       // USD-denominated pair — direct query (prices are stored in USD terms)
       const [candles, summaries] = await Promise.all([
         queryOHLCV(opts.client, {

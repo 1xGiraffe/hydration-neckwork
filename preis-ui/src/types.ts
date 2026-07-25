@@ -74,6 +74,9 @@ export interface Asset {
   name: string | null
   decimals: number
   isStablecoin: boolean
+  // Whether the asset stands in for USD when it quotes a pair. EURC/HEURC are
+  // stablecoins but track the euro, so a pair quoted in them is not a USD series.
+  isUsdPegged?: boolean
   parachainId: number | null  // XCM origin parachain ID for origin badge
   origin?: AssetOrigin | null
 }

@@ -14,6 +14,10 @@ interface AssetRow {
 
 // Stablecoin symbols — all variants of these symbols are treated as stablecoins.
 const STABLECOIN_SYMBOLS = new Set(['USDT', 'USDC', 'HOLLAR', 'DAI', 'HUSDT', 'HUSDC', 'EURC', 'HEURC'])
+// Being a stablecoin is not the same as being worth a dollar: EURC tracks the euro.
+// Only these can stand in for USD when a pair is denominated, since indexed prices
+// are USD — a EURC-quoted series has to be computed as a ratio of the two.
+const USD_PEGGED_SYMBOLS = new Set(['USDT', 'USDC', 'HOLLAR', 'DAI', 'HUSDT', 'HUSDC'])
 
 const assetCache = new Map<number, Asset>()
 let refreshTimer: ReturnType<typeof setInterval> | null = null
@@ -65,6 +69,7 @@ async function loadAssetsUncached(client: ClickHouseClient): Promise<void> {
       name: row.name === row.symbol ? null : row.name,
       decimals: row.decimals,
       isStablecoin: STABLECOIN_SYMBOLS.has(row.symbol),
+      isUsdPegged: USD_PEGGED_SYMBOLS.has(row.symbol),
       parachainId: row.parachain_id ?? null,
       origin: row.origin_ecosystem && row.origin_chain_id
         ? { ecosystem: row.origin_ecosystem, chainId: row.origin_chain_id, assetId: row.origin_asset_id ?? null }

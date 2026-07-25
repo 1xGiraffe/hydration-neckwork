@@ -325,10 +325,10 @@ export default function App() {
     const container = chartContainerRef.current
     if (!container) return
     try {
-      const displayQ = quoteAsset?.isStablecoin ? 'USD' : quoteSymbol
+      const displayQ = quoteAsset?.isUsdPegged ? 'USD' : quoteSymbol
       const isLight = document.documentElement.getAttribute('data-theme') === 'light'
       const pairLine = `${baseSymbol}${displayQ}, ${INTERVAL_LABELS[interval]}`
-      const nameParts = [baseAsset?.name ?? baseSymbol, quoteAsset?.isStablecoin ? 'USD' : (quoteAsset?.name ?? quoteSymbol)]
+      const nameParts = [baseAsset?.name ?? baseSymbol, quoteAsset?.isUsdPegged ? 'USD' : (quoteAsset?.name ?? quoteSymbol)]
       const subLine = nameParts.join(' / ')
       const utcNow = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + 'Z'
       const filename = `hydration_neckwork_${baseSymbol}${displayQ}_${INTERVAL_LABELS[interval]}_${utcNow}.png`
@@ -475,7 +475,7 @@ export default function App() {
               quoteId={quoteId}
               interval={interval}
               base={baseSymbol}
-              showVolumeSource={quoteAsset ? !quoteAsset.isStablecoin : false}
+              showVolumeSource={quoteAsset ? !quoteAsset.isUsdPegged : false}
               onVisibleRangeReady={handleVisibleRangeReady}
               onDataChange={setChartData}
               inspectionTime={inspectionTime}

@@ -7,8 +7,10 @@ export interface PairResult {
   nameHint: string | null
 }
 
+// A USD-pegged quote is implied by the bare base symbol ("HDX" = HDX/USD); any
+// other quote, EURC included, has to be named.
 export function pairDisplay(base: Asset, quote: Asset): string {
-  return quote.isStablecoin ? base.symbol : base.symbol + quote.symbol
+  return quote.isUsdPegged ? base.symbol : base.symbol + quote.symbol
 }
 
 function pairNameHint(base: Asset, quote: Asset): string | null {
@@ -71,8 +73,8 @@ export function searchPairs(query: string, assets: Asset[]): PairResult[] {
     // Cross pairs
     for (const quote of assets) {
       if (base.assetId === quote.assetId) continue
-      // Skip stablecoin quotes for non-stablecoins (covered by USD virtual pair)
-      if (quote.isStablecoin && !base.isStablecoin) continue
+      // Skip USD-pegged quotes for non-stablecoins (covered by the USD virtual pair)
+      if (quote.isUsdPegged && !base.isStablecoin) continue
 
       const display = base.symbol + quote.symbol
       const label = displayLabel(display)

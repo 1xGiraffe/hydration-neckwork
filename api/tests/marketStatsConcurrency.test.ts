@@ -7,6 +7,7 @@ const asset = {
   name: 'Hydration',
   decimals: 12,
   isStablecoin: false,
+  isUsdPegged: false,
   parachainId: null,
 }
 
