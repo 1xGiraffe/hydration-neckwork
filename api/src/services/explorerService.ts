@@ -5922,6 +5922,13 @@ function moneyMarketActivityFields(poolAddress: string | null | undefined): Pick
   return market ? { mmMarketKey: market.key, mmMarket: market.label } : {}
 }
 
+// The order every activity surface presents: newest block first, and within a
+// block the later event first. Rows without an event index (block hooks) sort last
+// inside their block rather than ahead of real events.
+export function compareActivityRowsNewestFirst(a: ActivityRow, b: ActivityRow): number {
+  return b.blockHeight - a.blockHeight || (b.eventIndex ?? -1) - (a.eventIndex ?? -1)
+}
+
 export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFilters): boolean {
   const tokenIds = assetIdsForToken(filters.token)
   if (tokenIds != null) {
@@ -6527,7 +6534,7 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
       })
     }
   }
-  return rows.sort((x, y) => y.blockHeight - x.blockHeight || (y.eventIndex ?? 0) - (x.eventIndex ?? 0))
+  return rows.sort(compareActivityRowsNewestFirst)
 }
 
 // Remote-initiated OUTBOUND transfers: an inbound message (no local extrinsic,
@@ -6586,7 +6593,7 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
       messageId: typeof bargs.id === 'string' && bargs.id.startsWith('0x') ? bargs.id : null,
     })
   }
-  return rows.sort((x, y) => y.blockHeight - x.blockHeight || (y.eventIndex ?? 0) - (x.eventIndex ?? 0))
+  return rows.sort(compareActivityRowsNewestFirst)
 }
 
 async function fetchDecodedXcmDeep(
@@ -8461,7 +8468,7 @@ export async function getRecentActivity(limit: number, from?: string, to?: strin
     if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
     if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
     rows = rows.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
-    rows.sort((a, b) => b.blockHeight - a.blockHeight || (b.eventIndex ?? -1) - (a.eventIndex ?? -1))
+    rows.sort(compareActivityRowsNewestFirst)
     if (locallyPaged && rows.length < want && sourceSaturated) throw activityQueryTooBroad()
     const sliceOffset = locallyPaged ? offset : 0
     const page = rows.slice(sliceOffset, sliceOffset + limit)
@@ -9911,7 +9918,7 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
     // same way the account/global feeds filter by row value.
     if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
     rows = rows.filter(r => activityRowMatchesFilters(r, { ...filters, token: undefined }))
-    rows.sort((a, b) => b.blockHeight - a.blockHeight || (b.extrinsicIndex ?? 0) - (a.extrinsicIndex ?? 0))
+    rows.sort(compareActivityRowsNewestFirst)
     const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, votes, xcm, xcmIn, xcmOutRemote, mm, otc]
       : type === 'transfer' ? [transfers]
         : type === 'trade' ? [trades, dcaFailures, otc]
@@ -11063,7 +11070,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   const sourceSaturated = ((type === 'all' || type === 'transfer') && transferSourceSaturated)
     || saturationSources.some(source => source.length >= catFetch)
   if (merged.length < want && sourceSaturated) throw activityQueryTooBroad()
-  const page = merged.sort((a, b) => b.blockHeight - a.blockHeight).slice(offset, offset + limit)
+  const page = merged.sort(compareActivityRowsNewestFirst).slice(offset, offset + limit)
   await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page)])
   return page
 }
