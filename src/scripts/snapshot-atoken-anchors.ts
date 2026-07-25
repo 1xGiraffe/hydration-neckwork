@@ -41,32 +41,50 @@ const blockTag = `0x${B0.toString(16)}`
 const client = createClickHouseClient()
 const pad = (h160: string) => h160.slice(2).toLowerCase().padStart(64, '0')
 
-// Batched eth_call at `block` (default B0). Returns results keyed by request index
-// (null on failure). The reserve MAP is read at 'latest' (all current reserves +
-// their stable aToken/vDebt addresses); balances/totalSupply are read at B0.
-async function ethCallBatchAt(calls: { to: string; data: string }[], block: string = blockTag): Promise<(string | null)[]> {
+// Batched eth_call at `block` (default B0). The reserve MAP is read at 'latest' (all
+// current reserves + their stable aToken/vDebt addresses); balances/totalSupply are
+// read at B0.
+//
+// THROWS if any request in the batch never produced a result — a dropped chunk or a
+// per-item JSON-RPC error. A missing balance is indistinguishable from a zero one, so
+// silently returning null let anchorForContract omit that holder and runOnce publish a
+// short anchor; because the table was then non-empty, no later cycle would ever
+// recompute it. An empty return ('0x' — reverted, or no code at B0) IS a result and
+// stays a legitimate skip.
+async function ethCallBatchAt(calls: { to: string; data: string }[], block: string = blockTag): Promise<string[]> {
   const out: (string | null)[] = new Array(calls.length).fill(null)
   const CHUNK = 50
   for (let start = 0; start < calls.length; start += CHUNK) {
     const chunk = calls.slice(start, start + CHUNK)
     const body = chunk.map((c, i) => ({ jsonrpc: '2.0', id: i, method: 'eth_call', params: [{ to: c.to, data: c.data }, block] }))
+    let lastError: unknown = null
     for (let attempt = 0; attempt < 3; attempt++) {
       const ctrl = new AbortController()
       const timer = setTimeout(() => ctrl.abort(), 30_000)
       try {
         const res = await fetch(RPC_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctrl.signal, body: JSON.stringify(body) })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const json = await res.json() as { id: number; result?: string }[]
+        const json = await res.json() as { id: number; result?: string; error?: { message?: string } }[]
         if (!Array.isArray(json)) throw new Error('non-array batch response')
-        for (const r of json) if (typeof r.id === 'number' && r.result) out[start + r.id] = r.result
+        const itemErrors = json.filter(r => typeof r.result !== 'string')
+        if (itemErrors.length) {
+          throw new Error(`${itemErrors.length}/${chunk.length} calls errored, first: ${itemErrors[0]?.error?.message ?? 'no result'}`)
+        }
+        for (const r of json) if (typeof r.id === 'number') out[start + r.id] = r.result!
+        lastError = null
         break
       } catch (err) {
-        if (attempt === 2) console.error(`[atoken-anchor] batch ${start} failed after retries:`, err instanceof Error ? err.message : err)
-        else await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
+        lastError = err
+        if (attempt < 2) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
       } finally { clearTimeout(timer) }
     }
+    if (lastError != null) {
+      throw new Error(`[atoken-anchor] eth_call batch at offset ${start} (block ${block}) failed after retries: ${lastError instanceof Error ? lastError.message : String(lastError)}`)
+    }
   }
-  return out
+  const missing = out.findIndex(value => value == null)
+  if (missing >= 0) throw new Error(`[atoken-anchor] eth_call batch returned no result for request ${missing} (block ${block})`)
+  return out as string[]
 }
 
 async function readReserveMap(): Promise<{ reserve: string; atoken: string; vdebt: string; pool: string; marketKey: string }[]> {
@@ -74,14 +92,16 @@ async function readReserveMap(): Promise<{ reserve: string; atoken: string; vdeb
   const rows: { reserve: string; atoken: string; vdebt: string; pool: string; marketKey: string }[] = []
   for (const { poolProxy, marketKey } of pools) {
     const [listRes] = await ethCallBatchAt([{ to: poolProxy, data: `0x${SEL.reservesList}` }], 'latest')
-    if (!listRes) { console.error(`[atoken-anchor] reservesList failed for pool ${poolProxy}`); continue }
+    // A pool that cannot be read must not silently drop out of the map: the reserve
+    // map feeds every downstream reconstruction. ethCallBatchAt throws on failure.
     const lh = listRes.slice(2)
     const n = parseInt(lh.slice(64, 128), 16)
     const reserves: string[] = []
     for (let i = 0; i < n && i < 128; i++) reserves.push('0x' + lh.slice(128 + i * 64 + 24, 128 + (i + 1) * 64))
     const data = await ethCallBatchAt(reserves.map(r => ({ to: poolProxy, data: `0x${SEL.reserveData}${pad(r)}` })), 'latest')
     reserves.forEach((reserve, i) => {
-      const d = data[i]; if (!d) return
+      const d = data[i]
+      if (d === '0x') return   // reserve not configured at this block
       const w = (j: number) => d.slice(2).slice(j * 64, j * 64 + 64)
       rows.push({ reserve, atoken: '0x' + w(8).slice(24), vdebt: '0x' + w(10).slice(24), pool: poolProxy, marketKey })
     })
@@ -123,20 +143,27 @@ async function candidateHolders(contract: string): Promise<string[]> {
 
 interface AnchorRow { contract_address: string; holder: string; scaled_balance: string; anchor_block: number }
 
+// `index` is the reserve's stored liquidityIndex from the last ReserveDataUpdated at
+// or below B0, not getReserveNormalizedIncome(asset)@B0 — which is that index
+// compounded over the blocks since. The two differ by the interest accrued in that
+// gap: measured against this chain, the gap is 0 blocks at best, 89 median and 3,058
+// at worst across the nine anchored reserves, and on the stalest one the resulting
+// index difference is 0.00000007%. Re-anchoring every holder to recover 7e-10 of a
+// balance is not worth invalidating the pinned anchor, so the stored index stands.
 async function anchorForContract(contract: string, index: bigint): Promise<AnchorRow[]> {
   if (index <= 0n) return []
   const holders = await candidateHolders(contract)
   const rows: AnchorRow[] = []
   // totalSupply@B0 (holder = '')
   const [tsHex] = await ethCallBatchAt([{ to: contract, data: `0x${SEL.totalSupply}` }])
-  if (tsHex && tsHex !== '0x') {
+  if (tsHex !== '0x') {
     const scaled = (BigInt(tsHex) * RAY) / index
     if (scaled > 0n) rows.push({ contract_address: contract, holder: '', scaled_balance: scaled.toString(), anchor_block: B0 })
   }
   if (holders.length) {
     const bals = await ethCallBatchAt(holders.map(h => ({ to: contract, data: `0x${SEL.balanceOf}${pad(h)}` })))
     bals.forEach((b, i) => {
-      if (!b || b === '0x') return
+      if (b === '0x') return   // no code / reverted: a real answer, not a failure
       let raw: bigint
       try { raw = BigInt(b) } catch { return }
       if (raw <= 0n) return
