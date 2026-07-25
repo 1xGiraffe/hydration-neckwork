@@ -10528,14 +10528,25 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   // Bucket per account (not collapsed across the list): each account's MM net must
   // be forward-filled independently then summed, same as balances — otherwise the
   // combined tag series sawtooths.
+  // account_money_market_position_history is raw_money_market_positions reordered
+  // account-first. The raw table is ordered (block_height, user_address, ...), so a
+  // per-account predicate spanning an account's whole life cannot use its primary
+  // index and every bucket pass read the entire table: 6,967,470 rows / 1.25 GiB /
+  // 118 ms / 250 MiB peak per call, and 7.28 TiB across 8,129 calls per 3h — the
+  // largest reader in the instance. Account-first the same call reads 40,960 rows /
+  // 6.57 MiB / 8 ms / 3.54 MiB, byte-identical output.
+  //
+  // The carry-in query below deliberately stays on the raw table: `block_height <
+  // minb` prunes almost perfectly against a block-first key (203,717 rows / 5.6 ms),
+  // and account-first it degrades to 1,738,112 rows / 470 ms.
   const mmRes = await client.query({
-    query: `SELECT account_id, lower(pool_address) AS pool,
+    query: `SELECT account_id, pool_address AS pool,
               toUInt32(least(intDiv(block_height - ${rng.minb}, ${BUCKET}), ${N})) AS b,
               argMax(toFloat64(total_collateral_base), ${moneyMarketPositionOrderSql()}) / 1e8 AS collat,
               argMax(toFloat64(total_debt_base), ${moneyMarketPositionOrderSql()}) / 1e8 AS debt
-            FROM price_data.raw_money_market_positions
+            FROM price_data.account_money_market_position_history
             WHERE account_id IN (${list}) AND block_height >= ${rng.minb} AND block_height <= ${rng.maxb}
-              AND lower(pool_address) IN (${configuredMmPoolsSql()})
+              AND pool_address IN (${configuredMmPoolsSql()})
             GROUP BY account_id, pool, b ORDER BY account_id, pool, b`,
     format: 'JSONEachRow',
   })
@@ -13844,10 +13855,11 @@ export function resampleValueSeriesToTrailingYear(values: number[], dates: strin
 // narrowing the span shrinks each bucket from ~8 days to ~2, so the weekly resampler
 // lands on different samples and 92 of 127 live sparklines moved by 1-6% — the list and
 // the detail chart would no longer agree, which is exactly the parity this shared path
-// exists to guarantee. The cost has to come out of the reads instead: an account-first
-// projection of raw_money_market_positions (its ORDER BY is block-first, so the
-// per-account predicate cannot use it), which needs a schema change plus materialization
-// over existing parts.
+// exists to guarantee. The cost came out of the reads instead: account-first ordering of
+// raw_money_market_positions, whose own ORDER BY is block-first so the per-account
+// predicate cannot use it. That is account_money_market_position_history, which cut the
+// bucket pass from 1.25 GiB to 6.57 MiB per call without moving a single value; what is
+// left here is the 180-bucket reconstruction itself, not the reads under it.
 //
 // Reuses the detail page's own getAccountHistory so the row sparkline and the
 // account/tag value-history chart are computed by the SAME code path (wallet + HOLLAR + money-market net worth +
