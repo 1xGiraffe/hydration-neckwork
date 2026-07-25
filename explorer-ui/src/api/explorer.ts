@@ -3,7 +3,7 @@ import type {
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem,
   AccountsPage, AccountSort, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, MoneyMarketResponse, AssetDetail, TagDetail,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail,
-  ValueEvent,
+  ValueEvent, ReferendumDetail,
 } from '../types'
 
 // A failed request carries the API's own explanation (Fastify puts it in
@@ -56,6 +56,8 @@ export const api = {
   extrinsicAt: (height: number, index: number, signal?: AbortSignal) => getJson<ExtrinsicDetail>(`/explorer/extrinsic-at/${height}/${index}`, signal),
   extrinsicActivity: (hash: string, signal?: AbortSignal) => getJson<ActivityRow[]>(`/explorer/extrinsic/${hash}/activity`, signal),
   extrinsicAtActivity: (height: number, index: number, signal?: AbortSignal) => getJson<ActivityRow[]>(`/explorer/extrinsic-at/${height}/${index}/activity`, signal),
+  referendum: (pallet: 'opengov' | 'democracy', index: number, signal?: AbortSignal) =>
+    getJson<ReferendumDetail>(`/explorer/referendum/${pallet}/${index}`, signal),
   dcaSchedule: (scheduleId: number, offset = 0, limit = 25, signal?: AbortSignal) => getJson<DcaScheduleDetail>(withQuery(`/explorer/dca/${scheduleId}`, { offset, limit }), signal),
   dcaScheduleAt: (height: number, index: number, kind: 'event' | 'extrinsic', signal?: AbortSignal) => getJson<{ scheduleId: number }>(withQuery(`/explorer/dca-at/${height}/${index}`, { kind }), signal),
   dcaExecution: (height: number, index: number, signal?: AbortSignal) => getJson<DcaExecutionDetail>(`/explorer/dca/exec/${height}/${index}`, signal),

@@ -30,6 +30,7 @@ export type Route =
   | { name: 'extrinsic'; id: string } // "height-index"
   | { name: 'activity-detail'; slug: ActivitySlug; id: string } // "height-index"
   | { name: 'dca-schedule'; scheduleId: number }
+  | { name: 'referendum'; pallet: 'opengov' | 'democracy'; index: number }
   | { name: 'dca-execution'; height: number; eventIndex: number }
   | { name: 'dca-resolve'; height: number; index: number; kind: 'event' | 'extrinsic' }
   | { name: 'events' }
@@ -92,6 +93,13 @@ export function parseRoute(loc: string): Route {
     case 'tag':
       return parts[1] ? { name: 'tag', tagId: parts[1] } : { name: 'tags' }
     case 'assets': return { name: 'assets' }
+    // /referendum/<pallet>/<index>. The pallet is part of the identity: Hydration
+    // voted through Democracy (0-206) and OpenGov (0-369) and both index from 0.
+    case 'referendum': {
+      const pallet = parts[1] === 'democracy' ? 'democracy' : parts[1] === 'opengov' ? 'opengov' : null
+      if (pallet && parts[2] && isSafeId(parts[2])) return { name: 'referendum', pallet, index: Number(parts[2]) }
+      return { name: 'activity' }
+    }
     case 'hdx': return { name: 'hdx' }
     case 'hollar': return { name: 'hollar' }
     case 'asset':
@@ -229,6 +237,7 @@ export const paths = {
   extrinsicAt: (h: number, i: number) => `/extrinsic/${h}-${i}`,
   activityDetail: (slug: ActivitySlug, id: string) => `/${slug}/${id}`,
   dcaSchedule: (scheduleId: number) => `/dca/${scheduleId}`,
+  referendum: (pallet: 'opengov' | 'democracy', index: number | string) => `/referendum/${pallet}/${index}`,
   events: () => '/events',
   event: (id: string) => `/event/${id}`,
   eventAt: (h: number, i: number) => `/event/${h}-${i}`,

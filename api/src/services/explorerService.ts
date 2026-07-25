@@ -1,5 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached, cachedSwr } from './cache.ts'
+import { referendumTitleFor } from './referendumTitleService.ts'
 import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags } from './tagService.ts'
@@ -5962,6 +5963,11 @@ export interface ActivityRow {
   mmMarket?: string          // display label; UI only calls out supplemental markets
   stakingAction?: string
   votePallet?: string
+  // Referendum identity for the row's link, plus the off-chain title. Set only for
+  // ConvictionVoting/Democracy rows: Council and Technical Committee votes are not
+  // referenda and their "ref" is a proposal hash.
+  voteRefPallet?: 'opengov' | 'democracy' | null
+  voteRefTitle?: string | null
   voteAction?: string
   voteRef?: string | null
   voteSide?: string
@@ -7587,6 +7593,20 @@ function voteAmountSqlExpr(): string {
     JSONExtractString(${vote},'balance')
   )`
 }
+// A vote row's referendum, as the explorer needs it: the pallet slug its detail
+// page and SubSquare link are keyed on, plus the off-chain title. Hydration voted
+// through both pallets and both index from 0, so the slug travels with the index.
+// Council/Technical Committee votes carry a proposal hash rather than an index and
+// are not referenda, so they get neither.
+export function referendumRefFields(
+  votePallet: string | null | undefined,
+  voteRef: string | null | undefined,
+): { voteRefPallet: 'opengov' | 'democracy' | null; voteRefTitle: string | null } {
+  const pallet = votePallet === 'ConvictionVoting' ? 'opengov' : votePallet === 'Democracy' ? 'democracy' : null
+  if (!pallet || !voteRef || !/^\d+$/.test(voteRef)) return { voteRefPallet: null, voteRefTitle: null }
+  return { voteRefPallet: pallet, voteRefTitle: referendumTitleFor(pallet, voteRef) }
+}
+
 function voteRowMatchesFilters(row: VoteRow, filters: VoteListFilters): boolean {
   if (filters.referendum && row.referendum !== filters.referendum) return false
   if (filters.conviction && (row.conviction ?? '').toLowerCase() !== filters.conviction.toLowerCase()) return false
@@ -8292,6 +8312,7 @@ export async function getRecentActivity(limit: number, from?: string, to?: strin
       type: 'vote', blockHeight: v.blockHeight, timestamp: v.timestamp, eventIndex: v.eventIndex, extrinsicIndex: v.extrinsicIndex,
       who: v.account, to: null, asset: v.asset, assetIn: null, assetOut: null, amount: v.amount, amountIn: null, amountOut: null, valueUsd: v.valueUsd,
       votePallet: v.pallet, voteAction: v.action, voteRef: v.referendum, voteSide: v.side, voteConviction: v.conviction,
+      ...referendumRefFields(v.pallet, v.referendum),
       linkBlock: v.blockHeight, linkIndex: v.extrinsicIndex,
     })
 
@@ -9228,6 +9249,7 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
         valueUsd: details.amount ? usdValue(prices, hdx.assetId, details.amount, hdx.decimals) : null,
         votePallet: e.event_name.split('.')[0], voteAction: 'Voted',
         voteRef: e.event_name === 'Democracy.Voted' ? argStr(args, 'refIndex') || null : callInfo?.ref ?? null,
+        ...referendumRefFields(e.event_name.split('.')[0], e.event_name === 'Democracy.Voted' ? argStr(args, 'refIndex') || null : callInfo?.ref ?? null),
         voteSide: details.side, voteConviction: details.conviction,
         linkBlock: e.block_height, linkIndex: e.extrinsic_index,
       })
@@ -10071,6 +10093,7 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
       votePallet: v.pallet,
       voteAction: v.action,
       voteRef: v.referendum,
+      ...referendumRefFields(v.pallet, v.referendum),
       voteSide: v.side,
       voteConviction: v.conviction,
       linkBlock: v.blockHeight,
@@ -11249,6 +11272,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
     type: 'vote', blockHeight: v.blockHeight, timestamp: v.timestamp, eventIndex: v.eventIndex, extrinsicIndex: v.extrinsicIndex,
     who: v.account, to: null, asset: v.asset, assetIn: null, assetOut: null, amount: v.amount, amountIn: null, amountOut: null, valueUsd: v.valueUsd,
     votePallet: v.pallet, voteAction: v.action, voteRef: v.referendum, voteSide: v.side, voteConviction: v.conviction,
+    ...referendumRefFields(v.pallet, v.referendum),
     linkBlock: v.blockHeight, linkIndex: v.extrinsicIndex,
   })) : []
   const rewards = (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')

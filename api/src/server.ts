@@ -39,6 +39,13 @@ import {
 } from './services/explorerService.ts'
 import { initTagService, loadTags, seedDefaultTags, syncMoneyMarketTag, startMoneyMarketTagRefresh, syncStructuralTags, startStructuralTagRefresh, reconcileTagColors, retireUnknownTagMemberships } from './services/tagService.ts'
 import { initIdentityService, loadIdentities, startIdentityRefresh, stopIdentityRefresh } from './services/identityService.ts'
+import { initGovernanceService } from './services/governanceService.ts'
+import {
+  initReferendumTitleService,
+  loadReferendumTitles,
+  startReferendumTitleRefresh,
+  stopReferendumTitleRefresh,
+} from './services/referendumTitleService.ts'
 import { initProxyMultisigService } from './services/proxyMultisigService.ts'
 import { initHdxService } from './services/hdxService.ts'
 import { initHollarService } from './services/hollarService.ts'
@@ -102,6 +109,7 @@ fastify.addHook('onClose', async () => {
   stopExplorerAssetsRefresh()
   stopRuntimeErrorNamesRefresh()
   stopIdentityRefresh()
+  stopReferendumTitleRefresh()
   stopBackgroundRefresh()
   stopAccountSwapActivityQueueDrain()
   stopExplorerBackgroundTasks()
@@ -149,6 +157,8 @@ async function start() {
     // readiness gates or historical backfills to wait on.
     initTagService(client)
     initIdentityService(client)
+    initReferendumTitleService(client)
+    initGovernanceService(client)
     initProxyMultisigService(client)
     initHdxService(client)
     initHollarService(client)
@@ -162,7 +172,9 @@ async function start() {
     // Tag icons can derive from a member's omniwatch emoji, so the snakewatch
     // source must be loaded before tags are indexed.
     await Promise.all([loadExplorerAssets(client), ensureSnakewatchEmojiSourceLoaded(), loadRuntimeErrorNames(client)])
-    await Promise.all([loadTags(), loadIdentities()])
+    // Referendum titles come from SubSquare (the chain has none), so they are held
+    // in memory like identities and read on every vote row the explorer renders.
+    await Promise.all([loadTags(), loadIdentities(), loadReferendumTitles().catch(() => {})])
     // Seed the fixed default tag set on a fresh database (no-op once tags exist),
     // so a clean `docker compose up` reaches the expected state with no manual step.
     await seedDefaultTags()
@@ -179,6 +191,7 @@ async function start() {
     await reconcileTagColors().catch(e => console.warn('[tags] color reconcile failed', e))
     await retireUnknownTagMemberships().catch(e => console.warn('[tags] retire reconcile failed', e))
     startIdentityRefresh()
+    startReferendumTitleRefresh()
     // H160 → bound substrate owner map for display resolution.
     await loadEvmBindings().catch(() => {})
     startEvmBindingsRefresh()

@@ -168,6 +168,33 @@ services:
     networks:
       - neckwork
 
+  # Referendum titles from SubSquare. The chain has no human title for a
+  # referendum, so "#369" is all the explorer could show without this. Live
+  # referenda are re-read every LIVE_REFRESH_MINUTES (Hydration usually has 0-2
+  # open); concluded ones are fetched once and then never requested again, which is
+  # what keeps the 576 settled referenda from being re-crawled every cycle.
+  referendum-titles:
+    image: hydration-neckwork-indexer:latest
+    build: .
+    container_name: hydration-neckwork-referendum-titles
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      schema-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - SUBSQUARE_BASE_URL=${SUBSQUARE_BASE_URL:-https://hydration.subsquare.io}
+    command: ["src/scripts/snapshot-referendum-titles.ts", "--loop",
+      "--cycle-minutes=${REFERENDUM_TITLE_CYCLE_MINUTES:-15}",
+      "--live-refresh-minutes=${REFERENDUM_TITLE_LIVE_REFRESH_MINUTES:-30}",
+      "--max-fetches=${REFERENDUM_TITLE_MAX_FETCHES:-40}",
+      "--delay-ms=${REFERENDUM_TITLE_DELAY_MS:-1500}"]
+    networks:
+      - neckwork
+
   # Seed current balances for every account, including dormant accounts with no
   # events in the indexed range, and refresh them on an interval.
   balance-snapshot:

@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- activity table exports slug/id/label helpers alongside its components */
-import { paths } from '../router'
+import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
 import { F, AddrPill, AssetChip, rowNav, Ago, AccountEmoji, ShortAddr, TagIcon, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
@@ -183,8 +183,15 @@ export function ActivityDesc({ r }: { r: ActivityRow }) {
     return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span></span>
   }
   if (r.type === 'vote' && r.asset) {
+    // A referendum's title says what the vote was about; "Ref 255" does not. The
+    // title comes from SubSquare and may not be fetched yet, so the index is the
+    // fallback rather than a placeholder. Only ConvictionVoting/Democracy rows have a
+    // referendum page — Council/TC votes carry a proposal hash instead.
     const ref = r.voteRef ? `Ref ${r.voteRef}` : 'Referendum'
-    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span> <span className="muted">{ref}</span><VoteSideBadge side={r.voteSide} />{r.voteConviction ? <span className="muted">{r.voteConviction}</span> : null}</span>
+    const label = r.voteRefTitle ?? ref
+    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span> {r.voteRefPallet && r.voteRef
+      ? <Link to={paths.referendum(r.voteRefPallet, r.voteRef)} className="ref-link" title={r.voteRefTitle ? `${ref} · ${r.voteRefTitle}` : ref} data-no-hover="true">{label}</Link>
+      : <span className="muted">{label}</span>}<VoteSideBadge side={r.voteSide} />{r.voteConviction ? <span className="muted">{r.voteConviction}</span> : null}</span>
   }
   return null
 }

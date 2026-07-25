@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
+import { getReferenda, getReferendum, parseReferendumPallet } from '../services/governanceService.ts'
 import {
   getStats, getRecentBlocks, getBlock, getRecentExtrinsics, getExtrinsic, getExtrinsicAt,
   getExtrinsicActivity, getBlockActivity,
@@ -177,6 +178,25 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const limit = limitParam(q, 25)
     const signedOnly = q.signedOnly === 'true' || q.signedOnly === '1'
     return getRecentExtrinsics(limit, signedOnly, dateParam(q, 'from'), dateParam(q, 'to'), offsetParam(q), extrinsicFilters(q))
+  })
+
+  // Referendum detail. Hydration has voted through two pallets that both index from
+  // 0 (Democracy 0-206, OpenGov 0-369), so the pallet is part of the identity — an
+  // index alone would show two different referenda under one URL.
+  fastify.get('/explorer/referendum/:pallet/:index', async (req, reply) => {
+    const params = z.object({ pallet: z.string(), index: uint32Param }).safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid referendum reference' })
+    const pallet = parseReferendumPallet(params.data.pallet)
+    if (!pallet) return reply.status(400).send({ error: "Referendum pallet must be 'opengov' or 'democracy'" })
+    const limit = limitParam(req.query as Record<string, unknown>, 500)
+    const detail = await getReferendum(pallet, params.data.index, limit)
+    if (!detail) return reply.status(404).send({ error: 'Referendum not found' })
+    return detail
+  })
+
+  fastify.get('/explorer/referenda', async (req) => {
+    const q = req.query as Record<string, unknown>
+    return getReferenda(limitParam(q, 100), offsetParam(q))
   })
 
   fastify.get('/explorer/extrinsic/:hash', async (req, reply) => {

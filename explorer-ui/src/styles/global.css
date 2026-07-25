@@ -1563,3 +1563,25 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Referendum: tally bar, vote bubbles, and the ref link on vote rows. */
+.ref-link { color: var(--accent); text-decoration: none; border-bottom: 1px dotted color-mix(in srgb, var(--accent) 55%, transparent); }
+.ref-link:hover { border-bottom-style: solid; }
+.tally-bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--surface-2); }
+.tally-aye { background: var(--green); }
+.tally-nay { background: var(--red); }
+.vb-aye-text { color: var(--green); }
+.vb-nay-text { color: var(--red); }
+.vote-bubbles svg { width: 100%; height: auto; display: block; }
+.vb-axis { fill: var(--text-low); font-size: 11px; letter-spacing: .08em; }
+/* Area encodes power, so bubbles overlap-check but still sit close; the stroke keeps
+   neighbouring circles legible where they touch. */
+.vb-bubble { stroke: var(--surface-1); stroke-width: 1; opacity: .78; cursor: pointer; transition: opacity .12s ease; }
+.vb-bubble.vb-aye { fill: var(--green); }
+.vb-bubble.vb-nay { fill: var(--red); }
+.vb-bubble:hover, .vb-bubble.on { opacity: 1; stroke: var(--text-high); }
+.vb-legend { margin-top: 8px; font-size: 12px; color: var(--text-medium); min-height: 18px; }
+.badge.vote-split { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+.badge.badge-quiet { background: var(--surface-2); color: var(--text-low); margin-left: 6px; }
+tr.row-muted td { opacity: .55; }
+.empty-note { padding: 14px; text-align: center; color: var(--text-low); font-size: 12px; }

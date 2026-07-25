@@ -492,6 +492,8 @@ export interface ActivityRow {
   mmMarket?: string
   stakingAction?: string
   votePallet?: string
+  voteRefPallet?: 'opengov' | 'democracy' | null
+  voteRefTitle?: string | null
   voteAction?: string
   voteRef?: string | null
   voteSide?: string
@@ -681,4 +683,49 @@ export interface DcaExecutionDetail {
   executionPrice: number | null
   period: number
   failureReason: FailureReason | null
+}
+
+export interface ReferendumVoter {
+  account: AccountRef | null
+  kind: 'Standard' | 'Split' | 'SplitAbstain'
+  side: 'Aye' | 'Nay' | 'Split' | 'SplitAbstain'
+  conviction: string | null
+  convictionIndex: number | null
+  balance: string
+  ayeBalance: string
+  nayBalance: string
+  abstainBalance: string
+  weightedAye: string
+  weightedNay: string
+  weighted: string
+  valueUsd: number | null
+  blockHeight: number
+  eventIndex: number
+  extrinsicIndex: number | null
+  timestamp: string
+  removed: boolean
+}
+
+export interface ReferendumTally { ayes: string; nays: string; support: string | null }
+
+export interface ReferendumDetail {
+  pallet: 'opengov' | 'democracy'
+  index: number
+  title: string | null
+  subsquareUrl: string
+  track: number | null
+  proposalHash: string | null
+  status: string
+  submittedAt: { blockHeight: number; timestamp: string } | null
+  concludedAt: { blockHeight: number; timestamp: string } | null
+  asset: AssetRef
+  onChainTally: ReferendumTally | null
+  directTally: {
+    ayes: string; nays: string; rawAyes: string; rawNays: string
+    ayeVoters: number; nayVoters: number; splitVoters: number; voters: number
+  }
+  indirectTally: ReferendumTally | null
+  voters: ReferendumVoter[]
+  votesShown: number
+  votesTotal: number
 }
