@@ -6671,25 +6671,36 @@ async function fetchDecodedXcmDeep(
   decode: (blocks: number[]) => Promise<ActivityRow[]>,
   matches: (row: ActivityRow) => boolean,
 ): Promise<ActivityRow[]> {
-  const out: ActivityRow[] = []
-  let cursor: number | null = null
-  const initialPageSize = Math.min(Math.max(want * 2, 500), 5_000)
-  for (let page = 0; ; page++) {
-    const bound = cursor == null ? base : `(${base}) AND block_height < ${cursor}`
-    const pageSize = Math.min(initialPageSize * 2 ** Math.min(page, 16), 5_000)
-    const candidates = await fetchBlocks(bound, pageSize)
-    const blocks = [...new Set(candidates.map(row => Number(row.block_height)).filter(Number.isSafeInteger))]
-    const rows: ActivityRow[] = []
-    for (let start = 0; start < blocks.length; start += 1_000) rows.push(...await decode(blocks.slice(start, start + 1_000)))
-    await applyHistoricalUsd(rows, activityHistPick)
-    out.push(...rows.filter(matches))
-    if (out.length >= want || candidates.length < pageSize) break
-    const next = blocks.length ? Math.min(...blocks) : null
-    if (next == null || (cursor != null && next >= cursor)) break
-    cursor = next
+  const walk = async (base: string): Promise<ActivityRow[]> => {
+    const out: ActivityRow[] = []
+    let cursor: number | null = null
+    const initialPageSize = Math.min(Math.max(want * 2, 500), 5_000)
+    for (let page = 0; ; page++) {
+      const bound = cursor == null ? base : `(${base}) AND block_height < ${cursor}`
+      const pageSize = Math.min(initialPageSize * 2 ** Math.min(page, 16), 5_000)
+      const candidates = await fetchBlocks(bound, pageSize)
+      const blocks = [...new Set(candidates.map(row => Number(row.block_height)).filter(Number.isSafeInteger))]
+      const rows: ActivityRow[] = []
+      for (let start = 0; start < blocks.length; start += 1_000) rows.push(...await decode(blocks.slice(start, start + 1_000)))
+      await applyHistoricalUsd(rows, activityHistPick)
+      out.push(...rows.filter(matches))
+      if (out.length >= want || candidates.length < pageSize) break
+      const next = blocks.length ? Math.min(...blocks) : null
+      if (next == null || (cursor != null && next >= cursor)) break
+      cursor = next
+    }
+    return out.sort((left, right) =>
+      right.blockHeight - left.blockHeight || (right.eventIndex ?? 0) - (left.eventIndex ?? 0))
   }
-  return out.sort((left, right) =>
-    right.blockHeight - left.blockHeight || (right.eventIndex ?? 0) - (left.eventIndex ?? 0))
+  // Unbounded candidate reads have to sort the whole event-name slice of
+  // xcm_event_activity to take their newest rows — the table sorts by
+  // (event_name, asset_id, block_height, …), so block order is not available for a
+  // short-circuit and one global activity page read 1.15 GiB / 17.2M rows. Try a
+  // recency window first exactly like withFeedWindow, and fall back to full history
+  // when it underfills, so no page ever sees only "an hour of chain".
+  if (base !== '1') return walk(base)
+  const recent = await walk(`block_height > (SELECT max(block_height) FROM price_data.raw_blocks) - ${FEED_WINDOW_BLOCKS}`)
+  return recent.length >= want ? recent : walk('1')
 }
 
 async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
