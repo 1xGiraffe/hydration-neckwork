@@ -59,15 +59,24 @@ export function identityForAccount(accountId: string): AccountIdentity | null {
 
 // Search the in-memory identity map by display name (case-insensitive substring).
 // The set is small (~hundreds) so a linear scan is cheaper than a ClickHouse query.
+// Ranked exact → prefix → substring and only then cut to `limit`, the same order
+// emojisMatchingName uses: truncating during the scan dropped the account whose
+// display IS the query whenever enough other names merely contained it — searching
+// "Validator" never found the account called "Validator".
 export function searchIdentitiesByDisplay(q: string, limit = 5): { accountId: string; identity: AccountIdentity }[] {
   const ql = q.trim().toLowerCase()
   if (!ql) return []
-  const out: { accountId: string; identity: AccountIdentity }[] = []
+  type Match = { accountId: string; identity: AccountIdentity }
+  const exact: Match[] = [], prefix: Match[] = [], sub: Match[] = []
   for (const [accountId, identity] of byAccount) {
-    if (identity.display.toLowerCase().includes(ql)) {
-      out.push({ accountId, identity })
-      if (out.length >= limit) break
-    }
+    const display = identity.display.toLowerCase()
+    if (display === ql) exact.push({ accountId, identity })
+    else if (display.startsWith(ql)) prefix.push({ accountId, identity })
+    else if (display.includes(ql)) sub.push({ accountId, identity })
   }
-  return out
+  // Shortest display first inside a bucket, account id as the tiebreak, so the
+  // closest name wins and the result does not depend on map iteration order.
+  const rank = (rows: Match[]) => rows.sort((a, b) =>
+    a.identity.display.length - b.identity.display.length || a.accountId.localeCompare(b.accountId))
+  return [...rank(exact), ...rank(prefix), ...rank(sub)].slice(0, limit)
 }
