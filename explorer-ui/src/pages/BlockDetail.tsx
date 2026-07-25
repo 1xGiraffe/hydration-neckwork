@@ -57,6 +57,8 @@ export function BlockDetail({ height }: { height: number }) {
   const activity = useBlockActivity(data ? height : null)
   const [tab, setTab] = useState<'activity' | 'exts' | 'events'>('activity')
   const activityRows = activity.data ?? []
+  // Older payloads carry no eventsShown; the list length is then the best we know.
+  const shownEvents = data?.eventsShown ?? data?.events.length ?? 0
 
   return (
     <div className="wrap">
@@ -116,15 +118,25 @@ export function BlockDetail({ height }: { height: number }) {
 
             {tab === 'events' && (
               <div className="panel">
-                {data.events.length ? data.events.map(e => (
-                  <div className="event-row" key={e.eventIndex}>
-                    <div className="ei"><Link to={paths.eventAt(data.height, e.eventIndex)} className="hash">{e.eventIndex}</Link></div>
-                    <div className="ec">
-                      <div className="row gap6"><Link to={paths.eventAt(data.height, e.eventIndex)} className="hash"><CallPill name={e.name} /></Link>{e.extrinsicIndex != null && <span className="muted mono" style={{ fontSize: 11 }}>extrinsic {data.height}-{e.extrinsicIndex}</span>}</div>
-                      {e.args != null && typeof e.args === 'object' && Object.keys(e.args).length > 0 && <JsonView value={e.args} />}
+                {data.events.length ? <>
+                  {data.events.map(e => (
+                    <div className="event-row" key={e.eventIndex}>
+                      <div className="ei"><Link to={paths.eventAt(data.height, e.eventIndex)} className="hash">{e.eventIndex}</Link></div>
+                      <div className="ec">
+                        <div className="row gap6"><Link to={paths.eventAt(data.height, e.eventIndex)} className="hash"><CallPill name={e.name} /></Link>{e.extrinsicIndex != null && <span className="muted mono" style={{ fontSize: 11 }}>extrinsic {data.height}-{e.extrinsicIndex}</span>}</div>
+                        {e.args != null && typeof e.args === 'object' && Object.keys(e.args).length > 0 && <JsonView value={e.args} />}
+                      </div>
                     </div>
-                  </div>
-                )) : <EmptyRow cols={1}>No events</EmptyRow>}
+                  ))}
+                  {/* A busy block carries thousands of events and the payload holds a
+                      prefix, so say so rather than letting the list look complete. */}
+                  {shownEvents < data.eventCount && (
+                    <div className="event-row">
+                      <div className="ei" />
+                      <div className="ec muted">Showing the first {F.int(shownEvents)} of {F.int(data.eventCount)} events in this block.</div>
+                    </div>
+                  )}
+                </> : <EmptyRow cols={1}>No events</EmptyRow>}
               </div>
             )}
           </>

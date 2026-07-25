@@ -1488,7 +1488,15 @@ export interface BlockDetail extends BlockSummary {
   extrinsicsRoot: string | null
   extrinsics: ExtrinsicSummary[]
   events: BlockEvent[]
+  // How many of the block's events `events` carries. Below eventCount on busy
+  // blocks, where the list is a prefix rather than the whole block.
+  eventsShown: number
 }
+
+// A block's event list is rendered in full, so the payload carries at most this
+// many. Busy blocks hold thousands; the response says how many it carries so the UI
+// can point at the filtered event list instead of silently showing a prefix.
+const BLOCK_EVENT_PAGE = 400
 
 export async function getBlock(height: number): Promise<BlockDetail | null> {
   return cached(`explorer:block:${height}`, 10000, async () => {
@@ -1509,8 +1517,8 @@ export async function getBlock(height: number): Promise<BlockDetail | null> {
       }),
       client.query({
         query: `SELECT event_index, extrinsic_index, event_name, args_json
-                FROM price_data.raw_events WHERE block_height = {h:UInt32} ORDER BY event_index LIMIT 400`,
-        query_params: { h: height }, format: 'JSONEachRow',
+                FROM price_data.raw_events WHERE block_height = {h:UInt32} ORDER BY event_index LIMIT {evLimit:UInt32}`,
+        query_params: { h: height, evLimit: BLOCK_EVENT_PAGE }, format: 'JSONEachRow',
       }),
     ])
     const block = (await blockRes.json<{ block_height: number; ts: string; block_hash: string; parent_hash: string; state_root: string | null; extrinsics_root: string | null; author: string | null; spec_version: number }>())[0]
@@ -1551,6 +1559,7 @@ export async function getBlock(height: number): Promise<BlockDetail | null> {
       eventCount,
       extrinsics,
       events,
+      eventsShown: events.length,
     }
   })
 }

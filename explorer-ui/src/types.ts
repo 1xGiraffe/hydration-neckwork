@@ -178,6 +178,9 @@ export interface BlockDetail extends BlockSummary {
   extrinsicsRoot: string | null
   extrinsics: ExtrinsicSummary[]
   events: BlockEvent[]
+  // How many of the block's events `events` carries — below eventCount on busy
+  // blocks, where the list is a prefix.
+  eventsShown?: number
 }
 
 export interface ExtrinsicEvent { eventIndex: number; name: string; args: unknown; decoded?: boolean }
