@@ -22,7 +22,11 @@ import { getHdxDashboard } from '../services/hdxService.ts'
 import { getHollarDashboard } from '../services/hollarService.ts'
 import { ACCOUNT_AFFINITY_BUSY_CODE, getCloseAccounts, getCloseAccountsForTag } from '../services/accountAffinityService.ts'
 
-const activityTypes = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'staking', 'vote', 'otc']
+// The wire vocabulary the explorer sends. 'stake' is the URL/product word; the
+// activity builders below still speak the row type 'staking', so it is translated
+// once here rather than in the eight places the service branches on it.
+const activityTypes = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc']
+const ACTIVITY_TYPE_ALIASES: Record<string, string> = { stake: 'staking' }
 const uint32Param = z.coerce.number().int().min(0).max(0xffff_ffff)
 
 // Public list endpoints never render more than 100 rows at once. A modest hard
@@ -92,7 +96,8 @@ function valueFilters(q: Record<string, unknown>): ValueListFilters {
 }
 
 function activityTypeParam(query: Record<string, unknown>): string {
-  return typeof query.type === 'string' && activityTypes.includes(query.type) ? query.type : 'all'
+  const t = typeof query.type === 'string' && activityTypes.includes(query.type) ? query.type : 'all'
+  return ACTIVITY_TYPE_ALIASES[t] ?? t
 }
 
 // null = out of range for this feed. The bound depends on the category, so callers

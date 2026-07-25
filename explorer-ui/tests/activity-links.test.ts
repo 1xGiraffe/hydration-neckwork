@@ -17,7 +17,7 @@ describe('activitySlug', () => {
     expect(activitySlug({ ...base, type: 'xcm' })).toBe('cross-chain')
     expect(activitySlug({ ...base, type: 'liquidity', liqAction: 'Add' })).toBe('add-liquidity')
     expect(activitySlug({ ...base, type: 'liquidity', liqAction: 'Remove' })).toBe('remove-liquidity')
-    expect(activitySlug({ ...base, type: 'mm', mmAction: 'Supply' })).toBe('supply')
+    expect(activitySlug({ ...base, type: 'mm', mmAction: 'Supply' })).toBe('lend')
     expect(activitySlug({ ...base, type: 'mm', mmAction: 'LiquidationCall' })).toBe('liquidate')
     expect(activitySlug({ ...base, type: 'mm', mmAction: 'Repay' })).toBe('repay')
     expect(activitySlug({ ...base, type: 'staking', stakingAction: 'Giga stake' })).toBe('staking')
@@ -78,7 +78,7 @@ describe('SLUG_TYPES', () => {
   })
   it('maps cross-chain to xcm', () => expect(SLUG_TYPES['cross-chain']).toEqual(['xcm']))
   it('maps the five mm slugs to mm', () => {
-    for (const slug of ['supply', 'withdraw', 'borrow', 'repay', 'liquidate'] as const) {
+    for (const slug of ['lend', 'withdraw', 'borrow', 'repay', 'liquidate'] as const) {
       expect(SLUG_TYPES[slug]).toEqual(['mm'])
     }
   })

@@ -58,6 +58,48 @@
   --amber: #F7BF06;
   --amber-soft: rgba(247,191,6,0.13);
 
+  --orange: #FF8A45;
+  --orange-soft: rgba(255,138,69,0.14);
+
+  /* charts with no category to name (all-activity, blocks, extrinsics, events) */
+  --chart-neutral: #6B7488;
+
+  /* movement (transfers, bridge hops) reads as quiet plumbing: two greys of the
+     same weight, told apart by temperature rather than loudness */
+  --neutral: #9AA3B5;
+  --neutral-cool: #8399BF;
+
+  /* Category layer — see the block below the light theme. */
+  --cat-trade: #FF8A45;
+  --cat-trade-dca: #FFC26B;
+  --cat-trade-fill: #D2551A;
+  --cat-trade-place: #C9855F;
+
+  --cat-borrow: #F7BF06;
+  --cat-borrow-withdraw: #FFE066;
+  --cat-borrow-lend: #C9A227;
+  --cat-borrow-repay: #9DA83A;
+  --cat-borrow-claim: #C8B98A;
+
+  --cat-liquidity: #6FB4FF;
+  --cat-liquidity-remove: #3F80C4;
+  --cat-liquidity-create: #A9D3F5;
+  --cat-liquidity-claim: #4FB2DE;
+
+  --cat-stake: #CB79F8;
+  --cat-stake-exit: #7E5BB0;
+  --cat-stake-reward: #9D8FE0;
+  --cat-stake-migrate: #C44DD8;
+  --cat-stake-cancel: #9C7BB8;
+
+  --cat-transfer: var(--neutral);
+  --cat-xcm: var(--neutral-cool);
+  --cat-vote: #DFB1F3;
+  --cat-bad: #FF6969;
+
+  /* lock families that are not activity categories */
+  --lock-vesting: #3FC2B8;
+
   /* balance-breakdown: transferable = light blue, clearable deposits/orders = blue */
   --bd-free: #95caff;
   --bd-clear: #3f88dd;
@@ -100,12 +142,76 @@
   --amber: #b58800;
   --amber-soft: rgba(247,191,6,0.16);
 
+  --orange: #A04508;
+  --orange-soft: rgba(160,69,8,0.12);
+
+  /* charts with no category to name (all-activity, blocks, extrinsics, events) */
+  --chart-neutral: #7B8298;
+
+  /* movement (transfers, bridge hops) reads as quiet plumbing: two greys of the
+     same weight, told apart by temperature rather than loudness */
+  --neutral: #5F5B67;
+  --neutral-cool: #3F5570;
+
+  /* Category layer — its own values here; the shared --sky/--amber/--lavender/--red
+     the valence layer uses sit around 2.5-3.7:1 as badge text on white. */
+  --cat-trade: #A04508;
+  --cat-trade-dca: #BC6E22;
+  --cat-trade-fill: #5A2401;
+  --cat-trade-place: #96694A;
+
+  --cat-borrow: #7A5D00;
+  --cat-borrow-withdraw: #9C7D14;
+  --cat-borrow-lend: #4F4A12;
+  --cat-borrow-repay: #6E7A2A;
+  --cat-borrow-claim: #8F8460;
+
+  --cat-liquidity: #1F60A4;
+  --cat-liquidity-remove: #123E6B;
+  --cat-liquidity-create: #4E86BE;
+  --cat-liquidity-claim: #2E7C9E;
+
+  --cat-stake: #6B3FAE;
+  --cat-stake-exit: #3E2A63;
+  --cat-stake-reward: #7B6FC4;
+  --cat-stake-migrate: #A02BB5;
+  --cat-stake-cancel: #7A5C90;
+
+  --cat-transfer: var(--neutral);
+  --cat-xcm: var(--neutral-cool);
+  --cat-vote: #98387F;
+  --cat-bad: #B02F2F;
+
+  /* lock families that are not activity categories */
+  --lock-vesting: #147F76;
+
   /* balance-breakdown: transferable = light blue, clearable deposits/orders = blue */
   --bd-free: #7fb0ea;
   --bd-clear: #2C89E9;
 
   color-scheme: light;
 }
+
+/* ------------------------------------------------------------------
+   Activity color coding — two layers that never compete:
+     CATEGORY  what kind of activity a row is: a family of related shades,
+               set per theme above,
+     VALENCE   which way it went (--green / --red), which WINS wherever a
+               row has a side: AYE/NAY, failures, liquidations.
+   Components name the meaning, never the hue, so a shade is changed in one
+   place.
+
+   Each family spans a RAMP with one shade per action rather than a single
+   hue with a light and a dark variant. Two variants could not carry it: a
+   family has up to five actions (Borrow / Withdraw / Lend / Repay / Claim),
+   and any pair sharing a variant reads as the same badge. The shades vary in
+   lightness AND chroma, not lightness alone, because a pure lightness ramp
+   inside one hue leaves neighbouring steps too close to tell apart at 10px.
+
+   The floor for badge text is 3:1 rather than 4.5:1 — a deliberate trade to
+   buy the range these ramps need. Every shade is checked against it in both
+   themes; see docs/superpowers/specs for the check.
+   ------------------------------------------------------------------ */
 
 * , *::before, *::after { box-sizing: border-box; }
 * { margin: 0; }
@@ -1095,8 +1201,15 @@ svg { display: block; }
 .mm-secondary-explainer { max-width: 760px; color: var(--text-medium); font-size: 12px; }
 .mm-secondary-available { display: flex; justify-content: space-between; gap: 12px; max-width: 320px; margin-top: 14px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
 .mm-secondary-available strong { color: var(--text-high); font-weight: 500; }
-.mm-secondary-debt { color: var(--lavender); }
-.mm-activity-market { display: inline-flex; align-items: center; border: 1px solid color-mix(in srgb, var(--lavender) 30%, transparent); border-radius: 9999px; background: var(--lavender-soft); color: var(--lavender); font-family: 'GeistMono'; font-size: 9px; font-weight: 600; line-height: 1; letter-spacing: 0.04em; white-space: nowrap; }
+.mm-secondary-debt { color: var(--cat-borrow); }
+/* Marks which money market a row belongs to, so it wears that family's yellow. */
+.mm-activity-market { display: inline-flex; align-items: center; border: 1px solid color-mix(in srgb, var(--cat-borrow) 30%, transparent); border-radius: 9999px; background: color-mix(in srgb, var(--cat-borrow) 13%, transparent); color: var(--cat-borrow); font-family: 'GeistMono'; font-size: 9px; font-weight: 600; line-height: 1; letter-spacing: 0.04em; white-space: nowrap; }
+/* GIGAHDX is brand black (same #000 the HDX lock charts and balance breakdown
+   already give it), so its market marker is the one filled black chip in the
+   app. A black fill would disappear into the dark theme's background, so there
+   it keeps a hairline edge rather than being lightened off-brand. */
+.mm-activity-market.mm-market-gigahdx { background: #000; border-color: #000; color: #fff; }
+:root[data-theme="dark"] .mm-activity-market.mm-market-gigahdx { border-color: rgba(255,255,255,0.3); }
 /* Top-holding token icons in the Holdings column (accounts list) and hover cards. */
 .holdings-cell { vertical-align: middle; white-space: nowrap; }
 .token-icons { display: inline-flex; align-items: center; gap: 3px; }

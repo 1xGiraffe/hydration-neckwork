@@ -243,7 +243,7 @@ export function economicModuleAccounts(tags: Tag[]): string[] {
 // under one label. Unlike DEFAULT_TAGS this set is DERIVED: members come from
 // the indexed reserve map, so a newly listed reserve joins on the next sync —
 // no code change needed.
-export const MM_TAG = { tagId: 'money-market', name: 'Supply & Borrow', color: '#6aa5f8', note: 'Money-market reserve contracts (aTokens, debt tokens, pools) — inflows are supplies/repayments, outflows are withdrawals/borrows', icon: '🏦' }
+export const MM_TAG = { tagId: 'money-market', name: 'Lend & Borrow', color: '#6aa5f8', note: 'Money-market reserve contracts (aTokens, debt tokens, pools) — inflows are lends/repayments, outflows are withdrawals/borrows', icon: '🏦' }
 
 // Membership rows for the MM tag: every distinct contract H160 from the reserve
 // map, in the truncated-account form its on-chain activity is indexed under.
@@ -372,14 +372,16 @@ export async function seedDefaultTags(): Promise<void> {
   console.log(`[tags] synced ${rows.length} tag membership(s) from DEFAULT_TAGS`)
 }
 
-// A tag's color is canonical in code (DEFAULT_TAGS / STRUCTURAL_TAGS / MM_TAG) —
-// there is no edit API. But membership rows are only ever INSERTED (seed and the
-// structural/MM syncs skip accounts that already exist), so editing a color in
-// code would otherwise never reach an already-seeded database: loadTags() reads
-// color from the table, and the Accounts/Holders aggregates read it straight
-// from SQL. Reconcile the stored color to the code definition with an in-place
-// mutation. Idempotent — the `color != …` guard makes it a no-op once the table
-// already matches, so it costs nothing on subsequent starts.
+// A tag's presentation — name, color, note, icon — is canonical in code
+// (DEFAULT_TAGS / STRUCTURAL_TAGS / MM_TAG); there is no edit API. But membership
+// rows are only ever INSERTED (seed and the structural/MM syncs skip accounts that
+// already exist), so editing any of those in code would otherwise never reach an
+// already-seeded database: loadTags() reads them from the table, and the
+// Accounts/Holders aggregates read color and name straight from SQL. Renaming a
+// tag in code and seeing the old name survive is the failure this prevents.
+// Reconcile the stored row to the code definition with an in-place mutation.
+// Idempotent — a tag already matching is skipped, so it costs nothing on
+// subsequent starts.
 // Membership rows are only ever INSERTED, so removing a tag from code leaves its
 // rows behind and loadTags keeps serving them — a retired tag would go on labelling
 // its account (and, when two tags named one pot, keep winning by label_id order).
@@ -399,24 +401,32 @@ export async function retireUnknownTagMemberships(): Promise<void> {
   console.log(`[tags] retired ${stale.length} tag(s) no longer defined in code: ${stale.join(', ')}`)
 }
 
-export async function reconcileTagColors(): Promise<void> {
-  const want = new Map<string, string>()
-  for (const d of DEFAULT_TAGS) want.set(d.tagId, d.color)
-  for (const d of STRUCTURAL_TAGS) want.set(d.tagId, d.color)
-  want.set(MM_TAG.tagId, MM_TAG.color)
+export async function reconcileTagPresentation(): Promise<void> {
+  type Presentation = { name: string; color: string; note: string; icon: string }
+  const want = new Map<string, Presentation>()
+  for (const d of [...DEFAULT_TAGS, ...STRUCTURAL_TAGS]) want.set(d.tagId, { name: d.name, color: d.color, note: d.note, icon: d.icon })
+  want.set(MM_TAG.tagId, { name: MM_TAG.name, color: MM_TAG.color, note: MM_TAG.note, icon: MM_TAG.icon })
   let changed = 0
-  for (const [tagId, color] of want) {
+  for (const [tagId, p] of want) {
     const tag = byTag.get(tagId)
-    if (!tag || tag.color === color) continue
+    if (!tag) continue
+    // loadTags() resolves an empty icon to the first member's avatar, so the
+    // in-memory icon is a derived value, not the stored one — comparing against
+    // it would rewrite every derived-icon tag on every start. A tag that defines
+    // no icon has nothing to reconcile.
+    const iconDiffers = p.icon !== '' && tag.icon !== p.icon
+    if (tag.name === p.name && tag.color === p.color && tag.note === p.note && !iconDiffers) continue
     await client.command({
-      query: `ALTER TABLE price_data.account_tags UPDATE color = {color:String} WHERE label_id = {tagId:String} AND color != {color:String}`,
-      query_params: { color, tagId },
+      query: `ALTER TABLE price_data.account_tags
+              UPDATE label_name = {name:String}, color = {color:String}, note = {note:String}${p.icon !== '' ? ', icon = {icon:String}' : ''}
+              WHERE label_id = {tagId:String}`,
+      query_params: { name: p.name, color: p.color, note: p.note, icon: p.icon, tagId },
       clickhouse_settings: { mutations_sync: '1' },
     })
     changed++
   }
   if (changed) {
     await loadTags()
-    console.log(`[tags] reconciled color for ${changed} tag(s) from code definitions`)
+    console.log(`[tags] reconciled presentation for ${changed} tag(s) from code definitions`)
   }
 }

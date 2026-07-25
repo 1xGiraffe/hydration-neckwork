@@ -18,7 +18,7 @@ export function AccountsChart({ data, loading }: { data: { date: string; active:
       <g key={t}>
         <line x1={padL} x2={W - padR} y1={y.toFixed(1)} y2={y.toFixed(1)} stroke="var(--separator)" strokeWidth="1" />
         <text x={padL - 8} y={(y + 3).toFixed(1)} textAnchor="end" className="ax-lbl" fill="var(--sky)">{fk(axisA * t)}</text>
-        <text x={W - padR + 8} y={(y + 3).toFixed(1)} textAnchor="start" className="ax-lbl" fill="var(--accent)">{fk(axisN * t)}</text>
+        <text x={W - padR + 8} y={(y + 3).toFixed(1)} textAnchor="start" className="ax-lbl" fill="var(--green)">{fk(axisN * t)}</text>
       </g>
     )
   })
@@ -26,12 +26,12 @@ export function AccountsChart({ data, loading }: { data: { date: string; active:
     <>
       <div className="sec-title">Daily active &amp; new accounts <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}>· last 30 days</span></div>
       <div className="pf-card">
-        <div className="bal-legend" style={{ margin: '0 0 10px' }}><span><i style={{ background: 'var(--sky)' }} />Active</span><span><i style={{ background: 'var(--accent)' }} />New</span></div>
+        <div className="bal-legend" style={{ margin: '0 0 10px' }}><span><i style={{ background: 'var(--sky)' }} />Active</span><span><i style={{ background: 'var(--green)' }} />New</span></div>
         {loading && !has ? <DayChartSkeleton ratio={W / H} /> : (
         <svg className="day-chart" viewBox={`0 0 ${W} ${H}`}>
           {grid}
           {has && <path className="chart-line" d={path(active, syA)} fill="none" stroke="var(--sky)" strokeWidth="2" strokeLinejoin="round" />}
-          {has && <path className="chart-line" d={path(neu, syN)} fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinejoin="round" />}
+          {has && <path className="chart-line" d={path(neu, syN)} fill="none" stroke="var(--green)" strokeWidth="2" strokeLinejoin="round" />}
         </svg>
         )}
       </div>

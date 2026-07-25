@@ -58,7 +58,7 @@ export function Accounts() {
         <select id="accounts-sort" value={sort} onChange={e => setQuery({ sort: e.target.value === 'value' ? null : e.target.value, page: null })}>
           <option value="value">Value</option>
           <option value="identity">Account</option>
-          <option value="supplied">Supplied</option>
+          <option value="supplied">Lent</option>
           <option value="borrowed">Borrowed</option>
           <option value="health">Health</option>
           <option value="liquidation">Liquidation $</option>
@@ -72,7 +72,7 @@ export function Accounts() {
           <thead><tr>
             <th>{sTh('identity', 'Account')}</th>
             <th className="r">{sTh('value', 'Value')}</th><th>Holdings</th><th className="r">1Y</th>
-            <th className="r">{sTh('supplied', 'Supplied')}</th><th className="r">{sTh('borrowed', 'Borrowed')}</th>
+            <th className="r">{sTh('supplied', 'Lent')}</th><th className="r">{sTh('borrowed', 'Borrowed')}</th>
             <th className="r">{sTh('health', 'Health')}</th>
             <th className="r">{sTh('liquidation', 'Liquidation $')}</th>
             <th className="r">{sTh('volume', 'Trading $')}</th>
@@ -93,7 +93,7 @@ export function Accounts() {
                   <td data-label="Value" className="r mono">{F.usd(r.portfolioUsd)}</td>
                   <td data-label="Holdings" className="holdings-cell">{r.topAssets?.length ? <TokenIconRow assets={r.topAssets} /> : <Dash />}</td>
                   <td data-label="1Y" className="r">{r.sparkline && r.sparkline.length > 1 ? <Sparkline data={r.sparkline} /> : <Dash />}</td>
-                  <td data-label="Supplied" className="r mono">{r.suppliedUsd ? F.usd(r.suppliedUsd) : <Dash />}</td>
+                  <td data-label="Lent" className="r mono">{r.suppliedUsd ? F.usd(r.suppliedUsd) : <Dash />}</td>
                   <td data-label="Borrowed" className="r mono">{r.borrowedUsd ? F.usd(r.borrowedUsd) : <Dash />}</td>
                   <td data-label="Health" className="r">{hf && addr
                     ? <HealthSimBadge hf={hf} addr={addr} />

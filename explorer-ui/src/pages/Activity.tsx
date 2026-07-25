@@ -8,6 +8,7 @@ import { Crumbs, F, DayBarChart, Pager, ActivityChips, normalizeActivityType, no
 import { ActivityTable } from '../components/ActivityTable'
 import { FilterZone, useFilters } from '../components/Filters'
 import { activityFilterFields } from '../components/activityFilters'
+import { categoryColor } from '../components/activityColors'
 
 const PAGE = 25
 // "smol" threshold — same $10 line ActivityTable uses for the .dim row treatment.
@@ -73,7 +74,9 @@ export function Activity() {
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Activity' }]} />
         <div className="page-title">Activity <span className="sub">on-chain activity, interpreted</span></div>
       </div>
-      <DayBarChart data={daily ?? []} label="Daily activity" selected={f.from === f.to ? f.from : undefined} onSelect={setDay} fmt={F.int} loading={!daily} />
+      {/* The histogram wears whatever category is filtered, so the chart and the
+          rows under it agree on what you are looking at. */}
+      <DayBarChart data={daily ?? []} color={categoryColor(type)} label="Daily activity" selected={f.from === f.to ? f.from : undefined} onSelect={setDay} fmt={F.int} loading={!daily} />
       <ActivityChips value={type} onChange={v => setQuery({ tab: v === 'all' ? null : v, action: null, page: null })} />
       <FilterZone fields={activityFilterFields(type, assets.data ?? [])} values={f} onChange={onChange} onClear={onClear}
         extra={<SmolToggle hiding={hideSmol} onToggle={() => { toggleSmol(); setQuery({ page: null }) }} />} />

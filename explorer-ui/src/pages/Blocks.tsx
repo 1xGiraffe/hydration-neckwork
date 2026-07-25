@@ -4,6 +4,7 @@ import { useNewRows } from '../hooks/useNewRows'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, usePageParam, setPage } from '../router'
 import { Crumbs, F, FinalizedBadge, AddrPill, AreaChart, ChartSkeleton, TableSkeleton, EmptyRow, Pager, rowNav, Ago, Dash } from '../components/ui'
+import { UNFILTERED_COLOR } from '../components/activityColors'
 import { parseUtcTimestamp } from '../utils/time'
 
 const PAGE = 25
@@ -50,7 +51,7 @@ export function Blocks() {
       {!recent ? <ChartSkeleton h={168} /> : (
       <div className="pf-card">
         <div className="pf-head"><div className="pf-now">{avg ? avg.toFixed(2) + 's' : '—'}</div><div className="pf-chg muted">target 6.00s</div></div>
-        <AreaChart data={chartData.length > 1 ? chartData : [6, 6]} h={120} target={6} floor={0} color="var(--lavender-deep)" valueFmt={v => v.toFixed(2) + 's'} />
+        <AreaChart data={chartData.length > 1 ? chartData : [6, 6]} h={120} target={6} floor={0} color={UNFILTERED_COLOR} valueFmt={v => v.toFixed(2) + 's'} />
       </div>
       )}
 

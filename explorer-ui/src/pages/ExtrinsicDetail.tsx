@@ -93,7 +93,7 @@ export function ExtrinsicDetail({ id }: { id: string }) {
                   <div className="event-row" key={e.eventIndex}>
                     <div className="ei"><Link to={paths.eventAt(data.blockHeight, e.eventIndex)} className="hash">{e.eventIndex}</Link></div>
                     <div className="ec">
-                      <div className="row gap6"><Link to={paths.eventAt(data.blockHeight, e.eventIndex)} className="hash"><CallPill name={e.name} /></Link>{e.decoded && <span className="badge" style={{ background: 'var(--lavender-soft)', color: 'var(--lavender)' }}>decoded</span>}</div>
+                      <div className="row gap6"><Link to={paths.eventAt(data.blockHeight, e.eventIndex)} className="hash"><CallPill name={e.name} /></Link>{e.decoded && <span className="badge" style={{ background: 'color-mix(in srgb, var(--neutral) 15%, transparent)', color: 'var(--neutral)' }}>decoded</span>}</div>
                       {e.args != null && typeof e.args === 'object' && Object.keys(e.args).length > 0 && <JsonView value={e.args} />}
                     </div>
                   </div>

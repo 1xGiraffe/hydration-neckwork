@@ -55,7 +55,7 @@ function GigaMarketSection({ d }: { d: HdxDashboard }) {
   const fmtAmt = compactAmount
   return (
     <>
-      <SecTitle title="GIGAHDX Money Market" subtitle="supply & borrow against staked HDX" />
+      <SecTitle title="GIGAHDX Money Market" subtitle="lend & borrow against staked HDX" />
       <div className="pf-card">
         <div className="hdx-cards">
           {rows.map(r => {

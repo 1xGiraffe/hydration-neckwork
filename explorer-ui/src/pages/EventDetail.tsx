@@ -26,7 +26,7 @@ export function EventDetail({ id }: { id: string }) {
           <>
             <div className="detail-card"><div className="dl">
               <div className="dt">Event ID</div><div className="dd mono">{data.blockHeight}-{data.eventIndex}</div>
-              <div className="dt">Event</div><div className="dd"><CallPill name={data.name} />{data.decoded && <span className="badge" style={{ background: 'var(--lavender-soft)', color: 'var(--lavender)', marginLeft: 6 }}>decoded</span>}</div>
+              <div className="dt">Event</div><div className="dd"><CallPill name={data.name} />{data.decoded && <span className="badge" style={{ background: 'color-mix(in srgb, var(--neutral) 15%, transparent)', color: 'var(--neutral)', marginLeft: 6 }}>decoded</span>}</div>
               <div className="dt">Block</div><div className="dd mono"><Link to={paths.block(data.blockHeight)} className="hash">{F.int(data.blockHeight)}</Link> <FinalizedBadge finalized={data.blockHeight <= (stats?.finalizedBlock ?? -1)} /></div>
               <div className="dt">Extrinsic</div><div className="dd">{extId ? <Link to={paths.extrinsic(extId)} className="hash mono">{extId}</Link> : <span className="muted mono">— system event</span>}</div>
               <div className="dt">Timestamp</div><div className="dd mono">{F.datetime(data.timestamp)}</div>

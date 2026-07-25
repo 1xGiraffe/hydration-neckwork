@@ -19,7 +19,7 @@ const HOVER_FLIP_THRESHOLD = 240
 // visible without opening the row.
 function OriginBadge({ origin }: { origin: ExtrinsicOrigin }) {
   if (origin.kind === 'proxy') {
-    return <span className="pill-badge" title="Executed on behalf of this account by a proxy" style={{ color: 'var(--sky)', background: 'color-mix(in srgb, var(--sky) 15%, transparent)' }}>proxy</span>
+    return <span className="pill-badge" title="Executed on behalf of this account by a proxy" style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 15%, transparent)' }}>proxy</span>
   }
   return <MultisigBadge origin={origin} />
 }
@@ -51,7 +51,7 @@ function MultisigBadge({ origin }: { origin: ExtrinsicOrigin }) {
     hideTimer.current = window.setTimeout(() => setRect(null), HOVER_HIDE_MS)
   }
   const state = origin.state ?? 'executed'
-  const col = state === 'cancelled' ? 'var(--red)' : state === 'pending' ? 'var(--amber)' : 'var(--sky)'
+  const col = state === 'cancelled' ? 'var(--red)' : state === 'pending' ? 'var(--amber)' : 'var(--green)'
   const mark = state === 'cancelled' ? '✕' : state === 'pending' ? '⏳' : '✓'
   const k = state === 'pending' ? origin.approvals : origin.threshold
   const kn = k && origin.signatories ? `${k}/${origin.signatories} ` : ''
@@ -228,7 +228,7 @@ export function EvRow({ e, now, isNew }: { e: EventRow; now: number; isNew?: boo
         <td data-label="ID" className="mono"><Link to={paths.eventAt(e.blockHeight, e.eventIndex)} className="hash" onClick={ev => ev.stopPropagation()}>{id}</Link></td>
         <td data-label="Block" className="mono"><Link to={paths.block(e.blockHeight)} className="hash" onClick={ev => ev.stopPropagation()}>{F.int(e.blockHeight)}</Link></td>
         <td data-label="Extrinsic" className="mono">{extId ? <Link to={paths.extrinsic(extId)} className="hash" onClick={ev => ev.stopPropagation()}>{extId}</Link> : <Dash />}</td>
-        <td data-label="Event"><CallPill name={e.name} />{e.decoded && <span className="badge" style={{ background: 'var(--lavender-soft)', color: 'var(--lavender)', marginLeft: 6 }}>decoded</span>}</td>
+        <td data-label="Event"><CallPill name={e.name} />{e.decoded && <span className="badge" style={{ background: 'color-mix(in srgb, var(--neutral) 15%, transparent)', color: 'var(--neutral)', marginLeft: 6 }}>decoded</span>}</td>
         <td data-label="Time" className="r mono muted"><Ago ts={e.timestamp} now={now} /></td>
         <td className="r exp-toggle col-hide-mobile"><button className={`exp-btn${open ? ' open' : ''}`} onClick={event => { event.stopPropagation(); toggle() }} aria-label={`${open ? 'Collapse' : 'Expand'} event ${id}`} aria-expanded={open}>▸</button></td>
       </tr>

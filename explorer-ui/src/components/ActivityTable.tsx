@@ -3,6 +3,7 @@ import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
 import { F, AddrPill, AssetChip, rowNav, Ago, AccountEmoji, ShortAddr, TagIcon, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
+import { activityBadge } from './activityColors'
 import type { ActivityRow } from '../types'
 
 // Chain badge for cross-chain (XCM) destinations — full network names, brand
@@ -63,34 +64,12 @@ export function ExternalAccountPill({ account }: { account: NonNullable<Activity
   return <a className="addr-pill ext-account" href={account.subscanUrl} target="_blank" rel="noopener" title={`${account.address} · opens ${site}`} data-no-hover="true">{body}<span className="ext-site">{site}</span></a>
 }
 
-function badge(r: ActivityRow): { label: string; col: string } {
-  if (r.type === 'mm') {
-    const a = r.mmAction || 'Supply'
-    const liq = a === 'LiquidationCall' || a === 'Liquidate'
-    return { label: liq ? 'Liquidate' : a === 'ClaimRewards' ? 'Claim rewards' : a, col: liq ? 'var(--red)' : (a === 'Borrow' || a === 'Withdraw') ? 'var(--amber)' : 'var(--green)' }
-  }
-  if (r.type === 'staking') {
-    const a = r.stakingAction || 'Staking'
-    const reward = /reward|payout/i.test(a)
-    const out = /unstake|cancel/i.test(a)
-    return { label: a, col: reward ? 'var(--green)' : out ? 'var(--amber)' : 'var(--lavender)' }
-  }
-  if (r.type === 'vote') return { label: r.voteAction || 'Vote', col: 'var(--sky)' }
-  if (r.type === 'liquidity') return { label: r.liqAction === 'Remove' ? 'Remove liquidity' : r.liqAction === 'Create' ? 'Create pool' : r.liqAction === 'Claim' ? 'Claim rewards' : r.liqAction === 'Add' ? 'Add liquidity' : 'Liquidity', col: r.liqAction === 'Remove' ? 'var(--amber)' : 'var(--green)' }
-  if (r.type === 'trade') return r.dca
-    ? { label: r.dcaStatus === 'failed' ? 'DCA failed' : 'DCA', col: r.dcaStatus === 'failed' ? 'var(--red)' : 'var(--amber)' }
-    : { label: 'Swap', col: 'var(--accent)' }
-  if (r.type === 'otc') {
-    const a = r.otcAction
-    return { label: 'OTC ' + (a ?? 'order').toLowerCase(), col: a === 'Pull' ? 'var(--amber)' : a === 'Fill' ? 'var(--green)' : 'var(--sky)' }
-  }
-  const M: Record<string, [string, string]> = { transfer: ['Transfer', 'var(--sky)'], xcm: ['Cross-chain', 'var(--lavender)'], dca: [r.dcaStatus === 'failed' ? 'DCA failed' : 'DCA', r.dcaStatus === 'failed' ? 'var(--red)' : 'var(--amber)'] }
-  const m = M[r.type] || ['Activity', 'var(--text-medium)']
-  return { label: m[0], col: m[1] }
-}
+// Row label + category color both live in activityColors, so the coding stays
+// one edit wide across every surface that shows an activity.
+const badge = activityBadge
 
 const MM_SLUG: Record<string, ActivitySlug> = {
-  Supply: 'supply', Withdraw: 'withdraw', Borrow: 'borrow', Repay: 'repay',
+  Supply: 'lend', Withdraw: 'withdraw', Borrow: 'borrow', Repay: 'repay',
   LiquidationCall: 'liquidate', Liquidate: 'liquidate',
   ClaimRewards: 'claim-rewards',
 }
@@ -101,7 +80,7 @@ export function activitySlug(r: ActivityRow): ActivitySlug {
     case 'dca': return 'dca'
     case 'xcm': return 'cross-chain'
     case 'liquidity': return r.liqAction === 'Remove' ? 'remove-liquidity' : r.liqAction === 'Create' ? 'create-pool' : r.liqAction === 'Claim' ? 'claim-rewards' : 'add-liquidity'
-    case 'mm': return MM_SLUG[r.mmAction ?? ''] ?? 'supply'
+    case 'mm': return MM_SLUG[r.mmAction ?? ''] ?? 'lend'
     case 'staking': return 'staking'
     case 'vote': return 'vote'
     case 'otc': return r.otcAction === 'Pull' ? 'otc-pull' : r.otcAction === 'Fill' ? 'otc-fill' : 'otc-place'
@@ -120,7 +99,7 @@ export function activityId(r: ActivityRow, dcaExecutionLink = false): string | n
 const SLUG_LABEL: Record<ActivitySlug, string> = {
   swap: 'Swap', dca: 'DCA', transfer: 'Transfer', 'cross-chain': 'Cross-chain',
   'add-liquidity': 'Add liquidity', 'remove-liquidity': 'Remove liquidity', 'create-pool': 'Create pool', 'claim-rewards': 'Claim rewards',
-  supply: 'Supply', withdraw: 'Withdraw', borrow: 'Borrow', repay: 'Repay',
+  lend: 'Lend', withdraw: 'Withdraw', borrow: 'Borrow', repay: 'Repay',
   liquidate: 'Liquidate', staking: 'Staking', vote: 'Vote',
   'otc-place': 'OTC place', 'otc-pull': 'OTC pull', 'otc-fill': 'OTC fill',
 }
@@ -131,7 +110,7 @@ export function activityLabel(slug: ActivitySlug): string { return SLUG_LABEL[sl
 export const SLUG_TYPES: Record<ActivitySlug, ActivityRow['type'][]> = {
   swap: ['trade', 'dca'], dca: ['trade', 'dca'], transfer: ['transfer'],
   'cross-chain': ['xcm'], 'add-liquidity': ['liquidity'], 'remove-liquidity': ['liquidity'], 'create-pool': ['liquidity'], 'claim-rewards': ['liquidity', 'mm'],
-  supply: ['mm'], withdraw: ['mm'], borrow: ['mm'], repay: ['mm'], liquidate: ['mm'],
+  lend: ['mm'], withdraw: ['mm'], borrow: ['mm'], repay: ['mm'], liquidate: ['mm'],
   staking: ['staking'], vote: ['vote'],
   'otc-place': ['otc'], 'otc-pull': ['otc'], 'otc-fill': ['otc'],
 }
@@ -153,7 +132,9 @@ export function ActivityBadge({ r }: { r: ActivityRow }) {
   const { label, col } = badge(r)
   const supplementalMarket = r.type === 'mm' && r.mmMarketKey && r.mmMarketKey !== 'core' ? r.mmMarket : null
   const partial = r.type === 'otc' && r.otcPartial ? 'partial' : null
-  return <span className="activity-badge-group"><span className="pill-badge" style={{ color: col, background: `color-mix(in srgb, ${col} 15%, transparent)` }}>{label}</span>{supplementalMarket && <span className="mm-activity-market">{supplementalMarket}</span>}{partial && <span className="mm-activity-market">{partial}</span>}</span>
+  // GIGAHDX is a brand-black market, so its marker is the one filled black chip.
+  const marketClass = supplementalMarket === 'GIGAHDX' ? ' mm-market-gigahdx' : ''
+  return <span className="activity-badge-group"><span className="pill-badge" style={{ color: col, background: `color-mix(in srgb, ${col} 15%, transparent)` }}>{label}</span>{supplementalMarket && <span className={`mm-activity-market${marketClass}`}>{supplementalMarket}</span>}{partial && <span className="mm-activity-market">{partial}</span>}</span>
 }
 
 export function ActivityDesc({ r }: { r: ActivityRow }) {

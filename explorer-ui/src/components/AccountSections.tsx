@@ -4,6 +4,7 @@ import type { ChartMarker } from './ui'
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
 import { performancePoints } from './performance'
+import { CAT } from './activityColors'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import type { MoneyMarketPosition, LpPosition, ActiveDca, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent } from '../types'
 import type { ReactNode } from 'react'
@@ -277,7 +278,7 @@ function MoneyMarketReserveColumns({ mm }: { mm: MoneyMarketPosition }) {
   return (
     <div className="mm-cols">
       <div>
-        <div className="mm-col-head">Supplied</div>
+        <div className="mm-col-head">Lent</div>
         {supplied.map(r => (
           <div className="mm-row" key={`s${r.assetId}`}>
             <span className="trade-leg"><AssetIcon assetId={r.assetId} iconAssetId={r.iconAssetId} symbol={r.symbol} size={18} parachainId={r.parachainId} origin={r.origin} /> <span className="mono">{r.symbol}</span></span>
@@ -321,14 +322,14 @@ function MoneyMarketCard({ mm, defisimAddress }: { mm: MoneyMarketPosition; defi
       <header className="sec-title mm-title-row">
         <h2 id={headingId} className="mm-title">{isPrimary ? mm.market : 'Money Market'}</h2>
         <span className="mm-title-note">
-          {isPrimary ? 'primary' : <>{iconAsset != null && <AssetIcon assetId={iconAsset} symbol={mm.market} size={14} />} {mm.market}</>} · supply &amp; borrow
+          {isPrimary ? 'primary' : <>{iconAsset != null && <AssetIcon assetId={iconAsset} symbol={mm.market} size={14} />} {mm.market}</>} · lend &amp; borrow
         </span>
         {mm.stakingBacked && <span className="mm-title-note">collateral is staked HDX — counted once in the wallet balance</span>}
         {defisimAddress && <a className="ext-link mm-defisim-link" href={`https://defisim.neckwork.net/?address=${encodeURIComponent(defisimAddress)}`} target="_blank" rel="noopener noreferrer">Open in DefiSim ↗</a>}
       </header>
       <div className="mm-card">
         <div className="mm-summary">
-          <div className="mm-stat"><span className="k">Supplied</span><span className="v">{F.usd(supplyUsd)}</span></div>
+          <div className="mm-stat"><span className="k">Lent</span><span className="v">{F.usd(supplyUsd)}</span></div>
           <div className="mm-stat"><span className="k">Borrowed</span><span className="v">{debtUsd > 0 ? F.usd(debtUsd) : '—'}</span></div>
           <div className="mm-stat"><span className="k">Net worth</span><span className="v">{F.usd(supplyUsd - debtUsd)}</span></div>
           <div className="mm-stat"><span className="k">Available to borrow</span><span className="v">{F.usd(Number(mm.availableBorrowsBase) / 1e8)}</span></div>
@@ -395,8 +396,10 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now }: { dcas: Activ
 }
 
 // Venue → badge colour, so the LP products read apart at a glance: NFT-held
-// Omnipool positions (bare / farmed) vs wallet-held stableswap pool shares.
-const LP_VENUE_COLORS: Record<string, string> = { Omnipool: 'var(--sky-deep)', 'Omnipool Farm': 'var(--green)', Stablepool: 'var(--sky)' }
+// Omnipool positions (bare / farmed) vs wallet-held stableswap pool shares. All
+// three are liquidity, so they stay inside that family's blues rather than
+// borrowing a hue that means something else elsewhere.
+const LP_VENUE_COLORS: Record<string, string> = { Omnipool: CAT.liquidity, 'Omnipool Farm': CAT.liquidityCreate, Stablepool: 'var(--sky-deep)' }
 
 export function LiquidityPositionsTable({ positions }: { positions: LpPosition[] }) {
   if (!positions.length) return null
@@ -409,7 +412,7 @@ export function LiquidityPositionsTable({ positions }: { positions: LpPosition[]
         <thead><tr><th>Pool asset</th><th>Venue</th><th className="r">Amount</th><th className="r">Value</th></tr></thead>
         <tbody>
           {positions.map(p => {
-            const col = LP_VENUE_COLORS[p.venue] ?? 'var(--sky)'
+            const col = LP_VENUE_COLORS[p.venue] ?? CAT.liquidity
             return (
               <tr key={p.positionId} {...rowNav(paths.asset(p.asset.assetId))}>
                 <td data-label="Pool asset">
@@ -434,9 +437,12 @@ export function LiquidityPositionsTable({ positions }: { positions: LpPosition[]
 }
 
 /* ============ proxy & multisig ============ */
+// A proxy type names the activity it is allowed to perform, so it takes that
+// activity's colour. Any is the exception: it authorises everything, which is
+// the dangerous one, so it keeps red.
 const PROXY_TYPE_COLORS: Record<string, string> = {
-  Any: 'var(--red)', CancelProxy: 'var(--text-low)', Governance: 'var(--sky)',
-  Transfer: 'var(--accent)', Liquidity: 'var(--green)', LiquidityMining: 'var(--green)',
+  Any: 'var(--red)', CancelProxy: 'var(--text-low)', Governance: CAT.vote,
+  Transfer: CAT.transfer, Liquidity: CAT.liquidity, LiquidityMining: CAT.liquidityCreate,
 }
 function ProxyTypeBadge({ type }: { type: string }) {
   const col = PROXY_TYPE_COLORS[type] ?? 'var(--text-medium)'
@@ -516,7 +522,7 @@ export function ProxyMultisigSection({ proxy, multisig, memberships }: {
                   {multisig.pending.map(p => (
                     <span key={p.callHash} className="proxy-rel">
                       <span className="mono" title={p.callHash}>{F.shortHash(p.callHash)}</span>
-                      <span className="pill-badge" style={{ color: 'var(--sky)', background: 'color-mix(in srgb, var(--sky) 14%, transparent)' }}>{p.approvals.length}/{multisig.threshold} approved</span>
+                      <span className="pill-badge" style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>{p.approvals.length}/{multisig.threshold} approved</span>
                       {p.approvals.map(a => <AddrPill key={a.accountId} account={a} noCopy />)}
                       <span className="muted mono" style={{ fontSize: 11 }}>since <Link className="hash" to={paths.block(p.sinceBlock)}>#{F.int(p.sinceBlock)}</Link></span>
                     </span>
@@ -537,7 +543,7 @@ export function ProxyMultisigSection({ proxy, multisig, memberships }: {
               {memberships.map(m => (
                 <span key={m.account.accountId} className="proxy-rel">
                   <AddrPill account={m.account} />
-                  <span className="pill-badge" style={{ color: 'var(--sky)', background: 'color-mix(in srgb, var(--sky) 14%, transparent)' }}>{m.threshold} of {m.signatories}</span>
+                  <span className="pill-badge" style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>{m.threshold} of {m.signatories}</span>
                 </span>
               ))}
             </div>

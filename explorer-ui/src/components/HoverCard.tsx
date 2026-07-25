@@ -298,7 +298,7 @@ function TradeHover({ id }: { id: string }) {
         <div className="hc-route-title"><span>Route</span><span className="mono">{hops.length} hop{hops.length === 1 ? '' : 's'}</span></div>
         {hops.map((h, i) => (
           <div className="hc-hop" key={`${h.pool}-${h.assetIn.assetId}-${h.assetOut.assetId}-${i}`}>
-            <span className="badge" style={{ background: 'var(--sky-soft)', color: 'var(--sky)' }}>{h.pool}{h.poolId != null ? ` #${h.poolId}` : ''}</span>
+            <span className="badge" style={{ background: 'color-mix(in srgb, var(--cat-liquidity) 15%, transparent)', color: 'var(--cat-liquidity)' }}>{h.pool}{h.poolId != null ? ` #${h.poolId}` : ''}</span>
             <span className="hc-hop-assets">
               <span className="trade-leg"><AssetIcon assetId={h.assetIn.assetId} iconAssetId={h.assetIn.iconAssetId} symbol={h.assetIn.symbol} size={16} parachainId={h.assetIn.parachainId} origin={h.assetIn.origin} /><span className="mono">{h.assetIn.symbol}</span></span>
               <span className="muted">→</span>

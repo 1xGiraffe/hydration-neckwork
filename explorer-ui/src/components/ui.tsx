@@ -5,6 +5,7 @@ import { Link, paths, navigate } from '../router'
 import type { AccountRef, AssetOrigin, AssetRef, FailureReason } from '../types'
 import { parseUtcTimestamp } from '../utils/time'
 import { useMediaQuery } from '../hooks/useMediaQuery'
+import { CAT } from './activityColors'
 
 /* ============ shared formatters ============ */
 const SUBSCRIPT = '₀₁₂₃₄₅₆₇₈₉'
@@ -574,7 +575,7 @@ export function StatusBadge({ ok, reason, compact }: { ok: boolean; reason?: str
 }
 export function VoteSideBadge({ side }: { side: string | null | undefined }) {
   const normalized = (side ?? 'Vote').toLowerCase()
-  const col = normalized === 'aye' ? 'var(--green)' : normalized === 'nay' ? 'var(--red)' : 'var(--sky)'
+  const col = normalized === 'aye' ? 'var(--green)' : normalized === 'nay' ? 'var(--red)' : CAT.vote
   const label = normalized === 'aye' ? 'AYE' : normalized === 'nay' ? 'NAY' : (side || 'Vote')
   return <span className="pill-badge" style={{ color: col, background: `color-mix(in srgb, ${col} 15%, transparent)` }}>{label}</span>
 }
@@ -671,15 +672,18 @@ export function ChartTip({ xPct, children }: { xPct: number; children: ReactNode
 // aggregation never hides the asset context.
 export interface ChartMarker { ts: string; kind: string; label: string; valueUsd: number; href: string | null; tip: ReactNode; detail?: ReactNode }
 
-// kind → theme token, legible in both the dark and light palettes.
+// kind → the same category color the row badge for that activity wears, so a
+// marker on the value chart and the row it links to are recognisably one thing.
+// Transfers in and out share the movement grey — the label carries the direction,
+// and an outgoing transfer is not a bad outcome, just an outgoing one.
 const CHART_MARKER_COLORS: Record<string, string> = {
-  'transfer-in': 'var(--green)',
-  'transfer-out': 'var(--red)',
-  swap: 'var(--sky)',
-  liquidity: 'var(--lavender)',
-  liquidation: 'var(--red)',
-  dca: 'var(--amber)', // matches the .dca-tag / DCA-pallet accent
-  'cross-chain': 'var(--sky-deep)', // deeper blue than swap's --sky in both themes
+  'transfer-in': CAT.transfer,
+  'transfer-out': CAT.transfer,
+  swap: CAT.trade,
+  liquidity: CAT.liquidity,
+  liquidation: CAT.bad,
+  dca: CAT.tradeDca,
+  'cross-chain': CAT.xcm,
   price: 'var(--text-low)', // neutral: a market move, not an on-chain event
   other: 'var(--text-low)',
 }
@@ -879,7 +883,7 @@ export function DayChartSkeleton({ ratio }: { ratio: number }) {
     </div>
   )
 }
-export function DayBarChart({ data, color = 'var(--sky)', fmt = (v: number) => String(Math.round(v)), label, selected, onSelect, loading }: {
+export function DayBarChart({ data, color = 'var(--accent)', fmt = (v: number) => String(Math.round(v)), label, selected, onSelect, loading }: {
   data: { date: string; value: number }[]; color?: string; fmt?: (v: number) => string; label?: string; selected?: string | null; onSelect?: (d: string | null) => void; loading?: boolean
 }) {
   const W = 860, H = 120, padX = 2, padB = 2, padT = 8
@@ -1199,7 +1203,7 @@ export function rowNav(to: string) {
 // value maps to the backend activity `type` filter; 'all' is the unfiltered feed.
 const ACTIVITY_CHIPS: { v: string; label: string }[] = [
   { v: 'all', label: 'All' }, { v: 'trade', label: 'Trade' }, { v: 'mm', label: 'Borrow' }, { v: 'liquidity', label: 'Liquidity' },
-  { v: 'transfer', label: 'Transfer' }, { v: 'xcm', label: 'Cross-chain' }, { v: 'staking', label: 'Stake' }, { v: 'vote', label: 'Vote' },
+  { v: 'transfer', label: 'Transfer' }, { v: 'xcm', label: 'Cross-chain' }, { v: 'stake', label: 'Stake' }, { v: 'vote', label: 'Vote' },
 ]
 const ACTIVITY_CHIP_VALUES = new Set(ACTIVITY_CHIPS.map(c => c.v))
 export function normalizeActivityType(value: string): string {
@@ -1220,8 +1224,8 @@ export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = 
   ],
   xcm: [{ v: 'out', label: 'Outgoing' }, { v: 'in', label: 'Incoming' }],
   liquidity: [{ v: 'Add', label: 'Add liquidity' }, { v: 'Remove', label: 'Remove liquidity' }, { v: 'Create', label: 'Create pool' }, { v: 'Claim', label: 'Claim rewards' }],
-  mm: [{ v: 'Supply', label: 'Supply' }, { v: 'Withdraw', label: 'Withdraw' }, { v: 'Borrow', label: 'Borrow' }, { v: 'Repay', label: 'Repay' }, { v: 'LiquidationCall', label: 'Liquidate' }, { v: 'ClaimRewards', label: 'Claim rewards' }],
-  staking: [{ v: 'Stake', label: 'Stake' }, { v: 'Add stake', label: 'Add stake' }, { v: 'Unstake', label: 'Unstake' }, { v: 'Force unstake', label: 'Force unstake' }, { v: 'Staking reward', label: 'Staking reward' }, { v: 'Giga stake', label: 'Giga stake' }, { v: 'Giga unstake', label: 'Giga unstake' }, { v: 'Unstake cancelled', label: 'Unstake cancelled' }, { v: 'Giga migration', label: 'Giga migration' }, { v: 'Giga reward', label: 'Giga reward' }, { v: 'Collator payout', label: 'Collator payout' }],
+  mm: [{ v: 'Supply', label: 'Lend' }, { v: 'Withdraw', label: 'Withdraw' }, { v: 'Borrow', label: 'Borrow' }, { v: 'Repay', label: 'Repay' }, { v: 'LiquidationCall', label: 'Liquidate' }, { v: 'ClaimRewards', label: 'Claim rewards' }],
+  stake: [{ v: 'Stake', label: 'Stake' }, { v: 'Add stake', label: 'Add stake' }, { v: 'Unstake', label: 'Unstake' }, { v: 'Force unstake', label: 'Force unstake' }, { v: 'Staking reward', label: 'Staking reward' }, { v: 'Giga stake', label: 'Giga stake' }, { v: 'Giga unstake', label: 'Giga unstake' }, { v: 'Unstake cancelled', label: 'Unstake cancelled' }, { v: 'Giga migration', label: 'Giga migration' }, { v: 'Giga reward', label: 'Giga reward' }, { v: 'Collator payout', label: 'Collator payout' }],
   // The value is the chain's own term; the label is how this app writes a side.
   vote: [{ v: 'Aye', label: 'AYE' }, { v: 'Nay', label: 'NAY' }],
 }

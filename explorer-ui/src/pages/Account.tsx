@@ -68,8 +68,8 @@ export function Account({ address }: { address: string }) {
                     : data.identity?.display
                       ? <span style={{ fontSize: 18 }}>{data.identity.display}{data.identity.verified && <span className="id-verified" title="Verified identity" style={{ marginLeft: 5 }}>✓</span>}</span>
                       : <span style={{ fontSize: 18 }}>{mod ? mod : (emojiName(data.emoji) ?? 'Account')}</span>}
-                    {data.proxy?.isPure && <span className="badge" title="Keyless pure-proxy account — controlled only through its proxies" style={{ color: 'var(--sky)', background: 'color-mix(in srgb, var(--sky) 14%, transparent)' }}>pure proxy</span>}
-                    {data.multisig && <span className="badge" title={`Multisig account — any ${data.multisig.threshold} of ${data.multisig.signatories.length} signatories can act`} style={{ color: 'var(--sky)', background: 'color-mix(in srgb, var(--sky) 14%, transparent)' }}>{data.multisig.threshold}/{data.multisig.signatories.length} multisig</span>}</div>
+                    {data.proxy?.isPure && <span className="badge" title="Keyless pure-proxy account — controlled only through its proxies" style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>pure proxy</span>}
+                    {data.multisig && <span className="badge" title={`Multisig account — any ${data.multisig.threshold} of ${data.multisig.signatories.length} signatories can act`} style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>{data.multisig.threshold}/{data.multisig.signatories.length} multisig</span>}</div>
                   {/* No EVM badge here: the 0x prefix already says it (and the
                       identities card shows "EVM (H160)") — the badge forced the
                       address to wrap mid-token on phones. */}

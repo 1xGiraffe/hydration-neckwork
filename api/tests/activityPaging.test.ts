@@ -43,7 +43,7 @@ describe('activity paging bounds', () => {
 
       expect(response.statusCode, `vote offset ${offset}`).not.toBe(400)
     }
-    for (const type of ['staking', 'otc']) {
+    for (const type of ['stake', 'otc']) {
       for (const offset of [10001, 250_000]) {
         const response = await app.inject(`/explorer/activity?offset=${offset}&type=${type}`)
 

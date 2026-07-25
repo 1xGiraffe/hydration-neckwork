@@ -2,6 +2,7 @@ import { useEvents, useDaily, useCounts } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { paths, usePageParam, setPage } from '../router'
 import { Crumbs, F, DayBarChart, EmptyRow, TableSkeleton, Pager } from '../components/ui'
+import { UNFILTERED_COLOR } from '../components/activityColors'
 import { EvRow } from '../components/ActivityRows'
 import { useNewRows } from '../hooks/useNewRows'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -28,7 +29,7 @@ export function Events() {
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Events' }]} />
         <div className="page-title">Events <span className="sub">emitted by extrinsics</span></div>
       </div>
-      <DayBarChart data={daily ?? []} label="Daily events emitted" selected={f.from === f.to ? f.from : undefined} onSelect={setDay} fmt={F.int} loading={!daily} />
+      <DayBarChart data={daily ?? []} color={UNFILTERED_COLOR} label="Daily events emitted" selected={f.from === f.to ? f.from : undefined} onSelect={setDay} fmt={F.int} loading={!daily} />
       <FilterZone fields={eventFilterFields} values={f} onChange={(k, v) => { onChange(k, v); setPage(0) }} onClear={onClear} />
       <div className="panel">
         <table className="tbl">

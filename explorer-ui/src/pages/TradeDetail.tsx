@@ -143,7 +143,7 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
                       <tbody>
                         {route.map((h, i) => (
                           <tr key={i}>
-                            <td data-label="Pool"><span className="badge" style={{ background: 'var(--sky-soft)', color: 'var(--sky)' }}>{h.pool}{h.poolId != null ? ` #${h.poolId}` : ''}</span></td>
+                            <td data-label="Pool"><span className="badge" style={{ background: 'color-mix(in srgb, var(--cat-liquidity) 15%, transparent)', color: 'var(--cat-liquidity)' }}>{h.pool}{h.poolId != null ? ` #${h.poolId}` : ''}</span></td>
                             <td data-label="In"><RouteAmount asset={h.assetIn} amount={h.displayAmountIn} /></td>
                             <td data-label="Out" className="r"><RouteAmount asset={h.assetOut} amount={h.displayAmountOut} /></td>
                             <td data-label="Pool fee" className="r">{h.fee ? <AssetAmount asset={h.fee.asset} amount={h.fee.amount} /> : <span className="muted mono">—</span>}</td>

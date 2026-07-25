@@ -44,7 +44,7 @@ describe('primary-first Money Market presentation', () => {
 
     expect(html.indexOf('data-market-key="core"')).toBeLessThan(html.indexOf('data-market-key="gigahdx"'))
     expect(html).not.toContain('mm-secondary')
-    expect(html).toContain('GIGAHDX · supply &amp; borrow')
+    expect(html).toContain('GIGAHDX · lend &amp; borrow')
     expect(html).toContain('/assets/67/icon')
     // both markets carry the full summary stats
     expect(html.match(/mm-summary/g)).toHaveLength(2)
@@ -53,7 +53,7 @@ describe('primary-first Money Market presentation', () => {
 
   it('never offers DefiSim when only the GIGAHDX market is active', () => {
     const html = renderToStaticMarkup(<MoneyMarketPositions markets={[supplemental]} defisimAddress="0xabc" />)
-    expect(html).toContain('GIGAHDX · supply &amp; borrow')
+    expect(html).toContain('GIGAHDX · lend &amp; borrow')
     expect(html).not.toContain('defisim.neckwork.net')
   })
 

@@ -41,7 +41,7 @@ describe('parseRoute (clean-path routing, design routes)', () => {
 
 describe('activity detail routes', () => {
   it('parses every activity slug', () => {
-    for (const slug of ['swap', 'transfer', 'cross-chain', 'add-liquidity', 'remove-liquidity', 'supply', 'withdraw', 'borrow', 'repay', 'liquidate', 'staking', 'vote', 'otc-place', 'otc-pull', 'otc-fill']) {
+    for (const slug of ['swap', 'transfer', 'cross-chain', 'add-liquidity', 'remove-liquidity', 'lend', 'withdraw', 'borrow', 'repay', 'liquidate', 'staking', 'vote', 'otc-place', 'otc-pull', 'otc-fill']) {
       expect(p(`/${slug}/13072380-e2`)).toEqual({ name: 'activity-detail', slug, id: '13072380-e2' })
       expect(p(`/${slug}/13072380-4`)).toEqual({ name: 'activity-detail', slug, id: '13072380-4' })
     }
