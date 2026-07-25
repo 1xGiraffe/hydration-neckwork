@@ -13418,8 +13418,11 @@ async function enrichTopAssets(
     for (const m of base) { const twin = evmAccountForm(m); if (twin) set.add(twin) }
     return [...set]
   })
-  const h160Of = (acc: string) => '0x' + acc.slice(2, 42).toLowerCase()
-  const rowH160s: string[][] = rowAccounts.map(accs => [...new Set(accs.map(h160Of))])
+  // The same derivation the detail page uses: an EVM-form account id carries its
+  // H160 after the 0x45544800 prefix, so truncating the id's first 20 bytes would
+  // produce a holder that matches nothing and drop the row's supplied collateral.
+  const rowH160s: string[][] = rowAccounts.map(accs =>
+    [...new Set(accs.map(mmH160ForAccount).filter((h): h is string => h != null).map(h => h.toLowerCase()))])
   // Reconstruct supplied collateral only for rows flagged with a money-market
   // position (aTokens exist only for configured MM pools). Each holder means a
   // full raw_evm_logs scan, so scanning only real MM holders keeps this ~3× faster
