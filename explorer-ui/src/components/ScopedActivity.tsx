@@ -18,7 +18,7 @@ import { EvRow, ExtRow } from './ActivityRows'
 import { ActivityTable } from './ActivityTable'
 import { eventFilterFields, extrinsicFilterFields, activityFilterFields } from './activityFilters'
 import { EmptyRow, ErrorRow, F, Pager, ActivityChips, TableSkeleton, normalizeActivityAction, normalizeActivityType } from './ui'
-import { PAGE_SIZE, activityTailOffset, pageCount, provenPageCount, trimFinalTailPage } from '../utils/activityPaging'
+import { PAGE_SIZE, activityTailOffset, pageCount, provenPageCount, tailOffsetForPage, tailPageParam, trimFinalTailPage } from '../utils/activityPaging'
 
 type ActivityScope =
   | { kind: 'account'; address: string }
@@ -41,7 +41,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const rawTab = useQueryValue('atab', 'activity')
   const activeTab = rawTab === 'extrinsics' || rawTab === 'events' ? rawTab : 'activity'
   const activityType = normalizeActivityType(useQueryValue('type', 'all'))
-  const filterOptions = { reservedKeys: ['page', 'tab', 'view', 'atab', 'type', 'apage'], pageKey: 'apage' }
+  const filterOptions = { reservedKeys: ['page', 'tab', 'view', 'atab', 'type', 'apage', 'atail'], pageKey: 'apage' }
   const activityFilters = useFilters({ ...filterOptions, keys: ['action', 'token', 'from', 'to', 'min'] })
   const extrinsicFilters = useFilters({ ...filterOptions, keys: ['call', 'result', 'origin', 'from', 'to'] })
   const eventFilters = useFilters({ ...filterOptions, keys: ['event', 'from', 'to'] })
@@ -50,7 +50,11 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const query = useQuery()
   const requestedPage = Number.parseInt(query.get('apage') ?? '', 10)
   const page = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 0
-  const offset = page * PAGE_SIZE
+  // `atail` pages from the OLDEST end (0 = last page). It exists because the row count
+  // overshoots the feed, so a count-derived last page misses; tail mode walks back from
+  // the true oldest row instead. When set it takes over from the forward offset.
+  const tailPage = tailPageParam(query.get('atail'))
+  const offset = tailPage == null ? page * PAGE_SIZE : 0
   const minimumUsd = activityFilters.values.min || undefined
   const activityHasCount = activityType === 'all'
     && !activityAction
@@ -66,7 +70,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const activityRowCount = activityHasCount
     ? (minimumUsd != null ? minimumCount.data?.activity : counts.data?.activity)
     : undefined
-  const activityTail = activityTailOffset(activityRowCount, offset)
+  const activityTail = tailPage != null ? tailOffsetForPage(tailPage) : activityTailOffset(activityRowCount, offset)
 
   const commonActivityArgs = [
     activityType,
@@ -80,11 +84,13 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const accountActivity = useAccountActivity(activeTab === 'activity' ? accountAddress : null, ...commonActivityArgs)
   const tagActivity = useTagActivity(activeTab === 'activity' ? tagId : null, ...commonActivityArgs)
   const activity = scope.kind === 'account' ? accountActivity : tagActivity
-  const activityRows = trimFinalTailPage(activity.data ?? [], activityRowCount, offset, activityTail)
+  const activityRows = tailPage != null
+    ? (activity.data ?? [])
+    : trimFinalTailPage(activity.data ?? [], activityRowCount, offset, activityTail)
   // Only ever advertise a page count the feed has proven; activityRowCount overshoots it
   // (see provenPageCount). Its other uses stay: the tab badge is an activity tally, and
   // activityTail/trimFinalTailPage already treat it as approximate.
-  const activityTotalPages = provenPageCount(activityRows.length, page, activity.isFetching)
+  const activityTotalPages = tailPage == null ? provenPageCount(activityRows.length, page, activity.isFetching) : undefined
   const accountExtrinsics = useAccountExtrinsics(
     activeTab === 'extrinsics' ? accountAddress : null,
     offset,
@@ -126,7 +132,8 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
 
   const setActiveTab = (tab: string | null) => setQuery({ atab: tab, apage: null })
   const setActivityType = (value: string) => setQuery({ type: value === 'all' ? null : value, action: null, apage: null })
-  const setPage = (nextPage: number) => setQuery({ apage: nextPage > 0 ? String(nextPage) : null })
+  const setPage = (nextPage: number) => setQuery({ apage: nextPage > 0 ? String(nextPage) : null, atail: null })
+  const setTailPage = (nextTail: number) => setQuery({ apage: null, atail: String(Math.max(0, nextTail)) })
   const extrinsicPages = hasNoValues(extrinsicFilters.values) ? pageCount(counts.data?.extrinsics) : undefined
   const eventPages = hasNoValues(eventFilters.values) ? pageCount(counts.data?.events) : undefined
 
@@ -148,8 +155,23 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
         />
         <ActivityTable rows={activityRows} now={now} live={page === 0} loading={activity.isFetching && !activity.data?.length}
           error={activity.error} onRetry={() => { void activity.refetch() }} />
-        <Pager page={page} totalPages={activityTotalPages} hasNext={activityRows.length === PAGE_SIZE}
-          pastEnd={!activity.isFetching && !activity.error && page > 0 && activityRows.length === 0} onPage={setPage} />
+        {/* Two axes, one pager. Forward paging counts from the newest row; tail paging
+            counts back from the oldest, which is how the last page is reachable at all
+            (the row count overshoots the feed, so it cannot locate the end). In tail
+            mode "previous" is one page NEWER and "next" one page older, and the numbered
+            buttons step out of tail mode entirely. */}
+        <Pager
+          page={page}
+          totalPages={activityTotalPages}
+          hasNext={tailPage != null ? tailPage > 0 : activityRows.length === PAGE_SIZE}
+          pastEnd={tailPage == null && !activity.isFetching && !activity.error && page > 0 && activityRows.length === 0}
+          label={tailPage == null ? undefined : tailPage === 0 ? 'Last page' : `${tailPage === 1 ? '1 page' : `${tailPage} pages`} from last`}
+          onPage={setPage}
+          onFirst={tailPage == null ? undefined : () => setPage(0)}
+          onPrev={tailPage == null ? undefined : () => setTailPage(tailPage + 1)}
+          onNext={tailPage == null ? undefined : () => setTailPage(Math.max(0, tailPage - 1))}
+          onLast={() => setTailPage(0)}
+        />
       </>}
 
       {activeTab === 'extrinsics' && <>

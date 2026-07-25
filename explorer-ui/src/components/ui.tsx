@@ -1106,7 +1106,7 @@ export function ErrorRow({ cols, title, error, onRetry }: { cols: number; title:
 // window of page numbers plus a jump box reach arbitrary depth (totalPages,
 // when known, enables a Last button). Lists are newest-first, so higher pages
 // go further back toward the very first block.
-export function Pager({ page, hasNext, totalPages, pastEnd, onPage }: { page: number; hasNext?: boolean; totalPages?: number; pastEnd?: boolean; onPage: (p: number) => void }) {
+export function Pager({ page, hasNext, totalPages, pastEnd, onPage, onFirst, onPrev, onNext, onLast, label }: { page: number; hasNext?: boolean; totalPages?: number; pastEnd?: boolean; onPage: (p: number) => void; onFirst?: () => void; onPrev?: () => void; onNext?: () => void; onLast?: () => void; label?: string }) {
   const [jump, setJump] = useState('')
   const last = totalPages != null ? totalPages - 1 : undefined
   const canNext = hasNext ?? (last != null ? page < last : true)
@@ -1129,13 +1129,22 @@ export function Pager({ page, hasNext, totalPages, pastEnd, onPage }: { page: nu
   const go = (n: number) => { if (n >= 0 && (last == null || n <= last || (n === page + 1 && canNext))) onPage(n) }
   return (
     <div className="pager">
-      <div className="info">Page {(page + 1).toLocaleString('en-US')}{last != null ? ` of ${(last + 1).toLocaleString('en-US')}` : ''}</div>
+      {/* `label` names a position the page number cannot, e.g. a page reached from the
+          oldest end where the total is unknown. */}
+      <div className="info">{label ?? `Page ${(page + 1).toLocaleString('en-US')}${last != null ? ` of ${(last + 1).toLocaleString('en-US')}` : ''}`}</div>
       <div className="btns">
-        <button onClick={() => go(0)} disabled={page === 0} title="First" aria-label="First page">«</button>
-        <button onClick={() => go(page - 1)} disabled={page === 0} title="Previous" aria-label="Previous page">‹</button>
+        {/* onFirst/onPrev exist for callers whose position is not a page NUMBER — paging
+            back from the oldest end, where "previous" means one page newer and the
+            absolute page index is unknown. */}
+        <button onClick={() => (onFirst ? onFirst() : go(0))} disabled={!onFirst && page === 0} title="First" aria-label="First page">«</button>
+        <button onClick={() => (onPrev ? onPrev() : go(page - 1))} disabled={!onPrev && page === 0} title="Previous" aria-label="Previous page">‹</button>
         {numbered.map(n => <button key={n} className={n === page ? 'on' : ''} onClick={() => go(n)} aria-label={`Page ${n + 1}`} aria-current={n === page ? 'page' : undefined}>{n + 1}</button>)}
-        <button onClick={() => go(page + 1)} disabled={!canNext} title="Next" aria-label="Next page">›</button>
-        {last != null && <button onClick={() => go(last)} disabled={page >= last} title="Last" aria-label="Last page">»</button>}
+        <button onClick={() => (onNext ? onNext() : go(page + 1))} disabled={!canNext} title="Next" aria-label="Next page">›</button>
+        {/* onLast reaches the end without a known total (the API's tail mode walks back
+            from the oldest row); a known total keeps the plain jump. */}
+        {onLast
+          ? <button onClick={onLast} title="Last" aria-label="Last page">»</button>
+          : last != null && <button onClick={() => go(last)} disabled={page >= last} title="Last" aria-label="Last page">»</button>}
         <form onSubmit={e => { e.preventDefault(); const n = parseInt(jump, 10); if (Number.isFinite(n) && n >= 1) go(n - 1); setJump('') }}>
           <input className="pager-jump" placeholder="Go to…" value={jump} onChange={e => setJump(e.target.value)} inputMode="numeric" aria-label="Go to page" />
         </form>

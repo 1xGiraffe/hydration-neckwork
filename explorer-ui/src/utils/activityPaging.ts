@@ -9,6 +9,25 @@ const MAX_FORWARD_OFFSET = 2_000
 // failure; those pages are served by a forward offset instead.
 const MAX_TAIL_ROWS = 4_500
 
+
+// Paging from the OLDEST end, counted in pages back from the last one: tailPage 0 is
+// the last page, 1 the one before it, and so on. This exists because the activity row
+// count overshoots the classified feed (one account reports 2,082 rows where the feed
+// ends at 1,650, so a count-derived "last page" lands 18 pages past the end), while the
+// API's tail mode walks back from the true oldest row and needs no count to be right.
+export const MAX_TAIL_PAGE = Math.floor(MAX_TAIL_ROWS / PAGE_SIZE) - 1
+
+export function tailPageParam(raw: string | null | undefined): number | null {
+  if (raw == null || raw === '') return null
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed < 0) return null
+  return Math.min(parsed, MAX_TAIL_PAGE)
+}
+
+export function tailOffsetForPage(tailPage: number): number {
+  return Math.max(0, tailPage) * PAGE_SIZE
+}
+
 export function pageCount(rowCount?: number | null): number | undefined {
   return rowCount != null && rowCount > 0 ? Math.ceil(rowCount / PAGE_SIZE) : undefined
 }

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { PAGE_SIZE, provenPageCount } from '../src/utils/activityPaging'
+import { MAX_TAIL_PAGE, PAGE_SIZE, provenPageCount, tailOffsetForPage, tailPageParam } from '../src/utils/activityPaging'
+
+// Mirrors MAX_TAIL_ROWS, which stays private to the paging module.
+const MAX_TAIL_ROWS_FOR_TEST = 4_500
 
 // The activity count is a sum of overlapping per-category counts, so it is an upper bound
 // on the feed, not its length. One live account reported 1,209 where the classified feed
@@ -41,5 +44,32 @@ describe('provenPageCount', () => {
     // Same inputs, no count argument to disagree with: the signature makes the bug
     // unrepresentable rather than merely unlikely.
     expect(provenPageCount.length).toBe(3)
+  })
+})
+
+// Reaching the last page cannot depend on the row count: it overshoots the classified
+// feed (one account reports 2,082 rows where the feed ends at 1,650, so a count-derived
+// last page lands 18 pages past the end). Tail paging counts back from the true oldest
+// row instead, where page 0 IS the last page.
+describe('tail paging', () => {
+  it('reads a tail page from the url', () => {
+    expect(tailPageParam('0')).toBe(0)
+    expect(tailPageParam('7')).toBe(7)
+  })
+
+  it('treats absent or nonsense values as "not in tail mode"', () => {
+    for (const raw of [null, undefined, '', 'last', '-1', 'NaN']) expect(tailPageParam(raw), String(raw)).toBeNull()
+  })
+
+  // The API rejects a tail beyond its own window, so the url is clamped to what it serves.
+  it('clamps to the servable tail window', () => {
+    expect(tailPageParam('999999')).toBe(MAX_TAIL_PAGE)
+    expect(MAX_TAIL_PAGE).toBe(Math.floor(MAX_TAIL_ROWS_FOR_TEST / PAGE_SIZE) - 1)
+  })
+
+  it('converts a tail page to the row offset the API takes', () => {
+    expect(tailOffsetForPage(0)).toBe(0)
+    expect(tailOffsetForPage(3)).toBe(3 * PAGE_SIZE)
+    expect(tailOffsetForPage(-5)).toBe(0)
   })
 })
