@@ -46,7 +46,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const extrinsicFilters = useFilters({ ...filterOptions, keys: ['call', 'result', 'origin', 'from', 'to'] })
   const eventFilters = useFilters({ ...filterOptions, keys: ['event', 'from', 'to'] })
   const activityAction = normalizeActivityAction(activityType, activityFilters.values.action ?? '')
-  const assets = useAssets()
+  const assets = useAssets(false)   // filter options only; the Assets page owns the poll
   const query = useQuery()
   const requestedPage = Number.parseInt(query.get('apage') ?? '', 10)
   const page = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 0

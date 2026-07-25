@@ -13823,9 +13823,23 @@ export function resampleValueSeriesToTrailingYear(values: number[], dates: strin
   return out
 }
 
-// Full-portfolio sparkline for the accounts directory. Reuses the detail page's own
-// getAccountHistory so the row sparkline and the account/tag value-history chart are
-// computed by the SAME code path (wallet + HOLLAR + money-market net worth +
+// Full-portfolio sparkline for the accounts directory.
+//
+// This reconstruction is the largest single reader in the instance (measured: 59.8 GiB /
+// 339M rows / 13.7 s across 72 runs on one deep activity page) because it builds 180
+// buckets over an account's ENTIRE life and resampleValueSeriesToTrailingYear then keeps
+// only 53 trailing weeks. Clamping the window to that year was built and measured: the
+// carry-in is fine (every sub-part establishes its opening value from rng.minb), but
+// narrowing the span shrinks each bucket from ~8 days to ~2, so the weekly resampler
+// lands on different samples and 92 of 127 live sparklines moved by 1-6% — the list and
+// the detail chart would no longer agree, which is exactly the parity this shared path
+// exists to guarantee. The cost has to come out of the reads instead: an account-first
+// projection of raw_money_market_positions (its ORDER BY is block-first, so the
+// per-account predicate cannot use it), which needs a schema change plus materialization
+// over existing parts.
+//
+// Reuses the detail page's own getAccountHistory so the row sparkline and the
+// account/tag value-history chart are computed by the SAME code path (wallet + HOLLAR + money-market net worth +
 // Omnipool/XYK LP principal, historical closes) and therefore cannot diverge — the
 // earlier wallet-only weekly approximation understated LP/MM-heavy accounts by ~2-3×.
 // Overwrites the wallet-only series enrichAccountRows produced, which stays as the

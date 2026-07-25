@@ -62,7 +62,7 @@ export function Activity() {
   const { data, isFetching, error, refetch } = useActivity(PAGE, f.from, f.to, page * PAGE, type, { token: f.token, min: activityMin }, action || undefined)  // filters applied server-side
   // The daily histogram mirrors the active tab + action/token filters.
   const { data: daily } = useDaily('activity', { type, action: action || undefined, token: f.token || undefined })
-  const assets = useAssets()
+  const assets = useAssets(false)   // filter options only; the Assets page owns the poll
   const now = useNow()
 
   const rows = data ?? []

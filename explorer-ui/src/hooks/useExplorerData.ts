@@ -205,8 +205,12 @@ export function useTagVotes(tagId: string | null, offset = 0, from?: string, to?
 export function useTagActivityCount(tagId: string | null, min: number | null) {
   return useQuery({ queryKey: ['tag-activity-count', tagId, min], queryFn: ({ signal }) => api.tagActivityCount(tagId as string, min as number, signal), enabled: !!tagId && min != null, staleTime: 600_000 })
 }
-export function useAssets() {
-  return useQuery({ queryKey: ['assets'], queryFn: ({ signal }) => api.assets(signal), refetchInterval: useInterval(SLOW_POLL_MS), staleTime: 30_000 })
+// The asset directory is 74 KB (20 KB gzipped), 57% of it sparklines. The Assets page
+// renders those and wants them fresh; the activity filters only read symbols out of the
+// same payload, so they opt out of the poll rather than re-pulling it every minute.
+export function useAssets(poll = true) {
+  const interval = useInterval(SLOW_POLL_MS)
+  return useQuery({ queryKey: ['assets'], queryFn: ({ signal }) => api.assets(signal), refetchInterval: poll ? interval : false, staleTime: 30_000 })
 }
 export function useHdxDashboard() {
   return useQuery({ queryKey: ['hdx-dashboard'], queryFn: ({ signal }) => api.hdx(signal), staleTime: 120_000 })
