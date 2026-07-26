@@ -10,6 +10,7 @@ import { rawProcessor } from './processor.js'
 import type { RawCall, RawEvent, RawExtrinsic } from './processor.js'
 import { aliasRowsForBoundEvent, aliasRowsForEvmParticipants } from './accountIdentity.js'
 import { extractBalanceObservations } from './balance.js'
+import { withoutRelayChainProof } from './callArgs.js'
 import { RawDatabase } from './database.js'
 import { extractEvmLogs } from './evmLogs.js'
 import {
@@ -125,7 +126,7 @@ function serializeExtrinsic(
     success: extrinsic.success ? 1 : 0,
     signature_json: extrinsic.signature ? toJsonString(extrinsic.signature) : null,
     call_name: extrinsic.call?.name ?? '',
-    call_args_json: toJsonString(extrinsic.call?.args ?? null),
+    call_args_json: toJsonString(withoutRelayChainProof(extrinsic.call?.name, extrinsic.call?.args ?? null)),
     error_json: extrinsic.error == null ? null : toJsonString(extrinsic.error),
     ingest_source: ingestSource,
   }
@@ -145,7 +146,7 @@ function serializeCall(call: RawCall, blockTimestamp: string, ingestSource: stri
     parent_call_address: call.address.length > 1 ? callAddressToString(call.address.slice(0, -1)) : null,
     call_name: call.name ?? '',
     origin_json: call.origin == null ? null : toJsonString(call.origin),
-    args_json: toJsonString(call.args ?? null),
+    args_json: toJsonString(withoutRelayChainProof(call.name, call.args ?? null)),
     success: call.success == null ? null : (call.success ? 1 : 0),
     error_json: call.error == null ? null : toJsonString(call.error),
     ingest_source: ingestSource,
