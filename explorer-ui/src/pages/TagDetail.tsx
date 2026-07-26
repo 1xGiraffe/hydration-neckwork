@@ -47,7 +47,7 @@ export function TagDetail({ tagId }: { tagId: string }) {
           return (
             <>
               <div className="acct-head">
-                <div className="acct-avatar"><TagIcon icon={data.icon} color={data.color} size={28} title={data.name} /></div>
+                <div className="acct-avatar"><TagIcon icon={data.icon} title={data.name} className="acct-avatar-icon" /></div>
                 <div className="acct-meta">
                   <div className="tag">{data.name} <span className="em" style={{ color: data.color }}>· tag</span></div>
                   <div className="full"><span className="muted">{members.length} accounts</span></div>

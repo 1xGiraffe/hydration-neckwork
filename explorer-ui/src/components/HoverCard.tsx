@@ -221,7 +221,7 @@ function AccountHover({ id, vote }: { id: string; vote?: VoteContext }) {
     <>
       <div className="hc-head">
         {tag
-          ? <TagIcon icon={tag.icon} color={tag.color} size={24} title={tag.name} />
+          ? <TagIcon icon={tag.icon} title={tag.name} className="hc-emoji" />
           : mod ? <span className="hc-emoji">⚙️</span>
             : <AccountEmoji account={data} className="hc-emoji" />}
         <div style={{ minWidth: 0 }}>
@@ -251,7 +251,7 @@ function TagHover({ id }: { id: string }) {
   return (
     <>
       <div className="hc-head">
-        <TagIcon icon={data.icon} color={data.color} size={24} title={data.name} />
+        <TagIcon icon={data.icon} title={data.name} className="hc-emoji" />
         <div>
           <div className="hc-title">{data.name}<span className="em" style={{ color: data.color }}> · tag</span></div>
           <div className="hc-sub mono">{data.members.length} account{data.members.length === 1 ? '' : 's'}</div>

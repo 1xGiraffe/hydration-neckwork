@@ -55,7 +55,7 @@ export function ExternalAccountPill({ account }: { account: NonNullable<Activity
       : null
   const body = <>
     {tag
-      ? <TagIcon icon={tag.icon} color={tag.color} title={tag.name} />
+      ? <TagIcon icon={tag.icon} title={tag.name} />
       : <AccountEmoji account={{ accountId: iconSeed, emoji: account.emoji, emojiName: account.emojiName, emojiUrl: account.emojiUrl }} />}
     {name ?? <span className="a mono"><ShortAddr addr={account.address} /></span>}
   </>

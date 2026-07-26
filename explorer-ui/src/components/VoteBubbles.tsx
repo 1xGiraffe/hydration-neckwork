@@ -26,7 +26,7 @@ function BubbleLabel({ account, label }: { account: AccountRef | null; label: 'f
   const mod = moduleName(account.accountId)
   const identity = account.identity
   const icon = tag
-    ? <TagIcon icon={tag.icon} color={tag.color} title={tag.name} />
+    ? <TagIcon icon={tag.icon} title={tag.name} className="vb-emoji" />
     : mod ? <span className="vb-emoji">⚙️</span>
       : <AccountEmoji account={account} className="vb-emoji" imgClass="vb-emoji-img" title="identity" />
   if (label === 'emoji') return icon

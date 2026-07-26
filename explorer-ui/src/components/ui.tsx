@@ -485,20 +485,27 @@ export function accountHref(account: AccountRef): string {
 
 // A tag's icon: an <img> when the icon is a URL/path (starts with / or http),
 // otherwise the value is treated as an emoji glyph.
-export function TagIcon({ icon, color, size = 20, title }: { icon: string; color?: string; size?: number; title?: string }) {
+//
+// The container carries no colour of its own: a tag icon wears the same quiet
+// circle as an account's avatar emoji, so a row of pills reads as one kind of
+// thing. `className` is how a surface with its own icon chrome (the hover card's
+// .hc-emoji, the 60px profile avatar) opts into that chrome instead.
+export function TagIcon({ icon, title, className = 'emoji id' }: { icon: string; title?: string; className?: string }) {
   const isImg = icon.startsWith('/') || icon.startsWith('http')
   if (isImg) {
-    return <span className="emoji id" style={{ borderColor: color, padding: 0, overflow: 'hidden' }} title={title}>
-      <img src={icon} alt="" width={size} height={size} style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', display: 'block' }} loading="lazy" />
+    // .emoji-img fills whatever container the class provides, exactly as an
+    // account's avatar image does, so the two are never sized differently.
+    return <span className={className} style={{ padding: 0, overflow: 'hidden' }} title={title}>
+      <img className="emoji-img" src={icon} alt="" loading="lazy" />
     </span>
   }
-  return <span className="emoji id" style={color ? { borderColor: color } : undefined} title={title}>{icon || '🏷️'}</span>
+  return <span className={className} title={title}>{icon || '🏷️'}</span>
 }
 
 export function TagGroupPill({ tag }: { tag: { tagId: string; name: string; color: string; icon: string; memberCount: number } }) {
   return (
     <Link to={paths.tag(tag.tagId)} className="addr-pill" title="Tagged group — open combined view">
-      <TagIcon icon={tag.icon} color={tag.color} title={tag.name} />
+      <TagIcon icon={tag.icon} title={tag.name} />
       <span className="tag" style={{ color: tag.color }}>{tag.name}{tag.memberCount > 1 ? <span className="muted"> ·{tag.memberCount}</span> : null}</span>
     </Link>
   )
@@ -513,7 +520,7 @@ export function AddrPill({ account, full, noCopy, noTag }: { account: AccountRef
     return (
       <span className="addr-wrap">
         <Link to={paths.tag(tag.id)} className="addr-pill" title="Tagged group — open combined view">
-          <TagIcon icon={tag.icon} color={tag.color} title={tag.name} />
+          <TagIcon icon={tag.icon} title={tag.name} />
           <span className="tag" style={{ color: tag.color }}>{tag.name}</span>
         </Link>
         {!noCopy && <Copy text={account.address} />}

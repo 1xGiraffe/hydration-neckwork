@@ -30,7 +30,7 @@ export function Tags() {
               <tr key={g.tagId} {...rowNav(paths.tag(g.tagId))}>
                 <td data-label="Tag">
                   <Link to={paths.tag(g.tagId)} className="addr-pill" onClick={e => e.stopPropagation()}>
-                    <TagIcon icon={g.icon} color={g.color} title={g.name} />
+                    <TagIcon icon={g.icon} title={g.name} />
                     <span className="tag" style={{ color: g.color }}>{g.name}</span>
                   </Link>
                 </td>

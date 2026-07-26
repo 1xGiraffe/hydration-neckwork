@@ -852,10 +852,9 @@ svg { display: block; }
   display: inline-flex; align-items: center; justify-content: center; font-size: 13px;
   background: var(--panel); border: 1px solid var(--border);
 }
-.addr-pill .emoji.id { border-color: var(--border); }
-/* Custom omniwatch image icon (e.g. a Discord avatar) — fills its rounded
-   container (.emoji / .sr-emoji / .hc-emoji), with an emoji-glyph fallback span
-   revealed on load error (see showIconFallback). */
+/* Custom omniwatch image icon (e.g. a Discord avatar) or a tag's logo — fills its
+   rounded container (.emoji / .sr-emoji / .hc-emoji / .acct-avatar-icon), with an
+   emoji-glyph fallback span revealed on load error (see showIconFallback). */
 .emoji-img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
 .icon-fallback { display: inline-flex; align-items: center; justify-content: center; }
 .acct-avatar-img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
@@ -985,6 +984,10 @@ svg { display: block; }
 /* ============ ACCOUNT HEADER ============ */
 .acct-head { display: flex; align-items: center; gap: 18px; background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 18px; padding: 22px 24px; margin-bottom: 16px; flex-wrap: wrap; }
 .acct-avatar { width: 60px; height: 60px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 30px; background: var(--panel); border: 1px solid var(--border); flex-shrink: 0; }
+/* A tag's icon inside that avatar: the avatar already draws the circle and its
+   border, so the icon brings no second ring of its own and a tag header reads
+   exactly like an account's. */
+.acct-avatar-icon { width: 100%; height: 100%; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; }
 .acct-avatar.plain { background: var(--panel); border-color: var(--border); }
 .acct-meta { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 /* Flex row so the pure-proxy / multisig badges sit centred on the name (not
@@ -1295,8 +1298,10 @@ svg { display: block; }
 .filters .fclear:hover { color: var(--text-high); background: var(--panel-hover); }
 .filters .fcount { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-left: auto; }
 
-/* highlight last-3 chars of any address */
-.last3 { color: var(--accent); }
+/* Highlight the last 3 chars of any address: the ink of the theme against the blue
+   of the rest of the address, so the characters that actually tell two addresses
+   apart carry the page's strongest contrast. */
+.last3 { color: var(--text-high); }
 /* ShortAddr full: desktop shows the whole address, phones the middle-ellipsis
    form — long EVM/SS58 strings otherwise wrap detail headers to 2–3 lines. */
 .addr-short { display: none; }
@@ -1705,34 +1710,47 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 
 /* One cluster, both sides. Bubbles are anchors so the app's global hover card and
    click-through work exactly as they do on any other account pill. */
-.vb-canvas { position: relative; width: 100%; }
+/* A bubble carries its side's colour twice: a full-strength ring, so the cluster
+   reads in the AYE green and NAY red the tally bar and the badges use, and a
+   tinted fill behind the label, which has to stay far enough from the blue of an
+   account link for the name inside to be legible. Hence the split by theme: a
+   dark fill under the light --sky, a pale one under --sky-deep. */
+.vb-canvas { position: relative; width: 100%; --vb-fill: 45%; --vb-link: var(--sky); }
+:root[data-theme="light"] .vb-canvas { --vb-fill: 30%; --vb-link: var(--sky-deep); }
 .vb-bubble {
   position: absolute; transform: translate(-50%, -50%); aspect-ratio: 1; border-radius: 50%;
   /* Row, like a list pill: icon first, then the name/address. */
   display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 5px;
-  overflow: hidden; text-decoration: none; color: var(--text-high);
+  overflow: hidden; text-decoration: none; color: var(--vb-link);
+  /* Inset rather than a border: the ring must not eat into a 6px bubble's box. */
+  background: color-mix(in srgb, var(--vb-color) var(--vb-fill), transparent);
+  box-shadow: inset 0 0 0 2px var(--vb-color);
   /* Brightness rather than an outline: a stroke on hover fought the packed edges. */
   transition: filter .12s ease, opacity .12s ease;
 }
 /* addr-pill brings inline-row styling (inline-flex, gap, nowrap, emoji chrome);
    inside a circle the bubble's own layout has to win. */
 .vb-bubble.addr-pill { display: flex; gap: 1px; font-size: inherit; }
-.vb-bubble.addr-pill .emoji { border: 0; background: none; padding: 0; width: auto; height: auto; }
-/* Muted fills so a packed chart is not a wall of saturated colour, and so ordinary
-   text colours stay readable on top of them. */
-.vb-bubble.vb-aye { background: color-mix(in srgb, var(--green) 34%, transparent); }
-.vb-bubble.vb-nay { background: color-mix(in srgb, var(--red) 34%, transparent); }
-.vb-bubble.vb-split { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+/* A side only names its colour; .vb-bubble above decides how the ring and the fill
+   are drawn from it. */
+.vb-bubble.vb-aye { --vb-color: var(--green); }
+.vb-bubble.vb-nay { --vb-color: var(--red); }
+.vb-bubble.vb-split { --vb-color: var(--accent); }
 .vb-bubble:hover, .vb-bubble.on { opacity: 1; filter: brightness(1.22); z-index: 2; }
+/* No circle or border around a bubble's icon: a bubble at the emoji threshold is
+   barely wider than the icon itself, so the pill's chrome would crowd it. */
 .vb-bubble .vb-emoji { font-size: clamp(9px, 1.5vw, 17px); line-height: 1; background: none; border: 0; padding: 0; }
-.vb-bubble .vb-emoji-img { width: 1em; height: 1em; display: block; }
+/* An avatar image or a tag's logo, both sized off the glyph they sit beside. */
+.vb-bubble .vb-emoji-img, .vb-bubble .vb-emoji .emoji-img { width: 1em; height: 1em; display: block; }
 /* Same type treatment as an address in a table, just scaled to the bubble. */
-.vb-bubble .vb-addr { font-size: clamp(7px, .8vw, 11px); line-height: 1.05; color: var(--text-high); white-space: nowrap; max-width: 74%; overflow: hidden; text-overflow: ellipsis; }
-.vb-bubble .vb-addr .last3 { color: var(--text-medium); }
+.vb-bubble .vb-addr { font-size: clamp(7px, .8vw, 11px); line-height: 1.05; color: var(--vb-link); white-space: nowrap; max-width: 74%; overflow: hidden; text-overflow: ellipsis; }
 /* An identity or tag name is free text, so it gets the ellipsis treatment a
    fixed-width shortened address never needs. */
-.vb-bubble .vb-name { font-family: inherit; font-weight: 600; }
-.vb-bubble .id-verified { margin-left: 2px; }
+/* A name is not an address: a tag brings its own colour inline, and an identity or
+   module name takes the theme's ink, exactly as in the tables. Only the shortened
+   address wears the link blue. */
+.vb-bubble .vb-name { font-family: inherit; font-weight: 600; color: var(--text-high); }
+.vb-bubble .id-verified { margin-left: 2px; color: inherit; }
 .vb-legend { margin-top: 10px; font-size: 12px; color: var(--text-medium); min-height: 18px; display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
 .vb-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin: 0 5px 0 2px; }
 .vb-dot.vb-aye { background: var(--green); }

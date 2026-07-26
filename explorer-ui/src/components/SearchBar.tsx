@@ -54,7 +54,7 @@ function SearchResultBody({ r }: { r: SearchResult }) {
   if (r.type === 'tag') {
     return (
       <span className="sr-acct">
-        <TagIcon icon={r.icon ?? ''} color={r.color} size={20} title={r.label || r.value} />
+        <TagIcon icon={r.icon ?? ''} title={r.label || r.value} />
         <span className="sr-acct-name"><span className="mono">{r.label || r.value}</span></span>
       </span>
     )

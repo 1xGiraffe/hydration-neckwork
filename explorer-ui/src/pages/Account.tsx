@@ -59,7 +59,7 @@ export function Account({ address }: { address: string }) {
           return (
             <>
               <div className="acct-head">
-                <div className="acct-avatar">{data.tag ? <TagIcon icon={data.tag.icon} color={data.tag.color} size={28} title={data.tag.name} /> : mod ? '⚙️' : data.emojiUrl
+                <div className="acct-avatar">{data.tag ? <TagIcon icon={data.tag.icon} title={data.tag.name} className="acct-avatar-icon" /> : mod ? '⚙️' : data.emojiUrl
                   ? <><img className="acct-avatar-img" src={data.emojiUrl} alt={data.emojiName ?? data.emoji} title={data.emojiName} onError={avatarImgFallback} /><span className="icon-fallback" style={{ display: 'none' }}>{data.emoji}</span></>
                   : data.emoji}</div>
                 <div className="acct-meta">
