@@ -6865,6 +6865,38 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
   return rows.sort(compareActivityRowsNewestFirst)
 }
 
+// The XCM decoders read their candidate blocks in 1,000-key chunks to keep each
+// query's result under the client's 100k max_result_rows guard. That guard is
+// per-query, so the chunks never had to wait for each other: a deep activity page
+// issued 92 chunk round-trips in one request, some of them GiB-scale, one at a time.
+// Run a few at a time — the bound the aToken reconstruction already uses for heavy
+// scans — and keep the results in chunk order, because the callers concatenate the
+// chunks and then sort on a key with ties, so chunk order is part of the response.
+//
+// Worth knowing before chasing more of it: this removes the serial round-trips, not
+// the page's wall time. On the deep account page only 3.1s of 10.0s is ClickHouse
+// time at all, and these chunk bursts already ran at ~0.1 effective parallelism
+// against their own summed query time — the span between the round-trips is
+// TS-side assembly, which is where that page's remaining seconds live.
+const XCM_CHUNK_CONCURRENCY = 4
+
+export async function mapChunksConcurrently<T, R>(
+  items: T[],
+  chunkSize: number,
+  concurrency: number,
+  run: (chunk: T[]) => Promise<R>,
+): Promise<R[]> {
+  const chunks: T[][] = []
+  for (let start = 0; start < items.length; start += chunkSize) chunks.push(items.slice(start, start + chunkSize))
+  const out = new Array<R>(chunks.length)
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (next < chunks.length) { const index = next++; out[index] = await run(chunks[index]) }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, chunks.length) }, worker))
+  return out
+}
+
 async function fetchDecodedXcmDeep(
   base: string,
   want: number,
@@ -6882,7 +6914,7 @@ async function fetchDecodedXcmDeep(
       const candidates = await fetchBlocks(bound, pageSize)
       const blocks = [...new Set(candidates.map(row => Number(row.block_height)).filter(Number.isSafeInteger))]
       const rows: ActivityRow[] = []
-      for (let start = 0; start < blocks.length; start += 1_000) rows.push(...await decode(blocks.slice(start, start + 1_000)))
+      for (const chunk of await mapChunksConcurrently(blocks, 1_000, XCM_CHUNK_CONCURRENCY, decode)) rows.push(...chunk)
       await applyHistoricalUsd(rows, activityHistPick)
       out.push(...rows.filter(matches))
       if (out.length >= want || candidates.length < pageSize) break
@@ -8203,13 +8235,15 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
   // blocks in chunks using the shared global/block builders.
   if (hookBlocks.length) {
     const prices = await ensurePrices()
-    for (let start = 0; start < hookBlocks.length; start += 1_000) {
-      const blocks = hookBlocks.slice(start, start + 1_000)
+    const decoded = await mapChunksConcurrently(hookBlocks, 1_000, XCM_CHUNK_CONCURRENCY, async blocks => {
       const [incoming, outgoing] = await Promise.all([
         xcmInRowsForBlocks(blocks, prices),
         xcmOutRemoteRowsForBlocks(blocks, prices),
       ])
-      for (const row of [...incoming, ...outgoing]) addHookAccount(row.blockHeight, row.who?.accountId)
+      return [...incoming, ...outgoing]
+    })
+    for (const chunk of decoded) {
+      for (const row of chunk) addHookAccount(row.blockHeight, row.who?.accountId)
     }
   }
   if (signedKeys.length) {
