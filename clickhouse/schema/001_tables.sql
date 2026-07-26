@@ -113,3 +113,10 @@ CREATE TABLE IF NOT EXISTS price_data.xyk_pool_reserve_history (`pool_account` S
 -- raw_events, done once at insert time. Replacement key matches raw_events'
 -- (block_height, event_index) so a replayed range collapses.
 CREATE TABLE IF NOT EXISTS price_data.lp_lifecycle_events (`block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `collection` String, `item` String, `position_id` String, `deposit_id` String, `owner` String, `from_account` String, `to_account` String, `lp_token` Int32, `amount` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (block_height, event_index) SETTINGS index_granularity = 8192;
+-- Balance observations in the asset registry's sequential id range (MV-fed): a
+-- static superset of the XYK pool share tokens, which the registry mints from
+-- that range. Ordered as the total-shares reconstruction's window partitions and
+-- sorts, so its share-token predicate prunes on the primary key and the sort is
+-- already done. Replacement key mirrors raw_balance_observations' own within
+-- asset_kind='substrate'.
+CREATE TABLE IF NOT EXISTS price_data.xyk_lp_share_observations (`asset_id` Int32, `account_id` String, `block_height` UInt32, `observation_id` String, `total` Nullable(String), `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (asset_id, account_id, block_height, observation_id) SETTINGS index_granularity = 8192;

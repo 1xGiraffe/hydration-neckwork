@@ -4,8 +4,10 @@ import { describe, it, expect } from 'vitest'
 import {
   OMNIPOOL_EVENT_KIND,
   XYK_FARM_EVENT_KIND,
+  XYK_SHARE_ASSET_ID_FLOOR,
   omnipoolLifecycleSelectSql,
   xykFarmLifecycleSelectSql,
+  xykShareTokensBelowFloorSql,
   xykTotalSharesInsertSql,
   stalePartitionsSql,
   partitionsNeedingRebuild,
@@ -64,6 +66,46 @@ describe('lp_lifecycle_events projection', () => {
   })
 })
 
+// The total-shares reconstruction windows over balance observations. Only 0.48%
+// of them belong to an XYK share token, but an MV predicate is evaluated per
+// inserted row and cannot join the pool set, which arrives from a different
+// pipeline and may arrive later. So the projection filters on a static superset —
+// the asset registry's sequential id range, where the XYK pallet's share tokens
+// are minted — and the job re-filters to the real set.
+describe('xyk_lp_share_observations projection', () => {
+  const mv = schemaStatement('003_materialized_views.sql', 'xyk_lp_share_observations_mv')
+  const table = schemaStatement('001_tables.sql', 'price_data.xyk_lp_share_observations')
+
+  it('filters on a static join-free superset, never on a set that can arrive later', () => {
+    expect(mv).toContain(`>= ${XYK_SHARE_ASSET_ID_FLOOR}`)
+    expect(mv).toContain("asset_kind = 'substrate'")
+    for (const lateBound of ['XYK.PoolCreated', 'xyk_pool_registry', 'dictGet', 'dictHas', 'joinGet']) {
+      expect(mv).not.toContain(lateBound)
+    }
+  })
+
+  it('is ordered exactly as the reconstruction window partitions and sorts', () => {
+    expect(table).toContain('ORDER BY (asset_id, account_id, block_height, observation_id)')
+    expect(xykTotalSharesInsertSql(1))
+      .toContain('PARTITION BY asset_id, account_id ORDER BY block_height, observation_id')
+  })
+
+  it('reads the projection and re-filters it to the real share-token set', () => {
+    const sql = xykTotalSharesInsertSql(1)
+    // FINAL: raw_balance_observations is replayable, and the projection inherits
+    // its replacement key; the share-token predicate keeps FINAL bounded.
+    expect(sql).toContain('price_data.xyk_lp_share_observations FINAL')
+    expect(sql).not.toContain('price_data.raw_balance_observations')
+    expect(sql).toContain('asset_id IN (SELECT lp FROM lps)')
+  })
+
+  it('fails loudly if a share token is ever minted below the projection floor', () => {
+    const sql = xykShareTokensBelowFloorSql()
+    expect(sql).toContain('price_data.xyk_pool_registry')
+    expect(sql).toContain(`lp < ${XYK_SHARE_ASSET_ID_FLOOR}`)
+  })
+})
+
 describe('xykTotalSharesInsertSql', () => {
   it('is a single idempotent INSERT keyed by run id, targeting the staging twin', () => {
     const sql = xykTotalSharesInsertSql(12345)
@@ -75,9 +117,11 @@ describe('xykTotalSharesInsertSql', () => {
 
   it('reconstructs total shares from balance deltas via a windowed cumulative sum', () => {
     const sql = xykTotalSharesInsertSql(1)
-    // Approach A: share issuance == cumulative net balance deltas of the shareToken.
-    expect(sql).toContain('price_data.raw_balance_observations')
-    expect(sql).toContain("event_name='XYK.PoolCreated'")
+    // Approach A: share issuance == cumulative net balance deltas of the
+    // shareToken, read through the xyk_lp_share_observations projection and
+    // scoped to the pools the xyk_pool_registry MV knows.
+    expect(sql).toContain('price_data.xyk_lp_share_observations')
+    expect(sql).toContain('price_data.xyk_pool_registry')
     expect(sql).toContain('lagInFrame')
     expect(sql).toContain('ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW')
   })

@@ -470,6 +470,30 @@ export async function runXykFarmIntervals(client: ClickHouseClient): Promise<Der
 // silently orphan the INSERT from the table atomicFullReplace actually swaps.
 const XYK_TOTAL_SHARES_TABLE = 'price_data.xyk_lp_total_shares_history'
 
+// First asset id the Hydration asset registry mints sequentially. XYK's
+// create_pool registers its share token through that counter, so every share
+// token — past and future — sits at or above this floor, while the
+// governance-registered assets that dominate the observation table sit below it.
+// That makes `asset_id >= floor` a join-free predicate the
+// xyk_lp_share_observations MV can apply per inserted row (see
+// clickhouse/schema/003_materialized_views.sql) and still be a provable superset
+// of the pool set, which the reconstruction below re-filters to exactly.
+export const XYK_SHARE_ASSET_ID_FLOOR = 1_000_000
+
+// The pool set. price_data.xyk_pool_registry is the MV over XYK.PoolCreated and
+// decodes shareToken with the same expression this used to run inline, so the two
+// sets are equal by construction — but the registry is 729 rows against a 302M-row
+// raw_events scan the event-name index barely prunes.
+const XYK_SHARE_TOKENS_SQL = 'SELECT DISTINCT lp_asset_id AS lp FROM price_data.xyk_pool_registry FINAL'
+
+// Guard on the superset claim. A share token below the floor would simply never
+// reach the projection, and its pool would silently vanish from the model, so
+// the job checks the real pool set against the floor every run and refuses to
+// publish rather than publish a hole.
+export function xykShareTokensBelowFloorSql(): string {
+  return `SELECT count() AS n FROM (${XYK_SHARE_TOKENS_SQL}) WHERE lp < ${XYK_SHARE_ASSET_ID_FLOOR}`
+}
+
 // The single INSERT…SELECT for the total-shares reconstruction, keyed by run id.
 // Targets the staging twin (never the live table directly) so the run's
 // result becomes visible only via the atomic EXCHANGE in runXykTotalShares.
@@ -477,15 +501,14 @@ const XYK_TOTAL_SHARES_TABLE = 'price_data.xyk_lp_total_shares_history'
 export function xykTotalSharesInsertSql(runId: number): string {
   const stepSelect = `
       WITH lps AS (
-        SELECT DISTINCT toInt32(JSONExtractInt(args_json,'shareToken')) AS lp
-        FROM price_data.raw_events WHERE event_name='XYK.PoolCreated'
+        ${XYK_SHARE_TOKENS_SQL}
       ),
       row_deltas AS (
-        SELECT toInt32(asset_id) AS lp, block_height,
+        SELECT asset_id AS lp, block_height,
           toInt256(assumeNotNull(total)) - lagInFrame(toInt256(assumeNotNull(total)), 1, toInt256(0))
             OVER (PARTITION BY asset_id, account_id ORDER BY block_height, observation_id) AS delta
-        FROM price_data.raw_balance_observations
-        WHERE asset_kind='substrate' AND toInt32OrZero(asset_id) IN (SELECT lp FROM lps)
+        FROM price_data.xyk_lp_share_observations FINAL
+        WHERE asset_id IN (SELECT lp FROM lps)
       ),
       per_block AS (SELECT lp, block_height, sum(delta) AS bd FROM row_deltas GROUP BY lp, block_height)
       SELECT lp AS lp_asset_id, block_height,
@@ -499,11 +522,19 @@ export function xykTotalSharesInsertSql(runId: number): string {
 export async function runXykTotalShares(client: ClickHouseClient): Promise<DerivationResult> {
   const runId = Date.now()
   const liveTable = XYK_TOTAL_SHARES_TABLE
+  const guard = await client.query({ query: xykShareTokensBelowFloorSql(), format: 'JSONEachRow' })
+  const below = Number((await guard.json<{ n: string }>())[0]?.n ?? 0)
+  if (below > 0) {
+    throw new Error(
+      `${below} XYK share token(s) below asset id ${XYK_SHARE_ASSET_ID_FLOOR}: `
+      + 'xyk_lp_share_observations cannot see them, so their pools would be missing from the model',
+    )
+  }
+  // No memory carve-out: windowing 1.2M projected rows in their stored order
+  // fits the long-op client's default cap, where the 244M-row scan and sort this
+  // replaced needed 8 GB.
   await atomicFullReplace(client, liveTable, async () => {
-    await client.command({
-      query: xykTotalSharesInsertSql(runId),
-      clickhouse_settings: { max_threads: 4, max_insert_threads: '2', max_execution_time: 3600, max_memory_usage: '8000000000' },
-    })
+    await client.command({ query: xykTotalSharesInsertSql(runId) })
   })
   const res = await client.query({
     query: `SELECT count() AS n FROM ${liveTable} WHERE run_id = ${runId}`,
