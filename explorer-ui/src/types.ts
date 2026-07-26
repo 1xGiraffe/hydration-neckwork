@@ -79,14 +79,17 @@ export interface TopAccountRow {
   } | null
   // 1Y weekly value sparkline (fixed length, zero-padded → same range for all rows).
   sparkline?: number[]
-  activityCount?: number
+  // Distinct balance observations, NOT the activity feed's row count — hMN has 6.1M of
+  // these behind 1.22M classified activities. The column is labelled for what it
+  // measures; the feed's own total lives on the account detail page.
+  balanceUpdates?: number
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
   // Up to 4 largest holdings (> $10, highest USD first) → icon cluster after value.
   topAssets?: { asset: AssetRef; valueUsd: number }[]
 }
 
-export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'activity' | 'volume' | 'liquidation'
+export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'updates' | 'volume' | 'liquidation'
 export interface AccountsPage { rows: TopAccountRow[]; total: number }
 
 // trade detail

@@ -14358,10 +14358,22 @@ export interface TopAccountRow {
   simAccount?: string | null
   supplementalMarket?: { marketKey: string; market: string; borrowedUsd: number; healthFactor?: string | null }
   // 1Y wallet-value sparkline (SPARK_WEEKS weekly points, zero-padded so every
-  // row spans the same trailing year) + activity counter. Optional — the page
-  // still renders if the enrichment pass fails.
+  // row spans the same trailing year) + the balance-update counter. Optional — the
+  // page still renders if the enrichment pass fails.
   sparkline?: number[]
-  activityCount?: number
+  // How many distinct balance observations the account has: every credit and debit
+  // the balances pallet reported for it, one per (block, event).
+  //
+  // NOT the number of activities its detail page lists, and deliberately no longer
+  // labelled as if it were. Those are different units — hMN has 6,129,461 balance
+  // observations behind 1,221,974 classified activities, because one user action moves
+  // several balances and most observations are protocol plumbing the feed suppresses.
+  // The feed's own definition cannot be served here: it is a per-account count whose
+  // cross-chain leg has to be parsed row by row (~14s for hMN), and the accounts this
+  // column ranks highest are exactly the structural pots whose exact total the count
+  // arms refuse — the Omnipool and treasury pots answer `complete: false` after ~18s
+  // each. A leaderboard ordered on partial totals would be worse than an honest label.
+  balanceUpdates?: number
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
   // Up to 4 largest holdings (> $10, highest USD first) for the icon cluster
@@ -14423,7 +14435,12 @@ export function buildValueSparkline(
   }
   return series.map(v => +v.toFixed(2))
 }
-export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'activity' | 'volume' | 'liquidation'
+export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'updates' | 'volume' | 'liquidation'
+// `activity` was this column's name while it was labelled as activities. Existing deep
+// links and bookmarks still carry it, so it resolves to the column it always meant.
+export function normalizeAccountSort(sort: string): string {
+  return sort === 'activity' ? 'updates' : sort
+}
 export interface AccountsPage { rows: TopAccountRow[]; total: number }
 const ACCOUNT_DIRECTORY_SNAPSHOT_MAX_AGE_SECONDS = 10 * 60
 
@@ -14481,7 +14498,7 @@ const ACCOUNT_SORT_SQL: Record<AccountSort, string> = {
   // Named accounts (tag or on-chain identity) first, alphabetically; the unnamed
   // rest by value.
   identity: 'if(has_identity = 0, 1, 0) ASC, lowerUTF8(disp_name) ASC, usd_total DESC',
-  activity: 'activity_count DESC, usd_total DESC',
+  updates: 'activity_count DESC, usd_total DESC',
   volume: 'trading_volume_usd DESC, usd_total DESC',
   liquidation: 'if(liquidation_volume_usd <= 0, 1, 0) ASC, liquidation_volume_usd DESC, usd_total DESC',
 }
@@ -14533,7 +14550,7 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
     const prices = await ensureAccountValuePrices()
     const { idsSql, unitsSql } = priceTransformArrays(prices)
     const orderBy = ACCOUNT_SORT_SQL[sort] ?? ACCOUNT_SORT_SQL.value
-    const includeActivitySort = sort === 'activity'
+    const includeActivitySort = sort === 'updates'
     const includeVolumeSort = sort === 'volume'
     const includeLiquidationSort = sort === 'liquidation'
     const activityCte = includeActivitySort ? `,
@@ -14816,7 +14833,7 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
             healthFactor: r.supplemental_hf ? r.supplemental_hf : null,
           },
         } : {}),
-        activityCount: r.activity_count > 0 ? Number(r.activity_count) : undefined,
+        balanceUpdates: r.activity_count > 0 ? Number(r.activity_count) : undefined,
         tradingVolumeUsd: r.trading_volume_usd > 0 ? Number(r.trading_volume_usd) : undefined,
         liquidationVolumeUsd: r.liquidation_volume_usd > 0 ? Number(r.liquidation_volume_usd) : undefined,
         topAssets: r.top_assets?.length ? r.top_assets.map(([id, valueUsd]) => ({ asset: asset(id), valueUsd })) : undefined,
@@ -15166,13 +15183,13 @@ async function enrichAccountRows(
       row.sparkline = spark
     }
     // Only fill a gap, never overwrite: the page query's grouped uniqMerge is the
-    // same expression sort=activity orders by, so replacing it with this per-member
+    // same expression sort=updates orders by, so replacing it with this per-member
     // sum would let a displayed number exceed the row above it. Where that query did
     // not run (any other sort) the sum stands in, and it now covers module/sovereign
     // members too — the busiest accounts on the chain used to show no value at all.
-    if (row.activityCount == null) {
+    if (row.balanceUpdates == null) {
       const counted = [...accs, ...moduleAccs].reduce((sum, a) => sum + (actByAcc.get(a) ?? 0), 0)
-      if (counted > 0) row.activityCount = counted
+      if (counted > 0) row.balanceUpdates = counted
     }
     if (accs.length) {
       const volume = accs.reduce((s, a) => s + (volumeByAccount.get(a) ?? 0), 0)
@@ -15773,7 +15790,7 @@ export function startAccountSuffixRefresh(): void {
   accountSuffixRefreshTimer.unref()
 }
 async function prewarmAccountDirectoryUncached(): Promise<void> {
-  const sorts: AccountSort[] = ['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'volume', 'liquidation']
+  const sorts: AccountSort[] = ['value', 'supplied', 'borrowed', 'health', 'identity', 'updates', 'volume', 'liquidation']
   for (const sort of sorts) await getAccounts(0, 50, sort)
   await getAccounts(50, 50, 'value')
 }

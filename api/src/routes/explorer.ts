@@ -13,6 +13,8 @@ import {
   getTagActivity, getTagExtrinsics, getTagEvents,
   getAddressVotes, getTagVotes,
   isLocatedActivityRequest,
+  normalizeAccountSort,
+  type AccountSort,
   type EventListFilters,
   type ExtrinsicListFilters,
   type ScopedListQuery,
@@ -33,7 +35,7 @@ const uint32Param = z.coerce.number().int().min(0).max(0xffff_ffff)
 // Public list endpoints never render more than 100 rows at once. A modest hard
 // cap prevents a single request from multiplying the feed candidate scans.
 const limitSchema = z.coerce.number().int().min(1).max(250).optional()
-const accountSortSchema = z.enum(['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'volume', 'liquidation'])
+const accountSortSchema = z.enum(['value', 'supplied', 'borrowed', 'health', 'identity', 'updates', 'activity', 'volume', 'liquidation'])
 const addressParam = z.object({ address: z.string().min(1).max(128) })
 const analyzableAddressParam = z.object({ address: z.string().min(3).max(128) })
 const tagParam = z.object({ tagId: z.string().min(1).max(64) })
@@ -238,7 +240,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const offset = offsetParam(q)
     if (offset == null) return badOffset(reply)
     const sort = accountSortSchema.safeParse(q.sort)
-    return getAccounts(offset, limit, sort.success ? sort.data : 'value')
+    return getAccounts(offset, limit, (sort.success ? normalizeAccountSort(sort.data) : 'value') as AccountSort)
   })
 
   fastify.get('/explorer/daily/:scope', async (req, reply) => {
