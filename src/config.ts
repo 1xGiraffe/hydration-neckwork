@@ -18,6 +18,8 @@ export interface Config {
   // Processing parameters
   BATCH_SIZE: number
   SNAPSHOT_INTERVAL: number
+  RAW_FLUSH_BLOCKS: number
+  RAW_FLUSH_INTERVAL_MS: number
 
   // Hydration chain constants
   LRNA_ASSET_ID: number
@@ -48,6 +50,11 @@ export const config: Config = {
   // Processing tuning parameters
   BATCH_SIZE: integerFromEnvironment('BATCH_SIZE', 50_000), // rows per ClickHouse insert (tunable based on performance)
   SNAPSHOT_INTERVAL: integerFromEnvironment('SNAPSHOT_INTERVAL', 1000), // blocks between full asset registry scans (live mode)
+  // Raw flush accumulation while behind chain head — see src/raw/flushPolicy.ts.
+  // At head every batch still flushes immediately, so these only shape catch-up
+  // and backfill, where the small-part churn actually accumulates.
+  RAW_FLUSH_BLOCKS: integerFromEnvironment('RAW_FLUSH_BLOCKS', 10, { min: 1 }),
+  RAW_FLUSH_INTERVAL_MS: integerFromEnvironment('RAW_FLUSH_INTERVAL_MS', 5_000, { min: 0 }),
 
   // Hydration chain asset IDs
   LRNA_ASSET_ID: 1,   // LRNA is the Omnipool hub token

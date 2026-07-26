@@ -257,6 +257,33 @@ export class RawClickHouseStore {
     await this.flushBatch(this.parserWarningsBatch, 'price_data.raw_parser_warnings', 'raw-parser-warnings')
   }
 
+  // Buffered blocks and the largest single-table buffer, for the flush policy
+  // (see flushPolicy.ts). One raw_blocks row is one block, and the row count is
+  // taken as a max rather than a sum because what it bounds is one INSERT.
+  pendingBlocks(): number {
+    return this.blocksBatch.size
+  }
+
+  pendingRows(): number {
+    return Math.max(
+      this.blocksBatch.size,
+      this.extrinsicsBatch.size,
+      this.callsBatch.size,
+      this.eventsBatch.size,
+      this.snapshotsBatch.size,
+      this.accountAliasesBatch.size,
+      this.balanceObservationsBatch.size,
+      this.evmLogsBatch.size,
+      this.moneyMarketEventsBatch.size,
+      this.moneyMarketPositionsBatch.size,
+      this.moneyMarketReservesBatch.size,
+      this.xcmActivityBatch.size,
+      this.bridgeEvidenceBatch.size,
+      this.operationTracesBatch.size,
+      this.parserWarningsBatch.size,
+    )
+  }
+
   async flushAll(): Promise<void> {
     await this.flushBlocks()
     await this.flushExtrinsics()

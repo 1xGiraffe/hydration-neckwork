@@ -6,6 +6,7 @@ import type {
 import { config } from '../config.js'
 import { createClickHouseClient } from '../db/client.js'
 import { RawClickHouseStore } from './store.js'
+import { shouldFlushRaw, type RawFlushLimits } from './flushPolicy.js'
 import type { RawCheckpointState } from './checkpoint.js'
 
 export class RawDatabase implements FinalDatabase<RawClickHouseStore> {
@@ -13,10 +14,21 @@ export class RawDatabase implements FinalDatabase<RawClickHouseStore> {
   private readonly pipelineId: string
   private readonly finalizeRangeBounds: { fromBlock: number; toBlock: number } | null
   private rangeFinalized = false
+  private readonly flushLimits: RawFlushLimits
+  private lastFlushAt = Date.now()
 
-  constructor(pipelineId: string, finalizeRangeBounds: { fromBlock: number; toBlock: number } | null = null) {
+  constructor(
+    pipelineId: string,
+    finalizeRangeBounds: { fromBlock: number; toBlock: number } | null = null,
+    flushLimits: RawFlushLimits = {
+      blocks: config.RAW_FLUSH_BLOCKS,
+      rows: config.BATCH_SIZE,
+      elapsedMs: config.RAW_FLUSH_INTERVAL_MS,
+    },
+  ) {
     this.pipelineId = pipelineId
     this.finalizeRangeBounds = finalizeRangeBounds
+    this.flushLimits = flushLimits
   }
 
   async connect(): Promise<HashAndHeight> {
@@ -35,7 +47,31 @@ export class RawDatabase implements FinalDatabase<RawClickHouseStore> {
     }
 
     await cb(this.store)
+
+    // The range worker validates its range in ClickHouse below, so its last batch
+    // must be written even if the accumulation triggers have not fired.
+    const reachedRangeEnd =
+      this.finalizeRangeBounds != null && info.nextHead.height >= this.finalizeRangeBounds.toBlock
+
+    // Rows stay buffered — and the checkpoint deliberately stays where it is, so a
+    // crash re-indexes them rather than skipping them — until a trigger fires.
+    if (
+      !shouldFlushRaw(
+        {
+          pendingBlocks: this.store.pendingBlocks(),
+          pendingRows: this.store.pendingRows(),
+          msSinceLastFlush: Date.now() - this.lastFlushAt,
+          atChainHead: info.isOnTop,
+          reachedRangeEnd,
+        },
+        this.flushLimits,
+      )
+    ) {
+      return
+    }
+
     await this.store.flushAll()
+    this.lastFlushAt = Date.now()
     await this.store.saveCheckpoint(
       this.pipelineId,
       info.nextHead.height,
@@ -43,11 +79,7 @@ export class RawDatabase implements FinalDatabase<RawClickHouseStore> {
       info.isOnTop ? 'live' : 'archive',
     )
 
-    if (
-      this.finalizeRangeBounds != null &&
-      !this.rangeFinalized &&
-      info.nextHead.height >= this.finalizeRangeBounds.toBlock
-    ) {
+    if (this.finalizeRangeBounds != null && !this.rangeFinalized && reachedRangeEnd) {
       console.log(
         `[Raw] Validating finalized range ${this.finalizeRangeBounds.fromBlock}-${this.finalizeRangeBounds.toBlock}`,
       )
