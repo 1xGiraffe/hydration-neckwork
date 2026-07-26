@@ -69,9 +69,7 @@ const activityOffsetSchema = z.coerce.number().int().min(0).max(MAX_SCOPED_ACTIV
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
 function dateParam(q: Record<string, unknown>, key: string): string | undefined {
   const v = q[key]
-  if (typeof v !== 'string' || !dateRe.test(v)) return undefined
-  const parsed = new Date(`${v}T00:00:00.000Z`)
-  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === v ? v : undefined
+  return typeof v === 'string' && isCalendarDay(v) ? v : undefined
 }
 // The plain SQL-paged lists (blocks, extrinsics, events, accounts, holders,
 // referenda, DCA executions) page by ClickHouse LIMIT/OFFSET, whose cost is linear
@@ -116,6 +114,47 @@ function valueFilters(q: Record<string, unknown>): ValueListFilters {
 function activityTypeParam(query: Record<string, unknown>): string {
   const t = typeof query.type === 'string' && activityTypes.includes(query.type) ? query.type : 'all'
   return ACTIVITY_TYPE_ALIASES[t] ?? t
+}
+
+// A supplied filter the server cannot honour used to be dropped in silence: an
+// unrecognized `type` fell back to `all` and answered with the UNFILTERED total
+// under the caller's own filtered parameters, and a malformed `min`/`unit`/`from`/
+// `to` simply vanished. Silently widening a request is a wrong answer wearing the
+// caller's query string — strictly worse than refusing it — so every shared list
+// filter is validated once, here, for every route this plugin owns.
+//
+// Only a value that was SUPPLIED and cannot be honoured is an error; an absent or
+// empty parameter still means "unfiltered", which is what the UI sends when it
+// clears a chip. The parsers below are the exact acceptance rules the readers
+// (`activityTypeParam`, `valueFilters`, `dateParam`) apply, so a value that passes
+// here is a value that reaches ClickHouse.
+const FILTER_PARAM_RULES: { key: string; accepts: (raw: string) => boolean; expected: string }[] = [
+  { key: 'type', accepts: raw => activityTypes.includes(raw), expected: activityTypes.join(', ') },
+  { key: 'unit', accepts: raw => raw === 'usd' || raw === 'token', expected: 'usd, token' },
+  // Any finite number is honourable: a negative floor selects every row, which is
+  // exactly what `numParam` already resolves it to. Only a value that is not a
+  // number at all would silently disappear.
+  { key: 'min', accepts: raw => z.coerce.number().finite().safeParse(raw).success, expected: 'a number' },
+  { key: 'from', accepts: raw => isCalendarDay(raw), expected: 'YYYY-MM-DD' },
+  { key: 'to', accepts: raw => isCalendarDay(raw), expected: 'YYYY-MM-DD' },
+]
+
+// A real calendar day, not merely the shape of one: `2025-02-30` matches the regex
+// but round-trips to March, and `dateParam` drops it. Same rule, one definition.
+function isCalendarDay(raw: string): boolean {
+  if (!dateRe.test(raw)) return false
+  const parsed = new Date(`${raw}T00:00:00.000Z`)
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === raw
+}
+
+// null = every supplied filter is usable.
+export function unusableFilterParam(query: Record<string, unknown>): { key: string; expected: string } | null {
+  for (const rule of FILTER_PARAM_RULES) {
+    const raw = query[rule.key]
+    if (raw == null || raw === '') continue
+    if (typeof raw !== 'string' || !rule.accepts(raw)) return { key: rule.key, expected: rule.expected }
+  }
+  return null
 }
 
 // null = out of range for this feed. The bound depends on the category, so callers
@@ -172,6 +211,13 @@ async function closeAccountsResponse<T>(reply: FastifyReply, load: () => Promise
 }
 
 export async function explorerRoutes(fastify: FastifyInstance) {
+  // Refuse a filter this plugin cannot honour before any route reads it, so no
+  // response can carry the caller's filter parameters over a wider answer.
+  fastify.addHook('preHandler', async (req, reply) => {
+    const bad = unusableFilterParam(req.query as Record<string, unknown>)
+    if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
+  })
+
   fastify.get('/explorer/stats', async () => getStats())
 
   fastify.get('/explorer/assets', async () => getAssets())
