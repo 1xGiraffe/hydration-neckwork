@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import type { ReactNode } from 'react'
 import { Link, paths } from '../router'
 import { AddrPill, Dash, EmptyRow, ErrorRow, F, MomentLink, TableSkeleton, VoteSideBadge, type Moment } from './ui'
@@ -39,6 +40,32 @@ function ReferendumCell({ row }: { row: VoteTableRow }) {
   )
 }
 
+// Memoised, and fed row objects whose identity survives a re-sort: a referendum
+// carries a couple of hundred of these, and sorting or filtering only reorders the
+// same votes, so React can move the rows without re-rendering any of them.
+const VoteRow = memo(function VoteRow({ row, asset, now, showAccount, showReferendum }: {
+  row: VoteTableRow; asset: AssetRef; now: number; showAccount?: boolean; showReferendum?: boolean
+}) {
+  return (
+    <tr className={row.withdrawn ? 'row-muted' : undefined}>
+      {showReferendum && <td data-label="Referendum"><ReferendumCell row={row} /></td>}
+      {showAccount && <td data-label="Account">{row.account ? <AddrPill account={row.account} /> : <span className="muted">unknown</span>}</td>}
+      <td data-label="Vote">
+        <VoteSideBadge side={row.side} />
+        {row.conviction ? <span className="muted"> {row.conviction}</span> : null}
+        {row.withdrawn && <span className="badge badge-quiet" title="Withdrawn before the referendum closed, so it is not counted">withdrawn</span>}
+      </td>
+      <td data-label="Votes" className="r mono">
+        {row.weighted == null ? <Dash /> : <>{F.amount(row.weighted, asset.decimals)} <span className="muted">{asset.symbol}</span></>}
+      </td>
+      <td data-label="Time" className="r">
+        {/* Links to the extrinsic that cast the vote (see MomentLink). */}
+        <MomentLink at={row} now={now} />
+      </td>
+    </tr>
+  )
+})
+
 export function VotesTable({ rows, asset, now, showAccount, showReferendum, sortHeads, loading, error, onRetry, pageSize }: {
   rows: VoteTableRow[]
   asset: AssetRef
@@ -69,22 +96,7 @@ export function VotesTable({ rows, asset, now, showAccount, showReferendum, sort
           : error && !rows.length ? <ErrorRow cols={cols + 1} title="Couldn’t load votes" error={error} onRetry={onRetry} />
             : !rows.length ? <EmptyRow cols={cols + 1}>No votes</EmptyRow>
               : rows.map(row => (
-                <tr key={row.key} className={row.withdrawn ? 'row-muted' : undefined}>
-                  {showReferendum && <td data-label="Referendum"><ReferendumCell row={row} /></td>}
-                  {showAccount && <td data-label="Account">{row.account ? <AddrPill account={row.account} /> : <span className="muted">unknown</span>}</td>}
-                  <td data-label="Vote">
-                    <VoteSideBadge side={row.side} />
-                    {row.conviction ? <span className="muted"> {row.conviction}</span> : null}
-                    {row.withdrawn && <span className="badge badge-quiet" title="Withdrawn before the referendum closed, so it is not counted">withdrawn</span>}
-                  </td>
-                  <td data-label="Votes" className="r mono">
-                    {row.weighted == null ? <Dash /> : <>{F.amount(row.weighted, asset.decimals)} <span className="muted">{asset.symbol}</span></>}
-                  </td>
-                  <td data-label="Time" className="r">
-                    {/* Links to the extrinsic that cast the vote (see MomentLink). */}
-                    <MomentLink at={row} now={now} />
-                  </td>
-                </tr>
+                <VoteRow key={row.key} row={row} asset={asset} now={now} showAccount={showAccount} showReferendum={showReferendum} />
               ))}
       </tbody>
     </table></div>

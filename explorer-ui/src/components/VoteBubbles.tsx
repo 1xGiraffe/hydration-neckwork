@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { memo, useMemo } from 'react'
 import { Link, paths } from '../router'
 import type { ReferendumVoter } from '../types'
 import { HEIGHT, WIDTH, packVoters } from './voteBubbleLayout'
@@ -39,7 +39,10 @@ function BubbleLabel({ account, label }: { account: AccountRef | null; label: 'f
   return <>{icon}{name}</>
 }
 
-export function VoteBubbles({ voters, decimals, symbol }: { voters: ReferendumVoter[]; decimals: number; symbol: string }) {
+// Memoised: the chart is ~900 nodes and depends only on the vote set, but the page
+// around it re-renders on the shared 1 Hz clock and on every sort/side chip, and
+// each of those re-reconciled the whole cluster for nothing.
+export const VoteBubbles = memo(function VoteBubbles({ voters, decimals, symbol }: { voters: ReferendumVoter[]; decimals: number; symbol: string }) {
   const bubbles = useMemo(() => packVoters(voters), [voters])
 
   if (!bubbles.length) return <div className="empty-note">No conviction-weighted votes to plot</div>
@@ -81,4 +84,4 @@ export function VoteBubbles({ voters, decimals, symbol }: { voters: ReferendumVo
       </div>
     </div>
   )
-}
+})

@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- shared atoms + formatters module */
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, FocusEvent as ReactFocusEvent, ReactNode, KeyboardEvent, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { Link, paths, navigate } from '../router'
 import type { AccountRef, AssetOrigin, AssetRef, FailureReason } from '../types'
@@ -808,6 +808,8 @@ function ChartMarkerFlag({ cluster, open, onOpen, onClose }: {
 // `dates` (parallel to `data`) makes the tooltip show the point's date; `valueFmt`
 // formats the displayed value (default F.usd, used by the portfolio charts).
 // `markers` flags notable events on the same time axis (see ChartMarker).
+// The viewBox is fixed and the svg is stretched to its container (height `h`).
+const W = 820, padT = 14, padB = 14
 export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt = F.usd, markers }: {
   data: number[]; h?: number; target?: number; color?: string; floor?: number
   dates?: string[]; valueFmt?: (v: number) => string; markers?: ChartMarker[]
@@ -818,29 +820,40 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
   // On phones 1.5% of the chart is a few px — caps would collide, so cluster
   // wider there. Same breakpoint as the stylesheet's table→card switch.
   const narrow = useMediaQuery('(max-width: 720px)')
-  if (!data || data.length < 2) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>Not enough history.</div>
-  const W = 820, padT = 14, padB = 14
-  // `floor` pins the baseline (e.g. 0) so small values don't glue to the bottom.
-  const min = floor != null ? floor : Math.min(...data, target ?? Infinity), max = Math.max(...data, target ?? -Infinity)
-  // X positions are proportional to TIME when a parseable date accompanies every
-  // point (portfolio/balance history buckets cover unequal time spans, so index
-  // spacing would distort the shape); index spacing is the fallback.
-  const xFrac = timeFractions(data.length, dates)
-  // Span the full width edge-to-edge so the line matches the hover crosshair, which
-  // maps 0..100% across the container. A horizontal inset would leave the first/last
-  // points hoverable (value shown) but with no line drawn at that x.
-  const sx = (i: number) => xFrac[i] * W
-  const sy = (v: number) => padT + (1 - (v - min) / ((max - min) || 1)) * (h - padT - padB)
-  const line = data.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
-  const area = `${line} L ${sx(data.length - 1).toFixed(1)} ${h - padB} L ${sx(0).toFixed(1)} ${h - padB} Z`
-  const up = data[data.length - 1] >= data[0]
-  const col = color ?? (up ? 'var(--green)' : 'var(--red)')
-  const gid = 'ag' + Math.round(min * 1000 + max)
+
+  // Pure geometry over the series. Every portfolio and balance chart in the app is
+  // one of these, and the pages holding them re-render once a second on the shared
+  // clock, so rebuilding the path strings in render meant recomputing the whole
+  // curve every tick and on every crosshair move.
+  const geom = useMemo(() => {
+    if (!data || data.length < 2) return null
+    // `floor` pins the baseline (e.g. 0) so small values don't glue to the bottom.
+    const min = floor != null ? floor : Math.min(...data, target ?? Infinity), max = Math.max(...data, target ?? -Infinity)
+    // X positions are proportional to TIME when a parseable date accompanies every
+    // point (portfolio/balance history buckets cover unequal time spans, so index
+    // spacing would distort the shape); index spacing is the fallback.
+    const xFrac = timeFractions(data.length, dates)
+    // Span the full width edge-to-edge so the line matches the hover crosshair, which
+    // maps 0..100% across the container. A horizontal inset would leave the first/last
+    // points hoverable (value shown) but with no line drawn at that x.
+    const sx = (i: number) => xFrac[i] * W
+    const sy = (v: number) => padT + (1 - (v - min) / ((max - min) || 1)) * (h - padT - padB)
+    const line = data.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
+    const area = `${line} L ${sx(data.length - 1).toFixed(1)} ${h - padB} L ${sx(0).toFixed(1)} ${h - padB} Z`
+    const up = data[data.length - 1] >= data[0]
+    return { xFrac, sy, line, area, col: color ?? (up ? 'var(--green)' : 'var(--red)'), gid: 'ag' + Math.round(min * 1000 + max) }
+  }, [data, dates, target, floor, h, color])
+
   // Markers key off the EXACT axis the line uses (timeAxisSpan is the same guard
   // as timeFractions): render only when the line is time-proportional, so a flag
   // never drifts off a curve that fell back to index spacing.
-  const markAxis = markers?.length ? timeAxisSpan(data.length, dates) : null
-  const markClusters = markers && markAxis ? clusterChartMarkers(markers, markAxis.t0, markAxis.span, narrow ? 0.045 : 0.015) : []
+  const markClusters = useMemo(() => {
+    const markAxis = markers?.length ? timeAxisSpan(data?.length ?? 0, dates) : null
+    return markers && markAxis ? clusterChartMarkers(markers, markAxis.t0, markAxis.span, narrow ? 0.045 : 0.015) : []
+  }, [markers, data, dates, narrow])
+
+  if (!geom) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>Not enough history.</div>
+  const { xFrac, sy, line, area, col, gid } = geom
 
   function onMove(e: ReactPointerEvent) {
     const wrap = wrapRef.current; if (!wrap) return

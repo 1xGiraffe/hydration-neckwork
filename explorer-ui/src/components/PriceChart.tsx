@@ -1,41 +1,53 @@
 /* eslint-disable react-refresh/only-export-components -- chart component + ema7 helper */
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { performancePoints } from './performance'
 import { ChartTip, F } from './ui'
+
+const W = 820, H = 190, padTop = 14, padBot = 14
 
 // Asset price chart with an EMA7 overlay, an availability-based performance row,
 // and a crosshair tooltip.
 export function PriceChart({ data, dates, price, change24h }: { data: number[]; dates?: string[]; price: number | null; change24h: number | null }) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const [hover, setHover] = useState<{ xPct: number; yPct: number; date: string; price: string; ema: string } | null>(null)
-  if (!data || data.length < 2) return null
 
-  const W = 820, H = 190, padTop = 14, padBot = 14
-  const n = data.length
-  const min = Math.min(...data), max = Math.max(...data)
-  // Span full width so the line/EMA align with the hover crosshair (0..100% across
-  // the container); a horizontal inset leaves the first/last points hoverable but
-  // with no line drawn there.
-  const sx = (i: number) => i / (n - 1) * W
-  const sy = (v: number) => padTop + (1 - (v - min) / ((max - min) || 1)) * (H - padTop - padBot)
-  const line = data.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
-  const area = `${line} L ${sx(n - 1).toFixed(1)} ${H - padBot} L ${sx(0).toFixed(1)} ${H - padBot} Z`
-  const up = data[n - 1] >= data[0]
-  const col = up ? 'var(--green)' : 'var(--red)'
+  // Pure geometry over the series: two path strings a thousand-odd points long,
+  // the EMA pass and the performance row. It changes only when the series does,
+  // but the page around this chart re-renders once a second on the shared clock,
+  // so without the memo the whole lot is rebuilt every tick — and again on every
+  // crosshair move.
+  const geom = useMemo(() => {
+    if (!data || data.length < 2) return null
+    const n = data.length
+    const min = Math.min(...data), max = Math.max(...data)
+    // Span full width so the line/EMA align with the hover crosshair (0..100% across
+    // the container); a horizontal inset leaves the first/last points hoverable but
+    // with no line drawn there.
+    const sx = (i: number) => i / (n - 1) * W
+    const sy = (v: number) => padTop + (1 - (v - min) / ((max - min) || 1)) * (H - padTop - padBot)
+    const line = data.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
+    const area = `${line} L ${sx(n - 1).toFixed(1)} ${H - padBot} L ${sx(0).toFixed(1)} ${H - padBot} Z`
+    const up = data[n - 1] >= data[0]
+    const col = up ? 'var(--green)' : 'var(--red)'
 
-  // EMA7
-  const k = 2 / 8
-  const ema: number[] = []
-  data.forEach((v, i) => ema.push(i ? v * k + ema[i - 1] * (1 - k) : v))
-  const emaLine = ema.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
+    // EMA7
+    const k = 2 / 8
+    const ema: number[] = []
+    data.forEach((v, i) => ema.push(i ? v * k + ema[i - 1] * (1 - k) : v))
+    const emaLine = ema.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
 
-  // perf
-  const last = data[n - 1]
-  const dated = dates && dates.length === data.length ? dates : undefined
-  const perfItems = [
-    ...(change24h != null ? [{ label: '24H', value: change24h }] : []),
-    ...performancePoints(data, dated),
-  ]
+    // perf
+    const dated = dates && dates.length === data.length ? dates : undefined
+    const perfItems = [
+      ...(change24h != null ? [{ label: '24H', value: change24h }] : []),
+      ...performancePoints(data, dated),
+    ]
+    return { n, sy, line, area, col, ema, emaLine, dated, perfItems, last: data[n - 1] }
+  }, [data, dates, change24h])
+
+  if (!geom) return null
+  const { n, sy, line, area, col, ema, emaLine, dated, perfItems, last } = geom
+
   const perf = (label: string, val: number) => (
     <span key={label} className="perf"><span className="pk">{label}</span><span className="pv" style={{ color: val >= 0 ? 'var(--green)' : 'var(--red)' }}>{val >= 0 ? '+' : ''}{val.toFixed(2)}%</span></span>
   )

@@ -6,7 +6,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths } from '../router'
 import { Crumbs, F, SkeletonRows, MomentLink } from '../components/ui'
 import { VoteBubbles } from '../components/VoteBubbles'
-import { VotesTable } from '../components/VotesTable'
+import { VotesTable, type VoteTableRow } from '../components/VotesTable'
 import { ProposalCall } from '../components/ProposalCall'
 import { ayeSharePct, orderVoters, selectTally, type DisplayTally, type SideFilter, type VoteSort } from '../utils/referendumVotes'
 
@@ -75,6 +75,22 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
   const [side, setSide] = useState<SideFilter>('all')
   const now = useNow()
   const shown = useMemo(() => orderVoters(data?.voters ?? [], sort, side), [data?.voters, sort, side])
+  // Row objects keyed on the voter, not rebuilt per render: sorting and the side chips
+  // only reorder and filter the same votes, so the memoised VoteRow can skip all ~176
+  // of them and React just moves the <tr>s.
+  const rowOf = useMemo(() => new Map((data?.voters ?? []).map(voter => [voter, {
+    key: `${voter.blockHeight}-${voter.eventIndex}`,
+    account: voter.account,
+    referendum: null, referendumPallet: null, referendumTitle: null,
+    side: voter.side,
+    conviction: voter.conviction,
+    weighted: voter.weighted,
+    blockHeight: voter.blockHeight,
+    extrinsicIndex: voter.extrinsicIndex,
+    timestamp: voter.timestamp,
+    withdrawn: voter.removed,
+  } satisfies VoteTableRow])), [data?.voters])
+  const voteRows = useMemo(() => shown.map(voter => rowOf.get(voter)!), [shown, rowOf])
   const tally = data ? selectTally(data) : null
 
   const label = `${PALLET_LABEL[pallet] ?? pallet} #${index}`
@@ -163,18 +179,7 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
             {/* The same table the account/tag votes tab renders; there the referendum is
                 the column that matters, here the account is. */}
             <VotesTable
-              rows={shown.map(voter => ({
-                key: `${voter.blockHeight}-${voter.eventIndex}`,
-                account: voter.account,
-                referendum: null, referendumPallet: null, referendumTitle: null,
-                side: voter.side,
-                conviction: voter.conviction,
-                weighted: voter.weighted,
-                blockHeight: voter.blockHeight,
-                extrinsicIndex: voter.extrinsicIndex,
-                timestamp: voter.timestamp,
-                withdrawn: voter.removed,
-              }))}
+              rows={voteRows}
               asset={data.asset}
               now={now}
               showAccount
