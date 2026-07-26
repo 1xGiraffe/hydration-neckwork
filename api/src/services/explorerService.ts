@@ -236,17 +236,71 @@ export function setOmnipoolAccountClaimsReady(): void { omnipoolAccountClaimsRea
 let moneyMarketAccountValuesReady = false
 export function setMoneyMarketAccountValuesReady(): void { moneyMarketAccountValuesReady = true }
 
-// (block_height, event_index) IN-prefilter from the account-activity index. The
-// surrounding query keeps its precise conditions — this only shrinks the scanned
-// granule set, so a hit set that also passes the original WHERE is unchanged.
-// Bounded newest-first: mirrors the callers' own newest-first LIMIT reads.
-function accountActivityRefsSql(accountListSql: string, eventCond: string, bound: string, limit: number): string {
-  return `(block_height, event_index) IN (
-    SELECT block_height, event_index FROM price_data.account_activity
-    WHERE account IN (${accountListSql}) AND ${bound}${eventCond ? ` AND ${eventCond}` : ''}
+// One arm per account costs at least one granule per active part of
+// account_activity (~65 parts × 8192 rows here), which the merged mark ranges of
+// a single `account IN (…)` scan pay only once. Measured on a 25-row page: 10
+// accounts read 1.0M rows merged vs 5.0M split, 16 accounts 14.8M merged vs 8.0M
+// split, 729 accounts 37.5M merged vs 360M split. Keep the fan-out to a handful
+// of accounts, where the split can never read more than a few million rows, and
+// let larger member sets (tags) keep the merged scan.
+const MAX_ACCOUNT_ACTIVITY_ARMS = 8
+
+// Newest-first distinct (block_height, event_index) references for an account
+// set, read out of the account-activity index.
+//
+// `account_activity` is `ORDER BY (account, block_height, event_index)`, so a
+// single `WHERE account IN (…) GROUP BY block_height, event_index` groups on a
+// key that is NOT a sort-order prefix: ClickHouse has to hash every row of every
+// listed account before `ORDER BY … LIMIT` can discard anything. The Omnipool
+// pallet account alone holds 72.5M references behind a 66-byte `account` String
+// — 5.3 GiB read and 4.07 GiB of aggregate state, i.e. a 500 on the query memory
+// ceiling rather than a page.
+//
+// So give each account its own arm. With `account` pinned to a literal,
+// (block_height, event_index) is exactly the remainder of the sort key, so an
+// arm is a reverse primary-key read that stops after `limit` rows and the outer
+// GROUP BY only ever sees `accounts × limit` of them.
+//
+// Taking the `offset + limit` newest per arm is exact for a merged
+// `offset + limit`: arms and merge share one ordering, so a reference at merged
+// rank r also sits at rank ≤ r inside its own account's stream — nothing older
+// than an account's (offset + limit)-th newest reference can reach the merged
+// head. The outer GROUP BY still owns every de-duplication the single scan did:
+// the same event reached through several related accounts or tag members, and
+// identical index rows in un-merged ReplacingMergeTree parts left by a replayed
+// range (those collapse before they can shorten a page unless a single arm's
+// window is mostly replay copies, which merges undo within minutes).
+//
+// Caller predicates belong INSIDE the arms. Filtering after the per-arm LIMIT
+// would keep the newest references first and only then drop the non-matching
+// ones, which is how a bounded feed silently loses older matches.
+export function accountActivityRefsQuery(accounts: string[], eventCond: string, bound: string, limit: number, offset = 0): string {
+  const pageLimit = Math.max(0, Math.trunc(limit))
+  const pageOffset = Math.max(0, Math.trunc(offset))
+  const armLimit = pageLimit + pageOffset
+  const safe = accounts.filter(a => ACCOUNT_RE.test(a))
+  const cond = eventCond ? ` AND ${eventCond}` : ''
+  const body = safe.length > MAX_ACCOUNT_ACTIVITY_ARMS
+    ? `SELECT block_height, event_index FROM price_data.account_activity
+    WHERE account IN (${sqlAccountList(safe)}) AND ${bound}${cond}`
+    : `SELECT block_height, event_index FROM (${(safe.length ? safe : ['']).map(account => `
+      SELECT block_height, event_index FROM price_data.account_activity
+      WHERE account = '${account}' AND ${bound}${cond}
+      ORDER BY block_height DESC, event_index DESC
+      LIMIT ${armLimit}`).join('\n      UNION ALL')}
+    )`
+  return `${body}
     GROUP BY block_height, event_index
     ORDER BY block_height DESC, event_index DESC
-    LIMIT ${limit})`
+    LIMIT ${pageLimit}${pageOffset ? ` OFFSET ${pageOffset}` : ''}`
+}
+
+// The same references as an IN-prefilter. The surrounding query keeps its precise
+// conditions — this only shrinks the scanned granule set, so a hit set that also
+// passes the original WHERE is unchanged.
+function accountActivityRefsSql(accounts: string[], eventCond: string, bound: string, limit: number): string {
+  return `(block_height, event_index) IN (
+    ${accountActivityRefsQuery(accounts, eventCond, bound, limit)})`
 }
 
 // Unfiltered recent-first feeds only need the newest slice of history: bound the
@@ -430,13 +484,16 @@ export interface EventListFilters { event?: string }
 export interface ValueListFilters { token?: string; min?: number; unit?: 'usd' | 'token' }
 export interface VoteListFilters { referendum?: string; conviction?: string }
 
-function textNameFilter(field: string, paramPrefix: string): string {
-  return `AND (
+function textNameMatchSql(field: string, paramPrefix: string): string {
+  return `(
     ${field} = {${paramPrefix}:String}
     OR positionCaseInsensitive(${field}, {${paramPrefix}:String}) > 0
     OR positionCaseInsensitive(replaceAll(${field}, '.', ' '), {${paramPrefix}Visible:String}) > 0
     OR position(replaceRegexpAll(lowerUTF8(${field}), '[^0-9a-z]', ''), {${paramPrefix}Compact:String}) > 0
   )`
+}
+function textNameFilter(field: string, paramPrefix: string): string {
+  return `AND ${textNameMatchSql(field, paramPrefix)}`
 }
 function textNameParams(paramPrefix: string, value?: string): Record<string, string> {
   const raw = value?.trim() ?? ''
@@ -6536,7 +6593,7 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
     let pageState: { scanned: number; cursor: { blockHeight: number; eventIndex: number } | null } = { scanned: 0, cursor: null }
     const fetchPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
       const senderRefsFilter = acctList
-        ? `AND ${accountActivityRefsSql(acctList, `event_name IN ('XTokens.TransferredAssets','PolkadotXcm.Sent')`, pageBound, pageLimit)}`
+        ? `AND ${accountActivityRefsSql(accounts!, `event_name IN ('XTokens.TransferredAssets','PolkadotXcm.Sent')`, pageBound, pageLimit)}`
         : ''
       const res = await client.query({
         query: `SELECT block_height, toString(block_timestamp) AS ts, extrinsic_index, event_index, name, args_json
@@ -6812,7 +6869,7 @@ async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, 
     const candidateToken = assetIdFilterSql(candidateAsset, tokenIds)
     const fetchBlocks = acctList
       ? async (pageBound: string, pageLimit: number) => {
-        const refsFilter = `AND ${accountActivityRefsSql(acctList, `event_name = 'Currencies.Withdrawn'`, pageBound, pageLimit)}`
+        const refsFilter = `AND ${accountActivityRefsSql(accounts!, `event_name = 'Currencies.Withdrawn'`, pageBound, pageLimit)}`
         const res = await client.query({
           query: `SELECT block_height FROM ${xcmEventActivityTable()}
                   ${candidateValue.joinSql}
@@ -6871,7 +6928,7 @@ async function getRecentXcmIn(limit: number, from?: string, to?: string, account
     // events (activity-index pruned), global from the newest processed messages.
     const fetchBlocks = acctList
       ? async (pageBound: string, pageLimit: number) => {
-        const refsFilter = `AND ${accountActivityRefsSql(acctList, `event_name IN (${sqlEventNameList(XCM_IN_DEPOSIT_EVENTS)})`, pageBound, pageLimit)}`
+        const refsFilter = `AND ${accountActivityRefsSql(accounts!, `event_name IN (${sqlEventNameList(XCM_IN_DEPOSIT_EVENTS)})`, pageBound, pageLimit)}`
         const res = await client.query({
           query: `SELECT block_height FROM ${xcmEventActivityTable()}
                   ${candidateValue.joinSql}
@@ -7303,7 +7360,7 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
     const names = sourceNames.map(n => `'${n}'`).join(',')
     // Account-scoped: prune via the activity index; global: recency window.
     const accountRefsFilter = acctList && !postFilter
-      ? `AND ${accountActivityRefsSql(acctList, `event_name IN (${names})`, bound, scanOffset + scanLimit)}`
+      ? `AND ${accountActivityRefsSql(accounts!, `event_name IN (${names})`, bound, scanOffset + scanLimit)}`
       : ''
     const accountFilter = acctList
       ? `AND who IN (${acctList})`
@@ -7504,12 +7561,13 @@ async function getRecentOtc(limit: number, from?: string, to?: string, offset = 
       // and are already in account_activity; Placed/Cancelled are owned by the
       // signing extrinsic. Combine those two account-first reference sets before
       // reading raw event payloads, preserving the exact later row builder.
+      // The OTC-event side is bounded exactly like the page it feeds: the read
+      // below takes the newest `pageOffset + pageLimit` OTC rows, so an event
+      // older than the account's (pageOffset + pageLimit)-th newest OTC
+      // reference can never appear on it. The signer side stays unbounded.
       const accountRefs = accountSet
         ? `AND ((e.block_height, e.event_index) IN (
-              SELECT block_height, event_index FROM price_data.account_activity
-              WHERE account IN (${sqlAccountList(accounts!)}) AND ${bound}
-                AND event_name IN (${names})
-              GROUP BY block_height, event_index
+              ${accountActivityRefsQuery(accounts!, `event_name IN (${names})`, bound, pageLimit, pageOffset)}
             ) OR (e.block_height, e.extrinsic_index) IN (
               SELECT block_height, extrinsic_index FROM price_data.raw_extrinsics
               WHERE signer IN (${sqlAccountList(accounts!)}) OR effective_signer IN (${sqlAccountList(accounts!)})
@@ -7708,7 +7766,7 @@ async function getRecentVotes(limit: number, from?: string, to?: string, offset 
     const scanLimit = postFilter ? Math.max(want * 8, limit + 500) : limit
     const scanOffset = postFilter ? 0 : offset
     const accountRefsFilter = acctList && !postFilter && tokenIds == null && valueFilters.min == null
-      ? `AND ${accountActivityRefsSql(acctList, `event_name IN ('ConvictionVoting.Voted','Democracy.Voted')`, bound, scanOffset + scanLimit)}`
+      ? `AND ${accountActivityRefsSql(accounts!, `event_name IN ('ConvictionVoting.Voted','Democracy.Voted')`, bound, scanOffset + scanLimit)}`
       : ''
     const accountFilter = acctList ? `AND (JSONExtractString(args_json,'who') IN (${acctList}) OR JSONExtractString(args_json,'voter') IN (${acctList}))` : ''
     const runVotes = async (b: string, pageLimit: number, pageOffset: number) => {
@@ -11212,7 +11270,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     // pots are dropped).
     const useTransferReadModel = tokenIds == null && queryFilters.min == null
     const transferRefsFilter = !useTransferReadModel && tokenIds == null && queryFilters.min == null
-      ? `AND ${accountActivityRefsSql(accList, `event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')`, bound, catFetch * 3)}`
+      ? `AND ${accountActivityRefsSql(accCond, `event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')`, bound, catFetch * 3)}`
       : ''
     // Supply/withdraw/borrow/repay move tokens between the user and a money-
     // market contract; those extrinsics already activity as `mm` rows, so their
@@ -11290,15 +11348,9 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     if (!transferSourceSaturated && transferRefsFilter) {
       const moreRefs = await client.query({
         query: `SELECT 1 FROM (
-                  SELECT block_height, event_index
-                  FROM price_data.account_activity
-                  WHERE account IN (${accList}) AND ${bound}
-                    AND event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')
-                  GROUP BY block_height, event_index
-                  ORDER BY block_height DESC, event_index DESC
-                  LIMIT 1 OFFSET {skip:UInt32}
+                  ${accountActivityRefsQuery(accCond, `event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')`, bound, 1, catFetch * 3)}
                 )`,
-        query_params: { skip: catFetch * 3 }, format: 'JSONEachRow',
+        format: 'JSONEachRow',
       })
       transferSourceSaturated = accountTransferWindowSaturated(
         rawTransferRows.length,
@@ -12035,9 +12087,16 @@ async function countAccountExtrinsics(accounts: string[], cacheKey: string, filt
 }
 
 // The events list pages distinct (block, event) references out of the account
-// activity index, so its total is that same reference query without the LIMIT. The
-// GROUP BY collapses both replayed index rows and events reached through several
-// tag members, exactly as the list's own reference read does.
+// activity index, so its total is that same reference set, counted whole. It has
+// to collapse the same things the list's reference read does — replayed index
+// rows, and one event reached through several related accounts or tag members.
+//
+// A GROUP BY does that by hashing every reference: on the Omnipool pot's 72.5M
+// it costs 5.5 s, 1.55 GiB and fifteen spills to disk. A reference is already a
+// pair of UInt32s, so shifting block_height into the high half is a bijection
+// into UInt64 — not a hash, no collision to argue about, and no assumption about
+// how many events a block may hold — and a roaring bitmap counts that set
+// directly, for the same total in 3.7 s, 743 MiB and no spill.
 async function countAccountEvents(accounts: string[], cacheKey: string, filters: EventListFilters, from?: string, to?: string): Promise<number> {
   const list = sqlAccountList(accounts)
   if (list === "''") return 0
@@ -12045,21 +12104,17 @@ async function countAccountEvents(accounts: string[], cacheKey: string, filters:
   return cached(`explorer:events-total:${cacheKey}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, 600_000, async () => {
     const eventFilter = filters.event?.trim() ? textNameFilter('event_name', 'eventName') : ''
     const res = await client.query({
-      query: `SELECT count() AS c FROM (
-                SELECT block_height, event_index
-                FROM price_data.account_activity
-                WHERE ${bound} AND account IN (${list})
-                  ${eventFilter}
-                GROUP BY block_height, event_index
-              )`,
+      query: `SELECT groupBitmap(bitShiftLeft(toUInt64(block_height), 32) + toUInt64(event_index)) AS c
+              FROM price_data.account_activity
+              WHERE ${bound} AND account IN (${list})
+                ${eventFilter}`,
       query_params: { ...textNameParams('eventName', filters.event) },
       format: 'JSONEachRow',
       // Structural pots (router/Omnipool/treasury/referral) hold tens of millions
-      // of activity references — the Omnipool pot's 72.5M. Grouping spills to disk
-      // there; uniqExact cannot spill and died on the memory ceiling instead. Four
-      // threads keep the biggest of these near five seconds on a cache miss (10-min
-      // TTL) while leaving cores for live requests.
-      clickhouse_settings: { max_bytes_before_external_group_by: '1500000000', max_threads: 4 },
+      // of references, so this still reads the whole account even though it no
+      // longer materializes it. Four threads keep the biggest of these under four
+      // seconds on a cache miss (10-min TTL) while leaving cores for live requests.
+      clickhouse_settings: { max_threads: 4 },
     })
     return Number((await res.json<{ c: string }>())[0]?.c ?? 0)
   })
@@ -13236,15 +13291,13 @@ async function getAccountEvents(accounts: string[], limit = 25, offset = 0, cach
       // Page over (block, event) references through the account-activity index,
       // then fetch only those rows from raw_events.
       const refsRes = await client.query({
-        query: `
-          SELECT block_height, event_index
-          FROM price_data.account_activity
-          WHERE ${bound} AND account IN (${list})
-            ${eventFilter}
-          GROUP BY block_height, event_index
-          ORDER BY block_height DESC, event_index DESC
-          LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
-        query_params: { limit, offset, ...textNameParams('eventName', filters.event) }, format: 'JSONEachRow',
+        query: accountActivityRefsQuery(accounts, filters.event?.trim() ? textNameMatchSql('event_name', 'eventName') : '', bound, limit, offset),
+        query_params: { ...textNameParams('eventName', filters.event) },
+        // Member sets past the arm cap keep the single grouped scan, which on a
+        // structural pot is the read that hit the memory ceiling. Spilling keeps
+        // such a page slow rather than a 500.
+        clickhouse_settings: { max_bytes_before_external_group_by: '1500000000' },
+        format: 'JSONEachRow',
       })
       const refs = await refsRes.json<{ block_height: number; event_index: number }>()
       if (!refs.length) return []
