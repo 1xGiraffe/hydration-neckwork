@@ -461,3 +461,78 @@ describe('unexplained vote extrinsics', () => {
     expect([...unexplainedVoteKeys([{ block_height: 200, extrinsic_index: 1, n: 1 }], [])]).toEqual(['200:1'])
   })
 })
+
+// No Democracy event names a proposal, so the hash comes from the enactment:
+// `do_enact_proposal` reads the preimage and dispatches it in one block, emitting
+// Democracy.PreimageUsed{proposalHash} before the Democracy.Executed{refIndex} that
+// reports the outcome. Each of the 49 enactment blocks in Hydration's history holds
+// exactly one of each, and anything else must resolve to nothing rather than a guess —
+// a wrong proposal on a referendum page is worse than none.
+describe('democracy proposal hash from the enactment block', () => {
+  const HASH = `0x${'ab'.repeat(32)}`
+  const answer = (rows: unknown[]) => vi.fn(async ({ query }: { query: string }) => ({
+    json: async () => {
+      if (query.includes("event_name LIKE {prefix:String}")) {
+        return [
+          { event_name: 'Democracy.Started', block_height: 793_680, extrinsic_index: null, ts: '2022-01-01 00:00:00', args_json: '{"refIndex":7}' },
+          { event_name: 'Democracy.Passed', block_height: 794_580, extrinsic_index: null, ts: '2022-01-02 00:00:00', args_json: '{"refIndex":7}' },
+          { event_name: 'Democracy.Executed', block_height: 795_180, extrinsic_index: null, ts: '2022-01-03 00:00:00', args_json: '{"refIndex":7}' },
+        ]
+      }
+      if (query.includes('Democracy.PreimageUsed')) return rows
+      if (query.includes('price_data.referendum_proposals')) {
+        return [{ pallet: 'ParachainSystem', call_name: 'authorize_upgrade', args_json: '{}', encoded: '0x00', byte_length: 34, decode_error: '' }]
+      }
+      return []
+    },
+  }))
+
+  const detailWith = async (rows: unknown[], index: number) => {
+    const query = answer(rows)
+    initGovernanceService({ query } as never)
+    initExplorerService({ query } as never)
+    initReferendumTitleService({ query } as never)
+    return getReferendum('democracy', index, 10)
+  }
+
+  it('pairs the one PreimageUsed with the one Executed in the block', async () => {
+    const detail = await detailWith([
+      { event_name: 'Democracy.PreimageUsed', event_index: 1, args_json: `{"proposalHash":"${HASH}","provider":"0x00"}` },
+      { event_name: 'Democracy.Executed', event_index: 3, args_json: '{"refIndex":7,"result":{"__kind":"Ok"}}' },
+    ], 7)
+    expect(detail?.proposalHash).toBe(HASH)
+    expect(detail?.proposalCall?.callName).toBe('authorize_upgrade')
+  })
+
+  it('refuses to guess when the block enacted more than one referendum', async () => {
+    const detail = await detailWith([
+      { event_name: 'Democracy.PreimageUsed', event_index: 1, args_json: `{"proposalHash":"${HASH}"}` },
+      { event_name: 'Democracy.Executed', event_index: 2, args_json: '{"refIndex":7}' },
+      { event_name: 'Democracy.PreimageUsed', event_index: 3, args_json: `{"proposalHash":"0x${'cd'.repeat(32)}"}` },
+      { event_name: 'Democracy.Executed', event_index: 4, args_json: '{"refIndex":8}' },
+    ], 8)
+    expect(detail?.proposalHash).toBeNull()
+    expect(detail?.proposalCall).toBeNull()
+  })
+
+  it('refuses a block whose Executed names another referendum', async () => {
+    const detail = await detailWith([
+      { event_name: 'Democracy.PreimageUsed', event_index: 1, args_json: `{"proposalHash":"${HASH}"}` },
+      { event_name: 'Democracy.Executed', event_index: 3, args_json: '{"refIndex":9}' },
+    ], 9)
+    expect(detail?.proposalHash).toBe(HASH)
+    const other = await detailWith([
+      { event_name: 'Democracy.PreimageUsed', event_index: 1, args_json: `{"proposalHash":"${HASH}"}` },
+      { event_name: 'Democracy.Executed', event_index: 3, args_json: '{"refIndex":11}' },
+    ], 10)
+    expect(other?.proposalHash).toBeNull()
+  })
+
+  it('leaves a referendum that emitted no PreimageUsed without a proposal', async () => {
+    const detail = await detailWith([
+      { event_name: 'Democracy.Executed', event_index: 3, args_json: '{"refIndex":12}' },
+    ], 12)
+    expect(detail?.proposalHash).toBeNull()
+    expect(detail?.proposalCall).toBeNull()
+  })
+})

@@ -628,6 +628,38 @@ export function indirectTallyFrom(onChain: ReferendumTally | null, direct: Refer
   return ayes === '0' && nays === '0' ? null : { ayes, nays, support: null }
 }
 
+// A Democracy referendum's proposal hash, from the block that ENACTED it.
+//
+// No Democracy event names a proposal: Started is {refIndex, threshold} and Executed is
+// {refIndex, result}. But `do_enact_proposal` reads the preimage and dispatches it in one
+// block, emitting Democracy.PreimageUsed{proposalHash, provider, deposit} before the
+// Democracy.Executed{refIndex} that reports the outcome. So the pair is a single
+// enactment, and the pairing is only trusted where it is unambiguous: each of the 49
+// enactment blocks in Hydration's history holds exactly one PreimageUsed and exactly one
+// Executed, and this returns null rather than a guess for anything else — showing a wrong
+// proposal on a referendum page is worse than showing none.
+//
+// The referenda enacted after the pallet moved its proposals into the Preimage pallet
+// emit no PreimageUsed, so they legitimately stay without a proposal.
+async function democracyProposalHash(executedBlock: number, index: number): Promise<string | null> {
+  const res = await client.query({
+    query: `SELECT event_name, event_index, args_json
+            FROM price_data.raw_events
+            WHERE block_height = {b:UInt32}
+              AND event_name IN ('Democracy.PreimageUsed', 'Democracy.Executed')
+            ORDER BY event_index`,
+    query_params: { b: executedBlock }, format: 'JSONEachRow',
+  })
+  const rows = await res.json<{ event_name: string; event_index: number; args_json: string }>()
+  const used = rows.filter(row => row.event_name === 'Democracy.PreimageUsed')
+  const executed = rows.filter(row => row.event_name === 'Democracy.Executed')
+  if (used.length !== 1 || executed.length !== 1) return null
+  const parse = (json: string) => { try { return JSON.parse(json) as Record<string, unknown> } catch { return {} } }
+  if (Number(parse(executed[0].args_json).refIndex) !== index) return null
+  const hash = parse(used[0].args_json).proposalHash
+  return typeof hash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(hash) ? hash.toLowerCase() : null
+}
+
 interface ProposalCallRow {
   pallet: string
   call_name: string
@@ -710,7 +742,12 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
     const concludedRow = [...lifecycle].reverse().find(row => isConcludingEvent(row.event_name))
     const submittedArgs = submitted ? (() => { try { return JSON.parse(submitted.args_json) as Record<string, unknown> } catch { return {} } })() : {}
     const proposal = submittedArgs.proposal as { hash?: unknown } | undefined
-    const proposalHash = typeof proposal?.hash === 'string' ? proposal.hash : null
+    // Democracy.Executed is the enactment, not the conclusion (see CONCLUDING_EVENTS), and
+    // the enactment is where the proposal hash surfaces.
+    const executedBlock = lifecycle.find(row => row.event_name === 'Democracy.Executed')?.block_height
+    const proposalHash = typeof proposal?.hash === 'string'
+      ? proposal.hash
+      : executedBlock != null ? await democracyProposalHash(executedBlock, index) : null
     const proposalCall = proposalHash ? await loadProposalCall(proposalHash) : null
 
     return {

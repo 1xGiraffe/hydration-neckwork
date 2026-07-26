@@ -1,7 +1,14 @@
+import { blake2AsHex } from '@polkadot/util-crypto'
 import { createClickHouseClient } from '../db/client.js'
 import { hasFlag, integerOption } from '../util/cliArgs.js'
 import { createSnapshotRpcClient, loadSnapshotRuntime } from './snapshotRuntime.js'
-import { flattenDecodedCall, jsonSafeArgs, proposalsNeedingDecode } from '../governance/proposalCalls.js'
+import {
+  flattenDecodedCall,
+  jsonSafeArgs,
+  preimageBytesFromCall,
+  proposalsNeedingDecode,
+  selectPreimageBytes,
+} from '../governance/proposalCalls.js'
 
 // Referendum proposal calls.
 //
@@ -43,18 +50,33 @@ interface ProposalRow {
 }
 
 // Every proposal hash a referendum has named, paired with the block its preimage was
-// noted at. Preimage.Noted carries the hash; the bytes sit on the same extrinsic.
+// noted at.
+//
+// OpenGov names its proposal on Referenda.Submitted and its preimage lands as
+// Preimage.Noted. Democracy names none — Democracy.Started is {refIndex, threshold} — so
+// the hashes there are the ones the pallet actually ENACTED, reported by
+// Democracy.PreimageUsed; the API pairs each back to its referendum by the
+// Democracy.Executed event in the same block. Either way the bytes sit on the extrinsic
+// that noted the preimage.
 async function loadWanted(): Promise<{ hash: string; notedBlock: number }[]> {
   const res = await client.query({
     query: `
-      SELECT lower(JSONExtractString(n.args_json, 'hash')) AS hash, max(n.block_height) AS noted_block
-      FROM price_data.raw_events n
-      WHERE n.event_name = 'Preimage.Noted'
-        AND lower(JSONExtractString(n.args_json, 'hash')) IN (
-          SELECT DISTINCT lower(JSONExtractString(args_json, 'proposal', 'hash'))
-          FROM price_data.raw_events
-          WHERE event_name = 'Referenda.Submitted' AND JSONHas(args_json, 'proposal')
-        )
+      SELECT hash, max(noted_block) AS noted_block FROM (
+        SELECT lower(JSONExtractString(n.args_json, 'hash')) AS hash, n.block_height AS noted_block
+        FROM price_data.raw_events n
+        WHERE n.event_name = 'Preimage.Noted'
+          AND lower(JSONExtractString(n.args_json, 'hash')) IN (
+            SELECT DISTINCT lower(JSONExtractString(args_json, 'proposal', 'hash'))
+            FROM price_data.raw_events
+            WHERE event_name = 'Referenda.Submitted' AND JSONHas(args_json, 'proposal'))
+        UNION ALL
+        SELECT lower(JSONExtractString(n.args_json, 'proposalHash')) AS hash, n.block_height AS noted_block
+        FROM price_data.raw_events n
+        WHERE n.event_name = 'Democracy.PreimageNoted'
+          AND lower(JSONExtractString(n.args_json, 'proposalHash')) IN (
+            SELECT DISTINCT lower(JSONExtractString(args_json, 'proposalHash'))
+            FROM price_data.raw_events WHERE event_name = 'Democracy.PreimageUsed')
+      )
       GROUP BY hash`,
     format: 'JSONEachRow',
   })
@@ -63,36 +85,53 @@ async function loadWanted(): Promise<{ hash: string; notedBlock: number }[]> {
     .map(row => ({ hash: row.hash, notedBlock: Number(row.noted_block) }))
 }
 
+// A hash counts as done only if the bytes on file really are its preimage. The hash IS
+// the content, so this is checkable — and 4 of 343 stored rows failed it, holding a
+// sibling preimage picked out of a batch that noted several. Verifying here means those
+// come back for another pass instead of standing as a wrong proposal forever.
 async function loadDecoded(): Promise<Set<string>> {
   const res = await client.query({
     // A row missing its encoded bytes is not finished, so it comes back for another pass.
-    query: `SELECT proposal_hash FROM price_data.referendum_proposals FINAL WHERE decode_error = '' AND encoded != ''`,
+    query: `SELECT proposal_hash, encoded FROM price_data.referendum_proposals FINAL WHERE decode_error = '' AND encoded != ''`,
     format: 'JSONEachRow',
   })
-  return new Set((await res.json<{ proposal_hash: string }>()).map(row => row.proposal_hash))
+  const rows = await res.json<{ proposal_hash: string; encoded: string }>()
+  return new Set(rows.filter(row => selectPreimageBytes([row.encoded], row.proposal_hash, digest)).map(row => row.proposal_hash))
 }
 
-// The preimage bytes for one hash. Taken from the note_preimage call on the same
-// extrinsic as the Noted event, which is where the runtime put them.
+const digest = (bytes: string): string => blake2AsHex(bytes, 256)
+
+interface ExtrinsicCallRow { block: number; call_name: string; args_json: string }
+
+// The preimage bytes for one hash, from the extrinsic that noted it.
+//
+// Every call on that extrinsic is a candidate — the note_preimage call itself when the
+// indexer recorded it, and otherwise the wrapper that carries it in its decoded args
+// (see preimageBytesFromCall). The winner is the one that hashes to the wanted hash, so
+// a batch that noted several preimages cannot hand back the wrong one. Earliest note
+// first: the runtime the call was written for is the one it is decoded against.
 async function loadPreimageBytes(hash: string): Promise<{ bytes: string; block: number } | null> {
   const res = await client.query({
     query: `
-      SELECT c.block_height AS block, JSONExtractString(c.args_json, 'bytes') AS bytes
+      SELECT c.block_height AS block, c.call_name AS call_name, c.args_json AS args_json
       FROM price_data.raw_calls c
-      WHERE c.call_name = 'Preimage.note_preimage'
-        AND (c.block_height, c.extrinsic_index) IN (
+      WHERE (c.block_height, c.extrinsic_index) IN (
           SELECT block_height, extrinsic_index FROM price_data.raw_events
-          WHERE event_name = 'Preimage.Noted'
-            AND lower(JSONExtractString(args_json, 'hash')) = {hash:String}
+          WHERE event_name IN ('Preimage.Noted', 'Democracy.PreimageNoted')
+            AND lower(if(event_name = 'Preimage.Noted',
+                         JSONExtractString(args_json, 'hash'),
+                         JSONExtractString(args_json, 'proposalHash'))) = {hash:String}
             AND extrinsic_index IS NOT NULL)
-      ORDER BY c.block_height
-      LIMIT 1`,
+      ORDER BY c.block_height, c.extrinsic_index, c.call_address`,
     query_params: { hash }, format: 'JSONEachRow',
   })
-  const row = (await res.json<{ block: number; bytes: string }>())[0]
-  return row && /^0x[0-9a-f]*$/i.test(row.bytes) && row.bytes.length > 2
-    ? { bytes: row.bytes, block: Number(row.block) }
-    : null
+  for (const row of await res.json<ExtrinsicCallRow>()) {
+    let args: unknown
+    try { args = JSON.parse(row.args_json) } catch { continue }
+    const bytes = selectPreimageBytes(preimageBytesFromCall(row.call_name, args), hash, digest)
+    if (bytes) return { bytes, block: Number(row.block) }
+  }
+  return null
 }
 
 // One runtime per spec version, not per proposal: loading metadata is the expensive part
