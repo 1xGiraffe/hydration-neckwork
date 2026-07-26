@@ -42,23 +42,23 @@ describe('exactActivityMismatch', () => {
 // a filter no count arm states puts the request back on the candidate window however
 // countable its category is.
 describe('isLocatedActivityRequest', () => {
-  it('covers every exact category, under either spelling of DCA', () => {
-    for (const type of ['transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'otc']) {
+  it('covers every category, under either spelling of DCA', () => {
+    for (const type of ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'otc']) {
       expect(isLocatedActivityRequest(type), type).toBe(true)
     }
   })
 
-  it('excludes the merged feed until every family it is made of is exact', () => {
-    expect(isLocatedActivityRequest('all')).toBe(false)
+  it('excludes a category the vocabulary does not know', () => {
+    expect(isLocatedActivityRequest('extrinsics')).toBe(false)
   })
 
   // A min-USD floor is decided on the row's event-time valuation, which no arm holds;
   // an action or a token would have to be mirrored in every arm to stay exact. Each one
   // keeps the window, and the window says what it covers.
   it('excludes a request whose filter no arm states', () => {
-    expect(isLocatedActivityRequest('transfer', 'swap')).toBe(false)
-    expect(isLocatedActivityRequest('transfer', undefined, { min: 10 })).toBe(false)
-    expect(isLocatedActivityRequest('transfer', undefined, { token: 'DOT' })).toBe(false)
+    expect(isLocatedActivityRequest('all', 'swap')).toBe(false)
+    expect(isLocatedActivityRequest('all', undefined, { min: 10 })).toBe(false)
+    expect(isLocatedActivityRequest('all', undefined, { token: 'DOT' })).toBe(false)
   })
 })
 

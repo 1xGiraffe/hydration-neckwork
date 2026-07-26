@@ -58,24 +58,23 @@ const MAX_NARROW_ACTIVITY_OFFSET = 250_000
 const NARROW_ACTIVITY_TYPES = new Set(['vote', 'staking', 'otc'])
 const maxActivityOffsetFor = (type: string) =>
   NARROW_ACTIVITY_TYPES.has(type) ? MAX_NARROW_ACTIVITY_OFFSET : MAX_ACTIVITY_OFFSET
-// Account and tag activity is bounded by the builder's candidate ceiling instead:
-// it grows ONE window until the classified feed reaches its end or the ceiling, and
-// serves pages only from the rows above that window's frontier — the same rows the
-// published total counts. So the depth of a page changes only which slice of that
-// window is returned, and every page a real total numbers is servable. The bound
-// here only has to stay above any countable feed length: ten sources at the 90k
+// A WINDOWED account/tag activity request — one carrying a filter no count arm states,
+// so it is still assembled by growing one candidate window until the classified feed
+// ends or the ceiling is reached, and paged only from the rows above that window's
+// frontier. Those are the same rows its published (partial) total counts, so the bound
+// only has to stay above any length that total can reach: ten sources at the 90k
 // candidate ceiling each.
-const MAX_SCOPED_ACTIVITY_OFFSET = 900_000
-// The categories whose account/tag pages are LOCATED (isLocatedActivityRequest) are
-// not bounded by depth at all: SQL counts the feed and finds the ≤ limit blocks the
-// page's ranks sit in, so the work is the feed's own size and an offset near the end
-// costs what one near the start does. The bound only has to stay above any total this
-// path publishes — the longest single-category feed indexed is the routerex pallet's
-// 1.70M liquidity rows (counted in 0.106s, its page at offset 899,999 served in
-// 0.232s) and the busiest trader's 843k trades (0.46s / 0.59s at offset 843,000).
+const MAX_WINDOWED_ACTIVITY_OFFSET = 900_000
+// A LOCATED request is not bounded by depth at all: SQL counts the feed and finds the
+// ≤ limit blocks the page's ranks sit in, so the work is the feed's own size and an
+// offset near the end costs what one near the start does. The bound only has to stay
+// above any total this path publishes — the longest feeds indexed are the busiest
+// trader's 1.22M merged activities (counted in 7.7s, pages 3.3s at every depth) and the
+// routerex pallet's 1.70M liquidity rows (0.106s / 0.232s at offset 899,999).
 const MAX_LOCATED_ACTIVITY_OFFSET = 5_000_000
-const maxScopedActivityOffsetFor = (type: string) =>
-  isLocatedActivityRequest(type) ? MAX_LOCATED_ACTIVITY_OFFSET : MAX_SCOPED_ACTIVITY_OFFSET
+const maxScopedActivityOffsetFor = (q: Record<string, unknown>, type: string) =>
+  isLocatedActivityRequest(type, textParam(q, 'action', 32), valueFilters(q))
+    ? MAX_LOCATED_ACTIVITY_OFFSET : MAX_WINDOWED_ACTIVITY_OFFSET
 const activityOffsetSchema = z.coerce.number().int().min(0).max(MAX_LOCATED_ACTIVITY_OFFSET).optional()
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
 function dateParam(q: Record<string, unknown>, key: string): string | undefined {
@@ -491,7 +490,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
     const q = req.query as Record<string, unknown>
     const activityType = activityTypeParam(q)
-    const maxOffset = maxScopedActivityOffsetFor(activityType)
+    const maxOffset = maxScopedActivityOffsetFor(q, activityType)
     const offset = boundedActivityOffset(q, maxOffset)
     if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${maxOffset}` })
     const rows = await getTagActivity(params.data.tagId, activityType, limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
@@ -559,7 +558,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
     const q = req.query as Record<string, unknown>
     const activityType = activityTypeParam(q)
-    const maxOffset = maxScopedActivityOffsetFor(activityType)
+    const maxOffset = maxScopedActivityOffsetFor(q, activityType)
     const offset = boundedActivityOffset(q, maxOffset)
     if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${maxOffset}` })
     const rows = await getAddressActivity(params.data.address, activityType, limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))

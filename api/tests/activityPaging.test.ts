@@ -123,12 +123,21 @@ describe('activity paging bounds', () => {
     }
   })
 
-  it('still refuses an offset no countable feed can reach', async () => {
+  // An unfiltered feed is LOCATED — its ranks are found in SQL and a page costs what the
+  // feed costs, not what the offset costs — so it pages as deep as any total it can
+  // publish. A filter no count arm states puts the same route back on the candidate
+  // window, and then the window's own depth is the bound again.
+  it('bounds a located request by the deepest feed and a windowed one by its window', async () => {
     for (const route of ['/explorer/address/alice/activity', '/explorer/tag/whales/activity']) {
-      const response = await app.inject(`${route}?offset=900001`)
+      expect((await app.inject(`${route}?offset=900001`)).statusCode, route).not.toBe(400)
 
-      expect(response.statusCode, route).toBe(400)
-      expect(response.json()).toEqual({ error: 'Activity offset must be between 0 and 900000' })
+      const located = await app.inject(`${route}?offset=5000001`)
+      expect(located.statusCode, route).toBe(400)
+      expect(located.json()).toEqual({ error: 'Activity offset must be between 0 and 5000000' })
+
+      const windowed = await app.inject(`${route}?offset=900001&min=10`)
+      expect(windowed.statusCode, route).toBe(400)
+      expect(windowed.json()).toEqual({ error: 'Activity offset must be between 0 and 900000' })
     }
   })
 

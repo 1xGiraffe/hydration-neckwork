@@ -11744,14 +11744,13 @@ async function enumeratedActivityRowsUncached(
 // them: `trade`, `liquidity` and `mm` mix a counted source with enumerated ones,
 // while `vote`, `staking` and `otc` are enumerated end to end.
 //
-// `xcm` is enumerated end to end too, at its own higher cap, and `transfer` is the one
+// `xcm` is enumerated end to end too, at its own higher cap; `transfer` is the one
 // family whose arm has to state another family's decisions, because subordination only
-// ever removes transfer rows.
-//
-// `all` is absent for one more commit: it is every arm and every enumerated source at
-// once, which is only sound once each family is exact on its own.
+// ever removes transfer rows; and `all` is simply every arm and every enumerated source
+// at once, which is sound because the families are disjoint — a row belongs to exactly
+// one of them.
 const EXACTLY_COUNTABLE_ACTIVITY_TYPES = new Set([
-  'transfer', 'trade', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'otc',
+  'all', 'transfer', 'trade', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'otc',
 ])
 
 // Whether this request is paged by locating its ranks rather than by widening a
@@ -11807,7 +11806,10 @@ async function planExactActivity(
   const all = enumeratedActivityAll(enumerated)
   const perBlock = new Map<number, number>()
   for (const row of all) {
-    if (!activityTypeMatchesFamily(row.type, type)) continue
+    // `all` asks for no family filter at all, exactly as the classifier's own
+    // `type !== 'all'` guard does — otherwise every enumerated row would be counted out
+    // of the merged feed and the total would fall short of the chips that make it up.
+    if (type !== 'all' && !activityTypeMatchesFamily(row.type, type)) continue
     perBlock.set(row.blockHeight, (perBlock.get(row.blockHeight) ?? 0) + 1)
   }
 
