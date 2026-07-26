@@ -58,9 +58,10 @@ function priceIdUniverse(): string {
 // The combined swap-row filter: every raw event that could contribute to a netted
 // trade — unified-era Broadcast.Swapped* at/above the cutover, legacy pallet
 // *Executed below it. This is the same row set buildPartitionInsertSql consumes
-// (its two era legs), factored out so the incremental staleness check can select
-// exactly the source rows the netting SELECT does. Single source of truth for the
-// era split.
+// (its two era legs). Single source of truth for the era split: the
+// swap_source_partition_watermarks MV that feeds the incremental staleness check
+// carries this predicate verbatim, and api/src/derivations/jobs.test.ts asserts
+// the declared MV still matches it.
 export function swapEventFilterSql(): string {
   return `((event_name IN (${BROADCAST_EVENTS}) AND block_height >= ${BROADCAST_MIN_BLOCK})`
     + ` OR (event_name IN (${LEGACY_EVENTS}) AND block_height < ${BROADCAST_MIN_BLOCK}))`
@@ -99,9 +100,25 @@ export function partitionBlockRange(partition: string): { fromBlock: number; toB
   }
 }
 
+// The ASOF right side is the whole ohlc_1h feed for every priced asset. A candle
+// matches only where `price_time <= block_time`, so every candle whose hour closes
+// after the partition's last trade is dead weight and can be cut. There is no safe
+// lower bound: an asset with no candle inside the partition is valued at the last
+// candle before it, however far back that lies. `maxBlockTime` is the partition's
+// own last swap block timestamp, carried by the staleness watermark projection;
+// omitting it values against the whole feed.
+function priceWindowSql(maxBlockTime: string | undefined): string {
+  if (maxBlockTime == null) return ''
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(maxBlockTime)) {
+    throw new Error(`invalid partition price watermark ${JSON.stringify(maxBlockTime)}`)
+  }
+  return ` AND interval_start <= (toDateTime('${maxBlockTime}') - toIntervalHour(1))`
+}
+
 export function buildPartitionInsertSql(
   partition: string,
   targetTable = 'price_data.account_trade_volume',
+  maxBlockTime?: string,
 ): string {
   const md = maxDecimals()
   const usdDivisor = (10n ** BigInt(md)).toString()
@@ -199,7 +216,7 @@ valued AS (
   FROM net n
   ASOF LEFT JOIN (
     SELECT asset_id, interval_start + INTERVAL 1 HOUR AS price_time, argMaxMerge(close_state) AS close
-    FROM price_data.ohlc_1h WHERE asset_id IN (${priceIdUniverse()}) GROUP BY asset_id, interval_start
+    FROM price_data.ohlc_1h WHERE asset_id IN (${priceIdUniverse()})${priceWindowSql(maxBlockTime)} GROUP BY asset_id, interval_start
   ) p ON p.asset_id = ${priceAliasSql('n.asset_id')} AND p.price_time <= n.block_time
 )
 SELECT account, block_height, trade_key,

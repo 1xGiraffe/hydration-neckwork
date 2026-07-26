@@ -120,3 +120,10 @@ CREATE TABLE IF NOT EXISTS price_data.lp_lifecycle_events (`block_height` UInt32
 -- already done. Replacement key mirrors raw_balance_observations' own within
 -- asset_kind='substrate'.
 CREATE TABLE IF NOT EXISTS price_data.xyk_lp_share_observations (`asset_id` Int32, `account_id` String, `block_height` UInt32, `observation_id` String, `total` Nullable(String), `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (asset_id, account_id, block_height, observation_id) SETTINGS index_granularity = 8192;
+-- Per-derived-partition source watermarks for the account_trade_volume staleness
+-- check (MV-fed): newest ingest, highest block and latest block time among the
+-- swap rows the netting consumes. Keyed on the derived table's synthetic
+-- toYYYYMM(toDateTime(block_height * 12)) partition, which ClickHouse cannot
+-- invert into a raw_events block range. max() is idempotent under replay, so
+-- re-inserting a range leaves every watermark unchanged.
+CREATE TABLE IF NOT EXISTS price_data.swap_source_partition_watermarks (`p` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_max_ts` SimpleAggregateFunction(max, DateTime)) ENGINE = AggregatingMergeTree PARTITION BY tuple() ORDER BY p SETTINGS index_granularity = 64;

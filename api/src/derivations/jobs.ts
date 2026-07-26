@@ -18,10 +18,7 @@
 // on-demand staging twins) or writes the (retired) lp_history_model_coverage gate rows.
 
 import type { ClickHouseClient } from '../db/client.ts'
-import {
-  buildPartitionInsertSql,
-  swapEventFilterSql,
-} from '../services/accountTradeVolume.ts'
+import { buildPartitionInsertSql } from '../services/accountTradeVolume.ts'
 import { allExplorerAssets } from '../services/explorerAssets.ts'
 import {
   buildOmnipoolOwnerIntervals,
@@ -109,17 +106,26 @@ async function atomicFullReplace(
 // at-or-past the partition's last source swap block. Price backfill descends
 // contiguously (supervisor), so coverage is monotone and each partition
 // computes exactly once it is priceable — and an empty blocks table (brand-new
-// DB) yields no candidates at all. The swap-row filter comes from the service
-// so it matches the exact source rows the netting consumes.
+// DB) yields no candidates at all.
+//
+// The source watermarks come from price_data.swap_source_partition_watermarks
+// (clickhouse/schema), an MV over the same swap-row filter. Asking raw_events
+// directly meant a full-table aggregate every cycle: the derived partition key
+// is toYYYYMM(toDateTime(block_height * 12)), which ClickHouse cannot invert
+// into a primary-key range, and raw_events is partitioned on real
+// block_timestamp, so neither form of pruning applied. max() is idempotent under
+// replay, so the MV holds the same watermarks in ~50 rows. Dropping raw rows
+// would leave a watermark high rather than low, which re-marks a partition stale
+// rather than hiding staleness.
 export function stalePartitionsSql(): string {
   return `
-    SELECT toString(src.p) AS p, toString(src.src_ingest) AS src_ingest
+    SELECT toString(src.p) AS p, toString(src.src_ingest) AS src_ingest, toString(src.src_max_ts) AS src_max_ts
     FROM (
-      SELECT toYYYYMM(toDateTime(block_height * 12)) AS p,
-             max(ingested_at) AS src_ingest,
-             max(block_height) AS src_maxb
-      FROM price_data.raw_events
-      WHERE ${swapEventFilterSql()}
+      SELECT p,
+             max(src_ingest) AS src_ingest,
+             max(src_maxb) AS src_maxb,
+             max(src_max_ts) AS src_max_ts
+      FROM price_data.swap_source_partition_watermarks
       GROUP BY p
     ) AS src
     LEFT JOIN (
@@ -159,10 +165,12 @@ export function partitionsNeedingRebuild(
   return candidates.filter(c => lastRebuilt.get(c.p) !== c.src_ingest).map(c => c.p)
 }
 
+interface StalePartition { p: string; src_ingest: string; src_max_ts: string }
+
 // src is ORDER BY p ascending → rebuild oldest partition first.
-async function stalePartitions(client: ClickHouseClient): Promise<{ p: string; src_ingest: string }[]> {
+async function stalePartitions(client: ClickHouseClient): Promise<StalePartition[]> {
   const res = await client.query({ query: stalePartitionsSql(), format: 'JSONEachRow' })
-  return res.json<{ p: string; src_ingest: string }>()
+  return res.json<StalePartition>()
 }
 
 // Recompute only the partitions whose source/derived coverage diverges. The
@@ -187,12 +195,16 @@ export async function runAccountTradeVolume(client: ClickHouseClient): Promise<D
   const stale = partitionsNeedingRebuild(candidates, rebuiltSourceWatermark)
   if (!stale.length) return { model, rows: 0 }
   const ingestByPartition = new Map(candidates.map(c => [c.p, c.src_ingest]))
+  // The partition's last swap block time, straight off the watermark projection.
+  // It bounds the valuation's ohlc right side from above — see
+  // buildPartitionInsertSql.
+  const maxBlockTimeByPartition = new Map(candidates.map(c => [c.p, c.src_max_ts]))
   await client.command({ query: `CREATE TABLE IF NOT EXISTS ${staging} AS ${live}` })
   for (const p of stale) {
     // Clean slate in staging for this partition (a prior crashed run may have
     // left rows); DROP PARTITION on an absent partition is a no-op.
     await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
-    await client.command({ query: buildPartitionInsertSql(p, staging) })
+    await client.command({ query: buildPartitionInsertSql(p, staging, maxBlockTimeByPartition.get(p)) })
     await client.command({ query: `ALTER TABLE ${live} REPLACE PARTITION ${p} FROM ${staging}` })
     await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
     // Only after the swap succeeded: a failed rebuild must stay a candidate.

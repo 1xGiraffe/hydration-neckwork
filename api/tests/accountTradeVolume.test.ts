@@ -43,6 +43,28 @@ describe('buildPartitionInsertSql', () => {
   })
 })
 
+// The ASOF right side is the whole ohlc_1h feed for every priced asset. Candles
+// that close after the partition's last trade can never win the ASOF match, so
+// they can be cut — but only from above.
+describe('valuation price window', () => {
+  it('cuts candles that close after the partition, and nothing before it', () => {
+    const sql = buildPartitionInsertSql('197011', 'price_data.account_trade_volume', '2022-09-30 23:59:54')
+    expect(sql).toContain("interval_start <= (toDateTime('2022-09-30 23:59:54') - toIntervalHour(1))")
+    // No lower bound: an asset with no candle inside the partition is valued at
+    // the last candle before it, however far back that is.
+    expect(sql).not.toContain('interval_start >=')
+  })
+
+  it('values against the whole feed when the partition watermark is unknown', () => {
+    expect(buildPartitionInsertSql('197011')).not.toContain('interval_start <=')
+  })
+
+  it('rejects a watermark that is not a plain ClickHouse datetime', () => {
+    expect(() => buildPartitionInsertSql('197011', 'price_data.account_trade_volume', "2022-01-01') OR 1=1 --"))
+      .toThrow()
+  })
+})
+
 // Pre-router (legacy) era: a routed DCA execution emits one pallet *Executed event
 // per hop, then one DCA.TradeExecuted. Keying each hop on its own event index turns
 // one trade into per-hop trades — the intermediate asset leaves as an output of the

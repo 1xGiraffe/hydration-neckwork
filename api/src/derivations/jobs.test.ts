@@ -127,11 +127,42 @@ describe('xykTotalSharesInsertSql', () => {
   })
 })
 
+// The source side of the staleness check is a per-partition max over every swap
+// row ever indexed. ClickHouse cannot invert the derived table's synthetic
+// toYYYYMM(toDateTime(block_height * 12)) partition key into a block range, and
+// raw_events is partitioned on real block_timestamp, so asking raw_events for it
+// read the whole table every cycle. max() is replay-idempotent, so an MV can
+// maintain the watermarks instead.
+describe('swap_source_partition_watermarks projection', () => {
+  const mv = schemaStatement('003_materialized_views.sql', 'swap_source_partition_watermarks_mv')
+  const table = schemaStatement('001_tables.sql', 'price_data.swap_source_partition_watermarks')
+
+  // ClickHouse re-prints a stored MV's SELECT from its AST, so the schema file
+  // carries the service's filter with normalised spacing and parentheses.
+  const bare = (sql: string): string => sql.replace(/[\s()]/g, '')
+
+  it('watches exactly the swap rows the netting consumes', () => {
+    expect(bare(mv)).toContain(bare(swapEventFilterSql()))
+  })
+
+  it('keys the watermarks on the derived table partition expression', () => {
+    expect(mv).toContain('toYYYYMM(toDateTime(block_height * 12))')
+  })
+
+  it('carries only watermarks a replayed insert cannot inflate', () => {
+    // max() of a re-inserted row is the same value; a sum or count would double.
+    expect(table).toContain('SimpleAggregateFunction(max, DateTime)')
+    expect(table).toContain('SimpleAggregateFunction(max, UInt32)')
+    expect(table).not.toContain('SimpleAggregateFunction(sum')
+    expect(table).not.toContain('AggregateFunction(count')
+  })
+})
+
 describe('stalePartitionsSql', () => {
   it('selects stale partitions by ingest-time watermark, not a count comparison', () => {
     const sql = stalePartitionsSql()
     // Ingest-time comparison: max raw ingested_at vs max derived computed_at.
-    expect(sql).toContain('max(ingested_at)')
+    expect(sql).toContain('max(src_ingest)')
     expect(sql).toContain('max(computed_at)')
     // No derived rows OR newer raw than derived → rebuild.
     expect(sql).toContain('der.der_computed IS NULL')
@@ -141,13 +172,18 @@ describe('stalePartitionsSql', () => {
     expect(sql).not.toMatch(/\bcount\s*\(/i)
   })
 
-  it('scopes the raw side to the service swap-row filter (single source of truth)', () => {
-    expect(stalePartitionsSql()).toContain(swapEventFilterSql())
+  it('reads the watermark projection, never raw_events', () => {
+    const sql = stalePartitionsSql()
+    expect(sql).toContain('price_data.swap_source_partition_watermarks')
+    expect(sql).not.toContain('price_data.raw_events')
+  })
+
+  it('carries the price window the rebuild bounds its valuation candles with', () => {
+    expect(stalePartitionsSql()).toContain('src_max_ts')
   })
 
   it('reads from the source and derived tables and matches the table partition key', () => {
     const sql = stalePartitionsSql()
-    expect(sql).toContain('price_data.raw_events')
     expect(sql).toContain('price_data.account_trade_volume')
     expect(sql).toContain('toYYYYMM(toDateTime(block_height * 12))')
   })
