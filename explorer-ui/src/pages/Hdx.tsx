@@ -4,9 +4,10 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths } from '../router'
 import { Crumbs, F, AddrPill, AssetIcon, ChartSkeleton, EmptyRow, compactAmount } from '../components/ui'
 import {
-  fmtHdx, lockColor, cohortColor, LOCK_ORDER,
+  fmtHdx, cohortColor,
   ChartLegend, ShareBar, StackedColumnChart, MirroredBarChart, GigaLiquidationChart,
 } from '../components/HdxCharts'
+import { LOCK_ORDER, lockColor } from '../components/lockColors'
 import type { ShareSegment, StackColumn, MirrorBar } from '../components/HdxCharts'
 import type { HdxDashboard, HdxLockType, HdxMover } from '../types'
 import { ChartTooltipRow as TipRow, DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'

@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { F, compactAmount } from './ui'
-import { lockColor } from './HdxCharts'
+import { lockColor } from './lockColors'
 import type { AddressBalance, BalanceLockComponent, BalanceUnlockSlice } from '../types'
 
 // Compact per-asset lock/reserve view for the balances-treemap inspector
