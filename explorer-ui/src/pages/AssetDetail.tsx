@@ -99,7 +99,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
             {tab === 'activity' && <>
               <ActivityChips value={activityType} onChange={v => setQuery({ type: v === 'all' ? null : v, action: null, page: null })} />
               <FilterZone fields={activityFilterFields(activityType, [], false)} values={{ ...activityFilters.values, action: activityAction }} onChange={activityFilters.onChange} onClear={activityFilters.onClear} />
-              <ActivityTable rows={assetActivity} now={now} live={activityPage === 0} loading={activity.isFetching && !assetActivity.length}
+              <ActivityTable rows={assetActivity} now={now} live={activityPage === 0} loading={activity.isFetching && !assetActivity.length} pageSize={ACTIVITY_PAGE}
                 error={activity.error} onRetry={() => { void activity.refetch() }} />
               <Pager page={activityPage} hasNext={activityPages.hasNext} note={activityPages.note} onPage={p => setQuery({ page: p > 0 ? String(p) : null })} />
             </>}
@@ -108,7 +108,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
               <div className="panel"><table className="tbl">
                 <thead><tr><th style={{ width: 50 }}>#</th><th>Holder</th><th className="r">Balance</th><th className="r">Value</th><th className="r">Share</th></tr></thead>
                 <tbody>
-                  {holders.isLoading && !holderRows.length ? <TableSkeleton cols={5} />
+                  {holders.isLoading && !holderRows.length ? <TableSkeleton cols={5} rows={HOLDERS_PAGE} />
                     : holderRows.length ? holderRows.map((h, i) => (
                     <tr key={i} {...(h.account ? rowNav(accountHref(h.account)) : {})}>
                       <td data-label="Rank" className="mono muted">{h.rank}</td>

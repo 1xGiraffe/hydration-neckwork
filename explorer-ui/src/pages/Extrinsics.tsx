@@ -44,7 +44,7 @@ export function Extrinsics() {
         <table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Call</th><th>Signer</th><th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody>
-            {isFetching && !rows.length ? <TableSkeleton cols={7} /> : !rows.length ? <EmptyRow cols={7}>No extrinsics</EmptyRow> : rows.map(x => <ExtRow key={`${x.blockHeight}-${x.index}`} x={x} now={now} isNew={fresh.has(`${x.blockHeight}-${x.index}`)} />)}
+            {isFetching && !rows.length ? <TableSkeleton cols={7} rows={PAGE} /> : !rows.length ? <EmptyRow cols={7}>No extrinsics</EmptyRow> : rows.map(x => <ExtRow key={`${x.blockHeight}-${x.index}`} x={x} now={now} isNew={fresh.has(`${x.blockHeight}-${x.index}`)} />)}
           </tbody>
         </table>
         <Pager page={page} totalPages={pages.totalPages} hasNext={pages.hasNext} note={pages.note} onPage={setPage} />

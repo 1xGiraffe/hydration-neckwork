@@ -39,7 +39,7 @@ function ReferendumCell({ row }: { row: VoteTableRow }) {
   )
 }
 
-export function VotesTable({ rows, asset, now, showAccount, showReferendum, sortHeads, loading, error, onRetry }: {
+export function VotesTable({ rows, asset, now, showAccount, showReferendum, sortHeads, loading, error, onRetry, pageSize }: {
   rows: VoteTableRow[]
   asset: AssetRef
   now: number
@@ -51,6 +51,8 @@ export function VotesTable({ rows, asset, now, showAccount, showReferendum, sort
   loading?: boolean
   error?: unknown
   onRetry?: () => void
+  // Sizes the loading skeleton on the paged surface so the pager under it holds still.
+  pageSize?: number
 }) {
   const cols = 2 + (showAccount ? 1 : 0) + (showReferendum ? 1 : 0)
   return (
@@ -63,7 +65,7 @@ export function VotesTable({ rows, asset, now, showAccount, showReferendum, sort
         <th className="r">{sortHeads?.time ?? 'Time'}</th>
       </tr></thead>
       <tbody>
-        {loading ? <TableSkeleton cols={cols + 1} />
+        {loading ? <TableSkeleton cols={cols + 1} rows={pageSize} />
           : error && !rows.length ? <ErrorRow cols={cols + 1} title="Couldn’t load votes" error={error} onRetry={onRetry} />
             : !rows.length ? <EmptyRow cols={cols + 1}>No votes</EmptyRow>
               : rows.map(row => (

@@ -80,7 +80,7 @@ export function Accounts() {
             <th className="r">{sTh('activity', 'Activity')}</th>
           </tr></thead>
           <tbody>
-            {isLoading && !data ? <TableSkeleton cols={10} /> : !rows.length ? <EmptyRow cols={10}>No accounts</EmptyRow> : rows.map((r, i) => {
+            {isLoading && !data ? <TableSkeleton cols={10} rows={PAGE} /> : !rows.length ? <EmptyRow cols={10}>No accounts</EmptyRow> : rows.map((r, i) => {
               // Badge only for actual borrowers — pure suppliers ('inf') show nothing.
               // Tag rows link DefiSim to the member holding the worst position.
               const hf = r.healthFactor && r.healthFactor !== 'inf' ? healthFactorDisplay(r.healthFactor) : null

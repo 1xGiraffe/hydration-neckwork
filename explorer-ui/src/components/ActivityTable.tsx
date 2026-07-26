@@ -209,7 +209,10 @@ function activityKey(r: ActivityRow): string {
     r.assetOut?.assetId ?? '', r.amountIn ?? r.amount ?? '', r.who?.accountId ?? '', r.mmMarketKey ?? ''].join('|')
 }
 
-export function ActivityTable({ rows, noActor, now, live, loading, error, onRetry, dcaExecutionLinks }: { rows: ActivityRow[]; noActor?: boolean; now: number; live?: boolean; loading?: boolean; error?: unknown; onRetry?: () => void; dcaExecutionLinks?: boolean }) {
+// `pageSize` sizes the loading skeleton, so a paged feed reserves the height it is
+// about to fill and the pager beneath it does not jump. Unpaged surfaces (a block's
+// or extrinsic's own activity) show whatever the record holds and leave it unset.
+export function ActivityTable({ rows, noActor, now, live, loading, error, onRetry, dcaExecutionLinks, pageSize }: { rows: ActivityRow[]; noActor?: boolean; now: number; live?: boolean; loading?: boolean; error?: unknown; onRetry?: () => void; dcaExecutionLinks?: boolean; pageSize?: number }) {
   const cols = noActor ? 4 : 5
   // Deduped stable keys: same row → same key across renders (so prepended live rows
   // are detected as new without remounting the rest); duplicates get a suffix.
@@ -220,7 +223,7 @@ export function ActivityTable({ rows, noActor, now, live, loading, error, onRetr
     <div className="panel"><table className="tbl">
       <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
       <tbody>
-        {loading && !rows.length ? <TableSkeleton cols={cols} />
+        {loading && !rows.length ? <TableSkeleton cols={cols} rows={pageSize} />
           : error && !rows.length ? <ErrorRow cols={cols} title="Couldn’t load activity" error={error} onRetry={onRetry} />
             : !rows.length ? <EmptyRow cols={cols}>No activity</EmptyRow>
               : rows.map((r, i) => {

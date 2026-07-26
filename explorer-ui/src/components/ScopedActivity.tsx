@@ -151,7 +151,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
           onChange={activityFilters.onChange}
           onClear={activityFilters.onClear}
         />
-        <ActivityTable rows={activityRows} now={now} live={page === 0} loading={activity.isFetching && !activity.data?.length}
+        <ActivityTable rows={activityRows} now={now} live={page === 0} loading={activity.isFetching && !activity.data?.length} pageSize={PAGE_SIZE}
           error={activity.error} onRetry={() => { void activity.refetch() }} />
         <Pager page={page} totalPages={totalPages} hasNext={hasNextPage(totalPages, page, activityRows.length)} note={countNote} onPage={setPage} />
       </>}
@@ -161,7 +161,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
         <div className="panel"><table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Call</th>{showSigner && <th>Sender</th>}{showOrigin && <th>Origin</th>}<th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody>
-            {extrinsics.isFetching && !extrinsics.data?.length ? <TableSkeleton cols={extrinsicColumns} />
+            {extrinsics.isFetching && !extrinsics.data?.length ? <TableSkeleton cols={extrinsicColumns} rows={PAGE_SIZE} />
               : extrinsics.error && !extrinsics.data?.length
                 ? <ErrorRow cols={extrinsicColumns} title="Couldn’t load extrinsics" error={extrinsics.error} onRetry={() => { void extrinsics.refetch() }} />
                 : !extrinsics.data?.length ? <EmptyRow cols={extrinsicColumns}>No extrinsics</EmptyRow>
@@ -176,7 +176,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
         <div className="panel"><table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Extrinsic</th><th>Event</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody>
-            {events.isFetching && !events.data?.length ? <TableSkeleton cols={6} />
+            {events.isFetching && !events.data?.length ? <TableSkeleton cols={6} rows={PAGE_SIZE} />
               : events.error && !events.data?.length
                 ? <ErrorRow cols={6} title="Couldn’t load events" error={events.error} onRetry={() => { void events.refetch() }} />
                 : !events.data?.length ? <EmptyRow cols={6}>No events</EmptyRow>

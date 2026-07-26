@@ -1030,6 +1030,9 @@ export function SkeletonRows({ rows = 8 }: { rows?: number }) {
 // Skeleton <tr> rows for a table body — keeps the header and column grid in place
 // while data loads (instead of a lone centered "Loading…"). Bar widths vary per
 // cell for a natural shimmer; collapses to one bar per row on mobile cards.
+// A paged list passes its page size: eight rows standing in for twenty-five made
+// the panel grow ~900px when the data landed, which is a scroll jump under the
+// reader and most of the layout shift on /blocks.
 export function TableSkeleton({ cols, rows = 8 }: { cols: number; rows?: number }) {
   const widths = ['58%', '42%', '70%', '36%', '52%', '48%', '64%', '40%']
   return <>{Array.from({ length: rows }).map((_, r) => (
@@ -1060,11 +1063,18 @@ export function ChartSkeleton({ h = 120 }: { h?: number }) {
     </div>
   )
 }
+// Real tab buttons carrying a shimmer instead of a label, so the placeholder is
+// exactly as tall as the loaded bar at every breakpoint — the tab font shrinks on
+// phones, and a hardcoded height was 2px out there and shifted the page.
 function TabsSkeleton({ tabs = 4 }: { tabs?: number }) {
-  const widths = ['72px', '86px', '68px', '92px']
+  const widths = ['52px', '66px', '48px', '72px']
   return (
     <div className="tabs tabs-skeleton" aria-hidden="true">
-      {Array.from({ length: tabs }).map((_, i) => <span key={i} className="sk-bar" style={{ width: widths[i % widths.length], animationDelay: `${(i % 4) * 80}ms` }} />)}
+      {Array.from({ length: tabs }).map((_, i) => (
+        <button key={i} type="button" disabled tabIndex={-1}>
+          <span className="sk-bar" style={{ width: widths[i % widths.length], animationDelay: `${(i % 4) * 80}ms` }} />
+        </button>
+      ))}
     </div>
   )
 }

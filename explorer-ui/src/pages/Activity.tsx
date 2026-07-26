@@ -89,7 +89,7 @@ export function Activity() {
       <ActivityChips value={type} onChange={v => setQuery({ tab: v === 'all' ? null : v, action: null, page: null })} />
       <FilterZone fields={activityFilterFields(type, assets.data ?? [])} values={f} onChange={onChange} onClear={onClear}
         extra={<SmolToggle hiding={hideSmol} onToggle={() => { toggleSmol(); setQuery({ page: null }) }} />} />
-      <ActivityTable rows={rows} now={now} live={page === 0} loading={isFetching && rows.length === 0} error={error} onRetry={() => { void refetch() }} />
+      <ActivityTable rows={rows} now={now} live={page === 0} loading={isFetching && rows.length === 0} pageSize={PAGE} error={error} onRetry={() => { void refetch() }} />
       <Pager page={page} totalPages={pages.totalPages} hasNext={pages.hasNext} note={pages.note} onPage={setPage} />
     </div>
   )

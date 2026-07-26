@@ -942,7 +942,10 @@ svg { display: block; }
 @media (max-width: 720px){ .dl .dt { border-bottom: 0; padding-bottom: 2px; } }
 
 .detail-header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
-.detail-header .nav-btns { display: inline-flex; gap: 4px; margin-left: auto; }
+/* A fixed slot, not a shrink-wrap: the strip holds 0, 1 or 2 arrows depending on
+   where the record sits, and on a phone it wraps onto its own line, so a width
+   that tracked the button count would move everything below it. */
+.detail-header .nav-btns { display: inline-flex; justify-content: flex-end; gap: 4px; margin-left: auto; min-width: 72px; min-height: 34px; }
 .detail-header .nav-btns a, .detail-header .nav-btns button { width: 34px; height: 34px; border-radius: 9px; border: 1px solid var(--border); background: var(--panel); display: inline-flex; align-items: center; justify-content: center; color: var(--text-medium); }
 .detail-header .nav-btns a:hover, .detail-header .nav-btns button:hover { color: var(--text-high); background: var(--panel-hover); }
 .detail-header .nav-btns a:focus-visible, .detail-header .nav-btns button:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
@@ -1476,8 +1479,8 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .chart-sk-metrics .sk-bar { width: 44px; height: 10px; }
 .chart-sk-plot { position: relative; flex: 1 1 auto; min-height: 34px; display: flex; align-items: flex-end; gap: 8px; padding-top: 10px; }
 .chart-sk-bar { flex: 1 1 0; min-width: 5px; max-width: 28px; border-radius: 5px 5px 2px 2px; opacity: .78; }
-.tabs-skeleton { align-items: center; min-height: 43px; }
-.tabs-skeleton .sk-bar { height: 12px; border-radius: 9999px; margin: 0 12px 0 4px; }
+.tabs-skeleton { align-items: center; }
+.tabs-skeleton .sk-bar { display: inline-block; height: 12px; border-radius: 9999px; vertical-align: middle; }
 .acct-head-skeleton { align-items: center; }
 .sk-avatar { width: 60px; height: 60px; border-radius: 50%; flex-shrink: 0; }
 .acct-head-skeleton .acct-meta { flex: 1 1 0; max-width: 620px; min-width: 0; }

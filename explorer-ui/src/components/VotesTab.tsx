@@ -58,6 +58,7 @@ export function VotesTab({ scope }: { scope: VotesScope }) {
         showAccount={scope.kind === 'tag'}
         showReferendum
         loading={votes.isFetching && !votes.data?.length}
+        pageSize={PAGE_SIZE}
         error={votes.error}
         onRetry={() => { void votes.refetch() }}
       />
