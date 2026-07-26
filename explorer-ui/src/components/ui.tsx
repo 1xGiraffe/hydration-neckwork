@@ -5,6 +5,7 @@ import { Link, paths, navigate } from '../router'
 import type { AccountRef, AssetOrigin, AssetRef, FailureReason } from '../types'
 import { parseUtcTimestamp } from '../utils/time'
 import { useMediaQuery } from '../hooks/useMediaQuery'
+import { voteSideLabel } from '../utils/voteRows'
 import { CAT } from './activityColors'
 
 /* ============ shared formatters ============ */
@@ -589,10 +590,12 @@ export function StatusBadge({ ok, reason, compact }: { ok: boolean; reason?: str
     ? <span className="badge ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>Success</span>
     : <span className="badge fail" title={reason || undefined}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>Failed</span>
 }
+// Aye and nay are valence, so they take the green and the red; the split kinds back
+// both sides at once (or neither), which is no valence at all, so they keep the vote
+// category's own lavender. The words come from the one shared mapping.
 export function VoteSideBadge({ side }: { side: string | null | undefined }) {
-  const normalized = (side ?? 'Vote').toLowerCase()
-  const col = normalized === 'aye' ? 'var(--green)' : normalized === 'nay' ? 'var(--red)' : CAT.vote
-  const label = normalized === 'aye' ? 'AYE' : normalized === 'nay' ? 'NAY' : (side || 'Vote')
+  const label = voteSideLabel(side)
+  const col = label === 'AYE' ? CAT.aye : label === 'NAY' ? CAT.nay : CAT.vote
   return <span className="pill-badge" style={{ color: col, background: `color-mix(in srgb, ${col} 15%, transparent)` }}>{label}</span>
 }
 export function FinalizedBadge({ finalized }: { finalized: boolean }) {
@@ -1246,8 +1249,9 @@ export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = 
   liquidity: [{ v: 'Add', label: 'Add liquidity' }, { v: 'Remove', label: 'Remove liquidity' }, { v: 'Create', label: 'Create pool' }, { v: 'Claim', label: 'Claim rewards' }],
   mm: [{ v: 'Supply', label: 'Lend' }, { v: 'Withdraw', label: 'Withdraw' }, { v: 'Borrow', label: 'Borrow' }, { v: 'Repay', label: 'Repay' }, { v: 'LiquidationCall', label: 'Liquidate' }, { v: 'ClaimRewards', label: 'Claim rewards' }],
   stake: [{ v: 'Stake', label: 'Stake' }, { v: 'Add stake', label: 'Add stake' }, { v: 'Unstake', label: 'Unstake' }, { v: 'Force unstake', label: 'Force unstake' }, { v: 'Staking reward', label: 'Staking reward' }, { v: 'Giga stake', label: 'Giga stake' }, { v: 'Giga unstake', label: 'Giga unstake' }, { v: 'Unstake cancelled', label: 'Unstake cancelled' }, { v: 'Giga migration', label: 'Giga migration' }, { v: 'Giga reward', label: 'Giga reward' }, { v: 'Collator payout', label: 'Collator payout' }],
-  // The value is the chain's own term; the label is how this app writes a side.
-  vote: [{ v: 'Aye', label: 'AYE' }, { v: 'Nay', label: 'NAY' }],
+  // The value is the chain's own term; the label is how this app writes that side —
+  // taken from the same mapping the badges use, so the two cannot diverge.
+  vote: [{ v: 'Aye', label: voteSideLabel('Aye') }, { v: 'Nay', label: voteSideLabel('Nay') }],
 }
 // Clamp a deep-linked action to the active type's known actions ('' = all).
 export function normalizeActivityAction(type: string, action: string): string {

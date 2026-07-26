@@ -5,6 +5,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../router'
 import { activityLabel, canonicalTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
 import { Crumbs, F, AddrPill, AssetChip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows } from '../components/ui'
+import { voteSideLabel } from '../utils/voteRows'
 
 export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: string }) {
   const label = activityLabel(slug)
@@ -29,7 +30,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
 
   const eventId = row?.eventIndex != null ? `${row.blockHeight}-${row.eventIndex}` : null
   const voteSub = row?.type === 'vote'
-    ? [row.voteSide?.toUpperCase(), row.voteConviction, row.voteRefTitle ?? (row.voteRef ? `Referendum #${row.voteRef}` : null)].filter(Boolean).join(' · ')
+    ? [voteSideLabel(row.voteSide), row.voteConviction, row.voteRefTitle ?? (row.voteRef ? `Referendum #${row.voteRef}` : null)].filter(Boolean).join(' · ')
     : ''
   return (
     <div className="wrap">

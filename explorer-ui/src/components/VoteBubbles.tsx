@@ -1,7 +1,8 @@
 import { useMemo } from 'react'
 import { Link, paths } from '../router'
 import type { ReferendumVoter } from '../types'
-import { HEIGHT, WIDTH, packVoters, type Bubble } from './voteBubbleLayout'
+import { HEIGHT, WIDTH, packVoters } from './voteBubbleLayout'
+import { voteSideLabel } from '../utils/voteRows'
 import { AccountEmoji, F, ShortAddr, TagIcon, moduleName } from './ui'
 import type { AccountRef } from '../types'
 
@@ -43,10 +44,6 @@ export function VoteBubbles({ voters, decimals, symbol }: { voters: ReferendumVo
 
   if (!bubbles.length) return <div className="empty-note">No conviction-weighted votes to plot</div>
 
-  // A side is always written in caps in this app (see VoteSideBadge), including in
-  // the hover card rows these attributes feed.
-  const sideWord = (bubble: Bubble) => (bubble.side === 'split' ? 'SPLIT' : bubble.side === 'aye' ? 'AYE' : 'NAY')
-
   return (
     <div className="vote-bubbles">
       <div className="vb-canvas" style={{ aspectRatio: `${WIDTH} / ${HEIGHT}` }}>
@@ -59,9 +56,14 @@ export function VoteBubbles({ voters, decimals, symbol }: { voters: ReferendumVo
             // same account card as any pill in a table (HoverCard.tsx SELECTOR). The
             // vote itself rides along in data attributes, so that card can add this
             // account's side, conviction and weighted power to its own rows.
+            //
+            // The COLOUR follows where the power landed (bubbleSide, from the weighted
+            // legs) because that is what the cluster's colour mix reads as; the WORD is
+            // the side actually cast, through the same mapping the votes table below
+            // badges it with, so a card and a row never disagree about one vote.
             className: `vb-bubble addr-pill vb-${bubble.side}`,
             data: {
-              'data-vote-side': sideWord(bubble),
+              'data-vote-side': voteSideLabel(bubble.voter.side),
               'data-vote-conviction': bubble.voter.conviction ?? '',
               'data-vote-weighted': `${F.amount(bubble.voter.weighted, decimals)} ${symbol}`,
             },

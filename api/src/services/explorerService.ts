@@ -7598,7 +7598,9 @@ export function voteDetails(args: Record<string, unknown>): VoteDetails {
     const amount = /^\d+$/.test(aye) && /^\d+$/.test(nay) && /^\d+$/.test(abstain)
       ? String(BigInt(aye) + BigInt(nay) + BigInt(abstain))
       : null
-    return { amount, side: 'Split abstain', conviction: null }
+    // The chain's own variant name, as the referendum voter list also reports it —
+    // one token per side across both vote sources, which the UI maps to its label.
+    return { amount, side: 'SplitAbstain', conviction: null }
   }
   const std = decodeStandardVote(vote.vote)
   return { amount: argStr(vote, 'balance') || null, ...std }

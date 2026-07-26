@@ -18,6 +18,16 @@ describe('value-aware account activity precision', () => {
       .toBe(String(3n * BigInt(max)))
   })
 
+  // Activity rows and the referendum voter list both feed the same vote badge, so both
+  // report a side with the chain's own AccountVote variant name.
+  it('reports a split vote side as the chain names the variant', () => {
+    expect(voteDetails({ vote: { __kind: 'Split', aye: '1', nay: '1' } }).side).toBe('Split')
+    expect(voteDetails({ vote: { __kind: 'SplitAbstain', aye: '0', nay: '0', abstain: '1' } }).side).toBe('SplitAbstain')
+    expect(voteDetails({ vote: { __kind: 'Standard', vote: 128, balance: '1' } }).side).toBe('Aye')
+    expect(voteDetails({ vote: { __kind: 'Standard', vote: 3, balance: '1' } }).side).toBe('Nay')
+    expect(voteDetails({}).side).toBe('Vote')
+  })
+
   it('rounds the minimum passing raw amount upward at the threshold boundary', () => {
     expect(minimumRawAmountForValue('10', '2.5', 6)).toBe(4_000_000n)
     expect(minimumRawAmountForValue('10', '3', 18)).toBe(3_333_333_333_333_333_334n)
