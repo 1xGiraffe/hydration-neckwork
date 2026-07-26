@@ -1,9 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { initExplorerService } from '../src/services/explorerService.ts'
+import { initReferendumTitleService } from '../src/services/referendumTitleService.ts'
 import {
   convictionName,
   convictionTenths,
   decodeVoteByte,
+  getReferendum,
   indirectTallyFrom,
+  initGovernanceService,
   isAfter,
   isConcludingEvent,
   latestVotePerAccount,
@@ -13,6 +17,7 @@ import {
   tallyFromArgs,
   tallyVoters,
   toVoter,
+  unexplainedVoteKeys,
   weightedVotePower,
   type ReferendumVoter,
   type VoteEventRow,
@@ -364,5 +369,95 @@ describe('on-chain tally extraction', () => {
     expect(tallyFromArgs('{"tally":{"ayes":"1e21","nays":"0"}}')).toBeNull()
     expect(tallyFromArgs('{"tally":{"ayes":12,"nays":0}}')).toBeNull()
     expect(tallyFromArgs('not json')).toBeNull()
+  })
+})
+
+// The referendum index lives on the vote CALL, and resolving it out of
+// price_data.raw_calls.args_json means reading a ~11 KB-per-row JSON column across
+// every call in the referendum's window. That is what took referenda 21, 113 and 204
+// to 2.5 GiB and 3.66 GiB of peak memory, over the 3.73 GiB request ceiling, and
+// answered HTTP 500. The index now comes from the referendum-first
+// governance_vote_calls projection, so raw_calls is only ever touched for the handful
+// of wrapper extrinsics whose payload has to be decoded — by exact block, never by
+// range.
+describe('referendum page read bounds', () => {
+  const rowsFor = (query: string): unknown[] => {
+    if (query.includes("event_name LIKE {prefix:String}")) {
+      return [
+        { event_name: 'Referenda.Submitted', block_height: 9_721_074, extrinsic_index: 3, ts: '2025-10-01 00:00:00', args_json: '{"index":204,"track":1}' },
+        { event_name: 'Referenda.TimedOut', block_height: 9_922_674, extrinsic_index: null, ts: '2025-10-15 00:00:00', args_json: '{"index":204,"tally":{"ayes":"10","nays":"0","support":"5"}}' },
+      ]
+    }
+    if (query.includes('price_data.governance_vote_calls') && query.includes('vote_kind')) {
+      return [{
+        block_height: 9_800_000, extrinsic_index: 2, ts: '2025-10-05 00:00:00',
+        who: `0x${'11'.repeat(32)}`, kind: 'Standard', vote_byte: 129, balance: '1000', aye: '', nay: '', abstain: '',
+      }]
+    }
+    if (query.includes('price_data.governance_vote_calls')) return [{ block_height: 9_800_000, extrinsic_index: 2, n: 1 }]
+    if (query.includes("event_name = 'ConvictionVoting.Voted'") && query.includes('count()')) {
+      return [{ block_height: 9_800_000, extrinsic_index: 2, n: 1 }, { block_height: 9_810_000, extrinsic_index: 4, n: 1 }]
+    }
+    if (query.includes("event_name = 'ConvictionVoting.Voted'")) {
+      return [{
+        block_height: 9_800_000, event_index: 7, extrinsic_index: 2, ts: '2025-10-05 00:00:00',
+        who: `0x${'11'.repeat(32)}`, kind: 'Standard', vote_byte: 129, balance: '1000', aye: '', nay: '', abstain: '', removed: 0,
+      }]
+    }
+    return []
+  }
+
+  it('never resolves a referendum index out of raw_calls JSON, and reads raw_calls by key only', async () => {
+    const seen: string[] = []
+    const query = vi.fn(async ({ query }: { query: string }) => {
+      seen.push(query)
+      return { json: async () => rowsFor(query) }
+    })
+    initGovernanceService({ query } as never)
+    initExplorerService({ query } as never)
+    initReferendumTitleService({ query } as never)
+
+    const detail = await getReferendum('opengov', 204, 7)
+    expect(detail?.votesTotal).toBe(1)
+
+    const rawCallReads = seen.filter(sql => sql.includes('price_data.raw_calls'))
+    expect(rawCallReads.length).toBeGreaterThan(0)
+    for (const sql of rawCallReads) {
+      expect(sql).not.toMatch(/JSONExtract\w*\(args_json, '(pollIndex|refIndex|index)'\)/)
+      expect(sql).not.toMatch(/block_height >=/)
+      expect(sql).toMatch(/block_height IN \{blocks:Array\(UInt32\)\}/)
+    }
+    // And the index really is resolved from the projection, keyed by (pallet, ref_index).
+    expect(seen.some(sql => /price_data\.governance_vote_calls[\s\S]*pallet = \{pallet:String\} AND ref_index = \{idx:UInt32\}/.test(sql))).toBe(true)
+  })
+})
+
+// A wrapper payload only has to be decoded for a vote no direct ConvictionVoting.vote
+// call explains. Counting per extrinsic is what makes that set small: a batch of five
+// votes is five call rows, and an extrinsic that voted on some OTHER referendum is
+// explained by its own call — the earlier "not one of THIS referendum's calls" test
+// dragged 2,705 such extrinsics into the decode pass on referendum 204 alone.
+describe('unexplained vote extrinsics', () => {
+  it('keeps only extrinsics with more Voted events than direct vote calls', () => {
+    const keys = unexplainedVoteKeys(
+      [
+        { block_height: 100, extrinsic_index: 2, n: 1 }, // direct vote on another referendum
+        { block_height: 101, extrinsic_index: 3, n: 5 }, // batch of five, all direct
+        { block_height: 102, extrinsic_index: 2, n: 1 }, // gasless permit vote, no call row
+        { block_height: 103, extrinsic_index: 4, n: 3 }, // batch of three, one wrapped
+      ],
+      [
+        { block_height: 100, extrinsic_index: 2, n: 1 },
+        { block_height: 101, extrinsic_index: 3, n: 5 },
+        { block_height: 103, extrinsic_index: 4, n: 2 },
+      ],
+    )
+    expect([...keys].sort()).toEqual(['102:2', '103:4'])
+  })
+
+  it('treats a failed vote call as no explanation at all', () => {
+    // Only successful calls are counted, so an extrinsic whose vote call failed and
+    // whose permit vote succeeded still has to be decoded.
+    expect([...unexplainedVoteKeys([{ block_height: 200, extrinsic_index: 1, n: 1 }], [])]).toEqual(['200:1'])
   })
 })

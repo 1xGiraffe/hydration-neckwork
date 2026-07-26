@@ -215,52 +215,115 @@ export interface VoteEventRow {
   removed: number
 }
 
+interface VoteCallRow {
+  block_height: number
+  extrinsic_index: number | null
+  ts: string
+  who: string
+  kind: string
+  vote_byte: number
+  balance: string
+  aye: string
+  nay: string
+  abstain: string
+}
+
+// Successful vote CALLS one referendum's own index names, from the referendum-first
+// projection `governance_vote_calls`.
+//
+// The index is a call argument, so resolving it from `raw_calls` means reading
+// `args_json` — and that column averages ~11 KB per row across every call on the
+// chain. A vote call is scattered through the window rather than clustered, so
+// nearly every granule holds one and the read degenerates into the whole window's
+// call JSON: 2.5 GiB and 3.66 GiB of peak memory for referendum 204, over the 3.73
+// GiB request ceiling, which is why 21, 113 and 204 answered HTTP 500. The
+// projection stores the decoded index and payload and is keyed by (pallet,
+// ref_index) first, so the same answer is a few KB.
+async function loadVoteCalls(pallet: ReferendumPallet, index: number, fromBlock: number, toBlock: number): Promise<VoteCallRow[]> {
+  const res = await client.query({
+    query: `SELECT block_height, extrinsic_index, toString(block_timestamp) AS ts,
+                   who, vote_kind AS kind, vote_byte, balance, aye, nay, abstain
+            FROM price_data.governance_vote_calls
+            WHERE pallet = {pallet:String} AND ref_index = {idx:UInt32}
+              AND call_name = {call:String} AND success = 1
+              AND block_height >= {from:UInt32} AND block_height <= {to:UInt32}
+              AND extrinsic_index IS NOT NULL
+            ORDER BY block_height, extrinsic_index, call_address`,
+    query_params: {
+      pallet, idx: index, from: fromBlock, to: toBlock,
+      call: pallet === 'opengov' ? 'ConvictionVoting.vote' : 'Democracy.vote',
+    },
+    format: 'JSONEachRow',
+  })
+  return res.json<VoteCallRow>()
+}
+
+export interface ExtrinsicVoteCount { block_height: number; extrinsic_index: number; n: number }
+
+// Vote extrinsics whose ConvictionVoting.Voted events a direct vote call does NOT
+// account for — the only ones whose referendum has to be recovered by decoding a
+// wrapper payload.
+//
+// Compared by COUNT per extrinsic rather than by presence, because an extrinsic can
+// carry several votes: `Utility.batch` items are indexed as their own call rows, so a
+// batch of five votes has five. An extrinsic with as many successful vote calls as
+// Voted events is therefore fully explained, whichever referenda those votes name —
+// including votes on OTHER referenda, which is what made this set 2,755 extrinsics
+// wide for referendum 204 when it was computed as "not one of THIS referendum's own
+// calls". Across all history 67,766 Voted events resolve to 66,254 direct calls,
+// leaving exactly the 1,512 wrapped votes, and no extrinsic mixes the two.
+export function unexplainedVoteKeys(voted: ExtrinsicVoteCount[], calls: ExtrinsicVoteCount[]): Set<string> {
+  const explained = new Map<string, number>()
+  for (const row of calls) explained.set(`${row.block_height}:${row.extrinsic_index}`, Number(row.n))
+  const keys = new Set<string>()
+  for (const row of voted) {
+    const key = `${row.block_height}:${row.extrinsic_index}`
+    if (Number(row.n) > (explained.get(key) ?? 0)) keys.add(key)
+  }
+  return keys
+}
+
+async function unexplainedVoteExtrinsics(fromBlock: number, toBlock: number): Promise<Set<string>> {
+  const perExtrinsic = (table: string, predicate: string) => client.query({
+    query: `SELECT block_height, toUInt32(extrinsic_index) AS extrinsic_index, count() AS n
+            FROM ${table}
+            WHERE ${predicate}
+              AND block_height >= {from:UInt32} AND block_height <= {to:UInt32}
+              AND extrinsic_index IS NOT NULL
+            GROUP BY block_height, extrinsic_index`,
+    query_params: { from: fromBlock, to: toBlock }, format: 'JSONEachRow',
+  })
+  const [votedRes, callsRes] = await Promise.all([
+    perExtrinsic('price_data.vote_activity', `event_name = 'ConvictionVoting.Voted'`),
+    perExtrinsic('price_data.governance_vote_calls', `pallet = 'opengov' AND call_name = 'ConvictionVoting.vote' AND success = 1`),
+  ])
+  return unexplainedVoteKeys(await votedRes.json<ExtrinsicVoteCount>(), await callsRes.json<ExtrinsicVoteCount>())
+}
+
 // The (block, extrinsic) pairs that voted on this referendum.
 //
 // Democracy.Voted names its referendum in the event, so those need no lookup at
 // all. ConvictionVoting.Voted does NOT: the index lives on the call. A direct
-// ConvictionVoting.vote call row covers 66,243 of 67,755 conviction votes (97.8%);
+// ConvictionVoting.vote call row covers 66,254 of 67,766 conviction votes (97.8%);
 // the remaining 1,512 are gasless app votes wrapped in
 // MultiTransactionPayment.dispatch_permit (1,441) and proxy/EVM wrappers, whose
 // index is only recoverable by decoding the payload — hence the second pass, which
 // reuses the decoders the activity feed already relies on. Skipping it would drop
 // 2.2% of votes with no visible sign, which is exactly the kind of silent
 // incompleteness this codebase refuses.
-async function convictionVoteExtrinsics(index: number, fromBlock: number, toBlock: number): Promise<Set<string>> {
-  const directRes = await client.query({
-    query: `SELECT DISTINCT block_height, extrinsic_index
-            FROM price_data.raw_calls
-            WHERE call_name = 'ConvictionVoting.vote'
-              AND block_height >= {from:UInt32} AND block_height <= {to:UInt32}
-              AND toUInt32(JSONExtractInt(args_json, 'pollIndex')) = {idx:UInt32}
-              AND extrinsic_index IS NOT NULL`,
-    query_params: { idx: index, from: fromBlock, to: toBlock }, format: 'JSONEachRow',
-  })
+async function convictionVoteExtrinsics(calls: VoteCallRow[], index: number, fromBlock: number, toBlock: number): Promise<Set<string>> {
   const keys = new Set<string>()
-  for (const row of await directRes.json<{ block_height: number; extrinsic_index: number }>()) {
-    keys.add(`${row.block_height}:${row.extrinsic_index}`)
-  }
+  for (const row of calls) keys.add(`${row.block_height}:${row.extrinsic_index}`)
 
-  // Which vote extrinsics in the window a direct call did NOT explain. Resolved in
-  // two steps on purpose: asking for args_json across every wrapper call in a long
-  // window reads hundreds of MB of JSON and tripped the query memory ceiling on
-  // referendum 44, while the unmatched set is tiny (1,512 in all of history) and can
-  // be addressed by key.
-  const candidateRes = await client.query({
-    query: `SELECT DISTINCT block_height, extrinsic_index
-            FROM price_data.vote_activity
-            WHERE event_name = 'ConvictionVoting.Voted'
-              AND block_height >= {from:UInt32} AND block_height <= {to:UInt32}
-              AND extrinsic_index IS NOT NULL`,
-    query_params: { from: fromBlock, to: toBlock }, format: 'JSONEachRow',
-  })
-  const candidates = (await candidateRes.json<{ block_height: number; extrinsic_index: number }>())
-    .filter(row => !keys.has(`${row.block_height}:${row.extrinsic_index}`))
-  if (!candidates.length) return keys
+  // Resolved in two steps on purpose: asking for args_json across every wrapper call
+  // in a long window reads hundreds of MB of JSON and tripped the query memory
+  // ceiling on referendum 44, while the unmatched set is tiny and can be addressed
+  // by key.
+  const candidateKeys = await unexplainedVoteExtrinsics(fromBlock, toBlock)
+  if (!candidateKeys.size) return keys
 
   const wanted = String(index)
-  const blocks = [...new Set(candidates.map(row => row.block_height))]
-  const candidateKeys = new Set(candidates.map(row => `${row.block_height}:${row.extrinsic_index}`))
+  const blocks = [...new Set([...candidateKeys].map(key => Number(key.split(':')[0])))]
   // Gasless app votes arrive as MultiTransactionPayment.dispatch_permit with the
   // SCALE-encoded vote in the permit payload (1,441 of the 1,512), the rest through
   // proxy/utility/multisig wrappers. Both are decoded by the helpers the activity
@@ -312,8 +375,41 @@ async function loadDemocracyVotes(index: number): Promise<VoteEventRow[]> {
   return res.json<VoteEventRow>()
 }
 
+// A vote CALL as a vote row, for the referenda that have no Voted event to read.
+//
+// The call carries the same AccountVote payload as the event and the voter is its
+// signed origin: across the whole event era all 66,254 successful direct vote calls
+// match a Voted event on (who, kind, vote byte, balance) exactly. There is no event
+// index, so the extrinsic index doubles as one — an extrinsic holds at most one vote
+// per account, which is all `latestVotePerAccount` orders by.
+export function voteRowFromCall(row: VoteCallRow): VoteEventRow {
+  return {
+    block_height: row.block_height,
+    event_index: row.extrinsic_index ?? 0,
+    extrinsic_index: row.extrinsic_index,
+    ts: row.ts,
+    who: row.who,
+    kind: row.kind,
+    vote_byte: row.vote_byte,
+    balance: row.balance,
+    aye: row.aye,
+    nay: row.nay,
+    abstain: row.abstain,
+    removed: 0,
+  }
+}
+
 async function loadConvictionVotes(index: number, fromBlock: number, toBlock: number): Promise<VoteEventRow[]> {
-  const keys = await convictionVoteExtrinsics(index, fromBlock, toBlock)
+  const calls = await loadVoteCalls('opengov', index, fromBlock, toBlock)
+  // ConvictionVoting.Voted did not exist before block 7,175,436, but successful
+  // ConvictionVoting.vote calls go back to 6,641,707. OpenGov referenda 0-43 closed
+  // before the event existed, and the split is clean — no referendum's vote calls
+  // straddle the boundary — so those 44 read their votes from the calls. Reading
+  // events alone would show them as having received zero votes, which reads as
+  // "nobody voted" rather than "this is not indexed".
+  if (toBlock < CONVICTION_VOTED_FIRST_BLOCK) return calls.map(voteRowFromCall)
+
+  const keys = await convictionVoteExtrinsics(calls, index, fromBlock, toBlock)
   if (!keys.size) return []
   const blocks = [...new Set([...keys].map(key => Number(key.split(':')[0])))]
   const res = await client.query({
@@ -329,39 +425,6 @@ async function loadConvictionVotes(index: number, fromBlock: number, toBlock: nu
   return rows.filter(row => row.extrinsic_index != null && keys.has(`${row.block_height}:${row.extrinsic_index}`))
 }
 
-// Pre-event-era votes, read from the CALLS.
-//
-// ConvictionVoting.Voted did not exist before block 7,175,436, but successful
-// ConvictionVoting.vote calls go back to 6,641,707 — 13,651 of them. OpenGov
-// referenda 0-43 therefore have vote calls and NO vote events at all, and the split
-// is clean (no referendum straddles the boundary). Reading events alone would show
-// those 44 referenda as having received zero votes, which reads as "nobody voted"
-// rather than "this is not indexed" — so their votes come from the calls instead.
-// The call carries the same AccountVote payload; the voter is the signed origin.
-async function loadPreEventEraVotes(index: number): Promise<VoteEventRow[]> {
-  const res = await client.query({
-    query: `SELECT block_height, toUInt32(extrinsic_index) AS event_index, extrinsic_index,
-                   toString(block_timestamp) AS ts,
-                   JSONExtractString(origin_json, 'value', 'value') AS who,
-                   JSONExtractString(args_json, 'vote', '__kind') AS kind,
-                   toUInt16(JSONExtractInt(args_json, 'vote', 'vote')) AS vote_byte,
-                   JSONExtractString(args_json, 'vote', 'balance') AS balance,
-                   JSONExtractString(args_json, 'vote', 'aye') AS aye,
-                   JSONExtractString(args_json, 'vote', 'nay') AS nay,
-                   JSONExtractString(args_json, 'vote', 'abstain') AS abstain,
-                   0 AS removed
-            FROM price_data.raw_calls
-            WHERE call_name = 'ConvictionVoting.vote'
-              AND block_height < {eventEra:UInt32}
-              AND success = 1
-              AND toUInt32(JSONExtractInt(args_json, 'pollIndex')) = {idx:UInt32}
-              AND extrinsic_index IS NOT NULL
-            ORDER BY block_height, extrinsic_index`,
-    query_params: { idx: index, eventEra: CONVICTION_VOTED_FIRST_BLOCK }, format: 'JSONEachRow',
-  })
-  return res.json<VoteEventRow>()
-}
-
 // Where in the chain a vote (or its removal) sits. Block plus extrinsic, because an
 // account can remove a vote and cast a new one in the same block: Democracy 206 has
 // exactly that, and only the LATER action stands.
@@ -372,44 +435,68 @@ export function isAfter(a: VotePosition, b: VotePosition): boolean {
   return (a.extrinsicIndex ?? -1) > (b.extrinsicIndex ?? -1)
 }
 
+const REMOVAL_CALLS: Record<ReferendumPallet, string[]> = {
+  opengov: ['ConvictionVoting.remove_vote', 'ConvictionVoting.remove_other_vote', 'ConvictionVoting.force_remove_vote'],
+  democracy: ['Democracy.remove_vote', 'Democracy.remove_other_vote', 'Democracy.force_remove_vote'],
+}
+
 // Votes WITHDRAWN, meaning removed while the referendum was still open — the LAST such
 // removal per account, so a vote recast afterwards still counts.
 //
 // The window ends one block before the conclusion, not at the last lifecycle event: a
-// removal once the vote has closed is just the voter unlocking their balance, and 1,179
-// of 2,436 OpenGov removals are of that kind — treating those as withdrawals would
-// silently delete votes that did count.
+// removal once the vote has closed is just the voter unlocking their balance —
+// treating those as withdrawals would silently delete votes that did count.
 //
-// The two pallets have to be read from different places. ConvictionVoting.VoteRemoved
-// names the voter but not the poll (same shape as Voted), so the index comes from the
-// remove_vote call on the same extrinsic. Democracy emits NO event for a removal at all,
-// so there the CALL is the only record: remove_vote drops the signer's own vote, while
-// remove_other_vote/force_remove_vote name their target in the args.
+// Both pallets name the poll only on the CALL, so the referendum-first projection is
+// what selects the removals; resolving the index out of `raw_calls.args_json` instead
+// read 825 MiB of call JSON for referendum 204's window alone.
+//
+// OpenGov then confirms each one against ConvictionVoting.VoteRemoved, addressed by
+// exact key. That event is not bookkeeping — `pallet_conviction_voting` emits it only
+// while the poll is Ongoing, so it is precisely the "was this a withdrawal or a
+// post-close unlock?" answer, and only 732 of 55,176 removal calls in all of history
+// carry one. One extrinsic often removes votes on several referenda at once (4,019 do),
+// but the window bound already drops the ones whose own poll had closed, and every
+// remaining extrinsic has exactly as many in-window removal calls for the referendum
+// as it has events — so keying the confirmation by extrinsic cannot borrow a sibling
+// referendum's event.
+//
+// Democracy emits no event for a removal at all, so there the call is the only record:
+// remove_vote drops the signer's own vote, while remove_other_vote/force_remove_vote
+// name their target in the args (the projection's `who` already resolves both). Same for
+// OpenGov removals below CONVICTION_VOTED_FIRST_BLOCK — the event did not exist yet
+// (the first one is at 7,175,689), so demanding one there kept withdrawn votes in the
+// tally and pushed referenda 14, 23, 27 and 32 ABOVE the chain's own figure.
 async function loadWithdrawals(pallet: ReferendumPallet, index: number, fromBlock: number, toBlock: number): Promise<Map<string, VotePosition>> {
-  const query = pallet === 'opengov'
-    ? `SELECT JSONExtractString(e.args_json, 'who') AS who, e.block_height AS block_height, e.extrinsic_index AS extrinsic_index
-       FROM price_data.raw_events e
-       WHERE e.event_name = 'ConvictionVoting.VoteRemoved'
-         AND e.block_height >= {from:UInt32} AND e.block_height <= {to:UInt32}
-         AND (e.block_height, e.extrinsic_index) IN (
-           SELECT block_height, extrinsic_index FROM price_data.raw_calls
-           WHERE call_name IN ('ConvictionVoting.remove_vote', 'ConvictionVoting.remove_other_vote', 'ConvictionVoting.force_remove_vote')
-             AND block_height >= {from:UInt32} AND block_height <= {to:UInt32}
-             AND toUInt32(JSONExtractInt(args_json, 'index')) = {idx:UInt32})`
-    : `SELECT if(call_name = 'Democracy.remove_vote',
-                JSONExtractString(origin_json, 'value', 'value'),
-                JSONExtractString(args_json, 'target')) AS who,
-              block_height, extrinsic_index
-       FROM price_data.raw_calls
-       WHERE call_name IN ('Democracy.remove_vote', 'Democracy.remove_other_vote', 'Democracy.force_remove_vote')
-         AND success = 1
-         AND block_height >= {from:UInt32} AND block_height <= {to:UInt32}
-         AND toUInt32(JSONExtractInt(args_json, 'index')) = {idx:UInt32}`
-  const res = await client.query({
-    query, query_params: { idx: index, from: fromBlock, to: toBlock }, format: 'JSONEachRow',
+  const removalRes = await client.query({
+    query: `SELECT who, block_height, extrinsic_index
+            FROM price_data.governance_vote_calls
+            WHERE pallet = {pallet:String} AND ref_index = {idx:UInt32}
+              AND call_name IN {calls:Array(String)} AND success = 1
+              AND block_height >= {from:UInt32} AND block_height <= {to:UInt32}`,
+    query_params: { pallet, idx: index, calls: REMOVAL_CALLS[pallet], from: fromBlock, to: toBlock },
+    format: 'JSONEachRow',
   })
+  let removals = await removalRes.json<{ who: string; block_height: number; extrinsic_index: number | null }>()
+
+  if (pallet === 'opengov') {
+    const confirmable = removals.filter(row => row.extrinsic_index != null && Number(row.block_height) >= CONVICTION_VOTED_FIRST_BLOCK)
+    const tuples = [...new Set(confirmable.map(row => `(${Number(row.block_height)},${Number(row.extrinsic_index)})`))].join(',')
+    removals = removals.filter(row => Number(row.block_height) < CONVICTION_VOTED_FIRST_BLOCK)
+    if (tuples) {
+      const eventRes = await client.query({
+        query: `SELECT JSONExtractString(args_json, 'who') AS who, block_height, extrinsic_index
+                FROM price_data.raw_events
+                WHERE event_name = 'ConvictionVoting.VoteRemoved'
+                  AND (block_height, extrinsic_index) IN (${tuples})`,
+        format: 'JSONEachRow',
+      })
+      removals = removals.concat(await eventRes.json<{ who: string; block_height: number; extrinsic_index: number | null }>())
+    }
+  }
+
   const latest = new Map<string, VotePosition>()
-  for (const row of await res.json<{ who: string; block_height: number; extrinsic_index: number | null }>()) {
+  for (const row of removals) {
     const who = (row.who ?? '').toLowerCase()
     if (!who) continue
     const at: VotePosition = { blockHeight: Number(row.block_height), extrinsicIndex: row.extrinsic_index }
@@ -592,9 +679,7 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
           const headRes = await client.query({ query: 'SELECT max(block_height) AS h FROM price_data.blocks', format: 'JSONEachRow' })
           end = Number((await headRes.json<{ h: number }>())[0]?.h ?? lifecycle[lifecycle.length - 1].block_height)
         }
-        const fromEvents = await loadConvictionVotes(index, first, end)
-        // A referendum wholly inside the pre-event era has no events to find.
-        return fromEvents.length ? fromEvents : loadPreEventEraVotes(index)
+        return loadConvictionVotes(index, first, end)
       })()
 
     if (!lifecycle.length && !votes.length) return null
