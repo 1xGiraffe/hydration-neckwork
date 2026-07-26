@@ -5974,13 +5974,17 @@ async function signersFor(pairs: [number, number | null][]): Promise<Map<string,
   return out
 }
 
-// The subset of (block, extrinsic) pairs whose extrinsic emitted a
-// Liquidation.Liquidated event. A liquidation repays the debt by swapping the
-// seized collateral via the router (emitting a Router.Executed that the trade
-// builders would otherwise surface as a standalone trade attributed to the
-// liquidator). The liquidation is already represented by its LiquidationCall (mm)
-// row, so callers skip these extrinsics when building trade rows. Bounded by the
-// caller's pairs (small IN list), like signersFor.
+// The subset of (block, extrinsic) pairs whose extrinsic dispatched a liquidation. A
+// liquidation repays the debt by swapping the seized collateral via the router (emitting
+// a Router.Executed that the trade builders would otherwise surface as a standalone
+// trade attributed to the liquidator). The liquidation is already represented by its
+// LiquidationCall (mm) row, so callers skip these extrinsics when building trade rows.
+// Bounded by the caller's pairs (small IN list), like signersFor.
+//
+// Reads the liquidation_extrinsics projection rather than raw_events for the same reason
+// accountSwapTradeArm does: an event_name predicate on raw_events prunes no granules, so
+// the pair lookup dragged args_json in with it. No FINAL and no DISTINCT: the rows land
+// in a Set, so an unmerged ReplacingMergeTree duplicate cannot change the answer.
 async function liquidationExtrinsics(pairs: [number, number | null][]): Promise<Set<string>> {
   const out = new Set<string>()
   const keys = [...new Set(pairs.filter(([, i]) => i != null).map(([h, i]) => `${h}:${i}`))]
@@ -5988,8 +5992,8 @@ async function liquidationExtrinsics(pairs: [number, number | null][]): Promise<
   for (let start = 0; start < keys.length; start += 5_000) {
     const tuples = keys.slice(start, start + 5_000).map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
     const res = await client.query({
-      query: `SELECT DISTINCT block_height, extrinsic_index FROM price_data.raw_events
-              WHERE (block_height, extrinsic_index) IN (${tuples}) AND event_name = 'Liquidation.Liquidated'`,
+      query: `SELECT block_height, extrinsic_index FROM price_data.liquidation_extrinsics
+              WHERE (block_height, extrinsic_index) IN (${tuples})`,
       format: 'JSONEachRow',
     })
     for (const r of await res.json<{ block_height: number; extrinsic_index: number }>()) out.add(`${r.block_height}:${r.extrinsic_index}`)
@@ -8082,10 +8086,15 @@ export function suppressSubordinateActivityRows<T extends ActivityRow>(rows: T[]
   })
 }
 
-// A dust cleanup is emitted as Tokens.Transfer immediately followed by
-// Tokens.DustLost.  It is balance-accounting performed by the tokens pallet,
-// not a transfer initiated by the account.  Match the exact sibling event
-// (including account, asset and amount) rather than hiding every treasury leg.
+// A dust cleanup is emitted as Tokens.Transfer immediately followed by the tokens
+// pallet's dust event. It is balance-accounting performed by the pallet, not a transfer
+// initiated by the account. Match the exact sibling event (including account, asset and
+// amount) rather than hiding every treasury leg.
+//
+// The pair is read from the dust_lost_events projection, which is the same table and the
+// same pre-extracted columns accountTransferArm's exclusion uses, so the count and the
+// rows cannot decide a pair differently. `who` is stored already case-folded. No FINAL:
+// the rows only build a lookup set, so an unmerged replacement duplicate is harmless.
 async function suppressDustTransferRows<T extends ActivityRow>(rows: T[]): Promise<T[]> {
   const transfers = rows.filter(r => r.type === 'transfer' && r.eventIndex != null && r.who && r.asset && r.amount)
   if (!transfers.length) return rows
@@ -8093,17 +8102,13 @@ async function suppressDustTransferRows<T extends ActivityRow>(rows: T[]): Promi
   const dustKeys = new Set<string>()
   for (let start = 0; start < tuples.length; start += 5000) {
     const res = await client.query({
-      query: `SELECT block_height, event_index,
-                JSONExtractString(args_json,'who') AS who,
-                JSONExtractInt(args_json,'currencyId') AS asset_id,
-                JSONExtractString(args_json,'amount') AS amount
-              FROM price_data.raw_events
-              WHERE (block_height, event_index) IN (${tuples.slice(start, start + 5000).join(',')})
-                AND event_name = 'Tokens.DustLost'`,
+      query: `SELECT block_height, event_index, who, asset_id, amount
+              FROM price_data.dust_lost_events
+              WHERE (block_height, event_index) IN (${tuples.slice(start, start + 5000).join(',')})`,
       format: 'JSONEachRow',
     })
     for (const d of await res.json<{ block_height: number; event_index: number; who: string; asset_id: number; amount: string }>()) {
-      dustKeys.add(`${d.block_height}:${d.event_index - 1}:${d.who.toLowerCase()}:${d.asset_id}:${d.amount}`)
+      dustKeys.add(`${d.block_height}:${d.event_index - 1}:${d.who}:${d.asset_id}:${d.amount}`)
     }
   }
   return rows.filter(r => r.type !== 'transfer' || r.eventIndex == null || !r.who || !r.asset || !r.amount
@@ -11287,6 +11292,10 @@ type ActivityCountArm = string
 // a share-asset leg routed through a pool inside an add/remove belongs to the
 // liquidity row — the second needs the representative row's assets, which is the
 // (isRouterNet, event_index) maximum the `LIMIT 1 BY` in the page read keeps.
+//
+// The liquidation set is the liquidation_extrinsics projection, not raw_events: an
+// event_name predicate there is only a set(200) skip index, so it prunes no granules and
+// the scan pulled args_json along with it — 17.2M rows for 8k extrinsics.
 function accountSwapTradeArm(list: string, bound: string): ActivityCountArm {
   return `SELECT block_height, count() AS rows FROM (
       SELECT block_height, extrinsic_index,
@@ -11297,12 +11306,13 @@ function accountSwapTradeArm(list: string, bound: string): ActivityCountArm {
       GROUP BY block_height, extrinsic_index
     )
     WHERE (block_height, extrinsic_index) NOT IN (
-        SELECT block_height, extrinsic_index FROM price_data.raw_events
-        WHERE event_name = 'Liquidation.Liquidated' AND extrinsic_index IS NOT NULL)
+        -- Read whole and without FINAL: this is the right side of a NOT IN, which is
+        -- set-semantic, so an unmerged replacement duplicate cannot change the answer.
+        SELECT block_height, extrinsic_index FROM price_data.liquidation_extrinsics)
       AND NOT ((rep_in IN (${shareAssetIdsSql()}) OR rep_out IN (${shareAssetIdsSql()}))
         AND (block_height, extrinsic_index) IN (
           SELECT block_height, extrinsic_index FROM price_data.liquidity_activity
-          WHERE who IN (${list}) AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
+          WHERE ${bound} AND who IN (${list}) AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
             AND extrinsic_index IS NOT NULL))
     GROUP BY block_height`
 }
@@ -11354,6 +11364,12 @@ function accountMoneyMarketArm(evmList: string, eventNames: readonly string[], b
 // the page read already computes with the same SQL, or a bound array of the
 // enumerated sources' own identities. There is no place left where a "usually"
 // applies; where a rule cannot be stated the type keeps its window instead.
+//
+// Each source arm carries `${bound}` so a from/to request prunes partitions. The two
+// subqueries WITHOUT one are driven by a primary-key predicate instead — the money-market
+// extrinsic lookup in semanticExtrinsicSql and the treasury call test both restrict
+// raw_events/raw_extrinsics to blocks the bounded candidate set already named — so a
+// timestamp filter there would be redundant, not missing.
 
 // The equivalence between an account's forms, as SQL. suppressSubordinateActivityRows
 // and the dust match compare `accountRef(x).accountId`, which folds a truncated-H160
@@ -11542,9 +11558,9 @@ function accountTransferArm(args: {
           AND (block_height, ${resolvedAccountIdSql('to_account', accounts)}) NOT IN (SELECT block_height, owner FROM hook_owner)))
         ${treasuryFilter}
         AND (block_height, event_index + 1, ${resolvedAccountIdSql('from_account', accounts)}, asset_id, amount) NOT IN (
-          SELECT block_height, event_index, lower(JSONExtractString(args_json,'who')),
-                 toUInt32(JSONExtractInt(args_json,'currencyId')), JSONExtractString(args_json,'amount')
-          FROM price_data.raw_events WHERE event_name = 'Tokens.DustLost')
+          -- Read whole and without FINAL: this is the right side of a NOT IN, which is
+          -- set-semantic, so an unmerged replacement duplicate cannot change the answer.
+          SELECT block_height, event_index, who, asset_id, amount FROM price_data.dust_lost_events)
     )
     GROUP BY block_height`
 }

@@ -171,3 +171,21 @@ CREATE TABLE IF NOT EXISTS price_data.account_trade_volume_staging (`account` St
 CREATE TABLE IF NOT EXISTS price_data.omnipool_position_owner_intervals_staging (`account_id` String, `position_id` String, `ownership_kind` Enum8('bare' = 1, 'farmed' = 2), `deposit_id` String, `valid_from_block` UInt32, `valid_from_extrinsic` Int64, `valid_from_event` UInt32, `valid_from_ts` DateTime, `valid_to_block` UInt32, `valid_to_extrinsic` Int64, `valid_to_event` UInt32, `source_event_kind` LowCardinality(String), `run_id` UInt64, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(run_id) PARTITION BY tuple() ORDER BY (account_id, position_id, valid_from_block, valid_from_event) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.xyk_farm_principal_intervals_staging (`account_id` String, `deposit_id` String, `lp_asset_id` Int32, `principal_shares_raw` String, `valid_from_block` UInt32, `valid_from_extrinsic` Int64, `valid_from_event` UInt32, `valid_from_ts` DateTime, `valid_to_block` UInt32, `valid_to_extrinsic` Int64, `valid_to_event` UInt32, `source_event_kind` LowCardinality(String), `run_id` UInt64, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(run_id) PARTITION BY tuple() ORDER BY (account_id, deposit_id, valid_from_block, valid_from_event) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.xyk_lp_total_shares_history_staging (`lp_asset_id` Int32, `block_height` UInt32, `total_shares_raw` String, `run_id` UInt64, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(run_id) PARTITION BY tuple() ORDER BY (lp_asset_id, block_height) SETTINGS index_granularity = 8192;
+-- The exact tuple the dust-cleanup pair is matched on (MV-fed from raw_events),
+-- pre-extracted so no reader touches args_json for it. `event_name` is only a set(200)
+-- skip index, so a Tokens.DustLost predicate prunes no granules and the ~9 KiB average
+-- args_json was decompressed for every row scanned: the busiest account's exact transfer
+-- count read 241M rows / 36.96 GiB / 2.2 s to reach 114k dust events, and this query
+-- family was 56.7% of all bytes the instance read.
+-- PARTITION BY tuple(): 114k rows spread over ~55 monthly partitions would be
+-- near-empty parts whose merge overhead exceeds any pruning benefit, and both this
+-- table and liquidation_extrinsics are only ever read whole (precedent:
+-- governance_vote_calls).
+CREATE TABLE IF NOT EXISTS price_data.dust_lost_events (`block_height` UInt32, `event_index` UInt32, `who` String, `asset_id` UInt32, `amount` String, `block_timestamp` DateTime, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (block_height, event_index) SETTINGS index_granularity = 8192;
+-- The (block, extrinsic) pairs a liquidation was dispatched in (MV-fed from raw_events),
+-- so the trade count and the trade row builders stop scanning raw_events for the same
+-- skip-indexed event name — 17.2M rows unbounded for 8k extrinsics. One extrinsic can
+-- emit several Liquidation.Liquidated events, and the replacement key collapses them to
+-- the pair set both readers actually want (8,020 events, 8,015 pairs).
+-- PARTITION BY tuple() for the reason given above.
+CREATE TABLE IF NOT EXISTS price_data.liquidation_extrinsics (`block_height` UInt32, `extrinsic_index` UInt32, `block_timestamp` DateTime, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (block_height, extrinsic_index) SETTINGS index_granularity = 8192;
