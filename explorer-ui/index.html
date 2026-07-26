@@ -13,6 +13,20 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- The two fonts a page title is made of: the Gazpacho label and the GeistMono
+         id beside it (.page-title / .num, both weight 500). Their fallbacks are much
+         narrower, so a title that fits one line before the swap wraps to two after
+         it and drops the page ~50px — 0.117 of layout shift on a detail page with a
+         long id, the app's worst Core Web Vital.
+         An @font-face is fetched only once an element actually uses it, which here is
+         after the SPA has painted, so the swap always lands late (font requested at
+         1.75s against a 1.41s first paint). Preloading starts both with the
+         stylesheet, and since the LCP element IS this title, it paints once in its
+         final form: at 390px on regular 3G, CLS 0.117 -> 0.000 and LCP 2.44s -> 1.73s.
+         It reorders rather than adds bytes, so on a 400kbps link — where 71kB of font
+         is ~1.4s of the pipe — it costs ~0.4s of LCP to buy the stable layout. -->
+    <link rel="preload" href="/fonts/GazpachoMedium.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/GeistMonoMedium.woff2" as="font" type="font/woff2" crossorigin />
     <script>
       (function () {
         try {
