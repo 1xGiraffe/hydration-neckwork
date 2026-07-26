@@ -670,7 +670,10 @@ export function Sparkline({ data, w = 110, h = 30, change7d }: { data: number[];
         </linearGradient>
       </defs>
       <path d={area} fill={`url(#${gid})`} stroke="none" />
-      <path d={line} fill="none" stroke={col} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      {/* preserveAspectRatio="none" lets a caller stretch this to any box (the
+          accounts card gives it the phone's full width); a non-scaling stroke
+          keeps the line 1.5px there instead of smearing with the x scale. */}
+      <path d={line} fill="none" stroke={col} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
     </svg>
   )
 }

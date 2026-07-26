@@ -1646,14 +1646,29 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
   .tbl.assets-tbl tbody td[data-label="Asset"]::before { display: none; }
   /* let any fixed-width desktop cells (e.g. sparkline) fill the card row */
   .tbl tbody td.spark-cell { width: auto; }
-  /* accounts list: the account name/tag is the card's first cell — align it to
-     the right edge like every other value (its desktop max-width would otherwise
-     pin the pill mid-row). Flex row: label left, pill right, shrink-to-ellipsis. */
-  .accounts-tbl td[data-label="Account"] {
-    max-width: none; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  /* Accounts list: a phone card leads with who this is and what they are worth on
+     one line, then gives the year of portfolio value the whole width of the card —
+     it is the one cell that says more the bigger it gets, and a 110px sparkline
+     wedged against the right edge said almost nothing. The remaining facts follow
+     as ordinary labelled rows, minus the ones this account does not have: a column
+     of em-dashes was most of the card's height. Grid rather than the shared block
+     layout, so the first two cells can share a line and the chart can span both. */
+  .accounts-tbl tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; padding: 10px 0 12px; }
+  .accounts-tbl tbody td { order: 4; grid-column: 1 / -1; }
+  .accounts-tbl tbody td.cell-empty { display: none; }
+  /* The pill IS the title, so it keeps the left edge and drops its label. */
+  .accounts-tbl tbody td[data-label="Account"] {
+    order: 1; grid-column: 1; max-width: none; text-align: left; padding-right: 4px; padding-top: 4px;
   }
-  .accounts-tbl td[data-label="Account"]::before { float: none; margin-right: 0; flex: none; }
-  .accounts-tbl td[data-label="Account"] .addr-wrap { min-width: 0; }
+  .accounts-tbl tbody td[data-label="Account"]::before { display: none; }
+  .accounts-tbl tbody td[data-label="Account"] .addr-wrap { min-width: 0; max-width: 100%; }
+  /* Value sits on that same line, weighted like the card's headline figure. */
+  .accounts-tbl tbody td[data-label="Value"] { order: 2; grid-column: 2; padding-top: 4px; padding-left: 0; font-size: 15px; font-weight: 600; color: var(--text-high); }
+  .accounts-tbl tbody td[data-label="Value"]::before { display: none; }
+  /* Full-bleed chart under the two of them, its label a caption above it. */
+  .accounts-tbl tbody td[data-label="1Y"] { order: 3; text-align: left; padding: 8px 14px 2px; }
+  .accounts-tbl tbody td[data-label="1Y"]::before { float: none; display: block; margin: 0 0 4px; line-height: 1.2; }
+  .accounts-tbl tbody td[data-label="1Y"] .spark { display: block; width: 100%; height: 56px; }
 
   /* expanded extrinsic/event panel: full-width, never card-ified */
   .tbl tbody tr.exp-row, .tbl tbody tr.exp-row > td { padding: 0; text-align: left; }

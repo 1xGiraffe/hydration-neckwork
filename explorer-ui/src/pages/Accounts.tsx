@@ -23,6 +23,10 @@ export function HealthSimBadge({ hf, addr }: { hf: { label: string; cls: string 
 
 const PAGE = 50
 const SORTS: Sort[] = ['value', 'health', 'identity', 'supplied', 'borrowed', 'activity', 'volume', 'liquidation']
+// Below 720px every row becomes a card, where a line reading "BORROWED —" carries
+// nothing: cells with no value are marked so the card can drop them. The desktop
+// table keeps its dash — a column still has to line up.
+const emptyIf = (empty: boolean) => empty ? ' cell-empty' : ''
 export function Accounts() {
   useDocumentTitle('Accounts')
   const page = usePageParam()
@@ -92,18 +96,18 @@ export function Accounts() {
                 <tr key={r.tag ? `tag:${r.tag.tagId}` : r.account ? `account:${r.account.accountId}` : `row:${r.simAccount ?? i}`}>
                   <td data-label="Account">{r.tag ? <TagGroupPill tag={r.tag} /> : r.account ? <AddrPill account={r.account} /> : <Dash />}</td>
                   <td data-label="Value" className="r mono">{F.usd(r.portfolioUsd)}</td>
-                  <td data-label="Holdings" className="holdings-cell">{r.topAssets?.length ? <TokenIconRow assets={r.topAssets} /> : <Dash />}</td>
-                  <td data-label="1Y" className="r">{r.sparkline && r.sparkline.length > 1 ? <Sparkline data={r.sparkline} /> : <Dash />}</td>
-                  <td data-label="Lent" className="r mono">{r.suppliedUsd ? F.usd(r.suppliedUsd) : <Dash />}</td>
-                  <td data-label="Borrowed" className="r mono">{r.borrowedUsd ? F.usd(r.borrowedUsd) : <Dash />}</td>
-                  <td data-label="Health" className="r">{hf && addr
+                  <td data-label="Holdings" className={`holdings-cell${emptyIf(!r.topAssets?.length)}`}>{r.topAssets?.length ? <TokenIconRow assets={r.topAssets} /> : <Dash />}</td>
+                  <td data-label="1Y" className={`r${emptyIf(!(r.sparkline && r.sparkline.length > 1))}`}>{r.sparkline && r.sparkline.length > 1 ? <Sparkline data={r.sparkline} /> : <Dash />}</td>
+                  <td data-label="Lent" className={`r mono${emptyIf(!r.suppliedUsd)}`}>{r.suppliedUsd ? F.usd(r.suppliedUsd) : <Dash />}</td>
+                  <td data-label="Borrowed" className={`r mono${emptyIf(!r.borrowedUsd)}`}>{r.borrowedUsd ? F.usd(r.borrowedUsd) : <Dash />}</td>
+                  <td data-label="Health" className={`r${emptyIf(!hf)}`}>{hf && addr
                     ? <HealthSimBadge hf={hf} addr={addr} />
                     : hf ? <span className={`hf ${hf.cls}`}>{hf.label}</span> : <Dash />}</td>
-                  <td data-label="Liquidation $" className="r mono">{r.liquidationVolumeUsd ? F.usd(r.liquidationVolumeUsd) : <Dash />}</td>
-                  <td data-label="Trading $" className="r mono">{r.tradingVolumeUsd ? F.usd(r.tradingVolumeUsd) : <Dash />}</td>
+                  <td data-label="Liquidation $" className={`r mono${emptyIf(!r.liquidationVolumeUsd)}`}>{r.liquidationVolumeUsd ? F.usd(r.liquidationVolumeUsd) : <Dash />}</td>
+                  <td data-label="Trading $" className={`r mono${emptyIf(!r.tradingVolumeUsd)}`}>{r.tradingVolumeUsd ? F.usd(r.tradingVolumeUsd) : <Dash />}</td>
                   {/* A partial total is a floor: the feed runs deeper than it could be
                       counted, so it reads as "at least this" instead of as exact. */}
-                  <td data-label="Activity" className="r">{count(r.activityCount)}{r.activityCount != null && r.activityCountComplete === false ? '+' : ''}</td>
+                  <td data-label="Activity" className={`r${emptyIf(r.activityCount == null)}`}>{count(r.activityCount)}{r.activityCount != null && r.activityCountComplete === false ? '+' : ''}</td>
                 </tr>
               )
             })}
