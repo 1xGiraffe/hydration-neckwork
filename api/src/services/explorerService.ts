@@ -4975,7 +4975,10 @@ async function getActiveDcas(accounts: string[]): Promise<ActiveDca[]> {
     if (!scheds.length) return []
     const ids = scheds.map(s => s.id).join(',')
     const [exRes, planRes] = await Promise.all([
-      client.query({ query: `SELECT id, count() AS n, toString(sum(toUInt256OrZero(amount_in))) AS filled FROM price_data.dca_events WHERE event_name='DCA.TradeExecuted' AND id IN (${ids}) GROUP BY id`, format: 'JSONEachRow' }),
+      // Counting and summing rows, so the replacements have to be resolved first —
+      // a re-inserted raw range would otherwise inflate both the executions done and
+      // the amount filled. `max(planned_block)` below is idempotent under a duplicate.
+      client.query({ query: `SELECT id, count() AS n, toString(sum(toUInt256OrZero(amount_in))) AS filled FROM price_data.dca_events FINAL WHERE event_name='DCA.TradeExecuted' AND id IN (${ids}) GROUP BY id`, format: 'JSONEachRow' }),
       client.query({ query: `SELECT id, max(planned_block) AS nb FROM price_data.dca_events WHERE event_name='DCA.ExecutionPlanned' AND id IN (${ids}) GROUP BY id`, format: 'JSONEachRow' }),
     ])
     const exMap = new Map<number, { n: number; filled: string }>()
@@ -9612,7 +9615,7 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
       const exRes = await client.query({
         query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index,
                        toString(amount_in) AS amount_in, toString(amount_out) AS amount_out
-                FROM price_data.dca_events
+                FROM price_data.dca_events FINAL
                 WHERE id = {sid:UInt64} AND event_name = 'DCA.TradeExecuted'
                 ORDER BY block_height DESC, event_index DESC LIMIT 50`,
         query_params: { sid: scheduleId }, format: 'JSONEachRow',
@@ -9709,7 +9712,7 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
     }),
     client.query({
       query: `SELECT event_index, toString(id) AS id, who, amount_in, amount_out, toString(block_timestamp) AS ts
-              FROM price_data.dca_events
+              FROM price_data.dca_events FINAL
               WHERE block_height = {h:UInt32} AND event_name = 'DCA.TradeExecuted'
               ORDER BY event_index`,
       query_params: { h: height },
@@ -11485,6 +11488,10 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   // — the owner is carried by DCA.TradeExecuted {who,id,amountIn,amountOut}. Resolve
   // the traded assets from the swap leg in the same block (match amountIn) and link
   // to the DCA.Scheduled extrinsic. Mirrors the global activity's DCA handling.
+  //
+  // Every read that emits one row per execution needs `FINAL`: dca_events replaces on
+  // (event_name, block_height, event_index, id), so a re-inserted raw range holds an
+  // execution twice until its parts merge and the feed renders that block twice.
   const dcaTrades: ActivityRow[] = wantDca
     ? await getRecentDcaFailures(catFetch, from, to, accounts, tokenIds)
     : []
@@ -11497,7 +11504,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     const dcaExecRes = await client.query({
       query: `SELECT e.block_height, e.event_index, toString(e.block_timestamp) AS ts, e.who AS who,
                 toString(e.id) AS id, e.amount_in, e.amount_out
-              FROM price_data.dca_events e
+              FROM price_data.dca_events AS e FINAL
               ${dcaScheduleJoinSql(['asset_in', 'asset_out'])}
               ${dcaValueFilter.joinSql}
               WHERE ${bound.replaceAll('block_height', 'e.block_height').replaceAll('block_timestamp', 'e.block_timestamp')}

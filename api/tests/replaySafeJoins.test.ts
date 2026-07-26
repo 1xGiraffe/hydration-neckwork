@@ -19,6 +19,41 @@ describe('dca_schedules joins are replay-safe', () => {
   })
 })
 
+// dca_events replaces on (event_name, block_height, event_index, id), so a
+// re-inserted raw range holds one execution twice until its parts merge. Most reads
+// of the table build a lookup keyed on the execution's own identity, where a
+// duplicate is indistinguishable from the row it replaces; these four instead emit
+// one output per ROW, so a duplicate renders the same execution twice (an account
+// feed showed block 13296172 twice) or inflates a count and a sum.
+describe('dca_events row reads are replay-safe', () => {
+  // Each read is pinned by the predicate that identifies it — asserted to occur
+  // exactly once, so a second undeduplicated copy of the same read fails here too —
+  // and the FROM clause it is reached through has to carry FINAL.
+  const perRowReads: [string, RegExp][] = [
+    // The account feed's own executions — one activity row per execution.
+    ['account activity executions', /AND e\.event_name='DCA\.TradeExecuted' AND e\.who IN \(/g],
+    // The failed attempts the same feed merges in.
+    ['account activity failures', /AND e\.event_name = 'DCA\.TradeFailed'/g],
+    // The schedule's executions listed under a DCA.Scheduled extrinsic.
+    ['extrinsic detail executions', /AND event_name = 'DCA\.TradeExecuted'\s+ORDER BY block_height DESC, event_index DESC LIMIT 50/g],
+    // The block's hook executions on the block activity feed.
+    ['block detail executions', /WHERE block_height = \{h:UInt32\} AND event_name = 'DCA\.TradeExecuted'\s+ORDER BY event_index/g],
+    // Executions done and amount filled on the active-schedule list.
+    ['active schedule progress', /WHERE event_name='DCA\.TradeExecuted' AND id IN \(/g],
+  ]
+
+  for (const [name, anchor] of perRowReads) {
+    it(`resolves replacements before ${name}`, () => {
+      const hits = [...explorerService.matchAll(anchor)]
+      expect(hits.length, name).toBe(1)
+
+      const at = hits[0].index
+      const from = explorerService.lastIndexOf('price_data.dca_events', at)
+      expect(explorerService.slice(from, at), name).toMatch(/^price_data\.dca_events(\s+AS\s+\w+)?\s+FINAL/)
+    })
+  }
+})
+
 // raw_blocks/raw_extrinsics/raw_events all replace on their event identity, so a
 // re-indexed range holds each row twice until its parts merge. The blocks list
 // paged and counted those rows directly, showing a block twice with doubled
