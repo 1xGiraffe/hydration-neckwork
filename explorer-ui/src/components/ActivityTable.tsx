@@ -137,15 +137,31 @@ export function ActivityBadge({ r }: { r: ActivityRow }) {
   return <span className="activity-badge-group"><span className="pill-badge" style={{ color: col, background: `color-mix(in srgb, ${col} 15%, transparent)` }}>{label}</span>{supplementalMarket && <span className={`mm-activity-market${marketClass}`}>{supplementalMarket}</span>}{partial && <span className="mm-activity-market">{partial}</span>}</span>
 }
 
-export function ActivityDesc({ r }: { r: ActivityRow }) {
+// One row's activity, as a phrase. `headed` marks a surface whose page HEADER
+// already states the row's context — the detail pages do, a list row has no header
+// above it — so there the phrase drops the facts the header repeats and keeps only
+// what it alone carries (the assets and amounts).
+export function ActivityDesc({ r, headed }: { r: ActivityRow; headed?: boolean }) {
   if (r.type === 'xcm' && r.xcmDir === 'in' && r.asset) {
     // Inbound cross-chain: origin chain (+ source account when the crosschain
-    // index resolved it), then the arrow, then the credited asset.
-    return <span className="asset-flow"><ChainBadge chain={r.fromChain ?? ''} />{r.fromAccount && <ExternalAccountPill account={r.fromAccount} />} → <span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span></span>
+    // index resolved it), then the arrow, then the credited asset. Headed, the
+    // origin chain is the header's own subtitle, leaving just the account — and
+    // with no account resolved there is no origin left for an arrow to point from.
+    const origin = headed
+      ? (r.fromAccount ? <ExternalAccountPill account={r.fromAccount} /> : null)
+      : <><ChainBadge chain={r.fromChain ?? ''} />{r.fromAccount && <ExternalAccountPill account={r.fromAccount} />}</>
+    return <span className="asset-flow">{origin}{origin ? ' → ' : null}<span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span></span>
   }
   if ((r.type === 'transfer' || r.type === 'xcm') && r.asset) {
-    // Asset first, then the arrow, then the destination account.
-    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span> → {r.type === 'xcm' && r.destChain && <ChainBadge chain={r.destChain} />}{r.type === 'xcm' && r.destAccount ? <ExternalAccountPill account={r.destAccount} /> : r.to && <AddrPill account={r.to} noCopy />}</span>
+    // Asset first, then the arrow, then the destination account. Headed, an outbound
+    // chain badge would repeat both the header's subtitle and the page's own
+    // Destination row, so only the account it lands on stays.
+    const destChain = r.type === 'xcm' && !headed && r.destChain ? <ChainBadge chain={r.destChain} /> : null
+    const destAccount = r.type === 'xcm'
+      ? (r.destAccount ? <ExternalAccountPill account={r.destAccount} /> : null)
+      : (r.to ? <AddrPill account={r.to} noCopy /> : null)
+    const dest = destChain || destAccount ? <>{destChain}{destAccount}</> : null
+    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span>{dest ? <> → {dest}</> : null}</span>
   }
   if ((r.type === 'trade' || r.type === 'dca') && r.assetIn && r.assetOut) {
     return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.assetIn} /> <span className="mono">{F.amount(r.amountIn, r.assetIn.decimals)}</span></span> → <span className="trade-leg"><AssetChip asset={r.assetOut} /> <span className="mono">{F.amount(r.amountOut, r.assetOut.decimals)}</span></span>{r.dcaStatus === 'failed' && <span className="muted">Failed attempt</span>}</span>
@@ -153,8 +169,9 @@ export function ActivityDesc({ r }: { r: ActivityRow }) {
   if (r.type === 'otc') {
     // Pull rows without an enriched leg pair (the Placed-by-orderId lookup
     // missed) render the order id alone — same fallback the design calls out.
+    // Kept even when headed: with no legs the order id is all this phrase has to say.
     if (!r.assetIn || !r.assetOut) return <span className="asset-flow"><span className="muted">Order #{r.otcOrderId}</span></span>
-    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.assetIn} /> <span className="mono">{F.amount(r.amountIn, r.assetIn.decimals)}</span></span> → <span className="trade-leg"><AssetChip asset={r.assetOut} /> <span className="mono">{F.amount(r.amountOut, r.assetOut.decimals)}</span></span> <span className="muted">#{r.otcOrderId}</span></span>
+    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.assetIn} /> <span className="mono">{F.amount(r.amountIn, r.assetIn.decimals)}</span></span> → <span className="trade-leg"><AssetChip asset={r.assetOut} /> <span className="mono">{F.amount(r.amountOut, r.assetOut.decimals)}</span></span>{headed ? null : <span className="muted">#{r.otcOrderId}</span>}</span>
   }
   if (r.type === 'liquidity' && r.liqAction === 'Create' && r.assetIn && r.assetOut) {
     // Pool creation seeds two assets — show both legs side by side.
@@ -164,6 +181,11 @@ export function ActivityDesc({ r }: { r: ActivityRow }) {
     return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span></span>
   }
   if (r.type === 'vote' && r.asset) {
+    const locked = <span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span>
+    // Headed, the referendum, the side and the conviction are all in the page title's
+    // own subtitle, so the locked capital is the one fact left to state; the
+    // referendum stays reachable through that page's Referendum row.
+    if (headed) return <span className="asset-flow">{locked}</span>
     // A referendum's title says what the vote was about; "Ref 255" does not. The
     // title comes from SubSquare and may not be fetched yet, so the index is the
     // fallback rather than a placeholder. Only ConvictionVoting/Democracy rows have a
@@ -171,7 +193,7 @@ export function ActivityDesc({ r }: { r: ActivityRow }) {
     // The index identifies the referendum, the title says what it is: show the index
     // muted ahead of a plain link on the title, which carries the referendum hover card.
     const label = r.voteRefTitle ?? (r.voteRef ? `Referendum #${r.voteRef}` : 'Referendum')
-    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span>
+    return <span className="asset-flow">{locked}
       {r.voteRef && <span className="muted mono ref-num">#{r.voteRef}</span>}
       {r.voteRefPallet && r.voteRef
         ? <Link to={paths.referendum(r.voteRefPallet, r.voteRef)} className="ref-link">{r.voteRefTitle ?? 'Referendum'}</Link>

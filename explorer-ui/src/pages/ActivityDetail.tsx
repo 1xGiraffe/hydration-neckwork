@@ -48,7 +48,9 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
         : isError || (rows && !row) ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>No {label.toLowerCase()} activity found at {id}</div>
         : isLoading || !row ? <div className="detail-card"><SkeletonRows /></div> : (
           <div className="detail-card"><div className="dl">
-            <div className="dt">Activity</div><div className="dd"><ActivityDesc r={row} /></div>
+            {/* headed: this page states the row's context in its own title and subtitle,
+                so the description drops what that already says (see ActivityDesc). */}
+            <div className="dt">Activity</div><div className="dd"><ActivityDesc r={row} headed /></div>
             <div className="dt">Value</div><div className="dd mono">{F.usd(row.valueUsd)}</div>
             {row.who && <><div className="dt">Account</div><div className="dd"><AddrPill account={row.who} /></div></>}
             {row.type === 'transfer' && row.to && <><div className="dt">To</div><div className="dd"><AddrPill account={row.to} /></div></>}
@@ -63,8 +65,8 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {row.type === 'liquidity' && <><div className="dt">Action</div><div className="dd">{row.liqAction === 'Remove' ? 'Remove liquidity' : row.liqAction === 'Create' ? 'Create pool' : row.liqAction === 'Claim' ? 'Claim rewards' : 'Add liquidity'}</div></>}
             {row.type === 'staking' && <><div className="dt">Action</div><div className="dd">{row.stakingAction ?? '—'}</div></>}
             {row.type === 'vote' && <>
-              {/* The referendum and the side already head this page (see voteSub), so they
-                  are not repeated in the list; the referendum stays reachable as a link. */}
+              {/* The referendum, the side and the conviction already head this page (see
+                  voteSub), so the only vote row left is the link out to the referendum. */}
               {row.voteRef && row.voteRefPallet && <>
                 <div className="dt">Referendum</div>
                 <div className="dd"><Link to={paths.referendum(row.voteRefPallet, row.voteRef)} className="ref-link">Open referendum #{row.voteRef}</Link></div>
