@@ -8411,7 +8411,7 @@ async function getRecentDcaFailures(limit: number, from?: string, to?: string, a
               ifNull(s.direction, '') AS direction,
               ifNull(s.amount_per, '') AS amount_per,
               s.block_height AS schedule_block, s.extrinsic_index AS schedule_index,
-              '' AS error
+              e.error AS error
             FROM price_data.dca_events AS e FINAL
             ${dcaScheduleJoinSql(['asset_in', 'asset_out', 'direction', 'amount_per', 'block_height', 'extrinsic_index'])}
             WHERE ${bound} AND e.event_name = 'DCA.TradeFailed'
@@ -8421,21 +8421,6 @@ async function getRecentDcaFailures(limit: number, from?: string, to?: string, a
     query_params: { limit, height: height ?? 0 }, format: 'JSONEachRow',
   })
   const rows = await res.json<{ block_height: number; ts: string; event_index: number; who: string; id: string; asset_in: number | null; asset_out: number | null; direction: string; amount_per: string; schedule_block: number; schedule_index: number | null; error: string }>()
-  // dca_events intentionally stays narrow; fetch error detail only for the
-  // bounded page instead of JSON-decoding every historical failure in raw_events.
-  const keys = rows.map(row => `(${row.block_height},${row.event_index})`)
-  const errors = new Map<string, string>()
-  if (keys.length) {
-    const errorRes = await client.query({
-      query: `SELECT block_height, event_index, JSONExtractRaw(args_json, 'error') AS error
-              FROM price_data.raw_events
-              WHERE (block_height, event_index) IN (${keys.join(',')}) AND event_name='DCA.TradeFailed'`,
-      format: 'JSONEachRow',
-    })
-    for (const row of await errorRes.json<{ block_height: number; event_index: number; error: string }>()) {
-      errors.set(`${row.block_height}:${row.event_index}`, row.error)
-    }
-  }
   return rows.map(r => {
     // The failed attempt only knows the schedule's fixed per-trade leg (the
     // sold amount for Sell orders, the bought amount for Buy orders).
@@ -8447,7 +8432,7 @@ async function getRecentDcaFailures(limit: number, from?: string, to?: string, a
       assetIn: r.asset_in != null ? asset(r.asset_in) : null,
       assetOut: r.asset_out != null ? asset(r.asset_out) : null,
       amount: null, amountIn: legs.amountIn, amountOut: legs.amountOut, valueUsd: null,
-      dca: true, dcaStatus: 'failed' as const, dcaError: errors.get(`${r.block_height}:${r.event_index}`) || undefined,
+      dca: true, dcaStatus: 'failed' as const, dcaError: r.error || undefined,
       dcaScheduleId: Number(r.id) || undefined,
       linkBlock: r.schedule_block || r.block_height, linkIndex: r.schedule_index,
     }
