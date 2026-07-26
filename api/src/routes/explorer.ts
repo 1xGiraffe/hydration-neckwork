@@ -12,7 +12,7 @@ import {
   getAddressValueEvents, getTagValueEvents,
   getTagActivity, getTagExtrinsics, getTagEvents,
   getAddressVotes, getTagVotes,
-  isExactlyPagedActivityType,
+  isLocatedActivityRequest,
   type EventListFilters,
   type ExtrinsicListFilters,
   type ScopedListQuery,
@@ -66,7 +66,7 @@ const maxActivityOffsetFor = (type: string) =>
 // here only has to stay above any countable feed length: ten sources at the 90k
 // candidate ceiling each.
 const MAX_SCOPED_ACTIVITY_OFFSET = 900_000
-// The categories whose account/tag pages are LOCATED (isExactlyPagedActivityType) are
+// The categories whose account/tag pages are LOCATED (isLocatedActivityRequest) are
 // not bounded by depth at all: SQL counts the feed and finds the ≤ limit blocks the
 // page's ranks sit in, so the work is the feed's own size and an offset near the end
 // costs what one near the start does. The bound only has to stay above any total this
@@ -75,7 +75,7 @@ const MAX_SCOPED_ACTIVITY_OFFSET = 900_000
 // 0.232s) and the busiest trader's 843k trades (0.46s / 0.59s at offset 843,000).
 const MAX_LOCATED_ACTIVITY_OFFSET = 5_000_000
 const maxScopedActivityOffsetFor = (type: string) =>
-  isExactlyPagedActivityType(type) ? MAX_LOCATED_ACTIVITY_OFFSET : MAX_SCOPED_ACTIVITY_OFFSET
+  isLocatedActivityRequest(type) ? MAX_LOCATED_ACTIVITY_OFFSET : MAX_SCOPED_ACTIVITY_OFFSET
 const activityOffsetSchema = z.coerce.number().int().min(0).max(MAX_LOCATED_ACTIVITY_OFFSET).optional()
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
 function dateParam(q: Record<string, unknown>, key: string): string | undefined {

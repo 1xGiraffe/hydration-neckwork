@@ -11238,9 +11238,26 @@ export function alignBalanceHistoryDailyPoints(history: AssetBalanceHistory[]): 
 // accounts, votes 121k, OTC 4.5k, referral claims 10k, incentive claims 51k), so in
 // practice the cap only ever refuses a genuinely new shape.
 const EXACT_SMALL_SOURCE_ROWS = 20_000
+// XCM gets its own, higher cap. Its three legs are the one family whose classification
+// genuinely cannot be restated in SQL — the outbound row set is the multilocation
+// payload's asset legs matched against the block's withdrawals, and the inbound one is
+// a backwards walk through a block's deposit events from the MessageQueue barrier —
+// so enumerating is not a shortcut here, it is the only way to be exact. The busiest
+// XCM account holds 59,392 rows (98,124 inbound deposit events and 42,310 outbound
+// anchors) and reads in ~4.7s; the cap sits above it and refuses anything larger rather
+// than letting one account's page block on an unbounded walk.
+const EXACT_XCM_SOURCE_ROWS = 80_000
+// Long enough that clicking through pages does not re-read the enumerated sources each
+// time, short enough that a feed's head is never minutes behind. Safe to hold because
+// the same cached rows feed the count and the page (see enumeratedActivityRows).
+const ENUMERATED_SOURCE_CACHE_MS = 60_000
 // How many bytes of interpolated account literals an arm may carry (see the budget
 // note where it is enforced).
 const MAX_EXACT_ACCOUNT_LIST_BYTES = 150_000
+// The per-source row ceiling on a located page. The closed block set already bounds
+// every read; this is only the backstop that keeps a pathological block from being
+// unbounded, and the per-block reconciliation refuses the page if it ever binds.
+const MAX_LOCATED_BLOCK_SOURCE_ROWS = 500_000
 
 // The asset ids `isShareAssetId` recognises, as a SQL list. Pool-share membership is
 // runtime asset-registry state that ClickHouse does not hold, which is precisely why
@@ -11315,11 +11332,225 @@ function accountMoneyMarketArm(evmList: string, eventNames: readonly string[], b
     GROUP BY block_height`
 }
 
-// The enumerated sources' own per-block counts, handed to ClickHouse as two bound
-// arrays rather than an interpolated tuple list: an account with thousands of small
-// rows would otherwise push the query text past max_query_size.
-const ENUMERATED_ARM = `SELECT tupleElement(pair, 1) AS block_height, toUInt64(tupleElement(pair, 2)) AS rows
-  FROM (SELECT arrayJoin(arrayZip({smallBlocks:Array(UInt32)}, {smallRows:Array(UInt32)})) AS pair)`
+// ── The transfer family ───────────────────────────────────────────────────────
+//
+// Transfers are the one family whose row set depends on the OTHER families, because
+// suppressSubordinateActivityRows only ever removes transfer rows: a transfer that is
+// the plumbing of a higher-level action is owned by that action and never rendered on
+// its own. So this arm is the classifier's whole transfer chain restated once —
+// candidate dedup, pot/pool/money-market/sibling filters, the treasury
+// donation-versus-fee call test, subordination to a semantic sibling, and the dust
+// cleanup pair — and nothing else in the feed needs restating for it.
+//
+// Every decision below is either a predicate on the candidate row, a set membership
+// the page read already computes with the same SQL, or a bound array of the
+// enumerated sources' own identities. There is no place left where a "usually"
+// applies; where a rule cannot be stated the type keeps its window instead.
+
+// The equivalence between an account's forms, as SQL. suppressSubordinateActivityRows
+// and the dust match compare `accountRef(x).accountId`, which folds a truncated-H160
+// id back to the substrate account it stands for — a mapping that lives in the
+// runtime's EVM bindings, tags and reserved-address rules, not in ClickHouse. Only the
+// REQUEST's own accounts can ever be on both sides of those comparisons (every
+// non-transfer source is already filtered to them), so folding exactly those forms is
+// exact, and any other id compares as itself just as `accountRef` leaves it.
+function resolvedAccountIdSql(column: string, accounts: string[]): string {
+  const forms = [...new Set(accounts.map(a => a.toLowerCase()))]
+  const resolved = forms.map(form => accountRef(form).accountId.toLowerCase())
+  if (!forms.length) return `lower(${column})`
+  return `transform(lower(${column}), [${forms.map(f => `'${f}'`).join(',')}], [${resolved.map(r => `'${r}'`).join(',')}], lower(${column}))`
+}
+
+// Which counterparties make a transfer plumbing rather than the account's own
+// activity, over the transfer read model's columns. Every exclusion has the same
+// shape — a leg whose other side is protocol machinery is that machinery's, UNLESS the
+// viewed account IS that machinery, in which case those legs are the only activity it
+// has. Shared by the page read and the count arm so the two cannot select differently.
+async function transferCandidatePotFiltersSql(accCond: string[]): Promise<string> {
+  const parts: string[] = []
+  if (!accCond.some(a => NOISY_TRANSFER_POTS.includes(a))) {
+    parts.push(`AND from_account NOT IN (${noisyPotList()}) AND to_account NOT IN (${noisyPotList()})`)
+  }
+  // Sibling/relay/parachain sovereign accounts are the XCM feed's counterparties; a
+  // transfer leg against one is that message, not a transfer.
+  parts.push(`AND NOT match(from_account, '^0x(7369626c|70617261|506172656e74)')`)
+  parts.push(`AND NOT match(to_account, '^0x(7369626c|70617261|506172656e74)')`)
+  const poolAccs = ammPoolAccounts()
+  if (poolAccs.size && !accCond.some(a => poolAccs.has(a))) {
+    const list = [...poolAccs].map(a => `'${a}'`).join(',')
+    parts.push(`AND from_account NOT IN (${list}) AND to_account NOT IN (${list})`)
+  }
+  const mmAccounts = await mmReserveAccountIds()
+  if (mmAccounts.size && !accCond.some(a => mmAccounts.has(a))) {
+    const list = [...mmAccounts].map(a => `'${a}'`).join(',')
+    parts.push(`AND from_account NOT IN (${list}) AND to_account NOT IN (${list})`)
+  }
+  return parts.join('\n                ')
+}
+
+// The candidate transfer events of an account, deduplicated exactly as
+// dedupeTransferEvents does it: one identity is (block, extrinsic, asset, from, to,
+// amount), and the pallet that reports it most specifically wins
+// (Currencies.Transferred over Tokens.Transfer over Balances.Transfer). Rows that tie
+// on priority all survive, which is why this is a window maximum and not an argMax.
+// The read model holds one row per (account, block, event), so the account set can
+// report the same event twice — DISTINCT collapses that and the ReplacingMergeTree's
+// unmerged replays in one step.
+function transferCandidateSql(accList: string, bound: string, potFilters: string): string {
+  return `SELECT block_height, event_index, xi, from_account, to_account, asset_id, amount
+    FROM (
+      SELECT *, max(prio) OVER (PARTITION BY block_height, xi, asset_id, lower(from_account), lower(to_account), amount) AS top_prio
+      FROM (
+        SELECT block_height, event_index, ifNull(extrinsic_index, 4294967295) AS xi,
+               from_account, to_account, asset_id, amount,
+               multiIf(event_name = 'Currencies.Transferred', 3, event_name = 'Tokens.Transfer', 2, 1) AS prio
+        FROM (
+          SELECT DISTINCT block_height, event_index, extrinsic_index, event_name, from_account, to_account, amount, asset_id
+          FROM price_data.account_transfer_activity
+          WHERE ${bound} AND account IN (${accList})
+            AND (from_account IN (${accList}) OR to_account IN (${accList}))
+            ${potFilters}
+        )
+      )
+    ) WHERE prio = top_prio`
+}
+
+// Every (block, extrinsic) the feed gives to a NON-transfer row, so a transfer sharing
+// it is that row's plumbing. Three sources state it in SQL; the enumerated sources
+// hand theirs over as a bound array.
+//
+// The swap and liquidity arms are deliberately the SOURCE sets rather than the row
+// sets: a liquidation's internal swap and a share-routed pool leg produce no trade row
+// yet still own their extrinsic's transfer legs, which is exactly the distinction the
+// builder draws with `tradeExt` before it drops those rows.
+function semanticExtrinsicSql(list: string, evmList: string, bound: string, enumeratedExtrinsics: [number, number][]): string {
+  const arms = [
+    `SELECT block_height, extrinsic_index FROM price_data.account_swap_activity FINAL
+       WHERE ${bound} AND account IN (${list})`,
+    `SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index FROM price_data.liquidity_activity
+       WHERE ${bound} AND who IN (${list}) AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
+         AND extrinsic_index IS NOT NULL`,
+  ]
+  // Money-market rows are EVM logs; the substrate extrinsic that emitted them is
+  // resolved through raw_events by (block, event) — a primary-key read, the same
+  // lookup extrinsicIndexFor does for the rendered rows.
+  if (evmList) {
+    arms.push(`SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index FROM price_data.raw_events
+       WHERE (block_height, event_index) IN (
+           SELECT block_height, event_index FROM price_data.account_money_market_activity FINAL
+           WHERE ${bound} AND account_id IN (${evmList})
+             AND event_name IN (${sqlEventNameList([...MONEY_MARKET_EVENT_NAMES])})
+             AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()}))
+         AND extrinsic_index IS NOT NULL`)
+  }
+  if (enumeratedExtrinsics.length) {
+    arms.push(`SELECT tupleElement(pair, 1) AS block_height, tupleElement(pair, 2) AS extrinsic_index
+       FROM (SELECT arrayJoin(${sortedBlockPairsSql(enumeratedExtrinsics)}) AS pair)`)
+  }
+  return arms.join('\n      UNION DISTINCT\n      ')
+}
+
+// (block, owner) for every non-transfer row the feed places in a block WITHOUT an
+// extrinsic. A hook transfer has no extrinsic to be owned by, so it is subordinate to
+// a hook sibling that names the same account — a block-and-account rule, never a
+// block-only one, so an unrelated transfer in a busy block is not swallowed.
+function hookOwnerSql(list: string, accounts: string[], evmList: string, bound: string, enumeratedOwners: [number, string][]): string {
+  const who = (column: string) => resolvedAccountIdSql(column, accounts)
+  const arms = [
+    `SELECT e.block_height AS block_height, ${who('e.who')} AS owner FROM price_data.dca_events AS e FINAL
+       WHERE ${bound.replaceAll('block_height', 'e.block_height').replaceAll('block_timestamp', 'e.block_timestamp')}
+         AND e.event_name IN ('DCA.TradeExecuted','DCA.TradeFailed') AND e.who IN (${list})`,
+    `SELECT block_height, ${who('who')} AS owner FROM price_data.liquidity_activity
+       WHERE ${bound} AND who IN (${list}) AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
+         AND extrinsic_index IS NULL`,
+  ]
+  if (evmList) {
+    arms.push(`SELECT block_height, ${who('account_id')} AS owner FROM price_data.account_money_market_activity FINAL
+       WHERE ${bound} AND account_id IN (${evmList})
+         AND event_name IN (${sqlEventNameList([...MONEY_MARKET_EVENT_NAMES])})
+         AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
+         AND (block_height, event_index) NOT IN (
+           SELECT block_height, event_index FROM price_data.raw_events
+           WHERE (block_height, event_index) IN (
+               SELECT block_height, event_index FROM price_data.account_money_market_activity FINAL
+               WHERE ${bound} AND account_id IN (${evmList}))
+             AND extrinsic_index IS NOT NULL)`)
+  }
+  if (enumeratedOwners.length) {
+    // Owners are account ids, so they are interned: an inbound-XCM-heavy account has
+    // tens of thousands of hook rows but a handful of distinct owners, and repeating the
+    // 66-character id per row is what pushed this payload over a megabyte.
+    const dictionary = [...new Set(enumeratedOwners.map(([, owner]) => owner))]
+    const index = new Map(dictionary.map((owner, at) => [owner, at + 1]))
+    const pairs = enumeratedOwners.map(([block, owner]) => [block, index.get(owner) as number] as [number, number])
+    arms.push(`SELECT tupleElement(pair, 1) AS block_height,
+              arrayElement([${dictionary.map(owner => `'${owner}'`).join(',')}], tupleElement(pair, 2)) AS owner
+       FROM (SELECT arrayJoin(${sortedBlockPairsSql(pairs)}) AS pair)`)
+  }
+  return arms.join('\n      UNION DISTINCT\n      ')
+}
+
+// One transfer row per surviving candidate, per block.
+function accountTransferArm(args: {
+  accounts: string[]
+  accList: string
+  list: string
+  evmList: string
+  bound: string
+  potFilters: string
+  viewingTreasury: boolean
+  enumeratedExtrinsics: [number, number][]
+  enumeratedOwners: [number, string][]
+}): ActivityCountArm {
+  const { accounts, accList, list, evmList, bound, potFilters, viewingTreasury } = args
+  // A transfer INTO the treasury pot is a fee or a deposit unless the extrinsic that
+  // emitted it is itself a token-transfer call — only then is it a donation the account
+  // made. Bounded to the candidates' own blocks so the 32.3M-row extrinsic table is
+  // read by primary key rather than scanned for a call name.
+  const treasuryFilter = viewingTreasury ? '' : `
+    AND NOT (to_account = '${TREASURY_POT}' AND (block_height, xi) NOT IN (
+      SELECT block_height, ifNull(extrinsic_index, 4294967295) FROM price_data.raw_extrinsics
+      WHERE block_height IN (SELECT block_height FROM cand WHERE to_account = '${TREASURY_POT}')
+        AND call_name IN (${sqlEventNameList([...TRANSFER_CALL_NAMES])})))`
+  return `SELECT block_height, count() AS rows FROM (
+      WITH cand AS (${transferCandidateSql(accList, bound, potFilters)}),
+           sem_ext AS (${semanticExtrinsicSql(list, evmList, bound, args.enumeratedExtrinsics)}),
+           hook_owner AS (${hookOwnerSql(list, accounts, evmList, bound, args.enumeratedOwners)})
+      SELECT block_height FROM cand
+      WHERE (xi = 4294967295 OR (block_height, xi) NOT IN (SELECT block_height, extrinsic_index FROM sem_ext))
+        AND (xi != 4294967295 OR (
+          (block_height, ${resolvedAccountIdSql('from_account', accounts)}) NOT IN (SELECT block_height, owner FROM hook_owner)
+          AND (block_height, ${resolvedAccountIdSql('to_account', accounts)}) NOT IN (SELECT block_height, owner FROM hook_owner)))
+        ${treasuryFilter}
+        AND (block_height, event_index + 1, ${resolvedAccountIdSql('from_account', accounts)}, asset_id, amount) NOT IN (
+          SELECT block_height, event_index, lower(JSONExtractString(args_json,'who')),
+                 toUInt32(JSONExtractInt(args_json,'currencyId')), JSONExtractString(args_json,'amount')
+          FROM price_data.raw_events WHERE event_name = 'Tokens.DustLost')
+    )
+    GROUP BY block_height`
+}
+
+// The enumerated sources travel in the query TEXT, not as bound parameters. The client
+// sends query_params in the request URI, and one heavy-XCM account's 59k per-block
+// counts overran the server's URI limit ("HTTP request URI invalid or too long") long
+// before they would trouble max_query_size — which applies to the body ClickHouse reads
+// as a stream, and is a setting this path raises deliberately.
+//
+// Blocks are delta-encoded against their sorted order so the digits stay small: a feed
+// dense in blocks pays ~4 bytes a block instead of ~9. arrayCumSum puts them back.
+function sortedBlockPairsSql(pairs: [number, number][]): string {
+  const sorted = [...pairs].sort((a, b) => a[0] - b[0])
+  const deltas: number[] = []
+  let previous = 0
+  for (const [block] of sorted) { deltas.push(block - previous); previous = block }
+  return `arrayZip(arrayCumSum([${deltas.join(',')}]), [${sorted.map(([, v]) => v).join(',')}])`
+}
+
+function enumeratedArm(pairs: [number, number][]): ActivityCountArm {
+  if (!pairs.length) return `SELECT toUInt32(0) AS block_height, toUInt64(0) AS rows WHERE 0`
+  return `SELECT tupleElement(pair, 1) AS block_height, toUInt64(tupleElement(pair, 2)) AS rows
+    FROM (SELECT arrayJoin(${sortedBlockPairsSql(pairs)}) AS pair)`
+}
 
 // Where a page's ranks live: the blocks holding them, how many rows the feed holds in
 // strictly newer blocks (`above`), and the feed's exact total.
@@ -11333,27 +11564,27 @@ interface ExactActivityLocation {
 // Everything needed to count and locate one (account set, type, filters) feed.
 interface ExactActivityPlan {
   arms: ActivityCountArm[]
-  // The enumerated sources' whole per-account history, already classified. Kept so
-  // the page pass can be reconciled against the same rows the total was counted from.
-  smallBlocks: number[]
-  smallRows: number[]
-}
-
-function planParams(plan: ExactActivityPlan): Record<string, unknown> {
-  return { smallBlocks: plan.smallBlocks, smallRows: plan.smallRows }
+  // Handed to the page pass so it renders the same enumerated rows the total counted,
+  // rather than reading them a second time at a different depth.
+  enumerated: EnumeratedActivity
 }
 
 function perBlockSql(plan: ExactActivityPlan): string {
   return `WITH per_block AS (
     SELECT block_height, sum(rows) AS rows
-    FROM (${[...plan.arms, ENUMERATED_ARM].join('\n    UNION ALL\n    ')})
+    FROM (${plan.arms.join('\n    UNION ALL\n    ')})
     GROUP BY block_height)`
 }
+
+// The interpolated enumerated data can reach a few hundred KB on the account with the
+// most cross-chain history, well past the 256 KiB default. Raised only for these two
+// queries, which is where the literals live.
+const EXACT_ACTIVITY_QUERY_SETTINGS = { max_query_size: '33554432' }
 
 async function countExactActivity(plan: ExactActivityPlan): Promise<number> {
   const res = await client.query({
     query: `${perBlockSql(plan)} SELECT toString(sum(rows)) AS total FROM per_block`,
-    query_params: planParams(plan), format: 'JSONEachRow',
+    clickhouse_settings: EXACT_ACTIVITY_QUERY_SETTINGS, format: 'JSONEachRow',
   })
   return Number((await res.json<{ total: string }>())[0]?.total ?? 0)
 }
@@ -11376,7 +11607,8 @@ async function locateExactActivity(plan: ExactActivityPlan, offset: number, limi
       FROM ranked
       WHERE cum > {off:UInt64} AND cum - rows < {off:UInt64} + {lim:UInt64}
       ORDER BY block_height DESC`,
-    query_params: { ...planParams(plan), off: offset, lim: limit }, format: 'JSONEachRow',
+    query_params: { off: offset, lim: limit },
+    clickhouse_settings: EXACT_ACTIVITY_QUERY_SETTINGS, format: 'JSONEachRow',
   })
   const rows = await res.json<{ block_height: number; block_rows: number; cum_rows: string; total_rows: string }>()
   // No block overlaps the requested ranks: the offset is past the end of the feed.
@@ -11396,6 +11628,7 @@ async function locateExactActivity(plan: ExactActivityPlan, offset: number, limi
 interface ExactActivityBound {
   blocks: number[]
   perBlock: Map<number, number>
+  enumerated: EnumeratedActivity
 }
 
 // A vote as the activity feed renders it. Shared so the enumerating pass and the
@@ -11410,28 +11643,55 @@ function voteActivityRow(v: VoteRow): ActivityRow {
   }
 }
 
-// The enumerated sources' whole per-account contribution to one type's feed, or null
-// when one of them holds more rows than this path is willing to read in full.
+// The enumerated sources' whole per-account contribution, or null when one of them
+// holds more rows than this path is willing to read in full.
 //
-// Each source is asked for EXACT_SMALL_SOURCE_ROWS + 1 rows, so coming back short IS
-// the proof that the read reached the end of that source — nothing has to be counted
-// separately to establish it. The builders are the same ones the page pass calls with
-// the same arguments, so their classification is never restated here; the per-block
-// reconciliation below would catch it if the two call sites ever drifted.
+// Each source is asked for its cap + 1 rows, so coming back short IS the proof that the
+// read reached the end of that source — nothing has to be counted separately to
+// establish it. The builders are the same ones the page pass calls with the same
+// arguments, so their classification is never restated here; the per-block
+// reconciliation would catch it if the two call sites ever drifted.
+//
+// Kept per source rather than flattened, because the page pass takes its enumerated
+// rows from HERE instead of reading them again: the same array supplies the per-block
+// counts the total is built from and the rows the page renders, so the two cannot be
+// different sets — and each source still lands in the slot the classifier expects
+// (referral claims and incentive claims both render under other families' types, so a
+// flat list could not tell them from the liquidity and mm reads).
+interface EnumeratedActivity {
+  otc: ActivityRow[]
+  dcaFailures: ActivityRow[]
+  rewards: ActivityRow[]
+  staking: ActivityRow[]
+  votes: ActivityRow[]
+  xcm: ActivityRow[]
+}
+
+// Every enumerated row. All of them are non-transfer, so a transfer feed needs each
+// one's extrinsic or hook owner to decide which transfers are its plumbing.
+function enumeratedActivityAll(e: EnumeratedActivity): ActivityRow[] {
+  return [...e.otc, ...e.dcaFailures, ...e.rewards, ...e.staking, ...e.votes, ...e.xcm]
+}
+
 async function enumeratedActivityRows(
   accounts: string[],
   type: string,
   filters: ValueListFilters,
   from?: string,
   to?: string,
-): Promise<ActivityRow[] | null> {
+): Promise<EnumeratedActivity | null> {
   // A count and every page of it want the same whole-history read, and the sources are
-  // read in full whether or not the account has rows in them — the OTC read alone
-  // costs ~300ms for an account with no OTC at all, because Placed/Cancelled ownership
-  // is a signer scan. Hold the assembled rows for one live window so a page burst pays
-  // for them once instead of per request.
+  // read in full whether or not the account has rows in them — the OTC read alone costs
+  // ~300ms for an account with no OTC at all (Placed/Cancelled ownership is a signer
+  // scan) and the three XCM legs cost ~4.7s on the account that holds the most of them.
+  // Hold the assembled rows for a window so a page burst pays for them once.
+  //
+  // Staleness here is consistency-safe rather than merely tolerable: the cached rows
+  // supply BOTH their per-block counts to the locate query and the rows the page
+  // renders, so the two always describe the same set. It costs freshness at the head,
+  // which is what every cached total on this page already costs.
   return cached(`explorer:exact-small:${type}:${[...accounts].sort().join(',')}:${filterKey(filters)}:${from ?? ''}:${to ?? ''}`,
-    timeWindow(from, to) ? 30_000 : LIVE_CACHE_MS,
+    ENUMERATED_SOURCE_CACHE_MS,
     () => enumeratedActivityRowsUncached(accounts, type, filters, from, to))
 }
 
@@ -11441,38 +11701,68 @@ async function enumeratedActivityRowsUncached(
   filters: ValueListFilters,
   from?: string,
   to?: string,
-): Promise<ActivityRow[] | null> {
+): Promise<EnumeratedActivity | null> {
   const depth = EXACT_SMALL_SOURCE_ROWS + 1
-  const sources: ActivityRow[][] = await Promise.all([
-    // OTC folds under the trade chip, so a trade feed carries it too.
-    type === 'trade' || type === 'otc' ? getRecentOtc(depth, from, to, 0, filters, undefined, accounts) : [],
-    type === 'trade' ? getRecentDcaFailures(depth, from, to, accounts, assetIdsForToken(filters.token)) : [],
+  const xcmDepth = EXACT_XCM_SOURCE_ROWS + 1
+  const tokenIds = assetIdsForToken(filters.token)
+  // Exactly the `want*` flags collectAccountActivity derives, so the two passes read
+  // the same sources for the same type. A transfer feed pulls all of them, because
+  // every one of them can own a transfer leg.
+  const wantTransfers = type === 'all' || type === 'transfer'
+  const need = {
+    otc: type === 'all' || type === 'otc' || type === 'trade' || wantTransfers,
+    dcaFailures: type === 'all' || type === 'trade' || wantTransfers,
+    rewards: type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm',
+    staking: type === 'all' || type === 'staking' || wantTransfers,
+    votes: type === 'all' || type === 'vote' || wantTransfers,
+    xcm: type === 'all' || type === 'xcm' || wantTransfers,
+  }
+  const [otc, dcaFailures, rewards, staking, votes, xcmLegs] = await Promise.all([
+    need.otc ? getRecentOtc(depth, from, to, 0, filters, undefined, accounts) : [],
+    need.dcaFailures ? getRecentDcaFailures(depth, from, to, accounts, tokenIds) : [],
     // Referral claims render as liquidity, incentive claims as mm.
-    type === 'liquidity' || type === 'mm' ? getRecentRewardClaims(depth, from, to, accounts, assetIdsForToken(filters.token), undefined, undefined, filters) : [],
-    type === 'staking' ? getRecentStaking(depth, from, to, accounts, 0, filters, undefined, undefined) : [],
-    type === 'vote' ? getRecentVotes(depth, from, to, 0, {}, accounts, filters).then(votes => votes.map(voteActivityRow)) : [],
+    need.rewards ? getRecentRewardClaims(depth, from, to, accounts, tokenIds, undefined, undefined, filters) : [],
+    need.staking ? getRecentStaking(depth, from, to, accounts, 0, filters, undefined, undefined) : [],
+    need.votes ? getRecentVotes(depth, from, to, 0, {}, accounts, filters).then(rows => rows.map(voteActivityRow)) : [],
+    // The three XCM legs each have their own limit, so saturation is per leg: the
+    // concatenation reaching a cap says nothing about whether one leg was exhausted.
+    need.xcm ? Promise.all([
+      getRecentXcm(xcmDepth, from, to, accounts, 0, filters),
+      getRecentXcmIn(xcmDepth, from, to, accounts, 0, filters),
+      getRecentXcmOutRemote(xcmDepth, from, to, accounts, 0, filters),
+    ]) : [],
   ])
-  if (sources.some(rows => rows.length >= depth)) return null
-  return sources.flat().filter(row => activityTypeMatchesFamily(row.type, type))
+  const capped: [ActivityRow[], number][] = [
+    [otc, depth], [dcaFailures, depth], [rewards, depth], [staking, depth], [votes, depth],
+    ...xcmLegs.map(leg => [leg, xcmDepth] as [ActivityRow[], number]),
+  ]
+  if (capped.some(([rows, cap]) => rows.length >= cap)) return null
+  return { otc, dcaFailures, rewards, staking, votes, xcm: xcmLegs.flat() }
 }
 
 // Which types this path can count exactly, in the order the reasoning above splits
 // them: `trade`, `liquidity` and `mm` mix a counted source with enumerated ones,
 // while `vote`, `staking` and `otc` are enumerated end to end.
 //
-// `all`, `transfer` and `xcm` are absent deliberately. Their feeds turn on decisions
-// no arm here states — the transfer dedup/pot/treasury-call/dust rules and the three
-// XCM legs' TS-side payload parsers — so they keep the candidate window and keep
-// saying that older history lies beyond the pages they number, rather than
-// advertising a total this path cannot serve.
-const EXACTLY_COUNTABLE_ACTIVITY_TYPES = new Set(['trade', 'liquidity', 'mm', 'vote', 'staking', 'otc'])
+// `xcm` is enumerated end to end too, at its own higher cap, and `transfer` is the one
+// family whose arm has to state another family's decisions, because subordination only
+// ever removes transfer rows.
+//
+// `all` is absent for one more commit: it is every arm and every enumerated source at
+// once, which is only sound once each family is exact on its own.
+const EXACTLY_COUNTABLE_ACTIVITY_TYPES = new Set([
+  'transfer', 'trade', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'otc',
+])
 
-// Whether an account/tag feed of this type is paged by locating its ranks rather than
-// by widening a candidate window. The route's offset bound depends on it: a located
-// page costs what its FEED costs, not what its offset costs, so it is servable to the
-// end of any total it publishes.
-export function isExactlyPagedActivityType(type: string): boolean {
-  return EXACTLY_COUNTABLE_ACTIVITY_TYPES.has(normalizeActivityTypeKey(type))
+// Whether this request is paged by locating its ranks rather than by widening a
+// candidate window — the same test planExactActivity applies, minus the per-account
+// parts it can only answer with the account in hand. The route's offset bound depends
+// on it: a located page costs what its FEED costs, not what its offset costs, so it is
+// servable to the end of any total it publishes, while a windowed one is still bounded
+// by the depth one candidate window reaches.
+export function isLocatedActivityRequest(type: string, action?: string, filters: ValueListFilters = {}): boolean {
+  if (!EXACTLY_COUNTABLE_ACTIVITY_TYPES.has(normalizeActivityTypeKey(type))) return false
+  return !action && filters.min == null && !filters.token
 }
 
 // A plan for counting and locating one feed, or null when the request's shape has no
@@ -11497,30 +11787,62 @@ async function planExactActivity(
   // carry ~100 KB of literals against ClickHouse's 256 KB query ceiling. Past this
   // budget the window answers instead of the request failing on query size.
   if (list.length * 2 > MAX_EXACT_ACCOUNT_LIST_BYTES) return null
-  const smallRows = await enumeratedActivityRows(accounts, type, filters, from, to)
-  if (!smallRows) return null
+  const enumerated = await enumeratedActivityRows(accounts, type, filters, from, to)
+  if (!enumerated) return null
 
   const bound = timeWindow(from, to) ?? '1'
-  const arms: ActivityCountArm[] = []
-  if (type === 'trade') arms.push(accountSwapTradeArm(list, bound), accountDcaTradeArm(list, bound))
-  if (type === 'liquidity') arms.push(accountLiquidityArm(list, bound))
-  if (type === 'mm') {
-    // Money-market rows are indexed under the account's truncated-H160 form, and a
-    // module account's rows are protocol internals the feed never shows — so an
-    // account that only HAS a module form contributes nothing. The exclusion is the
-    // builder's own `isModuleAcct(accountRef(account_id))`, applied to the same
-    // account_id values the arm restricts to: a truncated `modl…` H160 resolves back
-    // to its substrate module account, which a prefix test on the H160 would miss.
-    const evmForms = [...new Set(accounts.map(evmAccountForm).filter((form): form is string => !!form))]
-      .filter(form => !isModuleAcct(accountRef(form)))
-    if (evmForms.length) {
-      arms.push(accountMoneyMarketArm(evmForms.map(form => `'${form}'`).join(','), MONEY_MARKET_EVENT_NAMES, bound))
-    }
+  const wantTrades = type === 'all' || type === 'trade'
+  const wantTransfers = type === 'all' || type === 'transfer'
+  // Money-market rows are indexed under the account's truncated-H160 form. A module
+  // account's rows are protocol internals the feed never shows, so one that only HAS a
+  // module form contributes no mm rows — but its transfer legs are still owned by those
+  // extrinsics, which is why the suppression side below keeps every form. The exclusion
+  // is the builder's own `isModuleAcct(accountRef(account_id))`, applied to the same
+  // account_id values the arm restricts to: a truncated `modl…` H160 resolves back to
+  // its substrate module account, which a prefix test on the H160 would miss.
+  const evmForms = [...new Set(accounts.map(evmAccountForm).filter((form): form is string => !!form))]
+  const evmList = evmForms.map(form => `'${form}'`).join(',')
+  const userEvmList = evmForms.filter(form => !isModuleAcct(accountRef(form))).map(form => `'${form}'`).join(',')
+
+  const all = enumeratedActivityAll(enumerated)
+  const perBlock = new Map<number, number>()
+  for (const row of all) {
+    if (!activityTypeMatchesFamily(row.type, type)) continue
+    perBlock.set(row.blockHeight, (perBlock.get(row.blockHeight) ?? 0) + 1)
   }
 
-  const perBlock = new Map<number, number>()
-  for (const row of smallRows) perBlock.set(row.blockHeight, (perBlock.get(row.blockHeight) ?? 0) + 1)
-  return { arms, smallBlocks: [...perBlock.keys()], smallRows: [...perBlock.values()] }
+  const arms: ActivityCountArm[] = [enumeratedArm([...perBlock])]
+  if (wantTrades) arms.push(accountSwapTradeArm(list, bound), accountDcaTradeArm(list, bound))
+  if (type === 'all' || type === 'liquidity') arms.push(accountLiquidityArm(list, bound))
+  if ((type === 'all' || type === 'mm') && userEvmList) {
+    arms.push(accountMoneyMarketArm(userEvmList, MONEY_MARKET_EVENT_NAMES, bound))
+  }
+  const accCond = [...new Set(accounts.map(a => a.toLowerCase()))].filter(a => ACCOUNT_RE.test(a))
+  if (wantTransfers && accCond.length) {
+    // A transfer feed needs the enumerated sources' suppression identities too. Only
+    // their SIGNED rows contribute extrinsics and only their HOOK rows contribute owners,
+    // which is exactly the split suppressSubordinateActivityRows makes.
+    const signed = new Set(all.filter(row => row.extrinsicIndex != null)
+      .map(row => `${row.blockHeight}:${row.extrinsicIndex}`))
+    const owners = new Set(all.filter(row => row.extrinsicIndex == null)
+      .flatMap(row => [row.who?.accountId, row.to?.accountId]
+        .filter((id): id is string => !!id)
+        .map(id => `${row.blockHeight}:${id.toLowerCase()}`)))
+    arms.push(accountTransferArm({
+      accounts, accList: accCond.map(a => `'${a}'`).join(','), list, evmList, bound,
+      potFilters: await transferCandidatePotFiltersSql(accCond),
+      viewingTreasury: accCond.includes(TREASURY_POT),
+      enumeratedExtrinsics: [...signed].map(key => {
+        const at = key.indexOf(':')
+        return [Number(key.slice(0, at)), Number(key.slice(at + 1))] as [number, number]
+      }),
+      enumeratedOwners: [...owners].map(key => {
+        const at = key.indexOf(':')
+        return [Number(key.slice(0, at)), key.slice(at + 1)] as [number, string]
+      }),
+    }))
+  }
+  return { arms, enumerated }
 }
 
 // Which block's count SQL and the classifier disagree on, or null when they agree.
@@ -11736,7 +12058,12 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     }
   }
 
-  const otc = wantOtc ? await getRecentOtc(catFetch, from, to, 0, queryFilters, type === 'otc' ? action : undefined, accounts) : []
+  // The enumerated sources come from the plan when a page is located, so the rows the
+  // page renders are literally the rows its total was counted from — reading them again
+  // at a different depth is the one way this path could publish a number it cannot
+  // serve. Without a plan they are read here exactly as before.
+  const otc = exact ? exact.enumerated.otc
+    : wantOtc ? await getRecentOtc(catFetch, from, to, 0, queryFilters, type === 'otc' ? action : undefined, accounts) : []
   noteSource(otc.length, oldestWindowBlock(otc, r => r.blockHeight))
   const otcExt = activityExtrinsicSet(otc)
 
@@ -11774,16 +12101,10 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     const mmLegFilter = !viewingMmContract && mmList
       ? `AND JSONExtractString(args_json,'from') NOT IN (${mmList}) AND JSONExtractString(args_json,'to') NOT IN (${mmList})`
       : ''
-    const transferReadModelMmLegFilter = !viewingMmContract && mmList
-      ? `AND from_account NOT IN (${mmList}) AND to_account NOT IN (${mmList})`
-      : ''
     const poolAccs = ammPoolAccounts()
     const viewingPool = accCond.some(a => poolAccs.has(a))
     const poolLegFilter = !viewingPool && poolAccs.size
       ? `AND JSONExtractString(args_json,'from') NOT IN (${[...poolAccs].map(a => `'${a}'`).join(',')}) AND JSONExtractString(args_json,'to') NOT IN (${[...poolAccs].map(a => `'${a}'`).join(',')})`
-      : ''
-    const transferReadModelPoolLegFilter = !viewingPool && poolAccs.size
-      ? `AND from_account NOT IN (${[...poolAccs].map(a => `'${a}'`).join(',')}) AND to_account NOT IN (${[...poolAccs].map(a => `'${a}'`).join(',')})`
       : ''
     // The noisy-pot legs are plumbing on a NORMAL account's page, but when the
     // viewed account IS one of those pots (fee processor, omnipool, router) they
@@ -11793,8 +12114,9 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     const viewingNoisyPot = accCond.some(a => NOISY_TRANSFER_POTS.includes(a))
     const rawNoisyPotFilter = viewingNoisyPot ? '' :
       `AND JSONExtractString(args_json,'from') NOT IN (${noisyPotList()}) AND JSONExtractString(args_json,'to') NOT IN (${noisyPotList()})`
-    const readModelNoisyPotFilter = viewingNoisyPot ? '' :
-      `AND from_account NOT IN (${noisyPotList()}) AND to_account NOT IN (${noisyPotList()})`
+    // The read-model form of all three exclusions, shared verbatim with the count arm
+    // so the rows it counts and the rows this reads can never be a different set.
+    const readModelPotFilters = await transferCandidatePotFiltersSql(accCond)
     const trRes = await client.query({
       query: useTransferReadModel
         ? `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
@@ -11802,11 +12124,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
               FROM price_data.account_transfer_activity
               WHERE account IN (${accList}) AND ${bound}
                 AND (from_account IN (${accList}) OR to_account IN (${accList}))
-                ${readModelNoisyPotFilter}
-                AND NOT match(from_account, '^0x(7369626c|70617261|506172656e74)')
-                AND NOT match(to_account, '^0x(7369626c|70617261|506172656e74)')
-                ${transferReadModelPoolLegFilter}
-                ${transferReadModelMmLegFilter}
+                ${readModelPotFilters}
               ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`
         : `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
                 JSONExtractString(args_json,'from') AS from_acc,
@@ -11892,8 +12210,8 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   // Every read that emits one row per execution needs `FINAL`: dca_events replaces on
   // (event_name, block_height, event_index, id), so a re-inserted raw range holds an
   // execution twice until its parts merge and the feed renders that block twice.
-  const dcaTrades: ActivityRow[] = wantDca
-    ? await getRecentDcaFailures(catFetch, from, to, accounts, tokenIds)
+  const dcaTrades: ActivityRow[] = exact ? [...exact.enumerated.dcaFailures]
+    : wantDca ? await getRecentDcaFailures(catFetch, from, to, accounts, tokenIds)
     : []
   noteSource(dcaTrades.length, oldestWindowBlock(dcaTrades, r => r.blockHeight))
   if (wantDca) {
@@ -12078,16 +12396,20 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   // 6. Cross-chain (XCM) transfers sent (outbound) or received (inbound) by this account.
   // Each XCM leg has its own window, so saturation is per leg: the concatenation
   // reaching catFetch says nothing about whether any single leg was exhausted.
-  const xcmLegs = wantXcm
+  const xcmLegs = exact ? [exact.enumerated.xcm]
+    : wantXcm
     ? await Promise.all([getRecentXcm(catFetch, from, to, accounts, 0, queryFilters), getRecentXcmIn(catFetch, from, to, accounts, 0, queryFilters), getRecentXcmOutRemote(catFetch, from, to, accounts, 0, queryFilters)])
     : []
   for (const leg of xcmLegs) noteSource(leg.length, oldestWindowBlock(leg, r => r.blockHeight))
   const xcm = xcmLegs.flat()
-  const staking = wantStaking ? await getRecentStaking(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
+  const staking = exact ? exact.enumerated.staking
+    : wantStaking ? await getRecentStaking(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
   noteSource(staking.length, oldestWindowBlock(staking, r => r.blockHeight))
-  const voteRows: ActivityRow[] = wantVotes ? (await getRecentVotes(catFetch, from, to, 0, {}, accounts, queryFilters)).map(voteActivityRow) : []
+  const voteRows: ActivityRow[] = exact ? exact.enumerated.votes
+    : wantVotes ? (await getRecentVotes(catFetch, from, to, 0, {}, accounts, queryFilters)).map(voteActivityRow) : []
   noteSource(voteRows.length, oldestWindowBlock(voteRows, r => r.blockHeight))
-  const rewards = (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')
+  const rewards = exact ? exact.enumerated.rewards
+    : (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')
     ? await getRecentRewardClaims(catFetch, from, to, accounts, tokenIds, undefined, undefined, queryFilters)
     : []
   noteSource(rewards.length, oldestWindowBlock(rewards, r => r.blockHeight))
@@ -12187,13 +12509,15 @@ async function locatedAccountActivityPage(
   if (!plan) return null
   const location = await locateExactActivity(plan, offset, limit)
   if (!location.blocks.length) return []
-  // The located blocks hold `sum(perBlock)` rows between them; every source read under
-  // that closed bound is therefore bounded by it, with room for the enumerated sources
-  // that are read in full regardless.
-  const sourceLimit = EXACT_SMALL_SOURCE_ROWS + 1 + [...location.perBlock.values()].reduce((a, b) => a + b, 0)
+  // Only the SQL-counted sources are still read here, and the closed block set — not a
+  // row limit — is what bounds them: a source's CANDIDATES in a block can far outnumber
+  // the rows it contributes (a block with one real transfer can hold fifty plumbing
+  // legs), so a limit scaled to the located row count would truncate the very context
+  // the classification needs. The enumerated sources are handed over from the plan.
+  const sourceLimit = MAX_LOCATED_BLOCK_SOURCE_ROWS
   try {
     const built = await collectAccountActivity(accounts, type, sourceLimit, action, filters, from, to,
-      { blocks: location.blocks, perBlock: location.perBlock })
+      { blocks: location.blocks, perBlock: location.perBlock, enumerated: plan.enumerated })
     return built.rows.slice(offset - location.above, offset - location.above + limit)
   } catch (error) {
     if (!(error instanceof ExactActivityDisagreement)) throw error

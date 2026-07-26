@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { exactActivityMismatch, isExactlyPagedActivityType } from '../src/services/explorerService.ts'
+import { exactActivityMismatch, isLocatedActivityRequest } from '../src/services/explorerService.ts'
 
 const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
 
@@ -37,19 +37,28 @@ describe('exactActivityMismatch', () => {
   })
 })
 
-// Which categories page by locating their ranks decides the route's offset bound, so
-// the two must agree on the vocabulary — including that `dca` is a kind of trade.
-describe('isExactlyPagedActivityType', () => {
-  it('covers the categories counted exactly, under either spelling of DCA', () => {
-    for (const type of ['trade', 'dca', 'liquidity', 'mm', 'vote', 'staking', 'otc']) {
-      expect(isExactlyPagedActivityType(type), type).toBe(true)
+// Which requests page by locating their ranks decides the route's offset bound, so the
+// two must agree on the vocabulary — including that `dca` is a kind of trade, and that
+// a filter no count arm states puts the request back on the candidate window however
+// countable its category is.
+describe('isLocatedActivityRequest', () => {
+  it('covers every exact category, under either spelling of DCA', () => {
+    for (const type of ['transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'otc']) {
+      expect(isLocatedActivityRequest(type), type).toBe(true)
     }
   })
 
-  it('excludes the categories still served from a candidate window', () => {
-    for (const type of ['all', 'transfer', 'xcm']) {
-      expect(isExactlyPagedActivityType(type), type).toBe(false)
-    }
+  it('excludes the merged feed until every family it is made of is exact', () => {
+    expect(isLocatedActivityRequest('all')).toBe(false)
+  })
+
+  // A min-USD floor is decided on the row's event-time valuation, which no arm holds;
+  // an action or a token would have to be mirrored in every arm to stay exact. Each one
+  // keeps the window, and the window says what it covers.
+  it('excludes a request whose filter no arm states', () => {
+    expect(isLocatedActivityRequest('transfer', 'swap')).toBe(false)
+    expect(isLocatedActivityRequest('transfer', undefined, { min: 10 })).toBe(false)
+    expect(isLocatedActivityRequest('transfer', undefined, { token: 'DOT' })).toBe(false)
   })
 })
 
