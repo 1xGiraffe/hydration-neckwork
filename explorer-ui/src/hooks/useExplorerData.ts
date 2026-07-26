@@ -34,6 +34,16 @@ export function useActivity(limit = 30, from?: string, to?: string, offset = 0, 
   const ri = useInterval()
   return useQuery({ queryKey: ['activity', limit, from, to, offset, type, filters, action], queryFn: ({ signal }) => api.activity(limit, from, to, offset, type, filters, action, signal), refetchInterval: offset === 0 ? ri : false, staleTime: 2000 })
 }
+// The Activity pager's bounds. Only the categories the feed pages in SQL from one
+// source carry a real total; every category carries the servable depth. Never polls
+// — a total that moved under the reader would renumber pages mid-walk.
+export function useActivityCount(type = 'all', from?: string, to?: string, filters?: ValueFilters, action?: string) {
+  return useQuery({
+    queryKey: ['activity-count', type, from, to, filters, action],
+    queryFn: ({ signal }) => api.activityCount(type, from, to, filters, action, signal),
+    staleTime: 120_000,
+  })
+}
 export function useCounts() {
   return useQuery({ queryKey: ['counts'], queryFn: ({ signal }) => api.counts(signal), staleTime: 60_000 })
 }

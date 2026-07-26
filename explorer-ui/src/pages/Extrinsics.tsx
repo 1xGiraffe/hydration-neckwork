@@ -8,6 +8,7 @@ import { useNewRows } from '../hooks/useNewRows'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { FilterZone, useFilters } from '../components/Filters'
 import { extrinsicFilterFields } from '../components/activityFilters'
+import { offeredPages } from '../utils/activityPaging'
 
 const PAGE = 25
 export function Extrinsics() {
@@ -21,7 +22,15 @@ export function Extrinsics() {
 
   const rows = data ?? []
   const fresh = useNewRows(rows.map(x => `${x.blockHeight}-${x.index}`), page === 0)
-  const totalPages = counts && !f.from && !f.to && !f.call && !f.result ? Math.ceil(counts.extrinsics / PAGE) : undefined
+  // counts.extrinsics is the signed total, matching this list's signedOnly read. Any
+  // filter makes it the wrong total, and then the pager walks a page at a time
+  // instead of numbering pages that may not exist.
+  const pages = offeredPages({
+    page,
+    rowsOnPage: rows.length,
+    rowCount: counts && !f.from && !f.to && !f.call && !f.result ? counts.extrinsics : undefined,
+    maxOffset: counts?.maxOffset,
+  })
 
   return (
     <div className="wrap">
@@ -38,7 +47,7 @@ export function Extrinsics() {
             {isFetching && !rows.length ? <TableSkeleton cols={7} /> : !rows.length ? <EmptyRow cols={7}>No extrinsics</EmptyRow> : rows.map(x => <ExtRow key={`${x.blockHeight}-${x.index}`} x={x} now={now} isNew={fresh.has(`${x.blockHeight}-${x.index}`)} />)}
           </tbody>
         </table>
-        <Pager page={page} totalPages={totalPages} hasNext={(data?.length ?? 0) === PAGE} onPage={setPage} />
+        <Pager page={page} totalPages={pages.totalPages} hasNext={pages.hasNext} note={pages.note} onPage={setPage} />
       </div>
     </div>
   )

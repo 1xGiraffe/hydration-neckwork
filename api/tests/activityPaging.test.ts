@@ -3,13 +3,15 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { explorerRoutes } from '../src/routes/explorer.ts'
 import { scopedListTotalKey } from '../src/services/explorerService.ts'
 
-// The global feed's bound is per category because the cost is. Measured warm at
-// /explorer/activity?limit=25&offset=10000: otc 0.007s, staking 0.027s, vote 0.051s,
-// trade 0.093s, liquidity 0.267s, dca 0.319s, mm 0.413s, all 1.153s, transfer 4.233s,
-// xcm 37.806s — against max_execution_time 20s. The deep set is the categories whose
-// source is small enough that the whole feed is reachable (vote_activity 121,078 rows,
-// staking_activity 192,006, otc_activity 4,473); the wide feeds read multi-million-row
-// sources and keep the conservative bound. This is what withheld
+// The global feed's bound is per category because the cost is, and it is the depth
+// each category was measured to actually answer — a bound above that advertises
+// pages the feed then refuses. At offset 2500, with and without the page's default
+// $10 floor: trade 0.3/0.8s, mm 1.5/1.8s, liquidity 1.2/4.7s, transfer 1.9/6.6s,
+// xcm 3.3/8.1s, all 10.0/9.9s; at 5000 the merged and trade feeds refuse because
+// their candidate windows widen past the ceiling. The deep set is the categories the
+// feed pages in SQL over one small source (vote_activity 121,092 rows,
+// staking_activity 192,060, otc_activity 4,473), where a deep offset cannot explode:
+// at offset 190,000, vote 0.11s, staking 1.26s, otc 0.19s. That is what withheld
 // /activity?tab=vote&page=490 — 92% of the vote feed, at 51ms a page.
 describe('activity paging bounds', () => {
   const app = Fastify()
@@ -23,17 +25,51 @@ describe('activity paging bounds', () => {
   })
 
   it('rejects oversized offsets on the wide feeds instead of allocating the full prefix', async () => {
-    const response = await app.inject('/explorer/activity?offset=10001')
+    const response = await app.inject('/explorer/activity?offset=2501')
 
     expect(response.statusCode).toBe(400)
-    expect(response.json()).toEqual({ error: "Activity offset must be between 0 and 10000 for type 'all'" })
+    expect(response.json()).toEqual({ error: "Activity offset must be between 0 and 2500 for type 'all'" })
   })
 
   it('names the category in the error so the bound is not a mystery', async () => {
-    const response = await app.inject('/explorer/activity?offset=10001&type=transfer')
+    const response = await app.inject('/explorer/activity?offset=2501&type=transfer')
 
     expect(response.statusCode).toBe(400)
-    expect(response.json()).toEqual({ error: "Activity offset must be between 0 and 10000 for type 'transfer'" })
+    expect(response.json()).toEqual({ error: "Activity offset must be between 0 and 2500 for type 'transfer'" })
+  })
+
+  // The pager offers pages up to maxOffset and no further, so the bound the count
+  // publishes has to be the same one the feed enforces — otherwise the last offered
+  // page is a 400.
+  it('publishes the same bound the feed enforces, per category', async () => {
+    for (const [type, maxOffset] of [['all', 2500], ['transfer', 2500], ['vote', 250_000], ['stake', 250_000]] as const) {
+      const count = await app.inject(`/explorer/activity/count?type=${type}`)
+      const lastPage = await app.inject(`/explorer/activity?type=${type}&offset=${maxOffset}`)
+      const pastEnd = await app.inject(`/explorer/activity?type=${type}&offset=${maxOffset + 1}`)
+
+      // A countable category reads its total from ClickHouse, which these route-level
+      // tests do not have; its bound is asserted through the feed's own refusal below.
+      if (count.statusCode === 200) expect(count.json().maxOffset, type).toBe(maxOffset)
+      expect(lastPage.statusCode, `${type} offset ${maxOffset}`).not.toBe(400)
+      expect(pastEnd.statusCode, `${type} offset ${maxOffset + 1}`).toBe(400)
+    }
+  })
+
+  // Counting a category means counting exactly the rows its pages hold. Only the
+  // single-source SQL-paged feeds can do that, so the rest say so rather than
+  // publishing a number the pages would not match.
+  it('reports no total for the categories it cannot count', async () => {
+    for (const type of ['all', 'trade', 'transfer', 'liquidity', 'mm', 'xcm', 'stake', 'otc']) {
+      const response = await app.inject(`/explorer/activity/count?type=${type}`)
+
+      expect(response.json(), type).toMatchObject({ total: null, complete: false })
+    }
+  })
+
+  it('cannot count a category under an action filter, which is decided on built rows', async () => {
+    const response = await app.inject('/explorer/activity/count?type=vote&action=Aye')
+
+    expect(response.json()).toMatchObject({ total: null, complete: false })
   })
 
   it('lets the narrow categories page far past the wide-feed bound', async () => {
@@ -93,6 +129,19 @@ describe('activity paging bounds', () => {
 
       expect(response.statusCode, route).toBe(400)
       expect(response.json()).toEqual({ error: 'Activity offset must be between 0 and 900000' })
+    }
+  })
+
+  // The SQL-paged lists used to answer an out-of-range offset with page one's rows
+  // under the reader's page number: /explorer/events?offset=99999999 returned the
+  // three newest events. A refusal is the only honest answer, and the pagers now
+  // stop at the published bound so they never ask for one.
+  it('refuses an out-of-range list offset instead of serving page one', async () => {
+    for (const route of ['/explorer/blocks', '/explorer/extrinsics', '/explorer/events', '/explorer/accounts', '/explorer/holders/0', '/explorer/referenda']) {
+      const response = await app.inject(`${route}?offset=20000001`)
+
+      expect(response.statusCode, route).toBe(400)
+      expect(response.json()).toEqual({ error: 'Offset must be between 0 and 20000000' })
     }
   })
 })

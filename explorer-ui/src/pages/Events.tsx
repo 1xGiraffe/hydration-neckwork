@@ -8,6 +8,7 @@ import { useNewRows } from '../hooks/useNewRows'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { FilterZone, useFilters } from '../components/Filters'
 import { eventFilterFields } from '../components/activityFilters'
+import { offeredPages } from '../utils/activityPaging'
 
 const PAGE = 25
 export function Events() {
@@ -21,7 +22,15 @@ export function Events() {
 
   const rows = data ?? []
   const fresh = useNewRows(rows.map(e => `${e.blockHeight}-${e.eventIndex}`), page === 0)
-  const totalPages = counts && !f.from && !f.to && !f.event ? Math.ceil(counts.events / PAGE) : undefined
+  // 302.9M events is 12.1M pages, far past the offset the API serves — skipping N
+  // rows reads N rows — so the pager numbers the servable ones and says the rest are
+  // there. Any filter makes the unfiltered total the wrong one, leaving no total.
+  const pages = offeredPages({
+    page,
+    rowsOnPage: rows.length,
+    rowCount: counts && !f.from && !f.to && !f.event ? counts.events : undefined,
+    maxOffset: counts?.maxOffset,
+  })
 
   return (
     <div className="wrap">
@@ -38,7 +47,7 @@ export function Events() {
             {isFetching && !rows.length ? <TableSkeleton cols={6} /> : !rows.length ? <EmptyRow cols={6}>No events</EmptyRow> : rows.map(e => <EvRow key={`${e.blockHeight}-${e.eventIndex}`} e={e} now={now} isNew={fresh.has(`${e.blockHeight}-${e.eventIndex}`)} />)}
           </tbody>
         </table>
-        <Pager page={page} totalPages={totalPages} hasNext={(data?.length ?? 0) === PAGE} onPage={setPage} />
+        <Pager page={page} totalPages={pages.totalPages} hasNext={pages.hasNext} note={pages.note} onPage={setPage} />
       </div>
     </div>
   )

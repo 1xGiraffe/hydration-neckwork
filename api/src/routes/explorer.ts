@@ -6,7 +6,7 @@ import {
   getStats, getRecentBlocks, getBlock, getRecentExtrinsics, getExtrinsic, getExtrinsicAt,
   getExtrinsicActivity, getBlockActivity,
   getHolders, getAddress, getAddressHistory, search, getAssets, getAccounts, getDcaSchedule, getDcaScheduleIdAt, getDcaExecution,
-  getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getMoneyMarket, getAssetDetail, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag,
+  getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getGlobalActivityTotal, getMoneyMarket, getAssetDetail, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag,
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressListTotal, getTagListTotal,
   getAddressValueEvents, getTagValueEvents,
@@ -36,20 +36,22 @@ const accountSortSchema = z.enum(['value', 'supplied', 'borrowed', 'health', 'id
 const addressParam = z.object({ address: z.string().min(1).max(128) })
 const analyzableAddressParam = z.object({ address: z.string().min(3).max(128) })
 const tagParam = z.object({ tagId: z.string().min(1).max(64) })
-// Activity builders classify several indexed sources together. Keep offset pages
-// bounded so one request cannot allocate every preceding semantic row in Node.
-const MAX_ACTIVITY_OFFSET = 10_000
+// The multi-source categories assemble one candidate window per source, classify
+// it and page in Node, so their cost grows with depth and the window they need
+// grows with it too. This is the deepest offset every one of them was measured to
+// answer, with and without the page's default $10 floor — at offset 2500: trade
+// 0.3/0.8s, mm 1.5/1.8s, liquidity 1.2/4.7s, transfer 1.9/6.6s, xcm 3.3/8.1s,
+// all 10.0/9.9s. At 5000 the merged and trade feeds already refuse (their windows
+// widen past the candidate ceiling), so pages past this one were advertised and
+// then answered 503 — 10,000 offered four times the pages the feed can serve.
+const MAX_ACTIVITY_OFFSET = 2_500
 // A single bound across every category either starves the cheap tabs or lets the
-// expensive ones time out. Measured warm at /explorer/activity?limit=25&offset=10000:
-//   otc 0.007s  staking 0.027s  vote 0.051s  trade 0.093s  liquidity 0.267s
-//   dca 0.319s  mm 0.413s  all 1.153s  transfer 4.233s  xcm 37.806s
-// The deep set is the categories whose whole feed is reachable because the source
-// itself is small — vote_activity 121,078 rows, staking_activity 192,006, otc_activity
-// 4,473 — so a deep offset cannot explode no matter how far it is pushed. The wide
-// feeds read multi-million-row sources (transfer_activity 78.5M, xcm 55.8M), where the
-// cost does grow with depth, and keep the conservative bound.
+// expensive ones time out. The deep set is the categories the feed pages in SQL
+// from one small source — vote_activity 121,092 rows, staking_activity 192,060,
+// otc_activity 4,473 — so a deep offset cannot explode no matter how far it is
+// pushed: measured at offset 190,000, vote 0.11s, staking 1.26s, otc 0.19s.
 //
-// This is what withheld /activity?tab=vote&page=490: the vote feed is 4,843 pages of
+// This is what withheld /activity?tab=vote&page=490: the vote feed is 4,844 pages of
 // 25 and 92% of them sat behind a cap that costs it 51ms to serve.
 const MAX_NARROW_ACTIVITY_OFFSET = 250_000
 const NARROW_ACTIVITY_TYPES = new Set(['vote', 'staking', 'otc'])
@@ -71,9 +73,24 @@ function dateParam(q: Record<string, unknown>, key: string): string | undefined 
   const parsed = new Date(`${v}T00:00:00.000Z`)
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === v ? v : undefined
 }
-function offsetParam(q: Record<string, unknown>): number {
-  const n = z.coerce.number().int().min(0).max(20_000_000).safeParse(q.offset)
-  return n.success ? n.data : 0
+// The plain SQL-paged lists (blocks, extrinsics, events, accounts, holders,
+// referenda, DCA executions) page by ClickHouse LIMIT/OFFSET, whose cost is linear
+// in the offset: skipping N rows still reads N rows of the projection. Measured on
+// the events feed's own columns — offset 20M 2.4s, 50M 5.9s, 100M 11.0s — so the
+// bound keeps a page inside the client's 20s execution budget with room to spare.
+// Every block (13.3M) and signed extrinsic (4.5M) is reachable; the 302.9M-row
+// events feed is not, which its pager states rather than offering the pages.
+const MAX_LIST_OFFSET = 20_000_000
+const listOffsetSchema = z.coerce.number().int().min(0).max(MAX_LIST_OFFSET).optional()
+// null = out of range. Refused rather than quietly answered with page one, which
+// is what an offset past the ceiling used to get: a stale or hand-edited page
+// number served the newest rows under the reader's page number.
+function offsetParam(q: Record<string, unknown>): number | null {
+  const n = listOffsetSchema.safeParse(q.offset)
+  return n.success ? n.data ?? 0 : null
+}
+function badOffset(reply: FastifyReply): FastifyReply {
+  return reply.status(400).send({ error: `Offset must be between 0 and ${MAX_LIST_OFFSET}` })
 }
 function limitParam(q: Record<string, unknown>, fallback: number): number {
   const n = limitSchema.safeParse(q.limit)
@@ -159,10 +176,11 @@ export async function explorerRoutes(fastify: FastifyInstance) {
 
   fastify.get('/explorer/assets', async () => getAssets())
 
-  fastify.get('/explorer/accounts', async (req) => {
+  fastify.get('/explorer/accounts', async (req, reply) => {
     const q = req.query as Record<string, unknown>
     const limit = limitParam(q, 50)
     const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
     const sort = accountSortSchema.safeParse(q.sort)
     return getAccounts(offset, limit, sort.success ? sort.data : 'value')
   })
@@ -177,11 +195,16 @@ export async function explorerRoutes(fastify: FastifyInstance) {
 
   fastify.get('/explorer/accounts-daily', async () => getDailyAccounts())
 
-  fastify.get('/explorer/counts', async () => getListCounts())
+  // Row totals for the Blocks/Extrinsics/Events pagers, plus the deepest offset
+  // those lists serve, so a pager numbers only pages it can actually fetch instead
+  // of dividing a 302.9M-row total by the page size and offering the rest.
+  fastify.get('/explorer/counts', async () => ({ ...await getListCounts(), maxOffset: MAX_LIST_OFFSET }))
 
-  fastify.get('/explorer/blocks', async (req) => {
+  fastify.get('/explorer/blocks', async (req, reply) => {
     const q = req.query as Record<string, unknown>
-    return getRecentBlocks(limitParam(q, 25), offsetParam(q))
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    return getRecentBlocks(limitParam(q, 25), offset)
   })
 
   fastify.get('/explorer/block/:height', async (req, reply) => {
@@ -200,11 +223,13 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return getBlockActivity(params.data.height)
   })
 
-  fastify.get('/explorer/extrinsics', async (req) => {
+  fastify.get('/explorer/extrinsics', async (req, reply) => {
     const q = req.query as Record<string, unknown>
     const limit = limitParam(q, 25)
     const signedOnly = q.signedOnly === 'true' || q.signedOnly === '1'
-    return getRecentExtrinsics(limit, signedOnly, dateParam(q, 'from'), dateParam(q, 'to'), offsetParam(q), extrinsicFilters(q))
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    return getRecentExtrinsics(limit, signedOnly, dateParam(q, 'from'), dateParam(q, 'to'), offset, extrinsicFilters(q))
   })
 
   // Referendum detail. Hydration has voted through two pallets that both index from
@@ -221,9 +246,11 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return detail
   })
 
-  fastify.get('/explorer/referenda', async (req) => {
+  fastify.get('/explorer/referenda', async (req, reply) => {
     const q = req.query as Record<string, unknown>
-    return getReferenda(limitParam(q, 100), offsetParam(q))
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    return getReferenda(limitParam(q, 100), offset)
   })
 
   fastify.get('/explorer/extrinsic/:hash', async (req, reply) => {
@@ -248,7 +275,9 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = z.object({ scheduleId: z.coerce.number().int().nonnegative() }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid schedule id' })
     const q = req.query as Record<string, unknown>
-    const detail = await getDcaSchedule(params.data.scheduleId, offsetParam(q), limitParam(q, 25))
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    const detail = await getDcaSchedule(params.data.scheduleId, offset, limitParam(q, 25))
     if (!detail) return reply.status(404).send({ error: 'DCA schedule not found' })
     return detail
   })
@@ -318,9 +347,11 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return trade
   })
 
-  fastify.get('/explorer/events', async (req) => {
+  fastify.get('/explorer/events', async (req, reply) => {
     const q = req.query as Record<string, unknown>
-    return getRecentEvents(limitParam(q, 25), dateParam(q, 'from'), dateParam(q, 'to'), offsetParam(q), {
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    return getRecentEvents(limitParam(q, 25), dateParam(q, 'from'), dateParam(q, 'to'), offset, {
       event: textParam(q, 'event', 128),
     })
   })
@@ -349,6 +380,20 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return getRecentActivity(limitParam(q, 25), dateParam(q, 'from'), dateParam(q, 'to'), offset, type, valueFilters(q), textParam(q, 'action', 32))
   })
 
+  // What the Activity page's pager needs to offer only real pages: how long the
+  // chain-wide feed is under exactly the filters shown, and how deep it can be
+  // paged. `total: null` means this category cannot be counted without classifying
+  // chain-wide history (see getGlobalActivityTotal), and the pager then walks it by
+  // `maxOffset` and the last full page rather than numbering pages it cannot reach.
+  // `maxOffset` is the same bound the feed endpoint enforces, so no offered page
+  // can answer 400.
+  fastify.get('/explorer/activity/count', async (req) => {
+    const q = req.query as Record<string, unknown>
+    const type = activityTypeParam(q)
+    const total = await getGlobalActivityTotal(type, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
+    return { ...total, maxOffset: maxActivityOffsetFor(type) }
+  })
+
   fastify.get('/explorer/money-market', async (req) => {
     const limit = limitParam(req.query as Record<string, unknown>, 50)
     return getMoneyMarket(limit)
@@ -365,7 +410,9 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (!params.success) return reply.status(400).send({ error: 'Invalid asset id' })
     const q = req.query as Record<string, unknown>
     const limit = limitParam(q, 100)
-    return getHolders(params.data.assetId, limit, offsetParam(q))
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    return getHolders(params.data.assetId, limit, offset)
   })
 
   fastify.get('/explorer/tag/:tagId', async (req, reply) => {
@@ -398,7 +445,9 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = tagParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
     const q = req.query as Record<string, unknown>
-    const rows = await getTagExtrinsics(params.data.tagId, limitParam(q, 25), offsetParam(q), extrinsicFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    const rows = await getTagExtrinsics(params.data.tagId, limitParam(q, 25), offset, extrinsicFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
     if (!rows) return reply.status(404).send({ error: 'Tag not found' })
     return rows
   })
@@ -407,7 +456,9 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = tagParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
     const q = req.query as Record<string, unknown>
-    const rows = await getTagEvents(params.data.tagId, limitParam(q, 25), offsetParam(q), eventFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    const rows = await getTagEvents(params.data.tagId, limitParam(q, 25), offset, eventFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
     if (!rows) return reply.status(404).send({ error: 'Tag not found' })
     return rows
   })
@@ -461,7 +512,9 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = addressParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
     const q = req.query as Record<string, unknown>
-    const rows = await getAddressExtrinsics(params.data.address, limitParam(q, 25), offsetParam(q), extrinsicFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    const rows = await getAddressExtrinsics(params.data.address, limitParam(q, 25), offset, extrinsicFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
     if (!rows) return reply.status(404).send({ error: 'Address not recognized' })
     return rows
   })
@@ -470,7 +523,9 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = addressParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
     const q = req.query as Record<string, unknown>
-    const rows = await getAddressEvents(params.data.address, limitParam(q, 25), offsetParam(q), eventFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    const rows = await getAddressEvents(params.data.address, limitParam(q, 25), offset, eventFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
     if (!rows) return reply.status(404).send({ error: 'Address not recognized' })
     return rows
   })

@@ -17,6 +17,14 @@ function series(seed: number, n: number, base: number, vol = 0.12): number[] {
 }
 const TIP = 12_848_613
 const MOCK_NOW_MS = Date.UTC(2026, 6, 15, 12)
+// The paging bounds the real API publishes, so the mock pagers face the same three
+// shapes: a counted feed (vote), an uncounted one bounded only by serving depth, and
+// a total longer than the depth that serves it (events). The vote total leaves a
+// part-full last page (128 pages of 25, the last holding 12).
+export const MOCK_VOTE_ACTIVITY_TOTAL = 3_187
+export const MOCK_ACTIVITY_MAX_OFFSET = 2_500
+export const MOCK_NARROW_ACTIVITY_MAX_OFFSET = 250_000
+export const MOCK_LIST_MAX_OFFSET = 20_000_000
 function tsAt(height: number): string {
   const ms = MOCK_NOW_MS - (TIP - height) * 6000
   return new Date(ms).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
@@ -653,7 +661,23 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   { re: /^\/explorer\/accounts$/, fn: (_m, qs) => buildAccounts(Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 50), qs.get('sort') ?? 'value') },
   { re: /^\/explorer\/daily\/(\w+)(?:\?.*)?$/, fn: (m) => Array.from({ length: 45 }, (_, i) => { const d = new Date(MOCK_NOW_MS - (44 - i) * 86400000); const r = rng(i + m[1].length * 7); return { date: d.toISOString().slice(0, 10), value: Math.round((m[1] === 'events' ? 60000 : m[1] === 'extrinsics' ? 12000 : 4000) * (0.5 + r())) } as DailyPoint }) },
   { re: /^\/explorer\/accounts-daily$/, fn: () => Array.from({ length: 30 }, (_, i) => { const d = new Date(MOCK_NOW_MS - (29 - i) * 86400000); const r = rng(i * 31 + 5); return { date: d.toISOString().slice(0, 10), active: Math.round(6000 * (0.6 + r() * 0.8)), new: Math.round(350 * (0.4 + r())) } }) },
-  { re: /^\/explorer\/counts$/, fn: () => ({ blocks: 567764, extrinsics: 132771, events: 4200000, transfers: 410000 }) },
+  // events is deliberately longer than MOCK_LIST_MAX_OFFSET can page, so the mock
+  // reproduces the real shape: a total whose last pages the API will not serve.
+  { re: /^\/explorer\/counts$/, fn: () => ({ blocks: 567764, extrinsics: 132771, events: 302863213, transfers: 410000, maxOffset: MOCK_LIST_MAX_OFFSET }) },
+  // The global Activity feed's bounds. Vote is the one category the real API counts
+  // (it pages in SQL over a single source); everything else publishes only how deep
+  // it serves, exactly as the API does.
+  {
+    re: /^\/explorer\/activity\/count$/, fn: (_m, qs) => {
+      const type = qs.get('type') ?? 'all'
+      const countable = type === 'vote' && !qs.get('action')
+      return {
+        total: countable ? MOCK_VOTE_ACTIVITY_TOTAL : null,
+        complete: countable,
+        maxOffset: type === 'vote' ? MOCK_NARROW_ACTIVITY_MAX_OFFSET : MOCK_ACTIVITY_MAX_OFFSET,
+      }
+    },
+  },
   {
     re: /^\/explorer\/blocks$/, fn: (_m, qs) => {
       const limit = Number(qs.get('limit') ?? 25); const offset = Number(qs.get('offset') ?? 0)

@@ -258,6 +258,11 @@ const FEED_WINDOW_BLOCKS = 100_800 // ~7 days at 6s blocks
 // A Hydration block targets roughly six seconds. Keep hot feed results for most
 // of that interval so staggered clients share one ClickHouse read per block.
 const LIVE_CACHE_MS = 5_000
+// The API client's own result-row guard (`max_result_rows` in db/client.ts). A read
+// that would return more rows than this fails the whole request with a ClickHouse
+// 500, so no single source read may ask for more — not even after a row multiplier
+// is applied on top of a candidate count.
+const MAX_QUERY_RESULT_ROWS = 100_000
 // Keep candidate walks below the API client's 100k result-row guard. Sparse
 // filters fail explicitly with 413 instead of leaking a ClickHouse 500 after a
 // power-of-four widening step crosses the transport limit.
@@ -5445,7 +5450,15 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
     const notRouterHop = `AND who != '${ROUTER_PALLET_ACCT}'`
     const notDcaFeeLeg = `AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%') ${NOT_LEGACY_DCA_HOP}`
     const want = offset + limit
-    const scanLimit = Math.max(want * 8, 200)
+    // Several swap events can collapse into one user trade (a batch extrinsic's
+    // swaps, an old multi-hop route), so the scan over-fetches. Measured over the
+    // whole swap_activity table that amplification is 1.16 raw events per grouped
+    // trade (worst year 1.29), so the ×8 headroom only ever matters for small
+    // pages — while a wide candidate window multiplied straight past the client's
+    // result guard and failed the request with a ClickHouse 500. Clamping to the
+    // guard leaves ≥ 2× headroom at every window the activity feed asks for, and
+    // a scan that genuinely does not reach `want` is still reported below.
+    const scanLimit = Math.min(Math.max(want * 8, 200), MAX_QUERY_RESULT_ROWS)
     const fetchRaw = async (bound: string, pageLimit: number): Promise<RawSwapEventRow[]> => {
       const res = await client.query({
         query: `
@@ -6161,20 +6174,28 @@ async function fillMissingLiquidityAmounts(rows: LiquidityAmountCandidate[]): Pr
   const nullExtBlocks = [...new Set(missing.filter(r => r.extrinsic_index == null).map(r => r.block_height))]
   const columns = `block_height, event_index, extrinsic_index, asset_id, from_account, to_account, amount`
   const legs: LiquidityTransferLeg[] = []
-  // Chunked: a deep-walk page can carry tens of thousands of fill candidates,
-  // and one unchunked IN-list lookup would blow the client's result-row cap.
-  for (let i = 0; i < extKeys.length; i += 5000) {
-    const tuples = extKeys.slice(i, i + 5000).map(k => { const [h, j] = k.split(':'); return `(${h},${j})` }).join(',')
+  // Only legs in one of the missing rows' own assets can ever be matched (the
+  // match key carries asset_id), so a batch or routed extrinsic's unrelated legs
+  // are left in ClickHouse rather than shipped and discarded.
+  const fillAssetIds = [...new Set(missing.map(r => r.asset_id!))]
+  const assetFilter = `AND asset_id IN (${sqlUIntList(fillAssetIds)})`
+  // Chunked far smaller than a row-per-key lookup would need: this returns EVERY
+  // matching leg of each key, and legs per liquidity extrinsic run p50 11, p99 132,
+  // max 738. A 5,000-key chunk came back with 94k rows and the next crossed the
+  // client's 100k result guard, failing deep liquidity pages with a ClickHouse 500.
+  const legChunk = 500
+  for (let i = 0; i < extKeys.length; i += legChunk) {
+    const tuples = extKeys.slice(i, i + legChunk).map(k => { const [h, j] = k.split(':'); return `(${h},${j})` }).join(',')
     const res = await client.query({
-      query: `SELECT ${columns} FROM price_data.transfer_activity_by_time WHERE (block_height, extrinsic_index) IN (${tuples})`,
+      query: `SELECT ${columns} FROM price_data.transfer_activity_by_time WHERE (block_height, extrinsic_index) IN (${tuples}) ${assetFilter}`,
       format: 'JSONEachRow',
     })
     legs.push(...await res.json<LiquidityTransferLeg>())
   }
-  for (let i = 0; i < nullExtBlocks.length; i += 5000) {
-    const blocks = nullExtBlocks.slice(i, i + 5000).join(',')
+  for (let i = 0; i < nullExtBlocks.length; i += legChunk) {
+    const blocks = nullExtBlocks.slice(i, i + legChunk).join(',')
     const res = await client.query({
-      query: `SELECT ${columns} FROM price_data.transfer_activity_by_time WHERE block_height IN (${blocks}) AND extrinsic_index IS NULL`,
+      query: `SELECT ${columns} FROM price_data.transfer_activity_by_time WHERE block_height IN (${blocks}) AND extrinsic_index IS NULL ${assetFilter}`,
       format: 'JSONEachRow',
     })
     legs.push(...await res.json<LiquidityTransferLeg>())
@@ -8355,9 +8376,30 @@ export function activityRowMatchesAction(r: ActivityRow, action?: string): boole
     default: return true
   }
 }
+// A candidate window ClickHouse refuses to READ means the same thing to the reader
+// as one too broad to assemble: this depth needs a narrower filter or date range.
+// Its own guards — result rows, query text size, execution time — otherwise arrive
+// as an opaque 500 and the page shows "Internal Server Error" instead of what to
+// do about it. The multi-source categories still have secondary lookups whose size
+// follows the candidate window rather than the page, so a deep page under a sparse
+// filter can reach one of these guards.
+const CLICKHOUSE_QUERY_GUARD_CODES = new Set(['396', '62', '159'])
+function activityReadFailure(error: unknown): Error {
+  const code = (error as { code?: unknown })?.code
+  return typeof code === 'string' && CLICKHOUSE_QUERY_GUARD_CODES.has(code) ? activityQueryTooBroad() : error as Error
+}
+
 // Unified Activity feed. `type` selects a single category server-side (so the UI
 // chips paginate correctly through that category) or 'all' for the merged feed.
 export async function getRecentActivity(limit: number, from?: string, to?: string, offset = 0, type = 'all', filters: ValueListFilters = {}, action?: string): Promise<ActivityRow[]> {
+  try {
+    return await recentActivityPage(limit, from, to, offset, type, filters, action)
+  } catch (error) {
+    throw activityReadFailure(error)
+  }
+}
+
+async function recentActivityPage(limit: number, from?: string, to?: string, offset = 0, type = 'all', filters: ValueListFilters = {}, action?: string): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   type = normalizeActivityTypeKey(type)
   return cached(`explorer:activity:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
@@ -8671,6 +8713,56 @@ export async function getRecentActivity(limit: number, from?: string, to?: strin
     await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page)])
     return page
   })
+}
+
+// How long the chain-wide Activity feed is under exactly the filters the page is
+// showing, so its pager numbers real pages and its last page is one jump away.
+//
+// Only a category whose page IS one source's rows, ordered and offset by
+// ClickHouse, can be counted this way: the count is that source's own predicate,
+// so it cannot drift from the rows. `vote` qualifies. vote_activity is read
+// newest-first under SQL LIMIT/OFFSET; its row builder turns every event it
+// returns into exactly one feed row; neither plumbing rule can remove one (both
+// only ever drop transfer rows); and its value filter is the same exact
+// event-time predicate `rowMeetsExactUsdMinimum` re-applies to the built rows, so
+// a filtered total matches the filtered feed.
+//
+// Nothing else does. Staking and OTC are read the same way, but their row
+// builders can discard a source event (Giga companion folding, an OTC fill whose
+// Placed legs are missing), so a source count is not their feed's length. The
+// merged, trade, transfer, liquidity, money-market and cross-chain feeds are
+// assembled from up to twelve sources and paged in Node after classification, so
+// counting them means classifying chain-wide history — 78.5M transfer and 55.8M
+// XCM candidates — which no request may do. An action filter is decided on built
+// rows, never in SQL, so it takes any category out of the countable set.
+// Those all report no total, and their pager walks by the servable depth instead.
+export async function getGlobalActivityTotal(
+  type: string,
+  action: string | undefined,
+  filters: ValueListFilters,
+  from?: string,
+  to?: string,
+): Promise<ScopedListTotal> {
+  if (normalizeActivityTypeKey(type) !== 'vote' || action) return { total: null, complete: false }
+  const tw = timeWindow(from, to)
+  return cachedSwr(`explorer:activity-total:vote:${filterKey(filters)}:${from ?? ''}:${to ?? ''}`,
+    LIST_TOTAL_FRESH_MS, LIST_TOTAL_STALE_MS, async (): Promise<ScopedListTotal> => {
+      const prices = await ensurePrices()
+      const tokenIds = assetIdsForToken(filters.token)
+      // Votes lock HDX only, so any other token filter selects nothing.
+      if (tokenIds != null && !tokenIds.includes(0)) return { total: 0, complete: true }
+      const amountFilter = eventValueFilterSql('0', voteAmountSqlExpr(), 'block_timestamp', filters, prices, 'vote_price')
+      const res = await client.query({
+        query: `SELECT toString(uniqExact((block_height, event_index))) AS c
+                FROM price_data.vote_activity FINAL
+                ${amountFilter.joinSql}
+                WHERE ${tw ?? '1'}
+                  AND event_name IN ('ConvictionVoting.Voted','Democracy.Voted')
+                  ${amountFilter.predicateSql}`,
+        format: 'JSONEachRow',
+      })
+      return { total: Number((await res.json<{ c: string }>())[0]?.c ?? 0), complete: true }
+    })
 }
 
 // A DCA schedule is the canonical unit: initiation, lifecycle status, execution
@@ -9753,6 +9845,14 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
 // selects a single category server-side so rare types aren't starved by the slice.
 // Literal assetId match only — no aToken/share-token expansion.
 export async function getAssetActivity(assetId: number, type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[]> {
+  try {
+    return await assetActivityPage(assetId, type, limit, offset, action, filters, from, to)
+  } catch (error) {
+    throw activityReadFailure(error)
+  }
+}
+
+async function assetActivityPage(assetId: number, type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   return cached(`explorer:asset-activity:${assetId}:${type}:${limit}:${offset}:${action ?? ''}:${filterKey(filters)}:${from ?? ''}:${to ?? ''}`, tw ? 30000 : 8000, async () => {
     const prices = await ensurePrices()

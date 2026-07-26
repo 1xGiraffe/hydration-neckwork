@@ -1,4 +1,4 @@
-import { useAsset, useAssetActivity, useHolders } from '../hooks/useExplorerData'
+import { useActivityCount, useAsset, useAssetActivity, useHolders } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, navigate, useQuery, useQueryValue, setQuery } from '../router'
@@ -7,6 +7,7 @@ import { FilterZone, useFilters } from '../components/Filters'
 import { activityFilterFields } from '../components/activityFilters'
 import { PriceChart, ema7 } from '../components/PriceChart'
 import { ActivityTable } from '../components/ActivityTable'
+import { offeredPages } from '../utils/activityPaging'
 
 const PREIS_URL = (import.meta.env.VITE_PREIS_URL as string | undefined) || 'http://localhost:5173'
 const PREIS_DEFAULT_QUOTE_ID = 10
@@ -43,6 +44,13 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
   const activity = useAssetActivity(assetId, activityType, activityPage * ACTIVITY_PAGE, activityAction || undefined, tab === 'activity',
     activityFilters.values.from, activityFilters.values.to, activityFilters.values.min || undefined)
   const assetActivity = activity.data ?? []
+  // Asset activity is served by the global feed's endpoint under the same
+  // per-category depth bound, so the › arrow has to stop where that bound does —
+  // one page further is a refused request. Only `maxOffset` is read here: the total
+  // that comes with it is the chain-wide feed's length, not this asset's.
+  const activityBound = useActivityCount(activityType, activityFilters.values.from, activityFilters.values.to,
+    { min: activityFilters.values.min || undefined }, activityAction || undefined)
+  const activityPages = offeredPages({ page: activityPage, rowsOnPage: assetActivity.length, maxOffset: activityBound.data?.maxOffset, pageSize: ACTIVITY_PAGE })
   // Holders are paginated server-side (no cap) — fetched only while the tab is open.
   const HOLDERS_PAGE = 50
   const hp = parseInt(q.get('hpage') ?? '', 10)
@@ -93,7 +101,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
               <FilterZone fields={activityFilterFields(activityType, [], false)} values={{ ...activityFilters.values, action: activityAction }} onChange={activityFilters.onChange} onClear={activityFilters.onClear} />
               <ActivityTable rows={assetActivity} now={now} live={activityPage === 0} loading={activity.isFetching && !assetActivity.length}
                 error={activity.error} onRetry={() => { void activity.refetch() }} />
-              <Pager page={activityPage} hasNext={(activity.data?.length ?? 0) === ACTIVITY_PAGE} onPage={p => setQuery({ page: p > 0 ? String(p) : null })} />
+              <Pager page={activityPage} hasNext={activityPages.hasNext} note={activityPages.note} onPage={p => setQuery({ page: p > 0 ? String(p) : null })} />
             </>}
 
             {tab === 'holders' && (

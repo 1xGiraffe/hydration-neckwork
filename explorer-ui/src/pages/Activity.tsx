@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- page + its smol-filter helpers */
 import { useState } from 'react'
-import { useActivity, useDaily, useAssets } from '../hooks/useExplorerData'
+import { useActivity, useActivityCount, useDaily, useAssets } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, usePageParam, setPage, useQueryValue, setQuery } from '../router'
@@ -9,6 +9,7 @@ import { ActivityTable } from '../components/ActivityTable'
 import { FilterZone, useFilters } from '../components/Filters'
 import { activityFilterFields } from '../components/activityFilters'
 import { categoryColor } from '../components/activityColors'
+import { offeredPages } from '../utils/activityPaging'
 
 const PAGE = 25
 // "smol" threshold — same $10 line ActivityTable uses for the .dim row treatment.
@@ -61,12 +62,20 @@ export function Activity() {
     ? undefined
     : effectiveMin(f.min, hideSmol)
   const { data, isFetching, error, refetch } = useActivity(PAGE, f.from, f.to, page * PAGE, type, { token: f.token, min: activityMin }, action || undefined)  // filters applied server-side
+  // The pager's two bounds, under exactly the filters above: how many rows the feed
+  // holds where the API can count it (the vote feed pages in SQL over one source, so
+  // its length is that source's own count), and always how deep the API serves this
+  // category. The categories assembled from several sources report no total, so they
+  // get no page numbers — but their › arrow still stops at the servable depth
+  // instead of walking a reader into a refused request.
+  const { data: count } = useActivityCount(type, f.from, f.to, { token: f.token, min: activityMin }, action || undefined)
   // The daily histogram mirrors the active tab + action/token filters.
   const { data: daily } = useDaily('activity', { type, action: action || undefined, token: f.token || undefined })
   const assets = useAssets(false)   // filter options only; the Assets page owns the poll
   const now = useNow()
 
   const rows = data ?? []
+  const pages = offeredPages({ page, rowsOnPage: rows.length, rowCount: count?.total, maxOffset: count?.maxOffset })
 
   return (
     <div className="wrap">
@@ -81,7 +90,7 @@ export function Activity() {
       <FilterZone fields={activityFilterFields(type, assets.data ?? [])} values={f} onChange={onChange} onClear={onClear}
         extra={<SmolToggle hiding={hideSmol} onToggle={() => { toggleSmol(); setQuery({ page: null }) }} />} />
       <ActivityTable rows={rows} now={now} live={page === 0} loading={isFetching && rows.length === 0} error={error} onRetry={() => { void refetch() }} />
-      <Pager page={page} hasNext={(data?.length ?? 0) === PAGE} onPage={setPage} />
+      <Pager page={page} totalPages={pages.totalPages} hasNext={pages.hasNext} note={pages.note} onPage={setPage} />
     </div>
   )
 }

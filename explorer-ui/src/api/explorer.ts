@@ -60,6 +60,14 @@ export interface ListCountQuery extends ValueFilters, ExtrinsicFilters, EventFil
 // list that runs deeper than one candidate window reaches, so the pages it numbers
 // are real but are not all the list has.
 export interface ListCount { total: number | null; complete: boolean }
+// The chain-wide Activity feed's length under the filters shown, plus the deepest
+// offset the API serves it at. `total: null` = this category is assembled from
+// several sources and cannot be counted without classifying chain-wide history, so
+// its pager walks by `maxOffset` instead of numbering pages.
+export interface ActivityCount extends ListCount { maxOffset: number }
+// Global list totals, plus the deepest offset those lists serve — the events feed
+// is far longer than its servable depth, so its pager needs both numbers.
+export interface ListCounts { blocks: number; extrinsics: number; events: number; transfers: number; maxOffset: number }
 
 export const api = {
   stats: (signal?: AbortSignal) => getJson<ExplorerStats>('/explorer/stats', signal),
@@ -85,7 +93,11 @@ export const api = {
   events: (limit = 25, from?: string, to?: string, offset = 0, filters?: EventFilters, signal?: AbortSignal) => getJson<EventRow[]>(withQuery('/explorer/events', { limit, offset, from, to, ...filters }), signal),
   eventAt: (height: number, index: number, signal?: AbortSignal) => getJson<EventDetail>(`/explorer/event/${height}/${index}`, signal),
   activity: (limit = 25, from?: string, to?: string, offset = 0, type = 'all', filters?: ValueFilters, action?: string, signal?: AbortSignal) => getJson<ActivityRow[]>(withQuery('/explorer/activity', { limit, offset, type, action, from, to, ...filters }), signal),
-  counts: (signal?: AbortSignal) => getJson<{ blocks: number; extrinsics: number; events: number; transfers: number }>('/explorer/counts', signal),
+  // What the Activity pager sizes itself against: the feed's length under exactly
+  // these filters where it can be counted, and always the servable depth.
+  activityCount: (type = 'all', from?: string, to?: string, filters?: ValueFilters, action?: string, signal?: AbortSignal) =>
+    getJson<ActivityCount>(withQuery('/explorer/activity/count', { type, action, from, to, ...filters }), signal),
+  counts: (signal?: AbortSignal) => getJson<ListCounts>('/explorer/counts', signal),
   moneyMarket: (limit = 50, signal?: AbortSignal) => getJson<MoneyMarketResponse>(withQuery('/explorer/money-market', { limit }), signal),
   asset: (assetId: number, signal?: AbortSignal) => getJson<AssetDetail>(`/explorer/asset/${assetId}`, signal),
   // Same endpoint as the global activities feed, with the asset id pinned.

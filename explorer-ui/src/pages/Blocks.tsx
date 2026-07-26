@@ -6,6 +6,7 @@ import { Link, paths, usePageParam, setPage } from '../router'
 import { Crumbs, F, FinalizedBadge, AddrPill, AreaChart, ChartSkeleton, TableSkeleton, EmptyRow, Pager, rowNav, Ago, Dash } from '../components/ui'
 import { UNFILTERED_COLOR } from '../components/activityColors'
 import { parseUtcTimestamp } from '../utils/time'
+import { offeredPages } from '../utils/activityPaging'
 
 const PAGE = 25
 
@@ -38,7 +39,7 @@ export function Blocks() {
   }
   const avg = deltas.length ? deltas.reduce((a, b) => a + b, 0) / deltas.length : 0
   const chartData = deltas.map(d => Math.min(d, 18))
-  const totalPages = counts ? Math.ceil(counts.blocks / PAGE) : undefined
+  const pages = offeredPages({ page, rowsOnPage: rows.length, rowCount: counts?.blocks, maxOffset: counts?.maxOffset })
 
   return (
     <div className="wrap">
@@ -71,7 +72,7 @@ export function Blocks() {
             ))}
           </tbody>
         </table>
-        <Pager page={page} totalPages={totalPages} hasNext={rows.length === PAGE} onPage={setPage} />
+        <Pager page={page} totalPages={pages.totalPages} hasNext={pages.hasNext} note={pages.note} onPage={setPage} />
       </div>
     </div>
   )

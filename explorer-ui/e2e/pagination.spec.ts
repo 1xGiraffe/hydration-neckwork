@@ -103,6 +103,46 @@ test('a page past the end names its position instead of claiming "of" a smaller 
   await expect(pager.locator('.info')).toHaveText(`Page ${pages} of ${pages}`)
 })
 
+// The chain-wide Activity feed. Its pager used to know nothing: no total, no bound,
+// and a › arrow that meant "this page came back full", so it offered pages the API
+// refuses — the reported /activity?tab=vote&page=490 among them.
+test('the global activity feed pages the vote category against its real total', async ({ page }) => {
+  const total = mockSync<{ total: number }>('/explorer/activity/count?type=vote')!.total
+  const pages = Math.ceil(total / PAGE)
+  await page.goto('/activity?tab=vote')
+  const pager = page.locator('.pager')
+
+  await expect(pager.locator('.info')).toHaveText(`Page 1 of ${pages.toLocaleString('en-US')}`)
+  await pager.getByRole('button', { name: 'Last page' }).click()
+  await expect(pager.locator('.info')).toHaveText(`Page ${pages.toLocaleString('en-US')} of ${pages.toLocaleString('en-US')}`)
+  await expect(pager.getByRole('button', { name: 'Next page' })).toBeDisabled()
+  await expect(pager.getByRole('button', { name: `Page ${pages + 1}` })).toHaveCount(0)
+})
+
+test('a deep-linked activity page past the end names its position and offers the way back', async ({ page }) => {
+  const total = mockSync<{ total: number }>('/explorer/activity/count?type=vote')!.total
+  const pages = Math.ceil(total / PAGE)
+  await page.goto('/activity?tab=vote&page=490')
+  const pager = page.locator('.pager')
+
+  await expect(pager.locator('.info')).toHaveText(`Page 491 · past the last page (${pages.toLocaleString('en-US')})`)
+  await expect(pager.getByRole('button', { name: 'Page 491' })).toHaveCount(0)
+  await pager.getByRole('button', { name: 'Last page' }).click()
+  await expect(pager.locator('.info')).toHaveText(`Page ${pages.toLocaleString('en-US')} of ${pages.toLocaleString('en-US')}`)
+})
+
+test('an uncounted activity category stops at the depth the API serves', async ({ page }) => {
+  const { maxOffset } = mockSync<{ maxOffset: number }>('/explorer/activity/count?type=all')!
+  const deepest = Math.floor(maxOffset / PAGE)
+  await page.goto(`/activity?page=${deepest}`)
+  const pager = page.locator('.pager')
+
+  // No "of M": the merged feed cannot be counted, so no page number is claimed. The
+  // arrow still stops here — one page further is the offset the route rejects.
+  await expect(pager.locator('.info')).toHaveText(`Page ${(deepest + 1).toLocaleString('en-US')} · as deep as this list pages — narrow the date range for older rows`)
+  await expect(pager.getByRole('button', { name: 'Next page' })).toBeDisabled()
+})
+
 test('tag activity pagers know their totals', async ({ page }) => {
   await page.goto('/tag/kraken?view=activity&atab=events')
   const pager = page.locator('.pager')

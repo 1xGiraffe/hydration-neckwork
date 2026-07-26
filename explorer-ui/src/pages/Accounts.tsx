@@ -4,6 +4,7 @@ import { Link, paths, usePageParam, useQueryValue, setPage, setQuery } from '../
 import { Crumbs, F, AddrPill, Sparkline, EmptyRow, TableSkeleton, Pager, healthFactorDisplay, TagGroupPill, TokenIconRow, Dash } from '../components/ui'
 import { AccountsChart } from '../components/AccountsChart'
 import { defisimAccountTarget } from '../utils/defisim'
+import { offeredPages } from '../utils/activityPaging'
 
 type Sort = 'value' | 'health' | 'identity' | 'supplied' | 'borrowed' | 'activity' | 'volume' | 'liquidation'
 
@@ -34,7 +35,7 @@ export function Accounts() {
   // accounts, far too large to sort in the browser).
   const rows = data?.rows ?? []
   const total = data?.total ?? 0
-  const totalPages = data ? Math.max(1, Math.ceil(total / PAGE)) : undefined
+  const pages = offeredPages({ page, rowsOnPage: rows.length, rowCount: data ? Math.max(total, 1) : undefined, pageSize: PAGE })
   const sTh = (key: Sort, label: string) => (
     <button type="button" className={`th-sort${sort === key ? ' on' : ''}`} onClick={() => setQuery({ sort: key === 'value' ? null : key, page: null })}>{label}{sort === key ? ' ▼' : ''}</button>
   )
@@ -106,7 +107,7 @@ export function Accounts() {
             })}
           </tbody>
         </table>
-        <Pager page={page} totalPages={totalPages} hasNext={data ? page + 1 < (totalPages ?? 1) : true} onPage={setPage} />
+        <Pager page={page} totalPages={pages.totalPages} hasNext={pages.hasNext} note={pages.note} onPage={setPage} />
       </div>
     </div>
   )
