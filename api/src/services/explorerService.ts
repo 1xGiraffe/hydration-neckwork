@@ -5955,12 +5955,18 @@ async function extrinsicIndexFor(pairs: [number, number | null][]): Promise<Map<
   const out = new Map<string, number>()
   const keys = [...new Set(pairs.filter(([, e]) => e != null).map(([h, e]) => `${h}:${e}`))]
   if (!keys.length) return out
-  const tuples = keys.map(k => { const [h, e] = k.split(':'); return `(${h},${e})` }).join(',')
-  const res = await client.query({
-    query: `SELECT block_height, event_index, extrinsic_index FROM price_data.raw_events WHERE (block_height, event_index) IN (${tuples}) AND extrinsic_index IS NOT NULL`,
-    format: 'JSONEachRow',
-  })
-  for (const r of await res.json<{ block_height: number; event_index: number; extrinsic_index: number }>()) out.set(`${r.block_height}:${r.event_index}`, r.extrinsic_index)
+  // Chunked like every sibling ref lookup: a widened candidate window carries tens
+  // of thousands of money-market events, and one IN-list of all of them exceeds
+  // ClickHouse's max_query_size — which failed the whole window rather than this
+  // lookup, so the account's total went from "counted deeper" to "not counted".
+  for (let start = 0; start < keys.length; start += 5_000) {
+    const tuples = keys.slice(start, start + 5_000).map(k => { const [h, e] = k.split(':'); return `(${h},${e})` }).join(',')
+    const res = await client.query({
+      query: `SELECT block_height, event_index, extrinsic_index FROM price_data.raw_events WHERE (block_height, event_index) IN (${tuples}) AND extrinsic_index IS NOT NULL`,
+      format: 'JSONEachRow',
+    })
+    for (const r of await res.json<{ block_height: number; event_index: number; extrinsic_index: number }>()) out.set(`${r.block_height}:${r.event_index}`, r.extrinsic_index)
+  }
   return out
 }
 
@@ -10898,27 +10904,72 @@ export function alignBalanceHistoryDailyPoints(history: AssetBalanceHistory[]): 
   }).filter(h => hasNonZeroVisibleBalance(h.points))
 }
 
-// One assembled, classified and filtered account feed over a bounded candidate
-// window. `complete` is false when a contributing source filled its window, so
-// older rows exist beyond it and the feed is only a prefix of the account's
-// history.
-interface AccountActivityWindow { rows: ActivityRow[]; complete: boolean }
+// One assembled, classified and filtered account feed. `rows` is always an EXACT
+// prefix of that feed — every row it holds above `frontierBlock` and nothing else —
+// and `complete` (frontier absent) says that prefix is the whole history. So a total
+// is exact whether or not it is complete, and every page the total numbers renders
+// the rows the feed really holds there.
+interface AccountActivityWindow { rows: ActivityRow[]; complete: boolean; frontierBlock: number | null }
 
-// Which sources' windows have to be exhausted before a feed of this category can
-// be called complete — the categories that actually contribute its rows. Mirrors
-// what the page path has always treated as saturation, so a page and the exact
-// total derived from the same window can never disagree.
-type ActivitySourceKey = 'trade' | 'dca' | 'transfer' | 'liquidity' | 'mm' | 'xcm' | 'staking' | 'vote' | 'otc' | 'reward'
-const ACTIVITY_COMPLETENESS_SOURCES: Record<string, ActivitySourceKey[]> = {
-  all: ['trade', 'dca', 'transfer', 'liquidity', 'mm', 'xcm', 'staking', 'vote', 'otc', 'reward'],
-  transfer: ['transfer'],
-  trade: ['trade', 'dca', 'otc'],
-  liquidity: ['liquidity', 'reward'],
-  mm: ['mm', 'reward'],
-  otc: ['otc'],
-  xcm: ['xcm'],
-  staking: ['staking'],
-  vote: ['vote'],
+// One source's contribution to the window's frontier: it read `fetched` candidates
+// newest-first under `limit`, the oldest of them in block `oldestBlock`.
+interface ActivitySourceWindow { fetched: number; limit: number; oldestBlock: number | null }
+
+// The block below which the window stops being the feed. Every source is read
+// newest-first under its own LIMIT, so a source that filled its window has
+// complete coverage only down to the block its oldest candidate sits in; above
+// max(that block) over the saturated sources, EVERY source returned every
+// candidate it has.
+//
+// A block — not a (block, event) — boundary is what makes the rows above it
+// classifiable: every cross-source decision the feed makes is block-local
+// (transfer suppression and the liquidation/share-routed exclusions key on
+// (block, extrinsic), dust pairing on the neighbouring event index, DCA leg
+// matching and the XCM in-block walks on the block), so a block covered by every
+// source classifies exactly as it would with the whole history in hand. An
+// event-level boundary would leave a suppressing sibling one event too old to have
+// been fetched, and the row it should have hidden would be counted and rendered.
+//
+// null = no source saturated: the window IS the account's whole feed.
+export function activityWindowFrontier(sources: ActivitySourceWindow[]): number | null {
+  let frontier: number | null = null
+  for (const source of sources) {
+    if (source.fetched < source.limit || source.oldestBlock == null) continue
+    if (frontier == null || source.oldestBlock > frontier) frontier = source.oldestBlock
+  }
+  return frontier
+}
+
+// Drop what the window cannot account for. Rows below the frontier are missing
+// their older siblings, so paging or counting them would publish a feed with
+// gaps; above it the rows are the feed itself.
+export function activityRowsAboveFrontier<T extends { blockHeight: number }>(rows: T[], frontierBlock: number | null): T[] {
+  return frontierBlock == null ? rows : rows.filter(row => row.blockHeight > frontierBlock)
+}
+
+// A candidate window holds the newest N rows per source, so its frontier advances as
+// blocks are indexed — roughly one block per block for a steady account, faster for
+// one whose recent history is denser than its older history. A cached total counted
+// right at the frontier would therefore number a last page that the window no longer
+// reaches by the time it is fetched. So a PUBLISHED prefix stops this many blocks
+// above the frontier: ~3x the blocks the chain produces inside a partial total's
+// stale bound (30 minutes at ~6s per block), which costs well under a tenth of the
+// counted prefix even on the busiest structural pot. Pages are not held back — the
+// feed genuinely continues past a published prefix, which is what `complete: false`
+// tells the page to say.
+const ACTIVITY_PUBLISHED_FRONTIER_MARGIN_BLOCKS = 1_000
+export function publishedActivityFrontier(frontierBlock: number | null): number | null {
+  return frontierBlock == null ? null : frontierBlock + ACTIVITY_PUBLISHED_FRONTIER_MARGIN_BLOCKS
+}
+
+function oldestWindowBlock<T>(rows: T[], blockOf: (row: T) => number): number | null {
+  let oldest: number | null = null
+  for (const row of rows) {
+    const block = blockOf(row)
+    if (!Number.isFinite(block)) continue
+    if (oldest == null || block < oldest) oldest = block
+  }
+  return oldest
 }
 
 // Account-scoped activity: the account's own trades (summarized per extrinsic) +
@@ -10926,16 +10977,16 @@ const ACTIVITY_COMPLETENESS_SOURCES: Record<string, ActivitySourceKey[]> = {
 // counterparties). Used on the account & tag pages instead of raw per-asset
 // balance-change rows.
 //
-// Returns the WHOLE classified feed for the candidate window rather than a page:
-// the page slice and the exact row total are both taken from this one result, so
-// the number the pager sizes itself from is by construction the number of rows
-// the feed renders.
+// Returns the WHOLE classified feed above the window's frontier rather than a
+// page: the page slice and the exact row total are both taken from this one
+// result, so the number the pager sizes itself from is by construction the number
+// of rows the feed renders.
 async function collectAccountActivity(accounts: string[], type: string, catFetch: number, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<AccountActivityWindow> {
   type = normalizeActivityTypeKey(type)
   const tw = timeWindow(from, to)
   const bound = tw ?? '1'
   const list = sqlAccountList(accounts)
-  if (list === "''") return { rows: [], complete: true }
+  if (list === "''") return { rows: [], complete: true, frontierBlock: null }
   const related = new Set(accounts.map(a => a.toLowerCase()))
   const prices = await ensurePrices()
   const tokenIds = assetIdsForToken(filters.token)
@@ -10946,15 +10997,20 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const queryFilters = filters.min != null && filters.unit !== 'token'
     ? { ...filters, min: undefined, unit: undefined }
     : filters
-  // Window saturation is recorded per source AT FETCH TIME. A built array can be
-  // shorter than the window it came from (a liquidation's internal swap is
-  // dropped, reward claims fold into other categories) or longer (the three XCM
-  // legs are concatenated), so measuring the built rows would either miss a
-  // filled window or invent one — and an exact total stands or falls on knowing
-  // whether older candidates remain.
-  const filledSources = new Set<ActivitySourceKey>()
-  const noteSource = (key: ActivitySourceKey, fetched: number): void => {
-    if (fetched >= catFetch) filledSources.add(key)
+  // Window saturation is recorded per source AT FETCH TIME, with the block its
+  // oldest candidate sits in. A built array can be shorter than the window it came
+  // from (a liquidation's internal swap is dropped, reward claims fold into other
+  // categories) or longer (the three XCM legs are concatenated), so measuring the
+  // built rows would either miss a filled window or invent one — and both the
+  // frontier and an exact total stand or fall on knowing whether older candidates
+  // remain.
+  //
+  // Every source read below is either a source of this type's rows or the
+  // classification context they are suppressed against, so any of them filling its
+  // window bounds how far the feed is known.
+  const sourceWindows: ActivitySourceWindow[] = []
+  const noteSource = (fetched: number, oldestBlock: number | null): void => {
+    sourceWindows.push({ fetched, limit: catFetch, oldestBlock })
   }
   const wantTransfers = type === 'all' || type === 'transfer'
   // Classification context: Transfers excludes trade/staking/MM legs, Trades
@@ -11000,7 +11056,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
       query_params: { n: catFetch }, format: 'JSONEachRow',
     })
     const swapRows = await swapRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number; event_name: string; asset_in: number; asset_out: number; amount_in: string; amount_out: string; signer: string }>()
-    noteSource('trade', swapRows.length)
+    noteSource(swapRows.length, oldestWindowBlock(swapRows, r => r.block_height))
     const liqExt = await liquidationExtrinsics(swapRows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null]))
     const signerByExt = new Map(swapRows.map(e => [`${e.block_height}:${e.extrinsic_index}`, e.signer]))
     const groups = new Map<string, typeof swapRows>()
@@ -11029,7 +11085,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   }
 
   const otc = wantOtc ? await getRecentOtc(catFetch, from, to, 0, queryFilters, type === 'otc' ? action : undefined, accounts) : []
-  noteSource('otc', otc.length)
+  noteSource(otc.length, oldestWindowBlock(otc, r => r.blockHeight))
   const otcExt = activityExtrinsicSet(otc)
 
   // 2. Genuine user↔user transfers, queried directly from the transfer events
@@ -11148,7 +11204,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
         (await moreRefs.json<Record<string, number>>()).length > 0,
       )
     }
-    if (transferSourceSaturated) filledSources.add('transfer')
+    noteSource(transferSourceSaturated ? catFetch : rawTransferRows.length, oldestWindowBlock(rawTransferRows, r => r.block_height))
     // Transfers *to* the treasury pot are fees/deposits unless the originating
     // extrinsic is itself a token-transfer call — surface only genuine donations
     // (payouts *from* the treasury are unaffected). Skipped when the viewed
@@ -11189,7 +11245,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const dcaTrades: ActivityRow[] = wantDca
     ? await getRecentDcaFailures(catFetch, from, to, accounts, tokenIds)
     : []
-  noteSource('dca', dcaTrades.length)
+  noteSource(dcaTrades.length, oldestWindowBlock(dcaTrades, r => r.blockHeight))
   if (wantDca) {
     const dcaTokenFilter = tokenIds == null ? '' : tokenIds.length
       ? `AND (s.asset_in IN (${tokenIds.join(',')}) OR s.asset_out IN (${tokenIds.join(',')}))`
@@ -11209,7 +11265,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
       format: 'JSONEachRow',
     })
     const dcaExecs = await dcaExecRes.json<{ block_height: number; ts: string; who: string; id: string; amount_in: string; amount_out: string }>()
-    noteSource('dca', dcaExecs.length)
+    noteSource(dcaExecs.length, oldestWindowBlock(dcaExecs, r => r.block_height))
     if (dcaExecs.length) {
     const blocks = [...new Set(dcaExecs.map(d => d.block_height))]
     const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
@@ -11314,7 +11370,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
         row => row.blockHeight, row => row.eventIndex ?? -1,
         row => `${row.blockHeight}:${row.eventIndex}`)
       : await fetchLiquidityPage(bound, catFetch)
-    noteSource('liquidity', liqRows.length)
+    noteSource(liqRows.length, oldestWindowBlock(liqRows, r => r.blockHeight))
     for (const row of liqRows) {
       if (row.extrinsicIndex != null) liqCreateExt.add(`${row.blockHeight}:${row.extrinsicIndex}`)
       liq.push(row)
@@ -11348,7 +11404,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
       format: 'JSONEachRow',
     })
     const mmEv = await mmTxRes.json<{ block_height: number; event_index: number; ts: string; event_name: string; account_id: string | null; asset_address: string; pool_address: string | null; amount: string }>()
-    noteSource('mm', mmEv.length)
+    noteSource(mmEv.length, oldestWindowBlock(mmEv, r => r.block_height))
     // MM events are EVM logs (Ethereum.transact); resolve the substrate extrinsic
     // that emitted them so the row links/hovers to its extrinsic like the others.
     const mmExt = await extrinsicIndexFor(mmEv.map(r => [r.block_height, r.event_index] as [number, number | null]))
@@ -11373,10 +11429,10 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const xcmLegs = wantXcm
     ? await Promise.all([getRecentXcm(catFetch, from, to, accounts, 0, queryFilters), getRecentXcmIn(catFetch, from, to, accounts, 0, queryFilters), getRecentXcmOutRemote(catFetch, from, to, accounts, 0, queryFilters)])
     : []
-  for (const leg of xcmLegs) noteSource('xcm', leg.length)
+  for (const leg of xcmLegs) noteSource(leg.length, oldestWindowBlock(leg, r => r.blockHeight))
   const xcm = xcmLegs.flat()
   const staking = wantStaking ? await getRecentStaking(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
-  noteSource('staking', staking.length)
+  noteSource(staking.length, oldestWindowBlock(staking, r => r.blockHeight))
   const voteRows: ActivityRow[] = wantVotes ? (await getRecentVotes(catFetch, from, to, 0, {}, accounts, queryFilters)).map(v => ({
     type: 'vote', blockHeight: v.blockHeight, timestamp: v.timestamp, eventIndex: v.eventIndex, extrinsicIndex: v.extrinsicIndex,
     who: v.account, to: null, asset: v.asset, assetIn: null, assetOut: null, amount: v.amount, amountIn: null, amountOut: null, valueUsd: v.valueUsd,
@@ -11384,11 +11440,11 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     ...referendumRefFields(v.pallet, v.referendum),
     linkBlock: v.blockHeight, linkIndex: v.extrinsicIndex,
   })) : []
-  noteSource('vote', voteRows.length)
+  noteSource(voteRows.length, oldestWindowBlock(voteRows, r => r.blockHeight))
   const rewards = (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')
     ? await getRecentRewardClaims(catFetch, from, to, accounts, tokenIds, undefined, undefined, queryFilters)
     : []
-  noteSource('reward', rewards.length)
+  noteSource(rewards.length, oldestWindowBlock(rewards, r => r.blockHeight))
   if (filters.min != null && filters.unit !== 'token') {
     await applyHistoricalUsd([...trades, ...transfers, ...dcaTrades, ...rewards, ...liq, ...voteRows, ...mmTx, ...otc], activityHistPick)
   }
@@ -11407,8 +11463,12 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   let merged = await suppressActivityPlumbing([...userTrades, ...scopedTransfers, ...dcaTrades, ...rewards, ...liq, ...staking, ...voteRows, ...userMm, ...otc, ...xcm])
   if (type && type !== 'all') merged = merged.filter(r => activityTypeMatchesFamily(r.type, type))
   merged = merged.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
-  const complete = !(ACTIVITY_COMPLETENESS_SOURCES[type] ?? []).some(key => filledSources.has(key))
-  return { rows: merged.sort(compareActivityRowsNewestFirst), complete }
+  const frontierBlock = activityWindowFrontier(sourceWindows)
+  return {
+    rows: activityRowsAboveFrontier(merged, frontierBlock).sort(compareActivityRowsNewestFirst),
+    complete: frontierBlock == null,
+    frontierBlock,
+  }
 }
 
 // A page never asks for a narrower window than this, so page 1 of a small account
@@ -11420,10 +11480,10 @@ const ACTIVITY_WINDOW_FLOOR = 1_000
 const ACTIVITY_COUNT_WINDOW_SEED = 2_000
 
 // Grow the candidate window until the feed is complete — no source still had
-// older rows behind its window — or the source ceiling is reached. Completeness
-// is what makes an exact total possible AND what makes a deep page reachable, so
-// both paths grow the same window: whatever depth the total was counted at, a
-// page at that depth is servable for the same cost.
+// older rows behind its window — or the source ceiling is reached. A wider window
+// pushes the frontier further back, so it is what deepens both the exact total and
+// the pages that total numbers: whatever depth the total was counted at, a page at
+// that depth is servable for the same cost.
 async function growAccountActivityWindow(
   accounts: string[],
   type: string,
@@ -11442,40 +11502,57 @@ async function growAccountActivityWindow(
   }
 }
 
-// One page of the account feed. `offset+limit` rows must exist inside a complete
-// window, otherwise the page would silently omit older history.
+// One page of the account feed. The page must START above the window's frontier;
+// past it the feed continues but this window cannot say what it holds, so the page
+// is refused rather than silently omitting older history — and a page that only
+// ENDS past it is served short rather than withheld, because a total counts a
+// complete window to exactly there.
 async function getAccountActivity(accounts: string[], limit: number, type = 'all', offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[]> {
   const want = offset + limit
   const window = await growAccountActivityWindow(accounts, type, want * 5, action, filters, from, to,
     built => built.rows.length >= want)
-  if (!window.complete && window.rows.length < want) throw activityQueryTooBroad()
+  if (!window.complete && offset >= window.rows.length) throw activityQueryTooBroad()
   const page = window.rows.slice(offset, offset + limit)
   await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page)])
   return page
 }
 
-// A cold count is the most expensive read on the page and the widening passes are
-// what make it exact, so cap how long it may keep widening. Past the deadline the
-// answer is "not countable" — the same honest answer the candidate ceiling gives —
-// instead of an ever-growing wait or a ClickHouse execution timeout.
+// A cold count is the most expensive read on the page, so cap how long it may keep
+// widening. Past the deadline the answer is the widest exact prefix reached so far
+// rather than an ever-growing wait or a ClickHouse execution timeout.
 const ACTIVITY_COUNT_DEADLINE_MS = 15_000
-
 // How many rows the account/tag activity feed holds under exactly these filters —
-// the number the pager sizes itself from. null when the feed cannot be walked to
-// its end (structural pots hold tens of millions of activity rows), which the page
-// states rather than replacing with an estimate.
-async function countAccountActivity(accounts: string[], type: string, action: string | undefined, filters: ValueListFilters, from?: string, to?: string): Promise<number | null> {
+// the number the pager sizes itself from — and whether that is the whole feed.
+//
+// A count has no page depth to scale its window from, and the intermediate widening
+// steps a page walks through buy it nothing: it wants either the whole feed or the
+// deepest frontier the ceiling reaches, which is also the deepest a page can be
+// served from. So it seeds at the width that completes for the overwhelming majority
+// of accounts (7.0M of the 7.05M with any activity hold under a thousand indexed
+// references) and, if that saturates, jumps straight to the ceiling. A pot-sized
+// feed (the Omnipool pot references 72.5M activity rows) is counted exactly back to
+// its frontier and says so; only a feed whose narrowest window cannot even be
+// assembled has no total at all.
+async function countAccountActivity(accounts: string[], type: string, action: string | undefined, filters: ValueListFilters, from?: string, to?: string): Promise<ScopedListTotal> {
   const deadline = Date.now() + ACTIVITY_COUNT_DEADLINE_MS
-  try {
-    const window = await growAccountActivityWindow(accounts, type, ACTIVITY_COUNT_WINDOW_SEED, action, filters, from, to,
-      () => Date.now() > deadline)
-    return window.complete ? window.rows.length : null
-  } catch (error) {
-    // A window too wide to assemble is exactly the "cannot be counted" case, and a
-    // pager with no total still pages. Logged rather than swallowed silently.
-    console.warn('[explorer] activity total unavailable', { type, action, accounts: accounts.length }, error)
-    return null
+  let widest: AccountActivityWindow | null = null
+  for (const catFetch of [ACTIVITY_COUNT_WINDOW_SEED, MAX_ACTIVITY_SOURCE_ROWS]) {
+    try {
+      widest = await collectAccountActivity(accounts, type, catFetch, action, filters, from, to)
+    } catch (error) {
+      // A window too wide to assemble ends the widening. The narrower one that did
+      // assemble is still an exact prefix, so the pager keeps real pages over it.
+      // Logged rather than swallowed silently.
+      console.warn('[explorer] activity window unavailable', { type, action, catFetch, accounts: accounts.length }, error)
+      break
+    }
+    if (widest.complete || Date.now() > deadline) break
   }
+  if (!widest) return { total: null, complete: false }
+  // Counted at the published frontier, not the window's own: an incomplete total is
+  // cached for minutes and has to keep numbering pages the feed can still serve.
+  const counted = activityRowsAboveFrontier(widest.rows, publishedActivityFrontier(widest.frontierBlock))
+  return { total: counted.length, complete: widest.complete }
 }
 
 async function getScopedAccountActivity(
@@ -11723,6 +11800,11 @@ export async function getTagTabCounts(tagId: string): Promise<TabCounts | null> 
 // execution IS a swap, so trades 588 + dca 584 both counted the same 613 trade
 // rows and the pager advertised 49 pages of a 26-page feed.
 export type ScopedListTab = 'activity' | 'extrinsics' | 'events' | 'votes'
+// `total` is always exact for the rows it covers. `complete` says whether it covers
+// the whole list: an activity feed too deep to assemble in one window is counted
+// exactly back to its candidate frontier, and the page states that older history
+// lies beyond the pages it numbers rather than implying the list ends there.
+export interface ScopedListTotal { total: number | null; complete: boolean }
 export interface ScopedListQuery {
   tab: ScopedListTab
   type?: string
@@ -11745,53 +11827,59 @@ export function scopedListTotalKey(scope: string, query: ScopedListQuery): strin
   ].join(':')
 }
 
-// The activity total walks the entire classified feed, so it is far the most
-// expensive of the four — served stale-while-revalidate: only a cold first hit
-// waits, and an open page refreshes at most once per fresh window. A real total
-// must stay close to a feed that keeps growing, hence the short fresh window.
+// The activity total walks the whole classified feed above its frontier, so it is
+// far the most expensive of the four — served stale-while-revalidate: only a cold
+// first hit waits, and an open page refreshes at most once per fresh window. A real
+// total must stay close to a feed that keeps growing, hence the short fresh window.
 const LIST_TOTAL_FRESH_MS = 120_000
 const LIST_TOTAL_STALE_MS = 900_000
-// Discovering that a feed CANNOT be walked to its end is the most expensive read
-// on any detail page — the Omnipool pot's 72.5M activity references cost 1.15
-// billion rows / 88 GiB to fail on — and an hour of new blocks cannot turn such a
-// feed countable. So the refusal is remembered far longer than a total, instead of
-// being re-established every fresh window while the page sits open.
-const LIST_TOTAL_UNCOUNTABLE_MS = 3_600_000
-const uncountableLists = new Map<string, number>()
+// A prefix total costs the full widening pass to establish — the Omnipool pot's
+// 72.5M activity references reach the candidate ceiling every time — so once a list
+// is known to only be countable in part, its total is refreshed less eagerly than a
+// complete one instead of re-running that pass every fresh window while the page
+// sits open. It cannot be parked indefinitely either: the counted prefix is the
+// window's newest rows, so as blocks are indexed it gains rows at the head and loses
+// them past the frontier, and a total left to age would eventually number a last
+// page the window no longer reaches.
+const LIST_TOTAL_PARTIAL_FRESH_MS = 300_000
+const LIST_TOTAL_PARTIAL_STALE_MS = 1_800_000
+const partialTotalLists = new Map<string, number>()
 
-async function scopedListTotal(accounts: string[], scope: string, query: ScopedListQuery): Promise<number | null> {
+async function scopedListTotal(accounts: string[], scope: string, query: ScopedListQuery): Promise<ScopedListTotal> {
   const key = scopedListTotalKey(scope, query)
-  const refusedUntil = uncountableLists.get(key)
-  if (refusedUntil != null && refusedUntil > Date.now()) return null
-  const total = await cachedSwr(key, LIST_TOTAL_FRESH_MS, LIST_TOTAL_STALE_MS, async () => {
-    switch (query.tab) {
-      case 'activity':
-        return countAccountActivity(accounts, query.type ?? 'all', query.action, query.value ?? {}, query.from, query.to)
-      case 'extrinsics':
-        return countAccountExtrinsics(accounts, scope, query.extrinsic ?? {}, query.from, query.to)
-      case 'events':
-        return countAccountEvents(accounts, scope, query.event ?? {}, query.from, query.to)
-      case 'votes':
-        return countScopedVotes(accounts, scope, query.from, query.to)
-    }
-  })
-  if (total == null) {
-    const now = Date.now()
-    for (const [refused, until] of uncountableLists) if (until <= now) uncountableLists.delete(refused)
-    uncountableLists.set(key, now + LIST_TOTAL_UNCOUNTABLE_MS)
-  }
-  return total
+  const now = Date.now()
+  for (const [seen, until] of partialTotalLists) if (until <= now) partialTotalLists.delete(seen)
+  const partial = partialTotalLists.has(key)
+  const result = await cachedSwr(key,
+    partial ? LIST_TOTAL_PARTIAL_FRESH_MS : LIST_TOTAL_FRESH_MS,
+    partial ? LIST_TOTAL_PARTIAL_STALE_MS : LIST_TOTAL_STALE_MS,
+    async (): Promise<ScopedListTotal> => {
+      switch (query.tab) {
+        case 'activity':
+          return countAccountActivity(accounts, query.type ?? 'all', query.action, query.value ?? {}, query.from, query.to)
+        // The other three lists are counted by SQL over their own ordering, so
+        // their total is always the whole list.
+        case 'extrinsics':
+          return { total: await countAccountExtrinsics(accounts, scope, query.extrinsic ?? {}, query.from, query.to), complete: true }
+        case 'events':
+          return { total: await countAccountEvents(accounts, scope, query.event ?? {}, query.from, query.to), complete: true }
+        case 'votes':
+          return { total: await countScopedVotes(accounts, scope, query.from, query.to), complete: true }
+      }
+    })
+  if (!result.complete) partialTotalLists.set(key, Date.now() + LIST_TOTAL_PARTIAL_STALE_MS)
+  return result
 }
 
-// undefined = unknown account/tag (404); null = the list is real but its length
-// is not establishable inside the candidate ceiling.
-export async function getAddressListTotal(addressInput: string, query: ScopedListQuery): Promise<number | null | undefined> {
+// undefined = unknown account/tag (404). `total: null` = not even the narrowest
+// candidate window could be assembled, so the list has no countable prefix at all.
+export async function getAddressListTotal(addressInput: string, query: ScopedListQuery): Promise<ScopedListTotal | undefined> {
   const resolved = await resolveRelatedAccounts(addressInput)
   if (!resolved) return undefined
   return scopedListTotal(resolved.related, `addr:${resolved.norm.accountId}`, query)
 }
 
-export async function getTagListTotal(tagId: string, query: ScopedListQuery): Promise<number | null | undefined> {
+export async function getTagListTotal(tagId: string, query: ScopedListQuery): Promise<ScopedListTotal | undefined> {
   const members = tagMembers(tagId)
   if (!members) return undefined
   return scopedListTotal(members, `tag:${tagId}`, query)

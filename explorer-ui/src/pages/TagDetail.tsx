@@ -42,7 +42,7 @@ export function TagDetail({ tagId }: { tagId: string }) {
           const primarySupplyUsd = Number(primaryMarket?.totalSuppliedBase ?? primaryMarket?.totalCollateralBase ?? 0) / 1e8
           const primaryDebtUsd = Number(primaryMarket?.totalDebtBase ?? 0) / 1e8
           const supplementalDebtUsd = mmList.filter(p => p !== primaryMarket).reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
-          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data?.total ?? undefined, votesTotal.data?.total ?? undefined)
+          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>

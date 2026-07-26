@@ -3,6 +3,7 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MoneyMarketPositions, mmPositionCount, moneyMarketDebtUsd, profileTabs } from '../src/components/AccountSections'
 import { ActivityBadge } from '../src/components/ActivityTable'
+import { DetailTabs } from '../src/components/ui'
 import type { MoneyMarketPosition, ActivityRow } from '../src/types'
 
 function position(overrides: Partial<MoneyMarketPosition> = {}): MoneyMarketPosition {
@@ -96,13 +97,29 @@ describe('primary-first Money Market presentation', () => {
   it('shares profile debt and tab calculations between accounts and tags', () => {
     const markets = [position(), supplemental]
     expect(moneyMarketDebtUsd(markets)).toBe(6_240)
-    expect(profileTabs(3, markets, 2, 1, 42, 7)).toEqual([
+    expect(profileTabs(3, markets, 2, 1, { total: 42, complete: true }, 7)).toEqual([
       { key: 'overview', label: 'Overview' },
       { key: 'balances', label: 'Balances', count: 3 },
       { key: 'positions', label: 'Positions', count: 4 },
-      { key: 'activity', label: 'Activity', count: 42 },
+      { key: 'activity', label: 'Activity', count: 42, countAtLeast: false },
       { key: 'votes', label: 'Votes', count: 7 },
     ])
+  })
+
+  // A feed too deep to walk to its end is counted exactly back to its frontier, so
+  // the badge is a floor, not the account's whole history — it has to read "24,322+".
+  it('marks an activity badge counted over part of the feed', () => {
+    const tabs = profileTabs(0, [], 0, 0, { total: 24_322, complete: false })
+
+    expect(tabs.find(t => t.key === 'activity')).toEqual({ key: 'activity', label: 'Activity', count: 24_322, countAtLeast: true })
+    expect(renderToStaticMarkup(<DetailTabs tabs={tabs} active="activity" onChange={() => {}} />)).toContain('24,322+')
+  })
+
+  it('leaves the badge off entirely while no total is known', () => {
+    expect(profileTabs(0, [], 0, 0, { total: null, complete: false }).find(t => t.key === 'activity'))
+      .toEqual({ key: 'activity', label: 'Activity' })
+    expect(profileTabs(0, [], 0, 0, undefined).find(t => t.key === 'activity'))
+      .toEqual({ key: 'activity', label: 'Activity' })
   })
 
   it('labels a tag aggregate as the lowest real member health', () => {

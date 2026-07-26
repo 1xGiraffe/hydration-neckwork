@@ -1,12 +1,13 @@
 /* eslint-disable react-refresh/only-export-components -- shared account-section components + their count helper */
 import { F, AssetIcon, AssetAmount, AreaChart, ChartSkeleton, healthFactorDisplay, AddrPill, MomentLink, rowNav, Dash } from './ui'
-import type { ChartMarker } from './ui'
+import type { ChartMarker, DetailTab } from './ui'
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
 import { performancePoints } from './performance'
 import { CAT } from './activityColors'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import type { MoneyMarketPosition, LpPosition, ActiveDca, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent } from '../types'
+import type { ListCount } from '../api/explorer'
 import type { ReactNode } from 'react'
 
 // Render helpers shared by the Account and Tag detail pages so both surface the
@@ -200,15 +201,18 @@ export function profileTabs(
   markets: MoneyMarketPosition[],
   dcaCount: number,
   liquidityPositionCount: number,
-  activityCount?: number,
+  // The activity list's own total. `activity.complete === false` means it counts
+  // only the newest rows of a longer feed, which the badge marks with a `+` rather
+  // than passing off as the account's whole history.
+  activity?: ListCount,
   votesCount?: number,
-): { key: string; label: string; count?: number }[] {
+): DetailTab[] {
   const positionCount = mmPositionCount(markets) + dcaCount + liquidityPositionCount
   return [
     { key: 'overview', label: 'Overview' },
     { key: 'balances', label: 'Balances', count: balanceCount },
     ...(positionCount > 0 ? [{ key: 'positions', label: 'Positions', count: positionCount }] : []),
-    { key: 'activity', label: 'Activity', ...(activityCount == null ? {} : { count: activityCount }) },
+    { key: 'activity', label: 'Activity', ...(activity?.total == null ? {} : { count: activity.total, countAtLeast: !activity.complete }) },
     ...(votesCount && votesCount > 0 ? [{ key: 'votes', label: 'Votes', count: votesCount }] : []),
   ]
 }

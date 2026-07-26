@@ -56,6 +56,10 @@ export interface ListCountQuery extends ValueFilters, ExtrinsicFilters, EventFil
   from?: string
   to?: string
 }
+// One list's length. `complete: false` = `total` counts only the newest rows of a
+// list that runs deeper than one candidate window reaches, so the pages it numbers
+// are real but are not all the list has.
+export interface ListCount { total: number | null; complete: boolean }
 
 export const api = {
   stats: (signal?: AbortSignal) => getJson<ExplorerStats>('/explorer/stats', signal),
@@ -105,10 +109,11 @@ export const api = {
   accountVotes: (address: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<VoteRow[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/votes`, { offset, limit, from, to }), signal),
   accountActivityCounts: (address: string, signal?: AbortSignal) => getJson<TabCounts>(`/explorer/address/${encodeURIComponent(address)}/counts`, signal),
-  // How many rows one list holds under exactly the filters it is showing.
-  // `total: null` = the list is real but too deep to walk to its end.
+  // How many rows one list holds under exactly the filters it is showing. `total` is
+  // exact for the rows it covers; `complete: false` = the list runs deeper than the
+  // pages that total can number. `total: null` = no countable prefix at all.
   accountListCount: (address: string, query: ListCountQuery, signal?: AbortSignal) =>
-    getJson<{ total: number | null }>(withQuery(`/explorer/address/${encodeURIComponent(address)}/list-count`, { ...query }), signal),
+    getJson<ListCount>(withQuery(`/explorer/address/${encodeURIComponent(address)}/list-count`, { ...query }), signal),
   // Largest value-changing events (big transfers/swaps/liquidations) for the
   // value-history chart's markers; defaults to the account's full indexed range.
   accountValueEvents: (address: string, from?: string, to?: string, signal?: AbortSignal) =>
@@ -128,7 +133,7 @@ export const api = {
     getJson<VoteRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/votes`, { offset, limit, from, to }), signal),
   tagActivityCounts: (tagId: string, signal?: AbortSignal) => getJson<TabCounts>(`/explorer/tag/${encodeURIComponent(tagId)}/counts`, signal),
   tagListCount: (tagId: string, query: ListCountQuery, signal?: AbortSignal) =>
-    getJson<{ total: number | null }>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/list-count`, { ...query }), signal),
+    getJson<ListCount>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/list-count`, { ...query }), signal),
   search: (query: string, signal?: AbortSignal) => getJson<SearchResult[]>(withQuery('/explorer/search', { q: query }), signal),
   assets: (signal?: AbortSignal) => getJson<AssetListItem[]>('/explorer/assets', signal),
   hdx: (signal?: AbortSignal) => getJson<HdxDashboard>('/explorer/hdx', signal),

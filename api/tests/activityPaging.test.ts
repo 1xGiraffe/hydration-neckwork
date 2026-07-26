@@ -71,11 +71,12 @@ describe('activity paging bounds', () => {
   })
 
   // Account and tag activity pages are bounded by the builder's candidate ceiling,
-  // not by the offset: it grows one window until the classified feed is complete, so
-  // the depth of a page changes only which slice of that window is returned. That is
-  // the same window the exact total is counted from, which is what makes every page a
-  // real total implies servable — the pager can offer the last page of any feed it
-  // could count. The route bound only stays above any countable feed length.
+  // not by the offset: it grows one window until the classified feed ends or the
+  // ceiling is reached, and pages come only from the rows above that window's
+  // frontier. Those are the same rows the published total counts, which is what makes
+  // every page a real total numbers servable — the pager can offer the last page of
+  // any feed it could count. The route bound only stays above any countable feed
+  // length.
   it('serves account and tag activity pages far past the wide-feed bound', async () => {
     for (const route of ['/explorer/address/alice/activity', '/explorer/tag/whales/activity']) {
       for (const offset of [10001, 90_000, 900_000]) {

@@ -56,11 +56,12 @@ const NARROW_ACTIVITY_TYPES = new Set(['vote', 'staking', 'otc'])
 const maxActivityOffsetFor = (type: string) =>
   NARROW_ACTIVITY_TYPES.has(type) ? MAX_NARROW_ACTIVITY_OFFSET : MAX_ACTIVITY_OFFSET
 // Account and tag activity is bounded by the builder's candidate ceiling instead:
-// it grows ONE window until the classified feed is complete, so the depth of a
-// page only changes which slice of that window is returned — and it is the same
-// window the exact row total is counted from. Every page a real total implies is
-// therefore servable. The bound here only has to stay above any countable feed
-// length: ten sources at the 90k candidate ceiling each.
+// it grows ONE window until the classified feed reaches its end or the ceiling, and
+// serves pages only from the rows above that window's frontier — the same rows the
+// published total counts. So the depth of a page changes only which slice of that
+// window is returned, and every page a real total numbers is servable. The bound
+// here only has to stay above any countable feed length: ten sources at the 90k
+// candidate ceiling each.
 const MAX_SCOPED_ACTIVITY_OFFSET = 900_000
 const activityOffsetSchema = z.coerce.number().int().min(0).max(MAX_SCOPED_ACTIVITY_OFFSET).optional()
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
@@ -501,10 +502,12 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return counts
   })
 
-  // How many rows one of the detail page's lists holds under exactly the filters
-  // it is showing — the total its pager numbers pages from. `total: null` means the
-  // list is real but too deep to walk to its end, which the page states instead of
-  // publishing an estimate.
+  // How many rows one of the detail page's lists holds under exactly the filters it
+  // is showing — the total its pager numbers pages from. `complete: false` means the
+  // total is exact for the newest rows it covers but the list runs deeper than one
+  // candidate window reaches, which the page states rather than implying the list
+  // ends at the last page it can offer. `total: null` means no prefix could be
+  // established at all.
   fastify.get('/explorer/address/:address/list-count', async (req, reply) => {
     const params = analyzableAddressParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
@@ -512,7 +515,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (!query) return reply.status(400).send({ error: `List tab must be one of ${listTabSchema.options.join(', ')}` })
     const total = await getAddressListTotal(params.data.address, query)
     if (total === undefined) return reply.status(404).send({ error: 'Address not recognized' })
-    return { total }
+    return total
   })
 
   fastify.get('/explorer/tag/:tagId/list-count', async (req, reply) => {
@@ -522,7 +525,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (!query) return reply.status(400).send({ error: `List tab must be one of ${listTabSchema.options.join(', ')}` })
     const total = await getTagListTotal(params.data.tagId, query)
     if (total === undefined) return reply.status(404).send({ error: 'Tag not found' })
-    return { total }
+    return total
   })
 
   // Largest value-changing events (big transfers/swaps/liquidations) for the

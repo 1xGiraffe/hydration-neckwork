@@ -61,16 +61,22 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
       : eventListCount(eventFilters.values)
   const accountTotal = useAccountListCount(accountAddress, activeCountQuery)
   const tagTotal = useTagListCount(tagId, activeCountQuery)
-  const total = (scope.kind === 'account' ? accountTotal : tagTotal).data?.total
+  const count = (scope.kind === 'account' ? accountTotal : tagTotal).data
+  const total = count?.total
   const totalPages = pageCount(total)
-  // null (not undefined) is the API saying this feed is too deep to walk to its
-  // end. Say so, rather than leaving the missing "of M" unexplained.
-  const countNote = total === null ? 'too much history to count exactly' : undefined
+  // A total the API marked incomplete is exact for the pages it numbers, but the
+  // feed runs past them — say so, rather than letting the last page read as the end
+  // of the account's history. null (not undefined) is the rarer case of a feed whose
+  // narrowest window would not assemble, which leaves the "of M" missing entirely.
+  const countNote = total == null
+    ? (count ? 'too much history to count exactly' : undefined)
+    : count?.complete === false ? 'older history beyond the counted window' : undefined
   // The unfiltered activity length doubles as the tab badge. When no filter is
   // set it IS the total above, so the two share one request.
   const accountActivityTotal = useAccountListCount(accountAddress, activityListCount('all', '', {}))
   const tagActivityTotal = useTagListCount(tagId, activityListCount('all', '', {}))
-  const activityTotal = (scope.kind === 'account' ? accountActivityTotal : tagActivityTotal).data?.total
+  const activityCount = (scope.kind === 'account' ? accountActivityTotal : tagActivityTotal).data
+  const activityTotal = activityCount?.total
 
   const commonActivityArgs = [
     activityType,
@@ -130,7 +136,9 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   return (
     <>
       <div className="tabs">
-        <button className={activeTab === 'activity' ? 'active' : ''} onClick={() => setActiveTab(null)}>Activity{activityTotal != null ? <> <span className="cnt">{F.int(activityTotal)}</span></> : null}</button>
+        {/* A partial total is the newest rows of a longer feed, so the badge reads
+            "210k+" rather than claiming that is all the account did. */}
+        <button className={activeTab === 'activity' ? 'active' : ''} onClick={() => setActiveTab(null)}>Activity{activityTotal != null ? <> <span className="cnt">{F.int(activityTotal)}{activityCount?.complete === false ? '+' : ''}</span></> : null}</button>
         <button className={activeTab === 'extrinsics' ? 'active' : ''} onClick={() => setActiveTab('extrinsics')}>Extrinsics{counts.data ? <> <span className="cnt">{F.int(counts.data.extrinsics)}</span></> : null}</button>
         <button className={activeTab === 'events' ? 'active' : ''} onClick={() => setActiveTab('events')}>Events{counts.data ? <> <span className="cnt">{F.int(counts.data.events)}</span></> : null}</button>
       </div>
