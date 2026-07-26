@@ -5559,21 +5559,13 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
       // Keep every candidate and claim by adjacency: DCA.TradeExecuted follows
       // its swap's events, so the swap claims the nearest candidate after its
       // own event index and consumes it — two swaps can never share one.
-      const dcaByAmount = new Map<string, { who: string; id: string; event_index: number }[]>()
-      for (const d of dcaRows) {
-        const k = `${d.block_height}:${d.amount_in}`
-        const list = dcaByAmount.get(k) ?? []
-        list.push({ who: d.who, id: d.id, event_index: Number(d.event_index) })
-        dcaByAmount.set(k, list)
-      }
-      for (const list of dcaByAmount.values()) list.sort((a, b) => a.event_index - b.event_index)
-      const claimDca = (block: number, amountIn: string, eventIndex: number) => {
-        const list = dcaByAmount.get(`${block}:${amountIn}`)
-        if (!list?.length) return undefined
-        let idx = list.findIndex(d => d.event_index > eventIndex)
-        if (idx === -1) idx = list.length - 1
-        return list.splice(idx, 1)[0]
-      }
+      const dcaExecutions = adjacencyClaimIndex(
+        dcaRows.map(d => ({ ...d, event_index: Number(d.event_index) })),
+        d => `${d.block_height}:${d.amount_in}`,
+        d => d.event_index,
+      )
+      const claimDca = (block: number, amountIn: string, eventIndex: number) =>
+        dcaExecutions.claimAfter(`${block}:${amountIn}`, eventIndex)
       const dcaIds = [...new Set(dcaRows.map(d => d.id))].filter(Boolean)
       const schedById = await getDcaScheduleLinks(dcaIds)
 
@@ -6118,8 +6110,59 @@ function moneyMarketActivityFields(poolAddress: string | null | undefined): Pick
 // The order every activity surface presents: newest block first, and within a
 // block the later event first. Rows without an event index (block hooks) sort last
 // inside their block rather than ahead of real events.
+//
+// The order must also be TOTAL. Offset paging is only well defined if two feeds
+// built from different candidate sets order the same rows the same way; under a
+// tie `Array.sort` may pick either, and two pages sliced from separately-built
+// arrays can then both hold one of a tied pair and neither the other — a duplicate
+// and a gap, not a reordering. The discriminators below are all numeric and all
+// derived from columns ClickHouse holds, so the same order is expressible there.
 export function compareActivityRowsNewestFirst(a: ActivityRow, b: ActivityRow): number {
-  return b.blockHeight - a.blockHeight || (b.eventIndex ?? -1) - (a.eventIndex ?? -1)
+  return b.blockHeight - a.blockHeight
+    || (b.eventIndex ?? -1) - (a.eventIndex ?? -1)
+    || (b.extrinsicIndex ?? -1) - (a.extrinsicIndex ?? -1)
+    || activityKindRank(a) - activityKindRank(b)
+    || (b.dcaScheduleId ?? -1) - (a.dcaScheduleId ?? -1)
+}
+// A stable numeric rank per row family, so a tie on (block, event, extrinsic)
+// still resolves identically every time the feed is built.
+const ACTIVITY_KIND_RANK: Record<string, number> = {
+  trade: 0, otc: 1, liquidity: 2, mm: 3, xcm: 4, staking: 5, vote: 6, transfer: 7,
+}
+function activityKindRank(r: ActivityRow): number {
+  return ACTIVITY_KIND_RANK[r.type] ?? 8
+}
+
+// Pair rows that belong together by ADJACENCY rather than by a shared key, when the
+// key alone can collide. Each claim consumes its candidate, so two claimants can
+// never take the same one — the failure a plain Map lookup produces silently.
+export function adjacencyClaimIndex<T>(items: T[], keyOf: (item: T) => string, indexOf: (item: T) => number) {
+  const byKey = new Map<string, T[]>()
+  for (const item of items) {
+    const key = keyOf(item)
+    const list = byKey.get(key) ?? []
+    list.push(item)
+    byKey.set(key, list)
+  }
+  for (const list of byKey.values()) list.sort((a, b) => indexOf(a) - indexOf(b))
+  const take = (key: string, pick: (list: T[]) => number): T | undefined => {
+    const list = byKey.get(key)
+    if (!list?.length) return undefined
+    const at = pick(list)
+    return list.splice(at < 0 ? list.length - 1 : at, 1)[0]
+  }
+  return {
+    // Nearest candidate AFTER `index`; falls back to the last remaining one.
+    claimAfter: (key: string, index: number): T | undefined =>
+      take(key, list => list.findIndex(item => indexOf(item) > index)),
+    // Nearest candidate BEFORE `index`; falls back to the last remaining one.
+    claimBefore: (key: string, index: number): T | undefined =>
+      take(key, list => {
+        let at = -1
+        for (let i = 0; i < list.length && indexOf(list[i]) < index; i++) at = i
+        return at
+      }),
+  }
 }
 
 export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFilters): boolean {
@@ -11406,7 +11449,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
       : 'AND 0'
     const dcaValueFilter = eventValueFilterSql('s.asset_out', 'e.amount_out', 'e.block_timestamp', queryFilters, prices, 'account_dca_price')
     const dcaExecRes = await client.query({
-      query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.who AS who,
+      query: `SELECT e.block_height, e.event_index, toString(e.block_timestamp) AS ts, e.who AS who,
                 toString(e.id) AS id, e.amount_in, e.amount_out
               FROM price_data.dca_events e
               ANY LEFT JOIN price_data.dca_schedules s ON s.id = e.id
@@ -11418,7 +11461,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
       query_params: { n: catFetch },
       format: 'JSONEachRow',
     })
-    const dcaExecs = await dcaExecRes.json<{ block_height: number; ts: string; who: string; id: string; amount_in: string; amount_out: string }>()
+    const dcaExecs = await dcaExecRes.json<{ block_height: number; event_index: number; ts: string; who: string; id: string; amount_in: string; amount_out: string }>()
     noteSource(dcaExecs.length, oldestWindowBlock(dcaExecs, r => r.block_height))
     if (dcaExecs.length) {
     const blocks = [...new Set(dcaExecs.map(d => d.block_height))]
@@ -11440,14 +11483,16 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
       }
     }
     const [, schedById] = await Promise.all([fetchSwapLegs(), getDcaScheduleLinks(dcaExecs.map(d => d.id))])
-    // Match the swap leg by block+amountIn (prefer Router.Executed — the net summary).
-    const swapByKey = new Map<string, { event_index: number; asset_in: number; asset_out: number }>()
-    for (const s of swapLegs) {
-      const k = `${s.block_height}:${s.amount_in}`
-      if (!swapByKey.has(k) || isRouterNet(s.event_name)) swapByKey.set(k, { event_index: s.event_index, asset_in: s.asset_in, asset_out: s.asset_out })
-    }
-    for (const d of dcaExecs) {
-      const sw = swapByKey.get(`${d.block_height}:${d.amount_in}`)
+    // Pair each execution with its OWN swap leg, one to one. A plain
+    // (block, amountIn) lookup collides whenever one block settles two schedules of
+    // the same size — a popular round DCA amount does this constantly — and the
+    // collision is silent: both rows take the surviving map entry, so one renders
+    // against the other's swap and the two share a (block, eventIndex) identity.
+    // DCA.TradeExecuted is emitted immediately after the swap it settles, so the
+    // nearest unclaimed leg BEFORE the execution is its own; claiming consumes it.
+    const legs = adjacencyClaimIndex(swapLegs, s => `${s.block_height}:${s.amount_in}`, s => s.event_index)
+    for (const d of [...dcaExecs].sort((a, b) => a.block_height - b.block_height || a.event_index - b.event_index)) {
+      const sw = legs.claimBefore(`${d.block_height}:${d.amount_in}`, d.event_index)
       const aIn = sw ? asset(sw.asset_in) : null
       const aOut = sw ? asset(sw.asset_out) : null
       const sched = schedById.get(d.id)
