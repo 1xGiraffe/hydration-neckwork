@@ -12,6 +12,7 @@ import {
   getAddressValueEvents, getTagValueEvents,
   getTagActivity, getTagExtrinsics, getTagEvents,
   getAddressVotes, getTagVotes,
+  isExactlyPagedActivityType,
   type EventListFilters,
   type ExtrinsicListFilters,
   type ScopedListQuery,
@@ -65,7 +66,17 @@ const maxActivityOffsetFor = (type: string) =>
 // here only has to stay above any countable feed length: ten sources at the 90k
 // candidate ceiling each.
 const MAX_SCOPED_ACTIVITY_OFFSET = 900_000
-const activityOffsetSchema = z.coerce.number().int().min(0).max(MAX_SCOPED_ACTIVITY_OFFSET).optional()
+// The categories whose account/tag pages are LOCATED (isExactlyPagedActivityType) are
+// not bounded by depth at all: SQL counts the feed and finds the ≤ limit blocks the
+// page's ranks sit in, so the work is the feed's own size and an offset near the end
+// costs what one near the start does. The bound only has to stay above any total this
+// path publishes — the longest single-category feed indexed is the routerex pallet's
+// 1.70M liquidity rows (counted in 0.106s, its page at offset 899,999 served in
+// 0.232s) and the busiest trader's 843k trades (0.46s / 0.59s at offset 843,000).
+const MAX_LOCATED_ACTIVITY_OFFSET = 5_000_000
+const maxScopedActivityOffsetFor = (type: string) =>
+  isExactlyPagedActivityType(type) ? MAX_LOCATED_ACTIVITY_OFFSET : MAX_SCOPED_ACTIVITY_OFFSET
+const activityOffsetSchema = z.coerce.number().int().min(0).max(MAX_LOCATED_ACTIVITY_OFFSET).optional()
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
 function dateParam(q: Record<string, unknown>, key: string): string | undefined {
   const v = q[key]
@@ -480,8 +491,9 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
     const q = req.query as Record<string, unknown>
     const activityType = activityTypeParam(q)
-    const offset = boundedActivityOffset(q, MAX_SCOPED_ACTIVITY_OFFSET)
-    if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${MAX_SCOPED_ACTIVITY_OFFSET}` })
+    const maxOffset = maxScopedActivityOffsetFor(activityType)
+    const offset = boundedActivityOffset(q, maxOffset)
+    if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${maxOffset}` })
     const rows = await getTagActivity(params.data.tagId, activityType, limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
     if (!rows) return reply.status(404).send({ error: 'Tag not found' })
     return rows
@@ -547,8 +559,9 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
     const q = req.query as Record<string, unknown>
     const activityType = activityTypeParam(q)
-    const offset = boundedActivityOffset(q, MAX_SCOPED_ACTIVITY_OFFSET)
-    if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${MAX_SCOPED_ACTIVITY_OFFSET}` })
+    const maxOffset = maxScopedActivityOffsetFor(activityType)
+    const offset = boundedActivityOffset(q, maxOffset)
+    if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${maxOffset}` })
     const rows = await getAddressActivity(params.data.address, activityType, limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
     if (!rows) return reply.status(404).send({ error: 'Address not recognized' })
     return rows

@@ -10183,7 +10183,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
             pool_account AS pool_acc
           FROM price_data.liquidity_activity
           WHERE ${pageBound}
-            AND event_name IN ('Omnipool.LiquidityAdded','Omnipool.LiquidityRemoved','Stableswap.LiquidityAdded','Stableswap.LiquidityRemoved','XYK.LiquidityAdded','XYK.LiquidityRemoved','XYK.PoolCreated','OmnipoolLiquidityMining.RewardClaimed','XYKLiquidityMining.RewardClaimed')
+            AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
             AND who NOT LIKE '0x6d6f646c%'
             AND has(asset_refs, {assetId:UInt32})
           ORDER BY block_height DESC, event_index DESC
@@ -11190,6 +11190,366 @@ export function alignBalanceHistoryDailyPoints(history: AssetBalanceHistory[]): 
   }).filter(h => hasNonZeroVisibleBalance(h.points))
 }
 
+// ─── Locating a page inside a feed too large to assemble ──────────────────────
+//
+// The candidate window below answers "the newest N rows of each source", which is
+// what stops an account with a million activities from ever being paged to its end:
+// its total says "exact for the prefix I cover" and the pages stop at that prefix.
+// This path answers the question directly instead — SQL COUNTS the feed and LOCATES
+// the blocks a page's ranks sit in, and the classifier then runs over just those
+// blocks, with no per-source limit to saturate.
+//
+// It is sound because every cross-source decision the feed makes is block-local (the
+// same property the frontier relies on — see activityWindowFrontier). A block covered
+// by every source therefore classifies exactly as it would with the whole history in
+// hand, the feed's row count is a sum over blocks, and a page is a slice inside the
+// ≤ `limit` blocks holding its ranks. Because `above` counts WHOLE BLOCKS, SQL and
+// the classifier never have to agree on the order WITHIN a block — only on how many
+// rows each block holds.
+//
+// Two kinds of source feed it, and which kind a source is decides whether its
+// classification has to be re-expressed in SQL at all:
+//
+//   * ENUMERATED — a source whose entire per-account history fits under
+//     EXACT_SMALL_SOURCE_ROWS is read in full by its own normal builder. Its
+//     per-block counts are then the classified rows themselves, so there is no SQL
+//     mirror to drift: the staking hierarchy folding, the OTC signer resolution, the
+//     incentive-claim call confirmation and the DCA failure legs all stay exact
+//     without being restated. A source that does NOT fit refuses the exact path
+//     rather than guessing.
+//
+//   * COUNTED — a source running to hundreds of thousands of rows per account gets a
+//     SQL expression for its per-block row count. Only four do, and each one's rule
+//     is a row-per-source-row or a row-per-extrinsic rule SQL can state exactly. The
+//     runtime metadata two of them need (pool-share asset ids, the configured
+//     money-market pools) is interpolated from the live registry on every request
+//     rather than baked into a column, so a newly registered share token or reserve
+//     changes the answer immediately instead of silently going stale.
+//
+// The two halves are reconciled per block before a page is served: SQL's count for
+// each located block must equal the number of rows the classifier built in it. That
+// compares row identities per block rather than one grand total, which is the only
+// kind of check that can see a read returning the right NUMBER of wrong rows.
+
+// How many rows one source may hold for an account before this path stops claiming it
+// can enumerate it. Every enumerated source is read in full for every count and every
+// page, so this is what bounds that cost. The largest per-account histories in the
+// enumerated sources are far below it (staking 192k rows in total across all
+// accounts, votes 121k, OTC 4.5k, referral claims 10k, incentive claims 51k), so in
+// practice the cap only ever refuses a genuinely new shape.
+const EXACT_SMALL_SOURCE_ROWS = 20_000
+// How many bytes of interpolated account literals an arm may carry (see the budget
+// note where it is enforced).
+const MAX_EXACT_ACCOUNT_LIST_BYTES = 150_000
+
+// The asset ids `isShareAssetId` recognises, as a SQL list. Pool-share membership is
+// runtime asset-registry state that ClickHouse does not hold, which is precisely why
+// it is interpolated per request: a `kind` column baked at ingest could not learn
+// that a newly registered share token now routes its trade legs to liquidity.
+function shareAssetIdsSql(): string {
+  const ids = new Set<number>(Object.keys(SHARE_TOKEN_UNDERLYING_ID).map(Number))
+  for (const registered of allExplorerAssets()) if (isShareAssetId(registered.assetId)) ids.add(registered.assetId)
+  return [...ids].join(',')
+}
+
+// One block of the feed and how many rows it holds. Arms are UNIONed and summed per
+// block, so a source contributes rows to a block without knowing about the others.
+type ActivityCountArm = string
+
+// The account's signed swaps, counted the way the builder groups them: one trade row
+// per (block, extrinsic), minus the two extrinsics the classifier hands to another
+// category. A liquidation's internal collateral→debt swap belongs to its mm row, and
+// a share-asset leg routed through a pool inside an add/remove belongs to the
+// liquidity row — the second needs the representative row's assets, which is the
+// (isRouterNet, event_index) maximum the `LIMIT 1 BY` in the page read keeps.
+function accountSwapTradeArm(list: string, bound: string): ActivityCountArm {
+  return `SELECT block_height, count() AS rows FROM (
+      SELECT block_height, extrinsic_index,
+             argMax(asset_in, tuple(event_name IN (${ROUTER_NET_EVENTS_SQL}), event_index)) AS rep_in,
+             argMax(asset_out, tuple(event_name IN (${ROUTER_NET_EVENTS_SQL}), event_index)) AS rep_out
+      FROM price_data.account_swap_activity FINAL
+      WHERE ${bound} AND account IN (${list})
+      GROUP BY block_height, extrinsic_index
+    )
+    WHERE (block_height, extrinsic_index) NOT IN (
+        SELECT block_height, extrinsic_index FROM price_data.raw_events
+        WHERE event_name = 'Liquidation.Liquidated' AND extrinsic_index IS NOT NULL)
+      AND NOT ((rep_in IN (${shareAssetIdsSql()}) OR rep_out IN (${shareAssetIdsSql()}))
+        AND (block_height, extrinsic_index) IN (
+          SELECT block_height, extrinsic_index FROM price_data.liquidity_activity
+          WHERE who IN (${list}) AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
+            AND extrinsic_index IS NOT NULL))
+    GROUP BY block_height`
+}
+
+// DCA executions: one trade row each, whichever swap leg the execution ends up
+// rendered against. Executions ONLY — a schedule's failed attempts are rows of the
+// same feed, but they are one of the enumerated sources, so counting them here would
+// count them twice. (That is not a hypothetical: it shifted every page of one DCA
+// account by its two most recent failures until the per-block reconciliation caught
+// it — `block 9807371 counted 2, built 1`.)
+function accountDcaTradeArm(list: string, bound: string): ActivityCountArm {
+  return `SELECT e.block_height AS block_height, count() AS rows
+    FROM price_data.dca_events AS e FINAL
+    WHERE ${bound.replaceAll('block_height', 'e.block_height').replaceAll('block_timestamp', 'e.block_timestamp')}
+      AND e.event_name = 'DCA.TradeExecuted' AND e.who IN (${list})
+    GROUP BY e.block_height`
+}
+
+// Liquidity provision/removal/mining claims: one row per source row, exactly the
+// event list the page read uses.
+function accountLiquidityArm(list: string, bound: string): ActivityCountArm {
+  return `SELECT block_height, count() AS rows FROM price_data.liquidity_activity
+    WHERE ${bound} AND who IN (${list})
+      AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
+    GROUP BY block_height`
+}
+
+// Money-market transactions: one row per source row under the same configured-pool
+// allow-list the page read applies.
+function accountMoneyMarketArm(evmList: string, eventNames: readonly string[], bound: string): ActivityCountArm {
+  return `SELECT block_height, count() AS rows FROM price_data.account_money_market_activity FINAL
+    WHERE ${bound} AND account_id IN (${evmList})
+      AND event_name IN (${sqlEventNameList([...eventNames])})
+      AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
+    GROUP BY block_height`
+}
+
+// The enumerated sources' own per-block counts, handed to ClickHouse as two bound
+// arrays rather than an interpolated tuple list: an account with thousands of small
+// rows would otherwise push the query text past max_query_size.
+const ENUMERATED_ARM = `SELECT tupleElement(pair, 1) AS block_height, toUInt64(tupleElement(pair, 2)) AS rows
+  FROM (SELECT arrayJoin(arrayZip({smallBlocks:Array(UInt32)}, {smallRows:Array(UInt32)})) AS pair)`
+
+// Where a page's ranks live: the blocks holding them, how many rows the feed holds in
+// strictly newer blocks (`above`), and the feed's exact total.
+interface ExactActivityLocation {
+  total: number
+  blocks: number[]
+  perBlock: Map<number, number>
+  above: number
+}
+
+// Everything needed to count and locate one (account set, type, filters) feed.
+interface ExactActivityPlan {
+  arms: ActivityCountArm[]
+  // The enumerated sources' whole per-account history, already classified. Kept so
+  // the page pass can be reconciled against the same rows the total was counted from.
+  smallBlocks: number[]
+  smallRows: number[]
+}
+
+function planParams(plan: ExactActivityPlan): Record<string, unknown> {
+  return { smallBlocks: plan.smallBlocks, smallRows: plan.smallRows }
+}
+
+function perBlockSql(plan: ExactActivityPlan): string {
+  return `WITH per_block AS (
+    SELECT block_height, sum(rows) AS rows
+    FROM (${[...plan.arms, ENUMERATED_ARM].join('\n    UNION ALL\n    ')})
+    GROUP BY block_height)`
+}
+
+async function countExactActivity(plan: ExactActivityPlan): Promise<number> {
+  const res = await client.query({
+    query: `${perBlockSql(plan)} SELECT toString(sum(rows)) AS total FROM per_block`,
+    query_params: planParams(plan), format: 'JSONEachRow',
+  })
+  return Number((await res.json<{ total: string }>())[0]?.total ?? 0)
+}
+
+// The blocks holding ranks [offset, offset+limit). `cum` is the feed's running row
+// count newest-block-first, so a block overlaps the requested ranks exactly when it
+// ends after the first one and starts before the last. `sum(rows) OVER ()` takes the
+// total from the same single pass — a scalar subquery over `per_block` made
+// ClickHouse compute the whole aggregation twice (1.9s -> 0.5s on the deepest page of
+// the largest account).
+async function locateExactActivity(plan: ExactActivityPlan, offset: number, limit: number): Promise<ExactActivityLocation> {
+  const res = await client.query({
+    query: `${perBlockSql(plan)},
+      ranked AS (
+        SELECT block_height, rows,
+               sum(rows) OVER (ORDER BY block_height DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cum,
+               sum(rows) OVER () AS total
+        FROM per_block)
+      SELECT block_height, toUInt32(rows) AS block_rows, toString(cum) AS cum_rows, toString(total) AS total_rows
+      FROM ranked
+      WHERE cum > {off:UInt64} AND cum - rows < {off:UInt64} + {lim:UInt64}
+      ORDER BY block_height DESC`,
+    query_params: { ...planParams(plan), off: offset, lim: limit }, format: 'JSONEachRow',
+  })
+  const rows = await res.json<{ block_height: number; block_rows: number; cum_rows: string; total_rows: string }>()
+  // No block overlaps the requested ranks: the offset is past the end of the feed.
+  // The total still has to be reported, so take it from its own pass.
+  if (!rows.length) return { total: await countExactActivity(plan), blocks: [], perBlock: new Map(), above: 0 }
+  return {
+    total: Number(rows[0].total_rows),
+    blocks: rows.map(r => r.block_height),
+    perBlock: new Map(rows.map(r => [r.block_height, r.block_rows])),
+    above: Number(rows[0].cum_rows) - rows[0].block_rows,
+  }
+}
+
+// The classified rows the classifier is asked to reconcile against, and the blocks it
+// may read. `perBlock` is the contract: every located block must come back holding
+// exactly this many rows.
+interface ExactActivityBound {
+  blocks: number[]
+  perBlock: Map<number, number>
+}
+
+// A vote as the activity feed renders it. Shared so the enumerating pass and the
+// classifier's own pass cannot describe the same vote differently.
+function voteActivityRow(v: VoteRow): ActivityRow {
+  return {
+    type: 'vote', blockHeight: v.blockHeight, timestamp: v.timestamp, eventIndex: v.eventIndex, extrinsicIndex: v.extrinsicIndex,
+    who: v.account, to: null, asset: v.asset, assetIn: null, assetOut: null, amount: v.amount, amountIn: null, amountOut: null, valueUsd: v.valueUsd,
+    votePallet: v.pallet, voteAction: v.action, voteRef: v.referendum, voteSide: v.side, voteConviction: v.conviction,
+    ...referendumRefFields(v.pallet, v.referendum),
+    linkBlock: v.blockHeight, linkIndex: v.extrinsicIndex,
+  }
+}
+
+// The enumerated sources' whole per-account contribution to one type's feed, or null
+// when one of them holds more rows than this path is willing to read in full.
+//
+// Each source is asked for EXACT_SMALL_SOURCE_ROWS + 1 rows, so coming back short IS
+// the proof that the read reached the end of that source — nothing has to be counted
+// separately to establish it. The builders are the same ones the page pass calls with
+// the same arguments, so their classification is never restated here; the per-block
+// reconciliation below would catch it if the two call sites ever drifted.
+async function enumeratedActivityRows(
+  accounts: string[],
+  type: string,
+  filters: ValueListFilters,
+  from?: string,
+  to?: string,
+): Promise<ActivityRow[] | null> {
+  // A count and every page of it want the same whole-history read, and the sources are
+  // read in full whether or not the account has rows in them — the OTC read alone
+  // costs ~300ms for an account with no OTC at all, because Placed/Cancelled ownership
+  // is a signer scan. Hold the assembled rows for one live window so a page burst pays
+  // for them once instead of per request.
+  return cached(`explorer:exact-small:${type}:${[...accounts].sort().join(',')}:${filterKey(filters)}:${from ?? ''}:${to ?? ''}`,
+    timeWindow(from, to) ? 30_000 : LIVE_CACHE_MS,
+    () => enumeratedActivityRowsUncached(accounts, type, filters, from, to))
+}
+
+async function enumeratedActivityRowsUncached(
+  accounts: string[],
+  type: string,
+  filters: ValueListFilters,
+  from?: string,
+  to?: string,
+): Promise<ActivityRow[] | null> {
+  const depth = EXACT_SMALL_SOURCE_ROWS + 1
+  const sources: ActivityRow[][] = await Promise.all([
+    // OTC folds under the trade chip, so a trade feed carries it too.
+    type === 'trade' || type === 'otc' ? getRecentOtc(depth, from, to, 0, filters, undefined, accounts) : [],
+    type === 'trade' ? getRecentDcaFailures(depth, from, to, accounts, assetIdsForToken(filters.token)) : [],
+    // Referral claims render as liquidity, incentive claims as mm.
+    type === 'liquidity' || type === 'mm' ? getRecentRewardClaims(depth, from, to, accounts, assetIdsForToken(filters.token), undefined, undefined, filters) : [],
+    type === 'staking' ? getRecentStaking(depth, from, to, accounts, 0, filters, undefined, undefined) : [],
+    type === 'vote' ? getRecentVotes(depth, from, to, 0, {}, accounts, filters).then(votes => votes.map(voteActivityRow)) : [],
+  ])
+  if (sources.some(rows => rows.length >= depth)) return null
+  return sources.flat().filter(row => activityTypeMatchesFamily(row.type, type))
+}
+
+// Which types this path can count exactly, in the order the reasoning above splits
+// them: `trade`, `liquidity` and `mm` mix a counted source with enumerated ones,
+// while `vote`, `staking` and `otc` are enumerated end to end.
+//
+// `all`, `transfer` and `xcm` are absent deliberately. Their feeds turn on decisions
+// no arm here states — the transfer dedup/pot/treasury-call/dust rules and the three
+// XCM legs' TS-side payload parsers — so they keep the candidate window and keep
+// saying that older history lies beyond the pages they number, rather than
+// advertising a total this path cannot serve.
+const EXACTLY_COUNTABLE_ACTIVITY_TYPES = new Set(['trade', 'liquidity', 'mm', 'vote', 'staking', 'otc'])
+
+// Whether an account/tag feed of this type is paged by locating its ranks rather than
+// by widening a candidate window. The route's offset bound depends on it: a located
+// page costs what its FEED costs, not what its offset costs, so it is servable to the
+// end of any total it publishes.
+export function isExactlyPagedActivityType(type: string): boolean {
+  return EXACTLY_COUNTABLE_ACTIVITY_TYPES.has(normalizeActivityTypeKey(type))
+}
+
+// A plan for counting and locating one feed, or null when the request's shape has no
+// exact mirror. A refusal is not a failure: the caller falls back to the candidate
+// window, which reports what it covers.
+async function planExactActivity(
+  accounts: string[],
+  type: string,
+  action: string | undefined,
+  filters: ValueListFilters,
+  from?: string,
+  to?: string,
+): Promise<ExactActivityPlan | null> {
+  // An action or a value/token filter would have to be mirrored in every arm to stay
+  // exact, and a min-USD filter is not decided in SQL at all (it needs the row's
+  // event-time valuation). Those requests keep the window.
+  if (!EXACTLY_COUNTABLE_ACTIVITY_TYPES.has(type) || action || filters.min != null || filters.token) return null
+  const list = sqlAccountList(accounts)
+  if (list === "''") return null
+  // The counted arms interpolate the account list up to twice, and a tag's members are
+  // 68 bytes each — the largest today is 729 accounts, so a big tag's arms already
+  // carry ~100 KB of literals against ClickHouse's 256 KB query ceiling. Past this
+  // budget the window answers instead of the request failing on query size.
+  if (list.length * 2 > MAX_EXACT_ACCOUNT_LIST_BYTES) return null
+  const smallRows = await enumeratedActivityRows(accounts, type, filters, from, to)
+  if (!smallRows) return null
+
+  const bound = timeWindow(from, to) ?? '1'
+  const arms: ActivityCountArm[] = []
+  if (type === 'trade') arms.push(accountSwapTradeArm(list, bound), accountDcaTradeArm(list, bound))
+  if (type === 'liquidity') arms.push(accountLiquidityArm(list, bound))
+  if (type === 'mm') {
+    // Money-market rows are indexed under the account's truncated-H160 form, and a
+    // module account's rows are protocol internals the feed never shows — so an
+    // account that only HAS a module form contributes nothing. The exclusion is the
+    // builder's own `isModuleAcct(accountRef(account_id))`, applied to the same
+    // account_id values the arm restricts to: a truncated `modl…` H160 resolves back
+    // to its substrate module account, which a prefix test on the H160 would miss.
+    const evmForms = [...new Set(accounts.map(evmAccountForm).filter((form): form is string => !!form))]
+      .filter(form => !isModuleAcct(accountRef(form)))
+    if (evmForms.length) {
+      arms.push(accountMoneyMarketArm(evmForms.map(form => `'${form}'`).join(','), MONEY_MARKET_EVENT_NAMES, bound))
+    }
+  }
+
+  const perBlock = new Map<number, number>()
+  for (const row of smallRows) perBlock.set(row.blockHeight, (perBlock.get(row.blockHeight) ?? 0) + 1)
+  return { arms, smallBlocks: [...perBlock.keys()], smallRows: [...perBlock.values()] }
+}
+
+// Which block's count SQL and the classifier disagree on, or null when they agree.
+// Compared per block rather than in total: the failure this guards against — a read
+// that returns the right number of rows for the wrong blocks — leaves the total
+// intact, so nothing counting the whole page can see it.
+export function exactActivityMismatch(
+  builtBlocks: Iterable<number>,
+  perBlock: Map<number, number>,
+): string | null {
+  const built = new Map<number, number>()
+  for (const block of builtBlocks) built.set(block, (built.get(block) ?? 0) + 1)
+  for (const [block, counted] of perBlock) {
+    const actual = built.get(block) ?? 0
+    if (actual !== counted) return `block ${block} counted ${counted}, built ${actual}`
+  }
+  for (const [block, actual] of built) {
+    if (!perBlock.has(block)) return `block ${block} counted 0, built ${actual}`
+  }
+  return null
+}
+
+// Thrown, never swallowed: the count and the page disagree, so this request has no
+// answer from the exact path and the caller re-reads it through the candidate window.
+class ExactActivityDisagreement extends Error {}
+function exactActivityDisagreement(detail: string): Error {
+  return new ExactActivityDisagreement(detail)
+}
+
 // One assembled, classified and filtered account feed. `rows` is always an EXACT
 // prefix of that feed — every row it holds above `frontierBlock` and nothing else —
 // and `complete` (frontier absent) says that prefix is the whole history. So a total
@@ -11267,10 +11627,16 @@ function oldestWindowBlock<T>(rows: T[], blockOf: (row: T) => number): number | 
 // page: the page slice and the exact row total are both taken from this one
 // result, so the number the pager sizes itself from is by construction the number
 // of rows the feed renders.
-async function collectAccountActivity(accounts: string[], type: string, catFetch: number, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<AccountActivityWindow> {
+//
+// Given an `exact` bound it instead assembles precisely the located blocks: the
+// per-source bound becomes a closed block set that no source can saturate, so the
+// frontier is absent by construction and the result is the whole feed inside those
+// blocks. It is the same assembly either way — one classifier, one set of
+// suppression rules, for every surface.
+async function collectAccountActivity(accounts: string[], type: string, catFetch: number, action?: string, filters: ValueListFilters = {}, from?: string, to?: string, exact?: ExactActivityBound): Promise<AccountActivityWindow> {
   type = normalizeActivityTypeKey(type)
   const tw = timeWindow(from, to)
-  const bound = tw ?? '1'
+  const bound = exact ? `block_height IN (${exact.blocks.join(',') || '0'})` : tw ?? '1'
   const list = sqlAccountList(accounts)
   if (list === "''") return { rows: [], complete: true, frontierBlock: null }
   const related = new Set(accounts.map(a => a.toLowerCase()))
@@ -11622,7 +11988,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
                 asset_refs AS asset_refs
               FROM price_data.liquidity_activity
               WHERE ${pageBound}
-                AND event_name IN ('Omnipool.LiquidityAdded','Omnipool.LiquidityRemoved','Stableswap.LiquidityAdded','Stableswap.LiquidityRemoved','XYK.LiquidityAdded','XYK.LiquidityRemoved','XYK.PoolCreated','OmnipoolLiquidityMining.RewardClaimed','XYKLiquidityMining.RewardClaimed')
+                AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
                 AND who IN (${list})
                 ${liquidityTokenFilter}
               ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
@@ -11719,13 +12085,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const xcm = xcmLegs.flat()
   const staking = wantStaking ? await getRecentStaking(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
   noteSource(staking.length, oldestWindowBlock(staking, r => r.blockHeight))
-  const voteRows: ActivityRow[] = wantVotes ? (await getRecentVotes(catFetch, from, to, 0, {}, accounts, queryFilters)).map(v => ({
-    type: 'vote', blockHeight: v.blockHeight, timestamp: v.timestamp, eventIndex: v.eventIndex, extrinsicIndex: v.extrinsicIndex,
-    who: v.account, to: null, asset: v.asset, assetIn: null, assetOut: null, amount: v.amount, amountIn: null, amountOut: null, valueUsd: v.valueUsd,
-    votePallet: v.pallet, voteAction: v.action, voteRef: v.referendum, voteSide: v.side, voteConviction: v.conviction,
-    ...referendumRefFields(v.pallet, v.referendum),
-    linkBlock: v.blockHeight, linkIndex: v.extrinsicIndex,
-  })) : []
+  const voteRows: ActivityRow[] = wantVotes ? (await getRecentVotes(catFetch, from, to, 0, {}, accounts, queryFilters)).map(voteActivityRow) : []
   noteSource(voteRows.length, oldestWindowBlock(voteRows, r => r.blockHeight))
   const rewards = (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')
     ? await getRecentRewardClaims(catFetch, from, to, accounts, tokenIds, undefined, undefined, queryFilters)
@@ -11749,6 +12109,17 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   let merged = await suppressActivityPlumbing([...userTrades, ...scopedTransfers, ...dcaTrades, ...rewards, ...liq, ...staking, ...voteRows, ...userMm, ...otc, ...xcm])
   if (type && type !== 'all') merged = merged.filter(r => activityTypeMatchesFamily(r.type, type))
   merged = merged.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
+  if (exact) {
+    // The enumerated sources were read over the whole history rather than the located
+    // blocks, so restrict to the blocks the page was located in before reconciling.
+    const located = merged.filter(r => exact.perBlock.has(r.blockHeight))
+    const mismatch = exactActivityMismatch(located.map(r => r.blockHeight), exact.perBlock)
+    // Refusing is the only honest answer: the total and the page were derived from
+    // different row sets, so serving either would number pages the feed does not
+    // hold. The caller falls back to the candidate window, which says what it covers.
+    if (mismatch) throw exactActivityDisagreement(mismatch)
+    return { rows: located.sort(compareActivityRowsNewestFirst), complete: true, frontierBlock: null }
+  }
   const frontierBlock = activityWindowFrontier(sourceWindows)
   return {
     rows: activityRowsAboveFrontier(merged, frontierBlock).sort(compareActivityRowsNewestFirst),
@@ -11788,19 +12159,58 @@ async function growAccountActivityWindow(
   }
 }
 
-// One page of the account feed. The page must START above the window's frontier;
-// past it the feed continues but this window cannot say what it holds, so the page
-// is refused rather than silently omitting older history — and a page that only
-// ENDS past it is served short rather than withheld, because a total counts a
-// complete window to exactly there.
+// One page of the account feed, located inside the whole feed when the request's
+// shape can be counted exactly (see the section above) and otherwise sliced out of a
+// candidate window.
+//
+// Located: the page's ranks are found in SQL, the classifier assembles exactly the
+// blocks holding them, and the slice is taken at `offset - above` because `above`
+// rows of the feed sit in strictly newer blocks. Windowed: the page must START above
+// the window's frontier; past it the feed continues but this window cannot say what
+// it holds, so the page is refused rather than silently omitting older history — and
+// a page that only ENDS past it is served short rather than withheld, because a total
+// counts a complete window to exactly there.
 async function getAccountActivity(accounts: string[], limit: number, type = 'all', offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[]> {
+  const located = await locatedAccountActivityPage(accounts, type, limit, offset, action, filters, from, to)
+  const page = located ?? await windowedAccountActivityPage(accounts, type, limit, offset, action, filters, from, to)
+  await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page)])
+  return page
+}
+
+// Null when this request has no exact plan, or when the located blocks and the
+// classifier disagreed — either way the windowed path answers instead.
+async function locatedAccountActivityPage(
+  accounts: string[], type: string, limit: number, offset: number,
+  action: string | undefined, filters: ValueListFilters, from?: string, to?: string,
+): Promise<ActivityRow[] | null> {
+  const plan = await planExactActivity(accounts, normalizeActivityTypeKey(type), action, filters, from, to)
+  if (!plan) return null
+  const location = await locateExactActivity(plan, offset, limit)
+  if (!location.blocks.length) return []
+  // The located blocks hold `sum(perBlock)` rows between them; every source read under
+  // that closed bound is therefore bounded by it, with room for the enumerated sources
+  // that are read in full regardless.
+  const sourceLimit = EXACT_SMALL_SOURCE_ROWS + 1 + [...location.perBlock.values()].reduce((a, b) => a + b, 0)
+  try {
+    const built = await collectAccountActivity(accounts, type, sourceLimit, action, filters, from, to,
+      { blocks: location.blocks, perBlock: location.perBlock })
+    return built.rows.slice(offset - location.above, offset - location.above + limit)
+  } catch (error) {
+    if (!(error instanceof ExactActivityDisagreement)) throw error
+    console.warn('[explorer] located activity page disagreed with its count', { type, offset, limit, accounts: accounts.length }, error.message)
+    return null
+  }
+}
+
+async function windowedAccountActivityPage(
+  accounts: string[], type: string, limit: number, offset: number,
+  action: string | undefined, filters: ValueListFilters, from?: string, to?: string,
+): Promise<ActivityRow[]> {
   const want = offset + limit
   const window = await growAccountActivityWindow(accounts, type, want * 5, action, filters, from, to,
     built => built.rows.length >= want)
   if (!window.complete && offset >= window.rows.length) throw activityQueryTooBroad()
-  const page = window.rows.slice(offset, offset + limit)
-  await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page)])
-  return page
+  return window.rows.slice(offset, offset + limit)
 }
 
 // A cold count is the most expensive read on the page, so cap how long it may keep
@@ -11820,6 +12230,10 @@ const ACTIVITY_COUNT_DEADLINE_MS = 15_000
 // its frontier and says so; only a feed whose narrowest window cannot even be
 // assembled has no total at all.
 async function countAccountActivity(accounts: string[], type: string, action: string | undefined, filters: ValueListFilters, from?: string, to?: string): Promise<ScopedListTotal> {
+  // A countable shape needs no window at all: the total is a sum over the feed's
+  // blocks, so it is exact and complete however deep the account's history runs.
+  const plan = await planExactActivity(accounts, normalizeActivityTypeKey(type), action, filters, from, to)
+  if (plan) return { total: await countExactActivity(plan), complete: true }
   const deadline = Date.now() + ACTIVITY_COUNT_DEADLINE_MS
   let widest: AccountActivityWindow | null = null
   for (const catFetch of [ACTIVITY_COUNT_WINDOW_SEED, MAX_ACTIVITY_SOURCE_ROWS]) {
