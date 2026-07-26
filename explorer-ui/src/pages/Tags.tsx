@@ -34,7 +34,7 @@ export function Tags() {
                     <span className="tag" style={{ color: g.color }}>{g.name}</span>
                   </Link>
                 </td>
-                <td data-label="Accounts" className="r mono">{g.members.length}</td>
+                <td data-label="Accounts" className="r mono">{g.memberCount}</td>
               </tr>
             ))}
           </tbody>

@@ -1053,8 +1053,8 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
 ]
 
 const mockTags: Tag[] = [
-  { tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', note: 'Exchange — hot + deposit wallets', icon: '/tag-icons/kraken.jpg', members: [{ accountId: A.krakenEvm.accountId, address: A.krakenEvm.address }, { accountId: A.krakenSub.accountId, address: A.krakenSub.address }] },
-  { tagId: 'treasury', name: 'Treasury', color: '#74C742', note: '', icon: '🏦', members: [{ accountId: A.treasury.accountId, address: A.treasury.address }] },
+  { tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', note: 'Exchange — hot + deposit wallets', icon: '/tag-icons/kraken.jpg', memberCount: 2 },
+  { tagId: 'treasury', name: 'Treasury', color: '#74C742', note: '', icon: '🏦', memberCount: 1 },
 ]
 
 export function mockSync<T>(path: string): T | undefined {

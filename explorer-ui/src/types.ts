@@ -391,14 +391,15 @@ export interface SearchResult {
   color?: string
 }
 
-export interface TagMember { accountId: string; address: string }
+// Directory row for /explorer/tags. Members themselves come from the tag detail
+// endpoint; the list only ever shows how many there are.
 export interface Tag {
   tagId: string
   name: string
   color: string
   note: string
   icon: string
-  members: TagMember[]
+  memberCount: number
 }
 
 export interface IndexerStatus {
