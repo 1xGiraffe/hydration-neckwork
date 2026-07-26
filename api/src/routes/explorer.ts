@@ -35,7 +35,10 @@ const uint32Param = z.coerce.number().int().min(0).max(0xffff_ffff)
 // Public list endpoints never render more than 100 rows at once. A modest hard
 // cap prevents a single request from multiplying the feed candidate scans.
 const limitSchema = z.coerce.number().int().min(1).max(250).optional()
-const accountSortSchema = z.enum(['value', 'supplied', 'borrowed', 'health', 'identity', 'updates', 'activity', 'volume', 'liquidation'])
+// `updates` was this sort's token for one release while the column was labelled for the
+// balance-observation count it used to show. Still accepted so a link made against it
+// resolves to the column it always meant.
+const accountSortSchema = z.enum(['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'updates', 'volume', 'liquidation'])
 const addressParam = z.object({ address: z.string().min(1).max(128) })
 const analyzableAddressParam = z.object({ address: z.string().min(3).max(128) })
 const tagParam = z.object({ tagId: z.string().min(1).max(64) })

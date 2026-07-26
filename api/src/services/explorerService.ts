@@ -14358,22 +14358,14 @@ export interface TopAccountRow {
   simAccount?: string | null
   supplementalMarket?: { marketKey: string; market: string; borrowedUsd: number; healthFactor?: string | null }
   // 1Y wallet-value sparkline (SPARK_WEEKS weekly points, zero-padded so every
-  // row spans the same trailing year) + the balance-update counter. Optional — the
-  // page still renders if the enrichment pass fails.
+  // row spans the same trailing year) + activity counter. Optional — the page
+  // still renders if the enrichment pass fails.
   sparkline?: number[]
-  // How many distinct balance observations the account has: every credit and debit
-  // the balances pallet reported for it, one per (block, event).
-  //
-  // NOT the number of activities its detail page lists, and deliberately no longer
-  // labelled as if it were. Those are different units — hMN has 6,129,461 balance
-  // observations behind 1,221,974 classified activities, because one user action moves
-  // several balances and most observations are protocol plumbing the feed suppresses.
-  // The feed's own definition cannot be served here: it is a per-account count whose
-  // cross-chain leg has to be parsed row by row (~14s for hMN), and the accounts this
-  // column ranks highest are exactly the structural pots whose exact total the count
-  // arms refuse — the Omnipool and treasury pots answer `complete: false` after ~18s
-  // each. A leaderboard ordered on partial totals would be worse than an honest label.
-  balanceUpdates?: number
+  // The account's own activity feed total — the same number its detail page reports,
+  // computed by the background pass (see the activity-ordering note). Absent for an
+  // account outside the counted pool: no number is better than another model's number.
+  activityCount?: number
+  activityCountComplete?: boolean
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
   // Up to 4 largest holdings (> $10, highest USD first) for the icon cluster
@@ -14435,13 +14427,191 @@ export function buildValueSparkline(
   }
   return series.map(v => +v.toFixed(2))
 }
-export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'updates' | 'volume' | 'liquidation'
-// `activity` was this column's name while it was labelled as activities. Existing deep
-// links and bookmarks still carry it, so it resolves to the column it always meant.
+export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'activity' | 'volume' | 'liquidation'
+// The activity sort briefly shipped as `updates`; both resolve to the same column.
 export function normalizeAccountSort(sort: string): string {
-  return sort === 'activity' ? 'updates' : sort
+  return sort === 'updates' ? 'activity' : sort
 }
-export interface AccountsPage { rows: TopAccountRow[]; total: number }
+export interface AccountsPage {
+  rows: TopAccountRow[]
+  total: number
+  // For an ordering that can only be established for part of the directory, how many
+  // leading rows are provably in the right order. Absent means the whole ordering is.
+  rankedDepth?: number
+}
+
+// ─── The activity ordering ────────────────────────────────────────────────────
+//
+// The Activity column shows the number the account's own detail page reports: its
+// classified activity feed's exact total. It used to show distinct balance
+// observations, which is a different unit — hMN had 6,129,461 of those behind 1,221,974
+// activities — and the two disagreeing under one word is the defect this removes.
+//
+// That number cannot be computed on the request path. It is per-account, its
+// cross-chain leg has to be parsed row by row, and the accounts this column ranks
+// highest are the busiest on the chain: 2 to 12 seconds each, so fifty of them is
+// minutes. So it is computed where minutes are affordable — the same five-minute
+// background pass that already persists this directory's pages — and both the ordering
+// and the displayed value come from what that pass stored. The request reads one small
+// snapshot row.
+//
+// Which accounts it computes is the part that has to be justified rather than assumed.
+// Every feed row is built from at least one event that MENTIONS the account, so an
+// account's reference count in account_activity is an upper bound on its feed total
+// (hMN: 1.22M of 9.83M references; the Omnipool pot: 60.5k of 72.6M, because almost all
+// of its references are plumbing the feed suppresses). Take the pool as the accounts
+// with the most references, and that bound makes the pool a provable superset of the
+// true top N for every N whose N-th total is at least the largest reference count left
+// OUTSIDE the pool. `rankedDepth` reports exactly that N.
+//
+// Below it the ordering is still every counted total in order, and no row ever shows a
+// number from another model — an account the pass has not counted shows none at all and
+// sorts after the ones it has. So the imprecision past `rankedDepth` is bounded and
+// one-directional: an uncounted account with fewer references than the pool's floor
+// could belong among those ranks and is missing from them. It cannot displace a rank
+// above `rankedDepth`, and it cannot make a shown number wrong.
+const ACTIVITY_LEADERBOARD_SNAPSHOT_KEY = 'activity-leaderboard:v1'
+// The pool. Sized so a full rebuild fits comfortably inside the refresh interval it
+// runs on when warm (a re-count is a cache hit for most members) while its reference
+// floor still leaves a useful ranked depth: reference counts fall steeply — rank 100 is
+// 208,358, rank 400 is 33,981, rank 800 is 13,873 — so a deeper pool buys ranked depth
+// roughly linearly.
+const ACTIVITY_LEADERBOARD_POOL = 250
+// How long one refresh cycle may spend counting, well inside the five-minute interval it
+// runs on. A cold rebuild therefore takes several cycles, publishing a shallower ranked
+// depth in the meantime rather than nothing; once warm a re-count is a cache hit on the
+// same total the detail page holds, so a cycle costs a fraction of this. Sequential on
+// purpose, like the tag-count prewarm beside it — concurrent full-history counts would
+// contend with live ingestion for no benefit a background pass needs.
+const ACTIVITY_LEADERBOARD_BUDGET_MS = 240_000
+
+interface ActivityLeaderboardEntry {
+  // The directory's grouping key: a tag id for a tagged member, else the account id.
+  gkey: string
+  total: number
+  // False when the feed could only be counted in part (a structural pot whose candidate
+  // set exceeds the query memory ceiling). Rendered as a floor, and ranked below every
+  // exact total, so a reader is never shown a partial competing with an exact one.
+  complete: boolean
+}
+
+interface ActivityLeaderboard {
+  entries: ActivityLeaderboardEntry[]
+  rankedDepth: number
+  computedAt: string
+}
+
+let activityLeaderboard: ActivityLeaderboard | null = null
+
+// The pool, newest reference counts first, plus the largest count left outside it —
+// the bound `rankedDepth` is established against.
+async function activityLeaderboardPool(): Promise<{ pool: { account: string; refs: number }[]; refsOutside: number }> {
+  const res = await client.query({
+    query: `SELECT account, toString(count()) AS refs FROM price_data.account_activity
+            GROUP BY account
+            HAVING match(account, '^0x[0-9a-f]{64}$')
+            ORDER BY count() DESC LIMIT {limit:UInt32}`,
+    query_params: { limit: ACTIVITY_LEADERBOARD_POOL + 1 }, format: 'JSONEachRow',
+  })
+  const rows = (await res.json<{ account: string; refs: string }>())
+    .map(r => ({ account: r.account, refs: Number(r.refs) }))
+  return {
+    pool: rows.slice(0, ACTIVITY_LEADERBOARD_POOL),
+    // Nothing outside the pool can hold more feed rows than this.
+    refsOutside: rows[ACTIVITY_LEADERBOARD_POOL]?.refs ?? 0,
+  }
+}
+
+// Count one pool member through the very endpoints the detail pages read, so the
+// directory cannot describe an account differently from its own page — and so the count
+// lands in the same cache that page will hit.
+async function activityLeaderboardTotal(account: string): Promise<{ gkey: string; total: ScopedListTotal } | null> {
+  const tag = tagForAccount(account)
+  const query: ScopedListQuery = { tab: 'activity', type: 'all' }
+  if (tag) {
+    const total = await getTagListTotal(tag.tagId, query)
+    return total ? { gkey: tag.tagId, total } : null
+  }
+  const total = await getAddressListTotal(account, query)
+  return total ? { gkey: account, total } : null
+}
+
+// Rebuild what the budget allows, then publish. Ordering is by (exact before partial,
+// then total), and `rankedDepth` stops at the first rank the reference bound no longer
+// covers — so every page the directory offers is one this pass can stand behind.
+async function refreshActivityLeaderboardUncached(): Promise<void> {
+  const deadline = Date.now() + ACTIVITY_LEADERBOARD_BUDGET_MS
+  // Start from what is already published — including on a cold process, where that means
+  // the persisted ranking. Without this a restart would throw away every count and begin
+  // the multi-cycle rebuild again.
+  const published = await ensureActivityLeaderboard()
+  const { pool, refsOutside } = await activityLeaderboardPool()
+  const byGkey = new Map<string, ActivityLeaderboardEntry>()
+  // Carry those entries so a budget-limited pass deepens the ranking instead of
+  // restarting it; a re-counted member simply overwrites its own entry.
+  for (const entry of published?.entries ?? []) byGkey.set(entry.gkey, entry)
+  let counted = 0
+  for (const member of pool) {
+    if (Date.now() > deadline) break
+    try {
+      const result = await activityLeaderboardTotal(member.account)
+      if (!result || result.total.total == null) continue
+      byGkey.set(result.gkey, { gkey: result.gkey, total: result.total.total, complete: result.total.complete })
+      counted++
+    } catch (error) {
+      console.warn('[explorer] activity leaderboard member failed', member.account, error)
+    }
+  }
+  const entries = [...byGkey.values()]
+    .sort((a, b) => Number(b.complete) - Number(a.complete) || b.total - a.total)
+  // Only the leading run whose totals clear everything outside the pool is provably in
+  // order. A partial total is a floor, so it can never establish a rank.
+  let rankedDepth = 0
+  for (const entry of entries) {
+    if (!entry.complete || entry.total < refsOutside) break
+    rankedDepth++
+  }
+  activityLeaderboard = { entries, rankedDepth, computedAt: new Date().toISOString() }
+  await persistActivityLeaderboard(activityLeaderboard)
+  console.info('[explorer] activity leaderboard', { entries: entries.length, counted, rankedDepth, refsOutside })
+}
+
+// Persisted so a restart serves the last published ranking instead of an empty one; the
+// directory's own snapshot table is a keyed payload store, so this needs no new schema.
+async function persistActivityLeaderboard(board: ActivityLeaderboard): Promise<void> {
+  await client.insert({
+    table: 'price_data.account_directory_snapshots',
+    values: [{
+      snapshot_key: ACTIVITY_LEADERBOARD_SNAPSHOT_KEY,
+      payload_json: JSON.stringify(board),
+      computed_at: new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ''),
+    }],
+    format: 'JSONEachRow',
+  })
+}
+
+async function loadActivityLeaderboard(): Promise<ActivityLeaderboard | null> {
+  const res = await client.query({
+    query: `SELECT payload_json FROM price_data.account_directory_snapshots FINAL
+            WHERE snapshot_key = {key:String} LIMIT 1`,
+    query_params: { key: ACTIVITY_LEADERBOARD_SNAPSHOT_KEY }, format: 'JSONEachRow',
+  })
+  const row = (await res.json<{ payload_json: string }>())[0]
+  if (!row) return null
+  try {
+    const board = JSON.parse(row.payload_json) as ActivityLeaderboard
+    return Array.isArray(board?.entries) && Number.isSafeInteger(board.rankedDepth) ? board : null
+  } catch { return null }
+}
+
+// Whatever ranking is currently published. Never triggers a rebuild on the request path:
+// a cold process reads the persisted one, and an instance that has never built one
+// serves the directory with no activity numbers rather than with the wrong ones.
+async function ensureActivityLeaderboard(): Promise<ActivityLeaderboard | null> {
+  if (activityLeaderboard) return activityLeaderboard
+  activityLeaderboard = await loadActivityLeaderboard().catch(() => null)
+  return activityLeaderboard
+}
 const ACCOUNT_DIRECTORY_SNAPSHOT_MAX_AGE_SECONDS = 10 * 60
 
 async function loadAccountDirectorySnapshot(snapshotKey: string): Promise<AccountsPage | null> {
@@ -14498,7 +14668,8 @@ const ACCOUNT_SORT_SQL: Record<AccountSort, string> = {
   // Named accounts (tag or on-chain identity) first, alphabetically; the unnamed
   // rest by value.
   identity: 'if(has_identity = 0, 1, 0) ASC, lowerUTF8(disp_name) ASC, usd_total DESC',
-  updates: 'activity_count DESC, usd_total DESC',
+  // Exact totals first, then by total. See the activity-ordering note.
+  activity: 'activity_count_complete DESC, activity_count DESC, usd_total DESC',
   volume: 'trading_volume_usd DESC, usd_total DESC',
   liquidation: 'if(liquidation_volume_usd <= 0, 1, 0) ASC, liquidation_volume_usd DESC, usd_total DESC',
 }
@@ -14550,26 +14721,23 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
     const prices = await ensureAccountValuePrices()
     const { idsSql, unitsSql } = priceTransformArrays(prices)
     const orderBy = ACCOUNT_SORT_SQL[sort] ?? ACCOUNT_SORT_SQL.value
-    const includeActivitySort = sort === 'updates'
+    const includeActivitySort = sort === 'activity'
     const includeVolumeSort = sort === 'volume'
     const includeLiquidationSort = sort === 'liquidation'
-    const activityCte = includeActivitySort ? `,
-            activity AS (
-              SELECT if(t.lid = '', a.account_id, t.lid) AS gkey,
-                toUInt64(uniqMerge(a.activity_state)) AS activity
-              FROM (
-                SELECT
-                  ${boundAccountSql('w')} AS account_id,
-                  w.activity_state
-                FROM price_data.account_balance_weekly w
-                LEFT JOIN bind b ON b.eth_id = w.account_id
-                WHERE w.account_id != ''
-              ) a
-              LEFT JOIN tags t ON t.account_id = a.account_id
-              GROUP BY gkey
-            )` : ''
-    const activityJoin = includeActivitySort ? 'LEFT JOIN activity act ON act.gkey = g.gkey' : ''
-    const activitySelect = includeActivitySort ? 'ifNull(act.activity, 0)' : 'toUInt64(0)'
+    // The activity ordering and value both come from the background leaderboard, keyed
+    // on the same gkey this query groups by. An account outside the pool has no counted
+    // total, so it sorts last and renders no number — never a number from another model.
+    const leaderboard = includeActivitySort ? await ensureActivityLeaderboard() : null
+    const activityCte = ''
+    const activityJoin = ''
+    const activitySelect = leaderboard?.entries.length
+      ? `transform(g.gkey, [${leaderboard.entries.map(e => `'${e.gkey}'`).join(',')}], [${leaderboard.entries.map(e => e.total).join(',')}], toUInt64(0))`
+      : 'toUInt64(0)'
+    // Exact totals rank above partial ones: a partial is a floor, so ordering it against
+    // an exact number would put a "known to be at least this" above a "known to be this".
+    const activityCompleteSelect = leaderboard?.entries.length
+      ? `transform(g.gkey, [${leaderboard.entries.map(e => `'${e.gkey}'`).join(',')}], [${leaderboard.entries.map(e => (e.complete ? 1 : 0)).join(',')}], 0)`
+      : '0'
     const volumeCte = includeVolumeSort ? `,
             trade_volume_raw AS (
               SELECT account AS account_id, toFloat64(sum(${accountVolumeSource().col})) AS volume_usd
@@ -14777,6 +14945,7 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
             if(g.label_id != '' OR ident.account_id != '', 1, 0) AS has_identity,
             multiIf(g.label_id != '', g.lname, ident.display != '', ident.display, '') AS disp_name,
             ${activitySelect} AS activity_count,
+            ${activityCompleteSelect} AS activity_count_complete,
             ${volumeSelect} AS trading_volume_usd,
             ${liquidationSelect} AS liquidation_volume_usd,
             -- (asset_id, usd) for the 4 largest holdings, highest first: worth > $10
@@ -14804,7 +14973,7 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
       label_id: string; lname: string; color: string; icon: string; members: string; sample: string
       last_block: number; usd: number; usd_total: number; mm_col: number; mm_debt: number; mm_present: number; mm_hf: string; mm_worst_acct: string | null
       supplemental_present: number; supplemental_debt: number; supplemental_hf: string
-      has_identity: number; activity_count: number; trading_volume_usd: number; liquidation_volume_usd: number
+      has_identity: number; activity_count: number; activity_count_complete: number; trading_volume_usd: number; liquidation_volume_usd: number
       top_assets: [string, number][]
     }>()
 
@@ -14833,7 +15002,9 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
             healthFactor: r.supplemental_hf ? r.supplemental_hf : null,
           },
         } : {}),
-        balanceUpdates: r.activity_count > 0 ? Number(r.activity_count) : undefined,
+        activityCount: r.activity_count > 0 ? Number(r.activity_count) : undefined,
+        // A partial total is a floor, and says so rather than passing for exact.
+        activityCountComplete: r.activity_count > 0 ? r.activity_count_complete === 1 : undefined,
         tradingVolumeUsd: r.trading_volume_usd > 0 ? Number(r.trading_volume_usd) : undefined,
         liquidationVolumeUsd: r.liquidation_volume_usd > 0 ? Number(r.liquidation_volume_usd) : undefined,
         topAssets: r.top_assets?.length ? r.top_assets.map(([id, valueUsd]) => ({ asset: asset(id), valueUsd })) : undefined,
@@ -14866,7 +15037,9 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
       console.error('[accounts] top-asset enrichment failed:', err)
     }
 
-    const page = { rows, total }
+    // The activity ordering is only established for the leaderboard's ranked prefix, so
+    // the page publishes that depth and the pager offers nothing past it.
+    const page: AccountsPage = { rows, total, ...(leaderboard ? { rankedDepth: leaderboard.rankedDepth } : {}) }
     await persistAccountDirectorySnapshot(snapshotKey, page).catch(err => console.error('[accounts] snapshot persist failed:', err))
     return page
   })
@@ -14978,51 +15151,32 @@ async function enrichAccountRows(
   const moduleAccounts = [...new Set(rowModuleAccounts.flat())]
   if (!all.length && !moduleAccounts.length) return
   const list = all.length ? sqlAccountList(all) : "''"
-  const activityAccounts = [...new Set([...all, ...moduleAccounts])]
-  const activityList = activityAccounts.length ? sqlAccountList(activityAccounts) : "''"
 
   const winStart = sparklineCalendarWindowStart().toISOString().slice(0, 10)
 
-  // The weekly-state query merges all pre-window states into bucket -1, whose
-  // argMax is the exact baseline, and returns the all-time distinct event count
-  // as synthetic asset_id='' rows. The fallback uses the same output shape via
-  // grouping sets, so the assembly below is independent of readiness.
-  let allObs: { account_id: string; asset_id: string; b: number; bal: string; n_ev: number }[] = []
+  // The weekly-state query merges all pre-window states into bucket -1, whose argMax is
+  // the exact baseline. It no longer also counts distinct balance observations: that
+  // count used to fill the directory's Activity cell, and the cell now carries the
+  // account's own feed total from the background ranking instead.
+  let allObs: { account_id: string; asset_id: string; b: number; bal: string }[] = []
   if (all.length) {
     const obsRes = await client.query({
       query: `SELECT
               account_id,
               asset_id,
               toInt32(greatest(dateDiff('week', {ws:Date}, week_start), -1)) AS b,
-              argMaxMerge(balance_state) AS bal,
-              toUInt32(0) AS n_ev
+              argMaxMerge(balance_state) AS bal
             FROM price_data.account_balance_weekly
             WHERE account_id IN (${list})
               AND week_start < addWeeks({ws:Date}, ${SPARK_WEEKS})
-            GROUP BY account_id, asset_id, b
-            UNION ALL
-            SELECT
-              account_id,
-              '' AS asset_id,
-              toInt32(0) AS b,
-              '' AS bal,
-              toUInt32(uniqMerge(activity_state)) AS n_ev
-            FROM price_data.account_balance_weekly
-            -- Every member, module/sovereign forms included. Those are excluded from
-            -- the balance-history scan above because they carry millions of
-            -- observations, but this is one aggregate per account: leaving them out
-            -- blanked the Activity cell for the busiest accounts on the chain and
-            -- silently undercounted any tag that mixes module and user members.
-            WHERE account_id IN (${activityList})
-            GROUP BY account_id`,
+            GROUP BY account_id, asset_id, b`,
       query_params: { ws: winStart },
       format: 'JSONEachRow',
     })
-    allObs = await obsRes.json<{ account_id: string; asset_id: string; b: number; bal: string; n_ev: number }>()
+    allObs = await obsRes.json<{ account_id: string; asset_id: string; b: number; bal: string }>()
   }
   const obsRows = allObs.filter(r => r.asset_id !== '' && r.b >= 0)
   const baseRows = allObs.filter(r => r.asset_id !== '' && r.b === -1)
-  const actByAcc = new Map(allObs.filter(r => r.asset_id === '').map(r => [r.account_id, r.n_ev]))
 
   let moduleBalanceRows: { account_id: string; asset_id: string; bal: string }[] = []
   if (moduleAccounts.length) {
@@ -15181,15 +15335,6 @@ async function enrichAccountRows(
     if (spark) {
       spark[SPARK_WEEKS - 1] = +Number(raw[i].usd ?? 0).toFixed(2)
       row.sparkline = spark
-    }
-    // Only fill a gap, never overwrite: the page query's grouped uniqMerge is the
-    // same expression sort=updates orders by, so replacing it with this per-member
-    // sum would let a displayed number exceed the row above it. Where that query did
-    // not run (any other sort) the sum stands in, and it now covers module/sovereign
-    // members too — the busiest accounts on the chain used to show no value at all.
-    if (row.balanceUpdates == null) {
-      const counted = [...accs, ...moduleAccs].reduce((sum, a) => sum + (actByAcc.get(a) ?? 0), 0)
-      if (counted > 0) row.balanceUpdates = counted
     }
     if (accs.length) {
       const volume = accs.reduce((s, a) => s + (volumeByAccount.get(a) ?? 0), 0)
@@ -15790,9 +15935,22 @@ export function startAccountSuffixRefresh(): void {
   accountSuffixRefreshTimer.unref()
 }
 async function prewarmAccountDirectoryUncached(): Promise<void> {
-  const sorts: AccountSort[] = ['value', 'supplied', 'borrowed', 'health', 'identity', 'updates', 'volume', 'liquidation']
+  // The activity ranking first: the pages below read whatever it published, so building
+  // it here is what keeps that read off the request path entirely.
+  await refreshActivityLeaderboard().catch(error => console.warn('[explorer] activity leaderboard refresh failed', error))
+  const sorts: AccountSort[] = ['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'volume', 'liquidation']
   for (const sort of sorts) await getAccounts(0, 50, sort)
   await getAccounts(50, 50, 'value')
+}
+
+let activityLeaderboardInflight: Promise<void> | null = null
+function refreshActivityLeaderboard(): Promise<void> {
+  if (activityLeaderboardInflight) return activityLeaderboardInflight
+  const request = refreshActivityLeaderboardUncached().finally(() => {
+    if (activityLeaderboardInflight === request) activityLeaderboardInflight = null
+  })
+  activityLeaderboardInflight = request
+  return request
 }
 
 function prewarmAccountDirectory(): Promise<void> {

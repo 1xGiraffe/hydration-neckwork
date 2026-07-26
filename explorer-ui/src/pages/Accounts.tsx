@@ -6,7 +6,7 @@ import { AccountsChart } from '../components/AccountsChart'
 import { defisimAccountTarget } from '../utils/defisim'
 import { offeredPages } from '../utils/activityPaging'
 
-type Sort = 'value' | 'health' | 'identity' | 'supplied' | 'borrowed' | 'updates' | 'volume' | 'liquidation'
+type Sort = 'value' | 'health' | 'identity' | 'supplied' | 'borrowed' | 'activity' | 'volume' | 'liquidation'
 
 // Two-sided health badge: color-coded health factor | DefiSim, one link.
 export function HealthSimBadge({ hf, addr }: { hf: { label: string; cls: string }; addr: string }) {
@@ -22,7 +22,7 @@ export function HealthSimBadge({ hf, addr }: { hf: { label: string; cls: string 
 }
 
 const PAGE = 50
-const SORTS: Sort[] = ['value', 'health', 'identity', 'supplied', 'borrowed', 'updates', 'volume', 'liquidation']
+const SORTS: Sort[] = ['value', 'health', 'identity', 'supplied', 'borrowed', 'activity', 'volume', 'liquidation']
 export function Accounts() {
   useDocumentTitle('Accounts')
   const page = usePageParam()
@@ -64,7 +64,7 @@ export function Accounts() {
           <option value="health">Health</option>
           <option value="liquidation">Liquidation $</option>
           <option value="volume">Trading $</option>
-          <option value="updates">Balance updates</option>
+          <option value="activity">Activity</option>
         </select>
       </div>
 
@@ -77,7 +77,7 @@ export function Accounts() {
             <th className="r">{sTh('health', 'Health')}</th>
             <th className="r">{sTh('liquidation', 'Liquidation $')}</th>
             <th className="r">{sTh('volume', 'Trading $')}</th>
-            <th className="r">{sTh('updates', 'Bal. updates')}</th>
+            <th className="r">{sTh('activity', 'Activity')}</th>
           </tr></thead>
           <tbody>
             {isLoading && !data ? <TableSkeleton cols={10} rows={PAGE} /> : !rows.length ? <EmptyRow cols={10}>No accounts</EmptyRow> : rows.map((r, i) => {
@@ -101,7 +101,9 @@ export function Accounts() {
                     : hf ? <span className={`hf ${hf.cls}`}>{hf.label}</span> : <Dash />}</td>
                   <td data-label="Liquidation $" className="r mono">{r.liquidationVolumeUsd ? F.usd(r.liquidationVolumeUsd) : <Dash />}</td>
                   <td data-label="Trading $" className="r mono">{r.tradingVolumeUsd ? F.usd(r.tradingVolumeUsd) : <Dash />}</td>
-                  <td data-label="Bal. updates" className="r">{count(r.balanceUpdates)}</td>
+                  {/* A partial total is a floor: the feed runs deeper than it could be
+                      counted, so it reads as "at least this" instead of as exact. */}
+                  <td data-label="Activity" className="r">{count(r.activityCount)}{r.activityCount != null && r.activityCountComplete === false ? '+' : ''}</td>
                 </tr>
               )
             })}

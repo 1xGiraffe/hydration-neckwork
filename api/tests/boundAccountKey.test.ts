@@ -28,9 +28,10 @@ describe('bound-account directory key', () => {
   })
 
   it('builds every bound-account key through the one helper', () => {
-    // 5 call sites: asset holders, weekly activity, trade volume, liquidation volume,
-    // and the accounts directory itself.
-    expect((explorerService.match(/\$\{boundAccountSql\('\w+'\)\}/g) ?? []).length).toBe(5)
+    // 4 call sites: asset holders, trade volume, liquidation volume, and the accounts
+    // directory itself. The weekly-activity site went with the directory's
+    // balance-observation counter, which the account's own feed total replaced.
+    expect((explorerService.match(/\$\{boundAccountSql\('\w+'\)\}/g) ?? []).length).toBe(4)
     expect((explorerService.match(/substring\(\$\{account\}, 11, 8\) IN \('6d6f646c', '7369626c', '70617261'\)/g) ?? []).length).toBe(1)
   })
 

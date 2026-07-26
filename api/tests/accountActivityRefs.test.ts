@@ -94,9 +94,14 @@ describe('account-activity reference reads limit per account, then merge', () =>
     for (let at = explorerService.indexOf('FROM price_data.account_activity\n'); at > -1;
       at = explorerService.indexOf('FROM price_data.account_activity\n', at + 1)) {
       if (at > helperStart && at < helperEnd) continue
+      const read = explorerService.slice(at, at + 400)
+      // A whole-table ranking is a different shape and not the drift this guards: it
+      // takes no account predicate at all, so there is no per-account read to push a
+      // limit into — its LIMIT is a top-N of the aggregate, not a page of references.
+      if (read.includes('GROUP BY account\n') && !read.includes('account IN')) continue
       // Only unbounded set/count reads may stay inline; anything that pages or
       // limits has to come from the helper, or it groups before it limits again.
-      expect(explorerService.slice(at, at + 400)).not.toContain('LIMIT')
+      expect(read).not.toContain('LIMIT')
     }
     expect(explorerService).toContain('query: accountActivityRefsQuery(accounts,')
     expect(explorerService.match(/accountActivityRefsQuery\(/g)?.length).toBeGreaterThan(3)
