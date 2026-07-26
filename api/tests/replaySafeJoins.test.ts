@@ -7,15 +7,15 @@ const explorerService = readFileSync(new URL('../src/services/explorerService.ts
 // Raw ranges can be inserted again, so `dca_schedules` (ReplacingMergeTree keyed on
 // id) can hold two rows for one schedule until its parts merge. A plain join then
 // multiplies every activity row it matches — silently doubling failed DCA rows in
-// the global, account, tag and asset feeds, none of which dedupe afterwards.
+// the global, account, tag and asset feeds, none of which dedupe afterwards. The
+// duplicate is resolved on the schedule side, before the join sees it; asking the
+// join to pick one row instead is what `dcaScheduleJoinSql` explains it cannot do.
 describe('dca_schedules joins are replay-safe', () => {
-  it('never joins the table without ANY, FINAL, or an id-grouped subquery', () => {
-    const joins = explorerService.match(/(?:\w+\s+){0,3}JOIN\s*(?:\(SELECT[^)]*\))?\s*(?:price_data\.)?dca_schedules[^\n]*/g) ?? []
+  it('never joins the table without resolving its replacements first', () => {
+    const joins = explorerService.match(/JOIN[^;]{0,200}?price_data\.dca_schedules[^\n]*/g) ?? []
 
     expect(joins.length).toBeGreaterThan(0)
-    for (const join of joins) {
-      expect(join, join).toMatch(/ANY\s+LEFT\s+JOIN|FINAL/)
-    }
+    for (const join of joins) expect(join, join).toContain('FINAL')
   })
 })
 

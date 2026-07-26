@@ -8371,6 +8371,30 @@ async function getRecentRewardClaims(limit: number, from?: string, to?: string, 
   return out.sort((a, b) => b.blockHeight - a.blockHeight || (b.eventIndex ?? 0) - (a.eventIndex ?? 0)).slice(0, limit)
 }
 
+// Join an execution row aliased `e` to its schedule, one schedule row per `e.id`.
+//
+// It has to be a plain LEFT JOIN over an explicitly deduplicated right side, never
+// `ANY LEFT JOIN`. `ANY` reads like the right tool here — dca_schedules replaces on
+// `id`, so an un-merged replayed DCA.Scheduled row would otherwise multiply every
+// execution it joins — but on ClickHouse 26.3 the analyzer mis-associates an ANY
+// join's output: rows come back holding their own block, event index and amounts
+// beside ANOTHER schedule's `id`. The row COUNT stays exact, so only comparing
+// identities sees it and a count-based guard never fires. It needs a left side the
+// primary key can narrow (any `block_height` predicate over dca_events'
+// `ORDER BY (event_name, block_height, …)`), and it does not appear under the
+// `block_timestamp` bounds and single-block lookups the DCA reads use today — so it
+// would surface the moment a feed is located by block instead of by time. Measured
+// over one account's 100 executions in 90 blocks: 40 rows carried another schedule's
+// id and 60 of the 90 blocks came back with the wrong row count.
+//
+// So take the replacement semantics from the side that owns them: `FINAL` over
+// dca_schedules is bounded by the table being tiny (~34k rows, `ORDER BY id`), and a
+// plain LEFT JOIN onto a right side that is 1:1 by construction can neither fan out
+// nor re-associate.
+export function dcaScheduleJoinSql(columns: string[]): string {
+  return `LEFT JOIN (SELECT id, ${columns.join(', ')} FROM price_data.dca_schedules FINAL) s ON s.id = e.id`
+}
+
 async function getRecentDcaFailures(limit: number, from?: string, to?: string, accounts?: string[], assetIds?: number[], height?: number): Promise<ActivityRow[]> {
   if (assetIds != null && !assetIds.length) return []
   const accountFilter = accounts?.length ? `AND e.who IN (${sqlAccountList(accounts)})` : ''
@@ -8389,9 +8413,7 @@ async function getRecentDcaFailures(limit: number, from?: string, to?: string, a
               s.block_height AS schedule_block, s.extrinsic_index AS schedule_index,
               '' AS error
             FROM price_data.dca_events AS e FINAL
-            -- ANY: dca_schedules replaces on id, so an un-merged replayed
-            -- DCA.Scheduled row would otherwise multiply every failure it joins.
-            ANY LEFT JOIN price_data.dca_schedules s ON s.id = e.id
+            ${dcaScheduleJoinSql(['asset_in', 'asset_out', 'direction', 'amount_per', 'block_height', 'extrinsic_index'])}
             WHERE ${bound} AND e.event_name = 'DCA.TradeFailed'
               ${accountFilter} ${assetFilter}
             ORDER BY e.block_height DESC, e.event_index DESC
@@ -11491,7 +11513,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
       query: `SELECT e.block_height, e.event_index, toString(e.block_timestamp) AS ts, e.who AS who,
                 toString(e.id) AS id, e.amount_in, e.amount_out
               FROM price_data.dca_events e
-              ANY LEFT JOIN price_data.dca_schedules s ON s.id = e.id
+              ${dcaScheduleJoinSql(['asset_in', 'asset_out'])}
               ${dcaValueFilter.joinSql}
               WHERE ${bound.replaceAll('block_height', 'e.block_height').replaceAll('block_timestamp', 'e.block_timestamp')}
                 AND e.event_name='DCA.TradeExecuted' AND e.who IN (${list})
