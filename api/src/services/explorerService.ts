@@ -11258,6 +11258,14 @@ const MAX_EXACT_ACCOUNT_LIST_BYTES = 150_000
 // every read; this is only the backstop that keeps a pathological block from being
 // unbounded, and the per-block reconciliation refuses the page if it ever binds.
 const MAX_LOCATED_BLOCK_SOURCE_ROWS = 500_000
+// How many candidate transfer events the transfer arm will take on. Its subordination
+// and dust tests are hash sets over the account's OWN history, so the cost is that
+// history's size: the busiest trader's 3.0M candidates count in 3.0s, while the
+// structural pots (routerex 22.1M, treasury 13.4M, referrals 14.5M, Omnipool 45.8M)
+// exceed the query memory ceiling. They are recognised here, from a sort-key-prefix
+// count that costs ~0.2s, rather than by spending 16s to fail — the arm would fall back
+// to the window either way, and this way the fallback is not preceded by a wasted pass.
+const MAX_EXACT_TRANSFER_CANDIDATES = 6_000_000
 
 // The asset ids `isShareAssetId` recognises, as a SQL list. Pool-share membership is
 // runtime asset-registry state that ClickHouse does not hold, which is precisely why
@@ -11386,6 +11394,17 @@ async function transferCandidatePotFiltersSql(accCond: string[]): Promise<string
     parts.push(`AND from_account NOT IN (${list}) AND to_account NOT IN (${list})`)
   }
   return parts.join('\n                ')
+}
+
+// Whether this account's transfer history is larger than the arm will take on.
+// `account` is the read model's sort-key prefix, so this is a marks read.
+async function transferCandidatesExceedExactBudget(accCond: string[]): Promise<boolean> {
+  const res = await client.query({
+    query: `SELECT count() AS c FROM price_data.account_transfer_activity
+            WHERE account IN (${accCond.map(a => `'${a}'`).join(',')})`,
+    format: 'JSONEachRow',
+  })
+  return Number((await res.json<{ c: string }>())[0]?.c ?? 0) > MAX_EXACT_TRANSFER_CANDIDATES
 }
 
 // The candidate transfer events of an account, deduplicated exactly as
@@ -11821,6 +11840,7 @@ async function planExactActivity(
   }
   const accCond = [...new Set(accounts.map(a => a.toLowerCase()))].filter(a => ACCOUNT_RE.test(a))
   if (wantTransfers && accCond.length) {
+    if (await transferCandidatesExceedExactBudget(accCond)) return null
     // A transfer feed needs the enumerated sources' suppression identities too. Only
     // their SIGNED rows contribute extrinsics and only their HOOK rows contribute owners,
     // which is exactly the split suppressSubordinateActivityRows makes.
@@ -12501,31 +12521,44 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   return page
 }
 
-// Null when this request has no exact plan, or when the located blocks and the
-// classifier disagreed — either way the windowed path answers instead.
+// Null when this request has no exact plan, when the located blocks and the classifier
+// disagreed, or when a count arm was too heavy to run — the windowed path answers in
+// every one of those cases, with a partial total that says what it covers.
 async function locatedAccountActivityPage(
   accounts: string[], type: string, limit: number, offset: number,
   action: string | undefined, filters: ValueListFilters, from?: string, to?: string,
 ): Promise<ActivityRow[] | null> {
-  const plan = await planExactActivity(accounts, normalizeActivityTypeKey(type), action, filters, from, to)
-  if (!plan) return null
-  const location = await locateExactActivity(plan, offset, limit)
-  if (!location.blocks.length) return []
-  // Only the SQL-counted sources are still read here, and the closed block set — not a
-  // row limit — is what bounds them: a source's CANDIDATES in a block can far outnumber
-  // the rows it contributes (a block with one real transfer can hold fifty plumbing
-  // legs), so a limit scaled to the located row count would truncate the very context
-  // the classification needs. The enumerated sources are handed over from the plan.
-  const sourceLimit = MAX_LOCATED_BLOCK_SOURCE_ROWS
   try {
-    const built = await collectAccountActivity(accounts, type, sourceLimit, action, filters, from, to,
+    const plan = await planExactActivity(accounts, normalizeActivityTypeKey(type), action, filters, from, to)
+    if (!plan) return null
+    const location = await locateExactActivity(plan, offset, limit)
+    if (!location.blocks.length) return []
+    // Only the SQL-counted sources are still read here, and the closed block set — not a
+    // row limit — is what bounds them: a source's CANDIDATES in a block can far outnumber
+    // the rows it contributes (a block with one real transfer can hold fifty plumbing
+    // legs), so a limit scaled to the located row count would truncate the very context
+    // the classification needs. The enumerated sources are handed over from the plan.
+    const built = await collectAccountActivity(accounts, type, MAX_LOCATED_BLOCK_SOURCE_ROWS, action, filters, from, to,
       { blocks: location.blocks, perBlock: location.perBlock, enumerated: plan.enumerated })
     return built.rows.slice(offset - location.above, offset - location.above + limit)
   } catch (error) {
-    if (!(error instanceof ExactActivityDisagreement)) throw error
-    console.warn('[explorer] located activity page disagreed with its count', { type, offset, limit, accounts: accounts.length }, error.message)
+    if (!exactActivityRefusal(error)) throw error
+    console.warn('[explorer] located activity page unavailable', { type, offset, limit, accounts: accounts.length }, (error as Error).message)
     return null
   }
+}
+
+// Whether an exact-path failure means "answer this from the window instead" rather than
+// "this request is broken". The transfer family's subordination sets are hash sets over
+// the account's own history, so the structural pots — the routerex pallet alone holds
+// 10.9M hook transfer legs — can exceed the query memory ceiling. Falling back publishes
+// a partial total that says so, which is the same answer those pots got before any of
+// this existed; a 500 would be strictly worse than the honest incompleteness.
+function exactActivityRefusal(error: unknown): boolean {
+  if (error instanceof ExactActivityDisagreement) return true
+  const code = (error as { code?: unknown })?.code
+  // 241 memory limit, 396 result rows, 62 query size, 159 execution time.
+  return typeof code === 'string' && (code === '241' || CLICKHOUSE_QUERY_GUARD_CODES.has(code))
 }
 
 async function windowedAccountActivityPage(
@@ -12557,9 +12590,16 @@ const ACTIVITY_COUNT_DEADLINE_MS = 15_000
 // assembled has no total at all.
 async function countAccountActivity(accounts: string[], type: string, action: string | undefined, filters: ValueListFilters, from?: string, to?: string): Promise<ScopedListTotal> {
   // A countable shape needs no window at all: the total is a sum over the feed's
-  // blocks, so it is exact and complete however deep the account's history runs.
-  const plan = await planExactActivity(accounts, normalizeActivityTypeKey(type), action, filters, from, to)
-  if (plan) return { total: await countExactActivity(plan), complete: true }
+  // blocks, so it is exact and complete however deep the account's history runs. A
+  // refusal here is not an error page — it falls through to the window, which reports
+  // the prefix it does cover.
+  try {
+    const plan = await planExactActivity(accounts, normalizeActivityTypeKey(type), action, filters, from, to)
+    if (plan) return { total: await countExactActivity(plan), complete: true }
+  } catch (error) {
+    if (!exactActivityRefusal(error)) throw error
+    console.warn('[explorer] exact activity total unavailable', { type, action, accounts: accounts.length }, (error as Error).message)
+  }
   const deadline = Date.now() + ACTIVITY_COUNT_DEADLINE_MS
   let widest: AccountActivityWindow | null = null
   for (const catFetch of [ACTIVITY_COUNT_WINDOW_SEED, MAX_ACTIVITY_SOURCE_ROWS]) {
