@@ -1385,7 +1385,12 @@ export interface ExplorerStats {
 }
 
 export async function getStats(): Promise<ExplorerStats> {
-  return cached('explorer:stats', 3000, async () => {
+  // Longer than the clients' LIVE_MS = 6s poll on purpose. At 3s the entry had always
+  // expired by the time the next poll arrived, so the cache never returned a single
+  // hit and this 45 MiB / 77 ms read ran ~10x a minute forever. Above one poll
+  // interval each entry serves the following poll, which halves the executions while
+  // leaving the head block no more than ~2 blocks behind the blocks feed.
+  return cached('explorer:stats', 10_000, async () => {
     // Wall-clock 24h cutoff height (blocks now run ~5.6s, so the old head−7200
     // covered only ~11h). The counts read replayable ReplacingMergeTree raw
     // tables, so they dedup by row identity: a replay before the next merge
