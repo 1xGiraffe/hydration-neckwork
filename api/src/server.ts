@@ -34,6 +34,7 @@ import {
   moneyMarketAccountValueSnapshotReady,
   setMoneyMarketAccountValuesReady,
   startAccountsPrewarm,
+  startActivityLeaderboardRefresh,
   startTagCountsPrewarm,
   stopExplorerBackgroundTasks,
 } from './services/explorerService.ts'
@@ -239,6 +240,9 @@ async function start() {
     // request does not pay the cold-cache cost.
     startAccountsPrewarm()
     startTagCountsPrewarm()
+    // The directory's activity ranking, on its own slow interval: it recounts a few
+    // aged-out members per cycle rather than the whole pool per prewarm.
+    startActivityLeaderboardRefresh()
   } catch (err) {
     fastify.log.error(err)
     await fastify.close().catch(async closeError => {

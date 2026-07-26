@@ -14449,11 +14449,18 @@ export interface AccountsPage {
 //
 // That number cannot be computed on the request path. It is per-account, its
 // cross-chain leg has to be parsed row by row, and the accounts this column ranks
-// highest are the busiest on the chain: 2 to 12 seconds each, so fifty of them is
-// minutes. So it is computed where minutes are affordable — the same five-minute
-// background pass that already persists this directory's pages — and both the ordering
-// and the displayed value come from what that pass stored. The request reads one small
-// snapshot row.
+// highest are the busiest on the chain: 2 to 12 seconds each. So it is computed in a
+// background pass on its own slow interval, and both the ordering and the displayed
+// value come from what that pass stored. The request reads one small snapshot row.
+//
+// The pass is deliberately throttled rather than exhaustive. It rode the five-minute
+// directory prewarm at first, which recounted all 250 members 288 times a day: every
+// member's total was already past its cache's two-minute fresh window whenever the pass
+// came round, so nothing was ever reused and ClickHouse spent ~19 cores and ~60 TiB an
+// hour re-deriving numbers that had not changed. An exact per-account total is not a
+// five-minute value, so a cycle now recounts only the few members whose stored total has
+// aged out, one at a time, with a cooldown between them. Counted totals are persisted, so
+// throttling makes the column slightly older — never empty.
 //
 // Which accounts it computes is the part that has to be justified rather than assumed.
 // Every feed row is built from at least one event that MENTIONS the account, so an
@@ -14471,19 +14478,25 @@ export interface AccountsPage {
 // could belong among those ranks and is missing from them. It cannot displace a rank
 // above `rankedDepth`, and it cannot make a shown number wrong.
 const ACTIVITY_LEADERBOARD_SNAPSHOT_KEY = 'activity-leaderboard:v1'
-// The pool. Sized so a full rebuild fits comfortably inside the refresh interval it
-// runs on when warm (a re-count is a cache hit for most members) while its reference
-// floor still leaves a useful ranked depth: reference counts fall steeply — rank 100 is
-// 208,358, rank 400 is 33,981, rank 800 is 13,873 — so a deeper pool buys ranked depth
-// roughly linearly.
+// The pool. Sized so its reference floor still leaves a useful ranked depth: reference
+// counts fall steeply — rank 100 is 208,358, rank 400 is 33,981, rank 800 is 13,873 — so
+// a deeper pool buys ranked depth roughly linearly.
 const ACTIVITY_LEADERBOARD_POOL = 250
-// How long one refresh cycle may spend counting, well inside the five-minute interval it
-// runs on. A cold rebuild therefore takes several cycles, publishing a shallower ranked
-// depth in the meantime rather than nothing; once warm a re-count is a cache hit on the
-// same total the detail page holds, so a cycle costs a fraction of this. Sequential on
-// purpose, like the tag-count prewarm beside it — concurrent full-history counts would
-// contend with live ingestion for no benefit a background pass needs.
-const ACTIVITY_LEADERBOARD_BUDGET_MS = 240_000
+// How often the pass wakes up. Its own interval, not the five-minute directory prewarm's:
+// the pages below read whatever ranking is published, so the two have no reason to share a
+// cadence, and sharing it is what made an exact total a five-minute value.
+const ACTIVITY_LEADERBOARD_REFRESH_MS = 15 * 60_000
+// How stale a member's stored total may get before the pass recounts it.
+const ACTIVITY_LEADERBOARD_ENTRY_TTL_MS = 12 * 3_600_000
+// How many members one cycle counts, and how long it waits between them. One at a time
+// with idle gaps: a whole-history count is the most expensive read the API issues, and a
+// background ranking gains nothing from running several of them at once.
+const ACTIVITY_LEADERBOARD_COUNTS_PER_CYCLE = 3
+const ACTIVITY_LEADERBOARD_COUNT_COOLDOWN_MS = 20_000
+// The reference pool is a whole-table group-by (26 GiB, ~6s) and its membership moves over
+// days, so it is persisted with the ranking and re-derived on its own slow schedule
+// instead of once per cycle.
+const ACTIVITY_LEADERBOARD_POOL_TTL_MS = 6 * 3_600_000
 
 interface ActivityLeaderboardEntry {
   // The directory's grouping key: a tag id for a tagged member, else the account id.
@@ -14493,19 +14506,33 @@ interface ActivityLeaderboardEntry {
   // set exceeds the query memory ceiling). Rendered as a floor, and ranked below every
   // exact total, so a reader is never shown a partial competing with an exact one.
   complete: boolean
+  // When this total was established. Drives which members a cycle recounts: the pass
+  // revisits the oldest first and leaves everything inside its TTL alone.
+  countedAt?: string
 }
+
+interface ActivityLeaderboardPoolMember { account: string; refs: number }
 
 interface ActivityLeaderboard {
   entries: ActivityLeaderboardEntry[]
   rankedDepth: number
   computedAt: string
+  // The reference pool the ranking is drawn from, the largest reference count left
+  // outside it, and when that was derived.
+  pool?: ActivityLeaderboardPoolMember[]
+  refsOutside?: number
+  poolAt?: string
 }
 
 let activityLeaderboard: ActivityLeaderboard | null = null
 
-// The pool, newest reference counts first, plus the largest count left outside it —
-// the bound `rankedDepth` is established against.
-async function activityLeaderboardPool(): Promise<{ pool: { account: string; refs: number }[]; refsOutside: number }> {
+// The pool, largest reference counts first, plus the largest count left outside it — the
+// bound `rankedDepth` is established against. Re-derived only when the published one has
+// aged out; every cycle in between reuses it.
+async function activityLeaderboardPool(published: ActivityLeaderboard | null): Promise<{ pool: ActivityLeaderboardPoolMember[]; refsOutside: number; poolAt: string }> {
+  const fresh = published?.pool?.length && published.poolAt
+    && Date.now() - Date.parse(published.poolAt) < ACTIVITY_LEADERBOARD_POOL_TTL_MS
+  if (fresh) return { pool: published.pool as ActivityLeaderboardPoolMember[], refsOutside: published.refsOutside ?? 0, poolAt: published.poolAt as string }
   const res = await client.query({
     query: `SELECT account, toString(count()) AS refs FROM price_data.account_activity
             GROUP BY account
@@ -14519,7 +14546,15 @@ async function activityLeaderboardPool(): Promise<{ pool: { account: string; ref
     pool: rows.slice(0, ACTIVITY_LEADERBOARD_POOL),
     // Nothing outside the pool can hold more feed rows than this.
     refsOutside: rows[ACTIVITY_LEADERBOARD_POOL]?.refs ?? 0,
+    poolAt: new Date().toISOString(),
   }
+}
+
+// The directory row a pool member's total belongs to: its tag when it has one, because the
+// directory groups tagged accounts under the tag and the tag's own feed is what that row
+// shows.
+function activityLeaderboardGkey(account: string): string {
+  return tagForAccount(account)?.tagId ?? account
 }
 
 // Count one pool member through the very endpoints the detail pages read, so the
@@ -14536,33 +14571,63 @@ async function activityLeaderboardTotal(account: string): Promise<{ gkey: string
   return total ? { gkey: account, total } : null
 }
 
-// Rebuild what the budget allows, then publish. Ordering is by (exact before partial,
-// then total), and `rankedDepth` stops at the first rank the reference bound no longer
-// covers — so every page the directory offers is one this pass can stand behind.
+// How long ago a stored total was established. A never-counted member is infinitely due,
+// which is what puts a cold board's members ahead of a warm board's oldest entry.
+function activityLeaderboardEntryAge(entry: ActivityLeaderboardEntry | undefined): number {
+  if (!entry?.countedAt) return Infinity
+  const at = Date.parse(entry.countedAt)
+  return Number.isFinite(at) ? Date.now() - at : Infinity
+}
+
+// Recount the few members whose stored total has aged out, then publish. Ordering is by
+// (exact before partial, then total), and `rankedDepth` stops at the first rank the
+// reference bound no longer covers — so every page the directory offers is one this pass
+// can stand behind.
 async function refreshActivityLeaderboardUncached(): Promise<void> {
-  const deadline = Date.now() + ACTIVITY_LEADERBOARD_BUDGET_MS
   // Start from what is already published — including on a cold process, where that means
   // the persisted ranking. Without this a restart would throw away every count and begin
   // the multi-cycle rebuild again.
   const published = await ensureActivityLeaderboard()
-  const { pool, refsOutside } = await activityLeaderboardPool()
+  const { pool, refsOutside, poolAt } = await activityLeaderboardPool(published)
   const byGkey = new Map<string, ActivityLeaderboardEntry>()
-  // Carry those entries so a budget-limited pass deepens the ranking instead of
-  // restarting it; a re-counted member simply overwrites its own entry.
+  // Carry those entries so a throttled pass deepens the ranking instead of restarting it;
+  // a re-counted member simply overwrites its own entry.
   for (const entry of published?.entries ?? []) byGkey.set(entry.gkey, entry)
-  let counted = 0
+  // One member per directory row (a tag's members all resolve to the tag's own feed), the
+  // most overdue first, capped at what one cycle may spend.
+  const dueByGkey = new Map<string, ActivityLeaderboardPoolMember>()
   for (const member of pool) {
-    if (Date.now() > deadline) break
+    const gkey = activityLeaderboardGkey(member.account)
+    if (dueByGkey.has(gkey)) continue
+    if (activityLeaderboardEntryAge(byGkey.get(gkey)) <= ACTIVITY_LEADERBOARD_ENTRY_TTL_MS) continue
+    dueByGkey.set(gkey, member)
+  }
+  const due = [...dueByGkey.entries()]
+    .sort(([a], [b]) => activityLeaderboardEntryAge(byGkey.get(b)) - activityLeaderboardEntryAge(byGkey.get(a)))
+    .slice(0, ACTIVITY_LEADERBOARD_COUNTS_PER_CYCLE)
+  let counted = 0
+  for (const [, member] of due) {
+    // Idle between counts so the pass leaves the instance to live ingestion and requests
+    // rather than occupying it back to back.
+    if (counted) await new Promise(resolve => setTimeout(resolve, ACTIVITY_LEADERBOARD_COUNT_COOLDOWN_MS))
     try {
       const result = await activityLeaderboardTotal(member.account)
       if (!result || result.total.total == null) continue
-      byGkey.set(result.gkey, { gkey: result.gkey, total: result.total.total, complete: result.total.complete })
+      byGkey.set(result.gkey, {
+        gkey: result.gkey, total: result.total.total, complete: result.total.complete,
+        countedAt: new Date().toISOString(),
+      })
       counted++
     } catch (error) {
       console.warn('[explorer] activity leaderboard member failed', member.account, error)
     }
   }
+  // Only the current pool's rows are counted, so only they carry a number. Dropping the
+  // rest keeps the ranking (and the literal list the directory query interpolates) from
+  // growing with every pool reshuffle.
+  const poolGkeys = new Set(pool.map(member => activityLeaderboardGkey(member.account)))
   const entries = [...byGkey.values()]
+    .filter(entry => poolGkeys.has(entry.gkey))
     .sort((a, b) => Number(b.complete) - Number(a.complete) || b.total - a.total)
   // Only the leading run whose totals clear everything outside the pool is provably in
   // order. A partial total is a floor, so it can never establish a rank.
@@ -14571,9 +14636,9 @@ async function refreshActivityLeaderboardUncached(): Promise<void> {
     if (!entry.complete || entry.total < refsOutside) break
     rankedDepth++
   }
-  activityLeaderboard = { entries, rankedDepth, computedAt: new Date().toISOString() }
+  activityLeaderboard = { entries, rankedDepth, computedAt: new Date().toISOString(), pool, refsOutside, poolAt }
   await persistActivityLeaderboard(activityLeaderboard)
-  console.info('[explorer] activity leaderboard', { entries: entries.length, counted, rankedDepth, refsOutside })
+  console.info('[explorer] activity leaderboard', { entries: entries.length, due: due.length, counted, rankedDepth, refsOutside })
 }
 
 // Persisted so a restart serves the last published ranking instead of an empty one; the
@@ -15872,6 +15937,7 @@ let accountSuffixRefreshTimer: ReturnType<typeof setInterval> | null = null
 let accountSuffixInflight: Promise<void> | null = null
 let accountsPrewarmTimer: ReturnType<typeof setInterval> | null = null
 let accountsPrewarmInflight: Promise<void> | null = null
+let activityLeaderboardTimer: ReturnType<typeof setInterval> | null = null
 let tagCountsPrewarmTimer: ReturnType<typeof setInterval> | null = null
 let tagCountsPrewarmInflight: Promise<void> | null = null
 let tagDetailsPrewarmTimer: ReturnType<typeof setInterval> | null = null
@@ -15935,9 +16001,8 @@ export function startAccountSuffixRefresh(): void {
   accountSuffixRefreshTimer.unref()
 }
 async function prewarmAccountDirectoryUncached(): Promise<void> {
-  // The activity ranking first: the pages below read whatever it published, so building
-  // it here is what keeps that read off the request path entirely.
-  await refreshActivityLeaderboard().catch(error => console.warn('[explorer] activity leaderboard refresh failed', error))
+  // Every page here reads whatever activity ranking is currently published, so this pass
+  // does not build one — that runs on its own, much slower interval.
   const sorts: AccountSort[] = ['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'volume', 'liquidation']
   for (const sort of sorts) await getAccounts(0, 50, sort)
   await getAccounts(50, 50, 'value')
@@ -15951,6 +16016,19 @@ function refreshActivityLeaderboard(): Promise<void> {
   })
   activityLeaderboardInflight = request
   return request
+}
+
+// The activity ranking's own pass. Separate from the directory prewarm because the two
+// want completely different cadences: pages are cheap and want to be minutes fresh, while
+// an exact per-account total costs seconds of ClickHouse and changes slowly.
+export function startActivityLeaderboardRefresh(): void {
+  if (activityLeaderboardTimer) return
+  const cycle = async (): Promise<void> => {
+    await refreshActivityLeaderboard().catch(error => console.warn('[explorer] activity leaderboard refresh failed', error))
+  }
+  void cycle()
+  activityLeaderboardTimer = setInterval(() => { void cycle() }, ACTIVITY_LEADERBOARD_REFRESH_MS)
+  activityLeaderboardTimer.unref()
 }
 
 function prewarmAccountDirectory(): Promise<void> {
@@ -16028,6 +16106,7 @@ export function stopExplorerBackgroundTasks(): void {
   if (evmBindingsRefreshTimer) clearInterval(evmBindingsRefreshTimer)
   if (accountSuffixRefreshTimer) clearInterval(accountSuffixRefreshTimer)
   if (accountsPrewarmTimer) clearInterval(accountsPrewarmTimer)
+  if (activityLeaderboardTimer) clearInterval(activityLeaderboardTimer)
   if (tagCountsPrewarmTimer) clearInterval(tagCountsPrewarmTimer)
   if (tagDetailsPrewarmTimer) clearInterval(tagDetailsPrewarmTimer)
   if (omnipoolAccountClaimsRefreshTimer) clearInterval(omnipoolAccountClaimsRefreshTimer)
@@ -16035,6 +16114,7 @@ export function stopExplorerBackgroundTasks(): void {
   evmBindingsRefreshTimer = null
   accountSuffixRefreshTimer = null
   accountsPrewarmTimer = null
+  activityLeaderboardTimer = null
   tagCountsPrewarmTimer = null
   tagDetailsPrewarmTimer = null
   omnipoolAccountClaimsRefreshTimer = null

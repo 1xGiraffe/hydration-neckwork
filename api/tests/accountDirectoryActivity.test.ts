@@ -73,4 +73,42 @@ describe('the directory activity column is the feed total', () => {
     // And the background pass is the thing that does build it.
     expect(explorerService).toContain('await refreshActivityLeaderboard().catch(')
   })
+
+  // A whole-history count is the most expensive read the API issues. Riding the
+  // five-minute directory prewarm recounted all 250 pool members 288 times a day — every
+  // one of them past its cache's two-minute fresh window on every cycle — which cost
+  // ClickHouse ~19 cores and ~60 TiB an hour. The pass owns its own slow interval and
+  // recounts only what has aged out.
+  it('runs on its own interval, not the directory prewarm', () => {
+    const at = explorerService.indexOf('async function prewarmAccountDirectoryUncached')
+    expect(at).toBeGreaterThan(-1)
+    expect(explorerService.slice(at, explorerService.indexOf('\n}', at))).not.toContain('refreshActivityLeaderboard')
+
+    const start = explorerService.indexOf('export function startActivityLeaderboardRefresh')
+    expect(start).toBeGreaterThan(-1)
+    expect(explorerService.slice(start, explorerService.indexOf('\n}', start))).toContain('ACTIVITY_LEADERBOARD_REFRESH_MS')
+  })
+
+  it('counts only aged-out members, one at a time, with a cooldown', () => {
+    const at = explorerService.indexOf('async function refreshActivityLeaderboardUncached')
+    expect(at).toBeGreaterThan(-1)
+    const body = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
+
+    // Nothing inside its TTL is recounted, and a cycle takes at most a fixed few.
+    expect(body).toContain('ACTIVITY_LEADERBOARD_ENTRY_TTL_MS')
+    expect(body).toContain('ACTIVITY_LEADERBOARD_COUNTS_PER_CYCLE')
+    expect(body).toContain('ACTIVITY_LEADERBOARD_COUNT_COOLDOWN_MS')
+    // Sequential: each count is awaited, so the pass never has two in flight.
+    expect(body).toContain('await activityLeaderboardTotal(member.account)')
+  })
+
+  // The reference pool is a whole-table group-by (26 GiB). Its membership moves over days.
+  it('reuses the published reference pool until it ages out', () => {
+    const at = explorerService.indexOf('async function activityLeaderboardPool')
+    expect(at).toBeGreaterThan(-1)
+    const body = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
+
+    expect(body).toContain('ACTIVITY_LEADERBOARD_POOL_TTL_MS')
+    expect(body).toContain('published.poolAt')
+  })
 })
