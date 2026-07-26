@@ -1696,6 +1696,9 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .tally-nay { background: var(--red); }
 .vb-aye-text { color: var(--green); }
 .vb-nay-text { color: var(--red); }
+/* Says where a tally came from when it is NOT the chain's own figure. Prose, so it wraps
+   and keeps the body font rather than the mono of the amounts above it. */
+.tally-note { font-size: 12px; line-height: 1.45; color: var(--text-low); max-width: 74ch; }
 
 /* One cluster, both sides. Bubbles are anchors so the app's global hover card and
    click-through work exactly as they do on any other account pill. */

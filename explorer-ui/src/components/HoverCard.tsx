@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/explorer'
 import { useAddressSummary, useAsset, useExtrinsic, useBlock, useTagSummary, useTrade, useStats, useDcaSchedule, useDcaExecution } from '../hooks/useExplorerData'
 import { F, AssetIcon, AssetChip, AssetAmount, AddrPill, CallPill, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow } from './ui'
+import { ayeSharePct, selectTally } from '../utils/referendumVotes'
 import type { AssetRef } from '../types'
 
 // Global hover preview cards for account (.addr-pill), tag (/tag/… links),
@@ -177,9 +178,11 @@ function ReferendumHover({ id }: { id: string }) {
     staleTime: 60_000,
   })
   if (!data) return <div className="hc-sub mono">Loading…</div>
-  const tally = data.onChainTally ?? { ayes: data.directTally.ayes, nays: data.directTally.nays, support: null }
-  const ayes = Number(tally.ayes), nays = Number(tally.nays)
-  const ayePct = ayes + nays > 0 ? (ayes / (ayes + nays)) * 100 : null
+  // Same selection and same BigInt share the page uses, so the card cannot say a
+  // different percentage than the page it links to, and the AYE row still names its
+  // source when the chain published no tally of its own (every Democracy referendum).
+  const tally = selectTally(data)
+  const ayePct = ayeSharePct(tally.ayes, tally.nays)
   return (
     <>
       <div className="hc-head">
@@ -193,7 +196,10 @@ function ReferendumHover({ id }: { id: string }) {
         <div className="tally-aye" style={{ width: `${ayePct}%` }} />
         <div className="tally-nay" style={{ width: `${100 - ayePct}%` }} />
       </div>}
-      {ayePct != null && <div className="hc-row"><span>AYE</span><span className="mono">{ayePct.toFixed(1)}%</span></div>}
+      {ayePct != null && <div className="hc-row">
+        <span>{tally.source === 'chain' ? 'AYE' : 'AYE (attributed)'}</span>
+        <span className="mono">{ayePct.toFixed(1)}%</span>
+      </div>}
       <div className="hc-row"><span>Voters</span><span className="mono">{F.int(data.directTally.voters)}</span></div>
       <div className="hc-row"><span>AYE / NAY</span><span className="mono">{F.int(data.directTally.ayeVoters)} / {F.int(data.directTally.nayVoters)}</span></div>
     </>

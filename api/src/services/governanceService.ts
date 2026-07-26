@@ -37,8 +37,8 @@ export interface ReferendumVoter {
   ayeBalance: string
   nayBalance: string
   abstainBalance: string
-  // Conviction-weighted power, planck. For Split/SplitAbstain this is the plain
-  // balance: those variants have no conviction to apply.
+  // Conviction-weighted power, planck. Split/SplitAbstain carry no conviction, which the
+  // pallets read as Conviction::None — so each leg weighs 0.1x, not its plain balance.
   weightedAye: string
   weightedNay: string
   weighted: string
@@ -70,8 +70,20 @@ export interface ReferendumDetail {
   asset: AssetRef
   // The chain's own tally from the lifecycle event, already conviction-weighted and
   // inclusive of delegated power. Authoritative when present.
+  //
+  // Only OpenGov has one. Referenda.DecisionStarted/ConfirmStarted/Confirmed/Rejected all
+  // carry `tally`; the Democracy pallet carries none on any of its events
+  // (Started{refIndex,threshold}, Passed{refIndex}, NotPassed{refIndex},
+  // Cancelled{refIndex}, Executed{refIndex,result}) and keeps its Tally only inside
+  // Democracy::ReferendumInfoOf while the referendum is Ongoing, replacing it with
+  // Finished{approved,end} at the close. So this is null for every Democracy referendum
+  // and the consumer must present `directTally` as what it is.
   onChainTally: ReferendumTally | null
-  // What the indexed per-account votes add up to.
+  // What the indexed per-account votes add up to: the chain's DIRECT tally, excluding
+  // delegated power. Verified account-by-account against Democracy::VotingOf at the last
+  // block before the close — for referendum 61 the 22 counted votes reproduce the chain's
+  // own non-delegated ayes (14669791677216312056) exactly, and the whole remaining gap to
+  // the chain tally (142267191677216312056) is the inbound delegation of four voters.
   directTally: {
     ayes: string
     nays: string
@@ -134,11 +146,20 @@ export function referendumStatusFrom(pallet: ReferendumPallet, eventNames: strin
   return 'unknown'
 }
 
+// The event that ENDS the vote. Democracy.Executed is deliberately absent: it is the
+// enactment, which fires `delay` blocks after Democracy.Passed (600 blocks for
+// referendum 0, 43,200 for referendum 1). Treating it as the conclusion dated the
+// referendum to its enactment and stretched the withdrawal window past the close, where
+// a remove_vote is only a voter unlocking their balance.
 const CONCLUDING_EVENTS = new Set([
   'Referenda.Confirmed', 'Referenda.Approved', 'Referenda.Rejected', 'Referenda.Cancelled',
   'Referenda.TimedOut', 'Referenda.Killed',
-  'Democracy.Passed', 'Democracy.NotPassed', 'Democracy.Cancelled', 'Democracy.Vetoed', 'Democracy.Executed',
+  'Democracy.Passed', 'Democracy.NotPassed', 'Democracy.Cancelled', 'Democracy.Vetoed',
 ])
+
+export function isConcludingEvent(eventName: string): boolean {
+  return CONCLUDING_EVENTS.has(eventName)
+}
 
 interface LifecycleRow {
   event_name: string
@@ -168,7 +189,7 @@ async function loadLifecycle(pallet: ReferendumPallet, index: number): Promise<L
   return res.json<LifecycleRow>()
 }
 
-function tallyFromArgs(argsJson: string): ReferendumTally | null {
+export function tallyFromArgs(argsJson: string): ReferendumTally | null {
   try {
     const tally = (JSON.parse(argsJson) as { tally?: Record<string, unknown> }).tally
     if (!tally) return null
@@ -179,7 +200,7 @@ function tallyFromArgs(argsJson: string): ReferendumTally | null {
   } catch { return null }
 }
 
-interface VoteEventRow {
+export interface VoteEventRow {
   block_height: number
   event_index: number
   extrinsic_index: number | null
@@ -341,28 +362,61 @@ async function loadPreEventEraVotes(index: number): Promise<VoteEventRow[]> {
   return res.json<VoteEventRow>()
 }
 
-// Votes WITHDRAWN, meaning removed while the referendum was still open.
+// Where in the chain a vote (or its removal) sits. Block plus extrinsic, because an
+// account can remove a vote and cast a new one in the same block: Democracy 206 has
+// exactly that, and only the LATER action stands.
+export interface VotePosition { blockHeight: number; extrinsicIndex: number | null }
+
+export function isAfter(a: VotePosition, b: VotePosition): boolean {
+  if (a.blockHeight !== b.blockHeight) return a.blockHeight > b.blockHeight
+  return (a.extrinsicIndex ?? -1) > (b.extrinsicIndex ?? -1)
+}
+
+// Votes WITHDRAWN, meaning removed while the referendum was still open — the LAST such
+// removal per account, so a vote recast afterwards still counts.
 //
-// ConvictionVoting.VoteRemoved carries the voter but not the poll index (same shape
-// as Voted), so the index comes from the remove_vote call on the same extrinsic. The
-// upper bound is the conclusion block, not the last lifecycle event: a removal after
-// the vote closed is just the voter unlocking their balance, and 1,179 of 2,436
-// removals are of that kind — treating those as withdrawals would silently delete
-// votes that did count.
-async function loadRemovedVoters(index: number, fromBlock: number, toBlock: number): Promise<Set<string>> {
+// The window ends one block before the conclusion, not at the last lifecycle event: a
+// removal once the vote has closed is just the voter unlocking their balance, and 1,179
+// of 2,436 OpenGov removals are of that kind — treating those as withdrawals would
+// silently delete votes that did count.
+//
+// The two pallets have to be read from different places. ConvictionVoting.VoteRemoved
+// names the voter but not the poll (same shape as Voted), so the index comes from the
+// remove_vote call on the same extrinsic. Democracy emits NO event for a removal at all,
+// so there the CALL is the only record: remove_vote drops the signer's own vote, while
+// remove_other_vote/force_remove_vote name their target in the args.
+async function loadWithdrawals(pallet: ReferendumPallet, index: number, fromBlock: number, toBlock: number): Promise<Map<string, VotePosition>> {
+  const query = pallet === 'opengov'
+    ? `SELECT JSONExtractString(e.args_json, 'who') AS who, e.block_height AS block_height, e.extrinsic_index AS extrinsic_index
+       FROM price_data.raw_events e
+       WHERE e.event_name = 'ConvictionVoting.VoteRemoved'
+         AND e.block_height >= {from:UInt32} AND e.block_height <= {to:UInt32}
+         AND (e.block_height, e.extrinsic_index) IN (
+           SELECT block_height, extrinsic_index FROM price_data.raw_calls
+           WHERE call_name IN ('ConvictionVoting.remove_vote', 'ConvictionVoting.remove_other_vote', 'ConvictionVoting.force_remove_vote')
+             AND block_height >= {from:UInt32} AND block_height <= {to:UInt32}
+             AND toUInt32(JSONExtractInt(args_json, 'index')) = {idx:UInt32})`
+    : `SELECT if(call_name = 'Democracy.remove_vote',
+                JSONExtractString(origin_json, 'value', 'value'),
+                JSONExtractString(args_json, 'target')) AS who,
+              block_height, extrinsic_index
+       FROM price_data.raw_calls
+       WHERE call_name IN ('Democracy.remove_vote', 'Democracy.remove_other_vote', 'Democracy.force_remove_vote')
+         AND success = 1
+         AND block_height >= {from:UInt32} AND block_height <= {to:UInt32}
+         AND toUInt32(JSONExtractInt(args_json, 'index')) = {idx:UInt32}`
   const res = await client.query({
-    query: `SELECT DISTINCT JSONExtractString(e.args_json, 'who') AS who
-            FROM price_data.raw_events e
-            WHERE e.event_name = 'ConvictionVoting.VoteRemoved'
-              AND e.block_height >= {from:UInt32} AND e.block_height <= {to:UInt32}
-              AND (e.block_height, e.extrinsic_index) IN (
-                SELECT block_height, extrinsic_index FROM price_data.raw_calls
-                WHERE call_name IN ('ConvictionVoting.remove_vote', 'ConvictionVoting.remove_other_vote', 'ConvictionVoting.force_remove_vote')
-                  AND block_height >= {from:UInt32} AND block_height <= {to:UInt32}
-                  AND toUInt32(JSONExtractInt(args_json, 'index')) = {idx:UInt32})`,
-    query_params: { idx: index, from: fromBlock, to: toBlock }, format: 'JSONEachRow',
+    query, query_params: { idx: index, from: fromBlock, to: toBlock }, format: 'JSONEachRow',
   })
-  return new Set((await res.json<{ who: string }>()).map(row => row.who.toLowerCase()))
+  const latest = new Map<string, VotePosition>()
+  for (const row of await res.json<{ who: string; block_height: number; extrinsic_index: number | null }>()) {
+    const who = (row.who ?? '').toLowerCase()
+    if (!who) continue
+    const at: VotePosition = { blockHeight: Number(row.block_height), extrinsicIndex: row.extrinsic_index }
+    const held = latest.get(who)
+    if (!held || isAfter(at, held)) latest.set(who, at)
+  }
+  return latest
 }
 
 const big = (value: string | null | undefined): bigint => (value && /^\d+$/.test(value) ? BigInt(value) : 0n)
@@ -383,7 +437,7 @@ export function latestVotePerAccount(rows: VoteEventRow[]): VoteEventRow[] {
   return [...byAccount.values()]
 }
 
-function toVoter(row: VoteEventRow, removed: Set<string>, priceUsd: number | null, decimals: number): ReferendumVoter {
+export function toVoter(row: VoteEventRow, withdrawals: Map<string, VotePosition>, priceUsd: number | null, decimals: number): ReferendumVoter {
   const kind: VoteKind = row.kind === 'Split' || row.kind === 'SplitAbstain' ? row.kind : 'Standard'
   const aye = big(row.aye), nay = big(row.nay), abstain = big(row.abstain)
   const standardBalance = big(row.balance)
@@ -400,12 +454,16 @@ function toVoter(row: VoteEventRow, removed: Set<string>, priceUsd: number | nul
     if (decoded.side === 'Aye') weightedAye = weighted
     else weightedNay = weighted
   } else {
-    // Split votes back both sides with no conviction, so their power is the plain
-    // balance on each side; the abstain leg backs neither.
+    // A Split/SplitAbstain vote carries no conviction, which in both pallets means
+    // Conviction::None — the 0.1x class, NOT an unweighted balance. `Tally::add` runs each
+    // leg through `Conviction::None.votes(balance)` (capital / 10), so a 1.5M HDX split leg
+    // contributes 150k votes. Counting the full balance overstated it tenfold and pushed
+    // the attributed nays of OpenGov 39 above the chain's own tally, which is impossible.
+    // The abstain leg backs neither side but is still part of the capital.
     side = kind
     balance = aye + nay + abstain
-    weightedAye = aye
-    weightedNay = nay
+    weightedAye = weightedVotePower(aye, 0)
+    weightedNay = weightedVotePower(nay, 0)
   }
 
   const weighted = weightedAye + weightedNay
@@ -428,7 +486,12 @@ function toVoter(row: VoteEventRow, removed: Set<string>, priceUsd: number | nul
     eventIndex: row.event_index,
     extrinsicIndex: row.extrinsic_index,
     timestamp: row.ts,
-    removed: removed.has((row.who ?? '').toLowerCase()),
+    // Withdrawn only if the removal came AFTER this vote. An account that removed a vote
+    // and then voted again is voting, not withdrawing.
+    removed: (() => {
+      const at = withdrawals.get((row.who ?? '').toLowerCase())
+      return at != null && isAfter(at, { blockHeight: row.block_height, extrinsicIndex: row.extrinsic_index })
+    })(),
   }
 }
 
@@ -463,8 +526,10 @@ export function tallyVoters(voters: ReferendumVoter[]): ReferendumDetail['direct
 
 // The chain's tally includes delegated power, which emits no Voted event, so the
 // per-account votes can only ever sum to at most the on-chain figure. Report the
-// residual instead of hiding it: for OpenGov 368 the direct votes came to 99.975%
-// of the on-chain aye tally, and the missing 0.025% is precisely this.
+// residual instead of hiding it: OpenGov 39 attributes 1371548208681485335833 of the
+// chain's 1374035885979727209137 ayes, and the 2487677298241873304 gap is precisely this.
+// Where nothing was delegated the two agree to the planck and there is no row to show —
+// OpenGov 60 and 368, and 25 of the 207 Democracy referenda, land there.
 export function indirectTallyFrom(onChain: ReferendumTally | null, direct: ReferendumDetail['directTally']): ReferendumTally | null {
   if (!onChain) return null
   const diff = (chainValue: string, directValue: string) => {
@@ -521,7 +586,7 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
         // votes cannot be cast after it, so the window ends at the CONCLUSION. Using
         // the last lifecycle event instead widened some windows enough to read
         // hundreds of MB of call JSON.
-        const conclusionBlock = [...lifecycle].reverse().find(row => CONCLUDING_EVENTS.has(row.event_name))?.block_height
+        const conclusionBlock = [...lifecycle].reverse().find(row => isConcludingEvent(row.event_name))?.block_height
         let end = conclusionBlock
         if (end == null) {
           const headRes = await client.query({ query: 'SELECT max(block_height) AS h FROM price_data.blocks', format: 'JSONEachRow' })
@@ -540,15 +605,15 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
     const decimals = assetRef.decimals
 
     // Withdrawals only count up to the moment the referendum closed (see
-    // loadRemovedVoters); a still-open referendum has no such ceiling.
-    const concludedAtBlock = [...lifecycle].reverse().find(row => CONCLUDING_EVENTS.has(row.event_name))?.block_height
-    const removed = pallet === 'opengov' && lifecycle.length
-      ? await loadRemovedVoters(index, lifecycle[0].block_height, concludedAtBlock != null ? concludedAtBlock - 1 : 0xffff_ffff)
-      : new Set<string>()
+    // loadWithdrawals); a still-open referendum has no such ceiling.
+    const concludedAtBlock = [...lifecycle].reverse().find(row => isConcludingEvent(row.event_name))?.block_height
+    const withdrawals = lifecycle.length
+      ? await loadWithdrawals(pallet, index, lifecycle[0].block_height, concludedAtBlock != null ? concludedAtBlock - 1 : 0xffff_ffff)
+      : new Map<string, VotePosition>()
 
     const latest = latestVotePerAccount(votes)
     const voters = latest
-      .map(row => toVoter(row, removed, priceUsd, decimals))
+      .map(row => toVoter(row, withdrawals, priceUsd, decimals))
       // Heaviest voice first: the page and its bubble map are about who moved the vote.
       .sort((a, b) => (big(b.weighted) > big(a.weighted) ? 1 : big(b.weighted) < big(a.weighted) ? -1 : 0))
 
@@ -557,7 +622,7 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
     // figure (DecisionStarted, ConfirmStarted, Confirmed, Rejected all carry one).
     const onChainTally = [...lifecycle].reverse().map(row => tallyFromArgs(row.args_json)).find(Boolean) ?? null
     const submitted = lifecycle.find(row => row.event_name === 'Referenda.Submitted' || row.event_name === 'Democracy.Started')
-    const concludedRow = [...lifecycle].reverse().find(row => CONCLUDING_EVENTS.has(row.event_name))
+    const concludedRow = [...lifecycle].reverse().find(row => isConcludingEvent(row.event_name))
     const submittedArgs = submitted ? (() => { try { return JSON.parse(submitted.args_json) as Record<string, unknown> } catch { return {} } })() : {}
     const proposal = submittedArgs.proposal as { hash?: unknown } | undefined
     const proposalHash = typeof proposal?.hash === 'string' ? proposal.hash : null

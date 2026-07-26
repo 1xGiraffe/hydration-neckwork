@@ -8,7 +8,7 @@ import { Crumbs, F, SkeletonRows, MomentLink } from '../components/ui'
 import { VoteBubbles } from '../components/VoteBubbles'
 import { VotesTable } from '../components/VotesTable'
 import { ProposalCall } from '../components/ProposalCall'
-import { orderVoters, type SideFilter, type VoteSort } from '../utils/referendumVotes'
+import { ayeSharePct, orderVoters, selectTally, type DisplayTally, type SideFilter, type VoteSort } from '../utils/referendumVotes'
 
 const PALLET_LABEL: Record<string, string> = { opengov: 'OpenGov', democracy: 'Democracy' }
 
@@ -20,24 +20,42 @@ function useReferendum(pallet: 'opengov' | 'democracy', index: number) {
   })
 }
 
-// Share of the weighted tally, as a percentage of aye + nay. Computed in BigInt: the
-// values are 21-digit planck figures that a double would round.
-function sharePct(part: string, other: string): number | null {
-  try {
-    const a = BigInt(part), b = BigInt(other)
-    if (a + b === 0n) return null
-    return Number((a * 10_000n) / (a + b)) / 100
-  } catch { return null }
-}
-
 function TallyBar({ ayes, nays }: { ayes: string; nays: string }) {
-  const ayePct = sharePct(ayes, nays)
+  const ayePct = ayeSharePct(ayes, nays)
   if (ayePct == null) return <div className="empty-note">No votes counted yet</div>
   return (
     <div className="tally-bar" title={`${ayePct.toFixed(2)}% AYE`}>
       <div className="tally-aye" style={{ width: `${ayePct}%` }} />
       <div className="tally-nay" style={{ width: `${100 - ayePct}%` }} />
     </div>
+  )
+}
+
+// The tally, with the bar and the AYE/NAY amounts both pallets get — and a label that
+// says which figure this is. OpenGov carries the chain's own tally on its lifecycle
+// events; Democracy carries none anywhere, so a Democracy page can only show what its
+// indexed votes add up to and has to say so (see selectTally).
+export function TallySummary({ tally, voters, decimals }: { tally: DisplayTally; voters: number; decimals: number }) {
+  return (
+    <>
+      <div className="dt">{tally.source === 'chain' ? 'On-chain tally' : 'Attributed votes'}</div>
+      {/* dd-stack: .dd is a flex ROW, which put the bar beside the numbers and collapsed
+          it to zero width (its children are percentages). */}
+      <div className="dd dd-stack">
+        <TallyBar ayes={tally.ayes} nays={tally.nays} />
+        <div className="mono">
+          <span className="vb-aye-text">{F.amount(tally.ayes, decimals)} AYE</span>
+          {' · '}
+          <span className="vb-nay-text">{F.amount(tally.nays, decimals)} NAY</span>
+          {tally.support && <span className="muted"> · support {F.amount(tally.support, decimals)}</span>}
+        </div>
+        {tally.source === 'attributed' && <div className="tally-note">
+          Not the chain’s own tally: the Democracy pallet publishes its tally only in storage while a
+          referendum is open, so this sums the {F.int(voters)} indexed{voters === 1 ? ' vote' : ' votes'} —
+          the chain’s direct tally, without delegated power.
+        </div>}
+      </div>
+    </>
   )
 }
 
@@ -57,6 +75,7 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
   const [side, setSide] = useState<SideFilter>('all')
   const now = useNow()
   const shown = useMemo(() => orderVoters(data?.voters ?? [], sort, side), [data?.voters, sort, side])
+  const tally = data ? selectTally(data) : null
 
   const label = `${PALLET_LABEL[pallet] ?? pallet} #${index}`
   useDocumentTitle(data?.title ? `${data.title} · ${label}` : label)
@@ -76,7 +95,7 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
       </div>
 
       {isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Referendum not found</div>
-        : isLoading || !data ? <div className="detail-card"><SkeletonRows rows={5} /></div> : (
+        : isLoading || !data || !tally ? <div className="detail-card"><SkeletonRows rows={5} /></div> : (
           <>
             {/* Above the card and right-aligned, matching "Open in preis" on the
                 asset page rather than sitting in the detail list. */}
@@ -85,22 +104,7 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
             </div>
             <div className="detail-card">
               <div className="dl">
-                {/* The chain's own tally is authoritative: it is already
-                    conviction-weighted and includes delegated power. */}
-                {data.onChainTally && <>
-                  <div className="dt">On-chain tally</div>
-                  {/* dd-stack: .dd is a flex ROW, which put the bar beside the numbers
-                      and collapsed it to zero width (its children are percentages). */}
-                  <div className="dd dd-stack">
-                    <TallyBar ayes={data.onChainTally.ayes} nays={data.onChainTally.nays} />
-                    <div className="mono">
-                      <span className="vb-aye-text">{F.amount(data.onChainTally.ayes, data.asset.decimals)} AYE</span>
-                      {' · '}
-                      <span className="vb-nay-text">{F.amount(data.onChainTally.nays, data.asset.decimals)} NAY</span>
-                      {data.onChainTally.support && <span className="muted"> · support {F.amount(data.onChainTally.support, data.asset.decimals)}</span>}
-                    </div>
-                  </div>
-                </>}
+                <TallySummary tally={tally} voters={data.directTally.voters} decimals={data.asset.decimals} />
                 {/* Delegated power casts no vote of its own, so it can only appear as
                     the gap between the chain's tally and the votes we can attribute.
                     Stated rather than folded into someone's weight. */}
