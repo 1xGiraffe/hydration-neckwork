@@ -3,14 +3,10 @@ import { RawClickHouseStore } from '../../src/raw/store.ts'
 import type { RawBalanceObservationRow } from '../../src/raw/types.ts'
 
 class FakeClickHouseClient {
-  readonly inserts: Array<{ table: string; values: unknown[]; token: string | undefined }> = []
+  readonly inserts: Array<{ table: string; values: unknown[] }> = []
 
-  async insert(options: { table: string; values: unknown[]; clickhouse_settings?: { insert_deduplication_token?: string } }): Promise<void> {
-    this.inserts.push({
-      table: options.table,
-      values: options.values,
-      token: options.clickhouse_settings?.insert_deduplication_token,
-    })
+  async insert(options: { table: string; values: unknown[] }): Promise<void> {
+    this.inserts.push({ table: options.table, values: options.values })
   }
 }
 
@@ -43,10 +39,10 @@ describe('RawClickHouseStore balance observation inserts', () => {
     delete process.env.RAW_BALANCE_INSERT_MAX_BYTES
   })
 
-  it('chunks large balance observation flushes with unique dedupe tokens', async () => {
+  it('chunks large balance observation flushes by row count', async () => {
     process.env.RAW_BALANCE_INSERT_CHUNK_SIZE = '2'
     const fake = new FakeClickHouseClient()
-    const store = new RawClickHouseStore(fake as never, 10_000, 'range-10-14')
+    const store = new RawClickHouseStore(fake as never, 10_000)
 
     store.addBalanceObservations([
       balanceRow(10, 1),
@@ -64,19 +60,17 @@ describe('RawClickHouseStore balance observation inserts', () => {
       'price_data.raw_balance_observations',
       'price_data.raw_balance_observations',
     ])
-    expect(new Set(fake.inserts.map(i => i.token)).size).toBe(3)
-    expect(fake.inserts.map(i => i.token)).toEqual([
-      expect.stringMatching(/^raw-balance-observations-range-10-14-10-11-5-1-3-2-[0-9a-f]{24}$/),
-      expect.stringMatching(/^raw-balance-observations-range-10-14-12-13-5-2-3-2-[0-9a-f]{24}$/),
-      expect.stringMatching(/^raw-balance-observations-range-10-14-14-14-5-3-3-1-[0-9a-f]{24}$/),
-    ])
+    // Every observation is written exactly once, in order: chunking must not drop
+    // or repeat a row, and the ReplacingMergeTree key is what makes a replay safe.
+    expect(fake.inserts.flatMap(i => (i.values as RawBalanceObservationRow[]).map(row => row.block_height)))
+      .toEqual([10, 11, 12, 13, 14])
   })
 
   it('splits balance observation inserts by estimated JSON bytes', async () => {
     process.env.RAW_BALANCE_INSERT_CHUNK_SIZE = '100'
     process.env.RAW_BALANCE_INSERT_MAX_BYTES = '900'
     const fake = new FakeClickHouseClient()
-    const store = new RawClickHouseStore(fake as never, 10_000, 'range-20-22')
+    const store = new RawClickHouseStore(fake as never, 10_000)
 
     const rows = [balanceRow(20, 1), balanceRow(21, 2), balanceRow(22, 3)]
       .map((row, i) => ({ ...row, evidence_json: JSON.stringify({ payload: 'x'.repeat(500), i }) }))
@@ -86,10 +80,7 @@ describe('RawClickHouseStore balance observation inserts', () => {
 
     expect(fake.inserts).toHaveLength(3)
     expect(fake.inserts.every(i => i.values.length === 1)).toBe(true)
-    expect(fake.inserts.map(i => i.token)).toEqual([
-      expect.stringMatching(/^raw-balance-observations-range-20-22-20-20-3-1-3-1-[0-9a-f]{24}$/),
-      expect.stringMatching(/^raw-balance-observations-range-20-22-21-21-3-2-3-1-[0-9a-f]{24}$/),
-      expect.stringMatching(/^raw-balance-observations-range-20-22-22-22-3-3-3-1-[0-9a-f]{24}$/),
-    ])
+    expect(fake.inserts.flatMap(i => (i.values as RawBalanceObservationRow[]).map(row => row.block_height)))
+      .toEqual([20, 21, 22])
   })
 })

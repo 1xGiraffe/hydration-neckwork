@@ -36,8 +36,6 @@ export class RawDatabase implements FinalDatabase<RawClickHouseStore> {
     this.store = new RawClickHouseStore(client, config.BATCH_SIZE)
 
     const state = await this.store.getIngestionState(this.pipelineId)
-    const { replayNamespace } = state
-    this.store.setReplayNamespace(replayNamespace)
     return rawResumeHead(state, this.finalizeRangeBounds)
   }
 

@@ -121,7 +121,6 @@ async function runOnce(): Promise<void> {
   let scanned = 0
   let withDisplay = 0
   let inserted = 0
-  let flushSeq = 0
   let sampleLogged = 0
   const startedAt = Date.now()
 
@@ -133,9 +132,6 @@ async function runOnce(): Promise<void> {
       table: 'price_data.account_identities',
       values: rows,
       format: 'JSONEachRow',
-      clickhouse_settings: {
-        insert_deduplication_token: `account-identities-snapshot-${height}-${flushSeq++}-${rows.length}`,
-      },
     })
     inserted += rows.length
   }

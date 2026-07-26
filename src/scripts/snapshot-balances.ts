@@ -66,7 +66,6 @@ async function runOnce(): Promise<void> {
 
   let buffer: RawBalanceObservationRow[] = []
   let inserted = 0
-  let flushSeq = 0
   const startedAt = Date.now()
 
   const flush = async (): Promise<void> => {
@@ -77,9 +76,6 @@ async function runOnce(): Promise<void> {
       table: 'price_data.raw_balance_observations',
       values: rows,
       format: 'JSONEachRow',
-      clickhouse_settings: {
-        insert_deduplication_token: `raw-balance-snapshot-${height}-${flushSeq++}-${rows.length}`,
-      },
     })
     inserted += rows.length
     console.log(JSON.stringify({ type: 'snapshot_flush', inserted, seconds: Math.round((Date.now() - startedAt) / 1000) }))

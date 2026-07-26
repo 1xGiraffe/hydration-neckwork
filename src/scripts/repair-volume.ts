@@ -763,27 +763,21 @@ async function deletePriceKeys(client: ClickHouseClient, keys: string[]): Promis
   }
 }
 
-async function insertTradeRows(client: ClickHouseClient, rows: TradeVolumeRow[], from: number, to: number, runId: string): Promise<void> {
+async function insertTradeRows(client: ClickHouseClient, rows: TradeVolumeRow[]): Promise<void> {
   if (rows.length === 0) return
   await client.insert({
     table: 'price_data.trade_volume_by_account',
     values: rows,
     format: 'JSONEachRow',
-    clickhouse_settings: {
-      insert_deduplication_token: `volume-repair-trade-${runId}-${from}-${to}-${rows.length}`,
-    },
   })
 }
 
-async function insertPriceRows(client: ClickHouseClient, rows: PriceRow[], from: number, to: number, runId: string): Promise<void> {
+async function insertPriceRows(client: ClickHouseClient, rows: PriceRow[]): Promise<void> {
   if (rows.length === 0) return
   await client.insert({
     table: 'price_data.prices',
     values: rows,
     format: 'JSONEachRow',
-    clickhouse_settings: {
-      insert_deduplication_token: `volume-repair-prices-${runId}-${from}-${to}-${rows.length}`,
-    },
   })
 }
 
@@ -796,7 +790,6 @@ async function repairChunk(
     targets: Set<RepairTarget>
     targetAssetIds?: Set<number>
     apply: boolean
-    runId: string
   }
 ): Promise<RepairChunkResult> {
   const events = await queryRawEvents(client, options.from, options.to, options.unifiedSwapFromBlock)
@@ -853,12 +846,12 @@ async function repairChunk(
         query: `DELETE FROM price_data.trade_volume_by_account WHERE block_height BETWEEN ${options.from} AND ${options.to}${assetFilterSql(options.targetAssetIds, 'asset_id')}`,
         clickhouse_settings: { mutations_sync: '1' },
       })
-      await insertTradeRows(client, tradeRows, options.from, options.to, options.runId)
+      await insertTradeRows(client, tradeRows)
     }
 
     if (options.targets.has('prices')) {
       await deletePriceKeys(client, priceKeysToDelete)
-      await insertPriceRows(client, repairedPriceRows, options.from, options.to, options.runId)
+      await insertPriceRows(client, repairedPriceRows)
     }
   }
 
@@ -902,7 +895,6 @@ async function main(): Promise<void> {
     const targets = [...args.targets].join(', ')
     const targetAssetIds = sortedAssetIds(args.assetIds)
     const unifiedSwapFromBlock = await getUnifiedSwapFromBlock(client)
-    const runId = new Date().toISOString().replace(/[-:.TZ]/g, '')
     console.log(`[volume-repair] ${args.apply ? 'APPLY' : 'DRY RUN'} ${from}..${to} (${targets}), chunk=${args.chunkSize}, safe_tip=${safeTip}`)
     if (targetAssetIds) console.log(`[volume-repair] asset filter: ${targetAssetIds.join(', ')}`)
     if (!args.apply) console.log('[volume-repair] Pass --apply to mutate ClickHouse.')
@@ -921,7 +913,6 @@ async function main(): Promise<void> {
           targets: args.targets,
           targetAssetIds: args.assetIds,
           apply: args.apply,
-          runId,
         })
         totalEvents += result.events
         totalTradeRows += result.tradeRows

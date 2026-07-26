@@ -4,7 +4,6 @@ import { ClickHouseStore } from '../../src/store/clickhouseStore.ts'
 type InsertCall = {
   table: string
   values: any[]
-  token?: string
 }
 
 class FakeClickHouseClient {
@@ -26,12 +25,8 @@ class FakeClickHouseClient {
     this.existingRuntimeUpgrades = new Set(existing.runtimeUpgrades ?? [])
   }
 
-  async insert(options: { table: string; values: any[]; clickhouse_settings?: { insert_deduplication_token?: string } }): Promise<void> {
-    this.inserts.push({
-      table: options.table,
-      values: options.values,
-      token: options.clickhouse_settings?.insert_deduplication_token,
-    })
+  async insert(options: { table: string; values: any[] }): Promise<void> {
+    this.inserts.push({ table: options.table, values: options.values })
   }
 
   async query(options: { query: string; query_params?: Record<string, any> }): Promise<{ json: <T>() => Promise<T[]> }> {
@@ -104,7 +99,7 @@ describe('ClickHouseStore retry idempotency', () => {
       tradeVolumes: ['2:10:account-a'],
       runtimeUpgrades: ['20:300:299'],
     })
-    const store = new ClickHouseStore(fake as any, 10_000, 'retry', 'main-backfill-10-20')
+    const store = new ClickHouseStore(fake as any, 10_000, 'main-backfill-10-20')
 
     store.addBlocks([
       { block_height: 10, block_timestamp: '2026-06-21 00:00:00', spec_version: 1 },
@@ -141,7 +136,7 @@ describe('ClickHouseStore retry idempotency', () => {
 
   it('deduplicates repeated rows within the same flush batch', async () => {
     const fake = new FakeClickHouseClient()
-    const store = new ClickHouseStore(fake as any, 10_000, 'retry', 'main-backfill-5-6')
+    const store = new ClickHouseStore(fake as any, 10_000, 'main-backfill-5-6')
 
     store.addBlocks([
       { block_height: 5, block_timestamp: '2026-06-21 00:00:00', spec_version: 1 },
@@ -162,22 +157,23 @@ describe('ClickHouseStore retry idempotency', () => {
     ])
   })
 
-  it('uses content-addressed tokens for equal-sized batches with the same bounds', async () => {
+  // `assets` has no pre-insert key probe on purpose: it is a ReplacingMergeTree on
+  // asset_id, so every refreshed row must reach ClickHouse for the newest one to win.
+  it('re-sends changed asset rows so the replacement key keeps the latest', async () => {
     const fake = new FakeClickHouseClient()
-    const store = new ClickHouseStore(fake as any, 10_000, 'same-replay')
+    const store = new ClickHouseStore(fake as any, 10_000)
 
     store.addAssets([{ asset_id: 1, symbol: 'ONE', name: 'One', decimals: 12, parachain_id: null }])
     await store.flushAssets()
     store.addAssets([{ asset_id: 1, symbol: 'ONE2', name: 'One v2', decimals: 12, parachain_id: null }])
     await store.flushAssets()
 
-    expect(fake.inserts).toHaveLength(2)
-    expect(fake.inserts[0].token).not.toBe(fake.inserts[1].token)
+    expect(fake.inserts.map(insert => insert.values.map((row: any) => row.symbol))).toEqual([['ONE'], ['ONE2']])
   })
 
   it('honors the configured insert batch size', async () => {
     const fake = new FakeClickHouseClient()
-    const store = new ClickHouseStore(fake as any, 2, 'chunked')
+    const store = new ClickHouseStore(fake as any, 2)
     store.addBlocks(Array.from({ length: 5 }, (_, blockHeight) => ({
       block_height: blockHeight,
       block_timestamp: '2026-06-21 00:00:00',
@@ -191,7 +187,7 @@ describe('ClickHouseStore retry idempotency', () => {
 
   it('defers historical publication until explicitly published', async () => {
     const fake = new FakeClickHouseClient()
-    const store = new ClickHouseStore(fake as any, 10_000, 'deferred', 'main-backfill-10-12', {
+    const store = new ClickHouseStore(fake as any, 10_000, 'main-backfill-10-12', {
       deferPublication: true,
     })
 
@@ -226,7 +222,7 @@ describe('ClickHouseStore retry idempotency', () => {
 
   it('publishes deferred rows in threshold-sized chunks', async () => {
     const fake = new FakeClickHouseClient()
-    const store = new ClickHouseStore(fake as any, 2, 'deferred-chunks', 'main-backfill-1-5', {
+    const store = new ClickHouseStore(fake as any, 2, 'main-backfill-1-5', {
       deferPublication: true,
     })
     store.addBlocks(Array.from({ length: 5 }, (_, index) => ({

@@ -94,7 +94,7 @@ async function repairBlocks(blocks: number[], dryRun: boolean): Promise<{
     }
   }
 
-  const store = new RawClickHouseStore(client, 10_000, 'money-market-repair')
+  const store = new RawClickHouseStore(client, 10_000)
   let positionCount = 0
   let warningCount = 0
   const failedBlocks = new Set<number>()

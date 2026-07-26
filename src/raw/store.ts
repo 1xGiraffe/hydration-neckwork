@@ -1,8 +1,6 @@
 import { type ClickHouseClient } from '../db/client.js'
 import { BatchAccumulator } from '../store/batch.js'
-import { buildInsertDedupeToken } from '../store/dedupeToken.js'
 import { integerFromEnvironment } from '../util/env.js'
-import { blockHeightRange } from '../util/collections.js'
 import { getRawIngestionState, saveRawCheckpoint } from './checkpoint.js'
 import {
   finalizeRawRange,
@@ -56,9 +54,8 @@ export class RawClickHouseStore {
   private readonly bridgeEvidenceBatch: BatchAccumulator<RawBridgeEvidenceRow>
   private readonly operationTracesBatch: BatchAccumulator<RawOperationTraceRow>
   private readonly parserWarningsBatch: BatchAccumulator<RawParserWarningRow>
-  private replayNamespace: string
 
-  constructor(client: ClickHouseClient, flushThreshold: number = 10_000, replayNamespace: string = 'bootstrap') {
+  constructor(client: ClickHouseClient, flushThreshold: number = 10_000) {
     this.client = client
     this.blocksBatch = new BatchAccumulator<RawBlockRow>(flushThreshold)
     this.extrinsicsBatch = new BatchAccumulator<RawExtrinsicRow>(flushThreshold)
@@ -75,7 +72,6 @@ export class RawClickHouseStore {
     this.bridgeEvidenceBatch = new BatchAccumulator<RawBridgeEvidenceRow>(flushThreshold)
     this.operationTracesBatch = new BatchAccumulator<RawOperationTraceRow>(flushThreshold)
     this.parserWarningsBatch = new BatchAccumulator<RawParserWarningRow>(flushThreshold)
-    this.replayNamespace = replayNamespace
   }
 
   addBlocks(rows: RawBlockRow[]): void {
@@ -138,47 +134,53 @@ export class RawClickHouseStore {
     this.parserWarningsBatch.add(rows)
   }
 
+  // Inserts carry no insert-level deduplication, deliberately. Replay safety comes
+  // from the destination tables: every raw table is a ReplacingMergeTree keyed on a
+  // stable chain-derived identity (block height plus extrinsic/event index, trace id,
+  // observation id, …), so re-inserting a range collapses to the same rows on merge
+  // and reads that need exactness use FINAL over a primary-key predicate.
+  // ClickHouse's `insert_deduplication_token` would do nothing here: these tables are
+  // non-Replicated MergeTree family engines, where the token is only honoured if
+  // `non_replicated_deduplication_window` is declared (it defaults to 0, and no table
+  // sets it). It was passed on every insert for a while and was measurably inert —
+  // three identical inserts with one token still produced three rows. Declaring that
+  // window is the one-line change that would make it real; until then, do not re-add
+  // a token and do not treat it as a safety net.
   private async flushBatch<T extends { block_height: number }>(
     batch: BatchAccumulator<T>,
     table: string,
-    tokenPrefix: string,
   ): Promise<void> {
     for (const rows of batch.flushChunks()) {
-      const { min: minBlock, max: maxBlock } = blockHeightRange(rows)
-      const token = buildInsertDedupeToken(tokenPrefix, this.replayNamespace, rows, [minBlock, maxBlock])
       await this.client.insert({
         table,
         values: rows,
         format: 'JSONEachRow',
-        clickhouse_settings: {
-          insert_deduplication_token: token,
-        },
       })
     }
   }
 
   async flushBlocks(): Promise<void> {
-    await this.flushBatch(this.blocksBatch, 'price_data.raw_blocks', 'raw-blocks')
+    await this.flushBatch(this.blocksBatch, 'price_data.raw_blocks')
   }
 
   async flushExtrinsics(): Promise<void> {
-    await this.flushBatch(this.extrinsicsBatch, 'price_data.raw_extrinsics', 'raw-extrinsics')
+    await this.flushBatch(this.extrinsicsBatch, 'price_data.raw_extrinsics')
   }
 
   async flushCalls(): Promise<void> {
-    await this.flushBatch(this.callsBatch, 'price_data.raw_calls', 'raw-calls')
+    await this.flushBatch(this.callsBatch, 'price_data.raw_calls')
   }
 
   async flushEvents(): Promise<void> {
-    await this.flushBatch(this.eventsBatch, 'price_data.raw_events', 'raw-events')
+    await this.flushBatch(this.eventsBatch, 'price_data.raw_events')
   }
 
   async flushSnapshots(): Promise<void> {
-    await this.flushBatch(this.snapshotsBatch, 'price_data.raw_block_snapshots', 'raw-snapshots')
+    await this.flushBatch(this.snapshotsBatch, 'price_data.raw_block_snapshots')
   }
 
   async flushAccountAliases(): Promise<void> {
-    await this.flushBatch(this.accountAliasesBatch, 'price_data.raw_account_aliases', 'raw-account-aliases')
+    await this.flushBatch(this.accountAliasesBatch, 'price_data.raw_account_aliases')
   }
 
   async flushBalanceObservations(): Promise<void> {
@@ -203,58 +205,45 @@ export class RawClickHouseStore {
     }
     if (chunk.length > 0) chunks.push(chunk)
 
-    const chunkCount = chunks.length
-    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-      const chunk = chunks[chunkIndex]
-      const { min: minBlock, max: maxBlock } = blockHeightRange(chunk)
-      const token = buildInsertDedupeToken(
-        'raw-balance-observations',
-        this.replayNamespace,
-        chunk,
-        [minBlock, maxBlock, rows.length, chunkIndex + 1, chunkCount],
-      )
-
+    for (const observations of chunks) {
       await this.client.insert({
         table: 'price_data.raw_balance_observations',
-        values: chunk,
+        values: observations,
         format: 'JSONEachRow',
-        clickhouse_settings: {
-          insert_deduplication_token: token,
-        },
       })
     }
   }
 
   async flushEvmLogs(): Promise<void> {
-    await this.flushBatch(this.evmLogsBatch, 'price_data.raw_evm_logs', 'raw-evm-logs')
+    await this.flushBatch(this.evmLogsBatch, 'price_data.raw_evm_logs')
   }
 
   async flushMoneyMarketEvents(): Promise<void> {
-    await this.flushBatch(this.moneyMarketEventsBatch, 'price_data.raw_money_market_events', 'raw-money-market-events')
+    await this.flushBatch(this.moneyMarketEventsBatch, 'price_data.raw_money_market_events')
   }
 
   async flushMoneyMarketPositions(): Promise<void> {
-    await this.flushBatch(this.moneyMarketPositionsBatch, 'price_data.raw_money_market_positions', 'raw-money-market-positions')
+    await this.flushBatch(this.moneyMarketPositionsBatch, 'price_data.raw_money_market_positions')
   }
 
   async flushMoneyMarketReserves(): Promise<void> {
-    await this.flushBatch(this.moneyMarketReservesBatch, 'price_data.raw_money_market_reserves', 'raw-money-market-reserves')
+    await this.flushBatch(this.moneyMarketReservesBatch, 'price_data.raw_money_market_reserves')
   }
 
   async flushXcmActivity(): Promise<void> {
-    await this.flushBatch(this.xcmActivityBatch, 'price_data.raw_xcm_activity', 'raw-xcm-activity')
+    await this.flushBatch(this.xcmActivityBatch, 'price_data.raw_xcm_activity')
   }
 
   async flushBridgeEvidence(): Promise<void> {
-    await this.flushBatch(this.bridgeEvidenceBatch, 'price_data.raw_bridge_evidence', 'raw-bridge-evidence')
+    await this.flushBatch(this.bridgeEvidenceBatch, 'price_data.raw_bridge_evidence')
   }
 
   async flushOperationTraces(): Promise<void> {
-    await this.flushBatch(this.operationTracesBatch, 'price_data.raw_operation_traces', 'raw-operation-traces')
+    await this.flushBatch(this.operationTracesBatch, 'price_data.raw_operation_traces')
   }
 
   async flushParserWarnings(): Promise<void> {
-    await this.flushBatch(this.parserWarningsBatch, 'price_data.raw_parser_warnings', 'raw-parser-warnings')
+    await this.flushBatch(this.parserWarningsBatch, 'price_data.raw_parser_warnings')
   }
 
   // Buffered blocks and the largest single-table buffer, for the flush policy
@@ -303,7 +292,7 @@ export class RawClickHouseStore {
   }
 
   async saveCheckpoint(pipelineId: string, blockHeight: number, blockHash: string, mode: string): Promise<void> {
-    this.replayNamespace = await saveRawCheckpoint(this.client, pipelineId, blockHeight, blockHash, mode)
+    await saveRawCheckpoint(this.client, pipelineId, blockHeight, blockHash, mode)
   }
 
   async markRangeRunning(pipelineId: string, fromBlock: number, toBlock: number): Promise<void> {
@@ -316,10 +305,6 @@ export class RawClickHouseStore {
 
   async markRangeFailed(pipelineId: string, fromBlock: number, toBlock: number, error: unknown): Promise<void> {
     await markRawRangeFailed(this.client, pipelineId, fromBlock, toBlock, error)
-  }
-
-  setReplayNamespace(replayNamespace: string): void {
-    this.replayNamespace = replayNamespace
   }
 
   async getIngestionState(pipelineId: string): Promise<import('./checkpoint.js').RawCheckpointState> {

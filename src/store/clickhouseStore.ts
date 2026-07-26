@@ -1,10 +1,8 @@
 import { type ClickHouseClient } from '../db/client.js'
 import { type PriceRow, type TradeVolumeRow, type BlockRow, type AssetRow, type RuntimeUpgradeRow, type RuntimeErrorNameRow } from '../db/schema.js'
 import { BatchAccumulator, chunkRows } from './batch.js'
-import { buildInsertDedupeToken } from './dedupeToken.js'
 import { getLastProcessedBlock, saveCheckpoint } from './checkpoint.js'
 import { parseClickHouseDateTime } from '../db/timestamp.js'
-import { blockHeightRange } from '../util/collections.js'
 
 type BlockHeightRow = Pick<BlockRow, 'block_height'>
 type PriceKeyRow = Pick<PriceRow, 'asset_id' | 'block_height'>
@@ -64,6 +62,26 @@ function runtimeErrorNameKey(row: Pick<RuntimeErrorNameRow, 'spec_version' | 'pa
   return `${row.spec_version}:${row.pallet_index}:${row.error_index}`
 }
 
+// No insert carries insert-level deduplication, deliberately. Replay safety is a
+// property of each destination, and the guarantee differs per table:
+//   - `prices` and `trade_volume_by_account` are ReplacingMergeTree keyed on
+//     (asset_id, block_height[, account]), but that alone is not enough for prices:
+//     the eight `ohlc_*_mv` views hold additive `AggregateFunction(sum, …)` volume
+//     states, and an MV fires on the rows an INSERT actually writes, before any
+//     replacement happens. The `existingPriceKeys` / `existingTradeVolumeKeys`
+//     FINAL probes below are what stop a replay from double-counting; they are
+//     load-bearing, not an optimization.
+//   - `blocks` and `runtime_upgrades` are plain MergeTree, so their pre-insert key
+//     probes are the only thing keeping a replay from duplicating rows.
+//   - `assets` and `runtime_error_names` are ReplacingMergeTree keyed on identities
+//     a replay reproduces exactly, so re-inserting them is a no-op after merge.
+// ClickHouse's `insert_deduplication_token` cannot help any of this: these are
+// non-Replicated MergeTree family engines, which honour the token only when
+// `non_replicated_deduplication_window` is declared (default 0, and no table sets
+// it). It was passed on every insert here and was measurably inert — three
+// identical inserts sharing one token still produced three rows. Declaring that
+// window is the one-line change that would make it real; until then, do not re-add
+// a token and do not weaken the probes above believing one protects you.
 export class ClickHouseStore {
   private readonly client: ClickHouseClient
   private readonly pricesBatch: BatchAccumulator<PriceRow>
@@ -72,7 +90,6 @@ export class ClickHouseStore {
   private readonly assetsBatch: BatchAccumulator<AssetRow>
   private readonly runtimeUpgradesBatch: BatchAccumulator<RuntimeUpgradeRow>
   private readonly runtimeErrorNamesBatch: BatchAccumulator<RuntimeErrorNameRow>
-  private replayNamespace: string
   private readonly checkpointId: string
   private readonly deferPublication: boolean
   private readonly publicationChunkSize: number
@@ -86,7 +103,6 @@ export class ClickHouseStore {
   constructor(
     client: ClickHouseClient,
     flushThreshold: number = 10_000,
-    replayNamespace: string = 'bootstrap',
     checkpointId: string = 'main',
     options: ClickHouseStoreOptions = {},
   ) {
@@ -97,7 +113,6 @@ export class ClickHouseStore {
     this.assetsBatch = new BatchAccumulator<AssetRow>(flushThreshold)
     this.runtimeUpgradesBatch = new BatchAccumulator<RuntimeUpgradeRow>(flushThreshold)
     this.runtimeErrorNamesBatch = new BatchAccumulator<RuntimeErrorNameRow>(flushThreshold)
-    this.replayNamespace = replayNamespace
     this.checkpointId = checkpointId
     this.deferPublication = options.deferPublication === true
     this.publicationChunkSize = flushThreshold
@@ -217,16 +232,10 @@ export class ClickHouseStore {
       throw new Error(`Price ${priceKey(invalidTimestamp)} has no valid block_timestamp; refusing to publish a price without OHLC candles`)
     }
 
-    const { min: minBlock, max: maxBlock } = blockHeightRange(newRows)
-    const token = buildInsertDedupeToken('prices', this.replayNamespace, newRows, [minBlock, maxBlock])
-
     await this.client.insert({
       table: 'price_data.prices',
       values: newRows,
       format: 'JSONEachRow',
-      clickhouse_settings: {
-        insert_deduplication_token: token,
-      },
     })
   }
 
@@ -244,16 +253,10 @@ export class ClickHouseStore {
     const newRows = rows.filter(row => !existing.has(tradeVolumeKey(row)))
     if (newRows.length === 0) return
 
-    const { min: minBlock, max: maxBlock } = blockHeightRange(newRows)
-    const token = buildInsertDedupeToken('trade-volumes', this.replayNamespace, newRows, [minBlock, maxBlock])
-
     await this.client.insert({
       table: 'price_data.trade_volume_by_account',
       values: newRows,
       format: 'JSONEachRow',
-      clickhouse_settings: {
-        insert_deduplication_token: token,
-      },
     })
   }
 
@@ -271,16 +274,10 @@ export class ClickHouseStore {
     const newRows = rows.filter(row => !existing.has(blockKey(row)))
     if (newRows.length === 0) return
 
-    const { min: minBlock, max: maxBlock } = blockHeightRange(newRows)
-    const token = buildInsertDedupeToken('blocks', this.replayNamespace, newRows, [minBlock, maxBlock])
-
     await this.client.insert({
       table: 'price_data.blocks',
       values: newRows,
       format: 'JSONEachRow',
-      clickhouse_settings: {
-        insert_deduplication_token: token,
-      },
     })
   }
 
@@ -294,18 +291,10 @@ export class ClickHouseStore {
     const rows = uniqueRowsByKey(rowsToInsert, assetKey)
     if (rows.length === 0) return
 
-    const assetIds = rows.map(r => r.asset_id).sort((a, b) => a - b)
-    const minAssetId = assetIds[0]
-    const maxAssetId = assetIds[assetIds.length - 1]
-    const token = buildInsertDedupeToken('assets', this.replayNamespace, rows, [minAssetId, maxAssetId])
-
     await this.client.insert({
       table: 'price_data.assets',
       values: rows,
       format: 'JSONEachRow',
-      clickhouse_settings: {
-        insert_deduplication_token: token,
-      },
     })
   }
 
@@ -323,16 +312,10 @@ export class ClickHouseStore {
     const newRows = rows.filter(row => !existing.has(runtimeUpgradeKey(row)))
     if (newRows.length === 0) return
 
-    const { min: minBlock, max: maxBlock } = blockHeightRange(newRows)
-    const token = buildInsertDedupeToken('runtime-upgrades', this.replayNamespace, newRows, [minBlock, maxBlock])
-
     await this.client.insert({
       table: 'price_data.runtime_upgrades',
       values: newRows,
       format: 'JSONEachRow',
-      clickhouse_settings: {
-        insert_deduplication_token: token,
-      },
     })
   }
 
@@ -345,12 +328,10 @@ export class ClickHouseStore {
   private async insertRuntimeErrorNameRows(rowsToInsert: RuntimeErrorNameRow[]): Promise<void> {
     const rows = uniqueRowsByKey(rowsToInsert, runtimeErrorNameKey)
     if (rows.length === 0) return
-    const token = buildInsertDedupeToken('runtime-error-names', this.replayNamespace, rows)
     await this.client.insert({
       table: 'price_data.runtime_error_names',
       values: rows,
       format: 'JSONEachRow',
-      clickhouse_settings: { insert_deduplication_token: token },
     })
   }
 
@@ -417,11 +398,7 @@ export class ClickHouseStore {
   }
 
   async saveCheckpoint(blockHeight: number): Promise<void> {
-    this.replayNamespace = await saveCheckpoint(this.client, blockHeight, this.checkpointId)
-  }
-
-  setReplayNamespace(replayNamespace: string): void {
-    this.replayNamespace = replayNamespace
+    await saveCheckpoint(this.client, blockHeight, this.checkpointId)
   }
 
   async getLastProcessedBlock(): Promise<import('./checkpoint.js').IndexerCheckpointState> {

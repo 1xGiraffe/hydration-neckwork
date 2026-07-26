@@ -113,8 +113,7 @@ async function main(): Promise<void> {
     configured_markets: knownMarkets, events_only: eventsOnly, dry_run: dryRun, verify,
   }))
 
-  const namespace = `mm-backfill-${marketKey ?? 'all'}`
-  const store = new RawClickHouseStore(client, 10_000, namespace)
+  const store = new RawClickHouseStore(client, 10_000)
   const marketKeys = marketKey == null ? undefined : [marketKey]
   const derivedEventKeys = new Set<string>()
   const derivedReserveKeys = new Set<string>()

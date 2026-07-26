@@ -33,14 +33,14 @@ function attachStore(database: RawDatabase, store: FakeRawStore): void {
 
 describe('RawDatabase bounded range finalization', () => {
   it('starts a genuinely empty genesis range before block zero', () => {
-    expect(rawResumeHead({ height: 0, hash: '0x', replayNamespace: 'new', hasCheckpoint: false }, { fromBlock: 0, toBlock: 999 })).toEqual({
+    expect(rawResumeHead({ height: 0, hash: '0x', hasCheckpoint: false }, { fromBlock: 0, toBlock: 999 })).toEqual({
       height: -1,
       hash: '0x',
     })
   })
 
   it('resumes a checkpointed genesis range instead of replaying it', () => {
-    expect(rawResumeHead({ height: 500, hash: '0x500', replayNamespace: 'saved', hasCheckpoint: true }, { fromBlock: 0, toBlock: 999 })).toEqual({
+    expect(rawResumeHead({ height: 500, hash: '0x500', hasCheckpoint: true }, { fromBlock: 0, toBlock: 999 })).toEqual({
       height: 500,
       hash: '0x500',
     })

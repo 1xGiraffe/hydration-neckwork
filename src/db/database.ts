@@ -28,12 +28,11 @@ export class Database implements FinalDatabase<ClickHouseStore> {
 
   async connect(): Promise<HashAndHeight> {
     const client = createClickHouseClient()
-    this.store = new Store(client, config.BATCH_SIZE, 'bootstrap', this.checkpointId, {
+    this.store = new Store(client, config.BATCH_SIZE, this.checkpointId, {
       deferPublication: this.deferPublication,
     })
 
     const checkpoint = await this.store.getLastProcessedBlock()
-    this.store.setReplayNamespace(checkpoint.replayNamespace)
 
     if (this.startAtGenesis) {
       return {

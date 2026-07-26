@@ -153,7 +153,7 @@ async function runOnce(): Promise<void> {
   let warningCount = 0
   const marketStats: Array<{ market: string; candidates: number; positions: number; warnings: number }> = []
 
-  async function insertPositions(marketKey: string, positions: Awaited<ReturnType<typeof snapshotMoneyMarketPositions>>['positions']): Promise<number> {
+  async function insertPositions(positions: Awaited<ReturnType<typeof snapshotMoneyMarketPositions>>['positions']): Promise<number> {
     if (dryRun) return 0
     let count = 0
     for (let i = 0; i < positions.length; i += insertBatch) {
@@ -162,7 +162,6 @@ async function runOnce(): Promise<void> {
         table: 'price_data.raw_money_market_positions',
         values: rows,
         format: 'JSONEachRow',
-        clickhouse_settings: { insert_deduplication_token: `mm-sweep-${marketKey}-${head}-${i}-${rows.length}` },
       })
       count += rows.length
     }
@@ -177,7 +176,7 @@ async function runOnce(): Promise<void> {
     }
     positionsFound += primaryResult.positions.length
     warningCount += primaryResult.warnings.length
-    inserted += await insertPositions(primary.key, primaryResult.positions)
+    inserted += await insertPositions(primaryResult.positions)
     marketStats.push({ market: primary.key, candidates: h160s.length, positions: primaryResult.positions.length, warnings: primaryResult.warnings.length })
   }
 
@@ -195,7 +194,7 @@ async function runOnce(): Promise<void> {
       }
       positionsFound += result.positions.length
       warningCount += result.warnings.length
-      inserted += await insertPositions(market.key, result.positions)
+      inserted += await insertPositions(result.positions)
       marketStats.push({ market: market.key, candidates: participants.length, positions: result.positions.length, warnings: result.warnings.length })
     } catch (error) {
       console.error(`[mm-snapshot] supplemental market ${market.key} failed:`, error)
