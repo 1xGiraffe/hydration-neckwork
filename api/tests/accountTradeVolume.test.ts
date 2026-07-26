@@ -12,8 +12,9 @@ describe('accountVolumeSource', () => {
 describe('buildPartitionInsertSql', () => {
   it('deduplicates every replayable raw_events read with FINAL', () => {
     // raw_events is ReplacingMergeTree — a replayed range holds duplicate row
-    // versions until merges collapse them. All four era reads (2× broadcast,
-    // 2× legacy) must read FINAL or a mid-replay recompute doubles trade legs.
+    // versions until merges collapse them. All four reads (2× broadcast legs,
+    // legacy legs, and the DCA executions the legacy legs are keyed on) must read
+    // FINAL or a mid-replay recompute doubles trade legs.
     const sql = buildPartitionInsertSql('202601')
     expect(sql.match(/FROM price_data\.raw_events FINAL/g)).toHaveLength(4)
     expect(sql).not.toMatch(/FROM price_data\.raw_events(?! FINAL)/)
@@ -39,6 +40,71 @@ describe('buildPartitionInsertSql', () => {
 
   it('filters to the requested month partition', () => {
     expect(buildPartitionInsertSql('202601')).toContain('toYYYYMM(toDateTime(block_height * 12)) = 202601')
+  })
+})
+
+// Pre-router (legacy) era: a routed DCA execution emits one pallet *Executed event
+// per hop, then one DCA.TradeExecuted. Keying each hop on its own event index turns
+// one trade into per-hop trades — the intermediate asset leaves as an output of the
+// first key and arrives as an input of the second instead of netting to zero — so
+// volume_usd counts gross hops. Both legacy legs must take their key from the
+// enclosing execution instead.
+describe('legacy swap identity', () => {
+  // The `legacy` CTE is the single keyed source both legacy legs read.
+  function legacyCte(sql: string): string {
+    const start = sql.indexOf('\nlegacy AS (')
+    expect(start).toBeGreaterThan(-1)
+    const end = sql.indexOf('\n),', start)
+    expect(end).toBeGreaterThan(start)
+    return sql.slice(start, end)
+  }
+
+  it('anchors an unsigned legacy leg on the DCA execution enclosing it', () => {
+    const cte = legacyCte(buildPartitionInsertSql('197109'))
+    // Nearest FOLLOWING execution for the same (block, owner): every hop of a
+    // routed execution precedes its DCA.TradeExecuted, so the inequality has to
+    // run forwards. Matching backwards would key hops on the PREVIOUS execution
+    // and leave the last one unkeyed.
+    expect(cte).toContain('ASOF LEFT JOIN')
+    expect(cte).toContain("event_name = 'DCA.TradeExecuted'")
+    expect(cte).toContain('s.block_height = x.block_height AND s.who = x.who AND s.event_index <= x.exec_index')
+    expect(cte).toContain('1099511627776 + if(x.exec_marker > 0, x.exec_index, s.event_index)')
+  })
+
+  it('leaves a signed swap on its extrinsic and an unenclosed block-hook swap on its event', () => {
+    // Pallet/block-hook swaps (treasury and referral distribution) have no
+    // enclosing execution at all; their own event is the only identity there is,
+    // and the ASOF miss must fall back to it rather than to some later trade.
+    const cte = legacyCte(buildPartitionInsertSql('197109'))
+    expect(cte).toContain('if(s.extrinsic_index IS NULL,')
+    expect(cte).toContain('toUInt64(s.extrinsic_index))')
+    expect(cte).toContain('x.exec_index, s.event_index)')
+  })
+
+  it('distinguishes an ASOF miss from an execution at event index 0', () => {
+    // ASOF LEFT JOIN zero-fills a miss and 0 is a legal event index, so the match
+    // is detected through a +1 marker, never through `exec_index > 0`.
+    const cte = legacyCte(buildPartitionInsertSql('197109'))
+    expect(cte).toContain('event_index + 1 AS exec_marker')
+    expect(cte).not.toContain('x.exec_index > 0')
+  })
+
+  it('keys both legacy legs from that one source', () => {
+    // Each legacy event contributes an assetIn leg and an assetOut leg. Rekeying
+    // only one of them would split a hop's own two sides across keys and nothing
+    // would net at all, so neither leg may read raw_events directly any more.
+    const sql = buildPartitionInsertSql('197109')
+    expect(sql.match(/\n {2}FROM legacy\n/g)).toHaveLength(2)
+    expect(sql).not.toMatch(/FROM price_data\.raw_events FINAL WHERE event_name IN \('Omnipool\.SellExecuted'/)
+    expect(sql).not.toContain('if(extrinsic_index IS NULL, 1099511627776 + event_index, toUInt64(extrinsic_index))')
+  })
+
+  it('bounds the execution lookup to the partition it keys', () => {
+    // The lookup is a second raw_events read; unbounded it would scan the whole
+    // table per rebuild, exactly the regression partitionBlockRange exists to stop.
+    const cte = legacyCte(buildPartitionInsertSql('197501'))
+    expect(cte.match(/block_height >= 13147200 AND block_height < 13370400/g)).toHaveLength(2)
+    expect(cte.match(/toYYYYMM\(toDateTime\(block_height \* 12\)\) = 197501/g)).toHaveLength(2)
   })
 })
 
