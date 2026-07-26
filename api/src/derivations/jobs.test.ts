@@ -11,6 +11,7 @@ import {
   xykTotalSharesInsertSql,
   stalePartitionsSql,
   partitionsNeedingRebuild,
+  stagingBusySql,
 } from './jobs.ts'
 import { swapEventFilterSql } from '../services/accountTradeVolume.ts'
 
@@ -234,5 +235,59 @@ describe('partitionsNeedingRebuild', () => {
     const built = new Map([['197008', '2026-07-01 00:00:00'], ['197501', '2026-07-25 08:00:00']])
 
     expect(partitionsNeedingRebuild(candidates, built)).toEqual(['197501'])
+  })
+})
+
+// A publication swaps a staging twin into place with EXCHANGE TABLES or REPLACE
+// PARTITION, neither of which checks that the two sides agree. A twin whose DDL
+// drifted from its parent would therefore publish the wrong engine, ORDER BY or
+// partitioning without an error. The twins used to be created on demand with
+// `CREATE TABLE <t>_staging AS <t>`, which made drift impossible but put a table
+// definition in application code; now that they are declared, the equality has to
+// be asserted here.
+describe('staging twins', () => {
+  const TWINNED = [
+    'price_data.account_trade_volume',
+    'price_data.omnipool_position_owner_intervals',
+    'price_data.xyk_farm_principal_intervals',
+    'price_data.xyk_lp_total_shares_history',
+  ]
+
+  // Statements are separated by `;` but may be preceded by comment lines, so the
+  // DDL is taken from CREATE onwards.
+  function declaration(name: string): string {
+    const sql = readFileSync(SCHEMA_DIR + '001_tables.sql', 'utf8')
+    const statement = sql.split(';').find(s => s.includes(`EXISTS ${name} (`))
+    if (!statement) throw new Error(`${name} is not declared in clickhouse/schema/001_tables.sql`)
+    return statement.slice(statement.indexOf('CREATE ')).trim()
+  }
+
+  it.each(TWINNED)('%s has a declared twin with identical DDL', live => {
+    const twin = declaration(`${live}_staging`).replace(`${live}_staging`, live)
+
+    expect(twin).toBe(declaration(live))
+  })
+
+  // clickhouse/schema is the single source of truth for every table, so the jobs
+  // must not fall back to creating one when a twin is missing — that would mask a
+  // schema the bootstrap never applied.
+  it('are never created from the jobs module', () => {
+    const jobs = readFileSync(fileURLToPath(new URL('./jobs.ts', import.meta.url)), 'utf8')
+
+    expect(jobs).not.toMatch(/CREATE TABLE/i)
+  })
+})
+
+// Concurrent publications into the same twin silently truncate each other, so
+// every publication path probes for one first.
+describe('stagingBusySql', () => {
+  it('finds another process writing the twin without matching itself', () => {
+    const sql = stagingBusySql()
+
+    expect(sql).toContain('system.processes')
+    expect(sql).toContain('{staging:String}')
+    // The probe is itself a SELECT naming the twin; without this filter it would
+    // always report the twin as busy.
+    expect(sql).toContain("query_kind != 'Select'")
   })
 })

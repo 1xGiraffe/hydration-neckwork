@@ -13,9 +13,9 @@
 // table is always exactly the latest full run, with no stale rows left behind by
 // a shifted ReplacingMergeTree key and no unbounded run_id growth. account_trade_volume
 // rebuilds stale month-partitions in its own `_staging` twin and publishes each via
-// atomic REPLACE PARTITION. Target tables already exist in
-// clickhouse/schema/001_tables.sql — nothing here creates tables (beyond the
-// on-demand staging twins) or writes the (retired) lp_history_model_coverage gate rows.
+// atomic REPLACE PARTITION. Both the live tables and their staging twins are
+// declared in clickhouse/schema/001_tables.sql — nothing here creates a table or
+// writes the (retired) lp_history_model_coverage gate rows.
 
 import type { ClickHouseClient } from '../db/client.ts'
 import { buildPartitionInsertSql } from '../services/accountTradeVolume.ts'
@@ -36,6 +36,34 @@ export interface DerivationResult {
   rows: number
 }
 
+// ───────────────────── staging publication guard ─────────────────────
+// Every publication below TRUNCATEs its staging twin, fills it, then swaps it
+// into place. Two processes doing that to the same twin corrupt each other: the
+// second TRUNCATE wipes the first one's half-written rows, and the first swap
+// then publishes a truncated read model with no error anywhere. The derivations
+// container is a singleton, but a manual `DERIVATIONS_ONESHOT=1` run alongside it
+// races exactly this way.
+//
+// ClickHouse has no advisory lock, so detect the overlap: any in-flight
+// non-SELECT query naming this twin means another publication is already under
+// way. Skipping costs one poll interval, and the next cycle republishes. This
+// narrows rather than closes the check-then-truncate window — it turns the likely
+// operator mistake into a skipped cycle instead of silently wrong data. The
+// query_kind filter is what keeps this probe from matching itself.
+export function stagingBusySql(): string {
+  return `SELECT count() AS n FROM system.processes
+          WHERE query_kind != 'Select' AND position(query, {staging:String}) > 0`
+}
+
+async function stagingBusy(client: ClickHouseClient, stagingTable: string): Promise<boolean> {
+  const res = await client.query({
+    query: stagingBusySql(),
+    query_params: { staging: stagingTable },
+    format: 'JSONEachRow',
+  })
+  return Number((await res.json<{ n: string }>())[0]?.n ?? 0) > 0
+}
+
 // ───────────────────── atomic full-replace helper ─────────────────────
 // The three reconstruction jobs below (omnipool owner intervals, xyk farm
 // intervals, xyk total shares) each recompute their whole read model from
@@ -47,20 +75,24 @@ export interface DerivationResult {
 // one — FINAL has no key collision to collapse, and the stale row lingers
 // forever (plus run_id rows accumulate without bound).
 //
-// Instead, write the full recompute into a `<table>_staging` twin (same DDL,
-// created on demand) and EXCHANGE it with the live table — a single atomic
-// rename swap with no reader-visible gap. The live table is then always
-// exactly the latest full run: no stale keys, no unbounded run_id growth.
-// Truncate staging both before writing (clean slate if a prior run crashed
-// mid-way) and after the swap (drop the now-superseded old data promptly
-// rather than let it double the table's disk footprint until the next run).
+// Instead, write the full recompute into a `<table>_staging` twin (declared in
+// clickhouse/schema/001_tables.sql next to its parent) and EXCHANGE it with the
+// live table — a single atomic rename swap with no reader-visible gap. The live
+// table is then always exactly the latest full run: no stale keys, no unbounded
+// run_id growth. Truncate staging both before writing (clean slate if a prior
+// run crashed mid-way) and after the swap (drop the now-superseded old data
+// promptly rather than let it double the table's disk footprint until the next
+// run).
 async function atomicFullReplace(
   client: ClickHouseClient,
   liveTable: string,
   write: (stagingTable: string) => Promise<void>,
 ): Promise<void> {
   const stagingTable = `${liveTable}_staging`
-  await client.command({ query: `CREATE TABLE IF NOT EXISTS ${stagingTable} AS ${liveTable}` })
+  if (await stagingBusy(client, stagingTable)) {
+    console.log(`[derivations] ${liveTable} skipped: ${stagingTable} busy in another process`)
+    return
+  }
   await client.command({ query: `TRUNCATE TABLE ${stagingTable}` })
   await write(stagingTable)
   await client.command({ query: `EXCHANGE TABLES ${liveTable} AND ${stagingTable}` })
@@ -194,12 +226,15 @@ export async function runAccountTradeVolume(client: ClickHouseClient): Promise<D
   const candidates = await stalePartitions(client)
   const stale = partitionsNeedingRebuild(candidates, rebuiltSourceWatermark)
   if (!stale.length) return { model, rows: 0 }
+  if (await stagingBusy(client, staging)) {
+    console.log(`[derivations] ${model} skipped: ${staging} busy in another process`)
+    return { model, rows: 0 }
+  }
   const ingestByPartition = new Map(candidates.map(c => [c.p, c.src_ingest]))
   // The partition's last swap block time, straight off the watermark projection.
   // It bounds the valuation's ohlc right side from above — see
   // buildPartitionInsertSql.
   const maxBlockTimeByPartition = new Map(candidates.map(c => [c.p, c.src_max_ts]))
-  await client.command({ query: `CREATE TABLE IF NOT EXISTS ${staging} AS ${live}` })
   for (const p of stale) {
     // Clean slate in staging for this partition (a prior crashed run may have
     // left rows); DROP PARTITION on an absent partition is a no-op.
