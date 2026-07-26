@@ -207,13 +207,25 @@ export async function runAccountTradeVolume(client: ClickHouseClient): Promise<D
   return { model, rows: Number((await res.json<{ n: string }>())[0]?.n ?? 0) }
 }
 
+// ───────────────────────── lp_lifecycle_events ─────────────────────────
+// Both reconstructions below need the same thing: a handful of decoded fields
+// from the Omnipool/XYK NFT + liquidity-mining lifecycle. That is a pure
+// row-wise filter and decode, so it belongs in a materialized view rather than
+// in a job — price_data.lp_lifecycle_events (clickhouse/schema) does the eight
+// JSONExtract calls once at insert time and holds the ~880k decoded rows. The
+// MV's predicate is the disjunction of the two WHERE clauses below; each job
+// re-applies its own half against the decoded `collection` column so neither
+// observes the other's rows. FINAL deduplicates a replayed range on the
+// projection's (block_height, event_index) replacement key.
+const LP_LIFECYCLE_SOURCE = 'price_data.lp_lifecycle_events FINAL'
+
 // ─────────────────── omnipool_position_owner_intervals ───────────────────
 // Bounded full recompute: load the complete Omnipool NFT + liquidity-mining
-// lifecycle (~1M rows), reconstruct account-first ownership intervals with the
-// pure buildOmnipoolOwnerIntervals domain function, and swap the result into
-// the live table atomically (see atomicFullReplace).
+// lifecycle, reconstruct account-first ownership intervals with the pure
+// buildOmnipoolOwnerIntervals domain function, and swap the result into the
+// live table atomically (see atomicFullReplace).
 
-const OMNIPOOL_EVENT_KIND: Record<string, OwnerLifecycleKind> = {
+export const OMNIPOOL_EVENT_KIND: Record<string, OwnerLifecycleKind> = {
   'Uniques.Issued': 'nft_issue',
   'Uniques.Transferred': 'nft_transfer',
   'Uniques.Burned': 'nft_burn',
@@ -255,35 +267,38 @@ interface OmnipoolIntervalRow {
   run_id: number
 }
 
-export async function runOmnipoolOwnerIntervals(client: ClickHouseClient): Promise<DerivationResult> {
-  const runId = Date.now()
-  const res = await client.query({
-    query: `
+// The Omnipool half of lp_lifecycle_events. Exported so the schema/job coupling
+// can be asserted without a live ClickHouse (see jobs.test.ts).
+export function omnipoolLifecycleSelectSql(): string {
+  return `
       SELECT
           block_height AS block,
           extrinsic_index AS extrinsic,
           event_index AS event,
           toUInt32(toUnixTimestamp(block_timestamp)) AS ts,
           event_name,
-          JSONExtractString(args_json, 'collection') AS collection,
-          JSONExtractString(args_json, 'item') AS item,
-          JSONExtractString(args_json, 'positionId') AS positionId,
-          JSONExtractString(args_json, 'depositId') AS depositId,
-          lower(JSONExtractString(args_json, 'owner')) AS owner,
-          lower(JSONExtractString(args_json, 'from')) AS from,
-          lower(JSONExtractString(args_json, 'to')) AS to
-      FROM price_data.raw_events
+          collection,
+          item,
+          position_id AS positionId,
+          deposit_id AS depositId,
+          owner,
+          from_account AS from,
+          to_account AS to
+      FROM ${LP_LIFECYCLE_SOURCE}
       WHERE event_name IN (
           'Uniques.Issued','Uniques.Transferred','Uniques.Burned',
           'Omnipool.PositionDestroyed',
           'OmnipoolLiquidityMining.SharesDeposited','OmnipoolLiquidityMining.SharesRedeposited',
           'OmnipoolLiquidityMining.SharesWithdrawn','OmnipoolLiquidityMining.DepositDestroyed')
         AND (event_name NOT IN ('Uniques.Issued','Uniques.Transferred','Uniques.Burned')
-             OR JSONExtractString(args_json, 'collection') IN ('1337','2584'))
+             OR collection IN ('1337','2584'))
       ORDER BY block_height, event_index
-    `,
-    format: 'JSONEachRow',
-  })
+    `
+}
+
+export async function runOmnipoolOwnerIntervals(client: ClickHouseClient): Promise<DerivationResult> {
+  const runId = Date.now()
+  const res = await client.query({ query: omnipoolLifecycleSelectSql(), format: 'JSONEachRow' })
   const rows = await res.json<OmnipoolRawRow>()
 
   const events: OwnerLifecycleEvent[] = rows.map(r => ({
@@ -336,7 +351,7 @@ export async function runOmnipoolOwnerIntervals(client: ClickHouseClient): Promi
 // buildXykFarmIntervals domain function; result is swapped into the live
 // table atomically (see atomicFullReplace).
 
-const XYK_FARM_EVENT_KIND: Record<string, XykFarmLifecycleKind> = {
+export const XYK_FARM_EVENT_KIND: Record<string, XykFarmLifecycleKind> = {
   'Uniques.Issued': 'nft_issue',
   'Uniques.Transferred': 'nft_transfer',
   'Uniques.Burned': 'nft_burn',
@@ -376,22 +391,23 @@ interface XykFarmIntervalRow {
   run_id: number
 }
 
-export async function runXykFarmIntervals(client: ClickHouseClient): Promise<DerivationResult> {
-  const runId = Date.now()
-  const res = await client.query({
-    query: `
+// The XYK-farm half of lp_lifecycle_events (see omnipoolLifecycleSelectSql).
+export function xykFarmLifecycleSelectSql(): string {
+  return `
       SELECT block_height AS block, extrinsic_index AS extrinsic, event_index AS event,
         toUInt32(toUnixTimestamp(block_timestamp)) AS ts, event_name,
-        JSONExtractString(args_json,'item') AS item, JSONExtractString(args_json,'depositId') AS depositId,
-        lower(JSONExtractString(args_json,'owner')) AS owner, lower(JSONExtractString(args_json,'from')) AS from,
-        lower(JSONExtractString(args_json,'to')) AS to,
-        toInt32(JSONExtractInt(args_json,'lpToken')) AS lpToken, JSONExtractString(args_json,'amount') AS amount
-      FROM price_data.raw_events
-      WHERE (event_name IN ('Uniques.Issued','Uniques.Transferred','Uniques.Burned') AND JSONExtractString(args_json,'collection')='5389')
+        item, deposit_id AS depositId,
+        owner, from_account AS from, to_account AS to,
+        lp_token AS lpToken, amount
+      FROM ${LP_LIFECYCLE_SOURCE}
+      WHERE (event_name IN ('Uniques.Issued','Uniques.Transferred','Uniques.Burned') AND collection='5389')
          OR event_name IN ('XYKLiquidityMining.SharesDeposited','XYKLiquidityMining.SharesRedeposited','XYKLiquidityMining.DepositDestroyed')
-      ORDER BY block_height, event_index`,
-    format: 'JSONEachRow',
-  })
+      ORDER BY block_height, event_index`
+}
+
+export async function runXykFarmIntervals(client: ClickHouseClient): Promise<DerivationResult> {
+  const runId = Date.now()
+  const res = await client.query({ query: xykFarmLifecycleSelectSql(), format: 'JSONEachRow' })
   const rows = await res.json<XykFarmRawRow>()
 
   const events: XykFarmLifecycleEvent[] = rows.map(r => ({
