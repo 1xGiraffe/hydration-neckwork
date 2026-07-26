@@ -10563,6 +10563,24 @@ async function appendMoneyMarketBalanceRows(
   return availableFromBucket
 }
 
+// TS mirror of the `least(intDiv(block_height - minb, bucketSize), lastBucket)`
+// bucket expression every history query shares. The clamp puts the whole ragged
+// tail above minb + lastBucket·bucketSize into the last bucket.
+export function bucketOfHeight(height: number, minBlock: number, bucketSize: number, lastBucket: number): number {
+  return Math.min(Math.floor((height - minBlock) / bucketSize), lastBucket)
+}
+
+// The one height whose timestamp is each bucket's end: the last height the bucket
+// covers, plus maxBlock for the clamped tail bucket. Heights past maxBlock are
+// dropped so a bucket the account's range never reaches stays absent — exactly as
+// it was under a `block_height BETWEEN minBlock AND maxBlock` scan.
+export function bucketEndHeightsForRange(minBlock: number, maxBlock: number, bucketSize: number, lastBucket: number): number[] {
+  return [...new Set(
+    Array.from({ length: lastBucket }, (_, b) => minBlock + (b + 1) * bucketSize - 1)
+      .concat(maxBlock)
+      .filter(height => height >= minBlock && height <= maxBlock))]
+}
+
 // MM positions are re-snapshotted periodically by the raw indexer (every N
 // blocks, every borrower — not just on the borrower's own MM events), so the
 // stored net is dense and the series forward-fills only across a short gap before
@@ -10598,14 +10616,30 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   // mislabels mid-range buckets by months (block 7.19M: real 2025-03, interpolated
   // 2024-09) — wrong hover dates and wrong perf windows. Interpolation remains
   // only as the fallback for buckets with no indexed block.
+  //
+  // Read just the one height that decides each bucket rather than the account's
+  // whole block range: block_timestamp is monotone in block_height and `blocks` is
+  // complete (uniqExact(block_height) = max - min + 1), so a bucket's max timestamp
+  // is the timestamp AT its last height and every boundary height exists. 181 point
+  // lookups touch 180 marks / 11.8 MiB where the range GROUP BY touched 1,526 marks
+  // / 96.4 MiB, and this runs once per account history, per sparkline and per tag
+  // chart — enough executions to make the range scan one of the API's largest reads.
+  const bucketEndHeights = bucketEndHeightsForRange(rng.minb, rng.maxb, BUCKET, N)
   const tsRes = await client.query({
     query: `SELECT toUInt32(least(intDiv(block_height - ${rng.minb}, ${BUCKET}), ${N})) AS b, toString(max(block_timestamp)) AS ts
-            FROM price_data.blocks WHERE block_height >= ${rng.minb} AND block_height <= ${rng.maxb}
+            FROM price_data.blocks WHERE block_height IN (${bucketEndHeights.join(',')})
             GROUP BY b`,
     format: 'JSONEachRow',
   })
   const tsByBucket = new Map<number, string>()
   for (const r of await tsRes.json<{ b: number; ts: string }>()) tsByBucket.set(r.b, r.ts)
+  // On a complete `blocks` every requested height resolves, so a gap means the table
+  // has holes and the interpolated fallback is about to relabel buckets by months.
+  // Say so rather than letting a plausible date hide a broken source table.
+  const wantedBuckets = new Set(bucketEndHeights.map(height => bucketOfHeight(height, rng.minb, BUCKET, N)))
+  if (tsByBucket.size < wantedBuckets.size) {
+    console.error(`[Explorer] account history: ${wantedBuckets.size - tsByBucket.size}/${wantedBuckets.size} bucket-end heights missing from price_data.blocks over ${rng.minb}-${rng.maxb}; those dates fall back to interpolation`)
+  }
   const tsInterpolated = (b: number) => { const frac = N > 0 ? b / N : 0; const sec = rng.mint + frac * (rng.maxt - rng.mint); return new Date(sec * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '') }
   const tsAt = (b: number) => tsByBucket.get(b) ?? tsInterpolated(b)
 
