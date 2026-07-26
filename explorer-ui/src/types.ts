@@ -281,7 +281,7 @@ export interface AddressAlias {
 // Proxy & multisig relations (accounts resolved to displayable refs).
 export interface ProxyRelation { account: AccountRef; proxyType: string; delay: number }
 export interface AccountProxyInfo {
-  isPure: { creator: AccountRef; proxyType: string; blockHeight: number; timestamp: string } | null
+  isPure: { creator: AccountRef; proxyType: string; blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
   delegates: ProxyRelation[]    // accounts that can act for this one
   delegatorOf: ProxyRelation[]  // accounts this one can act for
 }

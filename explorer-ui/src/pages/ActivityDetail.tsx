@@ -1,9 +1,10 @@
 import { useEffect } from 'react'
 import { useBlockActivity, useExtrinsic, useStats } from '../hooks/useExplorerData'
+import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../router'
 import { activityLabel, canonicalTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
-import { Crumbs, F, AddrPill, AssetChip, StatusBadge, FinalizedBadge, CallPill, SkeletonRows } from '../components/ui'
+import { Crumbs, F, AddrPill, AssetChip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows } from '../components/ui'
 
 export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: string }) {
   const label = activityLabel(slug)
@@ -16,6 +17,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
   const extId = row?.extrinsicIndex != null ? `${row.blockHeight}-${row.extrinsicIndex}` : null
   const { data: ext } = useExtrinsic(extId)
   const { data: stats } = useStats(!!row)
+  const now = useNow()
 
   // Canonicalize slug and id form once the row is known (replaceState — links
   // survive reclassification, and extrinsic-form ids upgrade to event form).
@@ -76,8 +78,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
               {row.otcAction === 'Fill' && row.otcFee != null && row.assetOut && <><div className="dt">Fee</div><div className="dd mono">{F.exact(row.otcFee, row.assetOut.decimals)} <AssetChip asset={row.assetOut} /></div></>}
             </>}
             {row.dca && row.dcaStatus === 'failed' && <><div className="dt">Result</div><div className="dd"><StatusBadge ok={false} /></div></>}
-            <div className="dt">Timestamp</div><div className="dd mono">{F.datetime(row.timestamp)}</div>
-            <div className="dt">Block</div><div className="dd mono"><Link to={paths.block(row.blockHeight)} className="hash">{F.int(row.blockHeight)}</Link> <FinalizedBadge finalized={row.blockHeight <= (stats?.finalizedBlock ?? -1)} /></div>
+            <div className="dt">When</div><div className="dd mono"><MomentLink at={row} now={now} /> <FinalizedBadge finalized={row.blockHeight <= (stats?.finalizedBlock ?? -1)} /></div>
             {extId && <><div className="dt">Extrinsic</div><div className="dd mono"><Link to={paths.extrinsic(extId)} className="hash">{extId}</Link></div></>}
             {eventId && <><div className="dt">Event</div><div className="dd mono"><Link to={paths.event(eventId)} className="hash">{eventId}</Link></div></>}
             {ext && <>

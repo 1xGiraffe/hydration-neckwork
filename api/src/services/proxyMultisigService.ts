@@ -27,7 +27,10 @@ import { signedOrigin } from './explorerService.ts'
 let client: ClickHouseClient
 
 export interface ProxyRelation { accountId: string; proxyType: string; delay: number }
-export interface PureProxyInfo { creator: string; proxyType: string; blockHeight: number; timestamp: string }
+// `extrinsicIndex` is the proxy.create_pure call that created the account, so the
+// creation moment can link to it. Nullable because raw_events allows it: an
+// initializer/hook-emitted PureCreated would have no extrinsic.
+export interface PureProxyInfo { creator: string; proxyType: string; blockHeight: number; extrinsicIndex: number | null; timestamp: string }
 export interface MultisigComposition { threshold: number; signatories: string[] }
 export interface PendingMultisigOp { callHash: string; depositor: string; approvals: string[]; sinceBlock: number }
 
@@ -124,19 +127,19 @@ async function refreshProxies(): Promise<void> {
 
 async function refreshPureProxies(): Promise<void> {
   const res = await client.query({
-    query: `SELECT event_name, args_json, block_height, toString(block_timestamp) AS ts
+    query: `SELECT event_name, args_json, block_height, extrinsic_index, toString(block_timestamp) AS ts
             FROM price_data.raw_events
             WHERE event_name IN ('Proxy.PureCreated', 'Proxy.AnonymousCreated')
             ORDER BY block_height`,
     format: 'JSONEachRow',
   })
   const pure = new Map<string, PureProxyInfo>()
-  for (const r of await res.json<{ event_name: string; args_json: string; block_height: number; ts: string }>()) {
+  for (const r of await res.json<{ event_name: string; args_json: string; block_height: number; extrinsic_index: number | null; ts: string }>()) {
     try {
       const a = JSON.parse(r.args_json) as { pure?: string; anonymous?: string; who?: string; proxyType?: { __kind?: string } }
       const account = a.pure ?? a.anonymous
       if (!account || !a.who) continue
-      pure.set(account, { creator: a.who, proxyType: a.proxyType?.__kind ?? 'Any', blockHeight: r.block_height, timestamp: r.ts })
+      pure.set(account, { creator: a.who, proxyType: a.proxyType?.__kind ?? 'Any', blockHeight: r.block_height, extrinsicIndex: r.extrinsic_index ?? null, timestamp: r.ts })
     } catch { /* skip malformed row */ }
   }
   // Only pure proxies that still exist (they always keep ≥1 proxy entry; a

@@ -3,8 +3,8 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/explorer'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { Link, paths } from '../router'
-import { Crumbs, F, SkeletonRows, Ago } from '../components/ui'
+import { paths } from '../router'
+import { Crumbs, F, SkeletonRows, MomentLink } from '../components/ui'
 import { VoteBubbles } from '../components/VoteBubbles'
 import { VotesTable } from '../components/VotesTable'
 import { ProposalCall } from '../components/ProposalCall'
@@ -39,17 +39,6 @@ function TallyBar({ ayes, nays }: { ayes: string; nays: string }) {
       <div className="tally-nay" style={{ width: `${100 - ayePct}%` }} />
     </div>
   )
-}
-
-// A moment on a detail page: the time it happened, linked to the extrinsic that did it.
-// The block number adds nothing next to those two, and the extrinsic page links onward
-// to its block anyway. Falls back to a plain timestamp when no extrinsic exists — a
-// block hook (a referendum concluding, say) is not an extrinsic.
-function MomentLink({ at, now }: { at: { blockHeight: number; extrinsicIndex: number | null; timestamp: string }; now: number }) {
-  const ago = <Ago ts={at.timestamp} now={now} />
-  return at.extrinsicIndex == null
-    ? ago
-    : <Link to={paths.extrinsic(`${at.blockHeight}-${at.extrinsicIndex}`)} className="hash">{ago}</Link>
 }
 
 function SortHead({ label, value, sort, onSort }: { label: string; value: VoteSort; sort: VoteSort; onSort: (v: VoteSort) => void }) {

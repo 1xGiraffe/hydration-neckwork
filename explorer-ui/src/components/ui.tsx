@@ -183,6 +183,22 @@ export function Ago({ ts, now }: { ts: string; now: number }) {
   return <span title={F.datetime(ts)}>{F.ago(ts, now)}</span>
 }
 
+// When something happened, on any surface that shows a single moment: the
+// relative time, linked to what caused it — the extrinsic when there was one,
+// else the block, because a block hook (a referendum concluding, a DCA the
+// scheduler ran, an XCM arrival) is not an extrinsic. Either target reaches the
+// block, so a detail page carrying a moment needs no block row of its own.
+export interface Moment {
+  blockHeight: number
+  extrinsicIndex: number | null
+  timestamp: string
+}
+
+export function MomentLink({ at, now }: { at: Moment; now: number }) {
+  const to = at.extrinsicIndex != null ? paths.extrinsic(`${at.blockHeight}-${at.extrinsicIndex}`) : paths.block(at.blockHeight)
+  return <Link to={to} className="hash"><Ago ts={at.timestamp} now={now} /></Link>
+}
+
 // Uniform null/empty placeholder for table cells. Always monospace: a bare
 // `.muted` dash inherits the cell's font, and the sans-serif em dash glyph is
 // visibly wider than the mono one — same character, looks like two symbols.

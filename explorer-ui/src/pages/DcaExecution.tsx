@@ -2,7 +2,7 @@ import { useDcaExecution, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
-import { Crumbs, F, AddrPill, AssetChip, AssetAmount, StatusBadge, FinalizedBadge, FailureReasonRow, SkeletonRows, Ago } from '../components/ui'
+import { Crumbs, F, AddrPill, AssetChip, AssetAmount, StatusBadge, FinalizedBadge, FailureReasonRow, SkeletonRows, MomentLink } from '../components/ui'
 import { DcaResolve } from './DcaSchedule'
 
 // One DCA execution attempt: the block/time it ran, the swap it performed (or,
@@ -55,8 +55,9 @@ export function DcaExecution({ height, eventIndex }: { height: number; eventInde
             </span></div>
           </>}
           {data.who && <><div className="dt">Owner</div><div className="dd"><AddrPill account={data.who} /></div></>}
-          <div className="dt">Timestamp</div><div className="dd mono">{F.datetime(data.timestamp)} <span className="muted">· <Ago ts={data.timestamp} now={now} /></span></div>
-          <div className="dt">Block</div><div className="dd mono"><Link to={paths.block(data.blockHeight)} className="hash">{F.int(data.blockHeight)}</Link> <FinalizedBadge finalized={data.blockHeight <= (stats?.finalizedBlock ?? -1)} /></div>
+          {/* An execution the scheduler ran has no extrinsic of its own, so its
+              moment links to the block it ran in. */}
+          <div className="dt">When</div><div className="dd mono"><MomentLink at={data} now={now} /> <FinalizedBadge finalized={data.blockHeight <= (stats?.finalizedBlock ?? -1)} /></div>
           <div className="dt">Event</div><div className="dd mono"><Link to={paths.event(`${data.blockHeight}-${data.eventIndex}`)} className="hash">{data.blockHeight}-{data.eventIndex}</Link></div>
           {data.extrinsicIndex != null && <><div className="dt">Extrinsic</div><div className="dd mono"><Link to={paths.extrinsic(`${data.blockHeight}-${data.extrinsicIndex}`)} className="hash">{data.blockHeight}-{data.extrinsicIndex}</Link></div></>}
         </div></div>

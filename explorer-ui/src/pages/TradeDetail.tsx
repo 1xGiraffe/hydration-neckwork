@@ -1,8 +1,9 @@
 import { useEffect } from 'react'
 import { useTrade } from '../hooks/useExplorerData'
+import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect } from '../router'
-import { Crumbs, F, AddrPill, AssetChip, StatusBadge, SkeletonRows } from '../components/ui'
+import { Crumbs, F, AddrPill, AssetChip, StatusBadge, MomentLink, SkeletonRows } from '../components/ui'
 import type { TradeHop } from '../types'
 
 const HDX_ASSET: TradeHop['assetIn'] = { assetId: 0, symbol: 'HDX', name: 'Hydration', decimals: 12, parachainId: null }
@@ -79,6 +80,7 @@ function AssetAmount({ asset, amount }: { asset: TradeHop['assetIn']; amount: st
 
 export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swap' | 'dca' }) {
   const { data, isLoading, isError } = useTrade(id)
+  const now = useNow()
   const label = slug === 'dca' ? 'DCA' : 'Swap'
   useDocumentTitle(`${label} ${id}`)
   // Canonicalize /swap ↔ /dca once the data says which it is.
@@ -126,7 +128,7 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
                   </div>
                 </>}
                 {data.who && <><div className="dt">Trader</div><div className="dd"><AddrPill account={data.who} /></div></>}
-                <div className="dt">Timestamp</div><div className="dd mono">{F.datetime(data.timestamp)}</div>
+                <div className="dt">When</div><div className="dd mono"><MomentLink at={data} now={now} /></div>
                 <div className="dt">Result</div><div className="dd"><StatusBadge ok={data.success} /></div>
                 {extId && <><div className="dt">Extrinsic</div><div className="dd mono"><Link to={paths.extrinsic(extId)} className="hash">{extId}</Link></div></>}
                 {!extId && eventId && <><div className="dt">Event</div><div className="dd mono"><Link to={paths.event(eventId)} className="hash">{eventId}</Link></div></>}

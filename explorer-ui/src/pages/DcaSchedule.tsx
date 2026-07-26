@@ -4,8 +4,8 @@ import { api } from '../api/explorer'
 import { useDcaSchedule } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { Link, paths, redirect } from '../router'
-import { Crumbs, F, AddrPill, AssetChip, AssetAmount, SkeletonRows, Ago, Pager } from '../components/ui'
+import { paths, redirect } from '../router'
+import { Crumbs, F, AddrPill, AssetChip, AssetAmount, SkeletonRows, MomentLink, Pager } from '../components/ui'
 import { ActivityTable } from '../components/ActivityTable'
 
 const PAGE = 25
@@ -31,13 +31,7 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
             <div className="detail-card">
               <div className="dl">
                 <div className="dt">Owner</div><div className="dd">{data.who ? <AddrPill account={data.who} /> : '—'}</div>
-                {/* Time, linked to the extrinsic that scheduled it: the block number is
-                    noise beside those two, and the extrinsic page links to its block. */}
-                <div className="dt">Initiated</div><div className="dd mono">
-                  {data.createdAt.extrinsicIndex != null
-                    ? <Link to={paths.extrinsic(`${data.createdAt.blockHeight}-${data.createdAt.extrinsicIndex}`)} className="hash"><Ago ts={data.createdAt.timestamp} now={now} /></Link>
-                    : <Ago ts={data.createdAt.timestamp} now={now} />}
-                </div>
+                <div className="dt">Initiated</div><div className="dd mono"><MomentLink at={data.createdAt} now={now} /></div>
                 <div className="dt">Order</div><div className="dd">
                   {/* amountPer follows the order type: a Sell fixes the sold
                       amount, a Buy fixes the bought amount. */}

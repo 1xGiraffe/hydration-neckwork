@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { Link, paths } from '../router'
-import { AddrPill, Ago, Dash, EmptyRow, ErrorRow, F, TableSkeleton, VoteSideBadge } from './ui'
+import { AddrPill, Dash, EmptyRow, ErrorRow, F, MomentLink, TableSkeleton, VoteSideBadge, type Moment } from './ui'
 import type { AccountRef, AssetRef } from '../types'
 
 // The one votes table.
@@ -11,7 +11,8 @@ import type { AccountRef, AssetRef } from '../types'
 // differ are exactly the ones the context already answers: a referendum page needs the
 // ACCOUNT and knows its own referendum, an account page needs the REFERENDUM and knows
 // its own account.
-export interface VoteTableRow {
+// A row is one moment (when the vote was cast, and where) plus the vote itself.
+export interface VoteTableRow extends Moment {
   key: string
   account: AccountRef | null
   referendum: string | null
@@ -22,9 +23,6 @@ export interface VoteTableRow {
   // Conviction-weighted power, planck. Null when the vote has no weight to report (a
   // collective vote has neither balance nor conviction).
   weighted: string | null
-  blockHeight: number
-  extrinsicIndex: number | null
-  timestamp: string
   withdrawn?: boolean
 }
 
@@ -81,10 +79,8 @@ export function VotesTable({ rows, asset, now, showAccount, showReferendum, sort
                     {row.weighted == null ? <Dash /> : <>{F.amount(row.weighted, asset.decimals)} <span className="muted">{asset.symbol}</span></>}
                   </td>
                   <td data-label="Time" className="r">
-                    {/* The vote's own extrinsic, so a row leads to the transaction that cast it. */}
-                    {row.extrinsicIndex != null
-                      ? <Link to={paths.extrinsic(`${row.blockHeight}-${row.extrinsicIndex}`)} className="hash"><Ago ts={row.timestamp} now={now} /></Link>
-                      : <Ago ts={row.timestamp} now={now} />}
+                    {/* Links to the extrinsic that cast the vote (see MomentLink). */}
+                    <MomentLink at={row} now={now} />
                   </td>
                 </tr>
               ))}

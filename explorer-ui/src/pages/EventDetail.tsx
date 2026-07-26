@@ -1,13 +1,15 @@
 import { useEventAt, useStats } from '../hooks/useExplorerData'
+import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
-import { Crumbs, F, AddrPill, CallPill, StatusBadge, FinalizedBadge, ParamsTable, SkeletonRows } from '../components/ui'
+import { Crumbs, AddrPill, CallPill, StatusBadge, FinalizedBadge, MomentLink, ParamsTable, SkeletonRows } from '../components/ui'
 
 export function EventDetail({ id }: { id: string }) {
   useDocumentTitle(`Event ${id}`)
   const validId = /^\d+-\d+$/.test(id)
   const { data, isLoading, isError } = useEventAt(validId ? id : null)
   const { data: stats } = useStats(!!data)
+  const now = useNow()
   const args = (data?.args && typeof data.args === 'object') ? data.args as Record<string, unknown> : {}
   const extId = data?.extrinsicIndex != null ? `${data.blockHeight}-${data.extrinsicIndex}` : null
 
@@ -27,9 +29,9 @@ export function EventDetail({ id }: { id: string }) {
             <div className="detail-card"><div className="dl">
               <div className="dt">Event ID</div><div className="dd mono">{data.blockHeight}-{data.eventIndex}</div>
               <div className="dt">Event</div><div className="dd"><CallPill name={data.name} />{data.decoded && <span className="badge" style={{ background: 'color-mix(in srgb, var(--neutral) 15%, transparent)', color: 'var(--neutral)', marginLeft: 6 }}>decoded</span>}</div>
-              <div className="dt">Block</div><div className="dd mono"><Link to={paths.block(data.blockHeight)} className="hash">{F.int(data.blockHeight)}</Link> <FinalizedBadge finalized={data.blockHeight <= (stats?.finalizedBlock ?? -1)} /></div>
               <div className="dt">Extrinsic</div><div className="dd">{extId ? <Link to={paths.extrinsic(extId)} className="hash mono">{extId}</Link> : <span className="muted mono">— system event</span>}</div>
-              <div className="dt">Timestamp</div><div className="dd mono">{F.datetime(data.timestamp)}</div>
+              {/* A system event has no extrinsic, so its moment links to the block instead. */}
+              <div className="dt">When</div><div className="dd mono"><MomentLink at={data} now={now} /> <FinalizedBadge finalized={data.blockHeight <= (stats?.finalizedBlock ?? -1)} /></div>
               <div className="dt">Phase</div><div className="dd mono">{data.phase}</div>
               {data.extrinsic && (
                 <>

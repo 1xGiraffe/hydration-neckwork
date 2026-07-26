@@ -2334,7 +2334,7 @@ export interface MoneyMarketPosition {
 // Proxy & multisig relations resolved to displayable account refs.
 export interface ProxyRelationDisplay { account: AccountRef; proxyType: string; delay: number }
 export interface AccountProxyDisplay {
-  isPure: { creator: AccountRef; proxyType: string; blockHeight: number; timestamp: string } | null
+  isPure: { creator: AccountRef; proxyType: string; blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
   delegates: ProxyRelationDisplay[]    // accounts that can act for this one
   delegatorOf: ProxyRelationDisplay[]  // accounts this one can act for
 }
@@ -2624,7 +2624,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     const toProxyRel = (r: ProxyRelation): ProxyRelationDisplay => ({ account: accountRef(r.accountId), proxyType: r.proxyType, delay: r.delay })
     const proxyRaw = summary ? null : proxyInfoFor([...related])
     const proxy: AccountProxyDisplay | null = proxyRaw ? {
-      isPure: proxyRaw.isPure ? { creator: accountRef(proxyRaw.isPure.creator), proxyType: proxyRaw.isPure.proxyType, blockHeight: proxyRaw.isPure.blockHeight, timestamp: proxyRaw.isPure.timestamp } : null,
+      isPure: proxyRaw.isPure ? { creator: accountRef(proxyRaw.isPure.creator), proxyType: proxyRaw.isPure.proxyType, blockHeight: proxyRaw.isPure.blockHeight, extrinsicIndex: proxyRaw.isPure.extrinsicIndex, timestamp: proxyRaw.isPure.timestamp } : null,
       delegates: proxyRaw.delegates.map(toProxyRel),
       delegatorOf: proxyRaw.delegatorOf.map(toProxyRel),
     } : null

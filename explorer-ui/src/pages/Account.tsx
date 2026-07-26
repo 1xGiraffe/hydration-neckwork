@@ -120,7 +120,7 @@ export function Account({ address }: { address: string }) {
                 )
               })()}
 
-              <ProxyMultisigSection proxy={data.proxy} multisig={data.multisig} memberships={data.multisigMemberships} />
+              <ProxyMultisigSection proxy={data.proxy} multisig={data.multisig} memberships={data.multisigMemberships} now={now} />
 
               <CloseAccountsSection address={canonicalAddress ?? address} />
 

@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- shared account-section components + their count helper */
-import { F, AssetIcon, AssetAmount, AreaChart, ChartSkeleton, healthFactorDisplay, AddrPill, rowNav, Dash } from './ui'
+import { F, AssetIcon, AssetAmount, AreaChart, ChartSkeleton, healthFactorDisplay, AddrPill, MomentLink, rowNav, Dash } from './ui'
 import type { ChartMarker } from './ui'
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
@@ -470,10 +470,11 @@ function ProxyRelationRow({ rel }: { rel: ProxyRelation }) {
 // only when the account actually has such a relation: who can act for this
 // account (its proxies) / whom it can act for, the multisig composition with
 // pending operations, and multisig memberships on signer pages.
-export function ProxyMultisigSection({ proxy, multisig, memberships }: {
+export function ProxyMultisigSection({ proxy, multisig, memberships, now }: {
   proxy?: AccountProxyInfo | null
   multisig?: MultisigInfo | null
   memberships?: MultisigMembership[]
+  now: number
 }) {
   if (!proxy && !multisig && !memberships?.length) return null
   return (
@@ -488,8 +489,7 @@ export function ProxyMultisigSection({ proxy, multisig, memberships }: {
                 <div className="dd proxy-dd">
                   <span className="muted">Keyless account created by</span>
                   <AddrPill account={proxy.isPure.creator} />
-                  <span className="muted">at</span>
-                  <Link className="hash" to={paths.block(proxy.isPure.blockHeight)} title={F.datetime(proxy.isPure.timestamp)}>#{F.int(proxy.isPure.blockHeight)}</Link>
+                  <span className="mono"><MomentLink at={proxy.isPure} now={now} /></span>
                 </div>
               </>
             )}

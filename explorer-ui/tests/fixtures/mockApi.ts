@@ -394,7 +394,7 @@ function buildAddress(accountId: string): AddressDetail {
       delegates: [{ account: A.owl, proxyType: 'Any', delay: 0 }, { account: A.swan, proxyType: 'Governance', delay: 300 }],
       delegatorOf: [{ account: A.binance, proxyType: 'Transfer', delay: 0 }],
     } : a === A.swan ? {
-      isPure: { creator: A.fox, proxyType: 'Any', blockHeight: TIP - 220000, timestamp: tsAt(TIP - 220000) },
+      isPure: { creator: A.fox, proxyType: 'Any', blockHeight: TIP - 220000, extrinsicIndex: 2, timestamp: tsAt(TIP - 220000) },
       delegates: [{ account: A.fox, proxyType: 'Any', delay: 0 }],
       delegatorOf: [],
     } : null,
