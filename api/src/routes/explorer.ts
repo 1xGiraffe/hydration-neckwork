@@ -63,12 +63,12 @@ const MAX_NARROW_ACTIVITY_OFFSET = 250_000
 const NARROW_ACTIVITY_TYPES = new Set(['vote', 'staking', 'otc'])
 const maxActivityOffsetFor = (type: string) =>
   NARROW_ACTIVITY_TYPES.has(type) ? MAX_NARROW_ACTIVITY_OFFSET : MAX_ACTIVITY_OFFSET
-// A WINDOWED account/tag activity request — one carrying a filter no count arm states,
-// so it is still assembled by growing one candidate window until the classified feed
-// ends or the ceiling is reached, and paged only from the rows above that window's
-// frontier. Those are the same rows its published (partial) total counts, so the bound
-// only has to stay above any length that total can reach: ten sources at the 90k
-// candidate ceiling each.
+// A WINDOWED account/tag activity request — one carrying a min-USD floor, the single
+// filter no count arm states, so it is still assembled by growing one candidate window
+// until the classified feed ends or the ceiling is reached, and paged only from the rows
+// above that window's frontier. Those are the same rows its published (partial) total
+// counts, so the bound only has to stay above any length that total can reach: ten
+// sources at the 90k candidate ceiling each.
 const MAX_WINDOWED_ACTIVITY_OFFSET = 900_000
 // A LOCATED request is not bounded by depth at all: SQL counts the feed and finds the
 // ≤ limit blocks the page's ranks sit in, so the work is the feed's own size and an
@@ -77,8 +77,15 @@ const MAX_WINDOWED_ACTIVITY_OFFSET = 900_000
 // trader's 1.22M merged activities (counted in 7.7s, pages 3.3s at every depth) and the
 // routerex pallet's 1.70M liquidity rows (0.106s / 0.232s at offset 899,999).
 const MAX_LOCATED_ACTIVITY_OFFSET = 5_000_000
+// An action or a token no longer changes which bound applies: both are counted exactly,
+// so a filtered feed is servable to the end of the total it publishes just like the
+// unfiltered one. A per-account refusal (a structural pot whose transfer subordination
+// exceeds the query memory ceiling) still falls back to the window at request time, and
+// that request answers 503 "narrow the filter" past the window's reach rather than the
+// 400 a static bound would have given it — the same answer the unfiltered feed of those
+// pots already gives.
 const maxScopedActivityOffsetFor = (q: Record<string, unknown>, type: string) =>
-  isLocatedActivityRequest(type, textParam(q, 'action', 32), valueFilters(q))
+  isLocatedActivityRequest(type, valueFilters(q))
     ? MAX_LOCATED_ACTIVITY_OFFSET : MAX_WINDOWED_ACTIVITY_OFFSET
 const activityOffsetSchema = z.coerce.number().int().min(0).max(MAX_LOCATED_ACTIVITY_OFFSET).optional()
 const dateRe = /^\d{4}-\d{2}-\d{2}$/

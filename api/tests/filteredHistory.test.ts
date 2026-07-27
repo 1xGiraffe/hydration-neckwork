@@ -1,11 +1,20 @@
 import { describe, expect, it, vi } from 'vitest'
-import { accountTransferWindowSaturated, fetchFilteredDeep, activitySourceCoversCutoff, activitySourcesNeedingMore, completeActivityPageCutoff, activityCutoffFromDate, activitySourceSeedSize, historicalPriceHour } from '../src/services/explorerService.ts'
+import { transferReadNeedsWholeBound, fetchFilteredDeep, activitySourceCoversCutoff, activitySourcesNeedingMore, completeActivityPageCutoff, activityCutoffFromDate, activitySourceSeedSize, historicalPriceHour } from '../src/services/explorerService.ts'
 
 describe('deep filtered history', () => {
-  it('preserves saturation when indexed refs outlive a filtered raw page', () => {
-    expect(accountTransferWindowSaturated(20, 20, false)).toBe(true)
-    expect(accountTransferWindowSaturated(3, 20, true)).toBe(true)
-    expect(accountTransferWindowSaturated(3, 20, false)).toBe(false)
+  // The raw transfer read is pruned to the newest slice of the account's own transfer
+  // references. That cap is what can end the read early, so a SHORT read only means "end
+  // of history" once no reference survives past it — otherwise the read is taken again
+  // over the whole bound and the prefilter stays a pure optimisation.
+  it('redoes a short read only when a reference survives past the prefilter cap', () => {
+    expect(transferReadNeedsWholeBound(3, 20, true)).toBe(true)
+    expect(transferReadNeedsWholeBound(0, 20, true)).toBe(true)
+  })
+
+  it('keeps a read that filled its limit, and one the cap never cut', () => {
+    expect(transferReadNeedsWholeBound(20, 20, true)).toBe(false)
+    expect(transferReadNeedsWholeBound(25, 20, true)).toBe(false)
+    expect(transferReadNeedsWholeBound(3, 20, false)).toBe(false)
   })
 
   it('widens only sources whose candidate page has not reached the merged cutoff', () => {
