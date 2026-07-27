@@ -189,6 +189,23 @@ export function useAccountVotes(address: string | null, offset = 0, from?: strin
   const key = ['account-votes', address, offset, from, to]
   return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountVotes(address as string, offset, undefined, from, to, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
 }
+// One referendum, polled while it is still running.
+//
+// A running referendum gains votes under the reader, and the whole page — tally,
+// delegated residual, bubble map, votes table — is rebuilt from this one payload, so
+// polling it is all any of them need. It stops at the conclusion rather than on a
+// timer: a concluded referendum can never gain another vote, so there is nothing left
+// to poll for. The API holds a running referendum for one block and a concluded one for
+// a minute, so a poll here is not answered with the figures the last one already showed.
+export function useReferendum(pallet: 'opengov' | 'democracy', index: number) {
+  const live = useLive()
+  return useQuery({
+    queryKey: ['referendum', pallet, index],
+    queryFn: ({ signal }) => api.referendum(pallet, index, signal),
+    refetchInterval: query => (live && !query.state.data?.concludedAt ? DETAIL_POLL_MS : false),
+    staleTime: 6000,
+  })
+}
 // Lazy per-account / per-tag activity totals (extrinsic + event counts). The
 // first hit can take a few seconds server-side, so no live polling and a long
 // staleTime — badges simply appear once the count query resolves.

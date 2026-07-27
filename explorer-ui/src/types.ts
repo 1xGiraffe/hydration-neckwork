@@ -747,6 +747,17 @@ export interface ReferendumVoter {
 
 export interface ReferendumTally { ayes: string; nays: string; support: string | null }
 
+// The chain's own tally with the provenance that says whether it still holds. `final`
+// marks a concluding event's tally — the referendum's last word. A running referendum
+// only ever published a Referenda.DecisionStarted snapshot, taken as the decision
+// period opened and left behind by every vote since; the live tally sits in chain
+// storage, which is not indexed. See selectTally.
+export interface OnChainTally extends ReferendumTally {
+  final: boolean
+  blockHeight: number
+  timestamp: string
+}
+
 export interface ReferendumDetail {
   pallet: 'opengov' | 'democracy'
   index: number
@@ -759,9 +770,9 @@ export interface ReferendumDetail {
   submittedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
   concludedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
   asset: AssetRef
-  onChainTally: ReferendumTally | null
+  onChainTally: OnChainTally | null
   directTally: {
-    ayes: string; nays: string; rawAyes: string; rawNays: string
+    ayes: string; nays: string; rawAyes: string; rawNays: string; support: string
     ayeVoters: number; nayVoters: number; splitVoters: number; voters: number
   }
   indirectTally: ReferendumTally | null

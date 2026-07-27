@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { api } from '../api/explorer'
+import { useReferendum } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths } from '../router'
@@ -11,14 +10,6 @@ import { ProposalCall } from '../components/ProposalCall'
 import { ayeSharePct, orderVoters, selectTally, type DisplayTally, type SideFilter, type VoteSort } from '../utils/referendumVotes'
 
 const PALLET_LABEL: Record<string, string> = { opengov: 'OpenGov', democracy: 'Democracy' }
-
-function useReferendum(pallet: 'opengov' | 'democracy', index: number) {
-  return useQuery({
-    queryKey: ['referendum', pallet, index],
-    queryFn: ({ signal }) => api.referendum(pallet, index, signal),
-    staleTime: 30_000,
-  })
-}
 
 function TallyBar({ ayes, nays }: { ayes: string; nays: string }) {
   const ayePct = ayeSharePct(ayes, nays)
@@ -32,10 +23,13 @@ function TallyBar({ ayes, nays }: { ayes: string; nays: string }) {
 }
 
 // The tally, with the bar and the AYE/NAY amounts both pallets get — and a label that
-// says which figure this is. OpenGov carries the chain's own tally on its lifecycle
-// events; Democracy carries none anywhere, so a Democracy page can only show what its
-// indexed votes add up to and has to say so (see selectTally).
+// says which figure this is. A concluded OpenGov referendum carries the chain's own
+// final tally on its concluding event; a Democracy referendum carries none anywhere,
+// and a RUNNING OpenGov referendum carries only the decision-start snapshot, which the
+// votes since have left behind. The last two can show nothing but what their indexed
+// votes add up to (see selectTally).
 export function TallySummary({ tally, voters, decimals }: { tally: DisplayTally; voters: number; decimals: number }) {
+  const votesWord = voters === 1 ? 'vote' : 'votes'
   return (
     <>
       <div className="dt">{tally.source === 'chain' ? 'On-chain tally' : 'Attributed votes'}</div>
@@ -49,9 +43,13 @@ export function TallySummary({ tally, voters, decimals }: { tally: DisplayTally;
           <span className="vb-nay-text">{F.amount(tally.nays, decimals)} NAY</span>
           {tally.support && <span className="muted"> · support {F.amount(tally.support, decimals)}</span>}
         </div>
-        {tally.source === 'attributed' && <div className="tally-note">
+        {/* A running OpenGov referendum needs no caveat: the "Attributed votes" label
+            already says the figure is a reconstruction, and its numbers track the votes
+            as they arrive. Only Democracy, whose tally is never recoverable at all,
+            carries the explanation. */}
+        {tally.source === 'attributed' && !tally.snapshot && <div className="tally-note">
           Not the chain’s own tally: the Democracy pallet publishes its tally only in storage while a
-          referendum is open, so this sums the {F.int(voters)} indexed{voters === 1 ? ' vote' : ' votes'} —
+          referendum is open, so this sums the {F.int(voters)} indexed {votesWord} —
           the chain’s direct tally, without delegated power.
         </div>}
       </div>

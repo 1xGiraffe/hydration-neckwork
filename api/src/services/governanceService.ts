@@ -52,6 +52,22 @@ export interface ReferendumVoter {
 
 export interface ReferendumTally { ayes: string; nays: string; support: string | null }
 
+// The chain's own tally, lifted off a lifecycle event, carrying the provenance that
+// decides whether it is still true.
+//
+// `final` marks a tally from a CONCLUDING event — the referendum's last word, and the
+// figure to present. While a referendum is still running the only tally-bearing event
+// is Referenda.DecisionStarted, whose tally is a snapshot taken as the decision period
+// opened; every vote cast afterwards is missing from it. The pallet keeps the live
+// tally in Referenda.ReferendumInfoFor storage, which is not indexed, so a running
+// referendum has no current chain tally at all and the consumer must fall back to what
+// the indexed votes add up to rather than show a figure that has stopped moving.
+export interface OnChainTally extends ReferendumTally {
+  final: boolean
+  blockHeight: number
+  timestamp: string
+}
+
 export interface ReferendumDetail {
   pallet: ReferendumPallet
   index: number
@@ -69,34 +85,42 @@ export interface ReferendumDetail {
   concludedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
   asset: AssetRef
   // The chain's own tally from the lifecycle event, already conviction-weighted and
-  // inclusive of delegated power. Authoritative when present.
+  // inclusive of delegated power. Authoritative only where `final` says so — see
+  // OnChainTally.
   //
-  // Only OpenGov has one. Referenda.DecisionStarted/ConfirmStarted/Confirmed/Rejected all
-  // carry `tally`; the Democracy pallet carries none on any of its events
+  // Only OpenGov has one. Referenda.DecisionStarted carries a `tally`, as do the
+  // concluding Confirmed/Rejected/Cancelled/TimedOut; ConfirmStarted does NOT (all 337
+  // of them on this chain carry none). The Democracy pallet carries none on any event
   // (Started{refIndex,threshold}, Passed{refIndex}, NotPassed{refIndex},
   // Cancelled{refIndex}, Executed{refIndex,result}) and keeps its Tally only inside
   // Democracy::ReferendumInfoOf while the referendum is Ongoing, replacing it with
   // Finished{approved,end} at the close. So this is null for every Democracy referendum
   // and the consumer must present `directTally` as what it is.
-  onChainTally: ReferendumTally | null
+  onChainTally: OnChainTally | null
   // What the indexed per-account votes add up to: the chain's DIRECT tally, excluding
   // delegated power. Verified account-by-account against Democracy::VotingOf at the last
   // block before the close — for referendum 61 the 22 counted votes reproduce the chain's
   // own non-delegated ayes (14669791677216312056) exactly, and the whole remaining gap to
   // the chain tally (142267191677216312056) is the inbound delegation of four voters.
+  //
+  // This is the only current figure a RUNNING referendum has, because the chain
+  // publishes no tally event while it runs (see OnChainTally).
   directTally: {
     ayes: string
     nays: string
     rawAyes: string
     rawNays: string
+    // Pre-conviction capital backing the referendum, the same quantity the pallet
+    // calls `support`: aye capital plus abstain capital, nays excluded.
+    support: string
     ayeVoters: number
     nayVoters: number
     splitVoters: number
     voters: number
   }
-  // onChainTally minus directTally. Delegated voting power produces no Voted event
-  // of its own, so it can only ever show up as this residual — reported rather than
-  // silently folded into a voter's own weight.
+  // onChainTally minus directTally, and only where the chain tally is FINAL. Delegated
+  // voting power produces no Voted event of its own, so it can only ever show up as
+  // this residual — reported rather than silently folded into a voter's own weight.
   indirectTally: ReferendumTally | null
   voters: ReferendumVoter[]
   votesShown: number
@@ -198,6 +222,23 @@ export function tallyFromArgs(argsJson: string): ReferendumTally | null {
     if (ayes == null || nays == null) return null
     return { ayes, nays, support: str(tally.support) }
   } catch { return null }
+}
+
+// The freshest tally the chain itself published, and whether it is the last word.
+//
+// Reads backwards to the most recent event that carried a tally, then asks what kind
+// of event that was. A concluding event's tally is final; a Referenda.DecisionStarted
+// tally is a snapshot of the moment the decision period opened, which every later vote
+// moves past. Presenting the snapshot as the tally is what showed OpenGov 370 at
+// 19211236354479984589 ayes while thirty indexed votes already stood at
+// 789522038578859970114.
+export function onChainTallyFrom(rows: Pick<LifecycleRow, 'event_name' | 'block_height' | 'ts' | 'args_json'>[]): OnChainTally | null {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const tally = tallyFromArgs(rows[i].args_json)
+    if (!tally) continue
+    return { ...tally, final: isConcludingEvent(rows[i].event_name), blockHeight: rows[i].block_height, timestamp: rows[i].ts }
+  }
+  return null
 }
 
 export interface VoteEventRow {
@@ -583,19 +624,22 @@ export function toVoter(row: VoteEventRow, withdrawals: Map<string, VotePosition
 }
 
 export function tallyVoters(voters: ReferendumVoter[]): ReferendumDetail['directTally'] {
-  let ayes = 0n, nays = 0n, rawAyes = 0n, rawNays = 0n
+  let ayes = 0n, nays = 0n, rawAyes = 0n, rawNays = 0n, support = 0n
   let ayeVoters = 0, nayVoters = 0, splitVoters = 0
   for (const voter of voters) {
     // A withdrawn vote no longer backs anything, so it is listed but not tallied.
     if (voter.removed) continue
     ayes += big(voter.weightedAye)
     nays += big(voter.weightedNay)
+    // Support is pre-conviction CAPITAL, and `Tally::add` moves only the capital that
+    // is not a nay into it: aye capital and abstain capital, never nay capital.
     if (voter.kind === 'Standard') {
-      if (voter.side === 'Aye') { rawAyes += big(voter.balance); ayeVoters++ }
+      if (voter.side === 'Aye') { rawAyes += big(voter.balance); support += big(voter.balance); ayeVoters++ }
       else { rawNays += big(voter.balance); nayVoters++ }
     } else {
       rawAyes += big(voter.ayeBalance)
       rawNays += big(voter.nayBalance)
+      support += big(voter.ayeBalance) + big(voter.abstainBalance)
       splitVoters++
     }
   }
@@ -604,6 +648,7 @@ export function tallyVoters(voters: ReferendumVoter[]): ReferendumDetail['direct
     nays: nays.toString(),
     rawAyes: rawAyes.toString(),
     rawNays: rawNays.toString(),
+    support: support.toString(),
     ayeVoters,
     nayVoters,
     splitVoters,
@@ -617,8 +662,12 @@ export function tallyVoters(voters: ReferendumVoter[]): ReferendumDetail['direct
 // chain's 1374035885979727209137 ayes, and the 2487677298241873304 gap is precisely this.
 // Where nothing was delegated the two agree to the planck and there is no row to show —
 // OpenGov 60 and 368, and 25 of the 207 Democracy referenda, land there.
-export function indirectTallyFrom(onChain: ReferendumTally | null, direct: ReferendumDetail['directTally']): ReferendumTally | null {
-  if (!onChain) return null
+export function indirectTallyFrom(onChain: OnChainTally | null, direct: ReferendumDetail['directTally']): ReferendumTally | null {
+  // Only a FINAL chain tally shares a moment with the direct sum. A decision-start
+  // snapshot predates most of the votes, so their difference measures elapsed time,
+  // not delegation — on OpenGov 370 it would have reported the whole 770M gap as
+  // delegated power.
+  if (!onChain?.final) return null
   const diff = (chainValue: string, directValue: string) => {
     const delta = big(chainValue) - big(directValue)
     return delta > 0n ? delta.toString() : '0'
@@ -690,9 +739,21 @@ async function loadProposalCall(hash: string): Promise<ReferendumDetail['proposa
   }
 }
 
+// How long a referendum's answer stays true. A concluded referendum can gain no vote
+// and change no tally, so it is held for a minute; a running one is what the page polls
+// for new votes, so holding it that long would make the poll show the same figures four
+// times over. One block is the finest resolution the votes themselves have.
+const RUNNING_TTL_MS = 6_000
+const CONCLUDED_TTL_MS = 60_000
+
 export async function getReferendum(pallet: ReferendumPallet, index: number, limit = 500): Promise<ReferendumDetail | null> {
-  return cached(`explorer:referendum:${pallet}:${index}:${limit}`, 60_000, async () => {
-    const lifecycle = await loadLifecycle(pallet, index)
+  // Which of the two this is comes from the lifecycle, so that is read first — under
+  // its own single-flight cache, so a page polling a running referendum still costs one
+  // lifecycle query per window rather than one per reader.
+  const lifecycle = await cached(`explorer:referendum:lifecycle:${pallet}:${index}`, RUNNING_TTL_MS, () => loadLifecycle(pallet, index))
+  const ttlMs = lifecycle.some(row => isConcludingEvent(row.event_name)) ? CONCLUDED_TTL_MS : RUNNING_TTL_MS
+
+  return cached(`explorer:referendum:${pallet}:${index}:${limit}`, ttlMs, async () => {
     const votes = pallet === 'democracy'
       ? await loadDemocracyVotes(index)
       : await (async () => {
@@ -735,9 +796,7 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
       .sort((a, b) => (big(b.weighted) > big(a.weighted) ? 1 : big(b.weighted) < big(a.weighted) ? -1 : 0))
 
     const directTally = tallyVoters(voters)
-    // The most recent lifecycle event that carried a tally is the freshest on-chain
-    // figure (DecisionStarted, ConfirmStarted, Confirmed, Rejected all carry one).
-    const onChainTally = [...lifecycle].reverse().map(row => tallyFromArgs(row.args_json)).find(Boolean) ?? null
+    const onChainTally = onChainTallyFrom(lifecycle)
     const submitted = lifecycle.find(row => row.event_name === 'Referenda.Submitted' || row.event_name === 'Democracy.Started')
     const concludedRow = [...lifecycle].reverse().find(row => isConcludingEvent(row.event_name))
     const submittedArgs = submitted ? (() => { try { return JSON.parse(submitted.args_json) as Record<string, unknown> } catch { return {} } })() : {}

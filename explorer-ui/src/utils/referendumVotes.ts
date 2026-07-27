@@ -1,29 +1,46 @@
-import type { ReferendumDetail, ReferendumVoter } from '../types'
+import type { OnChainTally, ReferendumDetail, ReferendumVoter } from '../types'
 
 export type VoteSort = 'time' | 'votes'
 export type SideFilter = 'all' | 'aye' | 'nay'
 
 // Which tally a referendum page can show, and where the numbers came from.
 //
-// 'chain' is the pallet's own figure, lifted off a lifecycle event: already
-// conviction-weighted and already inclusive of delegated power. Only OpenGov emits one.
+// 'chain' is the pallet's own FINAL figure, lifted off a concluding lifecycle event:
+// already conviction-weighted and already inclusive of delegated power. Only OpenGov
+// emits one, and only once the referendum has closed.
 //
 // 'attributed' is the sum of the per-account votes we indexed. It is the chain's DIRECT
 // tally and nothing more — delegated power casts no Voted event, so it is missing from
-// this number and cannot be recovered from the events either. Every Democracy referendum
-// falls here, because the Democracy pallet publishes its Tally only in storage while the
-// referendum is Ongoing and drops it at the close. The two are NOT interchangeable, so the
-// source travels with the numbers and the caller labels it.
+// this number and cannot be recovered from the events either. The two are NOT
+// interchangeable, so the source travels with the numbers and the caller labels it.
+//
+// Two different referenda land on 'attributed', and `snapshot` tells them apart:
+//   - every Democracy referendum, which has no snapshot, because that pallet publishes
+//     its Tally only in storage while the referendum is Ongoing and drops it at the close;
+//   - every RUNNING OpenGov referendum, which carries the superseded decision-start
+//     snapshot. That figure was true when the decision period opened and every vote since
+//     has left it behind.
+// Only the first is a permanent gap worth explaining to a reader, so the presence of a
+// snapshot is what suppresses that explanation.
 export interface DisplayTally {
   ayes: string
   nays: string
   support: string | null
   source: 'chain' | 'attributed'
+  // The chain figure this reconstruction replaced, when there was one.
+  snapshot?: OnChainTally
 }
 
 export function selectTally(data: Pick<ReferendumDetail, 'onChainTally' | 'directTally'>): DisplayTally {
-  if (data.onChainTally) return { ...data.onChainTally, source: 'chain' }
-  return { ayes: data.directTally.ayes, nays: data.directTally.nays, support: null, source: 'attributed' }
+  const chain = data.onChainTally
+  if (chain?.final) return { ayes: chain.ayes, nays: chain.nays, support: chain.support, source: 'chain' }
+  return {
+    ayes: data.directTally.ayes,
+    nays: data.directTally.nays,
+    support: data.directTally.support,
+    source: 'attributed',
+    ...(chain ? { snapshot: chain } : {}),
+  }
 }
 
 // Share of the weighted tally, as a percentage of aye + nay. Computed in BigInt: these are

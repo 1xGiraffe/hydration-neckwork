@@ -11,6 +11,7 @@ import {
   isAfter,
   isConcludingEvent,
   latestVotePerAccount,
+  onChainTallyFrom,
   parseReferendumPallet,
   referendumStatusFrom,
   subsquareUrl,
@@ -19,6 +20,7 @@ import {
   toVoter,
   unexplainedVoteKeys,
   weightedVotePower,
+  type OnChainTally,
   type ReferendumVoter,
   type VoteEventRow,
   type VotePosition,
@@ -195,23 +197,134 @@ describe('tallyVoters', () => {
 
     expect(tally.ayes).toBe('324720460268124120656')
   })
+
+  // Support is the pre-conviction CAPITAL behind a referendum, and the pallet counts
+  // only the capital that is not a nay: `Tally::add` moves aye capital and abstain
+  // capital into `support` and leaves nay capital out entirely.
+  //
+  // Verified against the chain on every OpenGov referendum whose direct votes match
+  // the chain tally exactly (so no delegation can hide a difference): 61 of them, and
+  // this formula reproduces the chain's own support to the planck on all 61. OpenGov
+  // 368 pins the nay exclusion — its counted nay capital is 26555471605027219227 and
+  // the chain's support is 414293233712084572090, exactly the aye capital. OpenGov 60
+  // pins the abstain inclusion: aye capital alone falls 425128000000000000 short of
+  // its 440789637360488662047, which is precisely its abstain leg.
+  describe('support', () => {
+    it('counts aye capital and leaves nay capital out', () => {
+      const tally = tallyVoters([
+        voter({ side: 'Aye', balance: '100', weightedAye: '600', weighted: '600' }),
+        voter({ side: 'Nay', balance: '50', weightedNay: '50', weighted: '50' }),
+      ])
+
+      expect(tally.support).toBe('100')
+    })
+
+    // A split vote's aye and abstain legs are capital behind the referendum; its nay
+    // leg is not. Conviction never enters support — it is the raw balance either way.
+    it('counts a split vote by its aye and abstain legs only', () => {
+      const tally = tallyVoters([
+        voter({
+          kind: 'SplitAbstain', side: 'SplitAbstain', conviction: null, convictionIndex: null,
+          balance: '60', ayeBalance: '10', nayBalance: '20', abstainBalance: '30',
+          weightedAye: '1', weightedNay: '2', weighted: '3',
+        }),
+      ])
+
+      expect(tally.support).toBe('40')
+    })
+
+    it('excludes a withdrawn vote', () => {
+      const tally = tallyVoters([
+        voter({ side: 'Aye', balance: '100', weightedAye: '100', weighted: '100' }),
+        voter({ side: 'Aye', balance: '999', weightedAye: '999', weighted: '999', removed: true }),
+      ])
+
+      expect(tally.support).toBe('100')
+    })
+
+    it('adds exactly on 21-digit capital', () => {
+      const tally = tallyVoters([
+        voter({ side: 'Aye', balance: '414293233712084572090', weightedAye: '1', weighted: '1' }),
+        voter({ side: 'Aye', balance: '1', weightedAye: '1', weighted: '1' }),
+      ])
+
+      expect(tally.support).toBe('414293233712084572091')
+    })
+  })
+})
+
+// Only a CONCLUDING event's tally is the referendum's last word. While a referendum
+// is still running the sole tally-bearing event is Referenda.DecisionStarted, whose
+// figure is a snapshot taken as the decision period opened — OpenGov 370 published
+// 19211236354479984589 ayes there at block 13342550, eleven minutes after submission,
+// and the votes indexed since add up to 789522038578859970114. The pallet keeps the
+// live tally in Referenda.ReferendumInfoFor storage, which is not indexed, so a
+// running referendum has no current chain tally to show at all.
+describe('onChainTallyFrom', () => {
+  const row = (event_name: string, block_height: number, tally?: { ayes: string; nays: string; support?: string }) => ({
+    event_name,
+    block_height,
+    ts: '2026-07-27 11:38:03',
+    args_json: JSON.stringify(tally ? { index: 370, tally } : { index: 370 }),
+  })
+
+  it('marks a concluding event tally as final', () => {
+    const tally = onChainTallyFrom([
+      row('Referenda.Submitted', 100),
+      row('Referenda.DecisionStarted', 200, { ayes: '10', nays: '0', support: '5' }),
+      row('Referenda.Confirmed', 900, { ayes: '990', nays: '7', support: '400' }),
+    ])
+
+    expect(tally).toEqual({ ayes: '990', nays: '7', support: '400', final: true, blockHeight: 900, timestamp: '2026-07-27 11:38:03' })
+  })
+
+  // The bug this guards: a running referendum's only tally is the decision-start
+  // snapshot, and presenting it as the tally showed OpenGov 370 as 19.2M AYE while
+  // thirty indexed votes already stood at 789.5M.
+  it('marks a decision-start tally as not final', () => {
+    const tally = onChainTallyFrom([
+      row('Referenda.Submitted', 13_342_450),
+      row('Referenda.DecisionStarted', 13_342_550, { ayes: '19211236354479984589', nays: '0', support: '4924401572117738847' }),
+    ])
+
+    expect(tally).toMatchObject({ ayes: '19211236354479984589', final: false, blockHeight: 13_342_550 })
+  })
+
+  // ConfirmStarted carries no tally on this chain (355 DecisionStarted and 333
+  // Confirmed events carry one; all 337 ConfirmStarted carry none), so a referendum
+  // deep into confirmation still has only its decision-start snapshot.
+  it('ignores lifecycle events that carry no tally', () => {
+    const tally = onChainTallyFrom([
+      row('Referenda.DecisionStarted', 200, { ayes: '10', nays: '0', support: '5' }),
+      row('Referenda.ConfirmStarted', 800),
+      row('Referenda.DecisionDepositRefunded', 950),
+    ])
+
+    expect(tally).toMatchObject({ ayes: '10', final: false, blockHeight: 200 })
+  })
+
+  it('is null when no event carried a tally', () => {
+    expect(onChainTallyFrom([row('Democracy.Started', 10), row('Democracy.Passed', 20)])).toBeNull()
+  })
 })
 
 // The chain's tally includes delegated power, which emits no Voted event, so direct
 // votes can only ever sum to at most the on-chain figure. Live check on OpenGov 39:
 // on-chain ayes 1374035885979727209137 against 1371548208681485335833 direct.
 describe('indirectTallyFrom', () => {
+  const final = (ayes: string, nays: string): OnChainTally =>
+    ({ ayes, nays, support: null, final: true, blockHeight: 1, timestamp: '' })
   it('reports the residual instead of hiding it', () => {
     const direct = tallyVoters([voter({ weightedAye: '1371548208681485335833', weighted: '1371548208681485335833' })])
 
-    expect(indirectTallyFrom({ ayes: '1374035885979727209137', nays: '0', support: null }, direct))
+    expect(indirectTallyFrom(final('1374035885979727209137', '0'), direct))
       .toEqual({ ayes: '2487677298241873304', nays: '0', support: null })
   })
 
   it('is null when the direct votes account for everything', () => {
     const direct = tallyVoters([voter({ weightedAye: '100', weighted: '100' })])
 
-    expect(indirectTallyFrom({ ayes: '100', nays: '0', support: null }, direct)).toBeNull()
+    expect(indirectTallyFrom(final('100', '0'), direct)).toBeNull()
   })
 
   // A direct sum above the on-chain figure would mean over-counting; clamp at zero
@@ -219,11 +332,22 @@ describe('indirectTallyFrom', () => {
   it('never reports a negative residual', () => {
     const direct = tallyVoters([voter({ weightedAye: '500', weighted: '500' })])
 
-    expect(indirectTallyFrom({ ayes: '100', nays: '0', support: null }, direct)).toBeNull()
+    expect(indirectTallyFrom(final('100', '0'), direct)).toBeNull()
   })
 
   it('is null without an on-chain tally to compare against', () => {
     expect(indirectTallyFrom(null, tallyVoters([]))).toBeNull()
+  })
+
+  // A decision-start snapshot and the votes indexed since belong to different
+  // moments, so their difference is not delegated power — it is just elapsed time.
+  // OpenGov 370 would otherwise have reported the whole 770M gap as "delegated".
+  it('is null when the chain tally is only a snapshot', () => {
+    const direct = tallyVoters([voter({ weightedAye: '789522038578859970114', weighted: '789522038578859970114' })])
+    const snapshot: OnChainTally =
+      { ayes: '19211236354479984589', nays: '0', support: '4924401572117738847', final: false, blockHeight: 13_342_550, timestamp: '' }
+
+    expect(indirectTallyFrom(snapshot, direct)).toBeNull()
   })
 })
 

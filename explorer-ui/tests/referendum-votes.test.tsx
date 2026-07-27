@@ -67,13 +67,18 @@ describe('selectTally', () => {
   const directTally = {
     ayes: '1726862239116327685341', nays: '100003594056846489466',
     rawAyes: '405587145643483155404', rawNays: '25810953053914510321',
+    support: '405587145643483155404',
     ayeVoters: 153, nayVoters: 18, splitVoters: 0, voters: 171,
   }
 
-  it('prefers the chain tally when the pallet published one', () => {
-    const onChainTally = { ayes: '1779098767527936185457', nays: '102519899710184616184', support: '414293233712084572090' }
+  it('prefers the chain tally once it is final', () => {
+    const onChainTally = {
+      ayes: '1779098767527936185457', nays: '102519899710184616184', support: '414293233712084572090',
+      final: true, blockHeight: 9_684_303, timestamp: '2025-10-17 11:47:54',
+    }
 
-    expect(selectTally({ onChainTally, directTally })).toEqual({ ...onChainTally, source: 'chain' })
+    expect(selectTally({ onChainTally, directTally }))
+      .toEqual({ ayes: onChainTally.ayes, nays: onChainTally.nays, support: onChainTally.support, source: 'chain' })
   })
 
   it('falls back to the attributed votes and says so', () => {
@@ -82,12 +87,32 @@ describe('selectTally', () => {
     expect(tally.source).toBe('attributed')
     expect(tally.ayes).toBe(directTally.ayes)
     expect(tally.nays).toBe(directTally.nays)
-    // Support is an OpenGov concept carried on the event; a reconstruction has none to give.
-    expect(tally.support).toBeNull()
+    expect(tally.support).toBe(directTally.support)
+    // Nothing was superseded — the Democracy pallet never published a tally at all.
+    expect(tally.snapshot).toBeUndefined()
   })
 
   it('never labels a reconstruction as the chain figure', () => {
     expect(selectTally({ onChainTally: null, directTally }).source).not.toBe('chain')
+  })
+
+  // The reported bug: OpenGov 370's only tally event was the decision-start snapshot
+  // (19.2M AYE, 4.92M support, block 13342550), and showing it as "On-chain tally"
+  // hid the 789.5M the thirty votes indexed since already add up to.
+  it('does not present a decision-start snapshot as the tally', () => {
+    const snapshot = {
+      ayes: '19211236354479984589', nays: '0', support: '4924401572117738847',
+      final: false, blockHeight: 13_342_550, timestamp: '2026-07-27 11:38:03',
+    }
+
+    const tally = selectTally({ onChainTally: snapshot, directTally })
+
+    expect(tally.source).toBe('attributed')
+    expect(tally.ayes).toBe(directTally.ayes)
+    expect(tally.support).toBe(directTally.support)
+    // ...and the superseded figure travels with it, so the page can say what the chain
+    // last published and when, rather than dropping it silently.
+    expect(tally.snapshot).toEqual(snapshot)
   })
 })
 
@@ -133,6 +158,29 @@ describe('TallySummary labelling', () => {
     expect(html).toContain('Not the chain')
     expect(html).toContain('without delegated power')
     expect(html).toContain('171 indexed votes')
+  })
+
+  // A running OpenGov referendum carries no caveat at all: the label already says the
+  // figure is a reconstruction, and unlike Democracy its numbers move as votes arrive.
+  // It must certainly not borrow the Democracy explanation — that pallet has nothing to
+  // do with OpenGov 370.
+  it('adds no caveat to a running referendum', () => {
+    const html = render({
+      ayes: '789522038578859970114', nays: '0', support: '139440474770561651358', source: 'attributed',
+      snapshot: {
+        ayes: '19211236354479984589', nays: '0', support: '4924401572117738847',
+        final: false, blockHeight: 13_342_550, timestamp: '2026-07-27 11:38:03',
+      },
+    }, 30)
+
+    expect(html).toContain('Attributed votes')
+    expect(html).not.toContain('tally-note')
+    expect(html).not.toContain('Democracy pallet')
+    expect(html).not.toContain('Not the chain')
+    // The superseded snapshot is not shown either.
+    expect(html).not.toContain('13,342,550')
+    // ...but the reconstruction's own numbers still are.
+    expect(html).toContain('support')
   })
 
   it('draws the same bar for either source', () => {
