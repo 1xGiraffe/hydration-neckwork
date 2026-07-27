@@ -2680,6 +2680,9 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     const [balanceRows, lockBreakdowns, mmRes, prices] = await Promise.all([
       queryAggregatedBalances(list),
       summary ? Promise.resolve(new Map<number, AssetLockBreakdown>()) : queryLockBreakdownsSafe(list),
+      // Alone among the current-state readers this one collapses every related
+      // account into ONE row per market, so its winner is chosen across holders
+      // and it cannot read the per-(holder, market) projection.
       moneyMarketAccountValuesReady ? Promise.resolve(null) : client.query({
         query: `
           SELECT pool_address,
@@ -3005,7 +3008,7 @@ export function mergeErc20Balances(balances: AddressBalance[], holdings: { asset
 }
 
 // Per-market positions (collateral/debt/health-factor), one row per isolated pool,
-// from raw_money_market_positions maintained by snapshots and event indexing.
+// from the indexed positions the snapshot service and event indexing maintain.
 // Explorer requests never call getUserAccountData directly.
 async function getMoneyMarketPositions(h160: string): Promise<MoneyMarketPosition[]> {
   if (!/^0x[0-9a-fA-F]{40}$/.test(h160)) return []
@@ -3038,12 +3041,12 @@ async function getMoneyMarketPositions(h160: string): Promise<MoneyMarketPositio
       return orderMoneyMarkets(out)
     }
     const res = await client.query({
-      query: `SELECT pool_address, max(block_height) AS lb, toString(argMax(block_timestamp, ${moneyMarketPositionOrderSql()})) AS ts,
-                argMax(total_collateral_base, ${moneyMarketPositionOrderSql()}) AS c, argMax(total_debt_base, ${moneyMarketPositionOrderSql()}) AS d,
-                argMax(available_borrows_base, ${moneyMarketPositionOrderSql()}) AS ab, argMax(current_liquidation_threshold, ${moneyMarketPositionOrderSql()}) AS lt,
-                argMax(ltv, ${moneyMarketPositionOrderSql()}) AS ltv, argMax(health_factor, ${moneyMarketPositionOrderSql()}) AS hf
-              FROM price_data.raw_money_market_positions
-              WHERE user_address = {h:String} GROUP BY pool_address`,
+      query: `SELECT pool AS pool_address, ${mmPositionField('block_height')} AS lb,
+                toString(${mmPositionField('block_timestamp')}) AS ts,
+                toString(${mmPositionField('total_collateral_base')}) AS c, toString(${mmPositionField('total_debt_base')}) AS d,
+                toString(${mmPositionField('available_borrows_base')}) AS ab, toString(${mmPositionField('current_liquidation_threshold')}) AS lt,
+                toString(${mmPositionField('ltv')}) AS ltv, toString(${mmPositionField('health_factor')}) AS hf
+              FROM (${latestMoneyMarketPositionsSql('user_address = {h:String}')})`,
       query_params: { h: h160.toLowerCase() }, format: 'JSONEachRow',
     })
     const out: MoneyMarketPosition[] = []
@@ -3338,15 +3341,13 @@ export async function getGigaLiquidationLevels(): Promise<GigaLiquidations | nul
     const pool = (await getMmReserveTokens()).find(t => t.marketKey === 'gigahdx')?.poolProxy
     const currentPrice = (await ensurePrices()).get(0)?.price
     if (!pool || !(currentPrice != null && currentPrice > 0)) return null
-    // Latest snapshot per borrower; the snapshot loop keeps these current.
+    // Latest position per borrower in this market; the MV keeps it current.
     const res = await client.query({
-      query: `SELECT argMax(total_collateral_base, ${moneyMarketPositionOrderSql()}) AS total_collateral_base,
-                     argMax(total_debt_base, ${moneyMarketPositionOrderSql()}) AS total_debt_base,
-                     argMax(health_factor, ${moneyMarketPositionOrderSql()}) AS health_factor
-              FROM price_data.raw_money_market_positions
-              WHERE lower(pool_address) = {pool:String}
-              GROUP BY user_address
-              HAVING toFloat64OrZero(total_debt_base) > 0`,
+      query: `SELECT toString(${mmPositionField('total_collateral_base')}) AS total_collateral_base,
+                     toString(${mmPositionField('total_debt_base')}) AS total_debt_base,
+                     toString(${mmPositionField('health_factor')}) AS health_factor
+              FROM (${latestMoneyMarketPositionsSql('pool_address = {pool:String}')})
+              WHERE ${mmPositionField('total_debt_base')} > 0`,
       query_params: { pool: pool.toLowerCase() }, format: 'JSONEachRow',
     })
     const points = liquidationPointsFromPositions(await res.json<GigaPositionRow>(), currentPrice)
@@ -3711,12 +3712,41 @@ export function buildMoneyMarketAccountValueClaims(
 // observations order by their event index; a periodic full-block observation is
 // state after all events and therefore wins the same-block tie. Ingest time only
 // resolves a replay of the same stable observation identity.
+//
+// Current per-(holder, market) state does NOT use this: it reads
+// money_market_latest_positions, which resolves the same ordering at insert time
+// (see 001_tables.sql). What is left here are the per-bucket history passes,
+// which need the winner *within each bucket*, and the account-detail fallback,
+// which needs one winner across a whole alias group — neither is expressible
+// against a single-row-per-key projection.
 function moneyMarketPositionOrderSql(prefix = ''): string {
   const observation = `${prefix}observation_id`
   return `tuple(${prefix}block_height,
     if(startsWith(${observation}, 'money-market-periodic:'), toUInt32(4294967295),
       toUInt32OrZero(arrayElement(splitByChar(':', ${observation}), 3))),
     ${observation}, ${prefix}ingested_at)`
+}
+
+// Current aggregate position per (holder, market), one row per key, from the
+// insert-time argMax state in money_market_latest_positions. Re-aggregating raw
+// for this cost 4.65 GiB / 17.8M rows / 3.3 s per call.
+//
+// All nine winning values ride in ONE argMax state, so `position` is provably a
+// single observation's row; fields are addressed by name through
+// mmPositionField. `where` filters the projection's own key columns
+// (`user_address`, `pool_address`) — the configured-market set is extensible at
+// runtime via EXPLORER_MM_MARKETS while the schema is static, so the market
+// filter belongs to the reader, not the view.
+function latestMoneyMarketPositionsSql(where: string): string {
+  return `SELECT user_address AS holder, pool_address AS pool, argMaxMerge(position_state) AS position
+      FROM price_data.money_market_latest_positions
+      WHERE ${where}
+      GROUP BY holder, pool`
+}
+
+// One named field of the winning observation selected by the query above.
+function mmPositionField(field: string): string {
+  return `tupleElement(position, '${field}')`
 }
 
 async function reconstructAllActiveMoneyMarketScaled(
@@ -3749,21 +3779,18 @@ async function reconstructAllActiveMoneyMarketScaled(
 }
 
 async function loadAllLatestMoneyMarketAggregates(): Promise<LatestMoneyMarketAggregate[]> {
-  const order = moneyMarketPositionOrderSql()
   const result = await client.query({
-    query: `SELECT lower(user_address) AS holder,lower(pool_address) AS pool,
-        toString(argMax(toUInt256OrZero(total_collateral_base),${order})) AS collateral,
-        toString(argMax(toUInt256OrZero(total_debt_base),${order})) AS debt,
-        toString(argMax(toUInt256OrZero(available_borrows_base),${order})) AS available_borrows,
-        toUInt32(argMax(toUInt256OrZero(current_liquidation_threshold),${order})) AS liquidation_threshold,
-        toString(argMax(toUInt256OrZero(ltv),${order})) AS ltv,
-        toString(argMax(toUInt256OrZero(health_factor),${order})) AS health_factor,
-        argMax(block_height,${order}) AS latest_block,
-        toString(argMax(block_timestamp,${order})) AS latest_timestamp
-      FROM price_data.raw_money_market_positions
-      WHERE user_address!='' AND lower(pool_address) IN (${configuredMmPoolsSql()})
-      GROUP BY holder,pool
-      HAVING toUInt256OrZero(collateral)>0 OR toUInt256OrZero(debt)>0`,
+    query: `SELECT holder,pool,
+        toString(${mmPositionField('total_collateral_base')}) AS collateral,
+        toString(${mmPositionField('total_debt_base')}) AS debt,
+        toString(${mmPositionField('available_borrows_base')}) AS available_borrows,
+        toUInt32(${mmPositionField('current_liquidation_threshold')}) AS liquidation_threshold,
+        toString(${mmPositionField('ltv')}) AS ltv,
+        toString(${mmPositionField('health_factor')}) AS health_factor,
+        ${mmPositionField('block_height')} AS latest_block,
+        toString(${mmPositionField('block_timestamp')}) AS latest_timestamp
+      FROM (${latestMoneyMarketPositionsSql(`pool_address IN (${configuredMmPoolsSql()})`)})
+      WHERE ${mmPositionField('total_collateral_base')}>0 OR ${mmPositionField('total_debt_base')}>0`,
     format: 'JSONEachRow',
   })
   return (await result.json<{ holder: string; pool: string; collateral: string; debt: string; available_borrows: string; liquidation_threshold: number; ltv: string; health_factor: string; latest_block: number; latest_timestamp: string }>()).map(row => {
@@ -15225,14 +15252,13 @@ export async function getMoneyMarket(limit: number): Promise<{ totalSupplyUsd: n
     const res = await client.query({
       query: `
         WITH primary_positions AS (
-          SELECT account_id,
-            argMax(total_collateral_base, ${moneyMarketPositionOrderSql()}) AS col,
-            argMax(total_debt_base, ${moneyMarketPositionOrderSql()}) AS debt,
-            argMax(health_factor, ${moneyMarketPositionOrderSql()}) AS hf,
-            max(block_height) AS lb
-          FROM price_data.raw_money_market_positions
-          WHERE account_id != '' AND lower(pool_address) = '${CORE_MM_MARKET.poolProxy}'
-          GROUP BY account_id
+          SELECT ${mmPositionField('account_id')} AS account_id,
+            toString(${mmPositionField('total_collateral_base')}) AS col,
+            toString(${mmPositionField('total_debt_base')}) AS debt,
+            toString(${mmPositionField('health_factor')}) AS hf,
+            ${mmPositionField('block_height')} AS lb
+          FROM (${latestMoneyMarketPositionsSql(`pool_address = '${CORE_MM_MARKET.poolProxy}'`)})
+          WHERE ${mmPositionField('account_id')} != ''
         )
         SELECT account_id,
           col, debt, hf, lb,
@@ -15904,15 +15930,13 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
               GROUP BY account_id,pool_address
               HAVING col>0 OR debt>0
             )` : `mm_latest AS (
-              SELECT account_id,lower(pool_address) AS pool_address,
-                argMax(toFloat64OrZero(total_collateral_base),${moneyMarketPositionOrderSql()}) AS col,
-                argMax(toFloat64OrZero(total_debt_base),${moneyMarketPositionOrderSql()}) AS debt,
+              SELECT ${mmPositionField('account_id')} AS account_id,pool AS pool_address,
+                toFloat64(${mmPositionField('total_collateral_base')}) AS col,
+                toFloat64(${mmPositionField('total_debt_base')}) AS debt,
                 col AS risk_col,debt AS risk_debt,
-                argMax(toFloat64OrZero(current_liquidation_threshold),${moneyMarketPositionOrderSql()}) AS liqthr
-              FROM price_data.raw_money_market_positions
-              WHERE account_id!='' AND lower(pool_address) IN (${configuredMmPoolsSql()})
-              GROUP BY account_id,pool_address
-              HAVING col>0 OR debt>0
+                toFloat64(${mmPositionField('current_liquidation_threshold')}) AS liqthr
+              FROM (${latestMoneyMarketPositionsSql(`pool_address IN (${configuredMmPoolsSql()})`)})
+              WHERE ${mmPositionField('account_id')}!='' AND (col>0 OR debt>0)
             )`
 
     const [res, total] = await Promise.all([
