@@ -2,7 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { cached } from './cache.ts'
 import { convictionName, decodeVoteByte, weightedVotePower } from './convictionWeight.ts'
 import { assetDescriptor } from './explorerAssets.ts'
-import { accountRef, ensurePrices, nestedVoteInfos, voteFromPermitData, type AccountRef, type AssetRef } from './explorerService.ts'
+import { accountRef, ensurePrices, nestedRemovalRefs, nestedVoteInfos, removalRefsFromPermitData, voteFromPermitData, type AccountRef, type AssetRef } from './explorerService.ts'
 import { referendumTitles } from './referendumTitleService.ts'
 
 // Governance referendum detail.
@@ -341,6 +341,14 @@ async function unexplainedVoteExtrinsics(fromBlock: number, toBlock: number): Pr
   return unexplainedVoteKeys(await votedRes.json<ExtrinsicVoteCount>(), await callsRes.json<ExtrinsicVoteCount>())
 }
 
+// Top-level calls whose args can hide a ConvictionVoting call — the only place a wrapped
+// vote or removal names its poll, because `raw_calls` keeps no row for the nested call.
+const WRAPPER_CALL_NAMES = [
+  'MultiTransactionPayment.dispatch_permit', 'Proxy.proxy', 'Proxy.proxy_announced',
+  'Utility.batch', 'Utility.batch_all', 'Utility.force_batch', 'Multisig.as_multi',
+  'Multisig.as_multi_threshold_1', 'Ethereum.transact',
+]
+
 // The (block, extrinsic) pairs that voted on this referendum.
 //
 // Democracy.Voted names its referendum in the event, so those need no lookup at
@@ -377,10 +385,8 @@ async function convictionVoteExtrinsics(calls: VoteCallRow[], index: number, fro
               FROM price_data.raw_calls
               WHERE block_height IN {blocks:Array(UInt32)}
                 AND extrinsic_index IS NOT NULL
-                AND call_name IN ('MultiTransactionPayment.dispatch_permit', 'Proxy.proxy', 'Proxy.proxy_announced',
-                                  'Utility.batch', 'Utility.batch_all', 'Utility.force_batch', 'Multisig.as_multi',
-                                  'Multisig.as_multi_threshold_1', 'Ethereum.transact')`,
-      query_params: { blocks: slice }, format: 'JSONEachRow',
+                AND call_name IN {wrappers:Array(String)}`,
+      query_params: { blocks: slice, wrappers: WRAPPER_CALL_NAMES }, format: 'JSONEachRow',
     })
     for (const row of await res.json<{ block_height: number; extrinsic_index: number; args_json: string }>()) {
       const key = `${row.block_height}:${row.extrinsic_index}`
@@ -481,6 +487,68 @@ const REMOVAL_CALLS: Record<ReferendumPallet, string[]> = {
   democracy: ['Democracy.remove_vote', 'Democracy.remove_other_vote', 'Democracy.force_remove_vote'],
 }
 
+// The (block, extrinsic) pairs that removed a vote on this referendum through a WRAPPER.
+//
+// `raw_calls` keeps only the top-level call of a wrapped extrinsic, so a
+// ConvictionVoting.remove_vote inside a Utility batch or a gasless
+// MultiTransactionPayment.dispatch_permit has no row of its own and never reaches
+// `governance_vote_calls`. Such a withdrawal is invisible and its vote goes on being
+// counted: 35 of the chain's 735 ConvictionVoting.VoteRemoved events sit in exactly that
+// position (32 through dispatch_permit, 3 through Utility.batch_all, between blocks
+// 7,199,364 and 13,162,739), which is why OpenGov 200's attributed support stood 100 HDX
+// above the chain's own — an abstain-only vote, withdrawn before the close, still counted.
+//
+// Found the way wrapped VOTES already are (see convictionVoteExtrinsics): an extrinsic
+// with more VoteRemoved events than the projection has removal calls is hiding one, and
+// only those few wrappers are decoded. Only the extrinsic is resolved here — the event
+// names the account, so loadWithdrawals reads it from there exactly as for a direct
+// removal, which also means a wrapper that removes votes on several referenda at once
+// cannot lend this one a sibling's account.
+async function wrappedRemovalExtrinsics(index: number, fromBlock: number, toBlock: number): Promise<{ block_height: number; extrinsic_index: number }[]> {
+  const perExtrinsic = (table: string, predicate: string) => client.query({
+    query: `SELECT block_height, toUInt32(extrinsic_index) AS extrinsic_index, count() AS n
+            FROM ${table}
+            WHERE ${predicate}
+              AND block_height >= {from:UInt32} AND block_height <= {to:UInt32}
+              AND extrinsic_index IS NOT NULL
+            GROUP BY block_height, extrinsic_index`,
+    query_params: { from: fromBlock, to: toBlock }, format: 'JSONEachRow',
+  })
+  // VoteRemoved lives only in raw_events — vote_activity carries the Voted events, not
+  // the removals.
+  const [removedRes, callsRes] = await Promise.all([
+    perExtrinsic('price_data.raw_events', `event_name = 'ConvictionVoting.VoteRemoved'`),
+    perExtrinsic('price_data.governance_vote_calls',
+      `pallet = 'opengov' AND success = 1 AND call_name IN ('ConvictionVoting.remove_vote', 'ConvictionVoting.remove_other_vote', 'ConvictionVoting.force_remove_vote')`),
+  ])
+  const candidateKeys = unexplainedVoteKeys(await removedRes.json<ExtrinsicVoteCount>(), await callsRes.json<ExtrinsicVoteCount>())
+  if (!candidateKeys.size) return []
+
+  const wanted = String(index)
+  const blocks = [...new Set([...candidateKeys].map(key => Number(key.split(':')[0])))]
+  const found: { block_height: number; extrinsic_index: number }[] = []
+  const CHUNK = 2_000
+  for (let start = 0; start < blocks.length; start += CHUNK) {
+    const res = await client.query({
+      query: `SELECT block_height, extrinsic_index, args_json
+              FROM price_data.raw_calls
+              WHERE block_height IN {blocks:Array(UInt32)}
+                AND extrinsic_index IS NOT NULL
+                AND call_name IN {wrappers:Array(String)}`,
+      query_params: { blocks: blocks.slice(start, start + CHUNK), wrappers: WRAPPER_CALL_NAMES }, format: 'JSONEachRow',
+    })
+    for (const row of await res.json<{ block_height: number; extrinsic_index: number; args_json: string }>()) {
+      if (!candidateKeys.has(`${row.block_height}:${row.extrinsic_index}`)) continue
+      let args: Record<string, unknown>
+      try { args = JSON.parse(row.args_json) as Record<string, unknown> } catch { continue }
+      const removes = removalRefsFromPermitData((args as { data?: unknown }).data).includes(wanted)
+        || nestedRemovalRefs(args).includes(wanted)
+      if (removes) found.push({ block_height: Number(row.block_height), extrinsic_index: Number(row.extrinsic_index) })
+    }
+  }
+  return found
+}
+
 // Votes WITHDRAWN, meaning removed while the referendum was still open — the LAST such
 // removal per account, so a vote recast afterwards still counts.
 //
@@ -521,7 +589,14 @@ async function loadWithdrawals(pallet: ReferendumPallet, index: number, fromBloc
   let removals = await removalRes.json<{ who: string; block_height: number; extrinsic_index: number | null }>()
 
   if (pallet === 'opengov') {
-    const confirmable = removals.filter(row => row.extrinsic_index != null && Number(row.block_height) >= CONVICTION_VOTED_FIRST_BLOCK)
+    // A wrapped removal has no call row at all, so its extrinsic is recovered by decoding
+    // the wrapper. It then joins the same VoteRemoved confirmation as every other
+    // post-event-era removal, which is where its account comes from.
+    const wrapped = await wrappedRemovalExtrinsics(index, fromBlock, toBlock)
+    const confirmable = [
+      ...removals.filter(row => row.extrinsic_index != null && Number(row.block_height) >= CONVICTION_VOTED_FIRST_BLOCK),
+      ...wrapped,
+    ]
     const tuples = [...new Set(confirmable.map(row => `(${Number(row.block_height)},${Number(row.extrinsic_index)})`))].join(',')
     removals = removals.filter(row => Number(row.block_height) < CONVICTION_VOTED_FIRST_BLOCK)
     if (tuples) {

@@ -8062,6 +8062,79 @@ export function nestedVoteInfos(value: unknown, out: { ref: string; details: Vot
   for (const v of Object.values(o)) nestedVoteInfos(v, out)
   return out
 }
+const CONVICTION_REMOVE_VOTE_CALL_IDX = 0x04
+const UTILITY_PALLET_IDX = 0x0d
+// Utility.batch, batch_all and force_batch: a compact item count, then the calls.
+const UTILITY_BATCH_CALL_IDXS = new Set([0x00, 0x02, 0x04])
+const REMOVAL_CALL_KINDS = new Set(['remove_vote', 'remove_other_vote', 'force_remove_vote'])
+
+// The polls a gasless permit payload removes a vote from.
+//
+// A removal names its poll only on the CALL: ConvictionVoting.VoteRemoved carries the
+// account and the vote it dropped, but no index. The permit carries the call as SCALE
+// bytes rather than as a decoded row, so without this the removal cannot be attributed
+// to a referendum at all.
+//
+// The app sends these as a Utility batch of remove_vote calls, usually with an unrelated
+// Staking call last, so the batch is walked item by item and the walk STOPS at the first
+// item that is not a removal: without runtime metadata there is no way to know how long
+// another call is, and guessing an offset would invent poll indexes out of unrelated
+// bytes. That costs nothing in practice — across all 23 permit payloads on the chain a
+// byte-pattern scan finds no removal this walk misses, because the Staking call is last.
+//
+// remove_vote encodes `Option<Class>` then a PLAIN u32 poll index, where vote encodes a
+// compact one — hence the separate decoder rather than a parameter on voteFromPermitData.
+export function removalRefsFromPermitData(dataHex: unknown): string[] {
+  if (typeof dataHex !== 'string' || !dataHex.startsWith('0x')) return []
+  const b = Buffer.from(dataHex.slice(2), 'hex')
+  let off = 0
+  let items = 1
+  if (b.length >= 2 && b[0] === UTILITY_PALLET_IDX && UTILITY_BATCH_CALL_IDXS.has(b[1])) {
+    off = 2
+    if (off >= b.length) return []
+    const mode = b[off] & 3
+    if (mode === 0) { items = b[off] >> 2; off += 1 }
+    else if (mode === 1) { items = (b[off] | (b[off + 1] << 8)) >> 2; off += 2 }
+    else if (mode === 2) { items = ((b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24)) >>> 2); off += 4 }
+    else return []
+  }
+  const refs: string[] = []
+  for (let i = 0; i < items; i++) {
+    if (off + 2 > b.length || b[off] !== CONVICTION_VOTING_PALLET_IDX || b[off + 1] !== CONVICTION_REMOVE_VOTE_CALL_IDX) break
+    off += 2
+    // Option<Class>: None, or Some(u16).
+    const some = b[off]
+    off += 1
+    if (some === 0x01) off += 2
+    else if (some !== 0x00) break
+    if (off + 4 > b.length) break
+    refs.push(String(b.readUInt32LE(off)))
+    off += 4
+  }
+  return refs
+}
+// ConvictionVoting removals hidden inside wrapper args (Utility.batch*, Proxy.proxy, …),
+// the decoded-JSON counterpart of removalRefsFromPermitData. Same reason as
+// nestedVoteInfos: the wrapper's own call row is all `raw_calls` kept, so the nested call
+// is only readable from its JSON.
+export function nestedRemovalRefs(value: unknown, out: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    for (const v of value) nestedRemovalRefs(v, out)
+    return out
+  }
+  if (value == null || typeof value !== 'object') return out
+  const o = value as Record<string, unknown>
+  if (o.__kind === 'ConvictionVoting') {
+    const inner = o.value as Record<string, unknown> | undefined
+    if (inner && REMOVAL_CALL_KINDS.has(String(inner.__kind))) {
+      const ref = argStr(inner, 'index')
+      if (ref) out.push(ref)
+      return out
+    }
+  }
+  for (const v of Object.values(o)) nestedRemovalRefs(v, out)
+  return out
+}
 function mergeVoteDetails(primary: VoteDetails, fallback?: VoteDetails): VoteDetails {
   if (!fallback) return primary
   return {
