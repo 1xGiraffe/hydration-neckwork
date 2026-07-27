@@ -211,8 +211,8 @@ function evmAccountIdFromAddress(evmAddress: string): string | null {
 
 // The compact read models below fully cover history (their materialized views
 // populate them for every raw range as it is ingested), so the request path
-// reads them unconditionally. These two helpers centralize the model table
-// names their callers embed in SQL.
+// reads them unconditionally. These helpers centralize the model table names
+// their callers embed in SQL.
 function otcActivityTable(alias = ''): string {
   return `price_data.otc_activity${alias ? ` AS ${alias}` : ''} FINAL`
 }
@@ -220,8 +220,30 @@ function otcActivityTable(alias = ''): string {
 // Avoid FINAL here: it disables primary-key pruning on this 55M-row replacing
 // model and turns bounded block/asset lookups into multi-gigabyte partition
 // merges during request handling.
+//
+// This one is keyed (event_name, asset_id, block_height, event_index): it serves
+// the reads that name an event family and either a block set or an asset — global
+// candidate walks, the barrier/deposit-run reads whose walk needs a whole block,
+// and the asset surface.
 function xcmEventActivityTable(alias = ''): string {
   return `price_data.xcm_event_activity${alias ? ` AS ${alias}` : ''}`
+}
+// Same rows, keyed (who, block_height, event_index), for the reads that name
+// accounts. `who` is absent from the sort key of the table above, so an
+// account-scoped read of it prunes nothing. The heaviest cross-chain account's
+// exact XCM count (62,060 rows) read 518M rows / 9.79 GiB out of that table and
+// reads 50M rows / 2.02 GiB across the same query count once its account-scoped
+// arms come from here — same answer, a tenth of the rows. Per candidate page:
+// 12.8M rows / 820 MiB / 378 ms there against 2.3M rows / 143 MiB / 27 ms here.
+//
+// The same no-FINAL contract holds, for the same reason: every consumer folds
+// these rows by their stable (block_height, event_index) identity while decoding
+// — inbound credits key on (who, currency, amount) inside a block's deposit run,
+// remote pulls on (block, barrier, who, currency, amount) — so an un-merged
+// replacement duplicate cannot survive into a row, while FINAL would forfeit the
+// account-prefix pruning that is this table's entire purpose.
+function xcmEventActivityByAccountTable(alias = ''): string {
+  return `price_data.xcm_event_activity_by_account${alias ? ` AS ${alias}` : ''}`
 }
 
 // Published only after a complete, count-checked generation of every current
@@ -6851,17 +6873,27 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
               ORDER BY block_height DESC, event_index DESC`,
       format: 'JSONEachRow',
     }),
+    // The deposit run is read for the WHOLE block, never scoped to the account:
+    // the walk-back continues only while consecutive event indices stay inside the
+    // walk family, so dropping another account's event out of the run would end
+    // the walk early and lose credits behind it. Hence the block-keyed table.
+    //
+    // Read the extracted columns rather than args_json: `who`, `asset_id` and
+    // `amount` are exactly what the decode below consumed, and the payload is the
+    // fattest column in the model (794 MiB of its 1.87 GiB, 6.18 GiB of its 12 GiB
+    // uncompressed) on the read that touches the most rows of it.
     client.query({
-      query: `SELECT block_height, event_index, event_name, args_json
+      query: `SELECT block_height, event_index, event_name, who, asset_id, amount
               FROM ${xcmEventActivityTable()}
               WHERE block_height IN (${list}) AND event_name IN (${sqlEventNameList(XCM_IN_WALK_EVENTS)}) AND extrinsic_index IS NULL`,
       format: 'JSONEachRow',
     }),
   ])
   const barriers = await barRes.json<{ block_height: number; ts: string; event_index: number; args_json: string }>()
-  const byBlock = new Map<number, Map<number, { event_name: string; args_json: string }>>()
-  for (const e of await famRes.json<{ block_height: number; event_index: number; event_name: string; args_json: string }>()) {
-    const m = byBlock.get(e.block_height) ?? new Map<number, { event_name: string; args_json: string }>()
+  type WalkEvent = { event_name: string; who: string; asset_id: number; amount: string }
+  const byBlock = new Map<number, Map<number, WalkEvent>>()
+  for (const e of await famRes.json<{ block_height: number; event_index: number } & WalkEvent>()) {
+    const m = byBlock.get(e.block_height) ?? new Map<number, WalkEvent>()
     m.set(e.event_index, e)
     byBlock.set(e.block_height, m)
   }
@@ -6876,9 +6908,8 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
     for (let idx = b.event_index - 1; evs?.has(idx); idx--) {
       const e = evs.get(idx)!
       if (!XCM_IN_DEPOSIT_EVENTS.includes(e.event_name)) continue
-      const args = (safeJson(e.args_json) ?? {}) as { currencyId?: number; who?: string; amount?: string }
-      const cid = e.event_name === 'Balances.Deposit' ? 0 : Number(args.currencyId ?? 0)
-      const { who, amount } = args
+      // `asset_id` already carries the 0 that Balances.Deposit has no currencyId for.
+      const { who, amount, asset_id: cid } = e
       if (!who || !amount || amount === '0' || RESERVED_ACCOUNT_RE.test(who)) continue
       if (whoIn && !whoIn.has(who)) continue
       const key = `${who}:${cid}:${amount}`
@@ -6914,12 +6945,28 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
               ORDER BY block_height DESC, event_index ASC`,
       format: 'JSONEachRow',
     }),
-    client.query({
-      query: `SELECT block_height, event_index, args_json
-              FROM ${xcmEventActivityTable()}
-              WHERE block_height IN (${list}) AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NULL`,
-      format: 'JSONEachRow',
-    }),
+    // Unlike the inbound deposit run, each withdrawal stands on its own — it is
+    // paired with the block's next barrier, never with its neighbours — so an
+    // account-scoped caller can prefilter on `who` in SQL and read the account-first
+    // table, where (who, block_height) prunes to the account's own blocks instead
+    // of scanning the whole Currencies.Withdrawn slice. `whoIn` below stays the
+    // authority on membership, so this only shrinks the granules read. The extracted
+    // columns replace args_json either way: this decode only ever read
+    // who/currencyId/amount.
+    whoIn
+      ? client.query({
+        query: `SELECT block_height, event_index, who, asset_id, amount
+                FROM ${xcmEventActivityByAccountTable()}
+                WHERE who IN (${sqlAccountList([...whoIn])}) AND block_height IN (${list})
+                  AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NULL`,
+        format: 'JSONEachRow',
+      })
+      : client.query({
+        query: `SELECT block_height, event_index, who, asset_id, amount
+                FROM ${xcmEventActivityTable()}
+                WHERE block_height IN (${list}) AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NULL`,
+        format: 'JSONEachRow',
+      }),
   ])
   const barriersByBlock = new Map<number, { ts: string; event_index: number; args_json: string }[]>()
   for (const b of await barRes.json<{ block_height: number; ts: string; event_index: number; args_json: string }>()) {
@@ -6929,16 +6976,14 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
   }
   const rows: ActivityRow[] = []
   const seen = new Set<string>()
-  for (const w of await wdRes.json<{ block_height: number; event_index: number; args_json: string }>()) {
-    const args = (safeJson(w.args_json) ?? {}) as { currencyId?: number; who?: string; amount?: string }
-    const { who, amount } = args
+  for (const w of await wdRes.json<{ block_height: number; event_index: number; who: string; asset_id: number; amount: string }>()) {
+    const { who, amount, asset_id: cid } = w
     if (!who || !amount || amount === '0' || RESERVED_ACCOUNT_RE.test(who)) continue
     if (whoIn && !whoIn.has(who)) continue
     const barrier = (barriersByBlock.get(w.block_height) ?? []).find(b => b.event_index > w.event_index)
     if (!barrier) continue
     const bargs = safeJson(barrier.args_json) as { success?: boolean; id?: string; origin?: { __kind?: string; value?: number } } | null
     if (!bargs || bargs.success === false) continue
-    const cid = Number(args.currencyId ?? 0)
     const key = `${w.block_height}:${barrier.event_index}:${who}:${cid}:${amount}`
     if (seen.has(key)) continue
     seen.add(key)
@@ -7040,15 +7085,23 @@ async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, 
     const candidateWho = 'who'
     const candidateValue = eventValueFilterSql(candidateAsset, candidateAmount, 'block_timestamp', filters, prices, 'xcm_remote_price')
     const candidateToken = assetIdFilterSql(candidateAsset, tokenIds)
+    // Account-scoped: the account-first table makes `who IN (…)` the sort-key
+    // prefix, so `ORDER BY block_height DESC … LIMIT n` is a reverse primary-key
+    // read of that account's own rows. It carries the SAME reserved-account
+    // exclusion the global arm does, for the same reason: the decode below drops
+    // every module/sovereign beneficiary, so their candidate blocks can only cost
+    // work. Stating it here is what keeps a structural pot bounded — the Omnipool
+    // pallet account holds millions of hook-context rows and none of them can
+    // become a row.
     const fetchBlocks = acctList
       ? async (pageBound: string, pageLimit: number) => {
-        const refsFilter = `AND ${accountActivityRefsSql(accounts!, `event_name = 'Currencies.Withdrawn'`, pageBound, pageLimit)}`
         const res = await client.query({
-          query: `SELECT block_height FROM ${xcmEventActivityTable()}
+          query: `SELECT block_height FROM ${xcmEventActivityByAccountTable()}
                   ${candidateValue.joinSql}
-                  WHERE ${pageBound} ${refsFilter}
-                    AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NULL
+                  WHERE ${pageBound}
                     AND ${candidateWho} IN (${acctList})
+                    AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NULL
+                    AND NOT match(${candidateWho}, '${RESERVED_ACCOUNT_RE.source}')
                     ${candidateToken} ${candidateValue.predicateSql}
                   ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
           query_params: { limit: pageLimit }, format: 'JSONEachRow',
@@ -7098,16 +7151,18 @@ async function getRecentXcmIn(limit: number, from?: string, to?: string, account
     const candidateValue = eventValueFilterSql(candidateAsset, candidateAmount, 'block_timestamp', filters, prices, 'xcm_in_price')
     const candidateToken = assetIdFilterSql(candidateAsset, tokenIds)
     // Candidate blocks: account-scoped from the account's own hook-context deposit
-    // events (activity-index pruned), global from the newest processed messages.
+    // events, read account-first with the same reserved-account exclusion the global
+    // arm carries (see getRecentXcmOutRemote for both); global from the newest
+    // processed messages.
     const fetchBlocks = acctList
       ? async (pageBound: string, pageLimit: number) => {
-        const refsFilter = `AND ${accountActivityRefsSql(accounts!, `event_name IN (${sqlEventNameList(XCM_IN_DEPOSIT_EVENTS)})`, pageBound, pageLimit)}`
         const res = await client.query({
-          query: `SELECT block_height FROM ${xcmEventActivityTable()}
+          query: `SELECT block_height FROM ${xcmEventActivityByAccountTable()}
                   ${candidateValue.joinSql}
-                  WHERE ${pageBound} ${refsFilter}
-                    AND event_name IN (${sqlEventNameList(XCM_IN_DEPOSIT_EVENTS)}) AND extrinsic_index IS NULL
+                  WHERE ${pageBound}
                     AND ${candidateWho} IN (${acctList})
+                    AND event_name IN (${sqlEventNameList(XCM_IN_DEPOSIT_EVENTS)}) AND extrinsic_index IS NULL
+                    AND NOT match(${candidateWho}, '${RESERVED_ACCOUNT_RE.source}')
                     ${candidateToken} ${candidateValue.predicateSql}
                   ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
           query_params: { limit: pageLimit }, format: 'JSONEachRow',
@@ -10410,7 +10465,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
           WHERE ${tw ? tw.replaceAll('block_timestamp', 'w.block_timestamp') : '1'}
             AND w.event_name = 'Currencies.Withdrawn'
             AND ${cidExpr} = {assetId:UInt32}
-            AND position(x.args_json, concat('"value":"', JSONExtractString(w.args_json,'amount'), '"')) > 0
+            AND position(x.args_json, concat('"value":"', ${withdrawalAmountExpr}, '"')) > 0
             ${xcmValueFilter.predicateSql}
           ORDER BY w.block_height DESC, x.event_index DESC
           LIMIT {n:UInt32}`,
