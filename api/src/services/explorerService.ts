@@ -1,5 +1,5 @@
 import type { ClickHouseClient } from '../db/client.ts'
-import { cached, cachedSwr } from './cache.ts'
+import { cached, cachedSwr, cacheRefresh, seedStale } from './cache.ts'
 import { referendumTitleFor } from './referendumTitleService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
 import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
@@ -15224,28 +15224,51 @@ async function ensureActivityLeaderboard(): Promise<ActivityLeaderboard | null> 
 }
 const ACCOUNT_DIRECTORY_SNAPSHOT_MAX_AGE_SECONDS = 10 * 60
 
-async function loadAccountDirectorySnapshot(snapshotKey: string): Promise<AccountsPage | null> {
+// The last page published for `snapshotKey`, with the age that decides how long
+// it may still be used.
+//
+// Serving and refreshing want different answers, so the caller says which it is:
+//
+//  - `currentGenerationOnly: false` (serving) accepts any page inside the
+//    declared age tolerance. The snapshot key already carries the model version
+//    (v1/v2/v3), so which columns the payload holds is settled by the key; all
+//    that remains to bound is how old the numbers are, and that is exactly what
+//    the tolerance says. A page one generation behind is the stale value the
+//    directory is supposed to serve while the next one computes.
+//  - `currentGenerationOnly: true` (refreshing) additionally requires the page
+//    to be at least as new as the published Omnipool-claim and money-market
+//    generations. A refresh that accepted a superseded page would keep handing
+//    back the value it exists to replace, and the directory would never advance.
+async function loadAccountDirectorySnapshot(
+  snapshotKey: string,
+  currentGenerationOnly: boolean,
+): Promise<{ page: AccountsPage; ageSeconds: number } | null> {
+  const coversCurrentGeneration = currentGenerationOnly
+    ? `${omnipoolAccountClaimsReady
+        ? `computed_at >= (SELECT max(computed_at)
+            FROM price_data.omnipool_account_claim_snapshot_state FINAL
+            WHERE snapshot_key = 'current')`
+        : '1'}
+       AND ${moneyMarketAccountValuesReady
+        ? `computed_at >= (SELECT max(computed_at)
+            FROM price_data.money_market_account_value_snapshot_state FINAL
+            WHERE snapshot_key = 'current')`
+        : '1'}`
+    : '1'
   const res = await client.query({
     query: `SELECT payload_json,dateDiff('second',computed_at,now()) AS age,
-        ${omnipoolAccountClaimsReady
-          ? `computed_at >= (SELECT max(computed_at)
-              FROM price_data.omnipool_account_claim_snapshot_state FINAL
-              WHERE snapshot_key = 'current')`
-          : '1'} AS covers_claims,
-        ${moneyMarketAccountValuesReady
-          ? `computed_at >= (SELECT max(computed_at)
-              FROM price_data.money_market_account_value_snapshot_state FINAL
-              WHERE snapshot_key = 'current')`
-          : '1'} AS covers_money_market
+        ${coversCurrentGeneration} AS covers_current_generation
       FROM price_data.account_directory_snapshots FINAL
       WHERE snapshot_key={snapshotKey:String} LIMIT 1`,
     query_params: { snapshotKey }, format: 'JSONEachRow',
   })
-  const row = (await res.json<{ payload_json: string; age: number; covers_claims: number; covers_money_market: number }>())[0]
-  if (!row || Number(row.age) > ACCOUNT_DIRECTORY_SNAPSHOT_MAX_AGE_SECONDS || Number(row.covers_claims) !== 1 || Number(row.covers_money_market) !== 1) return null
+  const row = (await res.json<{ payload_json: string; age: number; covers_current_generation: number }>())[0]
+  if (!row || Number(row.age) > ACCOUNT_DIRECTORY_SNAPSHOT_MAX_AGE_SECONDS || Number(row.covers_current_generation) !== 1) return null
   try {
     const page = JSON.parse(row.payload_json) as AccountsPage
-    return Array.isArray(page?.rows) && Number.isSafeInteger(page.total) ? page : null
+    return Array.isArray(page?.rows) && Number.isSafeInteger(page.total)
+      ? { page, ageSeconds: Math.max(0, Number(row.age)) }
+      : null
   } catch { return null }
 }
 
@@ -15287,6 +15310,13 @@ const ACCOUNT_SORT_SQL: Record<AccountSort, string> = {
 // Total number of account rows (single accounts + tagged groups, tag members
 // collapsed into one). Offset-independent, so it's cached on its own key and
 // reused across pages.
+//
+// Unlike the pages themselves this keeps the account-value generation in its
+// KEY, so a generation change makes it absent rather than stale. The total is
+// not served on its own — it is embedded in a page payload, and a page must be
+// one generation throughout — and it is only ever computed inside a page
+// rebuild that is already running in the background, so invalidating it costs
+// no request any latency.
 async function getAccountsTotal(): Promise<number> {
   const modelVersion = accountDirectoryModelVersion()
   return cachedSwr(`explorer:accounts-total:${accountValueGenerationEpoch}:${modelVersion}`, 60_000, 30 * 60_000, async () => {
@@ -15313,21 +15343,42 @@ async function getAccountsTotal(): Promise<number> {
   })
 }
 
+const ACCOUNTS_FRESH_MS = 60_000
+const ACCOUNTS_STALE_MS = 30 * 60_000
+
+function accountsCacheKey(modelVersion: string, sort: AccountSort, offset: number, limit: number): string {
+  return `explorer:accounts:${modelVersion}:${sort}:${offset}:${limit}`
+}
+
 // Paginated directory of every account that has a balance observation (seeded
 // to the full chain by the snapshot-balances bootstrap). Sorting, money-market
 // enrichment, and identity-presence are all resolved server-side so a single
 // page can be ordered correctly against the whole set.
-export async function getAccounts(offset: number, limit: number, sort: AccountSort = 'value'): Promise<AccountsPage> {
-  // Whole-directory ranking: every refresh re-aggregates all balances (+ MM
+export function getAccounts(offset: number, limit: number, sort: AccountSort = 'value'): Promise<AccountsPage> {
+  return accountsPage(offset, limit, sort, false)
+}
+
+// The prewarm's entry point: rebuild the page for the current generation even
+// when a perfectly serveable previous one is cached. A background pass that owns
+// refresh must not be satisfied by the value it exists to replace.
+function refreshAccountsPage(offset: number, limit: number, sort: AccountSort): Promise<AccountsPage> {
+  return accountsPage(offset, limit, sort, true)
+}
+
+async function accountsPage(offset: number, limit: number, sort: AccountSort, refresh: boolean): Promise<AccountsPage> {
+  // Whole-directory ranking: every rebuild re-aggregates all balances (+ MM
   // positions, and full-history volume CTEs for some sorts) just to render one
-  // page — seconds of ClickHouse time. Serve stale-while-revalidating so only a
-  // truly cold first hit ever waits; the prewarmer below keeps the default view
-  // from ever being cold.
+  // page — seconds of ClickHouse time. Serve stale-while-revalidating so no
+  // request ever waits on it: within the fresh window the cached page is
+  // returned, and afterwards — including when the five-minute account-value
+  // generation advances — the previous page is returned while the next one
+  // computes in the background.
   const modelVersion = accountDirectoryModelVersion()
-  return cachedSwr(`explorer:accounts:${accountValueGenerationEpoch}:${modelVersion}:${sort}:${offset}:${limit}`, 60_000, 30 * 60_000, async () => {
-    const snapshotKey = `${modelVersion}:${sort}:${offset}:${limit}`
-    const snapshot = await loadAccountDirectorySnapshot(snapshotKey).catch(() => null)
-    if (snapshot) return snapshot
+  const key = accountsCacheKey(modelVersion, sort, offset, limit)
+  const snapshotKey = `${modelVersion}:${sort}:${offset}:${limit}`
+  const build = async (): Promise<AccountsPage> => {
+    const current = await loadAccountDirectorySnapshot(snapshotKey, true).catch(() => null)
+    if (current) return current.page
     const prices = await ensureAccountValuePrices()
     const { idsSql, unitsSql } = priceTransformArrays(prices)
     const orderBy = ACCOUNT_SORT_SQL[sort] ?? ACCOUNT_SORT_SQL.value
@@ -15652,7 +15703,22 @@ export async function getAccounts(offset: number, limit: number, sort: AccountSo
     const page: AccountsPage = { rows, total, ...(leaderboard ? { rankedDepth: leaderboard.rankedDepth } : {}) }
     await persistAccountDirectorySnapshot(snapshotKey, page).catch(err => console.error('[accounts] snapshot persist failed:', err))
     return page
-  })
+  }
+
+  // Read the generation once: labelling the result with the generation the
+  // rebuild STARTED from can only under-claim freshness, so one that advanced
+  // mid-rebuild is refreshed again rather than passing for current.
+  const generation = accountValueGenerationEpoch
+  if (refresh) return cacheRefresh(key, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS, build, generation)
+  // Nothing cached means a restarted process or an evicted key, not that no page
+  // exists: adopt the last persisted one as the stale value so this request
+  // serves it too, for whatever is left of the tolerance it was published under.
+  await seedStale(key, async () => {
+    const persisted = await loadAccountDirectorySnapshot(snapshotKey, false)
+    if (!persisted) return null
+    return { value: persisted.page, staleMs: (ACCOUNT_DIRECTORY_SNAPSHOT_MAX_AGE_SECONDS - persisted.ageSeconds) * 1000 }
+  }).catch(() => false)
+  return cachedSwr(key, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS, build, generation)
 }
 
 // Refine each row's top-holding icons to match the detail pages exactly. The main
@@ -16091,16 +16157,23 @@ const TAG_DETAIL_SNAPSHOT_MAX_AGE_SECONDS = 2 * 60
 const TAG_DETAIL_REQUEST_MAX_AGE_SECONDS = 10 * 60
 const hotTagDetails = new Set<string>(['treasury', 'money-market'])
 
+// Only requests read this snapshot — the two-minute prewarm always rebuilds — so
+// it is a serving read, and the rule is the one the directory's serving read
+// uses: age inside the declared tolerance, and the same model that produced it.
+// Requiring it to be newer than the published claim/money-market generations
+// instead would throw away a page that is still well inside the tolerance the
+// moment a generation is republished, which is exactly when a request most needs
+// it. The model belongs in the payload's identity, not in a freshness clause:
+// `membershipKey` carries it (see getTag) because this table, unlike the
+// directory's, has no model version in its key.
 async function loadTagDetailSnapshot(tagId: string, membershipKey: string): Promise<TagDetail | null> {
   const res = await client.query({
-    query: `SELECT membership_key,payload_json,dateDiff('second',computed_at,now()) AS age,
-      ${omnipoolAccountClaimsReady ? `computed_at>=(SELECT max(computed_at) FROM price_data.omnipool_account_claim_snapshot_state FINAL WHERE snapshot_key='current')` : '1'} AS covers_claims,
-      ${moneyMarketAccountValuesReady ? `computed_at>=(SELECT max(computed_at) FROM price_data.money_market_account_value_snapshot_state FINAL WHERE snapshot_key='current')` : '1'} AS covers_money_market
+    query: `SELECT membership_key,payload_json,dateDiff('second',computed_at,now()) AS age
       FROM price_data.tag_detail_snapshots FINAL WHERE tag_id={tagId:String} LIMIT 1`,
     query_params: { tagId }, format: 'JSONEachRow',
   })
-  const row = (await res.json<{ membership_key: string; payload_json: string; age: number; covers_claims: number; covers_money_market: number }>())[0]
-  if (!row || row.membership_key !== membershipKey || Number(row.age) > TAG_DETAIL_REQUEST_MAX_AGE_SECONDS || Number(row.covers_claims)!==1 || Number(row.covers_money_market)!==1) return null
+  const row = (await res.json<{ membership_key: string; payload_json: string; age: number }>())[0]
+  if (!row || row.membership_key !== membershipKey || Number(row.age) > TAG_DETAIL_REQUEST_MAX_AGE_SECONDS) return null
   try {
     const detail = JSON.parse(row.payload_json) as TagDetail
     return detail?.tagId === tagId && Array.isArray(detail.members) ? detail : null
@@ -16128,7 +16201,12 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
   // and DCA, none of which the card shows. The detail page still gets the full object.
   const summary = opts.summary === true
   const refresh = opts.refresh === true
-  const membershipKey = [...tag.members].map(member => member.toLowerCase()).sort().join(',')
+  // Identity of a persisted payload: which accounts it covers AND which
+  // account-value model computed it. `tag_detail_snapshots` is keyed by tag_id
+  // alone, so without the model version here a payload built before the
+  // money-market account-value generation was available (reading the raw
+  // position table instead) could be served after it became available.
+  const membershipKey = `${accountDirectoryModelVersion()}|${[...tag.members].map(member => member.toLowerCase()).sort().join(',')}`
   if (!summary) hotTagDetails.add(tagId)
   return cached(`explorer:tag:${accountValueGenerationEpoch}:${tagId}${summary ? ':summary' : refresh ? ':refresh' : ''}`, 8000, async () => {
     if (!summary && !refresh) {
@@ -16552,8 +16630,8 @@ async function prewarmAccountDirectoryUncached(): Promise<void> {
   // Every page here reads whatever activity ranking is currently published, so this pass
   // does not build one — that runs on its own, much slower interval.
   const sorts: AccountSort[] = ['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'volume', 'liquidation']
-  for (const sort of sorts) await getAccounts(0, 50, sort)
-  await getAccounts(50, 50, 'value')
+  for (const sort of sorts) await refreshAccountsPage(0, 50, sort)
+  await refreshAccountsPage(50, 50, 'value')
 }
 
 let activityLeaderboardInflight: Promise<void> | null = null

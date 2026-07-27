@@ -5,7 +5,7 @@
 // endpoint inside a TTL window collapse to a single DB query. Concurrent misses
 // for the same key share one in-flight promise (no thundering herd), and the
 // resolved value is served for `ttlMs`.
-interface Entry<T> { value: T; expiresAt: number; freshUntil?: number; lastAccessedAt: number }
+interface Entry<T> { value: T; expiresAt: number; freshUntil?: number; lastAccessedAt: number; generation?: number }
 
 const store = new Map<string, Entry<unknown>>()
 const inflight = new Map<string, Promise<unknown>>()
@@ -45,7 +45,7 @@ function prune(now: number): void {
   }
 }
 
-function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: number, fn: () => Promise<T>): Promise<T> {
+function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: number, fn: () => Promise<T>, generation?: number): Promise<T> {
   const pending = (async () => {
     try {
       const value = await fn()
@@ -53,6 +53,7 @@ function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: numb
       store.set(key, {
         value,
         ...(freshMs == null ? {} : { freshUntil: resolvedAt + freshMs }),
+        ...(generation == null ? {} : { generation }),
         expiresAt: resolvedAt + staleMs,
         lastAccessedAt: nextAccess(),
       })
@@ -88,7 +89,17 @@ export async function cached<T>(key: string, ttlMs: number, fn: () => Promise<T>
 // value IMMEDIATELY and refreshes once in the background (single-flight), so
 // no request ever waits on the recompute except a truly cold first hit. A
 // failed background refresh keeps serving the stale value until `staleMs`.
-export async function cachedSwr<T>(key: string, freshMs: number, staleMs: number, fn: () => Promise<T>): Promise<T> {
+//
+// `generation` names the data generation the value was computed against (for
+// the account directory: the account-value generation, which advances every
+// five minutes). When it advances the entry becomes STALE, not absent — the
+// previous generation's value keeps being served while the new one computes.
+// Putting the generation in the KEY instead would make the entry absent, which
+// defeats stale-while-revalidate by construction: there is no previous value to
+// find, so every generation change costs a cold, blocking recompute. Each
+// cached value is one whole generation, so serving the previous one is
+// internally consistent; it is never merged with the new one.
+export async function cachedSwr<T>(key: string, freshMs: number, staleMs: number, fn: () => Promise<T>, generation?: number): Promise<T> {
   assertDuration('freshMs', freshMs)
   assertDuration('staleMs', staleMs)
   if (staleMs < freshMs) throw new RangeError('staleMs must be greater than or equal to freshMs')
@@ -96,8 +107,9 @@ export async function cachedSwr<T>(key: string, freshMs: number, staleMs: number
   const hit = store.get(key) as Entry<T> | undefined
   if (hit && hit.expiresAt > now) {
     hit.lastAccessedAt = nextAccess()
-    if ((hit.freshUntil ?? hit.expiresAt) <= now && !inflight.has(key)) {
-      loadAndCache(key, freshMs, staleMs, fn).catch(() => { /* stale entry stays valid until staleMs */ })
+    const superseded = generation != null && hit.generation !== generation
+    if ((superseded || (hit.freshUntil ?? hit.expiresAt) <= now) && !inflight.has(key)) {
+      loadAndCache(key, freshMs, staleMs, fn, generation).catch(() => { /* stale entry stays valid until staleMs */ })
     }
     return hit.value
   }
@@ -106,5 +118,44 @@ export async function cachedSwr<T>(key: string, freshMs: number, staleMs: number
   const pending = inflight.get(key) as Promise<T> | undefined
   if (pending) return pending
 
-  return loadAndCache(key, freshMs, staleMs, fn)
+  return loadAndCache(key, freshMs, staleMs, fn, generation)
+}
+
+// Recompute a key now and install the result, for a background pass that OWNS
+// the refresh of that key. Unlike cachedSwr it is never satisfied by the value
+// it exists to replace, and unlike a bare call it shares cachedSwr's
+// single-flight, so a prewarm pass and a reader's background revalidation of the
+// same key collapse into one computation instead of racing.
+export function cacheRefresh<T>(key: string, freshMs: number, staleMs: number, fn: () => Promise<T>, generation?: number): Promise<T> {
+  assertDuration('freshMs', freshMs)
+  assertDuration('staleMs', staleMs)
+  if (staleMs < freshMs) throw new RangeError('staleMs must be greater than or equal to freshMs')
+  const pending = inflight.get(key) as Promise<T> | undefined
+  if (pending) return pending
+  return loadAndCache(key, freshMs, staleMs, fn, generation)
+}
+
+// Adopt an already-computed value — a page persisted to ClickHouse by an earlier
+// process — as a key's STALE value. It is never treated as fresh, so the first
+// reader serves it immediately and starts the refresh that replaces it, instead
+// of blocking on a cold recompute. `load` runs only when the key holds nothing,
+// so a warm cache pays nothing for it, and it may not outlive the freshness the
+// persisted value already declares (`staleMs` is the remainder of that budget).
+export async function seedStale<T>(key: string, load: () => Promise<{ value: T; staleMs: number } | null>): Promise<boolean> {
+  if (occupied(key, Date.now())) return false
+  const seed = await load()
+  if (!seed || !Number.isFinite(seed.staleMs) || seed.staleMs <= 0) return false
+  const at = Date.now()
+  // Re-check: the load above is a round trip, and a reader may have filled the
+  // key meanwhile. A live entry is never older than a persisted one.
+  if (occupied(key, at)) return false
+  store.set(key, { value: seed.value, freshUntil: at, expiresAt: at + seed.staleMs, lastAccessedAt: nextAccess() })
+  prune(at)
+  return true
+}
+
+function occupied(key: string, now: number): boolean {
+  if (inflight.has(key)) return true
+  const hit = store.get(key)
+  return hit != null && hit.expiresAt > now
 }
