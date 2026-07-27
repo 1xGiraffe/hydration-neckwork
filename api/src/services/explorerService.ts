@@ -19,6 +19,7 @@ import {
 import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
 import { xcmJourneySourcesFor, xcmJourneysByOriginTx } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
+import { canSkipRepublish } from './snapshotRepublish.ts'
 import { createHash } from 'node:crypto'
 import { resolveModuleError } from './runtimeErrorNames.ts'
 
@@ -3746,7 +3747,7 @@ async function loadAllLatestMoneyMarketAggregates(): Promise<LatestMoneyMarketAg
 
 const MONEY_MARKET_ACCOUNT_VALUES_REFRESH_MS = 5 * 60_000
 let moneyMarketAccountValuesRefreshTimer: ReturnType<typeof setInterval> | null = null
-let moneyMarketAccountValuesRefreshInflight: Promise<void> | null = null
+let moneyMarketAccountValuesRefreshInflight: Promise<'republished' | 'unchanged'> | null = null
 
 export async function moneyMarketAccountValueSnapshotReady(): Promise<boolean> {
   try {
@@ -3772,7 +3773,27 @@ export async function moneyMarketAccountValueSnapshotReady(): Promise<boolean> {
   } catch { return false }
 }
 
-async function refreshMoneyMarketAccountValuesUncached(): Promise<void> {
+// Checksummed form of one stored money-market claim row: every column of
+// money_market_account_value_snapshots except the generation's own identity
+// (`snapshot_id`, `computed_at`) and the two columns that are pure functions of
+// columns already covered — `holder` (the H160 whose account id this is) and
+// `market_key` (the configured market of `pool_address`).
+export const moneyMarketClaimChecksumFields = (claim: MoneyMarketAccountValueClaim): string =>
+  `${claim.accountId}|${claim.poolAddress}|${claim.reservePresent ? 1 : 0}|${claim.assetId}|${claim.supplied}|${claim.debt}|${claim.totalCollateralBase}|${claim.totalDebtBase}|${claim.availableBorrowsBase}|${claim.liquidationThreshold}|${claim.ltv}|${claim.healthFactor}|${claim.blockHeight}|${claim.blockTimestamp}\n`
+
+// Two price maps are the same account-value generation only if every asset
+// carries the same price and 24h change: the pinned map values the whole
+// directory, so a moved price is a changed generation even when no claim did.
+export function samePriceGeneration(a: Map<number, PriceInfo>, b: Map<number, PriceInfo>): boolean {
+  if (a.size !== b.size) return false
+  for (const [assetId, price] of a) {
+    const other = b.get(assetId)
+    if (!other || other.price !== price.price || other.priceRaw !== price.priceRaw || other.change24h !== price.change24h) return false
+  }
+  return true
+}
+
+async function refreshMoneyMarketAccountValuesUncached(): Promise<'republished' | 'unchanged'> {
   const [anchorBlock, tokens, indices, aggregates] = await Promise.all([
     aTokenAnchorBlock(), getMmReserveTokens(), reserveIndicesNow(), loadAllLatestMoneyMarketAggregates(),
   ])
@@ -3783,9 +3804,39 @@ async function refreshMoneyMarketAccountValuesUncached(): Promise<void> {
 
   const snapshotId = String(Date.now())
   const now = new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
+  // Hash in the stored table's own order. The claim array's order follows the
+  // unordered ClickHouse reads it was built from, so an order-sensitive digest
+  // would report a changed generation whenever two identical rows swapped.
   const checksum = createHash('sha256')
-  for (const claim of claims) {
-    checksum.update(`${claim.accountId}|${claim.poolAddress}|${claim.reservePresent ? 1 : 0}|${claim.assetId}|${claim.supplied}|${claim.debt}|${claim.totalCollateralBase}|${claim.totalDebtBase}|${claim.availableBorrowsBase}|${claim.liquidationThreshold}|${claim.ltv}|${claim.healthFactor}|${claim.blockHeight}|${claim.blockTimestamp}\n`)
+  const ordered = [...claims].sort((a, b) => a.accountId.localeCompare(b.accountId)
+    || a.poolAddress.localeCompare(b.poolAddress)
+    || Number(a.reservePresent) - Number(b.reservePresent)
+    || a.assetId - b.assetId)
+  for (const claim of ordered) checksum.update(moneyMarketClaimChecksumFields(claim))
+  const digest = checksum.digest('hex')
+
+  // Prices and the raw principal below publish as one account-value generation.
+  // The map is reloaded every cycle even when the principal did not move: it is
+  // what the directory's Value column is computed against, and freezing it
+  // would leave a stale value beside a live price everywhere else.
+  const nextAccountValuePrices = new Map(await loadFreshPrices())
+  const pricesMoved = !samePriceGeneration(accountValuePriceMap, nextAccountValuePrices)
+  const pinPrices = (): void => {
+    if (!pricesMoved) return
+    accountValuePriceMap = nextAccountValuePrices
+    accountValueGenerationEpoch++
+  }
+
+  if (await canSkipRepublish(client, {
+    dataTable: 'money_market_account_value_snapshots', stateTable: 'money_market_account_value_snapshot_state',
+    rowCountColumn: 'claim_count', checksum: digest, rowCount: claims.length,
+  })) {
+    // The published generation is the one this cycle computed, so it stays
+    // current: the readiness flag it justified stays set, and every consumer
+    // keyed on the pointer's `computed_at` keeps its still-correct entry.
+    setMoneyMarketAccountValuesReady()
+    pinPrices()
+    return 'unchanged'
   }
   const batchSize = 1_000
   for (let offset = 0; offset < claims.length; offset += batchSize) {
@@ -3815,19 +3866,19 @@ async function refreshMoneyMarketAccountValuesUncached(): Promise<void> {
   if (Number(counts?.c) !== claims.length || Number(counts?.u) !== claims.length) {
     throw new Error(`incomplete money-market account value generation ${counts?.c ?? 0}/${claims.length}`)
   }
-  // Prices and raw principal publish as one account-value generation. General
-  // Explorer prices may continue refreshing every 30 seconds, but account list
-  // and detail stay pinned together until the next bounded five-minute rebuild.
-  const nextAccountValuePrices = new Map(await loadFreshPrices())
   await client.insert({
     table: 'price_data.money_market_account_value_snapshot_state',
     values: [{
       snapshot_key: 'current', snapshot_id: snapshotId,
       source_holding_count: holdings.length, source_position_count: aggregates.length,
-      claim_count: claims.length, source_checksum: checksum.digest('hex'), computed_at: now,
+      claim_count: claims.length, source_checksum: digest, computed_at: now,
     }],
     format: 'JSONEachRow',
   })
+  // A republished principal is a new account-value generation whether or not
+  // prices moved with it, so the pinned map and the epoch advance together with
+  // it. General Explorer prices may keep refreshing every 30 seconds; account
+  // list and detail stay pinned to this generation.
   accountValuePriceMap = nextAccountValuePrices
   accountValueGenerationEpoch++
   if (!(await moneyMarketAccountValueSnapshotReady())) throw new Error('published money-market account value generation failed parity check')
@@ -3862,9 +3913,10 @@ async function refreshMoneyMarketAccountValuesUncached(): Promise<void> {
       })
     }
   }
+  return 'republished'
 }
 
-export function refreshMoneyMarketAccountValues(): Promise<void> {
+export function refreshMoneyMarketAccountValues(): Promise<'republished' | 'unchanged'> {
   if (moneyMarketAccountValuesRefreshInflight) return moneyMarketAccountValuesRefreshInflight
   const request = refreshMoneyMarketAccountValuesUncached().finally(() => {
     if (moneyMarketAccountValuesRefreshInflight===request) moneyMarketAccountValuesRefreshInflight=null
@@ -3876,7 +3928,9 @@ export function refreshMoneyMarketAccountValues(): Promise<void> {
 export function startMoneyMarketAccountValuesRefresh(): void {
   if (moneyMarketAccountValuesRefreshTimer) return
   moneyMarketAccountValuesRefreshTimer=setInterval(() => {
-    void refreshMoneyMarketAccountValues().catch(error => console.error('[accounts] money-market value refresh failed',error))
+    void refreshMoneyMarketAccountValues()
+      .then(outcome => console.info('[accounts] money-market values', { outcome }))
+      .catch(error => console.error('[accounts] money-market value refresh failed',error))
   },MONEY_MARKET_ACCOUNT_VALUES_REFRESH_MS)
   moneyMarketAccountValuesRefreshTimer.unref()
 }
@@ -4510,7 +4564,7 @@ export function buildOmnipoolAccountClaims(
 
 const OMNIPOOL_ACCOUNT_CLAIMS_REFRESH_MS = 5 * 60_000
 let omnipoolAccountClaimsRefreshTimer: ReturnType<typeof setInterval> | null = null
-let omnipoolAccountClaimsRefreshInflight: Promise<void> | null = null
+let omnipoolAccountClaimsRefreshInflight: Promise<'republished' | 'unchanged'> | null = null
 
 export async function omnipoolAccountClaimsSnapshotReady(): Promise<boolean> {
   try {
@@ -4543,7 +4597,13 @@ export async function omnipoolAccountClaimsSnapshotReady(): Promise<boolean> {
   } catch { return false }
 }
 
-async function refreshOmnipoolAccountClaimsUncached(): Promise<void> {
+// Checksummed form of one stored claim row: every column of
+// omnipool_account_claim_snapshots except the generation's own identity
+// (`snapshot_id`, `computed_at`).
+export const omnipoolClaimChecksumFields = (claim: OmnipoolAccountClaim): string =>
+  `${claim.positionId}|${claim.accountId}|${claim.assetId}|${claim.amount}|${claim.hubAmount}|${claim.venue}\n`
+
+async function refreshOmnipoolAccountClaimsUncached(): Promise<'republished' | 'unchanged'> {
   const [positions, state] = await Promise.all([
     reconstructAllOmnipoolPositions(),
     loadOmnipoolState(),
@@ -4553,9 +4613,24 @@ async function refreshOmnipoolAccountClaimsUncached(): Promise<void> {
 
   const snapshotId = String(Date.now())
   const now = new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
+  // Hash the CLAIMS, not the positions they came from: a claim is the position
+  // valued against current pool state, so two identical position sets under
+  // different reserves publish different withdrawal amounts. Hashing the
+  // sources would call that "unchanged" and freeze the directory's LP column.
   const checksum = createHash('sha256')
-  for (const position of [...positions].sort((a, b) => a.positionId.localeCompare(b.positionId))) {
-    checksum.update(`${position.positionId}|${position.accountId}|${position.venue}|${position.dec.assetId}|${position.dec.shares}|${position.dec.amount}|${position.dec.priceNum}\n`)
+  for (const claim of [...claims].sort((a, b) => a.positionId.localeCompare(b.positionId))) {
+    checksum.update(omnipoolClaimChecksumFields(claim))
+  }
+  const digest = checksum.digest('hex')
+  if (await canSkipRepublish(client, {
+    dataTable: 'omnipool_account_claim_snapshots', stateTable: 'omnipool_account_claim_snapshot_state',
+    rowCountColumn: 'claim_count', checksum: digest, rowCount: claims.length,
+  })) {
+    // The published generation is the one this cycle computed, so it stays
+    // current: the readiness flag it justified stays set and no consumer keyed
+    // on the pointer's `computed_at` is invalidated.
+    setOmnipoolAccountClaimsReady()
+    return 'unchanged'
   }
 
   // Bounded batches make a failed refresh cheap to retry. The state marker is
@@ -4594,7 +4669,7 @@ async function refreshOmnipoolAccountClaimsUncached(): Promise<void> {
     values: [{
       snapshot_key: 'current', snapshot_id: snapshotId,
       source_position_count: positions.length, claim_count: claims.length,
-      source_checksum: checksum.digest('hex'), computed_at: now,
+      source_checksum: digest, computed_at: now,
     }],
     format: 'JSONEachRow',
   })
@@ -4632,9 +4707,10 @@ async function refreshOmnipoolAccountClaimsUncached(): Promise<void> {
       clickhouse_settings: { mutations_sync: '1' },
     })
   }
+  return 'republished'
 }
 
-export function refreshOmnipoolAccountClaims(): Promise<void> {
+export function refreshOmnipoolAccountClaims(): Promise<'republished' | 'unchanged'> {
   if (omnipoolAccountClaimsRefreshInflight) return omnipoolAccountClaimsRefreshInflight
   const request = refreshOmnipoolAccountClaimsUncached().finally(() => {
     if (omnipoolAccountClaimsRefreshInflight === request) omnipoolAccountClaimsRefreshInflight = null
@@ -4646,7 +4722,9 @@ export function refreshOmnipoolAccountClaims(): Promise<void> {
 export function startOmnipoolAccountClaimsRefresh(): void {
   if (omnipoolAccountClaimsRefreshTimer) return
   omnipoolAccountClaimsRefreshTimer = setInterval(() => {
-    void refreshOmnipoolAccountClaims().catch(error => console.error('[accounts] Omnipool claim refresh failed', error))
+    void refreshOmnipoolAccountClaims()
+      .then(outcome => console.info('[accounts] Omnipool claims', { outcome }))
+      .catch(error => console.error('[accounts] Omnipool claim refresh failed', error))
   }, OMNIPOOL_ACCOUNT_CLAIMS_REFRESH_MS)
   omnipoolAccountClaimsRefreshTimer.unref()
 }

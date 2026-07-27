@@ -303,7 +303,8 @@ async function refresh(): Promise<void> {
       headBlock: head.height,
       headTsMs: head.ts,
     })
-    await persistLockSnapshot(client, rows, { blockHeight: head.height, relayHeight })
+    const outcome = await persistLockSnapshot(client, rows, { blockHeight: head.height, relayHeight })
+    console.info('[hdx] lock breakdown', { rows: rows.length, outcome })
   } catch (err) {
     console.error('[hdx] lock breakdown snapshot failed', err)
   }

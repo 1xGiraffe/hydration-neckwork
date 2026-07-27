@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { xxhashAsU8a } from '@polkadot/util-crypto'
 import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import type { ClickHouseClient } from '../db/client.ts'
+import { canSkipRepublish } from './snapshotRepublish.ts'
 import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
 import { decodeCompact } from './proxyMultisigService.ts'
 
@@ -28,6 +29,27 @@ export type BreakdownKind = 'lock' | 'reserve' | 'hold' | 'deposit'
 
 // GigaHdx unstakes mature 403,200 parachain blocks (28 days) after the unstake.
 export const GIGA_UNBONDING_BLOCKS = 403_200
+
+// Grid every projected unlock instant is snapped to. Finer than the coarsest
+// thing the UI renders from these dates (hours below 1.5 days, days above),
+// coarse enough that head drift crosses it a handful of times a day rather than
+// every refresh.
+export const PROJECTION_GRID_MS = 15 * 60_000
+export const snapProjection = (ms: number): number => Math.round(ms / PROJECTION_GRID_MS) * PROJECTION_GRID_MS
+
+// Project a block number to a wall-clock instant at the nominal 6s block time.
+// Snapping the BASIS — the extrapolated instant of block 0 — rather than each
+// projected date is what makes the result hold still: the basis is one shared
+// value that every date rides on, so real block time drifting away from 6s
+// moves all of them together, once per grid crossing (~9 times a day at the
+// current rate), instead of rewriting every dated row on every refresh. These
+// dates are estimates the UI renders as "in 18h" / "in 21d"; second-level
+// precision on them is noise, and it is noise the whole snapshot generation
+// would otherwise inherit.
+export function blockProjector(headTsMs: number, anchorBlock: number): (block: number) => number {
+  const basis = snapProjection(headTsMs - anchorBlock * 6000)
+  return block => basis + block * 6000
+}
 
 // One raw Balances.Locks / Tokens.Locks entry (id is the 8-byte ascii lock id).
 export interface LockRow { accountId: string; id: string; amount: bigint }
@@ -489,9 +511,12 @@ export async function collectLockBreakdownRows(input: CollectLockBreakdownInput)
     else merged.set(mapKey, { accountId, assetId, kind, source, amount, claimable, detail })
   }
 
-  const nowMs = input.headTsMs
-  const paraToMs = (block: number) => input.headTsMs + (block - input.headBlock) * 6000
-  const relayToMs = (block: number) => input.headTsMs + (block - input.relayHeight) * 6000
+  // Grid-snapped projections (see blockProjector): every dated row a generation
+  // publishes must hold still while the underlying lock does, or no generation
+  // is ever recognisably unchanged.
+  const paraToMs = blockProjector(input.headTsMs, input.headBlock)
+  const relayToMs = blockProjector(input.headTsMs, input.relayHeight)
+  const nowMs = paraToMs(input.headBlock)
   const unvested = unvestedByAccountRaw(input.vestingSchedules, input.relayHeight)
   const vestingEnd = new Map<string, number>()
   for (const s of input.vestingSchedules) {
@@ -562,8 +587,9 @@ export async function collectLockBreakdownRows(input: CollectLockBreakdownInput)
         const staked = row.amount > pendingTotal ? row.amount - pendingTotal : 0n
         // Act-now semantics: the staked part could be liquid after one unbond
         // period if the owner unstaked right now — a conditional 28d step, not
-        // an open-ended floor.
-        const unbondMs = nowMs + GIGA_UNBONDING_BLOCKS * 6000
+        // an open-ended floor. "28 days from now" has no fixed block behind it,
+        // so it only holds still if the `now` it extends from is on the grid too.
+        const unbondMs = snapProjection(nowMs) + GIGA_UNBONDING_BLOCKS * 6000
         sources.push({
           source, onchain: row.amount, open: 0n,
           steps: [
@@ -648,14 +674,24 @@ export async function collectLockBreakdownRows(input: CollectLockBreakdownInput)
   return [...merged.values()]
 }
 
+// Checksummed form of one stored row. Covers every column the snapshot table
+// carries apart from `snapshot_id` and `computed_at` (the generation's own
+// identity), so two generations with equal checksums are byte-identical to
+// every reader.
+export const lockRowChecksumFields = (r: BreakdownRow): string =>
+  `${r.accountId}|${r.assetId}|${r.kind}|${r.source}|${r.amount}|${r.claimable}|${r.detail}\n`
+
 // Publish one snapshot generation: insert under a fresh partition, verify the
 // row count round-trips, flip the state pointer, then drop older partitions —
-// the same shape as the money-market account-value snapshots.
+// the same shape as the money-market account-value snapshots. A generation
+// identical to the published one is not rewritten (see snapshotRepublish): the
+// account and tag balance pages keep reading the pointer they already read, and
+// the pointer's `computed_at` stays where it is.
 export async function persistLockSnapshot(
   client: ClickHouseClient,
   rows: BreakdownRow[],
   meta: { blockHeight: number; relayHeight: number },
-): Promise<void> {
+): Promise<'republished' | 'unchanged'> {
   // A gutted enumeration (RPC trouble) must never replace a good snapshot:
   // the chain has ~19k lock accounts, so a tiny row set means the read failed.
   if (rows.length < 1000) throw new Error(`lock breakdown suspiciously small (${rows.length} rows), keeping previous snapshot`)
@@ -665,7 +701,12 @@ export async function persistLockSnapshot(
   const sorted = [...rows].sort((a, b) => a.accountId === b.accountId
     ? (a.assetId - b.assetId) || a.kind.localeCompare(b.kind) || a.source.localeCompare(b.source)
     : a.accountId.localeCompare(b.accountId))
-  for (const r of sorted) checksum.update(`${r.accountId}|${r.assetId}|${r.kind}|${r.source}|${r.amount}|${r.claimable}|${r.detail}\n`)
+  for (const r of sorted) checksum.update(lockRowChecksumFields(r))
+  const digest = checksum.digest('hex')
+  if (await canSkipRepublish(client, {
+    dataTable: 'account_lock_snapshots', stateTable: 'account_lock_snapshot_state',
+    rowCountColumn: 'row_count', checksum: digest, rowCount: sorted.length,
+  })) return 'unchanged'
   const batchSize = 5_000
   for (let offset = 0; offset < sorted.length; offset += batchSize) {
     await client.insert({
@@ -694,7 +735,7 @@ export async function persistLockSnapshot(
     values: [{
       snapshot_key: 'current', snapshot_id: snapshotId, row_count: sorted.length,
       block_height: meta.blockHeight, relay_height: meta.relayHeight,
-      source_checksum: checksum.digest('hex'), computed_at: now,
+      source_checksum: digest, computed_at: now,
     }],
     format: 'JSONEachRow',
   })
@@ -709,6 +750,7 @@ export async function persistLockSnapshot(
       query_params: { partition: row.partition },
     })
   }
+  return 'republished'
 }
 
 // Read model for the account/tag balance endpoints: per display-relevant asset,
