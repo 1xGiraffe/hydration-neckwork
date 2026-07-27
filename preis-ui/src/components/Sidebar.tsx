@@ -222,8 +222,9 @@ export default function Sidebar({
         .market-row:hover { background: var(--panel-hover); transform: translateX(2px); }
         .market-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
         .market-row:active { transform: translateX(1px) scale(0.995); }
+        /* The tinted row already marks the selection — the symbol keeps the
+           full-contrast text color so it stays the most readable row. */
         .market-row.active { background: var(--accent-soft); }
-        .market-row.active .m-sym { color: var(--accent); }
         .m-sym { font-size: 13px; font-weight: 600; color: var(--text-high); display: flex; flex-direction: column; gap: 1px; min-width: 0; }
         .m-sym small { font-family: 'GeistMono', monospace; font-size: 10px; font-weight: 400; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .m-price { font-family: 'GeistMono', monospace; font-size: 12px; font-weight: 500; color: var(--text-high); text-align: right; }

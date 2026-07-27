@@ -240,8 +240,9 @@ export default function AssetPickerDialog({
           .picker-row { display: grid; grid-template-columns: 1fr 100px 70px 70px 70px 110px; gap: 16px; align-items: center; padding: 11px 22px; border-bottom: 1px solid var(--separator); cursor: pointer; border-left: 3px solid transparent; transition: background 140ms ease, transform 140ms var(--ease-out-soft); animation: preis-list-row-in 180ms var(--ease-out-soft) both; animation-delay: var(--row-delay, 0ms); }
           .picker-row:hover { background: var(--panel-hover); transform: translateX(2px); }
           .picker-row.active { background: var(--panel-hover); border-left-color: var(--text-medium); }
+          /* The tint and accent edge already mark the current pair — the symbol
+             keeps the full-contrast text color so it stays the most readable row. */
           .picker-row.current { background: var(--accent-soft); border-left-color: var(--accent); }
-          .picker-row.current .picker-sym { color: var(--accent); }
           .picker-asset { display: flex; align-items: center; gap: 12px; min-width: 0; }
           .picker-sym { display: block; font-size: 14px; font-weight: 600; color: var(--text-high); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
           .picker-name { display: flex; flex-direction: column; gap: 1px; min-width: 0; overflow: hidden; }
