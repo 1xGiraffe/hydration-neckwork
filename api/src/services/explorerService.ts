@@ -9709,14 +9709,14 @@ export async function getDcaExecution(height: number, eventIndex: number): Promi
   return cached(`explorer:dca-exec:${height}:${eventIndex}`, 60_000, async () => {
     const evRes = await client.query({
       query: `SELECT toString(id) AS id, event_name, extrinsic_index, toString(block_timestamp) AS ts,
-                     toString(amount_in) AS amount_in, toString(amount_out) AS amount_out
+                     toString(amount_in) AS amount_in, toString(amount_out) AS amount_out, error
               FROM price_data.dca_events
               WHERE block_height = {h:UInt32} AND event_index = {i:UInt32}
                 AND event_name IN ('DCA.TradeExecuted','DCA.TradeFailed')
               ORDER BY block_height DESC LIMIT 1`,
       query_params: { h: height, i: eventIndex }, format: 'JSONEachRow',
     })
-    const ev = (await evRes.json<{ id: string; event_name: string; extrinsic_index: number | null; ts: string; amount_in: string; amount_out: string }>())[0]
+    const ev = (await evRes.json<{ id: string; event_name: string; extrinsic_index: number | null; ts: string; amount_in: string; amount_out: string; error: string }>())[0]
     if (!ev) return null
     const scheduleId = Number(ev.id)
     const schedRes = await client.query({
@@ -9732,20 +9732,14 @@ export async function getDcaExecution(height: number, eventIndex: number): Promi
 
     let failureReason: FailureReason | null = null
     if (outcome.status === 'failed') {
-      const [errRes, specRes] = await Promise.all([
-        client.query({
-          query: `SELECT JSONExtractRaw(args_json,'error') AS error FROM price_data.raw_events
-                  WHERE event_name = 'DCA.TradeFailed' AND block_height = {h:UInt32} AND event_index = {i:UInt32} LIMIT 1`,
-          query_params: { h: height, i: eventIndex }, format: 'JSONEachRow',
-        }),
-        client.query({
-          query: `SELECT spec_version FROM price_data.blocks WHERE block_height = {h:UInt32} LIMIT 1`,
-          query_params: { h: height }, format: 'JSONEachRow',
-        }),
-      ])
-      const errJson = (await errRes.json<{ error: string }>())[0]?.error ?? null
+      // The failure event's own row carries the decoded error, so naming the
+      // reason only needs the runtime metadata for its spec version.
+      const specRes = await client.query({
+        query: `SELECT spec_version FROM price_data.blocks WHERE block_height = {h:UInt32} LIMIT 1`,
+        query_params: { h: height }, format: 'JSONEachRow',
+      })
       const specVersion = (await specRes.json<{ spec_version: number }>())[0]?.spec_version ?? 0
-      failureReason = dispatchErrorReason(errJson, specVersion, resolveModuleError)
+      failureReason = dispatchErrorReason(ev.error || null, specVersion, resolveModuleError)
     }
 
     const detail: DcaExecutionDetail = {
@@ -9863,10 +9857,14 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
         query_params: { sid: scheduleId }, format: 'JSONEachRow',
       }),
       client.query({
-        query: `SELECT block_height, ts, event_index, extrinsic_index, event_name, amount_in, amount_out
+        // `error` is DCA.TradeFailed's dispatch error, decoded once by the MV that
+        // feeds this table. Re-reading raw_events for the rows already listed here
+        // matched on (block_height, event_index) across tables and decompressed
+        // args_json for every row in every granule those keys touched.
+        query: `SELECT block_height, ts, event_index, extrinsic_index, event_name, amount_in, amount_out, error
                 FROM (
                   SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, id,
-                         toString(amount_in) AS amount_in, toString(amount_out) AS amount_out
+                         toString(amount_in) AS amount_in, toString(amount_out) AS amount_out, error
                   FROM price_data.dca_events
                   WHERE id = {sid:UInt64} AND event_name IN ('DCA.TradeExecuted','DCA.TradeFailed')
                   LIMIT 1 BY event_name, block_height, event_index, id
@@ -9895,18 +9893,7 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
     const aIn = asset(pair.assetIn), aOut = asset(pair.assetOut)
     const terminated = life.find(l => l.event_name === 'DCA.Terminated')
     const completed = life.find(l => l.event_name === 'DCA.Completed')
-    const executionRows = await exRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; amount_in: string; amount_out: string }>()
-    const failedTuples = executionRows.filter(x => x.event_name === 'DCA.TradeFailed').map(x => `(${x.block_height},${x.event_index})`)
-    const errors = new Map<string, string>()
-    if (failedTuples.length) {
-      const errorRes = await client.query({
-        query: `SELECT block_height, event_index, JSONExtractRaw(args_json,'error') AS error
-                FROM price_data.raw_events
-                WHERE event_name = 'DCA.TradeFailed' AND (block_height,event_index) IN (${failedTuples.join(',')})`,
-        format: 'JSONEachRow',
-      })
-      for (const e of await errorRes.json<{ block_height: number; event_index: number; error: string }>()) errors.set(`${e.block_height}:${e.event_index}`, e.error)
-    }
+    const executionRows = await exRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; amount_in: string; amount_out: string; error: string }>()
     const rows: ActivityRow[] = executionRows.map(x => {
       const failed = x.event_name === 'DCA.TradeFailed'
       // A failed attempt only knows the schedule's fixed per-trade leg; value
@@ -9919,13 +9906,18 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
         valueUsd: legs.amountOut != null
           ? usdValue(prices, aOut.assetId, legs.amountOut, aOut.decimals)
           : legs.amountIn != null ? usdValue(prices, aIn.assetId, legs.amountIn, aIn.decimals) : null,
-        dca: true, dcaStatus: failed ? 'failed' : undefined, dcaError: errors.get(`${x.block_height}:${x.event_index}`),
+        dca: true, dcaStatus: failed ? 'failed' : undefined, dcaError: x.error || undefined,
         dcaScheduleId: scheduleId, linkBlock: x.block_height, linkIndex: x.extrinsic_index,
       }
     })
     await applyHistoricalUsd(rows, activityHistPick)
     let statusReason: string | null = null
     if (terminated && Number(terminated.xi) < 0) {
+      // Not foldable into dca_events the way the failure errors above are:
+      // dca_events_mv writes '' AS error for DCA.Terminated, so the column is
+      // empty for every terminated row and reading it would blank this reason.
+      // Termination errors are only in raw_events, and this is a point lookup on
+      // the primary key.
       const errRes = await client.query({
         query: `SELECT JSONExtractRaw(args_json,'error') AS error FROM price_data.raw_events
                 WHERE event_name = 'DCA.Terminated' AND block_height = {bh:UInt32} AND event_index = {ei:UInt32} LIMIT 1`,

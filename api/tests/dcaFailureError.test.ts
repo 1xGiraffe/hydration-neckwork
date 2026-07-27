@@ -43,4 +43,53 @@ describe('DCA failure errors come from the read model', () => {
     expect(failures).not.toContain('args_json')
     expect(failures).not.toContain('raw_events')
   })
+
+  // Module-level function bodies end at the first column-0 closing brace.
+  const body = (name: string): string => {
+    const start = explorerService.indexOf(`export async function ${name}(`)
+    expect(start, name).toBeGreaterThan(-1)
+    return explorerService.slice(start, start + explorerService.slice(start).indexOf('\n}\n'))
+  }
+
+  it('takes the schedule page\'s failure errors off the rows it already listed', () => {
+    const schedule = body('getDcaSchedule')
+    // The row list comes from dca_events, so every row it can display has an
+    // error column already; the second query matched raw_events on a
+    // (block_height, event_index) tuple across tables to get the same string.
+    expect(schedule).toContain('dcaError: x.error || undefined')
+    expect(schedule).not.toContain('(block_height,event_index) IN')
+    expect(schedule).not.toContain("event_name = 'DCA.TradeFailed' AND (block_height")
+  })
+
+  it('reads no TradeFailed error from raw_events anywhere', () => {
+    const sites = [...explorerService.matchAll(/JSONExtractRaw\(args_json,'error'\)/g)]
+    // The one remaining site is DCA.Terminated's, which cannot use the column.
+    expect(sites).toHaveLength(1)
+    for (const site of sites) {
+      const stmt = explorerService.slice(site.index ?? 0, (site.index ?? 0) + 400)
+      expect(stmt).toContain("event_name = 'DCA.Terminated'")
+      expect(stmt).not.toContain('DCA.TradeFailed')
+    }
+  })
+
+  it('keeps the terminated schedule\'s reason on raw_events, which is its only source', () => {
+    // dca_events_mv writes '' AS error for DCA.Terminated, so folding this site
+    // in the way the failure sites were folded would blank every terminated
+    // schedule's status reason with nothing to catch it.
+    expect(statement(views, 'dca_events_mv')).toContain("'DCA.Terminated'")
+    const schedule = body('getDcaSchedule')
+    const at = schedule.indexOf('let statusReason')
+    expect(at).toBeGreaterThan(-1)
+    const reason = schedule.slice(at, schedule.indexOf('dcaTerminationReason(', at) + 200)
+    expect(reason).toContain('price_data.raw_events')
+    expect(reason).toContain("JSONExtractRaw(args_json,'error')")
+  })
+
+  it('reads the execution page\'s failure reason from the event row it already fetched', () => {
+    const execution = body('getDcaExecution')
+    expect(execution).toContain('price_data.dca_events')
+    expect(execution).toContain('dispatchErrorReason(ev.error || null,')
+    expect(execution).not.toContain('raw_events')
+    expect(execution).not.toContain('args_json')
+  })
 })
