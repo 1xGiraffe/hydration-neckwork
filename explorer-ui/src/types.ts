@@ -262,7 +262,16 @@ export interface ActiveDca {
   id: number; assetIn: AssetRef; assetOut: AssetRef; direction: string
   amountPerTrade: string; totalAmount: string; filledAmount: string; remainingAmount: string | null
   executionsDone: number; period: number; nextExecutionBlock: number | null
-  valueUsd: number | null; scheduleBlock: number; scheduleIndex: number | null
+  // Seconds actually observed between this order's trades. `period` is a block
+  // count and block time is not a constant (12s, ~6s, 2s ahead), so a duration
+  // has to come from measurement, not multiplication. Null before two trades.
+  periodSeconds: number | null
+  // valueUsd is one trade at current prices, budgetUsd the whole remaining plan.
+  valueUsd: number | null; budgetUsd: number | null
+  // Owner's spendable balance of the sold asset, on open-ended orders only —
+  // the only thing that can date an order with no budget to run out of.
+  fundingBalance: string | null
+  scheduleBlock: number; scheduleIndex: number | null
 }
 export interface MoneyMarketPosition {
   marketKey: string
@@ -668,8 +677,23 @@ export interface DcaScheduleDetail {
   direction: string
   amountPer: string
   totalAmount: string
+  // What one trade and the whole budget are worth — at today's price while the
+  // schedule is live, at the price of the day it stopped once it has finished
+  // (the era its own executions traded in).
+  amountPerUsd: number | null
+  budgetUsd: number | null
+  usdBasis: 'current' | 'ended'
   period: number
+  // Seconds actually observed between this schedule's trades (median of its most
+  // recent gaps), null before it has run twice. See ActiveDca.periodSeconds.
+  periodSeconds: number | null
   maxRetries: number
+  // Highest block the pallet has planned an execution for — the anchor for the
+  // next-execution countdown and the budget's remaining runway.
+  nextExecutionBlock: number | null
+  // Owner's spendable balance of the sold asset, on live open-ended schedules
+  // only: what dates an order that has no budget to exhaust.
+  fundingBalance: string | null
   status: 'active' | 'completed' | 'terminated' | 'cancelled'
   statusAt: string | null
   // Named termination reason for error terminations (e.g. "token frozen").

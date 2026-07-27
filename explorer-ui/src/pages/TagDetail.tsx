@@ -92,7 +92,7 @@ export function TagDetail({ tagId }: { tagId: string }) {
 
               {activeView === 'positions' && (<>
               <MoneyMarketPositions markets={mmList} />
-              {activeDcas.length > 0 && <ActiveDcaTable dcas={activeDcas} headBlock={headBlock} headTime={stats?.headTime} now={now} />}
+              {activeDcas.length > 0 && <ActiveDcaTable dcas={activeDcas} headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />}
               {liquidityPositions.length > 0 && <LiquidityPositionsTable positions={liquidityPositions} />}
               </>)}
 

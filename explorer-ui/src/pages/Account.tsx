@@ -133,7 +133,7 @@ export function Account({ address }: { address: string }) {
 
               {activeView === 'positions' && (<>
               <MoneyMarketPositions markets={mmList} defisimAddress={data.evmAddress ?? explicitEvmBinding ?? data.accountId} />
-              {data.activeDcas && <ActiveDcaTable dcas={data.activeDcas} headBlock={headBlock} headTime={stats?.headTime} now={now} />}
+              {data.activeDcas && <ActiveDcaTable dcas={data.activeDcas} headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />}
               {data.liquidityPositions && <LiquidityPositionsTable positions={data.liquidityPositions} />}
               </>)}
 

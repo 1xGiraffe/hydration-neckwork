@@ -1418,6 +1418,73 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 /* portfolio sparkline */
 .spark { display: inline-block; vertical-align: middle; }
 
+/* ============ DCA schedules ============
+   A DCA is scheduled in blocks but read in time, so every surface here leads
+   with the duration and keeps the block count in .dca-blocks behind it. */
+.prog-ring { position: relative; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.prog-ring svg { width: 100%; height: 100%; display: block; }
+.prog-ring .pr-track { stroke: var(--panel-hover); }
+.prog-ring .pr-label {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-family: 'GeistMono'; font-size: 15px; font-weight: 600; color: var(--text-high); letter-spacing: -0.02em;
+}
+.prog-ring .pr-unit { font-size: 10px; color: var(--text-low); margin-left: 1px; }
+.prog-ring .pr-runs { font-size: 13px; }
+
+/* The order, its progress and its next move, above the schedule's detail list.
+   Padded like a .dl row so the ring lines up with the labels under it rather
+   than floating against the card's rounded corner. */
+.dca-hero { display: flex; align-items: center; gap: 16px; padding: 18px; border-bottom: 1px solid var(--separator); flex-wrap: wrap; }
+.dca-hero-body { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+/* One type size for the whole sentence, chips included: the words are centred in
+   their line box and a chip's symbol is centred on its 20px icon, so the two only
+   share a baseline while they share a size — at 15px sans over 12px mono the
+   words visibly rode above the amounts. */
+.dca-order { font-size: 14px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.dca-order .asset-chip, .dca-order .trade-leg, .dca-order .mono { font-size: inherit; }
+.dca-order .dca-every { color: var(--text-medium); }
+.dca-hero-facts { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 13px; color: var(--text-medium); }
+/* Separator ahead of each fact but the first: a wrapped line then starts with
+   the dot instead of ending on one. */
+.dca-hero-facts > span + span::before { content: '·'; margin-right: 7px; color: var(--text-lowest); }
+.dca-hero-facts .dca-state { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+/* The mechanism behind a duration, never competing with it. */
+.dca-blocks { font-size: 11px; }
+/* Marks a dollar figure as the price of its own day, not of today. */
+.dca-then { font-size: 11px; color: var(--text-lowest); }
+/* Second line of a table cell: the dollar value under an amount, the block under
+   a countdown, the trades left under a runway. */
+/* Every cell's second line shares one box, so the dollar figures, block numbers,
+   trade counts and balances across a row sit on the same baseline. Nothing taller
+   than text goes in here — an asset icon would lift its own line out of step. */
+.dca-sub { display: block; font-size: 11px; line-height: 1.5; margin-top: 1px; }
+/* The ring rides inside the first line rather than setting the row's height. */
+.dca-filled .prog-ring { align-self: center; }
+/* Most cells in an active order are two lines (a value over its dollar figure,
+   its block, its trade count). Top-aligning the row puts every first line on one
+   line — including the selling → buying pair, which otherwise floated in the
+   middle of the tallest cell.
+   Those first lines hold different things: a 20px asset chip, an 18px ring, plain
+   text. Left alone each sets its own height and every second line in the row
+   starts somewhere else, so they all get the same 22px line to sit in. */
+.dca-tbl tbody td { vertical-align: top; line-height: 22px; }
+.dca-tbl tbody td .trade-leg, .dca-tbl tbody td .asset-chip { height: 22px; vertical-align: middle; }
+.dca-tbl tbody td .asset-flow { align-items: center; }
+/* Block-level, not inline-flex: an inline box would be baseline-aligned inside the
+   cell's line box and gain a couple of pixels the other cells do not have, which
+   is exactly what pushed the ring's row below its neighbours. */
+/* Column gap only: `gap` also spaces WRAPPED rows, and that gap fell between the
+   ring's line and the trade count below it — the 7px that pushed this cell's
+   second line below every other one in the row. */
+.dca-filled { display: flex; align-items: center; justify-content: flex-end; column-gap: 7px; row-gap: 0; flex-wrap: wrap; }
+.dca-filled .dca-sub { flex-basis: 100%; }
+@media (max-width: 720px) {
+  /* In a phone card each cell is one right-aligned row, so the second line sits
+     under the first rather than beside the ring. */
+  .dca-hero { gap: 14px; }
+  .dca-tbl .dca-filled { justify-content: flex-end; }
+}
+
 /* searchable token combobox */
 .combo { position: relative; }
 .combo-input { width: 150px; cursor: text; }

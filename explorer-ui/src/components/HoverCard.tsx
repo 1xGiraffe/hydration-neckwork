@@ -4,6 +4,7 @@ import { api } from '../api/explorer'
 import { useAddressSummary, useAsset, useExtrinsic, useBlock, useTagSummary, useTrade, useStats, useDcaSchedule, useDcaExecution } from '../hooks/useExplorerData'
 import { F, AssetIcon, AssetChip, AssetAmount, AddrPill, CallPill, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow } from './ui'
 import { ayeSharePct, selectTally } from '../utils/referendumVotes'
+import { dcaCadence, dcaProgress, fmtDuration } from '../utils/dca'
 import type { AssetRef } from '../types'
 
 // Global hover preview cards for account (.addr-pill), tag (/tag/… links),
@@ -338,10 +339,17 @@ function DcaScheduleHover({ id }: { id: string }) {
           ? <>buys <AssetAmount asset={data.assetOut} raw={data.amountPer} /> with <AssetChip asset={data.assetIn} /></>
           : <>sells <AssetAmount asset={data.assetIn} raw={data.amountPer} /> → <AssetChip asset={data.assetOut} /></>}
       </span></div>
-      <div className="hc-row"><span>Cadence</span><span className="mono">every {F.int(data.period)} blocks</span></div>
+      <div className="hc-row"><span>Every</span><span className="mono" title={`${F.int(data.period)} blocks`}>{fmtDuration(dcaCadence(data.periodSeconds, data.period).seconds)}</span></div>
       <div className="hc-row"><span>Budget</span>{data.totalAmount === '0'
         ? <span className="mono">open-ended</span>
-        : <AssetAmount asset={data.assetIn} raw={data.totalAmount} />}</div>
+        : <span>
+          <AssetAmount asset={data.assetIn} raw={data.totalAmount} />
+          {data.budgetUsd != null && <span className="mono muted"> · {F.usd(data.budgetUsd)}</span>}
+        </span>}</div>
+      {(() => {
+        const { pct, projected } = dcaProgress(data.totalAmount, data.executions.totalIn, data.fundingBalance)
+        return pct != null ? <div className="hc-row"><span>Filled</span><span className="mono">{projected ? '~' : ''}{Math.round(pct)}%</span></div> : null
+      })()}
       <div className="hc-row"><span>Executed</span><span className="mono">{F.int(data.executions.count)} trade{data.executions.count === 1 ? '' : 's'}{data.executions.failed > 0 ? ` · ${F.int(data.executions.failed)} failed` : ''}</span></div>
       {data.who && <div className="hc-row"><span>Owner</span><AddrPill account={data.who} noCopy /></div>}
     </>

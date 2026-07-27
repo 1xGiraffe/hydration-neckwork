@@ -1,11 +1,12 @@
 /* eslint-disable react-refresh/only-export-components -- shared account-section components + their count helper */
-import { F, AssetIcon, AssetAmount, AreaChart, ChartSkeleton, healthFactorDisplay, AddrPill, MomentLink, rowNav, Dash } from './ui'
+import { F, AssetIcon, AssetAmount, AreaChart, ChartSkeleton, healthFactorDisplay, AddrPill, MomentLink, ProgressRing, rowNav, Dash } from './ui'
 import type { ChartMarker, DetailTab } from './ui'
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
 import { performancePoints } from './performance'
 import { CAT } from './activityColors'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
+import { blockSeconds, blockSpanSeconds, dcaCadence, dcaProgress, dcaRunway, fmtDuration } from '../utils/dca'
 import type { MoneyMarketPosition, LpPosition, ActiveDca, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent } from '../types'
 import type { ListCount } from '../api/explorer'
 import type { ReactNode } from 'react'
@@ -14,33 +15,32 @@ import type { ReactNode } from 'react'
 // same on-chain data (balances, money-market card, DCA orders, LP positions,
 // portfolio chart, balance history) with identical markup.
 
-// Live "next execution" cell for an Active DCA order. Hydration blocks are ~6s,
-// so the countdown to the next execution block is (nextBlock - head) * 6 seconds.
+// Live "next execution" cell for an Active DCA order: the distance to its planned
+// block at the chain's measured pace (`blockSec`, from stats — block time has been
+// 12s, is ~6s and is heading for 2s, so it is never assumed here).
 // Re-renders on the shared 1s clock (`now`) so the countdown ticks; the title
 // carries the estimated wall-clock time. Once the block is at/under the head it's
 // either due (waiting for the next plan) or pending.
-export function DcaNextExec({ nextBlock, headBlock, headTime, now }: { nextBlock: number | null; headBlock: number; headTime?: string; now: number }) {
+//
+// Time leads and the block trails it: "in 12m" is the answer, block 13,336,587
+// is where it will happen.
+export function DcaNextExec({ nextBlock, headBlock, headTime, now, blockSec }: { nextBlock: number | null; headBlock: number; headTime?: string; now: number; blockSec?: number }) {
   if (nextBlock == null) return <Dash />
   // The block links even when not yet produced — the block page renders a live
   // countdown for future heights.
-  const blockLink = <Link to={paths.block(nextBlock)} className="hash">{F.int(nextBlock)}</Link>
+  const blockLink = <span className="dca-blocks muted mono"><Link to={paths.block(nextBlock)} className="hash">{F.int(nextBlock)}</Link></span>
   const blocksAway = nextBlock - headBlock
   if (blocksAway <= 0 || !headBlock) {
-    return <span title="Next execution is at or before the current head — awaiting its turn">{blockLink} · due</span>
+    return <span title="Next execution is at or before the current head — awaiting its turn">due <span className="dca-sub">{blockLink}</span></span>
   }
-  const timing = estimateBlockCountdown(nextBlock, headBlock, headTime, now)
-  const secondsUntil = timing?.secondsUntil ?? blocksAway * 6
+  const timing = estimateBlockCountdown(nextBlock, headBlock, headTime, now, blockSeconds(blockSec))
+  const secondsUntil = timing?.secondsUntil ?? blockSpanSeconds(blocksAway, blockSec)
   const est = timing ? new Date(timing.etaMs) : null
   return (
-    <span title={est ? `Est. ${est.toLocaleString()}` : `Approximately ${blocksAway} blocks away`}>{blockLink} · in {fmtCountdown(secondsUntil)}</span>
+    <span title={est ? `Est. ${est.toLocaleString()}` : `Approximately ${blocksAway} blocks away`}>
+      in {fmtDuration(secondsUntil, { seconds: true })}<span className="dca-sub">{blockLink}</span>
+    </span>
   )
-}
-function fmtCountdown(total: number): string {
-  const s = Math.max(0, Math.floor(total))
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60
-  if (h > 0) return `${h}h ${m}m`
-  if (m > 0) return `${m}m ${sec}s`
-  return `${sec}s`
 }
 
 // Value-event marker presentation: kind → badge label, marker link slug and the
@@ -361,21 +361,41 @@ export function MoneyMarketPositions({ markets, defisimAddress }: { markets: Mon
   )
 }
 
-export function ActiveDcaTable({ dcas, headBlock, headTime, now }: { dcas: ActiveDca[]; headBlock: number; headTime?: string; now: number }) {
+// An active order answers, in this order: what it trades, how much per trade and
+// in total (with today's dollar value under each), how far along it is, how often
+// it fires, when that is next, and when the budget runs out. Cadence and timing
+// are durations; the blocks that produce them ride underneath in the quiet type.
+export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec }: { dcas: ActiveDca[]; headBlock: number; headTime?: string; now: number; blockSec?: number }) {
   if (!dcas.length) return null
   return (
     <>
       <div className="sec-title">Active DCA orders · {dcas.length}</div>
-      <div className="panel"><table className="tbl">
-        <thead><tr><th>Selling → Buying</th><th className="r">Per trade</th><th className="r">Budget</th><th className="r">Filled</th><th className="r">Every</th><th className="r">Next exec.</th></tr></thead>
+      <div className="panel"><table className="tbl dca-tbl">
+        <thead><tr>
+          <th>Selling → Buying</th><th className="r">Per trade</th><th className="r">Budget</th>
+          <th className="r">Filled</th><th className="r">Every</th><th className="r">Next trade</th><th className="r">Runs out</th>
+        </tr></thead>
         <tbody>
           {dcas.map(d => {
             // Buy orders specify the output per trade ("buy 80 USDC"); sell orders the input.
             const isBuy = d.direction === 'Buy'
             const perAsset = isBuy ? d.assetOut : d.assetIn
-            const total = d.totalAmount === '0' ? null : Number(d.totalAmount) / 10 ** d.assetIn.decimals
-            const filled = Number(d.filledAmount) / 10 ** d.assetIn.decimals
-            const pct = total && total > 0 ? Math.min(100, filled / total * 100) : null
+            const openEnded = d.totalAmount === '0'
+            // Open-ended orders have no budget to be a fraction of: their share and
+            // their end come from the balance still funding them (see dcaProgress).
+            const { pct, projected } = dcaProgress(d.totalAmount, d.filledAmount, d.fundingBalance)
+            const timing = d.nextExecutionBlock != null && headBlock
+              ? estimateBlockCountdown(d.nextExecutionBlock, headBlock, headTime, now, blockSeconds(blockSec))
+              : null
+            // Measured from this order's own trades where it has them, so an order
+            // that outlived a block-time change reads at the pace it runs now.
+            const cadence = dcaCadence(d.periodSeconds, d.period, blockSec)
+            const runway = dcaRunway({
+              direction: d.direction, amountPer: d.amountPerTrade, totalAmount: d.totalAmount,
+              filledAmount: d.filledAmount, executionsDone: d.executionsDone,
+              periodSeconds: cadence.seconds, secondsToNext: timing?.secondsUntil ?? null,
+              fundingBalance: d.fundingBalance,
+            })
             return (
               <tr key={d.id} {...rowNav(paths.dcaSchedule(d.id))} data-dca-schedule={d.id}>
                 <td data-label="Selling → Buying">
@@ -385,11 +405,48 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now }: { dcas: Activ
                     <span className="trade-leg"><AssetIcon assetId={d.assetOut.assetId} iconAssetId={d.assetOut.iconAssetId} symbol={d.assetOut.symbol} size={20} parachainId={d.assetOut.parachainId} origin={d.assetOut.origin} /> <span className="mono">{d.assetOut.symbol}</span></span>
                   </span>
                 </td>
-                <td data-label="Per trade" className="r"><AssetAmount asset={perAsset} raw={d.amountPerTrade} />{isBuy ? ' (buy)' : ''}</td>
-                <td data-label="Budget" className="r">{total != null ? <AssetAmount asset={d.assetIn} raw={d.totalAmount} /> : <span className="mono muted">open-ended</span>}</td>
-                <td data-label="Filled" className="r mono muted">{pct != null ? `${pct.toFixed(0)}% · ${d.executionsDone}×` : `${d.executionsDone}× · open-ended`}</td>
-                <td data-label="Every" className="r mono muted">{d.period} blocks</td>
-                <td data-label="Next exec." className="r mono muted"><DcaNextExec nextBlock={d.nextExecutionBlock} headBlock={headBlock} headTime={headTime} now={now} /></td>
+                <td data-label="Per trade" className="r">
+                  <AssetAmount asset={perAsset} raw={d.amountPerTrade} />{isBuy ? <span className="muted"> bought</span> : null}
+                  {d.valueUsd != null && <span className="dca-sub mono muted">{F.usd(d.valueUsd)}</span>}
+                </td>
+                <td data-label="Budget" className="r">
+                  {openEnded ? <>
+                    <span className="mono muted">open-ended</span>
+                    {d.fundingBalance != null && <span className="dca-sub mono muted" title="Owner’s balance of the sold asset — what the order still has to spend">
+                      {F.amount(d.fundingBalance, d.assetIn.decimals)} {d.assetIn.symbol} left
+                    </span>}
+                  </> : <>
+                    <AssetAmount asset={d.assetIn} raw={d.totalAmount} />
+                    {d.budgetUsd != null && <span className="dca-sub mono muted">{F.usd(d.budgetUsd)}</span>}
+                  </>}
+                </td>
+                <td data-label="Filled" className="r">
+                  <span className="dca-filled">
+                    <ProgressRing pct={pct} size={18} stroke={8} title={pct == null ? 'Open-ended order — no balance to project against'
+                      : projected ? `${pct.toFixed(1)}% of what it has spent plus what the owner’s balance still funds`
+                        : `${pct.toFixed(1)}% of the budget spent`} />
+                    <span className="mono">{pct != null ? `${projected ? '~' : ''}${Math.round(pct)}%` : '—'}</span>
+                    <span className="dca-sub mono muted">{F.int(d.executionsDone)} {d.executionsDone === 1 ? 'trade' : 'trades'}</span>
+                  </span>
+                </td>
+                <td data-label="Every" className="r mono" title={cadence.measured
+                  ? 'Measured from the gaps between this order\u2019s own trades'
+                  : 'Estimated from the chain\u2019s current block time'}>{cadence.measured ? '' : '~'}{fmtDuration(cadence.seconds)}
+                  <span className="dca-sub dca-blocks mono muted">{F.int(d.period)} blocks</span>
+                </td>
+                <td data-label="Next trade" className="r mono"><DcaNextExec nextBlock={d.nextExecutionBlock} headBlock={headBlock} headTime={headTime} now={now} blockSec={blockSec} /></td>
+                <td data-label="Runs out" className="r mono">
+                  {runway && runway.trades > 0
+                    ? <span title={runway.funded
+                      ? 'Projected from the owner’s current balance of the sold asset — a top-up extends it'
+                      : runway.estimated
+                        ? 'Estimated from what this order has spent per trade so far — a Buy order fixes what it buys, not what it costs'
+                        : 'At this order’s per-trade amount and cadence'}>
+                      {runway.estimated ? '~' : ''}{fmtDuration(runway.seconds)}
+                      <span className="dca-sub mono muted">{runway.estimated ? '~' : ''}{F.int(runway.trades)} to go</span>
+                    </span>
+                    : <span className="muted">—</span>}
+                </td>
               </tr>
             )
           })}

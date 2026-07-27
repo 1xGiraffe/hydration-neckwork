@@ -646,6 +646,37 @@ export function CopyTextButton({ label, text }: { label: string; text: string })
 }
 
 /* ============ charts ============ */
+// How far along something is, as a ring: a DCA schedule's spent budget today.
+// One geometry, one moving number — the dash length — so the ring reads the same
+// at 26px in a table cell and at 72px on a detail page. `pct` null draws the
+// track alone, which is what an open-ended schedule has to show: it is running,
+// it has no end to be a fraction of.
+export function ProgressRing({ pct, size = 46, stroke = 5, color = CAT.tradeDca, label, title }: {
+  pct: number | null
+  size?: number
+  stroke?: number
+  color?: string
+  label?: ReactNode      // centre text; omit for the small in-table ring
+  title?: string
+}) {
+  const r = (44 - stroke) / 2
+  const circumference = 2 * Math.PI * r
+  const filled = pct == null ? 0 : Math.max(0, Math.min(100, pct)) / 100
+  return (
+    <span className="prog-ring" style={{ width: size, height: size }} title={title}>
+      <svg viewBox="0 0 44 44" aria-hidden="true">
+        <circle className="pr-track" cx="22" cy="22" r={r} strokeWidth={stroke} fill="none" />
+        {filled > 0 && <circle
+          cx="22" cy="22" r={r} stroke={color} strokeWidth={stroke} fill="none" strokeLinecap="round"
+          strokeDasharray={`${(circumference * filled).toFixed(2)} ${circumference.toFixed(2)}`}
+          transform="rotate(-90 22 22)"
+        />}
+      </svg>
+      {label != null && <span className="pr-label">{label}</span>}
+    </span>
+  )
+}
+
 export function Sparkline({ data, w = 110, h = 30, change7d }: { data: number[]; w?: number; h?: number; change7d?: number | null }) {
   const id = useId()
   if (!data || data.length < 2) return <Dash />
