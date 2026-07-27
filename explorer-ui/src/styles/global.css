@@ -1792,9 +1792,15 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 }
 
 /* Referendum: tally bar, vote bubbles, and the ref link on vote rows. */
-.ref-link { color: var(--sky); text-decoration: none; max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; }
+.ref-link { color: var(--sky); text-decoration: none; max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
 .ref-link:hover { text-decoration: underline; }
 .ref-num { margin-right: 2px; }
+/* A vote row pairs the index with the title. The title ellipsizes, and an
+   inline-block that clips its overflow takes its baseline from its bottom edge
+   rather than its text — which sat the title half a pixel below the index in the
+   cell's plain inline flow. A baseline-aligned flex row uses the title's real
+   text baseline, so the two sit on one line despite their different sizes. */
+.ref-cell { display: inline-flex; align-items: baseline; min-width: 0; max-width: 100%; }
 /* Wider screens have the room for more of the title before the ellipsis. */
 @media (min-width: 1100px) { .ref-link { max-width: 40ch; } }
 @media (max-width: 720px) { .ref-link { max-width: 18ch; } }

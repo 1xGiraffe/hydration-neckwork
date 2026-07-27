@@ -31,12 +31,12 @@ function ReferendumCell({ row }: { row: VoteTableRow }) {
   if (!row.referendum) return <Dash />
   const label = row.referendumTitle ?? `Referendum #${row.referendum}`
   return (
-    <>
+    <span className="ref-cell">
       <span className="muted mono ref-num">#{row.referendum}</span>
       {row.referendumPallet
         ? <Link to={paths.referendum(row.referendumPallet, row.referendum)} className="ref-link">{row.referendumTitle ?? 'Referendum'}</Link>
         : <span className="muted">{label}</span>}
-    </>
+    </span>
   )
 }
 
