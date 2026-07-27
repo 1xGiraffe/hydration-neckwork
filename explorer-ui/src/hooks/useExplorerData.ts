@@ -2,11 +2,20 @@ import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { api } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
 import { useLive, LIVE_MS } from '../live'
+import { useHeldRows } from './useHeldRows'
 import type { AccountSort } from '../types'
 
 // List/feed hooks honour the global Live toggle. When live, they poll on LIVE_MS;
 // when paused, no refetch. The API's single-flight cache keeps DB load O(1) in
 // the number of connected clients regardless of poll rate.
+//
+// Every newest-first feed below wraps its page-0 result in useHeldRows, which
+// applies a poll's new rows only while the reader is at the top of the page —
+// see that hook for why. The query key doubles as the list's identity there, so
+// paging, tabbing or filtering is adopted at once while the same list standing
+// still is held. Ranked directories (useAccounts, useHolders) are excluded: they
+// serve a fixed-size page whose rows are replaced in rank order rather than
+// pushed down by an insertion.
 const DETAIL_POLL_MS = 15_000
 const SLOW_POLL_MS = 60_000
 
@@ -29,19 +38,23 @@ export function useStats(enabled = true) {
 }
 export function useBlocks(limit = 25, offset = 0, enabled = true) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['blocks', limit, offset], queryFn: ({ signal }) => api.blocks(limit, offset, signal), enabled, refetchInterval: enabled && offset === 0 ? ri : false, staleTime: 5000, placeholderData: keepPreviousData })
+  const key = ['blocks', limit, offset]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.blocks(limit, offset, signal), enabled, refetchInterval: enabled && offset === 0 ? ri : false, staleTime: 5000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useExtrinsics(limit = 25, signedOnly = true, from?: string, to?: string, offset = 0, filters?: ExtrinsicFilters) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['extrinsics', limit, signedOnly, from, to, offset, filters], queryFn: ({ signal }) => api.extrinsics(limit, signedOnly, from, to, offset, filters, signal), refetchInterval: offset === 0 ? ri : false, staleTime: 2000, placeholderData: keepPreviousData })
+  const key = ['extrinsics', limit, signedOnly, from, to, offset, filters]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.extrinsics(limit, signedOnly, from, to, offset, filters, signal), refetchInterval: offset === 0 ? ri : false, staleTime: 2000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useEvents(limit = 25, from?: string, to?: string, offset = 0, filters?: EventFilters) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['events', limit, from, to, offset, filters], queryFn: ({ signal }) => api.events(limit, from, to, offset, filters, signal), refetchInterval: offset === 0 ? ri : false, staleTime: 2000, placeholderData: keepPreviousData })
+  const key = ['events', limit, from, to, offset, filters]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.events(limit, from, to, offset, filters, signal), refetchInterval: offset === 0 ? ri : false, staleTime: 2000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useActivity(limit = 30, from?: string, to?: string, offset = 0, type = 'all', filters?: ValueFilters, action?: string) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['activity', limit, from, to, offset, type, filters, action], queryFn: ({ signal }) => api.activity(limit, from, to, offset, type, filters, action, signal), refetchInterval: offset === 0 ? ri : false, staleTime: 2000, placeholderData: keepPreviousData })
+  const key = ['activity', limit, from, to, offset, type, filters, action]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.activity(limit, from, to, offset, type, filters, action, signal), refetchInterval: offset === 0 ? ri : false, staleTime: 2000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 // The Activity pager's bounds. Only the categories the feed pages in SQL from one
 // source carry a real total; every category carries the servable depth. Never polls
@@ -123,7 +136,8 @@ export function useHolders(assetId: number | null, offset: number, limit: number
 }
 export function useAssetActivity(assetId: number | null, type = 'all', offset = 0, action?: string, enabled = true, from?: string, to?: string, min?: string) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['asset-activity', assetId, type, offset, action, from, to, min], queryFn: ({ signal }) => api.assetActivity(assetId as number, type, offset, undefined, action, from, to, min, signal), enabled: assetId != null && enabled, refetchInterval: enabled && offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData })
+  const key = ['asset-activity', assetId, type, offset, action, from, to, min]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.assetActivity(assetId as number, type, offset, undefined, action, from, to, min, signal), enabled: assetId != null && enabled, refetchInterval: enabled && offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useAddress(address: string | null) {
   return useQuery({ queryKey: ['address', address], queryFn: ({ signal }) => api.address(address as string, signal), enabled: !!address, refetchInterval: useInterval(DETAIL_POLL_MS), staleTime: 6000 })
@@ -157,19 +171,23 @@ export function useTagCloseAccounts(tagId: string | null, enabled = false) {
 }
 export function useAccountActivity(address: string | null, type = 'all', offset = 0, action?: string, from?: string, to?: string, filters?: ValueFilters) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['account-activity', address, type, offset, action, from, to, filters], queryFn: ({ signal }) => api.accountActivity(address as string, type, offset, undefined, action, from, to, filters, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData })
+  const key = ['account-activity', address, type, offset, action, from, to, filters]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountActivity(address as string, type, offset, undefined, action, from, to, filters, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useAccountExtrinsics(address: string | null, offset = 0, from?: string, to?: string, filters?: ExtrinsicFilters) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['account-extrinsics', address, offset, from, to, filters], queryFn: ({ signal }) => api.accountExtrinsics(address as string, offset, undefined, from, to, filters, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData })
+  const key = ['account-extrinsics', address, offset, from, to, filters]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountExtrinsics(address as string, offset, undefined, from, to, filters, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useAccountEvents(address: string | null, offset = 0, from?: string, to?: string, filters?: EventFilters) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['account-events', address, offset, from, to, filters], queryFn: ({ signal }) => api.accountEvents(address as string, offset, undefined, from, to, filters, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData })
+  const key = ['account-events', address, offset, from, to, filters]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountEvents(address as string, offset, undefined, from, to, filters, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useAccountVotes(address: string | null, offset = 0, from?: string, to?: string) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['account-votes', address, offset, from, to], queryFn: ({ signal }) => api.accountVotes(address as string, offset, undefined, from, to, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData })
+  const key = ['account-votes', address, offset, from, to]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountVotes(address as string, offset, undefined, from, to, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 // Lazy per-account / per-tag activity totals (extrinsic + event counts). The
 // first hit can take a few seconds server-side, so no live polling and a long
@@ -218,19 +236,23 @@ export function useTagSummary(tagId: string | null) {
 }
 export function useTagActivity(tagId: string | null, type = 'all', offset = 0, action?: string, from?: string, to?: string, filters?: ValueFilters) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['tag-activity', tagId, type, offset, action, from, to, filters], queryFn: ({ signal }) => api.tagActivity(tagId as string, type, offset, undefined, action, from, to, filters, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData })
+  const key = ['tag-activity', tagId, type, offset, action, from, to, filters]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.tagActivity(tagId as string, type, offset, undefined, action, from, to, filters, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useTagExtrinsics(tagId: string | null, offset = 0, from?: string, to?: string, filters?: ExtrinsicFilters) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['tag-extrinsics', tagId, offset, from, to, filters], queryFn: ({ signal }) => api.tagExtrinsics(tagId as string, offset, undefined, from, to, filters, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData })
+  const key = ['tag-extrinsics', tagId, offset, from, to, filters]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.tagExtrinsics(tagId as string, offset, undefined, from, to, filters, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useTagEvents(tagId: string | null, offset = 0, from?: string, to?: string, filters?: EventFilters) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['tag-events', tagId, offset, from, to, filters], queryFn: ({ signal }) => api.tagEvents(tagId as string, offset, undefined, from, to, filters, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData })
+  const key = ['tag-events', tagId, offset, from, to, filters]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.tagEvents(tagId as string, offset, undefined, from, to, filters, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useTagVotes(tagId: string | null, offset = 0, from?: string, to?: string) {
   const ri = useInterval()
-  return useQuery({ queryKey: ['tag-votes', tagId, offset, from, to], queryFn: ({ signal }) => api.tagVotes(tagId as string, offset, undefined, from, to, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData })
+  const key = ['tag-votes', tagId, offset, from, to]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.tagVotes(tagId as string, offset, undefined, from, to, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 // The asset directory is 74 KB (20 KB gzipped), 57% of it sparklines. The Assets page
 // renders those and wants them fresh; the activity filters only read symbols out of the
