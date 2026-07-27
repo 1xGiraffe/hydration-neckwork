@@ -245,6 +245,7 @@ export default function Chart({
 }: ChartProps) {
   const dataScopeKey = `${baseId}:${quoteId}:${interval}`
   const containerRef = useRef<HTMLDivElement>(null)
+  const chartAreaRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
@@ -604,6 +605,17 @@ export default function Chart({
     loadMoreVolumeDetails,
   ])
 
+  // The price axis is canvas-drawn inside the chart, and its width follows the
+  // label text (an 8-decimal price needs far more room than "$1,961"). Mirror
+  // the measured width into a CSS variable so the legend can reserve that
+  // gutter and never run underneath the axis labels.
+  const syncPriceAxisWidth = useCallback(() => {
+    const chart = chartRef.current
+    const area = chartAreaRef.current
+    if (!chart || !area) return
+    area.style.setProperty('--price-axis-w', `${Math.round(chart.priceScale('right').width())}px`)
+  }, [])
+
   const applyData = useCallback((data: ApiCandle[]) => {
     const candleSeries = candleSeriesRef.current
     const volumeSeries = volumeSeriesRef.current
@@ -632,7 +644,8 @@ export default function Chart({
     volumeSeries.setData(volumeData)
     onDataChange?.(data)
     scheduleOmniwatchMarkers()
-  }, [onDataChange, scheduleOmniwatchMarkers])
+    syncPriceAxisWidth()
+  }, [onDataChange, scheduleOmniwatchMarkers, syncPriceAxisWidth])
 
   const replaceAllData = useCallback((data: ApiCandle[]) => {
     const normalized = normalizeCandles(data)
@@ -765,7 +778,12 @@ export default function Chart({
     }
     chart.subscribeClick(clickHandler)
 
-    const markerRangeHandler = () => scheduleOmniwatchMarkers()
+    const markerRangeHandler = () => {
+      scheduleOmniwatchMarkers()
+      // Panning/zooming re-autoscales the price axis, which can change how wide
+      // its labels are.
+      syncPriceAxisWidth()
+    }
     chart.timeScale().subscribeVisibleLogicalRangeChange(markerRangeHandler)
 
     const handleResize = () => {
@@ -775,6 +793,7 @@ export default function Chart({
       volumePaneTopRef.current = containerRef.current.clientHeight - volumePaneHeight
       chart.panes()[1].setHeight(volumePaneHeight)
       scheduleOmniwatchMarkers()
+      syncPriceAxisWidth()
     }
     const resizeObserver = new ResizeObserver(handleResize)
     resizeObserver.observe(container)
@@ -801,7 +820,7 @@ export default function Chart({
       countdownLineRef.current = null
       chart.remove()
     }
-  }, [onVisibleRangeReady, scheduleOmniwatchMarkers]) // create once; theme changes are handled by applyOptions below
+  }, [onVisibleRangeReady, scheduleOmniwatchMarkers, syncPriceAxisWidth]) // create once; theme changes are handled by applyOptions below
 
   // Theme changes: re-apply colors on the existing chart instance so the
   // canvas isn't torn down and re-mounted — a remount blanks the chart for a
@@ -1073,6 +1092,10 @@ export default function Chart({
           display: flex; flex-wrap: wrap; column-gap: 10px; row-gap: 2px;
           font-family: 'GeistMono', monospace; font-size: 11px; color: var(--text-medium);
         }
+        .chart-legend > span { white-space: nowrap; }
+        /* The O/H/L/C/V keys sit right against their value, dimmed so the row
+           scans as numbers first. */
+        .chart-legend .k { color: var(--text-low); }
         .chart-loading {
           position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
           color: var(--text-low); font-size: 13px; pointer-events: none; z-index: 6;
@@ -1192,10 +1215,11 @@ export default function Chart({
           text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-low); text-align: center;
         }
         .omniwatch-empty { padding: 32px 28px 36px; color: var(--text-low); font-size: 15px; text-align: center; }
-        /* On narrow viewports the price-axis labels crowd the top-right corner.
-           Push the legend down so it does not overlap axis labels. */
         @media (max-width: 768px) {
-          .chart-legend { left: 12px; right: 12px; top: 48px; }
+          /* Narrow viewports have no room to clear the price-axis labels
+             sideways, so reserve exactly the measured axis width as a gutter and
+             keep the legend at the top of the chart. */
+          .chart-legend { left: 12px; right: calc(var(--price-axis-w, 88px) + 8px); top: 10px; }
           .omniwatch-marker {
             height: 24px; min-width: 24px; padding: 0 4px; justify-content: center; gap: 0;
           }
@@ -1273,7 +1297,7 @@ export default function Chart({
           .omniwatch-net .value { font-size: 13px; }
         }
       `}</style>
-      <div className="chart-area">
+      <div ref={chartAreaRef} className="chart-area">
         <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
 
         {toolsEnabled && (
@@ -1326,13 +1350,13 @@ export default function Chart({
 
         {displayLegend && (
           <div className="chart-legend">
-            <span style={{ whiteSpace: 'nowrap' }}>O {formatPriceFixed(displayLegend.open)}</span>
-            <span style={{ whiteSpace: 'nowrap' }}>H {formatPriceFixed(displayLegend.high)}</span>
-            <span style={{ whiteSpace: 'nowrap' }}>L {formatPriceFixed(displayLegend.low)}</span>
-            <span style={{ whiteSpace: 'nowrap', color: displayLegend.close >= displayLegend.open ? upColor : 'var(--red)' }}>
-              C {formatPriceFixed(displayLegend.close)}
+            <span><span className="k">O</span>{formatPriceFixed(displayLegend.open)}</span>
+            <span><span className="k">H</span>{formatPriceFixed(displayLegend.high)}</span>
+            <span><span className="k">L</span>{formatPriceFixed(displayLegend.low)}</span>
+            <span style={{ color: displayLegend.close >= displayLegend.open ? upColor : 'var(--red)' }}>
+              <span className="k">C</span>{formatPriceFixed(displayLegend.close)}
             </span>
-            <span style={{ whiteSpace: 'nowrap' }}>V ${formatUsdVolume(displayLegend.volume)}{showVolumeSource ? ` (${base})` : ''}</span>
+            <span><span className="k">V</span>${formatUsdVolume(displayLegend.volume)}{showVolumeSource ? ` (${base})` : ''}</span>
           </div>
         )}
       </div>

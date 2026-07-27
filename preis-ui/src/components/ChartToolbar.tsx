@@ -77,10 +77,10 @@ export default function ChartToolbar({ tool, onTool, hasSelection, onDelete }: C
         .chart-tools-sep { height: 1px; margin: 2px 3px; background: var(--separator); }
         .chart-tools .chart-tools-delete { color: var(--red); }
         .chart-tools .chart-tools-delete:hover { color: var(--red); background: var(--red-soft); }
-        /* The mobile legend sits at top 48px and can wrap to two rows; start
+        /* The mobile legend sits at top 10px and can wrap to two rows; start
            the toolbar below it. */
         @media (max-width: 768px) {
-          .chart-tools { top: 84px; left: 8px; }
+          .chart-tools { top: 48px; left: 8px; }
         }
       `}</style>
       <div
