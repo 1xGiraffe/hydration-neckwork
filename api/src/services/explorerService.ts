@@ -1,5 +1,5 @@
 import type { ClickHouseClient } from '../db/client.ts'
-import { cached, cachedSwr, cacheRefresh, seedStale } from './cache.ts'
+import { cached, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
 import { referendumTitleFor } from './referendumTitleService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
 import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
@@ -11873,6 +11873,19 @@ const EXACT_XCM_SOURCE_ROWS = 80_000
 // time, short enough that a feed's head is never minutes behind. Safe to hold because
 // the same cached rows feed the count and the page (see enumeratedActivityRows).
 const ENUMERATED_SOURCE_CACHE_MS = 60_000
+// How long a snapshot may still be SERVED after it stops being fresh. Past the fresh
+// window a reader gets the previous snapshot immediately while the refresh runs behind it
+// (cachedSwr), so the multi-second read is paid once per window by a background pass
+// rather than once per visit by whoever arrives first. Measured on the account that holds
+// the most cross-chain history, that read is 6.2s of an 8.6s cold page.
+//
+// Set to the stale bound the list total on the same page already publishes
+// (LIST_TOTAL_STALE_MS — asserted equal by test, since that constant is declared further
+// down and cannot be referenced here). The pager's total and the rows under it may not
+// disagree about how old the feed is allowed to be, and a snapshot is a COMPLETE feed of
+// a slightly earlier chain state rather than a prefix of the current one, so serving one
+// costs recency at the head and nothing else.
+const ENUMERATED_SOURCE_STALE_MS = 900_000
 // How many bytes of interpolated account literals an arm may carry (see the budget
 // note where it is enforced).
 const MAX_EXACT_ACCOUNT_LIST_BYTES = 150_000
@@ -12434,6 +12447,44 @@ function enumeratedActivityAll(e: EnumeratedActivity): ActivityRow[] {
   return [...e.otc, ...e.dcaFailures, ...e.rewards, ...e.staking, ...e.votes, ...e.xcm]
 }
 
+// Which enumerated sources one type's feed needs. Exactly the `want*` flags
+// collectAccountActivity derives, so the two passes read the same sources for the same
+// type. A transfer feed pulls all of them, because every one of them can own a transfer
+// leg.
+//
+// The builders below take NO type argument, so the rows depend on which sources are read
+// and not on which type asked for them: `all` and `transfer` both need all six and
+// therefore produce the same array, as do `liquidity` and `mm` with their one. That is
+// why the cache key names the SOURCE SET rather than the type — two types that read the
+// same history share one entry instead of reading it twice under two names.
+const ENUMERATED_SOURCE_NAMES = ['otc', 'dcaFailures', 'rewards', 'staking', 'votes', 'xcm'] as const
+type EnumeratedSourceName = typeof ENUMERATED_SOURCE_NAMES[number]
+function enumeratedSourceNeed(type: string): Record<EnumeratedSourceName, boolean> {
+  const wantTransfers = type === 'all' || type === 'transfer'
+  return {
+    otc: type === 'all' || type === 'otc' || type === 'trade' || wantTransfers,
+    dcaFailures: type === 'all' || type === 'trade' || wantTransfers,
+    // Referral claims render as liquidity, incentive claims as mm.
+    rewards: type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm',
+    staking: type === 'all' || type === 'staking' || wantTransfers,
+    votes: type === 'all' || type === 'vote' || wantTransfers,
+    xcm: type === 'all' || type === 'xcm' || wantTransfers,
+  }
+}
+
+// Deliberately keyed on the source set, the account set and the date bound ALONE. These
+// rows are read UNFILTERED (see below), so an action or a token cannot change them — and
+// keying on the filter would only split the cache and read the same history again for
+// every chip the user tries.
+//
+// One key, one snapshot: the reader and the background pass that refreshes it both build
+// it here, so the pass cannot warm an entry nothing reads.
+export function enumeratedActivityKey(accounts: string[], type: string, from?: string, to?: string): string {
+  const need = enumeratedSourceNeed(type)
+  const sources = ENUMERATED_SOURCE_NAMES.filter(name => need[name]).join('+')
+  return `explorer:exact-small:${sources}:${[...accounts].sort().join(',')}:${from ?? ''}:${to ?? ''}`
+}
+
 async function enumeratedActivityRows(
   accounts: string[],
   type: string,
@@ -12443,21 +12494,30 @@ async function enumeratedActivityRows(
   // A count and every page of it want the same whole-history read, and the sources are
   // read in full whether or not the account has rows in them — the OTC read alone costs
   // ~300ms for an account with no OTC at all (Placed/Cancelled ownership is a signer
-  // scan) and the three XCM legs cost ~4.7s on the account that holds the most of them.
-  // Hold the assembled rows for a window so a page burst pays for them once.
+  // scan) and the three XCM legs cost ~6.2s on the account that holds the most of them.
+  // Hold the assembled rows for a window so a page burst pays for them once, and serve
+  // the previous snapshot while a lapsed one is re-read so no reader waits on it twice.
   //
-  // Staleness here is consistency-safe rather than merely tolerable: the cached rows
-  // supply BOTH their per-block counts to the locate query and the rows the page
-  // renders, so the two always describe the same set. It costs freshness at the head,
-  // which is what every cached total on this page already costs.
-  //
-  // Deliberately keyed on the account set, the type and the date bound ALONE. These
-  // rows are read UNFILTERED (see below), so an action or a token cannot change them —
-  // and keying on the filter would only split the cache and read the same history again
-  // for every chip the user tries.
-  return cached(`explorer:exact-small:${type}:${[...accounts].sort().join(',')}:${from ?? ''}:${to ?? ''}`,
-    ENUMERATED_SOURCE_CACHE_MS,
+  // Staleness here is consistency-safe rather than merely tolerable: one awaited snapshot
+  // supplies BOTH the per-block counts the locate query is built from and the rows the
+  // page renders, so the two always describe the same set however old it is. It costs
+  // freshness at the head, which is what every cached total on this page already costs.
+  return cachedSwr(enumeratedActivityKey(accounts, type, from, to),
+    ENUMERATED_SOURCE_CACHE_MS, ENUMERATED_SOURCE_STALE_MS,
     () => enumeratedActivityRowsUncached(accounts, type, from, to))
+}
+
+// Re-read the snapshot 92% of activity requests share — the unfiltered, undated
+// `all`/`transfer` source set — and install it under the key those requests read.
+//
+// `cacheRefresh` rather than a bare call or `enumeratedActivityRows`: a pass that OWNS a
+// key must never be satisfied by the value it exists to replace, and it must still share
+// the reader's single flight so a prewarm and a reader's own revalidation collapse into
+// one computation instead of racing.
+function refreshEnumeratedActivitySnapshot(accounts: string[]): Promise<EnumeratedActivity | null> {
+  return cacheRefresh(enumeratedActivityKey(accounts, 'all'),
+    ENUMERATED_SOURCE_CACHE_MS, ENUMERATED_SOURCE_STALE_MS,
+    () => enumeratedActivityRowsUncached(accounts, 'all'))
 }
 
 // Every enumerated source, read with NO action and NO token filter.
@@ -12479,22 +12539,10 @@ async function enumeratedActivityRowsUncached(
 ): Promise<EnumeratedActivity | null> {
   const depth = EXACT_SMALL_SOURCE_ROWS + 1
   const xcmDepth = EXACT_XCM_SOURCE_ROWS + 1
-  // Exactly the `want*` flags collectAccountActivity derives, so the two passes read
-  // the same sources for the same type. A transfer feed pulls all of them, because
-  // every one of them can own a transfer leg.
-  const wantTransfers = type === 'all' || type === 'transfer'
-  const need = {
-    otc: type === 'all' || type === 'otc' || type === 'trade' || wantTransfers,
-    dcaFailures: type === 'all' || type === 'trade' || wantTransfers,
-    rewards: type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm',
-    staking: type === 'all' || type === 'staking' || wantTransfers,
-    votes: type === 'all' || type === 'vote' || wantTransfers,
-    xcm: type === 'all' || type === 'xcm' || wantTransfers,
-  }
+  const need = enumeratedSourceNeed(type)
   const [otc, dcaFailures, rewards, staking, votes, xcmLegs] = await Promise.all([
     need.otc ? getRecentOtc(depth, from, to, 0, {}, undefined, accounts) : [],
     need.dcaFailures ? getRecentDcaFailures(depth, from, to, accounts) : [],
-    // Referral claims render as liquidity, incentive claims as mm.
     need.rewards ? getRecentRewardClaims(depth, from, to, accounts) : [],
     need.staking ? getRecentStaking(depth, from, to, accounts, 0, {}, undefined, undefined) : [],
     need.votes ? getRecentVotes(depth, from, to, 0, {}, accounts, {}).then(rows => rows.map(voteActivityRow)) : [],
@@ -13463,8 +13511,97 @@ async function getScopedAccountActivity(
   to?: string,
 ): Promise<ActivityRow[]> {
   const window = timeWindow(from, to)
+  noteHotActivityScope(cacheScope, accounts)
   return cached(`explorer:${cacheScope}:activity:${type}:${limit}:${offset}:${action ?? ''}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, window ? 30_000 : 8_000,
     () => getAccountActivity(accounts, limit, type, offset, action, filters, from, to))
+}
+
+// ── Keeping the shared enumerated read warm ───────────────────────────────────
+//
+// Serving the previous snapshot while a lapsed one re-reads (cachedSwr above) already
+// means only a reader who finds the key EMPTY waits, which over 12 days of proxy logs is
+// 17.5% of unfiltered account/tag activity requests rather than 25.3%. This pass closes
+// part of what is left, for the scopes a reader has recently been reading.
+//
+// It deliberately does not keep a standing set warm around the clock. Traffic to one
+// account is a handful of visits a day, so refreshing every hot scope every cycle
+// regardless of demand costs roughly twenty times the reader wall it removes — the same
+// trade that made the directory's activity ranking recount 250 members every five
+// minutes. Two rules keep this proportional instead:
+//
+//   - Demand decays. A scope stops being refreshed an hour after its last request, so a
+//     quiet instance does no work at all and cost tracks visits rather than uptime.
+//   - Only what is about to lapse is re-read. The snapshot outlives three cycles, so
+//     re-reading it every cycle would be two wasted reads in three.
+//
+// Measured against the same logs, that is 1.2 reads and 0.64s of wall per five-minute
+// cycle, for 325s of reader wall over twelve days against 507s without it and 778s
+// before either change.
+//
+// A first-ever visit cannot be warmed and is not pretended otherwise: it pays the cold
+// read and gets the same correct answer, only slower.
+const HOT_ACTIVITY_SCOPES = 16
+const HOT_ACTIVITY_SCOPE_IDLE_MS = 60 * 60_000
+// Re-read a snapshot only once it is within this much of lapsing — a little over one
+// cycle, so nothing expires between cycles and nothing is read three times per lifetime.
+const ENUMERATED_PREWARM_LEAD_MS = 6 * 60_000
+// What one cycle may spend, sequentially. The read is 0.1–0.3s for a typical account and
+// 6.2s for the one holding 101k cross-chain rows, so a wall-clock budget bounds the pass
+// where a count of scopes would not: worst case one over-running scope, then the pass
+// stops and the oldest-first ordering resumes there next cycle.
+const ENUMERATED_PREWARM_BUDGET_MS = 20_000
+interface HotActivityScope { accounts: string[]; requestedAt: number }
+const hotActivityScopes = new Map<string, HotActivityScope>()
+
+// Recorded at the one function both feed endpoints go through, and NOWHERE else: the
+// account-directory ranking counts pool members through getAddressListTotal /
+// getTagListTotal, and if those counted as a reader's interest this set would fill with
+// the 250 accounts that pass visits — reintroducing exactly the continuous whole-history
+// load the ranking was throttled to remove.
+//
+// Interest is in the SCOPE, not in the shape asked for: a reader moves between chips and
+// filters on one page, and every one of those shapes reads the same snapshot. Only the
+// undated `all`/`transfer` set is warmed, which is 92% of what they ask for.
+function noteHotActivityScope(cacheScope: string, accounts: string[]): void {
+  // Re-inserted so iteration order is least-recently-requested first, with the member
+  // list refreshed: a tag gains members and an account gains EVM bindings, and warming
+  // the key a stale list builds would warm one no reader reads.
+  hotActivityScopes.delete(cacheScope)
+  hotActivityScopes.set(cacheScope, { accounts, requestedAt: Date.now() })
+  for (const scope of hotActivityScopes.keys()) {
+    if (hotActivityScopes.size <= HOT_ACTIVITY_SCOPES) break
+    hotActivityScopes.delete(scope)
+  }
+}
+
+// Re-read the snapshots that are about to lapse under scopes still being read, oldest
+// request first, inside the cycle's budget.
+//
+// A failure here costs a reader latency and never correctness: the entry simply stays
+// absent and the next request computes it, so the pass logs and moves on.
+async function prewarmHotActivitySnapshots(): Promise<void> {
+  const startedAt = Date.now()
+  const deadline = startedAt + ENUMERATED_PREWARM_BUDGET_MS
+  let warmed = 0
+  let due = 0
+  for (const [cacheScope, scope] of [...hotActivityScopes].sort((a, b) => a[1].requestedAt - b[1].requestedAt)) {
+    if (startedAt - scope.requestedAt > HOT_ACTIVITY_SCOPE_IDLE_MS) { hotActivityScopes.delete(cacheScope); continue }
+    // The same budget planExactActivity refuses an over-large account list on, so a cycle
+    // cannot be spent warming a snapshot the request path never reads.
+    if (sqlAccountList(scope.accounts).length * 2 > MAX_EXACT_ACCOUNT_LIST_BYTES) continue
+    const key = enumeratedActivityKey(scope.accounts, 'all')
+    const expiry = cacheExpiry(key)
+    if (expiry != null && expiry - startedAt > ENUMERATED_PREWARM_LEAD_MS) continue
+    due++
+    if (Date.now() >= deadline) continue
+    try {
+      await refreshEnumeratedActivitySnapshot(scope.accounts)
+      warmed++
+    } catch (error) {
+      console.warn('[explorer] activity snapshot prewarm failed', error)
+    }
+  }
+  if (due) console.info('[explorer] activity snapshot prewarm', { hot: hotActivityScopes.size, due, warmed, ms: Date.now() - startedAt })
 }
 
 // Account detail feeds resolve the address to the same related-account set used
@@ -16932,6 +17069,11 @@ async function prewarmAccountDirectoryUncached(): Promise<void> {
   const sorts: AccountSort[] = ['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'volume', 'liquidation']
   for (const sort of sorts) await refreshAccountsPage(0, 50, sort)
   await refreshAccountsPage(50, 50, 'value')
+  // Then the detail pages' own shared read, on the same five-minute cycle: it is a third
+  // of the snapshot's stale bound, so a skipped cycle costs a reader nothing and no
+  // additional timer is needed. Last, and sequential, so the directory pages are never
+  // held behind it.
+  await prewarmHotActivitySnapshots()
 }
 
 let activityLeaderboardInflight: Promise<void> | null = null

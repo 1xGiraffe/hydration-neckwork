@@ -154,6 +154,21 @@ export async function seedStale<T>(key: string, load: () => Promise<{ value: T; 
   return true
 }
 
+// When the value under `key` stops being servable, or null when nothing is stored (an
+// in-flight computation counts as landing now, since it is about to install one).
+//
+// For a background pass that owns a key: it decides whether an entry will still be there
+// at the next cycle, so a pass on a short interval does not turn a long-lived entry into
+// a re-read per cycle. Reading the cache's own expiry rather than keeping a second copy of
+// it is what keeps the pass and the readers — whose stale-while-revalidate refreshes also
+// move it — from disagreeing about how old the value is.
+export function cacheExpiry(key: string): number | null {
+  const now = Date.now()
+  if (inflight.has(key)) return now
+  const hit = store.get(key)
+  return hit != null && hit.expiresAt > now ? hit.expiresAt : null
+}
+
 function occupied(key: string, now: number): boolean {
   if (inflight.has(key)) return true
   const hit = store.get(key)
