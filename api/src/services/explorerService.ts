@@ -11451,11 +11451,29 @@ function downsampleDaily(series: number[], dates: string[], blocks: number[]): {
 // One bucketed value-series reconstruction per scope (`addr:<id>` / `tag:<id>`),
 // shared by the value-history chart, the value-event jump detection and the
 // accounts-directory sparkline so the heavy per-asset walk runs once per consumer
-// set rather than once per consumer. The account-value generation in the key
-// advances every five minutes, so nothing survives longer than that regardless of
-// this TTL; it only has to outlast a single directory prewarm pass, whose eight
-// sorts repeat ~30% of their rows between them.
-const ACCOUNT_HISTORY_TTL_MS = 5 * 60_000
+// set rather than once per consumer. It is the instance's largest reader — the
+// directory prewarm alone drives ~340 reconstructions per pass, and their whole
+// query tree measured 49% of all ClickHouse CPU and 41% of its bytes over a clean
+// 70-minute window — so how long one entry lives is what that cost is divided by.
+//
+// The key deliberately does NOT carry the account-value generation. The
+// reconstruction never reads that generation: every bucket is valued at ohlc_1d
+// candles that had already closed by the bucket's own timestamp (see
+// getAccountHistory), never at the pinned current-price map, so a generation
+// change cannot alter a single value here and using it as the invalidation
+// dimension only threw the work away. What each consumer takes from the series is
+// also insensitive to its age: getAddressHistory, getTag and enrichAccountSparklines
+// all overwrite the final point with the row's own authoritative current value, and
+// getAccountValueEvents skips the last delta for exactly that reason. So nothing
+// served is ever a mix of two generations — the live point belongs to the caller's
+// generation and the buckets behind it belong to no generation at all.
+//
+// Half an hour is then bounded by what is left: the interior buckets. They are
+// weekly on the sparkline's grid and (max-min)/180 blocks — days, for any account
+// the directory ranks — on the detail chart, and only blocks older than the last
+// bucket boundary are affected at all, since everything newer collapses into the
+// pinned final bucket.
+const ACCOUNT_HISTORY_TTL_MS = 30 * 60_000
 
 // The account set is part of the key, not just the scope: the directory sparkline
 // covers a row's members without their module/sovereign forms while the detail page
@@ -11465,7 +11483,7 @@ function accountSetFingerprint(accounts: string[]): string {
 }
 
 function getAccountHistoryShared(accounts: string[], scopeKey: string): Promise<Awaited<ReturnType<typeof getAccountHistory>>> {
-  const key = `explorer:account-history:${accountValueGenerationEpoch}:${scopeKey}:${accountSetFingerprint(accounts)}`
+  const key = `explorer:account-history:${scopeKey}:${accountSetFingerprint(accounts)}`
   return cached(key, ACCOUNT_HISTORY_TTL_MS, () => getAccountHistory(accounts))
 }
 

@@ -179,17 +179,17 @@ describe('the directory wiring keeps the generation out of its keys', () => {
     // `explorer:accounts` — dropped it, because they want the previous generation
     // served while the next computes. `explorer:accounts-total` keeps it: it is
     // embedded in a page payload rather than served on its own, and it is only ever
-    // computed inside a rebuild that is already running in the background. The five
-    // remaining keys are 8-15s detail reads (`address`, `mm-positions`,
-    // `mm-reserves`, `lp-recon`, `tag`) plus the 5-minute `account-history`, whose
-    // series IS a directory row's sparkline — letting that one outlive a generation
-    // is exactly how a page comes to mix two.
+    // computed inside a rebuild that is already running in the background.
+    // `explorer:account-history` dropped it too (accountHistoryShared.test.ts owns
+    // that): the reconstruction is valued at closed historical candles and never
+    // reads the pinned price map, so the generation invalidated work it could not
+    // change. The five that remain are 8-15s detail reads whose whole payload IS
+    // valued at the pinned map.
     expect(generationKeys).toEqual([
       'explorer:address:${accountValueGenerationEpoch}:${norm.accountId}${summary ? \':summary\' : \'\'}',
       'explorer:mm-positions:${accountValueGenerationEpoch}:${h160.toLowerCase()}',
       'explorer:mm-reserves:${accountValueGenerationEpoch}:${h160.toLowerCase()}',
       'explorer:lp-recon:${accountValueGenerationEpoch}:${accs.sort().join(\',\')}',
-      'explorer:account-history:${accountValueGenerationEpoch}:${scopeKey}:${accountSetFingerprint(accounts)}',
       'explorer:accounts-total:${accountValueGenerationEpoch}:${modelVersion}',
       'explorer:tag:${accountValueGenerationEpoch}:${tagId}${summary ? \':summary\' : refresh ? \':refresh\' : \'\'}',
     ])
