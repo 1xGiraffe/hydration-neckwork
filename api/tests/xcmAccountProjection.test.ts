@@ -19,6 +19,28 @@ function functionBody(name: string): string {
   return rest.slice(0, next)
 }
 
+// The contiguous `//` block immediately above a top-level function.
+function commentAbove(name: string): string {
+  const at = explorerService.indexOf(`function ${name}`)
+  expect(at, name).toBeGreaterThan(-1)
+  const lines = explorerService.slice(0, at).split('\n')
+  const out: string[] = []
+  for (let i = lines.length - 2; i >= 0 && lines[i].startsWith('//'); i--) out.unshift(lines[i])
+  expect(out.length, name).toBeGreaterThan(0)
+  return out.join('\n')
+}
+
+// The event names of a `const NAME = [...]` array literal in explorerService.ts,
+// following one level of spread into another such constant.
+function eventNameConstant(name: string): string[] {
+  const at = explorerService.indexOf(`const ${name} = [`)
+  expect(at, name).toBeGreaterThan(-1)
+  const literal = explorerService.slice(at, explorerService.indexOf(']', at) + 1)
+  const spread = /\.\.\.([A-Z_]+)/.exec(literal)
+  const own = [...literal.matchAll(/'([A-Za-z]+\.[A-Za-z]+)'/g)].map(m => m[1])
+  return spread ? [...eventNameConstant(spread[1]), ...own] : own
+}
+
 // `who` is not in xcm_event_activity's sort key at all, so an account-scoped read of it
 // cannot prune: the busiest cross-chain account's exact XCM count read 518M rows / 9.79 GiB
 // across 149 queries there, and 50M rows / 2.02 GiB across the same 149 once the
@@ -30,6 +52,7 @@ function functionBody(name: string): string {
 describe('the account-scoped XCM readers use the account-first projection', () => {
   it('names each XCM table in exactly one place', () => {
     expect(occurrences(explorerService, 'price_data.xcm_event_activity_by_account')).toBe(1)
+    expect(occurrences(explorerService, 'price_data.xcm_inbound_walk_events')).toBe(1)
     // The parent's own name, minus the by_account mentions that contain it as a prefix.
     expect(occurrences(explorerService, 'price_data.xcm_event_activity')
       - occurrences(explorerService, 'price_data.xcm_event_activity_by_account')).toBe(1)
@@ -42,29 +65,30 @@ describe('the account-scoped XCM readers use the account-first projection', () =
     for (const site of ['getRecentXcmIn', 'getRecentXcmOutRemote', 'xcmOutRemoteRowsForBlocks']) {
       expect(functionBody(site), site).toContain('${xcmEventActivityByAccountTable()}')
     }
-    // The block-keyed reads stay on the parent: the inbound deposit run needs a whole
-    // block (a missing neighbour would end the walk early), the MessageQueue barriers
-    // carry the payload the account-first table projects away, and the asset surface is
-    // asset-keyed. One definition + nine call sites.
-    expect(occurrences(explorerService, 'xcmEventActivityTable(')).toBe(12)
+    // What stays on the parent: the global candidate walks, the outbound reads, the
+    // MessageQueue barriers (whose payload neither sibling carries), the global arm of
+    // the remote-pull withdrawal decode, and the asset surface. One definition + eight
+    // call sites — the inbound deposit run is the ninth, and it moved to the block-first
+    // projection below.
+    expect(occurrences(explorerService, 'xcmEventActivityTable(')).toBe(11)
     expect(functionBody('xcmInRowsForBlocks')).not.toContain('xcmEventActivityByAccountTable')
   })
 
-  // Both tables are ReplacingMergeTree and neither is read with FINAL: every consumer
-  // folds these rows by their stable (block_height, event_index) identity while decoding,
-  // so an un-merged replacement duplicate cannot reach a row, while FINAL would forfeit
-  // exactly the primary-key pruning each table exists to provide.
-  it('reads neither table with FINAL, and says why at the read site', () => {
-    expect(occurrences(explorerService, 'xcm_event_activity FINAL')).toBe(0)
-    expect(occurrences(explorerService, 'xcm_event_activity_by_account FINAL')).toBe(0)
-    expect(occurrences(explorerService, "price_data.xcm_event_activity${alias ? ` AS ${alias}` : ''}`")).toBe(1)
-    expect(occurrences(explorerService, "price_data.xcm_event_activity_by_account${alias ? ` AS ${alias}` : ''}`")).toBe(1)
-    const helpers = explorerService.slice(
-      explorerService.indexOf('// Every XCM consumer collapses'),
-      explorerService.indexOf('function xcmEventActivityByAccountTable'))
-      + functionBody('xcmEventActivityByAccountTable')
-    expect(occurrences(helpers, 'Avoid FINAL here')).toBe(1)
-    expect(occurrences(helpers, 'no-FINAL contract')).toBe(1)
+  // None of the three tables is read with FINAL: every consumer folds these rows by their
+  // stable (block_height, event_index) identity while decoding, so an un-merged
+  // replacement duplicate cannot reach a row, while FINAL would forfeit exactly the
+  // primary-key pruning each table exists to provide.
+  it('reads none of the three tables with FINAL, and says why at the read site', () => {
+    for (const table of ['xcm_event_activity', 'xcm_event_activity_by_account', 'xcm_inbound_walk_events']) {
+      expect(occurrences(explorerService, `${table} FINAL`), table).toBe(0)
+      expect(occurrences(explorerService, `price_data.${table}\${alias ? \` AS \${alias}\` : ''}\``), table).toBe(1)
+    }
+    // Stated once for the family, then restated by each sibling for its own key, because
+    // what FINAL would forfeit differs per table.
+    expect(occurrences(commentAbove('xcmEventActivityTable'), 'Avoid FINAL here')).toBe(1)
+    for (const helper of ['xcmEventActivityByAccountTable', 'xcmInboundWalkTable']) {
+      expect(occurrences(commentAbove(helper), 'no-FINAL contract'), helper).toBe(1)
+    }
   })
 
   // The account-scoped arms carry the reserved-account exclusion their global twins
@@ -114,9 +138,27 @@ describe('the account-scoped XCM readers use the account-first projection', () =
       expect(occurrences(body, `safeJson(${barrier}.args_json)`), site).toBe(1)
     }
   })
+
+  // The inbound deposit run is the one read that has to see a block's WHOLE run, so it can
+  // be neither account-scoped nor prefiltered. It reads the block-first projection, where
+  // those blocks are a primary-key lookup instead of eight whole event-name slices:
+  // replaying one cold count's 59 chunk reads gives 45.5M rows / 2.71 GiB / 754 ms on the
+  // parent against 13.4M rows / 964.6 MiB / 382 ms here, for the same 279,336 rows out.
+  it('reads the inbound deposit run from the block-first projection, and nothing else does', () => {
+    // One definition + one call site, and the call site is inside the inbound decoder.
+    expect(occurrences(explorerService, 'xcmInboundWalkTable(')).toBe(2)
+    const body = functionBody('xcmInRowsForBlocks')
+    expect(occurrences(body, '${xcmInboundWalkTable()}')).toBe(1)
+    expect(occurrences(body, '${sqlEventNameList(XCM_IN_WALK_EVENTS)}')).toBe(1)
+    // The decoder's other read is the barrier, still on the parent for its payload.
+    expect(occurrences(body, '${xcmEventActivityTable()}')).toBe(1)
+    // Hook context is the projection's own filter — extrinsic_index is not a column there —
+    // so of the decoder's two SQL predicates only the barrier's still states it.
+    expect(occurrences(body, 'AND extrinsic_index IS NULL')).toBe(1)
+  })
 })
 
-describe('the two XCM materialized views cannot drift apart', () => {
+describe('the three XCM materialized views cannot drift apart', () => {
   function mvStatement(name: string): string {
     const marker = `CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.${name} `
     const at = views.indexOf(marker)
@@ -155,9 +197,11 @@ describe('the two XCM materialized views cannot drift apart', () => {
     return { select: projectionExpressions(body.slice(0, fromAt)), where: body.slice(fromAt + SOURCE.length) }
   }
 
-  it('declares each view exactly once, both sourced from raw_events', () => {
-    expect(occurrences(views, 'price_data.xcm_event_activity_mv')).toBe(1)
-    expect(occurrences(views, 'price_data.xcm_event_activity_by_account_mv')).toBe(1)
+  it('declares each view exactly once, all of them sourced from raw_events', () => {
+    for (const name of ['xcm_event_activity_mv', 'xcm_event_activity_by_account_mv', 'xcm_inbound_walk_events_mv']) {
+      expect(occurrences(views, `price_data.${name}`), name).toBe(1)
+      expect(mvStatement(name), name).toContain(SOURCE)
+    }
   })
 
   it('filters the same raw events, byte for byte', () => {
@@ -177,6 +221,41 @@ describe('the two XCM materialized views cannot drift apart', () => {
     expect(child.select).toHaveLength(9)
     expect([...child.select].sort()).toEqual(parent.select.filter(e => e !== 'args_json').sort())
     expect(child.select[0]).toBe("JSONExtractString(args_json, 'who') AS who")
+  })
+
+  // The walk projection is a narrower slice of the same rows, so its filter is the one
+  // thing that legitimately differs from the parent's — and it has to be exactly the family
+  // the decoder walks. A name added to XCM_IN_WALK_EVENTS and not here would silently
+  // shorten runs rather than fail: the walk stops at the first event index it cannot find,
+  // so every credit behind the gap would disappear from the feed.
+  it('filters the walk projection to exactly the walk family the decoder uses', () => {
+    const walk = selectAndWhere('xcm_inbound_walk_events_mv')
+    const names = [...walk.where.matchAll(/'([A-Za-z]+\.[A-Za-z]+)'/g)].map(m => m[1])
+    expect(names).toHaveLength(8)
+    expect(names).toEqual(eventNameConstant('XCM_IN_WALK_EVENTS'))
+    // Hook context only, which is what lets the read drop `extrinsic_index IS NULL`.
+    expect(walk.where).toBe(`event_name IN (${names.map(n => `'${n}'`).join(', ')}) AND extrinsic_index IS NULL`)
+    // A strict subset of the parent's twelve names, so this table can only ever hold rows
+    // the parent holds too — which is what makes the set-equality check meaningful.
+    const parent = selectAndWhere('xcm_event_activity_mv')
+    for (const name of names) expect(parent.where, name).toContain(`'${name}'`)
+    expect(occurrences(parent.where, "'")).toBe(24)
+  })
+
+  it('extracts the walk projection with the parent view expressions', () => {
+    const parent = selectAndWhere('xcm_event_activity_mv')
+    const walk = selectAndWhere('xcm_inbound_walk_events_mv')
+    // Everything but the payload and extrinsic_index, every expression the parent's.
+    expect(walk.select).toHaveLength(8)
+    expect([...walk.select].sort())
+      .toEqual(parent.select.filter(e => e !== 'args_json' && e !== 'extrinsic_index').sort())
+    // Leading with the sort key, so the view writes rows in the target's own order.
+    expect(walk.select.slice(0, 2)).toEqual(['block_height', 'event_index'])
+  })
+
+  it('keys the walk projection on the block and carries no payload or extrinsic index', () => {
+    expect(occurrences(tables, 'price_data.xcm_inbound_walk_events')).toBe(1)
+    expect(tables).toContain('CREATE TABLE IF NOT EXISTS price_data.xcm_inbound_walk_events (`block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `event_name` LowCardinality(String), `who` String, `asset_id` UInt32, `amount` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index) SETTINGS index_granularity = 4096;')
   })
 
   it('keys the sibling on the account and holds no payload', () => {

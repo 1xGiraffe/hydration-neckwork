@@ -146,6 +146,27 @@ CREATE TABLE IF NOT EXISTS price_data.xcm_event_activity (`block_height` UInt32,
 -- materializes, so the whole projection costs 790 MiB against the parent's
 -- 1.87 GiB rather than duplicating the 794 MiB the payload column takes there.
 CREATE TABLE IF NOT EXISTS price_data.xcm_event_activity_by_account (`who` String, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `asset_id` UInt32, `amount` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (who, block_height, event_index) SETTINGS index_granularity = 4096;
+-- Block-first projection of the hook-context rows the inbound-XCM walk reads. That
+-- walk needs a block's WHOLE contiguous run of deposit-family events below the
+-- MessageQueue.Processed barrier, so it can never be account-scoped, and on
+-- xcm_event_activity it names eight event families with asset_id unconstrained --
+-- which leaves block_height third in that sort key and out of reach, so the read
+-- scans every asset range of those families: 45.5M rows / 2.71 GiB / 754 ms across the
+-- 59 chunk reads of the busiest account's exact XCM count. Here (block_height,
+-- event_index) IS the key and those same 59 reads cost 13.4M rows / 964.6 MiB / 382 ms
+-- for byte-identical results.
+-- It holds only what that walk consumes -- the eight families of XCM_IN_WALK_EVENTS
+-- in api/src/services/explorerService.ts, in hook context -- which is 15.2M of the
+-- parent's 55.8M rows and 205.6 MiB against its 1.87 GiB. Hook context is load-bearing
+-- rather than merely cheaper: extrinsic_index is absent here, so the walk's
+-- `extrinsic_index IS NULL` is supplied by the view's filter instead of the read's.
+-- Nothing else is filtered out, though. The walk stops at the first event index it
+-- cannot find, so dropping a module/sovereign beneficiary or a zero amount would end
+-- a run early and hide every credit behind it. MessageQueue.Processed stays out: its
+-- asset_id is always 0, so a barrier read already reaches block_height through the
+-- parent's (event_name, asset_id) prefix (12.3k rows for the same block set), and it
+-- needs the args_json this projection does not carry.
+CREATE TABLE IF NOT EXISTS price_data.xcm_inbound_walk_events (`block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `event_name` LowCardinality(String), `who` String, `asset_id` UInt32, `amount` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index) SETTINGS index_granularity = 4096;
 CREATE TABLE IF NOT EXISTS price_data.xcm_journey_sources (`message_id` String, `from_hex` String, `origin_urn` String, `updated_at` DateTime DEFAULT now(), `origin_tx` String DEFAULT '') ENGINE = ReplacingMergeTree(updated_at) ORDER BY message_id SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.xyk_farm_principal_intervals (`account_id` String, `deposit_id` String, `lp_asset_id` Int32, `principal_shares_raw` String, `valid_from_block` UInt32, `valid_from_extrinsic` Int64, `valid_from_event` UInt32, `valid_from_ts` DateTime, `valid_to_block` UInt32, `valid_to_extrinsic` Int64, `valid_to_event` UInt32, `source_event_kind` LowCardinality(String), `run_id` UInt64, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(run_id) PARTITION BY tuple() ORDER BY (account_id, deposit_id, valid_from_block, valid_from_event) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.xyk_lp_total_shares_history (`lp_asset_id` Int32, `block_height` UInt32, `total_shares_raw` String, `run_id` UInt64, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(run_id) PARTITION BY tuple() ORDER BY (lp_asset_id, block_height) SETTINGS index_granularity = 8192;

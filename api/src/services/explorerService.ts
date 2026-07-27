@@ -223,10 +223,36 @@ function otcActivityTable(alias = ''): string {
 //
 // This one is keyed (event_name, asset_id, block_height, event_index): it serves
 // the reads that name an event family and either a block set or an asset — global
-// candidate walks, the barrier/deposit-run reads whose walk needs a whole block,
-// and the asset surface.
+// candidate walks, the outbound reads, the MessageQueue barrier reads, the global
+// arm of the remote-pull withdrawal decode, and the asset surface. A barrier read
+// reaches block_height through that key even though it names no asset: MessageQueue.
+// Processed carries no currency at all, so it occupies a single asset_id = 0 range
+// and the block set prunes inside it — 12.3k rows for a 1,000-block set. It is also
+// the only read still needing args_json, whose success/id/origin are not columns.
 function xcmEventActivityTable(alias = ''): string {
   return `price_data.xcm_event_activity${alias ? ` AS ${alias}` : ''}`
+}
+// The inbound walk's own rows, keyed (block_height, event_index). That walk needs a
+// block's WHOLE contiguous run of deposit-family events below the barrier, so it can
+// never be account-scoped — and naming eight event families with no asset leaves
+// block_height third in the table above's key and unreachable, so the read scans
+// every asset range of all eight. Replaying one cold count's 59 chunk reads: 45.5M
+// rows / 2.71 GiB / 754 ms there against 13.4M rows / 964.6 MiB / 382 ms here, for
+// byte-identical results (279,336 rows both). The projection holds only those eight
+// families in hook context, 15.2M of the parent's 55.8M rows and 205.6 MiB of its
+// 1.87 GiB. index_granularity is its siblings' 4096: candidate blocks arrive far
+// denser than any granule's block span (a chunk's ~766 blocks spread over ~250k
+// chain blocks, one per ~326, against ~3.5k chain blocks per granule), so 1024 skips
+// no more of them worth having — 9.9M rows / 724.7 MiB but 452 ms, slower on the
+// extra mark ranges.
+//
+// The same no-FINAL contract holds, for the same reason: the decoder folds these rows
+// by their stable (block_height, event_index) identity while walking a block's run —
+// each credit keyed on (who, currency, amount) — so an un-merged replacement
+// duplicate cannot survive into a row, while FINAL would forfeit exactly the
+// block-prefix pruning this table exists to provide.
+function xcmInboundWalkTable(alias = ''): string {
+  return `price_data.xcm_inbound_walk_events${alias ? ` AS ${alias}` : ''}`
 }
 // Same rows, keyed (who, block_height, event_index), for the reads that name
 // accounts. `who` is absent from the sort key of the table above, so an
@@ -6876,16 +6902,19 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
     // The deposit run is read for the WHOLE block, never scoped to the account:
     // the walk-back continues only while consecutive event indices stay inside the
     // walk family, so dropping another account's event out of the run would end
-    // the walk early and lose credits behind it. Hence the block-keyed table.
+    // the walk early and lose credits behind it. Hence the block-first projection,
+    // where these blocks are a primary-key read instead of eight whole event-name
+    // slices — and where `extrinsic_index IS NULL` is the view's own filter rather
+    // than this predicate's, because the projection holds only hook-context rows.
     //
     // Read the extracted columns rather than args_json: `who`, `asset_id` and
-    // `amount` are exactly what the decode below consumed, and the payload is the
-    // fattest column in the model (794 MiB of its 1.87 GiB, 6.18 GiB of its 12 GiB
-    // uncompressed) on the read that touches the most rows of it.
+    // `amount` are exactly what the decode below consumes, and the payload is the
+    // fattest column of the parent model (794 MiB of its 1.87 GiB, 6.18 GiB of its
+    // 12 GiB uncompressed) on the read that touches the most rows of it.
     client.query({
       query: `SELECT block_height, event_index, event_name, who, asset_id, amount
-              FROM ${xcmEventActivityTable()}
-              WHERE block_height IN (${list}) AND event_name IN (${sqlEventNameList(XCM_IN_WALK_EVENTS)}) AND extrinsic_index IS NULL`,
+              FROM ${xcmInboundWalkTable()}
+              WHERE block_height IN (${list}) AND event_name IN (${sqlEventNameList(XCM_IN_WALK_EVENTS)})`,
       format: 'JSONEachRow',
     }),
   ])
