@@ -14,7 +14,9 @@ describe('per-page block lookups stay inside the query size limit', () => {
     const fn = explorerService.slice(at, explorerService.indexOf('const [, schedById]', at))
 
     expect(fn).toContain('block_height IN {blocks:Array(UInt32)}')
-    expect(fn).toContain('blocks.slice(start, start + 2_000)')
+    // The chunking is the helper's; the 2,000 block quantum is still this read's.
+    expect(fn).toContain('mapChunksConcurrently(blocks, 2_000,')
+    expect(fn).toContain('query_params: { blocks: chunk }')
     expect(fn).not.toMatch(/block_height IN \(\$\{blocks\}\)/)
   })
 
@@ -24,6 +26,7 @@ describe('per-page block lookups stay inside the query size limit', () => {
     const surrounding = explorerService.slice(at - 700, at + 900)
 
     expect(surrounding).toContain('block_height IN {blocks:Array(UInt32)}')
-    expect(surrounding).toContain('blocks.slice(start, start + 2_000)')
+    expect(surrounding).toContain('mapChunksConcurrently(blocks, 2_000,')
+    expect(surrounding.match(/query_params: \{ blocks: chunk \}/g)).toHaveLength(2)
   })
 })

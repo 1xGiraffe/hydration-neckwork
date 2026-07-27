@@ -54,10 +54,37 @@ describe('mapChunksConcurrently', () => {
   })
 })
 
-describe('the XCM chunk walks are not serial', () => {
-  it('leaves no awaited 1,000-key chunk loop behind', () => {
-    const serialChunkLoops = explorerService.match(/for \(let start = 0;[^\n]*\+= 1_000\)/g) ?? []
+// The chunked reads an Activity page issues — candidate-block decodes, the key
+// lookups that resolve semantic ownership, the liquidity transfer legs, the DCA
+// execution and swap-leg joins, the hourly closes — used to await one chunk at a
+// time. One filtered global page summed 51 s of ClickHouse time against a 37 s
+// wall because of it.
+describe('the chunked reads are not serial', () => {
+  it('leaves no awaited chunk loop behind at the sizes those reads use', () => {
+    const serialChunkLoops = explorerService.match(/for \(let (?:start|i) = 0;[^\n]*\+= (?:legChunk|500|1_000|2_000|5_000|5000)\)/g) ?? []
 
     expect(serialChunkLoops).toEqual([])
+  })
+
+  // Pin the site count: the guard above passes just as happily when the reads have
+  // been deleted, renamed or re-chunked to a size it does not look for.
+  it('routes every one of them through the one bounded helper', () => {
+    const sites = explorerService.match(/mapChunksConcurrently\(/g) ?? []
+    const bound = explorerService.match(/CHUNK_QUERY_CONCURRENCY/g) ?? []
+
+    expect(sites).toHaveLength(20)
+    // The shared bound, plus its own declaration. Every site takes it: a site with
+    // a hand-rolled concurrency is the thing this count exists to catch.
+    expect(bound).toHaveLength(sites.length + 1)
+    expect(explorerService).toMatch(/const CHUNK_QUERY_CONCURRENCY = 4$/m)
+  })
+
+  // The 500-key chunk in fillMissingLiquidityAmounts is not a round number: that
+  // read returns EVERY leg of each key, and at 5,000 keys one chunk came back with
+  // 94k rows and the next crossed the client's 100k result guard. Concurrency must
+  // not be an excuse to widen it back.
+  it('keeps the liquidity leg chunk at the size the result guard allows', () => {
+    expect(explorerService).toMatch(/const legChunk = 500$/m)
+    expect(explorerService.match(/mapChunksConcurrently\((?:extKeys|nullExtBlocks), legChunk,/g)).toHaveLength(2)
   })
 })

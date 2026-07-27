@@ -514,6 +514,37 @@ export function activitySourceSeedSize(want: number): number {
   return Math.min(bucket, MAX_ACTIVITY_SOURCE_ROWS)
 }
 
+// How deep a shared classified window has to prove itself, quantised so the pages
+// that walk one feed land on one key instead of assembling the same ordering per
+// click: the next power of two at or above the depth the page needs. A feed's
+// windows are then 32, 64, 128 … rows — logarithmically many in its depth — and
+// pages collapse onto one key faster the deeper they go, which is where paging
+// costs the most. Every offset from 1,025 to 2,048 shares one window.
+//
+// Every request quantises, including the first page, and that is deliberate in
+// both directions:
+//
+//   - Rounding up is not free. It is one more widening round for each source that
+//     has not yet crossed the deeper cutoff, and how much that costs depends on
+//     how sparse the filter is. On the global feed at min=95000, proving 64 rows
+//     instead of 25 cost nothing measurable (585 -> 525 queries, 29.4 -> 28.3 s);
+//     at min=2000000 it cost 246 s -> 653 s. Hence a power of two rather than the
+//     source-seed bucket (4 x activitySourceSeedSize), which would have rounded a
+//     25-row page to 64 instead of 32.
+//   - Quantising ALL of them is what keeps the feed's published ordering a
+//     function of the bucket alone, so any two requests needing the same depth
+//     read the same window. It is also worth more than it looks: the builder's
+//     ordering is not perfectly depth-independent — measured on the frozen
+//     min=95000 feed (no inserts in range), windows of depth 25, 32, 50, 64, 100
+//     and 128 all agree on their common prefix, but a window of depth 75 diverges
+//     from every one of them at index 59. Fewer distinct depths means fewer
+//     chances for two pages of one feed to be slices of two different orderings.
+export function activityWindowDepth(want: number): number {
+  let depth = 1
+  while (depth < want) depth *= 2
+  return depth
+}
+
 // Whether a prefiltered transfer read has to be taken again without its prefilter: it
 // came back short of its limit AND the account holds a transfer reference past the
 // prefilter's cap, so the cap — not the end of history — is what ended the read.
@@ -1282,8 +1313,7 @@ async function historicalCloses(pairs: { assetId: number; ts: string }[]): Promi
   // Candidate widening can value several thousand rows at once. Keep tuple SQL
   // comfortably below ClickHouse's max_query_size. Events in one asset/hour
   // share the same completed close, so the tuple list is hour-deduplicated.
-  for (let start = 0; start < values.length; start += 2_000) {
-    const batch = values.slice(start, start + 2_000)
+  const closeChunks = await mapChunksConcurrently(values, 2_000, CHUNK_QUERY_CONCURRENCY, async batch => {
     const priceIds = [...new Set(batch.map(p => p.priceId))]
     const tuples = batch.map(p => `(${p.priceId},'${p.ts}')`).join(',')
     const res = await client.query({
@@ -1301,7 +1331,12 @@ async function historicalCloses(pairs: { assetId: number; ts: string }[]): Promi
         ) p ON p.asset_id = ev.asset_id AND p.price_time <= toDateTime(ev.ts)`,
       format: 'JSONEachRow',
     })
-    for (const r of await res.json<{ asset_id: number; ts: string; close: string }>()) {
+    return res.json<{ asset_id: number; ts: string; close: string }>()
+  })
+  // In chunk order: the close cache evicts by insertion order, so which chunk's
+  // query finished first must not decide what it keeps.
+  for (const rows of closeChunks) {
+    for (const r of rows) {
       const key = `${r.asset_id}|${r.ts}`
       cacheHistoricalClose(key, Number(r.close) > 0 ? r.close : null)
     }
@@ -5779,16 +5814,17 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
       // block+amountIn); DCA.Scheduled maps id → its scheduling extrinsic for links.
       const dcaBlocks = [...new Set(rows.map(r => r.block_height))]
       const dcaRows: { block_height: number; event_index: number; who: string; id: string; amount_in: string }[] = []
-      for (let start = 0; start < dcaBlocks.length; start += 2_000) {
+      const dcaChunks = await mapChunksConcurrently(dcaBlocks, 2_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
         const dcaRes = await client.query({
           query: `SELECT block_height, event_index, who, toString(id) AS id, amount_in
                   FROM price_data.dca_events
                   WHERE event_name='DCA.TradeExecuted' AND block_height IN {dcaBlocks:Array(UInt32)}`,
-          query_params: { dcaBlocks: dcaBlocks.slice(start, start + 2_000) },
+          query_params: { dcaBlocks: chunk },
           format: 'JSONEachRow',
         })
-        dcaRows.push(...await dcaRes.json<{ block_height: number; event_index: number; who: string; id: string; amount_in: string }>())
-      }
+        return dcaRes.json<{ block_height: number; event_index: number; who: string; id: string; amount_in: string }>()
+      })
+      for (const rows of dcaChunks) dcaRows.push(...rows)
       // Same-block executions with the same per-trade amount are common (popular
       // round DCA sizes), so (block, amountIn) alone collides across schedules.
       // Keep every candidate and claim by adjacency: DCA.TradeExecuted follows
@@ -6190,13 +6226,16 @@ async function signersFor(pairs: [number, number | null][]): Promise<Map<string,
   const out = new Map<string, string>()
   const keys = [...new Set(pairs.filter(([, i]) => i != null).map(([h, i]) => `${h}:${i}`))]
   if (!keys.length) return out
-  for (let start = 0; start < keys.length; start += 5_000) {
-    const tuples = keys.slice(start, start + 5_000).map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
+  const chunks = await mapChunksConcurrently(keys, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const tuples = chunk.map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
     const res = await client.query({
       query: `SELECT block_height, extrinsic_index, coalesce(signer, effective_signer) AS signer FROM price_data.raw_extrinsics WHERE (block_height, extrinsic_index) IN (${tuples}) AND coalesce(signer, effective_signer) IS NOT NULL AND coalesce(signer, effective_signer) != ''`,
       format: 'JSONEachRow',
     })
-    for (const r of await res.json<{ block_height: number; extrinsic_index: number; signer: string }>()) out.set(`${r.block_height}:${r.extrinsic_index}`, r.signer)
+    return res.json<{ block_height: number; extrinsic_index: number; signer: string }>()
+  })
+  for (const rows of chunks) {
+    for (const r of rows) out.set(`${r.block_height}:${r.extrinsic_index}`, r.signer)
   }
   return out
 }
@@ -6216,14 +6255,17 @@ async function liquidationExtrinsics(pairs: [number, number | null][]): Promise<
   const out = new Set<string>()
   const keys = [...new Set(pairs.filter(([, i]) => i != null).map(([h, i]) => `${h}:${i}`))]
   if (!keys.length) return out
-  for (let start = 0; start < keys.length; start += 5_000) {
-    const tuples = keys.slice(start, start + 5_000).map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
+  const chunks = await mapChunksConcurrently(keys, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const tuples = chunk.map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
     const res = await client.query({
       query: `SELECT block_height, extrinsic_index FROM price_data.liquidation_extrinsics
               WHERE (block_height, extrinsic_index) IN (${tuples})`,
       format: 'JSONEachRow',
     })
-    for (const r of await res.json<{ block_height: number; extrinsic_index: number }>()) out.add(`${r.block_height}:${r.extrinsic_index}`)
+    return res.json<{ block_height: number; extrinsic_index: number }>()
+  })
+  for (const rows of chunks) {
+    for (const r of rows) out.add(`${r.block_height}:${r.extrinsic_index}`)
   }
   return out
 }
@@ -6238,14 +6280,17 @@ async function transferCallExtrinsics(pairs: [number, number | null][]): Promise
   const keys = [...new Set(pairs.filter(([, i]) => i != null).map(([h, i]) => `${h}:${i}`))]
   if (!keys.length) return out
   const callList = [...TRANSFER_CALL_NAMES].map(c => `'${c}'`).join(',')
-  for (let start = 0; start < keys.length; start += 5_000) {
-    const tuples = keys.slice(start, start + 5_000).map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
+  const chunks = await mapChunksConcurrently(keys, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const tuples = chunk.map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
     const res = await client.query({
       query: `SELECT block_height, extrinsic_index FROM price_data.raw_extrinsics
               WHERE (block_height, extrinsic_index) IN (${tuples}) AND call_name IN (${callList})`,
       format: 'JSONEachRow',
     })
-    for (const r of await res.json<{ block_height: number; extrinsic_index: number }>()) out.add(`${r.block_height}:${r.extrinsic_index}`)
+    return res.json<{ block_height: number; extrinsic_index: number }>()
+  })
+  for (const rows of chunks) {
+    for (const r of rows) out.add(`${r.block_height}:${r.extrinsic_index}`)
   }
   return out
 }
@@ -6260,13 +6305,16 @@ async function extrinsicIndexFor(pairs: [number, number | null][]): Promise<Map<
   // of thousands of money-market events, and one IN-list of all of them exceeds
   // ClickHouse's max_query_size — which failed the whole window rather than this
   // lookup, so the account's total went from "counted deeper" to "not counted".
-  for (let start = 0; start < keys.length; start += 5_000) {
-    const tuples = keys.slice(start, start + 5_000).map(k => { const [h, e] = k.split(':'); return `(${h},${e})` }).join(',')
+  const chunks = await mapChunksConcurrently(keys, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const tuples = chunk.map(k => { const [h, e] = k.split(':'); return `(${h},${e})` }).join(',')
     const res = await client.query({
       query: `SELECT block_height, event_index, extrinsic_index FROM price_data.raw_events WHERE (block_height, event_index) IN (${tuples}) AND extrinsic_index IS NOT NULL`,
       format: 'JSONEachRow',
     })
-    for (const r of await res.json<{ block_height: number; event_index: number; extrinsic_index: number }>()) out.set(`${r.block_height}:${r.event_index}`, r.extrinsic_index)
+    return res.json<{ block_height: number; event_index: number; extrinsic_index: number }>()
+  })
+  for (const rows of chunks) {
+    for (const r of rows) out.set(`${r.block_height}:${r.event_index}`, r.extrinsic_index)
   }
   return out
 }
@@ -6523,22 +6571,25 @@ async function fillMissingLiquidityAmounts(rows: LiquidityAmountCandidate[]): Pr
   // max 738. A 5,000-key chunk came back with 94k rows and the next crossed the
   // client's 100k result guard, failing deep liquidity pages with a ClickHouse 500.
   const legChunk = 500
-  for (let i = 0; i < extKeys.length; i += legChunk) {
-    const tuples = extKeys.slice(i, i + legChunk).map(k => { const [h, j] = k.split(':'); return `(${h},${j})` }).join(',')
-    const res = await client.query({
-      query: `SELECT ${columns} FROM price_data.transfer_activity_by_time WHERE (block_height, extrinsic_index) IN (${tuples}) ${assetFilter}`,
-      format: 'JSONEachRow',
-    })
-    legs.push(...await res.json<LiquidityTransferLeg>())
-  }
-  for (let i = 0; i < nullExtBlocks.length; i += legChunk) {
-    const blocks = nullExtBlocks.slice(i, i + legChunk).join(',')
-    const res = await client.query({
-      query: `SELECT ${columns} FROM price_data.transfer_activity_by_time WHERE block_height IN (${blocks}) AND extrinsic_index IS NULL ${assetFilter}`,
-      format: 'JSONEachRow',
-    })
-    legs.push(...await res.json<LiquidityTransferLeg>())
-  }
+  const [signedLegs, hookLegs] = await Promise.all([
+    mapChunksConcurrently(extKeys, legChunk, CHUNK_QUERY_CONCURRENCY, async chunk => {
+      const tuples = chunk.map(k => { const [h, j] = k.split(':'); return `(${h},${j})` }).join(',')
+      const res = await client.query({
+        query: `SELECT ${columns} FROM price_data.transfer_activity_by_time WHERE (block_height, extrinsic_index) IN (${tuples}) ${assetFilter}`,
+        format: 'JSONEachRow',
+      })
+      return res.json<LiquidityTransferLeg>()
+    }),
+    mapChunksConcurrently(nullExtBlocks, legChunk, CHUNK_QUERY_CONCURRENCY, async chunk => {
+      const blocks = chunk.join(',')
+      const res = await client.query({
+        query: `SELECT ${columns} FROM price_data.transfer_activity_by_time WHERE block_height IN (${blocks}) AND extrinsic_index IS NULL ${assetFilter}`,
+        format: 'JSONEachRow',
+      })
+      return res.json<LiquidityTransferLeg>()
+    }),
+  ])
+  for (const rows of [...signedLegs, ...hookLegs]) legs.push(...rows)
   matchLiquidityAmounts(missing, legs)
 }
 
@@ -6895,8 +6946,7 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
       type WithdrawalRow = { block_height: number; extrinsic_index: number | null; cid: number; amount: string }
       const withdrawals: WithdrawalRow[] = []
       const legacyPairs: { block_height: number; extrinsic_index: number | null }[] = []
-      for (let start = 0; start < blocks.length; start += 2_000) {
-        const chunk = blocks.slice(start, start + 2_000)
+      const blockChunks = await mapChunksConcurrently(blocks, 2_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
         const [wRes, legacyRes] = await Promise.all([
           client.query({
             query: `SELECT block_height, extrinsic_index,
@@ -6917,8 +6967,14 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
             format: 'JSONEachRow',
           }),
         ])
-        withdrawals.push(...await wRes.json<WithdrawalRow>())
-        legacyPairs.push(...await legacyRes.json<{ block_height: number; extrinsic_index: number | null }>())
+        return {
+          withdrawals: await wRes.json<WithdrawalRow>(),
+          legacy: await legacyRes.json<{ block_height: number; extrinsic_index: number | null }>(),
+        }
+      })
+      for (const chunk of blockChunks) {
+        withdrawals.push(...chunk.withdrawals)
+        legacyPairs.push(...chunk.legacy)
       }
       const wmap = new Map<string, number>()
       for (const withdrawal of withdrawals) {
@@ -7121,20 +7177,24 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
   return rows.sort(compareActivityRowsNewestFirst)
 }
 
-// The XCM decoders read their candidate blocks in 1,000-key chunks to keep each
-// query's result under the client's 100k max_result_rows guard. That guard is
-// per-query, so the chunks never had to wait for each other: a deep activity page
-// issued 92 chunk round-trips in one request, some of them GiB-scale, one at a time.
-// Run a few at a time — the bound the aToken reconstruction already uses for heavy
-// scans — and keep the results in chunk order, because the callers concatenate the
-// chunks and then sort on a key with ties, so chunk order is part of the response.
+// Chunked reads exist to keep each query's result under the client's 100k
+// max_result_rows guard (and each query's text under max_query_size). Both guards
+// are per-query, so the chunks never had to wait for each other: the XCM decoders
+// issued 92 chunk round-trips in one deep activity page, some of them GiB-scale,
+// one at a time, and a filtered global page summed 51 s of ClickHouse time against
+// a 37 s wall — essentially serial. Run a few at a time — the bound the aToken
+// reconstruction already uses for heavy scans — and keep the results in chunk
+// order, because callers concatenate the chunks and then sort on a key with ties,
+// so chunk order is part of the response. Every caller here either concatenates in
+// that order or folds the rows into a set/map keyed on the identities its own
+// chunk carried, which no two chunks share; completion order cannot reach either.
 //
 // Worth knowing before chasing more of it: this removes the serial round-trips, not
 // the page's wall time. On the deep account page only 3.1s of 10.0s is ClickHouse
 // time at all, and these chunk bursts already ran at ~0.1 effective parallelism
 // against their own summed query time — the span between the round-trips is
 // TS-side assembly, which is where that page's remaining seconds live.
-const XCM_CHUNK_CONCURRENCY = 4
+const CHUNK_QUERY_CONCURRENCY = 4
 
 export async function mapChunksConcurrently<T, R>(
   items: T[],
@@ -7170,7 +7230,7 @@ async function fetchDecodedXcmDeep(
       const candidates = await fetchBlocks(bound, pageSize)
       const blocks = [...new Set(candidates.map(row => Number(row.block_height)).filter(Number.isSafeInteger))]
       const rows: ActivityRow[] = []
-      for (const chunk of await mapChunksConcurrently(blocks, 1_000, XCM_CHUNK_CONCURRENCY, decode)) rows.push(...chunk)
+      for (const chunk of await mapChunksConcurrently(blocks, 1_000, CHUNK_QUERY_CONCURRENCY, decode)) rows.push(...chunk)
       await applyHistoricalUsd(rows, activityHistPick)
       out.push(...rows.filter(matches))
       if (out.length >= want || candidates.length < pageSize) break
@@ -8435,14 +8495,17 @@ async function suppressDustTransferRows<T extends ActivityRow>(rows: T[]): Promi
   if (!transfers.length) return rows
   const tuples = [...new Set(transfers.map(r => `(${r.blockHeight},${r.eventIndex! + 1})`))]
   const dustKeys = new Set<string>()
-  for (let start = 0; start < tuples.length; start += 5000) {
+  const dustChunks = await mapChunksConcurrently(tuples, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
     const res = await client.query({
       query: `SELECT block_height, event_index, who, asset_id, amount
               FROM price_data.dust_lost_events
-              WHERE (block_height, event_index) IN (${tuples.slice(start, start + 5000).join(',')})`,
+              WHERE (block_height, event_index) IN (${chunk.join(',')})`,
       format: 'JSONEachRow',
     })
-    for (const d of await res.json<{ block_height: number; event_index: number; who: string; asset_id: number; amount: string }>()) {
+    return res.json<{ block_height: number; event_index: number; who: string; asset_id: number; amount: string }>()
+  })
+  for (const rows of dustChunks) {
+    for (const d of rows) {
       dustKeys.add(`${d.block_height}:${d.event_index - 1}:${d.who}:${d.asset_id}:${d.amount}`)
     }
   }
@@ -8492,9 +8555,8 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
     ...OTC_EVENT_NAMES,
   ])]
   const semanticEvents: SemanticEvent[] = []
-  for (let start = 0; start < signedKeys.length; start += 5_000) {
-    const tuples = signedKeys.slice(start, start + 5_000)
-      .map(key => { const [height, index] = key.split(':'); return `(${height},${index})` })
+  const signedSemanticChunks = await mapChunksConcurrently(signedKeys, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const tuples = chunk.map(key => { const [height, index] = key.split(':'); return `(${height},${index})` })
     const result = await client.query({
       query: `SELECT block_height, extrinsic_index, event_name, args_json
               FROM price_data.raw_events
@@ -8506,10 +8568,11 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
                   AND JSONExtractString(args_json,'who') LIKE '0x6d6f646c%')`,
       format: 'JSONEachRow',
     })
-    semanticEvents.push(...await result.json<SemanticEvent>())
-  }
-  for (let start = 0; start < hookBlocks.length; start += 5_000) {
-    const blocks = hookBlocks.slice(start, start + 5_000).join(',')
+    return result.json<SemanticEvent>()
+  })
+  for (const rows of signedSemanticChunks) semanticEvents.push(...rows)
+  const hookSemanticChunks = await mapChunksConcurrently(hookBlocks, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const blocks = chunk.join(',')
     const result = await client.query({
       query: `SELECT block_height, extrinsic_index, event_name, args_json
               FROM price_data.raw_events
@@ -8523,8 +8586,9 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
                   AND JSONExtractString(args_json,'who') LIKE '0x6d6f646c%')`,
       format: 'JSONEachRow',
     })
-    semanticEvents.push(...await result.json<SemanticEvent>())
-  }
+    return result.json<SemanticEvent>()
+  })
+  for (const rows of hookSemanticChunks) semanticEvents.push(...rows)
   for (const event of semanticEvents) {
     const args = (safeJson(event.args_json) ?? {}) as Record<string, unknown>
     // Staking builders reject empty/zero amount events; do not let one own a
@@ -8550,8 +8614,8 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
   const candidateBlocks = [...new Set(transfers.map(row => row.blockHeight))]
   type SemanticMm = { block_height: number; event_index: number; account_id: string | null }
   const mmRows: SemanticMm[] = []
-  for (let start = 0; start < candidateBlocks.length; start += 5_000) {
-    const blocks = candidateBlocks.slice(start, start + 5_000).join(',')
+  const mmChunks = await mapChunksConcurrently(candidateBlocks, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const blocks = chunk.join(',')
     const result = await client.query({
       query: `SELECT block_height, event_index, account_id
               FROM price_data.raw_money_market_events
@@ -8561,8 +8625,9 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
                 AND user_address NOT LIKE '0x6d6f646c%'`,
       format: 'JSONEachRow',
     })
-    mmRows.push(...await result.json<SemanticMm>())
-  }
+    return result.json<SemanticMm>()
+  })
+  for (const rows of mmChunks) mmRows.push(...rows)
   const mmExtrinsics = await extrinsicIndexFor(mmRows.map(row => [row.block_height, row.event_index] as [number, number]))
   for (const row of mmRows) {
     const index = mmExtrinsics.get(`${row.block_height}:${row.event_index}`)
@@ -8575,7 +8640,7 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
   // blocks in chunks using the shared global/block builders.
   if (hookBlocks.length) {
     const prices = await ensurePrices()
-    const decoded = await mapChunksConcurrently(hookBlocks, 1_000, XCM_CHUNK_CONCURRENCY, async blocks => {
+    const decoded = await mapChunksConcurrently(hookBlocks, 1_000, CHUNK_QUERY_CONCURRENCY, async blocks => {
       const [incoming, outgoing] = await Promise.all([
         xcmInRowsForBlocks(blocks, prices),
         xcmOutRemoteRowsForBlocks(blocks, prices),
@@ -8586,21 +8651,21 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
       for (const row of chunk) addHookAccount(row.blockHeight, row.who?.accountId)
     }
   }
-  if (signedKeys.length) {
-    for (let start = 0; start < signedKeys.length; start += 5_000) {
-      const tuples = signedKeys.slice(start, start + 5_000)
-        .map(key => { const [height, index] = key.split(':'); return `(${height},${index})` })
-      const result = await client.query({
-        query: `SELECT DISTINCT block_height, extrinsic_index
-                FROM price_data.raw_xcm_activity
-                WHERE (block_height, extrinsic_index) IN (${tuples.join(',')})
-                  AND source_kind='event'
-                  AND name IN ('XTokens.TransferredAssets','PolkadotXcm.Sent')`,
-        format: 'JSONEachRow',
-      })
-      for (const row of await result.json<{ block_height: number; extrinsic_index: number | null }>()) {
-        if (row.extrinsic_index != null) semanticExtrinsics.add(`${row.block_height}:${row.extrinsic_index}`)
-      }
+  const xcmChunks = await mapChunksConcurrently(signedKeys, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const tuples = chunk.map(key => { const [height, index] = key.split(':'); return `(${height},${index})` })
+    const result = await client.query({
+      query: `SELECT DISTINCT block_height, extrinsic_index
+              FROM price_data.raw_xcm_activity
+              WHERE (block_height, extrinsic_index) IN (${tuples.join(',')})
+                AND source_kind='event'
+                AND name IN ('XTokens.TransferredAssets','PolkadotXcm.Sent')`,
+      format: 'JSONEachRow',
+    })
+    return result.json<{ block_height: number; extrinsic_index: number | null }>()
+  })
+  for (const rows of xcmChunks) {
+    for (const row of rows) {
+      if (row.extrinsic_index != null) semanticExtrinsics.add(`${row.block_height}:${row.extrinsic_index}`)
     }
   }
 
@@ -8609,16 +8674,18 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
   const incentiveKeys = transfers
     .filter(row => row.extrinsicIndex != null && row.from.accountId.toLowerCase() === INCENTIVES_REWARD_POT)
     .map(row => `${row.blockHeight}:${row.extrinsicIndex}`)
-  for (let start = 0; start < incentiveKeys.length; start += 5_000) {
-    const tuples = [...new Set(incentiveKeys.slice(start, start + 5_000))]
-      .map(key => { const [height, index] = key.split(':'); return `(${height},${index})` })
+  const incentiveChunks = await mapChunksConcurrently(incentiveKeys, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const tuples = [...new Set(chunk)].map(key => { const [height, index] = key.split(':'); return `(${height},${index})` })
     const result = await client.query({
       query: `SELECT DISTINCT block_height, extrinsic_index
               FROM price_data.incentive_claim_calls
               WHERE (block_height, extrinsic_index) IN (${tuples.join(',')})`,
       format: 'JSONEachRow',
     })
-    for (const row of await result.json<{ block_height: number; extrinsic_index: number }>()) {
+    return result.json<{ block_height: number; extrinsic_index: number }>()
+  })
+  for (const rows of incentiveChunks) {
+    for (const row of rows) {
       semanticExtrinsics.add(`${row.block_height}:${row.extrinsic_index}`)
     }
   }
@@ -8711,14 +8778,17 @@ async function getRecentRewardClaims(limit: number, from?: string, to?: string, 
       .filter(r => r.extrinsic_index != null)
       .map(r => `(${r.block_height},${r.extrinsic_index},'${r.call_address.replaceAll("'", "''")}')`))]
     const confirmedCalls = new Set<string>()
-    for (let start = 0; start < candidateTuples.length; start += 5000) {
+    const callChunks = await mapChunksConcurrently(candidateTuples, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
       const callRes = await client.query({
         query: `SELECT block_height, extrinsic_index, call_address
                 FROM price_data.incentive_claim_calls FINAL
-                PREWHERE (block_height, ifNull(extrinsic_index, 4294967295), call_address) IN (${candidateTuples.slice(start, start + 5000).join(',')})`,
+                PREWHERE (block_height, ifNull(extrinsic_index, 4294967295), call_address) IN (${chunk.join(',')})`,
         format: 'JSONEachRow',
       })
-      for (const c of await callRes.json<{ block_height: number; extrinsic_index: number; call_address: string }>()) confirmedCalls.add(`${c.block_height}:${c.extrinsic_index}:${c.call_address}`)
+      return callRes.json<{ block_height: number; extrinsic_index: number; call_address: string }>()
+    })
+    for (const rows of callChunks) {
+      for (const c of rows) confirmedCalls.add(`${c.block_height}:${c.extrinsic_index}:${c.call_address}`)
     }
     return dedupeTransferEvents(candidates.filter(r => r.extrinsic_index != null && confirmedCalls.has(`${r.block_height}:${r.extrinsic_index}:${r.call_address}`)))
   }
@@ -8833,15 +8903,18 @@ async function liquidityExtrinsicsForShareTrades(trades: TradeRow[]): Promise<Se
     .map(t => `(${t.blockHeight},${t.extrinsicIndex})`))]
   if (!tuples.length) return new Set()
   const out = new Set<string>()
-  for (let start = 0; start < tuples.length; start += 5_000) {
+  const chunks = await mapChunksConcurrently(tuples, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
     const res = await client.query({
       query: `SELECT DISTINCT block_height, extrinsic_index
               FROM price_data.raw_events
-              WHERE (block_height, extrinsic_index) IN (${tuples.slice(start, start + 5_000).join(',')})
+              WHERE (block_height, extrinsic_index) IN (${chunk.join(',')})
                 AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})`,
       format: 'JSONEachRow',
     })
-    for (const row of await res.json<{ block_height: number; extrinsic_index: number }>()) out.add(`${row.block_height}:${row.extrinsic_index}`)
+    return res.json<{ block_height: number; extrinsic_index: number }>()
+  })
+  for (const rows of chunks) {
+    for (const row of rows) out.add(`${row.block_height}:${row.extrinsic_index}`)
   }
   return out
 }
@@ -8895,316 +8968,436 @@ async function recentActivityPage(limit: number, from?: string, to?: string, off
   const tw = timeWindow(from, to)
   type = normalizeActivityTypeKey(type)
   return cached(`explorer:activity:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
-    const want = offset + limit
-    const classified = type === 'all' || type === 'trade' || type === 'transfer'
-    // Categories assembled from multiple sources page only after merging, so
-    // every source must cover the requested offset as well as the page size.
-    const locallyMerged = classified || !!action || type === 'xcm' || type === 'liquidity' || type === 'mm'
-    let fetchN = locallyMerged
-      ? Math.max(want * 5, limit + 50)
-      : Math.max(limit * 5, limit + 50)
-    const toTransferRow = (t: TransferRow): ActivityRow => ({
-      type: 'transfer', blockHeight: t.blockHeight, timestamp: t.timestamp, eventIndex: t.eventIndex, extrinsicIndex: t.extrinsicIndex,
-      who: t.from, to: t.to, asset: t.asset, assetIn: null, assetOut: null, amount: t.amount, amountIn: null, amountOut: null, valueUsd: t.valueUsd,
-    })
-    const toTradeRow = (t: TradeRow): ActivityRow => ({
-      type: 'trade', blockHeight: t.blockHeight, timestamp: t.timestamp, eventIndex: t.eventIndex, extrinsicIndex: t.extrinsicIndex,
-      who: t.who, to: null, asset: null, assetIn: t.assetIn, assetOut: t.assetOut, amount: null, amountIn: t.amountIn, amountOut: t.amountOut, valueUsd: t.valueUsd,
-      dca: t.dca, linkBlock: t.linkBlock, linkIndex: t.linkIndex,
-    })
-    const toVoteRow = (v: VoteRow): ActivityRow => ({
-      type: 'vote', blockHeight: v.blockHeight, timestamp: v.timestamp, eventIndex: v.eventIndex, extrinsicIndex: v.extrinsicIndex,
-      who: v.account, to: null, asset: v.asset, assetIn: null, assetOut: null, amount: v.amount, amountIn: null, amountOut: null, valueUsd: v.valueUsd,
-      votePallet: v.pallet, voteAction: v.action, voteRef: v.referendum, voteSide: v.side, voteConviction: v.conviction,
-      ...referendumRefFields(v.pallet, v.referendum),
-      linkBlock: v.blockHeight, linkIndex: v.extrinsicIndex,
-    })
-
-    let rows: ActivityRow[]
-    let locallyPaged = classified
-    let sourceSaturated = false
-    let plumbingApplied = false
-    const otcOnlyAction = type === 'trade' && !!resolveOtcAction(action) && !!OTC_ACTION_EVENTS[resolveOtcAction(action)!]
-    if (type === 'trade' && action === 'dca-failed') {
-      // Failed executions are a self-contained indexed DCA family.  Routing this
-      // action through the shared Trade classifier also paged swaps and OTC rows
-      // that can never match it, turning a small failure page into a multi-source
-      // full-history search.
-      rows = (await getRecentDcaFailures(want, from, to, undefined, assetIdsForToken(filters.token)))
-        .slice(offset, want)
-      locallyPaged = false
-    } else if (otcOnlyAction) {
-      // OTC actions are already exact, independently pageable event families.
-      // Sending them through the shared Trade classifier widens the unrelated
-      // swap source forever because no swap can satisfy an otc-* action.
-      rows = await getRecentOtc(limit, from, to, offset, filters, action)
-      locallyPaged = false
-    } else if (type === 'transfer') {
-      // Pull only transfer candidates, then resolve semantic ownership by their
-      // exact identities. Widening the swap/liquidity/XCM/etc. feeds alongside
-      // a sparse transfer filter made a 25-row page enumerate >100k unrelated
-      // rows and could never complete under the ClickHouse result guard.
-      const deferredValueFilter = filters.min != null && filters.unit !== 'token'
-      const sourceFilters = deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
-      for (;;) {
-        const transfers = await getRecentTransfers(fetchN, from, to, 0, true, sourceFilters)
-        const classifiedTransfers = await suppressTransferCandidates(transfers)
-        rows = await suppressDustTransferRows(classifiedTransfers.map(toTransferRow))
-        plumbingApplied = true
-        sourceSaturated = transfers.length >= fetchN
-        if (deferredValueFilter && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
-        const visibleRows = rows
-          .filter(row => activityRowMatchesFilters(row, filters) && activityRowMatchesAction(row, action))
-          .sort((left, right) => right.blockHeight - left.blockHeight || (right.eventIndex ?? -1) - (left.eventIndex ?? -1))
-        const cutoff = completeActivityPageCutoff(visibleRows, want)
-        const oldest = transfers.reduce<{ blockHeight: number; eventIndex: number } | null>((current, row) => {
-          const candidate = { blockHeight: row.blockHeight, eventIndex: row.eventIndex }
-          return current == null || candidate.blockHeight < current.blockHeight ||
-            (candidate.blockHeight === current.blockHeight && candidate.eventIndex < current.eventIndex)
-            ? candidate : current
-        }, null)
-        const complete = cutoff
-          ? activitySourceCoversCutoff(transfers.length, fetchN, oldest, cutoff)
-          : transfers.length < fetchN
-        if (complete) break
-        if (fetchN >= MAX_ACTIVITY_SOURCE_ROWS) throw activityQueryTooBroad()
-        fetchN = Math.min(fetchN * 4, MAX_ACTIVITY_SOURCE_ROWS)
-      }
-    } else if (classified) {
-      // Transfers, trades and the merged feed share ONE classification pass so a
-      // row never appears in a category the merged feed assigned elsewhere.
-      // The Trade-only view needs liquidity context to reject share-token router
-      // legs, plus DCA/OTC rows, but it cannot display transfers, rewards, MM,
-      // XCM, staking or votes. Avoid that unrelated fan-out on its hot path.
-      const needsFullClassification = type !== 'trade'
-      // Historical-price ASOF joins make a sparse minimum-value query scan the
-      // entire raw table before LIMIT can help. Fetch recent candidates without
-      // the threshold, value them in batches, and widen only sources that have
-      // not yet produced a complete page of qualifying rows.
-      // Asset-keyed swap reads can apply the exact event-time USD predicate
-      // before LIMIT more cheaply than repeatedly widening a sparse candidate
-      // window. Other activity families still defer USD filtering until their
-      // bounded candidates have been classified and valued below.
-      const deferredValueFilter = filters.min != null
-        && filters.unit !== 'token'
-        && !(type === 'trade' && filters.token)
-      // A four-figure USD floor is sparse enough that the cheap unfiltered
-      // probe cannot normally fill a page; go straight to bounded exact source
-      // reads. Lower/default floors retain the recent probe, which usually wins.
-      const directExactValueFilter = deferredValueFilter && filters.min! >= 1_000
-      let sourceValueFiltered = directExactValueFilter
-      let sourceFilters = sourceValueFiltered
-        ? filters
-        : deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
-      type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'staking' | 'vote'
-      const classifiedSourceKeys: ClassifiedSourceKey[] = [
-        'transfer', 'trade', 'dca', 'reward', 'liquidity', 'mm', 'otc',
-        'xcm', 'xcmIn', 'xcmOutRemote', 'staking', 'vote',
-      ]
-      const exactSeedSize = activitySourceSeedSize(want)
-      const exactSourceLimits = Object.fromEntries(classifiedSourceKeys.map(key => [key, sourceValueFiltered ? exactSeedSize : fetchN])) as Record<ClassifiedSourceKey, number>
-      const exactSourceCache = new Map<ClassifiedSourceKey, unknown[]>()
-      let exactSourceFrom = from
-      const loadClassifiedSource = <T>(
-        key: ClassifiedSourceKey,
-        load: (sourceLimit: number, sourceFrom: string | undefined) => Promise<T[]>,
-      ): Promise<T[]> => {
-        if (!sourceValueFiltered) return load(fetchN, from)
-        const previous = exactSourceCache.get(key)
-        if (previous) return Promise.resolve(previous as T[])
-        return load(exactSourceLimits[key], exactSourceFrom).then(sourceRows => {
-          exactSourceCache.set(key, sourceRows)
-          return sourceRows
-        })
-      }
-      for (;;) {
-        const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, staking, votes] = await Promise.all([
-          needsFullClassification
-            ? loadClassifiedSource('transfer', (sourceLimit, sourceFrom) => getRecentTransfers(sourceLimit, sourceFrom, to, 0, true, sourceFilters))
-            : Promise.resolve([]),
-          loadClassifiedSource('trade', (sourceLimit, sourceFrom) => getRecentTrades(sourceLimit, sourceFrom, to, 0, sourceFilters)),
-          // Failed schedules have no executed USD value and cannot survive a
-          // USD minimum. Do not widen their error-payload lookup alongside a
-          // sparse qualifying-swap walk (that used to reopen millions of raw
-          // rows for candidates guaranteed to be filtered out).
-          deferredValueFilter
-            ? Promise.resolve([])
-            : loadClassifiedSource('dca', (sourceLimit, sourceFrom) => getRecentDcaFailures(sourceLimit, sourceFrom, to, undefined, assetIdsForToken(filters.token))),
-          needsFullClassification
-            ? loadClassifiedSource('reward', (sourceLimit, sourceFrom) => getRecentRewardClaims(sourceLimit, sourceFrom, to, undefined, assetIdsForToken(filters.token)))
-            : Promise.resolve([]),
-          needsFullClassification
-            ? loadClassifiedSource('liquidity', (sourceLimit, sourceFrom) => getRecentLiquidity(sourceLimit, sourceFrom, to, 0, sourceFilters))
-            : Promise.resolve([]),
-          needsFullClassification
-            ? loadClassifiedSource('mm', (sourceLimit, sourceFrom) => getRecentMoneyMarket(sourceLimit, sourceFrom, to, 0, sourceFilters))
-            : Promise.resolve([]),
-          loadClassifiedSource('otc', (sourceLimit, sourceFrom) => getRecentOtc(sourceLimit, sourceFrom, to, 0, sourceFilters)),
-          needsFullClassification
-            ? loadClassifiedSource('xcm', (sourceLimit, sourceFrom) => getRecentXcm(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
-            : Promise.resolve([]),
-          needsFullClassification
-            ? loadClassifiedSource('xcmIn', (sourceLimit, sourceFrom) => getRecentXcmIn(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
-            : Promise.resolve([]),
-          needsFullClassification
-            ? loadClassifiedSource('xcmOutRemote', (sourceLimit, sourceFrom) => getRecentXcmOutRemote(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
-            : Promise.resolve([]),
-          needsFullClassification
-            ? loadClassifiedSource('staking', (sourceLimit, sourceFrom) => getRecentStaking(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
-            : Promise.resolve([]),
-          needsFullClassification
-            ? loadClassifiedSource('vote', (sourceLimit, sourceFrom) => getRecentVotes(sourceLimit, sourceFrom, to, 0, {}, undefined, sourceFilters))
-            : Promise.resolve([]),
-        ])
-        const sourceFilteredTransfers = sourceValueFiltered
-          ? await suppressTransferCandidates(transfers)
-          : transfers
-        const liquidityExtrinsics = needsFullClassification && !sourceValueFiltered
-          ? activityExtrinsicSet(liquidity)
-          : new Set([
-              ...activityExtrinsicSet(liquidity),
-              ...await liquidityExtrinsicsForShareTrades(trades),
-            ])
-        const userTrades = dropShareRoutedTrades(trades, liquidityExtrinsics)
-        // Drop swap-internal transfer legs: any transfer in a trade's extrinsic, or
-        // touching a pallet/pool account (hops, fees, referral pot). OTC fills
-        // settle peer-to-peer (real Transfer events between taker/maker, unlike an
-        // AMM swap's pool-internal Withdrawn/Deposited), so their extrinsics own
-        // their transfer legs the same way trades/staking/mm do.
-        const tradeExtrinsics = new Set(trades.filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
-        const stakingExtrinsics = activityExtrinsicSet(staking)
-        const mmExtrinsics = activityExtrinsicSet(mm)
-        const otcExtrinsics = activityExtrinsicSet(otc)
-        const userTransfers = sourceFilteredTransfers.filter(t =>
-          !(t.extrinsicIndex != null && tradeExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
-          !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
-          !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
-          !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
-          !isModuleAcct(t.from) && !isModuleAcct(t.to))
-        // Module-account MM rows are pool-proxy internals, not user activity.
-        const userMm = mm.filter(r => !isModuleAcct(r.who))
-        type SourceCursor = { blockHeight: number; eventIndex: number }
-        type SourcePage = { key: ClassifiedSourceKey; fetchSize: number; rawSize: number; rows: ActivityRow[]; oldest: SourceCursor | null; valueIrrelevant?: boolean }
-        const oldestOf = <T extends { blockHeight: number; eventIndex?: number | null }>(source: T[]): SourceCursor | null => {
-          let oldest: SourceCursor | null = null
-          for (const row of source) {
-            const candidate = { blockHeight: row.blockHeight, eventIndex: row.eventIndex ?? -1 }
-            if (oldest == null || candidate.blockHeight < oldest.blockHeight ||
-              (candidate.blockHeight === oldest.blockHeight && candidate.eventIndex < oldest.eventIndex)) oldest = candidate
-          }
-          return oldest
-        }
-        const sourceFetchSize = (key: ClassifiedSourceKey): number => sourceValueFiltered ? exactSourceLimits[key] : fetchN
-        const allSources: SourcePage[] = [
-          { key: 'transfer', fetchSize: sourceFetchSize('transfer'), rawSize: transfers.length, rows: userTransfers.map(toTransferRow), oldest: oldestOf(transfers) },
-          { key: 'trade', fetchSize: sourceFetchSize('trade'), rawSize: trades.length, rows: userTrades.map(toTradeRow), oldest: oldestOf(trades) },
-          // Failed DCA rows have no executed value and can never pass a minimum.
-          { key: 'dca', fetchSize: sourceFetchSize('dca'), rawSize: dcaFailures.length, rows: dcaFailures, oldest: oldestOf(dcaFailures), valueIrrelevant: true },
-          { key: 'reward', fetchSize: sourceFetchSize('reward'), rawSize: rewards.length, rows: rewards, oldest: oldestOf(rewards) },
-          { key: 'liquidity', fetchSize: sourceFetchSize('liquidity'), rawSize: liquidity.length, rows: liquidity, oldest: oldestOf(liquidity) },
-          { key: 'staking', fetchSize: sourceFetchSize('staking'), rawSize: staking.length, rows: staking, oldest: oldestOf(staking) },
-          { key: 'vote', fetchSize: sourceFetchSize('vote'), rawSize: votes.length, rows: votes.map(toVoteRow), oldest: oldestOf(votes) },
-          { key: 'mm', fetchSize: sourceFetchSize('mm'), rawSize: mm.length, rows: userMm, oldest: oldestOf(mm) },
-          { key: 'otc', fetchSize: sourceFetchSize('otc'), rawSize: otc.length, rows: otc, oldest: oldestOf(otc) },
-          { key: 'xcm', fetchSize: sourceFetchSize('xcm'), rawSize: xcm.length, rows: xcm, oldest: oldestOf(xcm) },
-          { key: 'xcmIn', fetchSize: sourceFetchSize('xcmIn'), rawSize: xcmIn.length, rows: xcmIn, oldest: oldestOf(xcmIn) },
-          { key: 'xcmOutRemote', fetchSize: sourceFetchSize('xcmOutRemote'), rawSize: xcmOutRemote.length, rows: xcmOutRemote, oldest: oldestOf(xcmOutRemote) },
-        ]
-        const sourcePages = type === 'trade'
-          ? [allSources[1], allSources[2], allSources[8]]
-          : type === 'transfer' ? [allSources[0]] : allSources
-        sourceSaturated = sourcePages.some(source => source.rawSize >= source.fetchSize)
-        // A transfer-only result still needs the other categories as
-        // classification context. Otherwise the transfer leg of an LP action,
-        // reward claim, vote, or XCM journey can reappear merely because the
-        // caller selected `type=transfer`.
-        const classificationPages = type === 'trade' ? sourcePages : allSources
-        rows = await suppressActivityPlumbing(classificationPages.flatMap(source => source.rows))
-        plumbingApplied = true
-        if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
-        if (deferredValueFilter && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
-        const visibleRows = rows.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
-          .sort((a, b) => b.blockHeight - a.blockHeight || (b.eventIndex ?? -1) - (a.eventIndex ?? -1))
-        const cutoff = completeActivityPageCutoff(visibleRows, want)
-        const coveragePages = type === 'transfer' ? allSources : sourcePages
-        const incompletePages = activitySourcesNeedingMore(
-          cutoff ? coveragePages : sourcePages,
-          cutoff,
-          deferredValueFilter,
-        )
-        const complete = incompletePages.length === 0
-        if (complete) break
-        // A low USD threshold usually completes from the first small unfiltered
-        // window and avoids an ASOF join below every source LIMIT. A sparse
-        // threshold is the opposite: repeatedly widening every family can cross
-        // the client's 100k row guard before finding 25 qualifying rows. After
-        // the first incomplete window, let each source apply its exact event-time
-        // predicate and resolve transfer/share-token ownership only for those
-        // bounded candidates. This retains complete-history classification while
-        // avoiding an all-family raw-history walk.
-        if (deferredValueFilter && !sourceValueFiltered) {
-          sourceValueFiltered = true
-          sourceFilters = filters
-          // Start each exact source at a fraction of the merged target. The
-          // common case fills the union from several activity families; sources
-          // that have not crossed the resulting cutoff are deepened separately.
-          fetchN = exactSeedSize
-          for (const key of classifiedSourceKeys) exactSourceLimits[key] = fetchN
-          exactSourceCache.clear()
-          exactSourceFrom = from
-          continue
-        }
-        if (sourceValueFiltered) {
-          if (!incompletePages.length) throw activityQueryTooBroad()
-          exactSourceFrom = cutoff ? activityCutoffFromDate(from, visibleRows, want) : from
-          for (const source of incompletePages) {
-            if (source.fetchSize >= MAX_ACTIVITY_SOURCE_ROWS) throw activityQueryTooBroad()
-            exactSourceLimits[source.key] = Math.min(source.fetchSize * 4, MAX_ACTIVITY_SOURCE_ROWS)
-            exactSourceCache.delete(source.key)
-          }
-          fetchN = Math.max(...Object.values(exactSourceLimits))
-          continue
-        }
-        if (fetchN >= MAX_ACTIVITY_SOURCE_ROWS) throw activityQueryTooBroad()
-        fetchN = Math.min(fetchN * 4, MAX_ACTIVITY_SOURCE_ROWS)
-      }
-    } else if (action) {
-      // Sub-type filtering breaks SQL paging — fetch a window and page locally.
-      locallyPaged = true
-      if (type === 'liquidity') rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters, action), ...(action === 'Claim' ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'liquidity') : [])]
-      else if (type === 'mm') rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters, action)).filter(r => !isModuleAcct(r.who)), ...(action === 'ClaimRewards' ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'mm') : [])]
-      else if (type === 'otc') rows = await getRecentOtc(fetchN, from, to, 0, filters, action)
-      else if (type === 'xcm') rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters)])).flat()
-      else if (type === 'staking') rows = await getRecentStaking(fetchN, from, to, undefined, 0, filters, undefined, action)
-      else rows = (await getRecentVotes(fetchN, from, to, 0, {}, undefined, filters)).map(toVoteRow)
-    } else if (type === 'liquidity') {
-      locallyPaged = true
-      rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'liquidity')]
-    } else if (type === 'mm') {
-      locallyPaged = true
-      rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters)).filter(r => !isModuleAcct(r.who)), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'mm')]
-    } else if (type === 'otc') {
-      rows = await getRecentOtc(limit, from, to, offset, filters)
-    } else if (type === 'xcm') {
-      locallyPaged = true
-      rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters)])).flat()
-    } else if (type === 'staking') {
-      rows = await getRecentStaking(limit, from, to, undefined, offset, filters)
-    } else {
-      rows = (await getRecentVotes(limit, from, to, offset, {}, undefined, filters)).map(toVoteRow)
-    }
-    if (locallyPaged && !classified) sourceSaturated = rows.length >= fetchN
-    if (!plumbingApplied) rows = await suppressActivityPlumbing(rows)
-    if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
-    if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
-    rows = rows.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
-    rows.sort(compareActivityRowsNewestFirst)
-    if (locallyPaged && rows.length < want && sourceSaturated) throw activityQueryTooBroad()
+    const { rows, locallyPaged } = await activityWindow(limit, from, to, offset, type, filters, action)
+    // A locally paged window holds the whole filtered ordering, so this page
+    // starts at `offset`; a SQL-paged read already returned the page itself.
+    // Copy the rows the page publishes: the window is shared with every other
+    // page of the same feed, and the enrichment below writes to its rows.
     const sliceOffset = locallyPaged ? offset : 0
-    const page = rows.slice(sliceOffset, sliceOffset + limit)
+    const page = rows.slice(sliceOffset, sliceOffset + limit).map(row => ({ ...row }))
     await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page)])
     return page
   })
+}
+
+interface ActivityWindow { rows: ActivityRow[]; locallyPaged: boolean }
+
+// The window a page is a slice of: shared by every page whose depth falls in the
+// same bucket, so paging a filtered feed assembles it once instead of per click.
+//
+// The live head of a cheap feed keeps the feed's own TTL, because that is the row
+// set a reader watches for their own transaction — including the Activity page's
+// default $10 smol floor, which is a filter but not an expensive one. Everything
+// else (a bounded date range, a page past the head, a sparse value floor that
+// sends every source to its exact event-time predicate) is not live data: keep it
+// fresh for a minute and serve it stale while it revalidates, so a reader paging
+// deep is never blocked on a rebuild.
+async function activityWindow(
+  limit: number, from: string | undefined, to: string | undefined, offset: number,
+  type: string, filters: ValueListFilters, action?: string,
+): Promise<ActivityWindow> {
+  const plan = activityWindowPlan(limit, offset, type, from, to, filters, action)
+  // A page cut by SQL OFFSET is its own window — the offset is part of the read —
+  // so it stays on the per-page cache above.
+  if (!plan) return buildActivityWindow(limit, from, to, offset, type, filters, action)
+  const load = (key: string, depth: number): Promise<ActivityWindow> => {
+    const build = async (): Promise<ActivityWindow> => {
+      const window = await buildActivityWindow(depth, from, to, 0, type, filters, action)
+      // Hold exactly the depth this key promises. No page keyed on it reads
+      // further, and the rows past it are the ones no source proved complete.
+      return { ...window, rows: window.rows.slice(0, depth) }
+    }
+    return plan.live
+      ? cached(key, LIVE_CACHE_MS, build)
+      : cachedSwr(key, ACTIVITY_WINDOW_FRESH_MS, ACTIVITY_WINDOW_STALE_MS, build)
+  }
+  const want = offset + limit
+  try {
+    return await load(plan.key, plan.depth)
+  } catch (error) {
+    // The bucket's deepest page needs more candidates than a request may read. A
+    // shallower page in the same bucket can still be served, so fall back to the
+    // depth this page itself asked for rather than refusing it.
+    if ((error as { code?: unknown })?.code !== 'ACTIVITY_QUERY_TOO_BROAD' || plan.depth === want) throw error
+    return await load(`${plan.key}:exact:${want}`, want)
+  }
+}
+
+// A filtered or deep Activity page is a slice of a window that costs seconds to
+// tens of seconds to assemble, and it is the same window at every offset of the
+// feed. One minute of freshness with stale-while-revalidate keeps a pager on one
+// window instead of paying the whole assembly per click, and keeps consecutive
+// pages inside a bucket slices of the SAME ordering rather than of two reads
+// taken seconds apart.
+const ACTIVITY_WINDOW_FRESH_MS = 60_000
+const ACTIVITY_WINDOW_STALE_MS = 5 * 60_000
+
+export interface ActivityWindowPlan { key: string; depth: number; live: boolean }
+
+// The shared window a request pages from, or null when the request's read already
+// IS its page. The key names the window — feed shape and proven depth — and
+// deliberately carries no offset and no page size: those choose the slice, not the
+// window, and putting them in the key is what made an expensive result reusable
+// only by an identical request.
+//
+// The window holding offset 0 of a live feed is the one whose freshness a reader
+// can see, so it stays on the feed TTL while every deeper bucket takes the window
+// TTL below.
+export function activityWindowPlan(
+  limit: number, offset: number, type: string, from: string | undefined, to: string | undefined,
+  filters: ValueListFilters, action?: string,
+): ActivityWindowPlan | null {
+  const category = normalizeActivityTypeKey(type)
+  if (!activityPagesInMemory(category, action)) return null
+  const depth = activityWindowDepth(offset + limit)
+  return {
+    key: `explorer:activity-window:${category}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}:${depth}`,
+    depth,
+    live: depth === activityWindowDepth(limit)
+      && !timeWindow(from, to)
+      && !activityExactValueFiltered(category, filters),
+  }
+}
+
+// Which categories build a page by slicing rows held in memory. Classification, an
+// action filter and a multi-source merge are all decided on built rows, so those
+// pages are slices of one ordering the request assembles; the rest carry their
+// offset into SQL, where the read is the page. This is the predicate the builder
+// pages by, so a window may only be shared across offsets where it holds.
+export function activityPagesInMemory(type: string, action?: string): boolean {
+  const category = normalizeActivityTypeKey(type)
+  // Failed DCA executions and the OTC actions are exact, independently pageable
+  // event families; the builder reads them at the page's own offset.
+  if (category === 'trade' && (action === 'dca-failed' || otcOnlyActivityAction(action))) return false
+  if (category === 'all' || category === 'trade' || category === 'transfer') return true
+  if (action) return true
+  return category === 'liquidity' || category === 'mm' || category === 'xcm'
+}
+
+function otcOnlyActivityAction(action?: string): boolean {
+  const otcAction = resolveOtcAction(action)
+  return !!otcAction && !!OTC_ACTION_EVENTS[otcAction]
+}
+
+// Whether a value floor is sparse enough that the classified builder skips the
+// cheap unfiltered probe and goes straight to bounded exact source reads. That is
+// also the line between a window one small recent read fills (0.2 s unfiltered,
+// 0.2 s at min=10) and one that widens every source until it can prove a cutoff
+// (3.4 s at min=1000, ~30 s at min=95000), so it decides whether the window can
+// keep tracking the chain.
+export function activityExactValueFiltered(type: string, filters: ValueListFilters): boolean {
+  return filters.min != null
+    && filters.unit !== 'token'
+    && !(normalizeActivityTypeKey(type) === 'trade' && !!filters.token)
+    && filters.min >= 1_000
+}
+
+async function buildActivityWindow(limit: number, from: string | undefined, to: string | undefined, offset: number, type: string, filters: ValueListFilters, action?: string): Promise<ActivityWindow> {
+  const want = offset + limit
+  const classified = type === 'all' || type === 'trade' || type === 'transfer'
+  // Categories assembled from multiple sources page only after merging, so
+  // every source must cover the requested offset as well as the page size.
+  const locallyMerged = classified || !!action || type === 'xcm' || type === 'liquidity' || type === 'mm'
+  let fetchN = locallyMerged
+    ? Math.max(want * 5, limit + 50)
+    : Math.max(limit * 5, limit + 50)
+  const toTransferRow = (t: TransferRow): ActivityRow => ({
+    type: 'transfer', blockHeight: t.blockHeight, timestamp: t.timestamp, eventIndex: t.eventIndex, extrinsicIndex: t.extrinsicIndex,
+    who: t.from, to: t.to, asset: t.asset, assetIn: null, assetOut: null, amount: t.amount, amountIn: null, amountOut: null, valueUsd: t.valueUsd,
+  })
+  const toTradeRow = (t: TradeRow): ActivityRow => ({
+    type: 'trade', blockHeight: t.blockHeight, timestamp: t.timestamp, eventIndex: t.eventIndex, extrinsicIndex: t.extrinsicIndex,
+    who: t.who, to: null, asset: null, assetIn: t.assetIn, assetOut: t.assetOut, amount: null, amountIn: t.amountIn, amountOut: t.amountOut, valueUsd: t.valueUsd,
+    dca: t.dca, linkBlock: t.linkBlock, linkIndex: t.linkIndex,
+  })
+  const toVoteRow = (v: VoteRow): ActivityRow => ({
+    type: 'vote', blockHeight: v.blockHeight, timestamp: v.timestamp, eventIndex: v.eventIndex, extrinsicIndex: v.extrinsicIndex,
+    who: v.account, to: null, asset: v.asset, assetIn: null, assetOut: null, amount: v.amount, amountIn: null, amountOut: null, valueUsd: v.valueUsd,
+    votePallet: v.pallet, voteAction: v.action, voteRef: v.referendum, voteSide: v.side, voteConviction: v.conviction,
+    ...referendumRefFields(v.pallet, v.referendum),
+    linkBlock: v.blockHeight, linkIndex: v.extrinsicIndex,
+  })
+
+  let rows: ActivityRow[]
+  // Where this window's page starts. Decided by the same predicate the window
+  // cache keys on, so a shared window can never be sliced at an offset the
+  // branch below already applied in SQL.
+  const locallyPaged = activityPagesInMemory(type, action)
+  let sourceSaturated = false
+  let plumbingApplied = false
+  const otcOnlyAction = type === 'trade' && otcOnlyActivityAction(action)
+  if (type === 'trade' && action === 'dca-failed') {
+    // Failed executions are a self-contained indexed DCA family.  Routing this
+    // action through the shared Trade classifier also paged swaps and OTC rows
+    // that can never match it, turning a small failure page into a multi-source
+    // full-history search.
+    rows = (await getRecentDcaFailures(want, from, to, undefined, assetIdsForToken(filters.token)))
+      .slice(offset, want)
+  } else if (otcOnlyAction) {
+    // OTC actions are already exact, independently pageable event families.
+    // Sending them through the shared Trade classifier widens the unrelated
+    // swap source forever because no swap can satisfy an otc-* action.
+    rows = await getRecentOtc(limit, from, to, offset, filters, action)
+  } else if (type === 'transfer') {
+    // Pull only transfer candidates, then resolve semantic ownership by their
+    // exact identities. Widening the swap/liquidity/XCM/etc. feeds alongside
+    // a sparse transfer filter made a 25-row page enumerate >100k unrelated
+    // rows and could never complete under the ClickHouse result guard.
+    const deferredValueFilter = filters.min != null && filters.unit !== 'token'
+    const sourceFilters = deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
+    for (;;) {
+      const transfers = await getRecentTransfers(fetchN, from, to, 0, true, sourceFilters)
+      const classifiedTransfers = await suppressTransferCandidates(transfers)
+      rows = await suppressDustTransferRows(classifiedTransfers.map(toTransferRow))
+      plumbingApplied = true
+      sourceSaturated = transfers.length >= fetchN
+      if (deferredValueFilter && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
+      const visibleRows = rows
+        .filter(row => activityRowMatchesFilters(row, filters) && activityRowMatchesAction(row, action))
+        .sort((left, right) => right.blockHeight - left.blockHeight || (right.eventIndex ?? -1) - (left.eventIndex ?? -1))
+      const cutoff = completeActivityPageCutoff(visibleRows, want)
+      const oldest = transfers.reduce<{ blockHeight: number; eventIndex: number } | null>((current, row) => {
+        const candidate = { blockHeight: row.blockHeight, eventIndex: row.eventIndex }
+        return current == null || candidate.blockHeight < current.blockHeight ||
+          (candidate.blockHeight === current.blockHeight && candidate.eventIndex < current.eventIndex)
+          ? candidate : current
+      }, null)
+      const complete = cutoff
+        ? activitySourceCoversCutoff(transfers.length, fetchN, oldest, cutoff)
+        : transfers.length < fetchN
+      if (complete) break
+      if (fetchN >= MAX_ACTIVITY_SOURCE_ROWS) throw activityQueryTooBroad()
+      fetchN = Math.min(fetchN * 4, MAX_ACTIVITY_SOURCE_ROWS)
+    }
+  } else if (classified) {
+    // Transfers, trades and the merged feed share ONE classification pass so a
+    // row never appears in a category the merged feed assigned elsewhere.
+    // The Trade-only view needs liquidity context to reject share-token router
+    // legs, plus DCA/OTC rows, but it cannot display transfers, rewards, MM,
+    // XCM, staking or votes. Avoid that unrelated fan-out on its hot path.
+    const needsFullClassification = type !== 'trade'
+    // Historical-price ASOF joins make a sparse minimum-value query scan the
+    // entire raw table before LIMIT can help. Fetch recent candidates without
+    // the threshold, value them in batches, and widen only sources that have
+    // not yet produced a complete page of qualifying rows.
+    // Asset-keyed swap reads can apply the exact event-time USD predicate
+    // before LIMIT more cheaply than repeatedly widening a sparse candidate
+    // window. Other activity families still defer USD filtering until their
+    // bounded candidates have been classified and valued below.
+    const deferredValueFilter = filters.min != null
+      && filters.unit !== 'token'
+      && !(type === 'trade' && filters.token)
+    // A four-figure USD floor is sparse enough that the cheap unfiltered
+    // probe cannot normally fill a page; go straight to bounded exact source
+    // reads. Lower/default floors retain the recent probe, which usually wins.
+    // Shared with the window cache, which needs the same line to decide whether
+    // this shape is cheap enough to keep tracking the chain.
+    const directExactValueFilter = activityExactValueFiltered(type, filters)
+    let sourceValueFiltered = directExactValueFilter
+    let sourceFilters = sourceValueFiltered
+      ? filters
+      : deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
+    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'staking' | 'vote'
+    const classifiedSourceKeys: ClassifiedSourceKey[] = [
+      'transfer', 'trade', 'dca', 'reward', 'liquidity', 'mm', 'otc',
+      'xcm', 'xcmIn', 'xcmOutRemote', 'staking', 'vote',
+    ]
+    const exactSeedSize = activitySourceSeedSize(want)
+    const exactSourceLimits = Object.fromEntries(classifiedSourceKeys.map(key => [key, sourceValueFiltered ? exactSeedSize : fetchN])) as Record<ClassifiedSourceKey, number>
+    const exactSourceCache = new Map<ClassifiedSourceKey, unknown[]>()
+    let exactSourceFrom = from
+    const loadClassifiedSource = <T>(
+      key: ClassifiedSourceKey,
+      load: (sourceLimit: number, sourceFrom: string | undefined) => Promise<T[]>,
+    ): Promise<T[]> => {
+      if (!sourceValueFiltered) return load(fetchN, from)
+      const previous = exactSourceCache.get(key)
+      if (previous) return Promise.resolve(previous as T[])
+      return load(exactSourceLimits[key], exactSourceFrom).then(sourceRows => {
+        exactSourceCache.set(key, sourceRows)
+        return sourceRows
+      })
+    }
+    for (;;) {
+      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, staking, votes] = await Promise.all([
+        needsFullClassification
+          ? loadClassifiedSource('transfer', (sourceLimit, sourceFrom) => getRecentTransfers(sourceLimit, sourceFrom, to, 0, true, sourceFilters))
+          : Promise.resolve([]),
+        loadClassifiedSource('trade', (sourceLimit, sourceFrom) => getRecentTrades(sourceLimit, sourceFrom, to, 0, sourceFilters)),
+        // Failed schedules have no executed USD value and cannot survive a
+        // USD minimum. Do not widen their error-payload lookup alongside a
+        // sparse qualifying-swap walk (that used to reopen millions of raw
+        // rows for candidates guaranteed to be filtered out).
+        deferredValueFilter
+          ? Promise.resolve([])
+          : loadClassifiedSource('dca', (sourceLimit, sourceFrom) => getRecentDcaFailures(sourceLimit, sourceFrom, to, undefined, assetIdsForToken(filters.token))),
+        needsFullClassification
+          ? loadClassifiedSource('reward', (sourceLimit, sourceFrom) => getRecentRewardClaims(sourceLimit, sourceFrom, to, undefined, assetIdsForToken(filters.token)))
+          : Promise.resolve([]),
+        needsFullClassification
+          ? loadClassifiedSource('liquidity', (sourceLimit, sourceFrom) => getRecentLiquidity(sourceLimit, sourceFrom, to, 0, sourceFilters))
+          : Promise.resolve([]),
+        needsFullClassification
+          ? loadClassifiedSource('mm', (sourceLimit, sourceFrom) => getRecentMoneyMarket(sourceLimit, sourceFrom, to, 0, sourceFilters))
+          : Promise.resolve([]),
+        loadClassifiedSource('otc', (sourceLimit, sourceFrom) => getRecentOtc(sourceLimit, sourceFrom, to, 0, sourceFilters)),
+        needsFullClassification
+          ? loadClassifiedSource('xcm', (sourceLimit, sourceFrom) => getRecentXcm(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
+          : Promise.resolve([]),
+        needsFullClassification
+          ? loadClassifiedSource('xcmIn', (sourceLimit, sourceFrom) => getRecentXcmIn(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
+          : Promise.resolve([]),
+        needsFullClassification
+          ? loadClassifiedSource('xcmOutRemote', (sourceLimit, sourceFrom) => getRecentXcmOutRemote(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
+          : Promise.resolve([]),
+        needsFullClassification
+          ? loadClassifiedSource('staking', (sourceLimit, sourceFrom) => getRecentStaking(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
+          : Promise.resolve([]),
+        needsFullClassification
+          ? loadClassifiedSource('vote', (sourceLimit, sourceFrom) => getRecentVotes(sourceLimit, sourceFrom, to, 0, {}, undefined, sourceFilters))
+          : Promise.resolve([]),
+      ])
+      const sourceFilteredTransfers = sourceValueFiltered
+        ? await suppressTransferCandidates(transfers)
+        : transfers
+      const liquidityExtrinsics = needsFullClassification && !sourceValueFiltered
+        ? activityExtrinsicSet(liquidity)
+        : new Set([
+            ...activityExtrinsicSet(liquidity),
+            ...await liquidityExtrinsicsForShareTrades(trades),
+          ])
+      const userTrades = dropShareRoutedTrades(trades, liquidityExtrinsics)
+      // Drop swap-internal transfer legs: any transfer in a trade's extrinsic, or
+      // touching a pallet/pool account (hops, fees, referral pot). OTC fills
+      // settle peer-to-peer (real Transfer events between taker/maker, unlike an
+      // AMM swap's pool-internal Withdrawn/Deposited), so their extrinsics own
+      // their transfer legs the same way trades/staking/mm do.
+      const tradeExtrinsics = new Set(trades.filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
+      const stakingExtrinsics = activityExtrinsicSet(staking)
+      const mmExtrinsics = activityExtrinsicSet(mm)
+      const otcExtrinsics = activityExtrinsicSet(otc)
+      const userTransfers = sourceFilteredTransfers.filter(t =>
+        !(t.extrinsicIndex != null && tradeExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+        !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+        !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+        !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+        !isModuleAcct(t.from) && !isModuleAcct(t.to))
+      // Module-account MM rows are pool-proxy internals, not user activity.
+      const userMm = mm.filter(r => !isModuleAcct(r.who))
+      type SourceCursor = { blockHeight: number; eventIndex: number }
+      type SourcePage = { key: ClassifiedSourceKey; fetchSize: number; rawSize: number; rows: ActivityRow[]; oldest: SourceCursor | null; valueIrrelevant?: boolean }
+      const oldestOf = <T extends { blockHeight: number; eventIndex?: number | null }>(source: T[]): SourceCursor | null => {
+        let oldest: SourceCursor | null = null
+        for (const row of source) {
+          const candidate = { blockHeight: row.blockHeight, eventIndex: row.eventIndex ?? -1 }
+          if (oldest == null || candidate.blockHeight < oldest.blockHeight ||
+            (candidate.blockHeight === oldest.blockHeight && candidate.eventIndex < oldest.eventIndex)) oldest = candidate
+        }
+        return oldest
+      }
+      const sourceFetchSize = (key: ClassifiedSourceKey): number => sourceValueFiltered ? exactSourceLimits[key] : fetchN
+      const allSources: SourcePage[] = [
+        { key: 'transfer', fetchSize: sourceFetchSize('transfer'), rawSize: transfers.length, rows: userTransfers.map(toTransferRow), oldest: oldestOf(transfers) },
+        { key: 'trade', fetchSize: sourceFetchSize('trade'), rawSize: trades.length, rows: userTrades.map(toTradeRow), oldest: oldestOf(trades) },
+        // Failed DCA rows have no executed value and can never pass a minimum.
+        { key: 'dca', fetchSize: sourceFetchSize('dca'), rawSize: dcaFailures.length, rows: dcaFailures, oldest: oldestOf(dcaFailures), valueIrrelevant: true },
+        { key: 'reward', fetchSize: sourceFetchSize('reward'), rawSize: rewards.length, rows: rewards, oldest: oldestOf(rewards) },
+        { key: 'liquidity', fetchSize: sourceFetchSize('liquidity'), rawSize: liquidity.length, rows: liquidity, oldest: oldestOf(liquidity) },
+        { key: 'staking', fetchSize: sourceFetchSize('staking'), rawSize: staking.length, rows: staking, oldest: oldestOf(staking) },
+        { key: 'vote', fetchSize: sourceFetchSize('vote'), rawSize: votes.length, rows: votes.map(toVoteRow), oldest: oldestOf(votes) },
+        { key: 'mm', fetchSize: sourceFetchSize('mm'), rawSize: mm.length, rows: userMm, oldest: oldestOf(mm) },
+        { key: 'otc', fetchSize: sourceFetchSize('otc'), rawSize: otc.length, rows: otc, oldest: oldestOf(otc) },
+        { key: 'xcm', fetchSize: sourceFetchSize('xcm'), rawSize: xcm.length, rows: xcm, oldest: oldestOf(xcm) },
+        { key: 'xcmIn', fetchSize: sourceFetchSize('xcmIn'), rawSize: xcmIn.length, rows: xcmIn, oldest: oldestOf(xcmIn) },
+        { key: 'xcmOutRemote', fetchSize: sourceFetchSize('xcmOutRemote'), rawSize: xcmOutRemote.length, rows: xcmOutRemote, oldest: oldestOf(xcmOutRemote) },
+      ]
+      const sourcePages = type === 'trade'
+        ? [allSources[1], allSources[2], allSources[8]]
+        : type === 'transfer' ? [allSources[0]] : allSources
+      sourceSaturated = sourcePages.some(source => source.rawSize >= source.fetchSize)
+      // A transfer-only result still needs the other categories as
+      // classification context. Otherwise the transfer leg of an LP action,
+      // reward claim, vote, or XCM journey can reappear merely because the
+      // caller selected `type=transfer`.
+      const classificationPages = type === 'trade' ? sourcePages : allSources
+      rows = await suppressActivityPlumbing(classificationPages.flatMap(source => source.rows))
+      plumbingApplied = true
+      if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
+      if (deferredValueFilter && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
+      const visibleRows = rows.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
+        .sort((a, b) => b.blockHeight - a.blockHeight || (b.eventIndex ?? -1) - (a.eventIndex ?? -1))
+      const cutoff = completeActivityPageCutoff(visibleRows, want)
+      const coveragePages = type === 'transfer' ? allSources : sourcePages
+      const incompletePages = activitySourcesNeedingMore(
+        cutoff ? coveragePages : sourcePages,
+        cutoff,
+        deferredValueFilter,
+      )
+      const complete = incompletePages.length === 0
+      if (complete) break
+      // A low USD threshold usually completes from the first small unfiltered
+      // window and avoids an ASOF join below every source LIMIT. A sparse
+      // threshold is the opposite: repeatedly widening every family can cross
+      // the client's 100k row guard before finding 25 qualifying rows. After
+      // the first incomplete window, let each source apply its exact event-time
+      // predicate and resolve transfer/share-token ownership only for those
+      // bounded candidates. This retains complete-history classification while
+      // avoiding an all-family raw-history walk.
+      if (deferredValueFilter && !sourceValueFiltered) {
+        sourceValueFiltered = true
+        sourceFilters = filters
+        // Start each exact source at a fraction of the merged target. The
+        // common case fills the union from several activity families; sources
+        // that have not crossed the resulting cutoff are deepened separately.
+        fetchN = exactSeedSize
+        for (const key of classifiedSourceKeys) exactSourceLimits[key] = fetchN
+        exactSourceCache.clear()
+        exactSourceFrom = from
+        continue
+      }
+      if (sourceValueFiltered) {
+        if (!incompletePages.length) throw activityQueryTooBroad()
+        exactSourceFrom = cutoff ? activityCutoffFromDate(from, visibleRows, want) : from
+        for (const source of incompletePages) {
+          if (source.fetchSize >= MAX_ACTIVITY_SOURCE_ROWS) throw activityQueryTooBroad()
+          exactSourceLimits[source.key] = Math.min(source.fetchSize * 4, MAX_ACTIVITY_SOURCE_ROWS)
+          exactSourceCache.delete(source.key)
+        }
+        fetchN = Math.max(...Object.values(exactSourceLimits))
+        continue
+      }
+      if (fetchN >= MAX_ACTIVITY_SOURCE_ROWS) throw activityQueryTooBroad()
+      fetchN = Math.min(fetchN * 4, MAX_ACTIVITY_SOURCE_ROWS)
+    }
+  } else if (action) {
+    // Sub-type filtering breaks SQL paging — fetch a window and page locally.
+    if (type === 'liquidity') rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters, action), ...(action === 'Claim' ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'liquidity') : [])]
+    else if (type === 'mm') rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters, action)).filter(r => !isModuleAcct(r.who)), ...(action === 'ClaimRewards' ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'mm') : [])]
+    else if (type === 'otc') rows = await getRecentOtc(fetchN, from, to, 0, filters, action)
+    else if (type === 'xcm') rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters)])).flat()
+    else if (type === 'staking') rows = await getRecentStaking(fetchN, from, to, undefined, 0, filters, undefined, action)
+    else rows = (await getRecentVotes(fetchN, from, to, 0, {}, undefined, filters)).map(toVoteRow)
+  } else if (type === 'liquidity') {
+    rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'liquidity')]
+  } else if (type === 'mm') {
+    rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters)).filter(r => !isModuleAcct(r.who)), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'mm')]
+  } else if (type === 'otc') {
+    rows = await getRecentOtc(limit, from, to, offset, filters)
+  } else if (type === 'xcm') {
+    rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters)])).flat()
+  } else if (type === 'staking') {
+    rows = await getRecentStaking(limit, from, to, undefined, offset, filters)
+  } else {
+    rows = (await getRecentVotes(limit, from, to, offset, {}, undefined, filters)).map(toVoteRow)
+  }
+  if (locallyPaged && !classified) sourceSaturated = rows.length >= fetchN
+  if (!plumbingApplied) rows = await suppressActivityPlumbing(rows)
+  if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
+  if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
+  rows = rows.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
+  rows.sort(compareActivityRowsNewestFirst)
+  if (locallyPaged && rows.length < want && sourceSaturated) throw activityQueryTooBroad()
+  return { rows, locallyPaged }
 }
 
 // How long the chain-wide Activity feed is under exactly the filters the page is
@@ -12897,16 +13090,17 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     type DcaSwapLegRow = { block_height: number; event_index: number; event_name: string; asset_in: number; asset_out: number; amount_in: string }
     const swapLegs: DcaSwapLegRow[] = []
     const fetchSwapLegs = async (): Promise<void> => {
-      for (let start = 0; start < blocks.length; start += 2_000) {
+      const chunks = await mapChunksConcurrently(blocks, 2_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
         const res = await client.query({
           query: `SELECT block_height, event_index, event_name, JSONExtractInt(args_json,'assetIn') AS asset_in, JSONExtractInt(args_json,'assetOut') AS asset_out,
                     JSONExtractString(args_json,'amountIn') AS amount_in
                   FROM price_data.raw_events WHERE block_height IN {blocks:Array(UInt32)} AND event_name IN (${names})`,
-          query_params: { blocks: blocks.slice(start, start + 2_000) },
+          query_params: { blocks: chunk },
           format: 'JSONEachRow',
         })
-        swapLegs.push(...await res.json<DcaSwapLegRow>())
-      }
+        return res.json<DcaSwapLegRow>()
+      })
+      for (const rows of chunks) swapLegs.push(...rows)
     }
     const [, schedById] = await Promise.all([fetchSwapLegs(), getDcaScheduleLinks(dcaExecs.map(d => d.id))])
     // Pair each execution with its OWN swap leg, one to one. A plain
