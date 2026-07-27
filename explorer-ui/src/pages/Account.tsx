@@ -11,6 +11,13 @@ import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 
+// Hydration opens any route with the account preselected, so the app shows this
+// account's balances and positions. Deep-link to the swap page: it is the app's
+// landing route, and every other section stays one click away.
+function hydrationAppUrl(address: string): string {
+  return `https://app.hydration.net/trade/swap/market?account=${encodeURIComponent(address)}`
+}
+
 export function Account({ address }: { address: string }) {
   const { data, isLoading, isError } = useAddress(address)
   const now = useNow()
@@ -58,6 +65,11 @@ export function Account({ address }: { address: string }) {
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
+              {/* Above the header card and right-aligned, matching "Open in preis"
+                  on the asset page and "Open in Subsquare" on a referendum. */}
+              <div className="ext-link-row">
+                <a className="ext-link" href={hydrationAppUrl(canonicalAddress ?? address)} target="_blank" rel="noopener">Open in Hydration ↗</a>
+              </div>
               <div className="acct-head">
                 <div className="acct-avatar">{data.tag ? <TagIcon icon={data.tag.icon} title={data.tag.name} className="acct-avatar-icon" /> : mod ? '⚙️' : data.emojiUrl
                   ? <><img className="acct-avatar-img" src={data.emojiUrl} alt={data.emojiName ?? data.emoji} title={data.emojiName} onError={avatarImgFallback} /><span className="icon-fallback" style={{ display: 'none' }}>{data.emoji}</span></>
