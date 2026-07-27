@@ -331,7 +331,7 @@ svg { display: block; }
 .theme-toggle {
   width: 34px; height: 34px; padding: 0; justify-content: center;
   display: inline-flex; align-items: center;
-  border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); color: var(--text-medium);
+  border-radius: 9999px; color: var(--text-medium);
   transition: color 150ms, background 150ms;
 }
 .theme-toggle:hover { color: var(--text-high); background: var(--panel-hover); }
@@ -340,10 +340,10 @@ svg { display: block; }
 .theme-toggle svg { width: 16px; height: 16px; }
 
 /* live-refresh toggle */
-.live-toggle { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 12px; border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-medium); }
-.live-toggle:hover { color: var(--text-high); }
+.live-toggle { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 12px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-medium); transition: color 150ms, background 150ms; }
+.live-toggle:hover { color: var(--text-high); background: var(--panel-hover); }
 .live-toggle .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-low); }
-.live-toggle.on { color: var(--green); border-color: color-mix(in srgb, var(--green) 38%, var(--border)); }
+.live-toggle.on { color: var(--green); }
 .live-toggle.on .dot { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 1.6s ease-in-out infinite; }
 
 /* collapsible filter zone */
@@ -380,11 +380,14 @@ svg { display: block; }
   .brand .wm, .brand .pr { display: none; }
 }
 
-/* compact search in topbar (inner pages) */
-.topbar-search { flex: 1 1 120px; min-width: 0; max-width: 300px; margin-left: 8px; }
+/* search in topbar (inner pages) — takes every pixel the brand, nav and right
+   controls leave, so it grows and shrinks with the viewport and the nav fold.
+   `.topbar-right`'s auto margin never wins any of that slack: flex-grow
+   resolves before auto margins, so the search absorbs the free space first. */
+.topbar-search { flex: 1 1 120px; min-width: 0; margin-left: 8px; }
 .topbar-search.hidden { display: none; }
-/* Desktop: the dropdown is wider than the compact input and anchored to its
-   right edge. Keep this before the ≤860px block so the mobile override wins. */
+/* Desktop: the dropdown is wider than the input and anchored to its right edge.
+   Keep this before the ≤860px block so the mobile override wins. */
 .topbar-search .search-results { left: auto; right: 0; width: min(440px, calc(100vw - 24px)); }
 @media (max-width: 860px) {
   /* single-line top chrome: [search ………] [burger]. The brand and the live /
@@ -398,7 +401,7 @@ svg { display: block; }
   .nav-burger { display: inline-flex; }
   .topbar-right { margin-left: auto; }
   .topbar-right .live-toggle, .topbar-right .theme-toggle { display: none; }
-  .topbar-search { flex: 1 1 auto; max-width: none; margin-left: 0; }
+  .topbar-search { flex: 1 1 auto; margin-left: 0; }
   .topbar-search.hidden { display: none; }
   /* Full-bleed dropdown: unposition the wrap so the absolute dropdown anchors
      to the sticky .topbar itself (sticky = positioned) — left/right then span
@@ -442,10 +445,10 @@ svg { display: block; }
 .search {
   display: flex; align-items: center; gap: 10px;
   height: 40px; padding: 0 14px;
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: 9999px; transition: border-color 160ms, background 160ms;
+  background: var(--panel);
+  border-radius: 9999px; transition: background 160ms;
 }
-.search:focus-within { border-color: var(--sky); background: color-mix(in srgb, var(--panel) 60%, transparent); }
+.search:focus-within { background: var(--panel-hover); }
 .search svg { width: 15px; height: 15px; color: var(--text-medium); flex-shrink: 0; }
 .search input {
   all: unset; flex: 1; min-width: 0; text-align: left;
