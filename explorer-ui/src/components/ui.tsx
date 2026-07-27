@@ -1081,6 +1081,23 @@ export function SkeletonRows({ rows = 8 }: { rows?: number }) {
     </div>
   )
 }
+// Props for a table body still showing the PREVIOUS query's rows.
+//
+// The list hooks carry `placeholderData: keepPreviousData`, so a filter, tab or
+// pager change keeps the outgoing rows on screen instead of emptying the table —
+// that is what removed the ~900px height jump under the reader's cursor. But it
+// also means `rows.length === 0` can no longer happen while a new key loads, so
+// every `isFetching && !rows.length` skeleton gate became unreachable for exactly
+// the changes a reader makes deliberately: the old rows sat there with no
+// indication, reading as the answer to a filter they do not answer. On the global
+// activity feed, where a high `$ from` takes tens of seconds, that is
+// indistinguishable from the filter being ignored.
+//
+// So the rows stay (no height jump) but are marked pending: dimmed, and aria-busy
+// for anything not reading pixels. Held rows are never presented as an answer.
+export function pendingRows(pending?: boolean): { className?: string; 'aria-busy'?: true } {
+  return pending ? { className: 'rows-pending', 'aria-busy': true } : {}
+}
 // Skeleton <tr> rows for a table body — keeps the header and column grid in place
 // while data loads (instead of a lone centered "Loading…"). Bar widths vary per
 // cell for a natural shimmer. Below 720px a loaded row is a stacked card of one

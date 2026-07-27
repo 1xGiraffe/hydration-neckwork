@@ -560,6 +560,13 @@ svg { display: block; }
    hovering restores full opacity for readability. */
 .tbl tbody tr.dim { opacity: .5; transition: opacity 120ms, background 120ms; }
 .tbl tbody tr.dim:hover { opacity: 1; }
+/* Rows belonging to the previous query while the next one loads (keepPreviousData,
+   see pendingRows). Dimmed rather than swapped for a skeleton so the table keeps
+   its height — removing that height jump is why the rows are held at all — but
+   never left looking like the answer to the filter just set. Not hover-restored,
+   unlike .dim: these rows are stale whether or not you point at them. */
+.tbl tbody.rows-pending { opacity: .4; transition: opacity 120ms; }
+.tbl tbody.rows-pending tr.clickable:hover { background: none; }
 .tbl td.r { text-align: right; }
 .tbl td.mono { font-family: 'GeistMono'; }
 /* Failed list request — deliberately louder than the "No activity" empty cell so

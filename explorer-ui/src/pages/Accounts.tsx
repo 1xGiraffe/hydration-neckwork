@@ -1,7 +1,7 @@
 import { useAccounts, useAccountsDaily } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, usePageParam, useQueryValue, setPage, setQuery } from '../router'
-import { Crumbs, F, AddrPill, Sparkline, EmptyRow, TableSkeleton, Pager, healthFactorDisplay, TagGroupPill, TokenIconRow, Dash } from '../components/ui'
+import { Crumbs, F, AddrPill, Sparkline, EmptyRow, TableSkeleton, Pager, healthFactorDisplay, TagGroupPill, TokenIconRow, Dash, pendingRows } from '../components/ui'
 import { AccountsChart } from '../components/AccountsChart'
 import { defisimAccountTarget } from '../utils/defisim'
 import { offeredPages } from '../utils/activityPaging'
@@ -32,7 +32,10 @@ export function Accounts() {
   const page = usePageParam()
   const sortParam = useQueryValue('sort', 'value') as Sort
   const sort = SORTS.includes(sortParam) ? sortParam : 'value'
-  const { data, isLoading } = useAccounts(page * PAGE, PAGE, sort)
+  // Rows answering the previous page or sort, held while the next loads. The
+  // directory rebuild is seconds when cold, so this is the difference between
+  // "sorting" and "the sort did nothing" (see pendingRows).
+  const { data, isLoading, isPlaceholderData } = useAccounts(page * PAGE, PAGE, sort)
   const { data: daily } = useAccountsDaily()
 
   // Rows arrive already sorted + paginated server-side (the full set is ~100k
@@ -83,7 +86,7 @@ export function Accounts() {
             <th className="r">{sTh('volume', 'Trading $')}</th>
             <th className="r">{sTh('activity', 'Activity')}</th>
           </tr></thead>
-          <tbody>
+          <tbody {...pendingRows(isPlaceholderData)}>
             {/* A phone card here drops the columns this account has nothing in and
                 gives the 1Y chart a whole line of its own, so its height is not the
                 column count: the directory's rows measure 172px (identity, value,

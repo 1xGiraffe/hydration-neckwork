@@ -1,7 +1,7 @@
 import { memo } from 'react'
 import type { ReactNode } from 'react'
 import { Link, paths } from '../router'
-import { AddrPill, Dash, EmptyRow, ErrorRow, F, MomentLink, TableSkeleton, VoteSideBadge, type Moment } from './ui'
+import { AddrPill, Dash, EmptyRow, ErrorRow, F, MomentLink, TableSkeleton, VoteSideBadge, pendingRows, type Moment } from './ui'
 import type { AccountRef, AssetRef } from '../types'
 
 // The one votes table.
@@ -66,7 +66,7 @@ const VoteRow = memo(function VoteRow({ row, asset, now, showAccount, showRefere
   )
 })
 
-export function VotesTable({ rows, asset, now, showAccount, showReferendum, sortHeads, loading, error, onRetry, pageSize }: {
+export function VotesTable({ rows, asset, now, showAccount, showReferendum, sortHeads, loading, pending, error, onRetry, pageSize }: {
   rows: VoteTableRow[]
   asset: AssetRef
   now: number
@@ -76,6 +76,8 @@ export function VotesTable({ rows, asset, now, showAccount, showReferendum, sort
   // columns are plain labels, so both tables read the same either way.
   sortHeads?: { votes: ReactNode; time: ReactNode }
   loading?: boolean
+  /** Rows still answering the previous page/filter — see pendingRows. */
+  pending?: boolean
   error?: unknown
   onRetry?: () => void
   // Sizes the loading skeleton on the paged surface so the pager under it holds still.
@@ -91,7 +93,7 @@ export function VotesTable({ rows, asset, now, showAccount, showReferendum, sort
         <th className="r">{sortHeads?.votes ?? 'Votes'}</th>
         <th className="r">{sortHeads?.time ?? 'Time'}</th>
       </tr></thead>
-      <tbody>
+      <tbody {...pendingRows(pending)}>
         {loading ? <TableSkeleton cols={cols + 1} rows={pageSize} />
           : error && !rows.length ? <ErrorRow cols={cols + 1} title="Couldn’t load votes" error={error} onRetry={onRetry} />
             : !rows.length ? <EmptyRow cols={cols + 1}>No votes</EmptyRow>

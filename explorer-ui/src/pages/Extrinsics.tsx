@@ -1,7 +1,7 @@
 import { useExtrinsics, useDaily, useCounts } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { paths, usePageParam, setPage } from '../router'
-import { Crumbs, F, DayBarChart, EmptyRow, TableSkeleton, Pager } from '../components/ui'
+import { Crumbs, F, DayBarChart, EmptyRow, TableSkeleton, Pager, pendingRows } from '../components/ui'
 import { UNFILTERED_COLOR } from '../components/activityColors'
 import { ExtRow } from '../components/ActivityRows'
 import { useNewRows } from '../hooks/useNewRows'
@@ -15,7 +15,9 @@ export function Extrinsics() {
   useDocumentTitle('Extrinsics')
   const page = usePageParam()
   const { values: f, onChange, onClear, setDay } = useFilters()
-  const { data, isFetching } = useExtrinsics(PAGE, true, f.from, f.to, page * PAGE, { call: f.call, result: f.result })
+  // isPlaceholderData: rows answering the previous filter/page, held while the new
+  // key loads (see pendingRows) — the skeleton gate below cannot catch that case.
+  const { data, isFetching, isPlaceholderData } = useExtrinsics(PAGE, true, f.from, f.to, page * PAGE, { call: f.call, result: f.result })
   const { data: daily } = useDaily('extrinsics')
   const { data: counts } = useCounts()
   const now = useNow()
@@ -43,7 +45,7 @@ export function Extrinsics() {
       <div className="panel">
         <table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Call</th><th>Signer</th><th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
-          <tbody>
+          <tbody {...pendingRows(isPlaceholderData)}>
             {isFetching && !rows.length ? <TableSkeleton cols={7} mobileCols={6} rows={PAGE} /> : !rows.length ? <EmptyRow cols={7}>No extrinsics</EmptyRow> : rows.map(x => <ExtRow key={`${x.blockHeight}-${x.index}`} x={x} now={now} isNew={fresh.has(`${x.blockHeight}-${x.index}`)} />)}
           </tbody>
         </table>

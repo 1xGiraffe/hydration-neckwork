@@ -17,7 +17,7 @@ import { FilterZone, useFilters } from './Filters'
 import { EvRow, ExtRow } from './ActivityRows'
 import { ActivityTable } from './ActivityTable'
 import { eventFilterFields, extrinsicFilterFields, activityFilterFields } from './activityFilters'
-import { EmptyRow, ErrorRow, F, Pager, ActivityChips, TableSkeleton, normalizeActivityAction, normalizeActivityType } from './ui'
+import { EmptyRow, ErrorRow, F, Pager, ActivityChips, TableSkeleton, normalizeActivityAction, normalizeActivityType, pendingRows } from './ui'
 import { PAGE_SIZE, activityListCount, eventListCount, extrinsicListCount, hasNextPage, pageCount } from '../utils/activityPaging'
 import type { ListCountQuery } from '../api/explorer'
 
@@ -151,7 +151,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
           onChange={activityFilters.onChange}
           onClear={activityFilters.onClear}
         />
-        <ActivityTable rows={activityRows} now={now} live={page === 0} loading={activity.isFetching && !activity.data?.length} pageSize={PAGE_SIZE}
+        <ActivityTable rows={activityRows} now={now} live={page === 0} loading={activity.isFetching && !activity.data?.length} pending={activity.isPlaceholderData} pageSize={PAGE_SIZE}
           error={activity.error} onRetry={() => { void activity.refetch() }} />
         <Pager page={page} totalPages={totalPages} hasNext={hasNextPage(totalPages, page, activityRows.length)} note={countNote} onPage={setPage} />
       </>}
@@ -160,7 +160,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
         <FilterZone fields={extrinsicFilterFields(showOrigin)} values={extrinsicFilters.values} onChange={extrinsicFilters.onChange} onClear={extrinsicFilters.onClear} />
         <div className="panel"><table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Call</th>{showSigner && <th>Sender</th>}{showOrigin && <th>Origin</th>}<th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
-          <tbody>
+          <tbody {...pendingRows(extrinsics.isPlaceholderData)}>
             {extrinsics.isFetching && !extrinsics.data?.length ? <TableSkeleton cols={extrinsicColumns} mobileCols={extrinsicColumns - 1} rows={PAGE_SIZE} />
               : extrinsics.error && !extrinsics.data?.length
                 ? <ErrorRow cols={extrinsicColumns} title="Couldn’t load extrinsics" error={extrinsics.error} onRetry={() => { void extrinsics.refetch() }} />
@@ -175,7 +175,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
         <FilterZone fields={eventFilterFields} values={eventFilters.values} onChange={eventFilters.onChange} onClear={eventFilters.onClear} />
         <div className="panel"><table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Extrinsic</th><th>Event</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
-          <tbody>
+          <tbody {...pendingRows(events.isPlaceholderData)}>
             {events.isFetching && !events.data?.length ? <TableSkeleton cols={6} mobileCols={5} rows={PAGE_SIZE} />
               : events.error && !events.data?.length
                 ? <ErrorRow cols={6} title="Couldn’t load events" error={events.error} onRetry={() => { void events.refetch() }} />

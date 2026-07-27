@@ -1,7 +1,7 @@
 import { useEvents, useDaily, useCounts } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { paths, usePageParam, setPage } from '../router'
-import { Crumbs, F, DayBarChart, EmptyRow, TableSkeleton, Pager } from '../components/ui'
+import { Crumbs, F, DayBarChart, EmptyRow, TableSkeleton, Pager, pendingRows } from '../components/ui'
 import { UNFILTERED_COLOR } from '../components/activityColors'
 import { EvRow } from '../components/ActivityRows'
 import { useNewRows } from '../hooks/useNewRows'
@@ -15,7 +15,9 @@ export function Events() {
   useDocumentTitle('Events')
   const page = usePageParam()
   const { values: f, onChange, onClear, setDay } = useFilters()
-  const { data, isFetching } = useEvents(PAGE, f.from, f.to, page * PAGE, { event: f.event })
+  // isPlaceholderData: rows answering the previous filter/page, held while the new
+  // key loads (see pendingRows) — the skeleton gate below cannot catch that case.
+  const { data, isFetching, isPlaceholderData } = useEvents(PAGE, f.from, f.to, page * PAGE, { event: f.event })
   const { data: daily } = useDaily('events')
   const { data: counts } = useCounts()
   const now = useNow()
@@ -43,7 +45,7 @@ export function Events() {
       <div className="panel">
         <table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Extrinsic</th><th>Event</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
-          <tbody>
+          <tbody {...pendingRows(isPlaceholderData)}>
             {isFetching && !rows.length ? <TableSkeleton cols={6} mobileCols={5} rows={PAGE} /> : !rows.length ? <EmptyRow cols={6}>No events</EmptyRow> : rows.map(e => <EvRow key={`${e.blockHeight}-${e.eventIndex}`} e={e} now={now} isNew={fresh.has(`${e.blockHeight}-${e.eventIndex}`)} />)}
           </tbody>
         </table>

@@ -3,7 +3,7 @@ import { useNow } from '../hooks/useNow'
 import { useNewRows } from '../hooks/useNewRows'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, usePageParam, setPage } from '../router'
-import { Crumbs, F, FinalizedBadge, AddrPill, AreaChart, ChartSkeleton, TableSkeleton, EmptyRow, Pager, rowNav, Ago, Dash } from '../components/ui'
+import { Crumbs, F, FinalizedBadge, AddrPill, AreaChart, ChartSkeleton, TableSkeleton, EmptyRow, Pager, rowNav, Ago, Dash, pendingRows } from '../components/ui'
 import { UNFILTERED_COLOR } from '../components/activityColors'
 import { parseUtcTimestamp } from '../utils/time'
 import { offeredPages } from '../utils/activityPaging'
@@ -20,6 +20,9 @@ export function Blocks() {
   const recent = recentQuery.data
   const data = page === 0 ? recent?.slice(0, PAGE) : pageQuery.data
   const isLoading = page === 0 ? recentQuery.isLoading : pageQuery.isLoading
+  // Rows still answering the previous page while the next loads (see pendingRows).
+  // Page one is a slice of the always-live recent query, so only deeper pages hold.
+  const pending = page > 0 && pageQuery.isPlaceholderData
   const stats = useStats()
   const { data: counts } = useCounts()
   const now = useNow()
@@ -64,7 +67,7 @@ export function Blocks() {
       <div className="panel">
         <table className="tbl">
           <thead><tr><th>Block</th><th>Status</th><th className="r">Extrinsics</th><th className="r">Events</th><th>Collator</th><th className="r">Time</th></tr></thead>
-          <tbody>
+          <tbody {...pendingRows(pending)}>
             {isLoading && !data ? <TableSkeleton cols={6} rows={PAGE} /> : !rows.length ? <EmptyRow cols={6}>No blocks</EmptyRow> : rows.map(b => (
               <tr key={b.height} {...rowNav(paths.block(b.height))} className={['clickable', fresh.has(String(b.height)) ? 'row-new' : ''].filter(Boolean).join(' ')}>
                 <td data-label="Block" className="mono"><Link to={paths.block(b.height)} className="hash">{F.int(b.height)}</Link></td>
