@@ -249,12 +249,14 @@ describe('the persisted snapshot reads separate serving from refreshing', () => 
   })
 
   // The tag snapshot has no model version in its key, so the model belongs in the
-  // identity the loader already compares — not in a freshness clause.
+  // identity the loader already compares — not in a freshness clause. See
+  // tagDetailPrewarm.test.ts for the shared derivation the prewarm relies on.
   it('identifies a tag payload by its model as well as its members', () => {
+    expect(explorerService).toContain('return `${accountDirectoryModelVersion()}|${tagMembershipList(members)}`')
     const at = explorerService.indexOf('export async function getTag(')
     expect(at).toBeGreaterThan(-1)
     const body = explorerService.slice(at, at + 1600)
-    expect(body).toContain('const membershipKey = `${accountDirectoryModelVersion()}|${')
+    expect(body).toContain('const membershipKey = tagDetailMembershipKey(tag.members)')
   })
 
   it('no longer rejects a serveable page for being one generation behind', () => {

@@ -13820,7 +13820,7 @@ export async function getTagTabCounts(tagId: string): Promise<TabCounts | null> 
   const members = tagMembers(tagId)
   if (!members) return null
   hotTagCounts.add(tagId)
-  const membershipKey = [...members].map(member => member.toLowerCase()).sort().join(',')
+  const membershipKey = tagMembershipList(members)
   const result = await client.query({
     query: `SELECT membership_key, extrinsics, events,
               dateDiff('second', computed_at, now()) AS age
@@ -16606,19 +16606,56 @@ function tagMembers(tagId: string): string[] | null {
   return tag.members.filter(m => ACCOUNT_RE.test(m))
 }
 
-const TAG_DETAIL_SNAPSHOT_MAX_AGE_SECONDS = 2 * 60
+// How often the prewarm wakes, not a bound on anything it produces: the age a
+// served payload is actually held to is TAG_DETAIL_REQUEST_MAX_AGE_SECONDS.
+const TAG_DETAIL_PREWARM_INTERVAL_MS = 2 * 60_000
 const TAG_DETAIL_REQUEST_MAX_AGE_SECONDS = 10 * 60
+// The prewarm rebuilds while a request would still accept the stored payload, so
+// the oldest snapshot any request can be served stays inside the serving
+// tolerance — waking more often than that only rebuilds payloads that would have
+// been served anyway. Deriving this from the wake interval instead would rebuild
+// every tick and bound nothing.
+//
+// TWO ticks of headroom, not one. `age` is whole-second arithmetic over a
+// second-precision column, so a rebuild landing a second past the tick grid reads
+// 479 at the fourth tick, skips, and is 599 by the fifth: measured replacement
+// periods of 480 s AND 600 s from a one-tick margin. At 600 s a request stops
+// accepting the payload and pays the multi-second reconstruction in the
+// foreground — a path that was unreachable before this guard existed, because a
+// hot tag was rebuilt every 120 s. Two ticks holds the period at 360-480 s with a
+// 120 s margin, which keeps it unreachable. It costs a skip rate of about two in
+// three instead of four in five.
+const TAG_DETAIL_PREWARM_REBUILD_AGE_SECONDS = TAG_DETAIL_REQUEST_MAX_AGE_SECONDS - 2 * (TAG_DETAIL_PREWARM_INTERVAL_MS / 1000)
 const hotTagDetails = new Set<string>(['treasury', 'money-market'])
 
-// Only requests read this snapshot — the two-minute prewarm always rebuilds — so
-// it is a serving read, and the rule is the one the directory's serving read
-// uses: age inside the declared tolerance, and the same model that produced it.
-// Requiring it to be newer than the published claim/money-market generations
-// instead would throw away a page that is still well inside the tolerance the
-// moment a generation is republished, which is exactly when a request most needs
-// it. The model belongs in the payload's identity, not in a freshness clause:
-// `membershipKey` carries it (see getTag) because this table, unlike the
-// directory's, has no model version in its key.
+// The joined member list both tag snapshot tables key on. Lowercased and sorted
+// so a reordered or re-cased tag definition still matches a stored payload.
+export function tagMembershipList(members: string[]): string {
+  return [...members].map(member => member.toLowerCase()).sort().join(',')
+}
+
+// Identity of a persisted tag-detail payload: which accounts it covers AND which
+// account-value model computed it. `tag_detail_snapshots` is keyed by tag_id
+// alone, so without the model version here a payload built before the
+// money-market account-value generation was available (reading the raw position
+// table instead) could be served after it became available. `tag_activity_counts`
+// keys on the bare list because activity counts do not depend on that model, so
+// only this form carries the prefix — every reader and writer of
+// `tag_detail_snapshots.membership_key` must come through here, or a key that
+// looks right silently matches nothing.
+export function tagDetailMembershipKey(members: string[]): string {
+  return `${accountDirectoryModelVersion()}|${tagMembershipList(members)}`
+}
+
+// Both requests and the prewarm read this snapshot, and the rule is the one the
+// directory's serving read uses: age inside the declared tolerance, and the same
+// model that produced it. Requiring it to be newer than the published
+// claim/money-market generations instead would throw away a page that is still
+// well inside the tolerance the moment a generation is republished, which is
+// exactly when a request most needs it. The model belongs in the payload's
+// identity, not in a freshness clause: `membershipKey` carries it (see
+// tagDetailMembershipKey) because this table, unlike the directory's, has no
+// model version in its key.
 async function loadTagDetailSnapshot(tagId: string, membershipKey: string): Promise<TagDetail | null> {
   const res = await client.query({
     query: `SELECT membership_key,payload_json,dateDiff('second',computed_at,now()) AS age
@@ -16631,6 +16668,19 @@ async function loadTagDetailSnapshot(tagId: string, membershipKey: string): Prom
     const detail = JSON.parse(row.payload_json) as TagDetail
     return detail?.tagId === tagId && Array.isArray(detail.members) ? detail : null
   } catch { return null }
+}
+
+// Metadata-only form of the read above, for the prewarm's skip decision: the
+// payload is multi-megabyte and the decision does not need it. Same two clauses,
+// its own age threshold.
+async function tagDetailSnapshotServesUntilNextTick(tagId: string, membershipKey: string): Promise<boolean> {
+  const res = await client.query({
+    query: `SELECT membership_key,dateDiff('second',computed_at,now()) AS age
+      FROM price_data.tag_detail_snapshots FINAL WHERE tag_id={tagId:String} LIMIT 1`,
+    query_params: { tagId }, format: 'JSONEachRow',
+  })
+  const row = (await res.json<{ membership_key: string; age: number }>())[0]
+  return !!row && row.membership_key === membershipKey && Number(row.age) < TAG_DETAIL_PREWARM_REBUILD_AGE_SECONDS
 }
 
 async function persistTagDetailSnapshot(tagId: string, membershipKey: string, detail: TagDetail): Promise<void> {
@@ -16654,12 +16704,7 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
   // and DCA, none of which the card shows. The detail page still gets the full object.
   const summary = opts.summary === true
   const refresh = opts.refresh === true
-  // Identity of a persisted payload: which accounts it covers AND which
-  // account-value model computed it. `tag_detail_snapshots` is keyed by tag_id
-  // alone, so without the model version here a payload built before the
-  // money-market account-value generation was available (reading the raw
-  // position table instead) could be served after it became available.
-  const membershipKey = `${accountDirectoryModelVersion()}|${[...tag.members].map(member => member.toLowerCase()).sort().join(',')}`
+  const membershipKey = tagDetailMembershipKey(tag.members)
   if (!summary) hotTagDetails.add(tagId)
   return cached(`explorer:tag:${accountValueGenerationEpoch}:${tagId}${summary ? ':summary' : refresh ? ':refresh' : ''}`, 8000, async () => {
     if (!summary && !refresh) {
@@ -17138,7 +17183,7 @@ async function prewarmTagTabCountsUncached(): Promise<void> {
   // Sequential by tag: the exact aggregation can be large for structural tags,
   // and concurrent full-history unions would contend with live ingestion.
   for (const tag of allTags()) {
-    const membershipKey = [...tag.members].map(member => member.toLowerCase()).sort().join(',')
+    const membershipKey = tagMembershipList(tag.members)
     const result = await client.query({
       query: `SELECT membership_key, dateDiff('second', computed_at, now()) AS age
               FROM price_data.tag_activity_counts FINAL
@@ -17172,9 +17217,19 @@ export function startTagCountsPrewarm(): void {
   const prewarmDetails = (): Promise<void> => {
     if (tagDetailsPrewarmInflight) return tagDetailsPrewarmInflight
     const request = (async () => {
-      // A distinct cache key keeps foreground requests on the last complete
-      // snapshot instead of joining this exact, multi-second reconstruction.
-      for (const tagId of hotTagDetails) await getTag(tagId, { refresh: true })
+      for (const tagId of hotTagDetails) {
+        const tag = getTagRecord(tagId)
+        // Reconstructing a tag whose stored payload a request would still accept
+        // buys nothing: the payload moves with live prices, so every rebuild
+        // differs and no content check can skip it — only its age can. Skipping
+        // leaves the same guarantee (no request meets a cold snapshot) and stops
+        // the multi-second balance/lock/money-market/LP/DCA/portfolio/volume
+        // reconstruction running on unchanged membership every two minutes.
+        if (tag?.members.length && await tagDetailSnapshotServesUntilNextTick(tagId, tagDetailMembershipKey(tag.members))) continue
+        // A distinct cache key keeps foreground requests on the last complete
+        // snapshot instead of joining this exact, multi-second reconstruction.
+        await getTag(tagId, { refresh: true })
+      }
     })().finally(() => {
       if (tagDetailsPrewarmInflight === request) tagDetailsPrewarmInflight = null
     })
@@ -17182,7 +17237,7 @@ export function startTagCountsPrewarm(): void {
     return request
   }
   void prewarmDetails().catch(error => console.error('[tag-detail] prewarm failed', error))
-  tagDetailsPrewarmTimer = setInterval(() => { void prewarmDetails().catch(error => console.error('[tag-detail] refresh failed', error)) }, TAG_DETAIL_SNAPSHOT_MAX_AGE_SECONDS * 1000)
+  tagDetailsPrewarmTimer = setInterval(() => { void prewarmDetails().catch(error => console.error('[tag-detail] refresh failed', error)) }, TAG_DETAIL_PREWARM_INTERVAL_MS)
   tagDetailsPrewarmTimer.unref()
 }
 
