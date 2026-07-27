@@ -1083,16 +1083,21 @@ export function SkeletonRows({ rows = 8 }: { rows?: number }) {
 }
 // Skeleton <tr> rows for a table body — keeps the header and column grid in place
 // while data loads (instead of a lone centered "Loading…"). Bar widths vary per
-// cell for a natural shimmer; collapses to one bar per row on mobile cards.
+// cell for a natural shimmer. Below 720px a loaded row is a stacked card of one
+// labelled line per column, so the placeholder keeps its cells there and draws
+// the same stack (see the mobile skeleton block in global.css).
 // A paged list passes its page size: eight rows standing in for twenty-five made
 // the panel grow ~900px when the data landed, which is a scroll jump under the
 // reader and most of the layout shift on /blocks.
-export function TableSkeleton({ cols, rows = 8 }: { cols: number; rows?: number }) {
+// `mobileCols` is how many of those lines the phone card actually draws, for the
+// tables whose trailing column is hidden there (the expand toggle) or whose empty
+// cells collapse (the accounts directory); the rest are hidden like the real ones.
+export function TableSkeleton({ cols, rows = 8, mobileCols = cols }: { cols: number; rows?: number; mobileCols?: number }) {
   const widths = ['58%', '42%', '70%', '36%', '52%', '48%', '64%', '40%']
   return <>{Array.from({ length: rows }).map((_, r) => (
     <tr className="sk-tr" key={r}>
       {Array.from({ length: cols }).map((_, c) => (
-        <td key={c}><span className="sk-bar" style={{ width: widths[(r * cols + c) % widths.length], animationDelay: `${((r + c) % 6) * 80}ms` }} /></td>
+        <td key={c} className={c >= mobileCols ? 'col-hide-mobile' : undefined}><span className="sk-bar" style={{ width: widths[(r * cols + c) % widths.length], animationDelay: `${((r + c) % 6) * 80}ms` }} /></td>
       ))}
     </tr>
   ))}</>

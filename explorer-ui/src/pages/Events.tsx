@@ -44,7 +44,7 @@ export function Events() {
         <table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Extrinsic</th><th>Event</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody>
-            {isFetching && !rows.length ? <TableSkeleton cols={6} rows={PAGE} /> : !rows.length ? <EmptyRow cols={6}>No events</EmptyRow> : rows.map(e => <EvRow key={`${e.blockHeight}-${e.eventIndex}`} e={e} now={now} isNew={fresh.has(`${e.blockHeight}-${e.eventIndex}`)} />)}
+            {isFetching && !rows.length ? <TableSkeleton cols={6} mobileCols={5} rows={PAGE} /> : !rows.length ? <EmptyRow cols={6}>No events</EmptyRow> : rows.map(e => <EvRow key={`${e.blockHeight}-${e.eventIndex}`} e={e} now={now} isNew={fresh.has(`${e.blockHeight}-${e.eventIndex}`)} />)}
           </tbody>
         </table>
         <Pager page={page} totalPages={pages.totalPages} hasNext={pages.hasNext} note={pages.note} onPage={setPage} />

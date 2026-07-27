@@ -49,7 +49,12 @@ export function Blocks() {
       </div>
 
       <div className="sec-title">Average block time</div>
-      {!recent ? <ChartSkeleton h={168} /> : (
+      {/* Match the loaded card: .pf-card padding (18+18) + the 26px average
+          headline row (39) + its 12px gap + the fixed 220px .apx-chart = 309.
+          The placeholder used to be 168, so the block table under it dropped
+          141px the moment the series landed — this page's whole layout shift,
+          at every viewport. */}
+      {!recent ? <ChartSkeleton h={309} /> : (
       <div className="pf-card">
         <div className="pf-head"><div className="pf-now">{avg ? avg.toFixed(2) + 's' : '—'}</div><div className="pf-chg muted">target 6.00s</div></div>
         <AreaChart data={chartData.length > 1 ? chartData : [6, 6]} h={120} target={6} floor={0} color={UNFILTERED_COLOR} valueFmt={v => v.toFixed(2) + 's'} />

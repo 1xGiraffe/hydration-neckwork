@@ -1520,6 +1520,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 @keyframes sk { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
 .sk-pill,
 .sk-avatar,
+.tbl tbody tr.sk-tr td::before,
 .chart-sk-bar {
   background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%);
   background-size: 400% 100%;
@@ -1571,9 +1572,17 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .exp-evs-skeleton .sk-pill { height: 24px; }
 .exp-link-skeleton { width: 128px; height: 11px; }
 @media (max-width: 720px) {
-  /* On stacked mobile cards, one shimmer bar per row reads cleaner than N. */
-  .tbl tbody tr.sk-tr td:not(:first-child) { display: none; }
-  .tbl tbody tr.sk-tr td:first-child { padding: 12px 14px; }
+  /* A loaded row here is a stacked card — one labelled line per column (see the
+     MOBILE block below) — so the placeholder draws that same stack: a
+     label-width bar floated left, a value bar right. One bar for the whole row
+     reserved ~60px against a ~203px card, so every list grew by its own height
+     the moment data landed. Each line reserves 31px: a line of plain text is
+     29.5px and one holding a pill or badge ~32px, which puts a six-column
+     /blocks card at 203px against the 202.9px it becomes. */
+  .tbl tbody tr.sk-tr td { min-height: 31px; text-align: right; overflow: hidden; }
+  .tbl tbody tr.sk-tr td::before {
+    content: ''; float: left; width: 52px; height: 8px; margin-top: 6px; border-radius: 4px;
+  }
   .chart-sk-metrics { display: none; }
   .acct-head-skeleton .acct-bal { margin-left: 0; align-items: flex-start; min-width: 0; width: 100%; }
   .dl-skeleton .dd .sk-bar { max-width: 86%; }

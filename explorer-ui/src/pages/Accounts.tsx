@@ -84,7 +84,11 @@ export function Accounts() {
             <th className="r">{sTh('activity', 'Activity')}</th>
           </tr></thead>
           <tbody>
-            {isLoading && !data ? <TableSkeleton cols={10} rows={PAGE} /> : !rows.length ? <EmptyRow cols={10}>No accounts</EmptyRow> : rows.map((r, i) => {
+            {/* A phone card here drops the columns this account has nothing in and
+                gives the 1Y chart a whole line of its own, so its height is not the
+                column count: the directory's rows measure 172px (identity, value,
+                holdings, chart) to 324px, averaging seven lines' worth. */}
+            {isLoading && !data ? <TableSkeleton cols={10} mobileCols={7} rows={PAGE} /> : !rows.length ? <EmptyRow cols={10}>No accounts</EmptyRow> : rows.map((r, i) => {
               // Badge only for actual borrowers — pure suppliers ('inf') show nothing.
               // Tag rows link DefiSim to the member holding the worst position.
               const hf = r.healthFactor && r.healthFactor !== 'inf' ? healthFactorDisplay(r.healthFactor) : null
