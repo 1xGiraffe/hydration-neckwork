@@ -10,6 +10,9 @@ export interface Config {
   RPC_RATE_LIMIT: number
   RPC_CAPACITY: number
 
+  // Non-Hydration identity sources, `key=url[@block]` and highest priority first.
+  IDENTITY_CHAINS: string
+
   // ClickHouse connection settings
   CLICKHOUSE_URL: string
   CLICKHOUSE_DB: string
@@ -41,6 +44,18 @@ export const config: Config = {
   RPC_URL: stringFromEnvironment('RPC_URL', 'https://rpc.hydradx.cloud'),
   RPC_RATE_LIMIT: integerFromEnvironment('RPC_RATE_LIMIT', 100), // requests per second
   RPC_CAPACITY: integerFromEnvironment('RPC_CAPACITY', 20), // max concurrent RPC requests
+
+  // Identity sources beyond Hydration, in falling display priority. The People
+  // chains are where Polkadot and Kusama identities actually live — both relay
+  // chains migrated theirs in 2024 and no Asset Hub ever carried the pallet.
+  // Testnet names are free to mint, so they rank last and only fill gaps.
+  // Set IDENTITY_CHAINS to an empty string to use Hydration alone.
+  IDENTITY_CHAINS: process.env.IDENTITY_CHAINS ?? [
+    'polkadot-people=https://polkadot-people-rpc.polkadot.io',
+    'kusama-people=https://kusama-people-rpc.polkadot.io',
+    'westend-people=https://westend-people-rpc.polkadot.io',
+    'paseo-people=https://people-paseo.rotko.net',
+  ].join(','),
 
   // ClickHouse connection
   CLICKHOUSE_URL: stringFromEnvironment('CLICKHOUSE_HOST', 'http://localhost:18123'),

@@ -15556,7 +15556,22 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             -- reserve-principal coverage this is a tiny published generation;
             -- the raw aggregate remains the correctness-first upgrade fallback.
             ${mmLatestCte},
-            ident AS (SELECT lower(account_id) AS account_id, any(display) AS display FROM price_data.account_identities FINAL GROUP BY account_id),
+            -- One name per account across every identity source: lowest chain
+            -- priority wins (0 = Hydration), chain key breaks a tie so the
+            -- directory's identity sort is stable. Blank displays are retired
+            -- rows, not identities.
+            -- Filtering happens in the inner query: naming the aggregate "display"
+            -- while also filtering on the column of that name resolves the WHERE
+            -- predicate to the aggregate, which ClickHouse rejects.
+            ident AS (
+              SELECT account_id, argMin(display, (priority, chain)) AS display
+              FROM (
+                SELECT lower(account_id) AS account_id, display, priority, chain
+                FROM price_data.account_identities FINAL
+                WHERE display != ''
+              )
+              GROUP BY account_id
+            ),
             grouped AS (
               SELECT
                 if(t.lid = '', latest.account_id, t.lid) AS gkey,

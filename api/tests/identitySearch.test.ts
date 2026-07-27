@@ -13,6 +13,8 @@ import {
 const id = (n: number) => '0x' + n.toString(16).padStart(64, '0')
 
 const identity = (accountId: string, display: string) => ({
+  chain: 'hydration',
+  priority: 0,
   account_id: accountId,
   display,
   verified: 0,

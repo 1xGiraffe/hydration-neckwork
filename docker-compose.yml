@@ -147,9 +147,11 @@ services:
     networks:
       - neckwork
 
-  # Populates price_data.account_identities from the chain's Identity.IdentityOf on
-  # startup, then refreshes on an interval. Self-seeding so a fresh `docker compose up`
-  # gets identities with no manual step.
+  # Populates price_data.account_identities from the Identity pallet of Hydration and
+  # of every chain in IDENTITY_CHAINS (the Polkadot/Kusama People chains and their
+  # testnets by default), on startup and then hourly. Self-seeding so a fresh
+  # `docker compose up` gets identities with no manual step. IDENTITY_CHAINS is
+  # forwarded only when set, so the code default in src/config.ts stays canonical.
   identity-snapshot:
     image: hydration-neckwork-indexer:latest
     build: .
@@ -158,13 +160,17 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+      # The first pass writes immediately, so the table has to exist by then.
+      schema-bootstrap:
+        condition: service_completed_successfully
     environment:
       - RPC_URL=${IDENTITY_RPC_URL:-https://rpc.hydradx.cloud}
+      - IDENTITY_CHAINS
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       - RPC_RATE_LIMIT=${IDENTITY_RPC_RATE_LIMIT:-20}
       - RPC_CAPACITY=${IDENTITY_RPC_CAPACITY:-5}
-    command: ["src/scripts/snapshot-identities.ts", "--loop", "--refresh-hours=${IDENTITY_REFRESH_HOURS:-24}"]
+    command: ["src/scripts/snapshot-identities.ts", "--loop", "--refresh-hours=${IDENTITY_REFRESH_HOURS:-1}"]
     networks:
       - neckwork
 
@@ -185,7 +191,7 @@ services:
     environment:
       # Metadata fetches are heavy and the public endpoints throttle hard when the other
       # snapshot services are busy; this one is not rate limited.
-      - RPC_URL=${REFERENDUM_PROPOSAL_RPC_URL:-https://hydration-rpc.neckwork.net}
+      - RPC_URL=${REFERENDUM_PROPOSAL_RPC_URL:-https://rpc.hydradx.cloud}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       - RPC_RATE_LIMIT=${REFERENDUM_PROPOSAL_RPC_RATE_LIMIT:-20}

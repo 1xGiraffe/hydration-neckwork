@@ -14,9 +14,11 @@ interface BlockHeader {
   number: string
 }
 
-export function createSnapshotRpcClient(): RpcClient {
+// Defaults to the Hydration endpoint; pass a URL for a snapshot that reads
+// another chain's state (see identityChains.ts).
+export function createSnapshotRpcClient(url = config.RPC_URL): RpcClient {
   return new RpcClient({
-    url: config.RPC_URL,
+    url,
     capacity: Math.max(1, Math.min(config.RPC_CAPACITY, 20)),
     rateLimit: Math.max(1, config.RPC_RATE_LIMIT),
     requestTimeout: 60_000,

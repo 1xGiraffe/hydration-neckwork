@@ -74,6 +74,8 @@ Docker Compose provides working defaults. Override them in an untracked `.env` f
 | `RAW_LIVE_RPC_URL` | `https://rpc.hydradx.cloud` | Live raw-indexer RPC |
 | `RAW_RPC_URL` | `https://rpc.coke.hydration.cloud` | Historical raw-worker RPC |
 | `RAW_EVM_RPC_URL` | `https://rpc.coke.hydration.cloud` | Historical EVM state reads |
+| `IDENTITY_RPC_URL` | `https://rpc.hydradx.cloud` | Hydration identity snapshot RPC |
+| `IDENTITY_CHAINS` | Polkadot/Kusama People chains and their testnets | Extra identity sources, `key=url[@block]` and highest display priority first; empty for Hydration only |
 | `SQD_GATEWAY` | Hydration SQD archive | Historical block source |
 | `CLICKHOUSE_HOST` | `http://localhost:18123` outside Compose | ClickHouse HTTP endpoint |
 | `CLICKHOUSE_PASSWORD` | empty outside Compose; `dev` in Compose | ClickHouse password |
