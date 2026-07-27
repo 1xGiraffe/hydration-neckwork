@@ -60,7 +60,7 @@ services:
       schema-bootstrap:
         condition: service_completed_successfully
     environment:
-      - RPC_URL=${RPC_URL:-https://rpc.hydradx.cloud}
+      - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
       - SQD_GATEWAY=${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}
       - SQD_GATEWAY_API_KEY=${SQD_GATEWAY_API_KEY:-}
       - CLICKHOUSE_HOST=http://clickhouse:8123
@@ -86,7 +86,7 @@ services:
       - SQD_GATEWAY=${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}
       - SQD_GATEWAY_API_KEY=${SQD_GATEWAY_API_KEY:-}
       - RAW_EVM_RPC_URL=${RAW_EVM_RPC_URL:-https://rpc.coke.hydration.cloud}
-      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://rpc.hydradx.cloud}
+      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://hydration-rpc.neckwork.net}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       - RPC_RATE_LIMIT=${RAW_RPC_RATE_LIMIT:-50}
@@ -120,11 +120,11 @@ services:
       schema-bootstrap:
         condition: service_completed_successfully
     environment:
-      - RPC_URL=${RAW_LIVE_RPC_URL:-https://rpc.hydradx.cloud}
+      - RPC_URL=${RAW_LIVE_RPC_URL:-https://hydration-rpc.neckwork.net}
       - SQD_GATEWAY=${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}
       - SQD_GATEWAY_API_KEY=${SQD_GATEWAY_API_KEY:-}
-      - RAW_EVM_RPC_URL=${RAW_LIVE_EVM_RPC_URL:-https://rpc.hydradx.cloud}
-      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://rpc.hydradx.cloud}
+      - RAW_EVM_RPC_URL=${RAW_LIVE_EVM_RPC_URL:-https://hydration-rpc.neckwork.net}
+      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://hydration-rpc.neckwork.net}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       - RPC_RATE_LIMIT=${RAW_LIVE_RPC_RATE_LIMIT:-50}
@@ -164,7 +164,7 @@ services:
       schema-bootstrap:
         condition: service_completed_successfully
     environment:
-      - RPC_URL=${IDENTITY_RPC_URL:-https://rpc.hydradx.cloud}
+      - RPC_URL=${IDENTITY_RPC_URL:-https://hydration-rpc.neckwork.net}
       - IDENTITY_CHAINS
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
@@ -191,7 +191,7 @@ services:
     environment:
       # Metadata fetches are heavy and the public endpoints throttle hard when the other
       # snapshot services are busy; this one is not rate limited.
-      - RPC_URL=${REFERENDUM_PROPOSAL_RPC_URL:-https://rpc.hydradx.cloud}
+      - RPC_URL=${REFERENDUM_PROPOSAL_RPC_URL:-https://hydration-rpc.neckwork.net}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       - RPC_RATE_LIMIT=${REFERENDUM_PROPOSAL_RPC_RATE_LIMIT:-20}
@@ -240,7 +240,7 @@ services:
       clickhouse:
         condition: service_healthy
     environment:
-      - RPC_URL=${BALANCES_SNAPSHOT_RPC_URL:-https://rpc.hydradx.cloud}
+      - RPC_URL=${BALANCES_SNAPSHOT_RPC_URL:-https://hydration-rpc.neckwork.net}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       - RPC_RATE_LIMIT=${BALANCES_SNAPSHOT_RPC_RATE_LIMIT:-20}
@@ -262,9 +262,9 @@ services:
       clickhouse:
         condition: service_healthy
     environment:
-      - RPC_URL=${MM_SNAPSHOT_RPC_URL:-https://rpc.hydradx.cloud}
-      - RAW_EVM_RPC_URL=${MM_SNAPSHOT_EVM_RPC_URL:-https://rpc.hydradx.cloud}
-      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://rpc.hydradx.cloud}
+      - RPC_URL=${MM_SNAPSHOT_RPC_URL:-https://hydration-rpc.neckwork.net}
+      - RAW_EVM_RPC_URL=${MM_SNAPSHOT_EVM_RPC_URL:-https://hydration-rpc.neckwork.net}
+      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://hydration-rpc.neckwork.net}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       - RPC_RATE_LIMIT=${MM_SNAPSHOT_RPC_RATE_LIMIT:-20}
@@ -286,9 +286,9 @@ services:
       clickhouse:
         condition: service_healthy
     environment:
-      - RPC_URL=${MM_SNAPSHOT_RPC_URL:-https://rpc.hydradx.cloud}
-      - RAW_EVM_RPC_URL=${MM_SNAPSHOT_EVM_RPC_URL:-https://rpc.hydradx.cloud}
-      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://rpc.hydradx.cloud}
+      - RPC_URL=${MM_SNAPSHOT_RPC_URL:-https://hydration-rpc.neckwork.net}
+      - RAW_EVM_RPC_URL=${MM_SNAPSHOT_EVM_RPC_URL:-https://hydration-rpc.neckwork.net}
+      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://hydration-rpc.neckwork.net}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       - RAW_MONEY_MARKET_POSITION_CONCURRENCY=${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}
@@ -314,8 +314,8 @@ services:
       clickhouse:
         condition: service_healthy
     environment:
-      - RPC_URL=${MM_SNAPSHOT_RPC_URL:-https://rpc.hydradx.cloud}
-      - RAW_ATOKEN_ANCHOR_RPC_URL=${MM_SNAPSHOT_RPC_URL:-https://rpc.hydradx.cloud}
+      - RPC_URL=${MM_SNAPSHOT_RPC_URL:-https://hydration-rpc.neckwork.net}
+      - RAW_ATOKEN_ANCHOR_RPC_URL=${MM_SNAPSHOT_RPC_URL:-https://hydration-rpc.neckwork.net}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
     command: ["src/scripts/snapshot-atoken-anchors.ts", "--loop", "--refresh-hours=${ATOKEN_ANCHOR_REFRESH_HOURS:-6}"]
@@ -344,7 +344,7 @@ services:
       - SQD_GATEWAY_API_KEY=${SQD_GATEWAY_API_KEY:-}
       - RAW_RPC_URL=${RAW_RPC_URL:-}
       - RAW_EVM_RPC_URL=${RAW_EVM_RPC_URL:-}
-      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://rpc.hydradx.cloud}
+      - RAW_EVM_RPC_FALLBACK_URLS=${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://hydration-rpc.neckwork.net}
       - RAW_WORKERS=${RAW_WORKERS:-6}
       - RAW_FAILED_RETRY_LIMIT=${RAW_FAILED_RETRY_LIMIT:-3}
       - RAW_BLOCKED_RETRY_AFTER_SECONDS=${RAW_BLOCKED_RETRY_AFTER_SECONDS:-21600}
@@ -361,13 +361,13 @@ services:
       - RAW_SNAPSHOT_READ_BATCH_CONCURRENCY=${RAW_SNAPSHOT_READ_BATCH_CONCURRENCY:-2}
       - RAW_MONEY_MARKET_POSITION_CONCURRENCY=${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}
       - RAW_MONEY_MARKET_BATCH_SIZE=${RAW_MONEY_MARKET_BATCH_SIZE:-50}
-      - MAIN_RPC_URL=${MAIN_RPC_URL:-https://rpc.hydradx.cloud}
+      - MAIN_RPC_URL=${MAIN_RPC_URL:-https://hydration-rpc.neckwork.net}
       - MAIN_RATE_LIMIT=${MAIN_RATE_LIMIT:-40}
       - MAIN_CAPACITY=${MAIN_CAPACITY:-8}
       - LIVE_MAIN_ENABLED=${LIVE_MAIN_ENABLED:-true}
       - LIVE_MAIN_NAME=${LIVE_MAIN_NAME:-hydration-neckwork-main-live}
       - LIVE_MAIN_PIPELINE_ID=${LIVE_MAIN_PIPELINE_ID:-main-live}
-      - LIVE_MAIN_RPC_URL=${LIVE_MAIN_RPC_URL:-https://rpc.hydradx.cloud}
+      - LIVE_MAIN_RPC_URL=${LIVE_MAIN_RPC_URL:-https://hydration-rpc.neckwork.net}
       - LIVE_MAIN_RATE_LIMIT=${LIVE_MAIN_RATE_LIMIT:-100}
       - LIVE_MAIN_CAPACITY=${LIVE_MAIN_CAPACITY:-20}
       - LIVE_MAIN_BATCH_SIZE=${LIVE_MAIN_BATCH_SIZE:-50000}
@@ -394,7 +394,7 @@ services:
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       # Live money-market reads use a Hydration RPC reachable from the container.
-      - RAW_EVM_RPC_URL=${RAW_EVM_RPC_URL:-https://rpc.hydradx.cloud}
+      - RAW_EVM_RPC_URL=${RAW_EVM_RPC_URL:-https://hydration-rpc.neckwork.net}
       - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
       - EXPLORER_OCELLOIDS_TOKEN=${EXPLORER_OCELLOIDS_TOKEN:-}
     networks:
@@ -419,7 +419,7 @@ services:
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       # Live money-market reads use a Hydration RPC reachable from the container.
-      - RAW_EVM_RPC_URL=${RAW_EVM_RPC_URL:-https://rpc.hydradx.cloud}
+      - RAW_EVM_RPC_URL=${RAW_EVM_RPC_URL:-https://hydration-rpc.neckwork.net}
       - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
       - EXPLORER_OCELLOIDS_TOKEN=${EXPLORER_OCELLOIDS_TOKEN:-}
     networks:

@@ -40,8 +40,8 @@ export const config: Config = {
   SQD_GATEWAY: stringFromEnvironment('SQD_GATEWAY', 'https://v2.archive.subsquid.io/network/hydradx'),
   SQD_GATEWAY_API_KEY: optionalStringFromEnvironment('SQD_GATEWAY_API_KEY'),
 
-  // RPC endpoint (fallback to public Hydration RPC)
-  RPC_URL: stringFromEnvironment('RPC_URL', 'https://rpc.hydradx.cloud'),
+  // RPC endpoint (falls back to the project's own unthrottled Hydration archive)
+  RPC_URL: stringFromEnvironment('RPC_URL', 'https://hydration-rpc.neckwork.net'),
   RPC_RATE_LIMIT: integerFromEnvironment('RPC_RATE_LIMIT', 100), // requests per second
   RPC_CAPACITY: integerFromEnvironment('RPC_CAPACITY', 20), // max concurrent RPC requests
 

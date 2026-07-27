@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { HYDRATION_CHAIN_KEY, parseIdentityChains } from '../../src/scripts/identityChains.ts'
 
-const HYDRATION_RPC = 'https://rpc.hydradx.cloud'
+const HYDRATION_RPC = 'https://hydration-rpc.neckwork.net'
 
 describe('identity chain configuration', () => {
   it('always leads with Hydration at the highest priority', () => {

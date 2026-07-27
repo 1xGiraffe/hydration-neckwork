@@ -48,7 +48,7 @@ describe('indexer numeric configuration', () => {
 
     const { config } = await import('../src/config.ts')
 
-    expect(config.RPC_URL).toBe('https://rpc.hydradx.cloud')
+    expect(config.RPC_URL).toBe('https://hydration-rpc.neckwork.net')
     expect(config.CLICKHOUSE_URL).toBe('http://localhost:18123')
   })
 })

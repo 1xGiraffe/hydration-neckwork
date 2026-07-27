@@ -123,7 +123,7 @@ Examples:
   npm run detect-gaps
 
 Environment Variables:
-  RPC_URL               HTTP(S) or WebSocket RPC endpoint (default: https://rpc.hydradx.cloud)
+  RPC_URL               HTTP(S) or WebSocket RPC endpoint (default: https://hydration-rpc.neckwork.net)
   RPC_CAPACITY          Max concurrent RPC requests (default: 20)
   INDEXER_PIPELINE_ID   Main indexer checkpoint id (default: main)
   MAIN_REQUIRE_FINALIZED_RAW  Require finalized raw ranges for historical mode (default: true)
