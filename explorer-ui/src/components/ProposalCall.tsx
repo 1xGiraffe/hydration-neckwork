@@ -1,4 +1,9 @@
+import { useMemo, useState, type ReactNode } from 'react'
 import { CopyTextButton } from './ui'
+import {
+  asInlineVariant, asNestedCall, asPlainVariant, callFoldHint, proposalCallRows,
+  CALL_LIST_CAP, FOLD_ROW_THRESHOLD,
+} from '../utils/proposalCall'
 
 // The referendum's actual proposal, decoded from its preimage.
 //
@@ -8,26 +13,11 @@ import { CopyTextButton } from './ui'
 // the leaves are formatted for the shapes governance calls actually contain — 32-byte
 // account ids, long EVM calldata, and 128-bit amounts that must never pass through a
 // double.
-
-// A subsquid enum is { __kind, value }; a nested CALL is one whose value carries its own
-// __kind, which is how a batch's entries and dispatch_as's inner call arrive.
-function asNestedCall(value: unknown): { pallet: string; call: string; args: Record<string, unknown> } | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const outer = value as { __kind?: unknown; value?: unknown }
-  if (typeof outer.__kind !== 'string' || !outer.value || typeof outer.value !== 'object') return null
-  const inner = outer.value as { __kind?: unknown } & Record<string, unknown>
-  if (typeof inner.__kind !== 'string') return null
-  const { __kind: call, ...args } = inner
-  return { pallet: outer.__kind, call: call as string, args }
-}
-
-// A plain enum variant with no payload, e.g. {"__kind":"Signed"}.
-function asPlainVariant(value: unknown): string | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const keys = Object.keys(value as Record<string, unknown>)
-  const kind = (value as { __kind?: unknown }).__kind
-  return keys.length === 1 && typeof kind === 'string' ? kind : null
-}
+//
+// Governance batches run to thousands of calls, so a proposal past FOLD_ROW_THRESHOLD
+// lines arrives as an outline: every call below the proposal's own is a heading the reader
+// opens. The shape of the batch stays legible without the page becoming a scroll of
+// arguments nobody asked for.
 
 const HEX = /^0x[0-9a-f]*$/i
 
@@ -52,35 +42,54 @@ function Leaf({ value }: { value: unknown }) {
   return <span className={cls} title={title}>{text}</span>
 }
 
-function ArgTree({ value, depth }: { value: unknown; depth: number }) {
+// A bounded prefix of a long list, with the remainder one click away. The reader's choice
+// lives here rather than in the panel so opening one huge batch does not unfold the rest.
+function ArgList({ items, depth, folded }: { items: unknown[]; depth: number; folded: boolean }) {
+  const [showAll, setShowAll] = useState(false)
+  const capped = !showAll && items.length > CALL_LIST_CAP
+  const shown = capped ? items.slice(0, CALL_LIST_CAP) : items
+  const remaining = items.length - CALL_LIST_CAP
+  // "calls" only when they are calls; a capped list of asset ids is not.
+  const noun = asNestedCall(items[0]) ? 'calls' : 'entries'
+  return (
+    <>
+      <ol className="pc-list">
+        {shown.map((item, i) => <li key={i}><ArgTree value={item} depth={depth} folded={folded} /></li>)}
+      </ol>
+      {capped && (
+        <button type="button" className="pc-more" onClick={() => setShowAll(true)}>
+          Show remaining {remaining.toLocaleString('en-US')} {noun}
+        </button>
+      )}
+    </>
+  )
+}
+
+function ArgTree({ value, depth, folded }: { value: unknown; depth: number; folded: boolean }) {
   const nested = asNestedCall(value)
-  if (nested) return <CallNode pallet={nested.pallet} call={nested.call} args={nested.args} depth={depth + 1} />
+  if (nested) return <CallNode pallet={nested.pallet} call={nested.call} args={nested.args} depth={depth + 1} folded={folded} />
 
   const variant = asPlainVariant(value)
   if (variant) return <span className="pc-variant">{variant}</span>
 
   if (Array.isArray(value)) {
     if (!value.length) return <span className="muted">empty</span>
-    return (
-      <ol className="pc-list">
-        {value.map((item, i) => <li key={i}><ArgTree value={item} depth={depth} /></li>)}
-      </ol>
-    )
+    return <ArgList items={value} depth={depth} folded={folded} />
   }
 
   if (value && typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>)
     // An enum with a payload reads as "Kind → payload" rather than two unrelated rows.
-    const kind = (value as { __kind?: unknown }).__kind
-    if (typeof kind === 'string' && entries.length === 2 && 'value' in (value as Record<string, unknown>)) {
-      return <><span className="pc-variant">{kind}</span> <ArgTree value={(value as { value: unknown }).value} depth={depth} /></>
+    const inline = asInlineVariant(value)
+    if (inline) {
+      const kind = (value as { __kind: string }).__kind
+      return <><span className="pc-variant">{kind}</span> <ArgTree value={inline.payload} depth={depth} folded={folded} /></>
     }
     return (
       <div className="pc-args">
-        {entries.map(([key, item]) => (
+        {Object.entries(value as Record<string, unknown>).map(([key, item]) => (
           <div className="pc-arg" key={key}>
             <span className="pc-key">{key}</span>
-            <div className="pc-val"><ArgTree value={item} depth={depth} /></div>
+            <div className="pc-val"><ArgTree value={item} depth={depth} folded={folded} /></div>
           </div>
         ))}
       </div>
@@ -90,16 +99,43 @@ function ArgTree({ value, depth }: { value: unknown; depth: number }) {
   return <Leaf value={value} />
 }
 
-function CallNode({ pallet, call, args, depth }: { pallet: string; call: string; args: Record<string, unknown>; depth: number }) {
+function CallNode({ pallet, call, args, depth, folded, action }: {
+  pallet: string
+  call: string
+  args: Record<string, unknown>
+  depth: number
+  folded: boolean
+  action?: ReactNode
+}) {
   const entries = Object.entries(args)
+  const signature = (
+    <>
+      <span className="pc-pallet">{pallet}</span>
+      <span className="pc-dot">.</span>
+      <span className="pc-name">{call}</span>
+    </>
+  )
+  const body = entries.length > 0 ? <ArgTree value={args} depth={depth} folded={folded} /> : null
+
+  // The proposal's own call always shows; only what it wraps folds. A native <details>
+  // carries the keyboard and focus behaviour of the close-accounts disclosure for free.
+  if (folded && depth > 0) {
+    const hint = callFoldHint(args)
+    return (
+      <details className="pc-call pc-nested pc-fold">
+        <summary className="pc-head">
+          {signature}
+          {hint && <span className="pc-hint">{hint}</span>}
+          <span className="pc-chevron" aria-hidden="true">⌄</span>
+        </summary>
+        {body}
+      </details>
+    )
+  }
   return (
     <div className={`pc-call${depth > 0 ? ' pc-nested' : ''}`}>
-      <div className="pc-head">
-        <span className="pc-pallet">{pallet}</span>
-        <span className="pc-dot">.</span>
-        <span className="pc-name">{call}</span>
-      </div>
-      {entries.length > 0 && <ArgTree value={args} depth={depth} />}
+      <div className="pc-head">{signature}{action}</div>
+      {body}
     </div>
   )
 }
@@ -134,6 +170,13 @@ function CopyRow({ call, hash }: { call: ProposalCallData; hash: string | null }
 }
 
 export function ProposalCall({ call, hash }: { call: ProposalCallData; hash: string | null }) {
+  const [expandAll, setExpandAll] = useState(false)
+  const args = useMemo(
+    () => (call.args && typeof call.args === 'object' ? call.args : {}) as Record<string, unknown>,
+    [call.args],
+  )
+  const foldable = useMemo(() => proposalCallRows(args) > FOLD_ROW_THRESHOLD, [args])
+
   // A hash that could not be decoded says so, rather than looking like a referendum with
   // no proposal at all.
   if (call.decodeError) {
@@ -147,10 +190,22 @@ export function ProposalCall({ call, hash }: { call: ProposalCallData; hash: str
       </div>
     )
   }
-  const args = (call.args && typeof call.args === 'object' ? call.args : {}) as Record<string, unknown>
+  // Expanding swaps the disclosures for plain blocks, so the tree returns to exactly its
+  // unfolded form and find-in-page reaches every argument.
   return (
     <div className="panel pc-panel">
-      <CallNode pallet={call.pallet} call={call.callName} args={args} depth={0} />
+      <CallNode
+        pallet={call.pallet}
+        call={call.callName}
+        args={args}
+        depth={0}
+        folded={foldable && !expandAll}
+        action={foldable && (
+          <button type="button" className="pc-toggle" onClick={() => setExpandAll(value => !value)}>
+            {expandAll ? 'Collapse all' : 'Expand all'}
+          </button>
+        )}
+      />
       <div className="pc-foot">
         <span className="muted">{call.byteLength.toLocaleString('en-US')} bytes</span>
         <CopyRow call={call} hash={hash} />
