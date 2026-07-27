@@ -2,14 +2,19 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { accountActivityRefsQuery } from '../src/services/explorerService.ts'
 
-const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
+const source = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8')
+const explorerService = source('../src/services/explorerService.ts')
+const affinityService = source('../src/services/accountAffinityService.ts')
+const tables = source('../../clickhouse/schema/001_tables.sql')
+const materializedViews = source('../../clickhouse/schema/003_materialized_views.sql')
+const occurrences = (haystack: string, needle: string) => haystack.split(needle).length - 1
 
 const OMNIPOOL = '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000'
 const OMNIPOOL_EVM = '0x455448006d6f646c6f6d6e69706f6f6c00000000000000000000000000000000'
 
 const arms = (sql: string): string[] => sql.split(/UNION ALL/).filter(part => part.includes('account ='))
 
-// price_data.account_activity is ORDER BY (account, block_height, event_index).
+// price_data.account_activity_v3 is ORDER BY (account, block_height, event_index).
 // Grouping (block_height, event_index) over `account IN (…)` is therefore not a
 // sort-order prefix and ClickHouse hashes every row of every listed account
 // before the LIMIT applies — 5.3 GiB and a memory-ceiling 500 on the Omnipool
@@ -91,8 +96,9 @@ describe('account-activity reference reads limit per account, then merge', () =>
     const helperEnd = explorerService.indexOf('function accountActivityRefsSql', helperStart)
     expect(helperStart).toBeGreaterThan(-1)
 
-    for (let at = explorerService.indexOf('FROM price_data.account_activity\n'); at > -1;
-      at = explorerService.indexOf('FROM price_data.account_activity\n', at + 1)) {
+    expect(occurrences(explorerService, 'FROM price_data.account_activity_v3\n')).toBe(5)
+    for (let at = explorerService.indexOf('FROM price_data.account_activity_v3\n'); at > -1;
+      at = explorerService.indexOf('FROM price_data.account_activity_v3\n', at + 1)) {
       if (at > helperStart && at < helperEnd) continue
       const read = explorerService.slice(at, at + 400)
       // A whole-table ranking is a different shape and not the drift this guards: it
@@ -105,5 +111,49 @@ describe('account-activity reference reads limit per account, then merge', () =>
     }
     expect(explorerService).toContain('query: accountActivityRefsQuery(accounts,')
     expect(explorerService.match(/accountActivityRefsQuery\(/g)?.length).toBeGreaterThan(3)
+  })
+})
+
+// account_activity_v3 holds the same rows as the retired account_activity under the
+// same engine, partitioning and sort key, and adds asset_id/amount/has_amount — so
+// every reader's column set is a strict subset and v1 is pure duplicated write and
+// merge cost. The reads move to v3; the declaration goes away so a fresh database
+// never creates the table or its materialized view again.
+describe('the account activity index has exactly one table behind it', () => {
+  // A bare `account_activity` (not `_v3`) anywhere in the read models would mean a
+  // reader still pins the retired table alive.
+  const bare = /price_data\.account_activity(?!_v3)\b/g
+
+  it('leaves no reader on the retired table', () => {
+    expect(explorerService.match(bare)).toBeNull()
+    expect(affinityService.match(bare)).toBeNull()
+    // And the readers that moved are all still there: five in the explorer service
+    // (the helper's merged and per-account arms, the vote-count prefilter, the
+    // events total, the leaderboard's reference pool) and two in the affinity
+    // service (direct transfers, CEX interactions).
+    expect(occurrences(explorerService, 'price_data.account_activity_v3')).toBe(8)
+    expect(occurrences(affinityService, 'price_data.account_activity_v3')).toBe(2)
+  })
+
+  it('no longer declares the retired table or its materialized view', () => {
+    expect(tables.match(bare)).toBeNull()
+    expect(materializedViews.match(bare)).toBeNull()
+    expect(materializedViews).not.toContain('account_activity_mv')
+    expect(occurrences(tables, 'CREATE TABLE IF NOT EXISTS price_data.account_activity_v3 ')).toBe(1)
+    expect(occurrences(materializedViews, 'price_data.account_activity_v3_mv TO price_data.account_activity_v3 ')).toBe(1)
+  })
+
+  // The repointed reads are deliberately non-FINAL: `account` leads the sort key, so
+  // a pinned account prunes to its own granules, while FINAL would force a merging
+  // read across the partition set. Un-merged ReplacingMergeTree duplicates are
+  // collapsed by the callers' own GROUP BY / groupBitmap instead.
+  it('keeps every repointed read off FINAL', () => {
+    const reads = explorerService.split('FROM price_data.account_activity_v3\n').slice(1)
+    expect(reads).toHaveLength(5)
+    for (const read of reads) expect(read.slice(0, 400)).not.toContain('FINAL')
+
+    const affinityReads = affinityService.split('FROM price_data.account_activity_v3\n').slice(1)
+    expect(affinityReads).toHaveLength(2)
+    for (const read of affinityReads) expect(read.slice(0, 400)).not.toContain('FINAL')
   })
 })

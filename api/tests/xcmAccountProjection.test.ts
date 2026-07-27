@@ -103,7 +103,7 @@ describe('the account-scoped XCM readers use the account-first projection', () =
     }
   })
 
-  // The account-first key IS the pruning, so the account_activity reference prefilter is
+  // The account-first key IS the pruning, so the account_activity_v3 reference prefilter is
   // gone from both XCM candidate arms. It was never only a granule shrinker there: its own
   // LIMIT counts references that the arm's `extrinsic_index IS NULL` then discards, so a
   // page came back short, the deep walk read that as end-of-data and stopped — silently

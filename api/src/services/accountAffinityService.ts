@@ -251,7 +251,7 @@ async function loadDirectTransfers(accounts: string[]): Promise<DirectTransferRo
     query: `
       WITH refs AS (
         SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index
-        FROM price_data.account_activity
+        FROM price_data.account_activity_v3
         WHERE account IN ({accounts:Array(String)})
           AND event_name IN ({transferEvents:Array(String)})
           AND is_module_transfer = 0
@@ -388,7 +388,7 @@ async function loadCexInteractions(candidateAccounts: string[], cexAccounts: str
     query: `
       WITH refs AS (
         SELECT block_height, event_index
-        FROM price_data.account_activity
+        FROM price_data.account_activity_v3
         WHERE account IN ({cexAccounts:Array(String)})
           AND event_name IN ({transferEvents:Array(String)})
           AND is_module_transfer = 0

@@ -286,8 +286,8 @@ let moneyMarketAccountValuesReady = false
 export function setMoneyMarketAccountValuesReady(): void { moneyMarketAccountValuesReady = true }
 
 // One arm per account costs at least one granule per active part of
-// account_activity (~65 parts × 8192 rows here), which the merged mark ranges of
-// a single `account IN (…)` scan pay only once. Measured on a 25-row page: 10
+// account_activity_v3 (~130 parts × 8192 rows here), which the merged mark ranges
+// of a single `account IN (…)` scan pay only once. Measured on a 25-row page: 10
 // accounts read 1.0M rows merged vs 5.0M split, 16 accounts 14.8M merged vs 8.0M
 // split, 729 accounts 37.5M merged vs 360M split. Keep the fan-out to a handful
 // of accounts, where the split can never read more than a few million rows, and
@@ -297,7 +297,7 @@ const MAX_ACCOUNT_ACTIVITY_ARMS = 8
 // Newest-first distinct (block_height, event_index) references for an account
 // set, read out of the account-activity index.
 //
-// `account_activity` is `ORDER BY (account, block_height, event_index)`, so a
+// `account_activity_v3` is `ORDER BY (account, block_height, event_index)`, so a
 // single `WHERE account IN (…) GROUP BY block_height, event_index` groups on a
 // key that is NOT a sort-order prefix: ClickHouse has to hash every row of every
 // listed account before `ORDER BY … LIMIT` can discard anything. The Omnipool
@@ -330,10 +330,10 @@ export function accountActivityRefsQuery(accounts: string[], eventCond: string, 
   const safe = accounts.filter(a => ACCOUNT_RE.test(a))
   const cond = eventCond ? ` AND ${eventCond}` : ''
   const body = safe.length > MAX_ACCOUNT_ACTIVITY_ARMS
-    ? `SELECT block_height, event_index FROM price_data.account_activity
+    ? `SELECT block_height, event_index FROM price_data.account_activity_v3
     WHERE account IN (${sqlAccountList(safe)}) AND ${bound}${cond}`
     : `SELECT block_height, event_index FROM (${(safe.length ? safe : ['']).map(account => `
-      SELECT block_height, event_index FROM price_data.account_activity
+      SELECT block_height, event_index FROM price_data.account_activity_v3
       WHERE account = '${account}' AND ${bound}${cond}
       ORDER BY block_height DESC, event_index DESC
       LIMIT ${armLimit}`).join('\n      UNION ALL')}
@@ -7994,7 +7994,7 @@ async function getRecentOtc(limit: number, from?: string, to?: string, offset = 
     const fetchPage = async (bound: string, pageLimit: number, pageOffset: number): Promise<ActivityRow[]> => {
       // An account OTC feed used to start at every OTC event, then resolve
       // signers and discard almost all rows in JS. Filled events expose `who`
-      // and are already in account_activity; Placed/Cancelled are owned by the
+      // and are already in account_activity_v3; Placed/Cancelled are owned by the
       // signing extrinsic. Combine those two account-first reference sets before
       // reading raw event payloads, preserving the exact later row builder.
       // The OTC-event side is bounded exactly like the page it feeds: the read
@@ -8451,7 +8451,7 @@ async function countScopedVotes(accounts: string[], cacheKey: string, from?: str
                 WHERE ${bound}
                   AND event_name IN ('ConvictionVoting.Voted','Democracy.Voted')
                   AND (block_height, event_index) IN (
-                    SELECT block_height, event_index FROM price_data.account_activity
+                    SELECT block_height, event_index FROM price_data.account_activity_v3
                     WHERE account IN (${list}) AND event_name IN ('ConvictionVoting.Voted','Democracy.Voted'))
                   AND (JSONExtractString(args_json,'who') IN (${list}) OR JSONExtractString(args_json,'voter') IN (${list}))`,
         format: 'JSONEachRow',
@@ -14003,7 +14003,7 @@ async function countAccountEvents(accounts: string[], cacheKey: string, filters:
     const eventFilter = filters.event?.trim() ? textNameFilter('event_name', 'eventName') : ''
     const res = await client.query({
       query: `SELECT groupBitmap(bitShiftLeft(toUInt64(block_height), 32) + toUInt64(event_index)) AS c
-              FROM price_data.account_activity
+              FROM price_data.account_activity_v3
               WHERE ${bound} AND account IN (${list})
                 ${eventFilter}`,
       query_params: { ...textNameParams('eventName', filters.event) },
@@ -15449,12 +15449,18 @@ export interface AccountsPage {
 //
 // Which accounts it computes is the part that has to be justified rather than assumed.
 // Every feed row is built from at least one event that MENTIONS the account, so an
-// account's reference count in account_activity is an upper bound on its feed total
+// account's reference count in account_activity_v3 is an upper bound on its feed total
 // (hMN: 1.22M of 9.83M references; the Omnipool pot: 60.5k of 72.6M, because almost all
 // of its references are plumbing the feed suppresses). Take the pool as the accounts
 // with the most references, and that bound makes the pool a provable superset of the
 // true top N for every N whose N-th total is at least the largest reference count left
 // OUTSIDE the pool. `rankedDepth` reports exactly that N.
+//
+// The pool counts rows rather than distinct references — no FINAL, so a replayed range's
+// un-merged replacement copies are still counted. That only ever counts a reference more
+// than once, so it stays an upper bound, and counting the floor too high only makes
+// `rankedDepth` more conservative. Deduplicating it would cost per-account aggregate
+// state across the whole table to tighten a bound that is already sound.
 //
 // Below it the ordering is still every counted total in order, and no row ever shows a
 // number from another model — an account the pass has not counted shows none at all and
@@ -15519,7 +15525,7 @@ async function activityLeaderboardPool(published: ActivityLeaderboard | null): P
     && Date.now() - Date.parse(published.poolAt) < ACTIVITY_LEADERBOARD_POOL_TTL_MS
   if (fresh) return { pool: published.pool as ActivityLeaderboardPoolMember[], refsOutside: published.refsOutside ?? 0, poolAt: published.poolAt as string }
   const res = await client.query({
-    query: `SELECT account, toString(count()) AS refs FROM price_data.account_activity
+    query: `SELECT account, toString(count()) AS refs FROM price_data.account_activity_v3
             GROUP BY account
             HAVING match(account, '^0x[0-9a-f]{64}$')
             ORDER BY count() DESC LIMIT {limit:UInt32}`,
