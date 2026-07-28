@@ -5745,22 +5745,33 @@ async function tradingVolumeByAccount(accounts: string[]): Promise<Map<string, n
 // Liquidations are globally rare (a few thousand events), so the collateral is
 // always valued at its block-time price — cheap even for the unfiltered
 // accounts-list sort.
+//
+// The legs come from the money_market_liquidation_calls projection rather than
+// raw_money_market_events: that table is ordered (block_height, event_index,
+// event_name), so `event_name = 'LiquidationCall'` sits on the third key column
+// behind no prefix and prunes nothing — each read scanned all 10.70M rows and
+// decompressed the ZSTD(6) decoded_args_json to reach 8,842 legs. The projection
+// is account-first, holds only those legs, and carries the decoded collateral
+// amount, so nothing here reads decoded_args_json.
+//
+// FINAL, unlike the set-semantic dust/liquidation-extrinsic projections: this one
+// is summed, so an unmerged replay duplicate would double a leg. It is bounded by
+// the account prefix when scoped and by the table's own size (8,842 rows) when not.
+// The configured-market and known-asset filters stay here rather than in the view —
+// MM_MARKETS is runtime-extensible and the asset registry is runtime state.
 function liquidationVolumeCtes(accountFilter = ''): string {
-  const accountExpr = `lower(ifNull(account_id, ''))`
-  const accountWhere = accountFilter ? `AND ${accountExpr} IN (${accountFilter})` : ''
+  const accountWhere = accountFilter ? `AND account_id IN (${accountFilter})` : ''
   const assetExpr = mmAssetIdSql('asset_address')
   return `
             liquidation_legs AS (
               SELECT
-                ${accountExpr} AS account_id,
+                account_id,
                 ${assetExpr} AS asset_id,
                 block_timestamp AS block_time,
-                JSONExtractString(decoded_args_json, 'liquidatedCollateralAmount') AS amount
-              FROM price_data.raw_money_market_events
-              WHERE event_name = 'LiquidationCall'
-                AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
+                liquidated_collateral_amount AS amount
+              FROM price_data.money_market_liquidation_calls FINAL
+              WHERE lower(pool_address) IN (${configuredMmPoolsSql()})
                 AND ${mmAssetKnownSql('asset_address')}
-                AND ${accountExpr} != ''
                 ${accountWhere}
             ),
             ${historicalVolumeSql('liquidation_legs', 'liquidation_volume_raw')}`

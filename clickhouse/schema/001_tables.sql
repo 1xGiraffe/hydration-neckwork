@@ -233,3 +233,25 @@ CREATE TABLE IF NOT EXISTS price_data.dust_lost_events (`block_height` UInt32, `
 -- the pair set both readers actually want (8,020 events, 8,015 pairs).
 -- PARTITION BY tuple() for the reason given above.
 CREATE TABLE IF NOT EXISTS price_data.liquidation_extrinsics (`block_height` UInt32, `extrinsic_index` UInt32, `block_timestamp` DateTime, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (block_height, extrinsic_index) SETTINGS index_granularity = 8192;
+-- The EVM money-market LiquidationCall legs the liquidation-volume reads value, decoded
+-- once at insert time. Unrelated to liquidation_extrinsics above, which is the substrate
+-- Liquidation.Liquidated extrinsic set used to suppress a liquidation's internal swap.
+-- raw_money_market_events is ordered (block_height, event_index, event_name), so an
+-- event_name predicate sits on the third key column behind no prefix and prunes nothing:
+-- every read scanned all 10.70M rows and decompressed the ZSTD(6) decoded_args_json along
+-- the way (688 MiB account-scoped, 1.03 GiB unfiltered) to reach 8,842 matching rows, for
+-- 1.08 TiB and 3,285 CPU-seconds across one day's 8,104 executions.
+-- ORDER BY is account-first because every one of those 8,104 executions was account-scoped
+-- (the account page and the two tag sites); account_id is functionally determined by the
+-- event identity, so appending (block_height, event_index) makes the key unique per source
+-- row and therefore a sound replacement key. The unfiltered accounts-directory sort reads
+-- the whole table, which is nine granules.
+-- index_granularity = 1024 so the account prefix can actually prune at this row count
+-- (precedent: governance_vote_calls); PARTITION BY tuple() because 8,842 rows over the ~20
+-- monthly partitions they span would be near-empty parts and neither read is time-bounded
+-- (precedent: dust_lost_events, liquidation_extrinsics).
+-- The configured-market and known-asset filters are deliberately NOT applied here:
+-- MM_MARKETS is runtime-extensible through EXPLORER_MM_MARKETS and the asset registry is
+-- runtime state, while the schema is static, so both stay read-time filters over the
+-- pool_address/asset_address columns this table carries (as for money_market_latest_positions).
+CREATE TABLE IF NOT EXISTS price_data.money_market_liquidation_calls (`account_id` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `pool_address` String, `asset_address` String, `liquidated_collateral_amount` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (account_id, block_height, event_index) SETTINGS index_granularity = 1024;
