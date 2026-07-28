@@ -7208,12 +7208,54 @@ const XCM_IN_WALK_EVENTS = [...XCM_IN_DEPOSIT_EVENTS, 'Balances.Issued', 'Balanc
 const RESERVED_ACCOUNT_RE = /^0x(6d6f646c|7369626c|70617261)/ // modl / sibl / para prefixes
 const sqlEventNameList = (names: string[]): string => names.map(n => `'${n}'`).join(',')
 
+// Events the XCM executor emits WHILE running a message, between the deposits it
+// credits and the MessageQueue.Processed that closes it. The credit run steps over
+// these; anything else ends it.
+//
+// `AssetsTrapped` is the one that matters: it is emitted when part of a message's
+// assets cannot be delivered — a Snowbridge transfer whose DOT fee remainder could
+// not be deposited traps it here — and it lands directly before the barrier, which
+// is precisely where a contiguity rule cannot survive it.
+//
+// Deliberately NOT crossable: MessageQueue.*, DmpQueue.* and XcmpQueue.Success/Fail.
+// Each of those closes or reports a DIFFERENT message, so crossing one would let a
+// run reach into the message before it.
+const XCM_WALK_CROSSABLE_EVENTS = [
+  'PolkadotXcm.AssetsTrapped', 'PolkadotXcm.AssetsClaimed', 'PolkadotXcm.FeesPaid',
+  'PolkadotXcm.Sent', 'PolkadotXcm.Attempted', 'PolkadotXcm.SupportedVersionChanged',
+  'PolkadotXcm.VersionNotifyRequested', 'PolkadotXcm.VersionChangeNotified',
+  'PolkadotXcm.VersionNotifyStarted', 'PolkadotXcm.VersionMigrationFinished',
+  'XcmpQueue.XcmpMessageSent',
+]
+
+// The event indices one inbound message credited, walking back from its barrier.
+//
+// Two bounds, and both are needed. The run steps over XCM bookkeeping but stops at
+// anything else, because the walk table holds EVERY hook-context deposit — including
+// the on_initialize credits of DCA, staking and referral payouts, which belong to no
+// message: dropping the stop rule and taking everything below the barrier would have
+// swept 740,829 further walk events into inbound transfers to recover 511. And it
+// never crosses the preceding barrier, so a block carrying several messages keeps
+// each one's credits to itself.
+export function xcmCreditRun(
+  barrierIndex: number, previousBarrierIndex: number,
+  inWalkFamily: (index: number) => boolean, crossable: (index: number) => boolean,
+): number[] {
+  const walked: number[] = []
+  for (let idx = barrierIndex - 1; idx > previousBarrierIndex; idx--) {
+    if (inWalkFamily(idx)) { walked.push(idx); continue }
+    if (crossable(idx)) continue
+    break
+  }
+  return walked
+}
+
 // Decode the inbound-XCM beneficiary credits of the given blocks (see above).
 // `whoIn` restricts rows to those raw beneficiary account ids (account/tag page).
 async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInfo>, whoIn?: Set<string>): Promise<ActivityRow[]> {
   const list = sqlUIntList(blocks)
   if (!list) return []
-  const [barRes, famRes] = await Promise.all([
+  const [barRes, famRes, crossRes] = await Promise.all([
     client.query({
       query: `SELECT ${XCM_BARRIER_COLUMNS}
               FROM ${xcmEventActivityTable()}
@@ -7221,13 +7263,13 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
               ORDER BY block_height DESC, event_index DESC`,
       format: 'JSONEachRow',
     }),
-    // The deposit run is read for the WHOLE block, never scoped to the account:
-    // the walk-back continues only while consecutive event indices stay inside the
-    // walk family, so dropping another account's event out of the run would end
-    // the walk early and lose credits behind it. Hence the block-first projection,
-    // where these blocks are a primary-key read instead of eight whole event-name
-    // slices — and where `extrinsic_index IS NULL` is the view's own filter rather
-    // than this predicate's, because the projection holds only hook-context rows.
+    // The deposit run is read for the WHOLE block, never scoped to the account: the
+    // walk-back has to see every family event between the barrier and its credits, so
+    // dropping another account's event out of the run would end the walk early and
+    // lose credits behind it. Hence the block-first projection, where these blocks are
+    // a primary-key read instead of eight whole event-name slices — and where
+    // `extrinsic_index IS NULL` is the view's own filter rather than this predicate's,
+    // because the projection holds only hook-context rows.
     //
     // Read the extracted columns rather than args_json: `who`, `asset_id` and
     // `amount` are exactly what the decode below consumes, and the payload is the
@@ -7239,6 +7281,19 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
               WHERE block_height IN (${list}) AND event_name IN (${sqlEventNameList(XCM_IN_WALK_EVENTS)})`,
       format: 'JSONEachRow',
     }),
+    // The indices the run may step over (XCM_WALK_CROSSABLE_EVENTS). raw_events is
+    // ordered (block_height, event_index), so this is the same bounded primary-key
+    // read on the page's blocks that extrinsicIndexFor already does — and it is read
+    // as a SET of indices, so an unmerged replay duplicate cannot change the outcome
+    // and FINAL is not needed. Hook context only, matching the walk view's own filter,
+    // so a run can never step out of hook context into an extrinsic's events.
+    client.query({
+      query: `SELECT block_height, event_index
+              FROM price_data.raw_events
+              WHERE block_height IN (${list}) AND extrinsic_index IS NULL
+                AND event_name IN (${sqlEventNameList(XCM_WALK_CROSSABLE_EVENTS)})`,
+      format: 'JSONEachRow',
+    }),
   ])
   const barriers = await barRes.json<XcmBarrierRow>()
   type WalkEvent = { event_name: string; who: string; asset_id: number; amount: string }
@@ -7248,15 +7303,34 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
     m.set(e.event_index, e)
     byBlock.set(e.block_height, m)
   }
+  const crossableByBlock = new Map<number, Set<number>>()
+  for (const e of await crossRes.json<{ block_height: number; event_index: number }>()) {
+    const s = crossableByBlock.get(e.block_height) ?? new Set<number>()
+    s.add(e.event_index)
+    crossableByBlock.set(e.block_height, s)
+  }
+  // Every barrier in a block is a floor for the one above it, failed ones included: a
+  // message that failed still ran, and its credits (if any) are its own.
+  const barrierIdxByBlock = new Map<number, number[]>()
+  for (const b of barriers) {
+    const at = barrierIdxByBlock.get(b.block_height) ?? []
+    at.push(b.event_index)
+    barrierIdxByBlock.set(b.block_height, at)
+  }
+  for (const idxs of barrierIdxByBlock.values()) idxs.sort((l, r) => l - r)
   const rows: ActivityRow[] = []
   for (const b of barriers) {
     if (!b.succeeded) continue
     const from = xcmOrigin(b)
     const messageId = xcmMessageId(b)
     const evs = byBlock.get(b.block_height)
+    const crossable = crossableByBlock.get(b.block_height)
+    const blockBarriers = barrierIdxByBlock.get(b.block_height) ?? []
+    const below = blockBarriers.filter(i => i < b.event_index)
+    const floor = below.length ? below[below.length - 1] : -1
     const seen = new Set<string>()
-    for (let idx = b.event_index - 1; evs?.has(idx); idx--) {
-      const e = evs.get(idx)!
+    for (const idx of xcmCreditRun(b.event_index, floor, i => evs?.has(i) ?? false, i => crossable?.has(i) ?? false)) {
+      const e = evs!.get(idx)!
       if (!XCM_IN_DEPOSIT_EVENTS.includes(e.event_name)) continue
       // `asset_id` already carries the 0 that Balances.Deposit has no currencyId for.
       const { who, amount, asset_id: cid } = e
