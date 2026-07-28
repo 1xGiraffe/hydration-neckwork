@@ -235,27 +235,33 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
               <>
                 <div className="wallet-group">
                   <div className="wallet-group-label">Substrate</div>
-                  {substrateWallets.map(w => w.installed ? (
-                    <button key={w.id} type="button" className="wallet-row" disabled={busy} onClick={() => void connectWallet(w.id)}>
-                      <span className="wallet-name">{w.title}</span>
-                      <span className="wallet-status">Installed</span>
-                    </button>
-                  ) : (
-                    <a key={w.id} className="wallet-row wallet-row-install" href={w.installUrl} target="_blank" rel="noreferrer">
-                      <span className="wallet-name">{w.title}</span>
-                      <span className="wallet-status">Install ↗</span>
-                    </a>
-                  ))}
+                  <div className="wallet-grid">
+                    {substrateWallets.map(w => w.installed ? (
+                      <button key={w.id} type="button" className="wallet-tile installed" disabled={busy} onClick={() => void connectWallet(w.id)}>
+                        <img className="wallet-tile-icon" src={w.icon} alt="" />
+                        <span className="wallet-tile-name">{w.title}</span>
+                        <span className="wallet-tile-status">Installed</span>
+                      </button>
+                    ) : (
+                      <a key={w.id} className="wallet-tile not-installed" href={w.installUrl} target="_blank" rel="noreferrer">
+                        <img className="wallet-tile-icon" src={w.icon} alt="" />
+                        <span className="wallet-tile-name">{w.title}</span>
+                        <span className="wallet-tile-status">Install ↗</span>
+                      </a>
+                    ))}
+                  </div>
                 </div>
                 {evmProviders.length > 0 && (
                   <div className="wallet-group">
                     <div className="wallet-group-label">Ethereum</div>
-                    {evmProviders.map(p => (
-                      <button key={p.info.rdns} type="button" className="wallet-row" disabled={busy} onClick={() => void connectProvider(p)}>
-                        {p.info.icon ? <img className="wallet-icon" src={p.info.icon} alt="" /> : null}
-                        <span className="wallet-name">{p.info.name}</span>
-                      </button>
-                    ))}
+                    <div className="wallet-grid">
+                      {evmProviders.map(p => (
+                        <button key={p.info.rdns} type="button" className="wallet-tile installed" disabled={busy} onClick={() => void connectProvider(p)}>
+                          {p.info.icon ? <img className="wallet-tile-icon" src={p.info.icon} alt="" /> : <span className="wallet-tile-icon" aria-hidden="true" />}
+                          <span className="wallet-tile-name">{p.info.name}</span>
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
               </>

@@ -4,7 +4,7 @@
 // window.ethereum fallback for older injectors). WalletConnect is out of scope
 // for v1 (needs a relay origin the CSP forbids and a heavy dependency).
 
-export interface SubstrateWalletInfo { id: string; title: string; installUrl: string; installed: boolean }
+export interface SubstrateWalletInfo { id: string; title: string; installUrl: string; icon: string; installed: boolean }
 export interface InjectedAccount { address: string; name?: string }
 interface InjectedExtension {
   accounts: { get(): Promise<InjectedAccount[]> }
@@ -13,15 +13,19 @@ interface InjectedExtension {
 interface InjectedWindow { injectedWeb3?: Record<string, { enable(origin: string): Promise<InjectedExtension> }> }
 
 // The extension registry hydration-ui supports, minus wallets without a
-// desktop story. Nova acts as polkadot-js inside its in-app browser.
-const SUBSTRATE_WALLETS: { id: string; title: string; installUrl: string }[] = [
-  { id: 'polkadot-js', title: 'Polkadot{.js} / Nova', installUrl: 'https://polkadot.js.org/extension/' },
-  { id: 'talisman', title: 'Talisman', installUrl: 'https://talisman.xyz/download' },
-  { id: 'subwallet-js', title: 'SubWallet', installUrl: 'https://www.subwallet.app/download.html' },
-  { id: 'aleph-zero', title: 'Aleph Zero Signer', installUrl: 'https://alephzero.org/signer' },
-  { id: 'enkrypt', title: 'Enkrypt', installUrl: 'https://www.enkrypt.com/' },
-  { id: 'fearless-wallet', title: 'Fearless Wallet', installUrl: 'https://fearlesswallet.io/' },
-  { id: 'polkagate', title: 'PolkaGate', installUrl: 'https://polkagate.xyz/' },
+// desktop story. Nova acts as polkadot-js inside its in-app browser — it
+// shares the SAME injected key, so it gets no separate registry entry; the
+// title just names both. Icons copied from galacticcouncil/hydration-ui
+// (packages/web3-connect/src/wallets/<Name>/logo.svg, Apache-2.0) into
+// public/wallet-icons/, same convention as public/tag-icons/.
+const SUBSTRATE_WALLETS: { id: string; title: string; installUrl: string; icon: string }[] = [
+  { id: 'polkadot-js', title: 'Polkadot{.js} / Nova', installUrl: 'https://polkadot.js.org/extension/', icon: '/wallet-icons/polkadot-js.svg' },
+  { id: 'talisman', title: 'Talisman', installUrl: 'https://talisman.xyz/download', icon: '/wallet-icons/talisman.svg' },
+  { id: 'subwallet-js', title: 'SubWallet', installUrl: 'https://www.subwallet.app/download.html', icon: '/wallet-icons/subwallet-js.svg' },
+  { id: 'aleph-zero', title: 'Aleph Zero Signer', installUrl: 'https://alephzero.org/signer', icon: '/wallet-icons/aleph-zero.svg' },
+  { id: 'enkrypt', title: 'Enkrypt', installUrl: 'https://www.enkrypt.com/', icon: '/wallet-icons/enkrypt.svg' },
+  { id: 'fearless-wallet', title: 'Fearless Wallet', installUrl: 'https://fearlesswallet.io/', icon: '/wallet-icons/fearless-wallet.svg' },
+  { id: 'polkagate', title: 'PolkaGate', installUrl: 'https://polkagate.xyz/', icon: '/wallet-icons/polkagate.svg' },
 ]
 
 export function listSubstrateWallets(): SubstrateWalletInfo[] {

@@ -65,7 +65,7 @@ async function loginFlow(page: Page): Promise<void> {
   await page.goto('/')
   await openConnectDialog(page)
 
-  const walletRow = page.locator('.wallet-row', { hasText: 'Polkadot{.js} / Nova' })
+  const walletRow = page.locator('.wallet-tile', { hasText: 'Polkadot{.js} / Nova' })
   await expect(walletRow).toContainText('Installed')
   await walletRow.click()
 
