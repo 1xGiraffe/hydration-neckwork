@@ -71,13 +71,44 @@ test('a user tag outranks the system tag, and the system tag returns on logout',
   const row = page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '980' }) })
   const pill = row.locator('a.addr-pill')
   await expect(pill).toContainText('Mine')
-  await expect(pill).toHaveAttribute('href', '/library/lib1')
+  // The tag's own aggregate view, not the library management page.
+  await expect(pill).toHaveAttribute('href', '/library/lib1/tag/t1')
 
   await page.locator('.account-btn').click()
   await page.locator('.account-menu button', { hasText: 'Log out' }).click()
 
   await expect(pill).toContainText('Treasury')
   await expect(pill).toHaveAttribute('href', '/tag/treasury')
+})
+
+test('a user-tag pill opens its own aggregate page, header included', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  userMock.state.tagMap = {
+    libraries: [
+      { libraryId: 'lib1', name: 'My library', tags: [
+        { tagId: 't1', name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
+      ] },
+      { libraryId: 'system', name: 'Hydration', tags: [] },
+    ],
+  }
+  // The management-page shape of the same tag, so GET /user/library-tag/lib1/t1
+  // (buildLibraryTagDetail in fixtures/test.ts) has real data to answer with.
+  userMock.state.libraries.push({
+    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+    owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
+    tags: [{
+      tagId: 't1', name: 'Mine', color: '#22c55e', icon: '👀', note: '',
+      members: [{ accountId: TREASURY_ACCOUNT_ID, address: TREASURY_ACCOUNT_ID, emoji: '👤', tag: null }],
+    }],
+  })
+
+  await page.goto('/accounts')
+  const row = page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '980' }) })
+  await row.locator('a.addr-pill').click()
+
+  await expect(page).toHaveURL(/\/library\/lib1\/tag\/t1$/)
+  await expect(page.locator('.acct-meta > .tag')).toContainText('Mine')
+  await expect(page.locator('.acct-meta')).toContainText('1 accounts')
 })
 
 test('create a library, tag a known address, and reorder', async ({ page, userMock }) => {

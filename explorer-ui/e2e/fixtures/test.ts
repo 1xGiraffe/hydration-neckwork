@@ -2,7 +2,7 @@ import type { Page, Route } from '@playwright/test'
 import { expect, test as base } from '@playwright/test'
 import { mockSync } from '../../tests/fixtures/mockApi'
 import type {
-  AccountRef, LibraryDetailResponse, LibraryTagDetail, LibrarySummaryRef, MeResponse, TagMapResponse,
+  AccountRef, LibraryDetailResponse, LibraryTagDetail, LibrarySummaryRef, MeResponse, TagMapResponse, TagDetail,
 } from '../../src/types'
 
 // The wallet-login identity every mock session resolves to, and the bearer
@@ -50,6 +50,21 @@ function freshState(): UserMockState {
     invites: [],
     order: [],
     tagMap: { libraries: [{ libraryId: 'system', name: 'Hydration', tags: [] }] },
+  }
+}
+
+// A library tag's own aggregate view, built from the same `state.libraries`
+// entries the management page reads — so a tag created/edited through the UI is
+// immediately reachable at its own aggregate URL too. Feeds (activity/extrinsics/
+// events/votes/value-events) answer empty elsewhere in this handler; only the
+// detail needs the tag's real presentation fields and members.
+function buildLibraryTagDetail(state: UserMockState, libraryId: string, tagId: string): TagDetail | null {
+  const tag = state.libraries.find(l => l.libraryId === libraryId)?.tags.find(t => t.tagId === tagId)
+  if (!tag) return null
+  return {
+    tagId: tag.tagId, name: tag.name, color: tag.color, note: tag.note, icon: tag.icon,
+    members: tag.members, balances: [], topAssets: [], portfolioUsd: 0,
+    moneyMarket: [], liquidityPositions: [], activeDcas: [], portfolioSeries: [], portfolioDates: [], balanceHistory: [],
   }
 }
 
@@ -241,6 +256,29 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     const { libraryIds } = bodyOf(route) as { libraryIds: string[] }
     state.order = libraryIds
     await fulfillJson(route, 200, { order: state.order })
+    return
+  }
+
+  // A library tag's own aggregate page. Deterministic empty feeds are enough to
+  // prove the page renders (the computation itself is the real API's concern,
+  // covered by api/tests/libraryTagRoutes.test.ts) — only the detail needs real
+  // tag data, from buildLibraryTagDetail above.
+  if (method === 'GET' && (m = path.match(/^\/user\/library-tag\/([^/]+)\/([^/]+)\/counts$/))) {
+    await fulfillJson(route, 200, { extrinsics: 0, extrinsicsOnBehalf: 0, events: 0, votes: 0 })
+    return
+  }
+  if (method === 'GET' && (m = path.match(/^\/user\/library-tag\/([^/]+)\/([^/]+)\/list-count$/))) {
+    await fulfillJson(route, 200, { total: 0, complete: true })
+    return
+  }
+  if (method === 'GET' && (m = path.match(/^\/user\/library-tag\/([^/]+)\/([^/]+)\/(?:activity|extrinsics|events|votes|value-events)$/))) {
+    await fulfillJson(route, 200, [])
+    return
+  }
+  if (method === 'GET' && (m = path.match(/^\/user\/library-tag\/([^/]+)\/([^/]+)$/))) {
+    const detail = buildLibraryTagDetail(state, decodeURIComponent(m[1]), decodeURIComponent(m[2]))
+    if (detail) await fulfillJson(route, 200, detail)
+    else await fulfillJson(route, 404, { error: 'not found' })
     return
   }
 
