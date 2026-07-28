@@ -14,7 +14,7 @@ import { normalizeAddress } from '../services/addressIdentity.ts'
 import {
   ensurePersonalLibrary, ownedLibrariesFor, subscriptionsFor, invitesFor, libraryOrderFor, tagMapFor,
   getLibrary, canView, createLibrary, updateLibrary, deleteLibrary,
-  createTag, updateTag, deleteTag, setTagMembers, setMemberOrder, visibleTagMembers,
+  createTag, updateTag, deleteTag, setTagMembers, setMemberOrder, visibleTagMembers, tagDisplayIcon,
   inviteToLibrary, revokeShare, respondToInvite, subscribePublic, unsubscribe, setLibraryOrder,
   librarySummary, LIMITS, type LibrarySummary, type UserLibrary,
 } from '../services/userLibraryService.ts'
@@ -73,10 +73,12 @@ export function libraryDetailResponse(lib: UserLibrary, viewer: string | null) {
   }
 }
 // A single tag, serialized the same way whether it comes back from create,
-// update, a members write, or a reorder — members as display accountRefs, in
-// display order, like a detail tag.
+// update, a members write, or a reorder — members as display accountRefs in
+// display order, like a detail tag. `icon` resolves the same first-member
+// fallback tagMapFor and visibleTagMembers use, so every surface that shows
+// this tag (management page, tag-map pills, aggregate page) agrees.
 function tagRef(t: { tagId: string; name: string; color: string; icon: string; note: string; order: string[] }) {
-  return { tagId: t.tagId, name: t.name, color: t.color, icon: t.icon, note: t.note, members: t.order.map(accountRef) }
+  return { tagId: t.tagId, name: t.name, color: t.color, icon: tagDisplayIcon(t.icon, t.order), note: t.note, members: t.order.map(accountRef) }
 }
 
 export async function userRoutes(fastify: FastifyInstance) {

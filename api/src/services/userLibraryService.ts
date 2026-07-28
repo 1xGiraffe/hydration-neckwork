@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
 import { normalizeAddress } from './addressIdentity.ts'
-import { UserDataError } from './userProfileService.ts'
+import { UserDataError, profileForAccount } from './userProfileService.ts'
+import { accountIcon } from './omniwatchIdentity.ts'
 // explorerService.ts does not import this module (checked: no import cycle),
 // so this stays a direct import rather than an init-time injected function.
 import { resolveDisplayAccountId } from './explorerService.ts'
@@ -161,6 +162,24 @@ function checkIcon(icon: string): string {
   return v
 }
 
+// Mirrors tagService.ts's iconFor for SYSTEM tags: an unset icon derives from
+// the first member (by display order, so a drag reorder can change which
+// member's face a tag shows) rather than rendering a blank pill. A user
+// library's first member is far more likely to be another explorer user than
+// a system tag's is, so this adds one precedence step ahead of the emoji
+// derivation — their own uploaded profile avatar. checkIcon above still keeps
+// an EXPLICITLY set icon emoji-only (v1's no-third-party-URL rule); this only
+// ever fires when the owner left the icon unset, so it never conflicts.
+export function tagDisplayIcon(icon: string, order: string[]): string {
+  if (icon) return icon
+  const first = order[0]
+  if (!first) return '🏷️'
+  const profile = profileForAccount(first)
+  if (profile && profile.avatarVersion > 0) return `/api/explorer/profile-avatar/${first}?v=${profile.avatarVersion}`
+  const memberIcon = accountIcon(first)
+  return memberIcon.emojiUrl || memberIcon.emoji
+}
+
 function requireOwned(owner: string, libraryId: string): UserLibrary {
   const lib = libraries.get(libraryId)
   if (!lib) throw new UserDataError(404, 'Library not found')
@@ -307,7 +326,7 @@ export function visibleTagMembers(viewer: string, libraryId: string, tagId: stri
   if (!isOwner && !isActiveSubscriber) return null
   const tag = lib.tags.get(tagId)
   if (!tag) return null
-  return { name: tag.name, color: tag.color, icon: tag.icon, note: tag.note, members: [...tag.order] }
+  return { name: tag.name, color: tag.color, icon: tagDisplayIcon(tag.icon, tag.order), note: tag.note, members: [...tag.order] }
 }
 
 export function invitesFor(accountId: string): LibrarySummary[] {
@@ -497,7 +516,7 @@ export function tagMapFor(accountId: string): TagMapLibrary[] {
     const lib = libraries.get(id)!
     return {
       libraryId: lib.libraryId, name: lib.name,
-      tags: [...lib.tags.values()].map(t => ({ tagId: t.tagId, name: t.name, color: t.color, icon: t.icon, members: [...t.order] })),
+      tags: [...lib.tags.values()].map(t => ({ tagId: t.tagId, name: t.name, color: t.color, icon: tagDisplayIcon(t.icon, t.order), members: [...t.order] })),
     }
   })
 }

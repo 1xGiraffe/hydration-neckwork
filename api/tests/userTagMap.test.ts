@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import {
-  initUserLibraryService, loadUserLibraries, ensurePersonalLibrary, createLibrary, createTag, setTagMembers,
+  initUserLibraryService, loadUserLibraries, ensurePersonalLibrary, createLibrary, createTag, setTagMembers, setMemberOrder,
   subscribePublic, setLibraryOrder, libraryOrderFor, tagMapFor, publicLibraries, publicLibrariesByOwner, deleteLibrary,
 } from '../src/services/userLibraryService.ts'
+import { accountIcon } from '../src/services/omniwatchIdentity.ts'
 import { fakeClient } from './helpers/userFakes.ts'
 
 const OWNER = '0x' + 'aa'.repeat(32)
@@ -55,5 +56,42 @@ describe('priority order and tag map', () => {
     expect(publicLibrariesByOwner(OWNER)).toHaveLength(2)
     await deleteLibrary(OWNER, p1.libraryId)
     expect(publicLibraries().map(l => l.libraryId)).toEqual([p2.libraryId])
+  })
+})
+
+// B2: an unset tag icon derives from the FIRST member in display order, so
+// the tag map (every pill's label source) always agrees with the management
+// page and the aggregate page — see tagDisplayIcon's own unit tests
+// (userTagIcon.test.ts) for the precedence rule itself.
+describe('tag map icon derivation follows member order', () => {
+  beforeEach(async () => { initUserLibraryService(fakeClient()); await loadUserLibraries() })
+
+  function tagOf(accountId: string, libraryId: string) {
+    return tagMapFor(accountId).find(l => l.libraryId === libraryId)!.tags[0]
+  }
+
+  it('derives from the first member, and a reorder changes which one', async () => {
+    const lib = await createLibrary(OWNER, 'Icons', '', 'private')
+    const tag = await createTag(OWNER, lib.libraryId, { name: 'T' })   // no icon → derives
+    const m1 = '0x' + '11'.repeat(32)
+    const m2 = '0x' + '22'.repeat(32)
+    await setTagMembers(OWNER, lib.libraryId, tag.tagId, [m1, m2], [])
+    expect(tagOf(OWNER, lib.libraryId).icon).toBe(accountIcon(m1).emojiUrl || accountIcon(m1).emoji)
+
+    await setMemberOrder(OWNER, lib.libraryId, tag.tagId, [m2, m1])
+    expect(tagOf(OWNER, lib.libraryId).icon).toBe(accountIcon(m2).emojiUrl || accountIcon(m2).emoji)
+  })
+
+  it('an explicit icon always wins over the derived fallback', async () => {
+    const lib = await createLibrary(OWNER, 'Icons', '', 'private')
+    const tag = await createTag(OWNER, lib.libraryId, { name: 'T', icon: '🔥' })
+    await setTagMembers(OWNER, lib.libraryId, tag.tagId, ['0x' + '11'.repeat(32)], [])
+    expect(tagOf(OWNER, lib.libraryId).icon).toBe('🔥')
+  })
+
+  it('falls back to the tag-icon glyph when the tag has no members yet', async () => {
+    const lib = await createLibrary(OWNER, 'Icons', '', 'private')
+    await createTag(OWNER, lib.libraryId, { name: 'Empty' })
+    expect(tagOf(OWNER, lib.libraryId).icon).toBe('🏷️')
   })
 })
