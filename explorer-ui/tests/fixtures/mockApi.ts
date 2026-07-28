@@ -248,15 +248,24 @@ function mmFor(seed: number) {
 function buildAssets(): AssetListItem[] {
   return ASSETS.map(a => ({ ...aref(a), price: a.price, change24h: a.ch / 100, change7d: a.ch7d / 100, type: a.type, amountUsd: 2_000_000 * (0.3 + rng(a.assetId + 9)() * 4), holderCount: 20 + Math.floor(rng(a.assetId + 17)() * 8000), sparkline: series(a.assetId * 13 + 1, 14, a.price) }))
 }
+// A structural pot touches balances on every trade, so its own activity feed runs deeper
+// than the directory's counter can reach and its total is a FLOOR — "at least this many",
+// rendered with a trailing '+'. The floor is deliberately the LARGEST number in the
+// column so that both halves of the rule are observable: an ordering that forgot the
+// completeness term would rank this row first instead of last.
+const ACTIVITY_FLOOR_ACCOUNT = A.treasury
+const ACTIVITY_FLOOR_COUNT = 50_000
+
 function buildAccounts(offset: number, limit: number, sort: string): AccountsPage {
   const rows: TopAccountRow[] = []
   // Kraken tag (2 members) as one row
   // 53 weekly points = the real API's 1Y padded sparkline shape.
-  rows.push({ account: null, tag: { tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', icon: '/tag-icons/kraken.jpg', memberCount: 2 }, portfolioUsd: 5_240_000, lastBlock: TIP - 12, healthFactor: '1410000000000000000', identity: 'Kraken', suppliedUsd: null, borrowedUsd: null, supplementalMarket: { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 6_200, healthFactor: '2380000000000000000' }, sparkline: series(99, 53, 5_240_000), activityCount: 2143, tradingVolumeUsd: 82_400_000, liquidationVolumeUsd: 740_000 })
+  rows.push({ account: null, tag: { tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', icon: '/tag-icons/kraken.jpg', memberCount: 2 }, portfolioUsd: 5_240_000, lastBlock: TIP - 12, healthFactor: '1410000000000000000', identity: 'Kraken', suppliedUsd: null, borrowedUsd: null, supplementalMarket: { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 6_200, healthFactor: '2380000000000000000' }, sparkline: series(99, 53, 5_240_000), activityCount: 2143, activityCountComplete: true, tradingVolumeUsd: 82_400_000, liquidationVolumeUsd: 740_000 })
   const seeds: [AccountRef, number][] = [[A.binance, 3_900_000], [A.fox, 1_240_000], [A.treasury, 980_000], [A.owl, 410_000], [A.swan, 96_000]]
   for (const [a, usd] of seeds) {
     const mm = mmFor(a.accountId.length * 7)
-    rows.push({ account: a, tag: null, portfolioUsd: usd, lastBlock: TIP - Math.floor(usd % 900), healthFactor: mm.debt > 0 ? BigInt(Math.round(mm.hf * 1e18)).toString() : 'inf', identity: a === A.binance ? 'Binance' : null, suppliedUsd: mm.supply > 0 ? mm.supply : null, borrowedUsd: mm.debt > 0 ? mm.debt : null, supplementalMarket: a === A.fox ? { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 4_800, healthFactor: '2500000000000000000' } : null, sparkline: series(a.accountId.length * 31, 53, usd), activityCount: 100 + (usd % 4000), tradingVolumeUsd: usd * (12 + (a.accountId.charCodeAt(4) % 9)), liquidationVolumeUsd: mm.debt > 0 ? usd * (0.08 + (a.accountId.charCodeAt(6) % 5) / 100) : undefined })
+    const floor = a === ACTIVITY_FLOOR_ACCOUNT
+    rows.push({ account: a, tag: null, portfolioUsd: usd, lastBlock: TIP - Math.floor(usd % 900), healthFactor: mm.debt > 0 ? BigInt(Math.round(mm.hf * 1e18)).toString() : 'inf', identity: a === A.binance ? 'Binance' : null, suppliedUsd: mm.supply > 0 ? mm.supply : null, borrowedUsd: mm.debt > 0 ? mm.debt : null, supplementalMarket: a === A.fox ? { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 4_800, healthFactor: '2500000000000000000' } : null, sparkline: series(a.accountId.length * 31, 53, usd), activityCount: floor ? ACTIVITY_FLOOR_COUNT : 100 + (usd % 4000), activityCountComplete: !floor, tradingVolumeUsd: usd * (12 + (a.accountId.charCodeAt(4) % 9)), liquidationVolumeUsd: mm.debt > 0 ? usd * (0.08 + (a.accountId.charCodeAt(6) % 5) / 100) : undefined })
   }
   const health = (row: TopAccountRow) => {
     if (!row.healthFactor) return Number.POSITIVE_INFINITY
@@ -266,7 +275,15 @@ function buildAccounts(offset: number, limit: number, sort: string): AccountsPag
     if (sort === 'supplied') return (b.suppliedUsd ?? -1) - (a.suppliedUsd ?? -1)
     if (sort === 'borrowed') return (b.borrowedUsd ?? -1) - (a.borrowedUsd ?? -1)
     if (sort === 'health') return health(a) - health(b)
-    if (sort === 'activity') return (b.activityCount ?? -1) - (a.activityCount ?? -1) || b.portfolioUsd - a.portfolioUsd
+    // Mirrors the server's `activity_count_complete DESC, activity_count DESC,
+    // usd_total DESC`. The completeness term comes FIRST: a floor says only "at least
+    // this many", so ranking it against an exact total by number alone would put a
+    // "known to be at least 50k" above a "known to be exactly 2,143".
+    if (sort === 'activity') {
+      return Number(b.activityCountComplete ?? false) - Number(a.activityCountComplete ?? false)
+        || (b.activityCount ?? -1) - (a.activityCount ?? -1)
+        || b.portfolioUsd - a.portfolioUsd
+    }
     if (sort === 'volume') return (b.tradingVolumeUsd ?? -1) - (a.tradingVolumeUsd ?? -1) || b.portfolioUsd - a.portfolioUsd
     if (sort === 'liquidation') return (b.liquidationVolumeUsd ?? -1) - (a.liquidationVolumeUsd ?? -1) || b.portfolioUsd - a.portfolioUsd
     if (sort === 'identity') {

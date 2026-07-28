@@ -57,8 +57,19 @@ describe('DCA failure errors come from the read model', () => {
     // error column already; the second query matched raw_events on a
     // (block_height, event_index) tuple across tables to get the same string.
     expect(schedule).toContain('dcaError: x.error || undefined')
-    expect(schedule).not.toContain('(block_height,event_index) IN')
-    expect(schedule).not.toContain("event_name = 'DCA.TradeFailed' AND (block_height")
+    // Spelled WITH the space the codebase actually uses: the no-space form appears
+    // nowhere in api/src, so a guard written that way matched zero things and would
+    // have passed over the cross-table lookup it exists to keep out. The positive
+    // count pins that the construct is still spelled this way somewhere, so this
+    // stays a real absence rather than another literal that can never match.
+    expect((explorerService.match(/\(block_height, event_index\) IN/g) ?? []).length).toBe(12)
+    expect(schedule).not.toContain('(block_height, event_index) IN')
+    // The one raw_events read left in here is DCA.Terminated's point lookup, whose
+    // error genuinely has no column. Pinning the count is what keeps that true: a
+    // reintroduced per-row error read would be a second one.
+    const rawReads = schedule.match(/FROM price_data\.raw_events/g) ?? []
+    expect(rawReads).toHaveLength(1)
+    expect(schedule.slice(schedule.indexOf('FROM price_data.raw_events'))).toContain("event_name = 'DCA.Terminated'")
   })
 
   it('reads no TradeFailed error from raw_events anywhere', () => {

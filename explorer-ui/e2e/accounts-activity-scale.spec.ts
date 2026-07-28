@@ -17,7 +17,10 @@ test('the activity column renders on the shared rough scale', async ({ page }) =
   await expect(cells).toHaveCount(page0.rows.length)
   expect(counts).toHaveLength(6)
 
-  await expect(cells).toHaveText(counts.map(n => compactAmount(n)))
+  // A partial total also carries a trailing '+'; the marker and its ordering rule are
+  // covered by accounts-activity-floor.spec.ts. Here it only has to not disturb the scale.
+  await expect(cells).toHaveText(page0.rows.map(r =>
+    compactAmount(r.activityCount!) + (r.activityCountComplete === false ? '+' : '')))
   // 2143 reads "2.14k", not the raw "2,143" a hand-rolled compaction fell back to.
   await expect(cells.first()).toHaveText('2.14k')
   await expect(cells.nth(1)).toHaveText('2.1k')

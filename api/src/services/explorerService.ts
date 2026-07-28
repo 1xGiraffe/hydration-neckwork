@@ -9551,10 +9551,25 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
 // event-time predicate `rowMeetsExactUsdMinimum` re-applies to the built rows, so
 // a filtered total matches the filtered feed.
 //
-// Nothing else does. Staking and OTC are read the same way, but their row
-// builders can discard a source event (Giga companion folding, an OTC fill whose
-// Placed legs are missing), so a source count is not their feed's length. The
-// merged, trade, transfer, liquidity, money-market and cross-chain feeds are
+// Nothing else does, for two different reasons. Staking is read the same way, but
+// its row builder discards source events three ways — suppressGigaCompanionEvents
+// drops the GigaHdx.Staked/Staking.ForceUnstaked companion of a migration or reward
+// claim, stakingRowFromEvent returns null for an event carrying no amount in the
+// requested asset, and repeats of one (block, extrinsic, event, who, asset, amount)
+// collapse to a single row — so a source count is not its feed's length. OTC's row builder
+// discards nothing: all three branches of otcRowFromEvent return a row, and a
+// missing Placed leg only leaves the asset legs and amounts null. OTC is excluded
+// because its FILTERS are not predicates over the rows being counted: a
+// Cancelled/Filled event carries no asset identity or order amounts of its own,
+// only the order's Placed event does, which is why getRecentOtc resolves legs
+// after the fetch and then walks history in Node (`fetchFilteredDeep`) for a token
+// or min filter. An unfiltered OTC count would in fact match its feed, so
+// reporting no total for it is conservative rather than required. It stays
+// excluded deliberately: a total that exists only when no filter is applied
+// disappears the moment the user filters, which reads as a broken pager, and the
+// depth-walking pager it falls back to is honest in both cases.
+//
+// The merged, trade, transfer, liquidity, money-market and cross-chain feeds are
 // assembled from up to twelve sources and paged in Node after classification, so
 // counting them means classifying chain-wide history — 78.5M transfer and 55.8M
 // XCM candidates — which no request may do. An action filter is decided on built
@@ -10213,7 +10228,7 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
     }
 
     const liqRows = events
-      .filter(e => ['Omnipool.LiquidityAdded', 'Omnipool.LiquidityRemoved', 'Stableswap.LiquidityAdded', 'Stableswap.LiquidityRemoved', 'XYK.LiquidityAdded', 'XYK.LiquidityRemoved', 'XYK.PoolCreated', 'OmnipoolLiquidityMining.RewardClaimed', 'XYKLiquidityMining.RewardClaimed'].includes(e.event_name))
+      .filter(e => LIQUIDITY_EVENTS.includes(e.event_name))
       .map(e => {
         const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
         return {

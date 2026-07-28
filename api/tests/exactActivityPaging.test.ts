@@ -260,9 +260,48 @@ describe('activity count arms count each row once', () => {
   // The arm and the page read must select the same rows, so they read one event list
   // rather than two copies of it.
   it('counts the liquidity events the page read builds rows from', () => {
-    expect((explorerService.match(/event_name IN \(\$\{sqlEventNameList\(LIQUIDITY_EVENTS\)\}\)/g) ?? []).length)
-      .toBeGreaterThanOrEqual(2)
-    expect(explorerService).not.toContain(`'Omnipool.LiquidityAdded','Omnipool.LiquidityRemoved'`)
+    expect((explorerService.match(/event_name IN \(\$\{sqlEventNameList\(LIQUIDITY_EVENTS\)\}\)/g) ?? []).length).toBe(9)
+    expect((explorerService.match(/LIQUIDITY_EVENTS\.includes\(/g) ?? []).length).toBe(1)
+  })
+
+  // Every selection of liquidity events must name the shared list, because an inline
+  // copy is what lets an arm and a page read drift apart. The signature of a copy is
+  // a line naming two of the event STRINGS at once, which is matched per line rather
+  // than as one literal: the previous form of this guard spelled the pair without the
+  // space the source uses, so it passed while an inline copy of all nine names sat in
+  // getExtrinsicActivity. Both surviving lines are declarations, and the assertion
+  // names them, so a third one fails here with its own line quoted.
+  it('leaves exactly two declared liquidity event lists and no inline copy', () => {
+    const listing = explorerService.split('\n')
+      .map((line, i) => ({ line: i + 1, text: line.trim() }))
+      .filter(({ text }) => text.includes(`'Omnipool.LiquidityAdded'`) && text.includes(`'Omnipool.LiquidityRemoved'`))
+
+    expect(listing.map(({ text }) => text)).toHaveLength(2)
+    expect(listing.filter(({ text }) => text.startsWith('const LIQUIDITY_EVENTS = ['))).toHaveLength(1)
+    // The other is VALUE_EVENT_LIQUIDITY_NAMES, whose first line opens the array; its
+    // declaration sits on the line above, so anchor it there.
+    const valueList = listing.find(({ text }) => !text.startsWith('const LIQUIDITY_EVENTS = ['))!
+    expect(explorerService.split('\n')[valueList.line - 2]).toContain('const VALUE_EVENT_LIQUIDITY_NAMES = [')
+  })
+
+  // The two lists are deliberately different, so this is NOT a duplication to collapse:
+  // value-chart markers price a flow, and the four events that carry no priceable flow
+  // of their own (pool creation, both mining reward claims) have no marker to draw.
+  it('keeps the value-marker list a strict, smaller subset of the feed list', () => {
+    const names = (decl: string): string[] => {
+      const at = explorerService.indexOf(decl)
+      expect(at, decl).toBeGreaterThan(-1)
+      const body = explorerService.slice(at, explorerService.indexOf(']', at))
+      return [...body.matchAll(/'([A-Za-z]+\.[A-Za-z]+)'/g)].map(m => m[1])
+    }
+    const feed = names('const LIQUIDITY_EVENTS = [')
+    const markers = names('const VALUE_EVENT_LIQUIDITY_NAMES = [')
+
+    expect(feed).toHaveLength(9)
+    expect(markers).toHaveLength(6)
+    expect(markers.filter(name => feed.includes(name))).toHaveLength(6)
+    expect(feed.filter(name => !markers.includes(name)))
+      .toEqual(['XYK.PoolCreated', 'OmnipoolLiquidityMining.RewardClaimed', 'XYKLiquidityMining.RewardClaimed'])
   })
 
   // Pool-share membership is asset-registry state ClickHouse does not hold. It is
