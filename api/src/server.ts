@@ -61,7 +61,19 @@ import { initUserAuthService, loadUserSessions } from './services/userAuthServic
 import { initUserProfileService, loadUserProfiles } from './services/userProfileService.ts'
 import { initUserLibraryService, loadUserLibraries } from './services/userLibraryService.ts'
 
-const fastify = Fastify({ logger: true })
+// Trust X-Forwarded-For/X-Real-IP only from loopback/link-local/private-range
+// hops — exactly the explorer-ui nginx container on the compose network (see
+// explorer-ui/nginx.conf's `/api/user/` location, which sets both headers).
+// Without this, every request's req.ip collapses to nginx's own container
+// address, so @fastify/rate-limit (api/src/routes/user.ts) keys ALL browsers
+// combined into one bucket — the whole site would share a single 10-logins/min
+// budget instead of each visitor getting their own. Tradeoff: a client that is
+// already inside that private network (not behind nginx) could spoof XFF to
+// rotate its own rate-limit bucket — acceptable, since the limiter is only an
+// abuse brake and auth itself is signature-based, not IP-based. Never widen
+// this to bare `true`, which would trust XFF from any hop, including a public
+// client spoofing it directly.
+const fastify = Fastify({ logger: true, trustProxy: ['loopback', 'linklocal', 'uniquelocal'] })
 
 const client = createClickHouseClient()
 
