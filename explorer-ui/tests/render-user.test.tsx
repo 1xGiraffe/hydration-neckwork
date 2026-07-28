@@ -6,9 +6,10 @@ import { AddrPill } from '../src/components/ui'
 import { LibrariesSection } from '../src/pages/Account'
 import { Libraries } from '../src/pages/Libraries'
 import { LibraryDetail } from '../src/pages/LibraryDetail'
+import { LibraryTagDetail } from '../src/pages/LibraryTagDetail'
 import { setTagMap } from '../src/userTags'
 import { parseRoute, paths } from '../src/router'
-import { MOCK_LIBRARIES, MOCK_LIBRARY_DETAIL } from './fixtures/mockApi'
+import { MOCK_LIBRARIES, MOCK_LIBRARY_DETAIL, MOCK_LIBRARY_TAG_DETAIL } from './fixtures/mockApi'
 import type { AccountRef, LibrarySummaryRef } from '../src/types'
 
 // Finds the single anchor wrapping `text` (libraries render an icon + name
@@ -53,14 +54,16 @@ describe('AddrPill precedence with profiles and user tags', () => {
     expect(html).toContain(`/api/explorer/profile-avatar/${ACC}?v=3`)
   })
 
-  it('a user tag out-prioritizes the system tag and links to its library', () => {
+  it('a user tag out-prioritizes the system tag and links to its own aggregate page', () => {
     setTagMap({ libraries: [
       { libraryId: 'lib1', name: 'Personal', tags: [{ tagId: 't1', name: 'Mine', color: '#0f0', icon: '', members: [ACC] }] },
       { libraryId: 'system', name: 'Hydration', tags: [] },
     ] })
     const html = renderToStaticMarkup(<AddrPill account={{ ...base, tag: { id: 'kraken', name: 'Kraken', color: '#a78bfa', icon: '🦑' } }} />)
     expect(html).toContain('Mine')
-    expect(html).toContain('/library/lib1')
+    // The tag's own combined view (/library/:libraryId/tag/:tagId), not the
+    // library management page (/library/:libraryId).
+    expect(hrefOf(html, 'Mine')).toBe('/library/lib1/tag/t1')
     expect(html).not.toContain('Kraken')
   })
 
@@ -151,5 +154,21 @@ describe('LibraryDetail — smoke render (logged out)', () => {
     // Anonymous viewer: no owner-only affordances.
     expect(html).not.toContain('New tag')
     expect(html).not.toContain('Remove')
+  })
+})
+
+// The aggregate view has no anonymous form at all — useSession()'s SSR snapshot
+// is always null here (see the file-level comment above), so this necessarily
+// renders the logged-out branch. A seeded query cache proves that branch takes
+// priority over any (unreachable, since the query is session-gated) data rather
+// than crashing trying to read it.
+describe('LibraryTagDetail — smoke render (logged out)', () => {
+  it('hints to log in instead of showing "not found" or the tag data', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['library-tag', 'personal', 'personal-watch'], MOCK_LIBRARY_TAG_DETAIL)
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><LibraryTagDetail libraryId="personal" tagId="personal-watch" /></QueryClientProvider>)
+    expect(html).toMatch(/log in/i)
+    expect(html).not.toContain('Watching')
+    expect(html).not.toContain('Tag not found')
   })
 })

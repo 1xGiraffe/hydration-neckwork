@@ -8,7 +8,8 @@ import type { TagMapResponse, AccountRef } from './types'
 // allAssociations() lists every match for the account page and hover card.
 export interface ResolvedTag { kind: 'system' | 'user'; id: string; name: string; color: string; icon: string; libraryId?: string; libraryName?: string }
 
-interface LibraryIndex { libraryId: string; name: string; byAccount: Map<string, { tagId: string; name: string; color: string; icon: string }> }
+interface LibraryTagIndex { tagId: string; name: string; color: string; icon: string }
+interface LibraryIndex { libraryId: string; name: string; tags: LibraryTagIndex[]; byAccount: Map<string, LibraryTagIndex> }
 let indexes: LibraryIndex[] | null = null
 let version = 0
 const listeners = new Set<() => void>()
@@ -16,6 +17,7 @@ const listeners = new Set<() => void>()
 export function setTagMap(map: TagMapResponse | null): void {
   indexes = map ? map.libraries.map(lib => ({
     libraryId: lib.libraryId, name: lib.name,
+    tags: lib.tags.map(t => ({ tagId: t.tagId, name: t.name, color: t.color, icon: t.icon })),
     byAccount: new Map(lib.tags.flatMap(t => t.members.map(m => [m, { tagId: t.tagId, name: t.name, color: t.color, icon: t.icon }] as const))),
   })) : null
   version++
@@ -53,4 +55,25 @@ export function allAssociations(account: Pick<AccountRef, 'accountId' | 'tag'>):
     if (hit) out.push({ kind: 'user', id: hit.tagId, name: hit.name, color: hit.color, icon: hit.icon, libraryId: lib.libraryId, libraryName: lib.name })
   }
   return out
+}
+
+export interface UserTagSearchHit { libraryId: string; libraryName: string; tagId: string; name: string; color: string; icon: string }
+
+// Client-side search over the viewer's OWN visible library tags — never the
+// server's shared, anonymous /explorer/search, which cannot know a viewer's
+// private tag names without becoming per-viewer (and losing its cache). Skips
+// the 'system' slot (it carries no tags of its own; the built-in directory has
+// its own /tag/:id search hit already). Logged out or before the tag map has
+// loaded, there is nothing to search.
+export function searchUserTags(q: string, limit = 3): UserTagSearchHit[] {
+  const needle = q.trim().toLowerCase()
+  if (!needle || !indexes) return []
+  const hits: UserTagSearchHit[] = []
+  for (const lib of indexes) {
+    if (lib.libraryId === 'system') continue
+    for (const t of lib.tags) {
+      if (t.name.toLowerCase().includes(needle)) hits.push({ libraryId: lib.libraryId, libraryName: lib.name, tagId: t.tagId, name: t.name, color: t.color, icon: t.icon })
+    }
+  }
+  return hits.slice(0, limit)
 }

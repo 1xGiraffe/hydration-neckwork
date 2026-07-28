@@ -1,14 +1,24 @@
-import { useState, useRef, useEffect, useId } from 'react'
+import { useState, useRef, useEffect, useId, useMemo } from 'react'
 import { api } from '../api/explorer'
 import { navigate, paths } from '../router'
 import type { SearchResult } from '../types'
+import { searchUserTags, useTagMapVersion } from '../userTags'
 import { ShortAddr, AccountEmoji, AssetIcon, TagIcon } from './ui'
+
+// A viewer's own library tag, resolved client-side (see userTags.searchUserTags)
+// rather than through the shared, anonymous /explorer/search — that endpoint is
+// cached across every viewer and cannot know a private tag's name. Carries its
+// own `type` so it merges into the same rendered list as a server SearchResult
+// without pretending to be one.
+interface UserTagHit { type: 'user-tag'; libraryId: string; libraryName: string; tagId: string; name: string; color: string; icon: string }
+type Hit = SearchResult | UserTagHit
 
 // `value` is the canonical AccountId32 (public-key hex); `label` carries the
 // human SS58/EVM form. Account links and display must use the latter.
 const srLooksAddr = (s?: string) => !!s && (s.startsWith('0x') || /^[1-9A-HJ-NP-Za-km-z]{40,}$/.test(s))
 
-function routeFor(r: SearchResult): string {
+function routeFor(r: Hit): string {
+  if (r.type === 'user-tag') return paths.libraryTag(r.libraryId, r.tagId)
   switch (r.type) {
     case 'block': return paths.block(r.value)
     case 'extrinsic': return paths.extrinsic(r.value)
@@ -19,14 +29,28 @@ function routeFor(r: SearchResult): string {
     default: return paths.dashboard()
   }
 }
-const TYPE_LABEL: Record<SearchResult['type'], string> = {
-  block: 'Block', extrinsic: 'Extrinsic', address: 'Account', asset: 'Asset', tag: 'Tag',
+function hitKey(r: Hit): string {
+  return r.type === 'user-tag' ? `user-tag:${r.libraryId}:${r.tagId}` : `${r.type}:${r.value}`
+}
+const TYPE_LABEL: Record<Hit['type'], string> = {
+  block: 'Block', extrinsic: 'Extrinsic', address: 'Account', asset: 'Asset', tag: 'Tag', 'user-tag': 'Tag',
 }
 
 // Account results use the same avatar and shortened-address treatment as account
 // pills. Identity names remain secondary so the address stays visible in compact
 // dropdowns.
-function SearchResultBody({ r }: { r: SearchResult }) {
+function SearchResultBody({ r }: { r: Hit }) {
+  if (r.type === 'user-tag') {
+    return (
+      <span className="sr-acct">
+        <TagIcon icon={r.icon} title={r.name} />
+        <span className="sr-acct-name">
+          <span className="mono" style={r.color ? { color: r.color } : undefined}>{r.name}</span>
+          <span className="sr-desc">· {r.libraryName}</span>
+        </span>
+      </span>
+    )
+  }
   if (r.type === 'address') {
     // `label` is the SS58 for a direct address hit, or the identity display for
     // an identity-name hit; `value` is the canonical accountId32.
@@ -63,6 +87,7 @@ function SearchResultBody({ r }: { r: SearchResult }) {
 }
 
 export function SearchBar({ variant }: { variant: 'hero' | 'topbar' }) {
+  useTagMapVersion()   // re-render when the viewer's tag map (thus its searchable tags) changes
   const [value, setValue] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
   const [open, setOpen] = useState(false)
@@ -113,14 +138,23 @@ export function SearchBar({ variant }: { variant: 'hero' | 'topbar' }) {
     setSearched(false)
     debounce.current = window.setTimeout(() => runSearch(v), 180)
   }
-  function go(r: SearchResult) {
+  function go(r: Hit) {
     searchSequence.current++
     searchAbort.current?.abort()
     navigate(routeFor(r)); setOpen(false); setValue(''); setResults([]); setResultsQuery(''); setSearched(false)
   }
-  // Hits for the text currently in the box; empty while a keystroke is still
-  // debouncing, so Enter re-runs the search instead of opening a stale hit.
-  const currentResults = resultsQuery === value.trim() ? results : []
+  // The viewer's own library tags matching the typed text, prepended ahead of the
+  // server's shared results — computed straight off `value` (no debounce, no
+  // network) since it's a pure local lookup over the tag map already in memory.
+  const userTagHits: UserTagHit[] = useMemo(
+    () => searchUserTags(value).map(hit => ({ type: 'user-tag' as const, ...hit })),
+    [value],
+  )
+  // Server hits for the text currently in the box; empty while a keystroke is still
+  // debouncing, so Enter re-runs the search instead of opening a stale hit. The
+  // local tag hits above stay regardless — they never go stale.
+  const serverResults: SearchResult[] = resultsQuery === value.trim() ? results : []
+  const currentResults: Hit[] = [...userTagHits, ...serverResults]
   function onKey(e: React.KeyboardEvent) {
     if (e.key === 'ArrowDown') { e.preventDefault(); setActive(a => Math.min(a + 1, currentResults.length - 1)) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(a => Math.max(a - 1, 0)) }
@@ -159,7 +193,7 @@ export function SearchBar({ variant }: { variant: 'hero' | 'topbar' }) {
       {variant === 'topbar' && <span className="kbd-slash" title="Press / to search">/</span>}
       <div id={resultsId} className="search-results" role="listbox" aria-label="Search results" hidden={!open || !value.trim()}>
         {currentResults.length ? currentResults.map((r, i) => (
-          <a key={`${r.type}:${r.value}`} id={`${resultsId}-option-${i}`} role="option" aria-selected={i === active} className={`sr-item${i === active ? ' on' : ''}`} href={routeFor(r)}
+          <a key={hitKey(r)} id={`${resultsId}-option-${i}`} role="option" aria-selected={i === active} className={`sr-item${i === active ? ' on' : ''}`} href={routeFor(r)}
             onMouseDown={e => { e.preventDefault(); go(r) }} onMouseEnter={() => setActive(i)}>
             <span className="sr-type">{TYPE_LABEL[r.type]}</span>
             <SearchResultBody r={r} />

@@ -1,4 +1,5 @@
 import { useAccountListCount, useAccountVotes, useTagListCount, useTagVotes } from '../hooks/useExplorerData'
+import { useLibraryTagListCount, useLibraryTagVotes } from '../hooks/useUser'
 import { useNow } from '../hooks/useNow'
 import { setQuery, useQuery } from '../router'
 import { Pager } from './ui'
@@ -10,6 +11,7 @@ import type { VoteRow } from '../types'
 type VotesScope =
   | { kind: 'account'; address: string }
   | { kind: 'tag'; tagId: string }
+  | { kind: 'library-tag'; libraryId: string; tagId: string }
 
 function toTableRow(vote: VoteRow): VoteTableRow {
   return {
@@ -29,33 +31,38 @@ function toTableRow(vote: VoteRow): VoteTableRow {
 
 export function VotesTab({ scope }: { scope: VotesScope }) {
   const accountAddress = scope.kind === 'account' ? scope.address : null
-  const tagId = scope.kind === 'tag' ? scope.tagId : null
+  const systemTagId = scope.kind === 'tag' ? scope.tagId : null
+  const libraryId = scope.kind === 'library-tag' ? scope.libraryId : null
+  const libraryTagId = scope.kind === 'library-tag' ? scope.tagId : null
   const now = useNow()
   const query = useQuery()
   const requestedPage = Number.parseInt(query.get('vpage') ?? '', 10)
   const page = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 0
   const offset = page * PAGE_SIZE
   const accountVotes = useAccountVotes(accountAddress, offset)
-  const tagVotes = useTagVotes(tagId, offset)
-  const votes = scope.kind === 'account' ? accountVotes : tagVotes
+  const tagVotes = useTagVotes(systemTagId, offset)
+  const libraryTagVotes = useLibraryTagVotes(libraryId, libraryTagId, offset)
+  const votes = scope.kind === 'account' ? accountVotes : scope.kind === 'tag' ? tagVotes : libraryTagVotes
   const rows = (votes.data ?? []).map(toTableRow)
   // The list exposes no filters, so its total is the whole vote history — counted
   // from the same sources the list merges (OpenGov/Democracy plus collectives).
   const accountTotal = useAccountListCount(accountAddress, voteListCount())
-  const tagTotal = useTagListCount(tagId, voteListCount())
-  const totalPages = pageCount((scope.kind === 'account' ? accountTotal : tagTotal).data?.total)
+  const tagTotal = useTagListCount(systemTagId, voteListCount())
+  const libraryTagTotal = useLibraryTagListCount(libraryId, libraryTagId, voteListCount())
+  const totalPages = pageCount((scope.kind === 'account' ? accountTotal : scope.kind === 'tag' ? tagTotal : libraryTagTotal).data?.total)
   const setPage = (nextPage: number) => setQuery({ vpage: nextPage > 0 ? String(nextPage) : null })
 
   return (
     <>
-      {/* Same table the referendum page uses. A tag page shows which member cast each
-          vote; an account page IS that account, so its account column drops — and here the
-          REFERENDUM is the column that matters, which the referendum page in turn omits. */}
+      {/* Same table the referendum page uses. A tag/library-tag page shows which
+          member cast each vote; an account page IS that account, so its account
+          column drops — and here the REFERENDUM is the column that matters, which
+          the referendum page in turn omits. */}
       <VotesTable
         rows={rows}
         asset={votes.data?.[0]?.asset ?? assetDescriptorFallback}
         now={now}
-        showAccount={scope.kind === 'tag'}
+        showAccount={scope.kind !== 'account'}
         showReferendum
         loading={votes.isFetching && !votes.data?.length}
         pending={votes.isPlaceholderData}

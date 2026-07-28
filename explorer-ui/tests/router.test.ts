@@ -30,6 +30,15 @@ describe('parseRoute (clean-path routing, design routes)', () => {
     expect(p(paths.hollar())).toEqual({ name: 'hollar' })
     expect(p(paths.asset(5))).toEqual({ name: 'asset', assetId: 5 })
     expect(p(paths.extrinsicAt(100, 3))).toEqual({ name: 'extrinsic', id: '100-3' })
+    expect(p(paths.libraryTag('lib1', 't1'))).toEqual({ name: 'library-tag', libraryId: 'lib1', tagId: 't1' })
+  })
+  it('parses a library tag aggregate page, keeping /library/:id working', () => {
+    expect(p('/library/lib1/tag/t1')).toEqual({ name: 'library-tag', libraryId: 'lib1', tagId: 't1' })
+    expect(p('/library/lib1')).toEqual({ name: 'library', libraryId: 'lib1' })
+    // A trailing /tag with nothing after it is not a valid aggregate page —
+    // falls back to the plain library page rather than a stray-segment 404.
+    expect(p('/library/lib1/tag')).toEqual({ name: 'library', libraryId: 'lib1' })
+    expect(paths.libraryTag('lib1', 't1')).toBe('/library/lib1/tag/t1')
   })
   it('rejects malformed encodings and unsafe numeric identifiers without throwing', () => {
     expect(p('/account/%E0%A4%A')).toEqual({ name: 'notfound', path: '/account/%E0%A4%A' })

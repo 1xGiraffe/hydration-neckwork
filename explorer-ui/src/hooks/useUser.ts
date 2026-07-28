@@ -1,8 +1,15 @@
 import { useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import { api, userApi } from '../api/explorer'
+import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
 import { useSession, setSession } from '../session'
 import { setTagMap } from '../userTags'
+import { useLive, LIVE_MS } from '../live'
+import { useHeldRows } from './useHeldRows'
+
+function useInterval(intervalMs = LIVE_MS): number | false {
+  return useLive() ? intervalMs : false
+}
 
 export function useMe() {
   const session = useSession()
@@ -30,6 +37,114 @@ export function useLibrary(id: string | null, authed: boolean) {
 }
 export function useAddressLibraries(address: string | null) {
   return useQuery({ queryKey: ['address-libraries', address], queryFn: ({ signal }) => api.addressLibraries(address!, signal), enabled: !!address, staleTime: 30_000 })
+}
+
+// ── Library tag aggregate view ──────────────────────────────────────────────
+// Mirrors the useTag*/useAddress* hooks in hooks/useExplorerData.ts, but authed
+// (userApi, gated on a session) — a library tag's combined view has no
+// anonymous/public form. `enabled` still requires libraryId/tagId themselves so
+// ScopedActivity/VotesTab can pass them through unconditionally, same pattern
+// as their system-tag counterparts.
+const LIBRARY_TAG_POLL_MS = 15_000
+
+export function useLibraryTag(libraryId: string | null, tagId: string | null) {
+  const session = useSession()
+  return useQuery({
+    queryKey: ['library-tag', libraryId, tagId],
+    queryFn: ({ signal }) => userApi.libraryTag(libraryId as string, tagId as string, signal),
+    enabled: !!session && !!libraryId && !!tagId,
+    refetchInterval: useInterval(LIBRARY_TAG_POLL_MS),
+    staleTime: 6000,
+  })
+}
+// Hover-card variant: the API skips the heavy portfolio-history reconstruction.
+export function useLibraryTagSummary(libraryId: string | null, tagId: string | null) {
+  const session = useSession()
+  return useQuery({
+    queryKey: ['library-tag-summary', libraryId, tagId],
+    queryFn: ({ signal }) => userApi.libraryTagSummary(libraryId as string, tagId as string, signal),
+    enabled: !!session && !!libraryId && !!tagId,
+    staleTime: 30_000,
+  })
+}
+export function useLibraryTagActivityCounts(libraryId: string | null, tagId: string | null) {
+  const session = useSession()
+  return useQuery({
+    queryKey: ['library-tag-activity-counts', libraryId, tagId],
+    queryFn: ({ signal }) => userApi.libraryTagActivityCounts(libraryId as string, tagId as string, signal),
+    enabled: !!session && !!libraryId && !!tagId,
+    staleTime: 600_000,
+  })
+}
+export function useLibraryTagListCount(libraryId: string | null, tagId: string | null, query: ListCountQuery | null) {
+  const session = useSession()
+  return useQuery({
+    queryKey: ['library-tag-list-count', libraryId, tagId, query],
+    queryFn: ({ signal }) => userApi.libraryTagListCount(libraryId as string, tagId as string, query as ListCountQuery, signal),
+    enabled: !!session && !!libraryId && !!tagId && !!query,
+    staleTime: 120_000,
+  })
+}
+export function useLibraryTagValueEvents(libraryId: string | null, tagId: string | null) {
+  const session = useSession()
+  return useQuery({
+    queryKey: ['library-tag-value-events', libraryId, tagId],
+    queryFn: ({ signal }) => userApi.libraryTagValueEvents(libraryId as string, tagId as string, undefined, undefined, signal),
+    enabled: !!session && !!libraryId && !!tagId,
+    staleTime: 600_000,
+  })
+}
+export function useLibraryTagActivity(libraryId: string | null, tagId: string | null, type = 'all', offset = 0, action?: string, from?: string, to?: string, filters?: ValueFilters) {
+  const session = useSession()
+  const ri = useInterval()
+  const key = ['library-tag-activity', libraryId, tagId, type, offset, action, from, to, filters]
+  return useHeldRows(useQuery({
+    queryKey: key,
+    queryFn: ({ signal }) => userApi.libraryTagActivity(libraryId as string, tagId as string, type, offset, undefined, action, from, to, filters, signal),
+    enabled: !!session && !!libraryId && !!tagId,
+    refetchInterval: offset === 0 ? ri : false,
+    staleTime: 6000,
+    placeholderData: keepPreviousData,
+  }), key, offset === 0)
+}
+export function useLibraryTagExtrinsics(libraryId: string | null, tagId: string | null, offset = 0, from?: string, to?: string, filters?: ExtrinsicFilters) {
+  const session = useSession()
+  const ri = useInterval()
+  const key = ['library-tag-extrinsics', libraryId, tagId, offset, from, to, filters]
+  return useHeldRows(useQuery({
+    queryKey: key,
+    queryFn: ({ signal }) => userApi.libraryTagExtrinsics(libraryId as string, tagId as string, offset, undefined, from, to, filters, signal),
+    enabled: !!session && !!libraryId && !!tagId,
+    refetchInterval: offset === 0 ? ri : false,
+    staleTime: 6000,
+    placeholderData: keepPreviousData,
+  }), key, offset === 0)
+}
+export function useLibraryTagEvents(libraryId: string | null, tagId: string | null, offset = 0, from?: string, to?: string, filters?: EventFilters) {
+  const session = useSession()
+  const ri = useInterval()
+  const key = ['library-tag-events', libraryId, tagId, offset, from, to, filters]
+  return useHeldRows(useQuery({
+    queryKey: key,
+    queryFn: ({ signal }) => userApi.libraryTagEvents(libraryId as string, tagId as string, offset, undefined, from, to, filters, signal),
+    enabled: !!session && !!libraryId && !!tagId,
+    refetchInterval: offset === 0 ? ri : false,
+    staleTime: 6000,
+    placeholderData: keepPreviousData,
+  }), key, offset === 0)
+}
+export function useLibraryTagVotes(libraryId: string | null, tagId: string | null, offset = 0, from?: string, to?: string) {
+  const session = useSession()
+  const ri = useInterval()
+  const key = ['library-tag-votes', libraryId, tagId, offset, from, to]
+  return useHeldRows(useQuery({
+    queryKey: key,
+    queryFn: ({ signal }) => userApi.libraryTagVotes(libraryId as string, tagId as string, offset, undefined, from, to, signal),
+    enabled: !!session && !!libraryId && !!tagId,
+    refetchInterval: offset === 0 ? ri : false,
+    staleTime: 6000,
+    placeholderData: keepPreviousData,
+  }), key, offset === 0)
 }
 
 // One mutation wrapper: every user mutation invalidates the user scope (me,

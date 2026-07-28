@@ -42,6 +42,7 @@ export type Route =
   | { name: 'tag'; tagId: string }
   | { name: 'libraries' }
   | { name: 'library'; libraryId: string }
+  | { name: 'library-tag'; libraryId: string; tagId: string }
   | { name: 'assets' }
   | { name: 'hdx' }
   | { name: 'hollar' }
@@ -96,7 +97,12 @@ export function parseRoute(loc: string): Route {
       return parts[1] ? { name: 'tag', tagId: parts[1] } : { name: 'tags' }
     case 'libraries': return { name: 'libraries' }
     case 'library':
-      return parts[1] ? { name: 'library', libraryId: parts[1] } : { name: 'libraries' }
+      if (!parts[1]) return { name: 'libraries' }
+      // The tag's own aggregate view, nested under its owning library
+      // (/library/:libraryId/tag/:tagId). A bare trailing /tag with no id
+      // falls back to the plain library page rather than a stray-segment 404.
+      if (parts[2] === 'tag' && parts[3]) return { name: 'library-tag', libraryId: parts[1], tagId: parts[3] }
+      return { name: 'library', libraryId: parts[1] }
     case 'assets': return { name: 'assets' }
     // /referendum/<pallet>/<index>. The pallet is part of the identity: Hydration
     // voted through Democracy (0-206) and OpenGov (0-369) and both index from 0.
@@ -257,6 +263,7 @@ export const paths = {
   holders: (assetId: number) => `/holders/${assetId}`,
   libraries: () => '/libraries',
   library: (id: string) => `/library/${encodeURIComponent(id)}`,
+  libraryTag: (libraryId: string, tagId: string) => `/library/${encodeURIComponent(libraryId)}/tag/${encodeURIComponent(tagId)}`,
 }
 
 export function Link({ to, children, className, title, ariaLabel, onClick, style, data }: { to: string; children: ReactNode; className?: string; title?: string; ariaLabel?: string; onClick?: (e: MouseEvent) => void; style?: CSSProperties; data?: Record<string, string> }) {

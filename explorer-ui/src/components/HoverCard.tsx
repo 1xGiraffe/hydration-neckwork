@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/explorer'
 import { useAddressSummary, useAsset, useExtrinsic, useBlock, useTagSummary, useTrade, useStats, useDcaSchedule, useDcaExecution } from '../hooks/useExplorerData'
+import { useLibraryTagSummary } from '../hooks/useUser'
 import { F, AssetIcon, AssetChip, AssetAmount, AddrPill, CallPill, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow, UserTagPill } from './ui'
 import { ayeSharePct, selectTally } from '../utils/referendumVotes'
 import { dcaCadence, dcaProgress, fmtDuration } from '../utils/dca'
@@ -14,7 +15,13 @@ import type { AssetRef } from '../types'
 // /extrinsic/…) and block (/block/…) links. Each card mirrors the basic-info
 // block of its detail page. Mounted once in App.
 type VoteContext = { side: string; conviction: string; weighted: string }
-type Target = { kind: 'account' | 'tag' | 'asset' | 'trade' | 'dca-schedule' | 'dca-exec' | 'extrinsic' | 'block' | 'referendum'; id: string; vote?: VoteContext; left: number; top: number; bottom: number }
+type Target = {
+  kind: 'account' | 'tag' | 'library-tag' | 'asset' | 'trade' | 'dca-schedule' | 'dca-exec' | 'extrinsic' | 'block' | 'referendum'
+  id: string
+  libraryId?: string   // 'library-tag' only
+  vote?: VoteContext
+  left: number; top: number; bottom: number
+}
 const SELECTOR = '.addr-pill:not([data-no-hover]), .asset-chip, a.hash, a[href*="/swap/"], a[href*="/dca/"], a[href*="/block/"], a[href*="/referendum/"], [data-activity], [data-ext]'
 const HOVER_DWELL_MS = 180
 
@@ -74,6 +81,12 @@ function parseTarget(el: Element): Omit<Target, 'left' | 'top' | 'bottom'> | nul
   }
   const rm = href.match(/\/referendum\/(opengov|democracy)\/(\d+)$/); if (rm) return { kind: 'referendum', id: `${rm[1]}/${rm[2]}` }
   const am = href.match(/\/account\/([^?#]+)$/); if (am) return { kind: 'account', id: decodeURIComponent(am[1]), vote: voteContext(el) }
+  // Checked BEFORE the bare /tag/… pattern below — a library tag's aggregate
+  // link (/library/:libraryId/tag/:tagId) also ends in "/tag/<id>", and would
+  // otherwise be misread as a SYSTEM tag whose id happens to be this tag's
+  // (unrelated) uuid.
+  const lm = href.match(/\/library\/([^/?#]+)\/tag\/([^?#]+)$/)
+  if (lm) return { kind: 'library-tag', id: decodeURIComponent(lm[2]), libraryId: decodeURIComponent(lm[1]) }
   const tm = href.match(/\/tag\/([^?#]+)$/); if (tm) return { kind: 'tag', id: decodeURIComponent(tm[1]) }
   const sm = href.match(/\/asset\/(\d+)$/); if (sm) return { kind: 'asset', id: sm[1] }
   const dm = href.match(/\/dca\/([^?#]+)$/); if (dm) { const id = decodeURIComponent(dm[1]); return { kind: dcaKind(id), id } }
@@ -158,6 +171,7 @@ export function HoverCards() {
       onMouseLeave={() => setTarget(null)}>
       {target.kind === 'account' ? <AccountHover id={target.id} vote={target.vote} />
         : target.kind === 'tag' ? <TagHover id={target.id} />
+        : target.kind === 'library-tag' ? <LibraryTagHover libraryId={target.libraryId!} tagId={target.id} />
         : target.kind === 'asset' ? <AssetHover id={Number(target.id)} />
         : target.kind === 'trade' ? <TradeHover id={target.id} />
         : target.kind === 'dca-schedule' ? <DcaScheduleHover id={target.id} />
@@ -265,6 +279,30 @@ function AccountHover({ id, vote }: { id: string; vote?: VoteContext }) {
 // all member accounts — the same figures the tag detail header shows.
 function TagHover({ id }: { id: string }) {
   const { data } = useTagSummary(id)
+  if (!data) return <div className="hc-sub mono">Loading…</div>
+  const debtUsd = data.moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
+  const topAssets = data.topAssets
+  return (
+    <>
+      <div className="hc-head">
+        <TagIcon icon={data.icon} title={data.name} className="hc-emoji" />
+        <div>
+          <div className="hc-title">{data.name}<span className="em" style={{ color: data.color }}> · tag</span></div>
+          <div className="hc-sub mono">{data.members.length} account{data.members.length === 1 ? '' : 's'}</div>
+        </div>
+      </div>
+      <ProfileMetrics {...data} debtUsd={debtUsd} topAssets={topAssets} />
+    </>
+  )
+}
+
+// A library tag's own hover card — same shape as TagHover, over the aggregate
+// view's authed summary. Logged out (or lacking permission) the query simply
+// never resolves data, and the card reads as "Loading…" rather than crashing —
+// this hovers a pill the viewer's own tag map already resolved for them, so in
+// practice they always have access to what they're hovering.
+function LibraryTagHover({ libraryId, tagId }: { libraryId: string; tagId: string }) {
+  const { data } = useLibraryTagSummary(libraryId, tagId)
   if (!data) return <div className="hc-sub mono">Loading…</div>
   const debtUsd = data.moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
   const topAssets = data.topAssets

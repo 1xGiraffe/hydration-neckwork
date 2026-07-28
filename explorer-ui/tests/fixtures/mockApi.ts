@@ -151,6 +151,14 @@ export const MOCK_TAG_MAP: TagMapResponse = {
     { libraryId: 'system', name: 'Hydration', tags: [] },
   ],
 }
+// The 'personal-watch' tag's own aggregate view — same tagId/name/color/icon a
+// pill resolved through MOCK_TAG_MAP links to, so /library/personal/tag/personal-watch
+// renders the identical label its pill already showed.
+export const MOCK_LIBRARY_TAG_DETAIL: TagDetail = {
+  tagId: 'personal-watch', name: 'Watching', color: '#f97316', note: '', icon: '👀',
+  members: [A.owl], balances: [], topAssets: [], portfolioUsd: 0,
+  moneyMarket: [], liquidityPositions: [], activeDcas: [], portfolioSeries: [], portfolioDates: [], balanceHistory: [],
+}
 // A private, invite-only library the viewer has been invited to but neither
 // owns nor has accepted yet.
 const MOCK_INVITE_LIBRARY: LibrarySummaryRef = {
@@ -1205,6 +1213,18 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   { re: /^\/user\/me$/, fn: () => MOCK_ME },
   { re: /^\/user\/tag-map$/, fn: () => MOCK_TAG_MAP },
   { re: /^\/user\/invites$/, fn: () => MOCK_INVITES },
+  // A library tag's own aggregate page. Feeds answer empty (deterministic, and
+  // enough for the page to render its header + empty tables); the detail carries
+  // the same tag the tag-map's 'personal-watch' entry resolves pills to, so a
+  // pill and its own aggregate page agree on name/color/icon.
+  { re: /^\/user\/library-tag\/[^/]+\/[^/]+\/counts$/, fn: () => ({ extrinsics: 0, extrinsicsOnBehalf: 0, events: 0, votes: 0 }) },
+  { re: /^\/user\/library-tag\/[^/]+\/[^/]+\/list-count$/, fn: () => ({ total: 0, complete: true }) },
+  { re: /^\/user\/library-tag\/[^/]+\/[^/]+\/activity$/, fn: () => [] as ActivityRow[] },
+  { re: /^\/user\/library-tag\/[^/]+\/[^/]+\/extrinsics$/, fn: () => [] as ExtrinsicSummary[] },
+  { re: /^\/user\/library-tag\/[^/]+\/[^/]+\/events$/, fn: () => [] as EventRow[] },
+  { re: /^\/user\/library-tag\/[^/]+\/[^/]+\/votes$/, fn: () => [] },
+  { re: /^\/user\/library-tag\/[^/]+\/[^/]+\/value-events$/, fn: () => [] as ValueEvent[] },
+  { re: /^\/user\/library-tag\/([^/]+)\/([^/]+)$/, fn: (m) => decodeURIComponent(m[2]) === MOCK_LIBRARY_TAG_DETAIL.tagId ? MOCK_LIBRARY_TAG_DETAIL : undefined },
 ]
 
 const mockTags: Tag[] = [
