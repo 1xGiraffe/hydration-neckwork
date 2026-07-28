@@ -4,7 +4,7 @@ import { getProfileAvatar } from '../services/userProfileService.ts'
 import { publicLibraries, publicLibrariesByOwner, getLibrary } from '../services/userLibraryService.ts'
 import { libSummaryRef, libraryDetailResponse } from './user.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
-import { resolveDisplayAccountId } from '../services/explorerService.ts'
+import { accountRef, resolveDisplayAccountId } from '../services/explorerService.ts'
 
 // Public read surface for user-authored data. Everything here is identical for
 // every viewer, so it stays behind the shared nginx/api caches like the rest of
@@ -36,6 +36,23 @@ export async function librariesRoutes(fastify: FastifyInstance) {
     // per-user view is GET /user/libraries/:id.
     if (!lib || lib.visibility !== 'public') return reply.status(404).send({ error: 'Library not found' })
     return libraryDetailResponse(lib, null)
+  })
+
+  // Display refs for a short list of wallet addresses, so the connect dialog
+  // can show accounts exactly the way pills do (canonical Polkadot SS58 / H160
+  // form plus identity/profile) instead of the extension's generic substrate
+  // encoding. Answers in input order, null per unparseable entry, so the
+  // client zips the response back onto the extension's account list.
+  const refsQuery = z.object({ addresses: z.string().min(1).max(2048) })
+  fastify.get('/explorer/account-refs', async (req, reply) => {
+    const query = refsQuery.safeParse(req.query)
+    if (!query.success) return reply.status(400).send({ error: 'Missing addresses' })
+    const addresses = query.data.addresses.split(',').map(a => a.trim()).filter(Boolean)
+    if (!addresses.length || addresses.length > 20) return reply.status(400).send({ error: 'Between 1 and 20 addresses' })
+    return addresses.map(a => {
+      const n = normalizeAddress(a)
+      return n ? accountRef(resolveDisplayAccountId(n.accountId)) : null
+    })
   })
 
   const addressParam = z.object({ address: z.string().min(3).max(128) })

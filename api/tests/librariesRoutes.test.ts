@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import Fastify from 'fastify'
+import { cryptoWaitReady, encodeAddress, randomAsU8a } from '@polkadot/util-crypto'
 import { librariesRoutes } from '../src/routes/libraries.ts'
 import { initUserLibraryService, loadUserLibraries, createLibrary, createTag, setTagMembers } from '../src/services/userLibraryService.ts'
 import { initUserProfileService, loadUserProfiles } from '../src/services/userProfileService.ts'
@@ -34,7 +35,10 @@ describe('/explorer library endpoints', () => {
     expect(rows[0]).toMatchObject({ libraryId: pub.libraryId, name: 'Pub', tagCount: 1, accountCount: 1 })
     expect(rows[0].owner.accountId).toBe(OWNER)
     const detail = await f.inject({ method: 'GET', url: `/explorer/library/${pub.libraryId}` })
-    expect(detail.json().tags[0].members[0].address).toBeTruthy()   // AccountRef, not a raw id
+    // Another user's curation is never enumerable — the public detail carries
+    // only the statistics; tag names and member lists stay with the owner.
+    expect(detail.json().tags).toEqual([])
+    expect(detail.json()).toMatchObject({ tagCount: 1, accountCount: 1 })
   })
 
   it('404s private libraries and unknown ids', async () => {
@@ -80,5 +84,45 @@ describe('/explorer library endpoints', () => {
     const list = await f.inject({ method: 'GET', url: '/explorer/libraries' })
     expect(list.statusCode).toBe(200)
     expect(list.headers['cache-control']).toBe('public, max-age=30')
+  })
+})
+
+// The connect dialog lists wallet accounts exactly the way pills do elsewhere:
+// canonical display address (Polkadot SS58 / H160, never the extension's
+// generic substrate encoding) plus identity/profile. The endpoint answers in
+// input order with null for entries that don't parse, so the client can zip
+// the response back onto the extension's account list.
+describe('/explorer/account-refs', () => {
+  beforeEach(async () => {
+    initUserLibraryService(fakeClient()); await loadUserLibraries()
+    initUserProfileService(fakeClient()); await loadUserProfiles()
+  })
+
+  async function build() {
+    const f = Fastify()
+    await f.register(librariesRoutes)
+    return f
+  }
+
+  it('answers in input order with the Polkadot display form', async () => {
+    await cryptoWaitReady()
+    const pubkey = randomAsU8a(32)
+    const generic = encodeAddress(pubkey, 42)   // what extensions typically return
+    const polkadot = encodeAddress(pubkey, 0)
+    const f = await build()
+    const r = await f.inject({ method: 'GET', url: `/explorer/account-refs?addresses=${generic},not-an-address` })
+    expect(r.statusCode).toBe(200)
+    const refs = r.json()
+    expect(refs).toHaveLength(2)
+    expect(refs[0].address).toBe(polkadot)
+    expect(refs[0].accountId).toMatch(/^0x[0-9a-f]{64}$/)
+    expect(refs[1]).toBeNull()
+  })
+
+  it('rejects an oversized or empty list', async () => {
+    const f = await build()
+    const many = Array.from({ length: 21 }, () => '15DajYeqgb4ADkb8scVCcNaXjfM1SV9PLvqjNDkpH6kBDRLZ').join(',')
+    expect((await f.inject({ method: 'GET', url: `/explorer/account-refs?addresses=${many}` })).statusCode).toBe(400)
+    expect((await f.inject({ method: 'GET', url: '/explorer/account-refs' })).statusCode).toBe(400)
   })
 })

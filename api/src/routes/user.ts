@@ -50,10 +50,16 @@ export function libSummaryRef(s: LibrarySummary) {
   return { ...rest, owner: accountRef(ownerAccountId) }
 }
 export function libraryDetailResponse(lib: UserLibrary, viewer: string | null) {
+  // Tag contents (names + member lists) are the owner's curation — everyone
+  // else gets the statistics already on the summary (tagCount, accountCount,
+  // subscriberCount). Subscribers still RECEIVE memberships through their own
+  // /user/tag-map (that's what resolves pills client-side); this only keeps
+  // another user's library from being browsed or scraped as a page.
+  const isOwner = viewer !== null && viewer === lib.owner
   return {
     ...libSummaryRef(librarySummary(lib)),
     subscribed: viewer ? subscriptionsFor(viewer).some(s => s.libraryId === lib.libraryId) : false,
-    tags: [...lib.tags.values()].map(tagRef),
+    tags: isOwner ? [...lib.tags.values()].map(tagRef) : [],
   }
 }
 // A single tag, serialized the same way whether it comes back from create,
