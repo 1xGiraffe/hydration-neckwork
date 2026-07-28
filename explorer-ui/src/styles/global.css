@@ -1756,8 +1756,6 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .wallet-row:disabled { opacity: 0.6; pointer-events: none; }
 .wallet-row .wallet-name { color: var(--text-high); font-weight: 500; }
 .wallet-row .wallet-status { margin-left: auto; color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; }
-.wallet-row-install .wallet-status { color: var(--sky); }
-.wallet-row .wallet-icon { width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0; }
 .wallet-row.account-row .wallet-status { font-size: 12.5px; }
 /* An account row's name reads the same as an AddrPill's would (profile → amber
    italic, on-chain identity → plain) — the account-picker rows and the signing
@@ -1770,6 +1768,41 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    the hover highlight .wallet-row otherwise carries. */
 .wallet-row.static { cursor: default; }
 .wallet-row.static:hover { color: var(--text-medium); background: var(--panel); border-color: var(--border); }
+/* Wallet picker: an icon grid (app.hydration.net's connect modal) rather than a
+   list of rows — a wallet is recognized by its logo faster than read as text.
+   Fixed column counts (not auto-fill) so the row count is a deliberate,
+   verifiable 4 desktop / 3 tablet-and-down rather than whatever a minmax()
+   guess happens to wrap to at a given dialog width — the dialog itself scales
+   down to `94vw` on narrow viewports (see .dialog), so 390px and 320px both
+   hit the same breakpoint below. Keyboard focus is the shared native-button
+   ring further up this file (:where(a, button, …):focus-visible) — every tile
+   is a real <button> or <a>, never a div with a click handler. */
+.wallet-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+@media (max-width: 480px) {
+  .wallet-grid { grid-template-columns: repeat(3, 1fr); }
+}
+.wallet-tile {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  box-sizing: border-box; padding: 16px 8px 12px; border-radius: 14px; background: var(--panel); border: 1px solid var(--border);
+  color: var(--text-medium); font-size: 11.5px; text-align: center; text-decoration: none;
+  transition: color 130ms, background 130ms, border-color 130ms, opacity 130ms;
+}
+.wallet-tile:hover { background: var(--panel-hover); border-color: var(--sky); }
+.wallet-tile:disabled { opacity: 0.6; pointer-events: none; }
+/* Forces every logo to the same box regardless of the source SVG's own
+   width/height (most are ~32-34px square; talisman.svg hardcodes 128) — the
+   CSS box wins over the intrinsic size either way, but sized explicitly here
+   so that's true by design, not by accident. */
+.wallet-tile-icon { width: 40px; height: 40px; border-radius: 10px; object-fit: contain; }
+.wallet-tile-name { color: var(--text-high); font-weight: 500; line-height: 1.25; }
+.wallet-tile-status { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+/* Installed reads as the "real" choice — full strength plus an accent border;
+   not-installed is a dimmed, honest "you'd need to leave to get this" link. */
+.wallet-tile.installed { border-color: color-mix(in srgb, var(--sky) 40%, var(--border)); }
+.wallet-tile.installed .wallet-tile-status { color: var(--sky); }
+.wallet-tile.not-installed { opacity: 0.55; }
+.wallet-tile.not-installed:hover { opacity: 0.85; }
+.wallet-tile.not-installed .wallet-tile-status { color: var(--text-low); }
 /* Two-segment sliding switch (visibility private/public) — the indicator pill
    translates by segment index, preis-ui's interval-selector mechanic. */
 .seg-switch {
