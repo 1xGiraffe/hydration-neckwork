@@ -22,6 +22,11 @@ describe('wallet registry', () => {
     const wallets = listSubstrateWallets()
     const byId = new Map(wallets.map(w => [w.id, w]))
     expect(byId.get('polkadot-js')?.installed).toBe(true)
+    // Nova is its own tile (distinct name/icon/install link) but connects
+    // through the SAME injected key as Polkadot{.js} — both read "installed"
+    // off one extension, never two independent checks that could disagree.
+    expect(byId.get('nova')?.installed).toBe(true)
+    expect(byId.get('nova')?.injectedKey).toBe('polkadot-js')
     expect(byId.get('talisman')?.installed).toBe(true)
     expect(byId.get('subwallet-js')?.installed).toBe(false)
     expect(byId.get('subwallet-js')?.installUrl).toContain('http')
@@ -30,7 +35,7 @@ describe('wallet registry', () => {
   it('sorts installed wallets ahead of uninstalled ones, declaration order as the tiebreak', () => {
     ;(window as { injectedWeb3?: unknown }).injectedWeb3 = { 'subwallet-js': { enable: async () => ({}) } }
     const ids = listSubstrateWallets().map(w => w.id)
-    expect(ids).toEqual(['subwallet-js', 'polkadot-js', 'talisman', 'aleph-zero', 'enkrypt', 'fearless-wallet', 'polkagate'])
+    expect(ids).toEqual(['subwallet-js', 'polkadot-js', 'nova', 'talisman', 'aleph-zero', 'enkrypt', 'fearless-wallet', 'polkagate'])
   })
 
   it('collects EIP-6963 announced providers', () => {

@@ -4,7 +4,13 @@
 // window.ethereum fallback for older injectors). WalletConnect is out of scope
 // for v1 (needs a relay origin the CSP forbids and a heavy dependency).
 
-export interface SubstrateWalletInfo { id: string; title: string; installUrl: string; icon: string; installed: boolean }
+// `id` is the catalog identity (React key, e2e selector target) — unique per
+// tile. `injectedKey` is which `window.injectedWeb3[...]` entry actually
+// backs it, which is NOT always the same: Nova acts as polkadot-js inside its
+// in-app browser, so it gets its OWN visual tile (distinct name/icon/install
+// link) while still connecting, and reporting installed, through the shared
+// 'polkadot-js' key.
+export interface SubstrateWalletInfo { id: string; title: string; installUrl: string; icon: string; injectedKey: string; installed: boolean }
 export interface InjectedAccount { address: string; name?: string }
 interface InjectedExtension {
   accounts: { get(): Promise<InjectedAccount[]> }
@@ -13,32 +19,33 @@ interface InjectedExtension {
 interface InjectedWindow { injectedWeb3?: Record<string, { enable(origin: string): Promise<InjectedExtension> }> }
 
 // The extension registry hydration-ui supports, minus wallets without a
-// desktop story. Nova acts as polkadot-js inside its in-app browser — it
-// shares the SAME injected key, so it gets no separate registry entry; the
-// title just names both. Icons copied from galacticcouncil/hydration-ui
+// desktop story. Icons copied from galacticcouncil/hydration-ui
 // (packages/web3-connect/src/wallets/<Name>/logo.svg, Apache-2.0) into
 // public/wallet-icons/, same convention as public/tag-icons/.
-const SUBSTRATE_WALLETS: { id: string; title: string; installUrl: string; icon: string }[] = [
-  { id: 'polkadot-js', title: 'Polkadot{.js} / Nova', installUrl: 'https://polkadot.js.org/extension/', icon: '/wallet-icons/polkadot-js.svg' },
-  { id: 'talisman', title: 'Talisman', installUrl: 'https://talisman.xyz/download', icon: '/wallet-icons/talisman.svg' },
-  { id: 'subwallet-js', title: 'SubWallet', installUrl: 'https://www.subwallet.app/download.html', icon: '/wallet-icons/subwallet-js.svg' },
-  { id: 'aleph-zero', title: 'Aleph Zero Signer', installUrl: 'https://alephzero.org/signer', icon: '/wallet-icons/aleph-zero.svg' },
-  { id: 'enkrypt', title: 'Enkrypt', installUrl: 'https://www.enkrypt.com/', icon: '/wallet-icons/enkrypt.svg' },
-  { id: 'fearless-wallet', title: 'Fearless Wallet', installUrl: 'https://fearlesswallet.io/', icon: '/wallet-icons/fearless-wallet.svg' },
-  { id: 'polkagate', title: 'PolkaGate', installUrl: 'https://polkagate.xyz/', icon: '/wallet-icons/polkagate.svg' },
+const SUBSTRATE_WALLETS: { id: string; title: string; installUrl: string; icon: string; injectedKey: string }[] = [
+  { id: 'polkadot-js', title: 'Polkadot{.js}', installUrl: 'https://polkadot.js.org/extension/', icon: '/wallet-icons/polkadot-js.svg', injectedKey: 'polkadot-js' },
+  { id: 'nova', title: 'Nova Wallet', installUrl: 'https://novawallet.io/', icon: '/wallet-icons/nova.svg', injectedKey: 'polkadot-js' },
+  { id: 'talisman', title: 'Talisman', installUrl: 'https://talisman.xyz/download', icon: '/wallet-icons/talisman.svg', injectedKey: 'talisman' },
+  { id: 'subwallet-js', title: 'SubWallet', installUrl: 'https://www.subwallet.app/download.html', icon: '/wallet-icons/subwallet-js.svg', injectedKey: 'subwallet-js' },
+  { id: 'aleph-zero', title: 'Aleph Zero Signer', installUrl: 'https://alephzero.org/signer', icon: '/wallet-icons/aleph-zero.svg', injectedKey: 'aleph-zero' },
+  { id: 'enkrypt', title: 'Enkrypt', installUrl: 'https://www.enkrypt.com/', icon: '/wallet-icons/enkrypt.svg', injectedKey: 'enkrypt' },
+  { id: 'fearless-wallet', title: 'Fearless Wallet', installUrl: 'https://fearlesswallet.io/', icon: '/wallet-icons/fearless-wallet.svg', injectedKey: 'fearless-wallet' },
+  { id: 'polkagate', title: 'PolkaGate', installUrl: 'https://polkagate.xyz/', icon: '/wallet-icons/polkagate.svg', injectedKey: 'polkagate' },
 ]
 
 export function listSubstrateWallets(): SubstrateWalletInfo[] {
   const injected = (window as InjectedWindow).injectedWeb3 ?? {}
-  const withStatus = SUBSTRATE_WALLETS.map(w => ({ ...w, installed: w.id in injected }))
+  const withStatus = SUBSTRATE_WALLETS.map(w => ({ ...w, installed: w.injectedKey in injected }))
   // Installed wallets first (so an install-link wallet never outranks one the
   // visitor can actually click), declaration order as the tiebreak within
   // each group — Array#filter is stable, so this needs no explicit sort.
   return [...withStatus.filter(w => w.installed), ...withStatus.filter(w => !w.installed)]
 }
 
-export async function connectSubstrate(id: string): Promise<{ accounts: InjectedAccount[]; ext: InjectedExtension }> {
-  const injected = (window as InjectedWindow).injectedWeb3?.[id]
+// Takes the INJECTED key (SubstrateWalletInfo.injectedKey), not the catalog
+// id — Nova's tile passes 'polkadot-js' here, same as the Polkadot{.js} tile.
+export async function connectSubstrate(injectedKey: string): Promise<{ accounts: InjectedAccount[]; ext: InjectedExtension }> {
+  const injected = (window as InjectedWindow).injectedWeb3?.[injectedKey]
   if (!injected) throw new Error('Wallet not installed')
   const ext = await injected.enable('Hydration Explorer')
   const accounts = await ext.accounts.get()

@@ -65,7 +65,7 @@ async function loginFlow(page: Page): Promise<void> {
   await page.goto('/')
   await openConnectDialog(page)
 
-  const walletRow = page.locator('.wallet-tile', { hasText: 'Polkadot{.js} / Nova' })
+  const walletRow = page.locator('.wallet-tile', { hasText: 'Polkadot{.js}' })
   await expect(walletRow).toContainText('Installed')
   await walletRow.click()
 
@@ -79,6 +79,23 @@ async function loginFlow(page: Page): Promise<void> {
 test('connect a wallet and sign in', async ({ page, userMock, injectedWallet }) => {
   void userMock; void injectedWallet // fixtures wire the mocked auth + wallet stub; the flow itself is exercised below
   await loginFlow(page)
+})
+
+// Nova shares the 'polkadot-js' injected key (it acts as polkadot-js inside
+// its own in-app browser) but gets a separate visual tile — distinct name,
+// icon and install link — rather than folding into the Polkadot{.js} tile.
+// Both must read "Installed" off the one stubbed extension, and either tile
+// must be able to complete the same connect/sign flow.
+test('Nova Wallet has its own tile and connects through the shared polkadot-js key', async ({ page, userMock, injectedWallet }) => {
+  void userMock; void injectedWallet
+  await page.goto('/')
+  await openConnectDialog(page)
+
+  const novaTile = page.locator('.wallet-tile', { hasText: 'Nova Wallet' })
+  await expect(novaTile).toContainText('Installed')
+  await novaTile.click()
+
+  await expect(page.locator('.account-btn .account-label')).toHaveText('E2E User')
 })
 
 test('a user tag outranks the system tag, and the system tag returns on logout', async ({ page, userMock }) => {

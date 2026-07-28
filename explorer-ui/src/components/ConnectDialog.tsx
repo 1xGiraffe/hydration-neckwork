@@ -237,7 +237,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
                   <div className="wallet-group-label">Substrate</div>
                   <div className="wallet-grid">
                     {substrateWallets.map(w => w.installed ? (
-                      <button key={w.id} type="button" className="wallet-tile installed" disabled={busy} onClick={() => void connectWallet(w.id)}>
+                      <button key={w.id} type="button" className="wallet-tile installed" disabled={busy} onClick={() => void connectWallet(w.injectedKey)}>
                         <img className="wallet-tile-icon" src={w.icon} alt="" />
                         <span className="wallet-tile-name">{w.title}</span>
                         <span className="wallet-tile-status">Installed</span>
