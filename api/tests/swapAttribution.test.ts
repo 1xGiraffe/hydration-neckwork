@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { closingNetEvent, groupSwapRows, onBehalfActor, routeGroups, routeStartAfter, type RawSwapEventRow } from '../src/services/explorerService.ts'
+import { closingNetEvent, groupSwapRows, onBehalfActor, routeGroups, routeStartAfter, tradeRowKey, type RawSwapEventRow } from '../src/services/explorerService.ts'
 
 // A swap event as the read model returns it — the feed reads them newest-first, so
 // within an extrinsic the rows arrive in DESCENDING event order.
@@ -159,5 +159,38 @@ describe('one extrinsic\'s events split into its routes', () => {
 
   it('returns nothing for no events', () => {
     expect(routeGroups([])).toEqual([])
+  })
+})
+
+// The deep USD-min fetch walks successive windows and dedups the rows it assembles.
+// That key identified a trade by its EXTRINSIC, so the second route of a batch was
+// deduped away again — /activity?min=5000 showed one of two $80k swaps.
+//
+// A route closed by a net event is identified by that event: stable however the
+// fetch windows fall. A trailing run has no such anchor, and its representative
+// shifts when a window splits the extrinsic, so it stays keyed per extrinsic —
+// preferring one row over a duplicate, which is what the old key got right.
+describe('the deep-fetch dedup key identifies a route', () => {
+  const key = (o: { blockHeight: number; extrinsicIndex: number | null; eventIndex: number; venue: string }) => tradeRowKey(o)
+
+  it('separates two routes of one extrinsic', () => {
+    const a = key({ blockHeight: 100, extrinsicIndex: 3, eventIndex: 42, venue: 'Router' })
+    const b = key({ blockHeight: 100, extrinsicIndex: 3, eventIndex: 67, venue: 'Router' })
+    expect(a).not.toBe(b)
+  })
+
+  it('keeps one identity for a route however the window falls', () => {
+    expect(key({ blockHeight: 100, extrinsicIndex: 3, eventIndex: 42, venue: 'Router' }))
+      .toBe(key({ blockHeight: 100, extrinsicIndex: 3, eventIndex: 42, venue: 'Router' }))
+  })
+
+  it('collapses a trailing run per extrinsic, so a shifting rep cannot duplicate it', () => {
+    const first = key({ blockHeight: 100, extrinsicIndex: 3, eventIndex: 51, venue: 'Omnipool' })
+    const shifted = key({ blockHeight: 100, extrinsicIndex: 3, eventIndex: 49, venue: 'Omnipool' })
+    expect(first).toBe(shifted)
+  })
+
+  it('keys a pallet-internal swap by its own event', () => {
+    expect(key({ blockHeight: 100, extrinsicIndex: null, eventIndex: 9, venue: 'Omnipool' })).toBe('100:e9')
   })
 })

@@ -5794,6 +5794,21 @@ export function routeStartAfter(netIndices: number[], netEvent: number): number 
 // event of its own is a route too. Surfaces that read a single extrinsic's events
 // (the extrinsic page, the block page) split them with this instead of keeping only
 // the first route.
+// How a trade row is identified when successive fetch windows are deduplicated.
+//
+// A route closed by a net event is identified BY that event, so the two routes of one
+// batch are two rows: keying on the extrinsic deduped the second away, which is how a
+// $79.7k swap stayed missing from /activity?min=5000 after the feed itself was fixed.
+//
+// A trailing run has no net event to anchor it, and its representative shifts when a
+// window splits the extrinsic, so it stays keyed per extrinsic — one row rather than a
+// duplicate, which is what the extrinsic-wide key got right.
+export function tradeRowKey(row: { blockHeight: number; extrinsicIndex: number | null; eventIndex: number; venue: string }): string {
+  if (row.extrinsicIndex == null) return `${row.blockHeight}:e${row.eventIndex}`
+  const extrinsic = `${row.blockHeight}:x${row.extrinsicIndex}`
+  return row.venue === 'Router' ? `${extrinsic}:r${row.eventIndex}` : `${extrinsic}:tail`
+}
+
 export function routeGroups<T extends { event_index: number; event_name: string }>(events: T[]): T[][] {
   const ordered = [...events].sort((l, r) => l.event_index - r.event_index)
   const nets = ordered.filter(e => isRouterNet(e.event_name)).map(e => e.event_index)
@@ -6097,7 +6112,7 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
         return buildRows(raw)
       }, row => rowMeetsExactUsdMinimum(row, filters.min!),
       row => row.blockHeight, row => row.eventIndex,
-      row => `${row.blockHeight}:${row.extrinsicIndex == null ? `e${row.eventIndex}` : `x${row.extrinsicIndex}`}`,
+      tradeRowKey,
       { pageSize: 25_000, pageState: () => pageState })
       return deep.slice(offset, offset + limit)
     }
