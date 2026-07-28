@@ -61,7 +61,7 @@ const MAX_ACTIVITY_OFFSET = 2_500
 // 25 and 92% of them sat behind a cap that costs it 51ms to serve.
 const MAX_NARROW_ACTIVITY_OFFSET = 250_000
 const NARROW_ACTIVITY_TYPES = new Set(['vote', 'staking', 'otc'])
-const maxActivityOffsetFor = (type: string) =>
+export const maxActivityOffsetFor = (type: string) =>
   NARROW_ACTIVITY_TYPES.has(type) ? MAX_NARROW_ACTIVITY_OFFSET : MAX_ACTIVITY_OFFSET
 // A WINDOWED account/tag activity request — one carrying a min-USD floor, the single
 // filter no count arm states, so it is still assembled by growing one candidate window
@@ -84,12 +84,12 @@ const MAX_LOCATED_ACTIVITY_OFFSET = 5_000_000
 // that request answers 503 "narrow the filter" past the window's reach rather than the
 // 400 a static bound would have given it — the same answer the unfiltered feed of those
 // pots already gives.
-const maxScopedActivityOffsetFor = (q: Record<string, unknown>, type: string) =>
+export const maxScopedActivityOffsetFor = (q: Record<string, unknown>, type: string) =>
   isLocatedActivityRequest(type, valueFilters(q))
     ? MAX_LOCATED_ACTIVITY_OFFSET : MAX_WINDOWED_ACTIVITY_OFFSET
 const activityOffsetSchema = z.coerce.number().int().min(0).max(MAX_LOCATED_ACTIVITY_OFFSET).optional()
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
-function dateParam(q: Record<string, unknown>, key: string): string | undefined {
+export function dateParam(q: Record<string, unknown>, key: string): string | undefined {
   const v = q[key]
   return typeof v === 'string' && isCalendarDay(v) ? v : undefined
 }
@@ -105,26 +105,30 @@ const listOffsetSchema = z.coerce.number().int().min(0).max(MAX_LIST_OFFSET).opt
 // null = out of range. Refused rather than quietly answered with page one, which
 // is what an offset past the ceiling used to get: a stale or hand-edited page
 // number served the newest rows under the reader's page number.
-function offsetParam(q: Record<string, unknown>): number | null {
+// Exported (with the parsers below it) so the user-tag aggregate routes
+// (routes/user.ts) accept and validate the same query params the system
+// tag/address routes do, through the exact same code — see that file's
+// library-tag routes for why sharing beats reimplementing.
+export function offsetParam(q: Record<string, unknown>): number | null {
   const n = listOffsetSchema.safeParse(q.offset)
   return n.success ? n.data ?? 0 : null
 }
-function badOffset(reply: FastifyReply): FastifyReply {
+export function badOffset(reply: FastifyReply): FastifyReply {
   return reply.status(400).send({ error: `Offset must be between 0 and ${MAX_LIST_OFFSET}` })
 }
-function limitParam(q: Record<string, unknown>, fallback: number): number {
+export function limitParam(q: Record<string, unknown>, fallback: number): number {
   const n = limitSchema.safeParse(q.limit)
   return n.success ? n.data ?? fallback : fallback
 }
-function textParam(q: Record<string, unknown>, key: string, max = 128): string | undefined {
+export function textParam(q: Record<string, unknown>, key: string, max = 128): string | undefined {
   const v = q[key]
   return typeof v === 'string' && v.trim() && v.length <= max ? v.trim() : undefined
 }
-function numParam(q: Record<string, unknown>, key: string): number | undefined {
+export function numParam(q: Record<string, unknown>, key: string): number | undefined {
   const n = z.coerce.number().finite().min(0).safeParse(q[key])
   return n.success ? n.data : undefined
 }
-function valueFilters(q: Record<string, unknown>): ValueListFilters {
+export function valueFilters(q: Record<string, unknown>): ValueListFilters {
   const unit = q.unit === 'token' ? 'token' : 'usd'
   return {
     token: textParam(q, 'token', 64),
@@ -133,7 +137,7 @@ function valueFilters(q: Record<string, unknown>): ValueListFilters {
   }
 }
 
-function activityTypeParam(query: Record<string, unknown>): string {
+export function activityTypeParam(query: Record<string, unknown>): string {
   const t = typeof query.type === 'string' && activityTypes.includes(query.type) ? query.type : 'all'
   return ACTIVITY_TYPE_ALIASES[t] ?? t
 }
@@ -181,11 +185,11 @@ export function unusableFilterParam(query: Record<string, unknown>): { key: stri
 
 // null = out of range for this feed. The bound depends on the category, so callers
 // that know their type pass it; the rest get the conservative wide-feed bound.
-function activityOffsetParam(query: Record<string, unknown>, type = 'all'): number | null {
+export function activityOffsetParam(query: Record<string, unknown>, type = 'all'): number | null {
   return boundedActivityOffset(query, maxActivityOffsetFor(type))
 }
 
-function boundedActivityOffset(query: Record<string, unknown>, max: number): number | null {
+export function boundedActivityOffset(query: Record<string, unknown>, max: number): number | null {
   const parsed = activityOffsetSchema.safeParse(query.offset)
   if (!parsed.success) return null
   const offset = parsed.data ?? 0
@@ -193,8 +197,8 @@ function boundedActivityOffset(query: Record<string, unknown>, max: number): num
 }
 
 // The list a detail-page pager is sizing itself against.
-const listTabSchema = z.enum(['activity', 'extrinsics', 'events', 'votes'])
-function scopedListQuery(q: Record<string, unknown>): ScopedListQuery | null {
+export const listTabSchema = z.enum(['activity', 'extrinsics', 'events', 'votes'])
+export function scopedListQuery(q: Record<string, unknown>): ScopedListQuery | null {
   const tab = listTabSchema.safeParse(q.tab)
   if (!tab.success) return null
   return {
@@ -209,13 +213,13 @@ function scopedListQuery(q: Record<string, unknown>): ScopedListQuery | null {
   }
 }
 
-function extrinsicFilters(query: Record<string, unknown>): ExtrinsicListFilters {
+export function extrinsicFilters(query: Record<string, unknown>): ExtrinsicListFilters {
   const result = query.result === 'success' || query.result === 'failed' ? query.result : undefined
   const origin = query.origin === 'signed' || query.origin === 'proxy' || query.origin === 'multisig' ? query.origin : undefined
   return { call: textParam(query, 'call', 128), result, origin }
 }
 
-function eventFilters(query: Record<string, unknown>): EventListFilters {
+export function eventFilters(query: Record<string, unknown>): EventListFilters {
   return { event: textParam(query, 'event', 128) }
 }
 

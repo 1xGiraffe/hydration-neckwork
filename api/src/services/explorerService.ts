@@ -17242,6 +17242,19 @@ export function tagMembershipList(members: string[]): string {
   return [...members].map(member => member.toLowerCase()).sort().join(',')
 }
 
+// Short fingerprint of a LIVE, owner-editable membership (a user tag's), for the
+// cache-scope keys the library-tag aggregate view uses. A system tag's membership
+// only changes on a code deploy, so its scopes (tagMembershipList above, and the
+// bare `tag:<id>` scope strings below) never needed this — but a library owner can
+// add or remove a member between two requests, and every cache the member-list
+// internals key purely by scope string (activity/extrinsics/events/votes/tab-counts/
+// list-totals — none hash the account list themselves) would otherwise keep serving
+// the previous membership's answer until its TTL lapses. Folding this into the scope
+// makes a membership change take effect immediately: the string itself changes.
+function membershipFingerprint(members: string[]): string {
+  return createHash('sha256').update(tagMembershipList(members)).digest('hex').slice(0, 16)
+}
+
 // Identity of a persisted tag-detail payload: which accounts it covers AND which
 // account-value model computed it. `tag_detail_snapshots` is keyed by tag_id
 // alone, so without the model version here a payload built before the
@@ -17304,22 +17317,38 @@ async function persistTagDetailSnapshot(tagId: string, membershipKey: string, de
   })
 }
 
-export async function getTag(tagId: string, opts: { summary?: boolean; refresh?: boolean } = {}): Promise<TagDetail | null> {
-  const tag = getTagRecord(tagId)
-  if (!tag || !tag.members.length) return null
-  // `summary` (hover card) skips the portfolio-history reconstruction — which for a
-  // large tag walks every member's transfer log and dominates the response — plus LP
-  // and DCA, none of which the card shows. The detail page still gets the full object.
+// The member-set builder behind getTag, extracted so the user-tag aggregate view
+// (getLibraryTagDetail below) can share it over an arbitrary, live-editable member
+// list. `presentation` is display-only (name/color/icon/note + the id to stamp on
+// the response) — everything else is derived from `members`. `opts.snapshot` is the
+// system-tag-only ClickHouse persistence layer (see loadTagDetailSnapshot /
+// persistTagDetailSnapshot); omitting it (as the library-tag callers do) means the
+// result is held only by the `cached()` wrapper below, never written to
+// `tag_detail_snapshots` — a user tag's membership can change at any time, and that
+// table has no per-caller bound on how many rows accumulate. `opts.scope` is the key
+// getAccountHistoryShared uses for the (much longer-lived) portfolio-history cache
+// it shares with the account page; system tags pass the same bare `tag:<id>` scope
+// they always have, so their history entries keep landing on the same cache rows.
+async function buildTagDetailForMembers(
+  presentation: { tagId: string; name: string; color: string; icon: string; note: string },
+  members: string[],
+  opts: {
+    summary?: boolean
+    refresh?: boolean
+    cacheKey: string
+    ttlMs?: number
+    scope: string
+    snapshot?: { tagId: string; membershipKey: string }
+  },
+): Promise<TagDetail> {
   const summary = opts.summary === true
   const refresh = opts.refresh === true
-  const membershipKey = tagDetailMembershipKey(tag.members)
-  if (!summary) hotTagDetails.add(tagId)
-  return cached(`explorer:tag:${accountValueGenerationEpoch}:${tagId}${summary ? ':summary' : refresh ? ':refresh' : ''}`, 8000, async () => {
-    if (!summary && !refresh) {
-      const snapshot = await loadTagDetailSnapshot(tagId, membershipKey).catch(() => null)
+  return cached(opts.cacheKey, opts.ttlMs ?? 30_000, async () => {
+    if (opts.snapshot && !summary && !refresh) {
+      const snapshot = await loadTagDetailSnapshot(opts.snapshot.tagId, opts.snapshot.membershipKey).catch(() => null)
       if (snapshot) return snapshot
     }
-    const list = sqlAccountList(tag.members)
+    const list = sqlAccountList(members)
     const [balanceRows, lockBreakdowns, prices] = await Promise.all([
       queryAggregatedBalances(list),
       summary ? Promise.resolve(new Map<number, AssetLockBreakdown>()) : queryLockBreakdownsSafe(list),
@@ -17334,13 +17363,13 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
     // live money-market (per-member H160 reads combined), Omnipool LP positions, and
     // active DCA orders. Money-market collateral is folded into the wallet balances
     // exactly as on the account page.
-    const mmMembers = tag.members.flatMap(simAccount => {
+    const mmMembers = members.flatMap(simAccount => {
       const h160 = mmH160ForAccount(simAccount)
       return h160 ? [{ h160, simAccount }] : []
     })
     const tagHistoryAccounts = [...new Set([
-      ...tag.members,
-      ...tag.members.map(evmAccountForm).filter(Boolean) as string[],
+      ...members,
+      ...members.map(evmAccountForm).filter(Boolean) as string[],
     ])]
     let moneyMarket = await aggregateMoneyMarket(mmMembers)
     // LP stays (it feeds the displayed value); only the heavy portfolio-history walk
@@ -17348,11 +17377,11 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
     const [history, bareLp, farmLp, xykLp, activeDcas] = await Promise.all([
       summary
         ? Promise.resolve({ portfolioSeries: [] as number[], portfolioDates: [] as string[], balanceHistory: [] as AssetBalanceHistory[] })
-        : getAccountHistoryShared(tagHistoryAccounts, `tag:${tagId}`),
-      getOmnipoolPositions(tag.members),
-      getFarmingPositions(tag.members),
-      getXykPositions(tag.members, balances),
-      summary ? Promise.resolve([]) : getActiveDcas(tag.members),
+        : getAccountHistoryShared(tagHistoryAccounts, opts.scope),
+      getOmnipoolPositions(members),
+      getFarmingPositions(members),
+      getXykPositions(members, balances),
+      summary ? Promise.resolve([]) : getActiveDcas(members),
     ])
     const lpPositions = [...bareLp, ...farmLp, ...xykLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
     // Staking-backed markets (GIGAHDX): collateral is the already-counted locked HDX,
@@ -17377,14 +17406,14 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
     const debtUsd = moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
     const portfolioSeries = history.portfolioSeries.slice()
     if (portfolioSeries.length) portfolioSeries[portfolioSeries.length - 1] = +(portfolioUsd - debtUsd).toFixed(2)
-    const volumeAccounts = [...new Set([...tag.members, ...tag.members.map(evmAccountForm).filter(Boolean) as string[]])]
+    const volumeAccounts = [...new Set([...members, ...members.map(evmAccountForm).filter(Boolean) as string[]])]
     const [tradingVolumeUsd, liquidationVolumeUsd] = await Promise.all([
       tradingVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
       liquidationVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
     ])
     const detail: TagDetail = {
-      tagId: tag.tagId, name: tag.name, color: tag.color, note: tag.note, icon: tag.icon,
-      members: tag.members.map(accountRef), balances, topAssets: topHeldTokens(balances), portfolioUsd,
+      tagId: presentation.tagId, name: presentation.name, color: presentation.color, note: presentation.note, icon: presentation.icon,
+      members: members.map(accountRef), balances, topAssets: topHeldTokens(balances), portfolioUsd,
       ...(tradingVolumeUsd > 0 ? { tradingVolumeUsd } : {}),
       ...(liquidationVolumeUsd > 0 ? { liquidationVolumeUsd } : {}),
       moneyMarket, liquidityPositions: [...lpPositions, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)), activeDcas,
@@ -17393,10 +17422,33 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
       // than being projected backward from their current balance.
       balanceHistory: summary ? [] : history.balanceHistory,
     }
-    if (!summary) await persistTagDetailSnapshot(tagId, membershipKey, detail)
+    if (opts.snapshot && !summary) await persistTagDetailSnapshot(opts.snapshot.tagId, opts.snapshot.membershipKey, detail)
       .catch(error => console.error('[tag-detail] snapshot persist failed', error))
     return detail
   })
+}
+
+export async function getTag(tagId: string, opts: { summary?: boolean; refresh?: boolean } = {}): Promise<TagDetail | null> {
+  const tag = getTagRecord(tagId)
+  if (!tag || !tag.members.length) return null
+  // `summary` (hover card) skips the portfolio-history reconstruction — which for a
+  // large tag walks every member's transfer log and dominates the response — plus LP
+  // and DCA, none of which the card shows. The detail page still gets the full object.
+  const summary = opts.summary === true
+  const refresh = opts.refresh === true
+  const membershipKey = tagDetailMembershipKey(tag.members)
+  if (!summary) hotTagDetails.add(tagId)
+  return buildTagDetailForMembers(
+    { tagId: tag.tagId, name: tag.name, color: tag.color, icon: tag.icon, note: tag.note },
+    tag.members,
+    {
+      summary, refresh,
+      cacheKey: `explorer:tag:${accountValueGenerationEpoch}:${tagId}${summary ? ':summary' : refresh ? ':refresh' : ''}`,
+      ttlMs: 8000,
+      scope: `tag:${tagId}`,
+      snapshot: { tagId, membershipKey },
+    },
+  )
 }
 
 // Tag feeds use the same account-set implementations as account detail feeds.
@@ -17419,6 +17471,81 @@ export async function getTagVotes(tagId: string, limit = 25, offset = 0, from?: 
   const members = tagMembers(tagId)
   if (!members) return null
   return getScopedVotes(members, `tag:${tagId}`, limit, offset, from, to, filters)
+}
+
+// ── User-tag aggregate view ───────────────────────────────────────────────────
+// A library tag's own combined view — same shape and same member-list internals
+// as a system tag's, but over a LIVE, owner-editable member set instead of a
+// code-defined one. The route layer resolves permission + the tag's presentation
+// fields and members (userLibraryService.visibleTagMembers) and passes them in
+// here; this file never reads userLibraryService's maps directly. Deliberately
+// excluded from hotTagDetails / hotTagCounts / startTagCountsPrewarm and from the
+// tag_detail_snapshots / tag_activity_counts ClickHouse tables: those exist to
+// amortize cost over a small, fixed set of code-defined tags, and a user can
+// create/delete arbitrarily many library tags at will.
+export interface LibraryTagPresentation { tagId: string; name: string; color: string; icon: string; note: string }
+
+function libraryTagMembers(members: string[]): string[] {
+  return members.filter(m => ACCOUNT_RE.test(m))
+}
+// Every cache the member-list internals key purely by this scope string (none of
+// them hash the account list themselves — see membershipFingerprint above), so the
+// fingerprint is what makes a membership edit invalidate the tag's caches at once
+// rather than after whichever TTL happens to be longest (tab-counts alone holds
+// 600s). `tagId` keeps two library tags with an identical membership from sharing
+// one cache row; `libraryId` keeps two libraries' tags namespaced apart too, though
+// tag ids are already unique per library.
+function libraryTagScope(libraryId: string, tagId: string, members: string[]): string {
+  return `library-tag:${libraryId}:${tagId}:${membershipFingerprint(members)}`
+}
+
+export async function getLibraryTagDetail(libraryId: string, presentation: LibraryTagPresentation, members: string[], opts: { summary?: boolean } = {}): Promise<TagDetail | null> {
+  const valid = libraryTagMembers(members)
+  if (!valid.length) return null
+  const summary = opts.summary === true
+  const scope = libraryTagScope(libraryId, presentation.tagId, valid)
+  return buildTagDetailForMembers(presentation, valid, { summary, cacheKey: `explorer:${scope}${summary ? ':summary' : ''}`, scope })
+}
+export async function getLibraryTagActivity(libraryId: string, tagId: string, members: string[], type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[]> {
+  const valid = libraryTagMembers(members)
+  if (!valid.length) return []
+  return getScopedAccountActivity(valid, libraryTagScope(libraryId, tagId, valid), type, limit, offset, action, filters, from, to)
+}
+export async function getLibraryTagExtrinsics(libraryId: string, tagId: string, members: string[], limit = 25, offset = 0, filters: ExtrinsicListFilters = {}, from?: string, to?: string): Promise<ExtrinsicSummary[]> {
+  const valid = libraryTagMembers(members)
+  if (!valid.length) return []
+  return getAccountExtrinsics(valid, limit, offset, libraryTagScope(libraryId, tagId, valid), filters, from, to)
+}
+export async function getLibraryTagEvents(libraryId: string, tagId: string, members: string[], limit = 25, offset = 0, filters: EventListFilters = {}, from?: string, to?: string): Promise<EventRow[]> {
+  const valid = libraryTagMembers(members)
+  if (!valid.length) return []
+  return getAccountEvents(valid, limit, offset, libraryTagScope(libraryId, tagId, valid), filters, from, to)
+}
+export async function getLibraryTagVotes(libraryId: string, tagId: string, members: string[], limit = 25, offset = 0, from?: string, to?: string, filters: VoteListFilters = {}): Promise<VoteRow[]> {
+  const valid = libraryTagMembers(members)
+  if (!valid.length) return []
+  return getScopedVotes(valid, libraryTagScope(libraryId, tagId, valid), limit, offset, from, to, filters)
+}
+// Mirrors getAddressTabCounts' simplicity (getAccountTabCounts's own in-process
+// cache), not getTagTabCounts' persisted-snapshot/background-refresh machinery —
+// that machinery exists to amortize a fixed set of code-defined tags, which a
+// library tag is not.
+export async function getLibraryTagTabCounts(libraryId: string, tagId: string, members: string[]): Promise<TabCounts> {
+  const valid = libraryTagMembers(members)
+  if (!valid.length) return { extrinsics: 0, extrinsicsOnBehalf: 0, events: 0, votes: 0 }
+  return getAccountTabCounts(valid, libraryTagScope(libraryId, tagId, valid))
+}
+export async function getLibraryTagListTotal(libraryId: string, tagId: string, members: string[], query: ScopedListQuery): Promise<ScopedListTotal> {
+  const valid = libraryTagMembers(members)
+  if (!valid.length) return { total: 0, complete: true }
+  return scopedListTotal(valid, libraryTagScope(libraryId, tagId, valid), query)
+}
+export async function getLibraryTagValueEvents(libraryId: string, tagId: string, members: string[], from?: string, to?: string): Promise<ValueEvent[]> {
+  const valid = libraryTagMembers(members)
+  if (!valid.length) return []
+  const scope = libraryTagScope(libraryId, tagId, valid)
+  const historyAccounts = [...new Set([...valid, ...valid.map(evmAccountForm).filter(Boolean) as string[]])]
+  return getAccountValueEvents(historyAccounts, scope, from, to, VALUE_EVENT_DEFAULT_LIMIT, historyAccounts)
 }
 
 // daily activity (bar charts)

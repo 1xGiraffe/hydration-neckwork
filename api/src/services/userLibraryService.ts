@@ -256,6 +256,25 @@ function activeSubscriptionCount(accountId: string): number {
   return n
 }
 
+// The aggregate-view seam: everything a tag's own combined portfolio/activity page
+// needs, gated by the SAME rule libraryDetailResponse's tag contents use — owner or
+// active subscriber, never mere public visibility. A public library still hides its
+// curation from a viewer who hasn't subscribed (see libraryDetailResponse's comment);
+// this is the same privacy boundary applied to the aggregate page rather than the
+// management page. Returns null for "not visible or missing" so the route can answer
+// both with the same 404 — a private library's tag and an unknown one must be
+// indistinguishable from outside.
+export function visibleTagMembers(viewer: string, libraryId: string, tagId: string): { name: string; color: string; icon: string; note: string; members: string[] } | null {
+  const lib = libraries.get(libraryId)
+  if (!lib) return null
+  const isOwner = lib.owner === viewer
+  const isActiveSubscriber = subsByLibrary.get(libraryId)?.get(viewer)?.status === 'active'
+  if (!isOwner && !isActiveSubscriber) return null
+  const tag = lib.tags.get(tagId)
+  if (!tag) return null
+  return { name: tag.name, color: tag.color, icon: tag.icon, note: tag.note, members: [...tag.members] }
+}
+
 export function invitesFor(accountId: string): LibrarySummary[] {
   const out: LibrarySummary[] = []
   for (const libId of subsByAccount.get(accountId) ?? []) {

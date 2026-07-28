@@ -1,19 +1,29 @@
-import type { FastifyInstance, FastifyReply } from 'fastify'
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import rateLimit from '@fastify/rate-limit'
 import { z } from 'zod'
 import {
   createChallenge, verifyChallenge, issueSession, revokeSession, requireUser,
 } from '../services/userAuthService.ts'
-import { accountRef, resolveDisplayAccountId } from '../services/explorerService.ts'
+import {
+  accountRef, resolveDisplayAccountId,
+  getLibraryTagDetail, getLibraryTagActivity, getLibraryTagExtrinsics, getLibraryTagEvents, getLibraryTagVotes,
+  getLibraryTagTabCounts, getLibraryTagListTotal, getLibraryTagValueEvents,
+} from '../services/explorerService.ts'
 import { setProfileName, setProfileAvatar, clearProfileAvatar, profileForAccount, UserDataError } from '../services/userProfileService.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
 import {
   ensurePersonalLibrary, ownedLibrariesFor, subscriptionsFor, invitesFor, libraryOrderFor, tagMapFor,
   getLibrary, canView, createLibrary, updateLibrary, deleteLibrary,
-  createTag, updateTag, deleteTag, setTagMembers,
+  createTag, updateTag, deleteTag, setTagMembers, visibleTagMembers,
   inviteToLibrary, revokeShare, respondToInvite, subscribePublic, unsubscribe, setLibraryOrder,
   librarySummary, type LibrarySummary, type UserLibrary,
 } from '../services/userLibraryService.ts'
+import {
+  limitParam, offsetParam, badOffset, textParam, valueFilters, activityTypeParam,
+  extrinsicFilters, eventFilters, dateParam, activityOffsetParam, boundedActivityOffset,
+  maxActivityOffsetFor, maxScopedActivityOffsetFor, scopedListQuery, listTabSchema,
+  unusableFilterParam,
+} from './explorer.ts'
 
 // Authenticated, per-user endpoints. Everything here is invisible to the shared
 // caches by construction: `no-store` is stamped on every reply (the server-wide
@@ -308,5 +318,130 @@ export async function userRoutes(fastify: FastifyInstance) {
     const body = orderBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid order payload' })
     return withUserErrors(reply, async () => ({ order: await setLibraryOrder(accountId, body.data.libraryIds) }))
+  })
+
+  // ── User-tag aggregate view ─────────────────────────────────────────────
+  // A library tag's own combined portfolio/activity page — the same shape as
+  // the system /explorer/tag/:id routes, over a viewer's own (or subscribed)
+  // library tag instead. Gating is the same rule libraryDetailResponse's tag
+  // contents use (owner or active subscriber, never mere public visibility):
+  // visibleTagMembers returns null for "not visible or missing" and every
+  // route below answers that with the same 404, so a private library's tag
+  // and an unknown one are indistinguishable from outside.
+  const libraryTagParams = z.object({ libraryId: z.string().min(1).max(64), tagId: z.string().min(1).max(64) })
+  // Resolves params + permission in one place; replies 404 itself on a miss
+  // so every route below just returns on a null.
+  function requireLibraryTag(req: FastifyRequest, reply: FastifyReply, accountId: string) {
+    const params = libraryTagParams.safeParse(req.params)
+    if (!params.success) { reply.status(400).send({ error: 'Invalid library/tag id' }); return null }
+    const tag = visibleTagMembers(accountId, params.data.libraryId, params.data.tagId)
+    if (!tag) { reply.status(404).send({ error: 'Tag not found' }); return null }
+    return { libraryId: params.data.libraryId, tagId: params.data.tagId, tag }
+  }
+
+  fastify.get('/user/library-tag/:libraryId/:tagId', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const resolved = requireLibraryTag(req, reply, accountId)
+    if (!resolved) return
+    const { libraryId, tagId, tag } = resolved
+    const summary = (req.query as { summary?: string })?.summary === '1'
+    const detail = await getLibraryTagDetail(libraryId, { tagId, name: tag.name, color: tag.color, icon: tag.icon, note: tag.note }, tag.members, { summary })
+    if (!detail) return reply.status(404).send({ error: 'Tag not found' })
+    return detail
+  })
+
+  fastify.get('/user/library-tag/:libraryId/:tagId/activity', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const resolved = requireLibraryTag(req, reply, accountId)
+    if (!resolved) return
+    const q = req.query as Record<string, unknown>
+    const bad = unusableFilterParam(q)
+    if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
+    const activityType = activityTypeParam(q)
+    const maxOffset = maxScopedActivityOffsetFor(q, activityType)
+    const offset = boundedActivityOffset(q, maxOffset)
+    if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${maxOffset}` })
+    return getLibraryTagActivity(resolved.libraryId, resolved.tagId, resolved.tag.members, activityType, limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
+  })
+
+  fastify.get('/user/library-tag/:libraryId/:tagId/extrinsics', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const resolved = requireLibraryTag(req, reply, accountId)
+    if (!resolved) return
+    const q = req.query as Record<string, unknown>
+    const bad = unusableFilterParam(q)
+    if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    return getLibraryTagExtrinsics(resolved.libraryId, resolved.tagId, resolved.tag.members, limitParam(q, 25), offset, extrinsicFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
+  })
+
+  fastify.get('/user/library-tag/:libraryId/:tagId/events', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const resolved = requireLibraryTag(req, reply, accountId)
+    if (!resolved) return
+    const q = req.query as Record<string, unknown>
+    const bad = unusableFilterParam(q)
+    if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    return getLibraryTagEvents(resolved.libraryId, resolved.tagId, resolved.tag.members, limitParam(q, 25), offset, eventFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
+  })
+
+  fastify.get('/user/library-tag/:libraryId/:tagId/votes', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const resolved = requireLibraryTag(req, reply, accountId)
+    if (!resolved) return
+    const q = req.query as Record<string, unknown>
+    const bad = unusableFilterParam(q)
+    if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
+    const offset = activityOffsetParam(q, 'vote')
+    if (offset == null) return reply.status(400).send({ error: `Votes offset must be between 0 and ${maxActivityOffsetFor('vote')}` })
+    return getLibraryTagVotes(resolved.libraryId, resolved.tagId, resolved.tag.members, limitParam(q, 25), offset, dateParam(q, 'from'), dateParam(q, 'to'))
+  })
+
+  fastify.get('/user/library-tag/:libraryId/:tagId/counts', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const resolved = requireLibraryTag(req, reply, accountId)
+    if (!resolved) return
+    return getLibraryTagTabCounts(resolved.libraryId, resolved.tagId, resolved.tag.members)
+  })
+
+  fastify.get('/user/library-tag/:libraryId/:tagId/list-count', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const resolved = requireLibraryTag(req, reply, accountId)
+    if (!resolved) return
+    const q = req.query as Record<string, unknown>
+    const bad = unusableFilterParam(q)
+    if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
+    const query = scopedListQuery(q)
+    if (!query) return reply.status(400).send({ error: `List tab must be one of ${listTabSchema.options.join(', ')}` })
+    return getLibraryTagListTotal(resolved.libraryId, resolved.tagId, resolved.tag.members, query)
+  })
+
+  fastify.get('/user/library-tag/:libraryId/:tagId/value-events', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const resolved = requireLibraryTag(req, reply, accountId)
+    if (!resolved) return
+    const q = req.query as Record<string, unknown>
+    const bad = unusableFilterParam(q)
+    if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
+    return getLibraryTagValueEvents(resolved.libraryId, resolved.tagId, resolved.tag.members, dateParam(q, 'from'), dateParam(q, 'to'))
   })
 }

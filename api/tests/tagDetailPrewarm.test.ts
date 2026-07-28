@@ -83,12 +83,16 @@ describe('the membership-key derivation lives in one place', () => {
 
   it('routes the tag_activity_counts sites through the bare form', () => {
     const calls = [...source.matchAll(/tagMembershipList\((members|tag\.members)\)/g)]
-    // getTagTabCounts, the counts prewarm, and the detail form composing on top.
-    expect(calls).toHaveLength(3)
+    // getTagTabCounts, the counts prewarm, the detail form composing on top, and
+    // the library-tag aggregate view's membershipFingerprint — a live,
+    // owner-editable membership needs its own cache-scope fingerprint (system tags
+    // don't: their membership only changes on a code deploy), and it composes
+    // through this same bare form rather than hand-rolling the sort/join again.
+    expect(calls).toHaveLength(4)
     const composed = source.indexOf('export function tagDetailMembershipKey(')
     const inside = calls.filter(c => (c.index ?? 0) > composed && (c.index ?? 0) < composed + 160)
     expect(inside).toHaveLength(1)
-    expect(calls.length - inside.length).toBe(2)
+    expect(calls.length - inside.length).toBe(3)
   })
 })
 
