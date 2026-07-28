@@ -163,7 +163,7 @@ export function startEvmBindingsRefresh(): void {
 // tagged derived accounts (e.g. a stableswap pool's EVM-side aToken holdings)
 // to the pool account. Only genuine, unbound EVM accounts keep the ETH-prefixed
 // id (and display their H160).
-function resolveDisplayAccountId(accountId: string): string {
+export function resolveDisplayAccountId(accountId: string): string {
   const evm = evmFromAccountId(accountId)
   if (!evm) return accountId
   return reservedH160AccountId(evm.slice(2)) ?? evmBindings.get(evm) ?? taggedAccountByH160(evm) ?? accountId
