@@ -1,6 +1,7 @@
 import type { Locator, Page } from '@playwright/test'
 import { E2E_TOKEN, INVALID_TAG_MEMBER_ADDRESS, expect, seedSession, test } from './fixtures/test'
 import type { UserMockState } from './fixtures/test'
+import type { AccountRef } from '../src/types'
 
 // Treasury's accountId, copied from `A.treasury` in tests/fixtures/mockApi.ts
 // (the module account behind Hydration's Treasury pallet — not exported from
@@ -13,6 +14,12 @@ const TREASURY_ACCOUNT_ID = '0x6d6f646c70792f74727372790000000000000000000000000
 // as a tag member — any well-formed address works for the mock, but reusing
 // one already meaningful elsewhere in the suite beats inventing a new one.
 const BINANCE_ADDRESS = '0x2c1F9eB7a4D0c83E5f6A1b9D2c7E04aF8b3D16C9'
+// A real user tag id is a UUID (userLibraryService mints them with
+// randomUUID()) — TagDetail's routing treats that SHAPE as the signal that an
+// id might be a user tag at all (see userTags.looksLikeUserTagId), so specs
+// that navigate straight to a user tag's own /tag/:id page need an id that
+// actually looks like one, not a short stand-in like 't1'.
+const USER_TAG_ID = '3fa85f64-5717-4562-b3fc-2c963f66afa6'
 
 // Regression coverage for the account-picker dropdown fix: the diagnosed bug
 // was a translucent background (var(--panel), meant for a wash over content —
@@ -103,7 +110,7 @@ test('a user tag outranks the system tag, and the system tag returns on logout',
   userMock.state.tagMap = {
     libraries: [
       { libraryId: 'lib1', name: 'My library', tags: [
-        { tagId: 't1', name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
+        { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
       ] },
       { libraryId: 'system', name: 'Hydration', tags: [] },
     ],
@@ -118,7 +125,7 @@ test('a user tag outranks the system tag, and the system tag returns on logout',
   const pill = row.locator('a.addr-pill')
   await expect(pill).toContainText('Mine')
   // The tag's own aggregate view, sharing the system /tag/:id namespace.
-  await expect(pill).toHaveAttribute('href', '/tag/t1')
+  await expect(pill).toHaveAttribute('href', `/tag/${USER_TAG_ID}`)
 
   await page.locator('.account-btn').click()
   await page.locator('.account-menu button', { hasText: 'Log out' }).click()
@@ -136,18 +143,18 @@ test('hovering a user-tag pill shows its own aggregate card, not the system tag 
   userMock.state.tagMap = {
     libraries: [
       { libraryId: 'lib1', name: 'My library', tags: [
-        { tagId: 't1', name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
+        { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
       ] },
       { libraryId: 'system', name: 'Hydration', tags: [] },
     ],
   }
-  // The management-page shape of the same tag, so GET /user/library-tag/lib1/t1
+  // The management-page shape of the same tag, so GET /user/library-tag/lib1/<id>
   // (the hover card's own summary request) has real data to answer with.
   userMock.state.libraries.push({
     libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
     tags: [{
-      tagId: 't1', name: 'Mine', color: '#22c55e', icon: '👀', note: '',
+      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', note: '',
       members: [{ accountId: TREASURY_ACCOUNT_ID, address: TREASURY_ACCOUNT_ID, emoji: '👤', tag: null }],
     }],
   })
@@ -166,18 +173,18 @@ test('a user-tag pill opens its own aggregate page, header included', async ({ p
   userMock.state.tagMap = {
     libraries: [
       { libraryId: 'lib1', name: 'My library', tags: [
-        { tagId: 't1', name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
+        { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
       ] },
       { libraryId: 'system', name: 'Hydration', tags: [] },
     ],
   }
-  // The management-page shape of the same tag, so GET /user/library-tag/lib1/t1
+  // The management-page shape of the same tag, so GET /user/library-tag/lib1/<id>
   // (buildLibraryTagDetail in fixtures/test.ts) has real data to answer with.
   userMock.state.libraries.push({
     libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
     tags: [{
-      tagId: 't1', name: 'Mine', color: '#22c55e', icon: '👀', note: '',
+      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', note: '',
       members: [{ accountId: TREASURY_ACCOUNT_ID, address: TREASURY_ACCOUNT_ID, emoji: '👤', tag: null }],
     }],
   })
@@ -186,9 +193,103 @@ test('a user-tag pill opens its own aggregate page, header included', async ({ p
   const row = page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '980' }) })
   await row.locator('a.addr-pill').click()
 
-  await expect(page).toHaveURL(/\/tag\/t1$/)
+  await expect(page).toHaveURL(new RegExp(`/tag/${USER_TAG_ID}$`))
   await expect(page.locator('.acct-meta > .tag')).toContainText('Mine')
   await expect(page.locator('.acct-meta')).toContainText('1 accounts')
+})
+
+// Regression coverage for a cold load racing the tag-map fetch: TagDetail
+// used to fall through to the system lookup (and its "Tag not found") the
+// instant `libraryForTag` came back empty, without knowing WHY it was
+// empty — logged out, or just not loaded yet. Holding the tag-map response
+// makes that "not loaded yet" window observable instead of racing past it.
+test('a cold logged-in load of a user-tag URL never flashes "Tag not found" while the tag map is in flight', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  userMock.state.tagMap = {
+    libraries: [
+      { libraryId: 'lib1', name: 'My library', tags: [
+        { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
+      ] },
+      { libraryId: 'system', name: 'Hydration', tags: [] },
+    ],
+  }
+  userMock.state.libraries.push({
+    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+    owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
+    tags: [{
+      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', note: '',
+      members: [{ accountId: TREASURY_ACCOUNT_ID, address: TREASURY_ACCOUNT_ID, emoji: '👤', tag: null }],
+    }],
+  })
+
+  let releaseTagMap = () => {}
+  const held = new Promise<void>(resolve => { releaseTagMap = resolve })
+  await page.route(/\/api\/user\/tag-map(?:\?.*)?$/, async route => {
+    await held
+    await route.fallback()
+  })
+
+  await page.goto(`/tag/${USER_TAG_ID}`)
+  // The map is still gated: this must read as "waiting", never "not found".
+  await expect(page.locator('.acct-head-skeleton')).toBeVisible()
+  await expect(page.locator('.detail-card', { hasText: 'Tag not found' })).toHaveCount(0)
+
+  releaseTagMap()
+  await expect(page.locator('.acct-meta > .tag')).toContainText('Mine')
+})
+
+// A UUID-shaped id can't be resolved client-side at all without a session
+// (the tag map only ever loads for one) — that's a real "can't tell", not a
+// "doesn't exist", so a logged-out visitor gets an invitation to log in
+// rather than the flat 404-style message an actually-unknown id gets.
+test('a logged-out visitor on a user-tag URL sees a log-in hint, not "Tag not found"', async ({ page }) => {
+  await page.goto(`/tag/${USER_TAG_ID}`)
+
+  const card = page.locator('.detail-card')
+  await expect(card).toContainText(/log in/i)
+  await expect(card).not.toContainText('Tag not found')
+
+  // The affordance is real, not decorative text — it opens the actual dialog.
+  // Scoped to the card: the topbar carries its own "Log in" button too.
+  await card.getByRole('button', { name: 'Log in' }).click()
+  await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
+})
+
+// The provenance pill reads the library's owner off the VIEWER's own /user/me
+// (see LibraryTagDetail.tsx) — every prior fixture made the viewer the
+// owner, which could hide a bug that shows the viewer's own name/avatar no
+// matter whose library it actually is. A subscribed (not owned) library with
+// a different owner is the case that would have caught it.
+test('the provenance pill shows a subscribed library\'s real owner, not the viewer', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  const foreignOwner: AccountRef = {
+    accountId: '0x' + 'cd'.repeat(32), address: '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty',
+    emoji: '🦉', tag: null, identity: null, profile: { name: 'Foreign Owner', avatarVersion: 0 },
+  }
+  userMock.state.tagMap = {
+    libraries: [
+      { libraryId: 'foreign-lib', name: 'Whales', tags: [
+        { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
+      ] },
+      { libraryId: 'system', name: 'Hydration', tags: [] },
+    ],
+  }
+  // Subscribed, not owned: pushed to `subscriptions`, never `libraries`.
+  userMock.state.subscriptions.push({
+    libraryId: 'foreign-lib', name: 'Whales', note: '', visibility: 'public', isPersonal: false,
+    owner: foreignOwner, tagCount: 1, accountCount: 1, subscriberCount: 5,
+    tags: [{
+      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', note: '',
+      members: [{ accountId: TREASURY_ACCOUNT_ID, address: TREASURY_ACCOUNT_ID, emoji: '👤', tag: null }],
+    }],
+  })
+
+  await page.goto(`/tag/${USER_TAG_ID}`)
+  await expect(page.locator('.acct-meta > .tag')).toContainText('Mine')
+  const pill = page.locator('.acct-meta a.addr-pill')
+  await expect(pill).toContainText('Foreign Owner')
+  await expect(pill).toContainText('Whales')
+  await expect(pill).not.toContainText('E2E User')
 })
 
 test('create a library, tag a known address, and reorder', async ({ page, userMock }) => {

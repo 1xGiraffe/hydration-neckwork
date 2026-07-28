@@ -8,6 +8,7 @@ import { Libraries } from '../src/pages/Libraries'
 import { Tags } from '../src/pages/Tags'
 import { LibraryDetail } from '../src/pages/LibraryDetail'
 import { LibraryTagDetail } from '../src/pages/LibraryTagDetail'
+import { TagDetail } from '../src/pages/TagDetail'
 import { setTagMap } from '../src/userTags'
 import { parseRoute, paths } from '../src/router'
 import { MOCK_LIBRARIES, MOCK_LIBRARY_DETAIL, MOCK_LIBRARY_TAG_DETAIL } from './fixtures/mockApi'
@@ -228,5 +229,58 @@ describe('LibraryTagDetail — smoke render (logged out)', () => {
     expect(html).toMatch(/log in/i)
     expect(html).not.toContain('Watching')
     expect(html).not.toContain('Tag not found')
+  })
+})
+
+// TagDetail's own routing between the system view and a user tag's aggregate
+// view. A UUID-shaped id is a real "maybe" until the tag map answers, so the
+// three states below (anonymous / loading / a slug that was never a maybe at
+// all) each get their own case rather than trusting a race between requests.
+describe('TagDetail — routing between system and user-tag views', () => {
+  const USER_TAG_ID = '3fa85f64-5717-4562-b3fc-2c963f66afa6'
+  beforeEach(() => setTagMap(null))
+
+  it('shows a log-in hint — not "Tag not found" — for a UUID-shaped id with no session', () => {
+    // Default reset: no session at all, i.e. tagMapStatus() === 'anonymous'.
+    const html = renderToStaticMarkup(<TagDetail tagId={USER_TAG_ID} />)
+    expect(html).toMatch(/log in/i)
+    expect(html).not.toContain('Tag not found')
+  })
+
+  it('shows the page skeleton — not "Tag not found" — for a UUID-shaped id while the tag map is loading', () => {
+    setTagMap(null, true) // session exists, map not back yet: tagMapStatus() === 'loading'
+    const html = renderToStaticMarkup(<TagDetail tagId={USER_TAG_ID} />)
+    expect(html).toContain('acct-head-skeleton')
+    expect(html).not.toContain('Tag not found')
+    expect(html).not.toMatch(/log in/i)
+  })
+
+  it('routes to LibraryTagDetail once the map is ready and hits — not TagDetail\'s own anonymous hint', () => {
+    setTagMap({ libraries: [
+      { libraryId: 'lib1', name: 'Personal', tags: [{ tagId: USER_TAG_ID, name: 'Mine', color: '#0f0', icon: '', members: [ACC] }] },
+    ] })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId={USER_TAG_ID} /></QueryClientProvider>)
+    // LibraryTagDetail itself still gates on a real session (useSession() is
+    // always null under this SSR harness — see the file-level comment above),
+    // so this can't reach the tag's real content here; it CAN prove routing
+    // got past TagDetail's own anonymous-UUID hint (a real "Log in" BUTTON,
+    // absent from LibraryTagDetail's own plain-text one) into LibraryTagDetail
+    // instead of stalling on TagDetail's — the e2e suite covers the full,
+    // logged-in "shows the real tag" path this harness cannot reach.
+    expect(html).not.toContain('<button')
+    expect(html).toMatch(/log in/i)
+  })
+
+  it('never shows the user-tag anonymous hint for a slug-shaped id, even though tagMapStatus() is "anonymous" too', () => {
+    // A slug can never be a user tag, so it must fast-path straight to
+    // SystemTagDetail regardless of tag-map state — "log in to view this
+    // tag" only ever comes from TagDetail's OWN anonymous-UUID branch, and
+    // SystemTagDetail never renders that text under any of its own states
+    // (loading/error/data), so its presence here would mean the UUID gate
+    // didn't run before the tag-map check.
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId="kraken" /></QueryClientProvider>)
+    expect(html).not.toMatch(/log in/i)
   })
 })

@@ -33,6 +33,14 @@ function accountRefFromAddress(address: string): AccountRef {
 // name-the-failure, restore-the-rest path against a real rejection.
 export const INVALID_TAG_MEMBER_ADDRESS = 'not-a-real-address'
 
+// A subscription entry may optionally carry the same tag/member detail an
+// owned library does — a subscribed (not owned) library's tags are still
+// real, curated by ITS owner, and a spec exercising the aggregate view of a
+// subscribed tag (e.g. the provenance pill for a non-owner viewer) needs
+// somewhere to seed them. Optional so the many specs that only need the
+// plain summary (subscribe/unsubscribe, Discover rows) don't have to fill it in.
+export type MockLibraryEntry = LibrarySummaryRef & { tags?: LibraryTagDetail[] }
+
 // Per-test mutable backing store for everything under `/api/user/**`. Kept
 // intentionally small (no ClickHouse, no real ids) — `libraries`/`tagMap` are
 // the two a spec actually reaches into; the rest exists so the full
@@ -41,7 +49,7 @@ export interface UserMockState {
   loggedIn: boolean
   account: AccountRef
   libraries: LibraryDetailResponse[]
-  subscriptions: LibrarySummaryRef[]
+  subscriptions: MockLibraryEntry[]
   invites: LibrarySummaryRef[]
   order: string[]
   tagMap: TagMapResponse
@@ -59,13 +67,16 @@ function freshState(): UserMockState {
   }
 }
 
-// A library tag's own aggregate view, built from the same `state.libraries`
-// entries the management page reads — so a tag created/edited through the UI is
-// immediately reachable at its own aggregate URL too. Feeds (activity/extrinsics/
-// events/votes/value-events) answer empty elsewhere in this handler; only the
-// detail needs the tag's real presentation fields and members.
+// A library tag's own aggregate view, built from either an OWNED library
+// (`state.libraries`) or a SUBSCRIBED one that was seeded with tag detail
+// (`state.subscriptions`, see MockLibraryEntry) — so a tag created/edited
+// through the UI, or a subscribed foreign library's tag, is immediately
+// reachable at its own aggregate URL too. Feeds (activity/extrinsics/events/
+// votes/value-events) answer empty elsewhere in this handler; only the detail
+// needs the tag's real presentation fields and members.
 function buildLibraryTagDetail(state: UserMockState, libraryId: string, tagId: string): TagDetail | null {
-  const tag = state.libraries.find(l => l.libraryId === libraryId)?.tags.find(t => t.tagId === tagId)
+  const lib = state.libraries.find(l => l.libraryId === libraryId) ?? state.subscriptions.find(l => l.libraryId === libraryId)
+  const tag = lib?.tags?.find(t => t.tagId === tagId)
   if (!tag) return null
   return {
     tagId: tag.tagId, name: tag.name, color: tag.color, note: tag.note, icon: tag.icon,

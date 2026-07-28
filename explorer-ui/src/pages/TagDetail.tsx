@@ -1,3 +1,4 @@
+import { lazy, Suspense, useState } from 'react'
 import { useTag, useTagListCount, useTagValueEvents, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -9,22 +10,72 @@ import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, MoneyMarketPositions, ActiveDcaTable, LiquidityPositionsTable } from '../components/AccountSections'
 import { BalancesTreemap } from '../components/BalancesTreemap'
-import { libraryForTag, useTagMapVersion } from '../userTags'
+import { libraryForTag, looksLikeUserTagId, tagMapStatus, useTagMapVersion } from '../userTags'
 import { LibraryTagDetail } from './LibraryTagDetail'
 
+const ConnectDialog = lazy(() => import('../components/ConnectDialog').then(m => ({ default: m.ConnectDialog })))
+
+// While a session exists but /user/tag-map hasn't answered yet, a UUID-shaped
+// id might still turn out to be a user tag — showing the plain page skeleton
+// (rather than falling through to the system lookup, which would flash "Tag
+// not found" only to be corrected a moment later once the map arrives).
+function TagDetailSkeleton() {
+  return (
+    <div className="wrap">
+      <div className="page-head"><Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Tags', to: paths.tags() }]} /></div>
+      <ProfilePageSkeleton />
+    </div>
+  )
+}
+
+// Logged out, a UUID-shaped id can never be resolved client-side (the tag map
+// only ever loads for a session — see userTags.tagMapStatus) — that's a real
+// "maybe", not a "no", so this reads as an invitation to log in rather than
+// the flat "Tag not found" an actually-unknown id gets.
+function LoginToViewTag() {
+  const [open, setOpen] = useState(false)
+  const [mounted, setMounted] = useState(false)
+  return (
+    <div className="wrap">
+      <div className="page-head"><Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Tags', to: paths.tags() }]} /></div>
+      <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>
+        <div>Log in to view this tag.</div>
+        <button type="button" className="btn primary" style={{ marginTop: 16 }} onClick={() => { setMounted(true); setOpen(true) }}>Log in</button>
+      </div>
+      {mounted && (
+        <Suspense fallback={null}>
+          <ConnectDialog open={open} onOpenChange={setOpen} />
+        </Suspense>
+      )}
+    </div>
+  )
+}
+
 // A user tag's aggregate view shares this same /tag/:id URL as a system tag —
-// this wrapper decides which one a given id means. System tag slugs are short,
-// code-defined words ('kraken', 'treasury', …); user-tag ids are UUIDs minted
-// by userLibraryService, so the two id spaces never collide — checking the
-// viewer's own tag-map first (instant, client-side, no request) can only ever
-// match a real user tag, never accidentally shadow a system one. Logged out,
-// or for a tag outside the viewer's own libraries/subscriptions, the map has
-// no entry and this falls through to the system view, which 404s on a
-// user-tag id exactly like it always did on any other unknown id.
+// this wrapper decides which one a given id means, and (since that decision
+// depends on the viewer's own tag map, an async fetch) which of three states
+// to show meanwhile. System tag slugs are short, code-defined words ('kraken',
+// 'treasury', …); user-tag ids are UUIDs minted by userLibraryService, so the
+// two id spaces never collide — a slug can never be a user tag and fast-paths
+// straight to the system view, unaffected by any of this.
+//
+// A UUID-shaped id, though, genuinely might be a user tag, and the map is
+// fetched once per session (Topbar's useTagMapSync) rather than per tag — so:
+//   - map still loading (session exists, no data yet): skeleton, not a guess.
+//   - map ready and it hits: the user-tag aggregate view (LibraryTagDetail).
+//   - no session at all: an invitation to log in, not "not found" — a real
+//     answer needs a session this viewer doesn't have.
+//   - map ready and it doesn't hit: genuinely unknown — the system lookup
+//     404s on it exactly like it would on any other unrecognized id, so this
+//     falls through there rather than growing a third "not found" panel.
 export function TagDetail({ tagId }: { tagId: string }) {
   useTagMapVersion()   // re-render once the viewer's tag map loads/changes
+  if (!looksLikeUserTagId(tagId)) return <SystemTagDetail tagId={tagId} />
+  const status = tagMapStatus()
+  if (status === 'loading') return <TagDetailSkeleton />
   const lib = libraryForTag(tagId)
   if (lib) return <LibraryTagDetail libraryId={lib.libraryId} tagId={tagId} />
+  if (status === 'anonymous') return <LoginToViewTag />
   return <SystemTagDetail tagId={tagId} />
 }
 

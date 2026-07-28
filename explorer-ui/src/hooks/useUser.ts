@@ -21,7 +21,10 @@ export function useMe() {
 export function useTagMapSync() {
   const session = useSession()
   const q = useQuery({ queryKey: ['user', 'tag-map', session?.accountId], queryFn: ({ signal }) => userApi.tagMap(signal), enabled: !!session, staleTime: 30_000 })
-  useEffect(() => { setTagMap(session ? q.data ?? null : null) }, [session, q.data])
+  // The explicit second argument matters exactly when `session` is truthy but
+  // `q.data` hasn't arrived yet — tagMapStatus() needs to read 'loading', not
+  // 'anonymous', for that window (see userTags.ts).
+  useEffect(() => { setTagMap(session ? q.data ?? null : null, !!session) }, [session, q.data])
   return q
 }
 

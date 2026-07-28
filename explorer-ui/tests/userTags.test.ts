@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { setTagMap, resolveTag, allAssociations, searchUserTags, libraryForTag } from '../src/userTags'
+import { setTagMap, resolveTag, allAssociations, searchUserTags, libraryForTag, tagMapStatus, looksLikeUserTagId } from '../src/userTags'
 import type { AccountRef } from '../src/types'
 
 const ACC = '0x' + 'ab'.repeat(32)
@@ -67,6 +67,44 @@ describe('libraryForTag', () => {
   it('returns null for an id no library claims (e.g. a system tag slug)', () => {
     setTagMap({ libraries: [{ libraryId: 'lib1', name: 'Personal', tags: [mine] }] })
     expect(libraryForTag('kraken')).toBeNull()
+  })
+})
+
+describe('tagMapStatus', () => {
+  beforeEach(() => setTagMap(null))
+
+  it('is "anonymous" with no session (the default null reset)', () => {
+    expect(tagMapStatus()).toBe('anonymous')
+  })
+
+  it('is "loading" once a session exists but the map has not arrived yet', () => {
+    setTagMap(null, true)
+    expect(tagMapStatus()).toBe('loading')
+  })
+
+  it('is "ready" once a map arrives — hasSession defaults from a real map', () => {
+    setTagMap({ libraries: [{ libraryId: 'lib1', name: 'Personal', tags: [mine] }] })
+    expect(tagMapStatus()).toBe('ready')
+  })
+
+  it('goes back to "anonymous" on logout (setTagMap(null) with its default)', () => {
+    setTagMap({ libraries: [{ libraryId: 'lib1', name: 'Personal', tags: [mine] }] })
+    expect(tagMapStatus()).toBe('ready')
+    setTagMap(null)
+    expect(tagMapStatus()).toBe('anonymous')
+  })
+})
+
+describe('looksLikeUserTagId', () => {
+  it('matches a UUID shape, case-insensitively', () => {
+    expect(looksLikeUserTagId('3fa85f64-5717-4562-b3fc-2c963f66afa6')).toBe(true)
+    expect(looksLikeUserTagId('3FA85F64-5717-4562-B3FC-2C963F66AFA6')).toBe(true)
+  })
+
+  it('rejects system tag slugs, including hyphenated ones', () => {
+    for (const slug of ['kraken', 'treasury', 'fee-processor', 'hdx-kraken-lp', 'personal-watch', 't1']) {
+      expect(looksLikeUserTagId(slug)).toBe(false)
+    }
   })
 })
 
