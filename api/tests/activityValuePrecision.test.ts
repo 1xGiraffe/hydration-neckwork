@@ -3,11 +3,13 @@ import {
   eventValueFilterSql,
   exactHistoricalValuePredicateSql,
   exactValuePredicateSql,
+  historicalPriceAssetId,
   historicalVolumeSql,
   minimumRawAmountForValue,
   activityRowMatchesFilters,
   voteDetails,
 } from '../src/services/explorerService.ts'
+import { PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, priceAssetId } from '../src/services/explorerAssets.ts'
 
 describe('value-aware account activity precision', () => {
   it('sums split vote balances without JavaScript number coercion', () => {
@@ -141,5 +143,51 @@ describe('value-aware account activity precision', () => {
     expect(aliasExprs[0]).toBe(aliasExprs[1])
     // The legs relation is read twice, so it must stay the cheap one.
     expect(occurrences('liquidation_legs')).toBe(2)
+  })
+})
+
+// A pool-share token is quoted only while it is its pool's tradeable leg:
+// 2-Pool-GDOT (690) has six hourly closes from April 2025 and none after, because
+// GDOT (69) took over. Excluding share tokens from the historical price alias does
+// NOT leave their flows unpriced — it leaves them matched against that abandoned
+// feed, and since the ASOF join has no lower bound it values a 2026 liquidation at
+// the April-2025 close forever (a ~4x overstatement that survives into every
+// liquidation/supply/withdraw value and the account's liquidation volume). Valuing
+// through the underlying is the near-peg unit-price proxy the current-price path
+// already applies, and it is the only alias with a live feed.
+describe('pool-share flows value through their underlying price feed', () => {
+  it('resolves a share token to its underlying, never to itself', () => {
+    expect(SHARE_TOKEN_UNDERLYING_ID[690]).toBe(69)
+    expect(historicalPriceAssetId(690)).toBe(69)
+    for (const shareId of Object.keys(SHARE_TOKEN_UNDERLYING_ID).map(Number)) {
+      expect(historicalPriceAssetId(shareId)).not.toBe(shareId)
+    }
+  })
+
+  // Chained aliases must land on the terminal priced id (GIGAHDX -> stHDX -> HDX),
+  // and historical valuation must agree with the current-price path about which id
+  // that is.
+  it('resolves every alias transitively, exactly as the current-price path does', () => {
+    for (const aliasedId of Object.keys(PRICE_ALIAS_ID).map(Number)) {
+      expect(historicalPriceAssetId(aliasedId)).toBe(priceAssetId(aliasedId))
+    }
+  })
+
+  // The min-value predicate is pushed into ClickHouse while the displayed row value
+  // is computed in TypeScript. If the SQL alias and the row alias disagree, a
+  // filtered page admits or drops rows against a value the rows never show.
+  it('aliases share tokens in the pushed-down SQL exactly as the row builder does', () => {
+    const sql = historicalVolumeSql('legs', 'out')
+    // The amount normalisation emits its own transform with quoted scale factors;
+    // only the unquoted asset-id -> asset-id pairs are price aliases.
+    const transforms = [...sql.matchAll(/transform\(toUInt32\([^)]*\), \[([\d,]+)\], \[([\d,]+)\]/g)]
+    expect(transforms).toHaveLength(2)
+    for (const [, fromList, toList] of transforms) {
+      const from = fromList.split(',').map(Number)
+      const to = toList.split(',').map(Number)
+      expect(from).toContain(690)
+      expect(to[from.indexOf(690)]).toBe(69)
+      from.forEach((id, i) => expect(to[i]).toBe(historicalPriceAssetId(id)))
+    }
   })
 })

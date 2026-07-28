@@ -1204,20 +1204,27 @@ function priceTransformArrays(prices: Map<number, PriceInfo>): { idsSql: string;
 // the whole chain would pull tens of millions of rows. The pre-aggregated
 // hourly close is one row per asset/hour, so the joined side stays bounded.
 
-// Pool-share assets have no historical NAV series. A current reserve snapshot
-// is not a valid substitute for an old flow, so historical valuation leaves
-// them unpriced. Other aliases are contractual 1:1 claims (aTokens and bonds).
-function historicalPriceAssetId(assetId: number): number {
-  return SHARE_TOKEN_UNDERLYING_ID[assetId] == null ? priceAssetId(assetId) : assetId
+// Every aliased asset — aTokens, bonds and pool shares alike — values through the
+// same terminal priced id its current-price path uses. Pool shares have no
+// historical NAV series, but their own feed is not a substitute for one: a share
+// token is quoted only while it is the pool's tradeable leg (2-Pool-GDOT was
+// quoted for six hours before GDOT took over), and the ASOF match below has no
+// lower bound, so a share token left to value itself matches that abandoned close
+// forever. The underlying is the near-peg unit-price proxy documented on
+// SHARE_TOKEN_UNDERLYING_ID and the only alias with a live feed.
+export function historicalPriceAssetId(assetId: number): number {
+  return priceAssetId(assetId)
 }
 
 // SQL: map an asset-id expression to the id whose historical price feed values
-// it. Share tokens remain unpriced because they need a historical NAV series.
+// it. Must stay identical to historicalPriceAssetId — the min-value predicate is
+// pushed down here while the displayed value is computed in TypeScript, so any
+// divergence filters pages on a value the rows do not show.
 function priceAliasIdSql(expr: string): string {
-  const from = Object.keys(PRICE_ALIAS_ID).filter(k => SHARE_TOKEN_UNDERLYING_ID[Number(k)] == null)
+  const from = Object.keys(PRICE_ALIAS_ID)
   // transform() applies once — resolve chained aliases (GIGAHDX → stHDX → HDX)
   // to their terminal priced id here.
-  const to = from.map(k => priceAssetId(Number(k)))
+  const to = from.map(k => historicalPriceAssetId(Number(k)))
   if (!from.length) return `toUInt32(${expr})`
   return `transform(toUInt32(${expr}), [${from.join(',')}], [${to.join(',')}], toUInt32(${expr}))`
 }
