@@ -59,6 +59,7 @@ import { ensureSnakewatchEmojiSourceLoaded } from './services/omniwatchIdentity.
 import { initXcmJourneyService } from './services/xcmJourneyService.ts'
 import { initUserAuthService, loadUserSessions } from './services/userAuthService.ts'
 import { initUserProfileService, loadUserProfiles } from './services/userProfileService.ts'
+import { initUserLibraryService, loadUserLibraries } from './services/userLibraryService.ts'
 
 const fastify = Fastify({ logger: true })
 
@@ -174,6 +175,7 @@ async function start() {
     initErc20WalletService(client)
     await initUserAuthService(client)
     initUserProfileService(client)
+    initUserLibraryService(client)
     // The node-full refreshers (lock breakdown, proxy/multisig, ERC-20 wallets)
     // share one coordinated scheduler so they never stack concurrent RPC bursts
     // on the archive node; started after their clients are set.
@@ -185,7 +187,7 @@ async function start() {
     await Promise.all([loadExplorerAssets(client), ensureSnakewatchEmojiSourceLoaded(), loadRuntimeErrorNames(client)])
     // Referendum titles come from SubSquare (the chain has none), so they are held
     // in memory like identities and read on every vote row the explorer renders.
-    await Promise.all([loadTags(), loadUserProfiles(), loadIdentities(), loadReferendumTitles().catch(() => {}), loadUserSessions()])
+    await Promise.all([loadTags(), loadUserProfiles(), loadIdentities(), loadReferendumTitles().catch(() => {}), loadUserSessions(), loadUserLibraries()])
     // Seed the fixed default tag set on a fresh database (no-op once tags exist),
     // so a clean `docker compose up` reaches the expected state with no manual step.
     await seedDefaultTags()
