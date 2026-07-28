@@ -29,19 +29,26 @@ function functionBody(name: string): string {
 // it, which is how two earlier guards in this repo degraded to asserting nothing.
 describe('liquidation volume reads the LiquidationCall projection', () => {
   it('builds its legs from the projection, at the one site that has legs', () => {
-    expect(occurrences(explorerService, 'FROM price_data.money_market_liquidation_calls')).toBe(1)
+    // Two readers of the projection: the account/tag volume builder below, and the
+    // asset detail page's daily seizure history (its own describe block). No third
+    // reader may appear without deciding which of them it belongs with.
+    expect(occurrences(explorerService, 'FROM price_data.money_market_liquidation_calls')).toBe(2)
     expect(functionBody('liquidationVolumeCtes')).toContain('FROM price_data.money_market_liquidation_calls FINAL')
     // The definition plus the two callers: the account/tag volume query and the
     // accounts-directory `sort=liquidation` CTE. One builder, so the account page, both
     // tag sites and the directory ordering can never value a liquidation differently.
-    expect(occurrences(explorerService, 'liquidationVolumeCtes')).toBe(3)
+    // Counted with the paren so a prose cross-reference (the asset-detail reader
+    // cites this builder's rationale) can't pass for a fourth call site.
+    expect(occurrences(explorerService, 'liquidationVolumeCtes(')).toBe(3)
     expect(functionBody('liquidationVolumeByAccount')).toContain('${liquidationVolumeCtes(list)}')
   })
 
   // Unlike the set-semantic dust/liquidation-extrinsic projections, this one is summed,
   // so an unmerged ReplacingMergeTree duplicate would double a leg's USD value.
   it('deduplicates with FINAL because the legs are summed', () => {
-    expect(occurrences(explorerService, 'money_market_liquidation_calls FINAL')).toBe(1)
+    // Both readers sum legs, so both need it — a bare read would double a leg whose
+    // replay duplicate has not merged yet.
+    expect(occurrences(explorerService, 'money_market_liquidation_calls FINAL')).toBe(2)
   })
 
   it('touches neither raw_money_market_events nor decoded_args_json for the legs', () => {

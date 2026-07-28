@@ -283,3 +283,18 @@ export function displayAssetId(assetId: number): number {
 export const UNDERLYING_TO_ATOKEN_ID: Record<number, number> = Object.fromEntries(
   Object.entries(ATOKEN_UNDERLYING_ID).map(([aToken, underlying]) => [underlying, Number(aToken)]),
 )
+
+// Reverse of SHARE_TOKEN_UNDERLYING_ID: main asset id → the pool-share token ids
+// that display as it. The share token can be what a protocol actually holds while
+// the page a reader visits is the main asset — the money market's GDOT reserve is
+// 2-Pool-GDOT (690), not GDOT (69) — so a reserve lookup has to be able to reach the
+// share token from the main id. A list, since nothing stops two pools folding into
+// one main asset. Decimals are NOT shared across the pair (2-Pool-PRIME carries 18
+// where PRIME carries 6), so callers must read each id's own descriptor.
+export const UNDERLYING_TO_SHARE_IDS: Record<number, number[]> = (() => {
+  const out: Record<number, number[]> = {}
+  for (const [share, underlying] of Object.entries(SHARE_TOKEN_UNDERLYING_ID)) {
+    (out[underlying] ??= []).push(Number(share))
+  }
+  return out
+})()

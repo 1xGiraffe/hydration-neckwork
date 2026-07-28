@@ -2,7 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { cached, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
 import { referendumTitleFor } from './referendumTitleService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
+import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags } from './tagService.ts'
 import { identityForAccount, searchIdentitiesByDisplay, type AccountIdentity } from './identityService.ts'
@@ -15407,12 +15407,143 @@ export async function getMoneyMarket(limit: number): Promise<{ totalSupplyUsd: n
 }
 
 // asset detail
+// Collateral seized from borrowers in the primary money market, per day. This is
+// what "liquidated" measures on an asset surface: the LiquidationCall's
+// `collateralAsset` leg, the same side the account/tag liquidation volume values.
+// The debt-repaid side is a different asset's flow and is not folded in here.
+//
+// Legs come from the money_market_liquidation_calls projection for the reasons
+// documented on liquidationVolumeCtes — raw_money_market_events is ordered
+// (block_height, event_index, event_name), so a LiquidationCall predicate prunes
+// nothing there and every read would decompress the ZSTD(6) decoded args. FINAL
+// because the legs are summed, and bounded by the projection's own size (a few
+// thousand rows chain-wide).
+export interface AssetLiquidationDay { date: string; valueUsd: number; amount: string; count: number }
+export interface AssetLiquidationTotal { valueUsd: number; amount: string; count: number }
+export interface AssetLiquidations {
+  // The decimals every `amount` below is expressed in. It is NOT necessarily the
+  // page asset's own: the reserve can be a pool-share token carrying different
+  // decimals than the asset it displays as (2-Pool-PRIME 18 vs PRIME 6).
+  decimals: number
+  // Full-history daily buckets, ascending; only days that had a liquidation.
+  days: AssetLiquidationDay[]
+  total: AssetLiquidationTotal
+}
 export interface AssetDetail {
   asset: AssetListItem
   holderCount: number
   totalUsd: number
   priceSeries: number[]
   priceDates: string[]
+  // Null for an asset that has never been a primary-market reserve — the surface
+  // omits the figure rather than claiming a zero for an asset the market never held.
+  liquidations: AssetLiquidations | null
+}
+// The market whose liquidations an asset page reports. Env-configured markets are
+// always supplemental, so this is the core market; isolated markets are never
+// blended, and a supplemental market's liquidations belong to its own surface.
+const primaryMmPools = (): string[] => MM_MARKETS.filter(m => m.role === 'primary').map(m => m.poolProxy)
+
+// Which money-market reserve rows belong to an asset's page. Up to three aliases can
+// stand between the id a reader visits and the id the market holds:
+//   • an aToken (aDOT 1001) is a claim on its reserve (DOT 5),
+//   • a pool-share token IS the reserve while the page is the main asset it displays
+//     as — the market's GDOT collateral is 2-Pool-GDOT (690), not GDOT (69),
+//   • both at once (atBTC 1006 → tBTC 1000765).
+// Every candidate has to price through the SAME feed as the page asset; that is what
+// makes one bounded ASOF join valid for all of them, so a candidate that does not is
+// dropped rather than valued at the wrong feed.
+// Decimals are per candidate, not per page — 2-Pool-PRIME carries 18 where PRIME
+// carries 6 — so each address keeps its own, and amounts are reported in the widest.
+export interface MmReserveScope { priceId: number; decimals: number; byAddress: Map<string, number> }
+function mmReserveScope(assetId: number): MmReserveScope {
+  const priceId = historicalPriceAssetId(assetId)
+  const direct = ATOKEN_UNDERLYING_ID[assetId] ?? assetId
+  const candidates = new Set<number>([assetId, direct,
+    ...(UNDERLYING_TO_SHARE_IDS[assetId] ?? []), ...(UNDERLYING_TO_SHARE_IDS[direct] ?? [])])
+  const byAddress = new Map<string, number>()
+  for (const candidate of candidates) {
+    if (historicalPriceAssetId(candidate) !== priceId) continue
+    const decimals = assetDescriptor(candidate).decimals
+    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 65) continue
+    for (const address of mmReserveAddressForAsset(candidate)) {
+      byAddress.set(address.toLowerCase(), Math.max(byAddress.get(address.toLowerCase()) ?? 0, decimals))
+    }
+  }
+  return { priceId, decimals: Math.max(0, ...byAddress.values()), byAddress }
+}
+
+async function isPrimaryMmReserve(scope: MmReserveScope): Promise<boolean> {
+  return (await getMmReserveTokens()).some(t =>
+    MM_MARKET_BY_KEY.get(t.marketKey)?.role === 'primary' && scope.byAddress.has(t.asset.toLowerCase()))
+}
+
+// Raw amounts from reserves with different decimals cannot be summed as they stand,
+// so each leg is scaled to the widest basis in the scope by an exact power of ten,
+// as overflow-checked fixed point. A silent UInt256 wrap or a float would move the
+// figure by orders of magnitude on precisely the assets that need this (2-Pool-PRIME
+// legs scale by 10^12 to sit beside PRIME's).
+export function mmAmountInScopeSql(scope: MmReserveScope, column: string): string {
+  const addresses = [...scope.byAddress.keys()]
+  const factors = addresses.map(a => `'${10n ** BigInt(scope.decimals - (scope.byAddress.get(a) ?? scope.decimals))}'`)
+  // A single reserve needs no per-row lookup; more than one does, and only then is
+  // the address read at all. Both branches emit an already-quoted literal.
+  const factor = addresses.length > 1
+    ? `transform(lower(asset_address), [${addresses.map(a => `'${a}'`).join(',')}], [${factors.join(',')}], '1')`
+    : factors[0] ?? `'1'`
+  return `multiplyDecimal(toDecimal256(${column}, 0), toDecimal256(${factor}, 0), 0)`
+}
+
+// Day buckets use `toStartOfDay(block_timestamp)` — the expression ohlc_1d_mv
+// buckets its candles by — so a bar lands on the price point it belongs to by
+// construction rather than by matching two independently chosen boundaries.
+//
+// Each leg is valued at the last hourly close completed before it happened, like
+// every other displayed historical flow. The ASOF right side is one asset's feed,
+// so it stays small. A leg older than the asset's first close contributes its
+// tokens with no USD, which understates the value rather than inventing one.
+async function assetLiquidationDays(scope: MmReserveScope): Promise<AssetLiquidationDay[]> {
+  if (!scope.byAddress.size) return []
+  const res = await client.query({
+    query: `
+      WITH legs AS (
+        SELECT toStartOfDay(block_timestamp) AS day,
+               block_timestamp AS block_time,
+               ${mmAmountInScopeSql(scope, 'liquidated_collateral_amount')} AS amount,
+               {priceId:UInt32} AS price_asset_id
+        FROM price_data.money_market_liquidation_calls FINAL
+        WHERE pool_address IN {pools:Array(String)}
+          AND asset_address IN {reserves:Array(String)}
+      )
+      SELECT toString(l.day) AS day,
+             toString(sum(l.amount)) AS amount,
+             toUInt32(count()) AS legs,
+             toFloat64(sum(multiplyDecimal(l.amount, toDecimal256(p.close, 12), 12))) / 1e${scope.decimals} AS value_usd
+      FROM legs l
+      ASOF LEFT JOIN (
+        SELECT asset_id, interval_start + INTERVAL 1 HOUR AS price_time, argMaxMerge(close_state) AS close
+        FROM price_data.ohlc_1h
+        WHERE asset_id = {priceId:UInt32}
+        GROUP BY asset_id, interval_start
+      ) p ON p.asset_id = l.price_asset_id AND p.price_time <= l.block_time
+      GROUP BY l.day
+      ORDER BY l.day`,
+    query_params: { pools: primaryMmPools(), reserves: [...scope.byAddress.keys()], priceId: scope.priceId },
+    format: 'JSONEachRow',
+  })
+  return (await res.json<{ day: string; amount: string; legs: number; value_usd: number }>())
+    .map(r => ({ date: r.day, valueUsd: Number(r.value_usd) || 0, amount: r.amount, count: Number(r.legs) }))
+}
+
+// The headline total is folded from the very rows the bars are drawn from, so the
+// card and the chart can never disagree — including for a day whose bar lands
+// outside the price series.
+function totalAssetLiquidations(days: AssetLiquidationDay[]): AssetLiquidationTotal {
+  return {
+    valueUsd: days.reduce((s, d) => s + d.valueUsd, 0),
+    amount: days.reduce((s, d) => s + BigInt(d.amount || '0'), 0n).toString(),
+    count: days.reduce((s, d) => s + d.count, 0),
+  }
 }
 export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
   return cached(`explorer:asset:${assetId}`, 30000, async () => {
@@ -15434,7 +15565,7 @@ export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
     // exists for this asset.
     let priceSeries: number[] = []
     let priceDates: string[] = []
-    try {
+    const closesP = (async () => {
       const end = new Date()
       const start = new Date(0)
       const fmt = (d: Date) => d.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
@@ -15450,9 +15581,19 @@ export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
         priceDates.push(r.ts)
         priceSeries.push(r.px)
       }
-    } catch { /* asset may have no OHLC */ }
+    })().catch(() => { /* asset may have no OHLC */ })
+    // The liquidation history is an independent read, so it costs no extra latency.
+    // A reserve with no seizures still reports a total (zero) — "in the market,
+    // never liquidated" is a fact, not missing data.
+    const scope = mmReserveScope(assetId)
+    const [days, isReserve] = await Promise.all([
+      assetLiquidationDays(scope), isPrimaryMmReserve(scope), closesP,
+    ])
+    const liquidations: AssetLiquidations | null = isReserve || days.length
+      ? { decimals: scope.decimals, days, total: totalAssetLiquidations(days) }
+      : null
 
-    return { asset: assetItem, holderCount: hsummary.total, totalUsd: hsummary.totalUsd, priceSeries, priceDates }
+    return { asset: assetItem, holderCount: hsummary.total, totalUsd: hsummary.totalUsd, priceSeries, priceDates, liquidations }
   })
 }
 
