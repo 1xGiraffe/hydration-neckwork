@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AddrPill, UserTagPill } from '../src/components/ui'
 import { LibrariesSection } from '../src/pages/Account'
 import { Libraries } from '../src/pages/Libraries'
+import { Tags } from '../src/pages/Tags'
 import { LibraryDetail } from '../src/pages/LibraryDetail'
 import { LibraryTagDetail } from '../src/pages/LibraryTagDetail'
 import { setTagMap } from '../src/userTags'
@@ -164,17 +165,34 @@ describe('LibrariesSection — account page tag libraries', () => {
 // libraries, Invites, owner controls) are exercised by hand per the task brief
 // and by the e2e suite, matching how Account.tsx/TagDetail.tsx have no
 // full-page render test here either.
-describe('Libraries hub — smoke render (logged out)', () => {
-  it('renders the page title and at least one Discover row', () => {
+describe('Tags hub — smoke render (logged out)', () => {
+  it('renders the Hydration Tags hero and at least one (unclickable) public-library row', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     queryClient.setQueryData(['libraries'], MOCK_LIBRARIES)
-    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Libraries /></QueryClientProvider>)
-    expect(html).toContain('Libraries')
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Tags /></QueryClientProvider>)
+    expect(html).toContain('Tags')
+    // The one clickable "library" row: the built-in directory, promoted above
+    // every user-made library.
+    expect(html).toContain('Hydration Tags')
+    expect(hrefOf(html, 'Hydration Tags')).toBe('/tags/hydration')
     expect(html).toContain('DeFi desks')
-    expect(hrefOf(html, 'DeFi desks')).toBe('/library/defi-desks')
+    // User-confirmed: a library row itself is not clickable — no anchor wraps
+    // the name (only the nested owner pill and the subscribe button are).
+    expect(hrefOf(html, 'DeFi desks')).toBeUndefined()
     // Logged out: no reorder/new-library affordances, just a connect prompt.
     expect(html).not.toContain('New library')
     expect(html).toContain('Log in to subscribe')
+  })
+})
+
+describe('Libraries — smoke render (logged out)', () => {
+  it('is pure management now — no discover/invites, just a log-in prompt', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Libraries /></QueryClientProvider>)
+    expect(html).toContain('Libraries')
+    expect(html).toMatch(/log in/i)
+    expect(html).not.toContain('New library')
+    expect(html).not.toContain('Log in to subscribe')
   })
 })
 

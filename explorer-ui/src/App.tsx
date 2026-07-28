@@ -22,6 +22,7 @@ const EventDetail = lazy(() => import('./pages/EventDetail').then(m => ({ defaul
 const Accounts = lazy(() => import('./pages/Accounts').then(m => ({ default: m.Accounts })))
 const Account = lazy(() => import('./pages/Account').then(m => ({ default: m.Account })))
 const Tags = lazy(() => import('./pages/Tags').then(m => ({ default: m.Tags })))
+const TagsHydration = lazy(() => import('./pages/Tags').then(m => ({ default: m.TagsHydration })))
 const TagDetail = lazy(() => import('./pages/TagDetail').then(m => ({ default: m.TagDetail })))
 const Libraries = lazy(() => import('./pages/Libraries').then(m => ({ default: m.Libraries })))
 const LibraryDetail = lazy(() => import('./pages/LibraryDetail').then(m => ({ default: m.LibraryDetail })))
@@ -74,6 +75,7 @@ export default function App() {
       case 'accounts': return <Accounts />
       case 'account': return <Account address={route.address} />
       case 'tags': return <Tags />
+      case 'tags-hydration': return <TagsHydration />
       case 'tag': return <TagDetail tagId={route.tagId} />
       case 'libraries': return <Libraries />
       case 'library': return <LibraryDetail libraryId={route.libraryId} />
