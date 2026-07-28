@@ -42,6 +42,10 @@ export function useUserMutation<A extends unknown[], R>(fn: (...args: A) => Prom
       void qc.invalidateQueries({ queryKey: ['user'] })
       void qc.invalidateQueries({ queryKey: ['libraries'] })
       void qc.invalidateQueries({ queryKey: ['library'] })
+      // Profile edits change how the account page itself renders (header name,
+      // avatar), and that page reads the ADDRESS query — refresh it too. Cheap:
+      // only mounted address queries refetch, and user mutations are rare.
+      void qc.invalidateQueries({ queryKey: ['address'] })
     },
   })
 }

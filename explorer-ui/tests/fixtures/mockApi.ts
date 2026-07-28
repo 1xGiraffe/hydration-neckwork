@@ -1189,7 +1189,16 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
     re: /^\/explorer\/tags$/, fn: () => mockTags,
   },
   { re: /^\/explorer\/libraries$/, fn: () => MOCK_LIBRARIES },
-  { re: /^\/explorer\/library\/(.+)$/, fn: (m) => MOCK_LIBRARY_DETAILS[decodeURIComponent(m[1])] },
+  // Public detail of another user's library carries only the statistics —
+  // tag names/members stay with the owner (mirrors libraryDetailResponse).
+  { re: /^\/explorer\/library\/(.+)$/, fn: (m) => { const d = MOCK_LIBRARY_DETAILS[decodeURIComponent(m[1])]; return d ? { ...d, tags: [] } : d } },
+  // Connect-dialog display refs: echo known fixture accounts (matched on either
+  // form), null for anything unknown — same contract as the real endpoint.
+  {
+    re: /^\/explorer\/account-refs$/,
+    fn: (_m, qs) => (qs.get('addresses') ?? '').split(',').filter(Boolean).map(addr =>
+      ACCS.find(a => a.address === addr || a.accountId === addr) ?? null),
+  },
   // Authed detail — same objects as the public endpoint above (the mock has no
   // private-only library, so there is nothing the anonymous route wouldn't see).
   { re: /^\/user\/libraries\/(.+)$/, fn: (m) => MOCK_LIBRARY_DETAILS[decodeURIComponent(m[1])] },

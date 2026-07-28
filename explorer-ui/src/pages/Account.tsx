@@ -12,7 +12,7 @@ import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { useSession } from '../session'
 import { useAddressLibraries, useMe } from '../hooks/useUser'
-import { resolveTag, allAssociations, useTagMapVersion } from '../userTags'
+import { allAssociations, useTagMapVersion } from '../userTags'
 import type { LibrarySummaryRef } from '../types'
 
 // Radix + the dialog are only needed once the account owner actually opens the
@@ -57,10 +57,12 @@ export function Account({ address }: { address: string }) {
   const headBlock = stats?.headBlock ?? 0
 
   // Document title mirrors the header's display-name logic: best-known name
-  // (resolved tag > module > profile name > identity > emoji name) plus the
+  // (module > profile name > identity > emoji name) plus the
   // short canonical address.
   const shortAddr = data ? F.shortAddr(data.evmAddress ?? data.ss58Polkadot) : null
-  const acctName = data ? (resolveTag(data)?.name ?? moduleName(data.accountId) ?? data.profile?.name ?? data.identity?.display ?? data.emojiName ?? emojiName(data.emoji)) : null
+  // The document title names the ACCOUNT itself (module → profile → identity →
+  // emoji name) — its tag memberships are chips on the page, not its name.
+  const acctName = data ? (moduleName(data.accountId) ?? data.profile?.name ?? data.identity?.display ?? data.emojiName ?? emojiName(data.emoji)) : null
   useDocumentTitle(data ? (acctName ? `${acctName} · ${shortAddr}` : shortAddr) : undefined)
 
   // Canonicalize the URL: always show the Polkadot SS58 (substrate) or EVM H160
@@ -81,7 +83,6 @@ export function Account({ address }: { address: string }) {
       {isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Address not recognized</div>
         : isLoading || !data ? <ProfilePageSkeleton /> : (() => {
           const mod = moduleName(data.accountId)
-          const resolved = resolveTag(data)
           const associations = allAssociations(data)
           const mmList = data.moneyMarket
           const explicitEvmBinding = data.aliases.find(alias => alias.relationship === 'explicit_binding' && alias.evmAddress)?.evmAddress
@@ -98,20 +99,21 @@ export function Account({ address }: { address: string }) {
                 <a className="ext-link" href={hydrationAppUrl(canonicalAddress ?? address)} target="_blank" rel="noopener">Open in Hydration ↗</a>
               </div>
               <div className="acct-head">
-                <div className="acct-avatar">{resolved
-                  ? <TagIcon icon={resolved.icon} title={resolved.name} className="acct-avatar-icon" />
-                  : mod ? '⚙️'
-                    : <AccountEmoji account={data} className="acct-avatar-icon" imgClass="acct-avatar-img" />}</div>
+                {/* The page is about the ACCOUNT, so the header always wears the
+                    account's own face — profile image (via AccountEmoji) or its
+                    emoji — never the tag's. Tag membership lives in the chip row
+                    below, where it links to the tag's aggregate page instead of
+                    making every member page impersonate the tag. */}
+                <div className="acct-avatar">{mod ? '⚙️'
+                  : <AccountEmoji account={data} className="acct-avatar-icon" imgClass="acct-avatar-img" />}</div>
                 <div className="acct-meta">
-                  <div className="tag">{resolved
-                    ? <span>{resolved.name} <span className="em" style={resolved.color ? { color: resolved.color } : undefined}>· tag</span></span>
-                    : mod
-                      ? <span style={{ fontSize: 18 }}>{mod}</span>
-                      : data.profile?.name
-                        ? <span style={{ fontSize: 18, fontStyle: 'italic', color: 'var(--amber)' }}>{data.profile.name}</span>
-                        : data.identity?.display
-                          ? <span style={{ fontSize: 18 }}>{data.identity.display}{data.identity.verified && <span className="id-verified" title="Verified identity" style={{ marginLeft: 5 }}>✓</span>}</span>
-                          : <span style={{ fontSize: 18 }}>{emojiName(data.emoji) ?? 'Account'}</span>}
+                  <div className="tag">{mod
+                    ? <span style={{ fontSize: 18 }}>{mod}</span>
+                    : data.profile?.name
+                      ? <span style={{ fontSize: 18, fontStyle: 'italic', color: 'var(--amber)' }}>{data.profile.name}</span>
+                      : data.identity?.display
+                        ? <span style={{ fontSize: 18 }}>{data.identity.display}{data.identity.verified && <span className="id-verified" title="Verified identity" style={{ marginLeft: 5 }}>✓</span>}</span>
+                        : <span style={{ fontSize: 18 }}>{emojiName(data.emoji) ?? 'Account'}</span>}
                     {data.proxy?.isPure && <span className="badge" title="Keyless pure-proxy account — controlled only through its proxies" style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>pure proxy</span>}
                     {data.multisig && <span className="badge" title={`Multisig account — any ${data.multisig.threshold} of ${data.multisig.signatories.length} signatories can act`} style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>{data.multisig.threshold}/{data.multisig.signatories.length} multisig</span>}</div>
                   {/* No EVM badge here: the 0x prefix already says it (and the
@@ -121,7 +123,8 @@ export function Account({ address }: { address: string }) {
                     <span className="mono"><ShortAddr addr={data.evmAddress ?? data.ss58Polkadot} full /></span> <Copy text={data.evmAddress ?? data.ss58Polkadot} />
                   </div>
                   {associations.length > 0 && (
-                    <div className="row gap6" style={{ marginTop: 2, flexWrap: 'wrap' }}>
+                    <div className="row gap6" style={{ marginTop: 2, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>Tags</span>
                       {associations.map(a => <UserTagPill key={a.libraryId ?? `system-${a.id}`} tag={a} address={data.evmAddress ?? data.ss58Polkadot} noCopy />)}
                     </div>
                   )}
@@ -191,7 +194,9 @@ export function Account({ address }: { address: string }) {
         })()}
       {editMounted && (
         <Suspense fallback={null}>
-          <EditProfileDialog open={editOpen} onOpenChange={setEditOpen} />
+          {/* The page's own data prefills the form — no /user/me round trip to
+              race against (a cold me query used to open the dialog blank). */}
+          {data && <EditProfileDialog open={editOpen} onOpenChange={setEditOpen} account={data} profile={data.profile ?? null} />}
         </Suspense>
       )}
     </div>

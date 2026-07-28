@@ -131,19 +131,23 @@ describe('Libraries hub — smoke render (logged out)', () => {
     expect(hrefOf(html, 'DeFi desks')).toBe('/library/defi-desks')
     // Logged out: no reorder/new-library affordances, just a connect prompt.
     expect(html).not.toContain('New library')
-    expect(html).toContain('Connect to subscribe')
+    expect(html).toContain('Log in to subscribe')
   })
 })
 
 describe('LibraryDetail — smoke render (logged out)', () => {
-  it('renders the header and one tag with a member row', () => {
+  it('shows another user\'s library as statistics only — never its tags or members', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    queryClient.setQueryData(['library', 'defi-desks', false], MOCK_LIBRARY_DETAIL)
+    // The public endpoint ships no tag contents for a foreign library — only
+    // the summary statistics. Mirror that shape here.
+    queryClient.setQueryData(['library', 'defi-desks', false], { ...MOCK_LIBRARY_DETAIL, tags: [] })
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><LibraryDetail libraryId="defi-desks" /></QueryClientProvider>)
     expect(html).toContain('DeFi desks')
     expect(html).toContain('· library')
-    expect(html).toContain('Active traders')
-    expect(html).toContain('2 accounts')
+    // Statistics panel, not tag panels.
+    expect(html).toContain('lib-stats')
+    expect(html).toContain('Subscriber')
+    expect(html).not.toContain('Active traders')
     // Anonymous viewer: no owner-only affordances.
     expect(html).not.toContain('New tag')
     expect(html).not.toContain('Remove')

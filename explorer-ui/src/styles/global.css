@@ -378,14 +378,18 @@ svg { display: block; }
   font-size: 12.5px; transition: color 150ms, background 150ms;
 }
 .account-btn:hover { color: var(--text-high); background: var(--panel-hover); }
-.acct-avatar {
-  width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0; overflow: hidden;
-  display: inline-flex; align-items: center; justify-content: center; font-size: 13px;
+/* Topbar's compact avatar: its own class, NOT .acct-avatar — that name belongs
+   to the account page's 60px header avatar later in this file, and sharing it
+   let the larger rule win the cascade (the button ballooned to 60px). */
+.topbar-avatar {
+  width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; overflow: hidden;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 12px;
   background: var(--bg-elev); border: 1px solid var(--border);
 }
-/* A self-authored profile name reads in a distinct italic voice, so it's never
-   mistaken for a derived address/identity label at a glance. */
-.profile-name { font-style: italic; color: var(--text-high); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The account button's label is chrome, not a pill: plain upright text (the
+   italic self-authored voice applies only inside .addr-pill / hover titles). */
+.account-label { color: var(--text-high); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-name { color: var(--text-high); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .invite-badge {
   display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px;
   padding: 0 4px; border-radius: 9999px; background: var(--accent); color: var(--accent-on);
@@ -1085,6 +1089,10 @@ svg { display: block; }
 .acct-meta .tag { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 22px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .acct-meta .tag .em { color: var(--lavender); font-style: italic; }
 .acct-meta .full { font-family: 'GeistMono'; font-size: 12.5px; color: var(--text-medium); word-break: break-all; display: flex; align-items: center; gap: 8px; }
+/* A pill nested in the header meta (e.g. a library's owner) keeps standard
+   pill sizing — .acct-meta .tag above is the 22px serif PAGE TITLE rule and
+   would otherwise win the cascade over .addr-pill .tag. */
+.acct-meta .addr-pill .tag { font-family: inherit; font-size: inherit; font-weight: 500; }
 /* Header stats render as a column-flow grid so the labels of every stat share
    row 1 and the amounts share row 2 on a common baseline — otherwise the 26px
    value and the 14px volumes float at unrelated heights. Each .acct-bal is
@@ -1714,7 +1722,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .dialog-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 16px; }
 .dialog-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 20px; border-top: 1px solid var(--separator); }
 .field { display: flex; flex-direction: column; gap: 7px; }
-.field label { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+.field label, .field .field-label { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
 .field input, .field textarea { all: unset; box-sizing: border-box; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text-high); padding: 10px 12px; font-family: 'Geist'; font-size: 13px; }
 .field input:focus, .field textarea:focus { border-color: var(--sky); }
 .field textarea { resize: vertical; min-height: 84px; font-family: 'GeistMono'; font-size: 12px; line-height: 1.6; }
@@ -1742,6 +1750,65 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .wallet-row-install .wallet-status { color: var(--sky); }
 .wallet-row .wallet-icon { width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0; }
 .wallet-row.account-row .wallet-status { font-size: 12.5px; }
+/* Two-segment sliding switch (visibility private/public) — the indicator pill
+   translates by segment index, preis-ui's interval-selector mechanic. */
+.seg-switch {
+  --seg-width: 84px; --seg-gap: 2px;
+  position: relative; display: grid; grid-template-columns: repeat(2, var(--seg-width)); gap: var(--seg-gap);
+  width: max-content; background: var(--panel); border: 1px solid var(--border); border-radius: 9999px; padding: 3px;
+}
+.seg-switch .seg-indicator {
+  position: absolute; top: 3px; bottom: 3px; left: 3px; width: var(--seg-width); border-radius: 9999px;
+  background: var(--accent);
+  transform: translateX(calc(var(--active-index) * (var(--seg-width) + var(--seg-gap))));
+  transition: transform 180ms ease-out;
+  pointer-events: none;
+}
+.seg-switch button {
+  position: relative; z-index: 1; height: 26px; width: var(--seg-width); border-radius: 9999px;
+  font-size: 12px; font-weight: 500; text-align: center; color: var(--text-medium);
+  transition: color 160ms;
+}
+.seg-switch button:hover { color: var(--text-high); }
+.seg-switch button.active { color: var(--accent-on); }
+.seg-switch button:disabled { opacity: 0.6; pointer-events: none; }
+/* Account picker: chips + search input (invites, tag members). */
+.acct-picker { position: relative; flex: 1; min-width: 220px; }
+.acct-picker-box {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; cursor: text;
+  padding: 6px 8px; border-radius: 10px; background: var(--bg-elev); border: 1px solid var(--border);
+}
+.acct-picker-box:focus-within { border-color: var(--sky); }
+.acct-picker-box.disabled { opacity: 0.6; pointer-events: none; }
+.acct-picker-box input { flex: 1; min-width: 140px; background: none; border: none; outline: none; color: var(--text-high); font-size: 13px; padding: 3px 2px; }
+.acct-chip {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  padding: 2px 4px 2px 8px; border-radius: 9999px; background: var(--panel); border: 1px solid var(--border);
+  font-family: 'GeistMono'; font-size: 11.5px; color: var(--text-high);
+}
+.acct-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-chip-x { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; color: var(--text-low); font-size: 13px; line-height: 1; }
+.acct-chip-x:hover { color: var(--text-high); background: var(--panel-hover); }
+.acct-picker-results {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 30; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow, 0 8px 24px rgba(0,0,0,0.35));
+}
+.acct-picker-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px;
+  font-size: 12.5px; color: var(--text-medium); text-align: left;
+}
+.acct-picker-row.active, .acct-picker-row:hover { background: var(--panel-hover); color: var(--text-high); }
+.acct-picker-name { color: var(--text-high); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-picker-addr { margin-left: auto; color: var(--text-low); font-size: 11px; flex-shrink: 0; }
+/* Foreign-library stats: the only view of another user's library contents. */
+.lib-stats { display: flex; gap: 32px; flex-wrap: wrap; }
+.lib-stats > div { display: flex; flex-direction: column; gap: 2px; }
+.lib-stat-num { font-family: 'Gazpacho', serif; font-size: 24px; font-weight: 500; color: var(--text-high); }
+.lib-stat-label { font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); text-transform: uppercase; letter-spacing: 0.05em; }
+/* Account rows carry the same avatar an account pill would (profile image /
+   snakewatch emoji / placeholder while the display refs load). */
+.account-row-emoji { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; overflow: hidden; background: var(--bg-elev); border: 1px solid var(--border); }
+.signing-account-name { color: var(--text-high); font-weight: 500; }
 
 /* Live mode: briefly highlight rows that were just added so it's clear which /
    how many arrived. Background pulses from an accent tint to transparent. */
