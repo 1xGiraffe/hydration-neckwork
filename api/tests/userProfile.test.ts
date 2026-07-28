@@ -35,6 +35,34 @@ describe('profiles', () => {
     expect(insertedRows(client, 'user_avatars').at(-1)).toMatchObject({ account_id: ACC, deleted: 1 })
   })
 
+  it('never reuses an avatar version after a clear → re-upload (the URL is cached immutable)', async () => {
+    await setProfileAvatar(ACC, WEBP.toString('base64'))              // v1
+    const before = await setProfileAvatar(ACC, PNG.toString('base64')) // v2
+    expect(before.avatarVersion).toBe(2)
+    const cleared = await clearProfileAvatar(ACC)
+    expect(cleared.avatarVersion).toBe(0)
+    // The persisted counter stays at its high-water mark (2), not reset to 0 —
+    // otherwise the very next upload would compute 0+1=1, reusing a version
+    // already served under the old (now-wrong) image at that URL.
+    expect(insertedRows(client, 'user_profiles').at(-1)).toMatchObject({ account_id: ACC, avatar_version: 2 })
+    const reuploaded = await setProfileAvatar(ACC, JPEG.toString('base64'))
+    expect(reuploaded.avatarVersion).toBe(3)
+  })
+
+  it('keeps the counter monotonic across a reload even while no avatar is currently set', async () => {
+    await setProfileAvatar(ACC, WEBP.toString('base64'))   // v1
+    await setProfileAvatar(ACC, PNG.toString('base64'))    // v2
+    await clearProfileAvatar(ACC)
+    const profileRows = insertedRows(client, 'user_profiles')
+    // Reload from exactly what was persisted: the profile row still carries the
+    // counter (2), and user_avatars FINAL has no live row after the tombstone.
+    const restore = fakeClient({ user_profiles: [profileRows.at(-1) as Record<string, unknown>], user_avatars: [] })
+    initUserProfileService(restore); await loadUserProfiles()
+    expect(profileForAccount(ACC)).toBeNull()   // no name, no live avatar -> null
+    const p = await setProfileAvatar(ACC, JPEG.toString('base64'))
+    expect(p.avatarVersion).toBe(3)   // continues past the last served version, not from 0
+  })
+
   it('validates magic bytes and size', () => {
     expect(validateAvatarBytes(PNG)).toBe('image/png')
     expect(validateAvatarBytes(WEBP)).toBe('image/webp')
@@ -45,7 +73,11 @@ describe('profiles', () => {
 
   it('profileForAccount is null until something is set, and loads persisted rows', async () => {
     expect(profileForAccount('0x' + 'ee'.repeat(32))).toBeNull()
-    const restore = fakeClient({ user_profiles: [{ account_id: ACC, display_name: 'Bob', avatar_version: 3 }] })
+    // Presence comes from user_avatars, not from avatar_version alone.
+    const restore = fakeClient({
+      user_profiles: [{ account_id: ACC, display_name: 'Bob', avatar_version: 3 }],
+      user_avatars: [{ account_id: ACC, deleted: 0 }],
+    })
     initUserProfileService(restore); await loadUserProfiles()
     expect(profileForAccount(ACC)).toEqual({ name: 'Bob', avatarVersion: 3 })
   })

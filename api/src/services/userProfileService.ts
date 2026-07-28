@@ -17,18 +17,41 @@ export const MAX_AVATAR_BYTES = 64 * 1024
 
 let client: ClickHouseClient
 const byAccount = new Map<string, UserProfile>()
+// The persisted avatar_version column, kept separately from UserProfile.avatarVersion
+// above. This map is the monotonic high-water mark — it only ever grows, on a
+// NEW upload — while byAccount's avatarVersion is presence-adjusted (0 when no
+// avatar currently exists; see loadUserProfiles). Splitting the two lets clear→
+// re-upload always mint a version strictly greater than any version previously
+// served, without a schema change: avatar URLs are `?v=<version>` cached
+// `immutable`, so reusing a version after a clear would make every viewer's
+// browser keep showing the OLD image forever.
+const avatarCounter = new Map<string, number>()
 
-export function initUserProfileService(c: ClickHouseClient): void { client = c; byAccount.clear() }
+export function initUserProfileService(c: ClickHouseClient): void { client = c; byAccount.clear(); avatarCounter.clear() }
 
 export async function loadUserProfiles(): Promise<void> {
-  const res = await client.query({
-    query: `SELECT account_id, display_name, avatar_version
-            FROM price_data.user_profiles FINAL WHERE deleted = 0`,
-    format: 'JSONEachRow',
-  })
+  const [profileRes, avatarRes] = await Promise.all([
+    client.query({
+      query: `SELECT account_id, display_name, avatar_version
+              FROM price_data.user_profiles FINAL WHERE deleted = 0`,
+      format: 'JSONEachRow',
+    }),
+    // Presence is authoritative from user_avatars itself, not from avatar_version
+    // being nonzero — the counter can be positive with no live avatar (cleared).
+    client.query({
+      query: `SELECT account_id FROM price_data.user_avatars FINAL WHERE deleted = 0`,
+      format: 'JSONEachRow',
+    }),
+  ])
+  const present = new Set<string>()
+  for (const r of await avatarRes.json<{ account_id: string }>()) present.add(r.account_id.toLowerCase())
   byAccount.clear()
-  for (const r of await res.json<{ account_id: string; display_name: string; avatar_version: number }>()) {
-    byAccount.set(r.account_id.toLowerCase(), { name: r.display_name ?? '', avatarVersion: Number(r.avatar_version ?? 0) })
+  avatarCounter.clear()
+  for (const r of await profileRes.json<{ account_id: string; display_name: string; avatar_version: number }>()) {
+    const acc = r.account_id.toLowerCase()
+    const counter = Number(r.avatar_version ?? 0)
+    avatarCounter.set(acc, counter)
+    byAccount.set(acc, { name: r.display_name ?? '', avatarVersion: present.has(acc) ? counter : 0 })
   }
 }
 
@@ -37,10 +60,12 @@ export function profileForAccount(accountId: string): UserProfile | null {
   return p && (p.name !== '' || p.avatarVersion > 0) ? p : null
 }
 
-async function persistProfile(accountId: string, p: UserProfile): Promise<void> {
+// Always persists the CURRENT counter (never the presence-adjusted avatarVersion),
+// so a rename or clear can never roll avatar_version backwards on the next load.
+async function persistProfile(accountId: string, name: string): Promise<void> {
   await client.insert({
     table: 'price_data.user_profiles',
-    values: [{ account_id: accountId, display_name: p.name, avatar_version: p.avatarVersion, deleted: 0 }],
+    values: [{ account_id: accountId, display_name: name, avatar_version: avatarCounter.get(accountId) ?? 0, deleted: 0 }],
     format: 'JSONEachRow',
   })
 }
@@ -51,7 +76,7 @@ export async function setProfileName(accountId: string, name: string): Promise<U
   const acc = accountId.toLowerCase()
   const next: UserProfile = { name: trimmed, avatarVersion: byAccount.get(acc)?.avatarVersion ?? 0 }
   byAccount.set(acc, next)
-  await persistProfile(acc, next)
+  await persistProfile(acc, trimmed)
   return next
 }
 
@@ -73,10 +98,16 @@ export async function setProfileAvatar(accountId: string, base64: string): Promi
   if (!validateAvatarBytes(bytes)) throw new UserDataError(422, 'Avatar must be webp, png, or jpeg and at most 64 KiB')
   const acc = accountId.toLowerCase()
   const prev = byAccount.get(acc) ?? { name: '', avatarVersion: 0 }
-  const next: UserProfile = { name: prev.name, avatarVersion: prev.avatarVersion + 1 }
+  // Bump the monotonic counter, not prev.avatarVersion — after a clear the
+  // latter reads 0 while the counter (and every previously served ?v=) is
+  // higher, and reusing an old version would serve stale bytes from an
+  // immutably-cached URL.
+  const nextCounter = (avatarCounter.get(acc) ?? 0) + 1
+  const next: UserProfile = { name: prev.name, avatarVersion: nextCounter }
   await client.insert({ table: 'price_data.user_avatars', values: [{ account_id: acc, image: bytes.toString('base64'), deleted: 0 }], format: 'JSONEachRow' })
+  avatarCounter.set(acc, nextCounter)
   byAccount.set(acc, next)
-  await persistProfile(acc, next)
+  await persistProfile(acc, prev.name)
   return next
 }
 
@@ -86,7 +117,10 @@ export async function clearProfileAvatar(accountId: string): Promise<UserProfile
   const next: UserProfile = { name: prev.name, avatarVersion: 0 }
   await client.insert({ table: 'price_data.user_avatars', values: [{ account_id: acc, image: '', deleted: 1 }], format: 'JSONEachRow' })
   byAccount.set(acc, next)
-  await persistProfile(acc, next)
+  // avatarCounter is left untouched — it only grows on a new upload
+  // (setProfileAvatar), so persistProfile below still writes the un-reset
+  // counter into avatar_version, and the next upload continues past it.
+  await persistProfile(acc, prev.name)
   return next
 }
 
