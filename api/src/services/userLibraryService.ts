@@ -27,20 +27,25 @@ export const LIMITS = {
   subscriptionsPerUser: 200, nameLen: 48, noteLen: 280,
 } as const
 
+interface Subscription { status: 'invited' | 'active' | 'declined'; origin: 'invite' | 'public' }
+
 let client: ClickHouseClient
 const libraries = new Map<string, UserLibrary>()
 const byOwner = new Map<string, Set<string>>()
+const subsByLibrary = new Map<string, Map<string, Subscription>>()   // libraryId -> account -> sub
+const subsByAccount = new Map<string, Set<string>>()                 // account -> libraryIds (any status)
 
 export function initUserLibraryService(c: ClickHouseClient): void {
-  client = c; libraries.clear(); byOwner.clear()
+  client = c; libraries.clear(); byOwner.clear(); subsByLibrary.clear(); subsByAccount.clear()
 }
 
 export async function loadUserLibraries(): Promise<void> {
-  libraries.clear(); byOwner.clear()
-  const [libRes, tagRes, memberRes] = [
+  libraries.clear(); byOwner.clear(); subsByLibrary.clear(); subsByAccount.clear()
+  const [libRes, tagRes, memberRes, subRes] = [
     await client.query({ query: `SELECT library_id, owner_account_id, name, note, visibility, is_personal FROM price_data.user_libraries FINAL WHERE deleted = 0`, format: 'JSONEachRow' }),
     await client.query({ query: `SELECT library_id, tag_id, name, color, icon, note FROM price_data.user_tags FINAL WHERE deleted = 0`, format: 'JSONEachRow' }),
     await client.query({ query: `SELECT library_id, tag_id, account_id FROM price_data.user_tag_members FINAL WHERE deleted = 0`, format: 'JSONEachRow' }),
+    await client.query({ query: `SELECT library_id, account_id, status, origin FROM price_data.user_library_subscriptions FINAL WHERE deleted = 0`, format: 'JSONEachRow' }),
   ]
   for (const r of await libRes.json<{ library_id: string; owner_account_id: string; name: string; note: string; visibility: string; is_personal: number }>()) {
     const lib: UserLibrary = {
@@ -62,6 +67,10 @@ export async function loadUserLibraries(): Promise<void> {
     tag.members.add(r.account_id)
     lib.memberTag.set(r.account_id, r.tag_id)
   }
+  for (const r of await subRes.json<{ library_id: string; account_id: string; status: string; origin: string }>()) {
+    if (!libraries.has(r.library_id)) continue
+    setSub(r.library_id, r.account_id, { status: r.status as Subscription['status'], origin: r.origin as Subscription['origin'] }, false)
+  }
 }
 
 export function getLibrary(libraryId: string): UserLibrary | null { return libraries.get(libraryId) ?? null }
@@ -72,11 +81,32 @@ export function librarySummary(lib: UserLibrary): LibrarySummary {
   return {
     libraryId: lib.libraryId, name: lib.name, note: lib.note, visibility: lib.visibility, isPersonal: lib.isPersonal,
     ownerAccountId: lib.owner, tagCount: lib.tags.size, accountCount: lib.memberTag.size,
-    subscriberCount: subscriberCountFor(lib.libraryId),   // Task 7 replaces the stub below
+    subscriberCount: subscriberCountFor(lib.libraryId),
   }
 }
-// Replaced in Task 7 by the real subscription index.
-function subscriberCountFor(_libraryId: string): number { return 0 }
+async function setSub(libraryId: string, account: string, sub: Subscription | null, persist = true): Promise<void> {
+  if (sub) {
+    if (!subsByLibrary.has(libraryId)) subsByLibrary.set(libraryId, new Map())
+    subsByLibrary.get(libraryId)!.set(account, sub)
+    if (!subsByAccount.has(account)) subsByAccount.set(account, new Set())
+    subsByAccount.get(account)!.add(libraryId)
+  } else {
+    subsByLibrary.get(libraryId)?.delete(account)
+    subsByAccount.get(account)?.delete(libraryId)
+  }
+  if (!persist) return
+  await client.insert({
+    table: 'price_data.user_library_subscriptions',
+    values: [{ library_id: libraryId, account_id: account, status: sub?.status ?? 'active', origin: sub?.origin ?? 'public', deleted: sub ? 0 : 1 }],
+    format: 'JSONEachRow',
+  })
+}
+
+function subscriberCountFor(libraryId: string): number {
+  let n = 0
+  for (const s of subsByLibrary.get(libraryId)?.values() ?? []) if (s.status === 'active') n++
+  return n
+}
 
 function checkText(value: string, max: number, what: string): string {
   const v = value.trim()
@@ -154,20 +184,98 @@ export async function updateLibrary(owner: string, libraryId: string, patch: { n
   if (patch.note !== undefined) lib.note = checkText(patch.note, LIMITS.noteLen, 'library note')
   if (patch.visibility !== undefined && patch.visibility !== lib.visibility) {
     lib.visibility = patch.visibility
-    if (patch.visibility === 'private') await revokePublicSubscriptions(lib.libraryId)   // Task 7; stub as no-op until then
+    if (patch.visibility === 'private') await revokePublicSubscriptions(lib.libraryId)
   }
   await persistLibrary(lib)
   return lib
 }
-// Replaced in Task 7.
-async function revokePublicSubscriptions(_libraryId: string): Promise<void> {}
+async function revokePublicSubscriptions(libraryId: string): Promise<void> {
+  for (const [account, sub] of subsByLibrary.get(libraryId) ?? []) {
+    if (sub.origin === 'public') await setSub(libraryId, account, null)
+  }
+}
 
 export async function deleteLibrary(owner: string, libraryId: string): Promise<void> {
   const lib = requireOwned(owner, libraryId)
   if (lib.isPersonal) throw new UserDataError(403, 'The personal library cannot be deleted')
   libraries.delete(libraryId)
   byOwner.get(owner)?.delete(libraryId)
+  for (const account of [...(subsByLibrary.get(libraryId)?.keys() ?? [])]) await setSub(libraryId, account, null)
   await persistLibrary(lib, 1)
+}
+
+export async function inviteToLibrary(owner: string, libraryId: string, grantee: string): Promise<void> {
+  const lib = requireOwned(owner, libraryId)
+  if (grantee === owner) throw new UserDataError(422, 'You already own this library')
+  const existing = subsByLibrary.get(libraryId)?.get(grantee)
+  if (existing?.status === 'active') return
+  await setSub(lib.libraryId, grantee, { status: 'invited', origin: 'invite' })
+}
+
+export async function revokeShare(owner: string, libraryId: string, grantee: string): Promise<void> {
+  requireOwned(owner, libraryId)
+  await setSub(libraryId, grantee, null)
+}
+
+export async function respondToInvite(accountId: string, libraryId: string, accept: boolean): Promise<void> {
+  const sub = subsByLibrary.get(libraryId)?.get(accountId)
+  if (!sub || sub.status !== 'invited') throw new UserDataError(404, 'No pending invite')
+  if (!accept) { await setSub(libraryId, accountId, null); return }
+  if (activeSubscriptionCount(accountId) >= LIMITS.subscriptionsPerUser) throw new UserDataError(422, `Limited to ${LIMITS.subscriptionsPerUser} subscriptions`)
+  await setSub(libraryId, accountId, { status: 'active', origin: 'invite' })
+}
+
+export async function subscribePublic(accountId: string, libraryId: string): Promise<void> {
+  const lib = libraries.get(libraryId)
+  if (!lib) throw new UserDataError(404, 'Library not found')
+  if (lib.owner === accountId) throw new UserDataError(422, 'You already own this library')
+  if (lib.visibility !== 'public') throw new UserDataError(403, 'This library is not public')
+  const existing = subsByLibrary.get(libraryId)?.get(accountId)
+  if (existing?.status === 'active') return
+  if (activeSubscriptionCount(accountId) >= LIMITS.subscriptionsPerUser) throw new UserDataError(422, `Limited to ${LIMITS.subscriptionsPerUser} subscriptions`)
+  await setSub(libraryId, accountId, { status: 'active', origin: existing?.origin === 'invite' ? 'invite' : 'public' })
+}
+
+export async function unsubscribe(accountId: string, libraryId: string): Promise<void> {
+  const sub = subsByLibrary.get(libraryId)?.get(accountId)
+  if (!sub || sub.status !== 'active') throw new UserDataError(404, 'Not subscribed')
+  await setSub(libraryId, accountId, null)
+}
+
+function activeSubscriptionCount(accountId: string): number {
+  let n = 0
+  for (const libId of subsByAccount.get(accountId) ?? []) if (subsByLibrary.get(libId)?.get(accountId)?.status === 'active') n++
+  return n
+}
+
+export function invitesFor(accountId: string): LibrarySummary[] {
+  const out: LibrarySummary[] = []
+  for (const libId of subsByAccount.get(accountId) ?? []) {
+    if (subsByLibrary.get(libId)?.get(accountId)?.status !== 'invited') continue
+    const lib = libraries.get(libId)
+    if (lib) out.push(librarySummary(lib))
+  }
+  return out
+}
+
+export function subscriptionsFor(accountId: string): LibrarySummary[] {
+  const out: LibrarySummary[] = []
+  for (const libId of subsByAccount.get(accountId) ?? []) {
+    if (subsByLibrary.get(libId)?.get(accountId)?.status !== 'active') continue
+    const lib = libraries.get(libId)
+    if (lib) out.push(librarySummary(lib))
+  }
+  return out
+}
+
+// Who may READ a library's contents: its owner, an active subscriber, or —
+// for public libraries — anyone.
+export function canView(accountId: string, libraryId: string): boolean {
+  const lib = libraries.get(libraryId)
+  if (!lib) return false
+  if (lib.visibility === 'public') return true
+  if (lib.owner === accountId) return true
+  return subsByLibrary.get(libraryId)?.get(accountId)?.status === 'active'
 }
 
 export async function createTag(owner: string, libraryId: string, def: { name: string; color?: string; icon?: string; note?: string }): Promise<UserTagDef> {
