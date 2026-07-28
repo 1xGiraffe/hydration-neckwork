@@ -21,8 +21,8 @@ function visibilityChip(lib: Pick<LibrarySummaryRef, 'isPersonal' | 'visibility'
 
 const TAG_COLORS = ['#5865f2', '#22c55e', '#f97316', '#7b6cf6', '#ef4444', '#06b6d4', '#eab308', '#74C742']
 
-function DeleteLibraryDialog({ open, onOpenChange, name, pending, onConfirm }: {
-  open: boolean; onOpenChange: (open: boolean) => void; name: string; pending: boolean; onConfirm: () => void
+function DeleteLibraryDialog({ open, onOpenChange, name, pending, error, onConfirm }: {
+  open: boolean; onOpenChange: (open: boolean) => void; name: string; pending: boolean; error: string | null; onConfirm: () => void
 }) {
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -39,6 +39,7 @@ function DeleteLibraryDialog({ open, onOpenChange, name, pending, onConfirm }: {
           </div>
           <div className="dialog-body">
             <Dialog.Description className="dialog-hint">Delete "{name}"? Its tags, subscriptions and invites are removed. This cannot be undone.</Dialog.Description>
+            {error && <div className="dialog-error">{error}</div>}
           </div>
           <div className="dialog-foot">
             <button type="button" className="btn" onClick={() => onOpenChange(false)}>Cancel</button>
@@ -239,6 +240,7 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
   const [editOpen, setEditOpen] = useState(false)
   const [editMounted, setEditMounted] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [newTagOpen, setNewTagOpen] = useState(false)
   const [shareAddr, setShareAddr] = useState('')
   const [shareError, setShareError] = useState<string | null>(null)
@@ -261,14 +263,23 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
     catch (e) { setShareError(e instanceof Error ? e.message : 'Could not revoke that address') }
   }
   async function confirmDelete() {
+    setDeleteError(null)
     try {
       await deleteMutation.mutateAsync([libraryId])
       setDeleteOpen(false)
       navigate(paths.libraries())
-    } catch {
-      // The mutation's error surfaces through its own isError state; the dialog
-      // stays open (closing on a failed delete would hide the only sign it failed).
+    } catch (e) {
+      // Surfaced inline via DeleteLibraryDialog's `error` prop; the dialog stays
+      // open (closing on a failed delete would hide the only sign it failed).
+      setDeleteError(e instanceof Error ? e.message : 'Could not delete the library')
     }
+  }
+  // Clearing on close (Cancel/Escape/overlay-click, not just the Cancel button)
+  // keeps a stale error from a previous failed attempt from flashing before the
+  // reset effect would otherwise run on next open.
+  function closeDelete(open: boolean) {
+    setDeleteOpen(open)
+    if (!open) setDeleteError(null)
   }
 
   return (
@@ -298,7 +309,7 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
                 {isOwner ? (
                   <>
                     <button type="button" className="btn" onClick={() => { setEditMounted(true); setEditOpen(true) }}>Edit</button>
-                    {!data.isPersonal && <button type="button" className="btn danger" onClick={() => setDeleteOpen(true)}>Delete</button>}
+                    {!data.isPersonal && <button type="button" className="btn danger" onClick={() => { setDeleteError(null); setDeleteOpen(true) }}>Delete</button>}
                   </>
                 ) : data.visibility === 'public' && session ? (
                   data.subscribed
@@ -328,7 +339,7 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
 
             {isOwner && <NewTagDialog open={newTagOpen} onOpenChange={setNewTagOpen} libraryId={libraryId} />}
             {isOwner && !data.isPersonal && (
-              <DeleteLibraryDialog open={deleteOpen} onOpenChange={setDeleteOpen} name={data.name} pending={deleteMutation.isPending} onConfirm={() => void confirmDelete()} />
+              <DeleteLibraryDialog open={deleteOpen} onOpenChange={closeDelete} name={data.name} pending={deleteMutation.isPending} error={deleteError} onConfirm={() => void confirmDelete()} />
             )}
             {editMounted && (
               <Suspense fallback={null}>

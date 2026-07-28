@@ -151,7 +151,7 @@ function Discover({ libraries, isLoading, me, session, onConnect }: {
                 <td data-label="Tags" className="r mono">{lib.tagCount}</td>
                 <td data-label="Accounts" className="r mono">{lib.accountCount}</td>
                 <td data-label="Subscribers" className="r mono">{lib.subscriberCount}</td>
-                <td className="r">
+                <td data-label="Action" className="r">
                   {!session ? (
                     <button type="button" className="btn sm" onClick={onConnect}>Connect to subscribe</button>
                   ) : owned ? (
