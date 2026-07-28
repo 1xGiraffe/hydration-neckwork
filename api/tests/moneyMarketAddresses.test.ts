@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { mmReserveAddressForAsset, mmReserveScope, valueSingleUnpricedSupply, type MmReserve } from '../src/services/explorerService.ts'
+import { mmReserveAddressForAsset, mmReserveAddressesForTokens, mmReserveAliasIds, mmReserveIdsForAsset, mmReserveScope, valueSingleUnpricedSupply, type MmReserve } from '../src/services/explorerService.ts'
 
 describe('money-market reserve address mapping', () => {
   it('includes both precompile and deployed-token addresses for HOLLAR', () => {
@@ -14,6 +14,70 @@ describe('money-market reserve address mapping', () => {
     expect(mmReserveAddressForAsset(5)).toEqual([
       '0x0000000000000000000000000000000100000005',
     ])
+  })
+})
+
+// One resolution behind every asset-scoped surface: the per-asset scope below and
+// the token filters further down both read it, so a filter and a page can never
+// disagree about which rows are the asset's.
+describe('reserve ids resolve an asset through its aliases', () => {
+  it('reaches the aToken underlying and the share token that displays as the asset', () => {
+    expect(mmReserveIdsForAsset(69)).toEqual([69, 690])          // GDOT → 2-Pool-GDOT
+    expect(mmReserveIdsForAsset(420)).toEqual([420, 4200])       // GETH → 2-Pool-GETH
+    expect(mmReserveIdsForAsset(1001)).toEqual([1001, 5])        // aDOT → DOT
+    expect(mmReserveIdsForAsset(5)).toEqual([5])                 // a plain reserve
+    expect(mmReserveIdsForAsset(690)).toEqual([690])             // the share token itself
+  })
+})
+
+// A token filter asking for GDOT matched only GDOT's own precompile, where the market
+// never files a supply, borrow, repay or liquidation — those all sit on the pool
+// share — so the money-market feed returned reward claims and nothing else.
+describe('token filters match every reserve a row can be filed under', () => {
+  it('covers the pool-share reserve of the token asked for', () => {
+    expect(mmReserveAddressesForTokens([69])).toEqual([
+      '0x0000000000000000000000000000000100000045',   // GDOT itself (reward claims)
+      '0x00000000000000000000000000000001000002b2',   // 2-Pool-GDOT (the reserve)
+    ])
+  })
+
+  it('keeps a plain reserve to one address and dedupes an aToken onto its underlying', () => {
+    expect(mmReserveAddressesForTokens([5])).toEqual(['0x0000000000000000000000000000000100000005'])
+    expect(mmReserveAddressesForTokens([1001, 5])).toEqual(['0x0000000000000000000000000000000100000005'])
+  })
+
+  // A filter can name several tokens; every one of them contributes its aliases.
+  it('unions the aliases of every token in the filter', () => {
+    expect(mmReserveAddressesForTokens([69, 420])).toEqual(expect.arrayContaining([
+      '0x00000000000000000000000000000001000002b2',
+      '0x0000000000000000000000000000000100001068',
+    ]))
+    expect(mmReserveAddressesForTokens([])).toEqual([])
+  })
+
+  // HOLLAR's deployed token address must survive the widening.
+  it('keeps deployed-token addresses', () => {
+    expect(mmReserveAddressesForTokens([222])).toContain('0x531a654d1696ed52e7275a8cede955e82620f99a')
+  })
+
+  // The token filter runs twice — as the SQL reserve predicate and again per
+  // assembled row — so a row has to answer to the same ids the address set was built
+  // from. Widening only the SQL half selected rows the row test then discarded, which
+  // left a filtered feed empty and its walker searching to the depth bound (503).
+  it('lets a row answer to the ids whose filter selected it', () => {
+    expect(mmReserveAliasIds(690)).toEqual([69])        // a 2-Pool-GDOT row answers to GDOT
+    expect(mmReserveAliasIds(5)).toEqual([1001])        // a DOT row answers to aDOT
+    expect(mmReserveAliasIds(4200)).toEqual([420])
+    expect(mmReserveAliasIds(69)).toEqual([])           // nothing further to answer to
+  })
+
+  // Round trip: every id whose filter selects a reserve's address must be an id that
+  // reserve's rows answer to, or the two halves of the filter disagree again.
+  it('round-trips against the address resolution', () => {
+    for (const [token, reserve] of [[69, 690], [420, 4200], [1110, 110], [1001, 5]] as const) {
+      expect(mmReserveIdsForAsset(token)).toContain(reserve)
+      expect([reserve, ...mmReserveAliasIds(reserve)]).toContain(token)
+    }
   })
 })
 

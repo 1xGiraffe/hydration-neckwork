@@ -164,9 +164,15 @@ describe('the account-scoped XCM readers use the account-first projection', () =
     expect(occurrences(body, '${sqlEventNameList(XCM_IN_WALK_EVENTS)}')).toBe(1)
     // The decoder's other read is the barrier, still on the parent for its payload.
     expect(occurrences(body, '${xcmEventActivityTable()}')).toBe(1)
-    // Hook context is the projection's own filter — extrinsic_index is not a column there —
-    // so of the decoder's two SQL predicates only the barrier's still states it.
-    expect(occurrences(body, 'AND extrinsic_index IS NULL')).toBe(1)
+    // Hook context is the walk projection's own filter — extrinsic_index is not a column
+    // there — so of the decoder's three reads only two state it: the barrier, and the
+    // crossable-index read, which is on raw_events and carries no such filter of its own.
+    // A run that could step out of hook context would walk into an extrinsic's events.
+    expect(occurrences(body, 'AND extrinsic_index IS NULL')).toBe(2)
+    expect(occurrences(body, '${sqlEventNameList(XCM_WALK_CROSSABLE_EVENTS)}')).toBe(1)
+    expect(occurrences(body, 'FROM price_data.raw_events')).toBe(1)
+    // Set semantics, so a replay duplicate cannot change which indices are crossable.
+    expect(occurrences(body, 'raw_events FINAL')).toBe(0)
   })
 })
 

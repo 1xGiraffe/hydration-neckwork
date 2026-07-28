@@ -130,6 +130,62 @@ describe('legacy swap identity', () => {
   })
 })
 
+// The legacy pallets do not agree on what their buy event's fields mean, and the
+// disagreement is silent: both carry `amount` and `buyPrice`, in opposite roles.
+// Reading an LBP buy with XYK's order swaps the trade's two sides, so the paid
+// leg is valued with the received leg's raw integer — across a decimals gap that
+// turned 202 DOT into 10,000,000 DOT and one bond purchase into $77.3M of volume.
+// Verified against the Router.RouteExecuted emitted in the same extrinsic:
+// LBP `buyPrice` = amountOut in 26/26 legacy routed buys, XYK `amount` =
+// amountOut in 396/446 (the remainder are multi-hop, where one leg != the route).
+describe('legacy buy/sell field mapping', () => {
+  // Which args_json field a legacy leg reads for one event, by evaluating the
+  // generated multiIf's branches in order the way ClickHouse would.
+  function legacyField(sql: string, side: 'in' | 'out', eventName: string): string {
+    const asset = side === 'in' ? 'assetIn' : 'assetOut'
+    const start = sql.indexOf(`toUInt32(greatest(0, JSONExtractInt(args_json,'${asset}')))`)
+    expect(start).toBeGreaterThan(-1)
+    const block = sql.slice(start, sql.indexOf('\n  FROM legacy', start))
+    for (const [, list, eq, field] of block.matchAll(
+      /event_name (?:IN \(([^)]*)\)|= ('[^']*')), JSONExtractString\(args_json,'(\w+)'\)/g,
+    )) {
+      if ((list ?? eq).split(',').map(s => s.trim().slice(1, -1)).includes(eventName)) return field
+    }
+    const fallback = block.match(/JSONExtractString\(args_json,'(\w+)'\)\), 0\)/)
+    expect(fallback).not.toBeNull()
+    return fallback![1]
+  }
+
+  it('reads an LBP buy in its own field order: amount paid, buyPrice received', () => {
+    const sql = buildPartitionInsertSql('197011')
+    expect(legacyField(sql, 'in', 'LBP.BuyExecuted')).toBe('amount')
+    expect(legacyField(sql, 'out', 'LBP.BuyExecuted')).toBe('buyPrice')
+  })
+
+  it('keeps an XYK buy on the opposite order: buyPrice paid, amount received', () => {
+    const sql = buildPartitionInsertSql('197011')
+    expect(legacyField(sql, 'in', 'XYK.BuyExecuted')).toBe('buyPrice')
+    expect(legacyField(sql, 'out', 'XYK.BuyExecuted')).toBe('amount')
+  })
+
+  it('keeps both pallets sells on amount paid, salePrice received', () => {
+    // Sells agree across the two pallets, so this branch stays shared.
+    const sql = buildPartitionInsertSql('197011')
+    for (const name of ['XYK.SellExecuted', 'LBP.SellExecuted']) {
+      expect(legacyField(sql, 'in', name)).toBe('amount')
+      expect(legacyField(sql, 'out', name)).toBe('salePrice')
+    }
+  })
+
+  it('leaves the Omnipool/Stableswap events on their own explicit amounts', () => {
+    const sql = buildPartitionInsertSql('197011')
+    for (const name of ['Omnipool.SellExecuted', 'Omnipool.BuyExecuted', 'Stableswap.BuyExecuted']) {
+      expect(legacyField(sql, 'in', name)).toBe('amountIn')
+      expect(legacyField(sql, 'out', name)).toBe('amountOut')
+    }
+  })
+})
+
 // The derived table's partition is a synthetic month over block_height * 12 seconds.
 // ClickHouse cannot invert that expression into a primary-key range, so a rebuild
 // filtered on it alone read every granule of raw_events (596M rows / 119 GiB per
