@@ -83,6 +83,8 @@ const CACHE_CONTROL: [RegExp, number][] = [
   [/^\/explorer\/address\/[^/]+\/history/, 120],
   [/^\/explorer\/(address|tag)\/[^/]+\/counts/, 600],
   [/^\/explorer\/(daily|accounts-daily)/, 300],
+  [/^\/explorer\/librar/, 30],                       // /libraries directory + /library/:id detail
+  [/^\/explorer\/address\/[^/]+\/libraries/, 30],
   [/^\/explorer\/(address|tag)\//, 8],
   [/^\/explorer\/search/, 10],
   // `assets` (no trailing slash) is the asset directory — 30s in-process TTL, so
