@@ -60,6 +60,21 @@ export function allAssociations(account: Pick<AccountRef, 'accountId' | 'tag'>):
   return out
 }
 
+// Which of the viewer's own (or subscribed) libraries owns a given tag id, if
+// any — the client-side half of TagDetail's routing: a user-tag id is a UUID
+// minted by userLibraryService, never one of the short, code-defined system
+// slugs (`kraken`, `treasury`, …), so this can never accidentally shadow a
+// real system tag of the same id. Used to resolve /tag/:id instantly, before
+// the system lookup even has a chance to 404.
+export function libraryForTag(tagId: string): { libraryId: string; libraryName: string } | null {
+  if (!indexes) return null
+  for (const lib of indexes) {
+    if (lib.libraryId === 'system') continue
+    if (lib.tags.some(t => t.tagId === tagId)) return { libraryId: lib.libraryId, libraryName: lib.name }
+  }
+  return null
+}
+
 export interface UserTagSearchHit { libraryId: string; libraryName: string; tagId: string; name: string; color: string; icon: string }
 
 // Client-side search over the viewer's OWN visible library tags — never the

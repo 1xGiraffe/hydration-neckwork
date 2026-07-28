@@ -18,7 +18,7 @@ type Hit = SearchResult | UserTagHit
 const srLooksAddr = (s?: string) => !!s && (s.startsWith('0x') || /^[1-9A-HJ-NP-Za-km-z]{40,}$/.test(s))
 
 function routeFor(r: Hit): string {
-  if (r.type === 'user-tag') return paths.libraryTag(r.libraryId, r.tagId)
+  if (r.type === 'user-tag') return paths.tag(r.tagId)
   switch (r.type) {
     case 'block': return paths.block(r.value)
     case 'extrinsic': return paths.extrinsic(r.value)

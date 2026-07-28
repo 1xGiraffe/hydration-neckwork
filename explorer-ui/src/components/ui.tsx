@@ -547,7 +547,7 @@ export function tagMemberSuffix(tag: Pick<ResolvedTag, 'memberCount'>, address: 
 export function UserTagPill({ tag, address, noCopy, noMemberSuffix }: { tag: ResolvedTag; address: string; noCopy?: boolean; noMemberSuffix?: boolean }) {
   return (
     <span className="addr-wrap">
-      <Link to={tag.kind === 'system' ? paths.tag(tag.id) : paths.libraryTag(tag.libraryId!, tag.id)} className="addr-pill" title={tag.kind === 'user' ? `${tag.name} — your library “${tag.libraryName}”` : 'Tagged group — open combined view'}>
+      <Link to={paths.tag(tag.id)} className="addr-pill" title={tag.kind === 'user' ? `${tag.name} — your library “${tag.libraryName}”` : 'Tagged group — open combined view'}>
         <TagIcon icon={tag.icon} title={tag.name} />
         <span className="tag" style={tag.color ? { color: tag.color } : undefined}>{tag.name}</span>
         {!noMemberSuffix && tagMemberSuffix(tag, address)}

@@ -61,9 +61,9 @@ describe('AddrPill precedence with profiles and user tags', () => {
     ] })
     const html = renderToStaticMarkup(<AddrPill account={{ ...base, tag: { id: 'kraken', name: 'Kraken', color: '#a78bfa', icon: '🦑' } }} />)
     expect(html).toContain('Mine')
-    // The tag's own combined view (/library/:libraryId/tag/:tagId), not the
-    // library management page (/library/:libraryId).
-    expect(hrefOf(html, 'Mine')).toBe('/library/lib1/tag/t1')
+    // The tag's own combined view, sharing the system /tag/:id namespace —
+    // not the library management page (/library/:libraryId).
+    expect(hrefOf(html, 'Mine')).toBe('/tag/t1')
     expect(html).not.toContain('Kraken')
   })
 

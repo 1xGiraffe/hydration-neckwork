@@ -100,14 +100,48 @@ test('a user tag outranks the system tag, and the system tag returns on logout',
   const row = page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '980' }) })
   const pill = row.locator('a.addr-pill')
   await expect(pill).toContainText('Mine')
-  // The tag's own aggregate view, not the library management page.
-  await expect(pill).toHaveAttribute('href', '/library/lib1/tag/t1')
+  // The tag's own aggregate view, sharing the system /tag/:id namespace.
+  await expect(pill).toHaveAttribute('href', '/tag/t1')
 
   await page.locator('.account-btn').click()
   await page.locator('.account-menu button', { hasText: 'Log out' }).click()
 
   await expect(pill).toContainText('Treasury')
   await expect(pill).toHaveAttribute('href', '/tag/treasury')
+})
+
+// Regression coverage for HoverCard's tag/library-tag disambiguation: since
+// user and system tags now share the plain /tag/:id href form, the hover
+// card has to tell them apart the same way TagDetail's own routing does —
+// via the viewer's tag map — rather than a URL shape unique to library tags.
+test('hovering a user-tag pill shows its own aggregate card, not the system tag lookup', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  userMock.state.tagMap = {
+    libraries: [
+      { libraryId: 'lib1', name: 'My library', tags: [
+        { tagId: 't1', name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
+      ] },
+      { libraryId: 'system', name: 'Hydration', tags: [] },
+    ],
+  }
+  // The management-page shape of the same tag, so GET /user/library-tag/lib1/t1
+  // (the hover card's own summary request) has real data to answer with.
+  userMock.state.libraries.push({
+    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+    owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
+    tags: [{
+      tagId: 't1', name: 'Mine', color: '#22c55e', icon: '👀', note: '',
+      members: [{ accountId: TREASURY_ACCOUNT_ID, address: TREASURY_ACCOUNT_ID, emoji: '👤', tag: null }],
+    }],
+  })
+
+  await page.goto('/accounts')
+  const row = page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '980' }) })
+  await row.locator('a.addr-pill').hover()
+
+  const card = page.locator('.hovercard')
+  await expect(card).toContainText('Mine')
+  await expect(card).toContainText('1 account')
 })
 
 test('a user-tag pill opens its own aggregate page, header included', async ({ page, userMock }) => {
@@ -135,7 +169,7 @@ test('a user-tag pill opens its own aggregate page, header included', async ({ p
   const row = page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '980' }) })
   await row.locator('a.addr-pill').click()
 
-  await expect(page).toHaveURL(/\/library\/lib1\/tag\/t1$/)
+  await expect(page).toHaveURL(/\/tag\/t1$/)
   await expect(page.locator('.acct-meta > .tag')).toContainText('Mine')
   await expect(page.locator('.acct-meta')).toContainText('1 accounts')
 })

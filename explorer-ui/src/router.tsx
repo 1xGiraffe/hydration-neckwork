@@ -39,10 +39,10 @@ export type Route =
   | { name: 'accounts' }
   | { name: 'account'; address: string }
   | { name: 'tags' }
+  | { name: 'tags-hydration' }
   | { name: 'tag'; tagId: string }
   | { name: 'libraries' }
   | { name: 'library'; libraryId: string }
-  | { name: 'library-tag'; libraryId: string; tagId: string }
   | { name: 'assets' }
   | { name: 'hdx' }
   | { name: 'hollar' }
@@ -92,16 +92,21 @@ export function parseRoute(loc: string): Route {
     case 'accounts': return { name: 'accounts' }
     case 'account':
       return parts[1] ? { name: 'account', address: parts[1] } : { name: 'accounts' }
-    case 'tags': return { name: 'tags' }
+    // /tags/hydration is the system-tag directory's own page; any other
+    // /tags/* segment (there are none in product today) falls back to the hub.
+    case 'tags': return parts[1] === 'hydration' ? { name: 'tags-hydration' } : { name: 'tags' }
     case 'tag':
       return parts[1] ? { name: 'tag', tagId: parts[1] } : { name: 'tags' }
     case 'libraries': return { name: 'libraries' }
     case 'library':
       if (!parts[1]) return { name: 'libraries' }
-      // The tag's own aggregate view, nested under its owning library
-      // (/library/:libraryId/tag/:tagId). A bare trailing /tag with no id
-      // falls back to the plain library page rather than a stray-segment 404.
-      if (parts[2] === 'tag' && parts[3]) return { name: 'library-tag', libraryId: parts[1], tagId: parts[3] }
+      // Pre-consolidation: a user tag's aggregate view used to live under its
+      // owning library (/library/:libraryId/tag/:tagId). It now shares the
+      // system namespace at /tag/:tagId (TagDetail resolves it client-side via
+      // userTags.libraryForTag) — redirect old links/bookmarks there. A bare
+      // trailing /tag with no id falls back to the plain library page rather
+      // than a stray-segment 404.
+      if (parts[2] === 'tag' && parts[3]) return { name: 'legacy', to: paths.tag(parts[3]) }
       return { name: 'library', libraryId: parts[1] }
     case 'assets': return { name: 'assets' }
     // /referendum/<pallet>/<index>. The pallet is part of the identity: Hydration
@@ -255,6 +260,7 @@ export const paths = {
   accounts: () => '/accounts',
   account: (addr: string) => `/account/${encodeURIComponent(addr)}`,
   tags: () => '/tags',
+  tagsHydration: () => '/tags/hydration',
   tag: (tagId: string) => `/tag/${encodeURIComponent(tagId)}`,
   assets: () => '/assets',
   hdx: () => '/hdx',
@@ -263,7 +269,6 @@ export const paths = {
   holders: (assetId: number) => `/holders/${assetId}`,
   libraries: () => '/libraries',
   library: (id: string) => `/library/${encodeURIComponent(id)}`,
-  libraryTag: (libraryId: string, tagId: string) => `/library/${encodeURIComponent(libraryId)}/tag/${encodeURIComponent(tagId)}`,
 }
 
 export function Link({ to, children, className, title, ariaLabel, onClick, style, data }: { to: string; children: ReactNode; className?: string; title?: string; ariaLabel?: string; onClick?: (e: MouseEvent) => void; style?: CSSProperties; data?: Record<string, string> }) {

@@ -6,7 +6,7 @@ import { useLibraryTagSummary } from '../hooks/useUser'
 import { F, AssetIcon, AssetChip, AssetAmount, AddrPill, CallPill, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow, UserTagPill } from './ui'
 import { ayeSharePct, selectTally } from '../utils/referendumVotes'
 import { dcaCadence, dcaProgress, fmtDuration } from '../utils/dca'
-import { resolveTag, allAssociations, useTagMapVersion } from '../userTags'
+import { resolveTag, allAssociations, useTagMapVersion, libraryForTag } from '../userTags'
 import type { AssetRef } from '../types'
 
 // Global hover preview cards for account (.addr-pill), tag (/tag/… links),
@@ -81,13 +81,14 @@ function parseTarget(el: Element): Omit<Target, 'left' | 'top' | 'bottom'> | nul
   }
   const rm = href.match(/\/referendum\/(opengov|democracy)\/(\d+)$/); if (rm) return { kind: 'referendum', id: `${rm[1]}/${rm[2]}` }
   const am = href.match(/\/account\/([^?#]+)$/); if (am) return { kind: 'account', id: decodeURIComponent(am[1]), vote: voteContext(el) }
-  // Checked BEFORE the bare /tag/… pattern below — a library tag's aggregate
-  // link (/library/:libraryId/tag/:tagId) also ends in "/tag/<id>", and would
-  // otherwise be misread as a SYSTEM tag whose id happens to be this tag's
-  // (unrelated) uuid.
-  const lm = href.match(/\/library\/([^/?#]+)\/tag\/([^?#]+)$/)
-  if (lm) return { kind: 'library-tag', id: decodeURIComponent(lm[2]), libraryId: decodeURIComponent(lm[1]) }
-  const tm = href.match(/\/tag\/([^?#]+)$/); if (tm) return { kind: 'tag', id: decodeURIComponent(tm[1]) }
+  // A user tag's aggregate view now shares the system /tag/:id namespace —
+  // disambiguate via the viewer's own tag-map, same as TagDetail's own routing.
+  const tm = href.match(/\/tag\/([^?#]+)$/)
+  if (tm) {
+    const id = decodeURIComponent(tm[1])
+    const lib = libraryForTag(id)
+    return lib ? { kind: 'library-tag', id, libraryId: lib.libraryId } : { kind: 'tag', id }
+  }
   const sm = href.match(/\/asset\/(\d+)$/); if (sm) return { kind: 'asset', id: sm[1] }
   const dm = href.match(/\/dca\/([^?#]+)$/); if (dm) { const id = decodeURIComponent(dm[1]); return { kind: dcaKind(id), id } }
   const trm = href.match(/\/(?:trade|swap)\/([^?#]+)$/); if (trm) return { kind: 'trade', id: decodeURIComponent(trm[1]) }

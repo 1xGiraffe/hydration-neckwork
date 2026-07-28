@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { setTagMap, resolveTag, allAssociations, searchUserTags } from '../src/userTags'
+import { setTagMap, resolveTag, allAssociations, searchUserTags, libraryForTag } from '../src/userTags'
 import type { AccountRef } from '../src/types'
 
 const ACC = '0x' + 'ab'.repeat(32)
@@ -44,6 +44,29 @@ describe('resolveTag', () => {
     const all = allAssociations(account)
     expect(all.map(a => a.id)).toEqual(['t1', 'kraken', 't2'])
     expect(all[2]).toMatchObject({ libraryName: 'Sub' })
+  })
+})
+
+describe('libraryForTag', () => {
+  beforeEach(() => setTagMap(null))
+
+  it('returns null when logged out (no map)', () => {
+    expect(libraryForTag('t1')).toBeNull()
+  })
+
+  it('finds the owning library by tag id, skipping the system slot', () => {
+    setTagMap({ libraries: [
+      { libraryId: 'lib1', name: 'Personal', tags: [mine] },
+      { libraryId: 'system', name: 'Hydration', tags: [] },
+      { libraryId: 'lib2', name: 'Sub', tags: [theirs] },
+    ] })
+    expect(libraryForTag('t1')).toEqual({ libraryId: 'lib1', libraryName: 'Personal' })
+    expect(libraryForTag('t2')).toEqual({ libraryId: 'lib2', libraryName: 'Sub' })
+  })
+
+  it('returns null for an id no library claims (e.g. a system tag slug)', () => {
+    setTagMap({ libraries: [{ libraryId: 'lib1', name: 'Personal', tags: [mine] }] })
+    expect(libraryForTag('kraken')).toBeNull()
   })
 })
 

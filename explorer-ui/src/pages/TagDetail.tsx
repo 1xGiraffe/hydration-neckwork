@@ -9,8 +9,26 @@ import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, MoneyMarketPositions, ActiveDcaTable, LiquidityPositionsTable } from '../components/AccountSections'
 import { BalancesTreemap } from '../components/BalancesTreemap'
+import { libraryForTag, useTagMapVersion } from '../userTags'
+import { LibraryTagDetail } from './LibraryTagDetail'
 
+// A user tag's aggregate view shares this same /tag/:id URL as a system tag —
+// this wrapper decides which one a given id means. System tag slugs are short,
+// code-defined words ('kraken', 'treasury', …); user-tag ids are UUIDs minted
+// by userLibraryService, so the two id spaces never collide — checking the
+// viewer's own tag-map first (instant, client-side, no request) can only ever
+// match a real user tag, never accidentally shadow a system one. Logged out,
+// or for a tag outside the viewer's own libraries/subscriptions, the map has
+// no entry and this falls through to the system view, which 404s on a
+// user-tag id exactly like it always did on any other unknown id.
 export function TagDetail({ tagId }: { tagId: string }) {
+  useTagMapVersion()   // re-render once the viewer's tag map loads/changes
+  const lib = libraryForTag(tagId)
+  if (lib) return <LibraryTagDetail libraryId={lib.libraryId} tagId={tagId} />
+  return <SystemTagDetail tagId={tagId} />
+}
+
+function SystemTagDetail({ tagId }: { tagId: string }) {
   const { data, isLoading, isError } = useTag(tagId)
   // Exact list lengths for the tab badges, shared with the lists' own totals.
   const activityTotal = useTagListCount(tagId, activityListCount('all', '', {}))
