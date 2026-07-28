@@ -164,7 +164,9 @@ export const MOCK_ME: MeResponse = {
   libraries: [MOCK_PERSONAL_LIBRARY, MOCK_LIBRARIES[0]],
   subscriptions: [MOCK_LIBRARIES[1]],
   invites: MOCK_INVITES,
-  order: [MOCK_PERSONAL_LIBRARY.libraryId, MOCK_LIBRARIES[0].libraryId, MOCK_LIBRARIES[1].libraryId],
+  // Priority order always names every slot, including the built-in 'system'
+  // directory — here last, so a viewer's own libraries outrank it by default.
+  order: [MOCK_PERSONAL_LIBRARY.libraryId, MOCK_LIBRARIES[0].libraryId, MOCK_LIBRARIES[1].libraryId, 'system'],
 }
 
 /* ---------- call/event catalogue ---------- */
@@ -1188,6 +1190,9 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   },
   { re: /^\/explorer\/libraries$/, fn: () => MOCK_LIBRARIES },
   { re: /^\/explorer\/library\/(.+)$/, fn: (m) => MOCK_LIBRARY_DETAILS[decodeURIComponent(m[1])] },
+  // Authed detail — same objects as the public endpoint above (the mock has no
+  // private-only library, so there is nothing the anonymous route wouldn't see).
+  { re: /^\/user\/libraries\/(.+)$/, fn: (m) => MOCK_LIBRARY_DETAILS[decodeURIComponent(m[1])] },
   { re: /^\/user\/me$/, fn: () => MOCK_ME },
   { re: /^\/user\/tag-map$/, fn: () => MOCK_TAG_MAP },
   { re: /^\/user\/invites$/, fn: () => MOCK_INVITES },

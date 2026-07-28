@@ -1,9 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AddrPill } from '../src/components/ui'
 import { LibrariesSection } from '../src/pages/Account'
+import { Libraries } from '../src/pages/Libraries'
+import { LibraryDetail } from '../src/pages/LibraryDetail'
 import { setTagMap } from '../src/userTags'
+import { parseRoute, paths } from '../src/router'
+import { MOCK_LIBRARIES, MOCK_LIBRARY_DETAIL } from './fixtures/mockApi'
 import type { AccountRef, LibrarySummaryRef } from '../src/types'
 
 // Finds the single anchor wrapping `text` (libraries render an icon + name
@@ -22,6 +27,15 @@ function hrefOf(html: string, text: string): string | undefined {
 // same as every other component test.
 const ACC = '0x' + 'ab'.repeat(32)
 const base: AccountRef = { accountId: ACC, address: '15xx', emoji: '🦊', tag: null, identity: null, profile: null }
+
+describe('library routes', () => {
+  it('parses the library routes', () => {
+    expect(parseRoute('/libraries')).toEqual({ name: 'libraries' })
+    expect(parseRoute('/library/abc-123')).toEqual({ name: 'library', libraryId: 'abc-123' })
+    expect(parseRoute('/library')).toEqual({ name: 'libraries' })
+    expect(paths.libraries()).toBe('/libraries')
+  })
+})
 
 describe('AddrPill precedence with profiles and user tags', () => {
   beforeEach(() => setTagMap(null))
@@ -97,5 +111,41 @@ describe('LibrariesSection — account page tag libraries', () => {
     const html = renderToStaticMarkup(<LibrariesSection publicLibraries={[]} ownLibraries={[]} isOwn />)
     expect(html).toContain('Manage libraries')
     expect(hrefOf(html, 'Manage libraries')).toBe('/libraries')
+  })
+})
+
+// useSession()'s useSyncExternalStore reads its SERVER snapshot (`() => null`)
+// under renderToStaticMarkup — see router.tsx's useRoute for the same pattern —
+// so every page render in this harness is necessarily the logged-out view.
+// These are smoke tests for the anonymous path; the logged-in panels (Your
+// libraries, Invites, owner controls) are exercised by hand per the task brief
+// and by the e2e suite, matching how Account.tsx/TagDetail.tsx have no
+// full-page render test here either.
+describe('Libraries hub — smoke render (logged out)', () => {
+  it('renders the page title and at least one Discover row', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['libraries'], MOCK_LIBRARIES)
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Libraries /></QueryClientProvider>)
+    expect(html).toContain('Libraries')
+    expect(html).toContain('DeFi desks')
+    expect(hrefOf(html, 'DeFi desks')).toBe('/library/defi-desks')
+    // Logged out: no reorder/new-library affordances, just a connect prompt.
+    expect(html).not.toContain('New library')
+    expect(html).toContain('Connect to subscribe')
+  })
+})
+
+describe('LibraryDetail — smoke render (logged out)', () => {
+  it('renders the header and one tag with a member row', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['library', 'defi-desks', false], MOCK_LIBRARY_DETAIL)
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><LibraryDetail libraryId="defi-desks" /></QueryClientProvider>)
+    expect(html).toContain('DeFi desks')
+    expect(html).toContain('· library')
+    expect(html).toContain('Active traders')
+    expect(html).toContain('2 accounts')
+    // Anonymous viewer: no owner-only affordances.
+    expect(html).not.toContain('New tag')
+    expect(html).not.toContain('Remove')
   })
 })

@@ -40,6 +40,8 @@ export type Route =
   | { name: 'account'; address: string }
   | { name: 'tags' }
   | { name: 'tag'; tagId: string }
+  | { name: 'libraries' }
+  | { name: 'library'; libraryId: string }
   | { name: 'assets' }
   | { name: 'hdx' }
   | { name: 'hollar' }
@@ -92,6 +94,9 @@ export function parseRoute(loc: string): Route {
     case 'tags': return { name: 'tags' }
     case 'tag':
       return parts[1] ? { name: 'tag', tagId: parts[1] } : { name: 'tags' }
+    case 'libraries': return { name: 'libraries' }
+    case 'library':
+      return parts[1] ? { name: 'library', libraryId: parts[1] } : { name: 'libraries' }
     case 'assets': return { name: 'assets' }
     // /referendum/<pallet>/<index>. The pallet is part of the identity: Hydration
     // voted through Democracy (0-206) and OpenGov (0-369) and both index from 0.
@@ -250,8 +255,6 @@ export const paths = {
   hollar: () => '/hollar',
   asset: (assetId: number) => `/asset/${assetId}`,
   holders: (assetId: number) => `/holders/${assetId}`,
-  // Route PARSING lands in Task 15 — until then these are link targets only;
-  // nginx/parseRoute fall back to notfound for them, which is safe.
   libraries: () => '/libraries',
   library: (id: string) => `/library/${encodeURIComponent(id)}`,
 }

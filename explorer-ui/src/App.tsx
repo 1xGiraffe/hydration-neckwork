@@ -23,6 +23,8 @@ const Accounts = lazy(() => import('./pages/Accounts').then(m => ({ default: m.A
 const Account = lazy(() => import('./pages/Account').then(m => ({ default: m.Account })))
 const Tags = lazy(() => import('./pages/Tags').then(m => ({ default: m.Tags })))
 const TagDetail = lazy(() => import('./pages/TagDetail').then(m => ({ default: m.TagDetail })))
+const Libraries = lazy(() => import('./pages/Libraries').then(m => ({ default: m.Libraries })))
+const LibraryDetail = lazy(() => import('./pages/LibraryDetail').then(m => ({ default: m.LibraryDetail })))
 const Assets = lazy(() => import('./pages/Assets').then(m => ({ default: m.Assets })))
 const AssetDetail = lazy(() => import('./pages/AssetDetail').then(m => ({ default: m.AssetDetail })))
 const Hdx = lazy(() => import('./pages/Hdx').then(m => ({ default: m.Hdx })))
@@ -73,6 +75,8 @@ export default function App() {
       case 'account': return <Account address={route.address} />
       case 'tags': return <Tags />
       case 'tag': return <TagDetail tagId={route.tagId} />
+      case 'libraries': return <Libraries />
+      case 'library': return <LibraryDetail libraryId={route.libraryId} />
       case 'assets': return <Assets />
       case 'hdx': return <Hdx />
       case 'hollar': return <Hollar />
