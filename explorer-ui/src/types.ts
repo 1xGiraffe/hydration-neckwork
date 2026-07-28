@@ -502,7 +502,11 @@ export interface ActivityRow {
   // Polkadot-format SS58 (one identity per pubkey across chains); emoji fields,
   // tag, and identity are derived server-side exactly like local accounts'.
   destAccount?: {
-    kind: 'AccountId32' | 'AccountKey20'; address: string; raw: string; subscanUrl: string | null
+    // The same canonical id local accountRefs carry — for a bound-EVM
+    // AccountKey20 this differs from `raw` (the bare H160), so viewer-side
+    // lookups (user tags, avatar URLs) must key on this, not on `raw`/`address`.
+    // Optional only for old cached responses/fixtures that predate this field.
+    kind: 'AccountId32' | 'AccountKey20'; accountId?: string; address: string; raw: string; subscanUrl: string | null
     emoji?: string; emojiName?: string; emojiUrl?: string
     tag?: TagRef | null
     identity?: { display: string; verified: boolean } | null

@@ -2,6 +2,9 @@ import { randomUUID } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
 import { normalizeAddress } from './addressIdentity.ts'
 import { UserDataError } from './userProfileService.ts'
+// explorerService.ts does not import this module (checked: no import cycle),
+// so this stays a direct import rather than an init-time injected function.
+import { resolveDisplayAccountId } from './explorerService.ts'
 
 // User tag libraries: named collections of tags, each tag holding member
 // accounts. Owned by one account; shareable by invite or publicly (Task 7);
@@ -324,8 +327,11 @@ export async function setTagMembers(owner: string, libraryId: string, tagId: str
   const tag = lib.tags.get(tagId)
   if (!tag) throw new UserDataError(404, 'Tag not found')
   const bad: string[] = []
-  const addIds = add.map(a => { const n = normalizeAddress(a); if (!n) bad.push(a); return n?.accountId ?? '' }).filter(Boolean)
-  const removeIds = remove.map(a => { const n = normalizeAddress(a); if (!n) bad.push(a); return n?.accountId ?? '' }).filter(Boolean)
+  // Canonicalize exactly like login/accountRef: a bound-EVM member must be
+  // stored under the SAME accountId pills carry, or a tag on a bound-EVM
+  // account never matches any pill on the page.
+  const addIds = add.map(a => { const n = normalizeAddress(a); if (!n) bad.push(a); return n ? resolveDisplayAccountId(n.accountId) : '' }).filter(Boolean)
+  const removeIds = remove.map(a => { const n = normalizeAddress(a); if (!n) bad.push(a); return n ? resolveDisplayAccountId(n.accountId) : '' }).filter(Boolean)
   if (bad.length) throw new UserDataError(400, `Not valid addresses: ${bad.slice(0, 3).join(', ')}${bad.length > 3 ? '…' : ''}`)
   const trulyNew = addIds.filter(id => !tag.members.has(id))
   if (tag.members.size + trulyNew.length > LIMITS.membersPerTag) throw new UserDataError(422, `Limited to ${LIMITS.membersPerTag} accounts per tag`)

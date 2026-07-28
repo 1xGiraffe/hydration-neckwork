@@ -6684,7 +6684,12 @@ export interface ActivityRow {
   destChain?: string         // xcm outbound: destination chain name
   destParachainId?: number | null
   destAccount?: {
-    kind: 'AccountId32' | 'AccountKey20'; address: string; raw: string; subscanUrl: string | null
+    // The SAME canonical id resolveDisplayAccountId/accountRef use for a local
+    // account: for a genuine AccountId32 this already equals `raw`, but for an
+    // AccountKey20 bound to a substrate owner it is that substrate accountId,
+    // not the bare H160 in `raw` — the client must key any viewer-side (user
+    // tag / avatar URL) lookup on THIS field, never on `raw` or `address`.
+    kind: 'AccountId32' | 'AccountKey20'; accountId: string; address: string; raw: string; subscanUrl: string | null
     emoji?: string; emojiName?: string; emojiUrl?: string
     tag?: { id: string; name: string; color: string; icon: string } | null
     identity?: { display: string; verified: boolean } | null
@@ -7085,7 +7090,7 @@ function externalAccountRef(raw: unknown, meta: XcmNetworkMeta | undefined): Act
     const t = tagForAccount(resolved)
     const id = identityForAccount(resolved)
     return {
-      kind: 'AccountId32', raw: h, address, subscanUrl: meta?.subscan ? `${meta.subscan}/account/${encodeURIComponent(chainAddress)}` : null,
+      kind: 'AccountId32', accountId: resolved, raw: h, address, subscanUrl: meta?.subscan ? `${meta.subscan}/account/${encodeURIComponent(chainAddress)}` : null,
       emoji: icon.emoji, emojiName: icon.emojiName, emojiUrl: icon.emojiUrl,
       tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon } : null,
       identity: id ? { display: id.display, verified: id.verified } : null,
@@ -7098,7 +7103,7 @@ function externalAccountRef(raw: unknown, meta: XcmNetworkMeta | undefined): Act
     const t = tagForAccount(resolved)
     const id = identityForAccount(resolved)
     return {
-      kind: 'AccountKey20', raw: h, address: h, subscanUrl: meta?.subscan ? `${meta.subscan}/account/${encodeURIComponent(h)}` : null,
+      kind: 'AccountKey20', accountId: resolved, raw: h, address: h, subscanUrl: meta?.subscan ? `${meta.subscan}/account/${encodeURIComponent(h)}` : null,
       emoji: icon.emoji, emojiName: icon.emojiName, emojiUrl: icon.emojiUrl,
       tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon } : null,
       identity: id ? { display: id.display, verified: id.verified } : null,
@@ -7848,7 +7853,7 @@ function externalChainRef(urnStr: string, account: string): { chain: string; par
       const t = tagForAccount(resolved)
       const id = identityForAccount(resolved)
       acct = {
-        kind: 'AccountId32', raw: h, address, subscanUrl: `https://solscan.io/account/${encodeURIComponent(address)}`,
+        kind: 'AccountId32', accountId: resolved, raw: h, address, subscanUrl: `https://solscan.io/account/${encodeURIComponent(address)}`,
         emoji: icon.emoji, emojiName: icon.emojiName, emojiUrl: icon.emojiUrl,
         tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon } : null,
         identity: id ? { display: id.display, verified: id.verified } : null,
@@ -7864,7 +7869,7 @@ function externalChainRef(urnStr: string, account: string): { chain: string; par
       const t = tagForAccount(resolved)
       const id = identityForAccount(resolved)
       acct = {
-        kind: 'AccountKey20', raw: h, address: h, subscanUrl: `https://etherscan.io/address/${encodeURIComponent(h)}`,
+        kind: 'AccountKey20', accountId: resolved, raw: h, address: h, subscanUrl: `https://etherscan.io/address/${encodeURIComponent(h)}`,
         emoji: icon.emoji, emojiName: icon.emojiName, emojiUrl: icon.emojiUrl,
         tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon } : null,
         identity: id ? { display: id.display, verified: id.verified } : null,

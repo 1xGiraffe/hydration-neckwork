@@ -40,7 +40,12 @@ export function explorerSiteName(url: string): string {
 }
 export function ExternalAccountPill({ account }: { account: NonNullable<ActivityRow['destAccount']> }) {
   useTagMapVersion()   // re-render when the viewer's tag map changes
-  const iconSeed = account.raw || account.address
+  // Prefer the server-resolved canonical accountId: for an AccountId32 it
+  // already equals `raw`, but for a bound-EVM AccountKey20 `raw` is the bare
+  // H160, not the accountId user tags/avatars are keyed by — using `raw` there
+  // silently failed to match either. Fall back to `raw`/`address` only for a
+  // response that predates this field (old cache entry or test fixture).
+  const iconSeed = account.accountId || account.raw || account.address
   const resolved = resolveTag({ accountId: iconSeed, tag: account.tag ?? null })
   const identity = account.identity
   const profile = account.profile

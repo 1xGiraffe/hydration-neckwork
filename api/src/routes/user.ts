@@ -231,7 +231,11 @@ export async function userRoutes(fastify: FastifyInstance) {
     if (!body.success) return reply.status(400).send({ error: 'Invalid address' })
     const normalized = normalizeAddress(body.data.address)
     if (!normalized) return reply.status(400).send({ error: 'Invalid address' })
-    return withUserErrors(reply, async () => { await inviteToLibrary(accountId, id, normalized.accountId); return { ok: true } })
+    // Canonicalize exactly like login: a bound-EVM grantee's invite must land
+    // under the SAME accountId their own session resolves to, or the invite
+    // never shows up in their invites list (invitesFor looks up their session id).
+    const grantee = resolveDisplayAccountId(normalized.accountId)
+    return withUserErrors(reply, async () => { await inviteToLibrary(accountId, id, grantee); return { ok: true } })
   })
 
   fastify.delete('/user/libraries/:id/invites/:address', async (req, reply) => {
@@ -241,7 +245,10 @@ export async function userRoutes(fastify: FastifyInstance) {
     const { id, address } = req.params as { id: string; address: string }
     const normalized = normalizeAddress(address)
     if (!normalized) return reply.status(400).send({ error: 'Invalid address' })
-    return withUserErrors(reply, async () => { await revokeShare(accountId, id, normalized.accountId); return { ok: true } })
+    // Same canonicalization as the invite route above, so revoking by address
+    // resolves to the exact id the invite was stored under.
+    const grantee = resolveDisplayAccountId(normalized.accountId)
+    return withUserErrors(reply, async () => { await revokeShare(accountId, id, grantee); return { ok: true } })
   })
 
   fastify.get('/user/invites', async (req, reply) => {
