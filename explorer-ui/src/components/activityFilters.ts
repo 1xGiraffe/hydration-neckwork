@@ -1,4 +1,4 @@
-import type { AssetListItem } from '../types'
+import type { AssetFilterItem } from '../types'
 import { ACTIVITY_ACTIONS } from './ui'
 import { tokenFilterOptions, type FilterField } from './Filters'
 
@@ -7,7 +7,7 @@ const DATE_FIELDS: FilterField[] = [
   { kind: 'date', key: 'to', title: 'To date' },
 ]
 
-export function activityFilterFields(type: string, assets: AssetListItem[], includeToken = true): FilterField[] {
+export function activityFilterFields(type: string, assets: AssetFilterItem[], includeToken = true): FilterField[] {
   const actions = ACTIVITY_ACTIONS[type]
   return [
     ...(actions ? [{

@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- filter primitives + helpers module */
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { useQuery, setQuery } from '../router'
-import type { AssetListItem } from '../types'
+import type { AssetFilterItem } from '../types'
 import { parseUtcTimestamp } from '../utils/time'
 
 export interface ComboOption { value: string; label: string; sub?: string; search?: string }
@@ -70,7 +70,7 @@ function DebouncedInput({ value, onCommit, type, placeholder, title, label, widt
 // Token combo options: value = asset id (unique — so filtering is unambiguous and
 // React keys don't collide), with a muted "name #id" detail line so duplicate
 // symbols (4× USDC, 3× USDT, …) are distinguishable. Searchable by symbol, name, id.
-export function tokenFilterOptions(assets: AssetListItem[]): ComboOption[] {
+export function tokenFilterOptions(assets: AssetFilterItem[]): ComboOption[] {
   return assets.map(a => ({
     value: String(a.assetId),
     label: a.symbol,

@@ -1,6 +1,6 @@
 import type {
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
-  HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem,
+  HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem,
   AccountsPage, AccountSort, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, MoneyMarketResponse, AssetDetail, TagDetail,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail,
   ValueEvent, ReferendumDetail,
@@ -109,6 +109,9 @@ export const api = {
   // the preview loads fast (the card only shows name, value, holdings, volumes).
   addressSummary: (address: string, signal?: AbortSignal) => getJson<AddressDetail>(withQuery(`/explorer/address/${encodeURIComponent(address)}`, { summary: '1' }), signal),
   addressHistory: (address: string, signal?: AbortSignal) => getJson<AccountHistoryResponse>(`/explorer/address/${encodeURIComponent(address)}/history`, signal),
+  // Value-chart variant: `series=1` leaves out the per-asset balance history, 98-99%
+  // of the full payload and read only by the Balances treemap.
+  addressHistorySeries: (address: string, signal?: AbortSignal) => getJson<AccountHistoryResponse>(withQuery(`/explorer/address/${encodeURIComponent(address)}/history`, { series: '1' }), signal),
   closeAccounts: (address: string, signal?: AbortSignal) => getJson<CloseAccountsResponse>(`/explorer/address/${encodeURIComponent(address)}/close-accounts`, signal),
   tagCloseAccounts: (tagId: string, signal?: AbortSignal) => getJson<CloseAccountsResponse>(`/explorer/tag/${encodeURIComponent(tagId)}/close-accounts`, signal),
   accountActivity: (address: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
@@ -148,6 +151,9 @@ export const api = {
     getJson<ListCount>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/list-count`, { ...query }), signal),
   search: (query: string, signal?: AbortSignal) => getJson<SearchResult[]>(withQuery('/explorer/search', { q: query }), signal),
   assets: (signal?: AbortSignal) => getJson<AssetListItem[]>('/explorer/assets', signal),
+  // Token-filter variant: the same ordered directory without prices, totals or
+  // sparklines — 74 kB down to 5.8 kB, since the combo reads ids and symbols only.
+  assetFilterOptions: (signal?: AbortSignal) => getJson<AssetFilterItem[]>(withQuery('/explorer/assets', { fields: 'filter' }), signal),
   hdx: (signal?: AbortSignal) => getJson<HdxDashboard>('/explorer/hdx', signal),
   hollar: (signal?: AbortSignal) => getJson<HollarDashboard>('/explorer/hollar', signal),
   accounts: (offset = 0, limit = 50, sort: AccountSort = 'value', signal?: AbortSignal) => getJson<AccountsPage>(withQuery('/explorer/accounts', { offset, limit, sort }), signal),

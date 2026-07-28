@@ -2864,7 +2864,12 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
   })
 }
 
-export async function getAddressHistory(addressInput: string): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; balanceHistory: AssetBalanceHistory[] } | null> {
+// `seriesOnly` drops the per-asset balance history, which is 98-99% of this
+// payload on a real account (603 kB of 609 kB on a 33-asset account) and is read
+// only by the Balances treemap — the value chart needs the two series alone. Both
+// halves come out of one cached walk, so this trims transfer and parse bytes, not
+// query work.
+export async function getAddressHistory(addressInput: string, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; balanceHistory: AssetBalanceHistory[] } | null> {
   const detail = await getAddress(addressInput)
   if (!detail) return null
   // The reconstruction is cached under the same scope key the value-event jump
@@ -2877,7 +2882,7 @@ export async function getAddressHistory(addressInput: string): Promise<{ portfol
   return {
     portfolioSeries,
     portfolioDates: history.portfolioDates,
-    balanceHistory: history.balanceHistory,
+    balanceHistory: opts.seriesOnly ? [] : history.balanceHistory,
   }
 }
 
@@ -5576,6 +5581,15 @@ export async function getAssets(): Promise<AssetListItem[]> {
       // Default ordering: total value held on Hydration, descending.
       .sort((x, y) => (y.amountUsd ?? 0) - (x.amountUsd ?? 0) || (y.price ?? 0) - (x.price ?? 0))
   })
+}
+
+// What the activity token filter shows and searches on — nothing else. It is a
+// projection of the same cached directory, so the option list and its value-ranked
+// ordering are identical to the full payload's; it just leaves behind the prices,
+// totals, holder counts and weekly sparklines (57% of 74 kB) the combo never reads.
+export interface AssetFilterItem { assetId: number; symbol: string; name: string | null }
+export async function getAssetFilterOptions(): Promise<AssetFilterItem[]> {
+  return (await getAssets()).map(a => ({ assetId: a.assetId, symbol: a.symbol, name: a.name }))
 }
 
 

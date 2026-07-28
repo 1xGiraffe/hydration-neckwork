@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- page + its smol-filter helpers */
 import { useState } from 'react'
-import { useActivity, useActivityCount, useDaily, useAssets } from '../hooks/useExplorerData'
+import { useActivity, useActivityCount, useDaily, useAssetFilterOptions } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, usePageParam, setPage, useQueryValue, setQuery } from '../router'
@@ -74,7 +74,7 @@ export function Activity() {
   const { data: count } = useActivityCount(type, f.from, f.to, { token: f.token, min: activityMin }, action || undefined)
   // The daily histogram mirrors the active tab + action/token filters.
   const { data: daily } = useDaily('activity', { type, action: action || undefined, token: f.token || undefined })
-  const assets = useAssets(false)   // filter options only; the Assets page owns the poll
+  const assets = useAssetFilterOptions()
   const now = useNow()
 
   const rows = data ?? []

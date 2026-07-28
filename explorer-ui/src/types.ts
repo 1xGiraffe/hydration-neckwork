@@ -56,6 +56,11 @@ export interface AssetListItem extends AssetRef {
   sparkline?: number[]
 }
 
+// `/explorer/assets?fields=filter` — the same ordered directory projected down to
+// what a token filter shows and searches on. `AssetListItem` widens to this, so
+// surfaces that only build filter options accept either shape.
+export type AssetFilterItem = Pick<AssetRef, 'assetId' | 'symbol' | 'name'>
+
 export interface TopAccountRow {
   account: AccountRef | null
   tag: { tagId: string; name: string; color: string; icon: string; memberCount: number } | null

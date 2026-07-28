@@ -146,8 +146,17 @@ export function useAddress(address: string | null) {
 export function useAddressSummary(address: string | null) {
   return useQuery({ queryKey: ['address-summary', address], queryFn: ({ signal }) => api.addressSummary(address as string, signal), enabled: !!address, staleTime: 30_000 })
 }
-export function useAddressHistory(address: string | null) {
-  return useQuery({ queryKey: ['address-history', address], queryFn: ({ signal }) => api.addressHistory(address as string, signal), enabled: !!address, staleTime: 120_000 })
+// `seriesOnly` asks for the value series without the per-asset balance history —
+// 98-99% of the payload, and only the Balances treemap reads it. The two shapes get
+// their own cache keys: sharing one would let an Overview-first visit hand the
+// treemap a response whose `balanceHistory` is empty by design.
+export function useAddressHistory(address: string | null, seriesOnly = false) {
+  return useQuery({
+    queryKey: ['address-history', address, seriesOnly ? 'series' : 'full'],
+    queryFn: ({ signal }) => (seriesOnly ? api.addressHistorySeries(address as string, signal) : api.addressHistory(address as string, signal)),
+    enabled: !!address,
+    staleTime: 120_000,
+  })
 }
 export function useCloseAccounts(address: string | null, enabled = false) {
   return useQuery({
@@ -271,12 +280,18 @@ export function useTagVotes(tagId: string | null, offset = 0, from?: string, to?
   const key = ['tag-votes', tagId, offset, from, to]
   return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.tagVotes(tagId as string, offset, undefined, from, to, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
 }
-// The asset directory is 74 KB (20 KB gzipped), 57% of it sparklines. The Assets page
-// renders those and wants them fresh; the activity filters only read symbols out of the
-// same payload, so they opt out of the poll rather than re-pulling it every minute.
-export function useAssets(poll = true) {
-  const interval = useInterval(SLOW_POLL_MS)
-  return useQuery({ queryKey: ['assets'], queryFn: ({ signal }) => api.assets(signal), refetchInterval: poll ? interval : false, staleTime: 30_000 })
+// The full asset directory is 74 kB (19 kB brotli), 57% of it sparklines. Only the
+// Assets page renders those, and it wants them fresh.
+export function useAssets() {
+  return useQuery({ queryKey: ['assets'], queryFn: ({ signal }) => api.assets(signal), refetchInterval: useInterval(SLOW_POLL_MS), staleTime: 30_000 })
+}
+// What an activity token filter needs: ids, symbols and names, in the directory's own
+// order. Own cache key, because the projected rows carry no prices or sparklines and
+// would leave the Assets page's table empty if the two shapes shared one entry. The
+// list arrives with the page so a `?token=<id>` deep link can name its chip
+// immediately, and it never polls — symbols do not move.
+export function useAssetFilterOptions() {
+  return useQuery({ queryKey: ['assets-filter'], queryFn: ({ signal }) => api.assetFilterOptions(signal), staleTime: 30_000 })
 }
 export function useHdxDashboard() {
   return useQuery({ queryKey: ['hdx-dashboard'], queryFn: ({ signal }) => api.hdx(signal), staleTime: 120_000 })

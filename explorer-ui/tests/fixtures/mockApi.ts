@@ -660,7 +660,10 @@ function assetScopedActivityRows(qs: URLSearchParams): ActivityRow[] {
 const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => unknown }[] = [
   { re: /^\/explorer\/stats$/, fn: () => ({ headBlock: TIP, finalizedBlock: TIP - 2, headTime: tsAt(TIP), avgBlockSec: 6.0, transfers24h: 18204, extrinsics24h: 42318, activeAccounts24h: 7120, hdxPrice: 0.02184 } satisfies ExplorerStats) },
   { re: /^\/indexer$/, fn: () => ({ blockHeight: TIP, blockTimestamp: tsAt(TIP), lagSeconds: 6, chainBlockHeight: TIP + 1, blocksBehindHead: 1 } satisfies IndexerStatus) },
-  { re: /^\/explorer\/assets$/, fn: () => buildAssets() },
+  // Two shapes off one directory, exactly as the API serves them: the full rows the
+  // Assets page renders, and `fields=filter`'s id/symbol/name projection in the same
+  // order, which is all a token combo shows and searches.
+  { re: /^\/explorer\/assets$/, fn: (_m, qs) => qs.get('fields') === 'filter' ? buildAssets().map(a => ({ assetId: a.assetId, symbol: a.symbol, name: a.name })) : buildAssets() },
   { re: /^\/explorer\/hdx$/, fn: () => buildHdx() },
   { re: /^\/explorer\/hollar$/, fn: () => buildHollar() },
   { re: /^\/explorer\/accounts$/, fn: (_m, qs) => buildAccounts(Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 50), qs.get('sort') ?? 'value') },
@@ -876,7 +879,9 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   // Per-account balance/portfolio history. Must sit before the generic address
   // route below, whose greedy `(.+)` would otherwise swallow this sub-path and
   // fall back to the default account — leaking one account's history onto another.
-  { re: /^\/explorer\/address\/(.+)\/history$/, fn: (m) => { const built = buildAddress(decodeURIComponent(m[1])); return { portfolioSeries: built.portfolioSeries ?? [], portfolioDates: built.portfolioDates ?? [], balanceHistory: built.balanceHistory ?? [] } } },
+  // `series=1` is the Overview's shape: the value series without the per-asset
+  // history the Balances treemap reads (98-99% of the real payload).
+  { re: /^\/explorer\/address\/(.+)\/history$/, fn: (m, qs) => { const built = buildAddress(decodeURIComponent(m[1])); return { portfolioSeries: built.portfolioSeries ?? [], portfolioDates: built.portfolioDates ?? [], balanceHistory: qs.get('series') === '1' ? [] : built.balanceHistory ?? [] } } },
   {
     re: /^\/explorer\/address\/(.+)\/close-accounts$/, fn: () => ({
       accounts: [

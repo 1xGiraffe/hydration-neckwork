@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useAddress, useAddressHistory, useAddressValueEvents, useAccountListCount, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -23,7 +23,15 @@ export function Account({ address }: { address: string }) {
   const now = useNow()
   const { data: stats } = useStats(!!data?.activeDcas?.length)
   const canonicalAddress = data ? (data.evmAddress ?? data.ss58Polkadot) : null
-  const history = useAddressHistory(canonicalAddress)
+  const view = useQueryValue('view', 'overview')
+  // Only the Balances treemap reads the per-asset balance history, and it is 98-99%
+  // of the history payload — so the Overview asks for the value series alone. The
+  // need latches: a reader who lands on `?view=balances` gets the full shape on the
+  // first request, and coming back to the Overview reuses it instead of trading it
+  // for the light one.
+  const [needBalanceHistory, setNeedBalanceHistory] = useState(view === 'balances')
+  if (view === 'balances' && !needBalanceHistory) setNeedBalanceHistory(true)
+  const history = useAddressHistory(canonicalAddress, !needBalanceHistory)
   const valueEvents = useAddressValueEvents(canonicalAddress)
   // The Activity tab badge is the exact length of the activity list, shared with
   // the list's own unfiltered total; absent while it resolves, and absent for good
@@ -31,7 +39,6 @@ export function Account({ address }: { address: string }) {
   const activityTotal = useAccountListCount(canonicalAddress, activityListCount('all', '', {}))
   const votesTotal = useAccountListCount(canonicalAddress, voteListCount())
   const headBlock = stats?.headBlock ?? 0
-  const view = useQueryValue('view', 'overview')
 
   // Document title mirrors the header's display-name logic: best-known name
   // (tag > identity > module > emoji name) plus the short canonical address.

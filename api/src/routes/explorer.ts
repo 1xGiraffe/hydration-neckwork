@@ -5,7 +5,7 @@ import { extrinsicEncoded } from '../services/extrinsicBytes.ts'
 import {
   getStats, getRecentBlocks, getBlock, getRecentExtrinsics, getExtrinsic, getExtrinsicAt,
   getExtrinsicActivity, getBlockActivity,
-  getHolders, getAddress, getAddressHistory, search, getAssets, getAccounts, getDcaSchedule, getDcaScheduleIdAt, getDcaExecution,
+  getHolders, getAddress, getAddressHistory, search, getAssets, getAssetFilterOptions, getAccounts, getDcaSchedule, getDcaScheduleIdAt, getDcaExecution,
   getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getGlobalActivityTotal, getMoneyMarket, getAssetDetail, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag,
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressListTotal, getTagListTotal,
@@ -242,7 +242,12 @@ export async function explorerRoutes(fastify: FastifyInstance) {
 
   fastify.get('/explorer/stats', async () => getStats())
 
-  fastify.get('/explorer/assets', async () => getAssets())
+  // `fields=filter` serves the id/symbol/name projection the activity token combo
+  // needs; every other value (and an absent one) serves the full directory the
+  // Assets page renders. Both shapes are the same ordered option list, so a caller
+  // can narrow the payload without changing what it can offer.
+  fastify.get('/explorer/assets', async req =>
+    (req.query as { fields?: string })?.fields === 'filter' ? getAssetFilterOptions() : getAssets())
 
   fastify.get('/explorer/accounts', async (req, reply) => {
     const q = req.query as Record<string, unknown>
@@ -557,10 +562,14 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return closeAccountsResponse(reply, () => getCloseAccounts(params.data.address), 'Address not recognized')
   })
 
+  // `series=1` returns the value series with an empty `balanceHistory` — the shape
+  // the Overview chart uses. Absent (or any other value) returns the full history
+  // the Balances treemap needs.
   fastify.get('/explorer/address/:address/history', async (req, reply) => {
     const params = addressParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
-    const history = await getAddressHistory(params.data.address)
+    const seriesOnly = (req.query as { series?: string })?.series === '1'
+    const history = await getAddressHistory(params.data.address, { seriesOnly })
     if (!history) return reply.status(404).send({ error: 'Address not recognized' })
     return history
   })
