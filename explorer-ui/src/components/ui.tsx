@@ -7,6 +7,8 @@ import { parseUtcTimestamp } from '../utils/time'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { voteSideLabel } from '../utils/voteRows'
 import { CAT } from './activityColors'
+import { resolveTag, useTagMapVersion } from '../userTags'
+import type { ResolvedTag } from '../userTags'
 
 /* ============ shared formatters ============ */
 const SUBSCRIPT = '₀₁₂₃₄₅₆₇₈₉'
@@ -437,17 +439,26 @@ export function showIconFallback(e: React.SyntheticEvent<HTMLImageElement>) {
 }
 
 // The account's omniwatch/snakewatch identity icon. Same fallback chain as
-// preis-ui's OmniwatchIcon: custom image (e.g. a Discord avatar) → emoji glyph →
-// deterministic gradient-letter emoji. `className` styles the emoji <span>;
-// `imgClass` styles the rounded image when an emojiUrl is present.
+// preis-ui's OmniwatchIcon: self-authored profile avatar (wallet-login) →
+// custom image (e.g. a Discord avatar) → emoji glyph → deterministic
+// gradient-letter emoji. `className` styles the emoji <span>; `imgClass`
+// styles the rounded image when an avatar/emojiUrl is present.
 export function AccountEmoji({ account, className = 'emoji id', imgClass = 'emoji-img', title }: {
-  account: { emoji?: string; emojiName?: string; emojiUrl?: string; accountId: string }
+  account: { emoji?: string; emojiName?: string; emojiUrl?: string; accountId: string; profile?: { avatarVersion: number } | null }
   className?: string
   imgClass?: string
   title?: string
 }) {
   const glyph = account.emoji || emojiFor(account.accountId)
   const name = account.emojiName ?? emojiName(glyph) ?? undefined
+  if (account.profile && account.profile.avatarVersion > 0) {
+    return (
+      <span className={className} style={{ padding: 0, overflow: 'hidden' }} title={title ?? name}>
+        <img className={imgClass} src={`/api/explorer/profile-avatar/${encodeURIComponent(account.accountId)}?v=${account.profile.avatarVersion}`} alt={name ?? glyph} onError={showIconFallback} />
+        <span className="icon-fallback" style={{ display: 'none' }}>{glyph}</span>
+      </span>
+    )
+  }
   if (account.emojiUrl) {
     return (
       <span className={className} style={{ padding: 0, overflow: 'hidden' }} title={title ?? name}>
@@ -511,22 +522,29 @@ export function TagGroupPill({ tag }: { tag: { tagId: string; name: string; colo
   )
 }
 
+// A resolved tag (system OR user-library) as the primary label: the group's icon
+// + name, linking to the tag's combined view (system) or the owning library
+// (user) — so a viewer's own organization is one click from any pill wearing it.
+export function UserTagPill({ tag, address, noCopy }: { tag: ResolvedTag; address: string; noCopy?: boolean }) {
+  return (
+    <span className="addr-wrap">
+      <Link to={tag.kind === 'system' ? paths.tag(tag.id) : paths.library(tag.libraryId!)} className="addr-pill" title={tag.kind === 'user' ? `${tag.name} — your library “${tag.libraryName}”` : 'Tagged group — open combined view'}>
+        <TagIcon icon={tag.icon} title={tag.name} />
+        <span className="tag" style={tag.color ? { color: tag.color } : undefined}>{tag.name}</span>
+      </Link>
+      {!noCopy && <Copy text={address} />}
+    </span>
+  )
+}
+
 export function AddrPill({ account, full, noCopy, noTag }: { account: AccountRef; full?: boolean; noCopy?: boolean; noTag?: boolean }) {
-  const tag = account.tag
-  // Tagged accounts use the group identity as the primary label, matching the
-  // Accounts list. `noTag` skips this on tag member lists, where the page context
-  // already supplies the group and each row should show the member itself.
-  if (tag && !noTag) {
-    return (
-      <span className="addr-wrap">
-        <Link to={paths.tag(tag.id)} className="addr-pill" title="Tagged group — open combined view">
-          <TagIcon icon={tag.icon} title={tag.name} />
-          <span className="tag" style={{ color: tag.color }}>{tag.name}</span>
-        </Link>
-        {!noCopy && <Copy text={account.address} />}
-      </span>
-    )
-  }
+  useTagMapVersion()   // re-render when the viewer's tag map changes
+  // Priority-resolved tag (the viewer's own libraries, in priority order, with
+  // the system directory as a slot in that order) is the primary label, matching
+  // the Accounts list. `noTag` skips this on tag member lists, where the page
+  // context already supplies the group and each row should show the member itself.
+  const resolved = noTag ? null : resolveTag(account)
+  if (resolved) return <UserTagPill tag={resolved} address={account.address} noCopy={noCopy} />
   const mod = moduleName(account.accountId)
   if (mod) {
     return (
@@ -534,6 +552,20 @@ export function AddrPill({ account, full, noCopy, noTag }: { account: AccountRef
         <Link to={accountHref(account)} className="addr-pill" title={account.address}>
           <span className="emoji">⚙️</span><span className="a">{mod}</span>
         </Link>
+      </span>
+    )
+  }
+  // Self-set profile name: above on-chain identity (the owner signed for it),
+  // below tags. Distinct class, and NEVER the ✓ mark — that stays exclusive
+  // to registrar-verified identities.
+  if (account.profile?.name) {
+    return (
+      <span className="addr-wrap">
+        <Link to={accountHref(account)} className="addr-pill" title={account.address}>
+          <AccountEmoji account={account} title="profile" />
+          <span className="tag profile-name">{account.profile.name}</span>
+        </Link>
+        {!noCopy && <Copy text={account.address} />}
       </span>
     )
   }

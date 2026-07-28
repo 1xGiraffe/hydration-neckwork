@@ -4,6 +4,7 @@ import type { ActivitySlug } from '../router'
 import { F, AddrPill, AssetChip, rowNav, Ago, AccountEmoji, ShortAddr, TagIcon, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
 import { activityBadge } from './activityColors'
+import { resolveTag, useTagMapVersion } from '../userTags'
 import type { ActivityRow } from '../types'
 
 // Chain badge for cross-chain (XCM) destinations — full network names, brand
@@ -38,25 +39,30 @@ export function explorerSiteName(url: string): string {
   return 'Subscan'
 }
 export function ExternalAccountPill({ account }: { account: NonNullable<ActivityRow['destAccount']> }) {
+  useTagMapVersion()   // re-render when the viewer's tag map changes
   const iconSeed = account.raw || account.address
-  const tag = account.tag
+  const resolved = resolveTag({ accountId: iconSeed, tag: account.tag ?? null })
   const identity = account.identity
-  // Same pubkey, same Hydration tag/identity, even on another chain — priority
-  // tag > identity, mirroring AddrPill's name precedence and classes (the "tag"
-  // class + small ✓ for a verified on-chain identity). The short address keeps
-  // showing via the pill's title when a name takes its place in the body.
-  const name = tag
-    ? <span className="tag" style={{ color: tag.color }}>{tag.name}</span>
-    : identity?.display
-      ? <>
-        <span className="tag">{identity.display}</span>
-        {identity.verified && <span className="id-verified" title="Verified identity">✓</span>}
-      </>
-      : null
+  const profile = account.profile
+  // Same pubkey, same Hydration tag/identity/profile, even on another chain —
+  // priority resolved tag > profile name > identity, mirroring AddrPill's name
+  // precedence and classes (the "tag"/"profile-name" class + small ✓ for a
+  // verified on-chain identity, never on a self-set name). The short address
+  // keeps showing via the pill's title when a name takes its place in the body.
+  const name = resolved
+    ? <span className="tag" style={resolved.color ? { color: resolved.color } : undefined}>{resolved.name}</span>
+    : profile?.name
+      ? <span className="tag profile-name">{profile.name}</span>
+      : identity?.display
+        ? <>
+          <span className="tag">{identity.display}</span>
+          {identity.verified && <span className="id-verified" title="Verified identity">✓</span>}
+        </>
+        : null
   const body = <>
-    {tag
-      ? <TagIcon icon={tag.icon} title={tag.name} />
-      : <AccountEmoji account={{ accountId: iconSeed, emoji: account.emoji, emojiName: account.emojiName, emojiUrl: account.emojiUrl }} />}
+    {resolved
+      ? <TagIcon icon={resolved.icon} title={resolved.name} />
+      : <AccountEmoji account={{ accountId: iconSeed, emoji: account.emoji, emojiName: account.emojiName, emojiUrl: account.emojiUrl, profile: account.profile }} />}
     {name ?? <span className="a mono"><ShortAddr addr={account.address} /></span>}
   </>
   if (!account.subscanUrl) return <span className="addr-pill" title={account.address}>{body}</span>

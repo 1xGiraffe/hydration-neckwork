@@ -902,7 +902,15 @@ svg { display: block; }
 .hovercard .hc-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
 .hovercard .hc-emoji { width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 16px; background: var(--panel); border: 1px solid var(--border); }
 .hovercard .hc-title { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 16px; }
+.hovercard .hc-title .profile-name { color: var(--amber); font-style: italic; }
 .hovercard .hc-sub { font-size: 11px; color: var(--text-medium); }
+/* Every tag association (not just the priority winner) as a row of compact
+   chips, so the card doubles as a "which of my libraries is this in" lookup.
+   Capped at 4 with a "+N" overflow chip — see MAX_HOVER_TAGS. */
+.hovercard .hc-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
+.hovercard .hc-tags .addr-pill { font-size: 11px; gap: 5px; }
+.hovercard .hc-tags .emoji { width: 16px; height: 16px; font-size: 10px; }
+.hovercard .hc-tags-more { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 10.5px; color: var(--text-low); background: var(--panel); border: 1px solid var(--border); }
 .hovercard .hc-identity { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; color: var(--green); margin-bottom: 10px; }
 .hovercard .hc-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-medium); padding: 4px 0; }
 .hovercard .hc-row .mono { font-family: 'GeistMono'; color: var(--text-high); }
@@ -937,6 +945,11 @@ svg { display: block; }
 .addr-pill .a { color: var(--sky); }
 .addr-pill:hover .a { text-decoration: underline; text-underline-offset: 2px; }
 .addr-pill .tag { color: var(--lavender); font-weight: 500; }
+/* Self-set wallet-login display name: a real, distinct hue from a curated tag's
+   lavender (amber reads as "the owner's own claim", unverified — same idea as
+   the ✓ mark staying exclusive to a registrar-checked identity), plus italics
+   so it never reads as a system/library tag at a glance. */
+.addr-pill .tag.profile-name { color: var(--amber); font-weight: 500; font-style: italic; }
 .ext-site {
   padding: 1px 5px;
   border: 1px solid var(--border);
@@ -1966,6 +1979,9 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    module name takes the theme's ink, exactly as in the tables. Only the shortened
    address wears the link blue. */
 .vb-bubble .vb-name { font-family: inherit; font-weight: 600; color: var(--text-high); }
+/* Self-set profile name: same amber-and-italic treatment as .addr-pill's, so a
+   bubble reads as "the owner's own claim" identically to every other pill. */
+.vb-bubble .vb-name.profile-name { color: var(--amber); font-style: italic; }
 .vb-bubble .id-verified { margin-left: 2px; color: inherit; }
 .vb-legend { margin-top: 10px; font-size: 12px; color: var(--text-medium); min-height: 18px; display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
 .vb-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin: 0 5px 0 2px; }

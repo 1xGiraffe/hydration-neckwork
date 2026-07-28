@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/explorer'
 import { useAddressSummary, useAsset, useExtrinsic, useBlock, useTagSummary, useTrade, useStats, useDcaSchedule, useDcaExecution } from '../hooks/useExplorerData'
-import { F, AssetIcon, AssetChip, AssetAmount, AddrPill, CallPill, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow } from './ui'
+import { F, AssetIcon, AssetChip, AssetAmount, AddrPill, CallPill, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow, UserTagPill } from './ui'
 import { ayeSharePct, selectTally } from '../utils/referendumVotes'
 import { dcaCadence, dcaProgress, fmtDuration } from '../utils/dca'
+import { resolveTag, allAssociations, useTagMapVersion } from '../userTags'
 import type { AssetRef } from '../types'
 
 // Global hover preview cards for account (.addr-pill), tag (/tag/… links),
@@ -207,30 +208,48 @@ function ReferendumHover({ id }: { id: string }) {
   )
 }
 
-// Compact account card: display name (tag / identity / pallet / emoji name) and
-// the value. No address — the pill being hovered already shows it.
+// Compact account card: display name (priority tag / module / profile / identity
+// / emoji name) and the value. No address — the pill being hovered already shows
+// it. The associations row lists EVERY tag membership (not just the winner), so
+// the card doubles as a quick "which of my libraries is this in" lookup.
+const MAX_HOVER_TAGS = 4
 function AccountHover({ id, vote }: { id: string; vote?: VoteContext }) {
+  useTagMapVersion()   // re-render when the viewer's tag map changes
   const { data } = useAddressSummary(id)
   if (!data) return <div className="hc-sub mono">Loading…</div>
   const mod = moduleName(data.accountId)
   const debtUsd = data.moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
   const topAssets = data.topAssets
-  const tag = data.tag
+  const resolved = resolveTag(data)
   const ident = data.identity
-  const title = tag ? tag.name : ident?.display ? ident.display : mod ? mod : (data.emojiName ?? emojiName(data.emoji) ?? 'Account')
+  const profile = data.profile
+  const usingProfileName = !resolved && !mod && !!profile?.name
+  const title = resolved?.name ?? mod ?? profile?.name ?? ident?.display ?? data.emojiName ?? emojiName(data.emoji) ?? 'Account'
+  // The ✓ mark stays exclusive to a genuinely displayed, verified on-chain
+  // identity — never the self-set profile name or a tag/module label.
+  const showIdentityCheck = !resolved && !mod && !profile?.name && !!ident?.display && ident.verified
+  const associations = allAssociations(data)
   return (
     <>
       <div className="hc-head">
-        {tag
-          ? <TagIcon icon={tag.icon} title={tag.name} className="hc-emoji" />
+        {resolved
+          ? <TagIcon icon={resolved.icon} title={resolved.name} className="hc-emoji" />
           : mod ? <span className="hc-emoji">⚙️</span>
             : <AccountEmoji account={data} className="hc-emoji" />}
         <div style={{ minWidth: 0 }}>
-          <div className="hc-title">{title}
-            {tag ? <span className="em" style={{ color: tag.color }}> · tag</span>
-              : ident?.verified && <span className="id-verified" title="Verified identity" style={{ marginLeft: 5 }}>✓</span>}</div>
+          <div className="hc-title">{usingProfileName ? <span className="profile-name">{title}</span> : title}
+            {resolved ? <span className="em" style={resolved.color ? { color: resolved.color } : undefined}> · tag</span>
+              : showIdentityCheck && <span className="id-verified" title="Verified identity" style={{ marginLeft: 5 }}>✓</span>}</div>
         </div>
       </div>
+      {associations.length > 0 && (
+        <div className="hc-tags">
+          {associations.slice(0, MAX_HOVER_TAGS).map(a => (
+            <UserTagPill key={a.libraryId ?? `system-${a.id}`} tag={a} address={data.evmAddress ?? data.ss58Polkadot} noCopy />
+          ))}
+          {associations.length > MAX_HOVER_TAGS && <span className="hc-tags-more">+{associations.length - MAX_HOVER_TAGS}</span>}
+        </div>
+      )}
       {/* Same two facts the referendum's votes table keeps: the vote itself and the
           conviction-weighted votes it carries. */}
       {vote && <>

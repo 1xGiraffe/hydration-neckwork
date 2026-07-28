@@ -4,6 +4,7 @@ import type { ReferendumVoter } from '../types'
 import { HEIGHT, WIDTH, packVoters } from './voteBubbleLayout'
 import { voteSideLabel } from '../utils/voteRows'
 import { AccountEmoji, F, ShortAddr, TagIcon, moduleName } from './ui'
+import { resolveTag, useTagMapVersion } from '../userTags'
 import type { AccountRef } from '../types'
 
 // Conviction-weighted vote power as ONE bubble map, aye and nay in the same cluster
@@ -15,27 +16,30 @@ import type { AccountRef } from '../types'
 // every table uses. Positions come from voteBubbleLayout in a fixed 720x340 space and
 // are converted to percentages, so the chart scales with its container.
 // A bubble's label follows the very same precedence AddrPill uses in every list —
-// tag group, then module account, then on-chain identity, then shortened address — so
-// an account reads identically here and in the tables. AddrPill itself cannot be
-// nested inside the bubble (it carries its own link and copy button, and an anchor
-// inside an anchor is invalid), so its content is mirrored with the same components
-// and classes.
+// priority-resolved tag, then module account, then self-set profile name, then
+// on-chain identity, then shortened address — so an account reads identically
+// here and in the tables. AddrPill itself cannot be nested inside the bubble (it
+// carries its own link and copy button, and an anchor inside an anchor is
+// invalid), so its content is mirrored with the same components and classes.
 function BubbleLabel({ account, label }: { account: AccountRef | null; label: 'full' | 'emoji' | 'none' }) {
   if (!account || label === 'none') return null
-  const tag = account.tag
+  const resolved = resolveTag(account)
   const mod = moduleName(account.accountId)
   const identity = account.identity
-  const icon = tag
-    ? <TagIcon icon={tag.icon} title={tag.name} className="vb-emoji" />
+  const profile = account.profile
+  const icon = resolved
+    ? <TagIcon icon={resolved.icon} title={resolved.name} className="vb-emoji" />
     : mod ? <span className="vb-emoji">⚙️</span>
       : <AccountEmoji account={account} className="vb-emoji" imgClass="vb-emoji-img" title="identity" />
   if (label === 'emoji') return icon
-  const name = tag
-    ? <span className="vb-addr vb-name" style={{ color: tag.color }}>{tag.name}</span>
+  const name = resolved
+    ? <span className="vb-addr vb-name" style={resolved.color ? { color: resolved.color } : undefined}>{resolved.name}</span>
     : mod ? <span className="vb-addr vb-name">{mod}</span>
-      : identity?.display
-        ? <span className="vb-addr vb-name">{identity.display}{identity.verified && <span className="id-verified" title="Verified identity">✓</span>}</span>
-        : <span className="vb-addr mono"><ShortAddr addr={account.address} /></span>
+      : profile?.name
+        ? <span className="vb-addr vb-name profile-name">{profile.name}</span>
+        : identity?.display
+          ? <span className="vb-addr vb-name">{identity.display}{identity.verified && <span className="id-verified" title="Verified identity">✓</span>}</span>
+          : <span className="vb-addr mono"><ShortAddr addr={account.address} /></span>
   return <>{icon}{name}</>
 }
 
@@ -43,6 +47,7 @@ function BubbleLabel({ account, label }: { account: AccountRef | null; label: 'f
 // around it re-renders on the shared 1 Hz clock and on every sort/side chip, and
 // each of those re-reconciled the whole cluster for nothing.
 export const VoteBubbles = memo(function VoteBubbles({ voters, decimals, symbol }: { voters: ReferendumVoter[]; decimals: number; symbol: string }) {
+  useTagMapVersion()   // re-render when the viewer's tag map changes (memo() only skips parent-driven re-renders)
   const bubbles = useMemo(() => packVoters(voters), [voters])
 
   if (!bubbles.length) return <div className="empty-note">No conviction-weighted votes to plot</div>

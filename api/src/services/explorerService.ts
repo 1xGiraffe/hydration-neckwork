@@ -2545,6 +2545,7 @@ export interface AddressDetail {
   ss58Polkadot: string
   tag: { id: string; name: string; color: string; icon: string } | null
   identity: AccountIdentity | null
+  profile: { name: string; avatarVersion: number } | null
   relatedAccountIds: string[]
   aliases: { accountId: string | null; evmAddress: string | null; primaryProfile: string; relationship: string; confidence: number }[]
   balances: AddressBalance[]
@@ -2800,6 +2801,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
 
     const tag = tagForAccount(norm.accountId)
     const onchainId = identityForAccount(norm.accountId)
+    const profile = profileForAccount(norm.accountId)
     const addrIcon = accountIcon(norm.accountId)
     // LP positions stay even in summary — they count toward the displayed value, so
     // dropping them would make the hover's value disagree with the detail page. Only
@@ -2854,6 +2856,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
       ss58Polkadot: norm.ss58Polkadot ?? '',
       tag: tag ? { id: tag.tagId, name: tag.name, color: tag.color, icon: tag.icon } : null,
       identity: onchainId,
+      profile,
       relatedAccountIds: [...related],
       aliases: aliasRows.map(a => ({ accountId: a.account_id, evmAddress: a.evm_address, primaryProfile: a.primary_profile, relationship: a.relationship, confidence: a.confidence })),
       balances,
@@ -6456,6 +6459,7 @@ export interface ActivityRow {
     emoji?: string; emojiName?: string; emojiUrl?: string
     tag?: { id: string; name: string; color: string; icon: string } | null
     identity?: { display: string; verified: boolean } | null
+    profile?: { name: string; avatarVersion: number } | null
   }
   xcmDir?: 'in' | 'out'      // xcm: transfer direction relative to Hydration
   fromChain?: string         // xcm inbound: origin chain name
@@ -6856,6 +6860,7 @@ function externalAccountRef(raw: unknown, meta: XcmNetworkMeta | undefined): Act
       emoji: icon.emoji, emojiName: icon.emojiName, emojiUrl: icon.emojiUrl,
       tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon } : null,
       identity: id ? { display: id.display, verified: id.verified } : null,
+      profile: profileForAccount(resolved),
     }
   }
   if (h.length === 42) {
@@ -6868,6 +6873,7 @@ function externalAccountRef(raw: unknown, meta: XcmNetworkMeta | undefined): Act
       emoji: icon.emoji, emojiName: icon.emojiName, emojiUrl: icon.emojiUrl,
       tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon } : null,
       identity: id ? { display: id.display, verified: id.verified } : null,
+      profile: profileForAccount(resolved),
     }
   }
   return undefined

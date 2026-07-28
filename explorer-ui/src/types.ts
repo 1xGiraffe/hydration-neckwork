@@ -328,6 +328,7 @@ export interface AddressDetail {
   ss58Polkadot: string
   tag: TagRef | null
   identity: AccountIdentity | null
+  profile?: ProfileRef | null
   relatedAccountIds: string[]
   aliases: AddressAlias[]
   balances: AddressBalance[]
@@ -505,6 +506,7 @@ export interface ActivityRow {
     emoji?: string; emojiName?: string; emojiUrl?: string
     tag?: TagRef | null
     identity?: { display: string; verified: boolean } | null
+    profile?: ProfileRef | null
   }
   xcmDir?: 'in' | 'out'      // xcm: transfer direction relative to Hydration
   fromChain?: string         // xcm inbound: origin chain name
