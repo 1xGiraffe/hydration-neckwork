@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import { userApi } from '../api/explorer'
 import { setSession } from '../session'
@@ -41,6 +41,14 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   const [busy, setBusy] = useState(false)
   const [evmProviders, setEvmProviders] = useState<EvmProviderDetail[]>([])
 
+  // Bumped on every reset (dialog close/reopen, "choose a different wallet")
+  // so an in-flight doSign can tell it's been superseded. Closing the dialog
+  // mid-signature must never let a stale challenge/verify round trip resolve
+  // into setSession/onOpenChange(false) after the visitor has backed out and
+  // started over — a `busy` check alone can't catch that, since a NEW attempt
+  // can also be `busy` by the time the OLD one's await settles.
+  const attemptRef = useRef(0)
+
   // Reset to a clean first screen every time the dialog opens, so a previous
   // attempt's error/account list never leaks into the next one. Adjusted
   // during render (React's prop-change-reset pattern) rather than an effect,
@@ -52,6 +60,10 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
       setStage('wallets'); setPending(null); setAccounts([]); setAddress(null); setError(null); setBusy(false)
     }
   }
+  // Refs can't be touched during render (only event handlers/effects), so the
+  // open/close edge above bumps the attempt counter here instead — still well
+  // before any new doSign a later click could trigger.
+  useEffect(() => { attemptRef.current++ }, [open])
 
   // EIP-6963 providers announce asynchronously; re-poll the same discovery
   // handle's list() whenever another one arrives while the dialog is open.
@@ -69,18 +81,24 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   const substrateWallets = useMemo(() => (open ? listSubstrateWallets() : []), [open])
 
   async function doSign(next: Pending, addr: string) {
+    const attempt = attemptRef.current
+    const stale = () => attemptRef.current !== attempt
     setBusy(true)
     setError(null)
     try {
       const { nonce, message } = await userApi.challenge(addr)
+      if (stale()) return
       const signature = next.kind === 'substrate'
         ? await signSubstrate(next.ext, addr, message)
         : await signEvm(next.provider, addr, message)
+      if (stale()) return
       const { token, me } = await userApi.verify(addr, nonce, signature)
+      if (stale()) return
       setSession({ token, accountId: me.account.accountId, address: me.account.address })
       setBusy(false)
       onOpenChange(false)
     } catch (e) {
+      if (stale()) return
       setBusy(false)
       setError(e instanceof Error ? e.message : 'Sign-in failed')
     }
@@ -138,6 +156,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   }
 
   function backToWallets() {
+    attemptRef.current++
     setStage('wallets'); setPending(null); setAccounts([]); setAddress(null); setError(null)
   }
 

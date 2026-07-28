@@ -27,6 +27,12 @@ describe('wallet registry', () => {
     expect(byId.get('subwallet-js')?.installUrl).toContain('http')
   })
 
+  it('sorts installed wallets ahead of uninstalled ones, declaration order as the tiebreak', () => {
+    ;(window as { injectedWeb3?: unknown }).injectedWeb3 = { 'subwallet-js': { enable: async () => ({}) } }
+    const ids = listSubstrateWallets().map(w => w.id)
+    expect(ids).toEqual(['subwallet-js', 'polkadot-js', 'talisman', 'aleph-zero', 'enkrypt', 'fearless-wallet', 'polkagate'])
+  })
+
   it('collects EIP-6963 announced providers', () => {
     const providers = discoverEvmProviders()
     window.dispatchEvent(new CustomEvent('eip6963:announceProvider', {

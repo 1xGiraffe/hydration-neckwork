@@ -26,7 +26,11 @@ const SUBSTRATE_WALLETS: { id: string; title: string; installUrl: string }[] = [
 
 export function listSubstrateWallets(): SubstrateWalletInfo[] {
   const injected = (window as InjectedWindow).injectedWeb3 ?? {}
-  return SUBSTRATE_WALLETS.map(w => ({ ...w, installed: w.id in injected }))
+  const withStatus = SUBSTRATE_WALLETS.map(w => ({ ...w, installed: w.id in injected }))
+  // Installed wallets first (so an install-link wallet never outranks one the
+  // visitor can actually click), declaration order as the tiebreak within
+  // each group — Array#filter is stable, so this needs no explicit sort.
+  return [...withStatus.filter(w => w.installed), ...withStatus.filter(w => !w.installed)]
 }
 
 export async function connectSubstrate(id: string): Promise<{ accounts: InjectedAccount[]; ext: InjectedExtension }> {

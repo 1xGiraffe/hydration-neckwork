@@ -253,7 +253,7 @@ export const paths = {
   // Route PARSING lands in Task 15 — until then these are link targets only;
   // nginx/parseRoute fall back to notfound for them, which is safe.
   libraries: () => '/libraries',
-  library: (id: string) => '/library/' + encodeURIComponent(id),
+  library: (id: string) => `/library/${encodeURIComponent(id)}`,
 }
 
 export function Link({ to, children, className, title, ariaLabel, onClick, style, data }: { to: string; children: ReactNode; className?: string; title?: string; ariaLabel?: string; onClick?: (e: MouseEvent) => void; style?: CSSProperties; data?: Record<string, string> }) {

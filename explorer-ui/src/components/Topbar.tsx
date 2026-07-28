@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import type { Route } from '../router'
 import { Link, paths } from '../router'
 import { SearchBar } from './SearchBar'
@@ -6,9 +6,14 @@ import { useLive, toggleLive } from '../live'
 import { useTheme } from '../hooks/useTheme'
 import { useSession } from '../session'
 import { useMe, useTagMapSync, logout } from '../hooks/useUser'
-import { ConnectDialog } from './ConnectDialog'
 import { AccountEmoji, ShortAddr, showIconFallback } from './ui'
 import type { AccountRef } from '../types'
+
+// Radix + the dialog itself are only needed once a visitor actually tries to
+// sign in, so it's a route-chunk-style lazy import (like every page in App.tsx)
+// rather than a static one — otherwise every visitor's entry chunk would carry
+// it, logged in or out.
+const ConnectDialog = lazy(() => import('./ConnectDialog').then(m => ({ default: m.ConnectDialog })))
 
 // Navigation: direct links plus one dropdown group (Chain) for the raw chain
 // data pages. A group's trigger navigates to its primary page (Chain → Blocks)
@@ -179,6 +184,11 @@ export function Topbar({ route }: { route: Route }) {
   const isDashboard = route.name === 'dashboard'
   const [drawer, setDrawer] = useState(false)
   const [connectOpen, setConnectOpen] = useState(false)
+  // Once true, stays true: the dialog module is only fetched the first time a
+  // visitor opens it, then stays mounted (closing just hides it) so reopening
+  // doesn't re-import or lose Suspense's already-resolved chunk.
+  const [connectMounted, setConnectMounted] = useState(false)
+  const openConnect = () => { setConnectMounted(true); setConnectOpen(true) }
   const drawerTriggerRef = useRef<HTMLButtonElement>(null)
   // Which desktop dropdown is open (by group label), or null. Driven by JS rather
   // than :hover/:focus-within so only one is ever open, and a click closes it.
@@ -271,7 +281,7 @@ export function Topbar({ route }: { route: Route }) {
             <span className="dot" /><span className="lab">{live ? 'Live' : 'Paused'}</span>
           </button>
           <ThemeToggle onClick={toggleTheme} />
-          <AccountMenuButton session={session} account={account} invites={invites} onConnect={() => setConnectOpen(true)} />
+          <AccountMenuButton session={session} account={account} invites={invites} onConnect={openConnect} />
           <button ref={drawerTriggerRef} className="nav-burger" onClick={() => setDrawer(true)} aria-label="Open menu" aria-expanded={drawer} aria-haspopup="dialog">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
           </button>
@@ -290,7 +300,7 @@ export function Topbar({ route }: { route: Route }) {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
               </button>
             </div>
-            <DrawerAccountSection session={session} invites={invites} onConnect={() => { setDrawer(false); setConnectOpen(true) }} onNavigate={() => setDrawer(false)} />
+            <DrawerAccountSection session={session} invites={invites} onConnect={() => { setDrawer(false); openConnect() }} onNavigate={() => setDrawer(false)} />
             <div className="drawer-sec">
               <div className="sec-lbl">Explore</div>
               {NAV_LINKS.map(it => (
@@ -314,7 +324,11 @@ export function Topbar({ route }: { route: Route }) {
           </nav>
         </div>
       )}
-      <ConnectDialog open={connectOpen} onOpenChange={setConnectOpen} />
+      {connectMounted && (
+        <Suspense fallback={null}>
+          <ConnectDialog open={connectOpen} onOpenChange={setConnectOpen} />
+        </Suspense>
+      )}
     </>
   )
 }
