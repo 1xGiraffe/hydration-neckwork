@@ -4,7 +4,9 @@ import type {
   AccountsPage, AccountSort, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, MoneyMarketResponse, AssetDetail, TagDetail,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail,
   ValueEvent, ReferendumDetail,
+  LibrarySummaryRef, LibraryDetailResponse, LibraryTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
 } from '../types'
+import { getSession, setSession } from '../session'
 
 // A failed request carries the API's own explanation (Fastify puts it in
 // `message`, hand-written rejections in `error`). Keeping it on the error lets a
@@ -24,6 +26,23 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: string; message?: string } | null
     throw new ApiError(response.status, body?.message || body?.error || `${response.status} ${response.statusText}`)
+  }
+  return response.json() as Promise<T>
+}
+
+// Authenticated JSON. A 401 means the session died server-side (expired,
+// revoked) — drop it locally so the UI falls back to logged-out everywhere.
+async function authedJson<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  const token = getSession()?.token
+  const response = await fetch(`/api${path}`, {
+    method, signal,
+    headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  })
+  if (response.status === 401) setSession(null)
+  if (!response.ok) {
+    const errBody = await response.json().catch(() => null) as { error?: string; message?: string } | null
+    throw new ApiError(response.status, errBody?.message || errBody?.error || `${response.status} ${response.statusText}`)
   }
   return response.json() as Promise<T>
 }
@@ -161,4 +180,35 @@ export const api = {
   daily: (scope: string, params?: { type?: string; action?: string; token?: string }, signal?: AbortSignal) => getJson<DailyPoint[]>(withQuery(`/explorer/daily/${scope}`, { ...params }), signal),
   accountsDaily: (signal?: AbortSignal) => getJson<{ date: string; active: number; new: number }[]>('/explorer/accounts-daily', signal),
   tags: (signal?: AbortSignal) => getJson<Tag[]>('/explorer/tags', signal),
+  // Public, shared-cacheable tag-library directory — no auth, no per-viewer
+  // fields (subscribed etc. come only from the authenticated userApi.library).
+  libraries: (signal?: AbortSignal) => getJson<LibrarySummaryRef[]>('/explorer/libraries', signal),
+  library: (id: string, signal?: AbortSignal) => getJson<LibraryDetailResponse>(`/explorer/library/${encodeURIComponent(id)}`, signal),
+  addressLibraries: (address: string, signal?: AbortSignal) => getJson<LibrarySummaryRef[]>(`/explorer/address/${encodeURIComponent(address)}/libraries`, signal),
+}
+
+export const userApi = {
+  challenge: (address: string) => authedJson<LoginChallengeResponse>('POST', '/user/auth/challenge', { address }),
+  verify: (address: string, nonce: string, signature: string) => authedJson<LoginResponse>('POST', '/user/auth/verify', { address, nonce, signature }),
+  logout: () => authedJson<{ ok: true }>('POST', '/user/auth/logout'),
+  me: (signal?: AbortSignal) => authedJson<MeResponse>('GET', '/user/me', undefined, signal),
+  tagMap: (signal?: AbortSignal) => authedJson<TagMapResponse>('GET', '/user/tag-map', undefined, signal),
+  setProfileName: (name: string) => authedJson<ProfileRef>('PUT', '/user/profile', { name }),
+  setAvatar: (data: string) => authedJson<ProfileRef>('PUT', '/user/profile/avatar', { data }),
+  clearAvatar: () => authedJson<ProfileRef>('DELETE', '/user/profile/avatar'),
+  library: (id: string, signal?: AbortSignal) => authedJson<LibraryDetailResponse>('GET', `/user/libraries/${encodeURIComponent(id)}`, undefined, signal),
+  createLibrary: (body: { name: string; note?: string; visibility: 'private' | 'public' }) => authedJson<LibraryDetailResponse>('POST', '/user/libraries', body),
+  updateLibrary: (id: string, body: { name?: string; note?: string; visibility?: 'private' | 'public' }) => authedJson<LibraryDetailResponse>('PATCH', `/user/libraries/${encodeURIComponent(id)}`, body),
+  deleteLibrary: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/libraries/${encodeURIComponent(id)}`),
+  createTag: (id: string, body: { name: string; color?: string; icon?: string; note?: string }) => authedJson<LibraryTagDetail>('POST', `/user/libraries/${encodeURIComponent(id)}/tags`, body),
+  updateTag: (id: string, tagId: string, body: { name?: string; color?: string; icon?: string; note?: string }) => authedJson<LibraryTagDetail>('PATCH', `/user/libraries/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}`, body),
+  deleteTag: (id: string, tagId: string) => authedJson<{ ok: true }>('DELETE', `/user/libraries/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}`),
+  setTagMembers: (id: string, tagId: string, body: { add?: string[]; remove?: string[] }) => authedJson<LibraryTagDetail>('PUT', `/user/libraries/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}/members`, body),
+  invite: (id: string, address: string) => authedJson<{ ok: true }>('POST', `/user/libraries/${encodeURIComponent(id)}/invites`, { address }),
+  revokeInvite: (id: string, address: string) => authedJson<{ ok: true }>('DELETE', `/user/libraries/${encodeURIComponent(id)}/invites/${encodeURIComponent(address)}`),
+  invites: (signal?: AbortSignal) => authedJson<LibrarySummaryRef[]>('GET', '/user/invites', undefined, signal),
+  respondInvite: (libraryId: string, accept: boolean) => authedJson<{ ok: true }>('POST', `/user/invites/${encodeURIComponent(libraryId)}/${accept ? 'accept' : 'decline'}`),
+  subscribe: (libraryId: string) => authedJson<{ ok: true }>('POST', '/user/subscriptions', { libraryId }),
+  unsubscribe: (libraryId: string) => authedJson<{ ok: true }>('DELETE', `/user/subscriptions/${encodeURIComponent(libraryId)}`),
+  setOrder: (libraryIds: string[]) => authedJson<{ order: string[] }>('PUT', '/user/library-order', { libraryIds }),
 }

@@ -6,6 +6,7 @@ import type {
   AccountRef, AssetRef, AssetLiquidationDay, AssetLiquidationTotal, HdxDashboard, HdxCohort, HdxLockType, HdxUnlockBucket, HdxDailyFlow, HdxMover,
   HollarDashboard, HollarCollateral, HollarArbDay, HollarTradeDay, HollarPool, HollarPegPoint,
   TradeDetail as TradeDetailResponse,
+  LibrarySummaryRef, LibraryDetailResponse, LibraryTagDetail, TagMapResponse, MeResponse,
 } from '../../src/types'
 
 /* ---------- deterministic helpers ---------- */
@@ -95,6 +96,76 @@ const A = {
 }
 const ACCS = [A.krakenEvm, A.binance, A.fox, A.owl, A.treasury, A.swan]
 const COLLATORS = [acc('0xf617ddeb11327140143ea2c663520f91c6f56d351fa2fb5cb5f2b0e80b755b37', '16ZfsSG7swhuyw79EMUcjmV3LEpYpAroUuMv13FZYuYSpb7B', '🌳')]
+
+/* ---------- tag libraries ---------- */
+// Owners and members are the SAME mock accounts used everywhere else (the fox,
+// owl, swan, binance, kraken) — a library's owner card, member pills, and an
+// address page's "in these libraries" panel must agree on one identity per
+// account, exactly as the live accounts/tags/activity feeds already do.
+const FOX_PROFILE = { name: 'fox.hdx', avatarVersion: 1 }
+const MOCK_PERSONAL_LIBRARY: LibrarySummaryRef = {
+  libraryId: 'personal', name: 'My library', note: '', visibility: 'private', isPersonal: true,
+  owner: { ...A.fox, profile: FOX_PROFILE }, tagCount: 1, accountCount: 1, subscriberCount: 0,
+}
+// Two public libraries, owned by two different existing mock accounts.
+export const MOCK_LIBRARIES: LibrarySummaryRef[] = [
+  { libraryId: 'defi-desks', name: 'DeFi desks', note: 'Accounts trading actively across Omnipool and the money markets', visibility: 'public', isPersonal: false, owner: { ...A.fox, profile: FOX_PROFILE }, tagCount: 2, accountCount: 3, subscriberCount: 3 },
+  { libraryId: 'exchange-wallets', name: 'Exchange wallets', note: 'Known CEX hot and deposit wallets', visibility: 'public', isPersonal: false, owner: A.binance, tagCount: 1, accountCount: 2, subscriberCount: 7 },
+]
+const MOCK_LIBRARY_DETAILS: Record<string, LibraryDetailResponse> = {
+  'defi-desks': {
+    ...MOCK_LIBRARIES[0],
+    tags: [
+      { tagId: 'defi-desks-active', name: 'Active traders', color: '#5865f2', icon: '📈', note: 'Trades weekly across Omnipool or the router', members: [A.fox, A.owl] },
+      { tagId: 'defi-desks-lp', name: 'Liquidity providers', color: '#22c55e', icon: '💧', note: 'Holds a live Omnipool or stablepool position', members: [A.swan] },
+    ] satisfies LibraryTagDetail[],
+    subscribed: false,
+  },
+  'exchange-wallets': {
+    ...MOCK_LIBRARIES[1],
+    tags: [
+      { tagId: 'exchange-wallets-hot', name: 'Hot wallets', color: '#f97316', icon: '🔥', note: 'Active deposit/withdrawal wallets', members: [A.binance, A.krakenEvm] },
+    ] satisfies LibraryTagDetail[],
+    subscribed: true,
+  },
+}
+export const MOCK_LIBRARY_DETAIL = MOCK_LIBRARY_DETAILS['defi-desks']
+// Which public libraries list this address as owner or tagged member — the
+// account page's "in these libraries" panel. Any address not one of the two
+// owners/members below falls back to the fox's set, mirroring buildAddress's
+// own unknown-address fallback.
+function addressLibraries(rawAddress: string): LibrarySummaryRef[] {
+  const wanted = decodeURIComponent(rawAddress)
+  const is = (a: AccountRef) => a.accountId === wanted || a.address.toLowerCase() === wanted.toLowerCase()
+  if (is(A.binance) || is(A.krakenEvm)) return [MOCK_LIBRARIES[1]]
+  return [MOCK_LIBRARIES[0]]
+}
+// A personal library (the tag map's non-system entry) plus the required
+// system marker. `personal-watch` holds a known mock address so a resolved
+// pill can be asserted against it.
+export const MOCK_TAG_MAP: TagMapResponse = {
+  libraries: [
+    { libraryId: 'personal', name: 'My library', tags: [
+      { tagId: 'personal-watch', name: 'Watching', color: '#f97316', icon: '👀', members: [A.owl.address] },
+    ] },
+    { libraryId: 'system', name: 'Hydration', tags: [] },
+  ],
+}
+// A private, invite-only library the viewer has been invited to but neither
+// owns nor has accepted yet.
+const MOCK_INVITE_LIBRARY: LibrarySummaryRef = {
+  libraryId: 'whale-watch', name: 'Whale watch', note: 'Invite-only — large HDX holders under active monitoring', visibility: 'private', isPersonal: false,
+  owner: A.binance, tagCount: 1, accountCount: 2, subscriberCount: 1,
+}
+export const MOCK_INVITES: LibrarySummaryRef[] = [MOCK_INVITE_LIBRARY]
+export const MOCK_ME: MeResponse = {
+  account: { ...A.fox, profile: FOX_PROFILE },
+  profile: FOX_PROFILE,
+  libraries: [MOCK_PERSONAL_LIBRARY, MOCK_LIBRARIES[0]],
+  subscriptions: [MOCK_LIBRARIES[1]],
+  invites: MOCK_INVITES,
+  order: [MOCK_PERSONAL_LIBRARY.libraryId, MOCK_LIBRARIES[0].libraryId, MOCK_LIBRARIES[1].libraryId],
+}
 
 /* ---------- call/event catalogue ---------- */
 const CALLS = ['Omnipool.sell', 'Omnipool.buy', 'Router.sell', 'Tokens.transfer', 'Balances.transfer_keep_alive', 'XTokens.transfer', 'Omnipool.add_liquidity', 'Staking.stake', 'DCA.schedule', 'EVM.call']
@@ -931,6 +1002,9 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   // `series=1` is the Overview's shape: the value series without the per-asset
   // history the Balances treemap reads (98-99% of the real payload).
   { re: /^\/explorer\/address\/(.+)\/history$/, fn: (m, qs) => { const built = buildAddress(decodeURIComponent(m[1])); return { portfolioSeries: built.portfolioSeries ?? [], portfolioDates: built.portfolioDates ?? [], balanceHistory: qs.get('series') === '1' ? [] : built.balanceHistory ?? [] } } },
+  // Public libraries that list this address as owner or tagged member — must
+  // also sit before the generic address route's greedy `(.+)`.
+  { re: /^\/explorer\/address\/(.+)\/libraries$/, fn: (m) => addressLibraries(m[1]) },
   {
     re: /^\/explorer\/address\/(.+)\/close-accounts$/, fn: () => ({
       accounts: [
@@ -1112,6 +1186,11 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   {
     re: /^\/explorer\/tags$/, fn: () => mockTags,
   },
+  { re: /^\/explorer\/libraries$/, fn: () => MOCK_LIBRARIES },
+  { re: /^\/explorer\/library\/(.+)$/, fn: (m) => MOCK_LIBRARY_DETAILS[decodeURIComponent(m[1])] },
+  { re: /^\/user\/me$/, fn: () => MOCK_ME },
+  { re: /^\/user\/tag-map$/, fn: () => MOCK_TAG_MAP },
+  { re: /^\/user\/invites$/, fn: () => MOCK_INVITES },
 ]
 
 const mockTags: Tag[] = [

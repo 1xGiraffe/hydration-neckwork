@@ -24,6 +24,11 @@ export interface AccountIdentity {
   twitter: string
 }
 
+// A wallet-login profile: the display name and avatar the account owner set
+// themselves. `avatarVersion` busts the avatar image URL's cache on change —
+// absent/null means no profile has been set up for the account.
+export interface ProfileRef { name: string; avatarVersion: number }
+
 export interface AccountRef {
   accountId: string
   address: string        // Polkadot SS58 or EVM 0x (never Hydration SS58)
@@ -32,6 +37,7 @@ export interface AccountRef {
   emojiUrl?: string      // custom image icon (e.g. a Discord avatar) — render in place of the emoji char
   tag: TagRef | null
   identity?: AccountIdentity | null   // on-chain Identity.IdentityOf display + judgement status
+  profile?: ProfileRef | null         // self-authored wallet-login profile, if the account has one
 }
 
 export interface ExplorerStats {
@@ -796,3 +802,57 @@ export interface ReferendumDetail {
   votesShown: number
   votesTotal: number
 }
+
+// A user-authored tag library: a named, ownable collection of tags an account
+// created to organize other accounts (mirrors the built-in Tag directory, but
+// user-owned and optionally shared). `isPersonal` marks the one library every
+// account gets automatically and cannot delete or leave.
+export interface LibrarySummaryRef {
+  libraryId: string
+  name: string
+  note: string
+  visibility: 'private' | 'public'
+  isPersonal: boolean
+  owner: AccountRef
+  tagCount: number
+  accountCount: number
+  subscriberCount: number
+}
+
+export interface LibraryTagDetail {
+  tagId: string
+  name: string
+  color: string
+  icon: string
+  note: string
+  members: AccountRef[]
+}
+
+export interface LibraryDetailResponse extends LibrarySummaryRef {
+  tags: LibraryTagDetail[]
+  // Present only when the viewer is authenticated and not the owner — whether
+  // they already subscribe to this (public) library.
+  subscribed?: boolean
+}
+
+// The viewer's tag-map projection: every library's tags reduced to member
+// addresses, for local pill resolution without a round trip per tag. The
+// 'system' entry stands for the built-in Tag directory (no library owns it).
+export interface TagMapLibrary {
+  libraryId: string
+  name: string
+  tags: { tagId: string; name: string; color: string; icon: string; members: string[] }[]
+}
+export interface TagMapResponse { libraries: TagMapLibrary[] }
+
+export interface MeResponse {
+  account: AccountRef
+  profile: ProfileRef | null
+  libraries: LibrarySummaryRef[]
+  subscriptions: LibrarySummaryRef[]
+  invites: LibrarySummaryRef[]
+  order: string[]
+}
+
+export interface LoginChallengeResponse { nonce: string; message: string }
+export interface LoginResponse { token: string; me: MeResponse }
