@@ -5751,7 +5751,7 @@ export interface TradeRow {
   linkBlock: number | null
   linkIndex: number | null
 }
-interface RawSwapEventRow {
+export interface RawSwapEventRow {
   block_height: number
   ts: string
   event_index: number
@@ -5764,11 +5764,94 @@ interface RawSwapEventRow {
   amount_out: string
 }
 
-function groupSwapRows(rows: RawSwapEventRow[]): { groups: Map<string, RawSwapEventRow[]>; order: string[] } {
+// One trade per ROUTE, not per extrinsic.
+//
+// The router emits a route's hop events as it executes them and then its net
+// summary, so a net event closes the run of hops before it: [5→25][25→10] then
+// Router.Executed 5→10 is one trade, and a hop belongs to the first net event at or
+// after it. That is what lets several routes share an extrinsic: a batch dispatching
+// two Router.sells emits two such runs and is two trades.
+//
+// Keying the group by the extrinsic instead collapsed them and kept only the first —
+// 52,700 trades chain-wide, including a proxied multisig batch whose $79.7k HUSDT
+// leg appeared on no surface at all, and arbitrage triangles that showed one leg of
+// three. The hops cannot simply be dropped instead: outside the router pallet's own
+// account they carry the USER's `who` (102k XYK legs), so they would each surface as
+// a trade of their own.
+//
+// Rows after the last net event have nothing to close them, so they stay one group
+// per extrinsic — the conservative reading, since a pre-rename multi-hop route and
+// two genuinely separate pool swaps are indistinguishable once no summary is emitted.
+// The net event that closes the route an event belongs to: the first one at or after
+// it. Ascending `netIndices`.
+export function closingNetEvent(netIndices: number[], eventIndex: number): number | undefined {
+  return netIndices.find(i => i >= eventIndex)
+}
+
+// Where a route's own events start: after the net event of the route before it, so a
+// detail page can slice one route out of a batch. Exclusive; -1 when it is the first.
+export function routeStartAfter(netIndices: number[], netEvent: number): number {
+  const before = netIndices.filter(i => i < netEvent)
+  return before.length ? before[before.length - 1] : -1
+}
+
+// The routes of ONE extrinsic's swap events, ascending, by the same boundary the feed
+// groups on: a net event closes the run before it, and a trailing run with no net
+// event of its own is a route too. Surfaces that read a single extrinsic's events
+// (the extrinsic page, the block page) split them with this instead of keeping only
+// the first route.
+// How a trade row is identified when successive fetch windows are deduplicated.
+//
+// A route closed by a net event is identified BY that event, so the two routes of one
+// batch are two rows: keying on the extrinsic deduped the second away, which is how a
+// $79.7k swap stayed missing from /activity?min=5000 after the feed itself was fixed.
+//
+// A trailing run has no net event to anchor it, and its representative shifts when a
+// window splits the extrinsic, so it stays keyed per extrinsic — one row rather than a
+// duplicate, which is what the extrinsic-wide key got right.
+export function tradeRowKey(row: { blockHeight: number; extrinsicIndex: number | null; eventIndex: number; venue: string }): string {
+  if (row.extrinsicIndex == null) return `${row.blockHeight}:e${row.eventIndex}`
+  const extrinsic = `${row.blockHeight}:x${row.extrinsicIndex}`
+  return row.venue === 'Router' ? `${extrinsic}:r${row.eventIndex}` : `${extrinsic}:tail`
+}
+
+export function routeGroups<T extends { event_index: number; event_name: string }>(events: T[]): T[][] {
+  const ordered = [...events].sort((l, r) => l.event_index - r.event_index)
+  const nets = ordered.filter(e => isRouterNet(e.event_name)).map(e => e.event_index)
+  const groups = new Map<number | 'tail', T[]>()
+  const order: (number | 'tail')[] = []
+  for (const e of ordered) {
+    const key = closingNetEvent(nets, e.event_index) ?? 'tail'
+    if (!groups.has(key)) { groups.set(key, []); order.push(key) }
+    groups.get(key)!.push(e)
+  }
+  return order.map(k => groups.get(k)!)
+}
+
+export function swapGroupKey(row: RawSwapEventRow, netEventsByExtrinsic: Map<string, number[]>): string {
+  if (row.extrinsic_index == null) return `${row.block_height}:e${row.event_index}`
+  const extrinsic = `${row.block_height}:x${row.extrinsic_index}`
+  const nets = netEventsByExtrinsic.get(`${row.block_height}:${row.extrinsic_index}`) ?? []
+  const closing = closingNetEvent(nets, row.event_index)
+  return closing != null ? `${extrinsic}:r${closing}` : `${extrinsic}:tail`
+}
+
+export function groupSwapRows(rows: RawSwapEventRow[]): { groups: Map<string, RawSwapEventRow[]>; order: string[] } {
+  // The net events of each extrinsic, ascending, so a row can find the one that
+  // closes it. The feed reads rows newest-first, so this cannot rely on input order.
+  const netEventsByExtrinsic = new Map<string, number[]>()
+  for (const row of rows) {
+    if (row.extrinsic_index == null || !isRouterNet(row.event_name)) continue
+    const key = `${row.block_height}:${row.extrinsic_index}`
+    const at = netEventsByExtrinsic.get(key) ?? []
+    at.push(row.event_index)
+    netEventsByExtrinsic.set(key, at)
+  }
+  for (const indices of netEventsByExtrinsic.values()) indices.sort((l, r) => l - r)
   const groups = new Map<string, RawSwapEventRow[]>()
   const order: string[] = []
   for (const row of rows) {
-    const key = row.extrinsic_index != null ? `${row.block_height}:x${row.extrinsic_index}` : `${row.block_height}:e${row.event_index}`
+    const key = swapGroupKey(row, netEventsByExtrinsic)
     if (!groups.has(key)) {
       groups.set(key, [])
       order.push(key)
@@ -5985,7 +6068,7 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
       // prefer Router.Executed (the net summary) over individual AMM hop events.
       const { groups, order } = groupSwapRows(rows)
       const pairs = rows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null])
-      const [signers, liqExt] = await Promise.all([signersFor(pairs), liquidationExtrinsics(pairs)])
+      const [signers, liqExt] = await Promise.all([actorsFor(pairs), liquidationExtrinsics(pairs)])
       const out: TradeRow[] = []
       for (const key of order) {
         if (maxRows != null && out.length >= maxRows) break
@@ -6035,7 +6118,7 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
         return buildRows(raw)
       }, row => rowMeetsExactUsdMinimum(row, filters.min!),
       row => row.blockHeight, row => row.eventIndex,
-      row => `${row.blockHeight}:${row.extrinsicIndex == null ? `e${row.eventIndex}` : `x${row.extrinsicIndex}`}`,
+      tradeRowKey,
       { pageSize: 25_000, pageState: () => pageState })
       return deep.slice(offset, offset + limit)
     }
@@ -6221,8 +6304,11 @@ async function inferredRouterRoute(height: number, eventIndex: number, netAmts: 
   return route
 }
 
-export async function getTradeDetail(height: number, index: number): Promise<TradeDetail | null> {
-  return cached(`explorer:trade:${height}:${index}`, 60_000, async () => {
+// `routeEvent` addresses ONE route of a batch that dispatched several: the events of
+// the route it closes, rather than every swap event the extrinsic emitted. Without it
+// a link to the second route's event answered with the first route's trade.
+export async function getTradeDetail(height: number, index: number, routeEvent?: number): Promise<TradeDetail | null> {
+  return cached(`explorer:trade:${height}:${index}:${routeEvent ?? ''}`, 60_000, async () => {
     const prices = await ensurePrices()
     const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
     const [evRes, extRes] = await Promise.all([
@@ -6242,7 +6328,12 @@ export async function getTradeDetail(height: number, index: number): Promise<Tra
     ])
     const evRows = await evRes.json<{ event_index: number; event_name: string; args_json: string; ts: string }>()
     if (!evRows.length) return null
-    const evs = evRows.map(r => ({ idx: r.event_index, name: r.event_name, ts: r.ts, args: (safeJson(r.args_json) ?? {}) as Record<string, unknown> }))
+    const allEvs = evRows.map(r => ({ idx: r.event_index, name: r.event_name, ts: r.ts, args: (safeJson(r.args_json) ?? {}) as Record<string, unknown> }))
+    // Slice the addressed route out, by the same boundaries the feed groups on.
+    const netIndices = allEvs.filter(e => isRouterNet(e.name)).map(e => e.idx)
+    const evs = routeEvent == null ? allEvs
+      : allEvs.filter(e => e.idx > routeStartAfter(netIndices, routeEvent) && e.idx <= routeEvent)
+    if (!evs.length) return null
     const ext = (await extRes.json<{ ts: string; extrinsic_hash: string; success: number | boolean; signer: string | null; effective_signer: string | null; fee: string | null; call_name: string; call_args_json: string }>())[0]
     const callName = ext?.call_name ?? ''
     const callArgs = (safeJson(ext?.call_args_json ?? '') ?? {}) as Record<string, unknown>
@@ -6278,7 +6369,10 @@ export async function getTradeDetail(height: number, index: number): Promise<Tra
     const inNum = Number(netAmts.amountIn) / 10 ** aIn.decimals
     const outNum = Number(netAmts.amountOut) / 10 ** aOut.decimals
     const netWho = String(net.args.who ?? '')
-    const actorId = ext?.effective_signer || ext?.signer || (ACCOUNT_RE.test(netWho) && netWho !== ROUTER_PALLET_ACCT ? netWho : null)
+    // A proxied or multisig dispatch moves the funds of the account it ran AS, so the
+    // detail names the same actor the feed does rather than the signatory.
+    const onBehalf = (await onBehalfActorsFor([[height, index]])).get(`${height}:${index}`)
+    const actorId = onBehalf || ext?.effective_signer || ext?.signer || (ACCOUNT_RE.test(netWho) && netWho !== ROUTER_PALLET_ACCT ? netWho : null)
     const detail: TradeDetail = {
       blockHeight: height, timestamp: ext?.ts ?? net.ts, extrinsicIndex: index, eventIndex: net.idx,
       hash: ext?.extrinsic_hash ?? null,
@@ -6312,7 +6406,19 @@ export async function getTradeDetailByEvent(height: number, eventIndex: number):
     })
     const ev = (await evRes.json<{ event_index: number; extrinsic_index: number | null; event_name: string; args_json: string; ts: string }>())[0]
     if (!ev) return null
-    if (ev.extrinsic_index != null) return getTradeDetail(height, ev.extrinsic_index)
+    if (ev.extrinsic_index != null) {
+      // Which route of the extrinsic this event belongs to, so a batch's second swap
+      // opens its own trade instead of its neighbour's.
+      const netRes = await client.query({
+        query: `SELECT event_index FROM price_data.raw_events
+                WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32}
+                  AND event_name IN (${ROUTER_NET_EVENTS_SQL})
+                ORDER BY event_index`,
+        query_params: { h: height, i: ev.extrinsic_index }, format: 'JSONEachRow',
+      })
+      const nets = (await netRes.json<{ event_index: number }>()).map(r => r.event_index)
+      return getTradeDetail(height, ev.extrinsic_index, closingNetEvent(nets, eventIndex))
+    }
 
     const args = (safeJson(ev.args_json) ?? {}) as Record<string, unknown>
     const netAmts = swapEventAmounts(ev.event_name, args)
@@ -6361,8 +6467,87 @@ export async function getTradeDetailByEvent(height: number, eventIndex: number):
   })
 }
 
+// The account a dispatch ran AS, when it was not the signatory's own.
+//
+// A swap dispatched through a proxy or a multisig moves the funds of the account the
+// call ran as, never those of the signatory who submitted it. The innermost proxy
+// wins: Multisig.as_multi → Proxy.proxy(real=X) executes its batch with X's origin,
+// so X is whose HUSDT left. Call addresses form a path tree ('root', '0', '0.0', …),
+// so depth is the dot count and 'root' is shallowest.
+//
+// With no proxy, the multisig account itself is the actor. With neither, there is no
+// on-behalf account and the signer stands.
+export interface OnBehalfCandidateSet {
+  proxies?: { callAddress: string; account: string }[]
+  multisig?: string
+}
+export function onBehalfActor(candidates: OnBehalfCandidateSet): string | undefined {
+  const depth = (callAddress: string) => callAddress === 'root' ? 0 : callAddress.split('.').length
+  const innermost = (candidates.proxies ?? [])
+    .filter(p => p.account)
+    .sort((l, r) => depth(r.callAddress) - depth(l.callAddress))[0]
+  return innermost?.account || candidates.multisig || undefined
+}
+
+// Map (block_height, extrinsic_index) → the account each extrinsic dispatched AS.
+// Both reads are purpose-built on-behalf models rather than the raw call args, which
+// would need a JSON path per nesting depth. Neither is keyed on (block, extrinsic),
+// so each is a full scan — of 4,679 and 4,884 rows respectively, because only
+// proxied/multisig dispatches land in them at all, against the ~2M swap extrinsics
+// that do not.
+async function onBehalfActorsFor(pairs: [number, number | null][]): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  const keys = [...new Set(pairs.filter(([, i]) => i != null).map(([h, i]) => `${h}:${i}`))]
+  if (!keys.length) return out
+  const tuples = keys.map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
+  const [proxyRes, msRes] = await Promise.all([
+    client.query({
+      query: `SELECT block_height, extrinsic_index, call_address, real_account
+              FROM price_data.proxy_call_activity
+              WHERE (block_height, extrinsic_index) IN (${tuples})`,
+      format: 'JSONEachRow',
+    }),
+    client.query({
+      query: `SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index, multisig
+              FROM price_data.multisig_event_activity
+              WHERE (block_height, assumeNotNull(extrinsic_index)) IN (${tuples})
+                AND event_name = 'Multisig.MultisigExecuted' AND multisig != ''`,
+      format: 'JSONEachRow',
+    }),
+  ])
+  const candidates = new Map<string, OnBehalfCandidateSet>()
+  for (const r of await proxyRes.json<{ block_height: number; extrinsic_index: number; call_address: string; real_account: string }>()) {
+    const key = `${r.block_height}:${r.extrinsic_index}`
+    const at = candidates.get(key) ?? {}
+    ;(at.proxies ??= []).push({ callAddress: r.call_address, account: r.real_account })
+    candidates.set(key, at)
+  }
+  for (const r of await msRes.json<{ block_height: number; extrinsic_index: number; multisig: string }>()) {
+    const key = `${r.block_height}:${r.extrinsic_index}`
+    const at = candidates.get(key) ?? {}
+    at.multisig ??= r.multisig
+    candidates.set(key, at)
+  }
+  for (const [key, set] of candidates) {
+    const actor = onBehalfActor(set)
+    if (actor) out.set(key, actor)
+  }
+  return out
+}
+
+// Map (block_height, extrinsic_index) → the account to attribute its pallet-internal
+// events (trades) to: the account the extrinsic dispatched AS when it ran through a
+// proxy or a multisig, else its signer. Attributing to the signatory credited a
+// multisig member with the proxied account's $79.7k swap while the account whose
+// funds moved showed nothing.
+async function actorsFor(pairs: [number, number | null][]): Promise<Map<string, string>> {
+  const [signers, onBehalf] = await Promise.all([signersFor(pairs), onBehalfActorsFor(pairs)])
+  for (const [key, actor] of onBehalf) signers.set(key, actor)
+  return signers
+}
+
 // Map (block_height, extrinsic_index) → signer account_id for a set of rows.
-// Used to attribute pallet-internal events (trades) to the real transaction author.
+// The raw signatory; callers attributing economic activity want actorsFor instead.
 async function signersFor(pairs: [number, number | null][]): Promise<Map<string, string>> {
   const out = new Map<string, string>()
   const keys = [...new Set(pairs.filter(([, i]) => i != null).map(([h, i]) => `${h}:${i}`))]
@@ -8256,7 +8441,7 @@ async function getRecentOtc(limit: number, from?: string, to?: string, offset = 
         .map(r => argInt((safeJson(r.args_json) ?? {}) as Record<string, unknown>, 'orderId'))
       const [placedById, signers] = await Promise.all([
         getOtcPlacedLegsByOrderId(lookupIds),
-        signersFor(rawOtc.filter(r => r.event_name === 'OTC.Placed' || r.event_name === 'OTC.Cancelled').map(r => [r.block_height, r.extrinsic_index] as [number, number | null])),
+        actorsFor(rawOtc.filter(r => r.event_name === 'OTC.Placed' || r.event_name === 'OTC.Cancelled').map(r => [r.block_height, r.extrinsic_index] as [number, number | null])),
       ])
       const out: ActivityRow[] = []
       for (const r of rawOtc) {
@@ -10256,7 +10441,7 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
     const events = await evRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; call_address: string; args_json: string }>()
     if (!events.length) return []
 
-    const signerMap = await signersFor([[height, index]])
+    const signerMap = await actorsFor([[height, index]])
     const signer = signerMap.get(`${height}:${index}`) ?? null
     const rows: ActivityRow[] = []
     const hdx = asset(0)
@@ -10285,14 +10470,24 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
 
     const swapEvents = events.filter(e => SWAP_EVENTS.includes(e.event_name))
     const dcaExec = events.find(e => e.event_name === 'DCA.TradeExecuted')
-    if (swapEvents.length) {
-      const rep = swapEvents.find(e => isRouterNet(e.event_name)) ?? swapEvents[0]
+    // A batch dispatching several routes is several trades. Keeping only the first
+    // route hid the rest — a proxied multisig batch showed its HUSDT leg and dropped
+    // the HUSDC one, on the very page that lists what the extrinsic did.
+    for (const route of routeGroups(swapEvents)) {
+      const rep = route.find(e => isRouterNet(e.event_name)) ?? route[route.length - 1]
       const args = (safeJson(rep.args_json) ?? {}) as Record<string, unknown>
       const aIn = asset(Number(args.assetIn ?? 0))
       const aOut = asset(Number(args.assetOut ?? 0))
-      const dcaArgs = dcaExec ? (safeJson(dcaExec.args_json) ?? {}) as Record<string, unknown> : null
+      // A DCA execution reports the schedule its swap belongs to and follows that
+      // swap's events, so it claims the last route that opened before it.
+      const ownsDca = dcaExec != null && rep.event_index <= dcaExec.event_index
+        && !routeGroups(swapEvents).some(other => {
+          const otherRep = other.find(e => isRouterNet(e.event_name)) ?? other[other.length - 1]
+          return otherRep.event_index > rep.event_index && otherRep.event_index <= dcaExec.event_index
+        })
+      const dcaArgs = ownsDca && dcaExec ? (safeJson(dcaExec.args_json) ?? {}) as Record<string, unknown> : null
       rows.push({
-        type: dcaExec ? 'dca' : 'trade',
+        type: dcaArgs ? 'dca' : 'trade',
         blockHeight: rep.block_height,
         timestamp: rep.ts,
         eventIndex: rep.event_index,
@@ -10306,7 +10501,7 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
         amountIn: argStr(dcaArgs ?? args, 'amountIn'),
         amountOut: argStr(dcaArgs ?? args, 'amountOut'),
         valueUsd: usdValue(prices, aOut.assetId, argStr(dcaArgs ?? args, 'amountOut'), aOut.decimals),
-        dca: !!dcaExec,
+        dca: !!dcaArgs,
         dcaScheduleId: dcaArgs ? Number(argStr(dcaArgs, 'id')) || undefined : undefined,
         linkBlock: rep.block_height,
         linkIndex: rep.extrinsic_index,
@@ -11021,7 +11216,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       const dcaByAmount = new Map<string, string>()
       for (const d of await dcaRes.json<{ block_height: number; who: string; amount_in: string }>()) dcaByAmount.set(`${d.block_height}:${d.amount_in}`, d.who)
       const pairs = rows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null])
-      const [signers, liqExt] = await Promise.all([signersFor(pairs), liquidationExtrinsics(pairs)])
+      const [signers, liqExt] = await Promise.all([actorsFor(pairs), liquidationExtrinsics(pairs)])
       const { groups, order } = groupSwapRows(rows)
       const out: ActivityRow[] = []
       for (const key of order) {
@@ -11259,7 +11454,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
         const orderIds = rows.map(r => argInt((safeJson(r.args_json) ?? {}) as Record<string, unknown>, 'orderId'))
         const [placedById, signers] = await Promise.all([
           getOtcPlacedLegsByOrderId(orderIds),
-          signersFor(rows.filter(r => r.event_name === 'OTC.Placed' || r.event_name === 'OTC.Cancelled').map(r => [r.block_height, r.extrinsic_index] as [number, number | null])),
+          actorsFor(rows.filter(r => r.event_name === 'OTC.Placed' || r.event_name === 'OTC.Cancelled').map(r => [r.block_height, r.extrinsic_index] as [number, number | null])),
         ])
         const out: ActivityRow[] = []
         for (const r of rows) {
