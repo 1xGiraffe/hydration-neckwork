@@ -94,10 +94,6 @@ export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identi
 export interface AccountsPage {
   rows: TopAccountRow[]
   total: number
-  // How many leading rows of THIS ordering are provably the true top N (see the API's
-  // activity-ordering note). Reported for the activity sort, whose ranking is
-  // established over a counted pool rather than over the whole directory.
-  rankedDepth?: number
 }
 
 // trade detail

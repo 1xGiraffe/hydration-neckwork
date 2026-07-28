@@ -1,7 +1,7 @@
 import { useAccounts, useAccountsDaily } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, usePageParam, useQueryValue, setPage, setQuery } from '../router'
-import { Crumbs, F, AddrPill, Sparkline, EmptyRow, TableSkeleton, Pager, healthFactorDisplay, TagGroupPill, TokenIconRow, Dash, pendingRows } from '../components/ui'
+import { Crumbs, F, AddrPill, Sparkline, EmptyRow, TableSkeleton, Pager, healthFactorDisplay, TagGroupPill, TokenIconRow, Dash, pendingRows, compactAmount } from '../components/ui'
 import { AccountsChart } from '../components/AccountsChart'
 import { defisimAccountTarget } from '../utils/defisim'
 import { offeredPages } from '../utils/activityPaging'
@@ -96,9 +96,9 @@ export function Accounts() {
               // Tag rows link DefiSim to the member holding the worst position.
               const hf = r.healthFactor && r.healthFactor !== 'inf' ? healthFactorDisplay(r.healthFactor) : null
               const addr = defisimAccountTarget(r.account, r.simAccount)
-              // Module accounts touch balances on every trade — compact the millions.
-              const fmtCount = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 10_000 ? `${Math.round(n / 1000)}k` : F.int(n)
-              const count = (n?: number) => n != null ? <span className="mono muted">{fmtCount(n)}</span> : <Dash />
+              // Module accounts touch balances on every trade, so the column shows the
+              // explorer-wide rough scale (2.25M · 505k · 4.87k) rather than a full count.
+              const count = (n?: number) => n != null ? <span className="mono muted">{compactAmount(n)}</span> : <Dash />
               return (
                 <tr key={r.tag ? `tag:${r.tag.tagId}` : r.account ? `account:${r.account.accountId}` : `row:${r.simAccount ?? i}`}>
                   <td data-label="Account">{r.tag ? <TagGroupPill tag={r.tag} /> : r.account ? <AddrPill account={r.account} /> : <Dash />}</td>
