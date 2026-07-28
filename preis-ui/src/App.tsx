@@ -1,5 +1,4 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
-import Chart from './components/Chart'
 import Topbar from './components/Topbar'
 import ChartHeader from './components/ChartHeader'
 import Sidebar from './components/Sidebar'
@@ -25,6 +24,13 @@ const DESKTOP_SIDEBAR_STORAGE_KEY = 'preis-desktop-sidebar-open'
 const INSPECTION_QUERY_PARAM = 'inspect'
 
 const AssetPickerDialog = lazy(() => import('./components/AssetPickerDialog'))
+
+// `Chart` pulls in lightweight-charts and the whole chart-tools layer, none of
+// which the shell needs to paint: the topbar, header and sidebar render from
+// /assets and /market-stats, while the chart cannot draw until /candles answers.
+// Splitting it keeps that code out of the entry chunk. `.chart-wrap` already has
+// its height from CSS, so the Suspense fallback swaps for the canvas in place.
+const Chart = lazy(() => import('./components/Chart'))
 
 function parseIntervalSlug(slug: string | undefined): OHLCVInterval {
   return INTERVALS.includes(slug as OHLCVInterval) ? (slug as OHLCVInterval) : '1h'
@@ -417,6 +423,15 @@ export default function App() {
         .main.sidebar-collapsed { grid-template-columns: 1fr; }
         .chart-col { display: grid; grid-template-rows: auto 1fr; min-width: 0; min-height: 0; overflow: hidden; }
         .chart-wrap { position: relative; min-height: 0; min-width: 0; overflow: hidden; }
+        /* Stand-in while the chart chunk arrives. It is absolutely positioned
+           inside .chart-wrap, whose height comes from .chart-col's 1fr row and
+           so is already settled by CSS before any chart code runs — the swap to
+           the real canvas therefore moves nothing. Wording and dimming match
+           Chart's own .chart-loading overlay so the two read as one state. */
+        .chart-boot {
+          position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+          color: var(--text-low); font-size: 13px; pointer-events: none;
+        }
         .sidebar-host { min-width: 0; overflow: hidden; animation: preis-list-row-in 180ms var(--ease-out-soft); }
         .toast {
           position: fixed; bottom: 24px; left: 50%;
@@ -469,20 +484,22 @@ export default function App() {
             onToggleFavorite={() => favorites.toggle(baseId, quoteId)}
           />
           <div ref={chartContainerRef} className="chart-wrap">
-            <Chart
-              key={`${baseId}-${quoteId}-${orientationKey}`}
-              baseId={baseId}
-              quoteId={quoteId}
-              interval={interval}
-              base={baseSymbol}
-              showVolumeSource={quoteAsset ? !quoteAsset.isUsdPegged : false}
-              onVisibleRangeReady={handleVisibleRangeReady}
-              onDataChange={setChartData}
-              inspectionTime={inspectionTime}
-              onInspectionTimeChange={handleInspectionTimeChange}
-              theme={theme}
-              toolsEnabled={toolsEnabled}
-            />
+            <Suspense fallback={<div className="chart-boot">Loading…</div>}>
+              <Chart
+                key={`${baseId}-${quoteId}-${orientationKey}`}
+                baseId={baseId}
+                quoteId={quoteId}
+                interval={interval}
+                base={baseSymbol}
+                showVolumeSource={quoteAsset ? !quoteAsset.isUsdPegged : false}
+                onVisibleRangeReady={handleVisibleRangeReady}
+                onDataChange={setChartData}
+                inspectionTime={inspectionTime}
+                onInspectionTimeChange={handleInspectionTimeChange}
+                theme={theme}
+                toolsEnabled={toolsEnabled}
+              />
+            </Suspense>
           </div>
         </div>
         {!isMobile && desktopSidebarOpen && (
