@@ -13,7 +13,14 @@ import { resolveDisplayAccountId } from './explorerService.ts'
 // updates memory first, then persists; every row uses the ReplacingMergeTree
 // soft-delete idiom (insert with deleted=1 to remove).
 
-export interface UserTagDef { tagId: string; name: string; color: string; icon: string; note: string; members: Set<string> }
+// `members` stays a Set for O(1) has/add/delete (the one-tag-per-account-per-
+// library move check does this on every write); `order` is the same
+// membership as a display-ordered array, the only field a drag/keyboard
+// reorder actually changes. `nextPosition` is a monotonic per-tag counter
+// (never rewound by a removal — see setTagMembers) so an appended member
+// always sorts after every row already persisted, exactly like
+// userProfileService's avatarCounter avoids reissuing a stale version.
+export interface UserTagDef { tagId: string; name: string; color: string; icon: string; note: string; members: Set<string>; order: string[]; nextPosition: number }
 export interface UserLibrary {
   libraryId: string; owner: string; name: string; note: string
   visibility: 'private' | 'public'; isPersonal: boolean
@@ -45,12 +52,25 @@ export function initUserLibraryService(c: ClickHouseClient): void {
   client = c; libraries.clear(); byOwner.clear(); subsByLibrary.clear(); subsByAccount.clear(); orderByAccount.clear()
 }
 
+// AGENTS.md's idempotent-schema rule: `CREATE TABLE IF NOT EXISTS` never
+// re-runs the declaration in `clickhouse/schema/004_user.sql` against a
+// database that already has the table, so a column added to that
+// declaration (here: `position`) needs its own guard to reach a database
+// created before the column existed. `ADD COLUMN IF NOT EXISTS` is
+// metadata-only on MergeTree (instant regardless of table size) and old
+// parts read the missing column as its `DEFAULT 0`, so this is safe and
+// cheap to run unconditionally on every start — called once from the
+// server bootstrap, before loadUserLibraries() first SELECTs `position`.
+export async function ensureTagMemberPositionColumn(c: ClickHouseClient): Promise<void> {
+  await c.command({ query: `ALTER TABLE price_data.user_tag_members ADD COLUMN IF NOT EXISTS position UInt32 DEFAULT 0` })
+}
+
 export async function loadUserLibraries(): Promise<void> {
   libraries.clear(); byOwner.clear(); subsByLibrary.clear(); subsByAccount.clear(); orderByAccount.clear()
   const [libRes, tagRes, memberRes, subRes, orderRes] = [
     await client.query({ query: `SELECT library_id, owner_account_id, name, note, visibility, is_personal FROM price_data.user_libraries FINAL WHERE deleted = 0`, format: 'JSONEachRow' }),
     await client.query({ query: `SELECT library_id, tag_id, name, color, icon, note FROM price_data.user_tags FINAL WHERE deleted = 0`, format: 'JSONEachRow' }),
-    await client.query({ query: `SELECT library_id, tag_id, account_id FROM price_data.user_tag_members FINAL WHERE deleted = 0`, format: 'JSONEachRow' }),
+    await client.query({ query: `SELECT library_id, tag_id, account_id, position FROM price_data.user_tag_members FINAL WHERE deleted = 0 ORDER BY library_id, tag_id, position, account_id`, format: 'JSONEachRow' }),
     await client.query({ query: `SELECT library_id, account_id, status, origin FROM price_data.user_library_subscriptions FINAL WHERE deleted = 0`, format: 'JSONEachRow' }),
     await client.query({ query: `SELECT account_id, library_ids FROM price_data.user_library_order FINAL WHERE deleted = 0`, format: 'JSONEachRow' }),
   ]
@@ -65,15 +85,26 @@ export async function loadUserLibraries(): Promise<void> {
     byOwner.get(lib.owner)!.add(lib.libraryId)
   }
   for (const r of await tagRes.json<{ library_id: string; tag_id: string; name: string; color: string; icon: string; note: string }>()) {
-    libraries.get(r.library_id)?.tags.set(r.tag_id, { tagId: r.tag_id, name: r.name, color: r.color ?? '', icon: r.icon ?? '', note: r.note ?? '', members: new Set() })
+    libraries.get(r.library_id)?.tags.set(r.tag_id, { tagId: r.tag_id, name: r.name, color: r.color ?? '', icon: r.icon ?? '', note: r.note ?? '', members: new Set(), order: [], nextPosition: 0 })
   }
-  for (const r of await memberRes.json<{ library_id: string; tag_id: string; account_id: string }>()) {
+  // The SQL ORDER BY above already sorts by position, but a re-sort here
+  // costs nothing at this table's size and keeps correctness independent of
+  // the query text — every row a pre-migration deployment left at the
+  // column's DEFAULT 0 still comes out in a deterministic (tag, account)
+  // order rather than whatever order ClickHouse happened to return them in.
+  const memberRows = [...await memberRes.json<{ library_id: string; tag_id: string; account_id: string; position: number }>()]
+    .sort((a, b) => a.library_id.localeCompare(b.library_id) || a.tag_id.localeCompare(b.tag_id) || Number(a.position) - Number(b.position) || a.account_id.localeCompare(b.account_id))
+  const maxPositionByTag = new Map<UserTagDef, number>()
+  for (const r of memberRows) {
     const lib = libraries.get(r.library_id)
     const tag = lib?.tags.get(r.tag_id)
     if (!lib || !tag) continue
     tag.members.add(r.account_id)
+    tag.order.push(r.account_id)
     lib.memberTag.set(r.account_id, r.tag_id)
+    maxPositionByTag.set(tag, Math.max(maxPositionByTag.get(tag) ?? -1, Number(r.position)))
   }
+  for (const [tag, maxPosition] of maxPositionByTag) tag.nextPosition = maxPosition + 1
   for (const r of await subRes.json<{ library_id: string; account_id: string; status: string; origin: string }>()) {
     if (!libraries.has(r.library_id)) continue
     setSub(r.library_id, r.account_id, { status: r.status as Subscription['status'], origin: r.origin as Subscription['origin'] }, false)
@@ -151,14 +182,18 @@ async function persistTag(libraryId: string, tag: UserTagDef, deleted = 0): Prom
     format: 'JSONEachRow',
   })
 }
-async function persistMembers(libraryId: string, tagId: string, accountIds: string[], deleted: number): Promise<void> {
-  if (!accountIds.length) return
+// `position` is meaningless on a tombstone (deleted=1) row — nothing ever
+// reads it back once `deleted = 0` is filtered out on load — so removal/move
+// callers just pass 0. An add or reorder always passes the real slot.
+async function persistMembers(libraryId: string, tagId: string, rows: { accountId: string; position: number }[], deleted: number): Promise<void> {
+  if (!rows.length) return
   await client.insert({
     table: 'price_data.user_tag_members',
-    values: accountIds.map(account_id => ({ library_id: libraryId, tag_id: tagId, account_id, deleted })),
+    values: rows.map(({ accountId, position }) => ({ library_id: libraryId, tag_id: tagId, account_id: accountId, position, deleted })),
     format: 'JSONEachRow',
   })
 }
+const tombstoneRows = (accountIds: string[]) => accountIds.map(accountId => ({ accountId, position: 0 }))
 
 function addLibrary(lib: UserLibrary): void {
   libraries.set(lib.libraryId, lib)
@@ -272,7 +307,7 @@ export function visibleTagMembers(viewer: string, libraryId: string, tagId: stri
   if (!isOwner && !isActiveSubscriber) return null
   const tag = lib.tags.get(tagId)
   if (!tag) return null
-  return { name: tag.name, color: tag.color, icon: tag.icon, note: tag.note, members: [...tag.members] }
+  return { name: tag.name, color: tag.color, icon: tag.icon, note: tag.note, members: [...tag.order] }
 }
 
 export function invitesFor(accountId: string): LibrarySummary[] {
@@ -311,7 +346,7 @@ export async function createTag(owner: string, libraryId: string, def: { name: s
   const tag: UserTagDef = {
     tagId: randomUUID(), name: checkText(def.name, LIMITS.nameLen, 'tag name'),
     color: checkText(def.color ?? '', 32, 'tag color'), icon: checkIcon(def.icon ?? ''),
-    note: checkText(def.note ?? '', LIMITS.noteLen, 'tag note'), members: new Set(),
+    note: checkText(def.note ?? '', LIMITS.noteLen, 'tag note'), members: new Set(), order: [], nextPosition: 0,
   }
   lib.tags.set(tag.tagId, tag)
   await persistTag(libraryId, tag)
@@ -334,11 +369,11 @@ export async function deleteTag(owner: string, libraryId: string, tagId: string)
   const lib = requireOwned(owner, libraryId)
   const tag = lib.tags.get(tagId)
   if (!tag) throw new UserDataError(404, 'Tag not found')
-  const members = [...tag.members]
+  const members = [...tag.order]
   lib.tags.delete(tagId)
   for (const m of members) lib.memberTag.delete(m)
   await persistTag(libraryId, tag, 1)
-  await persistMembers(libraryId, tagId, members, 1)
+  await persistMembers(libraryId, tagId, tombstoneRows(members), 1)
 }
 
 export async function setTagMembers(owner: string, libraryId: string, tagId: string, add: string[], remove: string[]): Promise<UserTagDef> {
@@ -358,24 +393,55 @@ export async function setTagMembers(owner: string, libraryId: string, tagId: str
   if (lib.memberTag.size + netNew.length > LIMITS.membersPerLibrary) throw new UserDataError(422, `Limited to ${LIMITS.membersPerLibrary} accounts per library`)
 
   // One tag per account per library: adding an account MOVES it out of its
-  // current tag in this library (tombstoning that membership row).
+  // current tag in this library (tombstoning that membership row). New
+  // members always land at the END of display order, at a position past
+  // every row already persisted for this tag (see UserTagDef.nextPosition).
   const moves = new Map<string, string[]>()   // fromTagId -> accountIds
+  const added: { accountId: string; position: number }[] = []
   for (const id of trulyNew) {
     const from = lib.memberTag.get(id)
     if (from && from !== tagId) {
-      lib.tags.get(from)?.members.delete(id)
+      const fromTag = lib.tags.get(from)
+      if (fromTag) { fromTag.members.delete(id); fromTag.order = fromTag.order.filter(m => m !== id) }
       if (!moves.has(from)) moves.set(from, [])
       moves.get(from)!.push(id)
     }
     tag.members.add(id)
+    tag.order.push(id)
+    added.push({ accountId: id, position: tag.nextPosition++ })
     lib.memberTag.set(id, tagId)
   }
   const removedHere = removeIds.filter(id => tag.members.delete(id))
+  if (removedHere.length) {
+    const removedSet = new Set(removedHere)
+    tag.order = tag.order.filter(id => !removedSet.has(id))
+  }
   for (const id of removedHere) lib.memberTag.delete(id)
 
-  await persistMembers(libraryId, tagId, trulyNew, 0)
-  await persistMembers(libraryId, tagId, removedHere, 1)
-  for (const [fromTag, ids] of moves) await persistMembers(libraryId, fromTag, ids, 1)
+  await persistMembers(libraryId, tagId, added, 0)
+  await persistMembers(libraryId, tagId, tombstoneRows(removedHere), 1)
+  for (const [fromTag, ids] of moves) await persistMembers(libraryId, fromTag, tombstoneRows(ids), 1)
+  return tag
+}
+
+// Owner-only reorder: `accountIds` must name exactly the tag's current
+// members, once each — a client-computed drag/keyboard order that dropped or
+// duplicated an id would silently corrupt the tag's membership, so this
+// rejects anything that isn't a permutation instead of best-effort applying
+// it. Every row is re-inserted with its new position — ReplacingMergeTree
+// replaces by (library_id, tag_id, account_id), so this is a full rewrite of
+// the tag's positions, not an addition — and `nextPosition` resets to the
+// list length so the next plain append still lands after every reordered row.
+export async function setMemberOrder(owner: string, libraryId: string, tagId: string, accountIds: string[]): Promise<UserTagDef> {
+  const lib = requireOwned(owner, libraryId)
+  const tag = lib.tags.get(tagId)
+  if (!tag) throw new UserDataError(404, 'Tag not found')
+  const seen = new Set<string>()
+  const isPermutation = accountIds.length === tag.members.size && accountIds.every(id => tag.members.has(id) && !seen.has(id) && seen.add(id))
+  if (!isPermutation) throw new UserDataError(400, 'Member order must list every current member exactly once')
+  tag.order = [...accountIds]
+  tag.nextPosition = accountIds.length
+  await persistMembers(libraryId, tagId, accountIds.map((accountId, position) => ({ accountId, position })), 0)
   return tag
 }
 
@@ -431,7 +497,7 @@ export function tagMapFor(accountId: string): TagMapLibrary[] {
     const lib = libraries.get(id)!
     return {
       libraryId: lib.libraryId, name: lib.name,
-      tags: [...lib.tags.values()].map(t => ({ tagId: t.tagId, name: t.name, color: t.color, icon: t.icon, members: [...t.members] })),
+      tags: [...lib.tags.values()].map(t => ({ tagId: t.tagId, name: t.name, color: t.color, icon: t.icon, members: [...t.order] })),
     }
   })
 }

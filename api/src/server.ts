@@ -59,7 +59,7 @@ import { ensureSnakewatchEmojiSourceLoaded } from './services/omniwatchIdentity.
 import { initXcmJourneyService } from './services/xcmJourneyService.ts'
 import { initUserAuthService, loadUserSessions } from './services/userAuthService.ts'
 import { initUserProfileService, loadUserProfiles } from './services/userProfileService.ts'
-import { initUserLibraryService, loadUserLibraries } from './services/userLibraryService.ts'
+import { initUserLibraryService, loadUserLibraries, ensureTagMemberPositionColumn } from './services/userLibraryService.ts'
 
 // Trust X-Forwarded-For/X-Real-IP only from loopback/link-local/private-range
 // hops — exactly the explorer-ui nginx container on the compose network (see
@@ -188,6 +188,10 @@ async function start() {
     await initUserAuthService(client)
     initUserProfileService(client)
     initUserLibraryService(client)
+    // Additive column on an existing deployment (see the guard's own comment
+    // in userLibraryService.ts) — must land before loadUserLibraries() below
+    // first SELECTs `position` from user_tag_members.
+    await ensureTagMemberPositionColumn(client)
     // The node-full refreshers (lock breakdown, proxy/multisig, ERC-20 wallets)
     // share one coordinated scheduler so they never stack concurrent RPC bursts
     // on the archive node; started after their clients are set.

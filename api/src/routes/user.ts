@@ -14,9 +14,9 @@ import { normalizeAddress } from '../services/addressIdentity.ts'
 import {
   ensurePersonalLibrary, ownedLibrariesFor, subscriptionsFor, invitesFor, libraryOrderFor, tagMapFor,
   getLibrary, canView, createLibrary, updateLibrary, deleteLibrary,
-  createTag, updateTag, deleteTag, setTagMembers, visibleTagMembers,
+  createTag, updateTag, deleteTag, setTagMembers, setMemberOrder, visibleTagMembers,
   inviteToLibrary, revokeShare, respondToInvite, subscribePublic, unsubscribe, setLibraryOrder,
-  librarySummary, type LibrarySummary, type UserLibrary,
+  librarySummary, LIMITS, type LibrarySummary, type UserLibrary,
 } from '../services/userLibraryService.ts'
 import {
   limitParam, offsetParam, badOffset, textParam, valueFilters, activityTypeParam,
@@ -73,9 +73,10 @@ export function libraryDetailResponse(lib: UserLibrary, viewer: string | null) {
   }
 }
 // A single tag, serialized the same way whether it comes back from create,
-// update, or a members write — members as display accountRefs, like a detail tag.
-function tagRef(t: { tagId: string; name: string; color: string; icon: string; note: string; members: Set<string> }) {
-  return { tagId: t.tagId, name: t.name, color: t.color, icon: t.icon, note: t.note, members: [...t.members].map(accountRef) }
+// update, a members write, or a reorder — members as display accountRefs, in
+// display order, like a detail tag.
+function tagRef(t: { tagId: string; name: string; color: string; icon: string; note: string; order: string[] }) {
+  return { tagId: t.tagId, name: t.name, color: t.color, icon: t.icon, note: t.note, members: t.order.map(accountRef) }
 }
 
 export async function userRoutes(fastify: FastifyInstance) {
@@ -199,6 +200,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   const tagCreateBody = z.object({ name: z.string().max(200), color: z.string().max(64).optional(), icon: z.string().max(64).optional(), note: z.string().max(400).optional() })
   const tagUpdateBody = tagCreateBody.partial()
   const membersBody = z.object({ add: z.array(z.string()).max(500).optional(), remove: z.array(z.string()).max(500).optional() })
+  const memberOrderBody = z.object({ accountIds: z.array(z.string()).max(LIMITS.membersPerTag) })
 
   fastify.post('/user/libraries/:id/tags', async (req, reply) => {
     noStore(reply)
@@ -236,6 +238,20 @@ export async function userRoutes(fastify: FastifyInstance) {
     const body = membersBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid members payload' })
     return withUserErrors(reply, async () => tagRef(await setTagMembers(accountId, id, tagId, body.data.add ?? [], body.data.remove ?? [])))
+  })
+
+  // Drag/keyboard reorder of a tag's members (B3): `accountIds` must be a
+  // permutation of the tag's CURRENT members — setMemberOrder 400s otherwise,
+  // rather than best-effort applying a client order that dropped or duplicated
+  // an id.
+  fastify.put('/user/libraries/:id/tags/:tagId/member-order', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const { id, tagId } = req.params as { id: string; tagId: string }
+    const body = memberOrderBody.safeParse(req.body)
+    if (!body.success) return reply.status(400).send({ error: 'Invalid member-order payload' })
+    return withUserErrors(reply, async () => tagRef(await setMemberOrder(accountId, id, tagId, body.data.accountIds)))
   })
 
   fastify.post('/user/libraries/:id/invites', async (req, reply) => {

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import {
   initUserLibraryService, loadUserLibraries, ensurePersonalLibrary,
   createLibrary, updateLibrary, deleteLibrary,
-  createTag, updateTag, deleteTag, setTagMembers,
+  createTag, updateTag, deleteTag, setTagMembers, setMemberOrder,
   getLibrary, ownedLibrariesFor,
 } from '../src/services/userLibraryService.ts'
 import { UserDataError } from '../src/services/userProfileService.ts'
@@ -10,6 +10,22 @@ import { fakeClient, insertedRows } from './helpers/userFakes.ts'
 
 const OWNER = '0x' + 'aa'.repeat(32)
 const MEMBER_SS58 = '15DajYeqgb4ADkb8scVCcNaXjfM1SV9PLvqjNDkpH6kBDRLZ'  // Kraken cold — any valid SS58 works
+const M1 = '0x' + '11'.repeat(32)
+const M2 = '0x' + '22'.repeat(32)
+const M3 = '0x' + '33'.repeat(32)
+
+// fakeClient's insert() just accumulates every call, so a reload test that
+// mutates the same (tag, account) key more than once (e.g. add, then
+// reorder) sees every historical row, not just the current one. The real
+// query is `FROM user_tag_members FINAL`, which collapses to the latest row
+// per key by `updated_at` (ReplacingMergeTree) — this reproduces that
+// collapse over the captured insert calls before feeding them to a fresh
+// fakeClient, so "reload" in a test means what it means against ClickHouse.
+function finalMemberRows(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  const byKey = new Map<string, Record<string, unknown>>()
+  for (const r of rows) byKey.set(`${r.library_id}:${r.tag_id}:${r.account_id}`, r)
+  return [...byKey.values()]
+}
 
 describe('library + tag CRUD', () => {
   let client: ReturnType<typeof fakeClient>
@@ -83,5 +99,69 @@ describe('library + tag CRUD', () => {
     expect(l.name).toBe('Keep')
     expect(l.tags.get(tag.tagId)!.members.size).toBe(1)
     expect(ownedLibrariesFor(OWNER)).toHaveLength(1)
+  })
+})
+
+describe('ordered membership (drag/keyboard reorder)', () => {
+  let client: ReturnType<typeof fakeClient>
+  beforeEach(async () => { client = fakeClient(); initUserLibraryService(client); await loadUserLibraries() })
+
+  it('orders members by add sequence, then a reorder persists and reload preserves it', async () => {
+    const lib = await createLibrary(OWNER, 'Order', '', 'private')
+    const tag = await createTag(OWNER, lib.libraryId, { name: 'T' })
+    // Added across separate calls (like the UI's sequential-submit), and
+    // again within one call — both land at the end in the given order.
+    await setTagMembers(OWNER, lib.libraryId, tag.tagId, [M1], [])
+    await setTagMembers(OWNER, lib.libraryId, tag.tagId, [M2, M3], [])
+    expect(getLibrary(lib.libraryId)!.tags.get(tag.tagId)!.order).toEqual([M1, M2, M3])
+
+    const reordered = await setMemberOrder(OWNER, lib.libraryId, tag.tagId, [M3, M1, M2])
+    expect(reordered.order).toEqual([M3, M1, M2])
+    // A move-semantics add after a reorder still appends at the end, past
+    // the reordered rows — nextPosition tracks the new order's length.
+    const withAppend = await setTagMembers(OWNER, lib.libraryId, tag.tagId, [MEMBER_SS58], [])
+    expect(withAppend.order.slice(0, 3)).toEqual([M3, M1, M2])
+    expect(withAppend.order).toHaveLength(4)
+
+    const restore = fakeClient({
+      user_libraries: insertedRows(client, 'user_libraries'),
+      user_tags: insertedRows(client, 'user_tags'),
+      user_tag_members: finalMemberRows(insertedRows(client, 'user_tag_members')).filter(r => r.deleted === 0),
+    })
+    initUserLibraryService(restore); await loadUserLibraries()
+    expect(getLibrary(lib.libraryId)!.tags.get(tag.tagId)!.order).toEqual(withAppend.order)
+  })
+
+  it('rejects a reorder that is not an exact permutation of the current members', async () => {
+    const lib = await createLibrary(OWNER, 'Order', '', 'private')
+    const tag = await createTag(OWNER, lib.libraryId, { name: 'T' })
+    await setTagMembers(OWNER, lib.libraryId, tag.tagId, [M1, M2], [])
+    await expect(setMemberOrder(OWNER, lib.libraryId, tag.tagId, [M1])).rejects.toMatchObject({ status: 400 })              // missing M2
+    await expect(setMemberOrder(OWNER, lib.libraryId, tag.tagId, [M1, M2, M3])).rejects.toMatchObject({ status: 400 })      // unknown extra
+    await expect(setMemberOrder(OWNER, lib.libraryId, tag.tagId, [M1, M1])).rejects.toMatchObject({ status: 400 })          // duplicate
+    // unaffected by the rejected attempts
+    expect(getLibrary(lib.libraryId)!.tags.get(tag.tagId)!.order).toEqual([M1, M2])
+  })
+
+  it('is owner-only, like every other tag mutation', async () => {
+    const lib = await createLibrary(OWNER, 'Order', '', 'private')
+    const tag = await createTag(OWNER, lib.libraryId, { name: 'T' })
+    await setTagMembers(OWNER, lib.libraryId, tag.tagId, [M1, M2], [])
+    await expect(setMemberOrder('0x' + 'bb'.repeat(32), lib.libraryId, tag.tagId, [M2, M1])).rejects.toMatchObject({ status: 403 })
+  })
+
+  it('removing a member drops it from order without disturbing the rest, and delete tombstones every ordered row', async () => {
+    const lib = await createLibrary(OWNER, 'Order', '', 'private')
+    const tag = await createTag(OWNER, lib.libraryId, { name: 'T' })
+    await setTagMembers(OWNER, lib.libraryId, tag.tagId, [M1, M2, M3], [])
+    const afterRemove = await setTagMembers(OWNER, lib.libraryId, tag.tagId, [], [M2])
+    expect(afterRemove.order).toEqual([M1, M3])
+    await deleteTag(OWNER, lib.libraryId, tag.tagId)
+    // Tombstoned across two calls (the plain remove of M2, then deleteTag's
+    // sweep of what was left, M1 and M3) — every member ever on this tag
+    // ends up deleted exactly once.
+    const memberRows = insertedRows(client, 'user_tag_members')
+    const tombstoned = memberRows.filter(r => r.deleted === 1 && r.tag_id === tag.tagId).map(r => r.account_id)
+    expect(new Set(tombstoned)).toEqual(new Set([M1, M2, M3]))
   })
 })

@@ -1,8 +1,10 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { splitSqlStatements, selectSchemaFiles } from '../src/db/schemaBootstrap.ts'
+import { ensureTagMemberPositionColumn } from '../src/services/userLibraryService.ts'
+import type { ClickHouseClient } from '../src/db/client.ts'
 
 const schemaDir = join(dirname(fileURLToPath(import.meta.url)), '../../clickhouse/schema')
 
@@ -29,5 +31,25 @@ describe('004_user.sql', () => {
       expect(stmt, t).toContain('deleted')
     }
     expect(statements).toHaveLength(tables.length)
+  })
+
+  // Ordered membership (B3): a fresh database gets the column from this
+  // declaration directly. ensureTagMemberPositionColumn below is what
+  // carries an existing deployment (created before this column existed) to
+  // the same shape.
+  it('declares user_tag_members.position for ordered membership', () => {
+    const stmt = statements.find(s => s.includes('price_data.user_tag_members'))
+    expect(stmt).toContain('position UInt32 DEFAULT 0')
+  })
+})
+
+describe('ensureTagMemberPositionColumn', () => {
+  it('issues an idempotent ADD COLUMN IF NOT EXISTS against user_tag_members', async () => {
+    const command = vi.fn(async (_args: { query: string }) => {})
+    await ensureTagMemberPositionColumn({ command } as unknown as ClickHouseClient)
+    expect(command).toHaveBeenCalledOnce()
+    const query = command.mock.calls[0][0].query
+    expect(query).toContain('ALTER TABLE price_data.user_tag_members')
+    expect(query).toContain('ADD COLUMN IF NOT EXISTS position UInt32 DEFAULT 0')
   })
 })
