@@ -473,6 +473,42 @@ test('a bad address in a batch reports itself and restores the rest, without los
   await expect(tagPanel.locator('.tag-member-chips .addr-pill')).toHaveCount(2)
 })
 
+// B3: drag & drop reorder has a keyboard fallback (Alt+ArrowLeft/Right on a
+// focused chip) — keyboard is the reliable path in Playwright, and it
+// exercises the exact same PUT .../member-order the mouse drag commits
+// through, so this pins the request body rather than just the DOM.
+test('reorders tag members with the keyboard and persists the new order', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  const memberA: AccountRef = { accountId: '0x' + '11'.repeat(32), address: '0x' + '11'.repeat(32), emoji: '🐵', tag: null }
+  const memberB: AccountRef = { accountId: '0x' + '22'.repeat(32), address: '0x' + '22'.repeat(32), emoji: '🐶', tag: null }
+  userMock.state.libraries.push({
+    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+    owner: userMock.state.account, tagCount: 1, accountCount: 2, subscriberCount: 0,
+    tags: [{ tagId: 't1', name: 'Watch', color: '#22c55e', icon: '👀', note: '', members: [memberA, memberB] }],
+  })
+
+  let orderRequestBody: { accountIds: string[] } | null = null
+  await page.route(/\/api\/user\/libraries\/lib1\/tags\/t1\/member-order$/, async route => {
+    orderRequestBody = route.request().postDataJSON()
+    await route.fallback()
+  })
+
+  await page.goto('/library/lib1')
+  const tagPanel = page.locator('.panel', { hasText: 'Watch' })
+  const chips = tagPanel.locator('.tag-member-chip')
+  await expect(chips).toHaveCount(2)
+  await expect(chips.nth(0)).toContainText('111') // memberA's last3
+  await expect(chips.nth(1)).toContainText('222') // memberB's last3
+
+  await chips.nth(0).focus()
+  await page.keyboard.press('Alt+ArrowRight')
+
+  await expect.poll(() => orderRequestBody).toEqual({ accountIds: [memberB.accountId, memberA.accountId] })
+  // The swap is reflected immediately (optimistic), not just in the request.
+  await expect(chips.nth(0)).toContainText('222')
+  await expect(chips.nth(1)).toContainText('111')
+})
+
 test.describe('mobile', () => {
   test.use({ viewport: { width: 390, height: 844 } })
 

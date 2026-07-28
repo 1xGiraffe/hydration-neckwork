@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { api } from '../api/explorer'
 import type { SearchResult } from '../types'
 import { AccountEmoji, ShortAddr } from './ui'
@@ -18,21 +18,27 @@ import { tokenizeAddresses } from './accountTokens'
 //    two distinct actions can't be inferred from a bare Enter.
 //  - `onCommit` (a tag's member editor): there is only one action, so a
 //    pick/Enter/paste-tokenize fires `onCommit` immediately and clears the
-//    input instead of staging a chip — the picker renders no chips of its own
-//    in this mode; the parent's own already-committed members render as chips
-//    elsewhere (see LibraryDetail's tag member editor). The input clears
-//    optimistically, but a batch (a multi-token paste, or a name-search result
-//    fired mid-typing) can still partly fail server-side — `onCommit` may
-//    return the addresses it never got to (submits sequentially and stops at
-//    the first rejection, like Invites' Invite/Revoke), and whatever comes
-//    back is restored into the input as text rather than silently dropped.
+//    input instead of staging a chip — the picker renders no STAGING chips of
+//    its own in this mode. The parent's own already-committed members render
+//    as `chips`, a slot placed ahead of the input inside the very same
+//    `.acct-picker-box` (see LibraryDetail's tag member editor) — one bordered
+//    token surface, not a picker with a separate chip list bolted underneath.
+//    The input clears optimistically, but a batch (a multi-token paste, or a
+//    name-search result fired mid-typing) can still partly fail server-side —
+//    `onCommit` may return the addresses it never got to (submits
+//    sequentially and stops at the first rejection, like Invites' own
+//    Invite/Revoke), and whatever comes back is restored into the input as
+//    text rather than silently dropped.
 
 const looksAddr = (s?: string) => !!s && (s.startsWith('0x') || /^[1-9A-HJ-NP-Za-km-z]{40,}$/.test(s))
 
-export function AccountPicker({ values = [], onChange, onCommit, placeholder, disabled, inputId }: {
+export function AccountPicker({ values = [], onChange, onCommit, chips, placeholder, disabled, inputId }: {
   values?: string[]
   onChange?: (next: string[]) => void
   onCommit?: (addresses: string[]) => Promise<string[] | void> | void
+  // Rendered ahead of the input, inside `.acct-picker-box` — only meaningful
+  // alongside `onCommit` (the `values` mode renders its own chips instead).
+  chips?: ReactNode
   placeholder?: string
   disabled?: boolean
   inputId?: string
@@ -148,6 +154,7 @@ export function AccountPicker({ values = [], onChange, onCommit, placeholder, di
             <button type="button" className="acct-chip-x" aria-label={`Remove ${labels[v] ?? v}`} disabled={disabled} onClick={() => onChange?.(values.filter(x => x !== v))}>×</button>
           </span>
         ))}
+        {onCommit && chips}
         <input
           ref={inputRef}
           id={inputId}

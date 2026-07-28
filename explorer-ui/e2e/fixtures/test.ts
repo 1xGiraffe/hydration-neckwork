@@ -248,6 +248,20 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     await fulfillJson(route, 200, tag)
     return
   }
+  if (method === 'PUT' && (m = path.match(/^\/user\/libraries\/([^/]+)\/tags\/([^/]+)\/member-order$/))) {
+    const lib = state.libraries.find(l => l.libraryId === decodeURIComponent(m![1]))
+    const tag = lib?.tags.find(t => t.tagId === decodeURIComponent(m![2]))
+    if (!lib || !tag) { await fulfillJson(route, 404, { error: 'not found' }); return }
+    const { accountIds } = bodyOf(route) as { accountIds?: string[] }
+    const ids = accountIds ?? []
+    const current = new Set(tag.members.map(mm => mm.accountId))
+    const isPermutation = ids.length === current.size && new Set(ids).size === ids.length && ids.every(id => current.has(id))
+    if (!isPermutation) { await fulfillJson(route, 400, { error: 'Member order must list every current member exactly once' }); return }
+    const byId = new Map(tag.members.map(mm => [mm.accountId, mm]))
+    tag.members = ids.map(id => byId.get(id)!)
+    await fulfillJson(route, 200, tag)
+    return
+  }
 
   if (method === 'POST' && (m = path.match(/^\/user\/libraries\/([^/]+)\/invites$/))) { await fulfillJson(route, 200, { ok: true }); return }
   if (method === 'DELETE' && (m = path.match(/^\/user\/libraries\/([^/]+)\/invites\/([^/]+)$/))) { await fulfillJson(route, 200, { ok: true }); return }

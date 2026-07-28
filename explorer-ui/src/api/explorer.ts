@@ -214,6 +214,10 @@ export const userApi = {
   updateTag: (id: string, tagId: string, body: { name?: string; color?: string; icon?: string; note?: string }) => authedJson<LibraryTagDetail>('PATCH', `/user/libraries/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}`, body),
   deleteTag: (id: string, tagId: string) => authedJson<{ ok: true }>('DELETE', `/user/libraries/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}`),
   setTagMembers: (id: string, tagId: string, body: { add?: string[]; remove?: string[] }) => authedJson<LibraryTagDetail>('PUT', `/user/libraries/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}/members`, body),
+  // Drag/keyboard reorder: `accountIds` must be a permutation of the tag's
+  // current members — the server 400s otherwise (see setMemberOrder).
+  setMemberOrder: (id: string, tagId: string, accountIds: string[]) =>
+    authedJson<LibraryTagDetail>('PUT', `/user/libraries/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}/member-order`, { accountIds }),
   // A library tag's own aggregate view (combined balances/history/activity of all
   // its members) — same TagDetail shape the system /tag/:id page uses, authed
   // because a private library's tag contents are owner/subscriber-only.

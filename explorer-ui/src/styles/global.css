@@ -1843,11 +1843,17 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .acct-chip-x { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; color: var(--text-low); font-size: 13px; line-height: 1; }
 .acct-chip-x:hover { color: var(--text-high); background: var(--panel-hover); }
 /* A tag's members, editable as tokens: the picker (immediate-commit mode)
-   above, its current members as the very same chip below — an AddrPill label
-   plus a separate ✕ button (never nested inside the label's own link). */
+   input sits right after the last chip, both inside one `.acct-picker-box` —
+   an AddrPill label plus a separate ✕ button (never nested inside the
+   label's own link). */
 .tag-member-chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.tag-member-chip { padding: 3px 4px 3px 3px; gap: 6px; }
+.tag-member-chip { padding: 3px 4px 3px 3px; gap: 6px; cursor: grab; }
 .tag-member-chip .addr-pill { font-size: 11.5px; gap: 5px; }
+/* Drag/keyboard reorder affordance — a static outline/opacity swap, no
+   transition, so it reads fine under prefers-reduced-motion without a
+   separate override. */
+.tag-member-chip.dragging { opacity: 0.5; cursor: grabbing; }
+.tag-member-chip.drag-over { outline: 2px solid var(--sky); outline-offset: 1px; }
 /* Same background/border/shadow/z-index recipe as .search-results (the page
    search dropdown) — a solid elevated surface that overlaps whatever panel it
    sits in, not var(--panel)'s translucent tint (meant for a wash OVER content,

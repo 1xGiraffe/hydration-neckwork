@@ -7,7 +7,7 @@ import { useLibrary, useUserMutation } from '../hooks/useUser'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { navigate, paths, setQuery, useQueryValue } from '../router'
 import { Crumbs, AddrPill, TagIcon, DetailTabs, ProfilePageSkeleton } from '../components/ui'
-import type { LibrarySummaryRef, LibraryTagDetail } from '../types'
+import type { AccountRef, LibrarySummaryRef, LibraryTagDetail } from '../types'
 
 const LibraryFormDialog = lazy(() => import('../components/LibraryFormDialog').then(m => ({ default: m.LibraryFormDialog })))
 
@@ -118,10 +118,12 @@ function NewTagDialog({ open, onOpenChange, libraryId }: { open: boolean; onOpen
 }
 
 // One tag's panel: header (icon, colored name, member count, owner-only
-// rename/delete + inline color/emoji editing) and its members as a token
-// surface — an AccountPicker in immediate-commit mode, then the current
-// members as removable chips. No table, no separate Add step: picking a
-// suggestion or hitting Enter on an address-shaped token adds it right away.
+// rename/delete + inline color/emoji editing) and its members as ONE token
+// surface — an AccountPicker in immediate-commit mode whose chips are the
+// tag's current members, so the input sits right after the last chip inside
+// the very same bordered box (no separate chip list under a separate input
+// bar). No table, no separate Add step: picking a suggestion or hitting
+// Enter on an address-shaped token adds it right away.
 function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: LibraryTagDetail; isOwner: boolean }) {
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState(tag.name)
@@ -132,6 +134,68 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
   const updateTagMutation = useUserMutation(userApi.updateTag)
   const deleteTagMutation = useUserMutation(userApi.deleteTag)
   const membersMutation = useUserMutation(userApi.setTagMembers)
+  const orderMutation = useUserMutation(userApi.setMemberOrder)
+
+  // Local, optimistic display order for drag/keyboard reorder. Reset
+  // whenever the server's own member list changes shape (add, remove, or a
+  // reorder that round-tripped) — comparing the joined id list rather than
+  // array identity means a reorder that hasn't landed yet (mid-drag, mid-
+  // mutation) never gets clobbered by an unrelated re-render of this panel.
+  const serverIds = tag.members.map(m => m.accountId)
+  const [order, setOrder] = useState(serverIds)
+  const [knownServerIds, setKnownServerIds] = useState(serverIds)
+  if (serverIds.join('\n') !== knownServerIds.join('\n')) {
+    setKnownServerIds(serverIds)
+    setOrder(serverIds)
+  }
+  const memberById = new Map(tag.members.map(m => [m.accountId, m]))
+  const orderedMembers = order.map(id => memberById.get(id)).filter((m): m is AccountRef => !!m)
+  const reorderPending = orderMutation.isPending
+  // An add/remove in flight can change the member set the moment it lands —
+  // reordering against that stale local `order` in the meantime could drop
+  // or duplicate an id, so dragging/keyboard-moving is disabled for either
+  // mutation, not just its own.
+  const chipsLocked = reorderPending || membersMutation.isPending
+  const [draggingId, setDraggingId] = useState<string | null>(null)
+  const [dragOverId, setDragOverId] = useState<string | null>(null)
+
+  async function commitOrder(next: string[]) {
+    const prev = order
+    setOrder(next)
+    try {
+      await orderMutation.mutateAsync([libraryId, tag.tagId, next])
+    } catch (e) {
+      setOrder(prev)
+      setError(e instanceof Error ? e.message : 'Could not save the new order')
+    }
+  }
+  function moveBy(accountId: string, delta: number) {
+    const i = order.indexOf(accountId)
+    const j = i + delta
+    if (i < 0 || j < 0 || j >= order.length) return
+    const next = order.slice()
+    ;[next[i], next[j]] = [next[j], next[i]]
+    void commitOrder(next)
+  }
+  function dropOn(targetId: string) {
+    setDraggingId(null); setDragOverId(null)
+    if (!draggingId || draggingId === targetId) return
+    const from = order.indexOf(draggingId)
+    const to = order.indexOf(targetId)
+    if (from < 0 || to < 0) return
+    const next = order.slice()
+    next.splice(from, 1)
+    next.splice(to, 0, draggingId)
+    void commitOrder(next)
+  }
+  // Alt/Meta+Arrow while any part of the chip (its AddrPill link, or the ×
+  // button) has focus — mirrors the mouse drag without needing a dedicated
+  // drag handle. `aria-keyshortcuts`/`aria-label` on the chip announce it.
+  function onChipKeyDown(e: React.KeyboardEvent, accountId: string) {
+    if (!(e.altKey || e.metaKey) || chipsLocked) return
+    if (e.key === 'ArrowLeft') { e.preventDefault(); moveBy(accountId, -1) }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); moveBy(accountId, 1) }
+  }
 
   function startEdit() {
     setName(tag.name); setColor(tag.color); setIcon(tag.icon); setError(null); setEditing(true)
@@ -211,21 +275,50 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
       </div>
       {error && <div className="dialog-error" style={{ margin: '12px 16px 0' }}>{error}</div>}
       <div style={{ padding: 16 }}>
-        {isOwner && (
-          <AccountPicker inputId={`add-members-${tag.tagId}`} onCommit={addMembers} placeholder="Search accounts or paste addresses" disabled={membersMutation.isPending} />
+        {isOwner ? (
+          <AccountPicker
+            inputId={`add-members-${tag.tagId}`}
+            onCommit={addMembers}
+            placeholder="Search accounts or paste addresses"
+            disabled={chipsLocked}
+            chips={
+              <div className="tag-member-chips">
+                {!orderedMembers.length
+                  ? <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>No accounts yet</div>
+                  : orderedMembers.map(m => (
+                    <span
+                      key={m.accountId}
+                      className={`acct-chip tag-member-chip${draggingId === m.accountId ? ' dragging' : ''}${dragOverId === m.accountId && draggingId !== m.accountId ? ' drag-over' : ''}`}
+                      draggable={!chipsLocked}
+                      tabIndex={0}
+                      role="group"
+                      aria-label={`${m.address} — press Alt+ArrowLeft or Alt+ArrowRight to move it`}
+                      aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight"
+                      onDragStart={() => setDraggingId(m.accountId)}
+                      onDragEnd={() => { setDraggingId(null); setDragOverId(null) }}
+                      onDragOver={e => { if (draggingId && draggingId !== m.accountId) { e.preventDefault(); setDragOverId(m.accountId) } }}
+                      onDragLeave={() => setDragOverId(prev => (prev === m.accountId ? null : prev))}
+                      onDrop={e => { e.preventDefault(); dropOn(m.accountId) }}
+                      onKeyDown={e => onChipKeyDown(e, m.accountId)}
+                    >
+                      <AddrPill account={m} noTag noCopy />
+                      <button type="button" className="acct-chip-x" aria-label={`Remove ${m.address}`} disabled={membersMutation.isPending} onClick={() => void removeMember(m.address)}>×</button>
+                    </span>
+                  ))}
+              </div>
+            }
+          />
+        ) : (
+          <div className="tag-member-chips">
+            {!tag.members.length
+              ? <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>No accounts yet</div>
+              : tag.members.map(m => (
+                <span key={m.accountId} className="acct-chip tag-member-chip">
+                  <AddrPill account={m} noTag noCopy />
+                </span>
+              ))}
+          </div>
         )}
-        <div className="tag-member-chips" style={{ marginTop: isOwner ? 10 : 0 }}>
-          {!tag.members.length
-            ? <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>No accounts yet</div>
-            : tag.members.map(m => (
-              <span key={m.accountId} className="acct-chip tag-member-chip">
-                <AddrPill account={m} noTag noCopy />
-                {isOwner && (
-                  <button type="button" className="acct-chip-x" aria-label={`Remove ${m.address}`} disabled={membersMutation.isPending} onClick={() => void removeMember(m.address)}>×</button>
-                )}
-              </span>
-            ))}
-        </div>
       </div>
     </div>
   )
