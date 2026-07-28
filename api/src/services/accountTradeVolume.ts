@@ -173,6 +173,21 @@ legacy AS (
   const inv = `(event_name = 'Broadcast.Swapped' AND JSONExtractString(args_json,'operation','__kind') = 'ExactOut' AND JSONExtractString(args_json,'fillerType','__kind') IN ('XYK','LBP') AND length(JSONExtractArrayRaw(args_json,'inputs')) = 1 AND length(JSONExtractArrayRaw(args_json,'outputs')) = 1)`
   const outAmount = `if(${inv}, JSONExtractString(JSONExtractArrayRaw(args_json,'inputs')[1],'amount'), JSONExtractString(leg,'amount'))`
   const inAmount = `if(${inv}, JSONExtractString(JSONExtractArrayRaw(args_json,'outputs')[1],'amount'), JSONExtractString(leg,'amount'))`
+  // The legacy era carries the same hazard in the pallet events themselves: XYK
+  // and LBP name their buy fields identically and mean the opposite by them.
+  // XYK.BuyExecuted is (amount = received, buyPrice = paid); LBP.BuyExecuted is
+  // (amount = paid, buyPrice = received). Checked against the Router.RouteExecuted
+  // in the same extrinsic over the whole legacy era: LBP buyPrice = amountOut in
+  // 26/26 routed buys, XYK amount = amountOut in 396/446 (the rest multi-hop, where
+  // a single leg is not the route total). Sells agree — amount paid, salePrice
+  // received — so only the buy branch splits.
+  //
+  // Reading an LBP buy with XYK's order swaps the trade's two sides, and because
+  // the two assets rarely share decimals the error is unbounded, not a rounding
+  // slip: block 4192220 paid 202.025 DOT (10 dec) for 1e17 raw of a Treasury bond
+  // (18 dec), and valuing the bond's integer as DOT booked 10,000,000 DOT —
+  // $77.3M of volume for a $1,562 trade. 26 such buys inflated the whole
+  // account_trade_volume leaderboard by $815.2M.
   return `
 INSERT INTO ${targetTable}
   (account, block_height, trade_key, volume_usd, net_in_usd, net_out_usd, trade_count, computed_at)
@@ -194,14 +209,16 @@ legs AS (
   SELECT who AS account, block_height, trade_key,
          block_timestamp, toUInt32(greatest(0, JSONExtractInt(args_json,'assetIn'))),
          -toDecimal256(multiIf(event_name IN ('XYK.SellExecuted','LBP.SellExecuted'), JSONExtractString(args_json,'amount'),
-                               event_name IN ('XYK.BuyExecuted','LBP.BuyExecuted'), JSONExtractString(args_json,'buyPrice'),
+                               event_name = 'XYK.BuyExecuted', JSONExtractString(args_json,'buyPrice'),
+                               event_name = 'LBP.BuyExecuted', JSONExtractString(args_json,'amount'),
                                JSONExtractString(args_json,'amountIn')), 0)
   FROM legacy
   UNION ALL
   SELECT who, block_height, trade_key,
          block_timestamp, toUInt32(greatest(0, JSONExtractInt(args_json,'assetOut'))),
          toDecimal256(multiIf(event_name IN ('XYK.SellExecuted','LBP.SellExecuted'), JSONExtractString(args_json,'salePrice'),
-                              event_name IN ('XYK.BuyExecuted','LBP.BuyExecuted'), JSONExtractString(args_json,'amount'),
+                              event_name = 'XYK.BuyExecuted', JSONExtractString(args_json,'amount'),
+                              event_name = 'LBP.BuyExecuted', JSONExtractString(args_json,'buyPrice'),
                               JSONExtractString(args_json,'amountOut')), 0)
   FROM legacy
 ),
