@@ -1233,9 +1233,20 @@ function rawAmountNormalizationSql(expr: string, targetDecimals: number): string
 // SQL fragment valuing a CTE of event legs at their block-time price, emitted as
 // the CTE `${outName}` (account_id, volume_usd). `legsCte` must expose
 // (account_id, asset_id, block_time, amount) rows — block_time is the event's
-// wall-clock time, ASOF-matched to the last completed hourly close. The joined
-// close is bounded to the priced-asset universe (a static list, so the — often
-// expensive — legs CTE is referenced only once).
+// wall-clock time, ASOF-matched to the last completed hourly close.
+//
+// The ASOF right side is bounded twice. The static priced-asset universe is the
+// outer bound; inside it, only the price feeds the legs actually reference can
+// ever match `p.asset_id = <alias(l.asset_id)>`, so the feed set is narrowed to
+// the legs' own distinct price ids. `ohlc_1h` holds ~76 feeds interleaved inside
+// every granule, so this prunes no marks — it stops `argMaxMerge` from merging
+// ~1.0M aggregate states down to the ~0.2M the legs can match, which is where
+// the CPU and the join's peak memory went (measured on the unfiltered
+// `sort=liquidation` directory shape: 1.26 → 0.36 CPU-s, 245 → 89 MiB peak).
+//
+// It costs a second reference to `legsCte`, so the caller's legs relation must
+// be cheap to read twice (the liquidation legs are a bounded account-first
+// projection read).
 export function historicalVolumeSql(legsCte: string, outName: string): string {
   const priceIds = [...new Set(allExplorerAssets().flatMap(a => [a.assetId, historicalPriceAssetId(a.assetId)]))].join(',')
   const maxDecimals = Math.max(12, ...allExplorerAssets().map(a => a.decimals))
@@ -1254,6 +1265,7 @@ export function historicalVolumeSql(legsCte: string, outName: string): string {
                 SELECT asset_id, interval_start + INTERVAL 1 HOUR AS price_time, argMaxMerge(close_state) AS close
                 FROM price_data.ohlc_1h
                 WHERE asset_id IN (${priceIds || '0'})
+                  AND asset_id IN (SELECT DISTINCT ${priceAliasIdSql('n.asset_id')} FROM ${legsCte} n)
                 GROUP BY asset_id, interval_start
               ) p ON p.asset_id = ${priceAliasIdSql('l.asset_id')} AND p.price_time <= l.block_time
               WHERE match(l.account_id, '^0x[0-9a-f]{64}$')

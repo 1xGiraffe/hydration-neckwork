@@ -118,4 +118,28 @@ describe('value-aware account activity precision', () => {
     expect(sql).toContain('interval_start + INTERVAL 1 HOUR AS price_time')
     expect(sql).not.toContain('sum(toFloat64OrZero(l.amount)')
   })
+
+  // ohlc_1h interleaves ~76 feeds inside every granule, so the static priced-asset
+  // universe prunes no marks and argMaxMerge ran over every candle in the table to
+  // value a few thousand legs. Only the feeds the legs reference can satisfy the ASOF
+  // equality, so narrowing the merged set to the legs' own distinct price ids is
+  // result-preserving and is what makes the merge bounded.
+  it('narrows the merged close set to the price feeds the legs reference', () => {
+    const sql = historicalVolumeSql('liquidation_legs', 'valued')
+    const occurrences = (needle: string): number => sql.split(needle).length - 1
+
+    // Exactly one static-universe bound and one legs-derived bound on the right side.
+    expect(occurrences('FROM price_data.ohlc_1h')).toBe(1)
+    expect(occurrences('WHERE asset_id IN (')).toBe(1)
+    expect(occurrences('AND asset_id IN (SELECT DISTINCT ')).toBe(1)
+    expect(occurrences('FROM liquidation_legs n)')).toBe(1)
+    // Both sides of the ASOF equality resolve the same alias chain, or the narrowed
+    // set would exclude a feed the join still wants and silently zero those legs.
+    const aliasExprs = [...sql.matchAll(/transform\(toUInt32\([ln]\.asset_id\),[^\n]*?, toUInt32\([ln]\.asset_id\)\)/g)]
+      .map(m => m[0].replace(/\b[ln]\.asset_id\b/g, 'X'))
+    expect(aliasExprs).toHaveLength(2)
+    expect(aliasExprs[0]).toBe(aliasExprs[1])
+    // The legs relation is read twice, so it must stay the cheap one.
+    expect(occurrences('liquidation_legs')).toBe(2)
+  })
 })
