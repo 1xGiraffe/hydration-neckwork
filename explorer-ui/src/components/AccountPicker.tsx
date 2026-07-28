@@ -11,12 +11,23 @@ import { tokenizeAddresses } from './accountTokens'
 // spreadsheet just works. Values handed back are display addresses; the server
 // normalizes and validates on submit, so the parent's inline error path stays
 // the single source of validation truth.
+//
+// Two modes, picked by which callback the parent passes:
+//  - `values`/`onChange` (Invites): the picker owns a staging list of chips the
+//    parent doesn't act on until a separate button (Invite/Revoke) is pressed —
+//    two distinct actions can't be inferred from a bare Enter.
+//  - `onCommit` (a tag's member editor): there is only one action, so a
+//    pick/Enter/paste-tokenize fires `onCommit` immediately and clears the
+//    input instead of staging a chip — the picker renders no chips of its own
+//    in this mode; the parent's own already-committed members render as chips
+//    elsewhere (see LibraryDetail's tag member editor).
 
 const looksAddr = (s?: string) => !!s && (s.startsWith('0x') || /^[1-9A-HJ-NP-Za-km-z]{40,}$/.test(s))
 
-export function AccountPicker({ values, onChange, placeholder, disabled, inputId }: {
-  values: string[]
-  onChange: (next: string[]) => void
+export function AccountPicker({ values = [], onChange, onCommit, placeholder, disabled, inputId }: {
+  values?: string[]
+  onChange?: (next: string[]) => void
+  onCommit?: (addresses: string[]) => void
   placeholder?: string
   disabled?: boolean
   inputId?: string
@@ -64,10 +75,14 @@ export function AccountPicker({ values, onChange, placeholder, disabled, inputId
   }, [openList])
 
   function addChips(next: string[], nextLabels?: Record<string, string>) {
-    const merged = [...values]
-    for (const v of next) if (!merged.includes(v)) merged.push(v)
-    if (nextLabels) setLabels(prev => ({ ...prev, ...nextLabels }))
-    onChange(merged)
+    if (onCommit) {
+      onCommit(next)
+    } else {
+      const merged = [...values]
+      for (const v of next) if (!merged.includes(v)) merged.push(v)
+      if (nextLabels) setLabels(prev => ({ ...prev, ...nextLabels }))
+      onChange?.(merged)
+    }
     setText('')
     setResults([])
   }
@@ -85,8 +100,8 @@ export function AccountPicker({ values, onChange, placeholder, disabled, inputId
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === 'Backspace' && !text && values.length) {
-      onChange(values.slice(0, -1))
+    if (!onCommit && e.key === 'Backspace' && !text && values.length) {
+      onChange?.(values.slice(0, -1))
       return
     }
     if (openList && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
@@ -112,10 +127,10 @@ export function AccountPicker({ values, onChange, placeholder, disabled, inputId
   return (
     <div className="acct-picker" ref={rootRef}>
       <div className={`acct-picker-box${disabled ? ' disabled' : ''}`} onClick={() => inputRef.current?.focus()}>
-        {values.map(v => (
+        {!onCommit && values.map(v => (
           <span key={v} className="acct-chip">
             <span className="acct-chip-label">{labels[v] ?? <ShortAddr addr={v} />}</span>
-            <button type="button" className="acct-chip-x" aria-label={`Remove ${labels[v] ?? v}`} disabled={disabled} onClick={() => onChange(values.filter(x => x !== v))}>×</button>
+            <button type="button" className="acct-chip-x" aria-label={`Remove ${labels[v] ?? v}`} disabled={disabled} onClick={() => onChange?.(values.filter(x => x !== v))}>×</button>
           </span>
         ))}
         <input
@@ -123,7 +138,7 @@ export function AccountPicker({ values, onChange, placeholder, disabled, inputId
           id={inputId}
           value={text}
           disabled={disabled}
-          placeholder={values.length ? '' : placeholder}
+          placeholder={!onCommit && values.length ? '' : placeholder}
           role="combobox"
           aria-expanded={openList}
           aria-controls={listId}

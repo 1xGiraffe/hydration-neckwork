@@ -5,8 +5,8 @@ import { AccountPicker } from '../components/AccountPicker'
 import { useSession } from '../session'
 import { useLibrary, useUserMutation } from '../hooks/useUser'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { navigate, paths } from '../router'
-import { Crumbs, AddrPill, TagIcon, Copy, EmptyRow, ProfilePageSkeleton } from '../components/ui'
+import { navigate, paths, setQuery, useQueryValue } from '../router'
+import { Crumbs, AddrPill, TagIcon, DetailTabs, ProfilePageSkeleton } from '../components/ui'
 import type { LibrarySummaryRef, LibraryTagDetail } from '../types'
 
 const LibraryFormDialog = lazy(() => import('../components/LibraryFormDialog').then(m => ({ default: m.LibraryFormDialog })))
@@ -118,14 +118,15 @@ function NewTagDialog({ open, onOpenChange, libraryId }: { open: boolean; onOpen
 }
 
 // One tag's panel: header (icon, colored name, member count, owner-only
-// rename/delete + inline color/emoji editing) and a member table (owner-only
-// per-row remove + an add-members textarea).
+// rename/delete + inline color/emoji editing) and its members as a token
+// surface — an AccountPicker in immediate-commit mode, then the current
+// members as removable chips. No table, no separate Add step: picking a
+// suggestion or hitting Enter on an address-shaped token adds it right away.
 function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: LibraryTagDetail; isOwner: boolean }) {
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState(tag.name)
   const [color, setColor] = useState(tag.color)
   const [icon, setIcon] = useState(tag.icon)
-  const [addAddrs, setAddAddrs] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
 
   const updateTagMutation = useUserMutation(userApi.updateTag)
@@ -155,15 +156,11 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
     try { await membersMutation.mutateAsync([libraryId, tag.tagId, { remove: [address] }]) }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not remove that account') }
   }
-  async function addMembers() {
-    if (!addAddrs.length) return
+  async function addMembers(addresses: string[]) {
+    if (!addresses.length) return
     setError(null)
-    try {
-      await membersMutation.mutateAsync([libraryId, tag.tagId, { add: addAddrs }])
-      setAddAddrs([])
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not add those accounts')
-    }
+    try { await membersMutation.mutateAsync([libraryId, tag.tagId, { add: addresses }]) }
+    catch (e) { setError(e instanceof Error ? e.message : 'Could not add those accounts') }
   }
 
   return (
@@ -198,35 +195,23 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
         )}
       </div>
       {error && <div className="dialog-error" style={{ margin: '12px 16px 0' }}>{error}</div>}
-      <table className="tbl">
-        <thead><tr><th>Account</th>{isOwner && <th className="r">Remove</th>}</tr></thead>
-        <tbody>
-          {!tag.members.length ? <EmptyRow cols={isOwner ? 2 : 1}>No accounts yet</EmptyRow> : tag.members.map(m => (
-            <tr key={m.accountId}>
-              <td data-label="Account">
-                <span className="row gap6" style={{ alignItems: 'center' }}>
-                  <AddrPill account={m} noTag noCopy />
-                  <Copy text={m.address} />
-                </span>
-              </td>
-              {isOwner && (
-                <td data-label="Remove" className="r">
-                  <button type="button" className="btn sm" aria-label={`Remove ${m.address}`} disabled={membersMutation.isPending} onClick={() => void removeMember(m.address)}>✕</button>
-                </td>
-              )}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {isOwner && (
-        <div style={{ padding: 16 }}>
-          <div className="field">
-            <label htmlFor={`add-members-${tag.tagId}`}>Add accounts</label>
-            <AccountPicker inputId={`add-members-${tag.tagId}`} values={addAddrs} onChange={setAddAddrs} placeholder="Search accounts or paste addresses" disabled={membersMutation.isPending} />
-          </div>
-          <button type="button" className="btn sm primary" style={{ marginTop: 8 }} disabled={membersMutation.isPending || !addAddrs.length} onClick={() => void addMembers()}>Add</button>
+      <div style={{ padding: 16 }}>
+        {isOwner && (
+          <AccountPicker inputId={`add-members-${tag.tagId}`} onCommit={addrs => void addMembers(addrs)} placeholder="Search accounts or paste addresses" disabled={membersMutation.isPending} />
+        )}
+        <div className="tag-member-chips" style={{ marginTop: isOwner ? 10 : 0 }}>
+          {!tag.members.length
+            ? <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>No accounts yet</div>
+            : tag.members.map(m => (
+              <span key={m.accountId} className="acct-chip tag-member-chip">
+                <AddrPill account={m} noTag noCopy />
+                {isOwner && (
+                  <button type="button" className="acct-chip-x" aria-label={`Remove ${m.address}`} disabled={membersMutation.isPending} onClick={() => void removeMember(m.address)}>×</button>
+                )}
+              </span>
+            ))}
         </div>
-      )}
+      </div>
     </div>
   )
 }
@@ -236,6 +221,10 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
   const { data, isLoading, isError } = useLibrary(libraryId, !!session)
   useDocumentTitle(data?.name)
   const isOwner = !!session && !!data && session.accountId === data.owner.accountId
+  // Owner-only tabs (Tags/Invites); deep-links via ?view= like Account.tsx's
+  // profile tabs. The non-owner view has no tabs, only its stats panel.
+  const view = useQueryValue('view', 'tags')
+  const activeView = view === 'invites' ? 'invites' : 'tags'
 
   const [editOpen, setEditOpen] = useState(false)
   const [editMounted, setEditMounted] = useState(false)
@@ -328,8 +317,15 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
             </div>
 
             {isOwner && (
+              <DetailTabs
+                tabs={[{ key: 'tags', label: 'Tags', count: data.tags.length }, { key: 'invites', label: 'Invites' }]}
+                active={activeView}
+                onChange={k => setQuery({ view: k === 'tags' ? null : k })}
+              />
+            )}
+
+            {isOwner && activeView === 'invites' && (
               <div className="panel" style={{ padding: 16, marginBottom: 16 }}>
-                <div className="sec-title" style={{ margin: '0 0 12px' }}>Invites</div>
                 {shareError && <div className="dialog-error" style={{ marginBottom: 8 }}>{shareError}</div>}
                 <div className="row gap6" style={{ flexWrap: 'wrap', alignItems: 'flex-start' }}>
                   <AccountPicker values={shareAddrs} onChange={setShareAddrs} placeholder="Search accounts or paste addresses" disabled={inviteMutation.isPending || revokeMutation.isPending} />
@@ -340,14 +336,15 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
               </div>
             )}
 
-            {isOwner ? (
+            {isOwner && activeView === 'tags' && (
               <>
-                <div className="sec-title">Tags · {data.tags.length}</div>
                 {!data.tags.length && <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, marginBottom: 16 }}>No tags yet.</div>}
                 {data.tags.map(tag => <TagPanel key={tag.tagId} libraryId={libraryId} tag={tag} isOwner={isOwner} />)}
                 <div className="ext-link-row"><button type="button" className="ext-link" style={{ cursor: 'pointer' }} onClick={() => setNewTagOpen(true)}>+ New tag</button></div>
               </>
-            ) : (
+            )}
+
+            {!isOwner && (
               /* Another user's curation is theirs: the API ships no tag names
                  or member lists here, only the statistics. Subscribing applies
                  the labels across the explorer without exposing the list. */

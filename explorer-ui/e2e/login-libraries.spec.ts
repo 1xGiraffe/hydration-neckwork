@@ -1,5 +1,6 @@
-import type { Page } from '@playwright/test'
+import type { Locator, Page } from '@playwright/test'
 import { E2E_TOKEN, expect, seedSession, test } from './fixtures/test'
+import type { UserMockState } from './fixtures/test'
 
 // Treasury's accountId, copied from `A.treasury` in tests/fixtures/mockApi.ts
 // (the module account behind Hydration's Treasury pallet — not exported from
@@ -12,6 +13,34 @@ const TREASURY_ACCOUNT_ID = '0x6d6f646c70792f74727372790000000000000000000000000
 // as a tag member — any well-formed address works for the mock, but reusing
 // one already meaningful elsewhere in the suite beats inventing a new one.
 const BINANCE_ADDRESS = '0x2c1F9eB7a4D0c83E5f6A1b9D2c7E04aF8b3D16C9'
+
+// Regression coverage for the account-picker dropdown fix: the diagnosed bug
+// was a translucent background (var(--panel), meant for a wash over content —
+// not a dropdown that needs to read as opaque) plus the containing `.panel`'s
+// own corner-clipping `overflow: hidden` cutting the dropdown off wherever it
+// pokes past the panel's edge. Exercised on both surfaces that host an
+// AccountPicker (Invites, a tag's member editor) at both viewports.
+//
+// Checks the fix's two mechanisms directly rather than pixel geometry (how far
+// the dropdown happens to extend past the panel's OTHER content varies with
+// how many members/hint text a given panel has, so it isn't a stable signal;
+// the computed styles are exactly what the CSS fix changed).
+async function assertDropdownReadsLikeSearchDropdown(panel: Locator): Promise<void> {
+  const dropdown = panel.locator('.acct-picker-results')
+  await expect(dropdown).toBeVisible()
+
+  const bg = await dropdown.evaluate(el => getComputedStyle(el).backgroundColor)
+  // A translucent color always ends in ", <fraction>)"; the fix's solid
+  // var(--bg-elev) never does (opaque rgb()/rgba(..., 1)).
+  expect(bg).not.toMatch(/,\s*0(\.\d+)?\s*\)$/)
+
+  // The panel's own corner-clipping overflow is lifted for exactly as long as
+  // the dropdown it would otherwise clip is in the DOM (see
+  // `.panel:has(.acct-picker-results)` in global.css) — this is what lets the
+  // dropdown paint over the panel's edge instead of being cut off at it.
+  const panelOverflow = await panel.evaluate(el => getComputedStyle(el).overflow)
+  expect(panelOverflow).toBe('visible')
+}
 
 // The topbar's login control collapses into the burger/drawer below 860px
 // (global.css's own breakpoint) — decide from the viewport Playwright is
@@ -142,15 +171,53 @@ test('create a library, tag a known address, and reorder', async ({ page, userMo
 
   const tagPanel = page.locator('.panel', { hasText: 'E2E Tag' })
   await expect(tagPanel).toContainText('No accounts yet')
-  // The account picker chips an address-shaped Enter, then Add submits.
+  // No Add button and no table: an address-shaped Enter commits the member
+  // immediately, and it renders as a chip.
+  await expect(tagPanel.locator('table')).toHaveCount(0)
+  await expect(tagPanel.getByRole('button', { name: 'Add' })).toHaveCount(0)
   await tagPanel.locator('.acct-picker input').fill(BINANCE_ADDRESS)
   await tagPanel.locator('.acct-picker input').press('Enter')
-  await tagPanel.locator('button', { hasText: 'Add' }).click()
-  await expect(tagPanel.locator('tbody a.addr-pill')).toHaveCount(1)
+  await expect(tagPanel.locator('.tag-member-chips .addr-pill')).toHaveCount(1)
+  await expect(tagPanel).not.toContainText('No accounts yet')
 
   await page.goto('/libraries')
   await page.locator('tbody tr', { hasText: 'E2E Library' }).locator('button[aria-label="Move up"]').click()
   await expect.poll(() => userMock.state.order).toEqual(['lib-2', 'seed'])
+})
+
+// Seeds an owned library with one (empty) tag — enough surface for both
+// AccountPicker hosts (a tag's member editor, and the Invites tab) without
+// running the full library/tag creation flow.
+function seedOneTagLibrary(userMock: { state: UserMockState }): void {
+  userMock.state.libraries.push({
+    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+    owner: userMock.state.account, tagCount: 1, accountCount: 0, subscriberCount: 0,
+    tags: [{ tagId: 't1', name: 'Watch', color: '#22c55e', icon: '👀', note: '', members: [] }],
+  })
+}
+
+test('the tag member editor and the invites picker both show tabs, and the library page deep-links to them', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  seedOneTagLibrary(userMock)
+
+  await page.goto('/library/lib1')
+  // Tags is the default tab — no ?view= needed to land on it.
+  await expect(page.locator('.tabs.detail-tabs button.active')).toHaveText(/Tags/)
+  const tagPanel = page.locator('.panel', { hasText: 'Watch' })
+  await tagPanel.locator('.acct-picker input').fill(BINANCE_ADDRESS)
+  await assertDropdownReadsLikeSearchDropdown(tagPanel)
+
+  await page.locator('.tabs.detail-tabs button', { hasText: 'Invites' }).click()
+  await expect(page).toHaveURL(/\?view=invites$/)
+  await expect(page.locator('.tabs.detail-tabs button.active')).toHaveText(/Invites/)
+  await expect(tagPanel).toHaveCount(0) // the Tags tab's panels are gone, not just hidden
+  const invitesPanel = page.locator('.panel', { hasText: 'Revoke removes a pending invite' })
+  await invitesPanel.locator('.acct-picker input').fill(BINANCE_ADDRESS)
+  await assertDropdownReadsLikeSearchDropdown(invitesPanel)
+
+  // Deep link straight to the Invites tab.
+  await page.goto('/library/lib1?view=invites')
+  await expect(page.locator('.tabs.detail-tabs button.active')).toHaveText(/Invites/)
 })
 
 test.describe('mobile', () => {
@@ -159,5 +226,15 @@ test.describe('mobile', () => {
   test('connect a wallet and sign in', async ({ page, userMock, injectedWallet }) => {
     void userMock; void injectedWallet
     await loginFlow(page)
+  })
+
+  test('the account-picker dropdown still overlaps its panel at 390px', async ({ page, userMock }) => {
+    await seedSession(page, userMock)
+    seedOneTagLibrary(userMock)
+
+    await page.goto('/library/lib1')
+    const tagPanel = page.locator('.panel', { hasText: 'Watch' })
+    await tagPanel.locator('.acct-picker input').fill(BINANCE_ADDRESS)
+    await assertDropdownReadsLikeSearchDropdown(tagPanel)
   })
 })
