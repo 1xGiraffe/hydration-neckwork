@@ -52,6 +52,7 @@ The database is a rebuildable projection of the chain; there are no migrations. 
 Keep in mind for new models:
 - Prefer an MV; for per-entity stateful needs an MV cannot express, prefer bounded request-time reconstruction or an in-memory snapshot on the existing coordinated refresher; add a new `derivations` job only for genuinely global, heavy models none of the above can express, and avoid new scheduled batch recompute jobs.
 - Every derived table must be reproducible from raw — no derived-only state.
+- Exception: `user_*` tables (`clickhouse/schema/004_user.sql`) are user-authored source-of-record, written only by the api service — they are NOT reproducible from raw, are excluded from every drop-and-refill/projection rebuild, and are exported nightly by the user-backup service.
 - A new or evolved MV table gets its history on an existing deployment through a one-time ad-hoc `INSERT … SELECT` from raw mirroring the MV's exact `SELECT`/`WHERE` (replay-safe through the table's replacement key), run during rollout and not committed — no migration or backfill scripts live in the repo, and a fresh database is complete from the declaration alone.
 - Recompute jobs must be idempotent and correct under out-of-order raw (partition-diff or atomic full-replace — never a forward high-water cursor).
 - Evolving a model means editing the declaration and rebuilding the projection (drop and let it refill, or reset the derived layer) — never a version-numbered migration or an in-place data patch.
