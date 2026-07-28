@@ -29,4 +29,25 @@ describe('per-page block lookups stay inside the query size limit', () => {
     expect(surrounding).toContain('mapChunksConcurrently(blocks, 2_000,')
     expect(surrounding.match(/query_params: \{ blocks: chunk \}/g)).toHaveLength(2)
   })
+
+  // The merged feed's vote arm asks vote_activity for as many candidates as the
+  // window is deep (5x the page's want, widened x4 while a source stays short), and
+  // each ConvictionVoting.Voted candidate contributes one (block_height,
+  // extrinsic_index) tuple to this read. At a 4,096-deep window that list was 20k
+  // tuples in one interpolated query — past max_query_size, so /explorer/activity
+  // ?type=all&offset=2400 answered 503 while type=vote and type=xcm at the same
+  // offset answered 200.
+  it('resolves the merged feed vote calls in tuple chunks', () => {
+    const at = explorerService.indexOf('const callTuples')
+    expect(at).toBeGreaterThan(-1)
+    const fn = explorerService.slice(at, explorerService.indexOf('const hdx = asset(0)', at))
+
+    expect(fn).toContain('mapChunksConcurrently(callTuples, 5_000, CHUNK_QUERY_CONCURRENCY,')
+    expect(fn).toContain('(block_height, extrinsic_index) IN (${chunk.join(\',\')})')
+    // The whole-list interpolation is what overflowed; it must not come back.
+    expect(fn).not.toContain('callTuples.join(')
+    // One read, chunked once: the wrapper-fallback pass folds the same rows again.
+    expect(fn.match(/mapChunksConcurrently\(/g)).toHaveLength(1)
+    expect(fn).toContain('const callRows = callChunks.flat()')
+  })
 })

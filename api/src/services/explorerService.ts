@@ -8359,14 +8359,23 @@ async function getRecentVotes(limit: number, from?: string, to?: string, offset 
       const callByExt = new Map<string, { ref: string | null; details: VoteDetails }>()
       const callsByExt = new Map<string, { ref: string | null; details: VoteDetails }[]>()
       if (callTuples.length) {
-        const calls = await client.query({
-          query: `SELECT block_height, extrinsic_index, call_address, call_name, args_json
-                  FROM price_data.raw_calls
-                  WHERE (block_height, extrinsic_index) IN (${callTuples.join(',')})
-                    AND call_name IN ('ConvictionVoting.vote', 'MultiTransactionPayment.dispatch_permit', ${VOTE_WRAPPER_CALLS})`,
-          format: 'JSONEachRow',
+        // Chunked like every other tuple read here: the merged feed's vote arm asks
+        // for as many candidates as the window is deep, and one interpolated list of
+        // 20k tuples already crossed `max_query_size` and failed deep `type=all`
+        // pages with a ClickHouse 500. The call-name filter keeps this at ~1.02 rows
+        // per tuple (max 3 measured over every vote extrinsic), so the wider 5,000-key
+        // chunk stays far below the client's result guard.
+        const callChunks = await mapChunksConcurrently(callTuples, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+          const calls = await client.query({
+            query: `SELECT block_height, extrinsic_index, call_address, call_name, args_json
+                    FROM price_data.raw_calls
+                    WHERE (block_height, extrinsic_index) IN (${chunk.join(',')})
+                      AND call_name IN ('ConvictionVoting.vote', 'MultiTransactionPayment.dispatch_permit', ${VOTE_WRAPPER_CALLS})`,
+            format: 'JSONEachRow',
+          })
+          return calls.json<{ block_height: number; extrinsic_index: number | null; call_address: string; call_name: string; args_json: string }>()
         })
-        const callRows = await calls.json<{ block_height: number; extrinsic_index: number | null; call_address: string; call_name: string; args_json: string }>()
+        const callRows = callChunks.flat()
         for (const c of callRows) {
           if (c.extrinsic_index == null) continue
           const args = (safeJson(c.args_json) ?? {}) as Record<string, unknown>
