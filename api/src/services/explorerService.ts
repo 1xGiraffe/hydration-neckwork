@@ -89,6 +89,50 @@ export function mmReserveAddressForAsset(assetId: number): string[] {
     .map(([addr]) => addr)
   return [...new Set([standard, ...deployed])]
 }
+
+// Every id whose money-market rows belong to `assetId`. Up to three aliases can
+// stand between the id a reader asks for and the id the market files rows under:
+//   • an aToken (aDOT 1001) is a claim on its reserve (DOT 5),
+//   • a pool-share token IS the reserve while the id a reader asks for is the main
+//     asset it displays as — GDOT 69's collateral is 2-Pool-GDOT 690,
+//   • both at once (atBTC 1006 → tBTC 1000765).
+// One source for the whole app, so a filter and a per-asset read can never disagree
+// about which rows are the asset's.
+export function mmReserveIdsForAsset(assetId: number): number[] {
+  const direct = ATOKEN_UNDERLYING_ID[assetId] ?? assetId
+  return [...new Set([assetId, direct,
+    ...(UNDERLYING_TO_SHARE_IDS[assetId] ?? []), ...(UNDERLYING_TO_SHARE_IDS[direct] ?? [])])]
+}
+
+// The reserve addresses a token filter has to match. Asking for GDOT matched only
+// GDOT's own precompile, where the market never files a supply, borrow, repay or
+// liquidation — those all sit on the pool share — so the filter returned reward
+// claims and nothing else.
+//
+// Unlike a per-asset read, a filter needs no units or price-feed agreement between
+// the aliases: it only decides which rows are selected, and each row is displayed
+// and valued through the asset its own reserve address resolves to.
+export function mmTokenMatchIds(tokenIds: number[]): number[] {
+  return [...new Set(tokenIds.flatMap(mmReserveIdsForAsset))]
+}
+export function mmReserveAddressesForTokens(tokenIds: number[]): string[] {
+  return [...new Set(mmTokenMatchIds(tokenIds).flatMap(mmReserveAddressForAsset))]
+}
+
+// The inverse, for a row: the other ids a money-market row on `reserveId` answers to
+// — the aToken a supplier actually holds (DOT 5 → aDOT 1001), and the main asset a
+// pool-share reserve displays as (2-Pool-GDOT 690 → GDOT 69).
+//
+// Rows carry these as `assetRefs`, the same channel a liquidity row uses for the
+// pool-side assets it references but does not display, because the token filter is
+// applied TWICE: once as the SQL reserve-address predicate, then again per assembled
+// row. Widening only the SQL half made the reads select rows the row test then threw
+// away, so a filtered feed found nothing and its walker kept searching until it hit
+// the depth bound — asking for aDOT or GETH answered 503 rather than 0.
+export function mmReserveAliasIds(reserveId: number): number[] {
+  const aliases = [UNDERLYING_TO_ATOKEN_ID[reserveId], SHARE_TOKEN_UNDERLYING_ID[reserveId]]
+  return [...new Set(aliases.filter((id): id is number => id != null && id !== reserveId))]
+}
 function mmAssetIdSql(expr: string): string {
   const addr = `lower(ifNull(${expr}, ''))`
   const h = `replaceRegexpOne(${addr}, '^0x', '')`
@@ -7687,7 +7731,7 @@ async function getRecentMoneyMarket(limit: number, from?: string, to?: string, o
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
     const reserveFilter = tokenIds == null ? '' : tokenIds.length
-      ? `AND asset_address IN (${[...new Set(tokenIds.flatMap(mmReserveAddressForAsset))].map(a => `'${a}'`).join(',')})`
+      ? `AND asset_address IN (${mmReserveAddressesForTokens(tokenIds).map(a => `'${a}'`).join(',')})`
       : 'AND 0'
     // Min pushes down exactly: mmAssetIdSql maps the reserve address to the
     // same asset id the row builder resolves, so SQL value == row valueUsd and
@@ -7723,6 +7767,7 @@ async function getRecentMoneyMarket(limit: number, from?: string, to?: string, o
         who: r.account_id ? accountRef(r.account_id) : null, to: null, asset: a, assetIn: null, assetOut: null,
         amount: r.amount, amountIn: null, amountOut: null,
         valueUsd: a ? usdValue(prices, a.assetId, r.amount, a.decimals) : null,
+        assetRefs: a ? mmReserveAliasIds(a.assetId) : undefined,
         mmAction: r.event_name, ...moneyMarketActivityFields(r.pool_address), linkBlock: r.block_height, linkIndex: xi,
       })
     }
@@ -12218,14 +12263,16 @@ function accountLiquidityArm(list: string, bound: string, eventNames: readonly s
 // (`mmAction` IS the event name, so moneyMarketEventNames is that mapping's inverse).
 //
 // The token test resolves the reserve CONTRACT back to the asset the row displays, the
-// same direction `assetIdFromMmAddress` resolves it for the row. Matching the other way
-// — mapping the requested token to reserve addresses, as the page read's own filter
-// does — folds an aToken onto its underlying's reserve, so a filter on the aToken would
-// count rows the classifier then drops as the underlying's. The `known` guard keeps an
-// unrecognised address from resolving to asset 0 and being counted under HDX.
+// same direction `assetIdFromMmAddress` resolves it for the row, and the requested
+// tokens are widened to the reserves they are held through so the arm admits exactly
+// the rows the page's own row test keeps: a row carries its reserve's aliases as
+// assetRefs, so a DOT-reserve row answers to aDOT and a 2-Pool-GDOT row to GDOT.
+// Widening one side alone desynchronises them — a count over rows the page drops, or a
+// page whose rows this arm never counted. The `known` guard keeps an unrecognised
+// address from resolving to asset 0 and being counted under HDX.
 function accountMoneyMarketArm(evmList: string, eventNames: readonly string[], bound: string, tokenIds?: number[]): ActivityCountArm {
   if (!eventNames.length) return emptyActivityCountArm()
-  const tokenFilter = armTokenFilter(tokenIds, ids =>
+  const tokenFilter = armTokenFilter(tokenIds && mmTokenMatchIds(tokenIds), ids =>
     `(${mmAssetKnownSql('asset_address')} AND ${mmAssetIdSql('asset_address')} IN (${ids}))`)
   return `SELECT block_height, count() AS rows FROM price_data.account_money_market_activity FINAL
     WHERE ${bound} AND account_id IN (${evmList})
@@ -13409,7 +13456,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   if (wantMm && evmForms.length && mmEventNames.length) {
     const mmList = evmForms.map(a => `'${a}'`).join(',')
     const reserveFilter = tokenIds == null ? '' : tokenIds.length
-      ? `AND asset_address IN (${[...new Set(tokenIds.flatMap(mmReserveAddressForAsset))].map(a => `'${a}'`).join(',')})`
+      ? `AND asset_address IN (${mmReserveAddressesForTokens(tokenIds).map(a => `'${a}'`).join(',')})`
       : 'AND 0'
     const mmAssetExpr = mmAssetIdSql('asset_address')
     const mmAmountExpr = `if(event_name='LiquidationCall', liquidated_collateral_amount, amount)`
@@ -13441,6 +13488,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
         who: r.account_id ? accountRef(r.account_id) : accounts[0] ? accountRef(accounts[0]) : null, to: null, asset: a, assetIn: null, assetOut: null,
         amount: r.amount, amountIn: null, amountOut: null,
         valueUsd: a ? usdValue(prices, a.assetId, r.amount, a.decimals) : null,
+        assetRefs: a ? mmReserveAliasIds(a.assetId) : undefined,
         mmAction: r.event_name, ...moneyMarketActivityFields(r.pool_address), linkBlock: r.block_height, linkIndex: xi,
       }
       mmTx.push(row)
@@ -15452,25 +15500,20 @@ export interface AssetDetail {
 // blended, and a supplemental market's liquidations belong to its own surface.
 const primaryMmPools = (): string[] => MM_MARKETS.filter(m => m.role === 'primary').map(m => m.poolProxy)
 
-// Which money-market reserve rows belong to an asset's page. Up to three aliases can
-// stand between the id a reader visits and the id the market holds:
-//   • an aToken (aDOT 1001) is a claim on its reserve (DOT 5),
-//   • a pool-share token IS the reserve while the page is the main asset it displays
-//     as — the market's GDOT collateral is 2-Pool-GDOT (690), not GDOT (69),
-//   • both at once (atBTC 1006 → tBTC 1000765).
-// Every candidate has to price through the SAME feed as the page asset; that is what
-// makes one bounded ASOF join valid for all of them, so a candidate that does not is
-// dropped rather than valued at the wrong feed.
-// Decimals are per candidate, not per page — 2-Pool-PRIME carries 18 where PRIME
-// carries 6 — so each address keeps its own, and amounts are reported in the widest.
+// The reserve addresses of one asset's page (see mmReserveIdsForAsset for the
+// aliases they come from), each carrying the decimals ITS rows are denominated in.
+//
+// What a per-asset read needs beyond a filter's address set: every candidate must
+// price through the SAME feed as the page asset, which is what makes one bounded
+// ASOF join valid for all of them, so a candidate that does not is dropped rather
+// than valued at the wrong feed. And decimals are per candidate, not per page —
+// 2-Pool-PRIME carries 18 where PRIME carries 6 — so amounts are reported in the
+// widest basis present rather than assumed uniform.
 export interface MmReserveScope { priceId: number; decimals: number; byAddress: Map<string, number> }
 export function mmReserveScope(assetId: number): MmReserveScope {
   const priceId = historicalPriceAssetId(assetId)
-  const direct = ATOKEN_UNDERLYING_ID[assetId] ?? assetId
-  const candidates = new Set<number>([assetId, direct,
-    ...(UNDERLYING_TO_SHARE_IDS[assetId] ?? []), ...(UNDERLYING_TO_SHARE_IDS[direct] ?? [])])
   const byAddress = new Map<string, number>()
-  for (const candidate of candidates) {
+  for (const candidate of mmReserveIdsForAsset(assetId)) {
     if (historicalPriceAssetId(candidate) !== priceId) continue
     const decimals = assetDescriptor(candidate).decimals
     if (!Number.isInteger(decimals) || decimals < 0 || decimals > 65) continue
@@ -17130,7 +17173,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
       : `AND (toUInt32(JSONExtractInt(args_json,'assetIn')) IN (${ids}) OR toUInt32(JSONExtractInt(args_json,'assetOut')) IN (${ids}))`
     const stakingTok = tokenIds == null ? '' : (tokenIds.includes(0) || tokenIds.includes(670)) ? '' : 'AND 0'
     const voteTok = tokenIds == null ? '' : tokenIds.includes(0) ? '' : 'AND 0'
-    const mmAddrs = tokenIds ? [...new Set(tokenIds.flatMap(mmReserveAddressForAsset))] : []
+    const mmAddrs = tokenIds ? mmReserveAddressesForTokens(tokenIds) : []
     const mmTok = tokenIds == null ? '' : mmAddrs.length ? `AND asset_address IN (${mmAddrs.map(a => `'${a}'`).join(',')})` : 'AND 0'
     let query: string
     if (scope === 'activity' && type !== 'mm' && type !== 'xcm') {

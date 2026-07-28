@@ -211,7 +211,11 @@ describe('the token filter reaches candidates only', () => {
     // arm whose predicate is not an armTokenFilter call.
     expect(body('accountDcaTradeArm')).toContain('leg_in IN (${ids}) OR leg_out IN (${ids})')
     expect(body('accountDcaTradeArm')).not.toContain('dcaScheduleJoinSql')
-    expect((explorerService.match(/armTokenFilter\(tokenIds, /g) ?? []).length).toBe(4)
+    // Counted once per arm. The money-market arm passes the requested tokens widened
+    // to the reserves they are held through (mmTokenMatchIds), so it admits exactly the
+    // rows the page's assetRefs test keeps — hence the id list, not the bare tokenIds.
+    expect((explorerService.match(/armTokenFilter\(tokenIds(?: &&[^,]+)?, /g) ?? []).length).toBe(4)
+    expect(body('accountMoneyMarketArm')).toContain('armTokenFilter(tokenIds && mmTokenMatchIds(tokenIds)')
   })
 
   // Only the candidate read inside the transfer arm is narrowed, and it is narrowed in

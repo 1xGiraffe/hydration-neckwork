@@ -98,12 +98,21 @@ describe('asset liquidation history buckets on the candles own day boundary', ()
 // as (the market's GDOT collateral is 2-Pool-GDOT 690 — resolving only the direct id
 // left GDOT and GETH showing nothing).
 describe('an asset page finds its reserve through every alias', () => {
-  it('reaches the aToken underlying and the pool-share token that displays as it', () => {
-    const body = functionBody('mmReserveScope')
-    expect(body).toContain('ATOKEN_UNDERLYING_ID[assetId] ?? assetId')
-    expect(body).toContain('UNDERLYING_TO_SHARE_IDS[assetId]')
-    expect(body).toContain('UNDERLYING_TO_SHARE_IDS[direct]')
-    expect(body).toContain('mmReserveAddressForAsset(candidate)')
+  // The alias set itself is mmReserveIdsForAsset — one resolution shared with the
+  // activity token filters, tested behaviourally in moneyMarketAddresses. What this
+  // pins is that the liquidation scope reads THAT resolution rather than growing its
+  // own, which is how the two could drift apart on the next alias.
+  it('takes its alias set from the shared resolution', () => {
+    expect(functionBody('mmReserveScope')).toContain('for (const candidate of mmReserveIdsForAsset(assetId))')
+    expect(functionBody('mmReserveScope')).toContain('mmReserveAddressForAsset(candidate)')
+    const ids = functionBody('mmReserveIdsForAsset')
+    expect(ids).toContain('ATOKEN_UNDERLYING_ID[assetId] ?? assetId')
+    expect(ids).toContain('UNDERLYING_TO_SHARE_IDS[assetId]')
+    expect(ids).toContain('UNDERLYING_TO_SHARE_IDS[direct]')
+    // Nothing else may resolve reserve addresses from a token id on its own.
+    expect(occurrences(explorerService, 'flatMap(mmReserveAddressForAsset)')).toBe(1)
+    expect(functionBody('mmTokenMatchIds')).toContain('tokenIds.flatMap(mmReserveIdsForAsset)')
+    expect(functionBody('mmReserveAddressesForTokens')).toContain('mmTokenMatchIds(tokenIds).flatMap(mmReserveAddressForAsset)')
   })
 
   // The reverse map is derived, never hand-maintained, so it cannot drift from the
