@@ -10,6 +10,18 @@ export default defineConfig({
   // (SPA fallback), so a hard load of `/activity`, `/account/x`, etc. boots the app.
   base: '/',
   appType: 'spa',
+  build: {
+    rollupOptions: {
+      output: {
+        // React, react-dom, scheduler and React Query change only when a
+        // dependency is upgraded, while the entry chunk changes on every deploy.
+        // Sharing one hash made a returning reader re-download the runtime for an
+        // app-only edit; a separate vendor chunk keeps it in the HTTP cache
+        // (content-hashed `/assets/` is served with `expires max`, see nginx.conf).
+        manualChunks: (id) => (id.includes('/node_modules/') ? 'vendor' : undefined),
+      },
+    },
+  },
   server: {
     proxy: {
       '/api': {
