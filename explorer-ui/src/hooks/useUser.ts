@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tansta
 import { api, userApi } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
 import { useSession, setSession } from '../session'
-import { setTagMap } from '../userTags'
+import { setTagMap, setTagMapError } from '../userTags'
 import { useLive, LIVE_MS } from '../live'
 import { useHeldRows } from './useHeldRows'
 
@@ -23,8 +23,16 @@ export function useTagMapSync() {
   const q = useQuery({ queryKey: ['user', 'tag-map', session?.accountId], queryFn: ({ signal }) => userApi.tagMap(signal), enabled: !!session, staleTime: 30_000 })
   // The explicit second argument matters exactly when `session` is truthy but
   // `q.data` hasn't arrived yet — tagMapStatus() needs to read 'loading', not
-  // 'anonymous', for that window (see userTags.ts).
-  useEffect(() => { setTagMap(session ? q.data ?? null : null, !!session) }, [session, q.data])
+  // 'anonymous', for that window (see userTags.ts). `q.isError` needs its own
+  // branch: react-query leaves `data` undefined on a failed fetch too, same
+  // as "still loading" — without checking isError, a query that exhausts its
+  // retries and fails never fires this effect again (data stays `undefined`,
+  // unchanged), so tagMapStatus() would read 'loading' forever.
+  useEffect(() => {
+    if (!session) { setTagMap(null); return }
+    if (q.isError) { setTagMapError(); return }
+    setTagMap(q.data ?? null, true)
+  }, [session, q.data, q.isError])
   return q
 }
 

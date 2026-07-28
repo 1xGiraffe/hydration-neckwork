@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { setTagMap, resolveTag, allAssociations, searchUserTags, libraryForTag, tagMapStatus, looksLikeUserTagId } from '../src/userTags'
+import { setTagMap, setTagMapError, resolveTag, allAssociations, searchUserTags, libraryForTag, tagMapStatus, looksLikeUserTagId } from '../src/userTags'
 import type { AccountRef } from '../src/types'
 
 const ACC = '0x' + 'ab'.repeat(32)
@@ -90,6 +90,36 @@ describe('tagMapStatus', () => {
   it('goes back to "anonymous" on logout (setTagMap(null) with its default)', () => {
     setTagMap({ libraries: [{ libraryId: 'lib1', name: 'Personal', tags: [mine] }] })
     expect(tagMapStatus()).toBe('ready')
+    setTagMap(null)
+    expect(tagMapStatus()).toBe('anonymous')
+  })
+
+  // Regression: useTagMapSync's effect used to key off [session, q.data] only.
+  // react-query leaves `data` undefined on a failed fetch, same as "still
+  // loading" — with no distinct error signal, a query that exhausted its
+  // retries and failed never fired the effect again, and tagMapStatus() read
+  // 'loading' forever (a UUID-shaped /tag/:id page's skeleton never resolved).
+  it('is "error" — a TERMINAL state, never "loading" — once the fetch fails outright', () => {
+    setTagMapError()
+    expect(tagMapStatus()).toBe('error')
+  })
+
+  it('setTagMapError() implies a session, even with no prior setTagMap(_, true)', () => {
+    // No setTagMap call at all yet this test — sessionActive starts false.
+    setTagMapError()
+    expect(tagMapStatus()).not.toBe('anonymous')
+    expect(tagMapStatus()).toBe('error')
+  })
+
+  it('a later successful setTagMap() clears a prior error back to "ready"', () => {
+    setTagMapError()
+    expect(tagMapStatus()).toBe('error')
+    setTagMap({ libraries: [{ libraryId: 'lib1', name: 'Personal', tags: [mine] }] })
+    expect(tagMapStatus()).toBe('ready')
+  })
+
+  it('logging out clears a prior error back to "anonymous"', () => {
+    setTagMapError()
     setTagMap(null)
     expect(tagMapStatus()).toBe('anonymous')
   })

@@ -238,6 +238,79 @@ test('a cold logged-in load of a user-tag URL never flashes "Tag not found" whil
   await expect(page.locator('.acct-meta > .tag')).toContainText('Mine')
 })
 
+// Regression for a "loading forever" bug in the fix above: a session whose
+// /user/tag-map fetch fails OUTRIGHT (every retry exhausted, not just "still
+// in flight") must still let a UUID-shaped /tag/:id page settle. Before this,
+// tagMapStatus() had no way to tell "errored" apart from "still loading" (both
+// left the map's own data undefined), so useTagMapSync's effect — keyed off
+// [session, q.data] — never fired again after the failure and the page's
+// skeleton never resolved at all.
+test('a UUID tag URL settles — never stays on the skeleton — when the tag-map fetch fails outright', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  await page.route(/\/api\/user\/tag-map(?:\?.*)?$/, route => route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"boom"}' }))
+
+  await page.goto(`/tag/${USER_TAG_ID}`)
+  // Right after navigation, the map is still retrying — the skeleton is the
+  // correct, honest state to be in at this instant.
+  await expect(page.locator('.acct-head-skeleton')).toBeVisible()
+
+  // Past the retry backoff (shouldRetryQuery allows 2 retries on a 5xx,
+  // exponential ~1s + ~2s), the fetch has failed outright and the page must
+  // have moved on to a real, rendered state — never stuck on the skeleton.
+  await expect(page.locator('.acct-head-skeleton')).toHaveCount(0, { timeout: 10_000 })
+  await expect(page.locator('.acct-meta .tag')).toBeVisible()
+})
+
+// HoverCard.parseTarget has the SAME loading/anonymous ambiguity TagDetail's
+// routing does (both read tagMapStatus()/libraryForTag() over a /tag/:id
+// href) — verify it actually guards against it rather than assuming the fix
+// above covers it. A real pill's OWN href/tag resolution (resolveTag) is
+// ALSO tag-map-sensitive, so a genuine account pill would just show the
+// account's system tag meanwhile and never exercise this path; a synthetic
+// /tag/:id link isolates the hover card's guard from that.
+test('the hover card shows nothing for a UUID /tag/:id link while the tag map is still loading, then resolves once it arrives', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  userMock.state.tagMap = {
+    libraries: [
+      { libraryId: 'lib1', name: 'My library', tags: [
+        { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
+      ] },
+      { libraryId: 'system', name: 'Hydration', tags: [] },
+    ],
+  }
+  userMock.state.libraries.push({
+    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+    owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
+    tags: [{
+      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', note: '',
+      members: [{ accountId: TREASURY_ACCOUNT_ID, address: TREASURY_ACCOUNT_ID, emoji: '👤', tag: null }],
+    }],
+  })
+
+  let releaseTagMap = () => {}
+  const held = new Promise<void>(resolve => { releaseTagMap = resolve })
+  await page.route(/\/api\/user\/tag-map(?:\?.*)?$/, async route => { await held; await route.fallback() })
+
+  await page.goto('/accounts')
+  await page.evaluate(id => {
+    const a = document.createElement('a')
+    a.href = `/tag/${id}`
+    a.className = 'addr-pill'
+    a.id = 'probe-link'
+    a.textContent = 'probe'
+    document.body.appendChild(a)
+  }, USER_TAG_ID)
+
+  await page.locator('#probe-link').hover()
+  await page.waitForTimeout(300) // past HOVER_DWELL_MS (180ms) with margin
+  await expect(page.locator('.hovercard')).toHaveCount(0)
+
+  releaseTagMap()
+  await page.mouse.move(0, 0) // force a fresh mouseover on the re-hover below
+  await page.locator('#probe-link').hover()
+  await expect(page.locator('.hovercard')).toContainText('Mine')
+})
+
 // A UUID-shaped id can't be resolved client-side at all without a session
 // (the tag map only ever loads for one) — that's a real "can't tell", not a
 // "doesn't exist", so a logged-out visitor gets an invitation to log in

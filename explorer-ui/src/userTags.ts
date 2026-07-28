@@ -20,6 +20,13 @@ let indexes: LibraryIndex[] | null = null
 // session at all" are indistinguishable, which is exactly what let TagDetail
 // flash "Tag not found" on a cold load (see tagMapStatus).
 let sessionActive = false
+// Set once a session's tag-map fetch fails OUTRIGHT (every retry exhausted) —
+// distinct from `indexes` being null while a fetch is merely still in flight.
+// Without this, a failed fetch and "still loading" read identically to
+// tagMapStatus(), and a UUID-shaped /tag/:id page waited on a response that
+// had already come back and failed: the skeleton never resolved. Cleared by
+// every normal setTagMap() call (a fresh load or a later successful retry).
+let mapErrored = false
 let version = 0
 const listeners = new Set<() => void>()
 
@@ -35,6 +42,18 @@ export function setTagMap(map: TagMapResponse | null, hasSession: boolean = map 
     byAccount: new Map(lib.tags.flatMap(t => t.members.map(m => [m, { tagId: t.tagId, name: t.name, color: t.color, icon: t.icon, memberCount: t.members.length }] as const))),
   })) : null
   sessionActive = hasSession
+  mapErrored = false
+  version++
+  listeners.forEach(l => l())
+}
+
+// The session's tag-map fetch is done retrying and never succeeded — a
+// TERMINAL outcome, unlike "still loading". Implies a session exists (this
+// is only ever called from a session-gated query), so it's safe to call even
+// if no prior setTagMap(_, true) has landed yet.
+export function setTagMapError(): void {
+  sessionActive = true
+  mapErrored = true
   version++
   listeners.forEach(l => l())
 }
@@ -43,13 +62,18 @@ export function useTagMapVersion(): number {
   return useSyncExternalStore(cb => { listeners.add(cb); return () => listeners.delete(cb) }, () => version, () => 0)
 }
 
-// Three-state read of where the tag map stands, for callers (TagDetail) that
-// must not treat "definitely no session" and "session exists, map still in
-// flight" the same way — the latter is temporary and resolves on its own,
-// the former never will. Pair with useTagMapVersion() for reactivity.
-export function tagMapStatus(): 'anonymous' | 'loading' | 'ready' {
+// Where the tag map stands, for callers (TagDetail, HoverCard) that must not
+// treat "definitely no session", "session exists, map still in flight" and
+// "session exists, map fetch failed" the same way — only 'loading' is
+// temporary and guaranteed to resolve on its own; 'anonymous' and 'error' are
+// both terminal (an id genuinely can't be resolved as a user tag from here)
+// and get treated alike by every caller so far, but are named separately
+// since WHY it can't be resolved differs. Pair with useTagMapVersion() for
+// reactivity.
+export function tagMapStatus(): 'anonymous' | 'loading' | 'ready' | 'error' {
   if (!sessionActive) return 'anonymous'
-  return indexes ? 'ready' : 'loading'
+  if (indexes) return 'ready'
+  return mapErrored ? 'error' : 'loading'
 }
 
 // System tag ids are short, hand-picked slugs ('kraken', 'fee-processor', …);

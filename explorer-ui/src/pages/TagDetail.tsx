@@ -53,7 +53,7 @@ function LoginToViewTag() {
 
 // A user tag's aggregate view shares this same /tag/:id URL as a system tag —
 // this wrapper decides which one a given id means, and (since that decision
-// depends on the viewer's own tag map, an async fetch) which of three states
+// depends on the viewer's own tag map, an async fetch) which of four states
 // to show meanwhile. System tag slugs are short, code-defined words ('kraken',
 // 'treasury', …); user-tag ids are UUIDs minted by userLibraryService, so the
 // two id spaces never collide — a slug can never be a user tag and fast-paths
@@ -65,9 +65,12 @@ function LoginToViewTag() {
 //   - map ready and it hits: the user-tag aggregate view (LibraryTagDetail).
 //   - no session at all: an invitation to log in, not "not found" — a real
 //     answer needs a session this viewer doesn't have.
-//   - map ready and it doesn't hit: genuinely unknown — the system lookup
-//     404s on it exactly like it would on any other unrecognized id, so this
-//     falls through there rather than growing a third "not found" panel.
+//   - map ready and it doesn't hit, OR the fetch failed outright (tagMapStatus
+//     'error' — every retry exhausted, a TERMINAL state, never confused with
+//     'loading'): genuinely unresolved either way, and the system lookup
+//     404s on it exactly like it would on any other unrecognized id, so both
+//     fall through there rather than growing a third/fourth "not found" panel
+//     — the one thing that must never happen is waiting on 'loading' forever.
 export function TagDetail({ tagId }: { tagId: string }) {
   useTagMapVersion()   // re-render once the viewer's tag map loads/changes
   if (!looksLikeUserTagId(tagId)) return <SystemTagDetail tagId={tagId} />

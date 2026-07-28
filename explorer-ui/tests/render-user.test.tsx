@@ -9,7 +9,7 @@ import { Tags } from '../src/pages/Tags'
 import { LibraryDetail } from '../src/pages/LibraryDetail'
 import { LibraryTagDetail } from '../src/pages/LibraryTagDetail'
 import { TagDetail } from '../src/pages/TagDetail'
-import { setTagMap } from '../src/userTags'
+import { setTagMap, setTagMapError } from '../src/userTags'
 import { parseRoute, paths } from '../src/router'
 import { MOCK_LIBRARIES, MOCK_LIBRARY_DETAIL, MOCK_LIBRARY_TAG_DETAIL } from './fixtures/mockApi'
 import type { AccountRef, LibrarySummaryRef } from '../src/types'
@@ -282,5 +282,21 @@ describe('TagDetail — routing between system and user-tag views', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId="kraken" /></QueryClientProvider>)
     expect(html).not.toMatch(/log in/i)
+  })
+
+  // Regression for the "loading forever" bug: a failed tag-map fetch must
+  // settle into the SAME fallback a genuine ready-but-missing id gets
+  // (SystemTagDetail's own lookup), never stay on TagDetail's own skeleton —
+  // 'error' is terminal. Both TagDetail's TagDetailSkeleton and
+  // SystemTagDetail's own (still-loading) skeleton render the identical
+  // `acct-head-skeleton` class, so the differentiator is the crumb: only
+  // SystemTagDetail's 3-segment one names the tag id as its last crumb
+  // (TagDetailSkeleton's is a bare 2-segment "Home / Tags").
+  it('falls through to the system lookup — not TagDetail\'s own skeleton — once the tag map fetch has failed outright', () => {
+    setTagMapError()
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId={USER_TAG_ID} /></QueryClientProvider>)
+    expect(html).not.toMatch(/log in/i)
+    expect(html).toContain(`>${USER_TAG_ID}<`)
   })
 })

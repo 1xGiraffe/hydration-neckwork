@@ -6,7 +6,7 @@ import { useLibraryTagSummary } from '../hooks/useUser'
 import { F, AssetIcon, AssetChip, AssetAmount, AddrPill, CallPill, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow, UserTagPill } from './ui'
 import { ayeSharePct, selectTally } from '../utils/referendumVotes'
 import { dcaCadence, dcaProgress, fmtDuration } from '../utils/dca'
-import { resolveTag, allAssociations, useTagMapVersion, libraryForTag } from '../userTags'
+import { resolveTag, allAssociations, useTagMapVersion, libraryForTag, tagMapStatus, looksLikeUserTagId } from '../userTags'
 import type { AssetRef } from '../types'
 
 // Global hover preview cards for account (.addr-pill), tag (/tag/… links),
@@ -86,6 +86,13 @@ function parseTarget(el: Element): Omit<Target, 'left' | 'top' | 'bottom'> | nul
   const tm = href.match(/\/tag\/([^?#]+)$/)
   if (tm) {
     const id = decodeURIComponent(tm[1])
+    // While the map is still loading, a UUID-shaped id might yet turn out to
+    // be a user tag — same ambiguity TagDetail's own routing waits out. Show
+    // no card yet rather than guessing 'tag' (system) and hitting a lookup
+    // that 404s forever on a real user-tag id (mirroring the bug TagDetail's
+    // own skeleton exists to avoid, just for the hover card instead of the
+    // page). 'error'/'anonymous' are terminal, same as a plain miss below.
+    if (tagMapStatus() === 'loading' && looksLikeUserTagId(id)) return null
     const lib = libraryForTag(id)
     return lib ? { kind: 'library-tag', id, libraryId: lib.libraryId } : { kind: 'tag', id }
   }
