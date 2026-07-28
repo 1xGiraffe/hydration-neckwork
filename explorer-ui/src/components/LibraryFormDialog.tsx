@@ -3,6 +3,27 @@ import * as Dialog from '@radix-ui/react-dialog'
 
 export interface LibraryFormValues { name: string; note: string; visibility: 'private' | 'public' }
 
+// Two-segment switch with a sliding indicator — same mechanics as preis-ui's
+// interval selector (an absolutely-positioned pill translated by segment
+// index; the global prefers-reduced-motion block zeroes the transition).
+function VisibilitySwitch({ value, onChange, disabled }: {
+  value: 'private' | 'public'
+  onChange: (v: 'private' | 'public') => void
+  disabled?: boolean
+}) {
+  const OPTIONS = ['private', 'public'] as const
+  return (
+    <div className="seg-switch" role="group" aria-label="Visibility" style={{ '--active-index': OPTIONS.indexOf(value) } as React.CSSProperties}>
+      <span className="seg-indicator" aria-hidden="true" />
+      {OPTIONS.map(v => (
+        <button key={v} type="button" aria-pressed={v === value} className={v === value ? 'active' : ''} disabled={disabled} onClick={() => onChange(v)}>
+          {v === 'private' ? 'Private' : 'Public'}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 // Shared name/note/visibility form for creating a library (Libraries.tsx) and
 // editing one (LibraryDetail.tsx) — same fields, same validation, same submit
 // chrome; only the title/hint/initial values and what happens on submit
@@ -67,10 +88,7 @@ export function LibraryFormDialog({ open, onOpenChange, title, hint, initial, su
             </div>
             <div className="field">
               <label id="library-visibility-label">Visibility</label>
-              <div className="row gap6" role="group" aria-labelledby="library-visibility-label">
-                <button type="button" className={`btn sm${visibility === 'private' ? ' primary' : ''}`} aria-pressed={visibility === 'private'} onClick={() => setVisibility('private')} disabled={pending}>Private</button>
-                <button type="button" className={`btn sm${visibility === 'public' ? ' primary' : ''}`} aria-pressed={visibility === 'public'} onClick={() => setVisibility('public')} disabled={pending}>Public</button>
-              </div>
+              <VisibilitySwitch value={visibility} onChange={setVisibility} disabled={pending} />
               <div className="muted" style={{ fontSize: 11 }}>
                 {visibility === 'public' ? 'Listed in Discover — anyone can subscribe.' : 'Only you (and anyone you invite) can see this library.'}
               </div>

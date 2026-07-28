@@ -1,6 +1,7 @@
 import { lazy, Suspense, useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import { userApi } from '../api/explorer'
+import { AccountPicker } from '../components/AccountPicker'
 import { useSession } from '../session'
 import { useLibrary, useUserMutation } from '../hooks/useUser'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -124,7 +125,7 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
   const [name, setName] = useState(tag.name)
   const [color, setColor] = useState(tag.color)
   const [icon, setIcon] = useState(tag.icon)
-  const [addText, setAddText] = useState('')
+  const [addAddrs, setAddAddrs] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
 
   const updateTagMutation = useUserMutation(userApi.updateTag)
@@ -155,12 +156,11 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
     catch (e) { setError(e instanceof Error ? e.message : 'Could not remove that account') }
   }
   async function addMembers() {
-    const addresses = addText.split(/[\s,]+/).map(s => s.trim()).filter(Boolean)
-    if (!addresses.length) return
+    if (!addAddrs.length) return
     setError(null)
     try {
-      await membersMutation.mutateAsync([libraryId, tag.tagId, { add: addresses }])
-      setAddText('')
+      await membersMutation.mutateAsync([libraryId, tag.tagId, { add: addAddrs }])
+      setAddAddrs([])
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not add those accounts')
     }
@@ -222,9 +222,9 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
         <div style={{ padding: 16 }}>
           <div className="field">
             <label htmlFor={`add-members-${tag.tagId}`}>Add accounts</label>
-            <textarea id={`add-members-${tag.tagId}`} value={addText} onChange={e => setAddText(e.target.value)} placeholder="Addresses, separated by spaces, commas, or newlines" disabled={membersMutation.isPending} />
+            <AccountPicker inputId={`add-members-${tag.tagId}`} values={addAddrs} onChange={setAddAddrs} placeholder="Search accounts or paste addresses" disabled={membersMutation.isPending} />
           </div>
-          <button type="button" className="btn sm primary" style={{ marginTop: 8 }} disabled={membersMutation.isPending || !addText.trim()} onClick={() => void addMembers()}>Add</button>
+          <button type="button" className="btn sm primary" style={{ marginTop: 8 }} disabled={membersMutation.isPending || !addAddrs.length} onClick={() => void addMembers()}>Add</button>
         </div>
       )}
     </div>
@@ -242,7 +242,7 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [newTagOpen, setNewTagOpen] = useState(false)
-  const [shareAddr, setShareAddr] = useState('')
+  const [shareAddrs, setShareAddrs] = useState<string[]>([])
   const [shareError, setShareError] = useState<string | null>(null)
 
   const updateMutation = useUserMutation(userApi.updateLibrary)
@@ -252,15 +252,23 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
   const inviteMutation = useUserMutation(userApi.invite)
   const revokeMutation = useUserMutation(userApi.revokeInvite)
 
+  // Chips submit sequentially so one bad address reports its own error while
+  // the rest still land; successfully-sent chips leave the picker.
   async function invite() {
     setShareError(null)
-    try { await inviteMutation.mutateAsync([libraryId, shareAddr.trim()]); setShareAddr('') }
-    catch (e) { setShareError(e instanceof Error ? e.message : 'Could not send the invite') }
+    for (const addr of shareAddrs) {
+      try { await inviteMutation.mutateAsync([libraryId, addr]) }
+      catch (e) { setShareError(e instanceof Error ? `${addr}: ${e.message}` : 'Could not send the invite'); return }
+      setShareAddrs(prev => prev.filter(a => a !== addr))
+    }
   }
   async function revoke() {
     setShareError(null)
-    try { await revokeMutation.mutateAsync([libraryId, shareAddr.trim()]); setShareAddr('') }
-    catch (e) { setShareError(e instanceof Error ? e.message : 'Could not revoke that address') }
+    for (const addr of shareAddrs) {
+      try { await revokeMutation.mutateAsync([libraryId, addr]) }
+      catch (e) { setShareError(e instanceof Error ? `${addr}: ${e.message}` : 'Could not revoke that address'); return }
+      setShareAddrs(prev => prev.filter(a => a !== addr))
+    }
   }
   async function confirmDelete() {
     setDeleteError(null)
@@ -323,19 +331,37 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
               <div className="panel" style={{ padding: 16, marginBottom: 16 }}>
                 <div className="sec-title" style={{ margin: '0 0 12px' }}>Invites</div>
                 {shareError && <div className="dialog-error" style={{ marginBottom: 8 }}>{shareError}</div>}
-                <div className="row gap6" style={{ flexWrap: 'wrap' }}>
-                  <input value={shareAddr} onChange={e => setShareAddr(e.target.value)} placeholder="SS58 or 0x address" style={{ flex: 1, minWidth: 220 }} />
-                  <button type="button" className="btn sm primary" disabled={inviteMutation.isPending || !shareAddr.trim()} onClick={() => void invite()}>Invite</button>
-                  <button type="button" className="btn sm" disabled={revokeMutation.isPending || !shareAddr.trim()} onClick={() => void revoke()}>Revoke</button>
+                <div className="row gap6" style={{ flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                  <AccountPicker values={shareAddrs} onChange={setShareAddrs} placeholder="Search accounts or paste addresses" disabled={inviteMutation.isPending || revokeMutation.isPending} />
+                  <button type="button" className="btn sm primary" disabled={inviteMutation.isPending || !shareAddrs.length} onClick={() => void invite()}>Invite</button>
+                  <button type="button" className="btn sm" disabled={revokeMutation.isPending || !shareAddrs.length} onClick={() => void revoke()}>Revoke</button>
                 </div>
-                <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>Invite lets an address see and accept this private library; Revoke removes a pending invite or an existing subscriber.</div>
+                <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>Invite lets these accounts see and accept this private library; Revoke removes a pending invite or an existing subscriber.</div>
               </div>
             )}
 
-            <div className="sec-title">Tags · {data.tags.length}</div>
-            {!data.tags.length && <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, marginBottom: 16 }}>No tags yet.</div>}
-            {data.tags.map(tag => <TagPanel key={tag.tagId} libraryId={libraryId} tag={tag} isOwner={isOwner} />)}
-            {isOwner && <div className="ext-link-row"><button type="button" className="ext-link" style={{ cursor: 'pointer' }} onClick={() => setNewTagOpen(true)}>+ New tag</button></div>}
+            {isOwner ? (
+              <>
+                <div className="sec-title">Tags · {data.tags.length}</div>
+                {!data.tags.length && <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, marginBottom: 16 }}>No tags yet.</div>}
+                {data.tags.map(tag => <TagPanel key={tag.tagId} libraryId={libraryId} tag={tag} isOwner={isOwner} />)}
+                <div className="ext-link-row"><button type="button" className="ext-link" style={{ cursor: 'pointer' }} onClick={() => setNewTagOpen(true)}>+ New tag</button></div>
+              </>
+            ) : (
+              /* Another user's curation is theirs: the API ships no tag names
+                 or member lists here, only the statistics. Subscribing applies
+                 the labels across the explorer without exposing the list. */
+              <div className="panel" style={{ padding: 16 }}>
+                <div className="lib-stats">
+                  <div><span className="lib-stat-num">{data.tagCount}</span><span className="lib-stat-label">Tag{data.tagCount === 1 ? '' : 's'}</span></div>
+                  <div><span className="lib-stat-num">{data.accountCount}</span><span className="lib-stat-label">Account{data.accountCount === 1 ? '' : 's'}</span></div>
+                  <div><span className="lib-stat-num">{data.subscriberCount}</span><span className="lib-stat-label">Subscriber{data.subscriberCount === 1 ? '' : 's'}</span></div>
+                </div>
+                <div className="muted" style={{ fontSize: 11, marginTop: 10 }}>
+                  Tag names and member lists stay with the library's owner. {data.visibility === 'public' ? 'Subscribe to apply its labels across the explorer.' : ''}
+                </div>
+              </div>
+            )}
 
             {isOwner && <NewTagDialog open={newTagOpen} onOpenChange={setNewTagOpen} libraryId={libraryId} />}
             {isOwner && !data.isPersonal && (
