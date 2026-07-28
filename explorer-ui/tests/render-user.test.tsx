@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { AddrPill } from '../src/components/ui'
+import { AddrPill, UserTagPill } from '../src/components/ui'
 import { LibrariesSection } from '../src/pages/Account'
 import { Libraries } from '../src/pages/Libraries'
 import { LibraryDetail } from '../src/pages/LibraryDetail'
@@ -104,6 +104,18 @@ describe('AddrPill precedence with profiles and user tags', () => {
     expect(html).toContain('Kraken')
     expect(html).toContain('tag-member-suffix')
     expect(html).toContain(`·${base.address.slice(-3)}`)
+  })
+
+  // Account.tsx's own associations row passes this: the page already names the
+  // one account above, and a system tag there carries no memberCount at all
+  // (unlike a user tag), so showing the suffix on some chips and not others in
+  // that same row would read as an inconsistency rather than useful info.
+  it('noMemberSuffix drops the disambiguator even when the tag has multiple members', () => {
+    const html = renderToStaticMarkup(
+      <UserTagPill tag={{ kind: 'system', id: 'kraken', name: 'Kraken', color: '#a78bfa', icon: '🦑', memberCount: 2 }} address={base.address} noCopy noMemberSuffix />,
+    )
+    expect(html).toContain('Kraken')
+    expect(html).not.toContain('tag-member-suffix')
   })
 })
 

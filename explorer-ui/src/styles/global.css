@@ -955,6 +955,9 @@ svg { display: block; }
 .addr-pill .a { color: var(--sky); }
 .addr-pill:hover .a { text-decoration: underline; text-underline-offset: 2px; }
 .addr-pill .tag { color: var(--lavender); font-weight: 500; }
+/* Which member of a multi-account tag this particular pill means — muted so
+   the tag name stays the primary read, mono like ShortAddr's highlighted tail. */
+.tag-member-suffix { color: var(--text-low); font-family: 'GeistMono'; font-size: 0.9em; }
 /* Self-set wallet-login display name: a real, distinct hue from a curated tag's
    lavender (amber reads as "the owner's own claim", unverified — same idea as
    the ✓ mark staying exclusive to a registrar-checked identity), plus italics

@@ -1,5 +1,5 @@
 import type { Locator, Page } from '@playwright/test'
-import { E2E_TOKEN, expect, seedSession, test } from './fixtures/test'
+import { E2E_TOKEN, INVALID_TAG_MEMBER_ADDRESS, expect, seedSession, test } from './fixtures/test'
 import type { UserMockState } from './fixtures/test'
 
 // Treasury's accountId, copied from `A.treasury` in tests/fixtures/mockApi.ts
@@ -218,6 +218,34 @@ test('the tag member editor and the invites picker both show tabs, and the libra
   // Deep link straight to the Invites tab.
   await page.goto('/library/lib1?view=invites')
   await expect(page.locator('.tabs.detail-tabs button.active')).toHaveText(/Invites/)
+})
+
+test('a bad address in a batch reports itself and restores the rest, without losing the good one ahead of it', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  seedOneTagLibrary(userMock)
+
+  await page.goto('/library/lib1')
+  const tagPanel = page.locator('.panel', { hasText: 'Watch' })
+  const input = tagPanel.locator('.acct-picker input')
+  // One Enter on a multi-token line takes the same commit path a multi-address
+  // paste does (tokenizeAddresses doesn't care which) — easier to drive here
+  // than simulating a real clipboard event.
+  await input.fill(`${BINANCE_ADDRESS} ${INVALID_TAG_MEMBER_ADDRESS} ${TREASURY_ACCOUNT_ID}`)
+  await input.press('Enter')
+
+  // Submitted sequentially, stopping at the first failure: the good address
+  // ahead of it already landed, the error names the bad one, and — since
+  // immediate-commit mode has no staging chips of its own to leave the rest
+  // sitting in — the bad address plus everything still unsent (the second
+  // good address) is restored into the input as text rather than dropped.
+  await expect(tagPanel.locator('.tag-member-chips .addr-pill')).toHaveCount(1)
+  await expect(tagPanel.locator('.dialog-error')).toContainText(INVALID_TAG_MEMBER_ADDRESS)
+  await expect(input).toHaveValue(`${INVALID_TAG_MEMBER_ADDRESS} ${TREASURY_ACCOUNT_ID}`)
+
+  // Dropping the bad one and resubmitting the rest lands it.
+  await input.fill(TREASURY_ACCOUNT_ID)
+  await input.press('Enter')
+  await expect(tagPanel.locator('.tag-member-chips .addr-pill')).toHaveCount(2)
 })
 
 test.describe('mobile', () => {

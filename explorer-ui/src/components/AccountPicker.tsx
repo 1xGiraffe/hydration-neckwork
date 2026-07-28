@@ -20,14 +20,19 @@ import { tokenizeAddresses } from './accountTokens'
 //    pick/Enter/paste-tokenize fires `onCommit` immediately and clears the
 //    input instead of staging a chip — the picker renders no chips of its own
 //    in this mode; the parent's own already-committed members render as chips
-//    elsewhere (see LibraryDetail's tag member editor).
+//    elsewhere (see LibraryDetail's tag member editor). The input clears
+//    optimistically, but a batch (a multi-token paste, or a name-search result
+//    fired mid-typing) can still partly fail server-side — `onCommit` may
+//    return the addresses it never got to (submits sequentially and stops at
+//    the first rejection, like Invites' Invite/Revoke), and whatever comes
+//    back is restored into the input as text rather than silently dropped.
 
 const looksAddr = (s?: string) => !!s && (s.startsWith('0x') || /^[1-9A-HJ-NP-Za-km-z]{40,}$/.test(s))
 
 export function AccountPicker({ values = [], onChange, onCommit, placeholder, disabled, inputId }: {
   values?: string[]
   onChange?: (next: string[]) => void
-  onCommit?: (addresses: string[]) => void
+  onCommit?: (addresses: string[]) => Promise<string[] | void> | void
   placeholder?: string
   disabled?: boolean
   inputId?: string
@@ -76,13 +81,23 @@ export function AccountPicker({ values = [], onChange, onCommit, placeholder, di
 
   function addChips(next: string[], nextLabels?: Record<string, string>) {
     if (onCommit) {
-      onCommit(next)
-    } else {
-      const merged = [...values]
-      for (const v of next) if (!merged.includes(v)) merged.push(v)
-      if (nextLabels) setLabels(prev => ({ ...prev, ...nextLabels }))
-      onChange?.(merged)
+      // Clears optimistically (the common case: everything lands) — any
+      // addresses `onCommit` reports back as unsent (it never resolved, or
+      // failed partway through a batch) are restored as text, not lost.
+      // Clearing `text`/`results` in the same tick also closes the dropdown
+      // (`openList` derives from both), so there's nothing left clickable to
+      // double-fire a second commit while the caller's own `disabled` prop
+      // hasn't yet propagated back down through a re-render.
+      setText('')
+      setResults([])
+      const pending = onCommit(next)
+      if (pending) void pending.then(remainder => { if (remainder?.length) setText(remainder.join(' ')) })
+      return
     }
+    const merged = [...values]
+    for (const v of next) if (!merged.includes(v)) merged.push(v)
+    if (nextLabels) setLabels(prev => ({ ...prev, ...nextLabels }))
+    onChange?.(merged)
     setText('')
     setResults([])
   }

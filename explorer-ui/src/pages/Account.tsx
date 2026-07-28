@@ -125,7 +125,7 @@ export function Account({ address }: { address: string }) {
                   {associations.length > 0 && (
                     <div className="row gap6" style={{ marginTop: 2, flexWrap: 'wrap', alignItems: 'center' }}>
                       <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>Tags</span>
-                      {associations.map(a => <UserTagPill key={a.libraryId ?? `system-${a.id}`} tag={a} address={data.evmAddress ?? data.ss58Polkadot} noCopy />)}
+                      {associations.map(a => <UserTagPill key={a.libraryId ?? `system-${a.id}`} tag={a} address={data.evmAddress ?? data.ss58Polkadot} noCopy noMemberSuffix />)}
                     </div>
                   )}
                 </div>

@@ -27,6 +27,12 @@ function accountRefFromAddress(address: string): AccountRef {
   return { accountId: address, address, emoji: '👤', tag: null }
 }
 
+// A deterministic way to make one address in an add() batch fail, standing in
+// for the real service's address validation (checksums etc. aren't worth
+// reproducing here) — exercises the tag member editor's sequential-submit,
+// name-the-failure, restore-the-rest path against a real rejection.
+export const INVALID_TAG_MEMBER_ADDRESS = 'not-a-real-address'
+
 // Per-test mutable backing store for everything under `/api/user/**`. Kept
 // intentionally small (no ClickHouse, no real ids) — `libraries`/`tagMap` are
 // the two a spec actually reaches into; the rest exists so the full
@@ -224,6 +230,7 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     const tag = lib?.tags.find(t => t.tagId === decodeURIComponent(m![2]))
     if (!lib || !tag) { await fulfillJson(route, 404, { error: 'not found' }); return }
     const { add, remove } = bodyOf(route) as { add?: string[]; remove?: string[] }
+    if ((add ?? []).includes(INVALID_TAG_MEMBER_ADDRESS)) { await fulfillJson(route, 400, { error: 'not a recognized address' }); return }
     for (const addr of remove ?? []) tag.members = tag.members.filter(mm => mm.address !== addr)
     for (const addr of add ?? []) if (!tag.members.some(mm => mm.address === addr)) tag.members.push(accountRefFromAddress(addr))
     lib.accountCount = new Set(lib.tags.flatMap(t => t.members.map(mm => mm.accountId))).size

@@ -156,11 +156,26 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
     try { await membersMutation.mutateAsync([libraryId, tag.tagId, { remove: [address] }]) }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not remove that account') }
   }
-  async function addMembers(addresses: string[]) {
-    if (!addresses.length) return
+  // Submitted one address at a time — `setTagMembers` validates a whole `add`
+  // array atomically, so batching a multi-token paste into one call would let
+  // a single bad address reject every good one alongside it, and by the time
+  // that failure came back the picker's input (immediate-commit mode has no
+  // staging list of its own) would already have cleared it. Sequential calls
+  // mirror how Invites submits its chips: whatever landed before the failure
+  // stays landed, the error names the address that didn't, and — since there's
+  // no chip list here to leave the rest sitting in — the failed address plus
+  // everything still unsent is handed back for the picker to restore as text.
+  async function addMembers(addresses: string[]): Promise<string[] | void> {
     setError(null)
-    try { await membersMutation.mutateAsync([libraryId, tag.tagId, { add: addresses }]) }
-    catch (e) { setError(e instanceof Error ? e.message : 'Could not add those accounts') }
+    for (let i = 0; i < addresses.length; i++) {
+      const addr = addresses[i]
+      try {
+        await membersMutation.mutateAsync([libraryId, tag.tagId, { add: [addr] }])
+      } catch (e) {
+        setError(`${addr}: ${e instanceof Error ? e.message : 'could not add that account'}`)
+        return addresses.slice(i)
+      }
+    }
   }
 
   return (
@@ -197,7 +212,7 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
       {error && <div className="dialog-error" style={{ margin: '12px 16px 0' }}>{error}</div>}
       <div style={{ padding: 16 }}>
         {isOwner && (
-          <AccountPicker inputId={`add-members-${tag.tagId}`} onCommit={addrs => void addMembers(addrs)} placeholder="Search accounts or paste addresses" disabled={membersMutation.isPending} />
+          <AccountPicker inputId={`add-members-${tag.tagId}`} onCommit={addMembers} placeholder="Search accounts or paste addresses" disabled={membersMutation.isPending} />
         )}
         <div className="tag-member-chips" style={{ marginTop: isOwner ? 10 : 0 }}>
           {!tag.members.length
