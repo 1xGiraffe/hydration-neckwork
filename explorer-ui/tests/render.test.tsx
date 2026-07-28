@@ -125,7 +125,15 @@ describe('PortfolioChart', () => {
   it('renders a skeleton while history is loading and no series is available', () => {
     const html = renderToStaticMarkup(<PortfolioChart title="Value" netUsd={0} series={[]} loading />)
     expect(html).toContain('Value')
-    expect(html).toContain('chart-skeleton')
+    expect(html).toContain('chart-card-skeleton')
+    // The placeholder must carry the loaded card's own chrome, not a fixed
+    // height: `.pf-card` + `.pf-head` + a `.perf-row` of four figures is what
+    // makes it as tall as the real card at both breakpoints.
+    expect(html).toContain('pf-card chart-card-skeleton')
+    expect(html).toContain('pf-head')
+    expect(html.match(/class="perf"/g)).toHaveLength(4)
+    // No pixel height on the card itself — its height comes from the chrome.
+    expect(html).not.toMatch(/chart-card-skeleton"[^>]*style="height/)
   })
 })
 

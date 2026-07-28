@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- shared account-section components + their count helper */
-import { F, AssetIcon, AssetAmount, AreaChart, ChartSkeleton, healthFactorDisplay, AddrPill, MomentLink, ProgressRing, rowNav, Dash } from './ui'
+import { F, AssetIcon, AssetAmount, AreaChart, ChartCardSkeleton, healthFactorDisplay, AddrPill, MomentLink, ProgressRing, rowNav, Dash } from './ui'
 import type { ChartMarker, DetailTab } from './ui'
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
@@ -152,7 +152,8 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
     return loading ? (
       <>
         <div className="sec-title">{title}</div>
-        <ChartSkeleton h={260} />
+        {/* Same shape as the loaded card below: value + the 24H/1W/1M/1Y row. */}
+        <ChartCardSkeleton metrics={4} />
       </>
     ) : null
   }

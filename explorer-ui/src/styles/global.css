@@ -1581,6 +1581,20 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .chart-sk-metrics { display: flex; gap: 14px; margin-left: auto; }
 .chart-sk-metrics .sk-bar { width: 44px; height: 10px; }
 .chart-sk-plot { position: relative; flex: 1 1 auto; min-height: 34px; display: flex; align-items: flex-end; gap: 8px; padding-top: 10px; }
+/* Standard chart card placeholder: the same `.pf-card` box and `.pf-head` row as
+   the loaded card, so padding, borders, margins, font-driven line heights and the
+   720px head wrap all resolve identically and the placeholder is the loaded
+   card's height without a hardcoded number. Its shimmer bars are inline-level and
+   shorter than a line, leaving each row's height to the strut exactly as the real
+   text does, and the plot is pinned to the fixed 220px of `.apx-chart`. */
+.chart-card-skeleton { position: relative; overflow: hidden; }
+.chart-card-skeleton .chart-sk-plot { flex: none; height: 220px; }
+.chart-card-skeleton .sk-bar { height: 0.7em; min-width: 0; }
+.chart-card-skeleton .pf-now .sk-bar { width: 138px; }
+.chart-card-skeleton .pf-chg .sk-bar { width: 86px; }
+.chart-card-skeleton .perf .pk .sk-bar { width: 28px; }
+.chart-card-skeleton .perf .pv .sk-bar { width: 48px; }
+.chart-card-skeleton .bal-legend .sk-bar { width: 54px; }
 .chart-sk-bar { flex: 1 1 0; min-width: 5px; max-width: 28px; border-radius: 5px 5px 2px 2px; opacity: .78; }
 .tabs-skeleton { align-items: center; }
 .tabs-skeleton .sk-bar { display: inline-block; height: 12px; border-radius: 9999px; vertical-align: middle; }

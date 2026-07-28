@@ -59,10 +59,12 @@ for (const [name, viewport] of [['phone', { width: 390, height: 844 }], ['deskto
       // mount with a transform, which moves no layout and shifts nothing.
       const panelTop = () => page.evaluate(() => (document.querySelector('.panel') as HTMLElement).offsetTop)
 
-      await expect(page.locator('.chart-skeleton')).toBeVisible()
+      await expect(page.locator('.chart-card-skeleton')).toBeVisible()
       const loading = await panelTop()
 
-      await expect(page.locator('.pf-card')).toBeVisible()
+      // The placeholder is itself a `.pf-card` — it is built out of the loaded
+      // card's chrome so its height needs no constant — so wait for the real one.
+      await expect(page.locator('.pf-card:not(.chart-card-skeleton)')).toBeVisible()
       // The card's headline is the only GeistMono text on the page, so it is
       // still measuring in the fallback face the instant it appears.
       await page.evaluate(() => document.fonts.ready)
@@ -70,5 +72,61 @@ for (const [name, viewport] of [['phone', { width: 390, height: 844 }], ['deskto
 
       expect(Math.abs(loaded - loading), `table panel moved ${loaded - loading}px`).toBeLessThan(2)
     })
+  })
+}
+
+// The other two standard chart cards. Both used to reserve a pixel constant that
+// could only be right at one viewport, because the card's head takes its height
+// from its font and wraps its figures below 720px: the account portfolio card
+// reserved 260px against a card measuring 328px at 1440 and 378px at 390, and the
+// asset price card reserved 336px — right at 1440, 52px short at 390. Both are now
+// built out of the loaded card's own chrome, so the heights are compared directly
+// here instead of against numbers this test would have to keep in sync.
+//
+// The placeholder reserves a head of four performance figures, because that is the
+// shape live data almost always takes (24H/1W/1M/1Y). It cannot know in advance
+// that a series is too short or too spiky for `performancePoints` to offer every
+// window — in this fixture the portfolio card resolves to none and the price card
+// to three, and at 390px a three-figure row still fits one line where four wrap.
+// So the invariant asserted always is that the placeholder is never SHORTER than
+// the card, which is the direction that dropped content under the reader; the
+// exact match is asserted whenever the loaded head does carry the four it drew.
+const ACCOUNT = '1L53bUTBopXqDXSXjBdQXFV7jZ8FtdRZS5JoMjGq5z3Cv2zr'
+
+for (const [name, viewport] of [['phone', { width: 390, height: 844 }], ['desktop', { width: 1440, height: 900 }]] as const) {
+  test.describe(`chart card placeholders (${name})`, () => {
+    test.use({ viewport })
+
+    for (const [what, route] of [['account portfolio', `/account/${ACCOUNT}`], ['asset price', '/asset/5']] as const) {
+      test(`the ${what} placeholder is never shorter than the card it becomes`, async ({ page }) => {
+        await holdApi(page, HOLD_MS)
+        await page.goto(route)
+
+        const placeholder = page.locator('.chart-card-skeleton')
+        await expect(placeholder).toBeVisible()
+        // Exactly one chart card is reserved on each of these pages, and it is
+        // built from the card's chrome rather than given a height.
+        await expect(placeholder).toHaveCount(1)
+        await expect(placeholder).not.toHaveAttribute('style', /height/)
+        const reserved = (await placeholder.boundingBox())!.height
+        // Read while it is still mounted; it is gone once the card resolves.
+        const drawn = await placeholder.locator('.pf-head .perf').count()
+
+        const card = page.locator('.pf-card:not(.chart-card-skeleton)').first()
+        await expect(card).toBeVisible()
+        // GeistMono sets the headline, so the card is still measuring in the
+        // fallback face the instant it appears.
+        await page.evaluate(() => document.fonts.ready)
+        const actual = (await card.boundingBox())!.height
+        const figures = await card.locator('.pf-head .perf').count()
+
+        expect(reserved, `reserved ${reserved} vs card ${actual}`).toBeGreaterThanOrEqual(actual - 2)
+        if (figures === drawn) {
+          expect(Math.abs(reserved - actual), `reserved ${reserved} vs card ${actual} with ${figures} figures`).toBeLessThan(2)
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth),
+          'no sideways scroll').toBe(0)
+      })
+    }
   })
 }

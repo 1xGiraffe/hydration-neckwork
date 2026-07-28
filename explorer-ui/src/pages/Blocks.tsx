@@ -3,7 +3,7 @@ import { useNow } from '../hooks/useNow'
 import { useNewRows } from '../hooks/useNewRows'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, usePageParam, setPage } from '../router'
-import { Crumbs, F, FinalizedBadge, AddrPill, AreaChart, ChartSkeleton, TableSkeleton, EmptyRow, Pager, rowNav, Ago, Dash, pendingRows } from '../components/ui'
+import { Crumbs, F, FinalizedBadge, AddrPill, AreaChart, ChartCardSkeleton, TableSkeleton, EmptyRow, Pager, rowNav, Ago, Dash, pendingRows } from '../components/ui'
 import { UNFILTERED_COLOR } from '../components/activityColors'
 import { parseUtcTimestamp } from '../utils/time'
 import { offeredPages } from '../utils/activityPaging'
@@ -52,12 +52,11 @@ export function Blocks() {
       </div>
 
       <div className="sec-title">Average block time</div>
-      {/* Match the loaded card: .pf-card padding (18+18) + the 26px average
-          headline row (39) + its 12px gap + the fixed 220px .apx-chart = 309.
-          The placeholder used to be 168, so the block table under it dropped
-          141px the moment the series landed — this page's whole layout shift,
-          at every viewport. */}
-      {!recent ? <ChartSkeleton h={309} /> : (
+      {/* One trailing figure ("target 6.00s") beside the average, so the
+          placeholder is the loaded card's own chrome around a 220px plot. It used
+          to reserve 168px against a 309px card, dropping the block table 141px
+          the moment the series landed — this page's whole layout shift. */}
+      {!recent ? <ChartCardSkeleton metrics={1} /> : (
       <div className="pf-card">
         <div className="pf-head"><div className="pf-now">{avg ? avg.toFixed(2) + 's' : '—'}</div><div className="pf-chg muted">target 6.00s</div></div>
         <AreaChart data={chartData.length > 1 ? chartData : [6, 6]} h={120} target={6} floor={0} color={UNFILTERED_COLOR} valueFmt={v => v.toFixed(2) + 's'} />

@@ -1121,8 +1121,23 @@ export function TableSkeleton({ cols, rows = 8, mobileCols = cols }: { cols: num
 }
 // Shimmer placeholder for a chart card body while its series loads — avoids the
 // degenerate flat-line / 1-1-0-axis render of an empty chart during the fetch.
-export function ChartSkeleton({ h = 120 }: { h?: number }) {
+// The shimmer plot both chart placeholders draw. In ChartSkeleton it stretches to
+// fill the reserved box; in ChartCardSkeleton it is pinned to the height of the
+// `.apx-chart` it stands in for.
+function ChartSkPlot() {
   const bars = [36, 54, 44, 68, 58, 76, 48, 64, 42, 72, 56, 46]
+  return (
+    <div className="chart-sk-plot">
+      {bars.map((v, i) => <span key={i} className="chart-sk-bar" style={{ height: `${v}%`, animationDelay: `${(i % 6) * 80}ms` }} />)}
+    </div>
+  )
+}
+// Reserves a fixed-height box for a chart whose loaded card has its own bespoke
+// shape (the /hdx and /hollar sections, where each card holds a differently sized
+// column/mirrored/stacked chart). Where the loaded card is the standard
+// `.pf-card` + `.apx-chart` pair, use ChartCardSkeleton instead — it needs no
+// number and stays correct across breakpoints.
+export function ChartSkeleton({ h = 120 }: { h?: number }) {
   return (
     <div className="chart-skeleton" style={{ height: h }} aria-hidden="true">
       <div className="chart-sk-head">
@@ -1133,9 +1148,48 @@ export function ChartSkeleton({ h = 120 }: { h?: number }) {
           <span className="sk-bar" />
         </span>
       </div>
-      <div className="chart-sk-plot">
-        {bars.map((v, i) => <span key={i} className="chart-sk-bar" style={{ height: `${v}%`, animationDelay: `${(i % 6) * 80}ms` }} />)}
+      <ChartSkPlot />
+    </div>
+  )
+}
+// Reserves a standard chart card by building it out of the loaded card's own
+// chrome — `.pf-card`, `.pf-head`, and a plot as tall as the fixed 220px
+// `.apx-chart` — instead of a pixel height. The head's height follows its font and
+// its figures wrap below 720px, so any single constant is right at one viewport
+// and wrong at the other: the 260px this replaced stood against a card measuring
+// 328px at 1440 and 378px at 390. Describing the head instead matches at both by
+// construction, the way TabsSkeleton already does for the tab bar. `metrics` is
+// how many figures trail the headline — one is drawn as the inline `.pf-chg` the
+// single-figure cards use, several as the stacked `.perf-row` — and `legend`
+// covers the cards that close with a `.bal-legend` row. `headClass` carries the
+// loaded head's own modifier: `.pf-head-asset` top-aligns its figures where the
+// default baseline alignment drops them ~17px lower, and that difference is
+// visible at both viewports.
+export function ChartCardSkeleton({ metrics = 0, legend = false, headClass = '' }: { metrics?: number; legend?: boolean; headClass?: string }) {
+  return (
+    <div className="pf-card chart-card-skeleton" aria-hidden="true">
+      <div className={['pf-head', headClass].filter(Boolean).join(' ')}>
+        <div className="pf-now"><span className="sk-bar" /></div>
+        {metrics === 1 && <div className="pf-chg"><span className="sk-bar" /></div>}
+        {metrics > 1 && (
+          <div className="perf-row">
+            {Array.from({ length: metrics }).map((_, i) => (
+              <span key={i} className="perf">
+                <span className="pk"><span className="sk-bar" /></span>
+                <span className="pv"><span className="sk-bar" /></span>
+              </span>
+            ))}
+          </div>
+        )}
       </div>
+      <ChartSkPlot />
+      {/* PriceChart pins its legend to 10px rather than the token's 14px. */}
+      {legend && (
+        <div className="bal-legend" style={{ marginTop: 10 }}>
+          <span><span className="sk-bar" /></span>
+          <span><span className="sk-bar" /></span>
+        </div>
+      )}
     </div>
   )
 }
@@ -1171,7 +1225,8 @@ export function ProfilePageSkeleton() {
       </div>
       <TabsSkeleton tabs={4} />
       <div className="sec-title sec-title-skeleton" aria-hidden="true"><span className="sk-bar" /></div>
-      <ChartSkeleton h={260} />
+      {/* Matches PortfolioChart: a headline value and the 24H/1W/1M/1Y row. */}
+      <ChartCardSkeleton metrics={4} />
     </>
   )
 }
@@ -1191,10 +1246,10 @@ export function AssetDetailSkeleton() {
     <>
       <div className="detail-card"><SkeletonRows rows={6} /></div>
       <div className="sec-title sec-title-skeleton" aria-hidden="true"><span className="sk-bar" /></div>
-      {/* Match the loaded price card: apx-chart (220) + card chrome (~38) + the
-          price/metrics header (~78) the skeleton doesn't draw — so the tabs and
-          table below don't jump down when the chart resolves. */}
-      <ChartSkeleton h={336} />
+      {/* Matches PriceChart: the price, its performance row, and the Price/EMA7
+          legend under the plot. The old 336px constant was right at 1440 and 52px
+          short at 390, where the performance row wraps. */}
+      <ChartCardSkeleton metrics={4} legend headClass="pf-head-asset" />
       <TabsSkeleton tabs={2} />
       <div className="activity-chips activity-chips-skeleton" aria-hidden="true">
         {Array.from({ length: 6 }).map((_, i) => <span key={i} className="sk-bar" style={{ width: i === 0 ? 48 : 86, animationDelay: `${(i % 5) * 80}ms` }} />)}
