@@ -77,6 +77,34 @@ describe('AddrPill precedence with profiles and user tags', () => {
     expect(html).toContain('Kraken')
     expect(html).toContain('/tag/kraken')
   })
+
+  it('a multi-member user tag disambiguates the pill with the member\'s last three address characters', () => {
+    setTagMap({ libraries: [
+      { libraryId: 'lib1', name: 'Personal', tags: [{ tagId: 't1', name: 'Mine', color: '#0f0', icon: '', members: [ACC, '15yy'] }] },
+      { libraryId: 'system', name: 'Hydration', tags: [] },
+    ] })
+    const html = renderToStaticMarkup(<AddrPill account={{ ...base }} />)
+    expect(html).toContain('Mine')
+    expect(html).toContain('tag-member-suffix')
+    expect(html).toContain(`·${base.address.slice(-3)}`)
+  })
+
+  it('a single-member user tag renders no member-disambiguation suffix', () => {
+    setTagMap({ libraries: [
+      { libraryId: 'lib1', name: 'Personal', tags: [{ tagId: 't1', name: 'Mine', color: '#0f0', icon: '', members: [ACC] }] },
+      { libraryId: 'system', name: 'Hydration', tags: [] },
+    ] })
+    const html = renderToStaticMarkup(<AddrPill account={{ ...base }} />)
+    expect(html).toContain('Mine')
+    expect(html).not.toContain('tag-member-suffix')
+  })
+
+  it('a system tag with more than one member also gets the disambiguation suffix', () => {
+    const html = renderToStaticMarkup(<AddrPill account={{ ...base, tag: { id: 'kraken', name: 'Kraken', color: '#a78bfa', icon: '🦑', memberCount: 2 } }} noCopy />)
+    expect(html).toContain('Kraken')
+    expect(html).toContain('tag-member-suffix')
+    expect(html).toContain(`·${base.address.slice(-3)}`)
+  })
 })
 
 describe('LibrariesSection — account page tag libraries', () => {

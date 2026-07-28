@@ -14,7 +14,7 @@ export interface AssetRef {
   origin?: AssetOrigin | null
 }
 
-export interface TagRef { id: string; name: string; color: string; icon: string }
+export interface TagRef { id: string; name: string; color: string; icon: string; memberCount?: number }
 
 export interface AccountIdentity {
   display: string

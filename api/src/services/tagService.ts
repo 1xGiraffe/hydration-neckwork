@@ -15,7 +15,7 @@ export interface Tag {
   icon: string      // explicit icon URL/emoji, or '' to derive from first member
   members: string[] // normalized account_ids
 }
-export interface AccountTag { tagId: string; name: string; color: string; icon: string }
+export interface AccountTag { tagId: string; name: string; color: string; icon: string; memberCount: number }
 
 let client: ClickHouseClient
 const byAccount = new Map<string, AccountTag>()
@@ -61,7 +61,7 @@ export async function loadTags(): Promise<void> {
     const icon = iconFor(tag)
     tag.icon = icon
     for (const accountId of tag.members) {
-      byAccount.set(accountId, { tagId: tag.tagId, name: tag.name, color: tag.color, icon })
+      byAccount.set(accountId, { tagId: tag.tagId, name: tag.name, color: tag.color, icon, memberCount: tag.members.length })
     }
   }
   byH160 = truncatedH160Index([...byTag.values()])

@@ -522,8 +522,22 @@ export function TagGroupPill({ tag }: { tag: { tagId: string; name: string; colo
   )
 }
 
+// A tag standing in for ONE specific account (AddrPill/ExternalAccountPill's
+// resolved label, or a member row wearing its own tag) is ambiguous once that
+// tag has more than one member — every one of them would render the exact same
+// pill. The last three characters of THIS pill's own address, muted and mono
+// like ShortAddr's highlighted tail, says which member it is without spelling
+// out the whole address. A tag with ≤1 member (or no known member count, e.g. an
+// old cached row) never needs it — it can only ever mean the one account shown.
+// Aggregate/member-list surfaces (TagGroupPill, tag member rows) show a member
+// COUNT instead and are not affected.
+export function tagMemberSuffix(tag: Pick<ResolvedTag, 'memberCount'>, address: string): ReactNode {
+  if (!tag.memberCount || tag.memberCount <= 1) return null
+  return <span className="tag-member-suffix mono">·{address.slice(-3)}</span>
+}
+
 // A resolved tag (system OR user-library) as the primary label: the group's icon
-// + name, linking to the tag's combined view (system) or the owning library
+// + name, linking to the tag's combined view (system) or the aggregate page
 // (user) — so a viewer's own organization is one click from any pill wearing it.
 export function UserTagPill({ tag, address, noCopy }: { tag: ResolvedTag; address: string; noCopy?: boolean }) {
   return (
@@ -531,6 +545,7 @@ export function UserTagPill({ tag, address, noCopy }: { tag: ResolvedTag; addres
       <Link to={tag.kind === 'system' ? paths.tag(tag.id) : paths.libraryTag(tag.libraryId!, tag.id)} className="addr-pill" title={tag.kind === 'user' ? `${tag.name} — your library “${tag.libraryName}”` : 'Tagged group — open combined view'}>
         <TagIcon icon={tag.icon} title={tag.name} />
         <span className="tag" style={tag.color ? { color: tag.color } : undefined}>{tag.name}</span>
+        {tagMemberSuffix(tag, address)}
       </Link>
       {!noCopy && <Copy text={address} />}
     </span>

@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- activity table exports slug/id/label helpers alongside its components */
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
-import { F, AddrPill, AssetChip, rowNav, Ago, AccountEmoji, ShortAddr, TagIcon, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows } from './ui'
+import { F, AddrPill, AssetChip, rowNav, Ago, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
 import { activityBadge } from './activityColors'
 import { resolveTag, useTagMapVersion } from '../userTags'
@@ -55,7 +55,7 @@ export function ExternalAccountPill({ account }: { account: NonNullable<Activity
   // verified on-chain identity, never on a self-set name). The short address
   // keeps showing via the pill's title when a name takes its place in the body.
   const name = resolved
-    ? <span className="tag" style={resolved.color ? { color: resolved.color } : undefined}>{resolved.name}</span>
+    ? <><span className="tag" style={resolved.color ? { color: resolved.color } : undefined}>{resolved.name}</span>{tagMemberSuffix(resolved, account.address)}</>
     : profile?.name
       ? <span className="tag profile-name">{profile.name}</span>
       : identity?.display

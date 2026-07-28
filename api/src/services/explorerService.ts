@@ -35,7 +35,7 @@ export interface AccountRef {
   emoji: string                                     // Omniwatch/snakewatch identity emoji (keyed by SS58 prefix-63 address)
   emojiName?: string                                // human-readable name for the custom emoji/icon (e.g. Discord emoji name)
   emojiUrl?: string                                 // custom image icon (e.g. a Discord avatar) — render in place of the emoji char
-  tag: { id: string; name: string; color: string; icon: string } | null
+  tag: { id: string; name: string; color: string; icon: string; memberCount?: number } | null
   identity?: AccountIdentity | null   // on-chain Identity.IdentityOf display + judgement status
   profile: { name: string; avatarVersion: number } | null   // self-set display name/avatar, if any
 }
@@ -229,7 +229,7 @@ export function accountRef(accountId: string): AccountRef {
     emoji: icon.emoji,
     emojiName: icon.emojiName,
     emojiUrl: icon.emojiUrl,
-    tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon } : null,
+    tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon, memberCount: t.memberCount } : null,
     identity: id,
     profile: profileForAccount(resolved),
   }
@@ -6691,7 +6691,7 @@ export interface ActivityRow {
     // tag / avatar URL) lookup on THIS field, never on `raw` or `address`.
     kind: 'AccountId32' | 'AccountKey20'; accountId: string; address: string; raw: string; subscanUrl: string | null
     emoji?: string; emojiName?: string; emojiUrl?: string
-    tag?: { id: string; name: string; color: string; icon: string } | null
+    tag?: { id: string; name: string; color: string; icon: string; memberCount?: number } | null
     identity?: { display: string; verified: boolean } | null
     profile?: { name: string; avatarVersion: number } | null
   }
@@ -7092,7 +7092,7 @@ function externalAccountRef(raw: unknown, meta: XcmNetworkMeta | undefined): Act
     return {
       kind: 'AccountId32', accountId: resolved, raw: h, address, subscanUrl: meta?.subscan ? `${meta.subscan}/account/${encodeURIComponent(chainAddress)}` : null,
       emoji: icon.emoji, emojiName: icon.emojiName, emojiUrl: icon.emojiUrl,
-      tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon } : null,
+      tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon, memberCount: t.memberCount } : null,
       identity: id ? { display: id.display, verified: id.verified } : null,
       profile: profileForAccount(resolved),
     }
@@ -7105,7 +7105,7 @@ function externalAccountRef(raw: unknown, meta: XcmNetworkMeta | undefined): Act
     return {
       kind: 'AccountKey20', accountId: resolved, raw: h, address: h, subscanUrl: meta?.subscan ? `${meta.subscan}/account/${encodeURIComponent(h)}` : null,
       emoji: icon.emoji, emojiName: icon.emojiName, emojiUrl: icon.emojiUrl,
-      tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon } : null,
+      tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon, memberCount: t.memberCount } : null,
       identity: id ? { display: id.display, verified: id.verified } : null,
       profile: profileForAccount(resolved),
     }
@@ -7855,7 +7855,7 @@ function externalChainRef(urnStr: string, account: string): { chain: string; par
       acct = {
         kind: 'AccountId32', accountId: resolved, raw: h, address, subscanUrl: `https://solscan.io/account/${encodeURIComponent(address)}`,
         emoji: icon.emoji, emojiName: icon.emojiName, emojiUrl: icon.emojiUrl,
-        tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon } : null,
+        tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon, memberCount: t.memberCount } : null,
         identity: id ? { display: id.display, verified: id.verified } : null,
       }
     }
@@ -7871,7 +7871,7 @@ function externalChainRef(urnStr: string, account: string): { chain: string; par
       acct = {
         kind: 'AccountKey20', accountId: resolved, raw: h, address: h, subscanUrl: `https://etherscan.io/address/${encodeURIComponent(h)}`,
         emoji: icon.emoji, emojiName: icon.emojiName, emojiUrl: icon.emojiUrl,
-        tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon } : null,
+        tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon, memberCount: t.memberCount } : null,
         identity: id ? { display: id.display, verified: id.verified } : null,
       }
     }

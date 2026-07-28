@@ -32,6 +32,9 @@ function BubbleLabel({ account, label }: { account: AccountRef | null; label: 'f
     : mod ? <span className="vb-emoji">⚙️</span>
       : <AccountEmoji account={account} className="vb-emoji" imgClass="vb-emoji-img" title="identity" />
   if (label === 'emoji') return icon
+  // No `·xyz` member-disambiguation suffix here (unlike AddrPill/ExternalAccountPill):
+  // a bubble's label is already clamped to a handful of characters at a few px tall,
+  // with no room for a tag name AND a tail.
   const name = resolved
     ? <span className="vb-addr vb-name" style={resolved.color ? { color: resolved.color } : undefined}>{resolved.name}</span>
     : mod ? <span className="vb-addr vb-name">{mod}</span>
