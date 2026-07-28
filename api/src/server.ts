@@ -18,6 +18,7 @@ import { indexerRoutes } from './routes/indexer.ts'
 import { explorerRoutes } from './routes/explorer.ts'
 import { tagRoutes } from './routes/tags.ts'
 import { userRoutes } from './routes/user.ts'
+import { librariesRoutes } from './routes/libraries.ts'
 import { loadExplorerAssets, stopExplorerAssetsRefresh } from './services/explorerAssets.ts'
 import { loadRuntimeErrorNames, stopRuntimeErrorNamesRefresh } from './services/runtimeErrorNames.ts'
 import {
@@ -57,6 +58,7 @@ import { initAccountAffinityService } from './services/accountAffinityService.ts
 import { ensureSnakewatchEmojiSourceLoaded } from './services/omniwatchIdentity.ts'
 import { initXcmJourneyService } from './services/xcmJourneyService.ts'
 import { initUserAuthService, loadUserSessions } from './services/userAuthService.ts'
+import { initUserProfileService, loadUserProfiles } from './services/userProfileService.ts'
 
 const fastify = Fastify({ logger: true })
 
@@ -126,6 +128,7 @@ await fastify.register(indexerRoutes, { client })
 await fastify.register(explorerRoutes)
 await fastify.register(tagRoutes)
 await fastify.register(userRoutes)
+await fastify.register(librariesRoutes)
 
 async function start() {
   try {
@@ -168,6 +171,7 @@ async function start() {
     initHollarService(client)
     initErc20WalletService(client)
     await initUserAuthService(client)
+    initUserProfileService(client)
     // The node-full refreshers (lock breakdown, proxy/multisig, ERC-20 wallets)
     // share one coordinated scheduler so they never stack concurrent RPC bursts
     // on the archive node; started after their clients are set.
@@ -179,7 +183,7 @@ async function start() {
     await Promise.all([loadExplorerAssets(client), ensureSnakewatchEmojiSourceLoaded(), loadRuntimeErrorNames(client)])
     // Referendum titles come from SubSquare (the chain has none), so they are held
     // in memory like identities and read on every vote row the explorer renders.
-    await Promise.all([loadTags(), loadIdentities(), loadReferendumTitles().catch(() => {}), loadUserSessions()])
+    await Promise.all([loadTags(), loadUserProfiles(), loadIdentities(), loadReferendumTitles().catch(() => {}), loadUserSessions()])
     // Seed the fixed default tag set on a fresh database (no-op once tags exist),
     // so a clean `docker compose up` reaches the expected state with no manual step.
     await seedDefaultTags()

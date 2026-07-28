@@ -5,6 +5,7 @@ import {
   createChallenge, verifyChallenge, issueSession, revokeSession, requireUser,
 } from '../services/userAuthService.ts'
 import { accountRef, resolveDisplayAccountId } from '../services/explorerService.ts'
+import { setProfileName, setProfileAvatar, clearProfileAvatar, profileForAccount, UserDataError } from '../services/userProfileService.ts'
 
 // Authenticated, per-user endpoints. Everything here is invisible to the shared
 // caches by construction: `no-store` is stamped on every reply (the server-wide
@@ -14,12 +15,20 @@ import { accountRef, resolveDisplayAccountId } from '../services/explorerService
 // cacheable request.
 export function noStore(reply: FastifyReply): void { reply.header('cache-control', 'no-store') }
 
+// UserDataError carries its own HTTP status (422 caps, 403 ownership, 404 unknown ids).
+export async function withUserErrors<T>(reply: FastifyReply, fn: () => Promise<T>): Promise<T | undefined> {
+  try { return await fn() } catch (err) {
+    if (err instanceof UserDataError) { void reply.status(err.status).send({ error: err.message }); return undefined }
+    throw err
+  }
+}
+
 const addressBody = z.object({ address: z.string().min(3).max(128) })
 const verifyBody = z.object({ address: z.string().min(3).max(128), nonce: z.string().min(16).max(64), signature: z.string().min(64).max(600) })
 
-// Assembled fully from Task 8 on; until then only account+profile-less shape.
+// Assembled fully from Task 8 on; until then only libraries/subscriptions/invites/order stay empty.
 export async function meResponse(accountId: string) {
-  return { account: accountRef(accountId), profile: null, libraries: [], subscriptions: [], invites: [], order: [] }
+  return { account: accountRef(accountId), profile: profileForAccount(accountId), libraries: [], subscriptions: [], invites: [], order: [] }
 }
 
 export async function userRoutes(fastify: FastifyInstance) {
@@ -61,5 +70,33 @@ export async function userRoutes(fastify: FastifyInstance) {
     const accountId = requireUser(req, reply)
     if (!accountId) return
     return meResponse(accountId)
+  })
+
+  const nameBody = z.object({ name: z.string().max(200) })
+  const avatarBody = z.object({ data: z.string().min(4).max(120_000) })  // 64 KiB binary ≈ 87 KiB base64
+
+  fastify.put('/user/profile', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const body = nameBody.safeParse(req.body)
+    if (!body.success) return reply.status(400).send({ error: 'Invalid profile payload' })
+    return withUserErrors(reply, () => setProfileName(accountId, body.data.name))
+  })
+
+  fastify.put('/user/profile/avatar', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const body = avatarBody.safeParse(req.body)
+    if (!body.success) return reply.status(400).send({ error: 'Invalid avatar payload' })
+    return withUserErrors(reply, () => setProfileAvatar(accountId, body.data.data))
+  })
+
+  fastify.delete('/user/profile/avatar', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    return clearProfileAvatar(accountId)
   })
 }

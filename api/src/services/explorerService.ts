@@ -22,6 +22,7 @@ import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent
 import { canSkipRepublish } from './snapshotRepublish.ts'
 import { createHash } from 'node:crypto'
 import { resolveModuleError } from './runtimeErrorNames.ts'
+import { profileForAccount } from './userProfileService.ts'
 
 let client: ClickHouseClient
 export function initExplorerService(c: ClickHouseClient): void { client = c }
@@ -36,6 +37,7 @@ export interface AccountRef {
   emojiUrl?: string                                 // custom image icon (e.g. a Discord avatar) — render in place of the emoji char
   tag: { id: string; name: string; color: string; icon: string } | null
   identity?: AccountIdentity | null   // on-chain Identity.IdentityOf display + judgement status
+  profile: { name: string; avatarVersion: number } | null   // self-set display name/avatar, if any
 }
 
 function asset(assetIdStr: string | number): AssetRef {
@@ -185,6 +187,7 @@ export function accountRef(accountId: string): AccountRef {
     emojiUrl: icon.emojiUrl,
     tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon } : null,
     identity: id,
+    profile: profileForAccount(resolved),
   }
 }
 
