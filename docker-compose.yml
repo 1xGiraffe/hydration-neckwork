@@ -174,6 +174,28 @@ services:
     networks:
       - neckwork
 
+  # Nightly export of the user_* tables (see clickhouse/schema/004_user.sql) —
+  # the only ClickHouse state not reproducible from raw chain data. Reuses the
+  # clickhouse service's own image so the client version always matches the
+  # server. See ops/backup-user-tables.sh for the export/retention/restore
+  # procedure.
+  user-backup:
+    build: ./clickhouse
+    container_name: hydration-neckwork-user-backup
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/backup-user-tables.sh"]
+    volumes:
+      - ./ops/backup-user-tables.sh:/backup-user-tables.sh:ro
+      - user_backups:/backups
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    networks:
+      - neckwork
+
   # Referendum proposal calls. A referendum names its proposal by hash and the call
   # itself lives in a preimage as SCALE bytes, which only runtime metadata can read —
   # hence an indexer-side decoder rather than API-side. A hash IS its content, so a
@@ -460,6 +482,7 @@ services:
 volumes:
   clickhouse_data:
     name: ${CLICKHOUSE_VOLUME_NAME:-hydration-neckwork-clickhouse-data}
+  user_backups:
 
 networks:
   neckwork:
