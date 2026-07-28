@@ -27,9 +27,10 @@ test('dual-market account renders GIGAHDX as a full market card below the primar
 
   // Same treatment as the primary: the full summary stats, not a collapsed line.
   await expect(giga.locator('.mm-summary .mm-stat')).not.toHaveCount(0)
-  // Heading reads "Money Market — GIGAHDX · supply & borrow" with the asset-67 logo.
+  // Heading reads "Money Market — GIGAHDX · lend & borrow" with the asset-67 logo:
+  // "lend" is the product term for a supply, the same word the activity badge uses.
   await expect(giga.locator('.mm-title')).toHaveText('Money Market')
-  await expect(giga.locator('.mm-title-note').first()).toContainText('GIGAHDX · supply & borrow')
+  await expect(giga.locator('.mm-title-note').first()).toContainText('GIGAHDX · lend & borrow')
   await expect(giga.locator('.mm-title-note img')).toHaveAttribute('src', /\/67\/icon/)
   await expect(giga).toContainText('HOLLAR')
 })
