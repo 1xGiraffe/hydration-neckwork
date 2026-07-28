@@ -29,23 +29,27 @@ export const LIMITS = {
 
 interface Subscription { status: 'invited' | 'active' | 'declined'; origin: 'invite' | 'public' }
 
+export const SYSTEM_LIBRARY_ID = 'system'
+
 let client: ClickHouseClient
 const libraries = new Map<string, UserLibrary>()
 const byOwner = new Map<string, Set<string>>()
 const subsByLibrary = new Map<string, Map<string, Subscription>>()   // libraryId -> account -> sub
 const subsByAccount = new Map<string, Set<string>>()                 // account -> libraryIds (any status)
+const orderByAccount = new Map<string, string[]>()                   // raw stored arrays; resolution happens in libraryOrderFor
 
 export function initUserLibraryService(c: ClickHouseClient): void {
-  client = c; libraries.clear(); byOwner.clear(); subsByLibrary.clear(); subsByAccount.clear()
+  client = c; libraries.clear(); byOwner.clear(); subsByLibrary.clear(); subsByAccount.clear(); orderByAccount.clear()
 }
 
 export async function loadUserLibraries(): Promise<void> {
-  libraries.clear(); byOwner.clear(); subsByLibrary.clear(); subsByAccount.clear()
-  const [libRes, tagRes, memberRes, subRes] = [
+  libraries.clear(); byOwner.clear(); subsByLibrary.clear(); subsByAccount.clear(); orderByAccount.clear()
+  const [libRes, tagRes, memberRes, subRes, orderRes] = [
     await client.query({ query: `SELECT library_id, owner_account_id, name, note, visibility, is_personal FROM price_data.user_libraries FINAL WHERE deleted = 0`, format: 'JSONEachRow' }),
     await client.query({ query: `SELECT library_id, tag_id, name, color, icon, note FROM price_data.user_tags FINAL WHERE deleted = 0`, format: 'JSONEachRow' }),
     await client.query({ query: `SELECT library_id, tag_id, account_id FROM price_data.user_tag_members FINAL WHERE deleted = 0`, format: 'JSONEachRow' }),
     await client.query({ query: `SELECT library_id, account_id, status, origin FROM price_data.user_library_subscriptions FINAL WHERE deleted = 0`, format: 'JSONEachRow' }),
+    await client.query({ query: `SELECT account_id, library_ids FROM price_data.user_library_order FINAL WHERE deleted = 0`, format: 'JSONEachRow' }),
   ]
   for (const r of await libRes.json<{ library_id: string; owner_account_id: string; name: string; note: string; visibility: string; is_personal: number }>()) {
     const lib: UserLibrary = {
@@ -71,6 +75,7 @@ export async function loadUserLibraries(): Promise<void> {
     if (!libraries.has(r.library_id)) continue
     setSub(r.library_id, r.account_id, { status: r.status as Subscription['status'], origin: r.origin as Subscription['origin'] }, false)
   }
+  for (const r of await orderRes.json<{ account_id: string; library_ids: string[] }>()) orderByAccount.set(r.account_id, r.library_ids)
 }
 
 export function getLibrary(libraryId: string): UserLibrary | null { return libraries.get(libraryId) ?? null }
@@ -347,4 +352,69 @@ export async function setTagMembers(owner: string, libraryId: string, tagId: str
   await persistMembers(libraryId, tagId, removedHere, 1)
   for (const [fromTag, ids] of moves) await persistMembers(libraryId, fromTag, ids, 1)
   return tag
+}
+
+export async function setLibraryOrder(accountId: string, libraryIds: string[]): Promise<string[]> {
+  if (libraryIds.length > 500) throw new UserDataError(422, 'Order list too long')
+  orderByAccount.set(accountId, libraryIds)
+  await client.insert({ table: 'price_data.user_library_order', values: [{ account_id: accountId, library_ids: libraryIds, deleted: 0 }], format: 'JSONEachRow' })
+  return libraryOrderFor(accountId)
+}
+
+// The RESOLVED order: stored entries that are still visible (or 'system'),
+// then everything visible-but-unlisted — personal first, 'system' next (when
+// unlisted), then subscription/creation order. Stale stored ids vanish here,
+// never at write time, so a revoked-then-reshared library keeps its old slot.
+export function libraryOrderFor(accountId: string): string[] {
+  const visible = visibleLibraryIds(accountId)
+  const stored = orderByAccount.get(accountId) ?? []
+  const out: string[] = []
+  for (const id of stored) {
+    if (id === SYSTEM_LIBRARY_ID || visible.has(id)) { out.push(id); visible.delete(id) }
+  }
+  if (!stored.includes(SYSTEM_LIBRARY_ID)) {
+    // unlisted defaults: personal ahead of system, everything else after
+    const personal = [...visible].find(id => libraries.get(id)?.isPersonal && libraries.get(id)?.owner === accountId)
+    if (personal) { out.push(personal); visible.delete(personal) }
+    out.push(SYSTEM_LIBRARY_ID)
+  }
+  out.push(...visible)
+  return out
+}
+
+function visibleLibraryIds(accountId: string): Set<string> {
+  const ids = new Set<string>(byOwner.get(accountId) ?? [])
+  for (const libId of subsByAccount.get(accountId) ?? []) {
+    if (subsByLibrary.get(libId)?.get(accountId)?.status === 'active' && libraries.has(libId)) ids.add(libId)
+  }
+  return ids
+}
+
+export function visibleLibrariesFor(accountId: string): UserLibrary[] {
+  return libraryOrderFor(accountId).filter(id => id !== SYSTEM_LIBRARY_ID).map(id => libraries.get(id)!).filter(Boolean)
+}
+
+export interface TagMapLibrary { libraryId: string; name: string; tags: { tagId: string; name: string; color: string; icon: string; members: string[] }[] }
+
+// One payload with everything the client needs to resolve labels: every
+// visible library in priority order, tags with member account-ids. The
+// 'system' slot is a marker — the client already has the system tag on each
+// accountRef, so shipping members again would be pure duplication.
+export function tagMapFor(accountId: string): TagMapLibrary[] {
+  return libraryOrderFor(accountId).map(id => {
+    if (id === SYSTEM_LIBRARY_ID) return { libraryId: SYSTEM_LIBRARY_ID, name: 'Hydration', tags: [] }
+    const lib = libraries.get(id)!
+    return {
+      libraryId: lib.libraryId, name: lib.name,
+      tags: [...lib.tags.values()].map(t => ({ tagId: t.tagId, name: t.name, color: t.color, icon: t.icon, members: [...t.members] })),
+    }
+  })
+}
+
+export function publicLibraries(): LibrarySummary[] {
+  return [...libraries.values()].filter(l => l.visibility === 'public').map(librarySummary)
+    .sort((a, b) => b.subscriberCount - a.subscriberCount || a.name.localeCompare(b.name))
+}
+export function publicLibrariesByOwner(owner: string): LibrarySummary[] {
+  return ownedLibrariesFor(owner).filter(l => l.visibility === 'public')
 }
