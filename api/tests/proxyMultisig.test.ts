@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { decodeCompact, decodeProxiesValue, decodeMultisigOpValue, deriveMultisigAccountId, proxyTypeName } from '../src/services/proxyMultisigService.ts'
 import { signedOrigin } from '../src/services/explorerService.ts'
@@ -103,5 +104,36 @@ describe('signed origin parsing', () => {
     expect(signedOrigin('{"__kind":"system","value":{"__kind":"Root"}}')).toBeNull()
     expect(signedOrigin(null)).toBeNull()
     expect(signedOrigin('not json')).toBeNull()
+  })
+})
+
+// The pure-proxy refresh reads three scalars — the created account, its creator, and the
+// proxy type — out of an event payload that also carries a disambiguation index nothing
+// wants. Shipping the whole payload charged 1.08 MiB of result bytes for 179 rows (9.85 GiB
+// across 9,473 refreshes in two weeks) and a JSON.parse per row, so the three are extracted
+// in SQL. `pure` is the current field name; `anonymous` is the same field under the pallet's
+// older event name, and BOTH have to be read or every pre-rename pure proxy disappears.
+describe('the pure-proxy refresh extracts its fields in SQL', () => {
+  const proxyMultisigService = readFileSync(new URL('../src/services/proxyMultisigService.ts', import.meta.url), 'utf8')
+  const occurrences = (text: string, needle: string): number => text.split(needle).length - 1
+
+  it('selects the decoded columns and never the payload', () => {
+    const at = proxyMultisigService.indexOf('async function refreshPureProxies')
+    expect(at).toBeGreaterThan(-1)
+    // Comments dropped, so every count below is of code rather than of prose quoting it.
+    const body = proxyMultisigService
+      .slice(at, proxyMultisigService.indexOf('async function refreshMultisigs', at))
+      .split('\n').filter(line => !line.trim().startsWith('//')).join('\n')
+
+    expect(body).toContain("if(JSONHas(args_json, 'pure'), JSONExtractString(args_json, 'pure'), JSONExtractString(args_json, 'anonymous')) AS account")
+    expect(body).toContain("JSONExtractString(args_json, 'who') AS creator")
+    expect(body).toContain("JSONExtractString(args_json, 'proxyType', '__kind') AS proxy_type")
+    expect(occurrences(body, 'JSON.parse')).toBe(0)
+    expect(occurrences(body, ', args_json,')).toBe(0)
+    // Both event names still feed it; the projection alone decides which field carries
+    // the account.
+    expect(body).toContain("event_name IN ('Proxy.PureCreated', 'Proxy.AnonymousCreated')")
+    // A proxy type the payload does not name is Any, as it was when TypeScript defaulted it.
+    expect(body).toContain("proxyType: r.proxy_type || 'Any'")
   })
 })

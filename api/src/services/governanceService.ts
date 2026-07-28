@@ -915,7 +915,14 @@ export interface ReferendumListRow {
   index: number
   title: string | null
   status: string
-  voters: number
+  // Not counted here. A referendum's voter count is the number of accounts whose LATEST
+  // vote in its lifecycle window still stands, and neither half of that is a column: an
+  // OpenGov `ConvictionVoting.Voted` event does not carry the poll index (it is recovered
+  // from the vote call, gasless votes from a SCALE permit payload), and a withdrawal is a
+  // removal call that may be wrapped in a batch/proxy/multisig. Reconstructing it costs
+  // what `/explorer/referendum/:pallet/:index` pays per referendum, which is why this
+  // states the absence rather than shipping a 0 that reads as "nobody voted".
+  voters: number | null
   blockHeight: number
   timestamp: string
 }
@@ -953,7 +960,7 @@ export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumL
         index: Number(row.ref_index),
         title: titles.get(`${pallet}:${Number(row.ref_index)}`) ?? null,
         status: referendumStatusFrom(pallet, row.events),
-        voters: 0,
+        voters: null,
         blockHeight: Number(row.block_height),
         timestamp: row.ts,
       }

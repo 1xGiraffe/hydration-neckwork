@@ -61,6 +61,19 @@ describe('the referendum lifecycle projection replaces the raw_events scans', ()
     expect(occurrences(governanceService, 'ORDER BY block_height DESC, pallet ASC, ref_index DESC')).toBe(1)
     expect(occurrences(governanceService, 'ORDER BY block_height DESC\n')).toBe(0)
   })
+
+  // The lifecycle answers what each referendum IS, not how many accounts backed it: a
+  // voter count is the accounts whose latest vote in the window still stands, and neither
+  // half is a column here (an OpenGov Voted event does not carry the poll index, and a
+  // withdrawal is a removal call that may be wrapped). The directory said `0`, which reads
+  // as "nobody voted" on 580 referenda that all have voters.
+  it('states the directory has no voter count rather than reporting zero', () => {
+    expect(occurrences(governanceService, 'voters: 0')).toBe(0)
+    expect(occurrences(governanceService, 'voters: null')).toBe(1)
+    expect(governanceService).toContain('voters: number | null')
+    // The real count is still exact on the detail page, off its own reconstruction.
+    expect(governanceService).toContain('voters: voters.filter(voter => !voter.removed).length')
+  })
 })
 
 // The projection exists to answer "which referendum is this event about" without re-reading

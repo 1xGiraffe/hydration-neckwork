@@ -116,11 +116,12 @@ describe('the account-scoped XCM readers use the account-first projection', () =
     expect(occurrences(explorerService, 'accountActivityRefsSql(')).toBeGreaterThan(3)
   })
 
-  // Both decoders build their rows from the pre-extracted columns, not from re-parsed
-  // JSON. The payload survives on exactly one read per decoder — the MessageQueue.Processed
-  // barrier, whose success/id/origin are not columns — and on nothing else, so a credit's
-  // `who`, currency and amount are decided in one place instead of twice.
-  it('decodes credits and withdrawals from columns, not args_json', () => {
+  // Both decoders build their rows from extracted columns and never from re-parsed JSON.
+  // The credits' who/currency/amount are the projection's own columns; the barrier's
+  // success/id/origin are not, so they are extracted in SQL instead — the barrier is read
+  // once per block of every XCM page and account feed (164,581 times over two weeks,
+  // 20.78 GiB of result bytes) and half its payload is a `weightUsed` nothing reads.
+  it('decodes credits and barriers from extracted fields, not args_json', () => {
     const sites = [
       { site: 'xcmInRowsForBlocks', row: 'e', barrier: 'b' },
       { site: 'xcmOutRemoteRowsForBlocks', row: 'w', barrier: 'barrier' },
@@ -130,13 +131,24 @@ describe('the account-scoped XCM readers use the account-first projection', () =
       expect(body, site).toContain('who, asset_id, amount')
       expect(occurrences(body, `safeJson(${row}.args_json)`), site).toBe(0)
       expect(occurrences(body, 'args.currencyId'), site).toBe(0)
-      expect(occurrences(body, 'JSONExtract'), site).toBe(0)
-      // Exactly one barrier read; it is the only projection that still selects the
-      // payload and the only place the decoder parses it.
+      // No decoder ships or parses a payload any more: the barrier read names the shared
+      // extracted projection and nothing here touches args_json.
       expect(occurrences(body, "event_name = 'MessageQueue.Processed'"), site).toBe(1)
-      expect(occurrences(body, 'event_index, args_json'), site).toBe(1)
-      expect(occurrences(body, `safeJson(${barrier}.args_json)`), site).toBe(1)
+      expect(occurrences(body, '${XCM_BARRIER_COLUMNS}'), site).toBe(1)
+      expect(occurrences(body, 'event_index, args_json'), site).toBe(0)
+      expect(occurrences(body, '.args_json'), site).toBe(0)
+      expect(occurrences(body, `safeJson(${barrier}.args_json)`), site).toBe(0)
     }
+    // The barrier projection states exactly the three fields the decodes read, and a
+    // barrier that stops naming its outcome stays a barrier rather than being dropped.
+    const columns = explorerService.slice(
+      explorerService.indexOf('const XCM_BARRIER_COLUMNS'),
+      explorerService.indexOf('function xcmOrigin'))
+    expect(columns).toContain("if(JSONHas(args_json,'success'), JSONExtractBool(args_json,'success'), 1) AS succeeded")
+    expect(columns).toContain("JSONExtractString(args_json,'id') AS message_id")
+    expect(columns).toContain("JSONExtractString(args_json,'origin','__kind') AS origin_kind")
+    expect(columns).toContain("JSONExtractUInt(args_json,'origin','value') AS origin_value")
+    expect(occurrences(explorerService, '${XCM_BARRIER_COLUMNS}')).toBe(2)
   })
 
   // The inbound deposit run is the one read that has to see a block's WHOLE run, so it can

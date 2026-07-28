@@ -5645,15 +5645,35 @@ export async function getRecentEvents(limit: number, from?: string, to?: string,
   return cached(`explorer:events:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const eventFilter = filters.event?.trim() ? textNameFilter('event_name', 'eventName') : ''
     const rows = await withFeedWindow(tw, limit, offset + limit, async (bound) => {
-      const res = await client.query({
+      // A page cut by OFFSET reads every skipped row too, and args_json is ZSTD(6) —
+      // the feed's whole weight. Locate the page on the sort key alone, then read the
+      // payload for the page's own keys: at the pager's deepest offset (20M) that is
+      // 78 ms / 177 MiB against 2,478 ms / 5.19 GiB / 765 MiB peak for the same rows.
+      // (block_height, event_index) IS the table's ORDER BY, so the payload pass
+      // returns exactly the key pass's rows and the re-stated ORDER BY reproduces its
+      // order. Duplicated replacement rows are still deduped by uniqueEventRows, as
+      // they were when one read carried both steps.
+      const keyRes = await client.query({
         query: `
-          SELECT block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts, event_name, args_json
+          SELECT block_height, event_index
           FROM price_data.raw_events
           WHERE ${bound}
             ${eventFilter}
           ORDER BY block_height DESC, event_index DESC
           LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         query_params: { limit, offset, ...textNameParams('eventName', filters.event) }, format: 'JSONEachRow',
+      })
+      const keys = await keyRes.json<{ block_height: number; event_index: number }>()
+      if (!keys.length) return []
+      const tuples = [...new Set(keys.map(key => `(${key.block_height},${key.event_index})`))].join(',')
+      const res = await client.query({
+        query: `
+          SELECT block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts, event_name, args_json
+          FROM price_data.raw_events
+          WHERE (block_height, event_index) IN (${tuples})
+            ${eventFilter}
+          ORDER BY block_height DESC, event_index DESC`,
+        query_params: { ...textNameParams('eventName', filters.event) }, format: 'JSONEachRow',
       })
       return res.json<EventSourceRow>()
     })
@@ -7102,14 +7122,33 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
   })
 }
 
+// The MessageQueue.Processed barrier every XCM decode below pairs its legs with.
+// Three of its fields are read — success, the message topic id, and the origin
+// network — and `weightUsed`, which none of them reads, is about half the payload.
+// Extract the three in SQL: the barrier is read for every block of every XCM page
+// and account feed, 164,581 times over two weeks for 20.78 GiB of result bytes,
+// and shipping the payload bought nothing but a JSON.parse per barrier row.
+interface XcmBarrierRow { block_height: number; ts: string; event_index: number; succeeded: boolean; message_id: string; origin_kind: string; origin_value: number }
+// `succeeded` is "not explicitly false", the same reading the decode had when it
+// held the parsed payload: a barrier that stops naming its outcome is still a
+// barrier, and dropping it would drop the credits it terminates.
+const XCM_BARRIER_COLUMNS = `block_height, toString(block_timestamp) AS ts, event_index,
+              if(JSONHas(args_json,'success'), JSONExtractBool(args_json,'success'), 1) AS succeeded,
+              JSONExtractString(args_json,'id') AS message_id,
+              JSONExtractString(args_json,'origin','__kind') AS origin_kind,
+              JSONExtractUInt(args_json,'origin','value') AS origin_value`
 // Origin network of an inbound XCM message (MessageQueue.Processed `origin`).
-function xcmOrigin(args: { origin?: { __kind?: string; value?: number } }): Pick<ActivityRow, 'fromChain' | 'fromParachainId'> {
-  const o = args.origin
-  if (o?.__kind === 'Parent') return { fromChain: RELAY_XCM_NETWORK.name, fromParachainId: null }
-  if (o?.__kind === 'Sibling' && typeof o.value === 'number') {
-    return { fromChain: (PARACHAIN_META[o.value] ?? { name: `Parachain ${o.value}` }).name, fromParachainId: o.value }
+function xcmOrigin(barrier: Pick<XcmBarrierRow, 'origin_kind' | 'origin_value'>): Pick<ActivityRow, 'fromChain' | 'fromParachainId'> {
+  if (barrier.origin_kind === 'Parent') return { fromChain: RELAY_XCM_NETWORK.name, fromParachainId: null }
+  if (barrier.origin_kind === 'Sibling') {
+    const id = barrier.origin_value
+    return { fromChain: (PARACHAIN_META[id] ?? { name: `Parachain ${id}` }).name, fromParachainId: id }
   }
   return {}
+}
+// The topic id as the explorer links it: a barrier without a hex topic has none.
+function xcmMessageId(barrier: Pick<XcmBarrierRow, 'message_id'>): string | null {
+  return barrier.message_id.startsWith('0x') ? barrier.message_id : null
 }
 
 // Inbound XCM detection. An incoming message executes outside any extrinsic and
@@ -7132,7 +7171,7 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
   if (!list) return []
   const [barRes, famRes] = await Promise.all([
     client.query({
-      query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, args_json
+      query: `SELECT ${XCM_BARRIER_COLUMNS}
               FROM ${xcmEventActivityTable()}
               WHERE block_height IN (${list}) AND event_name = 'MessageQueue.Processed' AND extrinsic_index IS NULL
               ORDER BY block_height DESC, event_index DESC`,
@@ -7157,7 +7196,7 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
       format: 'JSONEachRow',
     }),
   ])
-  const barriers = await barRes.json<{ block_height: number; ts: string; event_index: number; args_json: string }>()
+  const barriers = await barRes.json<XcmBarrierRow>()
   type WalkEvent = { event_name: string; who: string; asset_id: number; amount: string }
   const byBlock = new Map<number, Map<number, WalkEvent>>()
   for (const e of await famRes.json<{ block_height: number; event_index: number } & WalkEvent>()) {
@@ -7167,10 +7206,9 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
   }
   const rows: ActivityRow[] = []
   for (const b of barriers) {
-    const bargs = safeJson(b.args_json) as { success?: boolean; id?: string; origin?: { __kind?: string; value?: number } } | null
-    if (!bargs || bargs.success === false) continue
-    const from = xcmOrigin(bargs)
-    const messageId = typeof bargs.id === 'string' && bargs.id.startsWith('0x') ? bargs.id : null
+    if (!b.succeeded) continue
+    const from = xcmOrigin(b)
+    const messageId = xcmMessageId(b)
     const evs = byBlock.get(b.block_height)
     const seen = new Set<string>()
     for (let idx = b.event_index - 1; evs?.has(idx); idx--) {
@@ -7207,7 +7245,7 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
   if (!list) return []
   const [barRes, wdRes] = await Promise.all([
     client.query({
-      query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, args_json
+      query: `SELECT ${XCM_BARRIER_COLUMNS}
               FROM ${xcmEventActivityTable()}
               WHERE block_height IN (${list}) AND event_name = 'MessageQueue.Processed' AND extrinsic_index IS NULL
               ORDER BY block_height DESC, event_index ASC`,
@@ -7236,8 +7274,8 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
         format: 'JSONEachRow',
       }),
   ])
-  const barriersByBlock = new Map<number, { ts: string; event_index: number; args_json: string }[]>()
-  for (const b of await barRes.json<{ block_height: number; ts: string; event_index: number; args_json: string }>()) {
+  const barriersByBlock = new Map<number, XcmBarrierRow[]>()
+  for (const b of await barRes.json<XcmBarrierRow>()) {
     const l = barriersByBlock.get(b.block_height) ?? []
     l.push(b)
     barriersByBlock.set(b.block_height, l)
@@ -7250,19 +7288,18 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
     if (whoIn && !whoIn.has(who)) continue
     const barrier = (barriersByBlock.get(w.block_height) ?? []).find(b => b.event_index > w.event_index)
     if (!barrier) continue
-    const bargs = safeJson(barrier.args_json) as { success?: boolean; id?: string; origin?: { __kind?: string; value?: number } } | null
-    if (!bargs || bargs.success === false) continue
+    if (!barrier.succeeded) continue
     const key = `${w.block_height}:${barrier.event_index}:${who}:${cid}:${amount}`
     if (seen.has(key)) continue
     seen.add(key)
-    const origin = xcmOrigin(bargs)
+    const origin = xcmOrigin(barrier)
     const a = asset(cid)
     rows.push({
       type: 'xcm', blockHeight: w.block_height, timestamp: barrier.ts, eventIndex: w.event_index, extrinsicIndex: null,
       who: accountRef(who), to: null, asset: a, assetIn: null, assetOut: null,
       amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, amount, a.decimals),
       xcmDir: 'out', destChain: origin.fromChain, destParachainId: origin.fromParachainId ?? null,
-      messageId: typeof bargs.id === 'string' && bargs.id.startsWith('0x') ? bargs.id : null,
+      messageId: xcmMessageId(barrier),
     })
   }
   return rows.sort(compareActivityRowsNewestFirst)
@@ -8817,7 +8854,12 @@ async function getRecentRewardClaims(limit: number, from?: string, to?: string, 
   const referralAmountExpr = `toString(toUInt256OrZero(JSONExtractString(e.args_json,'referrerRewards')) + toUInt256OrZero(JSONExtractString(e.args_json,'tradeRewards')))`
   const referralValueFilter = eventValueFilterSql('0', referralAmountExpr, 'e.block_timestamp', filters, prices, 'referral_claim_price')
   const referralRes = await client.query({
-    query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index, e.extrinsic_index, e.args_json
+    // A claim's displayed amount is the SAME 256-bit sum the min-value predicate is
+    // pushed down as, so it is stated once: re-adding it in TypeScript from a shipped
+    // payload is how a page comes to filter on a value its rows do not show.
+    query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index, e.extrinsic_index,
+              JSONExtractString(e.args_json,'who') AS who,
+              ${referralAmountExpr} AS amount
             FROM (
               SELECT block_height, block_timestamp, event_index, extrinsic_index, event_name, args_json
               FROM price_data.referral_claim_activity FINAL
@@ -8830,15 +8872,12 @@ async function getRecentRewardClaims(limit: number, from?: string, to?: string, 
     query_params: { limit, height: height ?? 0, extrinsicIndex: extrinsicIndex ?? 0 }, format: 'JSONEachRow',
   })
   const out: ActivityRow[] = []
-  for (const r of await referralRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; args_json: string }>()) {
-    const args = (safeJson(r.args_json) ?? {}) as Record<string, unknown>
-    const who = argStr(args, 'who')
-    const amount = (BigInt(argStr(args, 'referrerRewards') || '0') + BigInt(argStr(args, 'tradeRewards') || '0')).toString()
+  for (const r of await referralRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; who: string; amount: string }>()) {
     const a = asset(0)
     out.push({
       type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
-      who: who ? accountRef(who) : null, to: null, asset: a, assetIn: null, assetOut: null,
-      amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, amount, a.decimals),
+      who: r.who ? accountRef(r.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
+      amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
       liqAction: 'Claim', linkBlock: r.block_height, linkIndex: r.extrinsic_index,
     })
   }

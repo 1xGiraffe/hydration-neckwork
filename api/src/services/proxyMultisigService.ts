@@ -126,21 +126,26 @@ async function refreshProxies(): Promise<void> {
 }
 
 async function refreshPureProxies(): Promise<void> {
+  // The three fields this reads are extracted in SQL. `Proxy.PureCreated` also
+  // carries a disambiguation index nothing here wants, and the whole-payload
+  // projection charged 1.08 MiB of result bytes for 179 rows — 9.85 GiB over
+  // 9,473 refreshes in two weeks — plus a JSON.parse per row.
+  // `pure` is the current name for the created account; `anonymous` is the same
+  // field under the pallet's old event name.
   const res = await client.query({
-    query: `SELECT event_name, args_json, block_height, extrinsic_index, toString(block_timestamp) AS ts
+    query: `SELECT block_height, extrinsic_index, toString(block_timestamp) AS ts,
+                   if(JSONHas(args_json, 'pure'), JSONExtractString(args_json, 'pure'), JSONExtractString(args_json, 'anonymous')) AS account,
+                   JSONExtractString(args_json, 'who') AS creator,
+                   JSONExtractString(args_json, 'proxyType', '__kind') AS proxy_type
             FROM price_data.raw_events
             WHERE event_name IN ('Proxy.PureCreated', 'Proxy.AnonymousCreated')
             ORDER BY block_height`,
     format: 'JSONEachRow',
   })
   const pure = new Map<string, PureProxyInfo>()
-  for (const r of await res.json<{ event_name: string; args_json: string; block_height: number; extrinsic_index: number | null; ts: string }>()) {
-    try {
-      const a = JSON.parse(r.args_json) as { pure?: string; anonymous?: string; who?: string; proxyType?: { __kind?: string } }
-      const account = a.pure ?? a.anonymous
-      if (!account || !a.who) continue
-      pure.set(account, { creator: a.who, proxyType: a.proxyType?.__kind ?? 'Any', blockHeight: r.block_height, extrinsicIndex: r.extrinsic_index ?? null, timestamp: r.ts })
-    } catch { /* skip malformed row */ }
+  for (const r of await res.json<{ block_height: number; extrinsic_index: number | null; ts: string; account: string; creator: string; proxy_type: string }>()) {
+    if (!r.account || !r.creator) continue
+    pure.set(r.account, { creator: r.creator, proxyType: r.proxy_type || 'Any', blockHeight: r.block_height, extrinsicIndex: r.extrinsic_index ?? null, timestamp: r.ts })
   }
   // Only pure proxies that still exist (they always keep ≥1 proxy entry; a
   // killed pure proxy disappears from Proxy.Proxies).
