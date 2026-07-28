@@ -6,9 +6,31 @@ import {
   listSubstrateWallets, connectSubstrate, signSubstrate,
   discoverEvmProviders, connectEvm, signEvm, accountRowLabel,
 } from '../wallets'
-import type { InjectedAccount, EvmProviderDetail, Eip1193Provider } from '../wallets'
+import type { InjectedAccount, EvmProviderDetail, Eip1193Provider, AccountRowLabel } from '../wallets'
 import { AccountEmoji, ShortAddr } from './ui'
 import type { AccountRef } from '../types'
+
+// The emoji/avatar + name + mono address a wallet account renders as, shared
+// by the account-picker rows and the signing screen so a chosen account looks
+// identical on both — the same pill-in-a-list treatment an AddrPill gets
+// elsewhere (profile name amber-italic, on-chain identity plain), just without
+// the account-page link a real AddrPill would carry (there's nowhere to link
+// to mid sign-in).
+function AccountRowLabelView({ account, label }: { account: AccountRef | null | undefined; label: AccountRowLabel }) {
+  return (
+    <>
+      {account
+        ? <AccountEmoji account={account} className="emoji id account-row-emoji" />
+        : <span className="emoji id account-row-emoji">👤</span>}
+      {label.primary && (
+        label.kind === 'profile' ? <span className="tag profile-name">{label.primary}</span>
+          : label.kind === 'identity' ? <span className="tag">{label.primary}</span>
+          : <span className="wallet-name">{label.primary}</span>
+      )}
+      <span className="wallet-status mono">{label.address ? <ShortAddr addr={label.address} /> : '···'}</span>
+    </>
+  )
+}
 
 // The extension handle or EVM provider a chosen address will sign with, kept
 // around from the connect step so the account picker and a signing retry both
@@ -247,11 +269,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
                     const label = accountRowLabel(ref, a.name, a.address)
                     return (
                       <button key={a.address} type="button" className="wallet-row account-row" onClick={() => pickAccount(a.address)}>
-                        {ref
-                          ? <AccountEmoji account={ref} className="emoji id account-row-emoji" />
-                          : <span className="emoji id account-row-emoji">👤</span>}
-                        {label.primary && <span className="wallet-name">{label.primary}</span>}
-                        <span className="wallet-status mono">{label.address ? <ShortAddr addr={label.address} /> : '···'}</span>
+                        <AccountRowLabelView account={ref} label={label} />
                       </button>
                     )
                   })}
@@ -260,15 +278,11 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
               </>
             )}
 
-            {stage === 'signing' && address && (() => {
-              const label = accountRowLabel(refs[address], accounts.find(a => a.address === address)?.name, address)
-              return (
-                <p className="dialog-hint">
-                  {label.primary && <span className="signing-account-name">{label.primary} </span>}
-                  <span className="mono">{label.address ? <ShortAddr addr={label.address} /> : '···'}</span>
-                </p>
-              )
-            })()}
+            {stage === 'signing' && address && (
+              <div className="wallet-row account-row static">
+                <AccountRowLabelView account={refs[address]} label={accountRowLabel(refs[address], accounts.find(a => a.address === address)?.name, address)} />
+              </div>
+            )}
           </div>
           {stage === 'signing' && error && (
             <div className="dialog-foot">

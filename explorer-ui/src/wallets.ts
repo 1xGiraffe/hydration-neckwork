@@ -87,14 +87,18 @@ export async function signEvm(provider: Eip1193Provider, address: string, messag
 // the extension's generic substrate encoding. `ref === undefined` means the
 // refs are still loading: show the wallet name alone rather than flashing the
 // raw form; `ref === null` means the lookup failed — degrade to the raw input
-// so the row is still identifiable.
-export interface AccountRowLabel { primary: string | null; address: string | null }
+// so the row is still identifiable. `kind` says which won, so the caller can
+// style the name the way an AddrPill would (profile → amber italic, identity →
+// plain) rather than every source reading identically.
+export interface AccountRowLabel { primary: string | null; kind: 'profile' | 'identity' | 'name' | null; address: string | null }
 export function accountRowLabel(
   ref: { address: string; profile?: { name: string } | null; identity?: { display: string } | null } | null | undefined,
   extensionName: string | undefined,
   rawAddress?: string,
 ): AccountRowLabel {
-  if (ref === undefined) return { primary: extensionName ?? null, address: null }
-  if (ref === null) return { primary: extensionName ?? null, address: rawAddress ?? null }
-  return { primary: ref.profile?.name || ref.identity?.display || extensionName || null, address: ref.address }
+  if (ref === undefined) return { primary: extensionName ?? null, kind: extensionName ? 'name' : null, address: null }
+  if (ref === null) return { primary: extensionName ?? null, kind: extensionName ? 'name' : null, address: rawAddress ?? null }
+  if (ref.profile?.name) return { primary: ref.profile.name, kind: 'profile', address: ref.address }
+  if (ref.identity?.display) return { primary: ref.identity.display, kind: 'identity', address: ref.address }
+  return { primary: extensionName ?? null, kind: extensionName ? 'name' : null, address: ref.address }
 }

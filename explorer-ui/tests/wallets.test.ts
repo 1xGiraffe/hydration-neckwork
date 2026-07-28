@@ -53,15 +53,17 @@ describe('wallet registry', () => {
       emoji: '🦊', tag: null, identity: null, profile: null,
     }
     // Canonical display address always comes from the ref, never the raw input.
+    // `kind` says which source won, so the caller can style the name the way
+    // an AddrPill would (profile → amber italic, identity → plain).
     expect(accountRowLabel({ ...ref, profile: { name: 'Maf', avatarVersion: 0 } }, 'Wallet 1'))
-      .toEqual({ primary: 'Maf', address: ref.address })
+      .toEqual({ primary: 'Maf', kind: 'profile', address: ref.address })
     expect(accountRowLabel({ ...ref, identity: { display: 'Chain Name', verified: true, email: '', web: '', twitter: '' } }, 'Wallet 1'))
-      .toEqual({ primary: 'Chain Name', address: ref.address })
-    expect(accountRowLabel(ref, 'Wallet 1')).toEqual({ primary: 'Wallet 1', address: ref.address })
+      .toEqual({ primary: 'Chain Name', kind: 'identity', address: ref.address })
+    expect(accountRowLabel(ref, 'Wallet 1')).toEqual({ primary: 'Wallet 1', kind: 'name', address: ref.address })
     // No name anywhere: the address IS the primary label, not shown twice.
-    expect(accountRowLabel(ref, undefined)).toEqual({ primary: null, address: ref.address })
+    expect(accountRowLabel(ref, undefined)).toEqual({ primary: null, kind: null, address: ref.address })
     // Refs unavailable (endpoint down): degrade to the wallet name + raw input.
-    expect(accountRowLabel(null, 'Wallet 1', '5FHneW46...')).toEqual({ primary: 'Wallet 1', address: '5FHneW46...' })
-    expect(accountRowLabel(undefined, undefined, '5FHneW46...')).toEqual({ primary: null, address: null })
+    expect(accountRowLabel(null, 'Wallet 1', '5FHneW46...')).toEqual({ primary: 'Wallet 1', kind: 'name', address: '5FHneW46...' })
+    expect(accountRowLabel(undefined, undefined, '5FHneW46...')).toEqual({ primary: null, kind: null, address: null })
   })
 })
