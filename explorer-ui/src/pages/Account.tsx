@@ -1,15 +1,24 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { useAddress, useAddressHistory, useAddressValueEvents, useAccountListCount, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, useQueryValue, setQuery } from '../router'
-import { Crumbs, F, Copy, ShortAddr, ProfilePageSkeleton, DetailTabs, moduleName, emojiName, TagIcon, showIconFallback as avatarImgFallback } from '../components/ui'
+import { Crumbs, F, Copy, ShortAddr, ProfilePageSkeleton, DetailTabs, moduleName, emojiName, TagIcon, AccountEmoji, UserTagPill, rowNav, EmptyRow } from '../components/ui'
 import { PortfolioChart, ProfileStats, MoneyMarketPositions, moneyMarketDebtUsd, profileTabs, ActiveDcaTable, LiquidityPositionsTable, ProxyMultisigSection } from '../components/AccountSections'
 import { BalancesTreemap } from '../components/BalancesTreemap'
 import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
+import { useSession } from '../session'
+import { useAddressLibraries, useMe } from '../hooks/useUser'
+import { resolveTag, allAssociations, useTagMapVersion } from '../userTags'
+import type { LibrarySummaryRef } from '../types'
+
+// Radix + the dialog are only needed once the account owner actually opens the
+// editor, so it's a route-chunk-style lazy import (matching ConnectDialog from
+// the Topbar) rather than a static one carried by every visitor's entry chunk.
+const EditProfileDialog = lazy(() => import('../components/EditProfileDialog').then(m => ({ default: m.EditProfileDialog })))
 
 // Hydration opens any route with the account preselected, so the app shows this
 // account's balances and positions. Deep-link to the swap page: it is the app's
@@ -19,7 +28,14 @@ function hydrationAppUrl(address: string): string {
 }
 
 export function Account({ address }: { address: string }) {
+  useTagMapVersion()   // re-render when the viewer's tag map changes
   const { data, isLoading, isError } = useAddress(address)
+  const session = useSession()
+  const isOwn = !!session && !!data && session.accountId === data.accountId
+  const me = useMe()
+  const libs = useAddressLibraries(address)
+  const [editOpen, setEditOpen] = useState(false)
+  const [editMounted, setEditMounted] = useState(false)
   const now = useNow()
   const { data: stats } = useStats(!!data?.activeDcas?.length)
   const canonicalAddress = data ? (data.evmAddress ?? data.ss58Polkadot) : null
@@ -41,9 +57,10 @@ export function Account({ address }: { address: string }) {
   const headBlock = stats?.headBlock ?? 0
 
   // Document title mirrors the header's display-name logic: best-known name
-  // (tag > identity > module > emoji name) plus the short canonical address.
+  // (resolved tag > module > profile name > identity > emoji name) plus the
+  // short canonical address.
   const shortAddr = data ? F.shortAddr(data.evmAddress ?? data.ss58Polkadot) : null
-  const acctName = data ? (data.tag?.name ?? data.identity?.display ?? moduleName(data.accountId) ?? data.emojiName ?? emojiName(data.emoji)) : null
+  const acctName = data ? (resolveTag(data)?.name ?? moduleName(data.accountId) ?? data.profile?.name ?? data.identity?.display ?? data.emojiName ?? emojiName(data.emoji)) : null
   useDocumentTitle(data ? (acctName ? `${acctName} · ${shortAddr}` : shortAddr) : undefined)
 
   // Canonicalize the URL: always show the Polkadot SS58 (substrate) or EVM H160
@@ -64,6 +81,8 @@ export function Account({ address }: { address: string }) {
       {isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Address not recognized</div>
         : isLoading || !data ? <ProfilePageSkeleton /> : (() => {
           const mod = moduleName(data.accountId)
+          const resolved = resolveTag(data)
+          const associations = allAssociations(data)
           const mmList = data.moneyMarket
           const explicitEvmBinding = data.aliases.find(alias => alias.relationship === 'explicit_binding' && alias.evmAddress)?.evmAddress
           // Debt counts from every market and is netted out of the portfolio Value.
@@ -75,18 +94,24 @@ export function Account({ address }: { address: string }) {
               {/* Above the header card and right-aligned, matching "Open in preis"
                   on the asset page and "Open in Subsquare" on a referendum. */}
               <div className="ext-link-row">
+                {isOwn && <button type="button" className="ext-link" style={{ cursor: 'pointer' }} onClick={() => { setEditMounted(true); setEditOpen(true) }}>Edit profile</button>}
                 <a className="ext-link" href={hydrationAppUrl(canonicalAddress ?? address)} target="_blank" rel="noopener">Open in Hydration ↗</a>
               </div>
               <div className="acct-head">
-                <div className="acct-avatar">{data.tag ? <TagIcon icon={data.tag.icon} title={data.tag.name} className="acct-avatar-icon" /> : mod ? '⚙️' : data.emojiUrl
-                  ? <><img className="acct-avatar-img" src={data.emojiUrl} alt={data.emojiName ?? data.emoji} title={data.emojiName} onError={avatarImgFallback} /><span className="icon-fallback" style={{ display: 'none' }}>{data.emoji}</span></>
-                  : data.emoji}</div>
+                <div className="acct-avatar">{resolved
+                  ? <TagIcon icon={resolved.icon} title={resolved.name} className="acct-avatar-icon" />
+                  : mod ? '⚙️'
+                    : <AccountEmoji account={data} className="acct-avatar-icon" imgClass="acct-avatar-img" />}</div>
                 <div className="acct-meta">
-                  <div className="tag">{data.tag
-                    ? <span>{data.tag.name} <span className="em" style={{ color: data.tag.color }}>· tag</span></span>
-                    : data.identity?.display
-                      ? <span style={{ fontSize: 18 }}>{data.identity.display}{data.identity.verified && <span className="id-verified" title="Verified identity" style={{ marginLeft: 5 }}>✓</span>}</span>
-                      : <span style={{ fontSize: 18 }}>{mod ? mod : (emojiName(data.emoji) ?? 'Account')}</span>}
+                  <div className="tag">{resolved
+                    ? <span>{resolved.name} <span className="em" style={resolved.color ? { color: resolved.color } : undefined}>· tag</span></span>
+                    : mod
+                      ? <span style={{ fontSize: 18 }}>{mod}</span>
+                      : data.profile?.name
+                        ? <span style={{ fontSize: 18, fontStyle: 'italic', color: 'var(--amber)' }}>{data.profile.name}</span>
+                        : data.identity?.display
+                          ? <span style={{ fontSize: 18 }}>{data.identity.display}{data.identity.verified && <span className="id-verified" title="Verified identity" style={{ marginLeft: 5 }}>✓</span>}</span>
+                          : <span style={{ fontSize: 18 }}>{emojiName(data.emoji) ?? 'Account'}</span>}
                     {data.proxy?.isPure && <span className="badge" title="Keyless pure-proxy account — controlled only through its proxies" style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>pure proxy</span>}
                     {data.multisig && <span className="badge" title={`Multisig account — any ${data.multisig.threshold} of ${data.multisig.signatories.length} signatories can act`} style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>{data.multisig.threshold}/{data.multisig.signatories.length} multisig</span>}</div>
                   {/* No EVM badge here: the 0x prefix already says it (and the
@@ -95,9 +120,9 @@ export function Account({ address }: { address: string }) {
                   <div className="full">
                     <span className="mono"><ShortAddr addr={data.evmAddress ?? data.ss58Polkadot} full /></span> <Copy text={data.evmAddress ?? data.ss58Polkadot} />
                   </div>
-                  {data.tag && (
-                    <div className="row gap6" style={{ marginTop: 2 }}>
-                      <Link to={paths.tag(data.tag.id)} style={{ fontFamily: 'GeistMono', fontSize: 11, color: data.tag.color }}>Part of tag “{data.tag.name}” · this page shows this account only</Link>
+                  {associations.length > 0 && (
+                    <div className="row gap6" style={{ marginTop: 2, flexWrap: 'wrap' }}>
+                      {associations.map(a => <UserTagPill key={a.libraryId ?? `system-${a.id}`} tag={a} address={data.evmAddress ?? data.ss58Polkadot} noCopy />)}
                     </div>
                   )}
                 </div>
@@ -143,6 +168,8 @@ export function Account({ address }: { address: string }) {
 
               <CloseAccountsSection address={canonicalAddress ?? address} />
 
+              <LibrariesSection publicLibraries={libs.data ?? []} ownLibraries={isOwn ? (me.data?.libraries ?? []) : []} isOwn={isOwn} />
+
               <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={history.data?.portfolioSeries ?? data.portfolioSeries ?? []} dates={history.data?.portfolioDates ?? data.portfolioDates} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} loading={history.isLoading || (history.isFetching && !history.data)} valueEvents={valueEvents.data} />
               </>)}
 
@@ -162,6 +189,51 @@ export function Account({ address }: { address: string }) {
             </>
           )
         })()}
+      {editMounted && (
+        <Suspense fallback={null}>
+          <EditProfileDialog open={editOpen} onOpenChange={setEditOpen} />
+        </Suspense>
+      )}
     </div>
+  )
+}
+
+// A viewed account's tag libraries: the public ones it's an owner/tagged member
+// of (every viewer sees these), plus — on the account's own page — every one of
+// the owner's OWN libraries including their private ones. `ownLibraries` is the
+// superset for anything the viewer owns, so a library owned by the viewed
+// account is deduped against it rather than shown twice.
+export function LibrariesSection({ publicLibraries, ownLibraries, isOwn }: {
+  publicLibraries: LibrarySummaryRef[]
+  ownLibraries: LibrarySummaryRef[]
+  isOwn: boolean
+}) {
+  const seen = new Set(ownLibraries.map(l => l.libraryId))
+  const rows = isOwn ? [...ownLibraries, ...publicLibraries.filter(l => !seen.has(l.libraryId))] : publicLibraries
+  if (!rows.length && !isOwn) return null
+  return (
+    <>
+      <div className="sec-title">Libraries{rows.length > 0 ? ` · ${rows.length}` : ''}</div>
+      <div className="panel"><table className="tbl">
+        <thead><tr><th>Library</th><th className="r">Accounts</th></tr></thead>
+        <tbody>
+          {!rows.length
+            ? <EmptyRow cols={2}>Not listed in any library yet</EmptyRow>
+            : rows.map(lib => (
+              <tr key={lib.libraryId} {...rowNav(paths.library(lib.libraryId))}>
+                <td data-label="Library">
+                  <Link to={paths.library(lib.libraryId)} className="addr-pill" onClick={e => e.stopPropagation()}>
+                    <TagIcon icon="📚" title={lib.name} />
+                    <span className="tag">{lib.name}</span>
+                  </Link>
+                  {lib.visibility === 'private' && <span className="muted" style={{ marginLeft: 8, fontSize: 11 }}>only you can see this</span>}
+                </td>
+                <td data-label="Accounts" className="r mono">{lib.accountCount}</td>
+              </tr>
+            ))}
+        </tbody>
+      </table></div>
+      {isOwn && <div className="ext-link-row"><Link to={paths.libraries()} className="ext-link">Manage libraries →</Link></div>}
+    </>
   )
 }
