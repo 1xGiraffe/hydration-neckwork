@@ -193,21 +193,23 @@ interface LifecycleRow {
   args_json: string
 }
 
-// Every lifecycle event for one referendum. Keyed on the index inside the args, so
-// the read is one narrow pass over the (few hundred) governance events rather than
-// anything proportional to the vote count.
+// Every lifecycle event for one referendum, from the referendum-first projection
+// `referendum_lifecycle_events`.
+//
+// The referendum is an event argument, so selecting it out of `raw_events` meant matching
+// the pallet by name prefix — which, unlike an IN list, the set(200) skip index on
+// `event_name` cannot use — and then decoding the index out of args_json on every row the
+// scan reached, decompressing the whole table's ZSTD(6) payload to find a few hundred
+// matches: 36.3M rows and 1.47 GiB for one cold page, and 1.38 TiB across three days.
+// The projection stores the decoded pallet/index and is keyed by them first, so the same
+// answer is a point lookup over three granules.
 async function loadLifecycle(pallet: ReferendumPallet, index: number): Promise<LifecycleRow[]> {
-  const indexField = pallet === 'opengov' ? 'index' : 'refIndex'
-  const prefix = pallet === 'opengov' ? 'Referenda.' : 'Democracy.'
   const res = await client.query({
     query: `SELECT event_name, block_height, extrinsic_index, toString(block_timestamp) AS ts, args_json
-            FROM price_data.raw_events
-            WHERE event_name LIKE {prefix:String}
-              AND event_name != 'Democracy.Voted'
-              AND JSONExtractInt(args_json, {field:String}) = {idx:UInt32}
-              AND JSONHas(args_json, {field:String})
+            FROM price_data.referendum_lifecycle_events FINAL
+            WHERE pallet = {pallet:String} AND ref_index = {idx:UInt32}
             ORDER BY block_height, event_index`,
-    query_params: { prefix: `${prefix}%`, field: indexField, idx: index },
+    query_params: { pallet, idx: index },
     format: 'JSONEachRow',
   })
   return res.json<LifecycleRow>()
@@ -919,6 +921,16 @@ export interface ReferendumListRow {
 }
 
 // Referendum directory: every referendum either pallet has recorded, newest first.
+// Grouped on the projection's own key prefix, so the whole directory is the three
+// granules `referendum_lifecycle_events` occupies rather than two full passes over
+// `raw_events` (see loadLifecycle for why that predicate could not be indexed).
+//
+// The last event's block is not a unique sort key — 84 of the 580 referenda share one
+// with another, because a deposit-refund batch closes many at once (33 in the largest
+// such block) — so (pallet, ref_index) breaks the tie. Without it the ordering is only
+// partial and LIMIT/OFFSET pages it inconsistently: walking the four pages of the default
+// limit back to back returned two referenda twice and silently dropped two others, and
+// which two varied from one walk to the next.
 export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumListRow[]> {
   return cached(`explorer:referenda:${limit}:${offset}`, 60_000, async () => {
     const [res, titles] = await Promise.all([
@@ -926,19 +938,9 @@ export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumL
         query: `
           SELECT pallet, ref_index, groupArray(event_name) AS events, max(block_height) AS block_height,
                  toString(max(block_timestamp)) AS ts
-          FROM (
-            SELECT 'opengov' AS pallet, toUInt32(JSONExtractInt(args_json, 'index')) AS ref_index,
-                   event_name, block_height, block_timestamp
-            FROM price_data.raw_events
-            WHERE event_name LIKE 'Referenda.%' AND JSONHas(args_json, 'index')
-            UNION ALL
-            SELECT 'democracy' AS pallet, toUInt32(JSONExtractInt(args_json, 'refIndex')) AS ref_index,
-                   event_name, block_height, block_timestamp
-            FROM price_data.raw_events
-            WHERE event_name LIKE 'Democracy.%' AND event_name != 'Democracy.Voted' AND JSONHas(args_json, 'refIndex')
-          )
+          FROM price_data.referendum_lifecycle_events FINAL
           GROUP BY pallet, ref_index
-          ORDER BY block_height DESC
+          ORDER BY block_height DESC, pallet ASC, ref_index DESC
           LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         query_params: { limit, offset }, format: 'JSONEachRow',
       }),

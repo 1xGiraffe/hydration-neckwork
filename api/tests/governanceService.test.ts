@@ -506,7 +506,7 @@ describe('on-chain tally extraction', () => {
 // range.
 describe('referendum page read bounds', () => {
   const rowsFor = (query: string): unknown[] => {
-    if (query.includes("event_name LIKE {prefix:String}")) {
+    if (query.includes('price_data.referendum_lifecycle_events')) {
       return [
         { event_name: 'Referenda.Submitted', block_height: 9_721_074, extrinsic_index: 3, ts: '2025-10-01 00:00:00', args_json: '{"index":204,"track":1}' },
         { event_name: 'Referenda.TimedOut', block_height: 9_922_674, extrinsic_index: null, ts: '2025-10-15 00:00:00', args_json: '{"index":204,"tally":{"ayes":"10","nays":"0","support":"5"}}' },
@@ -596,7 +596,7 @@ describe('democracy proposal hash from the enactment block', () => {
   const HASH = `0x${'ab'.repeat(32)}`
   const answer = (rows: unknown[]) => vi.fn(async ({ query }: { query: string }) => ({
     json: async () => {
-      if (query.includes("event_name LIKE {prefix:String}")) {
+      if (query.includes('price_data.referendum_lifecycle_events')) {
         return [
           { event_name: 'Democracy.Started', block_height: 793_680, extrinsic_index: null, ts: '2022-01-01 00:00:00', args_json: '{"refIndex":7}' },
           { event_name: 'Democracy.Passed', block_height: 794_580, extrinsic_index: null, ts: '2022-01-02 00:00:00', args_json: '{"refIndex":7}' },

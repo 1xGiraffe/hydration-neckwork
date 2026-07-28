@@ -48,22 +48,27 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 // invents an index: OpenGov referenda exist once Referenda.Submitted names them and
 // are concluded by Confirmed/Rejected/Cancelled/TimedOut/Killed/Approved; Democracy
 // ones exist on Democracy.Started and conclude on Passed/NotPassed/Cancelled/Vetoed.
+//
+// Read from the referendum-first projection rather than `raw_events`, where the
+// unindexable `event_name LIKE` prefix and the per-row JSON decode of the index cost
+// 1.71 GiB a cycle (357 GiB over three days) to reach 373 referenda. Source columns are
+// qualified because the `'opengov'`/`'democracy'` output alias shadows the projection's
+// own `pallet` column, which would otherwise make each arm's filter a constant true and
+// count every referendum under both pallets.
 async function loadInventory(): Promise<ReferendumInventoryRow[]> {
   const res = await client.query({
     query: `
-      SELECT 'opengov' AS pallet,
-             toUInt32(JSONExtractInt(args_json, 'index')) AS ref_index,
-             maxIf(1, event_name IN ('Referenda.Confirmed','Referenda.Rejected','Referenda.Cancelled','Referenda.TimedOut','Referenda.Killed','Referenda.Approved')) AS concluded
-      FROM price_data.raw_events
-      WHERE event_name LIKE 'Referenda.%' AND JSONHas(args_json, 'index')
-      GROUP BY pallet, ref_index
+      SELECT 'opengov' AS pallet, e.ref_index AS ref_index,
+             maxIf(1, e.event_name IN ('Referenda.Confirmed','Referenda.Rejected','Referenda.Cancelled','Referenda.TimedOut','Referenda.Killed','Referenda.Approved')) AS concluded
+      FROM price_data.referendum_lifecycle_events AS e FINAL
+      WHERE e.pallet = 'opengov'
+      GROUP BY e.ref_index
       UNION ALL
-      SELECT 'democracy' AS pallet,
-             toUInt32(JSONExtractInt(args_json, 'refIndex')) AS ref_index,
-             maxIf(1, event_name IN ('Democracy.Passed','Democracy.NotPassed','Democracy.Cancelled','Democracy.Vetoed','Democracy.Executed')) AS concluded
-      FROM price_data.raw_events
-      WHERE event_name LIKE 'Democracy.%' AND event_name != 'Democracy.Voted' AND JSONHas(args_json, 'refIndex')
-      GROUP BY pallet, ref_index`,
+      SELECT 'democracy' AS pallet, e.ref_index AS ref_index,
+             maxIf(1, e.event_name IN ('Democracy.Passed','Democracy.NotPassed','Democracy.Cancelled','Democracy.Vetoed','Democracy.Executed')) AS concluded
+      FROM price_data.referendum_lifecycle_events AS e FINAL
+      WHERE e.pallet = 'democracy'
+      GROUP BY e.ref_index`,
     format: 'JSONEachRow',
   })
   return (await res.json<{ pallet: string; ref_index: number; concluded: number }>()).map(row => ({

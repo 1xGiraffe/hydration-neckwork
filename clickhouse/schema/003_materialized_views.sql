@@ -97,3 +97,13 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.liquidation_extrinsics_mv TO p
 -- 8,842 rows). The amount stays a raw integer string: it is a uint256 wei-scale figure
 -- the reader parses with toDecimal256(_, 0), and no float ever touches it.
 CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.money_market_liquidation_calls_mv TO price_data.money_market_liquidation_calls (`account_id` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `pool_address` String, `asset_address` String, `liquidated_collateral_amount` String, `ingested_at` DateTime) AS SELECT lower(ifNull(account_id, '')) AS account_id, block_height, event_index, block_timestamp, lower(ifNull(pool_address, '')) AS pool_address, lower(ifNull(asset_address, '')) AS asset_address, JSONExtractString(decoded_args_json, 'liquidatedCollateralAmount') AS liquidated_collateral_amount, ingested_at FROM price_data.raw_money_market_events WHERE (event_name = 'LiquidationCall') AND (ifNull(account_id, '') != '');
+-- The pallet/index pair is derived exactly as the three readers derived it for themselves,
+-- so the projection can never place an event under a different referendum than the raw
+-- scan did: `Democracy.%` names its referendum in `refIndex` and everything else (the
+-- `Referenda.%` prefix) in `index`, and both go through the same toUInt32(JSONExtractInt(…))
+-- the directory already applied. The filter is likewise the readers' own, including the
+-- JSONHas guard that keeps out the pallet's non-referendum events (Democracy.Delegated,
+-- Democracy.PreimageNoted, and the one Democracy.Vetoed, which carries a proposal hash
+-- rather than a refIndex) and the Democracy.Voted exclusion that keeps 53,327 vote events
+-- out of a lifecycle table.
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.referendum_lifecycle_events_mv TO price_data.referendum_lifecycle_events (`pallet` LowCardinality(String), `ref_index` UInt32, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `args_json` String, `ingested_at` DateTime) AS SELECT if(event_name LIKE 'Democracy.%', 'democracy', 'opengov') AS pallet, toUInt32(if(event_name LIKE 'Democracy.%', JSONExtractInt(args_json, 'refIndex'), JSONExtractInt(args_json, 'index'))) AS ref_index, block_height, event_index, extrinsic_index, block_timestamp, event_name, args_json, ingested_at FROM price_data.raw_events WHERE ((event_name LIKE 'Referenda.%') AND JSONHas(args_json, 'index')) OR ((event_name LIKE 'Democracy.%') AND (event_name != 'Democracy.Voted') AND JSONHas(args_json, 'refIndex'));

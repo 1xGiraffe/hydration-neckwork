@@ -255,3 +255,24 @@ CREATE TABLE IF NOT EXISTS price_data.liquidation_extrinsics (`block_height` UIn
 -- runtime state, while the schema is static, so both stay read-time filters over the
 -- pool_address/asset_address columns this table carries (as for money_market_latest_positions).
 CREATE TABLE IF NOT EXISTS price_data.money_market_liquidation_calls (`account_id` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `pool_address` String, `asset_address` String, `liquidated_collateral_amount` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (account_id, block_height, event_index) SETTINGS index_granularity = 1024;
+-- Every referendum lifecycle event either governance pallet emitted, keyed by the
+-- referendum it names (MV-fed from raw_events). The referendum detail page, the referenda
+-- directory and the title fetcher's inventory all selected these rows with
+-- `event_name LIKE 'Referenda.%'` / `'Democracy.%'` over the whole of raw_events. A LIKE
+-- cannot use the set(200) skip index on event_name the way an IN list can, so every one of
+-- those reads scanned the table end to end and decompressed the ZSTD(6) args_json of all
+-- 36M+ rows to evaluate JSONExtractInt(args_json,'index') — 1.38 TiB and 324 CPU-seconds
+-- across three days' 4,164 detail-page reads alone, plus 357 GiB for the inventory.
+-- ORDER BY is referendum-first because a detail page names exactly one (pallet, ref_index),
+-- which makes it a point lookup; the directory and the inventory group by that same prefix
+-- and read the whole table, which is three granules. ref_index is functionally determined
+-- by the event, so appending (block_height, event_index) — the event identity in raw_events
+-- — makes the key unique per source row and therefore a sound replacement key.
+-- index_granularity = 1024 so the referendum prefix can prune at this row count (precedent:
+-- governance_vote_calls); PARTITION BY tuple() because 2,646 rows over the ~55 monthly
+-- partitions they span would be near-empty parts and no read is time-bounded (precedent:
+-- dust_lost_events, liquidation_extrinsics, money_market_liquidation_calls).
+-- args_json is carried rather than decoded because its consumers are open-ended: the page
+-- reads `tally` (ayes/nays/support) off whichever event last published one, `track` and
+-- `proposal.hash` off Referenda.Submitted, and the whole 2,646-row payload is 361 KiB.
+CREATE TABLE IF NOT EXISTS price_data.referendum_lifecycle_events (`pallet` LowCardinality(String), `ref_index` UInt32, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `args_json` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (pallet, ref_index, block_height, event_index) SETTINGS index_granularity = 1024;
