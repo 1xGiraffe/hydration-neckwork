@@ -11060,13 +11060,21 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       : Promise.resolve([])
 
     // Money market: supply/borrow/repay/withdraw/liquidation on the asset's reserve.
-    // For an aToken (aPRIME 1043) the reserve is the UNDERLYING asset (PRIME 43) —
-    // the MM activity for the aToken IS the supply/withdraw flow on that reserve.
+    // The reserve is often not the queried id. For an aToken (aPRIME 1043) it is the
+    // UNDERLYING asset (PRIME 43) — the MM activity for the aToken IS the
+    // supply/withdraw flow on that reserve. For a main asset whose collateral is a
+    // pool share it is the SHARE token: GDOT 69's reserve is 2-Pool-GDOT 690, so
+    // resolving only the direct id left GDOT, GETH and the HUSD* pages with no
+    // money-market rows at all.
     // Filter by the reserve's ERC20 address in SQL so low-volume reserves aren't
     // starved by a global recency window.
-    const mmReserveId = ATOKEN_UNDERLYING_ID[assetId] ?? assetId
+    // A row displays the queried asset and carries one raw amount, so a reserve only
+    // qualifies while its units ARE the queried asset's: 2-Pool-PRIME carries 18
+    // decimals where PRIME carries 6, and no single row can hold both bases.
     const mmP: Promise<ActivityRow[]> = wantMm ? (async () => {
-      const reserveAddrs = mmReserveAddressForAsset(mmReserveId)
+      const reserveAddrs = [...mmReserveScope(assetId).byAddress]
+        .filter(([, decimals]) => decimals === asset(assetId).decimals)
+        .map(([address]) => address)
       const mmValueFilter = eventValueFilterSql('{assetId:UInt32}', `if(event_name='LiquidationCall', JSONExtractString(decoded_args_json,'liquidatedCollateralAmount'), amount)`, 'block_timestamp', fixedAssetFilters, prices, 'asset_mm_price')
       const res = await client.query({
         query: `SELECT block_height, event_index, toString(block_timestamp) AS ts, event_name, account_id, asset_address, pool_address,
@@ -15456,7 +15464,7 @@ const primaryMmPools = (): string[] => MM_MARKETS.filter(m => m.role === 'primar
 // Decimals are per candidate, not per page — 2-Pool-PRIME carries 18 where PRIME
 // carries 6 — so each address keeps its own, and amounts are reported in the widest.
 export interface MmReserveScope { priceId: number; decimals: number; byAddress: Map<string, number> }
-function mmReserveScope(assetId: number): MmReserveScope {
+export function mmReserveScope(assetId: number): MmReserveScope {
   const priceId = historicalPriceAssetId(assetId)
   const direct = ATOKEN_UNDERLYING_ID[assetId] ?? assetId
   const candidates = new Set<number>([assetId, direct,
