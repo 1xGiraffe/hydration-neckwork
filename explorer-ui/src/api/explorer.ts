@@ -30,8 +30,13 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   return response.json() as Promise<T>
 }
 
-// Authenticated JSON. A 401 means the session died server-side (expired,
-// revoked) — drop it locally so the UI falls back to logged-out everywhere.
+// Authenticated JSON. A 401 on a request that actually carried a bearer token
+// means THAT session died server-side (expired, revoked) — drop it locally so
+// the UI falls back to logged-out everywhere. Never clear on a 401 from
+// /user/auth/* though: challenge/verify are pre-auth (never carry the session
+// they'd be clearing), so a bad-signature verify during an account SWITCH must
+// not log the still-valid original session out across every tab; logout
+// clears its own session unconditionally in its caller regardless of this.
 async function authedJson<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const token = getSession()?.token
   const response = await fetch(`/api${path}`, {
@@ -39,7 +44,7 @@ async function authedJson<T>(method: string, path: string, body?: unknown, signa
     headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
-  if (response.status === 401) setSession(null)
+  if (response.status === 401 && token && !path.startsWith('/user/auth/')) setSession(null)
   if (!response.ok) {
     const errBody = await response.json().catch(() => null) as { error?: string; message?: string } | null
     throw new ApiError(response.status, errBody?.message || errBody?.error || `${response.status} ${response.statusText}`)
