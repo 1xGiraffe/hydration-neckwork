@@ -329,9 +329,17 @@ svg { display: block; }
 .drawer-sec { padding: 10px 10px; border-bottom: 1px solid var(--separator); }
 .drawer-sec:last-child { border-bottom: 0; }
 .drawer-sec .sec-lbl { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); padding: 6px 12px 8px; }
-.drawer-sec > a { display: block; padding: 11px 12px; border-radius: 10px; font-size: 15px; font-weight: 500; color: var(--text-medium); transition: color 130ms, background 130ms; }
-.drawer-sec > a:hover { color: var(--text-high); background: var(--panel-hover); }
+/* .drawer-row is the button equivalent of a plain nav `a` above (Log out has
+   no route to link to), reset to the same look. */
+.drawer-sec > a, .drawer-sec > button.drawer-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; box-sizing: border-box; text-align: left;
+  padding: 11px 12px; border-radius: 10px; font-size: 15px; font-weight: 500; color: var(--text-medium);
+  background: transparent; border: none; font-family: inherit; cursor: pointer;
+  transition: color 130ms, background 130ms;
+}
+.drawer-sec > a:hover, .drawer-sec > button.drawer-row:hover { color: var(--text-high); background: var(--panel-hover); }
 .drawer-sec > a.active { color: var(--accent); background: var(--accent-soft); }
+.drawer-connect-btn { width: 100%; justify-content: center; height: 40px; }
 /* bottom drawer section: the live + theme controls (moved out of the topbar
    on mobile) sit side by side as regular pills */
 .drawer-sec.drawer-controls { display: flex; align-items: center; gap: 10px; padding: 14px 12px; }
@@ -358,6 +366,44 @@ svg { display: block; }
 .theme-toggle .ic-sun { display: block; }
 .theme-toggle .ic-moon { display: none; }
 .theme-toggle svg { width: 16px; height: 16px; }
+
+/* wallet-login: Connect button / logged-in account control */
+.connect-btn { color: var(--sky); border-color: color-mix(in srgb, var(--sky) 45%, var(--border)); }
+.connect-btn:hover { color: var(--text-high); border-color: var(--sky); background: var(--panel-hover); }
+.account-control { position: relative; }
+.account-btn {
+  display: inline-flex; align-items: center; gap: 8px; height: 34px;
+  padding: 0 12px 0 4px; border-radius: 9999px;
+  background: var(--panel); border: 1px solid var(--border); color: var(--text-medium);
+  font-size: 12.5px; transition: color 150ms, background 150ms;
+}
+.account-btn:hover { color: var(--text-high); background: var(--panel-hover); }
+.acct-avatar {
+  width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0; overflow: hidden;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 13px;
+  background: var(--bg-elev); border: 1px solid var(--border);
+}
+/* A self-authored profile name reads in a distinct italic voice, so it's never
+   mistaken for a derived address/identity label at a glance. */
+.profile-name { font-style: italic; color: var(--text-high); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.invite-badge {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px;
+  padding: 0 4px; border-radius: 9999px; background: var(--accent); color: var(--accent-on);
+  font-family: 'GeistMono'; font-size: 10px; line-height: 1; font-style: normal;
+}
+.account-menu {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 120;
+  min-width: 190px; padding: 6px; display: flex; flex-direction: column; gap: 2px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+}
+.account-menu a, .account-menu button.menu-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; box-sizing: border-box; text-align: left;
+  padding: 9px 12px; border-radius: 9px; font-size: 13px; color: var(--text-medium);
+  background: transparent; border: none; font-family: inherit; cursor: pointer;
+  transition: color 130ms, background 130ms;
+}
+.account-menu a:hover, .account-menu button.menu-row:hover { color: var(--text-high); background: var(--panel-hover); }
 
 /* live-refresh toggle */
 .live-toggle { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 12px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-medium); transition: color 150ms, background 150ms; }
@@ -420,7 +466,7 @@ svg { display: block; }
   .nav { display: none; }
   .nav-burger { display: inline-flex; }
   .topbar-right { margin-left: auto; }
-  .topbar-right .live-toggle, .topbar-right .theme-toggle { display: none; }
+  .topbar-right .live-toggle, .topbar-right .theme-toggle, .topbar-right .account-control, .topbar-right .connect-btn { display: none; }
   .topbar-search { flex: 1 1 auto; margin-left: 0; }
   .topbar-search.hidden { display: none; }
   /* Full-bleed dropdown: unposition the wrap so the absolute dropdown anchors
@@ -1663,6 +1709,26 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .swatches { display: flex; gap: 8px; flex-wrap: wrap; }
 .swatch { width: 26px; height: 26px; border-radius: 8px; border: 2px solid transparent; }
 .swatch.on { border-color: var(--text-high); }
+
+/* ConnectDialog: wallet list, account picker, signing screens (built on the
+   .dialog* skin above). */
+.dialog-hint { color: var(--text-low); font-size: 12.5px; }
+.dialog-error { padding: 10px 12px; border-radius: 10px; background: var(--red-soft); color: var(--red); font-size: 12.5px; }
+.wallet-group { display: flex; flex-direction: column; gap: 4px; }
+.wallet-group-label { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); padding: 0 2px 2px; }
+.wallet-row {
+  display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box;
+  padding: 11px 12px; border-radius: 12px; background: var(--panel); border: 1px solid var(--border);
+  color: var(--text-medium); font-size: 13px; text-align: left; text-decoration: none;
+  transition: color 130ms, background 130ms, border-color 130ms;
+}
+.wallet-row:hover { color: var(--text-high); background: var(--panel-hover); border-color: var(--sky); }
+.wallet-row:disabled { opacity: 0.6; pointer-events: none; }
+.wallet-row .wallet-name { color: var(--text-high); font-weight: 500; }
+.wallet-row .wallet-status { margin-left: auto; color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; }
+.wallet-row-install .wallet-status { color: var(--sky); }
+.wallet-row .wallet-icon { width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0; }
+.wallet-row.account-row .wallet-status { font-size: 12.5px; }
 
 /* Live mode: briefly highlight rows that were just added so it's clear which /
    how many arrived. Background pulses from an accent tint to transparent. */

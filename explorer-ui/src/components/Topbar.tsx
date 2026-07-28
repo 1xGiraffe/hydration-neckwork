@@ -4,6 +4,11 @@ import { Link, paths } from '../router'
 import { SearchBar } from './SearchBar'
 import { useLive, toggleLive } from '../live'
 import { useTheme } from '../hooks/useTheme'
+import { useSession } from '../session'
+import { useMe, useTagMapSync, logout } from '../hooks/useUser'
+import { ConnectDialog } from './ConnectDialog'
+import { AccountEmoji, ShortAddr, showIconFallback } from './ui'
+import type { AccountRef } from '../types'
 
 // Navigation: direct links plus one dropdown group (Chain) for the raw chain
 // data pages. A group's trigger navigates to its primary page (Chain → Blocks)
@@ -54,11 +59,126 @@ function ThemeToggle({ onClick }: { onClick: () => void }) {
   )
 }
 
+// The account's self-authored avatar image when it has one (cache-busted by
+// avatarVersion), else the same snakewatch/custom-icon emoji AddrPill uses
+// elsewhere, else a plain placeholder before the profile has loaded.
+function ProfileAvatar({ account }: { account?: AccountRef }) {
+  const profile = account?.profile
+  if (account && profile && profile.avatarVersion > 0) {
+    return (
+      <span className="acct-avatar" style={{ padding: 0, overflow: 'hidden' }}>
+        <img className="emoji-img" src={`/api/explorer/profile-avatar/${encodeURIComponent(account.accountId)}?v=${profile.avatarVersion}`} alt="" onError={showIconFallback} />
+        <span className="icon-fallback" style={{ display: 'none' }}>{account.emoji || '👤'}</span>
+      </span>
+    )
+  }
+  if (account) return <AccountEmoji account={account} className="acct-avatar" />
+  return <span className="acct-avatar">👤</span>
+}
+
+// Desktop compact login control: a Connect button logged out, or the account's
+// avatar + name opening a small menu (My account / Libraries / Log out) logged
+// in. Escape and an outside click close the menu, same as the drawer below.
+function AccountMenuButton({ session, account, invites, onConnect }: {
+  session: ReturnType<typeof useSession>
+  account: AccountRef | undefined
+  invites: number
+  onConnect: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const btnRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const closeOnEscape = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      setOpen(false)
+      btnRef.current?.focus()
+    }
+    const closeOnOutsideClick = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('keydown', closeOnEscape)
+    document.addEventListener('mousedown', closeOnOutsideClick)
+    return () => {
+      document.removeEventListener('keydown', closeOnEscape)
+      document.removeEventListener('mousedown', closeOnOutsideClick)
+    }
+  }, [open])
+  // Also close on a real navigation (browser back/forward), matching the
+  // topbar drawer/nav-dropdown behavior above.
+  useEffect(() => {
+    const closeOnNavigate = () => setOpen(false)
+    window.addEventListener('popstate', closeOnNavigate)
+    window.addEventListener('explorer:navigation', closeOnNavigate)
+    return () => {
+      window.removeEventListener('popstate', closeOnNavigate)
+      window.removeEventListener('explorer:navigation', closeOnNavigate)
+    }
+  }, [])
+
+  if (!session) {
+    return <button type="button" className="btn connect-btn" onClick={onConnect}>Connect</button>
+  }
+
+  return (
+    <div className="account-control" ref={rootRef}>
+      <button ref={btnRef} type="button" className="account-btn" aria-haspopup="true" aria-expanded={open} onClick={() => setOpen(o => !o)}>
+        <ProfileAvatar account={account} />
+        <span className="profile-name">{account?.profile?.name || <ShortAddr addr={session.address} />}</span>
+        {invites > 0 && <span className="invite-badge">{invites}</span>}
+      </button>
+      {open && (
+        <div className="account-menu">
+          <Link to={paths.account(session.address)} onClick={() => setOpen(false)}>My account</Link>
+          <Link to={paths.libraries()} onClick={() => setOpen(false)}>Libraries{invites > 0 && <span className="invite-badge">{invites}</span>}</Link>
+          <button type="button" className="menu-row" onClick={() => { setOpen(false); void logout() }}>Log out</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Mobile drawer login section: the same three destinations as the desktop
+// menu, as plain drawer rows — the drawer is already the expanded surface, so
+// a nested popover would be one flyout too many.
+function DrawerAccountSection({ session, invites, onConnect, onNavigate }: {
+  session: ReturnType<typeof useSession>
+  invites: number
+  onConnect: () => void
+  onNavigate: () => void
+}) {
+  if (!session) {
+    return (
+      <div className="drawer-sec">
+        <button type="button" className="btn primary drawer-connect-btn" onClick={onConnect}>Connect wallet</button>
+      </div>
+    )
+  }
+  return (
+    <div className="drawer-sec">
+      <div className="sec-lbl">Account</div>
+      <Link to={paths.account(session.address)} onClick={onNavigate}>My account</Link>
+      <Link to={paths.libraries()} onClick={onNavigate}>Libraries{invites > 0 && <span className="invite-badge">{invites}</span>}</Link>
+      <button type="button" className="drawer-row" onClick={() => { onNavigate(); void logout() }}>Log out</button>
+    </div>
+  )
+}
+
 export function Topbar({ route }: { route: Route }) {
+  // Pushes the viewer's tag map into the resolution store — mounted here once
+  // so every account pill on every page resolves through it.
+  useTagMapSync()
+  const session = useSession()
+  const me = useMe()
+  const account = me.data?.account
+  const invites = me.data?.invites.length ?? 0
   const live = useLive()
   const { toggle: toggleTheme } = useTheme()
   const isDashboard = route.name === 'dashboard'
   const [drawer, setDrawer] = useState(false)
+  const [connectOpen, setConnectOpen] = useState(false)
   const drawerTriggerRef = useRef<HTMLButtonElement>(null)
   // Which desktop dropdown is open (by group label), or null. Driven by JS rather
   // than :hover/:focus-within so only one is ever open, and a click closes it.
@@ -151,6 +271,7 @@ export function Topbar({ route }: { route: Route }) {
             <span className="dot" /><span className="lab">{live ? 'Live' : 'Paused'}</span>
           </button>
           <ThemeToggle onClick={toggleTheme} />
+          <AccountMenuButton session={session} account={account} invites={invites} onConnect={() => setConnectOpen(true)} />
           <button ref={drawerTriggerRef} className="nav-burger" onClick={() => setDrawer(true)} aria-label="Open menu" aria-expanded={drawer} aria-haspopup="dialog">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
           </button>
@@ -169,6 +290,7 @@ export function Topbar({ route }: { route: Route }) {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
               </button>
             </div>
+            <DrawerAccountSection session={session} invites={invites} onConnect={() => { setDrawer(false); setConnectOpen(true) }} onNavigate={() => setDrawer(false)} />
             <div className="drawer-sec">
               <div className="sec-lbl">Explore</div>
               {NAV_LINKS.map(it => (
@@ -192,6 +314,7 @@ export function Topbar({ route }: { route: Route }) {
           </nav>
         </div>
       )}
+      <ConnectDialog open={connectOpen} onOpenChange={setConnectOpen} />
     </>
   )
 }
