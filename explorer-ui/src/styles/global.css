@@ -614,6 +614,12 @@ svg { display: block; }
 .panel-head .t { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 17px; letter-spacing: 0; }
 .panel-head a { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
 .panel-head a:hover { color: var(--accent); }
+/* An open account-picker dropdown (Invites, tag member editor) is an absolutely
+   positioned child that pokes past the panel's own bottom edge — exempt the
+   panel from its own corner-clipping overflow for exactly as long as the
+   dropdown is in the DOM, so it floats over the panel instead of being cut off
+   at its border. */
+.panel:has(.acct-picker-results) { overflow: visible; }
 
 /* ============ TABLE ============ */
 .panel:has(> .tbl) { overflow-x: auto; }
@@ -1789,9 +1795,13 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .acct-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acct-chip-x { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; color: var(--text-low); font-size: 13px; line-height: 1; }
 .acct-chip-x:hover { color: var(--text-high); background: var(--panel-hover); }
+/* Same background/border/shadow/z-index recipe as .search-results (the page
+   search dropdown) — a solid elevated surface that overlaps whatever panel it
+   sits in, not var(--panel)'s translucent tint (meant for a wash OVER content,
+   not a dropdown that needs to read as opaque). */
 .acct-picker-results {
-  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 30; overflow: hidden;
-  background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow, 0 8px 24px rgba(0,0,0,0.35));
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 120; overflow: hidden;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 16px 40px rgba(0,0,0,0.45);
 }
 .acct-picker-row {
   display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px;
