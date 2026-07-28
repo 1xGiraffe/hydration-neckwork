@@ -3,7 +3,7 @@ import type {
   ExplorerStats, IndexerStatus, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   TransferRow, EventRow, TradeRow, ActivityRow, MoneyMarketResponse, AssetDetail, HoldersResponse,
   AddressDetail, AddressBalance, CloseAccountsResponse, TagDetail, SearchResult, AssetListItem, TopAccountRow, AccountsPage, DailyPoint, Tag,
-  AccountRef, AssetRef, HdxDashboard, HdxCohort, HdxLockType, HdxUnlockBucket, HdxDailyFlow, HdxMover,
+  AccountRef, AssetRef, AssetLiquidationDay, AssetLiquidationTotal, HdxDashboard, HdxCohort, HdxLockType, HdxUnlockBucket, HdxDailyFlow, HdxMover,
   HollarDashboard, HollarCollateral, HollarArbDay, HollarTradeDay, HollarPool, HollarPegPoint,
   TradeDetail as TradeDetailResponse,
 } from '../../src/types'
@@ -51,6 +51,33 @@ const ASSETS: MAsset[] = [
 const assetById = new Map(ASSETS.map(a => [a.assetId, a]))
 function aref(a: MAsset): AssetRef { return { assetId: a.assetId, symbol: a.symbol, name: a.name, decimals: a.decimals, parachainId: a.parachainId } }
 function raw(v: number, dec: number): string { return BigInt(Math.round(v * 1e6)).toString() + '0'.repeat(Math.max(0, dec - 6)) }
+
+/* ---------- money-market liquidations ---------- */
+// Primary-market reserves. USDC, vDOT and aUSDT are reserves that have never been
+// liquidated, so the asset card's Liquidated row is exercised at zero as well as
+// with history. Days land on the asset's own price dates, as the real API's
+// day buckets do.
+const MOCK_MM_RESERVES = new Set([5, 10, 22, 15, 19, 1002])
+const MOCK_LIQUIDATED_ASSETS = new Set([5, 10, 19])
+function mockLiquidationDays(a: MAsset, priceDates: string[]): AssetLiquidationDay[] {
+  if (!MOCK_LIQUIDATED_ASSETS.has(a.assetId)) return []
+  const r = rng(a.assetId * 977 + 3)
+  const out: AssetLiquidationDay[] = []
+  priceDates.forEach((date, i) => {
+    if (i % 11 !== 3) return
+    const roll = r()
+    const tokens = (0.2 + roll * 4) * 1000 / a.price
+    out.push({ date, valueUsd: +(tokens * a.price).toFixed(2), amount: raw(tokens, a.decimals), count: 1 + Math.floor(roll * 4) })
+  })
+  return out
+}
+function mockLiquidationTotal(days: AssetLiquidationDay[]): AssetLiquidationTotal {
+  return {
+    valueUsd: days.reduce((s, d) => s + d.valueUsd, 0),
+    amount: days.reduce((s, d) => s + BigInt(d.amount), 0n).toString(),
+    count: days.reduce((s, d) => s + d.count, 0),
+  }
+}
 
 /* ---------- accounts ---------- */
 function acc(accountId: string, address: string, emoji: string, tag: AccountRef['tag'] = null, identity: AccountRef['identity'] = null): AccountRef {
@@ -855,7 +882,12 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       const totalUsd = ACCS.reduce((s, _ac, i) => s + (i + 1) * 12000, 0)
       const priceSeries = series(a.assetId * 13 + 1, 180, a.price)
       const priceDates = priceSeries.map((_, i) => new Date(MOCK_NOW_MS - (priceSeries.length - 1 - i) * 86_400_000).toISOString().slice(0, 10))
-      return { asset: { ...aref(a), price: a.price, change24h: a.ch / 100, change7d: a.ch7d / 100, type: a.type, amountUsd: totalUsd }, holderCount: ACCS.length, totalUsd, priceSeries, priceDates } satisfies AssetDetail
+      const days = mockLiquidationDays(a, priceDates)
+      return {
+        asset: { ...aref(a), price: a.price, change24h: a.ch / 100, change7d: a.ch7d / 100, type: a.type, amountUsd: totalUsd },
+        holderCount: ACCS.length, totalUsd, priceSeries, priceDates,
+        liquidations: MOCK_MM_RESERVES.has(a.assetId) ? { decimals: a.decimals, days, total: mockLiquidationTotal(days) } : null,
+      } satisfies AssetDetail
     },
   },
   {

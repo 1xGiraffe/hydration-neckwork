@@ -80,6 +80,15 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
               <div className="dt">Price</div><div className="dd mono">{F.priceUsd(a.price)} <span style={{ color: chCol(a.change24h), marginLeft: 8 }}>{F.pct(a.change24h)}</span>{emaNow != null && <span className="mono ema-tag">EMA7 {F.priceUsd(emaNow)}</span>}</div>
               <div className="dt">Holders</div><div className="dd num">{F.int(data.holderCount)}</div>
               <div className="dt">TVL</div><div className="dd mono">{F.usd(data.totalUsd)}</div>
+              {/* Collateral seized from borrowers in the money market, over the
+                  asset's full history. Present for every asset the market holds or
+                  has held — a reserve that has never been liquidated reads $0. */}
+              {data.liquidations && <>
+                <div className="dt">Liquidated</div>
+                <div className="dd mono">{F.usd(data.liquidations.total.valueUsd)}
+                  <span className="muted" style={{ marginLeft: 8 }}>{F.amount(data.liquidations.total.amount, data.liquidations.decimals)} {a.symbol}</span>
+                </div>
+              </>}
             </div></div>
 
             {data.priceSeries.length > 1 && (
@@ -87,7 +96,8 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
                 <div className="sec-title" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>Price
                   <a className="ext-link" style={{ marginLeft: 'auto', textTransform: 'none', letterSpacing: 0 }} href={preisPairUrl(assetId)} target="_blank" rel="noopener">Open in preis ↗</a>
                 </div>
-                <PriceChart data={data.priceSeries} dates={data.priceDates} price={a.price} change24h={a.change24h} />
+                <PriceChart data={data.priceSeries} dates={data.priceDates} price={a.price} change24h={a.change24h}
+                  liquidations={data.liquidations} asset={a} />
               </>
             )}
 

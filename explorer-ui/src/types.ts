@@ -566,12 +566,27 @@ export interface MoneyMarketResponse {
   positions: MoneyMarketRow[]
 }
 
+// One day of collateral seized from borrowers in the primary money market:
+// `amount` is the raw token amount, `valueUsd` its value at the time it happened.
+export interface AssetLiquidationDay { date: string; valueUsd: number; amount: string; count: number }
+export interface AssetLiquidationTotal { valueUsd: number; amount: string; count: number }
+export interface AssetLiquidations {
+  // The basis every `amount` here is expressed in — not necessarily the page
+  // asset's own, since the reserve can be a pool-share token with different
+  // decimals (2-Pool-PRIME 18 vs PRIME 6). Format amounts with THIS.
+  decimals: number
+  days: AssetLiquidationDay[]
+  total: AssetLiquidationTotal
+}
+
 export interface AssetDetail {
   asset: AssetListItem
   holderCount: number
   totalUsd: number
   priceSeries: number[]
   priceDates?: string[]
+  // Absent/null unless the asset is or has been a primary money-market reserve.
+  liquidations?: AssetLiquidations | null
 }
 
 export interface HdxCohort { key: string; label: string; minPct: number; minHdx: number; accounts: number; totalHdx: number }

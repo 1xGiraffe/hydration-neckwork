@@ -1358,6 +1358,15 @@ svg { display: block; }
 .apx-tip .t-d { color: var(--text-low); }
 .apx-tip .t-p { color: var(--text-high); font-weight: 600; }
 .apx-tip .t-e { color: var(--lavender); }
+/* One crosshair reads price AND the day's liquidation. The tip is a single nowrap
+   row, so the liquidation takes a line of its own (`flex-basis: 100%` needs the
+   wrap) — keeping all four values on one line would push the tip past the card
+   edge on a 390px phone. */
+.apx-tip:has(.t-liq) { flex-wrap: wrap; row-gap: 3px; }
+/* The same red the bars themselves take (see BAR_COLOR in PriceChart), so the line
+   and the bar it describes are recognisably one thing. */
+.apx-tip .t-liq { flex-basis: 100%; color: var(--cat-bad); }
+.apx-tip .t-liq-n { color: var(--text-low); }
 /* value-history event markers: per-marker --mk carries the kind color. The
    dashed drop-line stays faint so the value line keeps reading first; the cap
    is the interactive bit (hover → clamped tooltip, click → activity detail). */
