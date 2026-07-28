@@ -5,6 +5,7 @@ import type {
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail,
   ValueEvent, ReferendumDetail,
   LibrarySummaryRef, LibraryDetailResponse, LibraryTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
+  AccountRef,
 } from '../types'
 import { getSession, setSession } from '../session'
 
@@ -188,6 +189,10 @@ export const api = {
   // Public, shared-cacheable tag-library directory — no auth, no per-viewer
   // fields (subscribed etc. come only from the authenticated userApi.library).
   libraries: (signal?: AbortSignal) => getJson<LibrarySummaryRef[]>('/explorer/libraries', signal),
+  // Display refs for wallet addresses (connect dialog): input order, null per
+  // unparseable entry, canonical Polkadot/H160 display form + identity/profile.
+  accountRefs: (addresses: string[], signal?: AbortSignal) =>
+    getJson<(AccountRef | null)[]>(withQuery('/explorer/account-refs', { addresses: addresses.join(',') }), signal),
   library: (id: string, signal?: AbortSignal) => getJson<LibraryDetailResponse>(`/explorer/library/${encodeURIComponent(id)}`, signal),
   addressLibraries: (address: string, signal?: AbortSignal) => getJson<LibrarySummaryRef[]>(`/explorer/address/${encodeURIComponent(address)}/libraries`, signal),
 }

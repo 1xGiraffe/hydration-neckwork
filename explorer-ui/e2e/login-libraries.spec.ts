@@ -40,7 +40,7 @@ async function loginFlow(page: Page): Promise<void> {
   await expect(walletRow).toContainText('Installed')
   await walletRow.click()
 
-  await expect(page.locator('.account-btn .profile-name')).toHaveText('E2E User')
+  await expect(page.locator('.account-btn .account-label')).toHaveText('E2E User')
 
   const stored = await page.evaluate(() => window.localStorage.getItem('explorer-session'))
   const session = stored ? (JSON.parse(stored) as { token?: string }) : null
@@ -111,7 +111,9 @@ test('create a library, tag a known address, and reorder', async ({ page, userMo
 
   const tagPanel = page.locator('.panel', { hasText: 'E2E Tag' })
   await expect(tagPanel).toContainText('No accounts yet')
-  await tagPanel.locator('textarea').fill(BINANCE_ADDRESS)
+  // The account picker chips an address-shaped Enter, then Add submits.
+  await tagPanel.locator('.acct-picker input').fill(BINANCE_ADDRESS)
+  await tagPanel.locator('.acct-picker input').press('Enter')
   await tagPanel.locator('button', { hasText: 'Add' }).click()
   await expect(tagPanel.locator('tbody a.addr-pill')).toHaveCount(1)
 

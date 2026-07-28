@@ -80,3 +80,21 @@ export async function connectEvm(provider: Eip1193Provider): Promise<string[]> {
 export async function signEvm(provider: Eip1193Provider, address: string, message: string): Promise<string> {
   return await provider.request({ method: 'personal_sign', params: [toHexMessage(message), address] }) as string
 }
+
+// How a wallet account renders in the connect dialog — the same precedence an
+// account pill uses (profile → identity → wallet-given name), with the
+// CANONICAL display address from the server ref (Polkadot SS58 / H160), never
+// the extension's generic substrate encoding. `ref === undefined` means the
+// refs are still loading: show the wallet name alone rather than flashing the
+// raw form; `ref === null` means the lookup failed — degrade to the raw input
+// so the row is still identifiable.
+export interface AccountRowLabel { primary: string | null; address: string | null }
+export function accountRowLabel(
+  ref: { address: string; profile?: { name: string } | null; identity?: { display: string } | null } | null | undefined,
+  extensionName: string | undefined,
+  rawAddress?: string,
+): AccountRowLabel {
+  if (ref === undefined) return { primary: extensionName ?? null, address: null }
+  if (ref === null) return { primary: extensionName ?? null, address: rawAddress ?? null }
+  return { primary: ref.profile?.name || ref.identity?.display || extensionName || null, address: ref.address }
+}

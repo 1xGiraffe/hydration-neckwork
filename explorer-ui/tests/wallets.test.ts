@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { listSubstrateWallets, discoverEvmProviders, toHexMessage } from '../src/wallets'
+import { listSubstrateWallets, discoverEvmProviders, toHexMessage, accountRowLabel } from '../src/wallets'
 
 // jsdom/happy-dom aren't project dependencies, so there is no ambient `window`
 // under the default Node test environment. Node's own EventTarget already
@@ -45,5 +45,23 @@ describe('wallet registry', () => {
 
   it('hex-encodes a message for signRaw/personal_sign', () => {
     expect(toHexMessage('ab')).toBe('0x6162')
+  })
+
+  it('labels a picker row like an account pill: profile → identity → wallet name → address', () => {
+    const ref = {
+      accountId: '0x' + 'ab'.repeat(32), address: '15DajYeqgb4ADkb8scVCcNaXjfM1SV9PLvqjNDkpH6kBDRLZ',
+      emoji: '🦊', tag: null, identity: null, profile: null,
+    }
+    // Canonical display address always comes from the ref, never the raw input.
+    expect(accountRowLabel({ ...ref, profile: { name: 'Maf', avatarVersion: 0 } }, 'Wallet 1'))
+      .toEqual({ primary: 'Maf', address: ref.address })
+    expect(accountRowLabel({ ...ref, identity: { display: 'Chain Name', verified: true, email: '', web: '', twitter: '' } }, 'Wallet 1'))
+      .toEqual({ primary: 'Chain Name', address: ref.address })
+    expect(accountRowLabel(ref, 'Wallet 1')).toEqual({ primary: 'Wallet 1', address: ref.address })
+    // No name anywhere: the address IS the primary label, not shown twice.
+    expect(accountRowLabel(ref, undefined)).toEqual({ primary: null, address: ref.address })
+    // Refs unavailable (endpoint down): degrade to the wallet name + raw input.
+    expect(accountRowLabel(null, 'Wallet 1', '5FHneW46...')).toEqual({ primary: 'Wallet 1', address: '5FHneW46...' })
+    expect(accountRowLabel(undefined, undefined, '5FHneW46...')).toEqual({ primary: null, address: null })
   })
 })

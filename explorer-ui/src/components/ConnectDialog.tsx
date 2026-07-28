@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
-import { userApi } from '../api/explorer'
+import { api, userApi } from '../api/explorer'
 import { setSession } from '../session'
 import {
   listSubstrateWallets, connectSubstrate, signSubstrate,
-  discoverEvmProviders, connectEvm, signEvm,
+  discoverEvmProviders, connectEvm, signEvm, accountRowLabel,
 } from '../wallets'
 import type { InjectedAccount, EvmProviderDetail, Eip1193Provider } from '../wallets'
-import { ShortAddr } from './ui'
+import { AccountEmoji, ShortAddr } from './ui'
+import type { AccountRef } from '../types'
 
 // The extension handle or EVM provider a chosen address will sign with, kept
 // around from the connect step so the account picker and a signing retry both
@@ -40,6 +41,10 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [evmProviders, setEvmProviders] = useState<EvmProviderDetail[]>([])
+  // Display refs keyed by the RAW extension address: undefined = still
+  // loading (the raw substrate encoding is never flashed), null = lookup
+  // failed (degrade to the raw form), ref = canonical pill-style display.
+  const [refs, setRefs] = useState<Record<string, AccountRef | null>>({})
 
   // Bumped on every reset (dialog close/reopen, "choose a different wallet")
   // so an in-flight doSign can tell it's been superseded. Closing the dialog
@@ -57,7 +62,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   if (open !== wasOpen) {
     setWasOpen(open)
     if (open) {
-      setStage('wallets'); setPending(null); setAccounts([]); setAddress(null); setError(null); setBusy(false)
+      setStage('wallets'); setPending(null); setAccounts([]); setAddress(null); setError(null); setBusy(false); setRefs({})
     }
   }
   // Refs can't be touched during render (only event handlers/effects), so the
@@ -79,6 +84,31 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   }, [open])
 
   const substrateWallets = useMemo(() => (open ? listSubstrateWallets() : []), [open])
+
+  // Resolve wallet addresses to display refs (canonical Polkadot/H160 form +
+  // identity/profile) so the picker and the signing screen show accounts the
+  // way pills do everywhere else. Best-effort: on failure every entry becomes
+  // null and the rows degrade to wallet name + raw address.
+  function loadRefs(addresses: string[]) {
+    const attempt = attemptRef.current
+    void api.accountRefs(addresses)
+      .then(found => {
+        if (attemptRef.current !== attempt) return
+        setRefs(prev => {
+          const next = { ...prev }
+          addresses.forEach((a, i) => { next[a] = found[i] ?? null })
+          return next
+        })
+      })
+      .catch(() => {
+        if (attemptRef.current !== attempt) return
+        setRefs(prev => {
+          const next = { ...prev }
+          for (const a of addresses) next[a] = null
+          return next
+        })
+      })
+  }
 
   async function doSign(next: Pending, addr: string) {
     const attempt = attemptRef.current
@@ -110,6 +140,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
       const { accounts: found, ext } = await connectSubstrate(id)
       const next: Pending = { kind: 'substrate', ext }
       setPending(next)
+      loadRefs(found.map(a => a.address))
       if (found.length === 1) {
         setAddress(found[0].address)
         setStage('signing')
@@ -129,6 +160,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
       const addrs = await connectEvm(detail.provider)
       const next: Pending = { kind: 'evm', provider: detail.provider }
       setPending(next)
+      loadRefs(addrs)
       if (addrs.length === 1) {
         setAddress(addrs[0])
         setStage('signing')
@@ -166,7 +198,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog">
           <div className="dialog-head">
-            <Dialog.Title asChild><h2>Connect a wallet</h2></Dialog.Title>
+            <Dialog.Title asChild><h2>Log in with your wallet</h2></Dialog.Title>
             <Dialog.Close asChild>
               <button className="theme-toggle" aria-label="Close">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
@@ -210,20 +242,33 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
             {stage === 'accounts' && (
               <>
                 <div className="wallet-group">
-                  {accounts.map(a => (
-                    <button key={a.address} type="button" className="wallet-row account-row" onClick={() => pickAccount(a.address)}>
-                      {a.name && <span className="wallet-name">{a.name}</span>}
-                      <span className="wallet-status mono"><ShortAddr addr={a.address} /></span>
-                    </button>
-                  ))}
+                  {accounts.map(a => {
+                    const ref = refs[a.address]
+                    const label = accountRowLabel(ref, a.name, a.address)
+                    return (
+                      <button key={a.address} type="button" className="wallet-row account-row" onClick={() => pickAccount(a.address)}>
+                        {ref
+                          ? <AccountEmoji account={ref} className="emoji id account-row-emoji" />
+                          : <span className="emoji id account-row-emoji">👤</span>}
+                        {label.primary && <span className="wallet-name">{label.primary}</span>}
+                        <span className="wallet-status mono">{label.address ? <ShortAddr addr={label.address} /> : '···'}</span>
+                      </button>
+                    )
+                  })}
                 </div>
                 <button type="button" className="btn" onClick={backToWallets}>Back</button>
               </>
             )}
 
-            {stage === 'signing' && address && (
-              <p className="dialog-hint mono"><ShortAddr addr={address} /></p>
-            )}
+            {stage === 'signing' && address && (() => {
+              const label = accountRowLabel(refs[address], accounts.find(a => a.address === address)?.name, address)
+              return (
+                <p className="dialog-hint">
+                  {label.primary && <span className="signing-account-name">{label.primary} </span>}
+                  <span className="mono">{label.address ? <ShortAddr addr={label.address} /> : '···'}</span>
+                </p>
+              )
+            })()}
           </div>
           {stage === 'signing' && error && (
             <div className="dialog-foot">

@@ -71,14 +71,14 @@ function ProfileAvatar({ account }: { account?: AccountRef }) {
   const profile = account?.profile
   if (account && profile && profile.avatarVersion > 0) {
     return (
-      <span className="acct-avatar" style={{ padding: 0, overflow: 'hidden' }}>
+      <span className="topbar-avatar" style={{ padding: 0, overflow: 'hidden' }}>
         <img className="emoji-img" src={`/api/explorer/profile-avatar/${encodeURIComponent(account.accountId)}?v=${profile.avatarVersion}`} alt="" onError={showIconFallback} />
         <span className="icon-fallback" style={{ display: 'none' }}>{account.emoji || '👤'}</span>
       </span>
     )
   }
-  if (account) return <AccountEmoji account={account} className="acct-avatar" />
-  return <span className="acct-avatar">👤</span>
+  if (account) return <AccountEmoji account={account} className="topbar-avatar" />
+  return <span className="topbar-avatar">👤</span>
 }
 
 // Desktop compact login control: a Connect button logged out, or the account's
@@ -124,14 +124,18 @@ function AccountMenuButton({ session, account, invites, onConnect }: {
   }, [])
 
   if (!session) {
-    return <button type="button" className="btn connect-btn" onClick={onConnect}>Connect</button>
+    return <button type="button" className="btn connect-btn" onClick={onConnect}>Log in</button>
   }
 
   return (
     <div className="account-control" ref={rootRef}>
       <button ref={btnRef} type="button" className="account-btn" aria-haspopup="true" aria-expanded={open} onClick={() => setOpen(o => !o)}>
         <ProfileAvatar account={account} />
-        <span className="profile-name">{account?.profile?.name || <ShortAddr addr={session.address} />}</span>
+        {/* Same precedence a pill uses (minus tag/module — this IS the viewer):
+            profile name, else on-chain identity, else the canonical short
+            address. Plain weight/upright — the italic profile voice belongs to
+            pills, not chrome. */}
+        <span className="account-label">{account?.profile?.name || account?.identity?.display || <ShortAddr addr={account?.address ?? session.address} />}</span>
         {invites > 0 && <span className="invite-badge">{invites}</span>}
       </button>
       {open && (
@@ -157,7 +161,7 @@ function DrawerAccountSection({ session, invites, onConnect, onNavigate }: {
   if (!session) {
     return (
       <div className="drawer-sec">
-        <button type="button" className="btn primary drawer-connect-btn" onClick={onConnect}>Connect wallet</button>
+        <button type="button" className="btn primary drawer-connect-btn" onClick={onConnect}>Log in</button>
       </div>
     )
   }
