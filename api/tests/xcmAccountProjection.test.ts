@@ -158,6 +158,51 @@ describe('the account-scoped XCM readers use the account-first projection', () =
   })
 })
 
+// raw_xcm_activity is ordered (block_height, source_kind, source_index, name), so the
+// outbound page's `block_height DESC, event_index DESC` can never be a readable key order.
+// The cost was never the sort: it was decompressing the ZSTD(6) args_json for every
+// candidate row before the LIMIT threw it away — 2.15M rows / 755.27 MiB / 306.94 MiB peak
+// to return one 25,000-row page, against 100.02 MiB / 44.51 MiB peak once the page's keys
+// are resolved first, for byte-identical JSON.
+//
+// Every assertion below also pins HOW MANY sites it found, so a rename cannot quietly
+// turn a "does not contain" guard into one that asserts nothing.
+describe('the outbound XCM page reads its payload for one page of keys', () => {
+  // Comment lines dropped, so every count below is of code rather than of prose that
+  // happens to quote it.
+  const body = functionBody('getRecentXcm').split('\n').filter(line => !line.trim().startsWith('//')).join('\n')
+
+  it('selects the payload once, and bounds that read by the page keys when unscoped', () => {
+    expect(occurrences(body, 'args_json')).toBe(3) // the projection, its row type, the decode
+    expect(occurrences(body, 'FROM price_data.raw_xcm_activity')).toBe(3) // payload, keys, legacy pairs
+    expect(occurrences(body, '(block_height, event_index) IN (')).toBe(1)
+    // The account-scoped page is already key-bounded through the account index, so it
+    // keeps the single read rather than resolving the same keys twice.
+    expect(occurrences(body, 'const rowBound = acctList\n        ? candidateBound')).toBe(1)
+  })
+
+  it('gives both passes one order, one limit and one row predicate', () => {
+    expect(occurrences(body, "const pageOrder = 'ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}'")).toBe(1)
+    expect(occurrences(body, '${pageOrder}')).toBe(2)
+    expect(occurrences(body, 'ORDER BY block_height DESC, event_index DESC')).toBe(1)
+    expect(occurrences(body, 'const xcmRows =')).toBe(1)
+    expect(occurrences(body, '${xcmRows}')).toBe(2)
+    // One page-size parameter for both passes: a key pass with a different limit would
+    // hand the payload pass a set that does not cover its own page.
+    expect(occurrences(body, 'query_params: { limit: pageLimit }')).toBe(1)
+    expect(occurrences(body, '{limit:UInt32}')).toBe(1)
+  })
+
+  // The cursor the deep walk pages from is the last returned row's (block, event index),
+  // so the payload pass must not be able to return a row the key pass did not choose.
+  it('keeps the payload pass on the same rows the key pass selected', () => {
+    expect(occurrences(body, "source_kind='event'")).toBe(2) // xcmRows, and the legacy-pairs read
+    expect(occurrences(body, 'AND ${xcmRows}`')).toBe(1)
+    expect(occurrences(body, 'eventIndex: last.event_index')).toBe(1)
+    expect(occurrences(body, 'row => row.eventIndex ?? -1')).toBe(1)
+  })
+})
+
 describe('the three XCM materialized views cannot drift apart', () => {
   function mvStatement(name: string): string {
     const marker = `CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.${name} `

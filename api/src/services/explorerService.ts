@@ -6977,13 +6977,33 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
       const senderRefsFilter = acctList
         ? `AND ${accountActivityRefsSql(accounts!, `event_name IN ('XTokens.TransferredAssets','PolkadotXcm.Sent')`, pageBound, pageLimit)}`
         : ''
+      // raw_xcm_activity is ordered (block_height, source_kind, source_index, name), so
+      // this page's `block_height DESC, event_index DESC` is not a readable key order and
+      // every candidate row is read and then sorted. What makes that expensive is the
+      // PAYLOAD, not the sort: args_json is ZSTD(6) and ~350 B/row, and reading it for
+      // every candidate cost 755 MiB to return one 25k page.
+      //
+      // The account-scoped page never paid that — `senderRefsFilter` already bounds the
+      // read to one page of (block_height, event_index) keys resolved from the account
+      // index. The global/window walk takes the same shape and resolves its own page of
+      // keys from this table's key columns first, so args_json is decompressed only for
+      // the rows the page returns. (block_height, event_index) is unique across every
+      // `source_kind='event'` row, so the payload pass returns exactly the key pass's
+      // rows, in the same order.
+      const pageOrder = 'ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}'
+      const xcmRows = `source_kind='event' AND name IN ('XTokens.TransferredAssets','PolkadotXcm.Sent') AND event_index IS NOT NULL`
+      const candidateBound = `${pageBound} ${senderRefsFilter} AND ${xcmRows} ${senderFilter}`
+      const rowBound = acctList
+        ? candidateBound
+        : `(block_height, event_index) IN (
+             SELECT block_height, event_index FROM price_data.raw_xcm_activity
+             WHERE ${candidateBound} ${pageOrder}
+           ) AND ${xcmRows}`
       const res = await client.query({
         query: `SELECT block_height, toString(block_timestamp) AS ts, extrinsic_index, event_index, name, args_json
                 FROM price_data.raw_xcm_activity
-                WHERE ${pageBound} ${senderRefsFilter} AND source_kind='event'
-                  AND name IN ('XTokens.TransferredAssets','PolkadotXcm.Sent')
-                  AND event_index IS NOT NULL ${senderFilter}
-                  ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
+                WHERE ${rowBound}
+                  ${pageOrder}`,
         query_params: { limit: pageLimit }, format: 'JSONEachRow',
       })
       const evs = await res.json<{ block_height: number; ts: string; extrinsic_index: number | null; event_index: number; name: string; args_json: string }>()
