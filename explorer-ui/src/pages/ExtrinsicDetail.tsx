@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
-import { useBlock, useExtrinsic, useExtrinsicActivity, useStats } from '../hooks/useExplorerData'
+import { useExtrinsic, useExtrinsicActivity, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, redirect } from '../router'
@@ -27,7 +27,13 @@ export function ExtrinsicDetail({ id }: { id: string }) {
   const { data, isLoading, isError } = useExtrinsic(id)
   // Prefer the resolved height-index id; while a 0x-hash id loads, show the short hash.
   useDocumentTitle(`Extrinsic ${data ? `${data.blockHeight}-${data.index}` : id.startsWith('0x') ? F.shortAddr(id) : id}`)
-  const block = useBlock(data?.blockHeight ?? null)
+  // "Next extrinsic" only asks whether index+1 exists in this block. Asking the
+  // sibling directly answers it in ~1–3 kB and lands under the very query key that
+  // page reads, so the arrow opens an already-loaded extrinsic; the block detail
+  // this used to come from carries every extrinsic and event in the block (5–10 kB
+  // compressed on a busy block) purely for that one chevron. A 404 on the block's
+  // last extrinsic is the answer, and 4xx is never retried (see queryRetry).
+  const next = useExtrinsic(data ? `${data.blockHeight}-${data.index + 1}` : null)
   const { data: stats } = useStats(!!data)
   const activity = useExtrinsicActivity(id, !!data)
   const now = useNow()
@@ -41,7 +47,7 @@ export function ExtrinsicDetail({ id }: { id: string }) {
 
   const args = (data?.callArgs && typeof data.callArgs === 'object') ? data.callArgs as Record<string, unknown> : {}
   const activityRows = activity.data ?? []
-  const canGoNext = !!data && !!block.data && data.index + 1 < block.data.extrinsicCount
+  const canGoNext = !!data && !!next.data
 
   return (
     <div className="wrap">

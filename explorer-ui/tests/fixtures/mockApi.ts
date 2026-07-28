@@ -72,6 +72,11 @@ const COLLATORS = [acc('0xf617ddeb11327140143ea2c663520f91c6f56d351fa2fb5cb5f2b0
 /* ---------- call/event catalogue ---------- */
 const CALLS = ['Omnipool.sell', 'Omnipool.buy', 'Router.sell', 'Tokens.transfer', 'Balances.transfer_keep_alive', 'XTokens.transfer', 'Omnipool.add_liquidity', 'Staking.stake', 'DCA.schedule', 'EVM.call']
 
+// How many extrinsics a mock block holds. Shared so every surface that walks a
+// block — the block detail, the feeds, and the extrinsic-at lookup's bounds —
+// agrees on the same block, exactly as the real API does.
+export function blockExtrinsicCount(height: number): number { return 2 + (height % 6) }
+
 function genExtrinsic(height: number, idx: number): ExtrinsicDetail {
   const r = rng(height * 31 + idx * 7)
   const call = CALLS[Math.floor(r() * CALLS.length)]
@@ -113,7 +118,7 @@ function recentExtrinsics(limit: number, signedOnly: boolean): ExtrinsicSummary[
   const out: ExtrinsicSummary[] = []
   let h = TIP
   while (out.length < limit && h > TIP - 400) {
-    const n = 2 + (h % 6)
+    const n = blockExtrinsicCount(h)
     for (let i = n - 1; i >= 0 && out.length < limit; i--) {
       const x = genExtrinsic(h, i)
       if (signedOnly && !x.signer) continue
@@ -207,7 +212,7 @@ function xcmExternalAccount(h: number): NonNullable<ActivityRow['fromAccount']> 
 }
 
 function mockBlockActivity(height: number): ActivityRow[] {
-  const n = 2 + (height % 6)
+  const n = blockExtrinsicCount(height)
   const rows = Array.from({ length: n }, (_, i) => mockExtrinsicActivity(height, i)).flat()
   rows.push(activityRowAtHeight(height))
   const aIn = ASSETS[2], aOut = ASSETS[1]
@@ -681,12 +686,12 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   {
     re: /^\/explorer\/blocks$/, fn: (_m, qs) => {
       const limit = Number(qs.get('limit') ?? 25); const offset = Number(qs.get('offset') ?? 0)
-      return Array.from({ length: limit }, (_, i) => { const h = TIP - offset - i; return { height: h, timestamp: tsAt(h), hash: hx(h, 64), author: COLLATORS[0], specVersion: 428, extrinsicCount: 2 + (h % 6), eventCount: (2 + (h % 6)) * 3 + (h % 5) } satisfies BlockSummary })
+      return Array.from({ length: limit }, (_, i) => { const h = TIP - offset - i; return { height: h, timestamp: tsAt(h), hash: hx(h, 64), author: COLLATORS[0], specVersion: 428, extrinsicCount: blockExtrinsicCount(h), eventCount: blockExtrinsicCount(h) * 3 + (h % 5) } satisfies BlockSummary })
     },
   },
   {
     re: /^\/explorer\/block\/(\d+)$/, fn: (m) => {
-      const h = Number(m[1]); const n = 2 + (h % 6)
+      const h = Number(m[1]); const n = blockExtrinsicCount(h)
       const exts = Array.from({ length: n }, (_, i) => genExtrinsic(h, i))
       const events: BlockDetail['events'] = []
       exts.forEach(x => x.events.forEach(e => events.push({ eventIndex: events.length, extrinsicIndex: x.index, name: e.name, args: e.args })))
@@ -700,7 +705,10 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   },
   { re: /^\/explorer\/block\/(\d+)\/activity$/, fn: (m) => mockBlockActivity(Number(m[1])) },
   { re: /^\/explorer\/extrinsics$/, fn: (_m, qs) => recentExtrinsics(Number(qs.get('limit') ?? 25), qs.get('signedOnly') === '1') },
-  { re: /^\/explorer\/extrinsic-at\/(\d+)\/(\d+)$/, fn: (m) => genExtrinsic(Number(m[1]), Number(m[2])) },
+  // Past the block's last index there is no extrinsic, so the fixture answers as the
+  // API does — nothing, which the callers turn into a 404. Handing back an invented
+  // extrinsic would make every block look endless to anything that pages or probes.
+  { re: /^\/explorer\/extrinsic-at\/(\d+)\/(\d+)$/, fn: (m) => Number(m[2]) < blockExtrinsicCount(Number(m[1])) ? genExtrinsic(Number(m[1]), Number(m[2])) : undefined },
   { re: /^\/explorer\/extrinsic-at\/(\d+)\/(\d+)\/activity$/, fn: (m) => mockExtrinsicActivity(Number(m[1]), Number(m[2])) },
   { re: /^\/explorer\/extrinsic\/(0x[0-9a-f]{64})$/, fn: () => genExtrinsic(12_848_613, 4) },
   { re: /^\/explorer\/extrinsic\/(0x[0-9a-f]{64})\/activity$/, fn: () => mockExtrinsicActivity(12_848_613, 4) },
@@ -757,7 +765,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       const limit = Number(qs.get('limit') ?? 25); const out: EventRow[] = []
       let h = TIP
       while (out.length < limit && h > TIP - 200) {
-        const n = 2 + (h % 6)
+        const n = blockExtrinsicCount(h)
         for (let i = n - 1; i >= 0 && out.length < limit; i--) { const x = genExtrinsic(h, i); for (const e of x.events) { out.push({ blockHeight: h, eventIndex: out.length, extrinsicIndex: x.index, timestamp: x.timestamp, name: e.name, args: e.args, decoded: !!(e as { decoded?: boolean }).decoded }); if (out.length >= limit) break } }
         h--
       }
@@ -857,7 +865,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       const limit = Number(qs.get('limit') ?? 25); const out: EventRow[] = []
       let h = TIP
       while (out.length < limit && h > TIP - 200) {
-        const n = 2 + (h % 6)
+        const n = blockExtrinsicCount(h)
         for (let i = n - 1; i >= 0 && out.length < limit; i--) { const x = genExtrinsic(h, i); for (const e of x.events) { out.push({ blockHeight: h, eventIndex: out.length, extrinsicIndex: x.index, timestamp: x.timestamp, name: e.name, args: e.args, decoded: !!(e as { decoded?: boolean }).decoded }); if (out.length >= limit) break } }
         h--
       }
@@ -1003,7 +1011,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       const limit = Number(qs.get('limit') ?? 25); const out: EventRow[] = []
       let h = TIP
       while (out.length < limit && h > TIP - 200) {
-        const n = 2 + (h % 6)
+        const n = blockExtrinsicCount(h)
         for (let i = n - 1; i >= 0 && out.length < limit; i--) { const x = genExtrinsic(h, i); for (const e of x.events) { out.push({ blockHeight: h, eventIndex: out.length, extrinsicIndex: x.index, timestamp: x.timestamp, name: e.name, args: e.args, decoded: !!(e as { decoded?: boolean }).decoded }); if (out.length >= limit) break } }
         h--
       }
