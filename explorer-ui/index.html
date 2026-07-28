@@ -24,9 +24,12 @@
          stylesheet, and since the LCP element IS this title, it paints once in its
          final form: at 390px on regular 3G, CLS 0.117 -> 0.000 and LCP 2.44s -> 1.73s.
          It reorders rather than adds bytes, so on a 400kbps link — where 71kB of font
-         is ~1.4s of the pipe — it costs ~0.4s of LCP to buy the stable layout. -->
-    <link rel="preload" href="/fonts/GazpachoMedium.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="preload" href="/fonts/GeistMonoMedium.woff2" as="font" type="font/woff2" crossorigin />
+         is ~1.4s of the pipe — it costs ~0.4s of LCP to buy the stable layout.
+         Only the `-latin` halves are preloaded: a title is Latin text, and the
+         `-ext` halves exist for the rare accented or Cyrillic name, so preloading
+         them would spend the pipe on bytes the page almost never draws. -->
+    <link rel="preload" href="/fonts/GazpachoMedium-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/GeistMonoMedium-latin.woff2" as="font" type="font/woff2" crossorigin />
     <script>
       (function () {
         try {
