@@ -618,8 +618,15 @@ svg { display: block; }
    positioned child that pokes past the panel's own bottom edge — exempt the
    panel from its own corner-clipping overflow for exactly as long as the
    dropdown is in the DOM, so it floats over the panel instead of being cut off
-   at its border. */
-.panel:has(.acct-picker-results) { overflow: visible; }
+   at its border. Lifting the clip alone isn't enough once there's a FOLLOWING
+   sibling panel to poke past (e.g. a library's second tag panel): every
+   `.panel` here is `position: static`, so plain paint order — not DOM order —
+   decides who's on top where they overlap, and a later static sibling always
+   paints over an earlier one. `position: relative` plus a z-index above any
+   sibling's (all `auto`, i.e. 0) makes THIS panel — the one actually hosting
+   the open dropdown — win that paint order instead, for exactly as long as
+   the dropdown is open.  */
+.panel:has(.acct-picker-results) { overflow: visible; position: relative; z-index: 2; }
 
 /* ============ TABLE ============ */
 .panel:has(> .tbl) { overflow-x: auto; }

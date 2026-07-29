@@ -486,6 +486,68 @@ function seedOneTagLibrary(userMock: { state: UserMockState }): void {
   })
 }
 
+// Regression for a stacking bug: lifting the host panel's own corner-clipping
+// overflow (see assertDropdownReadsLikeSearchDropdown above) is not enough
+// once there's a FOLLOWING sibling panel for the dropdown to poke past — every
+// `.panel` is `position: static`, so plain DOM/paint order (not the dropdown's
+// own z-index, which only competes within whatever stacking context it lands
+// in) decided who painted on top, and a later sibling always won. Seeds two
+// tags and a multi-result search (the default mock's own /explorer/search
+// only ever returns one hit for a bare address — not tall enough to reach the
+// second panel) so the open dropdown genuinely overlaps the second tag's
+// panel, then hit-tests every row that falls within that overlap via
+// elementFromPoint — the real, pixel-level symptom, not just "the dropdown is
+// in the DOM somewhere". Asserts the overlap set is non-empty first, so this
+// can't silently pass by testing nothing if the layout changes later.
+test('a tag picker dropdown paints over a FOLLOWING tag panel, not under it', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  userMock.state.libraries.push({
+    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+    owner: userMock.state.account, tagCount: 2, accountCount: 0, subscriberCount: 0,
+    tags: [
+      { tagId: 't1', name: 'Watch A', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '', members: [] },
+      { tagId: 't2', name: 'Watch B', color: '#f97316', icon: '🔥', displayIcon: '🔥', note: '', members: [] },
+    ],
+  })
+  const manyResults = Array.from({ length: 6 }, (_, i) => ({
+    type: 'address', value: `0x${String(i).padStart(2, '0')}${'11'.repeat(19)}`, label: `0x${String(i).padStart(2, '0')}${'11'.repeat(19)}`, emoji: '🏦',
+  }))
+  await page.route(/\/api\/explorer\/search(\?.*)?$/, route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(manyResults) }))
+
+  await page.goto('/library/lib1')
+  const panelA = page.locator('.panel', { hasText: 'Watch A' })
+  const panelB = page.locator('.panel', { hasText: 'Watch B' })
+  await panelA.locator('.acct-picker input').fill('0x')
+  await assertDropdownReadsLikeSearchDropdown(panelA)
+
+  const overlap = await page.evaluate(() => {
+    const dropdown = document.querySelector('.acct-picker-results')!
+    const rows = [...dropdown.querySelectorAll('.acct-picker-row')]
+    const panelBEl = [...document.querySelectorAll('.panel')].find(p => p.textContent?.includes('Watch B'))!
+    const bRect = panelBEl.getBoundingClientRect()
+    const overlapping = rows.filter(row => {
+      const r = row.getBoundingClientRect()
+      const cy = r.top + r.height / 2
+      return cy > bRect.top && cy < bRect.bottom
+    })
+    return overlapping.map(row => {
+      const r = row.getBoundingClientRect()
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2
+      const hit = document.elementFromPoint(cx, cy)
+      return { hitIsRow: hit === row || row.contains(hit) }
+    })
+  })
+  // The test setup itself must produce a real overlap, or the check below
+  // would trivially pass having tested nothing.
+  expect(overlap.length).toBeGreaterThan(0)
+  expect(overlap.every(r => r.hitIsRow)).toBe(true)
+
+  // Not a fluke of the second panel merely lacking its own picker: it has one
+  // too, and it's untouched — closing the first dropdown leaves the second
+  // panel fully interactive.
+  await expect(panelB.locator('.acct-picker input')).toBeVisible()
+})
+
 test('the tag member editor and the private Subscribers tab both show tabs, and the library page deep-links to Subscribers', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   seedOneTagLibrary(userMock)
