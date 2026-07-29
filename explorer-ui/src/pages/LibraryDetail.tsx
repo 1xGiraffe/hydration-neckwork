@@ -292,7 +292,7 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
                   : orderedMembers.map(m => (
                     <span
                       key={m.accountId}
-                      className={`acct-chip tag-member-chip${draggingId === m.accountId ? ' dragging' : ''}${dragOverId === m.accountId && draggingId !== m.accountId ? ' drag-over' : ''}`}
+                      className={`acct-chip tag-member-chip tag-member-chip-draggable${draggingId === m.accountId ? ' dragging' : ''}${dragOverId === m.accountId && draggingId !== m.accountId ? ' drag-over' : ''}`}
                       draggable={!chipsLocked}
                       tabIndex={0}
                       role="group"
