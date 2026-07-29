@@ -1252,6 +1252,10 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
           if (a.identity.display.toLowerCase().includes(q.toLowerCase())) out.push({ type: 'address', value: a.accountId, label: a.address, emoji: a.emoji, identity: a.identity })
         }
       }
+      // Referendum index or title, e.g. "263" or "treasury spend" — mirrors the
+      // real search's two referendum matchers.
+      if (/^\d+$/.test(q)) for (const r of MOCK_REFERENDA) if (String(r.index) === q) out.push(r)
+      if (/[a-z]/i.test(q)) for (const r of MOCK_REFERENDA) if (r.label?.toLowerCase().includes(q.toLowerCase())) out.push(r)
       return out
     },
   },
@@ -1292,6 +1296,13 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
 const mockTags: Tag[] = [
   { tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', note: 'Exchange — hot + deposit wallets', icon: '/tag-icons/kraken.jpg', memberCount: 2 },
   { tagId: 'treasury', name: 'Treasury', color: '#74C742', note: '', icon: '🏦', memberCount: 1 },
+]
+
+// Same index (263), two pallets — mirrors the real Democracy/OpenGov collision
+// the search dropdown and its route must keep distinct.
+const MOCK_REFERENDA: SearchResult[] = [
+  { type: 'referendum', value: 'opengov:263', label: 'Treasury spend for Bifrost integration', pallet: 'opengov', index: 263, status: 'deciding' },
+  { type: 'referendum', value: 'democracy:263', label: 'Treasury Council election', pallet: 'democracy', index: 263, status: 'passed' },
 ]
 
 export function mockSync<T>(path: string): T | undefined {

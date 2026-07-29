@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- exports routing/rendering helpers the tests exercise directly, alongside <SearchBar> */
 import { useState, useRef, useEffect, useId, useMemo } from 'react'
 import { api } from '../api/explorer'
 import { navigate, paths } from '../router'
@@ -17,7 +18,9 @@ type Hit = SearchResult | UserTagHit
 // human SS58/EVM form. Account links and display must use the latter.
 const srLooksAddr = (s?: string) => !!s && (s.startsWith('0x') || /^[1-9A-HJ-NP-Za-km-z]{40,}$/.test(s))
 
-function routeFor(r: Hit): string {
+// Exported for direct unit testing (routing + labelling are the durable behavior;
+// the debounced input above them needs a real DOM to exercise).
+export function routeFor(r: Hit): string {
   if (r.type === 'user-tag') return paths.tag(r.tagId)
   switch (r.type) {
     case 'block': return paths.block(r.value)
@@ -26,20 +29,26 @@ function routeFor(r: Hit): string {
     case 'address': return paths.account(srLooksAddr(r.label) ? r.label! : r.value)
     case 'asset': return paths.asset(Number(r.value))
     case 'tag': return paths.tag(r.value)
+    // Pallet is part of the referendum's identity (Democracy and OpenGov both
+    // index from 0), so both fields are needed to build its route.
+    case 'referendum': return r.pallet && r.index != null ? paths.referendum(r.pallet, r.index) : paths.dashboard()
     default: return paths.dashboard()
   }
 }
-function hitKey(r: Hit): string {
+// Exported alongside routeFor: a referendum's `value` is already pallet-qualified
+// (see referendumTitleKey server-side), which is what keeps a same-numbered
+// Democracy and OpenGov referendum from colliding on the same React key.
+export function hitKey(r: Hit): string {
   return r.type === 'user-tag' ? `user-tag:${r.listId}:${r.tagId}` : `${r.type}:${r.value}`
 }
-const TYPE_LABEL: Record<Hit['type'], string> = {
-  block: 'Block', extrinsic: 'Extrinsic', address: 'Account', asset: 'Asset', tag: 'Tag', 'user-tag': 'Tag',
+export const TYPE_LABEL: Record<Hit['type'], string> = {
+  block: 'Block', extrinsic: 'Extrinsic', address: 'Account', asset: 'Asset', tag: 'Tag', 'user-tag': 'Tag', referendum: 'Referendum',
 }
 
 // Account results use the same avatar and shortened-address treatment as account
 // pills. Identity names remain secondary so the address stays visible in compact
 // dropdowns.
-function SearchResultBody({ r }: { r: Hit }) {
+export function SearchResultBody({ r }: { r: Hit }) {
   if (r.type === 'user-tag') {
     return (
       <span className="sr-acct">
@@ -80,6 +89,16 @@ function SearchResultBody({ r }: { r: Hit }) {
       <span className="sr-acct">
         <TagIcon icon={r.icon ?? ''} title={r.label || r.value} />
         <span className="sr-acct-name"><span className="mono">{r.label || r.value}</span></span>
+      </span>
+    )
+  }
+  if (r.type === 'referendum') {
+    return (
+      <span className="sr-acct">
+        <span className="sr-acct-name">
+          <span className="mono">{r.label ?? `Referendum #${r.index}`}</span>
+          <span className="sr-desc">#{r.index}{r.status ? ` · ${r.status}` : ''}</span>
+        </span>
       </span>
     )
   }

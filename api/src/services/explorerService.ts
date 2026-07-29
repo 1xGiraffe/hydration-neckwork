@@ -1,6 +1,10 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
-import { referendumTitleFor } from './referendumTitleService.ts'
+import { referendumTitleFor, referendumTitleKey } from './referendumTitleService.ts'
+// Type-only: governanceService imports value exports back from this file (accountRef,
+// ensurePrices, …), so a runtime import here would cycle. search() reaches getReferenda
+// through a dynamic import instead, same as the tag branch does for tagService.
+import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
 import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
@@ -18035,7 +18039,7 @@ export async function getDailyAccounts(): Promise<{ date: string; active: number
 
 // search
 export interface SearchResult {
-  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag'
+  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum'
   value: string
   label?: string
   desc?: string   // asset-type: the descriptive name (e.g. DOT → "Polkadot")
@@ -18050,6 +18054,13 @@ export interface SearchResult {
   // (e.g. the Kraken logo) in front of the entry.
   icon?: string
   color?: string
+  // Referendum-type enrichment. `pallet`+`index` is the referendum's real identity —
+  // Democracy and OpenGov both index from 0, so the index alone cannot address it or
+  // build its route (`/referendum/:pallet/:index`). `status` is the lifecycle word
+  // (e.g. "deciding", "approved") so the dropdown needs no follow-up fetch.
+  pallet?: ReferendumPallet
+  index?: number
+  status?: string
 }
 
 // Two in-memory account indexes, both built from the ~100k accounts the explorer
@@ -18279,6 +18290,32 @@ function accountsByEmoji(emoji: string): string[] {
 // surfaces. Kept modest so the dropdown stays scannable.
 const MAX_ACCOUNT_RESULTS = 15
 
+// Cap on referendum results (index or title match) in one search response.
+const MAX_REFERENDUM_RESULTS = 8
+// Bounded snapshot of the whole referendum directory (Democracy 0-206, OpenGov
+// 0-369 as of writing — governance moves far slower than blocks or accounts, so
+// this ceiling comfortably covers the foreseeable count). getReferenda caches this
+// exact (limit, offset) for 60s regardless of the query text, so a burst of
+// searches shares one ClickHouse read instead of one per keystroke.
+const REFERENDA_SEARCH_DIRECTORY_LIMIT = 1000
+
+function referendumSearchResult(r: ReferendumListRow): SearchResult {
+  return { type: 'referendum', value: referendumTitleKey(r.pallet, r.index), label: r.title ?? undefined, pallet: r.pallet, index: r.index, status: r.status }
+}
+
+// Case-insensitive rank for a title substring match: exact, then prefix, then a
+// word start ("spend" in "Treasury spend for X"), then any other substring — so a
+// query naming the start of a referendum's title outranks one that only lands
+// mid-word.
+function titleMatchRank(title: string, ql: string): number {
+  const t = title.toLowerCase()
+  if (t === ql) return 0
+  if (t.startsWith(ql)) return 1
+  const idx = t.indexOf(ql)
+  if (idx < 0) return -1
+  return /[a-z0-9]/i.test(title[idx - 1]) ? 3 : 2
+}
+
 export async function search(q: string): Promise<SearchResult[]> {
   const query = q.trim()
   if (!query) return []
@@ -18294,6 +18331,17 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
     const h = Number(query)
     const res = await client.query({ query: `SELECT count() AS c FROM price_data.raw_blocks WHERE block_height = {h:UInt32}`, query_params: { h }, format: 'JSONEachRow' })
     if (Number((await res.json<{ c: string }>())[0]?.c ?? 0) > 0) results.push({ type: 'block', value: query })
+
+    // Referendum index — exact match on either pallet first (both index from 0, so
+    // one number can legitimately name two different referenda), then index-prefix
+    // matches, off the same bounded directory snapshot below.
+    const { getReferenda } = await import('./governanceService.ts')
+    const directory = await getReferenda(REFERENDA_SEARCH_DIRECTORY_LIMIT, 0)
+    const refHits = [
+      ...directory.filter(r => String(r.index) === query),
+      ...directory.filter(r => String(r.index) !== query && String(r.index).startsWith(query)),
+    ].slice(0, MAX_REFERENDUM_RESULTS)
+    for (const r of refHits) results.push(referendumSearchResult(r))
   }
 
   // extrinsic id "height-index"
@@ -18434,6 +18482,21 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
     for (const t of allTags()) {
       if (t.name.toLowerCase().includes(ql)) results.push({ type: 'tag', value: t.tagId, label: t.name, icon: t.icon, color: t.color })
     }
+  }
+
+  // Referendum title — case-insensitive substring (e.g. "treasury spend"), ranked
+  // prefix/word-start first and capped, off the same bounded directory snapshot
+  // the digit branch above uses.
+  if (/[A-Za-z]/.test(query)) {
+    const { getReferenda } = await import('./governanceService.ts')
+    const ql = query.toLowerCase()
+    const directory = await getReferenda(REFERENDA_SEARCH_DIRECTORY_LIMIT, 0)
+    const ranked = directory
+      .map(r => (r.title ? { r, rank: titleMatchRank(r.title, ql) } : null))
+      .filter((x): x is { r: ReferendumListRow; rank: number } => x != null && x.rank >= 0)
+      .sort((a, b) => a.rank - b.rank)
+      .slice(0, MAX_REFERENDUM_RESULTS)
+    for (const { r } of ranked) results.push(referendumSearchResult(r))
   }
 
   return results

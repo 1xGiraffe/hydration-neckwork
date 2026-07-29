@@ -407,7 +407,7 @@ export interface CloseAccountsResponse {
 }
 
 export interface SearchResult {
-  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag'
+  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum'
   value: string
   label?: string
   desc?: string   // asset-type: the descriptive name (e.g. DOT → "Polkadot")
@@ -422,6 +422,12 @@ export interface SearchResult {
   // dropdown can render the tag's icon in front of the entry.
   icon?: string
   color?: string
+  // Referendum-type results carry pallet+index (its real identity — Democracy and
+  // OpenGov both index from 0) and its lifecycle status, so the dropdown links
+  // straight to `/referendum/:pallet/:index` with no follow-up fetch.
+  pallet?: 'opengov' | 'democracy'
+  index?: number
+  status?: string
 }
 
 // Directory row for /explorer/tags. Members themselves come from the tag detail
