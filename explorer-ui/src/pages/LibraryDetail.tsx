@@ -327,22 +327,51 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
   )
 }
 
+// The Subscribers tab's rows, shared by both its surfaces: a private
+// library's editable chips (an `onRevoke` handler and its ✕ button) and a
+// public library's plain read-only list (neither passed — no ✕, since a
+// public library has no invite to revoke, only a subscription the account
+// itself controls). "invited" gets a small "pending" badge; "active" reads
+// plain, same as a tag's member chip.
+function ShareChips({ shares, onRevoke, revoking }: {
+  shares: { account: AccountRef; status: 'invited' | 'active' }[]
+  onRevoke?: (address: string) => void
+  revoking?: boolean
+}) {
+  if (!shares.length) return <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>No subscribers yet</div>
+  return (
+    <div className="tag-member-chips">
+      {shares.map(s => (
+        <span key={s.account.accountId} className="acct-chip tag-member-chip">
+          <AddrPill account={s.account} noTag noCopy />
+          {s.status === 'invited' && <span className="badge pending">pending</span>}
+          {onRevoke && (
+            <button type="button" className="acct-chip-x" aria-label={`Revoke ${s.account.address}`} disabled={revoking} onClick={() => onRevoke(s.account.address)}>×</button>
+          )}
+        </span>
+      ))}
+    </div>
+  )
+}
+
 export function LibraryDetail({ libraryId }: { libraryId: string }) {
   const session = useSession()
   const { data, isLoading, isError } = useLibrary(libraryId, !!session)
   useDocumentTitle(data?.name)
   const isOwner = !!session && !!data && session.accountId === data.owner.accountId
-  // Owner-only tabs (Tags/Invites); deep-links via ?view= like Account.tsx's
-  // profile tabs. The non-owner view has no tabs, only its stats panel.
+  // Owner-only tabs (Tags/Subscribers); deep-links via ?view= like Account.tsx's
+  // profile tabs. The non-owner view has no tabs, only its stats panel. The tab
+  // used to be called Invites at `?view=invites` — that value isn't aliased,
+  // it just falls back to the default 'tags' tab, same as any other unknown
+  // `view`; a stale deep link losing its tab selection is low-stakes.
   const view = useQueryValue('view', 'tags')
-  const activeView = view === 'invites' ? 'invites' : 'tags'
+  const activeView = view === 'subscribers' ? 'subscribers' : 'tags'
 
   const [editOpen, setEditOpen] = useState(false)
   const [editMounted, setEditMounted] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [newTagOpen, setNewTagOpen] = useState(false)
-  const [shareAddrs, setShareAddrs] = useState<string[]>([])
   const [shareError, setShareError] = useState<string | null>(null)
 
   const updateMutation = useUserMutation(userApi.updateLibrary)
@@ -351,24 +380,27 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
   const unsubscribeMutation = useUserMutation(userApi.unsubscribe)
   const inviteMutation = useUserMutation(userApi.invite)
   const revokeMutation = useUserMutation(userApi.revokeInvite)
+  const sharesLocked = inviteMutation.isPending || revokeMutation.isPending
 
-  // Chips submit sequentially so one bad address reports its own error while
-  // the rest still land; successfully-sent chips leave the picker.
-  async function invite() {
+  // Private library's Subscribers tab is a token surface like a tag's member
+  // editor (AccountPicker immediate-commit mode): an Enter/pick on the input
+  // invites right away, no staging list, no separate Invite button. Submitted
+  // sequentially — like setTagMembers' addMembers — so one bad address in a
+  // multi-token paste reports itself while every address ahead of it still
+  // lands, and whatever never got submitted is handed back for the picker to
+  // restore as text rather than silently dropping it.
+  async function inviteAddresses(addresses: string[]): Promise<string[] | void> {
     setShareError(null)
-    for (const addr of shareAddrs) {
+    for (let i = 0; i < addresses.length; i++) {
+      const addr = addresses[i]
       try { await inviteMutation.mutateAsync([libraryId, addr]) }
-      catch (e) { setShareError(e instanceof Error ? `${addr}: ${e.message}` : 'Could not send the invite'); return }
-      setShareAddrs(prev => prev.filter(a => a !== addr))
+      catch (e) { setShareError(`${addr}: ${e instanceof Error ? e.message : 'could not invite that account'}`); return addresses.slice(i) }
     }
   }
-  async function revoke() {
+  async function revokeOne(address: string) {
     setShareError(null)
-    for (const addr of shareAddrs) {
-      try { await revokeMutation.mutateAsync([libraryId, addr]) }
-      catch (e) { setShareError(e instanceof Error ? `${addr}: ${e.message}` : 'Could not revoke that address'); return }
-      setShareAddrs(prev => prev.filter(a => a !== addr))
-    }
+    try { await revokeMutation.mutateAsync([libraryId, address]) }
+    catch (e) { setShareError(e instanceof Error ? e.message : 'Could not revoke that account') }
   }
   async function confirmDelete() {
     setDeleteError(null)
@@ -427,21 +459,31 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
 
             {isOwner && (
               <DetailTabs
-                tabs={[{ key: 'tags', label: 'Tags', count: data.tags.length }, { key: 'invites', label: 'Invites' }]}
+                tabs={[{ key: 'tags', label: 'Tags', count: data.tags.length }, { key: 'subscribers', label: 'Subscribers', count: data.shares?.length ?? 0 }]}
                 active={activeView}
                 onChange={k => setQuery({ view: k === 'tags' ? null : k })}
               />
             )}
 
-            {isOwner && activeView === 'invites' && (
+            {isOwner && activeView === 'subscribers' && (
               <div className="panel" style={{ padding: 16, marginBottom: 16 }}>
                 {shareError && <div className="dialog-error" style={{ marginBottom: 8 }}>{shareError}</div>}
-                <div className="row gap6" style={{ flexWrap: 'wrap', alignItems: 'flex-start' }}>
-                  <AccountPicker values={shareAddrs} onChange={setShareAddrs} placeholder="Search accounts or paste addresses" disabled={inviteMutation.isPending || revokeMutation.isPending} />
-                  <button type="button" className="btn sm primary" disabled={inviteMutation.isPending || !shareAddrs.length} onClick={() => void invite()}>Invite</button>
-                  <button type="button" className="btn sm" disabled={revokeMutation.isPending || !shareAddrs.length} onClick={() => void revoke()}>Revoke</button>
+                {data.visibility === 'private' ? (
+                  <AccountPicker
+                    inputId="subscribers-input"
+                    onCommit={inviteAddresses}
+                    placeholder="Search accounts or paste addresses"
+                    disabled={sharesLocked}
+                    chips={<ShareChips shares={data.shares ?? []} onRevoke={revokeOne} revoking={revokeMutation.isPending} />}
+                  />
+                ) : (
+                  <ShareChips shares={data.shares ?? []} />
+                )}
+                <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+                  {data.visibility === 'private'
+                    ? 'Adding an account invites it to this private library; × revokes a pending invite or an existing subscriber.'
+                    : 'Public libraries are open-subscription — anyone can subscribe without an invite.'}
                 </div>
-                <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>Invite lets these accounts see and accept this private library; Revoke removes a pending invite or an existing subscriber.</div>
               </div>
             )}
 

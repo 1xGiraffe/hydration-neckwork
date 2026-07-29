@@ -285,8 +285,28 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     return
   }
 
-  if (method === 'POST' && (m = path.match(/^\/user\/libraries\/([^/]+)\/invites$/))) { await fulfillJson(route, 200, { ok: true }); return }
-  if (method === 'DELETE' && (m = path.match(/^\/user\/libraries\/([^/]+)\/invites\/([^/]+)$/))) { await fulfillJson(route, 200, { ok: true }); return }
+  // Subscribers tab (C10): `shares` lives directly on the mock's own
+  // LibraryDetailResponse object (like `tags`), mutated in place so the tab's
+  // mutate → invalidate → refetch cycle sees a real result on the next GET,
+  // same pattern setTagMembers above uses for a tag's own member list.
+  if (method === 'POST' && (m = path.match(/^\/user\/libraries\/([^/]+)\/invites$/))) {
+    const lib = state.libraries.find(l => l.libraryId === decodeURIComponent(m![1]))
+    if (!lib) { await fulfillJson(route, 404, { error: 'not found' }); return }
+    const { address } = bodyOf(route) as { address: string }
+    if (address === INVALID_TAG_MEMBER_ADDRESS) { await fulfillJson(route, 400, { error: 'not a recognized address' }); return }
+    lib.shares = lib.shares ?? []
+    const existing = lib.shares.find(s => s.account.address === address)
+    if (existing) existing.status = 'invited'
+    else lib.shares.push({ account: accountRefFromAddress(address), status: 'invited' })
+    await fulfillJson(route, 200, { ok: true })
+    return
+  }
+  if (method === 'DELETE' && (m = path.match(/^\/user\/libraries\/([^/]+)\/invites\/([^/]+)$/))) {
+    const lib = state.libraries.find(l => l.libraryId === decodeURIComponent(m![1]))
+    if (lib) lib.shares = (lib.shares ?? []).filter(s => s.account.address !== decodeURIComponent(m![2]))
+    await fulfillJson(route, 200, { ok: true })
+    return
+  }
   if (method === 'POST' && (m = path.match(/^\/user\/invites\/([^/]+)\/(accept|decline)$/))) {
     const id = decodeURIComponent(m![1])
     const invite = state.invites.find(i => i.libraryId === id)

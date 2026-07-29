@@ -468,7 +468,7 @@ function seedOneTagLibrary(userMock: { state: UserMockState }): void {
   })
 }
 
-test('the tag member editor and the invites picker both show tabs, and the library page deep-links to them', async ({ page, userMock }) => {
+test('the tag member editor and the private Subscribers tab both show tabs, and the library page deep-links to Subscribers', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   seedOneTagLibrary(userMock)
 
@@ -479,17 +479,71 @@ test('the tag member editor and the invites picker both show tabs, and the libra
   await tagPanel.locator('.acct-picker input').fill(BINANCE_ADDRESS)
   await assertDropdownReadsLikeSearchDropdown(tagPanel)
 
-  await page.locator('.tabs.detail-tabs button', { hasText: 'Invites' }).click()
-  await expect(page).toHaveURL(/\?view=invites$/)
-  await expect(page.locator('.tabs.detail-tabs button.active')).toHaveText(/Invites/)
+  await page.locator('.tabs.detail-tabs button', { hasText: 'Subscribers' }).click()
+  await expect(page).toHaveURL(/\?view=subscribers$/)
+  await expect(page.locator('.tabs.detail-tabs button.active')).toHaveText(/Subscribers/)
   await expect(tagPanel).toHaveCount(0) // the Tags tab's panels are gone, not just hidden
-  const invitesPanel = page.locator('.panel', { hasText: 'Revoke removes a pending invite' })
-  await invitesPanel.locator('.acct-picker input').fill(BINANCE_ADDRESS)
-  await assertDropdownReadsLikeSearchDropdown(invitesPanel)
+  const subscribersPanel = page.locator('.panel', { hasText: 'invites it to this private library' })
+  await subscribersPanel.locator('.acct-picker input').fill(BINANCE_ADDRESS)
+  await assertDropdownReadsLikeSearchDropdown(subscribersPanel)
 
-  // Deep link straight to the Invites tab.
+  // Deep link straight to the Subscribers tab.
+  await page.goto('/library/lib1?view=subscribers')
+  await expect(page.locator('.tabs.detail-tabs button.active')).toHaveText(/Subscribers/)
+
+  // C10: the tab used to be called Invites at `?view=invites` — that value
+  // isn't aliased, it just falls back to the default Tags tab like any other
+  // unrecognized `view`.
   await page.goto('/library/lib1?view=invites')
-  await expect(page.locator('.tabs.detail-tabs button.active')).toHaveText(/Invites/)
+  await expect(page.locator('.tabs.detail-tabs button.active')).toHaveText(/Tags/)
+})
+
+// C10: private library — the Subscribers tab is a token surface like a tag's
+// member editor, not a staging list with Invite/Revoke buttons. Enter commits
+// an invite immediately; the chip's own × revokes it.
+test('the private Subscribers tab invites via Enter and revokes via the chip ×, with no Invite/Revoke buttons', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  seedOneTagLibrary(userMock)   // visibility: 'private'
+
+  await page.goto('/library/lib1?view=subscribers')
+  const panel = page.locator('.panel', { hasText: 'invites it to this private library' })
+  await expect(panel.getByRole('button', { name: 'Invite', exact: true })).toHaveCount(0)
+  await expect(panel.getByRole('button', { name: 'Revoke', exact: true })).toHaveCount(0)
+  await expect(panel).toContainText('No subscribers yet')
+
+  const input = panel.locator('.acct-picker input')
+  await input.fill(BINANCE_ADDRESS)
+  await input.press('Enter')
+
+  const chip = panel.locator('.tag-member-chips .acct-chip')
+  await expect(chip).toHaveCount(1)
+  await expect(panel).not.toContainText('No subscribers yet')
+  // A freshly invited (not yet accepted) share reads as pending.
+  await expect(chip.locator('.badge.pending')).toHaveText('pending')
+
+  await chip.locator('.acct-chip-x').click()
+  await expect(chip).toHaveCount(0)
+  await expect(panel).toContainText('No subscribers yet')
+})
+
+// C10: public library — the same tab shows the subscriber list read-only:
+// no input, no ×, just account pills plus the count on the tab itself.
+test('a public library shows its subscriber list read-only, with no input and no revoke', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  userMock.state.libraries.push({
+    libraryId: 'lib-pub', name: 'Open library', note: '', visibility: 'public', isPersonal: false,
+    owner: userMock.state.account, tagCount: 0, accountCount: 0, subscriberCount: 1,
+    tags: [],
+    shares: [{ account: { accountId: BINANCE_ADDRESS, address: BINANCE_ADDRESS, emoji: '🏦', tag: null }, status: 'active' }],
+  })
+
+  await page.goto('/library/lib-pub?view=subscribers')
+  await expect(page.locator('.tabs.detail-tabs button', { hasText: 'Subscribers' }).locator('.cnt')).toHaveText('1')
+  const panel = page.locator('.panel', { hasText: 'open-subscription' })
+  await expect(panel.locator('.acct-picker')).toHaveCount(0)
+  await expect(panel.locator('.acct-chip-x')).toHaveCount(0)
+  await expect(panel.locator('.tag-member-chips .acct-chip')).toHaveCount(1)
+  await expect(panel.locator('.badge.pending')).toHaveCount(0)   // active, not invited
 })
 
 test('a bad address in a batch reports itself and restores the rest, without losing the good one ahead of it', async ({ page, userMock }) => {

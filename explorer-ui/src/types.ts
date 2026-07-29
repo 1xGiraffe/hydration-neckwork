@@ -847,6 +847,12 @@ export interface LibraryDetailResponse extends LibrarySummaryRef {
   // Present only when the viewer is authenticated and not the owner — whether
   // they already subscribe to this (public) library.
   subscribed?: boolean
+  // Owner-only (Subscribers tab): every account with a live invite or an
+  // active subscription. Absent for every other viewer, including the
+  // anonymous public detail — never an empty array standing in for "no
+  // access", so the tab can tell "no subscribers yet" apart from "not yours
+  // to see".
+  shares?: { account: AccountRef; status: 'invited' | 'active' }[]
 }
 
 // The viewer's tag-map projection: every library's tags reduced to member
