@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import Fastify from 'fastify'
 import { userRoutes } from '../src/routes/user.ts'
 import { initUserAuthService, resetUserAuthForTests } from '../src/services/userAuthService.ts'
-import { initUserLibraryService, loadUserLibraries } from '../src/services/userLibraryService.ts'
+import { initUserListService, loadUserLists } from '../src/services/userListService.ts'
 import { fakeClient } from './helpers/userFakes.ts'
 
 // Pins server.ts:64's trustProxy config: behind the explorer-ui nginx proxy,
@@ -26,8 +26,8 @@ describe('rate limiting behind a trusted proxy', () => {
   beforeEach(async () => {
     resetUserAuthForTests()
     await initUserAuthService(fakeClient())
-    initUserLibraryService(fakeClient())
-    await loadUserLibraries()
+    initUserListService(fakeClient())
+    await loadUserLists()
   })
 
   it('keys the limiter per X-Forwarded-For client, not per proxy hop', async () => {

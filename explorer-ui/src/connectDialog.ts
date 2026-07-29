@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 
 // A visitor can meet a "Subscribe" (or "Log in") affordance on any page —
-// /tags' discovery rows, a public library's own detail page, the topbar
+// /tags' discovery rows, a public list's own detail page, the topbar
 // itself — but the actual <ConnectDialog> is mounted exactly once, lazily,
 // by Topbar (see the file-level comment there on why: it's a route-chunk-
 // style import so a logged-in visitor never pays for Radix + the dialog).

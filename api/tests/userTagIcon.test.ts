@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { tagDisplayIcon } from '../src/services/userLibraryService.ts'
+import { tagDisplayIcon } from '../src/services/userListService.ts'
 import { accountIcon } from '../src/services/omniwatchIdentity.ts'
 import { initUserProfileService, setProfileAvatar, clearProfileAvatar } from '../src/services/userProfileService.ts'
 import { fakeClient } from './helpers/userFakes.ts'
@@ -7,7 +7,7 @@ import { fakeClient } from './helpers/userFakes.ts'
 // tagDisplayIcon is the small pure helper behind B2: mirrors tagService.ts's
 // iconFor (SYSTEM tags) for user tags, plus one extra precedence step user
 // tags get that system tags don't — a member's own uploaded profile avatar,
-// since a user-curated library is far more likely to hold another explorer
+// since a user-curated list is far more likely to hold another explorer
 // user's account than a system tag is.
 const M1 = '0x' + '11'.repeat(32)
 const M2 = '0x' + '22'.repeat(32)

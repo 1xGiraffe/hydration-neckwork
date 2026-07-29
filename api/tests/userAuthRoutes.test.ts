@@ -4,7 +4,7 @@ import { cryptoWaitReady, sr25519PairFromSeed, sr25519Sign, encodeAddress, rando
 import { u8aToHex, u8aWrapBytes } from '@polkadot/util'
 import { userRoutes } from '../src/routes/user.ts'
 import { initUserAuthService, resetUserAuthForTests } from '../src/services/userAuthService.ts'
-import { initUserLibraryService, loadUserLibraries } from '../src/services/userLibraryService.ts'
+import { initUserListService, loadUserLists } from '../src/services/userListService.ts'
 import { fakeClient } from './helpers/userFakes.ts'
 
 beforeAll(async () => { await cryptoWaitReady() })
@@ -32,8 +32,8 @@ describe('/user/auth', () => {
   beforeEach(async () => {
     resetUserAuthForTests()
     await initUserAuthService(fakeClient())
-    initUserLibraryService(fakeClient())
-    await loadUserLibraries()
+    initUserListService(fakeClient())
+    await loadUserLists()
   })
 
   it('challenge → sign → verify returns a bearer token and no-store', async () => {

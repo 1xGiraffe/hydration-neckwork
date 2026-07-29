@@ -10,8 +10,8 @@ import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, MoneyMarketPositions, ActiveDcaTable, LiquidityPositionsTable } from '../components/AccountSections'
 import { BalancesTreemap } from '../components/BalancesTreemap'
-import { libraryForTag, looksLikeUserTagId, tagMapStatus, useTagMapVersion } from '../userTags'
-import { LibraryTagDetail } from './LibraryTagDetail'
+import { listForTag, looksLikeUserTagId, tagMapStatus, useTagMapVersion } from '../userTags'
+import { ListTagDetail } from './ListTagDetail'
 
 const ConnectDialog = lazy(() => import('../components/ConnectDialog').then(m => ({ default: m.ConnectDialog })))
 
@@ -55,14 +55,14 @@ function LoginToViewTag() {
 // this wrapper decides which one a given id means, and (since that decision
 // depends on the viewer's own tag map, an async fetch) which of four states
 // to show meanwhile. System tag slugs are short, code-defined words ('kraken',
-// 'treasury', …); user-tag ids are UUIDs minted by userLibraryService, so the
+// 'treasury', …); user-tag ids are UUIDs minted by userListService, so the
 // two id spaces never collide — a slug can never be a user tag and fast-paths
 // straight to the system view, unaffected by any of this.
 //
 // A UUID-shaped id, though, genuinely might be a user tag, and the map is
 // fetched once per session (Topbar's useTagMapSync) rather than per tag — so:
 //   - map still loading (session exists, no data yet): skeleton, not a guess.
-//   - map ready and it hits: the user-tag aggregate view (LibraryTagDetail).
+//   - map ready and it hits: the user-tag aggregate view (ListTagDetail).
 //   - no session at all: an invitation to log in, not "not found" — a real
 //     answer needs a session this viewer doesn't have.
 //   - map ready and it doesn't hit, OR the fetch failed outright (tagMapStatus
@@ -76,8 +76,8 @@ export function TagDetail({ tagId }: { tagId: string }) {
   if (!looksLikeUserTagId(tagId)) return <SystemTagDetail tagId={tagId} />
   const status = tagMapStatus()
   if (status === 'loading') return <TagDetailSkeleton />
-  const lib = libraryForTag(tagId)
-  if (lib) return <LibraryTagDetail libraryId={lib.libraryId} tagId={tagId} />
+  const lib = listForTag(tagId)
+  if (lib) return <ListTagDetail listId={lib.listId} tagId={tagId} />
   if (status === 'anonymous') return <LoginToViewTag />
   return <SystemTagDetail tagId={tagId} />
 }

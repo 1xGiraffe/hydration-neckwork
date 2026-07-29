@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import Fastify from 'fastify'
 import { userRoutes } from '../src/routes/user.ts'
-import { librariesRoutes } from '../src/routes/libraries.ts'
+import { listsRoutes } from '../src/routes/lists.ts'
 import { initUserAuthService, resetUserAuthForTests, issueSession } from '../src/services/userAuthService.ts'
 import {
-  initUserLibraryService, loadUserLibraries, createLibrary, createTag, setTagMembers,
-  inviteToLibrary, respondToInvite,
-} from '../src/services/userLibraryService.ts'
+  initUserListService, loadUserLists, createList, createTag, setTagMembers,
+  inviteToList, respondToInvite,
+} from '../src/services/userListService.ts'
 import { fakeClient } from './helpers/userFakes.ts'
 import type { AccountRef, TagDetail } from '../src/services/explorerService.ts'
 
@@ -21,7 +21,7 @@ vi.mock('../src/services/explorerService.ts', async importOriginal => {
   const stubRef = (accountId: string): AccountRef => ({ accountId, address: accountId, emoji: '', tag: null, identity: null, profile: null })
   return {
     ...actual,
-    getLibraryTagDetail: vi.fn(async (_libraryId: string, presentation: { tagId: string; name: string; color: string; icon: string; note: string }, members: string[]) => {
+    getListTagDetail: vi.fn(async (_listId: string, presentation: { tagId: string; name: string; color: string; icon: string; note: string }, members: string[]) => {
       if (!members.length) return null
       return {
         tagId: presentation.tagId, name: presentation.name, color: presentation.color, note: presentation.note, icon: presentation.icon,
@@ -29,13 +29,13 @@ vi.mock('../src/services/explorerService.ts', async importOriginal => {
         moneyMarket: [], liquidityPositions: [], activeDcas: [], portfolioSeries: [], portfolioDates: [], balanceHistory: [],
       } satisfies TagDetail
     }),
-    getLibraryTagActivity: vi.fn(async () => []),
-    getLibraryTagExtrinsics: vi.fn(async () => []),
-    getLibraryTagEvents: vi.fn(async () => []),
-    getLibraryTagVotes: vi.fn(async () => []),
-    getLibraryTagTabCounts: vi.fn(async () => ({ extrinsics: 0, extrinsicsOnBehalf: 0, events: 0, votes: 0 })),
-    getLibraryTagListTotal: vi.fn(async () => ({ total: 0, complete: true })),
-    getLibraryTagValueEvents: vi.fn(async () => []),
+    getListTagActivity: vi.fn(async () => []),
+    getListTagExtrinsics: vi.fn(async () => []),
+    getListTagEvents: vi.fn(async () => []),
+    getListTagVotes: vi.fn(async () => []),
+    getListTagTabCounts: vi.fn(async () => ({ extrinsics: 0, extrinsicsOnBehalf: 0, events: 0, votes: 0 })),
+    getListTagListTotal: vi.fn(async () => ({ total: 0, complete: true })),
+    getListTagValueEvents: vi.fn(async () => []),
   }
 })
 
@@ -47,12 +47,12 @@ const MEMBER_ADDRESS = '15DajYeqgb4ADkb8scVCcNaXjfM1SV9PLvqjNDkpH6kBDRLZ'
 async function build() {
   const f = Fastify()
   await f.register(userRoutes)
-  await f.register(librariesRoutes)
+  await f.register(listsRoutes)
   return f
 }
 
-describe('/user/library-tag', () => {
-  let libraryId: string
+describe('/user/list-tag', () => {
+  let listId: string
   let tagId: string
   let memberAccountId: string
   let ownerToken: string
@@ -62,16 +62,16 @@ describe('/user/library-tag', () => {
   beforeEach(async () => {
     resetUserAuthForTests()
     await initUserAuthService(fakeClient())
-    initUserLibraryService(fakeClient())
-    await loadUserLibraries()
+    initUserListService(fakeClient())
+    await loadUserLists()
 
-    const lib = await createLibrary(OWNER, 'Desk', 'note', 'private')
-    const tag = await createTag(OWNER, lib.libraryId, { name: 'Giraffe', color: '#22c55e', icon: '🦒' })
-    const updated = await setTagMembers(OWNER, lib.libraryId, tag.tagId, [MEMBER_ADDRESS], [])
-    await inviteToLibrary(OWNER, lib.libraryId, SUBSCRIBER)
-    await respondToInvite(SUBSCRIBER, lib.libraryId, true)
+    const lib = await createList(OWNER, 'Desk', 'note', 'private')
+    const tag = await createTag(OWNER, lib.listId, { name: 'Giraffe', color: '#22c55e', icon: '🦒' })
+    const updated = await setTagMembers(OWNER, lib.listId, tag.tagId, [MEMBER_ADDRESS], [])
+    await inviteToList(OWNER, lib.listId, SUBSCRIBER)
+    await respondToInvite(SUBSCRIBER, lib.listId, true)
 
-    libraryId = lib.libraryId
+    listId = lib.listId
     tagId = tag.tagId
     memberAccountId = [...updated.members][0]
     ownerToken = await issueSession(OWNER)
@@ -83,7 +83,7 @@ describe('/user/library-tag', () => {
 
   it('200s the owner and carries the tag name/color and member accountRefs', async () => {
     const f = await build()
-    const r = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}`, headers: auth(ownerToken) })
+    const r = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}`, headers: auth(ownerToken) })
     expect(r.statusCode).toBe(200)
     const body = r.json()
     expect(body).toMatchObject({ tagId, name: 'Giraffe', color: '#22c55e' })
@@ -93,74 +93,74 @@ describe('/user/library-tag', () => {
 
   it('200s an active subscriber', async () => {
     const f = await build()
-    const r = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}`, headers: auth(subscriberToken) })
+    const r = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}`, headers: auth(subscriberToken) })
     expect(r.statusCode).toBe(200)
     expect(r.json()).toMatchObject({ tagId, name: 'Giraffe' })
   })
 
   it('404s a non-subscriber — indistinguishable from an unknown tag', async () => {
     const f = await build()
-    const r = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}`, headers: auth(outsiderToken) })
+    const r = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}`, headers: auth(outsiderToken) })
     expect(r.statusCode).toBe(404)
-    const rUnknown = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/not-a-tag`, headers: auth(ownerToken) })
+    const rUnknown = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/not-a-tag`, headers: auth(ownerToken) })
     expect(rUnknown.statusCode).toBe(404)
     expect(rUnknown.json()).toEqual(r.json())
   })
 
-  it('404s an unknown library id', async () => {
+  it('404s an unknown list id', async () => {
     const f = await build()
-    const r = await f.inject({ method: 'GET', url: `/user/library-tag/not-a-library/${tagId}`, headers: auth(ownerToken) })
+    const r = await f.inject({ method: 'GET', url: `/user/list-tag/not-a-list/${tagId}`, headers: auth(ownerToken) })
     expect(r.statusCode).toBe(404)
   })
 
   it('401s an anonymous request', async () => {
     const f = await build()
-    const r = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}` })
+    const r = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}` })
     expect(r.statusCode).toBe(401)
   })
 
   it('stamps no-store on every response, success or not', async () => {
     const f = await build()
-    const ok = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}`, headers: auth(ownerToken) })
+    const ok = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}`, headers: auth(ownerToken) })
     expect(ok.headers['cache-control']).toBe('no-store')
-    const anon = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}` })
+    const anon = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}` })
     expect(anon.headers['cache-control']).toBe('no-store')
   })
 
   it('gates a feed endpoint (activity) the same way and answers the stubbed empty feed', async () => {
     const f = await build()
-    const ok = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}/activity`, headers: auth(ownerToken) })
+    const ok = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}/activity`, headers: auth(ownerToken) })
     expect(ok.statusCode).toBe(200)
     expect(ok.json()).toEqual([])
-    const denied = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}/activity`, headers: auth(outsiderToken) })
+    const denied = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}/activity`, headers: auth(outsiderToken) })
     expect(denied.statusCode).toBe(404)
-    const anon = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}/activity` })
+    const anon = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}/activity` })
     expect(anon.statusCode).toBe(401)
   })
 
   it('rejects an unusable activity filter the same way the system tag route does', async () => {
     const f = await build()
-    const r = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}/activity?type=bogus`, headers: auth(ownerToken) })
+    const r = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}/activity?type=bogus`, headers: auth(ownerToken) })
     expect(r.statusCode).toBe(400)
   })
 
   it('gates counts, list-count and value-events', async () => {
     const f = await build()
-    const counts = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}/counts`, headers: auth(ownerToken) })
+    const counts = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}/counts`, headers: auth(ownerToken) })
     expect(counts.statusCode).toBe(200)
     expect(counts.json()).toMatchObject({ extrinsics: 0, events: 0, votes: 0 })
 
-    const listCount = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}/list-count?tab=activity`, headers: auth(ownerToken) })
+    const listCount = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}/list-count?tab=activity`, headers: auth(ownerToken) })
     expect(listCount.statusCode).toBe(200)
     expect(listCount.json()).toEqual({ total: 0, complete: true })
-    const badTab = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}/list-count?tab=bogus`, headers: auth(ownerToken) })
+    const badTab = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}/list-count?tab=bogus`, headers: auth(ownerToken) })
     expect(badTab.statusCode).toBe(400)
 
-    const valueEvents = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}/value-events`, headers: auth(ownerToken) })
+    const valueEvents = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}/value-events`, headers: auth(ownerToken) })
     expect(valueEvents.statusCode).toBe(200)
     expect(valueEvents.json()).toEqual([])
 
-    const denied = await f.inject({ method: 'GET', url: `/user/library-tag/${libraryId}/${tagId}/counts`, headers: auth(outsiderToken) })
+    const denied = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}/counts`, headers: auth(outsiderToken) })
     expect(denied.statusCode).toBe(404)
   })
 })

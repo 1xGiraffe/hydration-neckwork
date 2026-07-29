@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 
-export interface LibraryFormValues { name: string; note: string; visibility: 'private' | 'public' }
+export interface ListFormValues { name: string; note: string; visibility: 'private' | 'public' }
 
 // Two-segment switch with a sliding indicator — same mechanics as preis-ui's
 // interval selector (an absolutely-positioned pill translated by segment
@@ -24,19 +24,19 @@ function VisibilitySwitch({ value, onChange, disabled }: {
   )
 }
 
-// Shared name/note/visibility form for creating a library (Libraries.tsx) and
-// editing one (LibraryDetail.tsx) — same fields, same validation, same submit
+// Shared name/note/visibility form for creating a list (Lists.tsx) and
+// editing one (ListDetail.tsx) — same fields, same validation, same submit
 // chrome; only the title/hint/initial values and what happens on submit
 // differ, so both pages lazy-import this one file instead of drifting apart.
-export function LibraryFormDialog({ open, onOpenChange, title, hint, initial, submitLabel, pending, onSubmit }: {
+export function ListFormDialog({ open, onOpenChange, title, hint, initial, submitLabel, pending, onSubmit }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   title: string
   hint: string
-  initial?: LibraryFormValues
+  initial?: ListFormValues
   submitLabel: string
   pending: boolean
-  onSubmit: (values: LibraryFormValues) => Promise<void>
+  onSubmit: (values: ListFormValues) => Promise<void>
 }) {
   const [name, setName] = useState(initial?.name ?? '')
   const [note, setNote] = useState(initial?.note ?? '')
@@ -58,7 +58,7 @@ export function LibraryFormDialog({ open, onOpenChange, title, hint, initial, su
   async function submit() {
     setError(null)
     try { await onSubmit({ name: name.trim(), note: note.trim(), visibility }) }
-    catch (e) { setError(e instanceof Error ? e.message : 'Could not save the library') }
+    catch (e) { setError(e instanceof Error ? e.message : 'Could not save the list') }
   }
 
   return (
@@ -79,18 +79,18 @@ export function LibraryFormDialog({ open, onOpenChange, title, hint, initial, su
             {error && <div className="dialog-error">{error}</div>}
 
             <div className="field">
-              <label htmlFor="library-name-input">Name</label>
-              <input id="library-name-input" value={name} maxLength={64} onChange={e => setName(e.target.value)} disabled={pending} />
+              <label htmlFor="list-name-input">Name</label>
+              <input id="list-name-input" value={name} maxLength={64} onChange={e => setName(e.target.value)} disabled={pending} />
             </div>
             <div className="field">
-              <label htmlFor="library-note-input">Note</label>
-              <input id="library-note-input" value={note} maxLength={280} placeholder="Optional" onChange={e => setNote(e.target.value)} disabled={pending} />
+              <label htmlFor="list-note-input">Note</label>
+              <input id="list-note-input" value={note} maxLength={280} placeholder="Optional" onChange={e => setNote(e.target.value)} disabled={pending} />
             </div>
             <div className="field">
-              <label id="library-visibility-label">Visibility</label>
+              <label id="list-visibility-label">Visibility</label>
               <VisibilitySwitch value={visibility} onChange={setVisibility} disabled={pending} />
               <div className="muted" style={{ fontSize: 11 }}>
-                {visibility === 'public' ? 'Listed in Discover — anyone can subscribe.' : 'Only you (and anyone you invite) can see this library.'}
+                {visibility === 'public' ? 'Listed in Discover — anyone can subscribe.' : 'Only you (and anyone you invite) can see this list.'}
               </div>
             </div>
           </div>

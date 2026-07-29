@@ -18,7 +18,7 @@ import { indexerRoutes } from './routes/indexer.ts'
 import { explorerRoutes } from './routes/explorer.ts'
 import { tagRoutes } from './routes/tags.ts'
 import { userRoutes } from './routes/user.ts'
-import { librariesRoutes } from './routes/libraries.ts'
+import { listsRoutes } from './routes/lists.ts'
 import { loadExplorerAssets, stopExplorerAssetsRefresh } from './services/explorerAssets.ts'
 import { loadRuntimeErrorNames, stopRuntimeErrorNamesRefresh } from './services/runtimeErrorNames.ts'
 import {
@@ -59,7 +59,7 @@ import { ensureSnakewatchEmojiSourceLoaded } from './services/omniwatchIdentity.
 import { initXcmJourneyService } from './services/xcmJourneyService.ts'
 import { initUserAuthService, loadUserSessions } from './services/userAuthService.ts'
 import { initUserProfileService, loadUserProfiles } from './services/userProfileService.ts'
-import { initUserLibraryService, loadUserLibraries, ensureTagMemberPositionColumn } from './services/userLibraryService.ts'
+import { initUserListService, loadUserLists, ensureTagMemberPositionColumn } from './services/userListService.ts'
 
 // Trust X-Forwarded-For/X-Real-IP only from loopback/link-local/private-range
 // hops — exactly the explorer-ui nginx container on the compose network (see
@@ -96,8 +96,8 @@ const CACHE_CONTROL: [RegExp, number][] = [
   [/^\/explorer\/address\/[^/]+\/history/, 120],
   [/^\/explorer\/(address|tag)\/[^/]+\/counts/, 600],
   [/^\/explorer\/(daily|accounts-daily)/, 300],
-  [/^\/explorer\/librar/, 30],                       // /libraries directory + /library/:id detail
-  [/^\/explorer\/address\/[^/]+\/libraries/, 30],
+  [/^\/explorer\/list/, 30],                          // /lists directory + /list/:id detail
+  [/^\/explorer\/address\/[^/]+\/lists/, 30],
   [/^\/explorer\/(address|tag)\//, 8],
   [/^\/explorer\/search/, 10],
   // `assets` (no trailing slash) is the asset directory — 30s in-process TTL, so
@@ -143,7 +143,7 @@ await fastify.register(indexerRoutes, { client })
 await fastify.register(explorerRoutes)
 await fastify.register(tagRoutes)
 await fastify.register(userRoutes)
-await fastify.register(librariesRoutes)
+await fastify.register(listsRoutes)
 
 async function start() {
   try {
@@ -187,9 +187,9 @@ async function start() {
     initErc20WalletService(client)
     await initUserAuthService(client)
     initUserProfileService(client)
-    initUserLibraryService(client)
+    initUserListService(client)
     // Additive column on an existing deployment (see the guard's own comment
-    // in userLibraryService.ts) — must land before loadUserLibraries() below
+    // in userListService.ts) — must land before loadUserLists() below
     // first SELECTs `position` from user_tag_members.
     await ensureTagMemberPositionColumn(client)
     // The node-full refreshers (lock breakdown, proxy/multisig, ERC-20 wallets)
@@ -203,7 +203,7 @@ async function start() {
     await Promise.all([loadExplorerAssets(client), ensureSnakewatchEmojiSourceLoaded(), loadRuntimeErrorNames(client)])
     // Referendum titles come from SubSquare (the chain has none), so they are held
     // in memory like identities and read on every vote row the explorer renders.
-    await Promise.all([loadTags(), loadUserProfiles(), loadIdentities(), loadReferendumTitles().catch(() => {}), loadUserSessions(), loadUserLibraries()])
+    await Promise.all([loadTags(), loadUserProfiles(), loadIdentities(), loadReferendumTitles().catch(() => {}), loadUserSessions(), loadUserLists()])
     // Seed the fixed default tag set on a fresh database (no-op once tags exist),
     // so a clean `docker compose up` reaches the expected state with no manual step.
     await seedDefaultTags()

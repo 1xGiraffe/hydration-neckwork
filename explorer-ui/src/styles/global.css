@@ -619,7 +619,7 @@ svg { display: block; }
    panel from its own corner-clipping overflow for exactly as long as the
    dropdown is in the DOM, so it floats over the panel instead of being cut off
    at its border. Lifting the clip alone isn't enough once there's a FOLLOWING
-   sibling panel to poke past (e.g. a library's second tag panel): every
+   sibling panel to poke past (e.g. a list's second tag panel): every
    `.panel` here is `position: static`, so plain paint order — not DOM order —
    decides who's on top where they overlap, and a later static sibling always
    paints over an earlier one. `position: relative` plus a z-index above any
@@ -922,7 +922,7 @@ svg { display: block; }
 .hovercard .hc-title .profile-name { color: var(--amber); font-style: italic; }
 .hovercard .hc-sub { font-size: 11px; color: var(--text-medium); }
 /* Every tag association (not just the priority winner) as a row of compact
-   chips, so the card doubles as a "which of my libraries is this in" lookup.
+   chips, so the card doubles as a "which of my lists is this in" lookup.
    Capped at 4 with a "+N" overflow chip — see MAX_HOVER_TAGS. */
 .hovercard .hc-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
 .hovercard .hc-tags .addr-pill { font-size: 11px; gap: 5px; }
@@ -968,7 +968,7 @@ svg { display: block; }
 /* Self-set wallet-login display name: a real, distinct hue from a curated tag's
    lavender (amber reads as "the owner's own claim", unverified — same idea as
    the ✓ mark staying exclusive to a registrar-checked identity), plus italics
-   so it never reads as a system/library tag at a glance. */
+   so it never reads as a system/list tag at a glance. */
 .addr-pill .tag.profile-name { color: var(--amber); font-weight: 500; font-style: italic; }
 .ext-site {
   padding: 1px 5px;
@@ -1105,7 +1105,7 @@ svg { display: block; }
 .acct-meta .tag { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 22px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .acct-meta .tag .em { color: var(--lavender); font-style: italic; }
 .acct-meta .full { font-family: 'GeistMono'; font-size: 12.5px; color: var(--text-medium); word-break: break-all; display: flex; align-items: center; gap: 8px; }
-/* A pill nested in the header meta (e.g. a library's owner) keeps standard
+/* A pill nested in the header meta (e.g. a list's owner) keeps standard
    pill sizing — .acct-meta .tag above is the 22px serif PAGE TITLE rule and
    would otherwise win the cascade over .addr-pill .tag. */
 .acct-meta .addr-pill .tag { font-family: inherit; font-size: inherit; font-weight: 500; }
@@ -1884,19 +1884,19 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .acct-picker-row.active, .acct-picker-row:hover { background: var(--panel-hover); color: var(--text-high); }
 .acct-picker-name { color: var(--text-high); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acct-picker-addr { margin-left: auto; color: var(--text-low); font-size: 11px; flex-shrink: 0; }
-/* Foreign-library stats: the only view of another user's library contents. */
-/* A public library's own note, one line under its name in the discovery
+/* Foreign-list stats: the only view of another user's list contents. */
+/* A public list's own note, one line under its name in the discovery
    table — truncated rather than wrapped, since the row's other columns
    (owner, counts) need to stay on that same line. */
-.lib-row-note { font-size: 11px; margin-top: 2px; max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lib-stats { display: flex; gap: 32px; flex-wrap: wrap; }
-.lib-stats > div { display: flex; flex-direction: column; gap: 2px; }
-.lib-stat-num { font-family: 'Gazpacho', serif; font-size: 24px; font-weight: 500; color: var(--text-high); }
-.lib-stat-label { font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); text-transform: uppercase; letter-spacing: 0.05em; }
+.list-row-note { font-size: 11px; margin-top: 2px; max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list-stats { display: flex; gap: 32px; flex-wrap: wrap; }
+.list-stats > div { display: flex; flex-direction: column; gap: 2px; }
+.list-stat-num { font-family: 'Gazpacho', serif; font-size: 24px; font-weight: 500; color: var(--text-high); }
+.list-stat-label { font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); text-transform: uppercase; letter-spacing: 0.05em; }
 /* Account rows carry the same avatar an account pill would (profile image /
    snakewatch emoji / placeholder while the display refs load). */
 .account-row-emoji { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; overflow: hidden; background: var(--bg-elev); border: 1px solid var(--border); }
-/* A tag panel's own header icon (LibraryDetail's TagPanel): plain `.emoji.id`
+/* A tag panel's own header icon (ListDetail's TagPanel): plain `.emoji.id`
    has no size rule of its own, so when the icon falls back to a member's
    uploaded avatar (a bare <img> at width/height 100% of an unsized parent)
    the browser has nothing to resolve those percentages against and falls

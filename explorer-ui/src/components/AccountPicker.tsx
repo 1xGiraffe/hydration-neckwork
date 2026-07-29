@@ -21,7 +21,7 @@ import { tokenizeAddresses } from './accountTokens'
 //    input instead of staging a chip — the picker renders no STAGING chips of
 //    its own in this mode. The parent's own already-committed members render
 //    as `chips`, a slot placed ahead of the input inside the very same
-//    `.acct-picker-box` (see LibraryDetail's tag member editor) — one bordered
+//    `.acct-picker-box` (see ListDetail's tag member editor) — one bordered
 //    token surface, not a picker with a separate chip list bolted underneath.
 //    The input clears optimistically, but a batch (a multi-token paste, or a
 //    name-search result fired mid-typing) can still partly fail server-side —

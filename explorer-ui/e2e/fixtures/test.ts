@@ -2,7 +2,7 @@ import type { Page, Route } from '@playwright/test'
 import { expect, test as base } from '@playwright/test'
 import { mockSync } from '../../tests/fixtures/mockApi'
 import type {
-  AccountRef, LibraryDetailResponse, LibraryTagDetail, LibrarySummaryRef, MeResponse, TagMapResponse, TagDetail,
+  AccountRef, ListDetailResponse, ListTagDetail, ListSummaryRef, MeResponse, TagMapResponse, TagDetail,
 } from '../../src/types'
 
 // The wallet-login identity every mock session resolves to, and the bearer
@@ -22,7 +22,7 @@ function freshAccount(): AccountRef {
 // A plain address the real service has never seen becomes exactly this shape
 // server-side too: an account ref with nothing beyond the address itself —
 // no tag, no identity, no profile. Good enough for "does a member row
-// appear", which is all the library-management flow checks.
+// appear", which is all the list-management flow checks.
 function accountRefFromAddress(address: string): AccountRef {
   return { accountId: address, address, emoji: '👤', tag: null }
 }
@@ -45,34 +45,34 @@ function mockDisplayIcon(icon: string, members: AccountRef[]): string {
 }
 
 // Mirrors compareTagRefsByName (api/src/routes/user.ts): the real
-// libraryDetailResponse always serves tags alphabetically, case-insensitive,
+// listDetailResponse always serves tags alphabetically, case-insensitive,
 // tagId-tiebroken — never creation order. `lib.tags` here is pushed to in
 // creation order (see the create-tag handler below), so a GET that skipped
 // this would let a spec's "tags come back alphabetical" assertion pass for
 // the wrong reason (a mock that happens to insert in order) instead of the
 // real one (the server actively re-sorts).
-function sortedTags(tags: LibraryTagDetail[]): LibraryTagDetail[] {
+function sortedTags(tags: ListTagDetail[]): ListTagDetail[] {
   return [...tags].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.tagId.localeCompare(b.tagId))
 }
 
 // A subscription entry may optionally carry the same tag/member detail an
-// owned library does — a subscribed (not owned) library's tags are still
+// owned list does — a subscribed (not owned) list's tags are still
 // real, curated by ITS owner, and a spec exercising the aggregate view of a
 // subscribed tag (e.g. the provenance pill for a non-owner viewer) needs
 // somewhere to seed them. Optional so the many specs that only need the
 // plain summary (subscribe/unsubscribe, Discover rows) don't have to fill it in.
-export type MockLibraryEntry = LibrarySummaryRef & { tags?: LibraryTagDetail[] }
+export type MockListEntry = ListSummaryRef & { tags?: ListTagDetail[] }
 
 // Per-test mutable backing store for everything under `/api/user/**`. Kept
-// intentionally small (no ClickHouse, no real ids) — `libraries`/`tagMap` are
+// intentionally small (no ClickHouse, no real ids) — `lists`/`tagMap` are
 // the two a spec actually reaches into; the rest exists so the full
 // `userApi` surface has somewhere to read from and write to without 404ing.
 export interface UserMockState {
   loggedIn: boolean
   account: AccountRef
-  libraries: LibraryDetailResponse[]
-  subscriptions: MockLibraryEntry[]
-  invites: LibrarySummaryRef[]
+  lists: ListDetailResponse[]
+  subscriptions: MockListEntry[]
+  invites: ListSummaryRef[]
   order: string[]
   tagMap: TagMapResponse
 }
@@ -81,23 +81,23 @@ function freshState(): UserMockState {
   return {
     loggedIn: false,
     account: freshAccount(),
-    libraries: [],
+    lists: [],
     subscriptions: [],
     invites: [],
     order: [],
-    tagMap: { libraries: [{ libraryId: 'system', name: 'Hydration', tags: [] }] },
+    tagMap: { lists: [{ listId: 'system', name: 'Hydration', tags: [] }] },
   }
 }
 
-// A library tag's own aggregate view, built from either an OWNED library
-// (`state.libraries`) or a SUBSCRIBED one that was seeded with tag detail
-// (`state.subscriptions`, see MockLibraryEntry) — so a tag created/edited
-// through the UI, or a subscribed foreign library's tag, is immediately
+// A list tag's own aggregate view, built from either an OWNED list
+// (`state.lists`) or a SUBSCRIBED one that was seeded with tag detail
+// (`state.subscriptions`, see MockListEntry) — so a tag created/edited
+// through the UI, or a subscribed foreign list's tag, is immediately
 // reachable at its own aggregate URL too. Feeds (activity/extrinsics/events/
 // votes/value-events) answer empty elsewhere in this handler; only the detail
 // needs the tag's real presentation fields and members.
-function buildLibraryTagDetail(state: UserMockState, libraryId: string, tagId: string): TagDetail | null {
-  const lib = state.libraries.find(l => l.libraryId === libraryId) ?? state.subscriptions.find(l => l.libraryId === libraryId)
+function buildListTagDetail(state: UserMockState, listId: string, tagId: string): TagDetail | null {
+  const lib = state.lists.find(l => l.listId === listId) ?? state.subscriptions.find(l => l.listId === listId)
   const tag = lib?.tags?.find(t => t.tagId === tagId)
   if (!tag) return null
   return {
@@ -113,7 +113,7 @@ function buildMe(state: UserMockState): MeResponse {
   return {
     account: state.account,
     profile: state.account.profile ?? null,
-    libraries: state.libraries,
+    lists: state.lists,
     subscriptions: state.subscriptions,
     invites: state.invites,
     order: state.order,
@@ -134,7 +134,7 @@ function bodyOf(route: Route): Record<string, unknown> {
 // Handles every `userApi` call (`explorer-ui/src/api/explorer.ts`) against
 // `state`, mirroring the real `/user/**` routes closely enough for the UI's
 // own mutate → invalidate → refetch cycle to show real results: a created
-// library is there on the next `GET /user/libraries/:id`, a reordered list
+// list is there on the next `GET /user/lists/:id`, a reordered list
 // is there on the next `GET /user/me`, and so on. Auth is deliberately dumb —
 // any signature verifies, and the only thing gating a request past the
 // challenge/verify/logout routes is `state.loggedIn` plus the fixed bearer
@@ -196,26 +196,26 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
 
   let m: RegExpMatchArray | null
 
-  if (method === 'GET' && (m = path.match(/^\/user\/libraries\/([^/]+)$/))) {
-    const lib = state.libraries.find(l => l.libraryId === decodeURIComponent(m![1]))
+  if (method === 'GET' && (m = path.match(/^\/user\/lists\/([^/]+)$/))) {
+    const lib = state.lists.find(l => l.listId === decodeURIComponent(m![1]))
     if (lib) await fulfillJson(route, 200, { ...lib, tags: sortedTags(lib.tags) })
     else await fulfillJson(route, 404, { error: 'not found' })
     return
   }
-  if (method === 'POST' && path === '/user/libraries') {
+  if (method === 'POST' && path === '/user/lists') {
     const { name, note, visibility } = bodyOf(route) as { name: string; note?: string; visibility?: 'private' | 'public' }
-    const libraryId = `lib-${state.libraries.length + 1}`
-    const lib: LibraryDetailResponse = {
-      libraryId, name, note: note ?? '', visibility: visibility ?? 'private', isPersonal: false,
+    const listId = `list-${state.lists.length + 1}`
+    const lib: ListDetailResponse = {
+      listId, name, note: note ?? '', visibility: visibility ?? 'private', isPersonal: false,
       owner: state.account, tagCount: 0, accountCount: 0, subscriberCount: 0, tags: [],
     }
-    state.libraries.push(lib)
-    state.order.push(libraryId)
+    state.lists.push(lib)
+    state.order.push(listId)
     await fulfillJson(route, 200, lib)
     return
   }
-  if (method === 'PATCH' && (m = path.match(/^\/user\/libraries\/([^/]+)$/))) {
-    const lib = state.libraries.find(l => l.libraryId === decodeURIComponent(m![1]))
+  if (method === 'PATCH' && (m = path.match(/^\/user\/lists\/([^/]+)$/))) {
+    const lib = state.lists.find(l => l.listId === decodeURIComponent(m![1]))
     if (!lib) { await fulfillJson(route, 404, { error: 'not found' }); return }
     const body = bodyOf(route) as { name?: string; note?: string; visibility?: 'private' | 'public' }
     if (body.name != null) lib.name = body.name
@@ -224,19 +224,19 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     await fulfillJson(route, 200, lib)
     return
   }
-  if (method === 'DELETE' && (m = path.match(/^\/user\/libraries\/([^/]+)$/))) {
+  if (method === 'DELETE' && (m = path.match(/^\/user\/lists\/([^/]+)$/))) {
     const id = decodeURIComponent(m![1])
-    state.libraries = state.libraries.filter(l => l.libraryId !== id)
+    state.lists = state.lists.filter(l => l.listId !== id)
     state.order = state.order.filter(o => o !== id)
     await fulfillJson(route, 200, { ok: true })
     return
   }
 
-  if (method === 'POST' && (m = path.match(/^\/user\/libraries\/([^/]+)\/tags$/))) {
-    const lib = state.libraries.find(l => l.libraryId === decodeURIComponent(m![1]))
+  if (method === 'POST' && (m = path.match(/^\/user\/lists\/([^/]+)\/tags$/))) {
+    const lib = state.lists.find(l => l.listId === decodeURIComponent(m![1]))
     if (!lib) { await fulfillJson(route, 404, { error: 'not found' }); return }
     const { name, color, icon, note } = bodyOf(route) as { name: string; color?: string; icon?: string; note?: string }
-    const tag: LibraryTagDetail = {
+    const tag: ListTagDetail = {
       tagId: `tag-${lib.tags.length + 1}`, name, color: color ?? '#5865f2',
       icon: icon ?? '', displayIcon: mockDisplayIcon(icon ?? '', []), note: note ?? '', members: [],
     }
@@ -245,8 +245,8 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     await fulfillJson(route, 200, tag)
     return
   }
-  if (method === 'PATCH' && (m = path.match(/^\/user\/libraries\/([^/]+)\/tags\/([^/]+)$/))) {
-    const lib = state.libraries.find(l => l.libraryId === decodeURIComponent(m![1]))
+  if (method === 'PATCH' && (m = path.match(/^\/user\/lists\/([^/]+)\/tags\/([^/]+)$/))) {
+    const lib = state.lists.find(l => l.listId === decodeURIComponent(m![1]))
     const tag = lib?.tags.find(t => t.tagId === decodeURIComponent(m![2]))
     if (!tag) { await fulfillJson(route, 404, { error: 'not found' }); return }
     const body = bodyOf(route) as { name?: string; color?: string; icon?: string; note?: string }
@@ -261,14 +261,14 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     await fulfillJson(route, 200, tag)
     return
   }
-  if (method === 'DELETE' && (m = path.match(/^\/user\/libraries\/([^/]+)\/tags\/([^/]+)$/))) {
-    const lib = state.libraries.find(l => l.libraryId === decodeURIComponent(m![1]))
+  if (method === 'DELETE' && (m = path.match(/^\/user\/lists\/([^/]+)\/tags\/([^/]+)$/))) {
+    const lib = state.lists.find(l => l.listId === decodeURIComponent(m![1]))
     if (lib) { lib.tags = lib.tags.filter(t => t.tagId !== decodeURIComponent(m![2])); lib.tagCount = lib.tags.length }
     await fulfillJson(route, 200, { ok: true })
     return
   }
-  if (method === 'PUT' && (m = path.match(/^\/user\/libraries\/([^/]+)\/tags\/([^/]+)\/members$/))) {
-    const lib = state.libraries.find(l => l.libraryId === decodeURIComponent(m![1]))
+  if (method === 'PUT' && (m = path.match(/^\/user\/lists\/([^/]+)\/tags\/([^/]+)\/members$/))) {
+    const lib = state.lists.find(l => l.listId === decodeURIComponent(m![1]))
     const tag = lib?.tags.find(t => t.tagId === decodeURIComponent(m![2]))
     if (!lib || !tag) { await fulfillJson(route, 404, { error: 'not found' }); return }
     const { add, remove } = bodyOf(route) as { add?: string[]; remove?: string[] }
@@ -280,8 +280,8 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     await fulfillJson(route, 200, tag)
     return
   }
-  if (method === 'PUT' && (m = path.match(/^\/user\/libraries\/([^/]+)\/tags\/([^/]+)\/member-order$/))) {
-    const lib = state.libraries.find(l => l.libraryId === decodeURIComponent(m![1]))
+  if (method === 'PUT' && (m = path.match(/^\/user\/lists\/([^/]+)\/tags\/([^/]+)\/member-order$/))) {
+    const lib = state.lists.find(l => l.listId === decodeURIComponent(m![1]))
     const tag = lib?.tags.find(t => t.tagId === decodeURIComponent(m![2]))
     if (!lib || !tag) { await fulfillJson(route, 404, { error: 'not found' }); return }
     const { accountIds } = bodyOf(route) as { accountIds?: string[] }
@@ -297,11 +297,11 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
   }
 
   // Subscribers tab (C10): `shares` lives directly on the mock's own
-  // LibraryDetailResponse object (like `tags`), mutated in place so the tab's
+  // ListDetailResponse object (like `tags`), mutated in place so the tab's
   // mutate → invalidate → refetch cycle sees a real result on the next GET,
   // same pattern setTagMembers above uses for a tag's own member list.
-  if (method === 'POST' && (m = path.match(/^\/user\/libraries\/([^/]+)\/invites$/))) {
-    const lib = state.libraries.find(l => l.libraryId === decodeURIComponent(m![1]))
+  if (method === 'POST' && (m = path.match(/^\/user\/lists\/([^/]+)\/invites$/))) {
+    const lib = state.lists.find(l => l.listId === decodeURIComponent(m![1]))
     if (!lib) { await fulfillJson(route, 404, { error: 'not found' }); return }
     const { address } = bodyOf(route) as { address: string }
     if (address === INVALID_TAG_MEMBER_ADDRESS) { await fulfillJson(route, 400, { error: 'not a recognized address' }); return }
@@ -312,56 +312,56 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     await fulfillJson(route, 200, { ok: true })
     return
   }
-  if (method === 'DELETE' && (m = path.match(/^\/user\/libraries\/([^/]+)\/invites\/([^/]+)$/))) {
-    const lib = state.libraries.find(l => l.libraryId === decodeURIComponent(m![1]))
+  if (method === 'DELETE' && (m = path.match(/^\/user\/lists\/([^/]+)\/invites\/([^/]+)$/))) {
+    const lib = state.lists.find(l => l.listId === decodeURIComponent(m![1]))
     if (lib) lib.shares = (lib.shares ?? []).filter(s => s.account.address !== decodeURIComponent(m![2]))
     await fulfillJson(route, 200, { ok: true })
     return
   }
   if (method === 'POST' && (m = path.match(/^\/user\/invites\/([^/]+)\/(accept|decline)$/))) {
     const id = decodeURIComponent(m![1])
-    const invite = state.invites.find(i => i.libraryId === id)
-    state.invites = state.invites.filter(i => i.libraryId !== id)
+    const invite = state.invites.find(i => i.listId === id)
+    state.invites = state.invites.filter(i => i.listId !== id)
     if (invite && m![2] === 'accept') state.subscriptions.push(invite)
     await fulfillJson(route, 200, { ok: true })
     return
   }
   if (method === 'POST' && path === '/user/subscriptions') {
-    // No public-library catalogue lives in this store; a spec that needs a
+    // No public-list catalogue lives in this store; a spec that needs a
     // real subscribed row pushes it into `state.subscriptions` directly.
     await fulfillJson(route, 200, { ok: true })
     return
   }
   if (method === 'DELETE' && (m = path.match(/^\/user\/subscriptions\/([^/]+)$/))) {
-    state.subscriptions = state.subscriptions.filter(l => l.libraryId !== decodeURIComponent(m![1]))
+    state.subscriptions = state.subscriptions.filter(l => l.listId !== decodeURIComponent(m![1]))
     await fulfillJson(route, 200, { ok: true })
     return
   }
-  if (method === 'PUT' && path === '/user/library-order') {
-    const { libraryIds } = bodyOf(route) as { libraryIds: string[] }
-    state.order = libraryIds
+  if (method === 'PUT' && path === '/user/list-order') {
+    const { listIds } = bodyOf(route) as { listIds: string[] }
+    state.order = listIds
     await fulfillJson(route, 200, { order: state.order })
     return
   }
 
-  // A library tag's own aggregate page. Deterministic empty feeds are enough to
+  // A list tag's own aggregate page. Deterministic empty feeds are enough to
   // prove the page renders (the computation itself is the real API's concern,
-  // covered by api/tests/libraryTagRoutes.test.ts) — only the detail needs real
-  // tag data, from buildLibraryTagDetail above.
-  if (method === 'GET' && (m = path.match(/^\/user\/library-tag\/([^/]+)\/([^/]+)\/counts$/))) {
+  // covered by api/tests/listTagRoutes.test.ts) — only the detail needs real
+  // tag data, from buildListTagDetail above.
+  if (method === 'GET' && (m = path.match(/^\/user\/list-tag\/([^/]+)\/([^/]+)\/counts$/))) {
     await fulfillJson(route, 200, { extrinsics: 0, extrinsicsOnBehalf: 0, events: 0, votes: 0 })
     return
   }
-  if (method === 'GET' && (m = path.match(/^\/user\/library-tag\/([^/]+)\/([^/]+)\/list-count$/))) {
+  if (method === 'GET' && (m = path.match(/^\/user\/list-tag\/([^/]+)\/([^/]+)\/list-count$/))) {
     await fulfillJson(route, 200, { total: 0, complete: true })
     return
   }
-  if (method === 'GET' && (m = path.match(/^\/user\/library-tag\/([^/]+)\/([^/]+)\/(?:activity|extrinsics|events|votes|value-events)$/))) {
+  if (method === 'GET' && (m = path.match(/^\/user\/list-tag\/([^/]+)\/([^/]+)\/(?:activity|extrinsics|events|votes|value-events)$/))) {
     await fulfillJson(route, 200, [])
     return
   }
-  if (method === 'GET' && (m = path.match(/^\/user\/library-tag\/([^/]+)\/([^/]+)$/))) {
-    const detail = buildLibraryTagDetail(state, decodeURIComponent(m[1]), decodeURIComponent(m[2]))
+  if (method === 'GET' && (m = path.match(/^\/user\/list-tag\/([^/]+)\/([^/]+)$/))) {
+    const detail = buildListTagDetail(state, decodeURIComponent(m[1]), decodeURIComponent(m[2]))
     if (detail) await fulfillJson(route, 200, detail)
     else await fulfillJson(route, 404, { error: 'not found' })
     return
@@ -371,7 +371,7 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
 }
 
 // Seeds an already-logged-in session for specs that only need to exercise
-// what happens AFTER login (tag resolution, library management) — the wallet
+// what happens AFTER login (tag resolution, list management) — the wallet
 // dialog itself is covered once, end to end, by the login spec. Must run via
 // `page.addInitScript` (before any app code reads `localStorage`) and keep
 // `userMock`'s own `state.loggedIn` in sync, since `handleUserApi` gates

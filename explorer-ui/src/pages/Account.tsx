@@ -11,9 +11,9 @@ import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { useSession } from '../session'
-import { useAddressLibraries, useMe } from '../hooks/useUser'
+import { useAddressLists, useMe } from '../hooks/useUser'
 import { allAssociations, useTagMapVersion } from '../userTags'
-import type { LibrarySummaryRef } from '../types'
+import type { ListSummaryRef } from '../types'
 
 // Radix + the dialog are only needed once the account owner actually opens the
 // editor, so it's a route-chunk-style lazy import (matching ConnectDialog from
@@ -33,7 +33,7 @@ export function Account({ address }: { address: string }) {
   const session = useSession()
   const isOwn = !!session && !!data && session.accountId === data.accountId
   const me = useMe()
-  const libs = useAddressLibraries(address)
+  const libs = useAddressLists(address)
   const [editOpen, setEditOpen] = useState(false)
   const [editMounted, setEditMounted] = useState(false)
   const now = useNow()
@@ -125,7 +125,7 @@ export function Account({ address }: { address: string }) {
                   {associations.length > 0 && (
                     <div className="row gap6" style={{ marginTop: 2, flexWrap: 'wrap', alignItems: 'center' }}>
                       <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>Tags</span>
-                      {associations.map(a => <UserTagPill key={a.libraryId ?? `system-${a.id}`} tag={a} address={data.evmAddress ?? data.ss58Polkadot} noCopy noMemberSuffix />)}
+                      {associations.map(a => <UserTagPill key={a.listId ?? `system-${a.id}`} tag={a} address={data.evmAddress ?? data.ss58Polkadot} noCopy noMemberSuffix />)}
                     </div>
                   )}
                 </div>
@@ -171,7 +171,7 @@ export function Account({ address }: { address: string }) {
 
               <CloseAccountsSection address={canonicalAddress ?? address} />
 
-              <LibrariesSection publicLibraries={libs.data ?? []} ownLibraries={isOwn ? (me.data?.libraries ?? []) : []} isOwn={isOwn} />
+              <ListsSection publicLists={libs.data ?? []} ownLists={isOwn ? (me.data?.lists ?? []) : []} isOwn={isOwn} />
 
               <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={history.data?.portfolioSeries ?? data.portfolioSeries ?? []} dates={history.data?.portfolioDates ?? data.portfolioDates} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} loading={history.isLoading || (history.isFetching && !history.data)} valueEvents={valueEvents.data} />
               </>)}
@@ -203,31 +203,31 @@ export function Account({ address }: { address: string }) {
   )
 }
 
-// A viewed account's tag libraries: the public ones it's an owner/tagged member
+// A viewed account's tag lists: the public ones it's an owner/tagged member
 // of (every viewer sees these), plus — on the account's own page — every one of
-// the owner's OWN libraries including their private ones. `ownLibraries` is the
-// superset for anything the viewer owns, so a library owned by the viewed
+// the owner's OWN lists including their private ones. `ownLists` is the
+// superset for anything the viewer owns, so a list owned by the viewed
 // account is deduped against it rather than shown twice.
-export function LibrariesSection({ publicLibraries, ownLibraries, isOwn }: {
-  publicLibraries: LibrarySummaryRef[]
-  ownLibraries: LibrarySummaryRef[]
+export function ListsSection({ publicLists, ownLists, isOwn }: {
+  publicLists: ListSummaryRef[]
+  ownLists: ListSummaryRef[]
   isOwn: boolean
 }) {
-  const seen = new Set(ownLibraries.map(l => l.libraryId))
-  const rows = isOwn ? [...ownLibraries, ...publicLibraries.filter(l => !seen.has(l.libraryId))] : publicLibraries
+  const seen = new Set(ownLists.map(l => l.listId))
+  const rows = isOwn ? [...ownLists, ...publicLists.filter(l => !seen.has(l.listId))] : publicLists
   if (!rows.length && !isOwn) return null
   return (
     <>
-      <div className="sec-title">Libraries{rows.length > 0 ? ` · ${rows.length}` : ''}</div>
+      <div className="sec-title">Lists{rows.length > 0 ? ` · ${rows.length}` : ''}</div>
       <div className="panel"><table className="tbl">
-        <thead><tr><th>Library</th><th className="r">Accounts</th></tr></thead>
+        <thead><tr><th>List</th><th className="r">Accounts</th></tr></thead>
         <tbody>
           {!rows.length
-            ? <EmptyRow cols={2}>Not listed in any library yet</EmptyRow>
+            ? <EmptyRow cols={2}>Not listed in any list yet</EmptyRow>
             : rows.map(lib => (
-              <tr key={lib.libraryId} {...rowNav(paths.library(lib.libraryId))}>
-                <td data-label="Library">
-                  <Link to={paths.library(lib.libraryId)} className="addr-pill" onClick={e => e.stopPropagation()}>
+              <tr key={lib.listId} {...rowNav(paths.list(lib.listId))}>
+                <td data-label="List">
+                  <Link to={paths.list(lib.listId)} className="addr-pill" onClick={e => e.stopPropagation()}>
                     <TagIcon icon="📚" title={lib.name} />
                     <span className="tag">{lib.name}</span>
                   </Link>
@@ -238,7 +238,7 @@ export function LibrariesSection({ publicLibraries, ownLibraries, isOwn }: {
             ))}
         </tbody>
       </table></div>
-      {isOwn && <div className="ext-link-row"><Link to={paths.libraries()} className="ext-link">Manage libraries →</Link></div>}
+      {isOwn && <div className="ext-link-row"><Link to={paths.lists()} className="ext-link">Manage lists →</Link></div>}
     </>
   )
 }

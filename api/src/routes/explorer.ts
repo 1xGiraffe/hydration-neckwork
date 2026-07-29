@@ -108,7 +108,7 @@ const listOffsetSchema = z.coerce.number().int().min(0).max(MAX_LIST_OFFSET).opt
 // Exported (with the parsers below it) so the user-tag aggregate routes
 // (routes/user.ts) accept and validate the same query params the system
 // tag/address routes do, through the exact same code — see that file's
-// library-tag routes for why sharing beats reimplementing.
+// list-tag routes for why sharing beats reimplementing.
 export function offsetParam(q: Record<string, unknown>): number | null {
   const n = listOffsetSchema.safeParse(q.offset)
   return n.success ? n.data ?? 0 : null

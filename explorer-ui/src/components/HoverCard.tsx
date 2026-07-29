@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/explorer'
 import { useAddressSummary, useAsset, useExtrinsic, useBlock, useTagSummary, useTrade, useStats, useDcaSchedule, useDcaExecution } from '../hooks/useExplorerData'
-import { useLibraryTagSummary } from '../hooks/useUser'
+import { useListTagSummary } from '../hooks/useUser'
 import { F, AssetIcon, AssetChip, AssetAmount, AddrPill, CallPill, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow, UserTagPill } from './ui'
 import { ayeSharePct, selectTally } from '../utils/referendumVotes'
 import { dcaCadence, dcaProgress, fmtDuration } from '../utils/dca'
-import { resolveTag, allAssociations, useTagMapVersion, libraryForTag, tagMapStatus, looksLikeUserTagId } from '../userTags'
+import { resolveTag, allAssociations, useTagMapVersion, listForTag, tagMapStatus, looksLikeUserTagId } from '../userTags'
 import type { AssetRef } from '../types'
 
 // Global hover preview cards for account (.addr-pill), tag (/tag/… links),
@@ -16,9 +16,9 @@ import type { AssetRef } from '../types'
 // block of its detail page. Mounted once in App.
 type VoteContext = { side: string; conviction: string; weighted: string }
 type Target = {
-  kind: 'account' | 'tag' | 'library-tag' | 'asset' | 'trade' | 'dca-schedule' | 'dca-exec' | 'extrinsic' | 'block' | 'referendum'
+  kind: 'account' | 'tag' | 'list-tag' | 'asset' | 'trade' | 'dca-schedule' | 'dca-exec' | 'extrinsic' | 'block' | 'referendum'
   id: string
-  libraryId?: string   // 'library-tag' only
+  listId?: string   // 'list-tag' only
   vote?: VoteContext
   left: number; top: number; bottom: number
 }
@@ -93,8 +93,8 @@ function parseTarget(el: Element): Omit<Target, 'left' | 'top' | 'bottom'> | nul
     // own skeleton exists to avoid, just for the hover card instead of the
     // page). 'error'/'anonymous' are terminal, same as a plain miss below.
     if (tagMapStatus() === 'loading' && looksLikeUserTagId(id)) return null
-    const lib = libraryForTag(id)
-    return lib ? { kind: 'library-tag', id, libraryId: lib.libraryId } : { kind: 'tag', id }
+    const lib = listForTag(id)
+    return lib ? { kind: 'list-tag', id, listId: lib.listId } : { kind: 'tag', id }
   }
   const sm = href.match(/\/asset\/(\d+)$/); if (sm) return { kind: 'asset', id: sm[1] }
   const dm = href.match(/\/dca\/([^?#]+)$/); if (dm) { const id = decodeURIComponent(dm[1]); return { kind: dcaKind(id), id } }
@@ -179,7 +179,7 @@ export function HoverCards() {
       onMouseLeave={() => setTarget(null)}>
       {target.kind === 'account' ? <AccountHover id={target.id} vote={target.vote} />
         : target.kind === 'tag' ? <TagHover id={target.id} />
-        : target.kind === 'library-tag' ? <LibraryTagHover libraryId={target.libraryId!} tagId={target.id} />
+        : target.kind === 'list-tag' ? <ListTagHover listId={target.listId!} tagId={target.id} />
         : target.kind === 'asset' ? <AssetHover id={Number(target.id)} />
         : target.kind === 'trade' ? <TradeHover id={target.id} />
         : target.kind === 'dca-schedule' ? <DcaScheduleHover id={target.id} />
@@ -233,7 +233,7 @@ function ReferendumHover({ id }: { id: string }) {
 // Compact account card: display name (priority tag / module / profile / identity
 // / emoji name) and the value. No address — the pill being hovered already shows
 // it. The associations row lists EVERY tag membership (not just the winner), so
-// the card doubles as a quick "which of my libraries is this in" lookup.
+// the card doubles as a quick "which of my lists is this in" lookup.
 const MAX_HOVER_TAGS = 4
 function AccountHover({ id, vote }: { id: string; vote?: VoteContext }) {
   useTagMapVersion()   // re-render when the viewer's tag map changes
@@ -267,7 +267,7 @@ function AccountHover({ id, vote }: { id: string; vote?: VoteContext }) {
       {associations.length > 0 && (
         <div className="hc-tags">
           {associations.slice(0, MAX_HOVER_TAGS).map(a => (
-            <UserTagPill key={a.libraryId ?? `system-${a.id}`} tag={a} address={data.evmAddress ?? data.ss58Polkadot} noCopy />
+            <UserTagPill key={a.listId ?? `system-${a.id}`} tag={a} address={data.evmAddress ?? data.ss58Polkadot} noCopy />
           ))}
           {associations.length > MAX_HOVER_TAGS && <span className="hc-tags-more">+{associations.length - MAX_HOVER_TAGS}</span>}
         </div>
@@ -304,13 +304,13 @@ function TagHover({ id }: { id: string }) {
   )
 }
 
-// A library tag's own hover card — same shape as TagHover, over the aggregate
+// A list tag's own hover card — same shape as TagHover, over the aggregate
 // view's authed summary. Logged out (or lacking permission) the query simply
 // never resolves data, and the card reads as "Loading…" rather than crashing —
 // this hovers a pill the viewer's own tag map already resolved for them, so in
 // practice they always have access to what they're hovering.
-function LibraryTagHover({ libraryId, tagId }: { libraryId: string; tagId: string }) {
-  const { data } = useLibraryTagSummary(libraryId, tagId)
+function ListTagHover({ listId, tagId }: { listId: string; tagId: string }) {
+  const { data } = useListTagSummary(listId, tagId)
   if (!data) return <div className="hc-sub mono">Loading…</div>
   const debtUsd = data.moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
   const topAssets = data.topAssets

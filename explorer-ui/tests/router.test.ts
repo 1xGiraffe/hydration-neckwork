@@ -33,15 +33,14 @@ describe('parseRoute (clean-path routing, design routes)', () => {
     expect(p(paths.tag('t1'))).toEqual({ name: 'tag', tagId: 't1' })
     expect(p(paths.tagsHydration())).toEqual({ name: 'tags-hydration' })
   })
-  it('redirects a library-tag URL to its /tag/:id aggregate view, keeping /library/:id working', () => {
-    // Pre-consolidation: a user tag's aggregate page lived under its owning
-    // library. It now shares the system /tag/:id namespace instead (TagDetail
-    // resolves it client-side via userTags.libraryForTag) — old links redirect.
-    expect(p('/library/lib1/tag/t1')).toEqual({ name: 'legacy', to: '/tag/t1' })
-    expect(p('/library/lib1')).toEqual({ name: 'library', libraryId: 'lib1' })
-    // A trailing /tag with nothing after it is not a valid aggregate page —
-    // falls back to the plain library page rather than a stray-segment 404.
-    expect(p('/library/lib1/tag')).toEqual({ name: 'library', libraryId: 'lib1' })
+  it('resolves /list/:id from just the first segment, ignoring anything after it', () => {
+    // A user tag's own aggregate page lives at the system /tag/:id namespace
+    // (TagDetail resolves it client-side via userTags.listForTag), never under
+    // its owning list — so /list/:id takes only the id and drops any trailing
+    // segments rather than special-casing them.
+    expect(p('/list/lib1')).toEqual({ name: 'list', listId: 'lib1' })
+    expect(p('/list/lib1/tag/t1')).toEqual({ name: 'list', listId: 'lib1' })
+    expect(p('/list/lib1/tag')).toEqual({ name: 'list', listId: 'lib1' })
   })
   it('/tags/hydration is its own route; any other /tags/* falls back to the hub', () => {
     expect(p('/tags/hydration')).toEqual({ name: 'tags-hydration' })

@@ -17243,9 +17243,9 @@ export function tagMembershipList(members: string[]): string {
 }
 
 // Short fingerprint of a LIVE, owner-editable membership (a user tag's), for the
-// cache-scope keys the library-tag aggregate view uses. A system tag's membership
+// cache-scope keys the list-tag aggregate view uses. A system tag's membership
 // only changes on a code deploy, so its scopes (tagMembershipList above, and the
-// bare `tag:<id>` scope strings below) never needed this — but a library owner can
+// bare `tag:<id>` scope strings below) never needed this — but a list owner can
 // add or remove a member between two requests, and every cache the member-list
 // internals key purely by scope string (activity/extrinsics/events/votes/tab-counts/
 // list-totals — none hash the account list themselves) would otherwise keep serving
@@ -17318,11 +17318,11 @@ async function persistTagDetailSnapshot(tagId: string, membershipKey: string, de
 }
 
 // The member-set builder behind getTag, extracted so the user-tag aggregate view
-// (getLibraryTagDetail below) can share it over an arbitrary, live-editable member
+// (getListTagDetail below) can share it over an arbitrary, live-editable member
 // list. `presentation` is display-only (name/color/icon/note + the id to stamp on
 // the response) — everything else is derived from `members`. `opts.snapshot` is the
 // system-tag-only ClickHouse persistence layer (see loadTagDetailSnapshot /
-// persistTagDetailSnapshot); omitting it (as the library-tag callers do) means the
+// persistTagDetailSnapshot); omitting it (as the list-tag callers do) means the
 // result is held only by the `cached()` wrapper below, never written to
 // `tag_detail_snapshots` — a user tag's membership can change at any time, and that
 // table has no per-caller bound on how many rows accumulate. `opts.scope` is the key
@@ -17474,76 +17474,76 @@ export async function getTagVotes(tagId: string, limit = 25, offset = 0, from?: 
 }
 
 // ── User-tag aggregate view ───────────────────────────────────────────────────
-// A library tag's own combined view — same shape and same member-list internals
+// A list tag's own combined view — same shape and same member-list internals
 // as a system tag's, but over a LIVE, owner-editable member set instead of a
 // code-defined one. The route layer resolves permission + the tag's presentation
-// fields and members (userLibraryService.visibleTagMembers) and passes them in
-// here; this file never reads userLibraryService's maps directly. Deliberately
+// fields and members (userListService.visibleTagMembers) and passes them in
+// here; this file never reads userListService's maps directly. Deliberately
 // excluded from hotTagDetails / hotTagCounts / startTagCountsPrewarm and from the
 // tag_detail_snapshots / tag_activity_counts ClickHouse tables: those exist to
 // amortize cost over a small, fixed set of code-defined tags, and a user can
-// create/delete arbitrarily many library tags at will.
-export interface LibraryTagPresentation { tagId: string; name: string; color: string; icon: string; note: string }
+// create/delete arbitrarily many list tags at will.
+export interface ListTagPresentation { tagId: string; name: string; color: string; icon: string; note: string }
 
-function libraryTagMembers(members: string[]): string[] {
+function listTagMembers(members: string[]): string[] {
   return members.filter(m => ACCOUNT_RE.test(m))
 }
 // Every cache the member-list internals key purely by this scope string (none of
 // them hash the account list themselves — see membershipFingerprint above), so the
 // fingerprint is what makes a membership edit invalidate the tag's caches at once
 // rather than after whichever TTL happens to be longest (tab-counts alone holds
-// 600s). `tagId` keeps two library tags with an identical membership from sharing
-// one cache row; `libraryId` keeps two libraries' tags namespaced apart too, though
-// tag ids are already unique per library.
-function libraryTagScope(libraryId: string, tagId: string, members: string[]): string {
-  return `library-tag:${libraryId}:${tagId}:${membershipFingerprint(members)}`
+// 600s). `tagId` keeps two list tags with an identical membership from sharing
+// one cache row; `listId` keeps two lists' tags namespaced apart too, though
+// tag ids are already unique per list.
+function listTagScope(listId: string, tagId: string, members: string[]): string {
+  return `list-tag:${listId}:${tagId}:${membershipFingerprint(members)}`
 }
 
-export async function getLibraryTagDetail(libraryId: string, presentation: LibraryTagPresentation, members: string[], opts: { summary?: boolean } = {}): Promise<TagDetail | null> {
-  const valid = libraryTagMembers(members)
+export async function getListTagDetail(listId: string, presentation: ListTagPresentation, members: string[], opts: { summary?: boolean } = {}): Promise<TagDetail | null> {
+  const valid = listTagMembers(members)
   if (!valid.length) return null
   const summary = opts.summary === true
-  const scope = libraryTagScope(libraryId, presentation.tagId, valid)
+  const scope = listTagScope(listId, presentation.tagId, valid)
   return buildTagDetailForMembers(presentation, valid, { summary, cacheKey: `explorer:${scope}${summary ? ':summary' : ''}`, scope })
 }
-export async function getLibraryTagActivity(libraryId: string, tagId: string, members: string[], type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[]> {
-  const valid = libraryTagMembers(members)
+export async function getListTagActivity(listId: string, tagId: string, members: string[], type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[]> {
+  const valid = listTagMembers(members)
   if (!valid.length) return []
-  return getScopedAccountActivity(valid, libraryTagScope(libraryId, tagId, valid), type, limit, offset, action, filters, from, to)
+  return getScopedAccountActivity(valid, listTagScope(listId, tagId, valid), type, limit, offset, action, filters, from, to)
 }
-export async function getLibraryTagExtrinsics(libraryId: string, tagId: string, members: string[], limit = 25, offset = 0, filters: ExtrinsicListFilters = {}, from?: string, to?: string): Promise<ExtrinsicSummary[]> {
-  const valid = libraryTagMembers(members)
+export async function getListTagExtrinsics(listId: string, tagId: string, members: string[], limit = 25, offset = 0, filters: ExtrinsicListFilters = {}, from?: string, to?: string): Promise<ExtrinsicSummary[]> {
+  const valid = listTagMembers(members)
   if (!valid.length) return []
-  return getAccountExtrinsics(valid, limit, offset, libraryTagScope(libraryId, tagId, valid), filters, from, to)
+  return getAccountExtrinsics(valid, limit, offset, listTagScope(listId, tagId, valid), filters, from, to)
 }
-export async function getLibraryTagEvents(libraryId: string, tagId: string, members: string[], limit = 25, offset = 0, filters: EventListFilters = {}, from?: string, to?: string): Promise<EventRow[]> {
-  const valid = libraryTagMembers(members)
+export async function getListTagEvents(listId: string, tagId: string, members: string[], limit = 25, offset = 0, filters: EventListFilters = {}, from?: string, to?: string): Promise<EventRow[]> {
+  const valid = listTagMembers(members)
   if (!valid.length) return []
-  return getAccountEvents(valid, limit, offset, libraryTagScope(libraryId, tagId, valid), filters, from, to)
+  return getAccountEvents(valid, limit, offset, listTagScope(listId, tagId, valid), filters, from, to)
 }
-export async function getLibraryTagVotes(libraryId: string, tagId: string, members: string[], limit = 25, offset = 0, from?: string, to?: string, filters: VoteListFilters = {}): Promise<VoteRow[]> {
-  const valid = libraryTagMembers(members)
+export async function getListTagVotes(listId: string, tagId: string, members: string[], limit = 25, offset = 0, from?: string, to?: string, filters: VoteListFilters = {}): Promise<VoteRow[]> {
+  const valid = listTagMembers(members)
   if (!valid.length) return []
-  return getScopedVotes(valid, libraryTagScope(libraryId, tagId, valid), limit, offset, from, to, filters)
+  return getScopedVotes(valid, listTagScope(listId, tagId, valid), limit, offset, from, to, filters)
 }
 // Mirrors getAddressTabCounts' simplicity (getAccountTabCounts's own in-process
 // cache), not getTagTabCounts' persisted-snapshot/background-refresh machinery —
 // that machinery exists to amortize a fixed set of code-defined tags, which a
-// library tag is not.
-export async function getLibraryTagTabCounts(libraryId: string, tagId: string, members: string[]): Promise<TabCounts> {
-  const valid = libraryTagMembers(members)
+// list tag is not.
+export async function getListTagTabCounts(listId: string, tagId: string, members: string[]): Promise<TabCounts> {
+  const valid = listTagMembers(members)
   if (!valid.length) return { extrinsics: 0, extrinsicsOnBehalf: 0, events: 0, votes: 0 }
-  return getAccountTabCounts(valid, libraryTagScope(libraryId, tagId, valid))
+  return getAccountTabCounts(valid, listTagScope(listId, tagId, valid))
 }
-export async function getLibraryTagListTotal(libraryId: string, tagId: string, members: string[], query: ScopedListQuery): Promise<ScopedListTotal> {
-  const valid = libraryTagMembers(members)
+export async function getListTagListTotal(listId: string, tagId: string, members: string[], query: ScopedListQuery): Promise<ScopedListTotal> {
+  const valid = listTagMembers(members)
   if (!valid.length) return { total: 0, complete: true }
-  return scopedListTotal(valid, libraryTagScope(libraryId, tagId, valid), query)
+  return scopedListTotal(valid, listTagScope(listId, tagId, valid), query)
 }
-export async function getLibraryTagValueEvents(libraryId: string, tagId: string, members: string[], from?: string, to?: string): Promise<ValueEvent[]> {
-  const valid = libraryTagMembers(members)
+export async function getListTagValueEvents(listId: string, tagId: string, members: string[], from?: string, to?: string): Promise<ValueEvent[]> {
+  const valid = listTagMembers(members)
   if (!valid.length) return []
-  const scope = libraryTagScope(libraryId, tagId, valid)
+  const scope = listTagScope(listId, tagId, valid)
   const historyAccounts = [...new Set([...valid, ...valid.map(evmAccountForm).filter(Boolean) as string[]])]
   return getAccountValueEvents(historyAccounts, scope, from, to, VALUE_EVENT_DEFAULT_LIMIT, historyAccounts)
 }

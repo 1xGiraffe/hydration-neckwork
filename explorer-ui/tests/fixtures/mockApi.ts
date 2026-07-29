@@ -6,7 +6,7 @@ import type {
   AccountRef, AssetRef, AssetLiquidationDay, AssetLiquidationTotal, HdxDashboard, HdxCohort, HdxLockType, HdxUnlockBucket, HdxDailyFlow, HdxMover,
   HollarDashboard, HollarCollateral, HollarArbDay, HollarTradeDay, HollarPool, HollarPegPoint,
   TradeDetail as TradeDetailResponse,
-  LibrarySummaryRef, LibraryDetailResponse, LibraryTagDetail, TagMapResponse, MeResponse,
+  ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse,
 } from '../../src/types'
 
 /* ---------- deterministic helpers ---------- */
@@ -97,84 +97,84 @@ const A = {
 const ACCS = [A.krakenEvm, A.binance, A.fox, A.owl, A.treasury, A.swan]
 const COLLATORS = [acc('0xf617ddeb11327140143ea2c663520f91c6f56d351fa2fb5cb5f2b0e80b755b37', '16ZfsSG7swhuyw79EMUcjmV3LEpYpAroUuMv13FZYuYSpb7B', '🌳')]
 
-/* ---------- tag libraries ---------- */
+/* ---------- tag lists ---------- */
 // Owners and members are the SAME mock accounts used everywhere else (the fox,
-// owl, swan, binance, kraken) — a library's owner card, member pills, and an
-// address page's "in these libraries" panel must agree on one identity per
+// owl, swan, binance, kraken) — a list's owner card, member pills, and an
+// address page's "in these lists" panel must agree on one identity per
 // account, exactly as the live accounts/tags/activity feeds already do.
 const FOX_PROFILE = { name: 'fox.hdx', avatarVersion: 1 }
-const MOCK_PERSONAL_LIBRARY: LibrarySummaryRef = {
-  libraryId: 'personal', name: 'My library', note: '', visibility: 'private', isPersonal: true,
+const MOCK_PERSONAL_LIST: ListSummaryRef = {
+  listId: 'personal', name: 'My list', note: '', visibility: 'private', isPersonal: true,
   owner: { ...A.fox, profile: FOX_PROFILE }, tagCount: 1, accountCount: 1, subscriberCount: 0,
 }
-// Two public libraries, owned by two different existing mock accounts.
-export const MOCK_LIBRARIES: LibrarySummaryRef[] = [
-  { libraryId: 'defi-desks', name: 'DeFi desks', note: 'Accounts trading actively across Omnipool and the money markets', visibility: 'public', isPersonal: false, owner: { ...A.fox, profile: FOX_PROFILE }, tagCount: 2, accountCount: 3, subscriberCount: 3 },
-  { libraryId: 'exchange-wallets', name: 'Exchange wallets', note: 'Known CEX hot and deposit wallets', visibility: 'public', isPersonal: false, owner: A.binance, tagCount: 1, accountCount: 2, subscriberCount: 7 },
+// Two public lists, owned by two different existing mock accounts.
+export const MOCK_LISTS: ListSummaryRef[] = [
+  { listId: 'defi-desks', name: 'DeFi desks', note: 'Accounts trading actively across Omnipool and the money markets', visibility: 'public', isPersonal: false, owner: { ...A.fox, profile: FOX_PROFILE }, tagCount: 2, accountCount: 3, subscriberCount: 3 },
+  { listId: 'exchange-wallets', name: 'Exchange wallets', note: 'Known CEX hot and deposit wallets', visibility: 'public', isPersonal: false, owner: A.binance, tagCount: 1, accountCount: 2, subscriberCount: 7 },
 ]
-const MOCK_LIBRARY_DETAILS: Record<string, LibraryDetailResponse> = {
+const MOCK_LIST_DETAILS: Record<string, ListDetailResponse> = {
   'defi-desks': {
-    ...MOCK_LIBRARIES[0],
+    ...MOCK_LISTS[0],
     tags: [
       { tagId: 'defi-desks-active', name: 'Active traders', color: '#5865f2', icon: '📈', note: 'Trades weekly across Omnipool or the router', members: [A.fox, A.owl] },
       { tagId: 'defi-desks-lp', name: 'Liquidity providers', color: '#22c55e', icon: '💧', note: 'Holds a live Omnipool or stablepool position', members: [A.swan] },
-    ] satisfies LibraryTagDetail[],
+    ] satisfies ListTagDetail[],
     subscribed: false,
   },
   'exchange-wallets': {
-    ...MOCK_LIBRARIES[1],
+    ...MOCK_LISTS[1],
     tags: [
       { tagId: 'exchange-wallets-hot', name: 'Hot wallets', color: '#f97316', icon: '🔥', note: 'Active deposit/withdrawal wallets', members: [A.binance, A.krakenEvm] },
-    ] satisfies LibraryTagDetail[],
+    ] satisfies ListTagDetail[],
     subscribed: true,
   },
 }
-export const MOCK_LIBRARY_DETAIL = MOCK_LIBRARY_DETAILS['defi-desks']
-// Which public libraries list this address as owner or tagged member — the
-// account page's "in these libraries" panel. Any address not one of the two
+export const MOCK_LIST_DETAIL = MOCK_LIST_DETAILS['defi-desks']
+// Which public lists list this address as owner or tagged member — the
+// account page's "in these lists" panel. Any address not one of the two
 // owners/members below falls back to the fox's set, mirroring buildAddress's
 // own unknown-address fallback.
-function addressLibraries(rawAddress: string): LibrarySummaryRef[] {
+function addressLists(rawAddress: string): ListSummaryRef[] {
   const wanted = decodeURIComponent(rawAddress)
   const is = (a: AccountRef) => a.accountId === wanted || a.address.toLowerCase() === wanted.toLowerCase()
-  if (is(A.binance) || is(A.krakenEvm)) return [MOCK_LIBRARIES[1]]
-  return [MOCK_LIBRARIES[0]]
+  if (is(A.binance) || is(A.krakenEvm)) return [MOCK_LISTS[1]]
+  return [MOCK_LISTS[0]]
 }
-// A personal library (the tag map's non-system entry) plus the required
+// A personal list (the tag map's non-system entry) plus the required
 // system marker. `personal-watch` holds a known mock address so a resolved
 // pill can be asserted against it.
 export const MOCK_TAG_MAP: TagMapResponse = {
-  libraries: [
-    { libraryId: 'personal', name: 'My library', tags: [
+  lists: [
+    { listId: 'personal', name: 'My list', tags: [
       { tagId: 'personal-watch', name: 'Watching', color: '#f97316', icon: '👀', members: [A.owl.address] },
     ] },
-    { libraryId: 'system', name: 'Hydration', tags: [] },
+    { listId: 'system', name: 'Hydration', tags: [] },
   ],
 }
 // The 'personal-watch' tag's own aggregate view — same tagId/name/color/icon a
-// pill resolved through MOCK_TAG_MAP links to, so /library/personal/tag/personal-watch
+// pill resolved through MOCK_TAG_MAP links to, so /list/personal/tag/personal-watch
 // renders the identical label its pill already showed.
-export const MOCK_LIBRARY_TAG_DETAIL: TagDetail = {
+export const MOCK_LIST_TAG_DETAIL: TagDetail = {
   tagId: 'personal-watch', name: 'Watching', color: '#f97316', note: '', icon: '👀',
   members: [A.owl], balances: [], topAssets: [], portfolioUsd: 0,
   moneyMarket: [], liquidityPositions: [], activeDcas: [], portfolioSeries: [], portfolioDates: [], balanceHistory: [],
 }
-// A private, invite-only library the viewer has been invited to but neither
+// A private, invite-only list the viewer has been invited to but neither
 // owns nor has accepted yet.
-const MOCK_INVITE_LIBRARY: LibrarySummaryRef = {
-  libraryId: 'whale-watch', name: 'Whale watch', note: 'Invite-only — large HDX holders under active monitoring', visibility: 'private', isPersonal: false,
+const MOCK_INVITE_LIST: ListSummaryRef = {
+  listId: 'whale-watch', name: 'Whale watch', note: 'Invite-only — large HDX holders under active monitoring', visibility: 'private', isPersonal: false,
   owner: A.binance, tagCount: 1, accountCount: 2, subscriberCount: 1,
 }
-export const MOCK_INVITES: LibrarySummaryRef[] = [MOCK_INVITE_LIBRARY]
+export const MOCK_INVITES: ListSummaryRef[] = [MOCK_INVITE_LIST]
 export const MOCK_ME: MeResponse = {
   account: { ...A.fox, profile: FOX_PROFILE },
   profile: FOX_PROFILE,
-  libraries: [MOCK_PERSONAL_LIBRARY, MOCK_LIBRARIES[0]],
-  subscriptions: [MOCK_LIBRARIES[1]],
+  lists: [MOCK_PERSONAL_LIST, MOCK_LISTS[0]],
+  subscriptions: [MOCK_LISTS[1]],
   invites: MOCK_INVITES,
   // Priority order always names every slot, including the built-in 'system'
-  // directory — here last, so a viewer's own libraries outrank it by default.
-  order: [MOCK_PERSONAL_LIBRARY.libraryId, MOCK_LIBRARIES[0].libraryId, MOCK_LIBRARIES[1].libraryId, 'system'],
+  // directory — here last, so a viewer's own lists outrank it by default.
+  order: [MOCK_PERSONAL_LIST.listId, MOCK_LISTS[0].listId, MOCK_LISTS[1].listId, 'system'],
 }
 
 /* ---------- call/event catalogue ---------- */
@@ -1012,9 +1012,9 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   // `series=1` is the Overview's shape: the value series without the per-asset
   // history the Balances treemap reads (98-99% of the real payload).
   { re: /^\/explorer\/address\/(.+)\/history$/, fn: (m, qs) => { const built = buildAddress(decodeURIComponent(m[1])); return { portfolioSeries: built.portfolioSeries ?? [], portfolioDates: built.portfolioDates ?? [], balanceHistory: qs.get('series') === '1' ? [] : built.balanceHistory ?? [] } } },
-  // Public libraries that list this address as owner or tagged member — must
+  // Public lists that list this address as owner or tagged member — must
   // also sit before the generic address route's greedy `(.+)`.
-  { re: /^\/explorer\/address\/(.+)\/libraries$/, fn: (m) => addressLibraries(m[1]) },
+  { re: /^\/explorer\/address\/(.+)\/lists$/, fn: (m) => addressLists(m[1]) },
   {
     re: /^\/explorer\/address\/(.+)\/close-accounts$/, fn: () => ({
       accounts: [
@@ -1196,10 +1196,10 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   {
     re: /^\/explorer\/tags$/, fn: () => mockTags,
   },
-  { re: /^\/explorer\/libraries$/, fn: () => MOCK_LIBRARIES },
-  // Public detail of another user's library carries only the statistics —
-  // tag names/members stay with the owner (mirrors libraryDetailResponse).
-  { re: /^\/explorer\/library\/(.+)$/, fn: (m) => { const d = MOCK_LIBRARY_DETAILS[decodeURIComponent(m[1])]; return d ? { ...d, tags: [] } : d } },
+  { re: /^\/explorer\/lists$/, fn: () => MOCK_LISTS },
+  // Public detail of another user's list carries only the statistics —
+  // tag names/members stay with the owner (mirrors listDetailResponse).
+  { re: /^\/explorer\/list\/(.+)$/, fn: (m) => { const d = MOCK_LIST_DETAILS[decodeURIComponent(m[1])]; return d ? { ...d, tags: [] } : d } },
   // Connect-dialog display refs: echo known fixture accounts (matched on either
   // form), null for anything unknown — same contract as the real endpoint.
   {
@@ -1208,23 +1208,23 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       ACCS.find(a => a.address === addr || a.accountId === addr) ?? null),
   },
   // Authed detail — same objects as the public endpoint above (the mock has no
-  // private-only library, so there is nothing the anonymous route wouldn't see).
-  { re: /^\/user\/libraries\/(.+)$/, fn: (m) => MOCK_LIBRARY_DETAILS[decodeURIComponent(m[1])] },
+  // private-only list, so there is nothing the anonymous route wouldn't see).
+  { re: /^\/user\/lists\/(.+)$/, fn: (m) => MOCK_LIST_DETAILS[decodeURIComponent(m[1])] },
   { re: /^\/user\/me$/, fn: () => MOCK_ME },
   { re: /^\/user\/tag-map$/, fn: () => MOCK_TAG_MAP },
   { re: /^\/user\/invites$/, fn: () => MOCK_INVITES },
-  // A library tag's own aggregate page. Feeds answer empty (deterministic, and
+  // A list tag's own aggregate page. Feeds answer empty (deterministic, and
   // enough for the page to render its header + empty tables); the detail carries
   // the same tag the tag-map's 'personal-watch' entry resolves pills to, so a
   // pill and its own aggregate page agree on name/color/icon.
-  { re: /^\/user\/library-tag\/[^/]+\/[^/]+\/counts$/, fn: () => ({ extrinsics: 0, extrinsicsOnBehalf: 0, events: 0, votes: 0 }) },
-  { re: /^\/user\/library-tag\/[^/]+\/[^/]+\/list-count$/, fn: () => ({ total: 0, complete: true }) },
-  { re: /^\/user\/library-tag\/[^/]+\/[^/]+\/activity$/, fn: () => [] as ActivityRow[] },
-  { re: /^\/user\/library-tag\/[^/]+\/[^/]+\/extrinsics$/, fn: () => [] as ExtrinsicSummary[] },
-  { re: /^\/user\/library-tag\/[^/]+\/[^/]+\/events$/, fn: () => [] as EventRow[] },
-  { re: /^\/user\/library-tag\/[^/]+\/[^/]+\/votes$/, fn: () => [] },
-  { re: /^\/user\/library-tag\/[^/]+\/[^/]+\/value-events$/, fn: () => [] as ValueEvent[] },
-  { re: /^\/user\/library-tag\/([^/]+)\/([^/]+)$/, fn: (m) => decodeURIComponent(m[2]) === MOCK_LIBRARY_TAG_DETAIL.tagId ? MOCK_LIBRARY_TAG_DETAIL : undefined },
+  { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/counts$/, fn: () => ({ extrinsics: 0, extrinsicsOnBehalf: 0, events: 0, votes: 0 }) },
+  { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/list-count$/, fn: () => ({ total: 0, complete: true }) },
+  { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/activity$/, fn: () => [] as ActivityRow[] },
+  { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/extrinsics$/, fn: () => [] as ExtrinsicSummary[] },
+  { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/events$/, fn: () => [] as EventRow[] },
+  { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/votes$/, fn: () => [] },
+  { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/value-events$/, fn: () => [] as ValueEvent[] },
+  { re: /^\/user\/list-tag\/([^/]+)\/([^/]+)$/, fn: (m) => decodeURIComponent(m[2]) === MOCK_LIST_TAG_DETAIL.tagId ? MOCK_LIST_TAG_DETAIL : undefined },
 ]
 
 const mockTags: Tag[] = [

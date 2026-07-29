@@ -55,7 +55,7 @@ describe('the shared reconstruction outlives an account-value generation', () =>
     expect(sites).toHaveLength(4)
 
     // The two detail charts overwrite the last point with the displayed net worth.
-    // getTag's own call moved into buildTagDetailForMembers when the library-tag
+    // getTag's own call moved into buildTagDetailForMembers when the list-tag
     // aggregate view was extracted to share it — getTag now only delegates there,
     // so the pin follows the call site rather than the (unchanged) public name.
     for (const consumer of ['getAddressHistory', 'buildTagDetailForMembers']) {

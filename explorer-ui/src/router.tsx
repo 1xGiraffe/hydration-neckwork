@@ -41,8 +41,8 @@ export type Route =
   | { name: 'tags' }
   | { name: 'tags-hydration' }
   | { name: 'tag'; tagId: string }
-  | { name: 'libraries' }
-  | { name: 'library'; libraryId: string }
+  | { name: 'lists' }
+  | { name: 'list'; listId: string }
   | { name: 'assets' }
   | { name: 'hdx' }
   | { name: 'hollar' }
@@ -97,17 +97,9 @@ export function parseRoute(loc: string): Route {
     case 'tags': return parts[1] === 'hydration' ? { name: 'tags-hydration' } : { name: 'tags' }
     case 'tag':
       return parts[1] ? { name: 'tag', tagId: parts[1] } : { name: 'tags' }
-    case 'libraries': return { name: 'libraries' }
-    case 'library':
-      if (!parts[1]) return { name: 'libraries' }
-      // Pre-consolidation: a user tag's aggregate view used to live under its
-      // owning library (/library/:libraryId/tag/:tagId). It now shares the
-      // system namespace at /tag/:tagId (TagDetail resolves it client-side via
-      // userTags.libraryForTag) — redirect old links/bookmarks there. A bare
-      // trailing /tag with no id falls back to the plain library page rather
-      // than a stray-segment 404.
-      if (parts[2] === 'tag' && parts[3]) return { name: 'legacy', to: paths.tag(parts[3]) }
-      return { name: 'library', libraryId: parts[1] }
+    case 'lists': return { name: 'lists' }
+    case 'list':
+      return parts[1] ? { name: 'list', listId: parts[1] } : { name: 'lists' }
     case 'assets': return { name: 'assets' }
     // /referendum/<pallet>/<index>. The pallet is part of the identity: Hydration
     // voted through Democracy (0-206) and OpenGov (0-369) and both index from 0.
@@ -267,8 +259,8 @@ export const paths = {
   hollar: () => '/hollar',
   asset: (assetId: number) => `/asset/${assetId}`,
   holders: (assetId: number) => `/holders/${assetId}`,
-  libraries: () => '/libraries',
-  library: (id: string) => `/library/${encodeURIComponent(id)}`,
+  lists: () => '/lists',
+  list: (id: string) => `/list/${encodeURIComponent(id)}`,
 }
 
 export function Link({ to, children, className, title, ariaLabel, onClick, style, data }: { to: string; children: ReactNode; className?: string; title?: string; ariaLabel?: string; onClick?: (e: MouseEvent) => void; style?: CSSProperties; data?: Record<string, string> }) {

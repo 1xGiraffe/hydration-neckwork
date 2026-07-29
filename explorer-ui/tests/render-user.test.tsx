@@ -3,21 +3,21 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AddrPill, UserTagPill } from '../src/components/ui'
-import { LibrariesSection } from '../src/pages/Account'
-import { Libraries } from '../src/pages/Libraries'
+import { ListsSection } from '../src/pages/Account'
+import { Lists } from '../src/pages/Lists'
 import { Tags } from '../src/pages/Tags'
-import { LibraryDetail } from '../src/pages/LibraryDetail'
-import { LibraryTagDetail } from '../src/pages/LibraryTagDetail'
+import { ListDetail } from '../src/pages/ListDetail'
+import { ListTagDetail } from '../src/pages/ListTagDetail'
 import { TagDetail } from '../src/pages/TagDetail'
 import { setTagMap, setTagMapError } from '../src/userTags'
 import { parseRoute, paths } from '../src/router'
-import { MOCK_LIBRARIES, MOCK_LIBRARY_DETAIL, MOCK_LIBRARY_TAG_DETAIL } from './fixtures/mockApi'
-import type { AccountRef, LibrarySummaryRef } from '../src/types'
+import { MOCK_LISTS, MOCK_LIST_DETAIL, MOCK_LIST_TAG_DETAIL } from './fixtures/mockApi'
+import type { AccountRef, ListSummaryRef } from '../src/types'
 
-// Finds the single anchor wrapping `text` (libraries render an icon + name
+// Finds the single anchor wrapping `text` (lists render an icon + name
 // inside one <a>, so the href never sits right next to the visible text) and
 // returns its href, same intent as `screen.getByText(text).closest('a')` in a
-// harness with jsdom/@testing-library/react — neither is set up here (see the
+// harness with jsdom/@testing-list/react — neither is set up here (see the
 // AddrPill precedence tests above), so every render test in this file asserts
 // on the static markup string instead.
 function hrefOf(html: string, text: string): string | undefined {
@@ -25,18 +25,18 @@ function hrefOf(html: string, text: string): string | undefined {
   return anchors.find(m => m[2].includes(text))?.[1]
 }
 
-// No jsdom/@testing-library/react in this repo's test setup (see
+// No jsdom/@testing-list/react in this repo's test setup (see
 // tests/render.test.tsx) — render tests assert on the static markup string,
 // same as every other component test.
 const ACC = '0x' + 'ab'.repeat(32)
 const base: AccountRef = { accountId: ACC, address: '15xx', emoji: '🦊', tag: null, identity: null, profile: null }
 
-describe('library routes', () => {
-  it('parses the library routes', () => {
-    expect(parseRoute('/libraries')).toEqual({ name: 'libraries' })
-    expect(parseRoute('/library/abc-123')).toEqual({ name: 'library', libraryId: 'abc-123' })
-    expect(parseRoute('/library')).toEqual({ name: 'libraries' })
-    expect(paths.libraries()).toBe('/libraries')
+describe('list routes', () => {
+  it('parses the list routes', () => {
+    expect(parseRoute('/lists')).toEqual({ name: 'lists' })
+    expect(parseRoute('/list/abc-123')).toEqual({ name: 'list', listId: 'abc-123' })
+    expect(parseRoute('/list')).toEqual({ name: 'lists' })
+    expect(paths.lists()).toBe('/lists')
   })
 })
 
@@ -57,14 +57,14 @@ describe('AddrPill precedence with profiles and user tags', () => {
   })
 
   it('a user tag out-prioritizes the system tag and links to its own aggregate page', () => {
-    setTagMap({ libraries: [
-      { libraryId: 'lib1', name: 'Personal', tags: [{ tagId: 't1', name: 'Mine', color: '#0f0', icon: '', members: [ACC] }] },
-      { libraryId: 'system', name: 'Hydration', tags: [] },
+    setTagMap({ lists: [
+      { listId: 'lib1', name: 'Personal', tags: [{ tagId: 't1', name: 'Mine', color: '#0f0', icon: '', members: [ACC] }] },
+      { listId: 'system', name: 'Hydration', tags: [] },
     ] })
     const html = renderToStaticMarkup(<AddrPill account={{ ...base, tag: { id: 'kraken', name: 'Kraken', color: '#a78bfa', icon: '🦑' } }} />)
     expect(html).toContain('Mine')
     // The tag's own combined view, sharing the system /tag/:id namespace —
-    // not the library management page (/library/:libraryId).
+    // not the list management page (/list/:listId).
     expect(hrefOf(html, 'Mine')).toBe('/tag/t1')
     expect(html).not.toContain('Kraken')
   })
@@ -74,16 +74,16 @@ describe('AddrPill precedence with profiles and user tags', () => {
     expect(html).toContain('Chain Name')
   })
 
-  it('the system tag still wins when no user library claims the account (logged out)', () => {
+  it('the system tag still wins when no user list claims the account (logged out)', () => {
     const html = renderToStaticMarkup(<AddrPill account={{ ...base, tag: { id: 'kraken', name: 'Kraken', color: '#a78bfa', icon: '🦑' } }} noCopy />)
     expect(html).toContain('Kraken')
     expect(html).toContain('/tag/kraken')
   })
 
   it('a multi-member user tag disambiguates the pill with the member\'s last three address characters', () => {
-    setTagMap({ libraries: [
-      { libraryId: 'lib1', name: 'Personal', tags: [{ tagId: 't1', name: 'Mine', color: '#0f0', icon: '', members: [ACC, '15yy'] }] },
-      { libraryId: 'system', name: 'Hydration', tags: [] },
+    setTagMap({ lists: [
+      { listId: 'lib1', name: 'Personal', tags: [{ tagId: 't1', name: 'Mine', color: '#0f0', icon: '', members: [ACC, '15yy'] }] },
+      { listId: 'system', name: 'Hydration', tags: [] },
     ] })
     const html = renderToStaticMarkup(<AddrPill account={{ ...base }} />)
     expect(html).toContain('Mine')
@@ -92,9 +92,9 @@ describe('AddrPill precedence with profiles and user tags', () => {
   })
 
   it('a single-member user tag renders no member-disambiguation suffix', () => {
-    setTagMap({ libraries: [
-      { libraryId: 'lib1', name: 'Personal', tags: [{ tagId: 't1', name: 'Mine', color: '#0f0', icon: '', members: [ACC] }] },
-      { libraryId: 'system', name: 'Hydration', tags: [] },
+    setTagMap({ lists: [
+      { listId: 'lib1', name: 'Personal', tags: [{ tagId: 't1', name: 'Mine', color: '#0f0', icon: '', members: [ACC] }] },
+      { listId: 'system', name: 'Hydration', tags: [] },
     ] })
     const html = renderToStaticMarkup(<AddrPill account={{ ...base }} />)
     expect(html).toContain('Mine')
@@ -121,19 +121,19 @@ describe('AddrPill precedence with profiles and user tags', () => {
   })
 })
 
-describe('LibrariesSection — account page tag libraries', () => {
-  const publicLib: LibrarySummaryRef = { libraryId: 'l1', name: 'Whales', note: '', visibility: 'public', isPersonal: false, owner: base, tagCount: 2, accountCount: 5, subscriberCount: 3 }
-  const privateLib: LibrarySummaryRef = { libraryId: 'l2', name: 'Personal', note: '', visibility: 'private', isPersonal: true, owner: base, tagCount: 1, accountCount: 2, subscriberCount: 0 }
+describe('ListsSection — account page tag lists', () => {
+  const publicLib: ListSummaryRef = { listId: 'l1', name: 'Whales', note: '', visibility: 'public', isPersonal: false, owner: base, tagCount: 2, accountCount: 5, subscriberCount: 3 }
+  const privateLib: ListSummaryRef = { listId: 'l2', name: 'Personal', note: '', visibility: 'private', isPersonal: true, owner: base, tagCount: 1, accountCount: 2, subscriberCount: 0 }
 
-  it('lists an account’s public libraries and marks private ones on the own page', () => {
+  it('lists an account’s public lists and marks private ones on the own page', () => {
     const libs = [publicLib]
     const own = [...libs, privateLib]
-    const html = renderToStaticMarkup(<LibrariesSection publicLibraries={libs} ownLibraries={own} isOwn />)
+    const html = renderToStaticMarkup(<ListsSection publicLists={libs} ownLists={own} isOwn />)
     expect(html).toContain('Whales')
     expect(html).toContain('Personal')
     expect(html).toMatch(/only you/i)      // private marker
-    expect(hrefOf(html, 'Whales')).toBe('/library/l1')
-    // The public "Whales" library is owned by the viewer, so it's present in
+    expect(hrefOf(html, 'Whales')).toBe('/list/l1')
+    // The public "Whales" list is owned by the viewer, so it's present in
     // BOTH lists — it must still render as one row, not two. (The icon's
     // title="Whales" attribute repeats the name, so match the visible text
     // node — >Whales< — rather than every occurrence of the word.)
@@ -141,21 +141,21 @@ describe('LibrariesSection — account page tag libraries', () => {
   })
 
   it('shows only the public list — no private marker, no manage link — on someone else’s page', () => {
-    const html = renderToStaticMarkup(<LibrariesSection publicLibraries={[publicLib]} ownLibraries={[]} isOwn={false} />)
+    const html = renderToStaticMarkup(<ListsSection publicLists={[publicLib]} ownLists={[]} isOwn={false} />)
     expect(html).toContain('Whales')
     expect(html).not.toMatch(/only you/i)
-    expect(html).not.toContain('Manage libraries')
+    expect(html).not.toContain('Manage lists')
   })
 
-  it('renders nothing for a foreign account with no public libraries', () => {
-    const html = renderToStaticMarkup(<LibrariesSection publicLibraries={[]} ownLibraries={[]} isOwn={false} />)
+  it('renders nothing for a foreign account with no public lists', () => {
+    const html = renderToStaticMarkup(<ListsSection publicLists={[]} ownLists={[]} isOwn={false} />)
     expect(html).toBe('')
   })
 
   it('still renders — empty — with a manage link on an empty own page', () => {
-    const html = renderToStaticMarkup(<LibrariesSection publicLibraries={[]} ownLibraries={[]} isOwn />)
-    expect(html).toContain('Manage libraries')
-    expect(hrefOf(html, 'Manage libraries')).toBe('/libraries')
+    const html = renderToStaticMarkup(<ListsSection publicLists={[]} ownLists={[]} isOwn />)
+    expect(html).toContain('Manage lists')
+    expect(hrefOf(html, 'Manage lists')).toBe('/lists')
   })
 })
 
@@ -163,62 +163,62 @@ describe('LibrariesSection — account page tag libraries', () => {
 // under renderToStaticMarkup — see router.tsx's useRoute for the same pattern —
 // so every page render in this harness is necessarily the logged-out view.
 // These are smoke tests for the anonymous path; the logged-in panels (Your
-// libraries, Invites, owner controls) are exercised by hand per the task brief
+// lists, Invites, owner controls) are exercised by hand per the task brief
 // and by the e2e suite, matching how Account.tsx/TagDetail.tsx have no
 // full-page render test here either.
 describe('Tags hub — smoke render (logged out)', () => {
-  it('renders the Hydration Tags hero and at least one (unclickable) public-library row', () => {
+  it('renders the Hydration Tags hero and at least one (unclickable) public-list row', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    queryClient.setQueryData(['libraries'], MOCK_LIBRARIES)
+    queryClient.setQueryData(['lists'], MOCK_LISTS)
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Tags /></QueryClientProvider>)
     expect(html).toContain('Tags')
-    // The one clickable "library" row: the built-in directory, promoted above
-    // every user-made library.
+    // The one clickable "list" row: the built-in directory, promoted above
+    // every user-made list.
     expect(html).toContain('Hydration Tags')
     expect(hrefOf(html, 'Hydration Tags')).toBe('/tags/hydration')
     expect(html).toContain('DeFi desks')
-    // User-confirmed: a library row itself is not clickable — no anchor wraps
+    // User-confirmed: a list row itself is not clickable — no anchor wraps
     // the name (only the nested owner pill and the subscribe button are).
     expect(hrefOf(html, 'DeFi desks')).toBeUndefined()
-    // Logged out: no reorder/new-library affordances, but a real Subscribe
+    // Logged out: no reorder/new-list affordances, but a real Subscribe
     // button (C12) — same appearance as the logged-in one, opening the login
     // dialog instead of a dead "log in first" prompt.
-    expect(html).not.toContain('New library')
+    expect(html).not.toContain('New list')
     expect(html).toContain('Subscribe')
     expect(html).not.toContain('Log in to subscribe')
   })
 })
 
-describe('Libraries — smoke render (logged out)', () => {
+describe('Lists — smoke render (logged out)', () => {
   it('is pure management now — no discover/invites, just a log-in prompt', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Libraries /></QueryClientProvider>)
-    expect(html).toContain('Libraries')
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Lists /></QueryClientProvider>)
+    expect(html).toContain('Lists')
     expect(html).toMatch(/log in/i)
-    expect(html).not.toContain('New library')
+    expect(html).not.toContain('New list')
     expect(html).not.toContain('Subscribe')
   })
 })
 
-describe('LibraryDetail — smoke render (logged out)', () => {
-  it('shows another user\'s library as statistics only — never its tags or members', () => {
+describe('ListDetail — smoke render (logged out)', () => {
+  it('shows another user\'s list as statistics only — never its tags or members', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    // The public endpoint ships no tag contents for a foreign library — only
+    // The public endpoint ships no tag contents for a foreign list — only
     // the summary statistics. Mirror that shape here.
-    queryClient.setQueryData(['library', 'defi-desks', false], { ...MOCK_LIBRARY_DETAIL, tags: [] })
-    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><LibraryDetail libraryId="defi-desks" /></QueryClientProvider>)
+    queryClient.setQueryData(['list', 'defi-desks', false], { ...MOCK_LIST_DETAIL, tags: [] })
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><ListDetail listId="defi-desks" /></QueryClientProvider>)
     expect(html).toContain('DeFi desks')
-    // No "· library" suffix and no decorative avatar/icon block next to the name.
-    expect(html).not.toContain('· library')
+    // No "· list" suffix and no decorative avatar/icon block next to the name.
+    expect(html).not.toContain('· list')
     expect(html).not.toContain('acct-avatar')
     // Statistics panel, not tag panels.
-    expect(html).toContain('lib-stats')
+    expect(html).toContain('list-stats')
     expect(html).toContain('Subscriber')
     expect(html).not.toContain('Active traders')
     // Anonymous viewer: no owner-only affordances.
     expect(html).not.toContain('New tag')
     expect(html).not.toContain('Remove')
-    // C12: a public library shows a real Subscribe button even logged out —
+    // C12: a public list shows a real Subscribe button even logged out —
     // same appearance as the logged-in one (`>Subscribe<` pins the button's
     // own text node, not the "Subscriber" stat label above, which contains
     // "Subscribe" as a substring).
@@ -226,13 +226,13 @@ describe('LibraryDetail — smoke render (logged out)', () => {
   })
 
   // C4: the visibility badge is always public/private — `isPersonal` (an
-  // auto-created, non-deletable library, unrelated to who can see it) used to
-  // render a THIRD "personal" chip value here, which read as if the library
+  // auto-created, non-deletable list, unrelated to who can see it) used to
+  // render a THIRD "personal" chip value here, which read as if the list
   // were neither public nor private even though it's a plain public one.
-  it('never shows a "personal" badge, even for the personal library — only public/private', () => {
+  it('never shows a "personal" badge, even for the personal list — only public/private', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    queryClient.setQueryData(['library', 'defi-desks', false], { ...MOCK_LIBRARY_DETAIL, tags: [], isPersonal: true })
-    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><LibraryDetail libraryId="defi-desks" /></QueryClientProvider>)
+    queryClient.setQueryData(['list', 'defi-desks', false], { ...MOCK_LIST_DETAIL, tags: [], isPersonal: true })
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><ListDetail listId="defi-desks" /></QueryClientProvider>)
     expect(html).toContain('>public<')
     expect(html).not.toContain('personal')
   })
@@ -243,11 +243,11 @@ describe('LibraryDetail — smoke render (logged out)', () => {
 // renders the logged-out branch. A seeded query cache proves that branch takes
 // priority over any (unreachable, since the query is session-gated) data rather
 // than crashing trying to read it.
-describe('LibraryTagDetail — smoke render (logged out)', () => {
+describe('ListTagDetail — smoke render (logged out)', () => {
   it('hints to log in instead of showing "not found" or the tag data', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    queryClient.setQueryData(['library-tag', 'personal', 'personal-watch'], MOCK_LIBRARY_TAG_DETAIL)
-    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><LibraryTagDetail libraryId="personal" tagId="personal-watch" /></QueryClientProvider>)
+    queryClient.setQueryData(['list-tag', 'personal', 'personal-watch'], MOCK_LIST_TAG_DETAIL)
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><ListTagDetail listId="personal" tagId="personal-watch" /></QueryClientProvider>)
     expect(html).toMatch(/log in/i)
     expect(html).not.toContain('Watching')
     expect(html).not.toContain('Tag not found')
@@ -277,17 +277,17 @@ describe('TagDetail — routing between system and user-tag views', () => {
     expect(html).not.toMatch(/log in/i)
   })
 
-  it('routes to LibraryTagDetail once the map is ready and hits — not TagDetail\'s own anonymous hint', () => {
-    setTagMap({ libraries: [
-      { libraryId: 'lib1', name: 'Personal', tags: [{ tagId: USER_TAG_ID, name: 'Mine', color: '#0f0', icon: '', members: [ACC] }] },
+  it('routes to ListTagDetail once the map is ready and hits — not TagDetail\'s own anonymous hint', () => {
+    setTagMap({ lists: [
+      { listId: 'lib1', name: 'Personal', tags: [{ tagId: USER_TAG_ID, name: 'Mine', color: '#0f0', icon: '', members: [ACC] }] },
     ] })
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId={USER_TAG_ID} /></QueryClientProvider>)
-    // LibraryTagDetail itself still gates on a real session (useSession() is
+    // ListTagDetail itself still gates on a real session (useSession() is
     // always null under this SSR harness — see the file-level comment above),
     // so this can't reach the tag's real content here; it CAN prove routing
     // got past TagDetail's own anonymous-UUID hint (a real "Log in" BUTTON,
-    // absent from LibraryTagDetail's own plain-text one) into LibraryTagDetail
+    // absent from ListTagDetail's own plain-text one) into ListTagDetail
     // instead of stalling on TagDetail's — the e2e suite covers the full,
     // logged-in "shows the real tag" path this harness cannot reach.
     expect(html).not.toContain('<button')

@@ -809,12 +809,12 @@ export interface ReferendumDetail {
   votesTotal: number
 }
 
-// A user-authored tag library: a named, ownable collection of tags an account
+// A user-authored tag list: a named, ownable collection of tags an account
 // created to organize other accounts (mirrors the built-in Tag directory, but
-// user-owned and optionally shared). `isPersonal` marks the one library every
+// user-owned and optionally shared). `isPersonal` marks the one list every
 // account gets automatically and cannot delete or leave.
-export interface LibrarySummaryRef {
-  libraryId: string
+export interface ListSummaryRef {
+  listId: string
   name: string
   note: string
   visibility: 'private' | 'public'
@@ -825,7 +825,7 @@ export interface LibrarySummaryRef {
   subscriberCount: number
 }
 
-export interface LibraryTagDetail {
+export interface ListTagDetail {
   tagId: string
   name: string
   color: string
@@ -842,10 +842,10 @@ export interface LibraryTagDetail {
   members: AccountRef[]
 }
 
-export interface LibraryDetailResponse extends LibrarySummaryRef {
-  tags: LibraryTagDetail[]
+export interface ListDetailResponse extends ListSummaryRef {
+  tags: ListTagDetail[]
   // Present only when the viewer is authenticated and not the owner — whether
-  // they already subscribe to this (public) library.
+  // they already subscribe to this (public) list.
   subscribed?: boolean
   // Owner-only (Subscribers tab): every account with a live invite or an
   // active subscription. Absent for every other viewer, including the
@@ -855,22 +855,22 @@ export interface LibraryDetailResponse extends LibrarySummaryRef {
   shares?: { account: AccountRef; status: 'invited' | 'active' }[]
 }
 
-// The viewer's tag-map projection: every library's tags reduced to member
+// The viewer's tag-map projection: every list's tags reduced to member
 // addresses, for local pill resolution without a round trip per tag. The
-// 'system' entry stands for the built-in Tag directory (no library owns it).
-export interface TagMapLibrary {
-  libraryId: string
+// 'system' entry stands for the built-in Tag directory (no list owns it).
+export interface TagMapList {
+  listId: string
   name: string
   tags: { tagId: string; name: string; color: string; icon: string; members: string[] }[]
 }
-export interface TagMapResponse { libraries: TagMapLibrary[] }
+export interface TagMapResponse { lists: TagMapList[] }
 
 export interface MeResponse {
   account: AccountRef
   profile: ProfileRef | null
-  libraries: LibrarySummaryRef[]
-  subscriptions: LibrarySummaryRef[]
-  invites: LibrarySummaryRef[]
+  lists: ListSummaryRef[]
+  subscriptions: ListSummaryRef[]
+  invites: ListSummaryRef[]
   order: string[]
 }
 

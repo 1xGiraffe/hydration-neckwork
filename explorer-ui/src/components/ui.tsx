@@ -536,7 +536,7 @@ export function tagMemberSuffix(tag: Pick<ResolvedTag, 'memberCount'>, address: 
   return <span className="tag-member-suffix mono">·{address.slice(-3)}</span>
 }
 
-// A resolved tag (system OR user-library) as the primary label: the group's icon
+// A resolved tag (system OR user-list) as the primary label: the group's icon
 // + name, linking to the tag's combined view (system) or the aggregate page
 // (user) — so a viewer's own organization is one click from any pill wearing it.
 // `noMemberSuffix` drops the `·xyz` disambiguator (Account.tsx's own
@@ -547,7 +547,7 @@ export function tagMemberSuffix(tag: Pick<ResolvedTag, 'memberCount'>, address: 
 export function UserTagPill({ tag, address, noCopy, noMemberSuffix }: { tag: ResolvedTag; address: string; noCopy?: boolean; noMemberSuffix?: boolean }) {
   return (
     <span className="addr-wrap">
-      <Link to={paths.tag(tag.id)} className="addr-pill" title={tag.kind === 'user' ? `${tag.name} — your library “${tag.libraryName}”` : 'Tagged group — open combined view'}>
+      <Link to={paths.tag(tag.id)} className="addr-pill" title={tag.kind === 'user' ? `${tag.name} — your list “${tag.listName}”` : 'Tagged group — open combined view'}>
         <TagIcon icon={tag.icon} title={tag.name} />
         <span className="tag" style={tag.color ? { color: tag.color } : undefined}>{tag.name}</span>
         {!noMemberSuffix && tagMemberSuffix(tag, address)}
@@ -559,7 +559,7 @@ export function UserTagPill({ tag, address, noCopy, noMemberSuffix }: { tag: Res
 
 export function AddrPill({ account, full, noCopy, noTag }: { account: AccountRef; full?: boolean; noCopy?: boolean; noTag?: boolean }) {
   useTagMapVersion()   // re-render when the viewer's tag map changes
-  // Priority-resolved tag (the viewer's own libraries, in priority order, with
+  // Priority-resolved tag (the viewer's own lists, in priority order, with
   // the system directory as a slot in that order) is the primary label, matching
   // the Accounts list. `noTag` skips this on tag member lists, where the page
   // context already supplies the group and each row should show the member itself.

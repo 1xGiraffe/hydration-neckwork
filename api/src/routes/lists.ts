@@ -1,15 +1,15 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { getProfileAvatar } from '../services/userProfileService.ts'
-import { publicLibraries, publicLibrariesByOwner, getLibrary } from '../services/userLibraryService.ts'
-import { libSummaryRef, libraryDetailResponse } from './user.ts'
+import { publicLists, publicListsByOwner, getList } from '../services/userListService.ts'
+import { listSummaryRef, listDetailResponse } from './user.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
 import { accountRef, resolveDisplayAccountId } from '../services/explorerService.ts'
 
 // Public read surface for user-authored data. Everything here is identical for
 // every viewer, so it stays behind the shared nginx/api caches like the rest of
 // /explorer — the per-user views of the same data live under /user/*.
-export async function librariesRoutes(fastify: FastifyInstance) {
+export async function listsRoutes(fastify: FastifyInstance) {
   const accountParam = z.object({ accountId: z.string().regex(/^0x[0-9a-f]{64}$/) })
 
   fastify.get('/explorer/profile-avatar/:accountId', async (req, reply) => {
@@ -25,17 +25,17 @@ export async function librariesRoutes(fastify: FastifyInstance) {
     return reply.send(avatar.bytes)
   })
 
-  fastify.get('/explorer/libraries', async () => publicLibraries().map(libSummaryRef))
+  fastify.get('/explorer/lists', async () => publicLists().map(listSummaryRef))
 
-  const libParam = z.object({ id: z.string().min(1).max(64) })
-  fastify.get('/explorer/library/:id', async (req, reply) => {
-    const params = libParam.safeParse(req.params)
-    if (!params.success) return reply.status(404).send({ error: 'Library not found' })
-    const lib = getLibrary(params.data.id)
-    // Private libraries are indistinguishable from missing ones here — their
-    // per-user view is GET /user/libraries/:id.
-    if (!lib || lib.visibility !== 'public') return reply.status(404).send({ error: 'Library not found' })
-    return libraryDetailResponse(lib, null)
+  const listParam = z.object({ id: z.string().min(1).max(64) })
+  fastify.get('/explorer/list/:id', async (req, reply) => {
+    const params = listParam.safeParse(req.params)
+    if (!params.success) return reply.status(404).send({ error: 'List not found' })
+    const list = getList(params.data.id)
+    // Private lists are indistinguishable from missing ones here — their
+    // per-user view is GET /user/lists/:id.
+    if (!list || list.visibility !== 'public') return reply.status(404).send({ error: 'List not found' })
+    return listDetailResponse(list, null)
   })
 
   // Display refs for a short list of wallet addresses, so the connect dialog
@@ -56,11 +56,11 @@ export async function librariesRoutes(fastify: FastifyInstance) {
   })
 
   const addressParam = z.object({ address: z.string().min(3).max(128) })
-  fastify.get('/explorer/address/:address/libraries', async (req, reply) => {
+  fastify.get('/explorer/address/:address/lists', async (req, reply) => {
     const params = addressParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
     const n = normalizeAddress(params.data.address)
     if (!n) return reply.status(400).send({ error: 'Invalid address' })
-    return publicLibrariesByOwner(resolveDisplayAccountId(n.accountId)).map(libSummaryRef)
+    return publicListsByOwner(resolveDisplayAccountId(n.accountId)).map(listSummaryRef)
   })
 }

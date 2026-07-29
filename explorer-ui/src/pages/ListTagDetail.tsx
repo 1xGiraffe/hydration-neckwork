@@ -1,4 +1,4 @@
-import { useLibraryTag, useLibraryTagListCount, useLibraryTagValueEvents, useMe } from '../hooks/useUser'
+import { useListTag, useListTagListCount, useListTagValueEvents, useMe } from '../hooks/useUser'
 import { useSession } from '../session'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -13,39 +13,39 @@ import { useTagMapVersion } from '../userTags'
 import { useStats } from '../hooks/useExplorerData'
 import type { AccountRef } from '../types'
 
-// Provenance affordance: [owner avatar] OwnerName · LibraryName, one pill
-// linking to the library's management page (e.g. "🦒 Giraffe · Personal").
-// The tag-detail response itself carries no owner field — only a library's
+// Provenance affordance: [owner avatar] OwnerName · ListName, one pill
+// linking to the list's management page (e.g. "🦒 Giraffe · Personal").
+// The tag-detail response itself carries no owner field — only a list's
 // OWN summary does — so this reads it off the viewer's /user/me data instead,
-// which always has an entry for this tag's library: seeing the tag at all
+// which always has an entry for this tag's list: seeing the tag at all
 // means the viewer owns or subscribes to it.
-function LibraryProvenancePill({ libraryId, libraryName, owner }: { libraryId: string; libraryName: string; owner: AccountRef }) {
+function ListProvenancePill({ listId, listName, owner }: { listId: string; listName: string; owner: AccountRef }) {
   const ownerName = owner.profile?.name || owner.identity?.display || null
   return (
-    <Link to={paths.library(libraryId)} className="addr-pill" title={`${ownerName ?? owner.address} · ${libraryName}`}>
+    <Link to={paths.list(listId)} className="addr-pill" title={`${ownerName ?? owner.address} · ${listName}`}>
       <AccountEmoji account={owner} />
       {ownerName
         ? <span className={`tag${owner.profile?.name ? ' profile-name' : ''}`}>{ownerName}</span>
         : <span className="a mono"><ShortAddr addr={owner.address} /></span>}
-      <span className="muted"> · {libraryName}</span>
+      <span className="muted"> · {listName}</span>
     </Link>
   )
 }
 
-// A library tag's own aggregate view — same structure as the system TagDetail
-// page, over a viewer's own (or subscribed) library tag. Unlike a system tag,
+// A list tag's own aggregate view — same structure as the system TagDetail
+// page, over a viewer's own (or subscribed) list tag. Unlike a system tag,
 // this page has no anonymous form at all: the endpoint is authed and gated by
 // ownership/subscription, so a logged-out or unauthorized viewer sees a distinct
 // hint rather than the plain "not found" a missing tag id gets.
-export function LibraryTagDetail({ libraryId, tagId }: { libraryId: string; tagId: string }) {
+export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string }) {
   const session = useSession()
   useTagMapVersion()   // re-render if the viewer's own tag map changes (e.g. this tag gets renamed elsewhere)
   const me = useMe()
-  const librarySummary = [...(me.data?.libraries ?? []), ...(me.data?.subscriptions ?? [])].find(l => l.libraryId === libraryId)
-  const { data, isLoading, isError } = useLibraryTag(libraryId, tagId)
-  const activityTotal = useLibraryTagListCount(libraryId, tagId, activityListCount('all', '', {}))
-  const votesTotal = useLibraryTagListCount(libraryId, tagId, voteListCount())
-  const valueEvents = useLibraryTagValueEvents(libraryId, tagId)
+  const listSummary = [...(me.data?.lists ?? []), ...(me.data?.subscriptions ?? [])].find(l => l.listId === listId)
+  const { data, isLoading, isError } = useListTag(listId, tagId)
+  const activityTotal = useListTagListCount(listId, tagId, activityListCount('all', '', {}))
+  const votesTotal = useListTagListCount(listId, tagId, voteListCount())
+  const valueEvents = useListTagValueEvents(listId, tagId)
   useDocumentTitle(data?.name)
   const now = useNow()
   const { data: stats } = useStats(!!data?.activeDcas?.length)
@@ -96,7 +96,7 @@ export function LibraryTagDetail({ libraryId, tagId }: { libraryId: string; tagI
                       on a narrow viewport once both no longer fit on one line. */}
                   <div className="full" style={{ wordBreak: 'normal', flexWrap: 'wrap' }}>
                     <span className="muted">{members.length} accounts</span>
-                    {librarySummary && <> · <LibraryProvenancePill libraryId={libraryId} libraryName={librarySummary.name} owner={librarySummary.owner} /></>}
+                    {listSummary && <> · <ListProvenancePill listId={listId} listName={listSummary.name} owner={listSummary.owner} /></>}
                   </div>
                 </div>
                 <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} valueUsd={data.portfolioUsd - debtUsd} valueHint={
@@ -141,9 +141,9 @@ export function LibraryTagDetail({ libraryId, tagId }: { libraryId: string; tagI
               {liquidityPositions.length > 0 && <LiquidityPositionsTable positions={liquidityPositions} />}
               </>)}
 
-              {activeView === 'activity' && <ScopedActivity scope={{ kind: 'library-tag', libraryId, tagId }} />}
+              {activeView === 'activity' && <ScopedActivity scope={{ kind: 'list-tag', listId, tagId }} />}
 
-              {activeView === 'votes' && <VotesTab scope={{ kind: 'library-tag', libraryId, tagId }} />}
+              {activeView === 'votes' && <VotesTab scope={{ kind: 'list-tag', listId, tagId }} />}
             </>
           )
         })()}

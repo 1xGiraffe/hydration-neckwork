@@ -4,7 +4,7 @@ import type {
   AccountsPage, AccountSort, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, MoneyMarketResponse, AssetDetail, TagDetail,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail,
   ValueEvent, ReferendumDetail,
-  LibrarySummaryRef, LibraryDetailResponse, LibraryTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
+  ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
   AccountRef,
 } from '../types'
 import { getSession, setSession } from '../session'
@@ -186,15 +186,15 @@ export const api = {
   daily: (scope: string, params?: { type?: string; action?: string; token?: string }, signal?: AbortSignal) => getJson<DailyPoint[]>(withQuery(`/explorer/daily/${scope}`, { ...params }), signal),
   accountsDaily: (signal?: AbortSignal) => getJson<{ date: string; active: number; new: number }[]>('/explorer/accounts-daily', signal),
   tags: (signal?: AbortSignal) => getJson<Tag[]>('/explorer/tags', signal),
-  // Public, shared-cacheable tag-library directory — no auth, no per-viewer
-  // fields (subscribed etc. come only from the authenticated userApi.library).
-  libraries: (signal?: AbortSignal) => getJson<LibrarySummaryRef[]>('/explorer/libraries', signal),
+  // Public, shared-cacheable tag-list directory — no auth, no per-viewer
+  // fields (subscribed etc. come only from the authenticated userApi.list).
+  lists: (signal?: AbortSignal) => getJson<ListSummaryRef[]>('/explorer/lists', signal),
   // Display refs for wallet addresses (connect dialog): input order, null per
   // unparseable entry, canonical Polkadot/H160 display form + identity/profile.
   accountRefs: (addresses: string[], signal?: AbortSignal) =>
     getJson<(AccountRef | null)[]>(withQuery('/explorer/account-refs', { addresses: addresses.join(',') }), signal),
-  library: (id: string, signal?: AbortSignal) => getJson<LibraryDetailResponse>(`/explorer/library/${encodeURIComponent(id)}`, signal),
-  addressLibraries: (address: string, signal?: AbortSignal) => getJson<LibrarySummaryRef[]>(`/explorer/address/${encodeURIComponent(address)}/libraries`, signal),
+  list: (id: string, signal?: AbortSignal) => getJson<ListDetailResponse>(`/explorer/list/${encodeURIComponent(id)}`, signal),
+  addressLists: (address: string, signal?: AbortSignal) => getJson<ListSummaryRef[]>(`/explorer/address/${encodeURIComponent(address)}/lists`, signal),
 }
 
 export const userApi = {
@@ -206,44 +206,44 @@ export const userApi = {
   setProfileName: (name: string) => authedJson<ProfileRef>('PUT', '/user/profile', { name }),
   setAvatar: (data: string) => authedJson<ProfileRef>('PUT', '/user/profile/avatar', { data }),
   clearAvatar: () => authedJson<ProfileRef>('DELETE', '/user/profile/avatar'),
-  library: (id: string, signal?: AbortSignal) => authedJson<LibraryDetailResponse>('GET', `/user/libraries/${encodeURIComponent(id)}`, undefined, signal),
-  createLibrary: (body: { name: string; note?: string; visibility: 'private' | 'public' }) => authedJson<LibraryDetailResponse>('POST', '/user/libraries', body),
-  updateLibrary: (id: string, body: { name?: string; note?: string; visibility?: 'private' | 'public' }) => authedJson<LibraryDetailResponse>('PATCH', `/user/libraries/${encodeURIComponent(id)}`, body),
-  deleteLibrary: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/libraries/${encodeURIComponent(id)}`),
-  createTag: (id: string, body: { name: string; color?: string; icon?: string; note?: string }) => authedJson<LibraryTagDetail>('POST', `/user/libraries/${encodeURIComponent(id)}/tags`, body),
-  updateTag: (id: string, tagId: string, body: { name?: string; color?: string; icon?: string; note?: string }) => authedJson<LibraryTagDetail>('PATCH', `/user/libraries/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}`, body),
-  deleteTag: (id: string, tagId: string) => authedJson<{ ok: true }>('DELETE', `/user/libraries/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}`),
-  setTagMembers: (id: string, tagId: string, body: { add?: string[]; remove?: string[] }) => authedJson<LibraryTagDetail>('PUT', `/user/libraries/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}/members`, body),
+  list: (id: string, signal?: AbortSignal) => authedJson<ListDetailResponse>('GET', `/user/lists/${encodeURIComponent(id)}`, undefined, signal),
+  createList: (body: { name: string; note?: string; visibility: 'private' | 'public' }) => authedJson<ListDetailResponse>('POST', '/user/lists', body),
+  updateList: (id: string, body: { name?: string; note?: string; visibility?: 'private' | 'public' }) => authedJson<ListDetailResponse>('PATCH', `/user/lists/${encodeURIComponent(id)}`, body),
+  deleteList: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/lists/${encodeURIComponent(id)}`),
+  createTag: (id: string, body: { name: string; color?: string; icon?: string; note?: string }) => authedJson<ListTagDetail>('POST', `/user/lists/${encodeURIComponent(id)}/tags`, body),
+  updateTag: (id: string, tagId: string, body: { name?: string; color?: string; icon?: string; note?: string }) => authedJson<ListTagDetail>('PATCH', `/user/lists/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}`, body),
+  deleteTag: (id: string, tagId: string) => authedJson<{ ok: true }>('DELETE', `/user/lists/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}`),
+  setTagMembers: (id: string, tagId: string, body: { add?: string[]; remove?: string[] }) => authedJson<ListTagDetail>('PUT', `/user/lists/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}/members`, body),
   // Drag/keyboard reorder: `accountIds` must be a permutation of the tag's
   // current members — the server 400s otherwise (see setMemberOrder).
   setMemberOrder: (id: string, tagId: string, accountIds: string[]) =>
-    authedJson<LibraryTagDetail>('PUT', `/user/libraries/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}/member-order`, { accountIds }),
-  // A library tag's own aggregate view (combined balances/history/activity of all
+    authedJson<ListTagDetail>('PUT', `/user/lists/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}/member-order`, { accountIds }),
+  // A list tag's own aggregate view (combined balances/history/activity of all
   // its members) — same TagDetail shape the system /tag/:id page uses, authed
-  // because a private library's tag contents are owner/subscriber-only.
-  libraryTag: (libraryId: string, tagId: string, signal?: AbortSignal) =>
-    authedJson<TagDetail>('GET', `/user/library-tag/${encodeURIComponent(libraryId)}/${encodeURIComponent(tagId)}`, undefined, signal),
-  libraryTagSummary: (libraryId: string, tagId: string, signal?: AbortSignal) =>
-    authedJson<TagDetail>('GET', withQuery(`/user/library-tag/${encodeURIComponent(libraryId)}/${encodeURIComponent(tagId)}`, { summary: '1' }), undefined, signal),
-  libraryTagActivity: (libraryId: string, tagId: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
-    authedJson<ActivityRow[]>('GET', withQuery(`/user/library-tag/${encodeURIComponent(libraryId)}/${encodeURIComponent(tagId)}/activity`, { type, offset, limit, action, from, to, ...filters }), undefined, signal),
-  libraryTagExtrinsics: (libraryId: string, tagId: string, offset = 0, limit = 25, from?: string, to?: string, filters?: ExtrinsicFilters, signal?: AbortSignal) =>
-    authedJson<ExtrinsicSummary[]>('GET', withQuery(`/user/library-tag/${encodeURIComponent(libraryId)}/${encodeURIComponent(tagId)}/extrinsics`, { offset, limit, from, to, ...filters }), undefined, signal),
-  libraryTagEvents: (libraryId: string, tagId: string, offset = 0, limit = 25, from?: string, to?: string, filters?: EventFilters, signal?: AbortSignal) =>
-    authedJson<EventRow[]>('GET', withQuery(`/user/library-tag/${encodeURIComponent(libraryId)}/${encodeURIComponent(tagId)}/events`, { offset, limit, from, to, ...filters }), undefined, signal),
-  libraryTagVotes: (libraryId: string, tagId: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
-    authedJson<VoteRow[]>('GET', withQuery(`/user/library-tag/${encodeURIComponent(libraryId)}/${encodeURIComponent(tagId)}/votes`, { offset, limit, from, to }), undefined, signal),
-  libraryTagActivityCounts: (libraryId: string, tagId: string, signal?: AbortSignal) =>
-    authedJson<TabCounts>('GET', `/user/library-tag/${encodeURIComponent(libraryId)}/${encodeURIComponent(tagId)}/counts`, undefined, signal),
-  libraryTagListCount: (libraryId: string, tagId: string, query: ListCountQuery, signal?: AbortSignal) =>
-    authedJson<ListCount>('GET', withQuery(`/user/library-tag/${encodeURIComponent(libraryId)}/${encodeURIComponent(tagId)}/list-count`, { ...query }), undefined, signal),
-  libraryTagValueEvents: (libraryId: string, tagId: string, from?: string, to?: string, signal?: AbortSignal) =>
-    authedJson<ValueEvent[]>('GET', withQuery(`/user/library-tag/${encodeURIComponent(libraryId)}/${encodeURIComponent(tagId)}/value-events`, { from, to }), undefined, signal),
-  invite: (id: string, address: string) => authedJson<{ ok: true }>('POST', `/user/libraries/${encodeURIComponent(id)}/invites`, { address }),
-  revokeInvite: (id: string, address: string) => authedJson<{ ok: true }>('DELETE', `/user/libraries/${encodeURIComponent(id)}/invites/${encodeURIComponent(address)}`),
-  invites: (signal?: AbortSignal) => authedJson<LibrarySummaryRef[]>('GET', '/user/invites', undefined, signal),
-  respondInvite: (libraryId: string, accept: boolean) => authedJson<{ ok: true }>('POST', `/user/invites/${encodeURIComponent(libraryId)}/${accept ? 'accept' : 'decline'}`),
-  subscribe: (libraryId: string) => authedJson<{ ok: true }>('POST', '/user/subscriptions', { libraryId }),
-  unsubscribe: (libraryId: string) => authedJson<{ ok: true }>('DELETE', `/user/subscriptions/${encodeURIComponent(libraryId)}`),
-  setOrder: (libraryIds: string[]) => authedJson<{ order: string[] }>('PUT', '/user/library-order', { libraryIds }),
+  // because a private list's tag contents are owner/subscriber-only.
+  listTag: (listId: string, tagId: string, signal?: AbortSignal) =>
+    authedJson<TagDetail>('GET', `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}`, undefined, signal),
+  listTagSummary: (listId: string, tagId: string, signal?: AbortSignal) =>
+    authedJson<TagDetail>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}`, { summary: '1' }), undefined, signal),
+  listTagActivity: (listId: string, tagId: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
+    authedJson<ActivityRow[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/activity`, { type, offset, limit, action, from, to, ...filters }), undefined, signal),
+  listTagExtrinsics: (listId: string, tagId: string, offset = 0, limit = 25, from?: string, to?: string, filters?: ExtrinsicFilters, signal?: AbortSignal) =>
+    authedJson<ExtrinsicSummary[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/extrinsics`, { offset, limit, from, to, ...filters }), undefined, signal),
+  listTagEvents: (listId: string, tagId: string, offset = 0, limit = 25, from?: string, to?: string, filters?: EventFilters, signal?: AbortSignal) =>
+    authedJson<EventRow[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/events`, { offset, limit, from, to, ...filters }), undefined, signal),
+  listTagVotes: (listId: string, tagId: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
+    authedJson<VoteRow[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/votes`, { offset, limit, from, to }), undefined, signal),
+  listTagActivityCounts: (listId: string, tagId: string, signal?: AbortSignal) =>
+    authedJson<TabCounts>('GET', `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/counts`, undefined, signal),
+  listTagListCount: (listId: string, tagId: string, query: ListCountQuery, signal?: AbortSignal) =>
+    authedJson<ListCount>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/list-count`, { ...query }), undefined, signal),
+  listTagValueEvents: (listId: string, tagId: string, from?: string, to?: string, signal?: AbortSignal) =>
+    authedJson<ValueEvent[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/value-events`, { from, to }), undefined, signal),
+  invite: (id: string, address: string) => authedJson<{ ok: true }>('POST', `/user/lists/${encodeURIComponent(id)}/invites`, { address }),
+  revokeInvite: (id: string, address: string) => authedJson<{ ok: true }>('DELETE', `/user/lists/${encodeURIComponent(id)}/invites/${encodeURIComponent(address)}`),
+  invites: (signal?: AbortSignal) => authedJson<ListSummaryRef[]>('GET', '/user/invites', undefined, signal),
+  respondInvite: (listId: string, accept: boolean) => authedJson<{ ok: true }>('POST', `/user/invites/${encodeURIComponent(listId)}/${accept ? 'accept' : 'decline'}`),
+  subscribe: (listId: string) => authedJson<{ ok: true }>('POST', '/user/subscriptions', { listId }),
+  unsubscribe: (listId: string) => authedJson<{ ok: true }>('DELETE', `/user/subscriptions/${encodeURIComponent(listId)}`),
+  setOrder: (listIds: string[]) => authedJson<{ order: string[] }>('PUT', '/user/list-order', { listIds }),
 }

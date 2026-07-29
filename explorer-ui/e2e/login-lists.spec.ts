@@ -14,7 +14,7 @@ const TREASURY_ACCOUNT_ID = '0x6d6f646c70792f74727372790000000000000000000000000
 // as a tag member — any well-formed address works for the mock, but reusing
 // one already meaningful elsewhere in the suite beats inventing a new one.
 const BINANCE_ADDRESS = '0x2c1F9eB7a4D0c83E5f6A1b9D2c7E04aF8b3D16C9'
-// A real user tag id is a UUID (userLibraryService mints them with
+// A real user tag id is a UUID (userListService mints them with
 // randomUUID()) — TagDetail's routing treats that SHAPE as the signal that an
 // id might be a user tag at all (see userTags.looksLikeUserTagId), so specs
 // that navigate straight to a user tag's own /tag/:id page need an id that
@@ -152,7 +152,7 @@ test('the wallet grid shows a shortlist by default, and "Other wallets" reveals 
   await expect(page.locator('.account-btn .account-label')).toHaveText('E2E User')
 })
 
-// C12: a public library's Subscribe affordance shows for logged-out visitors
+// C12: a public list's Subscribe affordance shows for logged-out visitors
 // too — same button, appearance and label as the logged-in one — and opens
 // the login dialog rather than a dead end. /tags' own ConnectDialog instance
 // was removed in favor of the shared requestConnect() store Topbar consumes
@@ -173,11 +173,11 @@ test('logged out, clicking Subscribe on a /tags row opens the login dialog', asy
 test('a user tag outranks the system tag, and the system tag returns on logout', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   userMock.state.tagMap = {
-    libraries: [
-      { libraryId: 'lib1', name: 'My library', tags: [
+    lists: [
+      { listId: 'lib1', name: 'My list', tags: [
         { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
       ] },
-      { libraryId: 'system', name: 'Hydration', tags: [] },
+      { listId: 'system', name: 'Hydration', tags: [] },
     ],
   }
 
@@ -199,24 +199,24 @@ test('a user tag outranks the system tag, and the system tag returns on logout',
   await expect(pill).toHaveAttribute('href', '/tag/treasury')
 })
 
-// Regression coverage for HoverCard's tag/library-tag disambiguation: since
+// Regression coverage for HoverCard's tag/list-tag disambiguation: since
 // user and system tags now share the plain /tag/:id href form, the hover
 // card has to tell them apart the same way TagDetail's own routing does —
-// via the viewer's tag map — rather than a URL shape unique to library tags.
+// via the viewer's tag map — rather than a URL shape unique to list tags.
 test('hovering a user-tag pill shows its own aggregate card, not the system tag lookup', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   userMock.state.tagMap = {
-    libraries: [
-      { libraryId: 'lib1', name: 'My library', tags: [
+    lists: [
+      { listId: 'lib1', name: 'My list', tags: [
         { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
       ] },
-      { libraryId: 'system', name: 'Hydration', tags: [] },
+      { listId: 'system', name: 'Hydration', tags: [] },
     ],
   }
-  // The management-page shape of the same tag, so GET /user/library-tag/lib1/<id>
+  // The management-page shape of the same tag, so GET /user/list-tag/lib1/<id>
   // (the hover card's own summary request) has real data to answer with.
-  userMock.state.libraries.push({
-    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+  userMock.state.lists.push({
+    listId: 'lib1', name: 'My list', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
     tags: [{
       tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '',
@@ -236,17 +236,17 @@ test('hovering a user-tag pill shows its own aggregate card, not the system tag 
 test('a user-tag pill opens its own aggregate page, header included', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   userMock.state.tagMap = {
-    libraries: [
-      { libraryId: 'lib1', name: 'My library', tags: [
+    lists: [
+      { listId: 'lib1', name: 'My list', tags: [
         { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
       ] },
-      { libraryId: 'system', name: 'Hydration', tags: [] },
+      { listId: 'system', name: 'Hydration', tags: [] },
     ],
   }
-  // The management-page shape of the same tag, so GET /user/library-tag/lib1/<id>
-  // (buildLibraryTagDetail in fixtures/test.ts) has real data to answer with.
-  userMock.state.libraries.push({
-    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+  // The management-page shape of the same tag, so GET /user/list-tag/lib1/<id>
+  // (buildListTagDetail in fixtures/test.ts) has real data to answer with.
+  userMock.state.lists.push({
+    listId: 'lib1', name: 'My list', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
     tags: [{
       tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '',
@@ -265,21 +265,21 @@ test('a user-tag pill opens its own aggregate page, header included', async ({ p
 
 // Regression coverage for a cold load racing the tag-map fetch: TagDetail
 // used to fall through to the system lookup (and its "Tag not found") the
-// instant `libraryForTag` came back empty, without knowing WHY it was
+// instant `listForTag` came back empty, without knowing WHY it was
 // empty — logged out, or just not loaded yet. Holding the tag-map response
 // makes that "not loaded yet" window observable instead of racing past it.
 test('a cold logged-in load of a user-tag URL never flashes "Tag not found" while the tag map is in flight', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   userMock.state.tagMap = {
-    libraries: [
-      { libraryId: 'lib1', name: 'My library', tags: [
+    lists: [
+      { listId: 'lib1', name: 'My list', tags: [
         { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
       ] },
-      { libraryId: 'system', name: 'Hydration', tags: [] },
+      { listId: 'system', name: 'Hydration', tags: [] },
     ],
   }
-  userMock.state.libraries.push({
-    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+  userMock.state.lists.push({
+    listId: 'lib1', name: 'My list', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
     tags: [{
       tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '',
@@ -327,7 +327,7 @@ test('a UUID tag URL settles — never stays on the skeleton — when the tag-ma
 })
 
 // HoverCard.parseTarget has the SAME loading/anonymous ambiguity TagDetail's
-// routing does (both read tagMapStatus()/libraryForTag() over a /tag/:id
+// routing does (both read tagMapStatus()/listForTag() over a /tag/:id
 // href) — verify it actually guards against it rather than assuming the fix
 // above covers it. A real pill's OWN href/tag resolution (resolveTag) is
 // ALSO tag-map-sensitive, so a genuine account pill would just show the
@@ -336,15 +336,15 @@ test('a UUID tag URL settles — never stays on the skeleton — when the tag-ma
 test('the hover card shows nothing for a UUID /tag/:id link while the tag map is still loading, then resolves once it arrives', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   userMock.state.tagMap = {
-    libraries: [
-      { libraryId: 'lib1', name: 'My library', tags: [
+    lists: [
+      { listId: 'lib1', name: 'My list', tags: [
         { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
       ] },
-      { libraryId: 'system', name: 'Hydration', tags: [] },
+      { listId: 'system', name: 'Hydration', tags: [] },
     ],
   }
-  userMock.state.libraries.push({
-    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+  userMock.state.lists.push({
+    listId: 'lib1', name: 'My list', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
     tags: [{
       tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '',
@@ -393,28 +393,28 @@ test('a logged-out visitor on a user-tag URL sees a log-in hint, not "Tag not fo
   await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
 })
 
-// The provenance pill reads the library's owner off the VIEWER's own /user/me
-// (see LibraryTagDetail.tsx) — every prior fixture made the viewer the
+// The provenance pill reads the list's owner off the VIEWER's own /user/me
+// (see ListTagDetail.tsx) — every prior fixture made the viewer the
 // owner, which could hide a bug that shows the viewer's own name/avatar no
-// matter whose library it actually is. A subscribed (not owned) library with
+// matter whose list it actually is. A subscribed (not owned) list with
 // a different owner is the case that would have caught it.
-test('the provenance pill shows a subscribed library\'s real owner, not the viewer', async ({ page, userMock }) => {
+test('the provenance pill shows a subscribed list\'s real owner, not the viewer', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   const foreignOwner: AccountRef = {
     accountId: '0x' + 'cd'.repeat(32), address: '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty',
     emoji: '🦉', tag: null, identity: null, profile: { name: 'Foreign Owner', avatarVersion: 0 },
   }
   userMock.state.tagMap = {
-    libraries: [
-      { libraryId: 'foreign-lib', name: 'Whales', tags: [
+    lists: [
+      { listId: 'foreign-list', name: 'Whales', tags: [
         { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
       ] },
-      { libraryId: 'system', name: 'Hydration', tags: [] },
+      { listId: 'system', name: 'Hydration', tags: [] },
     ],
   }
-  // Subscribed, not owned: pushed to `subscriptions`, never `libraries`.
+  // Subscribed, not owned: pushed to `subscriptions`, never `lists`.
   userMock.state.subscriptions.push({
-    libraryId: 'foreign-lib', name: 'Whales', note: '', visibility: 'public', isPersonal: false,
+    listId: 'foreign-list', name: 'Whales', note: '', visibility: 'public', isPersonal: false,
     owner: foreignOwner, tagCount: 1, accountCount: 1, subscriberCount: 5,
     tags: [{
       tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '',
@@ -430,30 +430,30 @@ test('the provenance pill shows a subscribed library\'s real owner, not the view
   await expect(pill).not.toContainText('E2E User')
 })
 
-test('create a library, tag a known address, and reorder', async ({ page, userMock }) => {
+test('create a list, tag a known address, and reorder', async ({ page, userMock }) => {
   await seedSession(page, userMock)
-  // A second owned library, seeded directly so the reorder step swaps two
-  // REAL entries — the built-in 'system' slot that `Libraries.tsx` always
+  // A second owned list, seeded directly so the reorder step swaps two
+  // REAL entries — the built-in 'system' slot that `Lists.tsx` always
   // appends to the rendered rows is never actually IN `me.order`, so
   // reordering against it alone would be a no-op.
-  userMock.state.libraries.push({
-    libraryId: 'seed', name: 'Existing', note: '', visibility: 'private', isPersonal: false,
+  userMock.state.lists.push({
+    listId: 'seed', name: 'Existing', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 0, accountCount: 0, subscriberCount: 0, tags: [],
   })
   userMock.state.order.push('seed')
 
-  await page.goto('/libraries')
-  await page.getByRole('button', { name: '+ New library' }).click()
-  await page.locator('#library-name-input').fill('E2E Library')
+  await page.goto('/lists')
+  await page.getByRole('button', { name: '+ New list' }).click()
+  await page.locator('#list-name-input').fill('E2E List')
   await page.locator('.dialog-foot button', { hasText: 'Create' }).click()
 
-  // `state.libraries.length` was 1 (the seed) when the create handler ran,
-  // so the new library is deterministically 'lib-2'.
-  await expect(page).toHaveURL(/\/library\/lib-2$/)
+  // `state.lists.length` was 1 (the seed) when the create handler ran,
+  // so the new list is deterministically 'list-2'.
+  await expect(page).toHaveURL(/\/list\/list-2$/)
   // Direct child, not `.acct-meta .tag`: the owner AddrPill just below also
   // renders a `.tag` span (the mock owner has a profile name too), so the
   // descendant-combinator version matches both and trips strict mode.
-  await expect(page.locator('.acct-meta > .tag')).toContainText('E2E Library')
+  await expect(page.locator('.acct-meta > .tag')).toContainText('E2E List')
 
   await page.getByRole('button', { name: '+ New tag' }).click()
   await page.locator('#tag-name-input').fill('E2E Tag')
@@ -461,7 +461,7 @@ test('create a library, tag a known address, and reorder', async ({ page, userMo
 
   const tagPanel = page.locator('.panel', { hasText: 'E2E Tag' })
   // New user request: the tag header (icon + name) links to its own
-  // aggregate page — the mock mints this library's first tag as 'tag-1'.
+  // aggregate page — the mock mints this list's first tag as 'tag-1'.
   await expect(tagPanel.locator('.tag-panel-link')).toHaveAttribute('href', '/tag/tag-1')
   await expect(tagPanel).toContainText('No accounts yet')
   // No Add button and no table: an address-shaped Enter commits the member
@@ -473,17 +473,17 @@ test('create a library, tag a known address, and reorder', async ({ page, userMo
   await expect(tagPanel.locator('.tag-member-chips .addr-pill')).toHaveCount(1)
   await expect(tagPanel).not.toContainText('No accounts yet')
 
-  await page.goto('/libraries')
-  await page.locator('tbody tr', { hasText: 'E2E Library' }).locator('button[aria-label="Move up"]').click()
-  await expect.poll(() => userMock.state.order).toEqual(['lib-2', 'seed'])
+  await page.goto('/lists')
+  await page.locator('tbody tr', { hasText: 'E2E List' }).locator('button[aria-label="Move up"]').click()
+  await expect.poll(() => userMock.state.order).toEqual(['list-2', 'seed'])
 })
 
-// Seeds an owned library with one (empty) tag — enough surface for both
+// Seeds an owned list with one (empty) tag — enough surface for both
 // AccountPicker hosts (a tag's member editor, and the Invites tab) without
-// running the full library/tag creation flow.
-function seedOneTagLibrary(userMock: { state: UserMockState }): void {
-  userMock.state.libraries.push({
-    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+// running the full list/tag creation flow.
+function seedOneTagList(userMock: { state: UserMockState }): void {
+  userMock.state.lists.push({
+    listId: 'lib1', name: 'My list', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 0, subscriberCount: 0,
     tags: [{ tagId: 't1', name: 'Watch', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '', members: [] }],
   })
@@ -491,16 +491,16 @@ function seedOneTagLibrary(userMock: { state: UserMockState }): void {
 
 // New user request: a tag created mid-session stays pinned at the BOTTOM of
 // the list, in creation order, even once its name would sort ahead of an
-// existing tag — the server's alphabetical order (libraryDetailResponse) is
+// existing tag — the server's alphabetical order (listDetailResponse) is
 // still correct on a fresh load, so re-fetching the page (reload, or leaving
 // and reopening) must show it there instead. Both new tags sort before the
 // seeded 'Watch', which is exactly what would otherwise pull them up the
 // list mid-session.
 test('a newly created tag stays at the bottom until the page reloads', async ({ page, userMock }) => {
   await seedSession(page, userMock)
-  seedOneTagLibrary(userMock)
+  seedOneTagList(userMock)
 
-  await page.goto('/library/lib1')
+  await page.goto('/list/lib1')
   const panels = page.locator('.panel')
   await expect(panels).toHaveCount(1)
 
@@ -547,8 +547,8 @@ test('a newly created tag stays at the bottom until the page reloads', async ({ 
 // can't silently pass by testing nothing if the layout changes later.
 test('a tag picker dropdown paints over a FOLLOWING tag panel, not under it', async ({ page, userMock }) => {
   await seedSession(page, userMock)
-  userMock.state.libraries.push({
-    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+  userMock.state.lists.push({
+    listId: 'lib1', name: 'My list', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 2, accountCount: 0, subscriberCount: 0,
     tags: [
       { tagId: 't1', name: 'Watch A', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '', members: [] },
@@ -560,7 +560,7 @@ test('a tag picker dropdown paints over a FOLLOWING tag panel, not under it', as
   }))
   await page.route(/\/api\/explorer\/search(\?.*)?$/, route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(manyResults) }))
 
-  await page.goto('/library/lib1')
+  await page.goto('/list/lib1')
   const panelA = page.locator('.panel', { hasText: 'Watch A' })
   const panelB = page.locator('.panel', { hasText: 'Watch B' })
   await panelA.locator('.acct-picker input').fill('0x')
@@ -594,11 +594,11 @@ test('a tag picker dropdown paints over a FOLLOWING tag panel, not under it', as
   await expect(panelB.locator('.acct-picker input')).toBeVisible()
 })
 
-test('the tag member editor and the private Subscribers tab both show tabs, and the library page deep-links to Subscribers', async ({ page, userMock }) => {
+test('the tag member editor and the private Subscribers tab both show tabs, and the list page deep-links to Subscribers', async ({ page, userMock }) => {
   await seedSession(page, userMock)
-  seedOneTagLibrary(userMock)
+  seedOneTagList(userMock)
 
-  await page.goto('/library/lib1')
+  await page.goto('/list/lib1')
   // Tags is the default tab — no ?view= needed to land on it.
   await expect(page.locator('.tabs.detail-tabs button.active')).toHaveText(/Tags/)
   const tagPanel = page.locator('.panel', { hasText: 'Watch' })
@@ -609,30 +609,30 @@ test('the tag member editor and the private Subscribers tab both show tabs, and 
   await expect(page).toHaveURL(/\?view=subscribers$/)
   await expect(page.locator('.tabs.detail-tabs button.active')).toHaveText(/Subscribers/)
   await expect(tagPanel).toHaveCount(0) // the Tags tab's panels are gone, not just hidden
-  const subscribersPanel = page.locator('.panel', { hasText: 'invites it to this private library' })
+  const subscribersPanel = page.locator('.panel', { hasText: 'invites it to this private list' })
   await subscribersPanel.locator('.acct-picker input').fill(BINANCE_ADDRESS)
   await assertDropdownReadsLikeSearchDropdown(subscribersPanel)
 
   // Deep link straight to the Subscribers tab.
-  await page.goto('/library/lib1?view=subscribers')
+  await page.goto('/list/lib1?view=subscribers')
   await expect(page.locator('.tabs.detail-tabs button.active')).toHaveText(/Subscribers/)
 
   // C10: the tab used to be called Invites at `?view=invites` — that value
   // isn't aliased, it just falls back to the default Tags tab like any other
   // unrecognized `view`.
-  await page.goto('/library/lib1?view=invites')
+  await page.goto('/list/lib1?view=invites')
   await expect(page.locator('.tabs.detail-tabs button.active')).toHaveText(/Tags/)
 })
 
-// C10: private library — the Subscribers tab is a token surface like a tag's
+// C10: private list — the Subscribers tab is a token surface like a tag's
 // member editor, not a staging list with Invite/Revoke buttons. Enter commits
 // an invite immediately; the chip's own × revokes it.
 test('the private Subscribers tab invites via Enter and revokes via the chip ×, with no Invite/Revoke buttons', async ({ page, userMock }) => {
   await seedSession(page, userMock)
-  seedOneTagLibrary(userMock)   // visibility: 'private'
+  seedOneTagList(userMock)   // visibility: 'private'
 
-  await page.goto('/library/lib1?view=subscribers')
-  const panel = page.locator('.panel', { hasText: 'invites it to this private library' })
+  await page.goto('/list/lib1?view=subscribers')
+  const panel = page.locator('.panel', { hasText: 'invites it to this private list' })
   await expect(panel.getByRole('button', { name: 'Invite', exact: true })).toHaveCount(0)
   await expect(panel.getByRole('button', { name: 'Revoke', exact: true })).toHaveCount(0)
   await expect(panel).toContainText('No subscribers yet')
@@ -652,18 +652,18 @@ test('the private Subscribers tab invites via Enter and revokes via the chip ×,
   await expect(panel).toContainText('No subscribers yet')
 })
 
-// C10: public library — the same tab shows the subscriber list read-only:
+// C10: public list — the same tab shows the subscriber list read-only:
 // no input, no ×, just account pills plus the count on the tab itself.
-test('a public library shows its subscriber list read-only, with no input and no revoke', async ({ page, userMock }) => {
+test('a public list shows its subscriber list read-only, with no input and no revoke', async ({ page, userMock }) => {
   await seedSession(page, userMock)
-  userMock.state.libraries.push({
-    libraryId: 'lib-pub', name: 'Open library', note: '', visibility: 'public', isPersonal: false,
+  userMock.state.lists.push({
+    listId: 'list-pub', name: 'Open list', note: '', visibility: 'public', isPersonal: false,
     owner: userMock.state.account, tagCount: 0, accountCount: 0, subscriberCount: 1,
     tags: [],
     shares: [{ account: { accountId: BINANCE_ADDRESS, address: BINANCE_ADDRESS, emoji: '🏦', tag: null }, status: 'active' }],
   })
 
-  await page.goto('/library/lib-pub?view=subscribers')
+  await page.goto('/list/list-pub?view=subscribers')
   await expect(page.locator('.tabs.detail-tabs button', { hasText: 'Subscribers' }).locator('.cnt')).toHaveText('1')
   const panel = page.locator('.panel', { hasText: 'open-subscription' })
   await expect(panel.locator('.acct-picker')).toHaveCount(0)
@@ -674,9 +674,9 @@ test('a public library shows its subscriber list read-only, with no input and no
 
 test('a bad address in a batch reports itself and restores the rest, without losing the good one ahead of it', async ({ page, userMock }) => {
   await seedSession(page, userMock)
-  seedOneTagLibrary(userMock)
+  seedOneTagList(userMock)
 
-  await page.goto('/library/lib1')
+  await page.goto('/list/lib1')
   const tagPanel = page.locator('.panel', { hasText: 'Watch' })
   const input = tagPanel.locator('.acct-picker input')
   // One Enter on a multi-token line takes the same commit path a multi-address
@@ -710,13 +710,13 @@ test('a bad address in a batch reports itself and restores the rest, without los
 test('editing a tag whose icon fell back to its first member seeds the raw icon, not the derived one', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   const member: AccountRef = { accountId: '0x' + '11'.repeat(32), address: '0x' + '11'.repeat(32), emoji: '🐘', tag: null }
-  userMock.state.libraries.push({
-    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+  userMock.state.lists.push({
+    listId: 'lib1', name: 'My list', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
     tags: [{ tagId: 't1', name: 'Watch', color: '#22c55e', icon: '', displayIcon: '🐘', note: '', members: [member] }],
   })
 
-  await page.goto('/library/lib1')
+  await page.goto('/list/lib1')
   // A stable reference across the edit-mode transition: filtering `.panel`
   // by `hasText: 'Watch'` stops matching once editing swaps that text for an
   // `<input>` (input values aren't text content), and this fixture seeds
@@ -748,19 +748,19 @@ test('reorders tag members with the keyboard and persists the new order', async 
   await seedSession(page, userMock)
   const memberA: AccountRef = { accountId: '0x' + '11'.repeat(32), address: '0x' + '11'.repeat(32), emoji: '🐵', tag: null }
   const memberB: AccountRef = { accountId: '0x' + '22'.repeat(32), address: '0x' + '22'.repeat(32), emoji: '🐶', tag: null }
-  userMock.state.libraries.push({
-    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+  userMock.state.lists.push({
+    listId: 'lib1', name: 'My list', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 2, subscriberCount: 0,
     tags: [{ tagId: 't1', name: 'Watch', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '', members: [memberA, memberB] }],
   })
 
   let orderRequestBody: { accountIds: string[] } | null = null
-  await page.route(/\/api\/user\/libraries\/lib1\/tags\/t1\/member-order$/, async route => {
+  await page.route(/\/api\/user\/lists\/lib1\/tags\/t1\/member-order$/, async route => {
     orderRequestBody = route.request().postDataJSON()
     await route.fallback()
   })
 
-  await page.goto('/library/lib1')
+  await page.goto('/list/lib1')
   const tagPanel = page.locator('.panel', { hasText: 'Watch' })
   const chips = tagPanel.locator('.tag-member-chip')
   await expect(chips).toHaveCount(2)
@@ -786,9 +786,9 @@ test.describe('mobile', () => {
 
   test('the account-picker dropdown still overlaps its panel at 390px', async ({ page, userMock }) => {
     await seedSession(page, userMock)
-    seedOneTagLibrary(userMock)
+    seedOneTagList(userMock)
 
-    await page.goto('/library/lib1')
+    await page.goto('/list/lib1')
     const tagPanel = page.locator('.panel', { hasText: 'Watch' })
     await tagPanel.locator('.acct-picker input').fill(BINANCE_ADDRESS)
     await assertDropdownReadsLikeSearchDropdown(tagPanel)

@@ -19,8 +19,8 @@ const account: NonNullable<ActivityRow['destAccount']> = {
 
 describe('ExternalAccountPill keys the viewer tag lookup on the resolved accountId, not the raw H160', () => {
   beforeEach(() => setTagMap({
-    libraries: [{
-      libraryId: 'lib1', name: 'Mine',
+    lists: [{
+      listId: 'lib1', name: 'Mine',
       tags: [{ tagId: 't1', name: 'My Bound Wallet', color: '#0f0', icon: '🐳', members: [RESOLVED_ACCOUNT_ID] }],
     }],
   }))

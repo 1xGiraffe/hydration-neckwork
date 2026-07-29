@@ -5,12 +5,12 @@ import type { SearchResult } from '../types'
 import { searchUserTags, useTagMapVersion } from '../userTags'
 import { ShortAddr, AccountEmoji, AssetIcon, TagIcon } from './ui'
 
-// A viewer's own library tag, resolved client-side (see userTags.searchUserTags)
+// A viewer's own list tag, resolved client-side (see userTags.searchUserTags)
 // rather than through the shared, anonymous /explorer/search — that endpoint is
 // cached across every viewer and cannot know a private tag's name. Carries its
 // own `type` so it merges into the same rendered list as a server SearchResult
 // without pretending to be one.
-interface UserTagHit { type: 'user-tag'; libraryId: string; libraryName: string; tagId: string; name: string; color: string; icon: string }
+interface UserTagHit { type: 'user-tag'; listId: string; listName: string; tagId: string; name: string; color: string; icon: string }
 type Hit = SearchResult | UserTagHit
 
 // `value` is the canonical AccountId32 (public-key hex); `label` carries the
@@ -30,7 +30,7 @@ function routeFor(r: Hit): string {
   }
 }
 function hitKey(r: Hit): string {
-  return r.type === 'user-tag' ? `user-tag:${r.libraryId}:${r.tagId}` : `${r.type}:${r.value}`
+  return r.type === 'user-tag' ? `user-tag:${r.listId}:${r.tagId}` : `${r.type}:${r.value}`
 }
 const TYPE_LABEL: Record<Hit['type'], string> = {
   block: 'Block', extrinsic: 'Extrinsic', address: 'Account', asset: 'Asset', tag: 'Tag', 'user-tag': 'Tag',
@@ -46,7 +46,7 @@ function SearchResultBody({ r }: { r: Hit }) {
         <TagIcon icon={r.icon} title={r.name} />
         <span className="sr-acct-name">
           <span className="mono" style={r.color ? { color: r.color } : undefined}>{r.name}</span>
-          <span className="sr-desc">· {r.libraryName}</span>
+          <span className="sr-desc">· {r.listName}</span>
         </span>
       </span>
     )
@@ -143,7 +143,7 @@ export function SearchBar({ variant }: { variant: 'hero' | 'topbar' }) {
     searchAbort.current?.abort()
     navigate(routeFor(r)); setOpen(false); setValue(''); setResults([]); setResultsQuery(''); setSearched(false)
   }
-  // The viewer's own library tags matching the typed text, prepended ahead of the
+  // The viewer's own list tags matching the typed text, prepended ahead of the
   // server's shared results — computed straight off `value` (no debounce, no
   // network) since it's a pure local lookup over the tag map already in memory.
   const userTagHits: UserTagHit[] = useMemo(

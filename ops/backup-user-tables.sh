@@ -14,7 +14,7 @@ HOST="${CLICKHOUSE_HOST:-clickhouse}"
 PASSWORD="${CLICKHOUSE_PASSWORD:-dev}"
 DEST="${BACKUP_DIR:-/backups}"
 RETAIN_DAYS="${RETAIN_DAYS:-14}"
-TABLES="user_profiles user_avatars user_sessions user_libraries user_tags user_tag_members user_library_subscriptions user_library_order"
+TABLES="user_profiles user_avatars user_sessions user_lists user_tags user_tag_members user_list_subscriptions user_list_order"
 
 while true; do
   day="$(date -u +%Y-%m-%d)"

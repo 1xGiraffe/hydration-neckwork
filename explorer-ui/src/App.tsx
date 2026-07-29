@@ -24,8 +24,8 @@ const Account = lazy(() => import('./pages/Account').then(m => ({ default: m.Acc
 const Tags = lazy(() => import('./pages/Tags').then(m => ({ default: m.Tags })))
 const TagsHydration = lazy(() => import('./pages/Tags').then(m => ({ default: m.TagsHydration })))
 const TagDetail = lazy(() => import('./pages/TagDetail').then(m => ({ default: m.TagDetail })))
-const Libraries = lazy(() => import('./pages/Libraries').then(m => ({ default: m.Libraries })))
-const LibraryDetail = lazy(() => import('./pages/LibraryDetail').then(m => ({ default: m.LibraryDetail })))
+const Lists = lazy(() => import('./pages/Lists').then(m => ({ default: m.Lists })))
+const ListDetail = lazy(() => import('./pages/ListDetail').then(m => ({ default: m.ListDetail })))
 const Assets = lazy(() => import('./pages/Assets').then(m => ({ default: m.Assets })))
 const AssetDetail = lazy(() => import('./pages/AssetDetail').then(m => ({ default: m.AssetDetail })))
 const Hdx = lazy(() => import('./pages/Hdx').then(m => ({ default: m.Hdx })))
@@ -77,8 +77,8 @@ export default function App() {
       case 'tags': return <Tags />
       case 'tags-hydration': return <TagsHydration />
       case 'tag': return <TagDetail tagId={route.tagId} />
-      case 'libraries': return <Libraries />
-      case 'library': return <LibraryDetail libraryId={route.libraryId} />
+      case 'lists': return <Lists />
+      case 'list': return <ListDetail listId={route.listId} />
       case 'assets': return <Assets />
       case 'hdx': return <Hdx />
       case 'hollar': return <Hollar />

@@ -1,19 +1,19 @@
 import { userApi } from '../api/explorer'
 import { useTags } from '../hooks/useExplorerData'
 import { useSession } from '../session'
-import { useMe, useLibraries, useUserMutation } from '../hooks/useUser'
+import { useMe, useLists, useUserMutation } from '../hooks/useUser'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { requestConnect } from '../connectDialog'
 import { Link, paths } from '../router'
 import { Crumbs, AddrPill, EmptyRow, TableSkeleton, TagIcon, rowNav } from '../components/ui'
-import type { LibrarySummaryRef, MeResponse } from '../types'
+import type { ListSummaryRef, MeResponse } from '../types'
 
-// The one clickable "library" row on the hub: the built-in Hydration
-// directory, promoted above every user-made library so tags — not
-// libraries — read as the primary thing to browse. Its own table lives at
+// The one clickable "list" row on the hub: the built-in Hydration
+// directory, promoted above every user-made list so tags — not
+// lists — read as the primary thing to browse. Its own table lives at
 // /tags/hydration (TagsHydration below); everything else on this page is
 // either unclickable (Discover) or a management action (Invites, the
-// "Manage libraries" button).
+// "Manage lists" button).
 function HydrationTagsHero({ tagCount }: { tagCount: number }) {
   return (
     <Link to={paths.tagsHydration()} className="acct-head" style={{ textDecoration: 'none', color: 'inherit' }}>
@@ -26,12 +26,12 @@ function HydrationTagsHero({ tagCount }: { tagCount: number }) {
   )
 }
 
-// Public libraries, browsable but — user-confirmed — not clickable: a library
+// Public lists, browsable but — user-confirmed — not clickable: a list
 // is provenance/management, not something to open from here. The only actions
 // a row offers are the inline subscribe toggle and (via nested pills) a link
 // to the owner's account.
-function PublicLibraries({ libraries, isLoading, me, session }: {
-  libraries: LibrarySummaryRef[]
+function PublicLists({ lists, isLoading, me, session }: {
+  lists: ListSummaryRef[]
   isLoading: boolean
   me: MeResponse | undefined
   session: ReturnType<typeof useSession>
@@ -40,20 +40,20 @@ function PublicLibraries({ libraries, isLoading, me, session }: {
   const unsubscribeMutation = useUserMutation(userApi.unsubscribe)
   return (
     <>
-      <div className="sec-title">Public libraries · {libraries.length}</div>
+      <div className="sec-title">Public lists · {lists.length}</div>
       <div className="panel"><table className="tbl">
-        <thead><tr><th>Library</th><th>Owner</th><th className="r">Tags</th><th className="r">Accounts</th><th className="r">Subscribers</th><th className="r"></th></tr></thead>
+        <thead><tr><th>List</th><th>Owner</th><th className="r">Tags</th><th className="r">Accounts</th><th className="r">Subscribers</th><th className="r"></th></tr></thead>
         <tbody>
-          {isLoading && !libraries.length ? <TableSkeleton cols={6} rows={4} /> : !libraries.length ? <EmptyRow cols={6}>No public libraries yet</EmptyRow> : libraries.map(lib => {
-            const owned = me?.libraries.some(l => l.libraryId === lib.libraryId)
-            const subscribed = me?.subscriptions.some(l => l.libraryId === lib.libraryId)
+          {isLoading && !lists.length ? <TableSkeleton cols={6} rows={4} /> : !lists.length ? <EmptyRow cols={6}>No public lists yet</EmptyRow> : lists.map(lib => {
+            const owned = me?.lists.some(l => l.listId === lib.listId)
+            const subscribed = me?.subscriptions.some(l => l.listId === lib.listId)
             return (
-              <tr key={lib.libraryId}>
-                <td data-label="Library">
+              <tr key={lib.listId}>
+                <td data-label="List">
                   <span className="addr-pill" style={{ cursor: 'default' }}>
                     <span className="tag">{lib.name}</span>
                   </span>
-                  {lib.note && <div className="muted lib-row-note">{lib.note}</div>}
+                  {lib.note && <div className="muted list-row-note">{lib.note}</div>}
                 </td>
                 <td data-label="Owner"><AddrPill account={lib.owner} noCopy /></td>
                 <td data-label="Tags" className="r mono">{lib.tagCount}</td>
@@ -68,9 +68,9 @@ function PublicLibraries({ libraries, isLoading, me, session }: {
                   ) : owned ? (
                     <span className="muted" style={{ fontSize: 11 }}>Yours</span>
                   ) : subscribed ? (
-                    <button type="button" className="btn sm" disabled={unsubscribeMutation.isPending} onClick={() => unsubscribeMutation.mutate([lib.libraryId])}>Unsubscribe</button>
+                    <button type="button" className="btn sm" disabled={unsubscribeMutation.isPending} onClick={() => unsubscribeMutation.mutate([lib.listId])}>Unsubscribe</button>
                   ) : (
-                    <button type="button" className="btn sm primary" disabled={subscribeMutation.isPending} onClick={() => subscribeMutation.mutate([lib.libraryId])}>Subscribe</button>
+                    <button type="button" className="btn sm primary" disabled={subscribeMutation.isPending} onClick={() => subscribeMutation.mutate([lib.listId])}>Subscribe</button>
                   )}
                 </td>
               </tr>
@@ -83,37 +83,37 @@ function PublicLibraries({ libraries, isLoading, me, session }: {
 }
 
 // Two groups sharing one table: a pending invite the viewer hasn't answered
-// (Accept/Decline) and a private library they already accepted into (only
-// reachable through an invite — a public library's `visibility` would read
+// (Accept/Decline) and a private list they already accepted into (only
+// reachable through an invite — a public list's `visibility` would read
 // 'public' here regardless of whether this particular subscription started as
 // an invite or a direct Subscribe, so that case can't be distinguished from
 // the data /user/me ships and stays out of this list; it appears as an
-// ordinary Subscribed row in Public libraries above instead).
-function Invites({ invites, invitedSubscriptions }: { invites: LibrarySummaryRef[]; invitedSubscriptions: LibrarySummaryRef[] }) {
+// ordinary Subscribed row in Public lists above instead).
+function Invites({ invites, invitedSubscriptions }: { invites: ListSummaryRef[]; invitedSubscriptions: ListSummaryRef[] }) {
   const respondMutation = useUserMutation(userApi.respondInvite)
   const unsubscribeMutation = useUserMutation(userApi.unsubscribe)
   return (
     <>
       <div className="sec-title">Invites · {invites.length + invitedSubscriptions.length}</div>
       <div className="panel"><table className="tbl">
-        <thead><tr><th>Library</th><th>Owner</th><th className="r">Action</th></tr></thead>
+        <thead><tr><th>List</th><th>Owner</th><th className="r">Action</th></tr></thead>
         <tbody>
           {invites.map(inv => (
-            <tr key={inv.libraryId}>
-              <td data-label="Library"><span className="tag">{inv.name}</span></td>
+            <tr key={inv.listId}>
+              <td data-label="List"><span className="tag">{inv.name}</span></td>
               <td data-label="Owner"><AddrPill account={inv.owner} noCopy /></td>
               <td data-label="Action" className="r">
-                <button type="button" className="btn sm primary" disabled={respondMutation.isPending} onClick={() => respondMutation.mutate([inv.libraryId, true])}>Accept</button>{' '}
-                <button type="button" className="btn sm" disabled={respondMutation.isPending} onClick={() => respondMutation.mutate([inv.libraryId, false])}>Decline</button>
+                <button type="button" className="btn sm primary" disabled={respondMutation.isPending} onClick={() => respondMutation.mutate([inv.listId, true])}>Accept</button>{' '}
+                <button type="button" className="btn sm" disabled={respondMutation.isPending} onClick={() => respondMutation.mutate([inv.listId, false])}>Decline</button>
               </td>
             </tr>
           ))}
           {invitedSubscriptions.map(lib => (
-            <tr key={lib.libraryId}>
-              <td data-label="Library"><span className="tag">{lib.name}</span> <span className="muted" style={{ fontSize: 11 }}>· Invited · subscribed</span></td>
+            <tr key={lib.listId}>
+              <td data-label="List"><span className="tag">{lib.name}</span> <span className="muted" style={{ fontSize: 11 }}>· Invited · subscribed</span></td>
               <td data-label="Owner"><AddrPill account={lib.owner} noCopy /></td>
               <td data-label="Action" className="r">
-                <button type="button" className="btn sm" disabled={unsubscribeMutation.isPending} onClick={() => unsubscribeMutation.mutate([lib.libraryId])}>Unsubscribe</button>
+                <button type="button" className="btn sm" disabled={unsubscribeMutation.isPending} onClick={() => unsubscribeMutation.mutate([lib.listId])}>Unsubscribe</button>
               </td>
             </tr>
           ))}
@@ -124,21 +124,21 @@ function Invites({ invites, invitedSubscriptions }: { invites: LibrarySummaryRef
 }
 
 // The tag discovery hub: the built-in directory up top, then every OTHER way
-// to find tags — public libraries to subscribe to, and any pending/accepted
-// invites — with library management itself pushed behind its own button.
-// Tags are what a viewer clicks and shares; libraries are provenance, which is
-// why this page browses tags-by-library rather than editing libraries.
+// to find tags — public lists to subscribe to, and any pending/accepted
+// invites — with list management itself pushed behind its own button.
+// Tags are what a viewer clicks and shares; lists are provenance, which is
+// why this page browses tags-by-list rather than editing lists.
 export function Tags() {
   useDocumentTitle('Tags')
   const session = useSession()
   const me = useMe()
-  const libs = useLibraries()
+  const libs = useLists()
   const { data: systemTags } = useTags()
 
   const invites = me.data?.invites ?? []
   // See the Invites comment above: a private subscription can only exist
   // because an invite was accepted, so this is exact, not a heuristic — it
-  // just doesn't catch the (rarer) invite-to-a-public-library case.
+  // just doesn't catch the (rarer) invite-to-a-public-list case.
   const invitedSubscriptions = (me.data?.subscriptions ?? []).filter(l => l.visibility === 'private')
 
   return (
@@ -147,7 +147,7 @@ export function Tags() {
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Tags' }]} />
         <div className="page-title" style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           Tags
-          <Link to={paths.libraries()} className="btn" style={{ marginLeft: 'auto' }}>Manage libraries</Link>
+          <Link to={paths.lists()} className="btn" style={{ marginLeft: 'auto' }}>Manage lists</Link>
         </div>
       </div>
 
@@ -155,7 +155,7 @@ export function Tags() {
 
       {(invites.length > 0 || invitedSubscriptions.length > 0) && <Invites invites={invites} invitedSubscriptions={invitedSubscriptions} />}
 
-      <PublicLibraries libraries={libs.data ?? []} isLoading={libs.isLoading} me={me.data} session={session} />
+      <PublicLists lists={libs.data ?? []} isLoading={libs.isLoading} me={me.data} session={session} />
     </div>
   )
 }

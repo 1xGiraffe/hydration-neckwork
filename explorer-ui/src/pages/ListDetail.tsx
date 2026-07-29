@@ -4,29 +4,29 @@ import { userApi } from '../api/explorer'
 import { AccountPicker } from '../components/AccountPicker'
 import { useSession } from '../session'
 import { requestConnect } from '../connectDialog'
-import { useLibrary, useUserMutation } from '../hooks/useUser'
+import { useList, useUserMutation } from '../hooks/useUser'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, navigate, paths, setQuery, useQueryValue } from '../router'
 import { Crumbs, AddrPill, TagIcon, DetailTabs, ProfilePageSkeleton } from '../components/ui'
-import type { AccountRef, LibrarySummaryRef, LibraryTagDetail } from '../types'
+import type { AccountRef, ListSummaryRef, ListTagDetail } from '../types'
 
-const LibraryFormDialog = lazy(() => import('../components/LibraryFormDialog').then(m => ({ default: m.LibraryFormDialog })))
+const ListFormDialog = lazy(() => import('../components/ListFormDialog').then(m => ({ default: m.ListFormDialog })))
 
-// Duplicated (in full) from Libraries.tsx rather than imported: both pages are
+// Duplicated (in full) from Lists.tsx rather than imported: both pages are
 // separate route chunks, and importing across them would drag the whole
-// Libraries page — its Discover table, its own hooks — into this one just for
+// Lists page — its Discover table, its own hooks — into this one just for
 // a three-line badge. Always public/private — `isPersonal` (auto-created,
 // not deletable) is a backend/ownership fact, not a visibility state, and
-// showing it as a third chip value read as if a personal library were
+// showing it as a third chip value read as if a personal list were
 // neither public nor private, even on ones a viewer had made public.
-function visibilityChip(lib: Pick<LibrarySummaryRef, 'visibility'>) {
+function visibilityChip(lib: Pick<ListSummaryRef, 'visibility'>) {
   const [label, color] = lib.visibility === 'public' ? ['public', 'var(--sky)'] : ['private', 'var(--neutral)']
   return <span className="badge" style={{ color, background: `color-mix(in srgb, ${color} 14%, transparent)` }}>{label}</span>
 }
 
 const TAG_COLORS = ['#5865f2', '#22c55e', '#f97316', '#7b6cf6', '#ef4444', '#06b6d4', '#eab308', '#74C742']
 
-function DeleteLibraryDialog({ open, onOpenChange, name, pending, error, onConfirm }: {
+function DeleteListDialog({ open, onOpenChange, name, pending, error, onConfirm }: {
   open: boolean; onOpenChange: (open: boolean) => void; name: string; pending: boolean; error: string | null; onConfirm: () => void
 }) {
   return (
@@ -35,7 +35,7 @@ function DeleteLibraryDialog({ open, onOpenChange, name, pending, error, onConfi
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog" style={{ width: 'min(420px, 94vw)' }}>
           <div className="dialog-head">
-            <Dialog.Title asChild><h2>Delete library</h2></Dialog.Title>
+            <Dialog.Title asChild><h2>Delete list</h2></Dialog.Title>
             <Dialog.Close asChild>
               <button className="theme-toggle" aria-label="Close">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
@@ -56,7 +56,7 @@ function DeleteLibraryDialog({ open, onOpenChange, name, pending, error, onConfi
   )
 }
 
-function NewTagDialog({ open, onOpenChange, libraryId, onCreated }: { open: boolean; onOpenChange: (open: boolean) => void; libraryId: string; onCreated: (tagId: string) => void }) {
+function NewTagDialog({ open, onOpenChange, listId, onCreated }: { open: boolean; onOpenChange: (open: boolean) => void; listId: string; onCreated: (tagId: string) => void }) {
   const [name, setName] = useState('')
   const [color, setColor] = useState(TAG_COLORS[0])
   const [icon, setIcon] = useState('')
@@ -72,7 +72,7 @@ function NewTagDialog({ open, onOpenChange, libraryId, onCreated }: { open: bool
   async function create() {
     setError(null)
     try {
-      const created = await mutation.mutateAsync([libraryId, { name: name.trim(), color, icon: icon.trim() || undefined }])
+      const created = await mutation.mutateAsync([listId, { name: name.trim(), color, icon: icon.trim() || undefined }])
       onCreated(created.tagId)
       onOpenChange(false)
     } catch (e) {
@@ -94,7 +94,7 @@ function NewTagDialog({ open, onOpenChange, libraryId, onCreated }: { open: bool
             </Dialog.Close>
           </div>
           <div className="dialog-body">
-            <Dialog.Description className="dialog-hint">Group accounts inside this library under one label.</Dialog.Description>
+            <Dialog.Description className="dialog-hint">Group accounts inside this list under one label.</Dialog.Description>
             {error && <div className="dialog-error">{error}</div>}
             <div className="field">
               <label htmlFor="tag-name-input">Name</label>
@@ -129,7 +129,7 @@ function NewTagDialog({ open, onOpenChange, libraryId, onCreated }: { open: bool
 // the very same bordered box (no separate chip list under a separate input
 // bar). No table, no separate Add step: picking a suggestion or hitting
 // Enter on an address-shaped token adds it right away.
-function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: LibraryTagDetail; isOwner: boolean }) {
+function TagPanel({ listId, tag, isOwner }: { listId: string; tag: ListTagDetail; isOwner: boolean }) {
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState(tag.name)
   const [color, setColor] = useState(tag.color)
@@ -168,7 +168,7 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
     const prev = order
     setOrder(next)
     try {
-      await orderMutation.mutateAsync([libraryId, tag.tagId, next])
+      await orderMutation.mutateAsync([listId, tag.tagId, next])
     } catch (e) {
       setOrder(prev)
       setError(e instanceof Error ? e.message : 'Could not save the new order')
@@ -208,21 +208,21 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
   async function saveEdit() {
     setError(null)
     try {
-      await updateTagMutation.mutateAsync([libraryId, tag.tagId, { name: name.trim(), color, icon }])
+      await updateTagMutation.mutateAsync([listId, tag.tagId, { name: name.trim(), color, icon }])
       setEditing(false)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not save the tag')
     }
   }
   async function removeTag() {
-    if (!window.confirm(`Delete the "${tag.name}" tag? Its members stay in the library — only the tag is removed.`)) return
+    if (!window.confirm(`Delete the "${tag.name}" tag? Its members stay in the list — only the tag is removed.`)) return
     setError(null)
-    try { await deleteTagMutation.mutateAsync([libraryId, tag.tagId]) }
+    try { await deleteTagMutation.mutateAsync([listId, tag.tagId]) }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not delete the tag') }
   }
   async function removeMember(address: string) {
     setError(null)
-    try { await membersMutation.mutateAsync([libraryId, tag.tagId, { remove: [address] }]) }
+    try { await membersMutation.mutateAsync([listId, tag.tagId, { remove: [address] }]) }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not remove that account') }
   }
   // Submitted one address at a time — `setTagMembers` validates a whole `add`
@@ -239,7 +239,7 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
     for (let i = 0; i < addresses.length; i++) {
       const addr = addresses[i]
       try {
-        await membersMutation.mutateAsync([libraryId, tag.tagId, { add: [addr] }])
+        await membersMutation.mutateAsync([listId, tag.tagId, { add: [addr] }])
       } catch (e) {
         setError(`${addr}: ${e instanceof Error ? e.message : 'could not add that account'}`)
         return addresses.slice(i)
@@ -336,9 +336,9 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
 }
 
 // The Subscribers tab's rows, shared by both its surfaces: a private
-// library's editable chips (an `onRevoke` handler and its ✕ button) and a
-// public library's plain read-only list (neither passed — no ✕, since a
-// public library has no invite to revoke, only a subscription the account
+// list's editable chips (an `onRevoke` handler and its ✕ button) and a
+// public list's plain read-only list (neither passed — no ✕, since a
+// public list has no invite to revoke, only a subscription the account
 // itself controls). "invited" gets a small "pending" badge; "active" reads
 // plain, same as a tag's member chip.
 function ShareChips({ shares, onRevoke, revoking }: {
@@ -362,9 +362,9 @@ function ShareChips({ shares, onRevoke, revoking }: {
   )
 }
 
-export function LibraryDetail({ libraryId }: { libraryId: string }) {
+export function ListDetail({ listId }: { listId: string }) {
   const session = useSession()
-  const { data, isLoading, isError } = useLibrary(libraryId, !!session)
+  const { data, isLoading, isError } = useList(listId, !!session)
   useDocumentTitle(data?.name)
   const isOwner = !!session && !!data && session.accountId === data.owner.accountId
   // Owner-only tabs (Tags/Subscribers); deep-links via ?view= like Account.tsx's
@@ -383,7 +383,7 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
   const [shareError, setShareError] = useState<string | null>(null)
   // Ids of tags created during THIS mount, in creation order. The server
   // always sorts tags alphabetically (correct for a fresh load — see
-  // libraryDetailResponse), but re-sorting after every create would make a
+  // listDetailResponse), but re-sorting after every create would make a
   // just-created tag jump straight into the middle of the list the instant
   // its name sorts before an existing one, reading as if it moved or briefly
   // vanished. Pinning it to the bottom instead — until the page unmounts,
@@ -395,15 +395,15 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
   // render output is exactly what react-hooks/refs forbids.
   const [sessionNewTagIds, setSessionNewTagIds] = useState<string[]>([])
 
-  const updateMutation = useUserMutation(userApi.updateLibrary)
-  const deleteMutation = useUserMutation(userApi.deleteLibrary)
+  const updateMutation = useUserMutation(userApi.updateList)
+  const deleteMutation = useUserMutation(userApi.deleteList)
   const subscribeMutation = useUserMutation(userApi.subscribe)
   const unsubscribeMutation = useUserMutation(userApi.unsubscribe)
   const inviteMutation = useUserMutation(userApi.invite)
   const revokeMutation = useUserMutation(userApi.revokeInvite)
   const sharesLocked = inviteMutation.isPending || revokeMutation.isPending
 
-  // Private library's Subscribers tab is a token surface like a tag's member
+  // Private list's Subscribers tab is a token surface like a tag's member
   // editor (AccountPicker immediate-commit mode): an Enter/pick on the input
   // invites right away, no staging list, no separate Invite button. Submitted
   // sequentially — like setTagMembers' addMembers — so one bad address in a
@@ -414,25 +414,25 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
     setShareError(null)
     for (let i = 0; i < addresses.length; i++) {
       const addr = addresses[i]
-      try { await inviteMutation.mutateAsync([libraryId, addr]) }
+      try { await inviteMutation.mutateAsync([listId, addr]) }
       catch (e) { setShareError(`${addr}: ${e instanceof Error ? e.message : 'could not invite that account'}`); return addresses.slice(i) }
     }
   }
   async function revokeOne(address: string) {
     setShareError(null)
-    try { await revokeMutation.mutateAsync([libraryId, address]) }
+    try { await revokeMutation.mutateAsync([listId, address]) }
     catch (e) { setShareError(e instanceof Error ? e.message : 'Could not revoke that account') }
   }
   async function confirmDelete() {
     setDeleteError(null)
     try {
-      await deleteMutation.mutateAsync([libraryId])
+      await deleteMutation.mutateAsync([listId])
       setDeleteOpen(false)
-      navigate(paths.libraries())
+      navigate(paths.lists())
     } catch (e) {
-      // Surfaced inline via DeleteLibraryDialog's `error` prop; the dialog stays
+      // Surfaced inline via DeleteListDialog's `error` prop; the dialog stays
       // open (closing on a failed delete would hide the only sign it failed).
-      setDeleteError(e instanceof Error ? e.message : 'Could not delete the library')
+      setDeleteError(e instanceof Error ? e.message : 'Could not delete the list')
     }
   }
   // Clearing on close (Cancel/Escape/overlay-click, not just the Cancel button)
@@ -446,11 +446,11 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
   return (
     <div className="wrap">
       <div className="page-head">
-        <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Libraries', to: paths.libraries() }, { label: data?.name ?? 'Library' }]} />
+        <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Lists', to: paths.lists() }, { label: data?.name ?? 'List' }]} />
       </div>
 
       {isError ? (
-        <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Library not found</div>
+        <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>List not found</div>
       ) : isLoading || !data ? <ProfilePageSkeleton /> : (() => {
         // Render order: the server's alphabetical tags minus this session's
         // new ones, then the new ones in creation order at the end. Resolved
@@ -461,7 +461,7 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
         const tagById = new Map(data.tags.map(t => [t.tagId, t]))
         const orderedTags = [
           ...data.tags.filter(t => !isSessionNew.has(t.tagId)),
-          ...sessionNewTagIds.map(id => tagById.get(id)).filter((t): t is LibraryTagDetail => !!t),
+          ...sessionNewTagIds.map(id => tagById.get(id)).filter((t): t is ListTagDetail => !!t),
         ]
         return (
           <>
@@ -488,9 +488,9 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
                     // directly; the mutation itself needs a session either way.
                     <button type="button" className="btn primary" onClick={requestConnect}>Subscribe</button>
                   ) : data.subscribed ? (
-                    <button type="button" className="btn" disabled={unsubscribeMutation.isPending} onClick={() => unsubscribeMutation.mutate([libraryId])}>Unsubscribe</button>
+                    <button type="button" className="btn" disabled={unsubscribeMutation.isPending} onClick={() => unsubscribeMutation.mutate([listId])}>Unsubscribe</button>
                   ) : (
-                    <button type="button" className="btn primary" disabled={subscribeMutation.isPending} onClick={() => subscribeMutation.mutate([libraryId])}>Subscribe</button>
+                    <button type="button" className="btn primary" disabled={subscribeMutation.isPending} onClick={() => subscribeMutation.mutate([listId])}>Subscribe</button>
                   )
                 ) : null}
               </div>
@@ -520,8 +520,8 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
                 )}
                 <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
                   {data.visibility === 'private'
-                    ? 'Adding an account invites it to this private library; × revokes a pending invite or an existing subscriber.'
-                    : 'Public libraries are open-subscription — anyone can subscribe without an invite.'}
+                    ? 'Adding an account invites it to this private list; × revokes a pending invite or an existing subscriber.'
+                    : 'Public lists are open-subscription — anyone can subscribe without an invite.'}
                 </div>
               </div>
             )}
@@ -529,23 +529,23 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
             {isOwner && activeView === 'tags' && (
               <>
                 {!data.tags.length && <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, marginBottom: 16 }}>No tags yet.</div>}
-                {orderedTags.map(tag => <TagPanel key={tag.tagId} libraryId={libraryId} tag={tag} isOwner={isOwner} />)}
+                {orderedTags.map(tag => <TagPanel key={tag.tagId} listId={listId} tag={tag} isOwner={isOwner} />)}
                 <div className="ext-link-row"><button type="button" className="ext-link" style={{ cursor: 'pointer' }} onClick={() => setNewTagOpen(true)}>+ New tag</button></div>
               </>
             )}
 
             {!isOwner && (
               /* Another user's curation is theirs: the API ships no tag names
-                 or member lists here, only the statistics. Subscribing applies
+                 or members here, only the statistics. Subscribing applies
                  the labels across the explorer without exposing the list. */
               <div className="panel" style={{ padding: 16 }}>
-                <div className="lib-stats">
-                  <div><span className="lib-stat-num">{data.tagCount}</span><span className="lib-stat-label">Tag{data.tagCount === 1 ? '' : 's'}</span></div>
-                  <div><span className="lib-stat-num">{data.accountCount}</span><span className="lib-stat-label">Account{data.accountCount === 1 ? '' : 's'}</span></div>
-                  <div><span className="lib-stat-num">{data.subscriberCount}</span><span className="lib-stat-label">Subscriber{data.subscriberCount === 1 ? '' : 's'}</span></div>
+                <div className="list-stats">
+                  <div><span className="list-stat-num">{data.tagCount}</span><span className="list-stat-label">Tag{data.tagCount === 1 ? '' : 's'}</span></div>
+                  <div><span className="list-stat-num">{data.accountCount}</span><span className="list-stat-label">Account{data.accountCount === 1 ? '' : 's'}</span></div>
+                  <div><span className="list-stat-num">{data.subscriberCount}</span><span className="list-stat-label">Subscriber{data.subscriberCount === 1 ? '' : 's'}</span></div>
                 </div>
                 <div className="muted" style={{ fontSize: 11, marginTop: 10 }}>
-                  Tag names and member lists stay with the library's owner. {data.visibility === 'public' ? 'Subscribe to apply its labels across the explorer.' : ''}
+                  Tag names and members stay with the list's owner. {data.visibility === 'public' ? 'Subscribe to apply its labels across the explorer.' : ''}
                 </div>
               </div>
             )}
@@ -554,24 +554,24 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
               <NewTagDialog
                 open={newTagOpen}
                 onOpenChange={setNewTagOpen}
-                libraryId={libraryId}
+                listId={listId}
                 onCreated={tagId => setSessionNewTagIds(ids => [...ids, tagId])}
               />
             )}
             {isOwner && !data.isPersonal && (
-              <DeleteLibraryDialog open={deleteOpen} onOpenChange={closeDelete} name={data.name} pending={deleteMutation.isPending} error={deleteError} onConfirm={() => void confirmDelete()} />
+              <DeleteListDialog open={deleteOpen} onOpenChange={closeDelete} name={data.name} pending={deleteMutation.isPending} error={deleteError} onConfirm={() => void confirmDelete()} />
             )}
             {editMounted && (
               <Suspense fallback={null}>
-                <LibraryFormDialog
+                <ListFormDialog
                   open={editOpen}
                   onOpenChange={setEditOpen}
-                  title="Edit library"
+                  title="Edit list"
                   hint="Rename it, add a note, or change who can see it."
                   initial={{ name: data.name, note: data.note, visibility: data.visibility }}
                   submitLabel="Save"
                   pending={updateMutation.isPending}
-                  onSubmit={async values => { await updateMutation.mutateAsync([libraryId, values]); setEditOpen(false) }}
+                  onSubmit={async values => { await updateMutation.mutateAsync([listId, values]); setEditOpen(false) }}
                 />
               </Suspense>
             )}

@@ -29,7 +29,7 @@ const EVM_ADDR_RE = /^0x[0-9a-fA-F]{40}$/
 
 // personal_sign recovery: hash the EIP-191 envelope, recover the secp256k1
 // pubkey from the 65-byte r||s||v signature, derive the H160. Wallets emit
-// v = 27/28; raw libraries emit 0/1 — accept both.
+// v = 27/28; a raw secp256k1 signer emits 0/1 — accept both.
 //
 // secp256k1Recover's `hashType` only picks the OUTPUT pubkey encoding
 // (compressed 33 bytes vs. an "expanded" 64-byte X||Y with no 0x04 prefix,

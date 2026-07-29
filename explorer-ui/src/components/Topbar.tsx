@@ -33,7 +33,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
 ]
 const NAV_LINKS: NavItem[] = [
   { to: paths.activity(), label: 'Activity', match: ['activity'] },
-  { to: paths.accounts(), label: 'Accounts', match: ['accounts', 'account', 'tags', 'tags-hydration', 'tag', 'libraries', 'library'] },
+  { to: paths.accounts(), label: 'Accounts', match: ['accounts', 'account', 'tags', 'tags-hydration', 'tag', 'lists', 'list'] },
   { to: paths.assets(), label: 'Assets', match: ['assets', 'asset', 'holders'] },
   { to: paths.hdx(), label: 'HDX', match: ['hdx'] },
   { to: paths.hollar(), label: 'HOLLAR', match: ['hollar'] },
@@ -83,7 +83,7 @@ function ProfileAvatar({ account }: { account?: AccountRef }) {
 }
 
 // Desktop compact login control: a Connect button logged out, or the account's
-// avatar + name opening a small menu (My account / Libraries / Log out) logged
+// avatar + name opening a small menu (My account / Lists / Log out) logged
 // in. Escape and an outside click close the menu, same as the drawer below.
 function AccountMenuButton({ session, account, invites, onConnect }: {
   session: ReturnType<typeof useSession>
@@ -142,7 +142,7 @@ function AccountMenuButton({ session, account, invites, onConnect }: {
       {open && (
         <div className="account-menu">
           <Link to={paths.account(session.address)} onClick={() => setOpen(false)}>My account</Link>
-          <Link to={paths.libraries()} onClick={() => setOpen(false)}>Libraries{invites > 0 && <span className="invite-badge">{invites}</span>}</Link>
+          <Link to={paths.lists()} onClick={() => setOpen(false)}>Lists{invites > 0 && <span className="invite-badge">{invites}</span>}</Link>
           <button type="button" className="menu-row" onClick={() => { setOpen(false); void logout() }}>Log out</button>
         </div>
       )}
@@ -170,7 +170,7 @@ function DrawerAccountSection({ session, invites, onConnect, onNavigate }: {
     <div className="drawer-sec">
       <div className="sec-lbl">Account</div>
       <Link to={paths.account(session.address)} onClick={onNavigate}>My account</Link>
-      <Link to={paths.libraries()} onClick={onNavigate}>Libraries{invites > 0 && <span className="invite-badge">{invites}</span>}</Link>
+      <Link to={paths.lists()} onClick={onNavigate}>Lists{invites > 0 && <span className="invite-badge">{invites}</span>}</Link>
       <button type="button" className="drawer-row" onClick={() => { onNavigate(); void logout() }}>Log out</button>
     </div>
   )
@@ -194,7 +194,7 @@ export function Topbar({ route }: { route: Route }) {
   // doesn't re-import or lose Suspense's already-resolved chunk.
   const [connectMounted, setConnectMounted] = useState(false)
   const openConnect = () => { setConnectMounted(true); setConnectOpen(true) }
-  // Any other page (a /tags Subscribe row, a public library's own detail
+  // Any other page (a /tags Subscribe row, a public list's own detail
   // page when logged out, ...) opens THIS dialog via requestConnect() rather
   // than mounting a second instance of its own.
   useConnectRequest(openConnect)

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { splitSqlStatements, selectSchemaFiles } from '../src/db/schemaBootstrap.ts'
-import { ensureTagMemberPositionColumn } from '../src/services/userLibraryService.ts'
+import { ensureTagMemberPositionColumn } from '../src/services/userListService.ts'
 import type { ClickHouseClient } from '../src/db/client.ts'
 
 const schemaDir = join(dirname(fileURLToPath(import.meta.url)), '../../clickhouse/schema')
@@ -22,7 +22,7 @@ describe('004_user.sql', () => {
   })
 
   it('declares all eight user tables idempotently', () => {
-    const tables = ['user_profiles', 'user_avatars', 'user_sessions', 'user_libraries', 'user_tags', 'user_tag_members', 'user_library_subscriptions', 'user_library_order']
+    const tables = ['user_profiles', 'user_avatars', 'user_sessions', 'user_lists', 'user_tags', 'user_tag_members', 'user_list_subscriptions', 'user_list_order']
     for (const t of tables) {
       const stmt = statements.find(s => s.includes(`price_data.${t}`))
       expect(stmt, t).toBeDefined()

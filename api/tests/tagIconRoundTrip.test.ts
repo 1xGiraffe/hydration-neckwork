@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import Fastify from 'fastify'
 import { userRoutes } from '../src/routes/user.ts'
 import { initUserAuthService, resetUserAuthForTests, issueSession } from '../src/services/userAuthService.ts'
-import { initUserLibraryService, loadUserLibraries, createLibrary, createTag, setTagMembers } from '../src/services/userLibraryService.ts'
+import { initUserListService, loadUserLists, createList, createTag, setTagMembers } from '../src/services/userListService.ts'
 import { initUserProfileService, setProfileAvatar } from '../src/services/userProfileService.ts'
 import { accountIcon } from '../src/services/omniwatchIdentity.ts'
 import { fakeClient } from './helpers/userFakes.ts'
@@ -31,21 +31,21 @@ async function build() {
 
 describe('tag icon round-trip: raw vs. derived', () => {
   let token: string
-  let libraryId: string
+  let listId: string
   let tagId: string
 
   beforeEach(async () => {
     resetUserAuthForTests()
     await initUserAuthService(fakeClient())
-    initUserLibraryService(fakeClient())
-    await loadUserLibraries()
+    initUserListService(fakeClient())
+    await loadUserLists()
     initUserProfileService(fakeClient())
 
-    const lib = await createLibrary(OWNER, 'Desk', '', 'private')
-    const tag = await createTag(OWNER, lib.libraryId, { name: 'Watch' })   // icon left unset ('')
-    await setTagMembers(OWNER, lib.libraryId, tag.tagId, [MEMBER], [])
+    const lib = await createList(OWNER, 'Desk', '', 'private')
+    const tag = await createTag(OWNER, lib.listId, { name: 'Watch' })   // icon left unset ('')
+    await setTagMembers(OWNER, lib.listId, tag.tagId, [MEMBER], [])
     await setProfileAvatar(MEMBER, PNG.toString('base64'))                  // first member now has an avatar
-    libraryId = lib.libraryId
+    listId = lib.listId
     tagId = tag.tagId
     token = await issueSession(OWNER)
   })
@@ -54,7 +54,7 @@ describe('tag icon round-trip: raw vs. derived', () => {
 
   it('ships a URL-shaped displayIcon but keeps the raw icon empty', async () => {
     const f = await build()
-    const r = await f.inject({ method: 'GET', url: `/user/libraries/${libraryId}`, headers: auth(token) })
+    const r = await f.inject({ method: 'GET', url: `/user/lists/${listId}`, headers: auth(token) })
     expect(r.statusCode).toBe(200)
     const tag = r.json().tags[0]
     expect(tag.icon).toBe('')
@@ -63,12 +63,12 @@ describe('tag icon round-trip: raw vs. derived', () => {
 
   it('a rename that resubmits the RAW icon (as the fixed client does) succeeds and leaves the stored icon empty', async () => {
     const f = await build()
-    const before = await f.inject({ method: 'GET', url: `/user/libraries/${libraryId}`, headers: auth(token) })
+    const before = await f.inject({ method: 'GET', url: `/user/lists/${listId}`, headers: auth(token) })
     const rawIcon = before.json().tags[0].icon
     expect(rawIcon).toBe('')
 
     const renamed = await f.inject({
-      method: 'PATCH', url: `/user/libraries/${libraryId}/tags/${tagId}`,
+      method: 'PATCH', url: `/user/lists/${listId}/tags/${tagId}`,
       headers: auth(token), payload: { name: 'Renamed', icon: rawIcon },
     })
     expect(renamed.statusCode).toBe(200)
@@ -78,12 +78,12 @@ describe('tag icon round-trip: raw vs. derived', () => {
 
   it('resubmitting the DERIVED displayIcon instead — the pre-fix bug — is rejected, which is exactly why the two fields must stay separate', async () => {
     const f = await build()
-    const before = await f.inject({ method: 'GET', url: `/user/libraries/${libraryId}`, headers: auth(token) })
+    const before = await f.inject({ method: 'GET', url: `/user/lists/${listId}`, headers: auth(token) })
     const displayIcon = before.json().tags[0].displayIcon
     expect(displayIcon).toMatch(/^\//)   // URL-shaped
 
     const renamed = await f.inject({
-      method: 'PATCH', url: `/user/libraries/${libraryId}/tags/${tagId}`,
+      method: 'PATCH', url: `/user/lists/${listId}/tags/${tagId}`,
       headers: auth(token), payload: { name: 'Renamed', icon: displayIcon },
     })
     // A profile-avatar URL is over the tag-icon field's 64-char zod cap before
@@ -101,17 +101,17 @@ describe('tag icon round-trip: raw vs. derived', () => {
   // resubmits the raw '' must leave it dynamic.
   it('a rename against a plain-emoji fallback (no avatar) stays dynamic when the client resubmits the raw icon', async () => {
     const f = await build()
-    const bare = await createLibrary(OWNER, 'Desk2', '', 'private')
-    const bareTag = await createTag(OWNER, bare.libraryId, { name: 'Bare' })
-    await setTagMembers(OWNER, bare.libraryId, bareTag.tagId, [MEMBER_NO_AVATAR], [])
+    const bare = await createList(OWNER, 'Desk2', '', 'private')
+    const bareTag = await createTag(OWNER, bare.listId, { name: 'Bare' })
+    await setTagMembers(OWNER, bare.listId, bareTag.tagId, [MEMBER_NO_AVATAR], [])
 
-    const before = await f.inject({ method: 'GET', url: `/user/libraries/${bare.libraryId}`, headers: auth(token) })
+    const before = await f.inject({ method: 'GET', url: `/user/lists/${bare.listId}`, headers: auth(token) })
     const tag = before.json().tags[0]
     expect(tag.icon).toBe('')
     expect(tag.displayIcon).toBe(accountIcon(MEMBER_NO_AVATAR).emojiUrl || accountIcon(MEMBER_NO_AVATAR).emoji)
 
     const renamed = await f.inject({
-      method: 'PATCH', url: `/user/libraries/${bare.libraryId}/tags/${bareTag.tagId}`,
+      method: 'PATCH', url: `/user/lists/${bare.listId}/tags/${bareTag.tagId}`,
       headers: auth(token), payload: { name: 'Bare renamed', icon: tag.icon },
     })
     expect(renamed.statusCode).toBe(200)
