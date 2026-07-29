@@ -121,7 +121,24 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
     expect(foldReturn).toBeGreaterThan(-1)
     expect(cacheRefreshCall).toBeGreaterThan(foldReturn)
     expect(body).toContain('const viewerKey = `user-accounts:${modelVersion}:${viewerFold.fingerprint}:${sort}:${offset}:${limit}`')
-    expect(body).toContain('return cachedSwr(viewerKey, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS, build, generation)')
+    expect(body).toContain('return cachedSwr(viewerKey, ACCOUNTS_FRESH_MS, ACCOUNTS_VIEWER_STALE_MS, build, generation)')
+  })
+
+  // N1: per-viewer keys fan out by (fingerprint × sort × offset × limit)
+  // inside the SAME bounded, shared LRU every anonymous key also lives in —
+  // reusing the shared path's own 30-minute ACCOUNTS_STALE_MS there would let
+  // ordinary logged-in traffic evict the shared directory/hot keys that
+  // store exists to protect. The per-viewer branch gets its OWN, much
+  // shorter constant instead; the shared path's own constant is untouched.
+  it('the per-viewer stale window is its own constant, on the order of the 5-minute account-value generation — never the shared path\'s 30-minute one', () => {
+    expect(explorerService).toContain('const ACCOUNTS_STALE_MS = 30 * 60_000')
+    expect(explorerService).toContain('const ACCOUNTS_VIEWER_STALE_MS = 5 * 60_000')
+    const body = accountsPageBody()
+    // The shared path's two callers are unchanged by this fix.
+    expect(body).toContain('if (refresh) return cacheRefresh(key, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS, build, generation)')
+    expect(body).toContain('return cachedSwr(key, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS, build, generation)')
+    // The per-viewer caller never references the shared constant at all.
+    expect(body).not.toContain('cachedSwr(viewerKey, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS,')
   })
 
   // Pinned so the shared cache-key/generation wiring test (accountDirectoryGenerations.test.ts)

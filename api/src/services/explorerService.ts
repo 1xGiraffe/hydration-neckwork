@@ -16397,6 +16397,16 @@ async function getAccountsTotal(): Promise<number> {
 
 const ACCOUNTS_FRESH_MS = 60_000
 const ACCOUNTS_STALE_MS = 30 * 60_000
+// The per-viewer fold's OWN stale window — deliberately much shorter than
+// ACCOUNTS_STALE_MS. A per-viewer key is one of (fingerprint × sort × offset
+// × limit) in the SAME shared, bounded (5,000-entry) LRU every anonymous key
+// also lives in; at 30 minutes, ordinary logged-in traffic — or even one
+// session alone, polling near the 120 req/min rate limit across a few pages
+// and sorts — could evict the shared directory/hot keys that store exists to
+// protect. `generation` already forces a refresh every five minutes
+// regardless (accountValueGenerationEpoch), so a much longer stale window
+// buys nothing but eviction pressure; this sits on that same order.
+const ACCOUNTS_VIEWER_STALE_MS = 5 * 60_000
 
 function accountsCacheKey(modelVersion: string, sort: AccountSort, offset: number, limit: number): string {
   return `explorer:accounts:${modelVersion}:${sort}:${offset}:${limit}`
@@ -16911,9 +16921,16 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
   // (marks the entry stale, not absent, when it advances) rather than folded
   // into the key, for the same reason accountsCacheKey's own key leaves it
   // out — see the comment there.
+  //
+  // The stale window is its OWN ACCOUNTS_VIEWER_STALE_MS, deliberately much
+  // shorter than the shared path's ACCOUNTS_STALE_MS: per-viewer keys fan out
+  // by (fingerprint × sort × offset × limit) inside the SAME bounded LRU
+  // every anonymous key also lives in, so a long-lived per-viewer entry is
+  // eviction pressure on the shared hot keys with no shared reader to justify
+  // it — see ACCOUNTS_VIEWER_STALE_MS's own comment.
   if (viewerFold) {
     const viewerKey = `user-accounts:${modelVersion}:${viewerFold.fingerprint}:${sort}:${offset}:${limit}`
-    return cachedSwr(viewerKey, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS, build, generation)
+    return cachedSwr(viewerKey, ACCOUNTS_FRESH_MS, ACCOUNTS_VIEWER_STALE_MS, build, generation)
   }
   if (refresh) return cacheRefresh(key, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS, build, generation)
   // Nothing cached means a restarted process or an evicted key, not that no page
