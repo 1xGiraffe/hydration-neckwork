@@ -417,6 +417,17 @@ function buildAccounts(offset: number, limit: number, sort: string): AccountsPag
 // a system tag (never overridden), and the first list ahead of it whose tag
 // contains the row's account wins otherwise — summed exactly like a system
 // tag's own group, not fetched from a separate aggregate.
+//
+// Known, deliberate divergence from the real SQL: this operates on
+// buildAccounts's OWN already-grouped TopAccountRow[] and folds by
+// `listId:tagId` alone. It has no notion of the real query's `label_id` —
+// the per-account system-tag id the `grouped` CTE ALSO groups by (see
+// accountsPage's `labelIdSql`) — so it cannot reproduce a real regression
+// where a single user tag holds both a system-tagged and a system-tagless
+// account and the SQL's grouping splits it in two. That regression is
+// covered at the API level instead (accountsViewerFold.test.ts), where the
+// real grouping expressions are exercised; this mock only has to give the
+// e2e suite deterministic, plausible fold ROWS to assert rendering against.
 export function buildAccountsForViewer(tagMap: TagMapResponse | null, offset: number, limit: number, sort: string): AccountsPage {
   if (!tagMap) return buildAccounts(offset, limit, sort)
   const { rows } = buildAccounts(0, 1000, sort)

@@ -327,7 +327,22 @@ export function useAccounts(offset = 0, limit = 50, sort: AccountSort = 'value')
   const authed = !!session && tagMapStatus() === 'ready' && hasUserTagMembers()
   return useQuery({
     queryKey: authed ? ['accounts', 'viewer', session.accountId, tagMapVersion, offset, limit, sort] : ['accounts', offset, limit, sort],
-    queryFn: ({ signal }) => (authed ? userApi.accounts(offset, limit, sort, signal) : api.accounts(offset, limit, sort, signal)),
+    queryFn: async ({ signal }) => {
+      if (!authed) return api.accounts(offset, limit, sort, signal)
+      // The per-viewer fold is a strict enhancement over the shared page,
+      // never a requirement for the directory to render at all — a failure
+      // (a cold rebuild that outran the proxy's timeout, a transient 5xx, a
+      // fold past its server-side pair cap that still reached this far) must
+      // fall back to exactly the page a logged-out visitor would see, never
+      // an empty directory. A real cancellation (unmount, params changed)
+      // still propagates as an abort rather than firing a second request.
+      try {
+        return await userApi.accounts(offset, limit, sort, signal)
+      } catch (err) {
+        if (signal?.aborted) throw err
+        return api.accounts(offset, limit, sort, signal)
+      }
+    },
     refetchInterval: useInterval(SLOW_POLL_MS),
     staleTime: 20_000,
     placeholderData: keepPreviousData,

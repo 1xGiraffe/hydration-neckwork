@@ -264,6 +264,39 @@ test('a user tag holding two on-page accounts folds them into one row, and unfol
   await expect(page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '410k' }) })).toHaveCount(1)
 })
 
+// The per-viewer fold is a strict enhancement over the shared directory,
+// never a requirement for it to render at all — a failing /user/accounts
+// (a cold rebuild timing out, a transient 5xx, anything) must fall back to
+// exactly the page a logged-out visitor would see, not an empty table.
+test('a failing per-viewer fold falls back to the shared directory instead of rendering empty', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  userMock.state.tagMap = {
+    lists: [
+      { listId: 'lib1', name: 'My list', tags: [
+        { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
+      ] },
+      { listId: 'system', name: 'Hydration', tags: [] },
+    ],
+  }
+  await page.route(/\/api\/user\/accounts(\?.*)?$/, route => route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"boom"}' }))
+
+  await page.goto('/accounts')
+
+  // The table is not empty, and Treasury's own row is exactly the shared
+  // page's plain, single-account row — its real $980k, not doubled or
+  // dropped — proving the fallback served the shared /explorer/accounts
+  // fixture rather than an empty or partial one. Its PILL legitimately still
+  // reads "Mine" here: AddrPill resolves every account reference against the
+  // viewer's own tag map independently of which directory endpoint answered
+  // (the same mechanism a vote/activity/holder row's pill already uses
+  // everywhere else), and that map loaded fine — only the FOLDED, combined
+  // directory ROW failed to load and fell back. A single real, correctly
+  // valued row is the property this test exists to prove either way.
+  await expect(page.locator('.accounts-tbl tbody tr')).not.toHaveCount(0)
+  const treasuryRow = page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '980k' }) })
+  await expect(treasuryRow).toHaveCount(1)
+})
+
 // Regression coverage for HoverCard's tag/list-tag disambiguation: since
 // user and system tags now share the plain /tag/:id href form, the hover
 // card has to tell them apart the same way TagDetail's own routing does —
