@@ -14,6 +14,13 @@ const TREASURY_ACCOUNT_ID = '0x6d6f646c70792f74727372790000000000000000000000000
 // as a tag member — any well-formed address works for the mock, but reusing
 // one already meaningful elsewhere in the suite beats inventing a new one.
 const BINANCE_ADDRESS = '0x2c1F9eB7a4D0c83E5f6A1b9D2c7E04aF8b3D16C9'
+// The fox's and the owl's accountIds, copied from `A.fox`/`A.owl` in
+// tests/fixtures/mockApi.ts — the /accounts fixture's own $1.24M and $410k
+// rows. Neither carries a system tag (unlike Treasury above), which is
+// exactly what the directory-fold spec needs: two ordinary account rows to
+// fold into one, with nothing else already folding them server-side.
+const FOX_ACCOUNT_ID = '0xaa11bb22cc33dd44ee55ff6677889900aabbccddeeff00112233445566778899'
+const OWL_ACCOUNT_ID = '0xbb22cc33dd44ee55ff6677889900aabbccddeeff0011223344556677889900aa'
 // A real user tag id is a UUID (userListService mints them with
 // randomUUID()) — TagDetail's routing treats that SHAPE as the signal that an
 // id might be a user tag at all (see userTags.looksLikeUserTagId), so specs
@@ -197,6 +204,66 @@ test('a user tag outranks the system tag, and the system tag returns on logout',
 
   await expect(pill).toContainText('Treasury')
   await expect(pill).toHaveAttribute('href', '/tag/treasury')
+})
+
+// The directory is a shared, cached, server-side aggregate with no notion of
+// "the current viewer" — a user tag can never fold there the way a system
+// tag does (one SQL-computed group row). So when TWO of the viewer's own
+// tagged accounts both land on the same page, the fold has to happen
+// client-side: one aggregated row, fetched from the tag's own summary, with
+// the member rows dropped. Restored on logout, same as the single-member
+// case above.
+test('a user tag holding two on-page accounts folds them into one row, and unfolds on logout', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  userMock.state.tagMap = {
+    lists: [
+      { listId: 'lib1', name: 'My list', tags: [
+        { tagId: USER_TAG_ID, name: 'Whales', color: '#22c55e', icon: '🐳', members: [FOX_ACCOUNT_ID, OWL_ACCOUNT_ID] },
+      ] },
+      { listId: 'system', name: 'Hydration', tags: [] },
+    ],
+  }
+  // The management-page shape of the same tag, so the fold's own summary
+  // fetch (GET /user/list-tag/lib1/<id>?summary=1) has a real tag to answer
+  // for.
+  userMock.state.lists.push({
+    listId: 'lib1', name: 'My list', note: '', visibility: 'private', isPersonal: false,
+    owner: userMock.state.account, tagCount: 1, accountCount: 2, subscriberCount: 0,
+    tags: [{
+      tagId: USER_TAG_ID, name: 'Whales', color: '#22c55e', icon: '🐳', displayIcon: '🐳', note: '',
+      members: [
+        { accountId: FOX_ACCOUNT_ID, address: FOX_ACCOUNT_ID, emoji: '🦊', tag: null },
+        { accountId: OWL_ACCOUNT_ID, address: OWL_ACCOUNT_ID, emoji: '🦉', tag: null },
+      ],
+    }],
+  })
+  // The aggregate's own combined numbers — distinct from either member's own
+  // $1.24M/$410k row (so a leftover unfolded row would be caught) and from
+  // every other fixture row's value.
+  userMock.state.listTagSummaryOverrides[`lib1:${USER_TAG_ID}`] = { portfolioUsd: 2_220_000, tradingVolumeUsd: 480_000 }
+
+  await page.goto('/accounts')
+  const row = page.locator('.accounts-tbl tbody tr', { hasText: 'Whales' })
+  await expect(row).toHaveCount(1)
+  const pill = row.locator('a.addr-pill')
+  await expect(pill).toContainText('Whales')
+  await expect(pill).toContainText('·2')
+  // The tag's own aggregate page, exactly like a system tag's TagGroupPill.
+  await expect(pill).toHaveAttribute('href', `/tag/${USER_TAG_ID}`)
+  await expect(row.locator('td[data-label="Value"]')).toContainText('2.22M')
+  await expect(row.locator('td[data-label="Trading $"]')).toContainText('480k')
+  // Both member rows are gone — their own values no longer appear at all.
+  await expect(page.locator('.accounts-tbl tbody tr', { hasText: '1.24M' })).toHaveCount(0)
+  await expect(page.locator('.accounts-tbl tbody tr', { hasText: '410k' })).toHaveCount(0)
+  // The pagination-honesty hint, present only because a fold actually happened.
+  await expect(page.getByText("Folded rows combine all of the tag's accounts, including any beyond this page.")).toBeVisible()
+
+  await page.locator('.account-btn').click()
+  await page.locator('.account-menu button', { hasText: 'Log out' }).click()
+
+  await expect(page.locator('.accounts-tbl tbody tr', { hasText: 'Whales' })).toHaveCount(0)
+  await expect(page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '1.24M' }) })).toHaveCount(1)
+  await expect(page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '410k' }) })).toHaveCount(1)
 })
 
 // Regression coverage for HoverCard's tag/list-tag disambiguation: since

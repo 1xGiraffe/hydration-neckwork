@@ -75,6 +75,13 @@ export interface UserMockState {
   invites: ListSummaryRef[]
   order: string[]
   tagMap: TagMapResponse
+  // Per-tag override merged onto a list tag's own `?summary=1` response (the
+  // accounts directory's fold, and HoverCard, both read this endpoint) — the
+  // plain buildListTagDetail() below always answers zeroed-out numbers, which
+  // is fine for every OTHER spec (none read them), but a spec proving the
+  // fold shows a real aggregate value needs the summary to carry one. Keyed
+  // `${listId}:${tagId}` so two folds in one spec can't collide.
+  listTagSummaryOverrides: Record<string, Partial<TagDetail>>
 }
 
 function freshState(): UserMockState {
@@ -86,6 +93,7 @@ function freshState(): UserMockState {
     invites: [],
     order: [],
     tagMap: { lists: [{ listId: 'system', name: 'Hydration', tags: [] }] },
+    listTagSummaryOverrides: {},
   }
 }
 
@@ -361,9 +369,12 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     return
   }
   if (method === 'GET' && (m = path.match(/^\/user\/list-tag\/([^/]+)\/([^/]+)$/))) {
-    const detail = buildListTagDetail(state, decodeURIComponent(m[1]), decodeURIComponent(m[2]))
-    if (detail) await fulfillJson(route, 200, detail)
-    else await fulfillJson(route, 404, { error: 'not found' })
+    const listId = decodeURIComponent(m[1]), tagId = decodeURIComponent(m[2])
+    const detail = buildListTagDetail(state, listId, tagId)
+    if (!detail) { await fulfillJson(route, 404, { error: 'not found' }); return }
+    const isSummary = url.searchParams.get('summary') === '1'
+    const override = isSummary ? state.listTagSummaryOverrides[`${listId}:${tagId}`] : undefined
+    await fulfillJson(route, 200, override ? { ...detail, ...override } : detail)
     return
   }
 
