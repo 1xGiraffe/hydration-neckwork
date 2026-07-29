@@ -168,7 +168,14 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
   {
     tagId: 'treasury', name: 'Treasury', color: '', note: '', icon: '',
     // main pot + the py/trsry sub-account (suffix 0x08627411) observed on-chain
-    addresses: ['13UVJyLnbVp9RBZYFwFGyDvVd1y27Tt8tkntv6Q7JVPhFsTB', modlAccountId('py/trsry', '08627411')],
+    addresses: [
+      '13UVJyLnbVp9RBZYFwFGyDvVd1y27Tt8tkntv6Q7JVPhFsTB', modlAccountId('py/trsry', '08627411'),
+      '15qyoAjtLwtu7stVJ5qdsj7QJsfaxQEU3ZrihHExzC6hQyHA',
+      '1C1rAhLjoNjmm4cP4eYjWDywXVHa5f6XH3bKRmPikSkR3nv',
+      '164x3jtTcyT6tPRjMhi9ojkzXkBhFKdA3LxKbocdZjQaezBC',
+      '123dwFLLwME2hS12qWMREwYFefM4cHnEmH5go3Vq7mAtDdv9',
+      '13NWq5jfYPMthrdBpGsj4EaiJi21vDUUMeExcMVEVzzZzuVh',
+    ],
   },
   {
     tagId: 'hydration-multisig', name: 'Hydration Multisig', color: '', note: 'Hydration protocol multisig accounts', icon: '✍🏻',
