@@ -171,8 +171,11 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     addresses: ['13UVJyLnbVp9RBZYFwFGyDvVd1y27Tt8tkntv6Q7JVPhFsTB', modlAccountId('py/trsry', '08627411')],
   },
   {
-    tagId: 'hydration-multisig', name: 'Hydration Multisig', color: '', note: 'Hydration protocol multisig account', icon: '',
-    addresses: ['16RJh4z1eUHpC3ntre9H2noKGKxihkSqog9PBt9bRbAnj4RE'],
+    tagId: 'hydration-multisig', name: 'Hydration Multisig', color: '', note: 'Hydration protocol multisig accounts', icon: '✍🏻',
+    addresses: [
+      '16RJh4z1eUHpC3ntre9H2noKGKxihkSqog9PBt9bRbAnj4RE',
+      '14SuF79gUvkt2sXEZP6d7PB8prUKWekyLkUGLJ3YJLt3GBZ',
+    ],
   },
   // ---- pallet accounts (accounts with no extrinsics, decoded from their
   // "modl" + PalletId structure and matched to hydration-node constants) ----
