@@ -1,10 +1,12 @@
 import { lazy, Suspense, useState } from 'react'
 import { userApi } from '../api/explorer'
-import { useMe, useUserMutation } from '../hooks/useUser'
+import { useSession } from '../session'
+import { useLists, useMe, useUserMutation } from '../hooks/useUser'
 import { useTags } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, navigate, paths } from '../router'
 import { Crumbs } from '../components/ui'
+import { PublicListsPanel } from '../components/PublicListsPanel'
 import type { ListSummaryRef, MeResponse } from '../types'
 
 const ListFormDialog = lazy(() => import('../components/ListFormDialog').then(m => ({ default: m.ListFormDialog })))
@@ -208,7 +210,9 @@ function YourLists({ me }: { me: MeResponse }) {
 
 export function Lists() {
   useDocumentTitle('Lists')
+  const session = useSession()
   const me = useMe()
+  const libs = useLists()
   const createMutation = useUserMutation(userApi.createList)
 
   const [newLibOpen, setNewLibOpen] = useState(false)
@@ -226,13 +230,20 @@ export function Lists() {
       </div>
 
       <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, marginBottom: 16 }}>
-        Manage the tag lists you own or follow — reorder them, control who can see them, and create new ones. Discover and
-        subscribe to public lists, and answer invites, from the <Link to={paths.tags()}>Tags</Link> hub instead.
+        Manage the tag lists you own or follow — reorder them, control who can see them, and create new ones. Browse and
+        subscribe to public lists below, or answer invites from the <Link to={paths.tags()}>Tags</Link> hub.
       </div>
 
       {me.data ? <YourLists me={me.data} /> : !me.isLoading && (
-        <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Log in to manage your lists.</div>
+        <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)', marginBottom: 16 }}>Log in to manage your lists.</div>
       )}
+
+      {/* Public data behind no session gate — /explorer/lists needs none —
+          so this stays visible whether or not the viewer is logged in,
+          exactly like the same table on the Tags hub. Placed below Your
+          lists/the log-in prompt: what's already yours (or the nudge to make
+          it yours) reads before what's there to discover. */}
+      <PublicListsPanel lists={libs.data ?? []} isLoading={libs.isLoading} me={me.data} session={session} />
 
       {newLibMounted && (
         <Suspense fallback={null}>

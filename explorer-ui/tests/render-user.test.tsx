@@ -190,13 +190,22 @@ describe('Tags hub — smoke render (logged out)', () => {
 })
 
 describe('Lists — smoke render (logged out)', () => {
-  it('is pure management now — no discover/invites, just a log-in prompt', () => {
+  it('gates Your lists behind a log-in prompt, but public lists stay browsable/subscribable like /tags', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['lists'], MOCK_LISTS)
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Lists /></QueryClientProvider>)
     expect(html).toContain('Lists')
     expect(html).toMatch(/log in/i)
+    // Owned-list management stays gated: no reorder/new-list affordances.
     expect(html).not.toContain('New list')
-    expect(html).not.toContain('Subscribe')
+    // New user request: public lists are no longer Tags-hub-only — the same
+    // browsable/subscribable table (PublicListsPanel) now renders here too,
+    // logged out included, with a real Subscribe button (C12) rather than a
+    // dead "log in first" prompt.
+    expect(html).toContain('Public lists')
+    expect(html).toContain('DeFi desks')
+    expect(html).toContain('Subscribe')
+    expect(html).not.toContain('Log in to subscribe')
   })
 })
 

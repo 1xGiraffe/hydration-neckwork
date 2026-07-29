@@ -1,6 +1,7 @@
 import type { Locator, Page } from '@playwright/test'
 import { E2E_TOKEN, INVALID_TAG_MEMBER_ADDRESS, expect, seedSession, test } from './fixtures/test'
 import type { UserMockState } from './fixtures/test'
+import { MOCK_LISTS } from '../tests/fixtures/mockApi'
 import type { AccountRef } from '../src/types'
 
 // Treasury's accountId, copied from `A.treasury` in tests/fixtures/mockApi.ts
@@ -574,7 +575,10 @@ test('drags a row\'s handle to reorder the list, including the system row, and c
   userMock.state.order.push('lib-a', 'lib-b')
 
   await page.goto('/lists')
-  const rows = page.locator('tbody tr')
+  // Scoped to Your lists' own panel (the first on the page, above Public
+  // lists) — /lists now renders two `.tbl` tables, and an unscoped `tbody
+  // tr` would count both.
+  const rows = page.locator('.panel').first().locator('tbody tr')
   await expect(rows).toHaveCount(3) // Alpha, Bravo, and the fixed system row
 
   // The new Subscribers column, right-aligned/mono, reads straight off
@@ -609,6 +613,72 @@ test('drags a row\'s handle to reorder the list, including the system row, and c
   await rows.nth(1).getByRole('button', { name: 'Reorder Alpha' }).focus()
   await page.keyboard.press('ArrowUp')
   await expect.poll(() => userMock.state.order).toEqual(['lib-a', 'system', 'lib-b'])
+})
+
+// New user request: /lists browses and subscribes to public lists too, not
+// just /tags — PublicListsPanel is the exact same shared component either
+// page renders, so this pins that /lists actually wires it up (not just that
+// the component itself works, which the /tags specs already cover) and that
+// a subscribe click reaches the real endpoint from here.
+test('/lists browses public lists and subscribes to one, same as /tags', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  await page.goto('/lists')
+
+  await expect(page.locator('.sec-title', { hasText: 'Public lists' })).toBeVisible()
+  const row = page.locator('tbody tr', { hasText: 'Exchange wallets' })
+  await expect(row).toBeVisible()
+  await expect(row.locator('td[data-label="Owner"]')).toBeVisible()
+  await expect(row.locator('td[data-label="Subscribers"]')).toHaveText('7')
+
+  let subscribeBody: { listId: string } | null = null
+  await page.route(/\/api\/user\/subscriptions$/, async route => {
+    subscribeBody = route.request().postDataJSON()
+    await route.fallback()
+  })
+  await row.getByRole('button', { name: 'Subscribe', exact: true }).click()
+  await expect.poll(() => subscribeBody).toEqual({ listId: 'exchange-wallets' })
+})
+
+// The mock's own POST /user/subscriptions is deliberately a no-op (see its
+// comment in fixtures/test.ts) — a real subscribed row has to be seeded
+// directly, same as any other spec that needs one. Pushing the exact
+// MOCK_LISTS entry /explorer/lists already answers with keeps the row's
+// other fields (name, note, counts) consistent between the two fetches.
+test('an already-subscribed public list shows Unsubscribe on /lists, and unsubscribing calls the right endpoint', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  const exchangeWallets = MOCK_LISTS.find(l => l.listId === 'exchange-wallets')!
+  userMock.state.subscriptions.push(exchangeWallets)
+
+  await page.goto('/lists')
+  const row = page.locator('tbody tr', { hasText: 'Exchange wallets' })
+  const unsubscribeBtn = row.getByRole('button', { name: 'Unsubscribe' })
+  await expect(unsubscribeBtn).toBeVisible()
+  await expect(row.getByRole('button', { name: 'Subscribe', exact: true })).toHaveCount(0)
+
+  await unsubscribeBtn.click()
+  await expect.poll(() => userMock.state.subscriptions.some(l => l.listId === 'exchange-wallets')).toBe(false)
+  // The mutation's own invalidate → refetch cycle flips the row back to
+  // Subscribe, not just the server-side state checked above.
+  await expect(row.getByRole('button', { name: 'Subscribe', exact: true })).toBeVisible()
+})
+
+// New user request: logged out, /lists must not gate the public data behind
+// the "log in to manage" prompt — /explorer/lists needs no session, so the
+// table stays visible and its Subscribe button opens the login dialog, same
+// as the existing /tags coverage above.
+test('logged out, /lists still shows Public lists (with a real Subscribe → log-in flow) alongside the log-in prompt for Your lists', async ({ page }) => {
+  await page.goto('/lists')
+
+  await expect(page.locator('.detail-card', { hasText: 'Log in to manage your lists' })).toBeVisible()
+
+  const row = page.locator('tbody tr', { hasText: 'DeFi desks' })
+  const subscribeBtn = row.getByRole('button', { name: 'Subscribe', exact: true })
+  await expect(subscribeBtn).toBeVisible()
+  await expect(page.locator('.dialog')).toHaveCount(0)
+
+  await subscribeBtn.click()
+
+  await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
 })
 
 // Seeds an owned list with one (empty) tag — enough surface for both
