@@ -16475,14 +16475,33 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     // Every CTE below groups by this SAME `gkey` — a system tag's label_id when
     // the account has one, else the account itself. A viewer's fold overrides
     // that per-account, before any of them run: `fold_ids`/`fold_keys` name
-    // exactly the accounts whose winning group is one of the VIEWER's own tags
-    // (userListService.directoryFoldFor already excludes anyone the system tag
-    // wins), so a hit always replaces — never competes with — the system/account
-    // key. Absent a fold this returns the exact original expression, unchanged.
+    // exactly the accounts whose winning group is one of the VIEWER's own tags.
+    // directoryFoldFor excludes anyone the system tag wins IN PRIORITY ORDER —
+    // but a personal list outranks the reserved 'system' slot by default, so a
+    // folded account CAN still carry a real system label_id (e.g. Treasury,
+    // tagged into the viewer's own personal tag). `gkey` alone is safe to
+    // override — the whole point of the fold is that it wins the grouping — but
+    // `label_id` must be neutralized alongside it (see labelIdSql below), or the
+    // `grouped` CTE's `GROUP BY gkey, label_id` still splits one fold across
+    // however many distinct system labels its folded members carry, and the
+    // gkey-only satellite joins (mm_grouped, lp_grouped, trade_volume,
+    // liquidation_volume) then hand each split row the WHOLE group's totals.
+    // Absent a fold this returns the exact original expression, unchanged.
     const gkeySql = (idExpr: string): string => {
       if (!viewerFold) return `if(t.lid = '', ${idExpr}, t.lid)`
       const userKey = `transform(${idExpr}, {fold_ids:Array(String)}, {fold_keys:Array(String)}, '')`
       return `if(${userKey} != '', ${userKey}, if(t.lid = '', ${idExpr}, t.lid))`
+    }
+    // The `grouped` CTE's other half of the same grouping key (see gkeySql just
+    // above): a folded account's system label_id (if it has one) must read as
+    // '' here, so every member gkeySql already routed to the SAME gkey also
+    // shares the SAME label_id and collapses into one row, not one row per
+    // distinct label_id among the fold's members. Absent a fold this returns
+    // the exact original `t.lid`, unchanged.
+    const labelIdSql = (idExpr: string): string => {
+      if (!viewerFold) return 't.lid'
+      const userKey = `transform(${idExpr}, {fold_ids:Array(String)}, {fold_keys:Array(String)}, '')`
+      return `if(${userKey} != '', '', t.lid)`
     }
     // The activity ordering and value both come from the background leaderboard, keyed
     // on the same gkey this query groups by. An account outside the pool has no counted
@@ -16670,7 +16689,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             grouped AS (
               SELECT
                 ${gkeySql('latest.account_id')} AS gkey,
-                t.lid AS label_id, any(t.lname) AS lname, any(t.c) AS color, any(t.ic) AS icon,
+                ${labelIdSql('latest.account_id')} AS label_id, any(t.lname) AS lname, any(t.c) AS color, any(t.ic) AS icon,
                 uniqExact(latest.account_id) AS members, any(latest.account_id) AS sample, max(latest.lb) AS last_block,
                 sum(toFloat64(latest.bal) * transform(latest.asset_id, ${idsSql}, ${unitsSql}, 0.)) AS usd,
                 -- Per-asset USD merged across the group's members → top-holding icons.
@@ -16876,18 +16895,25 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
   // rebuild STARTED from can only under-claim freshness, so one that advanced
   // mid-rebuild is refreshed again rather than passing for current.
   const generation = accountValueGenerationEpoch
-  // A viewer's fold is never satisfied by, and never feeds, the shared
-  // SWR/snapshot machinery above: it is grouped by this ONE viewer's own tag
-  // priority rather than the shared system-tag grouping, so no other request
-  // could ever reuse it, and persisting it as if it were the canonical
-  // snapshot would risk serving one viewer's rows to another. A flat, short
-  // TTL still single-flights concurrent requests for the same viewer+page;
-  // there is deliberately no prewarm — a viewer's own tags can change at any
-  // moment, so nothing should be pre-computing a page for them ahead of a
-  // request that may never come.
+  // A viewer's fold is never persisted to the shared snapshot table and never
+  // prewarmed — it is grouped by this ONE viewer's own tag priority rather
+  // than the shared system-tag grouping, so no other request could ever
+  // reuse it, and persisting it as if it were the canonical snapshot would
+  // risk serving one viewer's rows to another; a viewer's own tags can also
+  // change at any moment, so nothing should be pre-computing a page for them
+  // ahead of a request that may never come. It DOES still reuse the shared
+  // SWR mechanism (cachedSwr, same as the anonymous path below) rather than a
+  // hard-TTL cached() — this is the SAME seconds-long whole-directory query,
+  // and a viewer idling on /accounts polls it every SLOW_POLL_MS; a hard
+  // expiry equal to that poll interval would force a blocking rebuild on
+  // nearly every poll instead of serving stale-while-revalidating like every
+  // other reader of this query does. `generation` is passed to the cache
+  // (marks the entry stale, not absent, when it advances) rather than folded
+  // into the key, for the same reason accountsCacheKey's own key leaves it
+  // out — see the comment there.
   if (viewerFold) {
-    const viewerKey = `user-accounts:${modelVersion}:${generation}:${viewerFold.fingerprint}:${sort}:${offset}:${limit}`
-    return cached(viewerKey, ACCOUNTS_FRESH_MS, build)
+    const viewerKey = `user-accounts:${modelVersion}:${viewerFold.fingerprint}:${sort}:${offset}:${limit}`
+    return cachedSwr(viewerKey, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS, build, generation)
   }
   if (refresh) return cacheRefresh(key, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS, build, generation)
   // Nothing cached means a restarted process or an evicted key, not that no page

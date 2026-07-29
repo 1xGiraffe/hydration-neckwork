@@ -47,6 +47,28 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
     expect(body).not.toContain("if(t.lid = '', a.account_id, t.lid) AS gkey")
   })
 
+  // C1 fix: `grouped`'s OTHER half of the same grouping key. gkeySql alone
+  // only overrides `gkey` — but directoryFoldFor can legitimately fold an
+  // account that STILL carries a real system label_id (a personal list
+  // outranks the reserved 'system' slot by default), and `grouped` groups by
+  // `(gkey, label_id)`. Without also neutralizing label_id, one fold key
+  // would split into one row per distinct label_id among its members, and
+  // the gkey-only satellite joins (mm_grouped, lp_grouped, trade_volume,
+  // liquidation_volume) would then hand EACH split row the whole group's
+  // totals — see the 'C1 regression' suite below for the concrete proof.
+  it('labelIdSql degrades to the original bare `t.lid` when no fold is passed, and grouped routes through it', () => {
+    const body = accountsPageBody()
+    const at = body.indexOf('const labelIdSql = ')
+    expect(at).toBeGreaterThan(-1)
+    const fn = body.slice(at, body.indexOf('\n    }', at) + 6)
+    expect(fn).toContain('if (!viewerFold) return \'t.lid\'')
+    expect(body).toContain('${labelIdSql(\'latest.account_id\')} AS label_id,')
+    expect(body).not.toContain('t.lid AS label_id,')
+    // Still the exact original grouping clause — only the SELECTed label_id
+    // expression feeding it changed, not the GROUP BY itself.
+    expect(body).toContain('GROUP BY gkey, label_id')
+  })
+
   // The extra `gkey` projection and the disp_name/has_identity overrides are
   // pure additive splices: each one's ABSENT-fold branch has to be the exact
   // original text, not merely something that happens to evaluate the same.
@@ -86,16 +108,20 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
     expect(body).toContain('if (!viewerFold) await persistAccountDirectorySnapshot(snapshotKey, page).catch(err => console.error(\'[accounts] snapshot persist failed:\', err))')
   })
 
-  // A viewer's fold never touches the shared cachedSwr/cacheRefresh entry —
-  // it returns through a SEPARATE `cached()` call before either is reached.
-  it('a viewerFold request returns via cached() before the shared cacheRefresh/cachedSwr calls, on its own key prefix', () => {
+  // A viewer's fold never touches the shared entry (own key prefix), but DOES
+  // reuse the shared stale-while-revalidate mechanism — a hard-TTL cached()
+  // equal to the client's own poll interval would force a blocking rebuild on
+  // nearly every poll (I1). `generation` is passed to cachedSwr rather than
+  // folded into the key, so a generation advance marks the entry stale
+  // (served immediately, refreshed in the background) rather than absent.
+  it('a viewerFold request returns via cachedSwr(..., generation) before the shared cacheRefresh/cachedSwr calls, on its own key prefix without generation baked in', () => {
     const body = accountsPageBody()
     const foldReturn = body.indexOf('if (viewerFold) {')
     const cacheRefreshCall = body.indexOf('if (refresh) return cacheRefresh(key,')
     expect(foldReturn).toBeGreaterThan(-1)
     expect(cacheRefreshCall).toBeGreaterThan(foldReturn)
-    expect(body).toContain('const viewerKey = `user-accounts:${modelVersion}:${generation}:${viewerFold.fingerprint}:${sort}:${offset}:${limit}`')
-    expect(body).toContain('return cached(viewerKey, ACCOUNTS_FRESH_MS, build)')
+    expect(body).toContain('const viewerKey = `user-accounts:${modelVersion}:${viewerFold.fingerprint}:${sort}:${offset}:${limit}`')
+    expect(body).toContain('return cachedSwr(viewerKey, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS, build, generation)')
   })
 
   // Pinned so the shared cache-key/generation wiring test (accountDirectoryGenerations.test.ts)
@@ -137,5 +163,68 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
     const body = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
     expect(body).toContain('if (!fold.ids.length) return getAccounts(offset, limit, sort)')
     expect(body).toContain('return accountsPage(offset, limit, sort, false, fold)')
+  })
+})
+
+// C1 regression — a mixed-membership fold (one user tag holding both a
+// system-tagged account and a system-tagless one) must collapse to exactly
+// one (gkey, label_id) group, not one per distinct label_id among its
+// members. There is no fake-ClickHouse harness for accountsPage's assembled
+// SQL (building one was judged disproportionate to this codebase's own
+// precedent for this function — see accountDirectoryGenerations.test.ts's
+// source-text pins), and the e2e mock's buildAccountsForViewer is
+// structurally unable to reproduce this (no label_id notion at all — see its
+// own comment in tests/fixtures/mockApi.ts). So this transcribes gkeySql's
+// and labelIdSql's real fold-branch semantics (`if`, and ClickHouse
+// `transform(id, from, to, '')`, whose default is '' on no match) 1:1 and
+// runs them against a synthetic `latest ⋈ tags` row set shaped exactly like
+// the real query's inputs — proving the fix's actual decision function, not
+// just pinning more source text.
+describe('C1 — a mixed-membership fold groups to exactly one row', () => {
+  const TAG = 'tag-uuid'
+  const TREASURY = '0x' + '11'.repeat(32)
+  const WHALE = '0x' + '22'.repeat(32)
+  const foldIds = [TREASURY, WHALE]
+  const foldKeys = [`u:${TAG}`, `u:${TAG}`]
+
+  // ClickHouse `transform(id, from, to, '')`: '' (the declared default) on
+  // no match — never null, never an error.
+  function transform(id: string, from: string[], to: string[]): string {
+    const i = from.indexOf(id)
+    return i === -1 ? '' : to[i]
+  }
+  // gkeySql's fold-present branch, transcribed from the pinned source above.
+  function gkey(id: string, lid: string): string {
+    const userKey = transform(id, foldIds, foldKeys)
+    return userKey !== '' ? userKey : (lid === '' ? id : lid)
+  }
+  // labelIdSql's fold-present branch, transcribed from the pinned source above.
+  function labelId(id: string, lid: string): string {
+    const userKey = transform(id, foldIds, foldKeys)
+    return userKey !== '' ? '' : lid
+  }
+
+  const rows = [
+    { id: TREASURY, lid: 'treasury', usd: 980_000 },   // carries a real system label_id
+    { id: WHALE, lid: '', usd: 250_000 },               // no system tag at all
+  ]
+
+  it('the fix: gkey AND label_id both route through the fold, so the two members share one (gkey, label_id) pair', () => {
+    const grouped = rows.map(r => ({ gkey: gkey(r.id, r.lid), labelId: labelId(r.id, r.lid), usd: r.usd }))
+    const pairs = new Set(grouped.map(g => `${g.gkey}|${g.labelId}`))
+
+    expect(pairs.size).toBe(1)
+    expect([...pairs][0]).toBe(`u:${TAG}|`)
+    // The SUM a `GROUP BY gkey, label_id` would compute over this one group —
+    // the real total, not half of it.
+    expect(grouped.reduce((s, g) => s + g.usd, 0)).toBe(1_230_000)
+  })
+
+  it('proves the bug was real: gkey-only folding (label_id left as bare t.lid) splits the same two members into two groups', () => {
+    // The pre-fix shape: only `gkey` is fold-aware; `label_id` is still the
+    // bare `t.lid`, exactly as `grouped`'s SELECT read before labelIdSql.
+    const buggyPairs = new Set(rows.map(r => `${gkey(r.id, r.lid)}|${r.lid}`))
+    expect(buggyPairs.size).toBe(2)
+    expect(buggyPairs).toEqual(new Set([`u:${TAG}|treasury`, `u:${TAG}|`]))
   })
 })

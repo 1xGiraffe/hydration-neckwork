@@ -58,8 +58,23 @@ const subsByList = new Map<string, Map<string, Subscription>>()   // listId -> a
 const subsByAccount = new Map<string, Set<string>>()                 // account -> listIds (any status)
 const orderByAccount = new Map<string, string[]>()                   // raw stored arrays; resolution happens in listOrderFor
 
+// Bumped by bumpMutation() below, itself called from every write path that
+// could change a viewer's directoryFoldFor() result (membership, tag
+// presentation, list/order/subscription changes) — this file's own writes
+// all funnel through one of a handful of low-level persistence calls
+// (persistList, persistTag, persistMembers, setSub, setListOrder's insert),
+// so bumping there catches every mutating export without instrumenting each
+// one. directoryFoldFor memoizes per viewer against this counter: recomputing
+// it is an O(candidates log candidates) sort-and-hash pass (see
+// directoryFoldFingerprint) on top of the priority walk, so a viewer idling
+// on /accounts and polling every 60s must not pay that on every single poll.
+let mutationCounter = 0
+function bumpMutation(): void { mutationCounter++ }
+const foldCache = new Map<string, { atMutation: number; fold: DirectoryFold | null }>()
+
 export function initUserListService(c: ClickHouseClient): void {
   client = c; lists.clear(); byOwner.clear(); subsByList.clear(); subsByAccount.clear(); orderByAccount.clear()
+  mutationCounter = 0; foldCache.clear()
 }
 
 // AGENTS.md's idempotent-schema rule: `CREATE TABLE IF NOT EXISTS` never
@@ -144,6 +159,7 @@ async function setSub(listId: string, account: string, sub: Subscription | null,
     subsByAccount.get(account)?.delete(listId)
   }
   if (!persist) return
+  bumpMutation()
   await client.insert({
     table: 'price_data.user_list_subscriptions',
     values: [{ list_id: listId, account_id: account, status: sub?.status ?? 'active', origin: sub?.origin ?? 'public', deleted: sub ? 0 : 1 }],
@@ -213,6 +229,7 @@ function requireOwned(owner: string, listId: string): UserList {
 }
 
 async function persistList(list: UserList, deleted = 0): Promise<void> {
+  bumpMutation()
   await client.insert({
     table: 'price_data.user_lists',
     values: [{ list_id: list.listId, owner_account_id: list.owner, name: list.name, note: list.note, visibility: list.visibility, is_personal: list.isPersonal ? 1 : 0, deleted }],
@@ -220,6 +237,7 @@ async function persistList(list: UserList, deleted = 0): Promise<void> {
   })
 }
 async function persistTag(listId: string, tag: UserTagDef, deleted = 0): Promise<void> {
+  bumpMutation()
   await client.insert({
     table: 'price_data.user_tags',
     values: [{ list_id: listId, tag_id: tag.tagId, name: tag.name, color: tag.color, icon: tag.icon, note: tag.note, deleted }],
@@ -231,6 +249,7 @@ async function persistTag(listId: string, tag: UserTagDef, deleted = 0): Promise
 // callers just pass 0. An add or reorder always passes the real slot.
 async function persistMembers(listId: string, tagId: string, rows: { accountId: string; position: number }[], deleted: number): Promise<void> {
   if (!rows.length) return
+  bumpMutation()
   await client.insert({
     table: 'price_data.user_tag_members',
     values: rows.map(({ accountId, position }) => ({ list_id: listId, tag_id: tagId, account_id: accountId, position, deleted })),
@@ -497,6 +516,7 @@ export async function setMemberOrder(owner: string, listId: string, tagId: strin
 export async function setListOrder(accountId: string, listIds: string[]): Promise<string[]> {
   if (listIds.length > 500) throw new UserDataError(422, 'Order list too long')
   orderByAccount.set(accountId, listIds)
+  bumpMutation()
   await client.insert({ table: 'price_data.user_list_order', values: [{ account_id: accountId, list_ids: listIds, deleted: 0 }], format: 'JSONEachRow' })
   return listOrderFor(accountId)
 }
@@ -578,14 +598,44 @@ export interface DirectoryFold {
 //
 // Only accounts already tagged somewhere in the viewer's own visible lists
 // can possibly change the directory's grouping, so the walk is bounded by
-// that (typically tiny) membership footprint, not by the directory itself.
+// that (typically tiny) membership footprint, not by the directory itself —
+// EXCEPT that "typically tiny" is not a real bound: LIMITS allows 20,000
+// members per list across up to 200 subscriptions, and this result is
+// shipped to ClickHouse as query_params, which @clickhouse/client 1.18.2
+// puts in the request URI (ClickHouse's default max_uri_size is 1 MiB).
+// Quoted, comma-joined and URL-encoded, each account id costs roughly
+// 90-130 bytes once across fold_ids and fold_keys together, so the real
+// break point is somewhere around 7,000-10,000 pairs. MAX_DIRECTORY_FOLD_PAIRS
+// sits well under half of that estimate, leaving headroom for the rest of
+// the request's query string. Past it, this returns null — no fold AT ALL,
+// not a truncated, viewer-invisible subset of "some of your tags fold, some
+// silently don't" — so the caller falls back to the shared page whole.
+// Checked against `candidates` (an upper bound on `winner.size`) so an
+// oversized viewer skips the O(n) priority walk entirely, not just its
+// output.
+const MAX_DIRECTORY_FOLD_PAIRS = 3_000
+
 // Returns null when nothing in it would actually win — the common case for a
 // viewer with no tags yet — so the caller can skip the whole per-viewer path.
+// Memoized per viewer against `mutationCounter`: recomputing is an
+// O(n log n) sort-and-hash (directoryFoldFingerprint) on top of the priority
+// walk, and a tagged viewer's own client polls /user/accounts every 60s
+// (useAccounts's SLOW_POLL_MS) — nothing here changes between polls unless
+// something in this file actually wrote.
 export function directoryFoldFor(viewer: string): DirectoryFold | null {
+  const hit = foldCache.get(viewer)
+  if (hit && hit.atMutation === mutationCounter) return hit.fold
+  const fold = computeDirectoryFold(viewer)
+  foldCache.set(viewer, { atMutation: mutationCounter, fold })
+  return fold
+}
+
+function computeDirectoryFold(viewer: string): DirectoryFold | null {
   const order = listOrderFor(viewer)
   const candidates = new Set<string>()
   for (const list of visibleListsFor(viewer)) for (const accountId of list.memberTag.keys()) candidates.add(accountId)
   if (!candidates.size) return null
+  if (candidates.size > MAX_DIRECTORY_FOLD_PAIRS) return null
 
   const winner = new Map<string, DirectoryFoldGroup>()
   const claimed = new Set<string>()   // decided one way or the other — a win below, or a system win here
@@ -619,16 +669,24 @@ export function directoryFoldFor(viewer: string): DirectoryFold | null {
     keys.push(key)
     groups.set(key, group)
   }
-  return { ids, keys, groups, fingerprint: directoryFoldFingerprint(ids, keys) }
+  return { ids, keys, groups, fingerprint: directoryFoldFingerprint(ids, keys, groups) }
 }
 
-// A stable identity for a fold's exact pairs, order-independent (Map
-// iteration order is insertion order, not anything meaningful here) — the
-// per-viewer cache key component that changes exactly when the fold would
-// produce different rows.
-function directoryFoldFingerprint(ids: string[], keys: string[]): string {
+// A stable identity for what a fold would actually SHOW, order-independent
+// (Map iteration order is insertion order, not anything meaningful here) —
+// the per-viewer cache key component that changes exactly when the fold
+// would produce different rows. Membership pairs alone are not enough: a
+// tag rename/recolor/re-icon changes what a cached row shows without moving
+// a single winner, and so does a memberCount change from a member the fold
+// itself doesn't win (memberCount above is the tag's FULL count, not just
+// its winning members) — so the presentation each group key carries is
+// folded in too, not just which accounts map to it.
+function directoryFoldFingerprint(ids: string[], keys: string[], groups: Map<string, DirectoryFoldGroup>): string {
   const pairs = ids.map((id, i) => `${id}:${keys[i]}`).sort()
-  return createHash('sha256').update(pairs.join('|')).digest('hex').slice(0, 16)
+  const presentation = [...groups.entries()]
+    .map(([key, g]) => `${key}:${g.tagId}:${g.listId}:${g.name}:${g.color}:${g.icon}:${g.memberCount}`)
+    .sort()
+  return createHash('sha256').update(`${pairs.join('|')}||${presentation.join('|')}`).digest('hex').slice(0, 16)
 }
 
 export function publicLists(): ListSummary[] {
