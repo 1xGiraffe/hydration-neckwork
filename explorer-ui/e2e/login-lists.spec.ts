@@ -177,7 +177,13 @@ test('logged out, clicking Subscribe on a /tags row opens the login dialog', asy
   await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
 })
 
-test('a user tag outranks the system tag, and the system tag returns on logout', async ({ page, userMock }) => {
+// A lone on-page match still becomes the TAG's own aggregated row (its own
+// summary values), never a member row wearing the tag's pill over Treasury's
+// OWN $980k — that mismatch (a member row labeled with the tag, but showing
+// the member's own numbers) is exactly the bug this feature exists to fix, so
+// even one match must behave like a system tag's own single-member group row
+// already does: the group row, with group values, full stop.
+test('a user tag outranks the system tag — even with a single member, it becomes the tag\'s own aggregated row — and the system tag returns on logout', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   userMock.state.tagMap = {
     lists: [
@@ -187,23 +193,44 @@ test('a user tag outranks the system tag, and the system tag returns on logout',
       { listId: 'system', name: 'Hydration', tags: [] },
     ],
   }
+  // The management-page shape of the same tag, so the fold's own summary
+  // fetch (GET /user/list-tag/lib1/<id>?summary=1) has a real tag to answer
+  // for, instead of 404ing.
+  userMock.state.lists.push({
+    listId: 'lib1', name: 'My list', note: '', visibility: 'private', isPersonal: false,
+    owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
+    tags: [{
+      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '',
+      members: [{ accountId: TREASURY_ACCOUNT_ID, address: TREASURY_ACCOUNT_ID, emoji: '🏦', tag: null }],
+    }],
+  })
+  // The tag's own aggregate value — deliberately distinct from Treasury's own
+  // $980k row value, so a leftover unfolded row (showing Treasury's own
+  // number under the tag's pill) would be caught rather than pass by
+  // coincidence.
+  userMock.state.listTagSummaryOverrides[`lib1:${USER_TAG_ID}`] = { portfolioUsd: 1_610_000 }
 
   await page.goto('/accounts')
-  // Treasury is the fixture's account row with a $980k portfolio value — a
-  // literal, deterministic amount in the mock (unlike every other row's
-  // value, none of which contain "980") — so it locates the row without
-  // depending on sort position.
-  const row = page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '980' }) })
+  const row = page.locator('.accounts-tbl tbody tr', { hasText: 'Mine' })
+  await expect(row).toHaveCount(1)
   const pill = row.locator('a.addr-pill')
   await expect(pill).toContainText('Mine')
   // The tag's own aggregate view, sharing the system /tag/:id namespace.
   await expect(pill).toHaveAttribute('href', `/tag/${USER_TAG_ID}`)
+  // The TAG's own value, not Treasury's own $980k.
+  await expect(row.locator('td[data-label="Value"]')).toContainText('1.61M')
+  await expect(page.locator('.accounts-tbl tbody tr', { hasText: '980k' })).toHaveCount(0)
 
   await page.locator('.account-btn').click()
   await page.locator('.account-menu button', { hasText: 'Log out' }).click()
 
-  await expect(pill).toContainText('Treasury')
-  await expect(pill).toHaveAttribute('href', '/tag/treasury')
+  // Logged out: the fold is gone, and Treasury's own system-tag row — with
+  // its own real $980k — is back.
+  await expect(page.locator('.accounts-tbl tbody tr', { hasText: 'Mine' })).toHaveCount(0)
+  const treasuryRow = page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '980k' }) })
+  const treasuryPill = treasuryRow.locator('a.addr-pill')
+  await expect(treasuryPill).toContainText('Treasury')
+  await expect(treasuryPill).toHaveAttribute('href', '/tag/treasury')
 })
 
 // The directory is a shared, cached, server-side aggregate with no notion of
@@ -292,7 +319,10 @@ test('hovering a user-tag pill shows its own aggregate card, not the system tag 
   })
 
   await page.goto('/accounts')
-  const row = page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '980' }) })
+  // Treasury's own row is now the tag's aggregated row (a lone on-page match
+  // still folds — see Accounts()), so it's located by the tag's name, not by
+  // Treasury's own (no longer shown here) $980k value.
+  const row = page.locator('.accounts-tbl tbody tr', { hasText: 'Mine' })
   await row.locator('a.addr-pill').hover()
 
   const card = page.locator('.hovercard')
@@ -322,7 +352,10 @@ test('a user-tag pill opens its own aggregate page, header included', async ({ p
   })
 
   await page.goto('/accounts')
-  const row = page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '980' }) })
+  // Treasury's own row is now the tag's aggregated row (a lone on-page match
+  // still folds — see Accounts()), so it's located by the tag's name, not by
+  // Treasury's own (no longer shown here) $980k value.
+  const row = page.locator('.accounts-tbl tbody tr', { hasText: 'Mine' })
   await row.locator('a.addr-pill').click()
 
   await expect(page).toHaveURL(new RegExp(`/tag/${USER_TAG_ID}$`))

@@ -38,10 +38,9 @@ function rowKey(r: TopAccountRow, i: number): string {
   return r.tag ? `tag:${r.tag.tagId}` : r.account ? `account:${r.account.accountId}` : `row:${r.simAccount ?? i}`
 }
 
-// One plain directory row (a system-tag group, an account, or a bare
-// sim-only row) — extracted so a viewer's user-tag "fold" that turns out to
-// have only one on-page match (nothing to actually fold) can render through
-// the exact same markup as an unfolded row instead of a second copy of it.
+// One plain directory row: a system-tag group (already folded server-side)
+// or an ordinary account with no viewer tag of its own — extracted so
+// Accounts() can render it from more than one branch below.
 function AccountRow({ r }: { r: TopAccountRow }) {
   // Badge only for actual borrowers — pure suppliers ('inf') show nothing.
   // Tag rows link DefiSim to the member holding the worst position.
@@ -123,20 +122,24 @@ export function Accounts() {
   // module state a plain render otherwise wouldn't know to react to.
   useTagMapVersion()
   // System tags already fold server-side (one SQL-computed group row per tag —
-  // see TopAccountRow.tag). A viewer's OWN tags never do: the directory is a
-  // shared, cached, server-side aggregate with no notion of "the current
-  // viewer", so a user tag can only be folded here, client-side, from the
-  // viewer's own tag map (see userTags.ts) once it's actually loaded — gating
-  // on 'ready' (not just "logged in") avoids folding on a stale/absent map and
-  // avoids a flash of unfolded rows while it loads. A bare loop over at most
-  // PAGE rows is cheap enough to redo on every render — not worth memoizing.
+  // see TopAccountRow.tag) — even a LONE member renders as the group row with
+  // group values, never a member row wearing the group's label. A viewer's OWN
+  // tags need the identical guarantee: showing a member's own row under the
+  // tag's pill (its values belonging to that one account, not the tag) is
+  // exactly the confusing mismatch this feature exists to fix, so every row
+  // whose account resolves to one of the viewer's tags is replaced by that
+  // tag's aggregated row — regardless of how many of its members land on this
+  // page. The directory itself is a shared, cached, server-side aggregate with
+  // no notion of "the current viewer", so this can only happen here,
+  // client-side, from the viewer's own tag map (see userTags.ts) once it's
+  // actually loaded — gating on 'ready' (not just "logged in") avoids folding
+  // on a stale/absent map and avoids a flash of unfolded rows while it loads.
+  // A bare loop over at most PAGE rows is cheap enough to redo on every
+  // render — not worth memoizing.
   const foldReady = tagMapStatus() === 'ready'
   const { displayRows, hasFold } = (() => {
     if (!foldReady) return { displayRows: rows.map((r, i) => <AccountRow key={rowKey(r, i)} r={r} />), hasFold: false }
-    interface Group {
-      isGroup: true; listId: string; tagId: string; name: string; color: string; icon: string
-      memberCount?: number; count: number; anchor: TopAccountRow; anchorIndex: number
-    }
+    interface Group { isGroup: true; listId: string; tagId: string; name: string; color: string; icon: string; memberCount?: number; count: number }
     const groups = new Map<string, Group>()
     const order: (Group | { isGroup: false; r: TopAccountRow; i: number })[] = []
     rows.forEach((r, i) => {
@@ -149,7 +152,7 @@ export function Accounts() {
         if (existing) { existing.count += 1; return }   // a later, lower-ranked member row: dropped
         const group: Group = {
           isGroup: true, listId: resolved.listId, tagId: resolved.id, name: resolved.name, color: resolved.color, icon: resolved.icon,
-          memberCount: resolved.memberCount, count: 1, anchor: r, anchorIndex: i,
+          memberCount: resolved.memberCount, count: 1,
         }
         groups.set(fk, group)
         order.push(group)
@@ -160,12 +163,9 @@ export function Accounts() {
     let folded = false
     const nodes = order.map(entry => {
       if (!entry.isGroup) return <AccountRow key={rowKey(entry.r, entry.i)} r={entry.r} />
-      // Nothing to fold with a single on-page match — the FIRST (highest-rank)
-      // row IS the only row, so it renders exactly as an unfolded one would.
-      if (entry.count < 2) return <AccountRow key={rowKey(entry.anchor, entry.anchorIndex)} r={entry.anchor} />
       folded = true
       // The full tag's own member count (its value below covers every member,
-      // not just the ones dropped here — see the hint) — falling back to the
+      // not just the ones on this page — see the hint) — falling back to the
       // on-page count only if the tag map ever omits it.
       return <FoldedTagRow key={`fold:${entry.listId}:${entry.tagId}`} listId={entry.listId} tagId={entry.tagId} name={entry.name} color={entry.color} icon={entry.icon} memberCount={entry.memberCount ?? entry.count} />
     })
@@ -200,8 +200,8 @@ export function Accounts() {
         </select>
       </div>
 
-      {/* Only ever true once a fold actually happened (2+ on-page rows for the
-          same viewer tag) — a page with no matches, or exactly one, says nothing. */}
+      {/* Only ever true once at least one row actually resolved to a viewer
+          tag — a page with no matches says nothing. */}
       {hasFold && <div className="muted" style={{ fontSize: 12, margin: '4px 2px 8px' }}>Folded rows combine all of the tag's accounts, including any beyond this page.</div>}
 
       <div className="panel">

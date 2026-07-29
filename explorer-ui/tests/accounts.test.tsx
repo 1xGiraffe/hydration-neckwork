@@ -92,6 +92,33 @@ describe('Accounts directory — folding the viewer\'s own user-tag rows', () =>
     expect(html).toContain('$200k')
   })
 
+  // A LONE on-page match still becomes the tag's own aggregated row, never a
+  // member row wearing the tag's pill over its own values — the same
+  // guarantee a system tag's single-member group row already gives (see
+  // Accounts()'s own comment). Regression for the confusion this feature
+  // exists to fix: a member's own value shown under the tag's label reads as
+  // the tag's total, when it never was one.
+  it('folds a single member row into the tag\'s own aggregated row too, not a member row under the tag\'s pill', () => {
+    setTagMap({ lists: [
+      { listId: 'lib1', name: 'Personal', tags: [{ tagId: 't1', name: 'Loner', color: '#22c55e', icon: '🐺', members: [ACC1] }] },
+      { listId: 'system', name: 'Hydration', tags: [] },
+    ] })
+    const html = renderAccounts()
+
+    expect(html).toContain('Loner')
+    // A single-member tag carries no '·N' suffix — same as a single-member
+    // system tag's TagGroupPill (TagGroupPill only shows it above 1).
+    expect(html).not.toContain('·1')
+    expect(hrefOf(html, 'Loner')).toBe('/tag/t1')
+
+    // All three rows still render (nothing dropped — there was only one
+    // match), but ACC1's OWN value is gone: it's the tag's row now, not its own.
+    expect(html.match(/data-label="Account"/g)).toHaveLength(3)
+    expect(html).not.toContain('$500k')
+    expect(html).toContain('$300k')
+    expect(html).toContain('$200k')
+  })
+
   it('renders the original, unfolded rows when logged out', () => {
     // Default beforeEach: setTagMap(null) — tagMapStatus() === 'anonymous'.
     const html = renderAccounts()
