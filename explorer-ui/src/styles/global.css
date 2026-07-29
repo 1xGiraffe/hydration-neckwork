@@ -1781,6 +1781,10 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 @media (max-width: 480px) {
   .wallet-grid { grid-template-columns: repeat(3, 1fr); }
 }
+/* "Other wallets" toggle: a small row under the shortlist grid, not another
+   tile — expanding it grows the dialog in place rather than replacing the
+   shortlist, so the wallets a visitor is most likely to have stay put. */
+.wallet-toggle { align-self: center; margin-top: 2px; }
 .wallet-tile {
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
   box-sizing: border-box; padding: 16px 8px 12px; border-radius: 14px; background: var(--panel); border: 1px solid var(--border);

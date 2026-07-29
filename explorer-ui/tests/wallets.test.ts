@@ -32,10 +32,34 @@ describe('wallet registry', () => {
     expect(byId.get('subwallet-js')?.installUrl).toContain('http')
   })
 
-  it('sorts installed wallets ahead of uninstalled ones, declaration order as the tiebreak', () => {
+  it('sorts installed wallets ahead of uninstalled ones WITHIN each group, shortlist group first', () => {
     ;(window as { injectedWeb3?: unknown }).injectedWeb3 = { 'subwallet-js': { enable: async () => ({}) } }
     const ids = listSubstrateWallets().map(w => w.id)
-    expect(ids).toEqual(['subwallet-js', 'polkadot-js', 'nova', 'talisman', 'aleph-zero', 'enkrypt', 'fearless-wallet', 'polkagate'])
+    // subwallet-js is shortlisted AND installed, so it leads its group (ahead
+    // of talisman/nova, declaration order otherwise) — but it never jumps
+    // ahead of the shortlist group as a whole into the "other" group, which
+    // stays in plain declaration order since nothing in it is installed.
+    expect(ids).toEqual(['subwallet-js', 'talisman', 'nova', 'polkadot-js', 'aleph-zero', 'enkrypt', 'fearless-wallet', 'polkagate'])
+  })
+
+  it('shortlists exactly Talisman, Nova and SubWallet, in that order; everything else is not shortlisted', () => {
+    const wallets = listSubstrateWallets()
+    expect(wallets.filter(w => w.shortlist).map(w => w.id)).toEqual(['talisman', 'nova', 'subwallet-js'])
+    expect(wallets.filter(w => !w.shortlist).map(w => w.id)).toEqual(['polkadot-js', 'aleph-zero', 'enkrypt', 'fearless-wallet', 'polkagate'])
+  })
+
+  it('never lets an installed "other" wallet jump ahead of the shortlist group as a whole', () => {
+    // Only the 'polkadot-js' extension is present. Nova (shortlisted) shares
+    // that injected key, so it reads as installed and leads its own group —
+    // but the shortlist group as a whole still renders entirely ahead of
+    // "other", where the actual Polkadot{.js} tile (also installed via the
+    // same key) lives.
+    ;(window as { injectedWeb3?: unknown }).injectedWeb3 = { 'polkadot-js': { enable: async () => ({}) } }
+    const wallets = listSubstrateWallets()
+    expect(wallets.map(w => w.id).slice(0, 3)).toEqual(['nova', 'talisman', 'subwallet-js'])
+    expect(wallets.find(w => w.id === 'nova')?.installed).toBe(true)
+    expect(wallets.find(w => w.id === 'polkadot-js')?.installed).toBe(true)
+    expect(wallets.map(w => w.id)[3]).toBe('polkadot-js')
   })
 
   it('collects EIP-6963 announced providers', () => {

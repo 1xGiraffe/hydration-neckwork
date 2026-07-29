@@ -10,7 +10,7 @@
 // in-app browser, so it gets its OWN visual tile (distinct name/icon/install
 // link) while still connecting, and reporting installed, through the shared
 // 'polkadot-js' key.
-export interface SubstrateWalletInfo { id: string; title: string; installUrl: string; icon: string; injectedKey: string; installed: boolean }
+export interface SubstrateWalletInfo { id: string; title: string; installUrl: string; icon: string; injectedKey: string; installed: boolean; shortlist: boolean }
 export interface InjectedAccount { address: string; name?: string }
 interface InjectedExtension {
   accounts: { get(): Promise<InjectedAccount[]> }
@@ -22,24 +22,33 @@ interface InjectedWindow { injectedWeb3?: Record<string, { enable(origin: string
 // desktop story. Icons copied from galacticcouncil/hydration-ui
 // (packages/web3-connect/src/wallets/<Name>/logo.svg, Apache-2.0) into
 // public/wallet-icons/, same convention as public/tag-icons/.
-const SUBSTRATE_WALLETS: { id: string; title: string; installUrl: string; icon: string; injectedKey: string }[] = [
-  { id: 'polkadot-js', title: 'Polkadot{.js}', installUrl: 'https://polkadot.js.org/extension/', icon: '/wallet-icons/polkadot-js.svg', injectedKey: 'polkadot-js' },
-  { id: 'nova', title: 'Nova Wallet', installUrl: 'https://novawallet.io/', icon: '/wallet-icons/nova.svg', injectedKey: 'polkadot-js' },
-  { id: 'talisman', title: 'Talisman', installUrl: 'https://talisman.xyz/download', icon: '/wallet-icons/talisman.svg', injectedKey: 'talisman' },
-  { id: 'subwallet-js', title: 'SubWallet', installUrl: 'https://www.subwallet.app/download.html', icon: '/wallet-icons/subwallet-js.svg', injectedKey: 'subwallet-js' },
-  { id: 'aleph-zero', title: 'Aleph Zero Signer', installUrl: 'https://alephzero.org/signer', icon: '/wallet-icons/aleph-zero.svg', injectedKey: 'aleph-zero' },
-  { id: 'enkrypt', title: 'Enkrypt', installUrl: 'https://www.enkrypt.com/', icon: '/wallet-icons/enkrypt.svg', injectedKey: 'enkrypt' },
-  { id: 'fearless-wallet', title: 'Fearless Wallet', installUrl: 'https://fearlesswallet.io/', icon: '/wallet-icons/fearless-wallet.svg', injectedKey: 'fearless-wallet' },
-  { id: 'polkagate', title: 'PolkaGate', installUrl: 'https://polkagate.xyz/', icon: '/wallet-icons/polkagate.svg', injectedKey: 'polkagate' },
+//
+// `shortlist` wallets (Talisman, Nova, SubWallet, in that order) show in the
+// grid by default; everything else sits behind the dialog's "Other wallets"
+// toggle. Declared in final render order — shortlist entries first, in the
+// exact order they should appear — so listSubstrateWallets only needs to
+// stable-sort each GROUP by installed status, never re-order across groups.
+const SUBSTRATE_WALLETS: { id: string; title: string; installUrl: string; icon: string; injectedKey: string; shortlist: boolean }[] = [
+  { id: 'talisman', title: 'Talisman', installUrl: 'https://talisman.xyz/download', icon: '/wallet-icons/talisman.svg', injectedKey: 'talisman', shortlist: true },
+  { id: 'nova', title: 'Nova Wallet', installUrl: 'https://novawallet.io/', icon: '/wallet-icons/nova.svg', injectedKey: 'polkadot-js', shortlist: true },
+  { id: 'subwallet-js', title: 'SubWallet', installUrl: 'https://www.subwallet.app/download.html', icon: '/wallet-icons/subwallet-js.svg', injectedKey: 'subwallet-js', shortlist: true },
+  { id: 'polkadot-js', title: 'Polkadot{.js}', installUrl: 'https://polkadot.js.org/extension/', icon: '/wallet-icons/polkadot-js.svg', injectedKey: 'polkadot-js', shortlist: false },
+  { id: 'aleph-zero', title: 'Aleph Zero Signer', installUrl: 'https://alephzero.org/signer', icon: '/wallet-icons/aleph-zero.svg', injectedKey: 'aleph-zero', shortlist: false },
+  { id: 'enkrypt', title: 'Enkrypt', installUrl: 'https://www.enkrypt.com/', icon: '/wallet-icons/enkrypt.svg', injectedKey: 'enkrypt', shortlist: false },
+  { id: 'fearless-wallet', title: 'Fearless Wallet', installUrl: 'https://fearlesswallet.io/', icon: '/wallet-icons/fearless-wallet.svg', injectedKey: 'fearless-wallet', shortlist: false },
+  { id: 'polkagate', title: 'PolkaGate', installUrl: 'https://polkagate.xyz/', icon: '/wallet-icons/polkagate.svg', injectedKey: 'polkagate', shortlist: false },
 ]
 
+// Installed-first within each group (shortlist, then the rest) — an
+// install-link wallet never outranks one the visitor can actually click, but
+// a shortlisted wallet never drops behind the toggle just because it's not
+// installed. Array#filter is stable, so declaration order is the tiebreak
+// within a group with no explicit sort needed.
 export function listSubstrateWallets(): SubstrateWalletInfo[] {
   const injected = (window as InjectedWindow).injectedWeb3 ?? {}
   const withStatus = SUBSTRATE_WALLETS.map(w => ({ ...w, installed: w.injectedKey in injected }))
-  // Installed wallets first (so an install-link wallet never outranks one the
-  // visitor can actually click), declaration order as the tiebreak within
-  // each group — Array#filter is stable, so this needs no explicit sort.
-  return [...withStatus.filter(w => w.installed), ...withStatus.filter(w => !w.installed)]
+  const byInstalled = (group: typeof withStatus) => [...group.filter(w => w.installed), ...group.filter(w => !w.installed)]
+  return [...byInstalled(withStatus.filter(w => w.shortlist)), ...byInstalled(withStatus.filter(w => !w.shortlist))]
 }
 
 // Takes the INJECTED key (SubstrateWalletInfo.injectedKey), not the catalog

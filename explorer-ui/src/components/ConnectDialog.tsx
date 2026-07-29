@@ -6,7 +6,7 @@ import {
   listSubstrateWallets, connectSubstrate, signSubstrate,
   discoverEvmProviders, connectEvm, signEvm, accountRowLabel,
 } from '../wallets'
-import type { InjectedAccount, EvmProviderDetail, Eip1193Provider, AccountRowLabel } from '../wallets'
+import type { InjectedAccount, EvmProviderDetail, Eip1193Provider, AccountRowLabel, SubstrateWalletInfo } from '../wallets'
 import { AccountEmoji, ShortAddr } from './ui'
 import type { AccountRef } from '../types'
 
@@ -67,6 +67,12 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   // loading (the raw substrate encoding is never flashed), null = lookup
   // failed (degrade to the raw form), ref = canonical pill-style display.
   const [refs, setRefs] = useState<Record<string, AccountRef | null>>({})
+  // The wallet grid shows only the shortlist (Talisman, Nova, SubWallet) by
+  // default; "Other wallets" expands the rest in place. Collapsed again every
+  // time the dialog reopens, same reset rule as every other stage-1 field
+  // below — a visitor who expanded it, closed the dialog, and came back gets
+  // a clean first screen, not wherever they left off.
+  const [showOtherWallets, setShowOtherWallets] = useState(false)
 
   // Bumped on every reset (dialog close/reopen, "choose a different wallet")
   // so an in-flight doSign can tell it's been superseded. Closing the dialog
@@ -84,7 +90,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   if (open !== wasOpen) {
     setWasOpen(open)
     if (open) {
-      setStage('wallets'); setPending(null); setAccounts([]); setAddress(null); setError(null); setBusy(false); setRefs({})
+      setStage('wallets'); setPending(null); setAccounts([]); setAddress(null); setError(null); setBusy(false); setRefs({}); setShowOtherWallets(false)
     }
   }
   // Refs can't be touched during render (only event handlers/effects), so the
@@ -106,6 +112,8 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   }, [open])
 
   const substrateWallets = useMemo(() => (open ? listSubstrateWallets() : []), [open])
+  const shortlistWallets = useMemo(() => substrateWallets.filter(w => w.shortlist), [substrateWallets])
+  const otherWallets = useMemo(() => substrateWallets.filter(w => !w.shortlist), [substrateWallets])
 
   // Resolve wallet addresses to display refs (canonical Polkadot/H160 form +
   // identity/profile) so the picker and the signing screen show accounts the
@@ -214,6 +222,22 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
     setStage('wallets'); setPending(null); setAccounts([]); setAddress(null); setError(null)
   }
 
+  function walletTile(w: SubstrateWalletInfo) {
+    return w.installed ? (
+      <button key={w.id} type="button" className="wallet-tile installed" disabled={busy} onClick={() => void connectWallet(w.injectedKey)}>
+        <img className="wallet-tile-icon" src={w.icon} alt="" />
+        <span className="wallet-tile-name">{w.title}</span>
+        <span className="wallet-tile-status">Installed</span>
+      </button>
+    ) : (
+      <a key={w.id} className="wallet-tile not-installed" href={w.installUrl} target="_blank" rel="noreferrer">
+        <img className="wallet-tile-icon" src={w.icon} alt="" />
+        <span className="wallet-tile-name">{w.title}</span>
+        <span className="wallet-tile-status">Install ↗</span>
+      </a>
+    )
+  }
+
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -236,20 +260,25 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
                 <div className="wallet-group">
                   <div className="wallet-group-label">Substrate</div>
                   <div className="wallet-grid">
-                    {substrateWallets.map(w => w.installed ? (
-                      <button key={w.id} type="button" className="wallet-tile installed" disabled={busy} onClick={() => void connectWallet(w.injectedKey)}>
-                        <img className="wallet-tile-icon" src={w.icon} alt="" />
-                        <span className="wallet-tile-name">{w.title}</span>
-                        <span className="wallet-tile-status">Installed</span>
-                      </button>
-                    ) : (
-                      <a key={w.id} className="wallet-tile not-installed" href={w.installUrl} target="_blank" rel="noreferrer">
-                        <img className="wallet-tile-icon" src={w.icon} alt="" />
-                        <span className="wallet-tile-name">{w.title}</span>
-                        <span className="wallet-tile-status">Install ↗</span>
-                      </a>
-                    ))}
+                    {shortlistWallets.map(walletTile)}
                   </div>
+                  {otherWallets.length > 0 && (
+                    <>
+                      <button
+                        type="button"
+                        className="btn sm wallet-toggle"
+                        aria-expanded={showOtherWallets}
+                        onClick={() => setShowOtherWallets(v => !v)}
+                      >
+                        {showOtherWallets ? 'Fewer wallets' : 'Other wallets'}
+                      </button>
+                      {showOtherWallets && (
+                        <div className="wallet-grid">
+                          {otherWallets.map(walletTile)}
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
                 {evmProviders.length > 0 && (
                   <div className="wallet-group">

@@ -67,12 +67,15 @@ async function openConnectDialog(page: Page): Promise<void> {
 // account → the topbar resolves the mocked profile name and the session
 // token lands in localStorage. Shared by the desktop and mobile variants
 // below — the dialog's own contents don't depend on viewport, only how it's
-// reached does.
+// reached does. Clicks the Nova tile rather than Polkadot{.js} — Nova is in
+// the default shortlist (C1) and shares the same stubbed 'polkadot-js'
+// injected key, so it exercises the exact same connect path without first
+// opening "Other wallets" (that toggle gets its own dedicated coverage below).
 async function loginFlow(page: Page): Promise<void> {
   await page.goto('/')
   await openConnectDialog(page)
 
-  const walletRow = page.locator('.wallet-tile', { hasText: 'Polkadot{.js}' })
+  const walletRow = page.locator('.wallet-tile', { hasText: 'Nova Wallet' })
   await expect(walletRow).toContainText('Installed')
   await walletRow.click()
 
@@ -102,6 +105,50 @@ test('Nova Wallet has its own tile and connects through the shared polkadot-js k
   await expect(novaTile).toContainText('Installed')
   await novaTile.click()
 
+  await expect(page.locator('.account-btn .account-label')).toHaveText('E2E User')
+})
+
+// C1: the wallet grid shows only a shortlist (Talisman, Nova, SubWallet) by
+// default; every other substrate wallet — including Polkadot{.js}, whose
+// injected key Nova's own tile shares — sits behind an "Other wallets"
+// toggle until it's opened, and the toggle resets closed on every reopen.
+test('the wallet grid shows a shortlist by default, and "Other wallets" reveals the rest', async ({ page, userMock, injectedWallet }) => {
+  void userMock; void injectedWallet
+  await page.goto('/')
+  await openConnectDialog(page)
+
+  const grid = page.locator('.dialog-body .wallet-grid').first()
+  await expect(grid.locator('.wallet-tile')).toHaveCount(3)
+  await expect(grid).toContainText('Talisman')
+  await expect(grid).toContainText('Nova Wallet')
+  await expect(grid).toContainText('SubWallet')
+  await expect(page.locator('.dialog-body')).not.toContainText('Polkadot{.js}')
+  await expect(page.locator('.dialog-body')).not.toContainText('Aleph Zero')
+
+  // A stable class-based locator, not a role+name query — the button's own
+  // accessible NAME changes with its label ("Other wallets" → "Fewer
+  // wallets"), so re-querying by the old name after the click would find
+  // nothing.
+  const toggle = page.locator('.wallet-toggle')
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(toggle).toHaveText('Other wallets')
+  await toggle.click()
+
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await expect(toggle).toHaveText('Fewer wallets')
+  const otherTile = page.locator('.wallet-tile', { hasText: 'Polkadot{.js}' })
+  await expect(otherTile).toContainText('Installed')
+  await expect(page.locator('.wallet-tile', { hasText: 'Aleph Zero Signer' })).toBeVisible()
+
+  // Closing and reopening the dialog resets the toggle, not just the wallet stage.
+  await page.keyboard.press('Escape')
+  await openConnectDialog(page)
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.locator('.dialog-body')).not.toContainText('Polkadot{.js}')
+
+  // The revealed tile still completes the same connect flow as a shortlisted one.
+  await toggle.click()
+  await page.locator('.wallet-tile', { hasText: 'Polkadot{.js}' }).click()
   await expect(page.locator('.account-btn .account-label')).toHaveText('E2E User')
 })
 
