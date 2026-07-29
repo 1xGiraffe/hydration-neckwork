@@ -5,6 +5,7 @@ import {
   createTag, updateTag, deleteTag, setTagMembers, setMemberOrder,
   getLibrary, ownedLibrariesFor,
 } from '../src/services/userLibraryService.ts'
+import { libraryDetailResponse } from '../src/routes/user.ts'
 import { UserDataError } from '../src/services/userProfileService.ts'
 import { fakeClient, insertedRows } from './helpers/userFakes.ts'
 
@@ -52,6 +53,37 @@ describe('library + tag CRUD', () => {
     await deleteLibrary(OWNER, lib.libraryId)
     expect(getLibrary(lib.libraryId)).toBeNull()
     await expect(deleteLibrary(OWNER, personal.libraryId)).rejects.toMatchObject({ status: 403 })
+  })
+
+  it('lists tags alphabetically in the detail response, regardless of creation order', async () => {
+    const lib = await createLibrary(OWNER, 'CEX', '', 'private')
+    // Created out of alphabetical order on purpose; "alpha" vs "Alpha" pins
+    // the comparison as case-insensitive (sensitivity: 'base'), not a plain
+    // localeCompare that would sort every uppercase name ahead of every
+    // lowercase one.
+    const zebra = await createTag(OWNER, lib.libraryId, { name: 'Zebra wallets' })
+    const banana = await createTag(OWNER, lib.libraryId, { name: 'banana wallets' })
+    const appleUpper = await createTag(OWNER, lib.libraryId, { name: 'Alpha wallets' })
+    const appleLower = await createTag(OWNER, lib.libraryId, { name: 'alpha wallets' })
+
+    const detail = libraryDetailResponse(getLibrary(lib.libraryId)!, OWNER)
+    const names = detail.tags.map(t => t.name)
+    // The two "alpha wallets" case variants compare equal under sensitivity:
+    // 'base', so which one leads between THEM is a tiebreak, not fixed —
+    // asserted separately below via the actual (random) tagIds rather than
+    // hardcoded here. The OUTER order (this pair vs "banana"/"Zebra") is not
+    // ambiguous and is asserted directly.
+    expect(names[0].toLowerCase()).toBe('alpha wallets')
+    expect(names[1].toLowerCase()).toBe('alpha wallets')
+    expect(names[2]).toBe('banana wallets')
+    expect(names[3]).toBe('Zebra wallets')
+    // tagId is the deterministic tiebreak (the same localeCompare the
+    // production comparator uses) — computed from the actual generated ids,
+    // never a hardcoded direction, since createTag's ids are random.
+    const [first, second] = detail.tags
+    const expectedIdOrder = [appleLower.tagId, appleUpper.tagId].sort((a, b) => a.localeCompare(b))
+    expect([first.tagId, second.tagId]).toEqual(expectedIdOrder)
+    void banana; void zebra
   })
 
   it('manages tags and enforces one tag per account per library (move semantics)', async () => {

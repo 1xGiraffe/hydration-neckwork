@@ -69,7 +69,17 @@ export function libraryDetailResponse(lib: UserLibrary, viewer: string | null) {
   return {
     ...libSummaryRef(librarySummary(lib)),
     subscribed: viewer ? subscriptionsFor(viewer).some(s => s.libraryId === lib.libraryId) : false,
-    tags: isOwner ? [...lib.tags.values()].map(tagRef) : [],
+    // Alphabetical, not creation order — matches the system tag directory
+    // (tagService's allTags(), also name-sorted). `lib.tags` is a Map, so
+    // without this every consumer of the detail response would otherwise see
+    // tags in whatever order they were created, not a stable, browsable one.
+    // Case-insensitive so "apple"/"Banana" interleave by letter rather than
+    // every uppercase name sorting ahead of every lowercase one; tagId is a
+    // deterministic tiebreak for two names that compare equal, not just
+    // relying on sort() stability. tagMapFor's own tag order is untouched —
+    // resolution there doesn't care about display order — and this doesn't
+    // touch a tag's MEMBER order, which stays position-based.
+    tags: isOwner ? [...lib.tags.values()].map(tagRef).sort(compareTagRefsByName) : [],
     // Subscribers tab (owner-only, additive): who has a live invite or an
     // active subscription. Undefined — not an empty array — for every other
     // viewer (including the anonymous public detail this same function builds
@@ -96,6 +106,9 @@ function tagRef(t: { tagId: string; name: string; color: string; icon: string; n
     tagId: t.tagId, name: t.name, color: t.color, icon: t.icon, displayIcon: tagDisplayIcon(t.icon, t.order),
     note: t.note, members: t.order.map(accountRef),
   }
+}
+function compareTagRefsByName(a: { name: string; tagId: string }, b: { name: string; tagId: string }): number {
+  return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.tagId.localeCompare(b.tagId)
 }
 
 export async function userRoutes(fastify: FastifyInstance) {
