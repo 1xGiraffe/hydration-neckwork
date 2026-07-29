@@ -164,4 +164,22 @@ describe('ordered membership (drag/keyboard reorder)', () => {
     const tombstoned = memberRows.filter(r => r.deleted === 1 && r.tag_id === tag.tagId).map(r => r.account_id)
     expect(new Set(tombstoned)).toEqual(new Set([M1, M2, M3]))
   })
+
+  // Regression: `trulyNew` used to filter `addIds` against the PRE-mutation
+  // Set, so a caller-supplied duplicate in one `add` array passed that check
+  // twice and got pushed into `order` (and persisted) twice for one Set
+  // entry — `order` desynced from `members` until the next reload, and any
+  // member-order submission built from that corrupted `order` would then
+  // fail the permutation check (accountIds.length !== tag.members.size).
+  it('a duplicate id in one add() call is deduped, keeping order and members in sync', async () => {
+    const lib = await createLibrary(OWNER, 'Order', '', 'private')
+    const tag = await createTag(OWNER, lib.libraryId, { name: 'T' })
+    const added = await setTagMembers(OWNER, lib.libraryId, tag.tagId, [M1, M1], [])
+    expect(added.order).toEqual([M1])
+    expect(added.members.size).toBe(1)
+    // A member-order submission built from the (now correctly deduped) list
+    // succeeds — this is exactly the operation the corrupted `order` used to
+    // 400 the user out of.
+    await expect(setMemberOrder(OWNER, lib.libraryId, tag.tagId, [M1])).resolves.toMatchObject({ order: [M1] })
+  })
 })

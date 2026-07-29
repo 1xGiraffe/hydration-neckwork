@@ -403,8 +403,13 @@ export async function setTagMembers(owner: string, libraryId: string, tagId: str
   // Canonicalize exactly like login/accountRef: a bound-EVM member must be
   // stored under the SAME accountId pills carry, or a tag on a bound-EVM
   // account never matches any pill on the page.
-  const addIds = add.map(a => { const n = normalizeAddress(a); if (!n) bad.push(a); return n ? resolveDisplayAccountId(n.accountId) : '' }).filter(Boolean)
-  const removeIds = remove.map(a => { const n = normalizeAddress(a); if (!n) bad.push(a); return n ? resolveDisplayAccountId(n.accountId) : '' }).filter(Boolean)
+  // Deduped: `trulyNew` below filters against the PRE-mutation Set, so a
+  // caller-supplied duplicate (e.g. a double-submitted `add`) would otherwise
+  // pass the "not already a member" check twice and get pushed into `order`
+  // (and persisted with two different positions) for one Set entry — order
+  // and membership silently desync until the next full reload.
+  const addIds = [...new Set(add.map(a => { const n = normalizeAddress(a); if (!n) bad.push(a); return n ? resolveDisplayAccountId(n.accountId) : '' }).filter(Boolean))]
+  const removeIds = [...new Set(remove.map(a => { const n = normalizeAddress(a); if (!n) bad.push(a); return n ? resolveDisplayAccountId(n.accountId) : '' }).filter(Boolean))]
   if (bad.length) throw new UserDataError(400, `Not valid addresses: ${bad.slice(0, 3).join(', ')}${bad.length > 3 ? '…' : ''}`)
   const trulyNew = addIds.filter(id => !tag.members.has(id))
   if (tag.members.size + trulyNew.length > LIMITS.membersPerTag) throw new UserDataError(422, `Limited to ${LIMITS.membersPerTag} accounts per tag`)
