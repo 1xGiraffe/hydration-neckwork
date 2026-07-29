@@ -166,7 +166,10 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     addresses: ['0xf1db8c4bfbb3d6a97c9b669a2ffc0b70f41f3547'],
   },
   {
-    tagId: 'treasury', name: 'Treasury', color: '', note: '', icon: '',
+    // Explicit icon: with no explicit icon a tag borrows its first member's
+    // emoji, and "first" follows account-id sort order — adding a member can
+    // silently change the tag's face (🏦 became 🦆 when the pot list grew).
+    tagId: 'treasury', name: 'Treasury', color: '', note: '', icon: '🏦',
     // main pot + the py/trsry sub-account (suffix 0x08627411) observed on-chain
     addresses: [
       '13UVJyLnbVp9RBZYFwFGyDvVd1y27Tt8tkntv6Q7JVPhFsTB', modlAccountId('py/trsry', '08627411'),
