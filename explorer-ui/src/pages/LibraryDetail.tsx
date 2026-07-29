@@ -3,6 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog'
 import { userApi } from '../api/explorer'
 import { AccountPicker } from '../components/AccountPicker'
 import { useSession } from '../session'
+import { requestConnect } from '../connectDialog'
 import { useLibrary, useUserMutation } from '../hooks/useUser'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { navigate, paths, setQuery, useQueryValue } from '../router'
@@ -449,10 +450,17 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
                     <button type="button" className="btn" onClick={() => { setEditMounted(true); setEditOpen(true) }}>Edit</button>
                     {!data.isPersonal && <button type="button" className="btn danger" onClick={() => { setDeleteError(null); setDeleteOpen(true) }}>Delete</button>}
                   </>
-                ) : data.visibility === 'public' && session ? (
-                  data.subscribed
-                    ? <button type="button" className="btn" disabled={unsubscribeMutation.isPending} onClick={() => unsubscribeMutation.mutate([libraryId])}>Unsubscribe</button>
-                    : <button type="button" className="btn primary" disabled={subscribeMutation.isPending} onClick={() => subscribeMutation.mutate([libraryId])}>Subscribe</button>
+                ) : data.visibility === 'public' ? (
+                  !session ? (
+                    // Same appearance as the logged-in Subscribe button below —
+                    // clicking opens the login dialog rather than subscribing
+                    // directly; the mutation itself needs a session either way.
+                    <button type="button" className="btn primary" onClick={requestConnect}>Subscribe</button>
+                  ) : data.subscribed ? (
+                    <button type="button" className="btn" disabled={unsubscribeMutation.isPending} onClick={() => unsubscribeMutation.mutate([libraryId])}>Unsubscribe</button>
+                  ) : (
+                    <button type="button" className="btn primary" disabled={subscribeMutation.isPending} onClick={() => subscribeMutation.mutate([libraryId])}>Subscribe</button>
+                  )
                 ) : null}
               </div>
             </div>

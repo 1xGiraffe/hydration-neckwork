@@ -1,14 +1,12 @@
-import { lazy, Suspense, useState } from 'react'
 import { userApi } from '../api/explorer'
 import { useTags } from '../hooks/useExplorerData'
 import { useSession } from '../session'
 import { useMe, useLibraries, useUserMutation } from '../hooks/useUser'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
+import { requestConnect } from '../connectDialog'
 import { Link, paths } from '../router'
 import { Crumbs, AddrPill, EmptyRow, TableSkeleton, TagIcon, rowNav } from '../components/ui'
 import type { LibrarySummaryRef, MeResponse } from '../types'
-
-const ConnectDialog = lazy(() => import('../components/ConnectDialog').then(m => ({ default: m.ConnectDialog })))
 
 // The one clickable "library" row on the hub: the built-in Hydration
 // directory, promoted above every user-made library so tags — not
@@ -32,12 +30,11 @@ function HydrationTagsHero({ tagCount }: { tagCount: number }) {
 // is provenance/management, not something to open from here. The only actions
 // a row offers are the inline subscribe toggle and (via nested pills) a link
 // to the owner's account.
-function PublicLibraries({ libraries, isLoading, me, session, onConnect }: {
+function PublicLibraries({ libraries, isLoading, me, session }: {
   libraries: LibrarySummaryRef[]
   isLoading: boolean
   me: MeResponse | undefined
   session: ReturnType<typeof useSession>
-  onConnect: () => void
 }) {
   const subscribeMutation = useUserMutation(userApi.subscribe)
   const unsubscribeMutation = useUserMutation(userApi.unsubscribe)
@@ -64,7 +61,10 @@ function PublicLibraries({ libraries, isLoading, me, session, onConnect }: {
                 <td data-label="Subscribers" className="r mono">{lib.subscriberCount}</td>
                 <td data-label="Action" className="r">
                   {!session ? (
-                    <button type="button" className="btn sm" onClick={onConnect}>Log in to subscribe</button>
+                    // Same appearance as the logged-in Subscribe button below —
+                    // clicking opens the login dialog rather than subscribing
+                    // directly; the mutation itself needs a session either way.
+                    <button type="button" className="btn sm primary" onClick={requestConnect}>Subscribe</button>
                   ) : owned ? (
                     <span className="muted" style={{ fontSize: 11 }}>Yours</span>
                   ) : subscribed ? (
@@ -135,10 +135,6 @@ export function Tags() {
   const libs = useLibraries()
   const { data: systemTags } = useTags()
 
-  const [connectOpen, setConnectOpen] = useState(false)
-  const [connectMounted, setConnectMounted] = useState(false)
-  const openConnect = () => { setConnectMounted(true); setConnectOpen(true) }
-
   const invites = me.data?.invites ?? []
   // See the Invites comment above: a private subscription can only exist
   // because an invite was accepted, so this is exact, not a heuristic — it
@@ -159,13 +155,7 @@ export function Tags() {
 
       {(invites.length > 0 || invitedSubscriptions.length > 0) && <Invites invites={invites} invitedSubscriptions={invitedSubscriptions} />}
 
-      <PublicLibraries libraries={libs.data ?? []} isLoading={libs.isLoading} me={me.data} session={session} onConnect={openConnect} />
-
-      {connectMounted && (
-        <Suspense fallback={null}>
-          <ConnectDialog open={connectOpen} onOpenChange={setConnectOpen} />
-        </Suspense>
-      )}
+      <PublicLibraries libraries={libs.data ?? []} isLoading={libs.isLoading} me={me.data} session={session} />
     </div>
   )
 }

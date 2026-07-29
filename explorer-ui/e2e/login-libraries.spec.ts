@@ -152,6 +152,24 @@ test('the wallet grid shows a shortlist by default, and "Other wallets" reveals 
   await expect(page.locator('.account-btn .account-label')).toHaveText('E2E User')
 })
 
+// C12: a public library's Subscribe affordance shows for logged-out visitors
+// too — same button, appearance and label as the logged-in one — and opens
+// the login dialog rather than a dead end. /tags' own ConnectDialog instance
+// was removed in favor of the shared requestConnect() store Topbar consumes
+// (see connectDialog.ts), so this also pins that the two components are
+// actually wired together, not just independently rendering the right label.
+test('logged out, clicking Subscribe on a /tags row opens the login dialog', async ({ page }) => {
+  await page.goto('/tags')
+  const row = page.locator('.tbl tbody tr', { hasText: 'DeFi desks' })
+  const subscribeBtn = row.getByRole('button', { name: 'Subscribe', exact: true })
+  await expect(subscribeBtn).toBeVisible()
+  await expect(page.locator('.dialog')).toHaveCount(0)
+
+  await subscribeBtn.click()
+
+  await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
+})
+
 test('a user tag outranks the system tag, and the system tag returns on logout', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   userMock.state.tagMap = {

@@ -3,6 +3,7 @@ import type { Route } from '../router'
 import { Link, paths } from '../router'
 import { SearchBar } from './SearchBar'
 import { useLive, toggleLive } from '../live'
+import { useConnectRequest } from '../connectDialog'
 import { useTheme } from '../hooks/useTheme'
 import { useSession } from '../session'
 import { useMe, useTagMapSync, logout } from '../hooks/useUser'
@@ -193,6 +194,10 @@ export function Topbar({ route }: { route: Route }) {
   // doesn't re-import or lose Suspense's already-resolved chunk.
   const [connectMounted, setConnectMounted] = useState(false)
   const openConnect = () => { setConnectMounted(true); setConnectOpen(true) }
+  // Any other page (a /tags Subscribe row, a public library's own detail
+  // page when logged out, ...) opens THIS dialog via requestConnect() rather
+  // than mounting a second instance of its own.
+  useConnectRequest(openConnect)
   const drawerTriggerRef = useRef<HTMLButtonElement>(null)
   // Which desktop dropdown is open (by group label), or null. Driven by JS rather
   // than :hover/:focus-within so only one is ever open, and a click closes it.

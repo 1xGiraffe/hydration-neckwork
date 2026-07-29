@@ -180,9 +180,12 @@ describe('Tags hub — smoke render (logged out)', () => {
     // User-confirmed: a library row itself is not clickable — no anchor wraps
     // the name (only the nested owner pill and the subscribe button are).
     expect(hrefOf(html, 'DeFi desks')).toBeUndefined()
-    // Logged out: no reorder/new-library affordances, just a connect prompt.
+    // Logged out: no reorder/new-library affordances, but a real Subscribe
+    // button (C12) — same appearance as the logged-in one, opening the login
+    // dialog instead of a dead "log in first" prompt.
     expect(html).not.toContain('New library')
-    expect(html).toContain('Log in to subscribe')
+    expect(html).toContain('Subscribe')
+    expect(html).not.toContain('Log in to subscribe')
   })
 })
 
@@ -193,7 +196,7 @@ describe('Libraries — smoke render (logged out)', () => {
     expect(html).toContain('Libraries')
     expect(html).toMatch(/log in/i)
     expect(html).not.toContain('New library')
-    expect(html).not.toContain('Log in to subscribe')
+    expect(html).not.toContain('Subscribe')
   })
 })
 
@@ -215,6 +218,11 @@ describe('LibraryDetail — smoke render (logged out)', () => {
     // Anonymous viewer: no owner-only affordances.
     expect(html).not.toContain('New tag')
     expect(html).not.toContain('Remove')
+    // C12: a public library shows a real Subscribe button even logged out —
+    // same appearance as the logged-in one (`>Subscribe<` pins the button's
+    // own text node, not the "Subscriber" stat label above, which contains
+    // "Subscribe" as a substring).
+    expect(html).toContain('>Subscribe<')
   })
 
   // C4: the visibility badge is always public/private — `isPersonal` (an
