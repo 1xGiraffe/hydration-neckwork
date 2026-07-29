@@ -177,12 +177,16 @@ test('logged out, clicking Subscribe on a /tags row opens the login dialog', asy
   await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
 })
 
-// A lone on-page match still becomes the TAG's own aggregated row (its own
-// summary values), never a member row wearing the tag's pill over Treasury's
-// OWN $980k — that mismatch (a member row labeled with the tag, but showing
-// the member's own numbers) is exactly the bug this feature exists to fix, so
-// even one match must behave like a system tag's own single-member group row
-// already does: the group row, with group values, full stop.
+// A lone on-page match still becomes the TAG's own aggregated row (a real
+// group row, group values), never a member row wearing the tag's pill over
+// Treasury's own — that mismatch is exactly the bug this feature exists to
+// fix, so even one match must behave like a system tag's own single-member
+// group row already does: the group row, with group values, full stop. The
+// fold happens server-side now (GET /user/accounts, mirroring accountsPage's
+// own gkey grouping) — logged in with a session and a tag map that has this
+// member is all a spec needs to seed; useAccounts (useExplorerData.ts)
+// switches endpoints on its own, and the mock's buildAccountsForViewer walks
+// the SAME tag map the real directoryFoldFor would.
 test('a user tag outranks the system tag — even with a single member, it becomes the tag\'s own aggregated row — and the system tag returns on logout', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   userMock.state.tagMap = {
@@ -193,22 +197,6 @@ test('a user tag outranks the system tag — even with a single member, it becom
       { listId: 'system', name: 'Hydration', tags: [] },
     ],
   }
-  // The management-page shape of the same tag, so the fold's own summary
-  // fetch (GET /user/list-tag/lib1/<id>?summary=1) has a real tag to answer
-  // for, instead of 404ing.
-  userMock.state.lists.push({
-    listId: 'lib1', name: 'My list', note: '', visibility: 'private', isPersonal: false,
-    owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
-    tags: [{
-      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '',
-      members: [{ accountId: TREASURY_ACCOUNT_ID, address: TREASURY_ACCOUNT_ID, emoji: '🏦', tag: null }],
-    }],
-  })
-  // The tag's own aggregate value — deliberately distinct from Treasury's own
-  // $980k row value, so a leftover unfolded row (showing Treasury's own
-  // number under the tag's pill) would be caught rather than pass by
-  // coincidence.
-  userMock.state.listTagSummaryOverrides[`lib1:${USER_TAG_ID}`] = { portfolioUsd: 1_610_000 }
 
   await page.goto('/accounts')
   const row = page.locator('.accounts-tbl tbody tr', { hasText: 'Mine' })
@@ -217,9 +205,12 @@ test('a user tag outranks the system tag — even with a single member, it becom
   await expect(pill).toContainText('Mine')
   // The tag's own aggregate view, sharing the system /tag/:id namespace.
   await expect(pill).toHaveAttribute('href', `/tag/${USER_TAG_ID}`)
-  // The TAG's own value, not Treasury's own $980k.
-  await expect(row.locator('td[data-label="Value"]')).toContainText('1.61M')
-  await expect(page.locator('.accounts-tbl tbody tr', { hasText: '980k' })).toHaveCount(0)
+  // A single-member fold sums to exactly that member's own value (Treasury's
+  // real $980k) — the exact-fold design means this is no longer a
+  // deliberately-different number standing in for "the fold ran"; the row
+  // simply not being labeled "Treasury" anywhere is the signal instead.
+  await expect(row.locator('td[data-label="Value"]')).toContainText('980k')
+  await expect(page.locator('.accounts-tbl tbody tr', { hasText: 'Treasury' })).toHaveCount(0)
 
   await page.locator('.account-btn').click()
   await page.locator('.account-menu button', { hasText: 'Log out' }).click()
@@ -233,13 +224,11 @@ test('a user tag outranks the system tag — even with a single member, it becom
   await expect(treasuryPill).toHaveAttribute('href', '/tag/treasury')
 })
 
-// The directory is a shared, cached, server-side aggregate with no notion of
-// "the current viewer" — a user tag can never fold there the way a system
-// tag does (one SQL-computed group row). So when TWO of the viewer's own
-// tagged accounts both land on the same page, the fold has to happen
-// client-side: one aggregated row, fetched from the tag's own summary, with
-// the member rows dropped. Restored on logout, same as the single-member
-// case above.
+// The directory folds a viewer's own tag INSIDE the ranking query now — same
+// gkey grouping a system tag gets — so two of the viewer's own tagged
+// accounts landing on the same page collapse into one row with their VALUES
+// SUMMED, not a separately-fetched aggregate. Restored on logout, same as the
+// single-member case above.
 test('a user tag holding two on-page accounts folds them into one row, and unfolds on logout', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   userMock.state.tagMap = {
@@ -250,24 +239,6 @@ test('a user tag holding two on-page accounts folds them into one row, and unfol
       { listId: 'system', name: 'Hydration', tags: [] },
     ],
   }
-  // The management-page shape of the same tag, so the fold's own summary
-  // fetch (GET /user/list-tag/lib1/<id>?summary=1) has a real tag to answer
-  // for.
-  userMock.state.lists.push({
-    listId: 'lib1', name: 'My list', note: '', visibility: 'private', isPersonal: false,
-    owner: userMock.state.account, tagCount: 1, accountCount: 2, subscriberCount: 0,
-    tags: [{
-      tagId: USER_TAG_ID, name: 'Whales', color: '#22c55e', icon: '🐳', displayIcon: '🐳', note: '',
-      members: [
-        { accountId: FOX_ACCOUNT_ID, address: FOX_ACCOUNT_ID, emoji: '🦊', tag: null },
-        { accountId: OWL_ACCOUNT_ID, address: OWL_ACCOUNT_ID, emoji: '🦉', tag: null },
-      ],
-    }],
-  })
-  // The aggregate's own combined numbers — distinct from either member's own
-  // $1.24M/$410k row (so a leftover unfolded row would be caught) and from
-  // every other fixture row's value.
-  userMock.state.listTagSummaryOverrides[`lib1:${USER_TAG_ID}`] = { portfolioUsd: 2_220_000, tradingVolumeUsd: 480_000 }
 
   await page.goto('/accounts')
   const row = page.locator('.accounts-tbl tbody tr', { hasText: 'Whales' })
@@ -277,13 +248,12 @@ test('a user tag holding two on-page accounts folds them into one row, and unfol
   await expect(pill).toContainText('·2')
   // The tag's own aggregate page, exactly like a system tag's TagGroupPill.
   await expect(pill).toHaveAttribute('href', `/tag/${USER_TAG_ID}`)
-  await expect(row.locator('td[data-label="Value"]')).toContainText('2.22M')
-  await expect(row.locator('td[data-label="Trading $"]')).toContainText('480k')
+  // $1.24M (fox) + $410k (owl), summed exactly — not fetched from a separate
+  // aggregate the way the old client-side fold needed to.
+  await expect(row.locator('td[data-label="Value"]')).toContainText('1.65M')
   // Both member rows are gone — their own values no longer appear at all.
   await expect(page.locator('.accounts-tbl tbody tr', { hasText: '1.24M' })).toHaveCount(0)
   await expect(page.locator('.accounts-tbl tbody tr', { hasText: '410k' })).toHaveCount(0)
-  // The pagination-honesty hint, present only because a fold actually happened.
-  await expect(page.getByText("Folded rows combine all of the tag's accounts, including any beyond this page.")).toBeVisible()
 
   await page.locator('.account-btn').click()
   await page.locator('.account-menu button', { hasText: 'Log out' }).click()

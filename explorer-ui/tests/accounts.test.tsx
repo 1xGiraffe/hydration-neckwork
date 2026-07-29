@@ -1,11 +1,10 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Accounts, HealthSimBadge } from '../src/pages/Accounts'
 import { healthFactorDisplay } from '../src/components/ui'
 import { defisimAccountTarget } from '../src/utils/defisim'
-import { setTagMap } from '../src/userTags'
 import type { TopAccountRow } from '../src/types'
 
 // Finds the single anchor wrapping `text`, same helper render-user.test.tsx
@@ -44,13 +43,14 @@ describe('DefiSim account target', () => {
   })
 })
 
-// Client-side folding of the viewer's OWN tags in the /accounts directory —
-// system tags fold server-side already (one SQL-computed group row, see
-// TopAccountRow.tag); a user tag has no such row, so Accounts() has to spot
-// its matching page rows itself (via userTags.resolveTag) and collapse them.
-describe('Accounts directory — folding the viewer\'s own user-tag rows', () => {
-  const ACC1 = '0x' + '11'.repeat(32)
-  const ACC2 = '0x' + '22'.repeat(32)
+// A viewer's own tag now folds INSIDE the accounts directory's ranking query,
+// exactly like a system tag (see explorerService.getAccountsForViewerFold) —
+// Accounts() itself no longer folds anything client-side, so the row already
+// arrives shaped like a system tag's own group row (tag.userTagId marks which
+// list/tag it came from). This only has to confirm that shape renders like
+// any other TagGroupPill and links to the tag's own aggregate page, next to
+// an ordinary account row that isn't affected by it.
+describe('Accounts directory — a viewer-tag row arrives pre-folded from the server', () => {
   const ACC3 = '0x' + '33'.repeat(32)
 
   function accountRow(id: string, usd: number): TopAccountRow {
@@ -59,74 +59,29 @@ describe('Accounts directory — folding the viewer\'s own user-tag rows', () =>
       tag: null, portfolioUsd: usd, lastBlock: 100, suppliedUsd: null, borrowedUsd: null,
     }
   }
-  // ACC1 (highest rank) and ACC2 both carry the viewer's "Whales" tag; ACC3 is
-  // unrelated to any user tag. Server rank order is preserved (ACC1 first),
-  // matching the directory's own value-desc default sort.
-  const rows: TopAccountRow[] = [accountRow(ACC1, 500_000), accountRow(ACC2, 300_000), accountRow(ACC3, 200_000)]
-
-  function renderAccounts(): string {
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    queryClient.setQueryData(['accounts', 0, 50, 'value'], { rows, total: rows.length })
-    return renderToStaticMarkup(<QueryClientProvider client={queryClient}><Accounts /></QueryClientProvider>)
+  function userTagRow(usd: number): TopAccountRow {
+    return {
+      account: null,
+      tag: { tagId: 't1', name: 'Whales', color: '#22c55e', icon: '🐳', memberCount: 2, userTagId: 't1', listId: 'lib1' },
+      portfolioUsd: usd, lastBlock: 100, suppliedUsd: null, borrowedUsd: null,
+    }
   }
 
-  beforeEach(() => setTagMap(null))
-
-  it('folds the two member rows into one aggregated row and leaves the unrelated row alone', () => {
-    setTagMap({ lists: [
-      { listId: 'lib1', name: 'Personal', tags: [{ tagId: 't1', name: 'Whales', color: '#22c55e', icon: '🐳', members: [ACC1, ACC2] }] },
-      { listId: 'system', name: 'Hydration', tags: [] },
-    ] })
-    const html = renderAccounts()
+  it('renders the folded row as a TagGroupPill linking to its own aggregate page, leaving the plain row alone', () => {
+    const rows: TopAccountRow[] = [userTagRow(800_000), accountRow(ACC3, 200_000)]
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['accounts', 0, 50, 'value'], { rows, total: rows.length })
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Accounts /></QueryClientProvider>)
 
     expect(html).toContain('Whales')
     expect(html).toContain('·2')
-    // The tag's own aggregate page, exactly like a system tag's TagGroupPill.
+    // `userTagId` is the same real tag id TagGroupPill always links by
+    // (paths.tag(tagId)) — no separate client-side routing needed for it.
     expect(hrefOf(html, 'Whales')).toBe('/tag/t1')
-
-    // Two body rows left: the fold and the unrelated account — not three.
+    // Two body rows: the folded tag row and the unrelated account — the fold
+    // already happened server-side, so there is no third "member" row to drop.
     expect(html.match(/data-label="Account"/g)).toHaveLength(2)
-    // Each member's own value is gone; only the unrelated row's is still there.
-    expect(html).not.toContain('$500k')
-    expect(html).not.toContain('$300k')
-    expect(html).toContain('$200k')
-  })
-
-  // A LONE on-page match still becomes the tag's own aggregated row, never a
-  // member row wearing the tag's pill over its own values — the same
-  // guarantee a system tag's single-member group row already gives (see
-  // Accounts()'s own comment). Regression for the confusion this feature
-  // exists to fix: a member's own value shown under the tag's label reads as
-  // the tag's total, when it never was one.
-  it('folds a single member row into the tag\'s own aggregated row too, not a member row under the tag\'s pill', () => {
-    setTagMap({ lists: [
-      { listId: 'lib1', name: 'Personal', tags: [{ tagId: 't1', name: 'Loner', color: '#22c55e', icon: '🐺', members: [ACC1] }] },
-      { listId: 'system', name: 'Hydration', tags: [] },
-    ] })
-    const html = renderAccounts()
-
-    expect(html).toContain('Loner')
-    // A single-member tag carries no '·N' suffix — same as a single-member
-    // system tag's TagGroupPill (TagGroupPill only shows it above 1).
-    expect(html).not.toContain('·1')
-    expect(hrefOf(html, 'Loner')).toBe('/tag/t1')
-
-    // All three rows still render (nothing dropped — there was only one
-    // match), but ACC1's OWN value is gone: it's the tag's row now, not its own.
-    expect(html.match(/data-label="Account"/g)).toHaveLength(3)
-    expect(html).not.toContain('$500k')
-    expect(html).toContain('$300k')
-    expect(html).toContain('$200k')
-  })
-
-  it('renders the original, unfolded rows when logged out', () => {
-    // Default beforeEach: setTagMap(null) — tagMapStatus() === 'anonymous'.
-    const html = renderAccounts()
-
-    expect(html).not.toContain('Whales')
-    expect(html.match(/data-label="Account"/g)).toHaveLength(3)
-    expect(html).toContain('$500k')
-    expect(html).toContain('$300k')
+    expect(html).toContain('$800k')
     expect(html).toContain('$200k')
   })
 })

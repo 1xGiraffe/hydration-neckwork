@@ -364,22 +364,14 @@ function buildAssets(): AssetListItem[] {
 const ACTIVITY_FLOOR_ACCOUNT = A.treasury
 const ACTIVITY_FLOOR_COUNT = 50_000
 
-function buildAccounts(offset: number, limit: number, sort: string): AccountsPage {
-  const rows: TopAccountRow[] = []
-  // Kraken tag (2 members) as one row
-  // 53 weekly points = the real API's 1Y padded sparkline shape.
-  rows.push({ account: null, tag: { tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', icon: '/tag-icons/kraken.jpg', memberCount: 2 }, portfolioUsd: 5_240_000, lastBlock: TIP - 12, healthFactor: '1410000000000000000', identity: 'Kraken', suppliedUsd: null, borrowedUsd: null, supplementalMarket: { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 6_200, healthFactor: '2380000000000000000' }, sparkline: series(99, 53, 5_240_000), activityCount: 2143, activityCountComplete: true, tradingVolumeUsd: 82_400_000, liquidationVolumeUsd: 740_000 })
-  const seeds: [AccountRef, number][] = [[A.binance, 3_900_000], [A.fox, 1_240_000], [A.treasury, 980_000], [A.owl, 410_000], [A.swan, 96_000]]
-  for (const [a, usd] of seeds) {
-    const mm = mmFor(a.accountId.length * 7)
-    const floor = a === ACTIVITY_FLOOR_ACCOUNT
-    rows.push({ account: a, tag: null, portfolioUsd: usd, lastBlock: TIP - Math.floor(usd % 900), healthFactor: mm.debt > 0 ? BigInt(Math.round(mm.hf * 1e18)).toString() : 'inf', identity: a === A.binance ? 'Binance' : null, suppliedUsd: mm.supply > 0 ? mm.supply : null, borrowedUsd: mm.debt > 0 ? mm.debt : null, supplementalMarket: a === A.fox ? { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 4_800, healthFactor: '2500000000000000000' } : null, sparkline: series(a.accountId.length * 31, 53, usd), activityCount: floor ? ACTIVITY_FLOOR_COUNT : 100 + (usd % 4000), activityCountComplete: !floor, tradingVolumeUsd: usd * (12 + (a.accountId.charCodeAt(4) % 9)), liquidationVolumeUsd: mm.debt > 0 ? usd * (0.08 + (a.accountId.charCodeAt(6) % 5) / 100) : undefined })
-  }
+// Shared by buildAccounts and buildAccountsForViewer, so a viewer-folded page
+// ranks its (re-summed) rows the exact same way the plain directory does.
+function sortAccountRows(rows: TopAccountRow[], sort: string): TopAccountRow[] {
   const health = (row: TopAccountRow) => {
     if (!row.healthFactor) return Number.POSITIVE_INFINITY
     return row.healthFactor === 'inf' ? Number.MAX_SAFE_INTEGER : Number(row.healthFactor)
   }
-  const sorted = [...rows].sort((a, b) => {
+  return [...rows].sort((a, b) => {
     if (sort === 'supplied') return (b.suppliedUsd ?? -1) - (a.suppliedUsd ?? -1)
     if (sort === 'borrowed') return (b.borrowedUsd ?? -1) - (a.borrowedUsd ?? -1)
     if (sort === 'health') return health(a) - health(b)
@@ -401,6 +393,65 @@ function buildAccounts(offset: number, limit: number, sort: string): AccountsPag
     }
     return b.portfolioUsd - a.portfolioUsd
   })
+}
+function buildAccounts(offset: number, limit: number, sort: string): AccountsPage {
+  const rows: TopAccountRow[] = []
+  // Kraken tag (2 members) as one row
+  // 53 weekly points = the real API's 1Y padded sparkline shape.
+  rows.push({ account: null, tag: { tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', icon: '/tag-icons/kraken.jpg', memberCount: 2 }, portfolioUsd: 5_240_000, lastBlock: TIP - 12, healthFactor: '1410000000000000000', identity: 'Kraken', suppliedUsd: null, borrowedUsd: null, supplementalMarket: { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 6_200, healthFactor: '2380000000000000000' }, sparkline: series(99, 53, 5_240_000), activityCount: 2143, activityCountComplete: true, tradingVolumeUsd: 82_400_000, liquidationVolumeUsd: 740_000 })
+  const seeds: [AccountRef, number][] = [[A.binance, 3_900_000], [A.fox, 1_240_000], [A.treasury, 980_000], [A.owl, 410_000], [A.swan, 96_000]]
+  for (const [a, usd] of seeds) {
+    const mm = mmFor(a.accountId.length * 7)
+    const floor = a === ACTIVITY_FLOOR_ACCOUNT
+    rows.push({ account: a, tag: null, portfolioUsd: usd, lastBlock: TIP - Math.floor(usd % 900), healthFactor: mm.debt > 0 ? BigInt(Math.round(mm.hf * 1e18)).toString() : 'inf', identity: a === A.binance ? 'Binance' : null, suppliedUsd: mm.supply > 0 ? mm.supply : null, borrowedUsd: mm.debt > 0 ? mm.debt : null, supplementalMarket: a === A.fox ? { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 4_800, healthFactor: '2500000000000000000' } : null, sparkline: series(a.accountId.length * 31, 53, usd), activityCount: floor ? ACTIVITY_FLOOR_COUNT : 100 + (usd % 4000), activityCountComplete: !floor, tradingVolumeUsd: usd * (12 + (a.accountId.charCodeAt(4) % 9)), liquidationVolumeUsd: mm.debt > 0 ? usd * (0.08 + (a.accountId.charCodeAt(6) % 5) / 100) : undefined })
+  }
+  const sorted = sortAccountRows(rows, sort)
+  return { rows: sorted.slice(offset, offset + limit), total: sorted.length }
+}
+
+// The accounts directory, folded under a VIEWER's own tags too — the mock's
+// analogue of userListService.directoryFoldFor + accountsPage's viewer-fold
+// grouping. Walks tagMap.lists in priority order exactly like resolveTag()
+// (userTags.ts) does client-side, but over buildAccounts's own already
+// system-tag-grouped rows: the 'system' slot wins a row that already carries
+// a system tag (never overridden), and the first list ahead of it whose tag
+// contains the row's account wins otherwise — summed exactly like a system
+// tag's own group, not fetched from a separate aggregate.
+export function buildAccountsForViewer(tagMap: TagMapResponse | null, offset: number, limit: number, sort: string): AccountsPage {
+  if (!tagMap) return buildAccounts(offset, limit, sort)
+  const { rows } = buildAccounts(0, 1000, sort)
+  const winnerFor = (row: TopAccountRow) => {
+    if (!row.account) return null   // already a system-tag group row — never re-folds
+    for (const lib of tagMap.lists) {
+      if (lib.listId === 'system') { if (row.account.tag) return null; continue }
+      const tag = lib.tags.find(t => t.members.includes(row.account!.accountId))
+      if (tag) return { tagId: tag.tagId, listId: lib.listId, name: tag.name, color: tag.color, icon: tag.icon, memberCount: tag.members.length }
+    }
+    return null
+  }
+  const groups = new Map<string, TopAccountRow>()
+  const out: TopAccountRow[] = []
+  for (const row of rows) {
+    const winner = winnerFor(row)
+    if (!winner) { out.push(row); continue }
+    const key = `${winner.listId}:${winner.tagId}`
+    const existing = groups.get(key)
+    if (existing) {
+      existing.portfolioUsd += row.portfolioUsd
+      if (row.suppliedUsd) existing.suppliedUsd = (existing.suppliedUsd ?? 0) + row.suppliedUsd
+      if (row.borrowedUsd) existing.borrowedUsd = (existing.borrowedUsd ?? 0) + row.borrowedUsd
+      if (row.tradingVolumeUsd) existing.tradingVolumeUsd = (existing.tradingVolumeUsd ?? 0) + row.tradingVolumeUsd
+      if (row.liquidationVolumeUsd) existing.liquidationVolumeUsd = (existing.liquidationVolumeUsd ?? 0) + row.liquidationVolumeUsd
+      continue
+    }
+    const grouped: TopAccountRow = {
+      ...row, account: null, identity: winner.name,
+      tag: { tagId: winner.tagId, name: winner.name, color: winner.color, icon: winner.icon, memberCount: winner.memberCount, userTagId: winner.tagId, listId: winner.listId },
+    }
+    groups.set(key, grouped)
+    out.push(grouped)
+  }
+  const sorted = sortAccountRows(out, sort)
   return { rows: sorted.slice(offset, offset + limit), total: sorted.length }
 }
 // Deterministic HDX lock/reserve breakdown for a balance of `bal` tokens (free =

@@ -1,6 +1,6 @@
 import type { Page, Route } from '@playwright/test'
 import { expect, test as base } from '@playwright/test'
-import { mockSync } from '../../tests/fixtures/mockApi'
+import { mockSync, buildAccountsForViewer } from '../../tests/fixtures/mockApi'
 import type {
   AccountRef, ListDetailResponse, ListTagDetail, ListSummaryRef, MeResponse, TagMapResponse, TagDetail,
 } from '../../src/types'
@@ -75,12 +75,16 @@ export interface UserMockState {
   invites: ListSummaryRef[]
   order: string[]
   tagMap: TagMapResponse
-  // Per-tag override merged onto a list tag's own `?summary=1` response (the
-  // accounts directory's fold, and HoverCard, both read this endpoint) — the
-  // plain buildListTagDetail() below always answers zeroed-out numbers, which
-  // is fine for every OTHER spec (none read them), but a spec proving the
-  // fold shows a real aggregate value needs the summary to carry one. Keyed
-  // `${listId}:${tagId}` so two folds in one spec can't collide.
+  // Per-tag override merged onto a list tag's OWN `?summary=1` response (the
+  // hover card reads this endpoint for a list tag's OWN aggregate page/
+  // preview) — the plain buildListTagDetail() below always answers
+  // zeroed-out numbers, which is fine for every OTHER spec (none read them),
+  // but a spec proving that page shows a real aggregate value needs the
+  // summary to carry one. Keyed `${listId}:${tagId}` so two tags in one spec
+  // can't collide. NOT read by the accounts directory any more — that folds
+  // server-side now (see GET /user/accounts → buildAccountsForViewer), summed
+  // straight off the SAME rows the plain directory ranks, not fetched from a
+  // separate aggregate.
   listTagSummaryOverrides: Record<string, Partial<TagDetail>>
 }
 
@@ -184,6 +188,15 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
   if (method === 'GET' && path === '/user/me') { await fulfillJson(route, 200, buildMe(state)); return }
   if (method === 'GET' && path === '/user/tag-map') { await fulfillJson(route, 200, state.tagMap); return }
   if (method === 'GET' && path === '/user/invites') { await fulfillJson(route, 200, state.invites); return }
+  // The accounts directory, folded under THIS session's own tag map —
+  // buildAccountsForViewer walks state.tagMap the same priority order
+  // resolveTag()/directoryFoldFor do, so a spec only has to seed the tag map
+  // (as it already does for every other user-tag spec) rather than also
+  // hand-rolling a folded accounts response of its own.
+  if (method === 'GET' && path === '/user/accounts') {
+    await fulfillJson(route, 200, buildAccountsForViewer(state.tagMap, Number(url.searchParams.get('offset') ?? 0), Number(url.searchParams.get('limit') ?? 50), url.searchParams.get('sort') ?? 'value'))
+    return
+  }
 
   if (method === 'PUT' && path === '/user/profile') {
     const { name } = bodyOf(route) as { name: string }

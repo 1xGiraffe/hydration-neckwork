@@ -1,8 +1,10 @@
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
-import { api } from '../api/explorer'
+import { api, userApi } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
 import { useLive, LIVE_MS } from '../live'
 import { useHeldRows } from './useHeldRows'
+import { getSession } from '../session'
+import { tagMapStatus, hasUserTagMembers, useTagMapVersion } from '../userTags'
 import type { AccountSort } from '../types'
 
 // List/feed hooks honour the global Live toggle. When live, they poll on LIVE_MS;
@@ -299,8 +301,37 @@ export function useHdxDashboard() {
 export function useHollarDashboard() {
   return useQuery({ queryKey: ['hollar-dashboard'], queryFn: ({ signal }) => api.hollar(signal), staleTime: 120_000 })
 }
+// The directory folds a viewer's OWN tags server-side too (exact values and
+// ranks, not just the shared system-tag grouping) — but only once there's a
+// session, its tag map has actually loaded ('ready', not still 'loading' or
+// 'error'), and it has at least one member: a logged-out, still-loading, or
+// tagless viewer gets nothing from the per-viewer endpoint the shared one
+// doesn't already answer, so this reaches for it unconditionally rather than
+// flashing unfolded rows first. The query key changes SHAPE (not just a value)
+// between the two paths, so a viewer whose tag map finishes loading — or who
+// adds their first tagged member — mid-session switches endpoints on its own;
+// held-rows-through-a-key-change (below) keeps the outgoing rows on screen
+// while the new endpoint answers, exactly as a page/sort change already does.
+//
+// Reads the session with `getSession()` rather than the `useSession()` hook:
+// every session change already runs through useTagMapSync's effect, which
+// calls setTagMap() on every branch (session gone, map loading, map in), so
+// subscribing to `useTagMapVersion()` alone already re-renders this on login
+// and logout too — and, like tagMapStatus()/hasUserTagMembers() beside it, a
+// plain read stays exercisable from a static render (see accounts.test.tsx),
+// where useSyncExternalStore's getServerSnapshot would otherwise pin
+// useSession() to null regardless of what a test seeds.
 export function useAccounts(offset = 0, limit = 50, sort: AccountSort = 'value') {
-  return useQuery({ queryKey: ['accounts', offset, limit, sort], queryFn: ({ signal }) => api.accounts(offset, limit, sort, signal), refetchInterval: useInterval(SLOW_POLL_MS), staleTime: 20_000, placeholderData: keepPreviousData })
+  const tagMapVersion = useTagMapVersion()
+  const session = getSession()
+  const authed = !!session && tagMapStatus() === 'ready' && hasUserTagMembers()
+  return useQuery({
+    queryKey: authed ? ['accounts', 'viewer', session.accountId, tagMapVersion, offset, limit, sort] : ['accounts', offset, limit, sort],
+    queryFn: ({ signal }) => (authed ? userApi.accounts(offset, limit, sort, signal) : api.accounts(offset, limit, sort, signal)),
+    refetchInterval: useInterval(SLOW_POLL_MS),
+    staleTime: 20_000,
+    placeholderData: keepPreviousData,
+  })
 }
 export function useDaily(scope: string, params?: { type?: string; action?: string; token?: string }) {
   // keepPreviousData: switching the active tab/action changes the query key; without

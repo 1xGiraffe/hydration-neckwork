@@ -76,6 +76,16 @@ export function tagMapStatus(): 'anonymous' | 'loading' | 'ready' | 'error' {
   return mapErrored ? 'error' : 'loading'
 }
 
+// Cheap "would the accounts directory even change" gate: whether the viewer's
+// own (or subscribed) tag map has a member anywhere. useAccounts
+// (useExplorerData.ts) reads this to decide whether the per-viewer /user/accounts
+// fold is worth fetching at all — a tagless viewer gets nothing from it that the
+// shared /explorer/accounts doesn't already answer, at zero extra server cost.
+export function hasUserTagMembers(): boolean {
+  if (!indexes) return false
+  return indexes.some(lib => lib.listId !== 'system' && lib.tags.some(t => t.memberCount > 0))
+}
+
 // System tag ids are short, hand-picked slugs ('kraken', 'fee-processor', …);
 // user tag ids are UUIDs minted by userListService's randomUUID(). The two
 // id spaces never collide, which is what lets TagDetail fast-path a slug

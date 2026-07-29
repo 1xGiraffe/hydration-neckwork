@@ -69,7 +69,12 @@ export type AssetFilterItem = Pick<AssetRef, 'assetId' | 'symbol' | 'name'>
 
 export interface TopAccountRow {
   account: AccountRef | null
-  tag: { tagId: string; name: string; color: string; icon: string; memberCount: number } | null
+  // `userTagId`/`listId` are additive: set only when this group row folded under
+  // the REQUESTING viewer's own tag (served from /user/accounts) rather than a
+  // system one. `tagId` is the tag's real id either way, so TagGroupPill's link
+  // (paths.tag(tagId)) already routes a user tag to its aggregate page — see
+  // userTags.ts's looksLikeUserTagId — with no change needed to read it.
+  tag: { tagId: string; name: string; color: string; icon: string; memberCount: number; userTagId?: string; listId?: string } | null
   portfolioUsd: number
   lastBlock: number
   // Money-market enrichment (null when the account has no MM position).

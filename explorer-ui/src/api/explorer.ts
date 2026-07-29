@@ -246,4 +246,9 @@ export const userApi = {
   subscribe: (listId: string) => authedJson<{ ok: true }>('POST', '/user/subscriptions', { listId }),
   unsubscribe: (listId: string) => authedJson<{ ok: true }>('DELETE', `/user/subscriptions/${encodeURIComponent(listId)}`),
   setOrder: (listIds: string[]) => authedJson<{ order: string[] }>('PUT', '/user/list-order', { listIds }),
+  // Same shape as api.accounts, folded under the caller's own tags too — see
+  // useAccounts (useExplorerData.ts) for when this is used instead of the
+  // public endpoint.
+  accounts: (offset = 0, limit = 50, sort: AccountSort = 'value', signal?: AbortSignal) =>
+    authedJson<AccountsPage>('GET', withQuery('/user/accounts', { offset, limit, sort }), undefined, signal),
 }
