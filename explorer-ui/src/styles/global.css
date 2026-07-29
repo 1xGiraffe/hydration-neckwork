@@ -1010,6 +1010,19 @@ svg { display: block; }
    the ✓ mark staying exclusive to a registrar-checked identity), plus italics
    so it never reads as a system/list tag at a glance. */
 .addr-pill .tag.profile-name { color: var(--amber); font-weight: 500; font-style: italic; }
+/* A list's own name (Lists.tsx's Your-lists table, and the shared
+   PublicListsPanel): plain white text, not a curated tag's lavender —
+   user-confirmed a list's name shouldn't read as if it WERE a tag. Same
+   size/weight as any other pill label; only the color changes. Specificity
+   (.addr-pill .tag.list-name, three classes) beats the plain .addr-pill .tag
+   rule above without needing !important or a reorder. */
+.addr-pill .tag.list-name { color: var(--text-high); }
+/* Underline-on-hover — the same static cue `.addr-pill:hover .a` and
+   `.tag-panel-link:hover .tag` already use elsewhere — but scoped to THIS
+   link wrapper specifically, not the shared `.addr-pill`, so a non-owned
+   public list's plain (non-clickable) `<span class="addr-pill">` wrapper
+   never shows a hover cue it can't back up with an actual navigation. */
+.list-name-link:hover .tag.list-name { text-decoration: underline; text-underline-offset: 2px; }
 .ext-site {
   padding: 1px 5px;
   border: 1px solid var(--border);

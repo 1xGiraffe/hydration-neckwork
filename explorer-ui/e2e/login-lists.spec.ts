@@ -714,6 +714,53 @@ test('logged out, /lists still shows Public lists (with a real Subscribe → log
   await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
 })
 
+// New user request: "I want to be able to click on my lists in /lists on the
+// bottom and /tags too to go to the detail. But only mine." — /explorer/lists
+// is a fixed fixture (MOCK_LISTS) unaffected by userMock.state, so making one
+// entry read as the viewer's own has to happen at the route level: rewrite
+// its `owner` to the logged-in viewer's own account (the exact ownership
+// comparison PublicListsPanel makes) rather than trying to match a hardcoded
+// fixture accountId. DeFi desks (fox-owned in the fixture) stays foreign, so
+// the same page proves both halves of "only mine" at once.
+test('an owned public list links to its detail page on /lists; a non-owned one stays plain text', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  await page.route(/\/api\/explorer\/lists(\?.*)?$/, async route => {
+    const rewritten = MOCK_LISTS.map(l => l.listId === 'exchange-wallets' ? { ...l, owner: userMock.state.account } : l)
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(rewritten) })
+  })
+
+  await page.goto('/lists')
+  const ownRow = page.locator('tbody tr', { hasText: 'Exchange wallets' })
+  const foreignRow = page.locator('tbody tr', { hasText: 'DeFi desks' })
+
+  await expect(ownRow.locator('td[data-label="List"] a.addr-pill')).toHaveAttribute('href', '/list/exchange-wallets')
+  // Ownership reads through to the Action cell too — no Subscribe/Unsubscribe
+  // on your own row, same "Yours" label the pre-existing logic already gave
+  // an owned row (this pins that isOwnList didn't diverge from that).
+  await expect(ownRow.getByRole('button', { name: /^(Subscribe|Unsubscribe)$/ })).toHaveCount(0)
+  await expect(ownRow).toContainText('Yours')
+
+  // The non-owned row's name stays the plain, non-clickable span — no
+  // anchor at all inside its List cell.
+  await expect(foreignRow.locator('td[data-label="List"] a')).toHaveCount(0)
+  await expect(foreignRow.locator('td[data-label="List"] span.addr-pill')).toBeVisible()
+})
+
+// The same check on /tags, proving the shared PublicListsPanel component (not
+// a per-page reimplementation) is what makes the owned-link behavior work
+// wherever it's rendered.
+test('an owned public list also links to its detail page on /tags (same shared PublicListsPanel)', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  await page.route(/\/api\/explorer\/lists(\?.*)?$/, async route => {
+    const rewritten = MOCK_LISTS.map(l => l.listId === 'defi-desks' ? { ...l, owner: userMock.state.account } : l)
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(rewritten) })
+  })
+
+  await page.goto('/tags')
+  const row = page.locator('tbody tr', { hasText: 'DeFi desks' })
+  await expect(row.locator('td[data-label="List"] a.addr-pill')).toHaveAttribute('href', '/list/defi-desks')
+})
+
 // Seeds an owned list with one (empty) tag — enough surface for both
 // AccountPicker hosts (a tag's member editor, and the Invites tab) without
 // running the full list/tag creation flow.

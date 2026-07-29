@@ -177,8 +177,12 @@ describe('Tags hub — smoke render (logged out)', () => {
     expect(html).toContain('Hydration Tags')
     expect(hrefOf(html, 'Hydration Tags')).toBe('/tags/hydration')
     expect(html).toContain('DeFi desks')
-    // User-confirmed: a list row itself is not clickable — no anchor wraps
-    // the name (only the nested owner pill and the subscribe button are).
+    // User-confirmed: a public list row is clickable only when the VIEWER
+    // owns it — logged out (this harness's every render, see the comment
+    // above this describe block), that's never true, so no anchor wraps the
+    // name here (only the nested owner pill and the subscribe button are).
+    // The owned case is session-dependent and covered by e2e instead (see
+    // login-lists.spec.ts's "an owned public list links to its detail page").
     expect(hrefOf(html, 'DeFi desks')).toBeUndefined()
     // Logged out: no reorder/new-list affordances, but a real Subscribe
     // button (C12) — same appearance as the logged-in one, opening the login

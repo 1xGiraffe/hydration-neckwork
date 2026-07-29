@@ -155,13 +155,13 @@ function YourLists({ me }: { me: MeResponse }) {
               >
                 <td data-label="List">
                   {row.kind === 'system' ? (
-                    <Link to={paths.tagsHydration()} className="addr-pill">
-                      <span className="tag">Hydration tags</span>
+                    <Link to={paths.tagsHydration()} className="addr-pill list-name-link">
+                      <span className="tag list-name">Hydration tags</span>
                     </Link>
                   ) : (
                     <>
-                      <Link to={paths.list(row.lib.listId)} className="addr-pill">
-                        <span className="tag">{row.lib.name}</span>
+                      <Link to={paths.list(row.lib.listId)} className="addr-pill list-name-link">
+                        <span className="tag list-name">{row.lib.name}</span>
                       </Link>{' '}
                       {visibilityChip(row.lib)}
                       {!row.owned && <span className="muted" style={{ marginLeft: 6, fontSize: 11 }}>subscribed</span>}
