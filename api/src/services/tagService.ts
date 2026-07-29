@@ -170,6 +170,10 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     // main pot + the py/trsry sub-account (suffix 0x08627411) observed on-chain
     addresses: ['13UVJyLnbVp9RBZYFwFGyDvVd1y27Tt8tkntv6Q7JVPhFsTB', modlAccountId('py/trsry', '08627411')],
   },
+  {
+    tagId: 'hydration-multisig', name: 'Hydration Multisig', color: '', note: 'Hydration protocol multisig account', icon: '',
+    addresses: ['16RJh4z1eUHpC3ntre9H2noKGKxihkSqog9PBt9bRbAnj4RE'],
+  },
   // ---- pallet accounts (accounts with no extrinsics, decoded from their
   // "modl" + PalletId structure and matched to hydration-node constants) ----
   {
