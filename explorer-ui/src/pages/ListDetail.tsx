@@ -252,8 +252,8 @@ function TagPanel({ listId, tag, isOwner }: { listId: string; tag: ListTagDetail
       <div className="panel-head">
         {editing ? (
           <span className="row gap6" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
-            <input value={icon} onChange={e => setIcon(e.target.value)} style={{ width: 48 }} aria-label="Tag icon" maxLength={4} disabled={updateTagMutation.isPending} />
-            <input value={name} onChange={e => setName(e.target.value)} aria-label="Tag name" maxLength={40} disabled={updateTagMutation.isPending} />
+            <input className="input sm" value={icon} onChange={e => setIcon(e.target.value)} style={{ width: 48 }} aria-label="Tag icon" maxLength={4} disabled={updateTagMutation.isPending} />
+            <input className="input sm" value={name} onChange={e => setName(e.target.value)} aria-label="Tag name" maxLength={40} disabled={updateTagMutation.isPending} />
             <span className="swatches" role="group" aria-label="Tag color">
               {TAG_COLORS.map(c => (
                 <button key={c} type="button" className={`swatch${c === color ? ' on' : ''}`} style={{ background: c, width: 20, height: 20 }} aria-label={`Color ${c}`} aria-pressed={c === color} onClick={() => setColor(c)} disabled={updateTagMutation.isPending} />

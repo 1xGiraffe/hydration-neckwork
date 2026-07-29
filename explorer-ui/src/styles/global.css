@@ -1739,9 +1739,17 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .dialog-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 20px; border-top: 1px solid var(--separator); }
 .field { display: flex; flex-direction: column; gap: 7px; }
 .field label, .field .field-label { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
-.field input, .field textarea { all: unset; box-sizing: border-box; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text-high); padding: 10px 12px; font-family: 'Geist'; font-size: 13px; }
-.field input:focus, .field textarea:focus { border-color: var(--sky); }
+/* Shared input skin: border/background/radius/focus ring defined once here.
+   `.field`'s own input/textarea get it through the selector list below; a
+   bare input OUTSIDE a `.field`'s stacked label layout (e.g. a tag panel's
+   inline rename row) opts in with just `.input`, no wrapper needed. */
+.input, .field input, .field textarea { all: unset; box-sizing: border-box; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text-high); padding: 10px 12px; font-family: 'Geist'; font-size: 13px; }
+.input:focus, .field input:focus, .field textarea:focus { border-color: var(--sky); }
 .field textarea { resize: vertical; min-height: 84px; font-family: 'GeistMono'; font-size: 12px; line-height: 1.6; }
+/* Compact variant for an .input sitting inline among small controls (a
+   panel-head row's .btn.sm / 20px swatches) rather than stacked under its
+   own label — same skin, shorter so it doesn't blow out the row's height. */
+.input.sm { padding: 5px 10px; font-size: 12.5px; }
 .member-check { font-family: 'GeistMono'; font-size: 11px; margin-top: 6px; }
 .swatches { display: flex; gap: 8px; flex-wrap: wrap; }
 .swatch { width: 26px; height: 26px; border-radius: 8px; border: 2px solid transparent; }
