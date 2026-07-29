@@ -460,6 +460,9 @@ test('create a library, tag a known address, and reorder', async ({ page, userMo
   await page.locator('.dialog-foot button', { hasText: 'Create' }).click()
 
   const tagPanel = page.locator('.panel', { hasText: 'E2E Tag' })
+  // New user request: the tag header (icon + name) links to its own
+  // aggregate page — the mock mints this library's first tag as 'tag-1'.
+  await expect(tagPanel.locator('.tag-panel-link')).toHaveAttribute('href', '/tag/tag-1')
   await expect(tagPanel).toContainText('No accounts yet')
   // No Add button and no table: an address-shaped Enter commits the member
   // immediately, and it renders as a chip.

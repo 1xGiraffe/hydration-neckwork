@@ -1909,6 +1909,12 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    var(--bg-elev) panel, same as `.acct-picker-results` does for `.sr-emoji`),
    not `.account-row-emoji`'s var(--bg-elev), which would blend into it. */
 .tag-panel-icon { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; overflow: hidden; background: var(--panel); border: 1px solid var(--border); }
+/* The tag panel header's own icon+name link to the tag's aggregate page —
+   deliberately NOT `.addr-pill` (that class's GeistMono/12.5px would fight
+   this header's serif `.panel-head .t` title styling); same hover affordance
+   `.addr-pill` uses for its own clickable text (an underline on the name),
+   cursor:pointer comes from the element being a real <a href>. */
+.tag-panel-link:hover .tag { text-decoration: underline; text-underline-offset: 2px; }
 
 /* Live mode: briefly highlight rows that were just added so it's clear which /
    how many arrived. Background pulses from an accent tint to transparent. */

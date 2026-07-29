@@ -6,7 +6,7 @@ import { useSession } from '../session'
 import { requestConnect } from '../connectDialog'
 import { useLibrary, useUserMutation } from '../hooks/useUser'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { navigate, paths, setQuery, useQueryValue } from '../router'
+import { Link, navigate, paths, setQuery, useQueryValue } from '../router'
 import { Crumbs, AddrPill, TagIcon, DetailTabs, ProfilePageSkeleton } from '../components/ui'
 import type { AccountRef, LibrarySummaryRef, LibraryTagDetail } from '../types'
 
@@ -264,8 +264,14 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
         ) : (
           <>
             <span className="t row gap6" style={{ alignItems: 'center' }}>
-              <TagIcon icon={tag.displayIcon} title={tag.name} className="emoji id tag-panel-icon" />
-              <span className="tag" style={{ color: tag.color }}>{tag.name}</span>
+              {/* Same target a resolved tag pill uses (UserTagPill) — the link
+                  wraps only the icon+name, not the member count or the whole
+                  header row, so it can't swallow the Edit/Delete buttons into
+                  a nested anchor. */}
+              <Link to={paths.tag(tag.tagId)} className="row gap6 tag-panel-link">
+                <TagIcon icon={tag.displayIcon} title={tag.name} className="emoji id tag-panel-icon" />
+                <span className="tag" style={{ color: tag.color }}>{tag.name}</span>
+              </Link>
               <span className="muted" style={{ fontWeight: 400 }}>· {tag.members.length} accounts</span>
             </span>
             {isOwner && (
