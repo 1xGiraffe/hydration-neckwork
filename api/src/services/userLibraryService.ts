@@ -148,6 +148,22 @@ function subscriberCountFor(libraryId: string): number {
   return n
 }
 
+// Owner-only view of a library's subscription state (Subscribers tab): every
+// account with a live invite or an active subscription, in the order they were
+// first shared with. 'declined' is filtered defensively for Subscription's full
+// status union — in practice respondToInvite(..., false) deletes the entry via
+// setSub(..., null) rather than ever persisting 'declined', so this never
+// actually sees one today, but a future caller that DID record a declined
+// status rather than deleting it must not leak it here.
+export function sharesFor(libraryId: string): { accountId: string; status: 'invited' | 'active' }[] {
+  const out: { accountId: string; status: 'invited' | 'active' }[] = []
+  for (const [account, sub] of subsByLibrary.get(libraryId) ?? []) {
+    if (sub.status === 'declined') continue
+    out.push({ accountId: account, status: sub.status })
+  }
+  return out
+}
+
 function checkText(value: string, max: number, what: string): string {
   const v = value.trim()
   if (!v && what.endsWith('name')) throw new UserDataError(422, `A ${what} is required`)

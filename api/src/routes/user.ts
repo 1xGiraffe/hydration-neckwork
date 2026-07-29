@@ -15,7 +15,7 @@ import {
   ensurePersonalLibrary, ownedLibrariesFor, subscriptionsFor, invitesFor, libraryOrderFor, tagMapFor,
   getLibrary, canView, createLibrary, updateLibrary, deleteLibrary,
   createTag, updateTag, deleteTag, setTagMembers, setMemberOrder, visibleTagMembers, tagDisplayIcon,
-  inviteToLibrary, revokeShare, respondToInvite, subscribePublic, unsubscribe, setLibraryOrder,
+  inviteToLibrary, revokeShare, respondToInvite, subscribePublic, unsubscribe, setLibraryOrder, sharesFor,
   librarySummary, LIMITS, type LibrarySummary, type UserLibrary,
 } from '../services/userLibraryService.ts'
 import {
@@ -70,6 +70,13 @@ export function libraryDetailResponse(lib: UserLibrary, viewer: string | null) {
     ...libSummaryRef(librarySummary(lib)),
     subscribed: viewer ? subscriptionsFor(viewer).some(s => s.libraryId === lib.libraryId) : false,
     tags: isOwner ? [...lib.tags.values()].map(tagRef) : [],
+    // Subscribers tab (owner-only, additive): who has a live invite or an
+    // active subscription. Undefined — not an empty array — for every other
+    // viewer (including the anonymous public detail this same function builds
+    // for /explorer/library/:id), so it drops out of the JSON entirely rather
+    // than reading as "nobody's subscribed" on a library whose sharing state
+    // this viewer has no right to see.
+    shares: isOwner ? sharesFor(lib.libraryId).map(s => ({ account: accountRef(s.accountId), status: s.status })) : undefined,
   }
 }
 // A single tag, serialized the same way whether it comes back from create,
