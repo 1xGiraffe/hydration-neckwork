@@ -26,12 +26,31 @@ const SENT = {
   messageId: `0x${'33'.repeat(32)}`,
 }
 
+// The pre-MessageQueue-migration event name, XTokens.TransferredMultiAssets, carries
+// the same sender/assets/fee/dest payload in the era's own MultiLocation encoding.
+// This is the verbatim args_json of Hydration's oldest such event (block 1,675,796):
+// DOT (parents:1, Here) to Acala (2000), with the V1 junction's nested network field.
+const XTOKENS_MULTI_V1 = {
+  sender: `0x${'f4'.repeat(32)}`,
+  assets: [{ id: { __kind: 'Concrete', value: { parents: 1, interior: { __kind: 'Here' } } }, fun: { __kind: 'Fungible', value: '200000000' } }],
+  fee: { id: { __kind: 'Concrete', value: { parents: 1, interior: { __kind: 'Here' } } }, fun: { __kind: 'Fungible', value: '200000000' } },
+  dest: { parents: 1, interior: { __kind: 'X2', value: [{ __kind: 'Parachain', value: 2000 }, { network: { __kind: 'Any' }, id: `0x${'f4'.repeat(32)}`, __kind: 'AccountId32' }] } },
+}
+
 describe('parseOutboundXcm', () => {
   it('parses the legacy XTokens.TransferredAssets shape', () => {
     const p = parseOutboundXcm(XTOKENS)!
     expect(p.sender).toBe(LEGACY_SENDER)
     expect(p.amounts).toEqual(['1000'])
     expect(p.dest.destParachainId).toBe(1000)
+  })
+
+  it('parses the pre-migration XTokens.TransferredMultiAssets V1 shape', () => {
+    const p = parseOutboundXcm(XTOKENS_MULTI_V1)!
+    expect(p.sender).toBe(`0x${'f4'.repeat(32)}`)
+    expect(p.amounts).toEqual(['200000000'])
+    expect(p.dest.destParachainId).toBe(2000)
+    expect(p.dest.destAccount?.accountId).toBe(`0x${'f4'.repeat(32)}`)
   })
 
   it('parses the PolkadotXcm.Sent shape: sender from the origin junction, amounts from the message', () => {

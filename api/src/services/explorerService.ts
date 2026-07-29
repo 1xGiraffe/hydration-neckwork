@@ -7259,7 +7259,7 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
     let pageState: { scanned: number; cursor: { blockHeight: number; eventIndex: number } | null } = { scanned: 0, cursor: null }
     const fetchPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
       const senderRefsFilter = acctList
-        ? `AND ${accountActivityRefsSql(accounts!, `event_name IN ('XTokens.TransferredAssets','PolkadotXcm.Sent')`, pageBound, pageLimit)}`
+        ? `AND ${accountActivityRefsSql(accounts!, `event_name IN (${XCM_SENT_EVENTS_SQL})`, pageBound, pageLimit)}`
         : ''
       // raw_xcm_activity is ordered (block_height, source_kind, source_index, name), so
       // this page's `block_height DESC, event_index DESC` is not a readable key order and
@@ -7275,7 +7275,7 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
       // `source_kind='event'` row, so the payload pass returns exactly the key pass's
       // rows, in the same order.
       const pageOrder = 'ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}'
-      const xcmRows = `source_kind='event' AND name IN ('XTokens.TransferredAssets','PolkadotXcm.Sent') AND event_index IS NOT NULL`
+      const xcmRows = `source_kind='event' AND name IN (${XCM_SENT_EVENTS_SQL}) AND event_index IS NOT NULL`
       const candidateBound = `${pageBound} ${senderRefsFilter} AND ${xcmRows} ${senderFilter}`
       const rowBound = acctList
         ? candidateBound
@@ -7316,7 +7316,7 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
             query: `SELECT DISTINCT block_height, extrinsic_index
                     FROM price_data.raw_xcm_activity
                     WHERE block_height IN {blocks:Array(UInt32)} AND source_kind='event'
-                      AND name='XTokens.TransferredAssets'`,
+                      AND name IN (${XCM_SENT_XTOKENS_EVENTS_SQL})`,
             query_params: { blocks: chunk },
             format: 'JSONEachRow',
           }),
@@ -7365,28 +7365,67 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
   })
 }
 
-// The MessageQueue.Processed barrier every XCM decode below pairs its legs with.
-// Three of its fields are read — success, the message topic id, and the origin
+// The barrier events every XCM decode below pairs its legs with. MessageQueue.Processed
+// closes every inbound message since the MessageQueue runtime migration (block
+// 5,433,625); before it, DMP messages from the relay closed with
+// DmpQueue.ExecutedDownward and HRMP messages from sibling parachains with
+// XcmpQueue.Success/Fail — a decode that only knows the new barrier drops every
+// pre-migration cross-chain transfer (~120k messages) on the floor. Nothing predates
+// these four: before the first XcmpQueue/DmpQueue event (block 1,439,879) not one
+// user-account hook deposit shares a block with a downward message — measured, all
+// 24,800 of them are on-initialize reward/vesting credits, not XCM.
+const XCM_BARRIER_EVENTS = ['MessageQueue.Processed', 'DmpQueue.ExecutedDownward', 'XcmpQueue.Success', 'XcmpQueue.Fail']
+const XCM_BARRIER_EVENTS_SQL = XCM_BARRIER_EVENTS.map(n => `'${n}'`).join(',')
+// Outbound send events. XTokens emitted TransferredMultiAssets until the same
+// MessageQueue migration renamed it TransferredAssets; both carry the identical
+// sender/assets/fee/dest payload (parseOutboundXcm's legacy branch), so every
+// consumer treats the two names as one event.
+const XCM_SENT_XTOKENS_EVENTS = ['XTokens.TransferredAssets', 'XTokens.TransferredMultiAssets']
+const XCM_SENT_XTOKENS_EVENTS_SQL = XCM_SENT_XTOKENS_EVENTS.map(n => `'${n}'`).join(',')
+const XCM_SENT_EVENTS_SQL = [...XCM_SENT_XTOKENS_EVENTS, 'PolkadotXcm.Sent'].map(n => `'${n}'`).join(',')
+const isXTokensSentEvent = (name: string): boolean => XCM_SENT_XTOKENS_EVENTS.includes(name)
+// Three of a barrier's fields are read — success, the message topic id, and the origin
 // network — and `weightUsed`, which none of them reads, is about half the payload.
 // Extract the three in SQL: the barrier is read for every block of every XCM page
 // and account feed, 164,581 times over two weeks for 20.78 GiB of result bytes,
 // and shipping the payload bought nothing but a JSON.parse per barrier row.
 interface XcmBarrierRow { block_height: number; ts: string; event_index: number; succeeded: boolean; message_id: string; origin_kind: string; origin_value: number }
-// `succeeded` is "not explicitly false", the same reading the decode had when it
-// held the parsed payload: a barrier that stops naming its outcome is still a
-// barrier, and dropping it would drop the credits it terminates.
+// `succeeded` per barrier era: MessageQueue names it in `success`; DmpQueue names it
+// in `outcome.__kind` (anything but Complete executed partially or not at all);
+// XcmpQueue splits it across two event names. The default stays "not explicitly
+// false": a barrier that stops naming its outcome is still a barrier, and dropping
+// it would drop the credits it terminates.
+// `message_id`: MessageQueue `id`, DmpQueue/XcmpQueue `messageId`/`messageHash` —
+// and the oldest XcmpQueue.Success rows are a bare JSON string holding the hash.
+// `origin`: only MessageQueue carries one. DMP is from the relay by construction;
+// an XCMP barrier is from a sibling parachain the old event never names.
 const XCM_BARRIER_COLUMNS = `block_height, toString(block_timestamp) AS ts, event_index,
-              if(JSONHas(args_json,'success'), JSONExtractBool(args_json,'success'), 1) AS succeeded,
-              JSONExtractString(args_json,'id') AS message_id,
-              JSONExtractString(args_json,'origin','__kind') AS origin_kind,
+              multiIf(
+                event_name = 'DmpQueue.ExecutedDownward', toUInt8(JSONExtractString(args_json,'outcome','__kind') = 'Complete'),
+                event_name = 'XcmpQueue.Fail', toUInt8(0),
+                JSONHas(args_json,'success'), toUInt8(JSONExtractBool(args_json,'success')),
+                toUInt8(1)) AS succeeded,
+              multiIf(
+                JSONType(args_json) = 'String', JSONExtractString(args_json),
+                JSONHas(args_json,'id'), JSONExtractString(args_json,'id'),
+                JSONHas(args_json,'messageId'), JSONExtractString(args_json,'messageId'),
+                JSONExtractString(args_json,'messageHash')) AS message_id,
+              multiIf(
+                event_name = 'DmpQueue.ExecutedDownward', 'Parent',
+                event_name IN ('XcmpQueue.Success','XcmpQueue.Fail'), 'SiblingUnknown',
+                JSONExtractString(args_json,'origin','__kind')) AS origin_kind,
               JSONExtractUInt(args_json,'origin','value') AS origin_value`
-// Origin network of an inbound XCM message (MessageQueue.Processed `origin`).
+// Origin network of an inbound XCM message (MessageQueue.Processed `origin`, or
+// synthesized from the barrier's event name for the pre-MessageQueue eras).
 function xcmOrigin(barrier: Pick<XcmBarrierRow, 'origin_kind' | 'origin_value'>): Pick<ActivityRow, 'fromChain' | 'fromParachainId'> {
   if (barrier.origin_kind === 'Parent') return { fromChain: RELAY_XCM_NETWORK.name, fromParachainId: null }
   if (barrier.origin_kind === 'Sibling') {
     const id = barrier.origin_value
     return { fromChain: (PARACHAIN_META[id] ?? { name: `Parachain ${id}` }).name, fromParachainId: id }
   }
+  // Pre-MessageQueue XCMP: the sender is some sibling parachain, but the old event
+  // carries no identity — say "Parachain" and no more rather than fabricate one.
+  if (barrier.origin_kind === 'SiblingUnknown') return { fromChain: 'Parachain', fromParachainId: null }
   return {}
 }
 // The topic id as the explorer links it: a barrier without a hex topic has none.
@@ -7395,7 +7434,8 @@ function xcmMessageId(barrier: Pick<XcmBarrierRow, 'message_id'>): string | null
 }
 
 // Inbound XCM detection. An incoming message executes outside any extrinsic and
-// ends with a MessageQueue.Processed event naming the origin chain. The
+// ends with a barrier event (XCM_BARRIER_EVENTS — MessageQueue.Processed names
+// the origin chain; the pre-migration barriers name at most the relay). The
 // beneficiary credit is the run of deposit events directly before that barrier:
 // walk back while events stay in the deposit family, keep non-module/
 // non-sovereign recipients, and fold the Currencies/Tokens/Balances mirror
@@ -7458,7 +7498,7 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
     client.query({
       query: `SELECT ${XCM_BARRIER_COLUMNS}
               FROM ${xcmEventActivityTable()}
-              WHERE block_height IN (${list}) AND event_name = 'MessageQueue.Processed' AND extrinsic_index IS NULL
+              WHERE block_height IN (${list}) AND event_name IN (${XCM_BARRIER_EVENTS_SQL}) AND extrinsic_index IS NULL
               ORDER BY block_height DESC, event_index DESC`,
       format: 'JSONEachRow',
     }),
@@ -7554,7 +7594,7 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
 // no PolkadotXcm.Sent) that withdraws from a local account and parks the funds
 // in the initiating chain's sovereign — e.g. HOLLAR pulled to AssetHub from
 // the AssetHub side. Detected as hook-context Currencies.Withdrawn rows
-// attributed to the next successful MessageQueue.Processed in the block; the
+// attributed to the next successful barrier event in the block; the
 // message origin is where the funds went. Fee withdrawals of the same message
 // surface as their own (small) rows — factual parts of the remote operation.
 async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, PriceInfo>, whoIn?: Set<string>): Promise<ActivityRow[]> {
@@ -7564,7 +7604,7 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
     client.query({
       query: `SELECT ${XCM_BARRIER_COLUMNS}
               FROM ${xcmEventActivityTable()}
-              WHERE block_height IN (${list}) AND event_name = 'MessageQueue.Processed' AND extrinsic_index IS NULL
+              WHERE block_height IN (${list}) AND event_name IN (${XCM_BARRIER_EVENTS_SQL}) AND extrinsic_index IS NULL
               ORDER BY block_height DESC, event_index ASC`,
       format: 'JSONEachRow',
     }),
@@ -9113,7 +9153,7 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
               FROM price_data.raw_xcm_activity
               WHERE (block_height, extrinsic_index) IN (${tuples.join(',')})
                 AND source_kind='event'
-                AND name IN ('XTokens.TransferredAssets','PolkadotXcm.Sent')`,
+                AND name IN (${XCM_SENT_EVENTS_SQL})`,
       format: 'JSONEachRow',
     })
     return result.json<{ block_height: number; extrinsic_index: number | null }>()
@@ -10515,8 +10555,8 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
 
     // Outbound XCM in either shape; when an extrinsic emits both (XTokens routed
     // through pallet_xcm) the legacy event wins so the transfer isn't doubled.
-    const xcmEvents = events.filter(e => e.event_name === 'XTokens.TransferredAssets' || e.event_name === 'PolkadotXcm.Sent')
-    const xcmLegacyExts = new Set(xcmEvents.filter(e => e.event_name === 'XTokens.TransferredAssets').map(e => `${e.block_height}:${e.extrinsic_index}`))
+    const xcmEvents = events.filter(e => isXTokensSentEvent(e.event_name) || e.event_name === 'PolkadotXcm.Sent')
+    const xcmLegacyExts = new Set(xcmEvents.filter(e => isXTokensSentEvent(e.event_name)).map(e => `${e.block_height}:${e.extrinsic_index}`))
     for (const e of xcmEvents) {
       if (e.event_name === 'PolkadotXcm.Sent' && xcmLegacyExts.has(`${e.block_height}:${e.extrinsic_index}`)) continue
       const parsed = parseOutboundXcm(safeJson(e.args_json))
@@ -11321,7 +11361,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
           INNER JOIN ${xcmEventActivityTable('x')}
             ON x.block_height = w.block_height
            AND x.extrinsic_index = w.extrinsic_index
-           AND x.event_name IN ('XTokens.TransferredAssets','PolkadotXcm.Sent')
+           AND x.event_name IN (${XCM_SENT_EVENTS_SQL})
           ${xcmValueFilter.joinSql}
           WHERE ${tw ? tw.replaceAll('block_timestamp', 'w.block_timestamp') : '1'}
             AND w.event_name = 'Currencies.Withdrawn'
@@ -14531,7 +14571,7 @@ const VALUE_EVENT_LIQUIDITY_NAMES = [
 ]
 // Cross-chain movements are indexed as deposit/withdraw events, not transfers:
 // an inbound XCM credit is a hook-context Currencies/Tokens.Deposited in a
-// MessageQueue.Processed block; an outbound send is the Currencies/Tokens.
+// barrier block (XCM_BARRIER_EVENTS); an outbound send is the Currencies/Tokens.
 // Withdrawn of an XTokens/PolkadotXcm extrinsic (user-sent) or a hook-context
 // one in a barrier block (remote-initiated pull).
 const VALUE_EVENT_XCM_IN_NAMES = ['Currencies.Deposited', 'Tokens.Deposited']
@@ -14664,9 +14704,9 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
     // remote-initiated pulls execute in hook context inside a MessageQueue.
     // Processed block; user-sent outbound withdrawals live in an XTokens/
     // pallet-xcm extrinsic (see VALUE_EVENT_XCM_* above).
-    const xcmSentEventNames = `'XTokens.TransferredAssets','PolkadotXcm.Sent'`
+    const xcmSentEventNames = XCM_SENT_EVENTS_SQL
     const xcmBarrierBlocksSql = `SELECT block_height FROM ${xcmEventActivityTable()}
-                    WHERE event_name = 'MessageQueue.Processed' AND extrinsic_index IS NULL AND (${windowCondFor('block_height')})`
+                    WHERE event_name IN (${XCM_BARRIER_EVENTS_SQL}) AND extrinsic_index IS NULL AND (${windowCondFor('block_height')})`
     const xcmSentPairsSql = `SELECT block_height, assumeNotNull(extrinsic_index) FROM price_data.raw_xcm_activity
                     WHERE source_kind = 'event' AND name IN (${xcmSentEventNames})
                       AND extrinsic_index IS NOT NULL AND (${windowCondFor('block_height')})`
@@ -15022,7 +15062,7 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
       for (const r of xcmSentRows) {
         const key = `${r.block_height}:${r.extrinsic_index}`
         const cur = xcmSentByExtrinsic.get(key)
-        if (!cur || (cur.name !== 'XTokens.TransferredAssets' && r.name === 'XTokens.TransferredAssets')) {
+        if (!cur || (!isXTokensSentEvent(cur.name) && isXTokensSentEvent(r.name))) {
           xcmSentByExtrinsic.set(key, { eventIndex: Number(r.event_index), name: r.name })
         }
       }

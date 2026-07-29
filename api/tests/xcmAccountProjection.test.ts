@@ -132,23 +132,46 @@ describe('the account-scoped XCM readers use the account-first projection', () =
       expect(occurrences(body, `safeJson(${row}.args_json)`), site).toBe(0)
       expect(occurrences(body, 'args.currencyId'), site).toBe(0)
       // No decoder ships or parses a payload any more: the barrier read names the shared
-      // extracted projection and nothing here touches args_json.
-      expect(occurrences(body, "event_name = 'MessageQueue.Processed'"), site).toBe(1)
+      // extracted projection and nothing here touches args_json. The name list covers
+      // both runtime eras (XCM_BARRIER_EVENTS), never the new barrier alone.
+      expect(occurrences(body, 'event_name IN (${XCM_BARRIER_EVENTS_SQL})'), site).toBe(1)
       expect(occurrences(body, '${XCM_BARRIER_COLUMNS}'), site).toBe(1)
       expect(occurrences(body, 'event_index, args_json'), site).toBe(0)
       expect(occurrences(body, '.args_json'), site).toBe(0)
       expect(occurrences(body, `safeJson(${barrier}.args_json)`), site).toBe(0)
     }
-    // The barrier projection states exactly the three fields the decodes read, and a
-    // barrier that stops naming its outcome stays a barrier rather than being dropped.
+    // The barrier projection states exactly the three fields the decodes read, era-aware:
+    // success comes from MessageQueue's `success`, DmpQueue's `outcome.__kind` (only
+    // Complete executed) or XcmpQueue's event name; the topic id falls back through the
+    // old events' messageId/messageHash — including the oldest XcmpQueue rows whose
+    // args are a bare JSON string holding the hash; and the origin is synthesized for
+    // the eras whose events never carried one (DMP is from the relay by construction).
+    // A barrier that stops naming its outcome stays a barrier rather than being dropped.
     const columns = explorerService.slice(
       explorerService.indexOf('const XCM_BARRIER_COLUMNS'),
       explorerService.indexOf('function xcmOrigin'))
-    expect(columns).toContain("if(JSONHas(args_json,'success'), JSONExtractBool(args_json,'success'), 1) AS succeeded")
-    expect(columns).toContain("JSONExtractString(args_json,'id') AS message_id")
-    expect(columns).toContain("JSONExtractString(args_json,'origin','__kind') AS origin_kind")
+    expect(columns).toContain("event_name = 'DmpQueue.ExecutedDownward', toUInt8(JSONExtractString(args_json,'outcome','__kind') = 'Complete')")
+    expect(columns).toContain("event_name = 'XcmpQueue.Fail', toUInt8(0)")
+    expect(columns).toContain("JSONHas(args_json,'success'), toUInt8(JSONExtractBool(args_json,'success'))")
+    expect(columns).toContain("JSONType(args_json) = 'String', JSONExtractString(args_json)")
+    expect(columns).toContain("JSONHas(args_json,'id'), JSONExtractString(args_json,'id')")
+    expect(columns).toContain("JSONHas(args_json,'messageId'), JSONExtractString(args_json,'messageId')")
+    expect(columns).toContain("JSONExtractString(args_json,'messageHash')) AS message_id")
+    expect(columns).toContain("event_name = 'DmpQueue.ExecutedDownward', 'Parent'")
+    expect(columns).toContain("event_name IN ('XcmpQueue.Success','XcmpQueue.Fail'), 'SiblingUnknown'")
     expect(columns).toContain("JSONExtractUInt(args_json,'origin','value') AS origin_value")
     expect(occurrences(explorerService, '${XCM_BARRIER_COLUMNS}')).toBe(2)
+    // The unidentified-sibling origin renders as a plain "Parachain", never a made-up id.
+    const origin = functionBody('xcmOrigin')
+    expect(origin).toContain("if (barrier.origin_kind === 'SiblingUnknown') return { fromChain: 'Parachain', fromParachainId: null }")
+    // No barrier consumer anywhere still filters on the new-era name alone, and no
+    // outbound consumer names the renamed XTokens event without its pre-migration twin.
+    expect(occurrences(explorerService, "event_name = 'MessageQueue.Processed'")).toBe(0)
+    expect(occurrences(explorerService, "'XTokens.TransferredAssets','PolkadotXcm.Sent'")).toBe(0)
+    expect(occurrences(explorerService, "name='XTokens.TransferredAssets'")).toBe(0)
+    // Exactly the barrier sites read the era-wide list: the two block decoders + the
+    // value-events gate, plus the definition itself.
+    expect(occurrences(explorerService, 'XCM_BARRIER_EVENTS_SQL')).toBe(4)
   })
 
   // The inbound deposit run is the one read that has to see a block's WHOLE run, so it can
@@ -271,7 +294,12 @@ describe('the three XCM materialized views cannot drift apart', () => {
     const parent = selectAndWhere('xcm_event_activity_mv')
     const child = selectAndWhere('xcm_event_activity_by_account_mv')
     expect(child.where).toBe(parent.where)
-    expect(occurrences(parent.where, "'")).toBe(24) // twelve event names
+    expect(occurrences(parent.where, "'")).toBe(32) // sixteen event names
+    // Both runtime eras' barriers and sends, so pre-MessageQueue (block 5,433,625)
+    // cross-chain history exists in the read model at all.
+    for (const name of ['DmpQueue.ExecutedDownward', 'XcmpQueue.Success', 'XcmpQueue.Fail', 'XTokens.TransferredMultiAssets']) {
+      expect(parent.where).toContain(`'${name}'`)
+    }
   })
 
   // The sibling projects args_json away and reorders to lead with its sort key; every
@@ -302,7 +330,7 @@ describe('the three XCM materialized views cannot drift apart', () => {
     // the parent holds too — which is what makes the set-equality check meaningful.
     const parent = selectAndWhere('xcm_event_activity_mv')
     for (const name of names) expect(parent.where, name).toContain(`'${name}'`)
-    expect(occurrences(parent.where, "'")).toBe(24)
+    expect(occurrences(parent.where, "'")).toBe(32)
   })
 
   it('extracts the walk projection with the parent view expressions', () => {
