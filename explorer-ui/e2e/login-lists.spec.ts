@@ -572,21 +572,30 @@ test('create a list, tag a known address, and reorder', async ({ page, userMock 
   await expect(tagPanel).not.toContainText('No accounts yet')
 
   await page.goto('/lists')
-  // The built-in 'system' slot is a real, draggable/reorderable row too (see
-  // the drag-reorder test below) — the ▲▼ buttons commit the FULL resolved
-  // order, system included, not just the two real list ids clicked past.
-  await page.locator('tbody tr', { hasText: 'E2E List' }).locator('button[aria-label="Move up"]').click()
+  // New user request: the ▲▼ buttons are gone — each row's own drag handle
+  // is a real, focusable <button> instead, and ArrowUp/ArrowDown while it's
+  // focused is the keyboard path (dragging itself isn't reliably driveable
+  // by keyboard). The built-in 'system' slot is a real, draggable/
+  // reorderable row too (see the drag-reorder test below) — this commits the
+  // FULL resolved order, system included, not just the two real list ids
+  // moved past.
+  await page.locator('tbody tr', { hasText: 'E2E List' }).getByRole('button', { name: 'Reorder E2E List' }).focus()
+  await page.keyboard.press('ArrowUp')
   await expect.poll(() => userMock.state.order).toEqual(['list-2', 'seed', 'system'])
 })
 
-// New user request: rows can be reordered by dragging, in addition to the
-// ▲▼ buttons above — same underlying commit (`PUT /user/list-order`), just a
-// different gesture. Playwright's `dragTo` drives a real HTML5 drag over
-// Chromium (dispatching dragstart/dragover/drop, not synthetic events this
-// spec constructs itself), so this exercises the actual `<tr draggable>`
-// wiring in Lists.tsx rather than assuming it works because the unit-level
-// shape matches ListDetail's chip precedent.
-test('drags a row to reorder the list, including the system row, and commits the full order', async ({ page, userMock }) => {
+// New user request: rows can be reordered by dragging their own handle, in
+// addition to the keyboard path above — same underlying commit
+// (`PUT /user/list-order`), just a different gesture. Playwright's `dragTo`
+// drives a real HTML5 drag over Chromium (dispatching dragstart/dragover/
+// drop, not synthetic events this spec constructs itself), so this exercises
+// the actual `<button className="row-handle" draggable>` wiring in
+// Lists.tsx rather than assuming it works because the unit-level shape
+// matches ListDetail's chip precedent. Dragging from the HANDLE rather than
+// the row itself is also what keeps the row's own name link — a native
+// anchor, draggable by the browser on its own — from ever competing with
+// this gesture for the same mouse-down.
+test('drags a row\'s handle to reorder the list, including the system row, and commits the full order', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   userMock.state.lists.push(
     { listId: 'lib-a', name: 'Alpha', note: '', visibility: 'private', isPersonal: false, owner: userMock.state.account, tagCount: 0, accountCount: 0, subscriberCount: 2, tags: [] },
@@ -605,8 +614,11 @@ test('drags a row to reorder the list, including the system row, and commits the
   await expect(page.locator('tbody tr', { hasText: 'Bravo' }).locator('td[data-label="Subscribers"]')).toHaveText('7')
   await expect(page.locator('tbody tr', { hasText: 'Hydration tags' }).locator('td[data-label="Subscribers"]')).toHaveText('—')
 
+  // No ▲▼ buttons left in the Order/Reorder column — just the one handle.
+  await expect(page.locator('tbody tr', { hasText: 'Alpha' }).getByRole('button', { name: 'Move up' })).toHaveCount(0)
+
   // Starting order is Alpha, Bravo, system (creation order). Drag the system
-  // row up to the top, past both real lists.
+  // row's handle up to the top, past both real lists.
   let orderRequestBody: { listIds: string[] } | null = null
   await page.route(/\/api\/user\/list-order$/, async route => {
     orderRequestBody = route.request().postDataJSON()
@@ -614,7 +626,7 @@ test('drags a row to reorder the list, including the system row, and commits the
   })
 
   const systemRow = page.locator('tbody tr', { hasText: 'Hydration tags' })
-  await systemRow.dragTo(rows.first())
+  await systemRow.getByRole('button', { name: 'Reorder Hydration tags' }).dragTo(rows.first())
 
   await expect.poll(() => orderRequestBody).toEqual({ listIds: ['system', 'lib-a', 'lib-b'] })
   await expect.poll(() => userMock.state.order).toEqual(['system', 'lib-a', 'lib-b'])
@@ -622,9 +634,10 @@ test('drags a row to reorder the list, including the system row, and commits the
   // the system row now reads first.
   await expect(rows.first()).toContainText('Hydration tags')
 
-  // The ▲▼ buttons keep working against this CURRENT (dragged) order, not
-  // the order the page loaded with.
-  await rows.nth(1).locator('button[aria-label="Move up"]').click()
+  // The keyboard path keeps working against this CURRENT (dragged) order,
+  // not the order the page loaded with.
+  await rows.nth(1).getByRole('button', { name: 'Reorder Alpha' }).focus()
+  await page.keyboard.press('ArrowUp')
   await expect.poll(() => userMock.state.order).toEqual(['lib-a', 'system', 'lib-b'])
 })
 

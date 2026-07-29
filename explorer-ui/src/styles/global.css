@@ -244,7 +244,19 @@ body {
   min-height: 100vh;
 }
 a { color: inherit; text-decoration: none; }
-button { all: unset; box-sizing: border-box; cursor: pointer; font-family: inherit; }
+/* :not(:where(.row-handle)) — Lists.tsx's drag handle deliberately opts OUT
+   of this reset. `all: unset` resets some internal, non-visual button
+   property Chromium's native drag-initiation heuristic keys off (confirmed
+   empirically: an explicit, enumerated reset of the same VISUAL properties
+   keeps a draggable button draggable; the `all: unset` shorthand alone does
+   not, regardless of which other properties ride along with it). The handle
+   gets its own equivalent reset below instead. The :where() wrapper matters:
+   a bare `:not(.row-handle)` would raise this selector's specificity from
+   (0,0,1) to (0,1,1) — enough to start beating every OTHER button's own
+   single-class override of this same reset (e.g. .acct-picker-row), since
+   :where()'s zero-specificity contribution is exactly what keeps `:not()`'s
+   specificity at the plain type selector's (0,0,1) it had before. */
+button:not(:where(.row-handle)) { all: unset; box-sizing: border-box; cursor: pointer; font-family: inherit; }
 svg { display: block; }
 /* `all: unset` also removes the browser's keyboard focus ring. Restore one
    consistently for every native or explicitly focusable control. */
@@ -642,15 +654,34 @@ svg { display: block; }
 .tbl tbody tr { transition: background 120ms; }
 .tbl tbody tr.clickable { cursor: pointer; }
 .tbl tbody tr.clickable:hover { background: var(--panel-hover); }
-/* Drag-reorderable rows (Lists.tsx's "Your lists"): same static outline/opacity
-   affordance as a tag's draggable member chips (see .tag-member-chip-draggable
-   below) — the whole row is the drag source, a grab cursor its only decoration,
-   so links/buttons inside (which set their own `cursor: pointer`) still read as
-   clickable. No transition on either state, so both read correctly under
+/* Drag-reorderable rows (Lists.tsx's "Your lists"): the dedicated .row-handle
+   button below is the drag source, not the row — dragging it dims the whole
+   row so the thing actually moving reads clearly, and a hovered drop target
+   outlines. No transition on either state, so both read correctly under
    prefers-reduced-motion without a separate override. */
-.tbl tbody tr.row-draggable { cursor: grab; }
-.tbl tbody tr.row-dragging { opacity: 0.5; cursor: grabbing; }
+.tbl tbody tr.row-dragging { opacity: 0.5; }
 .tbl tbody tr.row-drag-over { outline: 2px solid var(--sky); outline-offset: -2px; }
+/* The handle itself: muted like other secondary affordances (.muted), a grab
+   cursor its only decoration — same static, transition-free recipe as
+   .tag-member-chip-draggable's cursor swap, so it also reads correctly under
+   prefers-reduced-motion. Sized for a comfortable tap target at 390px, not
+   just desktop pointer precision. Reset by hand (NOT via the global
+   `button:not(.row-handle) { all: unset; ... }` rule above) — see that
+   rule's own comment for why `all: unset` specifically defeats this
+   button's draggability. */
+.row-handle {
+  box-sizing: border-box; background: none; border: none; padding: 0; margin: 0;
+  appearance: none; font-family: inherit;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: 8px;
+  color: var(--text-low); font-size: 15px; line-height: 1; letter-spacing: -1px;
+  cursor: grab;
+}
+.row-handle:hover:not(:disabled) { color: var(--text-high); background: var(--panel-hover); }
+.row-handle:active:not(:disabled) { cursor: grabbing; }
+.row-handle:disabled { opacity: 0.35; cursor: not-allowed; }
+.row-handle:focus { outline: none; }
+.row-handle:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
 /* Low-/zero-value Activity is de-emphasised so high-value rows stand out;
    hovering restores full opacity for readability. */
 .tbl tbody tr.dim { opacity: .5; transition: opacity 120ms, background 120ms; }

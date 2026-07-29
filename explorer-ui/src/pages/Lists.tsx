@@ -53,6 +53,13 @@ function swapNeighbor(order: string[], id: string, dir: -1 | 1): string[] {
   return next
 }
 
+// The handle's own accessible name — same row label a screen reader would
+// already be reading from the List cell, so "Reorder <name>" identifies
+// WHICH row's handle this is without repeating the whole cell's markup.
+function rowLabel(row: Row): string {
+  return row.kind === 'system' ? 'Hydration tags' : row.lib.name
+}
+
 function YourLists({ me }: { me: MeResponse }) {
   const orderMutation = useUserMutation(userApi.setOrder)
   // The fixed system row has no ListSummaryRef of its own — its counts come
@@ -103,7 +110,12 @@ function YourLists({ me }: { me: MeResponse }) {
     }
   }
   function move(id: string, dir: -1 | 1) {
-    void commitOrder(swapNeighbor(order, id, dir))
+    // swapNeighbor hands back the SAME array reference when `id` is already
+    // at that edge (see its own early return) — that reference equality is
+    // the no-op signal, so ArrowUp on the top row / ArrowDown on the bottom
+    // one never fires a pointless PUT.
+    const next = swapNeighbor(order, id, dir)
+    if (next !== order) void commitOrder(next)
   }
   function dropOn(targetId: string) {
     setDraggingId(null); setDragOverId(null)
@@ -121,47 +133,75 @@ function YourLists({ me }: { me: MeResponse }) {
     <>
       <div className="sec-title">Your lists</div>
       <div className="panel"><table className="tbl">
-        <thead><tr><th>List</th><th className="r">Tags</th><th className="r">Accounts</th><th className="r">Subscribers</th><th className="r">Order</th></tr></thead>
+        {/* No visible label: a bare handle column reads fine on its own, and
+            every handle names its OWN row via aria-label below — an
+            "Reorder" header would only repeat that. The aria-label here is
+            purely for a screen reader moving header-by-header across the
+            row (table navigation), not a visual caption. */}
+        <thead><tr><th>List</th><th className="r">Tags</th><th className="r">Accounts</th><th className="r">Subscribers</th><th className="r" aria-label="Reorder"></th></tr></thead>
         <tbody>
-          {displayRows.map((row, i) => (
-            <tr
-              key={row.id}
-              draggable={!locked}
-              className={`row-draggable${draggingId === row.id ? ' row-dragging' : ''}${dragOverId === row.id && draggingId !== row.id ? ' row-drag-over' : ''}`}
-              onDragStart={() => !locked && setDraggingId(row.id)}
-              onDragEnd={() => { setDraggingId(null); setDragOverId(null) }}
-              onDragOver={e => { if (draggingId && draggingId !== row.id && !locked) { e.preventDefault(); setDragOverId(row.id) } }}
-              onDragLeave={() => setDragOverId(prev => (prev === row.id ? null : prev))}
-              onDrop={e => { e.preventDefault(); if (!locked) dropOn(row.id) }}
-            >
-              <td data-label="List">
-                {row.kind === 'system' ? (
-                  <Link to={paths.tagsHydration()} className="addr-pill">
-                    <span className="tag">Hydration tags</span>
-                  </Link>
-                ) : (
-                  <>
-                    <Link to={paths.list(row.lib.listId)} className="addr-pill">
-                      <span className="tag">{row.lib.name}</span>
-                    </Link>{' '}
-                    {visibilityChip(row.lib)}
-                    {!row.owned && <span className="muted" style={{ marginLeft: 6, fontSize: 11 }}>subscribed</span>}
-                  </>
-                )}
-              </td>
-              <td data-label="Tags" className="r mono">{row.kind === 'list' ? row.lib.tagCount : systemTagCount ?? '—'}</td>
-              <td data-label="Accounts" className="r mono">{row.kind === 'list' ? row.lib.accountCount : systemAccountCount ?? '—'}</td>
-              <td data-label="Subscribers" className="r mono">{row.kind === 'list' ? row.lib.subscriberCount : '—'}</td>
-              <td data-label="Order" className="r">
-                <button type="button" className="btn sm" aria-label="Move up" disabled={i === 0 || locked} onClick={() => move(row.id, -1)}>▲</button>{' '}
-                <button type="button" className="btn sm" aria-label="Move down" disabled={i === displayRows.length - 1 || locked} onClick={() => move(row.id, 1)}>▼</button>
-              </td>
-            </tr>
-          ))}
+          {displayRows.map(row => {
+            const dragging = draggingId === row.id
+            const dragOver = dragOverId === row.id && draggingId !== row.id
+            return (
+              <tr
+                key={row.id}
+                className={dragging ? 'row-dragging' : dragOver ? 'row-drag-over' : undefined}
+                onDragOver={e => { if (draggingId && draggingId !== row.id && !locked) { e.preventDefault(); setDragOverId(row.id) } }}
+                onDragLeave={() => setDragOverId(prev => (prev === row.id ? null : prev))}
+                onDrop={e => { e.preventDefault(); if (!locked) dropOn(row.id) }}
+              >
+                <td data-label="List">
+                  {row.kind === 'system' ? (
+                    <Link to={paths.tagsHydration()} className="addr-pill">
+                      <span className="tag">Hydration tags</span>
+                    </Link>
+                  ) : (
+                    <>
+                      <Link to={paths.list(row.lib.listId)} className="addr-pill">
+                        <span className="tag">{row.lib.name}</span>
+                      </Link>{' '}
+                      {visibilityChip(row.lib)}
+                      {!row.owned && <span className="muted" style={{ marginLeft: 6, fontSize: 11 }}>subscribed</span>}
+                    </>
+                  )}
+                </td>
+                <td data-label="Tags" className="r mono">{row.kind === 'list' ? row.lib.tagCount : systemTagCount ?? '—'}</td>
+                <td data-label="Accounts" className="r mono">{row.kind === 'list' ? row.lib.accountCount : systemAccountCount ?? '—'}</td>
+                <td data-label="Subscribers" className="r mono">{row.kind === 'list' ? row.lib.subscriberCount : '—'}</td>
+                <td data-label="Reorder" className="r">
+                  {/* The handle — not the row — is the drag origin: dragging
+                      starts only from this glyph, so the List cell's own
+                      link (natively draggable, like any <a>) never competes
+                      with it for the gesture. Native <button> semantics keep
+                      it in the normal tab order and give ArrowUp/ArrowDown a
+                      focused element to act on, mirroring the tag-member
+                      chip's Alt+Arrow keyboard fallback (ListDetail.tsx) —
+                      unmodified arrows here, since this control has no other
+                      use for them. */}
+                  <button
+                    type="button"
+                    className="row-handle"
+                    draggable={!locked}
+                    disabled={locked}
+                    aria-label={`Reorder ${rowLabel(row)} — press ArrowUp or ArrowDown to move it`}
+                    aria-keyshortcuts="ArrowUp ArrowDown"
+                    onDragStart={() => setDraggingId(row.id)}
+                    onDragEnd={() => { setDraggingId(null); setDragOverId(null) }}
+                    onKeyDown={e => {
+                      if (locked) return
+                      if (e.key === 'ArrowUp') { e.preventDefault(); move(row.id, -1) }
+                      else if (e.key === 'ArrowDown') { e.preventDefault(); move(row.id, 1) }
+                    }}
+                  >⋮⋮</button>
+                </td>
+              </tr>
+            )
+          })}
         </tbody>
       </table></div>
       {orderError && <div className="dialog-error" style={{ marginBottom: 16 }}>{orderError}</div>}
-      <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11, marginBottom: 16 }}>Higher lists win when an account is tagged in several. Drag a row, or use ▲▼, to reorder.</div>
+      <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11, marginBottom: 16 }}>Higher lists win when an account is tagged in several. Drag a row's handle, or focus it and press ArrowUp/ArrowDown, to reorder.</div>
     </>
   )
 }
