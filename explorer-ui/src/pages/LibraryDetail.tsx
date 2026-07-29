@@ -260,7 +260,7 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
         ) : (
           <>
             <span className="t row gap6" style={{ alignItems: 'center' }}>
-              <TagIcon icon={tag.icon} title={tag.name} />
+              <TagIcon icon={tag.displayIcon} title={tag.name} />
               <span className="tag" style={{ color: tag.color }}>{tag.name}</span>
               <span className="muted" style={{ fontWeight: 400 }}>· {tag.members.length} accounts</span>
             </span>
@@ -396,7 +396,7 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
       {isError ? (
         <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Library not found</div>
       ) : isLoading || !data ? <ProfilePageSkeleton /> : (() => {
-        const icon = data.tags[0]?.icon || '🗂️'
+        const icon = data.tags[0]?.displayIcon || '🗂️'
         return (
           <>
             <div className="acct-head">

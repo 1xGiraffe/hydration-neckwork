@@ -829,7 +829,15 @@ export interface LibraryTagDetail {
   tagId: string
   name: string
   color: string
+  // The RAW stored icon — '' when unset. This is what an edit form must seed
+  // from and resubmit; `checkIcon` server-side rejects anything URL-shaped,
+  // so seeding an edit from `displayIcon` (which can be a profile-avatar URL
+  // once the first-member fallback engages) would 422 a plain rename.
   icon: string
+  // The DISPLAY icon — `icon` if set, else derived from the first member
+  // (see tagDisplayIcon server-side). Every display surface (this page's own
+  // header/pill, tag-map pills elsewhere) uses this, never `icon` directly.
+  displayIcon: string
   note: string
   members: AccountRef[]
 }

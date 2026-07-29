@@ -74,11 +74,21 @@ export function libraryDetailResponse(lib: UserLibrary, viewer: string | null) {
 }
 // A single tag, serialized the same way whether it comes back from create,
 // update, a members write, or a reorder — members as display accountRefs in
-// display order, like a detail tag. `icon` resolves the same first-member
-// fallback tagMapFor and visibleTagMembers use, so every surface that shows
-// this tag (management page, tag-map pills, aggregate page) agrees.
+// display order, like a detail tag. Ships TWO icon fields, deliberately not
+// collapsed into one: `icon` is the raw stored value (possibly '') — the
+// management page's edit form must seed from and resubmit exactly this, or
+// resubmitting the DERIVED value (which can be a profile-avatar URL once the
+// first-member fallback engages) would 422 a plain rename against
+// checkIcon's emoji-only rule, and would also silently freeze a dynamic
+// fallback into a permanent explicit icon. `displayIcon` is the resolved
+// value every display surface (this tag's header, its pill) shows — the same
+// derivation tagMapFor and visibleTagMembers apply, so all three surfaces
+// that show this tag agree on what it looks like.
 function tagRef(t: { tagId: string; name: string; color: string; icon: string; note: string; order: string[] }) {
-  return { tagId: t.tagId, name: t.name, color: t.color, icon: tagDisplayIcon(t.icon, t.order), note: t.note, members: t.order.map(accountRef) }
+  return {
+    tagId: t.tagId, name: t.name, color: t.color, icon: t.icon, displayIcon: tagDisplayIcon(t.icon, t.order),
+    note: t.note, members: t.order.map(accountRef),
+  }
 }
 
 export async function userRoutes(fastify: FastifyInstance) {

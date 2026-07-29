@@ -154,7 +154,7 @@ test('hovering a user-tag pill shows its own aggregate card, not the system tag 
     libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
     tags: [{
-      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', note: '',
+      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '',
       members: [{ accountId: TREASURY_ACCOUNT_ID, address: TREASURY_ACCOUNT_ID, emoji: '👤', tag: null }],
     }],
   })
@@ -184,7 +184,7 @@ test('a user-tag pill opens its own aggregate page, header included', async ({ p
     libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
     tags: [{
-      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', note: '',
+      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '',
       members: [{ accountId: TREASURY_ACCOUNT_ID, address: TREASURY_ACCOUNT_ID, emoji: '👤', tag: null }],
     }],
   })
@@ -217,7 +217,7 @@ test('a cold logged-in load of a user-tag URL never flashes "Tag not found" whil
     libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
     tags: [{
-      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', note: '',
+      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '',
       members: [{ accountId: TREASURY_ACCOUNT_ID, address: TREASURY_ACCOUNT_ID, emoji: '👤', tag: null }],
     }],
   })
@@ -282,7 +282,7 @@ test('the hover card shows nothing for a UUID /tag/:id link while the tag map is
     libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
     tags: [{
-      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', note: '',
+      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '',
       members: [{ accountId: TREASURY_ACCOUNT_ID, address: TREASURY_ACCOUNT_ID, emoji: '👤', tag: null }],
     }],
   })
@@ -352,7 +352,7 @@ test('the provenance pill shows a subscribed library\'s real owner, not the view
     libraryId: 'foreign-lib', name: 'Whales', note: '', visibility: 'public', isPersonal: false,
     owner: foreignOwner, tagCount: 1, accountCount: 1, subscriberCount: 5,
     tags: [{
-      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', note: '',
+      tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '',
       members: [{ accountId: TREASURY_ACCOUNT_ID, address: TREASURY_ACCOUNT_ID, emoji: '👤', tag: null }],
     }],
   })
@@ -417,7 +417,7 @@ function seedOneTagLibrary(userMock: { state: UserMockState }): void {
   userMock.state.libraries.push({
     libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 0, subscriberCount: 0,
-    tags: [{ tagId: 't1', name: 'Watch', color: '#22c55e', icon: '👀', note: '', members: [] }],
+    tags: [{ tagId: 't1', name: 'Watch', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '', members: [] }],
   })
 }
 
@@ -473,6 +473,46 @@ test('a bad address in a batch reports itself and restores the rest, without los
   await expect(tagPanel.locator('.tag-member-chips .addr-pill')).toHaveCount(2)
 })
 
+// Regression: the edit form used to seed itself from the tag's DISPLAY icon
+// (derived from the first member when the stored icon is '') and resubmit it
+// unconditionally on save — a plain rename would then either 422 (a
+// profile-avatar URL isn't emoji-shaped) or silently freeze the derived
+// emoji as a permanent explicit icon. The header still shows the derived
+// glyph; the edit field must show the RAW ('') one, and saving a rename must
+// not disturb it.
+test('editing a tag whose icon fell back to its first member seeds the raw icon, not the derived one', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  const member: AccountRef = { accountId: '0x' + '11'.repeat(32), address: '0x' + '11'.repeat(32), emoji: '🐘', tag: null }
+  userMock.state.libraries.push({
+    libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
+    owner: userMock.state.account, tagCount: 1, accountCount: 1, subscriberCount: 0,
+    tags: [{ tagId: 't1', name: 'Watch', color: '#22c55e', icon: '', displayIcon: '🐘', note: '', members: [member] }],
+  })
+
+  await page.goto('/library/lib1')
+  // A stable reference across the edit-mode transition: filtering `.panel`
+  // by `hasText: 'Watch'` stops matching once editing swaps that text for an
+  // `<input>` (input values aren't text content), and this fixture seeds
+  // exactly one tag — the only `.panel` rendered by the default 'tags' view.
+  const tagPanel = page.locator('.panel')
+  await expect(tagPanel).toHaveCount(1)
+  // The header shows the DERIVED icon (the member's emoji, not a blank tag glyph).
+  await expect(tagPanel.locator('.panel-head .emoji')).toHaveText('🐘')
+
+  await tagPanel.getByRole('button', { name: 'Edit' }).click()
+  // ...but the edit field seeds from the RAW icon ('' here), never the derived one.
+  await expect(tagPanel.locator('input[aria-label="Tag icon"]')).toHaveValue('')
+
+  await tagPanel.locator('input[aria-label="Tag name"]').fill('Watchers')
+  await tagPanel.getByRole('button', { name: 'Save' }).click()
+
+  await expect(tagPanel).not.toContainText('Could not save the tag')
+  await expect(tagPanel).toContainText('Watchers')
+  // Unfrozen: still shows the derived icon after the rename, not whatever
+  // would have been written had the edit form resubmitted the derived value.
+  await expect(tagPanel.locator('.panel-head .emoji')).toHaveText('🐘')
+})
+
 // B3: drag & drop reorder has a keyboard fallback (Alt+ArrowLeft/Right on a
 // focused chip) — keyboard is the reliable path in Playwright, and it
 // exercises the exact same PUT .../member-order the mouse drag commits
@@ -484,7 +524,7 @@ test('reorders tag members with the keyboard and persists the new order', async 
   userMock.state.libraries.push({
     libraryId: 'lib1', name: 'My library', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 1, accountCount: 2, subscriberCount: 0,
-    tags: [{ tagId: 't1', name: 'Watch', color: '#22c55e', icon: '👀', note: '', members: [memberA, memberB] }],
+    tags: [{ tagId: 't1', name: 'Watch', color: '#22c55e', icon: '👀', displayIcon: '👀', note: '', members: [memberA, memberB] }],
   })
 
   let orderRequestBody: { accountIds: string[] } | null = null

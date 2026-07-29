@@ -33,6 +33,17 @@ function accountRefFromAddress(address: string): AccountRef {
 // name-the-failure, restore-the-rest path against a real rejection.
 export const INVALID_TAG_MEMBER_ADDRESS = 'not-a-real-address'
 
+// Best-effort mirror of the real tagDisplayIcon fallback (explicit icon →
+// first member's emoji/emojiUrl → 🏷️) — the mock has no profile-avatar
+// simulation, so it never derives a URL, but every mutation path below
+// recomputes this so `displayIcon` is always a valid non-empty string
+// wherever the real API would ship one (TagIcon renders it unconditionally).
+function mockDisplayIcon(icon: string, members: AccountRef[]): string {
+  if (icon) return icon
+  const first = members[0]
+  return (first && (first.emojiUrl || first.emoji)) || '🏷️'
+}
+
 // A subscription entry may optionally carry the same tag/member detail an
 // owned library does — a subscribed (not owned) library's tags are still
 // real, curated by ITS owner, and a spec exercising the aggregate view of a
@@ -79,7 +90,9 @@ function buildLibraryTagDetail(state: UserMockState, libraryId: string, tagId: s
   const tag = lib?.tags?.find(t => t.tagId === tagId)
   if (!tag) return null
   return {
-    tagId: tag.tagId, name: tag.name, color: tag.color, note: tag.note, icon: tag.icon,
+    // The aggregate view is display-only — mirror the real API's
+    // visibleTagMembers and ship the DERIVED icon under `icon` here.
+    tagId: tag.tagId, name: tag.name, color: tag.color, note: tag.note, icon: tag.displayIcon,
     members: tag.members, balances: [], topAssets: [], portfolioUsd: 0,
     moneyMarket: [], liquidityPositions: [], activeDcas: [], portfolioSeries: [], portfolioDates: [], balanceHistory: [],
   }
@@ -212,7 +225,10 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     const lib = state.libraries.find(l => l.libraryId === decodeURIComponent(m![1]))
     if (!lib) { await fulfillJson(route, 404, { error: 'not found' }); return }
     const { name, color, icon, note } = bodyOf(route) as { name: string; color?: string; icon?: string; note?: string }
-    const tag: LibraryTagDetail = { tagId: `tag-${lib.tags.length + 1}`, name, color: color ?? '#5865f2', icon: icon ?? '', note: note ?? '', members: [] }
+    const tag: LibraryTagDetail = {
+      tagId: `tag-${lib.tags.length + 1}`, name, color: color ?? '#5865f2',
+      icon: icon ?? '', displayIcon: mockDisplayIcon(icon ?? '', []), note: note ?? '', members: [],
+    }
     lib.tags.push(tag)
     lib.tagCount = lib.tags.length
     await fulfillJson(route, 200, tag)
@@ -225,8 +241,12 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     const body = bodyOf(route) as { name?: string; color?: string; icon?: string; note?: string }
     if (body.name != null) tag.name = body.name
     if (body.color != null) tag.color = body.color
+    // The edit form seeds from and resubmits the RAW `icon` (never
+    // `displayIcon`) — mirrors the real updateTag route, which is exactly
+    // the bug this shape split fixed.
     if (body.icon != null) tag.icon = body.icon
     if (body.note != null) tag.note = body.note
+    tag.displayIcon = mockDisplayIcon(tag.icon, tag.members)
     await fulfillJson(route, 200, tag)
     return
   }
@@ -245,6 +265,7 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     for (const addr of remove ?? []) tag.members = tag.members.filter(mm => mm.address !== addr)
     for (const addr of add ?? []) if (!tag.members.some(mm => mm.address === addr)) tag.members.push(accountRefFromAddress(addr))
     lib.accountCount = new Set(lib.tags.flatMap(t => t.members.map(mm => mm.accountId))).size
+    tag.displayIcon = mockDisplayIcon(tag.icon, tag.members)
     await fulfillJson(route, 200, tag)
     return
   }
@@ -259,6 +280,7 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     if (!isPermutation) { await fulfillJson(route, 400, { error: 'Member order must list every current member exactly once' }); return }
     const byId = new Map(tag.members.map(mm => [mm.accountId, mm]))
     tag.members = ids.map(id => byId.get(id)!)
+    tag.displayIcon = mockDisplayIcon(tag.icon, tag.members)   // "first member" can change on reorder
     await fulfillJson(route, 200, tag)
     return
   }
