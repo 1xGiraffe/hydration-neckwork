@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
 import { normalizeAddress } from './addressIdentity.ts'
 import { UserDataError, profileForAccount } from './userProfileService.ts'
@@ -6,6 +6,15 @@ import { accountIcon } from './omniwatchIdentity.ts'
 // explorerService.ts does not import this module (checked: no import cycle),
 // so this stays a direct import rather than an init-time injected function.
 import { resolveDisplayAccountId } from './explorerService.ts'
+// tagService's in-memory system-tag index — the reverse direction of the same
+// deliberate boundary: explorerService.ts never reads this module's maps
+// directly (see its "User-tag aggregate view" comment), so the accounts
+// directory's per-viewer fold is resolved HERE and handed to explorerService
+// as plain data (directoryFoldFor's return value), not by explorerService
+// reaching back in. tagForAccount is an O(1) in-memory lookup — no ClickHouse
+// round trip — so walking a viewer's whole tag membership against it costs
+// nothing beyond the Map/Set work already living in this file.
+import { tagForAccount } from './tagService.ts'
 
 // User tag lists: named collections of tags, each tag holding member
 // accounts. Owned by one account; shareable by invite or publicly (Task 7);
@@ -540,6 +549,86 @@ export function tagMapFor(accountId: string): TagMapList[] {
       tags: [...list.tags.values()].map(t => ({ tagId: t.tagId, name: t.name, color: t.color, icon: tagDisplayIcon(t.icon, t.order), members: [...t.order] })),
     }
   })
+}
+
+// One winning group per account: the presentation the accounts-directory
+// fold shows a viewer's own tag under (see explorerService's ViewerFold).
+export interface DirectoryFoldGroup { tagId: string; listId: string; name: string; color: string; icon: string; memberCount: number }
+export interface DirectoryFold {
+  ids: string[]     // account_id, parallel to keys
+  keys: string[]    // this account's winning group key, `u:<tagId>` — never collides with a system label_id (those are short hand-picked slugs; tag ids are uuids)
+  groups: Map<string, DirectoryFoldGroup>   // group key -> presentation, keyed the same way
+  fingerprint: string
+}
+
+// The accounts directory's per-viewer override: which of a viewer's OWN (or
+// subscribed) tags should fold the directory's rows, exactly as if it were
+// another system tag — computed once here and handed to explorerService as
+// plain account_id -> group-key pairs (see the import comment above for why
+// this isn't computed the other way around).
+//
+// Walks the SAME priority order tagMapFor ships to the client and the
+// client's own resolveTag() (userTags.ts) walks: the first list in priority
+// order that "contains" an account wins it, where the reserved 'system' slot
+// "contains" an account when it carries a system tag (tagForAccount), and any
+// other list "contains" it when it is a member of one of THAT list's tags.
+// An account whose winner is the system slot is deliberately left out of the
+// returned pairs — the directory SQL's own `tags` CTE already folds it under
+// its system tag, and this must never re-fold it under a user tag instead.
+//
+// Only accounts already tagged somewhere in the viewer's own visible lists
+// can possibly change the directory's grouping, so the walk is bounded by
+// that (typically tiny) membership footprint, not by the directory itself.
+// Returns null when nothing in it would actually win — the common case for a
+// viewer with no tags yet — so the caller can skip the whole per-viewer path.
+export function directoryFoldFor(viewer: string): DirectoryFold | null {
+  const order = listOrderFor(viewer)
+  const candidates = new Set<string>()
+  for (const list of visibleListsFor(viewer)) for (const accountId of list.memberTag.keys()) candidates.add(accountId)
+  if (!candidates.size) return null
+
+  const winner = new Map<string, DirectoryFoldGroup>()
+  const claimed = new Set<string>()   // decided one way or the other — a win below, or a system win here
+  for (const listId of order) {
+    if (listId === SYSTEM_LIST_ID) {
+      for (const accountId of candidates) {
+        if (!claimed.has(accountId) && tagForAccount(accountId)) claimed.add(accountId)
+      }
+      continue
+    }
+    const list = lists.get(listId)
+    if (!list) continue
+    for (const tag of list.tags.values()) {
+      for (const accountId of tag.order) {
+        if (claimed.has(accountId)) continue
+        // The tag's FULL member count, not how many of its members are
+        // candidates here — the pill shows the whole tag, not this slice.
+        winner.set(accountId, { tagId: tag.tagId, listId, name: tag.name, color: tag.color, icon: tagDisplayIcon(tag.icon, tag.order), memberCount: tag.members.size })
+        claimed.add(accountId)
+      }
+    }
+  }
+  if (!winner.size) return null
+
+  const ids: string[] = []
+  const keys: string[] = []
+  const groups = new Map<string, DirectoryFoldGroup>()
+  for (const [accountId, group] of winner) {
+    const key = `u:${group.tagId}`
+    ids.push(accountId)
+    keys.push(key)
+    groups.set(key, group)
+  }
+  return { ids, keys, groups, fingerprint: directoryFoldFingerprint(ids, keys) }
+}
+
+// A stable identity for a fold's exact pairs, order-independent (Map
+// iteration order is insertion order, not anything meaningful here) — the
+// per-viewer cache key component that changes exactly when the fold would
+// produce different rows.
+function directoryFoldFingerprint(ids: string[], keys: string[]): string {
+  const pairs = ids.map((id, i) => `${id}:${keys[i]}`).sort()
+  return createHash('sha256').update(pairs.join('|')).digest('hex').slice(0, 16)
 }
 
 export function publicLists(): ListSummary[] {

@@ -39,6 +39,12 @@ const limitSchema = z.coerce.number().int().min(1).max(250).optional()
 // balance-observation count it used to show. Still accepted so a link made against it
 // resolves to the column it always meant.
 const accountSortSchema = z.enum(['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'updates', 'volume', 'liquidation'])
+// Exported so the viewer-fold accounts route (routes/user.ts) validates `sort` the
+// exact same way the public directory does — same precedent as offsetParam/limitParam.
+export function accountSortParam(q: Record<string, unknown>): AccountSort {
+  const sort = accountSortSchema.safeParse(q.sort)
+  return (sort.success ? normalizeAccountSort(sort.data) : 'value') as AccountSort
+}
 const addressParam = z.object({ address: z.string().min(1).max(128) })
 const analyzableAddressParam = z.object({ address: z.string().min(3).max(128) })
 const tagParam = z.object({ tagId: z.string().min(1).max(64) })
@@ -258,8 +264,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const limit = limitParam(q, 50)
     const offset = offsetParam(q)
     if (offset == null) return badOffset(reply)
-    const sort = accountSortSchema.safeParse(q.sort)
-    return getAccounts(offset, limit, (sort.success ? normalizeAccountSort(sort.data) : 'value') as AccountSort)
+    return getAccounts(offset, limit, accountSortParam(q))
   })
 
   fastify.get('/explorer/daily/:scope', async (req, reply) => {

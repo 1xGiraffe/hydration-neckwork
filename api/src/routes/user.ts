@@ -5,14 +5,14 @@ import {
   createChallenge, verifyChallenge, issueSession, revokeSession, requireUser,
 } from '../services/userAuthService.ts'
 import {
-  accountRef, resolveDisplayAccountId,
+  accountRef, resolveDisplayAccountId, getAccounts, getAccountsForViewerFold,
   getListTagDetail, getListTagActivity, getListTagExtrinsics, getListTagEvents, getListTagVotes,
   getListTagTabCounts, getListTagListTotal, getListTagValueEvents,
 } from '../services/explorerService.ts'
 import { setProfileName, setProfileAvatar, clearProfileAvatar, profileForAccount, UserDataError } from '../services/userProfileService.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
 import {
-  ensurePersonalList, ownedListsFor, subscriptionsFor, invitesFor, listOrderFor, tagMapFor,
+  ensurePersonalList, ownedListsFor, subscriptionsFor, invitesFor, listOrderFor, tagMapFor, directoryFoldFor,
   getList, canView, createList, updateList, deleteList,
   createTag, updateTag, deleteTag, setTagMembers, setMemberOrder, visibleTagMembers, tagDisplayIcon,
   inviteToList, revokeShare, respondToInvite, subscribePublic, unsubscribe, setListOrder, sharesFor,
@@ -22,7 +22,7 @@ import {
   limitParam, offsetParam, badOffset, textParam, valueFilters, activityTypeParam,
   extrinsicFilters, eventFilters, dateParam, activityOffsetParam, boundedActivityOffset,
   maxActivityOffsetFor, maxScopedActivityOffsetFor, scopedListQuery, listTabSchema,
-  unusableFilterParam,
+  unusableFilterParam, accountSortParam,
 } from './explorer.ts'
 
 // Authenticated, per-user endpoints. Everything here is invisible to the shared
@@ -186,6 +186,31 @@ export async function userRoutes(fastify: FastifyInstance) {
     const accountId = requireUser(req, reply)
     if (!accountId) return
     return { lists: tagMapFor(accountId) }
+  })
+
+  // The accounts directory, folded under THIS viewer's own tags too — same
+  // params, same shape as the public /explorer/accounts (reuses its exact
+  // parsers), so the client can swap endpoints without changing anything else
+  // about how it reads the response. directoryFoldFor is the userListService
+  // half of the fold (which accounts win, and under what presentation); the
+  // shared getAccounts/getAccountsForViewerFold in explorerService is the
+  // other half (the SAME bounded whole-directory query the public route runs
+  // — see accountsPage's cost comment — grouped by this fold if there is one).
+  // A tagless viewer (directoryFoldFor returns null) costs nothing beyond the
+  // shared endpoint: this calls getAccounts directly rather than paying for a
+  // second, per-viewer cache entry that would be byte-identical to the shared
+  // one anyway.
+  fastify.get('/user/accounts', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const q = req.query as Record<string, unknown>
+    const limit = limitParam(q, 50)
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    const sort = accountSortParam(q)
+    const fold = directoryFoldFor(accountId)
+    return fold ? getAccountsForViewerFold(offset, limit, sort, fold) : getAccounts(offset, limit, sort)
   })
 
   const listCreateBody = z.object({ name: z.string().max(200), note: z.string().max(400).optional(), visibility: z.enum(['private', 'public']) })

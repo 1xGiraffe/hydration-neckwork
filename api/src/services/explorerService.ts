@@ -15934,7 +15934,11 @@ export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
 // all accounts ranked by portfolio (tag-grouped)
 export interface TopAccountRow {
   account: AccountRef | null
-  tag: { tagId: string; name: string; color: string; icon: string; memberCount: number } | null
+  // `userTagId`/`listId` are additive: set only when this group row folded
+  // under a VIEWER's own tag (getAccountsForViewerFold) rather than a system
+  // one — `tagId` is the same id either way (system label id, or the user
+  // tag's uuid), so a caller that only reads `tagId` needs no change at all.
+  tag: { tagId: string; name: string; color: string; icon: string; memberCount: number; userTagId?: string; listId?: string } | null
   portfolioUsd: number
   lastBlock: number
   healthFactor?: string | null
@@ -16413,7 +16417,37 @@ function refreshAccountsPage(offset: number, limit: number, sort: AccountSort): 
   return accountsPage(offset, limit, sort, true)
 }
 
-async function accountsPage(offset: number, limit: number, sort: AccountSort, refresh: boolean): Promise<AccountsPage> {
+// One winning group per account, resolved from a VIEWER's own (or subscribed)
+// tags — userListService.directoryFoldFor's return shape, structurally, but
+// this file never imports that module (see its own "User-tag aggregate view"
+// comment for the established, deliberate boundary: explorerService is handed
+// resolved member/presentation data, never reads userListService's maps
+// itself). The route composes both services, exactly like the list-tag
+// endpoints already do for a single tag's own aggregate view.
+export interface ViewerFoldGroup { tagId: string; listId: string; name: string; color: string; icon: string; memberCount: number }
+export interface ViewerFold {
+  ids: string[]                          // account_id, parallel to keys
+  keys: string[]                         // this account's winning group key, `u:<tagId>`
+  fingerprint: string
+  groups: Map<string, ViewerFoldGroup>   // group key -> presentation
+}
+
+// The accounts directory, folded under one viewer's OWN tags in addition to
+// the shared system ones. Runs the exact same bounded whole-directory query
+// getAccounts does (see accountsPage's cost comment) — this adds no new
+// ClickHouse work of its own, only a different GROUP BY key for the accounts
+// the fold names — but the result is per-viewer, so it is cached (and NOT
+// snapshotted or prewarmed) on its own short-TTL key rather than the shared
+// SWR entry every anonymous request shares. `fold.ids` empty (a tagless
+// viewer, or one whose tags all lose to a system tag) means nothing would
+// actually change, so the caller should reach for getAccounts directly
+// instead — this still falls back safely if it doesn't.
+export function getAccountsForViewerFold(offset: number, limit: number, sort: AccountSort, fold: ViewerFold): Promise<AccountsPage> {
+  if (!fold.ids.length) return getAccounts(offset, limit, sort)
+  return accountsPage(offset, limit, sort, false, fold)
+}
+
+async function accountsPage(offset: number, limit: number, sort: AccountSort, refresh: boolean, viewerFold?: ViewerFold): Promise<AccountsPage> {
   // Whole-directory ranking: every rebuild re-aggregates all balances (+ MM
   // positions, and full-history volume CTEs for some sorts) just to render one
   // page — seconds of ClickHouse time. Serve stale-while-revalidating so no
@@ -16425,14 +16459,31 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
   const key = accountsCacheKey(modelVersion, sort, offset, limit)
   const snapshotKey = `${modelVersion}:${sort}:${offset}:${limit}`
   const build = async (): Promise<AccountsPage> => {
-    const current = await loadAccountDirectorySnapshot(snapshotKey, true).catch(() => null)
-    if (current) return current.page
+    // The persisted snapshot was computed under the SHARED system-tag
+    // grouping; a viewer's fold must never adopt it — see the anonymous path
+    // above it, unmodified, for what every non-fold request still gets.
+    if (!viewerFold) {
+      const current = await loadAccountDirectorySnapshot(snapshotKey, true).catch(() => null)
+      if (current) return current.page
+    }
     const prices = await ensureAccountValuePrices()
     const { idsSql, unitsSql } = priceTransformArrays(prices)
     const orderBy = ACCOUNT_SORT_SQL[sort] ?? ACCOUNT_SORT_SQL.value
     const includeActivitySort = sort === 'activity'
     const includeVolumeSort = sort === 'volume'
     const includeLiquidationSort = sort === 'liquidation'
+    // Every CTE below groups by this SAME `gkey` — a system tag's label_id when
+    // the account has one, else the account itself. A viewer's fold overrides
+    // that per-account, before any of them run: `fold_ids`/`fold_keys` name
+    // exactly the accounts whose winning group is one of the VIEWER's own tags
+    // (userListService.directoryFoldFor already excludes anyone the system tag
+    // wins), so a hit always replaces — never competes with — the system/account
+    // key. Absent a fold this returns the exact original expression, unchanged.
+    const gkeySql = (idExpr: string): string => {
+      if (!viewerFold) return `if(t.lid = '', ${idExpr}, t.lid)`
+      const userKey = `transform(${idExpr}, {fold_ids:Array(String)}, {fold_keys:Array(String)}, '')`
+      return `if(${userKey} != '', ${userKey}, if(t.lid = '', ${idExpr}, t.lid))`
+    }
     // The activity ordering and value both come from the background leaderboard, keyed
     // on the same gkey this query groups by. An account outside the pool has no counted
     // total, so it sorts last and renders no number — never a number from another model.
@@ -16455,7 +16506,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
               GROUP BY account_id
             ),
             trade_volume AS (
-              SELECT if(t.lid = '', v.account_id, t.lid) AS gkey, sum(v.volume_usd) AS volume_usd
+              SELECT ${gkeySql('v.account_id')} AS gkey, sum(v.volume_usd) AS volume_usd
               FROM (
                 SELECT
                   ${boundAccountSql('vr')} AS account_id,
@@ -16472,7 +16523,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     const liquidationCte = includeLiquidationSort ? `,
             ${liquidationVolumeCtes()},
             liquidation_volume AS (
-              SELECT if(t.lid = '', v.account_id, t.lid) AS gkey, sum(v.volume_usd) AS volume_usd
+              SELECT ${gkeySql('v.account_id')} AS gkey, sum(v.volume_usd) AS volume_usd
               FROM (
                 SELECT
                   ${boundAccountSql('vr')} AS account_id,
@@ -16504,7 +16555,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
                 FROM lp_claims GROUP BY account_id` : ''
     const lpGroupedCte = omnipoolAccountClaimsReady ? `,
             lp_grouped AS (
-              SELECT if(t.lid = '', p.account_id, t.lid) AS gkey,
+              SELECT ${gkeySql('p.account_id')} AS gkey,
                 sum(toFloat64(p.amount) * transform(toString(p.asset_id), ${idsSql}, ${unitsSql}, 0.)
                   + toFloat64(p.hub_amount) * transform('1', ${idsSql}, ${unitsSql}, 0.)) AS usd
               FROM lp_claims p LEFT JOIN tags t ON t.account_id = p.account_id
@@ -16538,6 +16589,22 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
               FROM (${latestMoneyMarketPositionsSql(`pool_address IN (${configuredMmPoolsSql()})`)})
               WHERE ${mmPositionField('account_id')}!='' AND (col>0 OR debt>0)
             )`
+
+    // Additive projections for a viewer's fold: the extra `gkey` column the
+    // response needs to look the group's presentation up by (see the row-mapping
+    // below), and the SAME group's NAME spliced into disp_name/has_identity so
+    // the `identity` sort ranks a folded row by the tag's own name rather than
+    // whichever member SQL happened to sample — exactly like a system tag's own
+    // name already does via `g.lname`. Every piece here is '' absent a fold, so
+    // the SELECT list is character-for-character what it always was.
+    const gkeySelect = viewerFold ? 'g.gkey AS gkey,\n            ' : ''
+    const groupNameExpr = viewerFold ? `transform(g.gkey, {fold_group_keys:Array(String)}, {fold_group_names:Array(String)}, '')` : ''
+    const hasIdentitySql = viewerFold
+      ? `if(${groupNameExpr} != '' OR g.label_id != '' OR ident.account_id != '', 1, 0) AS has_identity`
+      : `if(g.label_id != '' OR ident.account_id != '', 1, 0) AS has_identity`
+    const dispNameSql = viewerFold
+      ? `multiIf(${groupNameExpr} != '', ${groupNameExpr}, g.label_id != '', g.lname, ident.display != '', ident.display, '') AS disp_name`
+      : `multiIf(g.label_id != '', g.lname, ident.display != '', ident.display, '') AS disp_name`
 
     const [res, total] = await Promise.all([
       client.query({
@@ -16602,7 +16669,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             ),
             grouped AS (
               SELECT
-                if(t.lid = '', latest.account_id, t.lid) AS gkey,
+                ${gkeySql('latest.account_id')} AS gkey,
                 t.lid AS label_id, any(t.lname) AS lname, any(t.c) AS color, any(t.ic) AS icon,
                 uniqExact(latest.account_id) AS members, any(latest.account_id) AS sample, max(latest.lb) AS last_block,
                 sum(toFloat64(latest.bal) * transform(latest.asset_id, ${idsSql}, ${unitsSql}, 0.)) AS usd,
@@ -16622,7 +16689,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             -- and a compact supplemental-exposure badge.
             mm_grouped AS (
               SELECT
-                if(t.lid = '', a.account_id, t.lid) AS gkey,
+                ${gkeySql('a.account_id')} AS gkey,
                 sumIf(toFloat64(m.col), m.pool_address = '${CORE_MM_MARKET.poolProxy}') AS col,
                 sumIf(toFloat64(m.debt), m.pool_address = '${CORE_MM_MARKET.poolProxy}') AS debt,
                 sumIf(toFloat64(m.risk_debt), m.pool_address = '${CORE_MM_MARKET.poolProxy}') AS risk_debt,
@@ -16651,7 +16718,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             -- usd column, so a bare g.usd serialises as the qualified name g.usd in
             -- JSONEachRow -- raw[i].usd then read undefined and the sparkline final-bucket
             -- pin silently became 0 (every sparkline cliffed to zero at the end).
-            g.label_id, g.lname, g.color, g.icon, g.members, g.sample, g.last_block, g.usd AS usd,
+            ${gkeySelect}g.label_id, g.lname, g.color, g.icon, g.members, g.sample, g.last_block, g.usd AS usd,
             ifNull(mg.col, 0) AS mm_col, ifNull(mg.debt, 0) AS mm_debt, mg.worst_acct AS mm_worst_acct,
             if(ifNull(mg.col, 0) > 0 OR ifNull(mg.debt, 0) > 0, 1, 0) AS mm_present,
             ifNull(mg.supplemental_positions, 0) AS supplemental_present,
@@ -16664,8 +16731,8 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
                     ifNull(mg.col, 0) > 0, '${MAX_UINT256}', '') AS mm_hf,
             multiIf(ifNull(mg.risk_debt, 0) > 0, mg.worst_hf * 1e18, ifNull(mg.col, 0) > 0, 1e30, 1e31) AS mm_hf_num,
             g.usd + ${lpValue} + ifNull(mg.value_delta, 0) / 1e8 AS usd_total,
-            if(g.label_id != '' OR ident.account_id != '', 1, 0) AS has_identity,
-            multiIf(g.label_id != '', g.lname, ident.display != '', ident.display, '') AS disp_name,
+            ${hasIdentitySql},
+            ${dispNameSql},
             ${activitySelect} AS activity_count,
             ${activityCompleteSelect} AS activity_count_complete,
             ${volumeSelect} AS trading_volume_usd,
@@ -16686,8 +16753,20 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
           ${liquidationJoin}
           ORDER BY ${orderBy}
           LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
-        query_params: { limit, offset }, format: 'JSONEachRow',
+        query_params: {
+          limit, offset,
+          ...(viewerFold ? {
+            fold_ids: viewerFold.ids, fold_keys: viewerFold.keys,
+            fold_group_keys: [...viewerFold.groups.keys()], fold_group_names: [...viewerFold.groups.values()].map(g => g.name),
+          } : {}),
+        },
+        format: 'JSONEachRow',
       }),
+      // Unaffected by a viewer's fold: the row TOTAL stays the shared,
+      // system-tag-grouped count (see getAccountsForViewerFold's comment) — a
+      // folded page can render fewer distinct rows than this number implies,
+      // the same honest gap a page that hasn't reached the directory's tail
+      // yet already has.
       getAccountsTotal(),
     ])
 
@@ -16697,20 +16776,28 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
       supplemental_present: number; supplemental_debt: number; supplemental_hf: string
       has_identity: number; activity_count: number; activity_count_complete: number; trading_volume_usd: number; liquidation_volume_usd: number
       top_assets: [string, number][]
+      gkey?: string   // present only when viewerFold spliced `g.gkey AS gkey` in above
     }>()
 
     const rows: TopAccountRow[] = raw.map(r => {
-      const isTag = r.label_id !== ''
+      // A viewer's own tag wins the row over a system one — directoryFoldFor
+      // already guarantees the two never compete for the same account (see its
+      // own comment), so a hit here means r.label_id is '' and isTag would
+      // otherwise have read this as a plain, single-account row.
+      const userGroup = viewerFold && r.gkey ? viewerFold.groups.get(r.gkey) : undefined
+      const isTag = r.label_id !== '' || !!userGroup
       // Set when the group (tag members summed, or the lone account) holds a position.
       const hasMm = r.mm_present === 1
       return {
         account: isTag ? null : accountRef(r.sample),
-        tag: isTag ? { tagId: r.label_id, name: r.lname, color: r.color, icon: tagIcon(r.label_id, r.icon), memberCount: Number(r.members) } : null,
+        tag: userGroup
+          ? { tagId: userGroup.tagId, name: userGroup.name, color: userGroup.color, icon: userGroup.icon, memberCount: userGroup.memberCount, userTagId: userGroup.tagId, listId: userGroup.listId }
+          : (r.label_id !== '' ? { tagId: r.label_id, name: r.lname, color: r.color, icon: tagIcon(r.label_id, r.icon), memberCount: Number(r.members) } : null),
         portfolioUsd: r.usd_total, lastBlock: r.last_block,
         healthFactor: hasMm ? (r.mm_hf === MAX_UINT256 ? 'inf' : r.mm_hf) : null,
         // Prefer the on-chain identity display name for single-account rows; tag
-        // groups keep their tag label.
-        identity: isTag ? r.lname : (identityForAccount(r.sample)?.display ?? null),
+        // groups (system OR a viewer's own) keep their tag label.
+        identity: userGroup ? userGroup.name : (isTag ? r.lname : (identityForAccount(r.sample)?.display ?? null)),
         suppliedUsd: hasMm ? Number(r.mm_col) / 1e8 : null,
         borrowedUsd: hasMm ? Number(r.mm_debt) / 1e8 : null,
         // Account holding the group's worst-HF position — the DefiSim deep-link
@@ -16733,10 +16820,28 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
       }
     })
 
+    // The three enrichment passes below each re-derive "which accounts does this
+    // row cover" from `raw[i]` themselves (member expansion is cheap; re-deriving
+    // avoids a fourth parallel array to keep in sync). A system tag row resolves
+    // that through tagService's in-memory index (`getTagRecord(label_id).members`);
+    // a viewer-fold row has no system label at all, so it needs this map from the
+    // SAME gkey the main query just grouped by, back to the full set of accounts
+    // that share it — otherwise every one of these passes would silently narrow a
+    // multi-member folded row to its one arbitrary `sample` account.
+    const foldMembersByKey = viewerFold ? (() => {
+      const m = new Map<string, string[]>()
+      viewerFold.ids.forEach((id, i) => {
+        const k = viewerFold.keys[i]
+        const arr = m.get(k)
+        if (arr) arr.push(id); else m.set(k, [id])
+      })
+      return m
+    })() : null
+
     // Sparkline + counter enrichment is best-effort — a failure (RPC down, table
     // missing) must never take the directory itself down.
     try {
-      await enrichAccountRows(raw, rows)
+      await enrichAccountRows(raw, rows, foldMembersByKey)
     } catch (err) {
       console.error('[accounts] row enrichment failed:', err)
     }
@@ -16744,7 +16849,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     // Overwrite the wallet-only sparkline with the full-portfolio series the detail
     // page shows (parity). Best-effort — on failure the wallet-only fallback stands.
     try {
-      await enrichAccountSparklines(raw, rows)
+      await enrichAccountSparklines(raw, rows, foldMembersByKey)
     } catch (err) {
       console.error('[accounts] sparkline parity enrichment failed:', err)
     }
@@ -16754,7 +16859,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     // ERC-20 via the same assembly the detail pages use. Best-effort — on failure the
     // SQL approximation from the main query stands.
     try {
-      await enrichTopAssets(raw, rows, prices)
+      await enrichTopAssets(raw, rows, prices, foldMembersByKey)
     } catch (err) {
       console.error('[accounts] top-asset enrichment failed:', err)
     }
@@ -16762,7 +16867,8 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     // The activity ordering is only established for the leaderboard's ranked prefix, so
     // the page publishes that depth and the pager offers nothing past it.
     const page: AccountsPage = { rows, total, ...(leaderboard ? { rankedDepth: leaderboard.rankedDepth } : {}) }
-    await persistAccountDirectorySnapshot(snapshotKey, page).catch(err => console.error('[accounts] snapshot persist failed:', err))
+    // Never persisted for a viewer's fold — see the load-side skip above.
+    if (!viewerFold) await persistAccountDirectorySnapshot(snapshotKey, page).catch(err => console.error('[accounts] snapshot persist failed:', err))
     return page
   }
 
@@ -16770,6 +16876,19 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
   // rebuild STARTED from can only under-claim freshness, so one that advanced
   // mid-rebuild is refreshed again rather than passing for current.
   const generation = accountValueGenerationEpoch
+  // A viewer's fold is never satisfied by, and never feeds, the shared
+  // SWR/snapshot machinery above: it is grouped by this ONE viewer's own tag
+  // priority rather than the shared system-tag grouping, so no other request
+  // could ever reuse it, and persisting it as if it were the canonical
+  // snapshot would risk serving one viewer's rows to another. A flat, short
+  // TTL still single-flights concurrent requests for the same viewer+page;
+  // there is deliberately no prewarm — a viewer's own tags can change at any
+  // moment, so nothing should be pre-computing a page for them ahead of a
+  // request that may never come.
+  if (viewerFold) {
+    const viewerKey = `user-accounts:${modelVersion}:${generation}:${viewerFold.fingerprint}:${sort}:${offset}:${limit}`
+    return cached(viewerKey, ACCOUNTS_FRESH_MS, build)
+  }
   if (refresh) return cacheRefresh(key, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS, build, generation)
   // Nothing cached means a restarted process or an evicted key, not that no page
   // exists: adopt the last persisted one as the stale value so this request
@@ -16782,6 +16901,20 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
   return cachedSwr(key, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS, build, generation)
 }
 
+// Which accounts a directory row covers: a system tag's own full membership
+// (tagService's in-memory index), a viewer-fold row's full membership under
+// its `gkey` (see accountsPage's `foldMembersByKey` — absent for every row
+// that isn't one viewer's own tag), or just the row's single sampled account.
+// Shared by every enrichment pass below so a row can never disagree with
+// itself about which accounts it covers.
+function rowMemberAccounts(r: { label_id: string; sample: string; gkey?: string }, foldMembersByKey: Map<string, string[]> | null): string[] {
+  if (foldMembersByKey && r.gkey) {
+    const members = foldMembersByKey.get(r.gkey)
+    if (members) return members
+  }
+  return r.label_id !== '' ? (getTagRecord(r.label_id)?.members ?? []) : [r.sample]
+}
+
 // Refine each row's top-holding icons to match the detail pages exactly. The main
 // query only sees wallet balances; the hover card additionally folds in supplied
 // money-market collateral (aTokens, reconstructed) and EVM-side ERC-20. This reuses
@@ -16790,14 +16923,15 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
 // list and hover cannot diverge, while batching the one expensive input (the aToken
 // raw_evm_logs scan) across the whole page.
 async function enrichTopAssets(
-  raw: { label_id: string; sample: string }[],
+  raw: { label_id: string; sample: string; gkey?: string }[],
   rows: TopAccountRow[],
   prices: Map<number, PriceInfo>,
+  foldMembersByKey: Map<string, string[]> | null = null,
 ): Promise<void> {
   // Account set per row (tag → members, else the single sample) plus each account's
   // ETH-prefixed twin, where its EVM-side wallet balances live.
   const rowAccounts: string[][] = raw.map(r => {
-    const members = r.label_id !== '' ? (getTagRecord(r.label_id)?.members ?? []) : [r.sample]
+    const members = rowMemberAccounts(r, foldMembersByKey)
     const base = members.filter(m => ACCOUNT_RE.test(m))
     const set = new Set<string>(base)
     for (const m of base) { const twin = evmAccountForm(m); if (twin) set.add(twin) }
@@ -16863,8 +16997,9 @@ async function enrichTopAssets(
 // complete, this reads weekly states; during deployment/backfill it retains the
 // equivalent raw-observation query as a correctness-first fallback.
 async function enrichAccountRows(
-  raw: { label_id: string; sample: string; usd: number }[],
+  raw: { label_id: string; sample: string; usd: number; gkey?: string }[],
   rows: TopAccountRow[],
+  foldMembersByKey: Map<string, string[]> | null = null,
 ): Promise<void> {
   // Account set per row: tag rows expand to their members; each substrate account
   // also contributes its ETH-prefixed twin (its EVM-side pot, where MM/HOLLAR
@@ -16873,10 +17008,7 @@ async function enrichAccountRows(
   // events. Their sparkline remains absent unless a complete historical source is
   // available; current balances are never projected backward.
   const isModuleAccount = (a: string) => /^0x(6d6f646c|7369626c|70617261)/.test(a)
-  const rowMembers: string[][] = raw.map(r => {
-    const members = r.label_id !== '' ? (getTagRecord(r.label_id)?.members ?? []) : [r.sample]
-    return members.filter(m => ACCOUNT_RE.test(m))
-  })
+  const rowMembers: string[][] = raw.map(r => rowMemberAccounts(r, foldMembersByKey).filter(m => ACCOUNT_RE.test(m)))
   const rowHistorySubstrate: string[][] = rowMembers.map(members => members.filter(m => !isModuleAccount(m)))
   const rowModuleAccounts: string[][] = rowMembers.map(members => members.filter(isModuleAccount))
   const rowAccounts: string[][] = rowHistorySubstrate.map(members => {
@@ -17131,8 +17263,9 @@ export function resampleValueSeriesToTrailingYear(values: number[], dates: strin
 // pallet observations per directory refresh is far too heavy — so they keep no list
 // sparkline (their detail pages still chart in full), matching prior behaviour.
 async function enrichAccountSparklines(
-  raw: { label_id: string; sample: string; usd_total: number }[],
+  raw: { label_id: string; sample: string; usd_total: number; gkey?: string }[],
   rows: TopAccountRow[],
+  foldMembersByKey: Map<string, string[]> | null = null,
 ): Promise<void> {
   // Row account set = the row's members + their EVM twins, i.e. exactly the
   // relatedAccountIds the detail page feeds getAccountHistory.
@@ -17147,7 +17280,7 @@ async function enrichAccountSparklines(
   // Treasury, Omnipool, HOLLAR Stability Module, Liquidity Mining, Parachain Sovereign,
   // Staking Pot and Pallet Pots showed a value with no series at all.
   const rowAccounts: string[][] = raw.map(r => {
-    const members = r.label_id !== '' ? (getTagRecord(r.label_id)?.members ?? []) : [r.sample]
+    const members = rowMemberAccounts(r, foldMembersByKey)
     const base = members.filter(m => ACCOUNT_RE.test(m))
     const set = new Set<string>(base)
     for (const m of base) { const twin = evmAccountForm(m); if (twin) set.add(twin) }
@@ -17165,7 +17298,15 @@ async function enrichAccountSparklines(
       try {
         // Same scope key the detail page uses, so a row's reconstruction is shared
         // with its account page and with the other sorts this row appears under.
-        const scopeKey = raw[i].label_id !== '' ? `tag:${raw[i].label_id}` : `addr:${raw[i].sample}`
+        // A viewer-fold row carries no system label at all (it has its own uuid
+        // key instead), so it gets its own namespace — still just a label:
+        // getAccountHistoryShared's actual cache key also folds in a fingerprint
+        // of `accounts` itself, so two rows can never collide on a shared key
+        // wearing two different account sets.
+        const gkey = raw[i].gkey
+        const scopeKey = gkey && foldMembersByKey?.has(gkey)
+          ? `user-tag:${gkey}`
+          : (raw[i].label_id !== '' ? `tag:${raw[i].label_id}` : `addr:${raw[i].sample}`)
         const { portfolioSeries, portfolioDates } = await getAccountHistoryShared(accounts, scopeKey)
         if (portfolioSeries.length > 1) {
           // Resample the full-history series onto the fixed trailing-year grid: every
