@@ -1874,6 +1874,10 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .acct-picker-name { color: var(--text-high); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acct-picker-addr { margin-left: auto; color: var(--text-low); font-size: 11px; flex-shrink: 0; }
 /* Foreign-library stats: the only view of another user's library contents. */
+/* A public library's own note, one line under its name in the discovery
+   table — truncated rather than wrapped, since the row's other columns
+   (owner, counts) need to stay on that same line. */
+.lib-row-note { font-size: 11px; margin-top: 2px; max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lib-stats { display: flex; gap: 32px; flex-wrap: wrap; }
 .lib-stats > div { display: flex; flex-direction: column; gap: 2px; }
 .lib-stat-num { font-family: 'Gazpacho', serif; font-size: 24px; font-weight: 500; color: var(--text-high); }

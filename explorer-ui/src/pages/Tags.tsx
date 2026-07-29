@@ -19,7 +19,6 @@ const ConnectDialog = lazy(() => import('../components/ConnectDialog').then(m =>
 function HydrationTagsHero({ tagCount }: { tagCount: number }) {
   return (
     <Link to={paths.tagsHydration()} className="acct-head" style={{ textDecoration: 'none', color: 'inherit' }}>
-      <div className="acct-avatar"><TagIcon icon="🏷️" title="Hydration Tags" className="acct-avatar-icon" /></div>
       <div className="acct-meta">
         <div className="tag">Hydration Tags</div>
         <div className="full"><span className="muted">{tagCount} tag{tagCount === 1 ? '' : 's'} · the built-in directory</span></div>
@@ -55,9 +54,9 @@ function PublicLibraries({ libraries, isLoading, me, session, onConnect }: {
               <tr key={lib.libraryId}>
                 <td data-label="Library">
                   <span className="addr-pill" style={{ cursor: 'default' }}>
-                    <TagIcon icon="📚" title={lib.name} />
                     <span className="tag">{lib.name}</span>
                   </span>
+                  {lib.note && <div className="muted lib-row-note">{lib.note}</div>}
                 </td>
                 <td data-label="Owner"><AddrPill account={lib.owner} noCopy /></td>
                 <td data-label="Tags" className="r mono">{lib.tagCount}</td>

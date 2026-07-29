@@ -1,18 +1,21 @@
 import { lazy, Suspense, useState } from 'react'
 import { userApi } from '../api/explorer'
 import { useMe, useUserMutation } from '../hooks/useUser'
+import { useTags } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, navigate, paths } from '../router'
-import { Crumbs, TagIcon } from '../components/ui'
+import { Crumbs } from '../components/ui'
 import type { LibrarySummaryRef, MeResponse } from '../types'
 
 const LibraryFormDialog = lazy(() => import('../components/LibraryFormDialog').then(m => ({ default: m.LibraryFormDialog })))
 
-// A viewer's private "personal" library reads as `personal`, ahead of the
-// public/private split every other library carries. (Duplicated in
-// LibraryDetail.tsx rather than shared — see the comment there.)
-function visibilityChip(lib: Pick<LibrarySummaryRef, 'isPersonal' | 'visibility'>) {
-  const [label, color] = lib.isPersonal ? ['personal', 'var(--amber)'] : lib.visibility === 'public' ? ['public', 'var(--sky)'] : ['private', 'var(--neutral)']
+// Always public/private — `isPersonal` (auto-created, not deletable) is a
+// backend/ownership fact, not a visibility state; a "personal" chip read as
+// if the library were neither public nor private even once a viewer made it
+// public. (Duplicated in LibraryDetail.tsx rather than shared — see the
+// comment there.)
+function visibilityChip(lib: Pick<LibrarySummaryRef, 'visibility'>) {
+  const [label, color] = lib.visibility === 'public' ? ['public', 'var(--sky)'] : ['private', 'var(--neutral)']
   return <span className="badge" style={{ color, background: `color-mix(in srgb, ${color} 14%, transparent)` }}>{label}</span>
 }
 
@@ -52,6 +55,14 @@ function swapNeighbor(order: string[], id: string, dir: -1 | 1): string[] {
 
 function YourLibraries({ me }: { me: MeResponse }) {
   const orderMutation = useUserMutation(userApi.setOrder)
+  // The fixed system row has no LibrarySummaryRef of its own — its counts come
+  // from the same built-in tag list /tags/hydration itself renders. System
+  // tags are one-tag-per-account, so summing memberCount is an exact account
+  // count, not an approximation. Undefined (still loading) falls through to
+  // the em-dash placeholder every other row's loading state would use too.
+  const { data: systemTags } = useTags()
+  const systemTagCount = systemTags?.length
+  const systemAccountCount = systemTags?.reduce((sum, t) => sum + t.memberCount, 0)
   const rows = orderedRows(me)
   const move = (id: string, dir: -1 | 1) => orderMutation.mutate([swapNeighbor(me.order, id, dir)])
 
@@ -65,14 +76,12 @@ function YourLibraries({ me }: { me: MeResponse }) {
             <tr key={row.id}>
               <td data-label="Library">
                 {row.kind === 'system' ? (
-                  <Link to={paths.tags()} className="addr-pill">
-                    <TagIcon icon="🏷️" title="Hydration tags" />
+                  <Link to={paths.tagsHydration()} className="addr-pill">
                     <span className="tag">Hydration tags</span>
                   </Link>
                 ) : (
                   <>
                     <Link to={paths.library(row.lib.libraryId)} className="addr-pill">
-                      <TagIcon icon="📚" title={row.lib.name} />
                       <span className="tag">{row.lib.name}</span>
                     </Link>{' '}
                     {visibilityChip(row.lib)}
@@ -80,8 +89,8 @@ function YourLibraries({ me }: { me: MeResponse }) {
                   </>
                 )}
               </td>
-              <td data-label="Tags" className="r mono">{row.kind === 'library' ? row.lib.tagCount : '—'}</td>
-              <td data-label="Accounts" className="r mono">{row.kind === 'library' ? row.lib.accountCount : '—'}</td>
+              <td data-label="Tags" className="r mono">{row.kind === 'library' ? row.lib.tagCount : systemTagCount ?? '—'}</td>
+              <td data-label="Accounts" className="r mono">{row.kind === 'library' ? row.lib.accountCount : systemAccountCount ?? '—'}</td>
               <td data-label="Order" className="r">
                 <button type="button" className="btn sm" aria-label="Move up" disabled={i === 0 || orderMutation.isPending} onClick={() => move(row.id, -1)}>▲</button>{' '}
                 <button type="button" className="btn sm" aria-label="Move down" disabled={i === rows.length - 1 || orderMutation.isPending} onClick={() => move(row.id, 1)}>▼</button>
