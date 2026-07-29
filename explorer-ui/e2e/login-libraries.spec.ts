@@ -489,6 +489,49 @@ function seedOneTagLibrary(userMock: { state: UserMockState }): void {
   })
 }
 
+// New user request: a tag created mid-session stays pinned at the BOTTOM of
+// the list, in creation order, even once its name would sort ahead of an
+// existing tag — the server's alphabetical order (libraryDetailResponse) is
+// still correct on a fresh load, so re-fetching the page (reload, or leaving
+// and reopening) must show it there instead. Both new tags sort before the
+// seeded 'Watch', which is exactly what would otherwise pull them up the
+// list mid-session.
+test('a newly created tag stays at the bottom until the page reloads', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  seedOneTagLibrary(userMock)
+
+  await page.goto('/library/lib1')
+  const panels = page.locator('.panel')
+  await expect(panels).toHaveCount(1)
+
+  async function createTag(name: string) {
+    await page.getByRole('button', { name: '+ New tag' }).click()
+    await page.locator('#tag-name-input').fill(name)
+    await page.locator('.dialog-foot button', { hasText: 'Create' }).click()
+    await expect(page.locator('.dialog')).toHaveCount(0)
+  }
+
+  await createTag('Aardvark')
+  await createTag('Bumblebee')
+
+  // Alphabetical would read Aardvark, Bumblebee, Watch — but mid-session the
+  // two just-created tags stay below the pre-existing one, in the order they
+  // were created.
+  await expect(panels).toHaveCount(3)
+  await expect(panels.nth(0)).toContainText('Watch')
+  await expect(panels.nth(1)).toContainText('Aardvark')
+  await expect(panels.nth(2)).toContainText('Bumblebee')
+
+  await page.reload()
+
+  // A fresh load has no session memory of what was just created — plain
+  // alphabetical, matching the server's own order.
+  await expect(panels).toHaveCount(3)
+  await expect(panels.nth(0)).toContainText('Aardvark')
+  await expect(panels.nth(1)).toContainText('Bumblebee')
+  await expect(panels.nth(2)).toContainText('Watch')
+})
+
 // Regression for a stacking bug: lifting the host panel's own corner-clipping
 // overflow (see assertDropdownReadsLikeSearchDropdown above) is not enough
 // once there's a FOLLOWING sibling panel for the dropdown to poke past — every

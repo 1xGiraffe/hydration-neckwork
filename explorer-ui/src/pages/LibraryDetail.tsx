@@ -56,7 +56,7 @@ function DeleteLibraryDialog({ open, onOpenChange, name, pending, error, onConfi
   )
 }
 
-function NewTagDialog({ open, onOpenChange, libraryId }: { open: boolean; onOpenChange: (open: boolean) => void; libraryId: string }) {
+function NewTagDialog({ open, onOpenChange, libraryId, onCreated }: { open: boolean; onOpenChange: (open: boolean) => void; libraryId: string; onCreated: (tagId: string) => void }) {
   const [name, setName] = useState('')
   const [color, setColor] = useState(TAG_COLORS[0])
   const [icon, setIcon] = useState('')
@@ -72,7 +72,8 @@ function NewTagDialog({ open, onOpenChange, libraryId }: { open: boolean; onOpen
   async function create() {
     setError(null)
     try {
-      await mutation.mutateAsync([libraryId, { name: name.trim(), color, icon: icon.trim() || undefined }])
+      const created = await mutation.mutateAsync([libraryId, { name: name.trim(), color, icon: icon.trim() || undefined }])
+      onCreated(created.tagId)
       onOpenChange(false)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not create the tag')
@@ -380,6 +381,19 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [newTagOpen, setNewTagOpen] = useState(false)
   const [shareError, setShareError] = useState<string | null>(null)
+  // Ids of tags created during THIS mount, in creation order. The server
+  // always sorts tags alphabetically (correct for a fresh load — see
+  // libraryDetailResponse), but re-sorting after every create would make a
+  // just-created tag jump straight into the middle of the list the instant
+  // its name sorts before an existing one, reading as if it moved or briefly
+  // vanished. Pinning it to the bottom instead — until the page unmounts,
+  // since this state (like a ref) starts fresh on remount, so navigating
+  // away/reopening/reloading always shows the honest alphabetical order —
+  // keeps a session's own creations predictable without touching the
+  // server's stable ordering. Plain state rather than a ref: the ordering
+  // below feeds directly into JSX, and reading a ref's value to compute
+  // render output is exactly what react-hooks/refs forbids.
+  const [sessionNewTagIds, setSessionNewTagIds] = useState<string[]>([])
 
   const updateMutation = useUserMutation(userApi.updateLibrary)
   const deleteMutation = useUserMutation(userApi.deleteLibrary)
@@ -438,6 +452,17 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
       {isError ? (
         <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Library not found</div>
       ) : isLoading || !data ? <ProfilePageSkeleton /> : (() => {
+        // Render order: the server's alphabetical tags minus this session's
+        // new ones, then the new ones in creation order at the end. Resolved
+        // against `data.tags` (not cached) on every render, so a session-new
+        // tag that got deleted just drops out (no ghost panel) and one that
+        // got renamed stays pinned at the bottom under its unchanged tagId.
+        const isSessionNew = new Set(sessionNewTagIds)
+        const tagById = new Map(data.tags.map(t => [t.tagId, t]))
+        const orderedTags = [
+          ...data.tags.filter(t => !isSessionNew.has(t.tagId)),
+          ...sessionNewTagIds.map(id => tagById.get(id)).filter((t): t is LibraryTagDetail => !!t),
+        ]
         return (
           <>
             <div className="acct-head">
@@ -504,7 +529,7 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
             {isOwner && activeView === 'tags' && (
               <>
                 {!data.tags.length && <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, marginBottom: 16 }}>No tags yet.</div>}
-                {data.tags.map(tag => <TagPanel key={tag.tagId} libraryId={libraryId} tag={tag} isOwner={isOwner} />)}
+                {orderedTags.map(tag => <TagPanel key={tag.tagId} libraryId={libraryId} tag={tag} isOwner={isOwner} />)}
                 <div className="ext-link-row"><button type="button" className="ext-link" style={{ cursor: 'pointer' }} onClick={() => setNewTagOpen(true)}>+ New tag</button></div>
               </>
             )}
@@ -525,7 +550,14 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
               </div>
             )}
 
-            {isOwner && <NewTagDialog open={newTagOpen} onOpenChange={setNewTagOpen} libraryId={libraryId} />}
+            {isOwner && (
+              <NewTagDialog
+                open={newTagOpen}
+                onOpenChange={setNewTagOpen}
+                libraryId={libraryId}
+                onCreated={tagId => setSessionNewTagIds(ids => [...ids, tagId])}
+              />
+            )}
             {isOwner && !data.isPersonal && (
               <DeleteLibraryDialog open={deleteOpen} onOpenChange={closeDelete} name={data.name} pending={deleteMutation.isPending} error={deleteError} onConfirm={() => void confirmDelete()} />
             )}

@@ -44,6 +44,17 @@ function mockDisplayIcon(icon: string, members: AccountRef[]): string {
   return (first && (first.emojiUrl || first.emoji)) || '🏷️'
 }
 
+// Mirrors compareTagRefsByName (api/src/routes/user.ts): the real
+// libraryDetailResponse always serves tags alphabetically, case-insensitive,
+// tagId-tiebroken — never creation order. `lib.tags` here is pushed to in
+// creation order (see the create-tag handler below), so a GET that skipped
+// this would let a spec's "tags come back alphabetical" assertion pass for
+// the wrong reason (a mock that happens to insert in order) instead of the
+// real one (the server actively re-sorts).
+function sortedTags(tags: LibraryTagDetail[]): LibraryTagDetail[] {
+  return [...tags].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.tagId.localeCompare(b.tagId))
+}
+
 // A subscription entry may optionally carry the same tag/member detail an
 // owned library does — a subscribed (not owned) library's tags are still
 // real, curated by ITS owner, and a spec exercising the aggregate view of a
@@ -187,7 +198,7 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
 
   if (method === 'GET' && (m = path.match(/^\/user\/libraries\/([^/]+)$/))) {
     const lib = state.libraries.find(l => l.libraryId === decodeURIComponent(m![1]))
-    if (lib) await fulfillJson(route, 200, lib)
+    if (lib) await fulfillJson(route, 200, { ...lib, tags: sortedTags(lib.tags) })
     else await fulfillJson(route, 404, { error: 'not found' })
     return
   }
