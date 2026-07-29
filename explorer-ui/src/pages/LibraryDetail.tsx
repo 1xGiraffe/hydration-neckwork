@@ -14,9 +14,12 @@ const LibraryFormDialog = lazy(() => import('../components/LibraryFormDialog').t
 // Duplicated (in full) from Libraries.tsx rather than imported: both pages are
 // separate route chunks, and importing across them would drag the whole
 // Libraries page — its Discover table, its own hooks — into this one just for
-// a three-line badge.
-function visibilityChip(lib: Pick<LibrarySummaryRef, 'isPersonal' | 'visibility'>) {
-  const [label, color] = lib.isPersonal ? ['personal', 'var(--amber)'] : lib.visibility === 'public' ? ['public', 'var(--sky)'] : ['private', 'var(--neutral)']
+// a three-line badge. Always public/private — `isPersonal` (auto-created,
+// not deletable) is a backend/ownership fact, not a visibility state, and
+// showing it as a third chip value read as if a personal library were
+// neither public nor private, even on ones a viewer had made public.
+function visibilityChip(lib: Pick<LibrarySummaryRef, 'visibility'>) {
+  const [label, color] = lib.visibility === 'public' ? ['public', 'var(--sky)'] : ['private', 'var(--neutral)']
   return <span className="badge" style={{ color, background: `color-mix(in srgb, ${color} 14%, transparent)` }}>{label}</span>
 }
 
@@ -260,7 +263,7 @@ function TagPanel({ libraryId, tag, isOwner }: { libraryId: string; tag: Library
         ) : (
           <>
             <span className="t row gap6" style={{ alignItems: 'center' }}>
-              <TagIcon icon={tag.displayIcon} title={tag.name} />
+              <TagIcon icon={tag.displayIcon} title={tag.name} className="emoji id tag-panel-icon" />
               <span className="tag" style={{ color: tag.color }}>{tag.name}</span>
               <span className="muted" style={{ fontWeight: 400 }}>· {tag.members.length} accounts</span>
             </span>
@@ -396,13 +399,11 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
       {isError ? (
         <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Library not found</div>
       ) : isLoading || !data ? <ProfilePageSkeleton /> : (() => {
-        const icon = data.tags[0]?.displayIcon || '🗂️'
         return (
           <>
             <div className="acct-head">
-              <div className="acct-avatar"><TagIcon icon={icon} title={data.name} className="acct-avatar-icon" /></div>
               <div className="acct-meta">
-                <div className="tag">{data.name} <span className="em">· library</span></div>
+                <div className="tag">{data.name}</div>
                 <div className="full row gap6" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
                   <AddrPill account={data.owner} noCopy />
                   {visibilityChip(data)}
@@ -410,7 +411,7 @@ export function LibraryDetail({ libraryId }: { libraryId: string }) {
                 {data.note && <div className="muted" style={{ marginTop: 4 }}>{data.note}</div>}
                 <div className="muted" style={{ marginTop: 4, fontSize: 11 }}>{data.subscriberCount} subscriber{data.subscriberCount === 1 ? '' : 's'}</div>
               </div>
-              <div className="row gap6">
+              <div className="row gap6" style={{ marginLeft: 'auto' }}>
                 {isOwner ? (
                   <>
                     <button type="button" className="btn" onClick={() => { setEditMounted(true); setEditOpen(true) }}>Edit</button>

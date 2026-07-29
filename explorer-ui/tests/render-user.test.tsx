@@ -205,7 +205,9 @@ describe('LibraryDetail — smoke render (logged out)', () => {
     queryClient.setQueryData(['library', 'defi-desks', false], { ...MOCK_LIBRARY_DETAIL, tags: [] })
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><LibraryDetail libraryId="defi-desks" /></QueryClientProvider>)
     expect(html).toContain('DeFi desks')
-    expect(html).toContain('· library')
+    // No "· library" suffix and no decorative avatar/icon block next to the name.
+    expect(html).not.toContain('· library')
+    expect(html).not.toContain('acct-avatar')
     // Statistics panel, not tag panels.
     expect(html).toContain('lib-stats')
     expect(html).toContain('Subscriber')
@@ -213,6 +215,18 @@ describe('LibraryDetail — smoke render (logged out)', () => {
     // Anonymous viewer: no owner-only affordances.
     expect(html).not.toContain('New tag')
     expect(html).not.toContain('Remove')
+  })
+
+  // C4: the visibility badge is always public/private — `isPersonal` (an
+  // auto-created, non-deletable library, unrelated to who can see it) used to
+  // render a THIRD "personal" chip value here, which read as if the library
+  // were neither public nor private even though it's a plain public one.
+  it('never shows a "personal" badge, even for the personal library — only public/private', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['library', 'defi-desks', false], { ...MOCK_LIBRARY_DETAIL, tags: [], isPersonal: true })
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><LibraryDetail libraryId="defi-desks" /></QueryClientProvider>)
+    expect(html).toContain('>public<')
+    expect(html).not.toContain('personal')
   })
 })
 
