@@ -533,9 +533,7 @@ test('the provenance pill shows a subscribed list\'s real owner, not the viewer'
 test('create a list, tag a known address, and reorder', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   // A second owned list, seeded directly so the reorder step swaps two
-  // REAL entries — the built-in 'system' slot that `Lists.tsx` always
-  // appends to the rendered rows is never actually IN `me.order`, so
-  // reordering against it alone would be a no-op.
+  // REAL entries.
   userMock.state.lists.push({
     listId: 'seed', name: 'Existing', note: '', visibility: 'private', isPersonal: false,
     owner: userMock.state.account, tagCount: 0, accountCount: 0, subscriberCount: 0, tags: [],
@@ -574,8 +572,60 @@ test('create a list, tag a known address, and reorder', async ({ page, userMock 
   await expect(tagPanel).not.toContainText('No accounts yet')
 
   await page.goto('/lists')
+  // The built-in 'system' slot is a real, draggable/reorderable row too (see
+  // the drag-reorder test below) — the ▲▼ buttons commit the FULL resolved
+  // order, system included, not just the two real list ids clicked past.
   await page.locator('tbody tr', { hasText: 'E2E List' }).locator('button[aria-label="Move up"]').click()
-  await expect.poll(() => userMock.state.order).toEqual(['list-2', 'seed'])
+  await expect.poll(() => userMock.state.order).toEqual(['list-2', 'seed', 'system'])
+})
+
+// New user request: rows can be reordered by dragging, in addition to the
+// ▲▼ buttons above — same underlying commit (`PUT /user/list-order`), just a
+// different gesture. Playwright's `dragTo` drives a real HTML5 drag over
+// Chromium (dispatching dragstart/dragover/drop, not synthetic events this
+// spec constructs itself), so this exercises the actual `<tr draggable>`
+// wiring in Lists.tsx rather than assuming it works because the unit-level
+// shape matches ListDetail's chip precedent.
+test('drags a row to reorder the list, including the system row, and commits the full order', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  userMock.state.lists.push(
+    { listId: 'lib-a', name: 'Alpha', note: '', visibility: 'private', isPersonal: false, owner: userMock.state.account, tagCount: 0, accountCount: 0, subscriberCount: 2, tags: [] },
+    { listId: 'lib-b', name: 'Bravo', note: '', visibility: 'private', isPersonal: false, owner: userMock.state.account, tagCount: 0, accountCount: 0, subscriberCount: 7, tags: [] },
+  )
+  userMock.state.order.push('lib-a', 'lib-b')
+
+  await page.goto('/lists')
+  const rows = page.locator('tbody tr')
+  await expect(rows).toHaveCount(3) // Alpha, Bravo, and the fixed system row
+
+  // The new Subscribers column, right-aligned/mono, reads straight off
+  // subscriberCount for a real list row and shows the em-dash placeholder
+  // (like Tags/Accounts) on the system row, which has no subscriber concept.
+  await expect(page.locator('tbody tr', { hasText: 'Alpha' }).locator('td[data-label="Subscribers"]')).toHaveText('2')
+  await expect(page.locator('tbody tr', { hasText: 'Bravo' }).locator('td[data-label="Subscribers"]')).toHaveText('7')
+  await expect(page.locator('tbody tr', { hasText: 'Hydration tags' }).locator('td[data-label="Subscribers"]')).toHaveText('—')
+
+  // Starting order is Alpha, Bravo, system (creation order). Drag the system
+  // row up to the top, past both real lists.
+  let orderRequestBody: { listIds: string[] } | null = null
+  await page.route(/\/api\/user\/list-order$/, async route => {
+    orderRequestBody = route.request().postDataJSON()
+    await route.fallback()
+  })
+
+  const systemRow = page.locator('tbody tr', { hasText: 'Hydration tags' })
+  await systemRow.dragTo(rows.first())
+
+  await expect.poll(() => orderRequestBody).toEqual({ listIds: ['system', 'lib-a', 'lib-b'] })
+  await expect.poll(() => userMock.state.order).toEqual(['system', 'lib-a', 'lib-b'])
+  // Reflected immediately (optimistic), not just in the eventual request —
+  // the system row now reads first.
+  await expect(rows.first()).toContainText('Hydration tags')
+
+  // The ▲▼ buttons keep working against this CURRENT (dragged) order, not
+  // the order the page loaded with.
+  await rows.nth(1).locator('button[aria-label="Move up"]').click()
+  await expect.poll(() => userMock.state.order).toEqual(['lib-a', 'system', 'lib-b'])
 })
 
 // Seeds an owned list with one (empty) tag — enough surface for both

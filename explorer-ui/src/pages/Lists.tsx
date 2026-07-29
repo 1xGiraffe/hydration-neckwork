@@ -63,17 +63,77 @@ function YourLists({ me }: { me: MeResponse }) {
   const { data: systemTags } = useTags()
   const systemTagCount = systemTags?.length
   const systemAccountCount = systemTags?.reduce((sum, t) => sum + t.memberCount, 0)
+
+  // `orderedRows` already resolves EVERY slot — every owned/subscribed list
+  // plus 'system' — into a full, gapless sequence (see its own comment), so
+  // that resolved sequence, not the raw `me.order` the server happened to
+  // send, is the honest "current order" to drag/button-reorder against: it's
+  // the same one the table is actually rendering, system row included.
   const rows = orderedRows(me)
-  const move = (id: string, dir: -1 | 1) => orderMutation.mutate([swapNeighbor(me.order, id, dir)])
+  const rowById = new Map(rows.map(r => [r.id, r]))
+  const serverOrder = rows.map(r => r.id)
+
+  // Local, optimistic display order for drag/button reorder — same shape as
+  // ListDetail's tag-member order: reset whenever the server-resolved order
+  // changes SHAPE (a list created/deleted/subscribed elsewhere), not on every
+  // unrelated re-render, so a reorder that hasn't round-tripped yet (mid-drag,
+  // mid-mutation) survives a refetch of unrelated `me` fields. Comparing the
+  // joined id list rather than array identity is what makes that possible.
+  const [order, setOrder] = useState(serverOrder)
+  const [knownServerOrder, setKnownServerOrder] = useState(serverOrder)
+  if (serverOrder.join('\n') !== knownServerOrder.join('\n')) {
+    setKnownServerOrder(serverOrder)
+    setOrder(serverOrder)
+  }
+  const displayRows = order.map(id => rowById.get(id)).filter((r): r is Row => !!r)
+  const locked = orderMutation.isPending
+  const [draggingId, setDraggingId] = useState<string | null>(null)
+  const [dragOverId, setDragOverId] = useState<string | null>(null)
+  const [orderError, setOrderError] = useState<string | null>(null)
+
+  async function commitOrder(next: string[]) {
+    const prev = order
+    setOrder(next)
+    setOrderError(null)
+    try {
+      await orderMutation.mutateAsync([next])
+    } catch (e) {
+      setOrder(prev)
+      setOrderError(e instanceof Error ? e.message : 'Could not save the new order')
+    }
+  }
+  function move(id: string, dir: -1 | 1) {
+    void commitOrder(swapNeighbor(order, id, dir))
+  }
+  function dropOn(targetId: string) {
+    setDraggingId(null); setDragOverId(null)
+    if (!draggingId || draggingId === targetId) return
+    const from = order.indexOf(draggingId)
+    const to = order.indexOf(targetId)
+    if (from < 0 || to < 0) return
+    const next = order.slice()
+    next.splice(from, 1)
+    next.splice(to, 0, draggingId)
+    void commitOrder(next)
+  }
 
   return (
     <>
       <div className="sec-title">Your lists</div>
       <div className="panel"><table className="tbl">
-        <thead><tr><th>List</th><th className="r">Tags</th><th className="r">Accounts</th><th className="r">Order</th></tr></thead>
+        <thead><tr><th>List</th><th className="r">Tags</th><th className="r">Accounts</th><th className="r">Subscribers</th><th className="r">Order</th></tr></thead>
         <tbody>
-          {rows.map((row, i) => (
-            <tr key={row.id}>
+          {displayRows.map((row, i) => (
+            <tr
+              key={row.id}
+              draggable={!locked}
+              className={`row-draggable${draggingId === row.id ? ' row-dragging' : ''}${dragOverId === row.id && draggingId !== row.id ? ' row-drag-over' : ''}`}
+              onDragStart={() => !locked && setDraggingId(row.id)}
+              onDragEnd={() => { setDraggingId(null); setDragOverId(null) }}
+              onDragOver={e => { if (draggingId && draggingId !== row.id && !locked) { e.preventDefault(); setDragOverId(row.id) } }}
+              onDragLeave={() => setDragOverId(prev => (prev === row.id ? null : prev))}
+              onDrop={e => { e.preventDefault(); if (!locked) dropOn(row.id) }}
+            >
               <td data-label="List">
                 {row.kind === 'system' ? (
                   <Link to={paths.tagsHydration()} className="addr-pill">
@@ -91,15 +151,17 @@ function YourLists({ me }: { me: MeResponse }) {
               </td>
               <td data-label="Tags" className="r mono">{row.kind === 'list' ? row.lib.tagCount : systemTagCount ?? '—'}</td>
               <td data-label="Accounts" className="r mono">{row.kind === 'list' ? row.lib.accountCount : systemAccountCount ?? '—'}</td>
+              <td data-label="Subscribers" className="r mono">{row.kind === 'list' ? row.lib.subscriberCount : '—'}</td>
               <td data-label="Order" className="r">
-                <button type="button" className="btn sm" aria-label="Move up" disabled={i === 0 || orderMutation.isPending} onClick={() => move(row.id, -1)}>▲</button>{' '}
-                <button type="button" className="btn sm" aria-label="Move down" disabled={i === rows.length - 1 || orderMutation.isPending} onClick={() => move(row.id, 1)}>▼</button>
+                <button type="button" className="btn sm" aria-label="Move up" disabled={i === 0 || locked} onClick={() => move(row.id, -1)}>▲</button>{' '}
+                <button type="button" className="btn sm" aria-label="Move down" disabled={i === displayRows.length - 1 || locked} onClick={() => move(row.id, 1)}>▼</button>
               </td>
             </tr>
           ))}
         </tbody>
       </table></div>
-      <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11, marginBottom: 16 }}>Higher lists win when an account is tagged in several.</div>
+      {orderError && <div className="dialog-error" style={{ marginBottom: 16 }}>{orderError}</div>}
+      <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11, marginBottom: 16 }}>Higher lists win when an account is tagged in several. Drag a row, or use ▲▼, to reorder.</div>
     </>
   )
 }

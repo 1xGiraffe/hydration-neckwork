@@ -642,6 +642,15 @@ svg { display: block; }
 .tbl tbody tr { transition: background 120ms; }
 .tbl tbody tr.clickable { cursor: pointer; }
 .tbl tbody tr.clickable:hover { background: var(--panel-hover); }
+/* Drag-reorderable rows (Lists.tsx's "Your lists"): same static outline/opacity
+   affordance as a tag's draggable member chips (see .tag-member-chip-draggable
+   below) — the whole row is the drag source, a grab cursor its only decoration,
+   so links/buttons inside (which set their own `cursor: pointer`) still read as
+   clickable. No transition on either state, so both read correctly under
+   prefers-reduced-motion without a separate override. */
+.tbl tbody tr.row-draggable { cursor: grab; }
+.tbl tbody tr.row-dragging { opacity: 0.5; cursor: grabbing; }
+.tbl tbody tr.row-drag-over { outline: 2px solid var(--sky); outline-offset: -2px; }
 /* Low-/zero-value Activity is de-emphasised so high-value rows stand out;
    hovering restores full opacity for readability. */
 .tbl tbody tr.dim { opacity: .5; transition: opacity 120ms, background 120ms; }
