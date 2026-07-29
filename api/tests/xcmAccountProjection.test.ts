@@ -66,11 +66,12 @@ describe('the account-scoped XCM readers use the account-first projection', () =
       expect(functionBody(site), site).toContain('${xcmEventActivityByAccountTable()}')
     }
     // What stays on the parent: the global candidate walks, the outbound reads, the
-    // MessageQueue barriers (whose payload neither sibling carries), the global arm of
-    // the remote-pull withdrawal decode, and the asset surface. One definition + eight
-    // call sites — the inbound deposit run is the ninth, and it moved to the block-first
-    // projection below.
-    expect(occurrences(explorerService, 'xcmEventActivityTable(')).toBe(11)
+    // barrier reads (whose payload neither sibling carries), the global arm of the
+    // remote-pull withdrawal decode, the pre-migration inherent-context family read
+    // (the hook-only walk projection cannot hold those rows), and the asset surface.
+    // One definition + nine call sites — the hook-context inbound deposit run is the
+    // tenth, and it moved to the block-first projection below.
+    expect(occurrences(explorerService, 'xcmEventActivityTable(')).toBe(12)
     expect(functionBody('xcmInRowsForBlocks')).not.toContain('xcmEventActivityByAccountTable')
   })
 
@@ -184,14 +185,23 @@ describe('the account-scoped XCM readers use the account-first projection', () =
     expect(occurrences(explorerService, 'xcmInboundWalkTable(')).toBe(2)
     const body = functionBody('xcmInRowsForBlocks')
     expect(occurrences(body, '${xcmInboundWalkTable()}')).toBe(1)
-    expect(occurrences(body, '${sqlEventNameList(XCM_IN_WALK_EVENTS)}')).toBe(1)
-    // The decoder's other read is the barrier, still on the parent for its payload.
-    expect(occurrences(body, '${xcmEventActivityTable()}')).toBe(1)
-    // Hook context is the walk projection's own filter — extrinsic_index is not a column
-    // there — so of the decoder's three reads only two state it: the barrier, and the
-    // crossable-index read, which is on raw_events and carries no such filter of its own.
-    // A run that could step out of hook context would walk into an extrinsic's events.
-    expect(occurrences(body, 'AND extrinsic_index IS NULL')).toBe(2)
+    // Two family reads, one per execution context: the hook-context run from the walk
+    // projection, and the pre-migration inherent-context run from the parent (the walk
+    // projection is hook-only by its own filter, so the old rows can never be there).
+    expect(occurrences(body, '${sqlEventNameList(XCM_IN_WALK_EVENTS)}')).toBe(2)
+    // The decoder's parent reads: the barrier (kept on the parent for its payload) and
+    // the inherent-context family slice.
+    expect(occurrences(body, '${xcmEventActivityTable()}')).toBe(2)
+    // Context is stated era-aware: the barrier accepts the old events' inherent context
+    // (XCM_BARRIER_CONTEXT_SQL), the old family read is inherent-only, and the
+    // crossable-index read relaxes hook-only for pre-migration blocks. Pairing then
+    // requires each leg to share its barrier's own context, so a run can never cross
+    // execution contexts in either era.
+    expect(occurrences(body, '${XCM_BARRIER_CONTEXT_SQL}')).toBe(1)
+    expect(occurrences(body, 'AND extrinsic_index IS NOT NULL')).toBe(1)
+    expect(occurrences(body, '(extrinsic_index IS NULL OR block_height < ${MESSAGE_QUEUE_MIGRATION_BLOCK})')).toBe(1)
+    expect(occurrences(body, 'e.ext === bExt')).toBe(1)
+    expect(occurrences(body, 'c === bExt')).toBe(1)
     expect(occurrences(body, '${sqlEventNameList(XCM_WALK_CROSSABLE_EVENTS)}')).toBe(1)
     expect(occurrences(body, 'FROM price_data.raw_events')).toBe(1)
     // Set semantics, so a replay duplicate cannot change which indices are crossable.

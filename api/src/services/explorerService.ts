@@ -7384,12 +7384,25 @@ const XCM_SENT_XTOKENS_EVENTS = ['XTokens.TransferredAssets', 'XTokens.Transferr
 const XCM_SENT_XTOKENS_EVENTS_SQL = XCM_SENT_XTOKENS_EVENTS.map(n => `'${n}'`).join(',')
 const XCM_SENT_EVENTS_SQL = [...XCM_SENT_XTOKENS_EVENTS, 'PolkadotXcm.Sent'].map(n => `'${n}'`).join(',')
 const isXTokensSentEvent = (name: string): boolean => XCM_SENT_XTOKENS_EVENTS.includes(name)
+// The execution CONTEXT switched with the barrier names: since the migration,
+// messages process in on_initialize (hook context, extrinsic_index NULL); before
+// it, they processed inside the parachainSystem.set_validation_data INHERENT, so
+// every old barrier and every credit/withdrawal it governs carries that inherent's
+// extrinsic_index (measured: all 120,351 old barriers are extrinsic-context). A leg
+// therefore only ever pairs with a barrier from its own context — without that
+// rule, a hook-context DCA withdrawal sitting below an old inherent barrier in the
+// same block would masquerade as a remote-initiated cross-chain pull.
+const MESSAGE_QUEUE_MIGRATION_BLOCK = 5_433_625
+// The old barriers execute in the inherent, so `extrinsic_index IS NULL` would drop
+// them; MessageQueue.Processed stays hook-only (its rare extrinsic-context
+// occurrences — ServiceQueues calls — were deliberately excluded before this).
+const XCM_BARRIER_CONTEXT_SQL = `(extrinsic_index IS NULL OR event_name != 'MessageQueue.Processed')`
 // Three of a barrier's fields are read — success, the message topic id, and the origin
 // network — and `weightUsed`, which none of them reads, is about half the payload.
 // Extract the three in SQL: the barrier is read for every block of every XCM page
 // and account feed, 164,581 times over two weeks for 20.78 GiB of result bytes,
 // and shipping the payload bought nothing but a JSON.parse per barrier row.
-interface XcmBarrierRow { block_height: number; ts: string; event_index: number; succeeded: boolean; message_id: string; origin_kind: string; origin_value: number }
+interface XcmBarrierRow { block_height: number; ts: string; event_index: number; extrinsic_index: number | null; succeeded: boolean; message_id: string; origin_kind: string; origin_value: number }
 // `succeeded` per barrier era: MessageQueue names it in `success`; DmpQueue names it
 // in `outcome.__kind` (anything but Complete executed partially or not at all);
 // XcmpQueue splits it across two event names. The default stays "not explicitly
@@ -7399,7 +7412,7 @@ interface XcmBarrierRow { block_height: number; ts: string; event_index: number;
 // and the oldest XcmpQueue.Success rows are a bare JSON string holding the hash.
 // `origin`: only MessageQueue carries one. DMP is from the relay by construction;
 // an XCMP barrier is from a sibling parachain the old event never names.
-const XCM_BARRIER_COLUMNS = `block_height, toString(block_timestamp) AS ts, event_index,
+const XCM_BARRIER_COLUMNS = `block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index,
               multiIf(
                 event_name = 'DmpQueue.ExecutedDownward', toUInt8(JSONExtractString(args_json,'outcome','__kind') = 'Complete'),
                 event_name = 'XcmpQueue.Fail', toUInt8(0),
@@ -7494,11 +7507,16 @@ export function xcmCreditRun(
 async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInfo>, whoIn?: Set<string>): Promise<ActivityRow[]> {
   const list = sqlUIntList(blocks)
   if (!list) return []
-  const [barRes, famRes, crossRes] = await Promise.all([
+  // Pre-migration blocks execute their messages inside the set_validation_data
+  // inherent, so their family/crossable events are extrinsic-context and invisible
+  // to the hook-only walk projection — they are read from the block-first parent
+  // instead, and pairing matches each barrier's own context below.
+  const oldList = sqlUIntList(blocks.filter(b => b < MESSAGE_QUEUE_MIGRATION_BLOCK))
+  const [barRes, famRes, oldFamRes, crossRes] = await Promise.all([
     client.query({
       query: `SELECT ${XCM_BARRIER_COLUMNS}
               FROM ${xcmEventActivityTable()}
-              WHERE block_height IN (${list}) AND event_name IN (${XCM_BARRIER_EVENTS_SQL}) AND extrinsic_index IS NULL
+              WHERE block_height IN (${list}) AND event_name IN (${XCM_BARRIER_EVENTS_SQL}) AND ${XCM_BARRIER_CONTEXT_SQL}
               ORDER BY block_height DESC, event_index DESC`,
       format: 'JSONEachRow',
     }),
@@ -7520,32 +7538,49 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
               WHERE block_height IN (${list}) AND event_name IN (${sqlEventNameList(XCM_IN_WALK_EVENTS)})`,
       format: 'JSONEachRow',
     }),
+    // Pre-migration family events (inherent context) from the parent model, which
+    // filters names only, never context. Bounded exactly like the walk read: the
+    // page's blocks against the parent's (event_name, asset_id, block_height) key.
+    oldList
+      ? client.query({
+        query: `SELECT block_height, event_index, extrinsic_index, event_name, who, asset_id, amount
+                FROM ${xcmEventActivityTable()}
+                WHERE block_height IN (${oldList}) AND event_name IN (${sqlEventNameList(XCM_IN_WALK_EVENTS)})
+                  AND extrinsic_index IS NOT NULL`,
+        format: 'JSONEachRow',
+      })
+      : null,
     // The indices the run may step over (XCM_WALK_CROSSABLE_EVENTS). raw_events is
     // ordered (block_height, event_index), so this is the same bounded primary-key
     // read on the page's blocks that extrinsicIndexFor already does — and it is read
     // as a SET of indices, so an unmerged replay duplicate cannot change the outcome
-    // and FINAL is not needed. Hook context only, matching the walk view's own filter,
-    // so a run can never step out of hook context into an extrinsic's events.
+    // and FINAL is not needed. Context follows the era: hook-only in the MessageQueue
+    // era (so a run can never step out of hook context into an extrinsic's events),
+    // inherent context included for pre-migration blocks (the pairing below still
+    // requires the barrier's own context).
     client.query({
-      query: `SELECT block_height, event_index
+      query: `SELECT block_height, event_index, extrinsic_index
               FROM price_data.raw_events
-              WHERE block_height IN (${list}) AND extrinsic_index IS NULL
+              WHERE block_height IN (${list})
+                AND (extrinsic_index IS NULL OR block_height < ${MESSAGE_QUEUE_MIGRATION_BLOCK})
                 AND event_name IN (${sqlEventNameList(XCM_WALK_CROSSABLE_EVENTS)})`,
       format: 'JSONEachRow',
     }),
   ])
   const barriers = await barRes.json<XcmBarrierRow>()
-  type WalkEvent = { event_name: string; who: string; asset_id: number; amount: string }
+  type WalkEvent = { event_name: string; who: string; asset_id: number; amount: string; ext: number | null }
   const byBlock = new Map<number, Map<number, WalkEvent>>()
-  for (const e of await famRes.json<{ block_height: number; event_index: number } & WalkEvent>()) {
+  const addFamily = (e: { block_height: number; event_index: number; event_name: string; who: string; asset_id: number; amount: string }, ext: number | null): void => {
     const m = byBlock.get(e.block_height) ?? new Map<number, WalkEvent>()
-    m.set(e.event_index, e)
+    m.set(e.event_index, { event_name: e.event_name, who: e.who, asset_id: e.asset_id, amount: e.amount, ext })
     byBlock.set(e.block_height, m)
   }
-  const crossableByBlock = new Map<number, Set<number>>()
-  for (const e of await crossRes.json<{ block_height: number; event_index: number }>()) {
-    const s = crossableByBlock.get(e.block_height) ?? new Set<number>()
-    s.add(e.event_index)
+  for (const e of await famRes.json<{ block_height: number; event_index: number; event_name: string; who: string; asset_id: number; amount: string }>()) addFamily(e, null)
+  if (oldFamRes) for (const e of await oldFamRes.json<{ block_height: number; event_index: number; extrinsic_index: number; event_name: string; who: string; asset_id: number; amount: string }>()) addFamily(e, e.extrinsic_index)
+  const crossableByBlock = new Map<number, Map<number, number | null>>()
+  for (const e of await crossRes.json<{ block_height: number; event_index: number; extrinsic_index: number | null }>()) {
+    const s = crossableByBlock.get(e.block_height) ?? new Map<number, number | null>()
+    s.set(e.event_index, e.extrinsic_index)
     crossableByBlock.set(e.block_height, s)
   }
   // Every barrier in a block is a floor for the one above it, failed ones included: a
@@ -7568,7 +7603,12 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
     const below = blockBarriers.filter(i => i < b.event_index)
     const floor = below.length ? below[below.length - 1] : -1
     const seen = new Set<string>()
-    for (const idx of xcmCreditRun(b.event_index, floor, i => evs?.has(i) ?? false, i => crossable?.has(i) ?? false)) {
+    // A leg belongs to a barrier only in the barrier's own execution context: hook
+    // legs to a hook barrier, the inherent's legs to that same inherent's barrier.
+    const bExt = b.extrinsic_index ?? null
+    const inFamily = (i: number): boolean => { const e = evs?.get(i); return e !== undefined && e.ext === bExt }
+    const canCross = (i: number): boolean => { const c = crossable?.get(i); return c !== undefined && c === bExt }
+    for (const idx of xcmCreditRun(b.event_index, floor, inFamily, canCross)) {
       const e = evs!.get(idx)!
       if (!XCM_IN_DEPOSIT_EVENTS.includes(e.event_name)) continue
       // `asset_id` already carries the 0 that Balances.Deposit has no currencyId for.
@@ -7604,7 +7644,7 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
     client.query({
       query: `SELECT ${XCM_BARRIER_COLUMNS}
               FROM ${xcmEventActivityTable()}
-              WHERE block_height IN (${list}) AND event_name IN (${XCM_BARRIER_EVENTS_SQL}) AND extrinsic_index IS NULL
+              WHERE block_height IN (${list}) AND event_name IN (${XCM_BARRIER_EVENTS_SQL}) AND ${XCM_BARRIER_CONTEXT_SQL}
               ORDER BY block_height DESC, event_index ASC`,
       format: 'JSONEachRow',
     }),
@@ -7618,16 +7658,18 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
     // who/currencyId/amount.
     whoIn
       ? client.query({
-        query: `SELECT block_height, event_index, who, asset_id, amount
+        query: `SELECT block_height, event_index, extrinsic_index, who, asset_id, amount
                 FROM ${xcmEventActivityByAccountTable()}
                 WHERE who IN (${sqlAccountList([...whoIn])}) AND block_height IN (${list})
-                  AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NULL`,
+                  AND event_name = 'Currencies.Withdrawn'
+                  AND (extrinsic_index IS NULL OR block_height < ${MESSAGE_QUEUE_MIGRATION_BLOCK})`,
         format: 'JSONEachRow',
       })
       : client.query({
-        query: `SELECT block_height, event_index, who, asset_id, amount
+        query: `SELECT block_height, event_index, extrinsic_index, who, asset_id, amount
                 FROM ${xcmEventActivityTable()}
-                WHERE block_height IN (${list}) AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NULL`,
+                WHERE block_height IN (${list}) AND event_name = 'Currencies.Withdrawn'
+                  AND (extrinsic_index IS NULL OR block_height < ${MESSAGE_QUEUE_MIGRATION_BLOCK})`,
         format: 'JSONEachRow',
       }),
   ])
@@ -7639,11 +7681,15 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
   }
   const rows: ActivityRow[] = []
   const seen = new Set<string>()
-  for (const w of await wdRes.json<{ block_height: number; event_index: number; who: string; asset_id: number; amount: string }>()) {
+  for (const w of await wdRes.json<{ block_height: number; event_index: number; extrinsic_index: number | null; who: string; asset_id: number; amount: string }>()) {
     const { who, amount, asset_id: cid } = w
     if (!who || !amount || amount === '0' || RESERVED_ACCOUNT_RE.test(who)) continue
     if (whoIn && !whoIn.has(who)) continue
-    const barrier = (barriersByBlock.get(w.block_height) ?? []).find(b => b.event_index > w.event_index)
+    // Context-matched: a withdrawal pairs with the next barrier of its OWN execution
+    // context — without this, a hook-context DCA withdrawal below an old inherent
+    // barrier (or an old signed swap's withdrawal below nothing) would false-pair.
+    const wExt = w.extrinsic_index ?? null
+    const barrier = (barriersByBlock.get(w.block_height) ?? []).find(b => b.event_index > w.event_index && (b.extrinsic_index ?? null) === wExt)
     if (!barrier) continue
     if (!barrier.succeeded) continue
     const key = `${w.block_height}:${barrier.event_index}:${who}:${cid}:${amount}`
@@ -7766,7 +7812,7 @@ async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, 
                   ${candidateValue.joinSql}
                   WHERE ${pageBound}
                     AND ${candidateWho} IN (${acctList})
-                    AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NULL
+                    AND event_name = 'Currencies.Withdrawn' AND (extrinsic_index IS NULL OR block_height < ${MESSAGE_QUEUE_MIGRATION_BLOCK})
                     AND NOT match(${candidateWho}, '${RESERVED_ACCOUNT_RE.source}')
                     ${candidateToken} ${candidateValue.predicateSql}
                   ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
@@ -7779,7 +7825,7 @@ async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, 
           query: `SELECT block_height FROM ${xcmEventActivityTable()}
                   ${candidateValue.joinSql}
                   WHERE ${pageBound}
-                    AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NULL
+                    AND event_name = 'Currencies.Withdrawn' AND (extrinsic_index IS NULL OR block_height < ${MESSAGE_QUEUE_MIGRATION_BLOCK})
                     AND NOT match(${candidateWho}, '${RESERVED_ACCOUNT_RE.source}')
                     ${candidateToken} ${candidateValue.predicateSql}
                   ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
@@ -7827,7 +7873,7 @@ async function getRecentXcmIn(limit: number, from?: string, to?: string, account
                   ${candidateValue.joinSql}
                   WHERE ${pageBound}
                     AND ${candidateWho} IN (${acctList})
-                    AND event_name IN (${sqlEventNameList(XCM_IN_DEPOSIT_EVENTS)}) AND extrinsic_index IS NULL
+                    AND event_name IN (${sqlEventNameList(XCM_IN_DEPOSIT_EVENTS)}) AND (extrinsic_index IS NULL OR block_height < ${MESSAGE_QUEUE_MIGRATION_BLOCK})
                     AND NOT match(${candidateWho}, '${RESERVED_ACCOUNT_RE.source}')
                     ${candidateToken} ${candidateValue.predicateSql}
                   ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
@@ -7840,7 +7886,7 @@ async function getRecentXcmIn(limit: number, from?: string, to?: string, account
           query: `SELECT block_height FROM ${xcmEventActivityTable()}
                   ${candidateValue.joinSql}
                   WHERE ${pageBound}
-                    AND event_name IN (${sqlEventNameList(XCM_IN_DEPOSIT_EVENTS)}) AND extrinsic_index IS NULL
+                    AND event_name IN (${sqlEventNameList(XCM_IN_DEPOSIT_EVENTS)}) AND (extrinsic_index IS NULL OR block_height < ${MESSAGE_QUEUE_MIGRATION_BLOCK})
                     AND NOT match(${candidateWho}, '${RESERVED_ACCOUNT_RE.source}')
                     ${candidateToken} ${candidateValue.predicateSql}
                   ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
