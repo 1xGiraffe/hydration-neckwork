@@ -3,7 +3,9 @@ import rateLimit from '@fastify/rate-limit'
 import { z } from 'zod'
 import {
   createChallenge, verifyChallenge, issueSession, revokeSession, requireUser,
+  listSessions, revokeSessionByHash, deviceLabelFromUserAgent,
 } from '../services/userAuthService.ts'
+import { createDeviceLink, claimDeviceLink, deviceLinkStatus } from '../services/deviceLinkService.ts'
 import {
   accountRef, resolveDisplayAccountId, getAccounts, getAccountsForViewerFold,
   getListTagDetail, getListTagActivity, getListTagExtrinsics, getListTagEvents, getListTagVotes,
@@ -133,9 +135,68 @@ export async function userRoutes(fastify: FastifyInstance) {
     // Canonicalize exactly like the display side: a bound EVM signer lands on
     // the substrate account the explorer already shows for it.
     const accountId = resolveDisplayAccountId(verified)
-    const token = await issueSession(accountId)
+    const token = await issueSession(accountId, { label: deviceLabelFromUserAgent(req.headers['user-agent']), via: 'wallet' })
     await ensurePersonalList(accountId)
     return { token, me: await meResponse(accountId) }
+  })
+
+  // ---- QR device-link handoff. All three live under /user/auth/ on purpose:
+  // the UI's authedJson never drops a local session on a 401 from that prefix,
+  // so a rejected (expired/used) code can't log the scanning device out of an
+  // account it is already into. ----
+
+  const deviceLinkClaimBody = z.object({ code: z.string().regex(/^[0-9a-f]{64}$/) })
+
+  // A logged-in device mints the code the QR carries. The response's `code`
+  // goes into the QR only; `linkId` is what the dialog polls with.
+  fastify.post('/user/auth/device-link', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const link = createDeviceLink(accountId)
+    if (!link) return reply.status(503).send({ error: 'Too many pending link codes — try again shortly' })
+    return link
+  })
+
+  // The issuing device's poll: has anyone claimed this code yet?
+  fastify.get('/user/auth/device-link/:linkId', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    return { status: deviceLinkStatus((req.params as { linkId: string }).linkId, accountId) }
+  })
+
+  // The scanning device trades the code for its own session — same response
+  // shape as verify, so the client logs in identically either way. 401 covers
+  // unknown, expired, and already-claimed alike: the caller can't act on the
+  // difference, and collapsing them leaks nothing to whoever found a stale QR.
+  fastify.post('/user/auth/device-link/claim', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+    noStore(reply)
+    const body = deviceLinkClaimBody.safeParse(req.body)
+    if (!body.success) return reply.status(400).send({ error: 'Invalid link code' })
+    const accountId = claimDeviceLink(body.data.code)
+    if (!accountId) return reply.status(401).send({ error: 'This code has expired or was already used' })
+    const token = await issueSession(accountId, { label: deviceLabelFromUserAgent(req.headers['user-agent']), via: 'qr' })
+    await ensurePersonalList(accountId)
+    return { token, me: await meResponse(accountId) }
+  })
+
+  // ---- Devices: every live session of the account, revocable one by one. ----
+
+  fastify.get('/user/sessions', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    return { sessions: listSessions(accountId, (req.headers.authorization as string).slice(7)) }
+  })
+
+  fastify.delete('/user/sessions/:id', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const revoked = await revokeSessionByHash(accountId, (req.params as { id: string }).id)
+    if (!revoked) return reply.status(404).send({ error: 'Unknown session' })
+    return { ok: true }
   })
 
   fastify.post('/user/auth/logout', async (req, reply) => {
