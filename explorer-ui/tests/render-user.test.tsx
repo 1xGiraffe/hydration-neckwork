@@ -177,26 +177,26 @@ describe('TaggedInHint — logged-out "tagged in a public list" nudge', () => {
     return html.match(/<span class="muted lists-login-hint">([\s\S]*?)<\/span>$/)?.[1]
   }
 
-  // State 1: logged out, tagged in exactly one public list — a ghost pill in
-  // the header's tag-row grammar naming the list, plus a real login action
-  // (a <button>, never a dead link) wired to the same requestConnect() flow
-  // every other logged-out subscribe affordance uses.
-  it('renders the one public list as a ghost pill with a working login action, logged out', () => {
+  // State 1: logged out, tagged in a public list — one fixed line that names
+  // NOTHING (no list name, no count; the contents stay behind the login),
+  // separated by a middle dot, with a real login action (a <button>, never a
+  // dead link) wired to the same requestConnect() flow every other
+  // logged-out subscribe affordance uses.
+  it('renders the fixed nameless line with a working login action, logged out', () => {
     const html = renderToStaticMarkup(<TaggedInHint taggedIn={[oneTag]} session={null} />)
     const hint = hintTextOf(html)
-    expect(hint).toContain('tagged-in-pill')
-    expect(hint).toContain('Whales')
-    expect(hint).toMatch(/log in to subscribe/i)
+    expect(hint).toMatch(/^Tags available for this account · /)
+    expect(hint).toMatch(/login to subscribe/)
     expect(hint).toContain('<button')
+    expect(hint).not.toContain('Whales')
   })
 
-  // Several lists render as one pill each — same grammar as real tag pills.
-  it('renders one ghost pill per tagging list', () => {
-    const html = renderToStaticMarkup(<TaggedInHint taggedIn={[oneTag, secondTag]} session={null} />)
-    const hint = hintTextOf(html)!
-    expect(hint.match(/tagged-in-pill/g)?.length).toBe(2)
-    expect(hint).toContain('Whales')
-    expect(hint).toContain('DeFi desks')
+  // Several lists change nothing — same fixed line, still no names, no count.
+  it('renders the identical line regardless of how many lists tag the account', () => {
+    const one = renderToStaticMarkup(<TaggedInHint taggedIn={[oneTag]} session={null} />)
+    const two = renderToStaticMarkup(<TaggedInHint taggedIn={[oneTag, secondTag]} session={null} />)
+    expect(two).toBe(one)
+    expect(hintTextOf(two)).not.toContain('DeFi desks')
   })
 
   // State 2: logged out, but tagged in no public list at all.

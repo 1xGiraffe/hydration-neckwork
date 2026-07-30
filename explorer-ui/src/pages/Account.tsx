@@ -124,16 +124,15 @@ export function Account({ address }: { address: string }) {
                   <div className="full">
                     <span className="mono"><ShortAddr addr={data.evmAddress ?? data.ss58Polkadot} full /></span> <Copy text={data.evmAddress ?? data.ss58Polkadot} />
                   </div>
-                  {(associations.length > 0 || (!session && (taggedIn.data?.length ?? 0) > 0)) && (
+                  {associations.length > 0 && (
                     <div className="row gap6" style={{ marginTop: 2, flexWrap: 'wrap', alignItems: 'center' }}>
                       <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>Tags</span>
                       {associations.map(a => <UserTagPill key={a.listId ?? `system-${a.id}`} tag={a} address={data.evmAddress ?? data.ss58Polkadot} noCopy noMemberSuffix />)}
-                      {/* Logged-out teaser in the same visual grammar as the real
-                          pills: the public lists tagging this account, each a ghost
-                          pill whose contents stay behind the login. */}
-                      <TaggedInHint taggedIn={taggedIn.data ?? []} session={session} />
                     </div>
                   )}
+                  {/* Logged-out teaser, one quiet self-contained line — it names
+                      no list on purpose (the contents stay behind the login). */}
+                  <TaggedInHint taggedIn={taggedIn.data ?? []} session={session} />
                 </div>
                 <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} valueUsd={data.portfolioUsd - debtUsd} />
               </div>
@@ -269,20 +268,10 @@ export function TaggedInHint({ taggedIn, session }: {
   session: ReturnType<typeof useSession>
 }) {
   if (session || !taggedIn.length) return null
+  // Deliberately names no list and counts nothing — just that tags exist.
   return (
     <span className="muted lists-login-hint">
-      {taggedIn.map(l => (
-        <button
-          key={l.listId}
-          type="button"
-          className="addr-pill tagged-in-pill"
-          title={`Tagged in the public list “${l.name}” — log in to subscribe`}
-          onClick={requestConnect}
-        >
-          <span className="tag">{l.name}</span>
-        </button>
-      ))}
-      <button type="button" className="hint-link" onClick={requestConnect}>log in to subscribe</button>
+      Tags available for this account · <button type="button" className="hint-link" onClick={requestConnect}>login to subscribe</button>
     </span>
   )
 }
