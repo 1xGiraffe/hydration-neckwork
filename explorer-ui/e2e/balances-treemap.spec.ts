@@ -33,12 +33,46 @@ test.describe('balances treemap — desktop', () => {
       expect(first, `tile 0 should be >= tile ${i}`).toBeGreaterThanOrEqual(await area(tiles.nth(i)) - 1)
     }
 
-    // The biggest tile shows value ($) and share (%) on its face, % above value.
+    // The biggest tile leads with the TOKEN AMOUNT; the $ value follows as a
+    // dimmed suffix (big tiles only), and share (%) sits above the value line.
     const face = tiles.first()
     const faceText = (await face.innerText()).replace(/\s+/g, ' ')
     expect(faceText).toMatch(/\$/)
     expect(faceText).toMatch(/%/)
     expect(await top(face.locator('.tm-pct')), '% sits above value').toBeLessThan(await top(face.locator('.tm-val')))
+    // Amount primary: the copyable amount carries no $; the dimmed suffix does.
+    const amt = face.locator('.tm-copyamt')
+    expect(await amt.innerText()).not.toContain('$')
+    expect(await face.locator('.tm-val-usd').innerText()).toContain('$')
+    // See first, copy second: hovering the amount reveals the full-precision
+    // figure in an anchored chip — every digit, grouped, no compact suffixes —
+    // with the "click to copy" hint teaching the second action.
+    const tip = page.locator('.tm-exact-tip')
+    await amt.hover()
+    await expect(tip).toBeVisible()
+    await expect(tip).toContainText('click to copy')
+    const exact = (await tip.innerText()).replace('click to copy', '').trim()
+    expect(exact).toMatch(/^-?[\d,]+(\.\d+)?$/)
+    expect(exact).not.toMatch(/[kMB$]/)
+    // A click while the chip shows copies the plain number, confirms in the chip
+    // itself, and must NOT toggle the tile lock underneath.
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+    await amt.click()
+    await expect(tip).toHaveText('Copied ✓')
+    const copied = await page.evaluate(() => navigator.clipboard.readText())
+    expect(copied).toMatch(/^-?\d+(\.\d+)?$/)
+    expect(exact.replace(/,/g, '')).toBe(copied)
+    await expect(face).toHaveAttribute('aria-pressed', 'false')
+    // Leaving dismisses the chip.
+    await page.locator('.tm-detail-sym').hover()
+    await expect(tip).toHaveCount(0)
+
+    // The detail below leads with the amount too: Amount is the first metric and
+    // its copyable figure reveals the same exact form on hover.
+    const grid = page.locator('.tm-detail-grid')
+    await expect(grid.locator('.tm-metric-label').first()).toHaveText('Amount')
+    await grid.locator('.tm-metric-value.strong .tm-copyamt').hover()
+    await expect(page.locator('.tm-exact-tip')).toContainText(/^-?[\d,]+(\.\d+)?/)
 
     // No horizontal overflow.
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)

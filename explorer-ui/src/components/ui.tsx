@@ -106,6 +106,26 @@ export const F = {
     const v = Number(raw) / 10 ** dec
     return Number.isFinite(v) ? v : 0
   },
+  // The EXACT amount by string math on the raw integer — no digit is ever rounded
+  // away (routing through Number would lose precision past 2^53, and 128-bit
+  // amounts exist). Grouped for reading; hover/copy surfaces only.
+  preciseAmount: (raw: string | null | undefined, dec: number): string => {
+    const plain = F.preciseAmountPlain(raw, dec)
+    if (plain === '—') return plain
+    const neg = plain.startsWith('-')
+    const [int, frac] = (neg ? plain.slice(1) : plain).split('.')
+    const grouped = int.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+    return (neg ? '-' : '') + grouped + (frac ? '.' + frac : '')
+  },
+  // Ungrouped counterpart for the clipboard: a plain parseable number string.
+  preciseAmountPlain: (raw: string | null | undefined, dec: number): string => {
+    if (raw == null || raw === '' || !/^-?\d+$/.test(raw)) return '—'
+    const neg = raw.startsWith('-')
+    const digits = (neg ? raw.slice(1) : raw).padStart(dec + 1, '0')
+    const int = digits.slice(0, digits.length - dec) || '0'
+    const frac = dec > 0 ? digits.slice(digits.length - dec).replace(/0+$/, '') : ''
+    return (neg ? '-' : '') + int + (frac ? '.' + frac : '')
+  },
   usd: (v: number | null | undefined) => {
     if (v == null || !Number.isFinite(v)) return '—'
     // Signed values render "-$1.2k", not "$-1200.00" (price-move markers carry

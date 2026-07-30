@@ -1,4 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { F, AssetIcon } from './ui'
 import { AssetBalanceChart } from './BalanceHistory'
 import { BalanceBreakdown } from './BalanceBreakdown'
@@ -51,6 +52,55 @@ function assetName(a: AssetRef): string {
   return a.name ?? `#${a.assetId}`
 }
 
+// See first, copy second. Hovering the amount (or a first tap, where hover
+// doesn't exist) reveals the EXACT figure — every digit, F.preciseAmount's
+// string math — in a chip anchored above it, with a "click to copy" hint; only
+// a click made WHILE the chip is showing copies, and the chip confirms in place
+// ("Copied ✓"). The chip is portaled to <body> in viewport coordinates so a
+// 25-digit figure escapes the tile's overflow clipping, and pointer-events:none
+// keeps the click on the amount itself, which stops propagation — tiles are
+// buttons and must not toggle their lock on a copy.
+function CopyAmount({ raw, dec, children }: { raw: string; dec: number; children: React.ReactNode }) {
+  const ref = useRef<HTMLSpanElement>(null)
+  const hovering = useRef(false)
+  const [rect, setRect] = useState<DOMRect | null>(null) // non-null = chip open
+  const [done, setDone] = useState(false)
+  const open = () => setRect(ref.current?.getBoundingClientRect() ?? null)
+  const close = () => { setRect(null); setDone(false) }
+  return (
+    <span
+      ref={ref}
+      className="tm-copyamt"
+      onMouseEnter={() => { hovering.current = true; open() }}
+      onMouseLeave={() => { hovering.current = false; close() }}
+      onClick={e => {
+        e.stopPropagation(); e.preventDefault()
+        if (!rect) return open() // touch: the first tap reveals, never copies
+        void navigator.clipboard?.writeText(F.preciseAmountPlain(raw, dec))
+        setDone(true)
+        // A hover keeps the chip (mouseleave will close it); a tap has no leave
+        // event, so the confirmation dismisses itself.
+        setTimeout(() => { if (hovering.current) setDone(false); else close() }, 1400)
+      }}
+    >
+      {children}
+      {rect && createPortal(
+        <span
+          className="tm-exact-tip"
+          role="status"
+          style={{
+            left: Math.min(Math.max(Math.round(rect.left + rect.width / 2), 130), Math.round(window.innerWidth - 130)),
+            top: Math.round(rect.top - 7),
+          }}
+        >
+          {done ? 'Copied ✓' : <>{F.preciseAmount(raw, dec)}<span className="tm-exact-hint">click to copy</span></>}
+        </span>,
+        document.body,
+      )}
+    </span>
+  )
+}
+
 // Progressive tile-face content, revealed only when it comfortably fits so text is
 // never clipped mid-glyph. The full breakdown always lives in the detail card.
 function TileFace({ balance, share, w, h }: { balance: AddressBalance; share: number; w: number; h: number }) {
@@ -75,7 +125,14 @@ function TileFace({ balance, share, w, h }: { balance: AddressBalance; share: nu
           </span>
         : showSym && <span className="tm-sym">{a.symbol}</span>}
       {(big || med) && <span className="tm-pct">{pctStr(share)}</span>}
-      {(big || med) && <span className="tm-val">{F.usd(balance.valueUsd)}</span>}
+      {/* Token amount leads; the $ value tags along dimmed only where the tile
+          comfortably fits both. Sizing/sorting stays by USD — labels only. */}
+      {(big || med) && (
+        <span className="tm-val">
+          <CopyAmount raw={balance.total} dec={a.decimals}>{F.amount(balance.total, a.decimals)}</CopyAmount>
+          {big && balance.valueUsd != null && <span className="tm-val-usd"> · {F.usd(balance.valueUsd)}</span>}
+        </span>
+      )}
     </span>
   )
 }
@@ -132,7 +189,7 @@ function TileButton({ color, isOther, label, box, active, locked, onSelect, onHo
 // hook (which must run unconditionally).
 function AssetTile({ balance, share, box, ...handlers }: { balance: AddressBalance; share: number; box: Box } & TileHandlers) {
   const color = useAssetColor(balance.asset)
-  const label = `${balance.asset.symbol} — ${F.usd(balance.valueUsd)}, ${pctStr(share)} of valued holdings`
+  const label = `${balance.asset.symbol} — ${F.amount(balance.total, balance.asset.decimals)}, ${F.usd(balance.valueUsd)}, ${pctStr(share)} of valued holdings`
   return (
     <TileButton color={color} label={label} box={box} {...handlers}>
       <TileFace balance={balance} share={share} w={box.w} h={box.h} />
@@ -204,14 +261,17 @@ function FocusedDetail({ balance, hist, allHistory }: {
         </div>
         {balance != null && (
           <div className="tm-detail-grid">
-            {priced && <Metric label="Value" value={F.usd(balance.valueUsd)} strong />}
+            {/* Amount leads and carries the emphasis; value follows dimmed —
+                same priority as the tile labels above. */}
             <Metric
               label="Amount"
-              strong={!priced}
+              strong
               value={<span className="tm-amt">
-                {F.amount(balance.total, asset.decimals)}<span className="tm-amt-sym">{asset.symbol}</span>
+                <CopyAmount raw={balance.total} dec={asset.decimals}>{F.amount(balance.total, asset.decimals)}</CopyAmount>
+                <span className="tm-amt-sym">{asset.symbol}</span>
               </span>}
             />
+            {priced && <Metric label="Value" value={F.usd(balance.valueUsd)} />}
           </div>
         )}
         {balance != null && <BalanceBreakdown balance={balance} />}

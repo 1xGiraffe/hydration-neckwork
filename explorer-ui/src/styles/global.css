@@ -801,6 +801,16 @@ svg { display: block; }
 /* The %/value pair is pinned to the tile bottom as a group, % above value. */
 .tm-pct { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-medium); margin-top: auto; }
 .tm-val { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text-high); }
+.tm-val-usd { color: var(--text-medium); font-size: 12px; }
+/* Exact-amount micro-surface: hover reveals the full-precision figure in a chip,
+   a click while it shows copies (see first, copy second), the chip confirms in
+   place. Portaled to <body> and viewport-fixed so it escapes tile clipping;
+   centered with the `translate` property so the tipIn animation can't clobber it.
+   No color change on the figure itself, no global toast. */
+.tm-copyamt { cursor: copy; }
+.tm-copyamt:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
+.tm-exact-tip { position: fixed; translate: -50% -100%; z-index: 300; display: inline-flex; align-items: baseline; gap: 8px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-high); white-space: nowrap; max-width: calc(100vw - 24px); pointer-events: none; box-shadow: 0 8px 20px rgba(0,0,0,.4); animation: tipIn 120ms ease-out; }
+.tm-exact-hint { color: var(--text-low); font-size: 10px; }
 .tm-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--tile); }
 
 /* Docked detail card for the active tile. */
