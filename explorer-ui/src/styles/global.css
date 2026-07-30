@@ -1885,6 +1885,27 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .wallet-tile.not-installed { opacity: 0.55; }
 .wallet-tile.not-installed:hover { opacity: 0.85; }
 .wallet-tile.not-installed .wallet-tile-status { color: var(--text-low); }
+/* QR device-link: the login dialog's scan stage, the devices list, and the
+   "Link a device" QR view. The QR keeps uqr's own white background in both
+   themes — a scanner needs the contrast, not the theme. */
+.qr-tile-icon { padding: 6px; color: var(--text-high); }
+.qr-scan-video { width: 100%; max-height: 320px; border-radius: 12px; background: #000; object-fit: cover; }
+.qr-scan-fallback { padding: 24px 16px; border: 1px dashed var(--border); border-radius: 12px; color: var(--text-medium); font-size: 13px; text-align: center; }
+.qr-box { display: flex; justify-content: center; }
+.qr-box svg { width: 224px; height: 224px; border-radius: 12px; }
+.qr-box-loading { height: 224px; border-radius: 12px; background: var(--panel); }
+.qr-expiry { text-align: center; font-size: 12px; color: var(--text-medium); min-height: 1.2em; }
+.qr-linked { padding: 24px 16px; border-radius: 12px; background: var(--green-soft); color: var(--green); text-align: center; font-weight: 500; }
+.device-list { display: flex; flex-direction: column; gap: 8px; }
+.device-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
+.device-info { flex: 1; min-width: 0; }
+.device-name { color: var(--text-high); font-weight: 500; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.device-tag { font-size: 10px; }
+.device-meta { color: var(--text-low); font-size: 12px; margin-top: 2px; }
+/* The link-device landing page (phone camera → URL): one narrow card. */
+.link-device-card { max-width: 480px; padding: 24px; display: flex; flex-direction: column; gap: 14px; align-items: flex-start; }
+.link-device-card p { margin: 0; color: var(--text-medium); }
+.link-device-warn { padding: 10px 12px; border-radius: 10px; background: var(--amber-soft); color: var(--amber); font-size: 13px; }
 /* Two-segment sliding switch (visibility private/public) — the indicator pill
    translates by segment index, preis-ui's interval-selector mechanic. */
 .seg-switch {
