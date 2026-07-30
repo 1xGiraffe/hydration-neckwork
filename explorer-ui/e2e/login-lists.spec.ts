@@ -201,8 +201,10 @@ test.describe('Account page — logged-out "tagged in a public list" hint', () =
     await page.goto(`/account/${OWL_ADDRESS}`)
 
     const hint = page.locator('.lists-login-hint')
-    await expect(hint).toContainText('Tagged in')
+    // In the header's Tags row, pill grammar: the list name as a ghost pill.
     await expect(hint).toContainText('DeFi desks')
+    await expect(hint.locator('.tagged-in-pill')).toHaveCount(1)
+    expect(await hint.locator('..').locator('.muted').first().innerText()).toBe('Tags')
     await expect(page.locator('.dialog')).toHaveCount(0)
 
     await hint.getByRole('button', { name: 'log in to subscribe' }).click()

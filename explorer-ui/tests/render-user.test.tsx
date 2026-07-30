@@ -171,31 +171,32 @@ describe('TaggedInHint — logged-out "tagged in a public list" nudge', () => {
   const secondTag: ListSummaryRef = { listId: 'l3', name: 'DeFi desks', note: '', visibility: 'public', isPersonal: false, owner: base, tagCount: 1, accountCount: 9, subscriberCount: 1 }
   const OTHER_SESSION: Session = { token: 't2', accountId: '0x' + 'cd'.repeat(32), address: '15yy' }
 
-  // Isolates the hint's own text — React's SSR text-escapes a literal `"`
-  // to `&quot;`, and this scopes the check to the hint's own div so it can't
+  // Isolates the hint's own markup, scoped to its own span so it can't
   // false-positive against unrelated markup elsewhere on a real page.
   function hintTextOf(html: string): string | undefined {
-    return html.match(/<div class="muted lists-login-hint">([\s\S]*?)<\/div>/)?.[1]
+    return html.match(/<span class="muted lists-login-hint">([\s\S]*?)<\/span>$/)?.[1]
   }
 
-  // State 1: logged out, tagged in exactly one public list — names it and
-  // offers a real login action (a <button>, never a dead link), wired to
-  // the same requestConnect() flow every other logged-out subscribe
-  // affordance uses.
-  it('names the one public list and offers a working login action, logged out', () => {
+  // State 1: logged out, tagged in exactly one public list — a ghost pill in
+  // the header's tag-row grammar naming the list, plus a real login action
+  // (a <button>, never a dead link) wired to the same requestConnect() flow
+  // every other logged-out subscribe affordance uses.
+  it('renders the one public list as a ghost pill with a working login action, logged out', () => {
     const html = renderToStaticMarkup(<TaggedInHint taggedIn={[oneTag]} session={null} />)
     const hint = hintTextOf(html)
-    expect(hint).toMatch(/^Tagged in &quot;Whales&quot;/)
+    expect(hint).toContain('tagged-in-pill')
+    expect(hint).toContain('Whales')
     expect(hint).toMatch(/log in to subscribe/i)
     expect(hint).toContain('<button')
   })
 
-  // Several lists collapse to a count rather than naming each one.
-  it('shows a count instead of a name once tagged in more than one public list', () => {
+  // Several lists render as one pill each — same grammar as real tag pills.
+  it('renders one ghost pill per tagging list', () => {
     const html = renderToStaticMarkup(<TaggedInHint taggedIn={[oneTag, secondTag]} session={null} />)
-    const hint = hintTextOf(html)
-    expect(hint).toMatch(/^Tagged in 2 public lists/)
-    expect(hint).not.toContain('&quot;')
+    const hint = hintTextOf(html)!
+    expect(hint.match(/tagged-in-pill/g)?.length).toBe(2)
+    expect(hint).toContain('Whales')
+    expect(hint).toContain('DeFi desks')
   })
 
   // State 2: logged out, but tagged in no public list at all.
