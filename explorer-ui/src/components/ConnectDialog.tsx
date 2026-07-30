@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import { api, userApi } from '../api/explorer'
 import { setSession } from '../session'
@@ -8,7 +8,12 @@ import {
 } from '../wallets'
 import type { InjectedAccount, EvmProviderDetail, Eip1193Provider, AccountRowLabel, SubstrateWalletInfo } from '../wallets'
 import { AccountEmoji, ShortAddr } from './ui'
+import { extractDeviceLinkCode } from '../deviceLink'
 import type { AccountRef } from '../types'
+
+// The jsQR decoder only loads when someone actually picks "Scan QR code" —
+// wallet sign-ins never pay for it.
+const QrScanner = lazy(() => import('./QrScanner').then(m => ({ default: m.QrScanner })))
 
 // The emoji/avatar + name + mono address a wallet account renders as, shared
 // by the account-picker rows and the signing screen so a chosen account looks
@@ -39,11 +44,12 @@ type Pending =
   | { kind: 'substrate'; ext: Parameters<typeof signSubstrate>[0] }
   | { kind: 'evm'; provider: Eip1193Provider }
 
-type Stage = 'wallets' | 'accounts' | 'signing'
+type Stage = 'wallets' | 'accounts' | 'signing' | 'scan'
 
 function describeStage(stage: Stage, busy: boolean, hasError: boolean): string {
   if (stage === 'wallets') return 'Sign a message with your wallet to prove you own the address — no transaction, no fee.'
   if (stage === 'accounts') return 'Choose the account to sign in with.'
+  if (stage === 'scan') return busy ? 'Logging you in…' : 'Point the camera at the QR code shown on your logged-in device.'
   if (hasError) return 'Sign-in failed.'
   return busy ? 'Waiting for a signature in your wallet…' : 'Signing you in…'
 }
@@ -73,6 +79,12 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   // below — a visitor who expanded it, closed the dialog, and came back gets
   // a clean first screen, not wherever they left off.
   const [showOtherWallets, setShowOtherWallets] = useState(false)
+  // Camera failed or is unavailable on the scan stage — swap the viewfinder
+  // for guidance instead of leaving a black rectangle.
+  const [scanUnavailable, setScanUnavailable] = useState<string | null>(null)
+  // Claims are single-use server-side; this guards the sub-render window where
+  // a second decode of the same frame could double-claim (and so double-fail).
+  const claimingRef = useRef(false)
 
   // Bumped on every reset (dialog close/reopen, "choose a different wallet")
   // so an in-flight doSign can tell it's been superseded. Closing the dialog
@@ -90,13 +102,14 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   if (open !== wasOpen) {
     setWasOpen(open)
     if (open) {
-      setStage('wallets'); setPending(null); setAccounts([]); setAddress(null); setError(null); setBusy(false); setRefs({}); setShowOtherWallets(false)
+      setStage('wallets'); setPending(null); setAccounts([]); setAddress(null); setError(null); setBusy(false); setRefs({}); setShowOtherWallets(false); setScanUnavailable(null)
     }
   }
   // Refs can't be touched during render (only event handlers/effects), so the
   // open/close edge above bumps the attempt counter here instead — still well
-  // before any new doSign a later click could trigger.
-  useEffect(() => { attemptRef.current++ }, [open])
+  // before any new doSign a later click could trigger. The claim guard resets
+  // on the same edge for the same reason.
+  useEffect(() => { attemptRef.current++; claimingRef.current = false }, [open])
 
   // EIP-6963 providers announce asynchronously; re-poll the same discovery
   // handle's list() whenever another one arrives while the dialog is open.
@@ -219,7 +232,36 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
 
   function backToWallets() {
     attemptRef.current++
-    setStage('wallets'); setPending(null); setAccounts([]); setAddress(null); setError(null)
+    claimingRef.current = false
+    setStage('wallets'); setPending(null); setAccounts([]); setAddress(null); setError(null); setBusy(false); setScanUnavailable(null)
+  }
+
+  // A decoded QR from the scan stage. Foreign QR codes just keep the camera
+  // running with a hint; a device-link code is claimed for this device's own
+  // session — same setSession contract as a signed login.
+  async function claimScanned(text: string) {
+    if (claimingRef.current) return
+    const code = extractDeviceLinkCode(text)
+    if (!code) {
+      setError('That is not a device-link QR code — show the one from your logged-in device.')
+      return
+    }
+    claimingRef.current = true
+    const attempt = attemptRef.current
+    setBusy(true)
+    setError(null)
+    try {
+      const { token, me } = await userApi.claimDeviceLink(code)
+      if (attemptRef.current !== attempt) return
+      setSession({ token, accountId: me.account.accountId, address: me.account.address })
+      setBusy(false)
+      onOpenChange(false)
+    } catch (e) {
+      if (attemptRef.current !== attempt) return
+      claimingRef.current = false
+      setBusy(false)
+      setError(e instanceof Error ? e.message : 'Could not log in with this code')
+    }
   }
 
   function walletTile(w: SubstrateWalletInfo) {
@@ -244,7 +286,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog">
           <div className="dialog-head">
-            <Dialog.Title asChild><h2>Log in with your wallet</h2></Dialog.Title>
+            <Dialog.Title asChild><h2>{stage === 'scan' ? 'Log in with a QR code' : 'Log in with your wallet'}</h2></Dialog.Title>
             <Dialog.Close asChild>
               <button className="theme-toggle" aria-label="Close">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
@@ -293,6 +335,18 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
                     </div>
                   </div>
                 )}
+                <div className="wallet-group">
+                  <div className="wallet-group-label">Another device</div>
+                  <div className="wallet-grid">
+                    <button type="button" className="wallet-tile installed" disabled={busy} onClick={() => { setError(null); setStage('scan') }}>
+                      <svg className="wallet-tile-icon qr-tile-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                        <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" />
+                        <path d="M14 14h3v3h-3zM20 14h1M14 20h1M18 18h3v3h-3z" />
+                      </svg>
+                      <span className="wallet-tile-name">Scan QR code</span>
+                    </button>
+                  </div>
+                </div>
               </>
             )}
 
@@ -317,6 +371,24 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
               <div className="wallet-row account-row static">
                 <AccountRowLabelView account={refs[address]} label={accountRowLabel(refs[address], accounts.find(a => a.address === address)?.name, address)} />
               </div>
+            )}
+
+            {stage === 'scan' && (
+              <>
+                {scanUnavailable ? (
+                  <div className="qr-scan-fallback">{scanUnavailable}</div>
+                ) : (
+                  <Suspense fallback={<div className="qr-scan-fallback">Starting camera…</div>}>
+                    <QrScanner
+                      onCode={text => void claimScanned(text)}
+                      onUnavailable={reason => setScanUnavailable(reason === 'unsupported'
+                        ? 'No camera is available here (it needs an HTTPS connection). Scan the QR code with your phone’s camera app instead — it opens the explorer already logged in.'
+                        : 'Camera access was denied. Allow it in the browser settings, or scan the QR code with your phone’s camera app instead.')}
+                    />
+                  </Suspense>
+                )}
+                <button type="button" className="btn" onClick={backToWallets}>Back</button>
+              </>
             )}
           </div>
           {stage === 'signing' && error && (

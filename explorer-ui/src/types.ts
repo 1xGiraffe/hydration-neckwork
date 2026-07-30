@@ -887,3 +887,11 @@ export interface MeResponse {
 
 export interface LoginChallengeResponse { nonce: string; message: string }
 export interface LoginResponse { token: string; me: MeResponse }
+
+// QR device-link handoff: `code` goes into the QR only, `linkId` is the handle
+// the issuing device polls with (never the code itself).
+export interface DeviceLinkResponse { code: string; linkId: string; expiresAt: string }
+export type DeviceLinkStatus = 'pending' | 'claimed' | 'expired'
+// One live session on the devices list; `id` is the server-side token hash —
+// the handle revocation takes — never a usable token.
+export interface DeviceSession { id: string; label: string; createdVia: string; createdAt: string; lastSeen: string; current: boolean }
