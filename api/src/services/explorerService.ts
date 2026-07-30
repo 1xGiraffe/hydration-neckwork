@@ -18382,6 +18382,19 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
     seenAccounts.add(norm.accountId.toLowerCase())
   }
 
+  // Tag name — substring match, e.g. "kraken". Placed ahead of every fuzzy
+  // account/identity matcher below: a name query naming a system tag or a tag
+  // in the viewer's own lists should surface that tag before the identities it
+  // happens to also match, not after — an exact address/hash/block lookup above
+  // still wins outright, since this only fires on a query containing letters.
+  if (/[A-Za-z]/.test(query)) {
+    const { allTags } = await import('./tagService.ts')
+    const ql = query.toLowerCase()
+    for (const t of allTags()) {
+      if (t.name.toLowerCase().includes(ql)) results.push({ type: 'tag', value: t.tagId, label: t.name, icon: t.icon, color: t.color })
+    }
+  }
+
   // Combined "3-letter code + emoji name" query (either order: "pmo pig",
   // "pig pmo") — intersect the suffix bucket with the account's rendered glyph.
   // High-precision (usually pinpoints one account), so it ranks first among the
@@ -18472,15 +18485,6 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
         type: 'address', value: id, label: evmFromAccountId(id) ?? polkadotAddress(id) ?? undefined,
         emoji: ic.emoji, emojiName: ic.emojiName, emojiUrl: ic.emojiUrl, identity: identityForAccount(id),
       })
-    }
-  }
-
-  // Tag name — substring match, e.g. "kraken".
-  if (/[A-Za-z]/.test(query)) {
-    const { allTags } = await import('./tagService.ts')
-    const ql = query.toLowerCase()
-    for (const t of allTags()) {
-      if (t.name.toLowerCase().includes(ql)) results.push({ type: 'tag', value: t.tagId, label: t.name, icon: t.icon, color: t.color })
     }
   }
 
