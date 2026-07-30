@@ -124,10 +124,14 @@ export function Account({ address }: { address: string }) {
                   <div className="full">
                     <span className="mono"><ShortAddr addr={data.evmAddress ?? data.ss58Polkadot} full /></span> <Copy text={data.evmAddress ?? data.ss58Polkadot} />
                   </div>
-                  {associations.length > 0 && (
+                  {(associations.length > 0 || (!session && (taggedIn.data?.length ?? 0) > 0)) && (
                     <div className="row gap6" style={{ marginTop: 2, flexWrap: 'wrap', alignItems: 'center' }}>
                       <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>Tags</span>
                       {associations.map(a => <UserTagPill key={a.listId ?? `system-${a.id}`} tag={a} address={data.evmAddress ?? data.ss58Polkadot} noCopy noMemberSuffix />)}
+                      {/* Logged-out teaser in the same visual grammar as the real
+                          pills: the public lists tagging this account, each a ghost
+                          pill whose contents stay behind the login. */}
+                      <TaggedInHint taggedIn={taggedIn.data ?? []} session={session} />
                     </div>
                   )}
                 </div>
@@ -174,7 +178,6 @@ export function Account({ address }: { address: string }) {
               <CloseAccountsSection address={canonicalAddress ?? address} />
 
               <ListsSection publicLists={libs.data ?? []} ownLists={isOwn ? (me.data?.lists ?? []) : []} isOwn={isOwn} />
-              <TaggedInHint taggedIn={taggedIn.data ?? []} session={session} />
 
               <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={history.data?.portfolioSeries ?? data.portfolioSeries ?? []} dates={history.data?.portfolioDates ?? data.portfolioDates} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} loading={history.isLoading || (history.isFetching && !history.data)} valueEvents={valueEvents.data} />
               </>)}
@@ -267,8 +270,19 @@ export function TaggedInHint({ taggedIn, session }: {
 }) {
   if (session || !taggedIn.length) return null
   return (
-    <div className="muted lists-login-hint">
-      Tagged in {taggedIn.length === 1 ? `"${taggedIn[0].name}"` : `${taggedIn.length} public lists`} — <button type="button" className="hint-link" onClick={requestConnect}>log in to subscribe</button>.
-    </div>
+    <span className="muted lists-login-hint">
+      {taggedIn.map(l => (
+        <button
+          key={l.listId}
+          type="button"
+          className="addr-pill tagged-in-pill"
+          title={`Tagged in the public list “${l.name}” — log in to subscribe`}
+          onClick={requestConnect}
+        >
+          <span className="tag">{l.name}</span>
+        </button>
+      ))}
+      <button type="button" className="hint-link" onClick={requestConnect}>log in to subscribe</button>
+    </span>
   )
 }
