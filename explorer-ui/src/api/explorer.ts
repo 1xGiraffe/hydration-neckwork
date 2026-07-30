@@ -5,7 +5,7 @@ import type {
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
-  AccountRef,
+  AccountRef, DeviceLinkResponse, DeviceLinkStatus, DeviceSession,
 } from '../types'
 import { getSession, setSession } from '../session'
 
@@ -205,6 +205,14 @@ export const userApi = {
   challenge: (address: string) => authedJson<LoginChallengeResponse>('POST', '/user/auth/challenge', { address }),
   verify: (address: string, nonce: string, signature: string) => authedJson<LoginResponse>('POST', '/user/auth/verify', { address, nonce, signature }),
   logout: () => authedJson<{ ok: true }>('POST', '/user/auth/logout'),
+  // QR device-link handoff (see deviceLink.ts). All three live under
+  // /user/auth/ so authedJson's 401 carve-out applies: a rejected code never
+  // clears a session this device already holds.
+  createDeviceLink: () => authedJson<DeviceLinkResponse>('POST', '/user/auth/device-link'),
+  deviceLinkStatus: (linkId: string, signal?: AbortSignal) => authedJson<{ status: DeviceLinkStatus }>('GET', `/user/auth/device-link/${encodeURIComponent(linkId)}`, undefined, signal),
+  claimDeviceLink: (code: string) => authedJson<LoginResponse>('POST', '/user/auth/device-link/claim', { code }),
+  sessions: (signal?: AbortSignal) => authedJson<{ sessions: DeviceSession[] }>('GET', '/user/sessions', undefined, signal),
+  revokeSession: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/sessions/${encodeURIComponent(id)}`),
   me: (signal?: AbortSignal) => authedJson<MeResponse>('GET', '/user/me', undefined, signal),
   tagMap: (signal?: AbortSignal) => authedJson<TagMapResponse>('GET', '/user/tag-map', undefined, signal),
   setProfileName: (name: string) => authedJson<ProfileRef>('PUT', '/user/profile', { name }),

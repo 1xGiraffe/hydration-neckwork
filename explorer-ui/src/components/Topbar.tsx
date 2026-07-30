@@ -15,6 +15,9 @@ import type { AccountRef } from '../types'
 // rather than a static one — otherwise every visitor's entry chunk would carry
 // it, logged in or out.
 const ConnectDialog = lazy(() => import('./ConnectDialog').then(m => ({ default: m.ConnectDialog })))
+// Same lazy treatment: the devices list (and its QR renderer) only loads when
+// a logged-in visitor opens it.
+const DevicesDialog = lazy(() => import('./DevicesDialog').then(m => ({ default: m.DevicesDialog })))
 
 // Navigation: direct links plus one dropdown group (Chain) for the raw chain
 // data pages. A group's trigger navigates to its primary page (Chain → Blocks)
@@ -85,11 +88,12 @@ function ProfileAvatar({ account }: { account?: AccountRef }) {
 // Desktop compact login control: a Connect button logged out, or the account's
 // avatar + name opening a small menu (My account / Lists / Log out) logged
 // in. Escape and an outside click close the menu, same as the drawer below.
-function AccountMenuButton({ session, account, invites, onConnect }: {
+function AccountMenuButton({ session, account, invites, onConnect, onDevices }: {
   session: ReturnType<typeof useSession>
   account: AccountRef | undefined
   invites: number
   onConnect: () => void
+  onDevices: () => void
 }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -143,6 +147,7 @@ function AccountMenuButton({ session, account, invites, onConnect }: {
         <div className="account-menu">
           <Link to={paths.account(session.address)} onClick={() => setOpen(false)}>My account</Link>
           <Link to={paths.lists()} onClick={() => setOpen(false)}>Lists{invites > 0 && <span className="invite-badge">{invites}</span>}</Link>
+          <button type="button" className="menu-row" onClick={() => { setOpen(false); onDevices() }}>Devices</button>
           <button type="button" className="menu-row" onClick={() => { setOpen(false); void logout() }}>Log out</button>
         </div>
       )}
@@ -153,10 +158,11 @@ function AccountMenuButton({ session, account, invites, onConnect }: {
 // Mobile drawer login section: the same three destinations as the desktop
 // menu, as plain drawer rows — the drawer is already the expanded surface, so
 // a nested popover would be one flyout too many.
-function DrawerAccountSection({ session, invites, onConnect, onNavigate }: {
+function DrawerAccountSection({ session, invites, onConnect, onDevices, onNavigate }: {
   session: ReturnType<typeof useSession>
   invites: number
   onConnect: () => void
+  onDevices: () => void
   onNavigate: () => void
 }) {
   if (!session) {
@@ -171,6 +177,7 @@ function DrawerAccountSection({ session, invites, onConnect, onNavigate }: {
       <div className="sec-lbl">Account</div>
       <Link to={paths.account(session.address)} onClick={onNavigate}>My account</Link>
       <Link to={paths.lists()} onClick={onNavigate}>Lists{invites > 0 && <span className="invite-badge">{invites}</span>}</Link>
+      <button type="button" className="drawer-row" onClick={() => { onNavigate(); onDevices() }}>Devices</button>
       <button type="button" className="drawer-row" onClick={() => { onNavigate(); void logout() }}>Log out</button>
     </div>
   )
@@ -194,6 +201,9 @@ export function Topbar({ route }: { route: Route }) {
   // doesn't re-import or lose Suspense's already-resolved chunk.
   const [connectMounted, setConnectMounted] = useState(false)
   const openConnect = () => { setConnectMounted(true); setConnectOpen(true) }
+  const [devicesOpen, setDevicesOpen] = useState(false)
+  const [devicesMounted, setDevicesMounted] = useState(false)
+  const openDevices = () => { setDevicesMounted(true); setDevicesOpen(true) }
   // Any other page (a /tags Subscribe row, a public list's own detail
   // page when logged out, ...) opens THIS dialog via requestConnect() rather
   // than mounting a second instance of its own.
@@ -290,7 +300,7 @@ export function Topbar({ route }: { route: Route }) {
             <span className="dot" /><span className="lab">{live ? 'Live' : 'Paused'}</span>
           </button>
           <ThemeToggle onClick={toggleTheme} />
-          <AccountMenuButton session={session} account={account} invites={invites} onConnect={openConnect} />
+          <AccountMenuButton session={session} account={account} invites={invites} onConnect={openConnect} onDevices={openDevices} />
           <button ref={drawerTriggerRef} className="nav-burger" onClick={() => setDrawer(true)} aria-label="Open menu" aria-expanded={drawer} aria-haspopup="dialog">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
           </button>
@@ -309,7 +319,7 @@ export function Topbar({ route }: { route: Route }) {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
               </button>
             </div>
-            <DrawerAccountSection session={session} invites={invites} onConnect={() => { setDrawer(false); openConnect() }} onNavigate={() => setDrawer(false)} />
+            <DrawerAccountSection session={session} invites={invites} onConnect={() => { setDrawer(false); openConnect() }} onDevices={() => { setDrawer(false); openDevices() }} onNavigate={() => setDrawer(false)} />
             <div className="drawer-sec">
               <div className="sec-lbl">Explore</div>
               {NAV_LINKS.map(it => (
@@ -336,6 +346,11 @@ export function Topbar({ route }: { route: Route }) {
       {connectMounted && (
         <Suspense fallback={null}>
           <ConnectDialog open={connectOpen} onOpenChange={setConnectOpen} />
+        </Suspense>
+      )}
+      {devicesMounted && (
+        <Suspense fallback={null}>
+          <DevicesDialog open={devicesOpen} onOpenChange={setDevicesOpen} />
         </Suspense>
       )}
     </>

@@ -48,6 +48,7 @@ export type Route =
   | { name: 'hollar' }
   | { name: 'asset'; assetId: number }
   | { name: 'holders'; assetId: number }
+  | { name: 'link-device' } // QR login handoff target; the code rides in the fragment
   | { name: 'notfound'; path: string }
 
 // Internal nav event the store listens to (pushState/replaceState don't fire
@@ -114,6 +115,7 @@ export function parseRoute(loc: string): Route {
       return parts[1] && isSafeId(parts[1]) ? { name: 'asset', assetId: Number(parts[1]) } : { name: 'assets' }
     case 'holders':
       return parts[1] && isSafeId(parts[1]) ? { name: 'holders', assetId: Number(parts[1]) } : { name: 'assets' }
+    case 'link-device': return { name: 'link-device' }
     default:
       if ((ACTIVITY_SLUGS as readonly string[]).includes(parts[0])) {
         const slug = parts[0] as ActivitySlug
@@ -261,6 +263,7 @@ export const paths = {
   holders: (assetId: number) => `/holders/${assetId}`,
   lists: () => '/lists',
   list: (id: string) => `/list/${encodeURIComponent(id)}`,
+  linkDevice: () => '/link-device',
 }
 
 export function Link({ to, children, className, title, ariaLabel, onClick, style, data }: { to: string; children: ReactNode; className?: string; title?: string; ariaLabel?: string; onClick?: (e: MouseEvent) => void; style?: CSSProperties; data?: Record<string, string> }) {
