@@ -57,6 +57,43 @@ describe('/explorer list endpoints', () => {
     expect(r.json()).toHaveLength(1)
   })
 
+  // The teaser a non-subscriber's account page shows: this is a DIFFERENT
+  // question from ownership above — A1 owns nothing here, it's only ever
+  // tagged as a member of OWNER's public list.
+  it("serves the public lists that TAG an address as a member, via /tagged-in, without leaking tag names or members", async () => {
+    const pub = await createList(OWNER, 'Whales', '', 'public')
+    const tag = await createTag(OWNER, pub.listId, { name: 'Big fish' })
+    await setTagMembers(OWNER, pub.listId, tag.tagId, [A1], [])
+    const priv = await createList(OWNER, 'Private watch', '', 'private')
+    const privTag = await createTag(OWNER, priv.listId, { name: 'Watch' })
+    await setTagMembers(OWNER, priv.listId, privTag.tagId, [A1], [])
+
+    const f = await build()
+    const r = await f.inject({ method: 'GET', url: `/explorer/address/${A1}/tagged-in` })
+    expect(r.statusCode).toBe(200)
+    const rows = r.json()
+    // Only the public list — the private one A1 is genuinely also tagged in
+    // stays invisible, same as every other public read surface.
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ listId: pub.listId, name: 'Whales', tagCount: 1, accountCount: 1 })
+    expect(rows[0].owner.accountId).toBe(OWNER)
+    // Never the tag's own name or its member roster — only the same
+    // statistics /lists and /list/:id already expose to a non-owner.
+    const body = JSON.stringify(rows)
+    expect(body).not.toContain('Big fish')
+    expect(body).not.toContain('tags')
+    expect(body).not.toContain('members')
+  })
+
+  it('answers [] for an address tagged nowhere publicly, and 400s a garbage address the same way /lists does', async () => {
+    await createList(OWNER, 'Pub', '', 'public')
+    const f = await build()
+    const r = await f.inject({ method: 'GET', url: `/explorer/address/${A1}/tagged-in` })
+    expect(r.statusCode).toBe(200)
+    expect(r.json()).toEqual([])
+    expect((await f.inject({ method: 'GET', url: '/explorer/address/not-a-real-address/tagged-in' })).statusCode).toBe(400)
+  })
+
   it('layers the server cache-control hook correctly: no-store on /user routes survives, public stamp lands on /explorer/lists', async () => {
     // A copy of the server's onSend hook shape (api/src/server.ts:95-100) with a
     // couple of representative entries plus the new /explorer/list* rule and

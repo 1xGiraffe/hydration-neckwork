@@ -195,6 +195,10 @@ export const api = {
     getJson<(AccountRef | null)[]>(withQuery('/explorer/account-refs', { addresses: addresses.join(',') }), signal),
   list: (id: string, signal?: AbortSignal) => getJson<ListDetailResponse>(`/explorer/list/${encodeURIComponent(id)}`, signal),
   addressLists: (address: string, signal?: AbortSignal) => getJson<ListSummaryRef[]>(`/explorer/address/${encodeURIComponent(address)}/lists`, signal),
+  // Public lists that TAG this address as a member — distinct from
+  // addressLists above (lists the address itself OWNS). Same summary shape,
+  // never tag names/other members (see the route's own comment).
+  addressTaggedIn: (address: string, signal?: AbortSignal) => getJson<ListSummaryRef[]>(`/explorer/address/${encodeURIComponent(address)}/tagged-in`, signal),
 }
 
 export const userApi = {

@@ -97,7 +97,12 @@ const CACHE_CONTROL: [RegExp, number][] = [
   [/^\/explorer\/(address|tag)\/[^/]+\/counts/, 600],
   [/^\/explorer\/(daily|accounts-daily)/, 300],
   [/^\/explorer\/list/, 30],                          // /lists directory + /list/:id detail
-  [/^\/explorer\/address\/[^/]+\/lists/, 30],
+  // /lists (owned) + /tagged-in (member) — both summarize a public list's
+  // live subscriber/membership counts, so they share the same 30s freshness
+  // window as the directory/detail routes above (subscriberCount changes
+  // right under them too) rather than falling through to the generic 8s
+  // address bucket below.
+  [/^\/explorer\/address\/[^/]+\/(lists|tagged-in)/, 30],
   [/^\/explorer\/(address|tag)\//, 8],
   [/^\/explorer\/search/, 10],
   // `assets` (no trailing slash) is the asset directory — 30s in-process TTL, so
