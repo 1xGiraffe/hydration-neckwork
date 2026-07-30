@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { splitSqlStatements, selectSchemaFiles } from '../src/db/schemaBootstrap.ts'
 import { ensureTagMemberPositionColumn } from '../src/services/userListService.ts'
+import { ensureSessionDeviceColumns } from '../src/services/userAuthService.ts'
 import type { ClickHouseClient } from '../src/db/client.ts'
 
 const schemaDir = join(dirname(fileURLToPath(import.meta.url)), '../../clickhouse/schema')
@@ -41,6 +42,14 @@ describe('004_user.sql', () => {
     const stmt = statements.find(s => s.includes('price_data.user_tag_members'))
     expect(stmt).toContain('position UInt32 DEFAULT 0')
   })
+
+  // Devices list: fresh databases get the metadata columns from the
+  // declaration; ensureSessionDeviceColumns below carries deployed ones.
+  it('declares user_sessions device metadata', () => {
+    const stmt = statements.find(s => s.includes('price_data.user_sessions'))
+    expect(stmt).toContain(`label String DEFAULT ''`)
+    expect(stmt).toContain(`created_via LowCardinality(String) DEFAULT 'wallet'`)
+  })
 })
 
 describe('ensureTagMemberPositionColumn', () => {
@@ -51,5 +60,17 @@ describe('ensureTagMemberPositionColumn', () => {
     const query = command.mock.calls[0][0].query
     expect(query).toContain('ALTER TABLE price_data.user_tag_members')
     expect(query).toContain('ADD COLUMN IF NOT EXISTS position UInt32 DEFAULT 0')
+  })
+})
+
+describe('ensureSessionDeviceColumns', () => {
+  it('issues idempotent ADD COLUMN IF NOT EXISTS against user_sessions', async () => {
+    const command = vi.fn(async (_args: { query: string }) => {})
+    await ensureSessionDeviceColumns({ command } as unknown as ClickHouseClient)
+    expect(command).toHaveBeenCalledTimes(2)
+    const queries = command.mock.calls.map(c => c[0].query)
+    expect(queries[0]).toContain('ALTER TABLE price_data.user_sessions')
+    expect(queries[0]).toContain(`ADD COLUMN IF NOT EXISTS label String DEFAULT ''`)
+    expect(queries[1]).toContain(`ADD COLUMN IF NOT EXISTS created_via LowCardinality(String) DEFAULT 'wallet'`)
   })
 })
