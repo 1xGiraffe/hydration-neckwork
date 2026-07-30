@@ -1,0 +1,1489 @@
+/* eslint-disable react-refresh/only-export-components -- shared atoms + formatters module */
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, FocusEvent as ReactFocusEvent, ReactNode, KeyboardEvent, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
+import { Link, paths, navigate } from '../router'
+import type { AccountRef, AssetOrigin, AssetRef, FailureReason } from '../types'
+import { parseUtcTimestamp } from '../utils/time'
+import { useMediaQuery } from '../hooks/useMediaQuery'
+import { voteSideLabel } from '../utils/voteRows'
+import { CAT } from './activityColors'
+import { resolveTag, useTagMapVersion } from '../userTags'
+import type { ResolvedTag } from '../userTags'
+
+/* ============ shared formatters ============ */
+const SUBSCRIPT = '₀₁₂₃₄₅₆₇₈₉'
+const subscript = (n: number) => String(n).split('').map(d => SUBSCRIPT[+d]).join('')
+
+// Subscript-zero notation for very small prices (CoinGecko / DexTools style):
+//   0.0000007191 → "0.0₅7191"  (1 shown zero + 5 collapsed zeros)
+function tinyPrice(price: number): string {
+  const leadingZeros = -Math.floor(Math.log10(price)) - 1
+  const factor = 10 ** (leadingZeros + 4)
+  let sig = String(Math.round(price * factor))
+  // Rounding can bump us up a power of 10 (9.9999e-7 → "10000"); fall back to plain.
+  if (sig.length !== 4) return price.toFixed(leadingZeros + 4).replace(/\.?0+$/, '')
+  sig = sig.replace(/0+$/, '') || '0'
+  return '0.0' + subscript(leadingZeros - 1) + sig
+}
+
+// Graduated price precision, mirroring preis-ui's formatPrice (without the $ prefix).
+function priceStr(price: number): string {
+  if (price <= 0) return '0'
+  if (price >= 1000) return price.toLocaleString('en-US', { maximumFractionDigits: 0 })
+  if (price >= 100) return price.toFixed(1)
+  if (price >= 1) return price.toFixed(2)
+  if (price >= 0.01) return price.toFixed(4)
+  if (price >= 0.001) return price.toPrecision(4).replace(/\.?0+$/, '')
+  return tinyPrice(price)
+}
+
+// Collapse large magnitudes (≥ 1e6) into M/B/T/Q suffixes: 44.1B, 1.2T.
+// Beyond quadrillion, fall back to scientific notation (e.g. 1.05e+18).
+const BIG_UNITS = ['M', 'B', 'T', 'Q']
+// ~3 significant digits: 4.87 · 40 · 112 · 537 (trailing zeros trimmed).
+const sig3 = (n: number) => (n >= 100 ? n.toFixed(0) : n >= 10 ? n.toFixed(1) : n.toFixed(2)).replace(/\.0+$|(\.\d*[1-9])0+$/, '$1')
+// Round to 3 significant digits BEFORE picking a unit tier, so a value in the
+// carry band tiers up (999.6M → "1B") instead of rendering as "1000M".
+const round3 = (n: number) => Number(n.toPrecision(3))
+function compact(v: number): string {
+  let n = round3(v / 1e6)
+  let u = 0
+  while (n >= 1000 && u < BIG_UNITS.length - 1) { n /= 1000; u++ }
+  if (n >= 1000) return v.toExponential(2)
+  return sig3(n) + BIG_UNITS[u]
+}
+
+// The explorer-wide rough display scale for rounded numbers: ~3 significant
+// digits with k/M/B/T/Q compaction — 500 · 537 · 4.87k · 40k · 112k · 4.59M.
+// Values below 1 keep ~3 significant decimals (0.12 · 0.0034), and very small
+// fractions collapse into the subscript-zero price notation (0.0₅7191) so
+// high-decimal assets stay readable. Precision belongs in F.exact (tooltips,
+// detail surfaces).
+export function compactAmount(v: number): string {
+  if (!Number.isFinite(v)) return '—'
+  const sign = v < 0 ? '-' : ''
+  const a = Math.abs(v)
+  if (a === 0) return '0'
+  // Tier on the rounded value so 999.6k reads "1M", not "1000k" (round3 stays
+  // off the sub-1 paths — tinyPrice needs the unrounded fraction).
+  const r = a >= 1 ? round3(a) : a
+  if (r >= 1e6) return sign + compact(r)
+  if (r >= 1000) return sign + sig3(r / 1000) + 'k'
+  if (r >= 1) return sign + sig3(r)
+  if (a >= 0.001) return sign + parseFloat(a.toPrecision(3)).toString()
+  return sign + tinyPrice(a)
+}
+function compactCount(v: number): string {
+  if (!Number.isFinite(v)) return '0'
+  const abs = Math.abs(v)
+  if (abs >= 1e6) return compact(v)
+  if (abs >= 1e3) return (v / 1e3).toFixed(1).replace(/\.0$/, '') + 'k'
+  return Math.round(v).toLocaleString('en-US')
+}
+export const F = {
+  int: (n: number) => (Number.isFinite(n) ? n : 0).toLocaleString('en-US'),
+  count: compactCount,
+  shortHash: (h?: string | null) => !h ? '—' : h.length > 18 ? h.slice(0, 8) + '…' + h.slice(-6) : h,
+  shortAddr: (a?: string | null) => !a ? '—' : a.length > 14 ? a.slice(0, 6) + '…' + a.slice(-5) : a,
+  // Rough display amount (see compactAmount). Reach for F.exact only where a
+  // surface exists to show precision (tooltips, copyable detail values).
+  amount: (raw: string | null | undefined, dec: number) => {
+    if (raw == null || raw === '') return '—'
+    return compactAmount(Number(raw) / 10 ** dec)
+  },
+  // Full-precision counterpart for tooltips/detail: grouped, decimals kept.
+  exact: (raw: string | null | undefined, dec: number) => {
+    if (raw == null || raw === '') return '—'
+    const v = Number(raw) / 10 ** dec
+    if (!Number.isFinite(v)) return '—'
+    if (v >= 1e3) return v.toLocaleString('en-US', { maximumFractionDigits: 2 })
+    if (v === 0) return '0'
+    if (v >= 1) return v.toFixed(4)
+    return v.toFixed(6)
+  },
+  num: (raw: string | null | undefined, dec: number): number => {
+    if (raw == null || raw === '') return 0
+    const v = Number(raw) / 10 ** dec
+    return Number.isFinite(v) ? v : 0
+  },
+  // The EXACT amount by string math on the raw integer — no digit is ever rounded
+  // away (routing through Number would lose precision past 2^53, and 128-bit
+  // amounts exist). Grouped for reading; hover/copy surfaces only.
+  preciseAmount: (raw: string | null | undefined, dec: number): string => {
+    const plain = F.preciseAmountPlain(raw, dec)
+    if (plain === '—') return plain
+    const neg = plain.startsWith('-')
+    const [int, frac] = (neg ? plain.slice(1) : plain).split('.')
+    const grouped = int.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+    return (neg ? '-' : '') + grouped + (frac ? '.' + frac : '')
+  },
+  // Ungrouped counterpart for the clipboard: a plain parseable number string.
+  preciseAmountPlain: (raw: string | null | undefined, dec: number): string => {
+    if (raw == null || raw === '' || !/^-?\d+$/.test(raw)) return '—'
+    const neg = raw.startsWith('-')
+    const digits = (neg ? raw.slice(1) : raw).padStart(dec + 1, '0')
+    const int = digits.slice(0, digits.length - dec) || '0'
+    const frac = dec > 0 ? digits.slice(digits.length - dec).replace(/0+$/, '') : ''
+    return (neg ? '-' : '') + int + (frac ? '.' + frac : '')
+  },
+  usd: (v: number | null | undefined) => {
+    if (v == null || !Number.isFinite(v)) return '—'
+    // Signed values render "-$1.2k", not "$-1200.00" (price-move markers carry
+    // a signed delta; debt-heavy nets can dip below zero).
+    const sign = v < 0 ? '-' : ''
+    const a = Math.abs(v)
+    // Tier on the rounded value so $999.6k reads "$1M", not "$1000k".
+    const r = a >= 100 ? round3(a) : a
+    if (r >= 1e6) return sign + '$' + compact(r)
+    if (r >= 1e3) return sign + '$' + sig3(r / 1e3) + 'k'
+    if (r >= 100) return sign + '$' + r.toFixed(0)
+    return sign + '$' + a.toFixed(2)
+  },
+  priceUsd: (v: number | null | undefined) => {
+    if (v == null || !Number.isFinite(v)) return '—'
+    return '$' + priceStr(v)
+  },
+  pct: (v: number | null | undefined) => {
+    if (v == null || !Number.isFinite(v)) return '—'
+    const p = v * 100
+    return (p >= 0 ? '+' : '') + p.toFixed(2) + '%'
+  },
+  hdxFee: (raw: string | null | undefined) => {
+    if (raw == null || raw === '') return '—'
+    const v = Number(raw) / 1e12
+    if (!Number.isFinite(v) || v === 0) return '0 HDX'
+    return (v < 0.001 ? '<0.001' : v.toFixed(v < 1 ? 4 : 3)) + ' HDX'
+  },
+  ago: (ts: string, now = Date.now()) => {
+    const t = parseUtcTimestamp(ts); if (!Number.isFinite(t)) return '—'
+    const s = Math.max(0, Math.floor((now - t) / 1000))
+    if (s < 60) return s + 's ago'
+    const m = Math.floor(s / 60); if (m < 60) return m + 'm ' + (s % 60) + 's ago'
+    const h = Math.floor(m / 60); if (h < 24) return h + 'h ' + (m % 60) + 'm ago'
+    const d = Math.floor(h / 24); return d + 'd ' + (h % 24) + 'h ago'
+  },
+  datetime: (ts: string) => {
+    const t = parseUtcTimestamp(ts); if (!Number.isFinite(t)) return ts
+    const d = new Date(t)
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+    const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    const p = (n: number) => String(n).padStart(2, '0')
+    return `${days[d.getUTCDay()]} ${p(d.getUTCDate())} ${mon[d.getUTCMonth()]} ${d.getUTCFullYear()} · ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`
+  },
+}
+
+// Short ISO date (YYYY-MM-DD) from an indexer UTC timestamp, '' when unparseable.
+// Shared by the chart tooltips (AreaChart, BalanceHistory).
+function tsDate(ts: string): string {
+  const t = parseUtcTimestamp(ts)
+  return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 10) : ''
+}
+
+// The chart's time axis: parsed timestamps and [t0, span], but ONLY when every
+// point has a parseable, non-decreasing date with a positive overall span. Null
+// tells the caller to fall back to index spacing. timeFractions (the line) and
+// the event markers both key off this one guard so they always share an x axis.
+function timeAxisSpan(n: number, dates?: string[]): { ts: number[]; t0: number; span: number } | null {
+  if (!dates || dates.length !== n) return null
+  const ts = dates.map(parseUtcTimestamp)
+  const span = ts[n - 1] - ts[0]
+  if (!(span > 0)) return null
+  for (let i = 0; i < n; i++) if (!Number.isFinite(ts[i]) || (i > 0 && ts[i] < ts[i - 1])) return null
+  return { ts, t0: ts[0], span }
+}
+
+// Per-point x fraction (0..1) for a chart. Proportional to time when the dates
+// form a usable axis; otherwise evenly spaced by index.
+function timeFractions(n: number, dates?: string[]): number[] {
+  const axis = timeAxisSpan(n, dates)
+  if (!axis) return Array.from({ length: n }, (_, i) => i / (n - 1))
+  return axis.ts.map(t => (t - axis.t0) / axis.span)
+}
+
+// Relative time ("3m ago") that reveals the absolute UTC timestamp on hover.
+// Used anywhere a time is shown relative (activity, tables, activity rows).
+export function Ago({ ts, now }: { ts: string; now: number }) {
+  return <span title={F.datetime(ts)}>{F.ago(ts, now)}</span>
+}
+
+// When something happened, on any surface that shows a single moment: the
+// relative time, linked to what caused it — the extrinsic when there was one,
+// else the block, because a block hook (a referendum concluding, a DCA the
+// scheduler ran, an XCM arrival) is not an extrinsic. Either target reaches the
+// block, so a detail page carrying a moment needs no block row of its own.
+export interface Moment {
+  blockHeight: number
+  extrinsicIndex: number | null
+  timestamp: string
+}
+
+export function MomentLink({ at, now }: { at: Moment; now: number }) {
+  const to = at.extrinsicIndex != null ? paths.extrinsic(`${at.blockHeight}-${at.extrinsicIndex}`) : paths.block(at.blockHeight)
+  return <Link to={to} className="hash"><Ago ts={at.timestamp} now={now} /></Link>
+}
+
+// Uniform null/empty placeholder for table cells. Always monospace: a bare
+// `.muted` dash inherits the cell's font, and the sans-serif em dash glyph is
+// visibly wider than the mono one — same character, looks like two symbols.
+export function Dash() {
+  return <span className="mono muted">—</span>
+}
+
+// Explorer-wide amount convention: leading asset icon, then symbol, then the
+// amount — the activity-flow "trade leg" reading order. `formatted` overrides
+// the default raw-amount formatting for pre-formatted values.
+export function AssetAmount({ asset, raw, formatted }: { asset: AssetRef; raw?: string | null; formatted?: string }) {
+  return <span className="trade-leg"><AssetChip asset={asset} /> <span className="mono">{formatted ?? (raw != null ? F.amount(raw, asset.decimals) : '—')}</span></span>
+}
+
+// Short address with the final three characters highlighted.
+export function ShortAddr({ addr, full }: { addr: string; full?: boolean }) {
+  const head = addr.startsWith('0x') ? addr.slice(0, 6) : addr.slice(0, 4)
+  const tail = addr.slice(-5)
+  const short = <>{head}…{tail.slice(0, 2)}<span className="last3">{tail.slice(-3)}</span></>
+  if (!full) return short
+  // `full` renders both forms; ≤720px CSS swaps in the middle-ellipsis one so a
+  // 42/48-char EVM/SS58 address never wraps the header (Copy keeps the full value).
+  return <>
+    <span className="addr-full">{addr.slice(0, -3)}<span className="last3">{addr.slice(-3)}</span></span>
+    <span className="addr-short">{short}</span>
+  </>
+}
+
+/* ============ asset logo gradient ============ */
+const ASSET_COLORS: Record<string, [string, string]> = {
+  HDX: ['#e53e76', '#b454da'], DOT: ['#2C89E9', '#95caff'], USDT: ['#74C742', '#45AC1F'],
+  USDC: ['#2C89E9', '#1f5cab'], HOLLAR: ['#b3cf92', '#74C742'], DAI: ['#F7BF06', '#e3ae00'],
+  WBTC: ['#F7BF06', '#e3ae00'], iBTC: ['#F7BF06', '#e3ae00'], tBTC: ['#F7BF06', '#e3ae00'], WETH: ['#6e7588', '#a8afc0'],
+  vDOT: ['#cc6ef4', '#dfb1f3'], GDOT: ['#2C89E9', '#95caff'], aDOT: ['#cc6ef4', '#dfb1f3'], GLMR: ['#74C742', '#45AC1F'],
+  ASTR: ['#ff6868', '#d83b3b'], CFG: ['#dfb1f3', '#cc6ef4'],
+}
+const PALETTE: [string, string][] = [['#e53e76', '#b454da'], ['#2C89E9', '#95caff'], ['#74C742', '#45AC1F'], ['#cc6ef4', '#dfb1f3'], ['#F7BF06', '#e3ae00'], ['#ff6868', '#d83b3b'], ['#6e7588', '#a8afc0'], ['#b3cf92', '#74C742']]
+// Aave aTokens (aUSDC, aUSDT, aEURC…) wrap an underlying token — color them as the
+// underlying (aUSDC reads like USDC) rather than hashing the wrapped symbol to a
+// distinct color. A curated entry for the aToken itself (e.g. aDOT) still wins.
+function underlyingColorSymbol(symbol: string): string {
+  return /^a[A-Z]/.test(symbol) ? symbol.slice(1) : symbol
+}
+function assetGradient(symbol: string): [string, string] {
+  if (ASSET_COLORS[symbol]) return ASSET_COLORS[symbol]
+  const base = underlyingColorSymbol(symbol)
+  if (ASSET_COLORS[base]) return ASSET_COLORS[base]
+  let h = 0; for (let i = 0; i < base.length; i++) h = (h + base.charCodeAt(i)) % PALETTE.length
+  return PALETTE[h]
+}
+
+// A single brand-ish color per asset — the curated color for known tokens, else a
+// deterministic palette pick by symbol. Used as the treemap tile fallback when a
+// logo's dominant color can't be sampled (see utils/iconColor).
+export function assetBrandColor(symbol: string): string {
+  return assetGradient(symbol)[0]
+}
+function AssetLogo({ symbol, size = 20 }: { symbol: string; size?: number }) {
+  const [c1, c2] = assetGradient(symbol)
+  return <span className="asset-logo" style={{ width: size, height: size, fontSize: size * 0.4, background: `linear-gradient(135deg,${c1},${c2})` }}>{symbol.slice(0, 3)}</span>
+}
+
+// Real token icon from the Galactic Council asset-metadata CDN (same source as
+// preis-ui), with a gradient-letter fallback on load error.
+const ICON_CDN = 'https://cdn.jsdelivr.net/gh/galacticcouncil/intergalactic-asset-metadata@master/v2/polkadot/2034/assets'
+function iconUrl(id: number, ext: 'svg' | 'png'): string { return `${ICON_CDN}/${id}/icon.${ext}` }
+const METADATA_CDN = 'https://cdn.jsdelivr.net/gh/galacticcouncil/intergalactic-asset-metadata@master/v2'
+function originAssetIconUrl(origin: AssetOrigin, ext: 'svg' | 'png'): string | null {
+  if (!origin.assetId) return null
+  const assetKey = origin.ecosystem === 'ethereum' ? origin.assetId.toLowerCase() : origin.assetId
+  return `${METADATA_CDN}/${origin.ecosystem}/${origin.chainId}/assets/${assetKey}/icon.${ext}`
+}
+export function originChainIconUrl(origin: AssetOrigin): string {
+  return `${METADATA_CDN}/${origin.ecosystem}/${origin.chainId}/icon.svg`
+}
+
+// Hollar-wrapped stablecoins (HUSDC, HUSDT, …) have no icon of their own. preis-ui
+// renders them as a composite half-icon: left = HOLLAR (222), right = the wrapped
+// underlying (HUSDC → USDC). [leftId, rightId] — mirrors preis-ui COMPOSITE_ICONS.
+const COMPOSITE_ICONS: Record<number, [number, number]> = {
+  1110: [222, 22],      // HUSDC = HOLLAR + USDC
+  1111: [222, 10],      // HUSDT = HOLLAR + USDT
+  1112: [222, 1112],    // HUSDS = HOLLAR + USDS (no icon yet → letter half)
+  1113: [222, 1000625], // HUSDe = HOLLAR + sUSDe
+  4444: [222, 44],      // HEURC = HOLLAR + EURC
+}
+// Avoid noisy browser-level blocked requests for assets whose CDN icon format is
+// known from the current Hydration registry. Missing icons go straight to the
+// local gradient fallback; PNG-only icons skip the missing SVG request.
+const PNG_ICON_IDS = new Set([
+  4, 20, 35, 36, 38, 39, 43, 1000085, 1000189, 1000794, 1000796, 1000809,
+  1000286, 1000324, 1000365, 1000397, 1000479, 1000512, 1000524, 1000779,
+])
+const NO_CDN_ICON_IDS = new Set([
+  29, 37, 45, 100, 101, 102, 110, 670, 1112, 1000198, 1000444, 1000746, 1000766, 1000767, 1001034, 1001168,
+])
+function initialIconMode(srcId: number): 'svg' | 'png' | 'fail' {
+  if (NO_CDN_ICON_IDS.has(srcId)) return 'fail'
+  if (PNG_ICON_IDS.has(srcId)) return 'png'
+  return 'svg'
+}
+
+// Composite (Hollar-wrapped) and locally-known-missing assets have no single CDN
+// icon to sample a color from — callers should skip them and use a fallback color
+// rather than firing a request that only 404s.
+export function iconIsSampleable(assetId: number): boolean {
+  return !(assetId in COMPOSITE_ICONS) && !NO_CDN_ICON_IDS.has(assetId)
+}
+
+// A single CDN <img> with the svg→png→letter fallback chain. The load state is
+// reset whenever the resolved icon id changes (a row's AssetIcon is reused across
+// re-renders while the underlying asset changes after a data fetch — without the
+// reset its `mode` stays stale at 'fail'/'png' and the new asset never re-attempts
+// svg, so the icon only appears after a manual refresh).
+export function assetIconCandidates(srcId: number, origin?: AssetOrigin | null): string[] {
+  const out: string[] = []
+  // Like Hydration UI, globally-consensused assets use their canonical origin
+  // contract icon. Keep the local Hydration icon as a fallback for incomplete
+  // external metadata. Polkadot-origin assets continue using the curated local
+  // icon and get only an origin-chain badge.
+  if (origin?.ecosystem === 'ethereum') {
+    for (const ext of ['svg', 'png'] as const) {
+      const url = originAssetIconUrl(origin, ext)
+      if (url) out.push(url)
+    }
+  }
+  const initial = initialIconMode(srcId)
+  if (initial === 'svg') out.push(iconUrl(srcId, 'svg'), iconUrl(srcId, 'png'))
+  else if (initial === 'png') out.push(iconUrl(srcId, 'png'))
+  return out
+}
+
+function CdnIcon({ srcId, symbol, size, clip, origin }: { srcId: number; symbol: string; size: number; clip?: 'left' | 'right'; origin?: AssetOrigin | null }) {
+  const candidates = assetIconCandidates(srcId, origin)
+  const sourceKey = `${srcId}:${origin?.ecosystem ?? ''}:${origin?.chainId ?? ''}:${origin?.assetId ?? ''}`
+  const [fallback, setFallback] = useState<{ key: string; index: number }>({ key: sourceKey, index: 0 })
+  const index = fallback.key === sourceKey ? fallback.index : 0
+  const src = candidates[index]
+  if (!src) {
+    return clip ? null : <AssetLogo symbol={symbol} size={size} />
+  }
+  const style: React.CSSProperties = clip
+    ? { position: 'absolute', top: 0, left: 0, width: size, height: size, borderRadius: '50%', objectFit: 'cover', clipPath: clip === 'left' ? 'inset(0 50% 0 0)' : 'inset(0 0 0 50%)' }
+    : { width: size, height: size, borderRadius: '50%', objectFit: 'cover' }
+  return <img
+    className="asset-logo"
+    style={style}
+    src={src}
+    alt=""
+    loading="lazy"
+    onError={() => setFallback(current => ({ key: sourceKey, index: (current.key === sourceKey ? current.index : 0) + 1 }))}
+  />
+}
+
+export function AssetIcon({ assetId, iconAssetId, symbol, size = 20, parachainId, origin }: { assetId: number; iconAssetId?: number; symbol: string; size?: number; parachainId?: number | null; origin?: AssetOrigin | null }) {
+  // Some assets ship only .svg, others only .png — try svg, then png, then the
+  // gradient-letter fallback (same chain as preis-ui). Hollar-wrapped tokens render
+  // as a composite half/half icon; aTokens use the icon ID resolved by the API.
+  const composite = COMPOSITE_ICONS[assetId]
+  const chainOrigin = origin ?? (parachainId != null ? { ecosystem: 'polkadot', chainId: String(parachainId), assetId: null } : null)
+  const badgeKey = chainOrigin ? `${chainOrigin.ecosystem}:${chainOrigin.chainId}` : ''
+  const [badgeFailure, setBadgeFailure] = useState<{ key: string; failed: boolean }>({ key: badgeKey, failed: false })
+  const badgeFailed = badgeFailure.key === badgeKey && badgeFailure.failed
+  const body = composite ? (
+      <span className="asset-logo" style={{ position: 'relative', width: size, height: size, borderRadius: '50%', overflow: 'hidden', display: 'inline-block', background: assetGradient(symbol)[0] }}>
+        <CdnIcon srcId={composite[0]} symbol={symbol} size={size} clip="left" />
+        <CdnIcon srcId={composite[1]} symbol={symbol} size={size} clip="right" />
+      </span>
+    ) : <CdnIcon srcId={iconAssetId ?? assetId} symbol={symbol} size={size} origin={origin} />
+  return <span style={{ position: 'relative', width: size, height: size, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', verticalAlign: 'middle', lineHeight: 0 }}>
+    {body}
+    {chainOrigin && !badgeFailed && <img
+      src={originChainIconUrl(chainOrigin)} alt="" aria-hidden="true"
+      onError={() => setBadgeFailure({ key: badgeKey, failed: true })}
+      style={{ position: 'absolute', right: -2, bottom: -2, width: Math.max(10, Math.round(size * 0.42)), height: Math.max(10, Math.round(size * 0.42)), borderRadius: '50%', border: '1px solid var(--bg)', background: 'var(--bg)', objectFit: 'cover' }}
+    />}
+  </span>
+}
+
+export function AssetChip({ asset, link = true }: { asset: AssetRef; link?: boolean }) {
+  const body = <><AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} symbol={asset.symbol} parachainId={asset.parachainId} origin={asset.origin} /> {asset.symbol}</>
+  return link
+    ? <Link to={paths.asset(asset.assetId)} className="asset-chip">{body}</Link>
+    : <span className="asset-chip">{body}</span>
+}
+
+// A compact cluster of top-holding token icons shown after an account/tag value.
+// Display-only: each icon carries a value tooltip and the cluster opts out of the
+// global hover card so sweeping across a dense row never fires a stray preview.
+export function TokenIconRow({ assets, size = 16 }: { assets: { asset: AssetRef; valueUsd?: number | null }[]; size?: number }) {
+  if (!assets.length) return null
+  return (
+    <span className="token-icons" data-no-hover>
+      {assets.map(({ asset, valueUsd }) => (
+        <span key={asset.assetId} className="token-icons-item" title={valueUsd != null ? `${asset.symbol} — ${F.usd(valueUsd)}` : asset.symbol}>
+          <AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} symbol={asset.symbol} size={size} parachainId={asset.parachainId} origin={asset.origin} />
+        </span>
+      ))}
+    </span>
+  )
+}
+
+/* ============ account / module / label pill ============ */
+const EMOJI_POOL = ['🦊', '🦉', '🦝', '🦌', '🦢', '🐺', '🦅', '🦜', '🐢', '🐝', '🦋', '🐞', '🦂', '🦓', '🦒', '🦔', '🦇', '🐡', '🦈', '🦭', '🦦', '🐌', '🦗', '🦚', '🦩', '🐿️', '🦫', '🐬', '🦏', '🦛', '🐊', '🦣', '🦤', '🦃', '🦙', '🦥']
+function emojiFor(seed: string): string {
+  let h = 0; for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0
+  return EMOJI_POOL[h % EMOJI_POOL.length]
+}
+
+// Spell out the snakewatch identity emoji (e.g. 🦈 → "Shark") for account titles.
+const EMOJI_NAMES: Record<string, string> = {
+  '🐵': 'Monkey', '🐒': 'Monkey', '🦍': 'Gorilla', '🦧': 'Orangutan', '🐶': 'Dog', '🐕': 'Dog', '🦮': 'Guide Dog', '🐕‍🦺': 'Service Dog', '🐩': 'Poodle', '🐺': 'Wolf', '🦊': 'Fox', '🦝': 'Raccoon',
+  '🐱': 'Cat', '🐈': 'Cat', '🐈‍⬛': 'Black Cat', '🦁': 'Lion', '🐯': 'Tiger', '🐅': 'Tiger', '🐆': 'Leopard', '🐴': 'Horse', '🐎': 'Horse', '🦄': 'Unicorn', '🦓': 'Zebra', '🦌': 'Deer',
+  '🐮': 'Cow', '🐂': 'Ox', '🐃': 'Buffalo', '🐄': 'Cow', '🐷': 'Pig', '🐖': 'Pig', '🐗': 'Boar', '🐽': 'Pig', '🐏': 'Ram', '🐑': 'Sheep', '🐐': 'Goat', '🐪': 'Camel',
+  '🐫': 'Camel', '🦙': 'Llama', '🦒': 'Giraffe', '🐘': 'Elephant', '🦏': 'Rhino', '🦛': 'Hippo', '🐭': 'Mouse', '🐁': 'Mouse', '🐀': 'Rat', '🐹': 'Hamster', '🐰': 'Rabbit', '🐇': 'Rabbit',
+  '🐿': 'Chipmunk', '🦔': 'Hedgehog', '🦇': 'Bat', '🐻': 'Bear', '🐻‍❄️': 'Polar Bear', '🐨': 'Koala', '🐼': 'Panda', '🦥': 'Sloth', '🦦': 'Otter', '🦨': 'Skunk', '🦘': 'Kangaroo', '🦡': 'Badger',
+  '🐾': 'Paws', '🦃': 'Turkey', '🐔': 'Chicken', '🐓': 'Rooster', '🐣': 'Chick', '🐤': 'Chick', '🐥': 'Chick', '🐦': 'Bird', '🐧': 'Penguin', '🕊': 'Dove', '🦅': 'Eagle', '🦆': 'Duck',
+  '🦢': 'Swan', '🦉': 'Owl', '🦩': 'Flamingo', '🦚': 'Peacock', '🦜': 'Parrot', '🐸': 'Frog', '🐊': 'Crocodile', '🐢': 'Turtle', '🦎': 'Lizard', '🐍': 'Snake', '🐲': 'Dragon', '🐉': 'Dragon',
+  '🦕': 'Sauropod', '🦖': 'T-Rex', '🐬': 'Dolphin', '🐟': 'Fish', '🐠': 'Fish', '🐡': 'Pufferfish', '🦈': 'Shark', '🐙': 'Octopus', '🐚': 'Shell', '🐌': 'Snail', '🦋': 'Butterfly', '🐛': 'Bug',
+  '🐜': 'Ant', '🐝': 'Bee', '🐞': 'Ladybug', '🦗': 'Cricket', '🕷': 'Spider', '🦂': 'Scorpion', '🦟': 'Mosquito', '🦠': 'Microbe', '💐': 'Bouquet', '🌸': 'Blossom', '💮': 'Flower', '🏵': 'Rosette',
+  '🌹': 'Rose', '🥀': 'Wilted Rose', '🌺': 'Hibiscus', '🌻': 'Sunflower', '🌼': 'Daisy', '🌷': 'Tulip', '🌱': 'Seedling', '🌲': 'Evergreen', '🌳': 'Tree', '🌴': 'Palm Tree', '🌵': 'Cactus', '🌾': 'Rice',
+  '🌿': 'Herb', '☘': 'Shamrock', '🍀': 'Clover', '🍁': 'Maple Leaf', '🍂': 'Fallen Leaf', '🍃': 'Leaf', '🍄': 'Mushroom', '🦔️': 'Hedgehog',
+}
+export function emojiName(emoji?: string | null): string | null {
+  if (!emoji) return null
+  return EMOJI_NAMES[emoji] ?? EMOJI_NAMES[emoji.replace(/️/g, '')] ?? null
+}
+
+// On <img> error, hide the image and reveal its emoji-glyph fallback sibling
+// (mirrors preis-ui's showIconFallback so a dead avatar URL degrades gracefully).
+export function showIconFallback(e: React.SyntheticEvent<HTMLImageElement>) {
+  e.currentTarget.style.display = 'none'
+  const fb = e.currentTarget.nextElementSibling
+  if (fb instanceof HTMLElement) fb.style.display = ''
+}
+
+// The account's omniwatch/snakewatch identity icon. Same fallback chain as
+// preis-ui's OmniwatchIcon: self-authored profile avatar (wallet-login) →
+// custom image (e.g. a Discord avatar) → emoji glyph → deterministic
+// gradient-letter emoji. `className` styles the emoji <span>; `imgClass`
+// styles the rounded image when an avatar/emojiUrl is present.
+export function AccountEmoji({ account, className = 'emoji id', imgClass = 'emoji-img', title }: {
+  account: { emoji?: string; emojiName?: string; emojiUrl?: string; accountId: string; profile?: { avatarVersion: number } | null }
+  className?: string
+  imgClass?: string
+  title?: string
+}) {
+  const glyph = account.emoji || emojiFor(account.accountId)
+  const name = account.emojiName ?? emojiName(glyph) ?? undefined
+  if (account.profile && account.profile.avatarVersion > 0) {
+    return (
+      <span className={className} style={{ padding: 0, overflow: 'hidden' }} title={title ?? name}>
+        <img className={imgClass} src={`/api/explorer/profile-avatar/${encodeURIComponent(account.accountId)}?v=${account.profile.avatarVersion}`} alt={name ?? glyph} onError={showIconFallback} />
+        <span className="icon-fallback" style={{ display: 'none' }}>{glyph}</span>
+      </span>
+    )
+  }
+  if (account.emojiUrl) {
+    return (
+      <span className={className} style={{ padding: 0, overflow: 'hidden' }} title={title ?? name}>
+        <img className={imgClass} src={account.emojiUrl} alt={name ?? glyph} title={name} onError={showIconFallback} />
+        <span className="icon-fallback" style={{ display: 'none' }}>{glyph}</span>
+      </span>
+    )
+  }
+  return <span className={className} title={title ?? name}>{glyph}</span>
+}
+export function healthFactorDisplay(hf: string): { label: string; cls: string } {
+  if (hf === 'unknown') return { label: '—', cls: '' }
+  if (hf === 'inf') return { label: 'No debt', cls: '' }
+  const v = Number(hf) / 1e18
+  if (!Number.isFinite(v)) return { label: '—', cls: '' }
+  return { label: v.toFixed(2), cls: v < 1.1 ? 'hf-bad' : v < 1.6 ? 'hf-warn' : 'hf-ok' }
+}
+export function moduleName(accountId: string): string | null {
+  if (!accountId.startsWith('0x6d6f646c')) return null
+  const hex = accountId.slice(10)
+  let s = ''
+  for (let i = 0; i + 1 < hex.length; i += 2) {
+    const code = parseInt(hex.slice(i, i + 2), 16)
+    if (code >= 32 && code <= 126) s += String.fromCharCode(code); else break
+  }
+  return s.replace(/[^\x20-\x7e]+$/, '').trim() || null
+}
+
+// EVM accounts deep-link by their H160 (clean 0x…40 hex), others by accountId.
+export function accountHref(account: AccountRef): string {
+  // Always link to the human address — EVM 0x for EVM accounts, Polkadot SS58 for
+  // substrate — never the raw public-key hex. getAddress resolves both forms.
+  return paths.account(account.address)
+}
+
+// A tag's icon: an <img> when the icon is a URL/path (starts with / or http),
+// otherwise the value is treated as an emoji glyph.
+//
+// The container carries no colour of its own: a tag icon wears the same quiet
+// circle as an account's avatar emoji, so a row of pills reads as one kind of
+// thing. `className` is how a surface with its own icon chrome (the hover card's
+// .hc-emoji, the 60px profile avatar) opts into that chrome instead.
+export function TagIcon({ icon, title, className = 'emoji id' }: { icon: string; title?: string; className?: string }) {
+  const isImg = icon.startsWith('/') || icon.startsWith('http')
+  if (isImg) {
+    // .emoji-img fills whatever container the class provides, exactly as an
+    // account's avatar image does, so the two are never sized differently.
+    return <span className={className} style={{ padding: 0, overflow: 'hidden' }} title={title}>
+      <img className="emoji-img" src={icon} alt="" loading="lazy" />
+    </span>
+  }
+  return <span className={className} title={title}>{icon || '🏷️'}</span>
+}
+
+export function TagGroupPill({ tag }: { tag: { tagId: string; name: string; color: string; icon: string; memberCount: number } }) {
+  return (
+    <Link to={paths.tag(tag.tagId)} className="addr-pill" title="Tagged group — open combined view">
+      <TagIcon icon={tag.icon} title={tag.name} />
+      <span className="tag" style={{ color: tag.color }}>{tag.name}{tag.memberCount > 1 ? <span className="muted"> ·{tag.memberCount}</span> : null}</span>
+    </Link>
+  )
+}
+
+// A tag standing in for ONE specific account (AddrPill/ExternalAccountPill's
+// resolved label, or a member row wearing its own tag) is ambiguous once that
+// tag has more than one member — every one of them would render the exact same
+// pill. The last three characters of THIS pill's own address, muted and mono
+// like ShortAddr's highlighted tail, says which member it is without spelling
+// out the whole address. A tag with ≤1 member (or no known member count, e.g. an
+// old cached row) never needs it — it can only ever mean the one account shown.
+// Aggregate/member-list surfaces (TagGroupPill, tag member rows) show a member
+// COUNT instead and are not affected.
+export function tagMemberSuffix(tag: Pick<ResolvedTag, 'memberCount'>, address: string): ReactNode {
+  if (!tag.memberCount || tag.memberCount <= 1) return null
+  return <span className="tag-member-suffix mono">·{address.slice(-3)}</span>
+}
+
+// A resolved tag (system OR user-list) as the primary label: the group's icon
+// + name, linking to the tag's combined view (system) or the aggregate page
+// (user) — so a viewer's own organization is one click from any pill wearing it.
+// `noMemberSuffix` drops the `·xyz` disambiguator (Account.tsx's own
+// associations row — the page already names this exact account above, so the
+// suffix would be redundant noise, and system tags there carry no
+// `memberCount` at all, which would make it inconsistent between a user tag
+// and a system tag shown side by side).
+export function UserTagPill({ tag, address, noCopy, noMemberSuffix }: { tag: ResolvedTag; address: string; noCopy?: boolean; noMemberSuffix?: boolean }) {
+  return (
+    <span className="addr-wrap">
+      <Link to={paths.tag(tag.id)} className="addr-pill" title={tag.kind === 'user' ? `${tag.name} — your list “${tag.listName}”` : 'Tagged group — open combined view'}>
+        <TagIcon icon={tag.icon} title={tag.name} />
+        <span className="tag" style={tag.color ? { color: tag.color } : undefined}>{tag.name}</span>
+        {!noMemberSuffix && tagMemberSuffix(tag, address)}
+      </Link>
+      {!noCopy && <Copy text={address} />}
+    </span>
+  )
+}
+
+export function AddrPill({ account, full, noCopy, noTag }: { account: AccountRef; full?: boolean; noCopy?: boolean; noTag?: boolean }) {
+  useTagMapVersion()   // re-render when the viewer's tag map changes
+  // Priority-resolved tag (the viewer's own lists, in priority order, with
+  // the system directory as a slot in that order) is the primary label, matching
+  // the Accounts list. `noTag` skips this on tag member lists, where the page
+  // context already supplies the group and each row should show the member itself.
+  const resolved = noTag ? null : resolveTag(account)
+  if (resolved) return <UserTagPill tag={resolved} address={account.address} noCopy={noCopy} />
+  const mod = moduleName(account.accountId)
+  if (mod) {
+    return (
+      <span className="addr-wrap">
+        <Link to={accountHref(account)} className="addr-pill" title={account.address}>
+          <span className="emoji">⚙️</span><span className="a">{mod}</span>
+        </Link>
+      </span>
+    )
+  }
+  // Self-set profile name: above on-chain identity (the owner signed for it),
+  // below tags. Distinct class, and NEVER the ✓ mark — that stays exclusive
+  // to registrar-verified identities.
+  if (account.profile?.name) {
+    return (
+      <span className="addr-wrap">
+        <Link to={accountHref(account)} className="addr-pill" title={account.address}>
+          <AccountEmoji account={account} title="profile" />
+          <span className="tag profile-name">{account.profile.name}</span>
+        </Link>
+        {!noCopy && <Copy text={account.address} />}
+      </span>
+    )
+  }
+  // On-chain identity (Identity.IdentityOf): show the display name (with a small
+  // ✓ when judged Reasonable/KnownGood) instead of the shortened address.
+  const identity = account.identity
+  if (identity?.display) {
+    return (
+      <span className="addr-wrap">
+        <Link to={accountHref(account)} className="addr-pill" title={account.address}>
+          <AccountEmoji account={account} title="identity" />
+          <span className="tag">{identity.display}</span>
+          {identity.verified && <span className="id-verified" title="Verified identity">✓</span>}
+        </Link>
+        {!noCopy && <Copy text={account.address} />}
+      </span>
+    )
+  }
+  return (
+    <span className="addr-wrap">
+      <Link to={accountHref(account)} className="addr-pill" title={account.address}>
+        <AccountEmoji account={account} title="identity" />
+        <span className="a mono"><ShortAddr addr={account.address} full={full} /></span>
+      </Link>
+      {!noCopy && <Copy text={account.address} />}
+    </span>
+  )
+}
+
+/* ============ call / badges / copy ============ */
+export function CallPill({ name }: { name: string }) {
+  const [pallet, method = ''] = name.split('.')
+  return (
+    <span className={`call ${pallet.toLowerCase()}`} title={name}>
+      <span className="pallet">{pallet}</span><span className="dot">.</span><span className="method">{method}</span>
+    </span>
+  )
+}
+// A `.dl` row (dt + dd) for a decoded dispatch-error reason. The label and its
+// docs stack in a column wrapper so they share a left edge — the parent `.dd`
+// is a centered flex row, which would otherwise place them side by side.
+export function FailureReasonRow({ reason }: { reason: FailureReason }) {
+  return <>
+    <div className="dt">Failure reason</div>
+    <div className="dd"><div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+      <span className="mono">{reason.label}</span>
+      {reason.docs && <span className="muted">{reason.docs}</span>}
+    </div></div>
+  </>
+}
+
+export function StatusBadge({ ok, reason, compact }: { ok: boolean; reason?: string; compact?: boolean }) {
+  if (compact) {
+    const title = ok ? 'Success' : (reason || 'Failed')
+    const label = ok ? 'Success' : 'Failed'
+    return ok
+      ? <span className="badge ok badge-icon" title={title} aria-label={label}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg></span>
+      : <span className="badge fail badge-icon" title={title} aria-label={label}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg></span>
+  }
+  return ok
+    ? <span className="badge ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>Success</span>
+    : <span className="badge fail" title={reason || undefined}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>Failed</span>
+}
+// Aye and nay are valence, so they take the green and the red; the split kinds back
+// both sides at once (or neither), which is no valence at all, so they keep the vote
+// category's own lavender. The words come from the one shared mapping.
+export function VoteSideBadge({ side }: { side: string | null | undefined }) {
+  const label = voteSideLabel(side)
+  const col = label === 'AYE' ? CAT.aye : label === 'NAY' ? CAT.nay : CAT.vote
+  return <span className="pill-badge" style={{ color: col, background: `color-mix(in srgb, ${col} 15%, transparent)` }}>{label}</span>
+}
+export function FinalizedBadge({ finalized }: { finalized: boolean }) {
+  return finalized
+    ? <span className="badge finalized"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M9 12l2 2 4-4" /><circle cx="12" cy="12" r="9" /></svg>Finalized</span>
+    : <span className="badge pending"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>Pending</span>
+}
+export function Copy({ text }: { text: string }) {
+  return (
+    <button className="copy" title="Copy" onClick={(e) => { e.stopPropagation(); e.preventDefault(); navigator.clipboard?.writeText(text) }}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+    </button>
+  )
+}
+
+// A labelled copy button, for values worth taking away whole: an encoded call, a JSON
+// document. Confirms in place so a click is visibly acknowledged (the clipboard gives no
+// other feedback).
+export function CopyTextButton({ label, text }: { label: string; text: string }) {
+  const [done, setDone] = useState(false)
+  return (
+    <button
+      type="button"
+      className={`copy-text-btn${done ? ' done' : ''}`}
+      title={`Copy ${label}`}
+      onClick={e => {
+        e.stopPropagation(); e.preventDefault()
+        void navigator.clipboard?.writeText(text)
+        setDone(true)
+        setTimeout(() => setDone(false), 1200)
+      }}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+        {done
+          ? <path d="M20 6L9 17l-5-5" />
+          : <><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></>}
+      </svg>
+      {done ? 'copied' : label}
+    </button>
+  )
+}
+
+/* ============ charts ============ */
+// How far along something is, as a ring: a DCA schedule's spent budget today.
+// One geometry, one moving number — the dash length — so the ring reads the same
+// at 26px in a table cell and at 72px on a detail page. `pct` null draws the
+// track alone, which is what an open-ended schedule has to show: it is running,
+// it has no end to be a fraction of.
+export function ProgressRing({ pct, size = 46, stroke = 5, color = CAT.tradeDca, label, title }: {
+  pct: number | null
+  size?: number
+  stroke?: number
+  color?: string
+  label?: ReactNode      // centre text; omit for the small in-table ring
+  title?: string
+}) {
+  const r = (44 - stroke) / 2
+  const circumference = 2 * Math.PI * r
+  const filled = pct == null ? 0 : Math.max(0, Math.min(100, pct)) / 100
+  return (
+    <span className="prog-ring" style={{ width: size, height: size }} title={title}>
+      <svg viewBox="0 0 44 44" aria-hidden="true">
+        <circle className="pr-track" cx="22" cy="22" r={r} strokeWidth={stroke} fill="none" />
+        {filled > 0 && <circle
+          cx="22" cy="22" r={r} stroke={color} strokeWidth={stroke} fill="none" strokeLinecap="round"
+          strokeDasharray={`${(circumference * filled).toFixed(2)} ${circumference.toFixed(2)}`}
+          transform="rotate(-90 22 22)"
+        />}
+      </svg>
+      {label != null && <span className="pr-label">{label}</span>}
+    </span>
+  )
+}
+
+export function Sparkline({ data, w = 110, h = 30, change7d }: { data: number[]; w?: number; h?: number; change7d?: number | null }) {
+  const id = useId()
+  if (!data || data.length < 2) return <Dash />
+  const min = Math.min(...data), max = Math.max(...data)
+  const sx = w / (data.length - 1), sy = (v: number) => h - 3 - ((v - min) / ((max - min) || 1)) * (h - 6)
+  const line = data.map((v, i) => `${i ? 'L' : 'M'} ${(i * sx).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
+  // Fill the area down to the baseline so it matches the preis-ui sparkline: a
+  // gradient that fades from the line colour to transparent at the bottom.
+  const area = `${line} L ${((data.length - 1) * sx).toFixed(1)} ${h} L 0 ${h} Z`
+  // Up/down semantics mirror preis-ui: prefer the 7D change when supplied
+  // (green ≥0 / red <0 / neutral gray when null), else derive from first→last.
+  const dir = change7d === undefined ? (data[data.length - 1] >= data[0] ? 1 : -1) : change7d === null ? 0 : change7d >= 0 ? 1 : -1
+  const col = dir === 0 ? 'var(--text-low)' : dir > 0 ? 'var(--green)' : 'var(--red)'
+  const fillOpacity = dir === 0 ? 0.3 : dir > 0 ? 0.45 : 0.4
+  const gid = `spark-${id}`
+  return (
+    <svg className="spark" viewBox={`0 0 ${w} ${h}`} width={w} height={h} preserveAspectRatio="none">
+      <defs>
+        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={col} stopOpacity={fillOpacity} />
+          <stop offset="100%" stopColor={col} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={area} fill={`url(#${gid})`} stroke="none" />
+      {/* preserveAspectRatio="none" lets a caller stretch this to any box (the
+          accounts card gives it the phone's full width); a non-scaling stroke
+          keeps the line 1.5px there instead of smearing with the x scale. */}
+      <path d={line} fill="none" stroke={col} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+    </svg>
+  )
+}
+
+// Crosshair tooltip clamped inside its chart wrap: `left` is re-measured after
+// every render so an edge hover can't stick out of the card, which made the
+// whole page horizontally scrollable on phones. Shared by AreaChart/PriceChart.
+export function ChartTip({ xPct, children }: { xPct: number; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const el = ref.current, wrap = el?.parentElement
+    if (!el || !wrap) return
+    const half = el.offsetWidth / 2, w = wrap.clientWidth
+    const x = w <= half * 2 ? w / 2 : Math.min(Math.max(xPct / 100 * w, half), w - half)
+    el.style.left = `${x}px`
+  })
+  return <div className="apx-tip" ref={ref}>{children}</div>
+}
+
+/* ============ chart event markers ============ */
+// One flagged event on an AreaChart: positioned by `ts` on the same time axis
+// the crosshair uses, colored by `kind`, navigating to `href` on click. `tip`
+// is the single-marker hover card; clusters list label/value rows instead,
+// each carrying the marker's compact `detail` (traded pair / token amount) so
+// aggregation never hides the asset context.
+export interface ChartMarker { ts: string; kind: string; label: string; valueUsd: number; href: string | null; tip: ReactNode; detail?: ReactNode }
+
+// kind → the same category color the row badge for that activity wears, so a
+// marker on the value chart and the row it links to are recognisably one thing.
+// Transfers in and out share the movement grey — the label carries the direction,
+// and an outgoing transfer is not a bad outcome, just an outgoing one.
+const CHART_MARKER_COLORS: Record<string, string> = {
+  'transfer-in': CAT.transfer,
+  'transfer-out': CAT.transfer,
+  swap: CAT.trade,
+  liquidity: CAT.liquidity,
+  liquidation: CAT.bad,
+  dca: CAT.tradeDca,
+  'cross-chain': CAT.xcm,
+  price: 'var(--text-low)', // neutral: a market move, not an on-chain event
+  other: 'var(--text-low)',
+}
+function markerColor(kind: string): string { return CHART_MARKER_COLORS[kind] ?? 'var(--text-low)' }
+
+export interface ChartMarkerCluster { frac: number; items: ChartMarker[] }
+
+// Group markers that would land within `threshold` of the chart width of a
+// cluster's leftmost member into one flag (rendered with a ×N cap), so near-
+// coincident events never stack into an unreadable pile. Anchoring on the first
+// member bounds each cluster's width — chaining on neighbors would let a run of
+// closely spaced events collapse months into one flag. Out-of-range events are
+// dropped (a whisker of slack absorbs cache skew at the span's edges); items
+// are value-sorted so a cluster's largest event drives its color and click.
+export function clusterChartMarkers(markers: ChartMarker[], t0: number, span: number, threshold = 0.015): ChartMarkerCluster[] {
+  const pts = markers
+    .map(m => ({ m, frac: (parseUtcTimestamp(m.ts) - t0) / span }))
+    .filter(p => Number.isFinite(p.frac) && p.frac >= -0.01 && p.frac <= 1.01)
+    .map(p => ({ m: p.m, frac: Math.min(1, Math.max(0, p.frac)) }))
+    .sort((a, b) => a.frac - b.frac)
+  const groups: { fracs: number[]; items: ChartMarker[] }[] = []
+  for (const p of pts) {
+    const last = groups[groups.length - 1]
+    if (last && p.frac - last.fracs[0] < threshold) { last.fracs.push(p.frac); last.items.push(p.m) }
+    else groups.push({ fracs: [p.frac], items: [p.m] })
+  }
+  return groups.map(g => ({
+    frac: g.fracs.reduce((s, f) => s + f, 0) / g.fracs.length,
+    items: [...g.items].sort((a, b) => b.valueUsd - a.valueUsd),
+  }))
+}
+
+// One marker flag: a subtle dashed drop-line + a cap at the top. With a mouse the
+// cap navigates and hover opens the tooltip; on touch (no hover, and a link cap
+// would navigate before the tip is ever seen) tapping the cap TOGGLES the tip,
+// which carries the link(s). A cluster's tooltip lists every event as its own link.
+function ChartMarkerFlag({ cluster, open, onOpen, onClose }: {
+  cluster: ChartMarkerCluster; open: boolean; onOpen: () => void; onClose: () => void
+}) {
+  const rootRef = useRef<HTMLDivElement>(null)
+  const tipRef = useRef<HTMLDivElement>(null)
+  const coarse = useMediaQuery('(hover: none)')
+  useLayoutEffect(() => {
+    const el = tipRef.current
+    const wrap = el?.closest('.apx-wrap') as HTMLElement | null
+    if (!el || !wrap) return
+    // Same edge-clamping as ChartTip, expressed as a shift from the marker's x
+    // (the marker's own box is a zero-width column at the event's time).
+    const half = el.offsetWidth / 2, w = wrap.clientWidth, x = cluster.frac * w
+    const shift = (w <= half * 2 ? w / 2 : Math.min(Math.max(x, half), w - half)) - x
+    el.style.transform = `translateX(calc(-50% + ${shift.toFixed(1)}px))`
+  })
+  // Touch: dismiss the open tip when the next tap lands outside this marker.
+  useEffect(() => {
+    if (!open || !coarse) return
+    const onDown = (e: Event) => { if (!rootRef.current?.contains(e.target as Node)) onClose() }
+    document.addEventListener('pointerdown', onDown)
+    return () => document.removeEventListener('pointerdown', onDown)
+  }, [open, coarse, onClose])
+  const top = cluster.items[0]
+  const count = cluster.items.length
+  const capLabel = count > 1 ? `×${count}` : null
+  // aria-label, not title: the custom tip already opens on hover/focus, and a
+  // native title tooltip would pop up overlapping it.
+  const title = count > 1 ? `${count} events` : `${top.label} · ${F.usd(top.valueUsd)}`
+  const capCls = `apx-mark-cap${capLabel ? ' multi' : ''}`
+  // Keep the tip open while focus moves between its links; close on focus-out.
+  const onBlur = (e: ReactFocusEvent<HTMLDivElement>) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onClose()
+  }
+  return (
+    <div ref={rootRef} data-no-hover className={`apx-mark${open ? ' open' : ''}`} style={{ left: `${(cluster.frac * 100).toFixed(3)}%`, '--mk': markerColor(top.kind) } as CSSProperties}
+      onMouseEnter={coarse ? undefined : onOpen} onMouseLeave={coarse ? undefined : onClose}
+      onFocus={coarse ? undefined : onOpen} onBlur={coarse ? undefined : onBlur}>
+      <span className="apx-mark-line" aria-hidden="true" />
+      {coarse
+        ? <button type="button" className={capCls} aria-label={title} aria-expanded={open} onClick={() => (open ? onClose() : onOpen())}>{capLabel}</button>
+        : top.href
+          ? <Link className={capCls} to={top.href} ariaLabel={title}>{capLabel}</Link>
+          : <span className={capCls} aria-label={title} tabIndex={0}>{capLabel}</span>}
+      {open && (
+        <div className="apx-mark-tip" ref={tipRef}>
+          {count > 1
+            ? cluster.items.map((m, i) => {
+              const row = <>
+                <span className="t-d">{tsDate(m.ts)}</span>
+                <span className="t-k" style={{ color: markerColor(m.kind) }}>{m.label}</span>
+                {m.detail && <span className="t-a">{m.detail}</span>}
+                <span className="t-p">{F.usd(m.valueUsd)}</span>
+              </>
+              return m.href
+                ? <Link key={i} className="apx-mark-row" to={m.href}>{row}</Link>
+                : <div key={i} className="apx-mark-row">{row}</div>
+            })
+            : <>{top.tip}{coarse && top.href && <Link className="apx-mark-go" to={top.href}>View activity →</Link>}</>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Area/line chart with an optional target line and a crosshair tooltip on hover.
+// `dates` (parallel to `data`) makes the tooltip show the point's date; `valueFmt`
+// formats the displayed value (default F.usd, used by the portfolio charts).
+// `markers` flags notable events on the same time axis (see ChartMarker).
+// The viewBox is fixed and the svg is stretched to its container (height `h`).
+const W = 820, padT = 14, padB = 14
+export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt = F.usd, markers }: {
+  data: number[]; h?: number; target?: number; color?: string; floor?: number
+  dates?: string[]; valueFmt?: (v: number) => string; markers?: ChartMarker[]
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const [hover, setHover] = useState<{ xPct: number; yPct: number; val: string; date: string } | null>(null)
+  const [openMark, setOpenMark] = useState<number | null>(null)
+  // On phones 1.5% of the chart is a few px — caps would collide, so cluster
+  // wider there. Same breakpoint as the stylesheet's table→card switch.
+  const narrow = useMediaQuery('(max-width: 720px)')
+
+  // Pure geometry over the series. Every portfolio and balance chart in the app is
+  // one of these, and the pages holding them re-render once a second on the shared
+  // clock, so rebuilding the path strings in render meant recomputing the whole
+  // curve every tick and on every crosshair move.
+  const geom = useMemo(() => {
+    if (!data || data.length < 2) return null
+    // `floor` pins the baseline (e.g. 0) so small values don't glue to the bottom.
+    const min = floor != null ? floor : Math.min(...data, target ?? Infinity), max = Math.max(...data, target ?? -Infinity)
+    // X positions are proportional to TIME when a parseable date accompanies every
+    // point (portfolio/balance history buckets cover unequal time spans, so index
+    // spacing would distort the shape); index spacing is the fallback.
+    const xFrac = timeFractions(data.length, dates)
+    // Span the full width edge-to-edge so the line matches the hover crosshair, which
+    // maps 0..100% across the container. A horizontal inset would leave the first/last
+    // points hoverable (value shown) but with no line drawn at that x.
+    const sx = (i: number) => xFrac[i] * W
+    const sy = (v: number) => padT + (1 - (v - min) / ((max - min) || 1)) * (h - padT - padB)
+    const line = data.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
+    const area = `${line} L ${sx(data.length - 1).toFixed(1)} ${h - padB} L ${sx(0).toFixed(1)} ${h - padB} Z`
+    const up = data[data.length - 1] >= data[0]
+    return { xFrac, sy, line, area, col: color ?? (up ? 'var(--green)' : 'var(--red)'), gid: 'ag' + Math.round(min * 1000 + max) }
+  }, [data, dates, target, floor, h, color])
+
+  // Markers key off the EXACT axis the line uses (timeAxisSpan is the same guard
+  // as timeFractions): render only when the line is time-proportional, so a flag
+  // never drifts off a curve that fell back to index spacing.
+  const markClusters = useMemo(() => {
+    const markAxis = markers?.length ? timeAxisSpan(data?.length ?? 0, dates) : null
+    return markers && markAxis ? clusterChartMarkers(markers, markAxis.t0, markAxis.span, narrow ? 0.045 : 0.015) : []
+  }, [markers, data, dates, narrow])
+
+  if (!geom) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>Not enough history.</div>
+  const { xFrac, sy, line, area, col, gid } = geom
+
+  function onMove(e: ReactPointerEvent) {
+    const wrap = wrapRef.current; if (!wrap) return
+    const r = wrap.getBoundingClientRect(); if (!r.width) return
+    const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width))
+    // Snap to the point nearest the cursor in x-space (time-aware when dates drive x).
+    let i = 0
+    for (let k = 1; k < xFrac.length; k++) if (Math.abs(xFrac[k] - frac) < Math.abs(xFrac[i] - frac)) i = k
+    const ts = dates?.[i]
+    setHover({ xPct: xFrac[i] * 100, yPct: sy(data[i]) / h * 100, val: valueFmt(data[i]), date: ts ? tsDate(ts) : '' })
+  }
+
+  return (
+    // Pointer events cover mouse + touch: pointerdown makes the point appear the
+    // moment a finger lands, touch-action: pan-y (.apx-wrap) keeps horizontal drags
+    // scrubbing instead of scrolling, and only a mouse leaving clears the hover —
+    // a lifted finger fires pointerleave too, but the tapped point should stick.
+    <div className="apx-wrap" ref={wrapRef} onPointerDown={onMove} onPointerMove={onMove}
+      onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null) }}>
+      <svg className="apx-chart" viewBox={`0 0 ${W} ${h}`} preserveAspectRatio="none">
+        <defs><linearGradient id={gid} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={col} stopOpacity="0.26" /><stop offset="100%" stopColor={col} stopOpacity="0" /></linearGradient></defs>
+        <path className="chart-area" d={area} fill={`url(#${gid})`} />
+        {target != null && <line x1={0} x2={W} y1={sy(target).toFixed(1)} y2={sy(target).toFixed(1)} stroke="var(--text-low)" strokeDasharray="3 4" strokeOpacity="0.6" vectorEffect="non-scaling-stroke" />}
+        <path className="chart-line" d={line} fill="none" stroke={col} strokeWidth="2" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+      </svg>
+      {markClusters.length > 0 && (
+        <div className="apx-marks">
+          {markClusters.map((c, i) => (
+            <ChartMarkerFlag key={`${c.frac}:${c.items.length}`} cluster={c} open={openMark === i}
+              onOpen={() => setOpenMark(i)} onClose={() => setOpenMark(cur => (cur === i ? null : cur))} />
+          ))}
+        </div>
+      )}
+      {hover && <div className="apx-cross"><div className="apx-vline" style={{ left: `${hover.xPct}%` }} /><div className="apx-dot" style={{ left: `${hover.xPct}%`, top: `${hover.yPct}%` }} /></div>}
+      {/* The crosshair value tip yields while a marker tip is open — the two
+          would otherwise overlap at the top edge. */}
+      {hover && openMark == null && (
+        <ChartTip xPct={hover.xPct}>
+          {hover.date && <span className="t-d">{hover.date}</span>}
+          <span className="t-p">{hover.val}</span>
+        </ChartTip>
+      )}
+    </div>
+  )
+}
+
+// Daily activity bar chart with click-to-filter-by-day.
+// Skeleton bar heights (percent) for the loading placeholder — deterministic so
+// the shimmer doesn't reshuffle across renders.
+const DAY_SK_BARS = Array.from({ length: 44 }, (_, i) => 24 + Math.round(38 * Math.abs(Math.sin(i * 0.7)) + 22 * Math.abs(Math.sin(i * 0.23))))
+// Loading placeholder for the responsive (.day-chart) charts, whose svg height is
+// derived from its viewBox and scales with container width. `ratio` is the svg's
+// viewBox width/height, so the placeholder occupies the exact same height the chart
+// will — a fixed-px skeleton would leave a gap that jumps when data resolves.
+export function DayChartSkeleton({ ratio }: { ratio: number }) {
+  return (
+    <div className="day-chart day-chart-sk" aria-hidden="true" style={{ aspectRatio: String(ratio) }}>
+      {DAY_SK_BARS.map((v, i) => <span key={i} className="day-sk-bar" style={{ height: `${v}%`, animationDelay: `${(i % 6) * 80}ms` }} />)}
+    </div>
+  )
+}
+export function DayBarChart({ data, color = 'var(--accent)', fmt = (v: number) => String(Math.round(v)), label, selected, onSelect, loading }: {
+  data: { date: string; value: number }[]; color?: string; fmt?: (v: number) => string; label?: string; selected?: string | null; onSelect?: (d: string | null) => void; loading?: boolean
+}) {
+  const W = 860, H = 120, padX = 2, padB = 2, padT = 8
+  // On phones only the most recent 30 days render — the full window makes each
+  // bar a ~3px sliver that can't be tapped to filter. Same breakpoint as the
+  // stylesheet's table→card switch.
+  const narrow = useMediaQuery('(max-width: 720px)')
+  const days = narrow && data && data.length > 30 ? data.slice(-30) : data
+  const has = !!(days && days.length)
+  const max = has ? Math.max(...days.map(d => d.value), 1) : 1
+  const bw = has ? (W - 2 * padX) / days.length : 0
+  const avg = has ? days.reduce((a, b) => a + b.value, 0) / days.length : 0
+  // Always render the .pf-card frame, including while data loads, so the chart
+  // updates in place without remounting its container.
+  // The loading placeholder shares the .day-chart box and mirrors the svg's viewBox
+  // aspect ratio, so the card height is identical loading vs loaded at every width —
+  // no height jump when the daily query refetches (e.g. on a tab switch).
+  return (
+    <>
+      {label && <div className="sec-title">{label} <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}>· click a day to filter{selected ? <> · <span style={{ color: 'var(--accent)' }}>{selected}</span></> : ''}</span></div>}
+      <div className="pf-card">
+        {loading && !has ? (
+          <DayChartSkeleton ratio={W / H} />
+        ) : (
+          <svg className="day-chart" viewBox={`0 0 ${W} ${H}`}>
+            {has && days.map((d, i) => {
+              const bh = (d.value / max) * (H - padT - padB), x = padX + i * bw, y = H - padB - bh, on = selected === d.date
+              return <rect key={d.date} className={`day-bar${on ? ' on' : ''}`} style={{ fill: color }} x={x.toFixed(1)} y={y.toFixed(1)} width={(bw - 2).toFixed(1)} height={Math.max(1, bh).toFixed(1)} rx="2" onClick={() => onSelect?.(on ? null : d.date)}><title>{`${d.date} · ${fmt(d.value)}`}</title></rect>
+            })}
+          </svg>
+        )}
+        <div className="bal-xaxis" style={{ justifyContent: 'center' }}><span>{has ? `avg ${F.count(avg)}/day` : '…'}</span></div>
+      </div>
+    </>
+  )
+}
+
+/* ============ params table (typed key/value with address resolution) ============ */
+function looksHash(v: string): boolean { return /^0x[0-9a-f]{8,}$/i.test(v) }
+function looksAddr(v: string): boolean {
+  return /^0x[0-9a-fA-F]{40}$/.test(v) || /^0x[0-9a-fA-F]{64}$/.test(v) || /^[1-9A-HJ-NP-Za-km-z]{46,50}$/.test(v)
+}
+export function ParamsTable({ args }: { args: Record<string, unknown> }) {
+  const entries = Object.entries(args).filter(([k]) => !k.startsWith('_'))
+  if (!entries.length) return <div className="json muted">No call parameters</div>
+  return (
+    <div className="kv-params">
+      {entries.map(([k, v]) => {
+        let type: string, body: ReactNode
+        if (v !== null && typeof v === 'object') { type = Array.isArray(v) ? 'array' : 'object'; body = <span style={{ color: 'var(--text-medium)' }}>{JSON.stringify(v)}</span> }
+        else if (typeof v === 'number') { type = 'u32'; body = F.int(v) }
+        else if (typeof v === 'boolean') { type = 'bool'; body = String(v) }
+        else {
+          const s = String(v)
+          if (looksAddr(s)) { type = 'address'; body = <Link className="hash" to={paths.account(s)}>{F.shortAddr(s)}</Link> }
+          else if (looksHash(s)) { type = 'hash'; body = <span className="wrap-anywhere">{s}</span> }
+          else { type = 'string'; body = s }
+        }
+        return <div className="kv-row" key={k}><div className="kk">{k}<span className="ty">{type}</span></div><div className="vv">{body}</div></div>
+      })}
+    </div>
+  )
+}
+
+/* ============ JSON viewer ============ */
+export function JsonView({ value }: { value: unknown }) {
+  let json: string
+  try { json = JSON.stringify(value, null, 2) } catch { json = String(value) }
+  const html = (json ?? 'null')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"([^"]+)":/g, '<span class="key">"$1"</span><span class="punc">:</span>')
+    .replace(/: "([^"]*)"/g, ': <span class="str">"$1"</span>')
+    .replace(/: (\d[\d.]*)/g, ': <span class="numb">$1</span>')
+    .replace(/[{}[\]]/g, m => `<span class="punc">${m}</span>`)
+  return <div className="json" dangerouslySetInnerHTML={{ __html: html }} />
+}
+
+/* ============ layout helpers ============ */
+export function Crumbs({ items }: { items: { label: string; to?: string }[] }) {
+  return (
+    <div className="crumbs">
+      {items.map((it, i) => (
+        <span key={i} style={{ display: 'contents' }}>
+          {i > 0 && <span className="sep">/</span>}
+          {it.to ? <Link to={it.to}>{it.label}</Link> : <span>{it.label}</span>}
+        </span>
+      ))}
+    </div>
+  )
+}
+// Top-level tab bar for detail pages (Account/Tag). Reuses the shared .tabs
+// styling; `count` renders the small muted counter used elsewhere.
+// `countAtLeast` marks a count that covers only part of its list (an activity feed
+// too deep to walk to its end), so the badge reads "210k+" instead of implying the
+// list stops there.
+export interface DetailTab { key: string; label: string; count?: number; countAtLeast?: boolean }
+export function DetailTabs({ tabs, active, onChange }: { tabs: DetailTab[]; active: string; onChange: (key: string) => void }) {
+  return (
+    <div className="tabs detail-tabs">
+      {tabs.map(t => (
+        <button key={t.key} className={active === t.key ? 'active' : ''} onClick={() => onChange(t.key)}>
+          {t.label}{t.count != null ? <span className="cnt">{F.int(t.count)}{t.countAtLeast ? '+' : ''}</span> : null}
+        </button>
+      ))}
+    </div>
+  )
+}
+export function SkeletonRows({ rows = 8 }: { rows?: number }) {
+  const labels = ['42%', '34%', '48%', '40%', '55%', '36%', '46%', '32%']
+  const values = ['28%', '46%', '72%', '38%', '56%', '64%', '34%', '52%']
+  return (
+    <div className="dl dl-skeleton" aria-hidden="true">
+      {Array.from({ length: rows }).map((_, i) => (
+        <span key={i} style={{ display: 'contents' }}>
+          <div className="dt"><span className="sk-bar" style={{ width: labels[i % labels.length] }} /></div>
+          <div className="dd">
+            <span className="sk-bar" style={{ width: values[i % values.length], animationDelay: `${(i % 5) * 90}ms` }} />
+            {i % 3 === 0 && <span className="sk-pill" style={{ animationDelay: `${((i + 2) % 5) * 90}ms` }} />}
+          </div>
+        </span>
+      ))}
+    </div>
+  )
+}
+// Props for a table body still showing the PREVIOUS query's rows.
+//
+// The list hooks carry `placeholderData: keepPreviousData`, so a filter, tab or
+// pager change keeps the outgoing rows on screen instead of emptying the table —
+// that is what removed the ~900px height jump under the reader's cursor. But it
+// also means `rows.length === 0` can no longer happen while a new key loads, so
+// every `isFetching && !rows.length` skeleton gate became unreachable for exactly
+// the changes a reader makes deliberately: the old rows sat there with no
+// indication, reading as the answer to a filter they do not answer. On the global
+// activity feed, where a high `$ from` takes tens of seconds, that is
+// indistinguishable from the filter being ignored.
+//
+// So the rows stay (no height jump) but are marked pending: dimmed, and aria-busy
+// for anything not reading pixels. Held rows are never presented as an answer.
+export function pendingRows(pending?: boolean): { className?: string; 'aria-busy'?: true } {
+  return pending ? { className: 'rows-pending', 'aria-busy': true } : {}
+}
+// Skeleton <tr> rows for a table body — keeps the header and column grid in place
+// while data loads (instead of a lone centered "Loading…"). Bar widths vary per
+// cell for a natural shimmer. Below 720px a loaded row is a stacked card of one
+// labelled line per column, so the placeholder keeps its cells there and draws
+// the same stack (see the mobile skeleton block in global.css).
+// A paged list passes its page size: eight rows standing in for twenty-five made
+// the panel grow ~900px when the data landed, which is a scroll jump under the
+// reader and most of the layout shift on /blocks.
+// `mobileCols` is how many of those lines the phone card actually draws, for the
+// tables whose trailing column is hidden there (the expand toggle) or whose empty
+// cells collapse (the accounts directory); the rest are hidden like the real ones.
+export function TableSkeleton({ cols, rows = 8, mobileCols = cols }: { cols: number; rows?: number; mobileCols?: number }) {
+  const widths = ['58%', '42%', '70%', '36%', '52%', '48%', '64%', '40%']
+  return <>{Array.from({ length: rows }).map((_, r) => (
+    <tr className="sk-tr" key={r}>
+      {Array.from({ length: cols }).map((_, c) => (
+        <td key={c} className={c >= mobileCols ? 'col-hide-mobile' : undefined}><span className="sk-bar" style={{ width: widths[(r * cols + c) % widths.length], animationDelay: `${((r + c) % 6) * 80}ms` }} /></td>
+      ))}
+    </tr>
+  ))}</>
+}
+// Shimmer placeholder for a chart card body while its series loads — avoids the
+// degenerate flat-line / 1-1-0-axis render of an empty chart during the fetch.
+// The shimmer plot both chart placeholders draw. In ChartSkeleton it stretches to
+// fill the reserved box; in ChartCardSkeleton it is pinned to the height of the
+// `.apx-chart` it stands in for.
+function ChartSkPlot() {
+  const bars = [36, 54, 44, 68, 58, 76, 48, 64, 42, 72, 56, 46]
+  return (
+    <div className="chart-sk-plot">
+      {bars.map((v, i) => <span key={i} className="chart-sk-bar" style={{ height: `${v}%`, animationDelay: `${(i % 6) * 80}ms` }} />)}
+    </div>
+  )
+}
+// Reserves a fixed-height box for a chart whose loaded card has its own bespoke
+// shape (the /hdx and /hollar sections, where each card holds a differently sized
+// column/mirrored/stacked chart). Where the loaded card is the standard
+// `.pf-card` + `.apx-chart` pair, use ChartCardSkeleton instead — it needs no
+// number and stays correct across breakpoints.
+export function ChartSkeleton({ h = 120 }: { h?: number }) {
+  return (
+    <div className="chart-skeleton" style={{ height: h }} aria-hidden="true">
+      <div className="chart-sk-head">
+        <span className="sk-bar chart-sk-now" />
+        <span className="chart-sk-metrics">
+          <span className="sk-bar" />
+          <span className="sk-bar" />
+          <span className="sk-bar" />
+        </span>
+      </div>
+      <ChartSkPlot />
+    </div>
+  )
+}
+// Reserves a standard chart card by building it out of the loaded card's own
+// chrome — `.pf-card`, `.pf-head`, and a plot as tall as the fixed 220px
+// `.apx-chart` — instead of a pixel height. The head's height follows its font and
+// its figures wrap below 720px, so any single constant is right at one viewport
+// and wrong at the other: the 260px this replaced stood against a card measuring
+// 328px at 1440 and 378px at 390. Describing the head instead matches at both by
+// construction, the way TabsSkeleton already does for the tab bar. `metrics` is
+// how many figures trail the headline — one is drawn as the inline `.pf-chg` the
+// single-figure cards use, several as the stacked `.perf-row` — and `legend`
+// covers the cards that close with a `.bal-legend` row. `headClass` carries the
+// loaded head's own modifier: `.pf-head-asset` top-aligns its figures where the
+// default baseline alignment drops them ~17px lower, and that difference is
+// visible at both viewports.
+export function ChartCardSkeleton({ metrics = 0, legend = false, headClass = '' }: { metrics?: number; legend?: boolean; headClass?: string }) {
+  return (
+    <div className="pf-card chart-card-skeleton" aria-hidden="true">
+      <div className={['pf-head', headClass].filter(Boolean).join(' ')}>
+        <div className="pf-now"><span className="sk-bar" /></div>
+        {metrics === 1 && <div className="pf-chg"><span className="sk-bar" /></div>}
+        {metrics > 1 && (
+          <div className="perf-row">
+            {Array.from({ length: metrics }).map((_, i) => (
+              <span key={i} className="perf">
+                <span className="pk"><span className="sk-bar" /></span>
+                <span className="pv"><span className="sk-bar" /></span>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      <ChartSkPlot />
+      {/* PriceChart pins its legend to 10px rather than the token's 14px. */}
+      {legend && (
+        <div className="bal-legend" style={{ marginTop: 10 }}>
+          <span><span className="sk-bar" /></span>
+          <span><span className="sk-bar" /></span>
+        </div>
+      )}
+    </div>
+  )
+}
+// Real tab buttons carrying a shimmer instead of a label, so the placeholder is
+// exactly as tall as the loaded bar at every breakpoint — the tab font shrinks on
+// phones, and a hardcoded height was 2px out there and shifted the page.
+function TabsSkeleton({ tabs = 4 }: { tabs?: number }) {
+  const widths = ['52px', '66px', '48px', '72px']
+  return (
+    <div className="tabs tabs-skeleton" aria-hidden="true">
+      {Array.from({ length: tabs }).map((_, i) => (
+        <button key={i} type="button" disabled tabIndex={-1}>
+          <span className="sk-bar" style={{ width: widths[i % widths.length], animationDelay: `${(i % 4) * 80}ms` }} />
+        </button>
+      ))}
+    </div>
+  )
+}
+export function ProfilePageSkeleton() {
+  return (
+    <>
+      <div className="acct-head acct-head-skeleton" aria-hidden="true">
+        <span className="sk-avatar" />
+        <div className="acct-meta">
+          <span className="sk-bar sk-name" />
+          <span className="sk-bar sk-address" />
+          <span className="sk-bar sk-hint" />
+        </div>
+        <div className="acct-bal">
+          <span className="sk-bar sk-bal-label" />
+          <span className="sk-bar sk-bal-value" />
+        </div>
+      </div>
+      <TabsSkeleton tabs={4} />
+      <div className="sec-title sec-title-skeleton" aria-hidden="true"><span className="sk-bar" /></div>
+      {/* Matches PortfolioChart: a headline value and the 24H/1W/1M/1Y row. */}
+      <ChartCardSkeleton metrics={4} />
+    </>
+  )
+}
+function ActivityPanelSkeleton({ rows = 6, noActor = false }: { rows?: number; noActor?: boolean }) {
+  const cols = noActor ? 4 : 5
+  return (
+    <div className="panel">
+      <table className="tbl">
+        <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
+        <tbody><TableSkeleton cols={cols} rows={rows} /></tbody>
+      </table>
+    </div>
+  )
+}
+export function AssetDetailSkeleton() {
+  return (
+    <>
+      <div className="detail-card"><SkeletonRows rows={6} /></div>
+      <div className="sec-title sec-title-skeleton" aria-hidden="true"><span className="sk-bar" /></div>
+      {/* Matches PriceChart: the price, its performance row, and the Price/EMA7
+          legend under the plot. The old 336px constant was right at 1440 and 52px
+          short at 390, where the performance row wraps. */}
+      <ChartCardSkeleton metrics={4} legend headClass="pf-head-asset" />
+      <TabsSkeleton tabs={2} />
+      <div className="activity-chips activity-chips-skeleton" aria-hidden="true">
+        {Array.from({ length: 6 }).map((_, i) => <span key={i} className="sk-bar" style={{ width: i === 0 ? 48 : 86, animationDelay: `${(i % 5) * 80}ms` }} />)}
+      </div>
+      <ActivityPanelSkeleton rows={5} />
+    </>
+  )
+}
+export function ExpandedRowSkeleton() {
+  const kv = ['42%', '70%', '36%', '58%']
+  return (
+    <div className="exp exp-skeleton" aria-hidden="true">
+      <div className="exp-cols">
+        <div>
+          <div className="exp-h"><span className="sk-bar" /></div>
+          <div className="exp-kv exp-kv-skeleton">
+            {kv.map((w, i) => <span key={i} className="sk-bar" style={{ width: w, animationDelay: `${(i % 4) * 90}ms` }} />)}
+          </div>
+        </div>
+        <div>
+          <div className="exp-h"><span className="sk-bar" /></div>
+          <div className="exp-evs exp-evs-skeleton">
+            {Array.from({ length: 5 }).map((_, i) => <span key={i} className="sk-pill" style={{ width: 92 + (i % 2) * 28, animationDelay: `${(i % 5) * 90}ms` }} />)}
+          </div>
+        </div>
+      </div>
+      <span className="sk-bar exp-link-skeleton" />
+    </div>
+  )
+}
+export function EmptyRow({ cols, children }: { cols: number; children: ReactNode }) {
+  return <tr><td colSpan={cols} style={{ textAlign: 'center', padding: 32, color: 'var(--text-low)' }}>{children}</td></tr>
+}
+// A failed list request is not an empty list. The API's own message is shown
+// when it carries one — a too-broad activity window is a "narrow your filters"
+// signal, not a transient failure — so the row stays distinguishable from the
+// "No activity" state a successful empty response renders.
+export function ErrorRow({ cols, title, error, onRetry }: { cols: number; title: string; error: unknown; onRetry?: () => void }) {
+  const detail = error instanceof Error && error.name === 'ApiError' && error.message ? error.message : 'The request failed.'
+  return (
+    <tr><td colSpan={cols} className="table-error" role="alert">
+      <strong>{title}</strong>
+      <span>{detail}</span>
+      {onRetry && <button type="button" onClick={onRetry}>Try again</button>}
+    </td></tr>
+  )
+}
+// Deep-linkable pager. Lists are newest-first, so higher pages go further back
+// toward the very first block. With `totalPages` it numbers real pages and offers
+// a Last jump; without one it numbers only up to the current page and lets
+// `hasNext` drive the › arrow, so no page is offered before it is known to hold
+// rows. `note` states WHY a total is missing when the caller knows.
+export function Pager({ page, hasNext, totalPages, note, onPage }: { page: number; hasNext?: boolean; totalPages?: number; note?: string; onPage: (p: number) => void }) {
+  const [jump, setJump] = useState('')
+  const last = totalPages != null ? totalPages - 1 : undefined
+  const canNext = hasNext ?? (last != null ? page < last : true)
+  const maxButtons = 5
+  const windowStart = last != null ? Math.max(0, Math.min(page - 2, Math.max(0, last - maxButtons + 1))) : Math.max(0, page - 2)
+  // Without a known page count a full page means "there may be more" (the › arrow,
+  // driven by hasNext), not "there are two more pages". Speculative page+N buttons
+  // produced phantom trailing pages that rendered empty when the data ended on a
+  // page boundary.
+  const windowEnd = last != null ? Math.min(last, windowStart + maxButtons - 1) : page
+  const numbered: number[] = []
+  for (let n = windowStart; n <= windowEnd; n++) numbered.push(n)
+  // hasNext stays authoritative one page past a known last page: a total is only as
+  // fresh as its cache, and a newest-first list that has grown since must not
+  // dead-end before its new last page.
+  const go = (n: number) => { if (n >= 0 && (last == null || n <= last || (n === page + 1 && canNext))) onPage(n) }
+  // A deep link can still name a page the list does not reach (an old bookmark, a
+  // hand-edited number). Saying "Page 27 of 26" would read as a contradiction, so
+  // name the position instead; the numbered buttons already only offer real pages.
+  const info = last != null && page > last
+    ? `Page ${(page + 1).toLocaleString('en-US')} · past the last page (${(last + 1).toLocaleString('en-US')})`
+    : `Page ${(page + 1).toLocaleString('en-US')}${last != null ? ` of ${(last + 1).toLocaleString('en-US')}` : ''}`
+  return (
+    <div className="pager">
+      <div className="info">{info}{note && <> · {note}</>}</div>
+      <div className="btns">
+        <button onClick={() => go(0)} disabled={page === 0} title="First" aria-label="First page">«</button>
+        <button onClick={() => go(page - 1)} disabled={page === 0} title="Previous" aria-label="Previous page">‹</button>
+        {numbered.map(n => <button key={n} className={n === page ? 'on' : ''} onClick={() => go(n)} aria-label={`Page ${n + 1}`} aria-current={n === page ? 'page' : undefined}>{n + 1}</button>)}
+        <button onClick={() => go(page + 1)} disabled={!canNext} title="Next" aria-label="Next page">›</button>
+        {/* Enabled from a page PAST the last one too — that is where a stale deep link
+            lands, and » is the way back to real rows. */}
+        {last != null && <button onClick={() => go(last)} disabled={page === last} title="Last" aria-label="Last page">»</button>}
+        <form onSubmit={e => { e.preventDefault(); const n = parseInt(jump, 10); if (Number.isFinite(n) && n >= 1) go(n - 1); setJump('') }}>
+          <input className="pager-jump" placeholder="Go to…" value={jump} onChange={e => setJump(e.target.value)} inputMode="numeric" aria-label="Go to page" />
+        </form>
+      </div>
+    </div>
+  )
+}
+export function rowNav(to: string) {
+  return {
+    className: 'clickable',
+    tabIndex: 0,
+    onClick: (e: MouseEvent<HTMLElement>) => {
+      // Let nested interactive elements (account/asset links, the copy button) own
+      // their click — navigate to the row's target only when the click lands on
+      // blank row space. So clicking an AddrPill in a activity row goes to that
+      // account, not the row's extrinsic.
+      if ((e.target as HTMLElement).closest('a, button')) return
+      navigate(to)
+    },
+    onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
+      if (e.key !== 'Enter' || e.target !== e.currentTarget) return
+      e.preventDefault()
+      navigate(to)
+    },
+  }
+}
+
+// Shared activity type-filter chips (Activity page, account & asset detail). The chip
+// value maps to the backend activity `type` filter; 'all' is the unfiltered feed.
+const ACTIVITY_CHIPS: { v: string; label: string }[] = [
+  { v: 'all', label: 'All' }, { v: 'trade', label: 'Trade' }, { v: 'mm', label: 'Borrow' }, { v: 'liquidity', label: 'Liquidity' },
+  { v: 'transfer', label: 'Transfer' }, { v: 'xcm', label: 'Cross-chain' }, { v: 'stake', label: 'Stake' }, { v: 'vote', label: 'Vote' },
+]
+const ACTIVITY_CHIP_VALUES = new Set(ACTIVITY_CHIPS.map(c => c.v))
+export function normalizeActivityType(value: string): string {
+  if (value === 'dca') return 'trade'   // dca is surfaced under the Trade feed (server does the same)
+  if (value === 'otc') return 'trade'   // otc is surfaced under the Trade feed (server does the same)
+  return ACTIVITY_CHIP_VALUES.has(value) ? value : 'all'
+}
+
+// Per-category action filters (server matches these against row fields).
+export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = {
+  // Labels mirror the badges the activity table renders for each row, so the
+  // filter names exactly what it filters. OTC (place/pull/fill) is folded in
+  // here alongside swap/dca — otc rows keep their own badges/slugs/detail
+  // pages, only the Trade categorization changes.
+  trade: [
+    { v: 'swap', label: 'Swap' }, { v: 'dca', label: 'DCA' }, { v: 'dca-failed', label: 'Failed DCA' },
+    { v: 'otc-place', label: 'OTC place' }, { v: 'otc-pull', label: 'OTC pull' }, { v: 'otc-fill', label: 'OTC fill' },
+  ],
+  xcm: [{ v: 'out', label: 'Outgoing' }, { v: 'in', label: 'Incoming' }],
+  liquidity: [{ v: 'Add', label: 'Add liquidity' }, { v: 'Remove', label: 'Remove liquidity' }, { v: 'Create', label: 'Create pool' }, { v: 'Claim', label: 'Claim rewards' }],
+  mm: [{ v: 'Supply', label: 'Lend' }, { v: 'Withdraw', label: 'Withdraw' }, { v: 'Borrow', label: 'Borrow' }, { v: 'Repay', label: 'Repay' }, { v: 'LiquidationCall', label: 'Liquidate' }, { v: 'ClaimRewards', label: 'Claim rewards' }],
+  stake: [{ v: 'Stake', label: 'Stake' }, { v: 'Add stake', label: 'Add stake' }, { v: 'Unstake', label: 'Unstake' }, { v: 'Force unstake', label: 'Force unstake' }, { v: 'Staking reward', label: 'Staking reward' }, { v: 'Giga stake', label: 'Giga stake' }, { v: 'Giga unstake', label: 'Giga unstake' }, { v: 'Unstake cancelled', label: 'Unstake cancelled' }, { v: 'Giga migration', label: 'Giga migration' }, { v: 'Giga reward', label: 'Giga reward' }, { v: 'Collator payout', label: 'Collator payout' }],
+  // The value is the chain's own term; the label is how this app writes that side —
+  // taken from the same mapping the badges use, so the two cannot diverge.
+  vote: [{ v: 'Aye', label: voteSideLabel('Aye') }, { v: 'Nay', label: voteSideLabel('Nay') }],
+}
+// Clamp a deep-linked action to the active type's known actions ('' = all).
+export function normalizeActivityAction(type: string, action: string): string {
+  return ACTIVITY_ACTIONS[type]?.some(a => a.v === action) ? action : ''
+}
+export function ActivityChips({ value, onChange, action, onAction }: {
+  value: string; onChange: (v: string) => void; action?: string; onAction?: (v: string) => void
+}) {
+  const active = normalizeActivityType(value)
+  const actions = ACTIVITY_ACTIONS[active]
+  return (
+    <div className="activity-chips">
+      {ACTIVITY_CHIPS.map(c => <button key={c.v} className={`activity-chip${active === c.v ? ' on' : ''}`} onClick={() => onChange(c.v)}>{c.label}</button>)}
+      {actions && onAction && (
+        <select className="activity-action" value={normalizeActivityAction(active, action ?? '')} onChange={e => onAction(e.target.value)} aria-label="Action filter">
+          <option value="">All actions</option>
+          {actions.map(a => <option key={a.v} value={a.v}>{a.label}</option>)}
+        </select>
+      )}
+    </div>
+  )
+}

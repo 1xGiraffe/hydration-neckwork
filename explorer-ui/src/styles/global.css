@@ -1,0 +1,2289 @@
+/* ============================================================
+   Hydration Explorer — design-system styles
+   Fonts: Gazpacho (display), Geist (UI), Geist Mono (data)
+   ============================================================ */
+
+/* Each face ships as two woff2 halves with complementary `unicode-range`s, so a
+   page fetches only the half its text needs. `-latin` is ASCII + Latin-1 plus
+   every symbol the app draws (dashes, quotes, arrows, triangles, math
+   relations, currency, and the U+2080-2089 subscripts behind the 0.0(5)7191
+   notation) — that is all ordinary pages need. `-ext` holds the rest of what
+   the licensed face covers (Latin Extended, combining diacritics, Greek,
+   Cyrillic, CJK punctuation), so an accented or Cyrillic identity name still
+   renders in the brand face; it is simply never requested until one appears.
+   Coverage is unchanged from the unsplit faces — only transfer shrinks.
+   Both halves and these ranges come from `scripts/subset-fonts.py`. */
+
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoRegular-latin.woff2') format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoRegular-ext.woff2') format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0100-0107, U+010A-011B, U+011E-0123, U+0126-0127, U+012A-0131, U+0134-0137, U+0139-0148, U+014A-015B, U+015E-0167, U+016A-016B, U+016E-017E, U+018F, U+01FC-01FD, U+0218-021B, U+0237, U+0259, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+1E80-1E85, U+1E9E, U+1EF2-1EF3; }
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoMedium-latin.woff2') format('woff2'); font-weight: 500; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoMedium-ext.woff2') format('woff2'); font-weight: 500; font-display: swap; unicode-range: U+0100-0107, U+010A-011B, U+011E-0123, U+0126-0127, U+012A-0131, U+0134-0137, U+0139-0148, U+014A-015B, U+015E-0167, U+016A-016B, U+016E-017E, U+018F, U+01FC-01FD, U+0218-021B, U+0237, U+0259, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+1E80-1E85, U+1E9E, U+1EF2-1EF3; }
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoBold-latin.woff2') format('woff2'); font-weight: 600; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoBold-ext.woff2') format('woff2'); font-weight: 600; font-display: swap; unicode-range: U+0100-0107, U+010A-011B, U+011E-0123, U+0126-0127, U+012A-0131, U+0134-0137, U+0139-0148, U+014A-015B, U+015E-0167, U+016A-016B, U+016E-017E, U+018F, U+01FC-01FD, U+0218-021B, U+0237, U+0259, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+1E80-1E85, U+1E9E, U+1EF2-1EF3; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistRegular-latin.woff2') format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistRegular-ext.woff2') format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0100-0113, U+0116-012B, U+012E-0137, U+0139-013E, U+0141-0148, U+014A-014D, U+0150-017E, U+018F, U+0192, U+01CD-01CE, U+01E4-01E9, U+0218-021B, U+0237, U+0259, U+02B9, U+02BC, U+02C6-02C8, U+02D8-02DD, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+0335, U+039B, U+03A9, U+03BB, U+03C0, U+0400-040C, U+040E-045F, U+0462-0463, U+046A-046B, U+0472-0475, U+0490-0493, U+0496-0497, U+049A-049B, U+04A2-04A3, U+04AE-04B3, U+04B6-04B7, U+04BA-04BB, U+04C0, U+04CF, U+04D8-04D9, U+04E2-04E3, U+04E8-04E9, U+04EE-04EF, U+0E3F, U+1E20-1E21, U+1E80-1E85, U+1E9E, U+1EBC-1EBD, U+1EF2-1EF3, U+1EF8-1EF9, U+2032-2033, U+240B-240C, U+2460-2468, U+24EA, U+24FF, U+2639-263A, U+3003, U+3008-3011, U+3014-3017, U+301C, U+A78B-A78C, U+F8FF; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistMedium-latin.woff2') format('woff2'); font-weight: 500; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistMedium-ext.woff2') format('woff2'); font-weight: 500; font-display: swap; unicode-range: U+0100-0113, U+0116-012B, U+012E-0137, U+0139-013E, U+0141-0148, U+014A-014D, U+0150-017E, U+018F, U+0192, U+01CD-01CE, U+01E4-01E9, U+0218-021B, U+0237, U+0259, U+02B9, U+02BC, U+02C6-02C8, U+02D8-02DD, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+0335, U+039B, U+03A9, U+03BB, U+03C0, U+0400-040C, U+040E-045F, U+0462-0463, U+046A-046B, U+0472-0475, U+0490-0493, U+0496-0497, U+049A-049B, U+04A2-04A3, U+04AE-04B3, U+04B6-04B7, U+04BA-04BB, U+04C0, U+04CF, U+04D8-04D9, U+04E2-04E3, U+04E8-04E9, U+04EE-04EF, U+0E3F, U+1E20-1E21, U+1E80-1E85, U+1E9E, U+1EBC-1EBD, U+1EF2-1EF3, U+1EF8-1EF9, U+2032-2033, U+240B-240C, U+2460-2468, U+24EA, U+24FF, U+2639-263A, U+3003, U+3008-3011, U+3014-3017, U+301C, U+A78B-A78C, U+F8FF; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistSemiBold-latin.woff2') format('woff2'); font-weight: 600; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistSemiBold-ext.woff2') format('woff2'); font-weight: 600; font-display: swap; unicode-range: U+0100-0113, U+0116-012B, U+012E-0137, U+0139-013E, U+0141-0148, U+014A-014D, U+0150-017E, U+018F, U+0192, U+01CD-01CE, U+01E4-01E9, U+0218-021B, U+0237, U+0259, U+02B9, U+02BC, U+02C6-02C8, U+02D8-02DD, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+0335, U+039B, U+03A9, U+03BB, U+03C0, U+0400-040C, U+040E-045F, U+0462-0463, U+046A-046B, U+0472-0475, U+0490-0493, U+0496-0497, U+049A-049B, U+04A2-04A3, U+04AE-04B3, U+04B6-04B7, U+04BA-04BB, U+04C0, U+04CF, U+04D8-04D9, U+04E2-04E3, U+04E8-04E9, U+04EE-04EF, U+0E3F, U+1E20-1E21, U+1E80-1E85, U+1E9E, U+1EBC-1EBD, U+1EF2-1EF3, U+1EF8-1EF9, U+2032-2033, U+240B-240C, U+2460-2468, U+24EA, U+24FF, U+2639-263A, U+3003, U+3008-3011, U+3014-3017, U+301C, U+A78B-A78C, U+F8FF; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoRegular-latin.woff2') format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoRegular-ext.woff2') format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0100-0113, U+0116-012B, U+012E-0131, U+0134-0137, U+0139-013E, U+0141-0148, U+014C-014D, U+0150-0165, U+0168-017E, U+018F, U+0192, U+01CD-01CE, U+0218-021B, U+0237, U+0259, U+02C6-02C7, U+02D8-02DD, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+03A9, U+03C0, U+0E3F, U+1E20-1E21, U+1E80-1E85, U+1E9E, U+1EBC-1EBD, U+1EF2-1EF3, U+1EF8-1EF9, U+240B-240C, U+2423, U+3002-3003, U+3008-3011, U+3014-3017, U+301C, U+A78B-A78C, U+FF01-FF03, U+FF05-FF0A, U+FF0C-FF0F, U+FF1A-FF1B, U+FF1F-FF20, U+FF3B-FF3D, U+FF3F, U+FF5B, U+FF5D; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoMedium-latin.woff2') format('woff2'); font-weight: 500; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoMedium-ext.woff2') format('woff2'); font-weight: 500; font-display: swap; unicode-range: U+0100-0113, U+0116-012B, U+012E-0131, U+0134-0137, U+0139-013E, U+0141-0148, U+014A-014D, U+0150-017E, U+018F, U+0192, U+01CD-01CE, U+01E4-01E9, U+0218-021B, U+0237, U+0259, U+02B9, U+02BC, U+02C6-02C8, U+02D8-02DD, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+0335-0338, U+039B, U+03A9, U+03BB, U+03C0, U+0400-045F, U+0462-0463, U+046A-046B, U+0472-0475, U+0490-0493, U+0496-0497, U+049A-049B, U+04A2-04A3, U+04AE-04B3, U+04B6-04B7, U+04BA-04BB, U+04C0, U+04CF, U+04D8-04D9, U+04E2-04E3, U+04E8-04E9, U+04EE-04EF, U+0E3F, U+1E20-1E21, U+1E80-1E85, U+1E9E, U+1EBC-1EBD, U+1EF2-1EF3, U+1EF8-1EF9, U+2032-2033, U+240B-240C, U+2423, U+2460-2468, U+24EA, U+24FF-2500, U+2502, U+250C, U+2514, U+251C, U+3003, U+3008-3011, U+3014-3017, U+301C, U+A78B-A78C, U+F8FF; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoSemiBold-latin.woff2') format('woff2'); font-weight: 600; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoSemiBold-ext.woff2') format('woff2'); font-weight: 600; font-display: swap; unicode-range: U+0100-0113, U+0116-012B, U+012E-0131, U+0134-0137, U+0139-013E, U+0141-0148, U+014C-014D, U+0150-0165, U+0168-017E, U+018F, U+0192, U+01CD-01CE, U+0218-021B, U+0237, U+0259, U+02C6-02C7, U+02D8-02DD, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+03A9, U+03C0, U+0E3F, U+1E20-1E21, U+1E80-1E85, U+1E9E, U+1EBC-1EBD, U+1EF2-1EF3, U+1EF8-1EF9, U+240B-240C, U+2423, U+3002-3003, U+3008-3011, U+3014-3017, U+301C, U+A78B-A78C, U+FF01-FF03, U+FF05-FF0A, U+FF0C-FF0F, U+FF1A-FF1B, U+FF1F-FF20, U+FF3B-FF3D, U+FF3F, U+FF5B, U+FF5D; }
+
+:root {
+  /* shared easings (aligned with preis-ui) for consistent micro-interactions */
+  --ease-out-soft: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  /* iOS home-screen PWA safe-area inset (0 everywhere else, incl. Android).
+     Top-anchored surfaces pad by this so content clears the status bar when
+     the app runs full-bleed under a black-translucent bar. */
+  --safe-top: env(safe-area-inset-top, 0px);
+}
+:root[data-theme="dark"] {
+  --bg: #030816;
+  --bg-elev: #0d1525;
+  --bg-elev2: #131d30;
+  --panel: rgba(255,255,255,0.03);
+  --panel-hover: rgba(255,255,255,0.06);
+  --border: rgba(255,255,255,0.09);
+  --separator: rgba(255,255,255,0.055);
+
+  --text-high: #f5f1f8;
+  --text-medium: #a4abbd;
+  --text-low: #6a7187;
+  --text-lowest: #454c5e;
+
+  --accent: #e53e76;
+  --accent-soft: rgba(229,62,118,0.14);
+  --accent-on: #ffffff;
+
+  --lavender: #dfb1f3;
+  --lavender-deep: #cc6ef4;
+  --lavender-soft: rgba(204,110,244,0.15);
+
+  --sky: #95caff;
+  --sky-deep: #2C89E9;
+  --sky-soft: rgba(83,164,243,0.13);
+
+  --green: #74C742;
+  --green-deep: #45AC1F;
+  --green-soft: rgba(116,199,66,0.15);
+
+  --red: #ff6868;
+  --red-soft: rgba(255,104,104,0.13);
+
+  --amber: #F7BF06;
+  --amber-soft: rgba(247,191,6,0.13);
+
+  --orange: #FF8A45;
+  --orange-soft: rgba(255,138,69,0.14);
+
+  /* charts with no category to name (all-activity, blocks, extrinsics, events) */
+  --chart-neutral: #6B7488;
+
+  /* movement (transfers, bridge hops) reads as quiet plumbing: two greys of the
+     same weight, told apart by temperature rather than loudness */
+  --neutral: #9AA3B5;
+  --neutral-cool: #8399BF;
+
+  /* Category layer — see the block below the light theme. */
+  --cat-trade: #FF8A45;
+  --cat-trade-dca: #FFC26B;
+  --cat-trade-fill: #D2551A;
+  --cat-trade-place: #C9855F;
+
+  --cat-borrow: #F7BF06;
+  --cat-borrow-withdraw: #FFE066;
+  --cat-borrow-lend: #C9A227;
+  --cat-borrow-repay: #9DA83A;
+  --cat-borrow-claim: #C8B98A;
+
+  --cat-liquidity: #6FB4FF;
+  --cat-liquidity-remove: #3F80C4;
+  --cat-liquidity-create: #A9D3F5;
+  --cat-liquidity-claim: #4FB2DE;
+
+  --cat-stake: #CB79F8;
+  --cat-stake-exit: #7E5BB0;
+  --cat-stake-reward: #9D8FE0;
+  --cat-stake-migrate: #C44DD8;
+  --cat-stake-cancel: #9C7BB8;
+
+  --cat-transfer: var(--neutral);
+  --cat-xcm: var(--neutral-cool);
+  --cat-vote: #DFB1F3;
+  --cat-bad: #FF6969;
+
+  /* lock families that are not activity categories */
+  --lock-vesting: #3FC2B8;
+
+  /* balance-breakdown: transferable = light blue, clearable deposits/orders = blue */
+  --bd-free: #95caff;
+  --bd-clear: #3f88dd;
+
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --bg: #EFEDEA;
+  --bg-elev: #ffffff;
+  --bg-elev2: #f6f4f1;
+  --panel: rgba(36,14,50,0.035);
+  --panel-hover: rgba(36,14,50,0.07);
+  --border: rgba(36,14,50,0.13);
+  --separator: rgba(36,14,50,0.08);
+
+  --text-high: #232226;
+  --text-medium: #5f5b67;
+  --text-low: #8a8693;
+  --text-lowest: #bdb8c6;
+
+  --accent: #e53e76;
+  --accent-soft: rgba(229,62,118,0.10);
+  --accent-on: #ffffff;
+
+  --lavender: #b454da;
+  --lavender-deep: #823fa1;
+  --lavender-soft: rgba(204,110,244,0.16);
+
+  --sky: #2C89E9;
+  --sky-deep: #1f5cab;
+  --sky-soft: rgba(83,164,243,0.10);
+
+  --green: #45AC1F;
+  --green-deep: #2e7c12;
+  --green-soft: rgba(116,199,66,0.16);
+
+  --red: #d83b3b;
+  --red-soft: rgba(216,59,59,0.10);
+
+  --amber: #b58800;
+  --amber-soft: rgba(247,191,6,0.16);
+
+  --orange: #A04508;
+  --orange-soft: rgba(160,69,8,0.12);
+
+  /* charts with no category to name (all-activity, blocks, extrinsics, events) */
+  --chart-neutral: #7B8298;
+
+  /* movement (transfers, bridge hops) reads as quiet plumbing: two greys of the
+     same weight, told apart by temperature rather than loudness */
+  --neutral: #5F5B67;
+  --neutral-cool: #3F5570;
+
+  /* Category layer — its own values here; the shared --sky/--amber/--lavender/--red
+     the valence layer uses sit around 2.5-3.7:1 as badge text on white. */
+  --cat-trade: #A04508;
+  --cat-trade-dca: #BC6E22;
+  --cat-trade-fill: #5A2401;
+  --cat-trade-place: #96694A;
+
+  --cat-borrow: #7A5D00;
+  --cat-borrow-withdraw: #9C7D14;
+  --cat-borrow-lend: #4F4A12;
+  --cat-borrow-repay: #6E7A2A;
+  --cat-borrow-claim: #8F8460;
+
+  --cat-liquidity: #1F60A4;
+  --cat-liquidity-remove: #123E6B;
+  --cat-liquidity-create: #4E86BE;
+  --cat-liquidity-claim: #2E7C9E;
+
+  --cat-stake: #6B3FAE;
+  --cat-stake-exit: #3E2A63;
+  --cat-stake-reward: #7B6FC4;
+  --cat-stake-migrate: #A02BB5;
+  --cat-stake-cancel: #7A5C90;
+
+  --cat-transfer: var(--neutral);
+  --cat-xcm: var(--neutral-cool);
+  --cat-vote: #98387F;
+  --cat-bad: #B02F2F;
+
+  /* lock families that are not activity categories */
+  --lock-vesting: #147F76;
+
+  /* balance-breakdown: transferable = light blue, clearable deposits/orders = blue */
+  --bd-free: #7fb0ea;
+  --bd-clear: #2C89E9;
+
+  color-scheme: light;
+}
+
+/* ------------------------------------------------------------------
+   Activity color coding — two layers that never compete:
+     CATEGORY  what kind of activity a row is: a family of related shades,
+               set per theme above,
+     VALENCE   which way it went (--green / --red), which WINS wherever a
+               row has a side: AYE/NAY, failures, liquidations.
+   Components name the meaning, never the hue, so a shade is changed in one
+   place.
+
+   Each family spans a RAMP with one shade per action rather than a single
+   hue with a light and a dark variant. Two variants could not carry it: a
+   family has up to five actions (Borrow / Withdraw / Lend / Repay / Claim),
+   and any pair sharing a variant reads as the same badge. The shades vary in
+   lightness AND chroma, not lightness alone, because a pure lightness ramp
+   inside one hue leaves neighbouring steps too close to tell apart at 10px.
+
+   The floor for badge text is 3:1 rather than 4.5:1 — a deliberate trade to
+   buy the range these ramps need. Every shade is checked against it in both
+   themes; see docs/superpowers/specs for the check.
+   ------------------------------------------------------------------ */
+
+* , *::before, *::after { box-sizing: border-box; }
+* { margin: 0; }
+html { font-size: 16px; -webkit-font-smoothing: antialiased; scroll-behavior: smooth; }
+body {
+  font-family: 'Geist', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text-high);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+a { color: inherit; text-decoration: none; }
+/* :not(:where(.row-handle)) — Lists.tsx's drag handle deliberately opts OUT
+   of this reset. `all: unset` resets some internal, non-visual button
+   property Chromium's native drag-initiation heuristic keys off (confirmed
+   empirically: an explicit, enumerated reset of the same VISUAL properties
+   keeps a draggable button draggable; the `all: unset` shorthand alone does
+   not, regardless of which other properties ride along with it). The handle
+   gets its own equivalent reset below instead. The :where() wrapper matters:
+   a bare `:not(.row-handle)` would raise this selector's specificity from
+   (0,0,1) to (0,1,1) — enough to start beating every OTHER button's own
+   single-class override of this same reset (e.g. .acct-picker-row), since
+   :where()'s zero-specificity contribution is exactly what keeps `:not()`'s
+   specificity at the plain type selector's (0,0,1) it had before. */
+button:not(:where(.row-handle)) { all: unset; box-sizing: border-box; cursor: pointer; font-family: inherit; }
+svg { display: block; }
+/* `all: unset` also removes the browser's keyboard focus ring. Restore one
+   consistently for every native or explicitly focusable control. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--sky);
+  outline-offset: 2px;
+}
+::selection { background: var(--accent); color: var(--accent-on); }
+
+/* scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ============ LAYOUT ============ */
+.wrap { max-width: 1280px; margin: 0 auto; padding: 0 24px; }
+@media (max-width: 720px){ .wrap { padding: 0 16px; } }
+
+/* ============ TOPBAR ============ */
+.topbar {
+  position: sticky; top: 0; z-index: 50;
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border-bottom: 1px solid var(--separator);
+  /* extend the frosted bar up behind the iOS status bar and push the nav row
+     below it (0 on Android/desktop, so no visual change there) */
+  padding-top: var(--safe-top);
+}
+.topbar-inner { display: flex; align-items: center; gap: 20px; height: 60px; min-width: 0; }
+.brand { display: inline-flex; align-items: baseline; gap: 9px; flex-shrink: 0; }
+.brand .logo { width: 22px; height: 22px; color: var(--accent); transform: translateY(3px); }
+.brand .wm { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 18px; letter-spacing: 0; }
+.brand .pr { font-family: 'Gazpacho', serif; font-style: italic; font-weight: 400; font-size: 18px; color: var(--accent); }
+
+/* grouped nav: two dropdown groups (Activity, Chain) + direct links */
+.nav { display: flex; gap: 4px; margin-left: 8px; min-width: 0; flex: 0 0 auto; align-items: center; }
+.nav-group { position: relative; }
+/* invisible bridge so the pointer can cross the gap to the menu without it closing */
+.nav-group.open::after { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: 10px; }
+.nav-trigger, .nav-link {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 7px 13px; border-radius: 9999px;
+  font-size: 13px; font-weight: 500; color: var(--text-medium);
+  transition: color 150ms, background 150ms, transform 90ms ease;
+}
+.nav-trigger .caret { font-size: 9px; color: var(--text-low); transition: transform 150ms; }
+.nav-link:hover, .nav-group:hover > .nav-trigger, .nav-group.open > .nav-trigger { color: var(--text-high); background: var(--panel-hover); }
+.nav-group.open > .nav-trigger .caret { transform: rotate(180deg); }
+.nav-trigger.active, .nav-link.active { color: var(--accent); background: var(--accent-soft); }
+.nav-menu {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 120;
+  min-width: 176px; padding: 6px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+  opacity: 0; visibility: hidden; transform: translateY(-4px);
+  transition: opacity 140ms var(--ease-out-soft), transform 140ms var(--ease-out-soft), visibility 140ms;
+}
+.nav-group.open > .nav-menu { opacity: 1; visibility: visible; transform: translateY(0); }
+.nav-menu a { display: block; padding: 9px 12px; border-radius: 9px; font-size: 13px; color: var(--text-medium); white-space: nowrap; transition: color 130ms, background 130ms; }
+.nav-menu a:hover { color: var(--text-high); background: var(--panel-hover); }
+.nav-menu a.active { color: var(--accent); background: var(--accent-soft); }
+
+/* hamburger (mobile only) + right-hand drawer (preis-style) */
+.nav-burger { display: none; width: 34px; height: 34px; padding: 0; align-items: center; justify-content: center; border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); color: var(--text-medium); transition: color 150ms, background 150ms; }
+.nav-burger:hover { color: var(--text-high); background: var(--panel-hover); }
+.nav-burger svg { width: 17px; height: 17px; }
+.drawer-scrim { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,0.55); animation: ov 0.18s ease; }
+.drawer {
+  position: fixed; top: 0; right: 0; height: 100%; width: min(320px, 88vw); z-index: 201;
+  display: flex; flex-direction: column; overflow-y: auto;
+  background: var(--bg-elev); border-left: 1px solid var(--border);
+  box-shadow: -16px 0 44px rgba(0,0,0,0.5);
+  animation: drawerIn 0.2s var(--ease-out-soft);
+  /* keep the drawer head below the iOS status bar */
+  padding-top: var(--safe-top);
+}
+@keyframes drawerIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+.drawer-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--separator); }
+.drawer-head .brand { display: inline-flex; align-items: baseline; gap: 5px; }
+.drawer-head .theme-toggle svg { width: 15px; height: 15px; }
+.drawer-sec { padding: 10px 10px; border-bottom: 1px solid var(--separator); }
+.drawer-sec:last-child { border-bottom: 0; }
+.drawer-sec .sec-lbl { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); padding: 6px 12px 8px; }
+/* .drawer-row is the button equivalent of a plain nav `a` above (Log out has
+   no route to link to), reset to the same look. */
+.drawer-sec > a, .drawer-sec > button.drawer-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; box-sizing: border-box; text-align: left;
+  padding: 11px 12px; border-radius: 10px; font-size: 15px; font-weight: 500; color: var(--text-medium);
+  background: transparent; border: none; font-family: inherit; cursor: pointer;
+  transition: color 130ms, background 130ms;
+}
+.drawer-sec > a:hover, .drawer-sec > button.drawer-row:hover { color: var(--text-high); background: var(--panel-hover); }
+.drawer-sec > a.active { color: var(--accent); background: var(--accent-soft); }
+.drawer-connect-btn { width: 100%; justify-content: center; height: 40px; }
+/* bottom drawer section: the live + theme controls (moved out of the topbar
+   on mobile) sit side by side as regular pills */
+.drawer-sec.drawer-controls { display: flex; align-items: center; gap: 10px; padding: 14px 12px; }
+.drawer .live-toggle { width: auto; height: 34px; padding: 0 14px; justify-content: flex-start; }
+.drawer .live-toggle .lab { display: inline; }
+
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.net-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 34px; padding: 0 12px; border-radius: 9999px;
+  background: var(--panel); border: 1px solid var(--border);
+  font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium);
+  letter-spacing: 0.02em;
+}
+.net-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 1.8s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.4;} }
+.theme-toggle {
+  width: 34px; height: 34px; padding: 0; justify-content: center;
+  display: inline-flex; align-items: center;
+  border-radius: 9999px; color: var(--text-medium);
+  transition: color 150ms, background 150ms;
+}
+.theme-toggle:hover { color: var(--text-high); background: var(--panel-hover); }
+.theme-toggle .ic-sun { display: block; }
+.theme-toggle .ic-moon { display: none; }
+.theme-toggle svg { width: 16px; height: 16px; }
+
+/* wallet-login: Connect button / logged-in account control */
+.connect-btn { color: var(--sky); border-color: color-mix(in srgb, var(--sky) 45%, var(--border)); }
+.connect-btn:hover { color: var(--text-high); border-color: var(--sky); background: var(--panel-hover); }
+.account-control { position: relative; }
+.account-btn {
+  display: inline-flex; align-items: center; gap: 8px; height: 34px;
+  padding: 0 12px 0 4px; border-radius: 9999px;
+  background: var(--panel); border: 1px solid var(--border); color: var(--text-medium);
+  font-size: 12.5px; transition: color 150ms, background 150ms;
+}
+.account-btn:hover { color: var(--text-high); background: var(--panel-hover); }
+/* Topbar's compact avatar: its own class, NOT .acct-avatar — that name belongs
+   to the account page's 60px header avatar later in this file, and sharing it
+   let the larger rule win the cascade (the button ballooned to 60px). */
+.topbar-avatar {
+  width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; overflow: hidden;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 12px;
+  background: var(--bg-elev); border: 1px solid var(--border);
+}
+/* The account button's label is chrome, not a pill: plain upright text (the
+   italic self-authored voice applies only inside .addr-pill / hover titles). */
+.account-label { color: var(--text-high); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-name { color: var(--text-high); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.invite-badge {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px;
+  padding: 0 4px; border-radius: 9999px; background: var(--accent); color: var(--accent-on);
+  font-family: 'GeistMono'; font-size: 10px; line-height: 1; font-style: normal;
+}
+.account-menu {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 120;
+  min-width: 190px; padding: 6px; display: flex; flex-direction: column; gap: 2px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+}
+.account-menu a, .account-menu button.menu-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; box-sizing: border-box; text-align: left;
+  padding: 9px 12px; border-radius: 9px; font-size: 13px; color: var(--text-medium);
+  background: transparent; border: none; font-family: inherit; cursor: pointer;
+  transition: color 130ms, background 130ms;
+}
+.account-menu a:hover, .account-menu button.menu-row:hover { color: var(--text-high); background: var(--panel-hover); }
+
+/* live-refresh toggle */
+.live-toggle { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 12px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-medium); transition: color 150ms, background 150ms; }
+.live-toggle:hover { color: var(--text-high); background: var(--panel-hover); }
+.live-toggle .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-low); }
+.live-toggle.on { color: var(--green); }
+.live-toggle.on .dot { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 1.6s ease-in-out infinite; }
+
+/* collapsible filter zone */
+.filter-zone { margin-bottom: 14px; }
+.filter-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+/* "smol" toggle — hides sub-$10 activity; while hiding, the word itself wears
+   the dim+strike treatment the rows it hides would get. */
+.smol-toggle { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 13px; border: 1px solid var(--border); border-radius: 9999px; background: var(--panel); font-family: 'GeistMono'; font-size: 11px; letter-spacing: 0.06em; color: var(--text-medium); }
+.smol-toggle:hover { color: var(--text-high); }
+.smol-toggle svg { width: 13px; height: 13px; }
+.smol-toggle.hiding .smol-word { opacity: .5; text-decoration: line-through; }
+.filter-toggle { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px; border: 1px solid var(--border); border-radius: 9999px; background: var(--panel); font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-medium); }
+.filter-toggle:hover { color: var(--text-high); }
+.filter-toggle.open, .filter-toggle.has { color: var(--text-high); border-color: var(--sky); }
+.filter-toggle svg { width: 13px; height: 13px; }
+.filter-toggle .fb { background: var(--accent); color: #fff; border-radius: 9999px; padding: 1px 6px; font-size: 10px; }
+.filter-toggle .chev { color: var(--text-low); }
+.filters.hidden { display: none; }
+.filters { margin-top: 12px; }
+[data-theme="light"] .theme-toggle .ic-sun { display: none; }
+[data-theme="light"] .theme-toggle .ic-moon { display: block; }
+
+/* Mid-width fold: between the mobile drawer (≤860px) and full desktop, the six
+   nav items would squeeze the topbar search to its minimum — Assets/HDX/HOLLAR
+   collapse into the Assets dropdown instead. */
+.nav .nav-fold-group { display: none; }
+@media (min-width: 861px) and (max-width: 1119px) {
+  .nav > .nav-link.nav-fold { display: none; }
+  .nav .nav-fold-group { display: block; }
+}
+/* At the narrowest desktop widths even the folded nav pinches the search —
+   drop the wordmark and keep the logo. */
+@media (min-width: 861px) and (max-width: 989px) {
+  .brand .wm, .brand .pr { display: none; }
+}
+
+/* search in topbar (inner pages) — takes every pixel the brand, nav and right
+   controls leave, so it grows and shrinks with the viewport and the nav fold.
+   `.topbar-right`'s auto margin never wins any of that slack: flex-grow
+   resolves before auto margins, so the search absorbs the free space first. */
+.topbar-search { flex: 1 1 120px; min-width: 0; margin-left: 8px; }
+.topbar-search.hidden { display: none; }
+/* Desktop: the dropdown is wider than the input and anchored to its right edge.
+   Keep this before the ≤860px block so the mobile override wins. */
+.topbar-search .search-results { left: auto; right: 0; width: min(440px, calc(100vw - 24px)); }
+@media (max-width: 860px) {
+  /* single-line top chrome: [search ………] [burger]. The brand and the live /
+     theme toggles move into the drawer; the wordmark lives in its head. */
+  .topbar-inner { gap: 10px; height: auto; min-height: 60px; padding-top: 10px; padding-bottom: 10px; }
+  .brand { display: none; }
+  /* The start page has no topbar search (hero search instead), so the logo
+     keeps its spot there; sub pages still trade it for the full-width search. */
+  .topbar-dash .brand { display: inline-flex; margin-right: auto; }
+  .nav { display: none; }
+  .nav-burger { display: inline-flex; }
+  .topbar-right { margin-left: auto; }
+  .topbar-right .live-toggle, .topbar-right .theme-toggle, .topbar-right .account-control, .topbar-right .connect-btn { display: none; }
+  .topbar-search { flex: 1 1 auto; margin-left: 0; }
+  .topbar-search.hidden { display: none; }
+  /* Full-bleed dropdown: unposition the wrap so the absolute dropdown anchors
+     to the sticky .topbar itself (sticky = positioned) — left/right then span
+     the full bar width and top:100%+8px sits right under it. (position:fixed
+     is NOT reliable here: backdrop-filter's containing block isn't honored for
+     it in Chromium, which dropped the panel below the viewport.) */
+  .topbar-search .search-wrap { position: static; }
+  .topbar-search .search-results { left: 12px; right: 12px; width: auto; }
+}
+@media (max-width: 640px) {
+  /* tighten the top chrome so content/lists start higher on phones */
+  #view { padding-top: 20px; }
+  .page-head { margin-bottom: 16px; }
+  .page-title { font-size: 27px; }
+  .hero h1 { font-size: 34px; }
+  /* detail-page tabs sit closer under the pinned header */
+  .detail-tabs { margin-top: 16px; }
+}
+
+/* search results dropdown */
+.search-wrap { position: relative; }
+.search-results { position: absolute; top: calc(100% + 8px); left: 0; right: 0; z-index: 120; box-sizing: border-box; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 14px; padding: 6px; box-shadow: 0 16px 40px rgba(0,0,0,0.45); max-height: 360px; overflow-y: auto; }
+.search-results[hidden] { display: none; }
+.sr-item { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border-radius: 9px; cursor: pointer; min-width: 0; }
+.sr-item.on, .sr-item:hover { background: var(--panel-hover); }
+.sr-type { font-family: 'GeistMono'; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-low); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 2px 7px; min-width: 64px; text-align: center; }
+.sr-val { font-family: 'GeistMono'; font-size: 12.5px; color: var(--text-high); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-empty { padding: 12px 11px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-low); }
+/* account / asset search-result pill */
+.sr-acct { display: inline-flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; flex: 1 1 auto; }
+.sr-emoji { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; background: var(--panel); border: 1px solid var(--border); }
+/* Tag search-result icon (TagIcon's .emoji span) — match the account avatar so
+   the tag's logo/emoji glyph reads as a 22px bordered circle in front of the row. */
+.sr-acct .emoji { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; background: var(--panel); border: 1px solid var(--border); overflow: hidden; }
+.sr-acct-name { font-size: 12.5px; color: var(--text-high); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sr-acct-identity { min-width: 0; font-size: 12.5px; color: var(--text-medium); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sr-acct .id-verified { color: var(--green); font-weight: 700; font-size: 11px; }
+.sr-acct .sr-val { color: var(--sky); flex: 0 0 auto; }
+
+/* ============ SEARCH ============ */
+.search {
+  display: flex; align-items: center; gap: 10px;
+  height: 40px; padding: 0 14px;
+  background: var(--panel);
+  border-radius: 9999px; transition: background 160ms;
+}
+.search:focus-within { background: var(--panel-hover); }
+.search svg { width: 15px; height: 15px; color: var(--text-medium); flex-shrink: 0; }
+.search input {
+  all: unset; flex: 1; min-width: 0; text-align: left;
+  font-family: 'Geist'; font-size: 13px; color: var(--text-high);
+}
+.search input::placeholder { color: var(--text-low); }
+.search .hint { font-family: 'GeistMono'; font-size: 10px; color: var(--text-lowest); text-transform: uppercase; letter-spacing: 0.08em; }
+.kbd-slash { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: var(--text-medium); font-family: 'GeistMono'; font-size: 11px; line-height: 1; }
+@media (max-width: 768px) { .kbd-slash { display: none; } }
+
+/* Shared-element morph between the start page's hero search and the topbar
+   search when a navigation crosses the "/" boundary (see shouldMorphSearch in
+   router.tsx) — every viewport; reduced motion keeps the instant swap. The two
+   bars never coexist, so they can share one view-transition-name. */
+#heroSearch, .topbar-search .search { view-transition-name: searchbar; }
+::view-transition-group(searchbar) { animation-duration: 320ms; animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1); }
+/* Stretch both snapshots to the morphing group box — the bars' aspect ratios
+   differ (760×60 vs ~300×40), and the UA default (width 100%, height auto)
+   would let the taller snapshot poke out mid-flight. */
+::view-transition-old(searchbar), ::view-transition-new(searchbar) { width: 100%; height: 100%; }
+
+/* ============ VIEW / PAGE ============ */
+#view { padding: 32px 0 80px; min-height: 60vh; }
+/* Subtle micro-motion (all killed by the prefers-reduced-motion block):
+   page content rises in on navigation (pages remount per route; query-only
+   changes like tab switches keep the instance, so they don't replay it). */
+#view .wrap { animation: pageIn 240ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+@keyframes pageIn { from { opacity: 0; transform: translateY(6px); } }
+/* Overlays ease in instead of popping. */
+.search-results, .hovercard { animation: dropIn 140ms ease-out; }
+.apx-tip, .hdx-tip { animation: tipIn 120ms ease-out; }
+@keyframes dropIn { from { opacity: 0; transform: translateY(-4px); } }
+@keyframes tipIn { from { opacity: 0; } }
+/* Tactile press feedback on tappable pills/buttons (matters most on touch).
+   Elements with their own transition lists get `transform` appended in place —
+   transitions aren't additive, a shared rule here would clobber them. */
+.pager .btns button { transition: transform 90ms ease; }
+.tabs button:active, .nav-trigger:active, .nav-link:active, .pager .btns button:active, .activity-chip:active, .exp-btn:active { transform: scale(0.96); }
+.page-head { margin-bottom: 24px; }
+.crumbs { display: flex; align-items: center; gap: 8px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-bottom: 14px; text-transform: uppercase; letter-spacing: 0.08em; }
+.crumbs a:hover { color: var(--accent); }
+.crumbs .sep { color: var(--text-lowest); }
+.page-title { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 34px; letter-spacing: 0; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; row-gap: 2px; }
+.page-title .sub { font-family: 'GeistMono'; font-size: 13px; color: var(--text-medium); font-weight: 400; letter-spacing: 0; }
+
+/* ============ DASHBOARD HERO (search-first) ============ */
+.hero { padding: 40px 0 36px; text-align: center; border-bottom: 1px solid var(--separator); margin-bottom: 32px; }
+.hero h1 { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 56px; line-height: 1.02; letter-spacing: 0; margin-bottom: 8px; }
+@media (max-width: 720px) { .hero h1 { font-size: 38px; } }
+.hero h1 em { font-style: italic; font-weight: 400; color: var(--accent); }
+.hero p { color: var(--text-medium); font-size: 15px; margin-bottom: 26px; }
+.hero .search { max-width: 720px; margin: 0 auto; height: 52px; padding: 0 20px; border-radius: 16px; }
+.hero .search input { font-size: 15px; }
+.hero .search svg { width: 18px; height: 18px; }
+.hero .quick { display: flex; gap: 8px; justify-content: center; margin-top: 16px; flex-wrap: wrap; }
+.hero .quick span { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.hero .quick a { font-family: 'GeistMono'; font-size: 11px; color: var(--sky); padding: 3px 9px; border-radius: 9999px; background: var(--sky-soft); }
+.hero .quick a:hover { color: var(--text-high); }
+
+/* search-first variant: bigger search, breathing room, slim ribbon */
+.hero-search { padding: 64px 0 28px; }
+.hero-kicker { display: inline-flex; align-items: center; gap: 8px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-low); margin-bottom: 18px; }
+.hero-kicker .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 1.8s ease-in-out infinite; }
+.hero-search h1 { margin-bottom: 24px; }
+.search.xl { max-width: 760px; margin: 0 auto; height: 60px; padding: 0 22px; border-radius: 18px; }
+.search.xl input { font-size: 16px; }
+.search.xl svg { width: 20px; height: 20px; }
+.search.xl .hint { font-size: 12px; }
+
+/* slim stat ribbon (replaces dense cards) */
+.ribbon { display: inline-flex; align-items: center; gap: 0; margin-top: 26px; padding: 12px 8px; flex-wrap: wrap; justify-content: center; }
+.ribbon .cell { display: inline-flex; flex-direction: column; gap: 3px; padding: 0 20px; align-items: center; }
+.ribbon .cell .k { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
+.ribbon .cell .v { font-family: 'GeistMono'; font-size: 16px; font-weight: 600; color: var(--text-high); }
+.ribbon .rs { width: 1px; height: 26px; background: var(--separator); }
+.ribbon.standalone { display: flex; justify-content: flex-start; border: 1px solid var(--separator); border-radius: 14px; background: var(--bg-elev); margin: 0 0 24px; padding: 14px 8px; }
+.ribbon.standalone .cell { align-items: flex-start; }
+@media (max-width: 620px){
+  .ribbon .rs { display: none; }
+  .ribbon .cell { padding: 8px 14px; }
+  /* Standalone stat ribbon (e.g. /hdx header): a content-width flex wrap leaves
+     the columns ragged on a phone — lay the cells out on an even grid instead so
+     labels and values line up. */
+  .ribbon.standalone { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px 10px; padding: 14px; }
+  .ribbon.standalone .cell { padding: 0; }
+}
+
+/* ============ TWO-COLUMN PANELS ============ */
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 920px){ .cols { grid-template-columns: 1fr; } }
+.panel { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 18px; overflow: hidden; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--separator); }
+.panel-head .t { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 17px; letter-spacing: 0; }
+.panel-head a { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+.panel-head a:hover { color: var(--accent); }
+/* An open account-picker dropdown (Invites, tag member editor) is an absolutely
+   positioned child that pokes past the panel's own bottom edge — exempt the
+   panel from its own corner-clipping overflow for exactly as long as the
+   dropdown is in the DOM, so it floats over the panel instead of being cut off
+   at its border. Lifting the clip alone isn't enough once there's a FOLLOWING
+   sibling panel to poke past (e.g. a list's second tag panel): every
+   `.panel` here is `position: static`, so plain paint order — not DOM order —
+   decides who's on top where they overlap, and a later static sibling always
+   paints over an earlier one. `position: relative` plus a z-index above any
+   sibling's (all `auto`, i.e. 0) makes THIS panel — the one actually hosting
+   the open dropdown — win that paint order instead, for exactly as long as
+   the dropdown is open.  */
+.panel:has(.acct-picker-results) { overflow: visible; position: relative; z-index: 2; }
+
+/* ============ TABLE ============ */
+.panel:has(> .tbl) { overflow-x: auto; }
+.tbl { width: 100%; min-width: 760px; border-collapse: collapse; }
+.tbl thead th {
+  font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--text-low); font-weight: 500; text-align: left;
+  padding: 11px 16px; border-bottom: 1px solid var(--separator); white-space: nowrap;
+}
+.tbl thead th.r { text-align: right; }
+.tbl tbody td { padding: 12px 16px; border-bottom: 1px solid var(--separator); font-size: 13px; vertical-align: middle; }
+.tbl tbody tr:last-child td { border-bottom: 0; }
+.tbl tbody tr { transition: background 120ms; }
+.tbl tbody tr.clickable { cursor: pointer; }
+.tbl tbody tr.clickable:hover { background: var(--panel-hover); }
+/* Drag-reorderable rows (Lists.tsx's "Your lists"): the dedicated .row-handle
+   button below is the drag source, not the row — dragging it dims the whole
+   row so the thing actually moving reads clearly, and a hovered drop target
+   outlines. No transition on either state, so both read correctly under
+   prefers-reduced-motion without a separate override. */
+.tbl tbody tr.row-dragging { opacity: 0.5; }
+.tbl tbody tr.row-drag-over { outline: 2px solid var(--sky); outline-offset: -2px; }
+/* The handle itself: muted like other secondary affordances (.muted), a grab
+   cursor its only decoration — same static, transition-free recipe as
+   .tag-member-chip-draggable's cursor swap, so it also reads correctly under
+   prefers-reduced-motion. Sized for a comfortable tap target at 390px, not
+   just desktop pointer precision. Reset by hand (NOT via the global
+   `button:not(.row-handle) { all: unset; ... }` rule above) — see that
+   rule's own comment for why `all: unset` specifically defeats this
+   button's draggability. */
+.row-handle {
+  box-sizing: border-box; background: none; border: none; padding: 0; margin: 0;
+  appearance: none; font-family: inherit;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: 8px;
+  color: var(--text-low); font-size: 15px; line-height: 1; letter-spacing: -1px;
+  cursor: grab;
+}
+.row-handle:hover:not(:disabled) { color: var(--text-high); background: var(--panel-hover); }
+.row-handle:active:not(:disabled) { cursor: grabbing; }
+.row-handle:disabled { opacity: 0.35; cursor: not-allowed; }
+.row-handle:focus { outline: none; }
+.row-handle:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+/* Low-/zero-value Activity is de-emphasised so high-value rows stand out;
+   hovering restores full opacity for readability. */
+.tbl tbody tr.dim { opacity: .5; transition: opacity 120ms, background 120ms; }
+.tbl tbody tr.dim:hover { opacity: 1; }
+/* Rows belonging to the previous query while the next one loads (keepPreviousData,
+   see pendingRows). Dimmed rather than swapped for a skeleton so the table keeps
+   its height — removing that height jump is why the rows are held at all — but
+   never left looking like the answer to the filter just set. Not hover-restored,
+   unlike .dim: these rows are stale whether or not you point at them. */
+.tbl tbody.rows-pending { opacity: .4; transition: opacity 120ms; }
+.tbl tbody.rows-pending tr.clickable:hover { background: none; }
+.tbl td.r { text-align: right; }
+.tbl td.mono { font-family: 'GeistMono'; }
+/* Failed list request — deliberately louder than the "No activity" empty cell so
+   an error is never read as "there is nothing here". */
+.tbl td.table-error { padding: 32px 16px; text-align: center; color: var(--text-medium); font-size: 12px; }
+.tbl td.table-error strong { display: block; margin-bottom: 4px; color: var(--text-high); font-size: 13px; }
+.tbl td.table-error span { display: block; }
+.tbl td.table-error button {
+  display: inline-block; margin-top: 10px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel); color: var(--sky); font-family: 'GeistMono'; font-size: 11px;
+}
+.tbl td.table-error button:hover { background: var(--panel-hover); color: var(--text-high); }
+/* Row ids (e.g. 13184944-3) must stay on one line — a break at the hyphen
+   reads as two unrelated numbers rather than one block-extrinsic/event index. */
+.tbl td.mono .hash { white-space: nowrap; }
+/* Fee ("1.295 HDX") and Time ("5d 18h ago") must stay on one line in their narrow columns. */
+.tbl td[data-label="Fee"], .tbl td[data-label="Time"] { white-space: nowrap; }
+.accounts-tbl { min-width: 1180px; }
+/* Cap the Account column so a long on-chain identity or tag name can't widen the
+   10-column table past its min-width and force the whole panel to scroll
+   horizontally. The identity/tag/module label truncates with an ellipsis (the
+   full value stays in the pill's title + on the detail page). */
+.accounts-tbl td[data-label="Account"] { max-width: 232px; }
+.accounts-tbl td[data-label="Account"] .addr-wrap,
+.accounts-tbl td[data-label="Account"] .addr-pill { min-width: 0; max-width: 100%; }
+.accounts-tbl td[data-label="Account"] .addr-pill .tag,
+.accounts-tbl td[data-label="Account"] .addr-pill .a { overflow: hidden; text-overflow: ellipsis; }
+
+/* compact dashboard list rows */
+.mini-row { display: flex; align-items: center; gap: 12px; padding: 11px 18px; border-bottom: 1px solid var(--separator); cursor: pointer; transition: background 120ms; }
+.mini-row:last-child { border-bottom: 0; }
+.mini-row:hover { background: var(--panel-hover); }
+.mini-row .box {
+  width: 38px; height: 38px; border-radius: 11px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent);
+  font-family: 'GeistMono'; font-size: 11px; font-weight: 600;
+}
+.mini-row .box.sky { background: var(--sky-soft); color: var(--sky); }
+.mini-row .main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mini-row .main .l1 { font-family: 'GeistMono'; font-size: 13px; font-weight: 500; color: var(--text-high); }
+.mini-row .main .l1 a { color: var(--sky); }
+.mini-row .main .l2 { font-size: 11px; color: var(--text-low); font-family: 'GeistMono'; }
+.mini-row .right { text-align: right; display: flex; flex-direction: column; gap: 2px; flex-shrink: 0; }
+.mini-row .right .r1 { font-family: 'GeistMono'; font-size: 12px; color: var(--text-medium); }
+.mini-row .right .r2 { font-size: 11px; color: var(--text-low); font-family: 'GeistMono'; }
+
+/* ============ ATOMS ============ */
+.hash { font-family: 'GeistMono'; color: var(--sky); }
+.hash:hover { text-decoration: underline; text-underline-offset: 2px; }
+.muted { color: var(--text-low); }
+/* Global utility: `mono` means GeistMono wherever it appears. Without this,
+   spans marked mono outside the scoped rules (td.mono, .dd.mono, …) silently
+   rendered in the sans font — e.g. placeholder dashes and flow amounts. */
+.mono { font-family: 'GeistMono'; }
+.num { font-family: 'GeistMono'; }
+
+/* asset list row (preis-style) */
+.asset-row { display: flex; align-items: center; gap: 12px; }
+.ar-meta { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+/* weight 400: asset symbols read the same in every table (chips in flows/holders
+   are regular too); hierarchy here comes from size + the muted name line below. */
+.ar-sym { font-family: 'Geist', sans-serif; font-weight: 400; font-size: 14px; color: var(--text-high); }
+.ar-name { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.assets-tbl td { padding-top: 10px; padding-bottom: 10px; }
+.assets-tbl .ar-price { font-size: 14px; color: var(--text-high); }
+.assets-tbl .spark-cell { width: 120px; }
+.asset-active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.asset-active .ar-sym { color: var(--accent); }
+
+/* Balances treemap — value-weighted tiles (see BalancesTreemap.tsx). Neutral
+   panels sized by USD value, each with a thin brand-accent share-bar; the docked
+   detail card is the tooltip for the hovered/focused/tapped tile. */
+.tm-panel { padding: 12px; }
+/* The treemap is full-bleed: it breaks out of the panel's padding on the top and
+   sides (negative margins) so it merges into the outer container. The panel's own
+   border and rounded top corners (via its overflow:hidden) frame it; the bottom
+   stays square because the detail card docks directly below. Tiles inside are
+   square and their hairline borders do the internal separating. */
+.tm { position: relative; margin: -12px -12px 0; overflow: hidden; }
+.tm-tile {
+  --tile: var(--accent);
+  position: absolute; overflow: hidden; box-sizing: border-box;
+  padding: 0; min-width: 0; text-align: left; border-radius: 0;
+  background: color-mix(in srgb, var(--tile) 12%, var(--bg-elev2));
+  border: 1px solid color-mix(in srgb, var(--tile) 30%, var(--separator));
+  color: var(--text-high); cursor: pointer; appearance: none;
+  transition: background .14s ease, border-color .14s ease, box-shadow .14s ease;
+}
+/* Hover/active emphasis is fill + a taller colour bar, never a square border or
+   inset ring — those have square corners that the rounded clip cuts on the edge
+   tiles. */
+.tm-tile:hover { background: color-mix(in srgb, var(--tile) 24%, var(--bg-elev2)); }
+.tm-tile.active { background: color-mix(in srgb, var(--tile) 30%, var(--bg-elev2)); }
+.tm-tile.active .tm-bar { height: 4px; }
+.tm-tile:focus-visible { outline: 2px solid var(--tile); outline-offset: -3px; z-index: 1; }
+/* Absolutely positioned so its padding never forces a minimum tile width — a tiny
+   tile stays tiny (and clips its content) instead of ballooning past the edge. */
+.tm-face { position: absolute; inset: 0; box-sizing: border-box; padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.tm-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+/* Symbol over name, stacked to the right of the icon, so the name sits directly
+   below the symbol. */
+.tm-id { display: flex; flex-direction: column; min-width: 0; }
+.tm-sym { font-family: 'Geist', sans-serif; font-weight: 600; font-size: 14px; color: var(--text-high); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-name { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The %/value pair is pinned to the tile bottom as a group, % above value. */
+.tm-pct { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-medium); margin-top: auto; }
+.tm-val { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text-high); }
+.tm-val-usd { color: var(--text-medium); font-size: 12px; }
+/* Exact-amount micro-surface: hover reveals the full-precision figure in a chip,
+   a click while it shows copies (see first, copy second), the chip confirms in
+   place. Portaled to <body> and viewport-fixed so it escapes tile clipping;
+   centered with the `translate` property so the tipIn animation can't clobber it.
+   No color change on the figure itself, no global toast. */
+.tm-copyamt { cursor: copy; }
+.tm-copyamt:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
+.tm-exact-tip { position: fixed; translate: -50% -100%; z-index: 300; display: inline-flex; align-items: baseline; gap: 8px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-high); white-space: nowrap; max-width: calc(100vw - 24px); pointer-events: none; box-shadow: 0 8px 20px rgba(0,0,0,.4); animation: tipIn 120ms ease-out; }
+.tm-exact-hint { color: var(--text-low); font-size: 10px; }
+.tm-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--tile); }
+
+/* Docked detail card for the active tile. */
+/* The focused-asset detail flows directly inside the panel — no nested card
+   (border/background/radius), which read as a box inside a box. Horizontal
+   alignment comes from the panel's own padding. */
+.tm-detail { margin-top: 14px; }
+/* Desktop: identity, Value/Amount and the locks & reserves breakdown share one
+   flex band so the detail reads as a single combined level rather than three
+   stacked blocks. Head and metrics keep their natural size; the breakdown is
+   the flexible member that fills whatever width is left beside them (or wraps
+   to its own full-width line once there isn't room). */
+.tm-detail-band { display: flex; flex-wrap: wrap; align-items: flex-start; column-gap: 28px; row-gap: 14px; }
+.tm-detail-head { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.tm-detail-id { display: flex; flex-direction: column; min-width: 0; }
+.tm-detail-sym { font-family: 'Geist', sans-serif; font-weight: 600; font-size: 15px; color: var(--text-high); }
+.tm-detail-name { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-detail-grid { display: flex; flex-wrap: wrap; gap: 10px 26px; flex: 0 0 auto; }
+.tm-metric { display: flex; flex-direction: column; gap: 3px; }
+.tm-metric-label { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+.tm-metric-value { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text-medium); }
+.tm-metric-value.strong { color: var(--text-high); }
+/* Amount = free + reserved; the lock/reserve breakdown below spells out the split. */
+.tm-amt { display: inline-flex; align-items: center; gap: 5px; }
+.tm-amt-sym { color: var(--text-low); }
+/* Shown when the focused asset is held only in the past (no live amount/value). */
+.tm-detail-note { margin-top: 10px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-low); }
+
+/* per-asset lock/reserve breakdown (BalanceBreakdown) — adaptive TWO rows.
+   Variant A (bar + legend fit one line): "Locks" label alone, then the bar
+   and the inline legend sharing the row below. Variant B (legend too wide):
+   the label sits beside the bar, and the legend drops to its own row below —
+   which is also what mobile always renders (see .bd-row1/.bd-row2 mobile
+   overrides). Sits inside .tm-detail-band as the flexible member: it grows to
+   fill the space left beside the identity + metrics, with a floor width so
+   the bar and legend stay legible, and wraps to its own full-width line when
+   it doesn't fit. */
+.tm-breakdown { display: flex; flex-direction: column; gap: 8px; flex: 1 1 320px; min-width: 260px; }
+/* Mobile: the breakdown always drops below identity + metrics rather than
+   squeezing in beside them at a marginal width. */
+@media (max-width: 720px) {
+  .tm-breakdown { flex-basis: 100%; }
+}
+/* Variant B row: label beside the bar. */
+.bd-row1 { display: flex; align-items: center; gap: 12px; }
+.bd-row1 .tm-metric-label { flex: 0 0 auto; white-space: nowrap; }
+.bd-row1 .hdx-chart-wrap { flex: 1 1 auto; min-width: 0; }
+/* Variant A row: bar (flexible) + legend (natural width) sharing a line, the
+   legend landing right after the bar — effectively right-aligned as the bar
+   grows to fill the rest of the row. */
+.bd-row2 { display: flex; align-items: center; gap: 14px; }
+.bd-row2 .hdx-chart-wrap { flex: 1 1 auto; min-width: 0; }
+.bd-row2 .bd-sched { flex: 0 0 auto; }
+/* Mobile: both variants collapse to the same stacked look — label line, bar
+   full-width below it, legend stacked further below — regardless of which
+   markup the fit measurement chose. */
+@media (max-width: 720px) {
+  .bd-row1, .bd-row2 { flex-direction: column; align-items: stretch; gap: 6px; }
+}
+.bd-agg { position: relative; height: 16px; border-radius: 8px; background: var(--panel-hover); overflow: hidden; }
+/* the faint inset ring keeps brand-black (GIGAHDX) slices legible between dark neighbors */
+.bd-agg-seg { position: absolute; top: 0; height: 100%; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-high) 9%, transparent); }
+/* Bar-segment hover tip: mirrors a legend row's markup exactly (dot, cause,
+   compact amount, muted note) — no USD figure, unlike other hdx-chart tips. */
+.bd-tip-row { display: inline-flex; align-items: center; gap: 6px; }
+.bd-tip-row .bd-cause, .bd-tip-row .bd-note { overflow: visible; white-space: nowrap; }
+/* Legend: one row per lock/reserve source, mobile-first (today's stacked
+   look — dot, cause, amount, note in fixed columns). Desktop widens this to
+   a single wrapped inline line, each item separated by a muted divider. */
+.bd-sched { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
+.bd-sched-row { display: grid; grid-template-columns: 8px 96px 104px 1fr; gap: 8px; align-items: baseline; font-family: 'GeistMono'; font-size: 11.5px; line-height: 1.35; }
+/* the faint ring keeps dark dots (GIGAHDX brand black) legible on dark surfaces */
+.bd-dot { width: 8px; height: 8px; border-radius: 50%; align-self: center; box-shadow: 0 0 0 1px color-mix(in srgb, var(--text-low) 60%, transparent); }
+.bd-cause { color: var(--text-high); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bd-sched-amt { color: var(--text-high); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.bd-note { color: var(--text-low); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 480px) {
+  .bd-sched-row { grid-template-columns: 8px 82px 92px 1fr; gap: 6px; font-size: 11px; }
+}
+@media (min-width: 721px) {
+  /* Right-aligned so the legend ends flush with the bar's right edge rather
+     than starting under the "Locks" label. */
+  .bd-sched { flex-direction: row; flex-wrap: wrap; justify-content: flex-end; align-items: baseline; row-gap: 6px; column-gap: 0; }
+  .bd-sched-row { display: inline-flex; align-items: baseline; gap: 6px; flex-shrink: 0; }
+  .bd-sched-row .bd-cause, .bd-sched-row .bd-note { overflow: visible; white-space: nowrap; }
+  .bd-sched-row .bd-sched-amt { text-align: left; }
+  .bd-sched-row:not(:last-child)::after { content: '|'; align-self: center; color: var(--text-lowest); margin: 0 10px; }
+}
+/* Off-screen clone of the legend used only to measure its natural single-line
+   width (item count + note lengths both affect it) for the fit decision
+   above — absolutely positioned out of flow so it never affects layout or
+   paints, and unconstrained so it never wraps regardless of viewport. */
+.bd-legend-measure { position: absolute; left: -9999px; top: -9999px; visibility: hidden; display: flex; align-items: baseline; pointer-events: none; }
+/* Balance-history graph for the focused asset, docked inside the detail card. The
+   slot holds a stable height (matching the chart) so an asset with no indexed
+   history doesn't collapse it and shift the rows below as the pointer sweeps. */
+.tm-hist { margin-top: 14px; min-height: 243px; }
+.tm-hist-head { display: flex; align-items: center; margin-bottom: 6px; }
+
+/* Selectable rows: unpriced current holdings + historically held assets. Each
+   chip focuses its asset above rather than navigating away. */
+.tm-unpriced { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--separator); }
+.tm-rowgroup + .tm-rowgroup { margin-top: 14px; }
+.tm-unpriced-cap { display: block; font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); margin-bottom: 8px; }
+.tm-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.tm-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 6px; border-radius: 9999px; background: var(--bg-elev2); border: 1px solid var(--separator); font-family: 'Geist', sans-serif; font-size: 13px; color: var(--text-medium); cursor: pointer; appearance: none; text-align: left; transition: border-color 140ms, color 140ms, background 140ms; }
+.tm-chip:hover { border-color: var(--text-lowest); color: var(--text-high); }
+.tm-chip.on { border-color: var(--sky); background: var(--sky-soft); color: var(--text-high); }
+.tm-chip-val { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-low); }
+.tm-chips-scroll { max-height: 148px; overflow-y: auto; margin-top: 4px; }
+.tm-empty { padding: 22px; color: var(--text-low); font-family: 'GeistMono'; font-size: 13px; text-align: center; }
+
+/* combined activity */
+.pill-badge { display: inline-block; font-family: 'GeistMono'; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; padding: 3px 9px; border-radius: 9999px; white-space: nowrap; }
+.asset-flow { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.activity-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.activity-chip { font-family: 'GeistMono'; font-size: 11px; letter-spacing: 0.04em; padding: 6px 13px; border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); color: var(--text-medium); transition: color .14s, background .14s, border-color .14s, transform 90ms ease; }
+.activity-chip:hover { color: var(--text-high); }
+.activity-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.activity-action {
+  all: unset; box-sizing: border-box; height: 29px; line-height: 27px; padding: 0 13px;
+  border: 1px solid var(--border); border-radius: 9999px; background: var(--panel);
+  font-family: 'GeistMono'; font-size: 11px; letter-spacing: 0.04em;
+  color: var(--text-medium); cursor: pointer;
+}
+.activity-action:hover, .activity-action:focus { border-color: var(--sky); color: var(--text-high); }
+
+.th-sort { cursor: pointer; user-select: none; white-space: nowrap; }
+.th-sort:hover { color: var(--text-high); }
+.th-sort.on { color: var(--accent); }
+
+/* inline row expand (extrinsics / events) */
+.exp-toggle { width: 34px; text-align: center; }
+.exp-btn { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 6px; color: var(--text-low); font-family: 'GeistMono'; font-size: 12px; transition: transform .15s, color .15s, background .15s; }
+.exp-btn:hover { color: var(--text-high); background: var(--panel-hover); }
+.exp-btn.open { transform: rotate(90deg); color: var(--accent); }
+.exp-host.open { background: var(--panel-hover); }
+.exp-row > td { padding: 0 !important; background: var(--bg); border-bottom: 1px solid var(--separator); }
+.exp { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; border-left: 2px solid var(--accent); }
+.exp-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+@media (max-width: 720px) { .exp-cols { grid-template-columns: 1fr; } }
+.exp-h { font-family: 'GeistMono'; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-low); margin-bottom: 8px; }
+.exp-kv { display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; font-family: 'GeistMono'; font-size: 12px; }
+.exp-kv .kk { color: var(--text-medium); }
+.exp-kv .vv { color: var(--text-high); word-break: break-all; }
+.exp-evs { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* hovercards */
+.hovercard { position: fixed; z-index: 300; width: min(360px, calc(100vw - 24px)); background: var(--bg-elev); border: 1px solid var(--border); border-radius: 14px; padding: 14px; box-shadow: 0 16px 40px rgba(0,0,0,0.5); font-family: 'Geist', sans-serif; pointer-events: auto; }
+/* The call renders as a pill on its own full-width line; it never wraps, and an
+   over-long name (e.g. OmnipoolLiquidityMining.add_liquidity_and_join_farms) is
+   ellipsised inside the pill (full name on title-hover) rather than overflowing. */
+.hovercard .hc-call { padding: 2px 0 8px; }
+.hovercard .hc-call .call { display: inline-block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hovercard[hidden] { display: none; }
+.hovercard .hc-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+.hovercard .hc-emoji { width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 16px; background: var(--panel); border: 1px solid var(--border); }
+.hovercard .hc-title { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 16px; }
+.hovercard .hc-title .profile-name { color: var(--amber); font-style: italic; }
+.hovercard .hc-sub { font-size: 11px; color: var(--text-medium); }
+/* Every tag association (not just the priority winner) as a row of compact
+   chips, so the card doubles as a "which of my lists is this in" lookup.
+   Capped at 4 with a "+N" overflow chip — see MAX_HOVER_TAGS. */
+.hovercard .hc-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
+.hovercard .hc-tags .addr-pill { font-size: 11px; gap: 5px; }
+.hovercard .hc-tags .emoji { width: 16px; height: 16px; font-size: 10px; }
+.hovercard .hc-tags-more { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 10.5px; color: var(--text-low); background: var(--panel); border: 1px solid var(--border); }
+.hovercard .hc-identity { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; color: var(--green); margin-bottom: 10px; }
+.hovercard .hc-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-medium); padding: 4px 0; }
+.hovercard .hc-row .mono { font-family: 'GeistMono'; color: var(--text-high); }
+.hovercard .hc-route { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--separator); display: flex; flex-direction: column; gap: 7px; }
+.hovercard .hc-route-title { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-medium); }
+.hovercard .hc-route-title .mono { font-family: 'GeistMono'; color: var(--text-high); }
+.hovercard .hc-hop { display: grid; grid-template-columns: minmax(68px, auto) 1fr; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
+.hovercard .hc-hop .badge { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hovercard .hc-hop-assets { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
+.hovercard .hc-hop-assets .trade-leg { gap: 5px; min-width: 0; }
+.hovercard .hc-bals { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--separator); display: flex; flex-direction: column; gap: 6px; }
+.hovercard .hc-bal { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.hovercard .hc-bal .muted { margin-left: auto; }
+.hovercard .hc-go { display: inline-flex; align-items: center; gap: 4px; margin-top: 12px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--sky); }
+.hovercard .hc-go:hover { color: var(--text-high); }
+.addr-pill, .asset-chip { cursor: pointer; }
+
+/* address pill */
+.addr-wrap { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.addr-pill { display: inline-flex; align-items: center; gap: 7px; font-family: 'GeistMono'; font-size: 12.5px; white-space: nowrap; }
+.addr-pill .emoji {
+  width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 13px;
+  background: var(--panel); border: 1px solid var(--border);
+}
+/* Custom omniwatch image icon (e.g. a Discord avatar) or a tag's logo — fills its
+   rounded container (.emoji / .sr-emoji / .hc-emoji / .acct-avatar-icon), with an
+   emoji-glyph fallback span revealed on load error (see showIconFallback). */
+.emoji-img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
+.icon-fallback { display: inline-flex; align-items: center; justify-content: center; }
+.acct-avatar-img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
+.addr-pill .a { color: var(--sky); }
+.addr-pill:hover .a { text-decoration: underline; text-underline-offset: 2px; }
+.addr-pill .tag { color: var(--lavender); font-weight: 500; }
+/* Which member of a multi-account tag this particular pill means — muted so
+   the tag name stays the primary read, mono like ShortAddr's highlighted tail. */
+.tag-member-suffix { color: var(--text-low); font-family: 'GeistMono'; font-size: 0.9em; }
+/* Self-set wallet-login display name: a real, distinct hue from a curated tag's
+   lavender (amber reads as "the owner's own claim", unverified — same idea as
+   the ✓ mark staying exclusive to a registrar-checked identity), plus italics
+   so it never reads as a system/list tag at a glance. */
+.addr-pill .tag.profile-name { color: var(--amber); font-weight: 500; font-style: italic; }
+/* A list's own name (Lists.tsx's Your-lists table, and the shared
+   PublicListsPanel): plain white text, not a curated tag's lavender —
+   user-confirmed a list's name shouldn't read as if it WERE a tag. Same
+   size/weight as any other pill label; only the color changes. Specificity
+   (.addr-pill .tag.list-name, three classes) beats the plain .addr-pill .tag
+   rule above without needing !important or a reorder. */
+.addr-pill .tag.list-name { color: var(--text-high); }
+/* Underline-on-hover — the same static cue `.addr-pill:hover .a` and
+   `.tag-panel-link:hover .tag` already use elsewhere — but scoped to THIS
+   link wrapper specifically, not the shared `.addr-pill`, so a non-owned
+   public list's plain (non-clickable) `<span class="addr-pill">` wrapper
+   never shows a hover cue it can't back up with an actual navigation. */
+.list-name-link:hover .tag.list-name { text-decoration: underline; text-underline-offset: 2px; }
+.ext-site {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--text-low);
+  font-size: 9px;
+  line-height: 1.25;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.addr-pill.ext-account:hover .ext-site, .ref-link:hover .ext-site { color: var(--text-medium); border-color: var(--text-low); }
+/* trailing tag-name chip (emoji + address THEN tag name) */
+.addr-pill .tag-chip {
+  padding: 1px 7px; border-radius: 9999px; font-size: 11px; line-height: 1.4;
+  border: 1px solid currentColor; background: color-mix(in srgb, currentColor 12%, transparent);
+}
+.addr-pill .id-verified { color: var(--green); font-weight: 700; font-size: 11px; }
+
+/* status badge */
+.badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 10.5px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
+.badge svg { width: 11px; height: 11px; }
+.badge.ok { background: var(--green-soft); color: var(--green); }
+.badge.fail { background: var(--red-soft); color: var(--red); }
+.badge.finalized { background: var(--sky-soft); color: var(--sky); }
+.badge.pending { background: var(--amber-soft); color: var(--amber); }
+/* icon-only badge (compact lists) — even padding keeps the pill round instead
+   of the text variant's wider oval. */
+.badge-icon { padding: 4px; gap: 0; }
+
+/* call pill — pallet.method, color by pallet */
+.call { display: inline-flex; align-items: baseline; gap: 0; font-family: 'GeistMono'; font-size: 12px; padding: 3px 9px; border-radius: 7px; background: var(--panel); border: 1px solid var(--border); white-space: nowrap; }
+.call .pallet { font-weight: 600; }
+.call .dot { color: var(--text-lowest); margin: 0 1px; }
+.call .method { color: var(--text-medium); }
+.call.omnipool .pallet { color: var(--accent); }
+.call.tokens .pallet, .call.balances .pallet, .call.currencies .pallet { color: var(--sky); }
+.call.xtokens .pallet, .call.polkadotxcm .pallet, .call.xcmpqueue .pallet { color: var(--lavender); }
+.call.staking .pallet { color: var(--green); }
+.call.router .pallet { color: var(--amber); }
+.call.stableswap .pallet { color: var(--lavender-deep); }
+.call.dca .pallet { color: var(--amber); }
+.call.evm .pallet { color: var(--lavender-deep); }
+.call.moneymarket .pallet { color: var(--lavender-deep); }
+.call.system .pallet, .call.timestamp .pallet, .call.utility .pallet { color: var(--text-medium); }
+.call.multitransactionpayment .pallet { color: var(--sky); }
+
+/* Table cells: same treatment as the hovercard's .hc-call (above) — keep the
+   pill one line and ellipsize an over-long method name (e.g.
+   OmnipoolLiquidityMining.add_liquidity_and_join_farms) instead of wrapping
+   the row. Scoped to the Call/Event cell's own pill (a direct child of its
+   td) so a `.call` pill nested deeper — e.g. inside the expanded-row panel's
+   `.exp-evs` — keeps its intrinsic width. The pallet name (color-coded, most
+   scannable) always shows in full; only .method truncates. */
+.tbl td > .call { display: inline-flex; max-width: 100%; min-width: 0; white-space: nowrap; overflow: hidden; }
+.tbl td > .call .method { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* asset chip */
+/* vertical-align matters only when the chip sits in flowing text (e.g. the HSM
+   "Last intervention … via aUSDC" note): an inline-flex box baseline-aligns on
+   its first item — the 20px icon — riding high next to 13px prose. */
+.asset-chip { display: inline-flex; align-items: center; gap: 6px; font-family: 'GeistMono'; font-size: 12px; vertical-align: middle; }
+.asset-logo { width: 20px; height: 20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 8px; font-weight: 600; color: #fff; flex-shrink: 0; }
+
+/* copy button */
+.copy { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 6px; color: var(--text-low); transition: color 140ms, background 140ms; vertical-align: middle; }
+.copy:hover { color: var(--text-high); background: var(--panel-hover); }
+.copy svg { width: 12px; height: 12px; }
+
+/* ============ DETAIL CARD ============ */
+.detail-card { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 18px; overflow: hidden; }
+.dl { display: grid; grid-template-columns: 200px 1fr; }
+@media (max-width: 720px){ .dl { grid-template-columns: 1fr; } }
+.dl .dt { padding: 14px 18px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); border-bottom: 1px solid var(--separator); display: flex; align-items: center; }
+.dl .dd { padding: 14px 18px; border-bottom: 1px solid var(--separator); font-size: 13px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.dl .dd.mono { font-family: 'GeistMono'; }
+.dl .dt:nth-last-child(2), .dl .dd:last-child { border-bottom: 0; }
+@media (max-width: 720px){ .dl .dt { border-bottom: 0; padding-bottom: 2px; } }
+
+.detail-header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
+/* A fixed slot, not a shrink-wrap: the strip holds 0, 1 or 2 arrows depending on
+   where the record sits, and on a phone it wraps onto its own line, so a width
+   that tracked the button count would move everything below it. */
+.detail-header .nav-btns { display: inline-flex; justify-content: flex-end; gap: 4px; margin-left: auto; min-width: 72px; min-height: 34px; }
+.detail-header .nav-btns a, .detail-header .nav-btns button { width: 34px; height: 34px; border-radius: 9px; border: 1px solid var(--border); background: var(--panel); display: inline-flex; align-items: center; justify-content: center; color: var(--text-medium); }
+.detail-header .nav-btns a:hover, .detail-header .nav-btns button:hover { color: var(--text-high); background: var(--panel-hover); }
+.detail-header .nav-btns a:focus-visible, .detail-header .nav-btns button:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+.detail-header .nav-btns a svg, .detail-header .nav-btns button svg { width: 14px; height: 14px; }
+
+/* ============ TABS ============ */
+.tabs { display: flex; gap: 4px; margin: 24px 0 16px; border-bottom: 1px solid var(--separator); overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tabs button { padding: 10px 16px; font-size: 13px; font-weight: 500; color: var(--text-medium); border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color 140ms, border-color 140ms, transform 90ms ease; }
+.tabs button { flex: 0 0 auto; }
+.tabs button:hover { color: var(--text-high); }
+.tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tabs button .cnt { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-left: 6px; }
+.tabs button.active .cnt { color: var(--accent); }
+
+/* ============ JSON / params ============ */
+.kv-params { background: var(--bg); border: 1px solid var(--separator); border-radius: 12px; overflow: hidden; }
+.kv-row { display: grid; grid-template-columns: 220px 1fr; border-bottom: 1px solid var(--separator); }
+.kv-row:last-child { border-bottom: 0; }
+@media (max-width: 720px){ .kv-row { grid-template-columns: 1fr; } }
+.kv-row .kk { padding: 11px 16px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-medium); display: flex; gap: 8px; align-items: center; }
+.kv-row .kk .ty { font-size: 9px; padding: 1px 5px; border-radius: 4px; background: var(--panel); color: var(--text-low); text-transform: uppercase; letter-spacing: 0.06em; }
+.kv-row .vv { padding: 11px 16px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-high); word-break: break-all; }
+
+.json { font-family: 'GeistMono'; font-size: 12px; line-height: 1.7; background: var(--bg); border: 1px solid var(--separator); border-radius: 12px; padding: 16px 18px; overflow-x: auto; white-space: pre; color: var(--text-medium); }
+.json .key { color: var(--sky); }
+.json .str { color: var(--green); }
+.json .numb { color: var(--lavender); }
+.json .punc { color: var(--text-lowest); }
+
+/* event row */
+.event-row { display: grid; grid-template-columns: 56px 1fr; gap: 0; border-bottom: 1px solid var(--separator); }
+.event-row:last-child { border-bottom: 0; }
+.event-row .ei { padding: 14px 16px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-low); border-right: 1px solid var(--separator); }
+.event-row .ec { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+
+/* ============ ACCOUNT HEADER ============ */
+.acct-head { display: flex; align-items: center; gap: 18px; background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 18px; padding: 22px 24px; margin-bottom: 16px; flex-wrap: wrap; }
+.acct-avatar { width: 60px; height: 60px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 30px; background: var(--panel); border: 1px solid var(--border); flex-shrink: 0; }
+/* A tag's icon inside that avatar: the avatar already draws the circle and its
+   border, so the icon brings no second ring of its own and a tag header reads
+   exactly like an account's. */
+.acct-avatar-icon { width: 100%; height: 100%; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; }
+.acct-avatar.plain { background: var(--panel); border-color: var(--border); }
+.acct-meta { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+/* Flex row so the pure-proxy / multisig badges sit centred on the name (not
+   baseline-low) and, when they wrap below it, align to the name's left edge
+   instead of keeping a stray indent. `gap` replaces the badges' left margin. */
+.acct-meta .tag { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 22px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.acct-meta .tag .em { color: var(--lavender); font-style: italic; }
+.acct-meta .full { font-family: 'GeistMono'; font-size: 12.5px; color: var(--text-medium); word-break: break-all; display: flex; align-items: center; gap: 8px; }
+/* A pill nested in the header meta (e.g. a list's owner) keeps standard
+   pill sizing — .acct-meta .tag above is the 22px serif PAGE TITLE rule and
+   would otherwise win the cascade over .addr-pill .tag. */
+.acct-meta .addr-pill .tag { font-family: inherit; font-size: inherit; font-weight: 500; }
+/* Header stats render as a column-flow grid so the labels of every stat share
+   row 1 and the amounts share row 2 on a common baseline — otherwise the 26px
+   value and the 14px volumes float at unrelated heights. Each .acct-bal is
+   display:contents so its children land in the shared rows. Equal-width (1fr)
+   columns give the stats an even horizontal rhythm across a fixed region on
+   the right, rather than each column hugging its own (unequal) content width. */
+.acct-stats { margin-left: auto; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; align-items: baseline; column-gap: 28px; text-align: right; width: min(520px, 58%); }
+.acct-stats .acct-bal { display: contents; }
+.acct-stats .acct-bal .lab { grid-row: 1; }
+.acct-stats .acct-bal .amt { grid-row: 2; }
+.acct-stats .acct-bal .hint { grid-row: 3; }
+.acct-bal { text-align: right; }
+.acct-bal .lab { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
+.acct-bal .amt { font-family: 'GeistMono'; font-size: 26px; font-weight: 600; }
+.acct-bal .hint { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.acct-bal.subtle .amt { font-size: 14px; font-weight: 500; color: var(--text-medium); }
+.acct-bal.subtle .lab { font-size: 9px; color: var(--text-lowest); }
+/* On phones the stats grid unwraps into the header's own flex flow
+   (display:contents): the value joins the top row, right of the identity at
+   avatar height, and the volume pair drops to ONE shared line below — the
+   ::before pseudo flex-item is a full-width line break, added only when there
+   are volumes so volume-less headers don't gain an empty (gap-padded) row. */
+@media (max-width: 720px){
+  .acct-stats { display: contents; }
+  /* zero flex-basis: the meta's hypothetical width (one-line address) would
+     otherwise overflow the row and wrap the value onto its own line */
+  .acct-head .acct-meta { flex: 1 1 0; }
+  .acct-stats .acct-bal { display: block; text-align: right; }
+  .acct-stats .acct-bal:not(.subtle) { order: 0; margin-left: auto; }
+  .acct-stats .acct-bal:not(.subtle) .amt { font-size: 20px; }
+  .acct-head:has(.acct-bal.subtle)::before { content: ''; order: 1; flex-basis: 100%; }
+  .acct-stats .acct-bal.subtle { order: 2; }
+  .acct-stats .acct-bal.subtle:first-of-type { margin-left: auto; }
+  .acct-stats .acct-bal.subtle .lab { display: inline; }
+  .acct-stats .acct-bal.subtle .amt { display: inline; margin-left: 6px; }
+}
+
+/* progress bar (sync etc) */
+.bar { height: 5px; background: var(--panel); border-radius: 9999px; overflow: hidden; }
+.bar .fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--lavender-deep)); }
+
+/* pagination */
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; }
+.pager .info { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.pager .btns { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
+.pager .btns button { min-width: 30px; height: 30px; padding: 0 7px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); display: inline-flex; align-items: center; justify-content: center; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); white-space: nowrap; flex-shrink: 0; }
+.pager .btns button:hover:not(:disabled) { color: var(--text-high); background: var(--panel-hover); }
+.pager .btns button.on { background: var(--accent); color: var(--accent-on); border-color: var(--accent); }
+.pager .btns button:disabled { opacity: 0.35; cursor: not-allowed; }
+.pager-jump { all: unset; box-sizing: border-box; width: 64px; height: 30px; padding: 0 10px; margin-left: 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); font-family: 'GeistMono'; font-size: 11px; color: var(--text-high); }
+.pager-jump:focus { border-color: var(--sky); }
+.pager-jump::placeholder { color: var(--text-low); }
+@media (max-width: 520px) {
+  .pager { flex-direction: column; align-items: stretch; padding: 12px 14px; }
+  .pager .btns { justify-content: flex-start; }
+  .pager-jump { margin-left: 0; }
+  /* Five wide page-number buttons + arrows + Go-to wrap into broken rows at
+     large page counts — keep only the current page; « ‹ › » and the jump box
+     cover navigation. (Window buttons carry aria-label="Page N", arrows don't.) */
+  .pager .btns button[aria-label^="Page "]:not(.on) { display: none; }
+}
+
+/* small section title */
+.sec-title { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-medium); margin: 24px 0 12px; }
+
+/* footer */
+.foot { border-top: 1px solid var(--separator); padding: 28px 0; margin-top: 40px; }
+.foot-inner { display: flex; align-items: center; gap: 16px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); flex-wrap: wrap; }
+.foot-inner .grow { flex: 1; }
+.foot-inner .v { color: var(--text-medium); }
+.foot-inner .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+/* toast */
+.toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--bg-elev2); border: 1px solid var(--border); color: var(--text-high); padding: 10px 18px; border-radius: 10px; font-size: 13px; z-index: 200; opacity: 0; transition: opacity 200ms, transform 200ms; pointer-events: none; box-shadow: 0 12px 30px rgba(0,0,0,0.4); }
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ============ EXPLORER: SPEC ADDITIONS ============ */
+
+/* identity / alias card (EVM-primary accounts) */
+.id-card { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 16px; overflow: hidden; margin-bottom: 16px; }
+.id-card-head { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); padding: 13px 18px; border-bottom: 1px solid var(--separator); }
+/* nowrap + no shrink: inside the flex .full row the badge would otherwise
+   inherit word-break: break-all and wrap letter-by-letter under pressure */
+.id-kind { font-family: 'GeistMono'; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 5px; white-space: nowrap; flex-shrink: 0; }
+.id-kind.evm { background: var(--lavender-soft); color: var(--lavender); }
+.acct-meta .full .id-kind { margin-right: 4px; }
+
+/* balance source chip */
+.src-chip { font-family: 'GeistMono'; font-size: 10px; color: var(--text-medium); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 2px 7px; white-space: nowrap; }
+
+/* proxy & multisig relations (Overview cards) */
+.dl .dd.proxy-dd, .dl .dd .proxy-rel { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.proxy-rel { padding: 2px 0; }
+
+/* Lazy behavioral relationship analysis on account overview. */
+/* Symmetric vertical margins: collapses against neighbours that bring their
+   own, and keeps clearance from flush panels (tag page's member list). */
+.close-accounts { margin-top: 16px; margin-bottom: 16px; border: 1px solid var(--separator); border-radius: 16px; background: var(--bg-elev); overflow: hidden; }
+.close-accounts > summary { display: flex; align-items: center; gap: 14px; padding: 15px 18px; cursor: pointer; list-style: none; }
+.close-accounts > summary::-webkit-details-marker { display: none; }
+.close-accounts > summary:hover { background: var(--panel-hover); }
+.close-accounts > summary:focus-visible { outline: 2px solid var(--sky); outline-offset: -2px; border-radius: 16px; }
+.close-accounts-summary-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.close-accounts-title { font-family: 'GeistMono'; font-size: 11px; font-weight: 600; color: var(--text-medium); text-transform: uppercase; letter-spacing: 0.1em; }
+.close-accounts-subtitle { font-size: 11px; color: var(--text-low); }
+.close-accounts-chevron { margin-left: auto; color: var(--text-low); font-size: 18px; transition: transform 150ms var(--ease-standard); }
+.close-accounts[open] .close-accounts-chevron { transform: rotate(180deg); }
+.close-accounts-body { padding: 16px 18px 18px; border-top: 1px solid var(--separator); }
+.close-accounts-context { margin-bottom: 10px; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); text-transform: uppercase; letter-spacing: 0.06em; }
+.close-accounts-list, .close-account-reasons { padding: 0; list-style: none; }
+.close-account-match { padding: 13px 0; border-bottom: 1px solid var(--separator); }
+.close-account-match:first-child { padding-top: 4px; }
+.close-account-match:last-child { border-bottom: 0; }
+.close-account-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.close-account-confidence { display: inline-flex; align-items: center; padding: 3px 7px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; }
+.close-account-confidence.strong { color: var(--green); background: var(--green-soft); }
+.close-account-confidence.moderate { color: var(--amber); background: var(--amber-soft); }
+.close-account-seen { margin-left: auto; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); white-space: nowrap; }
+.close-account-reasons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.close-account-reasons li { padding: 4px 8px; border: 1px solid var(--separator); border-radius: 7px; background: var(--panel); color: var(--text-medium); font-size: 11px; }
+.close-accounts-disclaimer { margin-top: 12px; padding: 10px 12px; border-left: 2px solid var(--amber); border-radius: 0 8px 8px 0; background: var(--amber-soft); color: var(--text-medium); font-size: 11px; }
+.close-accounts-state { display: flex; min-height: 96px; flex-direction: column; align-items: flex-start; justify-content: center; gap: 4px; color: var(--text-medium); font-size: 12px; }
+.close-accounts-state strong { color: var(--text-high); font-size: 13px; }
+.close-accounts-retry { margin-top: 8px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--sky); font-family: 'GeistMono'; font-size: 11px; }
+.close-accounts-retry:hover { background: var(--panel-hover); color: var(--text-high); }
+.close-accounts-loading { display: grid; gap: 8px; color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; }
+.close-account-skeleton { display: flex; justify-content: space-between; gap: 20px; padding: 9px 0; }
+.close-account-skeleton span { width: 160px; height: 11px; border-radius: 6px; background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%); background-size: 400% 100%; animation: sk 1.4s ease infinite; }
+.close-account-skeleton span:last-child { width: 240px; }
+@media (max-width: 720px) {
+  .close-accounts > summary, .close-accounts-body { padding-left: 14px; padding-right: 14px; }
+  .close-account-head { align-items: flex-start; flex-wrap: wrap; }
+  .close-account-seen { width: 100%; margin-left: 0; }
+  .close-account-reasons { flex-direction: column; }
+  .close-account-skeleton span:last-child { width: 45%; }
+}
+
+/* money market card */
+.mm-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.mm-title { font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; }
+/* inline-flex + centered items: a market-logo icon inside the note (GIGAHDX)
+   would otherwise sit on the text baseline and push the whole note upward
+   relative to the primary market's plain-text note. */
+.mm-title-note { display: inline-flex; align-items: center; gap: 4px; color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+/* Compound selector on purpose: the generic `.ext-link` rule is declared later with
+   equal specificity, so a bare `.mm-defisim-link { margin-left: auto }` lost to its
+   `margin-left: 4px` and the link sat mid-row instead of right-aligned. */
+.ext-link.mm-defisim-link { margin-left: auto; text-transform: none; letter-spacing: 0; }
+/* Stays right-aligned once the title row wraps, so it lines up with the other
+   "Open in …" links instead of sliding under the heading on narrow screens. */
+.ext-link-row { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+.mm-card { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 16px; padding: 18px 20px; margin-bottom: 8px; }
+.mm-summary { display: flex; flex-wrap: wrap; gap: 28px; padding-bottom: 16px; border-bottom: 1px solid var(--separator); }
+.mm-stat { display: flex; flex-direction: column; gap: 4px; }
+.mm-stat .k { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
+.mm-stat .v { font-family: 'GeistMono'; font-size: 18px; font-weight: 600; }
+.hf { font-family: 'GeistMono'; font-weight: 600; padding: 1px 8px; border-radius: 6px; }
+.hf.hf-ok { background: var(--green-soft); color: var(--green); }
+.hf.hf-warn { background: var(--amber-soft); color: var(--amber); }
+.hf.hf-bad { background: var(--red-soft); color: var(--red); }
+/* trade detail — route flow */
+.trade-route { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.trade-hop { display: inline-flex; align-items: center; gap: 10px; }
+.hop-arrow { display: inline-flex; flex-direction: column; align-items: center; gap: 1px; color: var(--text-low); }
+.hop-arrow svg { width: 26px; height: 12px; }
+.hop-pool { font-family: 'GeistMono'; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-medium); white-space: nowrap; }
+
+/* two-sided health badge: color-coded factor | DefiSim, the whole thing one link */
+.hf-badge { display: inline-flex; align-items: stretch; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; font-family: 'GeistMono'; font-size: 11px; line-height: 1; white-space: nowrap; vertical-align: middle; }
+.hf-badge .hfv { padding: 5px 8px; font-weight: 600; color: var(--text-medium); }
+.hf-badge .hfv.hf-ok { background: var(--green-soft); color: var(--green); }
+.hf-badge .hfv.hf-warn { background: var(--amber-soft); color: var(--amber); }
+.hf-badge .hfv.hf-bad { background: var(--red-soft); color: var(--red); }
+.hf-badge .sim { padding: 5px 8px; border-left: 1px solid var(--border); color: var(--text-medium); background: var(--panel); }
+.hf-badge:hover .sim { color: var(--text-high); }
+.mm-bar { padding: 16px 0; border-bottom: 1px solid var(--separator); }
+.mm-bar-track { position: relative; height: 8px; background: var(--panel); border-radius: 9999px; overflow: hidden; }
+.mm-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--amber)); border-radius: 9999px; }
+.mm-bar-liq { position: absolute; top: -2px; bottom: -2px; left: 100%; width: 2px; background: var(--red); transform: translateX(-1px); }
+.mm-bar-lab { display: flex; justify-content: space-between; margin-top: 8px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); }
+.mm-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding-top: 16px; }
+@media (max-width: 720px){ .mm-cols { grid-template-columns: 1fr; } }
+.mm-col-head { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); margin-bottom: 10px; }
+.mm-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--separator); font-size: 12px; }
+.mm-row:last-child { border-bottom: 0; }
+.mm-row .mono { font-family: 'GeistMono'; }
+.mm-row .asset-chip { min-width: 86px; }
+.mm-row > .mono:nth-child(2) { margin-left: auto; }
+.mm-collateral-badge { font-size: 9px; }
+.mm-empty { color: var(--text-low); font-family: 'GeistMono'; font-size: 12px; padding: 8px 0; }
+
+/* Supplemental GIGAHDX credit line: compact until the user asks for detail. */
+.mm-secondary { margin-bottom: 8px; border: 1px solid var(--separator); border-radius: 14px; background: color-mix(in srgb, var(--bg-elev) 72%, var(--lavender-soft)); overflow: hidden; }
+.mm-secondary > summary { display: grid; grid-template-columns: minmax(190px, 1fr) auto 18px; gap: 18px; align-items: center; padding: 15px 18px; cursor: pointer; list-style: none; }
+.mm-secondary > summary::-webkit-details-marker { display: none; }
+.mm-secondary > summary:hover { background: var(--panel-hover); }
+.mm-secondary > summary:focus-visible { outline: 2px solid var(--sky); outline-offset: -2px; border-radius: 14px; }
+.mm-secondary-identity { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.mm-secondary-title { font-family: 'GeistMono'; font-size: 12px; font-weight: 600; color: var(--text-high); }
+.mm-secondary-subtitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-low); }
+.mm-secondary-stats { display: flex; align-items: center; gap: 22px; }
+.mm-secondary-stat { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.mm-secondary-stat > span { font-family: 'GeistMono'; font-size: 9px; color: var(--text-low); text-transform: uppercase; letter-spacing: 0.06em; }
+.mm-secondary-stat > strong { font-family: 'GeistMono'; font-size: 12px; font-weight: 500; white-space: nowrap; }
+.mm-secondary-stat > .hf { font-size: 11px; }
+.mm-secondary-toggle { color: var(--text-low); font-size: 18px; transition: transform 150ms var(--ease-standard); }
+.mm-secondary[open] .mm-secondary-toggle { transform: rotate(180deg); }
+.mm-secondary-body { padding: 16px 18px 18px; border-top: 1px solid var(--separator); }
+.mm-secondary-explainer { max-width: 760px; color: var(--text-medium); font-size: 12px; }
+.mm-secondary-available { display: flex; justify-content: space-between; gap: 12px; max-width: 320px; margin-top: 14px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.mm-secondary-available strong { color: var(--text-high); font-weight: 500; }
+.mm-secondary-debt { color: var(--cat-borrow); }
+/* Marks which money market a row belongs to, so it wears that family's yellow. */
+.mm-activity-market { display: inline-flex; align-items: center; border: 1px solid color-mix(in srgb, var(--cat-borrow) 30%, transparent); border-radius: 9999px; background: color-mix(in srgb, var(--cat-borrow) 13%, transparent); color: var(--cat-borrow); font-family: 'GeistMono'; font-size: 9px; font-weight: 600; line-height: 1; letter-spacing: 0.04em; white-space: nowrap; }
+/* GIGAHDX is brand black (same #000 the HDX lock charts and balance breakdown
+   already give it), so its market marker is the one filled black chip in the
+   app. A black fill would disappear into the dark theme's background, so there
+   it keeps a hairline edge rather than being lightened off-brand. */
+.mm-activity-market.mm-market-gigahdx { background: #000; border-color: #000; color: #fff; }
+:root[data-theme="dark"] .mm-activity-market.mm-market-gigahdx { border-color: rgba(255,255,255,0.3); }
+/* Top-holding token icons in the Holdings column (accounts list) and hover cards. */
+.holdings-cell { vertical-align: middle; white-space: nowrap; }
+.token-icons { display: inline-flex; align-items: center; gap: 3px; }
+.token-icons-item { display: inline-flex; line-height: 0; }
+.activity-badge-group { display: inline-flex; align-items: center; gap: 5px; }
+.mm-activity-market { padding: 4px 6px; }
+@media (max-width: 720px) {
+  .mm-secondary > summary { grid-template-columns: 1fr 18px; gap: 10px; }
+  .mm-secondary-stats { grid-column: 1 / -1; grid-row: 2; justify-content: space-between; gap: 12px; }
+  .mm-secondary-stat { align-items: flex-start; }
+  .mm-secondary-toggle { grid-column: 2; grid-row: 1; }
+  .mm-secondary-subtitle { white-space: normal; }
+}
+
+/* cross-chain chips */
+.chain-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 18px; padding: 0 6px; border-radius: 6px; font-family: 'GeistMono'; font-size: 9px; font-weight: 600; color: #fff; letter-spacing: 0.04em; flex-shrink: 0; }
+.dest { display: inline-flex; align-items: center; gap: 7px; }
+.trade-leg { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.trade-leg .mono { color: var(--text-high); }
+.ext-link { font-family: 'GeistMono'; font-size: 11px; color: var(--sky); padding: 2px 7px; border-radius: 6px; background: var(--sky-soft); margin-left: 4px; white-space: nowrap; }
+.ext-link:hover { color: var(--text-high); }
+.ref-link { display: inline-flex; align-items: center; gap: 7px; font-family: 'GeistMono'; font-size: 12px; color: var(--sky); white-space: nowrap; }
+.ref-link:hover .mono { text-decoration: underline; text-underline-offset: 2px; }
+
+/* operation trace */
+.trace { display: flex; flex-direction: column; gap: 0; }
+.trace-step { display: grid; grid-template-columns: 40px 1fr; gap: 12px; position: relative; }
+.trace-step .tnode { display: flex; justify-content: center; position: relative; }
+.trace-step .tnode .tn { width: 24px; height: 24px; border-radius: 50%; background: var(--lavender-soft); color: var(--lavender); border: 1px solid var(--lavender-deep); display: inline-flex; align-items: center; justify-content: center; font-family: 'GeistMono'; font-size: 11px; z-index: 1; }
+.trace-step:not(:last-child) .tnode::after { content: ''; position: absolute; top: 24px; bottom: -12px; left: 50%; width: 1px; background: var(--separator); transform: translateX(-50%); }
+.trace-step .tbody { display: flex; align-items: center; gap: 10px; padding: 4px 0 20px; }
+.trace-step .tdetail { font-family: 'GeistMono'; font-size: 12px; color: var(--text-medium); }
+
+/* start page (search only) — centered */
+.hero-search.start { border-bottom: 0; padding: 14vh 0 0; margin-bottom: 0; min-height: 70vh; }
+.hero-search.start h1 { font-size: 68px; }
+@media (max-width: 720px) { .hero-search.start h1 { font-size: 42px; } }
+
+/* Native <select> popups follow the control's color-scheme, which `all: unset`
+   resets — restore the active theme's scheme and give options explicit surface
+   colors so the dropdown list is readable in dark mode. */
+:root[data-theme="dark"] .filters select, :root[data-theme="dark"] .activity-action { color-scheme: dark; }
+:root[data-theme="light"] .filters select, :root[data-theme="light"] .activity-action { color-scheme: light; }
+.filters select option, .activity-action option { background: var(--bg-elev); color: var(--text-high); }
+
+/* Mobile-only sort control for lists whose sortable column headers vanish in
+   the stacked-card view (accounts). Same look as the filter selects. */
+.mobile-sort { display: none; }
+@media (max-width: 720px) {
+  .mobile-sort { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .mobile-sort label { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+  .mobile-sort select {
+    all: unset; box-sizing: border-box; height: 34px; line-height: 32px; padding: 0 12px;
+    border: 1px solid var(--border); border-radius: 9999px; background: var(--panel);
+    font-family: 'GeistMono'; font-size: 12px; color: var(--text-high); cursor: pointer;
+  }
+  :root[data-theme="dark"] .mobile-sort select { color-scheme: dark; }
+  :root[data-theme="light"] .mobile-sort select { color-scheme: light; }
+  .mobile-sort select option { background: var(--bg-elev); color: var(--text-high); }
+}
+
+/* list filters */
+.filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+.filters .combo-input, .filters select, .filters input {
+  all: unset; box-sizing: border-box; height: 34px; line-height: 32px; padding: 0 12px;
+  border: 1px solid var(--border); border-radius: 9999px; background: var(--panel);
+  font-family: 'GeistMono'; font-size: 12px; color: var(--text-high); cursor: pointer;
+}
+.filters input { cursor: text; }
+.filters input[type="number"] { width: 92px; }
+.filters input[type="date"] { color: var(--text-medium); }
+.filters input::placeholder { color: var(--text-low); }
+.filters select:hover, .filters input:hover { border-color: var(--sky); }
+.filters select:focus, .filters input:focus { border-color: var(--sky); background: var(--panel-hover); }
+.filters .fclear {
+  height: 34px; padding: 0 14px; border-radius: 9999px; border: 1px solid var(--border);
+  background: var(--panel); cursor: pointer;
+  font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-medium);
+}
+.filters .fclear:hover { color: var(--text-high); background: var(--panel-hover); }
+.filters .fcount { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-left: auto; }
+
+/* Highlight the last 3 chars of any address: the ink of the theme against the blue
+   of the rest of the address, so the characters that actually tell two addresses
+   apart carry the page's strongest contrast. */
+.last3 { color: var(--text-high); }
+/* ShortAddr full: desktop shows the whole address, phones the middle-ellipsis
+   form — long EVM/SS58 strings otherwise wrap detail headers to 2–3 lines. */
+.addr-short { display: none; }
+@media (max-width: 720px) {
+  .addr-full { display: none; }
+  .addr-short { display: inline; }
+}
+
+/* account portfolio chart */
+.pf-card { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 16px; padding: 18px 20px; margin-bottom: 16px; }
+.pf-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 12px; }
+.pf-head .pf-now { font-family: 'GeistMono'; font-size: 26px; font-weight: 600; }
+.pf-head .pf-chg { font-family: 'GeistMono'; font-size: 13px; }
+.pf-chart { width: 100%; height: 180px; display: block; }
+.apx-chart { width: 100%; height: 220px; display: block; margin-top: 8px; overflow: visible; }
+/* touch-action pan-y: horizontal touch drags scrub the crosshair (pointer events
+   keep firing) while vertical swipes still scroll the page. */
+.apx-wrap { position: relative; margin-top: 8px; touch-action: pan-y; }
+.apx-wrap .apx-chart { margin-top: 0; }
+.apx-cross { position: absolute; inset: 0; pointer-events: none; }
+.apx-vline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--text-medium); opacity: .55; transform: translateX(-.5px); }
+.apx-dot { position: absolute; width: 9px; height: 9px; border-radius: 50%; background: var(--text-high); border: 2px solid var(--bg-elev); transform: translate(-50%, -50%); }
+.apx-tip { position: absolute; top: 4px; transform: translateX(-50%); display: flex; gap: 8px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-family: 'GeistMono'; font-size: 11px; white-space: nowrap; pointer-events: none; box-shadow: 0 8px 20px rgba(0,0,0,.4); z-index: 4; }
+.apx-tip .t-d { color: var(--text-low); }
+.apx-tip .t-p { color: var(--text-high); font-weight: 600; }
+.apx-tip .t-e { color: var(--lavender); }
+/* One crosshair reads price AND the day's liquidation. The tip is a single nowrap
+   row, so the liquidation takes a line of its own (`flex-basis: 100%` needs the
+   wrap) — keeping all four values on one line would push the tip past the card
+   edge on a 390px phone. */
+.apx-tip:has(.t-liq) { flex-wrap: wrap; row-gap: 3px; }
+/* The same red the bars themselves take (see BAR_COLOR in PriceChart), so the line
+   and the bar it describes are recognisably one thing. */
+.apx-tip .t-liq { flex-basis: 100%; color: var(--cat-bad); }
+.apx-tip .t-liq-n { color: var(--text-low); }
+/* value-history event markers: per-marker --mk carries the kind color. The
+   dashed drop-line stays faint so the value line keeps reading first; the cap
+   is the interactive bit (hover → clamped tooltip, click → activity detail). */
+.apx-marks { position: absolute; inset: 0; pointer-events: none; }
+.apx-mark { position: absolute; top: 0; bottom: 0; width: 0; pointer-events: none; }
+.apx-mark-line { position: absolute; top: 11px; bottom: 0; left: -0.5px; width: 0; border-left: 1px dashed var(--mk); opacity: 0.3; }
+.apx-mark:hover .apx-mark-line, .apx-mark.open .apx-mark-line { opacity: 0.75; }
+.apx-mark-cap {
+  position: absolute; top: 0; left: 0; transform: translateX(-50%); box-sizing: border-box;
+  min-width: 11px; height: 11px; border-radius: 9999px;
+  background: var(--mk); border: 2px solid var(--bg-elev);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--mk) 40%, transparent);
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'GeistMono'; font-size: 9px; font-weight: 700; line-height: 1; text-decoration: none;
+  pointer-events: auto; cursor: pointer; transition: transform 120ms ease;
+  appearance: none; -webkit-appearance: none; padding: 0; margin: 0;
+}
+.apx-mark-cap:hover, .apx-mark-cap:focus-visible { transform: translateX(-50%) scale(1.25); }
+/* Cluster cap: an outlined ×N pill (panel background + kind-colored text reads
+   in both themes, unlike text on the raw kind color). */
+.apx-mark-cap.multi { min-width: 0; height: 15px; padding: 0 5px; border-radius: 8px; background: var(--bg-elev); border: 1px solid var(--mk); box-shadow: none; color: var(--mk); }
+.apx-mark-tip {
+  position: absolute; top: 18px; left: 0; transform: translateX(-50%); z-index: 6;
+  display: flex; flex-direction: column; gap: 4px; padding: 6px 9px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+  font-family: 'GeistMono'; font-size: 11px; white-space: nowrap;
+  box-shadow: 0 8px 20px rgba(0,0,0,.4); pointer-events: auto;
+  animation: tipIn 120ms ease-out;
+}
+.apx-mark-row { display: flex; align-items: center; gap: 8px; color: var(--text-medium); text-decoration: none; }
+.apx-mark-row .t-d { color: var(--text-low); }
+.apx-mark-row .t-k { font-weight: 600; }
+.apx-mark-row .t-p { color: var(--text-high); font-weight: 600; margin-left: auto; }
+/* Compact asset context (pair / amount) inside cluster rows; tighter than the
+   single-marker card so multi-row tips stay narrow. */
+.apx-mark-row .t-a { color: var(--text-medium); font-size: 11px; }
+.apx-mark-row .t-a .trade-leg { gap: 4px; }
+a.apx-mark-row:hover .t-p { text-decoration: underline; }
+.apx-mark-go { align-self: flex-start; margin-top: 3px; color: var(--mk); font-weight: 600; text-decoration: none; }
+a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
+/* Touch: no hover to reveal the tip, and a fingertip needs a bigger target, so
+   enlarge the caps (the cap toggles the tip on tap — see ChartMarkerFlag). */
+@media (hover: none) {
+  .apx-mark-cap { min-width: 20px; height: 20px; font-size: 10px; }
+  .apx-mark-cap.multi { height: 20px; padding: 0 8px; }
+  .apx-mark-tip { font-size: 12px; }
+}
+.ema-now { font-family: 'GeistMono'; font-size: 12px; color: var(--lavender); font-weight: 500; margin-left: 8px; }
+.ema-tag { color: var(--lavender); margin-left: 8px; }
+.pf-head-asset { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.perf-row { display: flex; gap: 22px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
+/* Portfolio-value header (account/tag): push the 24H/1W/1M/1Y items to the right
+   edge, matching the asset price-history header (.pf-head-asset). */
+.pf-head .perf-row { margin-left: auto; }
+.perf { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; min-width: 52px; }
+@media (max-width: 520px) {
+  .pf-head-asset { align-items: flex-start; }
+  .perf-row { gap: 10px 14px; max-width: 100%; }
+}
+.bt-chart { width: 100%; height: auto; display: block; margin-top: 8px; }
+.day-chart { width: 100%; height: auto; display: block; }
+.day-chart .ax-lbl { font-family: 'GeistMono'; font-size: 9px; }
+.day-bar { fill: var(--bar, var(--accent)); opacity: 0.4; cursor: pointer; transition: opacity 0.12s; }
+.day-bar:hover { opacity: 0.78; }
+.day-bar.on { opacity: 1; }
+/* Loading placeholder for the responsive .day-chart charts: same box (width:100%)
+   with the svg's viewBox aspect ratio (set inline per chart), so the card height
+   matches the loaded chart exactly at any width — no layout jump when data resolves
+   (e.g. the daily query refetching on a tab switch). */
+.day-chart-sk { display: flex; align-items: flex-end; gap: 3px; padding-top: 8px; box-sizing: border-box; }
+.day-sk-bar {
+  flex: 1 1 0; min-width: 2px; border-radius: 3px 3px 1px 1px; opacity: 0.7;
+  background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%);
+  background-size: 400% 100%; animation: sk 1.4s ease infinite;
+}
+
+.bal-xaxis { display: flex; justify-content: space-between; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); margin-top: 4px; }
+.bal-legend { display: flex; gap: 16px; align-items: center; margin-top: 14px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); flex-wrap: wrap; }
+.bal-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+
+.dca-tag { font-family: 'GeistMono'; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 6px; border-radius: 5px; background: var(--amber-soft); color: var(--amber); margin-left: 2px; }
+
+.perf .pk { font-family: 'GeistMono'; font-size: 10px; letter-spacing: 0.1em; color: var(--text-low); text-transform: uppercase; }
+.perf .pv { font-family: 'GeistMono'; font-size: 15px; font-weight: 600; }
+.identity-badge { display: inline-flex; align-items: center; gap: 5px; font-family: 'Geist'; font-size: 13px; font-weight: 500; color: var(--green); }
+.identity-badge svg { width: 12px; height: 12px; }
+
+/* portfolio sparkline */
+.spark { display: inline-block; vertical-align: middle; }
+
+/* ============ DCA schedules ============
+   A DCA is scheduled in blocks but read in time, so every surface here leads
+   with the duration and keeps the block count in .dca-blocks behind it. */
+.prog-ring { position: relative; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.prog-ring svg { width: 100%; height: 100%; display: block; }
+.prog-ring .pr-track { stroke: var(--panel-hover); }
+.prog-ring .pr-label {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-family: 'GeistMono'; font-size: 15px; font-weight: 600; color: var(--text-high); letter-spacing: -0.02em;
+}
+.prog-ring .pr-unit { font-size: 10px; color: var(--text-low); margin-left: 1px; }
+.prog-ring .pr-runs { font-size: 13px; }
+
+/* The order, its progress and its next move, above the schedule's detail list.
+   Padded like a .dl row so the ring lines up with the labels under it rather
+   than floating against the card's rounded corner. */
+.dca-hero { display: flex; align-items: center; gap: 16px; padding: 18px; border-bottom: 1px solid var(--separator); flex-wrap: wrap; }
+.dca-hero-body { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+/* One type size for the whole sentence, chips included: the words are centred in
+   their line box and a chip's symbol is centred on its 20px icon, so the two only
+   share a baseline while they share a size — at 15px sans over 12px mono the
+   words visibly rode above the amounts. */
+.dca-order { font-size: 14px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.dca-order .asset-chip, .dca-order .trade-leg, .dca-order .mono { font-size: inherit; }
+.dca-order .dca-every { color: var(--text-medium); }
+.dca-hero-facts { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 13px; color: var(--text-medium); }
+/* Separator ahead of each fact but the first: a wrapped line then starts with
+   the dot instead of ending on one. */
+.dca-hero-facts > span + span::before { content: '·'; margin-right: 7px; color: var(--text-lowest); }
+.dca-hero-facts .dca-state { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+/* The mechanism behind a duration, never competing with it. */
+.dca-blocks { font-size: 11px; }
+/* Marks a dollar figure as the price of its own day, not of today. */
+.dca-then { font-size: 11px; color: var(--text-lowest); }
+/* Second line of a table cell: the dollar value under an amount, the block under
+   a countdown, the trades left under a runway. */
+/* Every cell's second line shares one box, so the dollar figures, block numbers,
+   trade counts and balances across a row sit on the same baseline. Nothing taller
+   than text goes in here — an asset icon would lift its own line out of step. */
+.dca-sub { display: block; font-size: 11px; line-height: 1.5; margin-top: 1px; }
+/* The ring rides inside the first line rather than setting the row's height. */
+.dca-filled .prog-ring { align-self: center; }
+/* Most cells in an active order are two lines (a value over its dollar figure,
+   its block, its trade count). Top-aligning the row puts every first line on one
+   line — including the selling → buying pair, which otherwise floated in the
+   middle of the tallest cell.
+   Those first lines hold different things: a 20px asset chip, an 18px ring, plain
+   text. Left alone each sets its own height and every second line in the row
+   starts somewhere else, so they all get the same 22px line to sit in. */
+.dca-tbl tbody td { vertical-align: top; line-height: 22px; }
+.dca-tbl tbody td .trade-leg, .dca-tbl tbody td .asset-chip { height: 22px; vertical-align: middle; }
+.dca-tbl tbody td .asset-flow { align-items: center; }
+/* Block-level, not inline-flex: an inline box would be baseline-aligned inside the
+   cell's line box and gain a couple of pixels the other cells do not have, which
+   is exactly what pushed the ring's row below its neighbours. */
+/* Column gap only: `gap` also spaces WRAPPED rows, and that gap fell between the
+   ring's line and the trade count below it — the 7px that pushed this cell's
+   second line below every other one in the row. */
+.dca-filled { display: flex; align-items: center; justify-content: flex-end; column-gap: 7px; row-gap: 0; flex-wrap: wrap; }
+.dca-filled .dca-sub { flex-basis: 100%; }
+@media (max-width: 720px) {
+  /* In a phone card each cell is one right-aligned row, so the second line sits
+     under the first rather than beside the ring. */
+  .dca-hero { gap: 14px; }
+  .dca-tbl .dca-filled { justify-content: flex-end; }
+}
+
+/* searchable token combobox */
+.combo { position: relative; }
+.combo-input { width: 150px; cursor: text; }
+.combo-input::placeholder { color: var(--text-low); }
+.combo-pop { position: absolute; top: 40px; left: 0; z-index: 30; min-width: 220px; max-height: 280px; overflow-y: auto; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px; padding: 6px; box-shadow: 0 14px 34px rgba(0,0,0,0.45); }
+.combo-opt { padding: 8px 10px; border-radius: 8px; font-family: 'GeistMono'; font-size: 12px; cursor: pointer; color: var(--text-high); white-space: nowrap; }
+.combo-opt:hover, .combo-opt.active { background: var(--panel-hover); }
+.combo-opt .muted { font-size: 11px; margin-left: 4px; }
+/* Token lookup rows: symbol, then a muted "name #id" detail so duplicate symbols
+   (e.g. the four USDCs) are distinguishable on one line. */
+.combo-opt-sub { color: var(--text-low); font-size: 11px; margin-left: 8px; }
+.combo-opt-sub::before { content: '— '; }
+.combo-empty { color: var(--text-low); cursor: default; }
+.combo-empty:hover { background: transparent; }
+
+/* utility */
+.row { display: flex; align-items: center; gap: 10px; }
+.gap6 { gap: 6px; } .gap16 { gap: 16px; }
+.mt8 { margin-top: 8px; } .mt16 { margin-top: 16px; } .mt24 { margin-top: 24px; }
+.wrap-anywhere { word-break: break-all; }
+.spacer { flex: 1; }
+
+/* utility */
+
+/* ============================================================
+   explorer-ui additions (loading states, label editor, buttons)
+   — not in the static design; required for the live React app
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 0ms !important; scroll-behavior: auto !important; }
+}
+.skeleton-row { height: 49px; border-bottom: 1px solid var(--separator); background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%); background-size: 400% 100%; animation: sk 1.4s ease infinite; }
+@keyframes sk { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+.sk-pill,
+.sk-avatar,
+.tbl tbody tr.sk-tr td::before,
+.chart-sk-bar {
+  background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%);
+  background-size: 400% 100%;
+  animation: sk 1.4s ease infinite;
+}
+/* Table-body skeleton: real <tr>/<td> so the header + column grid stay put while
+   data loads. Each cell holds a shimmer bar of varying width. */
+.tbl tbody tr.sk-tr { cursor: default; }
+.tbl tbody tr.sk-tr:hover { background: transparent; }
+.sk-bar {
+  display: inline-block; height: 11px; min-width: 22px; border-radius: 6px; vertical-align: middle;
+  background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%);
+  background-size: 400% 100%; animation: sk 1.4s ease infinite;
+}
+.sk-pill { display: inline-block; width: 72px; height: 22px; border-radius: 9999px; vertical-align: middle; }
+.dl-skeleton .dt .sk-bar { height: 9px; min-width: 54px; }
+.dl-skeleton .dd { min-height: 49px; }
+.dl-skeleton .dd .sk-bar { height: 12px; max-width: min(680px, 70%); }
+/* Chart-card skeleton: fills the space an unresolved chart would occupy. */
+.chart-skeleton {
+  position: relative; display: flex; flex-direction: column; gap: 12px; overflow: hidden;
+  border-radius: 16px; margin-bottom: 16px; border: 1px solid var(--separator); padding: 14px 16px;
+  background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%);
+  background-size: 400% 100%; animation: sk 1.4s ease infinite;
+}
+.chart-sk-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 16px; }
+.chart-sk-now { width: 92px; height: 18px; }
+.chart-sk-metrics { display: flex; gap: 14px; margin-left: auto; }
+.chart-sk-metrics .sk-bar { width: 44px; height: 10px; }
+.chart-sk-plot { position: relative; flex: 1 1 auto; min-height: 34px; display: flex; align-items: flex-end; gap: 8px; padding-top: 10px; }
+/* Standard chart card placeholder: the same `.pf-card` box and `.pf-head` row as
+   the loaded card, so padding, borders, margins, font-driven line heights and the
+   720px head wrap all resolve identically and the placeholder is the loaded
+   card's height without a hardcoded number. Its shimmer bars are inline-level and
+   shorter than a line, leaving each row's height to the strut exactly as the real
+   text does, and the plot is pinned to the fixed 220px of `.apx-chart`. */
+.chart-card-skeleton { position: relative; overflow: hidden; }
+.chart-card-skeleton .chart-sk-plot { flex: none; height: 220px; }
+.chart-card-skeleton .sk-bar { height: 0.7em; min-width: 0; }
+.chart-card-skeleton .pf-now .sk-bar { width: 138px; }
+.chart-card-skeleton .pf-chg .sk-bar { width: 86px; }
+.chart-card-skeleton .perf .pk .sk-bar { width: 28px; }
+.chart-card-skeleton .perf .pv .sk-bar { width: 48px; }
+.chart-card-skeleton .bal-legend .sk-bar { width: 54px; }
+.chart-sk-bar { flex: 1 1 0; min-width: 5px; max-width: 28px; border-radius: 5px 5px 2px 2px; opacity: .78; }
+.tabs-skeleton { align-items: center; }
+.tabs-skeleton .sk-bar { display: inline-block; height: 12px; border-radius: 9999px; vertical-align: middle; }
+.acct-head-skeleton { align-items: center; }
+.sk-avatar { width: 60px; height: 60px; border-radius: 50%; flex-shrink: 0; }
+.acct-head-skeleton .acct-meta { flex: 1 1 0; max-width: 620px; min-width: 0; }
+.acct-head-skeleton .acct-meta .sk-bar { max-width: 100%; }
+.acct-head-skeleton .sk-name { width: 190px; height: 20px; }
+.acct-head-skeleton .sk-address { width: min(560px, 100%); height: 12px; }
+.acct-head-skeleton .sk-hint { width: 240px; height: 10px; }
+.acct-head-skeleton .acct-bal { margin-left: auto; min-width: 180px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.acct-head-skeleton .sk-bal-label { width: 54px; height: 9px; }
+.acct-head-skeleton .sk-bal-value { width: 132px; height: 24px; }
+.sec-title-skeleton .sk-bar { width: 104px; height: 10px; }
+.activity-chips-skeleton .sk-bar { height: 29px; border-radius: 9999px; }
+.exp-skeleton .exp-h .sk-bar { width: 86px; height: 9px; }
+.exp-kv-skeleton { grid-template-columns: 120px 1fr; }
+.exp-kv-skeleton .sk-bar { height: 11px; }
+.exp-evs-skeleton .sk-pill { height: 24px; }
+.exp-link-skeleton { width: 128px; height: 11px; }
+@media (max-width: 720px) {
+  /* A loaded row here is a stacked card — one labelled line per column (see the
+     MOBILE block below) — so the placeholder draws that same stack: a
+     label-width bar floated left, a value bar right. One bar for the whole row
+     reserved ~60px against a ~203px card, so every list grew by its own height
+     the moment data landed. Each line reserves 31px: a line of plain text is
+     29.5px and one holding a pill or badge ~32px, which puts a six-column
+     /blocks card at 203px against the 202.9px it becomes. */
+  .tbl tbody tr.sk-tr td { min-height: 31px; text-align: right; overflow: hidden; }
+  .tbl tbody tr.sk-tr td::before {
+    content: ''; float: left; width: 52px; height: 8px; margin-top: 6px; border-radius: 4px;
+  }
+  .chart-sk-metrics { display: none; }
+  .acct-head-skeleton .acct-bal { margin-left: 0; align-items: flex-start; min-width: 0; width: 100%; }
+  .dl-skeleton .dd .sk-bar { max-width: 86%; }
+}
+.empty-state { padding: 48px 16px; text-align: center; color: var(--text-low); font-size: 13px; font-family: 'GeistMono'; }
+.btn { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; background: var(--panel); border: 1px solid var(--border); color: var(--text-medium); transition: background 140ms, color 140ms; }
+.btn:hover { color: var(--text-high); background: var(--panel-hover); }
+.btn.sm { height: 26px; padding: 0 10px; font-size: 10px; }
+.btn.primary { background: var(--accent); color: var(--accent-on); border-color: transparent; }
+.btn.primary:hover { filter: brightness(1.06); }
+.btn.danger { color: var(--red); }
+.dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); animation: ov 0.18s ease; z-index: 100; }
+@keyframes ov { from { opacity: 0; } to { opacity: 1; } }
+.dialog { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(560px, 94vw); max-height: 88vh; overflow-y: auto; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 18px; z-index: 101; box-shadow: 0 24px 60px rgba(0,0,0,0.45); }
+.dialog-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; border-bottom: 1px solid var(--separator); }
+.dialog-head h2 { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 19px; }
+.dialog-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 16px; }
+.dialog-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 20px; border-top: 1px solid var(--separator); }
+.field { display: flex; flex-direction: column; gap: 7px; }
+.field label, .field .field-label { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+/* Shared input skin: border/background/radius/focus ring defined once here.
+   `.field`'s own input/textarea get it through the selector list below; a
+   bare input OUTSIDE a `.field`'s stacked label layout (e.g. a tag panel's
+   inline rename row) opts in with just `.input`, no wrapper needed. */
+.input, .field input, .field textarea { all: unset; box-sizing: border-box; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text-high); padding: 10px 12px; font-family: 'Geist'; font-size: 13px; }
+.input:focus, .field input:focus, .field textarea:focus { border-color: var(--sky); }
+.field textarea { resize: vertical; min-height: 84px; font-family: 'GeistMono'; font-size: 12px; line-height: 1.6; }
+/* Compact variant for an .input sitting inline among small controls (a
+   panel-head row's .btn.sm / 20px swatches) rather than stacked under its
+   own label — same skin, shorter so it doesn't blow out the row's height. */
+.input.sm { padding: 5px 10px; font-size: 12.5px; }
+.member-check { font-family: 'GeistMono'; font-size: 11px; margin-top: 6px; }
+.swatches { display: flex; gap: 8px; flex-wrap: wrap; }
+.swatch { width: 26px; height: 26px; border-radius: 8px; border: 2px solid transparent; }
+.swatch.on { border-color: var(--text-high); }
+
+/* ConnectDialog: wallet list, account picker, signing screens (built on the
+   .dialog* skin above). */
+.dialog-hint { color: var(--text-low); font-size: 12.5px; }
+.dialog-error { padding: 10px 12px; border-radius: 10px; background: var(--red-soft); color: var(--red); font-size: 12.5px; }
+.wallet-group { display: flex; flex-direction: column; gap: 4px; }
+.wallet-group-label { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); padding: 0 2px 2px; }
+.wallet-row {
+  display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box;
+  padding: 11px 12px; border-radius: 12px; background: var(--panel); border: 1px solid var(--border);
+  color: var(--text-medium); font-size: 13px; text-align: left; text-decoration: none;
+  transition: color 130ms, background 130ms, border-color 130ms;
+}
+.wallet-row:hover { color: var(--text-high); background: var(--panel-hover); border-color: var(--sky); }
+.wallet-row:disabled { opacity: 0.6; pointer-events: none; }
+.wallet-row .wallet-name { color: var(--text-high); font-weight: 500; }
+.wallet-row .wallet-status { margin-left: auto; color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; }
+.wallet-row.account-row .wallet-status { font-size: 12.5px; }
+/* An account row's name reads the same as an AddrPill's would (profile → amber
+   italic, on-chain identity → plain) — the account-picker rows and the signing
+   screen are both, in effect, one account shown "like a pill in a list", just
+   without the .addr-pill wrapper (its own gap/font-family would fight
+   .wallet-row's). */
+.wallet-row .tag { color: var(--lavender); font-weight: 500; }
+.wallet-row .tag.profile-name { color: var(--amber); font-style: italic; }
+/* The signing screen's row is a status display, not a clickable choice — drop
+   the hover highlight .wallet-row otherwise carries. */
+.wallet-row.static { cursor: default; }
+.wallet-row.static:hover { color: var(--text-medium); background: var(--panel); border-color: var(--border); }
+/* Wallet picker: an icon grid (app.hydration.net's connect modal) rather than a
+   list of rows — a wallet is recognized by its logo faster than read as text.
+   Fixed column counts (not auto-fill) so the row count is a deliberate,
+   verifiable 4 desktop / 3 tablet-and-down rather than whatever a minmax()
+   guess happens to wrap to at a given dialog width — the dialog itself scales
+   down to `94vw` on narrow viewports (see .dialog), so 390px and 320px both
+   hit the same breakpoint below. Keyboard focus is the shared native-button
+   ring further up this file (:where(a, button, …):focus-visible) — every tile
+   is a real <button> or <a>, never a div with a click handler. */
+.wallet-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+@media (max-width: 480px) {
+  .wallet-grid { grid-template-columns: repeat(3, 1fr); }
+}
+/* "Other wallets" toggle: a small row under the shortlist grid, not another
+   tile — expanding it grows the dialog in place rather than replacing the
+   shortlist, so the wallets a visitor is most likely to have stay put. */
+.wallet-toggle { align-self: center; margin-top: 2px; }
+.wallet-tile {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  box-sizing: border-box; padding: 16px 8px 12px; border-radius: 14px; background: var(--panel); border: 1px solid var(--border);
+  color: var(--text-medium); font-size: 11.5px; text-align: center; text-decoration: none;
+  transition: color 130ms, background 130ms, border-color 130ms, opacity 130ms;
+}
+.wallet-tile:hover { background: var(--panel-hover); border-color: var(--sky); }
+.wallet-tile:disabled { opacity: 0.6; pointer-events: none; }
+/* Forces every logo to the same box regardless of the source SVG's own
+   width/height (most are ~32-34px square; talisman.svg hardcodes 128) — the
+   CSS box wins over the intrinsic size either way, but sized explicitly here
+   so that's true by design, not by accident. */
+.wallet-tile-icon { width: 40px; height: 40px; border-radius: 10px; object-fit: contain; }
+.wallet-tile-name { color: var(--text-high); font-weight: 500; line-height: 1.25; }
+.wallet-tile-status { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+/* Installed reads as the "real" choice — full strength plus an accent border;
+   not-installed is a dimmed, honest "you'd need to leave to get this" link. */
+.wallet-tile.installed { border-color: color-mix(in srgb, var(--sky) 40%, var(--border)); }
+.wallet-tile.installed .wallet-tile-status { color: var(--sky); }
+.wallet-tile.not-installed { opacity: 0.55; }
+.wallet-tile.not-installed:hover { opacity: 0.85; }
+.wallet-tile.not-installed .wallet-tile-status { color: var(--text-low); }
+/* Two-segment sliding switch (visibility private/public) — the indicator pill
+   translates by segment index, preis-ui's interval-selector mechanic. */
+.seg-switch {
+  --seg-width: 84px; --seg-gap: 2px;
+  position: relative; display: grid; grid-template-columns: repeat(2, var(--seg-width)); gap: var(--seg-gap);
+  width: max-content; background: var(--panel); border: 1px solid var(--border); border-radius: 9999px; padding: 3px;
+}
+.seg-switch .seg-indicator {
+  position: absolute; top: 3px; bottom: 3px; left: 3px; width: var(--seg-width); border-radius: 9999px;
+  background: var(--accent);
+  transform: translateX(calc(var(--active-index) * (var(--seg-width) + var(--seg-gap))));
+  transition: transform 180ms ease-out;
+  pointer-events: none;
+}
+.seg-switch button {
+  position: relative; z-index: 1; height: 26px; width: var(--seg-width); border-radius: 9999px;
+  font-size: 12px; font-weight: 500; text-align: center; color: var(--text-medium);
+  transition: color 160ms;
+}
+.seg-switch button:hover { color: var(--text-high); }
+.seg-switch button.active { color: var(--accent-on); }
+.seg-switch button:disabled { opacity: 0.6; pointer-events: none; }
+/* Account picker: chips + search input (invites, tag members). */
+.acct-picker { position: relative; flex: 1; min-width: 220px; }
+.acct-picker-box {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; cursor: text;
+  padding: 6px 8px; border-radius: 10px; background: var(--bg-elev); border: 1px solid var(--border);
+}
+.acct-picker-box:focus-within { border-color: var(--sky); }
+.acct-picker-box.disabled { opacity: 0.6; pointer-events: none; }
+.acct-picker-box input { flex: 1; min-width: 140px; background: none; border: none; outline: none; color: var(--text-high); font-size: 13px; padding: 3px 2px; }
+.acct-chip {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  padding: 2px 4px 2px 8px; border-radius: 9999px; background: var(--panel); border: 1px solid var(--border);
+  font-family: 'GeistMono'; font-size: 11.5px; color: var(--text-high);
+}
+.acct-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-chip-x { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; color: var(--text-low); font-size: 13px; line-height: 1; }
+.acct-chip-x:hover { color: var(--text-high); background: var(--panel-hover); }
+/* A tag's members, editable as tokens: the picker (immediate-commit mode)
+   input sits right after the last chip, both inside one `.acct-picker-box` —
+   an AddrPill label plus a separate ✕ button (never nested inside the
+   label's own link). */
+.tag-member-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.tag-member-chip { padding: 3px 4px 3px 3px; gap: 6px; }
+.tag-member-chip .addr-pill { font-size: 11.5px; gap: 5px; }
+/* The grab cursor is a drag-reorder affordance, not a base chip style — the
+   Subscribers tab reuses `.tag-member-chip` for its own (non-draggable)
+   chips via ShareChips, so this needs its own modifier rather than living on
+   the shared class. Drag/keyboard reorder itself is a static outline/opacity
+   swap, no transition, so it reads fine under prefers-reduced-motion without
+   a separate override. */
+.tag-member-chip-draggable { cursor: grab; }
+.tag-member-chip.dragging { opacity: 0.5; cursor: grabbing; }
+.tag-member-chip.drag-over { outline: 2px solid var(--sky); outline-offset: 1px; }
+/* Same background/border/shadow/z-index recipe as .search-results (the page
+   search dropdown) — a solid elevated surface that overlaps whatever panel it
+   sits in, not var(--panel)'s translucent tint (meant for a wash OVER content,
+   not a dropdown that needs to read as opaque). */
+.acct-picker-results {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 120; overflow: hidden;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+}
+.acct-picker-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px;
+  font-size: 12.5px; color: var(--text-medium); text-align: left;
+}
+.acct-picker-row.active, .acct-picker-row:hover { background: var(--panel-hover); color: var(--text-high); }
+.acct-picker-name { color: var(--text-high); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-picker-addr { margin-left: auto; color: var(--text-low); font-size: 11px; flex-shrink: 0; }
+/* Foreign-list stats: the only view of another user's list contents. */
+/* A public list's own note, one line under its name in the discovery
+   table — truncated rather than wrapped, since the row's other columns
+   (owner, counts) need to stay on that same line. */
+.list-row-note { font-size: 11px; margin-top: 2px; max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Account.tsx's logged-out "tagged in a public list" hint, under the Lists
+   table. A single muted line, not a callout — the login action stays plain
+   text (no button chrome/background), same underline-on-hover treatment as
+   other inline actions (.hash, .pc-hash-toggle) rather than a second CTA box. */
+.lists-login-hint { margin-top: 8px; font-size: 11px; }
+.hint-link { background: none; border: 0; padding: 0; margin: 0; color: var(--sky); font: inherit; cursor: pointer; }
+.hint-link:hover { text-decoration: underline; text-underline-offset: 2px; }
+.list-stats { display: flex; gap: 32px; flex-wrap: wrap; }
+.list-stats > div { display: flex; flex-direction: column; gap: 2px; }
+.list-stat-num { font-family: 'Gazpacho', serif; font-size: 24px; font-weight: 500; color: var(--text-high); }
+.list-stat-label { font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); text-transform: uppercase; letter-spacing: 0.05em; }
+/* Account rows carry the same avatar an account pill would (profile image /
+   snakewatch emoji / placeholder while the display refs load). */
+.account-row-emoji { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; overflow: hidden; background: var(--bg-elev); border: 1px solid var(--border); }
+/* A tag panel's own header icon (ListDetail's TagPanel): plain `.emoji.id`
+   has no size rule of its own, so when the icon falls back to a member's
+   uploaded avatar (a bare <img> at width/height 100% of an unsized parent)
+   the browser has nothing to resolve those percentages against and falls
+   back to the image's OWN intrinsic pixel size — rendering a full-resolution
+   avatar instead of an icon. Constrained to the same square footprint as
+   .account-row-emoji/.sr-emoji, with the same background+border those carry —
+   omitting it left a plain emoji glyph floating in an invisible box instead
+   of the quiet circle every other icon of this size sits in. `.sr-emoji`'s
+   own var(--panel) fill is the one that reads here (this icon sits on a
+   var(--bg-elev) panel, same as `.acct-picker-results` does for `.sr-emoji`),
+   not `.account-row-emoji`'s var(--bg-elev), which would blend into it. */
+.tag-panel-icon { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; overflow: hidden; background: var(--panel); border: 1px solid var(--border); }
+/* The tag panel header's own icon+name link to the tag's aggregate page —
+   deliberately NOT `.addr-pill` (that class's GeistMono/12.5px would fight
+   this header's serif `.panel-head .t` title styling); same hover affordance
+   `.addr-pill` uses for its own clickable text (an underline on the name),
+   cursor:pointer comes from the element being a real <a href>. */
+.tag-panel-link:hover .tag { text-decoration: underline; text-underline-offset: 2px; }
+
+/* Live mode: briefly highlight rows that were just added so it's clear which /
+   how many arrived. Background pulses from an accent tint to transparent. */
+@keyframes rowEnter {
+  0%   { background-color: color-mix(in srgb, var(--sky) 14%, transparent); }
+  55%  { background-color: color-mix(in srgb, var(--sky) 8%, transparent); }
+  100% { background-color: transparent; }
+}
+.tbl tbody tr.row-new > td { animation: rowEnter 1.25s ease-out; }
+.tbl tbody tr.row-new > td:first-child { box-shadow: inset 2px 0 0 0 var(--sky); animation: rowEnter 1.25s ease-out, edgeFade 1.25s ease-out; }
+@keyframes edgeFade { 0% { box-shadow: inset 2px 0 0 0 var(--sky); } 100% { box-shadow: inset 2px 0 0 0 transparent; } }
+
+/* Asset search result: symbol then a muted descriptive name (e.g. DOT · Polkadot). */
+.sr-desc { color: var(--text-low); margin-left: 6px; font-size: 11.5px; }
+
+/* HDX dashboard */
+.hdx-chart-wrap { position: relative; }
+.hdx-tip { position: absolute; transform: translateX(-50%); display: flex; flex-direction: column; gap: 3px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-family: 'GeistMono'; font-size: 11px; white-space: nowrap; pointer-events: none; box-shadow: 0 8px 20px rgba(0,0,0,.4); z-index: 4; }
+.hdx-tip .t-d { color: var(--text-low); }
+.hdx-tip .t-row { display: flex; align-items: center; gap: 6px; color: var(--text-medium); }
+.hdx-tip .t-row i { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.hdx-tip .t-row .tv { margin-left: auto; padding-left: 12px; color: var(--text-high); font-weight: 600; }
+.hdx-ax { font-family: 'GeistMono'; font-size: 10px; fill: var(--text-low); }
+.ribbon .cell .s { font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); }
+.hdx-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 14px; }
+/* HOLLAR liquidity pools: cap at 4 per row. The min track is a quarter of the
+   container (minus its share of the 3 gaps), so a 5th never fits on desktop,
+   while the 160px floor still collapses the grid to fewer columns on phones. */
+.pool-cards { grid-template-columns: repeat(auto-fit, minmax(max(160px, calc(25% - 8px)), 1fr)); }
+.hdx-card { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--separator); border-radius: 12px; background: var(--panel); padding: 12px 14px; min-width: 0; }
+.hdx-card .hk { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500; color: var(--text-high); }
+.hdx-card .hk i { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.hdx-card .hk .cohort-threshold { margin-left: auto; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); white-space: nowrap; }
+.hdx-card .hv { font-family: 'GeistMono'; font-size: 17px; font-weight: 600; }
+.hdx-card .hs { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.hdx-note { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-top: 12px; }
+.hdx-flow-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; align-items: stretch; margin-bottom: 16px; }
+@media (max-width: 920px) { .hdx-flow-grid { grid-template-columns: 1fr; } }
+.hdx-dca { display: flex; flex-direction: column; gap: 18px; justify-content: center; }
+.hdx-dca .mm-stat .s { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+/* movers tables sit two-up in .cols — relax the global 760px table min-width.
+   Desktop-only: below 720px the stacked-card rule (.tbl { min-width: 0 }) must win. */
+@media (min-width: 721px) { .hdx-movers .tbl { min-width: 420px; } }
+@media (max-width: 720px) { .hdx-card .hk .cohort-threshold { display: none; } }
+
+/* ---- chart reveal: line and area gently fade in on mount. Plays once (React
+   reuses the node on hover/data re-renders, so it never re-triggers).
+   Deliberately NOT the stroke-dasharray/pathLength "draw" trick: with
+   vector-effect: non-scaling-stroke and a container wider than the viewBox,
+   Chromium resolves the dash in screen space while pathLength normalizes in
+   user space — the dash comes up short and the line's tail vanishes. ---- */
+@keyframes areaIn { from { opacity: 0; } to { opacity: 1; } }
+.chart-line { animation: areaIn 0.9s var(--ease-out-soft) both; }
+.chart-area { animation: areaIn 1s ease both; }
+
+/* ---- page content settles in with a soft rise on mount / route change. The
+   staggered delays give a light top-to-bottom cascade. ---- */
+@keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.wrap > .page-head, .wrap > .sec-title, .wrap > .pf-card, .wrap > .chart-skeleton,
+.wrap > .panel, .wrap > .filters, .wrap > .activity-chips, .wrap > .detail-card,
+.wrap > .tabs, .wrap > .acct-head {
+  animation: fadeUp 0.42s var(--ease-out-soft) both;
+}
+.wrap > *:nth-child(2) { animation-delay: 45ms; }
+.wrap > *:nth-child(3) { animation-delay: 90ms; }
+.wrap > *:nth-child(4) { animation-delay: 130ms; }
+.wrap > *:nth-child(n+5) { animation-delay: 160ms; }
+
+/* ============================================================
+   MOBILE (≤720px): data tables → stacked cards
+   The wide .tbl tables set min-width:760px and scroll horizontally
+   inside their panel, so on a phone only the first 2–3 columns show
+   and the most important right-hand ones (value, result, activity)
+   are hidden behind a sideways scroll. Below 720px each row becomes a
+   self-contained card and every cell shows its column label (from the
+   td's data-label) beside the value — nothing is hidden, no h-scroll.
+   Desktop rendering is unchanged. Cells that only make sense in a grid
+   (decorative arrows, the expand toggle) carry .col-hide-mobile.
+   ============================================================ */
+@media (max-width: 720px) {
+  .panel:has(> .tbl) { overflow: hidden; }
+  .tbl, .tbl tbody, .tbl tbody tr, .tbl tbody td { display: block; }
+  .tbl { min-width: 0; width: 100%; }
+  .tbl thead { display: none; }
+  .tbl tbody tr { padding: 8px 2px; border-bottom: 1px solid var(--separator); }
+  .tbl tbody tr:last-child { border-bottom: 0; }
+  .tbl tbody td { padding: 5px 14px; border: 0; font-size: 13px; min-height: 0; }
+  .tbl tbody td.col-hide-mobile { display: none; }
+
+  /* a labelled cell: column name floats left, value stays right */
+  .tbl tbody td[data-label] { text-align: right; overflow: hidden; line-height: 1.5; }
+  .tbl tbody td[data-label]::before {
+    content: attr(data-label);
+    float: left; margin-right: 14px;
+    color: var(--text-low);
+    font-family: 'GeistMono'; font-size: 10px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    white-space: nowrap; line-height: 1.85;
+  }
+  /* first cell reads as the card's title — a little breathing room on top */
+  .tbl tbody td[data-label]:first-child { padding-top: 9px; }
+  /* asset icon+name cells align to the right edge like other values */
+  .tbl tbody td[data-label] .asset-row { justify-content: flex-end; }
+  /* …except the Assets list, where the icon+name is the card's title: keep it
+     left-aligned so the name sits directly behind the icon (needs .tbl.assets-tbl
+     to outrank the flex-end rule above). */
+  .tbl.assets-tbl tbody td[data-label="Asset"] { text-align: left; }
+  .tbl.assets-tbl tbody td[data-label="Asset"] .asset-row { justify-content: flex-start; }
+  /* The icon+name is self-evidently the asset; drop the redundant "ASSET" label. */
+  .tbl.assets-tbl tbody td[data-label="Asset"]::before { display: none; }
+  /* let any fixed-width desktop cells (e.g. sparkline) fill the card row */
+  .tbl tbody td.spark-cell { width: auto; }
+  /* Accounts list: a phone card leads with who this is and what they are worth on
+     one line, then gives the year of portfolio value the whole width of the card —
+     it is the one cell that says more the bigger it gets, and a 110px sparkline
+     wedged against the right edge said almost nothing. The remaining facts follow
+     as ordinary labelled rows, minus the ones this account does not have: a column
+     of em-dashes was most of the card's height. Grid rather than the shared block
+     layout, so the first two cells can share a line and the chart can span both. */
+  .accounts-tbl tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; padding: 10px 0 12px; }
+  .accounts-tbl tbody td { order: 4; grid-column: 1 / -1; }
+  .accounts-tbl tbody td.cell-empty { display: none; }
+  /* The pill IS the title, so it keeps the left edge and drops its label. */
+  .accounts-tbl tbody td[data-label="Account"] {
+    order: 1; grid-column: 1; max-width: none; text-align: left; padding-right: 4px; padding-top: 4px;
+  }
+  .accounts-tbl tbody td[data-label="Account"]::before { display: none; }
+  .accounts-tbl tbody td[data-label="Account"] .addr-wrap { min-width: 0; max-width: 100%; }
+  /* Value sits on that same line, weighted like the card's headline figure. */
+  .accounts-tbl tbody td[data-label="Value"] { order: 2; grid-column: 2; padding-top: 4px; padding-left: 0; font-size: 15px; font-weight: 600; color: var(--text-high); }
+  .accounts-tbl tbody td[data-label="Value"]::before { display: none; }
+  /* Full-bleed chart under the two of them, its label a caption above it. */
+  .accounts-tbl tbody td[data-label="1Y"] { order: 3; text-align: left; padding: 8px 14px 2px; }
+  .accounts-tbl tbody td[data-label="1Y"]::before { float: none; display: block; margin: 0 0 4px; line-height: 1.2; }
+  .accounts-tbl tbody td[data-label="1Y"] .spark { display: block; width: 100%; height: 56px; }
+
+  /* expanded extrinsic/event panel: full-width, never card-ified */
+  .tbl tbody tr.exp-row, .tbl tbody tr.exp-row > td { padding: 0; text-align: left; }
+
+  /* empty-state / loading rows: keep them centered, no floated label */
+  .tbl tbody td[colspan] { text-align: center; }
+
+  /* horizontally-scrolling tab bars (detail tabs, topbar nav) get a right-edge
+     fade so a clipped last item (e.g. "Raw JSON") reads as "scroll for more". */
+  .tabs {
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
+  }
+
+  /* raw JSON wraps instead of scrolling sideways — a single hex blob can be
+     hundreds of thousands of px wide (same treatment as .kv-row .vv). */
+  .json { white-space: pre-wrap; overflow-wrap: anywhere; }
+}
+@media (max-width: 640px) {
+  /* tight enough that the standard 4-tab sets (detail pages, account/tag
+     views) fit a 360px phone without the sideways scroll + edge fade. */
+  .tabs { gap: 2px; }
+  .tabs button { padding: 10px 6px; font-size: 12.5px; }
+  .tabs button .cnt { margin-left: 4px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Referendum: tally bar, vote bubbles, and the ref link on vote rows. */
+.ref-link { color: var(--sky); text-decoration: none; max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+.ref-link:hover { text-decoration: underline; }
+.ref-num { margin-right: 2px; }
+/* A vote row pairs the index with the title. The title ellipsizes, and an
+   inline-block that clips its overflow takes its baseline from its bottom edge
+   rather than its text — which sat the title half a pixel below the index in the
+   cell's plain inline flow. A baseline-aligned flex row uses the title's real
+   text baseline, so the two sit on one line despite their different sizes. */
+.ref-cell { display: inline-flex; align-items: baseline; min-width: 0; max-width: 100%; }
+/* Wider screens have the room for more of the title before the ellipsis. */
+@media (min-width: 1100px) { .ref-link { max-width: 40ch; } }
+@media (max-width: 720px) { .ref-link { max-width: 18ch; } }
+/* Stacks a value under a full-width element (a tally bar) inside the flex-row .dd. */
+.dl .dd.dd-stack { flex-direction: column; align-items: stretch; gap: 6px; }
+.tally-bar { display: flex; width: 100%; height: 10px; border-radius: 5px; overflow: hidden; background: var(--surface-2); }
+.tally-aye { background: var(--green); }
+.tally-nay { background: var(--red); }
+.vb-aye-text { color: var(--green); }
+.vb-nay-text { color: var(--red); }
+/* Says where a tally came from when it is NOT the chain's own figure. Prose, so it wraps
+   and keeps the body font rather than the mono of the amounts above it. */
+.tally-note { font-size: 12px; line-height: 1.45; color: var(--text-low); max-width: 74ch; }
+
+/* One cluster, both sides. Bubbles are anchors so the app's global hover card and
+   click-through work exactly as they do on any other account pill. */
+/* A bubble carries its side's colour twice: a full-strength ring, so the cluster
+   reads in the AYE green and NAY red the tally bar and the badges use, and a
+   tinted fill behind the label, which has to stay far enough from the blue of an
+   account link for the name inside to be legible. Hence the split by theme: a
+   dark fill under the light --sky, a pale one under --sky-deep. */
+.vb-canvas { position: relative; width: 100%; --vb-fill: 45%; --vb-link: var(--sky); }
+:root[data-theme="light"] .vb-canvas { --vb-fill: 30%; --vb-link: var(--sky-deep); }
+.vb-bubble {
+  position: absolute; transform: translate(-50%, -50%); aspect-ratio: 1; border-radius: 50%;
+  /* Row, like a list pill: icon first, then the name/address. */
+  display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 5px;
+  overflow: hidden; text-decoration: none; color: var(--vb-link);
+  /* Inset rather than a border: the ring must not eat into a 6px bubble's box. */
+  background: color-mix(in srgb, var(--vb-color) var(--vb-fill), transparent);
+  box-shadow: inset 0 0 0 2px var(--vb-color);
+  /* Brightness rather than an outline: a stroke on hover fought the packed edges. */
+  transition: filter .12s ease, opacity .12s ease;
+}
+/* addr-pill brings inline-row styling (inline-flex, gap, nowrap, emoji chrome);
+   inside a circle the bubble's own layout has to win. */
+.vb-bubble.addr-pill { display: flex; gap: 1px; font-size: inherit; }
+/* A side only names its colour; .vb-bubble above decides how the ring and the fill
+   are drawn from it. */
+.vb-bubble.vb-aye { --vb-color: var(--green); }
+.vb-bubble.vb-nay { --vb-color: var(--red); }
+.vb-bubble.vb-split { --vb-color: var(--accent); }
+.vb-bubble:hover, .vb-bubble.on { opacity: 1; filter: brightness(1.22); z-index: 2; }
+/* No circle or border around a bubble's icon: a bubble at the emoji threshold is
+   barely wider than the icon itself, so the pill's chrome would crowd it. */
+.vb-bubble .vb-emoji { font-size: clamp(9px, 1.5vw, 17px); line-height: 1; background: none; border: 0; padding: 0; }
+/* An avatar image or a tag's logo, both sized off the glyph they sit beside. */
+.vb-bubble .vb-emoji-img, .vb-bubble .vb-emoji .emoji-img { width: 1em; height: 1em; display: block; }
+/* Same type treatment as an address in a table, just scaled to the bubble. */
+.vb-bubble .vb-addr { font-size: clamp(7px, .8vw, 11px); line-height: 1.05; color: var(--vb-link); white-space: nowrap; max-width: 74%; overflow: hidden; text-overflow: ellipsis; }
+/* An identity or tag name is free text, so it gets the ellipsis treatment a
+   fixed-width shortened address never needs. */
+/* A name is not an address: a tag brings its own colour inline, and an identity or
+   module name takes the theme's ink, exactly as in the tables. Only the shortened
+   address wears the link blue. */
+.vb-bubble .vb-name { font-family: inherit; font-weight: 600; color: var(--text-high); }
+/* Self-set profile name: same amber-and-italic treatment as .addr-pill's, so a
+   bubble reads as "the owner's own claim" identically to every other pill. */
+.vb-bubble .vb-name.profile-name { color: var(--amber); font-style: italic; }
+.vb-bubble .id-verified { margin-left: 2px; color: inherit; }
+.vb-legend { margin-top: 10px; font-size: 12px; color: var(--text-medium); min-height: 18px; display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
+.vb-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin: 0 5px 0 2px; }
+.vb-dot.vb-aye { background: var(--green); }
+.vb-dot.vb-nay { background: var(--red); }
+.vb-dot.vb-split { background: var(--accent); }
+.badge.vote-split { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+.badge.badge-quiet { background: var(--surface-2); color: var(--text-low); margin-left: 6px; }
+tr.row-muted td { opacity: .55; }
+.empty-note { padding: 14px; text-align: center; color: var(--text-low); font-size: 12px; }
+
+/* Decoded referendum proposal: a call tree, not raw JSON. */
+.pc-panel { padding: 14px 16px; }
+.pc-call { min-width: 0; }
+.pc-head { display: flex; align-items: baseline; gap: 1px; font-family: 'GeistMono'; font-size: 13px; margin-bottom: 8px; }
+.pc-pallet { color: var(--text-medium); }
+.pc-dot { color: var(--text-low); }
+.pc-name { color: var(--sky); font-weight: 600; }
+/* Nested calls step in with a rule, so a batch of batches stays readable. */
+.pc-nested { border-left: 2px solid var(--border); padding-left: 12px; margin: 6px 0; }
+.pc-args { display: grid; grid-template-columns: minmax(90px, max-content) 1fr; gap: 4px 14px; align-items: baseline; }
+.pc-key { font-size: 11px; color: var(--text-low); text-transform: uppercase; letter-spacing: .04em; }
+.pc-val { min-width: 0; font-size: 12px; color: var(--text-high); overflow-wrap: anywhere; }
+.pc-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.pc-list > li::marker { color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; }
+.pc-variant { font-family: 'GeistMono'; font-size: 12px; color: var(--accent); }
+/* A big proposal folds every call below its own to a heading, so the batch reads as an
+   outline. Same disclosure treatment as .close-accounts, sized for a tree row. */
+.pc-fold { display: block; }
+.pc-fold > summary { cursor: pointer; list-style: none; margin-bottom: 0; flex-wrap: wrap; row-gap: 2px; }
+.pc-fold[open] > summary { margin-bottom: 8px; }
+.pc-fold > summary::-webkit-details-marker { display: none; }
+.pc-fold > summary:hover .pc-name { text-decoration: underline; }
+.pc-fold > summary:focus-visible { outline: 2px solid var(--sky); outline-offset: 3px; border-radius: 4px; }
+/* What a folded call says about itself: its argument count, or the call it wraps. */
+.pc-hint { margin-left: 8px; font-size: 11px; color: var(--text-low); }
+.pc-chevron { margin-left: auto; padding-left: 10px; color: var(--text-low); font-size: 14px; line-height: 1; transition: transform 150ms var(--ease-standard); }
+.pc-fold[open] > summary .pc-chevron { transform: rotate(180deg); }
+.pc-toggle, .pc-more { background: var(--surface-2); border: 1px solid var(--border); color: var(--text-medium); font-family: 'GeistMono'; font-size: 10.5px; padding: 3px 8px; border-radius: 6px; cursor: pointer; }
+.pc-toggle:hover, .pc-more:hover { color: var(--text-high); border-color: var(--text-low); }
+.pc-toggle { margin-left: auto; }
+.pc-more { margin-top: 8px; color: var(--sky); }
+.pc-foot { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 11px; }
+.pc-hash-toggle { background: none; border: 0; color: var(--sky); font-size: 11px; cursor: pointer; padding: 0; }
+.pc-hash-toggle:hover { text-decoration: underline; }
+.pc-hash { color: var(--text-medium); font-size: 10.5px; overflow-wrap: anywhere; }
+.pc-unavailable { color: var(--text-medium); font-size: 12px; }
+.pc-error { color: var(--red); font-size: 11px; margin-top: 4px; }
+.pc-copy { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+.copy-text-btn, .pc-copy-btn { display: inline-flex; align-items: center; gap: 5px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-medium); font-family: 'GeistMono'; font-size: 10.5px; padding: 3px 8px; border-radius: 6px; cursor: pointer; }
+.copy-text-btn:hover, .pc-copy-btn:hover { color: var(--text-high); border-color: var(--text-low); }
+.copy-text-btn.done, .pc-copy-btn.done { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+.copy-text-btn svg, .pc-copy-btn svg { width: 12px; height: 12px; }
+.json-copy-row { display: flex; justify-content: flex-end; margin-bottom: 8px; }
