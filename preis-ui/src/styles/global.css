@@ -1,0 +1,239 @@
+/* ============== FONTS ============== */
+/* Each face ships as two woff2 halves with complementary `unicode-range`s, so a
+   page fetches only the half its text needs. `-latin` is ASCII + Latin-1 plus
+   every symbol the app draws (dashes, quotes, arrows, triangles, math
+   relations, currency, and the U+2080-2089 subscripts behind the 0.0(5)7191
+   notation) — that is all ordinary pages need. `-ext` holds the rest of what
+   the licensed face covers (Latin Extended, combining diacritics, Greek,
+   Cyrillic, CJK punctuation), so an accented or Cyrillic identity name still
+   renders in the brand face; it is simply never requested until one appears.
+   Coverage is unchanged from the unsplit faces — only transfer shrinks.
+   Both halves and these ranges come from `scripts/subset-fonts.py`. */
+
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoRegular-latin.woff2') format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoRegular-ext.woff2') format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0100-0107, U+010A-011B, U+011E-0123, U+0126-0127, U+012A-0131, U+0134-0137, U+0139-0148, U+014A-015B, U+015E-0167, U+016A-016B, U+016E-017E, U+018F, U+01FC-01FD, U+0218-021B, U+0237, U+0259, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+1E80-1E85, U+1E9E, U+1EF2-1EF3; }
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoMedium-latin.woff2') format('woff2'); font-weight: 500; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoMedium-ext.woff2') format('woff2'); font-weight: 500; font-display: swap; unicode-range: U+0100-0107, U+010A-011B, U+011E-0123, U+0126-0127, U+012A-0131, U+0134-0137, U+0139-0148, U+014A-015B, U+015E-0167, U+016A-016B, U+016E-017E, U+018F, U+01FC-01FD, U+0218-021B, U+0237, U+0259, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+1E80-1E85, U+1E9E, U+1EF2-1EF3; }
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoBold-latin.woff2') format('woff2'); font-weight: 600; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'Gazpacho'; src: url('/fonts/GazpachoBold-ext.woff2') format('woff2'); font-weight: 600; font-display: swap; unicode-range: U+0100-0107, U+010A-011B, U+011E-0123, U+0126-0127, U+012A-0131, U+0134-0137, U+0139-0148, U+014A-015B, U+015E-0167, U+016A-016B, U+016E-017E, U+018F, U+01FC-01FD, U+0218-021B, U+0237, U+0259, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+1E80-1E85, U+1E9E, U+1EF2-1EF3; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistRegular-latin.woff2') format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistRegular-ext.woff2') format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0100-0113, U+0116-012B, U+012E-0137, U+0139-013E, U+0141-0148, U+014A-014D, U+0150-017E, U+018F, U+0192, U+01CD-01CE, U+01E4-01E9, U+0218-021B, U+0237, U+0259, U+02B9, U+02BC, U+02C6-02C8, U+02D8-02DD, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+0335, U+039B, U+03A9, U+03BB, U+03C0, U+0400-040C, U+040E-045F, U+0462-0463, U+046A-046B, U+0472-0475, U+0490-0493, U+0496-0497, U+049A-049B, U+04A2-04A3, U+04AE-04B3, U+04B6-04B7, U+04BA-04BB, U+04C0, U+04CF, U+04D8-04D9, U+04E2-04E3, U+04E8-04E9, U+04EE-04EF, U+0E3F, U+1E20-1E21, U+1E80-1E85, U+1E9E, U+1EBC-1EBD, U+1EF2-1EF3, U+1EF8-1EF9, U+2032-2033, U+240B-240C, U+2460-2468, U+24EA, U+24FF, U+2639-263A, U+3003, U+3008-3011, U+3014-3017, U+301C, U+A78B-A78C, U+F8FF; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistMedium-latin.woff2') format('woff2'); font-weight: 500; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistMedium-ext.woff2') format('woff2'); font-weight: 500; font-display: swap; unicode-range: U+0100-0113, U+0116-012B, U+012E-0137, U+0139-013E, U+0141-0148, U+014A-014D, U+0150-017E, U+018F, U+0192, U+01CD-01CE, U+01E4-01E9, U+0218-021B, U+0237, U+0259, U+02B9, U+02BC, U+02C6-02C8, U+02D8-02DD, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+0335, U+039B, U+03A9, U+03BB, U+03C0, U+0400-040C, U+040E-045F, U+0462-0463, U+046A-046B, U+0472-0475, U+0490-0493, U+0496-0497, U+049A-049B, U+04A2-04A3, U+04AE-04B3, U+04B6-04B7, U+04BA-04BB, U+04C0, U+04CF, U+04D8-04D9, U+04E2-04E3, U+04E8-04E9, U+04EE-04EF, U+0E3F, U+1E20-1E21, U+1E80-1E85, U+1E9E, U+1EBC-1EBD, U+1EF2-1EF3, U+1EF8-1EF9, U+2032-2033, U+240B-240C, U+2460-2468, U+24EA, U+24FF, U+2639-263A, U+3003, U+3008-3011, U+3014-3017, U+301C, U+A78B-A78C, U+F8FF; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistSemiBold-latin.woff2') format('woff2'); font-weight: 600; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'Geist'; src: url('/fonts/GeistSemiBold-ext.woff2') format('woff2'); font-weight: 600; font-display: swap; unicode-range: U+0100-0113, U+0116-012B, U+012E-0137, U+0139-013E, U+0141-0148, U+014A-014D, U+0150-017E, U+018F, U+0192, U+01CD-01CE, U+01E4-01E9, U+0218-021B, U+0237, U+0259, U+02B9, U+02BC, U+02C6-02C8, U+02D8-02DD, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+0335, U+039B, U+03A9, U+03BB, U+03C0, U+0400-040C, U+040E-045F, U+0462-0463, U+046A-046B, U+0472-0475, U+0490-0493, U+0496-0497, U+049A-049B, U+04A2-04A3, U+04AE-04B3, U+04B6-04B7, U+04BA-04BB, U+04C0, U+04CF, U+04D8-04D9, U+04E2-04E3, U+04E8-04E9, U+04EE-04EF, U+0E3F, U+1E20-1E21, U+1E80-1E85, U+1E9E, U+1EBC-1EBD, U+1EF2-1EF3, U+1EF8-1EF9, U+2032-2033, U+240B-240C, U+2460-2468, U+24EA, U+24FF, U+2639-263A, U+3003, U+3008-3011, U+3014-3017, U+301C, U+A78B-A78C, U+F8FF; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoRegular-latin.woff2') format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoRegular-ext.woff2') format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0100-0113, U+0116-012B, U+012E-0131, U+0134-0137, U+0139-013E, U+0141-0148, U+014C-014D, U+0150-0165, U+0168-017E, U+018F, U+0192, U+01CD-01CE, U+0218-021B, U+0237, U+0259, U+02C6-02C7, U+02D8-02DD, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+03A9, U+03C0, U+0E3F, U+1E20-1E21, U+1E80-1E85, U+1E9E, U+1EBC-1EBD, U+1EF2-1EF3, U+1EF8-1EF9, U+240B-240C, U+2423, U+3002-3003, U+3008-3011, U+3014-3017, U+301C, U+A78B-A78C, U+FF01-FF03, U+FF05-FF0A, U+FF0C-FF0F, U+FF1A-FF1B, U+FF1F-FF20, U+FF3B-FF3D, U+FF3F, U+FF5B, U+FF5D; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoMedium-latin.woff2') format('woff2'); font-weight: 500; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoMedium-ext.woff2') format('woff2'); font-weight: 500; font-display: swap; unicode-range: U+0100-0113, U+0116-012B, U+012E-0131, U+0134-0137, U+0139-013E, U+0141-0148, U+014A-014D, U+0150-017E, U+018F, U+0192, U+01CD-01CE, U+01E4-01E9, U+0218-021B, U+0237, U+0259, U+02B9, U+02BC, U+02C6-02C8, U+02D8-02DD, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+0335-0338, U+039B, U+03A9, U+03BB, U+03C0, U+0400-045F, U+0462-0463, U+046A-046B, U+0472-0475, U+0490-0493, U+0496-0497, U+049A-049B, U+04A2-04A3, U+04AE-04B3, U+04B6-04B7, U+04BA-04BB, U+04C0, U+04CF, U+04D8-04D9, U+04E2-04E3, U+04E8-04E9, U+04EE-04EF, U+0E3F, U+1E20-1E21, U+1E80-1E85, U+1E9E, U+1EBC-1EBD, U+1EF2-1EF3, U+1EF8-1EF9, U+2032-2033, U+240B-240C, U+2423, U+2460-2468, U+24EA, U+24FF-2500, U+2502, U+250C, U+2514, U+251C, U+3003, U+3008-3011, U+3014-3017, U+301C, U+A78B-A78C, U+F8FF; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoSemiBold-latin.woff2') format('woff2'); font-weight: 600; font-display: swap; unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+2070, U+2074-2079, U+2080-2089, U+20AA, U+20AC, U+20B4, U+20B9, U+20BD, U+20BF, U+2107, U+2116-2117, U+2122, U+2153-2155, U+215B-215E, U+2190-2199, U+219D, U+21A9-21AA, U+21B0-21B1, U+21B3-21B5, U+21E4-21E5, U+21E7, U+2202, U+2205-2206, U+220F, U+2211-2212, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+2326-2327, U+232B, U+23CE, U+25B2-25B3, U+25B6-25B7, U+25BC-25BD, U+25C0-25C1, U+25CA-25CC, U+25CF, U+2776-277E, U+FB01-FB02; }
+@font-face { font-family: 'GeistMono'; src: url('/fonts/GeistMonoSemiBold-ext.woff2') format('woff2'); font-weight: 600; font-display: swap; unicode-range: U+0100-0113, U+0116-012B, U+012E-0131, U+0134-0137, U+0139-013E, U+0141-0148, U+014C-014D, U+0150-0165, U+0168-017E, U+018F, U+0192, U+01CD-01CE, U+0218-021B, U+0237, U+0259, U+02C6-02C7, U+02D8-02DD, U+0300-0304, U+0306-0308, U+030A-030C, U+0312, U+0326-0328, U+03A9, U+03C0, U+0E3F, U+1E20-1E21, U+1E80-1E85, U+1E9E, U+1EBC-1EBD, U+1EF2-1EF3, U+1EF8-1EF9, U+240B-240C, U+2423, U+3002-3003, U+3008-3011, U+3014-3017, U+301C, U+A78B-A78C, U+FF01-FF03, U+FF05-FF0A, U+FF0C-FF0F, U+FF1A-FF1B, U+FF1F-FF20, U+FF3B-FF3D, U+FF3F, U+FF5B, U+FF5D; }
+
+/* ============== TOKENS ============== */
+:root[data-theme="dark"] {
+  --bg: #030816;
+  --bg-elev: #0d1525;
+  --bg-deep: #010410;
+  --panel: rgba(255, 255, 255, 0.03);
+  --panel-hover: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.08);
+  --separator: rgba(255, 255, 255, 0.05);
+
+  --text-high: #f5f1f8;
+  --text-medium: #a59cab;
+  --text-low: #6e6776;
+  --text-lowest: #4a414f;
+
+  --accent: #e53e76;
+  --accent-soft: rgba(229, 62, 118, 0.16);
+  --accent-on: #ffffff;
+
+  --lavender: #dfb1f3;
+  --lavender-deep: #cc6ef4;
+  --lavender-soft: rgba(204, 110, 244, 0.16);
+
+  --sky: #95caff;
+  --sky-deep: #2C89E9;
+  --sky-soft: rgba(83, 164, 243, 0.14);
+
+  --green: #74C742;
+  --green-deep: #45AC1F;
+  --green-soft: rgba(116, 199, 66, 0.16);
+
+  --red: #ff6868;
+  --red-soft: rgba(255, 104, 104, 0.14);
+
+  --amber: #F7BF06;
+  --amber-soft: rgba(247, 191, 6, 0.14);
+
+  --kbd-bg: rgba(255, 255, 255, 0.06);
+}
+:root[data-theme="light"] {
+  --bg: #EFEDEA;
+  --bg-elev: #ffffff;
+  --bg-deep: #e5e1dc;
+  --panel: rgba(36, 14, 50, 0.04);
+  --panel-hover: rgba(36, 14, 50, 0.08);
+  --border: rgba(36, 14, 50, 0.14);
+  --separator: rgba(36, 14, 50, 0.08);
+
+  --text-high: #232226;
+  --text-medium: #6b6770;
+  --text-low: #8d8995;
+  --text-lowest: #c5b9cf;
+
+  --accent: #e53e76;
+  --accent-soft: rgba(229, 62, 118, 0.10);
+  --accent-on: #ffffff;
+
+  --lavender: #b454da;
+  --lavender-deep: #823fa1;
+  --lavender-soft: rgba(204, 110, 244, 0.18);
+
+  --sky: #2C89E9;
+  --sky-deep: #1f5cab;
+  --sky-soft: rgba(83, 164, 243, 0.10);
+
+  --green: #45AC1F;
+  --green-deep: #2e7c12;
+  --green-soft: rgba(116, 199, 66, 0.16);
+
+  --red: #d83b3b;
+  --red-soft: rgba(216, 59, 59, 0.10);
+
+  --amber: #b58800;
+  --amber-soft: rgba(247, 191, 6, 0.16);
+
+  --kbd-bg: rgba(36, 14, 50, 0.06);
+}
+
+/* ============== RESET ============== */
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; padding: 0; }
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  background: var(--bg);
+  color: var(--text-high);
+  font-family: 'Geist', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+html { overflow: hidden; }
+body { overflow: hidden; }
+button { all: unset; box-sizing: border-box; cursor: pointer; font-family: inherit; }
+svg { display: block; }
+::selection { background: var(--accent); color: var(--accent-on); }
+
+:root {
+  --ease-out-soft: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  /* iOS home-screen PWA safe-area inset (0 everywhere else, incl. Android).
+     Top-anchored surfaces pad by this so content clears the status bar when
+     the app runs full-bleed under a black-translucent bar. */
+  --safe-top: env(safe-area-inset-top, 0px);
+}
+
+/* Hide Lightweight Charts TradingView branding */
+#tv-attr-logo { display: none !important; }
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-low); }
+* { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+
+/* Focus rings */
+button:focus-visible,
+input:focus-visible,
+[role="option"]:focus-visible,
+[role="dialog"] :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--kbd-bg);
+  border: 1px solid var(--border);
+  color: var(--text-medium);
+  font-family: 'GeistMono', monospace;
+  font-size: 10px;
+  line-height: 1;
+}
+
+/* Live pulse used in topbar */
+@keyframes preis-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+@keyframes preis-value-up {
+  0% { background: var(--green-soft); color: var(--green); box-shadow: 0 0 0 1px var(--green-soft); }
+  100% { background: transparent; box-shadow: 0 0 0 1px transparent; }
+}
+@keyframes preis-value-down {
+  0% { background: var(--red-soft); color: var(--red); box-shadow: 0 0 0 1px var(--red-soft); }
+  100% { background: transparent; box-shadow: 0 0 0 1px transparent; }
+}
+@keyframes preis-value-flat {
+  0% { background: var(--panel-hover); box-shadow: 0 0 0 1px var(--border); }
+  100% { background: transparent; box-shadow: 0 0 0 1px transparent; }
+}
+@keyframes preis-favorite-pop {
+  0% { transform: scale(0.86); }
+  65% { transform: scale(1.08); }
+  100% { transform: scale(1); }
+}
+@keyframes preis-dialog-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes preis-dialog-panel-in {
+  from { opacity: 0; transform: translate(-50%, 6px) scale(0.985); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+@keyframes preis-dialog-panel-mobile-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes preis-list-row-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes preis-drawer-scrim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes preis-drawer-panel-in {
+  from { transform: translateX(16px); }
+  to { transform: translateX(0); }
+}
+@keyframes preis-toast-life {
+  0% { opacity: 0; transform: translate(-50%, 8px); }
+  10%, 82% { opacity: 1; transform: translate(-50%, 0); }
+  100% { opacity: 0; transform: translate(-50%, -4px); }
+}
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+  animation: preis-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+}

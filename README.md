@@ -1,0 +1,212 @@
+# Hydration Neckwork
+
+Hydration Neckwork is a ClickHouse-backed data platform containing two applications: the Explorer and Preis. It combines a block-level USD price indexer, a raw on-chain data lake, a shared API, a live block explorer, and market charts.
+
+## Product surfaces
+
+- **Explorer:** blocks, extrinsics, events, assets, holders, accounts, identities, tags, proxies, multisigs, and portfolio history.
+- **Activity:** transfers, swaps, DCA schedules, OTC orders, cross-chain activity, liquidity, money markets, staking, and governance votes.
+- **Protocol dashboards:** HDX supply, locks, flows, and unlocks; HOLLAR peg, Stability Module, and liquidity.
+- **Preis charts:** block-level USD prices and OHLCV candles for Hydration assets.
+- **API:** Fastify endpoints for explorer data, prices, candles, volume, and indexer status.
+
+## Quick start
+
+The containerized stack requires Docker with Compose. Local development additionally requires Node.js 22+.
+
+```bash
+git clone https://github.com/1xGiraffe/hydration-neckwork.git
+cd hydration-neckwork
+docker compose up --build -d
+```
+
+Local services:
+
+| Service | URL | Purpose |
+| --- | --- | --- |
+| Explorer | <http://localhost:5174> | Live chain explorer and protocol dashboards |
+| Preis | <http://localhost:5173> | Asset price and OHLCV charts |
+| API | <http://localhost:3000> | Explorer and market-data API |
+| ClickHouse HTTP | <http://localhost:18123> | Local database endpoint |
+
+The live pipelines start immediately. Historical ingestion continues in the background, so a fresh installation fills older explorer and price history over time.
+
+Useful status commands:
+
+```bash
+docker compose ps
+docker logs -f hydration-neckwork-ingestion-supervisor
+docker exec -it hydration-neckwork-clickhouse clickhouse-client \
+  --database=price_data --password "${CLICKHOUSE_PASSWORD:-dev}"
+```
+
+## Architecture
+
+```text
+SQD archive + Hydration RPC
+          │
+          ├─ raw-live + supervised backfill ── raw chain and derived tables
+          └─ live + historical price indexers ─ prices and OHLCV
+                                             │
+                                         ClickHouse
+                                             │
+                                      Fastify API (:3000)
+                                         ┌───┴───┐
+                                  Explorer UI   Preis UI
+                                     (:5174)     (:5173)
+```
+
+- `src/` contains the price and raw-data indexers, ingestion utilities, and maintenance scripts.
+- `clickhouse/schema/` is the single declarative schema (tables + materialized views), applied once to an empty database by the `schema-bootstrap` service — see [Database model](#database-model). There are no migrations.
+- `api/` serves indexed data through cached read models; Compose snapshot services refresh bounded current-state datasets.
+- `explorer-ui/` is the block explorer; `preis-ui/` is the price-chart application.
+- `ops/` contains the ingestion supervisor image.
+
+Historical raw ranges are finalized only after block counts and parent links validate. The supervisor promotes completed raw ranges into the price index and maintains the live pipelines. Writes and checkpoints are designed for replay and crash recovery.
+
+## Configuration
+
+Docker Compose provides working defaults. Override them in an untracked `.env` file when needed.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RPC_URL` | `https://hydration-rpc.neckwork.net` | Price indexer RPC |
+| `RAW_LIVE_RPC_URL` | `https://hydration-rpc.neckwork.net` | Live raw-indexer RPC |
+| `RAW_RPC_URL` | `https://rpc.coke.hydration.cloud` | Historical raw-worker RPC |
+| `RAW_EVM_RPC_URL` | `https://rpc.coke.hydration.cloud` | Historical EVM state reads |
+| `IDENTITY_RPC_URL` | `https://hydration-rpc.neckwork.net` | Hydration identity snapshot RPC |
+| `IDENTITY_CHAINS` | Polkadot/Kusama People chains and their testnets | Extra identity sources, `key=url[@block]` and highest display priority first; empty for Hydration only |
+| `SQD_GATEWAY` | Hydration SQD archive | Historical block source |
+| `CLICKHOUSE_HOST` | `http://localhost:18123` outside Compose | ClickHouse HTTP endpoint |
+| `CLICKHOUSE_PASSWORD` | empty outside Compose; `dev` in Compose | ClickHouse password |
+| `CLICKHOUSE_VOLUME_NAME` | `hydration-neckwork-clickhouse-data` | Docker volume containing ClickHouse data |
+| `RAW_WORKERS` | `6` | Concurrent raw historical workers |
+| `RANGE_SIZE` | `1000` | Blocks per raw historical range |
+| `MAIN_WORKERS` | `3` | Concurrent historical price workers |
+| `MAIN_MAX_RANGES` | `3` | Raw ranges consumed per price batch |
+| `VITE_EXPLORER_URL` | local fallback | Public Explorer URL embedded in Preis UI |
+| `VITE_PREIS_URL` | local fallback | Public Preis URL embedded in Explorer UI |
+| `EXPLORER_OCELLOIDS_TOKEN` | unset | Enables optional XCM journey enrichment |
+
+See [`docker-compose.yml`](docker-compose.yml) for service-specific tuning variables. Keep credentials in `.env`, never in tracked files. Vite URL changes require rebuilding the corresponding UI image.
+
+### Host-specific Compose overrides
+
+For changes that are not simple environment values—such as ports, networks,
+volumes, commands, or build settings—create a gitignored
+`docker-compose.override.yml` beside `docker-compose.yml`. Docker Compose loads
+and merges it automatically:
+
+```yaml
+services:
+  clickhouse:
+    ports: !override
+      - "127.0.0.1:28123:8123"
+
+  ingestion-supervisor:
+    environment:
+      RAW_WORKERS: ${RAW_WORKERS:-2}
+```
+
+Compose normally appends list values such as `ports`; `!override` replaces the
+tracked list instead. Inspect the fully merged configuration before starting it:
+
+```bash
+docker compose config
+docker compose up --build -d
+```
+
+The ingestion supervisor starts historical `indexer` and `raw-indexer` workers
+through Compose from inside its container. If the override changes either worker
+service, mount the file into the supervisor so those dynamically created workers
+inherit it:
+
+```yaml
+services:
+  ingestion-supervisor:
+    volumes:
+      - ./docker-compose.override.yml:/etc/hydration-neckwork/docker-compose.override.yml:ro
+```
+
+Keep credentials in `.env`; do not put them in the override file.
+
+## Querying prices
+
+The query views support point-in-time prices, continuous block ranges, timestamp lookup, and OHLCV at 5-minute, 15-minute, 30-minute, 1-hour, 4-hour, 1-day, 1-week, and 1-month intervals.
+
+```sql
+SELECT *
+FROM price_data.price_at_block(asset_id=5, block_height=7000000);
+
+SELECT *
+FROM price_data.ohlc_1h_query(
+  asset_id=5,
+  start_time='2026-01-01 00:00:00',
+  end_time='2026-01-31 23:59:59'
+);
+```
+
+See the [ClickHouse query guide](clickhouse/docs/QUERY_GUIDE.md) for the complete SQL reference.
+
+## Development
+
+Install each workspace, then run the repository-wide checks:
+
+```bash
+npm ci
+npm --prefix api ci
+npm --prefix explorer-ui ci
+npm --prefix preis-ui ci
+npm run check:all
+```
+
+Browser tests are separate because they require the relevant services:
+
+```bash
+npm --prefix explorer-ui run test:e2e
+npm --prefix preis-ui run test:e2e
+```
+
+Common indexer commands:
+
+```bash
+npm start -- --help
+npm run start:raw -- --help
+npm run detect-gaps
+npm run snapshot:balances -- --dry-run
+```
+
+## Database model
+
+The blockchain is the source of truth; every table is a reproducible projection of
+it, so the database is disposable and rebuildable — **there are no migrations**.
+
+- **Schema is declarative.** `clickhouse/schema/*.sql` defines every table and
+  materialized view (MV). The `schema-bootstrap` service applies it — in numeric
+  order, idempotently (`CREATE ... IF NOT EXISTS`) — to an empty database **before**
+  ingestion starts. Because the MVs exist first, every MV-backed read model populates
+  itself as raw data is indexed, in any order, with **no backfill**.
+- **Derived data comes from three places.** Most read models are MVs (automatic). The
+  few an MV cannot express — per-trade netting (`account_trade_volume`) and the stateful
+  LP-history reconstructions — are recomputed continuously and idempotently by the
+  `derivations` service. A small set of current-state snapshots (account-directory
+  values) are refreshed on API timers.
+- **To change a model, edit the declaration and rebuild the projection** — drop the
+  table/MV and let it refill from raw, or reset the derived layer and let it rebuild.
+  Never write an in-place migration; there is no version ledger.
+
+Fresh-install order (enforced by Compose `depends_on`):
+`schema-bootstrap` → ingestion (raw) → `derivations` → `api`. Applying the schema to a
+non-empty database is a safe no-op, so redeploying never risks existing data.
+
+## Operational safety
+
+- Keep ClickHouse data and checkpoints together; do not wipe tables to resolve an ingestion problem.
+- Let `ingestion-supervisor` own its dynamically created historical workers. Do not manually start or stop those containers.
+- Use bounded, explicit block ranges and distinct pipeline IDs for manual backfills.
+- Change a model by editing `clickhouse/schema/` and rebuilding that projection from raw; never patch derived data in place, and never wipe raw to fix a derived model.
+- Back up the ClickHouse volume before production schema or checkpoint maintenance.
+
+## License
+
+ISC

@@ -1,0 +1,105 @@
+import { expect, test } from './fixtures/test'
+
+// A DCA is a schedule, not a single fill: activity rows link to /dca/<scheduleId>,
+// which shows how the schedule was initiated and every execution so far.
+
+test('activity DCA rows navigate to the schedule page', async ({ page }) => {
+  await page.goto('/activity?tab=trade')
+  const dcaRow = page.locator('tr[data-activity^="dca/"]').first()
+  await expect(dcaRow).toBeVisible()
+  expect(await dcaRow.getAttribute('data-activity')).toMatch(/^dca\/\d+$/)
+  // click the Type cell — the row centre lands on the asset chip's own link
+  await dcaRow.locator('td').first().click()
+  await expect(page).toHaveURL(/\/dca\/\d+$/)
+  await expect(page.getByText('Started')).toBeVisible()
+})
+
+test('schedule page shows initiation, budget, totals and paged executions', async ({ page }) => {
+  await page.goto('/dca/33546')
+  await expect(page.locator('.page-title')).toContainText('DCA #33546')
+  const card = page.locator('.detail-card').first()
+  await expect(card).toContainText('Owner')
+  await expect(card).toContainText('~30m')
+  await expect(card).toContainText('· 300 blocks')
+  await expect(card).toContainText('132 trades')
+  await expect(page.locator('.tbl tbody tr')).toHaveCount(25)
+  await expect(page.locator('.pager')).toBeVisible()
+})
+
+test('cancelled schedule includes failed attempts in its execution timeline', async ({ page }) => {
+  await page.goto('/dca/33573')
+  await expect(page.locator('.page-title')).toContainText('cancelled')
+  await expect(page.locator('.detail-card').first()).toContainText('2 failed')
+  await expect(page.locator('.tbl tbody tr')).toHaveCount(2)
+  await expect(page.getByText('DCA failed')).toHaveCount(2)
+  await expect(page.getByText('Failed attempt', { exact: true })).toHaveCount(2)
+})
+
+test('a schedule execution row opens its own execution detail', async ({ page }) => {
+  await page.goto('/dca/33546')
+  const row = page.locator('.tbl tbody tr').first()
+  await expect(row).toBeVisible()
+  expect(await row.getAttribute('data-activity')).toMatch(/^dca\/\d+-e\d+$/)
+  await row.locator('td').first().click()
+  await expect(page).toHaveURL(/\/dca\/\d+-e\d+$/)
+  await expect(page.getByText('Schedule', { exact: true })).toBeVisible()
+  // the schedule link appears in both the crumbs and the detail card
+  await expect(page.locator('.detail-card a.hash', { hasText: 'DCA #33546' })).toBeVisible()
+})
+
+test('a failed attempt detail names the failure reason', async ({ page }) => {
+  // Schedule 33573 was cancelled with failed attempts in its timeline.
+  await page.goto('/dca/33573')
+  await page.locator('.tbl tbody tr').first().locator('td').first().click()
+  await expect(page).toHaveURL(/\/dca\/\d+-e\d+$/)
+  await expect(page.getByText('Failed', { exact: true })).toBeVisible()
+  await expect(page.getByText('Failure reason')).toBeVisible()
+})
+
+test('hovering a DCA activity row previews its schedule', async ({ page }) => {
+  await page.goto('/activity?tab=trade')
+  const dcaRow = page.locator('tr[data-activity^="dca/"]').first()
+  await expect(dcaRow).toBeVisible()
+  // the Type cell has no nested hover targets, so the row's schedule id wins
+  await dcaRow.locator('td').first().hover()
+  await expect(page.locator('.hovercard')).toContainText('DCA #')
+  await expect(page.locator('.hovercard')).toContainText('Order')
+})
+
+test('hovering a schedule execution row previews the attempt', async ({ page }) => {
+  await page.goto('/dca/33573')
+  const row = page.locator('.tbl tbody tr').first()
+  await expect(row).toBeVisible()
+  await row.locator('td').first().hover()
+  await expect(page.locator('.hovercard')).toContainText('DCA execution')
+  await expect(page.locator('.hovercard')).toContainText('Failed')
+})
+
+test('legacy per-execution DCA links resolve to the schedule page', async ({ page }) => {
+  // The extrinsic form is the scheduling extrinsic; the event form carried the
+  // swap event index (not the DCA event), so both resolve to the schedule.
+  await page.goto('/dca/12848613-4')
+  await expect(page).toHaveURL(/\/dca\/33546$/)
+  await expect(page.locator('.page-title')).toContainText('DCA #33546')
+
+  await page.goto('/dca/12848613-e77')
+  await expect(page).toHaveURL(/\/dca\/33546$/)
+})
+
+test('active-DCA rows show the budget and open the schedule page', async ({ page }) => {
+  await page.goto('/account/1L53bUTBopXqDXSXjBdQXFV7jZ8FtdRZS5JoMjGq5z3Cv2zr?view=positions')
+  const row = page.locator('tr[data-dca-schedule="33546"]')
+  await expect(row).toBeVisible()
+  await expect(row.locator('[data-label="Budget"]')).toContainText('1.2M')
+  // open-ended schedules say so instead of a number
+  await expect(page.locator('tr[data-dca-schedule="30104"] [data-label="Budget"]')).toContainText('open-ended')
+  // the next-execution block links to the (future) block page with a countdown
+  await row.locator('[data-label="Next trade"] a').click()
+  await expect(page).toHaveURL(/\/block\/\d+$/)
+  await expect(page.getByText('Future block')).toBeVisible()
+
+  await page.goBack()
+  await page.locator('tr[data-dca-schedule="33546"] [data-label="Filled"]').click()
+  await expect(page).toHaveURL(/\/dca\/33546$/)
+  await expect(page.getByText('Started')).toBeVisible()
+})

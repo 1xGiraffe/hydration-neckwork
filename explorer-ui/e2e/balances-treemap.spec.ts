@@ -1,0 +1,289 @@
+import { expect, test } from './fixtures/test'
+
+// Balances render as a value-weighted treemap (BalancesTreemap) on the account
+// detail page, and the treemap doubles as the selector for the per-asset balance
+// history. Tiles are sized by USD value, the biggest holding is the biggest tile,
+// each face shows % above value, and clicking a tile focuses that asset — showing
+// its value, amount and reserved lock, then its balance-history graph. Rows below
+// the map cover assets without a market price and assets held only in the past.
+const FOX = '1L53bUTBopXqDXSXjBdQXFV7jZ8FtdRZS5JoMjGq5z3Cv2zr'
+
+async function area(el: import('@playwright/test').Locator): Promise<number> {
+  const b = (await el.boundingBox())!
+  return b.width * b.height
+}
+
+async function top(el: import('@playwright/test').Locator): Promise<number> {
+  return (await el.boundingBox())!.y
+}
+
+test.describe('balances treemap — desktop', () => {
+  test('sizes tiles by value, biggest holding biggest, with % above value on the face', async ({ page }) => {
+    await page.goto(`/account/${FOX}?view=balances`)
+    const map = page.locator('.tm')
+    await expect(map).toBeVisible()
+
+    const tiles = page.locator('.tm-tile')
+    const count = await tiles.count()
+    expect(count).toBeGreaterThanOrEqual(2)
+
+    // Balances arrive sorted desc by value, so the first tile is the largest area.
+    const first = await area(tiles.first())
+    for (let i = 1; i < count; i++) {
+      expect(first, `tile 0 should be >= tile ${i}`).toBeGreaterThanOrEqual(await area(tiles.nth(i)) - 1)
+    }
+
+    // The biggest tile leads with the TOKEN AMOUNT; the $ value follows as a
+    // dimmed suffix (big tiles only), and share (%) sits above the value line.
+    const face = tiles.first()
+    const faceText = (await face.innerText()).replace(/\s+/g, ' ')
+    expect(faceText).toMatch(/\$/)
+    expect(faceText).toMatch(/%/)
+    expect(await top(face.locator('.tm-pct')), '% sits above value').toBeLessThan(await top(face.locator('.tm-val')))
+    // Amount primary: the copyable amount carries no $; the dimmed suffix does.
+    const amt = face.locator('.tm-copyamt')
+    expect(await amt.innerText()).not.toContain('$')
+    expect(await face.locator('.tm-val-usd').innerText()).toContain('$')
+    // See first, copy second: hovering the amount reveals the full-precision
+    // figure in an anchored chip — every digit, grouped, no compact suffixes —
+    // with the "click to copy" hint teaching the second action.
+    const tip = page.locator('.tm-exact-tip')
+    await amt.hover()
+    await expect(tip).toBeVisible()
+    await expect(tip).toContainText('click to copy')
+    const exact = (await tip.innerText()).replace('click to copy', '').trim()
+    expect(exact).toMatch(/^-?[\d,]+(\.\d+)?$/)
+    expect(exact).not.toMatch(/[kMB$]/)
+    // A click while the chip shows copies the plain number, confirms in the chip
+    // itself, and must NOT toggle the tile lock underneath.
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+    await amt.click()
+    await expect(tip).toHaveText('Copied ✓')
+    const copied = await page.evaluate(() => navigator.clipboard.readText())
+    expect(copied).toMatch(/^-?\d+(\.\d+)?$/)
+    expect(exact.replace(/,/g, '')).toBe(copied)
+    await expect(face).toHaveAttribute('aria-pressed', 'false')
+    // Leaving dismisses the chip.
+    await page.locator('.tm-detail-sym').hover()
+    await expect(tip).toHaveCount(0)
+
+    // The detail below leads with the amount too: Amount is the first metric and
+    // its copyable figure reveals the same exact form on hover.
+    const grid = page.locator('.tm-detail-grid')
+    await expect(grid.locator('.tm-metric-label').first()).toHaveText('Amount')
+    await grid.locator('.tm-metric-value.strong .tm-copyamt').hover()
+    await expect(page.locator('.tm-exact-tip')).toContainText(/^-?[\d,]+(\.\d+)?/)
+
+    // No horizontal overflow.
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+    expect(overflow).toBeLessThanOrEqual(0)
+
+    // No tile may spill past the map container — a tiny tile must clip, not balloon.
+    const spill = await page.evaluate(() => {
+      const box = document.querySelector('.tm')!.getBoundingClientRect()
+      return [...document.querySelectorAll('.tm-tile')].reduce((max, t) => {
+        const r = t.getBoundingClientRect()
+        return Math.max(max, r.right - box.right, r.bottom - box.bottom, box.left - r.left, box.top - r.top)
+      }, 0)
+    })
+    expect(spill, 'tiles must stay within the treemap container').toBeLessThanOrEqual(1)
+  })
+
+  test('previews on hover, locks on click, and the lock survives hovering elsewhere', async ({ page }) => {
+    await page.goto(`/account/${FOX}?view=balances`)
+    const tiles = page.locator('.tm-tile:not(.tm-other)')
+    await expect(tiles.first()).toBeVisible()
+
+    const detail = page.locator('.tm-detail')
+    // The default focus (largest holding) shows only Value + Amount (+ a reserved
+    // lock) with its history graph — the old Price / Share / Free / "View asset"
+    // are gone.
+    await expect(detail).toContainText('Value')
+    await expect(detail).toContainText('Amount')
+    await expect(detail).not.toContainText('Price')
+    await expect(detail).not.toContainText('Share')
+    await expect(page.locator('.tm-detail-link')).toHaveCount(0)
+    // No padlock next to the amount — the lock/reserve breakdown below the
+    // metrics fully replaces it.
+    await expect(detail.locator('.tm-lock')).toHaveCount(0)
+    await expect(detail.locator('[data-testid="balance-breakdown"]')).toBeVisible()
+    // The focused asset's balance-history graph is docked in the same card.
+    await expect(detail.locator('.tm-hist svg')).toBeVisible()
+
+    const sym1 = (await tiles.nth(1).getAttribute('aria-label'))!.split(' — ')[0]
+    const sym2 = (await tiles.nth(2).getAttribute('aria-label'))!.split(' — ')[0]
+
+    // Nothing is locked yet, so hovering previews — the detail follows the pointer.
+    await tiles.nth(1).hover()
+    await expect(page.locator('.tm-detail-sym')).toHaveText(sym1)
+    await tiles.nth(2).hover()
+    await expect(page.locator('.tm-detail-sym')).toHaveText(sym2)
+
+    // Clicking locks the focus (deep-links via ?asset=)…
+    await tiles.nth(1).click()
+    await expect(page).toHaveURL(/asset=\d+/)
+    await expect(tiles.nth(1)).toHaveClass(/active/)
+    await expect(page.locator('.tm-detail-sym')).toHaveText(sym1)
+
+    // …and now hovering a different tile no longer changes the focus.
+    await tiles.nth(2).hover()
+    await expect(page.locator('.tm-detail-sym')).toHaveText(sym1)
+
+    // Clicking the locked tile again unlocks it (clean URL); hover previews again.
+    await tiles.nth(1).click()
+    await expect(page).not.toHaveURL(/asset=/)
+    await tiles.nth(2).hover()
+    await expect(page.locator('.tm-detail-sym')).toHaveText(sym2)
+  })
+
+  test('focusing HDX shows the aggregated bar and the unlock schedule', async ({ page }) => {
+    await page.goto(`/account/${FOX}?view=balances&asset=0`)
+    const bd = page.locator('[data-testid="balance-breakdown"]')
+    await expect(bd).toBeVisible()
+
+    // One aggregated bar, no separate totals line.
+    await expect(bd.locator('.bd-agg')).toHaveCount(1)
+    await expect(bd).toContainText('Locks')
+
+    // The compact schedule: reason · amount · duration, sorted by time to
+    // liquidity — transferable first, dated ascending (days, not dates), then
+    // the open residual and the static "until …" reserves.
+    // Scope to the rendered legend: the band also holds an aria-hidden clone of it,
+    // used only to measure the legend's single-line width.
+    const rows = bd.locator('.bd-sched .bd-sched-row')
+    expect(await rows.count()).toBe(9)
+    await expect(rows.nth(0)).toContainText('free')
+    await expect(rows.nth(1)).toContainText('staking')
+    await expect(rows.nth(1)).toContainText('unstake to free')
+    await expect(rows.nth(2)).toContainText('DCA')
+    await expect(rows.nth(2)).toContainText('until cancelled')
+    await expect(rows.nth(3)).toContainText('deposits')
+    await expect(rows.nth(3)).toContainText('until cleared')
+    await expect(rows.nth(4)).toContainText('vote')
+    await expect(rows.nth(4)).toContainText('while voting/delegating')
+    await expect(rows.nth(5)).toContainText('GHDX unstake')
+    await expect(rows.nth(5)).toContainText(/in \d+(h|d)/)
+    await expect(rows.nth(6)).toContainText('GHDX')
+    await expect(rows.nth(6)).not.toContainText('GHDX unstake')
+    await expect(rows.nth(6)).toContainText('if unstaked now')
+    await expect(rows.nth(7)).toContainText('vote')
+    await expect(rows.nth(7)).toContainText(/in \d+(h|d)/)
+    await expect(rows.nth(8)).toContainText('vesting')
+    await expect(rows.nth(8)).toContainText('vests linearly')
+    // days, never dates
+    await expect(bd).not.toContainText(/Aug|Sep|Nov|Mar/)
+
+    // A non-native asset (DOT) shows its reserve-only schedule.
+    await page.goto(`/account/${FOX}?view=balances&asset=5`)
+    await expect(bd).toContainText('OTC')
+    await expect(bd).toContainText('until pulled')
+    await expect(bd).not.toContainText('unstake')
+  })
+
+  test('the tag balances view shows the aggregated schedule', async ({ page }) => {
+    await page.goto('/tag/kraken?view=balances&asset=0')
+    const bd = page.locator('[data-testid="balance-breakdown"]')
+    await expect(bd).toBeVisible()
+    await expect(bd.locator('.bd-agg')).toHaveCount(1)
+    await expect(bd).toContainText(/in \d+(h|d)/)
+    await expect(bd).toContainText('vote')
+  })
+
+  test('switching assets clears a lingering balance-history tooltip', async ({ page }) => {
+    await page.goto(`/account/${FOX}?view=balances`)
+    const tiles = page.locator('.tm-tile:not(.tm-other)')
+    await expect(page.locator('.tm-hist svg')).toBeVisible()
+
+    // Lock an asset so hovering the chart can't change the previewed asset.
+    await tiles.nth(1).click()
+    // Hovering the chart shows a crosshair tooltip for the day under the pointer.
+    await page.locator('.tm-hist .apx-wrap').hover()
+    await expect(page.locator('.apx-tip')).toBeVisible()
+
+    // Selecting another asset must clear that stale tooltip.
+    await tiles.nth(2).click()
+    await expect(page.locator('.apx-tip')).toHaveCount(0)
+  })
+
+  test('lists unpriced and historically held assets as selectable rows', async ({ page }) => {
+    await page.goto(`/account/${FOX}?view=balances`)
+    await expect(page.locator('.tm')).toBeVisible()
+
+    const rows = page.locator('.tm-unpriced')
+    await expect(rows).toContainText('without a market price')
+    await expect(rows).toContainText('historically held')
+
+    // Selecting the historically-held asset focuses it: no live amount, but its
+    // history graph still renders.
+    const past = page.locator('.tm-chip', { hasText: 'PAST' })
+    await past.click()
+    await expect(page).toHaveURL(/asset=313131/)
+    await expect(page.locator('.tm-detail-sym')).toHaveText('PAST')
+    await expect(page.locator('.tm-detail-note')).toContainText('Not currently held')
+    await expect(page.locator('.tm-detail .tm-hist svg')).toBeVisible()
+
+    // Selecting the unpriced holding shows its amount (no value) and, since it has
+    // no indexed history, an explicit note instead of a chart.
+    await page.locator('.tm-chip', { hasText: 'MYST' }).click()
+    const detail = page.locator('.tm-detail')
+    await expect(page.locator('.tm-detail-sym')).toHaveText('MYST')
+    await expect(detail).toContainText('Amount')
+    await expect(detail).not.toContainText('Value')
+    await expect(detail).toContainText('No balance history indexed')
+  })
+
+  // The owl folds a long dust tail into an aggregated "Other" tile.
+  test('hovering "Other" does not shift the section; it inspects on click', async ({ page }) => {
+    const OWL = '1NPoMQbiA6trJKkjB35uk96MeJD4PGWkLQLH7k7hXEkZpiba'
+    await page.goto(`/account/${OWL}?view=balances`)
+    const other = page.locator('.tm-tile.tm-other')
+    await expect(other).toBeVisible()
+
+    const detail = page.locator('.tm-detail')
+    // The default focus is an asset with a history graph; record its stable height.
+    await expect(detail.locator('.tm-hist svg')).toBeVisible()
+    const heightBefore = await detail.evaluate(el => (el as HTMLElement).offsetHeight)
+
+    // Hovering "Other" must NOT swap in the shorter breakdown — no preview, so no
+    // height change and no flicker as the pointer crosses the dust tile.
+    await other.hover()
+    await expect(page.locator('.tm-detail-sym')).not.toHaveText('Other holdings')
+    const heightAfter = await detail.evaluate(el => (el as HTMLElement).offsetHeight)
+    expect(heightAfter, 'section height stays put while hovering Other').toBe(heightBefore)
+
+    // Clicking "Other" still opens its breakdown of dust assets.
+    await other.click()
+    await expect(page.locator('.tm-detail-sym')).toHaveText('Other holdings')
+
+    // Selecting a dust asset (no indexed history) keeps the graph slot's height,
+    // so the rows below don't jump.
+    await detail.locator('.tm-chips-scroll .tm-chip').filter({ hasText: 'DUST' }).first().click()
+    await expect(page.locator('.tm-detail-sym')).toHaveText(/^DUST\d+$/)
+    await expect(page.locator('.tm-hist')).toContainText('No balance history indexed')
+    const histH = await page.locator('.tm-hist').evaluate(el => (el as HTMLElement).offsetHeight)
+    expect(histH, 'the history slot holds a stable height').toBe(243)
+  })
+})
+
+test.describe('balances treemap — mobile', () => {
+  test.use({ viewport: { width: 390, height: 844 } })
+
+  test('no horizontal overflow and tapping a tile focuses it with value, amount and graph', async ({ page }) => {
+    await page.goto(`/account/${FOX}?view=balances`)
+    const tiles = page.locator('.tm-tile:not(.tm-other)')
+    await expect(tiles.first()).toBeVisible()
+
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+    expect(overflow, 'treemap must not widen the page at 390px').toBeLessThanOrEqual(0)
+
+    // Tap an asset tile → the detail card focuses it and shows value/amount + graph.
+    const target = tiles.nth(1)
+    const sym = (await target.getAttribute('aria-label'))!.split(' — ')[0]
+    await target.click()
+    const detail = page.locator('.tm-detail')
+    await expect(page.locator('.tm-detail-sym')).toHaveText(sym)
+    await expect(detail).toContainText('Value')
+    await expect(detail).toContainText('Amount')
+    await expect(detail.locator('.tm-hist svg')).toBeVisible()
+  })
+})
