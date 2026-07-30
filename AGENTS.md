@@ -13,6 +13,7 @@ Hydration Neckwork indexes Hydration into ClickHouse and serves the Explorer and
 - Existing deployments matter. Schema changes must be idempotent and safe for both fresh databases and upgrades; destructive migrations need an explicit offline procedure and validation.
 - Keep API response changes additive and backward-compatible unless a versioned break is explicitly planned.
 - Inject credentials through environment variables; never commit tokens, keys, or populated environment files.
+- The `user_*` tables are the only private data in the database; everything else is public chain data. A deployment may expose a read-only ClickHouse endpoint to people outside the project, so treat them as never-exportable: no new read path, role, view, export, fixture, or log line may surface their contents. `user_sessions` holds session token hashes, so `system.query_log` is privileged too.
 
 ## Performance engineering
 
@@ -53,6 +54,7 @@ Keep in mind for new models:
 - Prefer an MV; for per-entity stateful needs an MV cannot express, prefer bounded request-time reconstruction or an in-memory snapshot on the existing coordinated refresher; add a new `derivations` job only for genuinely global, heavy models none of the above can express, and avoid new scheduled batch recompute jobs.
 - Every derived table must be reproducible from raw — no derived-only state.
 - Exception: `user_*` tables (`clickhouse/schema/004_user.sql`) are user-authored source-of-record, written only by the api service — they are NOT reproducible from raw, are excluded from every drop-and-refill/projection rebuild, and are exported nightly by the user-backup service.
+- Adding a `user_*` table means declaring it in `clickhouse/schema/004_user.sql` **and** adding it to `TABLES=` in `ops/backup-user-tables.sh` — the two lists must agree, or the table is silently never backed up despite being unreproducible. Where a deployment exposes the read-only ClickHouse endpoint, its host-side grant script (outside this repo) derives the reader's revokes from `004_user.sql` and must be re-run so the new table is unreadable; it also aborts if the two lists have diverged.
 - A new or evolved MV table gets its history on an existing deployment through a one-time ad-hoc `INSERT … SELECT` from raw mirroring the MV's exact `SELECT`/`WHERE` (replay-safe through the table's replacement key), run during rollout and not committed — no migration or backfill scripts live in the repo, and a fresh database is complete from the declaration alone.
 - Recompute jobs must be idempotent and correct under out-of-order raw (partition-diff or atomic full-replace — never a forward high-water cursor).
 - Evolving a model means editing the declaration and rebuilding the projection (drop and let it refill, or reset the derived layer) — never a version-numbered migration or an in-place data patch.
