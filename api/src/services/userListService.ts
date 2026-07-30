@@ -696,3 +696,19 @@ export function publicLists(): ListSummary[] {
 export function publicListsByOwner(owner: string): ListSummary[] {
   return ownedListsFor(owner).filter(l => l.visibility === 'public')
 }
+
+// Which PUBLIC lists tag `accountId` as a member of ANY of their tags — the
+// teaser a non-subscriber's own account page may reveal ("this account is
+// tagged somewhere public"), never a tag's name or its other members (same
+// privacy boundary listDetailResponse holds for a public list's own detail
+// page: curation stays with the owner/subscribers, only statistics are
+// public). `list.memberTag` already carries exactly one entry per account
+// currently tagged anywhere in that list, so this is a plain in-memory scan
+// over the resident public lists — no ClickHouse round trip. `accountId`
+// must already be canonicalized the way setTagMembers stores members
+// (resolveDisplayAccountId) — the route caller owns that.
+export function publicListsTagging(accountId: string): ListSummary[] {
+  return [...lists.values()].filter(l => l.visibility === 'public' && l.memberTag.has(accountId))
+    .map(listSummary)
+    .sort((a, b) => b.subscriberCount - a.subscriberCount || a.name.localeCompare(b.name))
+}

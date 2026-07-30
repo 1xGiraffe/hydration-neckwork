@@ -12,7 +12,7 @@ import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { useSession } from '../session'
 import { requestConnect } from '../connectDialog'
-import { useAddressLists, useMe } from '../hooks/useUser'
+import { useAddressLists, useAddressTaggedIn, useMe } from '../hooks/useUser'
 import { allAssociations, useTagMapVersion } from '../userTags'
 import type { ListSummaryRef } from '../types'
 
@@ -35,6 +35,7 @@ export function Account({ address }: { address: string }) {
   const isOwn = !!session && !!data && session.accountId === data.accountId
   const me = useMe()
   const libs = useAddressLists(address)
+  const taggedIn = useAddressTaggedIn(address)
   const [editOpen, setEditOpen] = useState(false)
   const [editMounted, setEditMounted] = useState(false)
   const now = useNow()
@@ -172,7 +173,8 @@ export function Account({ address }: { address: string }) {
 
               <CloseAccountsSection address={canonicalAddress ?? address} />
 
-              <ListsSection publicLists={libs.data ?? []} ownLists={isOwn ? (me.data?.lists ?? []) : []} isOwn={isOwn} session={session} />
+              <ListsSection publicLists={libs.data ?? []} ownLists={isOwn ? (me.data?.lists ?? []) : []} isOwn={isOwn} />
+              <TaggedInHint taggedIn={taggedIn.data ?? []} session={session} />
 
               <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={history.data?.portfolioSeries ?? data.portfolioSeries ?? []} dates={history.data?.portfolioDates ?? data.portfolioDates} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} loading={history.isLoading || (history.isFetching && !history.data)} valueEvents={valueEvents.data} />
               </>)}
@@ -208,15 +210,11 @@ export function Account({ address }: { address: string }) {
 // of (every viewer sees these), plus — on the account's own page — every one of
 // the owner's OWN lists including their private ones. `ownLists` is the
 // superset for anything the viewer owns, so a list owned by the viewed
-// account is deduped against it rather than shown twice. `session` is passed
-// in (rather than read via useSession() here) purely so the logged-out hint
-// below stays unit-testable without a real session — same DI PublicListsPanel
-// already uses.
-export function ListsSection({ publicLists, ownLists, isOwn, session }: {
+// account is deduped against it rather than shown twice.
+export function ListsSection({ publicLists, ownLists, isOwn }: {
   publicLists: ListSummaryRef[]
   ownLists: ListSummaryRef[]
   isOwn: boolean
-  session: ReturnType<typeof useSession>
 }) {
   const seen = new Set(ownLists.map(l => l.listId))
   const rows = isOwn ? [...ownLists, ...publicLists.filter(l => !seen.has(l.listId))] : publicLists
@@ -243,19 +241,34 @@ export function ListsSection({ publicLists, ownLists, isOwn, session }: {
             ))}
         </tbody>
       </table></div>
-      {isOwn ? (
-        <div className="ext-link-row"><Link to={paths.lists()} className="ext-link">Manage lists →</Link></div>
-      ) : !session && rows.length > 0 ? (
-        // A visitor with no session can't tell from the table alone that
-        // subscribing would follow this account's tags elsewhere in the
-        // explorer — a quiet, single-line nudge rather than a second
-        // Subscribe control per row (the table above has none; this account
-        // isn't a list a viewer subscribes to directly). Opens the same
-        // ConnectDialog every other logged-out subscribe affordance does.
-        <div className="muted lists-login-hint">
-          Tagged in {rows.length === 1 ? `"${rows[0].name}"` : `${rows.length} public lists`} — <button type="button" className="hint-link" onClick={requestConnect}>log in to subscribe</button>.
-        </div>
-      ) : null}
+      {isOwn && <div className="ext-link-row"><Link to={paths.lists()} className="ext-link">Manage lists →</Link></div>}
     </>
+  )
+}
+
+// A quiet nudge for a visitor with no session: GET /explorer/address/:address
+// /tagged-in (userListService.publicListsTagging) reveals only that a public
+// list TAGS this account as a member of one of its tags — never the tag's own
+// name or its other members, which stay hidden from a non-owner/non-subscriber
+// everywhere else (see listDetailResponse's identical boundary). This is
+// deliberately independent of ListsSection above: that section is about
+// lists the viewed account itself OWNS and made public, which is a different
+// question — an account can own zero public lists while still being tagged
+// in someone else's, and that's exactly the case this exists to surface. Logged
+// in (owner or not), the affordance disappears — a viewer who already has a
+// session either owns the list, already sees the tag through their own
+// tag-map, or gets nothing extra from being told "log in" when they're
+// already logged in. `session` is passed in (rather than read via
+// useSession() here) purely so this stays unit-testable without a real
+// session — same DI PublicListsPanel already uses.
+export function TaggedInHint({ taggedIn, session }: {
+  taggedIn: ListSummaryRef[]
+  session: ReturnType<typeof useSession>
+}) {
+  if (session || !taggedIn.length) return null
+  return (
+    <div className="muted lists-login-hint">
+      Tagged in {taggedIn.length === 1 ? `"${taggedIn[0].name}"` : `${taggedIn.length} public lists`} — <button type="button" className="hint-link" onClick={requestConnect}>log in to subscribe</button>.
+    </div>
   )
 }
