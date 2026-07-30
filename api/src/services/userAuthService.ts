@@ -68,8 +68,19 @@ const NONCE_TTL_MS = 5 * 60_000
 const pendingChallenges = new Map<string, PendingChallenge>()
 
 // ---- sessions: raw token only ever exists client-side; the map and the table
-// hold its sha256. 90-day sliding expiry, persisted at most hourly. ----
-interface Session { accountId: string; expiresAtMs: number; lastPersistedMs: number }
+// hold its sha256. 90-day sliding expiry, persisted at most hourly. Each
+// session doubles as a "device" on the devices list: label/createdVia say what
+// logged in and how ('wallet' signature or a scanned 'qr' handoff), so the
+// owner can recognize and revoke it. ----
+interface Session {
+  accountId: string
+  expiresAtMs: number
+  lastPersistedMs: number
+  label: string
+  createdVia: string
+  createdAtMs: number
+  lastSeenMs: number
+}
 const SESSION_TTL_MS = 90 * 24 * 3600_000
 const SESSION_PERSIST_EVERY_MS = 3600_000
 const sessionsByHash = new Map<string, Session>()
@@ -113,36 +124,65 @@ export function verifyChallenge(nonce: string, address: string, signature: strin
   return pending.accountId
 }
 
+// Same additive-column guard as ensureTagMemberPositionColumn (see its comment
+// in userListService.ts): `CREATE TABLE IF NOT EXISTS` never re-runs against a
+// deployed database, so the device-metadata columns added to the user_sessions
+// declaration need this to reach databases created before them. Metadata-only,
+// safe to run unconditionally on every start, before loadUserSessions() first
+// SELECTs the columns.
+export async function ensureSessionDeviceColumns(c: ClickHouseClient): Promise<void> {
+  await c.command({ query: `ALTER TABLE price_data.user_sessions ADD COLUMN IF NOT EXISTS label String DEFAULT '' AFTER expires_at` })
+  await c.command({ query: `ALTER TABLE price_data.user_sessions ADD COLUMN IF NOT EXISTS created_via LowCardinality(String) DEFAULT 'wallet' AFTER label` })
+}
+
 export async function loadUserSessions(): Promise<void> {
   const res = await client.query({
-    query: `SELECT token_hash, account_id, expires_at
+    query: `SELECT token_hash, account_id, expires_at, label, created_via, created_at, last_seen
             FROM price_data.user_sessions FINAL
             WHERE deleted = 0 AND expires_at > now()`,
     format: 'JSONEachRow',
   })
   sessionsByHash.clear()
   const now = Date.now()
-  for (const r of await res.json<{ token_hash: string; account_id: string; expires_at: string }>()) {
+  const ms = (dt: string | undefined) => (dt ? Date.parse(`${dt.replace(' ', 'T')}Z`) : NaN)
+  for (const r of await res.json<{ token_hash: string; account_id: string; expires_at: string; label?: string; created_via?: string; created_at?: string; last_seen?: string }>()) {
     // ClickHouse DateTime comes back as 'YYYY-MM-DD HH:MM:SS' (UTC); the WHERE
     // clause already excludes expired rows server-side, but re-check locally
     // too so a clock-skewed or stubbed source can never resurrect a dead session.
-    const expiresAtMs = Date.parse(`${r.expires_at.replace(' ', 'T')}Z`)
-    if (expiresAtMs > now) sessionsByHash.set(r.token_hash, { accountId: r.account_id, expiresAtMs, lastPersistedMs: now })
+    const expiresAtMs = ms(r.expires_at)
+    if (expiresAtMs > now) {
+      sessionsByHash.set(r.token_hash, {
+        accountId: r.account_id, expiresAtMs, lastPersistedMs: now,
+        label: r.label ?? '', createdVia: r.created_via || 'wallet',
+        createdAtMs: ms(r.created_at) || now, lastSeenMs: ms(r.last_seen) || now,
+      })
+    }
   }
 }
 
 async function persistSession(hash: string, s: Session, deleted = 0): Promise<void> {
   await client.insert({
     table: 'price_data.user_sessions',
-    values: [{ token_hash: hash, account_id: s.accountId, expires_at: chDateTime(s.expiresAtMs), last_seen: chDateTime(Date.now()), deleted }],
+    values: [{
+      token_hash: hash, account_id: s.accountId, expires_at: chDateTime(s.expiresAtMs),
+      // created_at is written explicitly: ReplacingMergeTree keeps the whole
+      // newest row, so relying on the column DEFAULT would reset the creation
+      // time on every hourly refresh.
+      label: s.label, created_via: s.createdVia, created_at: chDateTime(s.createdAtMs),
+      last_seen: chDateTime(s.lastSeenMs), deleted,
+    }],
     format: 'JSONEachRow',
   })
 }
 
-export async function issueSession(accountId: string): Promise<string> {
+export async function issueSession(accountId: string, meta?: { label?: string; via?: string }): Promise<string> {
   const token = randomBytes(32).toString('hex')
   const hash = sha256(token)
-  const session: Session = { accountId, expiresAtMs: Date.now() + SESSION_TTL_MS, lastPersistedMs: Date.now() }
+  const now = Date.now()
+  const session: Session = {
+    accountId, expiresAtMs: now + SESSION_TTL_MS, lastPersistedMs: now,
+    label: meta?.label ?? '', createdVia: meta?.via ?? 'wallet', createdAtMs: now, lastSeenMs: now,
+  }
   sessionsByHash.set(hash, session)
   await persistSession(hash, session)
   return token
@@ -157,6 +197,7 @@ export function sessionAccount(token: string): string | null {
   // Sliding expiry: refresh the window, persist at most hourly (fire-and-forget:
   // an unpersisted slide only costs an earlier re-login after a restart).
   s.expiresAtMs = now + SESSION_TTL_MS
+  s.lastSeenMs = now
   if (now - s.lastPersistedMs > SESSION_PERSIST_EVERY_MS) {
     s.lastPersistedMs = now
     void persistSession(hash, s).catch(() => {})
@@ -169,6 +210,58 @@ export async function revokeSession(token: string): Promise<void> {
   const s = sessionsByHash.get(hash)
   sessionsByHash.delete(hash)
   if (s) await persistSession(hash, s, 1)
+}
+
+// The devices list: every live session of this account, newest activity first.
+// `id` is the token hash — irreversible, so exposing it to its own account is
+// safe, and it is exactly the handle revokeSessionByHash needs back.
+export interface SessionInfo { id: string; label: string; createdVia: string; createdAt: string; lastSeen: string; current: boolean }
+
+export function listSessions(accountId: string, currentToken: string): SessionInfo[] {
+  const currentHash = sha256(currentToken)
+  const now = Date.now()
+  const out: SessionInfo[] = []
+  for (const [hash, s] of sessionsByHash) {
+    if (s.accountId !== accountId || s.expiresAtMs < now) continue
+    out.push({
+      id: hash, label: s.label, createdVia: s.createdVia,
+      createdAt: chDateTime(s.createdAtMs), lastSeen: chDateTime(s.lastSeenMs),
+      current: hash === currentHash,
+    })
+  }
+  return out.sort((a, b) => (a.current !== b.current ? (a.current ? -1 : 1) : b.lastSeen.localeCompare(a.lastSeen)))
+}
+
+// Revoke by token hash — the handle the devices list hands out — but only for
+// a session the caller's own account holds.
+export async function revokeSessionByHash(accountId: string, hash: string): Promise<boolean> {
+  const s = sessionsByHash.get(hash)
+  if (!s || s.accountId !== accountId) return false
+  sessionsByHash.delete(hash)
+  await persistSession(hash, s, 1)
+  return true
+}
+
+// A recognizable "what logged in here" for the devices list, derived once at
+// session creation from the User-Agent. Best-effort: unmatched agents get ''
+// and the UI shows its own placeholder.
+export function deviceLabelFromUserAgent(ua: string | undefined): string {
+  if (!ua) return ''
+  const os = /Android/i.test(ua) ? 'Android'
+    : /iPhone|iPod/i.test(ua) ? 'iPhone'
+    : /iPad/i.test(ua) ? 'iPad'
+    : /Windows/i.test(ua) ? 'Windows'
+    : /Macintosh|Mac OS X/i.test(ua) ? 'macOS'
+    : /CrOS/i.test(ua) ? 'ChromeOS'
+    : /Linux/i.test(ua) ? 'Linux' : ''
+  const browser = /Firefox\/|FxiOS\//i.test(ua) ? 'Firefox'
+    : /Edg(e|A|iOS)?\//i.test(ua) ? 'Edge'
+    : /OPR\/|Opera/i.test(ua) ? 'Opera'
+    : /SamsungBrowser\//i.test(ua) ? 'Samsung Internet'
+    : /Chrome\/|CriOS\//i.test(ua) ? 'Chrome'
+    : /Safari\//i.test(ua) ? 'Safari' : ''
+  if (!browser) return os
+  return os ? `${browser} on ${os}` : browser
 }
 
 // Route guard: resolves the bearer token or answers 401 itself. Callers bail on null.
