@@ -49,6 +49,14 @@ export function useList(id: string | null, authed: boolean) {
 export function useAddressLists(address: string | null) {
   return useQuery({ queryKey: ['address-lists', address], queryFn: ({ signal }) => api.addressLists(address!, signal), enabled: !!address, staleTime: 30_000 })
 }
+// Public lists that TAG this address as a member — the account page's
+// "tagged in a public list" hint for a viewer with no session. Unrelated to
+// useAddressLists above (ownership); ungated on session and same staleTime,
+// matching that sibling query so both stay eligible for the same shared
+// cache regardless of who's asking.
+export function useAddressTaggedIn(address: string | null) {
+  return useQuery({ queryKey: ['address-tagged-in', address], queryFn: ({ signal }) => api.addressTaggedIn(address!, signal), enabled: !!address, staleTime: 30_000 })
+}
 
 // ── List tag aggregate view ──────────────────────────────────────────────
 // Mirrors the useTag*/useAddress* hooks in hooks/useExplorerData.ts, but authed

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { getProfileAvatar } from '../services/userProfileService.ts'
-import { publicLists, publicListsByOwner, getList } from '../services/userListService.ts'
+import { publicLists, publicListsByOwner, publicListsTagging, getList } from '../services/userListService.ts'
 import { listSummaryRef, listDetailResponse } from './user.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
 import { accountRef, resolveDisplayAccountId } from '../services/explorerService.ts'
@@ -62,5 +62,21 @@ export async function listsRoutes(fastify: FastifyInstance) {
     const n = normalizeAddress(params.data.address)
     if (!n) return reply.status(400).send({ error: 'Invalid address' })
     return publicListsByOwner(resolveDisplayAccountId(n.accountId)).map(listSummaryRef)
+  })
+
+  // Which public lists TAG this address as a member of one of their tags —
+  // the teaser a non-subscriber's own account page may reveal ("this account
+  // is tagged somewhere public"). Deliberately the same summary shape as the
+  // sibling route above (name, owner, counts) and nothing more: a public
+  // list's tag names and other members stay hidden from a non-owner/
+  // non-subscriber everywhere else (see listDetailResponse's identical
+  // boundary on a list's own public detail), and this route must not become
+  // the one place that leaks them.
+  fastify.get('/explorer/address/:address/tagged-in', async (req, reply) => {
+    const params = addressParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const n = normalizeAddress(params.data.address)
+    if (!n) return reply.status(400).send({ error: 'Invalid address' })
+    return publicListsTagging(resolveDisplayAccountId(n.accountId)).map(listSummaryRef)
   })
 }

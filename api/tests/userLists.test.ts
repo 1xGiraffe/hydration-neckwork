@@ -3,7 +3,7 @@ import {
   initUserListService, loadUserLists, ensurePersonalList,
   createList, updateList, deleteList,
   createTag, updateTag, deleteTag, setTagMembers, setMemberOrder,
-  getList, ownedListsFor,
+  getList, ownedListsFor, publicListsTagging,
 } from '../src/services/userListService.ts'
 import { listDetailResponse } from '../src/routes/user.ts'
 import { UserDataError } from '../src/services/userProfileService.ts'
@@ -213,5 +213,50 @@ describe('ordered membership (drag/keyboard reorder)', () => {
     // succeeds — this is exactly the operation the corrupted `order` used to
     // 400 the user out of.
     await expect(setMemberOrder(OWNER, lib.listId, tag.tagId, [M1])).resolves.toMatchObject({ order: [M1] })
+  })
+})
+
+// publicListsTagging is the account page's "this account is tagged in a
+// public list" teaser for a viewer who isn't a subscriber — ownership
+// (publicListsByOwner, tested above via ownedListsFor) is a DIFFERENT
+// question: an account can own zero public lists yet still be tagged as a
+// member of someone else's, which is exactly the case this exists to catch.
+describe('publicListsTagging — member-of teaser for non-subscribers', () => {
+  let client: ReturnType<typeof fakeClient>
+  beforeEach(async () => { client = fakeClient(); initUserListService(client); await loadUserLists() })
+
+  it('finds a public list that tags the account as a member, via the canonical accountId', async () => {
+    const lib = await createList(OWNER, 'Whales', '', 'public')
+    const tag = await createTag(OWNER, lib.listId, { name: 'Big fish' })
+    await setTagMembers(OWNER, lib.listId, tag.tagId, [M1], [])
+    expect(publicListsTagging(M1)).toMatchObject([{ listId: lib.listId, name: 'Whales' }])
+    // A different account, never added, is not tagged anywhere.
+    expect(publicListsTagging(M2)).toEqual([])
+  })
+
+  it('excludes a private list even though the account is genuinely a member of it', async () => {
+    const lib = await createList(OWNER, 'Private watch', '', 'private')
+    const tag = await createTag(OWNER, lib.listId, { name: 'Watch' })
+    await setTagMembers(OWNER, lib.listId, tag.tagId, [M1], [])
+    expect(publicListsTagging(M1)).toEqual([])
+  })
+
+  it('returns [] for an account tagged nowhere, including when public lists exist', async () => {
+    const lib = await createList(OWNER, 'Whales', '', 'public')
+    const tag = await createTag(OWNER, lib.listId, { name: 'Big fish' })
+    await setTagMembers(OWNER, lib.listId, tag.tagId, [M1], [])
+    expect(publicListsTagging(M3)).toEqual([])
+  })
+
+  it('never reveals tag names or membership — only the same summary shape ownership-based lists get', async () => {
+    // listSummary()'s own shape has no `tags`/`members` field at all — this
+    // pins that publicListsTagging returns exactly that shape, not something
+    // richer that a route could accidentally forward.
+    const keys = ['listId', 'name', 'note', 'visibility', 'isPersonal', 'ownerAccountId', 'tagCount', 'accountCount', 'subscriberCount']
+    const lib = await createList(OWNER, 'Whales', '', 'public')
+    const tag = await createTag(OWNER, lib.listId, { name: 'Big fish' })
+    await setTagMembers(OWNER, lib.listId, tag.tagId, [M1], [])
+    const [summary] = publicListsTagging(M1)
+    expect(Object.keys(summary).sort()).toEqual(keys.sort())
   })
 })

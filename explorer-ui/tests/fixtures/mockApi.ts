@@ -140,6 +140,19 @@ function addressLists(rawAddress: string): ListSummaryRef[] {
   if (is(A.binance) || is(A.krakenEvm)) return [MOCK_LISTS[1]]
   return [MOCK_LISTS[0]]
 }
+// Which public lists TAG this address as a member of one of their real
+// MOCK_LIST_DETAILS tags — a DIFFERENT question from addressLists above
+// (ownership). Unlike addressLists' any-address fallback, this has no
+// default: an address that is genuinely nobody's tagged member (Treasury, an
+// arbitrary generated one, …) gets [], matching what the real
+// publicListsTagging scan would answer.
+function addressTaggedIn(rawAddress: string): ListSummaryRef[] {
+  const wanted = decodeURIComponent(rawAddress)
+  const is = (a: AccountRef) => a.accountId === wanted || a.address.toLowerCase() === wanted.toLowerCase()
+  return Object.entries(MOCK_LIST_DETAILS)
+    .filter(([, detail]) => detail.visibility === 'public' && detail.tags.some(t => t.members.some(is)))
+    .map(([listId]) => MOCK_LISTS.find(l => l.listId === listId)!)
+}
 // A personal list (the tag map's non-system entry) plus the required
 // system marker. `personal-watch` holds a known mock address so a resolved
 // pill can be asserted against it.
@@ -1077,6 +1090,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   // Public lists that list this address as owner or tagged member — must
   // also sit before the generic address route's greedy `(.+)`.
   { re: /^\/explorer\/address\/(.+)\/lists$/, fn: (m) => addressLists(m[1]) },
+  { re: /^\/explorer\/address\/(.+)\/tagged-in$/, fn: (m) => addressTaggedIn(m[1]) },
   {
     re: /^\/explorer\/address\/(.+)\/close-accounts$/, fn: () => ({
       accounts: [
