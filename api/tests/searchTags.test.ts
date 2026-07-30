@@ -74,3 +74,36 @@ describe('search: tag matches rank ahead of identity matches', () => {
     expect(results.some(r => r.type === 'address')).toBe(true)
   })
 })
+
+describe('search: within the tag group, match quality ranks ahead of directory order', () => {
+  afterEach(() => {
+    vi.doUnmock('../src/services/tagService.ts')
+    vi.restoreAllMocks()
+  })
+
+  // Regression: allTags() returned tags in directory/insertion order, so an
+  // exact "Kraken" tag inserted after "HDX Kraken LP" rendered below it —
+  // q=kraken came back ["HDX Kraken LP", "Kraken", ...] instead of leading
+  // with the exact name match.
+  it('ranks an exact tag name first, then a prefix, then a word-start match', async () => {
+    const { search } = await setup([
+      { tagId: 'hdx-kraken-lp', name: 'HDX Kraken LP' },
+      { tagId: 'kraken', name: 'Kraken' },
+      { tagId: 'kraken-whales', name: 'Kraken Whales' },
+    ])
+
+    const tags = (await search('kraken')).filter(r => r.type === 'tag')
+    expect(tags.map(r => r.value)).toEqual(['kraken', 'kraken-whales', 'hdx-kraken-lp'])
+  })
+
+  it('breaks a tie in match quality alphabetically by tag name', async () => {
+    const { search } = await setup([
+      { tagId: 'polkadot-treasury', name: 'Polkadot Treasury' },
+      { tagId: 'moonbeam-treasury', name: 'Moonbeam Treasury' },
+      { tagId: 'treasury', name: 'Treasury' },
+    ])
+
+    const tags = (await search('treasury')).filter(r => r.type === 'tag')
+    expect(tags.map(r => r.value)).toEqual(['treasury', 'moonbeam-treasury', 'polkadot-treasury'])
+  })
+})

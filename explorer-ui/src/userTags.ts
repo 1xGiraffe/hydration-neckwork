@@ -142,21 +142,43 @@ export function listForTag(tagId: string): { listId: string; listName: string } 
 
 export interface UserTagSearchHit { listId: string; listName: string; tagId: string; name: string; color: string; icon: string }
 
+// Case-insensitive rank for a name substring match: exact, then prefix, then
+// a word start ("spend" in "Treasury spend for X"), then any other substring —
+// mirrors nameMatchRank in api/src/services/explorerService.ts (the server's
+// tag and referendum-title matchers use the identical tiering; kept as a
+// small local copy since explorer-ui and api don't share a code package).
+// Without it, an exact "Treasury" list tag sorted below "Moonbeam Treasury"
+// merely because it was created later.
+function nameMatchRank(name: string, ql: string): number {
+  const t = name.toLowerCase()
+  if (t === ql) return 0
+  if (t.startsWith(ql)) return 1
+  const idx = t.indexOf(ql)
+  if (idx < 0) return -1
+  return /[a-z0-9]/i.test(name[idx - 1]) ? 3 : 2
+}
+
 // Client-side search over the viewer's OWN visible list tags — never the
 // server's shared, anonymous /explorer/search, which cannot know a viewer's
 // private tag names without becoming per-viewer (and losing its cache). Skips
 // the 'system' slot (it carries no tags of its own; the built-in directory has
 // its own /tag/:id search hit already). Logged out or before the tag map has
-// loaded, there is nothing to search.
+// loaded, there is nothing to search. Ranked exact/prefix/word-start/substring
+// (ties broken by name) before the limit is applied, so the closest match is
+// never crowded out by an earlier-created tag that merely also matches.
 export function searchUserTags(q: string, limit = 3): UserTagSearchHit[] {
   const needle = q.trim().toLowerCase()
   if (!needle || !indexes) return []
-  const hits: UserTagSearchHit[] = []
+  const hits: { hit: UserTagSearchHit; rank: number }[] = []
   for (const lib of indexes) {
     if (lib.listId === 'system') continue
     for (const t of lib.tags) {
-      if (t.name.toLowerCase().includes(needle)) hits.push({ listId: lib.listId, listName: lib.name, tagId: t.tagId, name: t.name, color: t.color, icon: t.icon })
+      const rank = nameMatchRank(t.name, needle)
+      if (rank >= 0) hits.push({ hit: { listId: lib.listId, listName: lib.name, tagId: t.tagId, name: t.name, color: t.color, icon: t.icon }, rank })
     }
   }
-  return hits.slice(0, limit)
+  return hits
+    .sort((a, b) => a.rank - b.rank || a.hit.name.localeCompare(b.hit.name))
+    .slice(0, limit)
+    .map(x => x.hit)
 }

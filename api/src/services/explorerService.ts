@@ -18303,17 +18303,20 @@ function referendumSearchResult(r: ReferendumListRow): SearchResult {
   return { type: 'referendum', value: referendumTitleKey(r.pallet, r.index), label: r.title ?? undefined, pallet: r.pallet, index: r.index, status: r.status }
 }
 
-// Case-insensitive rank for a title substring match: exact, then prefix, then a
-// word start ("spend" in "Treasury spend for X"), then any other substring — so a
-// query naming the start of a referendum's title outranks one that only lands
-// mid-word.
-function titleMatchRank(title: string, ql: string): number {
-  const t = title.toLowerCase()
+// Case-insensitive rank for a name/title substring match: exact, then prefix,
+// then a word start ("spend" in "Treasury spend for X"), then any other
+// substring — so a query naming the start of a name outranks one that only
+// lands mid-word. Shared by the referendum-title matcher and the tag-name
+// matcher below: without it, tag results came back in directory/insertion
+// order, so an exact "Treasury" tag sat under "Moonbeam Treasury" and
+// "Polkadot Treasury" merely because they were inserted first.
+function nameMatchRank(name: string, ql: string): number {
+  const t = name.toLowerCase()
   if (t === ql) return 0
   if (t.startsWith(ql)) return 1
   const idx = t.indexOf(ql)
   if (idx < 0) return -1
-  return /[a-z0-9]/i.test(title[idx - 1]) ? 3 : 2
+  return /[a-z0-9]/i.test(name[idx - 1]) ? 3 : 2
 }
 
 export async function search(q: string): Promise<SearchResult[]> {
@@ -18382,17 +18385,22 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
     seenAccounts.add(norm.accountId.toLowerCase())
   }
 
-  // Tag name — substring match, e.g. "kraken". Placed ahead of every fuzzy
-  // account/identity matcher below: a name query naming a system tag or a tag
-  // in the viewer's own lists should surface that tag before the identities it
-  // happens to also match, not after — an exact address/hash/block lookup above
-  // still wins outright, since this only fires on a query containing letters.
+  // Tag name — ranked exact/prefix/word-start/substring match (same tiering
+  // as the referendum-title matcher below), e.g. "kraken". Placed ahead of
+  // every fuzzy account/identity matcher below: a name query naming a system
+  // tag or a tag in the viewer's own lists should surface that tag before the
+  // identities it happens to also match, not after — an exact address/hash/
+  // block lookup above still wins outright, since this only fires on a query
+  // containing letters. Without the ranking, an exact "Treasury" tag sorted
+  // below "Moonbeam Treasury"/"Polkadot Treasury" on directory order alone.
   if (/[A-Za-z]/.test(query)) {
     const { allTags } = await import('./tagService.ts')
     const ql = query.toLowerCase()
-    for (const t of allTags()) {
-      if (t.name.toLowerCase().includes(ql)) results.push({ type: 'tag', value: t.tagId, label: t.name, icon: t.icon, color: t.color })
-    }
+    const rankedTags = allTags()
+      .map(t => ({ t, rank: nameMatchRank(t.name, ql) }))
+      .filter(x => x.rank >= 0)
+      .sort((a, b) => a.rank - b.rank || a.t.name.localeCompare(b.t.name))
+    for (const { t } of rankedTags) results.push({ type: 'tag', value: t.tagId, label: t.name, icon: t.icon, color: t.color })
   }
 
   // Combined "3-letter code + emoji name" query (either order: "pmo pig",
@@ -18496,7 +18504,7 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
     const ql = query.toLowerCase()
     const directory = await getReferenda(REFERENDA_SEARCH_DIRECTORY_LIMIT, 0)
     const ranked = directory
-      .map(r => (r.title ? { r, rank: titleMatchRank(r.title, ql) } : null))
+      .map(r => (r.title ? { r, rank: nameMatchRank(r.title, ql) } : null))
       .filter((x): x is { r: ReferendumListRow; rank: number } => x != null && x.rank >= 0)
       .sort((a, b) => a.rank - b.rank)
       .slice(0, MAX_REFERENDUM_RESULTS)

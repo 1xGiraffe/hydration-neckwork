@@ -168,4 +168,27 @@ describe('searchUserTags', () => {
     expect(searchUserTags('giraffe', 2)).toHaveLength(2)
     expect(searchUserTags('giraffe', 10)).toHaveLength(5)
   })
+
+  // Regression: hits used to come back in list-then-insertion order, so an
+  // exact "Kraken" tag created after "HDX Kraken LP" rendered below it. Ranks
+  // exact match first, then a prefix, then a word-start match, mirroring the
+  // server's tag/referendum-title tiering (nameMatchRank in
+  // api/src/services/explorerService.ts).
+  it('ranks an exact tag name first, then a prefix, then a word-start match — not creation order', () => {
+    const lpTag = { tagId: 'hdx-kraken-lp', name: 'HDX Kraken LP', color: '#0f0', icon: '', members: [] }
+    const exactTag = { tagId: 'kraken', name: 'Kraken', color: '#0f0', icon: '', members: [] }
+    const whalesTag = { tagId: 'kraken-whales', name: 'Kraken Whales', color: '#0f0', icon: '', members: [] }
+    setTagMap({ lists: [{ listId: 'lib1', name: 'Personal', tags: [lpTag, exactTag, whalesTag] }] })
+
+    expect(searchUserTags('kraken', 10).map(h => h.tagId)).toEqual(['kraken', 'kraken-whales', 'hdx-kraken-lp'])
+  })
+
+  it('breaks a tie in match quality alphabetically by tag name', () => {
+    const polkadot = { tagId: 'polkadot-treasury', name: 'Polkadot Treasury', color: '#0f0', icon: '', members: [] }
+    const moonbeam = { tagId: 'moonbeam-treasury', name: 'Moonbeam Treasury', color: '#0f0', icon: '', members: [] }
+    const exact = { tagId: 'treasury', name: 'Treasury', color: '#0f0', icon: '', members: [] }
+    setTagMap({ lists: [{ listId: 'lib1', name: 'Personal', tags: [polkadot, moonbeam, exact] }] })
+
+    expect(searchUserTags('treasury', 10).map(h => h.tagId)).toEqual(['treasury', 'moonbeam-treasury', 'polkadot-treasury'])
+  })
 })
