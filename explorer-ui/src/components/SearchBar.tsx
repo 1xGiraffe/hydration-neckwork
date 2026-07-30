@@ -1,0 +1,224 @@
+/* eslint-disable react-refresh/only-export-components -- exports routing/rendering helpers the tests exercise directly, alongside <SearchBar> */
+import { useState, useRef, useEffect, useId, useMemo } from 'react'
+import { api } from '../api/explorer'
+import { navigate, paths } from '../router'
+import type { SearchResult } from '../types'
+import { searchUserTags, useTagMapVersion } from '../userTags'
+import { ShortAddr, AccountEmoji, AssetIcon, TagIcon } from './ui'
+
+// A viewer's own list tag, resolved client-side (see userTags.searchUserTags)
+// rather than through the shared, anonymous /explorer/search — that endpoint is
+// cached across every viewer and cannot know a private tag's name. Carries its
+// own `type` so it merges into the same rendered list as a server SearchResult
+// without pretending to be one.
+interface UserTagHit { type: 'user-tag'; listId: string; listName: string; tagId: string; name: string; color: string; icon: string }
+type Hit = SearchResult | UserTagHit
+
+// `value` is the canonical AccountId32 (public-key hex); `label` carries the
+// human SS58/EVM form. Account links and display must use the latter.
+const srLooksAddr = (s?: string) => !!s && (s.startsWith('0x') || /^[1-9A-HJ-NP-Za-km-z]{40,}$/.test(s))
+
+// Exported for direct unit testing (routing + labelling are the durable behavior;
+// the debounced input above them needs a real DOM to exercise).
+export function routeFor(r: Hit): string {
+  if (r.type === 'user-tag') return paths.tag(r.tagId)
+  switch (r.type) {
+    case 'block': return paths.block(r.value)
+    case 'extrinsic': return paths.extrinsic(r.value)
+    // Never link to the raw public key — use the SS58/EVM address from `label`.
+    case 'address': return paths.account(srLooksAddr(r.label) ? r.label! : r.value)
+    case 'asset': return paths.asset(Number(r.value))
+    case 'tag': return paths.tag(r.value)
+    // Pallet is part of the referendum's identity (Democracy and OpenGov both
+    // index from 0), so both fields are needed to build its route.
+    case 'referendum': return r.pallet && r.index != null ? paths.referendum(r.pallet, r.index) : paths.dashboard()
+    default: return paths.dashboard()
+  }
+}
+// Exported alongside routeFor: a referendum's `value` is already pallet-qualified
+// (see referendumTitleKey server-side), which is what keeps a same-numbered
+// Democracy and OpenGov referendum from colliding on the same React key.
+export function hitKey(r: Hit): string {
+  return r.type === 'user-tag' ? `user-tag:${r.listId}:${r.tagId}` : `${r.type}:${r.value}`
+}
+export const TYPE_LABEL: Record<Hit['type'], string> = {
+  block: 'Block', extrinsic: 'Extrinsic', address: 'Account', asset: 'Asset', tag: 'Tag', 'user-tag': 'Tag', referendum: 'Referendum',
+}
+
+// Account results use the same avatar and shortened-address treatment as account
+// pills. Identity names remain secondary so the address stays visible in compact
+// dropdowns.
+export function SearchResultBody({ r }: { r: Hit }) {
+  if (r.type === 'user-tag') {
+    return (
+      <span className="sr-acct">
+        <TagIcon icon={r.icon} title={r.name} />
+        <span className="sr-acct-name">
+          <span className="mono" style={r.color ? { color: r.color } : undefined}>{r.name}</span>
+          <span className="sr-desc">· {r.listName}</span>
+        </span>
+      </span>
+    )
+  }
+  if (r.type === 'address') {
+    // `label` is the SS58 for a direct address hit, or the identity display for
+    // an identity-name hit; `value` is the canonical accountId32.
+    const addr = srLooksAddr(r.label) ? r.label! : r.value
+    const ident = r.identity
+    return (
+      <span className="sr-acct">
+        <AccountEmoji account={{ emoji: r.emoji, emojiName: r.emojiName, emojiUrl: r.emojiUrl, accountId: r.value }} className="sr-emoji" />
+        <span className="sr-val mono"><ShortAddr addr={addr} /></span>
+        {ident?.display
+          ? <span className="sr-acct-identity">{ident.display}{ident.verified && <span className="id-verified" title="Verified identity"> ✓</span>}</span>
+          : null}
+      </span>
+    )
+  }
+  if (r.type === 'asset') {
+    const asset = r.asset
+    return (
+      <span className="sr-acct">
+        <AssetIcon assetId={Number(r.value)} iconAssetId={asset?.iconAssetId} symbol={r.label || r.value} size={20} parachainId={asset?.parachainId} origin={asset?.origin} />
+        <span className="sr-acct-name"><span className="mono">{r.label || r.value}</span>{r.desc && r.desc !== r.label && <span className="sr-desc">{r.desc}</span>}</span>
+      </span>
+    )
+  }
+  if (r.type === 'tag') {
+    return (
+      <span className="sr-acct">
+        <TagIcon icon={r.icon ?? ''} title={r.label || r.value} />
+        <span className="sr-acct-name"><span className="mono">{r.label || r.value}</span></span>
+      </span>
+    )
+  }
+  if (r.type === 'referendum') {
+    return (
+      <span className="sr-acct">
+        <span className="sr-acct-name">
+          <span className="mono">{r.label ?? `Referendum #${r.index}`}</span>
+          <span className="sr-desc">#{r.index}{r.status ? ` · ${r.status}` : ''}</span>
+        </span>
+      </span>
+    )
+  }
+  return <span className="sr-val mono">{r.label || r.value}</span>
+}
+
+export function SearchBar({ variant }: { variant: 'hero' | 'topbar' }) {
+  useTagMapVersion()   // re-render when the viewer's tag map (thus its searchable tags) changes
+  const [value, setValue] = useState('')
+  const [results, setResults] = useState<SearchResult[]>([])
+  const [open, setOpen] = useState(false)
+  const [active, setActive] = useState(0)
+  const [searched, setSearched] = useState(false)
+  // The query `results` describes. While it differs from the input, the hits belong
+  // to text the user has already replaced: they must not render, be clickable, or be
+  // what Enter opens.
+  const [resultsQuery, setResultsQuery] = useState('')
+  const debounce = useRef<number | undefined>(undefined)
+  const blurTimeout = useRef<number | undefined>(undefined)
+  const searchAbort = useRef<AbortController | null>(null)
+  const searchSequence = useRef(0)
+  const resultsId = useId()
+
+  // `openFirst` is Enter's path: the hits on screen belong to older text, so the
+  // search runs first and navigates to what the typed query actually resolves to.
+  async function runSearch(qRaw: string, options: { openFirst?: boolean } = {}) {
+    const q = qRaw.trim()
+    const sequence = ++searchSequence.current
+    searchAbort.current?.abort()
+    if (!q) { setResults([]); setResultsQuery(''); setOpen(false); setSearched(false); return }
+    const controller = new AbortController()
+    searchAbort.current = controller
+    try {
+      const r = await api.search(q, controller.signal)
+      if (controller.signal.aborted || sequence !== searchSequence.current) return
+      if (options.openFirst && r[0]) { go(r[0]); return }
+      setResults(r); setResultsQuery(q); setActive(0); setOpen(true); setSearched(true)
+    } catch {
+      if (controller.signal.aborted || sequence !== searchSequence.current) return
+      setResults([]); setResultsQuery(q); setOpen(true); setSearched(true)
+    } finally {
+      if (searchAbort.current === controller) searchAbort.current = null
+    }
+  }
+  function onChange(v: string) {
+    setValue(v)
+    // Invalidate the in-flight query immediately. Waiting for the next debounce
+    // would leave a short window where an old response can paint under new text.
+    searchSequence.current++
+    searchAbort.current?.abort()
+    window.clearTimeout(debounce.current)
+    if (!v.trim()) {
+      setResults([]); setResultsQuery(''); setOpen(false); setSearched(false)
+      return
+    }
+    setSearched(false)
+    debounce.current = window.setTimeout(() => runSearch(v), 180)
+  }
+  function go(r: Hit) {
+    searchSequence.current++
+    searchAbort.current?.abort()
+    navigate(routeFor(r)); setOpen(false); setValue(''); setResults([]); setResultsQuery(''); setSearched(false)
+  }
+  // The viewer's own list tags matching the typed text, prepended ahead of the
+  // server's shared results — computed straight off `value` (no debounce, no
+  // network) since it's a pure local lookup over the tag map already in memory.
+  const userTagHits: UserTagHit[] = useMemo(
+    () => searchUserTags(value).map(hit => ({ type: 'user-tag' as const, ...hit })),
+    [value],
+  )
+  // Server hits for the text currently in the box; empty while a keystroke is still
+  // debouncing, so Enter re-runs the search instead of opening a stale hit. The
+  // local tag hits above stay regardless — they never go stale.
+  const serverResults: SearchResult[] = resultsQuery === value.trim() ? results : []
+  const currentResults: Hit[] = [...userTagHits, ...serverResults]
+  function onKey(e: React.KeyboardEvent) {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive(a => Math.min(a + 1, currentResults.length - 1)) }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(a => Math.max(a - 1, 0)) }
+    else if (e.key === 'Enter') { if (currentResults[active]) go(currentResults[active]); else void runSearch(value, { openFirst: true }) }
+    else if (e.key === 'Escape') { setOpen(false) }
+  }
+
+  useEffect(() => () => {
+    window.clearTimeout(debounce.current)
+    window.clearTimeout(blurTimeout.current)
+    searchSequence.current++
+    searchAbort.current?.abort()
+  }, [])
+
+  return (
+    <div className={`search ${variant === 'hero' ? 'xl' : ''} search-wrap`} id={variant === 'hero' ? 'heroSearch' : undefined}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
+      <input
+        id={variant === 'hero' ? 'heroSearchInput' : 'topbarSearchInput'}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        onKeyDown={onKey}
+        onFocus={() => { window.clearTimeout(blurTimeout.current); if (currentResults.length) setOpen(true) }}
+        onBlur={() => { blurTimeout.current = window.setTimeout(() => setOpen(false), 160) }}
+        placeholder="Account, Asset, Hash, Block, Tag"
+        aria-label="Search explorer"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={open && !!value.trim()}
+        aria-controls={resultsId}
+        aria-activedescendant={open && currentResults[active] ? `${resultsId}-option-${active}` : undefined}
+        autoComplete="off"
+        spellCheck={false}
+      />
+      {variant === 'hero' && <span className="hint">↵</span>}
+      {variant === 'topbar' && <span className="kbd-slash" title="Press / to search">/</span>}
+      <div id={resultsId} className="search-results" role="listbox" aria-label="Search results" hidden={!open || !value.trim()}>
+        {currentResults.length ? currentResults.map((r, i) => (
+          <a key={hitKey(r)} id={`${resultsId}-option-${i}`} role="option" aria-selected={i === active} className={`sr-item${i === active ? ' on' : ''}`} href={routeFor(r)}
+            onMouseDown={e => { e.preventDefault(); go(r) }} onMouseEnter={() => setActive(i)}>
+            <span className="sr-type">{TYPE_LABEL[r.type]}</span>
+            <SearchResultBody r={r} />
+          </a>
+        )) : <div className="sr-empty" role="status">{searched ? `No match for “${value.trim()}”` : 'Searching…'}</div>}
+      </div>
+    </div>
+  )
+}

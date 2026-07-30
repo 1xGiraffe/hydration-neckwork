@@ -1,0 +1,34 @@
+{
+  "outDir": "src/types",
+  "specVersions": "https://v2.archive.subsquid.io/metadata/hydradx",
+  "pallets": {
+    "Omnipool": {
+      "storage": ["Assets", "HubAssetImbalance"],
+      "events": ["TokenAdded", "TokenRemoved", "SellExecuted", "BuyExecuted"]
+    },
+    "XYK": {
+      "storage": ["PoolAssets", "TotalLiquidity", "ShareToken"],
+      "events": ["PoolCreated", "PoolDestroyed", "SellExecuted", "BuyExecuted"]
+    },
+    "Stableswap": {
+      "storage": ["Pools", "AssetTradability", "PoolPegs"],
+      "events": ["PoolCreated", "LiquidityAdded", "SellExecuted", "BuyExecuted"]
+    },
+    "Broadcast": {
+      "events": ["Swapped", "Swapped2", "Swapped3"]
+    },
+    "AssetRegistry": {
+      "storage": ["Assets", "AssetMetadataMap", "AssetLocations"]
+    },
+    "Tokens": {
+      "storage": ["Accounts", "TotalIssuance"],
+      "events": ["Transfer"]
+    },
+    "EVM": {
+      "storage": ["AccountStorages"]
+    },
+    "System": {
+      "storage": ["Account"]
+    }
+  }
+}
