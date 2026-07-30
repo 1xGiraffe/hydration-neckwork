@@ -1960,6 +1960,13 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    table — truncated rather than wrapped, since the row's other columns
    (owner, counts) need to stay on that same line. */
 .list-row-note { font-size: 11px; margin-top: 2px; max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Account.tsx's logged-out "tagged in a public list" hint, under the Lists
+   table. A single muted line, not a callout — the login action stays plain
+   text (no button chrome/background), same underline-on-hover treatment as
+   other inline actions (.hash, .pc-hash-toggle) rather than a second CTA box. */
+.lists-login-hint { margin-top: 8px; font-size: 11px; }
+.hint-link { background: none; border: 0; padding: 0; margin: 0; color: var(--sky); font: inherit; cursor: pointer; }
+.hint-link:hover { text-decoration: underline; text-underline-offset: 2px; }
 .list-stats { display: flex; gap: 32px; flex-wrap: wrap; }
 .list-stats > div { display: flex; flex-direction: column; gap: 2px; }
 .list-stat-num { font-family: 'Gazpacho', serif; font-size: 24px; font-weight: 500; color: var(--text-high); }

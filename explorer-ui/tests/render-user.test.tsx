@@ -13,6 +13,7 @@ import { setTagMap, setTagMapError } from '../src/userTags'
 import { parseRoute, paths } from '../src/router'
 import { MOCK_LISTS, MOCK_LIST_DETAIL, MOCK_LIST_TAG_DETAIL } from './fixtures/mockApi'
 import type { AccountRef, ListSummaryRef } from '../src/types'
+import type { Session } from '../src/session'
 
 // Finds the single anchor wrapping `text` (lists render an icon + name
 // inside one <a>, so the href never sits right next to the visible text) and
@@ -124,11 +125,14 @@ describe('AddrPill precedence with profiles and user tags', () => {
 describe('ListsSection — account page tag lists', () => {
   const publicLib: ListSummaryRef = { listId: 'l1', name: 'Whales', note: '', visibility: 'public', isPersonal: false, owner: base, tagCount: 2, accountCount: 5, subscriberCount: 3 }
   const privateLib: ListSummaryRef = { listId: 'l2', name: 'Personal', note: '', visibility: 'private', isPersonal: true, owner: base, tagCount: 1, accountCount: 2, subscriberCount: 0 }
+  const secondPublicLib: ListSummaryRef = { listId: 'l3', name: 'DeFi desks', note: '', visibility: 'public', isPersonal: false, owner: base, tagCount: 1, accountCount: 9, subscriberCount: 1 }
+  const OWNER_SESSION: Session = { token: 't', accountId: ACC, address: base.address }
+  const OTHER_SESSION: Session = { token: 't2', accountId: '0x' + 'cd'.repeat(32), address: '15yy' }
 
   it('lists an account’s public lists and marks private ones on the own page', () => {
     const libs = [publicLib]
     const own = [...libs, privateLib]
-    const html = renderToStaticMarkup(<ListsSection publicLists={libs} ownLists={own} isOwn />)
+    const html = renderToStaticMarkup(<ListsSection publicLists={libs} ownLists={own} isOwn session={OWNER_SESSION} />)
     expect(html).toContain('Whales')
     expect(html).toContain('Personal')
     expect(html).toMatch(/only you/i)      // private marker
@@ -140,22 +144,64 @@ describe('ListsSection — account page tag lists', () => {
     expect(html.match(/>Whales</g)).toHaveLength(1)
   })
 
-  it('shows only the public list — no private marker, no manage link — on someone else’s page', () => {
-    const html = renderToStaticMarkup(<ListsSection publicLists={[publicLib]} ownLists={[]} isOwn={false} />)
+  // State 3 of the login-hint feature: a viewer WITH a session, just not the
+  // owner — the existing "no manage link" case doubles as proof the hint
+  // never shows to a logged-in visitor either, not only a logged-out one.
+  it('shows only the public list — no private marker, no manage link, no login hint — for a logged-in non-owner', () => {
+    const html = renderToStaticMarkup(<ListsSection publicLists={[publicLib]} ownLists={[]} isOwn={false} session={OTHER_SESSION} />)
     expect(html).toContain('Whales')
     expect(html).not.toMatch(/only you/i)
     expect(html).not.toContain('Manage lists')
+    expect(html).not.toMatch(/log in/i)
   })
 
-  it('renders nothing for a foreign account with no public lists', () => {
-    const html = renderToStaticMarkup(<ListsSection publicLists={[]} ownLists={[]} isOwn={false} />)
+  it('renders nothing for a foreign account with no public lists, logged out', () => {
+    const html = renderToStaticMarkup(<ListsSection publicLists={[]} ownLists={[]} isOwn={false} session={null} />)
     expect(html).toBe('')
   })
 
   it('still renders — empty — with a manage link on an empty own page', () => {
-    const html = renderToStaticMarkup(<ListsSection publicLists={[]} ownLists={[]} isOwn />)
+    const html = renderToStaticMarkup(<ListsSection publicLists={[]} ownLists={[]} isOwn session={OWNER_SESSION} />)
     expect(html).toContain('Manage lists')
     expect(hrefOf(html, 'Manage lists')).toBe('/lists')
+  })
+
+  // Isolates the hint's own text from the table above it — the table's
+  // TagIcon already renders a `title="Whales"` attribute, which would
+  // otherwise false-positive a raw `"Whales"` substring check against the
+  // whole page, and React's SSR text-escapes a literal `"` to `&quot;`.
+  function hintTextOf(html: string): string | undefined {
+    return html.match(/<div class="muted lists-login-hint">([\s\S]*?)<\/div>/)?.[1]
+  }
+
+  // State 1: logged out, viewing an account tagged in exactly one public
+  // list — a hint names it and offers a real login action (a <button>,
+  // never a dead link), wired to the same requestConnect() flow every other
+  // logged-out subscribe affordance uses.
+  it('hints a logged-out visitor that the account is tagged in one public list, with a working login action', () => {
+    const html = renderToStaticMarkup(<ListsSection publicLists={[publicLib]} ownLists={[]} isOwn={false} session={null} />)
+    const hint = hintTextOf(html)
+    expect(hint).toMatch(/^Tagged in &quot;Whales&quot;/)
+    expect(hint).toMatch(/log in to subscribe/i)
+    expect(hint).toContain('<button')
+    expect(html).not.toContain('Manage lists')
+  })
+
+  // Several lists collapse to a count rather than naming each one.
+  it('hints with a count instead of a name once the account is tagged in more than one public list', () => {
+    const html = renderToStaticMarkup(<ListsSection publicLists={[publicLib, secondPublicLib]} ownLists={[]} isOwn={false} session={null} />)
+    const hint = hintTextOf(html)
+    expect(hint).toMatch(/^Tagged in 2 public lists/)
+    expect(hint).not.toContain('&quot;')
+  })
+
+  // State 2: logged out, but the account carries no public-list tags at
+  // all — the section renders nothing, same as before this feature existed,
+  // so no hint appears for an account that isn't tagged anywhere public.
+  it('shows no hint for a logged-out visitor when the account has no public lists', () => {
+    const html = renderToStaticMarkup(<ListsSection publicLists={[]} ownLists={[]} isOwn={false} session={null} />)
+    expect(html).toBe('')
+    expect(html).not.toMatch(/log in/i)
   })
 })
 

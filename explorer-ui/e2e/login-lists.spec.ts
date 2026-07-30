@@ -178,6 +178,58 @@ test('logged out, clicking Subscribe on a /tags row opens the login dialog', asy
   await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
 })
 
+// New user request: a visitor with no session, viewing an account tagged in
+// a public list, gets a quiet hint that this account is tagged plus a real
+// login action — not silence, and not a second per-row Subscribe control
+// (Account.tsx's Lists table has none; this account isn't itself a list a
+// viewer subscribes to). Opens the same requestConnect() → ConnectDialog the
+// /tags Subscribe row above does. FOX_ADDRESS resolves to MOCK_LISTS[0]
+// ("DeFi desks") via the shared mockApi's addressLists()
+// (tests/fixtures/mockApi.ts) — the default for every address except
+// Binance/Kraken's, which resolve to MOCK_LISTS[1] instead.
+const FOX_ADDRESS = '1L53bUTBopXqDXSXjBdQXFV7jZ8FtdRZS5JoMjGq5z3Cv2zr'
+
+test.describe('Account page — logged-out "tagged in a public list" hint', () => {
+  test('names the one public list and its login action opens the connect dialog', async ({ page }) => {
+    await page.goto(`/account/${FOX_ADDRESS}`)
+
+    const hint = page.locator('.lists-login-hint')
+    await expect(hint).toContainText('Tagged in')
+    await expect(hint).toContainText('DeFi desks')
+    await expect(page.locator('.dialog')).toHaveCount(0)
+
+    await hint.getByRole('button', { name: 'log in to subscribe' }).click()
+
+    await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
+  })
+
+  // No public-list membership at all — the Lists section itself renders
+  // nothing for a foreign, logged-out viewer (see Account.tsx's ListsSection),
+  // so there's nothing to hint about either.
+  test('an account with no public lists shows no hint', async ({ page }) => {
+    await page.route(/\/api\/explorer\/address\/[^/]+\/lists(\?.*)?$/, route =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }))
+
+    await page.goto(`/account/${FOX_ADDRESS}`)
+
+    await expect(page.locator('.acct-avatar')).toBeVisible() // the page itself rendered
+    await expect(page.locator('.sec-title', { hasText: 'Lists' })).toHaveCount(0)
+    await expect(page.locator('.lists-login-hint')).toHaveCount(0)
+  })
+
+  // Logged in — just not the owner of this account or its list — sees the
+  // exact same table row as the anonymous case above, but never the hint:
+  // the affordance exists only for a viewer who genuinely can't subscribe
+  // yet, not one who already could from here if they wanted to.
+  test('logged in as someone else, the same tagged account shows the list but no hint', async ({ page, userMock }) => {
+    await seedSession(page, userMock)
+    await page.goto(`/account/${FOX_ADDRESS}`)
+
+    await expect(page.locator('.tbl tbody tr', { hasText: 'DeFi desks' })).toBeVisible()
+    await expect(page.locator('.lists-login-hint')).toHaveCount(0)
+  })
+})
+
 // A lone on-page match still becomes the TAG's own aggregated row (a real
 // group row, group values), never a member row wearing the tag's pill over
 // Treasury's own — that mismatch is exactly the bug this feature exists to

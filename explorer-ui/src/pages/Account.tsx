@@ -11,6 +11,7 @@ import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { useSession } from '../session'
+import { requestConnect } from '../connectDialog'
 import { useAddressLists, useMe } from '../hooks/useUser'
 import { allAssociations, useTagMapVersion } from '../userTags'
 import type { ListSummaryRef } from '../types'
@@ -171,7 +172,7 @@ export function Account({ address }: { address: string }) {
 
               <CloseAccountsSection address={canonicalAddress ?? address} />
 
-              <ListsSection publicLists={libs.data ?? []} ownLists={isOwn ? (me.data?.lists ?? []) : []} isOwn={isOwn} />
+              <ListsSection publicLists={libs.data ?? []} ownLists={isOwn ? (me.data?.lists ?? []) : []} isOwn={isOwn} session={session} />
 
               <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={history.data?.portfolioSeries ?? data.portfolioSeries ?? []} dates={history.data?.portfolioDates ?? data.portfolioDates} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} loading={history.isLoading || (history.isFetching && !history.data)} valueEvents={valueEvents.data} />
               </>)}
@@ -207,11 +208,15 @@ export function Account({ address }: { address: string }) {
 // of (every viewer sees these), plus — on the account's own page — every one of
 // the owner's OWN lists including their private ones. `ownLists` is the
 // superset for anything the viewer owns, so a list owned by the viewed
-// account is deduped against it rather than shown twice.
-export function ListsSection({ publicLists, ownLists, isOwn }: {
+// account is deduped against it rather than shown twice. `session` is passed
+// in (rather than read via useSession() here) purely so the logged-out hint
+// below stays unit-testable without a real session — same DI PublicListsPanel
+// already uses.
+export function ListsSection({ publicLists, ownLists, isOwn, session }: {
   publicLists: ListSummaryRef[]
   ownLists: ListSummaryRef[]
   isOwn: boolean
+  session: ReturnType<typeof useSession>
 }) {
   const seen = new Set(ownLists.map(l => l.listId))
   const rows = isOwn ? [...ownLists, ...publicLists.filter(l => !seen.has(l.listId))] : publicLists
@@ -238,7 +243,19 @@ export function ListsSection({ publicLists, ownLists, isOwn }: {
             ))}
         </tbody>
       </table></div>
-      {isOwn && <div className="ext-link-row"><Link to={paths.lists()} className="ext-link">Manage lists →</Link></div>}
+      {isOwn ? (
+        <div className="ext-link-row"><Link to={paths.lists()} className="ext-link">Manage lists →</Link></div>
+      ) : !session && rows.length > 0 ? (
+        // A visitor with no session can't tell from the table alone that
+        // subscribing would follow this account's tags elsewhere in the
+        // explorer — a quiet, single-line nudge rather than a second
+        // Subscribe control per row (the table above has none; this account
+        // isn't a list a viewer subscribes to directly). Opens the same
+        // ConnectDialog every other logged-out subscribe affordance does.
+        <div className="muted lists-login-hint">
+          Tagged in {rows.length === 1 ? `"${rows[0].name}"` : `${rows.length} public lists`} — <button type="button" className="hint-link" onClick={requestConnect}>log in to subscribe</button>.
+        </div>
+      ) : null}
     </>
   )
 }
