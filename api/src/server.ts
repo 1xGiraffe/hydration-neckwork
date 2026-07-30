@@ -57,7 +57,7 @@ import { startBackgroundRefresh, stopBackgroundRefresh } from './services/backgr
 import { initAccountAffinityService } from './services/accountAffinityService.ts'
 import { ensureSnakewatchEmojiSourceLoaded } from './services/omniwatchIdentity.ts'
 import { initXcmJourneyService } from './services/xcmJourneyService.ts'
-import { initUserAuthService, loadUserSessions } from './services/userAuthService.ts'
+import { initUserAuthService, loadUserSessions, ensureSessionDeviceColumns } from './services/userAuthService.ts'
 import { initUserProfileService, loadUserProfiles } from './services/userProfileService.ts'
 import { initUserListService, loadUserLists, ensureTagMemberPositionColumn } from './services/userListService.ts'
 
@@ -193,10 +193,11 @@ async function start() {
     await initUserAuthService(client)
     initUserProfileService(client)
     initUserListService(client)
-    // Additive column on an existing deployment (see the guard's own comment
-    // in userListService.ts) — must land before loadUserLists() below
-    // first SELECTs `position` from user_tag_members.
+    // Additive columns on an existing deployment (see the guards' own comments
+    // in userListService.ts / userAuthService.ts) — must land before
+    // loadUserLists()/loadUserSessions() below first SELECT them.
     await ensureTagMemberPositionColumn(client)
+    await ensureSessionDeviceColumns(client)
     // The node-full refreshers (lock breakdown, proxy/multisig, ERC-20 wallets)
     // share one coordinated scheduler so they never stack concurrent RPC bursts
     // on the archive node; started after their clients are set.
