@@ -1965,13 +1965,8 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    muted line, not a callout — the login action stays plain text (no button
    chrome/background), same underline-on-hover treatment as other inline
    actions (.hash, .pc-hash-toggle) rather than a second CTA box. */
-/* Lives inline in the header's Tags row, in the same visual grammar as the real
-   tag pills — but as a ghost: dashed outline, muted text, no icon, because the
-   list's contents stay behind the login. */
-.lists-login-hint { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; }
-.tagged-in-pill { background: none; border: 1px dashed var(--border); border-radius: 999px; padding: 2px 9px; color: var(--text-medium); cursor: pointer; }
-.tagged-in-pill .tag { color: inherit; font-size: 11.5px; }
-.tagged-in-pill:hover { border-color: var(--text-low); color: var(--text-high); }
+/* One quiet self-contained line in the account header, under the tag row. */
+.lists-login-hint { display: block; margin-top: 3px; font-size: 11px; font-family: 'GeistMono'; }
 .hint-link { background: none; border: 0; padding: 0; margin: 0; color: var(--sky); font: inherit; cursor: pointer; }
 .hint-link:hover { text-decoration: underline; text-underline-offset: 2px; }
 .list-stats { display: flex; gap: 32px; flex-wrap: wrap; }

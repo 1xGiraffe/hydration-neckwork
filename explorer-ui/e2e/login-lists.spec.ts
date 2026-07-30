@@ -200,14 +200,13 @@ test.describe('Account page — logged-out "tagged in a public list" hint', () =
   test('names the one public list and its login action opens the connect dialog', async ({ page }) => {
     await page.goto(`/account/${OWL_ADDRESS}`)
 
-    const hint = page.locator('.lists-login-hint')
-    // In the header's Tags row, pill grammar: the list name as a ghost pill.
-    await expect(hint).toContainText('DeFi desks')
-    await expect(hint.locator('.tagged-in-pill')).toHaveCount(1)
-    expect(await hint.locator('..').locator('.muted').first().innerText()).toBe('Tags')
+    // One fixed line in the account header — deliberately names no list.
+    const hint = page.locator('.acct-head .lists-login-hint')
+    await expect(hint).toContainText('Tags available for this account ·')
+    await expect(hint).not.toContainText('DeFi desks')
     await expect(page.locator('.dialog')).toHaveCount(0)
 
-    await hint.getByRole('button', { name: 'log in to subscribe' }).click()
+    await hint.getByRole('button', { name: 'login to subscribe' }).click()
 
     await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
   })
