@@ -10227,6 +10227,9 @@ export async function getGlobalActivityTotal(
 
 // A DCA schedule is the canonical unit: initiation, lifecycle status, execution
 // totals, and a paged execution list belong to the schedule page.
+// One leg of a schedule's route, with its assets resolved for display.
+export interface DcaRouteHop { pool: string; poolId: number | null; assetIn: AssetRef; assetOut: AssetRef }
+
 export interface DcaScheduleDetail {
   scheduleId: number
   who: AccountRef | null
@@ -10252,7 +10255,23 @@ export interface DcaScheduleDetail {
   // turned into a duration: block time has been 12s, is ~6s and is heading for
   // 2s, so an old schedule read at today's block time is off by that ratio.
   periodSeconds: number | null
-  maxRetries: number
+  // How many times a failing execution is retried before the pallet gives up.
+  // Null means the schedule set none and the runtime default applies, or that the
+  // schedule was submitted through an EVM permit whose inner call is not indexed —
+  // never conflate either with a real zero.
+  maxRetries: number | null
+  // Per-execution slippage tolerance against the oracle price, as a Permill
+  // (30000 = 3%). Same Option caveat as maxRetries.
+  slippagePermill: number | null
+  // The order's own absolute price bound, fixed for the schedule's whole life: a
+  // Sell floors what each trade receives, a Buy caps what each trade pays. Exactly
+  // one of the two is set, per the order's direction.
+  minAmountOut: string | null
+  maxAmountIn: string | null
+  // The path each execution trades through. An EMPTY array is a real answer — the
+  // order named no path, so the router chooses one per execution. Null means the
+  // path is unknown (a pre-router schedule with no indexed call).
+  route: DcaRouteHop[] | null
   // Highest block the pallet has planned an execution for. It is the anchor for
   // "next in …" and, with the cadence, for how long the budget still has to run.
   nextExecutionBlock: number | null
@@ -10567,6 +10586,125 @@ async function recoverDcaScheduleOrder(blockHeight: number, extrinsicIndex: numb
   return row ? dcaOrderFromCallArgs(row.args_json) : null
 }
 
+// One leg of the path a schedule trades through. Stableswap names the pool it uses;
+// the other venues are a single pool each, so only Stableswap carries an id.
+export interface DcaRouteLeg { pool: string; poolId: number | null; assetIn: number; assetOut: number }
+
+// What DCA.Scheduled says about a schedule's terms beyond the pair and the size:
+// the order's own price bound, and the route it trades through.
+//
+// `route: []` is not missing data — it means the order named no path, so the router
+// picks one per execution. Callers must tell that apart from a pre-router schedule
+// (whose event carried no order at all), hence null vs an empty array.
+export interface DcaOrderTerms { minAmountOut: string | null; maxAmountIn: string | null; route: DcaRouteLeg[] | null }
+
+export function dcaOrderTermsFromEventArgs(argsJson: string): DcaOrderTerms | null {
+  let parsed: unknown
+  try { parsed = JSON.parse(argsJson) } catch { return null }
+  return dcaOrderTerms((parsed as { order?: unknown } | null)?.order)
+}
+
+// Same order object, reached through the call's `schedule` wrapper — the only place
+// a pre-router schedule's order survives.
+export function dcaOrderTermsFromCallArgs(argsJson: string): DcaOrderTerms | null {
+  let parsed: unknown
+  try { parsed = JSON.parse(argsJson) } catch { return null }
+  const schedule = (parsed as { schedule?: { order?: unknown } } | null)?.schedule
+  return dcaOrderTerms(schedule?.order)
+}
+
+function dcaOrderTerms(orderValue: unknown): DcaOrderTerms | null {
+  const order = orderValue as Record<string, unknown> | null | undefined
+  if (!order || typeof order !== 'object') return null
+  // A zero bound IS no bound: a floor of nothing rejects nothing, so a fifth of all
+  // Sell orders set one to opt out of an absolute limit and rely on slippage alone.
+  // Reporting it as a limit of "0" would state a constraint the order does not have.
+  const str = (v: unknown) => (typeof v === 'string' && v !== '' && v !== '0' ? v : null)
+  const int = (v: unknown) => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null)
+  const rawRoute = (order as { route?: unknown }).route
+  const route = Array.isArray(rawRoute)
+    ? rawRoute.flatMap((leg): DcaRouteLeg[] => {
+      const l = (leg ?? {}) as Record<string, unknown>
+      const pool = (l.pool ?? {}) as Record<string, unknown>
+      const kind = typeof pool.__kind === 'string' ? pool.__kind : ''
+      const assetIn = int(l.assetIn), assetOut = int(l.assetOut)
+      if (!kind || assetIn == null || assetOut == null) return []
+      return [{ pool: kind, poolId: int(pool.value), assetIn, assetOut }]
+    })
+    : null
+  return {
+    // A Sell order floors what it receives, a Buy order caps what it pays.
+    minAmountOut: str((order as { minAmountOut?: unknown }).minAmountOut),
+    maxAmountIn: str((order as { maxAmountIn?: unknown }).maxAmountIn),
+    route,
+  }
+}
+
+// Slippage and the retry limit live ONLY on the DCA.schedule call — the event never
+// carried either, which is why dca_schedules.max_retries reads 0 for every row it
+// has. Both are Option fields: absent means the pallet's own default applies, which
+// is not the same as zero, so absent stays null all the way to the response.
+//
+// Slippage is a Permill (30000 = 3%), the tolerance each execution allows against
+// the oracle price — a different limit from the order's own minAmountOut/maxAmountIn
+// bound above, which is absolute and fixed for the schedule's whole life.
+export function dcaScheduleTermsFromCallArgs(argsJson: string): { slippagePermill: number | null; maxRetries: number | null } | null {
+  let parsed: unknown
+  try { parsed = JSON.parse(argsJson) } catch { return null }
+  const schedule = (parsed as { schedule?: Record<string, unknown> } | null)?.schedule
+  if (!schedule || typeof schedule !== 'object') return null
+  const int = (v: unknown) => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null)
+  return { slippagePermill: int(schedule.slippage), maxRetries: int(schedule.maxRetries) }
+}
+
+// The two lookups behind the terms above, both bounded by a primary-key prefix on
+// the schedule's own creation block — the same shape (and justification) as
+// recoverDcaScheduleOrder. No projection carries these, and a schedule page reads
+// them once, for one schedule.
+//
+// The event is matched by id inside the block rather than by extrinsic: one
+// extrinsic can schedule nine orders at once, and 129 schedules have no extrinsic
+// index at all. The call is matched by extrinsic and is the same for every order in
+// it — no indexed extrinsic has ever mixed two slippages or two retry limits, so
+// which row answers does not matter, only that the choice is deterministic.
+//
+// EVM owners schedule through MultiTransactionPayment.dispatch_permit, whose inner
+// call is not decomposed into raw_calls, so 16% of schedules have no call row and
+// their slippage/retries stay null rather than being guessed at.
+async function dcaScheduleTerms(scheduleId: number, blockHeight: number, extrinsicIndex: number | null): Promise<{
+  minAmountOut: string | null; maxAmountIn: string | null; route: DcaRouteLeg[] | null
+  slippagePermill: number | null; maxRetries: number | null
+}> {
+  const [eventRes, callRes] = await Promise.all([
+    client.query({
+      query: `SELECT args_json FROM price_data.raw_events
+              WHERE block_height = {h:UInt32} AND event_name = 'DCA.Scheduled'
+                AND toUInt64(JSONExtractInt(args_json, 'id')) = {sid:UInt64}
+              LIMIT 1`,
+      query_params: { h: blockHeight, sid: scheduleId }, format: 'JSONEachRow',
+    }),
+    extrinsicIndex == null ? Promise.resolve(null) : client.query({
+      query: `SELECT args_json FROM price_data.raw_calls
+              WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32} AND call_name = 'DCA.schedule'
+              ORDER BY call_address ASC LIMIT 1`,
+      query_params: { h: blockHeight, i: extrinsicIndex }, format: 'JSONEachRow',
+    }),
+  ])
+  const eventArgs = (await eventRes.json<{ args_json: string }>())[0]?.args_json
+  const callArgs = callRes ? (await callRes.json<{ args_json: string }>())[0]?.args_json : undefined
+  const order = eventArgs ? dcaOrderTermsFromEventArgs(eventArgs) : null
+  // Pre-router schedules carry no order on the event; the call still has one.
+  const fromCall = callArgs ? dcaOrderTermsFromCallArgs(callArgs) : null
+  const terms = callArgs ? dcaScheduleTermsFromCallArgs(callArgs) : null
+  return {
+    minAmountOut: order?.minAmountOut ?? fromCall?.minAmountOut ?? null,
+    maxAmountIn: order?.maxAmountIn ?? fromCall?.maxAmountIn ?? null,
+    route: order?.route ?? fromCall?.route ?? null,
+    slippagePermill: terms?.slippagePermill ?? null,
+    maxRetries: terms?.maxRetries ?? null,
+  }
+}
+
 export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25): Promise<DcaScheduleDetail | null> {
   return cached(`explorer:dca-schedule:${scheduleId}:${offset}:${limit}`, 8000, async () => {
     const prices = await ensurePrices()
@@ -10635,6 +10773,7 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
       const recovered = await recoverDcaScheduleOrder(sched.block_height, sched.extrinsic_index)
       if (recovered) Object.assign(sched, recovered)
     }
+    const terms = await dcaScheduleTerms(scheduleId, sched.block_height, sched.extrinsic_index)
     const life = await lifeRes.json<{ event_name: string; ts: string; bh: number; ei: number; xi: number }>()
     const totals = (await totalRes.json<{ n: string; failed: string; attempts: string; tin: string; tout: string }>())[0]
     const pair = await resolveDcaTradedPair(scheduleId, sched.asset_in, sched.asset_out, sched.who)
@@ -10720,7 +10859,14 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
       amountPerUsd, budgetUsd, usdBasis,
       period: sched.period,
       periodSeconds: Number((await cadenceRes.json<{ sec: number }>())[0]?.sec ?? 0) || null,
-      maxRetries: sched.max_retries,
+      maxRetries: terms.maxRetries,
+      slippagePermill: terms.slippagePermill,
+      // Only the bound the order's own direction defines is meaningful.
+      minAmountOut: sched.direction === 'Buy' ? null : terms.minAmountOut,
+      maxAmountIn: sched.direction === 'Buy' ? terms.maxAmountIn : null,
+      route: terms.route?.map(leg => ({
+        pool: leg.pool, poolId: leg.poolId, assetIn: asset(leg.assetIn), assetOut: asset(leg.assetOut),
+      })) ?? null,
       fundingBalance,
       nextExecutionBlock: Number((await planRes.json<{ nb: number }>())[0]?.nb ?? 0) || null,
       status,

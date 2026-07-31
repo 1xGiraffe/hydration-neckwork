@@ -731,6 +731,10 @@ export interface TagDetail {
   balanceHistory: AssetBalanceHistory[]
 }
 
+// One leg of a DCA schedule's route. Only Stableswap names a specific pool; the
+// other venues are a single pool each.
+export interface DcaRouteHop { pool: string; poolId: number | null; assetIn: AssetRef; assetOut: AssetRef }
+
 export interface DcaScheduleDetail {
   scheduleId: number
   who: AccountRef | null
@@ -752,7 +756,21 @@ export interface DcaScheduleDetail {
   // Seconds actually observed between this schedule's trades (median of its most
   // recent gaps), null before it has run twice. See ActiveDca.periodSeconds.
   periodSeconds: number | null
-  maxRetries: number
+  // Null means the schedule set none (the runtime default applies) or that it was
+  // submitted through an EVM permit whose inner call is not indexed — neither is a
+  // real zero, so both render as unknown rather than "0 retries".
+  maxRetries: number | null
+  // Per-execution slippage tolerance against the oracle price, as a Permill
+  // (30000 = 3%). Same Option caveat as maxRetries.
+  slippagePermill: number | null
+  // The order's own absolute price bound, fixed for its whole life: a Sell floors
+  // what each trade receives, a Buy caps what each trade pays. Only the one the
+  // direction defines is ever set.
+  minAmountOut: string | null
+  maxAmountIn: string | null
+  // The path each execution trades through. An EMPTY array is a real answer: the
+  // order named no path, so the router picks one per execution. Null = unknown.
+  route: DcaRouteHop[] | null
   // Highest block the pallet has planned an execution for — the anchor for the
   // next-execution countdown and the budget's remaining runway.
   nextExecutionBlock: number | null
