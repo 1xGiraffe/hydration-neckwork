@@ -546,7 +546,7 @@ export interface ActivityRow {
   voteRef?: string | null
   voteSide?: string
   voteConviction?: string | null
-  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim'   // Create = pool creation; Claim = LM rewards
+  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'Destroy'   // Create = pool creation; Destroy = pool closure; Claim = LM rewards
   dca?: boolean
   dcaStatus?: 'failed'
   dcaError?: string
