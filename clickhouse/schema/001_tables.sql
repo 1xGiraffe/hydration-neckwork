@@ -179,7 +179,22 @@ CREATE TABLE IF NOT EXISTS price_data.xcm_event_activity_by_account (`who` Strin
 -- parent's (event_name, asset_id) prefix (12.3k rows for the same block set), and it
 -- needs the args_json this projection does not carry.
 CREATE TABLE IF NOT EXISTS price_data.xcm_inbound_walk_events (`block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `event_name` LowCardinality(String), `who` String, `asset_id` UInt32, `amount` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index) SETTINGS index_granularity = 4096;
-CREATE TABLE IF NOT EXISTS price_data.xcm_journey_sources (`message_id` String, `from_hex` String, `origin_urn` String, `updated_at` DateTime DEFAULT now(), `origin_tx` String DEFAULT '') ENGINE = ReplacingMergeTree(updated_at) ORDER BY message_id SETTINGS index_granularity = 8192;
+-- Third-party enrichment, and the one table here that is neither reproducible from
+-- raw nor covered by the user_* backup: it is learned from the Ocelloids crosschain
+-- API over time. `origin_protocol` is that API's own name for how the journey
+-- travelled (snowbridge / wh_portal / basejump / xcm), which is what lets a row say
+-- Ethereum-via-Snowbridge rather than just naming the sibling that relayed it. It is
+-- version-agnostic on purpose — Snowbridge v1 and v2 differ in their stop shape, not
+-- in this field. Dropping this table costs every resolution it holds; see
+-- ops/backup-user-tables.sh.
+CREATE TABLE IF NOT EXISTS price_data.xcm_journey_sources (`message_id` String, `from_hex` String, `origin_urn` String, `updated_at` DateTime DEFAULT now(), `origin_tx` String DEFAULT '', `origin_protocol` LowCardinality(String) DEFAULT '') ENGINE = ReplacingMergeTree(updated_at) ORDER BY message_id SETTINGS index_granularity = 8192;
+-- Topic ids looked for and not found yet. A bridged journey reaches the index only
+-- after it lands here (Snowbridge's Ethereum leg trails arrival by ~20 minutes), so
+-- a single attempt at render time is the wrong shape: without this marker a miss is
+-- retried on every request within a process and never targeted again after a
+-- restart. `attempts` drives the backoff; the row is superseded by the resolution
+-- itself once one is learned.
+CREATE TABLE IF NOT EXISTS price_data.xcm_journey_misses (`message_id` String, `attempts` UInt16, `first_seen_ms` UInt64, `last_attempt_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(last_attempt_at) ORDER BY message_id SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.xyk_farm_principal_intervals (`account_id` String, `deposit_id` String, `lp_asset_id` Int32, `principal_shares_raw` String, `valid_from_block` UInt32, `valid_from_extrinsic` Int64, `valid_from_event` UInt32, `valid_from_ts` DateTime, `valid_to_block` UInt32, `valid_to_extrinsic` Int64, `valid_to_event` UInt32, `source_event_kind` LowCardinality(String), `run_id` UInt64, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(run_id) PARTITION BY tuple() ORDER BY (account_id, deposit_id, valid_from_block, valid_from_event) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.xyk_lp_total_shares_history (`lp_asset_id` Int32, `block_height` UInt32, `total_shares_raw` String, `run_id` UInt64, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(run_id) PARTITION BY tuple() ORDER BY (lp_asset_id, block_height) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.xyk_pool_registry (`lp_asset_id` Int32, `pool_account` String, `asset_a` Int32, `asset_b` Int32, `created_block` UInt32, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY lp_asset_id SETTINGS index_granularity = 8192;

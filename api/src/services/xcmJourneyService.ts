@@ -33,6 +33,35 @@ const REFRESH_MS = 5 * 60_000
 const FAIL_BACKOFF_MS = 60_000
 const CACHE_MAX_ENTRIES = 30_000
 const XCM_JOURNEY_SOURCES_TABLE = 'price_data.xcm_journey_sources'
+const XCM_JOURNEY_MISSES_TABLE = 'price_data.xcm_journey_misses'
+
+// How far back a window walk reaches around an unresolved row.
+//
+// The list is ordered by the journey's OWN send time, so the window has to span the
+// gap between a message landing here and its journey having started elsewhere.
+// Measured on the live index: plain XCM arrives in seconds (p90 0.8 min), while
+// Snowbridge trails ~18-20 min behind its Ethereum transaction (beacon finality) and
+// Wormhole's tail runs to hours. A window sized for XCM therefore cannot contain a
+// bridged journey at all, which is why bridge arrivals went unresolved while
+// same-consensus hops resolved fine.
+const WINDOW_MS_LOCAL = 5 * 60_000
+const WINDOW_MS_BRIDGE = 90 * 60_000
+// Pages per window. A wide window covers more journeys, so it needs more of them.
+const WINDOW_PAGES_LOCAL = 3
+const WINDOW_PAGES_BRIDGE = 8
+
+// Retry schedule for a topic id the index does not have yet, by attempt count. A
+// bridged journey is typically absent on the first look and present on a later one,
+// so giving up after one attempt is what left rows permanently unenriched; retrying
+// every request instead would spend the whole budget on the same few ids. Capped:
+// past the last step a miss is left alone.
+const MISS_BACKOFF_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 3_600_000, 12 * 3_600_000]
+
+// How far the feed may fall behind before it is worth a warning, and how often to
+// check. Bridge latency alone puts tens of minutes between a journey being sent and
+// our seeing it, so the tolerance has to sit above that to avoid crying wolf.
+const SOURCE_LAG_TOLERANCE_MS = 30 * 60_000
+const SOURCE_PROBE_TTL_MS = 10 * 60_000
 
 let client: ClickHouseClient | undefined
 
@@ -52,6 +81,9 @@ export interface XcmJourneySource {
   destination: string        // journey destination chain URN
   originTx: string | null    // extrinsic hash on the origin chain
   correlationId: string      // xcscan journey id
+  // How the journey travelled, in the API's own vocabulary: 'snowbridge',
+  // 'wh_portal', 'basejump' or 'xcm'. Empty when a resolution predates the column.
+  originProtocol: string
 }
 
 interface JourneyItem {
@@ -60,10 +92,29 @@ interface JourneyItem {
   to?: string
   origin?: string
   destination?: string
+  originProtocol?: string
   originTxPrimary?: string | null
   sentAt?: number
   recvAt?: number
   stops?: unknown
+}
+
+// Bridges the API distinguishes, mapped to the words a reader knows them by. A
+// journey that merely crossed consensus systems by XCM is not "bridged" in this
+// sense and gets no label. Unlisted protocols fall back to their raw name rather
+// than being dropped, so a bridge added upstream still surfaces (and shows up in the
+// log line below) instead of silently reading as a plain hop.
+const BRIDGE_LABELS: Record<string, string> = {
+  snowbridge: 'Snowbridge',
+  wh_portal: 'Wormhole',
+  basejump: 'Basejump',
+}
+export function bridgeLabel(originProtocol: string, destinationProtocol?: string): string | null {
+  for (const p of [originProtocol, destinationProtocol]) {
+    if (!p || p === 'xcm') continue
+    return BRIDGE_LABELS[p] ?? p
+  }
+  return null
 }
 
 const ACCOUNT_HEX_RE = /^0x([0-9a-f]{64}|[0-9a-f]{40})$/
@@ -96,7 +147,7 @@ let lastFailAt = 0
 let inflight: Promise<void> | null = null
 let backgroundInflight: Promise<void> | null = null
 let pendingOldestMs = Number.MAX_SAFE_INTEGER
-const pendingHistoricalKeys = new Map<string, number>()
+const pendingHistoricalKeys = new Map<string, { timestampMs: number; bridge: boolean }>()
 
 function collectMessageIds(stops: unknown, out: Set<string>): void {
   const parsed = typeof stops === 'string' ? safeParse(stops) : stops
@@ -126,10 +177,57 @@ function safeParse(s: string): unknown {
 // ReplacingMergeTree collapses re-inserts of an already-known message_id, so
 // callers don't need to check what's already stored — only dedupe within
 // this batch to avoid sending the same message_id twice in one insert.
-function persistJourneySources(rows: { message_id: string; from_hex: string; origin_urn: string; origin_tx: string }[]): void {
+function persistJourneySources(rows: { message_id: string; from_hex: string; origin_urn: string; origin_tx: string; origin_protocol: string }[]): void {
   if (!client || !rows.length) return
   client.insert({ table: XCM_JOURNEY_SOURCES_TABLE, values: rows, format: 'JSONEachRow' })
     .catch(err => console.error('[Explorer] XCM journey source persist failed:', err instanceof Error ? err.message : err))
+}
+
+// Record that a topic id was looked for and not found, so the retry schedule can
+// space the next attempt out. Written after a walk that failed to resolve it, and
+// superseded by the resolution once one is learned (the reader checks sources first).
+function persistJourneyMisses(rows: { message_id: string; attempts: number; first_seen_ms: number }[]): void {
+  if (!client || !rows.length) return
+  client.insert({ table: XCM_JOURNEY_MISSES_TABLE, values: rows, format: 'JSONEachRow' })
+    .catch(err => console.error('[Explorer] XCM journey miss persist failed:', err instanceof Error ? err.message : err))
+}
+
+// Attempts already made per topic id, for the backoff. A miss row for an id that
+// has since resolved is harmless: xcmJourneySourcesFor only consults this for ids
+// that missed BOTH the memory map and the persisted resolutions.
+async function fetchJourneyMisses(messageIds: string[]): Promise<Map<string, { attempts: number; lastAttemptMs: number; firstSeenMs: number }>> {
+  const out = new Map<string, { attempts: number; lastAttemptMs: number; firstSeenMs: number }>()
+  if (!client || !messageIds.length) return out
+  try {
+    const res = await client.query({
+      query: `
+        SELECT message_id, max(attempts) AS attempts,
+               toUnixTimestamp(max(last_attempt_at)) AS last_attempt_s,
+               max(first_seen_ms) AS first_seen_ms
+        FROM ${XCM_JOURNEY_MISSES_TABLE}
+        WHERE message_id IN ({ids:Array(String)})
+        GROUP BY message_id
+      `,
+      query_params: { ids: messageIds }, format: 'JSONEachRow',
+    })
+    for (const row of await res.json<{ message_id: string; attempts: string; last_attempt_s: string; first_seen_ms: string }>()) {
+      out.set(row.message_id, {
+        attempts: Number(row.attempts) || 0,
+        lastAttemptMs: (Number(row.last_attempt_s) || 0) * 1000,
+        firstSeenMs: Number(row.first_seen_ms) || 0,
+      })
+    }
+  } catch (err) {
+    console.error('[Explorer] XCM journey miss lookup failed:', err instanceof Error ? err.message : err)
+  }
+  return out
+}
+
+// Whether a miss is due for another look. An id never seen before is always due.
+function missIsDue(miss: { attempts: number; lastAttemptMs: number } | undefined, nowMs: number): boolean {
+  if (!miss) return true
+  if (miss.attempts >= MISS_BACKOFF_MS.length) return false
+  return nowMs - miss.lastAttemptMs >= MISS_BACKOFF_MS[Math.max(0, miss.attempts - 1)]
 }
 
 function indexJourneys(items: JourneyItem[]): void {
@@ -138,7 +236,7 @@ function indexJourneys(items: JourneyItem[]): void {
     journeysByOriginTx.clear()
     oldestFetchedMs = Number.MAX_SAFE_INTEGER
   }
-  const toPersist = new Map<string, { message_id: string; from_hex: string; origin_urn: string; origin_tx: string }>()
+  const toPersist = new Map<string, { message_id: string; from_hex: string; origin_urn: string; origin_tx: string; origin_protocol: string }>()
   for (const j of items) {
     const ts = journeyReachMs(j)
     if (ts > 0) oldestFetchedMs = Math.min(oldestFetchedMs, ts)
@@ -152,13 +250,14 @@ function indexJourneys(items: JourneyItem[]): void {
       destination: j.destination,
       originTx: j.originTxPrimary ?? null,
       correlationId: j.correlationId,
+      originProtocol: typeof j.originProtocol === 'string' ? j.originProtocol : '',
     }
     if (src.from) {
       const ids = new Set<string>()
       collectMessageIds(j.stops, ids)
       for (const id of ids) {
         journeyByMessageId.set(id, src)
-        toPersist.set(id, { message_id: id, from_hex: src.from, origin_urn: src.origin, origin_tx: src.originTx ?? '' })
+        toPersist.set(id, { message_id: id, from_hex: src.from, origin_urn: src.origin, origin_tx: src.originTx ?? '', origin_protocol: src.originProtocol })
       }
     }
     if (j.origin === URN_HYDRATION && typeof src.originTx === 'string' && src.originTx.startsWith('0x')) {
@@ -171,7 +270,7 @@ function indexJourneys(items: JourneyItem[]): void {
   persistJourneySources([...toPersist.values()])
 }
 
-async function queryJourneysPage(cursor?: string): Promise<{ items: JourneyItem[]; endCursor?: string; hasNextPage?: boolean }> {
+async function postJourneysList(criteria: Record<string, unknown>, limit: number, cursor?: string): Promise<{ items: JourneyItem[]; endCursor?: string; hasNextPage?: boolean }> {
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), 3000)
   try {
@@ -179,8 +278,8 @@ async function queryJourneysPage(cursor?: string): Promise<{ items: JourneyItem[
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OCELLOIDS_TOKEN}` },
       body: JSON.stringify({
-        args: { op: 'journeys.list', criteria: { networks: [URN_HYDRATION] } },
-        pagination: { limit: PAGE_LIMIT, ...(cursor ? { cursor } : {}) },
+        args: { op: 'journeys.list', criteria },
+        pagination: { limit, ...(cursor ? { cursor } : {}) },
       }),
       signal: ctrl.signal,
     })
@@ -192,6 +291,56 @@ async function queryJourneysPage(cursor?: string): Promise<{ items: JourneyItem[
   }
 }
 
+// Whether the feed the walks read is actually keeping up, measured rather than
+// assumed — and reported, because nothing else here can tell.
+//
+// The `networks` filter is the only usable source: it returns just the journeys that
+// touch us, which is what makes a page worth walking. But it has been observed
+// serving a slice HOURS behind the API's unfiltered feed, and since an unrecognised
+// criteria key is ignored rather than rejected, a stale filtered page is
+// indistinguishable from a healthy one. Walking unfiltered instead is not a fix: at
+// the head only ~1 journey per 100 touches Hydration, and one page of that feed spans
+// almost a day of send times, so a walk that steers by time coverage declares itself
+// finished having learned nothing. Fixing this needs the upstream filter to be live;
+// all this can do is say so, loudly and at most once per TTL, instead of quietly
+// enriching nothing.
+let lastLagProbeAt = 0
+
+async function newestJourneyMs(criteria: Record<string, unknown>): Promise<number> {
+  try {
+    const { items } = await postJourneysList(criteria, 1)
+    return items.length ? journeyReachMs(items[0]) : 0
+  } catch { return 0 }
+}
+
+async function reportFeedLag(): Promise<void> {
+  if (Date.now() - lastLagProbeAt < SOURCE_PROBE_TTL_MS) return
+  lastLagProbeAt = Date.now()
+  const [filteredMs, unfilteredMs] = await Promise.all([
+    newestJourneyMs({ networks: [URN_HYDRATION] }),
+    newestJourneyMs({}),
+  ])
+  const lagMs = unfilteredMs - filteredMs
+  if (filteredMs > 0 && unfilteredMs > 0 && lagMs > SOURCE_LAG_TOLERANCE_MS) {
+    console.warn(`[Explorer] Ocelloids networks filter is ${Math.round(lagMs / 60_000)} min behind its unfiltered feed — recent XCM rows cannot be enriched until this clears`)
+  }
+}
+
+// One page of Hydration's journeys. `rawCount` and `oldestMs` describe the page as
+// returned, and the walks below steer on those rather than recomputing the same
+// minimum at each call site.
+async function queryJourneysPage(cursor?: string): Promise<{
+  items: JourneyItem[]; rawCount: number; oldestMs: number; endCursor?: string; hasNextPage?: boolean
+}> {
+  const page = await postJourneysList({ networks: [URN_HYDRATION] }, PAGE_LIMIT, cursor)
+  let oldestMs = Number.MAX_SAFE_INTEGER
+  for (const j of page.items) {
+    const ts = journeyReachMs(j)
+    if (ts > 0) oldestMs = Math.min(oldestMs, ts)
+  }
+  return { items: page.items, rawCount: page.items.length, oldestMs, endCursor: page.endCursor, hasNextPage: page.hasNextPage }
+}
+
 // Walk journey pages newest-first until the window covers `oldestNeededMs` (or
 // MAX_PAGES). This is called only by the background refresh scheduler.
 async function ensureJourneys(oldestNeededMs: number): Promise<void> {
@@ -200,16 +349,15 @@ async function ensureJourneys(oldestNeededMs: number): Promise<void> {
   if (Date.now() - lastFailAt < FAIL_BACKOFF_MS) return
   inflight ??= (async () => {
     try {
+      // Cheap, throttled, and the only signal that the feed has gone stale.
+      await reportFeedLag()
       let cursor: string | undefined
       let pageOldest = Number.MAX_SAFE_INTEGER
       for (let page = 0; page < MAX_PAGES; page++) {
-        const { items, endCursor, hasNextPage } = await queryJourneysPage(cursor)
+        const { items, rawCount, oldestMs, endCursor, hasNextPage } = await queryJourneysPage(cursor)
         indexJourneys(items)
-        for (const j of items) {
-          const ts = journeyReachMs(j)
-          if (ts > 0) pageOldest = Math.min(pageOldest, ts)
-        }
-        if (!items.length || !hasNextPage || !endCursor || pageOldest <= oldestNeededMs) break
+        pageOldest = Math.min(pageOldest, oldestMs)
+        if (!rawCount || !hasNextPage || !endCursor || pageOldest <= oldestNeededMs) break
         cursor = endCursor
       }
       lastFetchAt = Date.now()
@@ -235,7 +383,7 @@ async function fetchPersistedSources(messageIds: string[]): Promise<Map<string, 
   try {
     const res = await client.query({
       query: `
-        SELECT message_id, argMax(from_hex, updated_at) AS from_hex, argMax(origin_urn, updated_at) AS origin_urn, argMax(origin_tx, updated_at) AS origin_tx
+        SELECT message_id, argMax(from_hex, updated_at) AS from_hex, argMax(origin_urn, updated_at) AS origin_urn, argMax(origin_tx, updated_at) AS origin_tx, argMax(origin_protocol, updated_at) AS origin_protocol
         FROM ${XCM_JOURNEY_SOURCES_TABLE}
         WHERE message_id IN ({ids:Array(String)})
         GROUP BY message_id
@@ -243,9 +391,9 @@ async function fetchPersistedSources(messageIds: string[]): Promise<Map<string, 
       query_params: { ids: messageIds },
       format: 'JSONEachRow',
     })
-    for (const row of await res.json<{ message_id: string; from_hex: string; origin_urn: string; origin_tx: string }>()) {
+    for (const row of await res.json<{ message_id: string; from_hex: string; origin_urn: string; origin_tx: string; origin_protocol: string }>()) {
       if (!row.from_hex || !row.origin_urn) continue
-      out.set(row.message_id, { from: row.from_hex, to: '', origin: row.origin_urn, destination: '', originTx: row.origin_tx || null, correlationId: '' })
+      out.set(row.message_id, { from: row.from_hex, to: '', origin: row.origin_urn, destination: '', originTx: row.origin_tx || null, correlationId: '', originProtocol: row.origin_protocol || '' })
     }
   } catch (err) {
     console.error('[Explorer] XCM journey source persisted lookup failed:', err instanceof Error ? err.message : err)
@@ -259,24 +407,28 @@ export function historicalCursorAt(tsMs: number): string {
   return Buffer.from(`${tsMs}|999999999`).toString('base64')
 }
 
-// Walk a small window around a historical timestamp and persist matches.
-async function walkWindowAt(tsMs: number): Promise<void> {
+// Walk the window around one unresolved row's timestamp and persist what it learns.
+//
+// The window is asymmetric on purpose. The list is ordered by when a journey was
+// SENT, and our timestamp is when it ARRIVED, so what has to be covered is the
+// latency between the two — all of it behind us, none ahead. `bridge` widens that
+// from an XCM-sized window to a bridge-sized one (see WINDOW_MS_*); a small lead is
+// still kept so a journey sent moments after our block timestamp is not cut off by
+// clock skew between the chains.
+async function walkWindowAt(tsMs: number, bridge: boolean): Promise<void> {
+  const windowMs = bridge ? WINDOW_MS_BRIDGE : WINDOW_MS_LOCAL
+  const maxPages = bridge ? WINDOW_PAGES_BRIDGE : WINDOW_PAGES_LOCAL
   let cursor: string | undefined = historicalCursorAt(tsMs + 120_000)
-  for (let page = 0; page < 3; page++) {
-    const { items, endCursor, hasNextPage } = await queryJourneysPage(cursor)
+  for (let page = 0; page < maxPages; page++) {
+    const { items, rawCount, oldestMs, endCursor, hasNextPage } = await queryJourneysPage(cursor)
     indexJourneys(items)
-    let pageOldest = Number.MAX_SAFE_INTEGER
-    for (const j of items) {
-      const ts = journeyReachMs(j)
-      if (ts > 0) pageOldest = Math.min(pageOldest, ts)
-    }
-    if (!items.length || !hasNextPage || !endCursor || pageOldest <= tsMs - 120_000) break
+    if (!rawCount || !hasNextPage || !endCursor || oldestMs <= tsMs - windowMs) break
     cursor = endCursor
   }
 }
 
 function queueBackgroundRefresh(
-  keys: { id: string; timestampMs: number }[],
+  keys: { id: string; timestampMs: number; bridge?: boolean }[],
   includeHistorical: boolean,
 ): void {
   if (!OCELLOIDS_TOKEN || Date.now() - lastFailAt < FAIL_BACKOFF_MS) return
@@ -284,7 +436,7 @@ function queueBackgroundRefresh(
     if (!Number.isFinite(key.timestampMs) || key.timestampMs <= 0) continue
     pendingOldestMs = Math.min(pendingOldestMs, key.timestampMs)
     if (includeHistorical && pendingHistoricalKeys.size < MAX_BACKGROUND_KEYS) {
-      pendingHistoricalKeys.set(key.id.toLowerCase(), key.timestampMs)
+      pendingHistoricalKeys.set(key.id.toLowerCase(), { timestampMs: key.timestampMs, bridge: !!key.bridge })
     }
   }
   if (pendingOldestMs === Number.MAX_SAFE_INTEGER || backgroundInflight) return
@@ -298,25 +450,46 @@ function queueBackgroundRefresh(
 
       await ensureJourneys(oldestNeededMs)
 
-      const unresolved = historicalKeys
-        .filter(([messageId]) => !journeyByMessageId.has(messageId))
-        .map(([, timestampMs]) => timestampMs)
-        .sort((a, b) => b - a)
-      const windows: number[] = []
-      for (const timestampMs of unresolved) {
-        if (!windows.some(window => Math.abs(window - timestampMs) < 2 * 3_600_000)) {
-          windows.push(timestampMs)
-        }
+      // Only ids the recent sweep did not already answer are worth a window walk.
+      const stillMissing = historicalKeys.filter(([messageId]) => !journeyByMessageId.has(messageId))
+      if (!stillMissing.length) return
+      // Bridge candidates first: their journeys sit furthest from their arrival, so
+      // they are the ones the recent sweep is least likely to have covered — and the
+      // budget below is small enough that ordering decides what gets spent on.
+      const ordered = stillMissing
+        .map(([messageId, key]) => ({ messageId, ...key }))
+        .sort((a, b) => (Number(b.bridge) - Number(a.bridge)) || (b.timestampMs - a.timestampMs))
+      const windows: { timestampMs: number; bridge: boolean }[] = []
+      for (const key of ordered) {
+        // One walk covers a span, so a nearby id needs no window of its own — but
+        // only a walk at least as wide as this id needs can stand in for it.
+        const covered = windows.some(w => (!key.bridge || w.bridge)
+          && Math.abs(w.timestampMs - key.timestampMs) < (w.bridge ? WINDOW_MS_BRIDGE : WINDOW_MS_LOCAL))
+        if (!covered) windows.push({ timestampMs: key.timestampMs, bridge: key.bridge })
         if (windows.length >= MAX_HISTORICAL_WINDOWS) break
       }
       for (const window of windows) {
         try {
-          await walkWindowAt(window)
+          await walkWindowAt(window.timestampMs, window.bridge)
         } catch (err) {
           lastFailAt = Date.now()
           console.error('[Explorer] XCM historical journey walk failed:', err instanceof Error ? err.message : err)
           break
         }
+      }
+      // Whatever the walks did not resolve is recorded as an attempt, so the next
+      // request spaces its retry rather than repeating this immediately.
+      const unresolved = ordered.filter(k => !journeyByMessageId.has(k.messageId))
+      if (unresolved.length) {
+        const priorMisses = await fetchJourneyMisses(unresolved.map(k => k.messageId))
+        persistJourneyMisses(unresolved.map(k => {
+          const prior = priorMisses.get(k.messageId)
+          return {
+            message_id: k.messageId,
+            attempts: Math.min(0xffff, (prior?.attempts ?? 0) + 1),
+            first_seen_ms: prior?.firstSeenMs || k.timestampMs,
+          }
+        }))
       }
     })
     .catch(err => {
@@ -331,10 +504,15 @@ function queueBackgroundRefresh(
     })
 }
 
-// Resolve inbound journeys from memory and ClickHouse. Misses remain
-// unenriched for this response and schedule background discovery for later
-// requests.
-export async function xcmJourneySourcesFor(keys: { messageId: string; timestampMs: number }[]): Promise<Map<string, XcmJourneySource>> {
+// Resolve inbound journeys from memory and ClickHouse. Misses remain unenriched for
+// this response and schedule background discovery for later requests.
+//
+// `bridge` is the caller's local guess that this row is a bridge arrival — an
+// Ethereum-native asset credited from a sibling, say. It only ever steers how the
+// background budget is spent and how wide its walk reaches; it never becomes a
+// displayed origin, because holding a bridged asset on AssetHub and forwarding it
+// looks identical from here and is not the same journey.
+export async function xcmJourneySourcesFor(keys: { messageId: string; timestampMs: number; bridge?: boolean }[]): Promise<Map<string, XcmJourneySource>> {
   const out = new Map<string, XcmJourneySource>()
   if (!keys.length) return out
   for (const key of keys) {
@@ -350,10 +528,18 @@ export async function xcmJourneySourcesFor(keys: { messageId: string; timestampM
     }
   }
   const unresolved = keys.filter(k => !out.has(k.messageId) && k.timestampMs > 0)
-  queueBackgroundRefresh(
-    unresolved.map(key => ({ id: key.messageId, timestampMs: key.timestampMs })),
-    true,
-  )
+  if (unresolved.length && OCELLOIDS_TOKEN) {
+    // A topic id already looked for and not found waits out its backoff instead of
+    // being re-walked on every request. The bridge case is exactly why the schedule
+    // exists rather than a single attempt: its journey often appears only later.
+    const misses = await fetchJourneyMisses(unresolved.map(k => k.messageId.toLowerCase()))
+    const now = Date.now()
+    const due = unresolved.filter(k => missIsDue(misses.get(k.messageId.toLowerCase()), now))
+    queueBackgroundRefresh(
+      due.map(key => ({ id: key.messageId, timestampMs: key.timestampMs, bridge: key.bridge })),
+      true,
+    )
+  }
   return out
 }
 
