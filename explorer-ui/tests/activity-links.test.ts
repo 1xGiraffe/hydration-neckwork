@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { activitySlug, activityId, canonicalTarget, parseId, SLUG_TYPES } from '../src/components/ActivityTable'
+import { activitySlug, activityId, activityLabel, canonicalTarget, parseId, SLUG_TYPES } from '../src/components/ActivityTable'
+import { LIQ_LABELS } from '../src/components/activityColors'
 import type { ActivityRow } from '../src/types'
 
 const base: ActivityRow = {
@@ -17,6 +18,7 @@ describe('activitySlug', () => {
     expect(activitySlug({ ...base, type: 'xcm' })).toBe('cross-chain')
     expect(activitySlug({ ...base, type: 'liquidity', liqAction: 'Add' })).toBe('add-liquidity')
     expect(activitySlug({ ...base, type: 'liquidity', liqAction: 'Remove' })).toBe('remove-liquidity')
+    expect(activitySlug({ ...base, type: 'liquidity', liqAction: 'Destroy' })).toBe('destroy-pool')
     expect(activitySlug({ ...base, type: 'mm', mmAction: 'Supply' })).toBe('lend')
     expect(activitySlug({ ...base, type: 'mm', mmAction: 'LiquidationCall' })).toBe('liquidate')
     expect(activitySlug({ ...base, type: 'mm', mmAction: 'Repay' })).toBe('repay')
@@ -25,6 +27,17 @@ describe('activitySlug', () => {
     expect(activitySlug({ ...base, type: 'otc', otcAction: 'Place' })).toBe('otc-place')
     expect(activitySlug({ ...base, type: 'otc', otcAction: 'Pull' })).toBe('otc-pull')
     expect(activitySlug({ ...base, type: 'otc', otcAction: 'Fill' })).toBe('otc-fill')
+  })
+})
+
+// The slug label (crumbs/route title) and the liqAction label (the detail page's
+// Action field, via LIQ_LABELS[row.liqAction ?? ''] ?? LIQ_LABELS.Add in
+// ActivityDetail) are two independent maps that must still agree on a pool
+// destruction — the same double-naming reward-claim rows already need.
+describe('destroy-pool labels', () => {
+  it('names the slug and the liquidity action the same way', () => {
+    expect(activityLabel('destroy-pool')).toBe('Destroy pool')
+    expect(LIQ_LABELS.Destroy).toBe('Destroy pool')
   })
 })
 
