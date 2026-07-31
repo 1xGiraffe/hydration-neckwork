@@ -2227,7 +2227,11 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
 export interface HolderRow {
   rank: number
   account: AccountRef | null                 // null when this is a multi-account tag group
-  tag: { tagId: string; name: string; color: string; icon: string; memberCount: number } | null
+  // `userTagId`/`listId` are additive, same convention as TopAccountRow: set only
+  // when this group folded under the REQUESTING viewer's own tag (served from
+  // /user/holders) rather than a system one. `memberCount` counts members
+  // HOLDING this asset, like every system tag row on this surface.
+  tag: { tagId: string; name: string; color: string; icon: string; memberCount: number; userTagId?: string; listId?: string } | null
   balance: string
   lastBlock: number
   valueUsd?: number | null
@@ -2236,11 +2240,55 @@ export interface HolderRow {
 
 export interface HoldersPage { asset: AssetRef; holders: HolderRow[]; total: number; totalUsd: number }
 
+// The holders list, folded under one viewer's OWN (or subscribed) tags in
+// addition to the shared system ones — getAccountsForViewerFold's exact
+// pattern: same query/reconstruction work, only a different grouping key for
+// the accounts the fold names, cached per-viewer and never shared.
+export function getHoldersForViewerFold(assetId: number, limit: number, offset: number, fold: ViewerFold): Promise<HoldersPage> {
+  if (!fold.ids.length) return getHolders(assetId, limit, offset)
+  return getHolders(assetId, limit, offset, fold)
+}
+
+// A refFor for the TS-side holder groupers that lets a viewer's fold win an
+// account before its system tag does — the in-memory mirror of the SQL path's
+// `if(userKey != '', userKey, system)`. directoryFoldFor already excluded
+// every account the system slot wins in priority order, so a hit here IS the
+// resolved winner, never a competing claim.
+function viewerFoldRefFor(fold: ViewerFold | undefined): (accountId: string) => AccountRef {
+  if (!fold) return accountRef
+  const keyById = new Map<string, string>()
+  fold.ids.forEach((id, i) => keyById.set(id, fold.keys[i]))
+  return (accountId: string) => {
+    const ref = accountRef(accountId)
+    const key = keyById.get(ref.accountId)
+    const group = key ? fold.groups.get(key) : undefined
+    return group ? { ...ref, tag: { id: group.tagId, name: group.name, color: group.color, icon: group.icon, memberCount: group.memberCount } } : ref
+  }
+}
+
+// After TS-side grouping, stamp the rows whose tag came from the viewer's fold
+// with the additive user-tag markers (the SQL path does this inline).
+function markViewerHolderTags(rows: HolderRow[], fold: ViewerFold | undefined): HolderRow[] {
+  if (!fold) return rows
+  const listByTagId = new Map([...fold.groups.values()].map(g => [g.tagId, g.listId]))
+  return rows.map(r => {
+    const listId = r.tag ? listByTagId.get(r.tag.tagId) : undefined
+    return listId ? { ...r, tag: { ...r.tag!, userTagId: r.tag!.tagId, listId } } : r
+  })
+}
+
 // Paginated holder list. `limit`/`offset` page the full set (no hard cap), and
 // `total`/`totalUsd` describe the whole holder base regardless of the page so the
-// UI can show the true count, per-holder share, and a pager.
-export async function getHolders(assetId: number, limit: number, offset = 0): Promise<HoldersPage> {
+// UI can show the true count, per-holder share, and a pager. `viewerFold`
+// (only ever set via getHoldersForViewerFold) additionally folds the viewer's
+// own tags; absent a fold every path below is unchanged, including its cache key.
+export async function getHolders(assetId: number, limit: number, offset = 0, viewerFold?: ViewerFold): Promise<HoldersPage> {
   const a = asset(assetId)
+  // Per-viewer results carry the fold fingerprint and their own key prefix so
+  // they can never be served from — or evict into — the shared anonymous entry.
+  const pageKey = viewerFold
+    ? `user-holders:${viewerFold.fingerprint}:${assetId}:${limit}:${offset}`
+    : `explorer:holders:${assetId}:${limit}:${offset}`
   const enrichShare = (rows: HolderRow[], prices: Map<number, PriceInfo>, totalUsd: number): HolderRow[] => rows.map(h => {
     const valueUsd = usdValue(prices, assetId, h.balance, a.decimals)
     return { ...h, valueUsd, share: totalUsd > 0 ? (valueUsd ?? 0) / totalUsd : 0 }
@@ -2254,9 +2302,9 @@ export async function getHolders(assetId: number, limit: number, offset = 0): Pr
     .filter(([, displayId]) => displayId === assetId)
     .map(([shareId]) => Number(shareId))
   if (foldedShareIds.length) {
-    return cached(`explorer:holders:${assetId}:${limit}:${offset}`, 30000, async () => {
+    return cached(pageKey, 30000, async () => {
       const prices = await ensurePrices()
-      const all = await getFoldedDisplayAssetHolders(assetId, foldedShareIds)
+      const all = markViewerHolderTags(await getFoldedDisplayAssetHolders(assetId, foldedShareIds, viewerFold), viewerFold)
       const totalRaw = all.reduce((sum, row) => sum + BigInt(row.balance), 0n)
       const totalUsd = usdValue(prices, assetId, totalRaw.toString(), a.decimals) ?? 0
       const page = all.slice(offset, limit > 0 ? offset + limit : all.length)
@@ -2269,8 +2317,9 @@ export async function getHolders(assetId: number, limit: number, offset = 0): Pr
   // suppliers reconstructed from indexed anchors and event deltas. Those
   // sets are small, so fetch all and page in memory.
   if (ATOKEN_UNDERLYING_ID[assetId] != null) {
-    return cached(`explorer:holders:${assetId}:${limit}:${offset}`, 30000, async () => {
-      const [prices, all, supplies] = await Promise.all([ensurePrices(), getATokenHolders(assetId, 1_000_000), getATokenTotalSupplies()])
+    return cached(pageKey, 30000, async () => {
+      const [prices, allRows, supplies] = await Promise.all([ensurePrices(), getATokenHolders(assetId, 1_000_000, viewerFold), getATokenTotalSupplies()])
+      const all = markViewerHolderTags(allRows, viewerFold)
       // Value the asset at its reconstructed total supply — the same figure the
       // assets list shows. Summing the displayed rows instead would shrink the TVL
       // by whatever pallet accounts hold (35% of aDOT sits in the Omnipool), so the
@@ -2286,8 +2335,20 @@ export async function getHolders(assetId: number, limit: number, offset = 0): Pr
       return { asset: a, holders: enrichShare(page, prices, totalUsd), total: all.length, totalUsd }
     })
   }
-  return cached(`explorer:holders:${assetId}:${limit}:${offset}`, 30000, async () => {
+  return cached(pageKey, 30000, async () => {
     const prices = await ensurePrices()
+    // Same two splices as accountsPage's gkeySql/labelIdSql (see its comments
+    // for the full rationale, including why label_id must be neutralized
+    // alongside the group key): a viewer's fold overrides the grouping for
+    // exactly the accounts it names, before GROUP BY runs — and absent a fold
+    // both branches are the exact original expressions, unchanged.
+    const foldKey = `transform(latest.account_id, {fold_ids:Array(String)}, {fold_keys:Array(String)}, '')`
+    const groupKeySql = viewerFold
+      ? `if(${foldKey} != '', ${foldKey}, if(t.label_id = '', latest.account_id, t.label_id))`
+      : `if(t.label_id = '', latest.account_id, t.label_id)`
+    const labelIdSql = viewerFold
+      ? `if(${foldKey} != '', '', t.label_id)`
+      : `t.label_id`
     const res = await client.query({
       query: `
         WITH
@@ -2334,8 +2395,8 @@ export async function getHolders(assetId: number, limit: number, offset = 0): Pr
           ),
           grouped AS (
             SELECT
-              if(t.label_id = '', latest.account_id, t.label_id) AS group_key,
-              t.label_id AS label_id,
+              ${groupKeySql} AS group_key,
+              ${labelIdSql} AS label_id,
               any(t.label_name) AS label_name,
               any(t.color) AS color,
               any(t.icon) AS icon,
@@ -2354,18 +2415,27 @@ export async function getHolders(assetId: number, limit: number, offset = 0): Pr
         FROM grouped
         ORDER BY gbal DESC
         LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
-      query_params: { asset: String(assetId), limit, offset }, format: 'JSONEachRow',
+      query_params: {
+        asset: String(assetId), limit, offset,
+        ...(viewerFold ? { fold_ids: viewerFold.ids, fold_keys: viewerFold.keys } : {}),
+      }, format: 'JSONEachRow',
     })
     const rows = await res.json<{ group_key: string; label_id: string; label_name: string; color: string; icon: string; member_count: string; balance: string; last_block: number; sample_account: string; total: string; total_bal: string }>()
     const total = rows.length ? Number(rows[0].total) : 0
     const totalUsd = rows.length ? (usdValue(prices, assetId, rows[0].total_bal, a.decimals) ?? 0) : 0
     const holders: HolderRow[] = rows.map((r, i) => {
-      const isTag = r.label_id !== ''
+      // A viewer's own tag wins the row over a system one — directoryFoldFor
+      // guarantees they never compete for the same account, so a hit here
+      // means label_id was neutralized to '' by labelIdSql above.
+      const userGroup = viewerFold ? viewerFold.groups.get(r.group_key) : undefined
+      const isTag = r.label_id !== '' || !!userGroup
       const valueUsd = usdValue(prices, assetId, r.balance, a.decimals)
       return {
         rank: offset + i + 1,
         account: isTag ? null : accountRef(r.sample_account),
-        tag: isTag ? { tagId: r.label_id, name: r.label_name, color: r.color, icon: tagIcon(r.label_id, r.icon), memberCount: Number(r.member_count) } : null,
+        tag: userGroup
+          ? { tagId: userGroup.tagId, name: userGroup.name, color: userGroup.color, icon: userGroup.icon, memberCount: Number(r.member_count), userTagId: userGroup.tagId, listId: userGroup.listId }
+          : (isTag ? { tagId: r.label_id, name: r.label_name, color: r.color, icon: tagIcon(r.label_id, r.icon), memberCount: Number(r.member_count) } : null),
         balance: r.balance,
         lastBlock: r.last_block,
         valueUsd,
@@ -4167,21 +4237,24 @@ function accountIdFromH160(h160: string): string | null {
 // the anchor + indexed Mint/Burn/BalanceTransfer deltas (reconstructHolderScaled) and
 // scaled by the reserve's current liquidityIndex — no per-request RPC. Module/pallet
 // accounts are excluded from the displayed list. Returns HolderRow[] ranked by balance.
-async function getATokenHolders(aTokenAssetId: number, limit: number): Promise<HolderRow[]> {
+async function getATokenHolders(aTokenAssetId: number, limit: number, viewerFold?: ViewerFold): Promise<HolderRow[]> {
   const underlyingId = ATOKEN_UNDERLYING_ID[aTokenAssetId]
   if (underlyingId == null) return []
-  return cached(`explorer:atoken-holders:${aTokenAssetId}:${limit}`, 30000, async () => {
+  // The reconstruction is viewer-independent, so it is what gets cached; the
+  // (cheap, in-memory) grouping runs per call so a viewer's fold can regroup
+  // the same held balances without its own copy of the heavy work.
+  const held = await cached(`explorer:atoken-held:${aTokenAssetId}`, 30000, async () => {
     const b0 = await aTokenAnchorBlock()
     if (!b0) return []  // anchor not established yet → pending (never a wrong event-only sum)
     const reserve = (await getATokenReserves()).find(entry => entry.assetId === aTokenAssetId)
     if (!reserve) return []
     const scaled = await reconstructHolderScaled(reserve.token.aToken, b0)
-    const held = scaled
+    return scaled
       .filter(s => !s.holder.startsWith('0x6d6f646c'))   // exclude module/pallet accounts from the list
       .map(s => ({ h160: s.holder, bal: (s.scaled * reserve.liquidityIndex) / ATOKEN_RAY }))
       .filter(h => h.bal > 0n)
-    return groupATokenHolderRows(held, accountRef, accountIdFromH160).slice(0, limit)
   })
+  return groupATokenHolderRows(held, viewerFoldRefFor(viewerFold), accountIdFromH160).slice(0, limit)
 }
 
 interface HolderBalanceClaim { accountId: string; bal: bigint; lastBlock: number; memberKey?: string }
@@ -4249,8 +4322,10 @@ export function groupHolderBalanceClaims(
     .map(({ bal: _bal, ...row }, index) => ({ ...row, rank: index + 1 }))
 }
 
-async function getFoldedDisplayAssetHolders(displayAssetId: number, shareAssetIds: number[]): Promise<HolderRow[]> {
-  return cached(`explorer:folded-display-holders:${displayAssetId}`, 30000, async () => {
+async function getFoldedDisplayAssetHolders(displayAssetId: number, shareAssetIds: number[], viewerFold?: ViewerFold): Promise<HolderRow[]> {
+  // Claims (viewer-independent) are the cached unit; grouping runs per call —
+  // same split as getATokenHolders above, for the same per-viewer fold reason.
+  const claims = await cached(`explorer:folded-display-claims:${displayAssetId}`, 30000, async (): Promise<HolderBalanceClaim[]> => {
     const normalizedShareIds = [...new Set(shareAssetIds.filter(id => SHARE_TOKEN_UNDERLYING_ID[id] === displayAssetId))]
     if (!normalizedShareIds.length) return []
     const sourceIds = [displayAssetId, ...normalizedShareIds]
@@ -4336,8 +4411,9 @@ async function getFoldedDisplayAssetHolders(displayAssetId: number, shareAssetId
     // real custody balance. An unavailable reconstruction must never turn a
     // known on-chain holder into zero.
     claims.push(...custodyByContract.values())
-    return groupHolderBalanceClaims(claims, accountRef)
+    return claims
   })
+  return groupHolderBalanceClaims(claims, viewerFoldRefFor(viewerFold))
 }
 
 // Turn per-H160 aToken balances into display rows. Holders resolving (via
