@@ -6,6 +6,7 @@ import {
   isLocatedActivityRequest,
   liqActionFor,
   liquidityActionEventNames,
+  POOL_LIFECYCLE_EVENTS,
 } from '../src/services/explorerService.ts'
 import type { ActivityRow } from '../src/services/explorerService.ts'
 
@@ -243,6 +244,53 @@ describe('the token filter reaches candidates only', () => {
     // whole bound — so re-enabling the prefilter can only cost a query, never a row.
     expect((explorerService.match(/transferReadNeedsWholeBound\(/g) ?? []).length).toBe(2)   // definition + one call
     expect((explorerService.match(/await readTransfers\(/g) ?? []).length).toBe(2)
+  })
+})
+
+// A viewed account can be admitted to a liquidity_activity read through `who` (the LP)
+// or `pool_account` (the pool itself), but the pool_account arm must never widen beyond
+// the pool's own lifecycle — otherwise a future event that starts carrying a `pool` arg
+// would silently attribute every LP's add/remove on that pool to the pool account's own
+// feed, and a pool account's page would stop being lifecycle-markers-only.
+describe('POOL_LIFECYCLE_EVENTS confines the pool_account admission arm', () => {
+  it('names exactly pool creation and destruction', () => {
+    expect([...POOL_LIFECYCLE_EVENTS].sort()).toEqual(['XYK.PoolCreated', 'XYK.PoolDestroyed'])
+  })
+
+  it('is a subset of the full liquidity event list', () => {
+    const all = liquidityActionEventNames()
+    for (const name of POOL_LIFECYCLE_EVENTS) expect(all, name).toContain(name)
+  })
+
+  it('scopes pool_account inside its own event_name test, not the caller’s', () => {
+    const at = explorerService.indexOf('function liquidityWhoOrPoolSql')
+    expect(at).toBeGreaterThan(-1)
+    const body = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
+    expect(body).toMatch(/pool_account IN \(\$\{list\}\) AND event_name IN \(\$\{sqlEventNameList\(\[\.\.\.POOL_LIFECYCLE_EVENTS\]\)\}\)/)
+  })
+
+  // The failure this guards: reverting any one of the three sites to the old
+  // `(who IN (${list}) OR pool_account IN (${list}))` shape (no inner event_name test)
+  // would compile and pass every OTHER test here, since the outer per-call event list
+  // often masks it today by coincidence of which events currently populate pool_account.
+  it('leaves no liquidity_activity read with an unscoped pool_account arm', () => {
+    expect(explorerService).not.toMatch(/who IN \(\$\{list\}\) OR pool_account IN \(\$\{list\}\)\)/)
+  })
+
+  // accountLiquidityArm (the liquidity count arm), semanticExtrinsicSql (the transfer
+  // count arm's suppression context), and collectAccountActivity's liquidity page read
+  // must all call the one shared builder — not three copies that can drift apart.
+  it('is shared verbatim by all three liquidity_activity reads that admit a pool account', () => {
+    expect((explorerService.match(/liquidityWhoOrPoolSql\(list\)/g) ?? []).length).toBe(3)
+    for (const name of ['accountLiquidityArm', 'semanticExtrinsicSql']) {
+      const at = explorerService.indexOf(`function ${name}`)
+      expect(at, name).toBeGreaterThan(-1)
+      const fn = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
+      expect(fn, name).toContain('liquidityWhoOrPoolSql(list)')
+    }
+    // The page read is a closure inside collectAccountActivity, not a top-level
+    // function `body()` can extract by name — assert its call site directly.
+    expect(explorerService).toContain('AND ${liquidityWhoOrPoolSql(list)}\n                ${liquidityTokenFilter}')
   })
 })
 

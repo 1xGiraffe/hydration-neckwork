@@ -848,6 +848,20 @@ export function isAmountlessLiquidityEvent(eventName: string): boolean {
   return AMOUNTLESS_LIQUIDITY_EVENTS.has(eventName)
 }
 
+// The only two events a pool account itself is a party to — creation and
+// destruction — named explicitly rather than derived from a string suffix, so the
+// list cannot silently grow if a future event name happens to match a pattern.
+// `pool_account` (JSONExtractString(args_json,'pool') in the MV) is empty on every
+// OTHER liquidity_activity row today — Add/Remove/Claim carry no `pool` arg — but
+// that is a fact about today's runtime args, not a schema guarantee. Every read
+// that admits a viewed account through `pool_account` rather than `who` (see
+// liquidityWhoOrPoolSql) confines that arm to this set, so a future runtime that
+// starts stamping a `pool` field on XYK.LiquidityAdded/Removed cannot silently
+// attribute an ordinary LP's add/remove to the pool account's own feed. This is
+// also the intended product boundary: a pool account's page shows its own
+// lifecycle markers (Create/Destroy), never every LP's traffic on it.
+export const POOL_LIFECYCLE_EVENTS: ReadonlySet<string> = new Set(['XYK.PoolCreated', 'XYK.PoolDestroyed'])
+
 export function liquidityAmountFromArgs(eventName: string, args: Record<string, unknown>): string {
   const arg = LIQUIDITY_AMOUNT_ARG[eventName]
   return arg ? argStr(args, arg) : ''
@@ -12998,6 +13012,21 @@ function accountDcaTradeArm(list: string, bound: string, tokenIds?: number[]): A
     GROUP BY block_height`
 }
 
+// A pool account never appears as `who` on its own lifecycle events — the creator
+// does — so matching only `who` leaves every XYK pair account's Liquidity tab
+// empty. `who` and `pool_account` are never equal (verified across all
+// XYK.PoolCreated rows), so the OR cannot double-emit. The `pool_account` arm is
+// itself confined to POOL_LIFECYCLE_EVENTS regardless of the caller's own event
+// list: a viewed account should only ever be admitted through `pool_account` for
+// pool creation/destruction, never for an ordinary LP's add/remove on that pool,
+// even if a future runtime upgrade started populating `pool_account` more widely.
+// Shared verbatim by every liquidity_activity read that needs this admission test
+// — accountLiquidityArm, semanticExtrinsicSql, and the liquidity page read in
+// collectAccountActivity — so the three cannot drift into classifying differently.
+function liquidityWhoOrPoolSql(list: string): string {
+  return `(who IN (${list}) OR (pool_account IN (${list}) AND event_name IN (${sqlEventNameList([...POOL_LIFECYCLE_EVENTS])})))`
+}
+
 // Liquidity provision/removal/mining claims: one row per source row, exactly the
 // event list the page read uses, narrowed to the events whose action label the request
 // asked for.
@@ -13008,17 +13037,14 @@ function accountDcaTradeArm(list: string, bound: string, tokenIds?: number[]): A
 // liquidity_activity has an asset_id outside its own asset_refs), so this is exactly
 // the `[row.asset, …row.assetRefs]` test the classifier applies.
 //
-// A pool account never appears as `who` on its own lifecycle events — the creator
-// does — so matching only `who` leaves every XYK pair account's Liquidity tab
-// empty. `who` and `pool_account` are never equal (verified across all
-// XYK.PoolCreated rows), so the OR cannot double-emit. Both the count arm and the
-// page read carry this predicate: if they diverge the tab counts rows it will not
-// render, which is the exact failure the liquidityActionEventNames comment warns of.
+// Both the count arm and the page read carry the same liquidityWhoOrPoolSql
+// predicate: if they diverge the tab counts rows it will not render, which is the
+// exact failure the liquidityActionEventNames comment warns of.
 function accountLiquidityArm(list: string, bound: string, eventNames: readonly string[], tokenIds?: number[]): ActivityCountArm {
   if (!eventNames.length) return emptyActivityCountArm()
   const tokenFilter = armTokenFilter(tokenIds, ids => `hasAny(asset_refs, [${ids}])`)
   return `SELECT block_height, count() AS rows FROM price_data.liquidity_activity
-    WHERE ${bound} AND (who IN (${list}) OR pool_account IN (${list}))
+    WHERE ${bound} AND ${liquidityWhoOrPoolSql(list)}
       AND event_name IN (${sqlEventNameList([...eventNames])})
       ${tokenFilter}
     GROUP BY block_height`
@@ -13167,7 +13193,7 @@ function semanticExtrinsicSql(list: string, evmList: string, bound: string, enum
     `SELECT block_height, extrinsic_index FROM price_data.account_swap_activity FINAL
        WHERE ${bound} AND account IN (${list})`,
     `SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index FROM price_data.liquidity_activity
-       WHERE ${bound} AND (who IN (${list}) OR pool_account IN (${list})) AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
+       WHERE ${bound} AND ${liquidityWhoOrPoolSql(list)} AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
          AND extrinsic_index IS NOT NULL`,
   ]
   // Money-market rows are EVM logs; the substrate extrinsic that emitted them is
@@ -14172,7 +14198,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
               FROM price_data.liquidity_activity
               WHERE ${pageBound}
                 AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
-                AND (who IN (${list}) OR pool_account IN (${list}))
+                AND ${liquidityWhoOrPoolSql(list)}
                 ${liquidityTokenFilter}
               ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
         query_params: { n: pageLimit },
