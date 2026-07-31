@@ -87,14 +87,14 @@ describe('isLocatedActivityRequest', () => {
 // whose rows carry that action label. Both mappings below are therefore derived by
 // APPLYING the labelling function, never by restating it backwards.
 describe('action filters invert their labelling exactly', () => {
-  const LIQUIDITY_ACTIONS = ['Add', 'Remove', 'Create', 'Claim']
+  const LIQUIDITY_ACTIONS = ['Add', 'Remove', 'Create', 'Claim', 'Destroy']
 
   it('selects every liquidity event under exactly one action', () => {
     const all = liquidityActionEventNames()
-    expect(all.length).toBe(9)
+    expect(all.length).toBe(10)
     const selected = LIQUIDITY_ACTIONS.flatMap(action => liquidityActionEventNames(action))
     expect([...selected].sort()).toEqual([...all].sort())
-    expect(LIQUIDITY_ACTIONS.map(action => liquidityActionEventNames(action).length)).toEqual([3, 3, 1, 2])
+    expect(LIQUIDITY_ACTIONS.map(action => liquidityActionEventNames(action).length)).toEqual([3, 3, 1, 2, 1])
   })
 
   it('gives an action no liquidity event produces an empty selection, not everything', () => {
@@ -134,7 +134,7 @@ describe('per-action selections partition their category', () => {
       ],
     },
     {
-      actions: ['Add', 'Remove', 'Create', 'Claim'],
+      actions: ['Add', 'Remove', 'Create', 'Claim', 'Destroy'],
       rows: liquidityActionEventNames().map(name => row({ type: 'liquidity', liqAction: liqActionFor(name) })),
     },
     {
@@ -157,7 +157,7 @@ describe('per-action selections partition their category', () => {
     }
     // Pinned so a category dropped from the table above fails here rather than silently
     // shrinking the check to nothing.
-    expect(checked).toBe(25)
+    expect(checked).toBe(26)
   })
 
   it('treats a failed DCA attempt as a subset of DCA, never a seventh bucket', () => {
@@ -290,7 +290,8 @@ describe('activity count arms count each row once', () => {
 
   // The two lists are deliberately different, so this is NOT a duplication to collapse:
   // value-chart markers price a flow, and the four events that carry no priceable flow
-  // of their own (pool creation, both mining reward claims) have no marker to draw.
+  // of their own (pool creation, pool destruction, both mining reward claims) have no
+  // marker to draw.
   it('keeps the value-marker list a strict, smaller subset of the feed list', () => {
     const names = (decl: string): string[] => {
       const at = explorerService.indexOf(decl)
@@ -301,11 +302,11 @@ describe('activity count arms count each row once', () => {
     const feed = names('const LIQUIDITY_EVENTS = [')
     const markers = names('const VALUE_EVENT_LIQUIDITY_NAMES = [')
 
-    expect(feed).toHaveLength(9)
+    expect(feed).toHaveLength(10)
     expect(markers).toHaveLength(6)
     expect(markers.filter(name => feed.includes(name))).toHaveLength(6)
     expect(feed.filter(name => !markers.includes(name)))
-      .toEqual(['XYK.PoolCreated', 'OmnipoolLiquidityMining.RewardClaimed', 'XYKLiquidityMining.RewardClaimed'])
+      .toEqual(['XYK.PoolCreated', 'XYK.PoolDestroyed', 'OmnipoolLiquidityMining.RewardClaimed', 'XYKLiquidityMining.RewardClaimed'])
   })
 
   // Pool-share membership is asset-registry state ClickHouse does not hold. It is
