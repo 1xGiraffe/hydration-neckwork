@@ -6770,6 +6770,39 @@ async function transferCallExtrinsics(pairs: [number, number | null][]): Promise
   return out
 }
 
+// Which of these extrinsics settled an OTC order.
+//
+// A fill moves both sides in one extrinsic, and the fill row it belongs to is
+// attributed to the account that CALLED it — the taker. The maker never signs and
+// OTC.Filled names only the filler, so on the maker's own feed the fill is absent and
+// its two legs, which every other surface correctly folds away, were left standing as
+// a pair of unrelated transfers. The extrinsic settling an order is a fact about the
+// extrinsic, not about whose feed is being built, so the legs are read as plumbing for
+// both parties.
+//
+// Bounded exactly like transferCallExtrinsics above: the pairs come from the page's
+// own transfer rows and every read is a primary-key lookup.
+async function otcSettlementExtrinsics(pairs: [number, number | null][]): Promise<Set<string>> {
+  const out = new Set<string>()
+  const keys = [...new Set(pairs.filter(([, i]) => i != null).map(([h, i]) => `${h}:${i}`))]
+  if (!keys.length) return out
+  const chunks = await mapChunksConcurrently(keys, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const tuples = chunk.map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
+    const res = await client.query({
+      query: `SELECT DISTINCT block_height, extrinsic_index FROM ${otcActivityTable()}
+              WHERE (block_height, assumeNotNull(extrinsic_index)) IN (${tuples})
+                AND event_name IN (${sqlEventNameList([...OTC_FILL_EVENTS])})
+                AND extrinsic_index IS NOT NULL`,
+      format: 'JSONEachRow',
+    })
+    return res.json<{ block_height: number; extrinsic_index: number }>()
+  })
+  for (const rows of chunks) {
+    for (const r of rows) out.add(`${r.block_height}:${r.extrinsic_index}`)
+  }
+  return out
+}
+
 // Map (block_height, event_index) → extrinsic_index, so balance-observation
 // activity rows can link to their originating extrinsic (h-i) rather than the block.
 async function extrinsicIndexFor(pairs: [number, number | null][]): Promise<Map<string, number>> {
@@ -8628,6 +8661,8 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
 // extrinsic-scoped builders below also suppress those legs from the Transfers
 // category, else every fill would double as spurious transfer rows.
 const OTC_EVENT_NAMES = ['OTC.Placed', 'OTC.Cancelled', 'OTC.Filled', 'OTC.PartiallyFilled']
+// The two that settle an order, and so move both parties' assets in one extrinsic.
+export const OTC_FILL_EVENTS = ['OTC.Filled', 'OTC.PartiallyFilled'] as const
 const OTC_ACTION_EVENTS: Record<string, string[]> = {
   Place: ['OTC.Placed'],
   Pull: ['OTC.Cancelled'],
@@ -13305,6 +13340,11 @@ function semanticExtrinsicSql(list: string, evmList: string, bound: string, enum
              AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()}))
          AND extrinsic_index IS NOT NULL`)
   }
+  // Every OTC settlement, not only the ones this account's own rows reveal. The page
+  // drops both parties' legs (see otcSettlementExtrinsics), so a total that counted the
+  // maker's would exceed the rows it can serve.
+  arms.push(`SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index FROM ${otcActivityTable()}
+       WHERE ${bound} AND event_name IN (${sqlEventNameList([...OTC_FILL_EVENTS])}) AND extrinsic_index IS NOT NULL`)
   if (enumeratedExtrinsics.length) {
     arms.push(`SELECT tupleElement(pair, 1) AS block_height, tupleElement(pair, 2) AS extrinsic_index
        FROM (SELECT arrayJoin(${sortedBlockPairsSql(enumeratedExtrinsics)}) AS pair)`)
@@ -14169,16 +14209,24 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     // (payouts *from* the treasury are unaffected). Skipped when the viewed
     // account IS the treasury, whose page is exactly those legs.
     const viewingTreasury = accCond.includes(TREASURY_POT)
-    const treasuryTransferOk = viewingTreasury ? new Set<string>()
-      : await transferCallExtrinsics(rawTransferRows.filter(r => r.to_acc === TREASURY_POT).map(r => [r.block_height, r.extrinsic_index] as [number, number | null]))
+    const transferPairs = rawTransferRows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null])
+    const [treasuryTransferOk, otcSettlementExt] = await Promise.all([
+      viewingTreasury ? Promise.resolve(new Set<string>())
+        : transferCallExtrinsics(rawTransferRows.filter(r => r.to_acc === TREASURY_POT).map(r => [r.block_height, r.extrinsic_index] as [number, number | null])),
+      otcSettlementExtrinsics(transferPairs),
+    ])
     const seenTr = new Set<string>()
     for (const r of dedupeTransferEvents(rawTransferRows)) {
       const key = `${r.block_height}:${r.event_index}`
       if (seenTr.has(key)) continue
       seenTr.add(key)
       // Drop transfers that are a leg of one of our own signed trades or OTC
-      // fills (swap/settlement noise).
-      if (r.extrinsic_index != null && (tradeExt.has(`${r.block_height}:${r.extrinsic_index}`) || otcExt.has(`${r.block_height}:${r.extrinsic_index}`))) continue
+      // fills (swap/settlement noise) — and of any OTC settlement at all, since the
+      // maker's side of a fill is the same plumbing without a row of its own to be
+      // recognised by (see otcSettlementExtrinsics).
+      if (r.extrinsic_index != null && (tradeExt.has(`${r.block_height}:${r.extrinsic_index}`)
+        || otcExt.has(`${r.block_height}:${r.extrinsic_index}`)
+        || otcSettlementExt.has(`${r.block_height}:${r.extrinsic_index}`))) continue
       // A transfer to the treasury that is not itself a transfer call is a
       // fee/deposit (register_code, an XCM inherent, a non-swap batch fee), not a
       // user transfer.
