@@ -385,6 +385,12 @@ describe('bridgeLabel', () => {
     expect(bridgeLabel('snowbridge')).toBe('Snowbridge')
     expect(bridgeLabel('wh_portal')).toBe('Wormhole')
     expect(bridgeLabel('basejump')).toBe('Basejump')
+    expect(bridgeLabel('hyperbridge')).toBe('Hyperbridge')
+    // Wormhole reaches Hydration as the Portal token bridge (via Moonbeam — the old
+    // MRL route) and as Native Token Transfers, which burns and mints directly. A
+    // reader knows both as Wormhole; only the route differs.
+    expect(bridgeLabel('wh_ntt')).toBe('Wormhole')
+    expect(bridgeLabel('xcm', 'wh_ntt')).toBe('Wormhole')
   })
 
   // A journey that only ever spoke XCM is not "bridged", and neither end being a
