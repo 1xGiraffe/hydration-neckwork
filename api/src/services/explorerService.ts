@@ -1249,6 +1249,16 @@ function usdValue(prices: Map<number, PriceInfo>, assetId: number, raw: string, 
   const amt = Number(raw) / 10 ** decimals
   return Number.isFinite(amt) ? amt * p.price : null
 }
+// A liquidity row's amount/value must not survive on the wire as '' / 0 for an event
+// that is amountless BY CONSTRUCTION (see AMOUNTLESS_LIQUIDITY_EVENTS): Number('') is
+// 0, so usdValue(prices, assetId, '', decimals) returns 0 * price — not null — the
+// moment a price for the asset exists. Other liquidity events legitimately carry ''
+// only until fillMissingLiquidityAmounts/enrichPoolCreations backfills it, so this
+// guard belongs at each row's construction, not inside usdValue itself.
+export function liquidityRowAmount(eventName: string, prices: Map<number, PriceInfo>, assetId: number, raw: string, decimals: number): { amount: string | null; valueUsd: number | null } {
+  if (isAmountlessLiquidityEvent(eventName)) return { amount: null, valueUsd: null }
+  return { amount: raw, valueUsd: usdValue(prices, assetId, raw, decimals) }
+}
 function priceTransformArrays(prices: Map<number, PriceInfo>): { idsSql: string; unitsSql: string } {
   const ids: string[] = []
   const units: string[] = []
@@ -7130,7 +7140,7 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
         const row: ActivityRow = {
           type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
           who: r.who ? accountRef(r.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
-          amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
+          ...liquidityRowAmount(r.event_name, prices, a.assetId, r.amount, a.decimals), amountIn: null, amountOut: null,
           assetRefs: r.asset_refs,
           liqAction: liqActionFor(r.event_name),
         }
@@ -11042,7 +11052,7 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
       const row: ActivityRow = {
         type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
         who: r.who ? accountRef(r.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
-        amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
+        ...liquidityRowAmount(r.event_name, prices, a.assetId, r.amount, a.decimals), amountIn: null, amountOut: null,
         liqAction: liqActionFor(r.event_name),
         linkBlock: r.block_height, linkIndex: r.extrinsic_index,
       }
@@ -11490,7 +11500,7 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
     rows.push({
       type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
       who: r.who ? accountRef(r.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
-      amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
+      ...liquidityRowAmount(r.event_name, prices, a.assetId, r.amount, a.decimals), amountIn: null, amountOut: null,
       liqAction: liqActionFor(r.event_name),
     })
   }
@@ -11747,7 +11757,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
           const row: ActivityRow = {
             type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
             who: r.who ? accountRef(r.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
-            amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
+            ...liquidityRowAmount(r.event_name, prices, a.assetId, r.amount, a.decimals), amountIn: null, amountOut: null,
             liqAction: liqActionFor(r.event_name),
             linkBlock: r.block_height, linkIndex: r.extrinsic_index,
           }
@@ -14170,7 +14180,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
         const row: ActivityRow = {
           type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
           who: r.who ? accountRef(r.who) : accounts[0] ? accountRef(accounts[0]) : null, to: null, asset: a, assetIn: null, assetOut: null,
-          amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
+          ...liquidityRowAmount(r.event_name, prices, a.assetId, r.amount, a.decimals), amountIn: null, amountOut: null,
           assetRefs: r.asset_refs,
           liqAction: liqActionFor(r.event_name),
           linkBlock: r.block_height, linkIndex: r.extrinsic_index,
