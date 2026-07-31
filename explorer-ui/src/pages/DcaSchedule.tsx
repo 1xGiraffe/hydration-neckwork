@@ -1,14 +1,14 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/explorer'
 import { useDcaSchedule, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect } from '../router'
-import { Ago, Crumbs, F, AddrPill, AssetChip, AssetAmount, ProgressRing, SkeletonRows, MomentLink, Pager } from '../components/ui'
+import { Ago, Crumbs, F, AddrPill, AssetChip, AssetAmount, PoolBadge, ProgressRing, SkeletonRows, MomentLink, Pager } from '../components/ui'
 import { ActivityTable } from '../components/ActivityTable'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
-import { blockSeconds, dcaCadence, dcaProgress, dcaRunway, fmtDuration } from '../utils/dca'
+import { blockSeconds, dcaCadence, dcaProgress, dcaRunway, fmtDuration, fmtPermill } from '../utils/dca'
 import type { DcaScheduleDetail } from '../types'
 
 const PAGE = 25
@@ -160,6 +160,57 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
                   : <><AssetAmount asset={data.assetIn} raw={data.totalAmount} />
                     <Usd value={data.budgetUsd} basis={data.usdBasis} at={data.statusAt ?? data.createdAt.timestamp} /></>}
                 </div>
+
+                {/* The limits the order trades under, most-tuned first: slippage is
+                    the one an owner sets per schedule, then the absolute bound, then
+                    what happens when a trade misses them. Two different limits, so
+                    each is named for what it bounds — slippage is per trade and
+                    relative to the oracle price, the min/max is absolute and fixed
+                    for the schedule's whole life.
+                    Every one of these is omitted rather than shown as a zero when it
+                    is absent, and absent has three causes: an Option the schedule
+                    left unset, an EVM permit whose inner call is not indexed, and —
+                    for the bound — a deliberate zero, which is no bound at all. */}
+                {data.slippagePermill != null && <>
+                  <div className="dt">Slippage</div>
+                  <div className="dd"><span className="mono">{fmtPermill(data.slippagePermill)}</span>
+                    <span className="muted"> · allowed per trade, against the oracle price</span>
+                  </div>
+                </>}
+                {(data.minAmountOut ?? data.maxAmountIn) && <>
+                  <div className="dt">{data.direction === 'Buy' ? 'Max paid' : 'Min received'}</div>
+                  <div className="dd">
+                    <AssetAmount
+                      asset={data.direction === 'Buy' ? data.assetIn : data.assetOut}
+                      raw={(data.direction === 'Buy' ? data.maxAmountIn : data.minAmountOut) as string} />
+                    <span className="muted"> · per trade, or it fails</span>
+                  </div>
+                </>}
+                {data.maxRetries != null && <>
+                  <div className="dt">Retries</div>
+                  <div className="dd"><span className="mono">{F.int(data.maxRetries)}</span>
+                    <span className="muted"> · attempts after a failed trade before the schedule is terminated</span>
+                  </div>
+                </>}
+
+                {/* The route is not one of those limits — it is the path itself, and
+                    the only row here that draws rather than states — so it sits after
+                    them rather than among them. */}
+                {data.route && <>
+                  <div className="dt">Route</div>
+                  <div className="dd">{data.route.length === 0
+                    ? <span className="muted">chosen per trade by the router</span>
+                    : <span className="asset-flow dca-route">
+                      <AssetChip asset={data.route[0].assetIn} />
+                      {data.route.map((hop, i) => (
+                        <Fragment key={`${hop.pool}-${hop.assetIn.assetId}-${hop.assetOut.assetId}-${i}`}>
+                          <PoolBadge pool={hop.pool} poolId={hop.poolId} />
+                          <AssetChip asset={hop.assetOut} />
+                        </Fragment>
+                      ))}
+                    </span>}
+                  </div>
+                </>}
 
                 {/* Where it stands */}
                 <div className="dt">Traded</div>
