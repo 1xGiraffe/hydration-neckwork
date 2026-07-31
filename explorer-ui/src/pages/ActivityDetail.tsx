@@ -61,6 +61,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
               <div className="dt">Destination</div><div className="dd"><ChainBadge chain={row.destChain} />{row.destAccount && <span style={{ marginLeft: 8 }}><ExternalAccountPill account={row.destAccount} /></span>}</div>
               {row.fromTxUrl && <><div className="dt">Origin transaction</div><div className="dd"><a className="ext-link" href={row.fromTxUrl} target="_blank" rel="noopener">{explorerSiteName(row.fromTxUrl)} ↗</a></div></>}
             </>}
+            {row.type === 'xcm' && row.destTxUrl && <><div className="dt">Destination transaction</div><div className="dd"><a className="ext-link" href={row.destTxUrl} target="_blank" rel="noopener">{explorerSiteName(row.destTxUrl)} ↗</a></div></>}
             {row.type === 'xcm' && row.messageId && <><div className="dt">Message ID</div><div className="dd mono" style={{ overflowWrap: 'anywhere' }}>{row.messageId}</div></>}
             {row.type === 'xcm' && row.bridge && <><div className="dt">Bridge</div><div className="dd">{row.bridge}</div></>}
             {/* Both read the badge's own label maps, so this page cannot name an

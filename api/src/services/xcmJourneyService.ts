@@ -73,27 +73,39 @@ export function initXcmJourneyService(c: ClickHouseClient): void {
 }
 
 export interface XcmJourneySource {
-  from: string               // raw source account (0x 32- or 20-byte hex)
+  from: string               // raw source account (0x 32- or 20-byte hex), '' if none
   to: string                 // raw destination account (may be empty for remote-exec)
+  // The API's own rendering of each account, in the encoding its chain uses — base58
+  // for Solana, hex for EVM, SS58 for substrate. Preferred over re-encoding `from`/`to`
+  // here: it is the only way an address on a chain we do not model reads correctly.
+  fromFormatted: string
+  toFormatted: string
   origin: string             // journey origin chain URN (urn:ocn:<consensus>:<chainId>) —
                              // either end may differ from the hop our chain saw
                              // (e.g. Solana → Wormhole → Moonbeam → Hydration)
   destination: string        // journey destination chain URN
   originTx: string | null    // extrinsic hash on the origin chain
+  destTx: string | null      // transaction on the destination chain, once it lands
   correlationId: string      // xcscan journey id
-  // How the journey travelled, in the API's own vocabulary: 'snowbridge',
-  // 'wh_portal', 'basejump' or 'xcm'. Empty when a resolution predates the column.
+  // How the journey travelled at each end, in the API's own vocabulary: 'snowbridge',
+  // 'wh_portal', 'basejump', 'hyperbridge' or 'xcm'. A bridge shows up on the side it
+  // acts: inbound on origin, outbound on destination.
   originProtocol: string
+  destProtocol: string
 }
 
 interface JourneyItem {
   correlationId?: string
   from?: string
   to?: string
+  fromFormatted?: string | null
+  toFormatted?: string | null
   origin?: string
   destination?: string
   originProtocol?: string
+  destinationProtocol?: string
   originTxPrimary?: string | null
+  destinationTxPrimary?: string | null
   sentAt?: number
   recvAt?: number
   stops?: unknown
@@ -177,7 +189,23 @@ function safeParse(s: string): unknown {
 // ReplacingMergeTree collapses re-inserts of an already-known message_id, so
 // callers don't need to check what's already stored — only dedupe within
 // this batch to avoid sending the same message_id twice in one insert.
-function persistJourneySources(rows: { message_id: string; from_hex: string; origin_urn: string; origin_tx: string; origin_protocol: string }[]): void {
+// Both ends of a journey as one row, keyed by the topic id of the hop we saw.
+interface JourneyRow {
+  message_id: string
+  from_hex: string; origin_urn: string; origin_tx: string; origin_protocol: string; from_formatted: string
+  to_hex: string; dest_urn: string; dest_tx: string; dest_protocol: string; to_formatted: string
+}
+function journeyRow(messageId: string, src: XcmJourneySource): JourneyRow {
+  return {
+    message_id: messageId,
+    from_hex: src.from, origin_urn: src.origin, origin_tx: src.originTx ?? '',
+    origin_protocol: src.originProtocol, from_formatted: src.fromFormatted,
+    to_hex: src.to, dest_urn: src.destination, dest_tx: src.destTx ?? '',
+    dest_protocol: src.destProtocol, to_formatted: src.toFormatted,
+  }
+}
+
+function persistJourneySources(rows: JourneyRow[]): void {
   if (!client || !rows.length) return
   client.insert({ table: XCM_JOURNEY_SOURCES_TABLE, values: rows, format: 'JSONEachRow' })
     .catch(err => console.error('[Explorer] XCM journey source persist failed:', err instanceof Error ? err.message : err))
@@ -236,29 +264,37 @@ function indexJourneys(items: JourneyItem[]): void {
     journeysByOriginTx.clear()
     oldestFetchedMs = Number.MAX_SAFE_INTEGER
   }
-  const toPersist = new Map<string, { message_id: string; from_hex: string; origin_urn: string; origin_tx: string; origin_protocol: string }>()
+  const toPersist = new Map<string, JourneyRow>()
   for (const j of items) {
     const ts = journeyReachMs(j)
     if (ts > 0) oldestFetchedMs = Math.min(oldestFetchedMs, ts)
     if (!j.correlationId || typeof j.origin !== 'string' || typeof j.destination !== 'string') continue
     const from = typeof j.from === 'string' ? j.from.toLowerCase() : ''
     const to = typeof j.to === 'string' ? j.to.toLowerCase() : ''
+    const str = (v: unknown) => (typeof v === 'string' ? v : '')
     const src: XcmJourneySource = {
       from: ACCOUNT_HEX_RE.test(from) ? from : '',
       to: ACCOUNT_HEX_RE.test(to) ? to : '',
+      fromFormatted: str(j.fromFormatted),
+      toFormatted: str(j.toFormatted),
       origin: j.origin,
       destination: j.destination,
       originTx: j.originTxPrimary ?? null,
+      destTx: j.destinationTxPrimary ?? null,
       correlationId: j.correlationId,
-      originProtocol: typeof j.originProtocol === 'string' ? j.originProtocol : '',
+      originProtocol: str(j.originProtocol),
+      destProtocol: str(j.destinationProtocol),
     }
-    if (src.from) {
-      const ids = new Set<string>()
-      collectMessageIds(j.stops, ids)
-      for (const id of ids) {
-        journeyByMessageId.set(id, src)
-        toPersist.set(id, { message_id: id, from_hex: src.from, origin_urn: src.origin, origin_tx: src.originTx ?? '', origin_protocol: src.originProtocol })
-      }
+    // Index by topic id whatever else the journey has. Gating this on a usable source
+    // account (as it once was) silently excluded every OUTBOUND journey, because those
+    // report `from` as the origin CHAIN's urn rather than an account — which is exactly
+    // the set whose far destination we most want, since half of them carry no origin
+    // extrinsic hash to be found by either.
+    const ids = new Set<string>()
+    collectMessageIds(j.stops, ids)
+    for (const id of ids) {
+      journeyByMessageId.set(id, src)
+      toPersist.set(id, journeyRow(id, src))
     }
     if (j.origin === URN_HYDRATION && typeof src.originTx === 'string' && src.originTx.startsWith('0x')) {
       const key = src.originTx.toLowerCase()
@@ -383,7 +419,13 @@ async function fetchPersistedSources(messageIds: string[]): Promise<Map<string, 
   try {
     const res = await client.query({
       query: `
-        SELECT message_id, argMax(from_hex, updated_at) AS from_hex, argMax(origin_urn, updated_at) AS origin_urn, argMax(origin_tx, updated_at) AS origin_tx, argMax(origin_protocol, updated_at) AS origin_protocol
+        SELECT message_id,
+               argMax(from_hex, updated_at) AS from_hex, argMax(origin_urn, updated_at) AS origin_urn,
+               argMax(origin_tx, updated_at) AS origin_tx, argMax(origin_protocol, updated_at) AS origin_protocol,
+               argMax(from_formatted, updated_at) AS from_formatted,
+               argMax(to_hex, updated_at) AS to_hex, argMax(dest_urn, updated_at) AS dest_urn,
+               argMax(dest_tx, updated_at) AS dest_tx, argMax(dest_protocol, updated_at) AS dest_protocol,
+               argMax(to_formatted, updated_at) AS to_formatted
         FROM ${XCM_JOURNEY_SOURCES_TABLE}
         WHERE message_id IN ({ids:Array(String)})
         GROUP BY message_id
@@ -391,9 +433,20 @@ async function fetchPersistedSources(messageIds: string[]): Promise<Map<string, 
       query_params: { ids: messageIds },
       format: 'JSONEachRow',
     })
-    for (const row of await res.json<{ message_id: string; from_hex: string; origin_urn: string; origin_tx: string; origin_protocol: string }>()) {
-      if (!row.from_hex || !row.origin_urn) continue
-      out.set(row.message_id, { from: row.from_hex, to: '', origin: row.origin_urn, destination: '', originTx: row.origin_tx || null, correlationId: '', originProtocol: row.origin_protocol || '' })
+    for (const row of await res.json<JourneyRow>()) {
+      // A row is useful if EITHER end is known: an inbound lookup needs the origin, an
+      // outbound one the destination, and an outbound journey never has a source
+      // account at all. Requiring from_hex (as it once did) threw away every
+      // destination this table holds.
+      if (!row.origin_urn && !row.dest_urn) continue
+      out.set(row.message_id, {
+        from: row.from_hex || '', to: row.to_hex || '',
+        fromFormatted: row.from_formatted || '', toFormatted: row.to_formatted || '',
+        origin: row.origin_urn || '', destination: row.dest_urn || '',
+        originTx: row.origin_tx || null, destTx: row.dest_tx || null,
+        correlationId: '',
+        originProtocol: row.origin_protocol || '', destProtocol: row.dest_protocol || '',
+      })
     }
   } catch (err) {
     console.error('[Explorer] XCM journey source persisted lookup failed:', err instanceof Error ? err.message : err)
