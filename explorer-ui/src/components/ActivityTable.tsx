@@ -46,11 +46,22 @@ export function HydrationBadge() {
 }
 // The external-explorer label follows the link target — cross-chain accounts
 // live on Subscan for substrate chains, Solscan/Etherscan for Solana/Ethereum.
+// Every explorer a bridged journey can reach, so a Base link never says "Subscan".
+// Ordered longest-suffix first where hosts nest (optimistic.etherscan.io).
+const EXPLORER_SITES: [string, string][] = [
+  ['optimistic.etherscan.io', 'Etherscan'],
+  ['solscan.io', 'Solscan'],
+  ['etherscan.io', 'Etherscan'],
+  ['basescan.org', 'Basescan'],
+  ['arbiscan.io', 'Arbiscan'],
+  ['bscscan.com', 'BscScan'],
+  ['polygonscan.com', 'Polygonscan'],
+  ['suiscan.xyz', 'Suiscan'],
+]
 export function explorerSiteName(url: string): string {
   try {
     const host = new URL(url).hostname
-    if (host.endsWith('solscan.io')) return 'Solscan'
-    if (host.endsWith('etherscan.io')) return 'Etherscan'
+    for (const [suffix, name] of EXPLORER_SITES) if (host.endsWith(suffix)) return name
   } catch { /* fall through */ }
   return 'Subscan'
 }
