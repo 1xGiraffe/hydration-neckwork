@@ -11,7 +11,7 @@ import {
   getAddressListTotal, getTagListTotal,
   getAddressValueEvents, getTagValueEvents,
   getTagActivity, getTagExtrinsics, getTagEvents,
-  getAddressVotes, getTagVotes,
+  getAddressVotes, getTagVotes, getTagVotesByReferendum,
   isLocatedActivityRequest,
   normalizeAccountSort,
   type AccountSort,
@@ -555,6 +555,19 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const rows = await getTagVotes(params.data.tagId, limitParam(q, 25), offset, dateParam(q, 'from'), dateParam(q, 'to'))
     if (!rows) return reply.status(404).send({ error: 'Tag not found' })
     return rows
+  })
+
+  // The Votes tab's grouped mode: one row per referendum the tag's members
+  // voted on, members' latest votes combined.
+  fastify.get('/explorer/tag/:tagId/votes-by-referendum', async (req, reply) => {
+    const params = tagParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
+    const q = req.query as Record<string, unknown>
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    const page = await getTagVotesByReferendum(params.data.tagId, limitParam(q, 25), offset)
+    if (!page) return reply.status(404).send({ error: 'Tag not found' })
+    return page
   })
 
   fastify.get('/explorer/address/:address', async (req, reply) => {

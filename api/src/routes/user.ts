@@ -10,7 +10,7 @@ import {
   accountRef, resolveDisplayAccountId, getAccounts, getAccountsForViewerFold,
   getHolders, getHoldersForViewerFold,
   getListTagDetail, getListTagActivity, getListTagExtrinsics, getListTagEvents, getListTagVotes,
-  getListTagTabCounts, getListTagListTotal, getListTagValueEvents,
+  getListTagVotesByReferendum, getListTagTabCounts, getListTagListTotal, getListTagValueEvents,
 } from '../services/explorerService.ts'
 import { setProfileName, setProfileAvatar, clearProfileAvatar, profileForAccount, UserDataError } from '../services/userProfileService.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
@@ -563,6 +563,19 @@ export async function userRoutes(fastify: FastifyInstance) {
     const offset = activityOffsetParam(q, 'vote')
     if (offset == null) return reply.status(400).send({ error: `Votes offset must be between 0 and ${maxActivityOffsetFor('vote')}` })
     return getListTagVotes(resolved.listId, resolved.tagId, resolved.tag.members, limitParam(q, 25), offset, dateParam(q, 'from'), dateParam(q, 'to'))
+  })
+
+  // Grouped-mode counterpart of the votes route above — one row per referendum.
+  fastify.get('/user/list-tag/:listId/:tagId/votes-by-referendum', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const resolved = requireListTag(req, reply, accountId)
+    if (!resolved) return
+    const q = req.query as Record<string, unknown>
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    return getListTagVotesByReferendum(resolved.listId, resolved.tagId, resolved.tag.members, limitParam(q, 25), offset)
   })
 
   fastify.get('/user/list-tag/:listId/:tagId/counts', async (req, reply) => {
