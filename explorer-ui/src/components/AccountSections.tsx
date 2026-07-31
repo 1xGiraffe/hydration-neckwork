@@ -227,6 +227,7 @@ export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, valueUsd,
   const trading = tradingVolumeUsd ?? 0
   const liquidation = liquidationVolumeUsd ?? 0
   return (
+    <>
     <div className="acct-stats">
       {trading > 0 && <div className="acct-bal subtle">
         <div className="lab">Trading</div>
@@ -239,9 +240,13 @@ export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, valueUsd,
       <div className="acct-bal">
         <div className="lab">Value</div>
         <div className="amt">{F.usd(valueUsd)}</div>
-        {valueHint}
       </div>
     </div>
+    {/* The money-market breakdown rides on its own full-width row below the
+        stats, so it can run left under trading/liquidation instead of
+        wrapping inside the value's narrow column. */}
+    {valueHint && <div className="acct-stats-hint">{valueHint}</div>}
+  </>
   )
 }
 
