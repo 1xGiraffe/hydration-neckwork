@@ -13007,11 +13007,18 @@ function accountDcaTradeArm(list: string, bound: string, tokenIds?: number[]): A
 // always contains the representative `asset_id` the row displays (verified: no row in
 // liquidity_activity has an asset_id outside its own asset_refs), so this is exactly
 // the `[row.asset, …row.assetRefs]` test the classifier applies.
+//
+// A pool account never appears as `who` on its own lifecycle events — the creator
+// does — so matching only `who` leaves every XYK pair account's Liquidity tab
+// empty. `who` and `pool_account` are never equal (verified across all
+// XYK.PoolCreated rows), so the OR cannot double-emit. Both the count arm and the
+// page read carry this predicate: if they diverge the tab counts rows it will not
+// render, which is the exact failure the liquidityActionEventNames comment warns of.
 function accountLiquidityArm(list: string, bound: string, eventNames: readonly string[], tokenIds?: number[]): ActivityCountArm {
   if (!eventNames.length) return emptyActivityCountArm()
   const tokenFilter = armTokenFilter(tokenIds, ids => `hasAny(asset_refs, [${ids}])`)
   return `SELECT block_height, count() AS rows FROM price_data.liquidity_activity
-    WHERE ${bound} AND who IN (${list})
+    WHERE ${bound} AND (who IN (${list}) OR pool_account IN (${list}))
       AND event_name IN (${sqlEventNameList([...eventNames])})
       ${tokenFilter}
     GROUP BY block_height`
@@ -14165,7 +14172,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
               FROM price_data.liquidity_activity
               WHERE ${pageBound}
                 AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
-                AND who IN (${list})
+                AND (who IN (${list}) OR pool_account IN (${list}))
                 ${liquidityTokenFilter}
               ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
         query_params: { n: pageLimit },
