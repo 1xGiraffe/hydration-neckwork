@@ -1,4 +1,5 @@
-import type { ReferendumVoter } from '../types'
+import type { AccountRef, ReferendumVoter } from '../types'
+import type { ResolvedTag } from '../userTags'
 
 // Layout maths for the vote bubble map, kept out of the component file so the
 // component module exports only components (and so the scaling is unit-testable).
@@ -19,8 +20,25 @@ export const LABEL_EMOJI_R = 15
 
 export type BubbleSide = 'aye' | 'nay' | 'split'
 
+// Several tag members' live votes combined into one bubble. Sums are exact
+// integer strings (planck), like the voter fields they fold; the capital-
+// weighted average conviction is derived from weighted/balance at render time.
+export interface TagVoteGroup {
+  tag: ResolvedTag
+  voters: number
+  weightedAye: string
+  weightedNay: string
+  weighted: string
+  balance: string
+}
+
+// What the packer lays out: a lone voter, or a tag's combined votes.
+export type PackItem =
+  | { kind: 'voter'; voter: ReferendumVoter }
+  | { kind: 'tag'; group: TagVoteGroup }
+
 export interface Bubble {
-  voter: ReferendumVoter
+  item: PackItem
   x: number
   y: number
   r: number
@@ -30,10 +48,62 @@ export interface Bubble {
 }
 
 // A Split vote backs both sides at once, so it is neither aye nor nay.
-export function bubbleSide(voter: ReferendumVoter): BubbleSide {
+export function bubbleSide(voter: { weightedAye: string; weightedNay: string }): BubbleSide {
   const aye = Number(voter.weightedAye), nay = Number(voter.weightedNay)
   if (aye > 0 && nay > 0) return 'split'
   return nay > 0 ? 'nay' : 'aye'
+}
+
+// Fold live voters under their resolved tags — the same one-winner-per-account
+// resolution every pill uses (resolveTag: viewer's lists in priority order with
+// 'system' as a slot), so a bubble groups exactly like the accounts directory
+// and the holders list fold. A tag with a single live voter stays an individual
+// bubble: its label already reads as the tag, and the account-level hover and
+// link say strictly more than a group of one would.
+export function foldVoters(voters: ReferendumVoter[], resolve: (account: AccountRef) => ResolvedTag | null): PackItem[] {
+  // Withdrawn votes back nothing, so they are not plotted — the tally excludes them too.
+  const live = voters.filter(voter => !voter.removed && Number(voter.weighted) > 0)
+  const byTag = new Map<string, { tag: ResolvedTag; members: ReferendumVoter[] }>()
+  const items: PackItem[] = []
+  const slotByTag = new Map<string, number>()
+  for (const voter of live) {
+    const tag = voter.account ? resolve(voter.account) : null
+    if (!tag) { items.push({ kind: 'voter', voter }); continue }
+    const hit = byTag.get(tag.id)
+    if (hit) { hit.members.push(voter); continue }
+    byTag.set(tag.id, { tag, members: [voter] })
+    // The group renders where its first member would have — keep that slot.
+    slotByTag.set(tag.id, items.length)
+    items.push({ kind: 'voter', voter })
+  }
+  for (const [tagId, { tag, members }] of byTag) {
+    if (members.length < 2) continue
+    let aye = 0n, nay = 0n, weighted = 0n, balance = 0n
+    for (const m of members) {
+      aye += BigInt(m.weightedAye)
+      nay += BigInt(m.weightedNay)
+      weighted += BigInt(m.weighted)
+      balance += BigInt(m.balance)
+    }
+    // The first member's slot becomes the group (later members were never
+    // pushed as their own items), so folding leaves no member bubble behind.
+    items[slotByTag.get(tagId)!] = {
+      kind: 'tag',
+      group: {
+        tag, voters: members.length,
+        weightedAye: aye.toString(), weightedNay: nay.toString(),
+        weighted: weighted.toString(), balance: balance.toString(),
+      },
+    }
+  }
+  return items
+}
+
+function itemWeight(item: PackItem): number {
+  return Number(item.kind === 'voter' ? item.voter.weighted : item.group.weighted)
+}
+function itemSide(item: PackItem): BubbleSide {
+  return bubbleSide(item.kind === 'voter' ? item.voter : item.group)
 }
 
 // The radius scale comes from the TOTAL power on the chart, not from the largest
@@ -49,20 +119,26 @@ export function radiusScale(weights: number[], maxWeight: number, width: number)
   return Math.max(MIN_R, Math.min(scale, HEIGHT / 2.4))
 }
 
+// The referendum page's entry point: fold under nothing (a null resolver keeps
+// every voter individual — VoteBubbles passes resolveTag instead). Kept as the
+// packer's plain-voters form so the pinned coordinate tests keep meaning what
+// they always did.
+export function packVoters(voters: ReferendumVoter[]): Bubble[] {
+  return packItems(foldVoters(voters, () => null))
+}
+
 // ONE cluster holding both sides, so the chart reads as a single population with the
 // balance of the vote visible in the colour mix rather than as two charts to compare.
 // Deterministic spiral placement — no randomness, so the same referendum always
-// renders identically.
-export function packVoters(voters: ReferendumVoter[]): Bubble[] {
-  // Withdrawn votes back nothing, so they are not plotted — the tally excludes them too.
-  const live = voters.filter(voter => !voter.removed && Number(voter.weighted) > 0)
+// renders identically. Items arrive pre-folded and pre-filtered (foldVoters).
+export function packItems(items: PackItem[]): Bubble[] {
+  const live = items.filter(item => itemWeight(item) > 0)
   if (!live.length) return []
-  const weightOf = (voter: ReferendumVoter) => Number(voter.weighted)
-  const weights = live.map(weightOf)
+  const weights = live.map(itemWeight)
   const maxWeight = Math.max(...weights)
   const maxR = radiusScale(weights, maxWeight, WIDTH)
   // Largest first: heavy circles claim the centre, small ones fill in around them.
-  const ordered = [...live].sort((a, b) => weightOf(b) - weightOf(a))
+  const ordered = [...live].sort((a, b) => itemWeight(b) - itemWeight(a))
 
   const placed: Bubble[] = []
   // Flat mirrors of the circles already down. A busy referendum walks ~2.3M spiral
@@ -74,8 +150,8 @@ export function packVoters(voters: ReferendumVoter[]): Bubble[] {
   const cx = new Float64Array(ordered.length)
   const cy = new Float64Array(ordered.length)
   const cr = new Float64Array(ordered.length)
-  for (const voter of ordered) {
-    const weight = weightOf(voter)
+  for (const item of ordered) {
+    const weight = itemWeight(item)
     // sqrt so AREA is proportional to power.
     const r = Math.max(MIN_R, Math.sqrt(weight / maxWeight) * maxR)
     let best: { x: number; y: number } | null = null
@@ -100,11 +176,11 @@ export function packVoters(voters: ReferendumVoter[]): Bubble[] {
     cy[placed.length] = y
     cr[placed.length] = r
     placed.push({
-      voter,
+      item,
       x,
       y,
       r,
-      side: bubbleSide(voter),
+      side: itemSide(item),
       weight,
       label: r >= LABEL_FULL_R ? 'full' : r >= LABEL_EMOJI_R ? 'emoji' : 'none',
     })
