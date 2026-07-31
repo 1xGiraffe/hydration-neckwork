@@ -54,7 +54,16 @@ function CloseAccountsDisclosure({ address, tagId }: { address: string | null; t
                 {data.accounts.map(match => (
                   <li className="close-account-match" key={match.account.accountId}>
                     <div className="close-account-head">
-                      <AddrPill account={match.account} noTag noCopy />
+                      {/* A match is a DIFFERENT account from the one being viewed, so its
+                          own name is new information — unlike a tag's member list, which
+                          is what `noTag` exists for. Passing it here stripped the viewer's
+                          own list tag: the server only excludes accounts carrying a SYSTEM
+                          tag from being matches, so a privately tagged match is exactly
+                          the case that reached this pill and lost its label. Identity and
+                          profile names were never suppressed; this restores the tag beside
+                          them. The link still opens the ACCOUNT, because this list exists
+                          to name one specific account and its group page would lose it. */}
+                      <AddrPill account={match.account} tagToAccount noCopy />
                       <span className={`close-account-confidence ${match.confidence}`}>{match.confidence} signal</span>
                       <time className="close-account-seen" dateTime={match.lastSeen}>last signal {lastSeenLabel(match.lastSeen)}</time>
                     </div>

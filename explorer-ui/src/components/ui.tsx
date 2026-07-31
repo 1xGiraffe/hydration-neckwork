@@ -564,10 +564,14 @@ export function tagMemberSuffix(tag: Pick<ResolvedTag, 'memberCount'>, address: 
 // suffix would be redundant noise, and system tags there carry no
 // `memberCount` at all, which would make it inconsistent between a user tag
 // and a system tag shown side by side).
-export function UserTagPill({ tag, address, noCopy, noMemberSuffix }: { tag: ResolvedTag; address: string; noCopy?: boolean; noMemberSuffix?: boolean }) {
+// `to` overrides where the pill leads. A tagged account normally opens the group,
+// which is what a reader wants from a feed row — but a surface whose whole subject is
+// one specific account (close accounts) would lose that account by navigating to its
+// group, so it keeps the label and redirects the link.
+export function UserTagPill({ tag, address, noCopy, noMemberSuffix, to }: { tag: ResolvedTag; address: string; noCopy?: boolean; noMemberSuffix?: boolean; to?: string }) {
   return (
     <span className="addr-wrap">
-      <Link to={paths.tag(tag.id)} className="addr-pill" title={tag.kind === 'user' ? `${tag.name} — your list “${tag.listName}”` : 'Tagged group — open combined view'}>
+      <Link to={to ?? paths.tag(tag.id)} className="addr-pill" title={to ? `${tag.name} — open account ${address}` : tag.kind === 'user' ? `${tag.name} — your list “${tag.listName}”` : 'Tagged group — open combined view'}>
         <TagIcon icon={tag.icon} title={tag.name} />
         <span className="tag" style={tag.color ? { color: tag.color } : undefined}>{tag.name}</span>
         {!noMemberSuffix && tagMemberSuffix(tag, address)}
@@ -577,14 +581,16 @@ export function UserTagPill({ tag, address, noCopy, noMemberSuffix }: { tag: Res
   )
 }
 
-export function AddrPill({ account, full, noCopy, noTag }: { account: AccountRef; full?: boolean; noCopy?: boolean; noTag?: boolean }) {
+export function AddrPill({ account, full, noCopy, noTag, tagToAccount }: { account: AccountRef; full?: boolean; noCopy?: boolean; noTag?: boolean; tagToAccount?: boolean }) {
   useTagMapVersion()   // re-render when the viewer's tag map changes
   // Priority-resolved tag (the viewer's own lists, in priority order, with
   // the system directory as a slot in that order) is the primary label, matching
   // the Accounts list. `noTag` skips this on tag member lists, where the page
   // context already supplies the group and each row should show the member itself.
+  // `tagToAccount` keeps the name but points the link at the account — for a surface
+  // that is about this one account rather than the company it keeps.
   const resolved = noTag ? null : resolveTag(account)
-  if (resolved) return <UserTagPill tag={resolved} address={account.address} noCopy={noCopy} />
+  if (resolved) return <UserTagPill tag={resolved} address={account.address} noCopy={noCopy} to={tagToAccount ? accountHref(account) : undefined} />
   const mod = moduleName(account.accountId)
   if (mod) {
     return (
