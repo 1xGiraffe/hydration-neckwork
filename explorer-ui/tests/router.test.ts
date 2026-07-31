@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseRoute, paths, shouldMorphSearch } from '../src/router'
+import { parseRoute, paths, shouldMorphSearch, ACTIVITY_SLUG_TAB } from '../src/router'
 
 const p = (hash: string) => parseRoute(hash.replace(/^#/, ''))
 
@@ -56,10 +56,13 @@ describe('parseRoute (clean-path routing, design routes)', () => {
 
 describe('activity detail routes', () => {
   it('parses every activity slug', () => {
-    for (const slug of ['swap', 'transfer', 'cross-chain', 'add-liquidity', 'remove-liquidity', 'lend', 'withdraw', 'borrow', 'repay', 'liquidate', 'staking', 'vote', 'otc-place', 'otc-pull', 'otc-fill']) {
+    for (const slug of ['swap', 'transfer', 'cross-chain', 'add-liquidity', 'remove-liquidity', 'destroy-pool', 'lend', 'withdraw', 'borrow', 'repay', 'liquidate', 'staking', 'vote', 'otc-place', 'otc-pull', 'otc-fill']) {
       expect(p(`/${slug}/13072380-e2`)).toEqual({ name: 'activity-detail', slug, id: '13072380-e2' })
       expect(p(`/${slug}/13072380-4`)).toEqual({ name: 'activity-detail', slug, id: '13072380-4' })
     }
+    // A pool destruction is a liquidity-tab activity, same as create/add/remove —
+    // the crumb and the malformed-id fallback both resolve through this map.
+    expect(ACTIVITY_SLUG_TAB['destroy-pool']).toBe('liquidity')
     // DCA is a schedule page: numeric ids open it. The event-form id opens a
     // single execution's detail; the extrinsic-form id (the scheduling
     // extrinsic) still resolves to the owning schedule.
