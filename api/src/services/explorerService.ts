@@ -21,7 +21,7 @@ import {
   type MultisigOperationState,
 } from './onBehalfActivity.ts'
 import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
-import { xcmJourneySourcesFor, xcmJourneysByOriginTx } from './xcmJourneyService.ts'
+import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
 import { createHash } from 'node:crypto'
@@ -6855,6 +6855,12 @@ export interface ActivityRow {
   // Origin-chain extrinsic of an inbound transfer (explorer deep link) —
   // resolved with fromAccount from the crosschain journey index.
   fromTxUrl?: string | null
+  // How the transfer crossed, when it crossed a bridge rather than only XCM
+  // ('Snowbridge', 'Wormhole', 'Basejump'). Resolved from the journey index with
+  // fromChain, and deliberately not versioned: Snowbridge v1 and v2 differ in the
+  // hops they take, not in being Snowbridge, and a version we cannot always
+  // determine is not a fact worth showing a reader.
+  bridge?: string | null
   dca?: boolean
   dcaStatus?: 'failed'
   dcaError?: string
@@ -8142,7 +8148,11 @@ export function originTxExplorerUrl(urnStr: string, txHash: string | null): stri
 async function applyXcmInSources(rows: ActivityRow[]): Promise<void> {
   const inRows = rows.filter(r => r.type === 'xcm' && r.xcmDir === 'in' && r.messageId && !r.fromAccount)
   if (!inRows.length) return
-  const sources = await xcmJourneySourcesFor(inRows.map(r => ({ messageId: r.messageId!, timestampMs: activityRowTimestampMs(r) })))
+  const sources = await xcmJourneySourcesFor(inRows.map(r => ({
+    messageId: r.messageId!,
+    timestampMs: activityRowTimestampMs(r),
+    bridge: looksBridged(r),
+  })))
   for (const r of inRows) {
     const src = sources.get(r.messageId!)
     if (!src) continue
@@ -8152,7 +8162,19 @@ async function applyXcmInSources(rows: ActivityRow[]): Promise<void> {
     r.fromParachainId = origin.paraId
     r.fromAccount = origin.account
     r.fromTxUrl = originTxExplorerUrl(src.origin, src.originTx)
+    r.bridge = bridgeLabel(src.originProtocol)
   }
+}
+
+// A cheap local guess that an inbound hop began outside this consensus system: the
+// asset it credited is native to another ecosystem, so SOMETHING bridged it here
+// at some point. Used only to aim the enrichment budget and widen its search window
+// — a bridged asset held on AssetHub and forwarded from there is indistinguishable
+// from a fresh bridge arrival at this end, so this can never stand in for the origin
+// the journey index reports.
+function looksBridged(r: ActivityRow): boolean {
+  const ecosystem = r.asset?.origin?.ecosystem
+  return !!ecosystem && ecosystem !== 'polkadot'
 }
 
 // Remote-initiated outbound rows (HOLLAR-class): the transfer was initiated FROM
@@ -8164,7 +8186,9 @@ async function applyXcmInSources(rows: ActivityRow[]): Promise<void> {
 async function applyXcmOutRemoteSources(rows: ActivityRow[]): Promise<void> {
   const remoteRows = rows.filter(r => r.type === 'xcm' && r.xcmDir === 'out' && r.extrinsicIndex == null && r.messageId && !r.destAccount)
   if (!remoteRows.length) return
-  const sources = await xcmJourneySourcesFor(remoteRows.map(r => ({ messageId: r.messageId!, timestampMs: activityRowTimestampMs(r) })))
+  const sources = await xcmJourneySourcesFor(remoteRows.map(r => ({
+    messageId: r.messageId!, timestampMs: activityRowTimestampMs(r), bridge: looksBridged(r),
+  })))
   for (const r of remoteRows) {
     const src = sources.get(r.messageId!)
     if (!src) continue
@@ -8175,6 +8199,7 @@ async function applyXcmOutRemoteSources(rows: ActivityRow[]): Promise<void> {
       if (other.account) r.destAccount = other.account
     }
     r.fromTxUrl = originTxExplorerUrl(src.origin, src.originTx)
+    r.bridge = bridgeLabel(src.originProtocol)
   }
 }
 
