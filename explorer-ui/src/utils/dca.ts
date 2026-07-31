@@ -141,3 +141,14 @@ export function dcaProgress(totalAmount: string, filledAmount: string, fundingBa
   // 18-decimal token amounts, well past what a float divide holds exactly.
   return { pct: Number((filled * 1000n) / denominator) / 10, projected }
 }
+
+// A Permill (parts per million) as a percentage: 30000 → "3%", 1000 → "0.1%".
+// Not F.pct, which signs its output for price CHANGES — a slippage tolerance is a
+// magnitude, and "+3.00%" would read as a move rather than a limit. Trailing zeros
+// go, because every value the pallet has been given is a round fraction of a
+// percent and "3.00%" implies a precision the setting does not have.
+export function fmtPermill(permill: number): string {
+  if (!Number.isFinite(permill)) return '—'
+  const pct = permill / 10_000
+  return `${Number(pct.toFixed(4))}%`
+}

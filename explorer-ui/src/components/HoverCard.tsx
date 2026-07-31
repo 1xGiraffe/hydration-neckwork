@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/explorer'
 import { useAddressSummary, useAsset, useExtrinsic, useBlock, useTagSummary, useTrade, useStats, useDcaSchedule, useDcaExecution } from '../hooks/useExplorerData'
 import { useListTagSummary } from '../hooks/useUser'
-import { F, AssetIcon, AssetChip, AssetAmount, AddrPill, CallPill, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow, UserTagPill } from './ui'
+import { F, AssetIcon, AssetChip, AssetAmount, AddrPill, CallPill, PoolBadge, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow, UserTagPill } from './ui'
 import { ayeSharePct, selectTally } from '../utils/referendumVotes'
 import { dcaCadence, dcaProgress, fmtDuration } from '../utils/dca'
 import { resolveTag, allAssociations, useTagMapVersion, listForTag, tagMapStatus, looksLikeUserTagId } from '../userTags'
@@ -370,7 +370,7 @@ function TradeHover({ id }: { id: string }) {
         <div className="hc-route-title"><span>Route</span><span className="mono">{hops.length} hop{hops.length === 1 ? '' : 's'}</span></div>
         {hops.map((h, i) => (
           <div className="hc-hop" key={`${h.pool}-${h.assetIn.assetId}-${h.assetOut.assetId}-${i}`}>
-            <span className="badge" style={{ background: 'color-mix(in srgb, var(--cat-liquidity) 15%, transparent)', color: 'var(--cat-liquidity)' }}>{h.pool}{h.poolId != null ? ` #${h.poolId}` : ''}</span>
+            <PoolBadge pool={h.pool} poolId={h.poolId} />
             <span className="hc-hop-assets">
               <span className="trade-leg"><AssetIcon assetId={h.assetIn.assetId} iconAssetId={h.assetIn.iconAssetId} symbol={h.assetIn.symbol} size={16} parachainId={h.assetIn.parachainId} origin={h.assetIn.origin} /><span className="mono">{h.assetIn.symbol}</span></span>
               <span className="muted">→</span>

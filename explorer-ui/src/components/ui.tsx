@@ -657,6 +657,17 @@ export function FailureReasonRow({ reason }: { reason: FailureReason }) {
   </>
 }
 
+// The venue one hop of a route trades through. Only Stableswap names a pool, so
+// the id is appended only where there is one. Shared by the trade hovercard's route
+// and the DCA schedule's planned route so a venue never reads two ways.
+export function PoolBadge({ pool, poolId }: { pool: string; poolId?: number | null }) {
+  return (
+    <span className="badge" style={{ background: 'color-mix(in srgb, var(--cat-liquidity) 15%, transparent)', color: 'var(--cat-liquidity)' }}>
+      {pool}{poolId != null ? ` #${poolId}` : ''}
+    </span>
+  )
+}
+
 export function StatusBadge({ ok, reason, compact }: { ok: boolean; reason?: string; compact?: boolean }) {
   if (compact) {
     const title = ok ? 'Success' : (reason || 'Failed')
