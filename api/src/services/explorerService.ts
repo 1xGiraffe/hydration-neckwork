@@ -799,8 +799,9 @@ function bindCteSql(): string {
 
 // XYK.PoolCreated seeds a brand-new pool — a liquidity action in its own
 // right ('Create'), not a pair of raw transfers to an unknown account.
-export function liqActionFor(eventName: string): 'Add' | 'Remove' | 'Create' | 'Claim' {
+export function liqActionFor(eventName: string): 'Add' | 'Remove' | 'Create' | 'Claim' | 'Destroy' {
   if (eventName.endsWith('RewardClaimed')) return 'Claim'   // LM reward claims
+  if (eventName.endsWith('PoolDestroyed')) return 'Destroy' // lifecycle marker, no value
   return eventName.endsWith('PoolCreated') ? 'Create' : eventName.endsWith('Removed') ? 'Remove' : 'Add'
 }
 // Which liquidity events yield rows the action filter keeps. Derived by APPLYING
@@ -830,8 +831,21 @@ export const LIQUIDITY_AMOUNT_ARG: Record<string, string> = {
   'XYK.LiquidityAdded': '',                                // amountA/amountB vs assetA
   'XYK.LiquidityRemoved': '',                              // shares vs assetA
   'XYK.PoolCreated': '',                                   // initialSharesAmount vs assetA
+  'XYK.PoolDestroyed': '',                                 // no amount field; see AMOUNTLESS_LIQUIDITY_EVENTS
   'OmnipoolLiquidityMining.RewardClaimed': 'claimed',      // claimed + rewardCurrency
   'XYKLiquidityMining.RewardClaimed': 'claimed',
+}
+
+// Events whose empty amount is the ANSWER, not a gap to be recovered.
+// fillMissingLiquidityAmounts pairs an amountless row with the pool↔who transfer
+// leg in the same dispatch scope. XYK.PoolDestroyed is emitted in the same
+// extrinsic as XYK.LiquidityRemoved, with the same `who` and the same assetA, so
+// that pairing WOULD match — and would render the removal's value a second time,
+// inflating every feed the row appears in and admitting it to value filters.
+// 728 of 728 destructions carry that sibling, so this is unconditional.
+export const AMOUNTLESS_LIQUIDITY_EVENTS: ReadonlySet<string> = new Set(['XYK.PoolDestroyed'])
+export function isAmountlessLiquidityEvent(eventName: string): boolean {
+  return AMOUNTLESS_LIQUIDITY_EVENTS.has(eventName)
 }
 
 export function liquidityAmountFromArgs(eventName: string, args: Record<string, unknown>): string {
@@ -1452,9 +1466,9 @@ function exactUsdMeetsMinimum(legs: ExactUsdLeg[], minimum: number): boolean {
 // (the asset received), a transfer/liquidity/mm flow on the moved asset.
 type HistPick = { assetId: number; decimals: number; raw: string; ts: string } | null
 function activityHistPick(r: ActivityRow): HistPick {
-  // Create-pool rows already carry their combined BLOCK-TIME value (both seed
-  // legs — see enrichPoolCreations); a single-asset repricing would clobber it.
-  if (r.type === 'liquidity' && r.liqAction === 'Create') return null
+  // Create rows already carry their combined BLOCK-TIME value (both seed legs, see
+  // enrichPoolCreations); Destroy rows carry no value at all by construction.
+  if (r.type === 'liquidity' && (r.liqAction === 'Create' || r.liqAction === 'Destroy')) return null
   if (r.assetOut && r.amountOut != null) return { assetId: r.assetOut.assetId, decimals: r.assetOut.decimals, raw: r.amountOut, ts: r.timestamp }
   if (r.asset && r.amount != null) return { assetId: r.asset.assetId, decimals: r.asset.decimals, raw: r.amount, ts: r.timestamp }
   return null
@@ -6783,7 +6797,7 @@ export interface ActivityRow {
   // `assetB`). Token filters match against these too, so a pool-side asset the
   // row does not display still keeps its row.
   assetRefs?: number[]
-  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim'   // Create = pool creation; Claim = LM reward claim
+  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'Destroy'   // Create = pool creation; Destroy = pool closure (no value); Claim = LM reward claim
   mmAction?: string          // money-market: Supply/Borrow/Repay/Withdraw/LiquidationCall
   mmMarketKey?: string       // absent for legacy/unknown pools; `core` is primary
   mmMarket?: string          // display label; UI only calls out supplemental markets
@@ -7001,7 +7015,7 @@ export function matchLiquidityAmounts(missing: LiquidityAmountCandidate[], legs:
 }
 
 async function fillMissingLiquidityAmounts(rows: LiquidityAmountCandidate[]): Promise<void> {
-  const missing = rows.filter(r => !r.amount && r.who && r.asset_id != null)
+  const missing = rows.filter(r => !r.amount && r.who && r.asset_id != null && !isAmountlessLiquidityEvent(r.event_name))
   if (!missing.length) return
   // Signed actions carry an extrinsic index; offboarding-style force-removals are
   // dispatched from a runtime hook and carry none. Fetch the transfer legs for
@@ -18203,7 +18217,7 @@ export async function getListTagValueEvents(listId: string, tagId: string, membe
 // exclusions and $-value filters aren't replicated here (a coarse histogram).
 export interface DailyFilters { type?: string; action?: string; token?: string }
 const TRANSFER_EVENTS = ['Balances.Transfer', 'Tokens.Transfer', 'Currencies.Transferred']
-const LIQUIDITY_EVENTS = ['Omnipool.LiquidityAdded', 'Omnipool.LiquidityRemoved', 'Stableswap.LiquidityAdded', 'Stableswap.LiquidityRemoved', 'XYK.LiquidityAdded', 'XYK.LiquidityRemoved', 'XYK.PoolCreated', 'OmnipoolLiquidityMining.RewardClaimed', 'XYKLiquidityMining.RewardClaimed']
+const LIQUIDITY_EVENTS = ['Omnipool.LiquidityAdded', 'Omnipool.LiquidityRemoved', 'Stableswap.LiquidityAdded', 'Stableswap.LiquidityRemoved', 'XYK.LiquidityAdded', 'XYK.LiquidityRemoved', 'XYK.PoolCreated', 'XYK.PoolDestroyed', 'OmnipoolLiquidityMining.RewardClaimed', 'XYKLiquidityMining.RewardClaimed']
 const VOTE_EVENTS = ['ConvictionVoting.Voted', 'Democracy.Voted']
 const sqlNames = (names: readonly string[]) => names.map(n => `'${n}'`).join(',')
 
