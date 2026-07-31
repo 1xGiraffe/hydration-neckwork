@@ -55,10 +55,40 @@ describe('CloseAccountsSection', () => {
     queryClient.setQueryData(['close-accounts', address], response)
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><CloseAccountsSection address={address} /></QueryClientProvider>)
 
+    // Named like anywhere else — the tag/identity, not a bare address — while the link
+    // still opens the specific account this list exists to point at, never its group.
+    // Matched on the tag pill itself: the reason copy below also says "Kraken", so a
+    // bare substring would pass with the label still missing.
+    expect(html).toMatch(/class="tag"[^>]*>Kraken</)
     expect(html).toContain('/account/0xF73a2B8c1D4e9A06b5C8f2E1a3D70c9B4e6F18aD')
     expect(html).not.toContain('/tag/kraken')
     expect(html).toContain('strong signal')
     expect(html).toContain('Shared Kraken deposit address')
     expect(html).toContain('Behavioral signals are not proof of common ownership.')
+  })
+
+  // The server only excludes SYSTEM-tagged accounts from being matches, so what
+  // actually reaches this list is on-chain identities, self-set profile names, and the
+  // viewer's own private tags. All three are names a reader knows the account by, and
+  // all three were reduced to a short address here.
+  it('names a match by its on-chain identity rather than its address', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const identified = {
+      accountId: '0x1111111111111111111111111111111111111111111111111111111111111111',
+      address: '13b6…p3hMN',
+      emoji: '🌻',
+      tag: null,
+      identity: { display: 'Acala Foundation', verified: true },
+    }
+    queryClient.setQueryData(['close-accounts', address], {
+      accounts: [{ account: identified, score: 0.7, confidence: 'moderate', lastSeen: '2026-07-09 18:42:00', reasons: [{ type: 'near_signing', days: 2 }] }],
+      lookbackDays: 90,
+      disclaimer: 'Behavioral signals are not proof of common ownership.',
+    } satisfies CloseAccountsResponse)
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><CloseAccountsSection address={address} /></QueryClientProvider>)
+
+    expect(html).toContain('Acala Foundation')
+    // The registrar tick is the identity pill's, and belongs only to a judged identity.
+    expect(html).toContain('id-verified')
   })
 })
