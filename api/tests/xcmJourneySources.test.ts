@@ -135,8 +135,8 @@ describe('xcmJourneySourcesFor', () => {
     const call = insert.mock.calls[0][0]
     expect(call.table).toBe('price_data.xcm_journey_sources')
     expect(call.values).toHaveLength(2)
-    expect(call.values.find(v => v.message_id === MSG_A)).toEqual({ message_id: MSG_A, from_hex: FROM_2, origin_urn: ORIGIN_URN, origin_tx: '', origin_protocol: '' })
-    expect(call.values.find(v => v.message_id === MSG_B)).toEqual({ message_id: MSG_B, from_hex: FROM_2, origin_urn: ORIGIN_URN, origin_tx: '', origin_protocol: '' })
+    expect(call.values.find(v => v.message_id === MSG_A)).toMatchObject({ message_id: MSG_A, from_hex: FROM_2, origin_urn: ORIGIN_URN, origin_tx: '', origin_protocol: '' })
+    expect(call.values.find(v => v.message_id === MSG_B)).toMatchObject({ message_id: MSG_B, from_hex: FROM_2, origin_urn: ORIGIN_URN, origin_tx: '', origin_protocol: '' })
   })
 
   it('falls back to the persisted ClickHouse table when the live walk has nothing for the message id', async () => {
@@ -154,11 +154,15 @@ describe('xcmJourneySourcesFor', () => {
     expect(result.get(MSG_PERSISTED)).toEqual({
       from: FROM_PERSISTED,
       to: '',
+      fromFormatted: '',
+      toFormatted: '',
       origin: ORIGIN_URN,
       destination: '',
       originTx: null,
+      destTx: null,
       correlationId: '',
       originProtocol: '',
+      destProtocol: '',
     })
     expect(query).toHaveBeenCalledTimes(1)
     expect(fetchMock).not.toHaveBeenCalled()
@@ -320,6 +324,58 @@ describe('misses back off instead of re-walking', () => {
   it('always walks an id it has never looked for', async () => {
     const fetchMock = await runWith([])
     expect(walkCalls(fetchMock).length).toBeGreaterThan(0)
+  })
+})
+
+describe('outbound journeys resolve by topic id', () => {
+  // Outbound reports `from` as the origin CHAIN's urn, not an account, and roughly
+  // half of outbound BRIDGE journeys carry no origin extrinsic hash at all — while
+  // every one of them carries a topic id. Keying outbound by hash could therefore
+  // never reach a Wormhole destination; keying by topic reaches all of them, and the
+  // topic is also what the persisted table stores, so it survives a restart.
+  it('indexes a journey with no source account, and keeps both of its ends', async () => {
+    const now = Date.now()
+    const journey = {
+      correlationId: 'corr-out-wh',
+      from: 'urn:ocn:polkadot:2034',          // a chain urn, not an account
+      to: '0x4e69fc5b9315ae4d2aeeddfc7957aec78c921a5230d7e1fa75fcf24c3630ea65',
+      fromFormatted: null,
+      toFormatted: '6H6Y1zwJ8xFFmN7MxQVwnHXHFT4v41VwdhYWDiwF9s24',
+      origin: 'urn:ocn:polkadot:2034',
+      destination: 'urn:ocn:solana:101',
+      originProtocol: 'xcm',
+      destinationProtocol: 'wh_portal',
+      originTxPrimary: null,                   // the key the old design needed
+      destinationTxPrimary: null,
+      sentAt: now - 2000, recvAt: now - 1000,
+      stops: [{ type: 'hrmp', instructions: [{ messageId: MSG_A }] }],
+    }
+    const insert = makeInsertMock()
+    vi.stubGlobal('fetch', makeFetchMock(async () => ({ ok: true, json: async () => ({ items: [journey], pageInfo: { hasNextPage: false } }) })))
+    vi.stubEnv('EXPLORER_OCELLOIDS_TOKEN', 'test-token')
+    const { initXcmJourneyService, xcmJourneySourcesFor } = await import('../src/services/xcmJourneyService.ts')
+    initXcmJourneyService(fakeClient({ insert }) as never)
+
+    await xcmJourneySourcesFor([{ messageId: MSG_A, timestampMs: now }])
+    await vi.waitFor(async () => {
+      const got = await xcmJourneySourcesFor([{ messageId: MSG_A, timestampMs: now }])
+      expect(got.get(MSG_A)).toMatchObject({
+        destination: 'urn:ocn:solana:101',
+        toFormatted: '6H6Y1zwJ8xFFmN7MxQVwnHXHFT4v41VwdhYWDiwF9s24',
+        destProtocol: 'wh_portal',
+      })
+    })
+
+    // And the persisted row carries the destination, so the next process can serve it
+    // without walking anything.
+    const row = (insert.mock.calls.at(-1)![0] as { values: Record<string, string>[] }).values
+      .find(v => v.message_id === MSG_A)
+    expect(row).toMatchObject({
+      dest_urn: 'urn:ocn:solana:101',
+      to_formatted: '6H6Y1zwJ8xFFmN7MxQVwnHXHFT4v41VwdhYWDiwF9s24',
+      dest_protocol: 'wh_portal',
+      from_hex: '',
+    })
   })
 })
 

@@ -6855,6 +6855,9 @@ export interface ActivityRow {
   // Origin-chain extrinsic of an inbound transfer (explorer deep link) —
   // resolved with fromAccount from the crosschain journey index.
   fromTxUrl?: string | null
+  // Destination-chain transaction, once the journey lands there — the far end's
+  // counterpart to fromTxUrl (Basescan/Solscan/Etherscan, per chain).
+  destTxUrl?: string | null
   // How the transfer crossed, when it crossed a bridge rather than only XCM
   // ('Snowbridge', 'Wormhole', 'Basejump'). Resolved from the journey index with
   // fromChain, and deliberately not versioned: Snowbridge v1 and v2 differ in the
@@ -8072,8 +8075,8 @@ const EVM_PARACHAINS = new Set([2004, 3369]) // Moonbeam, Mythos
 // end chain — so the badge and the account ENCODING follow that chain (SS58
 // for substrate, H160 for EVM, base58 for Solana). Returns null for unknown
 // consensus systems (row keeps its local hop display).
-function externalChainRef(urnStr: string, account: string): { chain: string; paraId: number | null; account?: ActivityRow['destAccount'] } | null {
-  const urn = /^urn:ocn:([a-z0-9-]+):(\d+)$/.exec(urnStr)
+function externalChainRef(urnStr: string, account: string, formatted?: string): { chain: string; paraId: number | null; account?: ActivityRow['destAccount'] } | null {
+  const urn = /^urn:ocn:([a-z0-9-]+):([0-9a-zA-Zx]+)$/.exec(urnStr)
   if (!urn) return null
   const [, consensus, chainId] = urn
   const h = hexString(account)
@@ -8087,8 +8090,10 @@ function externalChainRef(urnStr: string, account: string): { chain: string; par
   if (consensus === 'solana') {
     let acct: ActivityRow['destAccount']
     if (h?.length === 66) {
-      let address = h
-      try { address = base58Encode(hexToU8a(h)) } catch { /* keep hex */ }
+      // The API already renders this in the chain's own encoding; only fall back to
+      // encoding it here when it did not.
+      let address = formatted || h
+      if (!formatted) { try { address = base58Encode(hexToU8a(h)) } catch { /* keep hex */ } }
       const resolved = resolveDisplayAccountId(h)
       const icon = accountIcon(resolved)
       const t = tagForAccount(resolved)
@@ -8103,6 +8108,7 @@ function externalChainRef(urnStr: string, account: string): { chain: string; par
     return { chain: 'Solana', paraId: null, account: acct }
   }
   if (consensus === 'ethereum') {
+    const meta = EVM_CHAIN_META[chainId]
     let acct: ActivityRow['destAccount']
     if (h?.length === 42) {
       const resolved = resolveDisplayAccountId(h160AccountId(h))
@@ -8110,15 +8116,27 @@ function externalChainRef(urnStr: string, account: string): { chain: string; par
       const t = tagForAccount(resolved)
       const id = identityForAccount(resolved)
       acct = {
-        kind: 'AccountKey20', accountId: resolved, raw: h, address: h, subscanUrl: `https://etherscan.io/address/${encodeURIComponent(h)}`,
+        kind: 'AccountKey20', accountId: resolved, raw: h, address: h,
+        // Per chain: an address on Base does not resolve on etherscan.
+        subscanUrl: meta ? `${meta.explorer}/address/${encodeURIComponent(h)}` : null,
         emoji: icon.emoji, emojiName: icon.emojiName, emojiUrl: icon.emojiUrl,
         tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon, memberCount: t.memberCount } : null,
         identity: id ? { display: id.display, verified: id.verified } : null,
       }
     }
-    return { chain: 'Ethereum', paraId: null, account: acct }
+    return { chain: ocnChainName(urnStr) ?? 'Ethereum', paraId: null, account: acct }
   }
-  return null
+  // Chains with no account model here (Sui) still name their end of the journey; the
+  // formatted address is shown without a link rather than being dropped.
+  const chain = ocnChainName(urnStr)
+  if (!chain) return null
+  return { chain, paraId: null, account: formatted ? plainExternalAccount(formatted) : undefined }
+}
+
+// An address on a chain this app does not model: displayed as the API rendered it,
+// with no explorer link and no local identity, because neither can be trusted here.
+function plainExternalAccount(address: string): ActivityRow['destAccount'] {
+  return { kind: 'AccountId32', accountId: '', raw: '', address, subscanUrl: null }
 }
 
 function activityRowTimestampMs(r: ActivityRow): number {
@@ -8130,18 +8148,62 @@ function activityRowTimestampMs(r: ActivityRow): number {
 // without a source pill.
 // Explorer deep link for the journey's origin transaction: Subscan for
 // substrate chains, the native explorer for other consensus systems.
-export function originTxExplorerUrl(urnStr: string, txHash: string | null): string | null {
-  if (!txHash || !/^0x[0-9a-fA-F]+$/.test(txHash)) return null
-  const urn = /^urn:ocn:([a-z0-9-]+):(\d+)$/.exec(urnStr)
-  if (!urn) return null
-  const [, consensus, chainId] = urn
+// The EVM chains reachable through the bridges, by their own chain id. Naming these
+// matters as much as linking them: an `ethereum:8453` journey read as plain
+// "Ethereum" sent a reader to etherscan for a transaction that only exists on Base.
+const EVM_CHAIN_META: Record<string, { name: string; explorer: string }> = {
+  1: { name: 'Ethereum', explorer: 'https://etherscan.io' },
+  8453: { name: 'Base', explorer: 'https://basescan.org' },
+  42161: { name: 'Arbitrum', explorer: 'https://arbiscan.io' },
+  10: { name: 'Optimism', explorer: 'https://optimistic.etherscan.io' },
+  56: { name: 'BNB Chain', explorer: 'https://bscscan.com' },
+  137: { name: 'Polygon', explorer: 'https://polygonscan.com' },
+}
+// A consensus system's own chain id is not always a number — Sui names itself by a
+// hex digest — so the id stays a string and only the polkadot branch reads it as one.
+function parseOcnUrn(urnStr: string): { consensus: string; chainId: string } | null {
+  const urn = /^urn:ocn:([a-z0-9-]+):([0-9a-zA-Zx]+)$/.exec(urnStr)
+  return urn ? { consensus: urn[1], chainId: urn[2] } : null
+}
+// Chain display name for either end of a journey, whatever consensus it sits in.
+export function ocnChainName(urnStr: string): string | null {
+  const parsed = parseOcnUrn(urnStr)
+  if (!parsed) return null
+  const { consensus, chainId } = parsed
   if (consensus === 'polkadot') {
+    const paraId = Number(chainId)
+    if (paraId === 0) return RELAY_XCM_NETWORK.name
+    return (PARACHAIN_META[paraId] ?? { name: `Parachain ${paraId}` }).name
+  }
+  if (consensus === 'ethereum') return EVM_CHAIN_META[chainId]?.name ?? `EVM chain ${chainId}`
+  if (consensus === 'solana') return 'Solana'
+  if (consensus === 'sui') return 'Sui'
+  if (consensus === 'kusama') {
+    const paraId = Number(chainId)
+    return paraId === 0 ? 'Kusama' : `Kusama ${paraId}`
+  }
+  return null
+}
+
+export function originTxExplorerUrl(urnStr: string, txHash: string | null): string | null {
+  if (!txHash) return null
+  const parsed = parseOcnUrn(urnStr)
+  if (!parsed) return null
+  const { consensus, chainId } = parsed
+  const isHex = /^0x[0-9a-fA-F]+$/.test(txHash)
+  if (consensus === 'polkadot' || consensus === 'kusama') {
+    if (!isHex) return null
     const paraId = Number(chainId)
     const meta = paraId === 0 ? RELAY_XCM_NETWORK : PARACHAIN_META[paraId]
     return meta?.subscan ? `${meta.subscan}/extrinsic/${txHash}` : null
   }
-  if (consensus === 'ethereum') return `https://etherscan.io/tx/${txHash}`
-  if (consensus === 'solana') return `https://solscan.io/tx/${txHash}`
+  if (consensus === 'ethereum') {
+    const meta = EVM_CHAIN_META[chainId]
+    return isHex && meta ? `${meta.explorer}/tx/${txHash}` : null
+  }
+  // Solana signatures are base58, not hex, so no hex test applies here.
+  if (consensus === 'solana') return `https://solscan.io/tx/${encodeURIComponent(txHash)}`
+  if (consensus === 'sui') return `https://suiscan.xyz/mainnet/tx/${encodeURIComponent(txHash)}`
   return null
 }
 
@@ -8156,7 +8218,7 @@ async function applyXcmInSources(rows: ActivityRow[]): Promise<void> {
   for (const r of inRows) {
     const src = sources.get(r.messageId!)
     if (!src) continue
-    const origin = externalChainRef(src.origin, src.from)
+    const origin = externalChainRef(src.origin, src.from, src.fromFormatted)
     if (!origin) continue
     r.fromChain = origin.chain
     r.fromParachainId = origin.paraId
@@ -8192,7 +8254,7 @@ async function applyXcmOutRemoteSources(rows: ActivityRow[]): Promise<void> {
   for (const r of remoteRows) {
     const src = sources.get(r.messageId!)
     if (!src) continue
-    const other = externalChainRef(src.origin, src.from)
+    const other = externalChainRef(src.origin, src.from, src.fromFormatted)
     if (other) {
       r.destChain = other.chain
       r.destParachainId = other.paraId
@@ -8226,17 +8288,33 @@ async function applyXcmOutDests(rows: ActivityRow[]): Promise<void> {
   const keys = outRows
     .map(r => ({ txHash: hashByPair.get(`${r.blockHeight}:${r.extrinsicIndex}`) ?? '', timestampMs: activityRowTimestampMs(r) }))
     .filter(k => k.txHash)
-  if (!keys.length) return
-  const journeys = await xcmJourneysByOriginTx(keys)
+  // Two keys, because neither covers outbound alone. The extrinsic hash is exact but
+  // absent from roughly half of outbound BRIDGE journeys, and those are precisely the
+  // ones whose real destination lies past the sibling we handed the message to. The
+  // topic id is on every one of them, is what this row already carries, and is what
+  // the persisted table is keyed by — so it also survives a restart, which the
+  // hash-keyed map (memory only) does not.
+  const byTopic = await xcmJourneySourcesFor(outRows
+    .filter(r => r.messageId)
+    .map(r => ({ messageId: r.messageId!, timestampMs: activityRowTimestampMs(r), bridge: looksBridged(r) })))
+  const journeys = keys.length ? await xcmJourneysByOriginTx(keys) : new Map()
   for (const r of outRows) {
     const hash = hashByPair.get(`${r.blockHeight}:${r.extrinsicIndex}`)
     const list = hash ? journeys.get(hash) : undefined
-    if (!list || list.length !== 1) continue
-    const dest = externalChainRef(list[0].destination, list[0].to)
+    const topicHit = r.messageId ? byTopic.get(r.messageId) : undefined
+    // Prefer whichever names a destination; the topic hit is the more complete of the
+    // two, since it carries the API's own rendering of the account.
+    const src = topicHit?.destination ? topicHit : (list && list.length === 1 ? list[0] : undefined)
+    if (!src?.destination) continue
+    const dest = externalChainRef(src.destination, src.to, src.toFormatted)
+    // A journey whose destination is Hydration is this row's own arrival, not its
+    // target, and one that merely restates the sibling we already named adds nothing.
     if (!dest || dest.paraId === 2034 || (dest.paraId != null && dest.paraId === r.destParachainId)) continue
     r.destChain = dest.chain
     r.destParachainId = dest.paraId
-    r.destAccount = dest.account
+    r.destAccount = dest.account ?? r.destAccount
+    r.bridge = bridgeLabel(src.originProtocol, src.destProtocol) ?? r.bridge
+    r.destTxUrl = originTxExplorerUrl(src.destination, src.destTx) ?? r.destTxUrl
   }
 }
 
