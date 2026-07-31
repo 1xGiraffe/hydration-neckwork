@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { unusableFilterParam } from './explorer.ts'
-import { liqActionFor, liquidityActionEventNames, isAmountlessLiquidityEvent } from '../services/explorerService.ts'
+import { liqActionFor, liquidityActionEventNames, isAmountlessLiquidityEvent, liquidityRowAmount } from '../services/explorerService.ts'
+import type { PriceInfo } from '../services/explorerService.ts'
 
 // A filter the server cannot honour must be refused, never dropped. Dropping one
 // answers a wider question under the caller's own parameters: an unrecognized
@@ -85,5 +86,20 @@ describe('liquidity pool lifecycle classification', () => {
     expect(isAmountlessLiquidityEvent('XYK.LiquidityAdded')).toBe(false)
     expect(isAmountlessLiquidityEvent('XYK.LiquidityRemoved')).toBe(false)
     expect(isAmountlessLiquidityEvent('Omnipool.LiquidityRemoved')).toBe(false)
+  })
+
+  // The read model hands an amountless event exactly '' (see
+  // LIQUIDITY_AMOUNT_ARG['XYK.PoolDestroyed']), and Number('') is 0 — so without an
+  // explicit guard at the row's construction, a Destroy row would price at exactly
+  // $0.00 the moment its asset has a live price, rather than carrying no value at
+  // all. The price MUST be present for this to be a real test: with none loaded,
+  // usdValue already returns null on its own and this would pass vacuously.
+  it('keeps a Destroy row valueless on the wire even when its asset has a live price', () => {
+    const prices = new Map<number, PriceInfo>([[5, { price: 2.5, change24h: 0 }]])
+    expect(liquidityRowAmount('XYK.PoolDestroyed', prices, 5, '', 12)).toEqual({ amount: null, valueUsd: null })
+    // Sanity: the same helper must still price a REAL amount for a non-amountless
+    // event under the same price map, so the guard isn't just returning null
+    // unconditionally.
+    expect(liquidityRowAmount('XYK.LiquidityAdded', prices, 5, String(4 * 10 ** 12), 12)).toEqual({ amount: String(4 * 10 ** 12), valueUsd: 10 })
   })
 })
