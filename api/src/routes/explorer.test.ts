@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { unusableFilterParam } from './explorer.ts'
+import { liqActionFor, liquidityActionEventNames, isAmountlessLiquidityEvent } from '../services/explorerService.ts'
 
 // A filter the server cannot honour must be refused, never dropped. Dropping one
 // answers a wider question under the caller's own parameters: an unrecognized
@@ -55,5 +56,34 @@ describe('unusableFilterParam', () => {
     // Fastify parses `?type=trade&type=vote` into an array; neither copy may be
     // silently preferred over the other.
     expect(unusableFilterParam({ type: ['trade', 'vote'] })?.key).toBe('type')
+  })
+})
+
+// XYK.PoolDestroyed always rides alongside XYK.LiquidityRemoved (728 of 728
+// extrinsic groups chain-wide), so it is a lifecycle marker carrying no value.
+// XYK.PoolCreated never rides alongside XYK.LiquidityAdded (0 of 956), so it is
+// the only record of the seed liquidity and must keep its amount.
+describe('liquidity pool lifecycle classification', () => {
+  it('labels pool destruction distinctly rather than falling through to Add', () => {
+    expect(liqActionFor('XYK.PoolDestroyed')).toBe('Destroy')
+    expect(liqActionFor('XYK.PoolCreated')).toBe('Create')
+    expect(liqActionFor('XYK.LiquidityRemoved')).toBe('Remove')
+    expect(liqActionFor('XYK.LiquidityAdded')).toBe('Add')
+    expect(liqActionFor('OmnipoolLiquidityMining.RewardClaimed')).toBe('Claim')
+  })
+
+  it('keeps the derived action inverse consistent with the label', () => {
+    expect(liquidityActionEventNames('Destroy')).toEqual(['XYK.PoolDestroyed'])
+    expect(liquidityActionEventNames('Remove')).not.toContain('XYK.PoolDestroyed')
+    expect(liquidityActionEventNames()).toContain('XYK.PoolDestroyed')
+  })
+
+  it('marks pool destruction amountless so the paired removal is not double-counted', () => {
+    expect(isAmountlessLiquidityEvent('XYK.PoolDestroyed')).toBe(true)
+    // Every other empty-amount event MUST still be fillable from its transfer leg.
+    expect(isAmountlessLiquidityEvent('XYK.PoolCreated')).toBe(false)
+    expect(isAmountlessLiquidityEvent('XYK.LiquidityAdded')).toBe(false)
+    expect(isAmountlessLiquidityEvent('XYK.LiquidityRemoved')).toBe(false)
+    expect(isAmountlessLiquidityEvent('Omnipool.LiquidityRemoved')).toBe(false)
   })
 })
