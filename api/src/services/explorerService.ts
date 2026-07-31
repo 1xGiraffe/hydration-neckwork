@@ -935,12 +935,6 @@ function liquidityAssetMatchExpr(idsCsv: string, args = 'args_json'): string {
     OR JSONExtractInt(${args},'poolId') IN (${idsCsv})
     OR hasAny(arrayMap(e -> JSONExtractInt(e,'assetId'), JSONExtractArrayRaw(${args},'assets')), [${idsCsv}]))`
 }
-function liquidityTokenFilterSql(ids?: number[], args = 'args_json'): string {
-  if (ids == null) return ''
-  if (!ids.length) return 'AND 0'
-  return `AND ${liquidityAssetMatchExpr(ids.join(','), args)}`
-}
-
 const UINT256_MAX = (1n << 256n) - 1n
 
 function decimalFraction(value: string | number): { numerator: bigint; denominator: bigint } {
@@ -18283,7 +18277,6 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
     const ids = tokenIds?.join(',')
     const sp = (s: string) => (s ? ` ${s}` : '')
     const transferTok = assetIdFilterSql(transferAssetIdSql(), tokenIds)
-    const liqTok = liquidityTokenFilterSql(tokenIds)
     const tradeTok = tokenIds == null ? '' : !tokenIds.length ? 'AND 0'
       : `AND (toUInt32(JSONExtractInt(args_json,'assetIn')) IN (${ids}) OR toUInt32(JSONExtractInt(args_json,'assetOut')) IN (${ids}))`
     const stakingTok = tokenIds == null ? '' : (tokenIds.includes(0) || tokenIds.includes(670)) ? '' : 'AND 0'
@@ -18360,15 +18353,6 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
             `event_name IN (${sqlNames([...SWAP_EVENTS, ...OTC_EVENT_NAMES, 'DCA.TradeFailed'])})${sp(tradeTok)}`,
             `(block_height, if(event_name IN (${sqlNames(SWAP_EVENTS)}), ifNull(extrinsic_index, event_index), event_index))`,
           )
-      } else if (type === 'liquidity') {
-        if (filters.action === 'Claim') {
-          const claimTok = tokenIds == null ? '' : !tokenIds.length ? ' AND 0'
-            : ` AND ((event_name = 'Referrals.Claimed' AND 0 IN (${ids})) OR (event_name != 'Referrals.Claimed' AND ${liquidityAssetMatchExpr(ids!)}))`
-          query = daily('raw_events', `event_name IN (${sqlNames([...LIQUIDITY_EVENTS.filter(n => n.endsWith('RewardClaimed')), 'Referrals.Claimed'])})${claimTok}`)
-        } else {
-          const act = filters.action === 'Add' ? ` AND event_name LIKE '%Added'` : filters.action === 'Remove' ? ` AND event_name LIKE '%Removed'` : filters.action === 'Create' ? ` AND event_name LIKE '%PoolCreated'` : ''
-          query = daily('raw_events', `event_name IN (${sqlNames(LIQUIDITY_EVENTS)})${act}${sp(liqTok)}`)
-        }
       } else if (type === 'staking') {
         const names = filters.action && STAKING_ACTION_EVENTS[filters.action] ? STAKING_ACTION_EVENTS[filters.action] : STAKING_EVENT_NAMES
         query = daily('raw_events', `event_name IN (${sqlNames(names)})${sp(stakingTok)}`)
