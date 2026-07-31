@@ -133,6 +133,8 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
       '12xtAYsRUrmbniiWQqJtECiBQrMn8AypQcXhnQAc6RB6XkLW',
       '15DajYeqgb4ADkb8scVCcNaXjfM1SV9PLvqjNDkpH6kBDRLZ',
       '1oJ65RyN3Ht7SMzWjdVKAbv9FBC6gUXNd97h4AjeVNTFqQn',
+      '148GnWxDeGsoF6yZMEWyk1LDkx25gGDVWfrLEE7wyzsxVJ4U',
+      '16MLQm1sSzec4JJN4NKvH8xUMz9vt6weRvRKu2gXgWxMcZ5S',
     ],
   },
   {
