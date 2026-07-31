@@ -13167,7 +13167,7 @@ function semanticExtrinsicSql(list: string, evmList: string, bound: string, enum
     `SELECT block_height, extrinsic_index FROM price_data.account_swap_activity FINAL
        WHERE ${bound} AND account IN (${list})`,
     `SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index FROM price_data.liquidity_activity
-       WHERE ${bound} AND who IN (${list}) AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
+       WHERE ${bound} AND (who IN (${list}) OR pool_account IN (${list})) AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
          AND extrinsic_index IS NOT NULL`,
   ]
   // Money-market rows are EVM logs; the substrate extrinsic that emitted them is
