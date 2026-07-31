@@ -60,6 +60,7 @@ describe('liquidity display amount pairing', () => {
       ['XYK.LiquidityAdded', { who: 'x', assetA: 0, assetB: 5, amountA: '600', amountB: '7' }, ''],
       ['XYK.LiquidityRemoved', { who: 'x', assetA: 1000085, assetB: 5, shares: '21174522741' }, ''],
       ['XYK.PoolCreated', { who: 'x', assetA: 0, assetB: 5, initialSharesAmount: '500', shareToken: 9, pool: 'p' }, ''],
+      ['XYK.PoolDestroyed', { who: 'x', assetA: 222, assetB: 0, shareToken: 1001296, pool: 'p' }, ''],
       ['OmnipoolLiquidityMining.RewardClaimed', { who: 'x', claimed: '400', rewardCurrency: 0, depositId: '1' }, '400'],
       ['XYKLiquidityMining.RewardClaimed', { who: 'x', claimed: '400', rewardCurrency: 0, depositId: '1' }, '400'],
     ]
