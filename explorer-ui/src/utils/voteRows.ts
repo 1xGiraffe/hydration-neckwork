@@ -60,3 +60,18 @@ export function voteToActivityRow(vote: VoteRow): ActivityRow {
 // Governance locks are denominated in HDX (asset 0, 12 decimals). Only used to render an
 // empty/loading votes table, before any row's own asset is available.
 export const assetDescriptorFallback = { assetId: 0, iconAssetId: 0, symbol: 'HDX', name: 'Hydration', decimals: 12 } as AssetRef
+
+// The capital-weighted average conviction of a combined vote, derived from the
+// two integer sums the aggregate carries: weighted = Σ(capital × conviction),
+// so weighted/capital IS the mean multiple, recovered in tenths with integer
+// arithmetic (conviction is defined in tenths on-chain: None = 0.1x … 6x).
+// Null when there is no capital to weigh — a collective vote has neither.
+// Shared by the referendum bubble chart's tag bubbles and the tag votes tab's
+// grouped rows, so one vote can never read two different averages.
+export function avgConvictionLabel(weighted: string | null, capital: string | null): string | null {
+  if (weighted == null || capital == null) return null
+  const w = BigInt(weighted), c = BigInt(capital)
+  if (c <= 0n) return null
+  const tenths = (w * 10n + c / 2n) / c   // round half up, still integer maths
+  return `${tenths / 10n}.${tenths % 10n}x avg`
+}

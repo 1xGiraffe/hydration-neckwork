@@ -302,6 +302,17 @@ export function useTagVotes(tagId: string | null, offset = 0, from?: string, to?
   const key = ['tag-votes', tagId, offset, from, to]
   return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.tagVotes(tagId as string, offset, undefined, from, to, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
 }
+// Grouped mode of the tag votes tab (one row per referendum) — a ranked page
+// whose rows are replaced in place, so no useHeldRows (same reasoning as
+// useAccounts/useHolders above the poll constants).
+export function useTagVotesByReferendum(tagId: string | null, offset = 0, enabled = true) {
+  const ri = useInterval()
+  return useQuery({
+    queryKey: ['tag-votes-by-ref', tagId, offset],
+    queryFn: ({ signal }) => api.tagVotesByReferendum(tagId as string, offset, undefined, signal),
+    enabled: !!tagId && enabled, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData,
+  })
+}
 // The full asset directory is 74 kB (19 kB brotli), 57% of it sparklines. Only the
 // Assets page renders those, and it wants them fresh.
 export function useAssets() {

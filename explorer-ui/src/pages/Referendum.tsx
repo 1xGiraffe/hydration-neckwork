@@ -155,7 +155,7 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
             </>}
 
             <div className="sec-title" style={{ marginTop: 22 }}>Voting power
-              <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · one bubble per account, area = conviction-weighted power</span>
+              <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · one bubble per account or tag, area = conviction-weighted power</span>
             </div>
             <div className="panel" style={{ padding: 12 }}>
               <VoteBubbles voters={data.voters} decimals={data.asset.decimals} symbol={data.asset.symbol} />
