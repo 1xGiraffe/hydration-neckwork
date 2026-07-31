@@ -1186,11 +1186,14 @@ svg { display: block; }
 .acct-stats .acct-bal { display: contents; }
 .acct-stats .acct-bal .lab { grid-row: 1; align-self: end; }
 .acct-stats .acct-bal .amt { grid-row: 2; align-self: start; }
-.acct-stats .acct-bal .hint { grid-row: 3; }
+/* The value's money-market breakdown: a full-width flex row of its own below
+   the stats, right-aligned — free to run left under trading/liquidation
+   rather than wrapping inside the value's one narrow column. */
+.acct-stats-hint { flex-basis: 100%; text-align: right; margin-top: -10px; }
 .acct-bal { text-align: right; }
 .acct-bal .lab { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
 .acct-bal .amt { font-family: 'GeistMono'; font-size: 26px; font-weight: 600; }
-.acct-bal .hint { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.acct-bal .hint, .acct-stats-hint .hint { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
 .acct-bal.subtle .amt { font-size: 14px; font-weight: 500; color: var(--text-medium); }
 .acct-bal.subtle .lab { font-size: 9px; color: var(--text-lowest); }
 /* On phones the header stacks into two full-width rows: the identity row
@@ -1232,10 +1235,10 @@ svg { display: block; }
   .acct-stats .acct-bal:not(.subtle) { order: 3; margin-left: auto; min-width: 0; }
   .acct-stats .acct-bal.subtle ~ .acct-bal:not(.subtle) { margin-left: 18px; }
   .acct-stats .acct-bal:not(.subtle) .amt { font-size: 20px; }
-  /* The value's (long, one-line) hint must not define the block's intrinsic
-     width, or the whole block wraps below the volumes; with its inline size
-     contained it wraps inside the value's own width instead. */
-  .acct-stats .acct-bal:not(.subtle) .hint { contain: inline-size; }
+  /* order 4: the hint row follows the stats line (default order 0 would sort
+     it ahead of the ::before break above). The tighter phone row gap needs no
+     extra pull-up. */
+  .acct-stats-hint { order: 4; margin-top: 0; }
 }
 
 /* progress bar (sync etc) */
