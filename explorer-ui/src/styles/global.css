@@ -1173,15 +1173,19 @@ svg { display: block; }
    would otherwise win the cascade over .addr-pill .tag. */
 .acct-meta .addr-pill .tag { font-family: inherit; font-size: inherit; font-weight: 500; }
 /* Header stats render as a column-flow grid so the labels of every stat share
-   row 1 and the amounts share row 2 on a common baseline — otherwise the 26px
-   value and the 14px volumes float at unrelated heights. Each .acct-bal is
-   display:contents so its children land in the shared rows. Equal-width (1fr)
-   columns give the stats an even horizontal rhythm across a fixed region on
-   the right, rather than each column hugging its own (unequal) content width. */
+   row 1 and the amounts share row 2 — otherwise the 26px value and the 14px
+   volumes float at unrelated heights. Labels sit at row 1's bottom and every
+   amount at row 2's top, so each amount reads directly below its own label
+   and the amounts share a common TOP edge (baseline-aligning them instead
+   hung the small volume figures ~13px below their labels, dangling from the
+   big value's baseline). Each .acct-bal is display:contents so its children
+   land in the shared rows. Equal-width (1fr) columns give the stats an even
+   horizontal rhythm across a fixed region on the right, rather than each
+   column hugging its own (unequal) content width. */
 .acct-stats { margin-left: auto; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; align-items: baseline; column-gap: 28px; text-align: right; width: min(520px, 58%); }
 .acct-stats .acct-bal { display: contents; }
-.acct-stats .acct-bal .lab { grid-row: 1; }
-.acct-stats .acct-bal .amt { grid-row: 2; }
+.acct-stats .acct-bal .lab { grid-row: 1; align-self: end; }
+.acct-stats .acct-bal .amt { grid-row: 2; align-self: start; }
 .acct-stats .acct-bal .hint { grid-row: 3; }
 .acct-bal { text-align: right; }
 .acct-bal .lab { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
@@ -1189,24 +1193,49 @@ svg { display: block; }
 .acct-bal .hint { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
 .acct-bal.subtle .amt { font-size: 14px; font-weight: 500; color: var(--text-medium); }
 .acct-bal.subtle .lab { font-size: 9px; color: var(--text-lowest); }
-/* On phones the stats grid unwraps into the header's own flex flow
-   (display:contents): the value joins the top row, right of the identity at
-   avatar height, and the volume pair drops to ONE shared line below — the
-   ::before pseudo flex-item is a full-width line break, added only when there
-   are volumes so volume-less headers don't gain an empty (gap-padded) row. */
+/* On phones the header stacks into two full-width rows: the identity row
+   (compact inline avatar + name + address/tags, using the whole width) and,
+   below it, ONE shared stats line — volumes on the left, the value on the
+   right, every stat as an inline label+amount pair. The stats grid unwraps
+   into the header's own flex flow (display:contents), and the ::before
+   pseudo flex-item is the full-width line break between the two rows, added
+   only when there are stats so stat-less headers don't gain an empty
+   (gap-padded) row. */
 @media (max-width: 720px){
   .acct-stats { display: contents; }
   /* zero flex-basis: the meta's hypothetical width (one-line address) would
-     otherwise overflow the row and wrap the value onto its own line */
+     otherwise overflow the row */
   .acct-head .acct-meta { flex: 1 1 0; }
-  .acct-stats .acct-bal { display: block; text-align: right; }
-  .acct-stats .acct-bal:not(.subtle) { order: 0; margin-left: auto; }
-  .acct-stats .acct-bal:not(.subtle) .amt { font-size: 20px; }
-  .acct-head:has(.acct-bal.subtle)::before { content: ''; order: 1; flex-basis: 100%; }
+  /* The 60px avatar (plus 18px gap) costs a fifth of a phone-width row and
+     wraps most names; inline it in front of the name instead, at the name's
+     own line height (28px ≈ the 22px serif title's line box, top-aligned so
+     it sits on the name's line, not centred on the whole meta block). Scoped
+     to the header — the profile dialog's picture control shares the class
+     and keeps its 60px. */
+  .acct-head { gap: 10px; }
+  .acct-head .acct-avatar { width: 28px; height: 28px; font-size: 15px; align-self: flex-start; }
+  /* The loading skeleton mirrors the real header, so its avatar shrinks with
+     it — otherwise the header visibly jumps when the data lands. */
+  .acct-head-skeleton .sk-avatar { width: 28px; height: 28px; align-self: flex-start; }
+  /* Only the NAME shares its line with the inline avatar; every meta row
+     after it (address, accounts count, tag chips) pulls back to the panel's
+     own left edge instead of inheriting the avatar's 38px indent. */
+  .acct-head .acct-meta > * + * { margin-left: -38px; }
+  .acct-head:has(.acct-bal)::before { content: ''; order: 1; flex-basis: 100%; }
+  /* Top-aligned label-over-amount blocks (the desktop grid's own reading
+     order), the whole group clustered right on one shared line: the first
+     stat's auto margin soaks up the line's free space — which works exactly
+     because no stat flexes. */
+  .acct-stats .acct-bal { display: block; align-self: flex-start; text-align: right; }
   .acct-stats .acct-bal.subtle { order: 2; }
   .acct-stats .acct-bal.subtle:first-of-type { margin-left: auto; }
-  .acct-stats .acct-bal.subtle .lab { display: inline; }
-  .acct-stats .acct-bal.subtle .amt { display: inline; margin-left: 6px; }
+  .acct-stats .acct-bal:not(.subtle) { order: 3; margin-left: auto; min-width: 0; }
+  .acct-stats .acct-bal.subtle ~ .acct-bal:not(.subtle) { margin-left: 18px; }
+  .acct-stats .acct-bal:not(.subtle) .amt { font-size: 20px; }
+  /* The value's (long, one-line) hint must not define the block's intrinsic
+     width, or the whole block wraps below the volumes; with its inline size
+     contained it wraps inside the value's own width instead. */
+  .acct-stats .acct-bal:not(.subtle) .hint { contain: inline-size; }
 }
 
 /* progress bar (sync etc) */
@@ -1408,6 +1437,10 @@ svg { display: block; }
 
 /* cross-chain chips */
 .chain-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 18px; padding: 0 6px; border-radius: 6px; font-family: 'GeistMono'; font-size: 9px; font-weight: 600; color: #fff; letter-spacing: 0.04em; flex-shrink: 0; }
+/* The local chain. Counterparties carry a hardcoded brand pair; this one derives
+   its ramp from the accent token, so it follows the brand instead of pinning a
+   second copy of it here. */
+.chain-badge-local { background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 70%, #000)); color: var(--accent-on); }
 .dest { display: inline-flex; align-items: center; gap: 7px; }
 .trade-leg { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
 .trade-leg .mono { color: var(--text-high); }
