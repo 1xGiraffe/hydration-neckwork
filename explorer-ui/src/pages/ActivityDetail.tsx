@@ -1,9 +1,9 @@
 import { useEffect } from 'react'
-import { useBlockActivity, useExtrinsic, useStats } from '../hooks/useExplorerData'
+import { useBlockActivity, useEventAt, useExtrinsic, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../router'
-import { activityLabel, canonicalTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
+import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
 import { LIQ_LABELS, MM_LABELS } from '../components/activityColors'
 import { Crumbs, F, AddrPill, AssetChip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows } from '../components/ui'
 import { voteSideLabel } from '../utils/voteRows'
@@ -21,6 +21,17 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
   const { data: stats } = useStats(!!row)
   const now = useNow()
 
+  // An id can name an event that IS activity but is not activity of its OWN: the
+  // transfer legs of an OTC fill, a swap or a money-market call are that action's
+  // plumbing, and the feed renders only the action. Such an id therefore matches no
+  // row, and answering "no transfer found" while titling the page "Transfer" asserts
+  // a family the event never belonged to and strands the reader one click from what
+  // it is. So resolve the event to its extrinsic and hand over to the activity that
+  // owns it. Fetched only on that miss, so the found path costs nothing extra.
+  const missedEventId = rows && !row && ref?.eventIndex != null ? `${ref.height}-${ref.eventIndex}` : null
+  const { data: missedEvent } = useEventAt(missedEventId)
+  const handover = missedEvent ? subordinateActivityTarget(rows ?? [], missedEvent.extrinsicIndex) : null
+
   // Canonicalize slug and id form once the row is known (replaceState — links
   // survive reclassification, and extrinsic-form ids upgrade to event form).
   useEffect(() => {
@@ -28,6 +39,12 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
     const target = canonicalTarget(row, slug, id)
     if (target) redirect(target)
   }, [row, slug, id])
+
+  // Hand a subordinate event over to the activity that owns it.
+  useEffect(() => {
+    if (row || !handover) return
+    redirect(handover)
+  }, [row, handover])
 
   const eventId = row?.eventIndex != null ? `${row.blockHeight}-${row.eventIndex}` : null
   const voteSub = row?.type === 'vote'
@@ -47,7 +64,19 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
       </div>
 
       {!ref ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Invalid activity id</div>
-        : isError || (rows && !row) ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>No {label.toLowerCase()} activity found at {id}</div>
+        : isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>No {label.toLowerCase()} activity found at {id}</div>
+        : rows && !row && missedEventId && !missedEvent ? <div className="detail-card"><SkeletonRows /></div>
+        : rows && !row && handover ? <div className="detail-card"><SkeletonRows /></div>
+        : rows && !row ? (
+          <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>
+            {/* The event may exist and simply not be an activity of its own (a fee leg,
+                a reserve, an internal hop). Naming the requested family here would
+                claim it was one, so the copy points at what does exist instead. */}
+            {missedEvent
+              ? <>Event <span className="mono">{id}</span> is not an activity of its own{missedEvent.extrinsicIndex != null ? <> — see <Link to={paths.extrinsic(`${ref!.height}-${missedEvent.extrinsicIndex}`)} className="hash">its extrinsic</Link></> : null}</>
+              : <>No {label.toLowerCase()} activity found at {id}</>}
+          </div>
+        )
         : isLoading || !row ? <div className="detail-card"><SkeletonRows /></div> : (
           <div className="detail-card"><div className="dl">
             {/* headed: this page states the row's context in its own title and subtitle,
