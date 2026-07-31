@@ -82,9 +82,9 @@ describe('activity category coding', () => {
       // covered by the grouping test below rather than the distinctness one.
       trade: [row({ type: 'trade' }), row({ type: 'trade', dca: true }),
         ...['Fill', 'Place'].map(a => row({ type: 'otc', otcAction: a as ActivityRow['otcAction'] }))],
-      // Staking groups the giga/plain variants of one act deliberately; what must
+      // Staking groups the GIGAHDX/plain variants of one act deliberately; what must
       // stay apart is what the act DOES.
-      staking: ['Stake', 'Unstake', 'Staking reward', 'Giga migration', 'Unstake cancelled']
+      staking: ['Stake', 'Unstake', 'Staking reward', 'GIGAHDX Migrate', 'GIGAHDX Cancel Unstake']
         .map(a => row({ type: 'staking', stakingAction: a })),
     }
     for (const [fam, rows] of Object.entries(families)) {
@@ -93,13 +93,13 @@ describe('activity category coding', () => {
     }
   })
 
-  it('keeps the giga and plain variants of one act on the same shade', () => {
+  it('keeps the GIGAHDX and plain variants of one act on the same shade', () => {
     const same = (a: string, b: string) =>
       expect(activityBadge(row({ type: 'staking', stakingAction: a })).col)
         .toBe(activityBadge(row({ type: 'staking', stakingAction: b })).col)
-    same('Stake', 'Giga stake')
-    same('Unstake', 'Giga unstake')
-    same('Staking reward', 'Giga reward')
+    same('Stake', 'GIGAHDX Stake')
+    same('Unstake', 'GIGAHDX Unstake')
+    same('Staking reward', 'GIGAHDX Reward')
     expect(activityBadge(row({ type: 'otc', otcAction: 'Pull' })).col)
       .toBe(activityBadge(row({ type: 'otc', otcAction: 'Place' })).col)
   })

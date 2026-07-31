@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { assetIconCandidates, normalizeActivityAction, originChainIconUrl, ACTIVITY_ACTIONS } from '../src/components/ui'
 import { activitySlug, SLUG_TYPES } from '../src/components/ActivityTable'
+import { activityBadge } from '../src/components/activityColors'
 import type { ActivityRow } from '../src/types'
 
 describe('trade activity actions', () => {
@@ -34,9 +35,17 @@ describe('origin asset icons', () => {
 
 describe('reward claim classification', () => {
   it('offers and routes incentives claims as claim-rewards activities', () => {
-    expect(ACTIVITY_ACTIONS.mm).toContainEqual({ v: 'ClaimRewards', label: 'Claim rewards' })
+    expect(ACTIVITY_ACTIONS.mm).toContainEqual({ v: 'ClaimRewards', label: 'Claim Lend Rewards' })
     expect(normalizeActivityAction('mm', 'ClaimRewards')).toBe('ClaimRewards')
     expect(activitySlug({ type: 'mm', mmAction: 'ClaimRewards' } as ActivityRow)).toBe('claim-rewards')
     expect(SLUG_TYPES['claim-rewards']).toEqual(expect.arrayContaining(['mm', 'liquidity']))
+  })
+
+  // Two unrelated claims share one slug, so the label is the only thing telling a
+  // reader which position paid out. They met in the merged feed as one word.
+  it('names the lending claim and the liquidity claim apart', () => {
+    expect(activityBadge({ type: 'mm', mmAction: 'ClaimRewards' } as ActivityRow).label).toBe('Claim Lend Rewards')
+    expect(activityBadge({ type: 'liquidity', liqAction: 'Claim' } as ActivityRow).label).toBe('Claim LP Rewards')
+    expect(ACTIVITY_ACTIONS.liquidity).toContainEqual({ v: 'Claim', label: 'Claim LP Rewards' })
   })
 })

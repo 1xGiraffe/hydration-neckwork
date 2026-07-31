@@ -14,35 +14,35 @@ const SHAPES: Record<string, { action: string; shapes: Shape[] }> = {
     shapes: [{ field: 'amount', args: { amount: '3300000000000', currency: '0' } }],
   },
   'GigaHdx.Staked': {
-    action: 'Giga stake',
+    action: 'GIGAHDX Stake',
     shapes: [
       { field: 'amount', args: { amount: '32000000000000000', gigahdx: '29000000000000000' } },
       { field: 'gigahdx', args: { amount: '32000000000000000', gigahdx: '29000000000000000' }, assetId: 670 },
     ],
   },
   'GigaHdx.Unstaked': {
-    action: 'Giga unstake',
+    action: 'GIGAHDX Unstake',
     shapes: [
       { field: 'payout', args: { payout: '11000000000000000', gigahdxAmount: '10000000000000000', positionId: '3', expiresAt: '99', yieldShare: '1' } },
       { field: 'gigahdxAmount', args: { payout: '11000000000000000', gigahdxAmount: '10000000000000000', positionId: '3', expiresAt: '99', yieldShare: '1' }, assetId: 670 },
     ],
   },
   'GigaHdx.UnstakeCancelled': {
-    action: 'Unstake cancelled',
+    action: 'GIGAHDX Cancel Unstake',
     shapes: [
       { field: 'amount', args: { amount: '5000000000000000', gigahdx: '4500000000000000', positionId: '7' } },
       { field: 'gigahdx', args: { amount: '5000000000000000', gigahdx: '4500000000000000', positionId: '7' }, assetId: 670 },
     ],
   },
   'GigaHdx.MigratedFromLegacy': {
-    action: 'Giga migration',
+    action: 'GIGAHDX Migrate',
     shapes: [
       { field: 'hdxUnlocked', args: { hdxUnlocked: '80000000000000000', gigahdxReceived: '72000000000000000' } },
       { field: 'gigahdxReceived', args: { hdxUnlocked: '80000000000000000', gigahdxReceived: '72000000000000000' }, assetId: 670 },
     ],
   },
   'GigaHdxRewards.RewardsClaimed': {
-    action: 'Giga reward',
+    action: 'GIGAHDX Reward',
     shapes: [
       { field: 'totalHdx', args: { totalHdx: '1400000000000000', gigahdxReceived: '1300000000000000' } },
       { field: 'gigahdxReceived', args: { totalHdx: '1400000000000000', gigahdxReceived: '1300000000000000' }, assetId: 670 },
