@@ -120,7 +120,10 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
                 <tbody {...pendingRows(holders.isPlaceholderData)}>
                   {holders.isLoading && !holderRows.length ? <TableSkeleton cols={5} rows={HOLDERS_PAGE} />
                     : holderRows.length ? holderRows.map((h, i) => (
-                    <tr key={i} {...(h.account ? rowNav(accountHref(h.account)) : {})}>
+                    // Semantic key (Accounts' rowKey idiom): a login can regroup
+                    // a row from account to viewer-tag between polls, and an
+                    // index key would then recycle the old row's DOM state.
+                    <tr key={h.tag ? `tag:${h.tag.tagId}` : h.account ? `account:${h.account.accountId}` : `row:${i}`} {...(h.account ? rowNav(accountHref(h.account)) : {})}>
                       <td data-label="Rank" className="mono muted">{h.rank}</td>
                       <td data-label="Holder">{h.tag ? <TagGroupPill tag={h.tag} /> : h.account ? <AddrPill account={h.account} noCopy /> : <Dash />}</td>
                       <td data-label="Balance" className="r"><AssetAmount asset={a} raw={h.balance} /></td>

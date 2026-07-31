@@ -132,9 +132,29 @@ export function useEventAt(id: string | null) {
 export function useAsset(assetId: number | null) {
   return useQuery({ queryKey: ['asset', assetId], queryFn: ({ signal }) => api.asset(assetId as number, signal), enabled: assetId != null, refetchInterval: useInterval(30_000), staleTime: 20_000 })
 }
+// Folded under the viewer's own tags too when a session with a loaded,
+// non-empty tag map is present — the same endpoint switch, gating, and
+// fall-back-to-public-on-failure contract as useAccounts below (see its
+// comment for why this reads getSession()/tagMapStatus() as plain values and
+// why the key changes SHAPE between the two paths).
 export function useHolders(assetId: number | null, offset: number, limit: number, enabled = true) {
   const ri = useInterval(30_000)
-  return useQuery({ queryKey: ['holders', assetId, offset, limit], queryFn: ({ signal }) => api.holders(assetId as number, offset, limit, signal), enabled: assetId != null && enabled, refetchInterval: offset === 0 ? ri : false, staleTime: 20_000, placeholderData: keepPreviousData })
+  const tagMapVersion = useTagMapVersion()
+  const session = getSession()
+  const authed = !!session && tagMapStatus() === 'ready' && hasUserTagMembers()
+  return useQuery({
+    queryKey: authed ? ['holders', 'viewer', session.accountId, tagMapVersion, assetId, offset, limit] : ['holders', assetId, offset, limit],
+    queryFn: async ({ signal }) => {
+      if (!authed) return api.holders(assetId as number, offset, limit, signal)
+      try {
+        return await userApi.holders(assetId as number, offset, limit, signal)
+      } catch (err) {
+        if (signal?.aborted) throw err
+        return api.holders(assetId as number, offset, limit, signal)
+      }
+    },
+    enabled: assetId != null && enabled, refetchInterval: offset === 0 ? ri : false, staleTime: 20_000, placeholderData: keepPreviousData,
+  })
 }
 export function useAssetActivity(assetId: number | null, type = 'all', offset = 0, action?: string, enabled = true, from?: string, to?: string, min?: string) {
   const ri = useInterval()
