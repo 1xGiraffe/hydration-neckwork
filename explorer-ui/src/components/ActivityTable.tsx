@@ -9,9 +9,17 @@ import type { ActivityRow } from '../types'
 
 // Chain badge for cross-chain (XCM) destinations — full network names, brand
 // gradients for the frequent chains, neutral gray for the rest.
+//
+// Polkadot and its AssetHub take the near-black of Polkadot's own brand, cast
+// faintly violet and blue to tell the relay from its system chain. Black also keeps
+// them off the accent the local badge owns: Polkadot's brand pink sat about two
+// degrees of hue from it, close enough that a relay badge and a Hydration badge read
+// as one chip at 9px. A warm counterparty is fine — Mythos red clears the accent by
+// forty degrees — but nothing here should sit that close to it again.
 const CHAIN_COLORS: Record<string, [string, string]> = {
-  Polkadot: ['#e6007a', '#bc0566'],
-  AssetHub: ['#2C89E9', '#1f5cab'],
+  Polkadot: ['#3d3540', '#141014'],
+  AssetHub: ['#333f4e', '#121820'],
+  Mythos: ['#e0332b', '#9d1a14'],
   Moonbeam: ['#53cbc9', '#0fb6b0'],
   Astar: ['#1b6dff', '#0a45c9'],
   Bifrost: ['#5a25f0', '#3a10b0'],
@@ -27,6 +35,14 @@ const CHAIN_COLORS: Record<string, [string, string]> = {
 export function ChainBadge({ chain }: { chain: string }) {
   const c = CHAIN_COLORS[chain] ?? ['#666', '#444']
   return <span className="chain-badge" style={{ background: `linear-gradient(135deg,${c[0]},${c[1]})` }} title={chain}>{chain || '?'}</span>
+}
+// The local end of a cross-chain hop. Every hop has Hydration at one end, and
+// naming it is what makes the arrow's direction readable — a row saying only
+// "AssetHub → USDC 55" leaves the reader to work out which side the asset landed
+// on. It takes the brand accent from the theme rather than a per-chain brand pair,
+// so the one chain that is always us never reads as just another counterparty.
+export function HydrationBadge() {
+  return <span className="chain-badge chain-badge-local" title="Hydration">Hydration</span>
 }
 // The external-explorer label follows the link target — cross-chain accounts
 // live on Subscan for substrate chains, Solscan/Etherscan for Solana/Ethereum.
@@ -156,26 +172,30 @@ export function ActivityBadge({ r }: { r: ActivityRow }) {
 // above it — so there the phrase drops the facts the header repeats and keeps only
 // what it alone carries (the assets and amounts).
 export function ActivityDesc({ r, headed }: { r: ActivityRow; headed?: boolean }) {
+  // A hop's two ends ARE its phrase, so cross-chain is the one family that keeps
+  // them on a headed surface too. Naming one end in a page subtitle is not the same
+  // as drawing the journey: this page's Activity row used to read "AAVE 30.4" and
+  // say nothing about where it came from or landed. So both xcm branches below
+  // ignore `headed` for the chain badges, and the detail page reads like its row.
   if (r.type === 'xcm' && r.xcmDir === 'in' && r.asset) {
-    // Inbound cross-chain: origin chain (+ source account when the crosschain
-    // index resolved it), then the arrow, then the credited asset. Headed, the
-    // origin chain is the header's own subtitle, leaving just the account — and
-    // with no account resolved there is no origin left for an arrow to point from.
-    const origin = headed
-      ? (r.fromAccount ? <ExternalAccountPill account={r.fromAccount} /> : null)
-      : <><ChainBadge chain={r.fromChain ?? ''} />{r.fromAccount && <ExternalAccountPill account={r.fromAccount} />}</>
-    return <span className="asset-flow">{origin}{origin ? ' → ' : null}<span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span></span>
+    // Inbound: origin chain (+ source account when the crosschain index resolved
+    // it), then the arrow, then the chain it landed on with the asset it credited.
+    const origin = <><ChainBadge chain={r.fromChain ?? ''} />{r.fromAccount && <ExternalAccountPill account={r.fromAccount} />}</>
+    return <span className="asset-flow">{origin} → <HydrationBadge /><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span></span>
   }
   if ((r.type === 'transfer' || r.type === 'xcm') && r.asset) {
-    // Asset first, then the arrow, then the destination account. Headed, an outbound
-    // chain badge would repeat both the header's subtitle and the page's own
-    // Destination row, so only the account it lands on stays.
-    const destChain = r.type === 'xcm' && !headed && r.destChain ? <ChainBadge chain={r.destChain} /> : null
+    // Asset first, then the arrow, then the destination chain and account.
+    const destChain = r.type === 'xcm' && r.destChain ? <ChainBadge chain={r.destChain} /> : null
     const destAccount = r.type === 'xcm'
       ? (r.destAccount ? <ExternalAccountPill account={r.destAccount} /> : null)
       : (r.to ? <AddrPill account={r.to} noCopy /> : null)
     const dest = destChain || destAccount ? <>{destChain}{destAccount}</> : null
-    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span>{dest ? <> → {dest}</> : null}</span>
+    // Outbound needs the chain it left as much as inbound needs the one it reached,
+    // and the asset sits beside it either way — it is the Hydration balance that
+    // moved. A local badge only earns its place opposite a counterparty, so a plain
+    // local transfer and an outbound hop with nothing left to point at both skip it.
+    const local = r.type === 'xcm' && dest ? <HydrationBadge /> : null
+    return <span className="asset-flow">{local}<span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span>{dest ? <> → {dest}</> : null}</span>
   }
   if ((r.type === 'trade' || r.type === 'dca') && r.assetIn && r.assetOut) {
     return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.assetIn} /> <span className="mono">{F.amount(r.amountIn, r.assetIn.decimals)}</span></span> → <span className="trade-leg"><AssetChip asset={r.assetOut} /> <span className="mono">{F.amount(r.amountOut, r.assetOut.decimals)}</span></span>{r.dcaStatus === 'failed' && <span className="muted">Failed attempt</span>}</span>

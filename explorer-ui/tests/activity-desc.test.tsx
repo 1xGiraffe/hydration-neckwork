@@ -52,26 +52,56 @@ describe('ActivityDesc — cross-chain', () => {
     destAccount: { kind: 'AccountKey20', address: '0x1111111111111111111111111111111111111111', raw: '0x11', subscanUrl: null },
   }
 
+  const inbound: ActivityRow = { ...base, type: 'xcm', xcmDir: 'in', asset: hdx, amount: '1000000000000', fromChain: 'AssetHub' }
+
+  // The local end, asserted through its class: the fixture asset is itself named
+  // Hydration, so matching the bare word would pass on the asset alone.
+  const local = /class="chain-badge chain-badge-local"/
+
   it('names the destination chain in a list', () => {
     expect(renderToStaticMarkup(<ActivityDesc r={out} />)).toContain('Moonbeam')
   })
 
-  it('drops the destination chain when the header and the Destination row both have it', () => {
+  // Unlike every other family, a hop keeps both ends on a headed surface: the two
+  // chains ARE the phrase, and a subtitle naming one of them in passing is not the
+  // same as drawing the journey. This is what a detail page reading only "AAVE 30.4"
+  // was missing.
+  it('draws the whole journey on a headed surface too', () => {
     const html = renderToStaticMarkup(<ActivityDesc r={out} headed />)
-    expect(html).not.toContain('Moonbeam')
+    expect(html).toContain('Moonbeam')
+    expect(html).toMatch(local)
     expect(html).toContain('0x1111111111111111111111111111111111111111')
   })
 
-  it('leaves no dangling arrow when nothing is left to point at', () => {
-    const html = renderToStaticMarkup(<ActivityDesc r={{ ...out, destAccount: undefined }} headed />)
-    expect(html).not.toContain('→')
+  it('names both ends of an inbound hop with no resolved origin account', () => {
+    const html = renderToStaticMarkup(<ActivityDesc r={inbound} headed />)
+    expect(html).toContain('AssetHub')
+    expect(html).toMatch(local)
+    expect(html).toContain('→')
   })
 
-  it('keeps an unresolved inbound origin account but not its chain', () => {
-    const inbound: ActivityRow = { ...base, type: 'xcm', xcmDir: 'in', asset: hdx, amount: '1000000000000', fromChain: 'AssetHub' }
-    const html = renderToStaticMarkup(<ActivityDesc r={inbound} headed />)
-    expect(html).not.toContain('AssetHub')
+  it('leaves no dangling arrow when nothing is left to point at', () => {
+    const html = renderToStaticMarkup(<ActivityDesc r={{ ...out, destChain: undefined, destAccount: undefined }} headed />)
     expect(html).not.toContain('→')
+    // Nor a local badge opposite nothing, which would read as a destination.
+    expect(html).not.toMatch(local)
+  })
+
+  // Which side the local badge lands on is the direction: the chain the balance left
+  // for an outbound hop, the chain it reached for an inbound one.
+  it('puts Hydration on the receiving side of an inbound hop', () => {
+    const html = renderToStaticMarkup(<ActivityDesc r={inbound} />)
+    expect(html.indexOf('AssetHub')).toBeLessThan(html.search(local))
+  })
+
+  it('puts Hydration on the sending side of an outbound hop', () => {
+    const html = renderToStaticMarkup(<ActivityDesc r={out} />)
+    expect(html.search(local)).toBeLessThan(html.indexOf('Moonbeam'))
+  })
+
+  it('leaves a same-chain transfer with no chain badges at all', () => {
+    const transfer: ActivityRow = { ...base, type: 'transfer', asset: hdx, amount: '1000000000000', to: null }
+    expect(renderToStaticMarkup(<ActivityDesc r={transfer} />)).not.toMatch(local)
   })
 })
 
