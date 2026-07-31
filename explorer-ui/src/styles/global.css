@@ -1444,6 +1444,10 @@ svg { display: block; }
    its ramp from the accent token, so it follows the brand instead of pinning a
    second copy of it here. */
 .chain-badge-local { background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 70%, #000)); color: var(--accent-on); }
+/* A route is one chain, not a list of separate facts, so its links sit closer than
+   a normal asset flow's. Pool badges and asset chips alternate, which is what keeps
+   the order readable once a long route wraps onto a second and third line. */
+.dca-route { gap: 6px; row-gap: 7px; }
 .dest { display: inline-flex; align-items: center; gap: 7px; }
 .trade-leg { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
 .trade-leg .mono { color: var(--text-high); }
