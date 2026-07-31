@@ -59,6 +59,12 @@ function evmAccountForm(acc: string): string | null {
   if (evmFromAccountId(acc)) return acc
   return /^0x[0-9a-f]{64}$/i.test(acc) ? '0x45544800' + acc.slice(2, 42) + '0000000000000000' : null
 }
+// The same mapping as SQL, for joining a substrate-keyed model to an EVM-keyed one.
+// A column already in truncated form folds to itself, since the marker and the
+// trailing zeros are what the concatenation puts back.
+function evmAccountFormSql(column: string): string {
+  return `concat('0x45544800', substring(lower(${column}), 3, 40), '0000000000000000')`
+}
 // Money-market reserve EVM address → substrate asset id. Reserves are either the
 // ERC20 precompile (0x…01 + 8-hex assetId) or a deployed token (e.g. HOLLAR).
 // Money-market reserve contracts that aren't the standard ERC20 precompile (e.g.
@@ -3083,6 +3089,37 @@ const MM_MARKET_ORDER = new Map<string, number>(MM_MARKETS.map((m, i) => [m.key,
 const configuredMmPoolsSql = () => MM_MARKETS.map(m => `'${m.poolProxy}'`).join(',')
 const supplementalMmPoolsSql = () => MM_MARKETS.filter(m => m.role === 'supplemental').map(m => `'${m.poolProxy}'`).join(',') || "''"
 const countedMmPoolsSql = () => MM_MARKETS.filter(m => !m.stakingBacked).map(m => `'${m.poolProxy}'`).join(',') || "''"
+const stakingBackedMmPoolsSql = () => MM_MARKETS.filter(m => m.stakingBacked).map(m => `'${m.poolProxy}'`).join(',') || "''"
+
+// The collateral legs a staking-backed market's own pallet moves, and which are
+// therefore not activity of their own.
+//
+// GIGAHDX staking mints stHDX and supplies it into the isolated GIGAHDX market as a
+// single act; unstaking withdraws it again, and migrating a legacy position or
+// claiming rewards tops it up. The GIGAHDX Stake / Unstake / Migrate / Reward /
+// Cancel unstake row IS that act, so the Supply/Withdraw beside it is plumbing and
+// every surface renders only the staking row. stHDX already held can still be
+// supplied straight into the market through the EVM pool — with no staking event
+// beside it, that keeps a Lend row of its own.
+//
+// The test is a GigaHdx.* event for the same account in the same block. The
+// money-market models are EVM logs with no extrinsic index (it is resolved per row
+// afterwards through raw_events), so the block is the tightest key both sides share;
+// across all indexed history it splits the legs exactly as their originating call
+// does — the pallet's own calls and the Utility/Proxy wrappers around them on one
+// side, dispatch_permit and Ethereum.transact on the other. Stated as SQL so it
+// applies before every LIMIT and a suppressed leg never costs a page one of its rows.
+//
+// Borrow, Repay and LiquidationCall stay: those are the user's own acts in this
+// market whatever put the collateral there.
+export function mmStakingPlumbingExclusionSql(poolColumn = "ifNull(pool_address, '')", accountColumn = "ifNull(account_id, '')"): string {
+  return `AND (event_name NOT IN ('Supply','Withdraw')
+                  OR lower(${poolColumn}) NOT IN (${stakingBackedMmPoolsSql()})
+                  OR (block_height, lower(${accountColumn})) NOT IN (
+                       SELECT block_height, ${evmAccountFormSql('who')}
+                       FROM price_data.staking_activity
+                       WHERE event_name LIKE 'GigaHdx%' AND length(who) = 66))`
+}
 function moneyMarketFields(m: ApiMmMarket): Pick<MoneyMarketPosition, 'marketKey' | 'market' | 'role' | 'defiSimSupported' | 'stakingBacked'> {
   return { marketKey: m.key, market: m.label, role: m.role, defiSimSupported: m.defiSimSupported, stakingBacked: m.stakingBacked }
 }
@@ -8187,6 +8224,7 @@ async function getRecentMoneyMarket(limit: number, from?: string, to?: string, o
                 WHERE ${bound} AND event_name IN (${eventNames.map(n => `'${n}'`).join(',')})
                   AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
                   AND user_address NOT LIKE '0x6d6f646c%'
+                  ${mmStakingPlumbingExclusionSql()}
                   ${reserveFilter}
                   ${amountFilter.predicateSql}
                 ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
@@ -8276,11 +8314,11 @@ export function stakingAmountAndAsset(eventName: string, args: Record<string, un
     return preferredAssetId != null && preferredAssetId !== assetId ? null : { assetId, amount: argStr(args, 'amount'), action: 'Collator payout' }
   }
   if (preferredAssetId != null && preferredAssetId !== 0 && preferredAssetId !== 670) return null
-  if (eventName === 'GigaHdx.Staked') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdx') : argStr(args, 'amount'), action: 'Giga stake' }
-  if (eventName === 'GigaHdx.Unstaked') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdxAmount') : argStr(args, 'payout'), action: 'Giga unstake' }
-  if (eventName === 'GigaHdx.UnstakeCancelled') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdx') : argStr(args, 'amount'), action: 'Unstake cancelled' }
-  if (eventName === 'GigaHdx.MigratedFromLegacy') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdxReceived') : argStr(args, 'hdxUnlocked'), action: 'Giga migration' }
-  if (eventName === 'GigaHdxRewards.RewardsClaimed') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdxReceived') : argStr(args, 'totalHdx'), action: 'Giga reward' }
+  if (eventName === 'GigaHdx.Staked') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdx') : argStr(args, 'amount'), action: 'GIGAHDX Stake' }
+  if (eventName === 'GigaHdx.Unstaked') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdxAmount') : argStr(args, 'payout'), action: 'GIGAHDX Unstake' }
+  if (eventName === 'GigaHdx.UnstakeCancelled') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdx') : argStr(args, 'amount'), action: 'GIGAHDX Cancel Unstake' }
+  if (eventName === 'GigaHdx.MigratedFromLegacy') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdxReceived') : argStr(args, 'hdxUnlocked'), action: 'GIGAHDX Migrate' }
+  if (eventName === 'GigaHdxRewards.RewardsClaimed') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdxReceived') : argStr(args, 'totalHdx'), action: 'GIGAHDX Reward' }
   if (preferredAssetId != null && preferredAssetId !== 0) return null
   if (eventName === 'Staking.PositionCreated') return { assetId: 0, amount: argStr(args, 'stake') || argStr(args, 'amount'), action: 'Stake' }
   if (eventName === 'Staking.StakeAdded') return { assetId: 0, amount: argStr(args, 'amount') || argStr(args, 'stake'), action: 'Add stake' }
@@ -8325,11 +8363,11 @@ const STAKING_ACTION_EVENTS: Record<string, string[]> = {
   'Unstake': ['Staking.Unstaked'],
   'Force unstake': ['Staking.ForceUnstaked'],
   'Staking reward': ['Staking.RewardsClaimed'],
-  'Giga stake': ['GigaHdx.Staked'],
-  'Giga unstake': ['GigaHdx.Unstaked'],
-  'Unstake cancelled': ['GigaHdx.UnstakeCancelled'],
-  'Giga migration': ['GigaHdx.MigratedFromLegacy'],
-  'Giga reward': ['GigaHdxRewards.RewardsClaimed'],
+  'GIGAHDX Stake': ['GigaHdx.Staked'],
+  'GIGAHDX Unstake': ['GigaHdx.Unstaked'],
+  'GIGAHDX Cancel Unstake': ['GigaHdx.UnstakeCancelled'],
+  'GIGAHDX Migrate': ['GigaHdx.MigratedFromLegacy'],
+  'GIGAHDX Reward': ['GigaHdxRewards.RewardsClaimed'],
   'Collator payout': ['CollatorRewards.CollatorRewarded'],
 }
 // SQL mirror of stakingAmountAndAsset for the value push-down: the min-USD
@@ -8373,8 +8411,8 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
         : STAKING_EVENT_NAMES
     // A subordinate-only filter still needs its possible parent events as
     // classification context. They are removed again after hierarchy folding,
-    // so filtering for "Giga stake" does not resurrect reward/migration plumbing.
-    const contextNames = action === 'Giga stake'
+    // so filtering for "GIGAHDX Stake" does not resurrect reward/migration plumbing.
+    const contextNames = action === 'GIGAHDX Stake'
       ? ['GigaHdxRewards.RewardsClaimed', 'GigaHdx.MigratedFromLegacy']
       : action === 'Force unstake' ? ['GigaHdx.MigratedFromLegacy'] : []
     const sourceNames = [...new Set([...selectedNames, ...contextNames])]
@@ -9026,6 +9064,105 @@ async function getScopedVotes(accounts: string[], cacheScope: string, limit: num
       .sort((a, b) => b.blockHeight - a.blockHeight || b.eventIndex - a.eventIndex)
       .slice(offset, offset + limit)
   })
+}
+
+// One referendum's combined vote across a tag's members: each member's LATEST
+// vote (a re-vote replaces the earlier row, exactly what the referendum page
+// counts), summed as integers. `conviction` is not carried — the client derives
+// the capital-weighted average from weighted/amount at presentation time, the
+// same way the bubble chart does for a folded tag bubble.
+export interface VoteGroupRow {
+  pallet: string
+  referendum: string | null
+  voteRefPallet?: 'opengov' | 'democracy' | null
+  voteRefTitle?: string | null
+  // The side cast when every member agrees; 'Split' when they diverge.
+  side: string
+  voters: number
+  weighted: string | null
+  amount: string | null
+  blockHeight: number
+  timestamp: string
+  eventIndex: number
+  extrinsicIndex: number | null
+  asset: AssetRef
+  valueUsd: number | null
+}
+export interface VotesByReferendumPage { rows: VoteGroupRow[]; total: number; complete: boolean }
+
+// The deepest member-vote history one aggregation reads. Far above any real
+// tag's vote count (the busiest system tag is a few hundred events); if a tag
+// ever exceeds it, `complete: false` says so explicitly instead of the page
+// silently pretending the tail doesn't exist.
+const VOTE_AGGREGATE_SCAN = 10_000
+
+// The tag/list-tag Votes tab's grouped mode: the same merged rows getScopedVotes
+// pages flat, folded to one row per referendum. Aggregates over the FULL history
+// before paginating — grouping a single page would split a referendum's members
+// across page boundaries.
+async function getScopedVotesByReferendum(accounts: string[], cacheScope: string, limit: number, offset: number): Promise<VotesByReferendumPage> {
+  return cached(`explorer:${cacheScope}:votes-by-ref:${limit}:${offset}`, 8_000, async () => {
+    const [gov, collective] = await Promise.all([
+      getRecentVotes(VOTE_AGGREGATE_SCAN, undefined, undefined, 0, {}, accounts),
+      getCollectiveVotes(accounts, VOTE_AGGREGATE_SCAN),
+    ])
+    const complete = gov.length < VOTE_AGGREGATE_SCAN && collective.length < VOTE_AGGREGATE_SCAN
+    return aggregateVotesByReferendum([...gov, ...collective], limit, offset, complete)
+  })
+}
+
+// The pure half of the grouped Votes view, split out so its invariants (latest
+// vote wins, integer sums, side agreement, unattributable isolation) are
+// directly testable without a ClickHouse-shaped fake.
+export function aggregateVotesByReferendum(voteRows: VoteRow[], limit: number, offset: number, complete: boolean): VotesByReferendumPage {
+  const all = [...voteRows].sort((a, b) => b.blockHeight - a.blockHeight || b.eventIndex - a.eventIndex)
+  interface Group {
+      row: VoteGroupRow
+      weighted: bigint | null
+      amount: bigint | null
+      sides: Set<string>
+      valueUsd: number | null
+    }
+    const seen = new Set<string>()   // (referendum, member) pairs already counted — first hit is the latest vote
+    const groups = new Map<string, Group>()
+    for (const row of all) {
+      // Collective votes name a proposal hash instead of an index; either way the
+      // referendum identity is (pallet-space, referendum). An unattributable vote
+      // still counts, keyed by its own event so it can never collapse with another.
+      const groupKey = `${row.voteRefPallet ?? row.pallet}:${row.referendum ?? `${row.blockHeight}:${row.eventIndex}`}`
+      const memberKey = `${groupKey}:${row.account ? row.account.accountId : `${row.blockHeight}:${row.eventIndex}`}`
+      if (seen.has(memberKey)) continue
+      seen.add(memberKey)
+      let group = groups.get(groupKey)
+      if (!group) {
+        // Rows arrive newest-first, so the first row IS the group's latest moment.
+        group = {
+          row: {
+            pallet: row.pallet, referendum: row.referendum,
+            voteRefPallet: row.voteRefPallet ?? null, voteRefTitle: row.voteRefTitle ?? null,
+            side: row.side, voters: 0, weighted: null, amount: null,
+            blockHeight: row.blockHeight, timestamp: row.timestamp,
+            eventIndex: row.eventIndex, extrinsicIndex: row.extrinsicIndex,
+            asset: row.asset, valueUsd: null,
+          },
+          weighted: null, amount: null, sides: new Set(), valueUsd: null,
+        }
+        groups.set(groupKey, group)
+      }
+      group.row.voters++
+      group.sides.add(row.side)
+      if (row.weighted != null) group.weighted = (group.weighted ?? 0n) + BigInt(row.weighted)
+      if (row.amount != null) group.amount = (group.amount ?? 0n) + BigInt(row.amount)
+      if (row.valueUsd != null) group.valueUsd = (group.valueUsd ?? 0) + row.valueUsd
+    }
+    const rows = [...groups.values()].slice(offset, offset + limit).map(group => ({
+      ...group.row,
+      side: group.sides.size === 1 ? group.row.side : 'Split',
+      weighted: group.weighted?.toString() ?? null,
+      amount: group.amount?.toString() ?? null,
+      valueUsd: group.valueUsd,
+    }))
+    return { rows, total: groups.size, complete }
 }
 
 // How many rows the Votes list holds — its tab badge and its pager's total.
@@ -10822,7 +10959,8 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
                 WHERE block_height = {h:UInt32}
                   AND event_index IN (${eventIndices})
                   AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
-                  AND event_name IN ('Supply','Borrow','Repay','Withdraw','LiquidationCall')`,
+                  AND event_name IN ('Supply','Borrow','Repay','Withdraw','LiquidationCall')
+                  ${mmStakingPlumbingExclusionSql()}`,
         query_params: { h: height },
         format: 'JSONEachRow',
       })
@@ -11063,6 +11201,7 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
                 AND event_name IN ('Supply','Borrow','Repay','Withdraw','LiquidationCall')
                 AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
                 AND user_address NOT LIKE '0x6d6f646c%'
+                ${mmStakingPlumbingExclusionSql()}
               ORDER BY event_index`,
       query_params: { h: height },
       format: 'JSONEachRow',
@@ -11580,6 +11719,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
                   AND user_address NOT LIKE '0x6d6f646c%'
                   AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
                   AND lower(ifNull(asset_address, '')) IN ({reserves:Array(String)})
+                  ${mmStakingPlumbingExclusionSql()}
                   ${mmValueFilter.predicateSql}
                 ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
         query_params: { n: fetchN, assetId, reserves: reserveAddrs }, format: 'JSONEachRow',
@@ -12727,6 +12867,7 @@ function accountMoneyMarketArm(evmList: string, eventNames: readonly string[], b
     WHERE ${bound} AND account_id IN (${evmList})
       AND event_name IN (${sqlEventNameList([...eventNames])})
       AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
+      ${mmStakingPlumbingExclusionSql()}
       ${tokenFilter}
     GROUP BY block_height`
 }
@@ -13917,6 +14058,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
               ${mmValueFilter.joinSql}
               WHERE ${bound} AND account_id IN (${mmList}) AND event_name IN (${mmEventNames.map(n => `'${n}'`).join(',')})
                 AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
+                ${mmStakingPlumbingExclusionSql()}
                 ${reserveFilter}
                 ${mmValueFilter.predicateSql}
               ORDER BY block_height DESC LIMIT {n:UInt32}`,
@@ -17822,6 +17964,11 @@ export async function getTagVotes(tagId: string, limit = 25, offset = 0, from?: 
   if (!members) return null
   return getScopedVotes(members, `tag:${tagId}`, limit, offset, from, to, filters)
 }
+export async function getTagVotesByReferendum(tagId: string, limit = 25, offset = 0): Promise<VotesByReferendumPage | null> {
+  const members = tagMembers(tagId)
+  if (!members) return null
+  return getScopedVotesByReferendum(members, `tag:${tagId}`, limit, offset)
+}
 
 // ── User-tag aggregate view ───────────────────────────────────────────────────
 // A list tag's own combined view — same shape and same member-list internals
@@ -17875,6 +18022,11 @@ export async function getListTagVotes(listId: string, tagId: string, members: st
   const valid = listTagMembers(members)
   if (!valid.length) return []
   return getScopedVotes(valid, listTagScope(listId, tagId, valid), limit, offset, from, to, filters)
+}
+export async function getListTagVotesByReferendum(listId: string, tagId: string, members: string[], limit = 25, offset = 0): Promise<VotesByReferendumPage> {
+  const valid = listTagMembers(members)
+  if (!valid.length) return { rows: [], total: 0, complete: true }
+  return getScopedVotesByReferendum(valid, listTagScope(listId, tagId, valid), limit, offset)
 }
 // Mirrors getAddressTabCounts' simplicity (getAccountTabCounts's own in-process
 // cache), not getTagTabCounts' persisted-snapshot/background-refresh machinery —
@@ -18031,7 +18183,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
         } else {
           const actionNames = moneyMarketEventNames(filters.action)
           const act = actionNames.length ? ` AND event_name IN (${sqlNames(actionNames)})` : ' AND 0'
-          query = daily('raw_money_market_events', `user_address NOT LIKE '0x6d6f646c%' AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})${act}${sp(mmTok)}`)
+          query = daily('raw_money_market_events', `user_address NOT LIKE '0x6d6f646c%' AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})${act}${sp(mmTok)} ${mmStakingPlumbingExclusionSql()}`)
         }
       } else if (type === 'otc') {
         // Asset identity for Cancelled/Filled/PartiallyFilled lives on the order's
