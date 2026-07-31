@@ -50,3 +50,29 @@ describe('suppressSubordinateActivityRows', () => {
     expect(suppressSubordinateActivityRows([vote, staking])).toEqual([vote, staking])
   })
 })
+
+// suppressSubordinateActivityRows can only recognise a parent it can SEE, and an OTC
+// fill is attributed to the account that called it — the taker. The maker never signs
+// and OTC.Filled names only the filler, so on the maker's feed the fill is absent and
+// this rule has nothing to suppress against. Both of the fill's legs then stood as a
+// pair of unrelated transfers, on the one surface (the account feed) that builds its
+// parent set from the account's own rows rather than the extrinsic's.
+//
+// The account path therefore also reads which extrinsics settled an order and drops
+// their legs for BOTH parties. These pin the half that is pure — that the rule alone
+// cannot do it — so the day someone removes the extra read, this says why it existed.
+describe('an OTC fill the account does not own', () => {
+  it('leaves the maker\'s legs standing when only this rule is applied', () => {
+    // What the maker's feed holds: two legs, no fill row.
+    const paid = row('transfer', { eventIndex: 6, who: account('0xmaker'), to: account('0xtaker') })
+    const received = row('transfer', { eventIndex: 10, who: account('0xtaker'), to: account('0xmaker') })
+    expect(suppressSubordinateActivityRows([paid, received])).toEqual([paid, received])
+  })
+
+  it('folds them away as soon as the fill is present', () => {
+    const fill = row('otc', { eventIndex: 13, otcAction: 'Fill' })
+    const paid = row('transfer', { eventIndex: 6, who: account('0xmaker'), to: account('0xtaker') })
+    const received = row('transfer', { eventIndex: 10, who: account('0xtaker'), to: account('0xmaker') })
+    expect(suppressSubordinateActivityRows([paid, received, fill])).toEqual([fill])
+  })
+})
