@@ -118,8 +118,13 @@ interface JourneyItem {
 // log line below) instead of silently reading as a plain hop.
 const BRIDGE_LABELS: Record<string, string> = {
   snowbridge: 'Snowbridge',
+  // Wormhole reaches Hydration two ways and a reader knows both as Wormhole: the
+  // Portal token bridge (via Moonbeam, the old MRL route) and Native Token Transfers,
+  // which burns and mints directly with no intermediary parachain.
   wh_portal: 'Wormhole',
+  wh_ntt: 'Wormhole',
   basejump: 'Basejump',
+  hyperbridge: 'Hyperbridge',
 }
 export function bridgeLabel(originProtocol: string, destinationProtocol?: string): string | null {
   for (const p of [originProtocol, destinationProtocol]) {
