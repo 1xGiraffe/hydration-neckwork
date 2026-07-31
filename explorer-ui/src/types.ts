@@ -578,6 +578,29 @@ export interface VoteRow {
   valueUsd: number | null
 }
 
+// One referendum's combined vote across a tag's members (the votes tab's
+// grouped mode): each member's latest vote summed as integers. The average
+// conviction is derived client-side from weighted/amount (avgConvictionLabel).
+export interface VoteGroupRow {
+  pallet: string
+  referendum: string | null
+  voteRefPallet?: 'opengov' | 'democracy' | null
+  voteRefTitle?: string | null
+  side: string
+  voters: number
+  weighted: string | null
+  amount: string | null
+  blockHeight: number
+  timestamp: string
+  eventIndex: number
+  extrinsicIndex: number | null
+  asset: AssetRef
+  valueUsd: number | null
+}
+// `complete: false` = the members' vote history ran past the aggregation's scan
+// ceiling, so rows cover only the newest part of it.
+export interface VotesByReferendumPage { rows: VoteGroupRow[]; total: number; complete: boolean }
+
 export interface MoneyMarketRow {
   account: AccountRef
   supplyUsd: number

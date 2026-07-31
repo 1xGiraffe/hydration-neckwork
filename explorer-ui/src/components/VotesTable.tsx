@@ -25,6 +25,9 @@ export interface VoteTableRow extends Moment {
   // collective vote has neither balance nor conviction).
   weighted: string | null
   withdrawn?: boolean
+  // Grouped mode (tag votes by referendum): how many members' latest votes this
+  // row combines. Absent on a plain single-vote row.
+  voters?: number
 }
 
 function ReferendumCell({ row }: { row: VoteTableRow }) {
@@ -53,6 +56,7 @@ const VoteRow = memo(function VoteRow({ row, asset, now, showAccount, showRefere
       <td data-label="Vote">
         <VoteSideBadge side={row.side} />
         {row.conviction ? <span className="muted"> {row.conviction}</span> : null}
+        {row.voters != null && row.voters > 1 && <span className="muted" title="Members whose latest vote this row combines"> · {row.voters} accounts</span>}
         {row.withdrawn && <span className="badge badge-quiet" title="Withdrawn before the referendum closed, so it is not counted">withdrawn</span>}
       </td>
       <td data-label="Votes" className="r mono">

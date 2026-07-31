@@ -165,6 +165,20 @@ export function useListTagVotes(listId: string | null, tagId: string | null, off
     placeholderData: keepPreviousData,
   }), key, offset === 0)
 }
+// Grouped mode (one row per referendum) — ranked page, no useHeldRows, same as
+// its system-tag counterpart in useExplorerData.ts.
+export function useListTagVotesByReferendum(listId: string | null, tagId: string | null, offset = 0, enabled = true) {
+  const session = useSession()
+  const ri = useInterval()
+  return useQuery({
+    queryKey: ['list-tag-votes-by-ref', listId, tagId, offset],
+    queryFn: ({ signal }) => userApi.listTagVotesByReferendum(listId as string, tagId as string, offset, undefined, signal),
+    enabled: !!session && !!listId && !!tagId && enabled,
+    refetchInterval: offset === 0 ? ri : false,
+    staleTime: 6000,
+    placeholderData: keepPreviousData,
+  })
+}
 
 // One mutation wrapper: every user mutation invalidates the user scope (me,
 // tag-map, list details) so the next render resolves with fresh data.

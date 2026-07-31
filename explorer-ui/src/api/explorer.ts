@@ -1,7 +1,7 @@
 import type {
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem,
-  AccountsPage, AccountSort, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, MoneyMarketResponse, AssetDetail, TagDetail,
+  AccountsPage, AccountSort, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
@@ -171,6 +171,9 @@ export const api = {
     getJson<EventRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/events`, { offset, limit, from, to, ...filters }), signal),
   tagVotes: (tagId: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<VoteRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/votes`, { offset, limit, from, to }), signal),
+  // Grouped mode of the votes tab: one row per referendum, members combined.
+  tagVotesByReferendum: (tagId: string, offset = 0, limit = 25, signal?: AbortSignal) =>
+    getJson<VotesByReferendumPage>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/votes-by-referendum`, { offset, limit }), signal),
   tagActivityCounts: (tagId: string, signal?: AbortSignal) => getJson<TabCounts>(`/explorer/tag/${encodeURIComponent(tagId)}/counts`, signal),
   tagListCount: (tagId: string, query: ListCountQuery, signal?: AbortSignal) =>
     getJson<ListCount>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/list-count`, { ...query }), signal),
@@ -245,6 +248,8 @@ export const userApi = {
     authedJson<EventRow[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/events`, { offset, limit, from, to, ...filters }), undefined, signal),
   listTagVotes: (listId: string, tagId: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
     authedJson<VoteRow[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/votes`, { offset, limit, from, to }), undefined, signal),
+  listTagVotesByReferendum: (listId: string, tagId: string, offset = 0, limit = 25, signal?: AbortSignal) =>
+    authedJson<VotesByReferendumPage>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/votes-by-referendum`, { offset, limit }), undefined, signal),
   listTagActivityCounts: (listId: string, tagId: string, signal?: AbortSignal) =>
     authedJson<TabCounts>('GET', `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/counts`, undefined, signal),
   listTagListCount: (listId: string, tagId: string, query: ListCountQuery, signal?: AbortSignal) =>
