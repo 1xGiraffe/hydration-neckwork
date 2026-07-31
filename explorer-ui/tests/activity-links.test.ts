@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { activitySlug, activityId, activityLabel, canonicalTarget, parseId, SLUG_TYPES } from '../src/components/ActivityTable'
+import { activitySlug, activityId, activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES } from '../src/components/ActivityTable'
 import { LIQ_LABELS } from '../src/components/activityColors'
 import type { ActivityRow } from '../src/types'
 
@@ -115,5 +115,46 @@ describe('canonicalTarget (otc)', () => {
   it('redirects on otc slug mismatch (row is a pull, current slug is otc-place)', () => {
     const row: ActivityRow = { ...base, type: 'otc', otcAction: 'Pull', otcOrderId: 42 }
     expect(canonicalTarget(row, 'otc-place', '100-e7')).toBe('/otc-pull/100-e7')
+  })
+})
+
+// An id can name an event that is real, is part of an activity, and is deliberately
+// not a row of its own: the transfer legs and fee withdrawals of an OTC fill, a swap
+// or a money-market call. Before this, such an id answered "No transfer activity
+// found" under a page titled "Transfer" — asserting a family the event never belonged
+// to, and stranding the reader one click from what it actually is.
+describe('subordinateActivityTarget', () => {
+  const at = (extrinsicIndex: number | null, over: Partial<ActivityRow> = {}): ActivityRow => ({
+    type: 'transfer', blockHeight: 13278487, timestamp: '2026-07-23 01:43:42', eventIndex: 12,
+    extrinsicIndex, who: null, to: null, asset: null, assetIn: null, assetOut: null,
+    amount: null, amountIn: null, amountOut: null, valueUsd: null, ...over,
+  } as ActivityRow)
+
+  it('hands a plumbing event over to the activity owning its extrinsic', () => {
+    // The real case: OTC.fill_order emits transfer legs at e6/e8 and the fill at e12.
+    const rows = [at(2, { type: 'otc', otcAction: 'Fill', eventIndex: 12 })]
+    expect(subordinateActivityTarget(rows, 2)).toBe('/otc-fill/13278487-e12')
+  })
+
+  it('refuses to guess when the extrinsic holds several activities', () => {
+    const rows = [
+      at(2, { type: 'otc', otcAction: 'Fill', eventIndex: 12 }),
+      at(2, { type: 'otc', otcAction: 'Fill', eventIndex: 20 }),
+    ]
+    expect(subordinateActivityTarget(rows, 2)).toBeNull()
+  })
+
+  it('has nowhere to hand over when nothing owns the extrinsic', () => {
+    expect(subordinateActivityTarget([at(9, { type: 'swap' })], 2)).toBeNull()
+    expect(subordinateActivityTarget([], 2)).toBeNull()
+    // A hook event has no extrinsic to be owned by.
+    expect(subordinateActivityTarget([at(2, { type: 'otc' })], null)).toBeNull()
+  })
+
+  // A DCA execution's own id is its schedule, so an owner with no addressable row
+  // falls back to the extrinsic rather than building a broken activity URL.
+  it('falls back to the extrinsic when the owner has no id of its own', () => {
+    const rows = [at(2, { type: 'transfer', eventIndex: null, extrinsicIndex: 2 })]
+    expect(subordinateActivityTarget(rows, 2)).toBe('/transfer/13278487-2')
   })
 })
