@@ -3,7 +3,7 @@ import { useSession } from '../session'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, useQueryValue, setQuery, Link } from '../router'
-import { Crumbs, F, AddrPill, AccountEmoji, ShortAddr, Copy, ProfilePageSkeleton, DetailTabs, TagIcon, accountHref, rowNav } from '../components/ui'
+import { Crumbs, F, AddrPill, Copy, ProfilePageSkeleton, DetailTabs, TagIcon, accountHref, rowNav } from '../components/ui'
 import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
@@ -19,16 +19,14 @@ import type { AccountRef } from '../types'
 // OWN summary does — so this reads it off the viewer's /user/me data instead,
 // which always has an entry for this tag's list: seeing the tag at all
 // means the viewer owns or subscribes to it.
-function ListProvenancePill({ listId, listName, owner }: { listId: string; listName: string; owner: AccountRef }) {
+// Where this tag comes from: just the list's name, linking to the list page —
+// deliberately quiet (no owner pill; the list page itself introduces the
+// owner), so provenance never competes with the tag's own identity. The owner
+// still rides along in the tooltip for anyone who wonders.
+function ListProvenanceLink({ listId, listName, owner }: { listId: string; listName: string; owner: AccountRef }) {
   const ownerName = owner.profile?.name || owner.identity?.display || null
   return (
-    <Link to={paths.list(listId)} className="addr-pill" title={`${ownerName ?? owner.address} · ${listName}`}>
-      <AccountEmoji account={owner} />
-      {ownerName
-        ? <span className={`tag${owner.profile?.name ? ' profile-name' : ''}`}>{ownerName}</span>
-        : <span className="a mono"><ShortAddr addr={owner.address} /></span>}
-      <span className="muted"> · {listName}</span>
-    </Link>
+    <Link to={paths.list(listId)} className="muted" title={ownerName ? `${listName} · a list by ${ownerName}` : listName}>{listName}</Link>
   )
 }
 
@@ -96,7 +94,7 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
                       on a narrow viewport once both no longer fit on one line. */}
                   <div className="full" style={{ wordBreak: 'normal', flexWrap: 'wrap' }}>
                     <span className="muted">{members.length} accounts</span>
-                    {listSummary && <> · <ListProvenancePill listId={listId} listName={listSummary.name} owner={listSummary.owner} /></>}
+                    {listSummary && <span className="muted"> · <ListProvenanceLink listId={listId} listName={listSummary.name} owner={listSummary.owner} /></span>}
                   </div>
                 </div>
                 <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} valueUsd={data.portfolioUsd - debtUsd} valueHint={
