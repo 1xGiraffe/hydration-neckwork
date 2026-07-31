@@ -169,6 +169,25 @@ export function canonicalTarget(row: ActivityRow, slug: ActivitySlug, id: string
   return canonicalSlug !== slug || canonicalId !== id ? paths.activityDetail(canonicalSlug, canonicalId) : null
 }
 
+// Where an event that is NOT an activity of its own belongs: the activity whose
+// extrinsic it is part of. The transfer legs and fee withdrawals of an OTC fill, a
+// swap or a money-market call are that action's plumbing — real events, deliberately
+// not rendered as rows — so an id naming one resolves to no row at all.
+//
+// Only an extrinsic with exactly ONE activity hands over unambiguously. A batch
+// holding several would make the choice arbitrary, so it returns null and the caller
+// says so instead, pointing at the extrinsic that lists them all.
+export function subordinateActivityTarget(rows: ActivityRow[], extrinsicIndex: number | null | undefined): string | null {
+  if (extrinsicIndex == null) return null
+  const owners = rows.filter(r => r.extrinsicIndex === extrinsicIndex)
+  if (owners.length !== 1) return null
+  const owner = owners[0]
+  const ownerId = activityId(owner)
+  return ownerId
+    ? paths.activityDetail(activitySlug(owner), ownerId)
+    : paths.extrinsic(`${owner.blockHeight}-${owner.extrinsicIndex}`)
+}
+
 export function ActivityBadge({ r }: { r: ActivityRow }) {
   const { label, col } = badge(r)
   const supplementalMarket = r.type === 'mm' && r.mmMarketKey && r.mmMarketKey !== 'core' ? r.mmMarket : null
