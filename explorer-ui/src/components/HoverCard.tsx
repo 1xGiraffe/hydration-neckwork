@@ -49,6 +49,20 @@ function dcaKind(id: string): Target['kind'] {
   return /^\d+-e\d+$/.test(id) ? 'dca-exec' : 'dca-schedule'
 }
 
+// Same two facts the votes tables keep — the vote cast and the conviction-
+// weighted votes it carries. For a tag bubble the conviction slot holds the
+// group's capital-weighted average plus its voter count ("6.0x avg · 3
+// accounts"), exactly what the tag page's grouped votes view shows per row.
+function VoteContextRows({ vote }: { vote?: VoteContext }) {
+  if (!vote) return null
+  return (
+    <>
+      <div className="hc-row"><span>Vote</span><span className="mono">{vote.side}{vote.conviction ? ` · ${vote.conviction}` : ''}</span></div>
+      <div className="hc-row"><span>Votes</span><span className="mono">{vote.weighted}</span></div>
+    </>
+  )
+}
+
 // A vote bubble is an account pill that also knows how that account voted, so the
 // card can add the side, conviction and weighted power to the usual account rows.
 function voteContext(el: Element): VoteContext | undefined {
@@ -94,7 +108,9 @@ function parseTarget(el: Element): Omit<Target, 'left' | 'top' | 'bottom'> | nul
     // page). 'error'/'anonymous' are terminal, same as a plain miss below.
     if (tagMapStatus() === 'loading' && looksLikeUserTagId(id)) return null
     const lib = listForTag(id)
-    return lib ? { kind: 'list-tag', id, listId: lib.listId } : { kind: 'tag', id }
+    // A folded tag bubble knows how the group voted, same as an account bubble.
+    const vote = voteContext(el)
+    return lib ? { kind: 'list-tag', id, listId: lib.listId, vote } : { kind: 'tag', id, vote }
   }
   const sm = href.match(/\/asset\/(\d+)$/); if (sm) return { kind: 'asset', id: sm[1] }
   const dm = href.match(/\/dca\/([^?#]+)$/); if (dm) { const id = decodeURIComponent(dm[1]); return { kind: dcaKind(id), id } }
@@ -178,8 +194,8 @@ export function HoverCards() {
       onMouseEnter={() => window.clearTimeout(hideTimer.current)}
       onMouseLeave={() => setTarget(null)}>
       {target.kind === 'account' ? <AccountHover id={target.id} vote={target.vote} />
-        : target.kind === 'tag' ? <TagHover id={target.id} />
-        : target.kind === 'list-tag' ? <ListTagHover listId={target.listId!} tagId={target.id} />
+        : target.kind === 'tag' ? <TagHover id={target.id} vote={target.vote} />
+        : target.kind === 'list-tag' ? <ListTagHover listId={target.listId!} tagId={target.id} vote={target.vote} />
         : target.kind === 'asset' ? <AssetHover id={Number(target.id)} />
         : target.kind === 'trade' ? <TradeHover id={target.id} />
         : target.kind === 'dca-schedule' ? <DcaScheduleHover id={target.id} />
@@ -272,12 +288,7 @@ function AccountHover({ id, vote }: { id: string; vote?: VoteContext }) {
           {associations.length > MAX_HOVER_TAGS && <span className="hc-tags-more">+{associations.length - MAX_HOVER_TAGS}</span>}
         </div>
       )}
-      {/* Same two facts the referendum's votes table keeps: the vote itself and the
-          conviction-weighted votes it carries. */}
-      {vote && <>
-        <div className="hc-row"><span>Vote</span><span className="mono">{vote.side}{vote.conviction ? ` · ${vote.conviction}` : ''}</span></div>
-        <div className="hc-row"><span>Votes</span><span className="mono">{vote.weighted}</span></div>
-      </>}
+      <VoteContextRows vote={vote} />
       <ProfileMetrics {...data} debtUsd={debtUsd} topAssets={topAssets} />
     </>
   )
@@ -285,7 +296,7 @@ function AccountHover({ id, vote }: { id: string; vote?: VoteContext }) {
 
 // Tag chips (grouped accounts): the tag identity plus the combined metrics of
 // all member accounts — the same figures the tag detail header shows.
-function TagHover({ id }: { id: string }) {
+function TagHover({ id, vote }: { id: string; vote?: VoteContext }) {
   const { data } = useTagSummary(id)
   if (!data) return <div className="hc-sub mono">Loading…</div>
   const debtUsd = data.moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
@@ -299,6 +310,7 @@ function TagHover({ id }: { id: string }) {
           <div className="hc-sub mono">{data.members.length} account{data.members.length === 1 ? '' : 's'}</div>
         </div>
       </div>
+      <VoteContextRows vote={vote} />
       <ProfileMetrics {...data} debtUsd={debtUsd} topAssets={topAssets} />
     </>
   )
@@ -309,7 +321,7 @@ function TagHover({ id }: { id: string }) {
 // never resolves data, and the card reads as "Loading…" rather than crashing —
 // this hovers a pill the viewer's own tag map already resolved for them, so in
 // practice they always have access to what they're hovering.
-function ListTagHover({ listId, tagId }: { listId: string; tagId: string }) {
+function ListTagHover({ listId, tagId, vote }: { listId: string; tagId: string; vote?: VoteContext }) {
   const { data } = useListTagSummary(listId, tagId)
   if (!data) return <div className="hc-sub mono">Loading…</div>
   const debtUsd = data.moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
@@ -323,6 +335,7 @@ function ListTagHover({ listId, tagId }: { listId: string; tagId: string }) {
           <div className="hc-sub mono">{data.members.length} account{data.members.length === 1 ? '' : 's'}</div>
         </div>
       </div>
+      <VoteContextRows vote={vote} />
       <ProfileMetrics {...data} debtUsd={debtUsd} topAssets={topAssets} />
     </>
   )
