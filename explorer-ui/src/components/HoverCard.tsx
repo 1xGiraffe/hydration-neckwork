@@ -405,11 +405,14 @@ function DcaScheduleHover({ id }: { id: string }) {
           : <>sells <AssetAmount asset={data.assetIn} raw={data.amountPer} /> → <AssetChip asset={data.assetOut} /></>}
       </span></div>
       <div className="hc-row"><span>Every</span><span className="mono" title={`${F.int(data.period)} blocks`}>{fmtDuration(dcaCadence(data.periodSeconds, data.period).seconds)}</span></div>
+      {/* asset-flow, not a plain span: the trade-leg exports the icon's baseline,
+          so inline text after it sags a few px — flex centering (the Order row
+          above, .dl .dd on the schedule page) is the established fix. */}
       <div className="hc-row"><span>Budget</span>{data.totalAmount === '0'
         ? <span className="mono">open-ended</span>
-        : <span>
+        : <span className="asset-flow">
           <AssetAmount asset={data.assetIn} raw={data.totalAmount} />
-          {data.budgetUsd != null && <span className="mono muted"> · {F.usd(data.budgetUsd)}</span>}
+          {data.budgetUsd != null && <span className="mono muted">· {F.usd(data.budgetUsd)}</span>}
         </span>}</div>
       {(() => {
         const { pct, projected } = dcaProgress(data.totalAmount, data.executions.totalIn, data.fundingBalance)
