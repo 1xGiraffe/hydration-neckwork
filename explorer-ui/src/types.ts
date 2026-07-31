@@ -231,7 +231,10 @@ export interface TransferRow {
 export interface HolderRow {
   rank: number
   account: AccountRef | null
-  tag: { tagId: string; name: string; color: string; icon: string; memberCount: number } | null
+  // `userTagId`/`listId`: same additive convention as TopAccountRow — set only
+  // when this group folded under the viewer's own tag (served from
+  // /user/holders). `memberCount` counts members holding this asset.
+  tag: { tagId: string; name: string; color: string; icon: string; memberCount: number; userTagId?: string; listId?: string } | null
   balance: string
   lastBlock: number
   valueUsd?: number | null
