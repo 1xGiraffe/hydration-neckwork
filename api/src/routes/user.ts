@@ -8,6 +8,7 @@ import {
 import { createDeviceLink, claimDeviceLink, deviceLinkStatus } from '../services/deviceLinkService.ts'
 import {
   accountRef, resolveDisplayAccountId, getAccounts, getAccountsForViewerFold,
+  getHolders, getHoldersForViewerFold,
   getListTagDetail, getListTagActivity, getListTagExtrinsics, getListTagEvents, getListTagVotes,
   getListTagTabCounts, getListTagListTotal, getListTagValueEvents,
 } from '../services/explorerService.ts'
@@ -24,7 +25,7 @@ import {
   limitParam, offsetParam, badOffset, textParam, valueFilters, activityTypeParam,
   extrinsicFilters, eventFilters, dateParam, activityOffsetParam, boundedActivityOffset,
   maxActivityOffsetFor, maxScopedActivityOffsetFor, scopedListQuery, listTabSchema,
-  unusableFilterParam, accountSortParam,
+  unusableFilterParam, accountSortParam, uint32Param,
 } from './explorer.ts'
 
 // Authenticated, per-user endpoints. Everything here is invisible to the shared
@@ -272,6 +273,26 @@ export async function userRoutes(fastify: FastifyInstance) {
     const sort = accountSortParam(q)
     const fold = directoryFoldFor(accountId)
     return fold ? getAccountsForViewerFold(offset, limit, sort, fold) : getAccounts(offset, limit, sort)
+  })
+
+  // An asset's holder list, folded under THIS viewer's own tags too — the
+  // /user/accounts pattern applied to /explorer/holders/:assetId: same params,
+  // same parsers, same response shape, so the client swaps endpoints without
+  // changing how it reads the page. The fold rides the same directoryFoldFor
+  // result the accounts directory uses, so the two surfaces always group an
+  // account the same way for the same viewer.
+  fastify.get('/user/holders/:assetId', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const params = z.object({ assetId: uint32Param }).safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid asset id' })
+    const q = req.query as Record<string, unknown>
+    const limit = limitParam(q, 100)
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    const fold = directoryFoldFor(accountId)
+    return fold ? getHoldersForViewerFold(params.data.assetId, limit, offset, fold) : getHolders(params.data.assetId, limit, offset)
   })
 
   const listCreateBody = z.object({ name: z.string().max(200), note: z.string().max(400).optional(), visibility: z.enum(['private', 'public']) })
