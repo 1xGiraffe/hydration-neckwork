@@ -315,7 +315,12 @@ function activityRowAtHeight(h: number): ActivityRow {
   }
   if (t === 'xcm' && h % 2 === 0) return { ...base, type: t, extrinsicIndex: null, asset: aref(aIn), amount: raw(amt, aIn.decimals), xcmDir: 'in', fromChain: 'AssetHub', fromAccount: xcmExternalAccount(h) }
   if (t === 'transfer' || t === 'xcm') return { ...base, type: t, to: ACCS[Math.floor(r() * ACCS.length)], asset: aref(aIn), amount: raw(amt, aIn.decimals), destChain: t === 'xcm' ? 'Moonbeam' : undefined, xcmDir: t === 'xcm' ? 'out' : undefined }
-  return { ...base, type: t, asset: aref(aIn), amount: raw(amt, aIn.decimals), mmAction: t === 'mm' ? (['Supply', 'Borrow', 'Repay', 'Withdraw'][Math.floor(r() * 4)]) : undefined, ...(t === 'mm' ? { mmMarketKey: 'gigahdx', mmMarket: 'GIGAHDX' } : {}) }
+  // GIGAHDX reaches the feed mainly through the debt side of its market: the
+  // collateral legs of a GIGAHDX stake are that staking row's plumbing and the API
+  // suppresses them, so a mock Lend/Withdraw belongs to the primary market.
+  const mmAction = t === 'mm' ? ['Supply', 'Borrow', 'Repay', 'Withdraw'][Math.floor(r() * 4)] : undefined
+  const gigaMm = mmAction === 'Borrow' || mmAction === 'Repay'
+  return { ...base, type: t, asset: aref(aIn), amount: raw(amt, aIn.decimals), mmAction, ...(gigaMm ? { mmMarketKey: 'gigahdx', mmMarket: 'GIGAHDX' } : {}) }
 }
 
 // Inbound XCM's source account, cycling through a tagged, an identity-only, and

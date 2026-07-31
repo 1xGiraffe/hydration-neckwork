@@ -4,6 +4,7 @@ import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../router'
 import { activityLabel, canonicalTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
+import { LIQ_LABELS, MM_LABELS } from '../components/activityColors'
 import { Crumbs, F, AddrPill, AssetChip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows } from '../components/ui'
 import { voteSideLabel } from '../utils/voteRows'
 
@@ -62,8 +63,10 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             </>}
             {row.type === 'xcm' && row.messageId && <><div className="dt">Message ID</div><div className="dd mono" style={{ overflowWrap: 'anywhere' }}>{row.messageId}</div></>}
             {row.type === 'xcm' && row.bridge && <><div className="dt">Bridge</div><div className="dd">{row.bridge}</div></>}
-            {row.type === 'mm' && <><div className="dt">Action</div><div className="dd">{row.mmAction === 'ClaimRewards' ? 'Claim rewards' : row.mmAction ?? '—'}</div></>}
-            {row.type === 'liquidity' && <><div className="dt">Action</div><div className="dd">{row.liqAction === 'Remove' ? 'Remove liquidity' : row.liqAction === 'Create' ? 'Create pool' : row.liqAction === 'Claim' ? 'Claim rewards' : 'Add liquidity'}</div></>}
+            {/* Both read the badge's own label maps, so this page cannot name an
+                action differently from the row that led here. */}
+            {row.type === 'mm' && <><div className="dt">Action</div><div className="dd">{MM_LABELS[row.mmAction ?? ''] ?? row.mmAction ?? '—'}</div></>}
+            {row.type === 'liquidity' && <><div className="dt">Action</div><div className="dd">{LIQ_LABELS[row.liqAction ?? ''] ?? LIQ_LABELS.Add}</div></>}
             {row.type === 'staking' && <><div className="dt">Action</div><div className="dd">{row.stakingAction ?? '—'}</div></>}
             {row.type === 'vote' && <>
               {/* The referendum, the side and the conviction already head this page (see
