@@ -20,7 +20,7 @@ describe('activitySlug', () => {
     expect(activitySlug({ ...base, type: 'mm', mmAction: 'Supply' })).toBe('lend')
     expect(activitySlug({ ...base, type: 'mm', mmAction: 'LiquidationCall' })).toBe('liquidate')
     expect(activitySlug({ ...base, type: 'mm', mmAction: 'Repay' })).toBe('repay')
-    expect(activitySlug({ ...base, type: 'staking', stakingAction: 'Giga stake' })).toBe('staking')
+    expect(activitySlug({ ...base, type: 'staking', stakingAction: 'GIGAHDX Stake' })).toBe('staking')
     expect(activitySlug({ ...base, type: 'vote', voteSide: 'Aye' })).toBe('vote')
     expect(activitySlug({ ...base, type: 'otc', otcAction: 'Place' })).toBe('otc-place')
     expect(activitySlug({ ...base, type: 'otc', otcAction: 'Pull' })).toBe('otc-pull')

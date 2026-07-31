@@ -107,6 +107,9 @@ export function activityId(r: ActivityRow, dcaExecutionLink = false): string | n
   if (r.extrinsicIndex != null) return `${r.blockHeight}-${r.extrinsicIndex}`
   return null
 }
+// A slug names a URL, and `claim-rewards` is the URL of BOTH reward claims (see
+// SLUG_TYPES), so its label stays the family-neutral one — which claim a row is
+// comes from its badge and its Action row, and those name the position it pays out.
 const SLUG_LABEL: Record<ActivitySlug, string> = {
   swap: 'Swap', dca: 'DCA', transfer: 'Transfer', 'cross-chain': 'Cross-chain',
   'add-liquidity': 'Add liquidity', 'remove-liquidity': 'Remove liquidity', 'create-pool': 'Create pool', 'claim-rewards': 'Claim rewards',
