@@ -13219,6 +13219,14 @@ function hookOwnerSql(list: string, accounts: string[], evmList: string, bound: 
     `SELECT e.block_height AS block_height, ${who('e.who')} AS owner FROM price_data.dca_events AS e FINAL
        WHERE ${bound.replaceAll('block_height', 'e.block_height').replaceAll('block_timestamp', 'e.block_timestamp')}
          AND e.event_name IN ('DCA.TradeExecuted','DCA.TradeFailed') AND e.who IN (${list})`,
+    // Bare `who IN (${list})` here, not liquidityWhoOrPoolSql's who-OR-pool_account —
+    // safe only because this arm is confined to extrinsic_index IS NULL and no
+    // lifecycle row has one: 0 of 1746 XYK.PoolCreated/PoolDestroyed rows carry a null
+    // extrinsic_index, verified chain-wide. If a hook-dispatched pool destruction ever
+    // produces one — the same shape as the Omnipool offboarding force-removals above
+    // (fillMissingLiquidityAmounts) — it would own no hook sibling here, so its
+    // withdrawal legs would surface on the pool's page as raw transfers instead of
+    // folding behind the liquidity row.
     `SELECT block_height, ${who('who')} AS owner FROM price_data.liquidity_activity
        WHERE ${bound} AND who IN (${list}) AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
          AND extrinsic_index IS NULL`,
