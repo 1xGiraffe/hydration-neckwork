@@ -187,7 +187,13 @@ CREATE TABLE IF NOT EXISTS price_data.xcm_inbound_walk_events (`block_height` UI
 -- version-agnostic on purpose — Snowbridge v1 and v2 differ in their stop shape, not
 -- in this field. Dropping this table costs every resolution it holds; see
 -- ops/backup-user-tables.sh.
-CREATE TABLE IF NOT EXISTS price_data.xcm_journey_sources (`message_id` String, `from_hex` String, `origin_urn` String, `updated_at` DateTime DEFAULT now(), `origin_tx` String DEFAULT '', `origin_protocol` LowCardinality(String) DEFAULT '') ENGINE = ReplacingMergeTree(updated_at) ORDER BY message_id SETTINGS index_granularity = 8192;
+-- Despite the name this holds BOTH ends of a journey, keyed by the XCM topic id the
+-- hop we saw carries. The topic is the only key that works in both directions: an
+-- outbound Wormhole journey has one on every occurrence but an origin extrinsic hash
+-- on barely half, so keying outbound by hash (as it once was) could never resolve
+-- them. `*_formatted` are the API's own renderings — base58 for Solana, hex for EVM —
+-- which is how a real destination account survives without re-encoding it here.
+CREATE TABLE IF NOT EXISTS price_data.xcm_journey_sources (`message_id` String, `from_hex` String, `origin_urn` String, `updated_at` DateTime DEFAULT now(), `origin_tx` String DEFAULT '', `origin_protocol` LowCardinality(String) DEFAULT '', `from_formatted` String DEFAULT '', `dest_urn` String DEFAULT '', `to_hex` String DEFAULT '', `to_formatted` String DEFAULT '', `dest_protocol` LowCardinality(String) DEFAULT '', `dest_tx` String DEFAULT '') ENGINE = ReplacingMergeTree(updated_at) ORDER BY message_id SETTINGS index_granularity = 8192;
 -- Topic ids looked for and not found yet. A bridged journey reaches the index only
 -- after it lands here (Snowbridge's Ethereum leg trails arrival by ~20 minutes), so
 -- a single attempt at render time is the wrong shape: without this marker a miss is

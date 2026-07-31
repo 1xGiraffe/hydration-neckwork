@@ -534,6 +534,9 @@ export interface ActivityRow {
   fromAccount?: ActivityRow['destAccount']
   messageId?: string | null
   fromTxUrl?: string | null   // xcm inbound: origin-chain extrinsic on its explorer  // xcm inbound: message topic id
+  // Destination-chain transaction, once the journey lands there — the far end's
+  // counterpart to fromTxUrl.
+  destTxUrl?: string | null
   // How the transfer crossed, when a bridge rather than only XCM carried it
   // ('Snowbridge', 'Wormhole', 'Basejump'). Resolved alongside fromChain, and not
   // versioned on purpose: Snowbridge v1 and v2 differ in the hops they take, not in
