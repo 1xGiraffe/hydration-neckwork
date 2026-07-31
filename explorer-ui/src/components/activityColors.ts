@@ -72,9 +72,13 @@ export function categoryColor(type: string): string {
 // The chain's money-market action names are not what this app calls them. The
 // values stay as the runtime emits them (they are the filter and the indexed
 // field); only the words a reader sees change here.
-const MM_LABELS: Record<string, string> = {
+//
+// Two unrelated acts are both a reward claim — a money-market lending incentive
+// and a liquidity-mining payout — and they meet in the merged feed, so each names
+// the position it pays out on rather than leaving a reader to guess which is which.
+export const MM_LABELS: Record<string, string> = {
   Supply: 'Lend',
-  ClaimRewards: 'Claim rewards',
+  ClaimRewards: 'Claim Lend Rewards',
   LiquidationCall: 'Liquidate',
   Liquidate: 'Liquidate',
 }
@@ -90,12 +94,13 @@ const MM_COLORS: Record<string, string> = {
   Liquidate: CAT.bad,
 }
 
-// Staking has more actions than a ramp can hold apart, so the giga/plain variants
-// of one act share a shade — Stake and Giga stake are the same act on different
-// products, and telling THOSE apart is the label's job. What must stay separate is
-// what the act does: enter, exit, collect, migrate, or call off a pending exit.
+// Staking has more actions than a ramp can hold apart, so the GIGAHDX/plain
+// variants of one act share a shade — Stake and GIGAHDX Stake are the same act on
+// different products, and telling THOSE apart is the label's job. What must stay
+// separate is what the act does: enter, exit, collect, migrate, or call off a
+// pending exit. Cancel is tested before exit because a cancelled unstake names both.
 function stakingColor(action: string): string {
-  if (/migration/i.test(action)) return CAT.stakeMigrate
+  if (/migrat/i.test(action)) return CAT.stakeMigrate
   if (/cancel/i.test(action)) return CAT.stakeCancel
   if (/reward|payout/i.test(action)) return CAT.stakeReward
   if (/unstake/i.test(action)) return CAT.stakeExit
@@ -119,8 +124,8 @@ function voteLabel(action: string | null | undefined): string {
 const LIQ_COLORS: Record<string, string> = {
   Add: CAT.liquidity, Remove: CAT.liquidityRemove, Create: CAT.liquidityCreate, Claim: CAT.liquidityClaim,
 }
-const LIQ_LABELS: Record<string, string> = {
-  Add: 'Add liquidity', Remove: 'Remove liquidity', Create: 'Create pool', Claim: 'Claim rewards',
+export const LIQ_LABELS: Record<string, string> = {
+  Add: 'Add liquidity', Remove: 'Remove liquidity', Create: 'Create pool', Claim: 'Claim LP Rewards',
 }
 const OTC_COLORS: Record<string, string> = {
   // Placing and pulling an offer both only move an offer around — neither moves

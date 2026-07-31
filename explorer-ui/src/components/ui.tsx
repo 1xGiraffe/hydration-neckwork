@@ -6,7 +6,7 @@ import type { AccountRef, AssetOrigin, AssetRef, FailureReason } from '../types'
 import { parseUtcTimestamp } from '../utils/time'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { voteSideLabel } from '../utils/voteRows'
-import { CAT } from './activityColors'
+import { CAT, LIQ_LABELS, MM_LABELS } from './activityColors'
 import { resolveTag, useTagMapVersion } from '../userTags'
 import type { ResolvedTag } from '../userTags'
 
@@ -1451,7 +1451,8 @@ export function normalizeActivityType(value: string): string {
 // Per-category action filters (server matches these against row fields).
 export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = {
   // Labels mirror the badges the activity table renders for each row, so the
-  // filter names exactly what it filters. OTC (place/pull/fill) is folded in
+  // filter names exactly what it filters — the renamed ones read from the badge's
+  // own map rather than restating it. OTC (place/pull/fill) is folded in
   // here alongside swap/dca — otc rows keep their own badges/slugs/detail
   // pages, only the Trade categorization changes.
   trade: [
@@ -1459,9 +1460,11 @@ export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = 
     { v: 'otc-place', label: 'OTC place' }, { v: 'otc-pull', label: 'OTC pull' }, { v: 'otc-fill', label: 'OTC fill' },
   ],
   xcm: [{ v: 'out', label: 'Outgoing' }, { v: 'in', label: 'Incoming' }],
-  liquidity: [{ v: 'Add', label: 'Add liquidity' }, { v: 'Remove', label: 'Remove liquidity' }, { v: 'Create', label: 'Create pool' }, { v: 'Claim', label: 'Claim rewards' }],
-  mm: [{ v: 'Supply', label: 'Lend' }, { v: 'Withdraw', label: 'Withdraw' }, { v: 'Borrow', label: 'Borrow' }, { v: 'Repay', label: 'Repay' }, { v: 'LiquidationCall', label: 'Liquidate' }, { v: 'ClaimRewards', label: 'Claim rewards' }],
-  stake: [{ v: 'Stake', label: 'Stake' }, { v: 'Add stake', label: 'Add stake' }, { v: 'Unstake', label: 'Unstake' }, { v: 'Force unstake', label: 'Force unstake' }, { v: 'Staking reward', label: 'Staking reward' }, { v: 'Giga stake', label: 'Giga stake' }, { v: 'Giga unstake', label: 'Giga unstake' }, { v: 'Unstake cancelled', label: 'Unstake cancelled' }, { v: 'Giga migration', label: 'Giga migration' }, { v: 'Giga reward', label: 'Giga reward' }, { v: 'Collator payout', label: 'Collator payout' }],
+  liquidity: [{ v: 'Add', label: 'Add liquidity' }, { v: 'Remove', label: 'Remove liquidity' }, { v: 'Create', label: 'Create pool' }, { v: 'Claim', label: LIQ_LABELS.Claim }],
+  mm: [{ v: 'Supply', label: MM_LABELS.Supply }, { v: 'Withdraw', label: 'Withdraw' }, { v: 'Borrow', label: 'Borrow' }, { v: 'Repay', label: 'Repay' }, { v: 'LiquidationCall', label: MM_LABELS.LiquidationCall }, { v: 'ClaimRewards', label: MM_LABELS.ClaimRewards }],
+  // Staking values ARE their labels — the server sends the action as a word, not a
+  // runtime event name — so there is no mapping here to keep in step.
+  stake: [{ v: 'Stake', label: 'Stake' }, { v: 'Add stake', label: 'Add stake' }, { v: 'Unstake', label: 'Unstake' }, { v: 'Force unstake', label: 'Force unstake' }, { v: 'Staking reward', label: 'Staking reward' }, { v: 'GIGAHDX Stake', label: 'GIGAHDX Stake' }, { v: 'GIGAHDX Unstake', label: 'GIGAHDX Unstake' }, { v: 'GIGAHDX Cancel Unstake', label: 'GIGAHDX Cancel Unstake' }, { v: 'GIGAHDX Migrate', label: 'GIGAHDX Migrate' }, { v: 'GIGAHDX Reward', label: 'GIGAHDX Reward' }, { v: 'Collator payout', label: 'Collator payout' }],
   // The value is the chain's own term; the label is how this app writes that side —
   // taken from the same mapping the badges use, so the two cannot diverge.
   vote: [{ v: 'Aye', label: voteSideLabel('Aye') }, { v: 'Nay', label: voteSideLabel('Nay') }],
