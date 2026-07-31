@@ -35,6 +35,27 @@ function makeQueryMock(handler: (args: QueryArgs) => Promise<unknown[]>) {
   return vi.fn(async (args: QueryArgs) => ({ json: async () => handler(args) }))
 }
 
+// The sweep probes both feeds with a one-item request to measure whether the one it
+// walks has fallen behind (see reportFeedLag). Those probes are requests too, so
+// counting raw fetch calls no longer measures walking. These split the two: a walk
+// asks for a page, a probe asks for a single item.
+const isProbe = (init: { body: string }) =>
+  (JSON.parse(init.body) as { pagination?: { limit?: number } }).pagination?.limit === 1
+const walkCalls = (mock: { mock: { calls: unknown[][] } }) =>
+  mock.mock.calls.filter(call => !isProbe(call[1] as { body: string }))
+
+// A fetch mock that answers probes itself and hands every WALK request to `handler`,
+// so a test can gate or vary the walk without having to model the probes.
+function makeFetchMock(handler: (init: { body: string }) => unknown, probeNewestMs = Date.now()) {
+  return vi.fn((_url: string, init: { body: string }) => {
+    if (isProbe(init)) {
+      const item = { correlationId: 'probe', origin: 'urn:ocn:polkadot:1000', destination: DEST_URN, sentAt: probeNewestMs, recvAt: probeNewestMs }
+      return Promise.resolve({ ok: true, json: async () => ({ items: [item], pageInfo: { hasNextPage: false } }) })
+    }
+    return handler(init)
+  })
+}
+
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.unstubAllEnvs()
@@ -73,7 +94,7 @@ describe('xcmJourneySourcesFor', () => {
       pageInfo: { hasNextPage: false },
     }
     let releaseFetch!: (response: { ok: boolean; json: () => Promise<typeof body> }) => void
-    const fetchMock = vi.fn(() => new Promise(resolve => { releaseFetch = resolve }))
+    const fetchMock = makeFetchMock(() => new Promise(resolve => { releaseFetch = resolve }))
     vi.stubGlobal('fetch', fetchMock)
     vi.stubEnv('EXPLORER_OCELLOIDS_TOKEN', 'test-token')
 
@@ -91,11 +112,11 @@ describe('xcmJourneySourcesFor', () => {
     // The external request remains unresolved, but the explorer lookup has
     // already returned after its single ClickHouse miss.
     expect(result.size).toBe(0)
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(walkCalls(fetchMock)).toHaveLength(1))
 
     // A concurrent miss shares the same background walk.
     expect((await xcmJourneySourcesFor(keys)).size).toBe(0)
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(walkCalls(fetchMock)).toHaveLength(1)
 
     releaseFetch({ ok: true, json: async () => body })
     await vi.waitFor(() => expect(insert).toHaveBeenCalledTimes(1))
@@ -106,14 +127,16 @@ describe('xcmJourneySourcesFor', () => {
     expect(cached.get(MSG_A)).toMatchObject({ from: FROM_2, origin: ORIGIN_URN, correlationId: 'corr-2' })
     expect(cached.get(MSG_B)).toMatchObject({ from: FROM_2, origin: ORIGIN_URN, correlationId: 'corr-2' })
 
-    // Both initial misses shared one persisted lookup; the cached read needs none.
-    expect(query).toHaveBeenCalledTimes(2)
+    // Each unresolved lookup reads twice — the persisted resolutions, then the miss
+    // ledger that decides whether this id is due another walk — so the two misses
+    // above account for four. The cached read that follows needs neither.
+    expect(query).toHaveBeenCalledTimes(4)
 
     const call = insert.mock.calls[0][0]
     expect(call.table).toBe('price_data.xcm_journey_sources')
     expect(call.values).toHaveLength(2)
-    expect(call.values.find(v => v.message_id === MSG_A)).toEqual({ message_id: MSG_A, from_hex: FROM_2, origin_urn: ORIGIN_URN, origin_tx: '' })
-    expect(call.values.find(v => v.message_id === MSG_B)).toEqual({ message_id: MSG_B, from_hex: FROM_2, origin_urn: ORIGIN_URN, origin_tx: '' })
+    expect(call.values.find(v => v.message_id === MSG_A)).toEqual({ message_id: MSG_A, from_hex: FROM_2, origin_urn: ORIGIN_URN, origin_tx: '', origin_protocol: '' })
+    expect(call.values.find(v => v.message_id === MSG_B)).toEqual({ message_id: MSG_B, from_hex: FROM_2, origin_urn: ORIGIN_URN, origin_tx: '', origin_protocol: '' })
   })
 
   it('falls back to the persisted ClickHouse table when the live walk has nothing for the message id', async () => {
@@ -135,6 +158,7 @@ describe('xcmJourneySourcesFor', () => {
       destination: '',
       originTx: null,
       correlationId: '',
+      originProtocol: '',
     })
     expect(query).toHaveBeenCalledTimes(1)
     expect(fetchMock).not.toHaveBeenCalled()
@@ -232,7 +256,7 @@ describe('in-flight journeys do not truncate the walk', () => {
       pageInfo: { hasNextPage: false },
     }
     const cursors: (string | undefined)[] = []
-    const fetchMock = vi.fn(async (_url: string, init: { body: string }) => {
+    const fetchMock = makeFetchMock(async (init: { body: string }) => {
       const body = JSON.parse(init.body) as { pagination?: { cursor?: string } }
       cursors.push(body.pagination?.cursor)
       return { ok: true, json: async () => (body.pagination?.cursor === 'cursor-2' ? page2 : page1) }
@@ -255,6 +279,147 @@ describe('in-flight journeys do not truncate the walk', () => {
   })
 })
 
+describe('misses back off instead of re-walking', () => {
+  // A bridged journey reaches the index only after it lands here (~20 min for
+  // Snowbridge), so the first look legitimately finds nothing. Without a persisted
+  // marker that miss was re-walked on every single request, which both wasted the
+  // whole background budget on one id and never gave the journey time to appear.
+  const missRow = (attempts: number, lastAttemptS: number) =>
+    [{ message_id: MSG_A, attempts: String(attempts), last_attempt_s: String(lastAttemptS), first_seen_ms: '1' }]
+
+  const runWith = async (rows: unknown[]) => {
+    const fetchMock = makeFetchMock(async () => ({ ok: true, json: async () => ({ items: [], pageInfo: { hasNextPage: false } }) }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('EXPLORER_OCELLOIDS_TOKEN', 'test-token')
+    const { initXcmJourneyService, xcmJourneySourcesFor } = await import('../src/services/xcmJourneyService.ts')
+    // The sources lookup finds nothing; the miss ledger returns `rows`.
+    const query = makeQueryMock(async ({ query: sql }) => (sql.includes('xcm_journey_misses') ? rows : []))
+    initXcmJourneyService(fakeClient({ query }) as never)
+    await xcmJourneySourcesFor([{ messageId: MSG_A, timestampMs: Date.now(), bridge: true }])
+    await new Promise(r => setTimeout(r, 150))
+    return fetchMock
+  }
+
+  it('skips a walk for an id looked for moments ago', async () => {
+    const fetchMock = await runWith(missRow(1, Math.floor(Date.now() / 1000)))
+    expect(walkCalls(fetchMock)).toHaveLength(0)
+  })
+
+  it('walks again once the backoff for that attempt has elapsed', async () => {
+    const fetchMock = await runWith(missRow(1, Math.floor(Date.now() / 1000) - 3600))
+    expect(walkCalls(fetchMock).length).toBeGreaterThan(0)
+  })
+
+  // Past the last step the id is left alone rather than retried forever: some
+  // journeys genuinely never appear, and they must not consume the budget for good.
+  it('gives up after the schedule runs out', async () => {
+    const fetchMock = await runWith(missRow(99, 0))
+    expect(walkCalls(fetchMock)).toHaveLength(0)
+  })
+
+  it('always walks an id it has never looked for', async () => {
+    const fetchMock = await runWith([])
+    expect(walkCalls(fetchMock).length).toBeGreaterThan(0)
+  })
+})
+
+describe('bridgeLabel', () => {
+  it('names the bridges the crosschain index distinguishes', async () => {
+    const { bridgeLabel } = await import('../src/services/xcmJourneyService.ts')
+    expect(bridgeLabel('snowbridge')).toBe('Snowbridge')
+    expect(bridgeLabel('wh_portal')).toBe('Wormhole')
+    expect(bridgeLabel('basejump')).toBe('Basejump')
+  })
+
+  // A journey that only ever spoke XCM is not "bridged", and neither end being a
+  // bridge means no label at all.
+  it('leaves a plain XCM journey unlabelled', async () => {
+    const { bridgeLabel } = await import('../src/services/xcmJourneyService.ts')
+    expect(bridgeLabel('xcm')).toBeNull()
+    expect(bridgeLabel('xcm', 'xcm')).toBeNull()
+    expect(bridgeLabel('')).toBeNull()
+  })
+
+  // Outbound journeys carry the bridge on the DESTINATION side (xcm -> snowbridge),
+  // so whichever end names a bridge is the one that answers.
+  it('reads the bridge from whichever end has one', async () => {
+    const { bridgeLabel } = await import('../src/services/xcmJourneyService.ts')
+    expect(bridgeLabel('xcm', 'snowbridge')).toBe('Snowbridge')
+    expect(bridgeLabel('snowbridge', 'xcm')).toBe('Snowbridge')
+  })
+
+  // Snowbridge v1 and v2 differ in the hops they take, not in this field, so a new
+  // upstream protocol should surface under its own name rather than vanish into
+  // "plain hop" — that is what makes an unrecognised bridge visible at all.
+  it('passes an unknown protocol through instead of dropping it', async () => {
+    const { bridgeLabel } = await import('../src/services/xcmJourneyService.ts')
+    expect(bridgeLabel('some_new_bridge')).toBe('some_new_bridge')
+  })
+})
+
+describe('feed staleness is reported', () => {
+  // The filter is the only usable source, so when it falls behind there is nothing to
+  // switch to — walking the unfiltered feed instead sounds appealing and does not
+  // work: only ~1 journey per 100 at its head touches Hydration, and one page spans
+  // most of a day, so a time-coverage walk finishes having learned nothing. What this
+  // can do is refuse to fail silently, since a stale filtered page looks exactly like
+  // a healthy one.
+  it('warns when the networks filter falls behind the unfiltered feed', async () => {
+    const now = Date.now()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fetchMock = vi.fn(async (_u: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { args: { criteria: Record<string, unknown> }; pagination: { limit: number } }
+      const filtered = Array.isArray(body.args.criteria.networks)
+      const sentAt = filtered ? now - 14 * 3_600_000 : now - 60_000
+      const item = {
+        correlationId: 'c1', from: FROM_1, to: '', origin: ORIGIN_URN, destination: DEST_URN,
+        originProtocol: 'xcm', originTxPrimary: null, sentAt, recvAt: sentAt,
+        stops: [{ instructions: [{ messageId: MSG_A }] }],
+      }
+      return { ok: true, json: async () => ({ items: [item], pageInfo: { hasNextPage: false } }) }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('EXPLORER_OCELLOIDS_TOKEN', 'test-token')
+
+    const { initXcmJourneyService, xcmJourneySourcesFor } = await import('../src/services/xcmJourneyService.ts')
+    initXcmJourneyService(fakeClient() as never)
+    await xcmJourneySourcesFor([{ messageId: MSG_B, timestampMs: now - 30 * 60_000, bridge: true }])
+
+    await vi.waitFor(() => {
+      expect(warn.mock.calls.flat().join(' ')).toMatch(/networks filter is \d+ min behind/)
+    })
+    warn.mockRestore()
+  })
+
+  // The walk itself only ever reads the filtered feed — the unfiltered one is probed
+  // for comparison, never paged.
+  it('never pages the unfiltered feed', async () => {
+    const now = Date.now()
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fetchMock = vi.fn(async (_u: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { args: { criteria: Record<string, unknown> }; pagination: { limit: number } }
+      const item = {
+        correlationId: 'c1', from: FROM_1, to: '', origin: ORIGIN_URN, destination: DEST_URN,
+        originProtocol: 'xcm', originTxPrimary: null, sentAt: now - 1000, recvAt: now,
+        stops: [{ instructions: [{ messageId: MSG_A }] }],
+      }
+      void body
+      return { ok: true, json: async () => ({ items: [item], pageInfo: { hasNextPage: false } }) }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('EXPLORER_OCELLOIDS_TOKEN', 'test-token')
+    const { initXcmJourneyService, xcmJourneySourcesFor } = await import('../src/services/xcmJourneyService.ts')
+    initXcmJourneyService(fakeClient() as never)
+    await xcmJourneySourcesFor([{ messageId: MSG_A, timestampMs: now, bridge: false }])
+    await new Promise(r => setTimeout(r, 150))
+
+    for (const call of walkCalls(fetchMock)) {
+      const body = JSON.parse((call[1] as { body: string }).body) as { args: { criteria: Record<string, unknown> } }
+      expect(Array.isArray(body.args.criteria.networks)).toBe(true)
+    }
+  })
+})
+
 describe('xcmJourneysByOriginTx', () => {
   it('serves the cache immediately and refreshes outbound journeys in the background', async () => {
     const txHash = '0x' + 'd'.repeat(64)
@@ -272,7 +437,7 @@ describe('xcmJourneysByOriginTx', () => {
       pageInfo: { hasNextPage: false },
     }
     let releaseFetch!: (response: { ok: boolean; json: () => Promise<typeof body> }) => void
-    const fetchMock = vi.fn(() => new Promise(resolve => { releaseFetch = resolve }))
+    const fetchMock = makeFetchMock(() => new Promise(resolve => { releaseFetch = resolve }))
     vi.stubGlobal('fetch', fetchMock)
     vi.stubEnv('EXPLORER_OCELLOIDS_TOKEN', 'test-token')
 
@@ -281,9 +446,9 @@ describe('xcmJourneysByOriginTx', () => {
     const key = { txHash, timestampMs: Date.now() }
 
     expect((await xcmJourneysByOriginTx([key])).size).toBe(0)
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(walkCalls(fetchMock)).toHaveLength(1))
     expect((await xcmJourneysByOriginTx([key])).size).toBe(0)
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(walkCalls(fetchMock)).toHaveLength(1)
 
     releaseFetch({ ok: true, json: async () => body })
     await vi.waitFor(async () => {
