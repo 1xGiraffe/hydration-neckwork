@@ -74,7 +74,7 @@ describe('every list that holds rows has a surface that marks them', () => {
       'useAccountActivity', 'useAccountEvents', 'useAccountExtrinsics', 'useAccountVotes',
       'useAccounts', 'useActivity', 'useAssetActivity', 'useBlocks', 'useDaily', 'useEvents',
       'useExtrinsics', 'useHolders', 'useTagActivity', 'useTagEvents',
-      'useTagExtrinsics', 'useTagVotes',
+      'useTagExtrinsics', 'useTagVotes', 'useTagVotesByReferendum',
     ])
     expect(holdingHooks.filter(h => CHART_ONLY.includes(h))).toEqual(CHART_ONLY)
   })

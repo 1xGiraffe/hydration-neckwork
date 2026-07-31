@@ -1,8 +1,8 @@
 import { memo, useMemo } from 'react'
 import { Link, paths } from '../router'
 import type { ReferendumVoter } from '../types'
-import { HEIGHT, WIDTH, packVoters } from './voteBubbleLayout'
-import { voteSideLabel } from '../utils/voteRows'
+import { HEIGHT, WIDTH, foldVoters, packItems, type TagVoteGroup } from './voteBubbleLayout'
+import { avgConvictionLabel, voteSideLabel } from '../utils/voteRows'
 import { AccountEmoji, F, ShortAddr, TagIcon, moduleName } from './ui'
 import { resolveTag, useTagMapVersion } from '../userTags'
 import type { AccountRef } from '../types'
@@ -46,12 +46,33 @@ function BubbleLabel({ account, label }: { account: AccountRef | null; label: 'f
   return <>{icon}{name}</>
 }
 
+// A folded tag bubble's label: the tag's own icon and coloured name plus the
+// ·N member count TagGroupPill uses, so a group reads here exactly like a
+// group row in the accounts directory or the holders list.
+function TagBubbleLabel({ group, label }: { group: TagVoteGroup; label: 'full' | 'emoji' | 'none' }) {
+  if (label === 'none') return null
+  const icon = <TagIcon icon={group.tag.icon} title={group.tag.name} className="vb-emoji" />
+  if (label === 'emoji') return icon
+  return (
+    <>
+      {icon}
+      <span className="vb-addr vb-name" style={group.tag.color ? { color: group.tag.color } : undefined}>
+        {group.tag.name}<span className="muted"> ·{group.voters}</span>
+      </span>
+    </>
+  )
+}
+
 // Memoised: the chart is ~900 nodes and depends only on the vote set, but the page
 // around it re-renders on the shared 1 Hz clock and on every sort/side chip, and
 // each of those re-reconciled the whole cluster for nothing.
 export const VoteBubbles = memo(function VoteBubbles({ voters, decimals, symbol }: { voters: ReferendumVoter[]; decimals: number; symbol: string }) {
-  useTagMapVersion()   // re-render when the viewer's tag map changes (memo() only skips parent-driven re-renders)
-  const bubbles = useMemo(() => packVoters(voters), [voters])
+  // Voters folding under a tag (system, or the viewer's own — resolveTag walks
+  // both) merge into one tag bubble, so the fold must recompute when the
+  // viewer's tag map changes, not only when the vote set does.
+  const tagVersion = useTagMapVersion()
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- tagVersion stands in for resolveTag's module state
+  const bubbles = useMemo(() => packItems(foldVoters(voters, resolveTag)), [voters, tagVersion])
 
   if (!bubbles.length) return <div className="empty-note">No conviction-weighted votes to plot</div>
 
@@ -59,35 +80,48 @@ export const VoteBubbles = memo(function VoteBubbles({ voters, decimals, symbol 
     <div className="vote-bubbles">
       <div className="vb-canvas" style={{ aspectRatio: `${WIDTH} / ${HEIGHT}` }}>
         {bubbles.map(bubble => {
-          const account = bubble.voter.account
-          const key = `${bubble.voter.blockHeight}-${bubble.voter.eventIndex}`
+          // addr-pill is what the global hover card hooks on, so a bubble shows the
+          // same account card as any pill in a table (HoverCard.tsx SELECTOR). The
+          // vote itself rides along in data attributes, so that card can add this
+          // account's side, conviction and weighted power to its own rows.
+          //
+          // The COLOUR follows where the power landed (bubbleSide, from the weighted
+          // legs) because that is what the cluster's colour mix reads as; the WORD is
+          // the side actually cast, through the same mapping the votes table below
+          // badges it with, so a card and a row never disagree about one vote.
+          const style = {
+            left: `${(bubble.x / WIDTH) * 100}%`,
+            top: `${(bubble.y / HEIGHT) * 100}%`,
+            width: `${(bubble.r * 2 / WIDTH) * 100}%`,
+          }
+          const className = `vb-bubble addr-pill vb-${bubble.side}`
+          if (bubble.item.kind === 'tag') {
+            const group = bubble.item.group
+            // A group's "conviction" is the capital-weighted mean of its members'.
+            const data = {
+              'data-vote-side': voteSideLabel(bubble.side === 'split' ? 'Split' : bubble.side),
+              'data-vote-conviction': `${avgConvictionLabel(group.weighted, group.balance) ?? ''}${group.voters > 1 ? ` · ${group.voters} accounts` : ''}`,
+              'data-vote-weighted': `${F.amount(group.weighted, decimals)} ${symbol}`,
+            }
+            return (
+              <Link key={`tag:${group.tag.id}`} to={paths.tag(group.tag.id)} className={className} style={style} data={data}>
+                <TagBubbleLabel group={group} label={bubble.label} />
+              </Link>
+            )
+          }
+          const voter = bubble.item.voter
+          const account = voter.account
+          const key = `${voter.blockHeight}-${voter.eventIndex}`
           const body = <BubbleLabel account={account} label={bubble.label} />
-          const common = {
-            // addr-pill is what the global hover card hooks on, so a bubble shows the
-            // same account card as any pill in a table (HoverCard.tsx SELECTOR). The
-            // vote itself rides along in data attributes, so that card can add this
-            // account's side, conviction and weighted power to its own rows.
-            //
-            // The COLOUR follows where the power landed (bubbleSide, from the weighted
-            // legs) because that is what the cluster's colour mix reads as; the WORD is
-            // the side actually cast, through the same mapping the votes table below
-            // badges it with, so a card and a row never disagree about one vote.
-            className: `vb-bubble addr-pill vb-${bubble.side}`,
-            data: {
-              'data-vote-side': voteSideLabel(bubble.voter.side),
-              'data-vote-conviction': bubble.voter.conviction ?? '',
-              'data-vote-weighted': `${F.amount(bubble.voter.weighted, decimals)} ${symbol}`,
-            },
-            style: {
-              left: `${(bubble.x / WIDTH) * 100}%`,
-              top: `${(bubble.y / HEIGHT) * 100}%`,
-              width: `${(bubble.r * 2 / WIDTH) * 100}%`,
-            },
+          const data = {
+            'data-vote-side': voteSideLabel(voter.side),
+            'data-vote-conviction': voter.conviction ?? '',
+            'data-vote-weighted': `${F.amount(voter.weighted, decimals)} ${symbol}`,
           }
           // An unattributable vote (no account id) is still plotted, just not linkable.
           return account
-            ? <Link key={key} to={paths.account(account.address)} {...common}>{body}</Link>
-            : <span key={key} {...{ ...common, data: undefined }} {...common.data}>{body}</span>
+            ? <Link key={key} to={paths.account(account.address)} className={className} style={style} data={data}>{body}</Link>
+            : <span key={key} className={className} style={style} {...data}>{body}</span>
         })}
       </div>
     </div>
