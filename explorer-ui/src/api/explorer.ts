@@ -263,4 +263,8 @@ export const userApi = {
   // public endpoint.
   accounts: (offset = 0, limit = 50, sort: AccountSort = 'value', signal?: AbortSignal) =>
     authedJson<AccountsPage>('GET', withQuery('/user/accounts', { offset, limit, sort }), undefined, signal),
+  // Same shape as api.holders, folded under the caller's own tags too — see
+  // useHolders (useExplorerData.ts) for when this replaces the public endpoint.
+  holders: (assetId: number, offset = 0, limit = 100, signal?: AbortSignal) =>
+    authedJson<HoldersResponse>('GET', withQuery(`/user/holders/${assetId}`, { offset, limit }), undefined, signal),
 }
