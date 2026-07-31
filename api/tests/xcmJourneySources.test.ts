@@ -195,6 +195,66 @@ describe('stop-level message ids (hrmp journey shape)', () => {
   })
 })
 
+describe('in-flight journeys do not truncate the walk', () => {
+  // A journey whose destination leg has not been observed reports recvAt: 0, not
+  // null. `??` keeps a zero, so reading `recvAt ?? sentAt` made the page walk
+  // believe it had reached 1970 and stop after its first page — and pinned the
+  // module's "oldest covered" marker at 0 for the life of the process, after which
+  // no refresh ever walks back again. A sixth of a live page is in that state.
+  it('keeps paging when a page holds an unreceived journey', async () => {
+    const now = Date.now()
+    const page1 = {
+      items: [{
+        correlationId: 'corr-waiting',
+        from: FROM_1,
+        to: '',
+        origin: 'urn:ocn:ethereum:1',
+        destination: DEST_URN,
+        originTxPrimary: '0x' + 'ef'.repeat(32),
+        sentAt: now - 60_000,
+        recvAt: 0,                       // still in flight — the whole point
+        stops: [{ type: 'bridge', instructions: [{ messageId: MSG_A }] }],
+      }],
+      pageInfo: { hasNextPage: true, endCursor: 'cursor-2' },
+    }
+    const page2 = {
+      items: [{
+        correlationId: 'corr-old',
+        from: FROM_2,
+        to: '',
+        origin: ORIGIN_URN,
+        destination: DEST_URN,
+        originTxPrimary: null,
+        sentAt: now - 4 * 3_600_000,
+        recvAt: now - 4 * 3_600_000,     // reaches past what the caller needs
+        stops: [{ type: 'hrmp', messageId: MSG_B }],
+      }],
+      pageInfo: { hasNextPage: false },
+    }
+    const cursors: (string | undefined)[] = []
+    const fetchMock = vi.fn(async (_url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { pagination?: { cursor?: string } }
+      cursors.push(body.pagination?.cursor)
+      return { ok: true, json: async () => (body.pagination?.cursor === 'cursor-2' ? page2 : page1) }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('EXPLORER_OCELLOIDS_TOKEN', 'test-token')
+
+    const { initXcmJourneyService, xcmJourneySourcesFor } = await import('../src/services/xcmJourneyService.ts')
+    initXcmJourneyService(fakeClient() as never)
+
+    // Asking for a message three hours back: page 1 only reaches a minute back, so
+    // the walk has to follow the cursor to cover it.
+    const key = { messageId: MSG_A, timestampMs: now - 3 * 3_600_000 }
+    expect((await xcmJourneySourcesFor([key])).size).toBe(0)
+
+    await vi.waitFor(() => expect(cursors).toEqual([undefined, 'cursor-2']))
+    await vi.waitFor(async () => {
+      expect((await xcmJourneySourcesFor([key])).get(MSG_A)).toMatchObject({ origin: 'urn:ocn:ethereum:1' })
+    })
+  })
+})
+
 describe('xcmJourneysByOriginTx', () => {
   it('serves the cache immediately and refreshes outbound journeys in the background', async () => {
     const txHash = '0x' + 'd'.repeat(64)
