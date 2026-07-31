@@ -68,6 +68,21 @@ interface JourneyItem {
 
 const ACCOUNT_HEX_RE = /^0x([0-9a-f]{64}|[0-9a-f]{40})$/
 
+// How far back a journey reaches, for the "have I walked past this yet" tests below.
+//
+// A journey still in flight reports recvAt: 0, not null — and `??` only falls back
+// on null/undefined, so reading `recvAt ?? sentAt` takes the zero and every walk
+// then believes it has reached the epoch. That is not an edge case: a sixth of a
+// live page is `waiting` (a bridge leg can sit unreceived for hours), so one such
+// row pins oldestFetchedMs at 0 for the life of the process, after which
+// ensureJourneys considers all history covered, and both page loops break after
+// their first page instead of the twenty and three they are written for.
+function journeyReachMs(j: JourneyItem): number {
+  const recv = typeof j.recvAt === 'number' ? j.recvAt : 0
+  const sent = typeof j.sentAt === 'number' ? j.sentAt : 0
+  return Math.max(recv, sent)
+}
+
 // Entries accumulate across refreshes so a row that was enriched once stays
 // enrichable while the process lives.
 // message topic id → journey (inbound rows).
@@ -125,8 +140,8 @@ function indexJourneys(items: JourneyItem[]): void {
   }
   const toPersist = new Map<string, { message_id: string; from_hex: string; origin_urn: string; origin_tx: string }>()
   for (const j of items) {
-    const ts = j.recvAt ?? j.sentAt
-    if (typeof ts === 'number') oldestFetchedMs = Math.min(oldestFetchedMs, ts)
+    const ts = journeyReachMs(j)
+    if (ts > 0) oldestFetchedMs = Math.min(oldestFetchedMs, ts)
     if (!j.correlationId || typeof j.origin !== 'string' || typeof j.destination !== 'string') continue
     const from = typeof j.from === 'string' ? j.from.toLowerCase() : ''
     const to = typeof j.to === 'string' ? j.to.toLowerCase() : ''
@@ -191,8 +206,8 @@ async function ensureJourneys(oldestNeededMs: number): Promise<void> {
         const { items, endCursor, hasNextPage } = await queryJourneysPage(cursor)
         indexJourneys(items)
         for (const j of items) {
-          const ts = j.recvAt ?? j.sentAt
-          if (typeof ts === 'number') pageOldest = Math.min(pageOldest, ts)
+          const ts = journeyReachMs(j)
+          if (ts > 0) pageOldest = Math.min(pageOldest, ts)
         }
         if (!items.length || !hasNextPage || !endCursor || pageOldest <= oldestNeededMs) break
         cursor = endCursor
@@ -252,8 +267,8 @@ async function walkWindowAt(tsMs: number): Promise<void> {
     indexJourneys(items)
     let pageOldest = Number.MAX_SAFE_INTEGER
     for (const j of items) {
-      const ts = j.recvAt ?? j.sentAt
-      if (typeof ts === 'number') pageOldest = Math.min(pageOldest, ts)
+      const ts = journeyReachMs(j)
+      if (ts > 0) pageOldest = Math.min(pageOldest, ts)
     }
     if (!items.length || !hasNextPage || !endCursor || pageOldest <= tsMs - 120_000) break
     cursor = endCursor
