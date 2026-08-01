@@ -124,6 +124,23 @@ export default function App() {
       // Ignore persistence failures; the in-memory preference still works.
     }
   }, [toolsEnabled])
+  // Price-scale mode is one preference for every pair, so switching pairs keeps
+  // the chosen scale. Linear stays the default.
+  const [logScale, setLogScale] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('preis-scale') === 'log'
+    } catch {
+      // localStorage can be unavailable in private or hardened contexts.
+      return false
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem('preis-scale', logScale ? 'log' : 'linear')
+    } catch {
+      // Ignore persistence failures; the in-memory preference still works.
+    }
+  }, [logScale])
   useEffect(() => {
     try {
       localStorage.setItem(DESKTOP_SIDEBAR_STORAGE_KEY, desktopSidebarOpen ? 'true' : 'false')
@@ -498,6 +515,8 @@ export default function App() {
                 onInspectionTimeChange={handleInspectionTimeChange}
                 theme={theme}
                 toolsEnabled={toolsEnabled}
+                logScale={logScale}
+                onLogScaleChange={setLogScale}
               />
             </Suspense>
           </div>
