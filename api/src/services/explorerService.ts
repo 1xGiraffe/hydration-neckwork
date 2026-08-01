@@ -13724,23 +13724,37 @@ function emptyActivityCountArm(): ActivityCountArm {
 // read's `ORDER BY … LIMIT 1 BY block_height, extrinsic_index` keeps. So a multi-hop
 // route is matched on its NET assets in both halves, and an intermediate asset the
 // user never named does not pull the extrinsic in on one side only.
+// What makes one swap row distinct from another on an account's page. An extrinsic
+// groups all its own swap events into one trade; a hook-dispatched swap has no
+// extrinsic, so its own event is its identity — three Treasury swaps have shared a
+// block, and grouping them all under a null extrinsic would render one and count one.
+// Extrinsic indices are non-negative, so the negative space cannot collide with them.
+const SWAP_GROUP_KEY_SQL = 'ifNull(toInt64(extrinsic_index), -toInt64(event_index) - 1)'
+export function accountSwapGroupKey(blockHeight: number, extrinsicIndex: number | null, eventIndex: number): string {
+  return `${blockHeight}:${extrinsicIndex ?? -eventIndex - 1}`
+}
+
 function accountSwapTradeArm(list: string, bound: string, tokenIds?: number[]): ActivityCountArm {
   const tokenFilter = armTokenFilter(tokenIds, ids => `(rep_in IN (${ids}) OR rep_out IN (${ids}))`)
   return `SELECT block_height, count() AS rows FROM (
-      SELECT block_height, extrinsic_index,
+      SELECT block_height, ${SWAP_GROUP_KEY_SQL} AS group_key,
+             -- Null for a hook swap, which owns no extrinsic; the liquidation and
+             -- share-leg exclusions below are extrinsic-scoped and skip it for free,
+             -- since a tuple holding NULL matches nothing on either side.
+             any(extrinsic_index) AS ext_index,
              argMax(asset_in, tuple(event_name IN (${ROUTER_NET_EVENTS_SQL}), event_index)) AS rep_in,
              argMax(asset_out, tuple(event_name IN (${ROUTER_NET_EVENTS_SQL}), event_index)) AS rep_out
       FROM price_data.account_swap_activity FINAL
       WHERE ${bound} AND account IN (${list})
-      GROUP BY block_height, extrinsic_index
+      GROUP BY block_height, group_key
     )
     WHERE 1 ${tokenFilter}
-      AND (block_height, extrinsic_index) NOT IN (
+      AND (ext_index IS NULL OR (block_height, ext_index) NOT IN (
         -- Read whole and without FINAL: this is the right side of a NOT IN, which is
         -- set-semantic, so an unmerged replacement duplicate cannot change the answer.
-        SELECT block_height, extrinsic_index FROM price_data.liquidation_extrinsics)
+        SELECT block_height, extrinsic_index FROM price_data.liquidation_extrinsics))
       AND NOT ((rep_in IN (${shareAssetIdsSql()}) OR rep_out IN (${shareAssetIdsSql()}))
-        AND (block_height, extrinsic_index) IN (
+        AND (block_height, ext_index) IN (
           SELECT block_height, extrinsic_index FROM price_data.liquidity_activity
           WHERE ${bound} AND who IN (${list}) AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
             AND extrinsic_index IS NOT NULL))
@@ -13983,8 +13997,8 @@ function transferCandidateSql(accList: string, bound: string, potFilters: string
 // builder draws with `tradeExt` before it drops those rows.
 function semanticExtrinsicSql(list: string, evmList: string, bound: string, enumeratedExtrinsics: [number, number][]): string {
   const arms = [
-    `SELECT block_height, extrinsic_index FROM price_data.account_swap_activity FINAL
-       WHERE ${bound} AND account IN (${list})`,
+    `SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index FROM price_data.account_swap_activity FINAL
+       WHERE ${bound} AND account IN (${list}) AND extrinsic_index IS NOT NULL`,
     `SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index FROM price_data.liquidity_activity
        WHERE ${bound} AND ${liquidityWhoOrPoolSql(list)} AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
          AND extrinsic_index IS NOT NULL`,
@@ -14714,24 +14728,27 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
           WHERE ${bound} AND account IN (${list})
           ${swapTokenFilter}
           ${swapAmountFilter.predicateSql}
-          ORDER BY block_height DESC, extrinsic_index DESC, event_name IN (${ROUTER_NET_EVENTS_SQL}) DESC, event_index DESC
-          LIMIT 1 BY block_height, extrinsic_index
+          ORDER BY block_height DESC, ${SWAP_GROUP_KEY_SQL} DESC, event_name IN (${ROUTER_NET_EVENTS_SQL}) DESC, event_index DESC
+          LIMIT 1 BY block_height, ${SWAP_GROUP_KEY_SQL}
           LIMIT {n:UInt32}`,
       query_params: { n: catFetch }, format: 'JSONEachRow',
     })
-    const swapRows = await swapRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number; event_name: string; asset_in: number; asset_out: number; amount_in: string; amount_out: string; signer: string }>()
+    const swapRows = await swapRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; asset_in: number; asset_out: number; amount_in: string; amount_out: string; signer: string }>()
     noteSource(swapRows.length, oldestWindowBlock(swapRows, r => r.block_height))
     const liqExt = await liquidationExtrinsics(swapRows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null]))
-    const signerByExt = new Map(swapRows.map(e => [`${e.block_height}:${e.extrinsic_index}`, e.signer]))
+    const signerByExt = new Map(swapRows.map(e => [accountSwapGroupKey(e.block_height, e.extrinsic_index, e.event_index), e.signer]))
     const groups = new Map<string, typeof swapRows>()
     const order: string[] = []
-    for (const r of swapRows) { const k = `${r.block_height}:${r.extrinsic_index}`; if (!groups.has(k)) { groups.set(k, []); order.push(k) } groups.get(k)!.push(r) }
+    for (const r of swapRows) { const k = accountSwapGroupKey(r.block_height, r.extrinsic_index, r.event_index); if (!groups.has(k)) { groups.set(k, []); order.push(k) } groups.get(k)!.push(r) }
     for (const k of order) {
+      const first = groups.get(k)![0]
       // Mark the extrinsic as a swap (so its transfer legs are dropped as noise),
       // but don't emit a trade row for a liquidation's internal collateral→debt
-      // swap — the liquidation shows as its mm row, not a user trade.
-      tradeExt.add(k)
-      if (liqExt.has(k)) continue
+      // swap — the liquidation shows as its mm row, not a user trade. A hook swap
+      // has no extrinsic to own, and claiming `block:null` would suppress the
+      // unrelated hook transfers that share the block.
+      if (first.extrinsic_index != null) tradeExt.add(`${first.block_height}:${first.extrinsic_index}`)
+      if (first.extrinsic_index != null && liqExt.has(`${first.block_height}:${first.extrinsic_index}`)) continue
       if (!wantTrades) continue
       const g = groups.get(k)!
       const rep = g.find(r => isRouterNet(r.event_name)) ?? g[0]

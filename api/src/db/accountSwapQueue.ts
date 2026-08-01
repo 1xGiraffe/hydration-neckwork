@@ -6,7 +6,8 @@ export interface AccountSwapQueueRow {
   queued_at: string
   block_height: number
   event_index: number
-  extrinsic_index: number
+  // Null for a swap dispatched from a block hook — see hookSwapActors.
+  extrinsic_index: number | null
   block_timestamp: string
   event_name: string
   asset_in: number
@@ -27,7 +28,7 @@ interface AccountSwapDestinationRow {
   account: string
   block_height: number
   event_index: number
-  extrinsic_index: number
+  extrinsic_index: number | null
   block_timestamp: string
   event_name: string
   signer: string
@@ -40,13 +41,42 @@ interface AccountSwapDestinationRow {
 
 const tupleKey = (block: number, index: number) => `${block}:${index}`
 
+// The swapper behind a hook-dispatched routed swap, keyed by (block, event index).
+// Only non-DCA operations belong here: a DCA execution is already attributed and
+// rendered by the DCA path, so admitting it would show every schedule's executions
+// twice on its owner's page.
+export type HookSwapActors = Map<string, string>
+
 export function accountSwapDestinationRows(
   queued: AccountSwapQueueRow[],
   extrinsics: AccountSwapExtrinsic[],
+  hookActors: HookSwapActors = new Map(),
 ): AccountSwapDestinationRow[] {
   const byTuple = new Map(extrinsics.map(row => [tupleKey(row.block_height, row.extrinsic_index), row]))
   const out: AccountSwapDestinationRow[] = []
   for (const row of queued) {
+    if (row.extrinsic_index == null) {
+      // No extrinsic means no signer; the actor comes from the Broadcast event.
+      // Unresolved (pre-Broadcast, placeholder swapper, or a DCA execution) stays
+      // out rather than being attributed to the router pallet.
+      const swapper = hookActors.get(tupleKey(row.block_height, row.event_index))
+      if (!swapper) continue
+      out.push({
+        account: swapper,
+        block_height: row.block_height,
+        event_index: row.event_index,
+        extrinsic_index: null,
+        block_timestamp: row.block_timestamp,
+        event_name: row.event_name,
+        signer: '',
+        asset_in: row.asset_in,
+        asset_out: row.asset_out,
+        amount_in: row.amount_in,
+        amount_out: row.amount_out,
+        ingested_at: row.ingested_at,
+      })
+      continue
+    }
     const extrinsic = byTuple.get(tupleKey(row.block_height, row.extrinsic_index))
     if (!extrinsic) continue
     const accounts = [...new Set([extrinsic.signer, extrinsic.effective_signer].filter((account): account is string => !!account))]
@@ -179,7 +209,8 @@ async function queuePage(client: ClickHouseClient, cursor: QueueCursor, limit: n
 }
 
 async function queueExtrinsics(client: ClickHouseClient, rows: AccountSwapQueueRow[]): Promise<AccountSwapExtrinsic[]> {
-  const tuples = [...new Set(rows.map(row => `(${row.block_height},${row.extrinsic_index})`))]
+  const tuples = [...new Set(rows.filter(row => row.extrinsic_index != null).map(row => `(${row.block_height},${row.extrinsic_index})`))]
+  if (!tuples.length) return []
   const out: AccountSwapExtrinsic[] = []
   for (let start = 0; start < tuples.length; start += 5_000) {
     const result = await client.query({
@@ -192,6 +223,33 @@ async function queueExtrinsics(client: ClickHouseClient, rows: AccountSwapQueueR
       format: 'JSONEachRow',
     })
     out.push(...await result.json<AccountSwapExtrinsic>())
+  }
+  return out
+}
+
+// Resolve the hook rows of a batch against swap_actor, which pairs the Broadcast
+// event's swapper with the Router operation id that Router.Executed reports as
+// `eventId`. via_dca = 0 keeps DCA executions out: they are already the DCA path's
+// rows, and a second copy here would double every schedule on its owner's page.
+async function hookSwapActors(client: ClickHouseClient, rows: AccountSwapQueueRow[]): Promise<HookSwapActors> {
+  const out: HookSwapActors = new Map()
+  const hooks = rows.filter(row => row.extrinsic_index == null)
+  if (!hooks.length) return out
+  const tuples = [...new Set(hooks.map(row => `(${row.block_height},${row.event_index})`))]
+  for (let start = 0; start < tuples.length; start += 5_000) {
+    const result = await client.query({
+      query: `SELECT e.block_height AS block_height, e.event_index AS event_index, a.swapper AS swapper
+              FROM price_data.raw_events AS e
+              INNER JOIN price_data.swap_actor AS a
+                ON a.block_height = e.block_height
+               AND a.operation_event_id = toUInt64(greatest(0, JSONExtractInt(e.args_json, 'eventId')))
+              WHERE (e.block_height, e.event_index) IN (${tuples.slice(start, start + 5_000).join(',')})
+                AND a.via_dca = 0`,
+      format: 'JSONEachRow',
+    })
+    for (const row of await result.json<{ block_height: number; event_index: number; swapper: string }>()) {
+      if (/^0x[0-9a-f]{64}$/.test(row.swapper)) out.set(tupleKey(row.block_height, row.event_index), row.swapper)
+    }
   }
   return out
 }
@@ -251,7 +309,8 @@ export async function drainAccountSwapActivityQueue(
   for (let batch = 0; batch < maxBatches; batch++) {
     const queued = await queuePage(client, cursor, batchSize)
     if (!queued.length) break
-    const destination = accountSwapDestinationRows(queued, await queueExtrinsics(client, queued))
+    const [extrinsics, hookActors] = await Promise.all([queueExtrinsics(client, queued), hookSwapActors(client, queued)])
+    const destination = accountSwapDestinationRows(queued, extrinsics, hookActors)
     if (destination.length) {
       await client.insert({ table: 'price_data.account_swap_activity', values: destination, format: 'JSONEachRow' })
     }

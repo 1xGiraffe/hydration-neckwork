@@ -37,4 +37,28 @@ describe('account swap queue', () => {
     expect(duplicate.map(row => row.account)).toEqual(['alice'])
     expect(effective.map(row => [row.account, row.signer])).toEqual([['evm-alice', 'evm-alice']])
   })
+
+  // A swap dispatched from a block hook has no extrinsic, so no signer: its actor
+  // comes from the Broadcast event via swap_actor. Before this, such a row was
+  // dropped for want of an extrinsic and the swap never reached its owner's page —
+  // a $90k Treasury swap among them.
+  it('attributes a hook swap to its Broadcast swapper instead of a signer', () => {
+    const hook: AccountSwapQueueRow = { ...queued, extrinsic_index: null }
+    const rows = accountSwapDestinationRows([hook], [], new Map([['42:7', 'treasury']]))
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ account: 'treasury', extrinsic_index: null, block_height: 42, event_index: 7 })
+    // No signer signed it; claiming one would name an actor that does not exist.
+    expect(rows[0].signer).toBe('')
+  })
+
+  // Unresolved covers three cases that must all stay out rather than be attributed
+  // to the router pallet: pre-Broadcast history, a placeholder swapper, and a DCA
+  // execution (already rendered by the DCA path, so a second row would double it).
+  it('drops a hook swap with no resolved swapper', () => {
+    const hook: AccountSwapQueueRow = { ...queued, extrinsic_index: null }
+    expect(accountSwapDestinationRows([hook], [], new Map())).toEqual([])
+    // Keyed by the swap's own event, not merely its block.
+    expect(accountSwapDestinationRows([hook], [], new Map([['42:9', 'someone-else']]))).toEqual([])
+  })
 })
