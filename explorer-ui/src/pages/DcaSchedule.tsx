@@ -8,7 +8,7 @@ import { Link, paths, redirect } from '../router'
 import { Ago, Crumbs, F, AddrPill, AssetChip, AssetAmount, PoolBadge, ProgressRing, SkeletonRows, MomentLink, Pager } from '../components/ui'
 import { ActivityTable } from '../components/ActivityTable'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
-import { blockSeconds, dcaCadence, dcaProgress, dcaRunway, fmtDuration, fmtPermill } from '../utils/dca'
+import { blockSeconds, dcaCadence, dcaProgress, dcaRunway, dcaUnspentBudget, fmtDuration, fmtPermill } from '../utils/dca'
 import type { DcaScheduleDetail } from '../types'
 
 const PAGE = 25
@@ -84,6 +84,11 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
       periodSeconds: cadence.seconds, secondsToNext: countdown?.secondsUntil ?? null,
       fundingBalance: data.fundingBalance,
     })
+    : null
+  // Only worth stating where the ring visibly falls short of full — which is the
+  // one case a reader has to explain to themselves (see dcaUnspentBudget).
+  const unspent = data && !active && pct != null && Math.round(pct) < 100
+    ? dcaUnspentBudget(data.totalAmount, data.executions.totalIn)
     : null
 
   return (
@@ -218,6 +223,14 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
                   <span className="muted mono"> · {F.int(data.executions.count)} {data.executions.count === 1 ? 'trade' : 'trades'}</span>
                   {data.executions.failed > 0 && <span style={{ color: 'var(--red)' }} className="mono"> · {F.int(data.executions.failed)} failed</span>}
                 </div>
+                {unspent && <>
+                  <div className="dt">Unspent</div>
+                  <div className="dd"><AssetAmount asset={data.assetIn} raw={unspent} />
+                    <span className="muted"> · {data.status === 'completed'
+                      ? 'left of the budget, released when the schedule closed — too little to fund another trade'
+                      : 'left of the budget, released when the schedule ended'}</span>
+                  </div>
+                </>}
                 {countdown && data.nextExecutionBlock && <>
                   <div className="dt">Next trade</div>
                   <div className="dd"><span className="mono">{countdown.secondsUntil > 0 ? `in ${fmtDuration(countdown.secondsUntil, { seconds: true })}` : 'due'}</span>
