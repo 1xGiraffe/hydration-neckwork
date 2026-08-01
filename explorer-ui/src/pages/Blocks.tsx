@@ -3,7 +3,7 @@ import { useNow } from '../hooks/useNow'
 import { useNewRows } from '../hooks/useNewRows'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, usePageParam, setPage } from '../router'
-import { Crumbs, F, FinalizedBadge, AddrPill, AreaChart, ChartCardSkeleton, TableSkeleton, EmptyRow, Pager, rowNav, Ago, Dash, pendingRows } from '../components/ui'
+import { Crumbs, F, FinalizedBadge, AddrPill, AreaChart, ChartCardSkeleton, TableSkeleton, EmptyRow, Pager, rowNav, Ago, Dash, pendingRows, LiveAnchor } from '../components/ui'
 import { UNFILTERED_COLOR } from '../components/activityColors'
 import { parseUtcTimestamp } from '../utils/time'
 import { offeredPages } from '../utils/activityPaging'
@@ -64,6 +64,9 @@ export function Blocks() {
       )}
 
       <div className="panel">
+        {/* Page one renders the always-live recent query, so that is the list whose
+            top edge decides whether an arrival lands or waits. */}
+        <LiveAnchor anchorRef={recentQuery.anchorRef} />
         <table className="tbl">
           <thead><tr><th>Block</th><th>Status</th><th className="r">Extrinsics</th><th className="r">Events</th><th>Collator</th><th className="r">Time</th></tr></thead>
           <tbody {...pendingRows(pending)}>

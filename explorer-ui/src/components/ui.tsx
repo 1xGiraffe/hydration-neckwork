@@ -1209,6 +1209,14 @@ export function SkeletonRows({ rows = 8 }: { rows?: number }) {
 export function pendingRows(pending?: boolean): { className?: string; 'aria-busy'?: true } {
   return pending ? { className: 'rows-pending', 'aria-busy': true } : {}
 }
+// Marks the top edge of a live list, directly above its table. useHeldRows observes
+// this to decide whether the reader can still see where an arrival lands, and so
+// whether a poll's new rows are applied or held (see that hook). Zero-height and
+// aria-hidden: it is a measurement point, not content. A list that renders none —
+// every non-live table — simply never holds.
+export function LiveAnchor({ anchorRef }: { anchorRef?: (el: HTMLElement | null) => void }) {
+  return anchorRef ? <span ref={anchorRef} className="live-anchor" aria-hidden="true" /> : null
+}
 // Skeleton <tr> rows for a table body — keeps the header and column grid in place
 // while data loads (instead of a lone centered "Loading…"). Bar widths vary per
 // cell for a natural shimmer. Below 720px a loaded row is a stacked card of one

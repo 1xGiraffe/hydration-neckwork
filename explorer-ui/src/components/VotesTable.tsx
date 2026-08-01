@@ -1,7 +1,7 @@
 import { memo } from 'react'
 import type { ReactNode } from 'react'
 import { Link, paths } from '../router'
-import { AddrPill, Dash, EmptyRow, ErrorRow, F, MomentLink, TableSkeleton, VoteSideBadge, pendingRows, type Moment } from './ui'
+import { AddrPill, Dash, EmptyRow, ErrorRow, F, MomentLink, TableSkeleton, VoteSideBadge, pendingRows, LiveAnchor, type Moment } from './ui'
 import type { AccountRef, AssetRef } from '../types'
 
 // The one votes table.
@@ -70,7 +70,7 @@ const VoteRow = memo(function VoteRow({ row, asset, now, showAccount, showRefere
   )
 })
 
-export function VotesTable({ rows, asset, now, showAccount, showReferendum, sortHeads, loading, pending, error, onRetry, pageSize }: {
+export function VotesTable({ rows, asset, now, showAccount, showReferendum, sortHeads, loading, pending, error, onRetry, pageSize, anchorRef }: {
   rows: VoteTableRow[]
   asset: AssetRef
   now: number
@@ -86,10 +86,13 @@ export function VotesTable({ rows, asset, now, showAccount, showReferendum, sort
   onRetry?: () => void
   // Sizes the loading skeleton on the paged surface so the pager under it holds still.
   pageSize?: number
+  // Marks this list's top edge when its rows are live (see useHeldRows). The
+  // referendum page and the grouped mode pass none: neither prepends.
+  anchorRef?: (el: HTMLElement | null) => void
 }) {
   const cols = 2 + (showAccount ? 1 : 0) + (showReferendum ? 1 : 0)
   return (
-    <div className="panel"><table className="tbl">
+    <div className="panel"><LiveAnchor anchorRef={anchorRef} /><table className="tbl">
       <thead><tr>
         {showReferendum && <th>Referendum</th>}
         {showAccount && <th>Account</th>}

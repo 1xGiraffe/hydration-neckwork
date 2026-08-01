@@ -642,6 +642,11 @@ svg { display: block; }
 
 /* ============ TABLE ============ */
 .panel:has(> .tbl) { overflow-x: auto; }
+/* The top edge of a live list, observed by useHeldRows to decide whether a poll's
+   new rows are applied or held. Occupies no space in either layout, so it marks
+   the top of the column headers on desktop and of the first row card below 720px,
+   where thead is display:none. */
+.live-anchor { display: block; height: 0; }
 .tbl { width: 100%; min-width: 760px; border-collapse: collapse; }
 .tbl thead th {
   font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;

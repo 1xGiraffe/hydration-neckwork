@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- activity table exports slug/id/label helpers alongside its components */
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
-import { F, AddrPill, AssetChip, rowNav, Ago, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows } from './ui'
+import { F, AddrPill, AssetChip, rowNav, Ago, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
 import { activityBadge } from './activityColors'
 import { resolveTag, useTagMapVersion } from '../userTags'
@@ -278,7 +278,7 @@ function activityKey(r: ActivityRow): string {
 // `pageSize` sizes the loading skeleton, so a paged feed reserves the height it is
 // about to fill and the pager beneath it does not jump. Unpaged surfaces (a block's
 // or extrinsic's own activity) show whatever the record holds and leave it unset.
-export function ActivityTable({ rows, noActor, now, live, loading, pending, error, onRetry, dcaExecutionLinks, pageSize }: { rows: ActivityRow[]; noActor?: boolean; now: number; live?: boolean; loading?: boolean; pending?: boolean; error?: unknown; onRetry?: () => void; dcaExecutionLinks?: boolean; pageSize?: number }) {
+export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pending, error, onRetry, dcaExecutionLinks, pageSize }: { rows: ActivityRow[]; noActor?: boolean; now: number; live?: boolean; anchorRef?: (el: HTMLElement | null) => void; loading?: boolean; pending?: boolean; error?: unknown; onRetry?: () => void; dcaExecutionLinks?: boolean; pageSize?: number }) {
   const cols = noActor ? 4 : 5
   // Deduped stable keys: same row → same key across renders (so prepended live rows
   // are detected as new without remounting the rest); duplicates get a suffix.
@@ -286,7 +286,7 @@ export function ActivityTable({ rows, noActor, now, live, loading, pending, erro
   const keys = rows.map(r => { const b = activityKey(r); const n = seen.get(b) ?? 0; seen.set(b, n + 1); return n ? `${b}#${n}` : b })
   const fresh = useNewRows(keys, !!live)
   return (
-    <div className="panel"><table className="tbl">
+    <div className="panel"><LiveAnchor anchorRef={anchorRef} /><table className="tbl">
       <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
       <tbody {...pendingRows(pending)}>
         {loading && !rows.length ? <TableSkeleton cols={cols} rows={pageSize} />

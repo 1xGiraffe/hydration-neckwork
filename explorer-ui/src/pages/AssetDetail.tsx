@@ -109,7 +109,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
             {tab === 'activity' && <>
               <ActivityChips value={activityType} onChange={v => setQuery({ type: v === 'all' ? null : v, action: null, page: null })} />
               <FilterZone fields={activityFilterFields(activityType, [], false)} values={{ ...activityFilters.values, action: activityAction }} onChange={activityFilters.onChange} onClear={activityFilters.onClear} />
-              <ActivityTable rows={assetActivity} now={now} live={activityPage === 0} loading={activity.isFetching && !assetActivity.length} pending={activity.isPlaceholderData} pageSize={ACTIVITY_PAGE}
+              <ActivityTable rows={assetActivity} now={now} live={activityPage === 0} anchorRef={activity.anchorRef} loading={activity.isFetching && !assetActivity.length} pending={activity.isPlaceholderData} pageSize={ACTIVITY_PAGE}
                 error={activity.error} onRetry={() => { void activity.refetch() }} />
               <Pager page={activityPage} hasNext={activityPages.hasNext} note={activityPages.note} onPage={p => setQuery({ page: p > 0 ? String(p) : null })} />
             </>}
