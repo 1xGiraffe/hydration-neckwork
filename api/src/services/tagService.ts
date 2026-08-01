@@ -124,6 +124,11 @@ const HOLLAR_ICON = 'https://cdn.jsdelivr.net/gh/galacticcouncil/intergalactic-a
 // member's omniwatch emoji (e.g. Treasury → 🏦). seedDefaultTags() syncs this set
 // into the database on every start, so a fresh database gets all of them and an
 // existing one picks up additions.
+// The money market's reward vault, in the truncated-account form its on-chain
+// activity is indexed under. Lives here rather than beside its reader so the tag
+// and the reward-claim classification in explorerService name the same account.
+export const INCENTIVES_REWARD_POT = '0x45544800112c208b900bcfc9ff8131d0f45769cb6c7c7d8d0000000000000000'
+
 export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: string; icon: string; addresses: string[] }[] = [
   {
     tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', note: '', icon: '/tag-icons/kraken.jpg',
@@ -205,11 +210,11 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     addresses: [modlAccountId('feeproc/')],
   },
   {
-    tagId: 'gigahdx-pots', name: 'GIGAHDX Pots', color: 'var(--accent)', note: 'GIGAHDX staking pallet pots — the stHDX gigapot and reward pools', icon: '',
+    tagId: 'gigahdx-pots', name: 'GIGAHDX Pot', color: 'var(--accent)', note: 'GIGAHDX staking pallet pots — the stHDX gigapot and reward pools', icon: '',
     addresses: [modlAccountId('gigahdx!'), modlAccountId('gigarwd!'), modlAccountId('gigarwd!', Buffer.from('alc', 'latin1').toString('hex'))],
   },
   {
-    tagId: 'pallet-pots', name: 'Pallet Pots', color: '#6a7187', note: 'Assorted pallet accounts: router executor, liquidations, bonds, vesting, OTC settlements, currency reserve', icon: '⚙️',
+    tagId: 'pallet-pots', name: 'Pallet Pot', color: '#6a7187', note: 'Assorted pallet accounts: router executor, liquidations, bonds, vesting, OTC settlements, currency reserve', icon: '⚙️',
     addresses: [modlAccountId('routerex'), modlAccountId('lqdation'), modlAccountId('pltbonds'), modlAccountId('py/vstng'), modlAccountId('otcsettl'), modlAccountId('curreser')],
   },
   {
@@ -221,6 +226,16 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     // EVM precompile (contract interface) + the py/hsmod substrate pallet pot
     // holding the module's aToken collateral — same module, two account forms.
     addresses: ['0x000000000000000000000000000000000000090a', modlAccountId('py/hsmod')],
+  },
+  {
+    // The vault the money market's Aave RewardsController pulls from when a user
+    // claims incentives: it has never signed an extrinsic, yet has paid BNC, PRIME,
+    // GDOT and HDX out to 1.7k distinct claimants. Untagged it reads as an
+    // anonymous six-figure whale rather than as the pot behind every reward claim.
+    tagId: 'incentive-pot', name: 'Incentive Pot', color: '#6aa5f8',
+    note: 'Money-market incentives reward pot — the vault the rewards controller pays claimed lending incentives from',
+    icon: '🎁',
+    addresses: [INCENTIVES_REWARD_POT],
   },
 ]
 
@@ -249,7 +264,7 @@ export function stableswapPoolAccount(poolId: number): string {
 // Tags whose members are protocol PLUMBING (pools, pots, farm sub-accounts) —
 // excluded from "economic actor" surfaces like the HDX top movers, unlike the
 // Treasury/HSM/fee tags which represent deliberate actors.
-export const SYSTEM_TAG_IDS = new Set(['money-market', 'omnipool', 'staking-pot', 'fee-processor', 'gigahdx-pots', 'pallet-pots', 'liquidity-mining', 'xyk-pools', 'stableswap-pools', 'sovereigns', 'moonbeam-wormhole'])
+export const SYSTEM_TAG_IDS = new Set(['money-market', 'omnipool', 'staking-pot', 'fee-processor', 'gigahdx-pots', 'pallet-pots', 'incentive-pot', 'liquidity-mining', 'xyk-pools', 'stableswap-pools', 'lbp-pools', 'sovereigns', 'moonbeam-wormhole'])
 
 // Tagged module (modl) accounts that count as economic actors — the top-movers
 // exception list: module plumbing stays hidden, the Treasury's DCA program shows.
@@ -301,15 +316,20 @@ export async function syncMoneyMarketTag(): Promise<void> {
 //  - liquidity-mining pots and sibling-parachain sovereigns are recognizable
 //    by their account-id structure alone (prefix scan over known balances).
 const LM_PREFIXES = ['OmniWhLM', 'Omni//LM', 'XYK///LM', 'xykLMpID'].map(id => ('0x' + Buffer.from('modl' + id, 'latin1').toString('hex')).toLowerCase())
+// A sovereign account is 20 meaningful bytes + zero padding under one of two
+// markers: 'sibl' for a sibling parachain, 'para' for a (relay-registered) para
+// id. Matching only 'sibl' left the 'para' form untagged.
+export const SOVEREIGN_PREFIXES = ['sibl', 'para'].map(id => ('0x' + Buffer.from(id, 'latin1').toString('hex')).toLowerCase())
 const STRUCTURAL_TAGS = [
   { tagId: 'xyk-pools', name: 'XYK Pool', color: '#86c4f5', note: 'XYK AMM pair account — holds the pool reserves', icon: '💧' },
   { tagId: 'stableswap-pools', name: 'Stableswap Pool', color: '#57a5ec', note: 'Stableswap pool account — holds the pool reserves', icon: '💧' },
+  { tagId: 'lbp-pools', name: 'LBP Pool', color: '#4a8fd6', note: 'Liquidity bootstrapping pool account — holds the reserves of a time-boxed token launch', icon: '💧' },
   { tagId: 'liquidity-mining', name: 'Liquidity Mining', color: 'var(--accent)', note: 'Liquidity-mining pallet pots (global/yield farm sub-accounts)', icon: '🚜' },
-  { tagId: 'sovereigns', name: 'Parachain Sovereign', color: '#e6007a', note: 'Sibling parachain sovereign account (sibl + para id) — holds assets on behalf of that chain', icon: '🛰️' },
+  { tagId: 'sovereigns', name: 'Parachain Sovereign', color: '#e6007a', note: 'Parachain sovereign account (sibl/para + para id) — holds assets on behalf of that chain', icon: '🛰️' },
 ] as const
 
 export async function syncStructuralTags(): Promise<void> {
-  const [xykRes, stableRes, prefixRes] = await Promise.all([
+  const [xykRes, stableRes, lbpRes, prefixRes] = await Promise.all([
     client.query({
       query: `SELECT DISTINCT JSONExtractString(args_json, 'pool') AS acc FROM price_data.raw_events WHERE event_name = 'XYK.PoolCreated'`,
       format: 'JSONEachRow',
@@ -318,20 +338,30 @@ export async function syncStructuralTags(): Promise<void> {
       query: `SELECT DISTINCT JSONExtractInt(args_json, 'poolId') AS pool_id FROM price_data.raw_events WHERE event_name = 'Stableswap.PoolCreated'`,
       format: 'JSONEachRow',
     }),
+    // LBP pools name their account on the creation event exactly as XYK does.
+    client.query({
+      query: `SELECT DISTINCT JSONExtractString(args_json, 'pool') AS acc FROM price_data.raw_events WHERE event_name = 'LBP.PoolCreated'`,
+      format: 'JSONEachRow',
+    }),
     client.query({
       query: `SELECT DISTINCT account_id FROM price_data.account_asset_latest_balances
-              WHERE startsWith(account_id, '0x7369626c') OR startsWith(account_id, '0x6d6f646c')`,
+              WHERE ${SOVEREIGN_PREFIXES.map(p => `startsWith(account_id, '${p}')`).join(' OR ')}
+                 OR startsWith(account_id, '0x6d6f646c')`,
       format: 'JSONEachRow',
     }),
   ])
-  const xyk = (await xykRes.json<{ acc: string }>()).map(r => r.acc.toLowerCase()).filter(a => /^0x[0-9a-f]{64}$/.test(a))
+  const poolAccounts = (rows: { acc: string }[]): string[] =>
+    rows.map(r => r.acc.toLowerCase()).filter(a => /^0x[0-9a-f]{64}$/.test(a))
+  const xyk = poolAccounts(await xykRes.json<{ acc: string }>())
+  const lbp = poolAccounts(await lbpRes.json<{ acc: string }>())
   const stable = (await stableRes.json<{ pool_id: number }>()).filter(r => r.pool_id > 0).map(r => stableswapPoolAccount(r.pool_id))
   const prefixAccounts = (await prefixRes.json<{ account_id: string }>()).map(r => r.account_id.toLowerCase())
   const membersByTag: Record<string, string[]> = {
     'xyk-pools': xyk,
     'stableswap-pools': stable,
+    'lbp-pools': lbp,
     'liquidity-mining': prefixAccounts.filter(a => LM_PREFIXES.some(p => a.startsWith(p))),
-    'sovereigns': prefixAccounts.filter(a => a.startsWith('0x7369626c')),
+    'sovereigns': prefixAccounts.filter(a => SOVEREIGN_PREFIXES.some(p => a.startsWith(p))),
   }
   const rows: Record<string, unknown>[] = []
   for (const def of STRUCTURAL_TAGS) {
