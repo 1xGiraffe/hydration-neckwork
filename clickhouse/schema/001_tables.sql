@@ -139,6 +139,15 @@ CREATE TABLE IF NOT EXISTS price_data.runtime_error_names (`spec_version` UInt32
 CREATE TABLE IF NOT EXISTS price_data.referendum_proposals (`proposal_hash` String, `pallet` LowCardinality(String), `call_name` LowCardinality(String), `args_json` String CODEC(ZSTD(6)), `encoded` String CODEC(ZSTD(6)), `byte_length` UInt32, `noted_block` UInt32, `decoded_at` DateTime DEFAULT now(), `decode_error` String DEFAULT '') ENGINE = ReplacingMergeTree(decoded_at) ORDER BY proposal_hash SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.referendum_titles (`pallet` LowCardinality(String), `ref_index` UInt32, `title` String, `concluded` UInt8 DEFAULT 0, `fetched_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(fetched_at) ORDER BY (pallet, ref_index) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.staking_activity (`block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `who` String, `args_json` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index) SETTINGS index_granularity = 1024;
+-- The account a routed swap was made FOR. Router.Executed/RouteExecuted never carry
+-- a `who`, so a swap dispatched by a block hook (Scheduler/HSM) has no signer to fall
+-- back on and loses its actor entirely. Broadcast.Swapped* names the swapper, and its
+-- operationStack carries the Router operation id that Router.Executed reports as
+-- `eventId` -- an exact key, not an amount heuristic. A routed swap emits one Broadcast
+-- row per hop, all naming the same swapper (verified: no (block, operation) key has two),
+-- so replacing on the operation collapses them idempotently under replay.
+CREATE TABLE IF NOT EXISTS price_data.swap_actor (`block_height` UInt32, `operation_event_id` UInt64, `block_timestamp` DateTime, `swapper` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, operation_event_id) SETTINGS index_granularity = 8192;
+
 CREATE TABLE IF NOT EXISTS price_data.swap_activity (`block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `who` String, `asset_in` UInt32, `asset_out` UInt32, `amount_in` String, `amount_out` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.tag_activity_counts (`tag_id` String, `membership_key` String, `extrinsics` UInt64, `events` UInt64, `computed_at` DateTime) ENGINE = ReplacingMergeTree(computed_at) ORDER BY tag_id SETTINGS index_granularity = 64;
 CREATE TABLE IF NOT EXISTS price_data.tag_detail_snapshots (`tag_id` String, `membership_key` String, `payload_json` String, `computed_at` DateTime) ENGINE = ReplacingMergeTree(computed_at) ORDER BY tag_id SETTINGS index_granularity = 64;
