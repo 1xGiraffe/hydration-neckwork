@@ -8354,9 +8354,140 @@ async function applyXcmOutDests(rows: ActivityRow[]): Promise<void> {
 // Remote-side enrichment of a final PAGE of activity rows — at most a page worth
 // of lookups per request; both passes share the journey cache.
 async function applyXcmJourneys(rows: ActivityRow[]): Promise<void> {
+  await applyNttBridgeDestinations(rows)
   await applyXcmInSources(rows)
   await applyXcmOutRemoteSources(rows)
   await applyXcmOutDests(rows)
+}
+
+// Wormhole Native Token Transfers — the direct route that replaced Moonbeam Routed
+// Liquidity for the venues MRL served. A send burns the token here and mints it on the
+// far chain, with no intermediary parachain, so nothing about it is XCM: no topic id,
+// no destination junction, no sibling. On chain it reads as an ordinary transfer of the
+// asset to the NTT minter registered for it (EVMAccounts.NttMinterSet), followed by a
+// burn from that minter — which is why these arrive in the feed looking like transfers.
+//
+// The far end is NOT resolvable through the crosschain index: measured against the live
+// index, none of 47 NTT journeys' origin hashes matches a Hydration extrinsic hash or an
+// EVM transaction hash, and there is no topic to key on. It IS in our own data, in the
+// manager's TransferSent log, so it is read from there and no other chain is indexed.
+const NTT_TRANSFER_SENT_TOPIC = '0xe54e51e42099622516fa3b48e9733581c9dbdcb771cafb093f745a0532a35982'
+
+// Wormhole's own chain numbering → the URN the rest of this file names chains by, so a
+// destination gets its display name, address encoding and explorer link from
+// externalChainRef rather than a second mapping that could disagree with it.
+const WORMHOLE_CHAIN_URNS: Record<number, string> = {
+  1: 'urn:ocn:solana:101',
+  2: 'urn:ocn:ethereum:1',
+  4: 'urn:ocn:ethereum:56',       // BNB Chain
+  5: 'urn:ocn:ethereum:137',      // Polygon
+  16: 'urn:ocn:polkadot:2004',    // Moonbeam
+  21: 'urn:ocn:sui:0x35834a8a',
+  23: 'urn:ocn:ethereum:42161',   // Arbitrum
+  24: 'urn:ocn:ethereum:10',      // Optimism
+  30: 'urn:ocn:ethereum:8453',    // Base
+}
+
+export interface NttTransferSent { recipient: string; amount: string; recipientChain: number }
+
+// NttManager.TransferSent(address indexed sender, bytes32 indexed recipient,
+//                         uint256 amount, uint256 fee, uint16 recipientChain, uint64 sequence)
+// The recipient is a bytes32 because it has to hold a Solana or Sui account as easily as
+// an EVM one; narrowing it to 20 bytes happens per destination, not here.
+export function decodeNttTransferSent(topics: string[], data: string): NttTransferSent | null {
+  if (topics[0]?.toLowerCase() !== NTT_TRANSFER_SENT_TOPIC) return null
+  const recipient = topics[2]
+  if (!/^0x[0-9a-fA-F]{64}$/.test(recipient ?? '')) return null
+  const body = (data ?? '').replace(/^0x/, '')
+  if (body.length < 64 * 3) return null
+  const word = (i: number) => body.slice(i * 64, (i + 1) * 64)
+  const amount = BigInt('0x' + word(0)).toString()
+  const recipientChain = Number(BigInt('0x' + word(2)))
+  if (!Number.isInteger(recipientChain) || recipientChain <= 0) return null
+  return { recipient: recipient.toLowerCase(), amount, recipientChain }
+}
+
+// The destination as this file names chains and accounts. An EVM chain takes the low 20
+// bytes of the bytes32; Solana and Sui take all 32, which is what their encodings need.
+export function nttDestination(sent: NttTransferSent): { urn: string; account: string } | null {
+  const urn = WORMHOLE_CHAIN_URNS[sent.recipientChain]
+  if (!urn) return null
+  const evm = urn.startsWith('urn:ocn:ethereum:') || urn === 'urn:ocn:polkadot:2004'
+  return { urn, account: evm ? '0x' + sent.recipient.slice(-40) : sent.recipient }
+}
+
+// assetId → the account its NTT minter burns from. Eleven rows today and one per asset
+// ever listed, so it is cached rather than joined into every read; the latest
+// registration for an asset wins, since a manager can be replaced.
+let nttMinterCache: { at: number; byAsset: Map<number, string> } | null = null
+async function nttMinterAccounts(): Promise<Map<number, string>> {
+  if (nttMinterCache && Date.now() - nttMinterCache.at < 300_000) return nttMinterCache.byAsset
+  const byAsset = new Map<number, string>()
+  try {
+    const res = await client.query({
+      query: `SELECT toUInt32(JSONExtractInt(args_json,'assetId')) AS asset_id,
+                     argMax(lower(JSONExtractString(args_json,'minter')), block_height) AS minter
+              FROM price_data.raw_events WHERE event_name = 'EVMAccounts.NttMinterSet'
+              GROUP BY asset_id`,
+      format: 'JSONEachRow',
+    })
+    for (const r of await res.json<{ asset_id: number; minter: string }>()) {
+      // The minter is an H160, so it takes h160AccountId — evmAccountForm widens a
+      // 32-byte account id and returns null for a 20-byte address.
+      if (/^0x[0-9a-f]{40}$/.test(r.minter)) byAsset.set(Number(r.asset_id), h160AccountId(r.minter).toLowerCase())
+    }
+    nttMinterCache = { at: Date.now(), byAsset }
+  } catch (err) {
+    console.error('[Explorer] NTT minter registry read failed:', err instanceof Error ? err.message : err)
+    return nttMinterCache?.byAsset ?? byAsset
+  }
+  return byAsset
+}
+
+// Name the far end of every NTT send on this page. The transfer to the minter is the
+// send, so that row carries the destination — page-scoped, one bounded read of the
+// logs of the extrinsics those rows already name.
+async function applyNttBridgeDestinations(rows: ActivityRow[]): Promise<void> {
+  const candidates = rows.filter(r => r.type === 'transfer' && r.to && r.asset && r.extrinsicIndex != null)
+  if (!candidates.length) return
+  const minters = await nttMinterAccounts()
+  if (!minters.size) return
+  const sends = candidates.filter(r => {
+    const minter = minters.get(r.asset!.assetId)
+    return !!minter && r.to!.accountId.toLowerCase() === minter.toLowerCase()
+  })
+  if (!sends.length) return
+  const tuples = [...new Set(sends.map(r => `(${r.blockHeight},${r.extrinsicIndex})`))].join(',')
+  const res = await client.query({
+    query: `SELECT block_height, extrinsic_index,
+                   JSONExtractString(JSONExtractRaw(args_json,'log'),'topics') AS topics,
+                   JSONExtractString(JSONExtractRaw(args_json,'log'),'data') AS data
+            FROM price_data.raw_events
+            WHERE (block_height, extrinsic_index) IN (${tuples}) AND event_name = 'EVM.Log'`,
+    format: 'JSONEachRow',
+  })
+  const sentByExt = new Map<string, NttTransferSent>()
+  for (const log of await res.json<{ block_height: number; extrinsic_index: number; topics: string; data: string }>()) {
+    const topics = (safeJson(log.topics) ?? []) as string[]
+    if (!Array.isArray(topics)) continue
+    const sent = decodeNttTransferSent(topics, log.data)
+    if (sent) sentByExt.set(`${log.block_height}:${log.extrinsic_index}`, sent)
+  }
+  for (const r of sends) {
+    const sent = sentByExt.get(`${r.blockHeight}:${r.extrinsicIndex}`)
+    if (!sent) continue
+    const dest = nttDestination(sent)
+    const ref = dest ? externalChainRef(dest.urn, dest.account) : null
+    r.bridge = 'Wormhole'
+    // The minter is the burn address, not a counterparty worth naming — the reader's
+    // counterparty is who receives on the far chain.
+    r.to = null
+    if (ref) {
+      r.destChain = ref.chain
+      r.destParachainId = ref.paraId
+      r.destAccount = ref.account
+    }
+  }
 }
 
 // Global money-market transactions (supply/borrow/repay/withdraw/liquidation) by
