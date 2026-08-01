@@ -132,6 +132,10 @@ svg { display: block; }
      Top-anchored surfaces pad by this so content clears the status bar when
      the app runs full-bleed under a black-translucent bar. */
   --safe-top: env(safe-area-inset-top, 0px);
+  /* Height of the strip along the bottom edge of the app: the sidebar's indexer
+     footer and the chart's price-scale switch sit side by side there, so they
+     share one height and their top edges line up across the seam. */
+  --status-strip-h: 38px;
 }
 
 /* Hide Lightweight Charts TradingView branding */

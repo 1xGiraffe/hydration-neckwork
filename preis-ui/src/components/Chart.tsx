@@ -4,6 +4,7 @@ import {
   CandlestickSeries,
   HistogramSeries,
   ColorType,
+  PriceScaleMode,
 } from 'lightweight-charts'
 import type {
   UTCTimestamp,
@@ -24,6 +25,7 @@ import { keepTabFocusInside } from '../utils/focus'
 import { ToolController } from '../chart-tools/ToolController'
 import type { ToolState } from '../chart-tools/ToolController'
 import ChartToolbar from './ChartToolbar'
+import ScaleControl from './ScaleControl'
 
 // Account pills link into the sibling explorer app (mirrors the explorer's
 // VITE_PREIS_URL wiring). Build-time env; falls back to the local docker UI.
@@ -55,6 +57,8 @@ interface ChartProps {
   onInspectionTimeChange?: (time: number | null) => void
   theme: 'dark' | 'light'
   toolsEnabled?: boolean
+  logScale?: boolean
+  onLogScaleChange?: (logarithmic: boolean) => void
 }
 
 interface Legend {
@@ -242,6 +246,7 @@ export default function Chart({
   baseId, quoteId, interval, base, showVolumeSource = false,
   onVisibleRangeReady, onDataChange, onCountdownChange,
   inspectionTime = null, onInspectionTimeChange, theme, toolsEnabled = true,
+  logScale = false, onLogScaleChange,
 }: ChartProps) {
   const dataScopeKey = `${baseId}:${quoteId}:${interval}`
   const containerRef = useRef<HTMLDivElement>(null)
@@ -296,6 +301,18 @@ export default function Chart({
   // attribute order-of-application).
   const themeRef = useRef(theme)
   useEffect(() => { themeRef.current = theme }, [theme])
+
+  // App remounts this component per pair, so the chart-creation effect reads
+  // the scale from a ref to seed the new price scale; later toggles are applied
+  // to the live scale by the effect below. Only the candle series' scale
+  // switches — the volume histogram shares no scale with it and stays linear.
+  const logScaleRef = useRef(logScale)
+  useEffect(() => { logScaleRef.current = logScale }, [logScale])
+  useEffect(() => {
+    candleSeriesRef.current?.priceScale().applyOptions({
+      mode: logScale ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal,
+    })
+  }, [logScale])
 
   useEffect(() => {
     if (loading) {
@@ -605,15 +622,22 @@ export default function Chart({
     loadMoreVolumeDetails,
   ])
 
-  // The price axis is canvas-drawn inside the chart, and its width follows the
-  // label text (an 8-decimal price needs far more room than "$1,961"). Mirror
-  // the measured width into a CSS variable so the legend can reserve that
-  // gutter and never run underneath the axis labels.
-  const syncPriceAxisWidth = useCallback(() => {
+  // Both axes are canvas-drawn inside the chart, so only the chart can measure
+  // them; mirror the two measurements DOM overlays need into CSS variables.
+  // Width: the price axis follows its label text (an 8-decimal price needs far
+  // more room than "$1,961"), and the legend reserves it as a right gutter so it
+  // never runs underneath the labels. Height: below 980px, where the sidebar and
+  // its indexer footer are gone, the scale switch takes the time-axis row
+  // instead of the app's bottom strip.
+  const syncAxisMetrics = useCallback(() => {
     const chart = chartRef.current
     const area = chartAreaRef.current
     if (!chart || !area) return
     area.style.setProperty('--price-axis-w', `${Math.round(chart.priceScale('right').width())}px`)
+    // Reads 0 until the chart lays out. Publishing that zero would beat the CSS
+    // fallback rather than defer to it, and a 0px-tall switch is invisible.
+    const timeAxisHeight = Math.round(chart.timeScale().height())
+    if (timeAxisHeight > 0) area.style.setProperty('--time-axis-h', `${timeAxisHeight}px`)
   }, [])
 
   const applyData = useCallback((data: ApiCandle[]) => {
@@ -644,8 +668,8 @@ export default function Chart({
     volumeSeries.setData(volumeData)
     onDataChange?.(data)
     scheduleOmniwatchMarkers()
-    syncPriceAxisWidth()
-  }, [onDataChange, scheduleOmniwatchMarkers, syncPriceAxisWidth])
+    syncAxisMetrics()
+  }, [onDataChange, scheduleOmniwatchMarkers, syncAxisMetrics])
 
   const replaceAllData = useCallback((data: ApiCandle[]) => {
     const normalized = normalizeCandles(data)
@@ -713,6 +737,9 @@ export default function Chart({
       priceLineStyle: 2,
       crosshairMarkerVisible: false,
     } as never)
+    candleSeries.priceScale().applyOptions({
+      mode: logScaleRef.current ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal,
+    })
 
     const volumeSeries = chart.addSeries(HistogramSeries, {
       color: txtLow,
@@ -782,7 +809,7 @@ export default function Chart({
       scheduleOmniwatchMarkers()
       // Panning/zooming re-autoscales the price axis, which can change how wide
       // its labels are.
-      syncPriceAxisWidth()
+      syncAxisMetrics()
     }
     chart.timeScale().subscribeVisibleLogicalRangeChange(markerRangeHandler)
 
@@ -793,7 +820,7 @@ export default function Chart({
       volumePaneTopRef.current = containerRef.current.clientHeight - volumePaneHeight
       chart.panes()[1].setHeight(volumePaneHeight)
       scheduleOmniwatchMarkers()
-      syncPriceAxisWidth()
+      syncAxisMetrics()
     }
     const resizeObserver = new ResizeObserver(handleResize)
     resizeObserver.observe(container)
@@ -820,7 +847,7 @@ export default function Chart({
       countdownLineRef.current = null
       chart.remove()
     }
-  }, [onVisibleRangeReady, scheduleOmniwatchMarkers, syncPriceAxisWidth]) // create once; theme changes are handled by applyOptions below
+  }, [onVisibleRangeReady, scheduleOmniwatchMarkers, syncAxisMetrics]) // create once; theme changes are handled by applyOptions below
 
   // Theme changes: re-apply colors on the existing chart instance so the
   // canvas isn't torn down and re-mounted — a remount blanks the chart for a
@@ -1093,6 +1120,70 @@ export default function Chart({
           font-family: 'GeistMono', monospace; font-size: 11px; color: var(--text-medium);
         }
         .chart-legend > span { white-space: nowrap; }
+        /* ---- Price-scale switch --------------------------------------------
+           Docked flush into the chart's bottom-right corner: the corner cell
+           below the price axis, which the chart leaves empty, so no tick label
+           is covered. One rounded corner; the other two edges are the chart's
+           own. Its height matches the sidebar's indexer footer, its neighbour
+           along the bottom edge, so the two top edges line up across the seam —
+           below 980px that neighbour is gone and it takes the time-axis row
+           instead (see the media query below). */
+        .sc-segmented {
+          position: absolute; bottom: 0; right: 0; z-index: 6;
+          filter: drop-shadow(-4px -4px 10px rgba(0, 0, 0, 0.20));
+        }
+        .sc-segmented button {
+          --sc-cell-w: 34px;
+          position: relative;
+          display: grid; grid-template-columns: repeat(2, var(--sc-cell-w));
+          height: var(--status-strip-h);
+          background: var(--bg-elev);
+          border: 1px solid var(--border); border-right: 0; border-bottom: 0;
+          border-radius: 8px 0 0 0;
+          /* Clips the sliding highlight into the rounded corner, so the
+             highlight needs no radius of its own at either stop. */
+          overflow: hidden;
+          /* The chart area clips its children, so the default outward focus
+             ring would be cut off on the flush edges. */
+          outline-offset: -2px;
+          transition: border-color 160ms;
+        }
+        /* Same moving highlight as the interval picker: one indicator that
+           travels, rather than two backgrounds crossfading. */
+        .sc-indicator {
+          position: absolute; top: 0; bottom: 0; left: 0; width: var(--sc-cell-w);
+          background: var(--accent);
+          transform: translateX(calc(var(--active-index) * var(--sc-cell-w)));
+          transition: transform 180ms var(--ease-out-soft), background 160ms;
+          pointer-events: none;
+        }
+        .sc-cell {
+          position: relative; z-index: 1;
+          display: inline-flex; align-items: center; justify-content: center;
+          font-family: 'GeistMono', monospace; font-size: 9.5px; font-weight: 500;
+          letter-spacing: 0.08em;
+          color: var(--text-medium);
+          transition: color 180ms;
+        }
+        .sc-cell.on { color: var(--accent-on); }
+        /* Hover brightens the idle label only. The frame stays neutral: the
+           travelling highlight already reports the state, and an accent border
+           on top of it read as a stuck focus ring. */
+        .sc-segmented button:hover .sc-cell:not(.on) { color: var(--text-high); }
+        /* No transform on press — it would lift the switch off the edges it is
+           fitted to. */
+        .sc-segmented button:active { filter: brightness(0.94); }
+
+        /* No sidebar below 980px, so there is no indexer footer to line up with.
+           The switch drops to the height of the time-axis row — the strip
+           carrying the month and hour labels — and sits within it exactly. */
+        @media (max-width: 980px) {
+          .sc-segmented button { height: var(--time-axis-h, 28px); }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          .sc-indicator { transition-duration: 0ms; }
+        }
         /* The O/H/L/C/V keys sit right against their value, dimmed so the row
            scans as numbers first. */
         .chart-legend .k { color: var(--text-low); }
@@ -1307,6 +1398,10 @@ export default function Chart({
             hasSelection={toolState.hasSelection}
             onDelete={() => toolsRef.current?.deleteSelection()}
           />
+        )}
+
+        {onLogScaleChange && (
+          <ScaleControl logarithmic={logScale} onToggle={() => onLogScaleChange(!logScale)} />
         )}
 
         {omniwatchMarkers.map(marker => {
