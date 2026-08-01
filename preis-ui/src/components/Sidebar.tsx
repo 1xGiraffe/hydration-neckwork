@@ -204,7 +204,7 @@ export default function Sidebar({
            equally and scroll independently — same height, both scrollable. */
         .sb-section.scroll { overflow-y: auto; flex: 1 1 0; min-height: 0; }
         /* Indexer footer: status-line at the bottom of the sidebar, no border below. */
-        .sb-section.sb-indexer { padding: 12px 20px; border-bottom: none; border-top: 1px solid var(--separator); margin-top: auto; }
+        .sb-section.sb-indexer { height: var(--status-strip-h); padding: 12px 20px; border-bottom: none; border-top: 1px solid var(--separator); margin-top: auto; }
         .sb-section.sb-indexer .sb-head { margin-bottom: 0; }
         .sb-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
         .sb-title { font-family: 'GeistMono', monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-medium); }
