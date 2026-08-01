@@ -112,6 +112,31 @@ for (const [name, viewport] of [['phone', { width: 390, height: 844 }], ['deskto
       await expect(page.locator('.panel table.tbl tbody tr.row-new')).toHaveCount(ADVANCE)
     })
 
+    // Scrolled down, but the top of the list is still on screen: the reader can
+    // see where an arrival lands, so holding there reads as a feed that stopped.
+    // The gate is the list's own top edge — the column headers on desktop, the
+    // first row on a phone, where the header is display:none.
+    test('keeps prepending while the top of the list is still on screen', async ({ page }) => {
+      const feed = await advancingBlocks(page)
+      await page.goto('/blocks')
+      await expect(page.locator('.panel table.tbl tbody tr').first()).toBeVisible()
+      const before = await heights(page)
+
+      // Put the list's top edge 150px below the viewport top — plainly visible,
+      // yet well past scrollY 0, which is all the old document-level gate asked.
+      const table = page.locator('.panel table.tbl')
+      await scrollTo(page, (await table.boundingBox())!.y - 150)
+      expect(await page.evaluate(() => window.scrollY), 'the reader has scrolled').toBeGreaterThan(0)
+
+      await feed.advanceHead(ADVANCE)
+
+      const after = await heights(page)
+      expect(Number(after[0].replace(/\D/g, '')), 'the head moved').toBe(Number(before[0].replace(/\D/g, '')) + ADVANCE)
+      expect(after.slice(ADVANCE)).toEqual(before.slice(0, PAGE - ADVANCE))
+      await expect(page.locator('.panel table.tbl tbody tr.row-new')).toHaveCount(ADVANCE)
+      expect(await overflow(page)).toBe(0)
+    })
+
     test('the pager still works while the reader is scrolled down', async ({ page }) => {
       const feed = await advancingBlocks(page)
       await page.goto('/blocks')

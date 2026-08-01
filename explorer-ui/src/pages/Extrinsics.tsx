@@ -1,7 +1,7 @@
 import { useExtrinsics, useDaily, useCounts } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { paths, usePageParam, setPage } from '../router'
-import { Crumbs, F, DayBarChart, EmptyRow, TableSkeleton, Pager, pendingRows } from '../components/ui'
+import { Crumbs, F, DayBarChart, EmptyRow, TableSkeleton, Pager, pendingRows, LiveAnchor } from '../components/ui'
 import { UNFILTERED_COLOR } from '../components/activityColors'
 import { ExtRow } from '../components/ActivityRows'
 import { useNewRows } from '../hooks/useNewRows'
@@ -17,7 +17,7 @@ export function Extrinsics() {
   const { values: f, onChange, onClear, setDay } = useFilters()
   // isPlaceholderData: rows answering the previous filter/page, held while the new
   // key loads (see pendingRows) — the skeleton gate below cannot catch that case.
-  const { data, isFetching, isPlaceholderData } = useExtrinsics(PAGE, true, f.from, f.to, page * PAGE, { call: f.call, result: f.result })
+  const { data, isFetching, isPlaceholderData, anchorRef } = useExtrinsics(PAGE, true, f.from, f.to, page * PAGE, { call: f.call, result: f.result })
   const { data: daily } = useDaily('extrinsics')
   const { data: counts } = useCounts()
   const now = useNow()
@@ -43,6 +43,7 @@ export function Extrinsics() {
       <DayBarChart data={daily ?? []} color={UNFILTERED_COLOR} label="Daily signed extrinsics" selected={f.from === f.to ? f.from : undefined} onSelect={setDay} fmt={F.int} loading={!daily} />
       <FilterZone fields={extrinsicFilterFields()} values={f} onChange={(k, v) => { onChange(k, v); setPage(0) }} onClear={onClear} />
       <div className="panel">
+        <LiveAnchor anchorRef={anchorRef} />
         <table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Call</th><th>Signer</th><th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody {...pendingRows(isPlaceholderData)}>

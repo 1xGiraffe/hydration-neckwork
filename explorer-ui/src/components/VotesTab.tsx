@@ -118,6 +118,7 @@ export function VotesTab({ scope }: { scope: VotesScope }) {
         loading={active.isFetching && !rows.length}
         pending={active.isPlaceholderData}
         pageSize={PAGE_SIZE}
+        anchorRef={grouped ? undefined : votes.anchorRef}
         error={active.error}
         onRetry={() => { void active.refetch() }}
       />
