@@ -8,7 +8,7 @@ import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts
 import { weightedFromLabels } from './convictionWeight.ts'
 import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
-import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags } from './tagService.ts'
+import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, INCENTIVES_REWARD_POT } from './tagService.ts'
 import { identityForAccount, searchIdentitiesByDisplay, type AccountIdentity } from './identityService.ts'
 import { normalizeAddress, hydrationAddress, polkadotAddress, reservedH160AccountId, type NormalizedAddress } from './addressIdentity.ts'
 import { accountIcon, emojisMatchingName, emojiNameFor, parseSuffixEmojiQuery } from './omniwatchIdentity.ts'
@@ -10079,8 +10079,6 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
     return !owners || (!owners.has(row.from.accountId.toLowerCase()) && !owners.has(row.to.accountId.toLowerCase()))
   })
 }
-
-const INCENTIVES_REWARD_POT = '0x45544800112c208b900bcfc9ff8131d0f45769cb6c7c7d8d0000000000000000'
 
 // Reward claims whose payout is otherwise indistinguishable from an ordinary
 // transfer.  The raw event tables already contain enough historical evidence,
