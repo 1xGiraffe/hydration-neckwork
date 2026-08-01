@@ -1229,8 +1229,12 @@ svg { display: block; }
   .acct-head-skeleton .sk-avatar { width: 28px; height: 28px; align-self: flex-start; }
   /* Only the NAME shares its line with the inline avatar; every meta row
      after it (address, accounts count, tag chips) pulls back to the panel's
-     own left edge instead of inheriting the avatar's 38px indent. */
-  .acct-head .acct-meta > * + * { margin-left: -38px; }
+     own left edge instead of inheriting the avatar's 38px indent. The
+     pull-back compensates for an avatar, so it applies only where one is
+     rendered: the avatar-less headers (a list's, the Hydration Tags hero)
+     have no indent to undo, and the same -38px there dragged every row but
+     the title 38px outside the card. */
+  .acct-head:has(.acct-avatar, .sk-avatar) .acct-meta > * + * { margin-left: -38px; }
   .acct-head:has(.acct-bal)::before { content: ''; order: 1; flex-basis: 100%; }
   /* Top-aligned label-over-amount blocks (the desktop grid's own reading
      order), the whole group clustered right on one shared line: the first
