@@ -46,8 +46,14 @@ export function fmtDuration(totalSeconds: number, opts: { seconds?: boolean } = 
   return `${sec}s`
 }
 
+// BigInt('') is 0n rather than an error, so an absent value has to be rejected
+// before the conversion: otherwise "no balance to project against" silently
+// becomes "a balance of zero", and the callers below cannot tell the two apart —
+// an unknown runway reads as no runway, and an unknowable progress reads as 100%,
+// which is to say as finished.
 function big(v: string | null | undefined): bigint | null {
-  try { return BigInt(v ?? '') } catch { return null }
+  if (v == null || v === '') return null
+  try { return BigInt(v) } catch { return null }
 }
 
 export interface DcaRunway {
@@ -140,6 +146,27 @@ export function dcaProgress(totalAmount: string, filledAmount: string, fundingBa
   // Percent with one decimal of headroom, in integer arithmetic — these are
   // 18-decimal token amounts, well past what a float divide holds exactly.
   return { pct: Number((filled * 1000n) / denominator) / 10, projected }
+}
+
+// What a finished budgeted order never got to spend.
+//
+// The pallet closes a schedule as soon as what is left of the budget can no longer
+// fund another trade, so "completed" does not mean "spent it all". A Sell order
+// fixes what each trade costs and leaves a rounding remainder — 98% of completed
+// ones stop with less than a single trade left. A Buy order fixes what it BUYS, so
+// the pallet has to keep the slippage-adjusted worst case (maxAmountIn) reserved
+// per execution rather than what a trade actually costs, and it can therefore close
+// with most of a trade's budget untouched: a page reading "completed" beside a
+// two-thirds-full ring, explaining neither. The remainder is released back to the
+// owner when the schedule closes.
+//
+// Null while the order still runs, when it has no budget to fall short of, and
+// when it did spend the lot.
+export function dcaUnspentBudget(totalAmount: string, filledAmount: string): string | null {
+  const total = big(totalAmount)
+  const filled = big(filledAmount)
+  if (total == null || filled == null || total <= 0n || filled >= total) return null
+  return (total - filled).toString()
 }
 
 // A Permill (parts per million) as a percentage: 30000 → "3%", 1000 → "0.1%".
