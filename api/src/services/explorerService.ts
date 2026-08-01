@@ -3208,6 +3208,43 @@ async function erc20WalletHoldingsForAccounts(h160s: string[]): Promise<{ asset:
   return out
 }
 
+// Per-holder form of the read above: the same bounded snapshot, grouped by the
+// account each row belongs to instead of summed across the whole set. A caller
+// asking on behalf of several unrelated owners (the funding balance behind their
+// DCA orders) must not see one owner's pot land on another's.
+async function erc20WalletHoldingsByAccount(h160s: string[]): Promise<Map<string, { asset: AssetRef; raw: bigint }[]>> {
+  const out = new Map<string, { asset: AssetRef; raw: bigint }[]>()
+  const bodies = [...new Set(h160s
+    .filter(h => /^0x[0-9a-fA-F]{40}$/.test(h))
+    .map(h => h.slice(2).toLowerCase()))]
+  if (!bodies.length) return out
+  const wanted = new Set(bodies)
+  const exactAccounts = [...new Set(bodies.flatMap(body => [
+    '0x45544800' + body + '0000000000000000',
+    reservedH160AccountId(body),
+  ]).filter((account): account is string => account != null))]
+  const res = await client.query({
+    query: `SELECT account_id, asset_id, toString(sum(toUInt256(total))) AS total
+            FROM price_data.erc20_wallet_balances FINAL
+            WHERE asset_id IN {assets:Array(String)}
+              AND (lower(account_id) IN {accounts:Array(String)}
+                OR substring(lower(account_id), 3, 40) IN {bodies:Array(String)})
+            GROUP BY account_id, asset_id`,
+    query_params: { assets: ERC20_WALLET_ASSET_IDS.map(String), accounts: exactAccounts, bodies },
+    format: 'JSONEachRow',
+  })
+  for (const r of await res.json<{ account_id: string; asset_id: string; total: string }>()) {
+    const id = r.account_id.toLowerCase()
+    // Undo the three storage forms the WHERE matched, back to the h160 that asked.
+    const h160 = evmFromAccountId(id) ?? '0x' + id.slice(2, 42)
+    if (!wanted.has(h160.slice(2))) continue
+    const raw = BigInt(r.total || '0')
+    if (raw <= 0n) continue
+    ;(out.get(h160) ?? out.set(h160, []).get(h160)!).push({ asset: asset(Number(r.asset_id)), raw })
+  }
+  return out
+}
+
 // Fold live ERC-20 holdings into the Tokens-side balance list: summed when the
 // asset already has a (separate-pot) Tokens balance, appended otherwise.
 export function mergeErc20Balances(balances: AddressBalance[], holdings: { asset: AssetRef; raw: bigint }[], prices: Map<number, PriceInfo>): AddressBalance[] {
@@ -4560,7 +4597,7 @@ async function aggregateMoneyMarket(members: { h160: string; simAccount: string 
 // Shared by the account and tag views so both surface MM collateral identically.
 // Returns the USD value actually folded into balances so the caller can detect a
 // shortfall (per-reserve reconstruction unavailable) and still count collateral.
-function applyMmCollateralToBalances(balances: AddressBalance[], moneyMarket: MoneyMarketPosition | null, prices: Map<number, PriceInfo>): number {
+function applyMmCollateralToBalances(balances: AddressBalance[], moneyMarket: Pick<MoneyMarketPosition, 'blockHeight' | 'reserves'> | null, prices: Map<number, PriceInfo>): number {
   let foldedUsd = 0
   for (const r of moneyMarket?.reserves ?? []) {
     if (r.supplied === '0' || r.assetId < 0) continue
@@ -5347,24 +5384,92 @@ export interface ActiveDca {
 // Spendable balance per (account, asset), for the open-ended DCA orders whose only
 // bound is the wallet behind them. Free rather than total: a reserved balance is
 // not something the scheduler can sell.
+//
+// Tokens.Accounts answers this on its own only for plain substrate assets. An
+// aToken (HUSDC, aDOT, …) is an Aave receipt held EVM-side, and an ERC-20-backed
+// asset (HOLLAR) keeps a separate contract-side pot, so for those the substrate row
+// carries at most the schedule's own named reserve and `free` reads 0. Reading it
+// alone made every open-ended order selling one of them report no funding at all —
+// which dcaProgress then renders as 100% filled, and dcaRunway as no trades left,
+// on an order still holding thousands of tokens.
+//
+// So compose the same three sources the account page composes, through the same
+// fold helpers: what a schedule says it is funded by and what its owner's Balances
+// tab shows then cannot drift apart. Both EVM-side reads are batched across the
+// whole account set rather than issued per owner.
 async function spendableBalances(pairs: { account: string; assetId: number }[]): Promise<Map<string, string>> {
   const out = new Map<string, string>()
   if (!pairs.length) return out
-  const accounts = sqlAccountList(pairs.map(p => p.account))
-  const assets = sqlUIntList([...new Set(pairs.map(p => p.assetId))])
-  if (accounts === "''" || !assets) return out
-  const res = await client.query({
-    query: `
-      SELECT account_id, asset_id, toString(free) AS free FROM (
-        SELECT account_id, asset_id, toUInt256OrZero(argMaxMerge(free_state)) AS free
-        FROM price_data.account_asset_latest_balances
-        WHERE account_id IN (${accounts}) AND asset_id IN (${assets})
-        GROUP BY account_id, asset_id
-      )`,
-    format: 'JSONEachRow',
-  })
-  for (const r of await res.json<{ account_id: string; asset_id: number; free: string }>()) {
-    out.set(`${r.account_id}|${r.asset_id}`, r.free)
+  const accounts = [...new Set(pairs.map(p => p.account))].filter(a => ACCOUNT_RE.test(a))
+  if (!accounts.length) return out
+  // Where an account's EVM-side holdings are indexed: itself if it is already the
+  // ETH-marker truncated form, else the runtime's first-20-bytes truncation.
+  const h160ByAccount = new Map<string, string>(
+    accounts.map(a => [a, (evmFromAccountId(a) ?? '0x' + a.slice(2, 42)).toLowerCase()]),
+  )
+  const h160s = [...new Set(h160ByAccount.values())]
+  const [prices, balanceRows, mmByHolder, erc20ByHolder] = await Promise.all([
+    ensureAccountValuePrices(),
+    client.query({
+      // Every asset the account holds, not just the ones asked for: the fold moves a
+      // held pool share (2-Pool-HUSDC) onto the main asset an order names (HUSDC),
+      // so filtering to the requested ids would drop the row that carries the answer.
+      query: `
+        SELECT account_id, asset_id, toString(t) AS total, toString(f) AS free, toString(rsv) AS reserved, lb AS last_block FROM (
+          SELECT account_id, asset_id,
+            toUInt256OrZero(argMaxMerge(total_state)) AS t,
+            toUInt256OrZero(argMaxMerge(free_state)) AS f,
+            toUInt256OrZero(argMaxMerge(reserved_state)) AS rsv,
+            maxMerge(last_block_state) AS lb
+          FROM price_data.account_asset_latest_balances
+          WHERE account_id IN (${sqlAccountList(accounts)})
+          GROUP BY account_id, asset_id
+        ) WHERE t > 0`,
+      format: 'JSONEachRow',
+    }).then(r => r.json<AggregatedBalanceRow & { account_id: string }>()),
+    mmReservesByHolder(h160s),
+    erc20WalletHoldingsByAccount(h160s),
+  ])
+  const rowsByAccount = new Map<string, AggregatedBalanceRow[]>()
+  for (const r of balanceRows) {
+    (rowsByAccount.get(r.account_id) ?? rowsByAccount.set(r.account_id, []).get(r.account_id)!).push(r)
+  }
+
+  const freeByAccountAsset = new Map<string, { free: string; decimals: number }>()
+  for (const account of accounts) {
+    const h160 = h160ByAccount.get(account)!
+    let balances = foldShareBalances(valueAccountBalances(rowsByAccount.get(account) ?? [], prices))
+    // Supplied collateral IS the account's aToken holding, so fold it in exactly as
+    // the account page does — including skipping the staking-backed market, whose
+    // collateral is HDX that stays locked in the wallet and is already counted.
+    const byMarket = new Map<string, MmReserve[]>()
+    for (const r of mmByHolder.get(h160) ?? []) {
+      const key = r.marketKey ?? 'core'
+      if (MM_MARKET_BY_KEY.get(key)?.stakingBacked) continue
+      ;(byMarket.get(key) ?? byMarket.set(key, []).get(key)!).push(r)
+    }
+    for (const reserves of byMarket.values()) applyMmCollateralToBalances(balances, { blockHeight: 0, reserves }, prices)
+    // The market's reserve is the pool share (2-Pool-HUSDC), not the asset the order
+    // names (HUSDC), so re-fold before reading — same second fold as getAddress.
+    balances = foldShareBalances(balances)
+    balances = mergeErc20Balances(balances, erc20ByHolder.get(h160) ?? [], prices)
+    for (const b of balances) freeByAccountAsset.set(`${account}|${b.asset.assetId}`, { free: b.free, decimals: b.asset.decimals })
+  }
+
+  const resolved = new Set(accounts)
+  for (const p of pairs) {
+    if (!resolved.has(p.account)) continue   // unreadable owner: absent, not zero
+    const display = displayAssetId(p.assetId)
+    const hit = freeByAccountAsset.get(`${p.account}|${display}`)
+    // No row after the fold means the owner holds none of it. That is a knowable
+    // zero — the "unfunded" end of an open-ended order — and a different statement
+    // from the null a caller gets for an owner we could not read at all.
+    if (!hit) { out.set(`${p.account}|${p.assetId}`, '0'); continue }
+    // An order denominated in the share token itself reads a row the fold has already
+    // rescaled to the main asset's decimals; put it back on the order's own scale.
+    out.set(`${p.account}|${p.assetId}`, display === p.assetId
+      ? hit.free
+      : rescaleRaw(hit.free, hit.decimals, asset(p.assetId).decimals))
   }
   return out
 }
