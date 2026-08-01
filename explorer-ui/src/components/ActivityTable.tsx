@@ -214,15 +214,11 @@ export function ActivityDesc({ r, headed }: { r: ActivityRow; headed?: boolean }
     return <span className="asset-flow">{origin} → <HydrationBadge /><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span></span>
   }
   if ((r.type === 'transfer' || r.type === 'xcm') && r.asset) {
-    // Asset first, then the arrow, then the destination chain and account.
-    //
-    // A transfer carrying a bridge left the chain — Wormhole NTT burns here and mints
-    // there — so it reads as the outbound hop it is, not as a transfer to the burn
-    // address. Everything below keys off that rather than off the row's family, which
-    // still says transfer because that is where the row is counted and addressed from.
-    const crossesChains = r.type === 'xcm' || !!r.bridge
-    const destChain = crossesChains && r.destChain ? <ChainBadge chain={r.destChain} /> : null
-    const destAccount = crossesChains
+    // Asset first, then the arrow, then the destination chain and account. A
+    // Wormhole NTT send is type 'xcm' like every other outbound hop — its burn
+    // leg never reaches this branch as a transfer.
+    const destChain = r.type === 'xcm' && r.destChain ? <ChainBadge chain={r.destChain} /> : null
+    const destAccount = r.type === 'xcm'
       ? (r.destAccount ? <ExternalAccountPill account={r.destAccount} /> : null)
       : (r.to ? <AddrPill account={r.to} noCopy /> : null)
     const dest = destChain || destAccount ? <>{destChain}{destAccount}</> : null
@@ -230,7 +226,7 @@ export function ActivityDesc({ r, headed }: { r: ActivityRow; headed?: boolean }
     // and the asset sits beside it either way — it is the Hydration balance that
     // moved. A local badge only earns its place opposite a counterparty, so a plain
     // local transfer and an outbound hop with nothing left to point at both skip it.
-    const local = crossesChains && dest ? <HydrationBadge /> : null
+    const local = r.type === 'xcm' && dest ? <HydrationBadge /> : null
     return <span className="asset-flow">{local}<span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span>{dest ? <> → {dest}</> : null}</span>
   }
   if ((r.type === 'trade' || r.type === 'dca') && r.assetIn && r.assetOut) {
