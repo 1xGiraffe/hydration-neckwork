@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { accountSwapGroupKey } from '../src/services/explorerService.ts'
 
 const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
 const tables = readFileSync(new URL('../../clickhouse/schema/001_tables.sql', import.meta.url), 'utf8')
@@ -68,5 +69,32 @@ describe('attachHookSwapActors — one resolution shared by every surface', () =
   // detail, the trade feed, the asset feed and the block page all run the same pass.
   it('runs on every surface that renders a swap', () => {
     expect(explorerService.match(/await attachHookSwapActors\(/g)).toHaveLength(4)
+  })
+})
+
+// An extrinsic groups all its swap events into one trade. A hook swap has no
+// extrinsic, so its own event is its identity: the Treasury has put six separate
+// swaps in one block, and grouping them under a shared null rendered — and counted
+// — exactly one of them.
+describe('accountSwapGroupKey — what makes one swap row distinct', () => {
+  it('groups by extrinsic when there is one, by event when there is not', () => {
+    expect(accountSwapGroupKey(9589594, 2, 17)).toBe('9589594:2')
+    expect(accountSwapGroupKey(9589594, 2, 59)).toBe('9589594:2')   // same extrinsic, one trade
+    expect(accountSwapGroupKey(9589594, null, 17)).not.toBe(accountSwapGroupKey(9589594, null, 59))
+  })
+
+  // Extrinsic indices are non-negative, so the negative space a hook row uses can
+  // never collide with a real extrinsic in the same block.
+  it('cannot collide a hook swap with an extrinsic', () => {
+    const hookKeys = [17, 59, 82, 114, 146, 183].map(ev => accountSwapGroupKey(9589594, null, ev))
+    const extrinsicKeys = [0, 1, 2, 3].map(xi => accountSwapGroupKey(9589594, xi, 0))
+    expect(new Set([...hookKeys, ...extrinsicKeys]).size).toBe(hookKeys.length + extrinsicKeys.length)
+  })
+
+  // The page read and its count arm must group identically, or the tab counts rows
+  // it will not render.
+  it('is the same identity the SQL uses on both sides', () => {
+    expect(explorerService).toMatch(/const SWAP_GROUP_KEY_SQL = 'ifNull\(toInt64\(extrinsic_index\), -toInt64\(event_index\) - 1\)'/)
+    expect(explorerService.match(/\$\{SWAP_GROUP_KEY_SQL\}/g)?.length).toBeGreaterThanOrEqual(3)
   })
 })
