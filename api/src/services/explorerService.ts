@@ -3230,38 +3230,22 @@ export function mergeErc20Balances(balances: AddressBalance[], holdings: { asset
 }
 
 // Per-market positions (collateral/debt/health-factor), one row per isolated pool,
-// from the indexed positions the snapshot service and event indexing maintain.
-// Explorer requests never call getUserAccountData directly.
+// from the indexed positions the periodic sweep service and event indexing maintain
+// in raw_money_market_positions. Explorer requests never call getUserAccountData
+// directly.
+//
+// Reads money_market_latest_positions, NOT the published account-value snapshot
+// (a different thing from the sweep above).
+// The snapshot's aggregate rows are a verbatim copy of this projection taken every
+// MONEY_MARKET_ACCOUNT_VALUES_REFRESH_MS (see buildMoneyMarketAccountValueClaims),
+// so reading it here could only ever return the same numbers up to five minutes
+// later — a borrow or repay would sit invisible on the account page for a whole
+// refresh period. The projection is a primary-key point lookup on user_address,
+// so the fresher read is also the cheaper one. The snapshot remains the source for
+// the accounts directory, which needs every account's value at once.
 async function getMoneyMarketPositions(h160: string): Promise<MoneyMarketPosition[]> {
   if (!/^0x[0-9a-fA-F]{40}$/.test(h160)) return []
   return cached(`explorer:mm-positions:${accountValueGenerationEpoch}:${h160.toLowerCase()}`, 15000, async () => {
-    const accountId = evmAccountIdFromAddress(h160.toLowerCase())
-    if (moneyMarketAccountValuesReady && accountId) {
-      const current = await client.query({
-        query: `SELECT pool_address,block_height AS lb,toString(block_timestamp) AS ts,
-            toString(total_collateral_base) AS c,toString(total_debt_base) AS d,
-            toString(available_borrows_base) AS ab,toString(liquidation_threshold) AS lt,
-            toString(ltv) AS ltv,toString(health_factor) AS hf
-          FROM price_data.money_market_account_value_snapshots
-          WHERE snapshot_id=(SELECT argMax(snapshot_id,computed_at)
-            FROM price_data.money_market_account_value_snapshot_state WHERE snapshot_key='current')
-            AND account_id={accountId:String} AND reserve_present=0`,
-        query_params: { accountId }, format: 'JSONEachRow',
-      })
-      const out: MoneyMarketPosition[]=[]
-      for (const row of await current.json<{ pool_address: string; lb: number; ts: string; c: string; d: string; ab: string; lt: string; ltv: string; hf: string }>()) {
-        if (row.c==='0' && row.d==='0') continue
-        const market=MM_MARKET_BY_POOL.get(row.pool_address.toLowerCase())
-        if (!market) continue
-        out.push({
-          ...moneyMarketFields(market),blockHeight:row.lb,timestamp:row.ts,
-          totalCollateralBase:row.c,totalSuppliedBase:row.c,totalDebtBase:row.d,
-          availableBorrowsBase:row.ab,liquidationThreshold:row.lt,ltv:row.ltv,
-          healthFactor:row.hf===MAX_UINT256?'inf':row.hf,
-        })
-      }
-      return orderMoneyMarkets(out)
-    }
     const res = await client.query({
       query: `SELECT pool AS pool_address, ${mmPositionField('block_height')} AS lb,
                 toString(${mmPositionField('block_timestamp')}) AS ts,
@@ -3634,39 +3618,17 @@ async function reconstructAccountScaled(h160: string, b0: number): Promise<Map<s
 
 // Per-reserve supplied (aToken) and debt (vDebt), reconstructed from the anchor
 // and indexed event deltas without request-time RPC.
+//
+// Reconstructed per request rather than read from the published account-value
+// snapshot, for the same freshness reason as getMoneyMarketPositions — and it must
+// move in lockstep with it: attachMmReserves raises the card's displayed totals to
+// max(aggregate, reserve-derived), so pairing a fresh aggregate with five-minute-old
+// reserves would let a stale-high debt survive a repay. Bounded to the account's own
+// rows (holder leads atoken_scaled_deltas' sort key); the anchor scan it adds is
+// ~92k rows / 12 MiB / 14 ms per uncached call.
 export async function getMoneyMarketReserves(h160: string): Promise<MmReserve[]> {
   if (!/^0x[0-9a-fA-F]{40}$/.test(h160)) return []
   return cached(`explorer:mm-reserves:${accountValueGenerationEpoch}:${h160.toLowerCase()}`, 15000, async () => {
-    const accountId=evmAccountIdFromAddress(h160.toLowerCase())
-    if (moneyMarketAccountValuesReady && accountId) {
-      const [prices,result]=await Promise.all([
-        ensureAccountValuePrices(),
-        client.query({
-          query: `SELECT market_key,asset_id,toString(supplied) AS supplied,toString(debt) AS debt
-            FROM price_data.money_market_account_value_snapshots
-            WHERE snapshot_id=(SELECT argMax(snapshot_id,computed_at)
-              FROM price_data.money_market_account_value_snapshot_state WHERE snapshot_key='current')
-              AND account_id={accountId:String} AND reserve_present=1`,
-          query_params:{accountId},format:'JSONEachRow',
-        }),
-      ])
-      const out: MmReserve[]=[]
-      for (const row of await result.json<{ market_key:string;asset_id:number;supplied:string;debt:string }>()) {
-        const underlying=asset(row.asset_id)
-        const supplied=BigInt(row.supplied||'0')
-        const displayId=supplied>0n ? UNDERLYING_TO_ATOKEN_ID[underlying.assetId] : undefined
-        const display=displayId!=null ? asset(displayId) : underlying
-        out.push({
-          assetId:display.assetId,symbol:display.symbol,decimals:underlying.decimals,
-          iconAssetId:display.iconAssetId,parachainId:display.parachainId,origin:display.origin,
-          supplied:row.supplied,debt:row.debt,
-          suppliedUsd:usdValue(prices,underlying.assetId,row.supplied,underlying.decimals),
-          debtUsd:usdValue(prices,underlying.assetId,row.debt,underlying.decimals),
-          collateral:supplied>0n,marketKey:row.market_key,
-        })
-      }
-      return out.sort((a,b)=>(b.suppliedUsd??b.debtUsd??0)-(a.suppliedUsd??a.debtUsd??0))
-    }
     const b0 = await aTokenAnchorBlock()
     if (!b0) return []
     const [prices, tokens, indices, byContract] = await Promise.all([
