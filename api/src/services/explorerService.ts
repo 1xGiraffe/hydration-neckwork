@@ -6314,6 +6314,7 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
           linkIndex: sched ? sched.idx : rep.extrinsic_index,
         })
       }
+      await attachHookSwapActors(out)
       await applyHistoricalUsd(out, tradeHistPick)
       return out
     }
@@ -6683,6 +6684,7 @@ export async function getTradeDetailByEvent(height: number, eventIndex: number):
       route,
       dca: !!dca,
     }
+    await attachHookSwapActors([detail])
     await applyHistoricalUsd([detail], d => ({ assetId: d.assetOut.assetId, decimals: d.assetOut.decimals, raw: d.amountOut, ts: d.timestamp }))
     return detail
   })
@@ -6765,6 +6767,61 @@ async function actorsFor(pairs: [number, number | null][]): Promise<Map<string, 
   const [signers, onBehalf] = await Promise.all([signersFor(pairs), onBehalfActorsFor(pairs)])
   for (const [key, actor] of onBehalf) signers.set(key, actor)
   return signers
+}
+
+// Map (block_height, event_index) → the account a routed HOOK swap was made for.
+//
+// Router.Executed/RouteExecuted never carry a `who`, and a swap dispatched from a
+// block hook — the Scheduler running a governance batch, an HSM arbitrage — has no
+// extrinsic and so no signer either. That left DCA as the only hook actor any feed
+// could name, and everything else rendered actorless: a $90k Treasury swap with a
+// blank account. Broadcast.Swapped* records the swapper alongside the Router
+// operation the swap belongs to, and swap_actor is that pairing, keyed by the same
+// `eventId` Router.Executed reports.
+//
+// Only worth asking for the rows nothing cheaper could attribute, so callers pass
+// just those; the lookup is then a primary-key match on both tables. Swaps before
+// block 6837789 have no Broadcast event to read and stay unattributed rather than
+// guessed at.
+async function hookSwapActorsFor(rows: { blockHeight: number; eventIndex: number }[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  const keys = [...new Set(rows.map(r => `${r.blockHeight}:${r.eventIndex}`))]
+  if (!keys.length) return out
+  const chunks = await mapChunksConcurrently(keys, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const tuples = chunk.map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
+    const res = await client.query({
+      query: `SELECT e.block_height AS block_height, e.event_index AS event_index, a.swapper AS swapper
+              FROM price_data.raw_events AS e
+              INNER JOIN price_data.swap_actor AS a
+                ON a.block_height = e.block_height
+               AND a.operation_event_id = toUInt64(greatest(0, JSONExtractInt(e.args_json, 'eventId')))
+              WHERE (e.block_height, e.event_index) IN (${tuples})`,
+      format: 'JSONEachRow',
+    })
+    return res.json<{ block_height: number; event_index: number; swapper: string }>()
+  })
+  for (const rows of chunks) {
+    for (const r of rows) if (ACCOUNT_RE.test(r.swapper)) out.set(`${r.block_height}:${r.event_index}`, r.swapper)
+  }
+  return out
+}
+
+// Fill in the actor of any hook swap nothing cheaper could attribute. Runs as a
+// post-pass over rows already built, so it cannot disturb the DCA adjacency claim
+// that decides which execution owns which swap, and it costs nothing on the
+// overwhelming majority of pages where every row already has an account.
+//
+// Shared by the trade feed, the asset feed, the block page and the swap detail so
+// the six surfaces cannot disagree about who made a swap.
+async function attachHookSwapActors(rows: { blockHeight: number; eventIndex?: number | null; extrinsicIndex: number | null; who: AccountRef | null }[]): Promise<void> {
+  const pending = rows.filter((r): r is typeof r & { eventIndex: number } =>
+    !r.who && r.extrinsicIndex == null && r.eventIndex != null)
+  if (!pending.length) return
+  const actors = await hookSwapActorsFor(pending)
+  for (const row of pending) {
+    const actor = actors.get(`${row.blockHeight}:${row.eventIndex}`)
+    if (actor) row.who = accountRef(actor)
+  }
 }
 
 // Map (block_height, extrinsic_index) → signer account_id for a set of rows.
@@ -12179,6 +12236,7 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
       linkIndex: null,
     })
   }
+  await attachHookSwapActors(rows)
 
   rows.push(...xcmInRows)
   rows.push(...xcmOutRemoteRows)
@@ -12451,6 +12509,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
           dca: !!dcaWho, linkBlock: rep.extrinsic_index != null ? rep.block_height : null, linkIndex: rep.extrinsic_index,
         })
       }
+      await attachHookSwapActors(out)
       return out
     })() : Promise.resolve([])
 
