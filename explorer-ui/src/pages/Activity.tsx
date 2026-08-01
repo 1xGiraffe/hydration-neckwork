@@ -64,7 +64,7 @@ export function Activity() {
   // isPlaceholderData: these rows answer the PREVIOUS filter/tab/page, kept on screen
   // while the new one loads. A high "$ from" here takes tens of seconds, so without
   // marking them the feed reads as ignoring the filter (see pendingRows).
-  const { data, isFetching, isPlaceholderData, error, refetch } = useActivity(PAGE, f.from, f.to, page * PAGE, type, { token: f.token, min: activityMin }, action || undefined)  // filters applied server-side
+  const { data, isFetching, isPlaceholderData, error, refetch, anchorRef } = useActivity(PAGE, f.from, f.to, page * PAGE, type, { token: f.token, min: activityMin }, action || undefined)  // filters applied server-side
   // The pager's two bounds, under exactly the filters above: how many rows the feed
   // holds where the API can count it (the vote feed pages in SQL over one source, so
   // its length is that source's own count), and always how deep the API serves this
@@ -92,7 +92,7 @@ export function Activity() {
       <ActivityChips value={type} onChange={v => setQuery({ tab: v === 'all' ? null : v, action: null, page: null })} />
       <FilterZone fields={activityFilterFields(type, assets.data ?? [])} values={f} onChange={onChange} onClear={onClear}
         extra={<SmolToggle hiding={hideSmol} onToggle={() => { toggleSmol(); setQuery({ page: null }) }} />} />
-      <ActivityTable rows={rows} now={now} live={page === 0} loading={isFetching && rows.length === 0} pending={isPlaceholderData} pageSize={PAGE} error={error} onRetry={() => { void refetch() }} />
+      <ActivityTable rows={rows} now={now} live={page === 0} anchorRef={anchorRef} loading={isFetching && rows.length === 0} pending={isPlaceholderData} pageSize={PAGE} error={error} onRetry={() => { void refetch() }} />
       <Pager page={page} totalPages={pages.totalPages} hasNext={pages.hasNext} note={pages.note} onPage={setPage} />
     </div>
   )
