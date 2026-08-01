@@ -11078,10 +11078,8 @@ interface DcaScheduleOrder {
 }
 
 export function dcaOrderFromCallArgs(argsJson: string): DcaScheduleOrder | null {
-  let parsed: unknown
-  try { parsed = JSON.parse(argsJson) } catch { return null }
-  const schedule = (parsed as { schedule?: Record<string, unknown> } | null)?.schedule
-  if (!schedule || typeof schedule !== 'object') return null
+  const schedule = dcaScheduleFromCallArgs(argsJson)
+  if (!schedule) return null
   const order = (schedule as { order?: Record<string, unknown> }).order
   if (!order || typeof order !== 'object') return null
   const num = (v: unknown) => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null)
@@ -11106,7 +11104,7 @@ async function recoverDcaScheduleOrder(blockHeight: number, extrinsicIndex: numb
   if (extrinsicIndex == null) return null
   const res = await client.query({
     query: `SELECT args_json FROM price_data.raw_calls
-            WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32} AND call_name = 'DCA.schedule'
+            WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32} AND call_address = 'root'
             LIMIT 1`,
     query_params: { h: blockHeight, i: extrinsicIndex }, format: 'JSONEachRow',
   })
@@ -11135,10 +11133,7 @@ export function dcaOrderTermsFromEventArgs(argsJson: string): DcaOrderTerms | nu
 // Same order object, reached through the call's `schedule` wrapper — the only place
 // a pre-router schedule's order survives.
 export function dcaOrderTermsFromCallArgs(argsJson: string): DcaOrderTerms | null {
-  let parsed: unknown
-  try { parsed = JSON.parse(argsJson) } catch { return null }
-  const schedule = (parsed as { schedule?: { order?: unknown } } | null)?.schedule
-  return dcaOrderTerms(schedule?.order)
+  return dcaOrderTerms(dcaScheduleFromCallArgs(argsJson)?.order)
 }
 
 function dcaOrderTerms(orderValue: unknown): DcaOrderTerms | null {
@@ -11177,12 +11172,60 @@ function dcaOrderTerms(orderValue: unknown): DcaOrderTerms | null {
 // the oracle price — a different limit from the order's own minAmountOut/maxAmountIn
 // bound above, which is absolute and fixed for the schedule's whole life.
 export function dcaScheduleTermsFromCallArgs(argsJson: string): { slippagePermill: number | null; maxRetries: number | null } | null {
-  let parsed: unknown
-  try { parsed = JSON.parse(argsJson) } catch { return null }
-  const schedule = (parsed as { schedule?: Record<string, unknown> } | null)?.schedule
-  if (!schedule || typeof schedule !== 'object') return null
+  const schedule = dcaScheduleFromCallArgs(argsJson)
+  if (!schedule) return null
   const int = (v: unknown) => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null)
   return { slippagePermill: int(schedule.slippage), maxRetries: int(schedule.maxRetries) }
+}
+
+// A DCA Schedule struct: an object under a key literally named `schedule` that
+// carries the pallet's own required `order`. Nothing else in a call tree pairs
+// those two, and matching on the order (rather than on `period`, or on the whole
+// field set) keeps this reading a schedule whose optional fields are all unset.
+function isDcaScheduleStruct(v: unknown): v is Record<string, unknown> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false
+  const order = (v as Record<string, unknown>).order
+  return !!order && typeof order === 'object'
+}
+
+// The `schedule` payload of a DCA.schedule call, wherever the extrinsic buried it.
+//
+// Only ~5 in 6 schedules are submitted as a bare DCA.schedule; the rest arrive
+// wrapped, and the wrapper the Hydration app now sends —
+// Dispatcher.dispatch_with_extra_gas — carries its inner call whole inside
+// args_json rather than as its own raw_calls row. Reading only the top-level
+// `DCA.schedule` call therefore found nothing for 2.3k schedules, every recent one
+// among them, and reported their slippage and retry limit as unset rather than as
+// what the owner chose. Multisig.as_multi, Utility.batch_all and Proxy.proxy nest
+// it the same way.
+//
+// Matching the Schedule struct's own shape instead of a list of wrapper call names
+// keeps this working for a wrapper nobody has used yet, and changes nothing for the
+// bare args that already parsed. An EVM permit (MultiTransactionPayment
+// .dispatch_permit, Ethereum.transact) keeps its inner call as opaque SCALE hex, so
+// those 3.2k stay null — there is nothing there to read, and a default would be a
+// guess at a term the owner set.
+//
+// One extrinsic can schedule several orders (nine, at most, in indexed history).
+// Depth-first order makes which one answers deterministic, and no indexed extrinsic
+// has ever mixed two slippages or two retry limits.
+export function dcaScheduleFromCallArgs(argsJson: string): Record<string, unknown> | null {
+  let parsed: unknown
+  try { parsed = JSON.parse(argsJson) } catch { return null }
+  // Wrappers nest a handful of levels (dispatch → DCA → schedule); the bound stops
+  // a batch-of-batches from walking an unbounded tree on a request path.
+  const walk = (node: unknown, depth: number): Record<string, unknown> | null => {
+    if (node == null || typeof node !== 'object' || depth > 12) return null
+    if (Array.isArray(node)) {
+      for (const item of node) { const hit = walk(item, depth + 1); if (hit) return hit }
+      return null
+    }
+    const obj = node as Record<string, unknown>
+    if (isDcaScheduleStruct(obj.schedule)) return obj.schedule as Record<string, unknown>
+    for (const value of Object.values(obj)) { const hit = walk(value, depth + 1); if (hit) return hit }
+    return null
+  }
+  return walk(parsed, 0)
 }
 
 // The two lookups behind the terms above, both bounded by a primary-key prefix on
@@ -11192,13 +11235,14 @@ export function dcaScheduleTermsFromCallArgs(argsJson: string): { slippagePermil
 //
 // The event is matched by id inside the block rather than by extrinsic: one
 // extrinsic can schedule nine orders at once, and 129 schedules have no extrinsic
-// index at all. The call is matched by extrinsic and is the same for every order in
-// it — no indexed extrinsic has ever mixed two slippages or two retry limits, so
-// which row answers does not matter, only that the choice is deterministic.
+// index at all. The call is the extrinsic's top-level one, whatever it is, because
+// the schedule is as often nested inside a wrapper as dispatched bare —
+// dcaScheduleFromCallArgs digs it back out either way.
 //
-// EVM owners schedule through MultiTransactionPayment.dispatch_permit, whose inner
-// call is not decomposed into raw_calls, so 16% of schedules have no call row and
-// their slippage/retries stay null rather than being guessed at.
+// EVM owners schedule through MultiTransactionPayment.dispatch_permit or
+// Ethereum.transact, whose inner call survives only as opaque SCALE hex, so 9% of
+// schedules have nothing to read and their slippage/retries stay null rather than
+// being guessed at.
 async function dcaScheduleTerms(scheduleId: number, blockHeight: number, extrinsicIndex: number | null): Promise<{
   minAmountOut: string | null; maxAmountIn: string | null; route: DcaRouteLeg[] | null
   slippagePermill: number | null; maxRetries: number | null
@@ -11213,8 +11257,8 @@ async function dcaScheduleTerms(scheduleId: number, blockHeight: number, extrins
     }),
     extrinsicIndex == null ? Promise.resolve(null) : client.query({
       query: `SELECT args_json FROM price_data.raw_calls
-              WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32} AND call_name = 'DCA.schedule'
-              ORDER BY call_address ASC LIMIT 1`,
+              WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32} AND call_address = 'root'
+              LIMIT 1`,
       query_params: { h: blockHeight, i: extrinsicIndex }, format: 'JSONEachRow',
     }),
   ])

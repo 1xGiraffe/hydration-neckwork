@@ -127,6 +127,62 @@ describe('dcaScheduleTermsFromCallArgs', () => {
   })
 })
 
+// Most schedules are not dispatched bare. The wrapper the Hydration app sends now,
+// Dispatcher.dispatch_with_extra_gas, carries its inner call whole inside args_json
+// instead of as its own raw_calls row, so reading only a top-level DCA.schedule
+// found nothing for it and reported the owner's slippage and retry limit as unset.
+describe('dcaScheduleFromCallArgs', () => {
+  // Real args of schedule #34198, verbatim but for the trimmed route.
+  const DISPATCH_WITH_EXTRA_GAS = JSON.stringify({
+    call: {
+      __kind: 'DCA',
+      value: {
+        schedule: {
+          owner: '0x41ddf2ded434f3b236eca63124ea45b9034a03249dec7b072c2b4efa8efa3eae',
+          period: 600, totalAmount: '0', maxRetries: 5, slippage: 10000,
+          order: {
+            assetIn: 1110, assetOut: 4444, amountIn: '22000000000000000000', minAmountOut: '0',
+            route: [{ pool: { __kind: 'Aave' }, assetIn: 1110, assetOut: 110 }], __kind: 'Sell',
+          },
+        },
+        __kind: 'schedule',
+      },
+    },
+    extraGas: '1000000',
+  })
+
+  it('digs the schedule out of the wrapper the app dispatches through', () => {
+    expect(dcaScheduleTermsFromCallArgs(DISPATCH_WITH_EXTRA_GAS)).toEqual({ slippagePermill: 10000, maxRetries: 5 })
+    // The order behind it comes back through the same unwrap, so a pre-router
+    // schedule submitted this way can still recover its pair and size.
+    expect(dcaOrderTermsFromCallArgs(DISPATCH_WITH_EXTRA_GAS)).toEqual({
+      minAmountOut: null, maxAmountIn: null,
+      route: [{ pool: 'Aave', poolId: null, assetIn: 1110, assetOut: 110 }],
+    })
+  })
+
+  // Matching the struct's shape rather than a list of wrapper names is what keeps
+  // Multisig/Proxy/Utility working — and a wrapper nobody has used yet.
+  it('finds it through batch, proxy and multisig nesting alike', () => {
+    const schedule = { owner: '0xab', period: 6, totalAmount: '1', maxRetries: 3, slippage: 5000, order: { __kind: 'Sell' } }
+    const batch = JSON.stringify({ calls: [{ __kind: 'Balances', value: { __kind: 'transfer' } }, { __kind: 'DCA', value: { schedule, __kind: 'schedule' } }] })
+    expect(dcaScheduleTermsFromCallArgs(batch)).toEqual({ slippagePermill: 5000, maxRetries: 3 })
+    const proxy = JSON.stringify({ real: '0xcd', forceProxyType: null, call: { __kind: 'DCA', value: { schedule, __kind: 'schedule' } } })
+    expect(dcaScheduleTermsFromCallArgs(proxy)).toEqual({ slippagePermill: 5000, maxRetries: 3 })
+    const multisig = JSON.stringify({ threshold: 2, otherSignatories: ['0x01'], maybeTimepoint: null, call: { __kind: 'DCA', value: { schedule, __kind: 'schedule' } }, maxWeight: {} })
+    expect(dcaScheduleTermsFromCallArgs(multisig)).toEqual({ slippagePermill: 5000, maxRetries: 3 })
+  })
+
+  // An EVM permit keeps its inner call as opaque SCALE hex. There is nothing to
+  // find, and a default would be a guess at a term the owner actually chose.
+  it('stays null for a call whose schedule never got decoded', () => {
+    const permit = JSON.stringify({ from: '0xc742', to: '0x0401', value: '0', data: '0x6b0d04010100a10f04' })
+    expect(dcaScheduleTermsFromCallArgs(permit)).toBeNull()
+    // A key named `schedule` that carries no order is not one either.
+    expect(dcaScheduleTermsFromCallArgs(JSON.stringify({ schedule: { start: 12 } }))).toBeNull()
+  })
+})
+
 // The call wraps the same order object the event carries, and it is the only place
 // a pre-router schedule's order survives at all.
 describe('dcaOrderTermsFromCallArgs', () => {
