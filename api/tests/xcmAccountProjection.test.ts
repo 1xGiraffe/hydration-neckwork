@@ -58,20 +58,21 @@ describe('the account-scoped XCM readers use the account-first projection', () =
       - occurrences(explorerService, 'price_data.xcm_event_activity_by_account')).toBe(1)
   })
 
-  it('routes the three account-scoped reads to the account-first table, and only those', () => {
-    // One definition + three call sites: the inbound candidate arm, the remote-outbound
-    // candidate arm, and the remote-outbound withdrawal decode.
-    expect(occurrences(explorerService, 'xcmEventActivityByAccountTable(')).toBe(4)
-    for (const site of ['getRecentXcmIn', 'getRecentXcmOutRemote', 'xcmOutRemoteRowsForBlocks']) {
+  it('routes the account-scoped reads to the account-first table, and only those', () => {
+    // One definition + four call sites: the inbound candidate arm, the remote-outbound
+    // candidate arm, the remote-outbound withdrawal decode, and the NTT arrival
+    // candidate arm.
+    expect(occurrences(explorerService, 'xcmEventActivityByAccountTable(')).toBe(5)
+    for (const site of ['getRecentXcmIn', 'getRecentXcmOutRemote', 'xcmOutRemoteRowsForBlocks', 'getRecentNttIn']) {
       expect(functionBody(site), site).toContain('${xcmEventActivityByAccountTable()}')
     }
     // What stays on the parent: the global candidate walks, the outbound reads, the
     // barrier reads (whose payload neither sibling carries), the global arm of the
     // remote-pull withdrawal decode, the pre-migration inherent-context family read
-    // (the hook-only walk projection cannot hold those rows), and the asset surface.
-    // One definition + nine call sites — the hook-context inbound deposit run is the
-    // tenth, and it moved to the block-first projection below.
-    expect(occurrences(explorerService, 'xcmEventActivityTable(')).toBe(12)
+    // (the hook-only walk projection cannot hold those rows), the asset surface, and
+    // the NTT arrival candidates' global arm. One definition + ten call sites — the
+    // hook-context inbound deposit run moved to the block-first projection below.
+    expect(occurrences(explorerService, 'xcmEventActivityTable(')).toBe(13)
     expect(functionBody('xcmInRowsForBlocks')).not.toContain('xcmEventActivityByAccountTable')
   })
 

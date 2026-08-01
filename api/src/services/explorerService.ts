@@ -2134,6 +2134,10 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
     const postUsdFilter = filters.min != null && filters.unit !== 'token'
     const amountFilter = eventValueFilterSql(assetExpr, amountExpr, 'block_timestamp',
       postUsdFilter ? { ...filters, min: undefined, unit: undefined } : filters, prices, 'transfer_price')
+    // A transfer of an NTT asset to its minter is that asset's outbound Wormhole send —
+    // a cross-chain row, not a transfer (see getRecentNttOut, which renders exactly the
+    // rows this predicate removes).
+    const nttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts())
     // userOnly drops pallet/pool/fee legs (module accounts 0x6d6f646c…) so the
     // Activity's "Transfers" tab shows genuine user↔user transfers, not swap noise.
     const plumbing = [...ammPoolAccounts(), ...(await mmReserveAccountIds())]
@@ -2190,6 +2194,7 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
             WHERE ${bound}
               ${useTransferReadModel ? '' : "AND event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')"}
               ${userFilter}
+              ${nttExclusion}
               ${tokenRefsFilter}
               ${tokenFilter}
               ${amountFilter.predicateSql}
@@ -2215,7 +2220,7 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
                     ${amountFilter.joinSql}
                     WHERE ${rawBound}
                       ${useTransferReadModel ? '' : "AND event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')"}
-                      ${userFilter} ${tokenRefsFilter} ${tokenFilter} ${amountFilter.predicateSql}
+                      ${userFilter} ${nttExclusion} ${tokenRefsFilter} ${tokenFilter} ${amountFilter.predicateSql}
                     ORDER BY block_height DESC, event_index DESC
                     LIMIT {limit:UInt32}`,
             query_params: { limit: rawLimit }, format: 'JSONEachRow',
@@ -8306,7 +8311,10 @@ async function applyXcmOutRemoteSources(rows: ActivityRow[]): Promise<void> {
 // (an extrinsic batching several journeys) keep the local junction data,
 // which names the beneficiary authoritatively.
 async function applyXcmOutDests(rows: ActivityRow[]): Promise<void> {
-  const outRows = rows.filter(r => r.type === 'xcm' && r.xcmDir === 'out' && r.extrinsicIndex != null)
+  // A row that already knows its bridge was built complete (Wormhole NTT reads its far
+  // end from our own logs), and the journey index has no key for it anyway — measured,
+  // none of 47 NTT journeys' origin hashes matches an extrinsic or EVM tx hash.
+  const outRows = rows.filter(r => r.type === 'xcm' && r.xcmDir === 'out' && r.extrinsicIndex != null && r.bridge == null)
   if (!outRows.length) return
   const pairs = [...new Set(outRows.map(r => `${r.blockHeight}:${r.extrinsicIndex}`))]
   const tuples = pairs.map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
@@ -8354,7 +8362,6 @@ async function applyXcmOutDests(rows: ActivityRow[]): Promise<void> {
 // Remote-side enrichment of a final PAGE of activity rows — at most a page worth
 // of lookups per request; both passes share the journey cache.
 async function applyXcmJourneys(rows: ActivityRow[]): Promise<void> {
-  await applyNttBridgeDestinations(rows)
   await applyXcmInSources(rows)
   await applyXcmOutRemoteSources(rows)
   await applyXcmOutDests(rows)
@@ -8416,6 +8423,48 @@ export function nttDestination(sent: NttTransferSent): { urn: string; account: s
   return { urn, account: evm ? '0x' + sent.recipient.slice(-40) : sent.recipient }
 }
 
+// Transceiver.ReceivedMessage(bytes32 digest, uint16 emitterChainId, bytes32 emitterAddress,
+//                             uint64 sequence) — all in data, nothing indexed. The second
+// word is the only statement of the source CHAIN on this side. The sending USER is not
+// here or in any other log: it sits in the NTT payload, which is calldata, so an inbound
+// row can name where it came from but never who sent it.
+const NTT_RECEIVED_MESSAGE_TOPIC = '0xf6fc529540981400dc64edf649eb5e2e0eb5812a27f8c81bac2c1d317e71a5f0'
+// NttManager.TransferRedeemed(bytes32 indexed digest) — emitted by the asset's own
+// manager (the registered minter address), which is what ties a redeem to its asset.
+const NTT_TRANSFER_REDEEMED_TOPIC = '0x504e6efe18ab9eed10dc6501a417f5b12a2f7f2b1593aed9b89f9bce3cf29a91'
+
+export function decodeNttReceivedMessage(topics: string[], data: string): { sourceChain: number } | null {
+  if (topics[0]?.toLowerCase() !== NTT_RECEIVED_MESSAGE_TOPIC) return null
+  const body = (data ?? '').replace(/^0x/, '')
+  if (body.length < 64 * 2) return null
+  const sourceChain = Number(BigInt('0x' + body.slice(64, 128)))
+  if (!Number.isInteger(sourceChain) || sourceChain <= 0) return null
+  return { sourceChain }
+}
+
+// The origin chain in the fields an inbound row carries. Same mapping as the outbound
+// destination, so both ends of the bridge are named from one table; an unmapped chain
+// yields nothing rather than a plausible wrong name.
+export function nttOriginChain(sourceChain: number): Pick<ActivityRow, 'fromChain' | 'fromParachainId'> | null {
+  const urn = WORMHOLE_CHAIN_URNS[sourceChain]
+  const chain = urn ? ocnChainName(urn) : null
+  if (!chain) return null
+  const parsed = parseOcnUrn(urn)
+  const paraId = parsed?.consensus === 'polkadot' ? Number(parsed.chainId) : null
+  return { fromChain: chain, fromParachainId: paraId }
+}
+
+// A transfer of an NTT asset TO its registered minter is that asset's outbound send —
+// the feed renders it as a cross-chain row, so the transfer family must neither show
+// nor count it. One shared fragment, mirroring mmStakingPlumbingExclusionSql: applied
+// at every transfer read site AND inside the transfer count arm's candidates, so the
+// rows a page renders and the rows its total counts can never be a different set.
+export function nttMinterLegExclusionSql(minters: Map<number, string>, assetExpr = 'asset_id', toExpr = 'to_account'): string {
+  if (!minters.size) return ''
+  const pairs = [...minters].map(([assetId, account]) => `(${assetId},'${account}')`).join(',')
+  return `AND (toUInt32(${assetExpr}), lower(${toExpr})) NOT IN (${pairs})`
+}
+
 // assetId → the account its NTT minter burns from. Eleven rows today and one per asset
 // ever listed, so it is cached rather than joined into every read; the latest
 // registration for an asset wins, since a manager can be replaced.
@@ -8444,50 +8493,218 @@ async function nttMinterAccounts(): Promise<Map<number, string>> {
   return byAsset
 }
 
-// Name the far end of every NTT send on this page. The transfer to the minter is the
-// send, so that row carries the destination — page-scoped, one bounded read of the
-// logs of the extrinsics those rows already name.
-async function applyNttBridgeDestinations(rows: ActivityRow[]): Promise<void> {
-  const candidates = rows.filter(r => r.type === 'transfer' && r.to && r.asset && r.extrinsicIndex != null)
-  if (!candidates.length) return
-  const minters = await nttMinterAccounts()
-  if (!minters.size) return
-  const sends = candidates.filter(r => {
-    const minter = minters.get(r.asset!.assetId)
-    return !!minter && r.to!.accountId.toLowerCase() === minter.toLowerCase()
+// The bare manager/minter H160 back out of its widened account id — h160AccountId
+// prefixes '45544800' and pads, so bytes 4..24 are the address. The transfer tables
+// hold the widened form; the manager's own logs hold the bare one.
+function nttMinterH160(account: string): string {
+  return '0x' + account.slice(10, 50)
+}
+
+interface NttSentLog { manager: string; sent: NttTransferSent; claimed?: boolean }
+interface NttExtrinsicLogs {
+  sent: NttSentLog[]
+  redeemed: Set<string>     // manager H160s that logged TransferRedeemed here
+  sourceChains: number[]    // one entry per decoded ReceivedMessage
+}
+
+// The NTT logs of the given `block:extrinsic` pairs, decoded — one bounded
+// primary-key read per 2k pairs. Replays in raw_evm_logs collapse under
+// LIMIT 1 BY the event identity.
+async function nttLogsFor(pairs: Iterable<string>): Promise<Map<string, NttExtrinsicLogs>> {
+  const keys = [...new Set(pairs)]
+  const out = new Map<string, NttExtrinsicLogs>()
+  if (!keys.length) return out
+  const chunks = await mapChunksConcurrently(keys, 2_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const tuples = chunk.map(key => {
+      const at = key.indexOf(':')
+      return `(${Number(key.slice(0, at))},${Number(key.slice(at + 1))})`
+    }).join(',')
+    const res = await client.query({
+      query: `SELECT block_height, event_index, extrinsic_index, lower(contract_address) AS contract, topics, data
+              FROM price_data.raw_evm_logs
+              WHERE (block_height, extrinsic_index) IN (${tuples})
+                AND topic0 IN ('${NTT_TRANSFER_SENT_TOPIC}','${NTT_RECEIVED_MESSAGE_TOPIC}','${NTT_TRANSFER_REDEEMED_TOPIC}')
+              LIMIT 1 BY block_height, event_index`,
+      format: 'JSONEachRow',
+    })
+    return res.json<{ block_height: number; event_index: number; extrinsic_index: number; contract: string; topics: string[]; data: string }>()
   })
-  if (!sends.length) return
-  const tuples = [...new Set(sends.map(r => `(${r.blockHeight},${r.extrinsicIndex})`))].join(',')
-  const res = await client.query({
-    query: `SELECT block_height, extrinsic_index,
-                   JSONExtractString(JSONExtractRaw(args_json,'log'),'topics') AS topics,
-                   JSONExtractString(JSONExtractRaw(args_json,'log'),'data') AS data
-            FROM price_data.raw_events
-            WHERE (block_height, extrinsic_index) IN (${tuples}) AND event_name = 'EVM.Log'`,
-    format: 'JSONEachRow',
-  })
-  const sentByExt = new Map<string, NttTransferSent>()
-  for (const log of await res.json<{ block_height: number; extrinsic_index: number; topics: string; data: string }>()) {
-    const topics = (safeJson(log.topics) ?? []) as string[]
-    if (!Array.isArray(topics)) continue
-    const sent = decodeNttTransferSent(topics, log.data)
-    if (sent) sentByExt.set(`${log.block_height}:${log.extrinsic_index}`, sent)
+  for (const log of chunks.flat()) {
+    const key = `${log.block_height}:${log.extrinsic_index}`
+    const entry = out.get(key) ?? { sent: [], redeemed: new Set<string>(), sourceChains: [] }
+    const topic0 = log.topics[0]?.toLowerCase()
+    if (topic0 === NTT_TRANSFER_REDEEMED_TOPIC) entry.redeemed.add(log.contract)
+    const sent = decodeNttTransferSent(log.topics, log.data)
+    if (sent) entry.sent.push({ manager: log.contract, sent })
+    const received = decodeNttReceivedMessage(log.topics, log.data)
+    if (received) entry.sourceChains.push(received.sourceChain)
+    out.set(key, entry)
   }
-  for (const r of sends) {
-    const sent = sentByExt.get(`${r.blockHeight}:${r.extrinsicIndex}`)
-    if (!sent) continue
-    const dest = nttDestination(sent)
-    const ref = dest ? externalChainRef(dest.urn, dest.account) : null
-    r.bridge = 'Wormhole'
-    // The minter is the burn address, not a counterparty worth naming — the reader's
-    // counterparty is who receives on the far chain.
-    r.to = null
-    if (ref) {
-      r.destChain = ref.chain
-      r.destParachainId = ref.paraId
-      r.destAccount = ref.account
+  return out
+}
+
+// Outbound NTT sends as cross-chain rows. The send's on-chain trace is an ordinary
+// transfer of the asset TO its registered minter (then a burn from it), so membership
+// is the same `(asset_id, to_account)` predicate the transfer family EXCLUDES by
+// (nttMinterLegExclusionSql) — one rule, two sides, so a leg is always exactly one of
+// the two families. The account-first read model indexes both parties, so the global
+// feed reads the MINTERS' own rows (a primary-key read of just the sends) and an
+// account page reads the viewed accounts'.
+//
+// The far end comes from the manager's TransferSent log, matched per extrinsic by
+// (manager, amount) with claim-once semantics for batched sends; a send whose log is
+// missing or ambiguous keeps an unresolved destination rather than a plausible one.
+async function getRecentNttOut(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
+  const tw = timeWindow(from, to)
+  const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
+  return cached(`explorer:ntt-out:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+    if (acctList === "''") return []
+    const minters = await nttMinterAccounts()
+    if (!minters.size) return []
+    const prices = await ensurePrices()
+    const tokenIds = assetIdsForToken(filters.token)
+    const scope = [...minters.keys()].filter(id => tokenIds == null || tokenIds.includes(id))
+    if (!scope.length) return []
+    const pairsSql = scope.map(id => `(${id},'${minters.get(id)!}')`).join(',')
+    const keyList = acctList ?? scope.map(id => `'${minters.get(id)!}'`).join(',')
+    const want = offset + limit
+    const fetchPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
+      const res = await client.query({
+        // The pallet mirrors of one send (Currencies.Transferred over Tokens.Transfer)
+        // collapse to the most specific event, exactly as the transfer feed dedupes —
+        // so the row keeps the (block, eventIndex) identity the leg had as a transfer.
+        query: `SELECT block_height, ts, event_index, extrinsic_index, from_acc, to_acc, amount, asset_id
+                FROM (
+                  SELECT DISTINCT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+                    from_account AS from_acc, to_account AS to_acc, amount, asset_id,
+                    multiIf(event_name = 'Currencies.Transferred', 3, event_name = 'Tokens.Transfer', 2, 1) AS priority
+                  FROM price_data.account_transfer_activity
+                  WHERE ${pageBound} AND account IN (${keyList})
+                    AND (asset_id, lower(to_account)) IN (${pairsSql})
+                  ORDER BY block_height DESC, priority DESC, event_index DESC
+                  LIMIT 1 BY block_height, extrinsic_index, asset_id, lower(from_acc), lower(to_acc), amount
+                )
+                ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
+        query_params: { limit: pageLimit }, format: 'JSONEachRow',
+      })
+      const legs = await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; from_acc: string; to_acc: string; amount: string; asset_id: number }>()
+      if (!legs.length) return []
+      const logs = await nttLogsFor(legs.filter(l => l.extrinsic_index != null).map(l => `${l.block_height}:${l.extrinsic_index}`))
+      const out: ActivityRow[] = []
+      for (const leg of legs) {
+        const a = asset(leg.asset_id)
+        const row: ActivityRow = {
+          type: 'xcm', blockHeight: leg.block_height, timestamp: leg.ts, eventIndex: leg.event_index, extrinsicIndex: leg.extrinsic_index,
+          who: leg.from_acc ? accountRef(leg.from_acc) : null, to: null, asset: a, assetIn: null, assetOut: null,
+          amount: leg.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, leg.amount, a.decimals),
+          xcmDir: 'out', bridge: 'Wormhole', linkBlock: leg.block_height, linkIndex: leg.extrinsic_index,
+        }
+        const manager = nttMinterH160(minters.get(leg.asset_id) ?? '')
+        const entry = leg.extrinsic_index != null ? logs.get(`${leg.block_height}:${leg.extrinsic_index}`) : undefined
+        const candidates = (entry?.sent ?? []).filter(s => s.manager === manager && !s.claimed)
+        const match = candidates.find(s => s.sent.amount === leg.amount) ?? (candidates.length === 1 ? candidates[0] : undefined)
+        if (match) {
+          match.claimed = true
+          const dest = nttDestination(match.sent)
+          const ref = dest ? externalChainRef(dest.urn, dest.account) : null
+          if (ref) {
+            row.destChain = ref.chain
+            row.destParachainId = ref.paraId
+            row.destAccount = ref.account
+          }
+        }
+        out.push(row)
+      }
+      await applyHistoricalUsd(out, activityHistPick)
+      return out
     }
-  }
+    const rows = await fetchFilteredDeep(
+      tw, want, fetchPage,
+      row => activityRowMatchesFilters(row, filters),
+      row => row.blockHeight, row => row.eventIndex ?? -1,
+      row => `${row.blockHeight}:${row.eventIndex}`,
+    )
+    return rows.slice(offset, offset + limit)
+  })
+}
+
+// Inbound NTT arrivals as cross-chain rows. An arrival is a MINT, not a transfer:
+// the user's tokens appear as a mirrored Currencies.Deposited in the redeem's SIGNED
+// extrinsic (fee refunds are bare Tokens.Deposited, treasury legs go to module
+// accounts — measured across every redeem indexed). A deposit only becomes a row when
+// the same extrinsic carries a TransferRedeemed log from THAT asset's own manager;
+// plain user deposits of the same assets outnumber real redeems ~250:1, so the log is
+// the classification, not an enrichment.
+//
+// The source CHAIN is the transceiver's ReceivedMessage word; the sending USER is in
+// the NTT payload (calldata, never logged), so no source account is shown — a named
+// chain with no pill is honest, an inferred pill would not be.
+async function getRecentNttIn(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
+  const tw = timeWindow(from, to)
+  const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
+  return cached(`explorer:ntt-in:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+    if (acctList === "''") return []
+    const minters = await nttMinterAccounts()
+    if (!minters.size) return []
+    const prices = await ensurePrices()
+    const tokenIds = assetIdsForToken(filters.token)
+    const scope = [...minters.keys()].filter(id => tokenIds == null || tokenIds.includes(id))
+    if (!scope.length) return []
+    const want = offset + limit
+    let pageState: { scanned: number; cursor: { blockHeight: number; eventIndex: number } | null } = { scanned: 0, cursor: null }
+    const fetchPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
+      const res = await client.query({
+        query: acctList
+          ? `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, who, asset_id, amount
+             FROM ${xcmEventActivityByAccountTable()}
+             WHERE ${pageBound} AND who IN (${acctList})
+               AND event_name = 'Currencies.Deposited' AND asset_id IN (${scope.join(',')})
+               AND extrinsic_index IS NOT NULL
+               AND NOT match(who, '${RESERVED_ACCOUNT_RE.source}')
+             ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`
+          : `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, who, asset_id, amount
+             FROM ${xcmEventActivityTable()}
+             WHERE ${pageBound}
+               AND event_name = 'Currencies.Deposited' AND asset_id IN (${scope.join(',')})
+               AND extrinsic_index IS NOT NULL
+               AND NOT match(who, '${RESERVED_ACCOUNT_RE.source}')
+             ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
+        query_params: { limit: pageLimit }, format: 'JSONEachRow',
+      })
+      const candidates = await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number; who: string; asset_id: number; amount: string }>()
+      const last = candidates.at(-1)
+      pageState = { scanned: candidates.length, cursor: last ? { blockHeight: last.block_height, eventIndex: last.event_index } : null }
+      if (!candidates.length) return []
+      const logs = await nttLogsFor(candidates.map(c => `${c.block_height}:${c.extrinsic_index}`))
+      const out: ActivityRow[] = []
+      for (const c of candidates) {
+        const entry = logs.get(`${c.block_height}:${c.extrinsic_index}`)
+        const manager = nttMinterH160(minters.get(c.asset_id) ?? '')
+        if (!entry || !entry.redeemed.has(manager)) continue
+        const a = asset(c.asset_id)
+        // One message names one chain; a batch of redeems from different chains names
+        // none for this row rather than guessing which message minted it.
+        const chains = [...new Set(entry.sourceChains)]
+        const origin = chains.length === 1 ? nttOriginChain(chains[0]) : null
+        out.push({
+          type: 'xcm', blockHeight: c.block_height, timestamp: c.ts, eventIndex: c.event_index, extrinsicIndex: c.extrinsic_index,
+          who: accountRef(c.who), to: null, asset: a, assetIn: null, assetOut: null,
+          amount: c.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, c.amount, a.decimals),
+          xcmDir: 'in', bridge: 'Wormhole', ...(origin ?? {}), linkBlock: c.block_height, linkIndex: c.extrinsic_index,
+        })
+      }
+      await applyHistoricalUsd(out, activityHistPick)
+      return out
+    }
+    const rows = await fetchFilteredDeep(
+      tw, want, fetchPage,
+      row => activityRowMatchesFilters(row, filters),
+      row => row.blockHeight, row => row.eventIndex ?? -1,
+      row => `${row.blockHeight}:${row.eventIndex}`,
+      { pageState: () => pageState },
+    )
+    return rows.slice(offset, offset + limit)
+  })
 }
 
 // Global money-market transactions (supply/borrow/repay/withdraw/liquidation) by
@@ -9728,6 +9945,46 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
     }
   }
 
+  // An NTT send or redeem extrinsic owns its transfer legs the way a swap or OTC fill
+  // does — the send/arrival renders as a cross-chain row (getRecentNttOut/In), so a
+  // transfer beside it is that row's plumbing. Sends are evidenced by the minter-leg
+  // itself (a primary-key read of the minters' own account-first rows), redeems by the
+  // manager's TransferRedeemed log.
+  const nttMinters = await nttMinterAccounts()
+  if (nttMinters.size && signedKeys.length) {
+    const pairsSql = [...nttMinters].map(([assetId, account]) => `(${assetId},'${account}')`).join(',')
+    const minterList = [...nttMinters.values()].map(a => `'${a}'`).join(',')
+    const managerList = [...nttMinters.values()].map(a => `'${nttMinterH160(a)}'`).join(',')
+    const nttChunks = await mapChunksConcurrently(signedKeys, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+      const tuples = chunk.map(key => { const [height, index] = key.split(':'); return `(${height},${index})` }).join(',')
+      const [sendRes, redeemRes] = await Promise.all([
+        client.query({
+          query: `SELECT DISTINCT block_height, extrinsic_index
+                  FROM price_data.account_transfer_activity
+                  WHERE account IN (${minterList})
+                    AND (block_height, extrinsic_index) IN (${tuples})
+                    AND (asset_id, lower(to_account)) IN (${pairsSql})`,
+          format: 'JSONEachRow',
+        }),
+        client.query({
+          query: `SELECT DISTINCT block_height, extrinsic_index
+                  FROM price_data.raw_evm_logs
+                  WHERE (block_height, extrinsic_index) IN (${tuples})
+                    AND topic0 = '${NTT_TRANSFER_REDEEMED_TOPIC}'
+                    AND lower(contract_address) IN (${managerList})`,
+          format: 'JSONEachRow',
+        }),
+      ])
+      return [...await sendRes.json<{ block_height: number; extrinsic_index: number | null }>(),
+        ...await redeemRes.json<{ block_height: number; extrinsic_index: number | null }>()]
+    })
+    for (const rows of nttChunks) {
+      for (const row of rows) {
+        if (row.extrinsic_index != null) semanticExtrinsics.add(`${row.block_height}:${row.extrinsic_index}`)
+      }
+    }
+  }
+
   // Incentive claims own their reward-pot transfer even though the semantic
   // evidence lives in the compact call model rather than an event.
   const incentiveKeys = transfers
@@ -10258,10 +10515,10 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     let sourceFilters = sourceValueFiltered
       ? filters
       : deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
-    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'staking' | 'vote'
+    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'nttOut' | 'nttIn' | 'staking' | 'vote'
     const classifiedSourceKeys: ClassifiedSourceKey[] = [
       'transfer', 'trade', 'dca', 'reward', 'liquidity', 'mm', 'otc',
-      'xcm', 'xcmIn', 'xcmOutRemote', 'staking', 'vote',
+      'xcm', 'xcmIn', 'xcmOutRemote', 'nttOut', 'nttIn', 'staking', 'vote',
     ]
     const exactSeedSize = activitySourceSeedSize(want)
     const exactSourceLimits = Object.fromEntries(classifiedSourceKeys.map(key => [key, sourceValueFiltered ? exactSeedSize : fetchN])) as Record<ClassifiedSourceKey, number>
@@ -10280,7 +10537,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       })
     }
     for (;;) {
-      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, staking, votes] = await Promise.all([
+      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, nttOut, nttIn, staking, votes] = await Promise.all([
         needsFullClassification
           ? loadClassifiedSource('transfer', (sourceLimit, sourceFrom) => getRecentTransfers(sourceLimit, sourceFrom, to, 0, true, sourceFilters))
           : Promise.resolve([]),
@@ -10310,6 +10567,12 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
           : Promise.resolve([]),
         needsFullClassification
           ? loadClassifiedSource('xcmOutRemote', (sourceLimit, sourceFrom) => getRecentXcmOutRemote(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
+          : Promise.resolve([]),
+        needsFullClassification
+          ? loadClassifiedSource('nttOut', (sourceLimit, sourceFrom) => getRecentNttOut(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
+          : Promise.resolve([]),
+        needsFullClassification
+          ? loadClassifiedSource('nttIn', (sourceLimit, sourceFrom) => getRecentNttIn(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
           : Promise.resolve([]),
         needsFullClassification
           ? loadClassifiedSource('staking', (sourceLimit, sourceFrom) => getRecentStaking(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
@@ -10371,6 +10634,8 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         { key: 'xcm', fetchSize: sourceFetchSize('xcm'), rawSize: xcm.length, rows: xcm, oldest: oldestOf(xcm) },
         { key: 'xcmIn', fetchSize: sourceFetchSize('xcmIn'), rawSize: xcmIn.length, rows: xcmIn, oldest: oldestOf(xcmIn) },
         { key: 'xcmOutRemote', fetchSize: sourceFetchSize('xcmOutRemote'), rawSize: xcmOutRemote.length, rows: xcmOutRemote, oldest: oldestOf(xcmOutRemote) },
+        { key: 'nttOut', fetchSize: sourceFetchSize('nttOut'), rawSize: nttOut.length, rows: nttOut, oldest: oldestOf(nttOut) },
+        { key: 'nttIn', fetchSize: sourceFetchSize('nttIn'), rawSize: nttIn.length, rows: nttIn, oldest: oldestOf(nttIn) },
       ]
       const sourcePages = type === 'trade'
         ? [allSources[1], allSources[2], allSources[8]]
@@ -10435,7 +10700,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     if (type === 'liquidity') rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters, action), ...(action === 'Claim' ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'liquidity') : [])]
     else if (type === 'mm') rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters, action)).filter(r => !isModuleAcct(r.who)), ...(action === 'ClaimRewards' ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'mm') : [])]
     else if (type === 'otc') rows = await getRecentOtc(fetchN, from, to, 0, filters, action)
-    else if (type === 'xcm') rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters)])).flat()
+    else if (type === 'xcm') rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters), getRecentNttOut(fetchN, from, to, undefined, 0, filters), getRecentNttIn(fetchN, from, to, undefined, 0, filters)])).flat()
     else if (type === 'staking') rows = await getRecentStaking(fetchN, from, to, undefined, 0, filters, undefined, action)
     else rows = (await getRecentVotes(fetchN, from, to, 0, {}, undefined, filters)).map(toVoteRow)
   } else if (type === 'liquidity') {
@@ -10445,7 +10710,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
   } else if (type === 'otc') {
     rows = await getRecentOtc(limit, from, to, offset, filters)
   } else if (type === 'xcm') {
-    rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters)])).flat()
+    rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters), getRecentNttOut(fetchN, from, to, undefined, 0, filters), getRecentNttIn(fetchN, from, to, undefined, 0, filters)])).flat()
   } else if (type === 'staking') {
     rows = await getRecentStaking(limit, from, to, undefined, offset, filters)
   } else {
@@ -11305,6 +11570,81 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
       }
     }
 
+    // Wormhole NTT legs, decoded from the events this read already holds — the same
+    // classification the feed builders apply (getRecentNttOut/getRecentNttIn): a
+    // transfer of an NTT asset to its registered minter is the send, and a mirrored
+    // Currencies.Deposited whose asset's manager logged TransferRedeemed here is the
+    // arrival's mint. The underlying transfer legs fold behind these rows through
+    // suppressActivityPlumbing, like every other family's plumbing.
+    const nttMinters = await nttMinterAccounts()
+    if (nttMinters.size) {
+      const sentLogs: NttSentLog[] = []
+      const redeemedManagers = new Set<string>()
+      const sourceChains: number[] = []
+      for (const e of events) {
+        if (e.event_name !== 'EVM.Log') continue
+        const log = ((safeJson(e.args_json) ?? {}) as { log?: { address?: string; topics?: string[]; data?: string } }).log
+        if (!log?.topics || !Array.isArray(log.topics)) continue
+        const contract = (log.address ?? '').toLowerCase()
+        if (log.topics[0]?.toLowerCase() === NTT_TRANSFER_REDEEMED_TOPIC) redeemedManagers.add(contract)
+        const sent = decodeNttTransferSent(log.topics, log.data ?? '')
+        if (sent) sentLogs.push({ manager: contract, sent })
+        const received = decodeNttReceivedMessage(log.topics, log.data ?? '')
+        if (received) sourceChains.push(received.sourceChain)
+      }
+      const seenNtt = new Set<string>()
+      for (const t of dedupeTransferEvents(transferRows.filter(leg => {
+        const minter = nttMinters.get(leg.asset_id)
+        return !!minter && leg.to_acc?.toLowerCase() === minter
+      }))) {
+        const key = `${t.block_height}:${t.event_index}`
+        if (seenNtt.has(key)) continue
+        seenNtt.add(key)
+        const a = asset(t.asset_id)
+        const row: ActivityRow = {
+          type: 'xcm', blockHeight: t.block_height, timestamp: t.ts, eventIndex: t.event_index, extrinsicIndex: t.extrinsic_index,
+          who: t.from_acc ? accountRef(t.from_acc) : null, to: null, asset: a, assetIn: null, assetOut: null,
+          amount: t.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, t.amount, a.decimals),
+          xcmDir: 'out', bridge: 'Wormhole', linkBlock: t.block_height, linkIndex: t.extrinsic_index,
+        }
+        const manager = nttMinterH160(nttMinters.get(t.asset_id) ?? '')
+        const candidates = sentLogs.filter(s => s.manager === manager && !s.claimed)
+        const match = candidates.find(s => s.sent.amount === t.amount) ?? (candidates.length === 1 ? candidates[0] : undefined)
+        if (match) {
+          match.claimed = true
+          const dest = nttDestination(match.sent)
+          const ref = dest ? externalChainRef(dest.urn, dest.account) : null
+          if (ref) {
+            row.destChain = ref.chain
+            row.destParachainId = ref.paraId
+            row.destAccount = ref.account
+          }
+        }
+        rows.push(row)
+      }
+      for (const e of events) {
+        if (e.event_name !== 'Currencies.Deposited') continue
+        const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
+        const who = argStr(args, 'who')
+        const cid = argInt(args, 'currencyId', 'currency_id')
+        const amount = argStr(args, 'amount')
+        const minter = nttMinters.get(cid)
+        if (!minter || !who || RESERVED_ACCOUNT_RE.test(who)) continue
+        if (!redeemedManagers.has(nttMinterH160(minter))) continue
+        const a = asset(cid)
+        // One message names one chain; a batch of redeems from different chains
+        // names none for this row rather than guessing which message minted it.
+        const chains = [...new Set(sourceChains)]
+        const origin = chains.length === 1 ? nttOriginChain(chains[0]) : null
+        rows.push({
+          type: 'xcm', blockHeight: e.block_height, timestamp: e.ts, eventIndex: e.event_index, extrinsicIndex: e.extrinsic_index,
+          who: accountRef(who), to: null, asset: a, assetIn: null, assetOut: null,
+          amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, amount, a.decimals),
+          xcmDir: 'in', bridge: 'Wormhole', ...(origin ?? {}), linkBlock: e.block_height, linkIndex: e.extrinsic_index,
+        })
+      }
+    }
+
     const liqRows = events
       .filter(e => LIQUIDITY_EVENTS.includes(e.event_name))
       .map(e => {
@@ -11874,6 +12214,9 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       const useTransferReadModel = true
       const transferAssetExpr = useTransferReadModel ? 'asset_id' : transferAssetIdSql()
       const transferValueFilter = eventValueFilterSql('{assetId:UInt32}', useTransferReadModel ? 'amount' : `JSONExtractString(args_json,'amount')`, 'block_timestamp', queryFilters, prices, 'asset_transfer_price')
+      // The asset's outbound Wormhole sends are its cross-chain rows (nttInP/nttOutP),
+      // not its transfers — same predicate both sides, so a leg is exactly one of the two.
+      const nttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts(), '{assetId:UInt32}')
       const res = await client.query({
         query: useTransferReadModel ? `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
@@ -11883,6 +12226,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
           WHERE ${bound} AND asset_id = {assetId:UInt32}
             AND from_account NOT LIKE '0x6d6f646c%'
             AND to_account NOT LIKE '0x6d6f646c%'
+            ${nttExclusion}
             ${transferValueFilter.predicateSql}
           ORDER BY block_height DESC, event_index DESC
           LIMIT {n:UInt32}` : `
@@ -12139,6 +12483,17 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
         .then(rows => rows.filter(row => row.asset?.assetId === assetId))
       : Promise.resolve([])
 
+    // Wormhole NTT sends and arrivals of this asset — the same builders every other
+    // surface uses, scoped by the token filter they already push into SQL.
+    const nttOutP: Promise<ActivityRow[]> = wantXcm
+      ? getRecentNttOut(fetchN, from, to, undefined, 0, { ...fixedAssetFilters, token: String(assetId) })
+        .then(rows => rows.filter(row => row.asset?.assetId === assetId))
+      : Promise.resolve([])
+    const nttInP: Promise<ActivityRow[]> = wantXcm
+      ? getRecentNttIn(fetchN, from, to, undefined, 0, { ...fixedAssetFilters, token: String(assetId) })
+        .then(rows => rows.filter(row => row.asset?.assetId === assetId))
+      : Promise.resolve([])
+
     // Money market: supply/borrow/repay/withdraw/liquidation on the asset's reserve.
     // The reserve is often not the queried id. For an aToken (aPRIME 1043) it is the
     // UNDERLYING asset (PRIME 43) — the MM activity for the aToken IS the
@@ -12261,7 +12616,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       linkIndex: v.extrinsicIndex,
     }))) : Promise.resolve([])
 
-    const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, mm, otc, staking, votes] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, mmP, otcP, stakingP, votesP])
+    const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, nttOut, nttIn, mm, otc, staking, votes] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, nttOutP, nttInP, mmP, otcP, stakingP, votesP])
     // Drop transfer legs of the asset's own trades (hops/fee legs share the extrinsic).
     const tradeExtrinsics = new Set(trades.filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
     const stakingExtrinsics = activityExtrinsicSet(staking)
@@ -12274,7 +12629,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)))
     const userTrades = dropShareRoutedTrades(trades, activityExtrinsicSet(liquidity))
     const userMm = mm.filter(r => !isModuleAcct(r.who))
-    let rows = await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...userMm, ...otc])
+    let rows = await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...nttOut, ...nttIn, ...userMm, ...otc])
     if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
     rows = rows.filter(r => activityRowMatchesAction(r, action))
     // The token key is meaningless here (the asset IS fixed); min applies the
@@ -12282,13 +12637,13 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
     rows = rows.filter(r => activityRowMatchesFilters(r, { ...filters, token: undefined }))
     rows.sort(compareActivityRowsNewestFirst)
-    const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, votes, xcm, xcmIn, xcmOutRemote, mm, otc]
+    const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, votes, xcm, xcmIn, xcmOutRemote, nttOut, nttIn, mm, otc]
       : type === 'transfer' ? [transfers]
         : type === 'trade' ? [trades, dcaFailures, otc]
           : type === 'liquidity' ? [liquidity, rewards]
             : type === 'mm' ? [mm, rewards]
               : type === 'otc' ? [otc]
-                : type === 'xcm' ? [xcm, xcmIn, xcmOutRemote]
+                : type === 'xcm' ? [xcm, xcmIn, xcmOutRemote, nttOut, nttIn]
                   : type === 'staking' ? [staking]
                     : [votes]
     if (rows.length < want && saturationSources.some(source => source.length >= fetchN)) throw activityQueryTooBroad()
@@ -13397,6 +13752,13 @@ async function transferCandidatePotFiltersSql(accCond: string[]): Promise<string
     const list = [...mmAccounts].map(a => `'${a}'`).join(',')
     parts.push(`AND from_account NOT IN (${list}) AND to_account NOT IN (${list})`)
   }
+  // A transfer of an NTT asset to its minter is an outbound Wormhole send — the
+  // cross-chain family's row (getRecentNttOut), which the enumerated sources count and
+  // render for every account including the minter's own. No viewing exception here,
+  // unlike the pots above: their legs have no other row to live in, this one does, so
+  // an exception would render the same leg twice.
+  const nttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts())
+  if (nttExclusion) parts.push(nttExclusion)
   return parts.join('\n                ')
 }
 
@@ -13709,12 +14071,15 @@ interface EnumeratedActivity {
   staking: ActivityRow[]
   votes: ActivityRow[]
   xcm: ActivityRow[]
+  // Wormhole NTT sends and arrivals — cross-chain rows like xcm's, kept as their own
+  // slot because their reads, caps and builders are their own.
+  ntt: ActivityRow[]
 }
 
 // Every enumerated row. All of them are non-transfer, so a transfer feed needs each
 // one's extrinsic or hook owner to decide which transfers are its plumbing.
 function enumeratedActivityAll(e: EnumeratedActivity): ActivityRow[] {
-  return [...e.otc, ...e.dcaFailures, ...e.rewards, ...e.staking, ...e.votes, ...e.xcm]
+  return [...e.otc, ...e.dcaFailures, ...e.rewards, ...e.staking, ...e.votes, ...e.xcm, ...e.ntt]
 }
 
 // Which enumerated sources one type's feed needs. Exactly the `want*` flags
@@ -13727,7 +14092,7 @@ function enumeratedActivityAll(e: EnumeratedActivity): ActivityRow[] {
 // therefore produce the same array, as do `liquidity` and `mm` with their one. That is
 // why the cache key names the SOURCE SET rather than the type — two types that read the
 // same history share one entry instead of reading it twice under two names.
-const ENUMERATED_SOURCE_NAMES = ['otc', 'dcaFailures', 'rewards', 'staking', 'votes', 'xcm'] as const
+const ENUMERATED_SOURCE_NAMES = ['otc', 'dcaFailures', 'rewards', 'staking', 'votes', 'xcm', 'ntt'] as const
 type EnumeratedSourceName = typeof ENUMERATED_SOURCE_NAMES[number]
 function enumeratedSourceNeed(type: string): Record<EnumeratedSourceName, boolean> {
   const wantTransfers = type === 'all' || type === 'transfer'
@@ -13739,6 +14104,7 @@ function enumeratedSourceNeed(type: string): Record<EnumeratedSourceName, boolea
     staking: type === 'all' || type === 'staking' || wantTransfers,
     votes: type === 'all' || type === 'vote' || wantTransfers,
     xcm: type === 'all' || type === 'xcm' || wantTransfers,
+    ntt: type === 'all' || type === 'xcm' || wantTransfers,
   }
 }
 
@@ -13810,7 +14176,7 @@ async function enumeratedActivityRowsUncached(
   const depth = EXACT_SMALL_SOURCE_ROWS + 1
   const xcmDepth = EXACT_XCM_SOURCE_ROWS + 1
   const need = enumeratedSourceNeed(type)
-  const [otc, dcaFailures, rewards, staking, votes, xcmLegs] = await Promise.all([
+  const [otc, dcaFailures, rewards, staking, votes, xcmLegs, nttLegs] = await Promise.all([
     need.otc ? getRecentOtc(depth, from, to, 0, {}, undefined, accounts) : [],
     need.dcaFailures ? getRecentDcaFailures(depth, from, to, accounts) : [],
     need.rewards ? getRecentRewardClaims(depth, from, to, accounts) : [],
@@ -13823,13 +14189,18 @@ async function enumeratedActivityRowsUncached(
       getRecentXcmIn(xcmDepth, from, to, accounts, 0, {}),
       getRecentXcmOutRemote(xcmDepth, from, to, accounts, 0, {}),
     ]) : [],
+    need.ntt ? Promise.all([
+      getRecentNttOut(depth, from, to, accounts, 0, {}),
+      getRecentNttIn(depth, from, to, accounts, 0, {}),
+    ]) : [],
   ])
   const capped: [ActivityRow[], number][] = [
     [otc, depth], [dcaFailures, depth], [rewards, depth], [staking, depth], [votes, depth],
     ...xcmLegs.map(leg => [leg, xcmDepth] as [ActivityRow[], number]),
+    ...nttLegs.map(leg => [leg, depth] as [ActivityRow[], number]),
   ]
   if (capped.some(([rows, cap]) => rows.length >= cap)) return null
-  return { otc, dcaFailures, rewards, staking, votes, xcm: xcmLegs.flat() }
+  return { otc, dcaFailures, rewards, staking, votes, xcm: xcmLegs.flat(), ntt: nttLegs.flat() }
 }
 
 // Which types this path can count exactly, in the order the reasoning above splits
@@ -14277,6 +14648,10 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     // The read-model form of all three exclusions, shared verbatim with the count arm
     // so the rows it counts and the rows this reads can never be a different set.
     const readModelPotFilters = await transferCandidatePotFiltersSql(accCond)
+    // The raw-events spelling of the NTT minter-leg exclusion the read-model path
+    // carries inside its pot filters (see transferCandidatePotFiltersSql).
+    const rawNttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts(),
+      transferAssetIdSql(), `JSONExtractString(args_json,'to')`)
     const readTransfers = async (refsFilter: string): Promise<RawTransferEventRow[]> => {
       const res = await client.query({
         query: useTransferReadModel
@@ -14303,6 +14678,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
                 AND NOT match(JSONExtractString(args_json,'to'), '^0x(7369626c|70617261|506172656e74)')
                 ${poolLegFilter}
                 ${mmLegFilter}
+                ${rawNttExclusion}
                 ${transferTokenFilter}
                 ${transferAmountFilter.predicateSql}
               ORDER BY block_height DESC, event_index DESC
@@ -14576,9 +14952,15 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   // 6. Cross-chain (XCM) transfers sent (outbound) or received (inbound) by this account.
   // Each XCM leg has its own window, so saturation is per leg: the concatenation
   // reaching catFetch says nothing about whether any single leg was exhausted.
-  const xcmLegs = exact ? [exact.enumerated.xcm]
+  const xcmLegs = exact ? [exact.enumerated.xcm, exact.enumerated.ntt]
     : wantXcm
-    ? await Promise.all([getRecentXcm(catFetch, from, to, accounts, 0, queryFilters), getRecentXcmIn(catFetch, from, to, accounts, 0, queryFilters), getRecentXcmOutRemote(catFetch, from, to, accounts, 0, queryFilters)])
+    ? await Promise.all([
+      getRecentXcm(catFetch, from, to, accounts, 0, queryFilters),
+      getRecentXcmIn(catFetch, from, to, accounts, 0, queryFilters),
+      getRecentXcmOutRemote(catFetch, from, to, accounts, 0, queryFilters),
+      getRecentNttOut(catFetch, from, to, accounts, 0, queryFilters),
+      getRecentNttIn(catFetch, from, to, accounts, 0, queryFilters),
+    ])
     : []
   for (const leg of xcmLegs) noteSource(leg.length, oldestWindowBlock(leg, r => r.blockHeight))
   const xcm = xcmLegs.flat()
@@ -18671,9 +19053,30 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
         const otcAction = resolveOtcAction(filters.action)
         const names = otcAction && OTC_ACTION_EVENTS[otcAction] ? OTC_ACTION_EVENTS[otcAction] : OTC_EVENT_NAMES
         query = daily('raw_events', `event_name IN (${sqlNames(names)})`)
-      } else if (type === 'xcm')
-        query = daily('raw_xcm_activity', '', '(block_height, source_index)')   // assets_json empty → token filter N/A
-      else {
+      } else if (type === 'xcm') {
+        // raw_xcm_activity counts queue messages; Wormhole NTT is not XCM and leaves no
+        // message, so its sends (the minter-leg identity the feed dedupes to) and
+        // arrivals (one TransferRedeemed per mint) are counted from their own traces.
+        // assets_json is empty and the NTT arms mirror the feed's own classification →
+        // token filter N/A here, as before.
+        const minters = await nttMinterAccounts()
+        const nttArms = minters.size ? `
+          UNION ALL SELECT toString(toDate(block_timestamp)) AS d,
+              toUInt64(uniqExact(tuple(block_height, ifNull(extrinsic_index, 4294967295), asset_id, lower(from_account), lower(to_account), amount))) AS v
+            FROM price_data.account_transfer_activity
+            WHERE ${since} AND account IN (${[...minters.values()].map(a => `'${a}'`).join(',')})
+              AND (asset_id, lower(to_account)) IN (${[...minters].map(([id, acc]) => `(${id},'${acc}')`).join(',')})
+            GROUP BY d
+          UNION ALL SELECT toString(toDate(block_timestamp)) AS d, toUInt64(uniqExact((block_height, event_index))) AS v
+            FROM price_data.raw_evm_logs
+            WHERE ${since} AND topic0 = '${NTT_TRANSFER_REDEEMED_TOPIC}'
+              AND lower(contract_address) IN (${[...minters.values()].map(a => `'${nttMinterH160(a)}'`).join(',')})
+            GROUP BY d` : ''
+        query = `SELECT d, toUInt64(sum(v)) AS v FROM (
+            ${daily('raw_xcm_activity', '', '(block_height, source_index)')}
+            ${nttArms}
+          ) GROUP BY d ORDER BY d`
+      } else {
         // 'all' — union of raw_events categories; OR each category's own token
         // predicate so the count mirrors the merged activity for the selected token.
         const allEvents = sqlNames([...TRANSFER_EVENTS, ...SWAP_EVENTS, ...LIQUIDITY_EVENTS, ...VOTE_EVENTS, ...STAKING_EVENT_NAMES, ...OTC_EVENT_NAMES])

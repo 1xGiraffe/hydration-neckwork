@@ -72,7 +72,7 @@ describe('the chunked reads are not serial', () => {
     const sites = explorerService.match(/mapChunksConcurrently\(/g) ?? []
     const bound = explorerService.match(/CHUNK_QUERY_CONCURRENCY/g) ?? []
 
-    expect(sites).toHaveLength(22)
+    expect(sites).toHaveLength(24)
     // The shared bound, plus its own declaration. Every site takes it: a site with
     // a hand-rolled concurrency is the thing this count exists to catch.
     expect(bound).toHaveLength(sites.length + 1)
