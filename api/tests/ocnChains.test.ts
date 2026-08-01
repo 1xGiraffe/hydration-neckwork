@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { decodeNttTransferSent, nttDestination, ocnChainName, originTxExplorerUrl } from '../src/services/explorerService.ts'
+import { decodeNttReceivedMessage, decodeNttTransferSent, nttDestination, nttMinterLegExclusionSql, nttOriginChain, ocnChainName, originTxExplorerUrl } from '../src/services/explorerService.ts'
 
 // A journey's ends are named by Ocelloids URNs, and a bridge can put either end on a
 // chain this app has no other reason to know. Two things then go wrong quietly: the
@@ -98,6 +98,75 @@ describe('decodeNttTransferSent', () => {
     expect(decodeNttTransferSent([topic, sender, recipient], '0x00')).toBeNull()
     // Without a bytes32 recipient there is no account to show.
     expect(decodeNttTransferSent([topic, sender], data)).toBeNull()
+  })
+})
+
+// The transceiver's ReceivedMessage is what marks an extrinsic as an NTT redeem, and
+// its second data word is the only place the source CHAIN is stated on this side. The
+// sending USER is not in any log — it lives in the NTT payload, which is calldata —
+// so the decode deliberately yields no source account.
+//
+// Decoded from a real arrival: SUI from Sui (chain 21) at block 13405201.
+describe('decodeNttReceivedMessage', () => {
+  const topic = '0xf6fc529540981400dc64edf649eb5e2e0eb5812a27f8c81bac2c1d317e71a5f0'
+  const digest = 'b7cf11ac1b0c576f84db64a0b0a1ff64b28662e1b83315678489bca472af401d'
+  const emitter = '25437da9f99dfab32c1a275663f51cd5c99eb867ab4d1f630e3799c5e68215da'
+  const data = '0x' + digest
+    + '0000000000000000000000000000000000000000000000000000000000000015'
+    + emitter
+    + '0000000000000000000000000000000000000000000000000000000000000001'
+
+  it('reads the source chain of a real arrival', () => {
+    expect(decodeNttReceivedMessage([topic], data)).toEqual({ sourceChain: 21 })
+  })
+
+  it('ignores any other log', () => {
+    expect(decodeNttReceivedMessage(['0x' + '11'.repeat(32)], data)).toBeNull()
+    // A payload too short to hold the chain word names no chain.
+    expect(decodeNttReceivedMessage([topic], '0x' + digest)).toBeNull()
+  })
+})
+
+describe('nttOriginChain', () => {
+  it('names the source chain in the fields inbound rows carry', () => {
+    expect(nttOriginChain(21)).toEqual({ fromChain: 'Sui', fromParachainId: null })
+    expect(nttOriginChain(1)).toEqual({ fromChain: 'Solana', fromParachainId: null })
+    expect(nttOriginChain(2)).toEqual({ fromChain: 'Ethereum', fromParachainId: null })
+    expect(nttOriginChain(16)).toEqual({ fromChain: 'Moonbeam', fromParachainId: 2004 })
+  })
+
+  it('yields nothing for a chain it does not know, rather than a plausible wrong one', () => {
+    expect(nttOriginChain(9999)).toBeNull()
+  })
+})
+
+// The minter-leg exclusion every transfer read site and the transfer count arm share:
+// a transfer of an NTT asset TO its registered minter is that asset's outbound send,
+// which the feed renders as a cross-chain row, so the transfer family must not also
+// count or show it. Stated as one SQL fragment so the sites cannot drift.
+describe('nttMinterLegExclusionSql', () => {
+  const minters = new Map([
+    [20, '0x45544800b5cef790d52a57fa619ed96edd64c5328f3dcfb70000000000000000'],
+    [18, '0x45544800cfd576f88c90844aebf45378fd09931281d8b14d0000000000000000'],
+  ])
+
+  it('excludes exactly the (asset, minter) pairs', () => {
+    const sql = nttMinterLegExclusionSql(minters)
+    expect(sql).toContain('NOT IN')
+    expect(sql).toContain("(20,'0x45544800b5cef790d52a57fa619ed96edd64c5328f3dcfb70000000000000000')")
+    expect(sql).toContain("(18,'0x45544800cfd576f88c90844aebf45378fd09931281d8b14d0000000000000000')")
+    expect(sql).toContain('toUInt32(asset_id)')
+    expect(sql).toContain('lower(to_account)')
+  })
+
+  it('takes per-site column expressions', () => {
+    const sql = nttMinterLegExclusionSql(minters, "JSONExtractInt(args_json,'currencyId')", "JSONExtractString(args_json,'to')")
+    expect(sql).toContain("toUInt32(JSONExtractInt(args_json,'currencyId'))")
+    expect(sql).toContain("lower(JSONExtractString(args_json,'to'))")
+  })
+
+  it('excludes nothing when no minter is registered', () => {
+    expect(nttMinterLegExclusionSql(new Map())).toBe('')
   })
 })
 

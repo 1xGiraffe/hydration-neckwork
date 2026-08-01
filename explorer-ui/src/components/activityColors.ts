@@ -166,13 +166,10 @@ export function activityBadge(r: ActivityRow): { label: string; col: string } {
     const a = r.otcAction
     return { label: 'OTC ' + (a ?? 'order').toLowerCase(), col: OTC_COLORS[a ?? ''] ?? CAT.tradePlace }
   }
-  // A transfer that carries a bridge left the chain: Wormhole NTT burns the token here
-  // and mints it on the far chain, which reads as a transfer to the burn address and is
-  // emphatically not one. Naming the bridge is the honest label; the row still lives in
-  // the transfer family, because that is where it is counted and addressed from.
-  if (r.type === 'transfer') return r.bridge
-    ? { label: r.bridge, col: CAT.xcm }
-    : { label: 'Transfer', col: CAT.transfer }
-  if (r.type === 'xcm') return { label: 'Cross-chain', col: CAT.xcm }
+  if (r.type === 'transfer') return { label: 'Transfer', col: CAT.transfer }
+  // A cross-chain row that knows its bridge names it — "Wormhole" or "Snowbridge"
+  // says how the transfer crossed, which "Cross-chain" only implies. Same family,
+  // colour and filters either way.
+  if (r.type === 'xcm') return { label: r.bridge ?? 'Cross-chain', col: CAT.xcm }
   return { label: 'Activity', col: 'var(--text-medium)' }
 }
