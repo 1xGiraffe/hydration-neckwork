@@ -113,7 +113,11 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
           const primaryMarket = mmList.find(p => p.role === 'primary') ?? mmList.find(p => p.marketKey === 'core')
           const primarySupplyUsd = Number(primaryMarket?.totalSuppliedBase ?? primaryMarket?.totalCollateralBase ?? 0) / 1e8
           const primaryDebtUsd = Number(primaryMarket?.totalDebtBase ?? 0) / 1e8
-          const supplementalDebtUsd = mmList.filter(p => p !== primaryMarket).reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
+          // One entry per supplemental market that actually carries debt, so the
+          // hint names each market (GIGAHDX, BIL, …) instead of one blended figure.
+          const supplementalDebts = mmList
+            .filter(p => p !== primaryMarket && Number(p.totalDebtBase) > 0)
+            .map(p => ({ key: p.marketKey, label: p.market, usd: Number(p.totalDebtBase) / 1e8 }))
           const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
@@ -125,10 +129,9 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
                   <div className="full"><span className="muted">{members.length} accounts</span></div>
                 </div>
                 <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} valueUsd={data.portfolioUsd - debtUsd} valueHint={
-                  (primaryDebtUsd > 0 || supplementalDebtUsd > 0) && <div className="hint">
+                  (primaryDebtUsd > 0 || supplementalDebts.length > 0) && <div className="hint">
                       {primaryDebtUsd > 0 && <>primary {F.usd(primarySupplyUsd)} lent · −{F.usd(primaryDebtUsd)} borrowed</>}
-                      {primaryDebtUsd > 0 && supplementalDebtUsd > 0 && <span aria-hidden="true"> · </span>}
-                      {supplementalDebtUsd > 0 && <span className="mm-secondary-debt">GIGAHDX debt −{F.usd(supplementalDebtUsd)}</span>}
+                      {supplementalDebts.map((m, i) => <span key={m.key}>{(primaryDebtUsd > 0 || i > 0) && <span aria-hidden="true"> · </span>}<span className="mm-secondary-debt">{m.label} debt −{F.usd(m.usd)}</span></span>)}
                     </div>
                 } />
               </div>
