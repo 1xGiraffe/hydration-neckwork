@@ -12,6 +12,9 @@ import type { RawEvmLogRow } from '../../src/raw/types.ts'
 
 const USER = '0xf34e845538cc8a498edd97d7cde16fdfef3d4d99'
 const RESERVE = '0x00000000000000000000000000000000000003e8'
+// A contract that supplies for others (the BIL issuer's shape) and one of its depositors.
+const VAULT = '0x646fd203bbcf19b35d79f58413bb07450fdbb1db'
+const DEPOSITOR = '0x90d2066823691dec57aabb0c493b7dc8a788d4a5'
 
 function supplyLog(contractAddress = '0x1b02e051683b5cfac5929c25e84adb26ecf87b38'): RawEvmLogRow {
   return {
@@ -257,6 +260,64 @@ describe('raw Money Market rows', () => {
     expect(rows.positions[0].pool_address).toBe(BIL_POOL_PROXY)
     const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body) as { params: Array<{ to: string }> }
     expect(body.params[0].to).toBe(BIL_POOL_PROXY)
+  })
+
+  // Aave names the SUPPLYING contract `user` and the account receiving the aTokens
+  // `onBehalfOf`, so a vault that supplies for its depositors would otherwise own every
+  // one of their positions. This is how the BIL vault deposits HOLLAR: one issuer
+  // contract calling supply() for each buyer in turn.
+  it('attributes a supply routed through a vault to the beneficiary, not the caller', async () => {
+    // Two participants means a batched eth_call, so answer each request by its id.
+    const accountData = `0x${[1000n, 200n, 800n, 8500n, 7500n, 5_000_000_000_000_000_000n]
+      .map(value => value.toString(16).padStart(64, '0'))
+      .join('')}`
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const body = JSON.parse((init as { body: string }).body) as { id: string } | Array<{ id: string }>
+      const requests = Array.isArray(body) ? body : [body]
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => requests.map(r => ({ id: r.id, result: accountData })),
+      } as unknown as Response
+    })
+
+    const log = supplyLog(BIL_POOL_PROXY)
+    log.decoded_args_json = JSON.stringify({
+      reserve: RESERVE,
+      user: VAULT,
+      onBehalfOf: DEPOSITOR,
+      amount: '1000',
+      referralCode: '0',
+    })
+    log.participants = [VAULT, DEPOSITOR]
+
+    const rows = await extractMoneyMarketRows([log], 'test')
+
+    expect(rows.events).toHaveLength(1)
+    expect(rows.events[0].user_address).toBe(DEPOSITOR)
+    // account_id and the position link follow user_address, so both must move with it.
+    expect(rows.events[0].account_id).toContain(DEPOSITOR.slice(2))
+    expect(rows.events[0].position_observation_id).toContain(DEPOSITOR)
+    // The caller stays discoverable — it is still a participant of the event.
+    expect(rows.events[0].participants).toContain(VAULT)
+    // A position is observed for the beneficiary, so the link above resolves.
+    expect(rows.positions.map(p => p.user_address)).toContain(DEPOSITOR)
+  })
+
+  // Withdraw and Repay carry no onBehalfOf: there `user` IS the position owner, and
+  // reordering the lookup must not disturb them.
+  it('keeps attributing a withdraw to its own user', async () => {
+    const log = supplyLog(BIL_POOL_PROXY)
+    log.event_name = 'Withdraw'
+    log.event_signature = 'Withdraw(address,address,address,uint256)'
+    log.decoded_args_json = JSON.stringify({ reserve: RESERVE, user: DEPOSITOR, to: VAULT, amount: '1000' })
+    log.participants = [DEPOSITOR, VAULT]
+
+    const rows = await extractMoneyMarketRows([log], 'test', { skipPositions: true })
+
+    expect(rows.events).toHaveLength(1)
+    expect(rows.events[0].user_address).toBe(DEPOSITOR)
   })
 
   it('routes both BIL market a-token contracts to the BIL pool', async () => {
