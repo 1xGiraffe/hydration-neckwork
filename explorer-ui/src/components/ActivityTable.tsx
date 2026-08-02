@@ -192,8 +192,10 @@ export function ActivityBadge({ r }: { r: ActivityRow }) {
   const { label, col } = badge(r)
   const supplementalMarket = r.type === 'mm' && r.mmMarketKey && r.mmMarketKey !== 'core' ? r.mmMarket : null
   const partial = r.type === 'otc' && r.otcPartial ? 'partial' : null
-  // GIGAHDX is a brand-black market, so its marker is the one filled black chip.
-  const marketClass = supplementalMarket === 'GIGAHDX' ? ' mm-market-gigahdx' : ''
+  // Branded supplemental markets wear their own filled chip: GIGAHDX its brand
+  // black, BIL the green-and-yellow of the Brazilian receivables behind it.
+  const marketClass = supplementalMarket === 'GIGAHDX' ? ' mm-market-gigahdx'
+    : supplementalMarket === 'BIL' ? ' mm-market-bil' : ''
   return <span className="activity-badge-group"><span className="pill-badge" style={{ color: col, background: `color-mix(in srgb, ${col} 15%, transparent)` }}>{label}</span>{supplementalMarket && <span className={`mm-activity-market${marketClass}`}>{supplementalMarket}</span>}{partial && <span className="mm-activity-market">{partial}</span>}</span>
 }
 
