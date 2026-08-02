@@ -17,6 +17,16 @@ const ATOKEN = '0xc0df4c545bafa1788a4ee55f79704d12fc2c7b5c'
 // means fresh installs and future raw workers cannot silently miss its logs.
 export const GIGAHDX_POOL_PROXY = '0x2ce2cfff743cdb6637f4b5d351937a541b8c8923'
 export const GIGAHDX_ATOKEN = '0x6b9ac524ec8f08c49ec80176b138d16eb461c3d8'
+// Third isolated market: BIL (Decentral × DUX Group Brazilian invoice-factoring
+// RWA, live 2026-08-01). Its reserves are uBIL — the receivables underlying —
+// and HOLLAR, the deposit leg. BIL itself (registry asset 55) is this pool's
+// aToken over uBIL (550): the liquid receipt that compounds the fixed yield.
+export const BIL_POOL_PROXY = '0x69310fda58c819ad82df7d2cb61841c853337a53'
+export const BIL_ATOKEN = '0x8184e2f7c477d165772c21f7a2dbbb61a76e7fc4'
+// The market's aToken over its HOLLAR reserve. Unlike HOLLAR itself (shared,
+// stays with core) this contract belongs to exactly this market, so routing it
+// here sends its Transfer position triggers to the right pool.
+export const BIL_HOLLAR_ATOKEN = '0xef313c2baf19ce58eeb6df9c82ae41c7387afe3e'
 const HOLLAR = '0x531a654d1696ed52e7275a8cede955e82620f99a'
 const POOL_ADDRESS_PROVIDER = '0xf3ba4d1b50f78301bdd7eaea9b67822a15fca691'
 const UI_POOL_DATA_PROVIDER = '0x112b087b60c1a166130d59266363c45f8aa99db0'
@@ -58,6 +68,12 @@ const GIGAHDX_MARKET: MoneyMarketDef = {
   key: 'gigahdx',
   poolProxy: GIGAHDX_POOL_PROXY,
   contracts: new Set([GIGAHDX_POOL_PROXY, GIGAHDX_ATOKEN]),
+}
+
+const BIL_MARKET: MoneyMarketDef = {
+  key: 'bil',
+  poolProxy: BIL_POOL_PROXY,
+  contracts: new Set([BIL_POOL_PROXY, BIL_ATOKEN, BIL_HOLLAR_ATOKEN]),
 }
 
 const SHARED_MM_CONTRACTS = new Set([
@@ -105,7 +121,7 @@ const MONEY_MARKETS: MoneyMarketDef[] = (() => {
   const out: MoneyMarketDef[] = []
   const pools = new Set<string>()
   const keys = new Set<string>()
-  for (const market of [CORE_MARKET, GIGAHDX_MARKET, ...parseExtraMarkets()]) {
+  for (const market of [CORE_MARKET, GIGAHDX_MARKET, BIL_MARKET, ...parseExtraMarkets()]) {
     if (pools.has(market.poolProxy) || keys.has(market.key)) continue
     pools.add(market.poolProxy)
     keys.add(market.key)
