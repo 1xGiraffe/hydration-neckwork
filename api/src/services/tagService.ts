@@ -118,6 +118,8 @@ export function allTags(): Tag[] {
 const HDX_ICON = 'https://cdn.jsdelivr.net/gh/galacticcouncil/intergalactic-asset-metadata@master/v2/polkadot/2034/assets/0/icon.svg'
 // The HOLLAR token icon (asset 222 on the same CDN), used by the HOLLAR tags.
 const HOLLAR_ICON = 'https://cdn.jsdelivr.net/gh/galacticcouncil/intergalactic-asset-metadata@master/v2/polkadot/2034/assets/222/icon.svg'
+// The BIL token icon (asset 55 on the same CDN), used by the BIL issuer tag.
+const BIL_ICON = 'https://cdn.jsdelivr.net/gh/galacticcouncil/intergalactic-asset-metadata@master/v2/polkadot/2034/assets/55/icon.svg'
 
 // Tags are a fixed, code-defined set — there is no create/edit/delete API. This is
 // the canonical definition; an empty `icon` derives the avatar from the first
@@ -236,6 +238,22 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     note: 'Money-market incentives reward pot — the vault the rewards controller pays claimed lending incentives from',
     icon: '🎁',
     addresses: [INCENTIVES_REWARD_POT],
+  },
+  {
+    // Primary issuance of BIL (Decentral × DUX Group invoice-receivables RWA):
+    // this operator wallet is the `caller` of every uBIL supply into the isolated
+    // BIL market, minting BIL straight to each buyer via onBehalfOf — including
+    // the launch seed the treasury passed on to the stableswap pool. It keeps no
+    // balance of its own, so untagged it reads as an anonymous busy EOA rather
+    // than the issuance bot behind every primary BIL sale. Color is the BIL
+    // market's bandeira green (see .mm-market-bil in explorer-ui).
+    tagId: 'bil-issuer', name: 'BIL Issuer', color: '#009739',
+    note: 'BIL issuance operation (Decentral × DUX Group): the operator wallet that supplies uBIL into the isolated BIL market on buyers’ behalf, minting BIL directly to them, and the distribution wallet the treasury passed the launch supply to, which seeded the BIL/HOLLAR stableswap pool',
+    icon: BIL_ICON,
+    addresses: [
+      '0x646fd203bbcf19b35d79f58413bb07450fdbb1db', // issuance operator (supply caller)
+      '0x15304c8f6921694c608312a7a16948454a578df0', // distribution wallet (launch supply → stableswap seed)
+    ],
   },
 ]
 
