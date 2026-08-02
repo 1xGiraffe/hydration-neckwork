@@ -1440,6 +1440,11 @@ svg { display: block; }
    it keeps a hairline edge rather than being lightened off-brand. */
 .mm-activity-market.mm-market-gigahdx { background: #000; border-color: #000; color: #fff; }
 :root[data-theme="dark"] .mm-activity-market.mm-market-gigahdx { border-color: rgba(255,255,255,0.3); }
+/* BIL is Brazilian invoice receivables, so its chip wears the flag: bandeira
+   green fill with a yellow edge. Text stays white — flag yellow on flag green
+   is far below AA contrast at this 9px size, so the yellow is the trim, not
+   the type. The same pairing reads on both themes; no dark override needed. */
+.mm-activity-market.mm-market-bil { background: #009739; border-color: #fedd00; color: #fff; }
 /* Top-holding token icons in the Holdings column (accounts list) and hover cards. */
 .holdings-cell { vertical-align: middle; white-space: nowrap; }
 .token-icons { display: inline-flex; align-items: center; gap: 3px; }
