@@ -148,14 +148,17 @@ export const ATOKEN_UNDERLYING_ID: Record<number, number> = {
   1046: 46,       // aapyUSD→ apyUSD
   1816: 816,      // aSIGIL → SIGIL (no price feed yet, included for completeness)
   67: 670,        // GIGAHDX→ stHDX (the gigahdx market's aToken — HDX staking receipt)
+  55: 550,        // BIL    → uBIL (the bil market's aToken — Brazilian invoice receivables)
   ...envIdMap('EXPLORER_EXTRA_ATOKEN_UNDERLYING'),
 }
 
-// aTokens normally borrow their reserve asset's artwork (aDOT → DOT). GIGA-branded
-// tokens are the exception: they ship their own CDN icon, so they must NOT alias to
-// the underlying's — GIGAHDX's underlying stHDX has no icon at all, which is why the
-// alias left GIGAHDX iconless. Price aliasing (priceAssetId) is unaffected.
-const OWN_ICON_ASSET_IDS = new Set<number>([67]) // GIGAHDX
+// aTokens normally borrow their reserve asset's artwork (aDOT → DOT). Branded
+// product tokens are the exception: they ship their own CDN icon, so they must NOT
+// alias to the underlying's — GIGAHDX's underlying stHDX has no icon at all, which
+// is why the alias left GIGAHDX iconless, and BIL's own art is the listed brand
+// while uBIL's marks the wrapped receivable. Price aliasing (priceAssetId) is
+// unaffected.
+const OWN_ICON_ASSET_IDS = new Set<number>([67, 55]) // GIGAHDX, BIL
 export function iconAssetIdFor(assetId: number): number {
   return OWN_ICON_ASSET_IDS.has(assetId) ? assetId : (ATOKEN_UNDERLYING_ID[assetId] ?? assetId)
 }
@@ -247,6 +250,15 @@ const DUPLICATE_PRICE_ALIAS_ID: Record<number, number> = {
   // 1:1 and drifts up only as staking yield accrues, so the HDX price is a
   // tight floor for it (and transitively for GIGAHDX, its aToken).
   670: 0,        // stHDX         → HDX
+  // BIL inverts the usual aToken direction: the aToken IS the liquid traded leg
+  // (HSM/router trades quote BIL directly) while its underlying uBIL never
+  // trades. The self-entry overrides the ATOKEN_UNDERLYING_ID spread so BIL
+  // keeps its own feed, and uBIL — an Aave underlying, always 1:1 with its
+  // rebasing aToken — values through it. Without the self-entry the pair would
+  // alias in both directions and priceAssetId's hop bound would leave uBIL
+  // resolving to itself, unpriced.
+  55: 55,        // BIL           → itself (own feed)
+  550: 55,       // uBIL          → BIL
 }
 // Every asset that should be priced via another asset (aTokens + pool shares).
 export const PRICE_ALIAS_ID: Record<number, number> = { ...ATOKEN_UNDERLYING_ID, ...SHARE_TOKEN_UNDERLYING_ID, ...DUPLICATE_PRICE_ALIAS_ID }
