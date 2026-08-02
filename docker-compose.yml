@@ -298,7 +298,8 @@ services:
     networks:
       - neckwork
 
-  # Refresh sparse GIGAHDX positions more often than the exhaustive primary sweep.
+  # Refresh sparse supplemental-market (GIGAHDX, BIL) positions more often than
+  # the exhaustive primary sweep.
   mm-supplemental-snapshot:
     image: hydration-neckwork-indexer:latest
     build: .
@@ -318,7 +319,7 @@ services:
       - RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS=${RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS:-20000}
     command:
       - src/scripts/snapshot-money-market.ts
-      - --market=gigahdx
+      - --market=gigahdx,bil
       - --loop
       - --refresh-minutes=${MM_SUPPLEMENTAL_SNAPSHOT_MINUTES:-15}
     networks:
