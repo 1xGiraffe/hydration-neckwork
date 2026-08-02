@@ -89,9 +89,11 @@ describe('primary-first Money Market presentation', () => {
     expect(html).toContain('/polkadot/2034/assets/22/icon.svg')
   })
 
-  it('counts all isolated money markets as one position family', () => {
+  // The Positions tab renders one card per isolated market, so the badge counts
+  // one per market — an account lending in core, GIGAHDX and BIL shows 3, not 1.
+  it('counts one position per isolated money market', () => {
     expect(mmPositionCount([])).toBe(0)
-    expect(mmPositionCount([position(), supplemental])).toBe(1)
+    expect(mmPositionCount([position(), supplemental])).toBe(2)
   })
 
   it('shares profile debt and tab calculations between accounts and tags', () => {
@@ -100,7 +102,7 @@ describe('primary-first Money Market presentation', () => {
     expect(profileTabs(3, markets, 2, 1, { total: 42, complete: true }, 7)).toEqual([
       { key: 'overview', label: 'Overview' },
       { key: 'balances', label: 'Balances', count: 3 },
-      { key: 'positions', label: 'Positions', count: 4 },
+      { key: 'positions', label: 'Positions', count: 5 },
       { key: 'activity', label: 'Activity', count: 42, countAtLeast: false },
       { key: 'votes', label: 'Votes', count: 7 },
     ])

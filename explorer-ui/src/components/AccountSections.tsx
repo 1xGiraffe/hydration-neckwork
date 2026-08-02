@@ -186,11 +186,12 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
   )
 }
 
-// Money markets are one position family in the account navigation. Isolated
-// markets remain separate inside that family, without making the tab count look
-// like the account has several unrelated supply/borrow products.
+// One count per isolated market: the API aggregates money market positions to
+// one entry per market (core, GIGAHDX, BIL, …), and the Positions tab renders
+// one card per entry — so the tab badge counts what the tab shows. Collapsing
+// the family to 1 undercounted every multi-market account and tag.
 export function mmPositionCount(markets: MoneyMarketPosition[]): number {
-  return markets.length > 0 ? 1 : 0
+  return markets.length
 }
 
 export function moneyMarketDebtUsd(markets: MoneyMarketPosition[]): number {
