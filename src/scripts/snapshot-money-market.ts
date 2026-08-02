@@ -26,7 +26,7 @@ import { hasFlag, integerOption, stringOption } from '../util/cliArgs.js'
 // Usage:
 //   npx tsx src/scripts/snapshot-money-market.ts [--dry-run] [--loop] [--refresh-hours=6]
 //   npx tsx src/scripts/snapshot-money-market.ts --market=gigahdx
-//   npx tsx src/scripts/snapshot-money-market.ts --market=gigahdx --loop --refresh-minutes=15
+//   npx tsx src/scripts/snapshot-money-market.ts --market=gigahdx,bil --loop --refresh-minutes=15
 
 interface BlockHeader { number: string }
 
@@ -35,7 +35,12 @@ const loop = hasFlag('loop')
 const refreshHours = integerOption('refresh-hours', 6)
 const refreshMinutes = integerOption('refresh-minutes', 0)
 const insertBatch = integerOption('insert-batch', 5_000)
+// One key, or a comma-separated list so a single supplemental worker can sweep
+// every sparse market (--market=gigahdx,bil) without duplicating the container.
 const requestedMarket = stringOption('market')
+const requestedMarketKeys = requestedMarket == null
+  ? null
+  : new Set(requestedMarket.split(',').map(key => key.trim()).filter(key => key !== ''))
 
 const client = createClickHouseClient()
 const rpc = new RpcClient({
@@ -136,8 +141,10 @@ async function runOnce(): Promise<void> {
   const head = await chainHead()
   const timestamp = toClickHouseDateTime(Date.now())
   const allMarkets = moneyMarketDefinitions()
-  const markets = requestedMarket == null ? allMarkets : allMarkets.filter(market => market.key === requestedMarket)
-  if (!markets.length) throw new Error(`unknown money market: ${requestedMarket}`)
+  const markets = requestedMarketKeys == null ? allMarkets : allMarkets.filter(market => requestedMarketKeys.has(market.key))
+  if (!markets.length || (requestedMarketKeys != null && markets.length !== requestedMarketKeys.size)) {
+    throw new Error(`unknown money market: ${requestedMarket}`)
+  }
   const primary = markets.find(market => market.key === 'core')
   const accounts = primary ? await loadAllAccounts() : []
   const h160s: string[] = []
@@ -223,7 +230,7 @@ async function main(): Promise<void> {
     return
   }
   // Service mode: let the balance snapshot seed accounts first, sweep, then repeat.
-  if (requestedMarket == null || requestedMarket === 'core') await waitForAccountsSeeded()
+  if (requestedMarketKeys == null || requestedMarketKeys.has('core')) await waitForAccountsSeeded()
   const intervalMs = refreshMinutes > 0
     ? Math.max(5, refreshMinutes) * 60_000
     : Math.max(1, refreshHours) * 3_600_000
