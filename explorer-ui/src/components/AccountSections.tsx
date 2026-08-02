@@ -315,8 +315,9 @@ function MoneyMarketReserveColumns({ mm }: { mm: MoneyMarketPosition }) {
 }
 
 // Non-primary market labels that map to a registered asset get its CDN icon
-// next to the label (GIGAHDX → asset 67, the token the market is named after).
-const MARKET_ICON_ASSET: Record<string, number> = { gigahdx: 67 }
+// next to the label (GIGAHDX → asset 67, BIL → asset 55 — the token each
+// market is named after).
+const MARKET_ICON_ASSET: Record<string, number> = { gigahdx: 67, bil: 55 }
 
 // Every market gets the full position treatment; only the primary market is
 // allowed to deep-link into DefiSim.
