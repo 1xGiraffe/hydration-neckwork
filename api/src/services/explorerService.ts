@@ -3088,6 +3088,14 @@ const GIGAHDX_MM_MARKET: ApiMmMarket = {
   key: 'gigahdx', label: 'GIGAHDX', poolProxy: '0x2ce2cfff743cdb6637f4b5d351937a541b8c8923',
   role: 'supplemental', defiSimSupported: false, stakingBacked: true,
 }
+// Isolated BIL market (Decentral × DUX Group invoice factoring): uBIL + HOLLAR
+// reserves, BIL (asset 55) as the uBIL reserve's aToken. Deposits are ordinary
+// EVM pool supplies — no staking pallet moves collateral — so unlike GIGAHDX it
+// is not staking-backed and its Supply/Withdraw rows are real user acts.
+const BIL_MM_MARKET: ApiMmMarket = {
+  key: 'bil', label: 'BIL', poolProxy: '0x69310fda58c819ad82df7d2cb61841c853337a53',
+  role: 'supplemental', defiSimSupported: false, stakingBacked: false,
+}
 function envMmMarkets(): ApiMmMarket[] {
   const raw = process.env.EXPLORER_MM_MARKETS?.trim()
   if (!raw) return []
@@ -3115,7 +3123,7 @@ function envMmMarkets(): ApiMmMarket[] {
 const MM_MARKETS: ApiMmMarket[] = (() => {
   const seen = new Set<string>(); const out: ApiMmMarket[] = []
   const keys = new Set<string>()
-  for (const m of [CORE_MM_MARKET, GIGAHDX_MM_MARKET, ...envMmMarkets()]) {
+  for (const m of [CORE_MM_MARKET, GIGAHDX_MM_MARKET, BIL_MM_MARKET, ...envMmMarkets()]) {
     if (!seen.has(m.poolProxy) && !keys.has(m.key)) { seen.add(m.poolProxy); keys.add(m.key); out.push(m) }
   }
   return out
