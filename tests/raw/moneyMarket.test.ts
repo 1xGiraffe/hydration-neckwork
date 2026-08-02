@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  BIL_ATOKEN,
+  BIL_HOLLAR_ATOKEN,
+  BIL_POOL_PROXY,
   DEFAULT_RAW_EVM_RPC_URL,
   GIGAHDX_POOL_PROXY,
   extractMoneyMarketRows,
@@ -232,6 +235,47 @@ describe('raw Money Market rows', () => {
       current_market_contracts: { pool: GIGAHDX_POOL_PROXY },
     })
     expect(result.positions).toHaveLength(0)
+  })
+
+  it('attributes BIL market pool logs to the BIL pool and routes the position read there', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({
+        result: `0x${[1000n, 200n, 800n, 8500n, 7500n, 5_000_000_000_000_000_000n]
+          .map(value => value.toString(16).padStart(64, '0'))
+          .join('')}`,
+      }),
+    } as unknown as Response)
+
+    const rows = await extractMoneyMarketRows([supplyLog(BIL_POOL_PROXY)], 'test')
+
+    expect(rows.events).toHaveLength(1)
+    expect(rows.events[0].pool_address).toBe(BIL_POOL_PROXY)
+    expect(rows.positions).toHaveLength(1)
+    expect(rows.positions[0].pool_address).toBe(BIL_POOL_PROXY)
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body) as { params: Array<{ to: string }> }
+    expect(body.params[0].to).toBe(BIL_POOL_PROXY)
+  })
+
+  it('routes both BIL market a-token contracts to the BIL pool', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({
+        result: `0x${[1000n, 200n, 800n, 8500n, 7500n, 5_000_000_000_000_000_000n]
+          .map(value => value.toString(16).padStart(64, '0'))
+          .join('')}`,
+      }),
+    } as unknown as Response)
+
+    for (const contract of [BIL_ATOKEN, BIL_HOLLAR_ATOKEN]) {
+      const rows = await extractMoneyMarketRows([supplyLog(contract)], 'test')
+      expect(rows.positions).toHaveLength(1)
+      expect(rows.positions[0].pool_address).toBe(BIL_POOL_PROXY)
+    }
   })
 })
 
