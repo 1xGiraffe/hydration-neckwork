@@ -670,7 +670,13 @@ export async function extractMoneyMarketRows(
     const market = marketForContract(row.contract_address)
     if (marketFilter != null && !marketFilter.has(market.key)) continue
     const args = parseDecodedArgs(row)
-    const userAddress = addressArg(args, ['user', 'onBehalfOf', 'from', 'to', 'owner', 'account', 'caller', 'repayer', 'liquidator', 'backer', 'target'])
+    // `onBehalfOf` outranks `user`: Aave names the CALLER `user` and the account that
+    // receives the aTokens or the debt `onBehalfOf`. They differ only when a contract
+    // acts for someone else — the BIL issuer supplying HOLLAR for each depositor — and
+    // there the position belongs to the beneficiary, not the vault that moved it. Only
+    // Supply, Borrow, MintUnbacked and Mint carry the field, and it is the owner in all
+    // four; Withdraw and Repay have no `onBehalfOf`, so `user` still wins there.
+    const userAddress = addressArg(args, ['onBehalfOf', 'user', 'from', 'to', 'owner', 'account', 'caller', 'repayer', 'liquidator', 'backer', 'target'])
     const assetAddress = addressArg(args, ['reserve', 'asset', 'underlyingAsset', 'collateralAsset', 'debtAsset', 'oldDelegatedToken', 'newDelegatedToken'])
     const amount = stringArg(args, ['amount', 'value', 'debtToCover', 'liquidatedCollateralAmount', 'amountMinted', 'bucketCapacity', 'newLevel'])
     const participants = uniqueAddresses([
