@@ -7293,6 +7293,7 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
     const postFilter = filters.min != null
     const want = offset + limit
     const fetchPage = async (bound: string, pageLimit: number, pageOffset: number): Promise<ActivityRow[]> => {
+      const routerHop = routerHopLiquiditySql(bound, assetExpr)
       const res = await client.query({
         query: `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
@@ -7304,10 +7305,12 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
             asset_refs AS asset_refs
           FROM price_data.liquidity_activity
           ${amountFilter.joinSql}
+          ${routerHop.joinSql}
           WHERE ${bound}
             AND event_name IN (${sqlEventNameList(liqEvents)})
             ${tokenRefsFilter}
             AND who NOT LIKE '0x6d6f646c%'
+            ${routerHop.predicateSql}
             ${tokenFilter}
             ${amountFilter.predicateSql}
           ORDER BY block_height DESC, event_index DESC
@@ -11819,6 +11822,7 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
       }
     }
 
+    const liqRouteEndpoints = routerRouteEndpoints(events)
     const liqRows = events
       .filter(e => LIQUIDITY_EVENTS.includes(e.event_name))
       .map(e => {
@@ -11836,6 +11840,8 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
           event_index: e.event_index,
         }
       })
+      .filter(r => !isRouterHopLiquidity(r.event_name, r.who, r.asset_id,
+        r.extrinsic_index == null ? undefined : liqRouteEndpoints.get(r.extrinsic_index)))
     await fillMissingLiquidityAmounts(liqRows)
     const createCands: { row: ActivityRow; pool: string; assetB: number }[] = []
     for (const r of liqRows) {
@@ -12016,14 +12022,20 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
       if (seen.has(key)) return false
       seen.add(key)
       return true
+    }).filter(r => {
+      // A module account never lends or borrows as a user: the router executor's Aave
+      // hops are route plumbing, which is why every enumerated feed drops them through
+      // `userMm`. Unconditional here for the same reason — a routed trade emits those
+      // hops whether or not the route also passed through a stablepool, so gating this
+      // on a surviving liquidity row surfaced them the moment routerHopLiquiditySql
+      // removed the pool leg.
+      return !(r.type === 'mm' && isModuleAcct(r.who))
     }).filter((r, _i, all) => {
-      // Consolidate liquidity-routed mechanics: when this extrinsic carries a
-      // liquidity add/remove, the share-asset swap legs and the pool proxy's
-      // money-market churn are that action's plumbing, not separate activities.
+      // Consolidate liquidity-routed mechanics: when this extrinsic carries a liquidity
+      // add/remove, routing into or out of the pool share is that action's own mechanics
+      // rather than a separate trade — the mirror of dropShareRoutedTrades.
       if (!all.some(x => x.type === 'liquidity')) return true
-      if (r.type === 'trade' && ((r.assetIn && isShareAssetId(r.assetIn.assetId)) || (r.assetOut && isShareAssetId(r.assetOut.assetId)))) return false
-      if (r.type === 'mm' && isModuleAcct(r.who)) return false
-      return true
+      return !(r.type === 'trade' && ((r.assetIn && isShareAssetId(r.assetIn.assetId)) || (r.assetOut && isShareAssetId(r.assetOut.assetId))))
     }))
     await Promise.all([applyHistoricalUsd(deduped, activityHistPick), applyXcmJourneys(deduped)])
     return deduped
@@ -12532,9 +12544,11 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
             asset_b AS asset_b,
             pool_account AS pool_acc
           FROM price_data.liquidity_activity
+          ${routerHopLiquiditySql(pageBound).joinSql}
           WHERE ${pageBound}
             AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
             AND who NOT LIKE '0x6d6f646c%'
+            ${routerHopLiquiditySql(pageBound).predicateSql}
             AND has(asset_refs, {assetId:UInt32})
           ORDER BY block_height DESC, event_index DESC
           LIMIT {n:UInt32}`,
@@ -13835,6 +13849,78 @@ function liquidityWhoOrPoolSql(list: string): string {
   return `(who IN (${list}) OR (pool_account IN (${list}) AND event_name IN (${sqlEventNameList([...POOL_LIFECYCLE_EVENTS])})))`
 }
 
+// The router uses a stablepool's add_liquidity / remove_liquidity_one_asset as a SWAP
+// primitive: a route hop converting an asset into the pool's share token (or back) emits
+// Stableswap.LiquidityAdded/LiquidityRemoved although nobody provided liquidity. The user's
+// economic action is the route's net trade, so the hop is plumbing (Router.buy 0→10 whose
+// second hop drains the 4-Pool is a trade, not a withdrawal). Only Stableswap is affected —
+// no XYK liquidity event and no module-attributed Omnipool one shares an extrinsic with a
+// router summary, verified chain-wide.
+//
+// Attribution changed with the 2025 router, so a hop is recognised two ways:
+//   - it is attributed to the router executor's own module account; or
+//   - (legacy) it is attributed to the trader and is row-wise identical to a real
+//     single-asset removal, so it is a hop when the extrinsic emitted a router net summary
+//     and the pool's share token is not one of that route's endpoints — an intermediate
+//     share is minted and burned inside the route and never lands anywhere.
+// A share token that IS a route endpoint stays a liquidity row: buying GDOT with DOT really
+// does add liquidity, and dropShareRoutedTrades already drops the mirroring share-legged
+// trade. Endpoints are compared after displayAssetId, since a route names GDOT (69) while
+// its pool emits the 2-Pool-GDOT (690) share.
+const STABLESWAP_LIQUIDITY_EVENTS = ['Stableswap.LiquidityAdded', 'Stableswap.LiquidityRemoved'] as const
+const STABLESWAP_LIQUIDITY_EVENT_SET: ReadonlySet<string> = new Set(STABLESWAP_LIQUIDITY_EVENTS)
+
+function shareTokenFoldSql(assetExpr: string): string {
+  const pairs = Object.entries(SHARE_TOKEN_UNDERLYING_ID)
+  if (!pairs.length) return assetExpr
+  return `transform(${assetExpr}, [${pairs.map(([share]) => share).join(',')}], [${pairs.map(([, main]) => main).join(',')}], ${assetExpr})`
+}
+
+// Shared verbatim by every liquidity_activity read that renders or counts rows, so the
+// feeds cannot classify a hop differently from each other. Returns a JOIN/predicate pair
+// rather than a bare predicate because the route endpoints live in a sibling event: the
+// subquery's columns are renamed so unqualified references in the caller stay unambiguous.
+// It has to run BEFORE the caller's LIMIT — 1.38M of the 1.41M Stableswap liquidity events
+// are router hops, so filtering finished pages would empty them and desync every count.
+function routerHopLiquiditySql(bound: string, assetExpr = 'asset_id'): { joinSql: string; predicateSql: string } {
+  return {
+    joinSql: `LEFT JOIN (
+          SELECT block_height AS rh_block, extrinsic_index AS rh_ext,
+                 groupArray(asset_in) AS rh_route_in, groupArray(asset_out) AS rh_route_out
+          FROM price_data.swap_activity
+          WHERE ${bound} AND event_name IN (${ROUTER_NET_EVENTS_SQL}) AND extrinsic_index IS NOT NULL
+          GROUP BY block_height, extrinsic_index
+        ) rh ON block_height = rh.rh_block AND extrinsic_index = rh.rh_ext`,
+    predicateSql: `AND NOT (event_name IN (${sqlEventNameList([...STABLESWAP_LIQUIDITY_EVENTS])})
+            AND (who LIKE '0x6d6f646c%'
+                 OR (length(rh_route_in) > 0
+                     AND NOT has(arrayConcat(rh_route_in, rh_route_out), ${shareTokenFoldSql(assetExpr)}))))`,
+  }
+}
+
+// The in-memory mirror of routerHopLiquiditySql, for the block/extrinsic builders that
+// already hold every event of the block and so need no second query.
+function routerRouteEndpoints(events: readonly { extrinsic_index: number | null; event_name: string; args_json: string }[]): Map<number, Set<number>> {
+  const byExtrinsic = new Map<number, Set<number>>()
+  for (const e of events) {
+    if (e.extrinsic_index == null || !isRouterNet(e.event_name)) continue
+    const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
+    const endpoints = byExtrinsic.get(e.extrinsic_index) ?? new Set<number>()
+    for (const side of ['assetIn', 'assetOut'] as const) {
+      const id = Number(args[side])
+      if (Number.isFinite(id)) endpoints.add(displayAssetId(id))
+    }
+    byExtrinsic.set(e.extrinsic_index, endpoints)
+  }
+  return byExtrinsic
+}
+
+export function isRouterHopLiquidity(eventName: string, who: string, assetId: number, routeEndpoints: ReadonlySet<number> | undefined): boolean {
+  if (!STABLESWAP_LIQUIDITY_EVENT_SET.has(eventName)) return false
+  if (who.startsWith('0x6d6f646c')) return true
+  return routeEndpoints != null && !routeEndpoints.has(displayAssetId(assetId))
+}
+
 // Liquidity provision/removal/mining claims: one row per source row, exactly the
 // event list the page read uses, narrowed to the events whose action label the request
 // asked for.
@@ -13851,9 +13937,12 @@ function liquidityWhoOrPoolSql(list: string): string {
 function accountLiquidityArm(list: string, bound: string, eventNames: readonly string[], tokenIds?: number[]): ActivityCountArm {
   if (!eventNames.length) return emptyActivityCountArm()
   const tokenFilter = armTokenFilter(tokenIds, ids => `hasAny(asset_refs, [${ids}])`)
+  const routerHop = routerHopLiquiditySql(bound)
   return `SELECT block_height, count() AS rows FROM price_data.liquidity_activity
+    ${routerHop.joinSql}
     WHERE ${bound} AND ${liquidityWhoOrPoolSql(list)}
       AND event_name IN (${sqlEventNameList([...eventNames])})
+      ${routerHop.predicateSql}
       ${tokenFilter}
     GROUP BY block_height`
 }
@@ -15049,9 +15138,11 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
                 pool_account AS pool_acc,
                 asset_refs AS asset_refs
               FROM price_data.liquidity_activity
+              ${routerHopLiquiditySql(pageBound, liquidityAssetExpr).joinSql}
               WHERE ${pageBound}
                 AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
                 AND ${liquidityWhoOrPoolSql(list)}
+                ${routerHopLiquiditySql(pageBound, liquidityAssetExpr).predicateSql}
                 ${liquidityTokenFilter}
               ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
         query_params: { n: pageLimit },
