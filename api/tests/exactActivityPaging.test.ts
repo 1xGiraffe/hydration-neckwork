@@ -290,7 +290,7 @@ describe('POOL_LIFECYCLE_EVENTS confines the pool_account admission arm', () => 
     }
     // The page read is a closure inside collectAccountActivity, not a top-level
     // function `body()` can extract by name — assert its call site directly.
-    expect(explorerService).toContain('AND ${liquidityWhoOrPoolSql(list)}\n                ${liquidityTokenFilter}')
+    expect(explorerService).toContain('AND ${liquidityWhoOrPoolSql(list)}\n                ${routerHopLiquiditySql(pageBound, liquidityAssetExpr).predicateSql}\n                ${liquidityTokenFilter}')
   })
 })
 
