@@ -2037,17 +2037,26 @@ function transferEventPriority(name: string): number {
   return 1
 }
 
-function dedupeTransferEvents<T extends RawTransferEventRow>(rows: T[]): T[] {
+// One side of a transfer identity. Accounts are compared as their 20-byte
+// runtime truncation — the same key the ERC-20 balance models use — because a
+// single movement can arrive in two account forms: an ERC-20-backed asset's
+// contract log names the truncation, the substrate event names the full
+// AccountId32. Comparing full ids would make those two rows different
+// identities and render the movement twice.
+function transferLegAccount(account: string): string {
+  return historyH160(account) ?? account.toLowerCase()
+}
+
+export function dedupeTransferEvents<T extends RawTransferEventRow>(rows: T[]): T[] {
+  const identity = (r: RawTransferEventRow): string =>
+    `${r.block_height}|${r.extrinsic_index ?? -1}|${r.asset_id}|${transferLegAccount(r.from_acc)}|${transferLegAccount(r.to_acc)}|${r.amount}`
   const maxPriority = new Map<string, number>()
   for (const r of rows) {
-    const key = `${r.block_height}|${r.extrinsic_index ?? -1}|${r.asset_id}|${r.from_acc.toLowerCase()}|${r.to_acc.toLowerCase()}|${r.amount}`
     const p = transferEventPriority(r.event_name)
+    const key = identity(r)
     if (p > (maxPriority.get(key) ?? 0)) maxPriority.set(key, p)
   }
-  return rows.filter(r => {
-    const key = `${r.block_height}|${r.extrinsic_index ?? -1}|${r.asset_id}|${r.from_acc.toLowerCase()}|${r.to_acc.toLowerCase()}|${r.amount}`
-    return transferEventPriority(r.event_name) === maxPriority.get(key)
-  })
+  return rows.filter(r => transferEventPriority(r.event_name) === maxPriority.get(identity(r)))
 }
 
 // Money-market protocol accounts (aToken/vDebt/pool contracts) in truncated-
