@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { closingNetEvent, groupSwapRows, onBehalfActor, routeGroups, routeStartAfter, tradeRowKey, type RawSwapEventRow } from '../src/services/explorerService.ts'
+import { closingNetEvent, groupSwapRows, onBehalfActor, routeGroups, routeStartAfter, swapRouteReps, tradeRowKey, type RawSwapEventRow } from '../src/services/explorerService.ts'
 
 // A swap event as the read model returns it — the feed reads them newest-first, so
 // within an extrinsic the rows arrive in DESCENDING event order.
@@ -69,6 +69,65 @@ describe('swap rows group per route, not per extrinsic', () => {
   it('preserves the order the rows arrived in', () => {
     const rows = [ev(67, 'Router.Executed', 1110, 222, ''), ev(42, 'Router.Executed', 1111, 222, '')]
     expect(keysOf(rows)).toEqual(['100:x3:r67', '100:x3:r42'])
+  })
+})
+
+// The account, tag and asset feeds each rebuild trade rows from an extrinsic's swap
+// events. They grouped them by EXTRINSIC while the global, block and extrinsic
+// surfaces grouped them per route, so a batch holding two routes rendered one trade
+// on those three and two everywhere else.
+//
+// Hydration 1NgtyLSJ… is an arbitrage bot whose every trade is a batch_all of two
+// Router sells forming a closed loop (sell A→B down one route, sell B→A back down
+// another). Its account page showed only the closing leg of all 826 loops, and its
+// trade tab reported 953 complete against 1,772 real routes.
+describe('a route representative is picked per route, not per extrinsic', () => {
+  // Hydration 13443514-2: 25.115130 USDC → aUSDT via Stableswap+Aave, then straight
+  // back aUSDT → 25.206258 USDC via a different pool chain. Two trades, not one.
+  const loop = [
+    ev(76, 'Router.Executed', 1002, 22, ''),
+    ev(70, 'Stableswap.SellExecuted', 222, 110),
+    ev(60, 'Stableswap.SellExecuted', 1002, 222),
+    ev(33, 'Router.Executed', 22, 1002, ''),
+    ev(20, 'Stableswap.SellExecuted', 22, 102),
+  ]
+
+  it('splits an arbitrage loop into both of its legs', () => {
+    expect(swapRouteReps(loop).map(r => [r.event_index, r.asset_in, r.asset_out]))
+      .toEqual([[76, 1002, 22], [33, 22, 1002]])
+  })
+
+  it('represents each route by its own net summary, not a hop', () => {
+    expect(swapRouteReps(loop).map(r => r.event_name)).toEqual(['Router.Executed', 'Router.Executed'])
+  })
+
+  it('keeps a single multi-hop route as one trade', () => {
+    const rows = [ev(137, 'Router.Executed', 5, 10, ''), ev(135, 'XYK.SellExecuted', 25, 10), ev(129, 'XYK.SellExecuted', 5, 129)]
+    expect(swapRouteReps(rows).map(r => r.event_index)).toEqual([137])
+  })
+
+  it('gives a trailing direct swap its own representative', () => {
+    const rows = [ev(157, 'Omnipool.SellExecuted', 102, 5), ev(137, 'Router.Executed', 5, 10, '')]
+    expect(swapRouteReps(rows).map(r => r.event_index)).toEqual([157, 137])
+  })
+
+  it('keys a pallet-internal swap per event, so hook swaps sharing a block stay distinct', () => {
+    const rows = [ev(9, 'Omnipool.SellExecuted', 5, 10, ROUTER, null), ev(4, 'Omnipool.SellExecuted', 10, 5, ROUTER, null)]
+    expect(swapRouteReps(rows).map(r => r.event_index)).toEqual([9, 4])
+  })
+
+  // The asset feed prefers a net summary only when it touches the asset whose page it
+  // is: a multi-hop route's net legs need not include an asset one of its hops traded.
+  it('falls back to the leading row when the net summary misses the asset', () => {
+    const rows = [ev(137, 'Router.Executed', 5, 10, ''), ev(135, 'XYK.SellExecuted', 25, 10), ev(129, 'XYK.SellExecuted', 5, 25)]
+    const touches25 = (r: RawSwapEventRow) => r.asset_in === 25 || r.asset_out === 25
+    expect(swapRouteReps(rows, touches25).map(r => r.event_index)).toEqual([137])
+    // …and the preference applies within the route, never across routes.
+    expect(swapRouteReps(loop, r => r.asset_in === 22 || r.asset_out === 22).map(r => r.event_index)).toEqual([76, 33])
+  })
+
+  it('returns nothing for no events', () => {
+    expect(swapRouteReps([])).toEqual([])
   })
 })
 

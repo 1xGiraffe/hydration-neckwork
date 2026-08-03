@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { accountSwapGroupKey } from '../src/services/explorerService.ts'
 
 const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
 const tables = readFileSync(new URL('../../clickhouse/schema/001_tables.sql', import.meta.url), 'utf8')
@@ -72,29 +71,38 @@ describe('attachHookSwapActors — one resolution shared by every surface', () =
   })
 })
 
-// An extrinsic groups all its swap events into one trade. A hook swap has no
-// extrinsic, so its own event is its identity: the Treasury has put six separate
-// swaps in one block, and grouping them under a shared null rendered — and counted
-// — exactly one of them.
-describe('accountSwapGroupKey — what makes one swap row distinct', () => {
-  it('groups by extrinsic when there is one, by event when there is not', () => {
-    expect(accountSwapGroupKey(9589594, 2, 17)).toBe('9589594:2')
-    expect(accountSwapGroupKey(9589594, 2, 59)).toBe('9589594:2')   // same extrinsic, one trade
-    expect(accountSwapGroupKey(9589594, null, 17)).not.toBe(accountSwapGroupKey(9589594, null, 59))
-  })
-
+// An extrinsic's swap events are collected together, then split into their routes. A
+// hook swap has no extrinsic, so its own event is its identity: the Treasury has put
+// six separate swaps in one block, and collecting them under a shared null rendered —
+// and counted — exactly one of them.
+describe('swap events are collected per extrinsic, hook swaps per event', () => {
   // Extrinsic indices are non-negative, so the negative space a hook row uses can
   // never collide with a real extrinsic in the same block.
   it('cannot collide a hook swap with an extrinsic', () => {
-    const hookKeys = [17, 59, 82, 114, 146, 183].map(ev => accountSwapGroupKey(9589594, null, ev))
-    const extrinsicKeys = [0, 1, 2, 3].map(xi => accountSwapGroupKey(9589594, xi, 0))
+    const key = (extrinsicIndex: number | null, eventIndex: number) => extrinsicIndex ?? -eventIndex - 1
+    const hookKeys = [17, 59, 82, 114, 146, 183].map(ev => key(null, ev))
+    const extrinsicKeys = [0, 1, 2, 3].map(xi => key(xi, 0))
     expect(new Set([...hookKeys, ...extrinsicKeys]).size).toBe(hookKeys.length + extrinsicKeys.length)
   })
 
-  // The page read and its count arm must group identically, or the tab counts rows
-  // it will not render.
-  it('is the same identity the SQL uses on both sides', () => {
+  it('is the collection key the SQL uses, in the page read and its count arm alike', () => {
     expect(explorerService).toMatch(/const SWAP_GROUP_KEY_SQL = 'ifNull\(toInt64\(extrinsic_index\), -toInt64\(event_index\) - 1\)'/)
-    expect(explorerService.match(/\$\{SWAP_GROUP_KEY_SQL\}/g)?.length).toBeGreaterThanOrEqual(3)
+    expect(explorerService.match(/\$\{SWAP_GROUP_KEY_SQL\}/g)?.length).toBeGreaterThanOrEqual(2)
+  })
+
+  // The page read and its count arm must arrive at the same trades, or the tab counts
+  // rows it will not render. Both split collected events into routes; neither may
+  // reduce an extrinsic to a single row before that split. `LIMIT 1 BY` over the
+  // collection key is exactly that mistake, and it undercounted a two-route batch by
+  // half on the account, tag and asset feeds.
+  it('never collapses a collection to one row before its routes are split', () => {
+    expect(explorerService).not.toMatch(/LIMIT 1 BY block_height, \$\{SWAP_GROUP_KEY_SQL\}/)
+    expect(explorerService).not.toMatch(/LIMIT 1 BY block_height, ifNull\(toString\(extrinsic_index\)/)
+  })
+
+  // Every feed that rebuilds trades from swap events goes through the one seam, so a
+  // route means the same thing on the account, tag, asset and global surfaces.
+  it('builds every feed\'s trade rows from the shared route seam', () => {
+    expect(explorerService.match(/swapRouteReps\(/g)?.length).toBeGreaterThanOrEqual(3)
   })
 })

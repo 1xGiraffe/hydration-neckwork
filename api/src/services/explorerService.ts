@@ -6057,7 +6057,17 @@ export function routeGroups<T extends { event_index: number; event_name: string 
   return order.map(k => groups.get(k)!)
 }
 
-export function swapGroupKey(row: RawSwapEventRow, netEventsByExtrinsic: Map<string, number[]>): string {
+// The fields grouping a swap event into its route needs. Kept structural so the
+// account feed's rows (which carry `signer` where the asset feed's carry `who`) group
+// through the same code rather than a parallel copy of it.
+export interface SwapGroupRow {
+  block_height: number
+  extrinsic_index: number | null
+  event_index: number
+  event_name: string
+}
+
+export function swapGroupKey(row: SwapGroupRow, netEventsByExtrinsic: Map<string, number[]>): string {
   if (row.extrinsic_index == null) return `${row.block_height}:e${row.event_index}`
   const extrinsic = `${row.block_height}:x${row.extrinsic_index}`
   const nets = netEventsByExtrinsic.get(`${row.block_height}:${row.extrinsic_index}`) ?? []
@@ -6065,7 +6075,7 @@ export function swapGroupKey(row: RawSwapEventRow, netEventsByExtrinsic: Map<str
   return closing != null ? `${extrinsic}:r${closing}` : `${extrinsic}:tail`
 }
 
-export function groupSwapRows(rows: RawSwapEventRow[]): { groups: Map<string, RawSwapEventRow[]>; order: string[] } {
+export function groupSwapRows<T extends SwapGroupRow>(rows: T[]): { groups: Map<string, T[]>; order: string[] } {
   // The net events of each extrinsic, ascending, so a row can find the one that
   // closes it. The feed reads rows newest-first, so this cannot rely on input order.
   const netEventsByExtrinsic = new Map<string, number[]>()
@@ -6077,7 +6087,7 @@ export function groupSwapRows(rows: RawSwapEventRow[]): { groups: Map<string, Ra
     netEventsByExtrinsic.set(key, at)
   }
   for (const indices of netEventsByExtrinsic.values()) indices.sort((l, r) => l - r)
-  const groups = new Map<string, RawSwapEventRow[]>()
+  const groups = new Map<string, T[]>()
   const order: string[] = []
   for (const row of rows) {
     const key = swapGroupKey(row, netEventsByExtrinsic)
@@ -6089,6 +6099,24 @@ export function groupSwapRows(rows: RawSwapEventRow[]): { groups: Map<string, Ra
   }
   return { groups, order }
 }
+
+// The one swap event that stands for each route, in the order the rows arrived — the
+// shared basis every trade feed builds its rows from, so none of them can disagree
+// about how many trades an extrinsic held.
+//
+// A route is represented by its Router net summary, which carries the user's real
+// assets and amounts rather than an intermediate hop's. `prefer` narrows that to a
+// summary the caller can use (the asset feed wants one that touches the asset whose
+// page it is); the leading row stands in when no summary qualifies, which is also
+// what a pre-rename route and a direct pool swap fall back to.
+export function swapRouteReps<T extends SwapGroupRow>(rows: T[], prefer: (row: T) => boolean = () => true): T[] {
+  const { groups, order } = groupSwapRows(rows)
+  return order.map(key => {
+    const group = groups.get(key)!
+    return group.find(row => isRouterNet(row.event_name) && prefer(row)) ?? group[0]
+  })
+}
+
 // activity_histogram_events.activity_index identifies a swap by its extrinsic (so a
 // router hop and its pool leg count as one activity) and every other row by its
 // event index — two identity spaces sharing one integer. Deduplicating on the
@@ -6293,16 +6321,13 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
       const dcaIds = [...new Set(dcaRows.map(d => d.id))].filter(Boolean)
       const schedById = await getDcaScheduleLinks(dcaIds)
 
-      // Group by extrinsic (signed) or by event (pallet-internal); within a group
-      // prefer Router.Executed (the net summary) over individual AMM hop events.
-      const { groups, order } = groupSwapRows(rows)
+      // One row per route, represented by its Router.Executed net summary rather than
+      // an individual AMM hop event.
       const pairs = rows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null])
       const [signers, liqExt] = await Promise.all([actorsFor(pairs), liquidationExtrinsics(pairs)])
       const out: TradeRow[] = []
-      for (const key of order) {
+      for (const rep of swapRouteReps(rows)) {
         if (maxRows != null && out.length >= maxRows) break
-        const g = groups.get(key)!
-        const rep = g.find(r => isRouterNet(r.event_name)) ?? g[0]
         if (isDcaFeeLegSwap(rep.extrinsic_index, rep.who)) continue
         if (rep.extrinsic_index != null && liqExt.has(`${rep.block_height}:${rep.extrinsic_index}`)) continue
         const venue = rep.event_name.split('.')[0]
@@ -12456,8 +12481,10 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       ? getRecentDcaFailures(fetchN, from, to, undefined, [assetId])
       : Promise.resolve([])
 
-    // Trades: swaps where the asset is either leg. Group per extrinsic (signed) or
-    // per event (pallet-internal), preferring Router.Executed (the net summary).
+    // Trades: swaps where the asset is either leg. Grouped per ROUTE, preferring the
+    // Router.Executed net summary that touches this asset. A `LIMIT 1 BY` per extrinsic
+    // used to collapse the rows before `swapRouteReps` could split them, so a batch
+    // dispatching two routes over this asset showed only the last.
     const tradesP: Promise<ActivityRow[]> = wantTrades ? (async () => {
       const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
       const useAssetSwapReadModel = true
@@ -12473,7 +12500,6 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
             AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%') ${NOT_LEGACY_DCA_HOP}
             ${tradeValueFilter.predicateSql}
           ORDER BY block_height DESC, extrinsic_index DESC, event_name IN (${ROUTER_NET_EVENTS_SQL}) DESC, event_index DESC
-          LIMIT 1 BY block_height, ifNull(toString(extrinsic_index), concat('event:', toString(event_index)))
           LIMIT {n:UInt32}` : `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
             JSONExtractString(args_json,'who') AS who,
@@ -12488,7 +12514,6 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
             AND (JSONExtractInt(args_json,'assetIn') = ${assetId} OR JSONExtractInt(args_json,'assetOut') = ${assetId})
             ${tradeValueFilter.predicateSql}
           ORDER BY block_height DESC, extrinsic_index DESC, event_name IN (${ROUTER_NET_EVENTS_SQL}) DESC, event_index DESC
-          LIMIT 1 BY block_height, ifNull(toString(extrinsic_index), concat('event:', toString(event_index)))
           LIMIT {n:UInt32}`,
         query_params: { n: fetchN, assetId }, format: 'JSONEachRow',
       })
@@ -12505,13 +12530,10 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       for (const d of await dcaRes.json<{ block_height: number; who: string; amount_in: string }>()) dcaByAmount.set(`${d.block_height}:${d.amount_in}`, d.who)
       const pairs = rows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null])
       const [signers, liqExt] = await Promise.all([actorsFor(pairs), liquidationExtrinsics(pairs)])
-      const { groups, order } = groupSwapRows(rows)
       const out: ActivityRow[] = []
-      for (const key of order) {
-        const g = groups.get(key)!
-        // Prefer the Router.Executed net summary, but only if it touches the asset
-        // (a multi-hop route's net legs may not include it even when a hop does).
-        const rep = g.find(r => isRouterNet(r.event_name) && (r.asset_in === assetId || r.asset_out === assetId)) ?? g[0]
+      // Prefer each route's Router.Executed net summary, but only if it touches the
+      // asset (a multi-hop route's net legs may not include it even when a hop does).
+      for (const rep of swapRouteReps(rows, r => r.asset_in === assetId || r.asset_out === assetId)) {
         // Drop DCA keeper-fee legs (SQL already excludes them; defensive net so a
         // fee leg never surfaces as a phantom "Swap" next to its "DCA" row).
         if (isDcaFeeLegSwap(rep.extrinsic_index, rep.who)) continue
@@ -13730,45 +13752,62 @@ function emptyActivityCountArm(): ActivityCountArm {
   return `SELECT toUInt32(0) AS block_height, toUInt64(0) AS rows WHERE 0`
 }
 
+// What collects an account's swap events before their routes are split out. An
+// extrinsic's own events are considered together, because a route's hops and the
+// summary closing them are one trade; a hook-dispatched swap has no extrinsic, so its
+// own event is its identity — three Treasury swaps have shared a block, and collecting
+// them all under a null extrinsic would render one and count one. Extrinsic indices
+// are non-negative, so the negative space cannot collide with them.
+const SWAP_GROUP_KEY_SQL = 'ifNull(toInt64(extrinsic_index), -toInt64(event_index) - 1)'
+
 // The account's signed swaps, counted the way the builder groups them: one trade row
-// per (block, extrinsic), minus the two extrinsics the classifier hands to another
-// category. A liquidation's internal collateral→debt swap belongs to its mm row, and
-// a share-asset leg routed through a pool inside an add/remove belongs to the
-// liquidity row — the second needs the representative row's assets, which is the
-// (isRouterNet, event_index) maximum the `LIMIT 1 BY` in the page read keeps.
+// per ROUTE, minus the two extrinsics the classifier hands to another category. A
+// liquidation's internal collateral→debt swap belongs to its mm row, and a share-asset
+// leg routed through a pool inside an add/remove belongs to the liquidity row — the
+// second needs the representative row's assets.
+//
+// Counting per extrinsic instead undercounted every batch that dispatched more than one
+// route: an arbitrage bot whose every trade is a batch_all of two Router sells reported
+// 953 trades, complete, against 1,784 real routes — and the page it sized rendered only
+// the closing leg of each loop.
+//
+// The routes are derived from the collected events exactly as `swapRouteReps` derives
+// them: a net summary closes the run of hops before it and represents that route, and a
+// trailing run with no summary is one more route represented by its highest event. So
+// the count and the page cannot disagree about how many trades an extrinsic held.
 //
 // The liquidation set is the liquidation_extrinsics projection, not raw_events: an
 // event_name predicate there is only a set(200) skip index, so it prunes no granules and
 // the scan pulled args_json along with it — 17.2M rows for 8k extrinsics.
 //
-// The token filter reads the SAME representative the page renders: `rep_in`/`rep_out`
-// are already the (isRouterNet, event_index) maximum, which is exactly the row the page
-// read's `ORDER BY … LIMIT 1 BY block_height, extrinsic_index` keeps. So a multi-hop
-// route is matched on its NET assets in both halves, and an intermediate asset the
-// user never named does not pull the extrinsic in on one side only.
-// What makes one swap row distinct from another on an account's page. An extrinsic
-// groups all its own swap events into one trade; a hook-dispatched swap has no
-// extrinsic, so its own event is its identity — three Treasury swaps have shared a
-// block, and grouping them all under a null extrinsic would render one and count one.
-// Extrinsic indices are non-negative, so the negative space cannot collide with them.
-const SWAP_GROUP_KEY_SQL = 'ifNull(toInt64(extrinsic_index), -toInt64(event_index) - 1)'
-export function accountSwapGroupKey(blockHeight: number, extrinsicIndex: number | null, eventIndex: number): string {
-  return `${blockHeight}:${extrinsicIndex ?? -eventIndex - 1}`
-}
-
+// The token filter reads the SAME representative the page renders, so a multi-hop route
+// is matched on its NET assets in both halves and an intermediate asset the user never
+// named does not pull the route in on one side only.
 function accountSwapTradeArm(list: string, bound: string, tokenIds?: number[]): ActivityCountArm {
   const tokenFilter = armTokenFilter(tokenIds, ids => `(rep_in IN (${ids}) OR rep_out IN (${ids}))`)
   return `SELECT block_height, count() AS rows FROM (
-      SELECT block_height, ${SWAP_GROUP_KEY_SQL} AS group_key,
-             -- Null for a hook swap, which owns no extrinsic; the liquidation and
-             -- share-leg exclusions below are extrinsic-scoped and skip it for free,
-             -- since a tuple holding NULL matches nothing on either side.
-             any(extrinsic_index) AS ext_index,
-             argMax(asset_in, tuple(event_name IN (${ROUTER_NET_EVENTS_SQL}), event_index)) AS rep_in,
-             argMax(asset_out, tuple(event_name IN (${ROUTER_NET_EVENTS_SQL}), event_index)) AS rep_out
-      FROM price_data.account_swap_activity FINAL
-      WHERE ${bound} AND account IN (${list})
-      GROUP BY block_height, group_key
+      SELECT block_height, ext_index, route.1 AS rep_in, route.2 AS rep_out
+      FROM (
+        SELECT block_height, ext_index, evs, nets,
+               -- Events past the last summary have nothing to close them: one further
+               -- route, represented by its highest event (the builder's leading row).
+               arrayFilter(x -> length(nets) = 0 OR x.1 > nets[-1].1, evs) AS tail,
+               arrayMap(x -> tuple(x.3, x.4), nets) AS net_routes,
+               if(empty(tail), net_routes, arrayPushBack(net_routes, tuple(tail[-1].3, tail[-1].4))) AS routes
+        FROM (
+          SELECT block_height,
+                 -- Null for a hook swap, which owns no extrinsic; the liquidation and
+                 -- share-leg exclusions below are extrinsic-scoped and skip it for free,
+                 -- since a tuple holding NULL matches nothing on either side.
+                 any(extrinsic_index) AS ext_index,
+                 arraySort(x -> x.1, groupArray(tuple(event_index, event_name IN (${ROUTER_NET_EVENTS_SQL}), asset_in, asset_out))) AS evs,
+                 arrayFilter(x -> x.2, evs) AS nets
+          FROM price_data.account_swap_activity FINAL
+          WHERE ${bound} AND account IN (${list})
+          GROUP BY block_height, ${SWAP_GROUP_KEY_SQL}
+        )
+      )
+      ARRAY JOIN routes AS route
     )
     WHERE 1 ${tokenFilter}
       AND (ext_index IS NULL OR (block_height, ext_index) NOT IN (
@@ -14826,30 +14865,22 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
           ${swapTokenFilter}
           ${swapAmountFilter.predicateSql}
           ORDER BY block_height DESC, ${SWAP_GROUP_KEY_SQL} DESC, event_name IN (${ROUTER_NET_EVENTS_SQL}) DESC, event_index DESC
-          LIMIT 1 BY block_height, ${SWAP_GROUP_KEY_SQL}
           LIMIT {n:UInt32}`,
       query_params: { n: catFetch }, format: 'JSONEachRow',
     })
     const swapRows = await swapRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; asset_in: number; asset_out: number; amount_in: string; amount_out: string; signer: string }>()
     noteSource(swapRows.length, oldestWindowBlock(swapRows, r => r.block_height))
     const liqExt = await liquidationExtrinsics(swapRows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null]))
-    const signerByExt = new Map(swapRows.map(e => [accountSwapGroupKey(e.block_height, e.extrinsic_index, e.event_index), e.signer]))
-    const groups = new Map<string, typeof swapRows>()
-    const order: string[] = []
-    for (const r of swapRows) { const k = accountSwapGroupKey(r.block_height, r.extrinsic_index, r.event_index); if (!groups.has(k)) { groups.set(k, []); order.push(k) } groups.get(k)!.push(r) }
-    for (const k of order) {
-      const first = groups.get(k)![0]
+    for (const rep of swapRouteReps(swapRows)) {
       // Mark the extrinsic as a swap (so its transfer legs are dropped as noise),
       // but don't emit a trade row for a liquidation's internal collateral→debt
       // swap — the liquidation shows as its mm row, not a user trade. A hook swap
       // has no extrinsic to own, and claiming `block:null` would suppress the
       // unrelated hook transfers that share the block.
-      if (first.extrinsic_index != null) tradeExt.add(`${first.block_height}:${first.extrinsic_index}`)
-      if (first.extrinsic_index != null && liqExt.has(`${first.block_height}:${first.extrinsic_index}`)) continue
+      if (rep.extrinsic_index != null) tradeExt.add(`${rep.block_height}:${rep.extrinsic_index}`)
+      if (rep.extrinsic_index != null && liqExt.has(`${rep.block_height}:${rep.extrinsic_index}`)) continue
       if (!wantTrades) continue
-      const g = groups.get(k)!
-      const rep = g.find(r => isRouterNet(r.event_name)) ?? g[0]
-      const who = signerByExt.get(k)
+      const who = rep.signer
       const aOut = asset(rep.asset_out)
       const row: ActivityRow = {
         type: 'trade', blockHeight: rep.block_height, timestamp: rep.ts, eventIndex: rep.event_index, extrinsicIndex: rep.extrinsic_index,
