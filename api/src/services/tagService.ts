@@ -255,6 +255,24 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
       '0x15304c8f6921694c608312a7a16948454a578df0', // distribution wallet (launch supply → stableswap seed)
     ],
   },
+  {
+    // The originator side of the same sale: where the HOLLAR buyers pay for BIL
+    // actually goes. The issuance operator sweeps its proceeds through a
+    // forwarder into a funding vault, and an operator wallet draws them out,
+    // DCAs them into USDT and withdraws over XCM to AssetHub. Untagged, that
+    // wallet reads as an anonymous whale dumping half a million HOLLAR — its
+    // funding leg is an EVM-internal ERC-20 transfer, so the activity feed
+    // cannot yet show where the HOLLAR came from. Same bandeira green as
+    // bil-issuer so both sides of the sale read as one market.
+    tagId: 'bil-originator', name: 'Decentral (BIL)', color: '#009739',
+    note: 'Decentral × DUX Group receivables operation: the funding vault BIL primary-sale HOLLAR proceeds are swept into, the forwarder that sweeps them, and the operator wallet that converts them to USDT and withdraws to AssetHub. The Treasury lent this vault 200,000 HOLLAR on 2026-03-26 and was repaid 207,337.97 HOLLAR on 2026-06-10.',
+    icon: BIL_ICON,
+    addresses: [
+      '0x2333aa052610012c27e4fc176bc27095651dcbc6', // operator wallet (vault draw → DCA to USDT → XCM out)
+      '0x207a626c07b73e76134177d1f44b0f32e94adb5a', // funding vault (also took the Treasury's 200k pilot)
+      '0x6a21891db0940491603f3cca0a9f4dba4c6e810c', // proceeds forwarder (issuer → vault, exact pass-through)
+    ],
+  },
 ]
 
 // Sync the code-defined tag set into the database: on a fresh database this
