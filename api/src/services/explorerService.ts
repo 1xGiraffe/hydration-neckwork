@@ -2031,10 +2031,44 @@ interface RawTransferEventRow {
   asset_id: number
 }
 
-function transferEventPriority(name: string): number {
-  if (name === 'Currencies.Transferred') return 3
-  if (name === 'Tokens.Transfer') return 2
-  return 1
+// The synthetic event name the ERC-20 transfer MVs insert. An ERC-20-backed
+// asset (HOLLAR) can move entirely inside the EVM and emit no substrate transfer
+// event, so those legs are read from the contract's own Transfer logs. The name
+// is not a real pallet event, which is why it ranks BELOW every pallet name in
+// transferEventPriority: when a movement produced both, the substrate row wins
+// and the log is dropped, so the row that renders is the one carrying real
+// AccountId32s rather than truncations.
+export const EVM_TRANSFER_EVENT_NAME = 'EVM.Transfer'
+
+// The pallet that reports a movement most specifically wins its identity tie, and the
+// synthetic EVM name loses to all of them. Kept as a table so the SQL windows can be
+// generated from it rather than restating the numbers.
+const TRANSFER_PRIORITY: [string, number][] = [
+  ['Currencies.Transferred', 4],
+  ['Tokens.Transfer', 3],
+  [EVM_TRANSFER_EVENT_NAME, 1],
+]
+const TRANSFER_PRIORITY_DEFAULT = 2
+
+export function transferEventPriority(name: string): number {
+  return TRANSFER_PRIORITY.find(([n]) => n === name)?.[1] ?? TRANSFER_PRIORITY_DEFAULT
+}
+
+// The same ranking in SQL, for the windows that resolve the tie server-side.
+export function transferPrioritySql(column: string): string {
+  const arms = TRANSFER_PRIORITY.map(([n, p]) => `${column} = '${n}', ${p}`).join(', ')
+  return `multiIf(${arms}, ${TRANSFER_PRIORITY_DEFAULT})`
+}
+
+// SQL twin of transferLegAccount: an account column reduced to the 20-byte
+// truncation both account forms of one movement share. ETH-prefixed ids drop the
+// marker and the trailing zeros; any other id contributes its first 20 bytes.
+export function transferLegAccountSql(column: string): string {
+  const id = `lower(${column})`
+  // The marker AND the 8 trailing zero bytes, exactly as evmFromAccountId tests them,
+  // so the two languages cannot disagree about what counts as a truncated form.
+  const isTruncated = `startsWith(${id}, '0x45544800') AND substring(${id}, 51, 16) = '0000000000000000'`
+  return `if(${isTruncated}, substring(${id}, 11, 40), substring(${id}, 3, 40))`
 }
 
 // One side of a transfer identity. Accounts are compared as their 20-byte
@@ -2197,7 +2231,7 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
               ${useTransferReadModel ? 'to_account' : "JSONExtractString(args_json, 'to')"} AS to_acc,
               ${amountExpr} AS amount,
               ${assetExpr} AS asset_id,
-              multiIf(event_name = 'Currencies.Transferred', 3, event_name = 'Tokens.Transfer', 2, 1) AS priority
+              ${transferPrioritySql('event_name')} AS priority
             FROM price_data.${useTransferReadModel ? transferTable : 'raw_events'}
             ${amountFilter.joinSql}
             WHERE ${bound}
@@ -2208,7 +2242,7 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
               ${tokenFilter}
               ${amountFilter.predicateSql}
             ORDER BY block_height DESC, priority DESC, event_index DESC
-            LIMIT 1 BY block_height, extrinsic_index, asset_id, lower(from_acc), lower(to_acc), amount
+            LIMIT 1 BY block_height, extrinsic_index, asset_id, ${transferLegAccountSql('from_acc')}, ${transferLegAccountSql('to_acc')}, amount
           )
           ORDER BY block_height DESC, event_index DESC
           LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
@@ -8721,12 +8755,12 @@ async function getRecentNttOut(limit: number, from?: string, to?: string, accoun
                 FROM (
                   SELECT DISTINCT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
                     from_account AS from_acc, to_account AS to_acc, amount, asset_id,
-                    multiIf(event_name = 'Currencies.Transferred', 3, event_name = 'Tokens.Transfer', 2, 1) AS priority
+                    ${transferPrioritySql('event_name')} AS priority
                   FROM price_data.account_transfer_activity
                   WHERE ${pageBound} AND account IN (${keyList})
                     AND (asset_id, lower(to_account)) IN (${pairsSql})
                   ORDER BY block_height DESC, priority DESC, event_index DESC
-                  LIMIT 1 BY block_height, extrinsic_index, asset_id, lower(from_acc), lower(to_acc), amount
+                  LIMIT 1 BY block_height, extrinsic_index, asset_id, ${transferLegAccountSql('from_acc')}, ${transferLegAccountSql('to_acc')}, amount
                 )
                 ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
         query_params: { limit: pageLimit }, format: 'JSONEachRow',
@@ -14076,11 +14110,11 @@ async function transferCandidatesExceedExactBudget(accCond: string[]): Promise<b
 function transferCandidateSql(accList: string, bound: string, potFilters: string, tokenFilter: string): string {
   return `SELECT block_height, event_index, xi, from_account, to_account, asset_id, amount
     FROM (
-      SELECT *, max(prio) OVER (PARTITION BY block_height, xi, asset_id, lower(from_account), lower(to_account), amount) AS top_prio
+      SELECT *, max(prio) OVER (PARTITION BY block_height, xi, asset_id, ${transferLegAccountSql('from_account')}, ${transferLegAccountSql('to_account')}, amount) AS top_prio
       FROM (
         SELECT block_height, event_index, ifNull(extrinsic_index, 4294967295) AS xi,
                from_account, to_account, asset_id, amount,
-               multiIf(event_name = 'Currencies.Transferred', 3, event_name = 'Tokens.Transfer', 2, 1) AS prio
+               ${transferPrioritySql('event_name')} AS prio
         FROM (
           SELECT DISTINCT block_height, event_index, extrinsic_index, event_name, from_account, to_account, amount, asset_id
           FROM price_data.account_transfer_activity
@@ -19355,7 +19389,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
         const minters = await nttMinterAccounts()
         const nttArms = minters.size ? `
           UNION ALL SELECT toString(toDate(block_timestamp)) AS d,
-              toUInt64(uniqExact(tuple(block_height, ifNull(extrinsic_index, 4294967295), asset_id, lower(from_account), lower(to_account), amount))) AS v
+              toUInt64(uniqExact(tuple(block_height, ifNull(extrinsic_index, 4294967295), asset_id, ${transferLegAccountSql('from_account')}, ${transferLegAccountSql('to_account')}, amount))) AS v
             FROM price_data.account_transfer_activity
             WHERE ${since} AND account IN (${[...minters.values()].map(a => `'${a}'`).join(',')})
               AND (asset_id, lower(to_account)) IN (${[...minters].map(([id, acc]) => `(${id},'${acc}')`).join(',')})
