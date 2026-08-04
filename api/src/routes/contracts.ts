@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { getContracts } from '../services/explorerService.ts'
+import { getContracts, getContractTransactions, getContractEvents } from '../services/explorerService.ts'
 import { CONTRACT_SORTS, type ContractSort } from '../services/contractRegistryService.ts'
 import {
   getContractAbiPayload,
@@ -50,5 +50,32 @@ export async function contractsRoutes(fastify: FastifyInstance) {
     const payload = await getContractSourcesPayload(address)
     if (!payload) return reply.status(404).send({ error: 'Contract is not verified' })
     return payload
+  })
+
+  // Contract-tab activity views (§9): the contract's own transactions and
+  // events with page-bounded verified-ABI decoding. Registered under
+  // /explorer/contract/, so they inherit its cache-control rule.
+  fastify.get('/explorer/contract/:address/transactions', async (req, reply) => {
+    const address = normalizeAddressParam(String((req.params as { address: string }).address ?? ''))
+    if (!isH160(address)) return reply.status(400).send({ error: 'Invalid contract address' })
+    const q = req.query as Record<string, unknown>
+    const offset = offsetSchema.safeParse(q.offset)
+    if (!offset.success) return reply.status(400).send({ error: 'Invalid offset' })
+    const limit = limitSchema.safeParse(q.limit)
+    const page = await getContractTransactions(address, offset.data ?? 0, limit.success ? limit.data ?? 25 : 25)
+    if (!page) return reply.status(404).send({ error: 'Not a contract' })
+    return page
+  })
+
+  fastify.get('/explorer/contract/:address/events', async (req, reply) => {
+    const address = normalizeAddressParam(String((req.params as { address: string }).address ?? ''))
+    if (!isH160(address)) return reply.status(400).send({ error: 'Invalid contract address' })
+    const q = req.query as Record<string, unknown>
+    const offset = offsetSchema.safeParse(q.offset)
+    if (!offset.success) return reply.status(400).send({ error: 'Invalid offset' })
+    const limit = limitSchema.safeParse(q.limit)
+    const page = await getContractEvents(address, offset.data ?? 0, limit.success ? limit.data ?? 25 : 25)
+    if (!page) return reply.status(404).send({ error: 'Not a contract' })
+    return page
   })
 }
