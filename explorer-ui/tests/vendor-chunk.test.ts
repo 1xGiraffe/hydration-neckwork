@@ -22,4 +22,15 @@ describe('build output', () => {
       expect(chunkOf(id)).toBeUndefined()
     }
   })
+
+  // viem is only ever imported by the lazy ABI-codec module (src/abiCodec.ts,
+  // dynamic import from the contract tab). Routing it into `vendor` would make
+  // every visitor download an ABI codec they never use; it gets its own chunk
+  // that loads with the tab.
+  it('keeps the ABI codec out of the vendor chunk', () => {
+    for (const dep of ['viem', 'abitype', 'ox']) {
+      expect(chunkOf(`/app/node_modules/${dep}/index.js`)).toBe('abi-codec')
+    }
+    expect(chunkOf('/app/node_modules/react/index.js')).toBe('vendor')
+  })
 })

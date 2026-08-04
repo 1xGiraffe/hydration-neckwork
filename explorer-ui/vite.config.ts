@@ -18,7 +18,13 @@ export default defineConfig({
         // Sharing one hash made a returning reader re-download the runtime for an
         // app-only edit; a separate vendor chunk keeps it in the HTTP cache
         // (content-hashed `/assets/` is served with `expires max`, see nginx.conf).
-        manualChunks: (id) => (id.includes('/node_modules/') ? 'vendor' : undefined),
+        // viem (+ its codec deps) is imported only by the lazily-loaded
+        // src/abiCodec.ts; its own chunk keeps the ABI codec out of the eager
+        // vendor download and loads it with the contract tab instead.
+        manualChunks: (id) => {
+          if (/\/node_modules\/(viem|abitype|ox)\//.test(id)) return 'abi-codec'
+          return id.includes('/node_modules/') ? 'vendor' : undefined
+        },
       },
     },
   },

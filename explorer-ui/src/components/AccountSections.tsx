@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- shared account-section components + their count helper */
 import { F, AssetIcon, AssetAmount, AreaChart, ChartCardSkeleton, healthFactorDisplay, AddrPill, MomentLink, ProgressRing, rowNav, Dash, EmptyRow, Copy } from './ui'
 import type { ChartMarker, DetailTab } from './ui'
-import { Link, paths } from '../router'
+import { Link, paths, setQuery } from '../router'
 import type { ActivitySlug } from '../router'
 import { performancePoints } from './performance'
 import { CAT } from './activityColors'
@@ -208,12 +208,14 @@ export function profileTabs(
   // than passing off as the account's whole history.
   activity?: ListCount,
   votesCount?: number,
+  hasContract?: boolean,
 ): DetailTab[] {
   const positionCount = mmPositionCount(markets) + dcaCount + liquidityPositionCount
   return [
     { key: 'overview', label: 'Overview' },
     { key: 'balances', label: 'Balances', count: balanceCount },
     ...(positionCount > 0 ? [{ key: 'positions', label: 'Positions', count: positionCount }] : []),
+    ...(hasContract ? [{ key: 'contract', label: 'Contract' }] : []),
     { key: 'activity', label: 'Activity', ...(activity?.total == null ? {} : { count: activity.total, countAtLeast: !activity.complete }) },
     ...(votesCount && votesCount > 0 ? [{ key: 'votes', label: 'Votes', count: votesCount }] : []),
   ]
@@ -702,9 +704,15 @@ export function ContractSection({ contract, now }: { contract?: ContractInfo | n
           </>
         )}
         <div className="dt">Verification</div>
-        <div className="dd">{contract.verification
-          ? <span className="badge ok">✓ Verified{contract.verification.matchType === 'exact_match' ? ' (exact match)' : ' (match)'}</span>
-          : <span className="badge" style={neutralBadge}>Unverified</span>}</div>
+        <div className="dd proxy-dd">{contract.verification?.status === 'verified'
+          ? <>
+              <span className="badge ok">✓ Verified{contract.verification.matchType === 'exact_match' ? ' (exact match)' : ' (match)'}</span>
+              {contract.verification.supersededBytecode && <span className="pill-badge" style={neutralBadge} title="The code at this address changed after verification (CREATE2 redeploy) — the verified source describes the previous bytecode">superseded bytecode</span>}
+            </>
+          : <>
+              <span className="badge" style={neutralBadge}>Unverified</span>
+              <button type="button" className="hint-link" style={{ fontSize: 12 }} onClick={() => setQuery({ view: 'contract' })}>verify →</button>
+            </>}</div>
         <div className="dt">Code</div>
         <div className="dd proxy-dd">
           <span className="mono">{F.int(contract.codeSize)} bytes</span>

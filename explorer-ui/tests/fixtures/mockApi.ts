@@ -428,34 +428,72 @@ function buildAccounts(offset: number, limit: number, sort: string): AccountsPag
   return { rows: sorted.slice(offset, offset + limit), total: sorted.length }
 }
 
-// The contracts directory: a top-level create (verified name absent — Phase 1
-// ships everything unverified), a factory child ("first seen", destroyed) and
-// an unknown-provenance contract, so every creation label is exercised.
+// The contracts directory: a verified top-level create, a factory child
+// ("first seen", destroyed, unverified) and an unknown-provenance contract, so
+// every creation label and both verification states are exercised. Hoisted so
+// buildAddress can attach the same rows to their account pages (same identity
+// across feeds, per the mock-data rule).
+const evmContractRef = (h160: string): AccountRef => ({ accountId: '0x45544800' + h160.slice(2) + '0000000000000000', address: h160, emoji: '🪙', tag: null, identity: null, profile: null, isContract: true })
+export const VERIFIED_CONTRACT_ADDRESS = '0x531a654d1696ed52e7275a8cede955e82620f99a'
+export const UNVERIFIED_CONTRACT_ADDRESS = '0x9a1c2b3d4e5f60718293a4b5c6d7e8f901234567'
+const MOCK_CONTRACTS: ContractInfo[] = [
+  {
+    address: VERIFIED_CONTRACT_ADDRESS, account: evmContractRef(VERIFIED_CONTRACT_ADDRESS),
+    verified: { status: 'verified', name: 'GhoToken', matchType: 'exact_match' },
+    verification: {
+      status: 'verified', name: 'GhoToken', compilerVersion: 'v0.8.10+commit.fc410830', matchType: 'exact_match',
+      source: 'verified', verifiedAt: tsAt(TIP - 100), abiPresent: true, sourceFileCount: 2, supersededBytecode: false,
+    },
+    creation: { method: 'create', deployer: A.fox, deployerWhitelisted: true, blockHeight: TIP - 2_000_000, extrinsicIndex: 2, timestamp: tsAt(TIP - 2_000_000), txHash: '0x' + 'ab'.repeat(32) },
+    codeHash: '0x' + 'cd'.repeat(32), codeSize: 10719, destroyed: false,
+    txCount: 41230, logCount: 96780, firstActivity: tsAt(TIP - 2_000_000), lastActivity: tsAt(TIP - 40),
+  },
+  {
+    address: '0x02639ec01313c8775fae74f2dad1118c8a8a86da', account: evmContractRef('0x02639ec01313c8775fae74f2dad1118c8a8a86da'),
+    verified: null, verification: { status: 'unverified' },
+    creation: { method: 'factory', factory: evmContractRef('0x1b02e051683b5cfac5929c25e84adb26ecf87b38'), attribution: 'first-log', blockHeight: TIP - 900_000, timestamp: tsAt(TIP - 900_000), txHash: '0x' + 'ef'.repeat(32) },
+    codeHash: '0x' + '12'.repeat(32), codeSize: 13783, destroyed: true,
+    txCount: 340, logCount: 2210, firstActivity: tsAt(TIP - 900_000), lastActivity: tsAt(TIP - 120_000),
+  },
+  {
+    address: UNVERIFIED_CONTRACT_ADDRESS, account: evmContractRef(UNVERIFIED_CONTRACT_ADDRESS),
+    verified: null, verification: { status: 'unverified' },
+    creation: { method: 'unknown' },
+    codeHash: '0x' + '34'.repeat(32), codeSize: 2333, destroyed: false,
+    txCount: 12, logCount: 0, firstActivity: tsAt(TIP - 300_000), lastActivity: tsAt(TIP - 300_000),
+  },
+]
+
+// The verified contract's lazy artifacts (Code/Read sub-tabs); unverified
+// addresses fall through to the harness 404 exactly like the real API.
+const MOCK_CONTRACT_ABI = {
+  address: VERIFIED_CONTRACT_ADDRESS,
+  abi: [
+    { type: 'function', name: 'balanceOf', stateMutability: 'view', inputs: [{ name: 'account', type: 'address' }], outputs: [{ name: '', type: 'uint256' }] },
+    { type: 'function', name: 'totalSupply', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'uint256' }] },
+    { type: 'function', name: 'symbol', stateMutability: 'pure', inputs: [], outputs: [{ name: '', type: 'string' }] },
+    { type: 'function', name: 'transfer', stateMutability: 'nonpayable', inputs: [{ name: 'to', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [{ name: '', type: 'bool' }] },
+    { type: 'event', name: 'Transfer', inputs: [] },
+  ],
+  source: 'verified',
+  contractName: 'GhoToken',
+}
+const MOCK_CONTRACT_SOURCES = {
+  address: VERIFIED_CONTRACT_ADDRESS,
+  files: [
+    { path: 'src/GhoToken.sol', content: '// SPDX-License-Identifier: MIT\npragma solidity ^0.8.10;\n\ncontract GhoToken {\n  uint256 public totalSupply;\n}\n' },
+    { path: 'src/lib/Math.sol', content: 'library Math { function min(uint256 a, uint256 b) internal pure returns (uint256) { return a < b ? a : b; } }\n' },
+  ],
+  compiler: { version: 'v0.8.10+commit.fc410830', evmVersion: 'london', optimizerEnabled: true, optimizerRuns: 200, constructorArguments: '0xabcd', settings: null },
+}
+
+export function mockContractByAddress(address: string): ContractInfo | undefined {
+  const lc = address.toLowerCase()
+  return MOCK_CONTRACTS.find(c => c.address === lc || c.account.accountId === lc)
+}
+
 function buildContracts(offset: number, limit: number, sort: string): ContractsPage {
-  const evmRef = (h160: string): AccountRef => ({ accountId: '0x45544800' + h160.slice(2) + '0000000000000000', address: h160, emoji: '🪙', tag: null, identity: null, profile: null, isContract: true })
-  const rows: ContractInfo[] = [
-    {
-      address: '0x531a654d1696ed52e7275a8cede955e82620f99a', account: evmRef('0x531a654d1696ed52e7275a8cede955e82620f99a'),
-      verified: null, verification: null,
-      creation: { method: 'create', deployer: A.fox, deployerWhitelisted: true, blockHeight: TIP - 2_000_000, extrinsicIndex: 2, timestamp: tsAt(TIP - 2_000_000), txHash: '0x' + 'ab'.repeat(32) },
-      codeHash: '0x' + 'cd'.repeat(32), codeSize: 10719, destroyed: false,
-      txCount: 41230, logCount: 96780, firstActivity: tsAt(TIP - 2_000_000), lastActivity: tsAt(TIP - 40),
-    },
-    {
-      address: '0x02639ec01313c8775fae74f2dad1118c8a8a86da', account: evmRef('0x02639ec01313c8775fae74f2dad1118c8a8a86da'),
-      verified: null, verification: null,
-      creation: { method: 'factory', factory: evmRef('0x1b02e051683b5cfac5929c25e84adb26ecf87b38'), attribution: 'first-log', blockHeight: TIP - 900_000, timestamp: tsAt(TIP - 900_000), txHash: '0x' + 'ef'.repeat(32) },
-      codeHash: '0x' + '12'.repeat(32), codeSize: 13783, destroyed: true,
-      txCount: 340, logCount: 2210, firstActivity: tsAt(TIP - 900_000), lastActivity: tsAt(TIP - 120_000),
-    },
-    {
-      address: '0x9a1c2b3d4e5f60718293a4b5c6d7e8f901234567', account: evmRef('0x9a1c2b3d4e5f60718293a4b5c6d7e8f901234567'),
-      verified: null, verification: null,
-      creation: { method: 'unknown' },
-      codeHash: '0x' + '34'.repeat(32), codeSize: 2333, destroyed: false,
-      txCount: 12, logCount: 0, firstActivity: tsAt(TIP - 300_000), lastActivity: tsAt(TIP - 300_000),
-    },
-  ]
+  const rows = MOCK_CONTRACTS
   const created = (c: ContractInfo) => c.creation.blockHeight ?? -1
   const sorted = [...rows].sort((a, b) => {
     if (sort === 'txs') return b.txCount - a.txCount || (a.address < b.address ? -1 : 1)
@@ -559,7 +597,11 @@ function hdxBreakdown(bal: number, dec: number): Pick<AddressBalance, 'frozen' |
 }
 
 function buildAddress(accountId: string): AddressDetail {
-  const a = ACCS.find(x => x.accountId === accountId || x.address.toLowerCase() === accountId.toLowerCase()) ?? A.fox
+  // A contract address gets the contract's own account ref (and the `contract`
+  // field below), so its account page grows the Contract tab; everything else
+  // keeps the fox fallback.
+  const contract = mockContractByAddress(accountId)
+  const a = contract?.account ?? ACCS.find(x => x.accountId === accountId || x.address.toLowerCase() === accountId.toLowerCase()) ?? A.fox
   const r = rng(a.accountId.length * 17)
   const priced = ASSETS.filter((_, i) => (r() > 0.4) || i < 2).slice(0, 6).map(as => {
     const bal = +(r() * (as.price > 1000 ? 3 : as.price > 1 ? 6000 : 2_000_000)).toFixed(4)
@@ -661,6 +703,7 @@ function buildAddress(accountId: string): AddressDetail {
       pending: [{ callHash: '0x25737077ac4eea2d3cc075243902f0d7e8e3a0ea9a39a00e6484121ba5b89aa8', depositor: A.owl, approvals: [A.owl], sinceBlock: TIP - 4200 }],
     } : null,
     multisigMemberships: a === A.owl ? [{ account: A.fox, threshold: 2, signatories: 3 }] : [],
+    ...(contract ? { contract } : {}),
   }
 }
 
@@ -912,6 +955,11 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   { re: /^\/explorer\/hollar$/, fn: () => buildHollar() },
   { re: /^\/explorer\/accounts$/, fn: (_m, qs) => buildAccounts(Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 50), qs.get('sort') ?? 'value') },
   { re: /^\/explorer\/contracts$/, fn: (_m, qs) => buildContracts(Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 50), qs.get('sort') ?? 'created') },
+  { re: /^\/explorer\/contract\/compiler-versions$/, fn: () => ({ versions: ['v0.8.19+commit.7dd6d404', 'v0.8.10+commit.fc410830'] }) },
+  // Artifacts exist only for the verified contract; anything else falls through
+  // to the harness 404, exactly like the real endpoints.
+  { re: /^\/explorer\/contract\/([^/]+)\/abi$/, fn: m => decodeURIComponent(m[1]).toLowerCase() === VERIFIED_CONTRACT_ADDRESS ? MOCK_CONTRACT_ABI : undefined },
+  { re: /^\/explorer\/contract\/([^/]+)\/sources$/, fn: m => decodeURIComponent(m[1]).toLowerCase() === VERIFIED_CONTRACT_ADDRESS ? MOCK_CONTRACT_SOURCES : undefined },
   { re: /^\/explorer\/daily\/(\w+)(?:\?.*)?$/, fn: (m) => Array.from({ length: 45 }, (_, i) => { const d = new Date(MOCK_NOW_MS - (44 - i) * 86400000); const r = rng(i + m[1].length * 7); return { date: d.toISOString().slice(0, 10), value: Math.round((m[1] === 'events' ? 60000 : m[1] === 'extrinsics' ? 12000 : 4000) * (0.5 + r())) } as DailyPoint }) },
   { re: /^\/explorer\/accounts-daily$/, fn: () => Array.from({ length: 30 }, (_, i) => { const d = new Date(MOCK_NOW_MS - (29 - i) * 86400000); const r = rng(i * 31 + 5); return { date: d.toISOString().slice(0, 10), active: Math.round(6000 * (0.6 + r() * 0.8)), new: Math.round(350 * (0.4 + r())) } }) },
   // events is deliberately longer than MOCK_LIST_MAX_OFFSET can page, so the mock

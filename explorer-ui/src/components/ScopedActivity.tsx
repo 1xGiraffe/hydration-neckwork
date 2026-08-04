@@ -45,7 +45,9 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const rawTab = useQueryValue('atab', 'activity')
   const activeTab = rawTab === 'extrinsics' || rawTab === 'events' ? rawTab : 'activity'
   const activityType = normalizeActivityType(useQueryValue('type', 'all'))
-  const filterOptions = { reservedKeys: ['page', 'tab', 'view', 'atab', 'type', 'apage'], pageKey: 'apage' }
+  // `contract` is the account page's contract sub-tab key — reserved so a
+  // lingering ?contract=read never reads as a filter value here.
+  const filterOptions = { reservedKeys: ['page', 'tab', 'view', 'atab', 'type', 'apage', 'contract'], pageKey: 'apage' }
   const activityFilters = useFilters({ ...filterOptions, keys: ['action', 'token', 'from', 'to', 'min'] })
   const extrinsicFilters = useFilters({ ...filterOptions, keys: ['call', 'result', 'origin', 'from', 'to'] })
   const eventFilters = useFilters({ ...filterOptions, keys: ['event', 'from', 'to'] })
