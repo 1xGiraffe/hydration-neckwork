@@ -79,7 +79,7 @@ export function tokenFilterOptions(assets: AssetFilterItem[]): ComboOption[] {
   }))
 }
 
-function Combo({ value, placeholder, label, width, options, onChange }: { value: string; placeholder?: string; label?: string; width?: number; options: ComboOption[]; onChange: (v: string) => void }) {
+export function Combo({ value, placeholder, label, width, options, onChange }: { value: string; placeholder?: string; label?: string; width?: number; options: ComboOption[]; onChange: (v: string) => void }) {
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)

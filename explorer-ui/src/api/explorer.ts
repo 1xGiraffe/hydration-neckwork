@@ -1,7 +1,7 @@
 import type {
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem,
-  AccountsPage, AccountSort, ContractsPage, ContractSort, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail,
+  AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
@@ -187,6 +187,26 @@ export const api = {
   hollar: (signal?: AbortSignal) => getJson<HollarDashboard>('/explorer/hollar', signal),
   accounts: (offset = 0, limit = 50, sort: AccountSort = 'value', signal?: AbortSignal) => getJson<AccountsPage>(withQuery('/explorer/accounts', { offset, limit, sort }), signal),
   contracts: (offset = 0, limit = 50, sort: ContractSort = 'created', signal?: AbortSignal) => getJson<ContractsPage>(withQuery('/explorer/contracts', { offset, limit, sort }), signal),
+  // Lazy verified-contract artifacts (Code/Read sub-tabs); 404 when unverified.
+  contractAbi: (address: string, signal?: AbortSignal) => getJson<ContractAbiPayload>(`/explorer/contract/${encodeURIComponent(address)}/abi`, signal),
+  contractSources: (address: string, signal?: AbortSignal) => getJson<ContractSourcesPayload>(`/explorer/contract/${encodeURIComponent(address)}/sources`, signal),
+  compilerVersions: (signal?: AbortSignal) => getJson<{ versions: string[] }>('/explorer/contract/compiler-versions', signal),
+  // Sourcify V2 verification (the same surface `forge verify-contract` uses).
+  // The api mounts these under /v2 — nginx/vite strip the /api prefix — and a
+  // failed submit answers with {customCode, message}, which ApiError surfaces.
+  verifySubmit: async (address: string, body: { stdJsonInput: unknown; compilerVersion: string; contractIdentifier: string }): Promise<{ verificationId: string }> => {
+    const response = await fetch(`/api/v2/verify/222222/${encodeURIComponent(address)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (response.status !== 202) {
+      const errBody = await response.json().catch(() => null) as { message?: string; error?: string } | null
+      throw new ApiError(response.status, errBody?.message || errBody?.error || `${response.status} ${response.statusText}`)
+    }
+    return response.json() as Promise<{ verificationId: string }>
+  },
+  verifyPoll: (verificationId: string, signal?: AbortSignal) => getJson<VerificationJob>(`/v2/verify/${encodeURIComponent(verificationId)}`, signal),
   // The daily histogram can mirror the activity page's tab + filters.
   daily: (scope: string, params?: { type?: string; action?: string; token?: string }, signal?: AbortSignal) => getJson<DailyPoint[]>(withQuery(`/explorer/daily/${scope}`, { ...params }), signal),
   accountsDaily: (signal?: AbortSignal) => getJson<{ date: string; active: number; new: number }[]>('/explorer/accounts-daily', signal),
