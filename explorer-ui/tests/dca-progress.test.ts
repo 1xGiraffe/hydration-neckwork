@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { dcaProgress, dcaUnspentBudget } from '../src/utils/dca'
+import { dcaAmountLeft, dcaLeftUsd, dcaProgress, dcaUnspentBudget } from '../src/utils/dca'
 
 // A DCA schedule is bounded either by a budget or by the wallet behind it, and the
 // two read completely differently. These pin the cases that have actually misled a
@@ -42,5 +42,64 @@ describe('dcaUnspentBudget', () => {
     expect(dcaUnspentBudget('1000', '1200')).toBeNull()   // never negative
     expect(dcaUnspentBudget('0', '500')).toBeNull()       // open-ended: no budget to fall short of
     expect(dcaUnspentBudget('bad', '1')).toBeNull()
+  })
+})
+
+// What a RUNNING budgeted order still has to spend — the figure the DCA tables and
+// the schedule page show beside the budget. Same arithmetic as dcaUnspentBudget,
+// different question: this one is live, that one is the remainder a finished order
+// had released back to it.
+describe('dcaAmountLeft', () => {
+  it('is the unfilled part of the budget, in exact integer arithmetic', () => {
+    // 18-decimal amounts, well past what a float divide holds.
+    expect(dcaAmountLeft('6504492042342880045395', '4336365585831843606504'))
+      .toBe('2168126456511036438891')
+    expect(dcaAmountLeft('1000', '250')).toBe('750')
+  })
+
+  it('shows nothing rather than "0 left" once the budget is spent', () => {
+    expect(dcaAmountLeft('1000', '1000')).toBeNull()
+    expect(dcaAmountLeft('1000', '1200')).toBeNull()   // never negative
+  })
+
+  it('is null for an open-ended order, which is funded by a balance, not a budget', () => {
+    expect(dcaAmountLeft('0', '500')).toBeNull()
+  })
+
+  it('is null on unparseable input rather than guessing', () => {
+    expect(dcaAmountLeft('bad', '1')).toBeNull()
+    expect(dcaAmountLeft('1000', '')).toBeNull()
+  })
+})
+
+// The dollar form is what the surfaces show. It has to follow dcaAmountLeft
+// exactly — the two are rendered from one guard — and it has to hold its share
+// through amounts a float divide would round away.
+describe('dcaLeftUsd', () => {
+  it('is the budget value scaled by the unspent share', () => {
+    expect(dcaLeftUsd('1000', '250', 400)).toBeCloseTo(300)
+    expect(dcaLeftUsd('10', '5', 1000)).toBeCloseTo(500)
+  })
+
+  it('holds the share on 18-decimal amounts, taken on the integers', () => {
+    // Two thirds of a 6,000-token budget left, the budget worth $300.
+    expect(dcaLeftUsd('6000000000000000000000', '2000000000000000000000', 300)).toBeCloseTo(200)
+    // A ratio with no exact decimal form still lands well inside a cent.
+    expect(dcaLeftUsd('3', '1', 300)).toBeCloseTo(200)
+    // A real schedule's amounts: 33.3328% of the budget still to spend.
+    expect(dcaLeftUsd('6504492042342880045395', '4336365585831843606504', 300)).toBeCloseTo(99.9983, 4)
+  })
+
+  it('is null exactly where dcaAmountLeft is', () => {
+    expect(dcaLeftUsd('1000', '1000', 400)).toBeNull()   // budget spent
+    expect(dcaLeftUsd('1000', '1200', 400)).toBeNull()   // never negative
+    expect(dcaLeftUsd('0', '500', 400)).toBeNull()       // open-ended
+    expect(dcaLeftUsd('bad', '1', 400)).toBeNull()
+  })
+
+  it('is null without a price, so a caller states the remainder in the asset', () => {
+    expect(dcaLeftUsd('1000', '250', null)).toBeNull()
+    expect(dcaLeftUsd('1000', '250', undefined)).toBeNull()
+    expect(dcaLeftUsd('1000', '250', NaN)).toBeNull()
   })
 })
