@@ -20,9 +20,12 @@ export default defineConfig({
         // (content-hashed `/assets/` is served with `expires max`, see nginx.conf).
         // viem (+ its codec deps) is imported only by the lazily-loaded
         // src/abiCodec.ts; its own chunk keeps the ABI codec out of the eager
-        // vendor download and loads it with the contract tab instead.
+        // vendor download and loads it with the contract tab instead. dedot
+        // follows the same rule via src/substrateWrite.ts: it loads only when
+        // a Substrate wallet connects on the contract Write tab.
         manualChunks: (id) => {
           if (/\/node_modules\/(viem|abitype|ox)\//.test(id)) return 'abi-codec'
+          if (/\/node_modules\/(dedot|@dedot|smoldot)\//.test(id)) return 'dedot'
           return id.includes('/node_modules/') ? 'vendor' : undefined
         },
       },

@@ -473,6 +473,7 @@ const MOCK_CONTRACT_ABI = {
     { type: 'function', name: 'totalSupply', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'uint256' }] },
     { type: 'function', name: 'symbol', stateMutability: 'pure', inputs: [], outputs: [{ name: '', type: 'string' }] },
     { type: 'function', name: 'transfer', stateMutability: 'nonpayable', inputs: [{ name: 'to', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [{ name: '', type: 'bool' }] },
+    { type: 'function', name: 'deposit', stateMutability: 'payable', inputs: [], outputs: [] },
     { type: 'event', name: 'Transfer', inputs: [] },
   ],
   source: 'verified',
