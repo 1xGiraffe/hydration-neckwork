@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState, Fragment, type KeyboardEvent } from 'react'
+import { useEffect, useRef, useState, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { useExtrinsic } from '../hooks/useExplorerData'
 import { Link, paths } from '../router'
 import { F, AddrPill, CallPill, StatusBadge, JsonView, Ago, ExpandedRowSkeleton, Dash } from './ui'
+import { EvmLogView } from './EvmDecoded'
+import { useExpandableRow } from '../hooks/useExpandableRow'
 import { failureReasonText, type ExtrinsicSummary, type ExtrinsicOrigin, type EventRow } from '../types'
 
 // Expandable extrinsic / event rows shared by the list pages (Extrinsics, Events)
@@ -163,17 +165,6 @@ function ExpandPanel({ id, origin }: { id: string; origin?: ExtrinsicOrigin }) {
   )
 }
 
-function useExpandableRow() {
-  const [open, setOpen] = useState(false)
-  const toggle = () => setOpen(value => !value)
-  const onKeyDown = (event: KeyboardEvent<HTMLTableRowElement>) => {
-    if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return
-    event.preventDefault()
-    toggle()
-  }
-  return { open, toggle, onKeyDown }
-}
-
 export function ExtRow({ x, now, isNew, noSigner, showOrigin, senderLabel }: { x: ExtrinsicSummary; now: number; isNew?: boolean; noSigner?: boolean; showOrigin?: boolean; senderLabel?: boolean }) {
   const { open, toggle, onKeyDown } = useExpandableRow()
   const id = `${x.blockHeight}-${x.index}`
@@ -236,7 +227,8 @@ export function EvRow({ e, now, isNew }: { e: EventRow; now: number; isNew?: boo
         <tr className="exp-row"><td colSpan={6}>
           <div className="exp">
             <div className="exp-h">{e.name}</div>
-            {hasArgs ? <JsonView value={args} /> : <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>no parameters</div>}
+            {e.evmDecoded ? <EvmLogView decoded={e.evmDecoded} />
+              : hasArgs ? <JsonView value={args} /> : <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>no parameters</div>}
             {extId ? <Link to={paths.extrinsic(extId)} className="hash">Open extrinsic →</Link> : <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>System event · no extrinsic</span>}
           </div>
         </td></tr>

@@ -1,7 +1,7 @@
 import type {
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem,
-  AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail,
+  AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
@@ -191,6 +191,12 @@ export const api = {
   contractAbi: (address: string, signal?: AbortSignal) => getJson<ContractAbiPayload>(`/explorer/contract/${encodeURIComponent(address)}/abi`, signal),
   contractSources: (address: string, signal?: AbortSignal) => getJson<ContractSourcesPayload>(`/explorer/contract/${encodeURIComponent(address)}/sources`, signal),
   compilerVersions: (signal?: AbortSignal) => getJson<{ versions: string[] }>('/explorer/contract/compiler-versions', signal),
+  // Contract-tab activity: the contract's own transactions and events with
+  // page-bounded verified-ABI decoding (method chips, named log params).
+  contractTransactions: (address: string, offset = 0, limit = 25, signal?: AbortSignal) =>
+    getJson<ContractTransactionsPage>(withQuery(`/explorer/contract/${encodeURIComponent(address)}/transactions`, { offset, limit }), signal),
+  contractEvents: (address: string, offset = 0, limit = 25, signal?: AbortSignal) =>
+    getJson<ContractEventsPage>(withQuery(`/explorer/contract/${encodeURIComponent(address)}/events`, { offset, limit }), signal),
   // Sourcify V2 verification (the same surface `forge verify-contract` uses).
   // The api mounts these under /v2 — nginx/vite strip the /api prefix — and a
   // failed submit answers with {customCode, message}, which ApiError surfaces.
