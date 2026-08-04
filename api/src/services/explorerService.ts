@@ -19304,12 +19304,111 @@ async function enrichAccountSparklines(
 //  - the per-row top-holdings pass (a query pair each) runs only for contracts
 //    that actually hold something — measured live, that is ~20 of 375, so the
 //    fan-out is a rounding error rather than 750 queries;
-//  - activity counts come from the accounts directory's published leaderboard,
-//    already in memory, so the column costs no query at all. A contract outside
-//    that pool shows no number — the same honest rule /accounts applies.
+//  - activity totals are counted through getAddressListTotal, the very call the
+//    account page's Activity tab makes, so a contract's row and its own page can
+//    never disagree — but that is the most expensive read the API issues (~0.6s
+//    each), so only the most overdue few are recounted per pass and the results
+//    are published so a restart resumes instead of re-sweeping.
 let contractMetricsByAddress = new Map<string, ContractMetrics>()
 let contractMetricsTimer: ReturnType<typeof setInterval> | null = null
 let contractMetricsInflight: Promise<void> | null = null
+
+// A whole-history activity count per contract, refreshed overdue-first. Paced the
+// way the accounts leaderboard paces the very same call — one at a time with an
+// idle gap between them, because a whole-history count is the most expensive read
+// the API issues and a background sweep gains nothing from overlapping them.
+// (Measured: six of these four-at-a-time did collide with the leaderboard's own
+// pass and both took ECONNRESETs from ClickHouse. Handled on both sides, but
+// there is no reason to provoke it.) 375 contracts at 6 per five-minute pass
+// sweeps the registry in ~5.2 h, so every entry is refreshed roughly twice per
+// TTL. The counts also land in the shared list-total cache, so a contract page
+// visited soon after gets its Activity tab total for free.
+const CONTRACT_ACTIVITY_SNAPSHOT_KEY = 'contract-activity:v1'
+const CONTRACT_ACTIVITY_ENTRY_TTL_MS = 12 * 3_600_000
+const CONTRACT_ACTIVITY_PER_PASS = 6
+const CONTRACT_ACTIVITY_COOLDOWN_MS = 5_000
+// `total: null` means no prefix could be established for this contract at all —
+// stored, not skipped, so a contract that cannot answer does not consume a
+// counting slot every pass. It renders as a dash either way.
+export interface ContractActivityEntry { total: number | null; complete: boolean; countedAt: string }
+let contractActivityCounts = new Map<string, ContractActivityEntry>()
+let contractActivityLoaded = false
+
+// A never-counted contract is infinitely overdue, which is what puts a cold
+// registry's contracts ahead of a warm one's oldest entry.
+function contractActivityAge(entry: ContractActivityEntry | undefined, now: number): number {
+  if (!entry?.countedAt) return Infinity
+  const at = Date.parse(entry.countedAt)
+  return Number.isFinite(at) ? now - at : Infinity
+}
+
+// Which contracts this pass recounts: only those whose stored total aged out,
+// most overdue first, capped at what one pass may spend. Pure, so the sweep's
+// coverage guarantee is testable — every contract must reach the front of this
+// queue well inside the TTL, or a column would go permanently stale.
+export function dueContractActivityCounts(
+  addresses: string[],
+  entries: Map<string, ContractActivityEntry>,
+  now: number,
+  limit = CONTRACT_ACTIVITY_PER_PASS,
+  ttlMs = CONTRACT_ACTIVITY_ENTRY_TTL_MS,
+): string[] {
+  return addresses
+    .filter(a => contractActivityAge(entries.get(a), now) > ttlMs)
+    .sort((a, b) => contractActivityAge(entries.get(b), now) - contractActivityAge(entries.get(a), now))
+    .slice(0, limit)
+}
+
+async function loadContractActivityCounts(): Promise<void> {
+  if (contractActivityLoaded) return
+  contractActivityLoaded = true
+  const res = await client.query({
+    query: `SELECT payload_json FROM price_data.account_directory_snapshots FINAL
+            WHERE snapshot_key = {key:String} LIMIT 1`,
+    query_params: { key: CONTRACT_ACTIVITY_SNAPSHOT_KEY }, format: 'JSONEachRow',
+  }).catch(() => null)
+  if (!res) return
+  const row = (await res.json<{ payload_json: string }>())[0]
+  if (!row) return
+  try {
+    const stored = JSON.parse(row.payload_json) as Record<string, ContractActivityEntry>
+    for (const [address, entry] of Object.entries(stored)) {
+      if (entry && (entry.total === null || Number.isSafeInteger(entry.total))) contractActivityCounts.set(address, entry)
+    }
+  } catch { /* an unreadable payload just means a fresh sweep */ }
+}
+
+// Recount the few contracts whose stored total has aged out, one at a time with
+// a cooldown between them; the directory keeps serving whatever is published
+// meanwhile, so nothing waits on this.
+async function refreshContractActivityCounts(addresses: string[]): Promise<void> {
+  await loadContractActivityCounts()
+  const known = new Set(addresses)
+  for (const address of [...contractActivityCounts.keys()]) {
+    if (!known.has(address)) contractActivityCounts.delete(address)   // reclassified away
+  }
+  const due = dueContractActivityCounts(addresses, contractActivityCounts, Date.now())
+  if (!due.length) return
+  let counted = 0
+  for (const address of due) {
+    if (counted) await new Promise(resolve => setTimeout(resolve, CONTRACT_ACTIVITY_COOLDOWN_MS))
+    const total = await getAddressListTotal(address, { tab: 'activity', type: 'all' })
+      .catch(err => { console.warn('[contracts] activity count failed', address, err); return undefined })
+    if (!total) continue
+    contractActivityCounts.set(address, { total: total.total, complete: total.complete, countedAt: new Date().toISOString() })
+    counted++
+  }
+  if (!counted) return
+  await client.insert({
+    table: 'price_data.account_directory_snapshots',
+    values: [{
+      snapshot_key: CONTRACT_ACTIVITY_SNAPSHOT_KEY,
+      payload_json: JSON.stringify(Object.fromEntries(contractActivityCounts)),
+      computed_at: new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ''),
+    }],
+    format: 'JSONEachRow',
+  }).catch(err => console.warn('[contracts] activity count persist failed', err))
+}
 
 export function contractMetrics(address: string): ContractMetrics {
   return contractMetricsByAddress.get(address.toLowerCase()) ?? {}
@@ -19417,11 +19516,10 @@ async function refreshContractMetricsUncached(): Promise<void> {
       .catch(err => console.warn('[contracts] metrics holdings failed', err)),
   ])
 
-  const leaderboard = await ensureActivityLeaderboard()
-  const activityByGkey = new Map(leaderboard?.entries.map(e => [e.gkey, e]) ?? [])
+  await refreshContractActivityCounts(addresses).catch(err => console.warn('[contracts] metrics activity failed', err))
+
   const next = new Map<string, ContractMetrics>()
   addresses.forEach((address, i) => {
-    const account = raw[i].sample
     const metrics: ContractMetrics = {}
     if (raw[i].usd_total !== 0) metrics.portfolioUsd = +raw[i].usd_total.toFixed(2)
     if (rows[i].topAssets?.length) metrics.topAssets = rows[i].topAssets
@@ -19430,8 +19528,8 @@ async function refreshContractMetricsUncached(): Promise<void> {
     const spark = rows[i].sparkline
     if (spark && spark.some(v => v !== 0)) metrics.sparkline = spark
     if (rows[i].tradingVolumeUsd) metrics.tradingVolumeUsd = rows[i].tradingVolumeUsd
-    const activity = activityByGkey.get(account)
-    if (activity) {
+    const activity = contractActivityCounts.get(address)
+    if (activity && activity.total != null) {
       metrics.activityCount = activity.total
       metrics.activityCountComplete = activity.complete
     }
