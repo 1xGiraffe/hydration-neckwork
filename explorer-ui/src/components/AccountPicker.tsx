@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { api } from '../api/explorer'
 import type { SearchResult } from '../types'
-import { AccountEmoji, ShortAddr } from './ui'
+import { AccountEmoji, ShortAddr, noAutofill } from './ui'
 import { tokenizeAddresses } from './accountTokens'
 
 // Email-recipient style account input: picked accounts sit as removable chips
@@ -155,7 +155,7 @@ export function AccountPicker({ values = [], onChange, onCommit, chips, placehol
           </span>
         ))}
         {onCommit && chips}
-        <input
+        <input {...noAutofill}
           ref={inputRef}
           id={inputId}
           value={text}
