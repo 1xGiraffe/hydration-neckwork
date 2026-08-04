@@ -1691,8 +1691,17 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .fn-head { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; width: 100%; cursor: pointer; padding: 4px 0; }
 .fn-head .fn-caret { margin-left: auto; }
 .fn-body { border-top: 1px solid var(--separator); margin-top: 8px; padding-top: 8px; }
+/* The Write gate must LOOK gated: a reverting estimate disables the button,
+   and the same dimming covers a busy Query on the Read tab. Same values as
+   the pager's disabled buttons. */
+.fn-body .btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .fn-nested { display: flex; flex-direction: column; gap: 2px; }
 .fn-nested-row { overflow-wrap: anywhere; }
+/* Write sub-tab: the wallet summary bar ("you are writing to X as Y") wraps
+   pills and buttons on one line, folding gracefully at 390px. */
+.write-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 4px 0; }
+.write-bar .btn { margin-left: auto; }
+.write-as { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
 /* ============ DCA schedules ============
    A DCA is scheduled in blocks but read in time, so every surface here leads

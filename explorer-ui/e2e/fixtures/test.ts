@@ -408,7 +408,13 @@ export async function seedSession(page: Page, userMock: { state: UserMockState }
   )
 }
 
-export const test = base.extend<{ mockApi: void; userMock: { state: UserMockState }; injectedWallet: void }>({
+// The EVM identity the mock wallet below serves, and the tx hash it "signs" —
+// fixed so specs can assert on them.
+export const E2E_EVM_ADDRESS = '0xe2e0000000000000000000000000000000000001'
+export const E2E_EVM_TX_HASH = '0x' + '77'.repeat(32)
+export const E2E_EVM_WALLET_RDNS = 'net.neckwork.test-wallet'
+
+export const test = base.extend<{ mockApi: void; userMock: { state: UserMockState }; injectedWallet: void; evmWallet: void }>({
   mockApi: [async ({ page }, use) => {
     // Anchor the matcher at the origin root. A broad `**/api/**` glob also
     // catches Vite source modules such as `/src/api/explorer.ts`.
@@ -452,16 +458,53 @@ export const test = base.extend<{ mockApi: void; userMock: { state: UserMockStat
     await use({ state })
   }, { auto: false }],
 
+  // The EVM counterpart of `injectedWallet`: announces one EIP-6963 provider
+  // before any app code runs. Requests are answered deterministically and
+  // recorded on `window.__evmWalletCalls`, so a spec can assert the exact
+  // chain-add/switch parameters a real wallet would receive. The first
+  // wallet_switchEthereumChain deliberately answers 4902 (chain unknown — the
+  // common case for chain 222222) so the add-chain path is always exercised.
+  evmWallet: [async ({ page }, use) => {
+    await page.addInitScript(([address, txHash, rdns]) => {
+      const calls: { method: string; params?: unknown[] }[] = []
+      ;(window as unknown as { __evmWalletCalls: unknown }).__evmWalletCalls = calls
+      let switches = 0
+      const provider = {
+        async request({ method, params }: { method: string; params?: unknown[] }) {
+          calls.push({ method, params })
+          if (method === 'eth_requestAccounts' || method === 'eth_accounts') return [address]
+          if (method === 'wallet_switchEthereumChain') {
+            if (++switches === 1) throw Object.assign(new Error('Unrecognized chain ID'), { code: 4902 })
+            return null
+          }
+          if (method === 'wallet_addEthereumChain') return null
+          if (method === 'eth_sendTransaction') return txHash
+          throw Object.assign(new Error(`unsupported ${method}`), { code: -32601 })
+        },
+      }
+      const announce = () => window.dispatchEvent(new CustomEvent('eip6963:announceProvider', {
+        detail: { info: { rdns, name: 'Test Wallet', icon: '' }, provider },
+      }))
+      window.addEventListener('eip6963:requestProvider', announce)
+      announce()
+    }, [E2E_EVM_ADDRESS, E2E_EVM_TX_HASH, E2E_EVM_WALLET_RDNS] as [string, string, string])
+    await use()
+  }, { auto: false }],
+
   // Installs the brief's wallet stub before any app code runs, so
   // `listSubstrateWallets()` sees `polkadot-js` as installed on the very
-  // first render.
+  // first render. signPayload exists because the contract Write tab hands the
+  // signer to dedot (extrinsic signing), not just signRaw logins.
   injectedWallet: [async ({ page }, use) => {
     await page.addInitScript(() => {
       (window as unknown as { injectedWeb3: unknown }).injectedWeb3 = {
         'polkadot-js': {
           enable: async () => ({
             accounts: { get: async () => [{ address: '15DajYeqgb4ADkb8scVCcNaXjfM1SV9PLvqjNDkpH6kBDRLZ', name: 'E2E' }] },
-            signer: { signRaw: async () => ({ signature: '0x' + 'ab'.repeat(64) }) },
+            signer: {
+              signRaw: async () => ({ signature: '0x' + 'ab'.repeat(64) }),
+              signPayload: async () => ({ signature: '0x' + 'ab'.repeat(64) }),
+            },
           }),
         },
       }

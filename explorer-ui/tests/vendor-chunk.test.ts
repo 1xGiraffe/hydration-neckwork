@@ -33,4 +33,15 @@ describe('build output', () => {
     }
     expect(chunkOf('/app/node_modules/react/index.js')).toBe('vendor')
   })
+
+  // dedot is only ever imported by the lazy substrate-write module
+  // (src/substrateWrite.ts, dynamic import when a Substrate wallet connects on
+  // the contract Write tab) — same rule as the ABI codec: its own chunk, never
+  // the eager vendor download.
+  it('keeps dedot out of the vendor chunk', () => {
+    for (const dep of ['dedot', '@dedot/api', '@dedot/codecs', '@dedot/utils', '@dedot/providers', 'smoldot']) {
+      expect(chunkOf(`/app/node_modules/${dep}/index.js`)).toBe('dedot')
+    }
+    expect(chunkOf('/app/node_modules/react/index.js')).toBe('vendor')
+  })
 })
