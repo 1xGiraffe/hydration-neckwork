@@ -12,7 +12,10 @@
 // 'polkadot-js' key.
 export interface SubstrateWalletInfo { id: string; title: string; installUrl: string; icon: string; injectedKey: string; installed: boolean; shortlist: boolean }
 export interface InjectedAccount { address: string; name?: string }
-interface InjectedExtension {
+// The injected signer also carries signPayload (extrinsic signing, used by
+// the contract Write tab through dedot); only signRaw is typed here because
+// it is all this module calls itself.
+export interface InjectedExtension {
   accounts: { get(): Promise<InjectedAccount[]> }
   signer: { signRaw(payload: { address: string; data: string; type: 'bytes' }): Promise<{ signature: string }> }
 }

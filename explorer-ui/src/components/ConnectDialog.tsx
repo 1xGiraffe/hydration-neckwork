@@ -4,38 +4,17 @@ import { api, userApi } from '../api/explorer'
 import { setSession } from '../session'
 import {
   listSubstrateWallets, connectSubstrate, signSubstrate,
-  discoverEvmProviders, connectEvm, signEvm, accountRowLabel,
+  connectEvm, signEvm, accountRowLabel,
 } from '../wallets'
-import type { InjectedAccount, EvmProviderDetail, Eip1193Provider, AccountRowLabel, SubstrateWalletInfo } from '../wallets'
-import { AccountEmoji, ShortAddr } from './ui'
+import type { InjectedAccount, EvmProviderDetail, Eip1193Provider } from '../wallets'
+import { AccountRowLabelView, EvmProviderTile, SubstrateWalletTile } from './WalletPicker'
+import { useEvmProviders } from '../hooks/useEvmProviders'
 import { extractDeviceLinkCode } from '../deviceLink'
 import type { AccountRef } from '../types'
 
 // The jsQR decoder only loads when someone actually picks "Scan QR code" —
 // wallet sign-ins never pay for it.
 const QrScanner = lazy(() => import('./QrScanner').then(m => ({ default: m.QrScanner })))
-
-// The emoji/avatar + name + mono address a wallet account renders as, shared
-// by the account-picker rows and the signing screen so a chosen account looks
-// identical on both — the same pill-in-a-list treatment an AddrPill gets
-// elsewhere (profile name amber-italic, on-chain identity plain), just without
-// the account-page link a real AddrPill would carry (there's nowhere to link
-// to mid sign-in).
-function AccountRowLabelView({ account, label }: { account: AccountRef | null | undefined; label: AccountRowLabel }) {
-  return (
-    <>
-      {account
-        ? <AccountEmoji account={account} className="emoji id account-row-emoji" />
-        : <span className="emoji id account-row-emoji">👤</span>}
-      {label.primary && (
-        label.kind === 'profile' ? <span className="tag profile-name">{label.primary}</span>
-          : label.kind === 'identity' ? <span className="tag">{label.primary}</span>
-          : <span className="wallet-name">{label.primary}</span>
-      )}
-      <span className="wallet-status mono">{label.address ? <ShortAddr addr={label.address} /> : '···'}</span>
-    </>
-  )
-}
 
 // The extension handle or EVM provider a chosen address will sign with, kept
 // around from the connect step so the account picker and a signing retry both
@@ -68,7 +47,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   const [address, setAddress] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [evmProviders, setEvmProviders] = useState<EvmProviderDetail[]>([])
+  const evmProviders = useEvmProviders(open)
   // Display refs keyed by the RAW extension address: undefined = still
   // loading (the raw substrate encoding is never flashed), null = lookup
   // failed (degrade to the raw form), ref = canonical pill-style display.
@@ -110,19 +89,6 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   // before any new doSign a later click could trigger. The claim guard resets
   // on the same edge for the same reason.
   useEffect(() => { attemptRef.current++; claimingRef.current = false }, [open])
-
-  // EIP-6963 providers announce asynchronously; re-poll the same discovery
-  // handle's list() whenever another one arrives while the dialog is open.
-  // `onAnnounce` both seeds the initial snapshot and serves as the ongoing
-  // subscription callback, so this stays "subscribe to an external store".
-  useEffect(() => {
-    if (!open) return
-    const discovery = discoverEvmProviders()
-    const onAnnounce = () => setEvmProviders(discovery.list())
-    onAnnounce()
-    window.addEventListener('eip6963:announceProvider', onAnnounce)
-    return () => { window.removeEventListener('eip6963:announceProvider', onAnnounce); discovery.stop() }
-  }, [open])
 
   const substrateWallets = useMemo(() => (open ? listSubstrateWallets() : []), [open])
   const shortlistWallets = useMemo(() => substrateWallets.filter(w => w.shortlist), [substrateWallets])
@@ -264,22 +230,6 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
     }
   }
 
-  function walletTile(w: SubstrateWalletInfo) {
-    return w.installed ? (
-      <button key={w.id} type="button" className="wallet-tile installed" disabled={busy} onClick={() => void connectWallet(w.injectedKey)}>
-        <img className="wallet-tile-icon" src={w.icon} alt="" />
-        <span className="wallet-tile-name">{w.title}</span>
-        <span className="wallet-tile-status">Installed</span>
-      </button>
-    ) : (
-      <a key={w.id} className="wallet-tile not-installed" href={w.installUrl} target="_blank" rel="noreferrer">
-        <img className="wallet-tile-icon" src={w.icon} alt="" />
-        <span className="wallet-tile-name">{w.title}</span>
-        <span className="wallet-tile-status">Install ↗</span>
-      </a>
-    )
-  }
-
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -302,7 +252,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
                 <div className="wallet-group">
                   <div className="wallet-group-label">Substrate</div>
                   <div className="wallet-grid">
-                    {shortlistWallets.map(walletTile)}
+                    {shortlistWallets.map(w => <SubstrateWalletTile key={w.id} wallet={w} busy={busy} onConnect={key => void connectWallet(key)} />)}
                   </div>
                   {otherWallets.length > 0 && (
                     <>
@@ -316,7 +266,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
                       </button>
                       {showOtherWallets && (
                         <div className="wallet-grid">
-                          {otherWallets.map(walletTile)}
+                          {otherWallets.map(w => <SubstrateWalletTile key={w.id} wallet={w} busy={busy} onConnect={key => void connectWallet(key)} />)}
                         </div>
                       )}
                     </>
@@ -326,12 +276,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
                   <div className="wallet-group">
                     <div className="wallet-group-label">Ethereum</div>
                     <div className="wallet-grid">
-                      {evmProviders.map(p => (
-                        <button key={p.info.rdns} type="button" className="wallet-tile installed" disabled={busy} onClick={() => void connectProvider(p)}>
-                          {p.info.icon ? <img className="wallet-tile-icon" src={p.info.icon} alt="" /> : <span className="wallet-tile-icon" aria-hidden="true" />}
-                          <span className="wallet-tile-name">{p.info.name}</span>
-                        </button>
-                      ))}
+                      {evmProviders.map(p => <EvmProviderTile key={p.info.rdns} detail={p} busy={busy} onConnect={d => void connectProvider(d)} />)}
                     </div>
                   </div>
                 )}

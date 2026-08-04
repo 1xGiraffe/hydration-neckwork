@@ -8,28 +8,31 @@ import { Combo } from './Filters'
 import { readFunctions, functionSignature, type AbiFunctionItem, type AbiParam } from '../abiShape'
 import { validateStandardJson, validateContractIdentifier } from '../verifyForm'
 import { ethCall, ethGetCode, EvmRpcError } from '../evmRpc'
+import { ContractWriteView } from './ContractWriteTab'
 import type { ContractInfo } from '../types'
 
 // The account page's Contract tab (?view=contract): a Code sub-tab (verified
-// source, ABI, bytecode, verify panel) and a Read sub-tab (browser-side
-// eth_call over the verified ABI). Deep-linkable via ?contract=code|read like
-// every other tab here. The ABI codec (viem) loads as its own lazy chunk only
-// when a query actually runs — see abiCodec.ts.
+// source, ABI, bytecode, verify panel), a Read sub-tab (browser-side eth_call
+// over the verified ABI) and a Write sub-tab (ContractWriteTab.tsx — its own
+// wallet connection, never the login session). Deep-linkable via
+// ?contract=code|read|write like every other tab here. The ABI codec (viem)
+// loads as its own lazy chunk only when a query actually runs — see abiCodec.ts.
 
 const neutralBadge = { color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' } as const
 
 export function ContractTab({ address, contract }: { address: string; contract: ContractInfo }) {
   const raw = useQueryValue('contract', 'code')
-  const active = raw === 'read' ? 'read' : 'code'
+  const active = raw === 'read' ? 'read' : raw === 'write' ? 'write' : 'code'
   return (
     <>
       <div className="tabs" style={{ marginTop: 16 }}>
         <button type="button" className={active === 'code' ? 'active' : ''} onClick={() => setQuery({ contract: null })}>Code</button>
         <button type="button" className={active === 'read' ? 'active' : ''} onClick={() => setQuery({ contract: 'read' })}>Read</button>
+        <button type="button" className={active === 'write' ? 'active' : ''} onClick={() => setQuery({ contract: 'write' })}>Write</button>
       </div>
-      {active === 'code'
-        ? <ContractCodeView address={address} contract={contract} />
-        : <ContractReadView address={address} contract={contract} />}
+      {active === 'code' && <ContractCodeView address={address} contract={contract} />}
+      {active === 'read' && <ContractReadView address={address} contract={contract} />}
+      {active === 'write' && <ContractWriteView address={address} contract={contract} />}
     </>
   )
 }

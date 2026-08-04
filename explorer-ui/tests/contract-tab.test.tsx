@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ContractTab, ContractCodeView, ContractReadView } from '../src/components/ContractTab'
+import { ContractWriteView } from '../src/components/ContractWriteTab'
+import { setContractWallet } from '../src/contractWallet'
 import { validateStandardJson, validateContractIdentifier } from '../src/verifyForm'
 import { ContractSection, profileTabs } from '../src/components/AccountSections'
 import type { ContractInfo } from '../src/types'
@@ -40,7 +42,8 @@ const abiPayload = {
   abi: [
     { type: 'function', name: 'balanceOf', stateMutability: 'view', inputs: [{ name: 'account', type: 'address' }], outputs: [{ name: '', type: 'uint256' }] },
     { type: 'function', name: 'symbol', stateMutability: 'pure', inputs: [], outputs: [{ name: '', type: 'string' }] },
-    { type: 'function', name: 'transfer', stateMutability: 'nonpayable', inputs: [], outputs: [] },
+    { type: 'function', name: 'transfer', stateMutability: 'nonpayable', inputs: [{ name: 'to', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [] },
+    { type: 'function', name: 'deposit', stateMutability: 'payable', inputs: [], outputs: [] },
   ],
   source: 'verified',
   contractName: 'GhoToken',
@@ -144,6 +147,42 @@ describe('ContractTab', () => {
     const out = render(<ContractTab address={ADDR} contract={verifiedInfo} />, seedVerified)
     expect(out).toContain('Code')
     expect(out).toContain('Read')
+    expect(out).toContain('Write')
+  })
+})
+
+describe('ContractWriteView', () => {
+  afterEach(() => setContractWallet(null))
+
+  it('numbers the nonpayable and payable functions, view/pure stay off', () => {
+    const out = render(<ContractWriteView address={ADDR} contract={verifiedInfo} />, seedVerified)
+    expect(out).toContain('transfer')
+    expect(out).toContain('deposit')
+    expect(out).toContain('payable')
+    expect(out).not.toContain('balanceOf')
+    expect(out).not.toContain('symbol')
+  })
+
+  it('gates writing on a wallet connection of its own', () => {
+    const out = render(<ContractWriteView address={ADDR} contract={verifiedInfo} />, seedVerified)
+    expect(out).toMatch(/Connect wallet/)
+    expect(out).not.toMatch(/Disconnect/)
+  })
+
+  it('shows the writing-as summary and a disconnect once connected', () => {
+    setContractWallet({
+      kind: 'evm', key: 'io.metamask', address: '0x' + '11'.repeat(20), walletName: 'MetaMask',
+      evmFrom: '0x' + '11'.repeat(20),
+    })
+    const out = render(<ContractWriteView address={ADDR} contract={verifiedInfo} />, seedVerified)
+    expect(out).toMatch(/writing to/i)
+    expect(out).toMatch(/Disconnect/)
+    expect(out).not.toMatch(/Connect wallet/)
+  })
+
+  it('hints at verification when the contract has no ABI', () => {
+    const out = render(<ContractWriteView address={ADDR} contract={contractInfo()} />)
+    expect(out).toMatch(/verif/i)
   })
 })
 
