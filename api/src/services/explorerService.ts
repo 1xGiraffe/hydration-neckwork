@@ -17,6 +17,7 @@ import { hexToU8a } from '@polkadot/util'
 import { proxyInfoFor, multisigCompositionFor, multisigMembershipsFor, pendingMultisigOps, threshold1OpsFor, type ProxyRelation, type PendingMultisigOp } from './proxyMultisigService.ts'
 import { isContractAccount, contractByH160, allContracts, contractsPage, type ContractRegistryEntry, type ContractCreation, type ContractSort } from './contractRegistryService.ts'
 import { verifiedContractInfo, verificationDisplay, searchVerifiedNames, allVerifiedContracts, type VerificationDisplay } from './contractVerificationService.ts'
+import { decodeEvmCallSites, attachEvmLogDecodes, decodeEvmLogArgs, decodeEventLog, getContractAbiIndexes, type DecodedEvmCall, type EvmLogDecode } from './contractAbiDecode.ts'
 import {
   resolveProxyInner, buildMultisigOperations, enrichMultisigOperations, proxyChildAddress,
   type ExtrinsicCallRow, type ProxyInnerInfo, type MultisigLifecycleEvent, type MultisigCallInfo,
@@ -1812,7 +1813,7 @@ function uniqueExtrinsicSummaries(rows: ExtrinsicSummaryRow[]): ExtrinsicSummary
     return [extrinsicSummary(row)]
   })
 }
-export interface BlockEvent { eventIndex: number; extrinsicIndex: number | null; name: string; args: unknown }
+export interface BlockEvent { eventIndex: number; extrinsicIndex: number | null; name: string; args: unknown; evmDecoded?: EvmLogDecode }
 export interface BlockDetail extends BlockSummary {
   parentHash: string
   stateRoot: string | null
@@ -1860,6 +1861,7 @@ export async function getBlock(height: number): Promise<BlockDetail | null> {
     const events: BlockEvent[] = (await evListRes.json<{ event_index: number; extrinsic_index: number | null; event_name: string; args_json: string }>())
       .filter(r => (evSeen.has(r.event_index) ? false : (evSeen.add(r.event_index), true)))
       .map(r => ({ eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index, name: r.event_name, args: safeJson(r.args_json) }))
+    await attachEvmLogDecodes(events)
     // De-dup replay rows by extrinsic_index.
     const seen = new Set<number>()
     const extrinsics: ExtrinsicSummary[] = []
@@ -1939,7 +1941,12 @@ export interface ExtrinsicDetail extends ExtrinsicSummary {
   callArgs: unknown
   error: unknown
   errorReason: FailureReason | null
-  events: { eventIndex: number; name: string; args: unknown }[]
+  events: { eventIndex: number; name: string; args: unknown; evmDecoded?: EvmLogDecode }[]
+  // Verified-ABI decodes of the EVM calls this extrinsic performs (top-level
+  // Ethereum.transact / EVM.call plus EVM.call nodes nested in wrapper call
+  // trees), decoded at request time from callArgs alone. Additive; absent when
+  // no target has a verified ABI.
+  evmCalls?: DecodedEvmCall[]
 }
 
 interface ExtrinsicDetailRow {
@@ -1973,6 +1980,10 @@ async function hydrateExtrinsicDetail(row: ExtrinsicDetailRow): Promise<Extrinsi
     seen.add(event.event_index)
     events.push({ eventIndex: event.event_index, name: event.event_name, args: safeJson(event.args_json) })
   }
+  await attachEvmLogDecodes(events)
+
+  const callArgs = safeJson(row.call_args_json)
+  const evmCalls = await decodeEvmCallSites(row.call_name, callArgs)
 
   return {
     blockHeight: row.block_height,
@@ -1985,10 +1996,11 @@ async function hydrateExtrinsicDetail(row: ExtrinsicDetailRow): Promise<Extrinsi
     fee: row.fee,
     version: row.version,
     tip: row.tip,
-    callArgs: safeJson(row.call_args_json),
+    callArgs,
     error: row.error_json ? safeJson(row.error_json) : null,
     errorReason: row.success === 1 ? null : dispatchErrorReason(row.error_json, row.spec_version, resolveModuleError),
     events,
+    ...(evmCalls.length ? { evmCalls } : {}),
   }
 }
 
@@ -2767,6 +2779,173 @@ function contractDisplay(e: ContractRegistryEntry): ContractDisplay {
 export function getContracts(offset: number, limit: number, sort: ContractSort): { contracts: ContractDisplay[]; total: number } {
   const { rows, total } = contractsPage(offset, limit, sort)
   return { contracts: rows.map(contractDisplay), total }
+}
+
+// --- contract tab activity (§9) ----------------------------------------------
+//
+// Two contract-scoped pages for the Contract tab. Transactions ride
+// evm_executed, whose ORDER BY starts with to_address — a primary-key prefix
+// read — grouped on the row identity so replayed raw ranges cannot duplicate a
+// page. Events ride raw_evm_logs key-first: the identity page carries only
+// (block_height, event_index) — raw_evm_logs is block-first, so the contract
+// predicate leans on its bloom-filter index and never touches the ZSTD payload
+// columns — and the payload pass then reads exactly the page's own keys through
+// the table's primary key. Decoding happens strictly on the fetched page: the
+// method chip is named from the target's cached verified-ABI index, and log
+// rows fall back from a verified-ABI decode to the ingest decode to raw topics.
+
+export interface ContractTxMethod { selector: string | null; name: string | null; signature: string | null }
+export interface ContractTxRow {
+  blockHeight: number
+  extrinsicIndex: number | null
+  timestamp: string
+  txHash: string
+  from: AccountRef | null
+  success: boolean
+  method: ContractTxMethod
+}
+
+export async function getContractTransactions(address: string, offset: number, limit: number): Promise<{ transactions: ContractTxRow[]; total: number } | null> {
+  const addr = address.toLowerCase()
+  if (!contractByH160(addr)) return null
+  return cached(`contract:txs:${addr}:${offset}:${limit}`, 30_000, async () => {
+    const [rows, countRows] = await Promise.all([
+      client.query({
+        query: `
+          SELECT block_height, event_index, any(extrinsic_index) AS extrinsic_index,
+                 toString(any(block_timestamp)) AS ts, any(tx_hash) AS tx_hash,
+                 any(from_address) AS from_address, any(exit_kind) AS exit_kind
+          FROM price_data.evm_executed
+          WHERE to_address = {address:String}
+          GROUP BY block_height, event_index
+          ORDER BY block_height DESC, event_index DESC
+          LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
+        query_params: { address: addr, limit, offset }, format: 'JSONEachRow',
+      }).then(r => r.json<{ block_height: number; event_index: number; extrinsic_index: number | null; ts: string; tx_hash: string; from_address: string; exit_kind: string }>()),
+      client.query({
+        query: `SELECT toUInt32(uniqExact((block_height, event_index))) AS c
+                FROM price_data.evm_executed WHERE to_address = {address:String}`,
+        query_params: { address: addr }, format: 'JSONEachRow',
+      }).then(r => r.json<{ c: number }>()),
+    ])
+
+    // Page-scoped selector enrichment: evm_executed carries no calldata, so the
+    // page's own extrinsics are read back by primary key for their first four
+    // input bytes. Only an Ethereum.transact input is trusted — any other
+    // wrapper would make the prefix a guess.
+    const selectors = new Map<string, string>()
+    const keys = [...new Set(rows.filter(r => r.extrinsic_index != null).map(r => `(${r.block_height},${r.extrinsic_index})`))]
+    if (keys.length) {
+      const inputRows = await client.query({
+        query: `
+          SELECT block_height, extrinsic_index, any(call_name) AS call_name,
+                 any(substring(JSONExtractString(call_args_json, 'transaction', 'value', 'input'), 1, 10)) AS input_prefix
+          FROM price_data.raw_extrinsics
+          WHERE (block_height, extrinsic_index) IN (${keys.join(',')})
+          GROUP BY block_height, extrinsic_index`,
+        format: 'JSONEachRow',
+      }).then(r => r.json<{ block_height: number; extrinsic_index: number; call_name: string; input_prefix: string }>())
+      for (const row of inputRows) {
+        if (row.call_name !== 'Ethereum.transact') continue
+        if (/^0x[0-9a-f]{8}$/.test(row.input_prefix)) selectors.set(`${row.block_height}:${row.extrinsic_index}`, row.input_prefix)
+      }
+    }
+
+    const indexes = await getContractAbiIndexes(addr)
+    const transactions: ContractTxRow[] = rows.map(row => {
+      const selector = row.extrinsic_index != null ? selectors.get(`${row.block_height}:${row.extrinsic_index}`) ?? null : null
+      const fn = selector ? indexes?.functionsBySelector.get(selector) : undefined
+      return {
+        blockHeight: row.block_height,
+        extrinsicIndex: row.extrinsic_index,
+        timestamp: row.ts,
+        txHash: row.tx_hash,
+        from: row.from_address ? accountRef(evmAccountIdFromAddress(row.from_address) ?? row.from_address) : null,
+        success: row.exit_kind === 'Succeed',
+        method: { selector, name: fn?.name ?? null, signature: fn?.signature ?? null },
+      }
+    })
+    return { transactions, total: Number(countRows[0]?.c ?? 0) }
+  })
+}
+
+export interface ContractEventRow {
+  blockHeight: number
+  eventIndex: number
+  extrinsicIndex: number | null
+  timestamp: string
+  name: string | null
+  topics: string[]
+  data: string
+  evmDecoded?: EvmLogDecode
+  args?: Record<string, unknown>
+  decodedBy?: 'verified-abi' | 'ingest'
+}
+
+export async function getContractEvents(address: string, offset: number, limit: number): Promise<{ events: ContractEventRow[]; total: number } | null> {
+  const addr = address.toLowerCase()
+  const entry = contractByH160(addr)
+  if (!entry) return null
+  return cached(`contract:events:${addr}:${offset}:${limit}`, 30_000, async () => {
+    const keys = await client.query({
+      query: `
+        SELECT block_height, event_index
+        FROM price_data.raw_evm_logs
+        WHERE contract_address = {address:String}
+        GROUP BY block_height, event_index
+        ORDER BY block_height DESC, event_index DESC
+        LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
+      query_params: { address: addr, limit, offset }, format: 'JSONEachRow',
+    }).then(r => r.json<{ block_height: number; event_index: number }>())
+
+    let rows: { block_height: number; event_index: number; extrinsic_index: number | null; ts: string; topics: string[]; data: string; decode_status: string; event_name: string | null; decoded_args_json: string }[] = []
+    if (keys.length) {
+      const tuples = keys.map(k => `(${k.block_height},${k.event_index})`).join(',')
+      rows = await client.query({
+        query: `
+          SELECT block_height, event_index, any(extrinsic_index) AS extrinsic_index,
+                 toString(any(block_timestamp)) AS ts, any(topics) AS topics, any(data) AS data,
+                 any(decode_status) AS decode_status, any(event_name) AS event_name,
+                 any(decoded_args_json) AS decoded_args_json
+          FROM price_data.raw_evm_logs
+          WHERE (block_height, event_index) IN (${tuples}) AND contract_address = {address:String}
+          GROUP BY block_height, event_index
+          ORDER BY block_height DESC, event_index DESC`,
+        query_params: { address: addr }, format: 'JSONEachRow',
+      }).then(r => r.json<{ block_height: number; event_index: number; extrinsic_index: number | null; ts: string; topics: string[]; data: string; decode_status: string; event_name: string | null; decoded_args_json: string }>())
+    }
+
+    const indexes = await getContractAbiIndexes(addr)
+    const events: ContractEventRow[] = rows.map(row => {
+      const base: ContractEventRow = {
+        blockHeight: row.block_height,
+        eventIndex: row.event_index,
+        extrinsicIndex: row.extrinsic_index,
+        timestamp: row.ts,
+        name: null,
+        topics: row.topics,
+        data: row.data,
+      }
+      const decoded = indexes ? decodeEventLog(indexes, row.topics, row.data) : { decoded: false as const }
+      if (decoded.decoded) {
+        return { ...base, name: decoded.name, evmDecoded: decoded, decodedBy: 'verified-abi' }
+      }
+      if (row.decode_status === 'decoded' && row.event_name) {
+        const args = safeJson(row.decoded_args_json)
+        return {
+          ...base,
+          name: row.event_name,
+          decodedBy: 'ingest',
+          ...(args != null && typeof args === 'object' && !Array.isArray(args) ? { args: args as Record<string, unknown> } : {}),
+        }
+      }
+      return base
+    })
+    // The total is the registry's bitmap cardinality — exact under replay and
+    // already in memory; a count() over 33M raw log rows would say the same
+    // thing for the price of a scan.
+    return { events, total: entry.logCount }
+  })
 }
 
 export interface AddressDetail {
@@ -5782,6 +5961,7 @@ export interface EventDetail {
   name: string
   args: unknown
   decoded: boolean
+  evmDecoded?: EvmLogDecode
   phase: string
   extrinsic: ExtrinsicSummary | null
 }
@@ -5799,9 +5979,11 @@ export async function getEventAt(height: number, index: number): Promise<EventDe
     // an Initialization/Finalization (system) event.
     const phase = e.extrinsic_index != null ? `ApplyExtrinsic(${e.extrinsic_index})` : 'Finalization'
     const extrinsic = e.extrinsic_index != null ? await getExtrinsicSummaryAt(e.block_height, e.extrinsic_index) : null
+    const args = safeJson(e.args_json)
+    const evmDecoded = e.event_name === 'EVM.Log' ? await decodeEvmLogArgs(args) : null
     return {
       blockHeight: e.block_height, eventIndex: e.event_index, extrinsicIndex: e.extrinsic_index, timestamp: e.ts,
-      name: e.event_name, args: safeJson(e.args_json), decoded: e.event_name === 'EVM.Log', phase, extrinsic,
+      name: e.event_name, args, decoded: e.event_name === 'EVM.Log', ...(evmDecoded ? { evmDecoded } : {}), phase, extrinsic,
     }
   })
 }
@@ -6046,6 +6228,7 @@ export interface EventRow {
   name: string
   args: unknown
   decoded: boolean
+  evmDecoded?: EvmLogDecode
 }
 interface EventSourceRow {
   block_height: number
@@ -6068,14 +6251,18 @@ function eventRow(row: EventSourceRow): EventRow {
   }
 }
 
-function uniqueEventRows(rows: EventSourceRow[]): EventRow[] {
+async function uniqueEventRows(rows: EventSourceRow[]): Promise<EventRow[]> {
   const seen = new Set<string>()
-  return rows.flatMap(row => {
+  const out = rows.flatMap(row => {
     const key = `${row.block_height}:${row.event_index}`
     if (seen.has(key)) return []
     seen.add(key)
     return [eventRow(row)]
   })
+  // Expanded event rows show their raw args; EVM.Log rows whose contract has a
+  // verified ABI additionally get named params (page-bounded, in-memory).
+  await attachEvmLogDecodes(out)
+  return out
 }
 export async function getRecentEvents(limit: number, from?: string, to?: string, offset = 0, filters: EventListFilters = {}): Promise<EventRow[]> {
   const tw = timeWindow(from, to)
