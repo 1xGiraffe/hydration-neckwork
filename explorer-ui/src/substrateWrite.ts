@@ -1,14 +1,15 @@
 import { DedotClient, WsProvider } from 'dedot'
 import { decodeAddress, u8aToHex } from 'dedot/utils'
-import { gasWithMargin } from './contractWrite'
-import type { WriteStage } from './contractWrite'
+import { gasPriceWithMargin, gasWithMargin, watchSubmittedWrite } from './contractWrite'
+import type { SubmitResult, WriteStage } from './contractWrite'
 
 // The Substrate half of the contract Write tab: build, sign and watch an
-// EVM.call extrinsic through dedot. This module is the single import point
-// for dedot and loads as its own lazy chunk (vite.config.ts manualChunks)
-// only when a Substrate wallet connects on the tab — the base bundle stays
-// SDK-free. dedot fetches metadata at runtime, so runtime upgrades never
-// break pinned call indices.
+// EVM.call extrinsic through dedot, plus the unsigned dispatch_permit submission
+// the EVM-wallet path (permitWrite.ts) hands over once its permit is signed.
+// This module is the single import point for dedot and loads as its own lazy
+// chunk (vite.config.ts manualChunks) only when a write actually needs a chain
+// connection — the base bundle stays SDK-free. dedot fetches metadata at
+// runtime, so runtime upgrades never break pinned call indices.
 
 export const SUBSTRATE_WS_URL = (import.meta.env.VITE_SUBSTRATE_WS_URL as string | undefined) || 'wss://hydration-rpc.neckwork.net'
 
@@ -19,10 +20,14 @@ export function deriveEvmSource(address: string): string {
   return u8aToHex(decodeAddress(address).slice(0, 20))
 }
 
-// The nine EVM.call arguments in declaration order (spec §7.5): gas_limit is
+// The ten EVM.call arguments in declaration order (spec §7.5): gas_limit is
 // the eth_estimateGas answer plus margin, max_fee_per_gas the eth_gasPrice
-// answer; max_priority_fee_per_gas and nonce stay None (undefined is dedot's
-// Option::None), access_list empty.
+// answer plus the same margin (a ceiling the moving base fee cannot outrun —
+// see gasPriceWithMargin); max_priority_fee_per_gas and nonce stay None
+// (undefined is dedot's Option::None), which is also what keeps the charged
+// price at the block's base fee, access_list empty. authorization_list is the
+// EIP-7702 list the pallet added as a tenth field — a Vec, not an Option, so it
+// must be an empty array; passing undefined makes dedot reject the call outright.
 export function buildEvmCallArgs(input: { source: string; target: string; data: string; valueWei: bigint; gasEstimate: bigint; gasPriceWei: bigint }) {
   return [
     input.source,
@@ -30,39 +35,29 @@ export function buildEvmCallArgs(input: { source: string; target: string; data: 
     input.data,
     input.valueWei,
     gasWithMargin(input.gasEstimate),
-    input.gasPriceWei,
+    gasPriceWithMargin(input.gasPriceWei),
     undefined,
     undefined,
+    [],
     [],
   ] as const
 }
 
-// EVM.call succeeding as an extrinsic says nothing about the EVM execution —
-// the pallet reports that through EVM.Executed / EVM.ExecutedFailed events in
-// the same extrinsic.
-export function interpretEvmCallEvents(events: readonly { event: { pallet: string; palletEvent: string | { name: string } } }[]): 'success' | 'reverted' | 'unknown' {
-  for (const record of events) {
-    if (record.event.pallet !== 'EVM') continue
-    const name = typeof record.event.palletEvent === 'string' ? record.event.palletEvent : record.event.palletEvent.name
-    if (name === 'Executed') return 'success'
-    if (name === 'ExecutedFailed') return 'reverted'
-  }
-  return 'unknown'
-}
-
-// The slice of a connected dedot client the write path uses — injectable so
-// the lifecycle is testable without a chain.
-export interface SubmitResult {
-  status: { type: string; value?: { blockHash?: string; blockNumber?: number; txIndex?: number; error?: string } }
-  txHash: string
-  events: readonly { event: { pallet: string; palletEvent: string | { name: string } } }[]
-  dispatchError?: unknown
-}
+// The slice of a connected dedot client the write paths use — injectable so the
+// lifecycle is testable without a chain.
 export interface EvmCallClient {
   tx: {
     evm: {
       call: (...args: unknown[]) => {
         signAndSend(address: string, options: { signer?: unknown }, callback: (result: SubmitResult) => void): Promise<unknown>
+      }
+    }
+    multiTransactionPayment: {
+      dispatchPermit: (...args: unknown[]) => {
+        // A submittable with no signature attached encodes as a bare (unsigned)
+        // extrinsic, and send() streams the same status/events shape
+        // signAndSend does.
+        send(callback: (result: SubmitResult) => void): Promise<unknown>
       }
     }
   }
@@ -80,6 +75,64 @@ export function getSubstrateClient(): Promise<DedotClient> {
     })
   }
   return clientPromise
+}
+
+// Submit a signed CallPermit as an unsigned MultiTransactionPayment.dispatch_permit
+// and stream the watch results. Nobody signs the extrinsic: the pallet's
+// validate_unsigned checks the permit signature and dry-runs the dispatch in the
+// pool, and the fee is charged to the permit's own `from` account in its
+// configured fee currency.
+export async function submitPermitUnsigned(
+  args: readonly unknown[],
+  onResult: (result: SubmitResult) => void,
+  getClient: () => Promise<EvmCallClient> = () => getSubstrateClient() as unknown as Promise<EvmCallClient>,
+): Promise<unknown> {
+  const client = await getClient()
+  try {
+    return await client.tx.multiTransactionPayment.dispatchPermit(...args).send(onResult)
+  } catch (err) {
+    throw new Error(await describePermitRejection(err))
+  }
+}
+
+// The pool rejects an unsigned dispatch_permit as InvalidTransaction::Custom(n),
+// where n is the index of the pallet error validate_unsigned hit — the useful
+// part ("EvmPermitExpired", "EvmPermitInvalid", …) that dedot's message drops.
+// Resolved against live metadata, so a reordered error enum cannot mislabel it.
+export async function describePermitRejection(err: unknown): Promise<string> {
+  const message = err instanceof Error ? err.message : String(err)
+  const code = customRejectionCode(err)
+  if (code == null) return message
+  try {
+    const client = await getSubstrateClient()
+    const pallet = client.metadata.latest.pallets.find(p => p.name === 'MultiTransactionPayment')
+    const errorTypeId = pallet?.error?.typeId
+    const type = errorTypeId == null ? undefined : client.metadata.latest.types[errorTypeId]
+    const members = type?.typeDef.type === 'Enum' ? type.typeDef.value.members : undefined
+    const name = members?.find(m => m.index === code)?.name
+    if (name) return `The chain rejected the permit: ${name}`
+  } catch {
+    // fall through to the raw message — a metadata miss must not hide the error
+  }
+  return `${message} (pallet error ${code})`
+}
+
+// dedot's InvalidTxError carries the runtime's validateTransaction Result on
+// `data`; the Custom payload sits at a variant-dependent depth inside its `err`,
+// so search for it rather than assuming one shape.
+export function customRejectionCode(err: unknown): number | null {
+  const data = (err as { data?: { err?: unknown } }).data
+  const validation = data?.err ?? data
+  const seen = new Set<unknown>()
+  const walk = (node: unknown, insideCustom: boolean): number | null => {
+    if (node == null || typeof node !== 'object' || seen.has(node)) return null
+    seen.add(node)
+    const record = node as { type?: unknown; value?: unknown }
+    const isCustom = insideCustom || record.type === 'Custom'
+    if (isCustom && typeof record.value === 'number') return record.value
+    return walk(record.value, isCustom)
+  }
+  return walk(validation, false)
 }
 
 export interface SubstrateWriteOptions {
@@ -104,8 +157,7 @@ export interface SubstrateWriteOptions {
 
 // Drive one EVM.call write end to end: connect, price, build, sign, watch.
 // Never throws — every outcome is a WriteStage, and the last emitted stage is
-// also returned. The watch unsubscribes on the first terminal state; finality
-// is not waited for (the explorer's own feed shows it).
+// also returned.
 export async function runSubstrateWrite(opts: SubstrateWriteOptions): Promise<WriteStage> {
   let stage: WriteStage = { phase: 'preparing' }
   const emit = (next: WriteStage) => { stage = next; opts.onStage(next) }
@@ -128,65 +180,20 @@ export async function runSubstrateWrite(opts: SubstrateWriteOptions): Promise<Wr
   }
 
   emit({ phase: 'wallet-pending' })
-  await new Promise<void>(resolve => {
-    let submitted = false
-    let settled = false
-    const settle = (next: WriteStage) => {
-      if (settled) return
-      settled = true
-      emit(next)
-      // Drop the watch once terminal — the unsub handle arrives via the
-      // signAndSend promise, which may resolve after the first callbacks.
-      void unsubPromise.then(unsub => { if (typeof unsub === 'function') (unsub as () => void)() }).catch(() => {})
-      resolve()
-    }
-    const onResult = (result: SubmitResult) => {
-      if (settled) return
-      const { status } = result
-      if (!submitted && (status.type === 'Validated' || status.type === 'Broadcasting')) {
-        submitted = true
-        emit({ phase: 'submitted', txHash: result.txHash })
-        return
-      }
-      if (status.type === 'BestChainBlockIncluded' || status.type === 'Finalized') {
-        const blockHeight = status.value?.blockNumber ?? 0
-        const txIndex = status.value?.txIndex
-        emit({ phase: 'in-block', txHash: result.txHash, blockHeight, txIndex })
-        if (result.dispatchError) {
-          settle({ phase: 'failed', error: 'The extrinsic failed on chain' })
-          return
-        }
-        const outcome = interpretEvmCallEvents(result.events)
-        if (outcome === 'reverted') {
-          void revertReason(opts, evmTx, blockHeight).then(reason => {
-            settle({ phase: 'reverted', txHash: result.txHash, blockHeight, txIndex, reason })
-          })
-        } else {
-          settle({ phase: 'success', txHash: result.txHash, blockHeight, txIndex })
-        }
-        return
-      }
-      if (status.type === 'Invalid' || status.type === 'Drop') {
-        settle({ phase: 'failed', error: status.value?.error ?? 'The transaction was rejected by the node' })
-      }
-    }
-    const unsubPromise = Promise.resolve()
-      .then(() => submittable.signAndSend(opts.address, { signer: opts.signer }, onResult))
-      .catch(err => {
-        settle({ phase: 'failed', error: err instanceof Error ? err.message : String(err) })
-      })
+  // EVM.call always emits an EVM outcome event, so an included extrinsic without
+  // one is not a silent failure here the way a stale permit is.
+  return watchSubmittedWrite({
+    start: onResult => submittable.signAndSend(opts.address, { signer: opts.signer }, onResult),
+    evmTx,
+    rpc: { call: opts.rpc.call },
+    decodeRevert: opts.decodeRevert,
+    unknownIs: 'success',
+    emit,
+    current: () => stage,
   })
-  return stage
 }
 
-// Same best-effort revert recovery as the EVM path: replay the call at the
-// block that included it and decode the node's revert payload.
-async function revertReason(opts: SubstrateWriteOptions, evmTx: { from?: string; to: string; data: string; value?: string }, blockHeight: number): Promise<string | null> {
-  try {
-    await opts.rpc.call(evmTx, `0x${blockHeight.toString(16)}`)
-    return null
-  } catch (err) {
-    const data = (err as { data?: string }).data
-    return typeof data === 'string' ? opts.decodeRevert(data) : null
-  }
-}
+// Re-exported so existing importers keep their entry point while the shared
+// lifecycle lives in the SDK-free module.
+export { interpretEvmCallEvents } from './contractWrite'
+export type { SubmitResult } from './contractWrite'
