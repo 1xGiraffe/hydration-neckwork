@@ -62,7 +62,7 @@ describe('DCA failure errors come from the read model', () => {
     // have passed over the cross-table lookup it exists to keep out. The positive
     // count pins that the construct is still spelled this way somewhere, so this
     // stays a real absence rather than another literal that can never match.
-    expect((explorerService.match(/\(block_height, event_index\) IN/g) ?? []).length).toBe(12)
+    expect((explorerService.match(/\(block_height, event_index\) IN/g) ?? []).length).toBe(13)
     expect(schedule).not.toContain('(block_height, event_index) IN')
     // The one raw_events read left in here is DCA.Terminated's point lookup, whose
     // error genuinely has no column. Pinning the count is what keeps that true: a
