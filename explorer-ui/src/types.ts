@@ -39,6 +39,7 @@ export interface AccountRef {
   identity?: AccountIdentity | null   // on-chain Identity.IdentityOf display + judgement status
   profile?: ProfileRef | null         // self-authored wallet-login profile, if the account has one
   isContract?: boolean                // deployed EVM smart contract — pills wear the </> glyph
+  contractName?: string               // verified source's contract name — the pill's label, like an identity display
 }
 
 export interface ExplorerStats {
@@ -154,8 +155,17 @@ export interface ContractInfo {
   logCount: number
   firstActivity: string | null
   lastActivity: string | null
+  // What the contract holds and does as an ACCOUNT, on the same models the
+  // accounts directory reads. Absent means "not established" — no number is
+  // shown rather than a zero standing in for one (see ContractMetrics, api).
+  portfolioUsd?: number
+  topAssets?: { asset: AssetRef; valueUsd: number }[]
+  sparkline?: number[]
+  tradingVolumeUsd?: number
+  activityCount?: number
+  activityCountComplete?: boolean
 }
-export type ContractSort = 'created' | 'active' | 'txs' | 'logs'
+export type ContractSort = 'created' | 'active' | 'txs' | 'logs' | 'value' | 'volume' | 'activity' | 'name'
 export interface ContractsPage {
   contracts: ContractInfo[]
   total: number
@@ -665,6 +675,7 @@ export interface ActivityRow {
     identity?: { display: string; verified: boolean } | null
     profile?: ProfileRef | null
     isContract?: boolean
+    contractName?: string
   }
   xcmDir?: 'in' | 'out'      // xcm: transfer direction relative to Hydration
   fromChain?: string         // xcm inbound: origin chain name

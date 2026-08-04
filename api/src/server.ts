@@ -38,6 +38,7 @@ import {
   moneyMarketAccountValueSnapshotReady,
   setMoneyMarketAccountValuesReady,
   startAccountsPrewarm,
+  startContractMetricsRefresh,
   startActivityLeaderboardRefresh,
   startTagCountsPrewarm,
   stopExplorerBackgroundTasks,
@@ -257,6 +258,10 @@ async function start() {
     // external writers (the ad-hoc Blockscout seed).
     await loadVerifiedContracts().catch(e => console.warn('[contracts] verified map load failed', e))
     startVerifiedContractsRefresh()
+    // What each contract holds and does as an account (value, holdings, 1Y,
+    // trading, activity) for the /contracts directory — one bounded ClickHouse
+    // pass over the whole registry, off the request path.
+    startContractMetricsRefresh()
     // Colors are code-canonical; push any code-side color edits onto already-seeded
     // rows (seed/sync never rewrite existing memberships). No-op when already in sync.
     await reconcileTagPresentation().catch(e => console.warn('[tags] presentation reconcile failed', e))
