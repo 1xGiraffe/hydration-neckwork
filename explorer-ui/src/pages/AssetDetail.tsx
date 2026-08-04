@@ -1,8 +1,10 @@
-import { useActivityCount, useAsset, useAssetActivity, useHolders } from '../hooks/useExplorerData'
+import { useEffect } from 'react'
+import { useActivityCount, useAsset, useAssetActivity, useAssetDcas, useHolders, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, navigate, useQuery, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, AssetIcon, AssetAmount, AddrPill, AssetDetailSkeleton, TableSkeleton, EmptyRow, rowNav, accountHref, TagGroupPill, ActivityChips, Pager, normalizeActivityType, normalizeActivityAction, Dash, pendingRows } from '../components/ui'
+import { ActiveDcaTable } from '../components/AccountSections'
 import { FilterZone, useFilters } from '../components/Filters'
 import { activityFilterFields } from '../components/activityFilters'
 import { PriceChart, ema7 } from '../components/PriceChart'
@@ -25,7 +27,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
   const now = useNow()
   const q = useQuery()
   const rawTab = q.get('tab')
-  const tab = (rawTab === 'holders' || rawTab === 'activity' ? rawTab : initialTab) as 'holders' | 'activity'
+  const tab = (rawTab === 'holders' || rawTab === 'activity' || rawTab === 'dcas' ? rawTab : initialTab) as 'holders' | 'activity' | 'dcas'
   const activityType = normalizeActivityType(useQueryValue('type', 'all'))
   // Activities filters — the same set as the global feed minus the token combo
   // (this page IS the token filter). `page` resets whenever a filter changes.
@@ -60,6 +62,24 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
   const holderRows = holders.data?.holders ?? []
   const holderCount = data?.holderCount ?? 0
   const holderPages = Math.max(1, Math.ceil((holders.data?.total ?? holderCount) / HOLDERS_PAGE))
+  // Ongoing DCA orders trading this asset — fetched only while the tab is open.
+  // Stats (head block, measured block time) feed the live "next trade" cells.
+  const dcas = useAssetDcas(assetId, tab === 'dcas')
+  const dcaBuys = dcas.data?.buys ?? []
+  const dcaSells = dcas.data?.sells ?? []
+  const { data: stats } = useStats(tab === 'dcas' && !!(dcaBuys.length || dcaSells.length))
+  // A /hdx "N orders" deep link lands with ?side=buys|sells: scroll that section
+  // into view once there are rows to scroll to. The path navigation has already
+  // reset scroll to the top, so this fires at most once per landing; switching
+  // tabs clears `side`, so a later return to the tab stays where the reader is.
+  // Readiness needs BOTH payloads: the sections mount only once the asset detail
+  // is in (the page-level skeleton gate), and the DCA rows can win that race.
+  const side = q.get('side')
+  const dcasReady = !!dcas.data && !!data
+  useEffect(() => {
+    if (tab !== 'dcas' || !dcasReady || (side !== 'buys' && side !== 'sells')) return
+    document.getElementById(`dca-${side}`)?.scrollIntoView()
+  }, [tab, side, dcasReady])
 
   return (
     <div className="wrap">
@@ -102,8 +122,9 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
             )}
 
             <div className="tabs">
-              <button className={tab === 'activity' ? 'active' : ''} onClick={() => initialTab === 'holders' ? navigate(paths.asset(assetId)) : setQuery({ tab: null, page: null, hpage: null })}>Activities</button>
-              <button className={tab === 'holders' ? 'active' : ''} onClick={() => setQuery({ tab: 'holders', page: null, hpage: null })}>Holders <span className="cnt">{F.int(data.holderCount)}</span></button>
+              <button className={tab === 'activity' ? 'active' : ''} onClick={() => initialTab === 'holders' ? navigate(paths.asset(assetId)) : setQuery({ tab: null, page: null, hpage: null, side: null })}>Activities</button>
+              <button className={tab === 'holders' ? 'active' : ''} onClick={() => setQuery({ tab: 'holders', page: null, hpage: null, side: null })}>Holders <span className="cnt">{F.int(data.holderCount)}</span></button>
+              <button className={tab === 'dcas' ? 'active' : ''} onClick={() => setQuery({ tab: 'dcas', page: null, hpage: null, side: null })}>DCAs <span className="cnt">{F.int(data.dcaCount)}</span></button>
             </div>
 
             {tab === 'activity' && <>
@@ -135,6 +156,30 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
               </table>
               <Pager page={hpage} totalPages={holderPages} onPage={setHpage} />
               </div>
+            )}
+
+            {/* The same table an account's active orders use, one section per
+                side of THIS asset, each an anchor for the /hdx "N orders" links.
+                Empty sections stay visible: "no ongoing sells" is an answer. */}
+            {tab === 'dcas' && (
+              dcas.isLoading && !dcas.data
+                ? <div className="panel"><table className="tbl"><tbody><TableSkeleton cols={8} rows={6} /></tbody></table></div>
+                : dcas.isError
+                  ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Failed to load the DCA orders</div>
+                  : <>
+                    {/* scrollMarginTop keeps a scrolled-to section title clear of
+                        the 61px sticky topbar. */}
+                    <div id="dca-buys" style={{ scrollMarginTop: 74 }}>
+                      <ActiveDcaTable dcas={dcaBuys} showOwner totals headBlock={stats?.headBlock ?? 0} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec}
+                        title={<>Buys · {dcaBuys.length} <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}>· ongoing orders buying {a.symbol}</span></>}
+                        emptyText={`No ongoing DCA orders buying ${a.symbol}`} />
+                    </div>
+                    <div id="dca-sells" style={{ scrollMarginTop: 74 }}>
+                      <ActiveDcaTable dcas={dcaSells} showOwner totals headBlock={stats?.headBlock ?? 0} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec}
+                        title={<>Sells · {dcaSells.length} <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}>· ongoing orders selling {a.symbol}</span></>}
+                        emptyText={`No ongoing DCA orders selling ${a.symbol}`} />
+                    </div>
+                  </>
             )}
           </>
         )}
