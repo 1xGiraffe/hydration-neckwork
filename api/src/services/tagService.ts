@@ -265,12 +265,16 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     // cannot yet show where the HOLLAR came from. Same bandeira green as
     // bil-issuer so both sides of the sale read as one market.
     tagId: 'bil-originator', name: 'Decentral (BIL)', color: '#009739',
-    note: 'Decentral × DUX Group receivables operation: the funding vault BIL primary-sale HOLLAR proceeds are swept into, the forwarder that sweeps them, and the operator wallet that converts them to USDT and withdraws to AssetHub. The Treasury lent this vault 200,000 HOLLAR on 2026-03-26 and was repaid 207,337.97 HOLLAR on 2026-06-10.',
+    note: 'Decentral × DUX Group receivables operation: the uBIL issuance contract that mints the receivable each buyer\'s HOLLAR pays for and passes that HOLLAR on, the funding vault it goes to, and the operator wallet that converts the proceeds to USDT and withdraws to AssetHub. The Treasury lent this vault 200,000 HOLLAR on 2026-03-26 and was repaid 207,337.97 HOLLAR on 2026-06-10.',
     icon: BIL_ICON,
     addresses: [
       '0x2333aa052610012c27e4fc176bc27095651dcbc6', // operator wallet (vault draw → DCA to USDT → XCM out)
       '0x207a626c07b73e76134177d1f44b0f32e94adb5a', // funding vault (also took the Treasury's 200k pilot)
-      '0x6a21891db0940491603f3cca0a9f4dba4c6e810c', // proceeds forwarder (issuer → vault, exact pass-through)
+      // uBIL token: mints from the zero address to the issuer, hands the mint to the
+      // BIL aToken, and forwards the buyer's HOLLAR to the vault. Its own HOLLAR
+      // balance nets to exactly 0 — a pass-through, which is what made it read as a
+      // forwarder until the mint legs identified it.
+      '0x6a21891db0940491603f3cca0a9f4dba4c6e810c',
     ],
   },
 ]

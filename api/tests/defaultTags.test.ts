@@ -68,7 +68,7 @@ describe('default tag membership is exclusive', () => {
 describe('BIL originator tag', () => {
   const byId = new Map(DEFAULT_TAGS.map(t => [t.tagId, t]))
 
-  it('claims the operator wallet, the funding vault and the forwarder', () => {
+  it('claims the operator wallet, the funding vault and the uBIL issuance contract', () => {
     const tag = byId.get('bil-originator')
     expect(tag?.addresses.map(a => a.toLowerCase())).toEqual([
       '0x2333aa052610012c27e4fc176bc27095651dcbc6',
@@ -92,5 +92,17 @@ describe('BIL originator tag', () => {
     expect(note).toMatch(/USDT/)
     expect(note).toMatch(/200,000/)
     expect(note).toMatch(/207,337\.97/)
+  })
+
+  // 0x6a21891db is the uBIL token contract, not a payment forwarder: it was given
+  // its roles on 2026-07-24 and has minted uBIL from the zero address 25 times
+  // (694,503.35 uBIL), handing each mint to the BIL aToken. It moves the buyer's
+  // HOLLAR on to the vault as part of that sale, which is what made it look like a
+  // forwarder. Naming it wrongly in the note misdescribes the one address a reader
+  // is most likely to arrive at from the uBIL side of the flow.
+  it('describes the uBIL issuance contract for what it is', () => {
+    const note = byId.get('bil-originator')?.note ?? ''
+    expect(note).toMatch(/uBIL/)
+    expect(note).not.toMatch(/forwarder/i)
   })
 })
