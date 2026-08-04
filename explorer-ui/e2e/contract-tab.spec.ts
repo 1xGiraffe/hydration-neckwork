@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test'
 import { expect, test } from './fixtures/test'
-import { VERIFIED_CONTRACT_ADDRESS, UNVERIFIED_CONTRACT_ADDRESS } from '../tests/fixtures/mockApi'
+import { VERIFIED_CONTRACT_ADDRESS, UNVERIFIED_CONTRACT_ADDRESS, firstEvmCallExtrinsic } from '../tests/fixtures/mockApi'
 
 // The account page's Contract tab: Code (verification card, source viewer, ABI,
 // browser-fetched bytecode, verify panel) and Read (view/pure functions over
@@ -77,6 +77,43 @@ test.describe('desktop', () => {
     await expect(row).toContainText('42,000,000,000,000,000,000')
   })
 
+  test('transactions and events sub-tabs page decoded contract activity', async ({ page }) => {
+    await mockEvmRpc(page)
+    await page.goto(`/account/${VERIFIED_CONTRACT_ADDRESS}?view=contract&contract=txs`)
+    const txRows = page.locator('.tbl tbody tr')
+    await expect(txRows).toHaveCount(25)
+    // Decoded method chips where the ABI answers; the raw selector where not.
+    await expect(page.locator('.pill-badge', { hasText: 'transfer' }).first()).toBeVisible()
+    await expect(page.locator('.pill-badge', { hasText: '0xdeadbeef' }).first()).toBeVisible()
+    // Paging rides its own param, so the account page's ?page is untouched.
+    await page.locator('.pager .btns button', { hasText: '2' }).click()
+    await expect(page).toHaveURL(/cpage=1/)
+    await expect(txRows).toHaveCount(25)
+
+    // Events: named where decodable, raw topic0 where not; expansion shows the
+    // verified-abi decode with linked address params.
+    await page.locator('.tabs button', { hasText: 'Events' }).click()
+    await expect(page).toHaveURL(/contract=events/)
+    await expect(page).not.toHaveURL(/cpage/)
+    await expect(page.locator('.pill-badge', { hasText: 'Transfer' }).first()).toBeVisible()
+    await expect(page.locator('.pill-badge', { hasText: 'Borrow' }).first()).toBeVisible()
+    await page.locator('tr.exp-host', { hasText: 'Transfer' }).first().click()
+    await expect(page.locator('.exp .evm-decoded')).toContainText('Transfer(address,address,uint256)')
+    await expect(page.locator('.exp .kv-params')).toContainText('from')
+  })
+
+  test('extrinsic detail decodes the EVM call and its log through the verified ABI', async ({ page }) => {
+    const { height, index } = firstEvmCallExtrinsic()
+    await page.goto(`/extrinsic/${height}-${index}`)
+    await page.locator('.tabs button', { hasText: 'Parameters' }).click()
+    // The decoded call renders above the raw args (additive, not a replacement).
+    await expect(page.locator('.evm-decoded')).toContainText('transfer(address,uint256)')
+    await expect(page.locator('.evm-decoded')).toContainText('GhoToken')
+    await expect(page.locator('.kv-params').last()).toBeVisible()
+    await page.locator('.tabs button', { hasText: 'Events' }).click()
+    await expect(page.locator('.event-row', { hasText: 'EVM.Log' }).locator('.evm-decoded')).toContainText('Transfer(address,address,uint256)')
+  })
+
   test('unverified contract: Code offers the CLI commands and the upload form; Read hints', async ({ page }) => {
     await mockEvmRpc(page)
     await page.goto(`/account/${UNVERIFIED_CONTRACT_ADDRESS}?view=contract`)
@@ -104,5 +141,18 @@ test.describe('mobile', () => {
     await expect(page.locator('.fn-row', { hasText: 'symbol()' })).toContainText('GHO')
     const overflowRead = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
     expect(overflowRead).toBeLessThanOrEqual(0)
+  })
+
+  test('transactions and events collapse to cards at 390px with no overflow', async ({ page }) => {
+    await mockEvmRpc(page)
+    await page.goto(`/account/${VERIFIED_CONTRACT_ADDRESS}?view=contract&contract=txs`)
+    await expect(page.locator('.pill-badge', { hasText: 'transfer' }).first()).toBeVisible()
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+    expect(overflow).toBeLessThanOrEqual(0)
+    await page.goto(`/account/${VERIFIED_CONTRACT_ADDRESS}?view=contract&contract=events`)
+    await page.locator('tr.exp-host', { hasText: 'Transfer' }).first().click()
+    await expect(page.locator('.exp .evm-decoded')).toContainText('Transfer(address,address,uint256)')
+    const overflowEvents = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+    expect(overflowEvents).toBeLessThanOrEqual(0)
   })
 })
