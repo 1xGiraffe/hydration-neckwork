@@ -8,7 +8,7 @@ import { Link, paths, redirect } from '../router'
 import { Ago, Crumbs, F, AddrPill, AssetChip, AssetAmount, PoolBadge, ProgressRing, SkeletonRows, MomentLink, Pager } from '../components/ui'
 import { ActivityTable } from '../components/ActivityTable'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
-import { blockSeconds, dcaCadence, dcaProgress, dcaRunway, dcaUnspentBudget, fmtDuration, fmtPermill } from '../utils/dca'
+import { blockSeconds, dcaAmountLeft, dcaCadence, dcaLeftUsd, dcaProgress, dcaRunway, dcaUnspentBudget, fmtDuration, fmtPermill } from '../utils/dca'
 import type { DcaScheduleDetail } from '../types'
 
 const PAGE = 25
@@ -90,6 +90,11 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
   const unspent = data && !active && pct != null && Math.round(pct) < 100
     ? dcaUnspentBudget(data.totalAmount, data.executions.totalIn)
     : null
+  // The live figure, only while the order still runs: once it has ended, what is
+  // left is no longer "still to spend" — it is the released remainder the
+  // "Unspent" row states, and showing both would say the same thing twice.
+  const amountLeft = data && active ? dcaAmountLeft(data.totalAmount, data.executions.totalIn) : null
+  const leftUsd = data && active ? dcaLeftUsd(data.totalAmount, data.executions.totalIn, data.budgetUsd) : null
 
   return (
     <div className="wrap">
@@ -163,7 +168,15 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
                     {data.fundingBalance != null && <> · funded by {F.amount(data.fundingBalance, data.assetIn.decimals)} {data.assetIn.symbol} in the wallet</>}
                   </span>
                   : <><AssetAmount asset={data.assetIn} raw={data.totalAmount} />
-                    <Usd value={data.budgetUsd} basis={data.usdBasis} at={data.statusAt ?? data.createdAt.timestamp} /></>}
+                    <Usd value={data.budgetUsd} basis={data.usdBasis} at={data.statusAt ?? data.createdAt.timestamp} />
+                    {/* What is still ahead of the order, beside what it started
+                        with — the same figure the DCA tables show, in the same
+                        dollars. Absent once the budget is spent, where "Unspent"
+                        below takes over, and stated in the sold asset when the
+                        asset has no price feed to state it in dollars. */}
+                    {amountLeft != null && <span className="muted mono" title="Left of the budget — what this order still has to spend">
+                      {' · '}{leftUsd != null ? F.usd(leftUsd) : `${F.amount(amountLeft, data.assetIn.decimals)} ${data.assetIn.symbol}`} left
+                    </span>}</>}
                 </div>
 
                 {/* The limits the order trades under, most-tuned first: slippage is

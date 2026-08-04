@@ -6,7 +6,7 @@ import type { ActivitySlug } from '../router'
 import { performancePoints } from './performance'
 import { CAT } from './activityColors'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
-import { blockSeconds, blockSpanSeconds, dcaCadence, dcaProgress, dcaRunway, fmtDuration } from '../utils/dca'
+import { blockSeconds, blockSpanSeconds, dcaAmountLeft, dcaCadence, dcaLeftUsd, dcaProgress, dcaRunway, fmtDuration } from '../utils/dca'
 import type { MoneyMarketPosition, LpPosition, ActiveDca, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent, ContractInfo } from '../types'
 import type { ListCount } from '../api/explorer'
 import type { ReactNode } from 'react'
@@ -507,6 +507,15 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
             const isBuy = d.direction === 'Buy'
             const perAsset = isBuy ? d.assetOut : d.assetIn
             const openEnded = d.totalAmount === '0'
+            // What the order still has to spend, in dollars: a budgeted one's
+            // unspent share of its budget, an open-ended one's whole funding
+            // balance (which is all it has left by definition). An asset with no
+            // price feed keeps the figure in the sold asset rather than losing it.
+            const leftUsd = openEnded ? d.fundingUsd : dcaLeftUsd(d.totalAmount, d.filledAmount, d.budgetUsd)
+            const leftRaw = openEnded ? d.fundingBalance : dcaAmountLeft(d.totalAmount, d.filledAmount)
+            const left = leftUsd != null ? F.usd(leftUsd)
+              : leftRaw != null ? `${F.amount(leftRaw, d.assetIn.decimals)} ${d.assetIn.symbol}`
+                : null
             // Open-ended orders have no budget to be a fraction of: their share and
             // their end come from the balance still funding them (see dcaProgress).
             const { pct, projected } = dcaProgress(d.totalAmount, d.filledAmount, d.fundingBalance)
@@ -539,13 +548,20 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
                 <td data-label="Budget" className="r">
                   {openEnded ? <>
                     <span className="mono muted">open-ended</span>
-                    {d.fundingBalance != null && <span className="dca-sub mono muted" title="Owner’s balance of the sold asset — what the order still has to spend">
-                      {F.amount(d.fundingBalance, d.assetIn.decimals)} {d.assetIn.symbol} left
+                    {left && <span className="dca-sub mono muted" title="Owner’s balance of the sold asset — what the order still has to spend">
+                      {left} left
                     </span>}
-                    {d.fundingUsd != null && <span className="dca-sub mono muted">{F.usd(d.fundingUsd)}</span>}
                   </> : <>
                     <AssetAmount asset={d.assetIn} raw={d.totalAmount} />
-                    {d.budgetUsd != null && <span className="dca-sub mono muted">{F.usd(d.budgetUsd)}</span>}
+                    {/* What the order started with and what is still ahead of it,
+                        on one line under the budget — two amounts of the same money,
+                        read left to right the way the schedule page states them.
+                        Stacked, they read as two unrelated facts. */}
+                    {(d.budgetUsd != null || left) && <span className="dca-sub mono muted">
+                      {d.budgetUsd != null && F.usd(d.budgetUsd)}
+                      {d.budgetUsd != null && left ? ' · ' : ''}
+                      {left && <span title="Left of the budget — what this order still has to spend">{left} left</span>}
+                    </span>}
                   </>}
                 </td>
                 <td data-label="Filled" className="r">

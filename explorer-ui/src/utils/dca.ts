@@ -169,6 +169,45 @@ export function dcaUnspentBudget(totalAmount: string, filledAmount: string): str
   return (total - filled).toString()
 }
 
+// What a RUNNING budgeted order still has to spend. Distinct from
+// dcaUnspentBudget, which is the remainder a FINISHED one never got to use: this
+// one is the live figure, and the same number dcaRunway divides into trades.
+//
+// Null for an open-ended order — it has no budget, and what funds it is the
+// owner's balance, which the surfaces already show as "… left" from
+// `fundingBalance` — and null once the budget is spent, so a row shows nothing
+// rather than "0 left".
+export function dcaAmountLeft(totalAmount: string, filledAmount: string): string | null {
+  const total = big(totalAmount)
+  const filled = big(filledAmount)
+  if (total == null || filled == null || total <= 0n || filled >= total) return null
+  return (total - filled).toString()
+}
+
+// The same figure in dollars, which is what the surfaces actually show: "$10k
+// left" says more about a budget than an amount of a token a reader may not price
+// in their head.
+//
+// A budget and its remainder are the same asset at the same moment, so scaling
+// the budget's dollar value (`budgetUsd`) by the unspent share IS pricing the
+// remainder — and it keeps a row's "left" on the same basis as the budget beside
+// it and as the section total (dcaAggregates), which no separately fetched price
+// could guarantee. The share is taken on the integers, the way dcaProgress takes
+// its percentage: these are 128-bit amounts that shed their low digits on the way
+// through a double, and only the display value here becomes a Number.
+//
+// Null wherever dcaAmountLeft is, and null when the asset has no price feed at
+// all — the callers then state the remainder in the sold asset rather than print
+// a dollar figure they don't have.
+export function dcaLeftUsd(totalAmount: string, filledAmount: string, budgetUsd: number | null | undefined): number | null {
+  if (budgetUsd == null || !Number.isFinite(budgetUsd)) return null
+  const left = big(dcaAmountLeft(totalAmount, filledAmount))
+  const total = big(totalAmount)
+  if (left == null || total == null || total <= 0n) return null
+  // A 1e12-part share is far finer than the ~3 significant digits F.usd prints.
+  return (budgetUsd * Number((left * 1_000_000_000_000n) / total)) / 1e12
+}
+
 // A Permill (parts per million) as a percentage: 30000 → "3%", 1000 → "0.1%".
 // Not F.pct, which signs its output for price CHANGES — a slippage tolerance is a
 // magnitude, and "+3.00%" would read as a move rather than a limit. Trailing zeros
