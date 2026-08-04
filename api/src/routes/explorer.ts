@@ -6,7 +6,7 @@ import {
   getStats, getRecentBlocks, getBlock, getRecentExtrinsics, getExtrinsic, getExtrinsicAt,
   getExtrinsicActivity, getBlockActivity,
   getHolders, getAddress, getAddressHistory, search, getAssets, getAssetFilterOptions, getAccounts, getDcaSchedule, getDcaScheduleIdAt, getDcaExecution,
-  getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getGlobalActivityTotal, getMoneyMarket, getAssetDetail, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag,
+  getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getGlobalActivityTotal, getMoneyMarket, getAssetDetail, getAssetDcas, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag,
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressListTotal, getTagListTotal,
   getAddressValueEvents, getTagValueEvents,
@@ -485,6 +485,15 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = z.object({ assetId: uint32Param }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid asset id' })
     return getAssetDetail(params.data.assetId)
+  })
+
+  // Ongoing DCA schedules trading one asset, split into buys (schedules
+  // acquiring it) and sells (schedules disposing of it). Chain-wide there are
+  // only a few dozen live schedules, so the list is unpaginated.
+  fastify.get('/explorer/asset/:assetId/dcas', async (req, reply) => {
+    const params = z.object({ assetId: uint32Param }).safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid asset id' })
+    return getAssetDcas(params.data.assetId)
   })
 
   fastify.get('/explorer/holders/:assetId', async (req, reply) => {

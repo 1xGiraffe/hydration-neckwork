@@ -286,8 +286,16 @@ export interface ActiveDca {
   // Owner's spendable balance of the sold asset, on open-ended orders only —
   // the only thing that can date an order with no budget to run out of.
   fundingBalance: string | null
+  // That balance at current prices — the open-ended stand-in for budgetUsd.
+  fundingUsd?: number | null
   scheduleBlock: number; scheduleIndex: number | null
+  // The schedule's owner — redundant on an account's own page, but the asset
+  // page lists schedules across owners, so each row names whose order it is.
+  who?: AccountRef
 }
+
+// The asset page's DCAs tab: ongoing schedules buying the asset vs selling it.
+export interface AssetDcas { buys: ActiveDca[]; sells: ActiveDca[] }
 export interface MoneyMarketPosition {
   marketKey: string
   market: string                 // display label, e.g. 'Money Market' or 'GIGAHDX'
@@ -638,6 +646,8 @@ export interface AssetLiquidations {
 export interface AssetDetail {
   asset: AssetListItem
   holderCount: number
+  // Ongoing DCA schedules buying or selling this asset (the DCAs tab badge).
+  dcaCount: number
   totalUsd: number
   priceSeries: number[]
   priceDates?: string[]

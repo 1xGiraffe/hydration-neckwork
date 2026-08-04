@@ -5386,7 +5386,13 @@ export interface ActiveDca {
   // balance is the only thing that can date their end. Null for budgeted orders,
   // where totalAmount already bounds them.
   fundingBalance: string | null
+  // That balance at current prices — the open-ended stand-in for budgetUsd, so
+  // an order with no budget can still be ranked and read in dollars.
+  fundingUsd: number | null
   scheduleBlock: number; scheduleIndex: number | null
+  // The schedule's owner. Redundant on an account's own page; the asset page
+  // lists schedules across owners, so each row names whose order it is.
+  who: AccountRef
 }
 
 // Spendable balance per (account, asset), for the open-ended DCA orders whose only
@@ -5532,11 +5538,19 @@ async function getDcaScheduleLinks(ids: Array<string | number>): Promise<Map<str
   return out
 }
 
+// One live schedule as dca_schedules stores it — the shape both active-order
+// surfaces (an account's own orders, an asset's ongoing buys/sells) select
+// before handing to enrichActiveDcas.
+interface ActiveDcaScheduleRow {
+  id: number; who: string; sblock: number; sidx: number | null
+  asset_in: number; asset_out: number; direction: string
+  amt_per: string; total: string; period: number
+}
+
 async function getActiveDcas(accounts: string[]): Promise<ActiveDca[]> {
   const list = sqlAccountList(accounts)
   if (list === "''") return []
   return cached(`explorer:dca-active:${[...accounts].sort().join(',')}`, 15000, async () => {
-    const prices = await ensurePrices()
     const schedRes = await client.query({
       query: `SELECT id, who, block_height AS sblock, extrinsic_index AS sidx,
                 asset_in, asset_out, direction, amount_per AS amt_per,
@@ -5549,51 +5563,115 @@ async function getActiveDcas(accounts: string[]): Promise<ActiveDca[]> {
               ORDER BY block_height DESC`,
       format: 'JSONEachRow',
     })
-    const scheds = await schedRes.json<{ id: number; who: string; sblock: number; sidx: number | null; asset_in: number; asset_out: number; direction: string; amt_per: string; total: string; period: number }>()
-    if (!scheds.length) return []
-    const ids = scheds.map(s => s.id).join(',')
-    const [exRes, planRes, cadenceRes] = await Promise.all([
-      // Counting and summing rows, so the replacements have to be resolved first —
-      // a re-inserted raw range would otherwise inflate both the executions done and
-      // the amount filled. `max(planned_block)` below is idempotent under a duplicate.
-      client.query({ query: `SELECT id, count() AS n, toString(sum(toUInt256OrZero(amount_in))) AS filled FROM price_data.dca_events FINAL WHERE event_name='DCA.TradeExecuted' AND id IN (${ids}) GROUP BY id`, format: 'JSONEachRow' }),
-      client.query({ query: `SELECT id, max(planned_block) AS nb FROM price_data.dca_events WHERE event_name='DCA.ExecutionPlanned' AND id IN (${ids}) GROUP BY id`, format: 'JSONEachRow' }),
-      client.query({ query: dcaCadenceQuery(`id IN (${ids})`, true), format: 'JSONEachRow' }),
-    ])
-    const exMap = new Map<number, { n: number; filled: string }>()
-    for (const e of await exRes.json<{ id: number; n: number; filled: string }>()) exMap.set(e.id, { n: e.n, filled: e.filled })
-    const planMap = new Map<number, number>()
-    for (const p of await planRes.json<{ id: number; nb: number }>()) planMap.set(p.id, p.nb)
-    const cadenceMap = new Map<number, number>()
-    for (const c of await cadenceRes.json<{ id: number; sec: number }>()) {
-      if (Number(c.sec) > 0) cadenceMap.set(c.id, Number(c.sec))
-    }
-    // Only open-ended orders need it: a budgeted one already knows where it ends.
-    const funds = await spendableBalances(
-      scheds.filter(x => x.total === '0').map(x => ({ account: x.who, assetId: x.asset_in })),
-    )
-    return scheds.map(s => {
-      const filled = exMap.get(s.id)?.filled ?? '0'
-      let remaining: string | null = null
-      try { if (s.total !== '0') remaining = (BigInt(s.total) - BigInt(filled)).toString() } catch { /* keep null */ }
-      const aIn = asset(s.asset_in), aOut = asset(s.asset_out)
-      // For a Buy order the per-trade amount is the OUTPUT (e.g. "buy 80 USDC"); for
-      // a Sell order it's the INPUT ("sell 85 aDOT"). Value it with the matching asset.
-      const perAsset = s.direction === 'Buy' ? aOut : aIn
-      return {
-        id: s.id, assetIn: aIn, assetOut: aOut, direction: s.direction,
-        amountPerTrade: s.amt_per, totalAmount: s.total, filledAmount: filled, remainingAmount: remaining,
-        executionsDone: exMap.get(s.id)?.n ?? 0, period: s.period, nextExecutionBlock: planMap.get(s.id) ?? null,
-        periodSeconds: cadenceMap.get(s.id) ?? null,
-        valueUsd: usdValue(prices, perAsset.assetId, s.amt_per, perAsset.decimals),
-        // The budget is always denominated in the sold asset, whichever leg the
-        // per-trade amount fixes.
-        budgetUsd: s.total === '0' ? null : usdValue(prices, aIn.assetId, s.total, aIn.decimals),
-        fundingBalance: s.total === '0' ? funds.get(`${s.who}|${s.asset_in}`) ?? null : null,
-        scheduleBlock: s.sblock, scheduleIndex: s.sidx,
-      }
-    })
+    return enrichActiveDcas(await schedRes.json<ActiveDcaScheduleRow>())
   })
+}
+
+// Everything a live schedule row doesn't carry itself: executions done and
+// filled amount (replay-deduplicated), the next planned block, the measured
+// cadence, current-price valuations, and — for open-ended orders — the owner's
+// spendable balance of the sold asset.
+async function enrichActiveDcas(scheds: ActiveDcaScheduleRow[]): Promise<ActiveDca[]> {
+  if (!scheds.length) return []
+  const prices = await ensurePrices()
+  const ids = scheds.map(s => s.id).join(',')
+  const [exRes, planRes, cadenceRes] = await Promise.all([
+    // Counting and summing rows, so the replacements have to be resolved first —
+    // a re-inserted raw range would otherwise inflate both the executions done and
+    // the amount filled. `max(planned_block)` below is idempotent under a duplicate.
+    client.query({ query: `SELECT id, count() AS n, toString(sum(toUInt256OrZero(amount_in))) AS filled FROM price_data.dca_events FINAL WHERE event_name='DCA.TradeExecuted' AND id IN (${ids}) GROUP BY id`, format: 'JSONEachRow' }),
+    client.query({ query: `SELECT id, max(planned_block) AS nb FROM price_data.dca_events WHERE event_name='DCA.ExecutionPlanned' AND id IN (${ids}) GROUP BY id`, format: 'JSONEachRow' }),
+    client.query({ query: dcaCadenceQuery(`id IN (${ids})`, true), format: 'JSONEachRow' }),
+  ])
+  const exMap = new Map<number, { n: number; filled: string }>()
+  for (const e of await exRes.json<{ id: number; n: number; filled: string }>()) exMap.set(e.id, { n: e.n, filled: e.filled })
+  const planMap = new Map<number, number>()
+  for (const p of await planRes.json<{ id: number; nb: number }>()) planMap.set(p.id, p.nb)
+  const cadenceMap = new Map<number, number>()
+  for (const c of await cadenceRes.json<{ id: number; sec: number }>()) {
+    if (Number(c.sec) > 0) cadenceMap.set(c.id, Number(c.sec))
+  }
+  // Only open-ended orders need it: a budgeted one already knows where it ends.
+  const funds = await spendableBalances(
+    scheds.filter(x => x.total === '0').map(x => ({ account: x.who, assetId: x.asset_in })),
+  )
+  return scheds.map(s => {
+    const filled = exMap.get(s.id)?.filled ?? '0'
+    let remaining: string | null = null
+    try { if (s.total !== '0') remaining = (BigInt(s.total) - BigInt(filled)).toString() } catch { /* keep null */ }
+    const aIn = asset(s.asset_in), aOut = asset(s.asset_out)
+    // For a Buy order the per-trade amount is the OUTPUT (e.g. "buy 80 USDC"); for
+    // a Sell order it's the INPUT ("sell 85 aDOT"). Value it with the matching asset.
+    const perAsset = s.direction === 'Buy' ? aOut : aIn
+    const fundingBalance = s.total === '0' ? funds.get(`${s.who}|${s.asset_in}`) ?? null : null
+    return {
+      id: s.id, assetIn: aIn, assetOut: aOut, direction: s.direction,
+      amountPerTrade: s.amt_per, totalAmount: s.total, filledAmount: filled, remainingAmount: remaining,
+      executionsDone: exMap.get(s.id)?.n ?? 0, period: s.period, nextExecutionBlock: planMap.get(s.id) ?? null,
+      periodSeconds: cadenceMap.get(s.id) ?? null,
+      valueUsd: usdValue(prices, perAsset.assetId, s.amt_per, perAsset.decimals),
+      // The budget is always denominated in the sold asset, whichever leg the
+      // per-trade amount fixes.
+      budgetUsd: s.total === '0' ? null : usdValue(prices, aIn.assetId, s.total, aIn.decimals),
+      fundingBalance,
+      fundingUsd: fundingBalance != null ? usdValue(prices, aIn.assetId, fundingBalance, aIn.decimals) : null,
+      scheduleBlock: s.sblock, scheduleIndex: s.sidx,
+      who: accountRef(s.who),
+    }
+  })
+}
+
+// The asset page's ordering: biggest money first. A budgeted order ranks by its
+// whole plan valued today (budgetUsd); an open-ended one has no plan beyond the
+// wallet behind it, so it ranks by that balance (fundingUsd) instead — the same
+// figure its Budget cell displays in each case. Rows with no dollar value at all
+// (no price feed, unreadable owner) sink below a knowable $0. Ties keep the
+// incoming order (sort is stable), i.e. schedule recency.
+export function compareDcasByBudgetUsdDesc(x: ActiveDca, y: ActiveDca): number {
+  return (y.budgetUsd ?? y.fundingUsd ?? -1) - (x.budgetUsd ?? x.fundingUsd ?? -1)
+}
+
+// The asset page's DCAs tab: every ongoing schedule trading this asset, split by
+// what it does TO the asset — buys acquire it (asset_out), sells dispose of it
+// (asset_in). FINAL because dca_schedules replaces on id (a later event enriches
+// a schedule's row) and an unresolved replacement would list the order twice;
+// the table is tiny (~34k rows), so FINAL stays bounded.
+export interface AssetDcas { buys: ActiveDca[]; sells: ActiveDca[] }
+export async function getAssetDcas(assetId: number): Promise<AssetDcas> {
+  return cached(`explorer:dca-asset:${assetId}`, 15000, async () => {
+    const schedRes = await client.query({
+      query: `SELECT id, who, block_height AS sblock, extrinsic_index AS sidx,
+                asset_in, asset_out, direction, amount_per AS amt_per,
+                total_amount AS total, period
+              FROM price_data.dca_schedules FINAL
+              WHERE (asset_in = {id:UInt32} OR asset_out = {id:UInt32})
+                AND id NOT IN (
+                  SELECT id FROM price_data.dca_events WHERE event_name IN ('DCA.Completed','DCA.Terminated')
+                )
+              ORDER BY block_height DESC`,
+      query_params: { id: assetId }, format: 'JSONEachRow',
+    })
+    const rows = await enrichActiveDcas(await schedRes.json<ActiveDcaScheduleRow>())
+    return {
+      buys: rows.filter(r => r.assetOut.assetId === assetId).sort(compareDcasByBudgetUsdDesc),
+      sells: rows.filter(r => r.assetIn.assetId === assetId).sort(compareDcasByBudgetUsdDesc),
+    }
+  })
+}
+
+// The DCAs tab badge on the asset page. countDistinct resolves the same
+// replacement duplicates FINAL does above, so the badge equals buys + sells.
+async function countAssetDcas(assetId: number): Promise<number> {
+  const res = await client.query({
+    query: `SELECT countDistinct(id) AS n
+            FROM price_data.dca_schedules
+            WHERE (asset_in = {id:UInt32} OR asset_out = {id:UInt32})
+              AND id NOT IN (
+                SELECT id FROM price_data.dca_events WHERE event_name IN ('DCA.Completed','DCA.Terminated')
+              )`,
+    query_params: { id: assetId }, format: 'JSONEachRow',
+  })
+  return Number((await res.json<{ n: string | number }>())[0]?.n ?? 0)
 }
 
 // extrinsic by block-index (design routes #/extrinsic/h-i)
@@ -17263,6 +17341,9 @@ export interface AssetLiquidations {
 export interface AssetDetail {
   asset: AssetListItem
   holderCount: number
+  // Ongoing DCA schedules buying or selling this asset — the DCAs tab's badge,
+  // counted exactly as getAssetDcas lists them so the two never disagree.
+  dcaCount: number
   totalUsd: number
   priceSeries: number[]
   priceDates: string[]
@@ -17412,14 +17493,14 @@ export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
     // A reserve with no seizures still reports a total (zero) — "in the market,
     // never liquidated" is a fact, not missing data.
     const scope = mmReserveScope(assetId)
-    const [days, isReserve] = await Promise.all([
-      assetLiquidationDays(scope), isPrimaryMmReserve(scope), closesP,
+    const [days, isReserve, dcaCount] = await Promise.all([
+      assetLiquidationDays(scope), isPrimaryMmReserve(scope), countAssetDcas(assetId), closesP,
     ])
     const liquidations: AssetLiquidations | null = isReserve || days.length
       ? { decimals: scope.decimals, days, total: totalAssetLiquidations(days) }
       : null
 
-    return { asset: assetItem, holderCount: hsummary.total, totalUsd: hsummary.totalUsd, priceSeries, priceDates, liquidations }
+    return { asset: assetItem, holderCount: hsummary.total, dcaCount, totalUsd: hsummary.totalUsd, priceSeries, priceDates, liquidations }
   })
 }
 
