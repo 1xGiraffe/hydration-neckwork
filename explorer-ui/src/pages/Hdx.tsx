@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { useHdxDashboard } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { paths } from '../router'
+import { Link, paths } from '../router'
 import { Crumbs, F, AddrPill, AssetIcon, ChartSkeleton, EmptyRow, compactAmount } from '../components/ui'
 import {
   fmtHdx, cohortColor,
@@ -271,15 +271,17 @@ function FlowsSection({ d }: { d: HdxDashboard }) {
           <div className="bal-xaxis" style={{ justifyContent: 'center' }}><span>avg buys {fmtHdx(avgBuy)}/day · avg sells {fmtHdx(avgSell)}/day</span></div>
         </div>
         <div className="pf-card hdx-dca" style={{ marginBottom: 0 }}>
+          {/* The order counts open the asset page's DCAs tab on the matching
+              section — the list these headline figures are summed from. */}
           <div className="mm-stat">
             <span className="k">Scheduled DCA buys</span>
             <span className="v">≈ {fmtHdx(buy.hdxPerDay)}/day</span>
-            <span className="s">{F.int(buy.orders)} orders</span>
+            <span className="s"><Link className="hash" to={`${paths.asset(0)}?tab=dcas&side=buys`} title="The ongoing DCA orders buying HDX">{F.int(buy.orders)} orders</Link></span>
           </div>
           <div className="mm-stat">
             <span className="k">Scheduled DCA sells</span>
             <span className="v">≈ {fmtHdx(sell.hdxPerDay)}/day</span>
-            <span className="s">{F.int(sell.orders)} orders</span>
+            <span className="s"><Link className="hash" to={`${paths.asset(0)}?tab=dcas&side=sells`} title="The ongoing DCA orders selling HDX">{F.int(sell.orders)} orders</Link></span>
           </div>
           <div className="mm-stat">
             <span className="k">Potential unlock overhang (28d)</span>

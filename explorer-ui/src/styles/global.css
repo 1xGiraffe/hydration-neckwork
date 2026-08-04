@@ -718,13 +718,9 @@ svg { display: block; }
 .accounts-tbl { min-width: 1180px; }
 /* Cap the Account column so a long on-chain identity or tag name can't widen the
    10-column table past its min-width and force the whole panel to scroll
-   horizontally. The identity/tag/module label truncates with an ellipsis (the
-   full value stays in the pill's title + on the detail page). */
+   horizontally. The label then truncates via the shared .addr-pill ellipsis
+   rules (the full value stays in the pill's title + on the detail page). */
 .accounts-tbl td[data-label="Account"] { max-width: 232px; }
-.accounts-tbl td[data-label="Account"] .addr-wrap,
-.accounts-tbl td[data-label="Account"] .addr-pill { min-width: 0; max-width: 100%; }
-.accounts-tbl td[data-label="Account"] .addr-pill .tag,
-.accounts-tbl td[data-label="Account"] .addr-pill .a { overflow: hidden; text-overflow: ellipsis; }
 
 /* compact dashboard list rows */
 .mini-row { display: flex; align-items: center; gap: 12px; padding: 11px 18px; border-bottom: 1px solid var(--separator); cursor: pointer; transition: background 120ms; }
@@ -1001,8 +997,17 @@ svg { display: block; }
 .addr-pill, .asset-chip { cursor: pointer; }
 
 /* address pill */
-.addr-wrap { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
-.addr-pill { display: inline-flex; align-items: center; gap: 7px; font-family: 'GeistMono'; font-size: 12.5px; white-space: nowrap; }
+/* A pill never grows past whatever box holds it: when space runs out, the NAME
+   is what gives way — the ellipsis rule below lets the .tag span shrink
+   (overflow:hidden clears a flex item's content-size floor) while the icon, the
+   muted ·xyz member suffix, the ✓ mark and the copy control keep their natural
+   width. So a truncated "GalacticCou…" still says WHICH member it is via its
+   suffix, on every surface at once (the full name stays in the pill's title).
+   A bare ADDRESS (.a) never truncates: ShortAddr is already the minimal
+   identifying form and its tail is the identity — "1TjR…CC…" says nothing. */
+.addr-wrap { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; min-width: 0; max-width: 100%; }
+.addr-pill { display: inline-flex; align-items: center; gap: 7px; font-family: 'GeistMono'; font-size: 12.5px; white-space: nowrap; min-width: 0; max-width: 100%; }
+.addr-pill .tag { overflow: hidden; text-overflow: ellipsis; }
 .addr-pill .emoji {
   width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
   display: inline-flex; align-items: center; justify-content: center; font-size: 13px;
@@ -1724,6 +1729,25 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    second line below every other one in the row. */
 .dca-filled { display: flex; align-items: center; justify-content: flex-end; column-gap: 7px; row-gap: 0; flex-wrap: wrap; }
 .dca-filled .dca-sub { flex-basis: 100%; }
+/* The section's aggregate rides as the first row, set apart by a wash rather
+   than a box so the columns keep reading straight down into the orders it sums. */
+.dca-tbl tr.dca-total td { background: color-mix(in srgb, var(--sky) 6%, transparent); }
+/* The asset page stacks a Buys and a Sells table; auto layout would size each
+   to its own content and the pair's columns would drift apart. Fixed shared
+   widths put both tables' columns on the same vertical lines so the eye runs
+   straight down from one into the other. Desktop only — the ≤720px stacked-card
+   view has no column tracks to align. */
+@media (min-width: 721px) {
+  .dca-tbl-aligned { table-layout: fixed; }
+  .dca-tbl-aligned th:nth-child(1) { width: 15%; }
+  .dca-tbl-aligned th:nth-child(2) { width: 17%; }
+  .dca-tbl-aligned th:nth-child(3) { width: 13%; }
+  .dca-tbl-aligned th:nth-child(4) { width: 13%; }
+  .dca-tbl-aligned th:nth-child(5) { width: 12%; }
+  .dca-tbl-aligned th:nth-child(6) { width: 10%; }
+  .dca-tbl-aligned th:nth-child(7) { width: 11%; }
+  .dca-tbl-aligned th:nth-child(8) { width: 9%; }
+}
 @media (max-width: 720px) {
   /* In a phone card each cell is one right-aligned row, so the second line sits
      under the first rather than beside the ring. */
@@ -2204,7 +2228,6 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
     order: 1; grid-column: 1; max-width: none; text-align: left; padding-right: 4px; padding-top: 4px;
   }
   .accounts-tbl tbody td[data-label="Account"]::before { display: none; }
-  .accounts-tbl tbody td[data-label="Account"] .addr-wrap { min-width: 0; max-width: 100%; }
   /* Value sits on that same line, weighted like the card's headline figure. */
   .accounts-tbl tbody td[data-label="Value"] { order: 2; grid-column: 2; padding-top: 4px; padding-left: 0; font-size: 15px; font-weight: 600; color: var(--text-high); }
   .accounts-tbl tbody td[data-label="Value"]::before { display: none; }
