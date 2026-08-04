@@ -16,6 +16,7 @@ import { assetsRoutes } from './routes/assets.ts'
 import { marketStatsRoutes } from './routes/market-stats.ts'
 import { indexerRoutes } from './routes/indexer.ts'
 import { explorerRoutes } from './routes/explorer.ts'
+import { contractsRoutes } from './routes/contracts.ts'
 import { tagRoutes } from './routes/tags.ts'
 import { userRoutes } from './routes/user.ts'
 import { listsRoutes } from './routes/lists.ts'
@@ -41,6 +42,7 @@ import {
   stopExplorerBackgroundTasks,
 } from './services/explorerService.ts'
 import { initTagService, loadTags, seedDefaultTags, syncMoneyMarketTag, startMoneyMarketTagRefresh, syncStructuralTags, startStructuralTagRefresh, reconcileTagPresentation, retireUnknownTagMemberships } from './services/tagService.ts'
+import { initContractRegistryService, loadContractRegistry, startContractRegistryRefresh, stopContractRegistryRefresh } from './services/contractRegistryService.ts'
 import { initIdentityService, loadIdentities, startIdentityRefresh, stopIdentityRefresh } from './services/identityService.ts'
 import { initGovernanceService } from './services/governanceService.ts'
 import {
@@ -114,6 +116,8 @@ const CACHE_CONTROL: [RegExp, number][] = [
   // matching client reuse cuts request volume without adding staleness.
   // (accounts-daily is matched by its earlier rule.)
   [/^\/explorer\/accounts/, 30],
+  // Contracts directory: in-memory registry refreshed every 5 minutes.
+  [/^\/explorer\/contracts/, 30],
   [/^\/explorer\//, 5],
 ]
 fastify.addHook('onSend', async (req, reply) => {
@@ -136,6 +140,7 @@ fastify.addHook('onClose', async () => {
   stopIdentityRefresh()
   stopReferendumTitleRefresh()
   stopBackgroundRefresh()
+  stopContractRegistryRefresh()
   stopAccountSwapActivityQueueDrain()
   stopExplorerBackgroundTasks()
   await client.close()
@@ -146,6 +151,7 @@ await fastify.register(candlesRoutes, { client })
 await fastify.register(marketStatsRoutes, { client })
 await fastify.register(indexerRoutes, { client })
 await fastify.register(explorerRoutes)
+await fastify.register(contractsRoutes)
 await fastify.register(tagRoutes)
 await fastify.register(userRoutes)
 await fastify.register(listsRoutes)
@@ -190,6 +196,9 @@ async function start() {
     initHdxService(client)
     initHollarService(client)
     initErc20WalletService(client)
+    // Must precede startBackgroundRefresh(): its initial pass runs the
+    // contract-code snapshot refresher, which reads and writes ClickHouse.
+    initContractRegistryService(client)
     await initUserAuthService(client)
     initUserProfileService(client)
     initUserListService(client)
@@ -221,6 +230,11 @@ async function start() {
     // from indexed data — recreated automatically after a fresh reindex.
     await syncStructuralTags().catch(e => console.warn('[tags] structural sync failed', e))
     startStructuralTagRefresh()
+    // Contract registry: merge the code snapshot with the MV projections. There
+    // is no contracts tag — the `</>` pill glyph (AccountRef.isContract) marks a
+    // contract wherever an account appears, and /contracts is their directory.
+    await loadContractRegistry().catch(e => console.warn('[contracts] registry load failed', e))
+    startContractRegistryRefresh()
     // Colors are code-canonical; push any code-side color edits onto already-seeded
     // rows (seed/sync never rewrite existing memberships). No-op when already in sync.
     await reconcileTagPresentation().catch(e => console.warn('[tags] presentation reconcile failed', e))

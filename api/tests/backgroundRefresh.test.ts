@@ -5,9 +5,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 const hdx = vi.fn(async () => {})
 const proxy = vi.fn(async () => {})
 const erc20 = vi.fn(async () => {})
+const contractCode = vi.fn(async () => {})
 vi.mock('../src/services/hdxService.ts', () => ({ refreshHdxSnapshot: () => hdx() }))
 vi.mock('../src/services/proxyMultisigService.ts', () => ({ refreshProxyMultisig: () => proxy() }))
 vi.mock('../src/services/erc20WalletService.ts', () => ({ refreshErc20Wallets: () => erc20() }))
+vi.mock('../src/services/contractRegistryService.ts', () => ({ refreshContractCode: () => contractCode() }))
 
 const { startBackgroundRefresh, stopBackgroundRefresh, dueTasks } = await import('../src/services/backgroundRefresh.ts')
 
@@ -21,6 +23,12 @@ describe('dueTasks cadence', () => {
     expect(dueTasks(2, tasks).map(t => t.name)).toEqual(['a'])
     expect(dueTasks(3, tasks).map(t => t.name)).toEqual(['a', 'b'])
     expect(dueTasks(6, tasks).map(t => t.name)).toEqual(['a', 'b'])
+  })
+
+  it('schedules the contract-code snapshot on every 15th tick (~15 min)', () => {
+    expect(dueTasks(14).map(t => t.name)).not.toContain('contract-code')
+    expect(dueTasks(15).map(t => t.name)).toContain('contract-code')
+    expect(dueTasks(30).map(t => t.name)).toContain('contract-code')
   })
 })
 
