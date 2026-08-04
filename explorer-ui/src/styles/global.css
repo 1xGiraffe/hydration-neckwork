@@ -1144,8 +1144,11 @@ svg { display: block; }
    that tracked the button count would move everything below it. */
 .detail-header .nav-btns { display: inline-flex; justify-content: flex-end; gap: 4px; margin-left: auto; min-width: 72px; min-height: 34px; }
 .detail-header .nav-btns a, .detail-header .nav-btns button { width: 34px; height: 34px; border-radius: 9px; border: 1px solid var(--border); background: var(--panel); display: inline-flex; align-items: center; justify-content: center; color: var(--text-medium); }
-.detail-header .nav-btns a:hover, .detail-header .nav-btns button:hover { color: var(--text-high); background: var(--panel-hover); }
+.detail-header .nav-btns a:hover, .detail-header .nav-btns button:not(:disabled):hover { color: var(--text-high); background: var(--panel-hover); }
 .detail-header .nav-btns a:focus-visible, .detail-header .nav-btns button:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+/* An end-of-range arrow stays in place instead of vanishing, so the pair never
+   shifts mid-walk; it reads as unavailable and takes no pointer. */
+.detail-header .nav-btns button:disabled { color: var(--text-lowest); cursor: not-allowed; }
 .detail-header .nav-btns a svg, .detail-header .nav-btns button svg { width: 14px; height: 14px; }
 
 /* ============ TABS ============ */
