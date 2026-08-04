@@ -721,12 +721,50 @@ svg { display: block; }
    horizontally. The label then truncates via the shared .addr-pill ellipsis
    rules (the full value stays in the pill's title + on the detail page). */
 .accounts-tbl td[data-label="Account"] { max-width: 232px; }
-.contracts-tbl { min-width: 980px; }
-/* Same cap as the accounts directory: a verified name or tag can't widen the
-   pill columns past the table's min-width. */
-.contracts-tbl td[data-label="Contract"], .contracts-tbl td[data-label="Deployer"] { max-width: 260px; }
+/* Eleven columns: the accounts directory's holdings set (Value/Holdings/1Y/
+   Trading $/Activity) beside the contract-specific ones (Deployer/Txs/Logs/
+   Created/Last active), with verification folded into the Contract cell as one
+   check. Sized and padded to fit a 1440px window without the panel scrolling
+   sideways — a column hidden off the right edge with no visible scrollbar reads
+   as missing, not as scrollable. */
+.contracts-tbl { min-width: 1180px; }
+/* The Contract cell gets the width, because the name is what the row is for:
+   at 200px "ERC1967Proxy" truncated to "ERC1967Pro…" and the verification check
+   wrapped onto a second line, doubling the row height. Laid out as a clipped flex
+   row (desktop only — below 720px the cell is the card's title line) so the pill
+   is the part that gives way and the check always stays on the line. The deployer
+   is always a short address pill, so it can afford the difference. */
+/* 240 + 148 measured: a contract name plus its ·xyz tail, glyph, copy and check
+   need ~222px, and a deployer's short-address pill ~113px. Splitting the same
+   388px this way keeps the deployer's highlighted last-three visible, which is
+   the part that identifies it. */
+.contracts-tbl td[data-label="Contract"] { max-width: 240px; }
+.contracts-tbl td[data-label="Deployer"] { max-width: 148px; }
+/* The one-line layout lives on an inner span, NEVER on the `td`: `display: flex`
+   on a table cell takes it out of table layout, so the browser wraps it in an
+   anonymous cell and the whole row grew from 47px to 95px. */
+@media (min-width: 721px) {
+  .contracts-tbl .cell-inline { display: flex; align-items: center; gap: 5px; min-width: 0; white-space: nowrap; overflow: hidden; }
+  .contracts-tbl .cell-inline .addr-wrap { min-width: 0; }
+}
 /* Destroyed contracts stay listed (history is addressable) but read as gone. */
 .contracts-tbl tr.contract-destroyed td { opacity: 0.55; }
+/* Verification as a bare check: the match kind is in the cell's title, so the
+   column costs one glyph instead of a chip. Sized like the id-verified tick. */
+.ok-check { color: var(--green); font-weight: 600; cursor: help; }
+/* Last active is always one relative duration, so it never needs to wrap. Created
+   carries "first seen" for the 16 factory-attributed contracts, which is the
+   honest label and is allowed its second line — bounded here, so one factory
+   child adds a line instead of tripling the row. */
+.contracts-tbl td[data-label="Last active"] { white-space: nowrap; }
+.contracts-tbl td[data-label="Created"] { max-width: 118px; }
+/* Below 720px each cell is a card line with a floated ::before label, so the
+   inner row must not become a flex container there (see the media query above);
+   it collapses back to plain inline content. */
+@media (max-width: 720px) { .contracts-tbl .cell-inline { display: inline; } }
+/* The check sits with the name inside the Contract cell rather than owning a
+   column, and never shrinks away with the pill. */
+.contracts-tbl td[data-label="Contract"] .ok-check { flex-shrink: 0; }
 
 /* compact dashboard list rows */
 .mini-row { display: flex; align-items: center; gap: 12px; padding: 11px 18px; border-bottom: 1px solid var(--separator); cursor: pointer; transition: background 120ms; }
@@ -1693,6 +1731,12 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .src-copy { margin-top: 4px; display: flex; justify-content: flex-end; }
 .cli-block { padding: 10px 12px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .abi-details > summary { padding: 6px 0; }
+/* Combo carries a fixed pixel width for filter bars. Inside a stacked card form
+   its neighbours are full-width inputs, so that fixed width becomes the form's
+   ragged right edge — and on a 390px phone it is nearly the whole width anyway.
+   Treat the width as a maximum here instead. */
+.id-card-body .combo, .id-card-body .combo-input { width: 100%; }
+.id-card-body .combo-input { max-width: 260px; }
 .upload-zone { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px dashed var(--separator); border-radius: 10px; }
 .upload-zone.drag { border-color: var(--sky); }
 /* the global button reset leaves fn-head unstyled — lay the row out explicitly */
@@ -2279,11 +2323,27 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
   .accounts-tbl tbody td[data-label="1Y"]::before { float: none; display: block; margin: 0 0 4px; line-height: 1.2; }
   .accounts-tbl tbody td[data-label="1Y"] .spark { display: block; width: 100%; height: 56px; }
 
-  /* Contracts directory cards: drop valueless lines (unverified column, unknown
-     deployer) like the accounts cards do, and let the pill be the card's title. */
+  /* Contracts directory cards: same shape as the accounts cards above, because
+     the row now carries the same holdings columns — pill and value share the top
+     line, the 1Y chart spans both, and valueless lines (unknown deployer, nothing
+     held) drop out instead of stacking em-dashes. The verification check rides
+     inside the pill cell, so it needs no line of its own. */
+  .contracts-tbl tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; padding: 10px 0 12px; }
+  .contracts-tbl tbody td { order: 4; grid-column: 1 / -1; }
   .contracts-tbl tbody td.cell-empty { display: none; }
-  .contracts-tbl tbody td[data-label="Contract"] { max-width: none; text-align: left; }
+  .contracts-tbl tbody td[data-label="Contract"] { order: 1; grid-column: 1; max-width: none; text-align: left; padding-right: 4px; padding-top: 4px; }
   .contracts-tbl tbody td[data-label="Contract"]::before { display: none; }
+  .contracts-tbl tbody td[data-label="Value"] { order: 2; grid-column: 2; grid-row: 1; padding-top: 4px; padding-left: 0; font-size: 15px; font-weight: 600; color: var(--text-high); }
+  .contracts-tbl tbody td[data-label="Value"]::before { display: none; }
+  .contracts-tbl tbody td[data-label="1Y"] { order: 3; text-align: left; padding: 8px 14px 2px; }
+  .contracts-tbl tbody td[data-label="1Y"]::before { float: none; display: block; margin: 0 0 4px; line-height: 1.2; }
+  .contracts-tbl tbody td[data-label="1Y"] .spark { display: block; width: 100%; height: 56px; }
+  /* The Deployer/Created caps are desktop column widths; a card line spans the
+     whole card, so left in place they end the cell 148/118px from the left edge
+     and its right-aligned value lands mid-card (Created also wrapping onto a
+     second line) instead of at the right edge like every other line. */
+  .contracts-tbl tbody td[data-label="Deployer"],
+  .contracts-tbl tbody td[data-label="Created"] { max-width: none; }
 
   /* expanded extrinsic/event panel: full-width, never card-ified */
   .tbl tbody tr.exp-row, .tbl tbody tr.exp-row > td { padding: 0; text-align: left; }

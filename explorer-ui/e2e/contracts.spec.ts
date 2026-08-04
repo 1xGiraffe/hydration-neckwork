@@ -44,4 +44,16 @@ test.describe('mobile', () => {
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
     expect(overflow).toBeLessThanOrEqual(0)
   })
+
+  // Every card line ends its value at the card's right edge. The desktop column
+  // caps must not leak in and stop a cell short of it.
+  test('right-aligns each card line to the same edge', async ({ page }) => {
+    await page.goto('/contracts')
+    const edges = await page.locator('.contracts-tbl tbody tr').first().evaluate(row => {
+      const right = (label: string) => Math.round(row.querySelector(`td[data-label="${label}"]`)!.getBoundingClientRect().right)
+      return { created: right('Created'), deployer: right('Deployer'), lastActive: right('Last active') }
+    })
+    expect(edges.created).toBe(edges.lastActive)
+    expect(edges.deployer).toBe(edges.lastActive)
+  })
 })

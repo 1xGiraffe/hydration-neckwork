@@ -647,6 +647,27 @@ export function AddrPill({ account, full, noCopy, noTag, tagToAccount }: { accou
       </span>
     )
   }
+  // A verified contract's own name, in the slot the bare address would take —
+  // the reason a pill exists is to say WHAT this is, and "GhoToken" says more
+  // than 0x531a…f99a. It sits below identity and profile deliberately: those
+  // name the actor, this names the code. Never the ✓ (registrar-verified
+  // identities only), and always with the address tail, because contract names
+  // are not unique — sixteen addresses on this chain are called ERC1967Proxy,
+  // and without the suffix every one of them would render the same pill (the
+  // same reasoning as tagMemberSuffix above).
+  if (account.contractName) {
+    return (
+      <span className="addr-wrap">
+        <Link to={accountHref(account)} className="addr-pill" title={`${account.contractName} — ${account.address}`}>
+          <AccountEmoji account={account} title="identity" />
+          <span className="tag">{account.contractName}</span>
+          <span className="tag-member-suffix mono">·{account.address.slice(-3)}</span>
+          <ContractGlyph show={account.isContract} />
+        </Link>
+        {!noCopy && <Copy text={account.address} />}
+      </span>
+    )
+  }
   return (
     <span className="addr-wrap">
       <Link to={accountHref(account)} className="addr-pill" title={account.address}>
