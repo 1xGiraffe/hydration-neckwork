@@ -50,6 +50,42 @@ describe('ActiveDcaTable — account vs asset-page modes', () => {
   })
 })
 
+// The Budget cell states two things and their order carries the meaning: what the
+// order started with, then what is still ahead of it. Both are money — the sold
+// asset's amount answers "how much of the token", which is not the question a
+// reader of a budget asks.
+describe('ActiveDcaTable — the Budget cell', () => {
+  const render = (d: ActiveDca) =>
+    renderToStaticMarkup(<ActiveDcaTable dcas={[d]} headBlock={13444900} now={Date.now()} />)
+
+  it('states the budget value and the remainder beside it, on one line', () => {
+    // A $100 budget with 79.5% of it unspent.
+    const html = render(dca())
+    expect(html).toContain('$100 · ')
+    expect(html).toContain('$79.86 left')
+    expect(html.indexOf('$100')).toBeLessThan(html.indexOf('$79.86'))
+    expect(html).not.toContain('HEURC left')
+  })
+
+  it('states an open-ended order’s funding balance as its remainder, once', () => {
+    const html = render(dca({ totalAmount: '0', remainingAmount: null, budgetUsd: null, fundingBalance: '7000000000000000000', fundingUsd: 42.5 }))
+    expect(html).toContain('open-ended')
+    expect(html).toContain('$42.50')
+    expect(html).not.toContain('HEURC left')
+    expect(html.match(/\$42\.50/g)).toHaveLength(1)   // not the balance and its value twice
+  })
+
+  it('says nothing about a remainder once the budget is spent', () => {
+    const html = render(dca({ filledAmount: '100000000000000000000', remainingAmount: '0' }))
+    expect(html).not.toContain(' left</span>')   // inline styles carry a CSS `left`
+  })
+
+  it('falls back to the sold asset when it has no price feed', () => {
+    const html = render(dca({ valueUsd: null, budgetUsd: null }))
+    expect(html).toContain('79.5 HEURC left')
+  })
+})
+
 describe('dcaAggregates — the section totals row', () => {
   // One budgeted order half spent, one open-ended, one unpriced: $100 per trade
   // every 12h + $10 per trade every 6h → $260/day across 6 trades/day. Amounts
