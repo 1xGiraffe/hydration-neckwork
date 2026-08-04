@@ -4,7 +4,7 @@ import { api } from '../api/explorer'
 import { navigate, paths } from '../router'
 import type { SearchResult } from '../types'
 import { searchUserTags, useTagMapVersion } from '../userTags'
-import { ShortAddr, AccountEmoji, AssetIcon, TagIcon } from './ui'
+import { AccountEmoji, AssetIcon, ShortAddr, TagIcon, noAutofill } from './ui'
 
 // A viewer's own list tag, resolved client-side (see userTags.searchUserTags)
 // rather than through the shared, anonymous /explorer/search — that endpoint is
@@ -191,7 +191,7 @@ export function SearchBar({ variant }: { variant: 'hero' | 'topbar' }) {
   return (
     <div className={`search ${variant === 'hero' ? 'xl' : ''} search-wrap`} id={variant === 'hero' ? 'heroSearch' : undefined}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
-      <input
+      <input {...noAutofill}
         id={variant === 'hero' ? 'heroSearchInput' : 'topbarSearchInput'}
         value={value}
         onChange={e => onChange(e.target.value)}
@@ -205,7 +205,6 @@ export function SearchBar({ variant }: { variant: 'hero' | 'topbar' }) {
         aria-expanded={open && !!value.trim()}
         aria-controls={resultsId}
         aria-activedescendant={open && currentResults[active] ? `${resultsId}-option-${active}` : undefined}
-        autoComplete="off"
         spellCheck={false}
       />
       {variant === 'hero' && <span className="hint">↵</span>}
