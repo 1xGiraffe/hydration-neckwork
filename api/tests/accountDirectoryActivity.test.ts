@@ -102,6 +102,32 @@ describe('the directory activity column is the feed total', () => {
     expect(body).toContain('await activityLeaderboardTotal(member.account)')
   })
 
+  // The pacing constants are only sound as a RELATIONSHIP: the counting rate has to
+  // clear BOTH halves of the pool — the reference members and the demand-driven ones
+  // the directory renders — within the freshness window, or entries age out faster
+  // than the pass returns to them. Shipping 3 per cycle gave 144 counts per window
+  // against 174 groups. Pin the arithmetic rather than the numbers, so tuning any one
+  // of them has to keep it.
+  it('counts fast enough to cover its whole pool inside the entry TTL', () => {
+    const constant = (name: string): number => {
+      const m = new RegExp(`const ${name} = ([^\n]+)`).exec(explorerService)
+      expect(m, name).not.toBeNull()
+      // The declarations are plain arithmetic over literals (e.g. `12 * 3_600_000`).
+      return Number(new Function(`return ${m![1].replace(/;.*$/, '')}`)())
+    }
+    const pool = constant('ACTIVITY_LEADERBOARD_POOL') + constant('ACTIVITY_LEADERBOARD_DIRECTORY_POOL_MAX')
+    const perCycle = constant('ACTIVITY_LEADERBOARD_COUNTS_PER_CYCLE')
+    const cycleMs = constant('ACTIVITY_LEADERBOARD_REFRESH_MS')
+    const ttlMs = constant('ACTIVITY_LEADERBOARD_ENTRY_TTL_MS')
+    const cooldownMs = constant('ACTIVITY_LEADERBOARD_COUNT_COOLDOWN_MS')
+
+    const countsPerWindow = (ttlMs / cycleMs) * perCycle
+    expect(countsPerWindow, `${countsPerWindow} counts per TTL vs a ${pool}-member pool`).toBeGreaterThanOrEqual(pool)
+    // And a cycle's own counting must still fit inside the cycle, cooldowns included,
+    // or passes would pile up instead of idling between them.
+    expect(perCycle * cooldownMs).toBeLessThan(cycleMs / 2)
+  })
+
   // The reference pool is a whole-table group-by (26 GiB). Its membership moves over days.
   it('reuses the published reference pool until it ages out', () => {
     const at = explorerService.indexOf('async function activityLeaderboardPool')
@@ -110,5 +136,54 @@ describe('the directory activity column is the feed total', () => {
 
     expect(body).toContain('ACTIVITY_LEADERBOARD_POOL_TTL_MS')
     expect(body).toContain('published.poolAt')
+  })
+})
+
+// The demand half of the pool: whatever the directory prewarm just rendered. This is
+// what makes the Activity column fill in for the pages a reader opens, rather than only
+// for the chain's busiest accounts.
+describe('the demand-driven half of the activity pool', () => {
+  const ACC = (b: string) => '0x' + b.repeat(32)
+  const A = ACC('aa'), B = ACC('bb'), C = ACC('cc')
+
+  it('takes a rendered row\'s grouping key: a tag id, else the account', async () => {
+    const { directoryRowGkeys } = await import('../src/services/explorerService.ts')
+    const rows = [
+      { tag: { tagId: 'money-market' }, account: null },
+      { tag: null, account: { accountId: A } },
+      { tag: null, account: null },                      // a bare simAccount row — no key
+    ] as unknown as Parameters<typeof directoryRowGkeys>[0]
+    expect(directoryRowGkeys(rows)).toEqual(['money-market', A])
+  })
+
+  it('maps each key to an account it can be counted through, skipping the reference pool', async () => {
+    const { demandPoolMembers } = await import('../src/services/explorerService.ts')
+    const memberOfTag = (tagId: string) => (tagId === 'money-market' ? C : null)
+    const out = demandPoolMembers(['money-market', A, B], new Set([B]), memberOfTag)
+    // A tag is counted through one of its members; B is already pooled; refs 0 puts
+    // these behind the reference members in the due order.
+    expect(out).toEqual([{ account: C, refs: 0 }, { account: A, refs: 0 }])
+  })
+
+  it('drops a key nothing can be counted through, and deduplicates', async () => {
+    const { demandPoolMembers } = await import('../src/services/explorerService.ts')
+    // The same tag leads several sorts, so it arrives repeatedly; an empty tag has no
+    // member to count through and is skipped rather than guessed at.
+    expect(demandPoolMembers(['ghost', 'ghost', A, A], new Set(), () => null))
+      .toEqual([{ account: A, refs: 0 }])
+  })
+
+  it('is bounded, so a pathological page cannot grow the pool without limit', async () => {
+    const { demandPoolMembers } = await import('../src/services/explorerService.ts')
+    const many = Array.from({ length: 50 }, (_, i) => '0x' + String(i).padStart(64, '0'))
+    expect(demandPoolMembers(many, new Set(), () => null, 10)).toHaveLength(10)
+  })
+
+  // A failed or half-finished prewarm must not narrow the pool to whatever it managed.
+  it('replaces the published set whole, only when the pass rendered something', () => {
+    const at = explorerService.indexOf('async function prewarmAccountDirectoryUncached')
+    const body = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
+    expect(body).toContain('if (rendered.length) directoryPoolGkeys = rendered')
+    expect(body).not.toContain('directoryPoolGkeys.push')
   })
 })

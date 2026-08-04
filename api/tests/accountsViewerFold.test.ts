@@ -245,3 +245,89 @@ describe('C1 — a mixed-membership fold groups to exactly one row', () => {
     expect(buggyPairs).toEqual(new Set([`u:${TAG}|treasury`, `u:${TAG}|`]))
   })
 })
+
+// A viewer's fold groups are keyed by `u:<tagId>`, which the activity leaderboard
+// can never contain — verified against both persisted generations, whose gkeys are
+// only system tag ids and bare account ids. So a subscribed list was the one kind
+// of directory row whose Activity cell stayed empty while every row around it
+// showed a number. Counting them means grouping the fold's parallel ids/keys
+// arrays back into member sets, which is what this pins; the count itself goes
+// through getListTagListTotal, the same call the group's own page makes.
+describe('viewerFoldMembers — the fold\'s member set per group', () => {
+  const A = '0x' + 'aa'.repeat(32), B = '0x' + 'bb'.repeat(32), C = '0x' + 'cc'.repeat(32)
+
+  it('groups the parallel ids/keys arrays by group key, order preserved', async () => {
+    const { viewerFoldMembers } = await import('../src/services/explorerService.ts')
+    expect(viewerFoldMembers({ ids: [A, B, C], keys: ['u:one', 'u:two', 'u:one'] }))
+      .toEqual(new Map([['u:one', [A, C]], ['u:two', [B]]]))
+  })
+
+  it('is empty for the anonymous path, and skips an id with no key', async () => {
+    const { viewerFoldMembers } = await import('../src/services/explorerService.ts')
+    expect(viewerFoldMembers({ ids: [], keys: [] }).size).toBe(0)
+    expect(viewerFoldMembers({ ids: [A, B], keys: ['u:one'] })).toEqual(new Map([['u:one', [A]]]))
+  })
+})
+
+// The deadline on the fold's activity counting bounds how long the page WAITS. It
+// must never bound how many groups are counted: guarding the START of each group
+// against the budget meant all N workers began at once, every count outlived the
+// budget, and the loop then stopped — so a viewer got numbers for exactly their
+// first `concurrency` groups and dashes for every group after them, permanently.
+describe('the viewer-fold activity budget bounds waiting, not coverage', () => {
+  function body(): string {
+    const at = explorerService.indexOf('function viewerFoldActivityEntries')
+    expect(at).toBeGreaterThan(-1)
+    return explorerService.slice(at, explorerService.indexOf('\n}\n', at))
+  }
+
+  it('computes nothing on the request path — it only registers work and reads', () => {
+    // The hard-won rule. A curated list's count reads 2.7-4.8 GiB and takes 3-4.3s;
+    // starting a dozen per page build saturated ClickHouse and made /accounts take
+    // 15s. The reader must never call the counting function.
+    expect(body()).not.toContain('getListTagListTotal')
+    expect(body()).not.toContain('await')
+    expect(body()).toContain('foldGroupsSeen.set')
+    expect(body()).toContain('foldTotals.get')
+  })
+
+  it('counts on a single-file background lane instead — one group per tick', () => {
+    const at = explorerService.indexOf('async function sweepOneFoldGroup')
+    expect(at).toBeGreaterThan(-1)
+    const sweep = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
+    expect(sweep).toContain('getListTagListTotal')
+    // Exactly one count per tick: concurrency is what saturated ClickHouse before,
+    // so the lane must never fan out. The tick reschedules itself after a cooldown.
+    expect(sweep.match(/getListTagListTotal/g)!).toHaveLength(1)
+    expect(sweep).not.toContain('Promise.all')
+    expect(explorerService).toContain('worked ? FOLD_COUNT_COOLDOWN_MS : FOLD_SWEEP_IDLE_MS')
+    // Bounded memory: a viewer cannot grow the tracked set without limit.
+    expect(explorerService).toContain('foldGroupsSeen.size < FOLD_GROUPS_TRACKED_MAX')
+  })
+
+  it('drains its queue in minutes, not hours', () => {
+    // 88 groups at ~3.5s a count plus the cooldown is single-digit minutes. Rationing
+    // a couple per quarter-hour made that 11 hours, restarted by every deploy.
+    const n = (name: string) => Number(new RegExp(`const ${name} = ([\\d_]+)`).exec(explorerService)![1].replace(/_/g, ''))
+    const perGroupMs = 3_500 + n('FOLD_COUNT_COOLDOWN_MS')
+    expect((88 * perGroupMs) / 60_000).toBeLessThan(15)
+  })
+
+  it('never logs anything identifying from a viewer\'s own lists', () => {
+    // user_* contents may not reach a log line (AGENTS.md), and they must not reach
+    // the shared totals table either — only in-memory maps. The sweep's summary
+    // counts groups; its failure logs the error. Neither carries an id or a name.
+    const at = explorerService.indexOf('async function sweepOneFoldGroup')
+    const sweep = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
+    const logs = [...body().match(/console\.\w+\([^)]*\)/g) ?? [], ...sweep.match(/console\.\w+\([^)]*\)/g) ?? []]
+    expect(logs.length).toBeGreaterThan(0)
+    for (const line of logs) {
+      for (const leak of ['gkey', 'spec.', 'group.name', 'group.tagId', 'group.listId', 'fold.ids']) {
+        expect(line, line).not.toContain(leak)
+      }
+    }
+    // Fold totals stay in memory; only shared gkeys reach account_activity_totals.
+    expect(sweep).not.toContain('persistActivityTotals')
+    expect(sweep).toContain('foldTotals.set')
+  })
+})
