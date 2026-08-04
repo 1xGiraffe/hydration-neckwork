@@ -5,7 +5,7 @@ import {
   contractByH160, isContractAccount, allContracts,
   type ContractRegistryInputs, type ContractRegistryEntry,
 } from '../src/services/contractRegistryService.ts'
-import { accountRef, getContracts, sortContractsByMetric, sortContractsByName, type ContractMetrics } from '../src/services/explorerService.ts'
+import { accountRef, getContracts, sortContractsByMetric, sortContractsByName, dueContractActivityCounts, type ContractMetrics, type ContractActivityEntry } from '../src/services/explorerService.ts'
 import { initContractVerificationService, loadVerifiedContracts } from '../src/services/contractVerificationService.ts'
 import type { ClickHouseClient } from '../src/db/client.ts'
 
@@ -338,6 +338,53 @@ describe('loadContractRegistry + accessors', () => {
     await loadVerifiedContracts()
   })
 })
+
+// A whole-history activity count is the API's most expensive read, so the
+// contracts directory recounts only a few per pass. The sweep is only honest if
+// every contract reaches the front of the queue well inside the entry TTL —
+// otherwise some rows would show a number that never refreshes.
+describe('dueContractActivityCounts', () => {
+  const HOUR = 3_600_000
+  const NOW = Date.parse('2026-08-04T12:00:00.000Z')
+  const counted = (hoursAgo: number, total: number | null = 1): ContractActivityEntry =>
+    ({ total, complete: true, countedAt: new Date(NOW - hoursAgo * HOUR).toISOString() })
+
+  it('counts the never-counted first, then the most overdue', () => {
+    const entries = new Map<string, ContractActivityEntry>([['b', counted(9)], ['c', counted(7)]])
+    expect(dueContractActivityCounts(['a', 'b', 'c'], entries, NOW, 3, 6 * HOUR)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('leaves entries inside the TTL alone', () => {
+    const entries = new Map<string, ContractActivityEntry>([['a', counted(1)], ['b', counted(9)]])
+    expect(dueContractActivityCounts(['a', 'b'], entries, NOW, 5, 6 * HOUR)).toEqual(['b'])
+  })
+
+  it('stores a contract that could not be counted, so it does not hog a slot every pass', () => {
+    const entries = new Map<string, ContractActivityEntry>([['a', counted(1, null)]])
+    expect(dueContractActivityCounts(['a'], entries, NOW, 5, 6 * HOUR)).toEqual([])
+  })
+
+  it('sweeps the whole registry well inside the TTL at the shipped cadence', () => {
+    // 6 per five-minute pass over 375 contracts: full coverage in ~5.2h, so every
+    // entry is refreshed roughly twice per 12h TTL. If either number changes, this
+    // is what says whether the column can still stay current.
+    const addresses = Array.from({ length: 375 }, (_, i) => `0x${i}`)
+    const entries = new Map<string, ContractActivityEntry>()
+    let passes = 0
+    let clock = NOW
+    while (entries.size < addresses.length && passes < 500) {
+      for (const a of dueContractActivityCounts(addresses, entries, clock, 6, 12 * HOUR)) {
+        entries.set(a, { total: 0, complete: true, countedAt: new Date(clock).toISOString() })
+      }
+      passes++
+      clock += 5 * 60_000
+    }
+    expect(entries.size).toBe(375)
+    const sweepMs = passes * 5 * 60_000
+    expect(sweepMs).toBeLessThan(12 * HOUR / 2)
+  })
+})
+
 // The Contract column's sort: the only ascending one here, because a name is read
 // alphabetically while every metric is read largest-first.
 describe('sortContractsByName', () => {
