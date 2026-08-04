@@ -3,11 +3,17 @@ import { expect, test, E2E_ADDRESS, E2E_EVM_ADDRESS, E2E_EVM_TX_HASH } from './f
 import { VERIFIED_CONTRACT_ADDRESS } from '../tests/fixtures/mockApi'
 
 // The contract tab's Write sub-tab over the EVM-wallet path: a wallet
-// connection of its own (never the login session), continuous gas estimates
-// gating the Write button, chain add/switch with the exact §7.5 parameters,
-// and the submitted → in-block → success lifecycle. The wallet is the
-// `evmWallet` EIP-6963 fixture; the HTTP RPC (estimate, gas price, receipt)
-// is mocked at the network layer so the real codec encodes every byte.
+// connection of its own (never the login session), continuous estimates gating
+// the Write button, and the CallPermit an EVM wallet signs instead of sending a
+// transaction. The wallet is the `evmWallet` EIP-6963 fixture; the HTTP RPC
+// (estimate, permit nonce, block timestamp) is mocked at the network layer so
+// the real codec encodes every byte.
+//
+// Where these specs stop: dispatching the signed permit is a Substrate
+// extrinsic over WSS, and mocking a node well enough to accept one is not worth
+// a megabyte metadata fixture (the same line the substrate spec draws). So the
+// socket is closed deliberately and the assertions cover everything up to and
+// including the signed payload, plus the failure the closed socket produces.
 
 const WORD = (hex: string) => hex.replace(/^0x/, '').padStart(64, '0')
 // Error(string) "not allowed": selector + offset + length + left-aligned bytes.
@@ -17,12 +23,26 @@ const NOT_ALLOWED_REVERT = '0x08c379a0' + WORD('20') + WORD('b') + '6e6f7420616c
 // maps a substrate signer to (pinned by tests/substrate-write.test.ts).
 const E2E_DERIVED_SOURCE = '0xba896f978f18d179207937a73758022ff6b405bc'
 
+// The permit nonce the CallPermit precompile reports, and the chain clock the
+// deadline is built from — both fixed so the signed payload is exact.
+const PERMIT_NONCE = 7
+const BLOCK_TIMESTAMP = 1_780_000_000
+
 async function mockEvmRpc(page: Page, estimateCalls?: { from?: string; data?: string }[]) {
   let receiptPolls = 0
+  // No WSS in a browser test: closing it keeps the fee-asset lookup and the
+  // permit dispatch off the real chain, so nothing here depends on the network.
+  await page.routeWebSocket('wss://hydration-rpc.neckwork.net/**', ws => ws.close())
   await page.route('https://hydration-rpc.neckwork.net/**', async route => {
-    const body = route.request().postDataJSON() as { method: string; params?: [{ data?: string; from?: string }, ...unknown[]] }
+    const body = route.request().postDataJSON() as { method: string; params?: [{ data?: string; from?: string; to?: string }, ...unknown[]] }
     const respond = (result: unknown) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ jsonrpc: '2.0', id: 1, result }) })
     if (body.method === 'eth_getCode') return respond('0x6080604052' + 'ab'.repeat(64))
+    if (body.method === 'eth_getBlockByNumber') return respond({ timestamp: `0x${BLOCK_TIMESTAMP.toString(16)}` })
+    // nonces(address) on the CallPermit precompile — the permit nonce, which is
+    // not the account nonce.
+    if (body.method === 'eth_call' && body.params?.[0]?.data?.startsWith('0x7ecebe00')) {
+      return respond(`0x${PERMIT_NONCE.toString(16).padStart(64, '0')}`)
+    }
     if (body.method === 'eth_estimateGas') {
       estimateCalls?.push({ from: body.params?.[0]?.from, data: body.params?.[0]?.data })
       const selector = body.params?.[0]?.data?.slice(0, 10)
@@ -48,7 +68,7 @@ async function connectTestWallet(page: Page) {
 test.describe('desktop', () => {
   test.use({ viewport: { width: 1440, height: 900 } })
 
-  test('connects its own wallet and completes a write with the exact chain params', async ({ page, evmWallet }) => {
+  test('connects its own wallet and signs the exact CallPermit instead of sending a transaction', async ({ page, evmWallet }) => {
     void evmWallet
     await mockEvmRpc(page)
     await page.goto(`/account/${VERIFIED_CONTRACT_ADDRESS}?view=contract&contract=write`)
@@ -68,33 +88,49 @@ test.describe('desktop', () => {
     await expect(writeBtn).toBeDisabled()
     await row.locator('input').nth(0).fill(E2E_EVM_ADDRESS)
     await row.locator('input').nth(1).fill('1000')
-    await expect(row).toContainText('Estimated gas')
-    await expect(row).toContainText('36,816')
+    // The row shows no cost at all, by decision: gas units are not a cost, and
+    // the fee cannot be quoted before signing. An enabled Write is the estimate
+    // landing. Both strings are asserted absent so neither creeps back.
     await expect(writeBtn).toBeEnabled()
+    await expect(row).not.toContainText('Estimated gas')
+    await expect(row).not.toContainText('Fee charged in')
 
-    // Write: chain switch (4902) → add with the §7.5 params → switch → send.
+    const expectedData = '0xa9059cbb' + E2E_EVM_ADDRESS.slice(2).padStart(64, '0') + (1000).toString(16).padStart(64, '0')
     await writeBtn.click()
-    await expect(row.locator('.badge.ok', { hasText: 'Success' })).toBeVisible()
-    await expect(row.locator('a', { hasText: '314,159' })).toHaveAttribute('href', '/block/314159')
+
+    // The wallet signs a CallPermit — that payload is what this spec pins. The
+    // dispatch then waits on the closed socket until runPermitWrite's own
+    // timeout, which is unit-tested rather than waited out here.
+    await expect(row).toContainText('Confirm in your wallet')
 
     const calls = await page.evaluate(() => (window as unknown as { __evmWalletCalls: { method: string; params?: unknown[] }[] }).__evmWalletCalls)
     const methods = calls.map(c => c.method)
-    expect(methods.filter(m => m === 'wallet_addEthereumChain')).toHaveLength(1)
-    expect(methods.indexOf('wallet_addEthereumChain')).toBeGreaterThan(methods.indexOf('wallet_switchEthereumChain'))
-    const add = calls.find(c => c.method === 'wallet_addEthereumChain')!
-    expect(add.params).toEqual([{
-      chainId: '0x3640e',
-      chainName: 'Hydration',
-      nativeCurrency: { name: 'WETH', symbol: 'WETH', decimals: 18 },
-      rpcUrls: ['https://hydration-rpc.neckwork.net'],
-      blockExplorerUrls: ['http://127.0.0.1:5197'],
-    }])
-    const send = calls.find(c => c.method === 'eth_sendTransaction')!
-    expect(send.params).toEqual([{
+    // The whole point of this path: nothing is ever sent as a transaction, so
+    // the wallet never gets to gate the write on its WETH balance — and no chain
+    // add/switch is needed to sign typed data.
+    expect(methods).not.toContain('eth_sendTransaction')
+    expect(methods).not.toContain('wallet_addEthereumChain')
+    expect(methods).not.toContain('wallet_switchEthereumChain')
+
+    const signed = calls.find(c => c.method === 'eth_signTypedData_v4')!
+    expect(signed.params?.[0]).toBe(E2E_EVM_ADDRESS)
+    const payload = JSON.parse(signed.params?.[1] as string)
+    expect(payload.primaryType).toBe('CallPermit')
+    expect(payload.domain).toEqual({
+      name: 'Call Permit Precompile',
+      version: '1',
+      chainId: 222222,
+      verifyingContract: '0x000000000000000000000000000000000000080a',
+    })
+    expect(payload.message).toEqual({
       from: E2E_EVM_ADDRESS,
       to: VERIFIED_CONTRACT_ADDRESS,
-      data: '0xa9059cbb' + E2E_EVM_ADDRESS.slice(2).padStart(64, '0') + (1000).toString(16).padStart(64, '0'),
-    }])
+      value: '0',
+      data: expectedData,
+      gaslimit: 46_020,                                  // 36,816 estimate + 25%
+      nonce: String(PERMIT_NONCE),                       // from the precompile, not the account
+      deadline: String(BLOCK_TIMESTAMP + 3600),          // chain clock, not the browser's
+    })
 
     // The hard isolation requirement: connecting and writing never touched
     // the login session; the wallet is remembered per-tab only.
@@ -142,7 +178,7 @@ test.describe('desktop', () => {
     const row = page.locator('.fn-row', { hasText: 'transfer(address, uint256)' })
     await row.locator('input').nth(0).fill(E2E_EVM_ADDRESS)
     await row.locator('input').nth(1).fill('1000')
-    await expect(row).toContainText('Estimated gas')
+    // An enabled Write is the estimate landing — the row shows no cost figure.
     await expect(row.locator('button', { hasText: /^Write$/ })).toBeEnabled()
     expect(estimateCalls.some(c => c.from === E2E_DERIVED_SOURCE)).toBe(true)
 
@@ -163,6 +199,95 @@ test.describe('desktop', () => {
     await page.reload()
     await expect(page.locator('.write-bar')).toContainText('You are writing to')
     await expect(page.locator('.write-bar button', { hasText: 'Disconnect' })).toBeVisible()
+  })
+
+  // Argument history is keyed by signature and field, saved when Write is
+  // pressed (whatever becomes of the transaction) and forgettable per value.
+  test('remembers each field\'s last values per signature, offers them on another contract, and forgets one on demand', async ({ page, evmWallet }) => {
+    void evmWallet
+    await mockEvmRpc(page)
+    await page.goto(`/account/${VERIFIED_CONTRACT_ADDRESS}?view=contract&contract=write`)
+    await connectTestWallet(page)
+    await page.locator('.fn-head', { hasText: 'transfer(address, uint256)' }).click()
+    const row = page.locator('.fn-row', { hasText: 'transfer(address, uint256)' })
+    const to = row.locator('input').nth(0)
+    const amount = row.locator('input').nth(1)
+
+    // First write: signed then dispatched into the closed socket. The values are
+    // recorded regardless.
+    await to.fill(E2E_EVM_ADDRESS)
+    await amount.fill('1000')
+    await row.locator('button', { hasText: /^Write$/ }).click()
+    await expect(row).toContainText('Confirm in your wallet')
+
+    // Second write from the same field: the first value is offered, and only in
+    // its own field — the amount box never offers an address. Each popover is
+    // scoped to its own field, and a field whose exact value is already typed
+    // offers nothing, so both boxes are cleared first.
+    // The suggestion wrapper must not shrink the box: the shared input reset has
+    // no width of its own, so a wrapper without one collapses it to a few
+    // characters.
+    const fieldWidth = (await row.locator('.field').nth(0).boundingBox())!.width
+    expect((await to.boundingBox())!.width).toBeGreaterThan(fieldWidth - 2)
+
+    const toPop = row.locator('.field').nth(0).locator('.recent-pop')
+    const amountPop = row.locator('.field').nth(1).locator('.recent-pop')
+    await to.fill('')
+    await amount.fill('')
+    await to.click()
+    await expect(toPop.locator('.recent-opt')).toHaveCount(1)
+    await expect(toPop).toContainText(E2E_EVM_ADDRESS)
+    await amount.click()
+    await expect(amountPop).toContainText('1000')
+    await expect(amountPop).not.toContainText(E2E_EVM_ADDRESS)
+
+    // Picking a suggestion fills the field.
+    await to.click()
+    await toPop.locator('.recent-opt', { hasText: E2E_EVM_ADDRESS }).click()
+    await expect(to).toHaveValue(E2E_EVM_ADDRESS)
+
+    // Keyed by signature, not contract: the same call on a different address
+    // offers the same value.
+    await page.goto('/account/0x8c5e657ca8879ada34555130f3be255ae47558b5?view=contract&contract=write')
+    await page.goto(`/account/${VERIFIED_CONTRACT_ADDRESS}?view=contract&contract=write`)
+    await page.locator('.fn-head', { hasText: 'transfer(address, uint256)' }).click()
+    await row.locator('input').nth(0).click()
+    await expect(row.locator('.field').nth(0).locator('.recent-pop')).toContainText(E2E_EVM_ADDRESS)
+
+    // The last argument's popover must not cover the Write button: it would
+    // otherwise swallow the press and refill the field instead of writing. Both
+    // arguments are filled so Write is enabled, and the amount is a prefix of the
+    // remembered value so its popover still has something to show.
+    await row.locator('input').nth(0).fill(E2E_EVM_ADDRESS)
+    await row.locator('input').nth(1).fill('10')
+    await row.locator('input').nth(1).click()
+    await expect(amountPop).toBeVisible()
+    const hit = await row.evaluate(el => {
+      const pop = el.querySelector('.recent-pop')!.getBoundingClientRect()
+      const button = el.querySelector('.fn-actions button') as HTMLElement
+      const b = button.getBoundingClientRect()
+      const over = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2) as HTMLElement
+      return { overlap: Math.max(0, Math.min(pop.bottom, b.bottom) - Math.max(pop.top, b.top)), hits: over?.tagName }
+    })
+    expect(hit.overlap).toBe(0)
+    expect(hit.hits).toBe('BUTTON')
+
+    // And the press really starts a write rather than picking a suggestion.
+    await row.locator('.fn-actions button').click()
+    await expect(row).toContainText('Confirm in your wallet')
+
+    // Forgetting removes it for good — the popover has nothing left to offer.
+    // The box is cleared first: a field already holding the exact value is
+    // offered nothing, so there would be no × to click.
+    await to.fill('')
+    await to.click()
+    await expect(toPop).toBeVisible()
+    await toPop.locator('.recent-opt', { hasText: E2E_EVM_ADDRESS }).locator('button').click()
+    await expect(toPop).toHaveCount(0)
+    await page.reload()
+    await page.locator('.fn-head', { hasText: 'transfer(address, uint256)' }).click()
+    await row.locator('input').nth(0).click()
+    await expect(row.locator('.field').nth(0).locator('.recent-pop')).toHaveCount(0)
   })
 })
 

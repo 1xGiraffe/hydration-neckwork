@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  deriveEvmSource, buildEvmCallArgs, interpretEvmCallEvents, runSubstrateWrite,
+  customRejectionCode, deriveEvmSource, buildEvmCallArgs, interpretEvmCallEvents, runSubstrateWrite,
 } from '../src/substrateWrite'
 import type { EvmCallClient, SubmitResult } from '../src/substrateWrite'
 import type { WriteStage } from '../src/contractWrite'
@@ -26,7 +26,7 @@ describe('deriveEvmSource', () => {
 })
 
 describe('buildEvmCallArgs', () => {
-  it('assembles the nine EVM.call arguments with gas margin and spec fee fields', () => {
+  it('assembles the ten EVM.call arguments with gas margin and spec fee fields', () => {
     const args = buildEvmCallArgs({
       source: DERIVED, target: TARGET, data: '0xd0e30db0',
       valueWei: 5n, gasEstimate: 100_000n, gasPriceWei: 1_000_000_000n,
@@ -37,11 +37,30 @@ describe('buildEvmCallArgs', () => {
       '0xd0e30db0',       // input
       5n,                 // value (wei)
       125_000n,           // gas_limit: estimate + 25% margin
-      1_000_000_000n,     // max_fee_per_gas: eth_gasPrice
+      1_250_000_000n,     // max_fee_per_gas: eth_gasPrice + 25% ceiling
       undefined,          // max_priority_fee_per_gas: None
       undefined,          // nonce: None
       [],                 // access_list
+      [],                 // authorization_list (EIP-7702): a Vec, so never None
     ])
+  })
+})
+
+// dedot's InvalidTxError carries the runtime's validateTransaction Result on
+// `data` — reading any other property silently loses the pallet error index and
+// leaves the user with "Invalid Tx: Invalid - Custom". The shape below is what a
+// live rejection produced (EvmPermitRunnerError is index 11).
+describe('customRejectionCode', () => {
+  it('finds the Custom payload inside the validation Result', () => {
+    const err = Object.assign(new Error('Invalid Tx: Invalid - Custom'), {
+      data: { isErr: true, err: { type: 'Invalid', value: { type: 'Custom', value: 11 } } },
+    })
+    expect(customRejectionCode(err)).toBe(11)
+  })
+
+  it('answers null for an unrelated error rather than guessing an index', () => {
+    expect(customRejectionCode(new Error('connection refused'))).toBe(null)
+    expect(customRejectionCode(Object.assign(new Error('x'), { data: { isErr: true, err: { type: 'Future' } } }))).toBe(null)
   })
 })
 
@@ -106,7 +125,7 @@ describe('runSubstrateWrite lifecycle', () => {
     })
     expect(stages.map(s => s.phase)).toEqual(['preparing', 'wallet-pending', 'submitted', 'in-block', 'success'])
     expect(final).toEqual({ phase: 'success', txHash: TX_HASH, blockHeight: 4711, txIndex: 2 })
-    expect(recorded.args).toEqual([DERIVED, TARGET, '0xd0e30db0', 5n, 125_000n, 1_000_000_000n, undefined, undefined, []])
+    expect(recorded.args).toEqual([DERIVED, TARGET, '0xd0e30db0', 5n, 125_000n, 1_250_000_000n, undefined, undefined, [], []])
     expect(recorded.address).toBe(SS58)
     expect(recorded.signer).toBe(signer)
     await new Promise(resolve => setTimeout(resolve, 0))
