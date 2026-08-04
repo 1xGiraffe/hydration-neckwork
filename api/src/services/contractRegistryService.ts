@@ -244,19 +244,27 @@ export function deployerWhitelistFromEvents(events: { event_name: string; who: s
   return set
 }
 
-export type ContractSort = 'created' | 'active' | 'txs' | 'logs'
-export const CONTRACT_SORTS: ContractSort[] = ['created', 'active', 'txs', 'logs']
+// `value`, `volume` and `activity` rank on the account-shaped metrics the display
+// layer holds (explorerService's contractMetrics), and `name` on the verified
+// name — none of which the registry knows, so pageContracts below deliberately
+// covers only the registry's own columns.
+export type ContractSort = 'created' | 'active' | 'txs' | 'logs' | 'value' | 'volume' | 'activity' | 'name'
+export const CONTRACT_SORTS: ContractSort[] = ['created', 'active', 'txs', 'logs', 'value', 'volume', 'activity', 'name']
 
 const creationBlock = (e: ContractRegistryEntry): number =>
   e.creation.method === 'unknown' ? -1 : e.creation.blockHeight
 
+// Only the registry's own columns; the metric sorts are ranked by the display
+// layer, which never reaches this comparator (see getContracts).
+const REGISTRY_SORTS: Record<string, (e: ContractRegistryEntry) => number | string> = {
+  created: (e: ContractRegistryEntry) => creationBlock(e),
+  active: (e: ContractRegistryEntry) => e.lastActivity ?? '',
+  txs: (e: ContractRegistryEntry) => e.txCount,
+  logs: (e: ContractRegistryEntry) => e.logCount,
+}
+
 export function pageContracts(list: ContractRegistryEntry[], offset: number, limit: number, sort: ContractSort): { rows: ContractRegistryEntry[]; total: number } {
-  const value: (e: ContractRegistryEntry) => number | string = {
-    created: (e: ContractRegistryEntry) => creationBlock(e),
-    active: (e: ContractRegistryEntry) => e.lastActivity ?? '',
-    txs: (e: ContractRegistryEntry) => e.txCount,
-    logs: (e: ContractRegistryEntry) => e.logCount,
-  }[sort]
+  const value = REGISTRY_SORTS[sort] ?? REGISTRY_SORTS.created
   const sorted = [...list].sort((a, b) => {
     const va = value(a), vb = value(b)
     if (va !== vb) return va < vb ? 1 : -1

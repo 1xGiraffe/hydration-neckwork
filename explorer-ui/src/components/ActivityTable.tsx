@@ -90,7 +90,11 @@ export function ExternalAccountPill({ account }: { account: NonNullable<Activity
           <span className="tag">{identity.display}</span>
           {identity.verified && <span className="id-verified" title="Verified identity">✓</span>}
         </>
-        : null
+        // A verified contract's name, with the address tail that says which of
+        // the same-named contracts this is — mirroring AddrPill exactly.
+        : account.contractName
+          ? <><span className="tag">{account.contractName}</span><span className="tag-member-suffix mono">·{account.address.slice(-3)}</span></>
+          : null
   const body = <>
     {resolved
       ? <TagIcon icon={resolved.icon} title={resolved.name} />
