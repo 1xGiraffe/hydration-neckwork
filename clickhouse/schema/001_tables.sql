@@ -48,6 +48,33 @@ CREATE TABLE IF NOT EXISTS price_data.erc20_wallet_balances (`account_id` String
 -- scan time. DoubleDelta + ZSTD reached 16.51 MiB but cost 57% more to read, which
 -- this table, an asset-first explorer activity index, cannot afford.
 CREATE TABLE IF NOT EXISTS price_data.event_asset_refs (`asset_id` UInt32, `event_name` LowCardinality(String), `block_height` UInt32 CODEC(T64, LZ4), `event_index` UInt32 CODEC(T64, LZ4), `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime CODEC(T64, LZ4), `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (asset_id, event_name, block_height, event_index) SETTINGS index_granularity = 2048;
+-- Chain-state snapshot of EVM.AccountCodes (same exception class as
+-- atoken_reserve_map: reproducible from live chain state, not from raw).
+-- Written only by the api's coordinated refresher. Rows are never deleted:
+-- an address that leaves a fully successful enumeration is replaced with
+-- destroyed=1. kind: 'contract' | 'asset-erc20' | 'oracle-adapter'
+-- | 'system-precompile' | 'sentinel' | 'planted-unknown'.
+CREATE TABLE IF NOT EXISTS price_data.evm_contract_code_snapshot (`address` String, `kind` LowCardinality(String), `code_hash` String, `code_size` UInt32, `destroyed` UInt8 DEFAULT 0, `updated_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(updated_at) ORDER BY address SETTINGS index_granularity = 64;
+-- Per-contract log stats. Exact under replay: identities live in a roaring
+-- bitmap ((event_index<<32)|block_height packing), so re-inserted raw ranges
+-- OR into the same bits instead of double-counting. One row per contract.
+CREATE TABLE IF NOT EXISTS price_data.evm_contract_log_stats (`contract_address` String, `log_identity_state` AggregateFunction(groupBitmap, UInt64), `first_block` SimpleAggregateFunction(min, UInt32), `last_block` SimpleAggregateFunction(max, UInt32), `first_timestamp` SimpleAggregateFunction(min, DateTime), `last_timestamp` SimpleAggregateFunction(max, DateTime)) ENGINE = AggregatingMergeTree ORDER BY contract_address SETTINGS index_granularity = 64;
+-- Top-level CREATE transactions (Ethereum.transact, action.__kind='Create').
+-- The extrinsic knows the deployer and init code but NOT the created address;
+-- the registry joins this to evm_executed on (block_height, extrinsic_index)
+-- at load time (285 rows — an MV cannot express the cross-table join replay-
+-- safely because the two raw tables of one block insert in either order).
+CREATE TABLE IF NOT EXISTS price_data.evm_create_transactions (`block_height` UInt32, `extrinsic_index` UInt32, `block_timestamp` DateTime, `deployer` String, `success` UInt8, `init_code_size` UInt32, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (block_height, extrinsic_index) SETTINGS index_granularity = 256;
+-- Ethereum.Executed projection, contract-first: per-contract tx counts, last
+-- activity, and the creation join (a CREATE tx's `to` IS the new contract) are
+-- key-pruned. (block_height, event_index) completes a stable replay identity,
+-- so counting is uniqExact over the key, never an additive sum. ~206k rows.
+CREATE TABLE IF NOT EXISTS price_data.evm_executed (`to_address` String, `from_address` String, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `tx_hash` String, `exit_kind` LowCardinality(String), `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (to_address, block_height, event_index) SETTINGS index_granularity = 1024;
+-- EVM.call projection (substrate accounts calling contracts via pallet-evm;
+-- these do NOT emit Ethereum.Executed). Target-first for per-contract counts;
+-- ifNull(extrinsic_index)+call_address mirrors raw_calls' identity so nested
+-- calls (batch/proxy) stay distinct and replays replace. ~137k rows.
+CREATE TABLE IF NOT EXISTS price_data.evm_pallet_calls (`target` String, `block_height` UInt32, `extrinsic_index` Nullable(UInt32), `call_address` String, `block_timestamp` DateTime, `source` String, `success` Nullable(UInt8), `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (target, block_height, ifNull(extrinsic_index, 4294967295), call_address) SETTINGS index_granularity = 1024;
 CREATE TABLE IF NOT EXISTS price_data.farm_deposit_latest (`deposit_id` String, `position_id` AggregateFunction(argMax, String, UInt64)) ENGINE = AggregatingMergeTree ORDER BY deposit_id SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.governance_vote_calls (`pallet` LowCardinality(String), `ref_index` UInt32, `block_height` UInt32, `extrinsic_index` Nullable(UInt32), `call_address` String, `block_timestamp` DateTime, `call_name` LowCardinality(String), `who` String, `vote_kind` LowCardinality(String), `vote_byte` UInt16, `balance` String, `aye` String, `nay` String, `abstain` String, `success` UInt8, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (pallet, ref_index, block_height, ifNull(extrinsic_index, 4294967295), call_address) SETTINGS index_granularity = 1024;
 CREATE TABLE IF NOT EXISTS price_data.hdx_holder_lifetime (`account_id` String, `first_nonzero_state` AggregateFunction(min, DateTime), `last_nonzero_state` AggregateFunction(max, DateTime)) ENGINE = AggregatingMergeTree ORDER BY account_id SETTINGS index_granularity = 1024;
