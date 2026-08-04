@@ -721,6 +721,12 @@ svg { display: block; }
    horizontally. The label then truncates via the shared .addr-pill ellipsis
    rules (the full value stays in the pill's title + on the detail page). */
 .accounts-tbl td[data-label="Account"] { max-width: 232px; }
+.contracts-tbl { min-width: 980px; }
+/* Same cap as the accounts directory: a verified name or tag can't widen the
+   pill columns past the table's min-width. */
+.contracts-tbl td[data-label="Contract"], .contracts-tbl td[data-label="Deployer"] { max-width: 260px; }
+/* Destroyed contracts stay listed (history is addressable) but read as gone. */
+.contracts-tbl tr.contract-destroyed td { opacity: 0.55; }
 
 /* compact dashboard list rows */
 .mini-row { display: flex; align-items: center; gap: 12px; padding: 11px 18px; border-bottom: 1px solid var(--separator); cursor: pointer; transition: background 120ms; }
@@ -1061,6 +1067,9 @@ svg { display: block; }
   border: 1px solid currentColor; background: color-mix(in srgb, currentColor 12%, transparent);
 }
 .addr-pill .id-verified { color: var(--green); font-weight: 700; font-size: 11px; }
+/* Smart-contract marker inside account pills — muted, non-interactive, same
+   weight class as the ✓ so a pill row keeps one rhythm. */
+.addr-pill .contract-glyph { color: var(--text-medium); font-size: 11px; font-weight: 500; letter-spacing: -0.5px; }
 
 /* status badge */
 .badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 10.5px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -2235,6 +2244,12 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
   .accounts-tbl tbody td[data-label="1Y"] { order: 3; text-align: left; padding: 8px 14px 2px; }
   .accounts-tbl tbody td[data-label="1Y"]::before { float: none; display: block; margin: 0 0 4px; line-height: 1.2; }
   .accounts-tbl tbody td[data-label="1Y"] .spark { display: block; width: 100%; height: 56px; }
+
+  /* Contracts directory cards: drop valueless lines (unverified column, unknown
+     deployer) like the accounts cards do, and let the pill be the card's title. */
+  .contracts-tbl tbody td.cell-empty { display: none; }
+  .contracts-tbl tbody td[data-label="Contract"] { max-width: none; text-align: left; }
+  .contracts-tbl tbody td[data-label="Contract"]::before { display: none; }
 
   /* expanded extrinsic/event panel: full-width, never card-ified */
   .tbl tbody tr.exp-row, .tbl tbody tr.exp-row > td { padding: 0; text-align: left; }

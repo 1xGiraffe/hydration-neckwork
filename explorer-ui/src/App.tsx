@@ -21,6 +21,7 @@ const Events = lazy(() => import('./pages/Events').then(m => ({ default: m.Event
 const EventDetail = lazy(() => import('./pages/EventDetail').then(m => ({ default: m.EventDetail })))
 const Accounts = lazy(() => import('./pages/Accounts').then(m => ({ default: m.Accounts })))
 const Account = lazy(() => import('./pages/Account').then(m => ({ default: m.Account })))
+const Contracts = lazy(() => import('./pages/Contracts').then(m => ({ default: m.Contracts })))
 const Tags = lazy(() => import('./pages/Tags').then(m => ({ default: m.Tags })))
 const TagsHydration = lazy(() => import('./pages/Tags').then(m => ({ default: m.TagsHydration })))
 const TagDetail = lazy(() => import('./pages/TagDetail').then(m => ({ default: m.TagDetail })))
@@ -75,6 +76,7 @@ export default function App() {
       case 'event': return <EventDetail id={route.id} />
       case 'accounts': return <Accounts />
       case 'account': return <Account address={route.address} />
+      case 'contracts': return <Contracts />
       case 'tags': return <Tags />
       case 'tags-hydration': return <TagsHydration />
       case 'tag': return <TagDetail tagId={route.tagId} />

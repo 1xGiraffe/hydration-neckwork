@@ -72,7 +72,7 @@ describe('every list that holds rows has a surface that marks them', () => {
   it('holds rows in exactly the paged list hooks, plus the day chart', () => {
     expect(holdingHooks.sort()).toEqual([
       'useAccountActivity', 'useAccountEvents', 'useAccountExtrinsics', 'useAccountVotes',
-      'useAccounts', 'useActivity', 'useAssetActivity', 'useBlocks', 'useDaily', 'useEvents',
+      'useAccounts', 'useActivity', 'useAssetActivity', 'useBlocks', 'useContracts', 'useDaily', 'useEvents',
       'useExtrinsics', 'useHolders', 'useTagActivity', 'useTagEvents',
       'useTagExtrinsics', 'useTagVotes', 'useTagVotesByReferendum',
     ])

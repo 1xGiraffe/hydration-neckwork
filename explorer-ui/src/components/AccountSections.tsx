@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- shared account-section components + their count helper */
-import { F, AssetIcon, AssetAmount, AreaChart, ChartCardSkeleton, healthFactorDisplay, AddrPill, MomentLink, ProgressRing, rowNav, Dash, EmptyRow } from './ui'
+import { F, AssetIcon, AssetAmount, AreaChart, ChartCardSkeleton, healthFactorDisplay, AddrPill, MomentLink, ProgressRing, rowNav, Dash, EmptyRow, Copy } from './ui'
 import type { ChartMarker, DetailTab } from './ui'
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
@@ -7,7 +7,7 @@ import { performancePoints } from './performance'
 import { CAT } from './activityColors'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import { blockSeconds, blockSpanSeconds, dcaCadence, dcaProgress, dcaRunway, fmtDuration } from '../utils/dca'
-import type { MoneyMarketPosition, LpPosition, ActiveDca, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent } from '../types'
+import type { MoneyMarketPosition, LpPosition, ActiveDca, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent, ContractInfo } from '../types'
 import type { ListCount } from '../api/explorer'
 import type { ReactNode } from 'react'
 
@@ -650,6 +650,69 @@ function ProxyRelationRow({ rel }: { rel: ProxyRelation }) {
       <ProxyTypeBadge type={rel.proxyType} />
       {delay && <span className="muted mono" style={{ fontSize: 11 }} title="Announcement delay before the proxy call executes">delay {delay}</span>}
     </span>
+  )
+}
+
+// Deployed-contract card for the Overview tab: creation provenance with honest
+// labels (a factory child is "first seen", never "created"; missing evidence
+// stays "Unknown"), verification status, and the on-chain code identity.
+export function ContractSection({ contract, now }: { contract?: ContractInfo | null; now: number }) {
+  if (!contract) return null
+  const c = contract.creation
+  const neutralBadge = { color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' } as const
+  return (
+    <div className="id-card">
+      <div className="id-card-head">Contract</div>
+      <div className="dl">
+        {c.method === 'create' && (
+          <>
+            {c.deployer && (
+              <>
+                <div className="dt" title="The account whose CREATE transaction deployed this contract">Creator</div>
+                <div className="dd proxy-dd">
+                  <AddrPill account={c.deployer} />
+                  {c.deployerWhitelisted && <span className="pill-badge" style={neutralBadge} title="In the EVMAccounts.ContractDeployer whitelist — advisory provenance only, the whitelist does not gate execution">whitelisted deployer</span>}
+                </div>
+              </>
+            )}
+            {c.timestamp && c.blockHeight != null && (
+              <>
+                <div className="dt">Created</div>
+                <div className="dd proxy-dd"><span className="mono"><MomentLink at={{ blockHeight: c.blockHeight, extrinsicIndex: c.extrinsicIndex ?? null, timestamp: c.timestamp }} now={now} /></span></div>
+              </>
+            )}
+          </>
+        )}
+        {c.method === 'factory' && c.factory && (
+          <>
+            <div className="dt" title="Internal creations emit no event — attributed from the transaction behind this contract's first log">Deployed by</div>
+            <div className="dd proxy-dd"><AddrPill account={c.factory} /><span className="pill-badge" style={neutralBadge}>factory</span></div>
+            {c.timestamp && c.blockHeight != null && (
+              <>
+                <div className="dt" title="Creation is not directly observable for factory children — this is the contract's first on-chain log">First seen</div>
+                <div className="dd proxy-dd"><span className="mono"><MomentLink at={{ blockHeight: c.blockHeight, extrinsicIndex: null, timestamp: c.timestamp }} now={now} /></span></div>
+              </>
+            )}
+          </>
+        )}
+        {c.method === 'unknown' && (
+          <>
+            <div className="dt">Created</div>
+            <div className="dd"><span className="muted" title="Neither a top-level CREATE nor first-log factory evidence exists for this address">Unknown</span></div>
+          </>
+        )}
+        <div className="dt">Verification</div>
+        <div className="dd">{contract.verification
+          ? <span className="badge ok">✓ Verified{contract.verification.matchType === 'exact_match' ? ' (exact match)' : ' (match)'}</span>
+          : <span className="badge" style={neutralBadge}>Unverified</span>}</div>
+        <div className="dt">Code</div>
+        <div className="dd proxy-dd">
+          <span className="mono">{F.int(contract.codeSize)} bytes</span>
+          <span className="mono muted" title={contract.codeHash}>{F.shortHash(contract.codeHash)}</span>
+          <Copy text={contract.codeHash} />
+        </div>
+      </div>
+    </div>
   )
 }
 
