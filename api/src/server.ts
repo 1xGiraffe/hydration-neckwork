@@ -40,6 +40,7 @@ import {
   startAccountsPrewarm,
   startContractMetricsRefresh,
   startActivityLeaderboardRefresh,
+  startFoldActivitySweep,
   startTagCountsPrewarm,
   stopExplorerBackgroundTasks,
 } from './services/explorerService.ts'
@@ -318,6 +319,9 @@ async function start() {
     // The directory's activity ranking, on its own slow interval: it recounts a few
     // aged-out members per cycle rather than the whole pool per prewarm.
     startActivityLeaderboardRefresh()
+    // Activity totals for viewers' own list tags: a single-file background lane, so a
+    // page never computes one (see explorerService).
+    startFoldActivitySweep()
   } catch (err) {
     fastify.log.error(err)
     await fastify.close().catch(async closeError => {
