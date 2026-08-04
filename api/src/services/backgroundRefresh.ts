@@ -1,6 +1,7 @@
 import { refreshHdxSnapshot } from './hdxService.ts'
 import { refreshProxyMultisig } from './proxyMultisigService.ts'
 import { refreshErc20Wallets } from './erc20WalletService.ts'
+import { refreshContractCode } from './contractRegistryService.ts'
 
 // Coordinated scheduler for the background refreshers that read node-full
 // (chain-state enumeration and EVM eth_call). Previously each ran on its own
@@ -37,6 +38,9 @@ const TASKS: RefreshTask[] = [
   { name: 'hdx-locks', everyTicks: 1, run: refreshHdxSnapshot },
   { name: 'proxy-multisig', everyTicks: 1, run: refreshProxyMultisig },
   { name: 'erc20-wallets', everyTicks: 3, run: refreshErc20Wallets },
+  // EVM.AccountCodes enumeration (~1k keys); contracts appear rarely, so a
+  // slow cadence keeps the archive-node duty cycle where it was.
+  { name: 'contract-code', everyTicks: 15, run: refreshContractCode },
 ]
 
 // Tasks due on a given 1-based tick number (exported for testing the cadence).
