@@ -7,7 +7,7 @@ import { requestConnect } from '../connectDialog'
 import { useList, useUserMutation } from '../hooks/useUser'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, navigate, paths, setQuery, useQueryValue } from '../router'
-import { Crumbs, AddrPill, TagIcon, DetailTabs, ProfilePageSkeleton } from '../components/ui'
+import { AddrPill, Crumbs, DetailTabs, ProfilePageSkeleton, TagIcon, noAutofill } from '../components/ui'
 import type { AccountRef, ListSummaryRef, ListTagDetail } from '../types'
 
 const ListFormDialog = lazy(() => import('../components/ListFormDialog').then(m => ({ default: m.ListFormDialog })))
@@ -98,7 +98,7 @@ function NewTagDialog({ open, onOpenChange, listId, onCreated }: { open: boolean
             {error && <div className="dialog-error">{error}</div>}
             <div className="field">
               <label htmlFor="tag-name-input">Name</label>
-              <input id="tag-name-input" value={name} maxLength={40} onChange={e => setName(e.target.value)} disabled={mutation.isPending} />
+              <input {...noAutofill} id="tag-name-input" value={name} maxLength={40} onChange={e => setName(e.target.value)} disabled={mutation.isPending} />
             </div>
             <div className="field">
               <label id="tag-color-label">Color</label>
@@ -110,7 +110,7 @@ function NewTagDialog({ open, onOpenChange, listId, onCreated }: { open: boolean
             </div>
             <div className="field">
               <label htmlFor="tag-icon-input">Icon (emoji, optional)</label>
-              <input id="tag-icon-input" value={icon} maxLength={4} placeholder="🏷️" onChange={e => setIcon(e.target.value)} disabled={mutation.isPending} />
+              <input {...noAutofill} id="tag-icon-input" value={icon} maxLength={4} placeholder="🏷️" onChange={e => setIcon(e.target.value)} disabled={mutation.isPending} />
             </div>
           </div>
           <div className="dialog-foot">
@@ -252,8 +252,8 @@ function TagPanel({ listId, tag, isOwner }: { listId: string; tag: ListTagDetail
       <div className="panel-head">
         {editing ? (
           <span className="row gap6" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
-            <input className="input sm" value={icon} onChange={e => setIcon(e.target.value)} style={{ width: 48 }} aria-label="Tag icon" maxLength={4} disabled={updateTagMutation.isPending} />
-            <input className="input sm" value={name} onChange={e => setName(e.target.value)} aria-label="Tag name" maxLength={40} disabled={updateTagMutation.isPending} />
+            <input {...noAutofill} className="input sm" value={icon} onChange={e => setIcon(e.target.value)} style={{ width: 48 }} aria-label="Tag icon" maxLength={4} disabled={updateTagMutation.isPending} />
+            <input {...noAutofill} className="input sm" value={name} onChange={e => setName(e.target.value)} aria-label="Tag name" maxLength={40} disabled={updateTagMutation.isPending} />
             <span className="swatches" role="group" aria-label="Tag color">
               {TAG_COLORS.map(c => (
                 <button key={c} type="button" className={`swatch${c === color ? ' on' : ''}`} style={{ background: c, width: 20, height: 20 }} aria-label={`Color ${c}`} aria-pressed={c === color} onClick={() => setColor(c)} disabled={updateTagMutation.isPending} />

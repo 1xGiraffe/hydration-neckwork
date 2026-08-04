@@ -53,6 +53,24 @@ function compact(v: number): string {
   return sig3(n) + BIG_UNITS[u]
 }
 
+// Spread into every input in the explorer. Nothing here is a credential — the
+// only identity is a wallet — so a password manager has nothing to offer, and its
+// overlay actively obstructs the fields that matter (addresses, amounts, hex).
+// autoComplete alone is widely ignored by managers, hence the vendor opt-outs:
+// data-1p-ignore (1Password), data-lpignore (LastPass), data-bwignore
+// (Bitwarden), data-form-type (Dashlane). Autocorrect and spellcheck go too;
+// they only ever mangle an address.
+export const noAutofill = {
+  autoComplete: 'off',
+  autoCorrect: 'off',
+  autoCapitalize: 'off',
+  spellCheck: false,
+  'data-1p-ignore': '',
+  'data-lpignore': 'true',
+  'data-bwignore': 'true',
+  'data-form-type': 'other',
+} as const
+
 // The explorer-wide rough display scale for rounded numbers: ~3 significant
 // digits with k/M/B/T/Q compaction — 500 · 537 · 4.87k · 40k · 112k · 4.59M.
 // Values below 1 keep ~3 significant decimals (0.12 · 0.0034), and very small
@@ -1495,7 +1513,7 @@ export function Pager({ page, hasNext, totalPages, note, onPage }: { page: numbe
             lands, and » is the way back to real rows. */}
         {last != null && <button onClick={() => go(last)} disabled={page === last} title="Last" aria-label="Last page">»</button>}
         <form onSubmit={e => { e.preventDefault(); const n = parseInt(jump, 10); if (Number.isFinite(n) && n >= 1) go(n - 1); setJump('') }}>
-          <input className="pager-jump" placeholder="Go to…" value={jump} onChange={e => setJump(e.target.value)} inputMode="numeric" aria-label="Go to page" />
+          <input {...noAutofill} className="pager-jump" placeholder="Go to…" value={jump} onChange={e => setJump(e.target.value)} inputMode="numeric" aria-label="Go to page" />
         </form>
       </div>
     </div>

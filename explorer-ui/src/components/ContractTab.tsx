@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError } from '../api/explorer'
 import { useContractAbi, useContractSources, useCompilerVersions } from '../hooks/useExplorerData'
 import { Link, paths, setQuery, useQueryValue } from '../router'
-import { F, Copy, CopyTextButton, JsonView } from './ui'
+import { Copy, CopyTextButton, F, JsonView, noAutofill } from './ui'
 import { Combo } from './Filters'
 import { readFunctions, functionSignature, type AbiFunctionItem, type AbiParam } from '../abiShape'
 import { validateStandardJson, validateContractIdentifier } from '../verifyForm'
@@ -260,20 +260,20 @@ function VerifyPanel({ address }: { address: string }) {
                   onDragLeave={() => setDragOver(false)}
                   onDrop={e => { e.preventDefault(); setDragOver(false); void onFile(e.dataTransfer.files?.[0]) }}
                 >
-                  <input ref={fileRef} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={e => { void onFile(e.target.files?.[0]); e.target.value = '' }} />
+                  <input {...noAutofill} ref={fileRef} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={e => { void onFile(e.target.files?.[0]); e.target.value = '' }} />
                   <button type="button" className="btn sm" onClick={() => fileRef.current?.click()}>Choose file</button>
                   <span className="muted" style={{ fontSize: 12 }}>{fileName ?? 'or drop the standard JSON here (forge build-info input / hardhat build-info)'}</span>
                 </div>
               </div>
               <div className="field">
                 <label>Contract</label>
-                <input className="input" placeholder="src/MyToken.sol:MyToken" value={identifier} onChange={e => setIdentifier(e.target.value)} />
+                <input {...noAutofill} className="input" placeholder="src/MyToken.sol:MyToken" value={identifier} onChange={e => setIdentifier(e.target.value)} />
               </div>
               <div className="field">
                 <label>Compiler version</label>
                 {versionOptions.length
                   ? <Combo value={version} placeholder="v0.8.19+commit.7dd6d404" label="Compiler version" width={260} options={versionOptions} onChange={setVersion} />
-                  : <input className="input" placeholder="v0.8.19+commit.7dd6d404" value={version} onChange={e => setVersion(e.target.value)} />}
+                  : <input {...noAutofill} className="input" placeholder="v0.8.19+commit.7dd6d404" value={version} onChange={e => setVersion(e.target.value)} />}
               </div>
               {error && <div className="dialog-error">{error}</div>}
               {completed?.error && <div className="dialog-error">{completed.error.message}</div>}
@@ -369,7 +369,7 @@ function ReadFnRow({ index, fn, address }: { index: number; fn: AbiFunctionItem;
           {fn.inputs.map((input, i) => (
             <div className="field" key={`${input.name}-${i}`}>
               <label>{input.name || `arg ${i}`} <span className="muted">({input.type})</span></label>
-              <input
+              <input {...noAutofill}
                 className="input"
                 placeholder={input.type}
                 value={raws[i] ?? ''}

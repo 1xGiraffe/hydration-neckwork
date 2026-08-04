@@ -1,4 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- filter primitives + helpers module */
+import { noAutofill } from './ui'
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { useQuery, setQuery } from '../router'
 import type { AssetFilterItem } from '../types'
@@ -52,7 +53,7 @@ function DebouncedInput({ value, onCommit, type, placeholder, title, label, widt
     window.clearTimeout(timer.current)
     if (draft !== value) onCommitRef.current(draft)
   }
-  return <input
+  return <input {...noAutofill}
     type={type}
     min={type === 'number' ? 0 : undefined}
     maxLength={type === 'text' ? 128 : undefined}
@@ -111,8 +112,8 @@ export function Combo({ value, placeholder, label, width, options, onChange }: {
   useEffect(() => () => window.clearTimeout(blurTimer.current), [])
   return (
     <div className="combo">
-      <input
-        className="combo-input" style={width ? { width } : undefined} placeholder={placeholder} autoComplete="off"
+      <input {...noAutofill}
+        className="combo-input" style={width ? { width } : undefined} placeholder={placeholder}
         aria-label={label ?? placeholder ?? 'Filter'}
         role="combobox"
         aria-autocomplete="list"
@@ -192,7 +193,7 @@ export function FilterZone({ fields, values, onChange, onClear, extra }: { field
       <div id={filtersId} className={`filters ${open ? '' : 'hidden'}`}>
         {fields.map(f => {
           const label = f.title ?? f.placeholder ?? f.key
-          if (f.kind === 'date') return <input key={f.key} type="date" value={values[f.key] || ''} onChange={e => onChange(f.key, e.target.value)} title={f.title} aria-label={label} />
+          if (f.kind === 'date') return <input {...noAutofill} key={f.key} type="date" value={values[f.key] || ''} onChange={e => onChange(f.key, e.target.value)} title={f.title} aria-label={label} />
           if (f.kind === 'number' || f.kind === 'text') {
             const value = values[f.key] || ''
             return <DebouncedInput key={f.key} type={f.kind} placeholder={f.placeholder} value={value} onCommit={v => onChange(f.key, v)} title={f.title} label={label} width={f.width} />
