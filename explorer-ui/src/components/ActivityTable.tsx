@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- activity table exports slug/id/label helpers alongside its components */
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
-import { F, AddrPill, AssetChip, rowNav, Ago, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor } from './ui'
+import { F, AddrPill, AssetChip, rowNav, Ago, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor, ContractGlyph } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
 import { activityBadge } from './activityColors'
 import { resolveTag, useTagMapVersion } from '../userTags'
@@ -96,6 +96,7 @@ export function ExternalAccountPill({ account }: { account: NonNullable<Activity
       ? <TagIcon icon={resolved.icon} title={resolved.name} />
       : <AccountEmoji account={{ accountId: iconSeed, emoji: account.emoji, emojiName: account.emojiName, emojiUrl: account.emojiUrl, profile: account.profile }} />}
     {name ?? <span className="a mono"><ShortAddr addr={account.address} /></span>}
+    <ContractGlyph show={account.isContract} />
   </>
   if (!account.subscanUrl) return <span className="addr-pill" title={account.address}>{body}</span>
   const site = explorerSiteName(account.subscanUrl)
