@@ -1966,6 +1966,21 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .combo-empty { color: var(--text-low); cursor: default; }
 .combo-empty:hover { background: transparent; }
 
+/* Recently used write-argument values: the combo popover, widened for long
+   addresses and with room for the per-row forget button. */
+/* The wrapper the suggestion popover anchors to must not shrink the field: the
+   shared `.input` reset drops `width`, so an input that used to stretch as a
+   `.field` flex child needs it back once it sits inside this wrapper. */
+.recent-field { width: 100%; }
+.recent-field > .input { width: 100%; }
+.recent-pop { min-width: 100%; max-width: min(520px, 90vw); }
+/* Upward when the list would otherwise cover the controls below it — the Write
+   button sits directly under the last argument. */
+.recent-pop.up { top: auto; bottom: calc(100% + 6px); }
+.recent-opt { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.recent-val { overflow: hidden; text-overflow: ellipsis; }
+.recent-forget { flex: none; }
+
 /* utility */
 .row { display: flex; align-items: center; gap: 10px; }
 .gap6 { gap: 6px; } .gap16 { gap: 16px; }
