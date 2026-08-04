@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { stackHeights, stackedColumnMax, niceAxisMax, fmtHdxTick } from '../src/components/HdxCharts'
+import { stackHeights, stackedColumnMax, niceAxisMax, fmtHdxTick, readableBarMax } from '../src/components/HdxCharts'
 
 describe('stackedColumnMax — high unlock clusters do not flatten the chart', () => {
   it('uses the largest value when the distribution has no separated high tail', () => {
@@ -44,6 +44,69 @@ describe('stackedColumnMax — caps a tall cluster so smaller bars stay visible'
     const axis = niceAxisMax(stackedColumnMax(totals))
     expect(axis).toBe(35)            // 35M top, 17.5M midpoint
     expect(10 / axis).toBeGreaterThan(0.28) // a 10M bar clears ~29% height
+  })
+})
+
+// The mirrored day-bar chart (HSM trades/arbitrage, HDX buys/sells, churn) sizes
+// itself with readableBarMax. Its job is to keep as many bars comparable as
+// possible; the unlock-schedule gap rule cannot, because a daily activity series
+// puts its widest ratio gap BELOW the bars that matter.
+describe('readableBarMax — daily activity keeps its loud days distinguishable', () => {
+  // Live 60-day HOLLAR HSM trades (2026-06-06 … 2026-08-04), non-zero values
+  // only: 15 mint days from 0.016 to 500k HOLLAR plus 15 burn days of 3–276.
+  const mints = [0.015773, 0.029803, 500000, 0.031464, 0.02741, 427.485, 4956.19, 5818.17, 11610.81, 7101.37, 30285.36, 9429.91, 46433.45, 13153.84, 90000]
+  const burns = [208.06, 157.69, 276.13, 155, 8.96, 164.33, 178.04, 3.4, 130.83, 60.89, 19.54, 18.09, 27.29, 22.93, 40.07]
+  const trades = [...mints, ...burns]
+  const frac = (v: number, cap: number) => Math.min(v, cap) / cap
+
+  it('clamps only the isolated spike, not the whole trading cluster', () => {
+    const cap = readableBarMax(trades)
+    expect(trades.filter(v => v > cap)).toEqual([500000]) // one break mark, not ten
+    // The gap rule capped at ~516, so every day from 4.9k up rendered identical.
+    expect(stackedColumnMax(trades)).toBeLessThan(600)
+    expect(cap).toBeGreaterThan(9e4)
+  })
+
+  it('spreads the mint days across the plot instead of saturating them', () => {
+    const cap = readableBarMax(trades)
+    expect(frac(90000, cap)).toBeGreaterThan(0.9)
+    expect(frac(46433.45, cap)).toBeCloseTo(0.49, 2)
+    expect(frac(13153.84, cap)).toBeCloseTo(0.14, 2)
+    expect(frac(4956.19, cap)).toBeGreaterThan(1 / 20) // smallest mint day still readable
+  })
+
+  it('picks the same cap for the phone window (last 30 bars) as for 60 days', () => {
+    // The reported bug: the phone view dropped the low-volume June prefix, which
+    // moved the widest gap and so gave the gap rule a completely different cap —
+    // mobile read fine while desktop saturated. A cap chosen by readability is
+    // stable under that window change.
+    const recent = [...mints.slice(6), ...burns.slice(12)]
+    expect(readableBarMax(recent)).toBeCloseTo(readableBarMax(trades), 6)
+    expect(stackedColumnMax(recent) / stackedColumnMax(trades)).toBeGreaterThan(100)
+  })
+
+  it('is insensitive to the exact readability threshold', () => {
+    for (const denom of [14, 16, 20, 32]) expect(readableBarMax(trades, 1 / denom)).toBeCloseTo(94500, 0)
+  })
+
+  it('scales to the true max when clamping would not buy any readable bar', () => {
+    expect(readableBarMax([10, 8, 6, 4, 2])).toBeCloseTo(10.5)
+    expect(readableBarMax([1, 1e9])).toBeCloseTo(1.05e9) // one dust bar is not worth clamping the max
+  })
+
+  it('clamps a lone outlier once the bulk gains from it', () => {
+    expect(readableBarMax([1, 1, 1, 1e9])).toBeCloseTo(1.05)
+  })
+
+  it('prefers the taller cap on a tie, so nothing clamps without a strict gain', () => {
+    // 3 tiny + 3 huge: capping low would make 3 readable and clamp 3 — a wash.
+    expect(readableBarMax([1, 1, 1, 1e6, 1e6, 1e6])).toBeCloseTo(1.05e6)
+  })
+
+  it('ignores zero and non-finite entries, and is safe when there is nothing to scale', () => {
+    expect(readableBarMax([0, 0, 5, NaN, Infinity, -3])).toBeCloseTo(5.25)
+    expect(readableBarMax([])).toBe(1)
+    expect(readableBarMax([0, 0, 0])).toBe(1)
   })
 })
 
