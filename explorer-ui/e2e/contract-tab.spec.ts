@@ -41,10 +41,16 @@ test.describe('desktop', () => {
     await expect(page).toHaveURL(/view=contract/)
     await expect(page.locator('.id-card', { hasText: 'Verification' })).toContainText('v0.8.10+commit.fc410830')
     await expect(page.locator('.id-card', { hasText: 'Verification' })).toContainText('✓ Verified')
-    // Source files: the list switches the viewer.
-    await expect(page.locator('.src-files button', { hasText: 'src/GhoToken.sol' })).toBeVisible()
+    // Source files: a tree beside the viewer, opened on the file declaring the
+    // verified contract rather than whichever dependency came first in the input.
+    const tree = page.locator('.src-split > .src-tree')
+    await expect(tree.locator('.src-tree-file.on')).toHaveText('GhoToken.sol')
+    await expect(page.locator('.src-pane-head .p')).toHaveText('src/GhoToken.sol')
     await expect(page.locator('.src-viewer').first()).toContainText('contract GhoToken')
-    await page.locator('.src-files button', { hasText: 'src/lib/Math.sol' }).click()
+    // Selecting another file switches the viewer; the tree collapses the shared
+    // directory chain, so the leaf is the basename.
+    await tree.locator('.src-tree-file', { hasText: 'Math.sol' }).click()
+    await expect(page.locator('.src-pane-head .p')).toHaveText('src/lib/Math.sol')
     await expect(page.locator('.src-viewer').first()).toContainText('library Math')
     // ABI (collapsible) and browser-fetched bytecode.
     await page.locator('.abi-details summary').click()
