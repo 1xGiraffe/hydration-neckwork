@@ -1,23 +1,28 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import Fastify from 'fastify'
+import { contractsRoutes } from '../src/routes/contracts.ts'
 
 // The contracts directory is served entirely from the in-memory registry; the
 // route's job is param hygiene: clamped offset/limit, a validated sort token,
-// and a stable {contracts, total} envelope.
-async function contractsResponse(url: string) {
-  vi.resetModules()
-  const getContracts = vi.fn((offset: number, limit: number, sort: string) => ({
+// and a stable {contracts, total} envelope. Hoisted mock rather than a
+// per-test resetModules/doMock cycle: re-importing the route graph per test
+// raced under load and handed a test the previous generation's module.
+const { getContracts } = vi.hoisted(() => ({ getContracts: vi.fn() }))
+vi.mock('../src/services/explorerService.ts', () => ({ getContracts }))
+
+beforeEach(() => {
+  getContracts.mockReset().mockImplementation((offset: number, limit: number, sort: string) => ({
     contracts: [{ address: '0x531a654d1696ed52e7275a8cede955e82620f99a' }],
     total: 1,
     echo: { offset, limit, sort },
   }))
-  vi.doMock('../src/services/explorerService.ts', () => ({ getContracts }))
-  const { default: Fastify } = await import('fastify')
-  const { contractsRoutes } = await import('../src/routes/contracts.ts')
+})
+
+async function contractsResponse(url: string) {
   const app = Fastify()
   await app.register(contractsRoutes)
   const response = await app.inject(url)
   await app.close()
-  vi.doUnmock('../src/services/explorerService.ts')
   return { response, getContracts }
 }
 
