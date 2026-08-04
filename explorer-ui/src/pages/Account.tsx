@@ -4,7 +4,7 @@ import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, Copy, ShortAddr, ProfilePageSkeleton, DetailTabs, moduleName, emojiName, TagIcon, AccountEmoji, UserTagPill, rowNav, EmptyRow } from '../components/ui'
-import { PortfolioChart, ProfileStats, MoneyMarketPositions, moneyMarketDebtUsd, profileTabs, ActiveDcaTable, LiquidityPositionsTable, ProxyMultisigSection } from '../components/AccountSections'
+import { PortfolioChart, ProfileStats, MoneyMarketPositions, moneyMarketDebtUsd, profileTabs, ActiveDcaTable, LiquidityPositionsTable, ProxyMultisigSection, ContractSection } from '../components/AccountSections'
 import { BalancesTreemap } from '../components/BalancesTreemap'
 import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
@@ -115,7 +115,14 @@ export function Account({ address }: { address: string }) {
                       ? <span style={{ fontSize: 18, fontStyle: 'italic', color: 'var(--amber)' }}>{data.profile.name}</span>
                       : data.identity?.display
                         ? <span style={{ fontSize: 18 }}>{data.identity.display}{data.identity.verified && <span className="id-verified" title="Verified identity" style={{ marginLeft: 5 }}>✓</span>}</span>
-                        : <span style={{ fontSize: 18 }}>{emojiName(data.emoji) ?? 'Account'}</span>}
+                        : data.contract?.verification?.name
+                          // A verified contract's name fills the name slot the way
+                          // an identity display name does (never the ✓ — that stays
+                          // exclusive to registrar-verified identities).
+                          ? <span style={{ fontSize: 18 }}>{data.contract.verification.name}</span>
+                          : <span style={{ fontSize: 18 }}>{emojiName(data.emoji) ?? 'Account'}</span>}
+                    {data.contract && <span className="badge" title="Deployed EVM smart contract — this address holds code" style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>contract</span>}
+                    {data.contract?.destroyed && <span className="badge" title="No code at this address anymore (selfdestructed or removed); history stays addressable" style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>destroyed</span>}
                     {data.proxy?.isPure && <span className="badge" title="Keyless pure-proxy account — controlled only through its proxies" style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>pure proxy</span>}
                     {data.multisig && <span className="badge" title={`Multisig account — any ${data.multisig.threshold} of ${data.multisig.signatories.length} signatories can act`} style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>{data.multisig.threshold}/{data.multisig.signatories.length} multisig</span>}</div>
                   {/* No EVM badge here: the 0x prefix already says it (and the
@@ -171,6 +178,8 @@ export function Account({ address }: { address: string }) {
                   </div>
                 )
               })()}
+
+              <ContractSection contract={data.contract} now={now} />
 
               <ProxyMultisigSection proxy={data.proxy} multisig={data.multisig} memberships={data.multisigMemberships} now={now} />
 

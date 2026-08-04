@@ -572,17 +572,27 @@ export function tagMemberSuffix(tag: Pick<ResolvedTag, 'memberCount'>, address: 
 // which is what a reader wants from a feed row — but a surface whose whole subject is
 // one specific account (close accounts) would lose that account by navigating to its
 // group, so it keeps the label and redirects the link.
-export function UserTagPill({ tag, address, noCopy, noMemberSuffix, to }: { tag: ResolvedTag; address: string; noCopy?: boolean; noMemberSuffix?: boolean; to?: string }) {
+export function UserTagPill({ tag, address, noCopy, noMemberSuffix, to, isContract }: { tag: ResolvedTag; address: string; noCopy?: boolean; noMemberSuffix?: boolean; to?: string; isContract?: boolean }) {
   return (
     <span className="addr-wrap">
       <Link to={to ?? paths.tag(tag.id)} className="addr-pill" title={to ? `${tag.name} — open account ${address}` : tag.kind === 'user' ? `${tag.name} — your list “${tag.listName}”` : 'Tagged group — open combined view'}>
         <TagIcon icon={tag.icon} title={tag.name} />
         <span className="tag" style={tag.color ? { color: tag.color } : undefined}>{tag.name}</span>
         {!noMemberSuffix && tagMemberSuffix(tag, address)}
+        <ContractGlyph show={isContract} />
       </Link>
       {!noCopy && <Copy text={address} />}
     </span>
   )
+}
+
+// Subtle "this address holds code" marker inside account pills — its own child
+// so it survives every label branch (tag pill, module, profile, identity, bare
+// address). Non-interactive by design: the global button reset would swallow a
+// nested control, and the account page's Contract card is one click away anyway.
+export function ContractGlyph({ show }: { show?: boolean }) {
+  if (!show) return null
+  return <span className="contract-glyph mono" title="Smart contract">{'</>'}</span>
 }
 
 export function AddrPill({ account, full, noCopy, noTag, tagToAccount }: { account: AccountRef; full?: boolean; noCopy?: boolean; noTag?: boolean; tagToAccount?: boolean }) {
@@ -594,13 +604,14 @@ export function AddrPill({ account, full, noCopy, noTag, tagToAccount }: { accou
   // `tagToAccount` keeps the name but points the link at the account — for a surface
   // that is about this one account rather than the company it keeps.
   const resolved = noTag ? null : resolveTag(account)
-  if (resolved) return <UserTagPill tag={resolved} address={account.address} noCopy={noCopy} to={tagToAccount ? accountHref(account) : undefined} />
+  if (resolved) return <UserTagPill tag={resolved} address={account.address} noCopy={noCopy} to={tagToAccount ? accountHref(account) : undefined} isContract={account.isContract} />
   const mod = moduleName(account.accountId)
   if (mod) {
     return (
       <span className="addr-wrap">
         <Link to={accountHref(account)} className="addr-pill" title={account.address}>
           <span className="emoji">⚙️</span><span className="a">{mod}</span>
+          <ContractGlyph show={account.isContract} />
         </Link>
       </span>
     )
@@ -614,6 +625,7 @@ export function AddrPill({ account, full, noCopy, noTag, tagToAccount }: { accou
         <Link to={accountHref(account)} className="addr-pill" title={account.address}>
           <AccountEmoji account={account} title="profile" />
           <span className="tag profile-name">{account.profile.name}</span>
+          <ContractGlyph show={account.isContract} />
         </Link>
         {!noCopy && <Copy text={account.address} />}
       </span>
@@ -629,6 +641,7 @@ export function AddrPill({ account, full, noCopy, noTag, tagToAccount }: { accou
           <AccountEmoji account={account} title="identity" />
           <span className="tag">{identity.display}</span>
           {identity.verified && <span className="id-verified" title="Verified identity">✓</span>}
+          <ContractGlyph show={account.isContract} />
         </Link>
         {!noCopy && <Copy text={account.address} />}
       </span>
@@ -639,6 +652,7 @@ export function AddrPill({ account, full, noCopy, noTag, tagToAccount }: { accou
       <Link to={accountHref(account)} className="addr-pill" title={account.address}>
         <AccountEmoji account={account} title="identity" />
         <span className="a mono"><ShortAddr addr={account.address} full={full} /></span>
+        <ContractGlyph show={account.isContract} />
       </Link>
       {!noCopy && <Copy text={account.address} />}
     </span>

@@ -3,6 +3,7 @@ import type {
   ExplorerStats, IndexerStatus, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   TransferRow, EventRow, TradeRow, ActivityRow, MoneyMarketResponse, AssetDetail, HoldersResponse,
   AddressDetail, AddressBalance, CloseAccountsResponse, TagDetail, SearchResult, AssetListItem, TopAccountRow, AccountsPage, DailyPoint, Tag,
+  ContractInfo, ContractsPage,
   AccountRef, AssetRef, AssetLiquidationDay, AssetLiquidationTotal, HdxDashboard, HdxCohort, HdxLockType, HdxUnlockBucket, HdxDailyFlow, HdxMover,
   HollarDashboard, HollarCollateral, HollarArbDay, HollarTradeDay, HollarPool, HollarPegPoint,
   TradeDetail as TradeDetailResponse,
@@ -425,6 +426,44 @@ function buildAccounts(offset: number, limit: number, sort: string): AccountsPag
   }
   const sorted = sortAccountRows(rows, sort)
   return { rows: sorted.slice(offset, offset + limit), total: sorted.length }
+}
+
+// The contracts directory: a top-level create (verified name absent — Phase 1
+// ships everything unverified), a factory child ("first seen", destroyed) and
+// an unknown-provenance contract, so every creation label is exercised.
+function buildContracts(offset: number, limit: number, sort: string): ContractsPage {
+  const evmRef = (h160: string): AccountRef => ({ accountId: '0x45544800' + h160.slice(2) + '0000000000000000', address: h160, emoji: '🪙', tag: null, identity: null, profile: null, isContract: true })
+  const rows: ContractInfo[] = [
+    {
+      address: '0x531a654d1696ed52e7275a8cede955e82620f99a', account: evmRef('0x531a654d1696ed52e7275a8cede955e82620f99a'),
+      verified: null, verification: null,
+      creation: { method: 'create', deployer: A.fox, deployerWhitelisted: true, blockHeight: TIP - 2_000_000, extrinsicIndex: 2, timestamp: tsAt(TIP - 2_000_000), txHash: '0x' + 'ab'.repeat(32) },
+      codeHash: '0x' + 'cd'.repeat(32), codeSize: 10719, destroyed: false,
+      txCount: 41230, logCount: 96780, firstActivity: tsAt(TIP - 2_000_000), lastActivity: tsAt(TIP - 40),
+    },
+    {
+      address: '0x02639ec01313c8775fae74f2dad1118c8a8a86da', account: evmRef('0x02639ec01313c8775fae74f2dad1118c8a8a86da'),
+      verified: null, verification: null,
+      creation: { method: 'factory', factory: evmRef('0x1b02e051683b5cfac5929c25e84adb26ecf87b38'), attribution: 'first-log', blockHeight: TIP - 900_000, timestamp: tsAt(TIP - 900_000), txHash: '0x' + 'ef'.repeat(32) },
+      codeHash: '0x' + '12'.repeat(32), codeSize: 13783, destroyed: true,
+      txCount: 340, logCount: 2210, firstActivity: tsAt(TIP - 900_000), lastActivity: tsAt(TIP - 120_000),
+    },
+    {
+      address: '0x9a1c2b3d4e5f60718293a4b5c6d7e8f901234567', account: evmRef('0x9a1c2b3d4e5f60718293a4b5c6d7e8f901234567'),
+      verified: null, verification: null,
+      creation: { method: 'unknown' },
+      codeHash: '0x' + '34'.repeat(32), codeSize: 2333, destroyed: false,
+      txCount: 12, logCount: 0, firstActivity: tsAt(TIP - 300_000), lastActivity: tsAt(TIP - 300_000),
+    },
+  ]
+  const created = (c: ContractInfo) => c.creation.blockHeight ?? -1
+  const sorted = [...rows].sort((a, b) => {
+    if (sort === 'txs') return b.txCount - a.txCount || (a.address < b.address ? -1 : 1)
+    if (sort === 'logs') return b.logCount - a.logCount || (a.address < b.address ? -1 : 1)
+    if (sort === 'active') return (b.lastActivity ?? '').localeCompare(a.lastActivity ?? '') || (a.address < b.address ? -1 : 1)
+    return created(b) - created(a) || (a.address < b.address ? -1 : 1)
+  })
+  return { contracts: sorted.slice(offset, offset + limit), total: sorted.length }
 }
 
 // The accounts directory, folded under a VIEWER's own tags too — the mock's
@@ -872,6 +911,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   { re: /^\/explorer\/hdx$/, fn: () => buildHdx() },
   { re: /^\/explorer\/hollar$/, fn: () => buildHollar() },
   { re: /^\/explorer\/accounts$/, fn: (_m, qs) => buildAccounts(Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 50), qs.get('sort') ?? 'value') },
+  { re: /^\/explorer\/contracts$/, fn: (_m, qs) => buildContracts(Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 50), qs.get('sort') ?? 'created') },
   { re: /^\/explorer\/daily\/(\w+)(?:\?.*)?$/, fn: (m) => Array.from({ length: 45 }, (_, i) => { const d = new Date(MOCK_NOW_MS - (44 - i) * 86400000); const r = rng(i + m[1].length * 7); return { date: d.toISOString().slice(0, 10), value: Math.round((m[1] === 'events' ? 60000 : m[1] === 'extrinsics' ? 12000 : 4000) * (0.5 + r())) } as DailyPoint }) },
   { re: /^\/explorer\/accounts-daily$/, fn: () => Array.from({ length: 30 }, (_, i) => { const d = new Date(MOCK_NOW_MS - (29 - i) * 86400000); const r = rng(i * 31 + 5); return { date: d.toISOString().slice(0, 10), active: Math.round(6000 * (0.6 + r() * 0.8)), new: Math.round(350 * (0.4 + r())) } }) },
   // events is deliberately longer than MOCK_LIST_MAX_OFFSET can page, so the mock

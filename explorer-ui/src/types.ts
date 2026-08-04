@@ -38,6 +38,7 @@ export interface AccountRef {
   tag: TagRef | null
   identity?: AccountIdentity | null   // on-chain Identity.IdentityOf display + judgement status
   profile?: ProfileRef | null         // self-authored wallet-login profile, if the account has one
+  isContract?: boolean                // deployed EVM smart contract — pills wear the </> glyph
 }
 
 export interface ExplorerStats {
@@ -109,6 +110,42 @@ export interface TopAccountRow {
 export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'activity' | 'volume' | 'liquidation'
 export interface AccountsPage {
   rows: TopAccountRow[]
+  total: number
+}
+
+// A registry contract, as the /contracts directory and AddressDetail.contract
+// carry it. Creation is evidence-labelled: `create` came from a top-level
+// Ethereum.transact, `factory` from first-log attribution ("first seen", never
+// "created"), `unknown` states honest incompleteness. `verified`/`verification`
+// stay null until the verification service lands.
+export interface ContractCreation {
+  method: 'create' | 'factory' | 'unknown'
+  deployer?: AccountRef | null
+  deployerWhitelisted?: boolean       // advisory ContractDeployer whitelist (provenance only)
+  factory?: AccountRef
+  attribution?: 'first-log'
+  blockHeight?: number
+  extrinsicIndex?: number
+  timestamp?: string
+  txHash?: string
+}
+export interface ContractInfo {
+  address: string
+  account: AccountRef
+  verified: { status: string; name: string; matchType: string } | null
+  verification: { status: string; name?: string; compilerVersion?: string; matchType?: string } | null
+  creation: ContractCreation
+  codeHash: string
+  codeSize: number
+  destroyed: boolean
+  txCount: number
+  logCount: number
+  firstActivity: string | null
+  lastActivity: string | null
+}
+export type ContractSort = 'created' | 'active' | 'txs' | 'logs'
+export interface ContractsPage {
+  contracts: ContractInfo[]
   total: number
 }
 
@@ -360,6 +397,7 @@ export interface AddressDetail {
   proxy?: AccountProxyInfo | null
   multisig?: MultisigInfo | null
   multisigMemberships?: MultisigMembership[]
+  contract?: ContractInfo | null      // deployed EVM contract at this address
   portfolioSeries?: number[]
   portfolioDates?: string[]
   balanceHistory?: AssetBalanceHistory[]
@@ -533,6 +571,7 @@ export interface ActivityRow {
     tag?: TagRef | null
     identity?: { display: string; verified: boolean } | null
     profile?: ProfileRef | null
+    isContract?: boolean
   }
   xcmDir?: 'in' | 'out'      // xcm: transfer direction relative to Hydration
   fromChain?: string         // xcm inbound: origin chain name

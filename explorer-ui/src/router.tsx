@@ -38,6 +38,7 @@ export type Route =
   | { name: 'legacy'; to: string } // pre-consolidation URL, redirected to /activity
   | { name: 'accounts' }
   | { name: 'account'; address: string }
+  | { name: 'contracts' }
   | { name: 'tags' }
   | { name: 'tags-hydration' }
   | { name: 'tag'; tagId: string }
@@ -93,6 +94,9 @@ export function parseRoute(loc: string): Route {
     case 'accounts': return { name: 'accounts' }
     case 'account':
       return parts[1] ? { name: 'account', address: parts[1] } : { name: 'accounts' }
+    // A contract's detail page IS the account page (/account/0x…) — /contracts
+    // is only the directory.
+    case 'contracts': return { name: 'contracts' }
     // /tags/hydration is the system-tag directory's own page; any other
     // /tags/* segment (there are none in product today) falls back to the hub.
     case 'tags': return parts[1] === 'hydration' ? { name: 'tags-hydration' } : { name: 'tags' }
@@ -253,6 +257,7 @@ export const paths = {
   eventAt: (h: number, i: number) => `/event/${h}-${i}`,
   accounts: () => '/accounts',
   account: (addr: string) => `/account/${encodeURIComponent(addr)}`,
+  contracts: () => '/contracts',
   tags: () => '/tags',
   tagsHydration: () => '/tags/hydration',
   tag: (tagId: string) => `/tag/${encodeURIComponent(tagId)}`,
