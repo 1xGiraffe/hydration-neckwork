@@ -15,6 +15,7 @@ import { accountIcon, emojisMatchingName, emojiNameFor, parseSuffixEmojiQuery } 
 import { encodeAddress, base58Encode } from '@polkadot/util-crypto'
 import { hexToU8a } from '@polkadot/util'
 import { proxyInfoFor, multisigCompositionFor, multisigMembershipsFor, pendingMultisigOps, threshold1OpsFor, type ProxyRelation, type PendingMultisigOp } from './proxyMultisigService.ts'
+import { isContractAccount, contractByH160, allContracts, contractsPage, type ContractRegistryEntry, type ContractCreation, type ContractSort } from './contractRegistryService.ts'
 import {
   resolveProxyInner, buildMultisigOperations, enrichMultisigOperations, proxyChildAddress,
   type ExtrinsicCallRow, type ProxyInnerInfo, type MultisigLifecycleEvent, type MultisigCallInfo,
@@ -42,6 +43,7 @@ export interface AccountRef {
   tag: { id: string; name: string; color: string; icon: string; memberCount?: number } | null
   identity?: AccountIdentity | null   // on-chain Identity.IdentityOf display + judgement status
   profile: { name: string; avatarVersion: number } | null   // self-set display name/avatar, if any
+  isContract?: boolean                // deployed EVM smart contract (contract registry)
 }
 
 function asset(assetIdStr: string | number): AssetRef {
@@ -242,6 +244,8 @@ export function accountRef(accountId: string): AccountRef {
     tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon, memberCount: t.memberCount } : null,
     identity: id,
     profile: profileForAccount(resolved),
+    // One Set lookup — every list surface gets the contract marker for free.
+    ...(isContractAccount(resolved) ? { isContract: true } : {}),
   }
 }
 
@@ -2694,6 +2698,73 @@ export interface MultisigDisplay {
 }
 export interface MultisigMembershipDisplay { account: AccountRef; threshold: number; signatories: number }
 
+// A contract's registry row, resolved to displayable refs. Serves both the
+// /explorer/contracts directory and AddressDetail.contract. `verified`/
+// `verification` are null until the verification service (Phase 2) lands —
+// explicit incompleteness, shaped for the fields it will fill.
+export interface ContractCreationDisplay {
+  method: 'create' | 'factory' | 'unknown'
+  deployer?: AccountRef | null
+  deployerWhitelisted?: boolean       // in the advisory ContractDeployer whitelist (provenance only)
+  factory?: AccountRef
+  attribution?: 'first-log'
+  blockHeight?: number
+  extrinsicIndex?: number
+  timestamp?: string
+  txHash?: string
+}
+export interface ContractDisplay {
+  address: string
+  account: AccountRef
+  verified: { status: string; name: string; matchType: string } | null
+  verification: Record<string, unknown> | null
+  creation: ContractCreationDisplay
+  codeHash: string
+  codeSize: number
+  destroyed: boolean
+  txCount: number
+  logCount: number
+  firstActivity: string | null
+  lastActivity: string | null
+}
+
+function contractDisplay(e: ContractRegistryEntry): ContractDisplay {
+  const c: ContractCreation = e.creation
+  const creation: ContractCreationDisplay =
+    c.method === 'create' ? {
+      method: 'create',
+      deployer: c.deployer ? accountRef(c.deployer) : null,
+      deployerWhitelisted: c.deployerWhitelisted,
+      blockHeight: c.blockHeight, extrinsicIndex: c.extrinsicIndex, timestamp: c.timestamp, txHash: c.txHash,
+    } : c.method === 'factory' ? {
+      method: 'factory',
+      factory: accountRef(evmAccountIdFromAddress(c.factory) ?? c.factory),
+      attribution: 'first-log',
+      blockHeight: c.blockHeight, timestamp: c.timestamp, txHash: c.txHash,
+    } : { method: 'unknown' }
+  return {
+    address: e.address,
+    account: accountRef(evmAccountIdFromAddress(e.address) ?? e.address),
+    verified: null,
+    verification: null,
+    creation,
+    codeHash: e.codeHash,
+    codeSize: e.codeSize,
+    destroyed: e.destroyed,
+    txCount: e.txCount,
+    logCount: e.logCount,
+    firstActivity: e.firstActivity,
+    lastActivity: e.lastActivity,
+  }
+}
+
+// Directory page — served entirely from the in-memory registry, no ClickHouse
+// on the request path.
+export function getContracts(offset: number, limit: number, sort: ContractSort): { contracts: ContractDisplay[]; total: number } {
+  const { rows, total } = contractsPage(offset, limit, sort)
+  return { contracts: rows.map(contractDisplay), total }
+}
+
 export interface AddressDetail {
   input: string
   kind: string
@@ -2722,6 +2793,7 @@ export interface AddressDetail {
   proxy: AccountProxyDisplay | null
   multisig: MultisigDisplay | null
   multisigMemberships: MultisigMembershipDisplay[]
+  contract?: ContractDisplay | null   // deployed EVM contract at this address (registry lookup)
 }
 
 const MAX_UINT256 = '115792089237316195423570985008687907853269984665640564039457584007913129639935'
@@ -2991,6 +3063,9 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     } : null
     const multisigMemberships: MultisigMembershipDisplay[] = multisigMembershipsFor([...related])
       .map(m => ({ account: accountRef(m.accountId), threshold: m.threshold, signatories: m.signatories }))
+    // Deployed contract at this address — O(1) registry lookup, hover card never shows it.
+    const contractEntry = summary || !norm.evmAddress ? null : contractByH160(norm.evmAddress)
+    const contract = contractEntry ? contractDisplay(contractEntry) : null
     // Omnipool LP = bare positions + farmed deposits. Bare and farmed are disjoint by
     // NFT ownership (a farmed position's NFT is held by the LM pallet), so no de-dup
     // is needed. Each is valued at its withdraw value. Staking is intentionally NOT
@@ -3031,6 +3106,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
       proxy,
       multisig,
       multisigMemberships,
+      contract,
       portfolioSeries: [],
       portfolioDates: [],
       balanceHistory: [],
@@ -7529,6 +7605,7 @@ function externalAccountRef(raw: unknown, meta: XcmNetworkMeta | undefined): Act
       tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon, memberCount: t.memberCount } : null,
       identity: id ? { display: id.display, verified: id.verified } : null,
       profile: profileForAccount(resolved),
+      ...(isContractAccount(resolved) ? { isContract: true } : {}),
     }
   }
   if (h.length === 42) {
@@ -7542,6 +7619,7 @@ function externalAccountRef(raw: unknown, meta: XcmNetworkMeta | undefined): Act
       tag: t ? { id: t.tagId, name: t.name, color: t.color, icon: t.icon, memberCount: t.memberCount } : null,
       identity: id ? { display: id.display, verified: id.verified } : null,
       profile: profileForAccount(resolved),
+      ...(isContractAccount(resolved) ? { isContract: true } : {}),
     }
   }
   return undefined
@@ -19510,7 +19588,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
 }
 
 // Total row counts per list (for pagination page-counts / Last button).
-export async function getListCounts(): Promise<{ blocks: number; extrinsics: number; events: number; transfers: number }> {
+export async function getListCounts(): Promise<{ blocks: number; extrinsics: number; events: number; transfers: number; contracts: number }> {
   return cached('explorer:counts', 60000, async () => {
     const q = async (sql: string) => Number((await (await client.query({ query: sql, format: 'JSONEachRow' })).json<{ c: string }>())[0]?.c ?? 0)
     const [blocks, extrinsics, events, transfers] = await Promise.all([
@@ -19522,7 +19600,7 @@ export async function getListCounts(): Promise<{ blocks: number; extrinsics: num
       q(`SELECT toString(count()) AS c FROM price_data.raw_events`),
       q(`SELECT toString(count()) AS c FROM price_data.raw_events WHERE event_name IN ('Balances.Transfer','Tokens.Transfer','Currencies.Transferred')`),
     ])
-    return { blocks, extrinsics, events, transfers }
+    return { blocks, extrinsics, events, transfers, contracts: allContracts().length }
   })
 }
 

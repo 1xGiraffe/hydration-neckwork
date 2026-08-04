@@ -316,16 +316,21 @@ export function economicModuleAccounts(tags: Tag[]): string[] {
 // no code change needed.
 export const MM_TAG = { tagId: 'money-market', name: 'Lend & Borrow', color: '#6aa5f8', note: 'Money-market reserve contracts (aTokens, debt tokens, pools) — inflows are lends/repayments, outflows are withdrawals/borrows', icon: '🏦' }
 
-// Membership rows for the MM tag: every distinct contract H160 from the reserve
-// map, in the truncated-account form its on-chain activity is indexed under.
-export function mmTagMemberRows(reserves: { atoken: string; vdebt: string; pool_proxy: string }[], existing: Set<string>): Record<string, unknown>[] {
+// Every distinct money-market contract H160 from the reserve map, in the
+// truncated-account form its on-chain activity is indexed under.
+export function mmContractAccountIds(reserves: { atoken: string; vdebt: string; pool_proxy: string }[]): Set<string> {
   const ids = new Set<string>()
   for (const r of reserves) {
     for (const h160 of [r.atoken, r.vdebt, r.pool_proxy]) {
       if (/^0x[0-9a-fA-F]{40}$/.test(h160)) ids.add('0x45544800' + h160.slice(2).toLowerCase() + '0000000000000000')
     }
   }
-  return [...ids].filter(id => !existing.has(id)).map(account_id => ({
+  return ids
+}
+
+// Membership rows for the MM tag: every distinct contract H160 from the reserve map.
+export function mmTagMemberRows(reserves: { atoken: string; vdebt: string; pool_proxy: string }[], existing: Set<string>): Record<string, unknown>[] {
+  return [...mmContractAccountIds(reserves)].filter(id => !existing.has(id)).map(account_id => ({
     label_id: MM_TAG.tagId, label_name: MM_TAG.name, color: MM_TAG.color, note: MM_TAG.note, icon: MM_TAG.icon, account_id, deleted: 0,
   }))
 }

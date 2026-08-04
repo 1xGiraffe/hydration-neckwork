@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { modlAccountId, stableswapPoolAccount, economicModuleAccounts, truncatedH160Index, SYSTEM_TAG_IDS, DEFAULT_TAGS, INCENTIVES_REWARD_POT, SOVEREIGN_PREFIXES } from '../src/services/tagService.ts'
+import { modlAccountId, stableswapPoolAccount, economicModuleAccounts, truncatedH160Index, mmContractAccountIds, initTagService, loadTags, retireUnknownTagMemberships, SYSTEM_TAG_IDS, DEFAULT_TAGS, INCENTIVES_REWARD_POT, SOVEREIGN_PREFIXES } from '../src/services/tagService.ts'
 import type { Tag } from '../src/services/tagService.ts'
+import type { ClickHouseClient } from '../src/db/client.ts'
 
 describe('system-account derivations', () => {
   it('builds modl pallet account ids ("modl" + 8-byte pallet id, zero-padded)', () => {
@@ -80,5 +81,51 @@ describe('truncatedH160Index — resolve EVM-side aliases of tagged native accou
       tag('broken', ['not-an-account']),
     ])
     expect(idx.size).toBe(0)
+  })
+})
+
+// The money-market reserve set in the truncated-account form its on-chain
+// activity is indexed under — the MM tag's membership source.
+describe('mmContractAccountIds', () => {
+  const trunc = (h160: string) => '0x45544800' + h160.slice(2).toLowerCase() + '0000000000000000'
+  const ATOKEN = '0x02639ec01313c8775fae74f2dad1118c8a8a86da'
+  const VDEBT = '0x00000000000000000000000000000000000dead0'
+
+  it('derives the truncated-account set from the reserve map and ignores malformed addresses', () => {
+    const ids = mmContractAccountIds([{ atoken: ATOKEN, vdebt: VDEBT, pool_proxy: 'not-an-address' }])
+    expect(ids).toEqual(new Set([trunc(ATOKEN), trunc(VDEBT)]))
+  })
+})
+
+// Contracts have no tag of their own: the `</>` pill glyph marks them wherever
+// an account appears, and /contracts is their directory. A membership row is
+// only ever inserted, so dropping the tag from code has to actively tombstone
+// what an earlier deployment seeded — that is what the retire pass is for.
+describe('retireUnknownTagMemberships', () => {
+  it('tombstones a tag no code definition claims, such as the retired contracts tag', async () => {
+    const commands: { query: string; query_params?: Record<string, unknown> }[] = []
+    let tagRows: Record<string, unknown>[] = [{
+      label_id: 'contracts', label_name: 'Contract', color: '', note: '', icon: '📜',
+      account_id: '0x45544800531a654d1696ed52e7275a8cede955e82620f99a0000000000000000',
+    }]
+    const client = {
+      query: async () => ({ json: async () => tagRows }),
+      command: async (cmd: { query: string; query_params?: Record<string, unknown> }) => {
+        commands.push(cmd)
+        tagRows = []   // the mutation is synchronous; the reload that follows sees none
+      },
+      insert: async () => {},
+    } as unknown as ClickHouseClient
+
+    initTagService(client)
+    await loadTags()
+    await retireUnknownTagMemberships()
+    expect(commands).toHaveLength(1)
+    expect(commands[0].query).toContain('deleted = 1')
+    expect(commands[0].query_params).toMatchObject({ tagIds: ['contracts'] })
+
+    // Idempotent: nothing left to retire on the next start.
+    await retireUnknownTagMemberships()
+    expect(commands).toHaveLength(1)
   })
 })
