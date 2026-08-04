@@ -19164,8 +19164,22 @@ async function persistTagDetailSnapshot(tagId: string, membershipKey: string, de
 // getAccountHistoryShared uses for the (much longer-lived) portfolio-history cache
 // it shares with the account page; system tags pass the same bare `tag:<id>` scope
 // they always have, so their history entries keep landing on the same cache rows.
+// A snapshot payload was serialized with whatever presentation was current when it
+// was computed, and its key is (tag_id, membership_key) — so editing only a tag's
+// name, colour, icon or note leaves the key alone and the stale text keeps being
+// served until membership happens to change. Presentation is canonical in code and
+// display-only (everything else in the payload derives from the member set), so
+// stamp the current values over the cached ones rather than discard a snapshot
+// that is otherwise still valid. Without this, reconcileTagPresentation reaches
+// the table, the in-memory record and every SQL aggregate — but not this page.
+export function withTagPresentation<T extends TagPresentation>(detail: T, presentation: TagPresentation): T {
+  return { ...detail, ...presentation }
+}
+
+export interface TagPresentation { tagId: string; name: string; color: string; icon: string; note: string }
+
 async function buildTagDetailForMembers(
-  presentation: { tagId: string; name: string; color: string; icon: string; note: string },
+  presentation: TagPresentation,
   members: string[],
   opts: {
     summary?: boolean
@@ -19181,7 +19195,7 @@ async function buildTagDetailForMembers(
   return cached(opts.cacheKey, opts.ttlMs ?? 30_000, async () => {
     if (opts.snapshot && !summary && !refresh) {
       const snapshot = await loadTagDetailSnapshot(opts.snapshot.tagId, opts.snapshot.membershipKey).catch(() => null)
-      if (snapshot) return snapshot
+      if (snapshot) return withTagPresentation(snapshot, presentation)
     }
     const list = sqlAccountList(members)
     const [balanceRows, lockBreakdowns, prices] = await Promise.all([
