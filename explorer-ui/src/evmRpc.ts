@@ -2,7 +2,7 @@
 // contract tab (bytecode display, Read-tab eth_call). Deliberately no client
 // SDK: the codec lives in abiCodec.ts (viem, lazy) and the transport is this
 // file — nothing else in the bundle needs a provider abstraction.
-const EVM_RPC_URL = (import.meta.env.VITE_EVM_RPC_URL as string | undefined) || 'https://hydration-rpc.neckwork.net'
+export const EVM_RPC_URL = (import.meta.env.VITE_EVM_RPC_URL as string | undefined) || 'https://hydration-rpc.neckwork.net'
 
 // A failed call. `data` carries the node's revert payload (when it supplies
 // one) so the caller can decode Error(string) into a message.
@@ -41,4 +41,29 @@ export function ethCall(to: string, data: string): Promise<string> {
 
 export function ethGetCode(address: string): Promise<string> {
   return rpc<string>('eth_getCode', [address, 'latest'])
+}
+
+// --- write-tab helpers -------------------------------------------------------
+
+// A tx object as eth_estimateGas / eth_call take it. `value` is hex wei.
+export interface EthTx { from?: string; to: string; data: string; value?: string }
+
+export interface EthReceipt { status: string; blockNumber: string; transactionHash: string }
+
+// Replay a full tx (with from/value) at a specific block — recovers the revert
+// data of a mined-but-failed write from its receipt's block.
+export function ethCallAt(tx: EthTx, block: string): Promise<string> {
+  return rpc<string>('eth_call', [tx, block])
+}
+
+export async function ethEstimateGas(tx: EthTx): Promise<bigint> {
+  return BigInt(await rpc<string>('eth_estimateGas', [tx]))
+}
+
+export async function ethGasPrice(): Promise<bigint> {
+  return BigInt(await rpc<string>('eth_gasPrice', []))
+}
+
+export function ethGetTransactionReceipt(txHash: string): Promise<EthReceipt | null> {
+  return rpc<EthReceipt | null>('eth_getTransactionReceipt', [txHash])
 }
