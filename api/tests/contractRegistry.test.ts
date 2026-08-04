@@ -5,7 +5,7 @@ import {
   contractByH160, isContractAccount, allContracts,
   type ContractRegistryInputs, type ContractRegistryEntry,
 } from '../src/services/contractRegistryService.ts'
-import { accountRef, getContracts } from '../src/services/explorerService.ts'
+import { accountRef, getContracts, sortContractsByMetric, sortContractsByName, type ContractMetrics } from '../src/services/explorerService.ts'
 import { initContractVerificationService, loadVerifiedContracts } from '../src/services/contractVerificationService.ts'
 import type { ClickHouseClient } from '../src/db/client.ts'
 
@@ -183,6 +183,44 @@ describe('pageContracts', () => {
     expect(rows.map(r => r.address)).toEqual([b.address])
     expect(total).toBe(3)
   })
+
+  // value/volume/activity rank on the display layer's metrics map, so the
+  // registry's own comparator never sees them; it must still return a stable
+  // page rather than an undefined-comparator crash.
+  it('falls back to the created ordering for the metric sorts it does not own', () => {
+    expect(pageContracts([a, b, c], 0, 10, 'value').rows.map(r => r.address))
+      .toEqual(pageContracts([a, b, c], 0, 10, 'created').rows.map(r => r.address))
+  })
+})
+
+// The account-shaped sorts rank the WHOLE registry on the metrics map. A metric
+// nobody established must not drop the contract from the directory — the row set
+// is always the registry itself.
+describe('sortContractsByMetric', () => {
+  const row = (address: string) => ({ address })
+  const A = '0x' + 'aa'.repeat(20), B = '0x' + 'bb'.repeat(20), C = '0x' + 'cc'.repeat(20)
+  const metrics: Record<string, ContractMetrics> = {
+    [A]: { portfolioUsd: 5, activityCount: 2 },
+    [B]: { portfolioUsd: 90, tradingVolumeUsd: 7 },
+    [C]: {},
+  }
+  const metricsFor = (address: string) => metrics[address] ?? {}
+
+  it('ranks descending on the metric and keeps unmeasured contracts last, address-asc', () => {
+    expect(sortContractsByMetric([row(A), row(B), row(C)], metricsFor, 'value').map(r => r.address)).toEqual([B, A, C])
+    expect(sortContractsByMetric([row(C), row(A), row(B)], metricsFor, 'volume').map(r => r.address)).toEqual([B, A, C])
+    expect(sortContractsByMetric([row(C), row(B), row(A)], metricsFor, 'activity').map(r => r.address)).toEqual([A, B, C])
+  })
+
+  it('never drops a row, so every page stays deterministic across sorts', () => {
+    for (const sort of ['value', 'volume', 'activity'] as const) {
+      expect(sortContractsByMetric([row(A), row(B), row(C)], metricsFor, sort)).toHaveLength(3)
+    }
+  })
+
+  it('leaves a registry-owned sort untouched for the registry comparator', () => {
+    expect(sortContractsByMetric([row(C), row(A)], metricsFor, 'txs').map(r => r.address)).toEqual([C, A])
+  })
 })
 
 // End-to-end load: the five bounded queries land in the accessors, and the
@@ -298,5 +336,31 @@ describe('loadContractRegistry + accessors', () => {
     // Reset the module map so test order never leaks a verified corpus.
     initContractVerificationService(verifiedClient({ abis: [], counts: [] }))
     await loadVerifiedContracts()
+  })
+})
+// The Contract column's sort: the only ascending one here, because a name is read
+// alphabetically while every metric is read largest-first.
+describe('sortContractsByName', () => {
+  const row = (address: string) => ({ address })
+  const A = '0x' + 'aa'.repeat(20), B = '0x' + 'bb'.repeat(20)
+  const C = '0x' + 'cc'.repeat(20), D = '0x' + 'dd'.repeat(20)
+  const names: Record<string, string> = { [A]: 'NttManager', [B]: 'AToken', [C]: 'aaveOracle' }
+  const nameFor = (address: string) => names[address] ?? ''
+
+  it('puts named contracts first, alphabetically, case-insensitively', () => {
+    expect(sortContractsByName([row(A), row(B), row(C), row(D)], nameFor).map(r => r.address))
+      .toEqual([C, B, A, D])   // aaveOracle, AToken, NttManager, then the unnamed one
+  })
+
+  it('leaves unnamed contracts in address order rather than ranking them on the empty string', () => {
+    const unnamed = [row(D), row(A), row('0x' + '11'.repeat(20))]
+    expect(sortContractsByName(unnamed, () => '').map(r => r.address))
+      .toEqual(['0x' + '11'.repeat(20), A, D])
+  })
+
+  it('breaks a shared name by address, so paging stays deterministic', () => {
+    // Sixteen addresses on this chain are called ERC1967Proxy.
+    const same = [row(D), row(B), row(A)]
+    expect(sortContractsByName(same, () => 'ERC1967Proxy').map(r => r.address)).toEqual([A, B, D])
   })
 })

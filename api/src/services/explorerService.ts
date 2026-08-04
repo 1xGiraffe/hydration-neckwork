@@ -46,6 +46,7 @@ export interface AccountRef {
   identity?: AccountIdentity | null   // on-chain Identity.IdentityOf display + judgement status
   profile: { name: string; avatarVersion: number } | null   // self-set display name/avatar, if any
   isContract?: boolean                // deployed EVM smart contract (contract registry)
+  contractName?: string               // verified source's contract name — the pill's label, like an identity display
 }
 
 function asset(assetIdStr: string | number): AssetRef {
@@ -229,6 +230,16 @@ export function resolveDisplayAccountId(accountId: string): string {
   return reservedH160AccountId(evm.slice(2)) ?? evmBindings.get(evm) ?? taggedAccountByH160(evm) ?? accountId
 }
 
+// A verified contract's own name for an account id, as an optional-field spread.
+// evmFromAccountId returns null for anything but a genuinely ETH-prefixed
+// account, so no substrate account can borrow a contract's name; the map is
+// in-memory, so this is one lookup on every pill.
+function contractNameOf(accountId: string): { contractName?: string } {
+  const evm = evmFromAccountId(accountId)
+  const name = evm ? verifiedContractInfo(evm)?.name : undefined
+  return name ? { contractName: name } : {}
+}
+
 export function accountRef(accountId: string): AccountRef {
   const resolved = resolveDisplayAccountId(accountId)
   const t = tagForAccount(resolved)
@@ -248,6 +259,9 @@ export function accountRef(accountId: string): AccountRef {
     profile: profileForAccount(resolved),
     // One Set lookup — every list surface gets the contract marker for free.
     ...(isContractAccount(resolved) ? { isContract: true } : {}),
+    // A verified contract's own name, so a pill can label it the way it labels
+    // an identity instead of showing bare hex.
+    ...contractNameOf(resolved),
   }
 }
 
@@ -2726,7 +2740,20 @@ export interface ContractCreationDisplay {
   timestamp?: string
   txHash?: string
 }
-export interface ContractDisplay {
+// What a contract holds and does as an ACCOUNT, on the same models the accounts
+// directory reads — a contract is an account, so the two directories must not
+// describe one differently. Absent fields mean "not established", never zero:
+// before the first background pass, and for a contract outside the activity
+// leaderboard's pool, the cell stays empty rather than inventing a number.
+export interface ContractMetrics {
+  portfolioUsd?: number
+  topAssets?: { asset: AssetRef; valueUsd: number }[]
+  sparkline?: number[]
+  tradingVolumeUsd?: number
+  activityCount?: number
+  activityCountComplete?: boolean
+}
+export interface ContractDisplay extends ContractMetrics {
   address: string
   account: AccountRef
   verified: { status: string; name: string; matchType: string } | null
@@ -2757,6 +2784,7 @@ function contractDisplay(e: ContractRegistryEntry): ContractDisplay {
     } : { method: 'unknown' }
   const verification = verificationDisplay(verifiedContractInfo(e.address), e.codeHash)
   return {
+    ...contractMetrics(e.address),
     address: e.address,
     account: accountRef(evmAccountIdFromAddress(e.address) ?? e.address),
     verified: verification.status === 'verified'
@@ -2774,11 +2802,60 @@ function contractDisplay(e: ContractRegistryEntry): ContractDisplay {
   }
 }
 
-// Directory page — served entirely from the in-memory registry, no ClickHouse
-// on the request path.
+// Directory page — served entirely from the in-memory registry plus the
+// in-memory metrics map, no ClickHouse on the request path. The account-shaped
+// sorts (value/volume/activity) rank on the metrics map, so they live here
+// rather than in the registry's own comparator.
 export function getContracts(offset: number, limit: number, sort: ContractSort): { contracts: ContractDisplay[]; total: number } {
-  const { rows, total } = contractsPage(offset, limit, sort)
-  return { contracts: rows.map(contractDisplay), total }
+  const sorted = sort === 'name'
+    ? sortContractsByName(allContracts(), a => verifiedContractInfo(a)?.name ?? '')
+    : CONTRACT_METRIC_SORTS[sort]
+      ? sortContractsByMetric(allContracts(), contractMetrics, sort)
+      : null
+  if (!sorted) {
+    const { rows, total } = contractsPage(offset, limit, sort)
+    return { contracts: rows.map(contractDisplay), total }
+  }
+  return { contracts: sorted.slice(offset, offset + limit).map(contractDisplay), total: sorted.length }
+}
+
+// The only ASCENDING sort here: a name is read alphabetically, unlike every
+// metric, which is read largest-first. Named contracts lead — an unnamed one has
+// nothing to sort by, so it follows in address order rather than being ranked
+// against the empty string.
+export function sortContractsByName<T extends { address: string }>(
+  list: T[],
+  nameFor: (address: string) => string,
+): T[] {
+  return [...list].sort((a, b) => {
+    const na = nameFor(a.address), nb = nameFor(b.address)
+    if (!na !== !nb) return na ? -1 : 1
+    const byName = na.localeCompare(nb, 'en', { sensitivity: 'base' })
+    if (byName !== 0) return byName
+    return a.address < b.address ? -1 : 1
+  })
+}
+const CONTRACT_METRIC_SORTS: Partial<Record<ContractSort, (m: ContractMetrics) => number>> = {
+  value: m => m.portfolioUsd ?? 0,
+  volume: m => m.tradingVolumeUsd ?? 0,
+  activity: m => m.activityCount ?? 0,
+}
+// Descending on the metric, address ascending to break ties — the same
+// deterministic rule pageContracts uses, so paging never repeats or drops a row.
+// A contract with no established metric sorts as 0, i.e. last, rather than being
+// dropped from the directory: the row set is the registry, always.
+export function sortContractsByMetric<T extends { address: string }>(
+  list: T[],
+  metricsFor: (address: string) => ContractMetrics,
+  sort: ContractSort,
+): T[] {
+  const metric = CONTRACT_METRIC_SORTS[sort]
+  if (!metric) return [...list]
+  return [...list].sort((a, b) => {
+    const va = metric(metricsFor(a.address)), vb = metric(metricsFor(b.address))
+    if (va !== vb) return vb - va
+    return a.address < b.address ? -1 : 1
+  })
 }
 
 // --- contract tab activity (§9) ----------------------------------------------
@@ -7797,6 +7874,7 @@ function externalAccountRef(raw: unknown, meta: XcmNetworkMeta | undefined): Act
       identity: id ? { display: id.display, verified: id.verified } : null,
       profile: profileForAccount(resolved),
       ...(isContractAccount(resolved) ? { isContract: true } : {}),
+      ...contractNameOf(resolved),
     }
   }
   if (h.length === 42) {
@@ -7811,6 +7889,7 @@ function externalAccountRef(raw: unknown, meta: XcmNetworkMeta | undefined): Act
       identity: id ? { display: id.display, verified: id.verified } : null,
       profile: profileForAccount(resolved),
       ...(isContractAccount(resolved) ? { isContract: true } : {}),
+      ...contractNameOf(resolved),
     }
   }
   return undefined
@@ -19209,6 +19288,177 @@ async function enrichAccountSparklines(
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, rows.length) }, worker))
 }
 
+// ---- contracts directory: account-shaped metrics -----------------------------
+//
+// A contract IS an account, so /contracts shows what it holds and does on the
+// SAME models /accounts does — reusing the directory's own enrichment passes
+// (enrichAccountRows, enrichTopAssets) over synthetic single-account rows rather
+// than a second implementation that could disagree with them. The whole registry
+// is ~375 rows, small enough for one background pass to cover every row, so the
+// value/volume/activity sorts rank the full directory instead of a page.
+//
+// Bounded on purpose:
+//  - the wallet/ERC-20 value roll-up, the weekly sparkline states, trading volume
+//    and liquidation volume are ONE batched query each over the whole id set
+//    (every source below is account-first, so the id list is a key-prefix read);
+//  - the per-row top-holdings pass (a query pair each) runs only for contracts
+//    that actually hold something — measured live, that is ~20 of 375, so the
+//    fan-out is a rounding error rather than 750 queries;
+//  - activity counts come from the accounts directory's published leaderboard,
+//    already in memory, so the column costs no query at all. A contract outside
+//    that pool shows no number — the same honest rule /accounts applies.
+let contractMetricsByAddress = new Map<string, ContractMetrics>()
+let contractMetricsTimer: ReturnType<typeof setInterval> | null = null
+let contractMetricsInflight: Promise<void> | null = null
+
+export function contractMetrics(address: string): ContractMetrics {
+  return contractMetricsByAddress.get(address.toLowerCase()) ?? {}
+}
+
+async function refreshContractMetricsUncached(): Promise<void> {
+  const contracts = allContracts()
+  if (!contracts.length) return
+  // Registry address → the ETH-prefixed AccountId32 its on-chain activity is
+  // indexed under; every account-keyed source below reads that form.
+  const accountFor = new Map<string, string>()
+  for (const c of contracts) {
+    const id = evmAccountIdFromAddress(c.address)
+    if (id && ACCOUNT_RE.test(id)) accountFor.set(c.address, id)
+  }
+  if (!accountFor.size) return
+  const addresses = [...accountFor.keys()]
+  const accounts = [...accountFor.values()]
+
+  const prices = await ensureAccountValuePrices()
+  const { idsSql, unitsSql } = priceTransformArrays(prices)
+  // Current wallet value per contract: the Tokens/Balances pot and the ERC-20
+  // pot, valued at current prices — the `grouped.usd` half of the accounts
+  // directory's own value, restricted to these ids. Money-market collateral and
+  // debt are folded in below from the same published snapshot the directory reads.
+  const valueRes = await client.query({
+    query: `
+      SELECT account_id, toFloat64(sum(usd)) AS usd
+      FROM (
+        SELECT account_id, toFloat64(toUInt256OrZero(argMaxMerge(total_state))) * transform(asset_id, ${idsSql}, ${unitsSql}, 0.) AS usd
+        FROM price_data.account_asset_latest_balances
+        WHERE account_id IN ({accounts:Array(String)})
+        GROUP BY account_id, asset_id
+        UNION ALL
+        SELECT account_id, toFloat64(toUInt256OrZero(argMax(total, updated_at))) * transform(asset_id, ${idsSql}, ${unitsSql}, 0.) AS usd
+        FROM price_data.erc20_wallet_balances
+        WHERE account_id IN ({accounts:Array(String)})
+        GROUP BY account_id, asset_id
+      )
+      GROUP BY account_id`,
+    query_params: { accounts }, format: 'JSONEachRow',
+  })
+  const walletUsd = new Map<string, number>()
+  for (const r of await valueRes.json<{ account_id: string; usd: number }>()) walletUsd.set(r.account_id, r.usd)
+
+  // Money-market contribution, from the published per-account generation the
+  // accounts directory ranks on and with its exact per-pool value expression:
+  // counted-market collateral, and all debt regardless of market. Staking-backed
+  // collateral is excluded from the value (it is already-counted locked HDX) but
+  // its debt still nets out, mirroring mm_grouped.value_delta.
+  const mmRes = moneyMarketAccountValuesReady ? await client.query({
+    query: `
+      SELECT account_id,
+             sum(if(pool_address IN (${countedMmPoolsSql()}), col, 0.)) / 1e8 AS collateral,
+             sum(debt) / 1e8 AS debt
+      FROM (
+        SELECT account_id, lower(pool_address) AS pool_address,
+          greatest(max(toFloat64(total_collateral_base)),
+            sumIf(toFloat64(supplied) * transform(toString(asset_id), ${idsSql}, ${unitsSql}, 0.) * 1e8, reserve_present = 1)) AS col,
+          greatest(max(toFloat64(total_debt_base)),
+            sumIf(toFloat64(debt) * transform(toString(asset_id), ${idsSql}, ${unitsSql}, 0.) * 1e8, reserve_present = 1)) AS debt
+        FROM price_data.money_market_account_value_snapshots
+        WHERE account_id IN ({accounts:Array(String)})
+          AND snapshot_id = (SELECT argMax(snapshot_id, computed_at)
+                               FROM price_data.money_market_account_value_snapshot_state
+                              WHERE snapshot_key = 'current')
+        GROUP BY account_id, pool_address
+        HAVING col > 0 OR debt > 0
+      )
+      GROUP BY account_id`,
+    query_params: { accounts }, format: 'JSONEachRow',
+  }).catch(() => null) : null
+  const mmDelta = new Map<string, { collateral: number; debt: number }>()
+  if (mmRes) {
+    for (const r of await mmRes.json<{ account_id: string; collateral: number; debt: number }>()) {
+      mmDelta.set(r.account_id, { collateral: r.collateral, debt: r.debt })
+    }
+  }
+
+  // Synthetic directory rows: one untagged account each, so rowMemberAccounts
+  // resolves to exactly that contract and the shared passes behave as they do
+  // for any single-account row on /accounts.
+  const raw = addresses.map(address => {
+    const account = accountFor.get(address)!
+    const mm = mmDelta.get(account)
+    const usd = walletUsd.get(account) ?? 0
+    return { label_id: '', sample: account, usd, usd_total: usd + (mm ? mm.collateral - mm.debt : 0) }
+  })
+  const rows: TopAccountRow[] = raw.map(r => ({ account: null, portfolioUsd: r.usd_total, lastBlock: 0 } as unknown as TopAccountRow))
+  // Flag the money-market rows before enrichTopAssets: it reconstructs supplied
+  // collateral only for rows that declare a position, exactly as the directory does.
+  raw.forEach((r, i) => {
+    const mm = mmDelta.get(r.sample)
+    if (!mm) return
+    if (mm.collateral > 0) rows[i].suppliedUsd = mm.collateral
+    if (mm.debt > 0) rows[i].borrowedUsd = mm.debt
+  })
+
+  // The sparkline/volume pass batches every query across the whole set; the
+  // top-holdings pass is per row, so give it only the rows that hold something.
+  const holding = raw.map((_, i) => i).filter(i => raw[i].usd_total !== 0 || rows[i].suppliedUsd != null || rows[i].borrowedUsd != null)
+  await Promise.all([
+    enrichAccountRows(raw, rows).catch(err => console.warn('[contracts] metrics history failed', err)),
+    enrichTopAssets(holding.map(i => raw[i]), holding.map(i => rows[i]), prices)
+      .catch(err => console.warn('[contracts] metrics holdings failed', err)),
+  ])
+
+  const leaderboard = await ensureActivityLeaderboard()
+  const activityByGkey = new Map(leaderboard?.entries.map(e => [e.gkey, e]) ?? [])
+  const next = new Map<string, ContractMetrics>()
+  addresses.forEach((address, i) => {
+    const account = raw[i].sample
+    const metrics: ContractMetrics = {}
+    if (raw[i].usd_total !== 0) metrics.portfolioUsd = +raw[i].usd_total.toFixed(2)
+    if (rows[i].topAssets?.length) metrics.topAssets = rows[i].topAssets
+    // A series that is flat zero across the whole year says nothing a dash does
+    // not; drop it so the column reads as "nothing held" rather than a floor line.
+    const spark = rows[i].sparkline
+    if (spark && spark.some(v => v !== 0)) metrics.sparkline = spark
+    if (rows[i].tradingVolumeUsd) metrics.tradingVolumeUsd = rows[i].tradingVolumeUsd
+    const activity = activityByGkey.get(account)
+    if (activity) {
+      metrics.activityCount = activity.total
+      metrics.activityCountComplete = activity.complete
+    }
+    next.set(address.toLowerCase(), metrics)
+  })
+  contractMetricsByAddress = next
+}
+
+function refreshContractMetrics(): Promise<void> {
+  if (contractMetricsInflight) return contractMetricsInflight
+  const request = refreshContractMetricsUncached().finally(() => {
+    if (contractMetricsInflight === request) contractMetricsInflight = null
+  })
+  contractMetricsInflight = request
+  return request
+}
+
+// ClickHouse-only, so it runs on its own timer rather than the node-full
+// refresh lane (see backgroundRefresh.ts). Five minutes matches the registry's
+// own reload, so a newly detected contract picks up metrics on the next pass.
+export function startContractMetricsRefresh(): void {
+  if (contractMetricsTimer) return
+  void refreshContractMetrics().catch(() => {})
+  contractMetricsTimer = setInterval(() => { void refreshContractMetrics().catch(() => {}) }, 5 * 60_000)
+  contractMetricsTimer.unref()
+}
+
 // tag detail — combined portfolio of all members
 export interface TagDetail {
   tagId: string
@@ -20053,6 +20303,7 @@ export function stopExplorerBackgroundTasks(): void {
   if (tagDetailsPrewarmTimer) clearInterval(tagDetailsPrewarmTimer)
   if (omnipoolAccountClaimsRefreshTimer) clearInterval(omnipoolAccountClaimsRefreshTimer)
   if (moneyMarketAccountValuesRefreshTimer) clearInterval(moneyMarketAccountValuesRefreshTimer)
+  if (contractMetricsTimer) clearInterval(contractMetricsTimer)
   evmBindingsRefreshTimer = null
   accountSuffixRefreshTimer = null
   accountsPrewarmTimer = null
@@ -20061,6 +20312,7 @@ export function stopExplorerBackgroundTasks(): void {
   tagDetailsPrewarmTimer = null
   omnipoolAccountClaimsRefreshTimer = null
   moneyMarketAccountValuesRefreshTimer = null
+  contractMetricsTimer = null
 }
 
 function accountsBySuffix(suffix: string): string[] {
