@@ -1,3 +1,4 @@
+import { noAutofill } from './ui'
 import { useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 
@@ -80,11 +81,11 @@ export function ListFormDialog({ open, onOpenChange, title, hint, initial, submi
 
             <div className="field">
               <label htmlFor="list-name-input">Name</label>
-              <input id="list-name-input" value={name} maxLength={64} onChange={e => setName(e.target.value)} disabled={pending} />
+              <input {...noAutofill} id="list-name-input" value={name} maxLength={64} onChange={e => setName(e.target.value)} disabled={pending} />
             </div>
             <div className="field">
               <label htmlFor="list-note-input">Note</label>
-              <input id="list-note-input" value={note} maxLength={280} placeholder="Optional" onChange={e => setNote(e.target.value)} disabled={pending} />
+              <input {...noAutofill} id="list-note-input" value={note} maxLength={280} placeholder="Optional" onChange={e => setNote(e.target.value)} disabled={pending} />
             </div>
             <div className="field">
               <label id="list-visibility-label">Visibility</label>

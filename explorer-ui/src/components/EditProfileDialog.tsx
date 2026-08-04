@@ -3,7 +3,7 @@ import type { ChangeEvent } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import { userApi } from '../api/explorer'
 import { useUserMutation } from '../hooks/useUser'
-import { AccountEmoji } from './ui'
+import { AccountEmoji, noAutofill } from './ui'
 import type { ProfileRef } from '../types'
 
 // Square-crop + resize any picked image down to a 128×128 avatar before it ever
@@ -131,7 +131,7 @@ export function EditProfileDialog({ open, onOpenChange, account, profile }: {
                 {preview
                   ? <span className="acct-avatar" style={{ padding: 0, overflow: 'hidden' }}><img src={preview} alt="" className="acct-avatar-img" /></span>
                   : <AccountEmoji account={{ ...account, profile }} className="acct-avatar" imgClass="acct-avatar-img" />}
-                <input ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={e => void onFileChange(e)} disabled={busy} />
+                <input {...noAutofill} ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={e => void onFileChange(e)} disabled={busy} />
                 <div className="row gap6">
                   <button type="button" className="btn sm" onClick={() => fileRef.current?.click()} disabled={busy}>{hasAvatar ? 'Replace' : 'Upload'}</button>
                   {hasAvatar && <button type="button" className="btn sm" onClick={() => void removePicture()} disabled={busy}>Remove</button>}
@@ -141,7 +141,7 @@ export function EditProfileDialog({ open, onOpenChange, account, profile }: {
 
             <div className="field">
               <label htmlFor="profile-name-input">Display name</label>
-              <input id="profile-name-input" value={name} maxLength={48} placeholder="Not set" onChange={e => setName(e.target.value)} disabled={busy} />
+              <input {...noAutofill} id="profile-name-input" value={name} maxLength={48} placeholder="Not set" onChange={e => setName(e.target.value)} disabled={busy} />
             </div>
           </div>
           <div className="dialog-foot">
