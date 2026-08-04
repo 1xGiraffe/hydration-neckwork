@@ -534,10 +534,14 @@ export function TagIcon({ icon, title, className = 'emoji id' }: { icon: string;
 }
 
 export function TagGroupPill({ tag }: { tag: { tagId: string; name: string; color: string; icon: string; memberCount: number } }) {
+  // The member count is a SIBLING of the name, not nested in it: a pill in a
+  // tight cell truncates its name span (see the .addr-pill ellipsis rules), and
+  // the count — like the ·xyz member suffix — must outlive that truncation.
   return (
     <Link to={paths.tag(tag.tagId)} className="addr-pill" title="Tagged group — open combined view">
       <TagIcon icon={tag.icon} title={tag.name} />
-      <span className="tag" style={{ color: tag.color }}>{tag.name}{tag.memberCount > 1 ? <span className="muted"> ·{tag.memberCount}</span> : null}</span>
+      <span className="tag" style={{ color: tag.color }}>{tag.name}</span>
+      {tag.memberCount > 1 ? <span className="tag-member-suffix mono">·{tag.memberCount}</span> : null}
     </Link>
   )
 }

@@ -156,6 +156,12 @@ export function useHolders(assetId: number | null, offset: number, limit: number
     enabled: assetId != null && enabled, refetchInterval: offset === 0 ? ri : false, staleTime: 20_000, placeholderData: keepPreviousData,
   })
 }
+// The asset page's DCAs tab — fetched only while the tab is open, polled at the
+// detail cadence so "next trade" plans stay current.
+export function useAssetDcas(assetId: number | null, enabled = true) {
+  const ri = useInterval(DETAIL_POLL_MS)
+  return useQuery({ queryKey: ['asset-dcas', assetId], queryFn: ({ signal }) => api.assetDcas(assetId as number, signal), enabled: assetId != null && enabled, refetchInterval: enabled ? ri : false, staleTime: 6000 })
+}
 export function useAssetActivity(assetId: number | null, type = 'all', offset = 0, action?: string, enabled = true, from?: string, to?: string, min?: string) {
   const ri = useInterval()
   const key = ['asset-activity', assetId, type, offset, action, from, to, min]

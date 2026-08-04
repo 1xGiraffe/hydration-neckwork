@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- shared account-section components + their count helper */
-import { F, AssetIcon, AssetAmount, AreaChart, ChartCardSkeleton, healthFactorDisplay, AddrPill, MomentLink, ProgressRing, rowNav, Dash } from './ui'
+import { F, AssetIcon, AssetAmount, AreaChart, ChartCardSkeleton, healthFactorDisplay, AddrPill, MomentLink, ProgressRing, rowNav, Dash, EmptyRow } from './ui'
 import type { ChartMarker, DetailTab } from './ui'
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
@@ -369,22 +369,138 @@ export function MoneyMarketPositions({ markets, defisimAddress }: { markets: Mon
   )
 }
 
+// What a section of orders adds up to, in the units its columns already speak.
+// Every figure folds only what a row displays: the per-day rate is each order's
+// per-trade value at its own cadence, the budget is each row's dollar figure
+// (funding balance for open-ended), and "left" scales a budget by the raw
+// remaining/total ratio — an unknown remainder counts as fully left rather than
+// silently spent. Rows with no price stay out of the sums instead of anchoring
+// them at $0; `pricedOrders` says how many rows the money figures actually fold.
+//
+// Rates are NEXT-24H realistic, not instantaneous — the same cap the /hdx
+// dashboard applies: each order contributes at most the trades it can still pay
+// for (dcaRunway), so a 30-second whale minutes from exhausting its budget
+// cannot inflate the daily figure by orders of magnitude.
+export interface DcaAggregates {
+  orders: number
+  pricedOrders: number
+  perDayUsd: number        // ≈ combined spend/buy rate, capped by what each order can still fund
+  tradesPerDay: number     // combined execution rate (all orders, priced or not), same cap
+  budgetUsd: number        // Σ budget (open-ended: funding balance) in dollars
+  leftUsd: number          // Σ still to spend, same basis
+  trades: number           // Σ executions done
+  nextBlock: number | null // the soonest planned execution across the orders
+}
+export function dcaAggregates(dcas: ActiveDca[], blockSec?: number): DcaAggregates {
+  const agg: DcaAggregates = { orders: dcas.length, pricedOrders: 0, perDayUsd: 0, tradesPerDay: 0, budgetUsd: 0, leftUsd: 0, trades: 0, nextBlock: null }
+  for (const d of dcas) {
+    const cadence = dcaCadence(d.periodSeconds, d.period, blockSec)
+    if (cadence.seconds > 0) {
+      const runway = dcaRunway({
+        direction: d.direction, amountPer: d.amountPerTrade, totalAmount: d.totalAmount,
+        filledAmount: d.filledAmount, executionsDone: d.executionsDone,
+        periodSeconds: cadence.seconds, fundingBalance: d.fundingBalance,
+      })
+      // No runway (a Buy that has never executed, an unreadable owner) leaves
+      // the order uncapped — the rate is ≈ either way.
+      const perDay = Math.min(86400 / cadence.seconds, runway?.trades ?? Infinity)
+      agg.tradesPerDay += perDay
+      if (d.valueUsd != null) agg.perDayUsd += d.valueUsd * perDay
+    }
+    const openEnded = d.totalAmount === '0'
+    const budget = openEnded ? d.fundingUsd : d.budgetUsd
+    if (budget != null) {
+      agg.pricedOrders += 1
+      agg.budgetUsd += budget
+      // An open-ended order's visible dollar figure IS what is left; a budgeted
+      // one keeps the fraction its raw remainder says. The ratio is display-only,
+      // so Number() precision is the same class as the dollar values themselves.
+      const total = Number(d.totalAmount)
+      const ratio = openEnded ? 1
+        : d.remainingAmount != null && total > 0 ? Math.min(1, Math.max(0, Number(d.remainingAmount) / total)) : 1
+      agg.leftUsd += budget * ratio
+    }
+    agg.trades += d.executionsDone
+    if (d.nextExecutionBlock != null) agg.nextBlock = agg.nextBlock == null ? d.nextExecutionBlock : Math.min(agg.nextBlock, d.nextExecutionBlock)
+  }
+  return agg
+}
+
+// The aggregate first row of an asset's DCA section: the orders below it summed
+// into the same columns — combined rate under Per trade, total money under
+// Budget, overall share spent under Filled, the section's own pulse under Every
+// and Next trade. Everything here is approximate by construction (measured
+// cadences, current prices, projected open-ended budgets), so the money and
+// share figures carry the ≈/~ the per-row cells reserve for estimates.
+function DcaTotalsRow({ dcas, showOwner, headBlock, headTime, now, blockSec }: {
+  dcas: ActiveDca[]; showOwner?: boolean; headBlock: number; headTime?: string; now: number; blockSec?: number
+}) {
+  const agg = dcaAggregates(dcas, blockSec)
+  const spentShare = agg.budgetUsd > 0 ? Math.max(0, Math.min(100, (1 - agg.leftUsd / agg.budgetUsd) * 100)) : null
+  const unpriced = agg.orders - agg.pricedOrders
+  return (
+    <tr className="dca-total">
+      <td data-label="Orders" colSpan={showOwner ? 2 : 1}>
+        <span className="muted">All {F.int(agg.orders)} orders combined</span>
+        {unpriced > 0 && <span className="dca-sub mono muted" title="Orders in an asset with no price feed — in the counts and timing here, but not in the dollar figures">{F.int(unpriced)} unpriced</span>}
+      </td>
+      <td data-label="Rate" className="r">
+        {agg.perDayUsd > 0 ? <><span className="mono">≈ {F.usd(agg.perDayUsd)}</span><span className="muted">/day</span></> : <Dash />}
+        <span className="dca-sub mono muted">combined rate</span>
+      </td>
+      <td data-label="Budget" className="r">
+        {agg.pricedOrders > 0 ? <>
+          <span className="mono">≈ {F.usd(agg.budgetUsd)}</span>
+          <span className="dca-sub mono muted">{F.usd(agg.leftUsd)} left</span>
+        </> : <Dash />}
+      </td>
+      <td data-label="Filled" className="r">
+        {spentShare != null && <span className="mono">~{Math.round(spentShare)}%</span>}
+        <span className="dca-sub mono muted">{F.int(agg.trades)} {agg.trades === 1 ? 'trade' : 'trades'}</span>
+      </td>
+      <td data-label="Every" className="r mono" title="One trade lands roughly this often across all these orders together">
+        {agg.tradesPerDay > 0 ? <>~{fmtDuration(86400 / agg.tradesPerDay)}<span className="dca-sub mono muted">between trades</span></> : <Dash />}
+      </td>
+      <td data-label="Next trade" className="r mono">
+        <DcaNextExec nextBlock={agg.nextBlock} headBlock={headBlock} headTime={headTime} now={now} blockSec={blockSec} />
+        {agg.nextBlock != null && <span className="dca-sub mono muted">soonest</span>}
+      </td>
+      <td data-label="Runs out" className="r"><Dash /></td>
+    </tr>
+  )
+}
+
 // An active order answers, in this order: what it trades, how much per trade and
 // in total (with today's dollar value under each), how far along it is, how often
 // it fires, when that is next, and when the budget runs out. Cadence and timing
 // are durations; the blocks that produce them ride underneath in the quiet type.
-export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec }: { dcas: ActiveDca[]; headBlock: number; headTime?: string; now: number; blockSec?: number }) {
-  if (!dcas.length) return null
+//
+// The account and tag pages use the defaults; the asset page names each section
+// itself (`title`), shows whose order each row is (`showOwner` — the page isn't
+// the owner there), keeps an empty section visible (`emptyText`) so a reader
+// sent to "sells" can see there are none rather than wonder where the table
+// went, and leads with the aggregate of the whole section (`totals`).
+export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title, showOwner, emptyText, totals }: {
+  dcas: ActiveDca[]; headBlock: number; headTime?: string; now: number; blockSec?: number
+  title?: ReactNode; showOwner?: boolean; emptyText?: ReactNode; totals?: boolean
+}) {
+  if (!dcas.length && !emptyText) return null
   return (
     <>
-      <div className="sec-title">Active DCA orders · {dcas.length}</div>
-      <div className="panel"><table className="tbl dca-tbl">
+      <div className="sec-title">{title ?? <>Active DCA orders · {dcas.length}</>}</div>
+      {/* The owner variant is the asset page's, where a Buys and a Sells table
+          stack: fixed shared column widths keep the pair's columns on the same
+          vertical lines (see .dca-tbl-aligned). */}
+      <div className="panel"><table className={'tbl dca-tbl' + (showOwner ? ' dca-tbl-aligned' : '')}>
         <thead><tr>
+          {showOwner && <th>Owner</th>}
           <th>Selling → Buying</th><th className="r">Per trade</th><th className="r">Budget</th>
           <th className="r">Filled</th><th className="r">Every</th><th className="r">Next trade</th><th className="r">Runs out</th>
         </tr></thead>
         <tbody>
-          {dcas.map(d => {
+          {/* A sum of one order would just repeat the order. */}
+          {totals && dcas.length > 1 && <DcaTotalsRow dcas={dcas} showOwner={showOwner} headBlock={headBlock} headTime={headTime} now={now} blockSec={blockSec} />}
+          {!dcas.length ? <EmptyRow cols={showOwner ? 8 : 7}>{emptyText}</EmptyRow> : dcas.map(d => {
             // Buy orders specify the output per trade ("buy 80 USDC"); sell orders the input.
             const isBuy = d.direction === 'Buy'
             const perAsset = isBuy ? d.assetOut : d.assetIn
@@ -406,6 +522,7 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec }: { d
             })
             return (
               <tr key={d.id} {...rowNav(paths.dcaSchedule(d.id))} data-dca-schedule={d.id}>
+                {showOwner && <td data-label="Owner">{d.who ? <AddrPill account={d.who} noCopy /> : <Dash />}</td>}
                 <td data-label="Selling → Buying">
                   <span className="asset-flow">
                     <span className="trade-leg"><AssetIcon assetId={d.assetIn.assetId} iconAssetId={d.assetIn.iconAssetId} symbol={d.assetIn.symbol} size={20} parachainId={d.assetIn.parachainId} origin={d.assetIn.origin} /> <span className="mono">{d.assetIn.symbol}</span></span>
@@ -423,6 +540,7 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec }: { d
                     {d.fundingBalance != null && <span className="dca-sub mono muted" title="Owner’s balance of the sold asset — what the order still has to spend">
                       {F.amount(d.fundingBalance, d.assetIn.decimals)} {d.assetIn.symbol} left
                     </span>}
+                    {d.fundingUsd != null && <span className="dca-sub mono muted">{F.usd(d.fundingUsd)}</span>}
                   </> : <>
                     <AssetAmount asset={d.assetIn} raw={d.totalAmount} />
                     {d.budgetUsd != null && <span className="dca-sub mono muted">{F.usd(d.budgetUsd)}</span>}
