@@ -21,6 +21,11 @@ import type { ListSummaryRef } from '../types'
 // the Topbar) rather than a static one carried by every visitor's entry chunk.
 const EditProfileDialog = lazy(() => import('../components/EditProfileDialog').then(m => ({ default: m.EditProfileDialog })))
 
+// The contract tab (source viewer, verify form, read panel) is only relevant on
+// the few hundred contract accounts — a lazy chunk keeps it (and, one dynamic
+// import deeper, the viem ABI codec) out of every other account page load.
+const ContractTab = lazy(() => import('../components/ContractTab').then(m => ({ default: m.ContractTab })))
+
 // Hydration opens any route with the account preselected, so the app shows this
 // account's balances and positions. Deep-link to the swap page: it is the app's
 // landing route, and every other section stays one click away.
@@ -90,7 +95,7 @@ export function Account({ address }: { address: string }) {
           const explicitEvmBinding = data.aliases.find(alias => alias.relationship === 'explicit_binding' && alias.evmAddress)?.evmAddress
           // Debt counts from every market and is netted out of the portfolio Value.
           const debtUsd = moneyMarketDebtUsd(mmList)
-          const tabs = profileTabs(data.balances.length, mmList, data.activeDcas?.length ?? 0, data.liquidityPositions?.length ?? 0, activityTotal.data, votesTotal.data?.total ?? undefined)
+          const tabs = profileTabs(data.balances.length, mmList, data.activeDcas?.length ?? 0, data.liquidityPositions?.length ?? 0, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
@@ -199,6 +204,12 @@ export function Account({ address }: { address: string }) {
               {data.activeDcas && <ActiveDcaTable dcas={data.activeDcas} headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />}
               {data.liquidityPositions && <LiquidityPositionsTable positions={data.liquidityPositions} />}
               </>)}
+
+              {activeView === 'contract' && data.contract && (
+                <Suspense fallback={null}>
+                  <ContractTab address={data.evmAddress ?? data.contract.address} contract={data.contract} />
+                </Suspense>
+              )}
 
               {activeView === 'activity' && <ScopedActivity scope={{ kind: 'account', address }} />}
 

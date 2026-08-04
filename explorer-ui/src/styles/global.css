@@ -1678,6 +1678,22 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 /* portfolio sparkline */
 .spark { display: inline-block; vertical-align: middle; }
 
+/* ============ contract tab (code / read) ============ */
+.src-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
+.src-viewer { max-height: 480px; overflow: auto; }
+.src-copy { margin-top: 4px; display: flex; justify-content: flex-end; }
+.cli-block { padding: 10px 12px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.abi-details > summary { padding: 6px 0; }
+.upload-zone { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px dashed var(--separator); border-radius: 10px; }
+.upload-zone.drag { border-color: var(--sky); }
+/* the global button reset leaves fn-head unstyled — lay the row out explicitly */
+.fn-row { padding-bottom: 10px; }
+.fn-head { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; width: 100%; cursor: pointer; padding: 4px 0; }
+.fn-head .fn-caret { margin-left: auto; }
+.fn-body { border-top: 1px solid var(--separator); margin-top: 8px; padding-top: 8px; }
+.fn-nested { display: flex; flex-direction: column; gap: 2px; }
+.fn-nested-row { overflow-wrap: anywhere; }
+
 /* ============ DCA schedules ============
    A DCA is scheduled in blocks but read in time, so every surface here leads
    with the duration and keeps the block count in .dca-blocks behind it. */

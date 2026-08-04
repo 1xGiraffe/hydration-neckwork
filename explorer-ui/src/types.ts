@@ -116,8 +116,9 @@ export interface AccountsPage {
 // A registry contract, as the /contracts directory and AddressDetail.contract
 // carry it. Creation is evidence-labelled: `create` came from a top-level
 // Ethereum.transact, `factory` from first-log attribution ("first seen", never
-// "created"), `unknown` states honest incompleteness. `verified`/`verification`
-// stay null until the verification service lands.
+// "created"), `unknown` states honest incompleteness. `verified` is the compact
+// directory chip; `verification` the full card, with an explicit `unverified`
+// status rather than a null when no verification exists.
 export interface ContractCreation {
   method: 'create' | 'factory' | 'unknown'
   deployer?: AccountRef | null
@@ -129,11 +130,22 @@ export interface ContractCreation {
   timestamp?: string
   txHash?: string
 }
+export interface ContractVerification {
+  status: string           // 'verified' | 'unverified'
+  name?: string
+  compilerVersion?: string
+  matchType?: string       // 'exact_match' | 'match' | ''
+  source?: string          // 'verified' | 'import:blockscout' | 'manual'
+  verifiedAt?: string
+  abiPresent?: boolean
+  sourceFileCount?: number
+  supersededBytecode?: boolean   // code at the address changed after verification (CREATE2 redeploy)
+}
 export interface ContractInfo {
   address: string
   account: AccountRef
   verified: { status: string; name: string; matchType: string } | null
-  verification: { status: string; name?: string; compilerVersion?: string; matchType?: string } | null
+  verification: ContractVerification | null
   creation: ContractCreation
   codeHash: string
   codeSize: number
@@ -147,6 +159,33 @@ export type ContractSort = 'created' | 'active' | 'txs' | 'logs'
 export interface ContractsPage {
   contracts: ContractInfo[]
   total: number
+}
+// Lazy verified-contract artifacts (extrinsic-bytes pattern): fetched only when
+// the Code/Read sub-tabs actually need them.
+export interface ContractAbiPayload {
+  address: string
+  abi: unknown[]
+  source: string
+  contractName: string
+}
+export interface ContractSourcesPayload {
+  address: string
+  files: { path: string; content: string }[]
+  compiler: {
+    version: string
+    evmVersion: string
+    optimizerEnabled: boolean
+    optimizerRuns: number
+    constructorArguments: string
+    settings: unknown
+  }
+}
+// Sourcify V2 verification job, as the poll endpoint reports it.
+export interface VerificationJob {
+  isJobCompleted: boolean
+  verificationId: string
+  contract: { match: string | null; runtimeMatch: string | null; creationMatch: string | null }
+  error?: { customCode: string; message: string; errorId: string }
 }
 
 // trade detail
