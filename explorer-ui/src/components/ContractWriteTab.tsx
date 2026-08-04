@@ -5,9 +5,11 @@ import { useContractAbi } from '../hooks/useExplorerData'
 import { Link, paths, setQuery } from '../router'
 import { AddrPill, F, ShortAddr } from './ui'
 import { writeFunctions, functionSignature, type AbiFunctionItem } from '../abiShape'
-import { ethCallAt, ethEstimateGas, ethGasPrice, ethGetTransactionReceipt, EvmRpcError } from '../evmRpc'
-import { parseWethValue, runEvmWrite } from '../contractWrite'
+import { ethBlockTimestamp, ethCallAt, ethEstimateGas, ethGasPrice, EvmRpcError } from '../evmRpc'
+import { HYDRATION_CHAIN_ID, parseWethValue } from '../contractWrite'
 import type { WriteStage } from '../contractWrite'
+import { RecentValueInput } from './RecentValueInput'
+import { fieldKey, historyKey, recordFieldValues } from '../writeHistory'
 import { restoreContractWallet, setContractWallet, useContractWallet } from '../contractWallet'
 import type { ContractWalletConnection } from '../contractWallet'
 import { ContractWalletDialog } from './ContractWalletDialog'
@@ -103,6 +105,9 @@ function WriteFnRow({ index, fn, address, wallet }: { index: number; fn: AbiFunc
   const [estimated, setEstimated] = useState<{ key: string; value: Estimate } | null>(null)
   const [stage, setStage] = useState<WriteStage>({ phase: 'idle' })
   const payable = fn.stateMutability === 'payable'
+  // Field history is keyed by the signature, not this contract — the same call
+  // on another deployment offers the same values.
+  const signature = historyKey(fn)
   const busy = stage.phase === 'preparing' || stage.phase === 'wallet-pending' || stage.phase === 'submitted' || stage.phase === 'in-block'
   const argsComplete = fn.inputs.every((_, i) => (raws[i] ?? '').trim() !== '')
   const estimateKey = JSON.stringify([raws, valueRaw, wallet?.evmFrom ?? null])
@@ -139,6 +144,13 @@ function WriteFnRow({ index, fn, address, wallet }: { index: number; fn: AbiFunc
 
   async function write() {
     if (!wallet || estimate?.kind !== 'gas' || busy) return
+    // Remember the arguments now, before anything can fail: a write declined in
+    // the wallet, rejected by the pool or reverted on chain was still worth
+    // typing, and is the one most likely to be tried again.
+    recordFieldValues(signature, {
+      ...Object.fromEntries(fn.inputs.map((_input, i) => [fieldKey(i), raws[i] ?? ''])),
+      ...(payable ? { [fieldKey('value')]: valueRaw } : {}),
+    })
     const codec = await import('../abiCodec')
     let data: `0x${string}`
     let valueWei: bigint
@@ -161,11 +173,16 @@ function WriteFnRow({ index, fn, address, wallet }: { index: number; fn: AbiFunc
       return
     }
     if (!wallet.provider) return
-    await runEvmWrite({
+    // EVM wallets write through a CallPermit, never eth_sendTransaction: the
+    // wallet would gate sending on its WETH balance, while the chain charges the
+    // account's own fee currency. Signing typed data has no balance check.
+    const [permit, sub] = await Promise.all([import('../permitWrite'), import('../substrateWrite')])
+    await permit.runPermitWrite({
       provider: wallet.provider,
+      chainId: HYDRATION_CHAIN_ID,
       from: wallet.evmFrom, to: address, data, valueWei,
-      explorerOrigin: window.location.origin,
-      rpc: { getTransactionReceipt: ethGetTransactionReceipt, call: ethCallAt },
+      rpc: { estimateGas: ethEstimateGas, call: ethCallAt, blockTimestamp: ethBlockTimestamp },
+      submit: (args, onResult) => sub.submitPermitUnsigned(args, onResult),
       decodeRevert: codec.decodeRevert,
       onStage: setStage,
     })
@@ -184,30 +201,35 @@ function WriteFnRow({ index, fn, address, wallet }: { index: number; fn: AbiFunc
           {fn.inputs.map((input, i) => (
             <div className="field" key={`${input.name}-${i}`}>
               <label>{input.name || `arg ${i}`} <span className="muted">({input.type})</span></label>
-              <input
-                className="input"
+              <RecentValueInput
+                signature={signature}
+                field={fieldKey(i)}
                 placeholder={input.type}
                 value={raws[i] ?? ''}
-                onChange={e => setRaws(prev => prev.map((v, j) => (j === i ? e.target.value : v)))}
+                onChange={next => setRaws(prev => prev.map((v, j) => (j === i ? next : v)))}
               />
             </div>
           ))}
           {payable && (
             <div className="field">
               <label>value <span className="muted">(WETH, optional)</span></label>
-              <input className="input" placeholder="0" value={valueRaw} onChange={e => setValueRaw(e.target.value)} />
+              <RecentValueInput signature={signature} field={fieldKey('value')} placeholder="0" value={valueRaw} onChange={setValueRaw} />
             </div>
           )}
           {!wallet && <div className="fn-hint">Connect a wallet above to write.</div>}
-          {wallet && argsComplete && !estimate && <div className="fn-hint">Estimating gas…</div>}
-          {estimate?.kind === 'gas' && (
-            <div className="fn-hint">
-              Estimated gas: <span className="mono">{F.int(Number(estimate.gas))}</span>
-            </div>
-          )}
+          {wallet && argsComplete && !estimate && <div className="fn-hint">Checking the write…</div>}
+          {/* No cost figure, ever: the only number available before signing is
+              gas units, which is not a cost, and the fee cannot be quoted — it is
+              charged in the account's own fee currency by a conversion only the
+              runtime can do, and on the permit path the dry run that would price
+              it needs a signature that does not exist yet. Naming the asset
+              without an amount answered nothing either. The estimate still runs:
+              it gates Write and decodes reverts. */}
           {estimate?.kind === 'revert' && <div className="dialog-error">Write would revert: {estimate.reason}</div>}
           {estimate?.kind === 'invalid' && <div className="dialog-error">{estimate.error}</div>}
-          <div>
+          {/* .fn-actions is the anchor RecentValueInput measures against: its
+              suggestion popover flips upward rather than cover this button. */}
+          <div className="fn-actions">
             <button
               type="button"
               className="btn primary sm"
