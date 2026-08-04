@@ -396,6 +396,36 @@ export function useContracts(offset = 0, limit = 50, sort: ContractSort = 'creat
     placeholderData: keepPreviousData,
   })
 }
+// Lazy verified-contract artifacts: fetched only when the Code/Read sub-tabs
+// need them (extrinsic-bytes pattern), long-lived (they change only on
+// re-verification), and a 404 for an unverified contract stays cheap.
+export function useContractAbi(address: string | null | undefined, enabled = true) {
+  return useQuery({
+    queryKey: ['contract-abi', address],
+    queryFn: ({ signal }) => api.contractAbi(address!, signal),
+    staleTime: 3_600_000,
+    retry: false,
+    enabled: !!address && enabled,
+  })
+}
+export function useContractSources(address: string | null | undefined, enabled = true) {
+  return useQuery({
+    queryKey: ['contract-sources', address],
+    queryFn: ({ signal }) => api.contractSources(address!, signal),
+    staleTime: 3_600_000,
+    retry: false,
+    enabled: !!address && enabled,
+  })
+}
+export function useCompilerVersions(enabled = true) {
+  return useQuery({
+    queryKey: ['compiler-versions'],
+    queryFn: ({ signal }) => api.compilerVersions(signal),
+    staleTime: 3_600_000,
+    retry: false,
+    enabled,
+  })
+}
 export function useDaily(scope: string, params?: { type?: string; action?: string; token?: string }) {
   // keepPreviousData: switching the active tab/action changes the query key; without
   // it `data` drops to undefined mid-fetch and the chart collapses to a skeleton
