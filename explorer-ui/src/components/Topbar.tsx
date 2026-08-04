@@ -31,6 +31,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
       { to: paths.blocks(), label: 'Blocks', match: ['blocks', 'block'] },
       { to: paths.extrinsics(), label: 'Extrinsics', match: ['extrinsics', 'extrinsic'] },
       { to: paths.events(), label: 'Events', match: ['events', 'event'] },
+      { to: paths.contracts(), label: 'Contracts', match: ['contracts'] },
     ],
   },
 ]

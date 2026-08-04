@@ -5,7 +5,7 @@ import { useLive, LIVE_MS } from '../live'
 import { useHeldRows } from './useHeldRows'
 import { getSession } from '../session'
 import { tagMapStatus, hasUserTagMembers, useTagMapVersion } from '../userTags'
-import type { AccountSort } from '../types'
+import type { AccountSort, ContractSort } from '../types'
 
 // List/feed hooks honour the global Live toggle. When live, they poll on LIVE_MS;
 // when paused, no refetch. The API's single-flight cache keeps DB load O(1) in
@@ -380,6 +380,17 @@ export function useAccounts(offset = 0, limit = 50, sort: AccountSort = 'value')
         return api.accounts(offset, limit, sort, signal)
       }
     },
+    refetchInterval: useInterval(SLOW_POLL_MS),
+    staleTime: 20_000,
+    placeholderData: keepPreviousData,
+  })
+}
+// Ranked directory like useAccounts (fixed-size page, rows replaced in rank
+// order): slow poll, held previous page, no per-viewer variant.
+export function useContracts(offset = 0, limit = 50, sort: ContractSort = 'created') {
+  return useQuery({
+    queryKey: ['contracts', offset, limit, sort],
+    queryFn: ({ signal }) => api.contracts(offset, limit, sort, signal),
     refetchInterval: useInterval(SLOW_POLL_MS),
     staleTime: 20_000,
     placeholderData: keepPreviousData,

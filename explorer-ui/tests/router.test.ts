@@ -18,6 +18,7 @@ describe('parseRoute (clean-path routing, design routes)', () => {
     expect(p('/trades')).toEqual({ name: 'legacy', to: '/activity?tab=trade' })
     expect(p('/accounts')).toEqual({ name: 'accounts' })
     expect(p('/account/7P6Agw')).toEqual({ name: 'account', address: '7P6Agw' })
+    expect(p('/contracts')).toEqual({ name: 'contracts' })
     expect(p('/assets')).toEqual({ name: 'assets' })
     expect(p('/hdx')).toEqual({ name: 'hdx' })
     expect(p('/hollar')).toEqual({ name: 'hollar' })
@@ -28,6 +29,7 @@ describe('parseRoute (clean-path routing, design routes)', () => {
   it('path builders round-trip', () => {
     expect(p(paths.block(42))).toEqual({ name: 'block', height: 42 })
     expect(p(paths.hollar())).toEqual({ name: 'hollar' })
+    expect(p(paths.contracts())).toEqual({ name: 'contracts' })
     expect(p(paths.asset(5))).toEqual({ name: 'asset', assetId: 5 })
     expect(p(paths.extrinsicAt(100, 3))).toEqual({ name: 'extrinsic', id: '100-3' })
     expect(p(paths.tag('t1'))).toEqual({ name: 'tag', tagId: 't1' })
