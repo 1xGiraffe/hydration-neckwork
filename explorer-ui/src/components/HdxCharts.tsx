@@ -300,6 +300,45 @@ export function GigaLiquidationChart({ currentPrice, points, h = 190 }: { curren
 /* ============ mirrored bar chart (buys/sells, new/exited) ============ */
 export interface MirrorBar { key: string; up: number; down: number; tip: ReactNode }
 
+// Height cap for a daily/weekly activity series. A cap is a trade: every bar
+// above it clamps to full height (its magnitude is lost, break mark + tooltip
+// value), and every bar below it grows. So pick the cap that maximises
+// `readable − clamped`, where a bar is readable when it lands in
+// [cap · minVisibleRatio, cap]; ties go to the taller cap, so nothing is clamped
+// without a strict gain. Candidates are the values themselves — a cap between
+// two values clamps the same bars as the lower one while making every bar
+// shorter, so it can never win.
+//
+// `stackedColumnMax` (the unlock-schedule rule) cuts instead at the widest ratio
+// gap inside the top third of the values, which assumes everything above the gap
+// is a small outlier cluster. Daily activity breaks that assumption: HOLLAR HSM
+// trades span 0.02 → 500k HOLLAR over 60 days, and the widest gap sits between
+// the real trading days (≥5k) and sub-HOLLAR rounding dust (≤430), so it capped
+// at ~516 and flattened all ten meaningful days to identical full-height bars.
+// This objective picks 94.5k there — one clamped spike, the rest legible — and
+// on live data it is window-invariant, i.e. the phone view (last 30 bars) and
+// the desktop view (60 bars) agree, which the gap rule did not.
+//
+// minVisibleRatio 1/16 ≈ 5px of the ~87px half-plot at the default h=190: the
+// shortest bar still comparable by eye. The choice is not knife-edge — every
+// ratio from ~1/14 to 1/32 picks the same cap on all four live series.
+export function readableBarMax(values: number[], minVisibleRatio = 1 / 16): number {
+  const asc = values.filter(v => Number.isFinite(v) && v > 0).sort((a, b) => a - b)
+  const n = asc.length
+  if (!n) return 1
+  let best = asc[n - 1]
+  let bestScore = -Infinity
+  let lo = 0
+  for (let i = 0; i < n; i++) {
+    if (i + 1 < n && asc[i + 1] === asc[i]) continue // score a run of equal values once, at its top
+    const cap = asc[i]
+    while (asc[lo] < cap * minVisibleRatio) lo++ // monotone in cap, so this scans once overall
+    const score = (i - lo + 1) - (n - 1 - i)
+    if (score >= bestScore) { bestScore = score; best = cap }
+  }
+  return best * 1.05
+}
+
 // Positive series above the zero line, negative below, 2px gaps between bars,
 // zero axis line, per-bar hover tooltip. Optional sparse x tick labels.
 export function MirroredBarChart({ data, h = 190, xTicks, upColor = 'var(--green)', downColor = 'var(--red)' }: {
@@ -318,24 +357,28 @@ export function MirroredBarChart({ data, h = 190, xTicks, upColor = 'var(--green
   if (!n) return <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, padding: '12px 0' }}>No data.</div>
   const half = (h - padT - padB) / 2
   const zeroY = padT + half
-  // Cap the axis at the outlier-aware max (same detection as the stacked chart)
-  // so a single huge day doesn't flatten every other bar into invisibility. Bars
+  // Cap the axis where the most bars stay readable (see readableBarMax) so
+  // neither a single huge day nor a long low-volume tail flattens the rest. Bars
   // above the cap clamp to full height and carry a break mark; the exact value
   // stays in the hover tooltip.
-  const max = stackedColumnMax(bars.flatMap(d => [d.up, d.down]))
+  const max = readableBarMax(bars.flatMap(d => [d.up, d.down]))
   const bw = (W - 2 * padX) / n
   const barW = Math.max(0.75, bw - 2)
+  // A non-zero bar always leaves a mark, so "traded a little" still reads
+  // differently from "no activity at all" once the cap is set by louder days.
+  const minBarH = 1.5
   return (
     <div className="hdx-chart-wrap" onMouseLeave={() => setHover(null)}>
       <svg className="day-chart" viewBox={`0 0 ${W} ${h}`}>
         {bars.map((d, i) => {
           const x = padX + i * bw
-          const uh = Math.min(d.up, max) / max * (half - 2), dh = Math.min(d.down, max) / max * (half - 2)
+          const uh = d.up > 0 ? Math.max(minBarH, Math.min(d.up, max) / max * (half - 2)) : 0
+          const dh = d.down > 0 ? Math.max(minBarH, Math.min(d.down, max) / max * (half - 2)) : 0
           const upTop = zeroY - 1 - uh, downBot = zeroY + 1 + dh
           return (
             <g key={d.key} opacity={hover == null || hover === i ? 1 : 0.65}>
-              {d.up > 0 && <rect x={x.toFixed(1)} y={upTop.toFixed(1)} width={barW.toFixed(1)} height={Math.max(0.75, uh).toFixed(1)} fill={upColor} rx="1.5" />}
-              {d.down > 0 && <rect x={x.toFixed(1)} y={(zeroY + 1).toFixed(1)} width={barW.toFixed(1)} height={Math.max(0.75, dh).toFixed(1)} fill={downColor} rx="1.5" />}
+              {d.up > 0 && <rect x={x.toFixed(1)} y={upTop.toFixed(1)} width={barW.toFixed(1)} height={uh.toFixed(1)} fill={upColor} rx="1.5" />}
+              {d.down > 0 && <rect x={x.toFixed(1)} y={(zeroY + 1).toFixed(1)} width={barW.toFixed(1)} height={dh.toFixed(1)} fill={downColor} rx="1.5" />}
               {d.up > max && <g stroke="var(--bg-elev)" strokeWidth="2.5">
                 <line x1={x.toFixed(1)} x2={(x + barW).toFixed(1)} y1={(upTop + 5).toFixed(1)} y2={(upTop + 2).toFixed(1)} />
                 <line x1={x.toFixed(1)} x2={(x + barW).toFixed(1)} y1={(upTop + 9).toFixed(1)} y2={(upTop + 6).toFixed(1)} />
