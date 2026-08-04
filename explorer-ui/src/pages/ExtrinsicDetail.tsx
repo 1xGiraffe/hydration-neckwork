@@ -56,14 +56,16 @@ export function ExtrinsicDetail({ id }: { id: string }) {
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Extrinsics', to: paths.extrinsics() }, { label: id }]} />
         <div className="detail-header">
           <div className="page-title">Extrinsic <span className="num">{id}</span></div>
-          {/* Always present, even before `data` resolves and even when neither
-              arrow applies. A long extrinsic id fills the title row on a phone,
-              so the button strip wraps onto its own flex line; letting it appear
-              only once the extrinsic loaded pushed the whole page down 50px
-              (0.11 of layout shift) exactly when the reader started reading. */}
+          {/* Both arrows always occupy the strip, the unavailable one disabled:
+              a block's first and last extrinsic otherwise moved the remaining
+              arrow sideways, so the same control sat under a different pixel on
+              every page of a walk. Rendering the strip before `data` resolves
+              also keeps the title row's height stable — appearing only once the
+              extrinsic loaded pushed the whole page down 50px (0.11 of layout
+              shift) exactly when the reader started reading. */}
           <div className="nav-btns">
-            {data && data.index > 0 && <button type="button" onClick={() => navigate(paths.extrinsicAt(data.blockHeight, data.index - 1))} title="Previous extrinsic" aria-label="Previous extrinsic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg></button>}
-            {canGoNext && <button type="button" onClick={() => navigate(paths.extrinsicAt(data!.blockHeight, data!.index + 1))} title="Next extrinsic" aria-label="Next extrinsic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6" /></svg></button>}
+            <button type="button" disabled={!data || data.index === 0} onClick={() => data && navigate(paths.extrinsicAt(data.blockHeight, data.index - 1))} title={data && data.index > 0 ? 'Previous extrinsic' : 'First extrinsic in this block'} aria-label="Previous extrinsic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg></button>
+            <button type="button" disabled={!canGoNext} onClick={() => canGoNext && navigate(paths.extrinsicAt(data!.blockHeight, data!.index + 1))} title={canGoNext ? 'Next extrinsic' : 'Last extrinsic in this block'} aria-label="Next extrinsic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6" /></svg></button>
           </div>
         </div>
       </div>
