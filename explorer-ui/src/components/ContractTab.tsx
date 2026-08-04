@@ -10,6 +10,7 @@ import { validateStandardJson, validateContractIdentifier } from '../verifyForm'
 import { ethCall, ethGetCode, EvmRpcError } from '../evmRpc'
 import { ContractWriteView } from './ContractWriteTab'
 import { ContractTransactionsView, ContractEventsView } from './ContractActivityTab'
+import { SourceBrowser } from './SourceBrowser'
 import type { ContractInfo } from '../types'
 
 // The account page's Contract tab (?view=contract): a Code sub-tab (verified
@@ -49,15 +50,20 @@ export function ContractTab({ address, contract }: { address: string; contract: 
 
 export function ContractCodeView({ address, contract }: { address: string; contract: ContractInfo }) {
   const verified = contract.verification?.status === 'verified'
+  // Verified: what it is, then its source, its interface and finally the raw
+  // code. Unverified: the code first — it is all there is — then how to verify.
+  if (verified) {
+    return (
+      <>
+        <VerifiedCode address={address} contract={contract} />
+        <BytecodeCard address={address} />
+      </>
+    )
+  }
   return (
     <>
-      {verified
-        ? <VerifiedCode address={address} contract={contract} />
-        : <>
-            <BytecodeCard address={address} />
-            <VerifyPanel address={address} />
-          </>}
-      {verified && <BytecodeCard address={address} />}
+      <BytecodeCard address={address} />
+      <VerifyPanel address={address} />
     </>
   )
 }
@@ -78,8 +84,6 @@ function VerifiedCode({ address, contract }: { address: string; contract: Contra
   const sources = useContractSources(address)
   const abi = useContractAbi(address, v.abiPresent !== false)
   const files = sources.data?.files ?? []
-  const [selectedPath, setSelectedPath] = useState<string | null>(null)
-  const selected = files.find(f => f.path === selectedPath) ?? files[0]
   const compiler = sources.data?.compiler
   return (
     <>
@@ -110,32 +114,17 @@ function VerifiedCode({ address, contract }: { address: string; contract: Contra
         </div>
       </div>
 
-      {files.length > 0 && (
-        <>
-          <div className="sec-title">Source files · {files.length}</div>
-          <div className="src-files">
-            {files.map(f => (
-              <button key={f.path} type="button" className={`btn sm${selected?.path === f.path ? ' primary' : ''}`} onClick={() => setSelectedPath(f.path)}>{f.path}</button>
-            ))}
-          </div>
-          {selected && (
-            <div style={{ position: 'relative' }}>
-              <pre className="json src-viewer">{selected.content}</pre>
-              <div className="src-copy"><CopyTextButton label={selected.path.split('/').pop() ?? 'file'} text={selected.content} /></div>
-            </div>
-          )}
-        </>
-      )}
+      {files.length > 0 && <SourceBrowser files={files} contractName={v.name} />}
 
       {abi.data && (
-        <>
-          <div className="sec-title">ABI</div>
+        <div className="id-card">
+          <div className="id-card-head">ABI</div>
           <details className="abi-details">
-            <summary className="muted" style={{ cursor: 'pointer' }}>Show ABI ({Array.isArray(abi.data.abi) ? abi.data.abi.length : 0} entries) </summary>
+            <summary>Show ABI ({Array.isArray(abi.data.abi) ? abi.data.abi.length : 0} entries)</summary>
             <JsonView value={abi.data.abi} />
           </details>
-          <div className="ext-link-row"><CopyTextButton label="ABI" text={JSON.stringify(abi.data.abi)} /></div>
-        </>
+          <div className="id-card-foot"><CopyTextButton label="ABI" text={JSON.stringify(abi.data.abi)} /></div>
+        </div>
       )}
     </>
   )
@@ -154,11 +143,11 @@ function BytecodeCard({ address }: { address: string }) {
   if (!data) return null
   const truncated = data.length > 600 ? `${data.slice(0, 600)}…` : data
   return (
-    <>
-      <div className="sec-title">Bytecode · {F.int(Math.max(0, (data.length - 2) / 2))} bytes</div>
+    <div className="id-card">
+      <div className="id-card-head">Bytecode · {F.int(Math.max(0, (data.length - 2) / 2))} bytes</div>
       <pre className="json src-viewer" style={{ maxHeight: 160 }}>{truncated}</pre>
-      <div className="ext-link-row"><CopyTextButton label="bytecode" text={data} /></div>
-    </>
+      <div className="id-card-foot"><CopyTextButton label="bytecode" text={data} /></div>
+    </div>
   )
 }
 
@@ -242,14 +231,14 @@ function VerifyPanel({ address }: { address: string }) {
         <div className="id-card-head">Verify this contract</div>
         <div className="dl">
           <div className="dt">Foundry</div>
-          <div className="dd">
+          <div className="dd dd-stack">
             <pre className="json cli-block">{forgeCmd}</pre>
-            <div className="ext-link-row" style={{ marginTop: 4 }}><CopyTextButton label="forge command" text={forgeCmd} /></div>
+            <div className="ext-link-row"><CopyTextButton label="forge command" text={forgeCmd} /></div>
           </div>
           <div className="dt">Hardhat</div>
-          <div className="dd">
+          <div className="dd dd-stack">
             <pre className="json cli-block">{`// hardhat.config: ${hardhatConfig}\n${hardhatCmd}`}</pre>
-            <div className="ext-link-row" style={{ marginTop: 4 }}><CopyTextButton label="hardhat command" text={hardhatCmd} /></div>
+            <div className="ext-link-row"><CopyTextButton label="hardhat command" text={hardhatCmd} /></div>
           </div>
         </div>
       </div>
@@ -257,37 +246,39 @@ function VerifyPanel({ address }: { address: string }) {
       <div className="id-card">
         <div className="id-card-head">Or verify in the browser</div>
         {succeeded ? (
-          <div style={{ padding: '8px 0' }}>
+          <div className="id-card-body">
             <span className="badge ok">✓ Verified{completed?.contract.match === 'exact_match' ? ' (exact match)' : ' (match)'}</span>
           </div>
         ) : (
           <>
-            <div className="field" style={{ marginTop: 8 }}>
-              <label>Compiler standard-JSON input</label>
-              <div
-                className={`upload-zone${dragOver ? ' drag' : ''}`}
-                onDragOver={e => { e.preventDefault(); setDragOver(true) }}
-                onDragLeave={() => setDragOver(false)}
-                onDrop={e => { e.preventDefault(); setDragOver(false); void onFile(e.dataTransfer.files?.[0]) }}
-              >
-                <input ref={fileRef} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={e => { void onFile(e.target.files?.[0]); e.target.value = '' }} />
-                <button type="button" className="btn sm" onClick={() => fileRef.current?.click()}>Choose file</button>
-                <span className="muted" style={{ fontSize: 12 }}>{fileName ?? 'or drop the standard JSON here (forge build-info input / hardhat build-info)'}</span>
+            <div className="id-card-body stack">
+              <div className="field">
+                <label>Compiler standard-JSON input</label>
+                <div
+                  className={`upload-zone${dragOver ? ' drag' : ''}`}
+                  onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+                  onDragLeave={() => setDragOver(false)}
+                  onDrop={e => { e.preventDefault(); setDragOver(false); void onFile(e.dataTransfer.files?.[0]) }}
+                >
+                  <input ref={fileRef} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={e => { void onFile(e.target.files?.[0]); e.target.value = '' }} />
+                  <button type="button" className="btn sm" onClick={() => fileRef.current?.click()}>Choose file</button>
+                  <span className="muted" style={{ fontSize: 12 }}>{fileName ?? 'or drop the standard JSON here (forge build-info input / hardhat build-info)'}</span>
+                </div>
               </div>
+              <div className="field">
+                <label>Contract</label>
+                <input className="input" placeholder="src/MyToken.sol:MyToken" value={identifier} onChange={e => setIdentifier(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>Compiler version</label>
+                {versionOptions.length
+                  ? <Combo value={version} placeholder="v0.8.19+commit.7dd6d404" label="Compiler version" width={260} options={versionOptions} onChange={setVersion} />
+                  : <input className="input" placeholder="v0.8.19+commit.7dd6d404" value={version} onChange={e => setVersion(e.target.value)} />}
+              </div>
+              {error && <div className="dialog-error">{error}</div>}
+              {completed?.error && <div className="dialog-error">{completed.error.message}</div>}
             </div>
-            <div className="field">
-              <label>Contract</label>
-              <input className="input" placeholder="src/MyToken.sol:MyToken" value={identifier} onChange={e => setIdentifier(e.target.value)} />
-            </div>
-            <div className="field">
-              <label>Compiler version</label>
-              {versionOptions.length
-                ? <Combo value={version} placeholder="v0.8.19+commit.7dd6d404" label="Compiler version" width={260} options={versionOptions} onChange={setVersion} />
-                : <input className="input" placeholder="v0.8.19+commit.7dd6d404" value={version} onChange={e => setVersion(e.target.value)} />}
-            </div>
-            {error && <div className="dialog-error">{error}</div>}
-            {completed?.error && <div className="dialog-error">{completed.error.message}</div>}
-            <div style={{ marginTop: 10 }}>
+            <div className="id-card-foot">
               {jobId && !completed
                 ? <span className="muted">Verifying — compiling and comparing bytecode…</span>
                 : <button type="button" className="btn primary" onClick={() => { void submit() }}>Verify</button>}
@@ -308,15 +299,15 @@ export function ContractReadView({ address, contract }: { address: string; contr
     return (
       <div className="id-card">
         <div className="id-card-head">Read</div>
-        <div className="muted" style={{ padding: '8px 0' }}>
+        <div className="id-card-note">
           Reading needs a verified ABI — <button type="button" className="hint-link" onClick={() => setQuery({ contract: null })}>verify this contract</button> first.
         </div>
       </div>
     )
   }
   const fns = readFunctions(abi.data?.abi)
-  if (!abi.data) return <div className="id-card"><div className="muted" style={{ padding: '8px 0' }}>Loading ABI…</div></div>
-  if (!fns.length) return <div className="id-card"><div className="muted" style={{ padding: '8px 0' }}>The verified ABI has no view or pure functions.</div></div>
+  if (!abi.data) return <div className="id-card"><div className="id-card-note">Loading ABI…</div></div>
+  if (!fns.length) return <div className="id-card"><div className="id-card-note">The verified ABI has no view or pure functions.</div></div>
   return (
     <>
       {fns.map((fn, i) => <ReadFnRow key={`${fn.name}-${i}`} index={i + 1} fn={fn} address={address} />)}
@@ -369,7 +360,7 @@ function ReadFnRow({ index, fn, address }: { index: number; fn: AbiFunctionItem;
     <div className="id-card fn-row">
       <button type="button" className="fn-head" onClick={toggle} aria-expanded={expanded}>
         <span className="mono muted">{index}.</span>
-        <span className="mono">{functionSignature(fn)}</span>
+        <span className="mono fn-sig">{functionSignature(fn)}</span>
         <span className="pill-badge" style={neutralBadge}>{fn.stateMutability}</span>
         <span className="muted fn-caret">{expanded ? '▾' : '▸'}</span>
       </button>
@@ -387,14 +378,14 @@ function ReadFnRow({ index, fn, address }: { index: number; fn: AbiFunctionItem;
             </div>
           ))}
           {fn.inputs.length > 0 && (
-            <div style={{ margin: '8px 0' }}>
+            <div>
               <button type="button" className="btn primary sm" disabled={busy} onClick={() => { void runQuery() }}>{busy ? 'Querying…' : 'Query'}</button>
             </div>
           )}
-          {busy && !fn.inputs.length && <div className="muted" style={{ padding: '4px 0' }}>Querying…</div>}
+          {busy && !fn.inputs.length && <div className="fn-hint">Querying…</div>}
           {error && <div className="dialog-error">{error}</div>}
           {result && (
-            <div className="kv-params" style={{ marginTop: 8 }}>
+            <div className="kv-params">
               {result.outputs.map((out, i) => (
                 <div className="kv-row" key={i}>
                   <div className="kk">{out.param.name || `output ${i}`}<span className="ty">{out.param.type}</span></div>

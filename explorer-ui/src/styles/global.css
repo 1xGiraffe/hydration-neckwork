@@ -1432,6 +1432,10 @@ svg { display: block; }
 /* Stays right-aligned once the title row wraps, so it lines up with the other
    "Open in …" links instead of sliding under the heading on narrow screens. */
 .ext-link-row { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+/* Inside a stacked definition cell the row is the last thing in the cell, whose
+   own padding already ends it — the trailing margin only made those cells read
+   bottom-heavy (the verify panel's forge/hardhat blocks). */
+.dl .dd .ext-link-row { margin-bottom: 0; }
 .mm-card { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 16px; padding: 18px 20px; margin-bottom: 8px; }
 .mm-summary { display: flex; flex-wrap: wrap; gap: 28px; padding-bottom: 16px; border-bottom: 1px solid var(--separator); }
 .mm-stat { display: flex; flex-direction: column; gap: 4px; }
@@ -1725,25 +1729,129 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 /* portfolio sparkline */
 .spark { display: inline-block; vertical-align: middle; }
 
-/* ============ contract tab (code / read) ============ */
-.src-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
-.src-viewer { max-height: 480px; overflow: auto; }
-.src-copy { margin-top: 4px; display: flex; justify-content: flex-end; }
+/* ============ contract tab (code / read / write) ============
+   .id-card carries no padding of its own — it exists for `.dl` grids, whose
+   cells bring their own 14px/18px. Everything on this tab is free-form content
+   instead, so it goes inside one of these three regions and inherits the same
+   inset; a bare child of .id-card sits flush against the border. */
+.id-card-body { padding: 15px 18px; }
+.id-card-body.stack { display: flex; flex-direction: column; gap: 14px; }
+.id-card-note { padding: 15px 18px; color: var(--text-medium); font-size: 13px; }
+/* Primary action right-aligned behind a separator, like a dialog's footer —
+   a submit button loose at the bottom-left of a form reads as unrelated to it. */
+.id-card-foot { display: flex; justify-content: flex-end; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 18px; border-top: 1px solid var(--separator); }
+.id-card-foot .muted { margin-right: auto; }
+
+/* Source browser: file tree beside the file, both scrolling in their own
+   column so a 31-file contract costs no vertical space before the code. Under
+   860px the tree folds into a <details> the selected path summarises. */
+/* The bottom inset belongs to the grid, not to the scrolling columns: padding
+   inside a scroll box only appears once it is scrolled to the end, so the tree and
+   the code were clipped flush against the card's bottom border. */
+/* ONE explicit row height, which both columns then fill exactly: the tree and the
+   code end on the same line, the divider and the tint reach the bottom, and each
+   column scrolls inside its own share. Sizing them separately (a max-height on
+   each) made the row as tall as whichever content was longer — a 31-file tree grew
+   the card to 1,300px with the code stranded at the top. The bottom inset is the
+   grid's, because padding inside a scroll box only shows at the end of its scroll. */
+.src-split { display: grid; grid-template-columns: minmax(180px, 260px) minmax(0, 1fr); grid-template-rows: 564px; align-items: stretch; padding-bottom: 12px; }
+.src-split + .src-split { border-top: 1px solid var(--separator); }
+/* No height of its own — the grid row gives it one (see .src-split). */
+.src-tree { border-right: 1px solid var(--separator); min-height: 0; overflow: auto; padding: 8px 6px; background: var(--panel); }
+.src-tree-dir { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 5px; width: 100%; cursor: pointer; padding: 4px 6px; border-radius: 7px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); text-align: left; overflow-wrap: anywhere; }
+.src-tree-dir:hover { color: var(--text-medium); background: var(--panel-hover); }
+.src-tree-dir .tw { flex-shrink: 0; width: 9px; color: var(--text-lowest); }
+.src-tree-file { all: unset; box-sizing: border-box; display: block; width: 100%; cursor: pointer; padding: 4px 6px 4px 8px; border-radius: 7px; font-family: 'GeistMono'; font-size: 11.5px; color: var(--text-medium); text-align: left; overflow-wrap: anywhere; }
+.src-tree-file:hover { color: var(--text-high); background: var(--panel-hover); }
+.src-tree-file.on { color: var(--accent-on); background: var(--accent); }
+.src-tree-file:focus-visible, .src-tree-dir:focus-visible { outline: 2px solid var(--sky); outline-offset: -2px; }
+.src-tree-kids { border-left: 1px solid var(--separator); margin-left: 8px; padding-left: 4px; }
+.src-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.src-pane-head { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--separator); font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); min-width: 0; }
+.src-pane-head .p { display: flex; min-width: 0; }
+.src-pane-head .p .dir { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-low); }
+.src-pane-head .p .file { flex-shrink: 0; }
+.src-pane-head .btn { margin-left: auto; flex-shrink: 0; }
+/* Fills what the path header leaves of the row, rather than carrying a height of
+   its own — see .src-split. The scroll box holds the gutter and the code side by
+   side, and owns the shared typography so their lines cannot drift apart. */
+.src-viewer {
+  flex: 1; min-height: 0; overflow: auto; display: flex; align-items: flex-start;
+  font-family: 'GeistMono'; font-size: 12px; line-height: 1.7; color: var(--text-medium);
+}
+.src-viewer .src-gutter, .src-viewer .src-code { margin: 0; white-space: pre; font: inherit; line-height: inherit; }
+/* Sticky, so the numbers stay beside their lines while the code scrolls sideways. */
+.src-gutter {
+  position: sticky; left: 0; z-index: 1; flex-shrink: 0; text-align: right;
+  padding: 16px 12px 34px 18px; color: var(--text-lowest); user-select: none;
+  background: var(--bg-elev); border-right: 1px solid var(--separator);
+}
+.src-code { flex: 1; min-width: 0; padding: 16px 18px 34px; color: var(--text-high); }
+/* Both columns scroll, and a scroll box cuts its last line in half at the edge —
+   which reads as content clipped by the card, not as more to scroll. Same
+   bottom-edge fade the horizontally-scrolling tab bars use for the same reason,
+   on the other axis. The mask sits on the scrollport, so the fade stays at the
+   bottom edge while scrolling, and each column's own bottom padding keeps the
+   final line crisp once it is scrolled to the end. */
+.src-tree, .src-viewer {
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent);
+  mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent);
+}
+/* Enough trailing space that the real last line clears the fade once scrolled to
+   the end (both panes carry it in their own padding, above). */
+.src-tree { padding-bottom: 26px; }
+/* Solidity highlighting reuses the JSON viewer's palette so code reads as one
+   system across the site: strings green, numbers lavender, keywords sky —
+   exactly .json's .str/.numb/.key. Types get the one extra hue. Comments use
+   --text-low rather than the JSON viewer's --text-lowest: punctuation may recede
+   to the edge of legibility, but a natspec block is prose someone reads. */
+.src-viewer .s-comment { color: var(--text-low); }
+.src-viewer .s-string { color: var(--green); }
+.src-viewer .s-number { color: var(--lavender); }
+.src-viewer .s-keyword { color: var(--sky); }
+.src-viewer .s-type { color: var(--amber); }
+/* The tree's mobile form: closed by default, so the code stays one scroll away. */
+.src-picker { display: none; }
+@media (max-width: 860px) {
+  .src-split { grid-template-columns: minmax(0, 1fr); }
+  .src-tree { display: none; }
+  .src-picker { display: block; border-bottom: 1px solid var(--separator); background: var(--panel); }
+  .src-picker > summary { display: flex; align-items: center; gap: 8px; padding: 11px 14px; cursor: pointer; list-style: none; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); }
+  .src-picker > summary::-webkit-details-marker { display: none; }
+  .src-picker > summary .cnt { margin-left: auto; color: var(--text-low); }
+  .src-picker[open] > summary { border-bottom: 1px solid var(--separator); }
+  .src-picker .src-tree { display: block; border-right: 0; max-height: 320px; }
+  /* The code wraps at this width (a 120-column Solidity line is unreadable
+     otherwise), and a wrapped line occupies one number but several visual lines —
+     so the gutter would stop lining up. Drop it rather than mislabel the code. */
+  .src-gutter { display: none; }
+  /* Same specificity as the shared `.src-viewer .src-code` typography rule above,
+     or that one keeps `pre` and the code scrolls sideways instead of wrapping. */
+  .src-viewer .src-code { white-space: pre-wrap; overflow-wrap: anywhere; }
+}
+
 .cli-block { padding: 10px 12px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.abi-details > summary { padding: 6px 0; }
+.abi-details > summary { cursor: pointer; padding: 13px 18px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); }
+.abi-details > summary:hover { color: var(--text-high); }
+.abi-details[open] > summary { border-bottom: 1px solid var(--separator); }
+.abi-details .json { margin: 0; border: 0; border-radius: 0; max-height: 520px; overflow: auto; }
 /* Combo carries a fixed pixel width for filter bars. Inside a stacked card form
    its neighbours are full-width inputs, so that fixed width becomes the form's
    ragged right edge — and on a 390px phone it is nearly the whole width anyway.
    Treat the width as a maximum here instead. */
 .id-card-body .combo, .id-card-body .combo-input { width: 100%; }
 .id-card-body .combo-input { max-width: 260px; }
-.upload-zone { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px dashed var(--separator); border-radius: 10px; }
-.upload-zone.drag { border-color: var(--sky); }
+.upload-zone { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px; border: 1px dashed var(--border); border-radius: 10px; background: var(--panel); }
+.upload-zone.drag { border-color: var(--sky); background: var(--panel-hover); }
 /* the global button reset leaves fn-head unstyled — lay the row out explicitly */
-.fn-row { padding-bottom: 10px; }
-.fn-head { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; width: 100%; cursor: pointer; padding: 4px 0; }
-.fn-head .fn-caret { margin-left: auto; }
-.fn-body { border-top: 1px solid var(--separator); margin-top: 8px; padding-top: 8px; }
+.fn-row { margin-bottom: 8px; }
+.fn-head { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; width: 100%; cursor: pointer; padding: 12px 18px; }
+.fn-head:hover { background: var(--panel-hover); }
+.fn-head:focus-visible { outline: 2px solid var(--sky); outline-offset: -2px; border-radius: 16px; }
+.fn-head .fn-sig { overflow-wrap: anywhere; min-width: 0; }
+.fn-head .fn-caret { margin-left: auto; flex-shrink: 0; }
+.fn-body { border-top: 1px solid var(--separator); padding: 15px 18px; display: flex; flex-direction: column; gap: 13px; }
+.fn-hint { color: var(--text-medium); font-size: 13px; }
 /* The Write gate must LOOK gated: a reverting estimate disables the button,
    and the same dimming covers a busy Query on the Read tab. Same values as
    the pager's disabled buttons. */
@@ -1752,8 +1860,9 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .fn-nested-row { overflow-wrap: anywhere; }
 /* Write sub-tab: the wallet summary bar ("you are writing to X as Y") wraps
    pills and buttons on one line, folding gracefully at 390px. */
-.write-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 4px 0; }
+.write-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 18px; }
 .write-bar .btn { margin-left: auto; }
+@media (max-width: 560px) { .write-bar .btn { margin-left: 0; } }
 .write-as { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
 /* ============ DCA schedules ============

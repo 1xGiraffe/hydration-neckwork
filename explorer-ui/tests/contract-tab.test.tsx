@@ -83,11 +83,24 @@ describe('ContractCodeView (verified)', () => {
     expect(out).toContain('0xabcd')          // constructor args
   })
 
-  it('lists the source files and shows the selected file content', () => {
+  it('lists the source files as a tree and shows the selected file content', () => {
     const out = html()
-    expect(out).toContain('src/GhoToken.sol')
-    expect(out).toContain('src/lib/Math.sol')
-    expect(out).toContain('contract GhoToken { uint256 supply; }')
+    // Both files reachable in the tree (the leaf shows the basename, the full
+    // path is its title), and the viewer opens on the one declaring the contract.
+    expect(out).toContain('title="src/GhoToken.sol"')
+    expect(out).toContain('title="src/lib/Math.sol"')
+    expect(out).toContain('src-tree-file on" title="src/GhoToken.sol"')
+    // The content is highlighted, so it is spans rather than one string — strip
+    // the markup and the file must come back byte for byte.
+    const code = /<pre class="src-code sol">([\s\S]*?)<\/pre>/.exec(out)![1]
+    expect(code.replace(/<[^>]+>/g, '')).toBe('contract GhoToken { uint256 supply; }')
+    expect(code).toContain('<span class="s-keyword">contract</span>')
+    expect(code).toContain('<span class="s-type">uint256</span>')
+    // One gutter number per line, hidden from assistive tech and unselectable, so
+    // copying the code never picks the numbers up.
+    const gutter = /<pre class="src-gutter" aria-hidden="true">([\s\S]*?)<\/pre>/.exec(out)![1]
+    expect(gutter).toBe('1')                                    // the fixture is one line
+    expect(gutter.split('\n')).toHaveLength(code.replace(/<[^>]+>/g, '').split('\n').length)
   })
 
   it('renders the ABI as collapsible JSON', () => {

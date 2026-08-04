@@ -34,18 +34,18 @@ export function ContractWriteView({ address, contract }: { address: string; cont
     return (
       <div className="id-card">
         <div className="id-card-head">Write</div>
-        <div className="muted" style={{ padding: '8px 0' }}>
+        <div className="id-card-note">
           Writing needs a verified ABI — <button type="button" className="hint-link" onClick={() => setQuery({ contract: null })}>verify this contract</button> first.
         </div>
       </div>
     )
   }
-  if (!abi.data) return <div className="id-card"><div className="muted" style={{ padding: '8px 0' }}>Loading ABI…</div></div>
+  if (!abi.data) return <div className="id-card"><div className="id-card-note">Loading ABI…</div></div>
   const fns = writeFunctions(abi.data.abi)
   return (
     <>
       <WalletBar wallet={wallet} contract={contract} onConnect={() => setDialogOpen(true)} />
-      {!fns.length && <div className="id-card"><div className="muted" style={{ padding: '8px 0' }}>The verified ABI has no state-changing functions.</div></div>}
+      {!fns.length && <div className="id-card"><div className="id-card-note">The verified ABI has no state-changing functions.</div></div>}
       {fns.map((fn, i) => <WriteFnRow key={`${fn.name}-${i}`} index={i + 1} fn={fn} address={address} wallet={wallet} />)}
       <ContractWalletDialog open={dialogOpen} onOpenChange={setDialogOpen} />
     </>
@@ -175,7 +175,7 @@ function WriteFnRow({ index, fn, address, wallet }: { index: number; fn: AbiFunc
     <div className="id-card fn-row">
       <button type="button" className="fn-head" onClick={() => setExpanded(v => !v)} aria-expanded={expanded}>
         <span className="mono muted">{index}.</span>
-        <span className="mono">{functionSignature(fn)}</span>
+        <span className="mono fn-sig">{functionSignature(fn)}</span>
         <span className="pill-badge" style={neutralBadge}>{fn.stateMutability}</span>
         <span className="muted fn-caret">{expanded ? '▾' : '▸'}</span>
       </button>
@@ -198,16 +198,16 @@ function WriteFnRow({ index, fn, address, wallet }: { index: number; fn: AbiFunc
               <input className="input" placeholder="0" value={valueRaw} onChange={e => setValueRaw(e.target.value)} />
             </div>
           )}
-          {!wallet && <div className="muted" style={{ margin: '8px 0', fontSize: 13 }}>Connect a wallet above to write.</div>}
-          {wallet && argsComplete && !estimate && <div className="muted" style={{ margin: '8px 0', fontSize: 13 }}>Estimating gas…</div>}
+          {!wallet && <div className="fn-hint">Connect a wallet above to write.</div>}
+          {wallet && argsComplete && !estimate && <div className="fn-hint">Estimating gas…</div>}
           {estimate?.kind === 'gas' && (
-            <div className="muted" style={{ margin: '8px 0', fontSize: 13 }}>
+            <div className="fn-hint">
               Estimated gas: <span className="mono">{F.int(Number(estimate.gas))}</span>
             </div>
           )}
           {estimate?.kind === 'revert' && <div className="dialog-error">Write would revert: {estimate.reason}</div>}
           {estimate?.kind === 'invalid' && <div className="dialog-error">{estimate.error}</div>}
-          <div style={{ margin: '8px 0' }}>
+          <div>
             <button
               type="button"
               className="btn primary sm"
@@ -236,18 +236,18 @@ function BlockRef({ blockHeight, txIndex }: { blockHeight: number; txIndex?: num
 
 function WriteStageLine({ stage }: { stage: WriteStage }) {
   if (stage.phase === 'idle') return null
-  if (stage.phase === 'preparing') return <div className="muted" style={{ padding: '4px 0' }}>Preparing the transaction…</div>
-  if (stage.phase === 'wallet-pending') return <div className="muted" style={{ padding: '4px 0' }}>Confirm in your wallet…</div>
+  if (stage.phase === 'preparing') return <div className="fn-hint">Preparing the transaction…</div>
+  if (stage.phase === 'wallet-pending') return <div className="fn-hint">Confirm in your wallet…</div>
   if (stage.phase === 'submitted' || stage.phase === 'in-block') {
     return (
-      <div className="muted" style={{ padding: '4px 0' }}>
+      <div className="fn-hint">
         Submitted — waiting for the block · <span className="mono wrap-anywhere" style={{ fontSize: 11 }}>{stage.txHash}</span>
       </div>
     )
   }
   if (stage.phase === 'success') {
     return (
-      <div style={{ padding: '4px 0' }}>
+      <div>
         <span className="badge ok">✓ Success</span>{' '}
         <span className="muted" style={{ fontSize: 13 }}>in block <BlockRef blockHeight={stage.blockHeight} txIndex={stage.txIndex} /></span>
       </div>
