@@ -9,6 +9,7 @@ import { readFunctions, functionSignature, type AbiFunctionItem, type AbiParam }
 import { validateStandardJson, validateContractIdentifier } from '../verifyForm'
 import { ethCall, ethGetCode, EvmRpcError } from '../evmRpc'
 import { ContractWriteView } from './ContractWriteTab'
+import { ContractTransactionsView, ContractEventsView } from './ContractActivityTab'
 import type { ContractInfo } from '../types'
 
 // The account page's Contract tab (?view=contract): a Code sub-tab (verified
@@ -22,17 +23,24 @@ const neutralBadge = { color: 'var(--neutral)', background: 'color-mix(in srgb, 
 
 export function ContractTab({ address, contract }: { address: string; contract: ContractInfo }) {
   const raw = useQueryValue('contract', 'code')
-  const active = raw === 'read' ? 'read' : raw === 'write' ? 'write' : 'code'
+  const active = raw === 'read' || raw === 'write' || raw === 'txs' || raw === 'events' ? raw : 'code'
+  // Every switch clears the activity views' own pager param, so a page deep in
+  // Transactions never leaks into Events (or lingers on Code).
+  const go = (key: string | null) => setQuery({ contract: key, cpage: null })
   return (
     <>
       <div className="tabs" style={{ marginTop: 16 }}>
-        <button type="button" className={active === 'code' ? 'active' : ''} onClick={() => setQuery({ contract: null })}>Code</button>
-        <button type="button" className={active === 'read' ? 'active' : ''} onClick={() => setQuery({ contract: 'read' })}>Read</button>
-        <button type="button" className={active === 'write' ? 'active' : ''} onClick={() => setQuery({ contract: 'write' })}>Write</button>
+        <button type="button" className={active === 'code' ? 'active' : ''} onClick={() => go(null)}>Code</button>
+        <button type="button" className={active === 'read' ? 'active' : ''} onClick={() => go('read')}>Read</button>
+        <button type="button" className={active === 'write' ? 'active' : ''} onClick={() => go('write')}>Write</button>
+        <button type="button" className={active === 'txs' ? 'active' : ''} onClick={() => go('txs')}>Transactions</button>
+        <button type="button" className={active === 'events' ? 'active' : ''} onClick={() => go('events')}>Events</button>
       </div>
       {active === 'code' && <ContractCodeView address={address} contract={contract} />}
       {active === 'read' && <ContractReadView address={address} contract={contract} />}
       {active === 'write' && <ContractWriteView address={address} contract={contract} />}
+      {active === 'txs' && <ContractTransactionsView address={address} />}
+      {active === 'events' && <ContractEventsView address={address} />}
     </>
   )
 }

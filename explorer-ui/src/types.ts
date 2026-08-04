@@ -180,6 +180,55 @@ export interface ContractSourcesPayload {
     settings: unknown
   }
 }
+// Request-time verified-ABI decoding on detail surfaces (§9). `hashed` marks an
+// indexed dynamic event param whose preimage only exists on chain as its hash.
+export interface EvmDecodedParam {
+  name: string
+  type: string
+  value: unknown
+  indexed?: boolean
+  hashed?: boolean
+}
+export interface EvmLogDecode {
+  decoded: true
+  name: string
+  signature: string
+  params: EvmDecodedParam[]
+  decodedBy: 'verified-abi'
+}
+export type EvmCallDecode =
+  | { decoded: true; name: string; signature: string; selector: string; params: EvmDecodedParam[] }
+  | { decoded: false; selector: string | null }
+export interface DecodedEvmCall {
+  target: string
+  contractName: string | null
+  call: EvmCallDecode
+}
+// Contract-tab activity views, scoped to one contract.
+export interface ContractTxMethod { selector: string | null; name: string | null; signature: string | null }
+export interface ContractTxRow {
+  blockHeight: number
+  extrinsicIndex: number | null
+  timestamp: string
+  txHash: string
+  from: AccountRef | null
+  success: boolean
+  method: ContractTxMethod
+}
+export interface ContractTransactionsPage { transactions: ContractTxRow[]; total: number }
+export interface ContractEventRow {
+  blockHeight: number
+  eventIndex: number
+  extrinsicIndex: number | null
+  timestamp: string
+  name: string | null
+  topics: string[]
+  data: string
+  evmDecoded?: EvmLogDecode
+  args?: Record<string, unknown>
+  decodedBy?: 'verified-abi' | 'ingest'
+}
+export interface ContractEventsPage { events: ContractEventRow[]; total: number }
 // Sourcify V2 verification job, as the poll endpoint reports it.
 export interface VerificationJob {
   isJobCompleted: boolean
@@ -270,7 +319,7 @@ export interface ExtrinsicSummary {
   errorReason?: FailureReason | null
 }
 
-export interface BlockEvent { eventIndex: number; extrinsicIndex: number | null; name: string; args: unknown }
+export interface BlockEvent { eventIndex: number; extrinsicIndex: number | null; name: string; args: unknown; evmDecoded?: EvmLogDecode }
 export interface BlockDetail extends BlockSummary {
   parentHash: string
   stateRoot: string | null
@@ -282,7 +331,7 @@ export interface BlockDetail extends BlockSummary {
   eventsShown?: number
 }
 
-export interface ExtrinsicEvent { eventIndex: number; name: string; args: unknown; decoded?: boolean }
+export interface ExtrinsicEvent { eventIndex: number; name: string; args: unknown; decoded?: boolean; evmDecoded?: EvmLogDecode }
 export interface ExtrinsicDetail extends ExtrinsicSummary {
   version: number
   tip: string | null
@@ -290,6 +339,9 @@ export interface ExtrinsicDetail extends ExtrinsicSummary {
   error: unknown
   errorReason: FailureReason | null
   events: ExtrinsicEvent[]
+  // Verified-ABI decodes of the extrinsic's EVM calls (top-level and nested in
+  // wrapper call trees); absent when no target has a verified ABI.
+  evmCalls?: DecodedEvmCall[]
 }
 
 export interface TransferRow {
@@ -548,6 +600,7 @@ export interface EventRow {
   name: string
   args: unknown
   decoded: boolean
+  evmDecoded?: EvmLogDecode
 }
 
 export interface EventDetail {
@@ -558,6 +611,7 @@ export interface EventDetail {
   name: string
   args: unknown
   decoded: boolean
+  evmDecoded?: EvmLogDecode
   phase: string
   extrinsic: ExtrinsicSummary | null
 }

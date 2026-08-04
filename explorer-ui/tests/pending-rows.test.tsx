@@ -72,7 +72,8 @@ describe('every list that holds rows has a surface that marks them', () => {
   it('holds rows in exactly the paged list hooks, plus the day chart', () => {
     expect(holdingHooks.sort()).toEqual([
       'useAccountActivity', 'useAccountEvents', 'useAccountExtrinsics', 'useAccountVotes',
-      'useAccounts', 'useActivity', 'useAssetActivity', 'useBlocks', 'useContracts', 'useDaily', 'useEvents',
+      'useAccounts', 'useActivity', 'useAssetActivity', 'useBlocks',
+      'useContractEvents', 'useContractTransactions', 'useContracts', 'useDaily', 'useEvents',
       'useExtrinsics', 'useHolders', 'useTagActivity', 'useTagEvents',
       'useTagExtrinsics', 'useTagVotes', 'useTagVotesByReferendum',
     ])
@@ -89,6 +90,7 @@ describe('every list that holds rows has a surface that marks them', () => {
       '../src/pages/AssetDetail.tsx': 2,        // activity feed + holders
       '../src/components/ScopedActivity.tsx': 3, // activity, extrinsics, events tabs
       '../src/components/VotesTab.tsx': 1,
+      '../src/components/ContractActivityTab.tsx': 2, // transactions + events sub-tabs
     }
     for (const [path, expected] of Object.entries(surfaces)) {
       const src = read(path)

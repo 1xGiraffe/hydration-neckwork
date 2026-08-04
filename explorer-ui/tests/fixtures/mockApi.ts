@@ -3,7 +3,7 @@ import type {
   ExplorerStats, IndexerStatus, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   TransferRow, EventRow, TradeRow, ActivityRow, MoneyMarketResponse, AssetDetail, HoldersResponse,
   AddressDetail, AddressBalance, CloseAccountsResponse, TagDetail, SearchResult, AssetListItem, TopAccountRow, AccountsPage, DailyPoint, Tag,
-  ContractInfo, ContractsPage,
+  ContractInfo, ContractsPage, ContractTransactionsPage, ContractEventsPage, ContractEventRow, DecodedEvmCall, EvmLogDecode,
   AccountRef, AssetRef, AssetLiquidationDay, AssetLiquidationTotal, HdxDashboard, HdxCohort, HdxLockType, HdxUnlockBucket, HdxDailyFlow, HdxMover,
   HollarDashboard, HollarCollateral, HollarArbDay, HollarTradeDay, HollarPool, HollarPegPoint,
   TradeDetail as TradeDetailResponse,
@@ -216,14 +216,14 @@ function genExtrinsic(height: number, idx: number): ExtrinsicDetail {
       : call.startsWith('Tokens.transfer') ? { currency_id: aIn.assetId, dest: dest.address, amount: raw(amt, aIn.decimals) }
       : call.startsWith('Balances') ? { dest: dest.address, value: raw(amt, 12) }
       : call.startsWith('XTokens') ? { currency_id: aIn.assetId, amount: raw(amt, aIn.decimals), dest: { V3: { parents: 1, interior: { X2: [{ Parachain: 2004 }, { AccountId32: { id: dest.address } }] } } } }
-      : call.startsWith('EVM') ? { target: '0x1b02E051683b5cfaC5929C25E84adb26ECf87B38', input: hx(height + idx, 72), value: '0', gas_limit: 300000 }
+      : call.startsWith('EVM') ? { source: EVM_CALLER, target: VERIFIED_CONTRACT_ADDRESS, input: evmTransferInput(height, idx, amt), value: '0', gas_limit: 300000 }
       : { amount: raw(amt, 12) }
   const events = isInherent
     ? [{ eventIndex: 0, name: 'System.ExtrinsicSuccess', args: { weight: 137_316_000 } }]
     : success
       ? [
         { eventIndex: 0, name: call.startsWith('Balances') ? 'Balances.Transfer' : 'Tokens.Transfer', args: { currency_id: aIn.assetId, from: signer.address, to: call.startsWith('Omnipool') ? 'Omnipool' : dest.address, amount: raw(amt, aIn.decimals) } },
-        ...(call.startsWith('EVM') ? [{ eventIndex: 1, name: 'EVM.Log', args: { reserve: aIn.symbol, user: signer.address, amount: raw(amt, aIn.decimals) }, decoded: true } as ExtrinsicDetail['events'][number]] : []),
+        ...(call.startsWith('EVM') ? [evmLogEvent(height, idx, amt)] : []),
         { eventIndex: 2, name: 'TransactionPayment.TransactionFeePaid', args: { who: signer.address, actual_fee: raw(0.02, 12), tip: '0' } },
         { eventIndex: 3, name: 'System.ExtrinsicSuccess', args: { weight: 412_000_000 } },
       ]
@@ -233,7 +233,72 @@ function genExtrinsic(height: number, idx: number): ExtrinsicDetail {
     signer: isInherent ? null : signer, success: isInherent ? true : success, callName,
     fee: isInherent ? null : raw(0.002 + r() * 0.05, 12), version: 4, tip: isInherent ? null : '0',
     callArgs, error: success || isInherent ? null : { module: 'Tokens', error: 'BelowMinimum' }, events,
+    ...(call.startsWith('EVM') && !isInherent ? { evmCalls: [evmCallDecode(height, idx, amt)] } : {}),
   }
+}
+
+/* ---------- verified-ABI decode fixtures (§9) ---------- */
+// The mock EVM.call extrinsic targets the verified contract with a well-formed
+// transfer(address,uint256) calldata, and carries the same request-time decode
+// shapes the api attaches: `evmCalls` on the extrinsic detail and `evmDecoded`
+// on its EVM.Log event.
+const EVM_CALLER = '0x4b0540d29f19b2da4cce2b1ba6b6325dd9d86622'
+const TRANSFER_TOPIC0 = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+const evmWord = (hex: string) => hex.replace(/^0x/, '').padStart(64, '0')
+function evmTransferTo(height: number, idx: number): string { return hx(height * 3 + idx + 1, 40) }
+function evmTransferAmount(amt: number): string { return raw(amt, 18) }
+function evmTransferInput(height: number, idx: number, amt: number): string {
+  return `0xa9059cbb${evmWord(evmTransferTo(height, idx))}${evmWord(BigInt(evmTransferAmount(amt)).toString(16))}`
+}
+function evmCallDecode(height: number, idx: number, amt: number): DecodedEvmCall {
+  return {
+    target: VERIFIED_CONTRACT_ADDRESS,
+    contractName: 'GhoToken',
+    call: {
+      decoded: true, name: 'transfer', signature: 'transfer(address,uint256)', selector: '0xa9059cbb',
+      params: [
+        { name: 'to', type: 'address', value: evmTransferTo(height, idx) },
+        { name: 'value', type: 'uint256', value: evmTransferAmount(amt) },
+      ],
+    },
+  }
+}
+function evmTransferLogDecode(height: number, idx: number, amt: number): EvmLogDecode {
+  return {
+    decoded: true, name: 'Transfer', signature: 'Transfer(address,address,uint256)', decodedBy: 'verified-abi',
+    params: [
+      { name: 'from', type: 'address', value: EVM_CALLER, indexed: true },
+      { name: 'to', type: 'address', value: evmTransferTo(height, idx), indexed: true },
+      { name: 'value', type: 'uint256', value: evmTransferAmount(amt) },
+    ],
+  }
+}
+function evmLogEvent(height: number, idx: number, amt: number): ExtrinsicDetail['events'][number] {
+  return {
+    eventIndex: 1,
+    name: 'EVM.Log',
+    args: {
+      log: {
+        address: VERIFIED_CONTRACT_ADDRESS,
+        topics: [TRANSFER_TOPIC0, `0x${evmWord(EVM_CALLER)}`, `0x${evmWord(evmTransferTo(height, idx))}`],
+        data: `0x${evmWord(BigInt(evmTransferAmount(amt)).toString(16))}`,
+      },
+    },
+    decoded: true,
+    evmDecoded: evmTransferLogDecode(height, idx, amt),
+  }
+}
+
+// The first EVM.call extrinsic below the tip — a stable target for e2e specs
+// that exercise the extrinsic detail's decoded rendering.
+export function firstEvmCallExtrinsic(): { height: number; index: number } {
+  for (let h = TIP; h > TIP - 400; h--) {
+    for (let i = 2; i < blockExtrinsicCount(h); i++) {
+      const x = genExtrinsic(h, i)
+      if (x.callName === 'EVM.call' && x.success) return { height: h, index: i }
+    }
+  }
+  throw new Error('no successful EVM.call extrinsic in the mock window')
 }
 
 function recentExtrinsics(limit: number, signedOnly: boolean): ExtrinsicSummary[] {
@@ -503,6 +568,50 @@ function buildContracts(offset: number, limit: number, sort: string): ContractsP
     return created(b) - created(a) || (a.address < b.address ? -1 : 1)
   })
   return { contracts: sorted.slice(offset, offset + limit), total: sorted.length }
+}
+
+// Contract-tab activity views. The verified contract's rows carry decoded
+// method chips and named events (with one selector-only and one raw row per
+// cycle so the fallbacks stay exercised); an unverified contract gets bare
+// selectors and topics. Unknown addresses fall through to the harness 404.
+const MOCK_CONTRACT_TX_TOTAL = 60
+function buildContractTransactions(address: string, offset: number, limit: number): ContractTransactionsPage | undefined {
+  const c = mockContractByAddress(address)
+  if (!c) return undefined
+  const verified = !!c.verified
+  const rows = Array.from({ length: Math.max(0, Math.min(limit, MOCK_CONTRACT_TX_TOTAL - offset)) }, (_, k) => {
+    const n = offset + k
+    const r = rng(n * 13 + 7)
+    const height = TIP - 40 - n * 7
+    return {
+      blockHeight: height, extrinsicIndex: 2, timestamp: tsAt(height), txHash: hx(n * 11 + 3, 64),
+      from: ACCS[Math.floor(r() * ACCS.length)], success: r() > 0.1,
+      method: !verified ? { selector: '0x12345678', name: null, signature: null }
+        : n % 5 === 4 ? { selector: '0xdeadbeef', name: null, signature: null }
+          : { selector: '0xa9059cbb', name: 'transfer', signature: 'transfer(address,uint256)' },
+    }
+  })
+  return { transactions: rows, total: MOCK_CONTRACT_TX_TOTAL }
+}
+
+const MOCK_CONTRACT_EVENT_TOTAL = 40
+function buildContractEvents(address: string, offset: number, limit: number): ContractEventsPage | undefined {
+  const c = mockContractByAddress(address)
+  if (!c) return undefined
+  const verified = !!c.verified
+  const rows: ContractEventRow[] = Array.from({ length: Math.max(0, Math.min(limit, MOCK_CONTRACT_EVENT_TOTAL - offset)) }, (_, k) => {
+    const n = offset + k
+    const height = TIP - 45 - n * 9
+    const base = {
+      blockHeight: height, eventIndex: 4, extrinsicIndex: 2, timestamp: tsAt(height),
+      topics: [TRANSFER_TOPIC0, `0x${evmWord(EVM_CALLER)}`, `0x${evmWord(evmTransferTo(height, 4))}`],
+      data: `0x${evmWord('f4240')}`,
+    }
+    if (verified && n % 3 === 0) return { ...base, name: 'Transfer', decodedBy: 'verified-abi' as const, evmDecoded: evmTransferLogDecode(height, 4, 12.5) }
+    if (n % 3 === 1) return { ...base, name: 'Borrow', decodedBy: 'ingest' as const, args: { reserve: c.address, user: EVM_CALLER, amount: raw(12.5, 18) } }
+    return { ...base, name: null, topics: [hx(n * 5 + 1, 64)], data: `0x${evmWord('1234')}` }
+  })
+  return { events: rows, total: MOCK_CONTRACT_EVENT_TOTAL }
 }
 
 // The accounts directory, folded under a VIEWER's own tags too — the mock's
@@ -961,6 +1070,8 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   // to the harness 404, exactly like the real endpoints.
   { re: /^\/explorer\/contract\/([^/]+)\/abi$/, fn: m => decodeURIComponent(m[1]).toLowerCase() === VERIFIED_CONTRACT_ADDRESS ? MOCK_CONTRACT_ABI : undefined },
   { re: /^\/explorer\/contract\/([^/]+)\/sources$/, fn: m => decodeURIComponent(m[1]).toLowerCase() === VERIFIED_CONTRACT_ADDRESS ? MOCK_CONTRACT_SOURCES : undefined },
+  { re: /^\/explorer\/contract\/([^/]+)\/transactions$/, fn: (m, qs) => buildContractTransactions(decodeURIComponent(m[1]).toLowerCase(), Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 25)) },
+  { re: /^\/explorer\/contract\/([^/]+)\/events$/, fn: (m, qs) => buildContractEvents(decodeURIComponent(m[1]).toLowerCase(), Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 25)) },
   { re: /^\/explorer\/daily\/(\w+)(?:\?.*)?$/, fn: (m) => Array.from({ length: 45 }, (_, i) => { const d = new Date(MOCK_NOW_MS - (44 - i) * 86400000); const r = rng(i + m[1].length * 7); return { date: d.toISOString().slice(0, 10), value: Math.round((m[1] === 'events' ? 60000 : m[1] === 'extrinsics' ? 12000 : 4000) * (0.5 + r())) } as DailyPoint }) },
   { re: /^\/explorer\/accounts-daily$/, fn: () => Array.from({ length: 30 }, (_, i) => { const d = new Date(MOCK_NOW_MS - (29 - i) * 86400000); const r = rng(i * 31 + 5); return { date: d.toISOString().slice(0, 10), active: Math.round(6000 * (0.6 + r() * 0.8)), new: Math.round(350 * (0.4 + r())) } }) },
   // events is deliberately longer than MOCK_LIST_MAX_OFFSET can page, so the mock

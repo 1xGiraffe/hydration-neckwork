@@ -417,6 +417,29 @@ export function useContractSources(address: string | null | undefined, enabled =
     enabled: !!address && enabled,
   })
 }
+// Contract-tab activity pages. The api holds these for 30s and the responses
+// ride the /explorer/contract/ 300s cache-control, so there is nothing to poll;
+// held previous pages keep the pager from collapsing while a page loads.
+export function useContractTransactions(address: string | null | undefined, offset = 0, limit = 25) {
+  return useQuery({
+    queryKey: ['contract-txs', address, offset, limit],
+    queryFn: ({ signal }) => api.contractTransactions(address!, offset, limit, signal),
+    staleTime: 30_000,
+    retry: false,
+    enabled: !!address,
+    placeholderData: keepPreviousData,
+  })
+}
+export function useContractEvents(address: string | null | undefined, offset = 0, limit = 25) {
+  return useQuery({
+    queryKey: ['contract-events', address, offset, limit],
+    queryFn: ({ signal }) => api.contractEvents(address!, offset, limit, signal),
+    staleTime: 30_000,
+    retry: false,
+    enabled: !!address,
+    placeholderData: keepPreviousData,
+  })
+}
 export function useCompilerVersions(enabled = true) {
   return useQuery({
     queryKey: ['compiler-versions'],

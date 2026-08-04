@@ -1167,6 +1167,12 @@ svg { display: block; }
 .kv-row .kk .ty { font-size: 9px; padding: 1px 5px; border-radius: 4px; background: var(--panel); color: var(--text-low); text-transform: uppercase; letter-spacing: 0.06em; }
 .kv-row .vv { padding: 11px 16px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-high); word-break: break-all; }
 
+/* Verified-ABI decode blocks (extrinsic params tab, event detail, expanded
+   event rows): a chip line above a ParamsTable; spaced so a following raw
+   params table reads as a separate section. */
+.evm-decoded { margin: 0 0 14px; }
+.evm-decoded:last-child { margin-bottom: 0; }
+
 .json { font-family: 'GeistMono'; font-size: 12px; line-height: 1.7; background: var(--bg); border: 1px solid var(--separator); border-radius: 12px; padding: 16px 18px; overflow-x: auto; white-space: pre; color: var(--text-medium); }
 .json .key { color: var(--sky); }
 .json .str { color: var(--green); }
