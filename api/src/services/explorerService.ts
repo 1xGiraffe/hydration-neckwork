@@ -18009,8 +18009,27 @@ const ACTIVITY_LEADERBOARD_ENTRY_TTL_MS = 12 * 3_600_000
 // How many members one cycle counts, and how long it waits between them. One at a time
 // with idle gaps: a whole-history count is the most expensive read the API issues, and a
 // background ranking gains nothing from running several of them at once.
-const ACTIVITY_LEADERBOARD_COUNTS_PER_CYCLE = 3
+//
+// The rate has to clear the WHOLE pool — reference plus demand — within the TTL, or
+// entries age out faster than the pass returns to them. 250 + 400 = 650 members
+// against a 12 h window and a 15-minute cycle needs 650 / (12 × 4) ≈ 14 per cycle;
+// 14 gives 672. At 3 per cycle (the rate this shipped with) the budget was 144, so
+// even the 174 groups the reference pool alone maps to aged out between counts.
+//
+// The cost is real and worth stating: most counts are sub-second, but a structural
+// pot's is 5–11 s (Polkadot Treasury's 1.19M activities take 10.8 s). Fourteen counts
+// spaced by the cooldown occupy about five minutes of the fifteen-minute cycle, still
+// strictly one read at a time, and only a handful of the 650 are the expensive kind.
+const ACTIVITY_LEADERBOARD_COUNTS_PER_CYCLE = 14
 const ACTIVITY_LEADERBOARD_COUNT_COOLDOWN_MS = 20_000
+// The demand-driven half of the pool: the rows the directory actually renders on
+// its prewarmed first pages, across every sort. Measured live, the eight sorts'
+// page 0 hold 301 distinct rows — each appearing on 1.33 sorts on average, because
+// the same tags and pots lead most orderings — so covering what a reader sees costs
+// ~300 counts rather than the 114,317 rows a per-row model would need. This is the
+// bound the rate above is sized against; the constant exists so the two cannot drift
+// apart unnoticed (accountDirectoryActivity.test.ts pins the relationship).
+const ACTIVITY_LEADERBOARD_DIRECTORY_POOL_MAX = 400
 // The reference pool is a whole-table group-by (26 GiB, ~6s) and its membership moves over
 // days, so it is persisted with the ranking and re-derived on its own slow schedule
 // instead of once per cycle.
@@ -18075,6 +18094,47 @@ function activityLeaderboardGkey(account: string): string {
   return tagForAccount(account)?.tagId ?? account
 }
 
+// The gkeys a rendered directory page covers — the same key the query grouped by, so
+// a leaderboard entry made from one lands on that exact row: a system tag's id, else
+// the account itself. Viewer-fold pages are never prewarmed, so `u:` keys cannot
+// appear here (those are counted directly, see viewerFoldActivityEntries).
+export function directoryRowGkeys(rows: TopAccountRow[]): string[] {
+  const out: string[] = []
+  for (const row of rows) {
+    const gkey = row.tag ? row.tag.tagId : row.account?.accountId
+    if (gkey) out.push(gkey)
+  }
+  return out
+}
+
+// Whatever the last full prewarm pass rendered, replaced atomically so a half-warmed
+// pass can never narrow the pool. Empty until the first pass completes, which only
+// means the board keeps to its reference pool for those few minutes.
+let directoryPoolGkeys: string[] = []
+
+// Pool members for those gkeys: an account each cycle can count FROM, since a total is
+// established through an account (a tagged one resolves to its tag's own feed — see
+// activityLeaderboardTotal). Reference-pool members are skipped, being counted already.
+// `refs: 0` places these after the reference pool in the due order, so the busiest
+// accounts on the chain keep priority over whatever currently leads a directory page.
+export function demandPoolMembers(
+  gkeys: string[],
+  alreadyPooled: Set<string>,
+  memberOfTag: (tagId: string) => string | null,
+  limit = ACTIVITY_LEADERBOARD_DIRECTORY_POOL_MAX,
+): ActivityLeaderboardPoolMember[] {
+  const out: ActivityLeaderboardPoolMember[] = []
+  const seen = new Set<string>()
+  for (const gkey of gkeys) {
+    if (out.length >= limit) break
+    if (seen.has(gkey) || alreadyPooled.has(gkey)) continue
+    seen.add(gkey)
+    const account = ACCOUNT_RE.test(gkey) ? gkey : memberOfTag(gkey)
+    if (account) out.push({ account, refs: 0 })
+  }
+  return out
+}
+
 // Count one pool member through the very endpoints the detail pages read, so the
 // directory cannot describe an account differently from its own page — and so the count
 // lands in the same cache that page will hit.
@@ -18106,6 +18166,13 @@ async function refreshActivityLeaderboardUncached(): Promise<void> {
   // the persisted ranking. Without this a restart would throw away every count and begin
   // the multi-cycle rebuild again.
   const published = await ensureActivityLeaderboard()
+  // Seed the swept table from the published ranking BEFORE counting anything: a cold
+  // process (every deploy) would otherwise serve a blank Activity column for the whole
+  // first cycle, since the table is the read path now.
+  if (!activityTotalsSeeded && published?.entries.length) {
+    await persistActivityTotals(published.entries)
+    activityTotalsSeeded = true
+  }
   const { pool, refsOutside, poolAt } = await activityLeaderboardPool(published)
   const byGkey = new Map<string, ActivityLeaderboardEntry>()
   // Carry those entries so a throttled pass deepens the ranking instead of restarting it;
@@ -18113,8 +18180,20 @@ async function refreshActivityLeaderboardUncached(): Promise<void> {
   for (const entry of published?.entries ?? []) byGkey.set(entry.gkey, entry)
   // One member per directory row (a tag's members all resolve to the tag's own feed), the
   // most overdue first, capped at what one cycle may spend.
+  // The reference pool ranks the chain's busiest accounts; the demand pool covers what
+  // the directory actually shows. Only the reference half is persisted and aged (see
+  // activityLeaderboardPool) — the demand half is rebuilt from the latest prewarm every
+  // cycle, so it follows the pages rather than a six-hour-old snapshot of them.
+  const members = [
+    ...pool,
+    ...demandPoolMembers(
+      directoryPoolGkeys,
+      new Set(pool.map(m => activityLeaderboardGkey(m.account))),
+      tagId => tagMembers(tagId)?.[0] ?? null,
+    ),
+  ]
   const dueByGkey = new Map<string, ActivityLeaderboardPoolMember>()
-  for (const member of pool) {
+  for (const member of members) {
     const gkey = activityLeaderboardGkey(member.account)
     if (dueByGkey.has(gkey)) continue
     if (activityLeaderboardEntryAge(byGkey.get(gkey)) <= ACTIVITY_LEADERBOARD_ENTRY_TTL_MS) continue
@@ -18124,6 +18203,7 @@ async function refreshActivityLeaderboardUncached(): Promise<void> {
     .sort(([a], [b]) => activityLeaderboardEntryAge(byGkey.get(b)) - activityLeaderboardEntryAge(byGkey.get(a)))
     .slice(0, ACTIVITY_LEADERBOARD_COUNTS_PER_CYCLE)
   let counted = 0
+  const countedNow = new Set<string>()
   for (const [, member] of due) {
     // Idle between counts so the pass leaves the instance to live ingestion and requests
     // rather than occupying it back to back.
@@ -18135,18 +18215,21 @@ async function refreshActivityLeaderboardUncached(): Promise<void> {
         gkey: result.gkey, total: result.total.total, complete: result.total.complete,
         countedAt: new Date().toISOString(),
       })
+      countedNow.add(result.gkey)
       counted++
     } catch (error) {
       console.warn('[explorer] activity leaderboard member failed', member.account, error)
     }
   }
-  // Only the current pool's rows are counted, so only they carry a number. Dropping the
-  // rest keeps the ranking (and the literal list the directory query interpolates) from
-  // growing with every pool reshuffle.
-  const poolGkeys = new Set(pool.map(member => activityLeaderboardGkey(member.account)))
-  const entries = [...byGkey.values()]
-    .filter(entry => poolGkeys.has(entry.gkey))
-    .sort((a, b) => Number(b.complete) - Number(a.complete) || b.total - a.total)
+  // Totals live in account_activity_totals, keyed by the directory's own grouping key,
+  // and the read path joins them (see AGENTS.md, Swept models) — they are no longer a
+  // literal spliced into the directory query, which is what capped this at a few
+  // hundred entries. Replacement is per gkey, so a partial sweep is a valid state and
+  // recounting one entity is idempotent.
+  const entries = [...byGkey.values()].sort((a, b) => Number(b.complete) - Number(a.complete) || b.total - a.total)
+  // Only what this cycle recounted; the seed above covers a cold start.
+  await persistActivityTotals(entries.filter(e => countedNow.has(e.gkey)))
+  activityTotalsSeeded = true
   // Only the leading run whose totals clear everything outside the pool is provably in
   // order. A partial total is a floor, so it can never establish a rank.
   let rankedDepth = 0
@@ -18156,7 +18239,25 @@ async function refreshActivityLeaderboardUncached(): Promise<void> {
   }
   activityLeaderboard = { entries, rankedDepth, computedAt: new Date().toISOString(), pool, refsOutside, poolAt }
   await persistActivityLeaderboard(activityLeaderboard)
-  console.info('[explorer] activity leaderboard', { entries: entries.length, due: due.length, counted, rankedDepth, refsOutside })
+  console.info('[explorer] activity leaderboard', { entries: entries.length, members: members.length, due: due.length, counted, rankedDepth, refsOutside })
+}
+
+// The sweep's write side. One row per directory grouping key; ReplacingMergeTree keyed
+// on gkey, so recounting an entity replaces its row rather than accumulating history.
+let activityTotalsSeeded = false
+
+async function persistActivityTotals(entries: ActivityLeaderboardEntry[]): Promise<void> {
+  if (!entries.length) return
+  await client.insert({
+    table: 'price_data.account_activity_totals',
+    values: entries.map(entry => ({
+      gkey: entry.gkey,
+      total: entry.total,
+      complete: entry.complete ? 1 : 0,
+      counted_at: (entry.countedAt || new Date().toISOString()).replace('T', ' ').replace(/\.\d{3}Z$/, ''),
+    })),
+    format: 'JSONEachRow',
+  }).catch(error => console.warn('[explorer] activity totals persist failed', error))
 }
 
 // Persisted so a restart serves the last published ranking instead of an empty one; the
@@ -18378,6 +18479,121 @@ export function getAccountsForViewerFold(offset: number, limit: number, sort: Ac
   return accountsPage(offset, limit, sort, false, fold)
 }
 
+// Activity totals for a VIEWER's own fold groups (subscribed lists and personal
+// tags). Those rows group under `u:<tagId>`, a key the activity leaderboard cannot
+// contain — it only ever counts a system tag id or a bare account id, verified
+// against both persisted generations — so they were the one kind of directory row
+// left with an empty Activity cell while every row around them showed a number.
+//
+// Counted through getListTagListTotal, which is exactly what the group's OWN
+// aggregate page calls, so the directory row and that page can never state
+// different numbers. That is the API's heaviest read, which is why the shared
+// directory amortizes it over a throttled leaderboard — but a fold is per-viewer
+// and a viewer has a handful of groups, not 250, and `scopedListTotal` caches on
+// the very key that page will hit (120 s fresh / 900 s stale), so the cost lands
+// once and is then shared.
+//
+// A request NEVER computes a fold total. Measured the hard way: a curated list's
+// count reads 2.7–4.8 GiB and takes 3–4.3 s (far heavier than a single account's
+// ~0.76 s), so starting a dozen of them per page build saturated ClickHouse and made
+// /accounts take 15 s — the page paying for work it then abandoned.
+//
+// Requests only REGISTER their groups; the paced background pass counts them, exactly
+// as the shared ranking is counted, and the page reads whatever is ready. A group not
+// yet counted shows no number, which is the same honest state an unswept account has.
+//
+// These stay in memory and never reach the shared table or a log line: the keys are
+// `u:<tagId>` from a viewer's own lists, which are user_* data.
+interface FoldGroupSpec { listId: string; tagId: string; members: string[] }
+const FOLD_GROUPS_TRACKED_MAX = 2_000
+const FOLD_TOTAL_TTL_MS = 12 * 3_600_000
+// Strictly one count at a time — concurrency is what broke this before (four
+// 4.8 GiB reads at once saturated the instance), not the total volume, which is
+// small: 88 groups at ~3.5s each is ~5 minutes of ClickHouse once per TTL. So the
+// sweep drains its queue continuously with a short gap and then idles, rather than
+// rationing a few per quarter hour — at 2 per 15-minute cycle those 88 groups would
+// have taken 11 hours, and the map is in memory, so every deploy restarted the wait.
+const FOLD_COUNT_COOLDOWN_MS = 2_000
+const FOLD_SWEEP_IDLE_MS = 30_000
+const foldGroupsSeen = new Map<string, FoldGroupSpec>()
+const foldTotals = new Map<string, ActivityLeaderboardEntry>()
+
+export function viewerFoldMembers(fold: { ids: string[]; keys: string[] }): Map<string, string[]> {
+  const byKey = new Map<string, string[]>()
+  fold.ids.forEach((accountId, i) => {
+    const key = fold.keys[i]
+    if (!key) return
+    ;(byKey.get(key) ?? byKey.set(key, []).get(key)!).push(accountId)
+  })
+  return byKey
+}
+
+function viewerFoldActivityEntries(fold: ViewerFold): ActivityLeaderboardEntry[] {
+  const out: ActivityLeaderboardEntry[] = []
+  for (const [gkey, members] of viewerFoldMembers(fold)) {
+    const group = fold.groups.get(gkey)
+    if (!group) continue
+    if (!foldGroupsSeen.has(gkey) && foldGroupsSeen.size < FOLD_GROUPS_TRACKED_MAX) {
+      foldGroupsSeen.set(gkey, { listId: group.listId, tagId: group.tagId, members })
+    }
+    const known = foldTotals.get(gkey)
+    if (known) out.push(known)
+  }
+  return out
+}
+
+// The single most-overdue group whose total has aged out, or null when none has.
+function dueFoldGroup(): [string, FoldGroupSpec] | null {
+  const now = Date.now()
+  const age = (gkey: string): number => {
+    const at = foldTotals.get(gkey)?.countedAt
+    const parsed = at ? Date.parse(at) : NaN
+    return Number.isFinite(parsed) ? now - parsed : Infinity
+  }
+  let best: [string, FoldGroupSpec] | null = null
+  let bestAge = FOLD_TOTAL_TTL_MS
+  for (const entry of foldGroupsSeen) {
+    const entryAge = age(entry[0])
+    if (entryAge > bestAge) { best = entry; bestAge = entryAge }
+  }
+  return best
+}
+
+// Counts one group, then reschedules: a continuous single-file lane rather than a
+// burst. Idles when nothing is due, so a warm process costs nothing.
+async function sweepOneFoldGroup(): Promise<boolean> {
+  const due = dueFoldGroup()
+  if (!due) return false
+  const [gkey, spec] = due
+  const total = await getListTagListTotal(spec.listId, spec.tagId, spec.members, { tab: 'activity', type: 'all' })
+    .catch(error => { console.warn('[explorer] fold activity count failed', error); return null })
+  if (!total || total.total == null) {
+    // Store the attempt so an ungroupable set does not hold the front of the queue.
+    foldTotals.set(gkey, { gkey, total: 0, complete: false, countedAt: new Date().toISOString() })
+    return true
+  }
+  foldTotals.set(gkey, { gkey, total: total.total, complete: total.complete, countedAt: new Date().toISOString() })
+  console.info('[explorer] fold activity totals', { tracked: foldGroupsSeen.size, known: foldTotals.size })
+  return true
+}
+
+let foldSweepTimer: ReturnType<typeof setTimeout> | null = null
+export function startFoldActivitySweep(): void {
+  if (foldSweepTimer) return
+  const tick = async (): Promise<void> => {
+    let worked = false
+    try { worked = await sweepOneFoldGroup() } catch (error) { console.warn('[explorer] fold activity sweep failed', error) }
+    foldSweepTimer = setTimeout(() => { void tick() }, worked ? FOLD_COUNT_COOLDOWN_MS : FOLD_SWEEP_IDLE_MS)
+    foldSweepTimer.unref()
+  }
+  foldSweepTimer = setTimeout(() => { void tick() }, FOLD_COUNT_COOLDOWN_MS)
+  foldSweepTimer.unref()
+}
+export function stopFoldActivitySweep(): void {
+  if (foldSweepTimer) clearTimeout(foldSweepTimer)
+  foldSweepTimer = null
+}
+
 async function accountsPage(offset: number, limit: number, sort: AccountSort, refresh: boolean, viewerFold?: ViewerFold): Promise<AccountsPage> {
   // Whole-directory ranking: every rebuild re-aggregates all balances (+ MM
   // positions, and full-history volume CTEs for some sorts) just to render one
@@ -18437,17 +18653,31 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     // The activity ordering and value both come from the background leaderboard, keyed
     // on the same gkey this query groups by. An account outside the pool has no counted
     // total, so it sorts last and renders no number — never a number from another model.
-    const leaderboard = includeActivitySort ? await ensureActivityLeaderboard() : null
+    // Read on EVERY sort, not just sort=activity: the leaderboard is an in-process
+    // object spliced in as a `transform()` literal, so the Activity column costs no
+    // query — gating it on the sort only meant the column read as empty by default.
+    const leaderboard = await ensureActivityLeaderboard()
+    // A viewer's own fold groups are keyed by `u:<tagId>`, which the leaderboard
+    // never holds, so they get derived entries (see viewerFoldActivityEntries).
+    // Shared totals come from the swept table by JOIN, not as a literal: the directory
+    // has 114k grouping keys and interpolating them would be megabytes of query text.
+    // A viewer's own fold groups stay a literal — there are dozens, and their keys are
+    // `u:<tagId>` from the viewer's private lists, which must not reach a shared table.
+    const foldEntries = viewerFold ? viewerFoldActivityEntries(viewerFold) : []
     const activityCte = ''
-    const activityJoin = ''
-    const activitySelect = leaderboard?.entries.length
-      ? `transform(g.gkey, [${leaderboard.entries.map(e => `'${e.gkey}'`).join(',')}], [${leaderboard.entries.map(e => e.total).join(',')}], toUInt64(0))`
+    const activityJoin = 'LEFT JOIN price_data.account_activity_totals AS act FINAL ON act.gkey = g.gkey'
+    const foldTotal = foldEntries.length
+      ? `transform(g.gkey, [${foldEntries.map(e => `'${e.gkey}'`).join(',')}], [${foldEntries.map(e => e.total).join(',')}], toUInt64(0))`
       : 'toUInt64(0)'
+    // A fold key is never in the shared table and vice versa, so this picks whichever
+    // side established the total rather than combining them.
+    const activitySelect = `if(${foldTotal} > 0, ${foldTotal}, ifNull(act.total, toUInt64(0)))`
     // Exact totals rank above partial ones: a partial is a floor, so ordering it against
     // an exact number would put a "known to be at least this" above a "known to be this".
-    const activityCompleteSelect = leaderboard?.entries.length
-      ? `transform(g.gkey, [${leaderboard.entries.map(e => `'${e.gkey}'`).join(',')}], [${leaderboard.entries.map(e => (e.complete ? 1 : 0)).join(',')}], 0)`
+    const foldComplete = foldEntries.length
+      ? `transform(g.gkey, [${foldEntries.map(e => `'${e.gkey}'`).join(',')}], [${foldEntries.map(e => (e.complete ? 1 : 0)).join(',')}], 0)`
       : '0'
+    const activityCompleteSelect = `if(${foldTotal} > 0, ${foldComplete}, ifNull(act.complete, 0))`
     const volumeCte = includeVolumeSort ? `,
             trade_volume_raw AS (
               SELECT account AS account_id, toFloat64(sum(${accountVolumeSource().col})) AS volume_usd
@@ -18815,8 +19045,11 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     }
 
     // The activity ordering is only established for the leaderboard's ranked prefix, so
-    // the page publishes that depth and the pager offers nothing past it.
-    const page: AccountsPage = { rows, total, ...(leaderboard ? { rankedDepth: leaderboard.rankedDepth } : {}) }
+    // the page publishes that depth and the pager offers nothing past it. Only the
+    // activity ORDERING is bounded that way — every other sort ranks the whole
+    // directory and must keep its full pager even though it now shows the same
+    // leaderboard's counts.
+    const page: AccountsPage = { rows, total, ...(includeActivitySort && leaderboard ? { rankedDepth: leaderboard.rankedDepth } : {}) }
     // Never persisted for a viewer's fold — see the load-side skip above.
     if (!viewerFold) await persistAccountDirectorySnapshot(snapshotKey, page).catch(err => console.error('[accounts] snapshot persist failed:', err))
     return page
@@ -20277,10 +20510,17 @@ export function startAccountSuffixRefresh(): void {
 }
 async function prewarmAccountDirectoryUncached(): Promise<void> {
   // Every page here reads whatever activity ranking is currently published, so this pass
-  // does not build one — that runs on its own, much slower interval.
+  // does not build one — that runs on its own, much slower interval. It does publish
+  // WHICH rows it rendered: those are the demand half of the ranking's pool, so the
+  // Activity column fills in for the pages a reader actually opens rather than only for
+  // the chain's busiest accounts (see demandPoolMembers).
   const sorts: AccountSort[] = ['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'volume', 'liquidation']
-  for (const sort of sorts) await refreshAccountsPage(0, 50, sort)
-  await refreshAccountsPage(50, 50, 'value')
+  const rendered: string[] = []
+  for (const sort of sorts) rendered.push(...directoryRowGkeys((await refreshAccountsPage(0, 50, sort))?.rows ?? []))
+  rendered.push(...directoryRowGkeys((await refreshAccountsPage(50, 50, 'value'))?.rows ?? []))
+  // Replaced whole, never appended to: a pass that failed partway must not narrow the
+  // pool to what it managed, and a row that left the directory must leave the pool.
+  if (rendered.length) directoryPoolGkeys = rendered
   // Then the detail pages' own shared read, on the same five-minute cycle: it is a third
   // of the snapshot's stale bound, so a skipped cycle costs a reader nothing and no
   // additional timer is needed. Last, and sequential, so the directory pages are never
@@ -20402,6 +20642,7 @@ export function stopExplorerBackgroundTasks(): void {
   if (omnipoolAccountClaimsRefreshTimer) clearInterval(omnipoolAccountClaimsRefreshTimer)
   if (moneyMarketAccountValuesRefreshTimer) clearInterval(moneyMarketAccountValuesRefreshTimer)
   if (contractMetricsTimer) clearInterval(contractMetricsTimer)
+  stopFoldActivitySweep()
   evmBindingsRefreshTimer = null
   accountSuffixRefreshTimer = null
   accountsPrewarmTimer = null
