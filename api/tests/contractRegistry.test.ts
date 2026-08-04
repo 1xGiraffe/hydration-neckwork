@@ -6,6 +6,7 @@ import {
   type ContractRegistryInputs, type ContractRegistryEntry,
 } from '../src/services/contractRegistryService.ts'
 import { accountRef, getContracts } from '../src/services/explorerService.ts'
+import { initContractVerificationService, loadVerifiedContracts } from '../src/services/contractVerificationService.ts'
 import type { ClickHouseClient } from '../src/db/client.ts'
 
 const HOLLAR = '0x531a654d1696ed52e7275a8cede955e82620f99a'
@@ -240,9 +241,24 @@ describe('loadContractRegistry + accessors', () => {
     expect(accountRef('0x45544800' + 'aa'.repeat(20) + '0000000000000000').isContract).toBeUndefined()
   })
 
-  it('serves directory rows with account refs, creation evidence and null verification', async () => {
+  // The verification service answers the same load queries from its own two
+  // tables; empty answers model an unverified corpus.
+  function verifiedClient(rows: { abis: unknown[]; counts: unknown[] }): ClickHouseClient {
+    return {
+      query: async ({ query }: { query: string }) => ({
+        json: async () => {
+          if (query.includes('contract_abis')) return rows.abis
+          if (query.includes('contract_sources')) return rows.counts
+          throw new Error(`Unexpected query: ${query}`)
+        },
+      }),
+    } as unknown as ClickHouseClient
+  }
+
+  it('serves directory rows with account refs, creation evidence and explicit unverified status', async () => {
     initContractRegistryService(fakeClient())
-    await loadContractRegistry()
+    initContractVerificationService(verifiedClient({ abis: [], counts: [] }))
+    await Promise.all([loadContractRegistry(), loadVerifiedContracts()])
     const { contracts, total } = getContracts(0, 10, 'txs')
     expect(total).toBe(1)
     const row = contracts[0]
@@ -250,10 +266,37 @@ describe('loadContractRegistry + accessors', () => {
     expect(row.account.isContract).toBe(true)
     expect(row.account.address).toBe(HOLLAR)   // contract pills display the H160
     expect(row.verified).toBeNull()
-    expect(row.verification).toBeNull()
+    expect(row.verification).toEqual({ status: 'unverified' })
     expect(row.creation.method).toBe('create')
     expect(row.creation.deployer?.accountId).toBe(DEPLOYER)
     expect(row.creation.txHash).toBe('0xabc')
     expect(row).toMatchObject({ codeSize: 10719, destroyed: false, txCount: 50, logCount: 900 })
+  })
+
+  it('fills the verified chip and verification card from the verified-contract map', async () => {
+    initContractRegistryService(fakeClient())
+    initContractVerificationService(verifiedClient({
+      abis: [{
+        address: HOLLAR, contract_name: 'GhoToken', compiler_version: 'v0.8.10+commit.fc410830',
+        match_type: 'FULL', source: 'verified', code_hash: '0x' + 'ab'.repeat(32),
+        verified_at: '2026-08-04 10:00:00', abi_present: 1,
+      }],
+      counts: [{ address: HOLLAR, c: 2 }],
+    }))
+    await Promise.all([loadContractRegistry(), loadVerifiedContracts()])
+    const row = getContracts(0, 10, 'txs').contracts[0]
+    expect(row.verified).toEqual({ status: 'verified', name: 'GhoToken', matchType: 'exact_match' })
+    expect(row.verification).toMatchObject({
+      status: 'verified',
+      compilerVersion: 'v0.8.10+commit.fc410830',
+      source: 'verified',
+      abiPresent: true,
+      sourceFileCount: 2,
+      // The registry snapshot hash equals the one recorded at verification time.
+      supersededBytecode: false,
+    })
+    // Reset the module map so test order never leaks a verified corpus.
+    initContractVerificationService(verifiedClient({ abis: [], counts: [] }))
+    await loadVerifiedContracts()
   })
 })

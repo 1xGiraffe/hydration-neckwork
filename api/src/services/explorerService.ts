@@ -16,6 +16,7 @@ import { encodeAddress, base58Encode } from '@polkadot/util-crypto'
 import { hexToU8a } from '@polkadot/util'
 import { proxyInfoFor, multisigCompositionFor, multisigMembershipsFor, pendingMultisigOps, threshold1OpsFor, type ProxyRelation, type PendingMultisigOp } from './proxyMultisigService.ts'
 import { isContractAccount, contractByH160, allContracts, contractsPage, type ContractRegistryEntry, type ContractCreation, type ContractSort } from './contractRegistryService.ts'
+import { verifiedContractInfo, verificationDisplay, searchVerifiedNames, allVerifiedContracts, type VerificationDisplay } from './contractVerificationService.ts'
 import {
   resolveProxyInner, buildMultisigOperations, enrichMultisigOperations, proxyChildAddress,
   type ExtrinsicCallRow, type ProxyInnerInfo, type MultisigLifecycleEvent, type MultisigCallInfo,
@@ -2699,9 +2700,9 @@ export interface MultisigDisplay {
 export interface MultisigMembershipDisplay { account: AccountRef; threshold: number; signatories: number }
 
 // A contract's registry row, resolved to displayable refs. Serves both the
-// /explorer/contracts directory and AddressDetail.contract. `verified`/
-// `verification` are null until the verification service (Phase 2) lands —
-// explicit incompleteness, shaped for the fields it will fill.
+// /explorer/contracts directory and AddressDetail.contract. `verified` is the
+// compact directory chip; `verification` is the full card (§5.2), an explicit
+// `unverified` status when no verification exists.
 export interface ContractCreationDisplay {
   method: 'create' | 'factory' | 'unknown'
   deployer?: AccountRef | null
@@ -2717,7 +2718,7 @@ export interface ContractDisplay {
   address: string
   account: AccountRef
   verified: { status: string; name: string; matchType: string } | null
-  verification: Record<string, unknown> | null
+  verification: VerificationDisplay
   creation: ContractCreationDisplay
   codeHash: string
   codeSize: number
@@ -2742,11 +2743,14 @@ function contractDisplay(e: ContractRegistryEntry): ContractDisplay {
       attribution: 'first-log',
       blockHeight: c.blockHeight, timestamp: c.timestamp, txHash: c.txHash,
     } : { method: 'unknown' }
+  const verification = verificationDisplay(verifiedContractInfo(e.address), e.codeHash)
   return {
     address: e.address,
     account: accountRef(evmAccountIdFromAddress(e.address) ?? e.address),
-    verified: null,
-    verification: null,
+    verified: verification.status === 'verified'
+      ? { status: 'verified', name: verification.name ?? '', matchType: verification.matchType ?? '' }
+      : null,
+    verification,
     creation,
     codeHash: e.codeHash,
     codeSize: e.codeSize,
@@ -19885,6 +19889,7 @@ function accountsByEmoji(emoji: string): string[] {
 // most-active accounts first, so this just controls how many of them the dropdown
 // surfaces. Kept modest so the dropdown stays scannable.
 const MAX_ACCOUNT_RESULTS = 15
+const MAX_CONTRACT_NAME_RESULTS = 5
 
 // Cap on referendum results (index or title match) in one search response.
 const MAX_REFERENDUM_RESULTS = 8
@@ -19997,6 +20002,23 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
       .filter(x => x.rank >= 0)
       .sort((a, b) => a.rank - b.rank || a.t.name.localeCompare(b.t.name))
     for (const { t } of rankedTags) results.push({ type: 'tag', value: t.tagId, label: t.name, icon: t.icon, color: t.color })
+
+    // Verified contract names, from the in-memory verified map — cheap and
+    // additive (§5.5). Rendered as account hits: `value` is the contract's
+    // truncated account form (the account page canonicalizes to the H160),
+    // `label` the H160 the dropdown shortens, and the verified name rides in
+    // the identity display slot (verified:false — the ✓ stays identity-only).
+    for (const hit of searchVerifiedNames(query, allVerifiedContracts()).slice(0, MAX_CONTRACT_NAME_RESULTS)) {
+      const accountId = evmAccountIdFromAddress(hit.address)
+      if (!accountId || seenAccounts.has(accountId)) continue
+      seenAccounts.add(accountId)
+      const ic = accountIcon(accountId)
+      results.push({
+        type: 'address', value: accountId, label: hit.address,
+        emoji: ic.emoji, emojiName: ic.emojiName, emojiUrl: ic.emojiUrl,
+        identity: { display: hit.name, verified: false, email: '', web: '', twitter: '' },
+      })
+    }
   }
 
   // Combined "3-letter code + emoji name" query (either order: "pmo pig",

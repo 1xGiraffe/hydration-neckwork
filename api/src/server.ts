@@ -20,6 +20,7 @@ import { contractsRoutes } from './routes/contracts.ts'
 import { tagRoutes } from './routes/tags.ts'
 import { userRoutes } from './routes/user.ts'
 import { listsRoutes } from './routes/lists.ts'
+import { verificationRoutes, collapseDuplicateSlashes } from './routes/verification.ts'
 import { loadExplorerAssets, stopExplorerAssetsRefresh } from './services/explorerAssets.ts'
 import { loadRuntimeErrorNames, stopRuntimeErrorNamesRefresh } from './services/runtimeErrorNames.ts'
 import {
@@ -43,6 +44,7 @@ import {
 } from './services/explorerService.ts'
 import { initTagService, loadTags, seedDefaultTags, syncMoneyMarketTag, startMoneyMarketTagRefresh, syncStructuralTags, startStructuralTagRefresh, reconcileTagPresentation, retireUnknownTagMemberships } from './services/tagService.ts'
 import { initContractRegistryService, loadContractRegistry, startContractRegistryRefresh, stopContractRegistryRefresh } from './services/contractRegistryService.ts'
+import { initContractVerificationService, loadVerifiedContracts, startVerifiedContractsRefresh, stopVerifiedContractsRefresh } from './services/contractVerificationService.ts'
 import { initIdentityService, loadIdentities, startIdentityRefresh, stopIdentityRefresh } from './services/identityService.ts'
 import { initGovernanceService } from './services/governanceService.ts'
 import {
@@ -75,7 +77,14 @@ import { initUserListService, loadUserLists, ensureTagMemberPositionColumn } fro
 // abuse brake and auth itself is signature-based, not IP-based. Never widen
 // this to bare `true`, which would trust XFF from any hop, including a public
 // client spoofing it directly.
-const fastify = Fastify({ logger: true, trustProxy: ['loopback', 'linklocal', 'uniquelocal'] })
+const fastify = Fastify({
+  logger: true,
+  trustProxy: ['loopback', 'linklocal', 'uniquelocal'],
+  // Verification clients can produce a doubled leading slash (`//v2/...`)
+  // purely from how they join their configured base URL; collapse it before
+  // routing so those requests reach the same handlers. See routes/verification.ts.
+  rewriteUrl: req => collapseDuplicateSlashes(req.url ?? '/'),
+})
 
 const client = createClickHouseClient()
 
@@ -118,6 +127,10 @@ const CACHE_CONTROL: [RegExp, number][] = [
   [/^\/explorer\/accounts/, 30],
   // Contracts directory: in-memory registry refreshed every 5 minutes.
   [/^\/explorer\/contracts/, 30],
+  // Verified-contract artifacts (ABI, sources) change only on re-verification.
+  [/^\/explorer\/contract\//, 300],
+  // Sourcify already-verified probe; flips at most once per verification.
+  [/^\/v2\/contract\//, 60],
   [/^\/explorer\//, 5],
 ]
 fastify.addHook('onSend', async (req, reply) => {
@@ -141,6 +154,7 @@ fastify.addHook('onClose', async () => {
   stopReferendumTitleRefresh()
   stopBackgroundRefresh()
   stopContractRegistryRefresh()
+  stopVerifiedContractsRefresh()
   stopAccountSwapActivityQueueDrain()
   stopExplorerBackgroundTasks()
   await client.close()
@@ -155,6 +169,7 @@ await fastify.register(contractsRoutes)
 await fastify.register(tagRoutes)
 await fastify.register(userRoutes)
 await fastify.register(listsRoutes)
+await fastify.register(verificationRoutes)
 
 async function start() {
   try {
@@ -199,6 +214,7 @@ async function start() {
     // Must precede startBackgroundRefresh(): its initial pass runs the
     // contract-code snapshot refresher, which reads and writes ClickHouse.
     initContractRegistryService(client)
+    initContractVerificationService(client)
     await initUserAuthService(client)
     initUserProfileService(client)
     initUserListService(client)
@@ -235,6 +251,12 @@ async function start() {
     // contract wherever an account appears, and /contracts is their directory.
     await loadContractRegistry().catch(e => console.warn('[contracts] registry load failed', e))
     startContractRegistryRefresh()
+    // Verified-contract map (names, match types, code hashes at verification
+    // time): drives the directory chip, AddressDetail.verification and search.
+    // Refreshed after every successful verification; the slow timer covers
+    // external writers (the ad-hoc Blockscout seed).
+    await loadVerifiedContracts().catch(e => console.warn('[contracts] verified map load failed', e))
+    startVerifiedContractsRefresh()
     // Colors are code-canonical; push any code-side color edits onto already-seeded
     // rows (seed/sync never rewrite existing memberships). No-op when already in sync.
     await reconcileTagPresentation().catch(e => console.warn('[tags] presentation reconcile failed', e))
