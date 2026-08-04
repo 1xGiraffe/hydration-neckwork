@@ -461,9 +461,10 @@ export const test = base.extend<{ mockApi: void; userMock: { state: UserMockStat
   // The EVM counterpart of `injectedWallet`: announces one EIP-6963 provider
   // before any app code runs. Requests are answered deterministically and
   // recorded on `window.__evmWalletCalls`, so a spec can assert the exact
-  // chain-add/switch parameters a real wallet would receive. The first
-  // wallet_switchEthereumChain deliberately answers 4902 (chain unknown — the
-  // common case for chain 222222) so the add-chain path is always exercised.
+  // payload a real wallet would receive — for writes that is the CallPermit
+  // typed data, the only thing an EVM wallet is ever asked to sign here. The
+  // signature is a fixed 65 bytes with recovery id 27; it never has to recover
+  // to the address, because no node validates it in a browser test.
   evmWallet: [async ({ page }, use) => {
     await page.addInitScript(([address, txHash, rdns]) => {
       const calls: { method: string; params?: unknown[] }[] = []
@@ -479,6 +480,7 @@ export const test = base.extend<{ mockApi: void; userMock: { state: UserMockStat
           }
           if (method === 'wallet_addEthereumChain') return null
           if (method === 'eth_sendTransaction') return txHash
+          if (method === 'eth_signTypedData_v4') return `0x${'11'.repeat(32)}${'22'.repeat(32)}1b`
           throw Object.assign(new Error(`unsupported ${method}`), { code: -32601 })
         },
       }

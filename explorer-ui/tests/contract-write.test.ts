@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { writeFunctions } from '../src/abiShape'
 import { encodeCall, parseArgs } from '../src/abiCodec'
 import {
-  hydrationChainParams, ensureHydrationChain, gasWithMargin, parseWethValue, runEvmWrite,
+  hydrationChainParams, ensureHydrationChain, gasWithMargin, gasPriceWithMargin, parseWethValue, runEvmWrite,
 } from '../src/contractWrite'
 import type { WriteStage } from '../src/contractWrite'
 
@@ -114,6 +114,14 @@ describe('gasWithMargin', () => {
     expect(gasWithMargin(100_000n)).toBe(125_000n)
     expect(gasWithMargin(21_000n)).toBe(26_250n)
     expect(gasWithMargin(0n)).toBe(0n)
+  })
+})
+
+describe('gasPriceWithMargin', () => {
+  it('adds the same 25% ceiling over eth_gasPrice, so a base fee that ticks up mid-flight still fits', () => {
+    expect(gasPriceWithMargin(6_468_984n)).toBe(8_086_230n)
+    expect(gasPriceWithMargin(1_000_000_000n)).toBe(1_250_000_000n)
+    expect(gasPriceWithMargin(0n)).toBe(0n)
   })
 })
 
