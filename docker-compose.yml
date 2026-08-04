@@ -400,6 +400,58 @@ services:
     networks:
       - neckwork
 
+  # Blockscout's contract-verification microservice: compiles submitted
+  # standard-json and compares against the bytecode the api hands it. Stateless
+  # apart from a compiler cache, and completely chain-agnostic, which is why it
+  # works for Hydration without knowing chain 222222. Internal network only —
+  # the public surface is the api's Sourcify-compatible translation layer.
+  #
+  # Config is deserialized with deny_unknown_fields: a typo in any
+  # SMART_CONTRACT_VERIFIER__* variable PANICS at startup rather than warning.
+  smart-contract-verifier:
+    image: ghcr.io/blockscout/smart-contract-verifier:v1.10.6
+    container_name: hydration-neckwork-smart-contract-verifier
+    restart: unless-stopped
+    environment:
+      # 2 MiB default is below a real project's standard-json input.
+      - SMART_CONTRACT_VERIFIER__SERVER__HTTP__MAX_BODY_SIZE=33554432
+      # Defaults to true and pulls two extra compiler lists on startup.
+      - SMART_CONTRACT_VERIFIER__ZKSYNC_SOLIDITY__ENABLED=false
+      # sourcify.dev does not know chain 222222, so its sourcify route is
+      # useless here; the api implements that protocol itself.
+      - SMART_CONTRACT_VERIFIER__SOURCIFY__ENABLED=false
+    volumes:
+      # Named volume, not a bind mount: the container runs as uid 1001 and would
+      # fail to populate a host-owned directory. A FRESH volume still mounts
+      # root-owned (the image has no /tmp/solidity-compilers to inherit from),
+      # so a new deployment needs a one-time
+      #   docker compose exec -u root smart-contract-verifier chown 1001:1001 /tmp/solidity-compilers
+      # or every verification fails with "fetching evm compiler: Permission denied".
+      - solidity_compilers:/tmp/solidity-compilers
+    networks:
+      - neckwork
+
+  # Nightly Parquet export of the contract verification tables — api-authored
+  # state a projection rebuild cannot regenerate (005_contracts.sql). Mirrors
+  # user-backup with its own script and volume; see ops/backup-contract-tables.sh
+  # for the export/retention/restore procedure.
+  contract-backup:
+    build: ./clickhouse
+    container_name: hydration-neckwork-contract-backup
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/backup-contract-tables.sh"]
+    volumes:
+      - ./ops/backup-contract-tables.sh:/backup-contract-tables.sh:ro
+      - contract_backups:/backups
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    networks:
+      - neckwork
+
   api:
     build:
       context: ./api
@@ -420,6 +472,10 @@ services:
       - RAW_EVM_RPC_URL=${RAW_EVM_RPC_URL:-https://hydration-rpc.neckwork.net}
       - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
       - EXPLORER_OCELLOIDS_TOKEN=${EXPLORER_OCELLOIDS_TOKEN:-}
+      # Contract verification: compile-and-compare backend + the chain id the
+      # Sourcify-compatible routes answer for.
+      - SMART_CONTRACT_VERIFIER_URL=${SMART_CONTRACT_VERIFIER_URL:-http://smart-contract-verifier:8050}
+      - EVM_CHAIN_ID=${EVM_CHAIN_ID:-222222}
     networks:
       - neckwork
 
@@ -472,6 +528,8 @@ services:
         # Public URL of the Preis price-chart UI, baked into the bundle at build time
         # (Vite). Set VITE_PREIS_URL in .env, then rebuild explorer-ui.
         VITE_PREIS_URL: ${VITE_PREIS_URL:-}
+        # Browser-side EVM JSON-RPC for the contract tab (bytecode, eth_call).
+        VITE_EVM_RPC_URL: ${VITE_EVM_RPC_URL:-}
     container_name: hydration-neckwork-explorer-ui
     depends_on:
       - api
@@ -484,6 +542,8 @@ volumes:
   clickhouse_data:
     name: ${CLICKHOUSE_VOLUME_NAME:-hydration-neckwork-clickhouse-data}
   user_backups:
+  contract_backups:
+  solidity_compilers:
 
 networks:
   neckwork:
