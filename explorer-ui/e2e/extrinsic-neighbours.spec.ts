@@ -36,9 +36,25 @@ test.describe('extrinsic neighbour navigation', () => {
 
     await expect(page).toHaveURL(new RegExp(`/extrinsic/${HEIGHT}-${LAST}$`))
     await expect(page.locator('.dl .dd').first()).toHaveText(`${HEIGHT}-${LAST}`)
-    // Past the block's last index there is no extrinsic, so no forward arrow.
-    await expect(page.locator('[aria-label="Next extrinsic"]')).toHaveCount(0)
-    await expect(page.locator('[aria-label="Previous extrinsic"]')).toHaveCount(1)
+    // Past the block's last index there is no extrinsic. The arrow stays in place,
+    // disabled and saying why, so the pair never shifts mid-walk — both arrows sit
+    // at the same coordinates on the first and last extrinsic of the block.
+    const next = page.locator('[aria-label="Next extrinsic"]')
+    const prev = page.locator('[aria-label="Previous extrinsic"]')
+    await expect(next).toBeDisabled()
+    await expect(next).toHaveAttribute('title', 'Last extrinsic in this block')
+    await expect(prev).toBeEnabled()
+    // Horizontal position only: the page's mount transform moves the painted box
+    // vertically for a moment, and it is sideways drift — a right-aligned strip
+    // resizing as arrows appear and vanish — that this pins.
+    const atLast = await next.boundingBox()
+
+    await page.goto(`/extrinsic/${HEIGHT}-0`)
+    await expect(page.locator('.dl .dd').first()).toHaveText(`${HEIGHT}-0`)
+    await expect(prev).toBeDisabled()
+    await expect(prev).toHaveAttribute('title', 'First extrinsic in this block')
+    await expect(next).toBeEnabled()
+    expect((await next.boundingBox())!.x).toBe(atLast!.x)
   })
 
   test.describe('mobile', () => {
@@ -58,11 +74,13 @@ test.describe('extrinsic neighbour navigation', () => {
       // a transform, which moves no layout.
       const cardTop = () => page.evaluate(() => (document.querySelector('.detail-card') as HTMLElement).offsetTop)
       await expect(page.locator('.nav-btns')).toHaveCount(1)
-      await expect(page.locator('[aria-label="Next extrinsic"]')).toHaveCount(0)
+      // Both arrows exist from the first paint, disabled until the extrinsic and
+      // its sibling resolve — so the strip's height is settled before either can.
+      await expect(page.locator('[aria-label="Next extrinsic"]')).toBeDisabled()
       await page.evaluate(() => document.fonts.ready)
       const loading = await cardTop()
 
-      await expect(page.locator('[aria-label="Next extrinsic"]')).toBeVisible()
+      await expect(page.locator('[aria-label="Next extrinsic"]')).toBeEnabled()
       const loaded = await cardTop()
       expect(Math.abs(loaded - loading), `detail card moved ${loaded - loading}px`).toBeLessThan(2)
     })
