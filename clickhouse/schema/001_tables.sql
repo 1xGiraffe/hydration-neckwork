@@ -85,6 +85,14 @@ CREATE TABLE IF NOT EXISTS price_data.evm_executed (`to_address` String, `from_a
 -- ifNull(extrinsic_index)+call_address mirrors raw_calls' identity so nested
 -- calls (batch/proxy) stay distinct and replays replace. ~137k rows.
 CREATE TABLE IF NOT EXISTS price_data.evm_pallet_calls (`target` String, `block_height` UInt32, `extrinsic_index` Nullable(UInt32), `call_address` String, `block_timestamp` DateTime, `source` String, `success` Nullable(UInt8), `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (target, block_height, ifNull(extrinsic_index, 4294967295), call_address) SETTINGS index_granularity = 1024;
+-- Ethereum.Executed projection, transaction-hash-first: resolves a pasted EVM
+-- transaction hash to the extrinsic that carries it (`/extrinsic/<txHash>` and
+-- search), which evm_executed's contract-first key cannot prune — a hash
+-- predicate there reads the whole table. tx_hash is unique per transaction, so it
+-- is a sound replacement key. Deliberately NOT partitioned: a point lookup would
+-- otherwise have to touch every month. Also keeps exitReason's detail and
+-- extraData (the returned revert data), which evm_executed drops. ~206k rows.
+CREATE TABLE IF NOT EXISTS price_data.evm_transactions (`tx_hash` String, `block_height` UInt32, `extrinsic_index` Nullable(UInt32), `event_index` UInt32, `block_timestamp` DateTime, `from_address` String, `to_address` String, `exit_kind` LowCardinality(String), `exit_detail` LowCardinality(String), `extra_data` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY tx_hash SETTINGS index_granularity = 1024;
 CREATE TABLE IF NOT EXISTS price_data.farm_deposit_latest (`deposit_id` String, `position_id` AggregateFunction(argMax, String, UInt64)) ENGINE = AggregatingMergeTree ORDER BY deposit_id SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.governance_vote_calls (`pallet` LowCardinality(String), `ref_index` UInt32, `block_height` UInt32, `extrinsic_index` Nullable(UInt32), `call_address` String, `block_timestamp` DateTime, `call_name` LowCardinality(String), `who` String, `vote_kind` LowCardinality(String), `vote_byte` UInt16, `balance` String, `aye` String, `nay` String, `abstain` String, `success` UInt8, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (pallet, ref_index, block_height, ifNull(extrinsic_index, 4294967295), call_address) SETTINGS index_granularity = 1024;
 CREATE TABLE IF NOT EXISTS price_data.hdx_holder_lifetime (`account_id` String, `first_nonzero_state` AggregateFunction(min, DateTime), `last_nonzero_state` AggregateFunction(max, DateTime)) ENGINE = AggregatingMergeTree ORDER BY account_id SETTINGS index_granularity = 1024;
