@@ -95,6 +95,31 @@ test.describe('desktop', () => {
     await expect(row).toContainText('42,000,000,000,000,000,000')
   })
 
+  // Query arguments feed the same signature-keyed store the Write tab uses,
+  // recorded when Query is pressed whatever the call returns.
+  test('read tab remembers queried values and offers them again', async ({ page }) => {
+    await mockEvmRpc(page)
+    await page.goto(`/account/${VERIFIED_CONTRACT_ADDRESS}?view=contract&contract=read`)
+    await page.locator('.fn-head', { hasText: 'balanceOf(address)' }).click()
+    const row = page.locator('.fn-row', { hasText: 'balanceOf(address)' })
+    await row.locator('input').fill(UNVERIFIED_CONTRACT_ADDRESS)
+    await row.locator('button', { hasText: 'Query' }).click()
+    await expect(row).toContainText('42,000,000,000,000,000,000')
+    // Offered again after a reload, scoped to its own field. The box comes back
+    // empty, so the popover has something to show on focus.
+    await page.reload()
+    await page.locator('.fn-head', { hasText: 'balanceOf(address)' }).click()
+    await row.locator('input').click()
+    const pop = row.locator('.recent-pop')
+    await expect(pop.locator('.recent-opt')).toHaveCount(1)
+    await expect(pop).toContainText(UNVERIFIED_CONTRACT_ADDRESS)
+    // Picking the suggestion fills the field and the query goes through.
+    await pop.locator('.recent-opt').click()
+    await expect(row.locator('input')).toHaveValue(UNVERIFIED_CONTRACT_ADDRESS)
+    await row.locator('button', { hasText: 'Query' }).click()
+    await expect(row).toContainText('42,000,000,000,000,000,000')
+  })
+
   test('transactions and events sub-tabs page decoded contract activity', async ({ page }) => {
     await mockEvmRpc(page)
     await page.goto(`/account/${VERIFIED_CONTRACT_ADDRESS}?view=contract&contract=txs`)
