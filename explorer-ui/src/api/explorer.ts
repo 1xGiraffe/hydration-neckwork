@@ -5,7 +5,7 @@ import type {
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
-  AccountRef, DeviceLinkResponse, DeviceLinkStatus, DeviceSession,
+  AccountRef, DeviceLinkResponse, DeviceLinkStatus, DeviceSession, EvmReceipt,
 } from '../types'
 import { getSession, setSession } from '../session'
 
@@ -108,6 +108,9 @@ export const api = {
   extrinsicAtActivity: (height: number, index: number, signal?: AbortSignal) => getJson<ActivityRow[]>(`/explorer/extrinsic-at/${height}/${index}/activity`, signal),
   extrinsicEncoded: (height: number, index: number, signal?: AbortSignal) =>
     getJson<{ encoded: string }>(`/explorer/extrinsic-at/${height}/${index}/encoded`, signal),
+  // Gas for one EVM transaction, from the chain's own receipt (nothing indexes it).
+  // 404 when the node cannot answer — the extrinsic page then omits the gas rows.
+  evmReceipt: (txHash: string, signal?: AbortSignal) => getJson<EvmReceipt>(`/explorer/evm-tx/${txHash}/receipt`, signal),
   referendum: (pallet: 'opengov' | 'democracy', index: number, signal?: AbortSignal, limit?: number) =>
     getJson<ReferendumDetail>(withQuery(`/explorer/referendum/${pallet}/${index}`, limit == null ? {} : { limit }), signal),
   dcaSchedule: (scheduleId: number, offset = 0, limit = 25, signal?: AbortSignal) => getJson<DcaScheduleDetail>(withQuery(`/explorer/dca/${scheduleId}`, { offset, limit }), signal),

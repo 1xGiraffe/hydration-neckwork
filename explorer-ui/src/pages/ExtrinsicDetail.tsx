@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
-import { useExtrinsic, useExtrinsicActivity, useStats } from '../hooks/useExplorerData'
+import { useEvmReceipt, useExtrinsic, useExtrinsicActivity, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, redirect } from '../router'
@@ -8,6 +8,8 @@ import { Crumbs, F, AddrPill, CallPill, StatusBadge, FinalizedBadge, FailureReas
 import { api } from '../api/explorer'
 import { ActivityTable } from '../components/ActivityTable'
 import { EvmCallCard, EvmLogView } from '../components/EvmDecoded'
+import { evmTransactionEnvelope } from '../utils/evmDecoded'
+import type { EvmTransactionFacts } from '../types'
 
 // Copies the extrinsic's SCALE bytes, fetched on demand: extrinsics are stored decoded,
 // so the encoded form comes from the chain (see extrinsicBytes.ts — re-encoding from
@@ -22,6 +24,68 @@ function CallDataCopy({ height, index }: { height: number; index: number }) {
   })
   if (!data?.encoded) return null
   return <CopyTextButton label="call data" text={data.encoded} />
+}
+
+// The Ethereum-native facts of an EVM transaction, on the extrinsic page that IS
+// that transaction's page (the contract Transactions tab already links every
+// transaction here, and a hash resolves to the same extrinsic id). The substrate
+// `Extrinsic hash` row above stays exactly where it is: both hashes are real and
+// name different things, so the page labels them rather than choosing.
+//
+// Gas is the one part nothing indexes, so it arrives from the receipt separately
+// and the rows simply do not appear until it does — never a zero or a placeholder
+// standing in for a number nobody has.
+function EvmTxRows({ tx, callArgs }: { tx?: EvmTransactionFacts; callArgs: unknown }) {
+  const { data: receipt } = useEvmReceipt(tx?.txHash)
+  const envelope = evmTransactionEnvelope(callArgs)
+  // Both gas rows live or die with the receipt: gas accounting is a single fact
+  // about what the transaction cost, and stating the limit the sender signed while
+  // the amount actually burned is unknown reads as an answer where there is none
+  // (the limit is on the Parameters tab either way). Within the group, a node that
+  // reports no effective price falls back to the ceiling the sender signed, labelled
+  // as that — a Legacy `gasPrice` and an EIP1559 `maxFeePerGas` are not the same claim.
+  const gasUsed = receipt?.gasUsed ?? null
+  const gasLimit = receipt ? envelope?.gasLimit ?? null : null
+  const usedShare = gasUsed != null && gasLimit != null && Number(gasLimit) > 0 ? Number(gasUsed) / Number(gasLimit) : null
+  const gasPrice = receipt ? receipt.effectiveGasPrice ?? envelope?.gasPrice?.value ?? null : null
+  const gasPriceSource = receipt?.effectiveGasPrice ? 'effective' : envelope?.gasPrice?.field ?? null
+  return <>
+    {tx && <>
+      <div className="dt">EVM tx hash</div>
+      <div className="dd mono wrap-anywhere">{tx.txHash} <Copy text={tx.txHash} /></div>
+    </>}
+    {envelope?.kind && <><div className="dt">Tx type</div><div className="dd mono">{envelope.kind}</div></>}
+    {envelope?.nonce != null && <><div className="dt">Nonce</div><div className="dd mono">{F.preciseAmount(envelope.nonce, 0)}</div></>}
+    {envelope?.value != null && <>
+      <div className="dt">Value</div>
+      {/* Named, not bare: the EVM's native currency here is WETH (asset 20, 18
+          decimals), verified against every non-zero-value transaction in the
+          chain's history — all 68 move currency 20 in exactly these raw units.
+          An unlabelled figure reads as HDX, which is both the wrong asset and
+          12-decimal, so the number would be misread by six orders of magnitude. */}
+      <div className="dd mono" title={F.preciseAmount(envelope.value, 18)}>{F.amount(envelope.value, 18)} WETH</div>
+    </>}
+    {gasUsed != null && <>
+      <div className="dt">Gas</div>
+      <div className="dd mono">
+        {F.preciseAmount(gasUsed, 0)}{gasLimit != null && <> / {F.preciseAmount(gasLimit, 0)}</>}
+        {usedShare != null && <span className="muted"> · {F.share(usedShare)} of limit</span>}
+      </div>
+    </>}
+    {gasPrice != null && <>
+      <div className="dt">Gas price</div>
+      <div className="dd mono">{F.preciseAmount(gasPrice, 0)} wei{gasPriceSource && <span className="muted"> · {gasPriceSource}</span>}</div>
+    </>}
+    {tx?.exitKind && <>
+      <div className="dt">Exit</div>
+      <div className="dd mono wrap-anywhere">
+        {tx.exitKind}{tx.exitDetail && ` · ${tx.exitDetail}`}
+        {/* Returned data — on a revert this is the reason the contract gave, which
+            no other explorer surface carries. */}
+        {tx.extraData && <> <span className="muted">returned</span> {tx.extraData} <Copy text={tx.extraData} /></>}
+      </div>
+    </>}
+  </>
 }
 
 export function ExtrinsicDetail({ id }: { id: string }) {
@@ -86,6 +150,7 @@ export function ExtrinsicDetail({ id }: { id: string }) {
                   <div className="dt">Fee</div><div className="dd mono">{F.hdxFee(data.fee)}</div>
                   <div className="dt">Tip</div><div className="dd mono">{F.hdxFee(data.tip)}</div></>
                 : <><div className="dt">Type</div><div className="dd"><span className="badge pending" style={{ background: 'var(--panel)', color: 'var(--text-medium)' }}>Inherent</span></div></>}
+              {data.callName === 'Ethereum.transact' && <EvmTxRows tx={data.evmTx} callArgs={data.callArgs} />}
             </div></div>
 
             <div className="tabs">

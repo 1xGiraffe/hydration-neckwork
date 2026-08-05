@@ -341,6 +341,22 @@ export interface BlockDetail extends BlockSummary {
   eventsShown?: number
 }
 
+// What the Ethereum.Executed event states about the transaction an
+// `Ethereum.transact` extrinsic submitted: the hash it is known by off-chain
+// (never the substrate extrinsic hash — both are real and name different things),
+// how the EVM exited, and the data it returned (the revert selector on a failure).
+export interface EvmTransactionFacts {
+  txHash: string
+  exitKind: string
+  exitDetail: string | null
+  extraData: string | null
+}
+// Gas accounting for one EVM transaction, fetched lazily per viewed extrinsic and
+// deliberately NOT part of ExtrinsicDetail — it comes from an RPC receipt, which
+// would otherwise sit on the critical path of every EVM extrinsic view. Exact
+// integers as decimal strings; `effectiveGasPrice` absent when the node omits it.
+export interface EvmReceipt { gasUsed: string; effectiveGasPrice: string | null }
+
 export interface ExtrinsicEvent { eventIndex: number; name: string; args: unknown; decoded?: boolean; evmDecoded?: EvmLogDecode }
 export interface ExtrinsicDetail extends ExtrinsicSummary {
   version: number
@@ -352,6 +368,8 @@ export interface ExtrinsicDetail extends ExtrinsicSummary {
   // Verified-ABI decodes of the extrinsic's EVM calls (top-level and nested in
   // wrapper call trees); absent when no target has a verified ABI.
   evmCalls?: DecodedEvmCall[]
+  // Present only on `Ethereum.transact`.
+  evmTx?: EvmTransactionFacts
 }
 
 export interface TransferRow {
