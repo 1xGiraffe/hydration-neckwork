@@ -8,6 +8,8 @@ import { Combo } from './Filters'
 import { readFunctions, functionSignature, type AbiFunctionItem, type AbiParam } from '../abiShape'
 import { validateStandardJson, validateContractIdentifier } from '../verifyForm'
 import { ethCall, ethGetCode, EvmRpcError } from '../evmRpc'
+import { RecentValueInput } from './RecentValueInput'
+import { fieldKey, historyKey, recordFieldValues } from '../writeHistory'
 import { ContractWriteView } from './ContractWriteTab'
 import { ContractTransactionsView, ContractEventsView } from './ContractActivityTab'
 import { SourceBrowser } from './SourceBrowser'
@@ -336,8 +338,15 @@ function ReadFnRow({ index, fn, address }: { index: number; fn: AbiFunctionItem;
   const [result, setResult] = useState<ReadResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // The same recent-values store the Write tab uses, keyed by the signature —
+  // a value queried here is offered on any deployment of the same call, and on
+  // a write form sharing the signature.
+  const signature = historyKey(fn)
 
   async function runQuery() {
+    // Recorded when Query is pressed, not when it answers — the Write tab's
+    // rule: a query that reverts or fails to parse was still worth typing.
+    recordFieldValues(signature, Object.fromEntries(fn.inputs.map((_input, i) => [fieldKey(i), raws[i] ?? ''])))
     setBusy(true)
     setError(null)
     setResult(null)
@@ -382,16 +391,19 @@ function ReadFnRow({ index, fn, address }: { index: number; fn: AbiFunctionItem;
           {fn.inputs.map((input, i) => (
             <div className="field" key={`${input.name}-${i}`}>
               <label>{input.name || `arg ${i}`} <span className="muted">({input.type})</span></label>
-              <input {...noAutofill}
-                className="input"
+              <RecentValueInput
+                signature={signature}
+                field={fieldKey(i)}
                 placeholder={input.type}
                 value={raws[i] ?? ''}
-                onChange={e => setRaws(prev => prev.map((v, j) => (j === i ? e.target.value : v)))}
+                onChange={next => setRaws(prev => prev.map((v, j) => (j === i ? next : v)))}
               />
             </div>
           ))}
+          {/* .fn-actions is the anchor RecentValueInput measures against: the
+              suggestion popover flips upward rather than cover this button. */}
           {fn.inputs.length > 0 && (
-            <div>
+            <div className="fn-actions">
               <button type="button" className="btn primary sm" disabled={busy} onClick={() => { void runQuery() }}>{busy ? 'Querying…' : 'Query'}</button>
             </div>
           )}

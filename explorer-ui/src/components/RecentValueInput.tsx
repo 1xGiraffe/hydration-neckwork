@@ -2,11 +2,12 @@ import { noAutofill } from './ui'
 import { useEffect, useId, useRef, useState } from 'react'
 import { fieldHistory, removeFieldValue, suggestionsFor } from '../writeHistory'
 
-// A write-form field that offers what was last typed into the same field of the
-// same function signature (writeHistory.ts). Built on the combo tokens the
-// filters use, with one addition the filters do not need: every suggestion can
-// be forgotten, by its × or by Delete/Backspace while it is highlighted — a
-// mistyped address should not follow you around forever.
+// A contract-form field (Read and Write tabs) that offers what was last typed
+// into the same field of the same function signature (writeHistory.ts). Built
+// on the combo tokens the filters use, with one addition the filters do not
+// need: every suggestion can be forgotten, by its × or by Delete/Backspace
+// while it is highlighted — a mistyped address should not follow you around
+// forever.
 export function RecentValueInput({
   signature, field, value, placeholder, onChange,
 }: {
@@ -20,7 +21,7 @@ export function RecentValueInput({
   const [history, setHistory] = useState<string[]>([])
   const [activeIndex, setActiveIndex] = useState(-1)
   // Opens upward when downward would cover what follows the field — for the last
-  // argument that is the Write button itself.
+  // argument that is the Write or Query button itself.
   const [flip, setFlip] = useState(false)
   const listboxId = useId()
   const wrapRef = useRef<HTMLDivElement | null>(null)

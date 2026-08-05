@@ -1,15 +1,18 @@
 import type { AbiFunctionItem } from './abiShape'
 
-// Recently used argument values for contract writes, remembered per function
-// signature and per field. Keyed by the signature rather than the contract on
-// purpose: the same call on a second deployment (a redeployed proxy, another
-// aToken) wants the same addresses and amounts offered, and a signature is what
-// makes two functions the same call.
+// Recently used argument values for contract reads and writes, remembered per
+// function signature and per field — the Read tab records on Query, the Write
+// tab on Write. Keyed by the signature rather than the contract on purpose:
+// the same call on a second deployment (a redeployed proxy, another aToken)
+// wants the same addresses and amounts offered, and a signature is what makes
+// two functions the same call.
 //
 // localStorage rather than sessionStorage — the value of the list is that it
 // survives the tab. It holds nothing but what the user typed into a public
 // contract form, and never a wallet address the app chose for them.
 
+// The key predates the Read tab joining the store; renaming it would orphan
+// every value users already accumulated, for nothing.
 const STORAGE_KEY = 'contract-write-inputs:v2'
 // v1 keyed on types alone; its entries can never match a v2 key, so they are
 // dropped rather than left to sit in the browser forever.
