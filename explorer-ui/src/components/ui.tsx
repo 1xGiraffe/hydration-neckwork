@@ -166,6 +166,13 @@ export const F = {
     const p = v * 100
     return (p >= 0 ? '+' : '') + p.toFixed(2) + '%'
   },
+  // An unsigned share of a whole ("62.9%"), for a part measured against its own
+  // total — gas used against the gas limit. Not F.pct, which signs its output for
+  // price CHANGES: "+62.9%" would read as a movement rather than a fraction.
+  share: (v: number | null | undefined) => {
+    if (v == null || !Number.isFinite(v)) return '—'
+    return (v * 100).toFixed(1) + '%'
+  },
   hdxFee: (raw: string | null | undefined) => {
     if (raw == null || raw === '') return '—'
     const v = Number(raw) / 1e12
