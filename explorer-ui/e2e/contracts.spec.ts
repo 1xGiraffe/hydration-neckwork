@@ -11,7 +11,7 @@ test.describe('desktop', () => {
     await page.goto('/contracts')
     await expect(page.locator('.page-title')).toContainText('Contracts')
     const rows = page.locator('.contracts-tbl tbody tr')
-    await expect(rows).toHaveCount(3)
+    await expect(rows).toHaveCount(4)
     // Factory child is labelled "first seen", never "created"; destroyed stays listed.
     await expect(page.locator('.contracts-tbl')).toContainText('first seen')
     await expect(page.locator('.contracts-tbl .badge', { hasText: 'destroyed' })).toBeVisible()

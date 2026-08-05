@@ -1,24 +1,36 @@
 import type { Page } from '@playwright/test'
 import { expect, test } from './fixtures/test'
-import { VERIFIED_CONTRACT_ADDRESS, UNVERIFIED_CONTRACT_ADDRESS, firstEvmCallExtrinsic } from '../tests/fixtures/mockApi'
+import { VERIFIED_CONTRACT_ADDRESS, UNVERIFIED_CONTRACT_ADDRESS, PROXY_CONTRACT_ADDRESS, firstEvmCallExtrinsic } from '../tests/fixtures/mockApi'
 
 // The account page's Contract tab: Code (verification card, source viewer, ABI,
 // browser-fetched bytecode, verify panel) and Read (view/pure functions over
 // browser-side eth_call). The EVM RPC is mocked at the network layer so the
-// real codec chunk still encodes/decodes every byte on the wire.
+// real codec chunk still encodes/decodes every byte on the wire. Proxy
+// detection reads the EIP-1967 slot through the same mock: only the proxy
+// fixture's slot answers, everything else reads zero.
 
 const WORD = (hex: string) => hex.replace(/^0x/, '').padStart(64, '0')
 // ABI-encoded string "GHO": offset, length 3, then the bytes left-aligned.
 const SYMBOL_RESULT = '0x' + WORD('20') + WORD('3') + '47484f'.padEnd(64, '0')
 const SUPPLY_RESULT = '0x' + WORD((10n ** 24n).toString(16))     // 1,000,000 × 1e18
 const BALANCE_RESULT = '0x' + WORD((42n * 10n ** 18n).toString(16))
+// keccak256("eip1967.proxy.implementation") - 1, pinned by tests/proxy-detect.test.ts.
+const IMPL_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc'
 
-async function mockEvmRpc(page: Page) {
+async function mockEvmRpc(page: Page, opts: { proxyImplementation?: string; ethCalls?: { to?: string; data?: string }[] } = {}) {
   await page.route('https://hydration-rpc.neckwork.net/**', async route => {
-    const body = route.request().postDataJSON() as { method: string; params?: [{ data?: string }] }
+    const body = route.request().postDataJSON() as { method: string; params?: [{ data?: string; to?: string }, ...unknown[]] }
     const respond = (result: string) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ jsonrpc: '2.0', id: 1, result }) })
+    if (body.method === 'eth_getStorageAt') {
+      const [addr, slot] = body.params as unknown as [string, string]
+      if (opts.proxyImplementation && addr?.toLowerCase() === PROXY_CONTRACT_ADDRESS && slot === IMPL_SLOT) {
+        return respond('0x' + WORD(opts.proxyImplementation))
+      }
+      return respond('0x' + WORD('0'))
+    }
     if (body.method === 'eth_getCode') return respond('0x6080604052' + 'ab'.repeat(64))
     if (body.method === 'eth_call') {
+      opts.ethCalls?.push({ to: body.params?.[0]?.to, data: body.params?.[0]?.data })
       const selector = body.params?.[0]?.data?.slice(0, 10)
       if (selector === '0x95d89b41') return respond(SYMBOL_RESULT)    // symbol()
       if (selector === '0x18160ddd') return respond(SUPPLY_RESULT)    // totalSupply()
@@ -120,6 +132,36 @@ test.describe('desktop', () => {
     await expect(page.locator('.event-row', { hasText: 'EVM.Log' }).locator('.evm-decoded')).toContainText('Transfer(address,address,uint256)')
   })
 
+  test('proxy: Read and Write resolve the implementation ABI against the proxy address', async ({ page }) => {
+    const ethCalls: { to?: string; data?: string }[] = []
+    await mockEvmRpc(page, { proxyImplementation: VERIFIED_CONTRACT_ADDRESS, ethCalls })
+    await page.goto(`/account/${PROXY_CONTRACT_ADDRESS}?view=contract&contract=read`)
+    // The note names the proxy kind and links the implementation.
+    await expect(page.locator('.id-card').first()).toContainText('EIP-1967 proxy')
+    await expect(page.locator(`a[href="/account/${VERIFIED_CONTRACT_ADDRESS}"]`).first()).toBeVisible()
+    // The implementation's view functions, executed on the proxy address.
+    await page.locator('.fn-head', { hasText: 'symbol()' }).click()
+    await expect(page.locator('.fn-row', { hasText: 'symbol()' })).toContainText('GHO')
+    expect(ethCalls.some(c => c.to?.toLowerCase() === PROXY_CONTRACT_ADDRESS && c.data?.startsWith('0x95d89b41'))).toBe(true)
+    expect(ethCalls.some(c => c.to?.toLowerCase() === VERIFIED_CONTRACT_ADDRESS)).toBe(false)
+    // Write lists the implementation's state-changing functions the same way.
+    await page.locator('.tabs button', { hasText: 'Write' }).click()
+    await expect(page.locator('.fn-head', { hasText: 'transfer(address, uint256)' })).toBeVisible()
+    await expect(page.locator('.fn-head', { hasText: 'deposit()' })).toBeVisible()
+    await expect(page.getByText('no state-changing functions')).toHaveCount(0)
+    // Code names the proxy too — the implementation is where the source lives.
+    await page.locator('.tabs button', { hasText: 'Code' }).click()
+    await expect(page.locator('.id-card').first()).toContainText('delegates calls to the implementation')
+  })
+
+  test('proxy: an unverified implementation is named rather than silently empty', async ({ page }) => {
+    await mockEvmRpc(page, { proxyImplementation: UNVERIFIED_CONTRACT_ADDRESS })
+    await page.goto(`/account/${PROXY_CONTRACT_ADDRESS}?view=contract&contract=read`)
+    await expect(page.locator('.id-card').first()).toContainText('The implementation is not verified')
+    await expect(page.locator(`a[href="/account/${UNVERIFIED_CONTRACT_ADDRESS}"]`).first()).toBeVisible()
+    await expect(page.locator('.fn-row')).toHaveCount(0)
+  })
+
   test('unverified contract: Code offers the CLI commands and the upload form; Read hints', async ({ page }) => {
     await mockEvmRpc(page)
     await page.goto(`/account/${UNVERIFIED_CONTRACT_ADDRESS}?view=contract`)
@@ -147,6 +189,16 @@ test.describe('mobile', () => {
     await expect(page.locator('.fn-row', { hasText: 'symbol()' })).toContainText('GHO')
     const overflowRead = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
     expect(overflowRead).toBeLessThanOrEqual(0)
+  })
+
+  test('proxy read-through stays usable at 390px with no overflow', async ({ page }) => {
+    await mockEvmRpc(page, { proxyImplementation: VERIFIED_CONTRACT_ADDRESS })
+    await page.goto(`/account/${PROXY_CONTRACT_ADDRESS}?view=contract&contract=read`)
+    await expect(page.locator('.id-card').first()).toContainText('EIP-1967 proxy')
+    await page.locator('.fn-head', { hasText: 'symbol()' }).click()
+    await expect(page.locator('.fn-row', { hasText: 'symbol()' })).toContainText('GHO')
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+    expect(overflow).toBeLessThanOrEqual(0)
   })
 
   test('transactions and events collapse to cards at 390px with no overflow', async ({ page }) => {
