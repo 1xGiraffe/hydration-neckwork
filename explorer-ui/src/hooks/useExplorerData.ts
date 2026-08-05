@@ -88,6 +88,19 @@ export function useExtrinsic(id: string | null) {
     staleTime: 60_000,
   })
 }
+// Gas for one EVM transaction. Asked only for an `Ethereum.transact` extrinsic a
+// reader actually opened, so it is one call per view rather than fan-out, and held
+// for the hour a receipt stays immutable. Never retried: a node that cannot answer
+// leaves the page's gas rows out, which is the honest rendering (see evmReceipt.ts).
+export function useEvmReceipt(txHash: string | null | undefined) {
+  return useQuery({
+    queryKey: ['evm-receipt', txHash],
+    queryFn: ({ signal }) => api.evmReceipt(txHash as string, signal),
+    enabled: !!txHash,
+    staleTime: 3_600_000,
+    retry: false,
+  })
+}
 export function useDcaSchedule(scheduleId: number, offset = 0) {
   return useQuery({ queryKey: ['dca-schedule', scheduleId, offset], queryFn: ({ signal }) => api.dcaSchedule(scheduleId, offset, 25, signal), staleTime: 8000 })
 }

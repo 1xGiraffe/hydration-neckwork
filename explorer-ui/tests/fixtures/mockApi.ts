@@ -3,7 +3,7 @@ import type {
   ExplorerStats, IndexerStatus, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   TransferRow, EventRow, TradeRow, ActivityRow, MoneyMarketResponse, AssetDetail, HoldersResponse,
   AddressDetail, AddressBalance, CloseAccountsResponse, TagDetail, SearchResult, AssetListItem, TopAccountRow, AccountsPage, DailyPoint, Tag,
-  ContractInfo, ContractsPage, ContractTransactionsPage, ContractEventsPage, ContractEventRow, DecodedEvmCall, EvmLogDecode,
+  ContractInfo, ContractsPage, ContractTransactionsPage, ContractEventsPage, ContractEventRow, DecodedEvmCall, EvmLogDecode, EvmReceipt, EvmTransactionFacts,
   AccountRef, AssetRef, AssetLiquidationDay, AssetLiquidationTotal, HdxDashboard, HdxCohort, HdxLockType, HdxUnlockBucket, HdxDailyFlow, HdxMover,
   HollarDashboard, HollarCollateral, HollarArbDay, HollarTradeDay, HollarPool, HollarPegPoint,
   TradeDetail as TradeDetailResponse,
@@ -207,9 +207,13 @@ function genExtrinsic(height: number, idx: number): ExtrinsicDetail {
   const aIn = ASSETS[Math.floor(r() * ASSETS.length)], aOut = ASSETS[Math.floor(r() * ASSETS.length)]
   const success = r() > 0.06
   const isInherent = idx < 2
-  const callName = isInherent ? (idx === 0 ? 'Timestamp.set' : 'ParachainSystem.set_validation_data') : call
+  // The chain's one EVM transaction (see MOCK_EVM_TX): an Ethereum.transact
+  // extrinsic, everywhere the mock walks a block, so its hash-resolved page and
+  // its height-index page are literally the same row.
+  const isEvmTx = height === MOCK_EVM_TX.height && idx === MOCK_EVM_TX.index
+  const callName = isInherent ? (idx === 0 ? 'Timestamp.set' : 'ParachainSystem.set_validation_data') : isEvmTx ? 'Ethereum.transact' : call
   const amt = +(10 + r() * 4000).toFixed(4)
-  const callArgs: Record<string, unknown> = isInherent
+  const callArgs: Record<string, unknown> = isEvmTx ? evmTxCallArgs(height, idx, amt) : isInherent
     ? (idx === 0 ? { now: Date.parse(tsAt(height).replace(' ', 'T') + 'Z') } : { data: '0x…relay-chain-state-proof' })
     : call.startsWith('Omnipool.sell') || call.startsWith('Router')
       ? { asset_in: aIn.assetId, asset_out: aOut.assetId, amount: raw(amt, aIn.decimals), min_buy_amount: raw(amt * 0.99, aOut.decimals) }
@@ -218,7 +222,15 @@ function genExtrinsic(height: number, idx: number): ExtrinsicDetail {
       : call.startsWith('XTokens') ? { currency_id: aIn.assetId, amount: raw(amt, aIn.decimals), dest: { V3: { parents: 1, interior: { X2: [{ Parachain: 2004 }, { AccountId32: { id: dest.address } }] } } } }
       : call.startsWith('EVM') ? { source: EVM_CALLER, target: VERIFIED_CONTRACT_ADDRESS, input: evmTransferInput(height, idx, amt), value: '0', gas_limit: 300000 }
       : { amount: raw(amt, 12) }
-  const events = isInherent
+  const events = isEvmTx
+    ? [
+      evmLogEvent(height, idx, amt),
+      evmExecutedEvent(),
+      // No TransactionPayment.TransactionFeePaid: the EVM takes its own fee, which
+      // is why an Ethereum.transact extrinsic shows no substrate fee at all.
+      { eventIndex: 3, name: 'System.ExtrinsicSuccess', args: { weight: 412_000_000 } },
+    ]
+    : isInherent
     ? [{ eventIndex: 0, name: 'System.ExtrinsicSuccess', args: { weight: 137_316_000 } }]
     : success
       ? [
@@ -230,10 +242,11 @@ function genExtrinsic(height: number, idx: number): ExtrinsicDetail {
       : [{ eventIndex: 0, name: 'System.ExtrinsicFailed', args: { dispatch_error: 'Token.BelowMinimum' } }]
   return {
     blockHeight: height, index: idx, hash: hx(height * 17 + idx, 64), timestamp: tsAt(height),
-    signer: isInherent ? null : signer, success: isInherent ? true : success, callName,
-    fee: isInherent ? null : raw(0.002 + r() * 0.05, 12), version: 4, tip: isInherent ? null : '0',
-    callArgs, error: success || isInherent ? null : { module: 'Tokens', error: 'BelowMinimum' }, events,
-    ...(call.startsWith('EVM') && !isInherent ? { evmCalls: [evmCallDecode(height, idx, amt)] } : {}),
+    signer: isInherent ? null : signer, success: isInherent || isEvmTx ? true : success, callName,
+    fee: isInherent || isEvmTx ? null : raw(0.002 + r() * 0.05, 12), version: 4, tip: isInherent ? null : '0',
+    callArgs, error: success || isInherent || isEvmTx ? null : { module: 'Tokens', error: 'BelowMinimum' }, events,
+    ...((call.startsWith('EVM') || isEvmTx) && !isInherent ? { evmCalls: [evmCallDecode(height, idx, amt)] } : {}),
+    ...(isEvmTx ? { evmTx: MOCK_EVM_TX_FACTS } : {}),
   }
 }
 
@@ -286,6 +299,50 @@ function evmLogEvent(height: number, idx: number, amt: number): ExtrinsicDetail[
     },
     decoded: true,
     evmDecoded: evmTransferLogDecode(height, idx, amt),
+  }
+}
+
+/* ---------- the chain's EVM transaction (Ethereum.transact) ---------- */
+// One `Ethereum.transact` extrinsic, addressable BOTH ways: by its extrinsic id
+// and by the Ethereum transaction hash a reader pastes from a wallet or another
+// explorer. The two hashes are deliberately different values — that is the whole
+// reason the hash needs resolving — and both name this one extrinsic, so the
+// feeds, the block, the hash lookup and the receipt all agree on one identity.
+export const MOCK_EVM_TX = { height: TIP - 5, index: 5 }
+export const MOCK_EVM_TX_HASH = hx(909_090, 64)
+// Its Ethereum.Executed facts, as the api derives them from that event.
+export const MOCK_EVM_TX_FACTS: EvmTransactionFacts = { txHash: MOCK_EVM_TX_HASH, exitKind: 'Succeed', exitDetail: 'Stopped', extraData: null }
+// Gas, which nothing indexes: the receipt endpoint answers this for MOCK_EVM_TX_HASH
+// and 404s for every other hash, exactly as a node that has no such transaction does.
+export const MOCK_EVM_TX_RECEIPT: EvmReceipt = { gasUsed: '355638', effectiveGasPrice: '7000447' }
+const MOCK_EVM_TX_GAS_LIMIT = '565795'
+
+// An EIP1559 envelope as raw_extrinsics stores it: the transaction nested under
+// `transaction.value`, integers as strings, the target in `action`. Calldata is the
+// same verified-ABI transfer the EVM.call fixture uses, so the Parameters tab
+// decodes it the same way.
+function evmTxCallArgs(height: number, idx: number, amt: number): Record<string, unknown> {
+  return {
+    transaction: {
+      __kind: 'EIP1559',
+      value: {
+        chainId: '222222', nonce: '141', maxPriorityFeePerGas: '7000447', maxFeePerGas: '7000447',
+        gasLimit: MOCK_EVM_TX_GAS_LIMIT,
+        action: { __kind: 'Call', value: VERIFIED_CONTRACT_ADDRESS },
+        value: '0', input: evmTransferInput(height, idx, amt), accessList: [],
+      },
+    },
+  }
+}
+
+function evmExecutedEvent(): ExtrinsicDetail['events'][number] {
+  return {
+    eventIndex: 2,
+    name: 'Ethereum.Executed',
+    args: {
+      from: EVM_CALLER, to: VERIFIED_CONTRACT_ADDRESS, transactionHash: MOCK_EVM_TX_HASH,
+      exitReason: { __kind: 'Succeed', value: { __kind: 'Stopped' } }, extraData: '0x',
+    },
   }
 }
 
@@ -1151,8 +1208,15 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   // extrinsic would make every block look endless to anything that pages or probes.
   { re: /^\/explorer\/extrinsic-at\/(\d+)\/(\d+)$/, fn: (m) => Number(m[2]) < blockExtrinsicCount(Number(m[1])) ? genExtrinsic(Number(m[1]), Number(m[2])) : undefined },
   { re: /^\/explorer\/extrinsic-at\/(\d+)\/(\d+)\/activity$/, fn: (m) => mockExtrinsicActivity(Number(m[1]), Number(m[2])) },
-  { re: /^\/explorer\/extrinsic\/(0x[0-9a-f]{64})$/, fn: () => genExtrinsic(12_848_613, 4) },
-  { re: /^\/explorer\/extrinsic\/(0x[0-9a-f]{64})\/activity$/, fn: () => mockExtrinsicActivity(12_848_613, 4) },
+  // An Ethereum transaction hash resolves to the extrinsic that carries it — the
+  // same object /extrinsic-at/<height>/<index> answers, which is what lets the page
+  // canonicalize the URL. Ahead of the generic 64-hex rule below, which stands in
+  // for "any substrate extrinsic hash".
+  { re: /^\/explorer\/extrinsic\/(0x[0-9a-f]{64})$/, fn: (m) => m[1] === MOCK_EVM_TX_HASH ? genExtrinsic(MOCK_EVM_TX.height, MOCK_EVM_TX.index) : genExtrinsic(12_848_613, 4) },
+  { re: /^\/explorer\/extrinsic\/(0x[0-9a-f]{64})\/activity$/, fn: (m) => m[1] === MOCK_EVM_TX_HASH ? mockExtrinsicActivity(MOCK_EVM_TX.height, MOCK_EVM_TX.index) : mockExtrinsicActivity(12_848_613, 4) },
+  // Gas comes from the node, per transaction. Unknown hash → undefined → 404, the
+  // same answer the api gives when the node cannot produce a receipt.
+  { re: /^\/explorer\/evm-tx\/(0x[0-9a-f]{64})\/receipt$/, fn: (m) => m[1] === MOCK_EVM_TX_HASH ? MOCK_EVM_TX_RECEIPT : undefined },
   {
     re: /^\/explorer\/trade\/(\d+)\/(\d+)$/, fn: (m) => {
       const h = Number(m[1]), i = Number(m[2]); const r = rng(h * 7 + i + 3)
@@ -1493,6 +1557,10 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       const q = (qs.get('q') ?? '').trim(); const out: SearchResult[] = []
       if (/^\d+$/.test(q)) out.push({ type: 'block', value: q })
       if (/^\d+-\d+$/.test(q)) out.push({ type: 'extrinsic', value: q })
+      // An EVM transaction hash offers the extrinsic and NOTHING else: it is 64-hex
+      // like an AccountId32, and the fallback that reads it as one offered a
+      // fabricated account page (see searchUncached's hash branch).
+      if (q.toLowerCase() === MOCK_EVM_TX_HASH) out.push({ type: 'extrinsic', value: MOCK_EVM_TX_HASH })
       const sym = ASSETS.find(a => a.symbol.toLowerCase() === q.toLowerCase()); if (sym) out.push({ type: 'asset', value: String(sym.assetId), label: sym.symbol })
       if (/kraken/i.test(q)) out.push({ type: 'tag', value: 'kraken', label: 'Kraken', icon: '/tag-icons/kraken.jpg', color: '#7b6cf6' })
       const acc = ACCS.find(a => a.address.toLowerCase() === q.toLowerCase() || a.accountId.toLowerCase() === q.toLowerCase()); if (acc) out.push({ type: 'address', value: acc.accountId, label: acc.address, emoji: acc.emoji, identity: acc.identity })
