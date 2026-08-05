@@ -1961,6 +1961,45 @@ export interface ExtrinsicDetail extends ExtrinsicSummary {
   // trees), decoded at request time from callArgs alone. Additive; absent when
   // no target has a verified ABI.
   evmCalls?: DecodedEvmCall[]
+  // The Ethereum-native identity and outcome of an `Ethereum.transact`
+  // extrinsic; absent on every other call. Additive.
+  evmTx?: EvmTransactionFacts
+}
+
+// What the Ethereum.Executed event states about the transaction its extrinsic
+// submitted: the hash it is known by off-chain, how the EVM exited, and the
+// returned data (the revert selector on a failure).
+export interface EvmTransactionFacts {
+  txHash: string
+  exitKind: string
+  exitDetail: string | null
+  extraData: string | null
+}
+
+// Read off the extrinsic's OWN Ethereum.Executed event, which the detail already
+// carries — not from evm_transactions. That table is ordered by tx_hash so that a
+// hash can be resolved to an extrinsic (its whole purpose); asking it for the
+// transaction AT a (block, index) has no usable key prefix and would put a
+// full-table read on every EVM extrinsic view. Same source either way: the MV's
+// columns are these exact JSON paths over this exact event.
+export function evmTransactionFacts(events: { name: string; args: unknown }[]): EvmTransactionFacts | null {
+  for (const event of events) {
+    if (event.name !== 'Ethereum.Executed') continue
+    const args = (event.args != null && typeof event.args === 'object') ? event.args as Record<string, unknown> : {}
+    const txHash = typeof args.transactionHash === 'string' ? args.transactionHash : null
+    if (!txHash) continue
+    const reason = (args.exitReason != null && typeof args.exitReason === 'object') ? args.exitReason as Record<string, unknown> : {}
+    const detail = (reason.value != null && typeof reason.value === 'object') ? reason.value as Record<string, unknown> : {}
+    const extraData = typeof args.extraData === 'string' ? args.extraData : null
+    return {
+      txHash,
+      exitKind: typeof reason.__kind === 'string' ? reason.__kind : '',
+      exitDetail: typeof detail.__kind === 'string' ? detail.__kind : null,
+      // '0x' is the empty return, not returned data.
+      extraData: extraData && extraData !== '0x' ? extraData : null,
+    }
+  }
+  return null
 }
 
 interface ExtrinsicDetailRow {
@@ -1998,6 +2037,7 @@ async function hydrateExtrinsicDetail(row: ExtrinsicDetailRow): Promise<Extrinsi
 
   const callArgs = safeJson(row.call_args_json)
   const evmCalls = await decodeEvmCallSites(row.call_name, callArgs)
+  const evmTx = evmTransactionFacts(events)
 
   return {
     blockHeight: row.block_height,
@@ -2015,9 +2055,34 @@ async function hydrateExtrinsicDetail(row: ExtrinsicDetailRow): Promise<Extrinsi
     errorReason: row.success === 1 ? null : dispatchErrorReason(row.error_json, row.spec_version, resolveModuleError),
     events,
     ...(evmCalls.length ? { evmCalls } : {}),
+    ...(evmTx ? { evmTx } : {}),
   }
 }
 
+// The extrinsic that submitted the EVM transaction with this hash, or null when no
+// indexed transaction carries it. Answered from evm_transactions, whose ORDER BY
+// tx_hash is exactly this predicate; duplicates from a replayed raw range carry
+// identical values (one event, one hash), so the newest row is taken rather than
+// paying FINAL. A null extrinsic_index is a MISS: without an owning extrinsic
+// there is nothing to open.
+async function evmTransactionExtrinsic(txHash: string): Promise<{ blockHeight: number; extrinsicIndex: number } | null> {
+  const res = await client.query({
+    query: `SELECT block_height, extrinsic_index FROM price_data.evm_transactions
+            WHERE tx_hash = {h:String} ORDER BY ingested_at DESC LIMIT 1`,
+    query_params: { h: txHash }, format: 'JSONEachRow',
+  })
+  const row = (await res.json<{ block_height: number; extrinsic_index: number | null }>())[0]
+  if (!row || row.extrinsic_index == null) return null
+  return { blockHeight: Number(row.block_height), extrinsicIndex: Number(row.extrinsic_index) }
+}
+
+// A 64-hex extrinsic id, resolved as a substrate extrinsic hash first and an
+// Ethereum transaction hash second. The two hash spaces are 32-byte digests over
+// different preimages, so a collision is cryptographically negligible; the order
+// states which meaning `/extrinsic/<hash>` takes as primary rather than resolving
+// a real ambiguity. An EVM hit answers through getExtrinsicAt, so a transaction
+// hash and its canonical height-index id return the same object from the same
+// code and can never disagree.
 export async function getExtrinsic(hash: string): Promise<ExtrinsicDetail | null> {
   if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) return null
   return cached(`explorer:extrinsic:${hash.toLowerCase()}`, 10000, async () => {
@@ -2033,7 +2098,9 @@ export async function getExtrinsic(hash: string): Promise<ExtrinsicDetail | null
       query_params: { hash: hash.toLowerCase() }, format: 'JSONEachRow',
     })
     const row = (await res.json<ExtrinsicDetailRow>())[0]
-    return row ? hydrateExtrinsicDetail(row) : null
+    if (row) return hydrateExtrinsicDetail(row)
+    const evm = await evmTransactionExtrinsic(hash.toLowerCase())
+    return evm ? getExtrinsicAt(evm.blockHeight, evm.extrinsicIndex) : null
   })
 }
 
@@ -20741,13 +20808,23 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
   let hashHit = false
   if (is64Hex) {
     const lc = query.toLowerCase()
-    const [blockRes, extRes] = await Promise.all([
+    // The EVM lookup runs alongside the two substrate ones: an Ethereum
+    // transaction hash is 64-hex like a block or extrinsic hash, and without it a
+    // pasted transaction hash fell through to canonicalizeAddress below, which
+    // reads any 32 bytes as an AccountId32 and offered a fabricated account page.
+    const [blockRes, extRes, evmTx] = await Promise.all([
       client.query({ query: `SELECT block_height FROM price_data.raw_blocks WHERE block_hash = {h:String} LIMIT 1`, query_params: { h: lc }, format: 'JSONEachRow' }),
       client.query({ query: `SELECT extrinsic_hash FROM price_data.raw_extrinsics WHERE extrinsic_hash = {h:String} LIMIT 1`, query_params: { h: lc }, format: 'JSONEachRow' }),
+      evmTransactionExtrinsic(lc),
     ])
     const blockHit = (await blockRes.json<{ block_height: number }>())[0]
     if (blockHit) { results.push({ type: 'block', value: String(blockHit.block_height) }); hashHit = true }
-    if ((await extRes.json<{ extrinsic_hash: string }>())[0]) { results.push({ type: 'extrinsic', value: lc }); hashHit = true }
+    const extHit = (await extRes.json<{ extrinsic_hash: string }>())[0]
+    if (extHit) { results.push({ type: 'extrinsic', value: lc }); hashHit = true }
+    // Same result shape as the extrinsic-hash hit — getExtrinsic resolves either
+    // meaning of the hash, and the page canonicalizes to the extrinsic id. Only
+    // when the substrate hash missed, so the dropdown never lists one hash twice.
+    if (evmTx && !extHit) { results.push({ type: 'extrinsic', value: lc }); hashHit = true }
   }
 
   // A 64-hex value is ambiguous (could be an AccountId32 or a block/extrinsic hash);
