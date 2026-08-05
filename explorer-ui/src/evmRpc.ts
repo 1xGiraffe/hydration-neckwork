@@ -43,6 +43,10 @@ export function ethGetCode(address: string): Promise<string> {
   return rpc<string>('eth_getCode', [address, 'latest'])
 }
 
+export function ethGetStorageAt(address: string, slot: string): Promise<string> {
+  return rpc<string>('eth_getStorageAt', [address, slot, 'latest'])
+}
+
 // --- write-tab helpers -------------------------------------------------------
 
 // A tx object as eth_estimateGas / eth_call take it. `value` is hex wei.
