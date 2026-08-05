@@ -68,6 +68,31 @@ function seedVerified(qc: QueryClient) {
   qc.setQueryData(['contract-abi', ADDR], abiPayload)
   qc.setQueryData(['contract-sources', ADDR], sourcesPayload)
   qc.setQueryData(['contract-bytecode', ADDR], '0x6080604052deadbeef')
+  qc.setQueryData(['proxy-impl', ADDR], null)   // detection settled: not a proxy
+}
+
+// A proxy in front of the verified ABI above: its own ABI is function-free, so
+// Read/Write must show the implementation's functions on the proxy address.
+const IMPL_ADDR = '0x5c87c0d56551149acbb7c7e637a90215810bbeb3'
+const proxyInfo = contractInfo({
+  verified: { status: 'verified', name: 'ERC1967Proxy', matchType: 'match' },
+  verification: {
+    status: 'verified', name: 'ERC1967Proxy', compilerVersion: 'v0.8.19+commit.7dd6d404',
+    matchType: 'match', source: 'verified', verifiedAt: '2026-08-04 10:00:00',
+    abiPresent: true, sourceFileCount: 1, supersededBytecode: false,
+  },
+})
+const proxyAbiPayload = {
+  address: ADDR,
+  abi: [{ type: 'constructor', stateMutability: 'payable', inputs: [] }, { type: 'fallback', stateMutability: 'payable' }],
+  source: 'verified',
+  contractName: 'ERC1967Proxy',
+}
+function seedProxy(qc: QueryClient) {
+  qc.setQueryData(['contract-abi', ADDR], proxyAbiPayload)
+  qc.setQueryData(['contract-bytecode', ADDR], '0x6080604052deadbeef')
+  qc.setQueryData(['proxy-impl', ADDR], { kind: 'eip1967', implementation: IMPL_ADDR })
+  qc.setQueryData(['contract-abi', IMPL_ADDR], { ...abiPayload, address: IMPL_ADDR })
 }
 
 describe('ContractCodeView (verified)', () => {
@@ -150,9 +175,20 @@ describe('ContractReadView', () => {
   })
 
   it('hints at verification when the contract has no ABI', () => {
-    const out = render(<ContractReadView address={ADDR} contract={contractInfo()} />)
+    const out = render(<ContractReadView address={ADDR} contract={contractInfo()} />, qc => qc.setQueryData(['proxy-impl', ADDR], null))
     expect(out).toMatch(/verif/i)
   })
+
+  it('reads a proxy through the implementation ABI, with the note naming it', () => {
+    const out = render(<ContractReadView address={ADDR} contract={proxyInfo} />, seedProxy)
+    expect(out).toContain('EIP-1967 proxy')
+    expect(out).toContain(`/account/${IMPL_ADDR}`)   // the note links the implementation
+    expect(out).toContain('balanceOf')               // implementation view functions
+    expect(out).toContain('symbol')
+    expect(out).not.toContain('transfer')            // nonpayable stays off the Read tab
+    expect(out).not.toMatch(/no view or pure functions/)
+  })
+
 })
 
 describe('ContractTab', () => {
@@ -194,8 +230,17 @@ describe('ContractWriteView', () => {
   })
 
   it('hints at verification when the contract has no ABI', () => {
-    const out = render(<ContractWriteView address={ADDR} contract={contractInfo()} />)
+    const out = render(<ContractWriteView address={ADDR} contract={contractInfo()} />, qc => qc.setQueryData(['proxy-impl', ADDR], null))
     expect(out).toMatch(/verif/i)
+  })
+
+  it('writes to a proxy through the implementation ABI', () => {
+    const out = render(<ContractWriteView address={ADDR} contract={proxyInfo} />, seedProxy)
+    expect(out).toContain('EIP-1967 proxy')
+    expect(out).toContain('transfer')
+    expect(out).toContain('deposit')
+    expect(out).not.toContain('balanceOf')
+    expect(out).not.toMatch(/no state-changing functions/)
   })
 })
 

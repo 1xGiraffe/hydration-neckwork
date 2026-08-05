@@ -11,6 +11,7 @@ import { ethCall, ethGetCode, EvmRpcError } from '../evmRpc'
 import { ContractWriteView } from './ContractWriteTab'
 import { ContractTransactionsView, ContractEventsView } from './ContractActivityTab'
 import { SourceBrowser } from './SourceBrowser'
+import { ProxyNoteCard, useProxyContract } from './ProxyNote'
 import type { ContractInfo } from '../types'
 
 // The account page's Contract tab (?view=contract): a Code sub-tab (verified
@@ -50,11 +51,16 @@ export function ContractTab({ address, contract }: { address: string; contract: 
 
 export function ContractCodeView({ address, contract }: { address: string; contract: ContractInfo }) {
   const verified = contract.verification?.status === 'verified'
-  // Verified: what it is, then its source, its interface and finally the raw
-  // code. Unverified: the code first — it is all there is — then how to verify.
+  const { proxy, implUnverified } = useProxyContract(address)
+  const proxyCard = proxy ? <ProxyNoteCard proxy={proxy} implUnverified={implUnverified} /> : null
+  // A detected proxy names its implementation first — the linked contract is
+  // where the real source lives. Then, verified: what it is, its source, its
+  // interface and finally the raw code. Unverified: the code first — it is all
+  // there is — then how to verify.
   if (verified) {
     return (
       <>
+        {proxyCard}
         <VerifiedCode address={address} contract={contract} />
         <BytecodeCard address={address} />
       </>
@@ -62,6 +68,7 @@ export function ContractCodeView({ address, contract }: { address: string; contr
   }
   return (
     <>
+      {proxyCard}
       <BytecodeCard address={address} />
       <VerifyPanel address={address} />
     </>
@@ -295,7 +302,9 @@ function VerifyPanel({ address }: { address: string }) {
 export function ContractReadView({ address, contract }: { address: string; contract: ContractInfo }) {
   const verified = contract.verification?.status === 'verified' && contract.verification.abiPresent !== false
   const abi = useContractAbi(address, verified)
-  if (!verified) {
+  const { proxy, implAbi, implUnverified, resolving } = useProxyContract(address)
+  if (resolving || (verified && !abi.data)) return <div className="id-card"><div className="id-card-note">Loading ABI…</div></div>
+  if (!verified && !proxy) {
     return (
       <div className="id-card">
         <div className="id-card-head">Read</div>
@@ -305,11 +314,15 @@ export function ContractReadView({ address, contract }: { address: string; contr
       </div>
     )
   }
-  const fns = readFunctions(abi.data?.abi)
-  if (!abi.data) return <div className="id-card"><div className="id-card-note">Loading ABI…</div></div>
-  if (!fns.length) return <div className="id-card"><div className="id-card-note">The verified ABI has no view or pure functions.</div></div>
+  // A proxy's own ABI is a constructor and a fallback — the functions live in
+  // the implementation, called here on the proxy address (that is what the
+  // fallback does). Implementation first; the proxy's own functions, when its
+  // ABI declares any, follow.
+  const fns = [...readFunctions(implAbi?.abi), ...readFunctions(abi.data?.abi)]
   return (
     <>
+      {proxy && <ProxyNoteCard proxy={proxy} implUnverified={implUnverified} />}
+      {!fns.length && !implUnverified && <div className="id-card"><div className="id-card-note">The verified ABI has no view or pure functions.</div></div>}
       {fns.map((fn, i) => <ReadFnRow key={`${fn.name}-${i}`} index={i + 1} fn={fn} address={address} />)}
     </>
   )

@@ -13,6 +13,7 @@ import { fieldKey, historyKey, recordFieldValues } from '../writeHistory'
 import { restoreContractWallet, setContractWallet, useContractWallet } from '../contractWallet'
 import type { ContractWalletConnection } from '../contractWallet'
 import { ContractWalletDialog } from './ContractWalletDialog'
+import { ProxyNoteCard, useProxyContract } from './ProxyNote'
 import type { ContractInfo } from '../types'
 
 // The contract tab's Write sub-tab (?contract=write): nonpayable/payable
@@ -26,13 +27,15 @@ const neutralBadge = { color: 'var(--neutral)', background: 'color-mix(in srgb, 
 export function ContractWriteView({ address, contract }: { address: string; contract: ContractInfo }) {
   const verified = contract.verification?.status === 'verified' && contract.verification.abiPresent !== false
   const abi = useContractAbi(address, verified)
+  const { proxy, implAbi, implUnverified, resolving } = useProxyContract(address)
   const wallet = useContractWallet()
   const [dialogOpen, setDialogOpen] = useState(false)
   // Reconnect a wallet remembered in this browser tab, silently (eth_accounts
   // only) — a no-op when nothing is remembered or something is connected.
   useEffect(() => { void restoreContractWallet() }, [])
 
-  if (!verified) {
+  if (resolving || (verified && !abi.data)) return <div className="id-card"><div className="id-card-note">Loading ABI…</div></div>
+  if (!verified && !proxy) {
     return (
       <div className="id-card">
         <div className="id-card-head">Write</div>
@@ -42,12 +45,15 @@ export function ContractWriteView({ address, contract }: { address: string; cont
       </div>
     )
   }
-  if (!abi.data) return <div className="id-card"><div className="id-card-note">Loading ABI…</div></div>
-  const fns = writeFunctions(abi.data.abi)
+  // Implementation functions first (they are what a proxy delegates to,
+  // written on the proxy address), then any the proxy's own ABI declares —
+  // same composition as the Read tab.
+  const fns = [...writeFunctions(implAbi?.abi), ...writeFunctions(abi.data?.abi)]
   return (
     <>
       <WalletBar wallet={wallet} contract={contract} onConnect={() => setDialogOpen(true)} />
-      {!fns.length && <div className="id-card"><div className="id-card-note">The verified ABI has no state-changing functions.</div></div>}
+      {proxy && <ProxyNoteCard proxy={proxy} implUnverified={implUnverified} />}
+      {!fns.length && !implUnverified && <div className="id-card"><div className="id-card-note">The verified ABI has no state-changing functions.</div></div>}
       {fns.map((fn, i) => <WriteFnRow key={`${fn.name}-${i}`} index={i + 1} fn={fn} address={address} wallet={wallet} />)}
       <ContractWalletDialog open={dialogOpen} onOpenChange={setDialogOpen} />
     </>

@@ -501,6 +501,10 @@ function buildAccounts(offset: number, limit: number, sort: string): AccountsPag
 const evmContractRef = (h160: string): AccountRef => ({ accountId: '0x45544800' + h160.slice(2) + '0000000000000000', address: h160, emoji: '🪙', tag: null, identity: null, profile: null, isContract: true })
 export const VERIFIED_CONTRACT_ADDRESS = '0x531a654d1696ed52e7275a8cede955e82620f99a'
 export const UNVERIFIED_CONTRACT_ADDRESS = '0x9a1c2b3d4e5f60718293a4b5c6d7e8f901234567'
+// A verified ERC1967 proxy in front of the verified contract: its own ABI has
+// no functions (constructor, events, fallback), so Read/Write must resolve the
+// implementation. The e2e RPC mock answers its EIP-1967 slot accordingly.
+export const PROXY_CONTRACT_ADDRESS = '0x7b1967aa5e0d38d1f2a1e6f7dd5f5cbe4c31c0de'
 const MOCK_CONTRACTS: ContractInfo[] = [
   {
     address: VERIFIED_CONTRACT_ADDRESS, account: evmContractRef(VERIFIED_CONTRACT_ADDRESS),
@@ -527,6 +531,17 @@ const MOCK_CONTRACTS: ContractInfo[] = [
     codeHash: '0x' + '34'.repeat(32), codeSize: 2333, destroyed: false,
     txCount: 12, logCount: 0, firstActivity: tsAt(TIP - 300_000), lastActivity: tsAt(TIP - 300_000),
   },
+  {
+    address: PROXY_CONTRACT_ADDRESS, account: evmContractRef(PROXY_CONTRACT_ADDRESS),
+    verified: { status: 'verified', name: 'ERC1967Proxy', matchType: 'match' },
+    verification: {
+      status: 'verified', name: 'ERC1967Proxy', compilerVersion: 'v0.8.19+commit.7dd6d404', matchType: 'match',
+      source: 'verified', verifiedAt: tsAt(TIP - 80), abiPresent: true, sourceFileCount: 1, supersededBytecode: false,
+    },
+    creation: { method: 'create', deployer: A.fox, deployerWhitelisted: true, blockHeight: TIP - 150_000, extrinsicIndex: 1, timestamp: tsAt(TIP - 150_000), txHash: '0x' + '77'.repeat(32) },
+    codeHash: '0x' + '56'.repeat(32), codeSize: 733, destroyed: false,
+    txCount: 18, logCount: 3, firstActivity: tsAt(TIP - 150_000), lastActivity: tsAt(TIP - 200),
+  },
 ]
 
 // The verified contract's lazy artifacts (Code/Read sub-tabs); unverified
@@ -543,6 +558,19 @@ const MOCK_CONTRACT_ABI = {
   ],
   source: 'verified',
   contractName: 'GhoToken',
+}
+// The proxy's own verified ABI, deliberately function-free — the shape that
+// forces Read/Write through the implementation.
+const MOCK_PROXY_ABI = {
+  address: PROXY_CONTRACT_ADDRESS,
+  abi: [
+    { type: 'constructor', stateMutability: 'payable', inputs: [{ name: '_logic', type: 'address' }, { name: '_data', type: 'bytes' }] },
+    { type: 'event', name: 'Upgraded', inputs: [{ name: 'implementation', type: 'address', indexed: true }] },
+    { type: 'fallback', stateMutability: 'payable' },
+    { type: 'receive', stateMutability: 'payable' },
+  ],
+  source: 'verified',
+  contractName: 'ERC1967Proxy',
 }
 const MOCK_CONTRACT_SOURCES = {
   address: VERIFIED_CONTRACT_ADDRESS,
@@ -1068,7 +1096,12 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   { re: /^\/explorer\/contract\/compiler-versions$/, fn: () => ({ versions: ['v0.8.19+commit.7dd6d404', 'v0.8.10+commit.fc410830'] }) },
   // Artifacts exist only for the verified contract; anything else falls through
   // to the harness 404, exactly like the real endpoints.
-  { re: /^\/explorer\/contract\/([^/]+)\/abi$/, fn: m => decodeURIComponent(m[1]).toLowerCase() === VERIFIED_CONTRACT_ADDRESS ? MOCK_CONTRACT_ABI : undefined },
+  { re: /^\/explorer\/contract\/([^/]+)\/abi$/, fn: m => {
+    const address = decodeURIComponent(m[1]).toLowerCase()
+    if (address === VERIFIED_CONTRACT_ADDRESS) return MOCK_CONTRACT_ABI
+    if (address === PROXY_CONTRACT_ADDRESS) return MOCK_PROXY_ABI
+    return undefined
+  } },
   { re: /^\/explorer\/contract\/([^/]+)\/sources$/, fn: m => decodeURIComponent(m[1]).toLowerCase() === VERIFIED_CONTRACT_ADDRESS ? MOCK_CONTRACT_SOURCES : undefined },
   { re: /^\/explorer\/contract\/([^/]+)\/transactions$/, fn: (m, qs) => buildContractTransactions(decodeURIComponent(m[1]).toLowerCase(), Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 25)) },
   { re: /^\/explorer\/contract\/([^/]+)\/events$/, fn: (m, qs) => buildContractEvents(decodeURIComponent(m[1]).toLowerCase(), Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 25)) },
