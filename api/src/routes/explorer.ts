@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
 import { getReferenda, getReferendum, parseReferendumPallet } from '../services/governanceService.ts'
 import { extrinsicEncoded } from '../services/extrinsicBytes.ts'
+import { evmTransactionReceipt } from '../services/evmReceipt.ts'
 import {
   getStats, getRecentBlocks, getBlock, getRecentExtrinsics, getExtrinsic, getExtrinsicAt,
   getExtrinsicActivity, getBlockActivity,
@@ -408,6 +409,18 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const ext = await getExtrinsicAt(params.data.height, params.data.index)
     if (!ext) return reply.status(404).send({ error: 'Extrinsic not found' })
     return getExtrinsicActivity(params.data.height, params.data.index)
+  })
+
+  // Gas used and the effective gas price of one EVM transaction. Not indexed (see
+  // evmReceipt.ts), so they come from the chain — one targeted lookup, cached, and
+  // only when a reader opens an EVM extrinsic. 404 rather than a guess when the
+  // node cannot answer; the extrinsic page renders completely without it.
+  fastify.get('/explorer/evm-tx/:hash/receipt', async (req, reply) => {
+    const params = z.object({ hash: z.string().regex(/^0x[0-9a-fA-F]{64}$/) }).safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid transaction hash' })
+    const receipt = await evmTransactionReceipt(params.data.hash.toLowerCase())
+    if (!receipt) return reply.status(404).send({ error: 'Transaction receipt unavailable' })
+    return receipt
   })
 
   // Trade detail (route + slippage) for the swap events of one extrinsic.
