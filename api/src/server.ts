@@ -104,6 +104,11 @@ await fastify.register(compress, { global: true, encodings: ['br', 'gzip', 'defl
 // responses instead of re-hitting the API. Longest-prefix match wins.
 const CACHE_CONTROL: [RegExp, number][] = [
   [/^\/assets$/, 300],
+  // The Live surfaces poll every 6s and their server caches are now
+  // invalidated per ingested block (head-keyed keys), so a 5s browser cache
+  // would be the freshness bottleneck. 2s only matters for rapid tab
+  // switches — consecutive 6s polls never hit it either way.
+  [/^\/explorer\/(stats|blocks|extrinsics|events|activity)$/, 2],
   [/^\/candles/, 5],
   [/^\/explorer\/hdx/, 300],
   [/^\/explorer\/hollar/, 300],

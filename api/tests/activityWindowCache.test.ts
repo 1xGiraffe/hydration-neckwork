@@ -132,8 +132,10 @@ describe('window freshness', () => {
     expect(plan(0, { min: 95_000 })!.live).toBe(false)
   })
 
-  it('spends the live TTL on the live branch and the window TTL on the rest', () => {
-    const live = explorerService.match(/\? cached\(key, LIVE_CACHE_MS, build\)/g) ?? []
+  it('spends the live TTL on the head-keyed live branch and the window TTL on the rest', () => {
+    // The live branch must carry the ingested-head tag: its freshness comes
+    // from per-block key rotation, not the TTL (which is only GC there).
+    const live = explorerService.match(/\? cached\(`\$\{key\}:\$\{await liveHeadTag\(\)\}`, LIVE_CACHE_MS, build\)/g) ?? []
     const windowed = explorerService.match(/: cachedSwr\(key, ACTIVITY_WINDOW_FRESH_MS, ACTIVITY_WINDOW_STALE_MS, build\)/g) ?? []
 
     expect(live).toHaveLength(1)
