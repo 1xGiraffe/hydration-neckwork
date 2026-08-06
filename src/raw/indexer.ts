@@ -322,8 +322,11 @@ function addSwapFamilies(
 }
 
 function liveFinalityPollIntervalMs(): number {
-  const configured = Number.parseInt(process.env.RAW_LIVE_FINALITY_POLL_MS ?? '12000', 10)
-  return Number.isSafeInteger(configured) && configured > 0 ? configured : 12_000
+  // Startup wait only (the follower's own head polling is RPC_HEAD_POLL_MS):
+  // how often to re-check finality when we resumed already caught up to the
+  // finalized head. 4s keeps the resume-into-follow handoff under one block.
+  const configured = Number.parseInt(process.env.RAW_LIVE_FINALITY_POLL_MS ?? '4000', 10)
+  return Number.isSafeInteger(configured) && configured > 0 ? configured : 4_000
 }
 
 export async function runRaw(options: RawRunOptions = {}): Promise<void> {
