@@ -34,6 +34,13 @@ const SHAPES: Record<string, { action: string; shapes: Shape[] }> = {
       { field: 'gigahdx', args: { amount: '5000000000000000', gigahdx: '4500000000000000', positionId: '7' }, assetId: 670 },
     ],
   },
+  // Unlocked releases the HDX principal after the unstake period — it has no
+  // stHDX leg, so it only carries an asset-0 shape (an stHDX-scoped view
+  // drops the row via the empty amount).
+  'GigaHdx.Unlocked': {
+    action: 'GIGAHDX Unlock',
+    shapes: [{ field: 'amount', args: { who: '0xf61d983487817667805f61db0f5ba60b29efa3b8563ed79379e56872d394207f', positionId: '13035834', amount: '1002030864126735184' } }],
+  },
   'GigaHdx.MigratedFromLegacy': {
     action: 'GIGAHDX Migrate',
     shapes: [
