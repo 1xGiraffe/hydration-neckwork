@@ -9,6 +9,7 @@ export interface Config {
   RPC_URL: string
   RPC_RATE_LIMIT: number
   RPC_CAPACITY: number
+  RPC_HEAD_POLL_MS: number
 
   // Non-Hydration identity sources, `key=url[@block]` and highest priority first.
   IDENTITY_CHAINS: string
@@ -44,6 +45,11 @@ export const config: Config = {
   RPC_URL: stringFromEnvironment('RPC_URL', 'https://hydration-rpc.neckwork.net'),
   RPC_RATE_LIMIT: integerFromEnvironment('RPC_RATE_LIMIT', 100), // requests per second
   RPC_CAPACITY: integerFromEnvironment('RPC_CAPACITY', 20), // max concurrent RPC requests
+  // How often the SQD live follower polls the chain for a new head (the RPC
+  // endpoints are HTTPS, so heads arrive by polling, not subscription). The
+  // upstream default of 5000ms was the single largest controllable slice of
+  // block-to-explorer latency; one getFinalizedHead every 2s is trivial load.
+  RPC_HEAD_POLL_MS: integerFromEnvironment('RPC_HEAD_POLL_MS', 2000),
 
   // Identity sources beyond Hydration, in falling display priority. The People
   // chains are where Polkadot and Kusama identities actually live — both relay

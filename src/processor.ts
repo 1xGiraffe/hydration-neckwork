@@ -11,6 +11,7 @@ export const processor = new SubstrateBatchProcessor()
     rateLimit: config.RPC_RATE_LIMIT,
     capacity: config.RPC_CAPACITY,
   })
+  .setRpcDataIngestionSettings({ headPollInterval: config.RPC_HEAD_POLL_MS })
 
   // Start from genesis (will be overridden by checkpoint in production)
   .setBlockRange({ from: 0 })

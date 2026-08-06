@@ -17,6 +17,7 @@ export const rawProcessor = new SubstrateBatchProcessor()
     rateLimit: config.RPC_RATE_LIMIT,
     capacity: config.RPC_CAPACITY,
   })
+  .setRpcDataIngestionSettings({ headPollInterval: config.RPC_HEAD_POLL_MS })
   .setBlockRange({ from: 0 })
   .addEvent({
     extrinsic: true,
