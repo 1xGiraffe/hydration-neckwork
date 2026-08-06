@@ -37,3 +37,36 @@ test('an unfinalized extrinsic detail page shows the Pending badge', async ({ pa
   await page.goto('/extrinsic/12848600-0')
   await expect(page.locator('.detail-card .badge.finalized')).toBeVisible()
 })
+
+test('the activity feed dims unfinalized rows and keeps them non-navigable', async ({ page }) => {
+  await page.goto('/activity')
+  const pendingRow = page.locator('table.tbl tbody tr.unfinalized').first()
+  await expect(pendingRow).toBeVisible()
+  // No detail page exists until the finalized classifier runs.
+  await expect(pendingRow).not.toHaveClass(/clickable/)
+  await expect(pendingRow).not.toHaveAttribute('data-activity', /.+/)
+})
+
+// The smol toggle round-trips through the URL: toggling writes ?smol=…, and a
+// deep link with it set overrides the visitor's stored preference.
+test('the smol toggle is URL-addressable', async ({ page }) => {
+  await page.goto('/activity')
+  const toggle = page.locator('.smol-toggle')
+  await expect(toggle).toHaveClass(/hiding/)   // hidden by default
+
+  await toggle.click()
+  await expect(page).toHaveURL(/[?&]smol=show/)
+  await expect(toggle).not.toHaveClass(/hiding/)
+
+  // Hiding is the default, so toggling back just removes the param.
+  await toggle.click()
+  await expect(page).not.toHaveURL(/smol=/)
+  await expect(toggle).toHaveClass(/hiding/)
+
+  // Deep link wins over the (now 'hide') stored preference.
+  await page.goto('/activity?smol=show')
+  await expect(toggle).not.toHaveClass(/hiding/)
+  // And it rides along when switching category chips.
+  await page.locator('.activity-chip', { hasText: 'Transfer' }).click()
+  await expect(page).toHaveURL(/smol=show/)
+})

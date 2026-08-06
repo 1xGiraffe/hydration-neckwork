@@ -669,6 +669,8 @@ export interface TradeRow {
 
 export interface ActivityRow {
   type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc'
+  // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
+  finalized?: boolean
   blockHeight: number
   timestamp: string
   eventIndex?: number | null
