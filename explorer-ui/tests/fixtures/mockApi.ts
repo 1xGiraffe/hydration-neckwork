@@ -5,6 +5,7 @@ import type {
   AddressDetail, AddressBalance, CloseAccountsResponse, TagDetail, SearchResult, AssetListItem, TopAccountRow, AccountsPage, DailyPoint, Tag,
   ContractInfo, ContractsPage, ContractTransactionsPage, ContractEventsPage, ContractEventRow, DecodedEvmCall, EvmLogDecode, EvmReceipt, EvmTransactionFacts,
   AccountRef, AssetRef, AssetLiquidationDay, AssetLiquidationTotal, HdxDashboard, HdxCohort, HdxLockType, HdxUnlockBucket, HdxDailyFlow, HdxMover,
+  AssetLiquidity, AssetLiquiditySource, PoolDetail, OmnipoolDetail, PoolCompositionEntry,
   HollarDashboard, HollarCollateral, HollarArbDay, HollarTradeDay, HollarPool, HollarPegPoint,
   TradeDetail as TradeDetailResponse,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse,
@@ -49,6 +50,9 @@ const ASSETS: MAsset[] = [
   { assetId: 16, symbol: 'GLMR', name: 'Moonbeam', decimals: 18, parachainId: 2004, price: 0.1842, ch: 9.18, ch7d: 14.0, ch1h: 1.1, type: 'Token' },
   { assetId: 1000, symbol: 'HOLLAR', name: 'Hollar', decimals: 18, parachainId: null, price: 1.0, ch: 0.02, ch7d: 0.0, ch1h: 0.0, type: 'Token' },
   { assetId: 1001, symbol: 'GDOT', name: 'Gigadot', decimals: 10, parachainId: null, price: 4.4501, ch: -1.1, ch7d: -2.0, ch1h: -0.1, type: 'Derivative' },
+  // The GDOT stable pool's share token: pool id == share asset id, so /pool/690
+  // and the Liquidity tab's pegged-pool card share one identity.
+  { assetId: 690, symbol: '2-Pool-GDOT', name: 'GDOT stable pool', decimals: 18, parachainId: null, price: 5.1, ch: 0.4, ch7d: 1.1, ch1h: 0.0, type: 'Share token' },
 ]
 const assetById = new Map(ASSETS.map(a => [a.assetId, a]))
 function aref(a: MAsset): AssetRef { return { assetId: a.assetId, symbol: a.symbol, name: a.name, decimals: a.decimals, parachainId: a.parachainId } }
@@ -1139,6 +1143,191 @@ function assetScopedActivityRows(qs: URLSearchParams): ActivityRow[] {
   return out.slice(0, limit)
 }
 
+/* ---------- liquidity pools ---------- */
+// One deterministic pool world shared by the Liquidity tab, /pool/:id and
+// /omnipool, so a card and the page it links to always carry the same numbers:
+// the Omnipool holds HDX/DOT/USDT/vDOT/WETH, pool 690 is the pegged GDOT
+// stableswap (vDOT + GDOT, Bifrost-oracle peg on the vDOT leg), and one
+// HDX/DOT XYK pair.
+const XYK_LP_ID = 1000194
+const MOCK_LRNA_PRICE = 5.0
+const POOL_DAYS = 120
+const POOL_BUCKETS = Array.from({ length: POOL_DAYS }, (_, i) => new Date(MOCK_NOW_MS - (POOL_DAYS - i) * 86_400_000).toISOString().slice(0, 10))
+const OMNI_POOL_ACCOUNT = acc('0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000', '7L53bUTBUvKnCVGKLM83Ch3wm3RNFbctFCxSHQwUJgLNsGVU', '💧', { id: 'omnipool', name: 'Omnipool', color: '#57a5ec', icon: '💧' })
+const POOL_690_ACCOUNT = acc(hx(690, 64), '167UdiHenqFRhRoXHwh6MBu9YV6NPkbCJx3MC71bfz9YTdzs', '💧', { id: 'stableswap-pools', name: 'Stableswap Pool', color: '#57a5ec', icon: '💧' })
+const XYK_PAIR_ACCOUNT = acc(hx(694, 64), '1XyKHdxDotPairAccountX1111111111111111111111111', '💧', { id: 'xyk-pools', name: 'XYK Pool', color: '#57a5ec', icon: '💧' })
+
+const OMNI_ASSETS: { id: number; reserve: number; capPct: number; tradable: string[] }[] = [
+  { id: 0, reserve: 48_000_000, capPct: 3.5, tradable: ['Sell', 'Buy', 'Add', 'Remove'] },
+  { id: 5, reserve: 610_000, capPct: 30, tradable: ['Sell', 'Buy', 'Add', 'Remove'] },
+  { id: 10, reserve: 1_650_000, capPct: 20, tradable: ['Sell', 'Buy', 'Add', 'Remove'] },
+  { id: 15, reserve: 92_000, capPct: 10, tradable: ['Sell', 'Buy', 'Add', 'Remove'] },
+  { id: 20, reserve: 310, capPct: 10, tradable: ['Sell'] },
+]
+const SS_690 = {
+  poolId: 690,
+  assets: [
+    { id: 15, reserve: 139_000, peg: { num: '13147', den: '10000', price: 1.3147 }, pegSource: { kind: 'oracle' as const, source: 'Bifrost', period: 'LastBlock', oracleAsset: aref(assetById.get(5)!) } },
+    { id: 5, reserve: 219_000, peg: { num: '1', den: '1', price: 1 }, pegSource: { kind: 'value' as const } },
+  ],
+  feePermill: 690, amplification: { current: 222, initial: 100, final: 222, initialBlock: TIP - 900_000, finalBlock: TIP - 880_000 },
+  maxPegUpdatePerbill: 120, issuance: 4_150_000, createdBlock: TIP - 1_000_000,
+}
+const XYK_POOL = { lpAssetId: XYK_LP_ID, assetA: 0, assetB: 5, reserveA: 5_200_000, reserveB: 25_500, createdBlock: TIP - 2_000_000, totalShares: 3_100_000 }
+
+const priceof = (id: number) => assetById.get(id)!.price
+const compEntry = (id: number, amount: number, tvlUsd: number): PoolCompositionEntry => {
+  const a = assetById.get(id)!
+  const usd = amount * a.price
+  return { asset: aref(a), amount: raw(amount, a.decimals), usd, sharePct: tvlUsd > 0 ? usd / tvlUsd * 100 : null }
+}
+const omniTvlUsd = () => OMNI_ASSETS.reduce((s, o) => s + o.reserve * priceof(o.id), 0)
+const ss690TvlUsd = () => SS_690.assets.reduce((s, x) => s + x.reserve * priceof(x.id), 0)
+const xykTvlUsd = () => XYK_POOL.reserveA * priceof(XYK_POOL.assetA) + XYK_POOL.reserveB * priceof(XYK_POOL.assetB)
+
+// A source's daily amount history: a gentle deterministic walk ending at the
+// current reserve, so the chart's right edge agrees with the cards above it.
+function poolAmountSeries(seed: number, current: number): number[] {
+  return series(seed, POOL_DAYS, current, 0.05)
+}
+
+function buildAssetLiquidity(assetId: number): AssetLiquidity {
+  const a = assetById.get(assetId) ?? ASSETS[0]
+  const sources: AssetLiquiditySource[] = []
+  const histSeries: AssetLiquidity['history']['series'] = []
+  const omni = OMNI_ASSETS.find(o => o.id === assetId)
+  if (omni) {
+    const usd = omni.reserve * a.price
+    sources.push({
+      kind: 'omnipool', poolId: null, name: 'Omnipool', tvlUsd: omniTvlUsd(),
+      assetAmount: raw(omni.reserve, a.decimals), assetUsd: usd, assetSharePct: usd / omniTvlUsd() * 100,
+      composition: [], hasPegs: false,
+    })
+    const amounts = poolAmountSeries(assetId * 31 + 7, omni.reserve)
+    histSeries.push({ key: 'omnipool', label: 'Omnipool', amounts, usd: amounts.map(v => v * a.price) })
+  }
+  const ss = SS_690.assets.find(x => x.id === assetId)
+  if (ss) {
+    const tvl = ss690TvlUsd()
+    sources.push({
+      kind: 'stableswap', poolId: 690, name: '2-Pool-GDOT', tvlUsd: tvl,
+      assetAmount: raw(ss.reserve, a.decimals), assetUsd: ss.reserve * a.price, assetSharePct: ss.reserve * a.price / tvl * 100,
+      composition: SS_690.assets.map(x => compEntry(x.id, x.reserve, tvl)),
+      hasPegs: true,
+    })
+    const amounts = poolAmountSeries(assetId * 31 + 11, ss.reserve)
+    histSeries.push({ key: 'ss:690', label: '2-Pool-GDOT', amounts, usd: amounts.map(v => v * a.price) })
+  }
+  if (assetId === XYK_POOL.assetA || assetId === XYK_POOL.assetB) {
+    const tvl = xykTvlUsd()
+    const amount = assetId === XYK_POOL.assetA ? XYK_POOL.reserveA : XYK_POOL.reserveB
+    sources.push({
+      kind: 'xyk', poolId: XYK_LP_ID, name: 'HDX / DOT', tvlUsd: tvl,
+      assetAmount: raw(amount, a.decimals), assetUsd: amount * a.price, assetSharePct: amount * a.price / tvl * 100,
+      composition: [compEntry(XYK_POOL.assetA, XYK_POOL.reserveA, tvl), compEntry(XYK_POOL.assetB, XYK_POOL.reserveB, tvl)],
+      hasPegs: false,
+    })
+    const amounts = poolAmountSeries(assetId * 31 + 13, amount)
+    histSeries.push({ key: `xyk:${XYK_LP_ID}`, label: 'HDX / DOT', amounts, usd: amounts.map(v => v * a.price) })
+  }
+  sources.sort((x, y) => (y.assetUsd ?? -1) - (x.assetUsd ?? -1))
+  const totalAmountNum = sources.reduce((s, x) => s + Number(BigInt(x.assetAmount)) / 10 ** a.decimals, 0)
+  return {
+    asset: aref(a),
+    totalAmount: raw(totalAmountNum, a.decimals),
+    totalUsd: totalAmountNum * a.price,
+    sources,
+    // DOT keeps one former pool so the section renders deterministically.
+    former: assetId === 5 ? [{ kind: 'xyk', poolId: 1000044, name: 'DOT / GLMR', lastActiveBlock: TIP - 400_000, lastActiveAt: tsAt(TIP - 400_000) }] : [],
+    history: { buckets: POOL_BUCKETS, series: histSeries },
+  }
+}
+
+function buildPoolDetail(poolId: number): PoolDetail | undefined {
+  if (poolId === 690) {
+    const tvl = ss690TvlUsd()
+    const share = assetById.get(690)!
+    const compAmounts = SS_690.assets.map((x, i) => poolAmountSeries(690 * 7 + i, x.reserve))
+    const pegWalk = series(69017, POOL_DAYS, SS_690.assets[0].peg.price, 0.004)
+    return {
+      kind: 'stableswap', poolId: 690, name: '2-Pool-GDOT', account: POOL_690_ACCOUNT, shareToken: aref(share),
+      createdBlock: SS_690.createdBlock, createdAt: tsAt(SS_690.createdBlock), destroyed: false,
+      tvlUsd: tvl, totalIssuance: raw(SS_690.issuance, share.decimals),
+      feePermill: SS_690.feePermill, amplification: SS_690.amplification, maxPegUpdatePerbill: SS_690.maxPegUpdatePerbill,
+      assets: SS_690.assets.map(x => ({ ...compEntry(x.id, x.reserve, tvl), peg: x.peg, pegSource: x.pegSource })),
+      paramEvents: [
+        { blockHeight: TIP - 880_000, timestamp: tsAt(TIP - 880_000), kind: 'max-peg-update', summary: 'Max peg update set to 0.000012% per block' },
+        { blockHeight: TIP - 900_000, timestamp: tsAt(TIP - 900_000), kind: 'amplification', summary: `Amplification ramping 100 → 222 over blocks ${TIP - 900_000}–${TIP - 880_000}` },
+        { blockHeight: SS_690.createdBlock, timestamp: tsAt(SS_690.createdBlock), kind: 'created', summary: 'Pool created with vDOT, GDOT — amplification 100, fee 0.069%, with price pegs' },
+      ],
+      history: {
+        buckets: POOL_BUCKETS,
+        tvlUsd: POOL_BUCKETS.map((_, i) => SS_690.assets.reduce((s, x, k) => s + compAmounts[k][i] * priceof(x.id), 0)),
+        composition: SS_690.assets.map((x, k) => ({ asset: aref(assetById.get(x.id)!), amounts: compAmounts[k], usd: compAmounts[k].map(v => v * priceof(x.id)) })),
+        pegs: [{ asset: aref(assetById.get(15)!), prices: pegWalk }],
+        issuance: poolAmountSeries(69019, SS_690.issuance),
+      },
+    }
+  }
+  if (poolId === XYK_LP_ID) {
+    const tvl = xykTvlUsd()
+    const legs = [[XYK_POOL.assetA, XYK_POOL.reserveA], [XYK_POOL.assetB, XYK_POOL.reserveB]] as const
+    const compAmounts = legs.map(([id, reserve]) => poolAmountSeries(id * 5 + 194, reserve))
+    return {
+      kind: 'xyk', poolId: XYK_LP_ID, name: 'HDX / DOT', account: XYK_PAIR_ACCOUNT,
+      shareToken: { assetId: XYK_LP_ID, symbol: 'HDX/DOT LP', name: 'HDX/DOT share token', decimals: 12, parachainId: null },
+      createdBlock: XYK_POOL.createdBlock, createdAt: tsAt(XYK_POOL.createdBlock), destroyed: false,
+      tvlUsd: tvl, totalIssuance: raw(XYK_POOL.totalShares, 12), feePermill: 3000,
+      amplification: null, maxPegUpdatePerbill: null,
+      assets: legs.map(([id, reserve]) => ({ ...compEntry(id, reserve, tvl), peg: null, pegSource: null })),
+      paramEvents: [],
+      history: {
+        buckets: POOL_BUCKETS,
+        tvlUsd: POOL_BUCKETS.map((_, i) => legs.reduce((s, [id], k) => s + compAmounts[k][i] * priceof(id), 0)),
+        composition: legs.map(([id], k) => ({ asset: aref(assetById.get(id)!), amounts: compAmounts[k], usd: compAmounts[k].map(v => v * priceof(id)) })),
+        pegs: null,
+        issuance: null,
+      },
+    }
+  }
+  return undefined
+}
+
+function buildOmnipool(): OmnipoolDetail {
+  const tvl = omniTvlUsd()
+  const rows = OMNI_ASSETS.map(o => {
+    const a = assetById.get(o.id)!
+    const usd = o.reserve * a.price
+    return {
+      asset: aref(a), reserve: raw(o.reserve, a.decimals), reserveUsd: usd,
+      hubReserve: raw(usd / MOCK_LRNA_PRICE, 12), weightPct: usd / tvl * 100, capPct: o.capPct, tradable: o.tradable,
+    }
+  }).sort((x, y) => (y.reserveUsd ?? 0) - (x.reserveUsd ?? 0))
+  const amountsById = new Map(OMNI_ASSETS.map(o => [o.id, poolAmountSeries(o.id * 31 + 7, o.reserve)]))
+  const composition = rows.map(r => ({
+    asset: r.asset,
+    usd: amountsById.get(r.asset.assetId)!.map(v => v * priceof(r.asset.assetId)),
+  }))
+  return {
+    account: OMNI_POOL_ACCOUNT,
+    tvlUsd: tvl, assetCount: OMNI_ASSETS.length,
+    hubReserveTotal: raw(tvl / MOCK_LRNA_PRICE, 12), lrnaPrice: MOCK_LRNA_PRICE,
+    assets: rows,
+    history: {
+      buckets: POOL_BUCKETS,
+      tvlUsd: POOL_BUCKETS.map((_, i) => composition.reduce((s, c) => s + (c.usd[i] ?? 0), 0)),
+      composition,
+    },
+  }
+}
+
+// Pools currently holding an asset (the Liquidity tab's count chip).
+function mockLiquiditySourceCount(assetId: number): number {
+  return (OMNI_ASSETS.some(o => o.id === assetId) ? 1 : 0)
+    + (SS_690.assets.some(x => x.id === assetId) ? 1 : 0)
+    + (assetId === XYK_POOL.assetA || assetId === XYK_POOL.assetB ? 1 : 0)
+}
+
 const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => unknown }[] = [
   { re: /^\/explorer\/stats$/, fn: () => ({ headBlock: TIP, finalizedBlock: TIP - 2, headTime: tsAt(TIP), avgBlockSec: 6.0, transfers24h: 18204, extrinsics24h: 42318, activeAccounts24h: 7120, hdxPrice: 0.02184 } satisfies ExplorerStats) },
   { re: /^\/indexer$/, fn: () => ({ blockHeight: TIP, blockTimestamp: tsAt(TIP), lagSeconds: 6, chainBlockHeight: TIP + 1, blocksBehindHead: 1 } satisfies IndexerStatus) },
@@ -1345,9 +1534,14 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
         asset: { ...aref(a), price: a.price, change24h: a.ch / 100, change7d: a.ch7d / 100, type: a.type, amountUsd: totalUsd },
         holderCount: ACCS.length, totalUsd, priceSeries, priceDates,
         liquidations: MOCK_MM_RESERVES.has(a.assetId) ? { decimals: a.decimals, days, total: mockLiquidationTotal(days) } : null,
+        liquiditySourceCount: mockLiquiditySourceCount(a.assetId),
       } satisfies AssetDetail
     },
   },
+  { re: /^\/explorer\/asset\/(\d+)\/liquidity$/, fn: m => buildAssetLiquidity(Number(m[1])) },
+  // Unknown pool ids fall through to the harness 404, like the real endpoint.
+  { re: /^\/explorer\/pool\/(\d+)$/, fn: m => buildPoolDetail(Number(m[1])) },
+  { re: /^\/explorer\/omnipool$/, fn: () => buildOmnipool() },
   {
     re: /^\/explorer\/holders\/(\d+)$/, fn: (m, qs) => {
       const a = assetById.get(Number(m[1])) ?? ASSETS[0]

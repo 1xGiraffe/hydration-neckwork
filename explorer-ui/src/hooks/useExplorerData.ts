@@ -351,6 +351,17 @@ export function useHdxDashboard() {
 export function useHollarDashboard() {
   return useQuery({ queryKey: ['hollar-dashboard'], queryFn: ({ signal }) => api.hollar(signal), staleTime: 120_000 })
 }
+// Pool surfaces follow the dashboard shape: one query, no polling — pool
+// history advances on a ~2h grid, so 120s staleness costs nothing.
+export function useAssetLiquidity(assetId: number, enabled: boolean) {
+  return useQuery({ queryKey: ['asset-liquidity', assetId], queryFn: ({ signal }) => api.assetLiquidity(assetId, signal), staleTime: 120_000, enabled })
+}
+export function usePoolDetail(poolId: number) {
+  return useQuery({ queryKey: ['pool', poolId], queryFn: ({ signal }) => api.poolDetail(poolId, signal), staleTime: 120_000 })
+}
+export function useOmnipool() {
+  return useQuery({ queryKey: ['omnipool'], queryFn: ({ signal }) => api.omnipool(signal), staleTime: 120_000 })
+}
 // The directory folds a viewer's OWN tags server-side too (exact values and
 // ranks, not just the shared system-tag grouping) — but only once there's a
 // session, its tag map has actually loaded ('ready', not still 'loading' or
