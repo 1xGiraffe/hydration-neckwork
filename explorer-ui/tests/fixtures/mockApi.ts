@@ -1491,11 +1491,13 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       const min = qs.get('min') ? Number(qs.get('min')) : null
       let h = TIP
       if (requestedType === 'all' || requestedType === 'trade') {
+        // The newest trade rides an unfinalized block: no detail link yet, the
+        // row is dimmed and non-navigable until finality.
         out.push({
           type: 'trade', blockHeight: h + 1, timestamp: tsAt(h + 1), eventIndex: 77, extrinsicIndex: null,
           who: A.fox, to: null, asset: null, assetIn: aref(ASSETS[2]), assetOut: aref(ASSETS[1]),
           amount: null, amountIn: raw(1234.56, ASSETS[2].decimals), amountOut: raw(1234.56 * ASSETS[2].price / ASSETS[1].price, ASSETS[1].decimals),
-          valueUsd: 1234.56 * ASSETS[2].price,
+          valueUsd: 1234.56 * ASSETS[2].price, finalized: false,
         })
       }
       const types: ActivityRow['type'][] = ['trade', 'transfer', 'xcm', 'liquidity', 'mm', 'dca', 'otc']
