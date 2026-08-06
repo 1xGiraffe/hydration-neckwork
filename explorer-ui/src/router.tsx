@@ -49,6 +49,8 @@ export type Route =
   | { name: 'hollar' }
   | { name: 'asset'; assetId: number }
   | { name: 'holders'; assetId: number }
+  | { name: 'pool'; poolId: number }
+  | { name: 'omnipool' }
   | { name: 'link-device' } // QR login handoff target; the code rides in the fragment
   | { name: 'notfound'; path: string }
 
@@ -119,6 +121,11 @@ export function parseRoute(loc: string): Route {
       return parts[1] && isSafeId(parts[1]) ? { name: 'asset', assetId: Number(parts[1]) } : { name: 'assets' }
     case 'holders':
       return parts[1] && isSafeId(parts[1]) ? { name: 'holders', assetId: Number(parts[1]) } : { name: 'assets' }
+    // /pool/<shareAssetId> — stableswap pools and XYK pairs are both addressed
+    // by their share/LP token id; the Omnipool has its own page.
+    case 'pool':
+      return parts[1] && isSafeId(parts[1]) ? { name: 'pool', poolId: Number(parts[1]) } : { name: 'assets' }
+    case 'omnipool': return { name: 'omnipool' }
     case 'link-device': return { name: 'link-device' }
     default:
       if ((ACTIVITY_SLUGS as readonly string[]).includes(parts[0])) {
@@ -266,6 +273,8 @@ export const paths = {
   hollar: () => '/hollar',
   asset: (assetId: number) => `/asset/${assetId}`,
   holders: (assetId: number) => `/holders/${assetId}`,
+  pool: (poolId: number) => `/pool/${poolId}`,
+  omnipool: () => '/omnipool',
   lists: () => '/lists',
   list: (id: string) => `/list/${encodeURIComponent(id)}`,
   linkDevice: () => '/link-device',

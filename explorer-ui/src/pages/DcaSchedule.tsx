@@ -5,7 +5,7 @@ import { useDcaSchedule, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect } from '../router'
-import { Ago, Crumbs, F, AddrPill, AssetChip, AssetAmount, PoolBadge, ProgressRing, SkeletonRows, MomentLink, Pager } from '../components/ui'
+import { Ago, Crumbs, F, AddrPill, AssetChip, AssetAmount, PoolBadge, poolHref, ProgressRing, SkeletonRows, MomentLink, Pager } from '../components/ui'
 import { ActivityTable } from '../components/ActivityTable'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import { blockSeconds, dcaAmountLeft, dcaCadence, dcaLeftUsd, dcaProgress, dcaRunway, dcaUnspentBudget, fmtDuration, fmtPermill } from '../utils/dca'
@@ -222,7 +222,7 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
                       <AssetChip asset={data.route[0].assetIn} />
                       {data.route.map((hop, i) => (
                         <Fragment key={`${hop.pool}-${hop.assetIn.assetId}-${hop.assetOut.assetId}-${i}`}>
-                          <PoolBadge pool={hop.pool} poolId={hop.poolId} />
+                          <PoolBadge pool={hop.pool} poolId={hop.poolId} to={poolHref(hop.pool, hop.poolId)} />
                           <AssetChip asset={hop.assetOut} />
                         </Fragment>
                       ))}

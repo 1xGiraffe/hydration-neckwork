@@ -29,6 +29,8 @@ const Lists = lazy(() => import('./pages/Lists').then(m => ({ default: m.Lists }
 const ListDetail = lazy(() => import('./pages/ListDetail').then(m => ({ default: m.ListDetail })))
 const Assets = lazy(() => import('./pages/Assets').then(m => ({ default: m.Assets })))
 const AssetDetail = lazy(() => import('./pages/AssetDetail').then(m => ({ default: m.AssetDetail })))
+const PoolDetail = lazy(() => import('./pages/PoolDetail').then(m => ({ default: m.PoolDetail })))
+const Omnipool = lazy(() => import('./pages/Omnipool').then(m => ({ default: m.Omnipool })))
 const Hdx = lazy(() => import('./pages/Hdx').then(m => ({ default: m.Hdx })))
 const Hollar = lazy(() => import('./pages/Hollar').then(m => ({ default: m.Hollar })))
 const LinkDevice = lazy(() => import('./pages/LinkDevice').then(m => ({ default: m.LinkDevice })))
@@ -87,6 +89,8 @@ export default function App() {
       case 'hollar': return <Hollar />
       case 'asset': return <AssetDetail assetId={route.assetId} />
       case 'holders': return <AssetDetail assetId={route.assetId} initialTab="holders" />
+      case 'pool': return <PoolDetail poolId={route.poolId} />
+      case 'omnipool': return <Omnipool />
       case 'link-device': return <LinkDevice />
       case 'notfound': return (
         <div className="wrap"><div className="page-head"><div className="page-title">Not found</div></div>

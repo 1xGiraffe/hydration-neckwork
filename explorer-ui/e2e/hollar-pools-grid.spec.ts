@@ -16,3 +16,11 @@ test('desktop liquidity pool grid has 4 entries per row', async ({ page }) => {
   expect(Math.max(...counts)).toBeLessThanOrEqual(4)
   expect(counts[0], 'first row should be full').toBe(4)
 })
+
+test('a pool card navigates to its pool page', async ({ page }) => {
+  await page.goto('/hollar')
+  const card = page.locator('.pool-cards .hdx-card').first()
+  await expect(card).toBeVisible()
+  await card.click()
+  await expect(page).toHaveURL(/\/pool\/\d+$/)
+})

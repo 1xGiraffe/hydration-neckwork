@@ -3,6 +3,7 @@ import type {
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem,
   AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
+  AssetLiquidity, PoolDetail, OmnipoolDetail,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
   AccountRef, DeviceLinkResponse, DeviceLinkStatus, DeviceSession, EvmReceipt,
@@ -129,6 +130,9 @@ export const api = {
   moneyMarket: (limit = 50, signal?: AbortSignal) => getJson<MoneyMarketResponse>(withQuery('/explorer/money-market', { limit }), signal),
   asset: (assetId: number, signal?: AbortSignal) => getJson<AssetDetail>(`/explorer/asset/${assetId}`, signal),
   assetDcas: (assetId: number, signal?: AbortSignal) => getJson<AssetDcas>(`/explorer/asset/${assetId}/dcas`, signal),
+  assetLiquidity: (assetId: number, signal?: AbortSignal) => getJson<AssetLiquidity>(`/explorer/asset/${assetId}/liquidity`, signal),
+  poolDetail: (poolId: number, signal?: AbortSignal) => getJson<PoolDetail>(`/explorer/pool/${poolId}`, signal),
+  omnipool: (signal?: AbortSignal) => getJson<OmnipoolDetail>('/explorer/omnipool', signal),
   // Same endpoint as the global activities feed, with the asset id pinned.
   assetActivity: (assetId: number, type = 'all', offset = 0, limit = 40, action?: string, from?: string, to?: string, min?: string, signal?: AbortSignal) =>
     getJson<ActivityRow[]>(withQuery('/explorer/activity', { asset: assetId, type, offset, limit, action, from, to, min }), signal),

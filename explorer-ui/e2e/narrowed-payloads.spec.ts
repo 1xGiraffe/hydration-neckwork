@@ -84,9 +84,9 @@ test.describe('asset directory — filters pay for ids and symbols only', () => 
     await expect.poll(() => requests.length).toBeGreaterThanOrEqual(1)
     for (const url of requests) expect(url).toContain('fields=filter')
 
-    // The combo's own option list, not a subset: 11 tokens in the fixture directory.
+    // The combo's own option list, not a subset: 12 tokens in the fixture directory.
     await combo.click()
-    await expect(page.locator('.combo-pop [role="option"]')).toHaveCount(12) // 11 + "All tokens"
+    await expect(page.locator('.combo-pop [role="option"]')).toHaveCount(13) // 12 + "All tokens"
     await expect(page.locator('.combo-pop .combo-opt-sym').first()).not.toBeEmpty()
   })
 
