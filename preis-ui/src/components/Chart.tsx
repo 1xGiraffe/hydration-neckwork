@@ -21,6 +21,7 @@ import type { ApiCandle, OHLCVInterval, OmniwatchTrader, OmniwatchVolumeDetails 
 import { fetchCandles, fetchVolumeDetails } from '../api/candles'
 import { formatCountdown } from '../utils/format'
 import { candleEndTimestamp, previousCandleRange, recentCandleRange } from '../utils/candleTime'
+import { headStreamHealthy, subscribeHead } from '../live'
 import { keepTabFocusInside } from '../utils/focus'
 import { ToolController } from '../chart-tools/ToolController'
 import type { ToolState } from '../chart-tools/ToolController'
@@ -1031,8 +1032,13 @@ export default function Chart({
       }
     }
 
-    const timer = window.setInterval(poll, POLL_INTERVAL_MS)
+    // A pushed head means new candles may exist RIGHT NOW; the interval keeps
+    // running as the fallback but skips its tick while the stream is healthy —
+    // with a live stream, requests happen only when a block actually lands.
+    const unsubscribeHead = subscribeHead(() => { void poll() })
+    const timer = window.setInterval(() => { if (!headStreamHealthy()) void poll() }, POLL_INTERVAL_MS)
     return () => {
+      unsubscribeHead()
       window.clearInterval(timer)
       livePollAbortRef.current?.abort()
       livePollAbortRef.current = null
