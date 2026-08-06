@@ -71,9 +71,9 @@ export function Blocks() {
           <thead><tr><th>Block</th><th>Status</th><th className="r">Extrinsics</th><th className="r">Events</th><th>Collator</th><th className="r">Time</th></tr></thead>
           <tbody {...pendingRows(pending)}>
             {isLoading && !data ? <TableSkeleton cols={6} rows={PAGE} /> : !rows.length ? <EmptyRow cols={6}>No blocks</EmptyRow> : rows.map(b => (
-              <tr key={b.height} {...rowNav(paths.block(b.height))} className={['clickable', fresh.has(String(b.height)) ? 'row-new' : ''].filter(Boolean).join(' ')}>
+              <tr key={b.height} {...rowNav(paths.block(b.height))} title={b.finalized === false ? 'Awaiting finality — may still reorganize' : undefined} className={['clickable', fresh.has(String(b.height)) ? 'row-new' : '', b.finalized === false ? 'unfinalized' : ''].filter(Boolean).join(' ')}>
                 <td data-label="Block" className="mono"><Link to={paths.block(b.height)} className="hash">{F.int(b.height)}</Link></td>
-                <td data-label="Status"><FinalizedBadge finalized={b.height <= (stats.data?.finalizedBlock ?? b.height)} /></td>
+                <td data-label="Status"><FinalizedBadge finalized={b.finalized !== false && b.height <= (stats.data?.finalizedBlock ?? b.height)} /></td>
                 <td data-label="Extrinsics" className="r mono">{b.extrinsicCount}</td>
                 <td data-label="Events" className="r mono">{b.eventCount}</td>
                 <td data-label="Collator">{b.author ? <AddrPill account={b.author} noCopy /> : <Dash />}</td>

@@ -34,19 +34,25 @@ type HeadListener = (head: number) => void
 const headListeners = new Set<HeadListener>()
 let source: EventSource | null = null
 let lastHead = 0
+// The newest UNFINALIZED block the api's pending layer can show. Feeds merge
+// pending rows, so a best-head advance must refetch them just like a newly
+// ingested finalized block.
+let lastBest = 0
 // A head that arrived while the tab was hidden: dispatch is deferred to the
 // next visibilitychange, so a background tab does no work but catches up the
 // moment it is looked at (interval polling is paused while streaming, so
 // silently dropping the event would leave the tab stale until the NEXT head).
 let pendingHiddenHead = 0
 
-// The newest pushed head while the stream is healthy, or 0. The api client
+// The newest pushed heads while the stream is healthy, or ''. The api client
 // stamps this onto live-feed URLs (`h=`): the nginx micro-cache keys on the
 // URI alone, so without it a push-triggered refetch can HIT the entry built
 // for the PREVIOUS head — with polling paused, that staleness would persist
-// until the next block rather than the next tick.
-export function liveHeadTag(): number {
-  return streamHealthy ? lastHead : 0
+// until the next block rather than the next tick. The unfinalized best rides
+// along so pending-row updates bust the cache too.
+export function liveHeadTag(): string {
+  if (!streamHealthy || lastHead === 0) return ''
+  return lastBest > lastHead ? `${lastHead}-${lastBest}` : `${lastHead}`
 }
 
 function dispatchHead(head: number): void {
@@ -82,12 +88,17 @@ export function useHeadStream(): boolean {
   )
 }
 
-// A pushed head only counts when it advances — reconnect replays the current
-// head, which must not trigger a redundant refetch storm.
-export function parseHeadEvent(data: string, previousHead: number): number | null {
+// A pushed frame only counts when a watermark advances — reconnect replays the
+// current frame, which must not trigger a redundant refetch storm. `head` is
+// the finalized-ingested checkpoint, `best` the newest unfinalized block.
+export interface HeadFrame { head: number; best: number }
+export function parseHeadEvent(data: string, prev: HeadFrame): HeadFrame | null {
   try {
-    const head = Number((JSON.parse(data) as { head?: unknown }).head)
-    return Number.isSafeInteger(head) && head > previousHead ? head : null
+    const raw = JSON.parse(data) as { head?: unknown; best?: unknown }
+    const head = Number.isSafeInteger(Number(raw.head)) ? Number(raw.head) : 0
+    const best = Number.isSafeInteger(Number(raw.best)) ? Number(raw.best) : 0
+    if (head <= prev.head && best <= prev.best) return null
+    return { head: Math.max(head, prev.head), best: Math.max(best, prev.best) }
   } catch { return null }
 }
 
@@ -96,10 +107,11 @@ function connectHead(): void {
   source = new EventSource('/api/explorer/live')
   source.addEventListener('open', () => setStreamHealthy(true))
   source.addEventListener('head', e => {
-    const head = parseHeadEvent((e as MessageEvent<string>).data, lastHead)
-    if (head == null) return
-    lastHead = head
-    dispatchHead(head)
+    const frame = parseHeadEvent((e as MessageEvent<string>).data, { head: lastHead, best: lastBest })
+    if (frame == null) return
+    lastHead = frame.head
+    lastBest = frame.best
+    dispatchHead(Math.max(frame.head, frame.best))
   })
   // Network drops auto-reconnect (server sends `retry:`); a non-200 response
   // (e.g. the mocked test API) closes the source for good. Either way the

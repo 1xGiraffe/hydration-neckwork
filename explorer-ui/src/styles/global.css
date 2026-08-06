@@ -2342,6 +2342,12 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    while the 160px floor still collapses the grid to fewer columns on phones. */
 .pool-cards { grid-template-columns: repeat(auto-fit, minmax(max(160px, calc(25% - 8px)), 1fr)); }
 .hdx-card { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--separator); border-radius: 12px; background: var(--panel); padding: 12px 14px; min-width: 0; }
+/* Unfinalized (pending-head) rows: the data exists but may still reorganize.
+   Deliberately subtle — dimmed ink, no extra column — and self-healing: the
+   class disappears with the next refetch after finalization. */
+.tbl tr.unfinalized > td { opacity: .55; transition: opacity 300ms; }
+.tbl tr.unfinalized:hover > td { opacity: .8; }
+
 /* A pool card that IS a link (the Liquidity tab's source cards): plain ink,
    hover lifts the border like a table row's hover — the whole card navigates. */
 a.hdx-card-link { text-decoration: none; color: inherit; cursor: pointer; transition: border-color 140ms; }
