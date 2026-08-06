@@ -304,12 +304,15 @@ export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pe
                 const aid = activityId(r, dcaExecutionLinks)
                 // De-emphasise low-/zero-value activity (null treated as low) so high-value rows stand out. Not hidden — just muted via the .dim class.
                 const dim = r.valueUsd == null || r.valueUsd < 10
-                const nav = aid ? rowNav(paths.activityDetail(slug, aid)) : null
+                // Unfinalized rows have no detail page yet (the classifier runs
+                // at finality) — dimmed and non-navigable until then.
+                const unfinalized = r.finalized === false
+                const nav = aid && !unfinalized ? rowNav(paths.activityDetail(slug, aid)) : null
                 const k = keys[i]
-                const className = [nav?.className, dim ? 'dim' : null, fresh.has(k) ? 'row-new' : null].filter(Boolean).join(' ') || undefined
+                const className = [nav?.className, dim ? 'dim' : null, fresh.has(k) ? 'row-new' : null, unfinalized ? 'unfinalized' : null].filter(Boolean).join(' ') || undefined
                 const showExt = slug !== 'swap' && slug !== 'dca' && r.extrinsicIndex != null
                 return (
-                  <tr key={k} {...(nav ?? {})} className={className} {...(aid ? { 'data-activity': `${slug}/${aid}` } : {})} {...(showExt ? { 'data-ext': `${r.blockHeight}-${r.extrinsicIndex}` } : {})}>
+                  <tr key={k} {...(nav ?? {})} className={className} title={unfinalized ? 'Awaiting finality — may still reorganize' : undefined} {...(aid && !unfinalized ? { 'data-activity': `${slug}/${aid}` } : {})} {...(showExt ? { 'data-ext': `${r.blockHeight}-${r.extrinsicIndex}` } : {})}>
                     <td data-label="Type"><ActivityBadge r={r} /></td>
                     {!noActor && <td data-label="Account">{r.who ? <AddrPill account={r.who} noCopy /> : <Dash />}</td>}
                     <td data-label="Activity"><ActivityDesc r={r} /></td>
