@@ -1,5 +1,4 @@
 /* eslint-disable react-refresh/only-export-components -- page + its smol-filter helpers */
-import { useState } from 'react'
 import { useActivity, useActivityCount, useDaily, useAssetFilterOptions } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -22,15 +21,26 @@ export function effectiveMin(userMin: string | undefined, hideSmol: boolean): st
   return userMin || (hideSmol ? String(SMOL_USD) : undefined)
 }
 
-// Persisted smol preference — hidden by default, survives reloads.
+// The smol preference resolves URL-first so a shared link shows exactly what
+// its sender saw: hiding is the default, so only `?smol=show` exists — an
+// absent param falls back to the persisted preference. Toggling writes both:
+// the URL (param set or removed, with the pager reset since the row set
+// changes) and the preference, which keeps the fallback consistent when the
+// param is removed.
+export function smolHiddenFrom(urlValue: string, storedHide: boolean): boolean {
+  return urlValue === 'show' ? false : storedHide
+}
 export function useHideSmol(): [boolean, () => void] {
-  const [hide, setHide] = useState(() => {
+  const urlValue = useQueryValue('smol', '')
+  const storedHide = (() => {
     try { return localStorage.getItem('explorer-hide-smol') !== '0' } catch { return true }
-  })
-  const toggle = () => setHide(h => {
-    try { localStorage.setItem('explorer-hide-smol', h ? '0' : '1') } catch { /* ignore */ }
-    return !h
-  })
+  })()
+  const hide = smolHiddenFrom(urlValue, storedHide)
+  const toggle = () => {
+    const nextHide = !hide
+    try { localStorage.setItem('explorer-hide-smol', nextHide ? '1' : '0') } catch { /* ignore */ }
+    setQuery({ smol: nextHide ? null : 'show', page: null })
+  }
   return [hide, toggle]
 }
 
@@ -53,7 +63,9 @@ export function Activity() {
   const page = usePageParam()
   const type = normalizeActivityType(useQueryValue('tab', 'all'))   // deep-linked active tab
   const action = normalizeActivityAction(type, useQueryValue('action', ''))   // per-type action filter
-  const { values: f, onChange, onClear, setDay } = useFilters()
+  // `smol` is a view preference with its own toggle, not a filter — reserved so
+  // it never renders as a filter chip and "clear filters" leaves it alone.
+  const { values: f, onChange, onClear, setDay } = useFilters({ reservedKeys: ['page', 'tab', 'smol'] })
   const [hideSmol, toggleSmol] = useHideSmol()
   // Failed attempts have no executed USD value. Selecting either DCA action
   // must therefore bypass the implicit "hide smol" floor, while an explicit
@@ -91,7 +103,7 @@ export function Activity() {
       <DayBarChart data={daily ?? []} color={categoryColor(type)} label="Daily activity" selected={f.from === f.to ? f.from : undefined} onSelect={setDay} fmt={F.int} loading={!daily} />
       <ActivityChips value={type} onChange={v => setQuery({ tab: v === 'all' ? null : v, action: null, page: null })} />
       <FilterZone fields={activityFilterFields(type, assets.data ?? [])} values={f} onChange={onChange} onClear={onClear}
-        extra={<SmolToggle hiding={hideSmol} onToggle={() => { toggleSmol(); setQuery({ page: null }) }} />} />
+        extra={<SmolToggle hiding={hideSmol} onToggle={toggleSmol} />} />
       <ActivityTable rows={rows} now={now} live={page === 0} anchorRef={anchorRef} loading={isFetching && rows.length === 0} pending={isPlaceholderData} pageSize={PAGE} error={error} onRetry={() => { void refetch() }} />
       <Pager page={page} totalPages={pages.totalPages} hasNext={pages.hasNext} note={pages.note} onPage={setPage} />
     </div>
