@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { cached } from './cache.ts'
 import { ensurePrices, getMoneyMarketReserves, type AssetRef, type PriceInfo } from './explorerService.ts'
 import { assetDescriptor } from './explorerAssets.ts'
+import { parsePoolAssetIds } from './stableswapSnapshot.ts'
 
 // HOLLAR (asset 222) dashboard — peg, HSM (HOLLAR Stability Module) state and
 // stableswap-pool liquidity. CH-only: no substrate RPC. HSM collateral params
@@ -233,15 +234,7 @@ async function loadSupply(): Promise<{ total: number; holders: number; omnipool:
 }
 
 interface HollarStablePool { poolId: number; hollarRaw: bigint; partners: { assetId: number; raw: bigint }[] }
-// Compact form (hex byte-string, one byte per asset id) is only valid for ids
-// ≤ 255 — mirrors parsePoolAssets in explorerService.ts.
-export function parsePoolAssetIds(raw: string | number[]): number[] {
-  if (Array.isArray(raw)) return raw.map(Number)
-  const h = raw.startsWith('0x') ? raw.slice(2) : raw
-  const out: number[] = []
-  for (let i = 0; i + 1 < h.length; i += 2) out.push(parseInt(h.slice(i, i + 2), 16))
-  return out
-}
+export { parsePoolAssetIds }
 
 // Every stableswap pool containing HOLLAR (110/HUSDC, 111/HUSDT, 112/HUSDS,
 // 113/HUSDe, 105/HOLLAR-USDC-USDT today, plus any future pool — discovered
