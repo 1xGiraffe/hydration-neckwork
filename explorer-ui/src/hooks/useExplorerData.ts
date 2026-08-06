@@ -1,7 +1,7 @@
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { api, userApi } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
-import { useLive, LIVE_MS } from '../live'
+import { useLive, useHeadStream, LIVE_MS } from '../live'
 import { useHeldRows } from './useHeldRows'
 import { getSession } from '../session'
 import { tagMapStatus, hasUserTagMembers, useTagMapVersion } from '../userTags'
@@ -21,8 +21,16 @@ import type { AccountSort, ContractSort } from '../types'
 const DETAIL_POLL_MS = 15_000
 const SLOW_POLL_MS = 60_000
 
-function useInterval(intervalMs = LIVE_MS): number | false {
-  return useLive() ? intervalMs : false
+// `pushed` marks a query the SSE head channel already refreshes (a
+// LIVE_PUSH_KEYS feed): while the stream is healthy its interval polling
+// pauses entirely, so requests happen only when a block actually lands. On
+// stream loss (older browser, proxy hiccup, mocked test API) the interval
+// resumes as the fallback.
+function useInterval(intervalMs = LIVE_MS, pushed = false): number | false {
+  const live = useLive()
+  const streaming = useHeadStream()
+  if (!live) return false
+  return pushed && streaming ? false : intervalMs
 }
 
 // Paged and tabbed lists carry `placeholderData: keepPreviousData` for the same
@@ -35,26 +43,26 @@ function useInterval(intervalMs = LIVE_MS): number | false {
 // overlap the previous ones, which a page or filter change never does.
 
 export function useStats(enabled = true) {
-  const ri = useInterval()
+  const ri = useInterval(LIVE_MS, true)
   return useQuery({ queryKey: ['stats'], queryFn: ({ signal }) => api.stats(signal), enabled, refetchInterval: enabled ? ri : false, staleTime: 2000 })
 }
 export function useBlocks(limit = 25, offset = 0, enabled = true) {
-  const ri = useInterval()
+  const ri = useInterval(LIVE_MS, true)
   const key = ['blocks', limit, offset]
   return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.blocks(limit, offset, signal), enabled, refetchInterval: enabled && offset === 0 ? ri : false, staleTime: 5000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useExtrinsics(limit = 25, signedOnly = true, from?: string, to?: string, offset = 0, filters?: ExtrinsicFilters) {
-  const ri = useInterval()
+  const ri = useInterval(LIVE_MS, true)
   const key = ['extrinsics', limit, signedOnly, from, to, offset, filters]
   return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.extrinsics(limit, signedOnly, from, to, offset, filters, signal), refetchInterval: offset === 0 ? ri : false, staleTime: 2000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useEvents(limit = 25, from?: string, to?: string, offset = 0, filters?: EventFilters) {
-  const ri = useInterval()
+  const ri = useInterval(LIVE_MS, true)
   const key = ['events', limit, from, to, offset, filters]
   return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.events(limit, from, to, offset, filters, signal), refetchInterval: offset === 0 ? ri : false, staleTime: 2000, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useActivity(limit = 30, from?: string, to?: string, offset = 0, type = 'all', filters?: ValueFilters, action?: string) {
-  const ri = useInterval()
+  const ri = useInterval(LIVE_MS, true)
   const key = ['activity', limit, from, to, offset, type, filters, action]
   return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.activity(limit, from, to, offset, type, filters, action, signal), refetchInterval: offset === 0 ? ri : false, staleTime: 2000, placeholderData: keepPreviousData }), key, offset === 0)
 }
