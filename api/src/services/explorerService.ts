@@ -32,6 +32,7 @@ import { resolveModuleError } from './runtimeErrorNames.ts'
 import { profileForAccount } from './userProfileService.ts'
 import { parsePoolAssetIds } from './stableswapSnapshot.ts'
 import { findPendingBlock, findPendingExtrinsic, findPendingExtrinsicByHash, pendingBestHeight, pendingBlocksDesc, type PendingBlock, type PendingExtrinsicRow } from './pendingHeadService.ts'
+import { buildPendingActivities } from './pendingActivity.ts'
 
 let client: ClickHouseClient
 export function initExplorerService(c: ClickHouseClient): void { client = c }
@@ -7717,6 +7718,73 @@ export interface ActivityRow {
   otcPartial?: boolean            // fill came from OTC.PartiallyFilled
   otcPartiallyFillable?: boolean  // Placed order property
   otcFee?: string                 // fills; denominated in assetOut
+  // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
+  finalized?: boolean
+}
+
+// BASIC unfinalized activity rows for page 0 of the plain live feed: trades
+// folded from Broadcast swaps and plain transfers (see pendingActivity.ts for
+// the deliberate scope). Valued at CURRENT prices — a pending row lives ~40
+// seconds, so event-time and now coincide for practical purposes. A token
+// filter or token-unit floor cannot be honoured against pending rows, so those
+// views stay finalized-only rather than silently widening; a USD floor applies
+// directly. `aboveHeight` fences the seam against the newest finalized row.
+async function pendingActivityRows(type: string, filters: ValueListFilters, aboveHeight: number): Promise<ActivityRow[]> {
+  if (type !== 'all' && type !== 'trade' && type !== 'transfer') return []
+  if (filters.token || filters.unit === 'token') return []
+  const prices = await ensurePrices()
+  const rows: ActivityRow[] = []
+  for (const block of pendingBlocksDesc(aboveHeight)) {
+    for (const a of buildPendingActivities(block)) {
+      if (type === 'trade' && a.kind !== 'trade') continue
+      if (type === 'transfer' && a.kind !== 'transfer') continue
+      const base = {
+        blockHeight: a.blockHeight,
+        timestamp: a.timestamp,
+        eventIndex: a.eventIndex,
+        extrinsicIndex: a.extrinsicIndex,
+        // Trade/transfer detail pages need the finalized row — pending rows
+        // carry no link target and the client keeps them non-navigable.
+        linkBlock: null,
+        linkIndex: null,
+        finalized: false as const,
+      }
+      const row: ActivityRow = a.kind === 'trade'
+        ? {
+            ...base,
+            type: 'trade',
+            who: accountRef(a.swapper),
+            to: null,
+            asset: null,
+            assetIn: asset(a.assetIn),
+            assetOut: asset(a.assetOut),
+            amount: null,
+            amountIn: a.amountIn,
+            amountOut: a.amountOut,
+            valueUsd: usdValue(prices, a.assetIn, a.amountIn, asset(a.assetIn).decimals)
+              ?? usdValue(prices, a.assetOut, a.amountOut, asset(a.assetOut).decimals),
+            assetRefs: [a.assetIn, a.assetOut],
+            dca: false,
+          }
+        : {
+            ...base,
+            type: 'transfer',
+            who: accountRef(a.from),
+            to: accountRef(a.to),
+            asset: asset(a.assetId),
+            assetIn: null,
+            assetOut: null,
+            amount: a.amount,
+            amountIn: null,
+            amountOut: null,
+            valueUsd: usdValue(prices, a.assetId, a.amount, asset(a.assetId).decimals),
+            assetRefs: [a.assetId],
+          }
+      if (filters.min != null && !(row.valueUsd != null && row.valueUsd >= filters.min)) continue
+      rows.push(row)
+    }
+  }
+  return rows
 }
 
 function moneyMarketActivityFields(poolAddress: string | null | undefined): Pick<ActivityRow, 'mmMarketKey' | 'mmMarket'> {
@@ -11092,7 +11160,7 @@ export async function getRecentActivity(limit: number, from?: string, to?: strin
 async function recentActivityPage(limit: number, from?: string, to?: string, offset = 0, type = 'all', filters: ValueListFilters = {}, action?: string): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   type = normalizeActivityTypeKey(type)
-  return cached(`explorer:activity:${await liveHeadTag(Boolean(tw))}:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:activity:${await liveFeedTag(Boolean(tw))}:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const { rows, locallyPaged } = await activityWindow(limit, from, to, offset, type, filters, action)
     // A locally paged window holds the whole filtered ordering, so this page
     // starts at `offset`; a SQL-paged read already returned the page itself.
@@ -11101,6 +11169,13 @@ async function recentActivityPage(limit: number, from?: string, to?: string, off
     const sliceOffset = locallyPaged ? offset : 0
     const page = rows.slice(sliceOffset, sliceOffset + limit).map(row => ({ ...row }))
     await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page)])
+    // Page 0 of the plain live feed leads with the BASIC unfinalized rows
+    // (pending trades and transfers); dated, deeper and action-filtered views
+    // stay finalized-only.
+    if (offset === 0 && !timeWindow(from, to) && !action) {
+      const pending = await pendingActivityRows(type, filters, page[0]?.blockHeight ?? 0)
+      if (pending.length) return [...pending, ...page].slice(0, limit)
+    }
     return page
   })
 }
