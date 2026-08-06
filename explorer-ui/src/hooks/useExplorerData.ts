@@ -79,8 +79,16 @@ export function useActivityCount(type = 'all', from?: string, to?: string, filte
 export function useCounts() {
   return useQuery({ queryKey: ['counts'], queryFn: ({ signal }) => api.counts(signal), staleTime: 60_000 })
 }
+// While a detail response is still unfinalized (served from the api's pending
+// layer), keep refetching briefly: the finalized row lands within ~40s carrying
+// the corrected details (fee, author, decoded failure), and the refetch stops
+// the moment the response stops saying `finalized: false`. Exported for tests.
+export function pendingRefetchMs(data: unknown): number | false {
+  return (data as { finalized?: boolean } | undefined)?.finalized === false ? 2_500 : false
+}
+
 export function useBlock(height: number | null) {
-  return useQuery({ queryKey: ['block', height], queryFn: ({ signal }) => api.block(height as number, signal), enabled: height != null, staleTime: 60_000 })
+  return useQuery({ queryKey: ['block', height], queryFn: ({ signal }) => api.block(height as number, signal), enabled: height != null, staleTime: 60_000, refetchInterval: q => pendingRefetchMs(q.state.data) })
 }
 export function useBlockActivity(height: number | null, enabled = true) {
   return useQuery({ queryKey: ['block-activity', height], queryFn: ({ signal }) => api.blockActivity(height as number, signal), enabled: height != null && enabled, staleTime: 60_000 })
@@ -94,6 +102,7 @@ export function useExtrinsic(id: string | null) {
     },
     enabled: !!id,
     staleTime: 60_000,
+    refetchInterval: q => pendingRefetchMs(q.state.data),
   })
 }
 // Gas for one EVM transaction. Asked only for an `Ethereum.transact` extrinsic a

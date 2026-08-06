@@ -139,7 +139,7 @@ export function ExtrinsicDetail({ id }: { id: string }) {
           <>
             <div className="detail-card"><div className="dl">
               <div className="dt">Extrinsic ID</div><div className="dd mono">{data.blockHeight}-{data.index}</div>
-              <div className="dt">Block</div><div className="dd mono"><Link to={paths.block(data.blockHeight)} className="hash">{F.int(data.blockHeight)}</Link> <FinalizedBadge finalized={data.blockHeight <= (stats?.finalizedBlock ?? -1)} /></div>
+              <div className="dt">Block</div><div className="dd mono"><Link to={paths.block(data.blockHeight)} className="hash">{F.int(data.blockHeight)}</Link> <FinalizedBadge finalized={data.finalized !== false && data.blockHeight <= (stats?.finalizedBlock ?? -1)} /></div>
               <div className="dt">Timestamp</div><div className="dd mono">{F.datetime(data.timestamp)}</div>
               <div className="dt">Extrinsic hash</div><div className="dd mono wrap-anywhere">{data.hash} <Copy text={data.hash} /></div>
               <div className="dt">Module / Call</div><div className="dd"><CallPill name={data.callName} /> <CallDataCopy height={data.blockHeight} index={data.index} /></div>

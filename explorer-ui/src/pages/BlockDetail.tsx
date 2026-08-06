@@ -80,7 +80,7 @@ export function BlockDetail({ height }: { height: number }) {
           <>
             <div className="detail-card"><div className="dl">
               <div className="dt">Block height</div><div className="dd"><span className="num">{F.int(data.height)}</span></div>
-              <div className="dt">Status</div><div className="dd"><FinalizedBadge finalized={data.height <= (stats?.finalizedBlock ?? -1)} /></div>
+              <div className="dt">Status</div><div className="dd"><FinalizedBadge finalized={data.finalized !== false && data.height <= (stats?.finalizedBlock ?? -1)} /></div>
               <div className="dt">Timestamp</div><div className="dd"><span className="mono">{F.datetime(data.timestamp)}</span></div>
               <div className="dt">Block hash</div><div className="dd"><span className="mono wrap-anywhere">{data.hash}</span></div>
               <div className="dt">Parent hash</div><div className="dd"><Link to={paths.block(data.height - 1)} className="hash wrap-anywhere">{data.parentHash}</Link></div>

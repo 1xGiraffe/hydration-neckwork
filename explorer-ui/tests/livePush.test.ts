@@ -1,21 +1,37 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { LIVE_PUSH_KEYS, parseHeadEvent } from '../src/live'
+import { pendingRefetchMs } from '../src/hooks/useExplorerData'
 
 describe('parseHeadEvent', () => {
-  it('accepts a head that advances', () => {
-    expect(parseHeadEvent('{"head":13487500}', 13487499)).toBe(13487500)
+  it('accepts a frame when either watermark advances', () => {
+    expect(parseHeadEvent('{"head":13487500,"best":13487507}', { head: 13487499, best: 13487507 }))
+      .toEqual({ head: 13487500, best: 13487507 })
+    // a new unfinalized best block alone must refetch the feeds too
+    expect(parseHeadEvent('{"head":13487500,"best":13487508}', { head: 13487500, best: 13487507 }))
+      .toEqual({ head: 13487500, best: 13487508 })
   })
 
-  it('ignores a replayed or regressed head — reconnects must not refetch-storm', () => {
-    expect(parseHeadEvent('{"head":13487500}', 13487500)).toBeNull()
-    expect(parseHeadEvent('{"head":13487499}', 13487500)).toBeNull()
+  it('ignores a replayed or regressed frame — reconnects must not refetch-storm', () => {
+    expect(parseHeadEvent('{"head":13487500,"best":13487507}', { head: 13487500, best: 13487507 })).toBeNull()
+    expect(parseHeadEvent('{"head":13487499,"best":13487506}', { head: 13487500, best: 13487507 })).toBeNull()
   })
 
-  it('ignores malformed frames', () => {
-    expect(parseHeadEvent('not json', 0)).toBeNull()
-    expect(parseHeadEvent('{"head":"soon"}', 0)).toBeNull()
-    expect(parseHeadEvent('{}', 0)).toBeNull()
+  it('tolerates frames without best (older api) and malformed data', () => {
+    expect(parseHeadEvent('{"head":13487500}', { head: 13487499, best: 0 })).toEqual({ head: 13487500, best: 0 })
+    expect(parseHeadEvent('not json', { head: 0, best: 0 })).toBeNull()
+    expect(parseHeadEvent('{"head":"soon"}', { head: 0, best: 0 })).toBeNull()
+  })
+})
+
+// A detail page served from the pending layer keeps refetching until the
+// finalized row replaces it — then stops.
+describe('pendingRefetchMs', () => {
+  it('polls only while the response says unfinalized', () => {
+    expect(pendingRefetchMs({ finalized: false })).toBe(2500)
+    expect(pendingRefetchMs({ finalized: true })).toBe(false)
+    expect(pendingRefetchMs({})).toBe(false)
+    expect(pendingRefetchMs(undefined)).toBe(false)
   })
 })
 
