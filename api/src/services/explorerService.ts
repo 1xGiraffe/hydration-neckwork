@@ -9651,6 +9651,7 @@ export const STAKING_EVENT_NAMES = [
   'GigaHdx.Staked',
   'GigaHdx.Unstaked',
   'GigaHdx.UnstakeCancelled',
+  'GigaHdx.Unlocked',
   'GigaHdx.MigratedFromLegacy',
   'GigaHdxRewards.RewardsClaimed',
   'Staking.PositionCreated',
@@ -9710,6 +9711,9 @@ export function stakingAmountAndAsset(eventName: string, args: Record<string, un
   if (eventName === 'GigaHdx.Staked') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdx') : argStr(args, 'amount'), action: 'GIGAHDX Stake' }
   if (eventName === 'GigaHdx.Unstaked') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdxAmount') : argStr(args, 'payout'), action: 'GIGAHDX Unstake' }
   if (eventName === 'GigaHdx.UnstakeCancelled') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdx') : argStr(args, 'amount'), action: 'GIGAHDX Cancel Unstake' }
+  // Unlocked releases the HDX principal once the unstake period has passed —
+  // it has no stHDX leg, so an stHDX-scoped view drops it (empty amount).
+  if (eventName === 'GigaHdx.Unlocked') return { assetId: 0, amount: wantStHdx ? '' : argStr(args, 'amount'), action: 'GIGAHDX Unlock' }
   if (eventName === 'GigaHdx.MigratedFromLegacy') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdxReceived') : argStr(args, 'hdxUnlocked'), action: 'GIGAHDX Migrate' }
   if (eventName === 'GigaHdxRewards.RewardsClaimed') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdxReceived') : argStr(args, 'totalHdx'), action: 'GIGAHDX Reward' }
   if (preferredAssetId != null && preferredAssetId !== 0) return null
@@ -9759,6 +9763,7 @@ const STAKING_ACTION_EVENTS: Record<string, string[]> = {
   'GIGAHDX Stake': ['GigaHdx.Staked'],
   'GIGAHDX Unstake': ['GigaHdx.Unstaked'],
   'GIGAHDX Cancel Unstake': ['GigaHdx.UnstakeCancelled'],
+  'GIGAHDX Unlock': ['GigaHdx.Unlocked'],
   'GIGAHDX Migrate': ['GigaHdx.MigratedFromLegacy'],
   'GIGAHDX Reward': ['GigaHdxRewards.RewardsClaimed'],
   'Collator payout': ['CollatorRewards.CollatorRewarded'],
@@ -9774,6 +9779,7 @@ export function stakingAmountSql(gigaAssetId: number): string {
       event_name='GigaHdx.Staked', ${giga('gigahdx', 'amount')},
       event_name='GigaHdx.Unstaked', ${giga('gigahdxAmount', 'payout')},
       event_name='GigaHdx.UnstakeCancelled', ${giga('gigahdx', 'amount')},
+      event_name='GigaHdx.Unlocked', ${gigaAssetId === 670 ? "''" : "JSONExtractString(args_json,'amount')"},
       event_name='GigaHdx.MigratedFromLegacy', ${giga('gigahdxReceived', 'hdxUnlocked')},
       event_name='GigaHdxRewards.RewardsClaimed', ${giga('gigahdxReceived', 'totalHdx')},
       event_name='Staking.PositionCreated', if(JSONHas(args_json,'stake'), JSONExtractString(args_json,'stake'), JSONExtractString(args_json,'amount')),
