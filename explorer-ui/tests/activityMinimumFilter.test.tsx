@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { effectiveMin, SmolToggle, SMOL_USD } from '../src/pages/Activity'
+import { effectiveMin, SmolToggle, smolHiddenFrom, SMOL_USD } from '../src/pages/Activity'
 
 describe('smol filter — effectiveMin', () => {
   it('supplies the $10 floor when hiding and no explicit "$ from" filter', () => {
@@ -30,5 +30,19 @@ describe('SmolToggle', () => {
     const html = renderToStaticMarkup(<SmolToggle hiding={false} onToggle={() => {}} />)
     expect(html).not.toContain('hiding')
     expect(html).toContain('aria-pressed="false"')
+  })
+})
+
+// URL-first resolution: a shared link shows exactly what its sender saw; a
+// bare URL falls back to the visitor's persisted preference.
+describe('smolHiddenFrom', () => {
+  it('lets ?smol=show win over the stored preference — the only URL form, since hiding is the default', () => {
+    expect(smolHiddenFrom('show', true)).toBe(false)
+  })
+
+  it('falls back to the stored preference on a bare URL or garbage value', () => {
+    expect(smolHiddenFrom('', true)).toBe(true)
+    expect(smolHiddenFrom('', false)).toBe(false)
+    expect(smolHiddenFrom('nonsense', true)).toBe(true)
   })
 })
