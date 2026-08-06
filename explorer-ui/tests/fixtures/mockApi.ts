@@ -362,6 +362,13 @@ export function firstEvmCallExtrinsic(): { height: number; index: number } {
   throw new Error('no successful EVM.call extrinsic in the mock window')
 }
 
+
+// Rows above the fixture's finalized boundary (stats.finalizedBlock = TIP - 2)
+// carry the pending-head marker, mirroring the api's unfinalized merge.
+function mockFinal(h: number): { finalized?: boolean } {
+  return h > TIP - 2 ? { finalized: false } : {}
+}
+
 function recentExtrinsics(limit: number, signedOnly: boolean): ExtrinsicSummary[] {
   const out: ExtrinsicSummary[] = []
   let h = TIP
@@ -370,7 +377,7 @@ function recentExtrinsics(limit: number, signedOnly: boolean): ExtrinsicSummary[
     for (let i = n - 1; i >= 0 && out.length < limit; i--) {
       const x = genExtrinsic(h, i)
       if (signedOnly && !x.signer) continue
-      out.push({ blockHeight: x.blockHeight, index: x.index, hash: x.hash, timestamp: x.timestamp, signer: x.signer, success: x.success, callName: x.callName, fee: x.fee })
+      out.push({ blockHeight: x.blockHeight, index: x.index, hash: x.hash, timestamp: x.timestamp, signer: x.signer, success: x.success, callName: x.callName, fee: x.fee, ...mockFinal(h) })
     }
     h--
   }
@@ -1373,7 +1380,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   {
     re: /^\/explorer\/blocks$/, fn: (_m, qs) => {
       const limit = Number(qs.get('limit') ?? 25); const offset = Number(qs.get('offset') ?? 0)
-      return Array.from({ length: limit }, (_, i) => { const h = TIP - offset - i; return { height: h, timestamp: tsAt(h), hash: hx(h, 64), author: COLLATORS[0], specVersion: 428, extrinsicCount: blockExtrinsicCount(h), eventCount: blockExtrinsicCount(h) * 3 + (h % 5) } satisfies BlockSummary })
+      return Array.from({ length: limit }, (_, i) => { const h = TIP - offset - i; return { height: h, timestamp: tsAt(h), hash: hx(h, 64), author: h > TIP - 2 ? null : COLLATORS[0], specVersion: 428, extrinsicCount: blockExtrinsicCount(h), eventCount: blockExtrinsicCount(h) * 3 + (h % 5), ...mockFinal(h) } satisfies BlockSummary })
     },
   },
   {
@@ -1395,7 +1402,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   // Past the block's last index there is no extrinsic, so the fixture answers as the
   // API does — nothing, which the callers turn into a 404. Handing back an invented
   // extrinsic would make every block look endless to anything that pages or probes.
-  { re: /^\/explorer\/extrinsic-at\/(\d+)\/(\d+)$/, fn: (m) => Number(m[2]) < blockExtrinsicCount(Number(m[1])) ? genExtrinsic(Number(m[1]), Number(m[2])) : undefined },
+  { re: /^\/explorer\/extrinsic-at\/(\d+)\/(\d+)$/, fn: (m) => Number(m[2]) < blockExtrinsicCount(Number(m[1])) ? { ...genExtrinsic(Number(m[1]), Number(m[2])), ...mockFinal(Number(m[1])) } : undefined },
   { re: /^\/explorer\/extrinsic-at\/(\d+)\/(\d+)\/activity$/, fn: (m) => mockExtrinsicActivity(Number(m[1]), Number(m[2])) },
   // An Ethereum transaction hash resolves to the extrinsic that carries it — the
   // same object /extrinsic-at/<height>/<index> answers, which is what lets the page
@@ -1460,7 +1467,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       let h = TIP
       while (out.length < limit && h > TIP - 200) {
         const n = blockExtrinsicCount(h)
-        for (let i = n - 1; i >= 0 && out.length < limit; i--) { const x = genExtrinsic(h, i); for (const e of x.events) { out.push({ blockHeight: h, eventIndex: out.length, extrinsicIndex: x.index, timestamp: x.timestamp, name: e.name, args: e.args, decoded: !!(e as { decoded?: boolean }).decoded }); if (out.length >= limit) break } }
+        for (let i = n - 1; i >= 0 && out.length < limit; i--) { const x = genExtrinsic(h, i); for (const e of x.events) { out.push({ blockHeight: h, eventIndex: out.length, extrinsicIndex: x.index, timestamp: x.timestamp, name: e.name, args: e.args, decoded: !!(e as { decoded?: boolean }).decoded, ...mockFinal(h) }); if (out.length >= limit) break } }
         h--
       }
       return out.slice(0, limit)

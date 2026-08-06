@@ -282,6 +282,8 @@ export interface TradeDetail {
 export interface DailyPoint { date: string; value: number }
 
 export interface BlockSummary {
+  // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
+  finalized?: boolean
   height: number
   timestamp: string
   hash: string
@@ -314,6 +316,8 @@ export interface ExtrinsicOrigin {
 }
 
 export interface ExtrinsicSummary {
+  // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
+  finalized?: boolean
   blockHeight: number
   index: number
   hash: string
@@ -621,6 +625,8 @@ export interface IndexerStatus {
 }
 
 export interface EventRow {
+  // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
+  finalized?: boolean
   blockHeight: number
   eventIndex: number
   extrinsicIndex: number | null
