@@ -175,7 +175,8 @@ export function ExtRow({ x, now, isNew, noSigner, showOrigin, senderLabel }: { x
   return (
     <>
       <tr
-        className={`exp-host${open ? ' open' : ''}${isNew ? ' row-new' : ''}`}
+        className={`exp-host${open ? ' open' : ''}${isNew ? ' row-new' : ''}${x.finalized === false ? ' unfinalized' : ''}`}
+        title={x.finalized === false ? 'Awaiting finality — may still reorganize' : undefined}
         tabIndex={0}
         aria-expanded={open}
         onClick={toggle}
@@ -209,7 +210,8 @@ export function EvRow({ e, now, isNew }: { e: EventRow; now: number; isNew?: boo
   return (
     <>
       <tr
-        className={`exp-host${open ? ' open' : ''}${isNew ? ' row-new' : ''}`}
+        className={`exp-host${open ? ' open' : ''}${isNew ? ' row-new' : ''}${e.finalized === false ? ' unfinalized' : ''}`}
+        title={e.finalized === false ? 'Awaiting finality — may still reorganize' : undefined}
         tabIndex={0}
         aria-expanded={open}
         onClick={toggle}
