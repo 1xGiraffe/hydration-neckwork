@@ -1127,6 +1127,32 @@ async function latestPriceBlock(): Promise<number> {
   })
 }
 
+// The newest FULLY ingested raw block: the live pipeline's checkpoint, which is
+// written only after every table of a block has flushed (raw_blocks lands
+// first, so max(raw_blocks) would race the block's own events). This is the
+// freshness generation for every live feed cache — cached briefly so detecting
+// a new block costs one trivial read per ~1.5s across all feeds combined.
+async function indexedRawHead(): Promise<number> {
+  return cached('explorer:raw-head', 1_500, async () => {
+    const res = await client.query({
+      query: `SELECT max(last_block) AS head FROM price_data.raw_ingestion_state`,
+      format: 'JSONEachRow',
+    })
+    return Number((await res.json<{ head: number | null }>())[0]?.head ?? 0)
+  })
+}
+
+// Cache-key tag for a feed page: live pages carry the ingested head, so a page
+// is reused only until the next block lands — freshness by construction, with
+// executions bounded at one per (variant, block). Time-windowed pages don't
+// shift with the head and keep a stable tag.
+export function headCacheTag(head: number | null): string {
+  return head == null ? 'tw' : `h${head}`
+}
+async function liveHeadTag(timeWindowed = false): Promise<string> {
+  return headCacheTag(timeWindowed ? null : await indexedRawHead())
+}
+
 // "24h"/"7d"-style windows were historically fixed block-count offsets that
 // assumed a constant block time (12s, later 6s), so `head - 7200` was taken to
 // mean "24h ago". The chain now produces ~5.6s blocks, so those offsets cover
@@ -1606,12 +1632,12 @@ export interface ExplorerStats {
 }
 
 export async function getStats(): Promise<ExplorerStats> {
-  // Longer than the clients' LIVE_MS = 6s poll on purpose. At 3s the entry had always
-  // expired by the time the next poll arrived, so the cache never returned a single
-  // hit and this 45 MiB / 77 ms read ran ~10x a minute forever. Above one poll
-  // interval each entry serves the following poll, which halves the executions while
-  // leaving the head block no more than ~2 blocks behind the blocks feed.
-  return cached('explorer:stats', 10_000, async () => {
+  // Head-keyed: a new entry exists per ingested block, so the first poll after
+  // a block landed recomputes (one 45 MiB / 77 ms read per block, request-
+  // driven) and every other poll hits the cache — the head shown is never a
+  // TTL behind the data. The TTL is garbage collection, not freshness: at
+  // ~5.4s blocks an entry is superseded long before it expires.
+  return cached(`explorer:stats:${await liveHeadTag()}`, 30_000, async () => {
     // Wall-clock 24h cutoff height (blocks now run ~5.6s, so the old head−7200
     // covered only ~11h). The counts read replayable ReplacingMergeTree raw
     // tables, so they dedup by row identity: a replay before the next merge
@@ -1665,7 +1691,7 @@ export interface BlockSummary {
 }
 
 export async function getRecentBlocks(limit: number, offset = 0): Promise<BlockSummary[]> {
-  return cached(`explorer:blocks:${limit}:${offset}`, LIVE_CACHE_MS, async () => {
+  return cached(`explorer:blocks:${await liveHeadTag()}:${limit}:${offset}`, LIVE_CACHE_MS, async () => {
     const blocksRes = await client.query({
       query: `
         SELECT block_height, toString(block_timestamp) AS ts, block_hash, author, spec_version
@@ -1908,7 +1934,7 @@ export async function getBlock(height: number): Promise<BlockDetail | null> {
 // recent extrinsics
 export async function getRecentExtrinsics(limit: number, signedOnly: boolean, from?: string, to?: string, offset = 0, filters: ExtrinsicListFilters = {}): Promise<ExtrinsicSummary[]> {
   const tw = timeWindow(from, to)
-  return cached(`explorer:extrinsics:${limit}:${offset}:${signedOnly}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:extrinsics:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${signedOnly}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const callFilter = filters.call?.trim() ? textNameFilter('call_name', 'callName') : ''
     const resultFilter = filters.result === 'success' ? 'AND success = 1' : filters.result === 'failed' ? 'AND success = 0' : ''
     const rows = await withFeedWindow(tw, limit, offset + limit, async (bound) => {
@@ -2212,7 +2238,7 @@ async function moneyMarketExtrinsicsForTransfers(rows: TransferRow[]): Promise<S
 
 async function getRecentTransfers(limit: number, from?: string, to?: string, offset = 0, userOnly = false, filters: ValueListFilters = {}, suppressMoneyMarket = false): Promise<TransferRow[]> {
   const tw = timeWindow(from, to)
-  return cached(`explorer:transfers:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${userOnly}:${filterKey(filters)}:${suppressMoneyMarket}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:transfers:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${userOnly}:${filterKey(filters)}:${suppressMoneyMarket}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
     const useAssetTransferReadModel = tokenIds != null
@@ -6404,7 +6430,7 @@ async function uniqueEventRows(rows: EventSourceRow[]): Promise<EventRow[]> {
 }
 export async function getRecentEvents(limit: number, from?: string, to?: string, offset = 0, filters: EventListFilters = {}): Promise<EventRow[]> {
   const tw = timeWindow(from, to)
-  return cached(`explorer:events:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:events:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const eventFilter = filters.event?.trim() ? textNameFilter('event_name', 'eventName') : ''
     const rows = await withFeedWindow(tw, limit, offset + limit, async (bound) => {
       // A page cut by OFFSET reads every skipped row too, and args_json is ZSTD(6) —
@@ -6723,7 +6749,7 @@ async function liquidationVolumeByAccount(accounts: string[]): Promise<Map<strin
 // trade and attribute it to the extrinsic signer (or the AMM `who` when unsigned).
 async function getRecentTrades(limit: number, from?: string, to?: string, offset = 0, filters: ValueListFilters = {}): Promise<TradeRow[]> {
   const tw = timeWindow(from, to)
-  return cached(`explorer:trades:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:trades:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
     const tokenIds = assetIdsForToken(filters.token)
@@ -7770,7 +7796,7 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
   // An action no liquidity event produces selects nothing — the same answer the merged
   // feed's activityRowMatchesAction gives it, reached without an empty `IN ()`.
   if (!liqEvents.length) return []
-  return cached(`explorer:liquidity:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:liquidity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
     const assetExpr = 'asset_id'
@@ -8094,7 +8120,7 @@ function outboundXcmRow(
 async function getRecentXcm(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:xcm-activity:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:xcm-activity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
     const senderFilter = acctList ? `AND sender IN (${acctList})` : ''
@@ -8629,7 +8655,7 @@ async function fetchDecodedXcmDeep(
 async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:xcmoutr-activity:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:xcmoutr-activity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     if (acctList === "''") return []
     const prices = await ensurePrices()
     const bound = tw ?? '1'
@@ -8694,7 +8720,7 @@ async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, 
 async function getRecentXcmIn(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:xcmin-activity:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:xcmin-activity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     if (acctList === "''") return []
     const prices = await ensurePrices()
     const bound = tw ?? '1'
@@ -9204,7 +9230,7 @@ async function nttLogsFor(pairs: Iterable<string>): Promise<Map<string, NttExtri
 async function getRecentNttOut(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:ntt-out:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:ntt-out:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     if (acctList === "''") return []
     const minters = await nttMinterAccounts()
     if (!minters.size) return []
@@ -9289,7 +9315,7 @@ async function getRecentNttOut(limit: number, from?: string, to?: string, accoun
 async function getRecentNttIn(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:ntt-in:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:ntt-in:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     if (acctList === "''") return []
     const minters = await nttMinterAccounts()
     if (!minters.size) return []
@@ -9366,7 +9392,7 @@ async function getRecentMoneyMarket(limit: number, from?: string, to?: string, o
   const eventNames = moneyMarketEventNames(action)
   if (!eventNames.length) return []
   const tw = timeWindow(from, to)
-  return cached(`explorer:mm-activity:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:mm-activity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
     const reserveFilter = tokenIds == null ? '' : tokenIds.length
@@ -9555,7 +9581,7 @@ export function stakingAmountSql(gigaAssetId: number): string {
 async function getRecentStaking(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}, assetId?: number, action?: string): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:staking-activity:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${assetId ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:staking-activity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${assetId ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const bound = tw ?? '1'
     const tokenIds = assetIdsForToken(filters.token)
@@ -9772,7 +9798,7 @@ interface RawOtcActivityEvent { block_height: number; ts: string; event_index: n
 async function getRecentOtc(limit: number, from?: string, to?: string, offset = 0, filters: ValueListFilters = {}, action?: string, accounts?: string[]): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const accountSet = accounts?.length ? new Set(accounts.map(account => account.toLowerCase())) : null
-  return cached(`explorer:otc-activity:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}:${accounts?.join(',') ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:otc-activity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}:${accounts?.join(',') ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
     const postFilter = tokenIds != null || filters.min != null || accountSet != null
@@ -10051,7 +10077,7 @@ function voteRowMatchesFilters(row: VoteRow, filters: VoteListFilters): boolean 
 async function getRecentVotes(limit: number, from?: string, to?: string, offset = 0, filters: VoteListFilters = {}, accounts?: string[], valueFilters: ValueListFilters = {}): Promise<VoteRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:votes:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}:${filterKey(valueFilters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:votes:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}:${filterKey(valueFilters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const bound = tw ?? '1'
     const eventFilter = "AND event_name IN ('ConvictionVoting.Voted','Democracy.Voted')"
@@ -10930,7 +10956,7 @@ export async function getRecentActivity(limit: number, from?: string, to?: strin
 async function recentActivityPage(limit: number, from?: string, to?: string, offset = 0, type = 'all', filters: ValueListFilters = {}, action?: string): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   type = normalizeActivityTypeKey(type)
-  return cached(`explorer:activity:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:activity:${await liveHeadTag(Boolean(tw))}:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const { rows, locallyPaged } = await activityWindow(limit, from, to, offset, type, filters, action)
     // A locally paged window holds the whole filtered ordering, so this page
     // starts at `offset`; a SQL-paged read already returned the page itself.
@@ -10963,7 +10989,7 @@ async function activityWindow(
   // A page cut by SQL OFFSET is its own window — the offset is part of the read —
   // so it stays on the per-page cache above.
   if (!plan) return buildActivityWindow(limit, from, to, offset, type, filters, action)
-  const load = (key: string, depth: number): Promise<ActivityWindow> => {
+  const load = async (key: string, depth: number): Promise<ActivityWindow> => {
     const build = async (): Promise<ActivityWindow> => {
       const window = await buildActivityWindow(depth, from, to, 0, type, filters, action)
       // Hold exactly the depth this key promises. No page keyed on it reads
@@ -10971,7 +10997,7 @@ async function activityWindow(
       return { ...window, rows: window.rows.slice(0, depth) }
     }
     return plan.live
-      ? cached(key, LIVE_CACHE_MS, build)
+      ? cached(`${key}:${await liveHeadTag()}`, LIVE_CACHE_MS, build)
       : cachedSwr(key, ACTIVITY_WINDOW_FRESH_MS, ACTIVITY_WINDOW_STALE_MS, build)
   }
   const want = offset + limit
