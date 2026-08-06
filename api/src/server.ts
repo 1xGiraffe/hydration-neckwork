@@ -18,6 +18,8 @@ import { indexerRoutes } from './routes/indexer.ts'
 import { explorerRoutes } from './routes/explorer.ts'
 import { contractsRoutes } from './routes/contracts.ts'
 import { poolsRoutes } from './routes/pools.ts'
+import { liveRoutes } from './routes/live.ts'
+import { initLiveHeadService, stopLiveHeadService } from './services/liveHeadService.ts'
 import { tagRoutes } from './routes/tags.ts'
 import { userRoutes } from './routes/user.ts'
 import { listsRoutes } from './routes/lists.ts'
@@ -161,6 +163,7 @@ fastify.get('/health', async () => {
 // Drain in-flight requests and close the ClickHouse keep-alive pool when Docker
 // replaces the API container. This prevents half-open requests during deploys.
 fastify.addHook('onClose', async () => {
+  stopLiveHeadService()
   stopAssetsRefresh()
   stopExplorerAssetsRefresh()
   stopRuntimeErrorNamesRefresh()
@@ -181,6 +184,7 @@ await fastify.register(indexerRoutes, { client })
 await fastify.register(explorerRoutes)
 await fastify.register(contractsRoutes)
 await fastify.register(poolsRoutes)
+await fastify.register(liveRoutes)
 await fastify.register(tagRoutes)
 await fastify.register(userRoutes)
 await fastify.register(listsRoutes)
@@ -226,6 +230,7 @@ async function start() {
     initHdxService(client)
     initHollarService(client)
     initPoolService(client)
+    initLiveHeadService(client)
     initErc20WalletService(client)
     // Must precede startBackgroundRefresh(): its initial pass runs the
     // contract-code snapshot refresher, which reads and writes ClickHouse.

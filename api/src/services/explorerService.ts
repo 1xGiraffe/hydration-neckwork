@@ -1132,14 +1132,23 @@ async function latestPriceBlock(): Promise<number> {
 // first, so max(raw_blocks) would race the block's own events). This is the
 // freshness generation for every live feed cache — cached briefly so detecting
 // a new block costs one trivial read per ~1.5s across all feeds combined.
+//
+// The SSE broadcaster publishes each head it is about to push as a floor, so a
+// refetch racing the push can never build against this probe's older cached
+// value — the pushed head is servable before any client hears about it.
+let pushedRawHead = 0
+export function publishIndexedRawHead(head: number): void {
+  if (head > pushedRawHead) pushedRawHead = head
+}
 async function indexedRawHead(): Promise<number> {
-  return cached('explorer:raw-head', 1_500, async () => {
+  const probed = await cached('explorer:raw-head', 1_500, async () => {
     const res = await client.query({
       query: `SELECT max(last_block) AS head FROM price_data.raw_ingestion_state`,
       format: 'JSONEachRow',
     })
     return Number((await res.json<{ head: number | null }>())[0]?.head ?? 0)
   })
+  return Math.max(probed, pushedRawHead)
 }
 
 // Cache-key tag for a feed page: live pages carry the ingested head, so a page
