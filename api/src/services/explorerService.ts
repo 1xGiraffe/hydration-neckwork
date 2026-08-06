@@ -11928,13 +11928,18 @@ async function resolveDcaTradedPair(scheduleId: number, storedIn: number, stored
 // failure reason is decoded on demand from the raw event, like extrinsics.
 export async function getDcaExecution(height: number, eventIndex: number): Promise<DcaExecutionDetail | null> {
   return cached(`explorer:dca-exec:${height}:${eventIndex}`, 60_000, async () => {
+    // Nearest-following resolution: an execution's swap legs always PRECEDE
+    // its closing TradeExecuted/TradeFailed event, so any event id from inside
+    // the bundle (an activity row's Broadcast leg, a Router event) resolves to
+    // the execution it belongs to. An exact TradeExecuted id — the canonical
+    // /dca/<block>-e<index> form the schedule page links — matches first.
     const evRes = await client.query({
       query: `SELECT toString(id) AS id, event_name, extrinsic_index, toString(block_timestamp) AS ts,
                      toString(amount_in) AS amount_in, toString(amount_out) AS amount_out, error
               FROM price_data.dca_events
-              WHERE block_height = {h:UInt32} AND event_index = {i:UInt32}
+              WHERE block_height = {h:UInt32} AND event_index >= {i:UInt32}
                 AND event_name IN ('DCA.TradeExecuted','DCA.TradeFailed')
-              ORDER BY block_height DESC LIMIT 1`,
+              ORDER BY event_index ASC LIMIT 1`,
       query_params: { h: height, i: eventIndex }, format: 'JSONEachRow',
     })
     const ev = (await evRes.json<{ id: string; event_name: string; extrinsic_index: number | null; ts: string; amount_in: string; amount_out: string; error: string }>())[0]
