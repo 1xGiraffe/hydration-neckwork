@@ -9,6 +9,13 @@ import type {
   AccountRef, DeviceLinkResponse, DeviceLinkStatus, DeviceSession, EvmReceipt,
 } from '../types'
 import { getSession, setSession } from '../session'
+// Live feeds stamp the pushed head onto their URLs (`h=`): the nginx
+// micro-cache keys on the URI alone, so a push-triggered refetch would
+// otherwise HIT the entry cached for the previous head — and with interval
+// polling paused while streaming, that staleness would last until the NEXT
+// block. Per-head URIs keep the shared cache (same head → same entry) while
+// making a new head a guaranteed cache MISS. 0 (not streaming) omits the tag.
+import { liveHeadTag } from '../live'
 
 // A failed request carries the API's own explanation (Fastify puts it in
 // `message`, hand-written rejections in `error`). Keeping it on the error lets a
@@ -96,13 +103,13 @@ export interface ActivityCount extends ListCount { maxOffset: number }
 export interface ListCounts { blocks: number; extrinsics: number; events: number; transfers: number; maxOffset: number }
 
 export const api = {
-  stats: (signal?: AbortSignal) => getJson<ExplorerStats>('/explorer/stats', signal),
+  stats: (signal?: AbortSignal) => getJson<ExplorerStats>(withQuery('/explorer/stats', { h: liveHeadTag() || undefined }), signal),
   indexer: (signal?: AbortSignal) => getJson<IndexerStatus>('/indexer', signal),
-  blocks: (limit = 25, offset = 0, signal?: AbortSignal) => getJson<BlockSummary[]>(withQuery('/explorer/blocks', { limit, offset }), signal),
+  blocks: (limit = 25, offset = 0, signal?: AbortSignal) => getJson<BlockSummary[]>(withQuery('/explorer/blocks', { limit, offset, h: liveHeadTag() || undefined }), signal),
   block: (height: number, signal?: AbortSignal) => getJson<BlockDetail>(`/explorer/block/${height}`, signal),
   blockActivity: (height: number, signal?: AbortSignal) => getJson<ActivityRow[]>(`/explorer/block/${height}/activity`, signal),
   extrinsics: (limit = 25, signedOnly = false, from?: string, to?: string, offset = 0, filters?: ExtrinsicFilters, signal?: AbortSignal) =>
-    getJson<ExtrinsicSummary[]>(withQuery('/explorer/extrinsics', { limit, offset, signedOnly, from, to, ...filters }), signal),
+    getJson<ExtrinsicSummary[]>(withQuery('/explorer/extrinsics', { limit, offset, signedOnly, from, to, ...filters, h: liveHeadTag() || undefined }), signal),
   extrinsic: (hash: string, signal?: AbortSignal) => getJson<ExtrinsicDetail>(`/explorer/extrinsic/${hash}`, signal),
   extrinsicAt: (height: number, index: number, signal?: AbortSignal) => getJson<ExtrinsicDetail>(`/explorer/extrinsic-at/${height}/${index}`, signal),
   extrinsicActivity: (hash: string, signal?: AbortSignal) => getJson<ActivityRow[]>(`/explorer/extrinsic/${hash}/activity`, signal),
@@ -119,9 +126,9 @@ export const api = {
   dcaExecution: (height: number, index: number, signal?: AbortSignal) => getJson<DcaExecutionDetail>(`/explorer/dca/exec/${height}/${index}`, signal),
   trade: (height: number, index: number, signal?: AbortSignal) => getJson<TradeDetail>(`/explorer/trade/${height}/${index}`, signal),
   tradeEvent: (height: number, index: number, signal?: AbortSignal) => getJson<TradeDetail>(`/explorer/trade-event/${height}/${index}`, signal),
-  events: (limit = 25, from?: string, to?: string, offset = 0, filters?: EventFilters, signal?: AbortSignal) => getJson<EventRow[]>(withQuery('/explorer/events', { limit, offset, from, to, ...filters }), signal),
+  events: (limit = 25, from?: string, to?: string, offset = 0, filters?: EventFilters, signal?: AbortSignal) => getJson<EventRow[]>(withQuery('/explorer/events', { limit, offset, from, to, ...filters, h: liveHeadTag() || undefined }), signal),
   eventAt: (height: number, index: number, signal?: AbortSignal) => getJson<EventDetail>(`/explorer/event/${height}/${index}`, signal),
-  activity: (limit = 25, from?: string, to?: string, offset = 0, type = 'all', filters?: ValueFilters, action?: string, signal?: AbortSignal) => getJson<ActivityRow[]>(withQuery('/explorer/activity', { limit, offset, type, action, from, to, ...filters }), signal),
+  activity: (limit = 25, from?: string, to?: string, offset = 0, type = 'all', filters?: ValueFilters, action?: string, signal?: AbortSignal) => getJson<ActivityRow[]>(withQuery('/explorer/activity', { limit, offset, type, action, from, to, ...filters, h: liveHeadTag() || undefined }), signal),
   // What the Activity pager sizes itself against: the feed's length under exactly
   // these filters where it can be counted, and always the servable depth.
   activityCount: (type = 'all', from?: string, to?: string, filters?: ValueFilters, action?: string, signal?: AbortSignal) =>
