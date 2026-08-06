@@ -5,6 +5,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, navigate, useQuery, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, AssetIcon, AssetAmount, AddrPill, AssetDetailSkeleton, TableSkeleton, EmptyRow, rowNav, accountHref, TagGroupPill, ActivityChips, Pager, normalizeActivityType, normalizeActivityAction, Dash, pendingRows } from '../components/ui'
 import { ActiveDcaTable } from '../components/AccountSections'
+import { AssetLiquidityTab } from '../components/AssetLiquidity'
 import { FilterZone, useFilters } from '../components/Filters'
 import { activityFilterFields } from '../components/activityFilters'
 import { PriceChart, ema7 } from '../components/PriceChart'
@@ -27,7 +28,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
   const now = useNow()
   const q = useQuery()
   const rawTab = q.get('tab')
-  const tab = (rawTab === 'holders' || rawTab === 'activity' || rawTab === 'dcas' ? rawTab : initialTab) as 'holders' | 'activity' | 'dcas'
+  const tab = (rawTab === 'holders' || rawTab === 'activity' || rawTab === 'dcas' || rawTab === 'liquidity' ? rawTab : initialTab) as 'holders' | 'activity' | 'dcas' | 'liquidity'
   const activityType = normalizeActivityType(useQueryValue('type', 'all'))
   // Activities filters — the same set as the global feed minus the token combo
   // (this page IS the token filter). `page` resets whenever a filter changes.
@@ -124,6 +125,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
             <div className="tabs">
               <button className={tab === 'activity' ? 'active' : ''} onClick={() => initialTab === 'holders' ? navigate(paths.asset(assetId)) : setQuery({ tab: null, page: null, hpage: null, side: null })}>Activities</button>
               <button className={tab === 'holders' ? 'active' : ''} onClick={() => setQuery({ tab: 'holders', page: null, hpage: null, side: null })}>Holders <span className="cnt">{F.int(data.holderCount)}</span></button>
+              <button className={tab === 'liquidity' ? 'active' : ''} onClick={() => setQuery({ tab: 'liquidity', page: null, hpage: null, side: null })}>Liquidity {data.liquiditySourceCount != null && <span className="cnt">{F.int(data.liquiditySourceCount)}</span>}</button>
               <button className={tab === 'dcas' ? 'active' : ''} onClick={() => setQuery({ tab: 'dcas', page: null, hpage: null, side: null })}>DCAs <span className="cnt">{F.int(data.dcaCount)}</span></button>
             </div>
 
@@ -157,6 +159,8 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
               <Pager page={hpage} totalPages={holderPages} onPage={setHpage} />
               </div>
             )}
+
+            {tab === 'liquidity' && <AssetLiquidityTab asset={a} />}
 
             {/* The same table an account's active orders use, one section per
                 side of THIS asset, each an anchor for the /hdx "N orders" links.

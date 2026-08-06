@@ -38,7 +38,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
 const NAV_LINKS: NavItem[] = [
   { to: paths.activity(), label: 'Activity', match: ['activity'] },
   { to: paths.accounts(), label: 'Accounts', match: ['accounts', 'account', 'tags', 'tags-hydration', 'tag', 'lists', 'list'] },
-  { to: paths.assets(), label: 'Assets', match: ['assets', 'asset', 'holders'] },
+  { to: paths.assets(), label: 'Assets', match: ['assets', 'asset', 'holders', 'pool', 'omnipool'] },
   { to: paths.hdx(), label: 'HDX', match: ['hdx'] },
   { to: paths.hollar(), label: 'HOLLAR', match: ['hollar'] },
 ]

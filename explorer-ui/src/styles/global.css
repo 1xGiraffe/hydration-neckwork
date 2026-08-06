@@ -2342,6 +2342,15 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    while the 160px floor still collapses the grid to fewer columns on phones. */
 .pool-cards { grid-template-columns: repeat(auto-fit, minmax(max(160px, calc(25% - 8px)), 1fr)); }
 .hdx-card { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--separator); border-radius: 12px; background: var(--panel); padding: 12px 14px; min-width: 0; }
+/* A pool card that IS a link (the Liquidity tab's source cards): plain ink,
+   hover lifts the border like a table row's hover — the whole card navigates. */
+a.hdx-card-link { text-decoration: none; color: inherit; cursor: pointer; transition: border-color 140ms; }
+a.hdx-card-link:hover { border-color: var(--text-low); }
+a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offset: 2px; }
+/* Amount ⇄ USD unit switch on the pooled-over-time chart. */
+.liq-toggle { display: inline-flex; gap: 2px; border: 1px solid var(--separator); border-radius: 8px; padding: 2px; }
+.liq-toggle button { padding: 3px 10px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); border-radius: 6px; }
+.liq-toggle button.active { background: var(--bg-elev); color: var(--text-high); }
 .hdx-card .hk { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500; color: var(--text-high); }
 .hdx-card .hk i { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .hdx-card .hk .cohort-threshold { margin-left: auto; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); white-space: nowrap; }
