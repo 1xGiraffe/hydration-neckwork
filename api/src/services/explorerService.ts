@@ -30,6 +30,7 @@ import { canSkipRepublish } from './snapshotRepublish.ts'
 import { createHash } from 'node:crypto'
 import { resolveModuleError } from './runtimeErrorNames.ts'
 import { profileForAccount } from './userProfileService.ts'
+import { parsePoolAssetIds } from './stableswapSnapshot.ts'
 
 let client: ClickHouseClient
 export function initExplorerService(c: ClickHouseClient): void { client = c }
@@ -1556,14 +1557,7 @@ function rowMeetsExactUsdMinimum(row: object & { valueUsd: number | null }, mini
 // (aTokens resolved to their underlying); a pool whose
 // reserves we can't fully price is skipped so the caller keeps the 1:1 proxy.
 interface SnapshotPool { pool_id: number; assets: string | number[]; reserves: string[]; total_issuance: string }
-function parsePoolAssets(assets: string | number[]): number[] {
-  if (Array.isArray(assets)) return assets.map(Number)
-  // Compact form: a hex byte-string, one byte per asset id (only used for ids ≤ 255).
-  const h = assets.startsWith('0x') ? assets.slice(2) : assets
-  const out: number[] = []
-  for (let i = 0; i + 1 < h.length; i += 2) out.push(parseInt(h.slice(i, i + 2), 16))
-  return out
-}
+const parsePoolAssets = parsePoolAssetIds
 let navMap = new Map<number, number>()
 let navLoadedAt = 0
 async function loadStableswapNav(prices: Map<number, PriceInfo>): Promise<Map<number, number>> {
