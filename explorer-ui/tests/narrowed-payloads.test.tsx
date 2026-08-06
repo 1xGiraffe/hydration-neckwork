@@ -91,8 +91,8 @@ describe('the token filter offers the same options from either asset shape', () 
   const projected = mockSync<AssetFilterItem[]>('/explorer/assets?fields=filter')!
 
   it('projects every row, in order, and nothing else', () => {
-    expect(full).toHaveLength(11)
-    expect(projected).toHaveLength(11)
+    expect(full).toHaveLength(12)
+    expect(projected).toHaveLength(12)
     expect(projected.map(a => a.assetId)).toEqual(full.map(a => a.assetId))
     for (const asset of projected) expect(Object.keys(asset)).toEqual(['assetId', 'symbol', 'name'])
   })
@@ -100,7 +100,7 @@ describe('the token filter offers the same options from either asset shape', () 
   it('builds an identical option list from the projection', () => {
     const options = tokenFilterOptions(projected)
     expect(options).toEqual(tokenFilterOptions(full))
-    expect(options).toHaveLength(11)
+    expect(options).toHaveLength(12)
   })
 
   it('names a deep-linked token id, so ?token=<id> never renders as a bare number', () => {
@@ -110,6 +110,6 @@ describe('the token filter offers the same options from either asset shape', () 
     expect(options.find(option => option.value === '5')?.label).toBe('DOT')
     expect(options.find(option => option.value === '0')?.label).toBe('HDX')
     // Duplicate symbols stay distinguishable because the id is the option value.
-    expect(new Set(options.map(option => option.value)).size).toBe(11)
+    expect(new Set(options.map(option => option.value)).size).toBe(12)
   })
 })

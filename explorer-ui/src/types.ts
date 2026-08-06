@@ -814,6 +814,101 @@ export interface AssetDetail {
   priceDates?: string[]
   // Absent/null unless the asset is or has been a primary money-market reserve.
   liquidations?: AssetLiquidations | null
+  // Number of pools currently holding this asset (the Liquidity tab badge).
+  liquiditySourceCount?: number
+}
+
+// liquidity pools (asset Liquidity tab, pool detail, Omnipool page)
+
+export type PoolKind = 'omnipool' | 'stableswap' | 'xyk'
+export interface PoolCompositionEntry { asset: AssetRef; amount: string; usd: number | null; sharePct: number | null }
+export interface AssetLiquiditySource {
+  kind: PoolKind
+  poolId: number | null            // share/LP asset id; null for the Omnipool
+  name: string
+  tvlUsd: number | null
+  assetAmount: string              // raw units of the page's asset in this pool
+  assetUsd: number | null
+  assetSharePct: number | null     // the asset's share of the pool's TVL
+  // Full per-asset breakdown for the card grid; compact rows below the card
+  // limit arrive with an empty composition (the pool page has the full one).
+  composition: PoolCompositionEntry[]
+  hasPegs: boolean
+}
+export interface FormerLiquiditySource {
+  kind: PoolKind
+  poolId: number | null
+  name: string
+  lastActiveBlock: number | null   // null: pool predates sampled pool history
+  lastActiveAt: string | null
+}
+export interface AssetLiquiditySeries { key: string; label: string; amounts: (number | null)[]; usd: (number | null)[] }
+export interface AssetLiquidity {
+  asset: AssetRef
+  totalAmount: string
+  totalUsd: number | null
+  sources: AssetLiquiditySource[]  // ordered by the asset's value, largest first
+  former: FormerLiquiditySource[]
+  history: { buckets: string[]; series: AssetLiquiditySeries[] }
+}
+
+export interface PegSourceInfo { kind: 'value' | 'oracle' | 'mmOracle'; source?: string; period?: string; oracleAsset?: AssetRef; address?: string }
+export interface PoolDetailAsset {
+  asset: AssetRef
+  amount: string
+  usd: number | null
+  sharePct: number | null
+  peg: { num: string; den: string; price: number } | null
+  pegSource: PegSourceInfo | null
+}
+export interface PoolParamEvent {
+  blockHeight: number
+  timestamp: string
+  kind: 'created' | 'amplification' | 'fee' | 'peg-source' | 'max-peg-update' | 'destroyed'
+  summary: string
+}
+export interface PoolDetail {
+  kind: 'stableswap' | 'xyk'
+  poolId: number
+  name: string
+  account: AccountRef
+  shareToken: AssetRef
+  createdBlock: number | null
+  createdAt: string | null
+  destroyed: boolean
+  tvlUsd: number | null
+  totalIssuance: string
+  feePermill: number | null
+  amplification: { current: number; initial: number; final: number; initialBlock: number; finalBlock: number } | null
+  maxPegUpdatePerbill: number | null
+  assets: PoolDetailAsset[]
+  paramEvents: PoolParamEvent[]
+  history: {
+    buckets: string[]
+    tvlUsd: (number | null)[]
+    composition: { asset: AssetRef; amounts: (number | null)[]; usd: (number | null)[] }[]
+    pegs: { asset: AssetRef; prices: (number | null)[] }[] | null
+    issuance: (number | null)[] | null
+  }
+}
+
+export interface OmnipoolAssetRow {
+  asset: AssetRef
+  reserve: string
+  reserveUsd: number | null
+  hubReserve: string
+  weightPct: number | null
+  capPct: number | null
+  tradable: string[]
+}
+export interface OmnipoolDetail {
+  account: AccountRef
+  tvlUsd: number | null
+  assetCount: number
+  hubReserveTotal: string
+  lrnaPrice: number | null
+  assets: OmnipoolAssetRow[]      // ordered by reserve value, largest first
+  history: { buckets: string[]; tvlUsd: (number | null)[]; composition: { asset: AssetRef; usd: (number | null)[] }[] }
 }
 
 export interface HdxCohort { key: string; label: string; minPct: number; minHdx: number; accounts: number; totalHdx: number }

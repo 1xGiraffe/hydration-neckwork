@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { stackHeights, stackedColumnMax, niceAxisMax, fmtHdxTick, readableBarMax } from '../src/components/HdxCharts'
+import { stackHeights, stackedColumnMax, niceAxisMax, fmtHdxTick, readableBarMax, stackSeries, lineRuns } from '../src/components/HdxCharts'
 
 describe('stackedColumnMax — high unlock clusters do not flatten the chart', () => {
   it('uses the largest value when the distribution has no separated high tail', () => {
@@ -192,5 +192,41 @@ describe('stackHeights — outlier columns compress only the oversized segments'
     const [small, big] = stackHeights([96, 600], 100)
     expect(small).toBe(96)
     expect(big).toBeGreaterThanOrEqual(4)
+  })
+})
+
+// Stacked-area stacking: bands accumulate bottom-up in the given order, and a
+// null bucket contributes nothing (the band is absent, never a fabricated 0
+// that would also poison the running top).
+describe('stackSeries — cumulative band tops', () => {
+  const s = (key: string, values: (number | null)[]) => ({ key, label: key, color: '#000', values })
+
+  it('accumulates bottom-up in series order', () => {
+    const { tops, max } = stackSeries([s('a', [1, 2]), s('b', [3, 4])])
+    expect(tops).toEqual([[1, 2], [4, 6]])
+    expect(max).toBe(6)
+  })
+
+  it('treats null as absent without breaking the running top', () => {
+    const { tops, max } = stackSeries([s('a', [1, null, 1]), s('b', [1, 1, null])])
+    expect(tops).toEqual([[1, 0, 1], [2, 1, 1]])
+    expect(max).toBe(2)
+  })
+
+  it('handles the empty case', () => {
+    expect(stackSeries([]).max).toBe(0)
+  })
+})
+
+// Peg lines break where data is absent instead of bridging the gap; an
+// isolated sample still renders (as a dot) rather than vanishing.
+describe('lineRuns — null-gap segmentation', () => {
+  it('splits on null runs and keeps singletons', () => {
+    expect(lineRuns([1, 2, null, 3, null, null, 4, 5])).toEqual([[0, 1], [3, 3], [6, 7]])
+  })
+
+  it('handles all-null and all-present series', () => {
+    expect(lineRuns([null, null])).toEqual([])
+    expect(lineRuns([1, 2, 3])).toEqual([[0, 2]])
   })
 })

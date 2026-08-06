@@ -257,8 +257,10 @@ export function Dash() {
 // Explorer-wide amount convention: leading asset icon, then symbol, then the
 // amount — the activity-flow "trade leg" reading order. `formatted` overrides
 // the default raw-amount formatting for pre-formatted values.
-export function AssetAmount({ asset, raw, formatted }: { asset: AssetRef; raw?: string | null; formatted?: string }) {
-  return <span className="trade-leg"><AssetChip asset={asset} /> <span className="mono">{formatted ?? (raw != null ? F.amount(raw, asset.decimals) : '—')}</span></span>
+// `link={false}` for hosts that are themselves links (a nested <a> is invalid
+// and browsers reparent it).
+export function AssetAmount({ asset, raw, formatted, link = true }: { asset: AssetRef; raw?: string | null; formatted?: string; link?: boolean }) {
+  return <span className="trade-leg"><AssetChip asset={asset} link={link} /> <span className="mono">{formatted ?? (raw != null ? F.amount(raw, asset.decimals) : '—')}</span></span>
 }
 
 // Short address with the final three characters highlighted.
@@ -730,12 +732,20 @@ export function FailureReasonRow({ reason }: { reason: FailureReason }) {
 // The venue one hop of a route trades through. Only Stableswap names a pool, so
 // the id is appended only where there is one. Shared by the trade hovercard's route
 // and the DCA schedule's planned route so a venue never reads two ways.
-export function PoolBadge({ pool, poolId }: { pool: string; poolId?: number | null }) {
-  return (
-    <span className="badge" style={{ background: 'color-mix(in srgb, var(--cat-liquidity) 15%, transparent)', color: 'var(--cat-liquidity)' }}>
-      {pool}{poolId != null ? ` #${poolId}` : ''}
-    </span>
-  )
+// `to` links the badge to the venue's pool page (nested links stay clickable
+// inside rowNav rows, same as every other pill).
+// The pool page a venue hop resolves to: the Omnipool has its own page, a
+// named pool id (stableswap share asset / XYK LP token) has /pool/:id, and
+// anything else (OTC, AAVE, HSM…) has no pool page.
+export function poolHref(pool: string, poolId?: number | null): string | undefined {
+  if (pool === 'Omnipool') return paths.omnipool()
+  return poolId != null ? paths.pool(poolId) : undefined
+}
+export function PoolBadge({ pool, poolId, to }: { pool: string; poolId?: number | null; to?: string }) {
+  const style = { background: 'color-mix(in srgb, var(--cat-liquidity) 15%, transparent)', color: 'var(--cat-liquidity)' } as const
+  const label = <>{pool}{poolId != null ? ` #${poolId}` : ''}</>
+  if (to) return <Link to={to} className="badge" style={style}>{label}</Link>
+  return <span className="badge" style={style}>{label}</span>
 }
 
 export function StatusBadge({ ok, reason, compact }: { ok: boolean; reason?: string; compact?: boolean }) {

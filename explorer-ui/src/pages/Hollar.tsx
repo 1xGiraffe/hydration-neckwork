@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { useHollarDashboard } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useNow } from '../hooks/useNow'
-import { paths } from '../router'
+import { Link, paths } from '../router'
 import { AssetAmount, Crumbs, F, AssetChip, Ago, AreaChart, ChartSkeleton, TableSkeleton, EmptyRow } from '../components/ui'
 import { useAssetColors } from '../utils/iconColor'
 import { ChartLegend, ShareBar, MirroredBarChart } from '../components/HdxCharts'
@@ -233,16 +233,19 @@ function PoolCard({ p }: { p: HollarPool }) {
       tip: <><span className="t-d">{pt.asset.symbol}</span><TipRow label="Amount" value={fmtAmt(pt.amount) + ' ' + pt.asset.symbol} /><TipRow label="Value" value={F.usd(pt.usd)} /></>,
     })),
   ]
+  // The pool id IS the share-token asset id, so the card links straight to the
+  // pool page (same as the Liquidity tab's cards). Inner asset chips stay
+  // link-less — a nested <a> is invalid and browsers reparent it.
   return (
-    <div className="hdx-card" style={{ gap: 10 }}>
+    <Link to={paths.pool(p.poolId)} className="hdx-card hdx-card-link" style={{ gap: 10 }} ariaLabel={`${poolLabel(p)} pool`}>
       <div className="hk" style={{ flexWrap: 'wrap', rowGap: 2 }}><span>{poolLabel(p)}</span><span className="cap">{F.usd(p.tvlUsd)} TVL</span></div>
       <ShareBar segments={segs} h={26} />
       <div className="hs">
         HOLLAR {p.hollarSharePct != null ? p.hollarSharePct.toFixed(1) + '%' : '—'}
         <span className="muted" title={`Balanced ≈ ${balancedPct.toFixed(1)}% for a ${p.partners.length + 1}-asset pool`}> (balanced ≈ {balancedPct.toFixed(1)}%)</span>
       </div>
-      <div className="hs">{p.partners.map((pt, i) => <span key={i}>{i > 0 && ' · '}<AssetAmount asset={pt.asset} formatted={fmtAmt(pt.amount)} /></span>)}</div>
-    </div>
+      <div className="hs">{p.partners.map((pt, i) => <span key={i}>{i > 0 && ' · '}<AssetAmount asset={pt.asset} formatted={fmtAmt(pt.amount)} link={false} /></span>)}</div>
+    </Link>
   )
 }
 function LiquiditySection({ d }: { d: HollarDashboard }) {
