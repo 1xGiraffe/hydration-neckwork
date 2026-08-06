@@ -17,6 +17,7 @@ import { marketStatsRoutes } from './routes/market-stats.ts'
 import { indexerRoutes } from './routes/indexer.ts'
 import { explorerRoutes } from './routes/explorer.ts'
 import { contractsRoutes } from './routes/contracts.ts'
+import { poolsRoutes } from './routes/pools.ts'
 import { tagRoutes } from './routes/tags.ts'
 import { userRoutes } from './routes/user.ts'
 import { listsRoutes } from './routes/lists.ts'
@@ -58,6 +59,7 @@ import {
 import { initProxyMultisigService } from './services/proxyMultisigService.ts'
 import { initHdxService } from './services/hdxService.ts'
 import { initHollarService } from './services/hollarService.ts'
+import { initPoolService } from './services/poolService.ts'
 import { initErc20WalletService } from './services/erc20WalletService.ts'
 import { startBackgroundRefresh, stopBackgroundRefresh } from './services/backgroundRefresh.ts'
 import { initAccountAffinityService } from './services/accountAffinityService.ts'
@@ -122,6 +124,11 @@ const CACHE_CONTROL: [RegExp, number][] = [
   // let clients reuse it just as long. Without this it fell through to the 2s
   // catch-all and browsers re-fetched the biggest list payload constantly.
   [/^\/explorer\/assets/, 30],
+  // Pool surfaces: current state refreshes every 30-60s server-side, the heavy
+  // history models every 300s — match the shortest internal freshness window.
+  [/^\/explorer\/omnipool/, 30],
+  [/^\/explorer\/pool\//, 30],
+  [/^\/explorer\/asset\/\d+\/liquidity/, 60],
   [/^\/explorer\/(holders|asset)\//, 15],
   // Directory ranking is SWR-cached with a 60s freshness window server-side;
   // matching client reuse cuts request volume without adding staleness.
@@ -168,6 +175,7 @@ await fastify.register(marketStatsRoutes, { client })
 await fastify.register(indexerRoutes, { client })
 await fastify.register(explorerRoutes)
 await fastify.register(contractsRoutes)
+await fastify.register(poolsRoutes)
 await fastify.register(tagRoutes)
 await fastify.register(userRoutes)
 await fastify.register(listsRoutes)
@@ -212,6 +220,7 @@ async function start() {
     initProxyMultisigService(client)
     initHdxService(client)
     initHollarService(client)
+    initPoolService(client)
     initErc20WalletService(client)
     // Must precede startBackgroundRefresh(): its initial pass runs the
     // contract-code snapshot refresher, which reads and writes ClickHouse.

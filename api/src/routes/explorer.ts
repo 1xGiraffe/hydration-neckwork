@@ -24,6 +24,7 @@ import {
 } from '../services/explorerService.ts'
 import { getHdxDashboard } from '../services/hdxService.ts'
 import { getHollarDashboard } from '../services/hollarService.ts'
+import { countLiquiditySources } from '../services/poolService.ts'
 import { ACCOUNT_AFFINITY_BUSY_CODE, getCloseAccounts, getCloseAccountsForTag } from '../services/accountAffinityService.ts'
 
 // The wire vocabulary the explorer sends. 'stake' is the URL/product word; the
@@ -497,7 +498,13 @@ export async function explorerRoutes(fastify: FastifyInstance) {
   fastify.get('/explorer/asset/:assetId', async (req, reply) => {
     const params = z.object({ assetId: uint32Param }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid asset id' })
-    return getAssetDetail(params.data.assetId)
+    // Additive: the Liquidity tab's count chip. Both reads are cached; the
+    // count comes from the same current-pools loader the tab renders from.
+    const [detail, liquiditySourceCount] = await Promise.all([
+      getAssetDetail(params.data.assetId),
+      countLiquiditySources(params.data.assetId).catch(() => 0),
+    ])
+    return { ...detail, liquiditySourceCount }
   })
 
   // Ongoing DCA schedules trading one asset, split into buys (schedules
