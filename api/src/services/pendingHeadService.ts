@@ -26,11 +26,28 @@ const POLL_MS = 2_000
 const MAX_PENDING = 30
 const WALKBACK_LIMIT = 12
 
+// Economic legs extracted at decode time (while the Codec objects are still in
+// hand — the display `args` are human-formatted and unusable for amounts).
+// They feed the BASIC pending activity rows: trades folded from Broadcast
+// swaps and plain transfers — deliberately not the full finalized classifier.
+export interface PendingSwapLeg {
+  swapper: string   // hex AccountId32
+  inputs: { assetId: number; amount: string }[]
+  outputs: { assetId: number; amount: string }[]
+}
+export interface PendingTransferLeg {
+  from: string
+  to: string
+  assetId: number
+  amount: string
+}
 export interface PendingEventRow {
   eventIndex: number
   extrinsicIndex: number | null
   name: string
   args: unknown
+  swap?: PendingSwapLeg
+  transfer?: PendingTransferLeg
 }
 export interface PendingExtrinsicRow {
   index: number
@@ -72,6 +89,18 @@ export function sqdEventName(section: string, method: string): string {
 
 export function chTimestamp(ms: number): string {
   return new Date(ms).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
+}
+
+// A Vec of { asset, amount } structs (polkadot-js Structs extend Map).
+function decodeAssetAmountVec(codec: unknown): { assetId: number; amount: string }[] {
+  const out: { assetId: number; amount: string }[] = []
+  for (const el of codec as Iterable<unknown>) {
+    const m = el as Map<string, { toString(): string } | undefined>
+    const assetId = Number(m.get('asset')?.toString())
+    const amount = m.get('amount')?.toString()
+    if (Number.isFinite(assetId) && amount) out.push({ assetId, amount })
+  }
+  return out
 }
 
 export function pendingBestHeight(): number {
@@ -142,7 +171,34 @@ async function fetchPendingBlock(height: number): Promise<PendingBlock | null> {
       if (name === 'System.ExtrinsicSuccess') successByExt.set(extrinsicIndex, true)
       if (name === 'System.ExtrinsicFailed') successByExt.set(extrinsicIndex, false)
     }
-    events.push({ eventIndex: i, extrinsicIndex, name, args: record.event.data.toHuman() })
+    const row: PendingEventRow = { eventIndex: i, extrinsicIndex, name, args: record.event.data.toHuman() }
+    try {
+      const data = record.event.data as unknown as Array<{ toString(): string }>
+      if (record.event.section === 'broadcast' && record.event.method.startsWith('Swapped')) {
+        // Positional layout: swapper, filler, fillerType, operation, inputs,
+        // outputs, fees, operationStack.
+        row.swap = {
+          swapper: u8aToHex(decodeAddress(data[0].toString())),
+          inputs: decodeAssetAmountVec(data[4]),
+          outputs: decodeAssetAmountVec(data[5]),
+        }
+      } else if (name === 'Balances.Transfer') {
+        row.transfer = {
+          from: u8aToHex(decodeAddress(data[0].toString())),
+          to: u8aToHex(decodeAddress(data[1].toString())),
+          assetId: 0,
+          amount: data[2].toString(),
+        }
+      } else if (name === 'Tokens.Transfer') {
+        row.transfer = {
+          from: u8aToHex(decodeAddress(data[1].toString())),
+          to: u8aToHex(decodeAddress(data[2].toString())),
+          assetId: Number(data[0].toString()),
+          amount: data[3].toString(),
+        }
+      }
+    } catch { /* an exotic layout — the row stays a plain event */ }
+    events.push(row)
   })
 
   let timestampMs = Date.now()
