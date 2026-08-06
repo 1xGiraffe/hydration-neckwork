@@ -31,6 +31,7 @@ import { createHash } from 'node:crypto'
 import { resolveModuleError } from './runtimeErrorNames.ts'
 import { profileForAccount } from './userProfileService.ts'
 import { parsePoolAssetIds } from './stableswapSnapshot.ts'
+import { findPendingBlock, findPendingExtrinsic, findPendingExtrinsicByHash, pendingBestHeight, pendingBlocksDesc, type PendingBlock, type PendingExtrinsicRow } from './pendingHeadService.ts'
 
 let client: ClickHouseClient
 export function initExplorerService(c: ClickHouseClient): void { client = c }
@@ -1161,6 +1162,14 @@ export function headCacheTag(head: number | null): string {
 async function liveHeadTag(timeWindowed = false): Promise<string> {
   return headCacheTag(timeWindowed ? null : await indexedRawHead())
 }
+// Tag for the feeds that merge PENDING (unfinalized) rows: a new best block
+// must invalidate their pages just like a newly ingested finalized one.
+async function liveFeedTag(timeWindowed = false): Promise<string> {
+  if (timeWindowed) return 'tw'
+  const head = await indexedRawHead()
+  const best = pendingBestHeight()
+  return best > head ? `h${head}p${best}` : `h${head}`
+}
 
 // "24h"/"7d"-style windows were historically fixed block-count offsets that
 // assumed a constant block time (12s, later 6s), so `head - 7200` was taken to
@@ -1646,7 +1655,7 @@ export async function getStats(): Promise<ExplorerStats> {
   // driven) and every other poll hits the cache — the head shown is never a
   // TTL behind the data. The TTL is garbage collection, not freshness: at
   // ~5.4s blocks an entry is superseded long before it expires.
-  return cached(`explorer:stats:${await liveHeadTag()}`, 30_000, async () => {
+  return cached(`explorer:stats:${await liveFeedTag()}`, 30_000, async () => {
     // Wall-clock 24h cutoff height (blocks now run ~5.6s, so the old head−7200
     // covered only ~11h). The counts read replayable ReplacingMergeTree raw
     // tables, so they dedup by row identity: a replay before the next merge
@@ -1675,10 +1684,16 @@ export async function getStats(): Promise<ExplorerStats> {
     ])
     const row = (await mainRes.json<{ head_block: string; head_time: string; avg_block: number; transfers_24h: string; extrinsics_24h: string; active_accounts_24h: string }>())[0]
     const head = Number(row?.head_block ?? 0)
+    // The head is the newest block we can SHOW (unfinalized pending blocks
+    // included); the finalized boundary is what the raw pipeline has ingested.
+    // Every FinalizedBadge in the UI compares against this boundary, so rows
+    // above it read Pending and flip as ingestion passes them. Before the
+    // pending layer this was faked as head − 2.
+    const best = pendingBlocksDesc(head)[0]
     return {
-      headBlock: head,
-      finalizedBlock: Math.max(0, head - 2),
-      headTime: row?.head_time ?? '',
+      headBlock: best?.height ?? head,
+      finalizedBlock: head,
+      headTime: best?.timestamp ?? row?.head_time ?? '',
       avgBlockSec: Number(row?.avg_block ?? 0),
       transfers24h: Number(row?.transfers_24h ?? 0),
       extrinsics24h: Number(row?.extrinsics_24h ?? 0),
@@ -1697,10 +1712,80 @@ export interface BlockSummary {
   specVersion: number
   extrinsicCount: number
   eventCount: number
+  // false = still unfinalized (served from the in-memory pending-head layer,
+  // may reorg away). Absent = finalized — additive, so old clients are unmoved.
+  finalized?: boolean
+}
+
+// pending (unfinalized) rows — see pendingHeadService.ts for the layer's
+// contract: memory-only, reorg-replaceable, pruned at the finalized floor.
+function pendingBlockSummary(b: PendingBlock): BlockSummary {
+  return {
+    height: b.height,
+    timestamp: b.timestamp,
+    hash: b.hash,
+    // Author decode needs the session-key mapping — not worth it for rows that
+    // live ~40 seconds; the finalized row fills it in.
+    author: null,
+    specVersion: b.specVersion,
+    extrinsicCount: b.extrinsics.length,
+    eventCount: b.events.length,
+    finalized: false,
+  }
+}
+function pendingExtrinsicSummary(b: PendingBlock, e: PendingExtrinsicRow): ExtrinsicSummary {
+  return {
+    blockHeight: b.height,
+    index: e.index,
+    hash: e.hash,
+    timestamp: b.timestamp,
+    signer: e.signerId ? accountRef(e.signerId) : null,
+    success: e.success,
+    callName: e.callName,
+    // The fee is charged on execution and lands with the finalized row.
+    fee: null,
+    finalized: false,
+  }
+}
+function pendingEventRows(b: PendingBlock): EventRow[] {
+  return [...b.events].reverse().map(e => ({
+    blockHeight: b.height,
+    eventIndex: e.eventIndex,
+    extrinsicIndex: e.extrinsicIndex,
+    timestamp: b.timestamp,
+    name: e.name,
+    args: e.args,
+    decoded: true,
+    finalized: false,
+  }))
+}
+function pendingExtrinsicDetail(b: PendingBlock, e: PendingExtrinsicRow): ExtrinsicDetail {
+  return {
+    ...pendingExtrinsicSummary(b, e),
+    version: e.version,
+    tip: e.tip,
+    callArgs: e.callArgs,
+    error: null,
+    // Failure details decode with the finalized row; until then the status
+    // badge alone carries the outcome.
+    errorReason: null,
+    events: e.events.map(ev => ({ eventIndex: ev.eventIndex, name: ev.name, args: ev.args })),
+  }
+}
+function pendingBlockDetail(b: PendingBlock): BlockDetail {
+  return {
+    ...pendingBlockSummary(b),
+    parentHash: b.parentHash,
+    stateRoot: null,
+    extrinsicsRoot: null,
+    extrinsics: b.extrinsics.map(e => pendingExtrinsicSummary(b, e)),
+    events: b.events.map(e => ({ eventIndex: e.eventIndex, extrinsicIndex: e.extrinsicIndex, name: e.name, args: e.args })),
+    eventsShown: b.events.length,
+  }
 }
 
 export async function getRecentBlocks(limit: number, offset = 0): Promise<BlockSummary[]> {
-  return cached(`explorer:blocks:${await liveHeadTag()}:${limit}:${offset}`, LIVE_CACHE_MS, async () => {
+  return cached(`explorer:blocks:${await liveFeedTag()}:${limit}:${offset}`, LIVE_CACHE_MS, async () => {
     const blocksRes = await client.query({
       query: `
         SELECT block_height, toString(block_timestamp) AS ts, block_hash, author, spec_version
@@ -1733,7 +1818,7 @@ export async function getRecentBlocks(limit: number, offset = 0): Promise<BlockS
     for (const r of await extRes.json<{ block_height: number; c: string }>()) extCounts.set(r.block_height, Number(r.c))
     const evCounts = new Map<number, number>()
     for (const r of await evRes.json<{ block_height: number; c: string }>()) evCounts.set(r.block_height, Number(r.c))
-    return blocks.map(b => ({
+    const rows: BlockSummary[] = blocks.map(b => ({
       height: b.block_height,
       timestamp: b.ts,
       hash: b.block_hash,
@@ -1742,6 +1827,14 @@ export async function getRecentBlocks(limit: number, offset = 0): Promise<BlockS
       extrinsicCount: extCounts.get(b.block_height) ?? 0,
       eventCount: evCounts.get(b.block_height) ?? 0,
     }))
+    // Page 0 leads with the unfinalized best-head blocks. Deeper pages shift by
+    // however many pending rows exist — showing the incoming data outranks
+    // page-boundary exactness here, by design.
+    if (offset === 0) {
+      const pending = pendingBlocksDesc(rows[0]?.height ?? 0).map(pendingBlockSummary)
+      if (pending.length) return [...pending, ...rows].slice(0, limit)
+    }
+    return rows
   })
 }
 
@@ -1770,6 +1863,8 @@ export interface ExtrinsicSummary {
   // to `FailureReason | null` always-present, hence the `| null` so the
   // override stays assignable to the base property type.
   errorReason?: FailureReason | null
+  // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
+  finalized?: boolean
 }
 interface ExtrinsicSummaryRow {
   block_height: number
@@ -1874,6 +1969,12 @@ export interface BlockDetail extends BlockSummary {
 const BLOCK_EVENT_PAGE = 400
 
 export async function getBlock(height: number): Promise<BlockDetail | null> {
+  // Pending first: a block the finalized pipeline does not serve yet answers
+  // from memory, marked unfinalized. The map prunes only once ClickHouse has
+  // the block, so the flip to the finalized version has no gap — and the
+  // pending read never enters the 10s cache below, so it can't outlive itself.
+  const pending = findPendingBlock(height)
+  if (pending) return pendingBlockDetail(pending)
   return cached(`explorer:block:${height}`, 10000, async () => {
     const [blockRes, extRes, evRes, evListRes] = await Promise.all([
       client.query({
@@ -1943,7 +2044,7 @@ export async function getBlock(height: number): Promise<BlockDetail | null> {
 // recent extrinsics
 export async function getRecentExtrinsics(limit: number, signedOnly: boolean, from?: string, to?: string, offset = 0, filters: ExtrinsicListFilters = {}): Promise<ExtrinsicSummary[]> {
   const tw = timeWindow(from, to)
-  return cached(`explorer:extrinsics:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${signedOnly}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:extrinsics:${await liveFeedTag(Boolean(tw))}:${limit}:${offset}:${signedOnly}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const callFilter = filters.call?.trim() ? textNameFilter('call_name', 'callName') : ''
     const resultFilter = filters.result === 'success' ? 'AND success = 1' : filters.result === 'failed' ? 'AND success = 0' : ''
     const rows = await withFeedWindow(tw, limit, offset + limit, async (bound) => {
@@ -1973,7 +2074,16 @@ export async function getRecentExtrinsics(limit: number, signedOnly: boolean, fr
       })
       return res.json<ExtrinsicSummaryRow & { error_json: string | null; spec_version: number }>()
     })
-    return uniqueExtrinsicSummaries(rows)
+    const finalizedRows = uniqueExtrinsicSummaries(rows)
+    // Page 0 of the plain live feed leads with the unfinalized extrinsics.
+    // Filtered/dated/deep views stay finalized-only: this layer's job is
+    // showing the incoming data, not filter-complete pending coverage.
+    if (offset === 0 && !tw && !filters.call?.trim() && !filters.result && !filters.origin) {
+      const pending = pendingBlocksDesc(finalizedRows[0]?.blockHeight ?? 0).flatMap(b =>
+        b.extrinsics.filter(e => !signedOnly || e.signerId != null).map(e => pendingExtrinsicSummary(b, e)))
+      if (pending.length) return [...pending, ...finalizedRows].slice(0, limit)
+    }
+    return finalizedRows
   })
 }
 
@@ -2114,6 +2224,10 @@ async function evmTransactionExtrinsic(txHash: string): Promise<{ blockHeight: n
 // code and can never disagree.
 export async function getExtrinsic(hash: string): Promise<ExtrinsicDetail | null> {
   if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) return null
+  // Pending first (see getBlock) — this is the lookup a just-submitted
+  // transaction's hash link hits, ~40s before its block finalizes.
+  const pending = findPendingExtrinsicByHash(hash)
+  if (pending) return pendingExtrinsicDetail(pending.block, pending.ext)
   return cached(`explorer:extrinsic:${hash.toLowerCase()}`, 10000, async () => {
     const res = await client.query({
       query: `SELECT e.block_height AS block_height, e.extrinsic_index AS extrinsic_index, e.extrinsic_hash AS extrinsic_hash,
@@ -6108,6 +6222,10 @@ async function countAssetDcas(assetId: number): Promise<number> {
 
 // extrinsic by block-index (design routes #/extrinsic/h-i)
 export async function getExtrinsicAt(height: number, index: number): Promise<ExtrinsicDetail | null> {
+  // Pending first (see getBlock): unfinalized extrinsics answer from memory,
+  // marked so the client keeps refetching until the finalized row lands.
+  const pending = findPendingExtrinsic(height, index)
+  if (pending) return pendingExtrinsicDetail(pending.block, pending.ext)
   return cached(`explorer:extrinsic-at:${height}:${index}`, 10000, async () => {
     const res = await client.query({
       query: `SELECT e.block_height AS block_height, e.extrinsic_index AS extrinsic_index, e.extrinsic_hash AS extrinsic_hash,
@@ -6402,6 +6520,8 @@ export interface EventRow {
   args: unknown
   decoded: boolean
   evmDecoded?: EvmLogDecode
+  // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
+  finalized?: boolean
 }
 interface EventSourceRow {
   block_height: number
@@ -6439,7 +6559,7 @@ async function uniqueEventRows(rows: EventSourceRow[]): Promise<EventRow[]> {
 }
 export async function getRecentEvents(limit: number, from?: string, to?: string, offset = 0, filters: EventListFilters = {}): Promise<EventRow[]> {
   const tw = timeWindow(from, to)
-  return cached(`explorer:events:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:events:${await liveFeedTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const eventFilter = filters.event?.trim() ? textNameFilter('event_name', 'eventName') : ''
     const rows = await withFeedWindow(tw, limit, offset + limit, async (bound) => {
       // A page cut by OFFSET reads every skipped row too, and args_json is ZSTD(6) —
@@ -6474,7 +6594,14 @@ export async function getRecentEvents(limit: number, from?: string, to?: string,
       })
       return res.json<EventSourceRow>()
     })
-    return uniqueEventRows(rows)
+    const finalizedRows = await uniqueEventRows(rows)
+    // Page 0 of the plain live feed leads with the unfinalized events; filtered
+    // and dated views stay finalized-only (see the extrinsics feed).
+    if (offset === 0 && !tw && !filters.event?.trim()) {
+      const pending = pendingBlocksDesc(finalizedRows[0]?.blockHeight ?? 0).flatMap(pendingEventRows)
+      if (pending.length) return [...pending, ...finalizedRows].slice(0, limit)
+    }
+    return finalizedRows
   })
 }
 

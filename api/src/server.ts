@@ -20,6 +20,7 @@ import { contractsRoutes } from './routes/contracts.ts'
 import { poolsRoutes } from './routes/pools.ts'
 import { liveRoutes } from './routes/live.ts'
 import { initLiveHeadService, stopLiveHeadService } from './services/liveHeadService.ts'
+import { initPendingHeadService, startPendingHeadService, stopPendingHeadService } from './services/pendingHeadService.ts'
 import { tagRoutes } from './routes/tags.ts'
 import { userRoutes } from './routes/user.ts'
 import { listsRoutes } from './routes/lists.ts'
@@ -163,6 +164,7 @@ fastify.get('/health', async () => {
 // Drain in-flight requests and close the ClickHouse keep-alive pool when Docker
 // replaces the API container. This prevents half-open requests during deploys.
 fastify.addHook('onClose', async () => {
+  stopPendingHeadService()
   stopLiveHeadService()
   stopAssetsRefresh()
   stopExplorerAssetsRefresh()
@@ -231,6 +233,11 @@ async function start() {
     initHollarService(client)
     initPoolService(client)
     initLiveHeadService(client)
+    // The pending-head follower is always-on (feeds merge its rows whether or
+    // not any SSE client is connected); it degrades to finalized-only silently
+    // if the RPC node is unreachable.
+    initPendingHeadService(client)
+    startPendingHeadService()
     initErc20WalletService(client)
     // Must precede startBackgroundRefresh(): its initial pass runs the
     // contract-code snapshot refresher, which reads and writes ClickHouse.
