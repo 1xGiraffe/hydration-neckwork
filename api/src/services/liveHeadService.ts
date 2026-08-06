@@ -1,6 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import type { ServerResponse } from 'node:http'
 import { publishIndexedRawHead } from './explorerService.ts'
+import { pendingBestHeight } from './pendingHeadService.ts'
 
 // Server-sent head events: one shared ClickHouse poller fans two watermarks
 // out to every connected tab, so live surfaces refetch the moment their data
@@ -25,12 +26,15 @@ export function initLiveHeadService(c: ClickHouseClient): void { client = c }
 const clients = new Set<ServerResponse>()
 let lastHead = 0
 let lastMain = 0
+let lastBest = 0
 let pollTimer: NodeJS.Timeout | null = null
 let keepaliveTimer: NodeJS.Timeout | null = null
 let polling = false
 
-export function sseHeadFrame(head: number, main: number): string {
-  return `event: head\ndata: {"head":${head},"main":${main}}\n\n`
+export function sseHeadFrame(head: number, main: number, best = 0): string {
+  // best — the newest UNFINALIZED block the pending layer can show; clients
+  // refetch feeds on its advance so incoming blocks appear pre-finality.
+  return `event: head\ndata: {"head":${head},"main":${main},"best":${best}}\n\n`
 }
 
 async function pollOnce(): Promise<void> {
@@ -46,11 +50,13 @@ async function pollOnce(): Promise<void> {
     const row = (await res.json<{ head: number | null; main: number | null }>())[0]
     const head = Number(row?.head ?? 0)
     const main = Number(row?.main ?? 0)
-    if (head > lastHead || main > lastMain) {
+    const best = pendingBestHeight()
+    if (head > lastHead || main > lastMain || best > lastBest) {
       lastHead = Math.max(lastHead, head)
       lastMain = Math.max(lastMain, main)
+      lastBest = Math.max(lastBest, best)
       publishIndexedRawHead(lastHead)
-      const frame = sseHeadFrame(lastHead, lastMain)
+      const frame = sseHeadFrame(lastHead, lastMain, lastBest)
       for (const c of clients) c.write(frame)
     }
   } catch { /* transient read failure — the next tick retries */ } finally {
@@ -72,7 +78,7 @@ export function addLiveHeadClient(res: ServerResponse): void {
   clients.add(res)
   // Replay the last known heads immediately, so a (re)connecting tab
   // resynchronizes without waiting for the next block.
-  if (lastHead > 0 || lastMain > 0) res.write(sseHeadFrame(lastHead, lastMain))
+  if (lastHead > 0 || lastMain > 0) res.write(sseHeadFrame(lastHead, lastMain, lastBest))
   ensureTimers()
 }
 
