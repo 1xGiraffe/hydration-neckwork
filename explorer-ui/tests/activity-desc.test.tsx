@@ -30,8 +30,17 @@ describe('ActivityDesc — vote', () => {
     expect(html).toContain('#368')
     expect(html).toContain('Tip Request for DIA Oracle Services on Hydration')
     expect(html).toContain('AYE')
-    expect(html).toContain('Locked5x')
+    // As a multiplier, not the runtime's `Locked5x`: the enum reads as neither a
+    // conviction nor, in the `None` case, as a value at all.
+    expect(html).toContain('>5x<')
+    expect(html).not.toContain('Locked5x')
     expect(html).toContain('24.9')
+  })
+
+  it('gives the no-lock vote its real weight instead of the word None', () => {
+    const html = renderToStaticMarkup(<ActivityDesc r={{ ...vote, voteConviction: 'None' }} />)
+    expect(html).toContain('>0.1x<')
+    expect(html).not.toContain('>None<')
   })
 
   it('keeps only the locked capital when the page header already says the rest', () => {
