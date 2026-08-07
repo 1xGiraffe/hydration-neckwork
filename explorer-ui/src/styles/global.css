@@ -2389,6 +2389,8 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .badge.projected.ok { color: var(--green); }
 .badge.projected.fail { color: var(--red); }
 .badge.projected.unknown { color: var(--text-low); border-style: dashed; padding-inline: 7px; }
+/* Conviction sits beside the AYE/NAY badge and must not read as part of it. */
+.conviction-tag { margin-left: 6px; }
 .pool-chip { display: inline-block; margin-right: 8px; font-size: 12px; line-height: 1; vertical-align: middle; animation: poolHover 1.4s steps(2, end) infinite; }
 /* Two positions, no in-between — the same pixel logic as the row's edge. */
 @keyframes poolHover { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
