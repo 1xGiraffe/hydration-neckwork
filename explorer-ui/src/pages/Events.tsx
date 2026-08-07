@@ -23,7 +23,10 @@ export function Events() {
   const now = useNow()
 
   const rows = data ?? []
-  const fresh = useNewRows(rows.map(e => `${e.blockHeight}-${e.eventIndex}`), page === 0)
+  // Projected pool events share block 0, so their key is transaction hash +
+  // index — otherwise two pool transactions' events would collide.
+  const rowKey = (e: (typeof rows)[number]) => e.mempool ? `${e.hash}-${e.eventIndex}` : `${e.blockHeight}-${e.eventIndex}`
+  const fresh = useNewRows(rows.map(rowKey), page === 0)
   // 302.9M events is 12.1M pages, far past the offset the API serves — skipping N
   // rows reads N rows — so the pager numbers the servable ones and says the rest are
   // there. Any filter makes the unfiltered total the wrong one, leaving no total.
@@ -47,7 +50,7 @@ export function Events() {
         <table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Extrinsic</th><th>Event</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody {...pendingRows(isPlaceholderData)}>
-            {isFetching && !rows.length ? <TableSkeleton cols={6} mobileCols={5} rows={PAGE} /> : !rows.length ? <EmptyRow cols={6}>No events</EmptyRow> : rows.map(e => <EvRow key={`${e.blockHeight}-${e.eventIndex}`} e={e} now={now} isNew={fresh.has(`${e.blockHeight}-${e.eventIndex}`)} />)}
+            {isFetching && !rows.length ? <TableSkeleton cols={6} mobileCols={5} rows={PAGE} /> : !rows.length ? <EmptyRow cols={6}>No events</EmptyRow> : rows.map(e => <EvRow key={rowKey(e)} e={e} now={now} isNew={fresh.has(rowKey(e))} />)}
           </tbody>
         </table>
         <Pager page={page} totalPages={pages.totalPages} hasNext={pages.hasNext} note={pages.note} onPage={setPage} />

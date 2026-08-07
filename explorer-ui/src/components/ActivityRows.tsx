@@ -2,10 +2,11 @@ import { useEffect, useRef, useState, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { useExtrinsic } from '../hooks/useExplorerData'
 import { Link, paths } from '../router'
-import { F, AddrPill, CallPill, StatusBadge, JsonView, Ago, ExpandedRowSkeleton, Dash } from './ui'
+import { F, AddrPill, CallPill, StatusBadge, ProjectedBadge, JsonView, Ago, Waiting, ExpandedRowSkeleton, Dash } from './ui'
 import { EvmLogView } from './EvmDecoded'
 import { useExpandableRow } from '../hooks/useExpandableRow'
 import { failureReasonText, type ExtrinsicSummary, type ExtrinsicOrigin, type EventRow } from '../types'
+import { PoolChip } from './ActivityTable'
 
 // Expandable extrinsic / event rows shared by the list pages (Extrinsics, Events)
 // and the account detail tabs. Kept here so the markup stays identical everywhere.
@@ -167,7 +168,11 @@ function ExpandPanel({ id, origin }: { id: string; origin?: ExtrinsicOrigin }) {
 
 export function ExtRow({ x, now, isNew, noSigner, showOrigin, senderLabel }: { x: ExtrinsicSummary; now: number; isNew?: boolean; noSigner?: boolean; showOrigin?: boolean; senderLabel?: boolean }) {
   const { open, toggle, onKeyDown } = useExpandableRow()
-  const id = `${x.blockHeight}-${x.index}`
+  // A mempool row has no block coordinates yet — its hash IS its id, and the
+  // extrinsic endpoint answers a hash from the pool projection, so the link,
+  // the expansion and "open full detail" all work before any block exists.
+  const mempool = x.mempool === true
+  const id = mempool ? x.hash : `${x.blockHeight}-${x.index}`
   const cols = 6 + (noSigner ? 0 : 1) + (showOrigin ? 1 : 0)
   // The action's sender: a multisig operation's initiator (the person who
   // proposed it) rather than the anchor/executing signer, when known.
@@ -175,25 +180,28 @@ export function ExtRow({ x, now, isNew, noSigner, showOrigin, senderLabel }: { x
   return (
     <>
       <tr
-        className={`exp-host${open ? ' open' : ''}${isNew ? ' row-new' : ''}${x.finalized === false ? ' unfinalized' : ''}`}
-        title={x.finalized === false ? 'Awaiting finality — may still reorganize' : undefined}
+        className={`exp-host${open ? ' open' : ''}${isNew ? ' row-new' : ''}${x.finalized === false && !mempool ? ' unfinalized' : ''}${mempool ? ' mempool' : ''}`}
+        title={mempool ? 'In the transaction pool — the outcome shown is a dry-run projection, not yet in any block'
+          : x.finalized === false ? 'Awaiting finality — may still reorganize' : undefined}
         tabIndex={0}
         aria-expanded={open}
         onClick={toggle}
         onKeyDown={onKeyDown}
         style={{ cursor: 'pointer' }}
       >
-        <td data-label="Extrinsic" className="mono"><Link to={paths.extrinsic(id)} className="hash" onClick={e => e.stopPropagation()}>{id}</Link></td>
-        <td data-label="Block" className="mono"><Link to={paths.block(x.blockHeight)} className="hash" onClick={e => e.stopPropagation()}>{F.int(x.blockHeight)}</Link></td>
+        <td data-label="Extrinsic" className="mono"><Link to={paths.extrinsic(id)} className="hash" onClick={e => e.stopPropagation()}>{mempool ? F.shortHash(x.hash) : id}</Link></td>
+        <td data-label="Block" className="mono">{mempool ? <PoolChip /> : <Link to={paths.block(x.blockHeight)} className="hash" onClick={e => e.stopPropagation()}>{F.int(x.blockHeight)}</Link>}</td>
         <td data-label="Call">{showOrigin && x.origin?.callHash
           ? <span className="mono muted" title={`Call hash ${x.origin.callHash} — call body not published on-chain`}>{F.shortHash(x.origin.callHash)}</span>
           : <CallPill name={x.callName} />}</td>
         {!noSigner && <td data-label={senderLabel ? 'Sender' : 'Signer'}>{sender ? <AddrPill account={sender} noCopy /> : <span className="muted mono">— inherent</span>}</td>}
         {showOrigin && <td data-label="Origin">{x.origin ? <OriginBadge origin={x.origin} /> : <Dash />}</td>}
-        <td data-label="Result" className="r">{showOrigin && x.origin?.state === 'pending'
-          ? <span className="badge pending badge-icon" title="Pending" aria-label="Pending"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg></span>
-          : <StatusBadge ok={x.success} reason={failureReasonText(x.errorReason)} compact />}</td>
-        <td data-label="Time" className="r mono muted"><Ago ts={x.timestamp} now={now} /></td>
+        <td data-label="Result" className="r">{mempool
+          ? <ProjectedBadge verdict={x.projected ?? 'unknown'} compact />
+          : showOrigin && x.origin?.state === 'pending'
+            ? <span className="badge pending badge-icon" title="Pending" aria-label="Pending"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg></span>
+            : <StatusBadge ok={x.success} reason={failureReasonText(x.errorReason)} compact />}</td>
+        <td data-label="Time" className="r mono muted">{mempool ? <Waiting ts={x.timestamp} now={now} /> : <Ago ts={x.timestamp} now={now} />}</td>
         <td className="r exp-toggle col-hide-mobile"><button className={`exp-btn${open ? ' open' : ''}`} onClick={event => { event.stopPropagation(); toggle() }} aria-label={`${open ? 'Collapse' : 'Expand'} extrinsic ${id}`} aria-expanded={open}>▸</button></td>
       </tr>
       {open && <tr className="exp-row"><td colSpan={cols}><ExpandPanel id={id} origin={showOrigin ? x.origin : undefined} /></td></tr>}
@@ -203,26 +211,30 @@ export function ExtRow({ x, now, isNew, noSigner, showOrigin, senderLabel }: { x
 
 export function EvRow({ e, now, isNew }: { e: EventRow; now: number; isNew?: boolean }) {
   const { open, toggle, onKeyDown } = useExpandableRow()
+  // A projected event of a pool transaction: no block, no event id of its own —
+  // it exists only as part of the transaction, which its hash addresses.
+  const mempool = e.mempool === true
   const id = `${e.blockHeight}-${e.eventIndex}`
-  const extId = e.extrinsicIndex != null ? `${e.blockHeight}-${e.extrinsicIndex}` : null
+  const extId = mempool ? e.hash : e.extrinsicIndex != null ? `${e.blockHeight}-${e.extrinsicIndex}` : null
   const args = e.args && typeof e.args === 'object' ? e.args as Record<string, unknown> : {}
   const hasArgs = Object.keys(args).length > 0
   return (
     <>
       <tr
-        className={`exp-host${open ? ' open' : ''}${isNew ? ' row-new' : ''}${e.finalized === false ? ' unfinalized' : ''}`}
-        title={e.finalized === false ? 'Awaiting finality — may still reorganize' : undefined}
+        className={`exp-host${open ? ' open' : ''}${isNew ? ' row-new' : ''}${e.finalized === false && !mempool ? ' unfinalized' : ''}${mempool ? ' mempool' : ''}`}
+        title={mempool ? 'Projected by a dry run of a transaction still in the pool — not emitted by any block yet'
+          : e.finalized === false ? 'Awaiting finality — may still reorganize' : undefined}
         tabIndex={0}
         aria-expanded={open}
         onClick={toggle}
         onKeyDown={onKeyDown}
         style={{ cursor: 'pointer' }}
       >
-        <td data-label="ID" className="mono"><Link to={paths.eventAt(e.blockHeight, e.eventIndex)} className="hash" onClick={ev => ev.stopPropagation()}>{id}</Link></td>
-        <td data-label="Block" className="mono"><Link to={paths.block(e.blockHeight)} className="hash" onClick={ev => ev.stopPropagation()}>{F.int(e.blockHeight)}</Link></td>
-        <td data-label="Extrinsic" className="mono">{extId ? <Link to={paths.extrinsic(extId)} className="hash" onClick={ev => ev.stopPropagation()}>{extId}</Link> : <Dash />}</td>
+        <td data-label="ID" className="mono">{mempool ? <span className="muted">#{e.eventIndex}</span> : <Link to={paths.eventAt(e.blockHeight, e.eventIndex)} className="hash" onClick={ev => ev.stopPropagation()}>{id}</Link>}</td>
+        <td data-label="Block" className="mono">{mempool ? <PoolChip /> : <Link to={paths.block(e.blockHeight)} className="hash" onClick={ev => ev.stopPropagation()}>{F.int(e.blockHeight)}</Link>}</td>
+        <td data-label="Extrinsic" className="mono">{extId ? <Link to={paths.extrinsic(extId)} className="hash" onClick={ev => ev.stopPropagation()}>{mempool ? F.shortHash(extId) : extId}</Link> : <Dash />}</td>
         <td data-label="Event"><CallPill name={e.name} />{e.decoded && <span className="badge" style={{ background: 'color-mix(in srgb, var(--neutral) 15%, transparent)', color: 'var(--neutral)', marginLeft: 6 }}>decoded</span>}</td>
-        <td data-label="Time" className="r mono muted"><Ago ts={e.timestamp} now={now} /></td>
+        <td data-label="Time" className="r mono muted">{mempool ? <Waiting ts={e.timestamp} now={now} /> : <Ago ts={e.timestamp} now={now} />}</td>
         <td className="r exp-toggle col-hide-mobile"><button className={`exp-btn${open ? ' open' : ''}`} onClick={event => { event.stopPropagation(); toggle() }} aria-label={`${open ? 'Collapse' : 'Expand'} event ${id}`} aria-expanded={open}>▸</button></td>
       </tr>
       {open && (
@@ -231,7 +243,7 @@ export function EvRow({ e, now, isNew }: { e: EventRow; now: number; isNew?: boo
             <div className="exp-h">{e.name}</div>
             {e.evmDecoded ? <EvmLogView decoded={e.evmDecoded} />
               : hasArgs ? <JsonView value={args} /> : <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>no parameters</div>}
-            {extId ? <Link to={paths.extrinsic(extId)} className="hash">Open extrinsic →</Link> : <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>System event · no extrinsic</span>}
+            {extId ? <Link to={paths.extrinsic(extId)} className="hash">{mempool ? 'Open pool transaction →' : 'Open extrinsic →'}</Link> : <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>System event · no extrinsic</span>}
           </div>
         </td></tr>
       )}
