@@ -472,6 +472,11 @@ services:
       - RAW_EVM_RPC_URL=${RAW_EVM_RPC_URL:-https://hydration-rpc.neckwork.net}
       - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
       - EXPLORER_OCELLOIDS_TOKEN=${EXPLORER_OCELLOIDS_TOKEN:-}
+      # Transaction-pool rows (dry-run projections of transactions no block
+      # carries yet). OFF unless set to on/1/true/yes: it needs a node that
+      # answers author_pendingExtrinsics and the DryRunApi, and what it shows
+      # are projections rather than chain facts.
+      - EXPLORER_MEMPOOL=${EXPLORER_MEMPOOL:-}
       # Contract verification: compile-and-compare backend + the chain id the
       # Sourcify-compatible routes answer for.
       - SMART_CONTRACT_VERIFIER_URL=${SMART_CONTRACT_VERIFIER_URL:-http://smart-contract-verifier:8050}
