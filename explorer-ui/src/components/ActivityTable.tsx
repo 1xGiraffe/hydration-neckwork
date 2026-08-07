@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- activity table exports slug/id/label helpers alongside its components */
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
-import { F, AddrPill, AssetChip, rowNav, Ago, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor, ContractGlyph } from './ui'
+import { F, AddrPill, AssetChip, rowNav, Ago, Waiting, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor, ContractGlyph } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
 import { activityBadge } from './activityColors'
 import { resolveTag, useTagMapVersion } from '../userTags'
@@ -193,6 +193,14 @@ export function subordinateActivityTarget(rows: ActivityRow[], extrinsicIndex: n
     : paths.extrinsic(`${owner.blockHeight}-${owner.extrinsicIndex}`)
 }
 
+// The transaction-pool marker: the space invader says "still in memory, not
+// on the chain yet" without spending a word or a chip's width on it. It
+// bobs where nothing else in the row moves; the bob stops under
+// prefers-reduced-motion (CSS).
+export function PoolChip() {
+  return <span className="pool-chip" role="img" aria-label="In the transaction pool" title="In the transaction pool — projected, not yet in any block">👾</span>
+}
+
 export function ActivityBadge({ r }: { r: ActivityRow }) {
   const { label, col } = badge(r)
   const supplementalMarket = r.type === 'mm' && r.mmMarketKey && r.mmMarketKey !== 'core' ? r.mmMarket : null
@@ -278,7 +286,10 @@ export function ActivityDesc({ r, headed }: { r: ActivityRow; headed?: boolean }
 
 // Stable identity for a activity row, for React keys + live new-row detection.
 function activityKey(r: ActivityRow): string {
-  return [r.type, r.blockHeight, r.extrinsicIndex ?? r.eventIndex ?? '', r.assetIn?.assetId ?? r.asset?.assetId ?? '',
+  // A mempool row's only identity is its transaction hash (block coordinates
+  // are 0 placeholders) — and its amounts stay IN the key, so a re-projection
+  // that changes the numbers reads as a new row and flashes.
+  return [r.type, r.blockHeight, r.hash ?? '', r.extrinsicIndex ?? r.eventIndex ?? '', r.assetIn?.assetId ?? r.asset?.assetId ?? '',
     r.assetOut?.assetId ?? '', r.amountIn ?? r.amount ?? '', r.who?.accountId ?? '', r.mmMarketKey ?? ''].join('|')
 }
 
@@ -304,20 +315,28 @@ export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pe
                 const aid = activityId(r, dcaExecutionLinks)
                 // De-emphasise low-/zero-value activity (null treated as low) so high-value rows stand out. Not hidden — just muted via the .dim class.
                 const dim = r.valueUsd == null || r.valueUsd < 10
+                // Mempool rows are dry-run PROJECTIONS of transactions no block
+                // holds yet — specially marked (not dimmed like unfinalized: the
+                // point is to stand out), non-navigable, replaced by their
+                // unfinalized row on inclusion. Their hash link is the one
+                // navigation that already works.
+                const mempool = r.mempool === true
                 // Unfinalized rows have no detail page yet (the classifier runs
                 // at finality) — dimmed and non-navigable until then.
-                const unfinalized = r.finalized === false
-                const nav = aid && !unfinalized ? rowNav(paths.activityDetail(slug, aid)) : null
+                const unfinalized = r.finalized === false && !mempool
+                const nav = aid && !unfinalized && !mempool ? rowNav(paths.activityDetail(slug, aid)) : null
                 const k = keys[i]
-                const className = [nav?.className, dim ? 'dim' : null, fresh.has(k) ? 'row-new' : null, unfinalized ? 'unfinalized' : null].filter(Boolean).join(' ') || undefined
-                const showExt = slug !== 'swap' && slug !== 'dca' && r.extrinsicIndex != null
+                const className = [nav?.className, dim ? 'dim' : null, fresh.has(k) ? 'row-new' : null, unfinalized ? 'unfinalized' : null, mempool ? 'mempool' : null].filter(Boolean).join(' ') || undefined
+                const title = mempool ? 'In the transaction pool — the outcome shown is a dry-run projection, not yet in any block'
+                  : unfinalized ? 'Awaiting finality — may still reorganize' : undefined
+                const showExt = slug !== 'swap' && slug !== 'dca' && r.extrinsicIndex != null && !mempool
                 return (
-                  <tr key={k} {...(nav ?? {})} className={className} title={unfinalized ? 'Awaiting finality — may still reorganize' : undefined} {...(aid && !unfinalized ? { 'data-activity': `${slug}/${aid}` } : {})} {...(showExt ? { 'data-ext': `${r.blockHeight}-${r.extrinsicIndex}` } : {})}>
+                  <tr key={k} {...(nav ?? {})} className={className} title={title} {...(aid && !unfinalized && !mempool ? { 'data-activity': `${slug}/${aid}` } : {})} {...(showExt ? { 'data-ext': `${r.blockHeight}-${r.extrinsicIndex}` } : {})}>
                     <td data-label="Type"><ActivityBadge r={r} /></td>
                     {!noActor && <td data-label="Account">{r.who ? <AddrPill account={r.who} noCopy /> : <Dash />}</td>}
                     <td data-label="Activity"><ActivityDesc r={r} /></td>
                     <td data-label="Value" className="r mono">{r.valueUsd != null ? F.usd(r.valueUsd) : <Dash />}</td>
-                    <td data-label="Time" className="r mono muted"><Ago ts={r.timestamp} now={now} /></td>
+                    <td data-label="Time" className="r mono muted">{mempool ? <><PoolChip /><Waiting ts={r.timestamp} now={now} /></> : <Ago ts={r.timestamp} now={now} />}</td>
                   </tr>
                 )
               })}
