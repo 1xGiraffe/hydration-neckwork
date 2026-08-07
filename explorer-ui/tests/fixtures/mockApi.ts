@@ -321,6 +321,41 @@ export const MOCK_EVM_TX_FACTS: EvmTransactionFacts = { txHash: MOCK_EVM_TX_HASH
 export const MOCK_EVM_TX_RECEIPT: EvmReceipt = { gasUsed: '355638', effectiveGasPrice: '7000447' }
 const MOCK_EVM_TX_GAS_LIMIT = '565795'
 
+/* ---------- a transaction still in the pool (mempool) ---------- */
+// One pool transaction: a dry-run PROJECTION with 0-0 block placeholders,
+// addressed by hash, leading page 0 of the activity and extrinsics feeds.
+export const MOCK_MEMPOOL_HASH = hx(777_777, 64)
+function mempoolExtrinsicSummary(): ExtrinsicSummary {
+  return { blockHeight: 0, index: 0, hash: MOCK_MEMPOOL_HASH, timestamp: tsAt(TIP + 2), signer: A.fox, success: true, callName: 'Router.sell', fee: null, finalized: false, mempool: true, projected: 'ok' }
+}
+function mempoolExtrinsicDetail(): ExtrinsicDetail {
+  return {
+    ...mempoolExtrinsicSummary(),
+    version: 4, tip: '0',
+    callArgs: { asset_in: ASSETS[2].assetId, asset_out: ASSETS[1].assetId, amount_in: raw(500, ASSETS[2].decimals), min_amount_out: raw(495 * ASSETS[2].price / ASSETS[1].price, ASSETS[1].decimals), route: [] },
+    error: null, errorReason: null,
+    events: [
+      { eventIndex: 0, name: 'Broadcast.Swapped3', args: { swapper: A.fox.address }, decoded: false },
+      { eventIndex: 1, name: 'System.ExtrinsicSuccess', args: {}, decoded: false },
+    ],
+  }
+}
+function mempoolEventRows(): EventRow[] {
+  return mempoolExtrinsicDetail().events.map(e => ({
+    blockHeight: 0, eventIndex: e.eventIndex, extrinsicIndex: null, timestamp: tsAt(TIP + 2),
+    name: e.name, args: e.args, decoded: false, finalized: false, mempool: true, hash: MOCK_MEMPOOL_HASH,
+  }))
+}
+function mempoolActivityRow(): ActivityRow {
+  return {
+    type: 'trade', mempool: true, finalized: false, hash: MOCK_MEMPOOL_HASH,
+    blockHeight: 0, timestamp: tsAt(TIP + 2), eventIndex: 0, extrinsicIndex: 0,
+    who: A.fox, to: null, asset: null, assetIn: aref(ASSETS[2]), assetOut: aref(ASSETS[1]),
+    amount: null, amountIn: raw(500, ASSETS[2].decimals), amountOut: raw(500 * ASSETS[2].price / ASSETS[1].price, ASSETS[1].decimals),
+    valueUsd: 500 * ASSETS[2].price,
+  }
+}
+
 // An EIP1559 envelope as raw_extrinsics stores it: the transaction nested under
 // `transaction.value`, integers as strings, the target in `action`. Calldata is the
 // same verified-ABI transfer the EVM.call fixture uses, so the Parameters tab
@@ -1398,7 +1433,12 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
     },
   },
   { re: /^\/explorer\/block\/(\d+)\/activity$/, fn: (m) => mockBlockActivity(Number(m[1])) },
-  { re: /^\/explorer\/extrinsics$/, fn: (_m, qs) => recentExtrinsics(Number(qs.get('limit') ?? 25), qs.get('signedOnly') === '1') },
+  { re: /^\/explorer\/extrinsics$/, fn: (_m, qs) => {
+    const limit = Number(qs.get('limit') ?? 25)
+    const rows = recentExtrinsics(limit, qs.get('signedOnly') === '1')
+    // Page 0 leads with the pool transaction, mirroring the api's merge.
+    return Number(qs.get('offset') ?? 0) === 0 ? [mempoolExtrinsicSummary(), ...rows].slice(0, limit) : rows
+  } },
   // Past the block's last index there is no extrinsic, so the fixture answers as the
   // API does — nothing, which the callers turn into a 404. Handing back an invented
   // extrinsic would make every block look endless to anything that pages or probes.
@@ -1408,8 +1448,8 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   // same object /extrinsic-at/<height>/<index> answers, which is what lets the page
   // canonicalize the URL. Ahead of the generic 64-hex rule below, which stands in
   // for "any substrate extrinsic hash".
-  { re: /^\/explorer\/extrinsic\/(0x[0-9a-f]{64})$/, fn: (m) => m[1] === MOCK_EVM_TX_HASH ? genExtrinsic(MOCK_EVM_TX.height, MOCK_EVM_TX.index) : genExtrinsic(12_848_613, 4) },
-  { re: /^\/explorer\/extrinsic\/(0x[0-9a-f]{64})\/activity$/, fn: (m) => m[1] === MOCK_EVM_TX_HASH ? mockExtrinsicActivity(MOCK_EVM_TX.height, MOCK_EVM_TX.index) : mockExtrinsicActivity(12_848_613, 4) },
+  { re: /^\/explorer\/extrinsic\/(0x[0-9a-f]{64})$/, fn: (m) => m[1] === MOCK_MEMPOOL_HASH ? mempoolExtrinsicDetail() : m[1] === MOCK_EVM_TX_HASH ? genExtrinsic(MOCK_EVM_TX.height, MOCK_EVM_TX.index) : genExtrinsic(12_848_613, 4) },
+  { re: /^\/explorer\/extrinsic\/(0x[0-9a-f]{64})\/activity$/, fn: (m) => m[1] === MOCK_MEMPOOL_HASH ? [] : m[1] === MOCK_EVM_TX_HASH ? mockExtrinsicActivity(MOCK_EVM_TX.height, MOCK_EVM_TX.index) : mockExtrinsicActivity(12_848_613, 4) },
   // Gas comes from the node, per transaction. Unknown hash → undefined → 404, the
   // same answer the api gives when the node cannot produce a receipt.
   { re: /^\/explorer\/evm-tx\/(0x[0-9a-f]{64})\/receipt$/, fn: (m) => m[1] === MOCK_EVM_TX_HASH ? MOCK_EVM_TX_RECEIPT : undefined },
@@ -1463,7 +1503,9 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   },
   {
     re: /^\/explorer\/events$/, fn: (_m, qs) => {
-      const limit = Number(qs.get('limit') ?? 25); const out: EventRow[] = []
+      const limit = Number(qs.get('limit') ?? 25)
+      // Page 0 leads with the pool transaction's PROJECTED events.
+      const out: EventRow[] = Number(qs.get('offset') ?? 0) === 0 ? mempoolEventRows() : []
       let h = TIP
       while (out.length < limit && h > TIP - 200) {
         const n = blockExtrinsicCount(h)
@@ -1491,6 +1533,9 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       const min = qs.get('min') ? Number(qs.get('min')) : null
       let h = TIP
       if (requestedType === 'all' || requestedType === 'trade') {
+        // Ahead of everything: a transaction still in the pool — a dry-run
+        // projection, specially highlighted and non-navigable.
+        out.push(mempoolActivityRow())
         // The newest trade rides an unfinalized block: no detail link yet, the
         // row is dimmed and non-navigable until finality.
         out.push({

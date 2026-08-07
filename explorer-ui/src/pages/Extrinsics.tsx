@@ -23,7 +23,10 @@ export function Extrinsics() {
   const now = useNow()
 
   const rows = data ?? []
-  const fresh = useNewRows(rows.map(x => `${x.blockHeight}-${x.index}`), page === 0)
+  // Mempool rows all sit at block 0-0, so their key is their hash — otherwise
+  // two pool transactions would collide and React would drop one.
+  const rowKey = (x: (typeof rows)[number]) => x.mempool ? x.hash : `${x.blockHeight}-${x.index}`
+  const fresh = useNewRows(rows.map(rowKey), page === 0)
   // counts.extrinsics is the signed total, matching this list's signedOnly read. Any
   // filter makes it the wrong total, and then the pager walks a page at a time
   // instead of numbering pages that may not exist.
@@ -47,7 +50,7 @@ export function Extrinsics() {
         <table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Call</th><th>Signer</th><th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody {...pendingRows(isPlaceholderData)}>
-            {isFetching && !rows.length ? <TableSkeleton cols={7} mobileCols={6} rows={PAGE} /> : !rows.length ? <EmptyRow cols={7}>No extrinsics</EmptyRow> : rows.map(x => <ExtRow key={`${x.blockHeight}-${x.index}`} x={x} now={now} isNew={fresh.has(`${x.blockHeight}-${x.index}`)} />)}
+            {isFetching && !rows.length ? <TableSkeleton cols={7} mobileCols={6} rows={PAGE} /> : !rows.length ? <EmptyRow cols={7}>No extrinsics</EmptyRow> : rows.map(x => <ExtRow key={rowKey(x)} x={x} now={now} isNew={fresh.has(rowKey(x))} />)}
           </tbody>
         </table>
         <Pager page={page} totalPages={pages.totalPages} hasNext={pages.hasNext} note={pages.note} onPage={setPage} />
