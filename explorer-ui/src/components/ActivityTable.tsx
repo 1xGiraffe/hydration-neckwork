@@ -5,6 +5,7 @@ import { F, AddrPill, AssetChip, rowNav, Ago, Waiting, AccountEmoji, ShortAddr, 
 import { useNewRows } from '../hooks/useNewRows'
 import { activityBadge } from './activityColors'
 import { resolveTag, useTagMapVersion } from '../userTags'
+import { convictionLabel } from '../utils/voteRows'
 import type { ActivityRow } from '../types'
 
 // Chain badge for cross-chain (XCM) destinations — full network names, brand
@@ -201,6 +202,15 @@ export function PoolChip() {
   return <span className="pool-chip" role="img" aria-label="In the transaction pool" title="In the transaction pool — projected, not yet in any block">👾</span>
 }
 
+// Conviction beside the side badge. It carries its own word because on a
+// narrow screen the row wraps and the multiplier lands alone on a line, where
+// a bare "6x" reads as a stray number rather than as how hard someone voted.
+export function ConvictionTag({ conviction }: { conviction: string | null | undefined }) {
+  const label = convictionLabel(conviction)
+  if (!label) return null
+  return <span className="muted conviction-tag" title="Conviction — the lock multiplier applied to this vote">{label}</span>
+}
+
 export function ActivityBadge({ r }: { r: ActivityRow }) {
   const { label, col } = badge(r)
   const supplementalMarket = r.type === 'mm' && r.mmMarketKey && r.mmMarketKey !== 'core' ? r.mmMarket : null
@@ -279,7 +289,7 @@ export function ActivityDesc({ r, headed }: { r: ActivityRow; headed?: boolean }
       {r.voteRefPallet && r.voteRef
         ? <Link to={paths.referendum(r.voteRefPallet, r.voteRef)} className="ref-link">{r.voteRefTitle ?? 'Referendum'}</Link>
         : <span className="muted">{label}</span>}
-      <VoteSideBadge side={r.voteSide} />{r.voteConviction ? <span className="muted">{r.voteConviction}</span> : null}</span>
+      <VoteSideBadge side={r.voteSide} /><ConvictionTag conviction={r.voteConviction} /></span>
   }
   return null
 }

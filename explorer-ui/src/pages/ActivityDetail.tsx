@@ -3,10 +3,10 @@ import { useBlockActivity, useEventAt, useExtrinsic, useStats } from '../hooks/u
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../router'
-import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
+import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ConvictionTag, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
 import { LIQ_LABELS, MM_LABELS } from '../components/activityColors'
-import { Crumbs, F, AddrPill, AssetChip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows } from '../components/ui'
-import { voteSideLabel } from '../utils/voteRows'
+import { Crumbs, F, AddrPill, AssetChip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge } from '../components/ui'
+import { convictionLabel, voteSideLabel } from '../utils/voteRows'
 
 export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: string }) {
   const label = activityLabel(slug)
@@ -48,7 +48,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
 
   const eventId = row?.eventIndex != null ? `${row.blockHeight}-${row.eventIndex}` : null
   const voteSub = row?.type === 'vote'
-    ? [voteSideLabel(row.voteSide), row.voteConviction, row.voteRefTitle ?? (row.voteRef ? `Referendum #${row.voteRef}` : null)].filter(Boolean).join(' · ')
+    ? [voteSideLabel(row.voteSide), convictionLabel(row.voteConviction), row.voteRefTitle ?? (row.voteRef ? `Referendum #${row.voteRef}` : null)].filter(Boolean).join(' · ')
     : ''
   return (
     <div className="wrap">
@@ -99,8 +99,12 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {row.type === 'liquidity' && <><div className="dt">Action</div><div className="dd">{LIQ_LABELS[row.liqAction ?? ''] ?? LIQ_LABELS.Add}</div></>}
             {row.type === 'staking' && <><div className="dt">Action</div><div className="dd">{row.stakingAction ?? '—'}</div></>}
             {row.type === 'vote' && <>
-              {/* The referendum, the side and the conviction already head this page (see
-                  voteSub), so the only vote row left is the link out to the referendum. */}
+              {/* The subtitle carries these too, but a subtitle is scenery: a reader
+                  looking for how hard somebody voted looks down the labelled rows, the
+                  way they would for any other fact on the page. Conviction especially,
+                  since it is what turns an amount into voting power. */}
+              <div className="dt">Vote</div>
+              <div className="dd"><VoteSideBadge side={row.voteSide} /><ConvictionTag conviction={row.voteConviction} /></div>
               {row.voteRef && row.voteRefPallet && <>
                 <div className="dt">Referendum</div>
                 <div className="dd"><Link to={paths.referendum(row.voteRefPallet, row.voteRef)} className="ref-link">Open referendum #{row.voteRef}</Link></div>
