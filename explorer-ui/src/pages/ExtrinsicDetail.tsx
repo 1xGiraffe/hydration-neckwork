@@ -4,9 +4,9 @@ import { useEvmReceipt, useExtrinsic, useExtrinsicActivity, useStats } from '../
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, redirect } from '../router'
-import { Crumbs, F, AddrPill, CallPill, StatusBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows } from '../components/ui'
+import { Crumbs, F, AddrPill, CallPill, StatusBadge, ProjectedBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows } from '../components/ui'
 import { api } from '../api/explorer'
-import { ActivityTable } from '../components/ActivityTable'
+import { ActivityTable, PoolChip } from '../components/ActivityTable'
 import { EvmCallCard, EvmLogView } from '../components/EvmDecoded'
 import { evmTransactionEnvelope } from '../utils/evmDecoded'
 import type { EvmTransactionFacts } from '../types'
@@ -90,22 +90,28 @@ function EvmTxRows({ tx, callArgs }: { tx?: EvmTransactionFacts; callArgs: unkno
 
 export function ExtrinsicDetail({ id }: { id: string }) {
   const { data, isLoading, isError } = useExtrinsic(id)
+  // A transaction still in the pool has no block coordinates — its hash stays
+  // the page's identity, and the 2.5s pending poll below walks it through
+  // pool → unfinalized → finalized in place, without a refresh.
+  const inPool = data?.mempool === true
   // Prefer the resolved height-index id; while a 0x-hash id loads, show the short hash.
-  useDocumentTitle(`Extrinsic ${data ? `${data.blockHeight}-${data.index}` : id.startsWith('0x') ? F.shortAddr(id) : id}`)
+  useDocumentTitle(`Extrinsic ${data && !inPool ? `${data.blockHeight}-${data.index}` : id.startsWith('0x') ? F.shortAddr(id) : id}`)
   // "Next extrinsic" only asks whether index+1 exists in this block. Asking the
   // sibling directly answers it in ~1–3 kB and lands under the very query key that
   // page reads, so the arrow opens an already-loaded extrinsic; the block detail
   // this used to come from carries every extrinsic and event in the block (5–10 kB
   // compressed on a busy block) purely for that one chevron. A 404 on the block's
   // last extrinsic is the answer, and 4xx is never retried (see queryRetry).
-  const next = useExtrinsic(data ? `${data.blockHeight}-${data.index + 1}` : null)
+  const next = useExtrinsic(data && !inPool ? `${data.blockHeight}-${data.index + 1}` : null)
   const { data: stats } = useStats(!!data)
   const activity = useExtrinsicActivity(id, !!data)
   const now = useNow()
   const [tab, setTab] = useState<'activity' | 'params' | 'events' | 'json'>('activity')
 
   useEffect(() => {
-    if (!data) return
+    // In the pool the 0-0 coordinates are placeholders, not an address — stay
+    // on the hash URL until a block gives the extrinsic a real id.
+    if (!data || data.mempool) return
     const canonicalId = `${data.blockHeight}-${data.index}`
     if (id !== canonicalId) redirect(`${paths.extrinsicAt(data.blockHeight, data.index)}${window.location.search}`)
   }, [data, id])
@@ -138,12 +144,21 @@ export function ExtrinsicDetail({ id }: { id: string }) {
         : isLoading || !data ? <div className="detail-card"><SkeletonRows /></div> : (
           <>
             <div className="detail-card"><div className="dl">
-              <div className="dt">Extrinsic ID</div><div className="dd mono">{data.blockHeight}-{data.index}</div>
-              <div className="dt">Block</div><div className="dd mono"><Link to={paths.block(data.blockHeight)} className="hash">{F.int(data.blockHeight)}</Link> <FinalizedBadge finalized={data.finalized !== false && data.blockHeight <= (stats?.finalizedBlock ?? -1)} /></div>
-              <div className="dt">Timestamp</div><div className="dd mono">{F.datetime(data.timestamp)}</div>
+              <div className="dt">Extrinsic ID</div><div className="dd mono">{inPool ? <span className="muted">not yet in a block</span> : <>{data.blockHeight}-{data.index}</>}</div>
+              <div className="dt">Block</div><div className="dd mono">{inPool ? <PoolChip /> : <><Link to={paths.block(data.blockHeight)} className="hash">{F.int(data.blockHeight)}</Link> <FinalizedBadge finalized={data.finalized !== false && data.blockHeight <= (stats?.finalizedBlock ?? -1)} /></>}</div>
+              <div className="dt">{inPool ? 'First seen' : 'Timestamp'}</div><div className="dd mono">{F.datetime(data.timestamp)}{inPool && <span className="muted"> · waiting {F.waiting(data.timestamp, now)}</span>}</div>
               <div className="dt">Extrinsic hash</div><div className="dd mono wrap-anywhere">{data.hash} <Copy text={data.hash} /></div>
-              <div className="dt">Module / Call</div><div className="dd"><CallPill name={data.callName} /> <CallDataCopy height={data.blockHeight} index={data.index} /></div>
-              <div className="dt">Result</div><div className="dd"><StatusBadge ok={data.success} /></div>
+              <div className="dt">Module / Call</div><div className="dd"><CallPill name={data.callName} /> {!inPool && <CallDataCopy height={data.blockHeight} index={data.index} />}</div>
+              <div className="dt">Result</div><div className="dd">{inPool ? <ProjectedBadge verdict={data.projected ?? 'unknown'} /> : <StatusBadge ok={data.success} />}</div>
+              {/* A nonce can be spent once, so this transaction is finished:
+                  the replacement is the one to watch, and it is one click away. */}
+              {data.replacedBy && <>
+                <div className="dt">Replaced by</div>
+                <div className="dd mono wrap-anywhere">
+                  <Link to={paths.extrinsic(data.replacedBy)} className="hash">{F.shortHash(data.replacedBy)}</Link>
+                  <span className="muted"> · same nonce, so this one can no longer be included</span>
+                </div>
+              </>}
               {!data.success && data.errorReason && <FailureReasonRow reason={data.errorReason} />}
               {data.signer
                 ? <><div className="dt">Signer</div><div className="dd"><AddrPill account={data.signer} /></div>
@@ -156,7 +171,7 @@ export function ExtrinsicDetail({ id }: { id: string }) {
             <div className="tabs">
               <button className={tab === 'activity' ? 'active' : ''} onClick={() => setTab('activity')}>Activity {activityRows.length > 0 && <span className="cnt">{activityRows.length}</span>}</button>
               <button className={tab === 'params' ? 'active' : ''} onClick={() => setTab('params')}>Parameters</button>
-              <button className={tab === 'events' ? 'active' : ''} onClick={() => setTab('events')}>Events <span className="cnt">{data.events.length}</span></button>
+              <button className={tab === 'events' ? 'active' : ''} onClick={() => setTab('events')}>{inPool ? 'Projected events' : 'Events'} <span className="cnt">{data.events.length}</span></button>
               <button className={tab === 'json' ? 'active' : ''} onClick={() => setTab('json')}>Raw JSON</button>
             </div>
 
@@ -173,9 +188,9 @@ export function ExtrinsicDetail({ id }: { id: string }) {
               <div className="panel">
                 {data.events.map(e => (
                   <div className="event-row" key={e.eventIndex}>
-                    <div className="ei"><Link to={paths.eventAt(data.blockHeight, e.eventIndex)} className="hash">{e.eventIndex}</Link></div>
+                    <div className="ei">{inPool ? <span className="muted mono">{e.eventIndex}</span> : <Link to={paths.eventAt(data.blockHeight, e.eventIndex)} className="hash">{e.eventIndex}</Link>}</div>
                     <div className="ec">
-                      <div className="row gap6"><Link to={paths.eventAt(data.blockHeight, e.eventIndex)} className="hash"><CallPill name={e.name} /></Link>{e.decoded && <span className="badge" style={{ background: 'color-mix(in srgb, var(--neutral) 15%, transparent)', color: 'var(--neutral)' }}>decoded</span>}</div>
+                      <div className="row gap6">{inPool ? <CallPill name={e.name} /> : <Link to={paths.eventAt(data.blockHeight, e.eventIndex)} className="hash"><CallPill name={e.name} /></Link>}{e.decoded && <span className="badge" style={{ background: 'color-mix(in srgb, var(--neutral) 15%, transparent)', color: 'var(--neutral)' }}>decoded</span>}</div>
                       {e.evmDecoded
                         ? <EvmLogView decoded={e.evmDecoded} />
                         : e.args != null && typeof e.args === 'object' && Object.keys(e.args).length > 0 && <JsonView value={e.args} />}

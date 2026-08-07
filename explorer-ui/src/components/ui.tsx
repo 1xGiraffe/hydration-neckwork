@@ -187,6 +187,19 @@ export const F = {
     const h = Math.floor(m / 60); if (h < 24) return h + 'h ' + (m % 60) + 'm ago'
     const d = Math.floor(h / 24); return d + 'd ' + (h % 24) + 'h ago'
   },
+  // The same elapsed time said as a DURATION rather than a moment. A pool row's
+  // clock starts when this node first saw the transaction; the block row that
+  // replaces it counts from when the chain executed it, which is later by
+  // however long it waited. Both are true, and phrasing them identically made
+  // the age appear to jump backwards at inclusion — so the pool row says how
+  // long it has been waiting, and only the block row says how long ago.
+  waiting: (ts: string, now = Date.now()) => {
+    const t = parseUtcTimestamp(ts); if (!Number.isFinite(t)) return '—'
+    const s = Math.max(0, Math.floor((now - t) / 1000))
+    if (s < 60) return s + 's'
+    const m = Math.floor(s / 60); if (m < 60) return m + 'm ' + (s % 60) + 's'
+    const h = Math.floor(m / 60); return h + 'h ' + (m % 60) + 'm'
+  },
   datetime: (ts: string) => {
     const t = parseUtcTimestamp(ts); if (!Number.isFinite(t)) return ts
     const d = new Date(t)
@@ -229,6 +242,12 @@ function timeFractions(n: number, dates?: string[]): number[] {
 // Used anywhere a time is shown relative (activity, tables, activity rows).
 export function Ago({ ts, now }: { ts: string; now: number }) {
   return <span title={F.datetime(ts)}>{F.ago(ts, now)}</span>
+}
+
+// How long a transaction has been sitting in the pool, for rows that have no
+// block time yet (see F.waiting for why this is not phrased as "ago").
+export function Waiting({ ts, now }: { ts: string; now: number }) {
+  return <span title={`Waiting in the transaction pool since ${F.datetime(ts)}`}>waiting {F.waiting(ts, now)}</span>
 }
 
 // When something happened, on any surface that shows a single moment: the
@@ -746,6 +765,30 @@ export function PoolBadge({ pool, poolId, to }: { pool: string; poolId?: number 
   const label = <>{pool}{poolId != null ? ` #${poolId}` : ''}</>
   if (to) return <Link to={to} className="badge" style={style}>{label}</Link>
   return <span className="badge" style={style}>{label}</span>
+}
+
+// The result of a transaction NOBODY has executed yet. A dry run establishes
+// what would happen against current state — informative (22 of 22 predictions
+// matched the chain in an overnight sample) but not a fact, and sometimes not
+// available at all. So a pool row wears a dashed badge that says "projected",
+// and an unjudged one says nothing rather than showing a green tick for an
+// outcome nothing established.
+export function ProjectedBadge({ verdict, compact }: { verdict: 'ok' | 'fail' | 'unknown'; compact?: boolean }) {
+  if (verdict === 'unknown') {
+    return <span className="badge projected unknown" title="No dry-run projection available — the outcome is unknown until a block executes it">?</span>
+  }
+  const ok = verdict === 'ok'
+  const title = ok
+    ? 'Projected to succeed — a dry run against current state, not yet executed'
+    : 'Projected to fail against current state — the chain may still execute it differently'
+  return (
+    <span className={`badge projected ${ok ? 'ok' : 'fail'}`} title={title}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+        {ok ? <polyline points="20 6 9 17 4 12" /> : <><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></>}
+      </svg>
+      {compact ? null : (ok ? 'Would succeed' : 'Would fail')}
+    </span>
+  )
 }
 
 export function StatusBadge({ ok, reason, compact }: { ok: boolean; reason?: string; compact?: boolean }) {

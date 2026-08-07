@@ -318,6 +318,14 @@ export interface ExtrinsicOrigin {
 export interface ExtrinsicSummary {
   // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
   finalized?: boolean
+  // true = still in the transaction pool: no block yet (blockHeight/index are 0
+  // placeholders, address it by hash) and the outcome is a dry-run PROJECTION.
+  mempool?: boolean
+  // What the dry run established, on mempool rows only. 'unknown' means the
+  // projection was unavailable — the transaction is listed, unjudged.
+  projected?: 'ok' | 'fail' | 'unknown'
+  // The transaction that reused this one's nonce and replaced it.
+  replacedBy?: string
   blockHeight: number
   index: number
   hash: string
@@ -627,6 +635,10 @@ export interface IndexerStatus {
 export interface EventRow {
   // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
   finalized?: boolean
+  // true = a dry-run PROJECTION of what a pool transaction would emit;
+  // blockHeight/extrinsicIndex are placeholders and `hash` names the transaction.
+  mempool?: boolean
+  hash?: string
   blockHeight: number
   eventIndex: number
   extrinsicIndex: number | null
@@ -671,6 +683,11 @@ export interface ActivityRow {
   type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc'
   // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
   finalized?: boolean
+  // true = still in the transaction pool, values are a dry-run PROJECTION.
+  mempool?: boolean
+  // The pool transaction's hash (mempool rows only) — their identity while no
+  // block coordinates exist yet.
+  hash?: string
   blockHeight: number
   timestamp: string
   eventIndex?: number | null

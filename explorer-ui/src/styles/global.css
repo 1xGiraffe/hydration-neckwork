@@ -2348,6 +2348,51 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .tbl tr.unfinalized > td { opacity: .55; transition: opacity 300ms; }
 .tbl tr.unfinalized:hover > td { opacity: .8; }
 
+/* Transaction-pool (mempool) rows: dry-run PROJECTIONS of transactions no
+   block holds yet. The opposite treatment of unfinalized: these must stand
+   out, not recede — a lavender wash with an edge bar, plus the pulsing pool
+   chip. Self-healing like unfinalized: inclusion replaces the row with its
+   (dimmed) unfinalized version, finality with the plain one. The pulse dies
+   with every other animation under prefers-reduced-motion. */
+.tbl tr.mempool > td { background: color-mix(in srgb, var(--lavender-deep) 7%, transparent); }
+.tbl tr.mempool:hover > td { background: color-mix(in srgb, var(--lavender-deep) 12%, transparent); }
+/* The pool row's left edge: a column of square pixels marching upward, one
+   block per step. A newly arrived row's solid sky line fades out after 1.25s
+   and leaves the row looking settled — but a pool row is not settled, it is a
+   projection held in memory, so its edge keeps moving for exactly as long as
+   that is true and stops existing the moment a block carries the transaction.
+   Blocks alternate full and half intensity, and the step timing makes them
+   jump a whole pixel at a time rather than slide. */
+.tbl tbody tr.mempool > td:first-child,
+.tbl tbody tr.mempool.row-new > td:first-child {
+  box-shadow: none;
+  background-image: repeating-linear-gradient(to bottom,
+    var(--lavender-deep) 0 3px,
+    transparent 3px 6px,
+    color-mix(in srgb, var(--lavender-deep) 40%, transparent) 6px 9px,
+    transparent 9px 12px);
+  background-repeat: repeat-y;
+  background-size: 3px 12px;
+  background-position: 0 0;
+  animation: poolBits 1s steps(4, end) infinite;
+}
+.tbl tbody tr.mempool.row-new > td:first-child { animation: poolBits 1s steps(4, end) infinite, rowEnter 1.25s ease-out; }
+@keyframes poolBits { from { background-position: 0 0; } to { background-position: 0 -12px; } }
+/* One motion per context: where the marching edge already says "in memory",
+   the invader sits still (it keeps bobbing on the detail page, which has no
+   row edge to carry the motion). */
+.tbl tbody tr.mempool .pool-chip { animation: none; }
+/* A projected result: the same shape as a real one, drawn as an outline so it
+   reads as "not settled yet" at a glance. The unknown case is deliberately
+   plain — no colour to imply an outcome nothing established. */
+.badge.projected { background: transparent; border: 1px dashed currentColor; }
+.badge.projected.ok { color: var(--green); }
+.badge.projected.fail { color: var(--red); }
+.badge.projected.unknown { color: var(--text-low); border-style: dashed; padding-inline: 7px; }
+.pool-chip { display: inline-block; margin-right: 8px; font-size: 12px; line-height: 1; vertical-align: middle; animation: poolHover 1.4s steps(2, end) infinite; }
+/* Two positions, no in-between — the same pixel logic as the row's edge. */
+@keyframes poolHover { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+
 /* A pool card that IS a link (the Liquidity tab's source cards): plain ink,
    hover lifts the border like a table row's hover — the whole card navigates. */
 a.hdx-card-link { text-decoration: none; color: inherit; cursor: pointer; transition: border-color 140ms; }
