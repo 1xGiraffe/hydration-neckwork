@@ -31,8 +31,8 @@ import { createHash } from 'node:crypto'
 import { resolveModuleError } from './runtimeErrorNames.ts'
 import { profileForAccount } from './userProfileService.ts'
 import { parsePoolAssetIds } from './stableswapSnapshot.ts'
-import { findPendingBlock, findPendingExtrinsic, findPendingExtrinsicByHash, pendingBestHeight, pendingBlocksDesc, type PendingBlock, type PendingExtrinsicRow } from './pendingHeadService.ts'
-import { buildPendingActivities } from './pendingActivity.ts'
+import { findMempoolTx, findPendingBlock, findPendingExtrinsic, findPendingExtrinsicByHash, mempoolTxs, pendingBestHeight, pendingBlocksDesc, type MempoolTx, type PendingBlock, type PendingExtrinsicRow } from './pendingHeadService.ts'
+import { buildMempoolActivities, buildPendingActivities, type PendingActivity } from './pendingActivity.ts'
 
 let client: ClickHouseClient
 export function initExplorerService(c: ClickHouseClient): void { client = c }
@@ -1773,6 +1773,40 @@ function pendingExtrinsicDetail(b: PendingBlock, e: PendingExtrinsicRow): Extrin
     events: e.events.map(ev => ({ eventIndex: ev.eventIndex, name: ev.name, args: ev.args })),
   }
 }
+// Transaction-pool rows: no block yet, so height/index are 0 placeholders and
+// everything downstream of execution is a dry-run PROJECTION (see
+// pendingHeadService.syncMempool). Clients address these rows by hash.
+function mempoolExtrinsicSummary(tx: MempoolTx): ExtrinsicSummary {
+  return {
+    blockHeight: 0,
+    index: 0,
+    hash: tx.hash,
+    timestamp: tx.firstSeen,
+    signer: tx.signerId ? accountRef(tx.signerId) : null,
+    // The dry-run verdict; an unjudged transaction reads as would-succeed
+    // rather than wearing a failure it has not earned — but `projected` below
+    // keeps the distinction, and the client renders from that.
+    success: tx.success ?? true,
+    callName: tx.callName,
+    fee: null,
+    finalized: false,
+    mempool: true,
+    projected: tx.success == null ? 'unknown' : tx.success ? 'ok' : 'fail',
+    ...(tx.replacedBy ? { replacedBy: tx.replacedBy } : {}),
+  }
+}
+function mempoolExtrinsicDetail(tx: MempoolTx): ExtrinsicDetail {
+  return {
+    ...mempoolExtrinsicSummary(tx),
+    version: tx.version,
+    tip: tx.tip,
+    callArgs: tx.callArgs,
+    error: null,
+    errorReason: null,
+    // The events the dry run projects this transaction would emit right now.
+    events: tx.events.map(ev => ({ eventIndex: ev.eventIndex, name: ev.name, args: ev.args })),
+  }
+}
 function pendingBlockDetail(b: PendingBlock): BlockDetail {
   return {
     ...pendingBlockSummary(b),
@@ -1866,6 +1900,19 @@ export interface ExtrinsicSummary {
   errorReason?: FailureReason | null
   // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
   finalized?: boolean
+  // true = still in the transaction pool (no block yet; outcome is a dry-run
+  // projection). blockHeight/index are 0 placeholders — address it by hash.
+  mempool?: boolean
+  // Set when another transaction from the same signer reused this one's nonce:
+  // the hash that replaced it. Such a transaction can never be included, so it
+  // stops being a row — this field is what its own page says instead.
+  replacedBy?: string
+  // What the dry run actually established about a pool transaction, kept apart
+  // from `success` because the two are different claims: `success` is a
+  // boolean the row must carry, while a projection can also be UNJUDGED (no
+  // DryRunApi answer). Printing a green tick for an unjudged transaction
+  // asserts something nothing established. Present on mempool rows only.
+  projected?: 'ok' | 'fail' | 'unknown'
 }
 interface ExtrinsicSummaryRow {
   block_height: number
@@ -2045,7 +2092,11 @@ export async function getBlock(height: number): Promise<BlockDetail | null> {
 // recent extrinsics
 export async function getRecentExtrinsics(limit: number, signedOnly: boolean, from?: string, to?: string, offset = 0, filters: ExtrinsicListFilters = {}): Promise<ExtrinsicSummary[]> {
   const tw = timeWindow(from, to)
-  return cached(`explorer:extrinsics:${await liveFeedTag(Boolean(tw))}:${limit}:${offset}:${signedOnly}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  // Page 0 of the plain live feed also leads with transaction-pool rows. Those
+  // are merged OUTSIDE the cache (see below), so the pool moving costs no read
+  // at all — the cached page stays keyed on the block watermarks alone.
+  const livePage0 = offset === 0 && !tw && !filters.call?.trim() && !filters.result && !filters.origin
+  const finalized = await cached(`explorer:extrinsics:${await liveFeedTag(Boolean(tw))}:${limit}:${offset}:${signedOnly}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const callFilter = filters.call?.trim() ? textNameFilter('call_name', 'callName') : ''
     const resultFilter = filters.result === 'success' ? 'AND success = 1' : filters.result === 'failed' ? 'AND success = 0' : ''
     const rows = await withFeedWindow(tw, limit, offset + limit, async (bound) => {
@@ -2079,13 +2130,20 @@ export async function getRecentExtrinsics(limit: number, signedOnly: boolean, fr
     // Page 0 of the plain live feed leads with the unfinalized extrinsics.
     // Filtered/dated/deep views stay finalized-only: this layer's job is
     // showing the incoming data, not filter-complete pending coverage.
-    if (offset === 0 && !tw && !filters.call?.trim() && !filters.result && !filters.origin) {
+    if (livePage0) {
       const pending = pendingBlocksDesc(finalizedRows[0]?.blockHeight ?? 0).flatMap(b =>
         b.extrinsics.filter(e => !signedOnly || e.signerId != null).map(e => pendingExtrinsicSummary(b, e)))
       if (pending.length) return [...pending, ...finalizedRows].slice(0, limit)
     }
     return finalizedRows
   })
+  // The pool, read fresh per request from memory: it changes many times between
+  // blocks, and re-keying the cached page on it would buy a ClickHouse read for
+  // every one of those changes. Pool entries are always signed, so both feed
+  // variants carry them.
+  if (!livePage0) return finalized
+  const pool = mempoolTxs().slice(0, poolShare(limit)).map(mempoolExtrinsicSummary)
+  return pool.length ? [...pool, ...finalized].slice(0, limit) : finalized
 }
 
 // single extrinsic
@@ -2223,13 +2281,33 @@ async function evmTransactionExtrinsic(txHash: string): Promise<{ blockHeight: n
 // a real ambiguity. An EVM hit answers through getExtrinsicAt, so a transaction
 // hash and its canonical height-index id return the same object from the same
 // code and can never disagree.
+// How much of page 0 the transaction pool may take. One busy transaction
+// projects dozens of events and a spammed pool holds dozens of transactions —
+// either would push every chain fact off the first page, turning a feed of what
+// happened into a feed of what might. A third leaves the page recognisable.
+function poolShare(limit: number): number {
+  return Math.max(3, Math.floor(limit / 3))
+}
+
+// Thrown by the hash lookup's cache builder so a miss propagates as an error
+// (which cached() does not store) rather than as a cached null.
+class ExtrinsicNotFound extends Error {}
 export async function getExtrinsic(hash: string): Promise<ExtrinsicDetail | null> {
   if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) return null
   // Pending first (see getBlock) — this is the lookup a just-submitted
   // transaction's hash link hits, ~40s before its block finalizes.
   const pending = findPendingExtrinsicByHash(hash)
   if (pending) return pendingExtrinsicDetail(pending.block, pending.ext)
-  return cached(`explorer:extrinsic:${hash.toLowerCase()}`, 10000, async () => {
+  // Then the transaction pool — the state a hash link lives in between wallet
+  // submission and block inclusion (a drop-grace inside the service covers the
+  // pool-to-block handoff so this page never flashes "not found").
+  const pooled = findMempoolTx(hash)
+  if (pooled) return mempoolExtrinsicDetail(pooled)
+  // A miss is NOT cached: a hash asked for while its block is between the
+  // pending layer and ClickHouse would otherwise 404 for the whole TTL, long
+  // after the extrinsic became readable. Misses are cheap and rare; a hit
+  // caches normally.
+  const found = await cached(`explorer:extrinsic:${hash.toLowerCase()}`, 10000, async () => {
     const res = await client.query({
       query: `SELECT e.block_height AS block_height, e.extrinsic_index AS extrinsic_index, e.extrinsic_hash AS extrinsic_hash,
                      toString(e.block_timestamp) AS ts, e.version AS version,
@@ -2244,8 +2322,14 @@ export async function getExtrinsic(hash: string): Promise<ExtrinsicDetail | null
     const row = (await res.json<ExtrinsicDetailRow>())[0]
     if (row) return hydrateExtrinsicDetail(row)
     const evm = await evmTransactionExtrinsic(hash.toLowerCase())
-    return evm ? getExtrinsicAt(evm.blockHeight, evm.extrinsicIndex) : null
+    const resolved = evm ? await getExtrinsicAt(evm.blockHeight, evm.extrinsicIndex) : null
+    if (!resolved) throw new ExtrinsicNotFound()
+    return resolved
+  }).catch(error => {
+    if (error instanceof ExtrinsicNotFound) return null
+    throw error
   })
+  return found
 }
 
 // recent transfers
@@ -6523,6 +6607,11 @@ export interface EventRow {
   evmDecoded?: EvmLogDecode
   // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
   finalized?: boolean
+  // true = a DRY-RUN projection of what a transaction still in the pool would
+  // emit. blockHeight/extrinsicIndex are 0/null placeholders — `hash` names the
+  // transaction, which is the only thing these events belong to yet.
+  mempool?: boolean
+  hash?: string
 }
 interface EventSourceRow {
   block_height: number
@@ -6560,7 +6649,8 @@ async function uniqueEventRows(rows: EventSourceRow[]): Promise<EventRow[]> {
 }
 export async function getRecentEvents(limit: number, from?: string, to?: string, offset = 0, filters: EventListFilters = {}): Promise<EventRow[]> {
   const tw = timeWindow(from, to)
-  return cached(`explorer:events:${await liveFeedTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  const livePage0 = offset === 0 && !tw && !filters.event?.trim()
+  const settled = await cached(`explorer:events:${await liveFeedTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const eventFilter = filters.event?.trim() ? textNameFilter('event_name', 'eventName') : ''
     const rows = await withFeedWindow(tw, limit, offset + limit, async (bound) => {
       // A page cut by OFFSET reads every skipped row too, and args_json is ZSTD(6) —
@@ -6598,12 +6688,42 @@ export async function getRecentEvents(limit: number, from?: string, to?: string,
     const finalizedRows = await uniqueEventRows(rows)
     // Page 0 of the plain live feed leads with the unfinalized events; filtered
     // and dated views stay finalized-only (see the extrinsics feed).
-    if (offset === 0 && !tw && !filters.event?.trim()) {
+    if (livePage0) {
       const pending = pendingBlocksDesc(finalizedRows[0]?.blockHeight ?? 0).flatMap(pendingEventRows)
       if (pending.length) return [...pending, ...finalizedRows].slice(0, limit)
     }
     return finalizedRows
   })
+  // And ahead of those, the events the pool's transactions are PROJECTED to
+  // emit — merged outside the cache, like the other pool merges, so the pool
+  // moving costs no read. They are not chain facts and say so: marked
+  // `mempool`, addressed by transaction hash, no block coordinates.
+  if (!livePage0) return settled
+  const pool = mempoolEventRows().slice(0, poolShare(limit))
+  return pool.length ? [...pool, ...settled].slice(0, limit) : settled
+}
+
+// The projected events of every transaction in the pool, newest transaction
+// first and, within one, in emission order.
+function mempoolEventRows(): EventRow[] {
+  const out: EventRow[] = []
+  for (const tx of mempoolTxs()) {
+    for (const e of tx.events) {
+      out.push({
+        blockHeight: 0,
+        eventIndex: e.eventIndex,
+        extrinsicIndex: null,
+        timestamp: tx.firstSeen,
+        name: e.name,
+        args: e.args,
+        decoded: e.name === 'Evm.Log' || e.name === 'EVM.Log',
+        finalized: false,
+        mempool: true,
+        hash: tx.hash,
+      })
+    }
+  }
+  return out
 }
 
 // trades (swaps)
@@ -7720,6 +7840,16 @@ export interface ActivityRow {
   otcFee?: string                 // fills; denominated in assetOut
   // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
   finalized?: boolean
+  // true = still in the transaction pool, values are a dry-run PROJECTION.
+  mempool?: boolean
+  // The pool transaction's hash (mempool rows only) — their identity while no
+  // block-height/event-index coordinates exist yet.
+  hash?: string
+}
+
+type BasicRowBase = {
+  blockHeight: number; timestamp: string; eventIndex: number; extrinsicIndex: number | null
+  linkBlock: null; linkIndex: null; finalized: false
 }
 
 // BASIC unfinalized activity rows for page 0 of the plain live feed: trades
@@ -7729,60 +7859,139 @@ export interface ActivityRow {
 // filter or token-unit floor cannot be honoured against pending rows, so those
 // views stay finalized-only rather than silently widening; a USD floor applies
 // directly. `aboveHeight` fences the seam against the newest finalized row.
+function basicActivityRow(a: PendingActivity, prices: Awaited<ReturnType<typeof ensurePrices>>, type: string, min: number | undefined): ActivityRow | null {
+  if (type !== 'all' && type !== a.kind) return null
+  const base = {
+    blockHeight: a.blockHeight,
+    timestamp: a.timestamp,
+    eventIndex: a.eventIndex,
+    extrinsicIndex: a.extrinsicIndex,
+    // Trade/transfer detail pages need the finalized row — pending rows
+    // carry no link target and the client keeps them non-navigable.
+    linkBlock: null,
+    linkIndex: null,
+    finalized: false as const,
+  }
+  if (a.kind === 'mm') {
+    const mm = basicMmRow(a, prices, base)
+    return mm && (min == null || (mm.valueUsd != null && mm.valueUsd >= min)) ? mm : null
+  }
+  if (a.kind === 'xcm') {
+    const x = basicXcmRow(a, prices, base)
+    return min == null || (x.valueUsd != null && x.valueUsd >= min) ? x : null
+  }
+  const row: ActivityRow = a.kind === 'trade'
+    ? {
+        ...base,
+        type: 'trade',
+        who: accountRef(a.swapper),
+        to: null,
+        asset: null,
+        assetIn: asset(a.assetIn),
+        assetOut: asset(a.assetOut),
+        amount: null,
+        amountIn: a.amountIn,
+        amountOut: a.amountOut,
+        valueUsd: usdValue(prices, a.assetIn, a.amountIn, asset(a.assetIn).decimals)
+          ?? usdValue(prices, a.assetOut, a.amountOut, asset(a.assetOut).decimals),
+        assetRefs: [a.assetIn, a.assetOut],
+        dca: false,
+      }
+    : {
+        ...base,
+        type: 'transfer',
+        who: accountRef(a.from),
+        to: accountRef(a.to),
+        asset: asset(a.assetId),
+        assetIn: null,
+        assetOut: null,
+        amount: a.amount,
+        amountIn: null,
+        amountOut: null,
+        valueUsd: usdValue(prices, a.assetId, a.amount, asset(a.assetId).decimals),
+        assetRefs: [a.assetId],
+      }
+  if (min != null && !(row.valueUsd != null && row.valueUsd >= min)) return null
+  return row
+}
+
+// Money market and cross-chain rows read the same two lookups the finalized
+// feed does — the reserve address map and the parachain metadata — so a pool
+// row and the row that replaces it name the same asset and the same chain.
+function basicMmRow(a: Extract<PendingActivity, { kind: 'mm' }>, prices: Awaited<ReturnType<typeof ensurePrices>>, base: BasicRowBase): ActivityRow | null {
+  const assetId = assetIdFromMmAddress(a.assetAddress)
+  if (assetId == null) return null
+  const a0 = asset(assetId)
+  return {
+    ...base,
+    type: 'mm',
+    who: accountRef(h160AccountId(a.who)),
+    to: null,
+    asset: a0,
+    assetIn: null,
+    assetOut: null,
+    amount: a.amount,
+    amountIn: null,
+    amountOut: null,
+    valueUsd: usdValue(prices, assetId, a.amount, a0.decimals),
+    assetRefs: mmReserveAliasIds(assetId),
+    mmAction: a.action,
+  }
+}
+function basicXcmRow(a: Extract<PendingActivity, { kind: 'xcm' }>, prices: Awaited<ReturnType<typeof ensurePrices>>, base: BasicRowBase): ActivityRow {
+  const a0 = asset(a.assetId)
+  // The destination chain when the message named one; a message that only
+  // crosses to the relay says so through its parents, which this layer does not
+  // read — so the row states the leg and leaves the far end to the finalized
+  // classifier rather than inventing it.
+  const meta = a.destParaId != null ? (PARACHAIN_META[a.destParaId] ?? { name: `Parachain ${a.destParaId}` }) : undefined
+  return {
+    ...base,
+    type: 'xcm',
+    xcmDir: 'out',
+    who: accountRef(a.who),
+    to: null,
+    asset: a0,
+    assetIn: null,
+    assetOut: null,
+    amount: a.amount,
+    amountIn: null,
+    amountOut: null,
+    valueUsd: usdValue(prices, a.assetId, a.amount, a0.decimals),
+    assetRefs: [a.assetId],
+    ...(meta ? { destChain: meta.name, destParachainId: a.destParaId } : {}),
+  }
+}
+const BASIC_ACTIVITY_TYPES = new Set(['all', 'trade', 'transfer', 'mm', 'xcm'])
 async function pendingActivityRows(type: string, filters: ValueListFilters, aboveHeight: number): Promise<ActivityRow[]> {
-  if (type !== 'all' && type !== 'trade' && type !== 'transfer') return []
+  if (!BASIC_ACTIVITY_TYPES.has(type)) return []
   if (filters.token || filters.unit === 'token') return []
   const prices = await ensurePrices()
   const rows: ActivityRow[] = []
   for (const block of pendingBlocksDesc(aboveHeight)) {
     for (const a of buildPendingActivities(block)) {
-      if (type === 'trade' && a.kind !== 'trade') continue
-      if (type === 'transfer' && a.kind !== 'transfer') continue
-      const base = {
-        blockHeight: a.blockHeight,
-        timestamp: a.timestamp,
-        eventIndex: a.eventIndex,
-        extrinsicIndex: a.extrinsicIndex,
-        // Trade/transfer detail pages need the finalized row — pending rows
-        // carry no link target and the client keeps them non-navigable.
-        linkBlock: null,
-        linkIndex: null,
-        finalized: false as const,
-      }
-      const row: ActivityRow = a.kind === 'trade'
-        ? {
-            ...base,
-            type: 'trade',
-            who: accountRef(a.swapper),
-            to: null,
-            asset: null,
-            assetIn: asset(a.assetIn),
-            assetOut: asset(a.assetOut),
-            amount: null,
-            amountIn: a.amountIn,
-            amountOut: a.amountOut,
-            valueUsd: usdValue(prices, a.assetIn, a.amountIn, asset(a.assetIn).decimals)
-              ?? usdValue(prices, a.assetOut, a.amountOut, asset(a.assetOut).decimals),
-            assetRefs: [a.assetIn, a.assetOut],
-            dca: false,
-          }
-        : {
-            ...base,
-            type: 'transfer',
-            who: accountRef(a.from),
-            to: accountRef(a.to),
-            asset: asset(a.assetId),
-            assetIn: null,
-            assetOut: null,
-            amount: a.amount,
-            amountIn: null,
-            amountOut: null,
-            valueUsd: usdValue(prices, a.assetId, a.amount, asset(a.assetId).decimals),
-            assetRefs: [a.assetId],
-          }
-      if (filters.min != null && !(row.valueUsd != null && row.valueUsd >= filters.min)) continue
-      rows.push(row)
+      const row = basicActivityRow(a, prices, type, filters.min)
+      if (row) rows.push(row)
     }
+  }
+  return rows
+}
+
+// Transaction-pool activity rows: the same BASIC classifier over each pool
+// transaction's dry-run projected events (only would-succeed projections make
+// activity claims — see buildMempoolActivities). Same filter contract as
+// pending rows; height 0 plus the transaction hash mark them for the client's
+// special treatment.
+async function mempoolActivityRows(type: string, filters: ValueListFilters): Promise<ActivityRow[]> {
+  if (!BASIC_ACTIVITY_TYPES.has(type)) return []
+  if (filters.token || filters.unit === 'token') return []
+  const activities = buildMempoolActivities(mempoolTxs())
+  if (!activities.length) return []
+  const prices = await ensurePrices()
+  const rows: ActivityRow[] = []
+  for (const a of activities) {
+    const row = basicActivityRow(a, prices, type, filters.min)
+    if (row) rows.push({ ...row, mempool: true, hash: a.hash })
   }
   return rows
 }
@@ -11166,7 +11375,10 @@ export async function getRecentActivity(limit: number, from?: string, to?: strin
 async function recentActivityPage(limit: number, from?: string, to?: string, offset = 0, type = 'all', filters: ValueListFilters = {}, action?: string): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   type = normalizeActivityTypeKey(type)
-  return cached(`explorer:activity:${await liveFeedTag(Boolean(tw))}:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  // Page 0 of the plain live feed also leads with transaction-pool rows, merged
+  // OUTSIDE the cache (see below) so a pool change costs no read.
+  const livePage0 = offset === 0 && !tw && !action
+  const settled = await cached(`explorer:activity:${await liveFeedTag(Boolean(tw))}:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const { rows, locallyPaged } = await activityWindow(limit, from, to, offset, type, filters, action)
     // A locally paged window holds the whole filtered ordering, so this page
     // starts at `offset`; a SQL-paged read already returned the page itself.
@@ -11178,12 +11390,18 @@ async function recentActivityPage(limit: number, from?: string, to?: string, off
     // Page 0 of the plain live feed leads with the BASIC unfinalized rows
     // (pending trades and transfers); dated, deeper and action-filtered views
     // stay finalized-only.
-    if (offset === 0 && !timeWindow(from, to) && !action) {
+    if (livePage0) {
       const pending = await pendingActivityRows(type, filters, page[0]?.blockHeight ?? 0)
       if (pending.length) return [...pending, ...page].slice(0, limit)
     }
     return page
   })
+  // The pool, read fresh per request: classifying a handful of already-decoded
+  // projections is in-memory work, so this stays cheap however often the pool
+  // moves (prices come from the shared, separately cached table).
+  if (!livePage0) return settled
+  const pool = (await mempoolActivityRows(type, filters)).slice(0, poolShare(limit))
+  return pool.length ? [...pool, ...settled].slice(0, limit) : settled
 }
 
 interface ActivityWindow { rows: ActivityRow[]; locallyPaged: boolean }
