@@ -68,6 +68,22 @@ export const assetDescriptorFallback = { assetId: 0, iconAssetId: 0, symbol: 'HD
 // Null when there is no capital to weigh — a collective vote has neither.
 // Shared by the referendum bubble chart's tag bubbles and the tag votes tab's
 // grouped rows, so one vote can never read two different averages.
+// A single vote's conviction, as a reader knows it. The chain names it with a
+// runtime enum — `Locked6x`, and `None` for the no-lock case — which reads as
+// neither a multiplier nor, in the `None` case, as a value at all: it looks
+// like missing data next to the votes that show one. Conviction is defined in
+// tenths on-chain (None = 0.1x … 6x), so the no-lock vote genuinely carries
+// 0.1x of its capital, and saying so keeps it in the same vocabulary the
+// grouped rows already use ("1.2x avg", see avgConvictionLabel below).
+// Anything unrecognised passes through untouched — a conviction the runtime
+// grows later is still a fact, and hiding it would be worse than printing it.
+export function convictionLabel(raw: string | null | undefined): string | null {
+  if (!raw) return null
+  if (raw === 'None') return '0.1x'
+  const locked = /^Locked([1-6])x$/.exec(raw)
+  return locked ? `${locked[1]}x` : raw
+}
+
 export function avgConvictionLabel(weighted: string | null, capital: string | null): string | null {
   if (weighted == null || capital == null) return null
   const w = BigInt(weighted), c = BigInt(capital)

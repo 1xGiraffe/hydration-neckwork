@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { Link, paths } from '../router'
 import { AddrPill, Dash, EmptyRow, ErrorRow, F, MomentLink, TableSkeleton, VoteSideBadge, pendingRows, LiveAnchor, type Moment } from './ui'
 import type { AccountRef, AssetRef } from '../types'
+import { ConvictionTag } from './ActivityTable'
 
 // The one votes table.
 //
@@ -55,7 +56,7 @@ const VoteRow = memo(function VoteRow({ row, asset, now, showAccount, showRefere
       {showAccount && <td data-label="Account">{row.account ? <AddrPill account={row.account} /> : <span className="muted">unknown</span>}</td>}
       <td data-label="Vote">
         <VoteSideBadge side={row.side} />
-        {row.conviction ? <span className="muted"> {row.conviction}</span> : null}
+        <ConvictionTag conviction={row.conviction} />
         {row.voters != null && row.voters > 1 && <span className="muted" title="Members whose latest vote this row combines"> · {row.voters} accounts</span>}
         {row.withdrawn && <span className="badge badge-quiet" title="Withdrawn before the referendum closed, so it is not counted">withdrawn</span>}
       </td>

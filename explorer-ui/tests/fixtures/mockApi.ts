@@ -492,6 +492,25 @@ function activityRowAtHeight(h: number): ActivityRow {
   return { ...base, type: t, asset: aref(aIn), amount: raw(amt, aIn.decimals), mmAction, ...(gigaMm ? { mmMarketKey: 'gigahdx', mmMarket: 'GIGAHDX' } : {}) }
 }
 
+// One vote per height, cycling the conviction values the chain actually emits —
+// including `None`, the no-lock vote that carries 0.1x and used to render as the
+// word "None" beside votes showing a multiplier, i.e. as missing data.
+export const MOCK_VOTE_CONVICTIONS = ['Locked6x', 'None', 'Locked2x', 'Locked1x', 'Locked5x'] as const
+export function voteRowAtHeight(h: number): ActivityRow {
+  const conviction = MOCK_VOTE_CONVICTIONS[h % MOCK_VOTE_CONVICTIONS.length]
+  const hdx = ASSETS[0]
+  const amt = 1000 + (h % 9000)
+  return {
+    type: 'vote', blockHeight: h, timestamp: tsAt(h), eventIndex: 95, extrinsicIndex: 3,
+    who: ACCS[h % ACCS.length], to: null, asset: aref(hdx), assetIn: null, assetOut: null,
+    amount: raw(amt, hdx.decimals), amountIn: null, amountOut: null, valueUsd: amt * hdx.price,
+    votePallet: 'ConvictionVoting', voteAction: 'Voted', voteRef: 380,
+    voteSide: h % 7 === 0 ? 'Nay' : 'Aye', voteConviction: conviction,
+    voteRefPallet: 'opengov', voteRefTitle: 'Security patch runtime upgrade v50.0.2',
+    linkBlock: h, linkIndex: 3,
+  }
+}
+
 // Inbound XCM's source account, cycling through a tagged, an identity-only, and
 // a plain local account by the same pubkey — demonstrates ExternalAccountPill's
 // full tag > identity > address precedence (same pubkey, same Hydration
@@ -510,6 +529,9 @@ function mockBlockActivity(height: number): ActivityRow[] {
   const n = blockExtrinsicCount(height)
   const rows = Array.from({ length: n }, (_, i) => mockExtrinsicActivity(height, i)).flat()
   rows.push(activityRowAtHeight(height))
+  // So a vote opened from the feed is found again when its own block is
+  // re-fetched by the detail page's row lookup.
+  rows.push(voteRowAtHeight(height))
   const aIn = ASSETS[2], aOut = ASSETS[1]
   rows.push({
     type: 'trade',
@@ -1544,6 +1566,13 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
           amount: null, amountIn: raw(1234.56, ASSETS[2].decimals), amountOut: raw(1234.56 * ASSETS[2].price / ASSETS[1].price, ASSETS[1].decimals),
           valueUsd: 1234.56 * ASSETS[2].price, finalized: false,
         })
+      }
+      // The vote category has its own generator: votes are not part of the
+      // per-height type cycle, so without this the tab renders empty and nothing
+      // exercises how a vote row reads.
+      if (requestedType === 'vote') {
+        while (out.length < limit && h > TIP - 400) { out.push(voteRowAtHeight(h)); h -= 1 + (h % 3) }
+        return out.slice(0, limit)
       }
       const types: ActivityRow['type'][] = ['trade', 'transfer', 'xcm', 'liquidity', 'mm', 'dca', 'otc']
       while (out.length < limit && h > TIP - 400) {
