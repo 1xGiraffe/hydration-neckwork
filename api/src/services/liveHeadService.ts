@@ -1,7 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import type { ServerResponse } from 'node:http'
 import { publishIndexedRawHead } from './explorerService.ts'
-import { pendingBestHeight } from './pendingHeadService.ts'
+import { mempoolGeneration, pendingBestHeight } from './pendingHeadService.ts'
 
 // Server-sent head events: one shared ClickHouse poller fans two watermarks
 // out to every connected tab, so live surfaces refetch the moment their data
@@ -17,6 +17,14 @@ import { pendingBestHeight } from './pendingHeadService.ts'
 // racing the push is served the pushed head, never the probe's older value.
 
 const POLL_MS = 1_000
+// The transaction pool moves many times between blocks, so it gets its own
+// much faster push — and it needs no ClickHouse read at all: the generation
+// counter lives in memory, and the heads it rides along with are the ones the
+// poller above already established. Clients act on a pool-only frame by
+// refetching just the two feeds that carry pool rows (see POOL_PUSH_KEYS).
+const POOL_PUSH_MS = 150
+// Both watermarks this timer carries live in memory (see pushMemoryWatermarks),
+// so it runs whether or not the transaction pool is being read.
 // Comment frames keep idle proxy hops from timing the stream out.
 const KEEPALIVE_MS = 25_000
 
@@ -27,14 +35,19 @@ const clients = new Set<ServerResponse>()
 let lastHead = 0
 let lastMain = 0
 let lastBest = 0
+let lastPool = -1
 let pollTimer: NodeJS.Timeout | null = null
+let poolTimer: NodeJS.Timeout | null = null
 let keepaliveTimer: NodeJS.Timeout | null = null
 let polling = false
 
-export function sseHeadFrame(head: number, main: number, best = 0): string {
+export function sseHeadFrame(head: number, main: number, best = 0, pool = 0): string {
   // best — the newest UNFINALIZED block the pending layer can show; clients
-  // refetch feeds on its advance so incoming blocks appear pre-finality.
-  return `event: head\ndata: {"head":${head},"main":${main},"best":${best}}\n\n`
+  //        refetch feeds on its advance so incoming blocks appear pre-finality.
+  // pool — the transaction-pool generation counter; it bumps whenever a pool
+  //        entry appears, drops or gets judged, so mempool rows surface and
+  //        update between blocks.
+  return `event: head\ndata: {"head":${head},"main":${main},"best":${best},"pool":${pool}}\n\n`
 }
 
 async function pollOnce(): Promise<void> {
@@ -51,12 +64,14 @@ async function pollOnce(): Promise<void> {
     const head = Number(row?.head ?? 0)
     const main = Number(row?.main ?? 0)
     const best = pendingBestHeight()
-    if (head > lastHead || main > lastMain || best > lastBest) {
+    const pool = mempoolGeneration()
+    if (head > lastHead || main > lastMain || best > lastBest || pool !== lastPool) {
       lastHead = Math.max(lastHead, head)
       lastMain = Math.max(lastMain, main)
       lastBest = Math.max(lastBest, best)
+      lastPool = pool
       publishIndexedRawHead(lastHead)
-      const frame = sseHeadFrame(lastHead, lastMain, lastBest)
+      const frame = sseHeadFrame(lastHead, lastMain, lastBest, lastPool)
       for (const c of clients) c.write(frame)
     }
   } catch { /* transient read failure — the next tick retries */ } finally {
@@ -64,13 +79,30 @@ async function pollOnce(): Promise<void> {
   }
 }
 
+// The in-memory watermarks: the transaction-pool generation and the newest
+// UNFINALIZED block. Neither needs a read, so both ride this fast timer rather
+// than the 1s ClickHouse poller — which matters most at the handoff, where a
+// transaction leaves the pool the instant its block is imported and would
+// otherwise wait out that second before its unfinalized row could be pushed.
+function pushMemoryWatermarks(): void {
+  const pool = mempoolGeneration()
+  const best = pendingBestHeight()
+  if (lastHead === 0) return
+  if (pool === lastPool && best <= lastBest) return
+  lastPool = pool
+  lastBest = Math.max(lastBest, best)
+  for (const c of clients) c.write(sseHeadFrame(lastHead, lastMain, lastBest, lastPool))
+}
+
 function ensureTimers(): void {
   pollTimer ??= setInterval(() => { void pollOnce() }, POLL_MS)
+  poolTimer ??= setInterval(pushMemoryWatermarks, POOL_PUSH_MS)
   keepaliveTimer ??= setInterval(() => { for (const c of clients) c.write(': ka\n\n') }, KEEPALIVE_MS)
 }
 
 function stopTimers(): void {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+  if (poolTimer) { clearInterval(poolTimer); poolTimer = null }
   if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null }
 }
 
@@ -78,7 +110,7 @@ export function addLiveHeadClient(res: ServerResponse): void {
   clients.add(res)
   // Replay the last known heads immediately, so a (re)connecting tab
   // resynchronizes without waiting for the next block.
-  if (lastHead > 0 || lastMain > 0) res.write(sseHeadFrame(lastHead, lastMain, lastBest))
+  if (lastHead > 0 || lastMain > 0) res.write(sseHeadFrame(lastHead, lastMain, lastBest, Math.max(0, lastPool)))
   ensureTimers()
 }
 
