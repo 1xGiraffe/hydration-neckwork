@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { usePoolActivity, usePoolDetail } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -6,6 +7,7 @@ import { AddrPill, Ago, AreaChart, AssetAmount, AssetChip, AssetIcon, ChartSkele
 import { ChartLegend, MultiLineChart, ShareBar, StackedAreaChart, type ShareSegment } from '../components/HdxCharts'
 import { ActivityTable } from '../components/ActivityTable'
 import { useAssetColors } from '../utils/iconColor'
+import { separateSeriesColors } from '../utils/seriesColors'
 import type { PegSourceInfo, PoolDetail as PoolDetailData } from '../types'
 
 // One stableswap or XYK pool, addressed by its share/LP token id: current
@@ -29,6 +31,9 @@ const PARAM_KIND_LABEL: Record<string, string> = {
 }
 
 function PoolBody({ d }: { d: PoolDetailData }) {
+  // Share first: a pool's history is about the balance between its assets, and
+  // USD hides that rotation inside the pool's own growth (see compSeries).
+  const [compUnit, setCompUnit] = useState<'share' | 'usd'>('share')
   const now = useNow()
   const colorFor = useAssetColors(d.assets.map(a => a.asset))
   // The pool's OWN activity, not its share token's: a swap through this pool
@@ -39,17 +44,37 @@ function PoolBody({ d }: { d: PoolDetailData }) {
   const hasPegs = d.assets.some(a => a.peg != null && a.peg.price !== 1)
   const ramping = d.amplification != null && d.amplification.current !== d.amplification.final
 
+  // Same separation as the stacked chart below: two segments of one family are
+  // otherwise one indistinguishable block.
+  const segmentColors = separateSeriesColors(d.assets.map(a => colorFor(a.asset)))
   const shareSegments: ShareSegment[] = d.tvlUsd != null
     ? d.assets.map((a, i) => ({
-        key: `${a.asset.assetId}:${i}`, label: a.asset.symbol, color: colorFor(a.asset), value: a.usd ?? 0,
+        key: `${a.asset.assetId}:${i}`, label: a.asset.symbol, color: segmentColors[i], value: a.usd ?? 0,
         tip: <><span className="t-d">{a.asset.symbol}</span><span className="t-row">{F.amount(a.amount, a.asset.decimals)} {a.asset.symbol}</span><span className="t-row">{F.usd(a.usd)}</span></>,
       }))
     : []
 
   // History models: composition in USD (nulls where a leg was unpriced or the
   // pool inactive); TVL and issuance as gap-aware line series.
-  const compSeries = d.history.composition.map(c => ({
-    key: String(c.asset.assetId), label: c.asset.symbol, color: colorFor(c.asset), values: c.usd,
+  //
+  // Share is the default view, as on the Omnipool: what a reader wants from a
+  // pool's history is how its balance between the assets moved, and in USD that
+  // rotation is hidden inside the pool's own growth or decline — every band
+  // rises and falls together and says nothing about the mix. Normalizing each
+  // bucket to 100% of its priced total answers the question directly, and the
+  // absolute scale stays one click away (and in the TVL chart below).
+  const bucketTotals = d.history.buckets.map((_, i) =>
+    d.history.composition.reduce((s, c) => s + (c.usd[i] ?? 0), 0))
+  // Two assets of one family sample to the same icon colour — vDOT and aDOT are
+  // both Polkadot pink — and a stack of them reads as one band. Separated per
+  // chart, so an asset keeps its own colour unless it would be invisible next
+  // to one already used here.
+  const compColors = separateSeriesColors(d.history.composition.map(c => colorFor(c.asset)))
+  const compSeries = d.history.composition.map((c, ci) => ({
+    key: String(c.asset.assetId), label: c.asset.symbol, color: compColors[ci],
+    values: compUnit === 'share'
+      ? c.usd.map((v, i) => (v == null || !(bucketTotals[i] > 0) ? null : (v / bucketTotals[i]) * 100))
+      : c.usd,
   }))
   const hasCompUsd = compSeries.some(s => s.values.some(v => v != null))
   const tvlPoints = d.history.buckets.map((b, i) => ({ b, v: d.history.tvlUsd[i] })).filter(p => p.v != null)
@@ -114,10 +139,16 @@ function PoolBody({ d }: { d: PoolDetailData }) {
 
       {hasCompUsd && d.history.buckets.length > 1 && (
         <>
-          <div className="sec-title">Composition over time</div>
+          <div className="sec-title" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>Composition over time
+            <span className="liq-toggle" style={{ marginLeft: 'auto' }}>
+              <button className={compUnit === 'share' ? 'active' : ''} onClick={() => setCompUnit('share')}>%</button>
+              <button className={compUnit === 'usd' ? 'active' : ''} onClick={() => setCompUnit('usd')}>USD</button>
+            </span>
+          </div>
           <div className="pf-card">
             <ChartLegend items={compSeries.map(s => ({ label: s.label, color: s.color }))} />
-            <StackedAreaChart buckets={d.history.buckets} series={compSeries} yFmt={F.usd} />
+            <StackedAreaChart buckets={d.history.buckets} series={compSeries}
+              yFmt={compUnit === 'share' ? v => `${parseFloat(v.toFixed(1))}%` : F.usd} showShare={compUnit === 'usd'} />
           </div>
         </>
       )}

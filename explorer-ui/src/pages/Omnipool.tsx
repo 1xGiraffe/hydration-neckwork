@@ -6,6 +6,7 @@ import { paths } from '../router'
 import { AddrPill, AreaChart, AssetAmount, AssetChip, ChartSkeleton, Crumbs, Dash, F, rowNav } from '../components/ui'
 import { ChartLegend, ShareBar, StackedAreaChart, type ShareSegment } from '../components/HdxCharts'
 import { useAssetColors } from '../utils/iconColor'
+import { separateSeriesColors } from '../utils/seriesColors'
 import type { AssetRef } from '../types'
 
 // The Omnipool: Hydration's shared-liquidity pool where every listed asset
@@ -54,10 +55,14 @@ export function Omnipool() {
     // id so their legend entries stay tellable apart.
     const symbolCounts = new Map<string, number>()
     for (const c of data.history.composition) symbolCounts.set(c.asset.symbol, (symbolCounts.get(c.asset.symbol) ?? 0) + 1)
-    const compSeries = data.history.composition.map(c => ({
+    // Two listings of one asset family sample to the same icon colour (the
+    // legend already tells them apart by id; the bands must too).
+    const compColors = separateSeriesColors(data.history.composition.map(c =>
+      c.asset.assetId === -1 ? OTHER_COLOR : colorFor(c.asset)))
+    const compSeries = data.history.composition.map((c, ci) => ({
       key: String(c.asset.assetId),
       label: (symbolCounts.get(c.asset.symbol) ?? 0) > 1 ? `${c.asset.symbol} #${c.asset.assetId}` : c.asset.symbol,
-      color: c.asset.assetId === -1 ? OTHER_COLOR : colorFor(c.asset),
+      color: compColors[ci],
       values: unit === 'share'
         ? c.usd.map((v, i) => (v == null || !(bucketTotals[i] > 0) ? null : (v / bucketTotals[i]) * 100))
         : c.usd,
@@ -101,6 +106,13 @@ export function Omnipool() {
           </table></div>
         </div>
 
+        {tvlPoints.length > 1 && (
+          <>
+            <div className="sec-title">TVL</div>
+            <div className="pf-card"><AreaChart data={tvlPoints.map(p => p.v!)} dates={tvlPoints.map(p => p.b)} color="var(--sky-deep)" floor={0} /></div>
+          </>
+        )}
+
         {compSeries.length > 0 && data.history.buckets.length > 1 && (
           <>
             <div className="sec-title" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>Composition over time
@@ -114,13 +126,6 @@ export function Omnipool() {
               <StackedAreaChart buckets={data.history.buckets} series={compSeries}
                 yFmt={unit === 'share' ? v => `${parseFloat(v.toFixed(1))}%` : F.usd} showShare={unit === 'usd'} />
             </div>
-          </>
-        )}
-
-        {tvlPoints.length > 1 && (
-          <>
-            <div className="sec-title">TVL</div>
-            <div className="pf-card"><AreaChart data={tvlPoints.map(p => p.v!)} dates={tvlPoints.map(p => p.b)} color="var(--sky-deep)" floor={0} /></div>
           </>
         )}
       </>
