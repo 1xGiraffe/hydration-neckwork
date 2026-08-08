@@ -13324,6 +13324,80 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
   return rows
 }
 
+// ── A pool's own swaps ────────────────────────────────────────────────────────
+//
+// What traded IN this pool, which is not what any other feed shows. Everywhere
+// else a routed swap is one row — its Router.Executed net summary, attributed
+// to the person, with the hops collapsed and rows whose `who` is the router pot
+// filtered out. That is right for a reader following an account or an asset,
+// and wrong for a pool: pool 690's vDOT/aDOT swaps are hops of routes whose net
+// legs name neither pool member nor its share token, so the pool page (which
+// asks for the SHARE token's activity) could only ever show trades of the share
+// token itself, and the swaps that actually happened in the pool appeared
+// nowhere.
+//
+// So this reads the hops deliberately, scoped to the pool: both legs are pool
+// members and the venue is the pool's own pallet. `asset_swap_activity` is
+// ORDER BY (asset_id, block_height, event_index), so pinning one member makes
+// it an index-prefix read — 8ms on pool 690. The actor still comes from the
+// extrinsic's signer, so a hop names the person who caused it rather than the
+// router pot that executed it.
+const POOL_VENUE_EVENTS: Record<string, string[]> = {
+  stableswap: ['Stableswap.SellExecuted', 'Stableswap.BuyExecuted'],
+  xyk: ['XYK.SellExecuted', 'XYK.BuyExecuted'],
+}
+export async function getPoolSwaps(poolId: number, members: number[], kind: string, limit = 25): Promise<ActivityRow[]> {
+  const events = POOL_VENUE_EVENTS[kind]
+  if (!events || members.length < 2) return []
+  return cached(`explorer:pool-swaps:${poolId}:${limit}:${await liveHeadTag()}`, LIVE_CACHE_MS, async () => {
+    const prices = await ensurePrices()
+    const res = await client.query({
+      query: `
+        SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+               who, asset_in, asset_out, amount_in, amount_out
+        FROM price_data.asset_swap_activity
+        WHERE asset_id = {pin:UInt32}
+          AND event_name IN (${events.map(n => `'${n}'`).join(',')})
+          AND asset_in IN {members:Array(UInt32)} AND asset_out IN {members:Array(UInt32)}
+        ORDER BY block_height DESC, event_index DESC
+        LIMIT {n:UInt32}`,
+      query_params: { pin: members[0], members, n: limit }, format: 'JSONEachRow',
+    })
+    const rows = await res.json<RawSwapEventRow>()
+    if (!rows.length) return []
+    // Two pools could hold the same pair, so the venue is confirmed against the
+    // pool id the event itself carries — a bounded lookup over these rows only.
+    const keys = rows.map(r => `(${r.block_height},${r.event_index})`).join(',')
+    const idRes = await client.query({
+      query: `SELECT block_height, event_index FROM price_data.raw_events
+              WHERE (block_height, event_index) IN (${keys})
+                AND JSONExtractInt(args_json, 'poolId') = {poolId:UInt32}`,
+      query_params: { poolId }, format: 'JSONEachRow',
+    })
+    const mine = new Set((await idRes.json<{ block_height: number; event_index: number }>())
+      .map(r => `${r.block_height}:${r.event_index}`))
+    const own = rows.filter(r => mine.has(`${r.block_height}:${r.event_index}`))
+    if (!own.length) return []
+    const signers = await actorsFor(own.map(r => [r.block_height, r.extrinsic_index] as [number, number | null]))
+    return own.map(r => {
+      const aIn = asset(r.asset_in), aOut = asset(r.asset_out)
+      const actor = (r.extrinsic_index != null ? signers.get(`${r.block_height}:${r.extrinsic_index}`) : undefined)
+        ?? (r.who && ACCOUNT_RE.test(r.who) ? r.who : null)
+      return {
+        type: 'trade' as const,
+        blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
+        who: actor ? accountRef(actor) : null, to: null, asset: null,
+        assetIn: aIn, assetOut: aOut, amount: null, amountIn: r.amount_in, amountOut: r.amount_out,
+        valueUsd: usdValue(prices, r.asset_out, r.amount_out, aOut.decimals)
+          ?? usdValue(prices, r.asset_in, r.amount_in, aIn.decimals),
+        assetRefs: [r.asset_in, r.asset_out],
+        dca: false,
+        linkBlock: r.block_height, linkIndex: r.extrinsic_index,
+      }
+    })
+  })
+}
+
 // asset-scoped activity (asset detail page)
 // A per-asset activity feed built SERVER-SIDE so it works regardless of how
 // recent the asset's activity is. Each category is filtered by the asset at the SQL level
