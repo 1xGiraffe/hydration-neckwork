@@ -1,4 +1,4 @@
-import { useAssetActivity, usePoolDetail } from '../hooks/useExplorerData'
+import { usePoolActivity, usePoolDetail } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
@@ -31,8 +31,11 @@ const PARAM_KIND_LABEL: Record<string, string> = {
 function PoolBody({ d }: { d: PoolDetailData }) {
   const now = useNow()
   const colorFor = useAssetColors(d.assets.map(a => a.asset))
-  const activity = useAssetActivity(d.poolId, 'all', 0, undefined, true)
-  const activityRows = (activity.data ?? []).slice(0, 12)
+  // The pool's OWN activity, not its share token's: a swap through this pool
+  // moves its member assets, so an asset-pinned feed on the share token shows
+  // liquidity and share trades while the pool's swaps are invisible.
+  const activity = usePoolActivity(d.poolId, 12)
+  const activityRows = activity.data ?? []
   const hasPegs = d.assets.some(a => a.peg != null && a.peg.price !== 1)
   const ramping = d.amplification != null && d.amplification.current !== d.amplification.final
 

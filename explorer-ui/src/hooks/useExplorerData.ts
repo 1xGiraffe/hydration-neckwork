@@ -192,6 +192,18 @@ export function useAssetDcas(assetId: number | null, enabled = true) {
   const ri = useInterval(DETAIL_POLL_MS)
   return useQuery({ queryKey: ['asset-dcas', assetId], queryFn: ({ signal }) => api.assetDcas(assetId as number, signal), enabled: assetId != null && enabled, refetchInterval: enabled ? ri : false, staleTime: 6000 })
 }
+// A pool page shows what happened in the POOL, which its share token's activity
+// cannot answer (see the api's getPoolSwaps).
+export function usePoolActivity(poolId: number | null, limit = 25) {
+  const ri = useInterval()
+  return useQuery({
+    queryKey: ['pool-activity', poolId, limit],
+    queryFn: ({ signal }) => api.poolActivity(poolId as number, limit, signal),
+    enabled: poolId != null,
+    staleTime: 6000,
+    refetchInterval: ri,
+  })
+}
 export function useAssetActivity(assetId: number | null, type = 'all', offset = 0, action?: string, enabled = true, from?: string, to?: string, min?: string) {
   const ri = useInterval()
   const key = ['asset-activity', assetId, type, offset, action, from, to, min]
