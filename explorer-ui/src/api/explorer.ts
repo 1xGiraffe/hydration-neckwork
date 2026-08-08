@@ -143,6 +143,11 @@ export const api = {
   // Same endpoint as the global activities feed, with the asset id pinned.
   assetActivity: (assetId: number, type = 'all', offset = 0, limit = 40, action?: string, from?: string, to?: string, min?: string, signal?: AbortSignal) =>
     getJson<ActivityRow[]>(withQuery('/explorer/activity', { asset: assetId, type, offset, limit, action, from, to, min }), signal),
+  // A pool's own activity: the swaps that happened IN it, merged with what its
+  // share token did. The asset-pinned activity feed cannot answer this — a
+  // routed swap's hops name the pool's members, not its share token.
+  poolActivity: (poolId: number, limit = 25, signal?: AbortSignal) =>
+    getJson<ActivityRow[]>(withQuery(`/explorer/pool/${poolId}/activity`, { limit }), signal),
   holders: (assetId: number, offset = 0, limit = 100, signal?: AbortSignal) => getJson<HoldersResponse>(withQuery(`/explorer/holders/${assetId}`, { offset, limit }), signal),
   address: (address: string, signal?: AbortSignal) => getJson<AddressDetail>(`/explorer/address/${encodeURIComponent(address)}`, signal),
   // Lightweight variant for the hover card: the API skips LP/DCA/proxy/multisig so

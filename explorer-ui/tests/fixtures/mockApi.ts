@@ -1624,6 +1624,32 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   { re: /^\/explorer\/asset\/(\d+)\/liquidity$/, fn: m => buildAssetLiquidity(Number(m[1])) },
   // Unknown pool ids fall through to the harness 404, like the real endpoint.
   { re: /^\/explorer\/pool\/(\d+)$/, fn: m => buildPoolDetail(Number(m[1])) },
+  // A pool's own activity: the swaps that happened IN it (between its member
+  // assets) ahead of what its share token did. The member-asset swaps are the
+  // half the share token's own activity feed can never show, and their absence
+  // is what made a busy pool look idle.
+  { re: /^\/explorer\/pool\/(\d+)\/activity$/, fn: (m, qs) => {
+    const poolId = Number(m[1])
+    const detail = buildPoolDetail(poolId)
+    if (!detail) return []
+    const limit = Number(qs.get('limit') ?? 25)
+    const members = detail.assets.map(a => a.asset.assetId)
+    const rows: ActivityRow[] = []
+    for (let i = 0; i < 6 && rows.length < limit; i++) {
+      const h = TIP - i * 3
+      const [a, b] = i % 2 === 0 ? members : [...members].reverse()
+      const aIn = assetById.get(a)!, aOut = assetById.get(b)!
+      const amt = 120 + i * 37
+      rows.push({
+        type: 'trade', blockHeight: h, timestamp: tsAt(h), eventIndex: 40 + i, extrinsicIndex: 2,
+        who: ACCS[i % ACCS.length], to: null, asset: null,
+        assetIn: aref(aIn), assetOut: aref(aOut),
+        amount: null, amountIn: raw(amt, aIn.decimals), amountOut: raw(amt * aIn.price / aOut.price, aOut.decimals),
+        valueUsd: amt * aIn.price, linkBlock: h, linkIndex: 2,
+      })
+    }
+    return rows.slice(0, limit)
+  } },
   { re: /^\/explorer\/omnipool$/, fn: () => buildOmnipool() },
   {
     re: /^\/explorer\/holders\/(\d+)$/, fn: (m, qs) => {
