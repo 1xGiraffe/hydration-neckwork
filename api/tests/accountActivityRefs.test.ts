@@ -130,8 +130,10 @@ describe('the account activity index has exactly one table behind it', () => {
     // And the readers that moved are all still there: five in the explorer service
     // (the helper's merged and per-account arms, the vote-count prefilter, the
     // events total, the leaderboard's reference pool) and two in the affinity
-    // service (direct transfers, CEX interactions).
-    expect(occurrences(explorerService, 'price_data.account_activity_v3')).toBe(8)
+    // service (direct transfers, CEX interactions). The ninth is the account
+    // activity watermark, which reads only max(block_height) for the account —
+    // it is what keeps an idle account's page from rebuilding every few seconds.
+    expect(occurrences(explorerService, 'price_data.account_activity_v3')).toBe(9)
     expect(occurrences(affinityService, 'price_data.account_activity_v3')).toBe(2)
   })
 
