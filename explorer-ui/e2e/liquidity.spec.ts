@@ -86,3 +86,23 @@ test.describe('mobile', () => {
     })
   }
 })
+
+// A pool page must show what traded IN the pool. Everywhere else a routed swap
+// is collapsed into its net Router.Executed row, whose legs name neither the
+// pool's members nor its share token — so asking the share token for its
+// activity (what this page used to do) showed liquidity and share trades while
+// the pool's own swaps, the reason to visit a pool page, appeared nowhere.
+// Reported against /pool/690, whose recent vDOT/DOT swaps were all missing.
+test('a pool page shows the swaps that happened in the pool', async ({ page }) => {
+  await page.goto('/pool/690')
+  const rows = page.locator('table.tbl tbody tr')
+  await expect(rows.first()).toBeVisible()
+
+  // Both legs of at least one row are pool members, which is what a swap
+  // through this pool looks like — a share-token trade never is.
+  const memberPairs = await rows.evaluateAll(trs => trs.filter(tr => {
+    const t = tr.querySelector('td[data-label="Activity"]')?.textContent ?? ''
+    return /vDOT/.test(t) && /DOT/.test(t) && !/GDOT/.test(t)
+  }).length)
+  expect(memberPairs).toBeGreaterThan(0)
+})
