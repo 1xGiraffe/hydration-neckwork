@@ -16429,6 +16429,46 @@ async function countAccountActivity(accounts: string[], type: string, action: st
   return { total: counted.length, complete: widest.complete }
 }
 
+// The newest block in which anything this account's page would show happened.
+//
+// It exists so the page stops rebuilding for accounts that did nothing. The
+// rebuild is expensive — measured on two real accounts at 750-1000ms, reading
+// 27-33M rows and 1.2-1.7 GiB — and under an 8-second TTL a reader polling
+// every 6s paid it again and again while the answer never changed. With the
+// height in the KEY, an idle account keeps hitting the cache and an account
+// that acts invalidates itself immediately, which is also faster than waiting
+// out a TTL.
+//
+// Two sources, because one does not see everything: account_activity_v3 is
+// ORDER BY (account, block_height, …) so its half is an index-prefix read,
+// while a DCA execution is attributed to the schedule's OWNER, whom the
+// per-account event index does not name — measured against 17 recently active
+// accounts, that was the single case where the index sat 12 blocks behind a
+// trade the feed was already showing. dca_events is scanned by `who` (5.7M
+// rows) and the pair together costs ~30ms.
+async function accountActivityWatermark(accounts: string[]): Promise<number> {
+  if (!accounts.length) return 0
+  // Briefly cached: one page asks for several lists at once, and they should
+  // agree on the height they were built for.
+  return cached(`explorer:acct-watermark:${accounts.join(',')}`, 2_000, async () => {
+    try {
+      const res = await client.query({
+        query: `SELECT greatest(
+                  (SELECT max(block_height) FROM price_data.account_activity_v3 WHERE account IN {accounts:Array(String)}),
+                  (SELECT max(block_height) FROM price_data.dca_events WHERE who IN {accounts:Array(String)})
+                ) AS w`,
+        query_params: { accounts }, format: 'JSONEachRow',
+      })
+      return Number((await res.json<{ w: number | null }>())[0]?.w ?? 0)
+    } catch {
+      // A failed watermark must not serve a stale page: fall back to a value
+      // that changes every block, which restores the old rebuild-always
+      // behaviour rather than pinning the cache on a height we never read.
+      return await indexedRawHead()
+    }
+  })
+}
+
 async function getScopedAccountActivity(
   accounts: string[],
   cacheScope: string,
@@ -16442,7 +16482,10 @@ async function getScopedAccountActivity(
 ): Promise<ActivityRow[]> {
   const window = timeWindow(from, to)
   noteHotActivityScope(cacheScope, accounts)
-  return cached(`explorer:${cacheScope}:activity:${type}:${limit}:${offset}:${action ?? ''}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, window ? 30_000 : 8_000,
+  // A dated view is history and cannot change; a live one is keyed by the
+  // account's own activity height, so the TTL is only a backstop.
+  const mark = window ? 0 : await accountActivityWatermark(accounts)
+  return cached(`explorer:${cacheScope}:activity:w${mark}:${type}:${limit}:${offset}:${action ?? ''}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, window ? 30_000 : 60_000,
     () => getAccountActivity(accounts, limit, type, offset, action, filters, from, to))
 }
 
