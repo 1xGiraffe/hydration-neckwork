@@ -59,18 +59,50 @@ export function useEvents(limit = 25, from?: string, to?: string, offset = 0, fi
   const key = ['events', limit, from, to, offset, filters]
   return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.events(limit, from, to, offset, filters, signal), refetchInterval: offset === 0 ? ri : false, staleTime: 2000, placeholderData: keepPreviousData }), key, offset === 0)
 }
+// Whether this request must go to the viewer's own endpoint: only the identity
+// filter's answer depends on who is asking, and only when the viewer actually
+// has tags — otherwise the shared, cached, public feed is the same answer for
+// everyone and there is no reason to pay for a per-viewer entry.
+function useViewerFeed(filters?: ValueFilters): { authed: boolean; accountId?: string; version: number } {
+  const version = useTagMapVersion()
+  const session = getSession()
+  const authed = !!filters?.identity && !!session && tagMapStatus() === 'ready' && hasUserTagMembers()
+  return { authed, accountId: session?.accountId, version }
+}
+
 export function useActivity(limit = 30, from?: string, to?: string, offset = 0, type = 'all', filters?: ValueFilters, action?: string) {
   const ri = useInterval(LIVE_MS, true)
-  const key = ['activity', limit, from, to, offset, type, filters, action]
-  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.activity(limit, from, to, offset, type, filters, action, signal), refetchInterval: offset === 0 ? ri : false, staleTime: 2000, placeholderData: keepPreviousData }), key, offset === 0)
+  const viewer = useViewerFeed(filters)
+  const key = viewer.authed
+    ? ['activity', 'viewer', viewer.accountId, viewer.version, limit, from, to, offset, type, filters, action]
+    : ['activity', limit, from, to, offset, type, filters, action]
+  return useHeldRows(useQuery({
+    queryKey: key,
+    queryFn: async ({ signal }) => {
+      if (!viewer.authed) return api.activity(limit, from, to, offset, type, filters, action, signal)
+      // The viewer's tags are an enhancement to the filter, never a
+      // requirement for the feed to render: a failed authed call falls back to
+      // the page a logged-out reader would see rather than an error.
+      try { return await userApi.activity(limit, from, to, offset, type, filters, action, signal) }
+      catch { return api.activity(limit, from, to, offset, type, filters, action, signal) }
+    },
+    refetchInterval: offset === 0 ? ri : false, staleTime: 2000, placeholderData: keepPreviousData,
+  }), key, offset === 0)
 }
 // The Activity pager's bounds. Only the categories the feed pages in SQL from one
 // source carry a real total; every category carries the servable depth. Never polls
 // — a total that moved under the reader would renumber pages mid-walk.
 export function useActivityCount(type = 'all', from?: string, to?: string, filters?: ValueFilters, action?: string) {
+  const viewer = useViewerFeed(filters)
   return useQuery({
-    queryKey: ['activity-count', type, from, to, filters, action],
-    queryFn: ({ signal }) => api.activityCount(type, from, to, filters, action, signal),
+    queryKey: viewer.authed
+      ? ['activity-count', 'viewer', viewer.accountId, viewer.version, type, from, to, filters, action]
+      : ['activity-count', type, from, to, filters, action],
+    queryFn: async ({ signal }) => {
+      if (!viewer.authed) return api.activityCount(type, from, to, filters, action, signal)
+      try { return await userApi.activityCount(type, from, to, filters, action, signal) }
+      catch { return api.activityCount(type, from, to, filters, action, signal) }
+    },
     staleTime: 120_000,
   })
 }
@@ -264,8 +296,19 @@ export function useTagCloseAccounts(tagId: string | null, enabled = false) {
 }
 export function useAccountActivity(address: string | null, type = 'all', offset = 0, action?: string, from?: string, to?: string, filters?: ValueFilters) {
   const ri = useInterval()
-  const key = ['account-activity', address, type, offset, action, from, to, filters]
-  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountActivity(address as string, type, offset, undefined, action, from, to, filters, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
+  const viewer = useViewerFeed(filters)
+  const key = viewer.authed
+    ? ['account-activity', 'viewer', viewer.accountId, viewer.version, address, type, offset, action, from, to, filters]
+    : ['account-activity', address, type, offset, action, from, to, filters]
+  return useHeldRows(useQuery({
+    queryKey: key,
+    queryFn: async ({ signal }) => {
+      if (!viewer.authed) return api.accountActivity(address as string, type, offset, undefined, action, from, to, filters, signal)
+      try { return await userApi.accountActivity(address as string, type, offset, undefined, action, from, to, filters, signal) }
+      catch { return api.accountActivity(address as string, type, offset, undefined, action, from, to, filters, signal) }
+    },
+    enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData,
+  }), key, offset === 0)
 }
 export function useAccountExtrinsics(address: string | null, offset = 0, from?: string, to?: string, filters?: ExtrinsicFilters) {
   const ri = useInterval()
@@ -345,8 +388,19 @@ export function useTagSummary(tagId: string | null) {
 }
 export function useTagActivity(tagId: string | null, type = 'all', offset = 0, action?: string, from?: string, to?: string, filters?: ValueFilters) {
   const ri = useInterval()
-  const key = ['tag-activity', tagId, type, offset, action, from, to, filters]
-  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.tagActivity(tagId as string, type, offset, undefined, action, from, to, filters, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
+  const viewer = useViewerFeed(filters)
+  const key = viewer.authed
+    ? ['tag-activity', 'viewer', viewer.accountId, viewer.version, tagId, type, offset, action, from, to, filters]
+    : ['tag-activity', tagId, type, offset, action, from, to, filters]
+  return useHeldRows(useQuery({
+    queryKey: key,
+    queryFn: async ({ signal }) => {
+      if (!viewer.authed) return api.tagActivity(tagId as string, type, offset, undefined, action, from, to, filters, signal)
+      try { return await userApi.tagActivity(tagId as string, type, offset, undefined, action, from, to, filters, signal) }
+      catch { return api.tagActivity(tagId as string, type, offset, undefined, action, from, to, filters, signal) }
+    },
+    enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData,
+  }), key, offset === 0)
 }
 export function useTagExtrinsics(tagId: string | null, offset = 0, from?: string, to?: string, filters?: ExtrinsicFilters) {
   const ri = useInterval()

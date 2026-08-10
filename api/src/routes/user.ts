@@ -8,6 +8,8 @@ import {
 import { createDeviceLink, claimDeviceLink, deviceLinkStatus } from '../services/deviceLinkService.ts'
 import {
   accountRef, resolveDisplayAccountId, getAccounts, getAccountsForViewerFold, getAccountsForMembers,
+  getRecentActivity, getAssetActivity, getGlobalActivityTotal, getAddressActivity, getTagActivity,
+  type ValueListFilters,
   getHolders, getHoldersForViewerFold,
   getListTagDetail, getListTagActivity, getListTagExtrinsics, getListTagEvents, getListTagVotes,
   getListTagVotesByReferendum, getListTagTabCounts, getListTagListTotal, getListTagValueEvents,
@@ -20,6 +22,7 @@ import {
   createTag, updateTag, deleteTag, setTagMembers, setMemberOrder, visibleTagMembers, tagDisplayIcon,
   inviteToList, revokeShare, respondToInvite, subscribePublic, unsubscribe, setListOrder, sharesFor,
   listSummary, LIMITS, type ListSummary, type UserList,
+  viewerTaggedAccounts,
 } from '../services/userListService.ts'
 import {
   limitParam, offsetParam, badOffset, textParam, valueFilters, activityTypeParam,
@@ -262,6 +265,81 @@ export async function userRoutes(fastify: FastifyInstance) {
   // shared endpoint: this calls getAccounts directly rather than paying for a
   // second, per-viewer cache entry that would be byte-identical to the shared
   // one anyway.
+  // The value filters a request carries, plus THIS viewer's tagged accounts —
+  // the one filter whose answer depends on who is asking, since an account the
+  // viewer tagged in their own or a subscribed list is named FOR THEM. Resolved
+  // from the session, never from the query string: a client could otherwise
+  // claim any account is named and page a feed nobody else sees.
+  const viewerValueFilters = (q: Record<string, unknown>, viewer: string): ValueListFilters => {
+    const filters = valueFilters(q)
+    if (!filters.identity) return filters
+    const tagged = viewerTaggedAccounts(viewer)
+    return tagged.size ? { ...filters, viewerTagged: tagged } : filters
+  }
+
+  // The activity feed, with the viewer's own and subscribed tags counting as
+  // names — same params, same parsers and same response shape as the public
+  // /explorer/activity, so the client swaps endpoints and reads the answer
+  // unchanged (the /user/accounts pattern above).
+  fastify.get('/user/activity', async (req, reply) => {
+    noStore(reply)
+    const viewer = requireUser(req, reply)
+    if (!viewer) return
+    const q = req.query as Record<string, unknown>
+    const type = activityTypeParam(q)
+    const offset = activityOffsetParam(q, type)
+    if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${maxActivityOffsetFor(type)} for type '${type}'` })
+    const filters = viewerValueFilters(q, viewer)
+    const asset = uint32Param.optional().safeParse(q.asset)
+    if (asset.success && asset.data != null) {
+      return getAssetActivity(asset.data, type, limitParam(q, 40), offset, textParam(q, 'action', 32), filters, dateParam(q, 'from'), dateParam(q, 'to'))
+    }
+    return getRecentActivity(limitParam(q, 25), dateParam(q, 'from'), dateParam(q, 'to'), offset, type, filters, textParam(q, 'action', 32))
+  })
+
+  fastify.get('/user/activity/count', async (req, reply) => {
+    noStore(reply)
+    const viewer = requireUser(req, reply)
+    if (!viewer) return
+    const q = req.query as Record<string, unknown>
+    const type = activityTypeParam(q)
+    const total = await getGlobalActivityTotal(type, textParam(q, 'action', 32), viewerValueFilters(q, viewer), dateParam(q, 'from'), dateParam(q, 'to'))
+    return { ...total, maxOffset: maxActivityOffsetFor(type) }
+  })
+
+  // The same for the two scoped feeds a reader filters from a detail page.
+  fastify.get('/user/address/:address/activity', async (req, reply) => {
+    noStore(reply)
+    const viewer = requireUser(req, reply)
+    if (!viewer) return
+    const params = z.object({ address: z.string().min(1).max(128) }).safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const q = req.query as Record<string, unknown>
+    const type = activityTypeParam(q)
+    const offset = boundedActivityOffset(q, maxScopedActivityOffsetFor(q, type))
+    if (offset == null) return reply.status(400).send({ error: 'Activity offset out of range' })
+    const rows = await getAddressActivity(params.data.address, type, limitParam(q, 40), offset,
+      textParam(q, 'action', 32), viewerValueFilters(q, viewer), dateParam(q, 'from'), dateParam(q, 'to'))
+    if (!rows) return reply.status(404).send({ error: 'Address not recognized' })
+    return rows
+  })
+
+  fastify.get('/user/tag/:tagId/activity', async (req, reply) => {
+    noStore(reply)
+    const viewer = requireUser(req, reply)
+    if (!viewer) return
+    const params = z.object({ tagId: z.string().min(1).max(64) }).safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
+    const q = req.query as Record<string, unknown>
+    const type = activityTypeParam(q)
+    const offset = boundedActivityOffset(q, maxScopedActivityOffsetFor(q, type))
+    if (offset == null) return reply.status(400).send({ error: 'Activity offset out of range' })
+    const rows = await getTagActivity(params.data.tagId, type, limitParam(q, 40), offset,
+      textParam(q, 'action', 32), viewerValueFilters(q, viewer), dateParam(q, 'from'), dateParam(q, 'to'))
+    if (!rows) return reply.status(404).send({ error: 'Tag not found' })
+    return rows
+  })
+
   fastify.get('/user/accounts', async (req, reply) => {
     noStore(reply)
     const accountId = requireUser(req, reply)
@@ -531,7 +609,7 @@ export async function userRoutes(fastify: FastifyInstance) {
     const maxOffset = maxScopedActivityOffsetFor(q, activityType)
     const offset = boundedActivityOffset(q, maxOffset)
     if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${maxOffset}` })
-    return getListTagActivity(resolved.listId, resolved.tagId, resolved.tag.members, activityType, limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
+    return getListTagActivity(resolved.listId, resolved.tagId, resolved.tag.members, activityType, limitParam(q, 40), offset, textParam(q, 'action', 32), viewerValueFilters(q, accountId), dateParam(q, 'from'), dateParam(q, 'to'))
   })
 
   fastify.get('/user/list-tag/:listId/:tagId/extrinsics', async (req, reply) => {

@@ -1,6 +1,7 @@
 import type { Page, Route } from '@playwright/test'
 import { expect, test as base } from '@playwright/test'
 import { mockSync, buildAccountsForViewer } from '../../tests/fixtures/mockApi'
+import type { ActivityRow } from '../../src/types'
 import type {
   AccountRef, ListDetailResponse, ListTagDetail, ListSummaryRef, MeResponse, TagMapResponse, TagDetail,
 } from '../../src/types'
@@ -195,6 +196,24 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
   // hand-rolling a folded accounts response of its own.
   if (method === 'GET' && path === '/user/accounts') {
     await fulfillJson(route, 200, buildAccountsForViewer(state.tagMap, Number(url.searchParams.get('offset') ?? 0), Number(url.searchParams.get('limit') ?? 50), url.searchParams.get('sort') ?? 'value'))
+    return
+  }
+
+  // The viewer-scoped activity feed: same rows the public one serves, but the
+  // identity filter also counts accounts THIS viewer has tagged. The mock walks
+  // state.tagMap exactly as viewerTaggedAccounts does server-side, so a spec
+  // seeds only the tag map.
+  if (method === 'GET' && (path === '/user/activity' || /^\/user\/(address|tag)\/[^/]+\/activity$/.test(path))) {
+    const tagged = new Set<string>()
+    for (const list of state.tagMap?.lists ?? []) for (const tag of list.tags) for (const m of tag.members) tagged.add(m.toLowerCase())
+    const identity = url.searchParams.get('identity')
+    const rows = mockSync<ActivityRow[]>('/explorer/activity?' + url.searchParams.toString()) ?? []
+    const isNamed = (r: ActivityRow) => {
+      const w = r.who
+      if (!w) return false
+      return !!(w.tag || w.identity?.display || w.profile?.name || w.contractName || tagged.has(w.accountId.toLowerCase()))
+    }
+    await fulfillJson(route, 200, identity ? rows.filter(r => isNamed(r) === (identity === 'named')) : rows)
     return
   }
 
