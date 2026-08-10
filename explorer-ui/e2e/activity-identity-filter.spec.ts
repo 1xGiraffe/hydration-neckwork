@@ -40,3 +40,49 @@ test('a scoped list carries the filter too', async ({ page }) => {
   const scoped = asked.filter(u => /\/tag\/[^/]+\/activity/.test(u))
   expect(scoped.every(u => u.includes('identity=unnamed'))).toBe(true)
 })
+
+// A viewer's OWN and subscribed tags are names too — to them. The public feed
+// cannot know them, so a logged-in reader's filter goes to the viewer endpoint,
+// which resolves the tags from the session rather than trusting the client.
+const TREASURY_ACCOUNT_ID = '0x6d6f646c70792f74727372790000000000000000000000000000000000000000'
+const USER_TAG_ID = '3fa85f64-5717-4562-b3fc-2c963f66afa6'
+
+test('a logged-in reader filters against their own tags', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  userMock.state.tagMap = {
+    lists: [
+      { listId: 'lib1', name: 'My list', tags: [
+        { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
+      ] },
+      { listId: 'system', name: 'Hydration', tags: [] },
+    ],
+  }
+
+  const asked: string[] = []
+  page.on('request', r => { const u = r.url(); if (u.includes('/activity')) asked.push(u) })
+  await page.goto('/activity?identity=named')
+  await expect(page.locator('table.tbl tbody tr').first()).toBeVisible()
+
+  // The viewer endpoint is the one asked, and the public one is not used for
+  // the filtered rows — the answer differs per viewer, so a shared cached page
+  // would be the wrong one.
+  await expect.poll(() => asked.some(u => u.includes('/user/activity') && u.includes('identity=named'))).toBe(true)
+})
+
+test('without the filter a logged-in reader still gets the shared public feed', async ({ page, userMock }) => {
+  await seedSession(page, userMock)
+  userMock.state.tagMap = {
+    lists: [{ listId: 'lib1', name: 'My list', tags: [
+      { tagId: USER_TAG_ID, name: 'Mine', color: '#22c55e', icon: '👀', members: [TREASURY_ACCOUNT_ID] },
+    ] }, { listId: 'system', name: 'Hydration', tags: [] }],
+  }
+  const asked: string[] = []
+  page.on('request', r => { const u = r.url(); if (u.includes('/activity')) asked.push(u) })
+  await page.goto('/activity')
+  await expect(page.locator('table.tbl tbody tr').first()).toBeVisible()
+
+  // Only the identity filter's answer depends on the viewer; everything else is
+  // the same page for everyone and must keep using the shared cached feed.
+  expect(asked.some(u => u.includes('/explorer/activity'))).toBe(true)
+  expect(asked.some(u => u.includes('/user/activity'))).toBe(false)
+})
