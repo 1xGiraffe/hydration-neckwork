@@ -2862,14 +2862,16 @@ function valueAccountBalances(rows: AggregatedBalanceRow[], prices: Map<number, 
 // AND at least 10% of the account's total held value. Fed the same valued +
 // folded balances the detail pages build (wallet + MM-collateral aTokens +
 // ERC-20), so the accounts-list icons and the hover card always agree.
+export const HELD_TOKEN_MIN_USD = 10
 export function topHeldTokens(balances: AddressBalance[]): { asset: AssetRef; valueUsd: number }[] {
   const total = balances.reduce((sum, b) => sum + Math.max(0, b.valueUsd ?? 0), 0)
   return balances
-    .filter(b => (b.valueUsd ?? 0) > 10 && (b.valueUsd ?? 0) >= 0.10 * total)
+    .filter(b => (b.valueUsd ?? 0) > HELD_TOKEN_MIN_USD && (b.valueUsd ?? 0) >= 0.10 * total)
     .sort((left, right) => (right.valueUsd ?? 0) - (left.valueUsd ?? 0))
     .slice(0, 4)
     .map(b => ({ asset: b.asset, valueUsd: b.valueUsd as number }))
 }
+
 
 // Rescale a base-10 integer amount string from `fromDec` to `toDec` decimal places
 // (truncating when shrinking). Used to bring amounts onto a common decimal scale.
@@ -18527,6 +18529,8 @@ export interface TopAccountRow {
   // Up to 4 largest holdings (> $10, highest USD first) for the icon cluster
   // shown after the row's value. Tag rows aggregate holdings across members.
   topAssets?: { asset: AssetRef; valueUsd: number }[]
+  // How many further holdings clear the same $10 without making the top four.
+  otherAssets?: number
 }
 
 // 1Y value sparkline
@@ -19567,7 +19571,16 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
               arrayReverseSort(x -> tupleElement(x, 2),
                 arrayFilter(x -> tupleElement(x, 2) > 10. AND tupleElement(x, 2) >= 0.10 * arraySum(tupleElement(g.asset_usd_map, 2)),
                   arrayZip(tupleElement(g.asset_usd_map, 1), tupleElement(g.asset_usd_map, 2)))),
-              1, 4) AS top_assets
+              1, 4) AS top_assets,
+            -- Every OTHER holding worth more than the same $10. The shown four
+            -- also need a 10% share, so an account spread across many similar
+            -- positions shows one icon and a count rather than looking empty.
+            -- Counted over the same map the icons come from, so a row's icons
+            -- and its count always agree. That map is the wallet-balance
+            -- approximation above: an account whose value sits in money-market
+            -- collateral or EVM-side ERC-20 counts fewer here than its detail
+            -- page lists, which is why only this surface shows a count at all.
+            greatest(0, toUInt32(arrayCount(v -> v > 10., tupleElement(g.asset_usd_map, 2))) - toUInt32(length(top_assets))) AS other_assets
           FROM grouped g
           LEFT JOIN mm_grouped mg ON mg.gkey = g.gkey
           ${lpJoin}
@@ -19600,6 +19613,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
       supplemental_present: number; supplemental_debt: number; supplemental_hf: string
       has_identity: number; activity_count: number; activity_count_complete: number; trading_volume_usd: number; liquidation_volume_usd: number
       top_assets: [string, number][]
+      other_assets: number
       gkey?: string   // present only when viewerFold spliced `g.gkey AS gkey` in above
     }>()
 
@@ -19641,6 +19655,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
         tradingVolumeUsd: r.trading_volume_usd > 0 ? Number(r.trading_volume_usd) : undefined,
         liquidationVolumeUsd: r.liquidation_volume_usd > 0 ? Number(r.liquidation_volume_usd) : undefined,
         topAssets: r.top_assets?.length ? r.top_assets.map(([id, valueUsd]) => ({ asset: asset(id), valueUsd })) : undefined,
+        otherAssets: r.other_assets > 0 ? Number(r.other_assets) : undefined,
       }
     })
 
