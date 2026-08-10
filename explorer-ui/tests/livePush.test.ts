@@ -51,8 +51,12 @@ describe('LIVE_PUSH_KEYS', () => {
   it('every pushed key exists as a query key prefix in the data hooks', () => {
     const hooks = readFileSync(new URL('../src/hooks/useExplorerData.ts', import.meta.url), 'utf8')
     for (const key of LIVE_PUSH_KEYS) {
+      // Match the ARRAY LITERAL rather than how it is assigned: a feed whose
+      // key is chosen by a ternary (the viewer-scoped variants) still starts
+      // with the pushed key, which is what react-query's prefix invalidation
+      // matches on.
       expect(hooks, `queryKey prefix '${key}' missing from useExplorerData.ts`)
-        .toMatch(new RegExp(`(queryKey: \\['${key}'|key = \\['${key}',)`))
+        .toMatch(new RegExp(`\\['${key}'[,\\]]`))
     }
   })
 
