@@ -29,13 +29,13 @@ const DUST_USD = 100
 // the same colour (vDOT and aDOT are both Polkadot pink).
 function CompositionBar({ composition, colors }: { composition: PoolCompositionEntry[]; colors: string[] }) {
   const priced = composition.filter(c => (c.usd ?? 0) > 0)
-  if (!priced.length) return <span className="muted mono liq-nobar">no priced legs</span>
+  if (!priced.length) return <span className="muted mono comp-none">no priced legs</span>
   const total = priced.reduce((s, c) => s + (c.usd ?? 0), 0)
   return (
-    <span className="liq-bar" role="img"
+    <span className="comp-bar" role="img"
       aria-label={priced.map(c => `${c.asset.symbol} ${Math.round(c.sharePct ?? 0)}%`).join(', ')}>
       {priced.map((c, i) => (
-        <span key={`${c.asset.assetId}:${i}`} className="liq-seg"
+        <span key={`${c.asset.assetId}:${i}`} className="comp-seg"
           style={{ width: `${((c.usd ?? 0) / total) * 100}%`, background: colors[composition.indexOf(c)] ?? colors[i] }}
           title={`${c.asset.symbol} · ${F.usd(c.usd)} · ${Math.round(c.sharePct ?? 0)}%`} />
       ))}
@@ -70,7 +70,7 @@ function PoolRow({ p }: { p: PoolListEntry }) {
           </span>
         </div>
       </td>
-      <td data-label="Composition" className="liq-bar-cell"><CompositionBar composition={p.composition} colors={colors} /></td>
+      <td data-label="Composition" className="comp-cell"><CompositionBar composition={p.composition} colors={colors} /></td>
       <td data-label="TVL" className="r mono liq-tvl">{p.tvlUsd != null ? F.usd(p.tvlUsd) : <Dash />}</td>
       <td data-label="Share" className="r mono muted">{p.sharePct != null ? `${p.sharePct < 0.1 ? '<0.1' : p.sharePct.toFixed(1)}%` : <Dash />}</td>
     </tr>
