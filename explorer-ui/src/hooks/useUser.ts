@@ -4,11 +4,11 @@ import { api, userApi } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
 import { useSession, setSession } from '../session'
 import { setTagMap, setTagMapError } from '../userTags'
-import { useLive, LIVE_MS } from '../live'
+import { LIVE_MS } from '../live'
 import { useHeldRows } from './useHeldRows'
 
-function useInterval(intervalMs = LIVE_MS): number | false {
-  return useLive() ? intervalMs : false
+function useInterval(intervalMs = LIVE_MS): number {
+  return intervalMs
 }
 
 export function useMe() {
