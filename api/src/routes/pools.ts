@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { getAssetLiquidity, getOmnipoolDetail, getPoolDetail } from '../services/poolService.ts'
+import { getAssetLiquidity, getOmnipoolDetail, getPoolDetail, getPoolsIndex } from '../services/poolService.ts'
 import { getAssetActivity, getPoolSwaps } from '../services/explorerService.ts'
 
 // Liquidity-pool endpoints: the asset Liquidity tab, stableswap/XYK pool detail
@@ -11,6 +11,11 @@ const uint32Schema = z.coerce.number().int().min(0).max(4_294_967_295)
 export async function poolsRoutes(fastify: FastifyInstance) {
   fastify.get('/explorer/omnipool', async () => {
     return getOmnipoolDetail()
+  })
+
+  // Every pool on the chain, largest first — the /liquidity index.
+  fastify.get('/explorer/pools', async () => {
+    return getPoolsIndex()
   })
 
   fastify.get('/explorer/pool/:poolId', async (req, reply) => {
