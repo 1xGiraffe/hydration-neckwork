@@ -1,7 +1,7 @@
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { api, userApi } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
-import { useLive, useHeadStream, LIVE_MS } from '../live'
+import { useHeadStream, LIVE_MS } from '../live'
 import { useHeldRows } from './useHeldRows'
 import { getSession } from '../session'
 import { tagMapStatus, hasUserTagMembers, useTagMapVersion } from '../userTags'
@@ -27,9 +27,7 @@ const SLOW_POLL_MS = 60_000
 // stream loss (older browser, proxy hiccup, mocked test API) the interval
 // resumes as the fallback.
 function useInterval(intervalMs = LIVE_MS, pushed = false): number | false {
-  const live = useLive()
   const streaming = useHeadStream()
-  if (!live) return false
   return pushed && streaming ? false : intervalMs
 }
 
@@ -282,11 +280,10 @@ export function useAccountVotes(address: string | null, offset = 0, from?: strin
 // to poll for. The API holds a running referendum for one block and a concluded one for
 // a minute, so a poll here is not answered with the figures the last one already showed.
 export function useReferendum(pallet: 'opengov' | 'democracy', index: number) {
-  const live = useLive()
   return useQuery({
     queryKey: ['referendum', pallet, index],
     queryFn: ({ signal }) => api.referendum(pallet, index, signal),
-    refetchInterval: query => (live && !query.state.data?.concludedAt ? DETAIL_POLL_MS : false),
+    refetchInterval: query => (query.state.data?.concludedAt ? false : DETAIL_POLL_MS),
     staleTime: 6000,
   })
 }

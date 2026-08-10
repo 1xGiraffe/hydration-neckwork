@@ -2,7 +2,6 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import type { Route } from '../router'
 import { Link, paths } from '../router'
 import { SearchBar } from './SearchBar'
-import { useLive, toggleLive } from '../live'
 import { useConnectRequest } from '../connectDialog'
 import { useTheme } from '../hooks/useTheme'
 import { useSession } from '../session'
@@ -194,7 +193,6 @@ export function Topbar({ route }: { route: Route }) {
   const me = useMe()
   const account = me.data?.account
   const invites = me.data?.invites.length ?? 0
-  const live = useLive()
   const { toggle: toggleTheme } = useTheme()
   const isDashboard = route.name === 'dashboard'
   const [drawer, setDrawer] = useState(false)
@@ -299,9 +297,6 @@ export function Topbar({ route }: { route: Route }) {
         </div>
 
         <div className="topbar-right">
-          <button className={`live-toggle ${live ? 'on' : ''}`} onClick={toggleLive} aria-label="Toggle live updates" aria-pressed={live}>
-            <span className="dot" /><span className="lab">{live ? 'Live' : 'Paused'}</span>
-          </button>
           <ThemeToggle onClick={toggleTheme} />
           <AccountMenuButton session={session} account={account} invites={invites} onConnect={openConnect} onDevices={openDevices} />
           <button ref={drawerTriggerRef} className="nav-burger" onClick={() => setDrawer(true)} aria-label="Open menu" aria-expanded={drawer} aria-haspopup="dialog">
@@ -338,9 +333,6 @@ export function Topbar({ route }: { route: Route }) {
               </div>
             ))}
             <div className="drawer-sec drawer-controls">
-              <button className={`live-toggle ${live ? 'on' : ''}`} onClick={toggleLive} aria-pressed={live} aria-label="Toggle live updates">
-                <span className="dot" /><span className="lab">{live ? 'Live' : 'Paused'}</span>
-              </button>
               <ThemeToggle onClick={toggleTheme} />
             </div>
           </nav>
