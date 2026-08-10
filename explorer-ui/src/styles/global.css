@@ -2415,14 +2415,19 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .liq-title { font-weight: 500; color: var(--text-high); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .liq-sub { display: flex; align-items: center; gap: 8px; }
 
-.liq-bar-cell { width: 34%; }
-.liq-bar { display: flex; width: 100%; height: 10px; border-radius: 999px; overflow: hidden; background: var(--bg-elev); }
+.comp-cell { width: 34%; }
+/* Named comp-, not liq-: `.liq-bar` is already the GIGAHDX liquidation
+   histogram's SVG <rect>, and in Chromium CSS width/height WIN over an SVG
+   rect's geometry attributes — this rule silently made all 14 of its bars
+   860 x 10px, one flat line where a distribution had been. A layout class and
+   an SVG geometry class must not share a name. */
+.comp-bar { display: flex; width: 100%; height: 10px; border-radius: 999px; overflow: hidden; background: var(--bg-elev); }
 /* A 2px surface gap between segments: adjacent fills of similar weight blur
    into one block without it, and the gap costs less than an outline. */
-.liq-seg + .liq-seg { box-shadow: inset 2px 0 0 0 var(--panel); }
-.liq-seg { transition: filter 140ms; }
-.tbl tbody tr:hover .liq-seg { filter: brightness(1.12); }
-.liq-nobar { font-size: 11px; }
+.comp-seg + .comp-seg { box-shadow: inset 2px 0 0 0 var(--panel); }
+.comp-seg { transition: filter 140ms; }
+.tbl tbody tr:hover .comp-seg { filter: brightness(1.12); }
+.comp-none { font-size: 11px; }
 .liq-tvl { color: var(--text-high); }
 
 /* The folded tail, and the page's closing note: both are asides, so they sit
@@ -2437,8 +2442,8 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 @media (max-width: 860px) {
   /* The card layout gives every cell its own line, so the bar spans the card
      and the icons keep their overlap against the card's own background. */
-  .liq-bar-cell { width: auto; }
-  .liq-bar { height: 12px; }
+  .comp-cell { width: auto; }
+  .comp-bar { height: 12px; }
   .icon-stack { --stack-ring: var(--bg-elev); }
 }
 
