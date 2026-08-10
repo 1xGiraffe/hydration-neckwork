@@ -457,15 +457,22 @@ export function AssetChip({ asset, link = true }: { asset: AssetRef; link?: bool
 // A compact cluster of top-holding token icons shown after an account/tag value.
 // Display-only: each icon carries a value tooltip and the cluster opts out of the
 // global hover card so sweeping across a dense row never fires a stray preview.
-export function TokenIconRow({ assets, size = 16 }: { assets: { asset: AssetRef; valueUsd?: number | null }[]; size?: number }) {
+// An account's largest holdings, as one stack. `others` is how many further
+// holdings worth more than $10 the stack does not show — the same threshold the
+// shown ones pass, so the count means "there is this much more of the same
+// kind", not "there are dust balances too".
+export function TokenIconRow({ assets, size = 16, others = 0 }: { assets: { asset: AssetRef; valueUsd?: number | null }[]; size?: number; others?: number }) {
   if (!assets.length) return null
   return (
-    <span className="token-icons" data-no-hover>
+    <span className="token-icons icon-stack" data-no-hover>
       {assets.map(({ asset, valueUsd }) => (
         <span key={asset.assetId} className="token-icons-item" title={valueUsd != null ? `${asset.symbol} — ${F.usd(valueUsd)}` : asset.symbol}>
           <AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} symbol={asset.symbol} size={size} parachainId={asset.parachainId} origin={asset.origin} />
         </span>
       ))}
+      {others > 0 && (
+        <span className="stack-more" title={`${others} more ${others === 1 ? 'holding' : 'holdings'} worth over $10`}>+{others}</span>
+      )}
     </span>
   )
 }
