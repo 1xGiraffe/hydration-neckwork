@@ -192,6 +192,11 @@ export function useAssetDcas(assetId: number | null, enabled = true) {
   const ri = useInterval(DETAIL_POLL_MS)
   return useQuery({ queryKey: ['asset-dcas', assetId], queryFn: ({ signal }) => api.assetDcas(assetId as number, signal), enabled: assetId != null && enabled, refetchInterval: enabled ? ri : false, staleTime: 6000 })
 }
+// Every pool, largest first. Snapshot-derived and cached server-side, so this
+// follows the ordinary list cadence rather than the live feeds'.
+export function usePools() {
+  return useQuery({ queryKey: ['pools'], queryFn: ({ signal }) => api.pools(signal), staleTime: 60_000 })
+}
 // A pool page shows what happened in the POOL, which its share token's activity
 // cannot answer (see the api's getPoolSwaps).
 export function usePoolActivity(poolId: number | null, limit = 25) {
