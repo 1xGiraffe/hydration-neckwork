@@ -1505,8 +1505,31 @@ svg { display: block; }
 .mm-activity-market.mm-market-bil { background: #009739; border-color: #fedd00; color: #fff; }
 /* Top-holding token icons in the Holdings column (accounts list) and hover cards. */
 .holdings-cell { vertical-align: middle; white-space: nowrap; }
-.token-icons { display: inline-flex; align-items: center; gap: 3px; }
+/* An asset stack: overlapped icons that read as ONE holding rather than a list
+   of separate things. A ring in the surface colour keeps them legible where
+   they overlap, and hovering the row fans them apart just enough to count.
+   Used for a pool's assets and for an account's holdings, so both read alike.
+
+   The fan is a TRANSFORM, never a margin. Margin changes the element's width,
+   and inside a table that reflows every column — measured on /liquidity before
+   this: hovering the Omnipool row grew its icon box 90 -> 110px, which pushed
+   the Pool column 470 -> 489 and pulled TVL and Share ~10px each, so the whole
+   row slid under the cursor. A transform moves the paint and leaves the layout
+   alone. It is capped at 12px, the gap that follows the stack, so a fanned
+   icon never reaches the text beside it. */
+.icon-stack { --stack-overlap: -7px; --stack-ring: var(--panel); display: inline-flex; align-items: center; flex-shrink: 0; }
+.icon-stack > * { border-radius: 50%; box-shadow: 0 0 0 2px var(--stack-ring); transition: transform 160ms var(--ease-out-soft); }
+.icon-stack > * + * { margin-left: var(--stack-overlap); }
+tr:hover .icon-stack > *:nth-child(2), .icon-stack:hover > *:nth-child(2) { transform: translateX(4px); }
+tr:hover .icon-stack > *:nth-child(3), .icon-stack:hover > *:nth-child(3) { transform: translateX(8px); }
+tr:hover .icon-stack > *:nth-child(n+4), .icon-stack:hover > *:nth-child(n+4) { transform: translateX(12px); }
+
+.token-icons { --stack-overlap: -5px; }
 .token-icons-item { display: inline-flex; line-height: 0; }
+/* How many other holdings the stack leaves out — every one worth more than $10.
+   A count, not more icons: past a few the icons stop being tellable apart. */
+.stack-more { margin-left: 11px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.holdings-cell .stack-more { margin-left: 9px; }
 .activity-badge-group { display: inline-flex; align-items: center; gap: 5px; }
 .mm-activity-market { padding: 4px 6px; }
 @media (max-width: 720px) {
