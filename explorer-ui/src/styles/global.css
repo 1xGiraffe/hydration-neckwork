@@ -355,8 +355,6 @@ svg { display: block; }
 /* bottom drawer section: the live + theme controls (moved out of the topbar
    on mobile) sit side by side as regular pills */
 .drawer-sec.drawer-controls { display: flex; align-items: center; gap: 10px; padding: 14px 12px; }
-.drawer .live-toggle { width: auto; height: 34px; padding: 0 14px; justify-content: flex-start; }
-.drawer .live-toggle .lab { display: inline; }
 
 .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .net-chip {
@@ -422,11 +420,6 @@ svg { display: block; }
 .account-menu a:hover, .account-menu button.menu-row:hover { color: var(--text-high); background: var(--panel-hover); }
 
 /* live-refresh toggle */
-.live-toggle { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 12px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-medium); transition: color 150ms, background 150ms; }
-.live-toggle:hover { color: var(--text-high); background: var(--panel-hover); }
-.live-toggle .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-low); }
-.live-toggle.on { color: var(--green); }
-.live-toggle.on .dot { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 1.6s ease-in-out infinite; }
 
 /* collapsible filter zone */
 .filter-zone { margin-bottom: 14px; }
@@ -482,7 +475,7 @@ svg { display: block; }
   .nav { display: none; }
   .nav-burger { display: inline-flex; }
   .topbar-right { margin-left: auto; }
-  .topbar-right .live-toggle, .topbar-right .theme-toggle, .topbar-right .account-control, .topbar-right .connect-btn { display: none; }
+  .topbar-right .theme-toggle, .topbar-right .account-control, .topbar-right .connect-btn { display: none; }
   .topbar-search { flex: 1 1 auto; margin-left: 0; }
   .topbar-search.hidden { display: none; }
   /* Full-bleed dropdown: unposition the wrap so the absolute dropdown anchors
