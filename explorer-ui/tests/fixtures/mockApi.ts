@@ -609,10 +609,22 @@ function buildAccounts(offset: number, limit: number, sort: string): AccountsPag
   // 53 weekly points = the real API's 1Y padded sparkline shape.
   rows.push({ account: null, tag: { tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', icon: '/tag-icons/kraken.jpg', memberCount: 2 }, portfolioUsd: 5_240_000, lastBlock: TIP - 12, healthFactor: '1410000000000000000', identity: 'Kraken', suppliedUsd: null, borrowedUsd: null, supplementalMarket: { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 6_200, healthFactor: '2380000000000000000' }, sparkline: series(99, 53, 5_240_000), activityCount: 2143, activityCountComplete: true, tradingVolumeUsd: 82_400_000, liquidationVolumeUsd: 740_000 })
   const seeds: [AccountRef, number][] = [[A.binance, 3_900_000], [A.fox, 1_240_000], [A.treasury, 980_000], [A.owl, 410_000], [A.swan, 96_000]]
-  for (const [a, usd] of seeds) {
+  // Holdings: the four largest as an icon stack, plus how many further holdings
+  // clear $10 without making the four. The shapes that matter are all here — a
+  // spread portfolio (few icons, big count), a plain one (no count), and an
+  // account holding nothing (the cell stays empty).
+  const holdings = (i: number): { topAssets: { asset: AssetRef; valueUsd: number }[]; otherAssets?: number } => {
+    if (i === 4) return { topAssets: [] }
+    const picks = ASSETS.slice(i % 3, (i % 3) + (i === 1 ? 2 : 4))
+    return {
+      topAssets: picks.map((x, k) => ({ asset: aref(x), valueUsd: 90_000 / (k + 1) })),
+      ...(i === 0 ? { otherAssets: 17 } : i === 2 ? { otherAssets: 3 } : {}),
+    }
+  }
+  for (const [i, [a, usd]] of seeds.entries()) {
     const mm = mmFor(a.accountId.length * 7)
     const floor = a === ACTIVITY_FLOOR_ACCOUNT
-    rows.push({ account: a, tag: null, portfolioUsd: usd, lastBlock: TIP - Math.floor(usd % 900), healthFactor: mm.debt > 0 ? BigInt(Math.round(mm.hf * 1e18)).toString() : 'inf', identity: a === A.binance ? 'Binance' : null, suppliedUsd: mm.supply > 0 ? mm.supply : null, borrowedUsd: mm.debt > 0 ? mm.debt : null, supplementalMarket: a === A.fox ? { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 4_800, healthFactor: '2500000000000000000' } : null, sparkline: series(a.accountId.length * 31, 53, usd), activityCount: floor ? ACTIVITY_FLOOR_COUNT : 100 + (usd % 4000), activityCountComplete: !floor, tradingVolumeUsd: usd * (12 + (a.accountId.charCodeAt(4) % 9)), liquidationVolumeUsd: mm.debt > 0 ? usd * (0.08 + (a.accountId.charCodeAt(6) % 5) / 100) : undefined })
+    rows.push({ account: a, tag: null, portfolioUsd: usd, lastBlock: TIP - Math.floor(usd % 900), healthFactor: mm.debt > 0 ? BigInt(Math.round(mm.hf * 1e18)).toString() : 'inf', identity: a === A.binance ? 'Binance' : null, suppliedUsd: mm.supply > 0 ? mm.supply : null, borrowedUsd: mm.debt > 0 ? mm.debt : null, supplementalMarket: a === A.fox ? { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 4_800, healthFactor: '2500000000000000000' } : null, sparkline: series(a.accountId.length * 31, 53, usd), activityCount: floor ? ACTIVITY_FLOOR_COUNT : 100 + (usd % 4000), activityCountComplete: !floor, tradingVolumeUsd: usd * (12 + (a.accountId.charCodeAt(4) % 9)), liquidationVolumeUsd: mm.debt > 0 ? usd * (0.08 + (a.accountId.charCodeAt(6) % 5) / 100) : undefined, ...holdings(i) })
   }
   const sorted = sortAccountRows(rows, sort)
   return { rows: sorted.slice(offset, offset + limit), total: sorted.length }

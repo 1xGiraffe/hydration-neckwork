@@ -106,6 +106,8 @@ export interface TopAccountRow {
   liquidationVolumeUsd?: number
   // Up to 4 largest holdings (> $10, highest USD first) → icon cluster after value.
   topAssets?: { asset: AssetRef; valueUsd: number }[]
+  // Further holdings over $10 the four icons leave out.
+  otherAssets?: number
 }
 
 export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'activity' | 'volume' | 'liquidation'
@@ -160,6 +162,8 @@ export interface ContractInfo {
   // shown rather than a zero standing in for one (see ContractMetrics, api).
   portfolioUsd?: number
   topAssets?: { asset: AssetRef; valueUsd: number }[]
+  // Further holdings over $10 the four icons leave out.
+  otherAssets?: number
   sparkline?: number[]
   tradingVolumeUsd?: number
   activityCount?: number

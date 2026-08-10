@@ -1,7 +1,7 @@
 import { useAccounts, useAccountsDaily } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, usePageParam, useQueryValue, setPage, setQuery } from '../router'
-import { Crumbs, F, AddrPill, Sparkline, EmptyRow, TableSkeleton, Pager, healthFactorDisplay, TagGroupPill, TokenIconRow, Dash, pendingRows, compactAmount } from '../components/ui'
+import { Crumbs, F, AddrPill, Sparkline, EmptyRow, TableSkeleton, Pager, healthFactorDisplay, TagGroupPill, TokenIconRow, Dash, pendingRows, compactAmount, rowNav } from '../components/ui'
 import { AccountsChart } from '../components/AccountsChart'
 import { defisimAccountTarget } from '../utils/defisim'
 import { offeredPages } from '../utils/activityPaging'
@@ -46,11 +46,17 @@ function AccountRow({ r }: { r: TopAccountRow }) {
   // Module accounts touch balances on every trade, so the column shows the
   // explorer-wide rough scale (2.25M · 505k · 4.87k) rather than a full count.
   const count = (n?: number) => n != null ? <span className="mono muted">{compactAmount(n)}</span> : <Dash />
+  // The whole row opens what it names, like every other directory here — a
+  // tag's combined view or the account's page. rowNav defers to nested links,
+  // so the pill, the health badge and the sparkline keep their own targets, and
+  // a row with neither (a bare DefiSim account) stays plain rather than
+  // pretending to lead somewhere.
+  const to = r.tag ? paths.tag(r.tag.tagId) : r.account ? paths.account(r.account.address) : null
   return (
-    <tr>
+    <tr {...(to ? rowNav(to) : {})}>
       <td data-label="Account">{r.tag ? <TagGroupPill tag={r.tag} /> : r.account ? <AddrPill account={r.account} /> : <Dash />}</td>
       <td data-label="Value" className="r mono">{F.usd(r.portfolioUsd)}</td>
-      <td data-label="Holdings" className={`holdings-cell${emptyIf(!r.topAssets?.length)}`}>{r.topAssets?.length ? <TokenIconRow assets={r.topAssets} /> : <Dash />}</td>
+      <td data-label="Holdings" className={`holdings-cell${emptyIf(!r.topAssets?.length)}`}>{r.topAssets?.length ? <TokenIconRow assets={r.topAssets} others={r.otherAssets ?? 0} /> : <Dash />}</td>
       <td data-label="1Y" className={`r${emptyIf(!(r.sparkline && r.sparkline.length > 1))}`}>{r.sparkline && r.sparkline.length > 1 ? <Sparkline data={r.sparkline} /> : <Dash />}</td>
       <td data-label="Lent" className={`r mono${emptyIf(!r.suppliedUsd)}`}>{r.suppliedUsd ? F.usd(r.suppliedUsd) : <Dash />}</td>
       <td data-label="Borrowed" className={`r mono${emptyIf(!r.borrowedUsd)}`}>{r.borrowedUsd ? F.usd(r.borrowedUsd) : <Dash />}</td>
