@@ -847,6 +847,22 @@ export interface AssetDetail {
 
 export type PoolKind = 'omnipool' | 'stableswap' | 'xyk'
 export interface PoolCompositionEntry { asset: AssetRef; amount: string; usd: number | null; sharePct: number | null }
+// Every pool on the chain, largest first (the /liquidity index). A pool is a
+// mixture, so each entry carries its own composition and the page draws it.
+export interface PoolListEntry {
+  kind: PoolKind
+  poolId: number | null
+  name: string
+  tvlUsd: number | null
+  sharePct: number | null
+  composition: PoolCompositionEntry[]
+  hasPegs: boolean
+}
+export interface PoolsIndexResponse {
+  totalTvlUsd: number | null
+  pools: PoolListEntry[]
+}
+
 export interface AssetLiquiditySource {
   kind: PoolKind
   poolId: number | null            // share/LP asset id; null for the Omnipool
