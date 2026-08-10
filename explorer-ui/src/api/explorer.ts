@@ -182,6 +182,10 @@ export const api = {
   tagValueEvents: (tagId: string, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<ValueEvent[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/value-events`, { from, to }), signal),
   tag: (tagId: string, signal?: AbortSignal) => getJson<TagDetail>(`/explorer/tag/${encodeURIComponent(tagId)}`, signal),
+  // The tag's members as directory rows — the same shape /explorer/accounts
+  // returns, so a tag page renders the directory table rather than its own list.
+  tagMembers: (tagId: string, signal?: AbortSignal) =>
+    getJson<AccountsPage>(`/explorer/tag/${encodeURIComponent(tagId)}/members`, signal),
   // Lightweight variant for the hover card (skips the heavy portfolio-history walk).
   tagSummary: (tagId: string, signal?: AbortSignal) => getJson<TagDetail>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}`, { summary: '1' }), signal),
   tagActivity: (tagId: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
@@ -286,6 +290,8 @@ export const userApi = {
   // because a private list's tag contents are owner/subscriber-only.
   listTag: (listId: string, tagId: string, signal?: AbortSignal) =>
     authedJson<TagDetail>('GET', `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}`, undefined, signal),
+  listTagMembers: (listId: string, tagId: string, signal?: AbortSignal) =>
+    authedJson<AccountsPage>('GET', `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/members`, undefined, signal),
   listTagSummary: (listId: string, tagId: string, signal?: AbortSignal) =>
     authedJson<TagDetail>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}`, { summary: '1' }), undefined, signal),
   listTagActivity: (listId: string, tagId: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>

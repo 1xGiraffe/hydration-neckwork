@@ -28,10 +28,13 @@ describe('bound-account directory key', () => {
   })
 
   it('builds every bound-account key through the one helper', () => {
-    // 4 call sites: asset holders, trade volume, liquidation volume, and the accounts
-    // directory itself. The weekly-activity site went with the directory's
+    // 5 call sites: asset holders, trade volume, liquidation volume, the accounts
+    // directory itself, and the member filter that scopes that same directory
+    // query to one tag — which must key members the SAME way the rows do, or a
+    // member's module truncation or bound H160 pot would be filtered out of its
+    // own row. The weekly-activity site went with the directory's
     // balance-observation counter, which the account's own feed total replaced.
-    expect((explorerService.match(/\$\{boundAccountSql\('\w+'\)\}/g) ?? []).length).toBe(4)
+    expect((explorerService.match(/\$\{boundAccountSql\('\w+'\)\}/g) ?? []).length).toBe(5)
     expect((explorerService.match(/substring\(\$\{account\}, 11, 8\) IN \('6d6f646c', '7369626c', '70617261'\)/g) ?? []).length).toBe(1)
   })
 
