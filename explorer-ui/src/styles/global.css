@@ -2389,6 +2389,43 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .badge.projected.ok { color: var(--green); }
 .badge.projected.fail { color: var(--red); }
 .badge.projected.unknown { color: var(--text-low); border-style: dashed; padding-inline: 7px; }
+/* ── /liquidity ───────────────────────────────────────────────────────────────
+   A pool is a mixture, so every row draws its own, and the page reads down as a
+   cascade of shapes rather than a column of numbers. The bar is the one bold
+   thing here; everything around it stays quiet. */
+.liq-pool { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.liq-more { margin-left: 10px; font-size: 11px; color: var(--text-low); }
+.liq-name { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.liq-title { font-weight: 500; color: var(--text-high); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.liq-sub { display: flex; align-items: center; gap: 8px; }
+
+.liq-bar-cell { width: 34%; }
+.liq-bar { display: flex; width: 100%; height: 10px; border-radius: 999px; overflow: hidden; background: var(--bg-elev); }
+/* A 2px surface gap between segments: adjacent fills of similar weight blur
+   into one block without it, and the gap costs less than an outline. */
+.liq-seg + .liq-seg { box-shadow: inset 2px 0 0 0 var(--panel); }
+.liq-seg { transition: filter 140ms; }
+.tbl tbody tr:hover .liq-seg { filter: brightness(1.12); }
+.liq-nobar { font-size: 11px; }
+.liq-tvl { color: var(--text-high); }
+
+/* The folded tail, and the page's closing note: both are asides, so they sit
+   outside the panel and stay quiet. */
+.liq-dust { display: flex; align-items: center; gap: 10px; padding: 10px 2px 0; font-family: 'GeistMono'; font-size: 11.5px; color: var(--text-low); }
+.liq-dust-toggle { color: var(--sky-deep); font-family: 'GeistMono'; font-size: 11.5px; }
+.liq-dust-toggle:hover { text-decoration: underline; }
+.liq-foot { max-width: 62ch; padding: 14px 2px 0; font-size: 12px; line-height: 1.6; }
+/* The closing link keeps its arrow: a wrapped "→" reads as a stray glyph. */
+.liq-foot .hash { white-space: nowrap; }
+
+@media (max-width: 860px) {
+  /* The card layout gives every cell its own line, so the bar spans the card
+     and the icons keep their overlap against the card's own background. */
+  .liq-bar-cell { width: auto; }
+  .liq-bar { height: 12px; }
+  .icon-stack { --stack-ring: var(--bg-elev); }
+}
+
 /* Conviction sits beside the AYE/NAY badge and must not read as part of it. */
 .conviction-tag { margin-left: 6px; }
 .pool-chip { display: inline-block; margin-right: 8px; font-size: 12px; line-height: 1; vertical-align: middle; animation: poolHover 1.4s steps(2, end) infinite; }

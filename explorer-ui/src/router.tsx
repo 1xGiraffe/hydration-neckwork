@@ -51,6 +51,7 @@ export type Route =
   | { name: 'holders'; assetId: number }
   | { name: 'pool'; poolId: number }
   | { name: 'omnipool' }
+  | { name: 'liquidity' }
   | { name: 'link-device' } // QR login handoff target; the code rides in the fragment
   | { name: 'notfound'; path: string }
 
@@ -126,6 +127,7 @@ export function parseRoute(loc: string): Route {
     case 'pool':
       return parts[1] && isSafeId(parts[1]) ? { name: 'pool', poolId: Number(parts[1]) } : { name: 'assets' }
     case 'omnipool': return { name: 'omnipool' }
+    case 'liquidity': return { name: 'liquidity' }
     case 'link-device': return { name: 'link-device' }
     default:
       if ((ACTIVITY_SLUGS as readonly string[]).includes(parts[0])) {
@@ -275,6 +277,7 @@ export const paths = {
   holders: (assetId: number) => `/holders/${assetId}`,
   pool: (poolId: number) => `/pool/${poolId}`,
   omnipool: () => '/omnipool',
+  liquidity: () => '/liquidity',
   lists: () => '/lists',
   list: (id: string) => `/list/${encodeURIComponent(id)}`,
   linkDevice: () => '/link-device',
