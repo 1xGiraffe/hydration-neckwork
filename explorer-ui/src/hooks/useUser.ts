@@ -66,6 +66,17 @@ export function useAddressTaggedIn(address: string | null) {
 // as their system-tag counterparts.
 const LIST_TAG_POLL_MS = 15_000
 
+// A user tag's members as directory rows — the same table /accounts renders.
+export function useListTagMembers(listId: string | null, tagId: string | null) {
+  const session = useSession()
+  return useQuery({
+    queryKey: ['list-tag-members', listId, tagId],
+    queryFn: ({ signal }) => userApi.listTagMembers(listId as string, tagId as string, signal),
+    enabled: !!session && !!listId && !!tagId,
+    staleTime: 60_000,
+  })
+}
+
 export function useListTag(listId: string | null, tagId: string | null) {
   const session = useSession()
   return useQuery({

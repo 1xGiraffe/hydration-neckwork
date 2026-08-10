@@ -1,9 +1,10 @@
 import { lazy, Suspense, useState } from 'react'
-import { useTag, useTagListCount, useTagValueEvents, useStats } from '../hooks/useExplorerData'
+import { useTag, useTagListCount, useTagMembers, useTagValueEvents, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, useQueryValue, setQuery } from '../router'
-import { Crumbs, F, AddrPill, Copy, ProfilePageSkeleton, DetailTabs, TagIcon, accountHref, rowNav } from '../components/ui'
+import { Crumbs, F, AddrPill, Copy, ProfilePageSkeleton, DetailTabs, TableSkeleton, TagIcon, accountHref, rowNav } from '../components/ui'
+import { AccountsTable } from '../components/AccountsTable'
 import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
@@ -84,6 +85,9 @@ export function TagDetail({ tagId }: { tagId: string }) {
 
 function SystemTagDetail({ tagId }: { tagId: string }) {
   const { data, isLoading, isError } = useTag(tagId)
+  // The members as directory rows. Its own request, so the page's own data is
+  // never held up by it — the member pills render meanwhile.
+  const memberRows = useTagMembers(tagId)
   // Exact list lengths for the tab badges, shared with the lists' own totals.
   const activityTotal = useTagListCount(tagId, activityListCount('all', '', {}))
   const votesTotal = useTagListCount(tagId, voteListCount())
@@ -139,22 +143,31 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
               <DetailTabs tabs={tabs} active={activeView} onChange={k => setQuery({ view: k === 'overview' ? null : k })} />
 
               {activeView === 'overview' && (<>
+              {/* The same table /accounts renders: a tag is a slice of the
+                  directory, and a reader who followed a tag from there should
+                  find the value, holdings and lending they were just reading,
+                  not a bare list of addresses. Falls back to the plain member
+                  pills while the rows load — the names are already known. */}
               <div className="sec-title">Accounts · {members.length}</div>
-              <div className="panel"><table className="tbl">
-                <thead><tr><th>Account</th></tr></thead>
-                <tbody>
-                  {members.map(m => (
-                    <tr key={m.accountId} {...rowNav(accountHref(m))}>
-                      <td>
-                        <span className="row gap6" style={{ alignItems: 'center' }}>
-                          <AddrPill account={m} noCopy noTag />
-                          <Copy text={m.address} />
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table></div>
+              {memberRows.data?.rows.length
+                ? <AccountsTable rows={memberRows.data.rows} skeletonRows={Math.min(members.length, 12)} />
+                : <div className="panel"><table className="tbl">
+                  <thead><tr><th>Account</th></tr></thead>
+                  <tbody>
+                    {memberRows.isLoading
+                      ? <TableSkeleton cols={1} rows={Math.min(members.length, 8)} />
+                      : members.map(m => (
+                        <tr key={m.accountId} {...rowNav(accountHref(m))}>
+                          <td>
+                            <span className="row gap6" style={{ alignItems: 'center' }}>
+                              <AddrPill account={m} noCopy noTag />
+                              <Copy text={m.address} />
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table></div>}
 
               <CloseAccountsSection tagId={tagId} />
 

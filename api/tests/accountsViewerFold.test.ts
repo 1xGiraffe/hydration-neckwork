@@ -17,9 +17,12 @@ function accountsPageBody(): string {
 // that widens the "absent" case fails here instead of only showing up as a
 // production behaviour change for logged-out traffic.
 describe('the accounts-directory viewer fold cannot drift the anonymous path', () => {
-  it('accountsPage takes viewerFold as an additive, optional 5th parameter', () => {
+  it('accountsPage takes viewerFold and the member scope as additive, optional parameters', () => {
+    // `members` scopes the same query to one tag's accounts (getAccountsForMembers).
+    // Both extras are optional and trailing, so every existing caller — and the
+    // anonymous path these tests guard — is unchanged.
     expect(explorerService).toContain(
-      'async function accountsPage(offset: number, limit: number, sort: AccountSort, refresh: boolean, viewerFold?: ViewerFold): Promise<AccountsPage> {',
+      'async function accountsPage(offset: number, limit: number, sort: AccountSort, refresh: boolean, viewerFold?: ViewerFold, members?: string[]): Promise<AccountsPage> {',
     )
   })
 
@@ -104,7 +107,10 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
   // two lines it always did.
   it('the persisted snapshot load/persist is skipped only by wrapping the ORIGINAL lines in `if (!viewerFold)`', () => {
     const body = accountsPageBody()
-    expect(body).toContain("if (!viewerFold) {\n      const current = await loadAccountDirectorySnapshot(snapshotKey, true).catch(() => null)\n      if (current) return current.page\n    }")
+    // The whole-directory snapshot is skipped for a member-scoped page too: it
+    // ranks every account under the shared grouping, which is a different row
+    // set entirely, not a page of this one.
+    expect(body).toContain("if (!viewerFold && !members) {\n      const current = await loadAccountDirectorySnapshot(snapshotKey, true).catch(() => null)\n      if (current) return current.page\n    }")
     expect(body).toContain('if (!viewerFold) await persistAccountDirectorySnapshot(snapshotKey, page).catch(err => console.error(\'[accounts] snapshot persist failed:\', err))')
   })
 

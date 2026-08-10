@@ -2,7 +2,10 @@ import { describe, it, expect } from 'vitest'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { Accounts, HealthSimBadge } from '../src/pages/Accounts'
+import { Accounts } from '../src/pages/Accounts'
+// The directory's row, header and health badge live in the shared table now —
+// /accounts and a tag's member list render the same component.
+import { HealthSimBadge } from '../src/components/AccountsTable'
 import { healthFactorDisplay } from '../src/components/ui'
 import { defisimAccountTarget } from '../src/utils/defisim'
 import type { TopAccountRow } from '../src/types'

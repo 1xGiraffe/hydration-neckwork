@@ -1870,6 +1870,13 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       return out.slice(0, limit)
     },
   },
+  // A tag's members as DIRECTORY rows: the same shape /explorer/accounts
+  // returns, one row per member and never folded under the tag itself.
+  { re: /^\/explorer\/tag\/(.+)\/members$/, fn: () => {
+    const { rows } = buildAccounts(0, 50, 'value')
+    const members = rows.filter(r => r.account).slice(0, 3).map(r => ({ ...r, tag: null }))
+    return { rows: members, total: members.length }
+  } },
   {
     re: /^\/explorer\/tag\/(.+)$/, fn: () => {
       const members = [A.krakenEvm, A.krakenSub]
@@ -1939,6 +1946,11 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   // enough for the page to render its header + empty tables); the detail carries
   // the same tag the tag-map's 'personal-watch' entry resolves pills to, so a
   // pill and its own aggregate page agree on name/color/icon.
+  { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/members$/, fn: () => {
+    const { rows } = buildAccounts(0, 50, 'value')
+    const members = rows.filter(r => r.account).slice(0, 2).map(r => ({ ...r, tag: null }))
+    return { rows: members, total: members.length }
+  } },
   { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/counts$/, fn: () => ({ extrinsics: 0, extrinsicsOnBehalf: 0, events: 0, votes: 0 }) },
   { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/list-count$/, fn: () => ({ total: 0, complete: true }) },
   { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/activity$/, fn: () => [] as ActivityRow[] },
