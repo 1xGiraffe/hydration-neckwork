@@ -724,6 +724,87 @@ async function assetLiquidityHistory(pools: CurrentPools, assetId: number): Prom
   return { buckets, series: foldTopSeries(series, 5) }
 }
 
+// ── Every pool, largest first ─────────────────────────────────────────────────
+//
+// The chain's liquidity is spread across three venues that behave differently —
+// the Omnipool's shared reserve, the stableswaps' pegged baskets, and the XYK
+// pairs — and nothing until now listed them together. A pool is not a single
+// number though: it is a MIXTURE, so each entry carries its own composition and
+// the page draws it, which is what tells a 50/50 basket apart from a venue
+// holding twenty slivers.
+//
+// Everything here comes from the snapshot loadCurrentPools already caches, so
+// the whole index is one pass over data the asset and pool pages share.
+export interface PoolListEntry {
+  kind: 'omnipool' | 'stableswap' | 'xyk'
+  poolId: number | null            // share/LP asset id; null for the Omnipool
+  name: string
+  tvlUsd: number | null
+  sharePct: number | null          // of all pooled value
+  composition: PoolCompositionEntry[]
+  hasPegs: boolean
+}
+export interface PoolListResponse {
+  totalTvlUsd: number | null
+  pools: PoolListEntry[]
+}
+
+export async function getPoolsIndex(): Promise<PoolListResponse> {
+  return cachedSwr('explorer:pools:index', 60_000, 300_000, async () => {
+    const [pools, prices] = await Promise.all([loadCurrentPools(), ensurePrices()])
+    const entries: PoolListEntry[] = []
+
+    const omni = [...pools.omnipool.values()].map(a => ({ assetId: a.assetId, raw: a.reserve }))
+    if (omni.length) {
+      const { entries: composition, tvlUsd } = buildComposition(prices, omni)
+      entries.push({
+        kind: 'omnipool', poolId: null, name: 'Omnipool', tvlUsd, sharePct: null,
+        // Largest leg first, so the drawn bar reads as a ranking too.
+        composition: [...composition].sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0)),
+        hasPegs: false,
+      })
+    }
+
+    for (const pool of pools.stableswap.values()) {
+      const { entries: composition, tvlUsd } = buildComposition(prices,
+        pool.assetIds.map((id, i) => ({ assetId: id, raw: pool.reserves[i] })))
+      entries.push({
+        kind: 'stableswap', poolId: pool.poolId, name: asset(pool.poolId).symbol, tvlUsd, sharePct: null,
+        composition, hasPegs: hasDriftingPegs(pool.pegs),
+      })
+    }
+
+    for (const pool of pools.xykByLp.values()) {
+      const { entries: composition, tvlUsd } = buildComposition(prices, [
+        { assetId: pool.assetA, raw: pool.reserveA },
+        { assetId: pool.assetB, raw: pool.reserveB },
+      ])
+      entries.push({
+        kind: 'xyk', poolId: pool.lpAssetId, name: `${asset(pool.assetA).symbol} / ${asset(pool.assetB).symbol}`,
+        tvlUsd, sharePct: null, composition, hasPegs: false,
+      })
+    }
+
+    return rankPools(entries)
+  })
+}
+
+// Largest first, and each pool's share of everything pooled. A pool whose legs
+// cannot all be priced has no TVL to rank by and sorts last rather than being
+// dropped — it still holds tokens, they just have nothing to be worth, and the
+// page says so. Kept pure so both rules stay pinned: 278 of the chain's 307
+// pools are unpriced, so "drop the unpriced" would quietly delete most of the
+// list, and "treat unpriced as zero" would rank them among the empty ones as if
+// that were measured.
+export function rankPools(entries: PoolListEntry[]): PoolListResponse {
+  const pools = [...entries].sort((a, b) => (b.tvlUsd ?? -1) - (a.tvlUsd ?? -1))
+  const totalTvlUsd = pools.reduce((s, e) => s + (e.tvlUsd ?? 0), 0) || null
+  for (const e of pools) {
+    e.sharePct = totalTvlUsd != null && totalTvlUsd > 0 && e.tvlUsd != null ? (e.tvlUsd / totalTvlUsd) * 100 : null
+  }
+  return { totalTvlUsd, pools }
+}
+
 export async function getAssetLiquidity(assetId: number): Promise<AssetLiquidityResponse> {
   return cachedSwr(`explorer:asset-liquidity:${assetId}`, 60_000, 300_000, async () => {
     const [pools, prices] = await Promise.all([loadCurrentPools(), ensurePrices()])
