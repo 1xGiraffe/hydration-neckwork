@@ -1,27 +1,12 @@
 import { useSyncExternalStore } from 'react'
 
-// Global Live/Paused state. When enabled, list views poll on LIVE_MS; when
-// paused, they do not refetch. Persisted to
-// localStorage so the choice survives reloads. The server-side single-flight
-// cache keeps DB load O(1) regardless of how many clients poll.
-// Hydration targets roughly one block every six seconds. Polling more often only
-// re-fetched the same head while forcing the API cache to expire between clients.
+// The explorer is always live. A block lands every ~6 seconds and the pages
+// follow it: the SSE head stream drives the refetches, and LIVE_MS is the
+// fallback interval for whenever that stream is unavailable (older browser,
+// proxy hiccup, mocked test API). Polling faster than the chain only re-fetches
+// the same head while forcing the API cache to expire between clients; the
+// server's single-flight cache keeps DB load O(1) however many clients watch.
 export const LIVE_MS = 6000
-
-let liveOn = (() => {
-  try { return localStorage.getItem('explorer-live') !== '0' } catch { return true }
-})()
-
-const listeners = new Set<() => void>()
-function emit() { listeners.forEach(l => l()) }
-
-export function toggleLive(): void {
-  liveOn = !liveOn
-  try { localStorage.setItem('explorer-live', liveOn ? '1' : '0') } catch { /* ignore */ }
-  if (liveOn) connectHead()
-  else disconnectHead()
-  emit()
-}
 
 // Push channel. The API streams the ingested chain head over SSE; when a new
 // block lands, main.tsx invalidates exactly the global live feeds below, so
@@ -128,7 +113,7 @@ export function parseHeadEvent(data: string, prev: HeadFrame): HeadFrame | null 
 }
 
 function connectHead(): void {
-  if (source || !liveOn || headListeners.size === 0 || typeof EventSource === 'undefined') return
+  if (source || headListeners.size === 0 || typeof EventSource === 'undefined') return
   source = new EventSource('/api/explorer/live')
   source.addEventListener('open', () => setStreamHealthy(true))
   source.addEventListener('head', e => {
@@ -153,16 +138,9 @@ function disconnectHead(): void {
 
 export function subscribeHead(cb: HeadListener): () => void {
   headListeners.add(cb)
-  if (liveOn) connectHead()
+  connectHead()
   return () => {
     headListeners.delete(cb)
     if (headListeners.size === 0) disconnectHead()
   }
-}
-export function useLive(): boolean {
-  return useSyncExternalStore(
-    (cb) => { listeners.add(cb); return () => listeners.delete(cb) },
-    () => liveOn,
-    () => liveOn,
-  )
 }
