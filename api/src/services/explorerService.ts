@@ -653,6 +653,12 @@ export interface ValueListFilters {
   min?: number
   unit?: 'usd' | 'token'
   identity?: 'named' | 'unnamed'
+  // Accounts THIS viewer has tagged, in their own lists or ones they subscribe
+  // to (userListService.viewerTaggedAccounts). Supplied only by the
+  // authenticated routes; anonymous requests judge on public names alone, so a
+  // shared cache entry can never carry one viewer's tags to another — the set
+  // is part of the cache key through filterKey.
+  viewerTagged?: Set<string>
 }
 export interface VoteListFilters { referendum?: string; conviction?: string }
 
@@ -681,7 +687,11 @@ function filterKey(filters?: object): string {
   return Object.entries(filters)
     .filter(([, v]) => v != null && v !== '')
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([k, v]) => `${k}=${String(v)}`)
+    // A Set stringifies to "[object Set]", so every viewer's tag set would key
+    // the SAME entry and one viewer's filtered page would be served to another.
+    // Sorted membership makes the key the thing it stands for; two viewers who
+    // tagged the same accounts genuinely share a page and should share a key.
+    .map(([k, v]) => `${k}=${v instanceof Set ? [...v].sort().join('+') : String(v)}`)
     .join('&')
 }
 
@@ -8072,7 +8082,9 @@ export function adjacencyClaimIndex<T>(items: T[], keyOf: (item: T) => string, i
 // Whether the explorer can put a NAME to this account — the same four things
 // that make it show one instead of bare hex: a system tag ("Treasury",
 // "Kraken"), an on-chain identity, a user profile name, or a verified
-// contract's name.
+// contract's name. A viewer's OWN tags are deliberately not part of it: they
+// live in the browser, and a server-paged feed cannot honour a predicate only
+// the client can evaluate without handing back ragged pages.
 // Filters decided on the BUILT row rather than pushed into SQL. A source that
 // has one must walk deeper until the page is full, instead of filtering a fixed
 // candidate window and coming up short — which the window guard turns into a
@@ -8082,12 +8094,15 @@ export function hasRowLevelFilter(filters: ValueListFilters): boolean {
 }
 // The subset a source re-checks after its SQL already enforced the rest.
 export function rowLevelFilters(filters: ValueListFilters): ValueListFilters {
-  return { min: filters.min, unit: filters.unit, identity: filters.identity }
+  return { min: filters.min, unit: filters.unit, identity: filters.identity, viewerTagged: filters.viewerTagged }
 }
 
-export function accountIsNamed(who: AccountRef | null | undefined): boolean {
+export function accountIsNamed(who: AccountRef | null | undefined, viewerTagged?: Set<string>): boolean {
   if (!who) return false
-  return !!(who.tag || who.identity?.display || who.profile?.name || who.contractName)
+  if (who.tag || who.identity?.display || who.profile?.name || who.contractName) return true
+  // ...and whatever the VIEWER has named themselves. Their own and subscribed
+  // tags are as much a name as a system one to the person reading the page.
+  return !!viewerTagged?.has(who.accountId.toLowerCase())
 }
 
 export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFilters): boolean {
@@ -8095,7 +8110,7 @@ export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFi
   // A row with no actor at all (a block hook, a scheduler payout) has no
   // account to name and so counts as unnamed.
   if (filters.identity) {
-    const named = accountIsNamed(row.who)
+    const named = accountIsNamed(row.who, filters.viewerTagged)
     if (named !== (filters.identity === 'named')) return false
   }
   const tokenIds = assetIdsForToken(filters.token)
@@ -10643,7 +10658,7 @@ async function getRecentVotes(limit: number, from?: string, to?: string, offset 
       // would return four rows where it promised twenty-five.
       const wantsNamed = valueFilters.identity ? valueFilters.identity === 'named' : null
       const deep = await fetchFilteredDeep(tw, want, async (b, pageLimit) => buildRows(await runVotes(b, pageLimit, 0)),
-        r => voteRowMatchesFilters(r, filters) && (wantsNamed == null || accountIsNamed(r.account) === wantsNamed),
+        r => voteRowMatchesFilters(r, filters) && (wantsNamed == null || accountIsNamed(r.account, valueFilters.viewerTagged) === wantsNamed),
         r => r.blockHeight, r => r.eventIndex, r => `${r.blockHeight}:${r.eventIndex}`)
       return deep.slice(offset, offset + limit)
     }

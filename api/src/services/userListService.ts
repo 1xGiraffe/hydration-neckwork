@@ -622,6 +622,23 @@ const MAX_DIRECTORY_FOLD_PAIRS = 3_000
 // walk, and a tagged viewer's own client polls /user/accounts every 60s
 // (useAccounts's SLOW_POLL_MS) — nothing here changes between polls unless
 // something in this file actually wrote.
+// Every account this viewer has tagged, across their own lists and the ones
+// they subscribe to — the set the activity feed's named/unnamed filter treats
+// as named alongside the public ones (system tag, on-chain identity, profile,
+// verified contract). Unlike directoryFoldFor this needs no priority
+// resolution: the question is only "is this account tagged by me", so a tag
+// losing to another list still counts. Cheap and cached against the same
+// mutation counter, so a tag edit invalidates it immediately.
+const viewerTaggedCache = new Map<string, { atMutation: number; ids: Set<string> }>()
+export function viewerTaggedAccounts(viewer: string): Set<string> {
+  const hit = viewerTaggedCache.get(viewer)
+  if (hit && hit.atMutation === mutationCounter) return hit.ids
+  const ids = new Set<string>()
+  for (const list of visibleListsFor(viewer)) for (const accountId of list.memberTag.keys()) ids.add(accountId.toLowerCase())
+  viewerTaggedCache.set(viewer, { atMutation: mutationCounter, ids })
+  return ids
+}
+
 export function directoryFoldFor(viewer: string): DirectoryFold | null {
   const hit = foldCache.get(viewer)
   if (hit && hit.atMutation === mutationCounter) return hit.fold

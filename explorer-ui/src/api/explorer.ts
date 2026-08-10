@@ -290,6 +290,17 @@ export const userApi = {
   // because a private list's tag contents are owner/subscriber-only.
   listTag: (listId: string, tagId: string, signal?: AbortSignal) =>
     authedJson<TagDetail>('GET', `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}`, undefined, signal),
+  // The same activity feeds as the public ones, with the viewer's OWN and
+  // subscribed tags counting as names for the identity filter. Identical params
+  // and response shape, so a caller swaps endpoints and reads it unchanged.
+  activity: (limit = 25, from?: string, to?: string, offset = 0, type = 'all', filters?: ValueFilters, action?: string, signal?: AbortSignal) =>
+    authedJson<ActivityRow[]>('GET', withQuery('/user/activity', { limit, offset, type, action, from, to, ...filters }), undefined, signal),
+  activityCount: (type = 'all', from?: string, to?: string, filters?: ValueFilters, action?: string, signal?: AbortSignal) =>
+    authedJson<ActivityCount>('GET', withQuery('/user/activity/count', { type, action, from, to, ...filters }), undefined, signal),
+  accountActivity: (address: string, type = 'all', offset = 0, limit = 40, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
+    authedJson<ActivityRow[]>('GET', withQuery(`/user/address/${encodeURIComponent(address)}/activity`, { type, offset, limit, action, from, to, ...filters }), undefined, signal),
+  tagActivity: (tagId: string, type = 'all', offset = 0, limit = 40, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
+    authedJson<ActivityRow[]>('GET', withQuery(`/user/tag/${encodeURIComponent(tagId)}/activity`, { type, offset, limit, action, from, to, ...filters }), undefined, signal),
   listTagMembers: (listId: string, tagId: string, signal?: AbortSignal) =>
     authedJson<AccountsPage>('GET', `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/members`, undefined, signal),
   listTagSummary: (listId: string, tagId: string, signal?: AbortSignal) =>
