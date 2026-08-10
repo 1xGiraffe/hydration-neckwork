@@ -138,10 +138,14 @@ export function numParam(q: Record<string, unknown>, key: string): number | unde
 }
 export function valueFilters(q: Record<string, unknown>): ValueListFilters {
   const unit = q.unit === 'token' ? 'token' : 'usd'
+  // named / unnamed: whether the explorer can put a name to the row's actor
+  // (see accountIsNamed). Anything else is no filter at all.
+  const identity = q.identity === 'named' || q.identity === 'unnamed' ? q.identity : undefined
   return {
     token: textParam(q, 'token', 64),
     min: numParam(q, 'min'),
     unit,
+    ...(identity ? { identity } : {}),
   }
 }
 
