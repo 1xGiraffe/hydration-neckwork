@@ -73,7 +73,7 @@ function withQuery(path: string, values: Record<string, QueryValue>): string {
   return encoded ? `${path}?${encoded}` : path
 }
 
-export interface ValueFilters { token?: string; min?: string }
+export interface ValueFilters { token?: string; min?: string; identity?: string }
 export interface ExtrinsicFilters { call?: string; result?: string; origin?: string }
 export interface EventFilters { event?: string }
 // Which list on an account/tag detail page a total is being asked for, plus the

@@ -648,7 +648,12 @@ function timeWindow(from?: string, to?: string): string | null {
 
 export interface ExtrinsicListFilters { call?: string; result?: 'success' | 'failed'; origin?: 'signed' | 'proxy' | 'multisig' }
 export interface EventListFilters { event?: string }
-export interface ValueListFilters { token?: string; min?: number; unit?: 'usd' | 'token' }
+export interface ValueListFilters {
+  token?: string
+  min?: number
+  unit?: 'usd' | 'token'
+  identity?: 'named' | 'unnamed'
+}
 export interface VoteListFilters { referendum?: string; conviction?: string }
 
 function textNameMatchSql(field: string, paramPrefix: string): string {
@@ -7973,7 +7978,10 @@ async function pendingActivityRows(type: string, filters: ValueListFilters, abov
   for (const block of pendingBlocksDesc(aboveHeight)) {
     for (const a of buildPendingActivities(block)) {
       const row = basicActivityRow(a, prices, type, filters.min)
-      if (row) rows.push(row)
+      // Every filter decided on the built row applies here too: these rows are
+      // merged in FRONT of the filtered page, so a filter they do not honour
+      // shows up as leaked rows at the top of the feed.
+      if (row && activityRowMatchesFilters(row, filters)) rows.push(row)
     }
   }
   return rows
@@ -7993,7 +8001,7 @@ async function mempoolActivityRows(type: string, filters: ValueListFilters): Pro
   const rows: ActivityRow[] = []
   for (const a of activities) {
     const row = basicActivityRow(a, prices, type, filters.min)
-    if (row) rows.push({ ...row, mempool: true, hash: a.hash })
+    if (row && activityRowMatchesFilters(row, filters)) rows.push({ ...row, mempool: true, hash: a.hash })
   }
   return rows
 }
@@ -8061,7 +8069,35 @@ export function adjacencyClaimIndex<T>(items: T[], keyOf: (item: T) => string, i
   }
 }
 
+// Whether the explorer can put a NAME to this account — the same four things
+// that make it show one instead of bare hex: a system tag ("Treasury",
+// "Kraken"), an on-chain identity, a user profile name, or a verified
+// contract's name.
+// Filters decided on the BUILT row rather than pushed into SQL. A source that
+// has one must walk deeper until the page is full, instead of filtering a fixed
+// candidate window and coming up short — which the window guard turns into a
+// 503 telling the reader to narrow filters they just set.
+export function hasRowLevelFilter(filters: ValueListFilters): boolean {
+  return filters.min != null || filters.identity != null
+}
+// The subset a source re-checks after its SQL already enforced the rest.
+export function rowLevelFilters(filters: ValueListFilters): ValueListFilters {
+  return { min: filters.min, unit: filters.unit, identity: filters.identity }
+}
+
+export function accountIsNamed(who: AccountRef | null | undefined): boolean {
+  if (!who) return false
+  return !!(who.tag || who.identity?.display || who.profile?.name || who.contractName)
+}
+
 export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFilters): boolean {
+  // Named / unnamed, judged on the row's ACTOR — the account the row is BY.
+  // A row with no actor at all (a block hook, a scheduler payout) has no
+  // account to name and so counts as unnamed.
+  if (filters.identity) {
+    const named = accountIsNamed(row.who)
+    if (named !== (filters.identity === 'named')) return false
+  }
   const tokenIds = assetIdsForToken(filters.token)
   if (tokenIds != null) {
     // assetRefs carries the pool-side assets a liquidity row references but does
@@ -8239,7 +8275,7 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
         predicateSql: `AND (${valueOk} OR ${preAmountExpr} = '' OR event_name = 'XYK.PoolCreated')`,
       }
     }
-    const postFilter = filters.min != null
+    const postFilter = hasRowLevelFilter(filters)
     const want = offset + limit
     const fetchPage = async (bound: string, pageLimit: number, pageOffset: number): Promise<ActivityRow[]> => {
       const routerHop = routerHopLiquiditySql(bound, assetExpr)
@@ -8293,9 +8329,9 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
     if (postFilter) {
       // Token is already enforced SQL-side over asset_refs — the post-match
       // re-checks just the value threshold.
-      const minOnly: ValueListFilters = { min: filters.min, unit: filters.unit }
+      const rowFilters = rowLevelFilters(filters)
       const rows = await fetchFilteredDeep(tw, want, (bound, pageLimit) => fetchPage(bound, pageLimit, 0),
-        r => activityRowMatchesFilters(r, minOnly), r => r.blockHeight, r => r.eventIndex ?? -1, r => `${r.blockHeight}:${r.eventIndex}`)
+        r => activityRowMatchesFilters(r, rowFilters), r => r.blockHeight, r => r.eventIndex ?? -1, r => `${r.blockHeight}:${r.eventIndex}`)
       return rows.slice(offset, offset + limit)
     }
     return withFeedWindow(tw, limit, offset + limit, (bound) => fetchPage(bound, limit, offset))
@@ -10010,7 +10046,7 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
     // staking history for every unrelated token in the merged activity feed.
     if (tokenIds != null && !tokenIds.some(id => id === 0 || id === 670)) return []
     const preferredAssetId = assetId ?? (tokenIds?.length === 1 && tokenIds[0] === 670 ? 670 : undefined)
-    const postFilter = assetId != null || tokenIds != null || filters.min != null || action != null
+    const postFilter = assetId != null || tokenIds != null || action != null || hasRowLevelFilter(filters)
     const want = offset + limit
     const scanLimit = postFilter ? Math.max(want * 8, limit + 250) : limit
     const scanOffset = postFilter ? 0 : offset
@@ -10222,7 +10258,7 @@ async function getRecentOtc(limit: number, from?: string, to?: string, offset = 
   return cached(`explorer:otc-activity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}:${accounts?.join(',') ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
-    const postFilter = tokenIds != null || filters.min != null || accountSet != null
+    const postFilter = tokenIds != null || accountSet != null || hasRowLevelFilter(filters)
     const want = offset + limit
     const resolvedAction = resolveOtcAction(action)
     const names = (resolvedAction && OTC_ACTION_EVENTS[resolvedAction] ? OTC_ACTION_EVENTS[resolvedAction] : OTC_EVENT_NAMES).map(n => `'${n}'`).join(',')
@@ -10505,7 +10541,7 @@ async function getRecentVotes(limit: number, from?: string, to?: string, offset 
     const tokenIds = assetIdsForToken(valueFilters.token)
     if (tokenIds != null && !tokenIds.includes(0)) return []
     const amountFilter = eventValueFilterSql('0', voteAmountSqlExpr(), 'block_timestamp', valueFilters, prices, 'vote_price')
-    const postFilter = !!filters.referendum || !!filters.conviction
+    const postFilter = !!filters.referendum || !!filters.conviction || hasRowLevelFilter(valueFilters)
     const want = offset + limit
     const scanLimit = postFilter ? Math.max(want * 8, limit + 500) : limit
     const scanOffset = postFilter ? 0 : offset
@@ -10601,8 +10637,14 @@ async function getRecentVotes(limit: number, from?: string, to?: string, offset 
       // Referendum/conviction resolve from the joined vote CALL, not the event —
       // walk full history in pages until enough filtered rows exist instead of
       // post-filtering a recency window.
+      // The identity filter is judged on the voter, so it belongs in the WALK's
+      // matcher: applied afterwards it would trim a page the walk had already
+      // declared full, and a category whose voters are mostly bare addresses
+      // would return four rows where it promised twenty-five.
+      const wantsNamed = valueFilters.identity ? valueFilters.identity === 'named' : null
       const deep = await fetchFilteredDeep(tw, want, async (b, pageLimit) => buildRows(await runVotes(b, pageLimit, 0)),
-        r => voteRowMatchesFilters(r, filters), r => r.blockHeight, r => r.eventIndex, r => `${r.blockHeight}:${r.eventIndex}`)
+        r => voteRowMatchesFilters(r, filters) && (wantsNamed == null || accountIsNamed(r.account) === wantsNamed),
+        r => r.blockHeight, r => r.eventIndex, r => `${r.blockHeight}:${r.eventIndex}`)
       return deep.slice(offset, offset + limit)
     }
     const events = acctList ? await runVotes(bound, scanLimit, scanOffset) : await withFeedWindow(tw, scanLimit, scanOffset + scanLimit, (b) => runVotes(b, scanLimit, scanOffset))
@@ -11878,6 +11920,12 @@ export async function getGlobalActivityTotal(
   to?: string,
 ): Promise<ScopedListTotal> {
   if (normalizeActivityTypeKey(type) !== 'vote' || action) return { total: null, complete: false }
+  // The identity filter is decided on the built row's actor, which this count
+  // cannot see: it counts vote EVENTS in SQL. Reporting the unfiltered total
+  // would have the pager offer pages the filtered list cannot fill, so it
+  // reports no total and the pager walks a page at a time — the same honest
+  // fallback every uncounted category already uses.
+  if (filters.identity) return { total: null, complete: false }
   const tw = timeWindow(from, to)
   return cachedSwr(`explorer:activity-total:vote:${filterKey(filters)}:${from ?? ''}:${to ?? ''}`,
     LIST_TOTAL_FRESH_MS, LIST_TOTAL_STALE_MS, async (): Promise<ScopedListTotal> => {
@@ -15602,7 +15650,10 @@ async function planExactActivity(
   // for one row in eight and disagree with the page on exactly the rows the threshold is
   // meant to select. So a min request keeps the candidate window, which values the rows
   // it assembled and says how far it reached.
-  if (!EXACTLY_COUNTABLE_ACTIVITY_TYPES.has(type) || filters.min != null) return null
+  // `identity` joins `min` as a filter with no exact SQL mirror: it is decided
+  // on the built row's actor, so an exact count over the read models would
+  // count rows the list then drops.
+  if (!EXACTLY_COUNTABLE_ACTIVITY_TYPES.has(type) || filters.min != null || filters.identity) return null
   const tokenIds = assetIdsForToken(filters.token)
   const list = sqlAccountList(accounts)
   if (list === "''") return null
