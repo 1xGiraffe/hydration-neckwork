@@ -87,6 +87,16 @@ test('/hdx charts stHDX liquidation levels with cumulative tooltip context', asy
   expect(await chart.locator('rect.liq-bar').count()).toBeGreaterThan(8)
   await expect(chart.locator('.liq-now-label')).toContainText('now')
 
+  // The bars are a DISTRIBUTION, so they differ in height and each is a slice
+  // of the width. A stylesheet rule meant for a layout box elsewhere can resize
+  // an SVG rect (CSS width/height beat geometry attributes) — that turned all
+  // 14 bars into one 860 x 10px line, which the count above still passed.
+  const boxes = await chart.locator('rect.liq-bar').evaluateAll(els =>
+    els.map(e => e.getBoundingClientRect()).map(r => ({ w: r.width, h: r.height })))
+  expect(new Set(boxes.map(b => Math.round(b.h))).size).toBeGreaterThan(1)
+  const chartWidth = (await chart.boundingBox())!.width
+  expect(Math.max(...boxes.map(b => b.w))).toBeLessThan(chartWidth / 4)
+
   await chart.locator('rect.liq-hit').nth(5).hover()
   const tip = page.locator('.hdx-tip')
   await expect(tip).toBeVisible()

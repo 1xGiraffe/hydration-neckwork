@@ -25,9 +25,9 @@ test('each row draws the pool it is, not just what it is worth', async ({ page }
 
   // A composition of more than one asset is more than one segment, and the
   // segments are described for a reader who cannot see them.
-  const bar = first.locator('.liq-bar')
+  const bar = first.locator('.comp-bar')
   await expect(bar).toBeVisible()
-  expect(await bar.locator('.liq-seg').count()).toBeGreaterThan(1)
+  expect(await bar.locator('.comp-seg').count()).toBeGreaterThan(1)
   await expect(bar).toHaveAttribute('aria-label', /%/)
 })
 
