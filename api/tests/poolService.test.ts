@@ -6,6 +6,7 @@ import {
   dailyGrid,
   decodePegSource,
   foldTopSeries,
+  rankPools,
   selectCompositionSeries,
   tradableFlags,
   type AssetLiquiditySeries,
@@ -206,5 +207,45 @@ describe('selectCompositionSeries — pinned assets', () => {
     const usd = new Map<number, (number | null)[]>([[5, [10]]])
     const { ids } = selectCompositionSeries(usd, 1, 1, [0])
     expect(ids).toEqual([5])
+  })
+})
+
+// The /liquidity index ranks every venue by what it holds. Two rules carry it,
+// and both matter more than they look: 278 of the chain's 307 pools cannot be
+// priced at all (XYK pairs of tokens nothing trades), so dropping the unpriced
+// would quietly delete most of the list, while counting them as zero would rank
+// them among the genuinely empty as if that had been measured.
+describe('rankPools', () => {
+  const pool = (name: string, tvlUsd: number | null) =>
+    ({ kind: 'xyk' as const, poolId: 1, name, tvlUsd, sharePct: null, composition: [], hasPegs: false })
+
+  it('puts the largest pool first', () => {
+    const { pools } = rankPools([pool('small', 10), pool('large', 1000), pool('mid', 100)])
+    expect(pools.map(p => p.name)).toEqual(['large', 'mid', 'small'])
+  })
+
+  it('keeps an unpriced pool, ranked below every priced one — including the empty', () => {
+    const { pools } = rankPools([pool('unpriced', null), pool('empty', 0), pool('held', 5)])
+    expect(pools.map(p => p.name)).toEqual(['held', 'empty', 'unpriced'])
+  })
+
+  it('shares out of everything pooled, and says nothing about a pool it cannot price', () => {
+    const { totalTvlUsd, pools } = rankPools([pool('a', 75), pool('b', 25), pool('c', null)])
+    expect(totalTvlUsd).toBe(100)
+    expect(pools[0].sharePct).toBeCloseTo(75)
+    expect(pools[1].sharePct).toBeCloseTo(25)
+    expect(pools[2].sharePct).toBeNull()
+  })
+
+  it('has no total when nothing can be priced, and claims no shares', () => {
+    const { totalTvlUsd, pools } = rankPools([pool('a', null), pool('b', null)])
+    expect(totalTvlUsd).toBeNull()
+    for (const p of pools) expect(p.sharePct).toBeNull()
+  })
+
+  it('leaves the callers array alone', () => {
+    const input = [pool('small', 1), pool('large', 2)]
+    rankPools(input)
+    expect(input.map(p => p.name)).toEqual(['small', 'large'])
   })
 })
