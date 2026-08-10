@@ -9,11 +9,15 @@ test('account detail activity tabs expose the same filters as the global lists',
   await page.getByRole('button', { name: 'Trade' }).click()
   await page.getByRole('button', { name: /Filters/ }).click()
 
-  await expect(page.locator('.filters select')).toContainText('DCA')
+  // The activity zone carries two selects — the per-type action, and the
+  // named/unnamed account filter every activity list shares — so each is named
+  // rather than reached as "the select".
+  await expect(page.locator('.filters select[aria-label="action"]')).toContainText('DCA')
+  await expect(page.locator('.filters select[aria-label="identity"]')).toContainText('Named accounts')
   await expect(page.getByPlaceholder('All tokens')).toBeVisible()
   await expect(page.locator('.filters input[type="date"]')).toHaveCount(2)
 
-  await page.locator('.filters select').selectOption('dca')
+  await page.locator('.filters select[aria-label="action"]').selectOption('dca')
   await page.getByPlaceholder('$ from').fill('100')
   await expect(page).toHaveURL(/type=trade/)
   await expect(page).toHaveURL(/action=dca/)
@@ -23,6 +27,8 @@ test('account detail activity tabs expose the same filters as the global lists',
   await expect(page.locator('.filter-toggle .fb')).toHaveCount(0)
   await page.getByRole('button', { name: /Filters/ }).click()
   await expect(page.getByPlaceholder('Call name')).toBeVisible()
+  // The extrinsics zone has its own single select (the result) — the identity
+  // filter belongs to activity lists, not to these.
   await expect(page.locator('.filters select')).toContainText('Failed')
   await expect(page.locator('.filters input[type="date"]')).toHaveCount(2)
   await page.getByPlaceholder('Call name').fill('transfer')
@@ -50,14 +56,20 @@ test('tag detail activity tabs expose and send the account-level filters', async
 
   await page.getByRole('button', { name: 'Trade' }).click()
   await page.getByRole('button', { name: /Filters/ }).click()
-  await expect(page.locator('.filters select')).toContainText('DCA')
+  await expect(page.locator('.filters select[aria-label="action"]')).toContainText('DCA')
   await expect(page.getByPlaceholder('All tokens')).toBeVisible()
   await expect(page.locator('.filters input[type="date"]')).toHaveCount(2)
-  await page.locator('.filters select').selectOption('dca')
+  await page.locator('.filters select[aria-label="action"]').selectOption('dca')
   await page.getByPlaceholder('All tokens').fill('USDC')
   await page.getByPlaceholder('All tokens').press('Enter')
   await page.getByPlaceholder('$ from').fill('100')
   await expect.poll(() => requests.some(url => url.includes('/activity?') && url.includes('action=dca') && url.includes('token=') && url.includes('min=100'))).toBe(true)
+
+  // The named/unnamed filter travels with the scoped list too, not just the
+  // global one — this tab is where a tag's activity is actually read.
+  await page.locator('.filters select[aria-label="identity"]').selectOption('named')
+  await expect.poll(() => requests.some(url => url.includes('/activity?') && url.includes('identity=named'))).toBe(true)
+  await page.locator('.filters select[aria-label="identity"]').selectOption('')
 
   await page.getByRole('button', { name: /Extrinsics/ }).click()
   await page.getByRole('button', { name: /Filters/ }).click()

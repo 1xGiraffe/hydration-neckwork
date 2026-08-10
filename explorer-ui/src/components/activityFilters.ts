@@ -7,6 +7,20 @@ const DATE_FIELDS: FilterField[] = [
   { kind: 'date', key: 'to', title: 'To date' },
 ]
 
+// Whether the explorer can put a name to the account a row is BY — a system tag
+// ("Treasury", "Kraken"), an on-chain identity, a profile name, or a verified
+// contract's name. Named separates the actors a reader can recognise from the
+// bare addresses; unnamed is how you find everyone else.
+const IDENTITY_FIELD: FilterField = {
+  kind: 'select',
+  key: 'identity',
+  options: [
+    { value: '', label: 'Any account' },
+    { value: 'named', label: 'Named accounts' },
+    { value: 'unnamed', label: 'Unnamed accounts' },
+  ],
+}
+
 export function activityFilterFields(type: string, assets: AssetFilterItem[], includeToken = true): FilterField[] {
   const actions = ACTIVITY_ACTIONS[type]
   return [
@@ -16,6 +30,7 @@ export function activityFilterFields(type: string, assets: AssetFilterItem[], in
       options: [{ value: '', label: 'All actions' }, ...actions.map(action => ({ value: action.v, label: action.label }))],
     }] : []),
     ...(includeToken ? [{ kind: 'combo' as const, key: 'token', placeholder: 'All tokens', width: 150, options: tokenFilterOptions(assets) }] : []),
+    IDENTITY_FIELD,
     ...DATE_FIELDS,
     { kind: 'number', key: 'min', placeholder: '$ from' },
   ]
