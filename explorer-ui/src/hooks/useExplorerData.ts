@@ -190,6 +190,17 @@ export function useAssetDcas(assetId: number | null, enabled = true) {
   const ri = useInterval(DETAIL_POLL_MS)
   return useQuery({ queryKey: ['asset-dcas', assetId], queryFn: ({ signal }) => api.assetDcas(assetId as number, signal), enabled: assetId != null && enabled, refetchInterval: enabled ? ri : false, staleTime: 6000 })
 }
+// A tag's members as directory rows — the same table /accounts renders, so a
+// tag reads as the slice of the directory it is.
+export function useTagMembers(tagId: string | null) {
+  return useQuery({
+    queryKey: ['tag-members', tagId],
+    queryFn: ({ signal }) => api.tagMembers(tagId as string, signal),
+    enabled: !!tagId,
+    staleTime: 60_000,
+  })
+}
+
 // Every pool, largest first. Snapshot-derived and cached server-side, so this
 // follows the ordinary list cadence rather than the live feeds'.
 export function usePools() {
