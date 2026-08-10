@@ -7,7 +7,7 @@ import {
   getStats, getRecentBlocks, getBlock, getRecentExtrinsics, getExtrinsic, getExtrinsicAt,
   getExtrinsicActivity, getBlockActivity,
   getHolders, getAddress, getAddressHistory, search, getAssets, getAssetFilterOptions, getAccounts, getDcaSchedule, getDcaScheduleIdAt, getDcaExecution,
-  getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getGlobalActivityTotal, getMoneyMarket, getAssetDetail, getAssetDcas, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag,
+  getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getGlobalActivityTotal, getMoneyMarket, getAssetDetail, getAssetDcas, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag, getTagMemberAccounts,
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressListTotal, getTagListTotal,
   getAddressValueEvents, getTagValueEvents,
@@ -532,6 +532,17 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const tag = await getTag(params.data.tagId, { summary: (req.query as { summary?: string })?.summary === '1' })
     if (!tag) return reply.status(404).send({ error: 'Tag not found' })
     return tag
+  })
+
+  // The tag's members as DIRECTORY rows — the same shape /explorer/accounts
+  // returns, so a tag page can render the directory table rather than a second,
+  // thinner list of the same accounts.
+  fastify.get('/explorer/tag/:tagId/members', async (req, reply) => {
+    const params = tagParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
+    const page = getTagMemberAccounts(params.data.tagId, accountSortParam(req.query as Record<string, unknown>))
+    if (!page) return reply.status(404).send({ error: 'Tag not found' })
+    return page
   })
 
   fastify.get('/explorer/tag/:tagId/close-accounts', async (req, reply) => {

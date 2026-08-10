@@ -7,7 +7,7 @@ import {
 } from '../services/userAuthService.ts'
 import { createDeviceLink, claimDeviceLink, deviceLinkStatus } from '../services/deviceLinkService.ts'
 import {
-  accountRef, resolveDisplayAccountId, getAccounts, getAccountsForViewerFold,
+  accountRef, resolveDisplayAccountId, getAccounts, getAccountsForViewerFold, getAccountsForMembers,
   getHolders, getHoldersForViewerFold,
   getListTagDetail, getListTagActivity, getListTagExtrinsics, getListTagEvents, getListTagVotes,
   getListTagVotesByReferendum, getListTagTabCounts, getListTagListTotal, getListTagValueEvents,
@@ -505,6 +505,17 @@ export async function userRoutes(fastify: FastifyInstance) {
     const detail = await getListTagDetail(listId, { tagId, name: tag.name, color: tag.color, icon: tag.icon, note: tag.note }, tag.members, { summary })
     if (!detail) return reply.status(404).send({ error: 'Tag not found' })
     return detail
+  })
+
+  // The list tag's members as DIRECTORY rows — same shape and same renderer as
+  // /explorer/accounts, so a user tag reads like the system tags beside it.
+  fastify.get('/user/list-tag/:listId/:tagId/members', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const resolved = requireListTag(req, reply, accountId)
+    if (!resolved) return
+    return getAccountsForMembers(resolved.tag.members, accountSortParam(req.query as Record<string, unknown>))
   })
 
   fastify.get('/user/list-tag/:listId/:tagId/activity', async (req, reply) => {

@@ -19122,6 +19122,22 @@ export interface ViewerFold {
 // viewer, or one whose tags all lose to a system tag) means nothing would
 // actually change, so the caller should reach for getAccounts directly
 // instead — this still falls back safely if it doesn't.
+// A system tag's members as directory rows. Null when no such tag exists, so
+// the route answers 404 rather than an empty list that reads as "no members".
+export function getTagMemberAccounts(tagId: string, sort: AccountSort = 'value'): Promise<AccountsPage> | null {
+  const members = tagMembers(tagId)
+  return members ? getAccountsForMembers(members, sort) : null
+}
+
+// The directory rows for exactly these accounts — one row each, never folded
+// under the tag they all share. Powers a tag page's member list, so a tag reads
+// like the directory it is a slice of.
+export function getAccountsForMembers(members: string[], sort: AccountSort = 'value'): Promise<AccountsPage> {
+  const ids = [...new Set(members.map(m => m.toLowerCase()))].sort()
+  if (!ids.length) return Promise.resolve({ rows: [], total: 0 })
+  return accountsPage(0, Math.min(ids.length, 500), sort, false, undefined, ids)
+}
+
 export function getAccountsForViewerFold(offset: number, limit: number, sort: AccountSort, fold: ViewerFold): Promise<AccountsPage> {
   if (!fold.ids.length) return getAccounts(offset, limit, sort)
   return accountsPage(offset, limit, sort, false, fold)
@@ -19242,7 +19258,7 @@ export function stopFoldActivitySweep(): void {
   foldSweepTimer = null
 }
 
-async function accountsPage(offset: number, limit: number, sort: AccountSort, refresh: boolean, viewerFold?: ViewerFold): Promise<AccountsPage> {
+async function accountsPage(offset: number, limit: number, sort: AccountSort, refresh: boolean, viewerFold?: ViewerFold, members?: string[]): Promise<AccountsPage> {
   // Whole-directory ranking: every rebuild re-aggregates all balances (+ MM
   // positions, and full-history volume CTEs for some sorts) just to render one
   // page — seconds of ClickHouse time. Serve stale-while-revalidating so no
@@ -19253,11 +19269,18 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
   const modelVersion = accountDirectoryModelVersion()
   const key = accountsCacheKey(modelVersion, sort, offset, limit)
   const snapshotKey = `${modelVersion}:${sort}:${offset}:${limit}`
+  // A member-scoped page reads only those accounts' balances, so it costs a
+  // fraction of the whole-directory ranking and needs none of its
+  // stale-while-revalidate machinery — an ordinary cache is enough.
+  const memberKey = members ? `:m${members.length}:${members.join(',')}` : ''
   const build = async (): Promise<AccountsPage> => {
     // The persisted snapshot was computed under the SHARED system-tag
     // grouping; a viewer's fold must never adopt it — see the anonymous path
     // above it, unmodified, for what every non-fold request still gets.
-    if (!viewerFold) {
+    // The persisted snapshot ranks the WHOLE directory under the shared
+    // system-tag grouping. A viewer's fold must not adopt it, and neither may a
+    // page scoped to one tag's members — it is a different row set entirely.
+    if (!viewerFold && !members) {
       const current = await loadAccountDirectorySnapshot(snapshotKey, true).catch(() => null)
       if (current) return current.page
     }
@@ -19282,7 +19305,15 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     // gkey-only satellite joins (mm_grouped, lp_grouped, trade_volume,
     // liquidation_volume) then hand each split row the WHOLE group's totals.
     // Absent a fold this returns the exact original expression, unchanged.
+    // Applied to the REMAPPED account id, so a member's module truncation or
+    // bound H160 pot folds into the member rather than being dropped — the same
+    // identity the ungrouped rows below are keyed by.
+    const memberFilter = members ? `WHERE ${boundAccountSql('l')} IN {members:Array(String)}` : ''
     const gkeySql = (idExpr: string): string => {
+      // Scoped to one tag's members: the tag is the page, so grouping by it
+      // would collapse every member into the single row the reader just came
+      // from. Each member is its own row instead.
+      if (members) return idExpr
       if (!viewerFold) return `if(t.lid = '', ${idExpr}, t.lid)`
       const userKey = `transform(${idExpr}, {fold_ids:Array(String)}, {fold_keys:Array(String)}, '')`
       return `if(${userKey} != '', ${userKey}, if(t.lid = '', ${idExpr}, t.lid))`
@@ -19294,6 +19325,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     // distinct label_id among the fold's members. Absent a fold this returns
     // the exact original `t.lid`, unchanged.
     const labelIdSql = (idExpr: string): string => {
+      if (members) return `''`
       if (!viewerFold) return 't.lid'
       const userKey = `transform(${idExpr}, {fold_ids:Array(String)}, {fold_keys:Array(String)}, '')`
       return `if(${userKey} != '', '', t.lid)`
@@ -19474,6 +19506,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
                 ${lpActors}
               ) l
               LEFT JOIN bind b ON b.eth_id = l.account_id
+              ${memberFilter}
             ),
             -- One latest row per configured isolated market. With complete
             -- reserve-principal coverage this is a tiny published generation;
@@ -19592,6 +19625,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
           LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         query_params: {
           limit, offset,
+          ...(members ? { members } : {}),
           ...(viewerFold ? {
             fold_ids: viewerFold.ids, fold_keys: viewerFold.keys,
             fold_group_keys: [...viewerFold.groups.keys()], fold_group_names: [...viewerFold.groups.values()].map(g => g.name),
@@ -19603,8 +19637,11 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
       // system-tag-grouped count (see getAccountsForViewerFold's comment) — a
       // folded page can render fewer distinct rows than this number implies,
       // the same honest gap a page that hasn't reached the directory's tail
-      // yet already has.
-      getAccountsTotal(),
+      // yet already has. A member-scoped page is NOT a page of that directory
+      // though: its total is the tag's own membership, and reporting the
+      // chain-wide 114k there would have a seven-member tag claim to be the
+      // first page of something vastly larger.
+      members ? Promise.resolve(members.length) : getAccountsTotal(),
     ])
 
     const raw = await res.json<{
@@ -19741,6 +19778,10 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
   // every anonymous key also lives in, so a long-lived per-viewer entry is
   // eviction pressure on the shared hot keys with no shared reader to justify
   // it — see ACCOUNTS_VIEWER_STALE_MS's own comment.
+  // A tag's own members: a small, bounded row set read from those accounts'
+  // balances alone, so the seconds-long whole-directory machinery above does
+  // not apply. Same freshness as the directory it mirrors.
+  if (members) return cachedSwr(`tag-accounts:${modelVersion}:${sort}${memberKey}`, ACCOUNTS_FRESH_MS, ACCOUNTS_VIEWER_STALE_MS, build, generation)
   if (viewerFold) {
     const viewerKey = `user-accounts:${modelVersion}:${viewerFold.fingerprint}:${sort}:${offset}:${limit}`
     return cachedSwr(viewerKey, ACCOUNTS_FRESH_MS, ACCOUNTS_VIEWER_STALE_MS, build, generation)

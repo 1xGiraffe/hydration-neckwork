@@ -1,9 +1,10 @@
-import { useListTag, useListTagListCount, useListTagValueEvents, useMe } from '../hooks/useUser'
+import { useListTag, useListTagListCount, useListTagMembers, useListTagValueEvents, useMe } from '../hooks/useUser'
 import { useSession } from '../session'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, useQueryValue, setQuery, Link } from '../router'
-import { Crumbs, F, AddrPill, Copy, ProfilePageSkeleton, DetailTabs, TagIcon, accountHref, rowNav } from '../components/ui'
+import { Crumbs, F, AddrPill, Copy, ProfilePageSkeleton, DetailTabs, TableSkeleton, TagIcon, accountHref, rowNav } from '../components/ui'
+import { AccountsTable } from '../components/AccountsTable'
 import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
@@ -41,6 +42,9 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
   const me = useMe()
   const listSummary = [...(me.data?.lists ?? []), ...(me.data?.subscriptions ?? [])].find(l => l.listId === listId)
   const { data, isLoading, isError } = useListTag(listId, tagId)
+  // The members as directory rows, requested alongside rather than inside the
+  // tag's own payload so neither waits on the other.
+  const memberRows = useListTagMembers(listId, tagId)
   const activityTotal = useListTagListCount(listId, tagId, activityListCount('all', '', {}))
   const votesTotal = useListTagListCount(listId, tagId, voteListCount())
   const valueEvents = useListTagValueEvents(listId, tagId)
@@ -112,22 +116,30 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
               <DetailTabs tabs={tabs} active={activeView} onChange={k => setQuery({ view: k === 'overview' ? null : k })} />
 
               {activeView === 'overview' && (<>
+              {/* The same table /accounts renders — a tag is a slice of the
+                  directory, so it shows the value, holdings and lending a
+                  reader was just looking at. The member pills stand in while
+                  the rows load; their names are already known. */}
               <div className="sec-title">Accounts · {members.length}</div>
-              <div className="panel"><table className="tbl">
-                <thead><tr><th>Account</th></tr></thead>
-                <tbody>
-                  {members.map(m => (
-                    <tr key={m.accountId} {...rowNav(accountHref(m))}>
-                      <td>
-                        <span className="row gap6" style={{ alignItems: 'center' }}>
-                          <AddrPill account={m} noCopy noTag />
-                          <Copy text={m.address} />
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table></div>
+              {memberRows.data?.rows.length
+                ? <AccountsTable rows={memberRows.data.rows} skeletonRows={Math.min(members.length, 12)} />
+                : <div className="panel"><table className="tbl">
+                  <thead><tr><th>Account</th></tr></thead>
+                  <tbody>
+                    {memberRows.isLoading
+                      ? <TableSkeleton cols={1} rows={Math.min(members.length, 8)} />
+                      : members.map(m => (
+                        <tr key={m.accountId} {...rowNav(accountHref(m))}>
+                          <td>
+                            <span className="row gap6" style={{ alignItems: 'center' }}>
+                              <AddrPill account={m} noCopy noTag />
+                              <Copy text={m.address} />
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table></div>}
 
               <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data} />
               </>)}
