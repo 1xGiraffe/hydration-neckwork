@@ -1623,6 +1623,27 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   },
   { re: /^\/explorer\/asset\/(\d+)\/liquidity$/, fn: m => buildAssetLiquidity(Number(m[1])) },
   // Unknown pool ids fall through to the harness 404, like the real endpoint.
+  // The /liquidity index: every pool largest first, including the long tail of
+  // XYK dust the page folds away by default.
+  { re: /^\/explorer\/pools$/, fn: () => {
+    const entry = (kind: 'omnipool' | 'stableswap' | 'xyk', poolId: number | null, name: string, legs: [number, number][], hasPegs = false) => {
+      const composition = legs.map(([id, usd]) => ({ asset: aref(assetById.get(id) ?? ASSETS[0]), amount: raw(usd, 12), usd, sharePct: 0 }))
+      const tvlUsd = composition.reduce((s, c) => s + (c.usd ?? 0), 0)
+      for (const c of composition) c.sharePct = tvlUsd > 0 ? ((c.usd ?? 0) / tvlUsd) * 100 : 0
+      return { kind, poolId, name, tvlUsd, sharePct: 0, composition, hasPegs }
+    }
+    const pools = [
+      entry('omnipool', null, 'Omnipool', [[0, 4_100_000], [5, 3_300_000], [20, 2_600_000], [10, 1_200_000], [222, 900_000]]),
+      entry('stableswap', 690, '2-Pool-GDOT', [[15, 2_517_611], [5, 1_141_173]], true),
+      entry('stableswap', 102, '2-Pool-HUSDT', [[222, 1_242_632], [10, 976_354]]),
+      entry('xyk', 1_000_081, 'HDX / DOT', [[0, 41_205], [5, 39_884]]),
+      // The tail: folded behind one line until a reader asks for it.
+      ...Array.from({ length: 6 }, (_, i) => entry('xyk', 1_000_100 + i, `LONGTAIL${i} / HDX`, [[0, i], [5, 0]])),
+    ]
+    const totalTvlUsd = pools.reduce((s, p) => s + (p.tvlUsd ?? 0), 0)
+    for (const p of pools) p.sharePct = totalTvlUsd > 0 ? ((p.tvlUsd ?? 0) / totalTvlUsd) * 100 : 0
+    return { totalTvlUsd, pools }
+  } },
   { re: /^\/explorer\/pool\/(\d+)$/, fn: m => buildPoolDetail(Number(m[1])) },
   // A pool's own activity: the swaps that happened IN it (between its member
   // assets) ahead of what its share token did. The member-asset swaps are the

@@ -6,7 +6,7 @@ import type {
   AssetLiquidity, PoolDetail, OmnipoolDetail,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
-  AccountRef, DeviceLinkResponse, DeviceLinkStatus, DeviceSession, EvmReceipt,
+  AccountRef, DeviceLinkResponse, DeviceLinkStatus, DeviceSession, EvmReceipt, PoolsIndexResponse,
 } from '../types'
 import { getSession, setSession } from '../session'
 // Live feeds stamp the pushed head onto their URLs (`h=`): the nginx
@@ -143,6 +143,7 @@ export const api = {
   // Same endpoint as the global activities feed, with the asset id pinned.
   assetActivity: (assetId: number, type = 'all', offset = 0, limit = 40, action?: string, from?: string, to?: string, min?: string, signal?: AbortSignal) =>
     getJson<ActivityRow[]>(withQuery('/explorer/activity', { asset: assetId, type, offset, limit, action, from, to, min }), signal),
+  pools: (signal?: AbortSignal) => getJson<PoolsIndexResponse>('/explorer/pools', signal),
   // A pool's own activity: the swaps that happened IN it, merged with what its
   // share token did. The asset-pinned activity feed cannot answer this — a
   // routed swap's hops name the pool's members, not its share token.

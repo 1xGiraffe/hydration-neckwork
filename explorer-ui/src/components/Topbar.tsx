@@ -38,7 +38,9 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
 const NAV_LINKS: NavItem[] = [
   { to: paths.activity(), label: 'Activity', match: ['activity'] },
   { to: paths.accounts(), label: 'Accounts', match: ['accounts', 'account', 'tags', 'tags-hydration', 'tag', 'lists', 'list'] },
-  { to: paths.assets(), label: 'Assets', match: ['assets', 'asset', 'holders', 'pool', 'omnipool'] },
+  { to: paths.assets(), label: 'Assets', match: ['assets', 'asset', 'holders'] },
+  // Pools live under Liquidity, so a pool or the Omnipool highlights there.
+  { to: paths.liquidity(), label: 'Liquidity', match: ['liquidity', 'pool', 'omnipool'] },
   { to: paths.hdx(), label: 'HDX', match: ['hdx'] },
   { to: paths.hollar(), label: 'HOLLAR', match: ['hollar'] },
 ]
@@ -47,11 +49,11 @@ const NAV_LINKS: NavItem[] = [
 // .nav-fold and hide in that window; this group is hidden everywhere else.
 // The trigger itself navigates to Assets, so the menu lists only HDX/HOLLAR —
 // an "Assets" entry under a group named Assets would be redundant.
-const FOLDABLE = new Set(['Assets', 'HDX', 'HOLLAR'])
+const FOLDABLE = new Set(['Assets', 'Liquidity', 'HDX', 'HOLLAR'])
 const ASSETS_FOLD_GROUP: { label: string; items: NavItem[]; menuItems?: NavItem[] } = {
   label: 'Assets',
   items: NAV_LINKS.filter(it => FOLDABLE.has(it.label)),
-  menuItems: NAV_LINKS.filter(it => it.label === 'HDX' || it.label === 'HOLLAR'),
+  menuItems: NAV_LINKS.filter(it => it.label === 'Liquidity' || it.label === 'HDX' || it.label === 'HOLLAR'),
 }
 
 function matches(item: NavItem, route: Route): boolean {
