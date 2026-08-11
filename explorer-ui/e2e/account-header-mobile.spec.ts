@@ -1,13 +1,14 @@
 import { expect, test } from './fixtures/test'
 
-// Mobile account header: the account value sits on the right at the height of
-// the emoji/name/address block, and the liquidation & trading volumes (when
-// present) share a single line below the header row.
+// Mobile account header: the identity block (inline emoji + name + address)
+// takes the first row on its own, and every stat — the trading & liquidation
+// volumes, then the account value — shares ONE line below it, clustered right
+// with the value last and largest.
 test.use({ viewport: { width: 390, height: 844 } })
 
 const FOX = '1L53bUTBopXqDXSXjBdQXFV7jZ8FtdRZS5JoMjGq5z3Cv2zr'
 
-test('value sits beside the identity; volumes share one line below', async ({ page }) => {
+test('the identity keeps its own row; every stat shares one line below', async ({ page }) => {
   await page.goto(`/account/${FOX}`)
   const avatar = page.locator('.acct-avatar')
   await expect(avatar).toBeVisible()
@@ -16,21 +17,23 @@ test('value sits beside the identity; volumes share one line below', async ({ pa
   const a = (await avatar.boundingBox())!
   const v = (await value.boundingBox())!
 
-  // Same top row: the value's vertical span overlaps the avatar's.
-  expect(v.y, 'value should start above the avatar bottom').toBeLessThan(a.y + a.height)
-  expect(v.y + v.height, 'value should end below the avatar top').toBeGreaterThan(a.y)
+  // The stats line is its own row: nothing in it reaches back up into the
+  // identity block, so a long name can never collide with the value.
+  expect(v.y, 'value should start below the identity').toBeGreaterThan(a.y + a.height)
   // Right-aligned: the value block ends in the right half of the 390px viewport.
   expect(v.x + v.width).toBeGreaterThan(300)
 
-  // Both volumes exist for this account and share ONE line below the address.
+  // Both volumes exist for this account and sit on that same line, left of the
+  // value — the whole group top-aligned so the labels read as one row.
   const addr = (await page.locator('.acct-meta .full').boundingBox())!
   const volumes = page.locator('.acct-stats .acct-bal.subtle')
   await expect(volumes).toHaveCount(2)
   const b0 = (await volumes.nth(0).boundingBox())!
   const b1 = (await volumes.nth(1).boundingBox())!
   expect(b0.y, 'volumes below the address').toBeGreaterThan(addr.y + addr.height - 2)
-  expect(b1.y, 'volumes below the address').toBeGreaterThan(addr.y + addr.height - 2)
   expect(Math.abs(b0.y - b1.y), 'volumes on one shared line').toBeLessThan(2)
+  expect(Math.abs(b0.y - v.y), 'value on that same line').toBeLessThan(2)
+  expect(b1.x + b1.width, 'value last in the group').toBeLessThanOrEqual(v.x)
 
   // The header must not widen the page.
   const overflow = await page.evaluate(() =>
