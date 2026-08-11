@@ -14,16 +14,14 @@ import { useTagMapVersion } from '../userTags'
 import { useStats } from '../hooks/useExplorerData'
 import type { AccountRef } from '../types'
 
-// Provenance affordance: [owner avatar] OwnerName · ListName, one pill
-// linking to the list's management page (e.g. "🦒 Giraffe · Personal").
-// The tag-detail response itself carries no owner field — only a list's
-// OWN summary does — so this reads it off the viewer's /user/me data instead,
-// which always has an entry for this tag's list: seeing the tag at all
-// means the viewer owns or subscribes to it.
 // Where this tag comes from: just the list's name, linking to the list page —
 // deliberately quiet (no owner pill; the list page itself introduces the
 // owner), so provenance never competes with the tag's own identity. The owner
 // still rides along in the tooltip for anyone who wonders.
+// The tag-detail response itself carries no owner field — only a list's
+// OWN summary does — so the tooltip's owner comes off the viewer's /user/me
+// data instead, which always has an entry for this tag's list: seeing the tag
+// at all means the viewer owns or subscribes to it.
 function ListProvenanceLink({ listId, listName, owner }: { listId: string; listName: string; owner: AccountRef }) {
   const ownerName = owner.profile?.name || owner.identity?.display || null
   return (
