@@ -3720,7 +3720,7 @@ export async function getAddressHistory(addressInput: string, opts: { seriesOnly
 // `stakingBacked` marks a market (GIGAHDX) whose collateral (stHDX) is backed by HDX
 // that stays LOCKED IN THE WALLET — so its collateral is display-only and must not be
 // added to portfolioUsd (the locked HDX is already counted). See applyMmCollateralToBalances.
-interface ApiMmMarket {
+export interface ApiMmMarket {
   key: string
   label: string
   poolProxy: string
@@ -3776,6 +3776,11 @@ const MM_MARKETS: ApiMmMarket[] = (() => {
   }
   return out
 })()
+// The configured markets, in display order. Exported so a surface that reports per
+// market (the Security page's solvency panel) uses the same set and the same
+// primary/supplemental roles the money-market pages do — the two isolated markets
+// must never be blended.
+export function mmMarkets(): readonly ApiMmMarket[] { return MM_MARKETS }
 const MM_MARKET_BY_POOL = new Map<string, ApiMmMarket>(MM_MARKETS.map(m => [m.poolProxy, m]))
 const MM_MARKET_BY_KEY = new Map<string, ApiMmMarket>(MM_MARKETS.map(m => [m.key, m]))
 const MM_MARKET_ORDER = new Map<string, number>(MM_MARKETS.map((m, i) => [m.key, i]))
@@ -8353,6 +8358,12 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
   })
 }
 interface XcmNetworkMeta { name: string; subscan?: string; ss58?: number }
+// A parachain's product name, for surfaces that hold a bare para id — a sibling
+// sovereign account, an XCM leg. Falls back to the id so an unlisted chain is
+// still named rather than blank.
+export function parachainName(paraId: number): string {
+  return PARACHAIN_META[paraId]?.name ?? `Parachain ${paraId}`
+}
 const RELAY_XCM_NETWORK: XcmNetworkMeta = { name: 'Polkadot', subscan: 'https://polkadot.subscan.io', ss58: 0 }
 // Destination parachain metadata for networks observed in Hydration XCM traffic.
 const PARACHAIN_META: Record<number, XcmNetworkMeta> = {

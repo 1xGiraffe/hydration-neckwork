@@ -2,6 +2,7 @@ import { refreshHdxSnapshot } from './hdxService.ts'
 import { refreshProxyMultisig } from './proxyMultisigService.ts'
 import { refreshErc20Wallets } from './erc20WalletService.ts'
 import { refreshContractCode } from './contractRegistryService.ts'
+import { refreshSecurityChainState } from './securityService.ts'
 
 // Coordinated scheduler for the background refreshers that read node-full
 // (chain-state enumeration and EVM eth_call). Previously each ran on its own
@@ -15,9 +16,10 @@ import { refreshContractCode } from './contractRegistryService.ts'
 //   hdx-locks      ~2.2s enumeration + ~0.8s ClickHouse write   → every tick (60s)
 //   proxy-multisig ~15ms enumeration + ~30ms reconstruction     → every tick (60s)
 //   erc20-wallets  ~1s eth_call (HOLLAR holders, 80/batch)       → every 3rd tick (180s)
-// Worst case (every third minute all three run back to back) ≈ 3.3s of node-full
-// time per 60s window — a low single-digit duty cycle, comfortably below the one
-// backfill worker the node sustains before live ingestion lags.
+//   security-state ~90ms (≈140 storage reads, 2 batches)         → every tick (60s)
+// Worst case (every fifteenth minute all of them run back to back) ≈ 4.4s of
+// node-full time per 60s window — a low single-digit duty cycle, comfortably
+// below the one backfill worker the node sustains before live ingestion lags.
 //
 // ClickHouse-only refreshers (money-market / Omnipool value snapshots, the
 // account-directory prewarm, tag syncs, asset/identity caches) are intentionally
@@ -41,6 +43,10 @@ const TASKS: RefreshTask[] = [
   // EVM.AccountCodes enumeration (~1k keys); contracts appear rarely, so a
   // slow cadence keeps the archive-node duty cycle where it was.
   { name: 'contract-code', everyTicks: 15, run: refreshContractCode },
+  // Circuit-breaker state: a handful of small map enumerations plus the total
+  // issuance of the ~60 rate-limited assets (~140 reads, 2 batches). The deposit
+  // fuses move with every mint, so this wants the base cadence.
+  { name: 'security-state', everyTicks: 1, run: refreshSecurityChainState },
 ]
 
 // Tasks due on a given 1-based tick number (exported for testing the cadence).

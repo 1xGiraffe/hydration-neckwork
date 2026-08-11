@@ -24,6 +24,7 @@ import {
 } from '../services/explorerService.ts'
 import { getHdxDashboard } from '../services/hdxService.ts'
 import { getHollarDashboard } from '../services/hollarService.ts'
+import { getSecurityDashboard } from '../services/securityService.ts'
 import { countLiquiditySources } from '../services/poolService.ts'
 import { ACCOUNT_AFFINITY_BUSY_CODE, getCloseAccounts, getCloseAccountsForTag } from '../services/accountAffinityService.ts'
 
@@ -755,6 +756,10 @@ export async function explorerRoutes(fastify: FastifyInstance) {
 
   fastify.get('/explorer/hollar', async () => {
     return getHollarDashboard()
+  })
+
+  fastify.get('/explorer/security', async () => {
+    return getSecurityDashboard()
   })
 
   fastify.get('/explorer/search', async (req) => {
