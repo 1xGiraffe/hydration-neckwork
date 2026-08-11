@@ -63,6 +63,7 @@ import { initProxyMultisigService } from './services/proxyMultisigService.ts'
 import { initHdxService } from './services/hdxService.ts'
 import { initHollarService } from './services/hollarService.ts'
 import { initPoolService } from './services/poolService.ts'
+import { initSecurityService } from './services/securityService.ts'
 import { initErc20WalletService } from './services/erc20WalletService.ts'
 import { startBackgroundRefresh, stopBackgroundRefresh } from './services/backgroundRefresh.ts'
 import { initAccountAffinityService } from './services/accountAffinityService.ts'
@@ -232,6 +233,7 @@ async function start() {
     initHdxService(client)
     initHollarService(client)
     initPoolService(client)
+    initSecurityService(client)
     initLiveHeadService(client)
     // The pending-head follower is always-on (feeds merge its rows whether or
     // not any SSE client is connected); it degrades to finalized-only silently
