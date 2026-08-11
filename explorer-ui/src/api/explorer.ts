@@ -2,7 +2,7 @@ import type {
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem,
   AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail,
-  AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
+  AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, SecurityDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
   AssetLiquidity, PoolDetail, OmnipoolDetail,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
@@ -209,6 +209,7 @@ export const api = {
   assetFilterOptions: (signal?: AbortSignal) => getJson<AssetFilterItem[]>(withQuery('/explorer/assets', { fields: 'filter' }), signal),
   hdx: (signal?: AbortSignal) => getJson<HdxDashboard>('/explorer/hdx', signal),
   hollar: (signal?: AbortSignal) => getJson<HollarDashboard>('/explorer/hollar', signal),
+  security: (signal?: AbortSignal) => getJson<SecurityDashboard>('/explorer/security', signal),
   accounts: (offset = 0, limit = 50, sort: AccountSort = 'value', signal?: AbortSignal) => getJson<AccountsPage>(withQuery('/explorer/accounts', { offset, limit, sort }), signal),
   contracts: (offset = 0, limit = 50, sort: ContractSort = 'created', signal?: AbortSignal) => getJson<ContractsPage>(withQuery('/explorer/contracts', { offset, limit, sort }), signal),
   // Lazy verified-contract artifacts (Code/Read sub-tabs); 404 when unverified.
