@@ -572,12 +572,13 @@ test('a logged-out visitor on a user-tag URL sees a log-in hint, not "Tag not fo
   await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
 })
 
-// The provenance pill reads the list's owner off the VIEWER's own /user/me
-// (see ListTagDetail.tsx) — every prior fixture made the viewer the
-// owner, which could hide a bug that shows the viewer's own name/avatar no
-// matter whose list it actually is. A subscribed (not owned) list with
-// a different owner is the case that would have caught it.
-test('the provenance pill shows a subscribed list\'s real owner, not the viewer', async ({ page, userMock }) => {
+// Provenance is one quiet link — the list's name, with the owner in its
+// tooltip (see ListTagDetail.tsx). The owner is read off the VIEWER's own
+// /user/me, and every prior fixture made the viewer the owner, which could
+// hide a bug that names the viewer no matter whose list it actually is. A
+// subscribed (not owned) list with a different owner is the case that would
+// have caught it.
+test('tag provenance names a subscribed list and its real owner, not the viewer', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   const foreignOwner: AccountRef = {
     accountId: '0x' + 'cd'.repeat(32), address: '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty',
@@ -603,10 +604,12 @@ test('the provenance pill shows a subscribed list\'s real owner, not the viewer'
 
   await page.goto(`/tag/${USER_TAG_ID}`)
   await expect(page.locator('.acct-meta > .tag')).toContainText('Mine')
-  const pill = page.locator('.acct-meta a.addr-pill')
-  await expect(pill).toContainText('Foreign Owner')
-  await expect(pill).toContainText('Whales')
-  await expect(pill).not.toContainText('E2E User')
+  // Visible text is the list; the owner stays in the tooltip so it never
+  // competes with the tag's own name.
+  const link = page.locator(`.acct-meta a[href="/list/foreign-list"]`)
+  await expect(link).toHaveText('Whales')
+  await expect(link).toHaveAttribute('title', /Whales · a list by Foreign Owner/)
+  await expect(page.locator('.acct-meta')).not.toContainText('E2E User')
 })
 
 test('create a list, tag a known address, and reorder', async ({ page, userMock }) => {
