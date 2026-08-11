@@ -894,13 +894,17 @@ function buildAddress(accountId: string): AddressDetail {
   const unpricedHoldings: AddressBalance[] = a === A.fox
     ? [{ asset: { assetId: 424242, symbol: 'MYST', name: 'Mystery Token', decimals: 12, parachainId: null }, total: raw(150_000, 12), free: raw(150_000, 12), reserved: '0', lastBlock: TIP - 5000, valueUsd: null }]
     : []
-  // The owl carries a long tail of sub-threshold dust (no market history), so its
-  // treemap folds into an "Other" tile — the fixture for the Other/no-history
-  // hover behaviour.
+  // The owl carries a long tail of small holdings (no market history), so its
+  // treemap folds them into an "Other" tile — the fixture for the Other/no-history
+  // hover behaviour. Two constraints set the values: each holding stays under the
+  // per-asset fold threshold (0.8% of the portfolio) so none earns its own tile,
+  // and the tail SUMS to a few percent so the folded tile is big enough to draw —
+  // a tail of true cents folds into a sub-pixel sliver, which the map drops and
+  // recovers as chips instead, and then there is no Other tile to hover.
   const dustHoldings: AddressBalance[] = a === A.owl
     ? Array.from({ length: 12 }, (_, i) => ({
         asset: { assetId: 700001 + i, symbol: `DUST${i + 1}`, name: `Dust asset ${i + 1}`, decimals: 12, parachainId: null },
-        total: raw(10 + i, 12), free: raw(10 + i, 12), reserved: '0', lastBlock: TIP - 100 * i, valueUsd: 0.2 + i * 0.05,
+        total: raw(100 + i * 7, 12), free: raw(100 + i * 7, 12), reserved: '0', lastBlock: TIP - 100 * i, valueUsd: 700 + i * 10,
       }))
     : []
   const balances = [...priced, ...unpricedHoldings, ...dustHoldings]
