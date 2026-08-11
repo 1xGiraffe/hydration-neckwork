@@ -26,7 +26,7 @@ const emptyIf = (empty: boolean) => empty ? ' cell-empty' : ''
 
 // A stable identity per rendered row: a system tag's own id, an account's id,
 // or (a bare simAccount-only row) its position.
-export function accountRowKey(r: TopAccountRow, i: number): string {
+function accountRowKey(r: TopAccountRow, i: number): string {
   return r.tag ? `tag:${r.tag.tagId}` : r.account ? `account:${r.account.accountId}` : `row:${r.simAccount ?? i}`
 }
 
