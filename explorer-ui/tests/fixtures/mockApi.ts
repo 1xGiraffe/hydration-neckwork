@@ -7,6 +7,7 @@ import type {
   AccountRef, AssetRef, AssetLiquidationDay, AssetLiquidationTotal, HdxDashboard, HdxCohort, HdxLockType, HdxUnlockBucket, HdxDailyFlow, HdxMover,
   AssetLiquidity, AssetLiquiditySource, PoolDetail, OmnipoolDetail, PoolCompositionEntry,
   HollarDashboard, HollarCollateral, HollarArbDay, HollarTradeDay, HollarPool, HollarPegPoint,
+  SecurityDashboard, SecurityFuse, SecurityPerBlockRow, SecurityLiquidityMove,
   TradeDetail as TradeDetailResponse,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse,
 } from '../../src/types'
@@ -1120,6 +1121,152 @@ function buildHdx(): HdxDashboard {
    from a fixed anchor timestamp + index-based formulas, so render tests can
    assert exact numbers instead of "close enough" ranges. */
 const HOLLAR_MOCK_ANCHOR = Date.parse('2026-07-10T00:00:00.000Z')
+// The Security page: one fuse per rate-limited asset, one Omnipool row per
+// listed asset, and a live lockdown so the grid's tripped state is exercised.
+function buildSecurity(): SecurityDashboard {
+  const limited: [number, number][] = [[5, 5_000_000], [10, 5_000_000], [22, 5_000_000], [15, 1_500_000], [19, 0.5], [20, 17], [16, 500_000]]
+  // Deliberately varied loads so the grid shows a cold, a warm, a hot and a
+  // tripped fuse — the four states the gauge has to tell apart.
+  const load: Record<number, number> = { 5: 0, 10: 2.94, 22: 52.4, 15: 81.7, 19: 0, 20: 0, 16: 100 }
+  const fuses: SecurityFuse[] = limited.map(([assetId, limit]) => {
+    const a = assetById.get(assetId)!
+    const pct = load[assetId] ?? 0
+    const locked = assetId === 16
+    const status: SecurityFuse['status'] = locked ? 'locked' : assetId === 19 ? 'expired' : assetId === 20 ? 'unarmed' : 'active'
+    return {
+      asset: aref(a), status,
+      limit: raw(limit, a.decimals),
+      used: raw((limit * pct) / 100, a.decimals),
+      headroom: raw((limit * (100 - pct)) / 100, a.decimals),
+      usagePct: locked ? 100 : pct,
+      untilBlock: locked ? TIP + 9_400 : null,
+      periodEndBlock: locked ? null : TIP + 4_200,
+      category: assetId === 0 ? 'local' : 'external',
+      lockdownCount: assetId === 16 ? 3 : assetId === 22 ? 1 : 0,
+    }
+  })
+  // The API serves fuses worst-first (usage, then trip history, then symbol) and
+  // both the grid and the table render in the order given, so the mock sorts the
+  // same way rather than leaving the order to its own asset list.
+  fuses.sort((a, b) => b.usagePct - a.usagePct || b.lockdownCount - a.lockdownCount || a.asset.symbol.localeCompare(b.asset.symbol))
+
+  const perBlock: SecurityPerBlockRow[] = [0, 5, 10, 15, 19, 20].map((assetId, i) => {
+    const a = assetById.get(assetId)!
+    const reserve = 1_000_000 / (i + 1)
+    return {
+      asset: aref(a), reserve: raw(reserve, a.decimals), reserveUsd: reserve * a.price,
+      tradeLimitPct: 50, tradeAllowance: raw(reserve / 2, a.decimals), tradeAllowanceUsd: (reserve / 2) * a.price,
+      addLimitPct: assetId === 5 ? null : 5, addAllowance: assetId === 5 ? null : raw(reserve / 20, a.decimals),
+      removeLimitPct: 5, removeAllowance: raw(reserve / 20, a.decimals),
+      overridden: assetId === 5,
+      peakBlockNet: raw(reserve / 90, a.decimals), peakBlockHeight: TIP - 500 * (i + 1),
+      peakPressurePct: 100 / 45, tradable: ['Sell', 'Buy', 'Add liquidity', 'Remove liquidity'],
+    }
+  })
+  return {
+    head: { blockHeight: TIP, blockTimestamp: tsAt(TIP) },
+    chainAsOf: tsAt(TIP).replace(' ', 'T') + 'Z',
+    chainBlock: TIP + 1,
+    withdraw: {
+      configured: true, limit: 1_000_000_000, used: 41_820_004, usagePct: 4.18,
+      windowMs: 21_600_000, lastCreditedMs: Date.parse(tsAt(TIP) + 'Z'), lockdownUntilMs: null,
+      armedAt: { blockHeight: TIP - 900_000, blockTimestamp: tsAt(TIP - 900_000) },
+      everTripped: false,
+      egressAccounts: [
+        { account: A.treasury, chain: 'AssetHub' },
+        { account: A.owl, chain: 'Moonbeam' },
+      ],
+      localAssets: [aref(assetById.get(0)!)], externalAssetCount: 56,
+    },
+    fuses: {
+      periodBlocks: 14_400, rows: fuses, lockedCount: 1, lockdownTotal: 26, releaseTotal: 108,
+      lockdowns: [16, 22, 5, 10, 15, 19, 20, 16, 22, 5, 10, 15].map((assetId, i) => ({
+        asset: aref(assetById.get(assetId)!),
+        blockHeight: TIP - 20_000 * (i + 1), blockTimestamp: tsAt(TIP - 20_000 * (i + 1)),
+        untilBlock: TIP - 20_000 * (i + 1) + 14_400,
+        liftedAtBlock: i === 0 ? null : TIP - 20_000 * (i + 1) + 2_000,
+        liftedAtTimestamp: i === 0 ? null : tsAt(TIP - 20_000 * (i + 1) + 2_000),
+        liftedEarly: i === 0 ? null : i === 1,
+        extrinsicIndex: i === 2 ? 3 : null,
+      })),
+    },
+    perBlock: { defaultTradePct: 50, defaultAddPct: 5, defaultRemovePct: 5, rows: perBlock, peakWindowDays: 30 },
+    trips: {
+      total: 438, enforcementTotal: 431, directTotal: 253, nestedTotal: 185,
+      byError: [
+        { name: 'MaxLiquidityLimitPerBlockReached', count: 430, enforcement: true },
+        { name: 'AssetInLockdown', count: 1, enforcement: true },
+        { name: 'InvalidAmount', count: 7, enforcement: false },
+      ],
+      byYear: [{ year: 2023, count: 38 }, { year: 2024, count: 94 }, { year: 2025, count: 161 }, { year: 2026, count: 138 }],
+      recent: [0, 1, 2].map(i => ({
+        blockHeight: TIP - 700 * (i + 1), blockTimestamp: tsAt(TIP - 700 * (i + 1)),
+        extrinsicId: `${TIP - 700 * (i + 1)}-${i + 2}`,
+        callName: i === 0 ? 'Omnipool.remove_liquidity' : 'Utility.batch_all',
+        errorName: 'MaxLiquidityLimitPerBlockReached', account: ACCS[i],
+      })),
+    },
+    freezes: {
+      paused: [
+        { pallet: 'PolkadotXcm', call: 'claim_assets', pausedAtBlock: TIP - 8_000, pausedAtTimestamp: tsAt(TIP - 8_000), extrinsicIndex: 3, orphaned: false },
+        { pallet: 'Elections', call: 'vote', pausedAtBlock: TIP - 900_000, pausedAtTimestamp: tsAt(TIP - 900_000), extrinsicIndex: 2, orphaned: true },
+      ],
+      hubTradability: ['Sell'],
+      omnipool: [{ asset: aref(assetById.get(16)!), poolId: null, bits: 8, flags: ['Remove liquidity'] }],
+      omnipoolAssetCount: 19,
+      delisted: [{ asset: aref(assetById.get(19)!), poolId: null, bits: 0, flags: ['Frozen'] }],
+      stableswap: [{ asset: aref(assetById.get(15)!), poolId: 690, bits: 11, flags: ['Sell', 'Buy', 'Remove liquidity'] }],
+    },
+    risk: {
+      windowDays: 30,
+      markets: [
+        { key: 'core', label: 'Money Market', role: 'primary' as const, borrowers: 662, debtUsd: 15_712_980, collateralUsd: 31_402_118, underwaterCount: 54, underwaterDebtUsd: 8_797.34, underwaterCollateralUsd: 0.17, badDebtCount: 45, badDebtUsd: 8_795.14, liquidatableCount: 9, liquidatableDebtUsd: 2.2, nearLiquidationCount: 24, nearLiquidationDebtUsd: 65_341 },
+        { key: 'gigahdx', label: 'GIGAHDX', role: 'supplemental' as const, borrowers: 53, debtUsd: 223_622, collateralUsd: 918_400, underwaterCount: 0, underwaterDebtUsd: 0, underwaterCollateralUsd: 0, badDebtCount: 0, badDebtUsd: 0, liquidatableCount: 0, liquidatableDebtUsd: 0, nearLiquidationCount: 0, nearLiquidationDebtUsd: 0 },
+        { key: 'bil', label: 'BIL', role: 'supplemental' as const, borrowers: 0, debtUsd: 0, collateralUsd: 0, underwaterCount: 0, underwaterDebtUsd: 0, underwaterCollateralUsd: 0, badDebtCount: 0, badDebtUsd: 0, liquidatableCount: 0, liquidatableDebtUsd: 0, nearLiquidationCount: 0, nearLiquidationDebtUsd: 0 },
+      ],
+      liquidations: {
+        day: 0, week: 5, month: 487, total: 8_358, lastTimestamp: tsAt(TIP - 12_000),
+        recent: [0, 1, 2].map(i => ({
+          blockHeight: TIP - 12_000 - i * 3_000, blockTimestamp: tsAt(TIP - 12_000 - i * 3_000),
+          extrinsicIndex: 2, borrower: A.binance,
+          collateral: aref(assetById.get(690)!), debt: aref(assetById.get(i === 0 ? 5 : 22)!),
+        })),
+      },
+      // Deliberately spans the 100% mark: the allowance is today's reserve, so a
+      // historical move can exceed it.
+      largestMoves: ([[1000, 'add', 118, 105.9], [5, 'remove', 42, 48.2], [10, 'add', 9, 3.1]] as const).map(([assetId, kind, amount, share]) => {
+        const a = assetById.get(assetId)!
+        return {
+          asset: aref(a), kind: kind as SecurityLiquidityMove['kind'],
+          amount: raw(amount * 1_000, a.decimals),
+          blockHeight: TIP - 4_000 - assetId, blockTimestamp: tsAt(TIP - 4_000 - assetId),
+          extrinsicIndex: 3,
+          allowance: raw((amount * 1_000 * 100) / share, a.decimals),
+          shareOfAllowancePct: share,
+        }
+      }),
+    },
+    runtime: { specVersion: 435, upgrades: 64, lastUpgrade: { blockHeight: TIP - 76_000, blockTimestamp: tsAt(TIP - 76_000) } },
+    // Long enough that the ledger's own pager has something to reveal.
+    timeline: Array.from({ length: 31 }, (_, i) => {
+      const shape = [
+        { kind: 'pause', label: 'Call paused', detail: 'PolkadotXcm.claim_assets', asset: null },
+        { kind: 'lockdown', label: 'Deposit fuse tripped', detail: 'GLMR locked until block ' + (TIP + 9_400).toLocaleString('en-US'), asset: aref(assetById.get(16)!) },
+        { kind: 'freeze', label: 'Omnipool tradability set', detail: 'WBTC → Frozen', asset: aref(assetById.get(19)!) },
+        { kind: 'unpause', label: 'Call unpaused', detail: 'Omnipool.add_liquidity', asset: null },
+        { kind: 'limit', label: 'Global withdraw limit set', detail: '1,000,000,000 HDX per 6h', asset: null },
+      ][i % 5]
+      const height = TIP - 8_000 - i * 30_000
+      return { ...shape, blockHeight: height, blockTimestamp: tsAt(height), extrinsicIndex: i % 3 === 0 ? null : i + 2 }
+    }),
+    guardians: {
+      techCommittee: { members: [A.fox, A.owl, A.swan, A.binance, A.krakenSub, A.treasury, A.krakenEvm], size: 7, majority: 4, superMajority: 5 },
+      memberSetAtBlock: TIP - 300_000,
+      outstandingWhitelisted: [{ callHash: '0x95dddfa3a727e46ac23c451d603846dafd4c8d50f0ae1144ab99077dd9dc650a', blockHeight: TIP - 120_000, blockTimestamp: tsAt(TIP - 120_000) }],
+    },
+  }
+}
+
 function buildHollar(): HollarDashboard {
   const DAY = 86_400_000
   const dayIso = (daysAgo: number) => new Date(HOLLAR_MOCK_ANCHOR - daysAgo * DAY).toISOString().slice(0, 10)
@@ -1413,6 +1560,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   { re: /^\/explorer\/assets$/, fn: (_m, qs) => qs.get('fields') === 'filter' ? buildAssets().map(a => ({ assetId: a.assetId, symbol: a.symbol, name: a.name })) : buildAssets() },
   { re: /^\/explorer\/hdx$/, fn: () => buildHdx() },
   { re: /^\/explorer\/hollar$/, fn: () => buildHollar() },
+  { re: /^\/explorer\/security$/, fn: () => buildSecurity() },
   { re: /^\/explorer\/accounts$/, fn: (_m, qs) => buildAccounts(Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 50), qs.get('sort') ?? 'value') },
   { re: /^\/explorer\/contracts$/, fn: (_m, qs) => buildContracts(Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 50), qs.get('sort') ?? 'created') },
   { re: /^\/explorer\/contract\/compiler-versions$/, fn: () => ({ versions: ['v0.8.19+commit.7dd6d404', 'v0.8.10+commit.fc410830'] }) },

@@ -1257,3 +1257,202 @@ export type DeviceLinkStatus = 'pending' | 'claimed' | 'expired'
 // One live session on the devices list; `id` is the server-side token hash —
 // the handle revocation takes — never a usable token.
 export interface DeviceSession { id: string; label: string; createdVia: string; createdAt: string; lastSeen: string; current: boolean }
+
+// Security page — circuit breakers, freezes and the origins that can lift them.
+// Raw integer amounts stay strings (asset decimals live on the AssetRef); the
+// global withdraw limit arrives pre-scaled to HDX because its reference currency
+// is fixed by the runtime.
+// Every sink live today is a sibling parachain's sovereign account, so `chain`
+// names the chain the funds are leaving for.
+export interface SecurityEgressSink { account: AccountRef; chain: string | null }
+export interface SecurityWithdrawLimit {
+  configured: boolean
+  limit: number | null
+  used: number | null
+  usagePct: number | null
+  windowMs: number | null
+  lastCreditedMs: number | null
+  lockdownUntilMs: number | null
+  armedAt: { blockHeight: number; blockTimestamp: string } | null
+  everTripped: boolean
+  egressAccounts: SecurityEgressSink[]
+  localAssets: AssetRef[]
+  externalAssetCount: number
+}
+
+// `unarmed` = no lockdown row yet (the asset's first mint sets the baseline);
+// `expired` = the 24h window elapsed and the next mint re-baselines it.
+export type SecurityFuseStatus = 'locked' | 'expired' | 'active' | 'unarmed'
+export interface SecurityFuse {
+  asset: AssetRef
+  status: SecurityFuseStatus
+  limit: string
+  used: string
+  headroom: string
+  usagePct: number
+  untilBlock: number | null
+  periodEndBlock: number | null
+  category: 'local' | 'external' | null
+  lockdownCount: number
+}
+
+export interface SecurityLockdown {
+  asset: AssetRef
+  blockHeight: number
+  blockTimestamp: string
+  untilBlock: number
+  liftedAtBlock: number | null
+  liftedAtTimestamp: string | null
+  liftedEarly: boolean | null
+  extrinsicIndex: number | null
+}
+
+export interface SecurityPerBlockRow {
+  asset: AssetRef
+  reserve: string
+  reserveUsd: number | null
+  tradeLimitPct: number
+  tradeAllowance: string
+  tradeAllowanceUsd: number | null
+  addLimitPct: number | null
+  addAllowance: string | null
+  removeLimitPct: number | null
+  removeAllowance: string | null
+  overridden: boolean
+  peakBlockNet: string | null
+  peakBlockHeight: number | null
+  peakPressurePct: number | null
+  tradable: string[]
+}
+
+export interface SecurityTrip {
+  blockHeight: number
+  blockTimestamp: string
+  extrinsicId: string
+  callName: string
+  errorName: string
+  account: AccountRef | null
+}
+
+export interface SecurityPausedCall {
+  pallet: string
+  call: string
+  pausedAtBlock: number | null
+  pausedAtTimestamp: string | null
+  extrinsicIndex: number | null
+  orphaned: boolean
+}
+
+export interface SecurityTradability { asset: AssetRef; poolId: number | null; bits: number; flags: string[] }
+
+export interface SecuritySafetyEvent {
+  kind: string
+  label: string
+  detail: string
+  blockHeight: number
+  blockTimestamp: string
+  extrinsicIndex: number | null
+  asset: AssetRef | null
+}
+
+// Solvency of one lending market. The primary and supplemental markets are
+// isolated, so their debts and health factors are never blended.
+export interface SecurityMarketSolvency {
+  key: string
+  label: string
+  role: 'primary' | 'supplemental'
+  borrowers: number
+  debtUsd: number
+  collateralUsd: number
+  // Under water: collateral no longer covers the debt at the liquidation
+  // threshold, so anyone may close the position for a fee — transient by design.
+  underwaterCount: number
+  underwaterDebtUsd: number
+  underwaterCollateralUsd: number
+  // Bad debt: the part no liquidation can recover, Σ max(0, debt − collateral).
+  badDebtCount: number
+  badDebtUsd: number
+  // Under water but still fully covered — a liquidator profits, so it should clear.
+  liquidatableCount: number
+  liquidatableDebtUsd: number
+  // Within 5% of the liquidation threshold, excluding positions whose proximity is
+  // structural: e-mode loops and isolation-mode collateral. Null when chain state
+  // is unavailable, since both flags are only readable from the pool contract.
+  nearLiquidationCount: number | null
+  nearLiquidationDebtUsd: number | null
+}
+
+export interface SecurityLiquidation {
+  blockHeight: number
+  blockTimestamp: string
+  extrinsicIndex: number | null
+  borrower: AccountRef
+  collateral: AssetRef
+  debt: AssetRef
+}
+
+// A real liquidity event beside the per-block allowance the circuit breaker
+// measures it against. The share can exceed 100%: the allowance is computed from
+// today's reserve, not the reserve at that block.
+export interface SecurityLiquidityMove {
+  asset: AssetRef
+  kind: 'add' | 'remove'
+  amount: string
+  blockHeight: number
+  blockTimestamp: string
+  extrinsicIndex: number | null
+  allowance: string | null
+  shareOfAllowancePct: number | null
+}
+
+export interface SecurityDashboard {
+  head: { blockHeight: number; blockTimestamp: string }
+  chainAsOf: string | null
+  chainBlock: number | null
+  withdraw: SecurityWithdrawLimit
+  fuses: {
+    periodBlocks: number
+    rows: SecurityFuse[]
+    lockedCount: number
+    lockdownTotal: number
+    releaseTotal: number
+    lockdowns: SecurityLockdown[]
+  }
+  perBlock: {
+    defaultTradePct: number
+    defaultAddPct: number
+    defaultRemovePct: number
+    rows: SecurityPerBlockRow[]
+    peakWindowDays: number
+  }
+  trips: {
+    total: number
+    enforcementTotal: number
+    directTotal: number
+    nestedTotal: number
+    byError: { name: string; count: number; enforcement: boolean }[]
+    byYear: { year: number; count: number }[]
+    recent: SecurityTrip[]
+  }
+  freezes: {
+    paused: SecurityPausedCall[]
+    hubTradability: string[]
+    omnipool: SecurityTradability[]
+    omnipoolAssetCount: number
+    delisted: SecurityTradability[]
+    stableswap: SecurityTradability[]
+  }
+  risk: {
+    windowDays: number
+    markets: SecurityMarketSolvency[]
+    liquidations: { day: number; week: number; month: number; total: number; lastTimestamp: string | null; recent: SecurityLiquidation[] }
+    largestMoves: SecurityLiquidityMove[]
+  }
+  runtime: { specVersion: number; upgrades: number; lastUpgrade: { blockHeight: number; blockTimestamp: string } | null }
+  timeline: SecuritySafetyEvent[]
+  guardians: {
+    techCommittee: { members: AccountRef[]; size: number; majority: number; superMajority: number }
+    memberSetAtBlock: number | null
+    outstandingWhitelisted: { callHash: string; blockHeight: number; blockTimestamp: string }[]
+  }
+}
