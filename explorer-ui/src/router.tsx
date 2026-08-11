@@ -21,6 +21,12 @@ export const ACTIVITY_SLUG_TAB: Record<ActivitySlug, string> = {
   'otc-place': 'trade', 'otc-pull': 'trade', 'otc-fill': 'trade',
 }
 
+// One section per part of the protocol, so a page never mixes two domains: the
+// money market's solvency and the Omnipool's per-block limits are different
+// questions and used to share a "Risk" tab.
+export const SECURITY_SECTIONS = ['cross-chain', 'omnipool', 'money-market', 'freezes', 'ledger', 'guardians'] as const
+export type SecuritySection = typeof SECURITY_SECTIONS[number]
+
 export type Route =
   | { name: 'dashboard' }
   | { name: 'activity' }
@@ -39,6 +45,9 @@ export type Route =
   | { name: 'accounts' }
   | { name: 'account'; address: string }
   | { name: 'contracts' }
+  // A section is its own page, not a tab: switching is a path change, so it scrolls
+  // to top and the back button steps through sections the way a reader expects.
+  | { name: 'security'; section: SecuritySection | null }
   | { name: 'tags' }
   | { name: 'tags-hydration' }
   | { name: 'tag'; tagId: string }
@@ -100,6 +109,11 @@ export function parseRoute(loc: string): Route {
     // A contract's detail page IS the account page (/account/0x…) — /contracts
     // is only the directory.
     case 'contracts': return { name: 'contracts' }
+    case 'security': {
+      const section = parts[1] as SecuritySection | undefined
+      if (section && (SECURITY_SECTIONS as readonly string[]).includes(section)) return { name: 'security', section }
+      return { name: 'security', section: null }
+    }
     // /tags/hydration is the system-tag directory's own page; any other
     // /tags/* segment (there are none in product today) falls back to the hub.
     case 'tags': return parts[1] === 'hydration' ? { name: 'tags-hydration' } : { name: 'tags' }
@@ -267,6 +281,7 @@ export const paths = {
   accounts: () => '/accounts',
   account: (addr: string) => `/account/${encodeURIComponent(addr)}`,
   contracts: () => '/contracts',
+  security: (section?: SecuritySection | null) => (section ? `/security/${section}` : '/security'),
   tags: () => '/tags',
   tagsHydration: () => '/tags/hydration',
   tag: (tagId: string) => `/tag/${encodeURIComponent(tagId)}`,
