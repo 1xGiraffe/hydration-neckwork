@@ -41,12 +41,15 @@ test('trade detail renders asset chips for route, fees, price, and execution val
 test('event-backed trade rows hover and navigate to the trade detail page', async ({ page }) => {
   await page.goto('/activity?tab=trade')
 
-  const row = page.locator('tr[data-activity$="-e77"]').first()
+  // The newest event-backed swap the feed offers, selected by shape rather than by
+  // a fixed event index: the top of this tab is a mempool projection followed by an
+  // unfinalized row, both deliberately non-navigable and owned by their own specs,
+  // and pinning one index made this test fail whenever that index moved.
+  const row = page.locator('tr.clickable[data-activity^="swap/"]:not([data-ext])').first()
   await expect(row).toBeVisible()
-  await expect(row).not.toHaveAttribute('data-ext', /.+/)
 
   const activity = await row.getAttribute('data-activity')
-  expect(activity).toMatch(/^swap\/\d+-e77$/)
+  expect(activity).toMatch(/^swap\/\d+-e\d+$/)
   const tradeId = activity!.replace(/^swap\//, '')
   await expect(row.locator('td[data-label="Type"]')).toContainText('Swap')
   await expect(page.locator('td[data-label="Type"]', { hasText: 'DCA' }).first()).toBeVisible()
