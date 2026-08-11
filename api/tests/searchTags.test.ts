@@ -16,11 +16,19 @@ function emptyRowClient() {
 interface TagFixture { tagId: string; name: string; icon?: string; color?: string }
 interface IdentityFixture { accountId: string; display: string }
 
+// The tag directory each test wants allTags() to report. Hoisted so the mock factory
+// below — which vitest applies before the module graph is built — can close over it.
+const fixture = vi.hoisted(() => ({ tags: [] as { tagId: string; name: string; icon?: string; color?: string }[] }))
+vi.mock('../src/services/tagService.ts', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/services/tagService.ts')>(),
+  allTags: () => fixture.tags.map(t => ({ tagId: t.tagId, name: t.name, color: t.color ?? '#fff', icon: t.icon ?? '', note: '', members: [] })),
+}))
+
 async function setup(tags: TagFixture[], identities: IdentityFixture[] = []) {
+  fixture.tags = tags
+  // Still a fresh graph per test: identity state and search's 10s query-keyed cache
+  // are module-level, and these tests reuse one query across different fixtures.
   vi.resetModules()
-  vi.doMock('../src/services/tagService.ts', () => ({
-    allTags: () => tags.map(t => ({ tagId: t.tagId, name: t.name, color: t.color ?? '#fff', icon: t.icon ?? '', note: '', members: [] })),
-  }))
   const { initExplorerService, search } = await import('../src/services/explorerService.ts')
   const { initGovernanceService } = await import('../src/services/governanceService.ts')
   const { initReferendumTitleService } = await import('../src/services/referendumTitleService.ts')
@@ -43,7 +51,7 @@ async function setup(tags: TagFixture[], identities: IdentityFixture[] = []) {
 
 describe('search: tag matches rank ahead of identity matches', () => {
   afterEach(() => {
-    vi.doUnmock('../src/services/tagService.ts')
+    vi.resetModules()
     vi.restoreAllMocks()
   })
 
@@ -77,7 +85,7 @@ describe('search: tag matches rank ahead of identity matches', () => {
 
 describe('search: within the tag group, match quality ranks ahead of directory order', () => {
   afterEach(() => {
-    vi.doUnmock('../src/services/tagService.ts')
+    vi.resetModules()
     vi.restoreAllMocks()
   })
 

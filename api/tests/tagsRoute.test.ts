@@ -3,18 +3,25 @@ import { describe, expect, it, vi } from 'vitest'
 // The tag directory is a size-ranked list, not a membership dump: enumerating
 // every member turned a ~3 kB response into ~132 kB of barely-compressible
 // addresses. Members stay on `/explorer/tag/:id`.
+// The directory each call wants allTags() to report. Hoisted with the mock factory
+// because a per-call vi.doMock is registered too late to be reliable: when it is
+// missed the route sees the real (empty) directory, and two calls that should differ
+// come back identical.
+const fixture = vi.hoisted(() => ({ tags: [] as { tagId: string; members: string[] }[] }))
+vi.mock('../src/services/tagService.ts', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/services/tagService.ts')>(),
+  allTags: () => fixture.tags.map(t => ({ name: t.tagId, color: '#fff', note: '', icon: '', ...t })),
+}))
+
 async function tagsResponse(tags: { tagId: string; members: string[] }[]) {
+  fixture.tags = tags
   vi.resetModules()
-  vi.doMock('../src/services/tagService.ts', () => ({
-    allTags: () => tags.map(t => ({ name: t.tagId, color: '#fff', note: '', icon: '', ...t })),
-  }))
   const { default: Fastify } = await import('fastify')
   const { tagRoutes } = await import('../src/routes/tags.ts')
   const app = Fastify()
   await app.register(tagRoutes)
   const response = await app.inject('/explorer/tags')
   await app.close()
-  vi.doUnmock('../src/services/tagService.ts')
   return response
 }
 
