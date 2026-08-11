@@ -7,6 +7,7 @@ Hydration Neckwork is a ClickHouse-backed data platform containing two applicati
 - **Explorer:** blocks, extrinsics, events, assets, holders, accounts, identities, tags, proxies, multisigs, and portfolio history.
 - **Activity:** transfers, swaps, DCA schedules, OTC orders, cross-chain activity, liquidity, money markets, staking, and governance votes.
 - **Protocol dashboards:** HDX supply, locks, flows, and unlocks; HOLLAR peg, Stability Module, and liquidity.
+- **Security:** circuit-breaker limits and their consumption, deposit lockdowns, paused calls, tradability freezes, money-market solvency, and the origins that can lift each control.
 - **Preis charts:** block-level USD prices and OHLCV candles for Hydration assets.
 - **API:** Fastify endpoints for explorer data, prices, candles, volume, and indexer status.
 

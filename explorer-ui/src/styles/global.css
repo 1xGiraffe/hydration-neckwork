@@ -2747,3 +2747,211 @@ tr.row-muted td { opacity: .55; }
 .copy-text-btn.done, .pc-copy-btn.done { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
 .copy-text-btn svg, .pc-copy-btn svg { width: 12px; height: 12px; }
 .json-copy-row { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+
+/* ============================================================
+   Security page
+   The signature element is the fuse grid: one small vertical gauge per asset
+   that carries a deposit limit, filled to the share of its 24h mint allowance
+   already spent. Sixty gauges read as one instrument; the table below carries
+   the numbers. `--fuse-w` is the only knob — every other size follows from it.
+   ============================================================ */
+
+.fuse-grid { --fuse-w: 54px; display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--fuse-w), 1fr)); gap: 8px; }
+.fuse {
+  display: flex; flex-direction: column; border-radius: 9px; overflow: hidden;
+  border: 1px solid var(--separator); background: var(--bg-elev2);
+  text-decoration: none; transition: border-color 140ms, transform 140ms var(--ease-out-soft);
+}
+.fuse:hover { border-color: var(--text-low); transform: translateY(-2px); }
+.fuse:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The gauge body. `color` is set per fuse so the fill and the number share one
+   hue without a second inline style. */
+.fuse-body { position: relative; display: block; height: 46px; }
+/* A hairline floor so an empty gauge still reads as an instrument rather than a
+   blank tile. */
+.fuse-body::after { content: ''; position: absolute; inset: auto 0 0 0; height: 1px; background: var(--text-lowest); }
+.fuse-fill { position: absolute; inset: auto 0 0 0; background: currentColor; opacity: .82; transition: height 500ms var(--ease-out-soft); }
+.fuse-pct {
+  position: absolute; inset: 4px 0 auto 0; text-align: center;
+  font-family: 'GeistMono'; font-size: 9.5px; font-weight: 600; letter-spacing: 0.02em;
+  color: currentColor;
+}
+.fuse-plate {
+  display: block; padding: 4px 3px 5px; text-align: center; border-top: 1px solid var(--separator);
+  background: var(--panel); font-family: 'GeistMono'; font-size: 9px; letter-spacing: 0.02em;
+  color: var(--text-medium); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fuse.dormant .fuse-plate { color: var(--text-lowest); }
+.fuse.locked { border-color: var(--red); box-shadow: inset 0 0 0 1px var(--red-soft); }
+.fuse.locked .fuse-plate { color: var(--red); }
+@media (prefers-reduced-motion: reduce) {
+  .fuse, .fuse-fill { transition: none; }
+  .fuse:hover { transform: none; }
+}
+
+.sec-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 14px; font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-low); }
+.sec-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sec-legend i { width: 9px; height: 9px; border-radius: 2px; }
+.sec-legend .muted { margin-left: auto; text-transform: none; letter-spacing: 0; }
+
+/* Wide load meter — the chain-wide withdraw budget. Quarter ticks give the bar a
+   scale without an axis. */
+.load-meter { position: relative; width: 100%; border-radius: 9999px; background: var(--panel); border: 1px solid var(--separator); overflow: hidden; }
+.load-meter .lm-fill { position: absolute; inset: 0 auto 0 0; border-radius: 9999px; transition: width 600ms var(--ease-out-soft); }
+/* Quarter ticks read against both the empty track and the fill, so they are a
+   text-scale hairline rather than the page background. */
+.load-meter .lm-tick { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--text-lowest); opacity: .55; }
+.load-meter .lm-label { position: absolute; inset: 0 10px 0 auto; display: flex; align-items: center; font-size: 10.5px; font-weight: 600; color: var(--text-medium); }
+@media (prefers-reduced-motion: reduce) { .load-meter .lm-fill { transition: none; } }
+
+.sec-meter-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.sec-meter-value { font-size: 19px; font-weight: 600; color: var(--text-high); }
+
+.sec-sub { font-family: 'GeistMono'; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-low); margin: 18px 0 9px; }
+.sec-pills { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
+.sec-delisted { background: var(--panel); color: var(--text-medium); border: 1px solid var(--separator); }
+.sec-delisted:hover { color: var(--text-high); border-color: var(--text-low); }
+
+/* Yearly trip counts: value above, bar, year below. Four bars need a scale, not
+   a chart. */
+.year-bars { display: flex; align-items: flex-end; gap: 14px; height: 132px; }
+.year-bars .yb { display: flex; flex-direction: column; align-items: center; gap: 5px; flex: 1; min-width: 34px; height: 100%; }
+.year-bars .yb-v { font-family: 'GeistMono'; font-size: 11px; font-weight: 600; color: var(--text-high); }
+.year-bars .yb-track { flex: 1; width: 100%; display: flex; align-items: flex-end; }
+.year-bars .yb-track i { display: block; width: 100%; border-radius: 4px 4px 0 0; min-height: 3px; opacity: .85; }
+.year-bars .yb-k { font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); }
+
+.sec-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 22px; align-items: start; }
+.sec-errors { display: flex; flex-direction: column; gap: 6px; }
+.sec-err { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 11.5px; color: var(--text-medium); border-bottom: 1px solid var(--separator); padding-bottom: 5px; }
+.sec-err:last-child { border-bottom: 0; }
+.sec-err.dim { color: var(--text-lowest); }
+.sec-err-n { color: var(--text-high); font-weight: 600; }
+.sec-err.dim .sec-err-n { color: var(--text-lowest); font-weight: 400; }
+
+.sec-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; }
+.tbl td.sec-dot-cell { padding-right: 0; }
+
+.sec-more { display: flex; justify-content: center; margin: 12px 0 4px; }
+.sec-warn { border-color: color-mix(in srgb, var(--amber) 45%, transparent); color: var(--text-medium); font-size: 12.5px; }
+.sec-asof { margin: 26px 0 40px; text-align: center; }
+
+.sec-bounty { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
+.sec-bounty div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--text-medium); border-bottom: 1px solid var(--separator); padding-bottom: 5px; }
+.sec-bounty div:last-child { border-bottom: 0; }
+.sec-bounty .mono { color: var(--text-high); }
+.sec-links { display: flex; flex-direction: column; gap: 7px; margin-top: 16px; font-family: 'GeistMono'; font-size: 11px; }
+.sec-links a { color: var(--accent); }
+.sec-links a:hover { text-decoration: underline; }
+/* The audit list is the only table on the page narrow enough not to need the
+   shared 760px floor, so it keeps its natural width beside the bounty card. */
+.assurance .tbl { min-width: 0; }
+.assurance-tbl tbody td { font-size: 12px; }
+
+@media (max-width: 860px) {
+  .fuse-grid { --fuse-w: 46px; gap: 6px; }
+  .sec-split { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .sec-legend .muted { margin-left: 0; width: 100%; }
+  .sec-meter-value { font-size: 16px; }
+  .year-bars { height: 112px; gap: 10px; }
+}
+
+/* Egress sinks: the chain a sovereign account belongs to, then the account. The
+   chain name is the identifying half, so it leads. */
+.sec-sinks { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-bottom: 10px; }
+.sec-sink { display: inline-flex; align-items: center; gap: 7px; }
+.sec-sink-chain { font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); }
+.sec-orphan { background: var(--amber-soft); color: var(--amber); margin-left: 8px; }
+
+/* Overview cards are buttons that switch tabs, so they carry the card's own look
+   with a button's affordance rather than a link's. */
+/* Nine summary cards read as three rows of three rather than auto-fit's ragged
+   last row, so the fixed count wins here. */
+.sec-ov { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 1119px) { .sec-ov { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.sec-ov-card { text-align: left; cursor: pointer; transition: border-color 140ms, background 140ms; }
+.sec-ov-card:hover { border-color: var(--text-low); background: var(--panel-hover); }
+.sec-ov-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sec-inline-link { color: var(--accent); font: inherit; }
+.sec-inline-link:hover { text-decoration: underline; }
+.sec-supplemental { background: var(--panel); color: var(--text-low); border: 1px solid var(--separator); margin-left: 8px; }
+
+/* Security page — phone layout.
+   Seven section links cannot fit 390px, and the shared tab bar they borrow their
+   look from scrolls with no visible affordance. Here the row wraps instead: every
+   destination stays on screen, at the cost of a second line. */
+@media (max-width: 720px) {
+  .sec-section-nav .tabs { flex-wrap: wrap; overflow: visible; row-gap: 0; }
+  .sec-section-nav .tabs button { flex: 0 1 auto; padding: 9px 12px; }
+
+  /* A phone card should not be a column of em-dashes: a cell with nothing in it
+     drops out, exactly as the accounts directory does. The desktop grid keeps
+     every column so the table still lines up. */
+  .tbl tbody td.cell-empty { display: none; }
+
+  /* Long unbroken identifiers (a pallet.call name) wrap instead of being clipped
+     by the labelled cell's `overflow: hidden`. */
+  .tbl tbody td.sec-wrap { overflow-wrap: anywhere; }
+
+  /* Values that carry a trailing qualifier ("$8.79k vs $0.17 left") need the two
+     parts stacked rather than crushed against the label. */
+  .tbl tbody td[data-label="Debt at risk"] .muted { display: block; }
+
+  /* The fuse plate's symbol is the only text on a 46px tile; give it the width. */
+  .fuse-plate { padding-left: 1px; padding-right: 1px; letter-spacing: 0; }
+
+  /* The egress budget reads as two lines on a phone — the used figure is the
+     number that matters, the limit is context. */
+  .sec-meter-head { row-gap: 6px; }
+  .sec-sinks { gap: 8px 14px; }
+}
+
+/* The first cell of every Security table names the thing the card is about — an
+   asset chip, a market, a paused call, an action. On a phone that is the card's
+   title, so it keeps the left edge and drops its column label, exactly as the
+   assets directory does. Everything after it stays a labelled value row. */
+@media (max-width: 720px) {
+  /* `Action` is named explicitly because the ledger's first cell is its colour dot,
+     which the phone layout hides — so the title is the second cell there. */
+  .sec-tbl tbody td[data-label]:first-child,
+  .sec-tbl tbody td[data-label="Action"] { text-align: left; padding-bottom: 8px; }
+  .sec-tbl tbody td[data-label]:first-child::before,
+  .sec-tbl tbody td[data-label="Action"]::before { display: none; }
+  .sec-tbl tbody td[data-label]:first-child .asset-chip { justify-content: flex-start; }
+  /* A title that is plain text reads as a heading rather than a value. */
+  .sec-tbl tbody td[data-label="Market"], .sec-tbl tbody td[data-label="Action"],
+  .sec-tbl tbody td[data-label="Paused call"], .sec-tbl tbody td[data-label="Published"] { font-weight: 500; }
+}
+
+/* Stat cards nested inside a padded card have ~318px to share on a 390px phone,
+   which is just under the shared 160px floor — so they fell to one per row and the
+   withdraw panel alone became four screens of scrolling. A slightly lower floor,
+   scoped to this page, pairs them up. */
+@media (max-width: 720px) {
+  .sec-page .pf-card .hdx-cards { grid-template-columns: repeat(auto-fit, minmax(136px, 1fr)); gap: 8px; }
+  .sec-page .pf-card .hdx-card { padding: 12px 13px; }
+  .sec-page .pf-card .hdx-card .hs { font-size: 10.5px; }
+}
+
+/* A risk figure leads with the money; the position count follows, small and quiet,
+   because it answers "how many" only after "how much". */
+.sec-amt { display: inline-flex; align-items: baseline; gap: 7px; white-space: nowrap; }
+.sec-amt-n { font-size: 11px; color: var(--text-low); }
+.sec-amt-n::after { content: ' pos'; }
+/* A qualifier that belongs to the column, not to the value under it. */
+.tbl thead th .th-sub { display: block; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text-lowest); }
+
+/* Security sections are pages, not tabs, so the nav row is links — same look as the
+   shared tab bar, but a real navigation, which is what resets the scroll position
+   and gives each section its own URL and history entry. */
+.sec-section-nav .tabs .sec-nav-link {
+  flex: 0 0 auto; padding: 10px 16px; font-size: 13px; font-weight: 500; color: var(--text-medium);
+  border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color 140ms, border-color 140ms;
+}
+.sec-section-nav .tabs .sec-nav-link:hover { color: var(--text-high); }
+.sec-section-nav .tabs .sec-nav-link.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Every ribbon number opens the section that explains it. */
+.ribbon .sec-ribbon-cell { border-radius: 10px; transition: background 140ms; }
+.ribbon .sec-ribbon-cell:hover { background: var(--panel-hover); }
+.ribbon .sec-ribbon-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

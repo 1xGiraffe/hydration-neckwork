@@ -447,6 +447,12 @@ export function useHdxDashboard() {
 export function useHollarDashboard() {
   return useQuery({ queryKey: ['hollar-dashboard'], queryFn: ({ signal }) => api.hollar(signal), staleTime: 120_000 })
 }
+// The circuit-breaker snapshot behind this refreshes every 60s on the API's
+// coordinated node-full refresher, so a matching poll keeps the fuse fills and
+// the egress meter within one refresh of the chain without ever out-running it.
+export function useSecurityDashboard() {
+  return useQuery({ queryKey: ['security-dashboard'], queryFn: ({ signal }) => api.security(signal), refetchInterval: 60_000, staleTime: 30_000 })
+}
 // Pool surfaces follow the dashboard shape: one query, no polling — pool
 // history advances on a ~2h grid, so 120s staleness costs nothing.
 export function useAssetLiquidity(assetId: number, enabled: boolean) {
