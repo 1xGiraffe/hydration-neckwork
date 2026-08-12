@@ -24,7 +24,7 @@ import {
   type MultisigOperationState,
 } from './onBehalfActivity.ts'
 import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
-import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx } from './xcmJourneyService.ts'
+import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx, type XcmJourneySource } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
 import { createHash } from 'node:crypto'
@@ -9395,6 +9395,32 @@ export function originTxExplorerUrl(urnStr: string, txHash: string | null): stri
   return null
 }
 
+// Our own chain, as the crosschain index names it. A journey with Hydration at an
+// end says nothing about a counterparty there — it names us.
+const HYDRATION_JOURNEY_URN = 'urn:ocn:polkadot:2034'
+
+// A message topic id travels with every leg that carries it, so the journey a row's
+// id resolves to is not always the leg the row represents: it can be one that STARTED
+// here. Reading its origin end then puts Hydration on both sides of the arrow and
+// pins a local account to a remote pill — the mirror of the guard applyXcmOutDests
+// already applies to its own side.
+export function journeyStartedHere(src: Pick<XcmJourneySource, 'origin'>): boolean {
+  return src.origin === HYDRATION_JOURNEY_URN
+}
+
+// Whether a Hydration-origin journey is the extrinsic-less row's OWN send rather than
+// some other row's. The HOLLAR AssetHub round trip is the case: an inbound message
+// makes Hydration send one straight back, and the crosschain index records that leg
+// with Hydration as the origin and the real counterparty at the DESTINATION end.
+// A journey a local extrinsic signed cannot be it — the rows this decides for have no
+// extrinsic, so their own send carries neither an origin account nor an origin tx.
+export function journeyIsOwnRemoteSend(
+  src: Pick<XcmJourneySource, 'origin' | 'destination' | 'from' | 'originTx'>,
+): boolean {
+  return journeyStartedHere(src) && !src.from && !src.originTx
+    && !!src.destination && src.destination !== HYDRATION_JOURNEY_URN
+}
+
 async function applyXcmInSources(rows: ActivityRow[]): Promise<void> {
   const inRows = rows.filter(r => r.type === 'xcm' && r.xcmDir === 'in' && r.messageId && !r.fromAccount)
   if (!inRows.length) return
@@ -9406,6 +9432,10 @@ async function applyXcmInSources(rows: ActivityRow[]): Promise<void> {
   for (const r of inRows) {
     const src = sources.get(r.messageId!)
     if (!src) continue
+    // A journey that started here is not this arrival's leg — sharing a topic id only
+    // says the two travelled together. Its far end is where we SENT something, which
+    // is not where this row came from, so the row keeps its own hop-chain badge.
+    if (journeyStartedHere(src)) continue
     const origin = externalChainRef(src.origin, src.from, src.fromFormatted)
     if (!origin) continue
     r.fromChain = origin.chain
@@ -9442,6 +9472,22 @@ async function applyXcmOutRemoteSources(rows: ActivityRow[]): Promise<void> {
   for (const r of remoteRows) {
     const src = sources.get(r.messageId!)
     if (!src) continue
+    if (journeyStartedHere(src)) {
+      // The topic resolved to the send ITSELF, not to the message that triggered it,
+      // so the counterparty — chain, account, and the transaction that received it —
+      // is the journey's destination end. Reading the origin end here named Hydration
+      // as its own destination and left the row with no account pill and no link.
+      if (!journeyIsOwnRemoteSend(src)) continue
+      const dest = externalChainRef(src.destination, src.to, src.toFormatted)
+      if (!dest) continue
+      r.destChain = dest.chain
+      r.destParachainId = dest.paraId
+      if (dest.account) r.destAccount = dest.account
+      r.destTxUrl = originTxExplorerUrl(src.destination, src.destTx) ?? r.destTxUrl
+      // A bridge on this leg acts at the end it leaves for, not the one it left.
+      r.bridge = bridgeLabel(src.originProtocol, src.destProtocol)
+      continue
+    }
     const other = externalChainRef(src.origin, src.from, src.fromFormatted)
     if (other) {
       r.destChain = other.chain
