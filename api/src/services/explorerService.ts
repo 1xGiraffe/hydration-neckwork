@@ -864,6 +864,7 @@ export function liquidityActionEventNames(action?: string): string[] {
 export const LIQUIDITY_AMOUNT_ARG: Record<string, string> = {
   'Omnipool.LiquidityAdded': 'amount',                     // assetId + amount
   'Omnipool.LiquidityRemoved': '',                         // sharesRemoved vs assetId
+  'Omnipool.PositionCreated': 'amount',                    // asset + amount (listing grant)
   'Stableswap.LiquidityAdded': 'shares',                   // asset_id IS the share token
   'Stableswap.LiquidityRemoved': 'shares',
   'XYK.LiquidityAdded': '',                                // amountA/amountB vs assetA
@@ -903,6 +904,41 @@ export const POOL_LIFECYCLE_EVENTS: ReadonlySet<string> = new Set(['XYK.PoolCrea
 export function liquidityAmountFromArgs(eventName: string, args: Record<string, unknown>): string {
   const arg = LIQUIDITY_AMOUNT_ARG[eventName]
   return arg ? argStr(args, arg) : ''
+}
+
+// The who/asset/amount a liquidity candidate displays, decided from the event args
+// alone. Shared by the in-memory builders (extrinsic page, block hook section) and
+// mirrored by liquidity_activity_mv's expressions, so the two layers cannot extract
+// a row differently. Omnipool.PositionCreated is the one event that names its
+// account `owner` and its asset `asset` — every other liquidity event uses `who`
+// plus one of rewardCurrency/assetId/poolId/assetA.
+export function liquidityCandidateArgs(eventName: string, args: Record<string, unknown>): {
+  who: string; asset_id: number; asset_b: number; pool_acc: string; amount: string
+} {
+  return {
+    who: argStr(args, 'who') || argStr(args, 'owner'),
+    asset_id: Number(args.rewardCurrency ?? args.assetId ?? args.poolId ?? args.assetA ?? args.asset ?? args.asset_id ?? 0),
+    asset_b: Number(args.assetB ?? 0),
+    pool_acc: argStr(args, 'pool'),
+    amount: liquidityAmountFromArgs(eventName, args),
+  }
+}
+
+// Drop every Omnipool.PositionCreated candidate whose block also holds an
+// Omnipool.LiquidityAdded naming the same account and asset: those are the two
+// companion events of one user add_liquidity, already rendered by the
+// LiquidityAdded row. What survives is the listing grant — `add_token`'s seed
+// position, which has no LiquidityAdded anywhere. The SQL twin of this rule lives
+// in routerHopLiquiditySql's predicate; the two must not drift.
+export function suppressPositionCreatedCompanions<T extends {
+  event_name: string; block_height: number; who: string; asset_id: number
+}>(rows: readonly T[]): T[] {
+  const added = new Set<string>()
+  for (const r of rows) {
+    if (r.event_name === 'Omnipool.LiquidityAdded') added.add(`${r.block_height}:${r.who.toLowerCase()}:${r.asset_id}`)
+  }
+  return rows.filter(r => r.event_name !== 'Omnipool.PositionCreated'
+    || !added.has(`${r.block_height}:${r.who.toLowerCase()}:${r.asset_id}`))
 }
 
 // Enrich Create-pool activity rows with BOTH seed legs (the same-extrinsic
@@ -12923,7 +12959,7 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
     }
 
     const liqRouteEndpoints = routerRouteEndpoints(events)
-    const liqRows = events
+    const liqRows = suppressPositionCreatedCompanions(events
       .filter(e => LIQUIDITY_EVENTS.includes(e.event_name))
       .map(e => {
         const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
@@ -12931,17 +12967,13 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
           block_height: e.block_height,
           extrinsic_index: e.extrinsic_index,
           event_name: e.event_name,
-          who: argStr(args, 'who'),
-          asset_id: Number(args.rewardCurrency ?? args.assetId ?? args.poolId ?? args.assetA ?? args.asset_id ?? 0),
-          asset_b: Number(args.assetB ?? 0),
-          pool_acc: argStr(args, 'pool'),
-          amount: liquidityAmountFromArgs(e.event_name, args),
+          ...liquidityCandidateArgs(e.event_name, args),
           ts: e.ts,
           event_index: e.event_index,
         }
       })
       .filter(r => !isRouterHopLiquidity(r.event_name, r.who, r.asset_id,
-        r.extrinsic_index == null ? undefined : liqRouteEndpoints.get(r.extrinsic_index)))
+        r.extrinsic_index == null ? undefined : liqRouteEndpoints.get(r.extrinsic_index))))
     await fillMissingLiquidityAmounts(liqRows)
     const createCands: { row: ActivityRow; pool: string; assetB: number }[] = []
     for (const r of liqRows) {
@@ -13246,17 +13278,18 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
     // module-account exclusion as getRecentLiquidity (source of truth).
     client.query({
       query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-                JSONExtractString(args_json, 'who') AS who,
+                if(JSONHas(args_json,'who'), JSONExtractString(args_json,'who'), JSONExtractString(args_json,'owner')) AS who,
                 multiIf(JSONHas(args_json,'rewardCurrency'), JSONExtractInt(args_json,'rewardCurrency'),
                   JSONHas(args_json,'assetId'), JSONExtractInt(args_json,'assetId'),
                   JSONHas(args_json,'poolId'), JSONExtractInt(args_json,'poolId'),
                   JSONHas(args_json,'assetA'), JSONExtractInt(args_json,'assetA'),
+                  JSONHas(args_json,'asset'), JSONExtractInt(args_json,'asset'),
                   JSONExtractInt(args_json,'asset_id')) AS asset_id,
                 multiIf(JSONHas(args_json,'claimed'), JSONExtractString(args_json,'claimed'), JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'shares')) AS amount
               FROM price_data.raw_events
               WHERE block_height = {h:UInt32} AND extrinsic_index IS NULL
                 AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
-                AND JSONExtractString(args_json,'who') NOT LIKE '0x6d6f646c%'
+                AND who NOT LIKE '0x6d6f646c%'
               ORDER BY event_index`,
       query_params: { h: height },
       format: 'JSONEachRow',
@@ -13393,7 +13426,7 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
   // Extrinsic-less liquidity — mirrors getRecentLiquidity's construction
   // (including its fillMissingLiquidityAmounts backfill, a no-op here since it
   // only applies to extrinsic-scoped rows).
-  const liqRows = await liquidityRes.json<LiquidityAmountCandidate & { ts: string }>()
+  const liqRows = suppressPositionCreatedCompanions(await liquidityRes.json<LiquidityAmountCandidate & { ts: string }>())
   await fillMissingLiquidityAmounts(liqRows)
   const seenLiquidity = new Set<string>()
   for (const r of liqRows) {
@@ -15071,6 +15104,12 @@ function shareTokenFoldSql(assetExpr: string): string {
 // It has to run BEFORE the caller's LIMIT — 1.38M of the 1.41M Stableswap liquidity events
 // are router hops, so filtering finished pages would empty them and desync every count.
 function routerHopLiquiditySql(bound: string, assetExpr = 'asset_id'): { joinSql: string; predicateSql: string } {
+  // The Omnipool.PositionCreated arm is the SQL twin of
+  // suppressPositionCreatedCompanions: a PositionCreated row renders only when no
+  // LiquidityAdded in its block names the same account and asset — what survives
+  // is `add_token`'s listing grant, the one position with no LiquidityAdded
+  // anywhere. Set-semantic NOT IN, so an unmerged replacement duplicate on the
+  // right side cannot change the answer.
   return {
     joinSql: `LEFT JOIN (
           SELECT block_height AS rh_block, extrinsic_index AS rh_ext,
@@ -15082,7 +15121,11 @@ function routerHopLiquiditySql(bound: string, assetExpr = 'asset_id'): { joinSql
     predicateSql: `AND NOT (event_name IN (${sqlEventNameList([...STABLESWAP_LIQUIDITY_EVENTS])})
             AND (who LIKE '0x6d6f646c%'
                  OR (length(rh_route_in) > 0
-                     AND NOT has(arrayConcat(rh_route_in, rh_route_out), ${shareTokenFoldSql(assetExpr)}))))`,
+                     AND NOT has(arrayConcat(rh_route_in, rh_route_out), ${shareTokenFoldSql(assetExpr)}))))
+            AND NOT (event_name = 'Omnipool.PositionCreated'
+                     AND (block_height, who, asset_id) IN (
+                       SELECT block_height, who, asset_id FROM price_data.liquidity_activity
+                       WHERE ${bound} AND event_name = 'Omnipool.LiquidityAdded'))`,
   }
 }
 
@@ -21009,7 +21052,14 @@ export async function getListTagValueEvents(listId: string, tagId: string, membe
 // exclusions and $-value filters aren't replicated here (a coarse histogram).
 export interface DailyFilters { type?: string; action?: string; token?: string }
 const TRANSFER_EVENTS = ['Balances.Transfer', 'Tokens.Transfer', 'Currencies.Transferred']
-const LIQUIDITY_EVENTS = ['Omnipool.LiquidityAdded', 'Omnipool.LiquidityRemoved', 'Stableswap.LiquidityAdded', 'Stableswap.LiquidityRemoved', 'XYK.LiquidityAdded', 'XYK.LiquidityRemoved', 'XYK.PoolCreated', 'XYK.PoolDestroyed', 'OmnipoolLiquidityMining.RewardClaimed', 'XYKLiquidityMining.RewardClaimed']
+// Omnipool.PositionCreated is a liquidity source for ONE shape only: a token
+// listing's `add_token` mints the seed position to a designated owner without
+// emitting Omnipool.LiquidityAdded, so the grant is invisible unless this event
+// stands in. On every user add_liquidity the two are companions in one block, so
+// every rendering/counting read suppresses a PositionCreated whose block holds a
+// LiquidityAdded naming the same owner and asset (routerHopLiquiditySql's
+// predicate; suppressPositionCreatedCompanions in the in-memory builders).
+const LIQUIDITY_EVENTS = ['Omnipool.LiquidityAdded', 'Omnipool.LiquidityRemoved', 'Omnipool.PositionCreated', 'Stableswap.LiquidityAdded', 'Stableswap.LiquidityRemoved', 'XYK.LiquidityAdded', 'XYK.LiquidityRemoved', 'XYK.PoolCreated', 'XYK.PoolDestroyed', 'OmnipoolLiquidityMining.RewardClaimed', 'XYKLiquidityMining.RewardClaimed']
 const VOTE_EVENTS = ['ConvictionVoting.Voted', 'Democracy.Voted']
 const sqlNames = (names: readonly string[]) => names.map(n => `'${n}'`).join(',')
 
