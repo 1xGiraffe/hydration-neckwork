@@ -92,10 +92,10 @@ describe('action filters invert their labelling exactly', () => {
 
   it('selects every liquidity event under exactly one action', () => {
     const all = liquidityActionEventNames()
-    expect(all.length).toBe(10)
+    expect(all.length).toBe(11)
     const selected = LIQUIDITY_ACTIONS.flatMap(action => liquidityActionEventNames(action))
     expect([...selected].sort()).toEqual([...all].sort())
-    expect(LIQUIDITY_ACTIONS.map(action => liquidityActionEventNames(action).length)).toEqual([3, 3, 1, 2, 1])
+    expect(LIQUIDITY_ACTIONS.map(action => liquidityActionEventNames(action).length)).toEqual([4, 3, 1, 2, 1])
   })
 
   it('gives an action no liquidity event produces an empty selection, not everything', () => {
@@ -158,7 +158,7 @@ describe('per-action selections partition their category', () => {
     }
     // Pinned so a category dropped from the table above fails here rather than silently
     // shrinking the check to nothing.
-    expect(checked).toBe(26)
+    expect(checked).toBe(27)
   })
 
   it('treats a failed DCA attempt as a subset of DCA, never a seventh bucket', () => {
@@ -350,11 +350,13 @@ describe('activity count arms count each row once', () => {
     const feed = names('const LIQUIDITY_EVENTS = [')
     const markers = names('const VALUE_EVENT_LIQUIDITY_NAMES = [')
 
-    expect(feed).toHaveLength(10)
+    expect(feed).toHaveLength(11)
     expect(markers).toHaveLength(6)
     expect(markers.filter(name => feed.includes(name))).toHaveLength(6)
+    // PositionCreated joins the non-marker complement: only 40 listing grants
+    // exist chain-wide, not a priceable flow series worth a marker stream.
     expect(feed.filter(name => !markers.includes(name)))
-      .toEqual(['XYK.PoolCreated', 'XYK.PoolDestroyed', 'OmnipoolLiquidityMining.RewardClaimed', 'XYKLiquidityMining.RewardClaimed'])
+      .toEqual(['Omnipool.PositionCreated', 'XYK.PoolCreated', 'XYK.PoolDestroyed', 'OmnipoolLiquidityMining.RewardClaimed', 'XYKLiquidityMining.RewardClaimed'])
   })
 
   // Pool-share membership is asset-registry state ClickHouse does not hold. It is
