@@ -44,7 +44,9 @@ describe('liquidity display amount pairing', () => {
   it('decides an amount arg for every event the liquidity read model ingests', () => {
     const ingested = mvStatement('IF NOT EXISTS price_data.liquidity_activity_mv')
     const where = ingested.slice(ingested.lastIndexOf('WHERE event_name IN ('))
-    const names = [...where.matchAll(/'([A-Za-z]+\.[A-Za-z]+)'/g)].map(m => m[1]).sort()
+    // Deduplicated: PositionCreated appears a second time in the WHERE's
+    // no-extrinsic admission clause, not only in the ingestion list.
+    const names = [...new Set([...where.matchAll(/'([A-Za-z]+\.[A-Za-z]+)'/g)].map(m => m[1]))].sort()
 
     expect(names.length).toBeGreaterThan(0)
     expect(Object.keys(LIQUIDITY_AMOUNT_ARG).sort()).toEqual(names)
@@ -55,6 +57,7 @@ describe('liquidity display amount pairing', () => {
     const cases: [string, Record<string, unknown>, string][] = [
       ['Omnipool.LiquidityAdded', { who: 'x', assetId: 5, amount: '700', positionId: '1' }, '700'],
       ['Omnipool.LiquidityRemoved', { who: 'x', positionId: '1', assetId: 5, sharesRemoved: '900', fee: '1' }, ''],
+      ['Omnipool.PositionCreated', { positionId: '1', owner: 'x', asset: 1000771, amount: '300', shares: '300', price: '7' }, '300'],
       ['Stableswap.LiquidityAdded', { poolId: 102, who: 'x', shares: '800', assets: [] }, '800'],
       ['Stableswap.LiquidityRemoved', { poolId: 102, who: 'x', shares: '800', amounts: [], fee: '1' }, '800'],
       ['XYK.LiquidityAdded', { who: 'x', assetA: 0, assetB: 5, amountA: '600', amountB: '7' }, ''],
