@@ -221,14 +221,17 @@ export function profileTabs(
   ]
 }
 
-export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, valueUsd, valueHint }: {
+export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUsd, valueUsd, valueHint }: {
   tradingVolumeUsd?: number | null
   liquidationVolumeUsd?: number | null
+  // Protocol revenue earned from this account (fees paid, penalties, interest).
+  revenueUsd?: number | null
   valueUsd: number
   valueHint?: ReactNode
 }) {
   const trading = tradingVolumeUsd ?? 0
   const liquidation = liquidationVolumeUsd ?? 0
+  const revenue = revenueUsd ?? 0
   return (
     <>
     <div className="acct-stats">
@@ -239,6 +242,10 @@ export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, valueUsd,
       {liquidation > 0 && <div className="acct-bal subtle">
         <div className="lab">Liquidation</div>
         <div className="amt">{F.usd(liquidation)}</div>
+      </div>}
+      {revenue > 0 && <div className="acct-bal subtle">
+        <div className="lab">Revenue</div>
+        <div className="amt">{F.usd(revenue)}</div>
       </div>}
       <div className="acct-bal">
         <div className="lab">Value</div>
@@ -653,15 +660,17 @@ function ProxyTypeBadge({ type }: { type: string }) {
   const col = PROXY_TYPE_COLORS[type] ?? 'var(--text-medium)'
   return <span className="pill-badge" title={`Proxy type: ${type}`} style={{ color: col, background: `color-mix(in srgb, ${col} 14%, transparent)` }}>{type}</span>
 }
-// Delay in blocks rendered with its rough wall-clock equivalent (6s blocks).
-function proxyDelay(delay: number): string | null {
+// Delay in blocks rendered with its rough wall-clock equivalent, converted at
+// the chain's measured pace (`blockSec`) — the pallet counts the announcement
+// delay in blocks, and what that is worth in minutes changes with block time.
+function proxyDelay(delay: number, blockSec?: number): string | null {
   if (delay <= 0) return null
-  const s = delay * 6
+  const s = blockSpanSeconds(delay, blockSec)
   const human = s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`
   return `${F.int(delay)} blocks (~${human})`
 }
-function ProxyRelationRow({ rel }: { rel: ProxyRelation }) {
-  const delay = proxyDelay(rel.delay)
+function ProxyRelationRow({ rel, blockSec }: { rel: ProxyRelation; blockSec?: number }) {
+  const delay = proxyDelay(rel.delay, blockSec)
   return (
     <span className="proxy-rel">
       <AddrPill account={rel.account} />
@@ -744,11 +753,12 @@ export function ContractSection({ contract, now }: { contract?: ContractInfo | n
 // only when the account actually has such a relation: who can act for this
 // account (its proxies) / whom it can act for, the multisig composition with
 // pending operations, and multisig memberships on signer pages.
-export function ProxyMultisigSection({ proxy, multisig, memberships, now }: {
+export function ProxyMultisigSection({ proxy, multisig, memberships, now, blockSec }: {
   proxy?: AccountProxyInfo | null
   multisig?: MultisigInfo | null
   memberships?: MultisigMembership[]
   now: number
+  blockSec?: number
 }) {
   if (!proxy && !multisig && !memberships?.length) return null
   return (
@@ -770,13 +780,13 @@ export function ProxyMultisigSection({ proxy, multisig, memberships, now }: {
             {proxy.delegates.length > 0 && (
               <>
                 <div className="dt" title="Accounts allowed to submit calls on behalf of this account">Controlled by</div>
-                <div className="dd proxy-dd">{proxy.delegates.map((r, i) => <ProxyRelationRow key={`${r.account.accountId}-${r.proxyType}-${i}`} rel={r} />)}</div>
+                <div className="dd proxy-dd">{proxy.delegates.map((r, i) => <ProxyRelationRow key={`${r.account.accountId}-${r.proxyType}-${i}`} rel={r} blockSec={blockSec} />)}</div>
               </>
             )}
             {proxy.delegatorOf.length > 0 && (
               <>
                 <div className="dt" title="Accounts this account may submit calls for">Proxy for</div>
-                <div className="dd proxy-dd">{proxy.delegatorOf.map((r, i) => <ProxyRelationRow key={`${r.account.accountId}-${r.proxyType}-${i}`} rel={r} />)}</div>
+                <div className="dd proxy-dd">{proxy.delegatorOf.map((r, i) => <ProxyRelationRow key={`${r.account.accountId}-${r.proxyType}-${i}`} rel={r} blockSec={blockSec} />)}</div>
               </>
             )}
           </div>

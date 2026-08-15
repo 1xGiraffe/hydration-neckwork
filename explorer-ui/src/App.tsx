@@ -34,6 +34,7 @@ const PoolDetail = lazy(() => import('./pages/PoolDetail').then(m => ({ default:
 const Omnipool = lazy(() => import('./pages/Omnipool').then(m => ({ default: m.Omnipool })))
 const Liquidity = lazy(() => import('./pages/Liquidity').then(m => ({ default: m.Liquidity })))
 const Hdx = lazy(() => import('./pages/Hdx').then(m => ({ default: m.Hdx })))
+const Revenue = lazy(() => import('./pages/Revenue').then(m => ({ default: m.Revenue })))
 const Hollar = lazy(() => import('./pages/Hollar').then(m => ({ default: m.Hollar })))
 const LinkDevice = lazy(() => import('./pages/LinkDevice').then(m => ({ default: m.LinkDevice })))
 
@@ -89,6 +90,7 @@ export default function App() {
       case 'list': return <ListDetail listId={route.listId} />
       case 'assets': return <Assets />
       case 'hdx': return <Hdx />
+      case 'revenue': return <Revenue />
       case 'hollar': return <Hollar />
       case 'asset': return <AssetDetail assetId={route.assetId} />
       case 'holders': return <AssetDetail assetId={route.assetId} initialTab="holders" />

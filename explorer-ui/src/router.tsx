@@ -56,6 +56,7 @@ export type Route =
   | { name: 'assets' }
   | { name: 'hdx' }
   | { name: 'hollar' }
+  | { name: 'revenue' }
   | { name: 'asset'; assetId: number }
   | { name: 'holders'; assetId: number }
   | { name: 'pool'; poolId: number }
@@ -132,6 +133,7 @@ export function parseRoute(loc: string): Route {
     }
     case 'hdx': return { name: 'hdx' }
     case 'hollar': return { name: 'hollar' }
+    case 'revenue': return { name: 'revenue' }
     case 'asset':
       return parts[1] && isSafeId(parts[1]) ? { name: 'asset', assetId: Number(parts[1]) } : { name: 'assets' }
     case 'holders':
@@ -288,6 +290,7 @@ export const paths = {
   assets: () => '/assets',
   hdx: () => '/hdx',
   hollar: () => '/hollar',
+  revenue: () => '/revenue',
   asset: (assetId: number) => `/asset/${assetId}`,
   holders: (assetId: number) => `/holders/${assetId}`,
   pool: (poolId: number) => `/pool/${poolId}`,

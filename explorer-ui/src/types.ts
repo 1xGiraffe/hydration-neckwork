@@ -46,7 +46,13 @@ export interface ExplorerStats {
   headBlock: number
   finalizedBlock: number
   headTime: string
+  // The chain's MEASURED pace — elastic scaling runs it a little ahead of the
+  // slot time. Use it for a live block delta (a countdown to a future block).
   avgBlockSec: number
+  // The runtime's NOMINAL slot time (6 today, 2 planned). Runtime block-count
+  // constants — a fuse period, a lock duration — are DERIVED from it, so a
+  // pallet's 14 400-block day is stated at this rate, never at the measured one.
+  nominalBlockSec: number
   transfers24h: number
   extrinsics24h: number
   activeAccounts24h: number
@@ -104,13 +110,15 @@ export interface TopAccountRow {
   activityCountComplete?: boolean
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
+  // Protocol revenue earned from this account/group.
+  revenueUsd?: number
   // Up to 4 largest holdings (> $10, highest USD first) → icon cluster after value.
   topAssets?: { asset: AssetRef; valueUsd: number }[]
   // Further holdings over $10 the four icons leave out.
   otherAssets?: number
 }
 
-export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'activity' | 'volume' | 'liquidation'
+export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'activity' | 'volume' | 'liquidation' | 'revenue'
 export interface AccountsPage {
   rows: TopAccountRow[]
   total: number
@@ -526,6 +534,7 @@ export interface AddressDetail {
   portfolioUsd: number
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
+  revenueUsd?: number
   moneyMarket: MoneyMarketPosition[]
   liquidityPositions?: LpPosition[]
   activeDcas?: ActiveDca[]
@@ -961,6 +970,45 @@ export interface HdxLockType { key: string; label: string; accounts: number; tot
 export interface HdxUnlockBucket { label: string; fromTs: string; toTs: string; gigahdx: number; vesting: number; vote: number }
 export interface HdxDailyFlow { date: string; buyHdx: number; sellHdx: number; buyers: number; sellers: number }
 export interface HdxMover { account: AccountRef; balanceHdx: number; boughtHdx: number; soldHdx: number; netHdx: number }
+
+// ── /revenue ────────────────────────────────────────────────────────────────
+export type RevenueStream =
+  | 'omnipool_asset_fee' | 'omnipool_protocol_fee' | 'liquidation_penalty'
+  | 'pepl_liquidation_profit' | 'asset_reserve' | 'hollar_borrow'
+  | 'hsm_revenue' | 'network_fee'
+export type RevenueRange = '30d' | '1y' | 'all'
+
+export interface RevenuePoint { t: number; usd: number }
+export interface RevenueDashboard {
+  totals: { day: number; week: number; month: number; allTime: number }
+  history: {
+    range: RevenueRange
+    bucketSeconds: number
+    series: { stream: RevenueStream; points: RevenuePoint[] }[]
+  }
+  breakdown: { stream: RevenueStream; usd: number; share: number }[]
+  topAccounts: { account: AccountRef; usd: number }[]
+  asOf: string
+}
+
+export interface RevenueFlowItem {
+  stream: RevenueStream
+  block: number
+  t: number
+  eventIndex: number
+  legIndex: number
+  account: AccountRef | null
+  assetId: number
+  usd: number
+}
+export interface RevenueFlowResponse {
+  items: RevenueFlowItem[]
+  drips: { key: string; label: string; stream: RevenueStream; usdPerBlock: number }[]
+  cursor: string
+  head: number
+  blockSeconds: number
+}
+
 export interface HdxDashboard {
   price: number | null
   change24h: number | null
@@ -1041,6 +1089,7 @@ export interface TagDetail {
   portfolioUsd: number
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
+  revenueUsd?: number
   moneyMarket: MoneyMarketPosition[]
   liquidityPositions?: LpPosition[]
   activeDcas?: ActiveDca[]

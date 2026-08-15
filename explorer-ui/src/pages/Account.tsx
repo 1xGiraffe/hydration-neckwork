@@ -44,7 +44,9 @@ export function Account({ address }: { address: string }) {
   const [editOpen, setEditOpen] = useState(false)
   const [editMounted, setEditMounted] = useState(false)
   const now = useNow()
-  const { data: stats } = useStats(!!data?.activeDcas?.length)
+  // Both the DCA countdowns and the proxy announcement delays are block counts
+  // the page states in time, so they convert at the chain's measured pace.
+  const { data: stats } = useStats(!!data?.activeDcas?.length || !!data?.proxy)
   const canonicalAddress = data ? (data.evmAddress ?? data.ss58Polkadot) : null
   const view = useQueryValue('view', 'overview')
   // Only the Balances treemap reads the per-asset balance history, and it is 98-99%
@@ -146,7 +148,7 @@ export function Account({ address }: { address: string }) {
                       no list on purpose (the contents stay behind the login). */}
                   <TaggedInHint taggedIn={taggedIn.data ?? []} session={session} />
                 </div>
-                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} valueUsd={data.portfolioUsd - debtUsd} />
+                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} revenueUsd={data.revenueUsd} valueUsd={data.portfolioUsd - debtUsd} />
               </div>
 
               <DetailTabs tabs={tabs} active={activeView} onChange={k => setQuery({ view: k === 'overview' ? null : k })} />
@@ -186,7 +188,7 @@ export function Account({ address }: { address: string }) {
 
               <ContractSection contract={data.contract} now={now} />
 
-              <ProxyMultisigSection proxy={data.proxy} multisig={data.multisig} memberships={data.multisigMemberships} now={now} />
+              <ProxyMultisigSection proxy={data.proxy} multisig={data.multisig} memberships={data.multisigMemberships} now={now} blockSec={stats?.avgBlockSec} />
 
               <CloseAccountsSection address={canonicalAddress ?? address} />
 
