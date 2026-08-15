@@ -152,6 +152,19 @@ describe('omnipool fee streams', () => {
       .toContain("'0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a'")
   })
 
+  it('never lists the protocol among its own payers, on any attributed stream', () => {
+    // Pallet accounts (treasury buybacks, the liquidation pallet's collateral
+    // sales, referral/OTC bots) and the runtime executor pay with protocol
+    // money; their rows keep their value but blank to the unattributed bucket.
+    for (const stream of ['omnipool_asset_fee', 'omnipool_protocol_fee', 'hsm_revenue',
+      'network_fee', 'liquidation_penalty', 'pepl_liquidation_profit'] as const) {
+      const sql = buildRevenueEventRowsSql(stream)
+      expect(sql, stream).toContain("startsWith")
+      expect(sql, stream).toContain("'0x6d6f646c'")
+      expect(sql, stream).toContain('0x45544800000000000000000000000000000000000000090a0000000000000000')
+    }
+  })
+
   it('exports the protocol-revenue predicate the explorer and account model share', () => {
     // Asset-fee legs count as protocol revenue only when routed out of the pool
     // (or burned); lp stays with LPs and legacy unknown legs stay unclassified.

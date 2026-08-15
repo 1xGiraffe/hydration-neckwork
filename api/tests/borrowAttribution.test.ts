@@ -43,6 +43,13 @@ describe('accountBorrowInterestSql', () => {
     expect(sql).toContain("concat('0x45544800', substring(holder, 3), '0000000000000000')")
     expect(sql).toContain('greatest(')
   })
+
+  it('blanks protocol-internal holders to the unattributed bucket', () => {
+    // Same rule as attributablePayerSql: pallet H160s and the runtime executor
+    // still weigh (conservation), but never appear as payers.
+    expect(sql).toContain("startsWith(holder, '0x6d6f646c')")
+    expect(sql).toContain('0x000000000000000000000000000000000000090a')
+  })
 })
 
 describe('assetReserveMintsSql', () => {
