@@ -17,7 +17,7 @@ import type { TopAccountRow } from '../types'
 // short member list arrives already ranked. So the header renders sort buttons
 // only when a handler is passed, and reads as plain labels otherwise.
 
-export type AccountSortKey = 'value' | 'health' | 'identity' | 'supplied' | 'borrowed' | 'activity' | 'volume' | 'liquidation'
+export type AccountSortKey = 'value' | 'health' | 'identity' | 'supplied' | 'borrowed' | 'activity' | 'volume' | 'liquidation' | 'revenue'
 
 // Below 720px every row becomes a card, where a line reading "BORROWED —"
 // carries nothing: cells with no value are marked so the card can drop them.
@@ -43,7 +43,7 @@ export function HealthSimBadge({ hf, addr }: { hf: { label: string; cls: string 
   )
 }
 
-export function AccountRow({ r }: { r: TopAccountRow }) {
+export function AccountRow({ r, memberView }: { r: TopAccountRow; memberView?: boolean }) {
   // Badge only for actual borrowers — pure suppliers ('inf') show nothing.
   // Tag rows link DefiSim to the member holding the worst position.
   const hf = r.healthFactor && r.healthFactor !== 'inf' ? healthFactorDisplay(r.healthFactor) : null
@@ -56,10 +56,17 @@ export function AccountRow({ r }: { r: TopAccountRow }) {
   // so the pill, the health badge and the sparkline keep their own targets, and
   // a row with neither (a bare DefiSim account) stays plain rather than
   // pretending to lead somewhere.
-  const to = r.tag ? paths.tag(r.tag.tagId) : r.account ? paths.account(r.account.address) : null
+  // A member list is ABOUT its members: each row shows the account itself
+  // (never a tag pill that would loop back to the page the reader is on) and
+  // the whole row opens the account.
+  const to = memberView && r.account
+    ? paths.account(r.account.address)
+    : r.tag ? paths.tag(r.tag.tagId) : r.account ? paths.account(r.account.address) : null
   return (
     <tr {...(to ? rowNav(to) : {})}>
-      <td data-label="Account">{r.tag ? <TagGroupPill tag={r.tag} /> : r.account ? <AddrPill account={r.account} /> : <Dash />}</td>
+      <td data-label="Account">{memberView && r.account
+        ? <AddrPill account={r.account} noTag />
+        : r.tag ? <TagGroupPill tag={r.tag} /> : r.account ? <AddrPill account={r.account} /> : <Dash />}</td>
       <td data-label="Value" className="r mono">{F.usd(r.portfolioUsd)}</td>
       <td data-label="Holdings" className={`holdings-cell${emptyIf(!r.topAssets?.length)}`}>{r.topAssets?.length ? <TokenIconRow assets={r.topAssets} others={r.otherAssets ?? 0} /> : <Dash />}</td>
       <td data-label="1Y" className={`r${emptyIf(!(r.sparkline && r.sparkline.length > 1))}`}>{r.sparkline && r.sparkline.length > 1 ? <Sparkline data={r.sparkline} /> : <Dash />}</td>
@@ -70,6 +77,7 @@ export function AccountRow({ r }: { r: TopAccountRow }) {
         : hf ? <span className={`hf ${hf.cls}`}>{hf.label}</span> : <Dash />}</td>
       <td data-label="Liquidation $" className={`r mono${emptyIf(!r.liquidationVolumeUsd)}`}>{r.liquidationVolumeUsd ? F.usd(r.liquidationVolumeUsd) : <Dash />}</td>
       <td data-label="Trading $" className={`r mono${emptyIf(!r.tradingVolumeUsd)}`}>{r.tradingVolumeUsd ? F.usd(r.tradingVolumeUsd) : <Dash />}</td>
+      <td data-label="Revenue" className={`r mono${emptyIf(!r.revenueUsd)}`}>{r.revenueUsd ? F.usd(r.revenueUsd) : <Dash />}</td>
       {/* A partial total is a floor: the feed runs deeper than it could be
           counted, so it reads as "at least this" instead of as exact. */}
       <td data-label="Activity" className={`r${emptyIf(r.activityCount == null)}`}>{count(r.activityCount)}{r.activityCount != null && r.activityCountComplete === false ? '+' : ''}</td>
@@ -77,7 +85,7 @@ export function AccountRow({ r }: { r: TopAccountRow }) {
   )
 }
 
-export function AccountsTable({ rows, loading, pending, sort, onSort, emptyLabel = 'No accounts', skeletonRows = 12, footer }: {
+export function AccountsTable({ rows, loading, pending, sort, onSort, emptyLabel = 'No accounts', skeletonRows = 12, footer, memberView }: {
   rows: TopAccountRow[]
   loading?: boolean
   pending?: boolean
@@ -85,6 +93,8 @@ export function AccountsTable({ rows, loading, pending, sort, onSort, emptyLabel
   onSort?: (key: AccountSortKey) => void
   emptyLabel?: string
   skeletonRows?: number
+  // Member lists (tag pages): rows render and link as the accounts themselves.
+  memberView?: boolean
   // Rendered inside the panel, under the table — where the directory's pager
   // has always sat, sharing the panel's own surface.
   footer?: ReactNode
@@ -102,6 +112,7 @@ export function AccountsTable({ rows, loading, pending, sort, onSort, emptyLabel
           <th className="r">{th('health', 'Health')}</th>
           <th className="r">{th('liquidation', 'Liquidation $')}</th>
           <th className="r">{th('volume', 'Trading $')}</th>
+          <th className="r">{th('revenue', 'Revenue')}</th>
           <th className="r">{th('activity', 'Activity')}</th>
         </tr></thead>
         <tbody {...pendingRows(pending)}>
@@ -109,9 +120,9 @@ export function AccountsTable({ rows, loading, pending, sort, onSort, emptyLabel
               gives the 1Y chart a whole line of its own, so its height is not the
               column count: the directory's rows measure 172px (identity, value,
               holdings, chart) to 324px, averaging seven lines' worth. */}
-          {loading && !rows.length ? <TableSkeleton cols={10} mobileCols={7} rows={skeletonRows} />
-            : !rows.length ? <EmptyRow cols={10}>{emptyLabel}</EmptyRow>
-              : rows.map((r, i) => <AccountRow key={accountRowKey(r, i)} r={r} />)}
+          {loading && !rows.length ? <TableSkeleton cols={11} mobileCols={7} rows={skeletonRows} />
+            : !rows.length ? <EmptyRow cols={11}>{emptyLabel}</EmptyRow>
+              : rows.map((r, i) => <AccountRow key={accountRowKey(r, i)} r={r} memberView={memberView} />)}
         </tbody>
       </table>
       {footer}
@@ -132,6 +143,7 @@ export function AccountsSortSelect({ id, sort, onSort }: { id: string; sort: Acc
         <option value="health">Health</option>
         <option value="liquidation">Liquidation $</option>
         <option value="volume">Trading $</option>
+        <option value="revenue">Revenue</option>
         <option value="activity">Activity</option>
       </select>
     </div>

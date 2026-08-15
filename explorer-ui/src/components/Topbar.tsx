@@ -43,17 +43,18 @@ const NAV_LINKS: NavItem[] = [
   { to: paths.liquidity(), label: 'Liquidity', match: ['liquidity', 'pool', 'omnipool'] },
   { to: paths.hdx(), label: 'HDX', match: ['hdx'] },
   { to: paths.hollar(), label: 'HOLLAR', match: ['hollar'] },
+  { to: paths.revenue(), label: 'Revenue', match: ['revenue'] },
 ]
 // Mid-width fold (861–1119px, CSS-gated): Assets/HDX/HOLLAR collapse into one
 // dropdown so the topbar search keeps a usable width. The direct links carry
 // .nav-fold and hide in that window; this group is hidden everywhere else.
 // The trigger itself navigates to Assets, so the menu lists only HDX/HOLLAR —
 // an "Assets" entry under a group named Assets would be redundant.
-const FOLDABLE = new Set(['Assets', 'Liquidity', 'HDX', 'HOLLAR'])
+const FOLDABLE = new Set(['Assets', 'Liquidity', 'HDX', 'HOLLAR', 'Revenue'])
 const ASSETS_FOLD_GROUP: { label: string; items: NavItem[]; menuItems?: NavItem[] } = {
   label: 'Assets',
   items: NAV_LINKS.filter(it => FOLDABLE.has(it.label)),
-  menuItems: NAV_LINKS.filter(it => it.label === 'Liquidity' || it.label === 'HDX' || it.label === 'HOLLAR'),
+  menuItems: NAV_LINKS.filter(it => it.label === 'Liquidity' || it.label === 'HDX' || it.label === 'HOLLAR' || it.label === 'Revenue'),
 }
 
 function matches(item: NavItem, route: Route): boolean {
