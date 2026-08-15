@@ -120,7 +120,12 @@ per_holder AS (
   )
   GROUP BY contract, holder
 )
-SELECT concat('0x45544800', substring(holder, 3), '0000000000000000') AS account,
+-- Protocol-internal holders (pallet accounts acting through their truncated
+-- H160, and the runtime executor) blank to the unattributed bucket, matching
+-- attributablePayerSql in revenueStreams.ts: their weight still participates,
+-- so conservation holds while no protocol actor lists among its own payers.
+SELECT if(startsWith(holder, '0x6d6f646c') OR holder = '0x000000000000000000000000000000000000090a',
+          '', concat('0x45544800', substring(holder, 3), '0000000000000000')) AS account,
        toString(sum(greatest(
          intDiv((p.s0 + p.dw) * toInt256(i.idx1) - p.s0 * toInt256(i.idx0), ${RAY_INT_SQL}) - p.pr,
          toInt256(0)))) AS interest
