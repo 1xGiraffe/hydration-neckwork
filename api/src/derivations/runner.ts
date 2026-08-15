@@ -1,4 +1,4 @@
-// Continuous background process for the four derivation jobs in jobs.ts (the
+// Continuous background process for the derivation jobs in jobs.ts (the
 // read models a plain materialized view cannot express). Entrypoint:
 // `tsx src/derivations/runner.ts` — a standalone process/container that owns
 // these jobs exclusively; the API itself no longer runs any timer-driven
@@ -6,9 +6,9 @@
 //
 // Each cycle opens a fresh long-op client (a slow rebuild must never hold a
 // connection open between ticks), does the work, and closes it in `finally`
-// regardless of outcome. The four jobs share one client per cycle but are
-// each wrapped in their own try/catch so one failing job (e.g. a transient
-// ClickHouse hiccup) never stalls the other three.
+// regardless of outcome. The jobs share one client per cycle but are each
+// wrapped in their own try/catch so one failing job (e.g. a transient
+// ClickHouse hiccup) never stalls the others.
 //
 // Set DERIVATIONS_ONESHOT=1 to run exactly one cycle and exit 0 instead of
 // looping — used to verify a cycle completes cleanly without waiting on the
@@ -17,8 +17,11 @@
 import { createLongOpClickHouseClient, type ClickHouseClient } from '../db/client.ts'
 import { loadExplorerAssets } from '../services/explorerAssets.ts'
 import {
+  runAccountRevenue,
   runAccountTradeVolume,
   runOmnipoolOwnerIntervals,
+  runPoolSwapHourly,
+  runRevenueEvents,
   runXykFarmIntervals,
   runXykTotalShares,
   type DerivationResult,
@@ -57,9 +60,20 @@ export interface DerivationJob {
 // rows) name the same thing regardless of which path a job took.
 const JOBS: DerivationJob[] = [
   { model: 'account_trade_volume', run: runAccountTradeVolume, needsAssets: true },
+  // No needsAssets: pool_swap_hourly stores raw integer leg sums and no
+  // valuation, so it has no dependency on the registry's decimals or price
+  // aliases and stays correct on a cycle whose registry refresh failed.
+  { model: 'pool_swap_hourly', run: runPoolSwapHourly },
   { model: 'omnipool_owner_intervals', run: runOmnipoolOwnerIntervals },
   { model: 'xyk_farm_intervals', run: runXykFarmIntervals },
   { model: 'xyk_total_shares', run: runXykTotalShares },
+  // Valuation is baked into every revenue row, so the job shares
+  // account_trade_volume's registry guard.
+  { model: 'revenue_events', run: runRevenueEvents, needsAssets: true },
+  // Strictly after revenue_events: its staleness keys on the fresh partition's
+  // computed_at, and its USD comes from the already-valued rows (no registry
+  // dependency of its own).
+  { model: 'account_revenue', run: runAccountRevenue },
 ]
 
 export interface RunCycleDeps {
