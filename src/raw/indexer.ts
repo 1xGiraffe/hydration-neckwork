@@ -32,6 +32,9 @@ import {
 } from './json.js'
 import { assertMoneyMarketPositionConfig, extractMoneyMarketRows, snapshotMoneyMarketPositions } from './moneyMarket.js'
 import { createClickHouseClient } from '../db/client.js'
+import { minutesFromEnvironment } from '../util/env.js'
+import { MS_PER_MINUTE, crossedChainTimeBoundary } from '../util/chainTimeCadence.js'
+import { retainsSnapshotAtHeight, snapshotEveryNBlocksFromEnvironment } from './snapshotCadence.js'
 import { fetchChainHead, fetchFinalizedHead } from '../rpc/head.js'
 import type {
   RawBlockRow,
@@ -186,32 +189,35 @@ function serializeSnapshot(
   }
 }
 
-function rawAssetSnapshotInterval(): number {
-  const rawInterval = Number.parseInt(
-    process.env.RAW_ASSET_SNAPSHOT_INTERVAL ?? `${config.SNAPSHOT_INTERVAL}`,
-    10,
-  )
-  return Number.isFinite(rawInterval) && rawInterval > 0
-    ? rawInterval
-    : config.SNAPSHOT_INTERVAL
+// Chain time between asset-registry scans, not a block count: the interval is a
+// duration, and a block count only expresses one at a fixed block time.
+function rawAssetSnapshotIntervalMinutes(): number {
+  return minutesFromEnvironment('RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES', config.SNAPSHOT_INTERVAL_MINUTES, {
+    name: 'RAW_ASSET_SNAPSHOT_INTERVAL',
+  })
 }
 
 function snapshotTraceEnabled(): boolean {
   return process.env.RAW_SNAPSHOT_TRACE === 'true'
 }
 
-// Periodic Money Market position re-aggregation: every N blocks, re-read every
-// known borrower's getUserAccountData so the explorer's portfolio history reflects
-// interest accrual + oracle price drift between a borrower's own MM actions
-// (event-only snapshots otherwise freeze an untouched position). ~12h by default,
-// which is ~1 sample per explorer history bucket over a multi-week window.
+// Periodic Money Market position re-aggregation: on every 12h chain-time boundary,
+// re-read every known borrower's getUserAccountData so the explorer's portfolio
+// history reflects interest accrual + oracle price drift between a borrower's own
+// MM actions (event-only snapshots otherwise freeze an untouched position). 12h is
+// ~1 sample per explorer history bucket over a multi-week window.
 function mmPeriodicSnapshotEnabled(): boolean {
   return (process.env.RAW_MM_PERIODIC_SNAPSHOT_ENABLED ?? 'true') !== 'false'
 }
 
-function mmSnapshotIntervalBlocks(): number {
-  const configured = Number.parseInt(process.env.RAW_MM_SNAPSHOT_INTERVAL_BLOCKS ?? '7200', 10)
-  return Number.isSafeInteger(configured) && configured > 0 ? configured : 7200
+// 12h of chain time, not 7,200 blocks. The cost of this job is an eth_call per
+// known borrower (3,216 positions read from 5,598 borrowers at the last measured
+// run), so the block-count form would have tripled its RPC fan-out at a 2s block
+// time purely as an artefact of how the interval was written down.
+function mmSnapshotIntervalMinutes(): number {
+  return minutesFromEnvironment('RAW_MM_SNAPSHOT_INTERVAL_MINUTES', 720, {
+    name: 'RAW_MM_SNAPSHOT_INTERVAL_BLOCKS',
+  })
 }
 
 // Seed the borrower set from positions already in ClickHouse so a freshly started
@@ -324,7 +330,9 @@ function addSwapFamilies(
 function liveFinalityPollIntervalMs(): number {
   // Startup wait only (the follower's own head polling is RPC_HEAD_POLL_MS):
   // how often to re-check finality when we resumed already caught up to the
-  // finalized head. 4s keeps the resume-into-follow handoff under one block.
+  // finalized head. 4s keeps the resume-into-follow handoff under one block at a
+  // 6s block time — at 2s it is two blocks, so drop it to 1500-2000ms then (it is
+  // one extra chain_getFinalizedHead against a local RPC, only during startup).
   const configured = Number.parseInt(process.env.RAW_LIVE_FINALITY_POLL_MS ?? '4000', 10)
   return Number.isSafeInteger(configured) && configured > 0 ? configured : 4_000
 }
@@ -406,11 +414,22 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
     }
   }
 
-  const registry = new AssetRegistryTracker(rawAssetSnapshotInterval())
+  const registry = new AssetRegistryTracker(rawAssetSnapshotIntervalMinutes())
   const compositionCache = new PoolCompositionCache()
 
+  // Throws on a cadence that would stop populating the % 600 pool-history MVs,
+  // before a single block is indexed.
+  const snapshotEveryNBlocks = snapshotEveryNBlocksFromEnvironment()
+  if (snapshotEveryNBlocks > 1) {
+    console.warn(
+      `[Raw] RAW_SNAPSHOT_EVERY_N_BLOCKS=${snapshotEveryNBlocks}: raw_block_snapshots keeps one row per ${snapshotEveryNBlocks} blocks. ` +
+      'The main (price) pipeline requires a snapshot row for every historical block it replays ' +
+      '(src/indexer.ts, "Missing finalized raw snapshot"), so any range it has not already processed will fail.',
+    )
+  }
+
   const mmSnapshotEnabled = mmPeriodicSnapshotEnabled()
-  const mmSnapshotInterval = mmSnapshotIntervalBlocks()
+  const mmSnapshotIntervalMs = mmSnapshotIntervalMinutes() * MS_PER_MINUTE
   // Authoritative wrapper↔base relation for the snapshot payload the price
   // pipeline replays; reloaded when the asset registry changes.
   const atokenReserves = new AtokenReserveMap()
@@ -419,7 +438,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
   if (mmSnapshotEnabled) {
     try {
       knownBorrowers = await loadKnownBorrowers()
-      console.log(`[Raw] Money Market periodic snapshot enabled (every ${mmSnapshotInterval} blocks); seeded ${knownBorrowers.size} borrowers`)
+      console.log(`[Raw] Money Market periodic snapshot enabled (every ${mmSnapshotIntervalMs / MS_PER_MINUTE} minutes of chain time); seeded ${knownBorrowers.size} borrowers`)
     } catch (error) {
       console.warn('[Raw] Failed to seed Money Market borrower set; will accumulate from events', error)
     }
@@ -428,6 +447,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
   let currentState: SnapshotState | null = null
   let previousBlockHash: string | null = null
   let previousBlockHeight: number | null = null
+  let previousBlockTimestampMs: number | null = null
   let previousSpecVersion: number | null = null
 
   let lastLogBlock = startBlock
@@ -450,6 +470,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       if (firstHeight <= previousBlockHeight) {
         previousBlockHash = null
         previousBlockHeight = null
+        previousBlockTimestampMs = null
       } else if (firstHeight > previousBlockHeight + 1) {
         throw new Error(`[Raw][Integrity] Processor gap between blocks ${previousBlockHeight} and ${firstHeight}`)
       }
@@ -474,8 +495,14 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
         compositionCache.invalidateAll()
       }
 
+      // Captured before the update: the money-market cadence below asks whether
+      // this block is the first one past a chain-time boundary, which needs the
+      // previous block's timestamp.
+      const priorBlockTimestampMs = previousBlockTimestampMs
+
       previousBlockHash = block.header.hash
       previousBlockHeight = blockHeight
+      previousBlockTimestampMs = block.header.timestamp ?? null
       previousSpecVersion = specVersion
 
       ctx.store.addBlocks([serializeBlock(block.header, ingestSource)])
@@ -545,16 +572,22 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
         xcmBridgeOperations.operationTraces.length
 
       // Track every borrower seen via event-driven positions, then re-snapshot the
-      // whole set on interval boundaries (deterministic by absolute height so each
-      // boundary is covered exactly once across the parallel range workers). eth_call
-      // failures degrade to parser warnings, never abort the block.
+      // whole set on chain-time boundaries — the first block past each 12h mark on
+      // the absolute UTC grid. Deterministic like the absolute-height boundary it
+      // replaces (it depends only on the two adjacent block timestamps, not on where
+      // a worker started), so each boundary is covered exactly once across the
+      // parallel range workers and a replay writes the same heights. The one case it
+      // cannot see is a boundary falling on a worker's very first block, where there
+      // is no previous block to compare with; that boundary is skipped rather than
+      // guessed at, which costs one sample and keeps replays reproducible.
+      // eth_call failures degrade to parser warnings, never abort the block.
       if (mmSnapshotEnabled) {
         for (const position of moneyMarket.positions) {
           if (!position.user_address) continue
           const firstBlock = knownBorrowers.get(position.user_address)
           if (firstBlock == null || blockHeight < firstBlock) knownBorrowers.set(position.user_address, blockHeight)
         }
-        if (blockHeight % mmSnapshotInterval === 0) {
+        if (crossedChainTimeBoundary(priorBlockTimestampMs, block.header.timestamp, mmSnapshotIntervalMs)) {
           const borrowers = borrowersAtHeight(knownBorrowers, blockHeight)
           if (borrowers.length > 0) {
             const mmSnapshot = await tracePhase(blockHeight, 'mm_periodic_snapshot', () =>
@@ -685,11 +718,17 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
         throw new Error(`Snapshot state not initialized at block ${blockHeight}`)
       }
 
-      const payload = buildSnapshotPayload(block.header, currentState)
-      const payloadJson = toJsonString(payload)
-      ctx.store.addSnapshots([
-        serializeSnapshot(payloadJson, block.header, ingestSource),
-      ])
+      // The ~273 KB payload is built and stored per block by default. Under a
+      // thinned cadence the serialization is skipped too, not just the row — the
+      // JSON is the cost, and `currentState` (which the next block reuses) is
+      // maintained above regardless of whether this height is written out.
+      if (retainsSnapshotAtHeight(blockHeight, snapshotEveryNBlocks)) {
+        const payload = buildSnapshotPayload(block.header, currentState)
+        const payloadJson = toJsonString(payload)
+        ctx.store.addSnapshots([
+          serializeSnapshot(payloadJson, block.header, ingestSource),
+        ])
+      }
 
       blocksProcessed++
 
