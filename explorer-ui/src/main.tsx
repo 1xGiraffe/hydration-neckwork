@@ -5,6 +5,7 @@ import App from './App'
 import { shouldRetryQuery } from './queryRetry'
 import { LIVE_PUSH_KEYS, POOL_PUSH_KEYS, subscribeHead } from './live'
 import './styles/global.css'
+import { initTabsInk } from './tabsInk'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -36,3 +37,5 @@ createRoot(document.getElementById('root')!).render(
     </QueryClientProvider>
   </StrictMode>,
 )
+
+initTabsInk()

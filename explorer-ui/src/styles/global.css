@@ -1186,7 +1186,17 @@ svg { display: block; }
 .detail-header .nav-btns a svg, .detail-header .nav-btns button svg { width: 14px; height: 14px; }
 
 /* ============ TABS ============ */
-.tabs { display: flex; gap: 4px; margin: 24px 0 16px; border-bottom: 1px solid var(--separator); overflow-x: auto; scrollbar-width: none; }
+.tabs { display: flex; gap: 4px; margin: 24px 0 16px; border-bottom: 1px solid var(--separator); overflow-x: auto; scrollbar-width: none; position: relative; }
+/* Sliding active indicator (tabsInk.ts): a ::before ink line per bar glides
+   between tabs, positioned purely via CSS variables the script writes — no
+   injected DOM, so React's children stay untouched. While present, the
+   per-button underline (the no-JS fallback) yields. The transition arms only
+   after first placement (ink-live), so the ink never slides in from zero. */
+.tabs.has-ink::before { content: ''; position: absolute; bottom: 0; height: 2px;
+  left: var(--ink-left, 0); width: var(--ink-width, 0);
+  background: var(--accent); border-radius: 1px; pointer-events: none; }
+.tabs.ink-live::before { transition: left 260ms var(--ease-standard), width 260ms var(--ease-standard); }
+.tabs.has-ink button.active { border-bottom-color: transparent; }
 .tabs::-webkit-scrollbar { display: none; }
 .tabs button { padding: 10px 16px; font-size: 13px; font-weight: 500; color: var(--text-medium); border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color 140ms, border-color 140ms, transform 90ms ease; }
 .tabs button { flex: 0 0 auto; }
