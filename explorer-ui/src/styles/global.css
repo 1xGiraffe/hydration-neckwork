@@ -3069,6 +3069,12 @@ a.rev-pill-label:hover { color: var(--accent); }
 @media (max-width: 920px) { .rev-grid { grid-template-columns: 1fr; } }
 /* Page-level timeframe row: governs history, breakdown and top payers alike. */
 .rev-controls { display: flex; justify-content: flex-end; margin: 4px 0 -30px; position: relative; z-index: 1; }
-@media (max-width: 720px) { .rev-controls { justify-content: flex-start; margin-bottom: 0; } }
+@media (max-width: 720px) {
+  .rev-controls { justify-content: flex-start; margin-bottom: 0; }
+  /* Three short tabs never scroll, so the mobile tab bars' right-edge
+     "scroll for more" fade (see the .tabs mask below) only chews the last
+     button; exempt this selector from it. */
+  .rev-controls .tabs { -webkit-mask-image: none; mask-image: none; }
+}
 .rev-breakdown-tbl { margin-top: 12px; }
 .rev-note { color: var(--text-low); font-size: 12.5px; max-width: 720px; margin: 18px 2px 8px; line-height: 1.55; }
