@@ -95,8 +95,16 @@ export function RevenueFlow() {
 
   useEffect(() => {
     const onVisibility = () => setHidden(document.hidden)
+    // pageshow/focus too: a mobile browser restoring a frozen page does not
+    // reliably fire visibilitychange, and a stuck hidden=true froze the river.
     document.addEventListener('visibilitychange', onVisibility)
-    return () => document.removeEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pageshow', onVisibility)
+    window.addEventListener('focus', onVisibility)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pageshow', onVisibility)
+      window.removeEventListener('focus', onVisibility)
+    }
   }, [])
 
   useEffect(() => {
@@ -118,10 +126,20 @@ export function RevenueFlow() {
   const [ledger, setLedger] = useState<FlowEmission[]>([])
 
   useEffect(() => {
-    if (hidden) return
+    // The loop is ALWAYS registered: browsers already suspend rAF while the
+    // page is hidden, so backgrounding pauses it for free — and gating it on
+    // the `hidden` state instead proved fragile (a restore that skipped
+    // visibilitychange left the state stuck and the river frozen). A frame
+    // firing IS proof of visibility, so it also self-heals a stale flag.
     let frame = 0
     const loop = () => {
-      const due = scheduler.drain(Date.now())
+      if (document.hidden) {
+        frame = window.requestAnimationFrame(loop)
+        return
+      }
+      setHidden(prev => (prev ? false : prev))
+      const now = Date.now()
+      const due = scheduler.drain(now)
       if (due.length) {
         if (reducedMotion) {
           setLedger(prev => [...due.reverse(), ...prev].slice(0, 14))
@@ -133,14 +151,19 @@ export function RevenueFlow() {
           const travel = vertical
             ? (stage ? stage.clientHeight : 420) - 140
             : -(((stage ? stage.clientWidth : 1200)) - 172)
-          setParticles(prev => [...prev, ...due.map(e => toParticle(e, vertical, fullscreen, travel))].slice(-200))
+          setParticles(prev => [
+            // Prune strays: a particle whose animation clock a freeze swallowed
+            // would otherwise sit in the stage forever without an animationend.
+            ...prev.filter(p => now - p.at < 90_000),
+            ...due.map(e => toParticle(e, vertical, fullscreen, travel)),
+          ].slice(-200))
         }
       }
       frame = window.requestAnimationFrame(loop)
     }
     frame = window.requestAnimationFrame(loop)
     return () => window.cancelAnimationFrame(frame)
-  }, [scheduler, reducedMotion, vertical, fullscreen, hidden])
+  }, [scheduler, reducedMotion, vertical, fullscreen])
 
   function arrive(particle: Particle): void {
     setParticles(prev => prev.filter(p => p.id !== particle.id))
