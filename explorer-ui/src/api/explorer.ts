@@ -2,7 +2,8 @@ import type {
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem,
   AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail,
-  AccountHistoryResponse, CloseAccountsResponse, HdxDashboard, HollarDashboard, SecurityDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
+  AccountHistoryResponse, CloseAccountsResponse, HdxDashboard,
+  RevenueDashboard, RevenueFlowResponse, RevenueRange, HollarDashboard, SecurityDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
   AssetLiquidity, PoolDetail, OmnipoolDetail,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
@@ -208,6 +209,9 @@ export const api = {
   // sparklines — 74 kB down to 5.8 kB, since the combo reads ids and symbols only.
   assetFilterOptions: (signal?: AbortSignal) => getJson<AssetFilterItem[]>(withQuery('/explorer/assets', { fields: 'filter' }), signal),
   hdx: (signal?: AbortSignal) => getJson<HdxDashboard>('/explorer/hdx', signal),
+  revenue: (range: RevenueRange = '30d', signal?: AbortSignal) => getJson<RevenueDashboard>(withQuery('/explorer/revenue', { range }), signal),
+  // Live feed: the head tag busts the edge micro-cache the moment a block lands.
+  revenueFlow: (after?: string | null, signal?: AbortSignal) => getJson<RevenueFlowResponse>(withQuery('/explorer/revenue/flow', { after: after || undefined, h: liveHeadTag() || undefined }), signal),
   hollar: (signal?: AbortSignal) => getJson<HollarDashboard>('/explorer/hollar', signal),
   security: (signal?: AbortSignal) => getJson<SecurityDashboard>('/explorer/security', signal),
   accounts: (offset = 0, limit = 50, sort: AccountSort = 'value', signal?: AbortSignal) => getJson<AccountsPage>(withQuery('/explorer/accounts', { offset, limit, sort }), signal),

@@ -5,7 +5,7 @@ import { expect, test } from './fixtures/test'
 // reader who followed a tag out of the directory lost the value, holdings,
 // lending and activity they had just been reading.
 
-const DIRECTORY_COLUMNS = ['Account', 'Value', 'Holdings', '1Y', 'Lent', 'Borrowed', 'Health', 'Liquidation $', 'Trading $', 'Activity']
+const DIRECTORY_COLUMNS = ['Account', 'Value', 'Holdings', '1Y', 'Lent', 'Borrowed', 'Health', 'Liquidation $', 'Trading $', 'Revenue', 'Activity']
 
 test('a system tag lists its members as directory rows', async ({ page }) => {
   await page.goto('/tag/kraken')

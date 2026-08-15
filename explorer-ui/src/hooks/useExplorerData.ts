@@ -1,11 +1,11 @@
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { api, userApi } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
-import { useHeadStream, LIVE_MS } from '../live'
+import { useHeadStream, BLOCK_STALE_MS, LIVE_MS } from '../live'
 import { useHeldRows } from './useHeldRows'
 import { getSession } from '../session'
 import { tagMapStatus, hasUserTagMembers, useTagMapVersion } from '../userTags'
-import type { AccountSort, ContractSort } from '../types'
+import type { AccountSort, ContractSort, RevenueRange } from '../types'
 
 // List/feed hooks honour the global Live toggle. When live, they poll on LIVE_MS;
 // when paused, no refetch. The API's single-flight cache keeps DB load O(1) in
@@ -220,7 +220,7 @@ export function useHolders(assetId: number | null, offset: number, limit: number
 // detail cadence so "next trade" plans stay current.
 export function useAssetDcas(assetId: number | null, enabled = true) {
   const ri = useInterval(DETAIL_POLL_MS)
-  return useQuery({ queryKey: ['asset-dcas', assetId], queryFn: ({ signal }) => api.assetDcas(assetId as number, signal), enabled: assetId != null && enabled, refetchInterval: enabled ? ri : false, staleTime: 6000 })
+  return useQuery({ queryKey: ['asset-dcas', assetId], queryFn: ({ signal }) => api.assetDcas(assetId as number, signal), enabled: assetId != null && enabled, refetchInterval: enabled ? ri : false, staleTime: BLOCK_STALE_MS })
 }
 // A tag's members as directory rows — the same table /accounts renders, so a
 // tag reads as the slice of the directory it is.
@@ -246,17 +246,17 @@ export function usePoolActivity(poolId: number | null, limit = 25) {
     queryKey: ['pool-activity', poolId, limit],
     queryFn: ({ signal }) => api.poolActivity(poolId as number, limit, signal),
     enabled: poolId != null,
-    staleTime: 6000,
+    staleTime: BLOCK_STALE_MS,
     refetchInterval: ri,
   })
 }
 export function useAssetActivity(assetId: number | null, type = 'all', offset = 0, action?: string, enabled = true, from?: string, to?: string, min?: string) {
   const ri = useInterval()
   const key = ['asset-activity', assetId, type, offset, action, from, to, min]
-  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.assetActivity(assetId as number, type, offset, undefined, action, from, to, min, signal), enabled: assetId != null && enabled, refetchInterval: enabled && offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.assetActivity(assetId as number, type, offset, undefined, action, from, to, min, signal), enabled: assetId != null && enabled, refetchInterval: enabled && offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useAddress(address: string | null) {
-  return useQuery({ queryKey: ['address', address], queryFn: ({ signal }) => api.address(address as string, signal), enabled: !!address, refetchInterval: useInterval(DETAIL_POLL_MS), staleTime: 6000 })
+  return useQuery({ queryKey: ['address', address], queryFn: ({ signal }) => api.address(address as string, signal), enabled: !!address, refetchInterval: useInterval(DETAIL_POLL_MS), staleTime: BLOCK_STALE_MS })
 }
 // Hover-card variant: the API omits LP/DCA/proxy/multisig so the preview loads fast.
 export function useAddressSummary(address: string | null) {
@@ -307,23 +307,23 @@ export function useAccountActivity(address: string | null, type = 'all', offset 
       try { return await userApi.accountActivity(address as string, type, offset, undefined, action, from, to, filters, signal) }
       catch { return api.accountActivity(address as string, type, offset, undefined, action, from, to, filters, signal) }
     },
-    enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData,
+    enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData,
   }), key, offset === 0)
 }
 export function useAccountExtrinsics(address: string | null, offset = 0, from?: string, to?: string, filters?: ExtrinsicFilters) {
   const ri = useInterval()
   const key = ['account-extrinsics', address, offset, from, to, filters]
-  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountExtrinsics(address as string, offset, undefined, from, to, filters, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountExtrinsics(address as string, offset, undefined, from, to, filters, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useAccountEvents(address: string | null, offset = 0, from?: string, to?: string, filters?: EventFilters) {
   const ri = useInterval()
   const key = ['account-events', address, offset, from, to, filters]
-  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountEvents(address as string, offset, undefined, from, to, filters, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountEvents(address as string, offset, undefined, from, to, filters, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useAccountVotes(address: string | null, offset = 0, from?: string, to?: string) {
   const ri = useInterval()
   const key = ['account-votes', address, offset, from, to]
-  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountVotes(address as string, offset, undefined, from, to, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountVotes(address as string, offset, undefined, from, to, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
 }
 // One referendum, polled while it is still running.
 //
@@ -338,7 +338,7 @@ export function useReferendum(pallet: 'opengov' | 'democracy', index: number) {
     queryKey: ['referendum', pallet, index],
     queryFn: ({ signal }) => api.referendum(pallet, index, signal),
     refetchInterval: query => (query.state.data?.concludedAt ? false : DETAIL_POLL_MS),
-    staleTime: 6000,
+    staleTime: BLOCK_STALE_MS,
   })
 }
 // Lazy per-account / per-tag activity totals (extrinsic + event counts). The
@@ -380,7 +380,7 @@ export function useTagActivityCounts(tagId: string | null) {
   return useQuery({ queryKey: ['tag-activity-counts', tagId], queryFn: ({ signal }) => api.tagActivityCounts(tagId as string, signal), enabled: !!tagId, staleTime: 600_000 })
 }
 export function useTag(tagId: string | null) {
-  return useQuery({ queryKey: ['tag', tagId], queryFn: ({ signal }) => api.tag(tagId as string, signal), enabled: !!tagId, refetchInterval: useInterval(DETAIL_POLL_MS), staleTime: 6000 })
+  return useQuery({ queryKey: ['tag', tagId], queryFn: ({ signal }) => api.tag(tagId as string, signal), enabled: !!tagId, refetchInterval: useInterval(DETAIL_POLL_MS), staleTime: BLOCK_STALE_MS })
 }
 // Hover-card variant: the API skips the heavy portfolio-history reconstruction.
 export function useTagSummary(tagId: string | null) {
@@ -399,23 +399,23 @@ export function useTagActivity(tagId: string | null, type = 'all', offset = 0, a
       try { return await userApi.tagActivity(tagId as string, type, offset, undefined, action, from, to, filters, signal) }
       catch { return api.tagActivity(tagId as string, type, offset, undefined, action, from, to, filters, signal) }
     },
-    enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData,
+    enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData,
   }), key, offset === 0)
 }
 export function useTagExtrinsics(tagId: string | null, offset = 0, from?: string, to?: string, filters?: ExtrinsicFilters) {
   const ri = useInterval()
   const key = ['tag-extrinsics', tagId, offset, from, to, filters]
-  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.tagExtrinsics(tagId as string, offset, undefined, from, to, filters, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.tagExtrinsics(tagId as string, offset, undefined, from, to, filters, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useTagEvents(tagId: string | null, offset = 0, from?: string, to?: string, filters?: EventFilters) {
   const ri = useInterval()
   const key = ['tag-events', tagId, offset, from, to, filters]
-  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.tagEvents(tagId as string, offset, undefined, from, to, filters, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.tagEvents(tagId as string, offset, undefined, from, to, filters, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useTagVotes(tagId: string | null, offset = 0, from?: string, to?: string) {
   const ri = useInterval()
   const key = ['tag-votes', tagId, offset, from, to]
-  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.tagVotes(tagId as string, offset, undefined, from, to, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData }), key, offset === 0)
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.tagVotes(tagId as string, offset, undefined, from, to, signal), enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
 }
 // Grouped mode of the tag votes tab (one row per referendum) — a ranked page
 // whose rows are replaced in place, so no useHeldRows (same reasoning as
@@ -425,7 +425,7 @@ export function useTagVotesByReferendum(tagId: string | null, offset = 0, enable
   return useQuery({
     queryKey: ['tag-votes-by-ref', tagId, offset],
     queryFn: ({ signal }) => api.tagVotesByReferendum(tagId as string, offset, undefined, signal),
-    enabled: !!tagId && enabled, refetchInterval: offset === 0 ? ri : false, staleTime: 6000, placeholderData: keepPreviousData,
+    enabled: !!tagId && enabled, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData,
   })
 }
 // The full asset directory is 74 kB (19 kB brotli), 57% of it sparklines. Only the
@@ -443,6 +443,9 @@ export function useAssetFilterOptions() {
 }
 export function useHdxDashboard() {
   return useQuery({ queryKey: ['hdx-dashboard'], queryFn: ({ signal }) => api.hdx(signal), staleTime: 120_000 })
+}
+export function useRevenueDashboard(range: RevenueRange) {
+  return useQuery({ queryKey: ['revenue-dashboard', range], queryFn: ({ signal }) => api.revenue(range, signal), staleTime: 60_000 })
 }
 export function useHollarDashboard() {
   return useQuery({ queryKey: ['hollar-dashboard'], queryFn: ({ signal }) => api.hollar(signal), staleTime: 120_000 })

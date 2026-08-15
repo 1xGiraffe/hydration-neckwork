@@ -132,7 +132,7 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
                   <div className="tag">{data.name} <span className="em" style={{ color: data.color }}>· tag</span></div>
                   <div className="full"><span className="muted">{members.length} accounts</span></div>
                 </div>
-                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} valueUsd={data.portfolioUsd - debtUsd} valueHint={
+                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} revenueUsd={data.revenueUsd} valueUsd={data.portfolioUsd - debtUsd} valueHint={
                   (primaryDebtUsd > 0 || supplementalDebts.length > 0) && <div className="hint">
                       {primaryDebtUsd > 0 && <>primary {F.usd(primarySupplyUsd)} lent · −{F.usd(primaryDebtUsd)} borrowed</>}
                       {supplementalDebts.map((m, i) => <span key={m.key}>{(primaryDebtUsd > 0 || i > 0) && <span aria-hidden="true"> · </span>}<span className="mm-secondary-debt">{m.label} debt −{F.usd(m.usd)}</span></span>)}
@@ -150,7 +150,7 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
                   pills while the rows load — the names are already known. */}
               <div className="sec-title">Accounts · {members.length}</div>
               {memberRows.data?.rows.length
-                ? <AccountsTable rows={memberRows.data.rows} skeletonRows={Math.min(members.length, 12)} />
+                ? <AccountsTable rows={memberRows.data.rows} skeletonRows={Math.min(members.length, 12)} memberView />
                 : <div className="panel"><table className="tbl">
                   <thead><tr><th>Account</th></tr></thead>
                   <tbody>

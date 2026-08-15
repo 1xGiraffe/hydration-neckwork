@@ -7,7 +7,7 @@ import { AccountsSortSelect, AccountsTable, type AccountSortKey } from '../compo
 import { offeredPages } from '../utils/activityPaging'
 
 const PAGE = 50
-const SORTS: AccountSortKey[] = ['value', 'health', 'identity', 'supplied', 'borrowed', 'activity', 'volume', 'liquidation']
+const SORTS: AccountSortKey[] = ['value', 'health', 'identity', 'supplied', 'borrowed', 'activity', 'volume', 'liquidation', 'revenue']
 
 export function Accounts() {
   useDocumentTitle('Accounts')

@@ -12,17 +12,17 @@ test.describe('squeezed (1000px)', () => {
   test('the asset sections fold under one dropdown and the search stays usable', async ({ page }) => {
     await page.goto('/activity')
     await expect(page.locator('.nav .nav-fold-group .nav-trigger')).toBeVisible()
-    for (const label of ['Liquidity', 'HDX', 'HOLLAR']) {
+    for (const label of ['Liquidity', 'HDX', 'HOLLAR', 'Revenue']) {
       await expect(page.locator('.nav > a.nav-link', { hasText: label })).toBeHidden()
     }
 
     await page.locator('.nav-fold-group .nav-trigger').hover()
     const menu = page.locator('.nav-fold-group .nav-menu')
-    for (const label of ['Liquidity', 'HDX', 'HOLLAR']) {
+    for (const label of ['Liquidity', 'HDX', 'HOLLAR', 'Revenue']) {
       await expect(menu.locator('a', { hasText: label })).toBeVisible()
     }
     // the trigger IS the Assets link — no redundant "Assets" menu entry
-    await expect(menu.locator('a')).toHaveCount(3)
+    await expect(menu.locator('a')).toHaveCount(4)
 
     const search = (await page.locator('.topbar-search .search').boundingBox())!
     expect(search.width, 'search must keep usable width').toBeGreaterThan(170)
