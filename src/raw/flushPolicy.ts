@@ -8,17 +8,32 @@
 //
 // ClickHouse's own answer to this, async_insert, cannot help here and is already
 // enabled: async_insert=1 and wait_for_async_insert=1 are 26.3 server defaults.
-// Measured over 6 hours, the gap between consecutive raw_blocks INSERTs is 4.99 s
-// at p10 and 10.02 s at the median, and not one gap was under 3 s — no buffer short
-// enough to be safe can coalesce anything, while a buffer long enough to coalesce
-// would be waited on by each of the ~15 sequential inserts a flush performs, since
-// wait_for_async_insert blocks until the buffer is written.
+// Measured over 6 hours (2026-07, at the chain's 6 s block time), the gap between
+// consecutive raw_blocks INSERTs is 4.99 s at p10 and 10.02 s at the median, and not
+// one gap was under 3 s — no buffer short enough to be safe can coalesce anything,
+// while a buffer long enough to coalesce would be waited on by each of the ~15
+// sequential inserts a flush performs, since wait_for_async_insert blocks until the
+// buffer is written.
+//
+// That ruling survives a 6 s → 2 s block time, because the gap it measures is not a
+// block-time property. raw-live follows the *finalized* head, so batches arrive on
+// the relay chain's GRANDPA cadence: re-measured 2026-08-13 over 6 h, insert gaps
+// were p10 4.0 s / median 8.1 s / p90 20.1 s / p99 42 s, carrying 2.1 blocks per
+// flush. At 2 s the same finality burst carries ~3x the blocks, so the flush cadence
+// (and with it part count and merge pressure) stays flat while rows per flush
+// triple — inserts averaging 40 rows become ~120, which costs nothing.
+// The pessimistic case, where head polling rather than finality gates the flush, is
+// one block per 2 s: 43,200 flushes/day against today's 7,367 (5.9x), a 454 ms flush
+// inside a 2 s window = 23% duty cycle, with active parts still one to two orders of
+// magnitude below parts_to_delay_insert. Uncomfortable to look at, not a cliff.
+// Re-measure the gap distribution after the migration before touching any of this;
+// if finality cadence really did change, this comment's premise is what moved.
 //
 // So batching has to be explicit, and it must not trade the freshness the explorer
 // reads for parts nobody is paying for at head. Hence three independent triggers,
 // whichever fires first:
 //
-//   atChainHead      At head there is nothing to batch (one block per ~6 s) and
+//   atChainHead      At head there is nothing to batch (one block per block time) and
 //                    staleness is the only thing that matters, so flush at once.
 //                    Steady state is therefore exactly what it was before.
 //   reachedRangeEnd  A bounded range worker validates its range in ClickHouse right

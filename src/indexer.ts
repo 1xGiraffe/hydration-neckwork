@@ -35,7 +35,11 @@ import { extractRuntimeErrorNames } from './raw/runtimeErrorNames.js'
 import type { RpcClient } from '@subsquid/rpc-client'
 import type { ClickHouseStore } from './store/clickhouseStore.js'
 
-const BACKFILL_ASSET_SNAPSHOT_INTERVAL = 10_000
+// Chain time between asset-registry scans while backfilling: the 10,000-block
+// interval this replaces was 1,000 minutes at 6 s. Backfill reads the interval off
+// the historical blocks' own timestamps, so a range covering 2022 scans exactly as
+// often as it did before, whatever the chain's cadence becomes.
+const BACKFILL_ASSET_SNAPSHOT_INTERVAL_MINUTES = 1_000
 
 let errorNamesRpc: RpcClient | null = null
 // Snapshot a spec version's pallet error names into runtime_error_names. Loads
@@ -488,7 +492,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
     to: options.toBlock,
   })
 
-  const registry = new AssetRegistryTracker(BACKFILL_ASSET_SNAPSHOT_INTERVAL, nativeAssetMetadata, {
+  const registry = new AssetRegistryTracker(BACKFILL_ASSET_SNAPSHOT_INTERVAL_MINUTES, nativeAssetMetadata, {
     includeUnresolvedAssets: false,
   })
   let historicalRegistryInitialized = false
@@ -544,7 +548,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
       console.log('[Progress] Caught up to chain tip, switching to live mode (volumes now active)')
       isLiveMode = true
       currentLogInterval = liveLogInterval
-      registry.setSnapshotInterval(config.SNAPSHOT_INTERVAL)
+      registry.setSnapshotIntervalMinutes(config.SNAPSHOT_INTERVAL_MINUTES)
     }
 
     let historicalSnapshotStream: AsyncGenerator<HistoricalSnapshotEntry, void, unknown> | null = null
