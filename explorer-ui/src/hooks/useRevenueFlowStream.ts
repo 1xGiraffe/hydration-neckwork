@@ -288,9 +288,15 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
         resumeSpreadRef.current = Math.min(60_000, awayMs / 2)
       }
       hiddenAtRef.current = 0
-      timedPull()
+      // Focus fires on every keyboard/tab hop; only a real resume pulls hard.
+      if (Date.now() - lastPull >= 1_200) timedPull()
     }
     document.addEventListener('visibilitychange', onVisibility)
+    // Same restore quirk as the component: a resumed mobile page may skip
+    // visibilitychange entirely, so pageshow/focus drive the resume path too
+    // (throttling inside keeps focus chatter from spamming pulls).
+    window.addEventListener('pageshow', onVisibility)
+    window.addEventListener('focus', onVisibility)
     // Head frames can arrive far faster than blocks (mempool-only frames every
     // ~150ms on deployments with the mempool layer); the river only needs one
     // pull per block, so pushes inside the spacing window are ignored.
@@ -309,6 +315,8 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
       unsubscribe()
       window.clearInterval(fallback)
       document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pageshow', onVisibility)
+      window.removeEventListener('focus', onVisibility)
     }
   }, [scheduler, paused])
 
