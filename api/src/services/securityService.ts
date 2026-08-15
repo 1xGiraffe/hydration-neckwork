@@ -3,6 +3,7 @@ import { xxhashAsU8a } from '@polkadot/util-crypto'
 import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import { substrateStorageBatch, substrateAllKeys, SUBSTRATE_RPC_URL } from './substrateRpc.ts'
 import { cachedSwr } from './cache.ts'
+import { nominalBlockMsMismatch, resolveParaBlockTime, type ResolvedBlockTime } from './blockTime.ts'
 import { accountRef, ensurePrices, mmMarkets, parachainName, type AccountRef, type AssetRef, type PriceInfo } from './explorerService.ts'
 import { assetDescriptor } from './explorerAssets.ts'
 import { loadCurrentPools } from './poolService.ts'
@@ -18,9 +19,10 @@ import { resolveModuleError } from './runtimeErrorNames.ts'
 //      6h window. Only readable from chain state, so it comes from the RPC
 //      snapshot below.
 //   2. Per-asset deposit fuses — every orml-tokens mint is measured against the
-//      asset's registry `xcm_rate_limit` over a 14 400-block period. The limit is
-//      reconstructed from indexed AssetRegistry events; the baseline and the
-//      lockdown state are chain state.
+//      asset's registry `xcm_rate_limit` over a one-day period, which the
+//      runtime expresses as a block count (14 400 blocks at today's 6s slot
+//      time; see FUSE_PERIOD_BLOCKS). The limit is reconstructed from indexed
+//      AssetRegistry events; the baseline and the lockdown state are chain state.
 //   3. Omnipool per-block trade/liquidity limits — a fraction of the asset's
 //      reserve at the block's first guarded touch. The fractions are chain state
 //      (defaults when unset); the reserves come from the block snapshot.
@@ -36,9 +38,103 @@ import { resolveModuleError } from './runtimeErrorNames.ts'
 let client: ClickHouseClient
 export function initSecurityService(c: ClickHouseClient): void { client = c }
 
-// The deposit fuse's period, `pallet_circuit_breaker::Config::Period = DAYS`
-// (runtime/hydradx/src/assets.rs). Not a metadata constant, so it is pinned here.
-const FUSE_PERIOD_BLOCKS = 14_400
+// ────────────────────────────────────────────────────────────────────────────
+// MIGRATION-DAY ACTION — 2s block times
+//
+// The deposit fuse's period is `pallet_circuit_breaker::Config::Period = DAYS`
+// (runtime/hydradx/src/assets.rs). `DAYS` is derived from MILLISECS_PER_BLOCK,
+// so the 2s runtime upgrade silently REDEFINES it from 14 400 to 43 200 blocks
+// with no storage or event change to notice.
+//
+// It is the ONE block-count constant this service cannot read: verified against
+// the live runtime (spec 435), the CircuitBreaker pallet publishes only
+// defaultMaxNetTradeVolumeLimitPerBlock, defaultMaxAddLiquidityLimitPerBlock and
+// defaultMaxRemoveLiquidityLimitPerBlock — `Period` is not a metadata constant,
+// unlike aura.slotDuration and gigaHdx.cooldownPeriod, which runtimeConstants.ts
+// does read. So it is pinned here, and the pin is what has to move.
+//
+// ON THE DAY THE 2s RUNTIME GOES LIVE: set SECURITY_FUSE_PERIOD_BLOCKS=43200
+// (or bump the default below and redeploy). Until the pin moves, every fuse
+// whose period started more than 14 400 blocks ago is reported `expired` while
+// it is still active, and its used/headroom figures read as a fresh period.
+//
+// checkFusePeriodPin() below turns that into a self-detecting tripwire: it runs
+// on every security-state refresh (backgroundRefresh, 60s) and warns — at most
+// hourly — when the runtime's slot time says this pin is wrong, or when it
+// could not be verified at all.
+// ────────────────────────────────────────────────────────────────────────────
+const DEFAULT_FUSE_PERIOD_BLOCKS = 14_400
+export function parseFusePeriodBlocks(raw: string | undefined): number {
+  const value = raw?.trim()
+  if (!value) return DEFAULT_FUSE_PERIOD_BLOCKS
+  const n = Number(value)
+  if (!Number.isSafeInteger(n) || n <= 0) {
+    console.error(`[security] SECURITY_FUSE_PERIOD_BLOCKS must be a positive integer, received ${JSON.stringify(raw)}; keeping ${DEFAULT_FUSE_PERIOD_BLOCKS}`)
+    return DEFAULT_FUSE_PERIOD_BLOCKS
+  }
+  return n
+}
+const FUSE_PERIOD_BLOCKS = parseFusePeriodBlocks(process.env.SECURITY_FUSE_PERIOD_BLOCKS)
+
+// The pin's tripwire, as a pure function over a resolved block time: `Period =
+// DAYS` means one day's worth of blocks at the runtime's NOMINAL slot time, so
+// the pin is correct exactly when it equals 86 400 000 / MILLISECS_PER_BLOCK.
+// That is an equality, not a tolerance, which is why elastic scaling cannot
+// raise a false alarm — today's chain runs ~7% more blocks per day than the pin
+// and still resolves to the same 6000ms slot.
+//
+// Three outcomes, deliberately distinct:
+//   null                  the pin is verified correct;
+//   "PIN UNVERIFIED"      neither metadata nor a usable measurement was
+//                         available, so nothing is known — NOT the same as
+//                         "matches", and the caller retries next refresh;
+//   "PIN IS STALE"        the runtime's slot time says the pin is wrong.
+export function fusePeriodPinWarning(pinBlocks: number, resolved: ResolvedBlockTime): string | null {
+  if (resolved.source === 'held' && resolved.measuredMs == null) {
+    return `[security] FUSE PERIOD PIN UNVERIFIED: runtime metadata is unavailable and the chain could not be measured, `
+      + `so the pinned ${pinBlocks}-block fuse period could not be checked against the runtime. Retrying on the next refresh.`
+  }
+  const expected = Math.round(86_400_000 / resolved.nominalMs)
+  const origin = resolved.source === 'metadata'
+    ? 'runtime metadata reports a slot time of'
+    : `the chain measures ${Math.round(resolved.measuredMs ?? resolved.nominalMs)}ms/block against a slot time of`
+  if (expected === pinBlocks) {
+    // A held resolution with an out-of-band sample still matches the pin, but
+    // the sample itself is worth surfacing once: it is how a stall looks.
+    const anomaly = resolved.measuredMs == null ? null : nominalBlockMsMismatch(resolved.measuredMs)
+    return resolved.source === 'held' && anomaly
+      ? `[security] fuse period pin ${pinBlocks} still matches the runtime, but ${anomaly}`
+      : null
+  }
+  return `[security] FUSE PERIOD PIN IS STALE: ${origin} ${resolved.nominalMs}ms, `
+    + `so pallet_circuit_breaker's Period = DAYS is now ${expected} blocks, not the pinned ${pinBlocks}. `
+    + `Every deposit fuse verdict is wrong until SECURITY_FUSE_PERIOD_BLOCKS=${expected} is set.`
+}
+
+// Log at most once an hour: the condition is a standing one (it stays true
+// until an operator re-pins and redeploys), and the check runs every 60s.
+const FUSE_PIN_LOG_INTERVAL_MS = 3_600_000
+let lastFusePinLogAt = 0
+export function shouldLogFusePinWarning(nowMs: number, lastLoggedAt: number): boolean {
+  return lastLoggedAt === 0 || nowMs - lastLoggedAt >= FUSE_PIN_LOG_INTERVAL_MS
+}
+
+// Runs on every security-state refresh. Best effort: it must never be able to
+// fail the refresh it rides on, and a fuse verdict is still served (with the
+// pin as it stands) either way.
+async function checkFusePeriodPin(): Promise<void> {
+  try {
+    const warning = fusePeriodPinWarning(FUSE_PERIOD_BLOCKS, await resolveParaBlockTime(client))
+    if (!warning) return
+    const now = Date.now()
+    if (!shouldLogFusePinWarning(now, lastFusePinLogAt)) return
+    lastFusePinLogAt = now
+    console.warn(warning)
+  } catch (err) {
+    console.warn('[security] fuse period pin check failed', err)
+  }
+}
+
 // Hydration's reference currency for the global withdraw limit is HDX.
 const HDX_DECIMALS = 12
 // The Omnipool hub asset is exempt from every per-block limit and cannot have one.
@@ -462,6 +558,12 @@ export async function refreshSecurityChainState(): Promise<void> {
     // Cached responses are built from the snapshot, so a new snapshot must be
     // publishable immediately rather than after the response TTL.
     snapshotGeneration += 1
+    // Re-verify the one block-count constant this service has to pin. It rides
+    // this refresh rather than a task of its own: the check is a cached read
+    // plus arithmetic, and the thing it guards is exactly what this snapshot
+    // feeds. A boot-only check would never notice a runtime upgrade on a
+    // process that has been up for weeks.
+    await checkFusePeriodPin()
   })().finally(() => { refreshInFlight = null })
   return refreshInFlight
 }

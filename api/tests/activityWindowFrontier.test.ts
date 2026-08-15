@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { activityRowsAboveFrontier, activityWindowFrontier, compareActivityRowsNewestFirst, publishedActivityFrontier } from '../src/services/explorerService.ts'
+import { activityFrontierMarginBlocks, activityRowsAboveFrontier, activityWindowFrontier, compareActivityRowsNewestFirst, publishedActivityFrontier } from '../src/services/explorerService.ts'
 import type { ActivityRow } from '../src/services/explorerService.ts'
 
 // The account/tag activity feed is assembled from a dozen sources, each read
@@ -44,11 +44,31 @@ describe('activity window frontier', () => {
 // complete feed has no frontier to advance and so is published whole.
 describe('published frontier', () => {
   it('stops a published prefix above the window frontier', () => {
-    expect(publishedActivityFrontier(9_500)).toBeGreaterThan(9_500)
+    expect(publishedActivityFrontier(9_500, activityFrontierMarginBlocks(6_000))).toBeGreaterThan(9_500)
   })
 
   it('leaves a complete feed uncut', () => {
-    expect(publishedActivityFrontier(null)).toBeNull()
+    expect(publishedActivityFrontier(null, activityFrontierMarginBlocks(6_000))).toBeNull()
+  })
+
+  // The margin is a duration (3× the 30-minute stale bound of a partial total),
+  // so it has to grow as blocks get shorter: a block count pinned at today's
+  // pace would cover 11 minutes instead of 90 after the 2s upgrade, and the
+  // last page a cached total numbers would outrun the window. Pinned against
+  // real paces rather than restating the formula, which would assert nothing.
+  it('derives the margin from the measured pace, not a fixed block count', () => {
+    // 5 588 ms/block — the pace measured on the live chain, Aug 2026.
+    expect(activityFrontierMarginBlocks(5_588)).toBe(966)
+    // The nominal slot times either side of the migration.
+    expect(activityFrontierMarginBlocks(6_000)).toBe(900)
+    expect(activityFrontierMarginBlocks(2_000)).toBe(2_700)
+    // A faster chain needs MORE blocks to cover the same 90 minutes.
+    expect(activityFrontierMarginBlocks(2_000)).toBeGreaterThan(activityFrontierMarginBlocks(6_000))
+  })
+
+  it('never returns a zero margin for an absurd slot time', () => {
+    expect(activityFrontierMarginBlocks(0)).toBeGreaterThan(0)
+    expect(activityFrontierMarginBlocks(-1)).toBeGreaterThan(0)
   })
 })
 

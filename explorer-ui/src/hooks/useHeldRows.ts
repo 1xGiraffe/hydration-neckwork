@@ -32,7 +32,8 @@ function useListTopInView(): [boolean, (el: HTMLElement | null) => void] {
 // A newest-first list only prepends while the top of that list is on screen.
 //
 // Once the list's top has scrolled away, a poll that lands new rows pushes
-// everything the reader is looking at down by a row or more; every six seconds.
+// everything the reader is looking at down by a row or more; every ~6s today,
+// and every 2s once the chain speeds up.
 // Measured on /blocks that is the single largest layout-shift source in the app. So
 // below that point the newly polled rows are HELD: the window rendered when the
 // reader scrolled past stays exactly as it was, and the poll keeps running at its

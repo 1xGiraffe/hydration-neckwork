@@ -4,7 +4,7 @@ import { api, userApi } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
 import { useSession, setSession } from '../session'
 import { setTagMap, setTagMapError } from '../userTags'
-import { LIVE_MS } from '../live'
+import { BLOCK_STALE_MS, LIVE_MS } from '../live'
 import { useHeldRows } from './useHeldRows'
 
 function useInterval(intervalMs = LIVE_MS): number {
@@ -84,7 +84,7 @@ export function useListTag(listId: string | null, tagId: string | null) {
     queryFn: ({ signal }) => userApi.listTag(listId as string, tagId as string, signal),
     enabled: !!session && !!listId && !!tagId,
     refetchInterval: useInterval(LIST_TAG_POLL_MS),
-    staleTime: 6000,
+    staleTime: BLOCK_STALE_MS,
   })
 }
 // Hover-card variant: the API skips the heavy portfolio-history reconstruction.
@@ -133,7 +133,7 @@ export function useListTagActivity(listId: string | null, tagId: string | null, 
     queryFn: ({ signal }) => userApi.listTagActivity(listId as string, tagId as string, type, offset, undefined, action, from, to, filters, signal),
     enabled: !!session && !!listId && !!tagId,
     refetchInterval: offset === 0 ? ri : false,
-    staleTime: 6000,
+    staleTime: BLOCK_STALE_MS,
     placeholderData: keepPreviousData,
   }), key, offset === 0)
 }
@@ -146,7 +146,7 @@ export function useListTagExtrinsics(listId: string | null, tagId: string | null
     queryFn: ({ signal }) => userApi.listTagExtrinsics(listId as string, tagId as string, offset, undefined, from, to, filters, signal),
     enabled: !!session && !!listId && !!tagId,
     refetchInterval: offset === 0 ? ri : false,
-    staleTime: 6000,
+    staleTime: BLOCK_STALE_MS,
     placeholderData: keepPreviousData,
   }), key, offset === 0)
 }
@@ -159,7 +159,7 @@ export function useListTagEvents(listId: string | null, tagId: string | null, of
     queryFn: ({ signal }) => userApi.listTagEvents(listId as string, tagId as string, offset, undefined, from, to, filters, signal),
     enabled: !!session && !!listId && !!tagId,
     refetchInterval: offset === 0 ? ri : false,
-    staleTime: 6000,
+    staleTime: BLOCK_STALE_MS,
     placeholderData: keepPreviousData,
   }), key, offset === 0)
 }
@@ -172,7 +172,7 @@ export function useListTagVotes(listId: string | null, tagId: string | null, off
     queryFn: ({ signal }) => userApi.listTagVotes(listId as string, tagId as string, offset, undefined, from, to, signal),
     enabled: !!session && !!listId && !!tagId,
     refetchInterval: offset === 0 ? ri : false,
-    staleTime: 6000,
+    staleTime: BLOCK_STALE_MS,
     placeholderData: keepPreviousData,
   }), key, offset === 0)
 }
@@ -186,7 +186,7 @@ export function useListTagVotesByReferendum(listId: string | null, tagId: string
     queryFn: ({ signal }) => userApi.listTagVotesByReferendum(listId as string, tagId as string, offset, undefined, signal),
     enabled: !!session && !!listId && !!tagId && enabled,
     refetchInterval: offset === 0 ? ri : false,
-    staleTime: 6000,
+    staleTime: BLOCK_STALE_MS,
     placeholderData: keepPreviousData,
   })
 }

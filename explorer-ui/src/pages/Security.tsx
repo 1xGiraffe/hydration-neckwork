@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
-import { useSecurityDashboard } from '../hooks/useExplorerData'
+import { useSecurityDashboard, useStats } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useNow } from '../hooks/useNow'
 import { Link, paths, SECURITY_SECTIONS } from '../router'
@@ -13,6 +13,8 @@ import { FuseGrid, LoadMeter, YearBars } from '../components/SecurityPanels'
 import {
   AUDITS, CONTROL_ORIGINS, SECURITY_LINKS, UNPAUSABLE, fmtBlocks, fmtDuration, fmtPct, loadColor,
 } from '../utils/security'
+import { blockSeconds } from '../utils/dca'
+import { parseUtcTimestamp } from '../utils/time'
 import type { SecurityDashboard, SecurityFuse, SecurityPerBlockRow, SecuritySafetyEvent } from '../types'
 
 // Security: what stops value leaving the chain, what caps value arriving, what
@@ -90,7 +92,7 @@ function OverviewCard({ section, label, value, sub, tone }: {
   )
 }
 
-function Overview({ d, now }: { d: SecurityDashboard; now: number }) {
+function Overview({ d, now, nominalSec }: { d: SecurityDashboard; now: number; nominalSec: number }) {
   const primary = d.risk.markets.find(m => m.role === 'primary')
   const loadedFuses = d.fuses.rows.filter(r => r.status === 'active' && r.usagePct > 0)
   const hottest = loadedFuses[0]
@@ -111,7 +113,7 @@ function Overview({ d, now }: { d: SecurityDashboard; now: number }) {
         </>
       )}
 
-      <SecTitle title="Value arriving, per asset" subtitle={`${d.fuses.rows.length} rate-limited assets · ${fmtBlocks(d.fuses.periodBlocks)} window`} />
+      <SecTitle title="Value arriving, per asset" subtitle={`${d.fuses.rows.length} rate-limited assets · ${fmtBlocks(d.fuses.periodBlocks, nominalSec)} window`} />
       <FuseBoard d={d} loadedOnly note={<>
         Each asset can only be minted so fast, and a deposit that overshoots is held in reserve until the lockdown lifts.{' '}
         <Link className="sec-inline-link" to={paths.security('cross-chain')}>See the ingress detail →</Link>
@@ -291,7 +293,7 @@ const FUSE_STATUS_BADGE: Record<SecurityFuse['status'], { label: string; cls: st
   unarmed: { label: 'Unused', cls: 'finalized' },
 }
 
-function FuseTable({ d, headBlock }: { d: SecurityDashboard; headBlock: number }) {
+function FuseTable({ d, headBlock, blockSec }: { d: SecurityDashboard; headBlock: number; blockSec: number }) {
   return (
     <div className="panel">
       <table className="tbl sec-tbl">
@@ -315,8 +317,8 @@ function FuseTable({ d, headBlock }: { d: SecurityDashboard; headBlock: number }
                   {dormant ? <span className="muted">—</span> : fmtPct(r.usagePct)}
                 </td>
                 <td data-label="Window" className="r mono muted">
-                  {r.status === 'locked' && r.untilBlock ? `unlocks in ${fmtBlocks(Math.max(0, r.untilBlock - headBlock))}`
-                    : r.status === 'active' && r.periodEndBlock ? `resets in ${fmtBlocks(Math.max(0, r.periodEndBlock - headBlock))}`
+                  {r.status === 'locked' && r.untilBlock ? `unlocks in ${fmtBlocks(Math.max(0, r.untilBlock - headBlock), blockSec)}`
+                    : r.status === 'active' && r.periodEndBlock ? `resets in ${fmtBlocks(Math.max(0, r.periodEndBlock - headBlock), blockSec)}`
                       : r.status === 'expired' ? 'next mint resets' : 'not started'}
                 </td>
                 <td data-label="Trips" className={`r mono muted${r.lockdownCount ? '' : ' cell-empty'}`}>{r.lockdownCount || <span className="muted">—</span>}</td>
@@ -329,7 +331,7 @@ function FuseTable({ d, headBlock }: { d: SecurityDashboard; headBlock: number }
   )
 }
 
-function LockdownHistory({ d, now }: { d: SecurityDashboard; now: number }) {
+function LockdownHistory({ d, now, nominalSec }: { d: SecurityDashboard; now: number; nominalSec: number }) {
   const [expanded, setExpanded] = useState(false)
   const rows = expanded ? d.fuses.lockdowns : d.fuses.lockdowns.slice(0, 10)
   return (
@@ -344,7 +346,9 @@ function LockdownHistory({ d, now }: { d: SecurityDashboard; now: number }) {
                 <td data-label="Asset"><AssetChip asset={l.asset} /></td>
                 <td data-label="Tripped"><MomentLink at={{ blockHeight: l.blockHeight, extrinsicIndex: l.extrinsicIndex, timestamp: l.blockTimestamp }} now={now} /></td>
                 <td data-label="Held for" className="r mono muted">
-                  {l.liftedAtBlock ? fmtBlocks(l.liftedAtBlock - l.blockHeight) : `${fmtBlocks(l.untilBlock - l.blockHeight)} (scheduled)`}
+                  {l.liftedAtTimestamp
+                    ? fmtDuration(parseUtcTimestamp(l.liftedAtTimestamp) - parseUtcTimestamp(l.blockTimestamp))
+                    : `${fmtBlocks(l.untilBlock - l.blockHeight, nominalSec)} (scheduled)`}
                 </td>
                 <td data-label="Cleared">{l.liftedAtTimestamp ? <Ago ts={l.liftedAtTimestamp} now={now} /> : <span className="muted">still locked</span>}</td>
                 <td data-label="How" className={`r mono muted${l.liftedEarly == null ? ' cell-empty' : ''}`}>
@@ -390,13 +394,13 @@ function FuseBoard({ d, explain, loadedOnly, note }: { d: SecurityDashboard; exp
   )
 }
 
-function FuseSection({ d, headBlock, now }: { d: SecurityDashboard; headBlock: number; now: number }) {
+function FuseSection({ d, headBlock, now, blockSec, nominalSec }: { d: SecurityDashboard; headBlock: number; now: number; blockSec: number; nominalSec: number }) {
   return (
     <>
-      <SecTitle title="Deposit fuses" subtitle={`${d.fuses.rows.length} assets · ${fmtBlocks(d.fuses.periodBlocks)} window`} />
+      <SecTitle title="Deposit fuses" subtitle={`${d.fuses.rows.length} assets · ${fmtBlocks(d.fuses.periodBlocks, nominalSec)} window`} />
       <FuseBoard d={d} explain />
-      <FuseTable d={d} headBlock={headBlock} />
-      <LockdownHistory d={d} now={now} />
+      <FuseTable d={d} headBlock={headBlock} blockSec={blockSec} />
+      <LockdownHistory d={d} now={now} nominalSec={nominalSec} />
     </>
   )
 }
@@ -574,7 +578,7 @@ function FreezeSection({ d, now }: { d: SecurityDashboard; now: number }) {
                     ? <MomentLink at={{ blockHeight: p.pausedAtBlock, extrinsicIndex: p.extrinsicIndex, timestamp: p.pausedAtTimestamp }} now={now} />
                     : <Dash />}
                 </td>
-                <td data-label="Held for" className="r mono muted">{p.pausedAtBlock != null ? fmtBlocks(d.head.blockHeight - p.pausedAtBlock) : '—'}</td>
+                <td data-label="Held for" className="r mono muted">{p.pausedAtTimestamp ? fmtDuration(now - parseUtcTimestamp(p.pausedAtTimestamp)) : '—'}</td>
               </tr>
             ))}
           </tbody>
@@ -963,6 +967,17 @@ function SecuritySkeleton() {
 export function Security({ section }: { section: SecuritySection | null }) {
   const { data, isError } = useSecurityDashboard()
   const now = useNow()
+  // Every window on this page is a block count in the pallet and a duration to
+  // the reader, and the two are not converted at the same rate. A LIVE delta —
+  // the blocks between here and an unlock — plays out at the pace the chain is
+  // actually running. A pallet CONSTANT (the fuse period, a scheduled lockdown
+  // span) is derived from the runtime's slot time, so it converts at the
+  // nominal: at 5.7s measured, the 14 400-block day the runtime means as 24h
+  // would otherwise be reported as 22.8h. See api/src/services/blockTime.ts for
+  // the three block times and which question each one answers.
+  const { data: stats } = useStats()
+  const blockSec = blockSeconds(stats?.avgBlockSec)
+  const nominalSec = blockSeconds(stats?.nominalBlockSec)
   useDocumentTitle(data
     ? `Security${section ? ` · ${SECTION_LABELS[section]}` : ` · ${data.fuses.lockedCount ? `${data.fuses.lockedCount} locked` : 'nothing tripped'}`}`
     : 'Security')
@@ -970,10 +985,10 @@ export function Security({ section }: { section: SecuritySection | null }) {
 
   const body = (d: SecurityDashboard) => {
     switch (section) {
-      case null: return <Overview d={d} now={now} />
+      case null: return <Overview d={d} now={now} nominalSec={nominalSec} />
       // Value entering and leaving the chain: the egress budget it is charged
       // against, and the per-asset fuse on the way in.
-      case 'cross-chain': return <><WithdrawSection d={d} now={now} /><FuseSection d={d} headBlock={headBlock} now={now} /></>
+      case 'cross-chain': return <><WithdrawSection d={d} now={now} /><FuseSection d={d} headBlock={headBlock} now={now} blockSec={blockSec} nominalSec={nominalSec} /></>
       // What a block allows in the pool, the largest real moves against those
       // allowances, and every time a limit rejected something.
       case 'omnipool': return <><PerBlockSection d={d} /><LiquidityMovesSection d={d} now={now} /><TripsSection d={d} now={now} /></>
