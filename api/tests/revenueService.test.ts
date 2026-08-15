@@ -101,8 +101,34 @@ describe('getRevenueDashboard', () => {
     expect(tailQuery).toContain("block_timestamp > toDateTime('2026-08-14 10:00:00')")
   })
 
+  it('ranks HOLLAR borrowers among the top payers via range-exact weights', async () => {
+    vi.setSystemTime(NOW + 600_000)
+    const { initRevenueService, getRevenueDashboard } = await service()
+    const dayStart = Math.floor((NOW + 600_000) / 1000 / 86_400) * 86_400
+    const { seen, client } = fakeClient({
+      'toString(max(block_timestamp)) AS mark': [{ stream: 'hollar_borrow', mark: '2026-08-14 10:00:00' }],
+      '-- rev:dashboard:totals': [{ stream: 'hollar_borrow', day: '10', week: '10', month: '10', all_time: '10' }],
+      '-- rev:dashboard:buckets': [{ stream: 'hollar_borrow', t: dayStart, usd: '10' }],
+      '-- rev:dashboard:top-accounts': [{ account: ACCOUNT_A, usd: '4' }],
+      '-- rev:borrow-weights': [
+        { account: ACCOUNT_B, interest: '3000000000000000000' },
+        { account: ACCOUNT_A, interest: '1000000000000000000' },
+      ],
+    })
+    initRevenueService(client)
+    const dash = await getRevenueDashboard('30d')
+    // $10 of range HOLLAR interest splits 3:1 over the weights; ACCOUNT_A also
+    // paid $4 of eventful revenue, so both rank with combined totals.
+    const byId = new Map(dash.topAccounts.map(r => [r.account.accountId, r.usd]))
+    expect(byId.get(ACCOUNT_B)).toBeCloseTo(7.5, 9)
+    expect(byId.get(ACCOUNT_A)).toBeCloseTo(6.5, 9)
+    // The weights query covers exactly the requested window.
+    const weightsCall = seen.find(x => x.query.includes('-- rev:borrow-weights'))!
+    expect(weightsCall.params.reserve).toBe('0x531a654d1696ed52e7275a8cede955e82620f99a')
+  })
+
   it('answers an empty model with zeros and no synthetic points', async () => {
-    vi.setSystemTime(NOW + 120_000)
+    vi.setSystemTime(NOW + 900_000)
     const { initRevenueService, getRevenueDashboard } = await service()
     const { client } = fakeClient({})
     initRevenueService(client)
@@ -116,7 +142,7 @@ describe('getRevenueDashboard', () => {
 
 describe('getRevenueFlow', () => {
   it('serves items strictly after the cursor, ascending, and echoes the new cursor', async () => {
-    vi.setSystemTime(NOW + 240_000)
+    vi.setSystemTime(NOW + 1_200_000)
     const { initRevenueService, getRevenueFlow } = await service()
     const { client } = fakeClient({
       raw_ingestion_state: [{ head: 13_600_000 }],
@@ -141,9 +167,9 @@ describe('getRevenueFlow', () => {
   })
 
   it('seeds a cursorless first call with only the most recent minute', async () => {
-    vi.setSystemTime(NOW + 360_000)
+    vi.setSystemTime(NOW + 1_500_000)
     const { initRevenueService, getRevenueFlow } = await service()
-    const nowSec = Math.floor((NOW + 360_000) / 1000)
+    const nowSec = Math.floor((NOW + 1_500_000) / 1000)
     const recent = new Date((nowSec - 30) * 1000).toISOString().slice(0, 19).replace('T', ' ')
     const { client } = fakeClient({
       raw_ingestion_state: [{ head: 13_600_000 }],
@@ -158,9 +184,9 @@ describe('getRevenueFlow', () => {
   })
 
   it('derives the borrow drip from the last observed hourly accrual', async () => {
-    vi.setSystemTime(NOW + 480_000)
+    vi.setSystemTime(NOW + 1_800_000)
     const { initRevenueService, getRevenueFlow } = await service()
-    const nowSec = Math.floor((NOW + 480_000) / 1000)
+    const nowSec = Math.floor((NOW + 1_800_000) / 1000)
     const hour = Math.floor(nowSec / 3_600) * 3_600
     const ch = (s: number) => new Date(s * 1000).toISOString().slice(0, 19).replace('T', ' ')
     const { client } = fakeClient({
