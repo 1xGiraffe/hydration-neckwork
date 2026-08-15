@@ -67,7 +67,14 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       - RPC_RATE_LIMIT=${INDEXER_RPC_RATE_LIMIT:-100}
       - RPC_CAPACITY=${INDEXER_RPC_CAPACITY:-20}
+      # Empty means "use the code default". Passing the knobs through is what
+      # makes the 2s migration values and the deprecated-name warnings usable by
+      # supervisor-created main-live workers.
+      - RPC_HEAD_POLL_MS=${RPC_HEAD_POLL_MS:-}
+      - SNAPSHOT_INTERVAL_MINUTES=${SNAPSHOT_INTERVAL_MINUTES:-}
+      - SNAPSHOT_INTERVAL=${SNAPSHOT_INTERVAL:-}
       - BATCH_SIZE=${INDEXER_BATCH_SIZE:-10000}
+      - GRAPH_MIN_PATH_LIQUIDITY_USD=${GRAPH_MIN_PATH_LIQUIDITY_USD:-}
     networks:
       - neckwork
 
@@ -91,6 +98,8 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       - RPC_RATE_LIMIT=${RAW_RPC_RATE_LIMIT:-50}
       - RPC_CAPACITY=${RAW_RPC_CAPACITY:-10}
+      - RPC_HEAD_POLL_MS=${RPC_HEAD_POLL_MS:-}
+      - RAW_LIVE_FINALITY_POLL_MS=${RAW_LIVE_FINALITY_POLL_MS:-}
       - RAW_BALANCE_READ_CONCURRENCY=${RAW_BALANCE_READ_CONCURRENCY:-20}
       - RAW_BALANCE_READ_BATCH_ENABLED=${RAW_BALANCE_READ_BATCH_ENABLED:-true}
       - RAW_BALANCE_READ_BATCH_SIZE=${RAW_BALANCE_READ_BATCH_SIZE:-250}
@@ -101,9 +110,24 @@ services:
       - RAW_MONEY_MARKET_POSITION_CONCURRENCY=${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}
       - RAW_MONEY_MARKET_BATCH_SIZE=${RAW_MONEY_MARKET_BATCH_SIZE:-50}
       - RAW_MM_PERIODIC_SNAPSHOT_ENABLED=${RAW_MM_PERIODIC_SNAPSHOT_ENABLED:-true}
-      - RAW_MM_SNAPSHOT_INTERVAL_BLOCKS=${RAW_MM_SNAPSHOT_INTERVAL_BLOCKS:-7200}
+      # Chain time, not a block count: the money-market re-snapshot costs an
+      # eth_call per known borrower, so a block-count interval would have
+      # tripled its RPC fan-out at a 2s block time. 720 = 12h.
+      - RAW_MM_SNAPSHOT_INTERVAL_MINUTES=${RAW_MM_SNAPSHOT_INTERVAL_MINUTES:-}
+      # Deprecated block-count form, passed through empty so a deployment that still
+      # sets it gets the startup warning naming the replacement instead of silence.
+      - RAW_MM_SNAPSHOT_INTERVAL_BLOCKS=${RAW_MM_SNAPSHOT_INTERVAL_BLOCKS:-}
       - BATCH_SIZE=${RAW_BATCH_SIZE:-50000}
-      - RAW_ASSET_SNAPSHOT_INTERVAL=${RAW_ASSET_SNAPSHOT_INTERVAL:-1000}
+      # Chain time between asset-registry scans. 100 = what the old
+      # RAW_ASSET_SNAPSHOT_INTERVAL of 1000 blocks meant at 6s.
+      - RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES=${RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES:-}
+      - RAW_ASSET_SNAPSHOT_INTERVAL=${RAW_ASSET_SNAPSHOT_INTERVAL:-}
+      # One raw_block_snapshots row per N blocks. 1 = today's per-block behaviour.
+      # The table is the largest in the database and 36% of all growth, so N is the
+      # one pure-config disk lever; N must divide the 600-block pool-history MV grid
+      # (checked at startup). Do NOT raise it before the main/price pipeline stops
+      # requiring a snapshot row for every block it replays — see the migration runbook.
+      - RAW_SNAPSHOT_EVERY_N_BLOCKS=${RAW_SNAPSHOT_EVERY_N_BLOCKS:-1}
       - RAW_PIPELINE_ID=${RAW_PIPELINE_ID:-raw-main}
     command: ["src/raw/cli.ts"]
     networks:
@@ -129,6 +153,8 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       - RPC_RATE_LIMIT=${RAW_LIVE_RPC_RATE_LIMIT:-50}
       - RPC_CAPACITY=${RAW_LIVE_RPC_CAPACITY:-10}
+      - RPC_HEAD_POLL_MS=${RPC_HEAD_POLL_MS:-}
+      - RAW_LIVE_FINALITY_POLL_MS=${RAW_LIVE_FINALITY_POLL_MS:-}
       - RAW_BALANCE_READ_CONCURRENCY=${RAW_BALANCE_READ_CONCURRENCY:-20}
       - RAW_BALANCE_READ_BATCH_ENABLED=${RAW_BALANCE_READ_BATCH_ENABLED:-true}
       - RAW_BALANCE_READ_BATCH_SIZE=${RAW_BALANCE_READ_BATCH_SIZE:-250}
@@ -139,9 +165,24 @@ services:
       - RAW_MONEY_MARKET_POSITION_CONCURRENCY=${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}
       - RAW_MONEY_MARKET_BATCH_SIZE=${RAW_MONEY_MARKET_BATCH_SIZE:-50}
       - RAW_MM_PERIODIC_SNAPSHOT_ENABLED=${RAW_MM_PERIODIC_SNAPSHOT_ENABLED:-true}
-      - RAW_MM_SNAPSHOT_INTERVAL_BLOCKS=${RAW_MM_SNAPSHOT_INTERVAL_BLOCKS:-7200}
+      # Chain time, not a block count: the money-market re-snapshot costs an
+      # eth_call per known borrower, so a block-count interval would have
+      # tripled its RPC fan-out at a 2s block time. 720 = 12h.
+      - RAW_MM_SNAPSHOT_INTERVAL_MINUTES=${RAW_MM_SNAPSHOT_INTERVAL_MINUTES:-}
+      # Deprecated block-count form, passed through empty so a deployment that still
+      # sets it gets the startup warning naming the replacement instead of silence.
+      - RAW_MM_SNAPSHOT_INTERVAL_BLOCKS=${RAW_MM_SNAPSHOT_INTERVAL_BLOCKS:-}
       - BATCH_SIZE=${RAW_LIVE_BATCH_SIZE:-50000}
-      - RAW_ASSET_SNAPSHOT_INTERVAL=${RAW_ASSET_SNAPSHOT_INTERVAL:-1000}
+      # Chain time between asset-registry scans. 100 = what the old
+      # RAW_ASSET_SNAPSHOT_INTERVAL of 1000 blocks meant at 6s.
+      - RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES=${RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES:-}
+      - RAW_ASSET_SNAPSHOT_INTERVAL=${RAW_ASSET_SNAPSHOT_INTERVAL:-}
+      # One raw_block_snapshots row per N blocks. 1 = today's per-block behaviour.
+      # The table is the largest in the database and 36% of all growth, so N is the
+      # one pure-config disk lever; N must divide the 600-block pool-history MV grid
+      # (checked at startup). Do NOT raise it before the main/price pipeline stops
+      # requiring a snapshot row for every block it replays — see the migration runbook.
+      - RAW_SNAPSHOT_EVERY_N_BLOCKS=${RAW_SNAPSHOT_EVERY_N_BLOCKS:-1}
       - RAW_PIPELINE_ID=raw-live
     command: ["src/raw/cli.ts", "--pipeline-id=raw-live"]
     networks:
@@ -371,6 +412,9 @@ services:
       - RAW_WORKERS=${RAW_WORKERS:-6}
       - RAW_FAILED_RETRY_LIMIT=${RAW_FAILED_RETRY_LIMIT:-3}
       - RAW_BLOCKED_RETRY_AFTER_SECONDS=${RAW_BLOCKED_RETRY_AFTER_SECONDS:-21600}
+      # Blocks per backfill range. Block-denominated by design (a range is a unit of
+      # indexing work); a faster chain means more ranges per day, not bigger ones.
+      # No change needed at a block-time cutover — see scripts/ingestion-supervisor.sh.
       - RANGE_SIZE=${RANGE_SIZE:-1000}
       - MAIN_MAX_RANGES=${MAIN_MAX_RANGES:-3}
       - MAIN_WORKERS=${MAIN_WORKERS:-3}
@@ -470,6 +514,10 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       # Live money-market reads use a Hydration RPC reachable from the container.
       - RAW_EVM_RPC_URL=${RAW_EVM_RPC_URL:-https://hydration-rpc.neckwork.net}
+      # Runtime block-count constants that must remain operator-overridable at a
+      # cadence migration. Empty preserves the code/metadata fallback.
+      - SECURITY_FUSE_PERIOD_BLOCKS=${SECURITY_FUSE_PERIOD_BLOCKS:-}
+      - GIGA_UNBONDING_BLOCKS=${GIGA_UNBONDING_BLOCKS:-}
       - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
       - EXPLORER_OCELLOIDS_TOKEN=${EXPLORER_OCELLOIDS_TOKEN:-}
       # Transaction-pool rows (dry-run projections of transactions no block

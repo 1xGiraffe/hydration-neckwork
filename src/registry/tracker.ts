@@ -3,6 +3,11 @@ import * as storage from '../types/storage.ts'
 import type { AssetMetadata } from './types.ts'
 import type { AssetRow } from '../db/schema.ts'
 import { config } from '../config.ts'
+import { MS_PER_MINUTE, shouldRunOnElapsedChainTime } from '../util/chainTimeCadence.ts'
+
+// Every caller passes a processor block *header*, which carries the chain
+// timestamp the scan cadence is measured in; the storage reads only need `Block`.
+type TimestampedBlock = Block & { timestamp?: number }
 
 interface SnapshotOptions {
   force?: boolean
@@ -293,14 +298,17 @@ export function lpAliasesFor(
 
 export class AssetRegistryTracker {
   private cache: Map<number, AssetMetadata> = new Map()
-  private lastSnapshotBlock: number = -1 // Force first scan
-  private snapshotInterval: number
+  // Chain time of the last scan, not the height of it: the scan cadence is a
+  // duration ("about every 100 minutes"), and a block count only expresses a
+  // duration at one particular block time. null forces the first scan.
+  private lastSnapshotTimestampMs: number | null = null
+  private snapshotIntervalMinutes: number
   private seededAssetRows: AssetRow[] = []
   private includeUnresolvedAssets: boolean
   private ambiguousWrappersLogged = new Set<number>()
 
-  constructor(snapshotInterval?: number, nativeAssetMetadata?: AssetMetadata, options: TrackerOptions = {}) {
-    this.snapshotInterval = snapshotInterval ?? config.SNAPSHOT_INTERVAL
+  constructor(snapshotIntervalMinutes?: number, nativeAssetMetadata?: AssetMetadata, options: TrackerOptions = {}) {
+    this.snapshotIntervalMinutes = snapshotIntervalMinutes ?? config.SNAPSHOT_INTERVAL_MINUTES
     this.includeUnresolvedAssets = options.includeUnresolvedAssets ?? true
     if (nativeAssetMetadata) {
       this.cache.set(nativeAssetMetadata.assetId, { ...nativeAssetMetadata })
@@ -321,9 +329,15 @@ export class AssetRegistryTracker {
    * Perform snapshot scan if interval has passed
    * Returns AssetRow[] for any new or changed assets (for ClickHouse persistence)
    */
-  async maybeSnapshot(blockHeight: number, block: Block, options: SnapshotOptions = {}): Promise<AssetRow[]> {
-    // Check if snapshot is needed
-    if (!options.force && blockHeight - this.lastSnapshotBlock < this.snapshotInterval) {
+  async maybeSnapshot(blockHeight: number, block: TimestampedBlock, options: SnapshotOptions = {}): Promise<AssetRow[]> {
+    // Check if snapshot is needed. The interval is chain time read off the blocks
+    // themselves, so it means the same thing live, during backfill (a historical
+    // block carries the time it was authored at), and after a block-time change.
+    if (!options.force && !shouldRunOnElapsedChainTime(
+      this.lastSnapshotTimestampMs,
+      block.timestamp,
+      this.snapshotIntervalMinutes * MS_PER_MINUTE,
+    )) {
       return []
     }
 
@@ -496,7 +510,12 @@ export class AssetRegistryTracker {
       this.seededAssetRows = []
     }
 
-    this.lastSnapshotBlock = blockHeight
+    // Genesis carries no timestamp. Recording 0 costs exactly one extra scan —
+    // the next timestamped block is epoch-milliseconds past 0, so it re-scans
+    // immediately and the normal cadence runs from there — while any further
+    // timestamp-less block is skipped by shouldRunOnElapsedChainTime rather than
+    // scanning every block.
+    this.lastSnapshotTimestampMs = block.timestamp ?? 0
 
     const skippedSuffix = unresolvedAssetsSkipped > 0
       ? `, ${unresolvedAssetsSkipped} unresolved assets skipped`
@@ -593,8 +612,8 @@ export class AssetRegistryTracker {
   /**
    * Update snapshot interval (used when switching between archive/live modes)
    */
-  setSnapshotInterval(interval: number): void {
-    this.snapshotInterval = interval
-    console.log(`[AssetRegistry] Snapshot interval updated to ${interval} blocks`)
+  setSnapshotIntervalMinutes(minutes: number): void {
+    this.snapshotIntervalMinutes = minutes
+    console.log(`[AssetRegistry] Snapshot interval updated to ${minutes} minutes of chain time`)
   }
 }

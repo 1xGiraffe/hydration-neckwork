@@ -5,6 +5,13 @@ ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CLICKHOUSE_DATABASE="${CLICKHOUSE_DATABASE:-price_data}"
 CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-dev}"
 RAW_WORKERS="${RAW_WORKERS:-6}"
+# Blocks per backfill range — block-denominated on purpose: a range is a unit of
+# indexing work, and the work in a block does not change with the chain's block
+# time. A faster chain therefore produces proportionally more ranges per day (3x at
+# a 2s block time) rather than bigger ones. That is a supervisor bookkeeping cost,
+# not an ingestion cost: raw-live maps at 5 blocks/s p50 against the 0.5 blocks/s a
+# 2s chain demands, and the per-range overhead is one container start. Measured
+# capacity leaves this comfortable, so nothing here needs to change at the cutover.
 RANGE_SIZE="${RANGE_SIZE:-1000}"
 MAIN_MAX_RANGES="${MAIN_MAX_RANGES:-2}"
 # Parallel price backfills keep event-time prices near the raw ingestion frontier.
