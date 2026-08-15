@@ -81,6 +81,25 @@ export const TREASURY_ACCOUNT = '0x6d6f646c70792f7472737279000000000000000000000
  */
 export const PLACEHOLDER_SWAPPER = '0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a'
 
+/** Pallet-account prefix (`modl…`) — the protocol's own operational accounts. */
+export const MODL_ACCOUNT_PREFIX = '0x6d6f646c'
+
+/**
+ * A payer only when it is an actual USER. The protocol's own actors — pallet
+ * accounts (`modl…`: treasury buyback/fee-conversion swaps, the liquidation
+ * pallet selling seized collateral, referral/OTC-settlement bots) and the
+ * runtime EVM executor — pay their fees with protocol money, so attributing
+ * that to them would list the protocol among its own customers (measured:
+ * ~1% of attributed revenue). Their rows keep their VALUE (dashboard totals
+ * and conservation are untouched); only the payer blanks to the explicit
+ * unattributed bucket, exactly like the placeholder swapper. Sibling/para
+ * sovereign accounts stay attributed: another chain trading here IS a user.
+ */
+export function attributablePayerSql(expr: string): string {
+  return `if(startsWith(${expr}, '${MODL_ACCOUNT_PREFIX}')
+             OR ${expr} IN ('${PLACEHOLDER_SWAPPER}', '${HSM_EXECUTOR_ACCOUNTS[0]}'), '', ${expr})`
+}
+
 /** The Aave collector — see the feesCharts.ts note; the liquidation cut and MintedToTreasury land here. */
 export const AAVE_COLLECTOR = '0xe52567ff06acd6cbe7ba94dc777a3126e180b6d9'
 
@@ -175,7 +194,7 @@ WITH rows AS (
                  fee_recipient = '${OMNIPOOL_ACCOUNT}', 'lp',
                  fee_recipient != '', 'protocol',
                  'unknown') AS dest,
-         if(swapper = '${PLACEHOLDER_SWAPPER}', '', swapper) AS account,
+         ${attributablePayerSql('swapper')} AS account,
          asset_id, amount
   FROM price_data.pool_swap_legs FINAL
   WHERE venue = 'omnipool' AND leg_kind = 'fee' AND ${hub}
@@ -253,7 +272,8 @@ split AS (
   FROM matched
 ),
 rows AS (
-  SELECT block_height, block_time, event_index, leg_index, '' AS dest, account, asset_id, amount
+  SELECT block_height, block_time, event_index, leg_index, '' AS dest,
+         ${attributablePayerSql('account')} AS account, asset_id, amount
   FROM split
   WHERE amount > toUInt256(0)
   UNION ALL
@@ -284,7 +304,7 @@ WITH liquidated AS (
 ),
 rows AS (
   SELECT block_height, block_time, event_index, toUInt16(0) AS leg_index, '' AS dest,
-         ${ethMappedAccountSql("JSONExtractString(args, 'user')")} AS account,
+         ${attributablePayerSql(ethMappedAccountSql("JSONExtractString(args, 'user')"))} AS account,
          toUInt32(JSONExtractUInt(args, 'debtAsset')) AS asset_id,
          JSONExtractString(args, 'profit') AS amount
   FROM liquidated
@@ -376,7 +396,7 @@ valued AS (
 ),
 priced AS (
   SELECT block_height, event_index, block_time,
-         if(venue = 'hsm' AND NOT hollar_is_out, swapper, '') AS account,
+         if(venue = 'hsm' AND NOT hollar_is_out, ${attributablePayerSql('swapper')}, '') AS account,
          if(venue = 'hsm', collateral_asset, toUInt32(${HOLLAR_ASSET_ID})) AS asset_id,
          if(venue = 'hsm',
             toString(if(block_height < ${HSM_BUYBACK_FEE_CUT_BLOCK},
@@ -453,7 +473,7 @@ gas_deposits AS (
 ),
 rows AS (
   SELECT block_height, block_time, event_index, toUInt16(0) AS leg_index, '' AS dest,
-         JSONExtractString(args, 'who') AS account,
+         ${attributablePayerSql("JSONExtractString(args, 'who')")} AS account,
          toUInt32(0) AS asset_id,
          JSONExtractString(args, 'actualFee') AS amount
   FROM fee_events
@@ -461,9 +481,9 @@ rows AS (
   UNION ALL
   SELECT d.block_height AS block_height, d.block_time AS block_time, d.event_index AS event_index,
          toUInt16(0) AS leg_index, '' AS dest,
-         if(x.cname = 'Ethereum.transact',
+         ${attributablePayerSql(`if(x.cname = 'Ethereum.transact',
             if(e.args != '', ${ethMappedAccountSql("JSONExtractString(e.args, 'from')")}, ''),
-            x.csigner) AS account,
+            x.csigner)`)} AS account,
          if(d.event_name = 'Tokens.Deposited', toUInt32(20), toUInt32(0)) AS asset_id,
          JSONExtractString(d.args, 'amount') AS amount
   FROM gas_deposits d
