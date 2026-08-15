@@ -7,15 +7,17 @@ import { Crumbs, F, AddrPill, CallPill, StatusBadge, FinalizedBadge, JsonView, S
 import { ActivityTable } from '../components/ActivityTable'
 import { EvmLogView } from '../components/EvmDecoded'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
+import { blockSeconds } from '../utils/dca'
 
-// Hydration targets ~6s blocks, so the ETA of a not-yet-produced block is the
-// observed head timestamp plus (height − head) × 6s.
-const BLOCK_SEC = 6
-
-function FutureBlock({ height, head, headTime, now }: { height: number; head: number; headTime?: string; now: number }) {
+function FutureBlock({ height, head, headTime, now, blockSec }: { height: number; head: number; headTime?: string; now: number; blockSec?: number }) {
   const remaining = height - head
-  const timing = estimateBlockCountdown(height, head, headTime, now, BLOCK_SEC)
-  const secondsUntil = timing?.secondsUntil ?? Math.max(0, remaining * BLOCK_SEC)
+  // The ETA of a not-yet-produced block is the observed head timestamp plus
+  // (height − head) × the chain's own pace, so it follows the chain across a
+  // block-time change instead of assuming the era it was written in.
+  const pace = blockSeconds(blockSec)
+  const paceLabel = `${parseFloat(pace.toFixed(1))}s`
+  const timing = estimateBlockCountdown(height, head, headTime, now, pace)
+  const secondsUntil = timing?.secondsUntil ?? Math.max(0, Math.round(remaining * pace))
   const eta = timing ? new Date(timing.etaMs) : null
   // F.datetime formats a UTC indexer-style timestamp string ("YYYY-MM-DD HH:MM:SS").
   const etaIso = eta?.toISOString().slice(0, 19).replace('T', ' ')
@@ -36,11 +38,11 @@ function FutureBlock({ height, head, headTime, now }: { height: number; head: nu
         <div className="dt">Target height</div><div className="dd"><span className="num">{F.int(height)}</span></div>
         <div className="dt">Current head</div><div className="dd"><Link to={paths.block(head)} className="num">{F.int(head)}</Link></div>
         <div className="dt">Blocks remaining</div><div className="dd num">{F.int(remaining)}</div>
-        <div className="dt">Countdown</div><div className="dd mono" title={`~${secondsUntil}s at ~${BLOCK_SEC}s/block`}>{fmt(secondsUntil)}</div>
+        <div className="dt">Countdown</div><div className="dd mono" title={`~${secondsUntil}s at ~${paceLabel}/block`}>{fmt(secondsUntil)}</div>
         <div className="dt">Estimated time</div><div className="dd mono" title={etaFull}>{etaIso ? <>{etaIso} UTC <span className="muted">(est.)</span></> : <Dash />}</div>
       </div>
       <div style={{ padding: '14px 16px 4px', color: 'var(--text-medium)', fontSize: 13 }}>
-        This block has not been produced yet. The estimate assumes Hydration's ~{BLOCK_SEC}s block time and updates live.
+        This block has not been produced yet. The estimate runs at the chain's recent pace of ~{paceLabel} per block and updates live.
       </div>
     </div>
   )
@@ -74,7 +76,7 @@ export function BlockDetail({ height }: { height: number }) {
         </div>
       </div>
 
-      {isFuture ? <FutureBlock height={height} head={headBlock} headTime={stats?.headTime} now={now} />
+      {isFuture ? <FutureBlock height={height} head={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />
         : isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Block not found</div>
         : isLoading || !data ? <div className="detail-card"><SkeletonRows /></div> : (
           <>

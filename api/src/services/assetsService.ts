@@ -17,7 +17,19 @@ const STABLECOIN_SYMBOLS = new Set(['USDT', 'USDC', 'HOLLAR', 'DAI', 'HUSDT', 'H
 // Being a stablecoin is not the same as being worth a dollar: EURC tracks the euro.
 // Only these can stand in for USD when a pair is denominated, since indexed prices
 // are USD — a EURC-quoted series has to be computed as a ratio of the two.
-const USD_PEGGED_SYMBOLS = new Set(['USDT', 'USDC', 'HOLLAR', 'DAI', 'HUSDT', 'HUSDC'])
+//
+// The `Hydrated *` money-market wrappers (HUSDT/HUSDC/HUSDS/HUSDe) are stablecoins
+// but not dollars: they accrue interest, so their price leaves par and keeps going.
+// Measured against their own USD candles, HUSDT went 0.9993 → 1.0195 and HUSDC
+// 0.9992 → 1.0159 between 2025-09-22 and 2026-08-12, roughly 2 %/yr and unbounded.
+// While HUSDT/HUSDC were listed here a pair quoted in one of them published the
+// base asset's raw USD price, understating the rate by exactly that accrued
+// interest (1.9 %/1.6 % as of 2026-08-12, worsening daily) — and their siblings
+// HUSDS/HUSDe, same family and same drift, were never listed, so two of four got
+// real cross rates and two did not. All four now take the cross path, where the
+// quote's own price divides the base's. They trade against everything they quote,
+// so the ratio is a real market rate, not an approximation.
+const USD_PEGGED_SYMBOLS = new Set(['USDT', 'USDC', 'HOLLAR', 'DAI'])
 
 const assetCache = new Map<number, Asset>()
 let refreshTimer: ReturnType<typeof setInterval> | null = null

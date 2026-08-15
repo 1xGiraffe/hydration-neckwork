@@ -108,6 +108,14 @@ export interface PendingBlock {
 
 let chClient: ClickHouseClient | null = null
 let api: ApiPromise | null = null
+
+// The connected node handle, or null while the service has not started and
+// after the '[pending] disabled — RPC connection failed' path below. Exposed
+// only so runtimeConstants.ts can read runtime METADATA constants (they are
+// resident on this object; reading one is a property access, not a round trip)
+// without opening a second connection to the node. Callers must treat null as
+// "the chain cannot be consulted" and never as a value.
+export function pendingNodeApi(): ApiPromise | null { return api }
 let timer: NodeJS.Timeout | null = null
 let poolTimer: NodeJS.Timeout | null = null
 let ticking = false

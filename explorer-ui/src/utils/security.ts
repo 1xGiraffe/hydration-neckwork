@@ -18,10 +18,10 @@ export function fmtPct(v: number | null | undefined, digits = 2): string {
   return `${parseFloat(v.toFixed(digits))}%`
 }
 
-// A duration in whole blocks, said the way the pallet counts it (6s blocks).
-// Hours up to two days, then days. The domain's own units are hours — the fuse
-// period is spoken of as 24h, not one day — so the switch to days waits until
-// hours stop being readable.
+// A duration in whole blocks, said the way the pallet counts it. Hours up to
+// two days, then days. The domain's own units are hours — the fuse period is
+// spoken of as 24h, not one day — so the switch to days waits until hours stop
+// being readable.
 const DAY_THRESHOLD_HOURS = 48
 function saidInUnits(mins: number): string {
   if (mins < 1) return '<1 min'
@@ -31,8 +31,23 @@ function saidInUnits(mins: number): string {
   return `${parseFloat((hours / 24).toFixed(1))} d`
 }
 
-export function fmtBlocks(blocks: number): string {
-  return saidInUnits((blocks * 6) / 60)
+// The pallet counts these windows in blocks; a reader wants them in hours. The
+// rate that conversion uses is the caller's decision, because two different
+// block times answer two different questions (api/src/services/blockTime.ts):
+//
+//   - A runtime CONSTANT — the fuse period, a scheduled lockdown span — is
+//     derived from the runtime's slot time (`DAYS` = 14 400 blocks at 6s), so it
+//     is said at the NOMINAL rate (`stats.nominalBlockSec`). At the measured
+//     5.7s the pallet's 24h day would read 22.8h, which is not a number the
+//     runtime has ever meant.
+//   - A LIVE delta — blocks between the head and an unlock — plays out at the
+//     pace the chain is actually producing, so it is said at the MEASURED rate
+//     (`stats.avgBlockSec`).
+//
+// Both come from the same stats payload, and both follow the 2s migration on
+// their own; neither is a constant in this file.
+export function fmtBlocks(blocks: number, blockSec: number): string {
+  return saidInUnits((blocks * blockSec) / 60)
 }
 
 export function fmtDuration(ms: number): string {

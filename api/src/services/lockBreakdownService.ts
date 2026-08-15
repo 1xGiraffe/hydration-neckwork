@@ -5,6 +5,8 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
 import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
 import { decodeCompact } from './proxyMultisigService.ts'
+import { NOMINAL_RELAY_BLOCK_MS } from './blockTime.ts'
+import { runtimeGigaCooldownBlocks } from './runtimeConstants.ts'
 
 // Per-account lock/reserve/hold breakdown snapshots.
 //
@@ -27,8 +29,44 @@ import { decodeCompact } from './proxyMultisigService.ts'
 
 export type BreakdownKind = 'lock' | 'reserve' | 'hold' | 'deposit'
 
-// GigaHdx unstakes mature 403,200 parachain blocks (28 days) after the unstake.
-export const GIGA_UNBONDING_BLOCKS = 403_200
+// GigaHdx unstakes mature after `gigaHdx.cooldownPeriod` parachain blocks —
+// 403,200, i.e. 28 days at today's 6s slot time (verified against the live
+// runtime, spec 435).
+//
+// Unlike the deposit fuse's period this one IS published in metadata, so it is
+// READ rather than pinned (runtimeConstants.ts, an in-memory property access on
+// the pending layer's connection). The runtime is expected to rescale it at the
+// 2s upgrade so the cooldown stays 28 days — 1,209,600 blocks — and reading it
+// makes that self-correcting.
+//
+// Resolution order, most explicit first:
+//   1. GIGA_UNBONDING_BLOCKS  an operator override; wins over everything, so a
+//      wrong or unavailable chain read is always escapable without a redeploy.
+//   2. runtime metadata       authoritative whenever the node is reachable.
+//   3. the pin below          the last resort, and the value a stale process
+//      falls back to if the node is unreachable at the moment it asks.
+//
+// A stale value misdates every FUTURE unstake derived here (hdxService's
+// pendingUnstakes expiry, the conditional 28-day GIGAHDX step in the binding
+// timeline); the expiry blocks of unstakes already on chain are absolute block
+// numbers and stay correct either way.
+const DEFAULT_GIGA_UNBONDING_BLOCKS = 403_200
+// null when unset or unusable — the caller falls through to the next source.
+export function parseGigaUnbondingBlocks(raw: string | undefined): number | null {
+  const value = raw?.trim()
+  if (!value) return null
+  const n = Number(value)
+  if (!Number.isSafeInteger(n) || n <= 0) {
+    console.error(`[locks] GIGA_UNBONDING_BLOCKS must be a positive integer, received ${JSON.stringify(raw)}; ignoring it`)
+    return null
+  }
+  return n
+}
+export function gigaUnbondingBlocks(): number {
+  return parseGigaUnbondingBlocks(process.env.GIGA_UNBONDING_BLOCKS)
+    ?? runtimeGigaCooldownBlocks()
+    ?? DEFAULT_GIGA_UNBONDING_BLOCKS
+}
 
 // Grid every projected unlock instant is snapped to. Finer than the coarsest
 // thing the UI renders from these dates (hours below 1.5 days, days above),
@@ -37,18 +75,38 @@ export const GIGA_UNBONDING_BLOCKS = 403_200
 export const PROJECTION_GRID_MS = 15 * 60_000
 export const snapProjection = (ms: number): number => Math.round(ms / PROJECTION_GRID_MS) * PROJECTION_GRID_MS
 
-// Project a block number to a wall-clock instant at the nominal 6s block time.
+// Project a block number to a wall-clock instant at a fixed slot time.
 // Snapping the BASIS — the extrapolated instant of block 0 — rather than each
 // projected date is what makes the result hold still: the basis is one shared
-// value that every date rides on, so real block time drifting away from 6s
-// moves all of them together, once per grid crossing (~9 times a day at the
-// current rate), instead of rewriting every dated row on every refresh. These
-// dates are estimates the UI renders as "in 18h" / "in 21d"; second-level
+// value that every date rides on, so real block time drifting away from the
+// slot time moves all of them together, once per grid crossing (~9 times a day
+// at the current rate), instead of rewriting every dated row on every refresh.
+// These dates are estimates the UI renders as "in 18h" / "in 21d"; second-level
 // precision on them is noise, and it is noise the whole snapshot generation
 // would otherwise inherit.
-export function blockProjector(headTsMs: number, anchorBlock: number): (block: number) => number {
-  const basis = snapProjection(headTsMs - anchorBlock * 6000)
-  return block => basis + block * 6000
+//
+// The SLOPE must be a slot time, not a measured pace: it multiplies block
+// counts up to ~400k, so a measurement wobbling by 50ms between refreshes would
+// move a far-future date by five hours and republish the whole generation every
+// cycle. blockTime.ts's paraBlockMs() resolves the measured pace to the
+// runtime's slot time for exactly this reason.
+function projector(headTsMs: number, anchorBlock: number, msPerBlock: number): (block: number) => number {
+  const basis = snapProjection(headTsMs - anchorBlock * msPerBlock)
+  return block => basis + block * msPerBlock
+}
+
+// RELAY heights (vesting schedules) — do not convert. Polkadot's 6s slot time
+// is not part of Hydration's 2s migration, so this stays hard-coded and must
+// never be routed through the parachain pace.
+export function relayBlockProjector(headTsMs: number, anchorRelayBlock: number): (block: number) => number {
+  return projector(headTsMs, anchorRelayBlock, NOMINAL_RELAY_BLOCK_MS)
+}
+
+// PARACHAIN heights (GIGAHDX unstakes, conviction priors). `msPerBlock` is the
+// resolved parachain slot time — 6000 today, 2000 after the planned upgrade —
+// supplied by the caller so this stays a pure function of its inputs.
+export function paraBlockProjector(headTsMs: number, anchorBlock: number, msPerBlock: number): (block: number) => number {
+  return projector(headTsMs, anchorBlock, msPerBlock)
 }
 
 // One raw Balances.Locks / Tokens.Locks entry (id is the 8-byte ascii lock id).
@@ -435,8 +493,9 @@ function serializeTimeline(slices: TimelineSlice[]): string {
 }
 
 // Persisted tranche form: block numbers become estimated timestamps at snapshot
-// time (6s blocks, same convention as the HDX dashboard) so readers never need
-// a para-vs-relay block basis.
+// time (at the chain's slot time — ~6s today, 2s planned — via the caller's
+// projector, same convention as the HDX dashboard) so readers never need a
+// para-vs-relay block basis.
 function serializeTranches(tranches: LockTranche[], blockToMs: (block: number) => number): string {
   if (!tranches.length) return ''
   return JSON.stringify(tranches.map(t => ({
@@ -481,6 +540,10 @@ export interface CollectLockBreakdownInput {
   pendingUnstakes: { accountId: string; expiryBlock: number; payoutRaw: bigint }[]
   headBlock: number
   headTsMs: number
+  // The parachain slot time to project para heights at (blockTime.ts's
+  // paraBlockMs). Relay heights are projected at NOMINAL_RELAY_BLOCK_MS and are
+  // deliberately not affected by it.
+  paraBlockMs: number
 }
 
 // Assemble the full per-account component set: the shared hdxService data plus
@@ -511,11 +574,14 @@ export async function collectLockBreakdownRows(input: CollectLockBreakdownInput)
     else merged.set(mapKey, { accountId, assetId, kind, source, amount, claimable, detail })
   }
 
-  // Grid-snapped projections (see blockProjector): every dated row a generation
+  // Grid-snapped projections (see projector): every dated row a generation
   // publishes must hold still while the underlying lock does, or no generation
   // is ever recognisably unchanged.
-  const paraToMs = blockProjector(input.headTsMs, input.headBlock)
-  const relayToMs = blockProjector(input.headTsMs, input.relayHeight)
+  const paraMs = input.paraBlockMs
+  // Resolved once per generation, so every dated row in it shares one answer.
+  const unbondingBlocks = gigaUnbondingBlocks()
+  const paraToMs = paraBlockProjector(input.headTsMs, input.headBlock, paraMs)
+  const relayToMs = relayBlockProjector(input.headTsMs, input.relayHeight)
   const nowMs = paraToMs(input.headBlock)
   const unvested = unvestedByAccountRaw(input.vestingSchedules, input.relayHeight)
   const vestingEnd = new Map<string, number>()
@@ -589,7 +655,7 @@ export async function collectLockBreakdownRows(input: CollectLockBreakdownInput)
         // period if the owner unstaked right now — a conditional 28d step, not
         // an open-ended floor. "28 days from now" has no fixed block behind it,
         // so it only holds still if the `now` it extends from is on the grid too.
-        const unbondMs = snapProjection(nowMs) + GIGA_UNBONDING_BLOCKS * 6000
+        const unbondMs = snapProjection(nowMs) + unbondingBlocks * paraMs
         sources.push({
           source, onchain: row.amount, open: 0n,
           steps: [

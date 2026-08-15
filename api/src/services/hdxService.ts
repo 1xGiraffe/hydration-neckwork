@@ -3,12 +3,13 @@ import { xxhashAsU8a } from '@polkadot/util-crypto'
 import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
 import { decodeCompact } from './proxyMultisigService.ts'
-import { collectLockBreakdownRows, persistLockSnapshot, GIGA_UNBONDING_BLOCKS, type LockRow } from './lockBreakdownService.ts'
+import { collectLockBreakdownRows, gigaUnbondingBlocks, persistLockSnapshot, type LockRow } from './lockBreakdownService.ts'
 import { cached } from './cache.ts'
+import { NOMINAL_RELAY_BLOCK_MS, paraBlockMs } from './blockTime.ts'
 import { allTags, economicModuleAccounts } from './tagService.ts'
 import { accountRef, ensurePrices, cutoffHeightForWindow, getGigaMarketStats, getGigaLiquidationLevels, type AccountRef, type GigaMarketReserveStat, type GigaLiquidations } from './explorerService.ts'
 
-export { GIGA_UNBONDING_BLOCKS }
+export { gigaUnbondingBlocks }
 
 // HDX-dashboard chain snapshots: balance locks by lock id, GIGAHDX pending
 // unstakes, vesting schedules and conviction-voting prior locks — everything the
@@ -127,6 +128,10 @@ async function loadLocks(): Promise<{ lockTypes: LockTypeTotal[]; lockAccounts: 
 async function loadPendingUnstakes(): Promise<PendingUnstake[] | null> {
   const keys = await substrateAllKeys(PENDING_UNSTAKES_PREFIX)
   const values = await substrateStorageBatch(keys)
+  // One answer for the whole enumeration, so every expiry in a snapshot is
+  // derived from the same cooldown (read from runtime metadata when the node is
+  // reachable — see lockBreakdownService).
+  const unbondingBlocks = gigaUnbondingBlocks()
   const out: PendingUnstake[] = []
   for (let i = 0; i < keys.length; i++) {
     const raw = values[i]
@@ -138,7 +143,7 @@ async function loadPendingUnstakes(): Promise<PendingUnstake[] | null> {
     const accountId = u8aToHex(tail.slice(16, 48))
     const startBlock = u32At(tail, 56)
     const payout = u128At(hexToU8a(raw), 0)
-    out.push({ accountId, startBlock, expiryBlock: startBlock + GIGA_UNBONDING_BLOCKS, payoutHdx: toHdx(payout), payoutRaw: payout })
+    out.push({ accountId, startBlock, expiryBlock: startBlock + unbondingBlocks, payoutHdx: toHdx(payout), payoutRaw: payout })
   }
   return keys.length && !out.length ? null : out.sort((a, b) => a.expiryBlock - b.expiryBlock)
 }
@@ -293,7 +298,7 @@ async function refresh(): Promise<void> {
   // it from ClickHouse). Failures keep the previous published generation and
   // never invalidate the in-memory dashboard snapshot above.
   try {
-    const head = await loadHead()
+    const [head, paraMs] = await Promise.all([loadHead(), paraBlockMs(client)])
     const rows = await collectLockBreakdownRows({
       nativeLockRows: locks.rows,
       vestingSchedules: vesting,
@@ -302,6 +307,7 @@ async function refresh(): Promise<void> {
       pendingUnstakes: pending.map(p => ({ accountId: p.accountId, expiryBlock: p.expiryBlock, payoutRaw: p.payoutRaw })),
       headBlock: head.height,
       headTsMs: head.ts,
+      paraBlockMs: paraMs,
     })
     const outcome = await persistLockSnapshot(client, rows, { blockHeight: head.height, relayHeight })
     console.info('[hdx] lock breakdown', { rows: rows.length, outcome })
@@ -397,17 +403,20 @@ const iso = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace
 
 export async function getHdxDashboard(): Promise<HdxDashboard> {
   return cached('explorer:hdx-dashboard', 300_000, async () => {
-    const [prices, head, supply, flows, dca, churn, movers, gigaMarket] = await Promise.all([
-      ensurePrices(), loadHead(), loadSupplyCohorts(), loadDailyFlows(), loadDcaFlows(), loadChurn(), loadTopMovers(),
+    const [prices, head, paraMs, supply, flows, dca, churn, movers, gigaMarket] = await Promise.all([
+      ensurePrices(), loadHead(), paraBlockMs(client), loadSupplyCohorts(), loadDailyFlows(), loadDcaFlows(), loadChurn(), loadTopMovers(),
       getGigaMarketStats().catch(() => null),
     ])
     const gigaLiquidations = await getGigaLiquidationLevels().catch(() => null)
     const px = prices.get(0)
     const snap = snapshot
-    const blockTs = (block: number) => head.ts + (block - head.height) * 6000
-    // Vesting schedules count relay blocks; extrapolate the snapshot's relay
-    // height to the CH head timestamp (relay blocks are a solid 6s).
-    const relayNow = snap ? snap.relayHeight + Math.round((head.ts - snap.at) / 6000) : 0
+    // PARACHAIN heights (GIGAHDX unstake expiries, conviction prior unlocks) at
+    // the resolved parachain slot time — ~6s today, 2s planned.
+    const blockTs = (block: number) => head.ts + (block - head.height) * paraMs
+    // Vesting schedules count RELAY blocks — do not convert. Extrapolate the
+    // snapshot's relay height to the CH head timestamp at Polkadot's own 6s
+    // slot time, which Hydration's 2s migration does not touch.
+    const relayNow = snap ? snap.relayHeight + Math.round((head.ts - snap.at) / NOMINAL_RELAY_BLOCK_MS) : 0
 
     // Unlock timeline: 8 weekly buckets, then monthly to +12 months; releases
     // beyond that (long vesting tails) land in `later`. Everything already
@@ -447,7 +456,8 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
         const perHdx = Number(s.perPeriod) / 1e12
         const periodsUpTo = (block: number) => Math.max(0, Math.min(s.periodCount, Math.floor((block - s.start) / s.period)))
         const doneNow = periodsUpTo(relayNow)
-        const relayAt = (ts: number) => relayNow + Math.round((ts - now) / 6000)
+        // RELAY heights — do not convert (see relayNow above).
+        const relayAt = (ts: number) => relayNow + Math.round((ts - now) / NOMINAL_RELAY_BLOCK_MS)
         let prev = doneNow
         for (const b of buckets) {
           const upto = periodsUpTo(relayAt(b.to))
@@ -554,7 +564,7 @@ async function loadDailyFlows(): Promise<HdxDailyFlow[]> {
   const head = await loadHead()
   // Wall-clock 60d window; the volume table has no timestamp, so join blocks for
   // the real per-block date instead of extrapolating from a fixed block time
-  // (which drifts now that blocks run ~5.6s, not the assumed 6s).
+  // (which a fixed block-count offset misses: ~6s today, 2s planned).
   const from = await cutoffHeightForWindow(60 * 24, head.height)
   const res = await client.query({
     query: `
@@ -574,8 +584,10 @@ async function loadDailyFlows(): Promise<HdxDailyFlow[]> {
 
 // Active DCA orders touching HDX → realistic NEXT-24H buy/sell volume, not the
 // naive instantaneous rate:
-//  - executions/day uses the MEASURED block count of the last 24h (elastic
-//    scaling makes real throughput ≠ 14,400 six-second blocks), and
+//  - executions/day uses the MEASURED block count of the last 24h — elastic
+//    scaling makes real throughput differ from a day's worth of nominal slots
+//    (14,400 at today's ~6s, 43,200 at the planned 2s), and the measurement
+//    carries the migration for free — and
 //  - each schedule is capped by its REMAINING budget (total − spent), so a
 //    whale order minutes from exhaustion can't inflate the daily figure by an
 //    order of magnitude. Open-ended budgets (total_amount = 0) are uncapped.
@@ -672,7 +684,7 @@ export function moverAccountFilterSql(taggedModuleAccounts: string[]): string {
 
 async function loadTopMovers(): Promise<HdxDashboard['topMovers']> {
   const head = await loadHead()
-  // Wall-clock 7d window (fixed block-count offsets undersize it at ~5.6s/block).
+  // Wall-clock 7d window (a fixed block-count offset undersizes it: ~6s today, 2s planned).
   const from = await cutoffHeightForWindow(7 * 24, head.height)
   const taggedModl = economicModuleAccounts(allTags())
   const res = await client.query({
