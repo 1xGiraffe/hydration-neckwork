@@ -43,7 +43,7 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
   it('every gkey site in the query routes through gkeySql, and none still inlines the old expression', () => {
     const body = accountsPageBody()
     const calls = [...body.matchAll(/\$\{gkeySql\('([a-zA-Z_.]+)'\)\} AS gkey/g)].map(m => m[1])
-    expect(calls.sort()).toEqual(['a.account_id', 'latest.account_id', 'p.account_id', 'v.account_id', 'v.account_id'].sort())
+    expect(calls.sort()).toEqual(['a.account_id', 'latest.account_id', 'p.account_id', 'v.account_id', 'v.account_id', 'v.account_id'].sort())
     expect(body).not.toContain("if(t.lid = '', v.account_id, t.lid) AS gkey")
     expect(body).not.toContain("if(t.lid = '', p.account_id, t.lid) AS gkey")
     expect(body).not.toContain("if(t.lid = '', latest.account_id, t.lid) AS gkey")

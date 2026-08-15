@@ -61,6 +61,7 @@ import {
 } from './services/referendumTitleService.ts'
 import { initProxyMultisigService } from './services/proxyMultisigService.ts'
 import { initHdxService } from './services/hdxService.ts'
+import { initRevenueService } from './services/revenueService.ts'
 import { initHollarService } from './services/hollarService.ts'
 import { initPoolService } from './services/poolService.ts'
 import { initSecurityService } from './services/securityService.ts'
@@ -108,13 +109,18 @@ await fastify.register(compress, { global: true, encodings: ['br', 'gzip', 'defl
 // responses instead of re-hitting the API. Longest-prefix match wins.
 const CACHE_CONTROL: [RegExp, number][] = [
   [/^\/assets$/, 300],
-  // The Live surfaces poll every 6s and their server caches are now
-  // invalidated per ingested block (head-keyed keys), so a 5s browser cache
-  // would be the freshness bottleneck. 2s only matters for rapid tab
-  // switches — consecutive 6s polls never hit it either way.
+  // The Live surfaces poll on the chain's block cadence (~6s today, 2s
+  // planned) and their server caches are invalidated per ingested block
+  // (head-keyed keys), so a 5s browser cache would be the freshness
+  // bottleneck. 2s only matters for rapid tab switches — consecutive polls at
+  // today's cadence never hit it either way.
   [/^\/explorer\/(stats|blocks|extrinsics|events|activity)$/, 2],
   [/^\/candles/, 5],
   [/^\/explorer\/hdx/, 300],
+  // Revenue dashboard is SWR-cached 60s server-side; the flow tail is a live
+  // feed whose URL carries the head tag, so 2s only bounds rapid tab switches.
+  [/^\/explorer\/revenue\/flow$/, 2],
+  [/^\/explorer\/revenue$/, 60],
   [/^\/explorer\/hollar/, 300],
   [/^\/explorer\/address\/[^/]+\/close-accounts/, 900],
   [/^\/explorer\/address\/[^/]+\/history/, 120],
@@ -231,6 +237,7 @@ async function start() {
     initGovernanceService(client)
     initProxyMultisigService(client)
     initHdxService(client)
+    initRevenueService(client)
     initHollarService(client)
     initPoolService(client)
     initSecurityService(client)
