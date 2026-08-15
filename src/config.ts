@@ -1,4 +1,9 @@
-import { integerFromEnvironment, optionalStringFromEnvironment, stringFromEnvironment } from './util/env.js'
+import {
+  integerFromEnvironment,
+  minutesFromEnvironment,
+  optionalStringFromEnvironment,
+  stringFromEnvironment,
+} from './util/env.js'
 
 export interface Config {
   // Subsquid Network gateway for Hydration mainnet
@@ -21,7 +26,7 @@ export interface Config {
 
   // Processing parameters
   BATCH_SIZE: number
-  SNAPSHOT_INTERVAL: number
+  SNAPSHOT_INTERVAL_MINUTES: number
   RAW_FLUSH_BLOCKS: number
   RAW_FLUSH_INTERVAL_MS: number
 
@@ -48,8 +53,15 @@ export const config: Config = {
   // How often the SQD live follower polls the chain for a new head (the RPC
   // endpoints are HTTPS, so heads arrive by polling, not subscription). The
   // upstream default of 5000ms was the single largest controllable slice of
-  // block-to-explorer latency; one getFinalizedHead every 2s is trivial load.
-  RPC_HEAD_POLL_MS: integerFromEnvironment('RPC_HEAD_POLL_MS', 2000),
+  // block-to-explorer latency; a chain_getHeader every 750ms is trivial load on
+  // an RPC that runs on the same host (measured: 0 errors/retries in 6h at 2000ms,
+  // and the poll does not appear in raw-live's cost at all — its per-block wall
+  // time is ClickHouse insert round-trips).
+  // 750ms rather than 2000ms because the poll interval has to stay well under a
+  // block: at a 2s block time 2000ms is exactly one poll per block, so any jitter
+  // costs a full block of lag and a missed poll is invisible. At 6s it oversampled
+  // 3:1; 750ms keeps roughly that ratio at 2s and 8:1 today.
+  RPC_HEAD_POLL_MS: integerFromEnvironment('RPC_HEAD_POLL_MS', 750),
 
   // Identity sources beyond Hydration, in falling display priority. The People
   // chains are where Polkadot and Kusama identities actually live — both relay
@@ -70,7 +82,12 @@ export const config: Config = {
 
   // Processing tuning parameters
   BATCH_SIZE: integerFromEnvironment('BATCH_SIZE', 50_000), // rows per ClickHouse insert (tunable based on performance)
-  SNAPSHOT_INTERVAL: integerFromEnvironment('SNAPSHOT_INTERVAL', 1000), // blocks between full asset registry scans (live mode)
+  // Chain time between full asset registry scans in live mode. Measured in the
+  // blocks' own timestamps rather than a block count, so the scan rate is fixed
+  // through a block-time change (100 min is what the previous SNAPSHOT_INTERVAL
+  // of 1,000 blocks meant at 6 s; at 2 s that same count would have scanned every
+  // ~33 min). The deprecated SNAPSHOT_INTERVAL is still read, at 6 s per block.
+  SNAPSHOT_INTERVAL_MINUTES: minutesFromEnvironment('SNAPSHOT_INTERVAL_MINUTES', 100, { name: 'SNAPSHOT_INTERVAL' }),
   // Raw flush accumulation while behind chain head — see src/raw/flushPolicy.ts.
   // At head every batch still flushes immediately, so these only shape catch-up
   // and backfill, where the small-part churn actually accumulates.
@@ -85,5 +102,14 @@ export const config: Config = {
   // USD references are treated symmetrically: the basket stays centered on $1,
   // while any 10/22 deviation is split across both assets instead of privileging 10.
   USD_REFERENCE_IDS: [10, 22],
-  GRAPH_MIN_PATH_LIQUIDITY_USD: integerFromEnvironment('GRAPH_MIN_PATH_LIQUIDITY_USD', 12_000, { min: 0 }),
+  // 0 (no gate) on purpose: any positive floor permanently unprices every asset
+  // whose only venue is an isolated pool below it (PEN, NEURO, UNQ, SUB, NODL, …
+  // were dark for five weeks under the previous 12 000), and the surfaces that
+  // read those prices — the official-UI API, preis, account valuations — treat
+  // "no price" as "does not exist". The gate is also not what protects deep
+  // assets: Omnipool prices are authoritative and the weighted median prefers
+  // the deepest path, so a dust pool can only ever price an asset that has no
+  // deeper venue — for which its actual on-chain marginal price is the best
+  // available truth.
+  GRAPH_MIN_PATH_LIQUIDITY_USD: integerFromEnvironment('GRAPH_MIN_PATH_LIQUIDITY_USD', 0, { min: 0 }),
 }
