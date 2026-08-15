@@ -20,9 +20,11 @@
 
 import type { ClickHouseClient } from '../db/client.ts'
 import { measuredParaBlockMs } from './blockTime.ts'
+import { accountBorrowInterestSql, distributeUsd1e12 } from './borrowAttribution.ts'
 import { cached, cachedSwr } from './cache.ts'
 import { accountRef, type AccountRef } from './explorerService.ts'
 import {
+  HOLLAR_RESERVE_ADDRESS,
   PROTOCOL_REVENUE_PREDICATE_SQL,
   REVENUE_STREAMS,
   buildRevenueEventRowsSql,
@@ -277,6 +279,9 @@ LIMIT 10`,
     for (const row of await (await topQuery).json<{ account: string; usd: string }>()) {
       top.set(row.account, scaledUsd(row.usd))
     }
+    const addTop = (account: string, usd: bigint): void => {
+      if (account && usd > 0n) top.set(account, (top.get(account) ?? 0n) + usd)
+    }
 
     for (const row of tail) {
       const t = tailSeconds(row)
@@ -305,6 +310,57 @@ LIMIT 10`,
       rangeTotals.set(stream, [...series.values()].reduce((a, b) => a + b, 0n))
     }
     const rangeSum = [...rangeTotals.values()].reduce((a, b) => a + b, 0n)
+
+    // Borrow interest joins the payer ranking too, or a pure HOLLAR borrower
+    // would show revenue on their account page yet never rank here (the
+    // symmetry rule). hollar_borrow is attributed EXACTLY for the requested
+    // window: the range's booked USD split over the same scaled-debt×Δindex
+    // weights the account_revenue job uses. asset_reserve (dormant since
+    // 2026-06-25) joins from account_revenue for months FULLY inside the
+    // range — exact for "all", and a mint in a partial boundary month simply
+    // stays out of the ranking rather than being time-scaled onto payers.
+    const hollarRangeUsd = rangeTotals.get('hollar_borrow') ?? 0n
+    if (hollarRangeUsd > 0n) {
+      const weightsRes = await client.query({
+        query: accountBorrowInterestSql(),
+        query_params: {
+          reserve: HOLLAR_RESERVE_ADDRESS,
+          start: chTimestamp(rangeStart),
+          end: chTimestamp(nowSeconds),
+        },
+        format: 'JSONEachRow',
+      })
+      const weights = (await weightsRes.json<{ account: string; interest: string }>())
+        .map(r => ({ account: r.account, weight: BigInt(r.interest) }))
+      for (const [account, usd] of distributeUsd1e12(hollarRangeUsd, weights)) addTop(account, usd)
+    }
+    if ((rangeTotals.get('asset_reserve') ?? 0n) > 0n) {
+      const firstFullMonth = (s: number): number => {
+        const d = new Date(s * 1000)
+        const monthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / 1000
+        const next = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1))
+        return s <= monthStart ? Number(`${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}`)
+          : Number(`${next.getUTCFullYear()}${String(next.getUTCMonth() + 1).padStart(2, '0')}`)
+      }
+      const lastFullMonth = (s: number): number => {
+        const d = new Date(s * 1000)
+        const prev = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) - 1)
+        return Number(`${prev.getUTCFullYear()}${String(prev.getUTCMonth() + 1).padStart(2, '0')}`)
+      }
+      const reserveRes = await client.query({
+        query: `-- rev:dashboard:reserve-payers
+SELECT account, toString(sum(revenue_usd)) AS usd
+FROM price_data.account_revenue
+WHERE stream = 'asset_reserve' AND account != ''
+  AND month >= ${firstFullMonth(Math.max(rangeStart, 0))} AND month <= ${lastFullMonth(nowSeconds)}
+GROUP BY account`,
+        format: 'JSONEachRow',
+        clickhouse_settings: DECIMAL_STRINGS,
+      })
+      for (const row of await reserveRes.json<{ account: string; usd: string }>()) {
+        addTop(row.account, scaledUsd(row.usd))
+      }
+    }
 
     return {
       totals: {
