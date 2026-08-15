@@ -1,5 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
+import { NOMINAL_BLOCKS_PER_HOUR, blocksPerHour, measuredParaBlockMs, paraBlockMs } from './blockTime.ts'
 import { referendumTitleFor, referendumTitleKey } from './referendumTitleService.ts'
 // Type-only: governanceService imports value exports back from this file (accountRef,
 // ensurePrices, …), so a runtime import here would cycle. search() reaches getReferenda
@@ -36,6 +37,14 @@ import { buildMempoolActivities, buildPendingActivities, type PendingActivity } 
 
 let client: ClickHouseClient
 export function initExplorerService(c: ClickHouseClient): void { client = c }
+/**
+ * Whether this service already has its handle. Exists so a service that depends on
+ * it transitively (poolService, whose every value is priced through `ensurePrices`)
+ * can supply a handle for a process that has none WITHOUT repointing the one an
+ * already-booted process is using — a long-op or scratch client silently replacing
+ * the live price loader's would be invisible until prices went stale.
+ */
+export function hasExplorerClient(): boolean { return client != null }
 
 // shared shapes
 export type AssetRef = ExplorerAsset
@@ -437,9 +446,28 @@ function accountActivityRefsSql(accounts: string[], eventCond: string, bound: st
 // only when the window returns fewer rows than the SQL asked for (sparse
 // filters, deep offsets, end of data). Worst case = one cheap extra query on
 // top of exactly what ran before.
-const FEED_WINDOW_BLOCKS = 100_800 // ~7 days at 6s blocks
-// A Hydration block targets roughly six seconds. Keep hot feed results for most
-// of that interval so staggered clients share one ClickHouse read per block.
+//
+// The window is SEVEN DAYS of wall clock, resolved through the blocks table the
+// same way cutoffHeightForWindow does, not a fixed block count: a block is ~6s
+// today and 2s is planned, so a `head − 100 800` offset would silently shrink
+// to ~2.3 days at the upgrade. ClickHouse folds the scalar sub-select to a
+// constant before the scan, so the bound stays primary-key prunable.
+//
+// The sub-select reads `price_data.blocks`, not `raw_blocks` as the old
+// head-offset form did. Both advance with ingestion and block heights are
+// global, so the bound is the same window either way; `blocks` is used because
+// it is the table cutoffWindowSql already resolves every other wall-clock
+// window against, and it carries the timestamp partitioning that makes the
+// lookup cheap. Both failure directions are safe: a `blocks` table that lags
+// yields an OLDER cutoff (a wider window — more scanned, nothing missed), and
+// an empty one yields min() = 0, i.e. the whole range.
+const FEED_WINDOW_HOURS = 168
+export function feedWindowBoundSql(): string {
+  return `block_height > (${cutoffWindowSql(FEED_WINDOW_HOURS)})`
+}
+// A Hydration block targets roughly six seconds today (2s is planned). Keep hot
+// feed results for most of that interval so staggered clients share one
+// ClickHouse read per block.
 const LIVE_CACHE_MS = 5_000
 // The API client's own result-row guard (`max_result_rows` in db/client.ts). A read
 // that would return more rows than this fails the whole request with a ClickHouse
@@ -459,7 +487,7 @@ function activityQueryTooBroad(): Error {
 async function withFeedWindow<T>(tw: string | null, expectRows: number, depth: number, run: (bound: string) => Promise<T[]>): Promise<T[]> {
   if (tw) return run(tw)
   if (depth > 10_000) return run('1')
-  const rows = await run(`block_height > (SELECT max(block_height) FROM price_data.raw_blocks) - ${FEED_WINDOW_BLOCKS}`)
+  const rows = await run(feedWindowBoundSql())
   return rows.length >= expectRows ? rows : run('1')
 }
 
@@ -1225,10 +1253,11 @@ async function liveFeedTag(timeWindowed = false): Promise<string> {
 
 // "24h"/"7d"-style windows were historically fixed block-count offsets that
 // assumed a constant block time (12s, later 6s), so `head - 7200` was taken to
-// mean "24h ago". The chain now produces ~5.6s blocks, so those offsets cover
-// far LESS wall-clock than their names imply (7200 blocks ≈ 11h, not 24h).
-// These helpers resolve a cutoff HEIGHT from a wall-clock window via the blocks
-// table, keeping the reading queries height-predicated — so the
+// mean "24h ago". A Hydration block is ~6s today (elastic scaling runs it a
+// little faster) and 2s is planned, so those offsets cover far LESS wall-clock
+// than their names imply and would shrink again at the upgrade. These helpers
+// resolve a cutoff HEIGHT from a wall-clock window via the blocks table,
+// keeping the reading queries height-predicated — so the
 // (asset_id, block_height) / block_height sort keys still prune the scan —
 // while the window means an actual span of time.
 
@@ -1239,11 +1268,18 @@ export function cutoffWindowSql(hours: number): string {
   return `SELECT min(block_height) AS h FROM price_data.blocks WHERE block_timestamp >= now() - INTERVAL ${Math.max(1, Math.round(hours))} HOUR`
 }
 
-// Fallback cutoff when the blocks table can't answer (empty/error): assume 6s
-// blocks (600/hour), which reproduces the exact pre-fix constant (24h → head −
-// 14400, 7d → head − 100800) so behaviour degrades to the old windows.
-export function fallbackCutoffHeight(head: number, hours: number): number {
-  return Math.max(0, head - Math.round(hours * 600))
+// Fallback cutoff when the blocks table can't answer (empty/error). Callers
+// pass the MEASURED blocks per hour when they have one, so the estimate tracks
+// real production through the 2s migration; the default is the nominal 600/hour
+// (6s blocks), which reproduces the exact pre-fix constant (24h → head − 14400,
+// 7d → head − 100800) and remains the final fallback when nothing can be
+// measured either.
+export function fallbackCutoffHeight(head: number, hours: number, perHour: number = NOMINAL_BLOCKS_PER_HOUR): number {
+  // A non-positive rate is a broken measurement, not "zero blocks an hour": fall
+  // back to the nominal so the window keeps its meaning instead of collapsing to
+  // the head (which would silently return an empty 24h).
+  const rate = Number.isFinite(perHour) && perHour > 0 ? perHour : NOMINAL_BLOCKS_PER_HOUR
+  return Math.max(0, head - Math.round(hours * rate))
 }
 
 // Resolve the block height that was the chain head `hours` ago. Cached briefly:
@@ -1255,8 +1291,10 @@ export async function cutoffHeightForWindow(hours: number, head: number): Promis
       const res = await client.query({ query: cutoffWindowSql(hours), format: 'JSONEachRow' })
       const h = Number((await res.json<{ h: number | null }>())[0]?.h ?? 0)
       if (h > 0) return h
-    } catch { /* fall through to the 6s-block estimate */ }
-    return fallbackCutoffHeight(head, hours)
+    } catch { /* fall through to the measured-pace estimate */ }
+    // measuredParaBlockMs swallows its own failures and returns the nominal, so
+    // this degrades to 600 blocks/hour rather than throwing on a dead database.
+    return fallbackCutoffHeight(head, hours, blocksPerHour(await measuredParaBlockMs(client)))
   })
 }
 
@@ -1284,7 +1322,8 @@ async function refreshPrices(): Promise<Map<number, PriceInfo>> {
     const head = await latestPriceBlock()
     if (!head) return priceMap
     // Timestamp-derived cutoffs so "24h"/"7d" track wall-clock as block time
-    // drifts (~5.6s now). Resolved once per refresh, not per asset.
+    // moves (~6s today, 2s planned; measured where it matters). Resolved once
+    // per refresh, not per asset.
     const [dayStart, weekStart, cut72] = await Promise.all([
       cutoffHeightForWindow(24, head),
       cutoffHeightForWindow(168, head),
@@ -1694,47 +1733,104 @@ export interface ExplorerStats {
   headBlock: number
   finalizedBlock: number
   headTime: string
+  // The chain's MEASURED pace, for "how fast is it going" and for extrapolating
+  // a live block delta into a countdown.
   avgBlockSec: number
+  // The runtime's NOMINAL slot time (blockTime.ts: read from runtime metadata,
+  // inferred from indexed blocks only when the node is unreachable): 6 today, 2
+  // after the planned upgrade. Every runtime block-count constant is derived
+  // from it, so this — never avgBlockSec — is what turns one of those counts
+  // into a duration.
+  //
+  // The two are sampled independently and cached on different clocks (a
+  // 100-block average per request-ish, a slot time per 5 minutes), so they are
+  // NOT two views of one reading and will not agree exactly. That is the point:
+  // avgBlockSec is meant to move and nominalBlockSec is meant not to.
+  nominalBlockSec: number
   transfers24h: number
   extrinsics24h: number
   activeAccounts24h: number
   hdxPrice: number | null
 }
 
+interface ExplorerStatsCounts {
+  transfers24h: number
+  extrinsics24h: number
+  activeAccounts24h: number
+}
+
+// These are 24-hour summary numbers, not the live head. Recomputing all three
+// uniqExact scans on every head made total work scale with BOTH rows per window
+// and blocks per day: 3x throughput became ~9x query load. A 30-second shared
+// hold is <0.04% of the window it summarizes while reducing the heavy read to a
+// fixed 2,880/day at any block cadence. The head/average/countdowns below remain
+// head-keyed and update every block.
+export const STATS_COUNTS_CACHE_MS = 30_000
+export const STATS_COUNTS_SQL = `
+  SELECT
+    toUInt64((SELECT uniqExact((block_height, event_index)) FROM price_data.raw_events
+      WHERE block_height > {cutoff24h:UInt32} AND event_name IN ('Balances.Transfer','Tokens.Transfer'))) AS transfers_24h,
+    toUInt64((SELECT uniqExact((block_height, extrinsic_index)) FROM price_data.raw_extrinsics
+      WHERE block_height > {cutoff24h:UInt32} AND coalesce(signer, effective_signer) IS NOT NULL)) AS extrinsics_24h,
+    toUInt64((SELECT uniqExact(account_id) FROM price_data.raw_balance_observations
+      WHERE block_height > {cutoff24h:UInt32})) AS active_accounts_24h`
+
+async function getStatsCounts(cutoff24h: number): Promise<ExplorerStatsCounts> {
+  return cached('explorer:stats:counts-24h', STATS_COUNTS_CACHE_MS, async () => {
+    const res = await client.query({
+      query: STATS_COUNTS_SQL,
+      query_params: { cutoff24h },
+      format: 'JSONEachRow',
+    })
+    const row = (await res.json<{ transfers_24h: string; extrinsics_24h: string; active_accounts_24h: string }>())[0]
+    return {
+      transfers24h: Number(row?.transfers_24h ?? 0),
+      extrinsics24h: Number(row?.extrinsics_24h ?? 0),
+      activeAccounts24h: Number(row?.active_accounts_24h ?? 0),
+    }
+  })
+}
+
 export async function getStats(): Promise<ExplorerStats> {
   // Head-keyed: a new entry exists per ingested block, so the first poll after
-  // a block landed recomputes (one 45 MiB / 77 ms read per block, request-
-  // driven) and every other poll hits the cache — the head shown is never a
-  // TTL behind the data. The TTL is garbage collection, not freshness: at
-  // ~5.4s blocks an entry is superseded long before it expires.
+  // a block landed refreshes the cheap head sample and every other poll hits the
+  // cache — the head shown is never a TTL behind the data. The three 24h counts
+  // have their own 30s hold above, so a faster chain cannot multiply their scan
+  // frequency. This TTL is garbage collection, not head freshness.
   return cached(`explorer:stats:${await liveFeedTag()}`, 30_000, async () => {
-    // Wall-clock 24h cutoff height (blocks now run ~5.6s, so the old head−7200
-    // covered only ~11h). The counts read replayable ReplacingMergeTree raw
-    // tables, so they dedup by row identity: a replay before the next merge
-    // would otherwise double-count events/extrinsics.
+    // Wall-clock 24h cutoff height, measured from the blocks table — a fixed
+    // head−7200 offset assumed 12s blocks and covers ~11h at today's ~6s (and
+    // would cover ~4h at the planned 2s). The counts read replayable
+    // ReplacingMergeTree raw tables, so they dedup by row identity: a replay
+    // before the next merge would otherwise double-count events/extrinsics.
     const cutoff24h = await cutoffHeightForWindow(24, await latestPriceBlock())
-    const [mainRes, prices] = await Promise.all([
+    const [mainRes, prices, nominalBlockMs, counts] = await Promise.all([
       client.query({
         query: `
           WITH (SELECT max(block_height) FROM price_data.raw_blocks) AS head
           SELECT
             toUInt64(head) AS head_block,
             (SELECT toString(max(block_timestamp)) FROM price_data.raw_blocks WHERE block_height = head) AS head_time,
+            -- The displayed average block time. Same measurement as
+            -- blockTime.ts's avgBlockMsSql (in seconds, not ms) but folded into
+            -- this query so the Live header costs one read rather than two; the
+            -- helper is the one behaviour depends on, this one is only shown.
             (SELECT toFloat64(dateDiff('second', min(block_timestamp), max(block_timestamp)) / greatest(count() - 1, 1))
-               FROM (SELECT block_timestamp FROM price_data.raw_blocks ORDER BY block_height DESC LIMIT 100)) AS avg_block,
-            toUInt64((SELECT uniqExact((block_height, event_index)) FROM price_data.raw_events
-               WHERE block_height > {cutoff24h:UInt32} AND event_name IN ('Balances.Transfer','Tokens.Transfer'))) AS transfers_24h,
-            toUInt64((SELECT uniqExact((block_height, extrinsic_index)) FROM price_data.raw_extrinsics
-               WHERE block_height > {cutoff24h:UInt32} AND coalesce(signer, effective_signer) IS NOT NULL)) AS extrinsics_24h,
-            toUInt64((SELECT uniqExact(account_id) FROM price_data.raw_balance_observations
-               WHERE block_height > {cutoff24h:UInt32})) AS active_accounts_24h
+               FROM (SELECT block_timestamp FROM price_data.blocks ORDER BY block_height DESC LIMIT 100)) AS avg_block
         `,
-        query_params: { cutoff24h },
         format: 'JSONEachRow',
       }),
       ensurePrices(),
+      // The runtime's slot time beside the measured pace. A UI turning a
+      // runtime block-count constant (a fuse period, a lock duration — all
+      // derived from MILLISECS_PER_BLOCK) into a duration needs THIS number,
+      // not the elastic-scaling pace: at 5.7s measured, the pallet's 14 400-block
+      // day would otherwise read 22.8h. Snapped to the ladder and cached 5min,
+      // so it is a step function that moves once, at the runtime upgrade.
+      paraBlockMs(client),
+      getStatsCounts(cutoff24h),
     ])
-    const row = (await mainRes.json<{ head_block: string; head_time: string; avg_block: number; transfers_24h: string; extrinsics_24h: string; active_accounts_24h: string }>())[0]
+    const row = (await mainRes.json<{ head_block: string; head_time: string; avg_block: number }>())[0]
     const head = Number(row?.head_block ?? 0)
     // The head is the newest block we can SHOW (unfinalized pending blocks
     // included); the finalized boundary is what the raw pipeline has ingested.
@@ -1747,9 +1843,10 @@ export async function getStats(): Promise<ExplorerStats> {
       finalizedBlock: head,
       headTime: best?.timestamp ?? row?.head_time ?? '',
       avgBlockSec: Number(row?.avg_block ?? 0),
-      transfers24h: Number(row?.transfers_24h ?? 0),
-      extrinsics24h: Number(row?.extrinsics_24h ?? 0),
-      activeAccounts24h: Number(row?.active_accounts_24h ?? 0),
+      nominalBlockSec: nominalBlockMs / 1000,
+      transfers24h: counts.transfers24h,
+      extrinsics24h: counts.extrinsics24h,
+      activeAccounts24h: counts.activeAccounts24h,
       hdxPrice: prices.get(0)?.price ?? null,
     }
   })
@@ -3395,6 +3492,8 @@ export interface AddressDetail {
   portfolioUsd: number
   tradingVolumeUsd: number
   liquidationVolumeUsd: number
+  // Protocol revenue earned from this account (absent when zero).
+  revenueUsd?: number
   moneyMarket: MoneyMarketPosition[]          // one entry per isolated market the account has a position in
   liquidityPositions?: LpPosition[]
   activeDcas?: ActiveDca[]
@@ -3635,9 +3734,10 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     const collateralShortfall = countedPositions.reduce((s, p) => s + mmCollateralShortfallUsd(p, 0), 0)
     const portfolioUsd = balances.reduce((s, b) => s + (b.valueUsd ?? 0), 0) + Math.max(0, collateralShortfall - foldedMmUsd)
     const volumeAccounts = [...new Set([...related, ...[...related].map(evmAccountForm).filter(Boolean) as string[]])]
-    const [tradingVolumeUsd, liquidationVolumeUsd] = await Promise.all([
+    const [tradingVolumeUsd, liquidationVolumeUsd, revenueUsd] = await Promise.all([
       tradingVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
       liquidationVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
+      revenueByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
     ])
 
     const tag = tagForAccount(norm.accountId)
@@ -3708,6 +3808,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
       portfolioUsd: portfolioUsd + lpUsd,
       tradingVolumeUsd,
       liquidationVolumeUsd,
+      ...(revenueUsd > 0 ? { revenueUsd } : {}),
       moneyMarket,
       liquidityPositions: [...lpPositions, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)),
       activeDcas,
@@ -6585,31 +6686,48 @@ async function getATokenTotalSupplies(): Promise<Map<number, bigint>> {
   })
 }
 
-// 7-day daily price samples per asset (oldest→newest) for the assets-list
-// sparkline + 7D change. One bounded query over the last ~7 days of blocks —
-// no FINAL on the 485M-row prices table (cf. the perf rule).
+// 7-day price samples per asset (oldest→newest) for the assets-list sparkline
+// + 7D change. One bounded query over the last 7 days of blocks — no FINAL on
+// the 485M-row prices table (cf. the perf rule).
+//
+// The window and the buckets are both wall-clock: the cutoff height comes from
+// cutoffHeightForWindow (so "7 days" stays 7 days as block time changes) and
+// the buckets are 4-hour timestamp intervals rather than a fixed 2400-block
+// stride. The height predicate stays — it is what prunes the scan, since
+// `prices` sorts by (asset_id, block_height) and partitions on a block-height
+// expression, so a timestamp bound alone would read the whole table.
+export const SPARKLINE_WINDOW_HOURS = 168
+export const SPARKLINE_BUCKET_HOURS = 4
+// 168h / 4h. The window's edges do not align to the bucket grid, so the query
+// can return one extra partial bucket; the newest SPARKLINE_BUCKETS are kept so
+// the series length never exceeds what the list has always rendered (the
+// 2400-block stride this replaced produced exactly 42 buckets).
+export const SPARKLINE_BUCKETS = SPARKLINE_WINDOW_HOURS / SPARKLINE_BUCKET_HOURS
 async function getWeeklyPriceSamples(): Promise<Map<number, number[]>> {
   return cached('explorer:price-samples-7d', 60000, async () => {
     const m = new Map<number, number[]>()
     try {
       const head = await latestPriceBlock()
       if (!head) return m
-      const weekStart = Math.max(0, head - 100_800)
+      const weekStart = await cutoffHeightForWindow(SPARKLINE_WINDOW_HOURS, head)
       const res = await client.query({
         query: `
-          SELECT asset_id, toUInt16(intDiv(toInt64({head:UInt32}) - toInt64(block_height), 2400)) AS bucket,
+          SELECT asset_id, toStartOfInterval(block_timestamp, INTERVAL ${SPARKLINE_BUCKET_HOURS} HOUR) AS bucket,
             toFloat64(argMax(usd_price, block_height)) AS px
           FROM price_data.prices
           WHERE block_height > {weekStart:UInt32} AND block_height <= {head:UInt32} AND usd_price > 0
           GROUP BY asset_id, bucket
-          ORDER BY asset_id, bucket DESC`,
+          ORDER BY asset_id, bucket`,
         query_params: { head, weekStart },
         format: 'JSONEachRow',
       })
-      for (const r of await res.json<{ asset_id: number; bucket: number; px: number }>()) {
+      for (const r of await res.json<{ asset_id: number; bucket: string; px: number }>()) {
         const arr = m.get(r.asset_id) ?? []
-        arr.push(r.px) // already ordered oldest (high days_ago) → newest
+        arr.push(r.px) // ordered oldest → newest by the bucket timestamp
         m.set(r.asset_id, arr)
+      }
+      for (const [assetId, arr] of m) {
+        if (arr.length > SPARKLINE_BUCKETS) m.set(assetId, arr.slice(-SPARKLINE_BUCKETS))
       }
       // aTokens borrow the (transitively resolved) underlying's sparkline + 7D.
       for (const aToken of Object.keys(PRICE_ALIAS_ID)) {
@@ -7053,6 +7171,25 @@ async function liquidationVolumeByAccount(accounts: string[]): Promise<Map<strin
         ${liquidationVolumeCtes(list)}
       SELECT account_id, toFloat64(sum(volume_usd)) AS volume_usd
       FROM liquidation_volume_raw
+      GROUP BY account_id`,
+    format: 'JSONEachRow',
+  })
+  return positiveAccountVolumes(await res.json<{ account_id: string; volume_usd: number }>())
+}
+// Protocol revenue EARNED FROM an account (trade fees it paid, its liquidation
+// penalties, its attributed borrow interest, its network fees) — the account
+// grain of price_data.account_revenue (clickhouse/schema/008_revenue.sql),
+// summed across streams. Same freshness contract as the derived table: the
+// live tail (up to ~2h) surfaces on the /revenue dashboard, not here.
+async function revenueByAccount(accounts: string[]): Promise<Map<string, number>> {
+  const safe = [...new Set(accounts.map(a => a.toLowerCase()).filter(a => ACCOUNT_RE.test(a)))]
+  if (!safe.length) return new Map()
+  const list = sqlAccountList(safe)
+  const res = await client.query({
+    query: `
+      SELECT account AS account_id, toFloat64(sum(revenue_usd)) AS volume_usd
+      FROM price_data.account_revenue
+      WHERE account IN (${list})
       GROUP BY account_id`,
     format: 'JSONEachRow',
   })
@@ -9161,7 +9298,7 @@ async function fetchDecodedXcmDeep(
   // recency window first exactly like withFeedWindow, and fall back to full history
   // when it underfills, so no page ever sees only "an hour of chain".
   if (base !== '1') return walk(base)
-  const recent = await walk(`block_height > (SELECT max(block_height) FROM price_data.raw_blocks) - ${FEED_WINDOW_BLOCKS}`)
+  const recent = await walk(feedWindowBoundSql())
   return recent.length >= want ? recent : walk('1')
 }
 
@@ -12161,10 +12298,47 @@ function humanizeKind(s: string): string {
   return s.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase()
 }
 
+// A pallet index, from either Module shape's `index`. Anything that is not a
+// non-negative integer is absent, never 0 — 0 is the System pallet.
+function dispatchPalletIndex(value: unknown): number | null {
+  if (typeof value !== 'number' && typeof value !== 'string') return null
+  const index = Number(value)
+  return Number.isInteger(index) && index >= 0 ? index : null
+}
+
+// An error index, from either Module shape's `error`: the low byte of the modern
+// 4-byte little-endian hex array, or the flat shape's integer as it stands. An
+// unreadable value is absent, never 0 — 0 is a real error index in every pallet.
+function dispatchErrorIndex(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isInteger(value) && value >= 0 ? value : null
+  if (typeof value !== 'string') return null
+  if (/^0x[0-9a-fA-F]{2,}$/.test(value)) {
+    const low = parseInt(value.slice(2, 4), 16)
+    return Number.isInteger(low) ? low : null
+  }
+  const index = Number(value)
+  return Number.isInteger(index) && index >= 0 ? index : null
+}
+
 // Shared DispatchError → human reason. `resolve` names Module errors from the
 // runtime_error_names lookup (spec-version keyed); a miss yields an honest
 // `pallet <i> · error #<j>` label rather than a fabricated name. Named kinds
 // (Token/Arithmetic/BadOrigin/…) are self-describing and carry no docs.
+//
+// A Module error states its pallet and error indices in one of TWO shapes, and
+// both are live in `raw_extrinsics`:
+//
+//  * MODERN (blocks 1,476,029 →): `{__kind, value: {index, error}}`, where
+//    `error` is a 4-byte little-endian array rendered as hex whose FIRST byte is
+//    the error index inside the pallet.
+//  * FLAT (blocks 692,900 … 1,475,949, 2022-07-06 … 2022-11-29, 601 rows):
+//    `{__kind, index, error}` with both at the top level and `error` a plain
+//    integer — no byte array to slice.
+//
+// The nested shape is read first so it stays authoritative wherever it exists.
+// A Module error in neither shape reports nothing, because 0 is both a real
+// pallet index (System) and a real error index, so defaulting either would name
+// a triple the row never stated.
 export function dispatchErrorReason(
   error: unknown,
   specVersion: number,
@@ -12174,11 +12348,11 @@ export function dispatchErrorReason(
   const kind = typeof err?.__kind === 'string' ? err.__kind : null
   if (!kind) return null
   if (kind === 'Module') {
-    const value = err?.value as { index?: number; error?: string } | undefined
-    const palletIndex = Number(value?.index)
-    const hex = typeof value?.error === 'string' ? value.error : '0x00'
-    const errorIndex = parseInt(hex.slice(2, 4) || '0', 16)
-    if (!Number.isInteger(palletIndex)) return null
+    const nested = err?.value as { index?: unknown; error?: unknown } | undefined
+    const source = dispatchPalletIndex(nested?.index) != null ? nested : err
+    const palletIndex = dispatchPalletIndex(source?.index)
+    const errorIndex = dispatchErrorIndex(source?.error)
+    if (palletIndex == null || errorIndex == null) return null
     const hit = resolve(specVersion, palletIndex, errorIndex)
     return hit
       ? { label: `${hit.pallet}.${hit.name}`, docs: hit.docs || null }
@@ -15941,15 +16115,29 @@ export function activityRowsAboveFrontier<T extends { blockHeight: number }>(row
 // blocks are indexed — roughly one block per block for a steady account, faster for
 // one whose recent history is denser than its older history. A cached total counted
 // right at the frontier would therefore number a last page that the window no longer
-// reaches by the time it is fetched. So a PUBLISHED prefix stops this many blocks
-// above the frontier: ~3x the blocks the chain produces inside a partial total's
-// stale bound (30 minutes at ~6s per block), which costs well under a tenth of the
-// counted prefix even on the busiest structural pot. Pages are not held back — the
-// feed genuinely continues past a published prefix, which is what `complete: false`
-// tells the page to say.
-const ACTIVITY_PUBLISHED_FRONTIER_MARGIN_BLOCKS = 1_000
-export function publishedActivityFrontier(frontierBlock: number | null): number | null {
-  return frontierBlock == null ? null : frontierBlock + ACTIVITY_PUBLISHED_FRONTIER_MARGIN_BLOCKS
+// reaches by the time it is fetched. So a PUBLISHED prefix stops a margin of blocks
+// above the frontier: 3x the blocks the chain produces inside a partial total's
+// stale bound, which costs well under a tenth of the counted prefix even on the
+// busiest structural pot. Pages are not held back — the feed genuinely continues
+// past a published prefix, which is what `complete: false` tells the page to say.
+//
+// The margin is a DURATION, so it is derived from the chain's pace rather than
+// pinned as a block count: ~966 blocks at today's measured ~5.6s, ~2 700 after
+// the planned 2s upgrade, where the old fixed 1 000 would have covered 11
+// minutes instead of 90 and let the last page outrun its own total.
+//
+// This one takes the MEASURED pace, not the resolved slot time: how far the
+// frontier runs while a total sits in cache is pure throughput — it is blocks
+// the chain actually produced, not a duration a runtime constant encodes. The
+// resulting few-percent wobble between polls is immaterial next to the frontier
+// advancing under the same cached total, which is what `complete: false`
+// already tells the page about.
+const ACTIVITY_PARTIAL_TOTAL_STALE_MS = 30 * 60_000
+export function activityFrontierMarginBlocks(paraBlockMs: number): number {
+  return Math.max(1, Math.round((3 * ACTIVITY_PARTIAL_TOTAL_STALE_MS) / Math.max(1, paraBlockMs)))
+}
+export function publishedActivityFrontier(frontierBlock: number | null, marginBlocks: number): number | null {
+  return frontierBlock == null ? null : frontierBlock + marginBlocks
 }
 
 function oldestWindowBlock<T>(rows: T[], blockOf: (row: T) => number): number | null {
@@ -16667,7 +16855,8 @@ async function countAccountActivity(accounts: string[], type: string, action: st
   if (!widest) return { total: null, complete: false }
   // Counted at the published frontier, not the window's own: an incomplete total is
   // cached for minutes and has to keep numbering pages the feed can still serve.
-  const counted = activityRowsAboveFrontier(widest.rows, publishedActivityFrontier(widest.frontierBlock))
+  const margin = activityFrontierMarginBlocks(await measuredParaBlockMs(client))
+  const counted = activityRowsAboveFrontier(widest.rows, publishedActivityFrontier(widest.frontierBlock, margin))
   return { total: counted.length, complete: widest.complete }
 }
 
@@ -18692,6 +18881,8 @@ export interface TopAccountRow {
   activityCountComplete?: boolean
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
+  // Protocol revenue earned from this account/group (see revenueByAccount).
+  revenueUsd?: number
   // Up to 4 largest holdings (> $10, highest USD first) for the icon cluster
   // shown after the row's value. Tag rows aggregate holdings across members.
   topAssets?: { asset: AssetRef; valueUsd: number }[]
@@ -18753,7 +18944,7 @@ export function buildValueSparkline(
   }
   return series.map(v => +v.toFixed(2))
 }
-export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'activity' | 'volume' | 'liquidation'
+export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'activity' | 'volume' | 'liquidation' | 'revenue'
 // The activity sort briefly shipped as `updates`; both resolve to the same column.
 export function normalizeAccountSort(sort: string): string {
   return sort === 'updates' ? 'activity' : sort
@@ -19193,6 +19384,7 @@ const ACCOUNT_SORT_SQL: Record<AccountSort, string> = {
   activity: 'activity_count_complete DESC, activity_count DESC, usd_total DESC',
   volume: 'trading_volume_usd DESC, usd_total DESC',
   liquidation: 'if(liquidation_volume_usd <= 0, 1, 0) ASC, liquidation_volume_usd DESC, usd_total DESC',
+  revenue: 'if(revenue_usd <= 0, 1, 0) ASC, revenue_usd DESC, usd_total DESC',
 }
 
 // Total number of account rows (single accounts + tagged groups, tag members
@@ -19456,6 +19648,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     const includeActivitySort = sort === 'activity'
     const includeVolumeSort = sort === 'volume'
     const includeLiquidationSort = sort === 'liquidation'
+    const includeRevenueSort = sort === 'revenue'
     // Every CTE below groups by this SAME `gkey` — a system tag's label_id when
     // the account has one, else the account itself. A viewer's fold overrides
     // that per-account, before any of them run: `fold_ids`/`fold_keys` name
@@ -19563,6 +19756,30 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             )` : ''
     const liquidationJoin = includeLiquidationSort ? 'LEFT JOIN liquidation_volume lv ON lv.gkey = g.gkey' : ''
     const liquidationSelect = includeLiquidationSort ? 'ifNull(lv.volume_usd, 0.)' : '0.'
+    // Same shape as the volume splice: heavy only for its own sort, grouped by
+    // the SAME gkey/fold rules, EVM twins folded through the bind map.
+    const revenueCte = includeRevenueSort ? `,
+            account_revenue_raw AS (
+              SELECT account AS account_id, toFloat64(sum(revenue_usd)) AS volume_usd
+              FROM price_data.account_revenue
+              WHERE match(account, '^0x[0-9a-f]{64}$')
+              GROUP BY account_id
+            ),
+            account_revenue_grouped AS (
+              SELECT ${gkeySql('v.account_id')} AS gkey, sum(v.volume_usd) AS volume_usd
+              FROM (
+                SELECT
+                  ${boundAccountSql('vr')} AS account_id,
+                  sum(vr.volume_usd) AS volume_usd
+                FROM account_revenue_raw vr
+                LEFT JOIN bind b ON b.eth_id = vr.account_id
+                GROUP BY account_id
+              ) v
+              LEFT JOIN tags t ON t.account_id = v.account_id
+              GROUP BY gkey
+            )` : ''
+    const revenueJoin = includeRevenueSort ? 'LEFT JOIN account_revenue_grouped rv ON rv.gkey = g.gkey' : ''
+    const revenueSelect = includeRevenueSort ? 'ifNull(rv.volume_usd, 0.)' : '0.'
     const lpClaimsCte = omnipoolAccountClaimsReady ? `,
             lp_claims AS (
               SELECT s.account_id, s.asset_id, s.amount, s.hub_amount
@@ -19740,6 +19957,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             ${activityCte}
             ${volumeCte}
             ${liquidationCte}
+            ${revenueCte}
           SELECT
             -- Alias the wallet value explicitly: the lp_grouped join (v3) also exposes a
             -- usd column, so a bare g.usd serialises as the qualified name g.usd in
@@ -19764,6 +19982,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             ${activityCompleteSelect} AS activity_count_complete,
             ${volumeSelect} AS trading_volume_usd,
             ${liquidationSelect} AS liquidation_volume_usd,
+            ${revenueSelect} AS revenue_usd,
             -- (asset_id, usd) for the 4 largest holdings, highest first: worth > $10
             -- AND ≥ 10% of the group's total held value (arraySum of the map).
             arraySlice(
@@ -19787,6 +20006,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
           ${activityJoin}
           ${volumeJoin}
           ${liquidationJoin}
+          ${revenueJoin}
           ORDER BY ${orderBy}
           LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         query_params: {
@@ -19814,7 +20034,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
       label_id: string; lname: string; color: string; icon: string; members: string; sample: string
       last_block: number; usd: number; usd_total: number; mm_col: number; mm_debt: number; mm_present: number; mm_hf: string; mm_worst_acct: string | null
       supplemental_present: number; supplemental_debt: number; supplemental_hf: string
-      has_identity: number; activity_count: number; activity_count_complete: number; trading_volume_usd: number; liquidation_volume_usd: number
+      has_identity: number; activity_count: number; activity_count_complete: number; trading_volume_usd: number; liquidation_volume_usd: number; revenue_usd: number
       top_assets: [string, number][]
       other_assets: number
       gkey?: string   // present only when viewerFold spliced `g.gkey AS gkey` in above
@@ -19857,6 +20077,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
         activityCountComplete: r.activity_count > 0 ? r.activity_count_complete === 1 : undefined,
         tradingVolumeUsd: r.trading_volume_usd > 0 ? Number(r.trading_volume_usd) : undefined,
         liquidationVolumeUsd: r.liquidation_volume_usd > 0 ? Number(r.liquidation_volume_usd) : undefined,
+        revenueUsd: r.revenue_usd > 0 ? Number(r.revenue_usd) : undefined,
         topAssets: r.top_assets?.length ? r.top_assets.map(([id, valueUsd]) => ({ asset: asset(id), valueUsd })) : undefined,
         otherAssets: r.other_assets > 0 ? Number(r.other_assets) : undefined,
       }
@@ -20237,9 +20458,10 @@ async function enrichAccountRows(
   for (const r of baseRows) (baseByAccount.get(r.account_id) ?? baseByAccount.set(r.account_id, []).get(r.account_id)!).push(r)
   const moduleBalancesByAccount = new Map<string, { account_id: string; asset_id: string; bal: string }[]>()
   for (const r of moduleBalanceRows) (moduleBalancesByAccount.get(r.account_id) ?? moduleBalancesByAccount.set(r.account_id, []).get(r.account_id)!).push(r)
-  const [volumeByAccount, liquidationByAccount] = await Promise.all([
+  const [volumeByAccount, liquidationByAccount, revenueByAccountAll] = await Promise.all([
     tradingVolumeByAccount(all),
     liquidationVolumeByAccount(all),
+    revenueByAccount(all),
   ])
 
   rows.forEach((row, i) => {
@@ -20273,6 +20495,8 @@ async function enrichAccountRows(
       if (volume > 0) row.tradingVolumeUsd = volume
       const liquidationVolume = accs.reduce((s, a) => s + (liquidationByAccount.get(a) ?? 0), 0)
       if (liquidationVolume > 0) row.liquidationVolumeUsd = liquidationVolume
+      const revenue = accs.reduce((s, a) => s + (revenueByAccountAll.get(a) ?? 0), 0)
+      if (revenue > 0) row.revenueUsd = revenue
     }
   })
 }
@@ -20670,6 +20894,7 @@ export interface TagDetail {
   portfolioUsd: number
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
+  revenueUsd?: number
   moneyMarket: MoneyMarketPosition[]
   liquidityPositions?: LpPosition[]
   activeDcas?: ActiveDca[]
@@ -20894,15 +21119,17 @@ async function buildTagDetailForMembers(
     const portfolioSeries = history.portfolioSeries.slice()
     if (portfolioSeries.length) portfolioSeries[portfolioSeries.length - 1] = +(portfolioUsd - debtUsd).toFixed(2)
     const volumeAccounts = [...new Set([...members, ...members.map(evmAccountForm).filter(Boolean) as string[]])]
-    const [tradingVolumeUsd, liquidationVolumeUsd] = await Promise.all([
+    const [tradingVolumeUsd, liquidationVolumeUsd, revenueUsd] = await Promise.all([
       tradingVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
       liquidationVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
+      revenueByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
     ])
     const detail: TagDetail = {
       tagId: presentation.tagId, name: presentation.name, color: presentation.color, note: presentation.note, icon: presentation.icon,
       members: members.map(accountRef), balances, topAssets: topHeldTokens(balances), portfolioUsd,
       ...(tradingVolumeUsd > 0 ? { tradingVolumeUsd } : {}),
       ...(liquidationVolumeUsd > 0 ? { liquidationVolumeUsd } : {}),
+      ...(revenueUsd > 0 ? { revenueUsd } : {}),
       moneyMarket, liquidityPositions: [...lpPositions, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)), activeDcas,
       portfolioSeries, portfolioDates: history.portfolioDates,
       // Holdings without indexed historical observations remain absent rather

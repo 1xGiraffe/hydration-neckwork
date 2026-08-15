@@ -23,6 +23,7 @@ import {
   type ValueListFilters,
 } from '../services/explorerService.ts'
 import { getHdxDashboard } from '../services/hdxService.ts'
+import { FLOW_CURSOR_RE, REVENUE_RANGES, getRevenueDashboard, getRevenueFlow } from '../services/revenueService.ts'
 import { getHollarDashboard } from '../services/hollarService.ts'
 import { getSecurityDashboard } from '../services/securityService.ts'
 import { countLiquiditySources } from '../services/poolService.ts'
@@ -41,7 +42,7 @@ const limitSchema = z.coerce.number().int().min(1).max(250).optional()
 // `updates` was this sort's token for one release while the column was labelled for the
 // balance-observation count it used to show. Still accepted so a link made against it
 // resolves to the column it always meant.
-const accountSortSchema = z.enum(['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'updates', 'volume', 'liquidation'])
+const accountSortSchema = z.enum(['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'updates', 'volume', 'liquidation', 'revenue'])
 // Exported so the viewer-fold accounts route (routes/user.ts) validates `sort` the
 // exact same way the public directory does — same precedent as offsetParam/limitParam.
 export function accountSortParam(q: Record<string, unknown>): AccountSort {
@@ -752,6 +753,18 @@ export async function explorerRoutes(fastify: FastifyInstance) {
 
   fastify.get('/explorer/hdx', async () => {
     return getHdxDashboard()
+  })
+
+  fastify.get('/explorer/revenue', async (req, reply) => {
+    const q = z.object({ range: z.enum(REVENUE_RANGES).default('30d') }).safeParse(req.query)
+    if (!q.success) return reply.status(400).send({ error: 'Invalid range' })
+    return getRevenueDashboard(q.data.range)
+  })
+
+  fastify.get('/explorer/revenue/flow', async (req, reply) => {
+    const q = z.object({ after: z.string().regex(FLOW_CURSOR_RE).optional() }).safeParse(req.query)
+    if (!q.success) return reply.status(400).send({ error: 'Invalid cursor' })
+    return getRevenueFlow(q.data.after ?? null)
   })
 
   fastify.get('/explorer/hollar', async () => {
