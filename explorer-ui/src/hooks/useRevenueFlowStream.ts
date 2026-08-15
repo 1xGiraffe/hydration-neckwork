@@ -171,6 +171,17 @@ export function createFlowScheduler(opts: FlowSchedulerOptions): FlowScheduler {
 // The fetch loop
 // ---------------------------------------------------------------------------
 
+/**
+ * Resume behavior scales with how long the tab was away:
+ *  * under FLOW_RESUME_RESET_MS — keep the cursor (nothing is dropped) and
+ *    stretch the catch-up batch over ~half the absence, so a one-minute pause
+ *    replays as a calm half-minute of flow instead of one clump;
+ *  * over it — restart with a fresh seed: the counter says "while watching",
+ *    a full multi-minute recap is just noise, and a page the browser froze
+ *    mid-fetch gets a clean slate.
+ */
+export const FLOW_RESUME_RESET_MS = 90_000
+
 export interface RevenueFlowStream {
   scheduler: FlowScheduler
   /** Last fetched drip rates (for the legend's live rates). */
@@ -197,15 +208,20 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
   const lastHeadRef = useRef(0)
   const lastBatchAtRef = useRef(0)
   const dripsRef = useRef<RevenueFlowResponse['drips']>([])
-  const inflightRef = useRef(false)
+  // Timestamp, not a boolean: a mobile browser can freeze the page mid-fetch
+  // and never settle the promise, and a boolean latch would then skip every
+  // future pull forever. A stale timestamp simply stops counting as busy.
+  const inflightAtRef = useRef(0)
+  const hiddenAtRef = useRef(0)
+  const resumeSpreadRef = useRef(0)
 
   useEffect(() => {
     if (paused) return
     let disposed = false
 
     async function pull(): Promise<void> {
-      if (inflightRef.current || document.hidden) return
-      inflightRef.current = true
+      if (Date.now() - inflightAtRef.current < 15_000 || document.hidden) return
+      inflightAtRef.current = Date.now()
       try {
         const res = await api.revenueFlow(cursorRef.current)
         if (disposed) return
@@ -217,9 +233,13 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
         // instead, so the river flows evenly between arrivals.
         const now = Date.now()
         const headDelta = lastHeadRef.current > 0 ? Math.max(0, res.head - lastHeadRef.current) : 0
-        const gapMs = lastBatchAtRef.current > 0
+        let gapMs = lastBatchAtRef.current > 0
           ? Math.min(90_000, Math.max(res.blockSeconds * 1_500, now - lastBatchAtRef.current))
           : 15_000
+        if (resumeSpreadRef.current > 0) {
+          gapMs = Math.max(gapMs, resumeSpreadRef.current)
+          resumeSpreadRef.current = 0
+        }
         if (res.items.length || headDelta > 0) lastBatchAtRef.current = now
         scheduler.ingest(res.items, gapMs)
         dripsRef.current = res.drips
@@ -240,7 +260,7 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
       } catch {
         if (!disposed) setConnected(false)
       } finally {
-        inflightRef.current = false
+        inflightAtRef.current = 0
       }
     }
 
@@ -249,6 +269,28 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
       lastPull = Date.now()
       void pull()
     }
+    // Returning after a real absence (a backgrounded mobile app, not a quick
+    // tab flick) restarts the stream instead of resuming it: the cursor and
+    // head are minutes stale, so a fresh seed reads better than a burst of
+    // old items — and it clears any state a frozen page left behind.
+    const onVisibility = (): void => {
+      if (document.hidden) {
+        hiddenAtRef.current = Date.now()
+        return
+      }
+      const awayMs = hiddenAtRef.current > 0 ? Date.now() - hiddenAtRef.current : 0
+      if (awayMs > FLOW_RESUME_RESET_MS) {
+        cursorRef.current = null
+        lastHeadRef.current = 0
+        lastBatchAtRef.current = 0
+        inflightAtRef.current = 0
+      } else if (awayMs > 10_000) {
+        resumeSpreadRef.current = Math.min(60_000, awayMs / 2)
+      }
+      hiddenAtRef.current = 0
+      timedPull()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
     // Head frames can arrive far faster than blocks (mempool-only frames every
     // ~150ms on deployments with the mempool layer); the river only needs one
     // pull per block, so pushes inside the spacing window are ignored.
@@ -266,6 +308,7 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
       disposed = true
       unsubscribe()
       window.clearInterval(fallback)
+      document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [scheduler, paused])
 
