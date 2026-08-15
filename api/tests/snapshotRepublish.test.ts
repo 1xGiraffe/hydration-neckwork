@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest'
 import type { ClickHouseClient } from '../src/db/client.ts'
 import { REPUBLISH_FLOOR_MS, skipDecision, type PublishedGeneration } from '../src/services/snapshotRepublish.ts'
 import {
-  blockProjector, lockRowChecksumFields, persistLockSnapshot, snapProjection, PROJECTION_GRID_MS,
-  type BreakdownRow,
+  lockRowChecksumFields, paraBlockProjector, persistLockSnapshot, relayBlockProjector, snapProjection,
+  PROJECTION_GRID_MS, type BreakdownRow,
 } from '../src/services/lockBreakdownService.ts'
 import {
   moneyMarketClaimChecksumFields, omnipoolClaimChecksumFields, samePriceGeneration,
@@ -229,14 +229,15 @@ describe('snapshot checksums cover every stored column', () => {
 
 describe('grid-snapped unlock projections', () => {
   it('projects a fixed block to the same instant while the chain head advances', () => {
-    // Real block time runs above the nominal 6s the projection assumes, so the
-    // basis drifts steadily; the grid absorbs it instead of rewriting the date.
+    // Real block time runs above the nominal slot time the projection assumes,
+    // so the basis drifts steadily; the grid absorbs it instead of rewriting
+    // the date.
     const target = 2_000_000
     const projections = new Set<number>()
     for (let cycle = 0; cycle < 60; cycle++) {
       const block = 1_000_000 + cycle * 9
       const headTsMs = 1_700_000_000_000 + cycle * 60_000
-      projections.add(blockProjector(headTsMs, block)(target))
+      projections.add(paraBlockProjector(headTsMs, block, 6000)(target))
     }
     // One hour of drift at ~6.66s per block moves the basis ~6.6 minutes, so a
     // 15-minute grid is crossed at most once across the window.
@@ -246,10 +247,34 @@ describe('grid-snapped unlock projections', () => {
 
   it('keeps the projected instant within half a grid step of the raw estimate', () => {
     const headTsMs = 1_700_000_123_456
-    const project = blockProjector(headTsMs, 1_000_000)
+    const project = paraBlockProjector(headTsMs, 1_000_000, 6000)
     expect(Math.abs(project(1_000_100) - (headTsMs + 100 * 6000))).toBeLessThanOrEqual(PROJECTION_GRID_MS / 2)
     // The snapped quantity is the basis every date rides on — block 0's instant.
     expect(snapProjection(project(0))).toBe(project(0))
+  })
+
+  // The two chains do NOT share a slot time through Hydration's 2s migration:
+  // relay heights (vesting) stay on Polkadot's 6s, parachain heights move to
+  // whatever the runtime's slot time is. One projector cannot serve both.
+  it('diverges relay from para once the parachain slot time changes', () => {
+    const headTsMs = 1_700_000_000_000
+    const relay = relayBlockProjector(headTsMs, 1_000_000)
+    const paraToday = paraBlockProjector(headTsMs, 1_000_000, 6000)
+    const paraAfter = paraBlockProjector(headTsMs, 1_000_000, 2000)
+    // Today the two agree: the parachain slot time IS 6s.
+    expect(paraToday(1_100_000)).toBe(relay(1_100_000))
+    // After the upgrade 100k parachain blocks are ~2.3 days, not ~7 — while the
+    // same count of RELAY blocks is unchanged.
+    expect(paraAfter(1_100_000) - headTsMs).toBeCloseTo(100_000 * 2000, -6)
+    expect(relay(1_100_000) - headTsMs).toBeCloseTo(100_000 * 6000, -6)
+    expect(relayBlockProjector(headTsMs, 1_000_000)(1_100_000)).toBe(relay(1_100_000))
+  })
+
+  it('keeps the grid snap on the basis at any slot time', () => {
+    for (const ms of [6000, 2000]) {
+      const project = paraBlockProjector(1_700_000_123_456, 1_000_000, ms)
+      expect(snapProjection(project(0))).toBe(project(0))
+    }
   })
 })
 

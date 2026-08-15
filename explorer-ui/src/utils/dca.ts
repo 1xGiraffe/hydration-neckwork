@@ -4,14 +4,22 @@
 // the schedule pages lead with, so the DCA detail page, the account's active
 // orders and the hover card cannot drift apart on what "every" or "left" means.
 
-// Last-resort block time. Nothing here should reach for it when the chain's own
-// measured pace (stats.avgBlockSec) or a schedule's observed cadence is at hand:
+// Last-resort block time, for the moment before any payload has arrived.
+// Nothing displayed should reach for it: the chain publishes both of its own
+// block times in the stats payload — `avgBlockSec`, the measured pace, for a
+// live block delta, and `nominalBlockSec`, the runtime's slot time, for a
+// runtime block-count constant (see api/src/services/blockTime.ts for why the
+// two are not interchangeable) — and a schedule's observed cadence beats both.
 // Hydration has produced blocks at 12s, produces them at ~6s and is heading for
-// 2s, so a hard-coded seconds-per-block is wrong for every era but one.
+// 2s, so a hard-coded seconds-per-block is wrong for every era but one. What is
+// left for this constant is the empty-state default below and the poll/freshness
+// timers in live.ts, which are needed before the first fetch resolves.
 export const NOMINAL_BLOCK_SECONDS = 6
 
-export function blockSeconds(measured: number | null | undefined): number {
-  return measured != null && Number.isFinite(measured) && measured > 0 ? measured : NOMINAL_BLOCK_SECONDS
+// Resolve a seconds-per-block from the payload, whichever of the two rates the
+// caller asked for, falling back only when the payload is not loaded yet.
+export function blockSeconds(fromChain: number | null | undefined): number {
+  return fromChain != null && Number.isFinite(fromChain) && fromChain > 0 ? fromChain : NOMINAL_BLOCK_SECONDS
 }
 
 export function blockSpanSeconds(blocks: number, secondsPerBlock?: number | null): number {

@@ -28,6 +28,8 @@ Local services:
 | Explorer | <http://localhost:5174> | Live chain explorer and protocol dashboards |
 | Preis | <http://localhost:5173> | Asset price and OHLCV charts |
 | API | <http://localhost:3000> | Explorer and market-data API |
+| Public API | <http://localhost:3002> | Versioned REST API for the Hydration UI and external feeds (Swagger at `/docs`) |
+| Public API cache | <http://localhost:8081> | nginx micro-cache in front of the public API |
 | ClickHouse HTTP | <http://localhost:18123> | Local database endpoint |
 
 The live pipelines start immediately. Historical ingestion continues in the background, so a fresh installation fills older explorer and price history over time.
@@ -51,15 +53,15 @@ SQD archive + Hydration RPC
                                              │
                                          ClickHouse
                                              │
-                                      Fastify API (:3000)
-                                         ┌───┴───┐
-                                  Explorer UI   Preis UI
-                                     (:5174)     (:5173)
+                                      Fastify API (:3000)      Public API (:3002)
+                                         ┌───┴───┐                    │
+                                  Explorer UI   Preis UI      nginx cache (:8081)
+                                     (:5174)     (:5173)      Hydration UI / feeds
 ```
 
 - `src/` contains the price and raw-data indexers, ingestion utilities, and maintenance scripts.
 - `clickhouse/schema/` is the single declarative schema (tables + materialized views), applied once to an empty database by the `schema-bootstrap` service — see [Database model](#database-model). There are no migrations.
-- `api/` serves indexed data through cached read models; Compose snapshot services refresh bounded current-state datasets.
+- `api/` serves indexed data through cached read models; Compose snapshot services refresh bounded current-state datasets. `api/src/public/` is the separate `api-public` service — the versioned REST contract for the Hydration UI and external feeds (see the Public API section in [AGENTS.md](AGENTS.md)).
 - `explorer-ui/` is the block explorer; `preis-ui/` is the price-chart application.
 - `ops/` contains the ingestion supervisor image.
 
@@ -88,6 +90,7 @@ Docker Compose provides working defaults. Override them in an untracked `.env` f
 | `VITE_EXPLORER_URL` | local fallback | Public Explorer URL embedded in Preis UI |
 | `VITE_PREIS_URL` | local fallback | Public Preis URL embedded in Explorer UI |
 | `EXPLORER_OCELLOIDS_TOKEN` | unset | Enables optional XCM journey enrichment |
+| `PUBLIC_API_MASTER` | `true` | `master` flag in the public API's `/rest/service/metadata` probe |
 
 See [`docker-compose.yml`](docker-compose.yml) for service-specific tuning variables. Keep credentials in `.env`, never in tracked files. Vite URL changes require rebuilding the corresponding UI image.
 
