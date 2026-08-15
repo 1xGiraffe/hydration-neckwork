@@ -1,9 +1,11 @@
-export function parsePort(value: string | undefined): number {
+// `name` only labels the failure: the public API service reads PUBLIC_API_PORT
+// (src/public/server.ts), so a bad value must name the variable the operator set.
+export function parsePort(value: string | undefined, name = 'API_PORT'): number {
   const raw = value?.trim() || '3000'
-  if (!/^\d+$/.test(raw)) throw new Error(`API_PORT must be an integer, received ${JSON.stringify(value)}`)
+  if (!/^\d+$/.test(raw)) throw new Error(`${name} must be an integer, received ${JSON.stringify(value)}`)
   const port = Number(raw)
   if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
-    throw new Error(`API_PORT must be between 1 and 65535, received ${JSON.stringify(value)}`)
+    throw new Error(`${name} must be between 1 and 65535, received ${JSON.stringify(value)}`)
   }
   return port
 }

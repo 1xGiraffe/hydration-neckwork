@@ -49,7 +49,7 @@ The database is a rebuildable projection of the chain; there are no migrations. 
   1. **Materialized views** for anything expressible row-wise; they populate automatically from raw in any insertion order (live-forward and backward backfill alike), so a model's completeness tracks raw's completeness for free.
   2. **Bounded request-time reconstruction, or an in-memory snapshot on the existing coordinated refresher**, for per-entity stateful models an MV cannot express. Prefer a pure domain function over the entity's own rows in account-first MV-fed tables, with page-scoped enrichment via primary-key lookups. Reach for a small in-memory snapshot on the existing coordinated refresher only when TS-side computation is unavoidable (for example deriving a multisig address via `createKeyMulti`), or for current-state directory values neither an MV nor request-time reconstruction compute (account-directory Omnipool claims, money-market account values).
   3. **A swept per-entity model** when the value is neither row-wise (no MV) nor affordable per request, and its definition lives in application code rather than SQL. Entities are recounted continuously on the existing coordinated refresher — one at a time, ordered by staleness and by an ingest-time watermark — into a keyed table the read path `LEFT JOIN`s. `account_activity_totals` is the case: an activity total IS the feed's classification, so it is produced by calling the same scoped-total function the detail page calls, and at ~0.76s per account the directory's 114k rows can be neither counted per request nor restated in SQL. Its obligations are in **Swept models** below.
-  4. **The `derivations` service** (`api/src/derivations/`) ONLY for global, heavy models none of the above can express — avoid adding new scheduled batch recompute jobs. `account_trade_volume` is partition-incremental — it recomputes only the month-partitions whose raw changed, detected by an ingest-time watermark (`max(raw.ingested_at) > max(derived.computed_at)`), which is subset-safe and correct under backward backfill. The LP reconstructions (`omnipool_position_owner_intervals`, `xyk_farm_principal_intervals`, `xyk_lp_total_shares_history`) do a bounded full recompute with atomic replace (staging table + `EXCHANGE TABLES`), because a forward cursor is wrong while backfill fills lower blocks and shifted keys would otherwise leave stale rows.
+  4. **The `derivations` service** (`api/src/derivations/`) ONLY for global, heavy models none of the above can express — avoid adding new scheduled batch recompute jobs. `account_trade_volume` and `pool_swap_hourly` are partition-incremental — they recompute only the month-partitions whose raw changed, detected by an ingest-time watermark (`max(raw.ingested_at) > max(derived.computed_at)`), which is subset-safe and correct under backward backfill. `pool_swap_hourly` is also the case where an MV is impossible rather than merely awkward: its source is a `ReplacingMergeTree`, so the legs must be deduplicated BEFORE they are summed, and an insert-trigger MV cannot do a cross-row deduplication. Readers of a partition-incremental model take the closed part from it and the tail from raw, so a lagging partition costs time rather than rows — but raw backfilled BELOW the reader's cut under-reports until the next cycle, which is a freshness bound to state, not to hide. The LP reconstructions (`omnipool_position_owner_intervals`, `xyk_farm_principal_intervals`, `xyk_lp_total_shares_history`) do a bounded full recompute with atomic replace (staging table + `EXCHANGE TABLES`), because a forward cursor is wrong while backfill fills lower blocks and shifted keys would otherwise leave stale rows.
 
 **Swept models.** A swept per-entity model earns its keep only under all of these:
 - **It calls the surface's own function.** The stored value must come from the same code path the entity's detail page calls, never a SQL re-statement of it. A directory that computes a number a second way will disagree with the page it links to, which is the symmetry rule under **Explorer semantics**.
@@ -81,6 +81,7 @@ Keep in mind for new models:
 
 - Render the user's highest-level economic action and suppress internal plumbing legs. Classification must remain symmetric across global, block, extrinsic, account, asset, and tag activity surfaces.
 - Every activity needs a stable event identity and canonical URL. DCA activity links represent schedules; an individual execution is addressable from the schedule page via its execution event (`/dca/<block>-e<eventIndex>`). OTC cancellation is called **Pull** in product copy. Always write **HOLLAR** in uppercase.
+- The Omnipool hub asset (registry id 1) is called **H2O** everywhere — UI copy, API field descriptions, docs, comments. Never write LRNA (its legacy name) except when quoting an on-chain identifier that literally spells it.
 - Activity is the sole domain and API term; do not restore Stream names, routes, or compatibility aliases.
 - Display and copy user addresses as canonical SS58 or H160 forms, never raw AccountId public-key hex. Preserve real identity/tag context across local and cross-chain account pills.
 - The primary and GIGAHDX money markets are isolated. Never blend their health factors. Primary-market directory/DefiSim figures stay primary-only; supplemental collateral backing must not be counted twice; tag risk uses the lowest real member health factor.
@@ -88,6 +89,40 @@ Keep in mind for new models:
 - Multi-asset activity filters must match every referenced asset, including nested pool assets and both sides of a pair.
 - Keep unresolved XCM origins and destinations explicit; enrichment runs asynchronously and must not delay explorer requests.
 - Default tags and structural accounts must be reproducible and idempotent from a clean database. Vesting uses relay-chain height; conviction and GIGAHDX timing use parachain height.
+
+## Public API
+
+The `api-public` service (`api/src/public/`, same image as `api`, own process behind the
+`api-public-nginx` micro-cache) serves the official Hydration UI and external data feeds. It is a
+**versioned frozen contract**, unlike the explorer/preis routes:
+
+- Changes within `/v1` are additive-only; renaming, retyping, or removing a field or route
+  requires a `/v2`. The data-lake-compatible surfaces (`/rest/service/metadata`, `/proxy/*`) are
+  pinned to what the Hydration UI's provider-selection and proxy clients expect.
+- Every public route declares zod request/response schemas (published via OpenAPI at
+  `/openapi.json` and `/docs`) and an explicit entry in `api/src/public/cacheControl.ts`, anchored
+  to the exact registered path so a neighbouring future route cannot inherit its TTL — unmatched
+  routes deliberately ship `no-store`. The one exception is `/proxy/*`, which has no entry on
+  purpose: those responses are cached in-process per upstream and must stay out of any shared
+  cache, so they take the `no-store` default.
+- `api/src/public/**` may import only the allow-list pinned by `api/tests/public/isolation.test.ts`
+  (`db/client`, `config`, `types`, and the `cache`/`explorerAssets`/`ohlcvService`/`poolService`/
+  `volumeService` services). Never `explorerService`. The one sanctioned transitive coupling —
+  `initPoolService` wiring an explorerService client when none is set — is documented at the
+  guard in `poolService.ts`; keep it non-clobbering.
+- Numeric semantics (single-side netted volume, fee/protocol-fee split, APR/APY definitions,
+  window anchoring) are normative in
+  `docs/superpowers/specs/2026-08-12-public-rest-api-design.md` § Semantics, including the
+  documented deviations from the Hydration Data Lake. Swagger descriptions must stay in sync with
+  that section; do not "fix" a deviation without updating both.
+- The public read models live in `clickhouse/schema/006_public.sql` (`pool_swap_legs` with its
+  `op_key` routed-trade key, `farm_config_events`, `otc_order_events`, and the `pool_swap_hourly`
+  pre-aggregate that keeps the fees charts and the DefiLlama backfill off a full leg scan).
+  External-feed facades
+  (CoinGecko/DefiLlama) reuse `pool_swap_legs`, which covers the FULL era: the modern
+  `Broadcast.Swapped*` MV plus four legacy per-pallet MVs (< 6,837,788, back to block 1,708,104).
+  The legacy omnipool buy-fee side flips at the runtime upgrade at block 4,221,778 (fee on the IN
+  asset before, OUT asset after) — the MV and its tests pin this; see the spec's legacy-era note.
 
 ## UI
 

@@ -6,7 +6,7 @@ import { Security } from '../src/pages/Security'
 import { fmtBlocks, fmtDuration, fmtPct, loadColor } from '../src/utils/security'
 import { parseRoute, paths, SECURITY_SECTIONS } from '../src/router'
 import type { SecuritySection } from '../src/router'
-import type { SecurityDashboard } from '../src/types'
+import type { ExplorerStats, SecurityDashboard } from '../src/types'
 
 const DOT = { assetId: 5, symbol: 'DOT', name: 'Polkadot', decimals: 10, parachainId: null }
 const ASTR = { assetId: 9, symbol: 'ASTR', name: 'Astar', decimals: 18, parachainId: 2006 }
@@ -133,9 +133,18 @@ function mockData(): SecurityDashboard {
   }
 }
 
-function render(data: SecurityDashboard, section: SecuritySection | null = null): string {
+// `stats` seeds the chain's two block times; omitted, the page renders without
+// them and every conversion falls back to the nominal constant.
+function render(data: SecurityDashboard, section: SecuritySection | null = null, stats?: Partial<ExplorerStats>): string {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   queryClient.setQueryData(['security-dashboard'], data)
+  if (stats) {
+    queryClient.setQueryData(['stats'], {
+      headBlock: data.chainBlock ?? data.head.blockHeight, finalizedBlock: data.head.blockHeight, headTime: data.head.blockTimestamp,
+      avgBlockSec: 6, nominalBlockSec: 6, transfers24h: 0, extrinsics24h: 0, activeAccounts24h: 0, hdxPrice: null,
+      ...stats,
+    } satisfies ExplorerStats)
+  }
   return renderToStaticMarkup(<QueryClientProvider client={queryClient}><Security section={section} /></QueryClientProvider>)
 }
 
@@ -183,6 +192,41 @@ describe('Security section pages', () => {
     expect(omni).toContain('Per-block limits')
     expect(omni).toContain('Largest liquidity moves')
     expect(omni).not.toContain('Solvency')
+  })
+
+  // The page carries both kinds of number, and they do NOT convert at the same
+  // rate (api/src/services/blockTime.ts). A pallet CONSTANT — the fuse period,
+  // a scheduled lockdown span — is derived from the runtime's slot time, so it
+  // is stated at the nominal; a LIVE delta plays out at the pace the chain is
+  // actually producing. A measured 2s against a nominal 6s tells them apart:
+  // conflating the two reports the runtime's 24h day as 8h.
+  it('states pallet windows at the nominal slot time and live deltas at the measured pace', () => {
+    const data = mockData()
+    // A lockdown still running, so its span is the scheduled one rather than an
+    // observed gap between two produced blocks.
+    data.fuses.lockdowns.unshift({
+      asset: DOT, blockHeight: 13_540_000, blockTimestamp: '2026-08-09 12:00:00', untilBlock: 13_554_400,
+      liftedAtBlock: null, liftedAtTimestamp: null, liftedEarly: null, extrinsicIndex: null,
+    })
+    const html = render(data, 'cross-chain', { avgBlockSec: 2, nominalBlockSec: 6 })
+
+    // 14 400 blocks is the runtime's DAYS, and a day is a day in every era.
+    expect(html).toContain('24 h window')
+    expect(html).toContain('24 h (scheduled)')
+    expect(html).not.toContain('8 h (scheduled)')
+    // 13 560 000 − 13 554 524 = 5 476 blocks still to be produced, at 2s each.
+    expect(html).toContain('unlocks in 3 h')
+    expect(html).toContain('resets in 3 h')
+    expect(html).not.toContain('unlocks in 9.1 h')
+  })
+
+  it('uses indexed timestamps for elapsed history instead of today\'s block pace', () => {
+    const data = mockData()
+    const crossChain = render(data, 'cross-chain', { avgBlockSec: 2, nominalBlockSec: 2 })
+    // The first lockdown lasted from 06:29:51 to 18:18:57: 35h49m. Its block
+    // delta at today's hypothetical 2s pace would incorrectly read 13.9h.
+    expect(crossChain).toContain('35.8 h')
+    expect(crossChain).not.toContain('13.9 h')
   })
 })
 
@@ -332,12 +376,23 @@ describe('security formatting', () => {
   // The domain speaks in hours (the fuse period is "24h", not "one day"), so days
   // only take over once hours stop reading.
   it('says a block count in hours up to two days, then days', () => {
-    expect(fmtBlocks(5)).toBe('<1 min')
-    expect(fmtBlocks(10)).toBe('1 min')
-    expect(fmtBlocks(600)).toBe('1 h')
-    expect(fmtBlocks(14_400)).toBe('24 h')
-    expect(fmtBlocks(28_800)).toBe('2 d')
-    expect(fmtBlocks(100_800)).toBe('7 d')
+    expect(fmtBlocks(5, 6)).toBe('<1 min')
+    expect(fmtBlocks(10, 6)).toBe('1 min')
+    expect(fmtBlocks(600, 6)).toBe('1 h')
+    expect(fmtBlocks(14_400, 6)).toBe('24 h')
+    expect(fmtBlocks(28_800, 6)).toBe('2 d')
+    expect(fmtBlocks(100_800, 6)).toBe('7 d')
+  })
+
+  // The pallet's windows are block counts; what they are worth in hours is the
+  // chain's pace, so the same fuse period reads 24h before and after a block-time
+  // change instead of tripling on the day the chain speeds up.
+  it('converts a block count at the measured pace, not a fixed one', () => {
+    expect(fmtBlocks(14_400, 2)).toBe('8 h')
+    expect(fmtBlocks(43_200, 2)).toBe('24 h')
+    expect(fmtBlocks(7_200, 12)).toBe('24 h')
+    // A measured pace is fractional: 14,400 blocks at 5.63s is 22.5h.
+    expect(fmtBlocks(14_400, 5.63)).toBe('22.5 h')
   })
 
   it('says a millisecond window the same way', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { correctVestingLocks, decodeCompactBig, GIGA_UNBONDING_BLOCKS, moverAccountFilterSql, nonNegativeUIntDifferenceSql } from '../src/services/hdxService.ts'
+import { correctVestingLocks, decodeCompactBig, gigaUnbondingBlocks, moverAccountFilterSql, nonNegativeUIntDifferenceSql } from '../src/services/hdxService.ts'
 import { hexToU8a } from '@polkadot/util'
 
 describe('decodeCompactBig', () => {
@@ -28,7 +28,7 @@ describe('decodeCompactBig', () => {
 
 describe('GIGAHDX unbonding', () => {
   it('uses the protocol 28-day parachain-block delay', () => {
-    expect(GIGA_UNBONDING_BLOCKS).toBe(28 * 24 * 600)
+    expect(gigaUnbondingBlocks()).toBe(28 * 24 * 600)
   })
 })
 

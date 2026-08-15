@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cachedSwr } from './cache.ts'
-import { accountRef, ensurePrices, type AccountRef, type AssetRef, type PriceInfo } from './explorerService.ts'
+import { accountRef, ensurePrices, hasExplorerClient, initExplorerService, type AccountRef, type AssetRef, type PriceInfo } from './explorerService.ts'
 import { assetDescriptor, priceAssetId } from './explorerAssets.ts'
 import { stableswapPoolAccount } from './tagService.ts'
 import { hasDriftingPegs, parseStableswapPools, pegPrice, type StableswapPoolSnapshot } from './stableswapSnapshot.ts'
@@ -18,7 +18,22 @@ import { hasDriftingPegs, parseStableswapPools, pegPrice, type StableswapPoolSna
 // displayed, never applied to USD.
 
 let client: ClickHouseClient
-export function initPoolService(c: ClickHouseClient): void { client = c }
+/**
+ * Wires this service's ClickHouse handle.
+ *
+ * TRANSITIVE COUPLING, stated on purpose: every value this service produces is
+ * priced through `explorerService.ensurePrices`, so a process that initializes only
+ * this service gets an EMPTY price map — `refreshPrices` swallows the failure — and
+ * silently reports every pool as unpriced instead of failing. That is what the
+ * public API's platform TVL first did. So a handle is supplied for a process that
+ * has none, and only then: repointing an explorerService that is already wired
+ * would let a caller with a scratch or long-op client take over the live price
+ * loader's connection, which nothing would surface.
+ */
+export function initPoolService(c: ClickHouseClient): void {
+  client = c
+  if (!hasExplorerClient()) initExplorerService(c)
+}
 
 const LRNA_ASSET_ID = 1
 const OMNIPOOL_ACCOUNT = '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000'

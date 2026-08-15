@@ -87,6 +87,13 @@ export function swapEventFilterSql(): string {
 // `toYYYYMM(toDateTime(block_height * 12))` expression the partition key uses.
 // A block is 12 synthetic seconds, so the month's first block is its UTC epoch
 // second divided by 12, and the bound is exclusive at the next month's first block.
+// "Synthetic" is load-bearing: 12 is a partitioning constant, decoupled from the
+// chain's real block time (6s since 2022), and it must stay identical across all
+// five sites — see the note above account_trade_volume in
+// clickhouse/schema/001_tables.sql. Do not re-pin it at a block-time change; a
+// faster chain just makes each partition span fewer real days (~15 at 6s, ~5 at 2s,
+// so proportionally more partitions go stale per real day and this job rebuilds
+// more often), which is a cost question, never a correctness one.
 export function partitionBlockRange(partition: string): { fromBlock: number; toBlock: number } {
   const year = Number(partition.slice(0, 4))
   const month = Number(partition.slice(4, 6))

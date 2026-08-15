@@ -110,6 +110,10 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.xyk_lp_share_observations_mv T
 -- Swap-row filter mirrors swapEventFilterSql() in api/src/services/accountTradeVolume.ts,
 -- the single source of truth for the Broadcast/legacy era split, so the watermarks
 -- cover exactly the rows the netting reads (asserted in api/src/derivations/jobs.test.ts).
+-- `block_height * 12` is the synthetic block-space partition clock, not the chain's
+-- block time; it must stay identical to account_trade_volume's PARTITION BY or the
+-- watermarks key on partitions the derived table does not have. See the note above
+-- account_trade_volume in 001_tables.sql before changing it at a block-time change.
 CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.swap_source_partition_watermarks_mv TO price_data.swap_source_partition_watermarks (`p` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_max_ts` SimpleAggregateFunction(max, DateTime)) AS SELECT toYYYYMM(toDateTime(block_height * 12)) AS p, max(ingested_at) AS src_ingest, max(block_height) AS src_maxb, max(block_timestamp) AS src_max_ts FROM price_data.raw_events WHERE ((event_name IN ('Broadcast.Swapped', 'Broadcast.Swapped2', 'Broadcast.Swapped3')) AND (block_height >= 6837788)) OR ((event_name IN ('Omnipool.SellExecuted', 'Omnipool.BuyExecuted', 'XYK.SellExecuted', 'XYK.BuyExecuted', 'Stableswap.SellExecuted', 'Stableswap.BuyExecuted', 'LBP.SellExecuted', 'LBP.BuyExecuted')) AND (block_height < 6837788)) GROUP BY p;
 -- who / asset_id / amount are extracted here exactly as the count arm and the row-path
 -- sibling matcher in api/src/services/explorerService.ts used to extract them for

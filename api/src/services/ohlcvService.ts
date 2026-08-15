@@ -40,6 +40,13 @@ export async function queryOHLCV(
       start_time: startTime,
       end_time: endTime,
     },
+    // The OHLCV columns are Decimal(38,12). ClickHouse renders decimals as bare JSON
+    // numbers by default, so JSON.parse turns each one into a double and OHLCVCandle's
+    // `string` fields are a lie at runtime — a 16-17 significant-digit volume can lose
+    // its last digit before any consumer sees it. Quoting them makes the declared type
+    // true and keeps the exact value available to callers that do integer arithmetic
+    // on it; candleToResponse's parseFloat is unaffected.
+    clickhouse_settings: { output_format_json_quote_decimals: 1 },
     format: 'JSONEachRow',
   })
   return result.json<OHLCVCandle>()

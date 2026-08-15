@@ -1,12 +1,27 @@
 import { useSyncExternalStore } from 'react'
+import { NOMINAL_BLOCK_SECONDS } from './utils/dca'
 
-// The explorer is always live. A block lands every ~6 seconds and the pages
-// follow it: the SSE head stream drives the refetches, and LIVE_MS is the
-// fallback interval for whenever that stream is unavailable (older browser,
+// The explorer is always live. A block lands every ~6s today (2s planned) and
+// the pages follow it: the SSE head stream drives the refetches, and LIVE_MS is
+// the fallback interval for whenever that stream is unavailable (older browser,
 // proxy hiccup, mocked test API). Polling faster than the chain only re-fetches
 // the same head while forcing the API cache to expire between clients; the
 // server's single-flight cache keeps DB load O(1) however many clients watch.
-export const LIVE_MS = 6000
+//
+// These two timers are the only block-time knowledge in the UI that does not
+// come from the chain, because neither is a value anyone reads: one is a poll
+// interval, the other a cache-freshness window, and both are needed BEFORE the
+// stats payload carrying the chain's own rates has been fetched at all. They
+// ride on the fallback constant instead. A faster chain therefore keeps the same
+// fallback cadence until someone moves that constant — a degraded-mode poll a
+// block or two behind, never a wrong number on screen.
+export const LIVE_MS = NOMINAL_BLOCK_SECONDS * 1000
+// One nominal block of freshness for the live feeds: a poll that lands inside
+// the block already on screen serves it from cache instead of asking again.
+// Feeds with a rate of their own (block/extrinsic/event lists at 2-5s, detail
+// pages at 20-120s) keep their own value; this is the shared "as fresh as the
+// chain" default.
+export const BLOCK_STALE_MS = NOMINAL_BLOCK_SECONDS * 1000
 
 // Push channel. The API streams the ingested chain head over SSE; when a new
 // block lands, main.tsx invalidates exactly the global live feeds below, so

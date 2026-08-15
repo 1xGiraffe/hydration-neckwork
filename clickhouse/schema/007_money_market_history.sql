@@ -1,0 +1,192 @@
+-- Money-market read models for the public /v1 REST API: per-reserve interest
+-- rates, and per-reserve supplied/debt state (reserve TVL history and the
+-- current moneyMarketSupplyUsd). Normative definitions:
+-- docs/superpowers/specs/2026-08-12-public-rest-api-design.md § Phase 2.
+--
+-- WHAT RAW HOLDS. raw_money_market_reserves.ReserveDataUpdated carries exactly
+-- five numbers, as RAY-scaled (1e27) decimal STRINGS:
+--
+--   {"liquidityRate":"9483888550120237863852107",
+--    "stableBorrowRate":"87844061325598878355077933",
+--    "variableBorrowRate":"26422030662799439177538967",
+--    "liquidityIndex":"1053028806315852937432178217",
+--    "variableBorrowIndex":"1093425375129287086303227868","event":"…"}
+--
+--   * The strings reach 28 digits and most of them exceed 2^64 (1,307,030 of
+--     1,761,062 rows as of 2026-08-12), so the rates are read with
+--     JSONExtractString → toUInt256OrZero. JSONExtractUInt caps at 2^64 and
+--     would silently truncate the majority of the table.
+--   * metrics_json and decoded_args_json carry byte-identical values for these
+--     keys on every row (0 mismatches over the whole table). The sibling
+--     money_market_reserve_indices_mv reads decoded_args_json; this MV reads
+--     metrics_json per the spec. Either is correct; they must not diverge.
+--   * pool_address is empty on 1,674,617 of the rows (the event is emitted by
+--     the pool implementation), so it falls back to contract_address exactly as
+--     money_market_reserve_indices_mv does. The fallback yields the three real
+--     pool proxies and nothing else: 0x1b02e051… (core), 0x2ce2cfff… (gigahdx),
+--     0x69310fda… (bil).
+--   * stableBorrowRate is present but not projected: Aave's stable-rate
+--     borrowing is disabled on these markets, so the number is inert. Adding the
+--     column later is an additive change; inventing a consumer for it now is not.
+--
+-- WHY THERE IS NO money_market_reserve_state_history TABLE. The spec left the
+-- source open. Neither candidate is honestly MV-expressible at reserve level:
+--
+--   (a) Project totals out of the reserve events. Ruled out by the data: over
+--       every event name the table holds (ReserveDataUpdated,
+--       FacilitatorBucketLevelUpdated, IsolationModeTotalDebtUpdated,
+--       MintedToTreasury, and the role/ownership events) the only quantities are
+--       the two rates, the two indices, the HOLLAR facilitator bucket level, the
+--       isolation-mode debt ceiling usage and a treasury mint amount. No event
+--       carries a reserve's total liquidity or total debt, scaled or actual.
+--   (b) Scaled-total reconstruction (atoken_scaled_anchor holder='' + the
+--       per-event deltas of atoken_scaled_deltas_by_contract) × the reserve
+--       index. This is the correct model and is what the two views below
+--       compute, but it cannot be a materialized view:
+--       - a running total is not row-wise, so an MV cannot emit it, and an
+--         additive Summing/Aggregating destination is exactly the double-count
+--         a replayed raw range causes;
+--       - its base is not raw. The holder='' anchor is a node-sourced
+--         totalSupply() at B0 (same chain-state exception class as
+--         atoken_reserve_map). B0 is derived at runtime as
+--         max(anchor_block) — currently 8,200,000 — never hardcoded here.
+--         Indexed EVM-log coverage BELOW B0 is incomplete. Measured over all 16
+--         contracts that hold an anchor: summing every indexed delta from zero
+--         up to B0 reproduces the node's totalSupply for exactly ONE of them,
+--         and that one (0x8a598fe3…) has only 44,258 blocks of history below B0
+--         so there is nearly nothing for it to miss. The other 15 differ, 9 of
+--         them materially, spread −74.34% … +9.91% (−74.34, −70.29, −39.08,
+--         −35.13, −25.12, −18.63, +0.39, +5.16, +9.91; the remaining 6 are
+--         rounding-scale, 1e-9 … 2e-7). Errors run in BOTH directions, so this
+--         is missing and duplicated log coverage, not one-sided truncation.
+--         Every contract created after B0 has no anchor row and its whole
+--         history is in the deltas, which is why those reconstruct exactly.
+--
+-- So this file ships the rates MV plus two read-time views, and reserve state
+-- history starts at B0. A stored table would have to either invent the pre-B0
+-- era or double-count under replay; an explicit coverage floor is the honest
+-- shape. Cost is measured, not assumed: the current view is ~0.8 s and the
+-- history view ~1.1 s for every reserve of every market over a 7-day daily
+-- grid, both dominated by one FINAL pass over the 13.7M post-B0 delta rows.
+-- That cost is flat in the window and does NOT belong on an uncached request
+-- path: the consuming route must cache (an unmatched public route ships
+-- no-store by default, so the TTL has to be declared deliberately).
+--
+-- EMPTY RESULT IS NOT ZERO. Both views return zero rows whenever
+-- atoken_scaled_anchor holds no snapshot — a fresh database before
+-- snapshot-atoken-anchors.ts has run, or that service's RPC being unreachable,
+-- which is a one-way failure (the money-market readiness flag never un-sets
+-- itself). Consumers must render null, exactly as /v1/stats/platform's
+-- moneyMarketSupplyUsd already does: null says "no model here", while 0 reports
+-- the platform as smaller than it is.
+--
+-- The `anchor_block > 0` guard on the contract lists is what makes that true,
+-- and it is load-bearing rather than defensive. Verified by emptying the anchor
+-- table on a scratch rebuild: without the guard, a database whose reserve map is
+-- populated but whose anchor is not — the partial state that RPC failure leaves,
+-- since the map is refreshed every cycle and the anchor only when it is empty —
+-- returned 22 reserves with 20 non-zero totals built from post-B0 deltas ALONE,
+-- i.e. silently understated supply rather than no answer. For the same reason
+-- the history view's index branch is INNER JOINed to the reserve map: reading
+-- money_market_reserve_indices unfiltered emitted 120 all-zero rows on an empty
+-- map, which is precisely the "0 standing in for a value" AGENTS.md forbids.
+--
+-- CONSERVATION (AGENTS.md's receipt-token rule). For each reserve contract,
+--   total_scaled = Σ_holders holder_scaled + anchor_gap
+-- where anchor_gap = totalSupply()@B0 − Σ balanceOf(holder)@B0 is the holders
+-- the anchor enumeration missed. The gap is 0–400 scaled units for 14 of the 16
+-- anchored contracts, and 2.49e23 (aGDOT) / 3.62e14 (a1000765) / 1.39e6 (aUSDT)
+-- for the other three. These views report the TOTAL — never the holder sum
+-- scaled up to it — so the gap stays visible as a difference against
+-- money_market_account_value_snapshots rather than being smeared over holders.
+--
+-- TWO TRAPS, both silent, both pinned by api/tests/public/schemaMoneyMarket.test.ts:
+--   * RAY must be written toUInt256('1000000000000000000000000000'). The bare
+--     literal 1000000000000000000000000000 is out of UInt64 range so ClickHouse
+--     parses it as Float64, and toInt256 of that is 1000000000013300453828 too
+--     large — a wrong divisor that still looks exactly right in the SQL text.
+--   * start_time must NOT be pushed into the running sum. The window filter is
+--     applied after the cumulative sum, on the outer SELECT; end_time is pushed
+--     down (a future delta must not count) and start_time deliberately is not.
+--     Filtering the sum's input by start_time would silently rebase every series
+--     to zero at the left edge of the requested window.
+
+-- Per-reserve interest rates, one row per ReserveDataUpdated. Sibling of
+-- money_market_reserve_indices, same key and partitioning: the two split one
+-- event because the indices drive balance reconstruction while the rates drive
+-- APR/APY surfaces, and they are read on entirely different paths.
+-- RAY units (1e27); an APR is rate/1e27 and the APY compounds it per second.
+CREATE TABLE IF NOT EXISTS price_data.money_market_reserve_rates (`pool_address` String, `reserve_address` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `liquidity_rate` UInt256, `variable_borrow_rate` UInt256, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (pool_address, reserve_address, block_height, event_index) SETTINGS index_granularity = 4096;
+
+-- raw_money_market_reserves.reserve_address is table-qualified in the filter
+-- because the SELECT aliases a column to reserve_address: ClickHouse resolves a
+-- bare column in WHERE against the SELECT's aliases first. Both spellings return
+-- the same 1,761,070 rows here, so this is a guard against a future edit that
+-- makes the alias mean something else, not a fix. ingested_at is carried through
+-- from raw rather than being now(), so a backward backfill replaces its row
+-- instead of losing to wall-clock ordering. No FINAL: an MV is an insert trigger
+-- over the inserted block, and deduplication is the destination's replacement key.
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.money_market_reserve_rates_mv TO price_data.money_market_reserve_rates (`pool_address` String, `reserve_address` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `liquidity_rate` UInt256, `variable_borrow_rate` UInt256, `ingested_at` DateTime) AS SELECT lower(if(pool_address = '', contract_address, pool_address)) AS pool_address, lower(ifNull(reserve_address, '')) AS reserve_address, block_height, event_index, block_timestamp, toUInt256OrZero(JSONExtractString(metrics_json, 'liquidityRate')) AS liquidity_rate, toUInt256OrZero(JSONExtractString(metrics_json, 'variableBorrowRate')) AS variable_borrow_rate, ingested_at FROM price_data.raw_money_market_reserves WHERE (raw_money_market_reserves.event_name = 'ReserveDataUpdated') AND (ifNull(raw_money_market_reserves.reserve_address, '') != '');
+
+-- Current supplied/debt per reserve, in raw asset units, for the money-market
+-- directory value and platform TVL. Composes the same three sources and the same
+-- arithmetic as explorerService.ts's reconstructTotalScaled + reserveIndicesNow,
+-- so the public number and the explorer's cannot disagree:
+--
+--   scaled = totalSupply()@B0 + Σ scaled_delta(block > B0)
+--   amount = scaled · index / RAY          (truncating, as the explorer does)
+--
+-- FINAL on the deltas is required, not decorative: the table is a
+-- ReplacingMergeTree over a replayable raw range, and summing unmerged
+-- duplicates double-counts. The indices are read with argMax over
+-- (block_height, event_index, ingested_at) — the table's full replacement key
+-- plus its version — which resolves a replayed duplicate to the same winner
+-- without a merge, so FINAL there would only add one.
+--
+-- Reserve membership comes from atoken_reserve_map, and three cases behave
+-- differently. A reserve whose aToken/vDebt has neither an anchor row nor any
+-- delta reports 0, which is its true supply. A reserve absent from the map
+-- (never in the pool's reservesList when the map was last refreshed) is absent
+-- here too, rather than reported as zero. A reserve the map still holds but
+-- whose ReserveDataUpdated never fired is dropped outright, because the join to
+-- money_market_reserve_indices is an INNER one — there is no index to multiply
+-- by, and 0 would be a lie.
+--
+-- A DELISTED reserve LINGERS. snapshot-atoken-anchors.ts only inserts into a
+-- ReplacingMergeTree keyed (asset_address, atoken) and never deletes, so a
+-- reserve dropped from the pool's reservesList keeps its last map row and its
+-- last anchor forever and goes on reporting its final state — the same
+-- stale-per-entity shape as omnipool_pool_state_history's delisted assets. It
+-- does not vanish, and it does not fall to zero. Treat a reserve whose
+-- block_timestamp has stopped advancing as delisted, not as idle.
+CREATE VIEW IF NOT EXISTS price_data.money_market_reserve_state_current AS WITH (SELECT max(anchor_block) FROM price_data.atoken_scaled_anchor) AS anchor_block, contracts AS (SELECT lower(atoken) AS contract, lower(pool_proxy) AS pool_address, lower(asset_address) AS reserve_address, 1 AS kind FROM price_data.atoken_reserve_map FINAL WHERE anchor_block > 0 UNION ALL SELECT lower(vdebt) AS contract, lower(pool_proxy) AS pool_address, lower(asset_address) AS reserve_address, 2 AS kind FROM price_data.atoken_reserve_map FINAL WHERE anchor_block > 0), scaled AS (SELECT contract, sum(scaled) AS scaled FROM (SELECT lower(contract_address) AS contract, toInt256(argMax(scaled_balance, updated_at)) AS scaled FROM price_data.atoken_scaled_anchor WHERE holder = '' GROUP BY contract UNION ALL SELECT contract_address AS contract, sum(scaled_delta) AS scaled FROM price_data.atoken_scaled_deltas_by_contract FINAL WHERE block_height > anchor_block GROUP BY contract) GROUP BY contract), totals AS (SELECT c.pool_address AS pool_address, c.reserve_address AS reserve_address, sumIf(s.scaled, c.kind = 1) AS supplied_scaled, sumIf(s.scaled, c.kind = 2) AS debt_scaled FROM contracts AS c LEFT JOIN scaled AS s ON s.contract = c.contract GROUP BY pool_address, reserve_address), indices AS (SELECT pool_address, reserve_address, argMax(liquidity_index, tuple(block_height, event_index, ingested_at)) AS liquidity_index, argMax(variable_borrow_index, tuple(block_height, event_index, ingested_at)) AS variable_borrow_index, max(block_height) AS index_block_height, max(block_timestamp) AS index_block_timestamp FROM price_data.money_market_reserve_indices GROUP BY pool_address, reserve_address) SELECT t.pool_address AS pool_address, t.reserve_address AS reserve_address, i.index_block_height AS block_height, i.index_block_timestamp AS block_timestamp, t.supplied_scaled AS supplied_scaled, t.debt_scaled AS debt_scaled, i.liquidity_index AS liquidity_index, i.variable_borrow_index AS variable_borrow_index, intDiv(t.supplied_scaled * toInt256(i.liquidity_index), toInt256(toUInt256('1000000000000000000000000000'))) AS supplied, intDiv(t.debt_scaled * toInt256(i.variable_borrow_index), toInt256(toUInt256('1000000000000000000000000000'))) AS debt FROM totals AS t INNER JOIN indices AS i ON (i.pool_address = t.pool_address) AND (i.reserve_address = t.reserve_address);
+
+-- Per-reserve supplied/debt over time on a caller-chosen bucket grid, for
+-- reserve TVL history. Parameters: bucket_seconds, start_time, end_time.
+--
+--   SELECT * FROM price_data.money_market_reserve_state_history(
+--     bucket_seconds = 86400, start_time = '2026-05-01 00:00:00',
+--     end_time = '2026-08-12 00:00:00')
+--
+-- Semantics a consumer must know:
+--   * A row's values are the CLOSING state of the bucket that begins at
+--     bucket_start. The final bucket is partial unless end_time is exactly a
+--     bucket boundary.
+--   * The series is a STEP FUNCTION: a bucket in which the reserve saw neither a
+--     scaled delta nor a ReserveDataUpdated emits no row, and carries the
+--     previous row's values. Verified against money_market_reserve_state_current:
+--     over a full-history daily grid the last row of every one of the 26 reserves
+--     equals the current view exactly, while a one-hour grid emits only the 11
+--     reserves that moved in that hour. Take the last row per reserve for a
+--     current value, or use the current view.
+--   * Coverage starts at B0 — derived at runtime from max(anchor_block),
+--     currently 8,200,000 (see the header). Both sources are cut at B0 so the
+--     grid cannot begin before the anchor it is built on. A start_time below B0
+--     silently returns fewer buckets, not an error.
+--   * liquidity_index / variable_borrow_index are the last index observed at or
+--     before the bucket's end, carried forward by argMax over an ordering rank
+--     that is tuple(0,0,epoch) on the delta rows, so a delta-only bucket keeps
+--     the previous bucket's index instead of multiplying by zero.
+--   * 256-bit columns are returned as integers; a JSON reader receives them
+--     quoted, which is what keeps them lossless.
+CREATE VIEW IF NOT EXISTS price_data.money_market_reserve_state_history AS WITH (SELECT max(anchor_block) FROM price_data.atoken_scaled_anchor) AS anchor_block, toIntervalSecond({bucket_seconds:UInt32}) AS bucket, contracts AS (SELECT lower(atoken) AS contract, lower(pool_proxy) AS pool_address, lower(asset_address) AS reserve_address, 1 AS kind FROM price_data.atoken_reserve_map FINAL WHERE anchor_block > 0 UNION ALL SELECT lower(vdebt) AS contract, lower(pool_proxy) AS pool_address, lower(asset_address) AS reserve_address, 2 AS kind FROM price_data.atoken_reserve_map FINAL WHERE anchor_block > 0), reserves AS (SELECT DISTINCT pool_address, reserve_address FROM contracts), anchors AS (SELECT c.pool_address AS pool_address, c.reserve_address AS reserve_address, sumIf(a.scaled, c.kind = 1) AS supplied_anchor, sumIf(a.scaled, c.kind = 2) AS debt_anchor FROM contracts AS c LEFT JOIN (SELECT lower(contract_address) AS contract, toInt256(argMax(scaled_balance, updated_at)) AS scaled FROM price_data.atoken_scaled_anchor WHERE holder = '' GROUP BY contract) AS a ON a.contract = c.contract GROUP BY pool_address, reserve_address), observations AS (SELECT c.pool_address AS pool_address, c.reserve_address AS reserve_address, toStartOfInterval(d.block_timestamp, bucket) AS bucket_start, if(c.kind = 1, d.scaled_delta, toInt256(0)) AS supplied_delta, if(c.kind = 2, d.scaled_delta, toInt256(0)) AS debt_delta, toUInt256(0) AS liquidity_index, toUInt256(0) AS variable_borrow_index, tuple(toUInt32(0), toUInt32(0), toDateTime(0)) AS index_rank FROM (SELECT contract_address, block_timestamp, scaled_delta FROM price_data.atoken_scaled_deltas_by_contract FINAL WHERE (block_height > anchor_block) AND (block_timestamp <= {end_time:DateTime})) AS d INNER JOIN contracts AS c ON c.contract = d.contract_address UNION ALL SELECT x.pool_address AS pool_address, x.reserve_address AS reserve_address, toStartOfInterval(x.block_timestamp, bucket) AS bucket_start, toInt256(0) AS supplied_delta, toInt256(0) AS debt_delta, x.liquidity_index AS liquidity_index, x.variable_borrow_index AS variable_borrow_index, tuple(x.block_height, x.event_index, x.ingested_at) AS index_rank FROM (SELECT pool_address, reserve_address, block_height, event_index, block_timestamp, liquidity_index, variable_borrow_index, ingested_at FROM price_data.money_market_reserve_indices WHERE (block_height > anchor_block) AND (block_timestamp <= {end_time:DateTime})) AS x INNER JOIN reserves AS m ON (m.pool_address = x.pool_address) AND (m.reserve_address = x.reserve_address)), bucketed AS (SELECT pool_address, reserve_address, bucket_start, sum(supplied_delta) AS supplied_delta, sum(debt_delta) AS debt_delta, argMax(liquidity_index, index_rank) AS liquidity_index, argMax(variable_borrow_index, index_rank) AS variable_borrow_index, max(index_rank) AS bucket_rank FROM observations GROUP BY pool_address, reserve_address, bucket_start), running AS (SELECT b.pool_address AS pool_address, b.reserve_address AS reserve_address, b.bucket_start AS bucket_start, a.supplied_anchor + (sum(b.supplied_delta) OVER w) AS supplied_scaled, a.debt_anchor + (sum(b.debt_delta) OVER w) AS debt_scaled, argMax(b.liquidity_index, b.bucket_rank) OVER w AS liquidity_index, argMax(b.variable_borrow_index, b.bucket_rank) OVER w AS variable_borrow_index FROM bucketed AS b LEFT JOIN anchors AS a ON (a.pool_address = b.pool_address) AND (a.reserve_address = b.reserve_address) WINDOW w AS (PARTITION BY b.pool_address, b.reserve_address ORDER BY b.bucket_start ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) SELECT r.pool_address AS pool_address, r.reserve_address AS reserve_address, r.bucket_start AS bucket_start, r.supplied_scaled AS supplied_scaled, r.debt_scaled AS debt_scaled, r.liquidity_index AS liquidity_index, r.variable_borrow_index AS variable_borrow_index, intDiv(r.supplied_scaled * toInt256(r.liquidity_index), toInt256(toUInt256('1000000000000000000000000000'))) AS supplied, intDiv(r.debt_scaled * toInt256(r.variable_borrow_index), toInt256(toUInt256('1000000000000000000000000000'))) AS debt FROM running AS r WHERE (r.bucket_start >= {start_time:DateTime}) AND (r.bucket_start <= {end_time:DateTime}) ORDER BY pool_address ASC, reserve_address ASC, bucket_start ASC;
