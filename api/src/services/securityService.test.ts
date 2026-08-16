@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   allowanceFor, assetIdFromBlakeKey, classifyFuse, committeeThresholds, decayedAccumulator,
   decodeLockdownState, decodeOptionalRational, decodePausedKey, decodeRational,
-  decodeWithdrawAccumulator, decodeWithdrawConfig, egressSinkChain, pairLockdowns, rationalPct, replayPauses,
-  tradableLabels, type LockdownState,
+  decodeWithdrawAccumulator, decodeWithdrawConfig, egressSinkChain, pairLockdowns, rationalPct, registryLimitChanges, withdrawConfigText,
+  replayPauses, tradableLabels, type LockdownState,
 } from './securityService.ts'
 
 // Every number the Security page shows about a live limit comes out of one of
@@ -212,6 +212,69 @@ describe('pairLockdowns', () => {
   })
   it('ignores a removal with no matching lockdown', () => {
     expect(pairLockdowns([row('AssetLockdownRemoved', 200, { assetId: 5 })])).toHaveLength(0)
+  })
+})
+
+describe('registryLimitChanges', () => {
+  // Rows carry the synthetic descriptor (symbol `#id`, 12 decimals) because the
+  // registry cache is not loaded in a unit test; on the live page these are
+  // vDOT at 10 decimals and BNC at 12.
+  const row = (asset_id: number, block_height: number, xcm_rate_limit: string) => ({
+    asset_id, block_height, block_timestamp: '2026-01-01 00:00:00', extrinsic_index: 2, xcm_rate_limit,
+  })
+
+  it('records the arming of a fuse and every later move of its limit', () => {
+    // Asset 15's real history, ending at the cut TC proposal #374 applied.
+    const out = registryLimitChanges([
+      row(15, 2_514_313, ''),
+      row(15, 9_116_348, '9000000000000000'),
+      row(15, 9_288_306, '15000000000000000'),
+      row(15, 13_644_113, '534100582229883'),
+    ])
+    expect(out.map(e => e.label)).toEqual([
+      'Deposit fuse limit set', 'Deposit fuse limit changed', 'Deposit fuse limit changed',
+    ])
+    expect(out.map(e => e.blockHeight)).toEqual([9_116_348, 9_288_306, 13_644_113])
+    expect(out[2].detail).toBe('#15 → 534.1 (was 15,000)')
+    expect(out[2]).toMatchObject({ kind: 'limit', extrinsicIndex: 2, asset: { assetId: 15 } })
+  })
+
+  it('stays silent when an update restates the same limit', () => {
+    const out = registryLimitChanges([
+      row(33, 100, '6205412361354520000000000'),
+      row(33, 200, '6205412361354520000000000'),
+      row(33, 300, '6205412361354520000000000'),
+    ])
+    expect(out).toHaveLength(1)
+    expect(out[0].blockHeight).toBe(100)
+  })
+
+  it('says nothing about an asset that never carried a limit', () => {
+    expect(registryLimitChanges([row(1_000_639, 100, ''), row(1_000_639, 200, 'null')])).toHaveLength(0)
+  })
+
+  it('reports a limit being removed rather than dropping the row', () => {
+    const out = registryLimitChanges([row(14, 100, '518134604599066000'), row(14, 200, '')])
+    expect(out.map(e => e.label)).toEqual(['Deposit fuse limit set', 'Deposit fuse limit cleared'])
+    expect(out[1].detail).toBe('#14 → no limit')
+  })
+
+  it('keeps each asset on its own history', () => {
+    const out = registryLimitChanges([
+      row(14, 100, '1000000000000'), row(14, 300, '2000000000000'),
+      row(15, 100, '1000000000000'),
+    ])
+    expect(out.map(e => `${e.blockHeight}:${e.detail}`)).toEqual([
+      '100:#14 → 1', '300:#14 → 2 (was 1)', '100:#15 → 1',
+    ])
+  })
+})
+
+describe('withdrawConfigText', () => {
+  it('states the budget as an HDX allowance per window', () => {
+    // The two configs on record: the 2026-04-06 arming, and the 10x cut in TC #374.
+    expect(withdrawConfigText({ limit: '1000000000000000000000', window: '21600000' })).toBe('1,000,000,000 HDX per 6h')
+    expect(withdrawConfigText({ limit: '100000000000000000000', window: '21600000' })).toBe('100,000,000 HDX per 6h')
   })
 })
 
