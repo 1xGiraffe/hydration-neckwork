@@ -803,12 +803,13 @@ export async function getSecurityDashboard(): Promise<SecurityDashboard> {
 
 async function buildSecurityDashboard(): Promise<SecurityDashboard> {
   const snap = snapshot
-  const [head, pools, lockdownRows, releaseTotal, limitEvents, pauseEvents, tripRows, peaks, omniTradabilityHistory, stableTradability, whitelisted, memberSet, solvency, liquidations, liquidityMoves, runtime] = await Promise.all([
+  const [head, pools, lockdownRows, releaseTotal, limitEvents, registryLimitRows, pauseEvents, tripRows, peaks, omniTradabilityHistory, stableTradability, whitelisted, memberSet, solvency, liquidations, liquidityMoves, runtime] = await Promise.all([
     queryHead(),
     loadCurrentPools(),
     queryLockdownEvents(),
     queryDepositReleases(),
     queryLimitEvents(),
+    queryRegistryLimitEvents(),
     queryPauseEvents(),
     queryTrips(),
     queryPeakBlockVolume(),
@@ -848,7 +849,7 @@ async function buildSecurityDashboard(): Promise<SecurityDashboard> {
       upgrades: Number(runtime?.upgrades ?? 0),
       lastUpgrade: runtime ? { blockHeight: runtime.block_height, blockTimestamp: runtime.block_timestamp } : null,
     },
-    timeline: buildTimeline(limitEvents, pauseEvents, lockdownRows, omniTradabilityHistory),
+    timeline: buildTimeline(limitEvents, pauseEvents, lockdownRows, omniTradabilityHistory, registryLimitRows),
     guardians: {
       techCommittee: buildTechCommittee(memberSet),
       memberSetAtBlock: memberSet?.block_height ?? null,
@@ -904,6 +905,23 @@ async function queryLimitEvents(): Promise<LimitEventRow[]> {
     format: 'JSONEachRow',
   })
   return res.json<LimitEventRow>()
+}
+
+// Every registry event that could carry a deposit-fuse limit, grouped so the
+// ledger can diff each asset's own history. `Updated` restates the whole entry,
+// so the rows that leave the limit alone are dropped by registryLimitChanges
+// rather than here — the diff needs to see them to know nothing moved.
+async function queryRegistryLimitEvents(): Promise<RegistryLimitRow[]> {
+  const res = await client.query({
+    query: `SELECT block_height, block_timestamp, extrinsic_index,
+                   JSONExtractInt(args_json, 'assetId') AS asset_id,
+                   JSONExtractString(args_json, 'xcmRateLimit') AS xcm_rate_limit
+            FROM price_data.raw_events
+            WHERE event_name IN ('AssetRegistry.Registered', 'AssetRegistry.Updated')
+            ORDER BY asset_id, block_height, event_index`,
+    format: 'JSONEachRow',
+  })
+  return res.json<RegistryLimitRow>()
 }
 
 // TransactionPause emits only on a real state change, so pause/unpause events are
@@ -1268,6 +1286,70 @@ function buildFuses(
   }
 }
 
+export interface RegistryLimitRow {
+  block_height: number
+  block_timestamp: string
+  extrinsic_index: number | null
+  asset_id: number
+  xcm_rate_limit: string
+}
+
+// A deposit fuse's limit IS the registry's `xcm_rate_limit`, so moving one is a
+// safety action even though it arrives as an asset-registry event rather than a
+// circuit-breaker one. `Registered` and `Updated` restate the asset's entire entry
+// and most updates leave the limit alone, so only a row that actually moves it
+// earns a ledger entry. An absent, empty or zero value means the asset carries no
+// limit — the same reading loadRegistryLimits applies to the newest event per
+// asset. Rows must arrive grouped by asset and ordered by block within each.
+export function registryLimitChanges(rows: RegistryLimitRow[]): SafetyEvent[] {
+  const out: SafetyEvent[] = []
+  const previous = new Map<number, bigint | null>()
+  for (const r of rows) {
+    const assetId = Number(r.asset_id)
+    if (!Number.isInteger(assetId) || assetId < 0) continue
+    const next = parseRegistryLimit(r.xcm_rate_limit)
+    const seen = previous.has(assetId)
+    const prev = previous.get(assetId) ?? null
+    previous.set(assetId, next)
+    if (prev === next) continue
+    // Registration without a fuse is not an action, so only a limit that exists
+    // on one side of the change is worth a line.
+    if (!seen && next === null) continue
+    const descriptor = asset(assetId)
+    const label = next === null ? 'Deposit fuse limit cleared' : prev === null ? 'Deposit fuse limit set' : 'Deposit fuse limit changed'
+    const detail = next === null
+      ? `${descriptor.symbol} → no limit`
+      : prev === null
+        ? `${descriptor.symbol} → ${fuseAmount(next, descriptor.decimals)}`
+        : `${descriptor.symbol} → ${fuseAmount(next, descriptor.decimals)} (was ${fuseAmount(prev, descriptor.decimals)})`
+    out.push({
+      kind: 'limit',
+      label,
+      detail,
+      blockHeight: r.block_height,
+      blockTimestamp: r.block_timestamp,
+      extrinsicIndex: extrinsicIndexOf(r.extrinsic_index),
+      asset: descriptor,
+    })
+  }
+  return out
+}
+
+function parseRegistryLimit(raw: string | null | undefined): bigint | null {
+  if (!raw || raw === 'null') return null
+  try {
+    const limit = BigInt(raw)
+    return limit > 0n ? limit : null
+  } catch { return null }
+}
+
+// Fuse limits run from half a WBTC to millions of vASTR, so the precision follows
+// the magnitude rather than a fixed number of decimals.
+function fuseAmount(raw: bigint, decimals: number): string {
+  const value = toHuman(raw, decimals)
+  return value.toLocaleString('en-US', { maximumFractionDigits: value >= 1000 ? 0 : value >= 1 ? 2 : 6 })
+}
+
 // Pair each AssetLockdown with the AssetLockdownRemoved that cleared it. A removal
 // before the lockdown's own `until` block was a governance lift; at or after it,
 // the fuse cleared itself on the next under-limit mint.
@@ -1586,6 +1668,12 @@ const LIMIT_EVENT_LABEL: Record<string, string> = {
   'CircuitBreaker.EgressAccountsRemoved': 'Egress sinks removed',
 }
 
+// The global withdraw budget as the ledger states it: an HDX allowance per window.
+export function withdrawConfigText(args: Record<string, unknown>): string {
+  const limit = toHuman(BigInt(String(args.limit ?? '0')), HDX_DECIMALS)
+  return `${limit.toLocaleString('en-US', { maximumFractionDigits: 0 })} HDX per ${Math.round(Number(args.window ?? 0) / 3_600_000)}h`
+}
+
 // One chronological ledger of every governance action against a safety control,
 // newest first. Configuration events, pauses, lockdowns and tradability flips read
 // as one story, which is how they were actually applied — several of them arrived
@@ -1595,8 +1683,9 @@ function buildTimeline(
   pauseEvents: PauseEventRow[],
   lockdownRows: LimitEventRow[],
   tradabilityHistory: LimitEventRow[],
+  registryLimitRows: RegistryLimitRow[],
 ): SafetyEvent[] {
-  const out: SafetyEvent[] = []
+  const out: SafetyEvent[] = [...registryLimitChanges(registryLimitRows)]
   const rationalText = (v: unknown): string => {
     if (Array.isArray(v) && v.length === 2) return `${(Number(v[0]) / Number(v[1]) * 100).toFixed(2)}%`
     return 'disabled'
@@ -1604,6 +1693,7 @@ function buildTimeline(
   // AssetCategoryUpdated fired 58 times in one batch; one entry per block keeps
   // the ledger readable without hiding that it happened.
   const categoryByBlock = new Map<number, { count: number; row: LimitEventRow }>()
+  let previousWithdrawConfig: string | null = null
 
   for (const e of limitEvents) {
     const args = safeJson(e.args_json)
@@ -1615,8 +1705,11 @@ function buildTimeline(
     let detail = ''
     if (e.event_name.endsWith('LimitChanged')) detail = `${assetDescriptor(Number(args.assetId ?? 0)).symbol} → ${rationalText(args.tradeVolumeLimit ?? args.liquidityLimit)}`
     else if (e.event_name === 'CircuitBreaker.WithdrawLimitConfigUpdated') {
-      const limit = toHuman(BigInt(String(args.limit ?? '0')), HDX_DECIMALS)
-      detail = `${limit.toLocaleString('en-US', { maximumFractionDigits: 0 })} HDX per ${Math.round(Number(args.window ?? 0) / 3_600_000)}h`
+      // The event restates the whole config, so carrying the previous one keeps a
+      // tightening readable as the change it was rather than a bare new number.
+      const config = withdrawConfigText(args)
+      detail = previousWithdrawConfig && previousWithdrawConfig !== config ? `${config} (was ${previousWithdrawConfig})` : config
+      previousWithdrawConfig = config
     } else if (e.event_name.startsWith('CircuitBreaker.EgressAccounts')) detail = `${args.count ?? 0} accounts`
     else if (e.event_name === 'CircuitBreaker.WithdrawLockdownTriggered') detail = `until ${new Date(Number(args.until ?? 0)).toISOString().slice(0, 16).replace('T', ' ')} UTC`
     out.push({
