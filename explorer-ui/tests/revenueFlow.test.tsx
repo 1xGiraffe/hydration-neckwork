@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createFlowScheduler } from '../src/hooks/useRevenueFlowStream'
+import { advanceStage } from '../src/components/RevenueFlow'
 import type { RevenueFlowItem } from '../src/types'
 
 // The river's scheduler is pure and deterministic: fetched items are paced
@@ -7,7 +8,9 @@ import type { RevenueFlowItem } from '../src/types'
 // (never Math.random — a re-render must not reshuffle the river), sub-threshold
 // incomes become text-free motes, bursts past the cap coalesce into merged
 // motes instead of flooding or silently dropping, and the session total counts
-// every cent that entered regardless of presentation tier.
+// every cent that entered regardless of presentation tier. The stage keeps the
+// same guarantee downstream: a particle shed by the occupancy cap or the stray
+// prune surrenders its USD for immediate credit instead of losing it.
 
 function item(over: Partial<RevenueFlowItem>): RevenueFlowItem {
   return {
@@ -91,5 +94,29 @@ describe('createFlowScheduler', () => {
     expect(emissions).toHaveLength(2)
     expect(emissions.every(e => e.kind === 'mote' && e.stream === 'hollar_borrow')).toBe(true)
     expect(s.sessionTotalUsd()).toBeCloseTo(0.0064, 9)
+  })
+})
+
+describe('advanceStage', () => {
+  const p = (usd: number, at: number) => ({ usd, at })
+  const NOW = 1_000_000
+
+  it('credits value shed by the occupancy cap instead of losing it', () => {
+    const prev = Array.from({ length: 195 }, () => p(0.01, NOW - 1_000))
+    const due = Array.from({ length: 10 }, () => p(1, NOW))
+    const { next, droppedUsd } = advanceStage(prev, due, NOW)
+    expect(next.length).toBe(200)
+    // Five oldest particles fell off the cap; their USD arrives immediately.
+    expect(droppedUsd).toBeCloseTo(0.05, 9)
+    // Conservation: what entered = what is still flying + what was credited.
+    const entered = [...prev, ...due].reduce((s, x) => s + x.usd, 0)
+    expect(next.reduce((s, x) => s + x.usd, 0) + droppedUsd).toBeCloseTo(entered, 9)
+  })
+
+  it('credits strays whose animation clock a freeze swallowed', () => {
+    const prev = [p(2.5, NOW - 91_000), p(0.4, NOW - 1_000)]
+    const { next, droppedUsd } = advanceStage(prev, [], NOW)
+    expect(next).toEqual([p(0.4, NOW - 1_000)])
+    expect(droppedUsd).toBeCloseTo(2.5, 9)
   })
 })

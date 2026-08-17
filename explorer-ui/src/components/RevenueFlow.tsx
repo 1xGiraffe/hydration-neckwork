@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- river component + the pure advanceStage helper its tests exercise */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AddrPill, F } from './ui'
 import { useMediaQuery } from '../hooks/useMediaQuery'
@@ -17,10 +18,12 @@ import { REVENUE_STREAM_COLOR, REVENUE_STREAM_LABEL } from './revenueColors'
 // is the money that visibly flowed in.
 //
 // Density is honest by construction: the scheduler paces real items with
-// identity-derived jitter and coalesces bursts into merged motes (never
-// dropping value — see useRevenueFlowStream). The river pauses while the tab
-// is hidden, and `prefers-reduced-motion` swaps the whole animation for a calm
-// live ledger of the same items.
+// identity-derived jitter and coalesces bursts into merged motes, and value
+// is never dropped — when the stage itself must shed a particle (the particle
+// cap, or the stray prune after a freeze), its USD is credited straight to
+// the counter instead of arriving visibly (see advanceStage). The river
+// pauses while the tab is hidden, and `prefers-reduced-motion` swaps the
+// whole animation for a calm live ledger of the same items.
 
 interface Particle extends FlowEmission {
   /** Visual params, derived deterministically from the emission id. */
@@ -60,6 +63,33 @@ function toParticle(e: FlowEmission, vertical: boolean, fullscreen: boolean, tra
     sizePx: e.kind === 'merged' ? 13 : e.stream === 'network_fee' ? Math.max(9, moteSize(e.usd)) : moteSize(e.usd),
     travelPx,
   }
+}
+
+/** Stage occupancy cap — the visual limit, above the scheduler's pacing cap. */
+const STAGE_MAX_PARTICLES = 200
+/** A particle this old never got its animationend (a freeze ate the clock). */
+const STAGE_STRAY_MS = 90_000
+
+/**
+ * Advance the stage by one drain: prune strays whose animation clock a freeze
+ * swallowed, append the due emissions, and cap occupancy. A pruned or
+ * capped-out particle never fires animationend, so its USD is returned as
+ * `droppedUsd` for the caller to credit to the arrived counter directly —
+ * the "never dropping value" guarantee holds whichever way a particle leaves.
+ */
+export function advanceStage<P extends { at: number; usd: number }>(
+  prev: P[], due: P[], now: number,
+): { next: P[]; droppedUsd: number } {
+  let droppedUsd = 0
+  const kept = prev.filter(p => {
+    if (now - p.at < STAGE_STRAY_MS) return true
+    droppedUsd += p.usd
+    return false
+  })
+  const merged = [...kept, ...due]
+  const overflow = merged.length - STAGE_MAX_PARTICLES
+  for (let i = 0; i < overflow; i += 1) droppedUsd += merged[i].usd
+  return { next: overflow > 0 ? merged.slice(overflow) : merged, droppedUsd }
 }
 
 /** Module-level so the scheduler's clock is not an impure closure made in render. */
@@ -123,6 +153,10 @@ export function RevenueFlow() {
   const [arrivedUsd, setArrivedUsd] = useState(0)
   const [pulse, setPulse] = useState(0)
   const [particles, setParticles] = useState<Particle[]>([])
+  // Source of truth for the stage (state mirrors it): advanceStage must see
+  // the current list OUTSIDE a setState updater, because crediting dropped
+  // value is a side effect an updater is not allowed to have.
+  const particlesRef = useRef<Particle[]>([])
   const [ledger, setLedger] = useState<FlowEmission[]>([])
 
   useEffect(() => {
@@ -151,12 +185,16 @@ export function RevenueFlow() {
           const travel = vertical
             ? (stage ? stage.clientHeight : 420) - 140
             : -(((stage ? stage.clientWidth : 1200)) - 172)
-          setParticles(prev => [
-            // Prune strays: a particle whose animation clock a freeze swallowed
-            // would otherwise sit in the stage forever without an animationend.
-            ...prev.filter(p => now - p.at < 90_000),
-            ...due.map(e => toParticle(e, vertical, fullscreen, travel)),
-          ].slice(-200))
+          const { next, droppedUsd } = advanceStage(
+            particlesRef.current,
+            due.map(e => toParticle(e, vertical, fullscreen, travel)),
+            now,
+          )
+          particlesRef.current = next
+          setParticles(next)
+          // A shed particle arrives silently: same credit as arrive(), minus
+          // the pulse — nothing visibly reached the counter.
+          if (droppedUsd > 0) setArrivedUsd(prev => prev + droppedUsd)
         }
       }
       frame = window.requestAnimationFrame(loop)
@@ -166,7 +204,8 @@ export function RevenueFlow() {
   }, [scheduler, reducedMotion, vertical, fullscreen])
 
   function arrive(particle: Particle): void {
-    setParticles(prev => prev.filter(p => p.id !== particle.id))
+    particlesRef.current = particlesRef.current.filter(p => p.id !== particle.id)
+    setParticles(particlesRef.current)
     setArrivedUsd(prev => prev + particle.usd)
     setPulse(p => p + 1)
   }
