@@ -214,3 +214,35 @@ describe('getRevenueFlow', () => {
     expect(FLOW_CURSOR_RE.test('abc')).toBe(false)
   })
 })
+
+describe('split marks under a mid-request refresh', () => {
+  it('threads one marks read into both arms even when the marks cache expires mid-request', async () => {
+    vi.setSystemTime(NOW + 2_760_000)
+    const { initRevenueService, getRevenueDashboard } = await service()
+    let marksCalls = 0
+    const seen: Seen[] = []
+    const client = {
+      query: vi.fn(async ({ query, query_params }: { query: string; query_params?: Record<string, unknown> }) => {
+        seen.push({ query, params: query_params ?? {} })
+        if (query.includes('toString(max(block_timestamp)) AS mark')) {
+          marksCalls += 1
+          // A REPLACE PARTITION between reads would advance the mark.
+          const mark = marksCalls === 1 ? '2026-08-14 10:00:00' : '2026-08-14 11:00:00'
+          return { json: async () => [{ stream: 'network_fee', mark }] }
+        }
+        if (query.includes('-- rev:dashboard:totals')) {
+          // Outlive the marks cache while the request is still composing.
+          vi.setSystemTime(Date.now() + 16_000)
+        }
+        return { json: async () => [] }
+      }),
+    }
+    initRevenueService(client as never)
+    await getRevenueDashboard('30d')
+    expect(marksCalls).toBe(1)
+    const totalsQuery = seen.find(s => s.query.includes('-- rev:dashboard:totals'))!.query
+    const tailQuery = seen.find(s => s.query.includes('-- rev:network_fee'))!.query
+    expect(totalsQuery).toContain("(stream = 'network_fee' AND block_timestamp <= toDateTime('2026-08-14 10:00:00'))")
+    expect(tailQuery).toContain("block_timestamp > toDateTime('2026-08-14 10:00:00')")
+  })
+})
