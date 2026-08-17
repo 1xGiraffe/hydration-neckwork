@@ -218,6 +218,33 @@ describe('getRevenueFlow', () => {
   })
 })
 
+describe('top payer ranking completeness', () => {
+  it('fetches the cold eventful sum for an account the LIMIT dropped before merging its adds', async () => {
+    vi.setSystemTime(NOW + 2_400_000)
+    const { initRevenueService, getRevenueDashboard } = await service()
+    const dayStart = Math.floor((NOW + 2_400_000) / 1000 / 86_400) * 86_400
+    const { seen, client } = fakeClient({
+      'toString(max(block_timestamp)) AS mark': [{ stream: 'hollar_borrow', mark: '2026-08-14 10:00:00' }],
+      '-- rev:dashboard:totals': [{ stream: 'hollar_borrow', day: '10', week: '10', month: '10', all_time: '10' }],
+      '-- rev:dashboard:buckets': [{ stream: 'hollar_borrow', t: dayStart, usd: '10' }],
+      '-- rev:dashboard:top-accounts': [{ account: ACCOUNT_A, usd: '4' }],
+      '-- rev:borrow-weights': [{ account: ACCOUNT_B, interest: '1000000000000000000' }],
+      // ACCOUNT_B's cold eventful revenue: real, but outside the cold top 10.
+      '-- rev:dashboard:top-account-sums': [{ account: ACCOUNT_B, usd: '9' }],
+    })
+    initRevenueService(client)
+    const dash = await getRevenueDashboard('30d')
+    // B's combined total is its full cold sum plus the whole HOLLAR pot —
+    // not just the add the merge happens to know about.
+    const byId = new Map(dash.topAccounts.map(r => [r.account.accountId, r.usd]))
+    expect(byId.get(ACCOUNT_B)).toBeCloseTo(19, 9)
+    expect(byId.get(ACCOUNT_A)).toBeCloseTo(4, 9)
+    expect(dash.topAccounts[0].account.accountId).toBe(ACCOUNT_B)
+    const sumsCall = seen.find(x => x.query.includes('-- rev:dashboard:top-account-sums'))!
+    expect(sumsCall.params.accounts).toEqual([ACCOUNT_B])
+  })
+})
+
 describe('split marks under a mid-request refresh', () => {
   it('threads one marks read into both arms even when the marks cache expires mid-request', async () => {
     vi.setSystemTime(NOW + 2_760_000)
