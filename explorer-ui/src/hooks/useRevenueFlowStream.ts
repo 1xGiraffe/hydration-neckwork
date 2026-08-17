@@ -212,6 +212,12 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
   // and never settle the promise, and a boolean latch would then skip every
   // future pull forever. A stale timestamp simply stops counting as busy.
   const inflightAtRef = useRef(0)
+  // Monotonic pull epoch, bumped when a pull starts. Both takeover paths — the
+  // stale latch expiring on a merely slow fetch, and the resume reset clearing
+  // the latch — can start a pull while the old one is still in flight; the old
+  // response then carries a stale epoch and is discarded whole, so it can
+  // never double-ingest a batch or rewind the cursor and head.
+  const pullEpochRef = useRef(0)
   const hiddenAtRef = useRef(0)
   const resumeSpreadRef = useRef(0)
 
@@ -221,10 +227,11 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
 
     async function pull(): Promise<void> {
       if (Date.now() - inflightAtRef.current < 15_000 || document.hidden) return
+      const epoch = ++pullEpochRef.current
       inflightAtRef.current = Date.now()
       try {
         const res = await api.revenueFlow(cursorRef.current)
-        if (disposed) return
+        if (disposed || epoch !== pullEpochRef.current) return
         cursorRef.current = res.cursor
         scheduler.setBlockMs(res.blockSeconds * 1000)
         // Raw ingestion lands in multi-block batches (the head often jumps ~10
@@ -260,7 +267,8 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
       } catch {
         if (!disposed) setConnected(false)
       } finally {
-        inflightAtRef.current = 0
+        // An orphaned pull must not clear the latch the current pull owns.
+        if (epoch === pullEpochRef.current) inflightAtRef.current = 0
       }
     }
 
