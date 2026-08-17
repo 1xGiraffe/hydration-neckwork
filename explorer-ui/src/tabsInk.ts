@@ -4,8 +4,9 @@
 // two variables plus a `has-ink` class, so it never inserts DOM into
 // React-owned children (an appended child made the reconciler and the
 // MutationObserver fight — the page wedged) and never forces layout flushes.
-// Without JS, or under prefers-reduced-motion, the per-button underline
-// fallback still renders.
+// Without JS the per-button underline fallback still renders; under
+// prefers-reduced-motion the ink renders too, just without sliding (the
+// global reduced-motion CSS zeroes its transition).
 
 const BAR_SELECTOR = '.tabs'
 

@@ -1190,13 +1190,20 @@ svg { display: block; }
 /* Sliding active indicator (tabsInk.ts): a ::before ink line per bar glides
    between tabs, positioned purely via CSS variables the script writes — no
    injected DOM, so React's children stay untouched. While present, the
-   per-button underline (the no-JS fallback) yields. The transition arms only
-   after first placement (ink-live), so the ink never slides in from zero. */
+   per-tab underline (the no-JS fallback) yields. Under prefers-reduced-motion
+   the ink still renders — the global reduced-motion block zeroes its
+   transition, so it swaps between tabs instead of sliding. The transition
+   arms only after first placement (ink-live), so the ink never slides in
+   from zero. */
 .tabs.has-ink::before { content: ''; position: absolute; bottom: 0; height: 2px;
   left: var(--ink-left, 0); width: var(--ink-width, 0);
   background: var(--accent); border-radius: 1px; pointer-events: none; }
 .tabs.ink-live::before { transition: left 260ms var(--ease-standard), width 260ms var(--ease-standard); }
-.tabs.has-ink button.active { border-bottom-color: transparent; }
+/* The security nav's anchor tabs need their own suppression: its
+   .sec-nav-link.active rule sets the accent at higher specificity than the
+   plain button selector, and without this both underline and ink render. */
+.tabs.has-ink button.active,
+.sec-section-nav .tabs.has-ink .sec-nav-link.active { border-bottom-color: transparent; }
 .tabs::-webkit-scrollbar { display: none; }
 .tabs button { padding: 10px 16px; font-size: 13px; font-weight: 500; color: var(--text-medium); border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color 140ms, border-color 140ms, transform 90ms ease; }
 .tabs button { flex: 0 0 auto; }
@@ -2889,14 +2896,9 @@ tr.row-muted td { opacity: .55; }
 .sec-inline-link:hover { text-decoration: underline; }
 .sec-supplemental { background: var(--panel); color: var(--text-low); border: 1px solid var(--separator); margin-left: 8px; }
 
-/* Security page — phone layout.
-   Seven section links cannot fit 390px, and the shared tab bar they borrow their
-   look from scrolls with no visible affordance. Here the row wraps instead: every
-   destination stays on screen, at the cost of a second line. */
+/* Security page — phone layout. (The section nav's own phone rules live with
+   the .sec-nav-link rules below, after the base declarations they override.) */
 @media (max-width: 720px) {
-  .sec-section-nav .tabs { flex-wrap: wrap; overflow: visible; row-gap: 0; }
-  .sec-section-nav .tabs button { flex: 0 1 auto; padding: 9px 12px; }
-
   /* A phone card should not be a column of em-dashes: a cell with nothing in it
      drops out, exactly as the accounts directory does. The desktop grid keeps
      every column so the table still lines up. */
@@ -2963,6 +2965,20 @@ tr.row-muted td { opacity: .55; }
 }
 .sec-section-nav .tabs .sec-nav-link:hover { color: var(--text-high); }
 .sec-section-nav .tabs .sec-nav-link.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Phone: seven section links cannot fit 390px, and the shared tab bar they
+   borrow their look from scrolls with no visible affordance. The row wraps
+   instead — every destination stays on screen, at the cost of a second line.
+   The sliding ink cannot follow the wrap: its ::before is pinned to the BAR's
+   bottom edge with only horizontal coordinates, so a first-row active link
+   would draw its indicator under an unrelated second-row tab. No ink here;
+   the per-link underline marks the active section instead. */
+@media (max-width: 720px) {
+  .sec-section-nav .tabs { flex-wrap: wrap; overflow: visible; row-gap: 0; }
+  .sec-section-nav .tabs .sec-nav-link { flex: 0 1 auto; padding: 9px 12px; }
+  .sec-section-nav .tabs.has-ink::before { content: none; }
+  .sec-section-nav .tabs.has-ink .sec-nav-link.active { border-bottom-color: var(--accent); }
+}
 
 /* Every ribbon number opens the section that explains it. */
 .ribbon .sec-ribbon-cell { border-radius: 10px; transition: background 140ms; }
