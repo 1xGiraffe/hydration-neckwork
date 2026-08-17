@@ -9270,6 +9270,7 @@ async function fetchDecodedXcmDeep(
   fetchBlocks: (bound: string, limit: number) => Promise<{ block_height: number }[]>,
   decode: (blocks: number[]) => Promise<ActivityRow[]>,
   matches: (row: ActivityRow) => boolean,
+  tailKey?: string,
 ): Promise<ActivityRow[]> {
   const walk = async (base: string): Promise<ActivityRow[]> => {
     const out: ActivityRow[] = []
@@ -9300,7 +9301,25 @@ async function fetchDecodedXcmDeep(
   // when it underfills, so no page ever sees only "an hour of chain".
   if (base !== '1') return walk(base)
   const recent = await walk(feedWindowBoundSql())
-  return recent.length >= want ? recent : walk('1')
+  if (recent.length >= want) return recent
+  if (!tailKey) return walk('1')
+  // A sparse arm underfills its recent window on EVERY live rebuild — its newest
+  // matching rows are simply old — so the head-keyed outer cache re-ran this
+  // full-history walk once per ingested block (the xcm-out-remote arm alone read
+  // ~340 MiB per feed poll). Everything the full walk can see beyond the live
+  // window is immutable chain history: only a backfill changes it. So the full
+  // walk is refreshed on the shared window TTL instead, and the LIVE recent rows
+  // are merged over it — a new matching event still appears the block it lands,
+  // through `recent`, while the immutable tail stops being recomputed per block.
+  const full = await cachedSwr(
+    `explorer:xcm-deep-tail:${tailKey}:${want}`, ACTIVITY_WINDOW_FRESH_MS, ACTIVITY_WINDOW_STALE_MS, () => walk('1'))
+  const seen = new Set(recent.map(row => `${row.blockHeight}:${row.eventIndex ?? ''}:${row.extrinsicIndex ?? ''}`))
+  // Copies: the cached tail's rows are shared across requests, and downstream
+  // enrichment writes to the rows it is handed.
+  return [...recent, ...full.filter(row => !seen.has(`${row.blockHeight}:${row.eventIndex ?? ''}:${row.extrinsicIndex ?? ''}`))]
+    .map(row => ({ ...row }))
+    .sort((left, right) =>
+      right.blockHeight - left.blockHeight || (right.eventIndex ?? 0) - (left.eventIndex ?? 0))
 }
 
 async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
@@ -9360,6 +9379,7 @@ async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, 
       fetchBlocks,
       blocks => xcmOutRemoteRowsForBlocks(blocks, prices, whoIn),
       row => activityRowMatchesFilters(row, filters),
+      `xcmoutr:${acctList ?? ''}:${filterKey(filters)}`,
     )
     return rows.slice(offset, offset + limit)
   })
@@ -9421,6 +9441,7 @@ async function getRecentXcmIn(limit: number, from?: string, to?: string, account
       fetchBlocks,
       blocks => xcmInRowsForBlocks(blocks, prices, whoIn),
       row => activityRowMatchesFilters(row, filters),
+      `xcmin:${acctList ?? ''}:${filterKey(filters)}`,
     )
     return rows.slice(offset, offset + limit)
   })
@@ -9880,9 +9901,37 @@ interface NttExtrinsicLogs {
 // The NTT logs of the given `block:extrinsic` pairs, decoded — one bounded
 // primary-key read per 2k pairs. Replays in raw_evm_logs collapse under
 // LIMIT 1 BY the event identity.
+//
+// Pairs safely below the ingested head are memoized across rebuilds: an
+// extrinsic's own log rows are immutable chain history, but the sparse
+// cross-chain arms hand this the SAME full-history candidate list on every
+// head-keyed rebuild, and each cold pair costs a whole granule of the fat
+// `data` column (~150 MiB per feed poll measured). Near-head pairs stay
+// uncached so a block still settling is always re-read.
+const NTT_LOGS_MEMO_MAX = 50_000
+const NTT_LOGS_FINALITY_MARGIN_BLOCKS = 600
+const nttLogsMemo = new Map<string, NttExtrinsicLogs | null>()
+function nttMemoBlock(key: string): number {
+  return Number(key.slice(0, key.indexOf(':')))
+}
+// Callers get a per-call copy of the `sent` wrappers: the outbound builder
+// marks a wrapper `claimed` to pair sends with legs WITHIN one request, and a
+// flag surviving on a shared memo entry would eat the pairing of every later
+// request. `redeemed`/`sourceChains` are only read, so they stay shared.
+function nttLogsCopy(entry: NttExtrinsicLogs): NttExtrinsicLogs {
+  return { sent: entry.sent.map(s => ({ manager: s.manager, sent: s.sent })), redeemed: entry.redeemed, sourceChains: entry.sourceChains }
+}
 async function nttLogsFor(pairs: Iterable<string>): Promise<Map<string, NttExtrinsicLogs>> {
-  const keys = [...new Set(pairs)]
+  const requested = [...new Set(pairs)]
   const out = new Map<string, NttExtrinsicLogs>()
+  if (!requested.length) return out
+  const memoFloor = (await indexedRawHead()) - NTT_LOGS_FINALITY_MARGIN_BLOCKS
+  const keys: string[] = []
+  for (const key of requested) {
+    const hit = nttLogsMemo.get(key)
+    if (hit === undefined) { keys.push(key); continue }
+    if (hit) out.set(key, nttLogsCopy(hit))
+  }
   if (!keys.length) return out
   const chunks = await mapChunksConcurrently(keys, 2_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
     const tuples = chunk.map(key => {
@@ -9899,16 +9948,29 @@ async function nttLogsFor(pairs: Iterable<string>): Promise<Map<string, NttExtri
     })
     return res.json<{ block_height: number; event_index: number; extrinsic_index: number; contract: string; topics: string[]; data: string }>()
   })
+  const fetched = new Map<string, NttExtrinsicLogs>()
   for (const log of chunks.flat()) {
     const key = `${log.block_height}:${log.extrinsic_index}`
-    const entry = out.get(key) ?? { sent: [], redeemed: new Set<string>(), sourceChains: [] }
+    const entry = fetched.get(key) ?? { sent: [], redeemed: new Set<string>(), sourceChains: [] }
     const topic0 = log.topics[0]?.toLowerCase()
     if (topic0 === NTT_TRANSFER_REDEEMED_TOPIC) entry.redeemed.add(log.contract)
     const sent = decodeNttTransferSent(log.topics, log.data)
     if (sent) entry.sent.push({ manager: log.contract, sent })
     const received = decodeNttReceivedMessage(log.topics, log.data)
     if (received) entry.sourceChains.push(received.sourceChain)
-    out.set(key, entry)
+    fetched.set(key, entry)
+  }
+  for (const key of keys) {
+    const entry = fetched.get(key) ?? null
+    if (entry) out.set(key, nttLogsCopy(entry))
+    if (nttMemoBlock(key) > memoFloor) continue
+    if (nttLogsMemo.size >= NTT_LOGS_MEMO_MAX) {
+      // Insertion-ordered Map: dropping the oldest tenth keeps eviction O(1)
+      // amortized without tracking recency.
+      let drop = NTT_LOGS_MEMO_MAX / 10
+      for (const old of nttLogsMemo.keys()) { nttLogsMemo.delete(old); if (--drop <= 0) break }
+    }
+    nttLogsMemo.set(key, entry)
   }
   return out
 }
@@ -10777,6 +10839,59 @@ function voteRowMatchesFilters(row: VoteRow, filters: VoteListFilters): boolean 
   if (filters.conviction && (row.conviction ?? '').toLowerCase() !== filters.conviction.toLowerCase()) return false
   return true
 }
+// Vote/wrapper call rows per `(block,extrinsic)` tuple, memoized below the
+// ingested head like nttLogsFor's pairs: the rows are immutable chain history,
+// but the head-keyed vote arm re-reads the same tuple list on every rebuild and
+// each cold tuple costs a whole granule of raw_calls' fat args_json (~120 MiB
+// per feed poll measured). Consumers only parse the rows, never write them, so
+// the memo shares them; rows of one extrinsic stay in their returned order
+// (they always come from a single tuple's read).
+interface VoteCallRow { block_height: number; extrinsic_index: number | null; call_address: string; call_name: string; args_json: string }
+const VOTE_CALLS_MEMO_MAX = 50_000
+const VOTE_CALLS_FINALITY_MARGIN_BLOCKS = 600
+const voteCallsMemo = new Map<string, VoteCallRow[]>()
+async function voteCallRowsForTuples(tuples: string[]): Promise<VoteCallRow[]> {
+  const out: VoteCallRow[] = []
+  const misses: string[] = []
+  for (const tuple of tuples) {
+    const hit = voteCallsMemo.get(tuple)
+    if (hit === undefined) misses.push(tuple)
+    else out.push(...hit)
+  }
+  if (!misses.length) return out
+  const memoFloor = (await indexedRawHead()) - VOTE_CALLS_FINALITY_MARGIN_BLOCKS
+  // Chunked like every other tuple read here: the merged feed's vote arm asks
+  // for as many candidates as the window is deep, and one interpolated list of
+  // 20k tuples already crossed `max_query_size` and failed deep `type=all`
+  // pages with a ClickHouse 500. The call-name filter keeps this at ~1.02 rows
+  // per tuple (max 3 measured over every vote extrinsic), so the wider 5,000-key
+  // chunk stays far below the client's result guard.
+  const chunks = await mapChunksConcurrently(misses, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const calls = await client.query({
+      query: `SELECT block_height, extrinsic_index, call_address, call_name, args_json
+              FROM price_data.raw_calls
+              WHERE (block_height, extrinsic_index) IN (${chunk.join(',')})
+                AND call_name IN ('ConvictionVoting.vote', 'MultiTransactionPayment.dispatch_permit', ${VOTE_WRAPPER_CALLS})`,
+      format: 'JSONEachRow',
+    })
+    return calls.json<VoteCallRow>()
+  })
+  const byTuple = new Map<string, VoteCallRow[]>(misses.map(tuple => [tuple, []]))
+  for (const row of chunks.flat()) {
+    byTuple.get(`(${row.block_height},${row.extrinsic_index})`)?.push(row)
+    out.push(row)
+  }
+  for (const [tuple, rows] of byTuple) {
+    if (Number(tuple.slice(1, tuple.indexOf(','))) > memoFloor) continue
+    if (voteCallsMemo.size >= VOTE_CALLS_MEMO_MAX) {
+      let drop = VOTE_CALLS_MEMO_MAX / 10
+      for (const old of voteCallsMemo.keys()) { voteCallsMemo.delete(old); if (--drop <= 0) break }
+    }
+    voteCallsMemo.set(tuple, rows)
+  }
+  return out
+}
+
 async function getRecentVotes(limit: number, from?: string, to?: string, offset = 0, filters: VoteListFilters = {}, accounts?: string[], valueFilters: ValueListFilters = {}): Promise<VoteRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
@@ -10812,23 +10927,7 @@ async function getRecentVotes(limit: number, from?: string, to?: string, offset 
       const callByExt = new Map<string, { ref: string | null; details: VoteDetails }>()
       const callsByExt = new Map<string, { ref: string | null; details: VoteDetails }[]>()
       if (callTuples.length) {
-        // Chunked like every other tuple read here: the merged feed's vote arm asks
-        // for as many candidates as the window is deep, and one interpolated list of
-        // 20k tuples already crossed `max_query_size` and failed deep `type=all`
-        // pages with a ClickHouse 500. The call-name filter keeps this at ~1.02 rows
-        // per tuple (max 3 measured over every vote extrinsic), so the wider 5,000-key
-        // chunk stays far below the client's result guard.
-        const callChunks = await mapChunksConcurrently(callTuples, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
-          const calls = await client.query({
-            query: `SELECT block_height, extrinsic_index, call_address, call_name, args_json
-                    FROM price_data.raw_calls
-                    WHERE (block_height, extrinsic_index) IN (${chunk.join(',')})
-                      AND call_name IN ('ConvictionVoting.vote', 'MultiTransactionPayment.dispatch_permit', ${VOTE_WRAPPER_CALLS})`,
-            format: 'JSONEachRow',
-          })
-          return calls.json<{ block_height: number; extrinsic_index: number | null; call_address: string; call_name: string; args_json: string }>()
-        })
-        const callRows = callChunks.flat()
+        const callRows = await voteCallRowsForTuples(callTuples)
         for (const c of callRows) {
           if (c.extrinsic_index == null) continue
           const args = (safeJson(c.args_json) ?? {}) as Record<string, unknown>
@@ -14041,6 +14140,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
         },
         async blocks => (await xcmInRowsForBlocks(blocks, prices)).filter(row => row.asset?.assetId === assetId),
         row => activityRowMatchesFilters(row, fixedAssetFilters),
+        `asset-xcmin:${assetId}:${filterKey(fixedAssetFilters)}`,
       )
     })() : Promise.resolve([])
 
