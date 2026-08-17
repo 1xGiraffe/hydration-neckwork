@@ -1,9 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   NOMINAL_BLOCKS_PER_HOUR, NOMINAL_PARA_BLOCK_MS, NOMINAL_RELAY_BLOCK_MS, RUNTIME_SLOT_MS_LADDER,
   avgBlockMsSql, blocksPerHour, clampBlockMs, dailyBlockCountSql, dailyBlockMs,
-  decideParaBlockTime, nominalBlockMsMismatch, resolveNominalBlockMs, type ResolvedBlockTime,
+  decideParaBlockTime, measuredParaBlockMs, nominalBlockMsMismatch, resolveNominalBlockMs, type ResolvedBlockTime,
 } from '../src/services/blockTime.ts'
+
+vi.mock('../src/services/runtimeConstants.ts', async importOriginal => ({
+  ...(await importOriginal<typeof import('../src/services/runtimeConstants.ts')>()),
+  runtimeSlotDurationMs: vi.fn(() => 2_000),
+}))
 import { fusePeriodPinWarning, parseFusePeriodBlocks, shouldLogFusePinWarning } from '../src/services/securityService.ts'
 import { gigaUnbondingBlocks, parseGigaUnbondingBlocks } from '../src/services/lockBreakdownService.ts'
 
@@ -329,5 +334,14 @@ describe('decideParaBlockTime', () => {
   it('still moves when the chain genuinely upgrades and metadata is down', () => {
     const d = decideParaBlockTime(null, 1_990, 6_000)
     expect(d).toMatchObject({ nominalMs: 2_000, source: 'measured' })
+  })
+})
+
+describe('measuredParaBlockMs degradation', () => {
+  it('degrades a failed measurement to the runtime-reported nominal, not the constant', async () => {
+    // With the mocked runtime on a 2s slot, one broken 100-block read must not
+    // report 6s throughput for a cache window on a 2s chain.
+    const failing = { query: vi.fn(async () => { throw new Error('clickhouse down') }) }
+    await expect(measuredParaBlockMs(failing as never)).resolves.toBe(2_000)
   })
 })
