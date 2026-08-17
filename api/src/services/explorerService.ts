@@ -13923,7 +13923,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
             asset_b AS asset_b,
             pool_account AS pool_acc
           FROM price_data.liquidity_activity
-          ${routerHopLiquiditySql(pageBound).joinSql}
+          ${routerHopLiquiditySql(pageBound, 'asset_id', 'has(asset_refs, {assetId:UInt32})').joinSql}
           WHERE ${pageBound}
             AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
             AND who NOT LIKE '0x6d6f646c%'
@@ -15278,7 +15278,18 @@ function shareTokenFoldSql(assetExpr: string): string {
 // subquery's columns are renamed so unqualified references in the caller stay unambiguous.
 // It has to run BEFORE the caller's LIMIT — 1.38M of the 1.41M Stableswap liquidity events
 // are router hops, so filtering finished pages would empty them and desync every count.
-export function routerHopLiquiditySql(bound: string, assetExpr = 'asset_id'): { joinSql: string; predicateSql: string } {
+//
+// `candidateScopeSql` is the caller's own row filter (its who/pool or asset
+// predicate). When given, the route join is bounded to the blocks that hold a
+// scope-matching Stableswap liquidity row — the only rows whose predicate ever
+// consults the route arrays — instead of aggregating EVERY router route the
+// bound admits. On the full-history account arms (the activity-count sweep runs
+// them with bound = 1) that aggregation hashed all ~1.9M routed extrinsics per
+// query: ~700 MiB of hash table and half the query's rows for routes no row
+// looks at. Identical results by construction: a row outside the scope fails
+// the caller's own WHERE regardless of the join, and every consulted row's
+// block is in the set.
+export function routerHopLiquiditySql(bound: string, assetExpr = 'asset_id', candidateScopeSql?: string): { joinSql: string; predicateSql: string } {
   // The Omnipool.PositionCreated arm is the SQL twin of
   // suppressPositionCreatedCompanions: a PositionCreated row renders only when no
   // LiquidityAdded in its block names the same account and asset — what survives
@@ -15290,12 +15301,19 @@ export function routerHopLiquiditySql(bound: string, assetExpr = 'asset_id'): { 
   // inside a block at an event index, and a companion LiquidityAdded sits at a
   // different index of the same block, so reusing the row bound verbatim let a
   // companion escape suppression whenever a page ended between the two.
+  const routeBlockScope = candidateScopeSql
+    ? `
+            AND block_height IN (
+              SELECT block_height FROM price_data.liquidity_activity
+              WHERE ${bound} AND (${candidateScopeSql})
+                AND event_name IN (${sqlEventNameList([...STABLESWAP_LIQUIDITY_EVENTS])}))`
+    : ''
   return {
     joinSql: `LEFT JOIN (
           SELECT block_height AS rh_block, extrinsic_index AS rh_ext,
                  groupArray(asset_in) AS rh_route_in, groupArray(asset_out) AS rh_route_out
           FROM price_data.swap_activity
-          WHERE ${bound} AND event_name IN (${ROUTER_NET_EVENTS_SQL}) AND extrinsic_index IS NOT NULL
+          WHERE ${bound} AND event_name IN (${ROUTER_NET_EVENTS_SQL}) AND extrinsic_index IS NOT NULL${routeBlockScope}
           GROUP BY block_height, extrinsic_index
         ) rh ON block_height = rh.rh_block AND extrinsic_index = rh.rh_ext`,
     predicateSql: `AND NOT (event_name IN (${sqlEventNameList([...STABLESWAP_LIQUIDITY_EVENTS])})
@@ -15351,7 +15369,7 @@ export function isRouterHopLiquidity(eventName: string, who: string, assetId: nu
 function accountLiquidityArm(list: string, bound: string, eventNames: readonly string[], tokenIds?: number[]): ActivityCountArm {
   if (!eventNames.length) return emptyActivityCountArm()
   const tokenFilter = armTokenFilter(tokenIds, ids => `hasAny(asset_refs, [${ids}])`)
-  const routerHop = routerHopLiquiditySql(bound)
+  const routerHop = routerHopLiquiditySql(bound, 'asset_id', liquidityWhoOrPoolSql(list))
   return `SELECT block_height, count() AS rows FROM price_data.liquidity_activity
     ${routerHop.joinSql}
     WHERE ${bound} AND ${liquidityWhoOrPoolSql(list)}
@@ -16561,7 +16579,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
                 pool_account AS pool_acc,
                 asset_refs AS asset_refs
               FROM price_data.liquidity_activity
-              ${routerHopLiquiditySql(pageBound, liquidityAssetExpr).joinSql}
+              ${routerHopLiquiditySql(pageBound, liquidityAssetExpr, liquidityWhoOrPoolSql(list)).joinSql}
               WHERE ${pageBound}
                 AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
                 AND ${liquidityWhoOrPoolSql(list)}
