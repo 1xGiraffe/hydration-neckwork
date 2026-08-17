@@ -284,12 +284,20 @@ LIMIT 10`,
       series.set(Number(row.t), scaledUsd(row.usd))
       buckets.set(row.stream, series)
     }
+    // Payer ranking: `top` holds EXACT cold eventful sums per account; every
+    // other component (raw tail, HOLLAR interest, reserve mints) accumulates
+    // into `adds` and merges at the end. Keeping the two apart is what makes
+    // the ranking exact despite the cold query's LIMIT: an account that gains
+    // an add but sits outside the cold top 10 has its full cold sum fetched
+    // below, and an account with no adds at all cannot outrank the 10th cold
+    // account it already lost to.
     const top = new Map<string, bigint>()
     for (const row of await (await topQuery).json<{ account: string; usd: string }>()) {
       top.set(row.account, scaledUsd(row.usd))
     }
+    const adds = new Map<string, bigint>()
     const addTop = (account: string, usd: bigint): void => {
-      if (account && usd > 0n) top.set(account, (top.get(account) ?? 0n) + usd)
+      if (account && usd > 0n) adds.set(account, (adds.get(account) ?? 0n) + usd)
     }
 
     for (const row of tail) {
@@ -307,7 +315,7 @@ LIMIT 10`,
         const series = buckets.get(row.stream) ?? new Map<number, bigint>()
         series.set(bucket, (series.get(bucket) ?? 0n) + usd)
         buckets.set(row.stream, series)
-        if (row.account) top.set(row.account, (top.get(row.account) ?? 0n) + usd)
+        addTop(row.account, usd)
       }
     }
 
@@ -372,6 +380,32 @@ GROUP BY account`,
       for (const row of await reserveRes.json<{ account: string; usd: string }>()) {
         addTop(row.account, scaledUsd(row.usd))
       }
+    }
+
+    // An account with adds but outside the cold top 10 still owns cold
+    // eventful revenue the LIMIT dropped; without it the combined ranking
+    // would compare partial totals. Fetch those accounts' exact cold sums
+    // (bounded: tail actors + borrowers + reserve payers), then merge.
+    const missing = [...adds.keys()].filter(account => !top.has(account))
+    if (missing.length > 0) {
+      const sumsRes = await client.query({
+        query: `-- rev:dashboard:top-account-sums
+SELECT account, toString(sum(amount_usd)) AS usd
+FROM price_data.revenue_events
+WHERE ${PROTOCOL_REVENUE_PREDICATE_SQL} AND ${caps}
+  AND block_timestamp >= toDateTime('${chTimestamp(rangeStart)}')
+  AND account IN {accounts:Array(String)}
+GROUP BY account`,
+        query_params: { accounts: missing },
+        format: 'JSONEachRow',
+        clickhouse_settings: DECIMAL_STRINGS,
+      })
+      for (const row of await sumsRes.json<{ account: string; usd: string }>()) {
+        top.set(row.account, scaledUsd(row.usd))
+      }
+    }
+    for (const [account, usd] of adds) {
+      top.set(account, (top.get(account) ?? 0n) + usd)
     }
 
     return {
