@@ -34,11 +34,16 @@ interface SummaryRow {
   total_volume_sell: string
   total_volume_total: string
   total_net_volume: string
+  total_native_net_volume: string
   trade_count: string
   volume_buy: string
   volume_sell: string
   volume_total: string
   net_volume: string
+  native_volume_buy: string
+  native_volume_sell: string
+  native_volume_total: string
+  native_net_volume: string
 }
 
 interface DetailRow {
@@ -48,6 +53,10 @@ interface DetailRow {
   volume_total: string
   net_volume: string
   trade_count: string
+  native_volume_buy: string
+  native_volume_sell: string
+  native_volume_total: string
+  native_net_volume: string
 }
 
 export interface TradeVolumeDetails {
@@ -58,6 +67,11 @@ export interface TradeVolumeDetails {
   volumeSell: number
   volumeTotal: number
   netVolume: number
+  // Candle totals in the base asset's raw integer units (exact decimal strings).
+  nativeVolumeBuy: string
+  nativeVolumeSell: string
+  nativeVolumeTotal: string
+  nativeNetVolume: string
   limit: number
   offset: number
   hasMore: boolean
@@ -71,6 +85,10 @@ interface DetailTotalsRow {
   volume_sell: string
   volume_total: string
   net_volume: string
+  native_volume_buy: string
+  native_volume_sell: string
+  native_volume_total: string
+  native_net_volume: string
 }
 
 function isMissingTradeVolumeTable(error: unknown): boolean {
@@ -85,6 +103,13 @@ function parseNumber(value: string | number | null | undefined): number {
   return Number(value) || 0
 }
 
+// Raw-unit amounts stay strings end to end: a 38-digit integer loses its tail
+// as a JavaScript number, so the queries stringify them and we only validate.
+function parseRawAmount(value: string | number | null | undefined): string {
+  const text = String(value ?? '')
+  return /^-?\d+$/.test(text) ? text : '0'
+}
+
 function toTrader(row: {
   account: string
   volume_buy: string
@@ -92,6 +117,10 @@ function toTrader(row: {
   volume_total: string
   net_volume: string
   trade_count: string
+  native_volume_buy: string
+  native_volume_sell: string
+  native_volume_total: string
+  native_net_volume: string
 }): OmniwatchTrader {
   const address = polkadotAddress(row.account)
   const icon = accountIcon(row.account)
@@ -106,6 +135,10 @@ function toTrader(row: {
     volumeTotal: parseNumber(row.volume_total),
     netVolume: parseNumber(row.net_volume),
     tradeCount: Number(row.trade_count) || 0,
+    nativeVolumeBuy: parseRawAmount(row.native_volume_buy),
+    nativeVolumeSell: parseRawAmount(row.native_volume_sell),
+    nativeVolumeTotal: parseRawAmount(row.native_volume_total),
+    nativeNetVolume: parseRawAmount(row.native_net_volume),
   }
 }
 
@@ -136,22 +169,28 @@ export async function queryTradeVolumeSummaries(
           toString(tupleElement(top_trader, 4)) AS volume_total,
           toString(tupleElement(top_trader, 5)) AS net_volume,
           toString(tupleElement(top_trader, 6)) AS trade_count,
+          toString(tupleElement(top_trader, 7)) AS native_volume_buy,
+          toString(tupleElement(top_trader, 8)) AS native_volume_sell,
+          toString(tupleElement(top_trader, 9)) AS native_volume_total,
+          toString(tupleElement(top_trader, 10)) AS native_net_volume,
           toString(account_count) AS account_count,
           toString(total_trade_count) AS total_trade_count,
           toString(total_volume_buy) AS total_volume_buy,
           toString(total_volume_sell) AS total_volume_sell,
           toString(total_volume_total) AS total_volume_total,
-          toString(total_net_volume) AS total_net_volume
+          toString(total_net_volume) AS total_net_volume,
+          toString(total_native_net_volume) AS total_native_net_volume
         FROM (
           SELECT
             interval_start,
-            argMax(tuple(account, volume_buy, volume_sell, volume_total, net_volume, trade_count), volume_total) AS top_trader,
+            argMax(tuple(account, volume_buy, volume_sell, volume_total, net_volume, trade_count, native_volume_buy, native_volume_sell, native_volume_total, native_net_volume), volume_total) AS top_trader,
             count() AS account_count,
             sum(trade_count) AS total_trade_count,
             sum(volume_buy) AS total_volume_buy,
             sum(volume_sell) AS total_volume_sell,
             sum(volume_total) AS total_volume_total,
-            sum(net_volume) AS total_net_volume
+            sum(net_volume) AS total_net_volume,
+            sum(native_net_volume) AS total_native_net_volume
           FROM (
             SELECT
               ${bucket} AS interval_start,
@@ -160,7 +199,11 @@ export async function queryTradeVolumeSummaries(
               sum(tv.usd_volume_sell) AS volume_sell,
               sum(tv.usd_volume_buy) + sum(tv.usd_volume_sell) AS volume_total,
               sum(tv.usd_volume_buy) - sum(tv.usd_volume_sell) AS net_volume,
-              sum(tv.trade_count) AS trade_count
+              sum(tv.trade_count) AS trade_count,
+              sum(tv.native_volume_buy) AS native_volume_buy,
+              sum(tv.native_volume_sell) AS native_volume_sell,
+              sum(tv.native_volume_buy) + sum(tv.native_volume_sell) AS native_volume_total,
+              sum(tv.native_volume_buy) - sum(tv.native_volume_sell) AS native_net_volume
             FROM price_data.trade_volume_by_account AS tv
             INNER JOIN price_data.blocks b ON tv.block_height = b.block_height
             WHERE tv.asset_id = {asset_id:UInt32}
@@ -199,6 +242,7 @@ export async function queryTradeVolumeSummaries(
         volumeSell: parseNumber(row.total_volume_sell),
         volumeTotal: parseNumber(row.total_volume_total),
         netVolume: parseNumber(row.total_net_volume),
+        nativeNetVolume: parseRawAmount(row.total_native_net_volume),
       })
     }
 
@@ -238,7 +282,11 @@ export async function queryTradeVolumeDetails(
       sum(tv.usd_volume_sell) AS volume_sell,
       sum(tv.usd_volume_buy) + sum(tv.usd_volume_sell) AS volume_total,
       sum(tv.usd_volume_buy) - sum(tv.usd_volume_sell) AS net_volume,
-      sum(tv.trade_count) AS trade_count
+      sum(tv.trade_count) AS trade_count,
+      sum(tv.native_volume_buy) AS native_volume_buy,
+      sum(tv.native_volume_sell) AS native_volume_sell,
+      sum(tv.native_volume_buy) + sum(tv.native_volume_sell) AS native_volume_total,
+      sum(tv.native_volume_buy) - sum(tv.native_volume_sell) AS native_net_volume
     FROM price_data.trade_volume_by_account AS tv
     INNER JOIN price_data.blocks b ON tv.block_height = b.block_height
     WHERE tv.asset_id = {asset_id:UInt32}
@@ -267,7 +315,11 @@ export async function queryTradeVolumeDetails(
             volume_sell,
             volume_total,
             net_volume,
-            trade_count
+            trade_count,
+            toString(native_volume_buy) AS native_volume_buy,
+            toString(native_volume_sell) AS native_volume_sell,
+            toString(native_volume_total) AS native_volume_total,
+            toString(native_net_volume) AS native_net_volume
           FROM (${perAccountQuery})
           ORDER BY volume_total DESC, account ASC
           LIMIT {limit:UInt32} OFFSET {offset:UInt32}
@@ -283,7 +335,11 @@ export async function queryTradeVolumeDetails(
             toString(sum(volume_buy)) AS volume_buy,
             toString(sum(volume_sell)) AS volume_sell,
             toString(sum(volume_total)) AS volume_total,
-            toString(sum(net_volume)) AS net_volume
+            toString(sum(net_volume)) AS net_volume,
+            toString(sum(native_volume_buy)) AS native_volume_buy,
+            toString(sum(native_volume_sell)) AS native_volume_sell,
+            toString(sum(native_volume_total)) AS native_volume_total,
+            toString(sum(native_net_volume)) AS native_net_volume
           FROM (${perAccountQuery})
         `,
         query_params: queryParams,
@@ -309,6 +365,10 @@ export async function queryTradeVolumeDetails(
       volumeSell: parseNumber(totals?.volume_sell),
       volumeTotal: parseNumber(totals?.volume_total),
       netVolume: parseNumber(totals?.net_volume),
+      nativeVolumeBuy: parseRawAmount(totals?.native_volume_buy),
+      nativeVolumeSell: parseRawAmount(totals?.native_volume_sell),
+      nativeVolumeTotal: parseRawAmount(totals?.native_volume_total),
+      nativeNetVolume: parseRawAmount(totals?.native_net_volume),
       limit,
       offset,
       hasMore,
@@ -324,6 +384,10 @@ export async function queryTradeVolumeDetails(
         volumeSell: 0,
         volumeTotal: 0,
         netVolume: 0,
+        nativeVolumeBuy: '0',
+        nativeVolumeSell: '0',
+        nativeVolumeTotal: '0',
+        nativeNetVolume: '0',
         limit,
         offset,
         hasMore: false,

@@ -19,7 +19,7 @@ import type {
 import { INTERVAL_LABELS } from '../types'
 import type { ApiCandle, OHLCVInterval, OmniwatchTrader, OmniwatchVolumeDetails } from '../types'
 import { fetchCandles, fetchVolumeDetails } from '../api/candles'
-import { formatCountdown } from '../utils/format'
+import { formatCountdown, formatTokenAmount, tokenAmountFromRaw } from '../utils/format'
 import { candleEndTimestamp, previousCandleRange, recentCandleRange } from '../utils/candleTime'
 import { headStreamHealthy, subscribeHead } from '../live'
 import { keepTabFocusInside } from '../utils/focus'
@@ -50,6 +50,9 @@ interface ChartProps {
   quoteId: number
   interval: OHLCVInterval
   base: string
+  // Decimals of the base asset, used to scale the raw-unit trade amounts the
+  // omniwatch payload carries. Token amounts stay hidden until it is known.
+  baseDecimals?: number | null
   showVolumeSource?: boolean
   onVisibleRangeReady?: (getter: () => { from: number; to: number } | null) => void
   onDataChange?: (data: ApiCandle[]) => void
@@ -244,7 +247,7 @@ function paletteForTheme(theme?: 'dark' | 'light' | string | null): ChartPalette
 function isLight(p: ChartPalette): boolean { return p.bg === CHART_PALETTES.light.bg }
 
 export default function Chart({
-  baseId, quoteId, interval, base, showVolumeSource = false,
+  baseId, quoteId, interval, base, baseDecimals = null, showVolumeSource = false,
   onVisibleRangeReady, onDataChange, onCountdownChange,
   inspectionTime = null, onInspectionTimeChange, theme, toolsEnabled = true,
   logScale = false, onLogScaleChange,
@@ -1116,6 +1119,17 @@ export default function Chart({
     ? Math.max(1, modalDetails.volumeTotal)
     : 1
 
+  // Raw-unit trade amounts become token figures only once the base asset's
+  // decimals are known — an unscaled amount would be wrong by orders of magnitude.
+  const tokenLabel = useCallback((raw: string, signed = false): string | null => {
+    if (typeof baseDecimals !== 'number') return null
+    const amount = tokenAmountFromRaw(raw, baseDecimals)
+    const sign = signed && amount >= 0 ? '+' : ''
+    return `${sign}${formatTokenAmount(amount)} ${base}`
+  }, [base, baseDecimals])
+  const modalNetToken = modalDetails ? tokenLabel(modalDetails.nativeNetVolume, true) : null
+  const modalVolumeToken = modalDetails ? tokenLabel(modalDetails.nativeVolumeTotal) : null
+
   return (
     <>
       <style>{`
@@ -1260,6 +1274,10 @@ export default function Chart({
         }
         .omniwatch-stat .v.up { color: var(--green); }
         .omniwatch-stat .v.down { color: var(--red); }
+        .omniwatch-stat .sub {
+          display: block; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+          font-family: 'GeistMono', monospace; font-size: 12px; color: var(--text-low);
+        }
         .omniwatch-summary {
           display: flex; align-items: center; justify-content: space-between; gap: 12px;
           padding: 18px 28px 10px; font-family: 'GeistMono', monospace; font-size: 12px;
@@ -1269,6 +1287,7 @@ export default function Chart({
         .omniwatch-summary .price-change.down { color: var(--red); }
         .omniwatch-summary .net.up { color: var(--green); }
         .omniwatch-summary .net.down { color: var(--red); }
+        .omniwatch-summary .net .token { color: var(--text-medium); }
         .omniwatch-rows {
           flex: 1; min-height: 0; padding: 0 28px 22px; overflow-y: auto;
           overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
@@ -1300,8 +1319,13 @@ export default function Chart({
         .omniwatch-flow-nums { display: flex; flex-wrap: wrap; gap: 16px; font-family: 'GeistMono', monospace; font-size: 12px; }
         .omniwatch-flow-nums .buy { color: var(--green); }
         .omniwatch-flow-nums .sell { color: var(--red); }
+        .omniwatch-flow-nums .token { margin-left: 6px; color: var(--text-low); }
         .omniwatch-net { display: flex; flex-direction: column; gap: 4px; text-align: right; min-width: 0; }
         .omniwatch-net .value { font-family: 'GeistMono', monospace; font-size: 18px; font-weight: 700; line-height: 1.2; }
+        .omniwatch-net .token {
+          font-family: 'GeistMono', monospace; font-size: 12px; line-height: 1.2; color: var(--text-medium);
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
         .omniwatch-net .label {
           font-family: 'GeistMono', monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low);
         }
@@ -1370,10 +1394,11 @@ export default function Chart({
           .omniwatch-flow-track { height: 10px; }
           .omniwatch-flow-nums { display: none; }
           .omniwatch-net {
-            align-self: center; justify-self: end; flex-direction: row; align-items: center; justify-content: flex-end;
-            gap: 0; text-align: right; min-width: 72px;
+            align-self: center; justify-self: end; align-items: flex-end; justify-content: center;
+            gap: 2px; text-align: right; min-width: 72px;
           }
           .omniwatch-net .value { font-size: 14px; }
+          .omniwatch-net .token { font-size: 11px; }
           .omniwatch-net .label { display: none; }
           .omniwatch-empty { padding: 28px 16px 32px; font-size: 14px; }
         }
@@ -1392,6 +1417,7 @@ export default function Chart({
           .omniwatch-pill { flex-basis: 66px; width: 66px; max-width: 66px; padding: 0 6px 0 5px; }
           .omniwatch-net { min-width: 66px; }
           .omniwatch-net .value { font-size: 13px; }
+          .omniwatch-net .token { font-size: 10px; }
         }
       `}</style>
       <div ref={chartAreaRef} className="chart-area">
@@ -1415,6 +1441,7 @@ export default function Chart({
           if (!summary) return null
           const more = Math.max(0, summary.accountCount - 1)
           const direction = summary.netVolume >= 0 ? 'net-buy' : 'net-sell'
+          const netToken = tokenLabel(summary.nativeNetVolume, true)
           return (
             <button
               key={marker.candle.intervalStart}
@@ -1423,7 +1450,7 @@ export default function Chart({
               style={{ left: marker.x, top: marker.y }}
               onClick={() => openVolumeModal(marker.candle)}
               aria-label={`Volume contributors for ${formatCandleDate(marker.candle.intervalStart)}`}
-              title={`${summary.topTrader.shortAccount} ${formatSignedUsdVolume(summary.netVolume)}`}
+              title={`${summary.topTrader.shortAccount} ${formatSignedUsdVolume(summary.netVolume)}${netToken ? ` · ${netToken}` : ''}`}
             >
               <OmniwatchIcon trader={summary.topTrader} />
               {marker.showAccount && more === 0 && <span className="id">{summary.topTrader.shortAccount}</span>}
@@ -1479,7 +1506,11 @@ export default function Chart({
               <div className="omniwatch-stat"><span className="k">Low</span><span className="v">{formatPriceFixed(modalCandle.low)}</span></div>
               <div className="omniwatch-stat"><span className="k">Close</span><span className={`v ${modalCandle.close >= modalCandle.open ? 'up' : 'down'}`}>{formatPriceFixed(modalCandle.close)}</span></div>
               <div className="omniwatch-stat"><span className="k">Change</span><span className={`v ${modalChangePct >= 0 ? 'up' : 'down'}`}>{formatPercent(modalChangePct)}</span></div>
-              <div className="omniwatch-stat"><span className="k">Volume</span><span className="v">${formatUsdVolume(modalCandle.volumeTotal)}</span></div>
+              <div className="omniwatch-stat">
+                <span className="k">Volume</span>
+                <span className="v">${formatUsdVolume(modalCandle.volumeTotal)}</span>
+                {modalVolumeToken && <span className="sub">{modalVolumeToken}</span>}
+              </div>
             </div>
 
             <div className="omniwatch-summary">
@@ -1491,7 +1522,10 @@ export default function Chart({
               {modalDetails && (
                 <>
                   <span>{formatCount(modalDetails.tradeCount)} trades · {formatCount(modalDetails.accountCount)} accounts</span>
-                  <span className={`net ${modalDetails.netVolume >= 0 ? 'up' : 'down'}`}>Net {formatSignedUsdVolume(modalDetails.netVolume)}</span>
+                  <span className={`net ${modalDetails.netVolume >= 0 ? 'up' : 'down'}`}>
+                    Net {formatSignedUsdVolume(modalDetails.netVolume)}
+                    {modalNetToken && <span className="token"> · {modalNetToken}</span>}
+                  </span>
                 </>
               )}
             </div>
@@ -1506,6 +1540,9 @@ export default function Chart({
                   const isBuyer = account.netVolume >= 0
                   const hasBuy = account.volumeBuy > 0
                   const hasSell = account.volumeSell > 0
+                  const buyToken = tokenLabel(account.nativeVolumeBuy)
+                  const sellToken = tokenLabel(account.nativeVolumeSell)
+                  const netToken = tokenLabel(account.nativeNetVolume, true)
                   return (
                     <div className="omniwatch-row" key={account.account}>
                       <div className="omniwatch-account">
@@ -1528,12 +1565,23 @@ export default function Chart({
                           </div>
                         </div>
                         <div className="omniwatch-flow-nums">
-                          {hasBuy && <span className="buy">+${formatUsdVolume(account.volumeBuy)} bought</span>}
-                          {hasSell && <span className="sell">-${formatUsdVolume(account.volumeSell)} sold</span>}
+                          {hasBuy && (
+                            <span className="buy">
+                              +${formatUsdVolume(account.volumeBuy)} bought
+                              {buyToken && <span className="token">{buyToken}</span>}
+                            </span>
+                          )}
+                          {hasSell && (
+                            <span className="sell">
+                              -${formatUsdVolume(account.volumeSell)} sold
+                              {sellToken && <span className="token">{sellToken}</span>}
+                            </span>
+                          )}
                         </div>
                       </div>
                       <div className={`omniwatch-net ${isBuyer ? 'buyer' : 'seller'}`}>
                         <span className="value">{formatSignedUsdVolume(account.netVolume)}</span>
+                        {netToken && <span className="token">{netToken}</span>}
                         <span className="label">{isBuyer ? 'Net buyer' : 'Net seller'}</span>
                       </div>
                     </div>

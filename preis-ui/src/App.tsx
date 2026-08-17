@@ -508,6 +508,7 @@ export default function App() {
                 quoteId={quoteId}
                 interval={interval}
                 base={baseSymbol}
+                baseDecimals={baseAsset?.decimals ?? null}
                 showVolumeSource={quoteAsset ? !quoteAsset.isUsdPegged : false}
                 onVisibleRangeReady={handleVisibleRangeReady}
                 onDataChange={setChartData}

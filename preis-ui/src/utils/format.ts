@@ -34,6 +34,28 @@ export function formatPrice(price: number, usd = true): string {
   return prefix + formatTinyPrice(price)
 }
 
+// Raw on-chain integer units → a display number. Amounts stay exact decimal
+// strings all the way from ClickHouse, so this is the presentation boundary:
+// a double keeps ~15 significant digits, far more than the 3-4 we render.
+export function tokenAmountFromRaw(raw: string | null | undefined, decimals: number): number {
+  if (!raw || !Number.isFinite(decimals)) return 0
+  const value = Number(raw) / Math.pow(10, decimals)
+  return Number.isFinite(value) ? value : 0
+}
+
+// Token amounts span many magnitudes (millions of HDX, fractions of a WBTC), so
+// compact the large end like the volume figures and hand the small end to the
+// price formatter, whose subscript notation keeps high-decimal assets readable.
+export function formatTokenAmount(value: number): string {
+  if (!Number.isFinite(value)) return '0'
+  const abs = Math.abs(value)
+  const sign = value < 0 ? '-' : ''
+  if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(2)}M`
+  if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(2)}K`
+  if (abs >= 1) return `${sign}${abs.toFixed(2)}`
+  return sign + formatPrice(abs, false)
+}
+
 export function formatChange(change: number | null): string {
   if (change === null || !Number.isFinite(change)) return '—'
   const pct = change * 100
