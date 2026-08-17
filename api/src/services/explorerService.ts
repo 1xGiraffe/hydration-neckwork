@@ -939,7 +939,8 @@ export function liquidityAmountFromArgs(eventName: string, args: Record<string, 
 // mirrored by liquidity_activity_mv's expressions, so the two layers cannot extract
 // a row differently. Omnipool.PositionCreated is the one event that names its
 // account `owner` and its asset `asset` — every other liquidity event uses `who`
-// plus one of rewardCurrency/assetId/poolId/assetA.
+// plus one of rewardCurrency/assetId/poolId/assetA (or the legacy snake_case
+// `asset_id`, which the MV carries too).
 export function liquidityCandidateArgs(eventName: string, args: Record<string, unknown>): {
   who: string; asset_id: number; asset_b: number; pool_acc: string; amount: string
 } {
@@ -15277,13 +15278,18 @@ function shareTokenFoldSql(assetExpr: string): string {
 // subquery's columns are renamed so unqualified references in the caller stay unambiguous.
 // It has to run BEFORE the caller's LIMIT — 1.38M of the 1.41M Stableswap liquidity events
 // are router hops, so filtering finished pages would empty them and desync every count.
-function routerHopLiquiditySql(bound: string, assetExpr = 'asset_id'): { joinSql: string; predicateSql: string } {
+export function routerHopLiquiditySql(bound: string, assetExpr = 'asset_id'): { joinSql: string; predicateSql: string } {
   // The Omnipool.PositionCreated arm is the SQL twin of
   // suppressPositionCreatedCompanions: a PositionCreated row renders only when no
   // LiquidityAdded in its block names the same account and asset — what survives
   // is `add_token`'s listing grant, the one position with no LiquidityAdded
   // anywhere. Set-semantic NOT IN, so an unmerged replacement duplicate on the
-  // right side cannot change the answer.
+  // right side cannot change the answer. The companion lookup is bounded by the
+  // BLOCKS that hold a bound-admitted PositionCreated (a rare event, so the
+  // inner set is tiny), never by `bound` itself: the deep-walk cursor cuts
+  // inside a block at an event index, and a companion LiquidityAdded sits at a
+  // different index of the same block, so reusing the row bound verbatim let a
+  // companion escape suppression whenever a page ended between the two.
   return {
     joinSql: `LEFT JOIN (
           SELECT block_height AS rh_block, extrinsic_index AS rh_ext,
@@ -15299,7 +15305,10 @@ function routerHopLiquiditySql(bound: string, assetExpr = 'asset_id'): { joinSql
             AND NOT (event_name = 'Omnipool.PositionCreated'
                      AND (block_height, who, asset_id) IN (
                        SELECT block_height, who, asset_id FROM price_data.liquidity_activity
-                       WHERE ${bound} AND event_name = 'Omnipool.LiquidityAdded'))`,
+                       WHERE event_name = 'Omnipool.LiquidityAdded'
+                         AND block_height IN (
+                           SELECT block_height FROM price_data.liquidity_activity
+                           WHERE ${bound} AND event_name = 'Omnipool.PositionCreated')))`,
   }
 }
 
