@@ -322,9 +322,12 @@ LIMIT 10`,
 
     // Borrow interest joins the payer ranking too, or a pure HOLLAR borrower
     // would show revenue on their account page yet never rank here (the
-    // symmetry rule). hollar_borrow is attributed EXACTLY for the requested
+    // symmetry rule). hollar_borrow is attributed EXACTLY for the booked
     // window: the range's booked USD split over the same scaled-debt×Δindex
-    // weights the account_revenue job uses. asset_reserve (dormant since
+    // weights the account_revenue job uses, with the weights window ending at
+    // the stream's cold mark — the last booked hour — so a borrower who only
+    // opened debt after the mark takes no share of interest booked before
+    // they borrowed. asset_reserve (dormant since
     // 2026-06-25) joins from account_revenue for months FULLY inside the
     // range — exact for "all", and a mint in a partial boundary month simply
     // stays out of the ranking rather than being time-scaled onto payers.
@@ -335,7 +338,7 @@ LIMIT 10`,
         query_params: {
           reserve: HOLLAR_RESERVE_ADDRESS,
           start: chTimestamp(rangeStart),
-          end: chTimestamp(nowSeconds),
+          end: marks.get('hollar_borrow') ?? chTimestamp(nowSeconds),
         },
         format: 'JSONEachRow',
       })
