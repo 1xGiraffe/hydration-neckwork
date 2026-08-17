@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { useExtrinsic } from '../hooks/useExplorerData'
 import { Link, paths } from '../router'
-import { F, AddrPill, CallPill, StatusBadge, ProjectedBadge, JsonView, Ago, Waiting, ExpandedRowSkeleton, Dash } from './ui'
+import { F, AddrPill, CallPill, StatusBadge, MempoolResultBadge, JsonView, Ago, Waiting, ExpandedRowSkeleton, Dash } from './ui'
 import { EvmLogView } from './EvmDecoded'
 import { useExpandableRow } from '../hooks/useExpandableRow'
 import { failureReasonText, type ExtrinsicSummary, type ExtrinsicOrigin, type EventRow } from '../types'
@@ -197,7 +197,7 @@ export function ExtRow({ x, now, isNew, noSigner, showOrigin, senderLabel }: { x
         {!noSigner && <td data-label={senderLabel ? 'Sender' : 'Signer'}>{sender ? <AddrPill account={sender} noCopy /> : <span className="muted mono">— inherent</span>}</td>}
         {showOrigin && <td data-label="Origin">{x.origin ? <OriginBadge origin={x.origin} /> : <Dash />}</td>}
         <td data-label="Result" className="r">{mempool
-          ? <ProjectedBadge verdict={x.projected ?? 'unknown'} compact />
+          ? <MempoolResultBadge includability={x.includability} reason={x.unincludableReason} projected={x.projected} compact />
           : showOrigin && x.origin?.state === 'pending'
             ? <span className="badge pending badge-icon" title="Pending" aria-label="Pending"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg></span>
             : <StatusBadge ok={x.success} reason={failureReasonText(x.errorReason)} compact />}</td>

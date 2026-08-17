@@ -4,7 +4,7 @@ import { useEvmReceipt, useExtrinsic, useExtrinsicActivity, useStats } from '../
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, redirect } from '../router'
-import { Crumbs, F, AddrPill, CallPill, StatusBadge, ProjectedBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows } from '../components/ui'
+import { Crumbs, F, AddrPill, CallPill, StatusBadge, MempoolResultBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows } from '../components/ui'
 import { api } from '../api/explorer'
 import { ActivityTable, PoolChip } from '../components/ActivityTable'
 import { EvmCallCard, EvmLogView } from '../components/EvmDecoded'
@@ -149,7 +149,7 @@ export function ExtrinsicDetail({ id }: { id: string }) {
               <div className="dt">{inPool ? 'First seen' : 'Timestamp'}</div><div className="dd mono">{F.datetime(data.timestamp)}{inPool && <span className="muted"> · waiting {F.waiting(data.timestamp, now)}</span>}</div>
               <div className="dt">Extrinsic hash</div><div className="dd mono wrap-anywhere">{data.hash} <Copy text={data.hash} /></div>
               <div className="dt">Module / Call</div><div className="dd"><CallPill name={data.callName} /> {!inPool && <CallDataCopy height={data.blockHeight} index={data.index} />}</div>
-              <div className="dt">Result</div><div className="dd">{inPool ? <ProjectedBadge verdict={data.projected ?? 'unknown'} /> : <StatusBadge ok={data.success} />}</div>
+              <div className="dt">Result</div><div className="dd">{inPool ? <MempoolResultBadge includability={data.includability} reason={data.unincludableReason} projected={data.projected} /> : <StatusBadge ok={data.success} />}</div>
               {/* A nonce can be spent once, so this transaction is finished:
                   the replacement is the one to watch, and it is one click away. */}
               {data.replacedBy && <>
