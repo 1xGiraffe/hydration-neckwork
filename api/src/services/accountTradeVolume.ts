@@ -88,7 +88,7 @@ export function swapEventFilterSql(): string {
 // A block is 12 synthetic seconds, so the month's first block is its UTC epoch
 // second divided by 12, and the bound is exclusive at the next month's first block.
 // "Synthetic" is load-bearing: 12 is a partitioning constant, decoupled from the
-// chain's real block time (6s since 2022), and it must stay identical across all
+// chain's real block time (~12-15s until Q3 2025, ~6s since, 2s next), and it must stay identical across all
 // five sites — see the note above account_trade_volume in
 // clickhouse/schema/001_tables.sql. Do not re-pin it at a block-time change; a
 // faster chain just makes each partition span fewer real days (~15 at 6s, ~5 at 2s,
