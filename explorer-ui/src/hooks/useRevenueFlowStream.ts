@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { api } from '../api/explorer'
 import { subscribeHead, LIVE_MS } from '../live'
 import type { RevenueFlowItem, RevenueFlowResponse, RevenueStream } from '../types'
@@ -182,16 +182,6 @@ export function createFlowScheduler(opts: FlowSchedulerOptions): FlowScheduler {
  */
 export const FLOW_RESUME_RESET_MS = 90_000
 
-export interface RevenueFlowStream {
-  scheduler: FlowScheduler
-  /** Last fetched drip rates (for the legend's live rates). */
-  drips: RevenueFlowResponse['drips']
-  blockSeconds: number
-  connected: boolean
-  /** Newest indexed block the feed served. */
-  head: number
-}
-
 /**
  * Feeds a scheduler from /explorer/revenue/flow: fetches on every head push
  * (interval fallback while the SSE is down), ticks the borrow drip once per
@@ -199,15 +189,10 @@ export interface RevenueFlowStream {
  * return), and pauses entirely while the document is hidden — the river only
  * flows when someone is watching it.
  */
-export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): RevenueFlowStream {
-  const [drips, setDrips] = useState<RevenueFlowResponse['drips']>([])
-  const [blockSeconds, setBlockSeconds] = useState(6)
-  const [connected, setConnected] = useState(false)
-  const [head, setHead] = useState(0)
+export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): void {
   const cursorRef = useRef<string | null>(null)
   const lastHeadRef = useRef(0)
   const lastBatchAtRef = useRef(0)
-  const dripsRef = useRef<RevenueFlowResponse['drips']>([])
   // Timestamp, not a boolean: a mobile browser can freeze the page mid-fetch
   // and never settle the promise, and a boolean latch would then skip every
   // future pull forever. A stale timestamp simply stops counting as busy.
@@ -249,10 +234,6 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
         }
         if (res.items.length || headDelta > 0) lastBatchAtRef.current = now
         scheduler.ingest(res.items, gapMs)
-        dripsRef.current = res.drips
-        setDrips(res.drips)
-        setBlockSeconds(res.blockSeconds)
-        setConnected(true)
         if (headDelta > 0) {
           // One drip mote per accrued block (capped so a returning background
           // tab surges a dozen blocks' worth, not an hour's), spread over the
@@ -263,9 +244,8 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
           scheduler.tickBlock(res.drips, 3, 10_000)
         }
         lastHeadRef.current = res.head
-        setHead(res.head)
       } catch {
-        if (!disposed) setConnected(false)
+        // Transient fetch failure: the head SSE and the fallback interval retry.
       } finally {
         // An orphaned pull must not clear the latch the current pull owns.
         if (epoch === pullEpochRef.current) inflightAtRef.current = 0
@@ -327,6 +307,4 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
       window.removeEventListener('focus', onVisibility)
     }
   }, [scheduler, paused])
-
-  return { scheduler, drips, blockSeconds, connected, head }
 }
