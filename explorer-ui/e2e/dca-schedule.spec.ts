@@ -19,7 +19,9 @@ test('schedule page shows initiation, budget, totals and paged executions', asyn
   await expect(page.locator('.page-title')).toContainText('DCA #33546')
   const card = page.locator('.detail-card').first()
   await expect(card).toContainText('Owner')
-  await expect(card).toContainText('~30m')
+  // 300 blocks at the mock's measured 5.7s pace (dcaCadence's estimate path,
+  // hence the ~). '~30m' would mean the nominal-6s fallback won the stats race.
+  await expect(card).toContainText('~28m')
   await expect(card).toContainText('· 300 blocks')
   await expect(card).toContainText('132 trades')
   await expect(page.locator('.tbl tbody tr')).toHaveCount(25)
