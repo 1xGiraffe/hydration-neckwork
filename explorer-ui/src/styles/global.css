@@ -2987,11 +2987,12 @@ tr.row-muted td { opacity: .55; }
 
 /* ── /revenue — the revenue river ─────────────────────────────────────────────
    Incomes drift from the right edge into the treasury counter (top → bottom on
-   phones). Particles animate `left`/`top` deliberately: a dozen concurrent
-   nodes are far below layout-thrash territory and it keeps the destination
-   panel-relative without JS measurement. The global prefers-reduced-motion
-   blocks kill these animations wholesale; the component additionally renders a
-   ledger list instead of the river in that mode. */
+   phones). Particles animate transform only (see .rev-particle below): the
+   drift runs on the compositor, and the travel distance to the counter is
+   measured at spawn from the stage box (RevenueFlow.tsx) into --travel. The
+   global prefers-reduced-motion blocks kill these animations wholesale; the
+   component additionally renders a ledger list instead of the river in that
+   mode. */
 .rev-hero { padding: 0; margin-bottom: 24px; }
 /* River and the totals ribbon share ONE panel; the ribbon's top border is the separator. */
 .rev-hero-ribbon { display: flex; justify-content: flex-start; margin: 0; padding: 14px 8px; border-top: 1px solid var(--separator); }
