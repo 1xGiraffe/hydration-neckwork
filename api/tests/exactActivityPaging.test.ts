@@ -281,7 +281,9 @@ describe('POOL_LIFECYCLE_EVENTS confines the pool_account admission arm', () => 
   // count arm's suppression context), and collectAccountActivity's liquidity page read
   // must all call the one shared builder — not three copies that can drift apart.
   it('is shared verbatim by all three liquidity_activity reads that admit a pool account', () => {
-    expect((explorerService.match(/liquidityWhoOrPoolSql\(list\)/g) ?? []).length).toBe(3)
+    // 5 = the three reads' own WHERE arms plus the two candidate scopes the
+    // account arms hand routerHopLiquiditySql — the same shared builder either way.
+    expect((explorerService.match(/liquidityWhoOrPoolSql\(list\)/g) ?? []).length).toBe(5)
     for (const name of ['accountLiquidityArm', 'semanticExtrinsicSql']) {
       const at = explorerService.indexOf(`function ${name}`)
       expect(at, name).toBeGreaterThan(-1)
