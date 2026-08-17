@@ -557,6 +557,67 @@ services:
     networks:
       - neckwork
 
+  # Public REST API (docs/superpowers/specs/2026-08-12-public-rest-api-design.md):
+  # the versioned /v1 + /rest surface for the Hydration UI and external feeds.
+  # Its own process on the same image/env as `api`, so public traffic never
+  # shares an event loop, in-process cache or rate-limit budget with the
+  # explorer; gated on schema-bootstrap like every other schema consumer.
+  api-public:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: hydration-neckwork-api
+    container_name: hydration-neckwork-api-public
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      schema-bootstrap:
+        condition: service_completed_successfully
+    command: ["./node_modules/.bin/tsx", "src/public/server.ts"]
+    ports:
+      - "3002:3000"
+    environment:
+      # Batch filters travel in the query string, so a supported request line is
+      # kilobytes long — `/v1/pools/xyk/volumes?pools=` takes a list of 67-byte
+      # pool accounts whose realistic maximum is the whole XYK venue (measured 289
+      # pools, ~19.4 kB). Node's 16 kB default made that a bare 431 with no error
+      # envelope from ~250 ids up, independently of the edge's own limit (raised
+      # alongside in public-nginx/nginx.conf). 32 kB carries ~485 ids. Set only for
+      # this service: the explorer API takes no such list.
+      - NODE_OPTIONS=--max-http-header-size=32768
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      # Published by /rest/service/metadata. Set to "false" on a host that serves
+      # a lagging copy, so a consumer's provider failover prefers another host.
+      - PUBLIC_API_MASTER=${PUBLIC_API_MASTER:-true}
+      # Same asset-registry snapshot as `api` (aToken aliases feed /v1/assets).
+      - EXPLORER_EXTRA_ATOKEN_UNDERLYING=${EXPLORER_EXTRA_ATOKEN_UNDERLYING:-}
+      # XCM volume for /hydration-web/v1/stats, from the same Ocelloids account the
+      # explorer's journey enrichment uses. Without the token that one field is
+      # served as null; the rest of the response is unaffected.
+      - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
+      - EXPLORER_OCELLOIDS_TOKEN=${EXPLORER_OCELLOIDS_TOKEN:-}
+    networks:
+      - neckwork
+
+  # Micro-cache in front of api-public: URI-keyed, honors the app's per-route
+  # Cache-Control, collapses concurrent misses into one upstream request. The
+  # external reverse proxy (outside this repo) points the public hostname here,
+  # never at api-public directly.
+  api-public-nginx:
+    build:
+      context: ./public-nginx
+      dockerfile: Dockerfile
+    container_name: hydration-neckwork-api-public-nginx
+    restart: unless-stopped
+    depends_on:
+      - api-public
+    ports:
+      - "8081:80"
+    networks:
+      - neckwork
+
   preis-ui:
     build:
       context: ./preis-ui
