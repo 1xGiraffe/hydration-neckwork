@@ -38,16 +38,19 @@ describe('per-page block lookups stay inside the query size limit', () => {
   // ?type=all&offset=2400 answered 503 while type=vote and type=xcm at the same
   // offset answered 200.
   it('resolves the merged feed vote calls in tuple chunks', () => {
-    const at = explorerService.indexOf('const callTuples')
+    // The chunked read lives in voteCallRowsForTuples (memoized per tuple);
+    // buildRows must route through it rather than interpolating its own list.
+    const at = explorerService.indexOf('async function voteCallRowsForTuples')
     expect(at).toBeGreaterThan(-1)
-    const fn = explorerService.slice(at, explorerService.indexOf('const hdx = asset(0)', at))
+    const fn = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
 
-    expect(fn).toContain('mapChunksConcurrently(callTuples, 5_000, CHUNK_QUERY_CONCURRENCY,')
+    expect(fn).toContain('mapChunksConcurrently(misses, 5_000, CHUNK_QUERY_CONCURRENCY,')
     expect(fn).toContain('(block_height, extrinsic_index) IN (${chunk.join(\',\')})')
     // The whole-list interpolation is what overflowed; it must not come back.
-    expect(fn).not.toContain('callTuples.join(')
+    expect(fn).not.toContain('misses.join(')
+    expect(explorerService).not.toContain('callTuples.join(')
     // One read, chunked once: the wrapper-fallback pass folds the same rows again.
     expect(fn.match(/mapChunksConcurrently\(/g)).toHaveLength(1)
-    expect(fn).toContain('const callRows = callChunks.flat()')
+    expect(explorerService).toContain('const callRows = await voteCallRowsForTuples(callTuples)')
   })
 })
