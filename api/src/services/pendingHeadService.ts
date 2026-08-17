@@ -177,6 +177,19 @@ export interface MempoolTx {
   // but the entry survives the drop grace so its own page can say what
   // happened instead of 404ing on the submitter watching it.
   replacedBy: string | null
+  // The runtime's includability verdict, from BlockBuilder_apply_extrinsic
+  // against the best block — the ONLY call that reveals it. `validate_transaction`
+  // returns Ok for a transaction that cannot pay its fee (so the node keeps and
+  // gossips it), and only apply surfaces Invalid(Payment). This is distinct from
+  // `success` (the dry run's dispatch outcome): a transaction can be includable
+  // and still fail its own call, or be well-formed and never includable.
+  //   'includable' — apply Ok; it will enter a block
+  //   'queued'     — Invalid(Future): waiting on an earlier nonce from this signer
+  //   'rejected'   — Invalid(anything else): permanently un-includable (Payment is
+  //                  the one seen in the wild); rejectReason names it
+  //   'unknown'    — the check could not run, so the transaction is not hidden
+  includability: 'includable' | 'queued' | 'rejected' | 'unknown'
+  rejectReason: string | null
 }
 const MEMPOOL_MAX_AGE_MS = 5 * 60_000
 const MEMPOOL_DROP_GRACE_MS = 30_000
@@ -198,9 +211,29 @@ const MEMPOOL_HANDOFF_MS = 20_000
 // of pool rows anyway.
 const MEMPOOL_ADMIT_PER_SWEEP = 8
 const MEMPOOL_MAX_ENTRIES = 60
+// How many REJECTED transactions the feed shows at once. A rejected transaction is
+// a real failing one worth surfacing (it cannot pay its fee, its nonce is stale),
+// so a few are shown — but an endless run of them is a flood, and beyond this cap
+// the surplus is suppressed like the followups below.
+const MEMPOOL_MAX_REJECTED_SHOWN = 8
+// Suppressed hashes — followups behind a rejected transaction, and rejected
+// surplus beyond the cap — are remembered so the sweep skips them without
+// re-admitting or re-judging. Bounded and insertion-ordered: at the cap the oldest
+// is dropped, and if it is still in the node's pool it is simply re-judged once.
+const MEMPOOL_SUPPRESSED_MAX = 20_000
 const DRY_RUN_XCM_VERSION = 4
 const poolByHash = new Map<string, MempoolTx>()
+const suppressedHashes = new Set<string>()
 let poolGeneration = 0
+
+function suppress(hash: string): void {
+  if (suppressedHashes.has(hash)) return
+  suppressedHashes.add(hash)
+  if (suppressedHashes.size > MEMPOOL_SUPPRESSED_MAX) {
+    const oldest = suppressedHashes.values().next().value
+    if (oldest !== undefined) suppressedHashes.delete(oldest)
+  }
+}
 
 // What the feeds show as "in the pool": everything the node still lists, plus
 // the ones it has just dropped while we race to fetch their block (see
@@ -215,7 +248,65 @@ export function poolRowVisible(tx: Pick<MempoolTx, 'inPool' | 'droppedAtMs' | 'c
   // copy that will never be included, so it stops being a row at once (its
   // entry lives on only to answer its own page).
   if (tx.replacedBy) return false
+  // A rejected transaction stays visible on purpose — a genuine failing one is
+  // worth showing, badged for what it is. Its never-mineable FOLLOWUPS and any
+  // flood surplus are not shown, but that is handled by dropping them from
+  // tracking entirely (see classifySuppressed), so anything still here is a row.
   return tx.inPool || now - (tx.droppedAtMs ?? 0) < MEMPOOL_HANDOFF_MS
+}
+
+// Which tracked transactions to drop from the feed AND from tracking, so they
+// occupy no slot or memory. Two kinds, both rooted in a rejected transaction:
+//   • a FOLLOWUP — same signer, a higher nonce than one of that signer's rejected
+//     transactions. It can only ever queue behind a transaction that will never
+//     execute, and showing "queued behind an earlier nonce" with that earlier
+//     transaction gone is worse than showing nothing.
+//   • the REJECTED SURPLUS — beyond MEMPOOL_MAX_REJECTED_SHOWN failing heads, the
+//     rest is a flood. The longest-waiting heads stay (a real stuck transaction is
+//     old; a flood is fresh), the newer surplus goes.
+// A rejected "head" — the lowest rejected nonce per signer — is NOT suppressed: it
+// is the failing transaction the reader should see.
+export function classifySuppressed(
+  txs: Array<Pick<MempoolTx, 'hash' | 'signerId' | 'nonce' | 'includability' | 'firstSeenMs'>>,
+  maxRejectedShown: number,
+): Set<string> {
+  const minRejectedNonce = new Map<string, number>()
+  for (const tx of txs) {
+    if (tx.includability !== 'rejected' || tx.signerId == null || tx.nonce == null) continue
+    const cur = minRejectedNonce.get(tx.signerId)
+    if (cur == null || tx.nonce < cur) minRejectedNonce.set(tx.signerId, tx.nonce)
+  }
+  const suppressed = new Set<string>()
+  const heads: Array<{ hash: string; firstSeenMs: number }> = []
+  for (const tx of txs) {
+    const floor = tx.signerId != null ? minRejectedNonce.get(tx.signerId) : undefined
+    // Strictly above a rejected nonce from the same signer: a doomed followup.
+    if (floor != null && tx.nonce != null && tx.nonce > floor) { suppressed.add(tx.hash); continue }
+    if (tx.includability === 'rejected') heads.push(tx)
+  }
+  // Keep the longest-waiting failing heads; suppress the newer surplus.
+  heads.sort((a, b) => a.firstSeenMs - b.firstSeenMs)
+  for (const tx of heads.slice(maxRejectedShown)) suppressed.add(tx.hash)
+  return suppressed
+}
+
+// Interpret BlockBuilder_apply_extrinsic's decoded ApplyExtrinsicResult into an
+// includability verdict. Ok — whether or not the dispatched call itself succeeds —
+// means the transaction enters a block. Invalid(Future) is a transaction correctly
+// waiting behind an earlier nonce. Every other Invalid is a permanent refusal, and
+// Unknown means the runtime could not judge it, so it is not hidden.
+interface ApplyResultLike {
+  isOk: boolean
+  asErr?: { isInvalid: boolean; asInvalid: { isFuture: boolean; type: string } }
+}
+export function includabilityFromApply(result: ApplyResultLike): { includability: MempoolTx['includability']; rejectReason: string | null } {
+  if (result.isOk) return { includability: 'includable', rejectReason: null }
+  const err = result.asErr
+  if (err?.isInvalid) {
+    if (err.asInvalid.isFuture) return { includability: 'queued', rejectReason: null }
+    return { includability: 'rejected', rejectReason: err.asInvalid.type }
+  }
+  return { includability: 'unknown', rejectReason: null }
 }
 export function mempoolTxs(): MempoolTx[] {
   const now = Date.now()
@@ -568,6 +659,10 @@ async function sweepMempool(): Promise<void> {
   for (const ext of pool) {
     if (!ext.isSigned) continue
     const hash = ext.hash.toHex().toLowerCase()
+    // A hash we have already judged doomed (a followup, or flood surplus) is
+    // skipped without admitting or re-judging it — the whole point of tracking it
+    // nowhere is that it costs one Set entry, not a slot and a runtime call.
+    if (suppressedHashes.has(hash)) continue
     seen.add(hash)
     const known = poolByHash.get(hash)
     if (known) {
@@ -585,6 +680,14 @@ async function sweepMempool(): Promise<void> {
   const built = await Promise.all(admit.map(a => buildMempoolTx(a.hash, a.ext)))
   for (const tx of built) { poolByHash.set(tx.hash, tx); changed = true }
   if (built.length && resolveReplacements()) changed = true
+  // Drop doomed followups and flood surplus from tracking entirely, remembering
+  // their hashes so the next sweep skips them. Runs every sweep because a rejected
+  // head established this sweep is what condemns a followup admitted earlier.
+  const doomed = classifySuppressed([...poolByHash.values()], MEMPOOL_MAX_REJECTED_SHOWN)
+  for (const hash of doomed) {
+    suppress(hash)
+    if (poolByHash.delete(hash)) changed = true
+  }
   for (const [hash, tx] of poolByHash) {
     // Age alone never removes a transaction the node still lists: the row would
     // vanish from the feeds while the pool it claims to mirror still holds it —
@@ -635,6 +738,22 @@ interface PoolExtrinsicLike {
   tip: { toString(): string }
   nonce: { toString(): string }
   version: number
+  toHex(): string
+}
+
+// The signed extrinsic's includability, asked of the runtime once at admission.
+// `state.call` runs the runtime API against the best block in an isolated
+// instance — nothing is persisted — so this is a read, bounded per sweep by the
+// admit cap. Best-effort: any failure leaves the verdict `unknown`, never hides.
+async function checkIncludability(ext: PoolExtrinsicLike): Promise<{ includability: MempoolTx['includability']; rejectReason: string | null }> {
+  if (!api) return { includability: 'unknown', rejectReason: null }
+  try {
+    const raw = await api.rpc.state.call('BlockBuilder_apply_extrinsic', ext.toHex())
+    const decoded = api.createType('ApplyExtrinsicResult', raw) as unknown as ApplyResultLike
+    return includabilityFromApply(decoded)
+  } catch {
+    return { includability: 'unknown', rejectReason: null }
+  }
 }
 
 async function buildMempoolTx(hash: string, extRaw: unknown): Promise<MempoolTx> {
@@ -661,8 +780,18 @@ async function buildMempoolTx(hash: string, extRaw: unknown): Promise<MempoolTx>
     carried: false,
     nonce: Number.isFinite(nonce) ? nonce : null,
     replacedBy: null,
+    includability: 'unknown',
+    rejectReason: null,
   }
   if (!signerId) return tx
+  // Ask the runtime whether this can ever be included BEFORE dry-running the
+  // call: a rejected transaction leaves the feed, so its dry run would be wasted
+  // work — and skipping it halves the per-transaction cost during a flood, where
+  // every transaction is rejected.
+  const verdict = await checkIncludability(ext)
+  tx.includability = verdict.includability
+  tx.rejectReason = verdict.rejectReason
+  if (tx.includability === 'rejected') return tx
   try {
     // Dry-run the CALL with the signer's origin (not the signed extrinsic):
     // no nonce/fee gating, just the projected execution and its events.
@@ -717,6 +846,7 @@ export function stopPendingHeadService(): void {
   if (poolTimer) { clearInterval(poolTimer); poolTimer = null }
   byHeight.clear()
   poolByHash.clear()
+  suppressedHashes.clear()
   const a = api
   api = null
   if (a) void a.disconnect().catch(() => { /* closing */ })
