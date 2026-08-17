@@ -9,6 +9,12 @@ export interface OmniwatchTrader {
   volumeTotal: number
   netVolume: number
   tradeCount: number
+  // Traded amounts in the base asset's own raw integer units, as exact decimal
+  // strings — scale by the asset's decimals to display them.
+  nativeVolumeBuy: string
+  nativeVolumeSell: string
+  nativeVolumeTotal: string
+  nativeNetVolume: string
 }
 
 interface OmniwatchCandleSummary {
@@ -19,6 +25,7 @@ interface OmniwatchCandleSummary {
   volumeSell: number
   volumeTotal: number
   netVolume: number
+  nativeNetVolume: string
 }
 
 export interface OmniwatchVolumeDetails {
@@ -29,6 +36,10 @@ export interface OmniwatchVolumeDetails {
   volumeSell: number
   volumeTotal: number
   netVolume: number
+  nativeVolumeBuy: string
+  nativeVolumeSell: string
+  nativeVolumeTotal: string
+  nativeNetVolume: string
   limit: number
   offset: number
   hasMore: boolean
