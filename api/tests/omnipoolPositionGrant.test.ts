@@ -3,6 +3,7 @@ import {
   liqActionFor,
   liquidityActionEventNames,
   liquidityCandidateArgs,
+  routerHopLiquiditySql,
   suppressPositionCreatedCompanions,
 } from '../src/services/explorerService.ts'
 
@@ -61,5 +62,22 @@ describe('omnipool listing-grant positions', () => {
     const otherBlock = { event_name: 'Omnipool.PositionCreated', block_height: 101, who: '0xabc', asset_id: 5 }
     const otherAsset = { event_name: 'Omnipool.PositionCreated', block_height: 100, who: '0xabc', asset_id: 9 }
     expect(suppressPositionCreatedCompanions([added, otherBlock, otherAsset])).toEqual([added, otherBlock, otherAsset])
+  })
+
+  it('keeps the SQL companion lookup block-complete under an event-granular page bound', () => {
+    // The deep walk cuts inside a block at an event index. A companion
+    // LiquidityAdded lives at a DIFFERENT index of the candidate's own block,
+    // so the LiquidityAdded scan must never inherit the row bound verbatim —
+    // it is bounded by the blocks holding a bound-admitted PositionCreated.
+    const bound = '(1) AND (block_height < 100 OR (block_height = 100 AND event_index < 25))'
+    const { predicateSql } = routerHopLiquiditySql(bound)
+    // The LiquidityAdded scan carries no row bound of its own — only the
+    // block-set membership test.
+    expect(predicateSql).toMatch(/WHERE event_name = 'Omnipool\.LiquidityAdded'\s+AND block_height IN \(/)
+    // The row bound appears exactly once: on the PositionCreated block set,
+    // where it mirrors what the outer query admits.
+    const boundUses = predicateSql.split('event_index < 25').length - 1
+    expect(boundUses).toBe(1)
+    expect(predicateSql).toMatch(/event_index < 25\)\) AND event_name = 'Omnipool\.PositionCreated'/)
   })
 })
