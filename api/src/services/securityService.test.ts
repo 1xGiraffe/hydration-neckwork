@@ -3,7 +3,7 @@ import {
   allowanceFor, assetIdFromBlakeKey, classifyFuse, committeeThresholds, decayedAccumulator,
   decodeLockdownState, decodeOptionalRational, decodePausedKey, decodeRational,
   decodeWithdrawAccumulator, decodeWithdrawConfig, egressSinkChain, pairLockdowns, rationalPct, registryLimitChanges, withdrawConfigText,
-  replayPauses, tradableLabels, type LockdownState,
+  replayPauses, tradabilityStateName, tradableLabels, type LockdownState,
 } from './securityService.ts'
 
 // Every number the Security page shows about a live limit comes out of one of
@@ -311,6 +311,25 @@ describe('tradableLabels', () => {
     expect(tradableLabels(1)).toEqual(['Sell'])
     expect(tradableLabels(8)).toEqual(['Remove liquidity'])
     expect(tradableLabels(11)).toEqual(['Sell', 'Buy', 'Remove liquidity'])
+  })
+})
+
+describe('tradabilityStateName', () => {
+  it('leads with what is switched off while the blocked side is shorter', () => {
+    // The state every offboarding starts with: 11 = add liquidity disabled.
+    expect(tradabilityStateName(11)).toBe('Add liquidity off')
+    expect(tradabilityStateName(3)).toBe('Add liquidity · Remove liquidity off')
+  })
+
+  it('flips to the allowed remainder once more is off than on', () => {
+    // 8 = withdraw-only, the second offboarding step.
+    expect(tradabilityStateName(8)).toBe('only Remove liquidity allowed')
+    expect(tradabilityStateName(1)).toBe('only Sell allowed')
+  })
+
+  it('names the two absolute states plainly', () => {
+    expect(tradabilityStateName(15)).toBe('fully tradable')
+    expect(tradabilityStateName(0)).toBe('frozen — nothing allowed')
   })
 })
 
