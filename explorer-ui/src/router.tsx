@@ -301,7 +301,7 @@ export const paths = {
   linkDevice: () => '/link-device',
 }
 
-export function Link({ to, children, className, title, ariaLabel, onClick, style, data }: { to: string; children: ReactNode; className?: string; title?: string; ariaLabel?: string; onClick?: (e: MouseEvent) => void; style?: CSSProperties; data?: Record<string, string> }) {
+export function Link({ to, children, className, title, ariaLabel, tabIndex, onClick, style, data }: { to: string; children: ReactNode; className?: string; title?: string; ariaLabel?: string; tabIndex?: number; onClick?: (e: MouseEvent) => void; style?: CSSProperties; data?: Record<string, string> }) {
   const href = normalize(to)
   const handle = useCallback((e: MouseEvent) => {
     onClick?.(e)
@@ -317,5 +317,5 @@ export function Link({ to, children, className, title, ariaLabel, onClick, style
   }, [onClick, href])
   // `data` is spread verbatim so a caller can attach the data-* attributes the global
   // hover card reads, without this component knowing what they mean.
-  return <a href={href} className={className} title={title} aria-label={ariaLabel} style={style} onClick={handle} {...data}>{children}</a>
+  return <a href={href} className={className} title={title} aria-label={ariaLabel} tabIndex={tabIndex} style={style} onClick={handle} {...data}>{children}</a>
 }

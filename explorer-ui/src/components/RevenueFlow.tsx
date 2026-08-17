@@ -267,7 +267,9 @@ export function RevenueFlow() {
             >
               <span className="rev-dot" style={{ background: REVENUE_STREAM_COLOR[p.stream] }} />
               {p.item.account ? (
-                <AddrPill account={p.item.account} noCopy />
+                // noFocus: the stage is aria-hidden, so a tab stop here would
+                // land keyboard focus on content assistive tech cannot see.
+                <AddrPill account={p.item.account} noCopy noFocus />
               ) : (
                 <span className="rev-pill-label">{REVENUE_STREAM_LABEL[p.stream]}</span>
               )}

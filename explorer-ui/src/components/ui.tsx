@@ -625,10 +625,13 @@ export function tagMemberSuffix(tag: Pick<ResolvedTag, 'memberCount'>, address: 
 // which is what a reader wants from a feed row — but a surface whose whole subject is
 // one specific account (close accounts) would lose that account by navigating to its
 // group, so it keeps the label and redirects the link.
-export function UserTagPill({ tag, address, noCopy, noMemberSuffix, to, isContract }: { tag: ResolvedTag; address: string; noCopy?: boolean; noMemberSuffix?: boolean; to?: string; isContract?: boolean }) {
+// `noFocus` (here and on AddrPill) takes the link out of the tab order — for
+// pills inside an aria-hidden region (the revenue river's stage), where a tab
+// stop would land keyboard focus on content assistive tech cannot see.
+export function UserTagPill({ tag, address, noCopy, noMemberSuffix, noFocus, to, isContract }: { tag: ResolvedTag; address: string; noCopy?: boolean; noMemberSuffix?: boolean; noFocus?: boolean; to?: string; isContract?: boolean }) {
   return (
     <span className="addr-wrap">
-      <Link to={to ?? paths.tag(tag.id)} className="addr-pill" title={to ? `${tag.name} — open account ${address}` : tag.kind === 'user' ? `${tag.name} — your list “${tag.listName}”` : 'Tagged group — open combined view'}>
+      <Link to={to ?? paths.tag(tag.id)} tabIndex={noFocus ? -1 : undefined} className="addr-pill" title={to ? `${tag.name} — open account ${address}` : tag.kind === 'user' ? `${tag.name} — your list “${tag.listName}”` : 'Tagged group — open combined view'}>
         <TagIcon icon={tag.icon} title={tag.name} />
         <span className="tag" style={tag.color ? { color: tag.color } : undefined}>{tag.name}</span>
         {!noMemberSuffix && tagMemberSuffix(tag, address)}
@@ -648,8 +651,10 @@ export function ContractGlyph({ show }: { show?: boolean }) {
   return <span className="contract-glyph mono" title="Smart contract">{'</>'}</span>
 }
 
-export function AddrPill({ account, full, noCopy, noTag, tagToAccount }: { account: AccountRef; full?: boolean; noCopy?: boolean; noTag?: boolean; tagToAccount?: boolean }) {
+export function AddrPill({ account, full, noCopy, noTag, noFocus, tagToAccount }: { account: AccountRef; full?: boolean; noCopy?: boolean; noTag?: boolean; noFocus?: boolean; tagToAccount?: boolean }) {
   useTagMapVersion()   // re-render when the viewer's tag map changes
+  // See UserTagPill: -1 keeps aria-hidden hosts (the revenue river) out of the tab order.
+  const tabIndex = noFocus ? -1 : undefined
   // Priority-resolved tag (the viewer's own lists, in priority order, with
   // the system directory as a slot in that order) is the primary label, matching
   // the Accounts list. `noTag` skips this on tag member lists, where the page
@@ -657,12 +662,12 @@ export function AddrPill({ account, full, noCopy, noTag, tagToAccount }: { accou
   // `tagToAccount` keeps the name but points the link at the account — for a surface
   // that is about this one account rather than the company it keeps.
   const resolved = noTag ? null : resolveTag(account)
-  if (resolved) return <UserTagPill tag={resolved} address={account.address} noCopy={noCopy} to={tagToAccount ? accountHref(account) : undefined} isContract={account.isContract} />
+  if (resolved) return <UserTagPill tag={resolved} address={account.address} noCopy={noCopy} noFocus={noFocus} to={tagToAccount ? accountHref(account) : undefined} isContract={account.isContract} />
   const mod = moduleName(account.accountId)
   if (mod) {
     return (
       <span className="addr-wrap">
-        <Link to={accountHref(account)} className="addr-pill" title={account.address}>
+        <Link to={accountHref(account)} tabIndex={tabIndex} className="addr-pill" title={account.address}>
           <span className="emoji">⚙️</span><span className="a">{mod}</span>
           <ContractGlyph show={account.isContract} />
         </Link>
@@ -675,7 +680,7 @@ export function AddrPill({ account, full, noCopy, noTag, tagToAccount }: { accou
   if (account.profile?.name) {
     return (
       <span className="addr-wrap">
-        <Link to={accountHref(account)} className="addr-pill" title={account.address}>
+        <Link to={accountHref(account)} tabIndex={tabIndex} className="addr-pill" title={account.address}>
           <AccountEmoji account={account} title="profile" />
           <span className="tag profile-name">{account.profile.name}</span>
           <ContractGlyph show={account.isContract} />
@@ -690,7 +695,7 @@ export function AddrPill({ account, full, noCopy, noTag, tagToAccount }: { accou
   if (identity?.display) {
     return (
       <span className="addr-wrap">
-        <Link to={accountHref(account)} className="addr-pill" title={account.address}>
+        <Link to={accountHref(account)} tabIndex={tabIndex} className="addr-pill" title={account.address}>
           <AccountEmoji account={account} title="identity" />
           <span className="tag">{identity.display}</span>
           {identity.verified && <span className="id-verified" title="Verified identity">✓</span>}
@@ -711,7 +716,7 @@ export function AddrPill({ account, full, noCopy, noTag, tagToAccount }: { accou
   if (account.contractName) {
     return (
       <span className="addr-wrap">
-        <Link to={accountHref(account)} className="addr-pill" title={`${account.contractName} — ${account.address}`}>
+        <Link to={accountHref(account)} tabIndex={tabIndex} className="addr-pill" title={`${account.contractName} — ${account.address}`}>
           <AccountEmoji account={account} title="identity" />
           <span className="tag">{account.contractName}</span>
           <span className="tag-member-suffix mono">·{account.address.slice(-3)}</span>
@@ -723,7 +728,7 @@ export function AddrPill({ account, full, noCopy, noTag, tagToAccount }: { accou
   }
   return (
     <span className="addr-wrap">
-      <Link to={accountHref(account)} className="addr-pill" title={account.address}>
+      <Link to={accountHref(account)} tabIndex={tabIndex} className="addr-pill" title={account.address}>
         <AccountEmoji account={account} title="identity" />
         <span className="a mono"><ShortAddr addr={account.address} full={full} /></span>
         <ContractGlyph show={account.isContract} />
