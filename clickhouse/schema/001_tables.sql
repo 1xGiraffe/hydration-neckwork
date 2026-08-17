@@ -32,8 +32,9 @@ CREATE TABLE IF NOT EXISTS price_data.account_swap_activity_queue_state (`id` UI
 CREATE TABLE IF NOT EXISTS price_data.account_tags (`label_id` String, `label_name` String, `color` String DEFAULT '', `note` String DEFAULT '', `icon` String DEFAULT '', `account_id` String, `deleted` UInt8 DEFAULT 0, `created_at` DateTime DEFAULT now(), `updated_at` DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (label_id, account_id) SETTINGS index_granularity = 8192;
 -- `toDateTime(block_height * 12)` — the synthetic block clock, five sites.
 -- ────────────────────────────────────────────────────────────────────────────
--- The 12 here is NOT the chain's block time and never was (the chain has run at
--- 6s since 2022). It is a fixed constant that maps a block height into a
+-- The 12 here is NOT the chain's block time — the chain ran at ~12-15s until
+-- Q3 2025, ~6s since, and is migrating to 2s; the constant matched the early
+-- era by origin but is now decoupled. It is a fixed constant that maps a block height into a
 -- monotonic, evenly spaced pseudo-date, purely so ClickHouse has something to
 -- partition a block-keyed table by without carrying a timestamp column. Nothing
 -- reads the resulting date as a wall-clock time: it names a partition, and

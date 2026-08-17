@@ -36,9 +36,12 @@ import type { RpcClient } from '@subsquid/rpc-client'
 import type { ClickHouseStore } from './store/clickhouseStore.js'
 
 // Chain time between asset-registry scans while backfilling: the 10,000-block
-// interval this replaces was 1,000 minutes at 6 s. Backfill reads the interval off
-// the historical blocks' own timestamps, so a range covering 2022 scans exactly as
-// often as it did before, whatever the chain's cadence becomes.
+// interval this replaces was 1,000 minutes at the 6 s era's cadence, and that is
+// the parity this constant preserves from here on — backfill reads the interval
+// off the historical blocks' own timestamps, so future cadences change nothing.
+// Over the ~12-15 s years (2022 through Q2 2025) it scans ~2-2.5× as often as
+// the old block-count interval did there: more scans, never fewer, accepted as
+// a bounded cost of one cadence-independent constant.
 const BACKFILL_ASSET_SNAPSHOT_INTERVAL_MINUTES = 1_000
 
 let errorNamesRpc: RpcClient | null = null
