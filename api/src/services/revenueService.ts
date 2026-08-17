@@ -6,10 +6,15 @@
 //   cold  — price_data.revenue_events, the derivations-built canonical table
 //           (closed hours only, event-time valued);
 //   tail  — the SAME per-stream definitions run over raw for everything past
-//           each stream's own cold high-water mark, so the split is a
-//           performance boundary and never a coverage gate.
-// The per-stream marks are read FIRST and then baked into BOTH arms as
-// literals, so a REPLACE PARTITION landing mid-request cannot make the arms
+//           each stream's own cold high-water mark, so for the EVENTFUL
+//           streams the split is a performance boundary, not a coverage gate.
+//           hollar_borrow is the exception: it accrues per hour and has no
+//           eventful raw form, so its dashboard figures end at the last booked
+//           hour — the open hour plus the job's rebuild hold, up to ~2h behind
+//           now (the flow's drip stands in for exactly that gap).
+// The per-stream marks are read ONCE per request and threaded into BOTH arms
+// as literals — the cold caps and the tail filters (and the tail's cache
+// identity) — so a REPLACE PARTITION landing mid-request cannot make the arms
 // overlap on an hour or straddle a gap (the SPLIT_BOUNDS argument from the
 // public fees service, applied across two queries).
 //
@@ -161,11 +166,15 @@ interface TailRow {
 /**
  * The raw tail: every stream's rows past its own cold mark, one UNION query
  * through the shared builders. Bounded to `hours` before now; cached briefly
- * (single-flight) so concurrent flow pollers share one execution.
+ * (single-flight) so concurrent flow pollers share one execution. The caller
+ * passes the SAME marks it caps the cold arm with, and those marks are part of
+ * the cache identity — a cached tail built from older marks must never be
+ * paired with fresher cold caps (rows between the two mark generations would
+ * be counted twice) or vice versa (counted in neither arm).
  */
-async function tailRows(hours: number): Promise<TailRow[]> {
-  return cached(`revenue:tail:${hours}`, 2_000, async () => {
-    const marks = await coldMarks()
+async function tailRows(hours: number, marks: Map<RevenueStream, string>): Promise<TailRow[]> {
+  const marksKey = [...marks].map(([s, m]) => `${s}=${m}`).sort().join(',')
+  return cached(`revenue:tail:${hours}:${marksKey}`, 2_000, async () => {
     const arms = EVENTFUL.map(stream => {
       const mark = marks.get(stream) ?? '1970-01-01 00:00:00'
       return `SELECT * FROM (
@@ -259,7 +268,7 @@ LIMIT 10`,
       format: 'JSONEachRow',
       clickhouse_settings: DECIMAL_STRINGS,
     })
-    const tail = (await tailRows(tailHours(marks, nowSeconds)))
+    const tail = (await tailRows(tailHours(marks, nowSeconds), marks))
       .filter(row => isProtocolRevenue(row.stream, row.dest))
 
     // Integer 1e-12 USD end to end; one float conversion at the wire below.
@@ -483,7 +492,7 @@ async function borrowDrips(blockSeconds: number): Promise<RevenueFlowResponse['d
 export async function getRevenueFlow(after: string | null): Promise<RevenueFlowResponse> {
   const [head, rows, blockMs] = await Promise.all([
     indexedHead(),
-    tailRows(1),
+    coldMarks().then(marks => tailRows(1, marks)),
     measuredParaBlockMs(client),
   ])
   const blockSeconds = blockMs / 1_000
