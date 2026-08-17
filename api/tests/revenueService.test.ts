@@ -122,9 +122,12 @@ describe('getRevenueDashboard', () => {
     const byId = new Map(dash.topAccounts.map(r => [r.account.accountId, r.usd]))
     expect(byId.get(ACCOUNT_B)).toBeCloseTo(7.5, 9)
     expect(byId.get(ACCOUNT_A)).toBeCloseTo(6.5, 9)
-    // The weights query covers exactly the requested window.
+    // The weights window ends at the stream's cold mark — the distributed USD
+    // is booked up to there, so a borrower who only opened debt later must not
+    // take a share of it.
     const weightsCall = seen.find(x => x.query.includes('-- rev:borrow-weights'))!
     expect(weightsCall.params.reserve).toBe('0x531a654d1696ed52e7275a8cede955e82620f99a')
+    expect(weightsCall.params.end).toBe('2026-08-14 10:00:00')
   })
 
   it('answers an empty model with zeros and no synthetic points', async () => {
