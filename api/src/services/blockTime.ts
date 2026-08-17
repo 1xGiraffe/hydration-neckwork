@@ -158,18 +158,27 @@ export function nominalBlockMsMismatch(measuredMs: number): string | null {
 // Blocks the chain produces per hour at a given slot/pace.
 export const blocksPerHour = (msPerBlock: number): number => 3_600_000 / clampBlockMs(msPerBlock)
 
+// The nominal a failed or implausible MEASUREMENT degrades to: the runtime's
+// own answer while the node is reachable, else the last nominal this process
+// established, else the pre-measurement constant. Degrading to the bare
+// constant instead would make one bad 100-block read report 6s throughput on a
+// 2s chain for a whole cache window even while metadata says 2000ms.
+function degradedNominalMs(): number {
+  return runtimeSlotDurationMs() ?? heldNominalMs ?? NOMINAL_PARA_BLOCK_MS
+}
+
 async function readAvgBlockMs(client: ClickHouseClient): Promise<number> {
   try {
     const res = await client.query({ query: avgBlockMsSql(100), format: 'JSONEachRow' })
     const raw = Number((await res.json<{ ms: number | null }>())[0]?.ms ?? 0)
-    const clamped = clampBlockMs(raw)
-    if (clamped !== raw) {
-      console.warn(`[blocktime] implausible measured block time (${raw}ms), using the ${NOMINAL_PARA_BLOCK_MS}ms nominal`)
-    }
-    return clamped
+    if (Number.isFinite(raw) && raw >= MIN_PLAUSIBLE_BLOCK_MS && raw <= MAX_PLAUSIBLE_BLOCK_MS) return raw
+    const nominal = degradedNominalMs()
+    console.warn(`[blocktime] implausible measured block time (${raw}ms), using the ${nominal}ms nominal`)
+    return nominal
   } catch (err) {
-    console.warn(`[blocktime] block-time measurement failed, using the ${NOMINAL_PARA_BLOCK_MS}ms nominal`, err)
-    return NOMINAL_PARA_BLOCK_MS
+    const nominal = degradedNominalMs()
+    console.warn(`[blocktime] block-time measurement failed, using the ${nominal}ms nominal`, err)
+    return nominal
   }
 }
 
