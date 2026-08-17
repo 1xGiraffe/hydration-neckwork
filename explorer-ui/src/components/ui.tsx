@@ -785,6 +785,53 @@ export function PoolBadge({ pool, poolId, to }: { pool: string; poolId?: number 
 // available at all. So a pool row wears a dashed badge that says "projected",
 // and an unjudged one says nothing rather than showing a green tick for an
 // outcome nothing established.
+// Why the runtime will never include a pool transaction, in the reader's terms.
+// `Payment` is the one seen in the wild — a transaction whose account cannot cover
+// the fee validates Ok (so the node keeps and gossips it) and only fails when a
+// block tries to apply it, which is exactly why the dry run alone reads it as
+// "would succeed."
+function unincludableText(reason: string | null | undefined): string {
+  switch (reason) {
+    case 'Payment': return 'the signer cannot pay the transaction fee'
+    case 'Stale': return 'the nonce has already been used'
+    case 'BadProof': return 'the signature does not verify'
+    case 'ExhaustsResources': return 'it would exceed a block’s resource limits'
+    case 'AncientBirthBlock': return 'its mortal era has expired'
+    default: return 'the runtime will not include it in a block'
+  }
+}
+
+// The result of a pool transaction, told honestly: whether it can enter a block at
+// all comes first, and only then what its call would do. A `rejected` transaction
+// is never listed in a feed — it reaches this badge on its own detail page — so
+// the point here is to replace the dry run's misleading "would succeed" with the
+// reason it is stuck. `queued` waits on an earlier nonce; otherwise the dry-run
+// projection stands.
+export function MempoolResultBadge({ includability, reason, projected, compact }: {
+  includability?: 'includable' | 'queued' | 'rejected' | 'unknown'
+  reason?: string | null
+  projected?: 'ok' | 'fail' | 'unknown'
+  compact?: boolean
+}) {
+  if (includability === 'rejected') {
+    return (
+      <span className={`badge projected fail${compact ? ' badge-icon' : ''}`} title={`Cannot be included — ${unincludableText(reason)}. It passes the node's checks and is kept in the pool, but no block can apply it.`}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+        {compact ? null : 'Cannot be included'}
+      </span>
+    )
+  }
+  if (includability === 'queued') {
+    return (
+      <span className={`badge pending${compact ? ' badge-icon' : ''}`} title="Waiting on an earlier transaction from this signer — a lower nonce must be included first">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
+        {compact ? null : 'Queued behind an earlier nonce'}
+      </span>
+    )
+  }
+  return <ProjectedBadge verdict={projected ?? 'unknown'} compact={compact} />
+}
+
 export function ProjectedBadge({ verdict, compact }: { verdict: 'ok' | 'fail' | 'unknown'; compact?: boolean }) {
   if (verdict === 'unknown') {
     return <span className="badge projected unknown" title="No dry-run projection available — the outcome is unknown until a block executes it">?</span>

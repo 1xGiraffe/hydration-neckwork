@@ -1941,6 +1941,8 @@ function mempoolExtrinsicSummary(tx: MempoolTx): ExtrinsicSummary {
     finalized: false,
     mempool: true,
     projected: tx.success == null ? 'unknown' : tx.success ? 'ok' : 'fail',
+    includability: tx.includability,
+    unincludableReason: tx.rejectReason,
     ...(tx.replacedBy ? { replacedBy: tx.replacedBy } : {}),
   }
 }
@@ -2062,6 +2064,15 @@ export interface ExtrinsicSummary {
   // DryRunApi answer). Printing a green tick for an unjudged transaction
   // asserts something nothing established. Present on mempool rows only.
   projected?: 'ok' | 'fail' | 'unknown'
+  // The runtime's includability verdict for a pool transaction, distinct from the
+  // dry-run `projected` outcome: `projected` is what the CALL would do, this is
+  // whether the transaction can enter a block at all. A 'rejected' transaction
+  // (it cannot pay its fee, its nonce is stale, …) is a genuine failing one, shown
+  // and badged with `unincludableReason`; its doomed followups are dropped from
+  // the feeds entirely. 'queued' waits on an earlier nonce. Present on mempool
+  // rows only.
+  includability?: 'includable' | 'queued' | 'rejected' | 'unknown'
+  unincludableReason?: string | null
 }
 interface ExtrinsicSummaryRow {
   block_height: number

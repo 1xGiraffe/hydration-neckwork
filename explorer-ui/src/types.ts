@@ -336,6 +336,14 @@ export interface ExtrinsicSummary {
   // What the dry run established, on mempool rows only. 'unknown' means the
   // projection was unavailable — the transaction is listed, unjudged.
   projected?: 'ok' | 'fail' | 'unknown'
+  // Whether the runtime can include this pool transaction at all — a separate
+  // claim from `projected` (what its call would do). 'rejected' is a genuine
+  // failing transaction (it cannot pay its fee, its nonce is stale, …), shown and
+  // badged for what it is; `unincludableReason` names the cause. 'queued' waits on
+  // an earlier nonce. A doomed followup behind a rejected transaction is dropped
+  // entirely, so it never reaches the client.
+  includability?: 'includable' | 'queued' | 'rejected' | 'unknown'
+  unincludableReason?: string | null
   // The transaction that reused this one's nonce and replaced it.
   replacedBy?: string
   blockHeight: number
