@@ -1442,6 +1442,21 @@ export function tradableLabels(bits: number): string[] {
   return out
 }
 
+// A tradability state as the ledger words it. The reader's question is "what is
+// switched off", so the shorter side of the mask speaks: naming the surviving
+// permissions instead made six rows read "Sell · Buy · Remove liquidity" when
+// the one fact that changed was Add liquidity turning off. When more is off
+// than on, the allowed remainder is the shorter, clearer statement.
+export function tradabilityStateName(bits: number): string {
+  if (bits === 15) return 'fully tradable'
+  if (bits === 0) return 'frozen — nothing allowed'
+  const allowed = tradableLabels(bits)
+  const blocked = tradableLabels(~bits & 15)
+  return blocked.length <= allowed.length
+    ? `${blocked.join(' · ')} off`
+    : `only ${allowed.join(' · ')} allowed`
+}
+
 // The circuit-breaker errors that mean a limit actually stopped something. The
 // pallet's other errors are administrative — a malformed limit, a release against
 // an asset that is not locked — and counting them as trips would overstate how
@@ -1759,16 +1774,27 @@ function buildTimeline(
       asset: asset(assetId),
     })
   }
+  // Events arrive block-ascending, so each (family, pool, asset)'s previous
+  // state is at hand: the ledger states the new rules AND what they replaced,
+  // like every limit row does — an asset's first event has no on-record
+  // predecessor and states only the new rules. A change that only ADDS
+  // permissions reads green even when it stops short of fully tradable.
+  const tradabilityPrev = new Map<string, number>()
   for (const e of tradabilityHistory) {
     const args = safeJson(e.args_json)
     const bits = Number((args.state as { bits?: number } | undefined)?.bits ?? 0)
     const assetId = Number(args.assetId ?? 0)
     const poolId = args.poolId != null ? Number(args.poolId) : null
     const where = poolId != null ? `pool ${poolId} · ` : ''
+    const prevKey = `${e.event_name}:${poolId ?? ''}:${assetId}`
+    const prev = tradabilityPrev.get(prevKey)
+    tradabilityPrev.set(prevKey, bits)
+    const relaxed = bits === 15 || (prev != null && prev !== bits && (bits & prev) === prev)
     out.push({
-      kind: bits === 15 ? 'unfreeze' : 'freeze',
+      kind: relaxed ? 'unfreeze' : 'freeze',
       label: e.event_name.startsWith('Stableswap') ? 'Stablepool tradability set' : 'Omnipool tradability set',
-      detail: `${where}${assetDescriptor(assetId).symbol} → ${bits === 15 ? 'fully tradable' : tradableLabels(bits).join(' · ')}`,
+      detail: `${where}${assetDescriptor(assetId).symbol} → ${tradabilityStateName(bits)}`
+        + (prev != null && prev !== bits ? ` (was ${tradabilityStateName(prev)})` : ''),
       blockHeight: e.block_height,
       blockTimestamp: e.block_timestamp,
       extrinsicIndex: extrinsicIndexOf(e.extrinsic_index),
