@@ -4,6 +4,7 @@ import { Link, paths } from '../router'
 import { AddrPill, Dash, EmptyRow, ErrorRow, F, MomentLink, TableSkeleton, VoteSideBadge, pendingRows, LiveAnchor, type Moment } from './ui'
 import type { AccountRef, AssetRef } from '../types'
 import { ConvictionTag } from './ActivityTable'
+import { voteSubjectLabel } from '../utils/voteRows'
 
 // The one votes table.
 //
@@ -31,15 +32,18 @@ export interface VoteTableRow extends Moment {
   voters?: number
 }
 
+// A numbered referendum leads with its muted index and links its title; a
+// collective motion has neither an index nor a page, so its shortened proposal
+// hash is the whole cell (voteSubjectLabel — the same phrase the activity feed's
+// vote row shows, so one vote cannot read two ways).
 function ReferendumCell({ row }: { row: VoteTableRow }) {
   if (!row.referendum) return <Dash />
-  const label = row.referendumTitle ?? `Referendum #${row.referendum}`
   return (
     <span className="ref-cell">
-      <span className="muted mono ref-num">#{row.referendum}</span>
+      {row.referendumPallet && <span className="muted mono ref-num">#{row.referendum}</span>}
       {row.referendumPallet
         ? <Link to={paths.referendum(row.referendumPallet, row.referendum)} className="ref-link">{row.referendumTitle ?? 'Referendum'}</Link>
-        : <span className="muted">{label}</span>}
+        : <span className="muted">{voteSubjectLabel(row.referendum, row.referendumPallet, row.referendumTitle)}</span>}
     </span>
   )
 }
