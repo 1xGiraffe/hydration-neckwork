@@ -257,7 +257,7 @@ export function assetIdFromBlakeKey(storageKey: string): number | null {
 // the pallet saturates a net burn to zero, so headroom is never more than the
 // limit (a bug the reference dashboard has).
 export interface FuseVerdict {
-  status: 'locked' | 'expired' | 'active' | 'unarmed'
+  status: 'locked' | 'frozen' | 'expired' | 'active' | 'unarmed'
   usedRaw: bigint
   headroomRaw: bigint
   usagePct: number
@@ -267,6 +267,12 @@ export interface FuseVerdict {
 export function classifyFuse(limitRaw: bigint, state: LockdownState | undefined, issuanceRaw: bigint | undefined, headBlock: number): FuseVerdict {
   if (state?.kind === 'locked' && state.untilBlock > headBlock) {
     return { status: 'locked', usedRaw: limitRaw, headroomRaw: 0n, usagePct: 100, untilBlock: state.untilBlock, periodEndBlock: null }
+  }
+  // A limit of exactly zero is an armed fuse with no headroom, not an absent one:
+  // `IssuanceIncreaseFuse` reserves the whole of the first deposit and locks the
+  // asset down, in every period state. So there is nothing for a window to say.
+  if (limitRaw === 0n) {
+    return { status: 'frozen', usedRaw: 0n, headroomRaw: 0n, usagePct: 100, untilBlock: null, periodEndBlock: null }
   }
   // A `Locked` row whose block has passed, or no row at all: the first
   // under-limit mint re-baselines the period, so the full limit is available.
@@ -334,6 +340,10 @@ let snapshotGeneration = 0
 // registry's own events: `Registered`/`Updated` both carry the asset's full state,
 // so the newest event per asset IS the current registry entry. Verified against
 // live chain state for all 59 limited assets.
+//
+// A declared zero is kept. `XcmRateLimitsInRegistry` returns `Option<Balance>`, so
+// only an unset limit disarms the fuse; `Some(0)` arms it with no headroom, which
+// is the strictest setting there is and has to be visible.
 async function loadRegistryLimits(): Promise<Map<number, bigint>> {
   const res = await client.query({
     query: `SELECT asset_id, xcm_rate_limit
@@ -352,7 +362,7 @@ async function loadRegistryLimits(): Promise<Map<number, bigint>> {
   for (const r of rows) {
     try {
       const limit = BigInt(r.xcm_rate_limit)
-      if (limit > 0n) out.set(Number(r.asset_id), limit)
+      if (limit >= 0n) out.set(Number(r.asset_id), limit)
     } catch { /* non-numeric payload — the asset simply has no readable limit */ }
   }
   return out
@@ -729,7 +739,7 @@ export interface SecurityDashboard {
   chainAsOf: string | null
   chainBlock: number | null
   withdraw: WithdrawLimitView
-  fuses: { periodBlocks: number; rows: FuseRow[]; lockedCount: number; lockdownTotal: number; releaseTotal: number; lockdowns: LockdownEvent[] }
+  fuses: { periodBlocks: number; rows: FuseRow[]; lockedCount: number; frozenCount: number; lockdownTotal: number; releaseTotal: number; lockdowns: LockdownEvent[] }
   perBlock: {
     defaultTradePct: number
     defaultAddPct: number
@@ -1261,7 +1271,9 @@ function buildFuses(
       : null
     rows.push({
       asset: descriptor,
-      status: verdict?.status ?? 'unarmed',
+      // The limit is indexed, so a frozen fuse still reads as frozen with no
+      // chain snapshot; only the period state needs one.
+      status: verdict?.status ?? (limitRaw === 0n ? 'frozen' : 'unarmed'),
       limit: limitRaw.toString(),
       used: (verdict?.usedRaw ?? 0n).toString(),
       headroom: (verdict?.headroomRaw ?? limitRaw).toString(),
@@ -1280,6 +1292,7 @@ function buildFuses(
     periodBlocks: FUSE_PERIOD_BLOCKS,
     rows,
     lockedCount: rows.filter(r => r.status === 'locked').length,
+    frozenCount: rows.filter(r => r.status === 'frozen').length,
     lockdownTotal: lockdowns.length,
     releaseTotal,
     lockdowns: lockdowns.slice().reverse(),
@@ -1298,9 +1311,10 @@ export interface RegistryLimitRow {
 // safety action even though it arrives as an asset-registry event rather than a
 // circuit-breaker one. `Registered` and `Updated` restate the asset's entire entry
 // and most updates leave the limit alone, so only a row that actually moves it
-// earns a ledger entry. An absent, empty or zero value means the asset carries no
-// limit — the same reading loadRegistryLimits applies to the newest event per
-// asset. Rows must arrive grouped by asset and ordered by block within each.
+// earns a ledger entry. An absent or empty value means the asset carries no limit;
+// a declared zero is a limit of zero, which freezes deposits — the same reading
+// loadRegistryLimits applies to the newest event per asset. Rows must arrive
+// grouped by asset and ordered by block within each.
 export function registryLimitChanges(rows: RegistryLimitRow[]): SafetyEvent[] {
   const out: SafetyEvent[] = []
   const previous = new Map<number, bigint | null>()
@@ -1316,16 +1330,21 @@ export function registryLimitChanges(rows: RegistryLimitRow[]): SafetyEvent[] {
     // on one side of the change is worth a line.
     if (!seen && next === null) continue
     const descriptor = asset(assetId)
-    const label = next === null ? 'Deposit fuse limit cleared' : prev === null ? 'Deposit fuse limit set' : 'Deposit fuse limit changed'
-    const detail = next === null
-      ? `${descriptor.symbol} → no limit`
-      : prev === null
-        ? `${descriptor.symbol} → ${fuseAmount(next, descriptor.decimals)}`
-        : `${descriptor.symbol} → ${fuseAmount(next, descriptor.decimals)} (was ${fuseAmount(prev, descriptor.decimals)})`
+    // Zero is the one move that changes what KIND of action this is: closing the
+    // fuse to nothing is a freeze, and reopening it is a release.
+    const froze = next === 0n
+    const thawed = prev === 0n
+    const label = froze
+      ? 'Deposits frozen'
+      : thawed ? 'Deposits unfrozen'
+        : next === null ? 'Deposit fuse limit cleared'
+          : prev === null ? 'Deposit fuse limit set' : 'Deposit fuse limit changed'
+    const next_ = froze ? '0 — every deposit is held in reserve' : next === null ? 'no limit' : fuseAmount(next, descriptor.decimals)
+    const was = prev === null || next === null ? '' : ` (was ${thawed ? '0' : fuseAmount(prev, descriptor.decimals)})`
     out.push({
-      kind: 'limit',
+      kind: froze ? 'freeze' : thawed ? 'unfreeze' : 'limit',
       label,
-      detail,
+      detail: `${descriptor.symbol} → ${next_}${was}`,
       blockHeight: r.block_height,
       blockTimestamp: r.block_timestamp,
       extrinsicIndex: extrinsicIndexOf(r.extrinsic_index),
@@ -1335,11 +1354,13 @@ export function registryLimitChanges(rows: RegistryLimitRow[]): SafetyEvent[] {
   return out
 }
 
+// `null` means the registry declares no limit at all. Zero is a value, not an
+// absence — see loadRegistryLimits.
 function parseRegistryLimit(raw: string | null | undefined): bigint | null {
   if (!raw || raw === 'null') return null
   try {
     const limit = BigInt(raw)
-    return limit > 0n ? limit : null
+    return limit >= 0n ? limit : null
   } catch { return null }
 }
 

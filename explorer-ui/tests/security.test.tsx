@@ -41,6 +41,7 @@ function mockData(): SecurityDashboard {
         { asset: SKY, status: 'expired', limit: (118_000n * 10n ** 18n).toString(), used: '0', headroom: (118_000n * 10n ** 18n).toString(), usagePct: 0, untilBlock: null, periodEndBlock: 13_500_000, category: 'external', lockdownCount: 2 },
       ],
       lockedCount: 1,
+      frozenCount: 0,
       lockdownTotal: 26,
       releaseTotal: 108,
       lockdowns: [
@@ -180,6 +181,30 @@ describe('Security section pages', () => {
       // The crumb trail leads back to the overview.
       expect(html, section).toContain('href="/security"')
     }
+  })
+
+  // A registry `xcm_rate_limit` of zero arms the fuse with no headroom, so the
+  // asset admits nothing at all. It is the strictest state a fuse has, and used
+  // to be invisible — a zero read as "carries no limit" and dropped the row.
+  it('shows an asset frozen at a zero limit as shut, not as unused', () => {
+    const data = mockData()
+    data.fuses = {
+      ...data.fuses,
+      frozenCount: 1,
+      rows: [
+        { asset: SKY, status: 'frozen', limit: '0', used: '0', headroom: '0', usagePct: 100, untilBlock: null, periodEndBlock: null, category: 'external', lockdownCount: 0 },
+        ...data.fuses.rows,
+      ],
+    }
+    const crossChain = render(data, 'cross-chain')
+    expect(crossChain).toContain('Frozen')
+    expect(crossChain).toContain('no deposit accepted')
+    expect(crossChain).toContain('FRZ')
+
+    // The overview counts it alongside the lockdown rather than reporting idle.
+    const overview = render(data)
+    expect(overview).toContain('2 shut')
+    expect(overview).toContain('1 locked down · 1 held at a zero limit')
   })
 
   it('keeps the money market and the Omnipool on separate pages', () => {
@@ -326,7 +351,7 @@ describe('Security page overview', () => {
 
   it('renders with no fuses, no trips and nothing paused', () => {
     const data = mockData()
-    data.fuses = { ...data.fuses, rows: [], lockedCount: 0, lockdownTotal: 0, releaseTotal: 0, lockdowns: [] }
+    data.fuses = { ...data.fuses, rows: [], lockedCount: 0, frozenCount: 0, lockdownTotal: 0, releaseTotal: 0, lockdowns: [] }
     data.trips = { ...data.trips, total: 0, enforcementTotal: 0, directTotal: 0, nestedTotal: 0, byError: [], byYear: [], recent: [] }
     data.freezes = { ...data.freezes, paused: [], delisted: [] }
     data.timeline = []
