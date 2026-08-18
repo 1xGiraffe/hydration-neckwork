@@ -90,11 +90,16 @@ describe('the token filter offers the same options from either asset shape', () 
   const full = mockSync<AssetListItem[]>('/explorer/assets')!
   const projected = mockSync<AssetFilterItem[]>('/explorer/assets?fields=filter')!
 
+  // `price` is the one number that rides along: a price-alert form has to say what
+  // the token costs, and fetching the full directory (or an asset detail) for one
+  // number would cost far more than one float per row. The heavy fields — totals,
+  // holder counts, weekly sparklines, 57% of 74 kB — stay out.
   it('projects every row, in order, and nothing else', () => {
     expect(full).toHaveLength(12)
     expect(projected).toHaveLength(12)
     expect(projected.map(a => a.assetId)).toEqual(full.map(a => a.assetId))
-    for (const asset of projected) expect(Object.keys(asset)).toEqual(['assetId', 'symbol', 'name'])
+    for (const asset of projected) expect(Object.keys(asset)).toEqual(['assetId', 'symbol', 'name', 'price'])
+    expect(projected.map(a => a.price)).toEqual(full.map(a => a.price))
   })
 
   it('builds an identical option list from the projection', () => {

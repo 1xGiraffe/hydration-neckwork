@@ -6,7 +6,7 @@ import { evmTransactionReceipt } from '../services/evmReceipt.ts'
 import {
   getStats, getRecentBlocks, getBlock, getRecentExtrinsics, getExtrinsic, getExtrinsicAt,
   getExtrinsicActivity, getBlockActivity,
-  getHolders, getAddress, getAddressHistory, search, getAssets, getAssetFilterOptions, getAccounts, getDcaSchedule, getDcaScheduleIdAt, getDcaExecution,
+  getHolders, getAddress, getAddressHistory, search, getAssets, getAssetFilterOptions, getFilterNames, getAccounts, getDcaSchedule, getDcaScheduleIdAt, getDcaExecution,
   getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getGlobalActivityTotal, getMoneyMarket, getAssetDetail, getAssetDcas, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag, getTagMemberAccounts,
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressListTotal, getTagListTotal,
@@ -32,7 +32,9 @@ import { ACCOUNT_AFFINITY_BUSY_CODE, getCloseAccounts, getCloseAccountsForTag } 
 // The wire vocabulary the explorer sends. 'stake' is the URL/product word; the
 // activity builders below still speak the row type 'staking', so it is translated
 // once here rather than in the eight places the service branches on it.
-const activityTypes = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc']
+// Exported so the notification rule registry's own copy (which must stay free
+// of this module's route/service imports) can be pinned equal to it by test.
+export const activityTypes = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc']
 const ACTIVITY_TYPE_ALIASES: Record<string, string> = { stake: 'staking' }
 export const uint32Param = z.coerce.number().int().min(0).max(0xffff_ffff)
 
@@ -66,6 +68,12 @@ const MAX_ACTIVITY_OFFSET = 2_500
 // from one small source — vote_activity 121,092 rows, staking_activity 192,060,
 // otc_activity 4,473 — so a deep offset cannot explode no matter how far it is
 // pushed: measured at offset 190,000, vote 0.11s, staking 1.26s, otc 0.19s.
+//
+// `vote` merges a SECOND source into that page (the collective Council/Technical
+// Committee votes, a few thousand events all-time), which costs a deep page the
+// small source's own depth on top of the page size — bounded by that source, never
+// by the offset, because the merge translates ranks instead of reading both
+// sources to `offset + limit` (getVoteFeedRows).
 //
 // This is what withheld /activity?tab=vote&page=490: the vote feed is 4,844 pages of
 // 25 and 92% of them sat behind a cap that costs it 51ms to serve.
@@ -266,6 +274,12 @@ export async function explorerRoutes(fastify: FastifyInstance) {
   // can narrow the payload without changing what it can offer.
   fastify.get('/explorer/assets', async req =>
     (req.query as { fields?: string })?.fields === 'filter' ? getAssetFilterOptions() : getAssets())
+
+  // The call/event names present in the indexed data, so the Extrinsics/Events
+  // filter boxes and the alert form can offer them. Shared across every caller
+  // and cached an hour server-side (and the same in the browser — see
+  // CACHE_CONTROL in server.ts): a name list moves only with a runtime upgrade.
+  fastify.get('/explorer/filter-names', async () => getFilterNames())
 
   fastify.get('/explorer/accounts', async (req, reply) => {
     const q = req.query as Record<string, unknown>

@@ -451,6 +451,9 @@ svg { display: block; }
 @media (min-width: 861px) and (max-width: 1119px) {
   .nav > .nav-link.nav-fold { display: none; }
   .nav .nav-fold-group { display: block; }
+  /* The permanent Assets group yields to the wider fold dropdown here, or the
+     bar would show two "Assets" triggers. */
+  .nav .nav-unfold-group { display: none; }
 }
 /* At the narrowest desktop widths even the folded nav pinches the search —
    drop the wordmark and keep the logo. */
@@ -478,6 +481,8 @@ svg { display: block; }
   .nav { display: none; }
   .nav-burger { display: inline-flex; }
   .topbar-right { margin-left: auto; }
+  /* The bell stays: it is the only route to notifications (no drawer/menu
+     row), so on mobile it sits directly left of the burger. */
   .topbar-right .theme-toggle, .topbar-right .account-control, .topbar-right .connect-btn { display: none; }
   .topbar-search { flex: 1 1 auto; margin-left: 0; }
   .topbar-search.hidden { display: none; }
@@ -1211,6 +1216,10 @@ svg { display: block; }
 .tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
 .tabs button .cnt { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-left: 6px; }
 .tabs button.active .cnt { color: var(--accent); }
+/* A tab may carry the same unread pill the topbar's bell does, or — where the
+   attention has no number behind it — a bare dot. */
+.tabs button .invite-badge { margin-left: 6px; vertical-align: middle; }
+.tabs button .tab-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); margin-left: 6px; vertical-align: middle; }
 
 /* ============ JSON / params ============ */
 .kv-params { background: var(--bg); border: 1px solid var(--separator); border-radius: 12px; overflow: hidden; }
@@ -1282,6 +1291,13 @@ svg { display: block; }
 .acct-bal .hint, .acct-stats-hint .hint { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
 .acct-bal.subtle .amt { font-size: 14px; font-weight: 500; color: var(--text-medium); }
 .acct-bal.subtle .lab { font-size: 9px; color: var(--text-lowest); }
+/* A label with a roomier and a compact spelling ("Protocol revenue" / "Revenue"):
+   the wide form yields below the width where the stat row starts wrapping. */
+.acct-bal .lab-narrow { display: none; }
+@media (max-width: 720px) {
+  .acct-bal .lab-wide { display: none; }
+  .acct-bal .lab-narrow { display: inline; }
+}
 /* On phones the header stacks into two full-width rows: the identity row
    (compact inline avatar + name + address/tags, using the whole width) and,
    below it, ONE shared stats line — volumes on the left, the value on the
@@ -2140,7 +2156,21 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    inline rename row) opts in with just `.input`, no wrapper needed. */
 .input, .field input, .field textarea { all: unset; box-sizing: border-box; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text-high); padding: 10px 12px; font-family: 'Geist'; font-size: 13px; }
 .input:focus, .field input:focus, .field textarea:focus { border-color: var(--sky); }
+/* Dialog form selects: the .field input skin plus an explicit chevron —
+   `appearance: none` drops the native arrow, and the native look is the one
+   thing in these forms the tokens don't reach. Scoped to .field so the
+   filter-bar, table-head and mobile-sort selects keep their compact style. */
+.field select { box-sizing: border-box; appearance: none; width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text-high); padding: 10px 34px 10px 12px; font-family: 'Geist'; font-size: 13px; cursor: pointer; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888a94' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; }
+.field select:focus { border-color: var(--sky); outline: none; }
+:root[data-theme="dark"] .field select { color-scheme: dark; }
+:root[data-theme="light"] .field select { color-scheme: light; }
+.field select option { background: var(--bg-elev); color: var(--text-high); }
 .field textarea { resize: vertical; min-height: 84px; font-family: 'GeistMono'; font-size: 12px; line-height: 1.6; }
+/* A combo standing in for a form field (the alert form's token, pallet and
+   call/event pickers) fills the field like the selects beside it — the 150px
+   filter-bar width is for a filter ROW, where several controls share a line. */
+.field .combo, .field .combo-input { width: 100%; }
+.field .combo-pop { left: 0; right: 0; min-width: 0; }
 /* Compact variant for an .input sitting inline among small controls (a
    panel-head row's .btn.sm / 20px swatches) rather than stacked under its
    own label — same skin, shorter so it doesn't blow out the row's height. */
@@ -2154,6 +2184,10 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    .dialog* skin above). */
 .dialog-hint { color: var(--text-low); font-size: 12.5px; }
 .dialog-error { padding: 10px 12px; border-radius: 10px; background: var(--red-soft); color: var(--red); font-size: 12.5px; }
+/* Same box as the error, in the informational sky rather than a warm tone:
+   "you already have this alert" after an idempotent create is worth reading and
+   is not a refusal, so it must not be mistaken for one. */
+.dialog-note { padding: 10px 12px; border-radius: 10px; background: var(--sky-soft); color: var(--sky); font-size: 12.5px; }
 .wallet-group { display: flex; flex-direction: column; gap: 4px; }
 .wallet-group-label { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); padding: 0 2px 2px; }
 .wallet-row {
@@ -2234,6 +2268,140 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .device-name { color: var(--text-high); font-weight: 500; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .device-tag { font-size: 10px; }
 .device-meta { color: var(--text-low); font-size: 12px; margin-top: 2px; }
+/* ── Notifications ───────────────────────────────────────────────────────
+   The topbar bell, the /notifications page, and the "Get notified" button
+   every other surface carries. No new tokens or motion: the badge is the
+   invite pill, rows borrow the device-row box, and the only transitions are
+   the same colour fades every control uses (killed by the global
+   prefers-reduced-motion block above). */
+
+/* Bell: sized and hovered exactly like .theme-toggle beside it, plus a corner
+   anchor for the unread pill. Hidden ≤860px with the rest of the desktop
+   right-hand chrome — the drawer carries the same link there. */
+.topbar-bell {
+  position: relative; width: 34px; height: 34px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 9999px; color: var(--text-medium);
+  transition: color 150ms, background 150ms;
+}
+.topbar-bell:hover { color: var(--text-high); background: var(--panel-hover); }
+.topbar-bell svg { width: 16px; height: 16px; }
+.topbar-bell .invite-badge { position: absolute; top: -1px; right: -1px; border: 1px solid var(--bg-elev); }
+
+/* A section title with a control on its right (Security's safety ledger, the
+   alerts list). The title keeps its own vertical rhythm; the control rides the
+   same baseline instead of pushing a row of its own. */
+.sec-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sec-title-row .sec-title { margin-right: auto; }
+
+/* Per-surface subscribe affordance. Two shapes: the small pill (.notify-btn,
+   plain .btn.sm) and the quiet `ext-link` variant for a detail page's existing
+   link row. The bell glyph is what makes them recognisable as one action. */
+.notify-wrap { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.notify-bell { width: 12px; height: 12px; flex-shrink: 0; }
+.notify-link { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.notify-error { color: var(--red); font-family: 'GeistMono'; font-size: 11px; }
+/* Subscribed: the same pill, wearing the accent it already uses for an active
+   chip. State comes from the rules the viewer HAS, so this survives a reload —
+   and clicking it unsubscribes, which is why it reads as pressed. */
+.notify-btn.on, .notify-link.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.notify-btn.on { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.notify-manage { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.notify-manage:hover { color: var(--text-high); }
+/* Asset header: the prefilled alert buttons, pushed to the far edge of the row.
+   Three pills do not fit one phone line, so the row wraps as a block and each
+   button keeps its own count chip beside it. */
+.notify-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+/* How many alerts of that kind this token already has — any threshold. A link,
+   because the only thing to do with the number is go and look at them. */
+.notify-count {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent);
+  font-family: 'GeistMono'; font-size: 10.5px; line-height: 1;
+}
+.notify-count:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+/* The filter zone's `extra` slot, when it holds more than one control — one
+   flex child keeps .filter-head's space-between layout intact. */
+.filter-extra { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+
+/* Logged-out teaser. Two columns on desktop, stacked on phones. */
+.notif-hero { display: flex; gap: 24px; align-items: flex-start; padding: 26px 24px; flex-wrap: wrap; }
+.notif-hero-copy { flex: 1 1 320px; min-width: 0; }
+.notif-hero-copy h2 { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 25px; margin: 0 0 10px; color: var(--text-high); }
+.notif-hero-copy p { margin: 0; color: var(--text-medium); font-size: 14px; line-height: 1.65; max-width: 62ch; }
+.notif-hero-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
+.notif-hero-note { font-family: 'GeistMono'; font-size: 11px; }
+.notif-hero-channels { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
+.notif-channel-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 7px 14px; border-radius: 9999px;
+  background: var(--panel); border: 1px solid var(--border);
+  font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium);
+}
+.notif-personas { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.notif-persona { padding: 16px 18px; border: 1px solid var(--separator); border-radius: 14px; background: var(--bg-elev); }
+.notif-persona-who { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
+.notif-persona-want { color: var(--text-high); font-size: 15px; margin-top: 6px; }
+.notif-persona-how { color: var(--text-medium); font-size: 12.5px; margin-top: 8px; }
+.notif-foot-note { font-family: 'GeistMono'; font-size: 11px; margin-top: 16px; }
+
+/* Channels panel: grouped rows inside one .panel, same box as .device-row. */
+.notif-panel { padding: 4px 0; }
+.notif-list { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; }
+.notif-group-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.notif-group-head:not(:first-child) { margin-top: 10px; }
+.notif-group-title { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-medium); margin-right: auto; }
+.notif-note { color: var(--text-low); font-size: 12.5px; }
+.notif-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
+.notif-row-main { flex: 1; min-width: 0; }
+.notif-row-title { color: var(--text-high); font-weight: 500; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.notif-row-meta { color: var(--text-low); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
+.notif-row-actions { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.notif-linked { padding: 14px 16px; border-radius: 10px; background: var(--green-soft); color: var(--green); font-weight: 500; }
+.notif-link-panel { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }
+.notif-link-code { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.notif-link-code .mono { color: var(--text-high); overflow-wrap: anywhere; }
+
+/* Rules + inbox. The kind badge borrows the neutral badge colouring rather
+   than inventing a per-kind palette — the summary already says what it is. */
+.notif-kind { color: var(--neutral); background: color-mix(in srgb, var(--neutral) 14%, transparent); }
+.notif-chip {
+  display: inline-flex; align-items: center; margin: 0 4px 4px 0; padding: 2px 8px; border-radius: 9999px;
+  background: var(--panel); border: 1px solid var(--border);
+  font-family: 'GeistMono'; font-size: 10.5px; color: var(--text-medium);
+}
+.tbl tbody tr.notif-rule-muted { opacity: 0.55; }
+/* An unread row is marked on its leading edge — a background tint would fight
+   the table's own hover and zebra treatment. */
+.tbl tbody tr.notif-unread td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+.notif-quick-add { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; font-family: 'GeistMono'; font-size: 11px; }
+
+/* New-alert form assists. The preset chips are the activity filter's own chips,
+   sitting under the input they fill, so they read as shortcuts to that field
+   rather than as a filter of their own. */
+.alert-presets { margin: 6px 0 0; gap: 5px; }
+.alert-presets .activity-chip { padding: 3px 10px; }
+.alert-price-hint { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: 11px; }
+.alert-price-hint .mono { color: var(--text-high); }
+/* A parameter the surface decided, not one to pick: the rules list's own
+   parameter pill, sitting where its combo would have been. */
+.alert-locked { display: flex; align-items: center; min-height: 34px; }
+.alert-locked-token { margin: 0; font-size: 11.5px; color: var(--text-high); }
+
+@media (max-width: 720px) {
+  /* Stacked-card viewport: a channel row's actions drop under its label
+     rather than squeezing the endpoint host to nothing. */
+  .notif-row { flex-direction: column; align-items: stretch; }
+  .notif-row-actions { justify-content: flex-end; }
+  .notif-hero-channels { flex-direction: row; flex-wrap: wrap; }
+  .notify-actions { margin-left: 0; }
+  /* The stacked card draws each cell as its own line, so the unread mark moves
+     to the whole card's leading edge. */
+  .tbl tbody tr.notif-unread td:first-child { box-shadow: none; }
+  .tbl tbody tr.notif-unread { box-shadow: inset 2px 0 0 var(--accent); }
+}
+
 /* The link-device landing page (phone camera → URL): one narrow card. */
 .link-device-card { max-width: 480px; padding: 24px; display: flex; flex-direction: column; gap: 14px; align-items: flex-start; }
 .link-device-card p { margin: 0; color: var(--text-medium); }
@@ -2308,6 +2476,11 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .acct-picker-row.active, .acct-picker-row:hover { background: var(--panel-hover); color: var(--text-high); }
 .acct-picker-name { color: var(--text-high); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acct-picker-addr { margin-left: auto; color: var(--text-low); font-size: 11px; flex-shrink: 0; }
+/* The same token box, used as ONE field of the new-alert form rather than as a
+   wide row's recipient input — so it takes the field's full width instead of
+   holding a 220px floor a narrow dialog cannot give it. */
+.alert-target-picker { width: 100%; min-width: 0; }
+.alert-target-picker .acct-picker-row .sr-desc { margin-left: 4px; }
 /* Foreign-list stats: the only view of another user's list contents. */
 /* A public list's own note, one line under its name in the discovery
    table — truncated rather than wrapped, since the row's other columns
@@ -2734,6 +2907,18 @@ tr.row-muted td { opacity: .55; }
 /* Nested calls step in with a rule, so a batch of batches stays readable. */
 .pc-nested { border-left: 2px solid var(--border); padding-left: 12px; margin: 6px 0; }
 .pc-args { display: grid; grid-template-columns: minmax(90px, max-content) 1fr; gap: 4px 14px; align-items: baseline; }
+/* The grid's two tracks are the KEY and VALUE columns; each .pc-arg wraps one
+   pair, so it must dissolve into the grid — as a box it would itself occupy a
+   track, land every second argument in the 1fr column, and crush it to a
+   character's width on mobile (EXTRA_GAS rendering vertically). */
+.pc-arg { display: contents; }
+/* Below ~480px even a max-content key column starves the value of a long hash
+   or planck amount — stack each pair instead. */
+@media (max-width: 480px) {
+  .pc-args { grid-template-columns: 1fr; gap: 2px; }
+  .pc-arg { display: block; }
+  .pc-arg .pc-key { display: block; margin-top: 6px; }
+}
 .pc-key { font-size: 11px; color: var(--text-low); text-transform: uppercase; letter-spacing: .04em; }
 .pc-val { min-width: 0; font-size: 12px; color: var(--text-high); overflow-wrap: anywhere; }
 .pc-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
@@ -2795,6 +2980,14 @@ tr.row-muted td { opacity: .55; }
   position: absolute; inset: 4px 0 auto 0; text-align: center;
   font-family: 'GeistMono'; font-size: 9.5px; font-weight: 600; letter-spacing: 0.02em;
   color: currentColor;
+}
+/* A gauge filled past the label zone would render the number in its own hue
+   (red on red for a locked/frozen fuse) — back it with the tile's own surface
+   so LOCK/FRZ/99 stay readable on any fill color in both themes. */
+.fuse-pct.on-fill {
+  color: var(--text-high);
+  background: color-mix(in srgb, var(--bg-elev2) 78%, transparent);
+  width: fit-content; margin: 0 auto; padding: 0 3px; border-radius: 4px;
 }
 .fuse-plate {
   display: block; padding: 4px 3px 5px; text-align: center; border-top: 1px solid var(--separator);

@@ -22,8 +22,12 @@ describe('004_user.sql', () => {
     expect(files[files.length - 1]).toBe('004_user.sql')
   })
 
-  it('declares all eight user tables idempotently', () => {
-    const tables = ['user_profiles', 'user_avatars', 'user_sessions', 'user_lists', 'user_tags', 'user_tag_members', 'user_list_subscriptions', 'user_list_order']
+  it('declares every user table idempotently', () => {
+    const tables = [
+      'user_profiles', 'user_avatars', 'user_sessions', 'user_lists', 'user_tags', 'user_tag_members',
+      'user_list_subscriptions', 'user_list_order',
+      'user_notification_channels', 'user_notification_rules', 'user_notification_inbox', 'user_notification_state',
+    ]
     for (const t of tables) {
       const stmt = statements.find(s => s.includes(`price_data.${t}`))
       expect(stmt, t).toBeDefined()
@@ -49,6 +53,29 @@ describe('004_user.sql', () => {
     const stmt = statements.find(s => s.includes('price_data.user_sessions'))
     expect(stmt).toContain(`label String DEFAULT ''`)
     expect(stmt).toContain(`created_via LowCardinality(String) DEFAULT 'wallet'`)
+  })
+
+  // The inbox is the only user table that ages out on its own; without the TTL
+  // a busy account's notification history would grow without bound.
+  it('bounds the notification inbox with a TTL', () => {
+    const stmt = statements.find(s => s.includes('price_data.user_notification_inbox'))
+    expect(stmt).toContain('TTL created_at + INTERVAL 180 DAY')
+  })
+
+  // A user_* table that is declared but not backed up is silently
+  // unrecoverable, since none of them is reproducible from raw. AGENTS.md
+  // requires the two lists to agree exactly; the host-side grant script
+  // outside this repo aborts when they diverge, so this pins it here too.
+  it('agrees exactly with the backup script table list', () => {
+    const declared = statements
+      .map(s => /price_data\.(\w+)/.exec(s)?.[1])
+      .filter((t): t is string => !!t)
+    const backupSh = readFileSync(join(schemaDir, '../../ops/backup-user-tables.sh'), 'utf8')
+    const backed = (/^TABLES="([^"]*)"/m.exec(backupSh)?.[1] ?? '').split(/\s+/).filter(Boolean)
+    expect([...backed].sort()).toEqual([...declared].sort())
+    for (const t of ['user_notification_channels', 'user_notification_rules', 'user_notification_inbox', 'user_notification_state']) {
+      expect(backed, t).toContain(t)
+    }
   })
 })
 

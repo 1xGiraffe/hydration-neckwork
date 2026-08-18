@@ -1,4 +1,4 @@
-import { useEvents, useDaily, useCounts } from '../hooks/useExplorerData'
+import { useEvents, useDaily, useCounts, useFilterNames } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { paths, usePageParam, setPage } from '../router'
 import { Crumbs, F, DayBarChart, EmptyRow, TableSkeleton, Pager, pendingRows, LiveAnchor } from '../components/ui'
@@ -20,6 +20,7 @@ export function Events() {
   const { data, isFetching, isPlaceholderData, anchorRef } = useEvents(PAGE, f.from, f.to, page * PAGE, { event: f.event })
   const { data: daily } = useDaily('events')
   const { data: counts } = useCounts()
+  const { data: names } = useFilterNames()
   const now = useNow()
 
   const rows = data ?? []
@@ -44,7 +45,7 @@ export function Events() {
         <div className="page-title">Events <span className="sub">emitted by extrinsics</span></div>
       </div>
       <DayBarChart data={daily ?? []} color={UNFILTERED_COLOR} label="Daily events emitted" selected={f.from === f.to ? f.from : undefined} onSelect={setDay} fmt={F.int} loading={!daily} />
-      <FilterZone fields={eventFilterFields} values={f} onChange={(k, v) => { onChange(k, v); setPage(0) }} onClear={onClear} />
+      <FilterZone fields={eventFilterFields(names?.events)} values={f} onChange={(k, v) => { onChange(k, v); setPage(0) }} onClear={onClear} />
       <div className="panel">
         <LiveAnchor anchorRef={anchorRef} />
         <table className="tbl">

@@ -8,6 +8,9 @@ import { ActivityTable } from '../components/ActivityTable'
 import { FilterZone, useFilters } from '../components/Filters'
 import { activityFilterFields } from '../components/activityFilters'
 import { categoryColor } from '../components/activityColors'
+import { NotifyButton } from '../components/NotifyButton'
+import { LARGE_VALUE_MIN_USD } from '../notificationKinds'
+import type { PendingNotification } from '../pendingNotification'
 import { offeredPages } from '../utils/activityPaging'
 
 const PAGE = 25
@@ -58,6 +61,32 @@ export function SmolToggle({ hiding, onToggle }: { hiding: boolean; onToggle: ()
     </button>
   )
 }
+// Which of the feed's current filters an alert rule can actually express. A
+// token plus a USD floor IS a large-trade rule on the trade tab and a
+// large-transfer rule on the transfer one; everything else the filter zone
+// offers (dates, an identity class, a per-category action) has no trigger kind
+// behind it, and offering a "Notify" that quietly drops half the filter would
+// promise alerts the reader never asked for. So: express it exactly, or hide.
+// The `all` tab keeps the trade rule it has always produced — a narrowing the
+// reader can see in the button's own copy, never a widening.
+// The preposition follows the server's own summary for that kind: a trade
+// happens ON a token, a transfer is OF one.
+const NOTIFIABLE_TABS: Record<string, { kind: 'large-trade' | 'large-transfer'; noun: string; of: string }> = {
+  all: { kind: 'large-trade', noun: 'Trades', of: 'on' },
+  trade: { kind: 'large-trade', noun: 'Trades', of: 'on' },
+  transfer: { kind: 'large-transfer', noun: 'Transfers', of: 'of' },
+}
+export function notifiableFilters(type: string, token: string | undefined, min: string | undefined): PendingNotification | null {
+  const tab = NOTIFIABLE_TABS[type]
+  const assetId = Number(token)
+  const minUsd = Number(min)
+  if (!tab) return null
+  if (!token || !Number.isInteger(assetId) || assetId < 0) return null
+  if (!min || !Number.isFinite(minUsd) || minUsd < LARGE_VALUE_MIN_USD) return null
+  // The name is display copy, so the floor reads on the app's own rough scale.
+  return { kind: tab.kind, params: { assetId, minUsd }, name: `${tab.noun} over ${F.usd(minUsd)} ${tab.of} asset ${assetId}` }
+}
+
 export function Activity() {
   useDocumentTitle('Activity')
   const page = usePageParam()
@@ -91,6 +120,9 @@ export function Activity() {
 
   const rows = data ?? []
   const pages = offeredPages({ page, rowsOnPage: rows.length, rowCount: count?.total, maxOffset: count?.maxOffset })
+  // The user's OWN "$ from" only — the smol floor is a view preference, and
+  // turning it into a $10 alert would be a rule nobody asked for.
+  const notifiable = notifiableFilters(type, f.token, f.min)
 
   return (
     <div className="wrap">
@@ -103,7 +135,15 @@ export function Activity() {
       <DayBarChart data={daily ?? []} color={categoryColor(type)} label="Daily activity" selected={f.from === f.to ? f.from : undefined} onSelect={setDay} fmt={F.int} loading={!daily} />
       <ActivityChips value={type} onChange={v => setQuery({ tab: v === 'all' ? null : v, action: null, page: null })} />
       <FilterZone fields={activityFilterFields(type, assets.data ?? [])} values={f} onChange={onChange} onClear={onClear}
-        extra={<SmolToggle hiding={hideSmol} onToggle={toggleSmol} />} />
+        extra={
+          // One wrapper, not two siblings: .filter-head is a space-between
+          // flex row, so a third child would push the smol toggle to the middle.
+          <span className="filter-extra">
+            <SmolToggle hiding={hideSmol} onToggle={toggleSmol} />
+            {notifiable && <NotifyButton rule={notifiable} label="Notify"
+              title={`Alert me on ${notifiable.kind === 'large-transfer' ? 'transfers' : 'trades'} matching these filters`} />}
+          </span>
+        } />
       <ActivityTable rows={rows} now={now} live={page === 0} anchorRef={anchorRef} loading={isFetching && rows.length === 0} pending={isPlaceholderData} pageSize={PAGE} error={error} onRetry={() => { void refetch() }} />
       <Pager page={page} totalPages={pages.totalPages} hasNext={pages.hasNext} note={pages.note} onPage={setPage} />
     </div>
