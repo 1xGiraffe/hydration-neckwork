@@ -57,6 +57,24 @@ export function voteToActivityRow(vote: VoteRow): ActivityRow {
 }
 
 
+// What a vote was ABOUT, in one phrase, wherever a vote row shows its subject.
+//
+// A conviction/Democracy vote names a numbered referendum with a page of its own;
+// a collective (Council / Technical Committee) vote names a proposal HASH and has
+// none. Calling that hash "Referendum #0x0529aa…664b5b" states two wrong things at
+// once — it is a motion, and the hash is not an index — so a subject with no
+// referendum pallet reads as the motion it is. The off-chain title, when one is
+// known, always wins: it is what the vote was actually about.
+export function voteSubjectLabel(
+  referendum: string | null | undefined,
+  referendumPallet: 'opengov' | 'democracy' | null | undefined,
+  referendumTitle: string | null | undefined,
+): string {
+  if (referendumTitle) return referendumTitle
+  if (!referendum) return 'Referendum'
+  return referendumPallet ? `Referendum #${referendum}` : `Motion ${referendum}`
+}
+
 // Governance locks are denominated in HDX (asset 0, 12 decimals). Only used to render an
 // empty/loading votes table, before any row's own asset is available.
 export const assetDescriptorFallback = { assetId: 0, iconAssetId: 0, symbol: 'HDX', name: 'Hydration', decimals: 12 } as AssetRef
