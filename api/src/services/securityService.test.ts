@@ -155,6 +155,17 @@ describe('classifyFuse', () => {
   it('reports an asset with no lockdown row as unarmed with the full allowance', () => {
     expect(classifyFuse(limit, undefined, undefined, head)).toMatchObject({ status: 'unarmed', headroomRaw: limit })
   })
+  it('reads a zero limit as frozen, whatever the period says', () => {
+    // `Some(0)` is not "no limit": the fuse arms with no headroom, so the first
+    // deposit of any size is reserved and the asset locked down.
+    for (const state of [undefined, { kind: 'locked', untilBlock: head - 1 }, { kind: 'unlocked', periodStartBlock: head - 100, baselineRaw: 0n }] as (LockdownState | undefined)[]) {
+      expect(classifyFuse(0n, state, 0n, head)).toMatchObject({ status: 'frozen', usedRaw: 0n, headroomRaw: 0n, usagePct: 100 })
+    }
+  })
+  it('still names a live lockdown on a frozen asset, so its unlock block stays readable', () => {
+    expect(classifyFuse(0n, { kind: 'locked', untilBlock: head + 5_000 }, 0n, head))
+      .toMatchObject({ status: 'locked', untilBlock: head + 5_000 })
+  })
   it('holds back a usage figure when issuance could not be read', () => {
     const state: LockdownState = { kind: 'unlocked', periodStartBlock: head - 100, baselineRaw: 5_000n }
     expect(classifyFuse(limit, state, undefined, head)).toMatchObject({ status: 'active', usedRaw: 0n, usagePct: 0 })
@@ -257,6 +268,30 @@ describe('registryLimitChanges', () => {
     const out = registryLimitChanges([row(14, 100, '518134604599066000'), row(14, 200, '')])
     expect(out.map(e => e.label)).toEqual(['Deposit fuse limit set', 'Deposit fuse limit cleared'])
     expect(out[1].detail).toBe('#14 → no limit')
+  })
+
+  it('records a limit of zero as the deposit freeze it is, not as no limit at all', () => {
+    // TC proposal #376, enacted at block 13,660,370: EWT's `xcm_rate_limit` went
+    // from unset to `Some(0)`, which arms the fuse with no headroom.
+    const out = registryLimitChanges([row(252_525, 7_111_216, ''), row(252_525, 13_660_370, '0')])
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({ kind: 'freeze', label: 'Deposits frozen', blockHeight: 13_660_370 })
+    expect(out[0].detail).toBe('#252525 → 0 — every deposit is held in reserve')
+  })
+
+  it('reports a freeze over an existing limit, and its release', () => {
+    const out = registryLimitChanges([
+      row(14, 100, '1000000000000'), row(14, 200, '0'), row(14, 300, '2000000000000'),
+    ])
+    expect(out.map(e => `${e.kind}:${e.label}:${e.detail}`)).toEqual([
+      'limit:Deposit fuse limit set:#14 → 1',
+      'freeze:Deposits frozen:#14 → 0 — every deposit is held in reserve (was 1)',
+      'unfreeze:Deposits unfrozen:#14 → 2 (was 0)',
+    ])
+  })
+
+  it('stays silent when an update restates a zero limit', () => {
+    expect(registryLimitChanges([row(14, 100, '0'), row(14, 200, '0')])).toHaveLength(1)
   })
 
   it('keeps each asset on its own history', () => {
