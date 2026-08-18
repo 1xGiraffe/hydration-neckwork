@@ -17,6 +17,7 @@ import type { SecurityFuse, SecurityFuseStatus } from '../types'
 
 const FUSE_STATUS_TEXT: Record<SecurityFuseStatus, string> = {
   locked: 'Locked — minting is held in reserve until the lockdown lifts',
+  frozen: 'Frozen — the limit is zero, so any deposit at all is held in reserve',
   active: 'Armed — inside the 24h window',
   expired: 'Window elapsed — the next mint starts a fresh 24h allowance',
   unarmed: 'No window open yet — the next mint starts the first one',
@@ -26,32 +27,37 @@ const FUSE_STATUS_TEXT: Record<SecurityFuseStatus, string> = {
 // always carries a readable symbol. The whole tile links to the asset.
 function Fuse({ fuse }: { fuse: SecurityFuse }) {
   const locked = fuse.status === 'locked'
+  const frozen = fuse.status === 'frozen'
+  // Locked and frozen both mean no deposit gets through, so both read full.
+  const shut = locked || frozen
   // A locked fuse is at its limit, not idle — only an elapsed or never-opened
   // window makes a gauge dormant.
   const dormant = fuse.status === 'expired' || fuse.status === 'unarmed'
-  const pct = locked ? 100 : Math.min(100, fuse.usagePct)
+  const pct = shut ? 100 : Math.min(100, fuse.usagePct)
   // Below ~2% a proportional fill is a sub-pixel sliver, so any real usage keeps
   // a visible floor — the number in the tooltip stays exact either way.
   const fillPct = pct > 0 ? Math.max(pct, 3) : 0
-  const color = locked ? 'var(--red)' : loadColor(pct)
+  const color = shut ? 'var(--red)' : loadColor(pct)
   const title = [
     `${fuse.asset.symbol} · asset ${fuse.asset.assetId}`,
     FUSE_STATUS_TEXT[fuse.status],
-    `Limit ${F.exact(fuse.limit, fuse.asset.decimals)} per 24h`,
-    dormant ? 'Used 0 (window not running)' : `Minted ${F.exact(fuse.used, fuse.asset.decimals)} · ${fmtPct(fuse.usagePct)} of the allowance`,
+    frozen ? 'Limit 0 per 24h' : `Limit ${F.exact(fuse.limit, fuse.asset.decimals)} per 24h`,
+    frozen ? '' : dormant ? 'Used 0 (window not running)' : `Minted ${F.exact(fuse.used, fuse.asset.decimals)} · ${fmtPct(fuse.usagePct)} of the allowance`,
     fuse.lockdownCount > 0 ? `Tripped ${fuse.lockdownCount}× historically` : '',
   ].filter(Boolean).join('\n')
 
   return (
     <Link
       to={paths.asset(fuse.asset.assetId)}
-      className={`fuse${locked ? ' locked' : ''}${dormant ? ' dormant' : ''}`}
+      className={`fuse${shut ? ' locked' : ''}${dormant ? ' dormant' : ''}`}
       title={title}
-      ariaLabel={`${fuse.asset.symbol} deposit fuse, ${locked ? 'locked' : fmtPct(fuse.usagePct)} used`}
+      ariaLabel={`${fuse.asset.symbol} deposit fuse, ${locked ? 'locked' : frozen ? 'frozen' : `${fmtPct(fuse.usagePct)} used`}`}
     >
       <span className="fuse-body" style={{ color }}>
         <span className="fuse-fill" style={{ height: `${fillPct}%` }} />
-        {pct >= 4 && <span className="fuse-pct">{locked ? 'LOCK' : Math.round(pct)}</span>}
+        {/* Past ~70% the fill reaches the label zone, so currentColor would put
+            the number in its own hue — `on-fill` gives it a backdrop instead. */}
+        {pct >= 4 && <span className={`fuse-pct${fillPct >= 70 ? ' on-fill' : ''}`}>{locked ? 'LOCK' : frozen ? 'FRZ' : Math.round(pct)}</span>}
       </span>
       <span className="fuse-plate">{fuse.asset.symbol}</span>
     </Link>
