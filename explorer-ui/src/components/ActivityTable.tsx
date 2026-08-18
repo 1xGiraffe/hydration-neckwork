@@ -5,7 +5,7 @@ import { F, AddrPill, AssetChip, rowNav, Ago, Waiting, AccountEmoji, ShortAddr, 
 import { useNewRows } from '../hooks/useNewRows'
 import { activityBadge } from './activityColors'
 import { resolveTag, useTagMapVersion } from '../userTags'
-import { convictionLabel } from '../utils/voteRows'
+import { convictionLabel, voteSubjectLabel } from '../utils/voteRows'
 import type { ActivityRow } from '../types'
 
 // Chain badge for cross-chain (XCM) destinations — full network names, brand
@@ -280,15 +280,16 @@ export function ActivityDesc({ r, headed }: { r: ActivityRow; headed?: boolean }
     // A referendum's title says what the vote was about; "Ref 255" does not. The
     // title comes from SubSquare and may not be fetched yet, so the index is the
     // fallback rather than a placeholder. Only ConvictionVoting/Democracy rows have a
-    // referendum page — Council/TC votes carry a proposal hash instead.
+    // referendum page — Council/TC votes carry a proposal hash instead, which is why
+    // the label is shared with the votes table (see voteSubjectLabel).
     // The index identifies the referendum, the title says what it is: show the index
-    // muted ahead of a plain link on the title, which carries the referendum hover card.
-    const label = r.voteRefTitle ?? (r.voteRef ? `Referendum #${r.voteRef}` : 'Referendum')
+    // muted ahead of a plain link on the title, which carries the referendum hover
+    // card. A hash is not an index, so a motion leads with its label alone.
     return <span className="asset-flow">{locked}
-      {r.voteRef && <span className="muted mono ref-num">#{r.voteRef}</span>}
+      {r.voteRef && r.voteRefPallet && <span className="muted mono ref-num">#{r.voteRef}</span>}
       {r.voteRefPallet && r.voteRef
         ? <Link to={paths.referendum(r.voteRefPallet, r.voteRef)} className="ref-link">{r.voteRefTitle ?? 'Referendum'}</Link>
-        : <span className="muted">{label}</span>}
+        : <span className="muted">{voteSubjectLabel(r.voteRef, r.voteRefPallet, r.voteRefTitle)}</span>}
       <VoteSideBadge side={r.voteSide} /><ConvictionTag conviction={r.voteConviction} /></span>
   }
   return null
