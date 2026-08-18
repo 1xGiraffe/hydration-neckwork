@@ -244,7 +244,9 @@ export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUs
         <div className="amt">{F.usd(liquidation)}</div>
       </div>}
       {revenue > 0 && <div className="acct-bal subtle">
-        <div className="lab">Revenue</div>
+        {/* "Protocol revenue" where the row has room; the narrow swap keeps the
+            four stat tiles on one line on phones. */}
+        <div className="lab"><span className="lab-wide">Protocol revenue</span><span className="lab-narrow">Revenue</span></div>
         <div className="amt">{F.usd(revenue)}</div>
       </div>}
       <div className="acct-bal">
