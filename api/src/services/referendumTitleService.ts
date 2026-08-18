@@ -74,3 +74,23 @@ export function referendumTitleFor(pallet: string, index: number | string | null
 export function referendumTitleCount(): number {
   return byRef.size
 }
+
+// Whether a title says anything a reader could not have worked out from the index.
+//
+// What this table holds is SubSquare's page title, and for a referendum nobody
+// wrote a post for that is the platform's own placeholder: the bare
+// "Referendum #123", sometimes with the track in brackets ahead of it, sometimes
+// literally "Untitled". A message whose subject line is that placeholder repeats
+// the index its own headline already carries, which is why the submitted-phase
+// notification waits for a real one (the parked map in notifications/evaluator).
+//
+// Deliberately narrow: only the bare template counts as generic. A title that
+// merely CONTAINS the index ("Referendum #123 — raise the HDX fee") says
+// something, and treating it as absent would hold a perfectly good alert forever.
+const GENERIC_TITLE_RE = /^(?:\[[^\]]*\]\s*)?(?:referend(?:um|a)|ref)\.?\s*#?\s*\d+\.?$/i
+export function isGenericReferendumTitle(title: string | null | undefined): boolean {
+  const t = (title ?? '').trim()
+  if (!t) return true
+  if (/^untitled$/i.test(t)) return true
+  return GENERIC_TITLE_RE.test(t)
+}

@@ -73,6 +73,11 @@ import { initXcmJourneyService } from './services/xcmJourneyService.ts'
 import { initUserAuthService, loadUserSessions, ensureSessionDeviceColumns } from './services/userAuthService.ts'
 import { initUserProfileService, loadUserProfiles } from './services/userProfileService.ts'
 import { initUserListService, loadUserLists, ensureTagMemberPositionColumn } from './services/userListService.ts'
+import { notificationRoutes } from './routes/notifications.ts'
+import { initNotifications, loadNotifications } from './notifications/notificationStore.ts'
+import { startTelegramBot, stopTelegramBot } from './notifications/telegramBot.ts'
+import { initEvaluator, startNotificationEvaluator, stopNotificationEvaluator } from './notifications/evaluator.ts'
+import { telegramConfigured } from './notifications/delivery.ts'
 
 // Trust X-Forwarded-For/X-Real-IP only from loopback/link-local/private-range
 // hops — exactly the explorer-ui nginx container on the compose network (see
@@ -139,6 +144,10 @@ const CACHE_CONTROL: [RegExp, number][] = [
   // let clients reuse it just as long. Without this it fell through to the 2s
   // catch-all and browsers re-fetched the biggest list payload constantly.
   [/^\/explorer\/assets/, 30],
+  // The call/event name catalogue: an hour, matching its in-process TTL. The
+  // list changes only when a runtime upgrade adds or removes a name, and every
+  // filter box and alert form on the site reads the same copy.
+  [/^\/explorer\/filter-names$/, 3600],
   // Pool surfaces: current state refreshes every 30-60s server-side, the heavy
   // history models every 300s — match the shortest internal freshness window.
   [/^\/explorer\/omnipool/, 30],
@@ -183,6 +192,10 @@ fastify.addHook('onClose', async () => {
   stopVerifiedContractsRefresh()
   stopAccountSwapActivityQueueDrain()
   stopExplorerBackgroundTasks()
+  stopTelegramBot()
+  // Awaited: the evaluator's cursors are written on a throttle, and the last
+  // ones have to land before the client that writes them closes.
+  await stopNotificationEvaluator()
   await client.close()
 })
 
@@ -196,6 +209,7 @@ await fastify.register(poolsRoutes)
 await fastify.register(liveRoutes)
 await fastify.register(tagRoutes)
 await fastify.register(userRoutes)
+await fastify.register(notificationRoutes)
 await fastify.register(listsRoutes)
 await fastify.register(verificationRoutes)
 
@@ -255,6 +269,8 @@ async function start() {
     await initUserAuthService(client)
     initUserProfileService(client)
     initUserListService(client)
+    initNotifications(client)
+    initEvaluator(client)
     // Additive columns on an existing deployment (see the guards' own comments
     // in userListService.ts / userAuthService.ts) — must land before
     // loadUserLists()/loadUserSessions() below first SELECT them.
@@ -271,7 +287,7 @@ async function start() {
     await Promise.all([loadExplorerAssets(client), ensureSnakewatchEmojiSourceLoaded(), loadRuntimeErrorNames(client)])
     // Referendum titles come from SubSquare (the chain has none), so they are held
     // in memory like identities and read on every vote row the explorer renders.
-    await Promise.all([loadTags(), loadUserProfiles(), loadIdentities(), loadReferendumTitles().catch(() => {}), loadUserSessions(), loadUserLists()])
+    await Promise.all([loadTags(), loadUserProfiles(), loadIdentities(), loadReferendumTitles().catch(() => {}), loadUserSessions(), loadUserLists(), loadNotifications()])
     // Seed the fixed default tag set on a fresh database (no-op once tags exist),
     // so a clean `docker compose up` reaches the expected state with no manual step.
     await seedDefaultTags()
@@ -314,6 +330,15 @@ async function start() {
     startAccountSwapActivityQueueDrain(client)
     await fastify.listen({ port: config.port, host: config.host })
     console.log(`[API] Server listening on ${config.host}:${config.port}`)
+    // Telegram channel linking needs the bot's long-poll loop; without a token
+    // the notification routes still work and simply report Telegram as
+    // unconfigured.
+    if (telegramConfigured()) startTelegramBot()
+    // Alert evaluation is always-on and independent of the SSE-gated live-head
+    // service: a notification has to fire whether or not anybody has the
+    // explorer open. Its first tick seeds the cursor at the live head, so
+    // starting it never replays what was indexed while the api was down.
+    startNotificationEvaluator()
     // One-time historical repair (background, off the request client): routed
     // swaps ingested before the queue MV lack their Router net row in
     // account_swap_activity, so the activity feed shows an internal hop

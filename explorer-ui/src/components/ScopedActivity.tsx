@@ -5,6 +5,7 @@ import {
   useAccountActivityCounts,
   useAccountListCount,
   useAssetFilterOptions,
+  useFilterNames,
   useTagActivityCounts,
   useTagEvents,
   useTagExtrinsics,
@@ -53,6 +54,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const eventFilters = useFilters({ ...filterOptions, keys: ['event', 'from', 'to'] })
   const activityAction = normalizeActivityAction(activityType, activityFilters.values.action ?? '')
   const assets = useAssetFilterOptions()
+  const names = useFilterNames()
   const query = useQuery()
   const requestedPage = Number.parseInt(query.get('apage') ?? '', 10)
   const page = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 0
@@ -185,7 +187,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
       </>}
 
       {activeTab === 'extrinsics' && <>
-        <FilterZone fields={extrinsicFilterFields(showOrigin)} values={extrinsicFilters.values} onChange={extrinsicFilters.onChange} onClear={extrinsicFilters.onClear} />
+        <FilterZone fields={extrinsicFilterFields(showOrigin, names.data?.calls)} values={extrinsicFilters.values} onChange={extrinsicFilters.onChange} onClear={extrinsicFilters.onClear} />
         <div className="panel"><LiveAnchor anchorRef={extrinsics.anchorRef} /><table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Call</th>{showSigner && <th>Sender</th>}{showOrigin && <th>Origin</th>}<th className="r">Result</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody {...pendingRows(extrinsics.isPlaceholderData)}>
@@ -200,7 +202,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
       </>}
 
       {activeTab === 'events' && <>
-        <FilterZone fields={eventFilterFields} values={eventFilters.values} onChange={eventFilters.onChange} onClear={eventFilters.onClear} />
+        <FilterZone fields={eventFilterFields(names.data?.events)} values={eventFilters.values} onChange={eventFilters.onChange} onClear={eventFilters.onClear} />
         <div className="panel"><LiveAnchor anchorRef={events.anchorRef} /><table className="tbl">
           <thead><tr><th>ID</th><th>Block</th><th>Extrinsic</th><th>Event</th><th className="r">Time</th><th style={{ width: 34 }}></th></tr></thead>
           <tbody {...pendingRows(events.isPlaceholderData)}>

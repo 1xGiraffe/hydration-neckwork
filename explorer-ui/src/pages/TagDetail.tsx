@@ -11,6 +11,7 @@ import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, MoneyMarketPositions, ActiveDcaTable, LiquidityPositionsTable } from '../components/AccountSections'
 import { BalancesTreemap } from '../components/BalancesTreemap'
+import { NotifyButton } from '../components/NotifyButton'
 import { listForTag, looksLikeUserTagId, tagMapStatus, useTagMapVersion } from '../userTags'
 import { ListTagDetail } from './ListTagDetail'
 
@@ -126,6 +127,17 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
+              {/* Same placement as the account page's own bell — above the
+                  header card, right-aligned. A tag target follows the tag, so
+                  this watches whoever is in it, not the members it holds now. */}
+              <div className="ext-link-row">
+                <NotifyButton
+                  variant="link"
+                  label="Get notified"
+                  title={`Alert me on activity by anyone tagged ${data.name}`}
+                  rule={{ kind: 'account-activity', params: { target: { kind: 'tag', tagId } }, name: `Activity of ${data.name}` }}
+                />
+              </div>
               <div className="acct-head">
                 <div className="acct-avatar"><TagIcon icon={data.icon} title={data.name} className="acct-avatar-icon" /></div>
                 <div className="acct-meta">

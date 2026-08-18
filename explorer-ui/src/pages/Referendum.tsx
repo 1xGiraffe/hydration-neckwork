@@ -7,6 +7,7 @@ import { Crumbs, F, SkeletonRows, MomentLink } from '../components/ui'
 import { VoteBubbles } from '../components/VoteBubbles'
 import { VotesTable, type VoteTableRow } from '../components/VotesTable'
 import { ProposalCall } from '../components/ProposalCall'
+import { NotifyButton } from '../components/NotifyButton'
 import { ayeSharePct, orderVoters, selectTally, type DisplayTally, type SideFilter, type VoteSort } from '../utils/referendumVotes'
 
 const PALLET_LABEL: Record<string, string> = { opengov: 'OpenGov', democracy: 'Democracy' }
@@ -114,6 +115,15 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
             {/* Above the card and right-aligned, matching "Open in preis" on the
                 asset page rather than sitting in the detail list. */}
             <div className="ext-link-row">
+              {/* Referenda are a chain-wide feed, not a per-item subscription:
+                  by the time you can read this one it has already moved. The
+                  rule watches every phase of every referendum. */}
+              <NotifyButton
+                variant="link"
+                label="Watch referenda"
+                title="Alert me when a referendum enters a new phase"
+                rule={{ kind: 'referendum', params: {}, name: 'New referenda' }}
+              />
               <a href={data.subsquareUrl} target="_blank" rel="noopener" className="ext-link">Open in Subsquare ↗</a>
             </div>
             <div className="detail-card">

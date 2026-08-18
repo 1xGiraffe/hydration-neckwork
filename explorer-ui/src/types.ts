@@ -71,9 +71,11 @@ export interface AssetListItem extends AssetRef {
 }
 
 // `/explorer/assets?fields=filter` — the same ordered directory projected down to
-// what a token filter shows and searches on. `AssetListItem` widens to this, so
-// surfaces that only build filter options accept either shape.
-export type AssetFilterItem = Pick<AssetRef, 'assetId' | 'symbol' | 'name'>
+// what a token filter shows and searches on, plus the current price so a
+// price-alert form can say what the token costs without a second request.
+// `AssetListItem` widens to this, so surfaces that only build filter options
+// accept either shape.
+export type AssetFilterItem = Pick<AssetRef, 'assetId' | 'symbol' | 'name'> & { price?: number | null }
 
 export interface TopAccountRow {
   account: AccountRef | null
@@ -1315,6 +1317,106 @@ export type DeviceLinkStatus = 'pending' | 'claimed' | 'expired'
 // the handle revocation takes — never a usable token.
 export interface DeviceSession { id: string; label: string; createdVia: string; createdAt: string; lastSeen: string; current: boolean }
 
+// Notifications. The kind union mirrors NOTIFICATION_KINDS in
+// api/src/notifications/notificationRules.ts; the constants and per-kind
+// parameter shapes live in src/notificationKinds.ts, which is the UI's copy of
+// that registry (a rule's parameter set exists in exactly one place per side).
+export type NotificationKind =
+  | 'account-activity' | 'large-trade' | 'large-transfer' | 'price' | 'health-factor'
+  | 'referendum' | 'tc-motion' | 'safety' | 'extrinsic' | 'event'
+// A channel is described by what is safe to show: a web-push channel by its
+// endpoint's HOST (never the endpoint or its keys), a Telegram channel by its
+// @username (never the chat id). The server never sends the credential itself.
+export interface NotificationChannel {
+  id: string
+  kind: 'webpush' | 'telegram'
+  label: string
+  verified: boolean
+  endpointHost?: string
+  username?: string
+}
+// What an account-activity rule watches: one address, a system tag, or one of
+// the viewer's own list tags. A tag target follows its membership, so the rule
+// stores the tag's identity rather than the addresses it held when it was made.
+// The legacy `{ address }` parameter shape is still accepted by the server and
+// still readable here (see readTarget in notificationKinds.ts).
+export type NotificationTarget =
+  | { kind: 'address'; address: string }
+  | { kind: 'tag'; tagId: string }
+  | { kind: 'list-tag'; listId: string; tagId: string }
+
+// `channels: []` means every channel — the same "empty is all" rule the store
+// uses, so a rule keeps working when a new channel is linked later.
+export interface NotificationRule {
+  id: string
+  kind: NotificationKind
+  kindLabel: string
+  name: string
+  summary: string
+  params: Record<string, unknown>
+  channels: string[]
+  muted: boolean
+  cooldownS: number
+  // Display-only echo of a tag target, resolved server-side: the rules table
+  // renders a tag pill from these rather than re-resolving a tag id the viewer
+  // may not even have loaded. Absent for an address target.
+  targetLabel?: string
+  targetMemberCount?: number
+  targetIcon?: string
+  targetColor?: string
+  // Set by POST /rules when an equivalent rule already existed: the create is
+  // idempotent, so a double click (or a second surface subscribing to the same
+  // thing) gets the rule back instead of a duplicate.
+  existing?: boolean
+}
+export interface NotificationInboxRow {
+  id: string
+  ruleId: string
+  kind: string
+  kindLabel: string
+  title: string
+  body: string
+  url: string
+  blockHeight: number
+  read: boolean
+  createdAt: string
+}
+// `vapidPublicKey`/`telegramBot` are '' when that channel is unconfigured on
+// this deployment — the page says so rather than offering a dead button.
+export interface NotificationsOverview {
+  channels: NotificationChannel[]
+  rules: NotificationRule[]
+  unread: number
+  vapidPublicKey: string
+  telegramBot: string
+}
+export interface NotificationInboxPage { rows: NotificationInboxRow[]; unread: number; total: number }
+// `/explorer/filter-names` — the pallet.call and pallet.Event names present in the
+// indexed data, so a name field can offer them instead of asking to be told one.
+// Suggestions only: a name not in the list is still a valid filter and a valid
+// alert (the server matches names case-insensitively and partially).
+export interface FilterNames { calls: string[]; events: string[] }
+// The Telegram link handoff: `url` is the bot deep link carrying `code`.
+export interface NotificationTelegramLink { code: string; url: string; expiresAt: string }
+export type NotificationLinkStatus = 'pending' | 'claimed' | 'expired'
+// What a create/update request carries. `params` is the kind's own object (see
+// notificationKinds.ts); the server re-validates it and answers 422 by name.
+export interface NotificationRuleInput {
+  kind: NotificationKind
+  params: Record<string, unknown>
+  name?: string
+  channels?: string[]
+  cooldownS?: number
+}
+export interface NotificationRulePatch {
+  muted?: boolean
+  name?: string
+  params?: Record<string, unknown>
+  channels?: string[]
+  cooldownS?: number
+}
+export interface WebPushSubscriptionInput { endpoint: string; keys: { p256dh: string; auth: string } }
+
 // Security page — circuit breakers, freezes and the origins that can lift them.
 // Raw integer amounts stay strings (asset decimals live on the AssetRef); the
 // global withdraw limit arrives pre-scaled to HDX because its reference currency
@@ -1339,7 +1441,7 @@ export interface SecurityWithdrawLimit {
 
 // `unarmed` = no lockdown row yet (the asset's first mint sets the baseline);
 // `expired` = the 24h window elapsed and the next mint re-baselines it.
-export type SecurityFuseStatus = 'locked' | 'expired' | 'active' | 'unarmed'
+export type SecurityFuseStatus = 'locked' | 'frozen' | 'expired' | 'active' | 'unarmed'
 export interface SecurityFuse {
   asset: AssetRef
   status: SecurityFuseStatus
@@ -1471,6 +1573,7 @@ export interface SecurityDashboard {
     periodBlocks: number
     rows: SecurityFuse[]
     lockedCount: number
+    frozenCount: number
     lockdownTotal: number
     releaseTotal: number
     lockdowns: SecurityLockdown[]

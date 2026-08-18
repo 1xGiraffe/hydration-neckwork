@@ -8,6 +8,7 @@ import { PortfolioChart, ProfileStats, MoneyMarketPositions, moneyMarketDebtUsd,
 import { BalancesTreemap } from '../components/BalancesTreemap'
 import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
+import { NotifyButton } from '../components/NotifyButton'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { useSession } from '../session'
@@ -105,6 +106,14 @@ export function Account({ address }: { address: string }) {
                   on the asset page and "Open in Subsquare" on a referendum. */}
               <div className="ext-link-row">
                 {isOwn && <button type="button" className="ext-link" style={{ cursor: 'pointer' }} onClick={() => { setEditMounted(true); setEditOpen(true) }}>Edit profile</button>}
+                {/* Watching an account is the single most-asked-for alert, and
+                    this is the only page that knows which address is meant. */}
+                <NotifyButton
+                  variant="link"
+                  label="Get notified"
+                  title="Alert me on this account's activity"
+                  rule={{ kind: 'account-activity', params: { target: { kind: 'address', address: canonicalAddress ?? address } }, name: `Activity of ${F.shortAddr(canonicalAddress ?? address)}` }}
+                />
                 <a className="ext-link" href={hydrationAppUrl(canonicalAddress ?? address)} target="_blank" rel="noopener">Open in Hydration ↗</a>
               </div>
               <div className="acct-head">

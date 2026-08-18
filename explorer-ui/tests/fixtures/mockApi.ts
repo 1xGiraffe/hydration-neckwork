@@ -10,6 +10,8 @@ import type {
   SecurityDashboard, SecurityFuse, SecurityPerBlockRow, SecurityLiquidityMove,
   TradeDetail as TradeDetailResponse,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse,
+  NotificationChannel, NotificationRule, NotificationInboxRow, NotificationsOverview,
+  FilterNames,
 } from '../../src/types'
 
 /* ---------- deterministic helpers ---------- */
@@ -196,8 +198,97 @@ export const MOCK_ME: MeResponse = {
   order: [MOCK_PERSONAL_LIST.listId, MOCK_LISTS[0].listId, MOCK_LISTS[1].listId, 'system'],
 }
 
+/* ---------- notifications ---------- */
+// Both channel kinds, and four rules covering four different trigger shapes,
+// three channel routings (all channels / one named channel / all channels
+// while muted), both cooldown shapes and all three account-activity target
+// spellings (legacy flat address, tag) — so the rules table renders every
+// branch it has from one fixture. The webpush channel is described by its
+// endpoint HOST and the telegram one by its @username, exactly as the API
+// ships them: a channel's real config is a credential and never leaves the
+// server. `summary` is the server's own describeRule() wording.
+export const MOCK_NOTIFICATION_VAPID_KEY = 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U'
+export const MOCK_NOTIFICATION_TELEGRAM_BOT = 'hydration_explorer_bot'
+export const MOCK_NOTIFICATION_CHANNELS: NotificationChannel[] = [
+  { id: 'chan-webpush-1', kind: 'webpush', label: 'Chrome on macOS', verified: true, endpointHost: 'fcm.googleapis.com' },
+  { id: 'chan-telegram-1', kind: 'telegram', label: '', verified: true, username: 'hydrationwatcher' },
+]
+export const MOCK_NOTIFICATION_RULES: NotificationRule[] = [
+  {
+    id: 'rule-whale', kind: 'large-trade', kindLabel: 'Large trade', name: 'Large HDX trades',
+    summary: 'trades over $10k on HDX', params: { assetId: 0, minUsd: 10_000 },
+    channels: [], muted: false, cooldownS: 0,
+  },
+  {
+    id: 'rule-price', kind: 'price', kindLabel: 'Price alert', name: '',
+    summary: 'HDX price above $0.03', params: { assetId: 0, direction: 'above', price: 0.03 },
+    channels: ['chan-telegram-1'], muted: false, cooldownS: 3600,
+  },
+  // Deliberately the LEGACY flat `{ address }` shape: the server still accepts
+  // and still stores rules written before targets existed, so the rules table
+  // and every subscribe button have to read one.
+  {
+    id: 'rule-owl-activity', kind: 'account-activity', kindLabel: 'Account activity', name: 'Owl watch',
+    summary: `activity over $50k by ${A.owl.address.slice(0, 4)}…${A.owl.address.slice(-5)}`,
+    params: { address: A.owl.address, minUsd: 50_000 },
+    channels: [], muted: true, cooldownS: 300,
+  },
+  // A TAG target, with the display fields the server resolves for it — the tag
+  // is what the rule watches, so the table draws the tag rather than the
+  // addresses it happens to hold today.
+  {
+    id: 'rule-tag-activity', kind: 'account-activity', kindLabel: 'Account activity', name: '',
+    summary: 'activity by anyone tagged Kraken',
+    params: { target: { kind: 'tag', tagId: 'kraken' } },
+    targetLabel: 'Kraken', targetIcon: '/tag-icons/kraken.jpg', targetColor: '#7b6cf6', targetMemberCount: 2,
+    channels: [], muted: false, cooldownS: 0,
+  },
+]
+// Two unread of three — the badge count the topbar and the inbox header both
+// read, and the same row identities across the overview and the inbox.
+export const MOCK_NOTIFICATION_UNREAD = 2
+export const MOCK_NOTIFICATION_INBOX: NotificationInboxRow[] = [
+  {
+    id: 'notif-1', ruleId: 'rule-whale', kind: 'large-trade', kindLabel: 'Large trade',
+    title: 'Large trade: 4.87M HDX → 106k USDT', body: 'Swapped on Omnipool for $106k.',
+    url: `/swap/${TIP - 12}-e4`, blockHeight: TIP - 12, read: false, createdAt: tsAt(TIP - 12),
+  },
+  {
+    id: 'notif-2', ruleId: 'rule-price', kind: 'price', kindLabel: 'Price alert',
+    title: 'HDX rose above $0.03', body: 'Now $0.0304, up 4.28% on the day.',
+    url: '/asset/0', blockHeight: TIP - 240, read: false, createdAt: tsAt(TIP - 240),
+  },
+  {
+    id: 'notif-3', ruleId: 'rule-owl-activity', kind: 'account-activity', kindLabel: 'Account activity',
+    title: 'Owl watch: transfer out', body: '233M HDX left the account.',
+    url: `/transfer/${TIP - 900}-e2`, blockHeight: TIP - 900, read: true, createdAt: tsAt(TIP - 900),
+  },
+]
+export const MOCK_NOTIFICATIONS_OVERVIEW: NotificationsOverview = {
+  channels: MOCK_NOTIFICATION_CHANNELS,
+  rules: MOCK_NOTIFICATION_RULES,
+  unread: MOCK_NOTIFICATION_UNREAD,
+  vapidPublicKey: MOCK_NOTIFICATION_VAPID_KEY,
+  telegramBot: MOCK_NOTIFICATION_TELEGRAM_BOT,
+}
+
 /* ---------- call/event catalogue ---------- */
 const CALLS = ['Omnipool.sell', 'Omnipool.buy', 'Router.sell', 'Tokens.transfer', 'Balances.transfer_keep_alive', 'XTokens.transfer', 'Omnipool.add_liquidity', 'Staking.stake', 'DCA.schedule', 'EVM.call']
+
+// What `/explorer/filter-names` serves: the names the indexed data holds, which
+// the Extrinsics/Events name filters and the alert form's pallet/name pickers
+// offer. Deliberately a SUPERSET of the mock's own rows — the real endpoint
+// answers from a block window, not from the page in front of you — but every call
+// the mock extrinsics carry is in it, so a name picked from the list matches rows
+// the mock feeds actually return. Sorted, exactly as the endpoint sorts.
+export const MOCK_FILTER_NAMES: FilterNames = {
+  calls: [...CALLS, 'Ethereum.transact', 'ParachainSystem.set_validation_data', 'Referenda.submit', 'Timestamp.set'].sort(),
+  events: [
+    'Balances.Transfer', 'DCA.Scheduled', 'EVM.Executed', 'EVM.Log', 'Omnipool.BuyExecuted', 'Omnipool.SellExecuted',
+    'Referenda.Approved', 'Referenda.Cancelled', 'Referenda.Confirmed', 'Referenda.DecisionStarted', 'Referenda.Rejected', 'Referenda.Submitted',
+    'System.ExtrinsicFailed', 'System.ExtrinsicSuccess', 'Tokens.Transfer', 'TransactionPayment.TransactionFeePaid',
+  ].sort(),
+}
 
 // How many extrinsics a mock block holds. Shared so every surface that walks a
 // block — the block detail, the feeds, and the extrinsic-at lookup's bounds —
@@ -512,6 +603,26 @@ export function voteRowAtHeight(h: number): ActivityRow {
   }
 }
 
+// A Technical Committee vote. A collective vote is vote activity like any other,
+// and it carries none of the things a conviction vote does: no locked capital, no
+// conviction, and a proposal HASH where a referendum index would be — so it has no
+// referendum page and its subject reads as the motion it is. The same identity is
+// served by the global vote feed, the account feed and its own block, so opening it
+// from any of them lands on the same detail page.
+export const MOCK_TC_MOTION_HASH = '0x0529aa…664b5b'
+export function collectiveVoteRowAtHeight(h: number, who: AccountRef = A.owl): ActivityRow {
+  const hdx = ASSETS[0]
+  return {
+    type: 'vote', blockHeight: h, timestamp: tsAt(h), eventIndex: 96, extrinsicIndex: 4,
+    who, to: null, asset: aref(hdx), assetIn: null, assetOut: null,
+    amount: null, amountIn: null, amountOut: null, valueUsd: 0,
+    votePallet: 'Technical Committee', voteAction: 'Voted', voteRef: MOCK_TC_MOTION_HASH,
+    voteSide: h % 2 === 0 ? 'Aye' : 'Nay', voteConviction: null,
+    voteRefPallet: null, voteRefTitle: null,
+    linkBlock: h, linkIndex: 4,
+  }
+}
+
 // Inbound XCM's source account, cycling through a tagged, an identity-only, and
 // a plain local account by the same pubkey — demonstrates ExternalAccountPill's
 // full tag > identity > address precedence (same pubkey, same Hydration
@@ -531,8 +642,9 @@ function mockBlockActivity(height: number): ActivityRow[] {
   const rows = Array.from({ length: n }, (_, i) => mockExtrinsicActivity(height, i)).flat()
   rows.push(activityRowAtHeight(height))
   // So a vote opened from the feed is found again when its own block is
-  // re-fetched by the detail page's row lookup.
+  // re-fetched by the detail page's row lookup — for both kinds of vote.
   rows.push(voteRowAtHeight(height))
+  rows.push(collectiveVoteRowAtHeight(height))
   const aIn = ASSETS[2], aOut = ASSETS[1]
   rows.push({
     type: 'trade',
@@ -992,6 +1104,12 @@ function buildAddress(accountId: string): AddressDetail {
 // of 25 with a partial last one.
 const MOCK_ACTIVITY_ROWS = 137
 function mockAccountActivity(a: AccountRef, r: () => number): ActivityRow[] {
+  return [...accountActivityCycle(a, r), collectiveVoteRowAtHeight(TIP - MOCK_ACTIVITY_ROWS * 90 - 120, a)]
+}
+// The account feed's own rows, oldest last, with a committee vote appended after
+// them: the account/tag feed merges the collective votes the same way the global
+// one does, so the account page has to hold one too.
+function accountActivityCycle(a: AccountRef, r: () => number): ActivityRow[] {
   return Array.from({ length: MOCK_ACTIVITY_ROWS }, (_, i) => {
     const h = TIP - i * 90 - Math.floor(r() * 30)
     const t = (['trade', 'transfer', 'dca', 'trade'] as const)[Math.floor(r() * 4)]
@@ -1183,7 +1301,7 @@ function buildSecurity(): SecurityDashboard {
       localAssets: [aref(assetById.get(0)!)], externalAssetCount: 56,
     },
     fuses: {
-      periodBlocks: 14_400, rows: fuses, lockedCount: 1, lockdownTotal: 26, releaseTotal: 108,
+      periodBlocks: 14_400, rows: fuses, lockedCount: 1, frozenCount: 0, lockdownTotal: 26, releaseTotal: 108,
       lockdowns: [16, 22, 5, 10, 15, 19, 20, 16, 22, 5, 10, 15].map((assetId, i) => ({
         asset: aref(assetById.get(assetId)!),
         blockHeight: TIP - 20_000 * (i + 1), blockTimestamp: tsAt(TIP - 20_000 * (i + 1)),
@@ -1561,7 +1679,10 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   // Two shapes off one directory, exactly as the API serves them: the full rows the
   // Assets page renders, and `fields=filter`'s id/symbol/name projection in the same
   // order, which is all a token combo shows and searches.
-  { re: /^\/explorer\/assets$/, fn: (_m, qs) => qs.get('fields') === 'filter' ? buildAssets().map(a => ({ assetId: a.assetId, symbol: a.symbol, name: a.name })) : buildAssets() },
+  { re: /^\/explorer\/assets$/, fn: (_m, qs) => qs.get('fields') === 'filter' ? buildAssets().map(a => ({ assetId: a.assetId, symbol: a.symbol, name: a.name, price: a.price })) : buildAssets() },
+  // The call/event name catalogue behind the name filters and the alert form's
+  // pallet/name pickers.
+  { re: /^\/explorer\/filter-names$/, fn: () => MOCK_FILTER_NAMES },
   { re: /^\/explorer\/hdx$/, fn: () => buildHdx() },
   { re: /^\/explorer\/hollar$/, fn: () => buildHollar() },
   { re: /^\/explorer\/security$/, fn: () => buildSecurity() },
@@ -1735,7 +1856,12 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       // per-height type cycle, so without this the tab renders empty and nothing
       // exercises how a vote row reads.
       if (requestedType === 'vote') {
-        while (out.length < limit && h > TIP - 400) { out.push(voteRowAtHeight(h)); h -= 1 + (h % 3) }
+        // Every fifth row is a committee vote: the feed merges the collective votes
+        // into the same category, so the tab has to render both shapes.
+        while (out.length < limit && h > TIP - 400) {
+          out.push(h % 5 === 0 ? collectiveVoteRowAtHeight(h) : voteRowAtHeight(h))
+          h -= 1 + (h % 3)
+        }
         return out.slice(0, limit)
       }
       const types: ActivityRow['type'][] = ['trade', 'transfer', 'xcm', 'liquidity', 'mm', 'dca', 'otc']
@@ -2092,6 +2218,15 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   // private-only list, so there is nothing the anonymous route wouldn't see).
   { re: /^\/user\/lists\/(.+)$/, fn: (m) => MOCK_LIST_DETAILS[decodeURIComponent(m[1])] },
   { re: /^\/user\/me$/, fn: () => MOCK_ME },
+  // Notifications. GET-only here, like every other mockSync route — the
+  // stateful create/patch/delete surface lives in the Playwright userMock
+  // (e2e/fixtures/test.ts), which owns /user/** for specs that mutate.
+  { re: /^\/user\/notifications\/overview$/, fn: () => MOCK_NOTIFICATIONS_OVERVIEW },
+  { re: /^\/user\/notifications\/inbox$/, fn: (_m, qs) => {
+    const limit = Number(qs.get('limit') ?? 50)
+    const offset = Number(qs.get('offset') ?? 0)
+    return { rows: MOCK_NOTIFICATION_INBOX.slice(offset, offset + limit), unread: MOCK_NOTIFICATION_UNREAD, total: MOCK_NOTIFICATION_INBOX.length }
+  } },
   { re: /^\/user\/tag-map$/, fn: () => MOCK_TAG_MAP },
   { re: /^\/user\/invites$/, fn: () => MOCK_INVITES },
   // A list tag's own aggregate page. Feeds answer empty (deterministic, and

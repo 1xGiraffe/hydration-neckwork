@@ -5,6 +5,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, useQueryValue, setQuery, Link } from '../router'
 import { Crumbs, F, AddrPill, Copy, ProfilePageSkeleton, DetailTabs, TableSkeleton, TagIcon, accountHref, rowNav } from '../components/ui'
 import { AccountsTable } from '../components/AccountsTable'
+import { NotifyButton } from '../components/NotifyButton'
 import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
@@ -89,6 +90,16 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
+              {/* The account page's bell, over a whole tag: the rule names the
+                  LIST tag, so accounts added to it later are watched too. */}
+              <div className="ext-link-row">
+                <NotifyButton
+                  variant="link"
+                  label="Get notified"
+                  title={`Alert me on activity by anyone tagged ${data.name}`}
+                  rule={{ kind: 'account-activity', params: { target: { kind: 'list-tag', listId, tagId } }, name: `Activity of ${data.name}` }}
+                />
+              </div>
               <div className="acct-head">
                 <div className="acct-avatar"><TagIcon icon={data.icon} title={data.name} className="acct-avatar-icon" /></div>
                 <div className="acct-meta">

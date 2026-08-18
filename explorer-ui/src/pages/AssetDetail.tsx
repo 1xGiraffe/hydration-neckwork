@@ -1,8 +1,8 @@
-import { useEffect } from 'react'
+import { Suspense, lazy, useEffect, useState } from 'react'
 import { useActivityCount, useAsset, useAssetActivity, useAssetDcas, useHolders, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { paths, navigate, useQuery, useQueryValue, setQuery } from '../router'
+import { Link, paths, navigate, useQuery, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, AssetIcon, AssetAmount, AddrPill, AssetDetailSkeleton, TableSkeleton, EmptyRow, rowNav, accountHref, TagGroupPill, ActivityChips, Pager, normalizeActivityType, normalizeActivityAction, Dash, pendingRows } from '../components/ui'
 import { ActiveDcaTable } from '../components/AccountSections'
 import { AssetLiquidityTab } from '../components/AssetLiquidity'
@@ -10,7 +10,21 @@ import { FilterZone, useFilters } from '../components/Filters'
 import { activityFilterFields } from '../components/activityFilters'
 import { PriceChart, ema7 } from '../components/PriceChart'
 import { ActivityTable } from '../components/ActivityTable'
+import { BellIcon } from '../components/NotifyButton'
+import type { AlertPreset } from '../components/NewAlertDialog'
+import { ASSET_ALERT_MIN_USD, assetRuleCount } from '../notificationKinds'
+import { useNotificationMutation, useNotificationsOverview } from '../hooks/useNotifications'
+import { userApi } from '../api/explorer'
+import { useSession } from '../session'
+import { requestConnect } from '../connectDialog'
+import { stashPendingNotification } from '../pendingNotification'
 import { offeredPages } from '../utils/activityPaging'
+import type { AssetListItem, NotificationKind, NotificationRuleInput } from '../types'
+
+// The alert dialog is only reached by clicking one of the header's buttons, so it
+// costs this page nothing until then — the same lazy mount the notifications page
+// gives it.
+const NewAlertDialog = lazy(() => import('../components/NewAlertDialog').then(m => ({ default: m.NewAlertDialog })))
 
 const PREIS_URL = (import.meta.env.VITE_PREIS_URL as string | undefined) || 'http://localhost:5173'
 const PREIS_DEFAULT_QUOTE_ID = 10
@@ -88,6 +102,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Assets', to: paths.assets() }, { label: a?.symbol ?? String(assetId) }]} />
         <div className="detail-header">
           <div className="page-title">{a && <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} symbol={a.symbol} size={30} parachainId={a.parachainId} origin={a.origin} />} {a?.symbol ?? a?.name ?? `Asset`} <span className="sub muted">#{a?.assetId ?? assetId}</span></div>
+          {a && <AssetAlertActions asset={a} />}
         </div>
       </div>
 
@@ -187,6 +202,131 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
             )}
           </>
         )}
+    </div>
+  )
+}
+
+/* ── the header's alert buttons ───────────────────────────────────────────── */
+
+// The three alerts this page can prefill from what it already shows: a price
+// threshold seeded from the live price, and a value floor on this token's trades
+// and on its transfers.
+//
+// Each button OPENS the shared new-alert dialog with the token locked in and the
+// fields filled, rather than creating a rule on the spot. That is the difference
+// from NotifyButton (which every other surface still uses): here a second alert
+// at another level is an ordinary thing to want — "$0.025 as well as $0.02" — so
+// there is nothing for an exact-parameters toggle to be right about. Duplicates
+// cost nothing anyway: the create is idempotent server-side, and the dialog says
+// so in place when it happens.
+//
+// The subscribed state this surface DOES show is a count: how many alerts of that
+// kind already watch this token, whatever their threshold, linking to where they
+// are managed.
+function AssetAlertActions({ asset }: { asset: AssetListItem }) {
+  const session = useSession()
+  const overview = useNotificationsOverview()
+  const createRule = useNotificationMutation(userApi.createNotificationRule)
+  const [preset, setPreset] = useState<AlertPreset | null>(null)
+  const [open, setOpen] = useState(false)
+  // Mounted separately from `open` so the lazy chunk is fetched on the first click
+  // and the dialog's close animation still has a component to run on.
+  const [mounted, setMounted] = useState(false)
+  const rules = overview.data?.rules ?? []
+  const lockAsset = { assetId: asset.assetId, symbol: asset.symbol, price: asset.price }
+
+  const buttons: { label: string; title: string; preset: AlertPreset }[] = [
+    // A price alert needs a price to be prefilled FROM; without a feed for this
+    // token there is no meaningful default and the button would open on a blank.
+    ...(asset.price != null ? [{
+      label: 'Price alert',
+      title: `Alert me when ${asset.symbol} crosses a price — now ${F.priceUsd(asset.price)}`,
+      preset: {
+        kind: 'price' as NotificationKind,
+        label: 'Price alert',
+        lockAsset,
+        params: { price: asset.price, direction: 'above' },
+        name: `${asset.symbol} price`,
+      },
+    }] : []),
+    {
+      label: 'Trade alert',
+      title: `Alert me on ${asset.symbol} trades over ${F.usd(ASSET_ALERT_MIN_USD)}`,
+      preset: {
+        kind: 'large-trade' as NotificationKind,
+        label: 'Trade alert',
+        lockAsset,
+        params: { minUsd: ASSET_ALERT_MIN_USD },
+        name: `Large ${asset.symbol} trades`,
+      },
+    },
+    {
+      label: 'Transfer alert',
+      title: `Alert me on ${asset.symbol} transfers over ${F.usd(ASSET_ALERT_MIN_USD)}`,
+      preset: {
+        kind: 'large-transfer' as NotificationKind,
+        label: 'Transfer alert',
+        lockAsset,
+        params: { minUsd: ASSET_ALERT_MIN_USD },
+        name: `Large ${asset.symbol} transfers`,
+      },
+    },
+  ]
+
+  return (
+    <div className="notify-actions">
+      {buttons.map(b => {
+        const count = session ? assetRuleCount(rules, b.preset.kind, asset.assetId) : 0
+        return (
+          <span key={b.label} className="notify-wrap">
+            <button
+              type="button"
+              className="btn sm notify-btn"
+              title={b.title}
+              onClick={() => { setPreset(b.preset); setMounted(true); setOpen(true) }}
+            >
+              <BellIcon /> {b.label}
+            </button>
+            {count > 0 && (
+              <Link to={paths.notifications('alerts')} className="notify-count"
+                title={`${count} ${b.label.toLowerCase()}${count === 1 ? '' : 's'} on ${asset.symbol} — manage`}
+              >{F.int(count)}</Link>
+            )}
+          </span>
+        )
+      })}
+
+      {mounted && preset && (
+        <Suspense fallback={null}>
+          <NewAlertDialog
+            open={open}
+            onOpenChange={setOpen}
+            // The token is locked, so the dialog needs no token directory here.
+            assets={[]}
+            pending={createRule.isPending}
+            preset={preset}
+            submitLabel={session ? undefined : 'Log in to save this alert'}
+            onSubmit={async (input: NotificationRuleInput) => {
+              // Logged out this is still a real save: the rule the dialog just
+              // built is parked and the login dialog takes over, and the pending
+              // handoff creates it once the wallet round trip finishes. A "log in
+              // first" dead end would throw away the numbers just chosen.
+              if (!session) {
+                stashPendingNotification({ kind: input.kind, params: input.params, ...(input.name ? { name: input.name } : {}) })
+                setOpen(false)
+                requestConnect()
+                return
+              }
+              const created = await createRule.mutateAsync([input])
+              // Already had exactly this one: the dialog stays open and says so,
+              // which is a gentler answer than a closed dialog that appears to
+              // have made a duplicate.
+              if (created.existing) return { existing: true }
+              setOpen(false)
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   )
 }

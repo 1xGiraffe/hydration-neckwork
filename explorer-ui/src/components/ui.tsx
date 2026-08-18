@@ -1339,13 +1339,19 @@ export function Crumbs({ items }: { items: { label: string; to?: string }[] }) {
 // `countAtLeast` marks a count that covers only part of its list (an activity feed
 // too deep to walk to its end), so the badge reads "210k+" instead of implying the
 // list stops there.
-export interface DetailTab { key: string; label: string; count?: number; countAtLeast?: boolean }
+// `badge` is a whole node rather than a number, for a tab whose counter belongs
+// to a system that already has its own pill (the notifications inbox reuses the
+// topbar's `invite-badge`); `dot` is the unnumbered "there is something to look
+// at here" mark, for a tab whose attention has no count behind it.
+export interface DetailTab { key: string; label: string; count?: number; countAtLeast?: boolean; badge?: ReactNode; dot?: boolean; title?: string }
 export function DetailTabs({ tabs, active, onChange }: { tabs: DetailTab[]; active: string; onChange: (key: string) => void }) {
   return (
     <div className="tabs detail-tabs">
       {tabs.map(t => (
-        <button key={t.key} className={active === t.key ? 'active' : ''} onClick={() => onChange(t.key)}>
+        <button key={t.key} className={active === t.key ? 'active' : ''} title={t.title} onClick={() => onChange(t.key)}>
           {t.label}{t.count != null ? <span className="cnt">{F.int(t.count)}{t.countAtLeast ? '+' : ''}</span> : null}
+          {t.badge}
+          {t.dot ? <span className="tab-dot" aria-hidden="true" /> : null}
         </button>
       ))}
     </div>
