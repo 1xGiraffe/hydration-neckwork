@@ -51,7 +51,9 @@
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Hydration Explorer" />
     <meta name="twitter:description" content="Live block explorer for the Hydration network" />
-    <meta name="twitter:image" content="/og-image.png" />
+    <!-- X resolves twitter:image only as an absolute URL — a relative path here
+         made cards render without an image while og:image (absolute) was fine. -->
+    <meta name="twitter:image" content="https://hydration-explorer.neckwork.net/og-image.png" />
     <title>Hydration Explorer</title>
   </head>
   <body>
