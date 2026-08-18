@@ -37,6 +37,7 @@ const Hdx = lazy(() => import('./pages/Hdx').then(m => ({ default: m.Hdx })))
 const Revenue = lazy(() => import('./pages/Revenue').then(m => ({ default: m.Revenue })))
 const Hollar = lazy(() => import('./pages/Hollar').then(m => ({ default: m.Hollar })))
 const LinkDevice = lazy(() => import('./pages/LinkDevice').then(m => ({ default: m.LinkDevice })))
+const Notifications = lazy(() => import('./pages/Notifications').then(m => ({ default: m.Notifications })))
 
 // Consolidated top-level URLs are replaced with the matching Activity tab.
 function LegacyRedirect({ to }: { to: string }) {
@@ -98,6 +99,7 @@ export default function App() {
       case 'omnipool': return <Omnipool />
       case 'liquidity': return <Liquidity />
       case 'link-device': return <LinkDevice />
+      case 'notifications': return <Notifications />
       case 'notfound': return (
         <div className="wrap"><div className="page-head"><div className="page-title">Not found</div></div>
           <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>

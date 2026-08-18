@@ -441,6 +441,12 @@ export function useAssets() {
 export function useAssetFilterOptions() {
   return useQuery({ queryKey: ['assets-filter'], queryFn: ({ signal }) => api.assetFilterOptions(signal), staleTime: 30_000 })
 }
+// The call/event name catalogue behind the name filters and the alert form's
+// pallet/name pickers. Cached an hour by the API and never polled: the list moves
+// only when a runtime upgrade adds or removes a name.
+export function useFilterNames() {
+  return useQuery({ queryKey: ['filter-names'], queryFn: ({ signal }) => api.filterNames(signal), staleTime: 3_600_000 })
+}
 export function useHdxDashboard() {
   return useQuery({ queryKey: ['hdx-dashboard'], queryFn: ({ signal }) => api.hdx(signal), staleTime: 120_000 })
 }

@@ -13,6 +13,8 @@ export interface FilterField {
   title?: string
   width?: number
   options?: ComboOption[]
+  /** combo only: accept a typed value that is not in the option list. */
+  freeText?: boolean
 }
 export type FilterValues = Record<string, string>
 const FILTER_DEBOUNCE_MS = 300
@@ -80,12 +82,20 @@ export function tokenFilterOptions(assets: AssetFilterItem[]): ComboOption[] {
   }))
 }
 
-export function Combo({ value, placeholder, label, width, options, onChange }: { value: string; placeholder?: string; label?: string; width?: number; options: ComboOption[]; onChange: (v: string) => void }) {
+// `freeText` opts a combo into accepting a value that is not in its option list:
+// the options become suggestions, and whatever was typed is committed too — on the
+// same typing-settled debounce a free-form filter input uses, and immediately on
+// Enter, on picking the "use this" row, or on blur. Needed wherever the catalogue
+// behind the list is a snapshot of what has been INDEXED rather than the set of
+// legal values — call/event names, whose filters match partially ("omnipool" is a
+// whole pallet) and whose newest members may not be in the window's catalogue yet.
+export function Combo({ value, placeholder, label, width, options, onChange, freeText, inputId }: { value: string; placeholder?: string; label?: string; width?: number; options: ComboOption[]; onChange: (v: string) => void; freeText?: boolean; inputId?: string }) {
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
   const listboxId = useId()
   const blurTimer = useRef<number | undefined>(undefined)
+  const commitTimer = useRef<number | undefined>(undefined)
   const matched = value ? options.find(o => o.value === value) : undefined
   // When the picked symbol is shared by other assets, show its id in the collapsed
   // input so which one is active stays clear (e.g. "USDC #1000766").
@@ -103,17 +113,32 @@ export function Combo({ value, placeholder, label, width, options, onChange }: {
   const list = q
     ? options.filter(o => (o.search ?? `${o.label} ${o.sub ?? ''}`).toLowerCase().includes(q.toLowerCase()))
     : options
+  // What a free-text combo would commit for the current query: '' when the typed
+  // text already IS one of the options (picking that row is the same thing) or
+  // when free text is off.
+  const typed = q.trim()
+  const freeChoice = freeText && typed && !options.some(o => o.value.toLowerCase() === typed.toLowerCase()) ? typed : ''
+  // What the query as typed would commit — an exact option value included, since
+  // typing a name out in full means the same thing as picking its row.
+  const typedCommit = freeText && typed && typed !== value ? typed : ''
   const selectIndex = (index: number) => {
-    if (index === 0) onChange('')
+    window.clearTimeout(commitTimer.current)
+    // Row 0 is "clear" normally, and "use what I typed" while a free-text combo
+    // holds an unlisted query — the two never coexist (an empty query has nothing
+    // to use, a typed one has nothing to clear).
+    if (index === 0) onChange(freeChoice || '')
     else if (list[index - 1]) onChange(list[index - 1].value)
+    else if (freeChoice) onChange(freeChoice)
     else return
+    setQ('')
     setOpen(false)
   }
-  useEffect(() => () => window.clearTimeout(blurTimer.current), [])
+  useEffect(() => () => { window.clearTimeout(blurTimer.current); window.clearTimeout(commitTimer.current) }, [])
   return (
     <div className="combo">
       <input {...noAutofill}
         className="combo-input" style={width ? { width } : undefined} placeholder={placeholder}
+        id={inputId}
         aria-label={label ?? placeholder ?? 'Filter'}
         role="combobox"
         aria-autocomplete="list"
@@ -121,10 +146,30 @@ export function Combo({ value, placeholder, label, width, options, onChange }: {
         aria-controls={listboxId}
         aria-activedescendant={open ? `${listboxId}-option-${Math.min(activeIndex, list.length)}` : undefined}
         value={open ? q : selectedLabel}
-        onChange={e => { setQ(e.target.value); setActiveIndex(1); setOpen(true) }}
+        onChange={e => {
+          const next = e.target.value
+          setQ(next); setActiveIndex(1); setOpen(true)
+          // Free-form filters can trigger expensive scans, so a free-text combo
+          // commits once typing settles — the same rule (and the same delay)
+          // DebouncedInput applies, so replacing that input with this one changed
+          // what the field OFFERS and not when it queries.
+          if (!freeText) return
+          window.clearTimeout(commitTimer.current)
+          const settled = next.trim()
+          commitTimer.current = window.setTimeout(() => { if (settled !== value) onChange(settled) }, FILTER_DEBOUNCE_MS)
+        }}
         onFocus={reopen}
         onMouseDown={() => { if (!open) reopen() }}
-        onBlur={() => { blurTimer.current = window.setTimeout(() => setOpen(false), 160) }}
+        // A typed-but-unpicked value commits on the way out too, so leaving the
+        // field never loses it. Committed SYNCHRONOUSLY, not on the close timer:
+        // whatever the reader clicked next may submit the form, and a value still
+        // sitting in a pending timeout would be gone. Closing keeps the delay,
+        // which is what lets a click land on an option.
+        onBlur={() => {
+          window.clearTimeout(commitTimer.current)
+          if (typedCommit) onChange(typedCommit)
+          blurTimer.current = window.setTimeout(() => { setQ(''); setOpen(false) }, 160)
+        }}
         onKeyDown={event => {
           if (event.key === 'ArrowDown') {
             event.preventDefault()
@@ -153,7 +198,7 @@ export function Combo({ value, placeholder, label, width, options, onChange }: {
             onMouseEnter={() => setActiveIndex(0)}
             onMouseDown={event => { event.preventDefault(); selectIndex(0) }}
           >
-            {placeholder}
+            {freeChoice ? <>Use “<span className="mono">{freeChoice}</span>”</> : placeholder}
           </div>
           {list.map((o, index) => (
             <div
@@ -169,7 +214,7 @@ export function Combo({ value, placeholder, label, width, options, onChange }: {
               {o.sub && <span className="combo-opt-sub">{o.sub}</span>}
             </div>
           ))}
-          {!list.length && <div className="combo-opt combo-empty">No matches</div>}
+          {!list.length && !freeChoice && <div className="combo-opt combo-empty">No matches</div>}
         </div>
       )}
     </div>
@@ -199,7 +244,7 @@ export function FilterZone({ fields, values, onChange, onClear, extra }: { field
             return <DebouncedInput key={f.key} type={f.kind} placeholder={f.placeholder} value={value} onCommit={v => onChange(f.key, v)} title={f.title} label={label} width={f.width} />
           }
           if (f.kind === 'select') return <select key={f.key} value={values[f.key] || ''} onChange={e => onChange(f.key, e.target.value)} title={f.title} aria-label={label}>{f.options!.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
-          if (f.kind === 'combo') return <Combo key={f.key} value={values[f.key] || ''} placeholder={f.placeholder} label={label} width={f.width} options={f.options!} onChange={v => onChange(f.key, v)} />
+          if (f.kind === 'combo') return <Combo key={f.key} value={values[f.key] || ''} placeholder={f.placeholder} label={label} width={f.width} options={f.options!} freeText={f.freeText} onChange={v => onChange(f.key, v)} />
           return null
         })}
         <button className="fclear" onClick={onClear}>Clear</button>

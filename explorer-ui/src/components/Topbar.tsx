@@ -6,7 +6,9 @@ import { useConnectRequest } from '../connectDialog'
 import { useTheme } from '../hooks/useTheme'
 import { useSession } from '../session'
 import { useMe, useTagMapSync, logout } from '../hooks/useUser'
+import { useNotificationsOverview, usePendingNotificationHandoff } from '../hooks/useNotifications'
 import { AccountEmoji, ShortAddr, showIconFallback } from './ui'
+import { NotificationBell } from './NotificationBell'
 import type { AccountRef } from '../types'
 
 // Radix + the dialog itself are only needed once a visitor actually tries to
@@ -18,44 +20,61 @@ const ConnectDialog = lazy(() => import('./ConnectDialog').then(m => ({ default:
 // a logged-in visitor opens it.
 const DevicesDialog = lazy(() => import('./DevicesDialog').then(m => ({ default: m.DevicesDialog })))
 
-// Navigation: direct links plus one dropdown group (Chain) for the raw chain
-// data pages. A group's trigger navigates to its primary page (Chain → Blocks)
-// while hovering/focusing reveals the rest. Every route is still reachable so
-// deep links / bookmarks keep working.
+// Navigation: direct links plus dropdown groups. A group's trigger navigates
+// to its primary page (Chain → Blocks, Assets → Assets) while hovering/focusing
+// reveals the rest; `menuItems` orders the dropdown independently of the
+// trigger/highlight `items`. Every route is still reachable so deep links /
+// bookmarks keep working.
 type NavItem = { to: string; label: string; match: Route['name'][] }
-const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
-  {
-    label: 'Chain',
-    items: [
-      { to: paths.blocks(), label: 'Blocks', match: ['blocks', 'block'] },
-      { to: paths.extrinsics(), label: 'Extrinsics', match: ['extrinsics', 'extrinsic'] },
-      { to: paths.events(), label: 'Events', match: ['events', 'event'] },
-      { to: paths.contracts(), label: 'Contracts', match: ['contracts'] },
-      { to: paths.security(), label: 'Security', match: ['security'] },
-    ],
-  },
-]
-const NAV_LINKS: NavItem[] = [
-  { to: paths.activity(), label: 'Activity', match: ['activity'] },
-  { to: paths.accounts(), label: 'Accounts', match: ['accounts', 'account', 'tags', 'tags-hydration', 'tag', 'lists', 'list'] },
-  { to: paths.assets(), label: 'Assets', match: ['assets', 'asset', 'holders'] },
+type NavGroup = { label: string; items: NavItem[]; menuItems?: NavItem[] }
+const IT = {
+  activity: { to: paths.activity(), label: 'Activity', match: ['activity'] } as NavItem,
+  accounts: { to: paths.accounts(), label: 'Accounts', match: ['accounts', 'account', 'tags', 'tags-hydration', 'tag', 'lists', 'list'] } as NavItem,
+  assets: { to: paths.assets(), label: 'Assets', match: ['assets', 'asset', 'holders'] } as NavItem,
   // Pools live under Liquidity, so a pool or the Omnipool highlights there.
-  { to: paths.liquidity(), label: 'Liquidity', match: ['liquidity', 'pool', 'omnipool'] },
-  { to: paths.hdx(), label: 'HDX', match: ['hdx'] },
-  { to: paths.hollar(), label: 'HOLLAR', match: ['hollar'] },
-  { to: paths.revenue(), label: 'Revenue', match: ['revenue'] },
-]
-// Mid-width fold (861–1119px, CSS-gated): Assets/HDX/HOLLAR collapse into one
-// dropdown so the topbar search keeps a usable width. The direct links carry
-// .nav-fold and hide in that window; this group is hidden everywhere else.
-// The trigger itself navigates to Assets, so the menu lists only HDX/HOLLAR —
-// an "Assets" entry under a group named Assets would be redundant.
-const FOLDABLE = new Set(['Assets', 'Liquidity', 'HDX', 'HOLLAR', 'Revenue'])
-const ASSETS_FOLD_GROUP: { label: string; items: NavItem[]; menuItems?: NavItem[] } = {
-  label: 'Assets',
-  items: NAV_LINKS.filter(it => FOLDABLE.has(it.label)),
-  menuItems: NAV_LINKS.filter(it => it.label === 'Liquidity' || it.label === 'HDX' || it.label === 'HOLLAR' || it.label === 'Revenue'),
+  liquidity: { to: paths.liquidity(), label: 'Liquidity', match: ['liquidity', 'pool', 'omnipool'] } as NavItem,
+  hdx: { to: paths.hdx(), label: 'HDX', match: ['hdx'] } as NavItem,
+  hollar: { to: paths.hollar(), label: 'HOLLAR', match: ['hollar'] } as NavItem,
+  revenue: { to: paths.revenue(), label: 'Revenue', match: ['revenue'] } as NavItem,
+  blocks: { to: paths.blocks(), label: 'Blocks', match: ['blocks', 'block'] } as NavItem,
+  extrinsics: { to: paths.extrinsics(), label: 'Extrinsics', match: ['extrinsics', 'extrinsic'] } as NavItem,
+  events: { to: paths.events(), label: 'Events', match: ['events', 'event'] } as NavItem,
+  contracts: { to: paths.contracts(), label: 'Contracts', match: ['contracts'] } as NavItem,
+  security: { to: paths.security(), label: 'Security', match: ['security'] } as NavItem,
 }
+// Liquidity lives under Assets at every width; the trigger navigates to Assets
+// so the menu lists only Liquidity. Security leads the Chain menu (it is the
+// entry a returning operator wants first) while the trigger keeps Blocks.
+const ASSETS_GROUP: NavGroup = { label: 'Assets', items: [IT.assets, IT.liquidity], menuItems: [IT.liquidity] }
+const CHAIN_GROUP: NavGroup = {
+  label: 'Chain',
+  items: [IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.security],
+  menuItems: [IT.security, IT.blocks, IT.extrinsics, IT.events, IT.contracts],
+}
+// Mid-width fold (861–1119px, CSS-gated): HDX/HOLLAR/Revenue and the Assets
+// group collapse into this single wider Assets dropdown so the topbar search
+// keeps a usable width. Direct links carry .nav-fold and hide in that window;
+// the permanent Assets group carries .nav-unfold-group and hides there too;
+// this group is hidden everywhere else.
+const FOLDABLE = new Set(['HDX', 'HOLLAR', 'Revenue'])
+const ASSETS_FOLD_GROUP: NavGroup = {
+  label: 'Assets',
+  items: [IT.assets, IT.liquidity, IT.hdx, IT.hollar, IT.revenue],
+  menuItems: [IT.liquidity, IT.hdx, IT.hollar, IT.revenue],
+}
+// The desktop nav in visual order; the drawer keeps every destination flat.
+const NAV_ENTRIES: Array<{ kind: 'link'; item: NavItem } | { kind: 'group'; group: NavGroup; fold?: 'only' | 'hidden' }> = [
+  { kind: 'link', item: IT.activity },
+  { kind: 'link', item: IT.accounts },
+  { kind: 'group', group: ASSETS_GROUP, fold: 'hidden' },
+  { kind: 'link', item: IT.hdx },
+  { kind: 'link', item: IT.hollar },
+  { kind: 'link', item: IT.revenue },
+  { kind: 'group', group: ASSETS_FOLD_GROUP, fold: 'only' },
+  { kind: 'group', group: CHAIN_GROUP },
+]
+const DRAWER_LINKS: NavItem[] = [IT.activity, IT.accounts, IT.assets, IT.liquidity, IT.hdx, IT.hollar, IT.revenue]
+const DRAWER_GROUPS: NavGroup[] = [CHAIN_GROUP]
 
 function matches(item: NavItem, route: Route): boolean {
   return item.match.includes(route.name)
@@ -92,10 +111,12 @@ function ProfileAvatar({ account }: { account?: AccountRef }) {
 // Desktop compact login control: a Connect button logged out, or the account's
 // avatar + name opening a small menu (My account / Lists / Log out) logged
 // in. Escape and an outside click close the menu, same as the drawer below.
-function AccountMenuButton({ session, account, invites, onConnect, onDevices }: {
+function AccountMenuButton({ session, account, invites, theme, onToggleTheme, onConnect, onDevices }: {
   session: ReturnType<typeof useSession>
   account: AccountRef | undefined
   invites: number
+  theme: 'dark' | 'light'
+  onToggleTheme: () => void
   onConnect: () => void
   onDevices: () => void
 }) {
@@ -152,6 +173,9 @@ function AccountMenuButton({ session, account, invites, onConnect, onDevices }: 
           <Link to={paths.account(session.address)} onClick={() => setOpen(false)}>My account</Link>
           <Link to={paths.lists()} onClick={() => setOpen(false)}>Lists{invites > 0 && <span className="invite-badge">{invites}</span>}</Link>
           <button type="button" className="menu-row" onClick={() => { setOpen(false); onDevices() }}>Devices</button>
+          {/* The standalone topbar toggle is hidden while logged in — the menu
+              is its home then, so the chrome stays one control shorter. */}
+          <button type="button" className="menu-row" onClick={onToggleTheme}>{theme === 'dark' ? 'Light mode' : 'Dark mode'}</button>
           <button type="button" className="menu-row" onClick={() => { setOpen(false); void logout() }}>Log out</button>
         </div>
       )}
@@ -159,9 +183,11 @@ function AccountMenuButton({ session, account, invites, onConnect, onDevices }: 
   )
 }
 
-// Mobile drawer login section: the same three destinations as the desktop
-// menu, as plain drawer rows — the drawer is already the expanded surface, so
-// a nested popover would be one flyout too many.
+// Mobile drawer login section: the same destinations as the desktop menu, as
+// plain drawer rows — the drawer is already the expanded surface, so a nested
+// popover would be one flyout too many. Notifications is deliberately absent
+// here and in the desktop menu: the topbar bell is always visible, so a menu
+// row would be a second door to the same room.
 function DrawerAccountSection({ session, invites, onConnect, onDevices, onNavigate }: {
   session: ReturnType<typeof useSession>
   invites: number
@@ -195,7 +221,12 @@ export function Topbar({ route }: { route: Route }) {
   const me = useMe()
   const account = me.data?.account
   const invites = me.data?.invites.length ?? 0
-  const { toggle: toggleTheme } = useTheme()
+  // The unread badge and the logged-out→login→create handoff both belong to the
+  // one component that is mounted on every page.
+  const notifications = useNotificationsOverview()
+  const unread = session ? notifications.data?.unread ?? 0 : 0
+  usePendingNotificationHandoff()
+  const { theme, toggle: toggleTheme } = useTheme()
   const isDashboard = route.name === 'dashboard'
   const [drawer, setDrawer] = useState(false)
   const [connectOpen, setConnectOpen] = useState(false)
@@ -266,19 +297,21 @@ export function Topbar({ route }: { route: Route }) {
         </Link>
 
         <nav className="nav" aria-label="Primary">
-          {NAV_LINKS.map(it => (
-            <Link key={it.to} to={it.to} className={`nav-link${FOLDABLE.has(it.label) ? ' nav-fold' : ''}${matches(it, route) ? ' active' : ''}`}>{it.label}</Link>
-          ))}
-          {[ASSETS_FOLD_GROUP, ...NAV_GROUPS].map((group: typeof ASSETS_FOLD_GROUP) => {
+          {NAV_ENTRIES.map(entry => {
+            if (entry.kind === 'link') {
+              const it = entry.item
+              return <Link key={it.to} to={it.to} className={`nav-link${FOLDABLE.has(it.label) ? ' nav-fold' : ''}${matches(it, route) ? ' active' : ''}`}>{it.label}</Link>
+            }
+            const { group, fold } = entry
             const active = group.items.some(it => matches(it, route))
-            const isFold = group === ASSETS_FOLD_GROUP
+            const key = `${group.label}:${fold ?? 'always'}`
             return (
               <div
-                className={`nav-group${isFold ? ' nav-fold-group' : ''}${openGroup === group.label ? ' open' : ''}`}
-                key={group.label}
-                onMouseEnter={() => setOpenGroup(group.label)}
+                className={`nav-group${fold === 'only' ? ' nav-fold-group' : ''}${fold === 'hidden' ? ' nav-unfold-group' : ''}${openGroup === key ? ' open' : ''}`}
+                key={key}
+                onMouseEnter={() => setOpenGroup(key)}
                 onMouseLeave={() => setOpenGroup(null)}
-                onFocus={() => setOpenGroup(group.label)}
+                onFocus={() => setOpenGroup(key)}
                 onBlur={e => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOpenGroup(null) }}
               >
                 <Link to={group.items[0].to} className={`nav-trigger${active ? ' active' : ''}`} onClick={() => setOpenGroup(null)}>
@@ -299,8 +332,9 @@ export function Topbar({ route }: { route: Route }) {
         </div>
 
         <div className="topbar-right">
-          <ThemeToggle onClick={toggleTheme} />
-          <AccountMenuButton session={session} account={account} invites={invites} onConnect={openConnect} onDevices={openDevices} />
+          {!session && <ThemeToggle onClick={toggleTheme} />}
+          <NotificationBell unread={unread} />
+          <AccountMenuButton session={session} account={account} invites={invites} theme={theme} onToggleTheme={toggleTheme} onConnect={openConnect} onDevices={openDevices} />
           <button ref={drawerTriggerRef} className="nav-burger" onClick={() => setDrawer(true)} aria-label="Open menu" aria-expanded={drawer} aria-haspopup="dialog">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
           </button>
@@ -322,14 +356,14 @@ export function Topbar({ route }: { route: Route }) {
             <DrawerAccountSection session={session} invites={invites} onConnect={() => { setDrawer(false); openConnect() }} onDevices={() => { setDrawer(false); openDevices() }} onNavigate={() => setDrawer(false)} />
             <div className="drawer-sec">
               <div className="sec-lbl">Explore</div>
-              {NAV_LINKS.map(it => (
+              {DRAWER_LINKS.map(it => (
                 <Link key={it.to} to={it.to} className={matches(it, route) ? 'active' : ''}>{it.label}</Link>
               ))}
             </div>
-            {NAV_GROUPS.map(group => (
+            {DRAWER_GROUPS.map(group => (
               <div className="drawer-sec" key={group.label}>
                 <div className="sec-lbl">{group.label}</div>
-                {group.items.map(it => (
+                {(group.menuItems ?? group.items).map(it => (
                   <Link key={it.to} to={it.to} className={matches(it, route) ? 'active' : ''}>{it.label}</Link>
                 ))}
               </div>

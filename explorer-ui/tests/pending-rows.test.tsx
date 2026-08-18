@@ -94,7 +94,11 @@ describe('every list that holds rows has a surface that marks them', () => {
     }
     for (const [path, expected] of Object.entries(surfaces)) {
       const src = read(path)
-      const marks = occurrences(src, 'pendingRows(') + occurrences(src, 'pending={')
+      // `pending={…isPlaceholderData}` specifically: other components on these
+      // pages take a `pending` prop for a write in flight (the asset header's
+      // alert dialog), which is not a held-rows signal and must not be counted
+      // as one.
+      const marks = occurrences(src, 'pendingRows(') + (src.match(/pending=\{[^}]*isPlaceholderData[^}]*\}/g)?.length ?? 0)
       expect(marks, path).toBe(expected)
       // A surface that reads isPlaceholderData but never renders it would pass a
       // bare "mentions pendingRows" check, so require the read as well.
