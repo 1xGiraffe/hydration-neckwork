@@ -1,6 +1,6 @@
 import type {
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
-  HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem,
+  HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
   AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard,
   RevenueDashboard, RevenueFlowResponse, RevenueRange, HollarDashboard, SecurityDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
@@ -8,6 +8,9 @@ import type {
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
   AccountRef, DeviceLinkResponse, DeviceLinkStatus, DeviceSession, EvmReceipt, PoolsIndexResponse,
+  NotificationChannel, NotificationRule, NotificationRuleInput, NotificationRulePatch,
+  NotificationsOverview, NotificationInboxPage, NotificationTelegramLink, NotificationLinkStatus,
+  WebPushSubscriptionInput,
 } from '../types'
 import { getSession, setSession } from '../session'
 // Live feeds stamp the pushed head onto their URLs (`h=`): the nginx
@@ -208,6 +211,10 @@ export const api = {
   // Token-filter variant: the same ordered directory without prices, totals or
   // sparklines — 74 kB down to 5.8 kB, since the combo reads ids and symbols only.
   assetFilterOptions: (signal?: AbortSignal) => getJson<AssetFilterItem[]>(withQuery('/explorer/assets', { fields: 'filter' }), signal),
+  // The call/event names the data actually holds, for the name filters and the
+  // alert form's pallet/name pickers. Cached an hour on both ends — a name list
+  // moves only with a runtime upgrade.
+  filterNames: (signal?: AbortSignal) => getJson<FilterNames>('/explorer/filter-names', signal),
   hdx: (signal?: AbortSignal) => getJson<HdxDashboard>('/explorer/hdx', signal),
   revenue: (range: RevenueRange = '30d', signal?: AbortSignal) => getJson<RevenueDashboard>(withQuery('/explorer/revenue', { range }), signal),
   // Live feed: the head tag busts the edge micro-cache the moment a block lands.
@@ -342,4 +349,40 @@ export const userApi = {
   // useHolders (useExplorerData.ts) for when this replaces the public endpoint.
   holders: (assetId: number, offset = 0, limit = 100, signal?: AbortSignal) =>
     authedJson<HoldersResponse>('GET', withQuery(`/user/holders/${assetId}`, { offset, limit }), undefined, signal),
+
+  // ── Notifications ────────────────────────────────────────────────────
+  // Channels, alert rules and the inbox. Everything lives under
+  // /user/notifications/, so nginx's uncached /api/user/ location and the
+  // API's own no-store stamping cover it without a rule of their own.
+  notificationsOverview: (signal?: AbortSignal) =>
+    authedJson<NotificationsOverview>('GET', '/user/notifications/overview', undefined, signal),
+  // 503 when the deployment carries no VAPID keys — the overview says so
+  // first (vapidPublicKey === ''), so this is the race, not the normal path.
+  registerWebPush: (subscription: WebPushSubscriptionInput, label?: string) =>
+    authedJson<NotificationChannel>('POST', '/user/notifications/channels/webpush', { subscription, ...(label ? { label } : {}) }),
+  createTelegramLink: () =>
+    authedJson<NotificationTelegramLink>('POST', '/user/notifications/channels/telegram/link'),
+  telegramLinkStatus: (code: string, signal?: AbortSignal) =>
+    authedJson<{ status: NotificationLinkStatus }>('GET', `/user/notifications/channels/telegram/link/${encodeURIComponent(code)}`, undefined, signal),
+  deleteNotificationChannel: (id: string) =>
+    authedJson<{ ok: true }>('DELETE', `/user/notifications/channels/${encodeURIComponent(id)}`),
+  // Dispatches a real message through the real renderer, so a green reply means
+  // the whole path works — not merely that the channel row exists.
+  testNotificationChannel: (id: string) =>
+    authedJson<{ ok: true }>('POST', `/user/notifications/channels/${encodeURIComponent(id)}/test`),
+  createNotificationRule: (body: NotificationRuleInput) =>
+    authedJson<NotificationRule>('POST', '/user/notifications/rules', body),
+  updateNotificationRule: (id: string, body: NotificationRulePatch) =>
+    authedJson<NotificationRule>('PATCH', `/user/notifications/rules/${encodeURIComponent(id)}`, body),
+  deleteNotificationRule: (id: string) =>
+    authedJson<{ ok: true }>('DELETE', `/user/notifications/rules/${encodeURIComponent(id)}`),
+  notificationInbox: (limit = 50, offset = 0, signal?: AbortSignal) =>
+    authedJson<NotificationInboxPage>('GET', withQuery('/user/notifications/inbox', { limit, offset }), undefined, signal),
+  // No `ids` marks everything read — the inbox's own "you have seen these" call.
+  markNotificationsRead: (ids?: string[]) =>
+    authedJson<{ ok: true; marked: number; unread: number }>('POST', '/user/notifications/inbox/read', ids ? { ids } : {}),
+  // Empties the history in one write. The rules are untouched and keep firing —
+  // this is not unsubscribing, which is why the UI puts it behind a confirm.
+  clearNotificationInbox: () =>
+    authedJson<{ ok: true; cleared: number; unread: number }>('POST', '/user/notifications/inbox/clear', {}),
 }

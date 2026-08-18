@@ -9,6 +9,7 @@ import {
   AddrPill, Ago, AssetAmount, AssetChip, ChartSkeleton, Crumbs, Dash, EmptyRow, F, MomentLink, TableSkeleton,
 } from '../components/ui'
 import { DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
+import { NotifyButton } from '../components/NotifyButton'
 import { FuseGrid, LoadMeter, YearBars } from '../components/SecurityPanels'
 import {
   AUDITS, CONTROL_ORIGINS, SECURITY_LINKS, UNPAUSABLE, fmtBlocks, fmtDuration, fmtPct, loadColor,
@@ -21,7 +22,6 @@ import type { SecurityDashboard, SecurityFuse, SecurityPerBlockRow, SecuritySafe
 // throttles the pool each block, what is switched off right now — and who holds
 // each switch. Live chain state for the limits and their consumption, indexed
 // history for every time a control fired or was changed.
-
 const LEDGER_PAGE = 25
 // The floor the hand-off links to the activity feed carry, so a reader arriving
 // there sees movements on the scale this page is about rather than the whole feed.
@@ -96,6 +96,10 @@ function Overview({ d, now, nominalSec }: { d: SecurityDashboard; now: number; n
   const primary = d.risk.markets.find(m => m.role === 'primary')
   const loadedFuses = d.fuses.rows.filter(r => r.status === 'active' && r.usagePct > 0)
   const hottest = loadedFuses[0]
+  const shut = d.fuses.lockedCount + d.fuses.frozenCount
+  const shutSub = d.fuses.lockedCount && d.fuses.frozenCount
+    ? `${F.int(d.fuses.lockedCount)} locked down · ${F.int(d.fuses.frozenCount)} held at a zero limit`
+    : d.fuses.lockedCount ? 'minting held in reserve' : 'a zero limit refuses every deposit'
   const peak = d.perBlock.rows.reduce((m, r) => Math.max(m, r.peakPressurePct ?? 0), 0)
   const restricted = d.freezes.omnipool.length + d.freezes.stableswap.length
   return (
@@ -122,9 +126,9 @@ function Overview({ d, now, nominalSec }: { d: SecurityDashboard; now: number; n
       <SecTitle title="Everything else" />
       <div className="hdx-cards sec-ov">
         <OverviewCard section="cross-chain" label="Deposit fuses"
-          value={d.fuses.lockedCount ? `${F.int(d.fuses.lockedCount)} locked` : hottest ? fmtPct(hottest.usagePct) : 'idle'}
-          tone={d.fuses.lockedCount ? 'var(--red)' : hottest ? loadColor(hottest.usagePct) : undefined}
-          sub={d.fuses.lockedCount ? 'minting held in reserve' : hottest ? `${hottest.asset.symbol} is the fullest of ${F.int(loadedFuses.length)} carrying load` : 'no asset is minting against its limit'} />
+          value={shut ? `${F.int(shut)} shut` : hottest ? fmtPct(hottest.usagePct) : 'idle'}
+          tone={shut ? 'var(--red)' : hottest ? loadColor(hottest.usagePct) : undefined}
+          sub={shut ? shutSub : hottest ? `${hottest.asset.symbol} is the fullest of ${F.int(loadedFuses.length)} carrying load` : 'no asset is minting against its limit'} />
         <OverviewCard section="omnipool" label="Per-block limits"
           value={fmtPct(peak)} tone={loadColor(peak)}
           sub={`busiest block in ${d.perBlock.peakWindowDays} days, against its allowance`} />
@@ -157,7 +161,10 @@ function Overview({ d, now, nominalSec }: { d: SecurityDashboard; now: number; n
           sub={d.runtime.lastUpgrade ? <>upgraded <Ago ts={d.runtime.lastUpgrade.blockTimestamp} now={now} /> · {F.int(d.runtime.upgrades)} in total</> : 'no upgrade recorded'} />
       </div>
 
-      <SecTitle title="Latest safety action" />
+      <div className="sec-title-row">
+        <SecTitle title="Latest safety action" />
+        <NotifyButton rule={{ kind: 'safety', params: {}, name: 'Safety actions' }} label="Get notified" title="Alert me on every circuit breaker, pause, freeze and lockdown" />
+      </div>
       <Ledger events={d.timeline.slice(0, 6)} now={now} compact />
     </>
   )
@@ -288,6 +295,7 @@ const FUSE_EXPLAINER = 'Each of these assets can be minted only so fast. Every d
 
 const FUSE_STATUS_BADGE: Record<SecurityFuse['status'], { label: string; cls: string }> = {
   locked: { label: 'Locked', cls: 'fail' },
+  frozen: { label: 'Frozen', cls: 'fail' },
   active: { label: 'Armed', cls: 'ok' },
   expired: { label: 'Idle', cls: 'finalized' },
   unarmed: { label: 'Unused', cls: 'finalized' },
@@ -306,7 +314,7 @@ function FuseTable({ d, headBlock, blockSec }: { d: SecurityDashboard; headBlock
         <tbody>
           {!d.fuses.rows.length ? <EmptyRow cols={7}>No asset carries a deposit limit</EmptyRow> : d.fuses.rows.map(r => {
             const badge = FUSE_STATUS_BADGE[r.status]
-            const dormant = r.status === 'expired' || r.status === 'unarmed'
+            const dormant = r.status === 'expired' || r.status === 'unarmed' || r.status === 'frozen'
             return (
               <tr key={r.asset.assetId}>
                 <td data-label="Asset"><AssetChip asset={r.asset} /></td>
@@ -318,8 +326,9 @@ function FuseTable({ d, headBlock, blockSec }: { d: SecurityDashboard; headBlock
                 </td>
                 <td data-label="Window" className="r mono muted">
                   {r.status === 'locked' && r.untilBlock ? `unlocks in ${fmtBlocks(Math.max(0, r.untilBlock - headBlock), blockSec)}`
-                    : r.status === 'active' && r.periodEndBlock ? `resets in ${fmtBlocks(Math.max(0, r.periodEndBlock - headBlock), blockSec)}`
-                      : r.status === 'expired' ? 'next mint resets' : 'not started'}
+                    : r.status === 'frozen' ? 'no deposit accepted'
+                      : r.status === 'active' && r.periodEndBlock ? `resets in ${fmtBlocks(Math.max(0, r.periodEndBlock - headBlock), blockSec)}`
+                        : r.status === 'expired' ? 'next mint resets' : 'not started'}
                 </td>
                 <td data-label="Trips" className={`r mono muted${r.lockdownCount ? '' : ' cell-empty'}`}>{r.lockdownCount || <span className="muted">—</span>}</td>
               </tr>
@@ -371,7 +380,7 @@ function LockdownHistory({ d, now, nominalSec }: { d: SecurityDashboard; now: nu
 }
 
 function FuseBoard({ d, explain, loadedOnly, note }: { d: SecurityDashboard; explain?: boolean; loadedOnly?: boolean; note?: ReactNode }) {
-  const loaded = d.fuses.rows.filter(r => r.status === 'locked' || (r.status === 'active' && r.usagePct > 0))
+  const loaded = d.fuses.rows.filter(r => r.status === 'locked' || r.status === 'frozen' || (r.status === 'active' && r.usagePct > 0))
   const shown = loadedOnly ? loaded : d.fuses.rows
   return (
     <div className="pf-card">

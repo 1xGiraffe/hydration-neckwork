@@ -1,4 +1,4 @@
-import { useExtrinsics, useDaily, useCounts } from '../hooks/useExplorerData'
+import { useExtrinsics, useDaily, useCounts, useFilterNames } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { paths, usePageParam, setPage } from '../router'
 import { Crumbs, F, DayBarChart, EmptyRow, TableSkeleton, Pager, pendingRows, LiveAnchor } from '../components/ui'
@@ -20,6 +20,7 @@ export function Extrinsics() {
   const { data, isFetching, isPlaceholderData, anchorRef } = useExtrinsics(PAGE, true, f.from, f.to, page * PAGE, { call: f.call, result: f.result })
   const { data: daily } = useDaily('extrinsics')
   const { data: counts } = useCounts()
+  const { data: names } = useFilterNames()
   const now = useNow()
 
   const rows = data ?? []
@@ -44,7 +45,7 @@ export function Extrinsics() {
         <div className="page-title">Extrinsics <span className="sub">signed calls</span></div>
       </div>
       <DayBarChart data={daily ?? []} color={UNFILTERED_COLOR} label="Daily signed extrinsics" selected={f.from === f.to ? f.from : undefined} onSelect={setDay} fmt={F.int} loading={!daily} />
-      <FilterZone fields={extrinsicFilterFields()} values={f} onChange={(k, v) => { onChange(k, v); setPage(0) }} onClear={onClear} />
+      <FilterZone fields={extrinsicFilterFields(false, names?.calls)} values={f} onChange={(k, v) => { onChange(k, v); setPage(0) }} onClear={onClear} />
       <div className="panel">
         <LiveAnchor anchorRef={anchorRef} />
         <table className="tbl">

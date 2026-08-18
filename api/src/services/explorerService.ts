@@ -4120,6 +4120,26 @@ async function getMoneyMarketPositions(h160: string): Promise<MoneyMarketPositio
   })
 }
 
+// One address's PRIMARY-market health factor, as a number (Infinity = no debt,
+// null = no position or an unreadable address). The two markets are isolated, so
+// this deliberately reads the primary market alone and never blends a
+// supplemental (GIGAHDX) position into it — the same rule the account page,
+// the directory and DefiSim follow.
+//
+// Shares getMoneyMarketPositions' 15s cache, so a watcher polling several
+// addresses costs one point lookup per address per cache period.
+export async function getPrimaryHealthFactor(addressInput: string): Promise<number | null> {
+  const norm = normalizeAddress(addressInput)
+  if (!norm) return null
+  const h160 = norm.evmAddress ?? mmH160ForAccount(norm.accountId)
+  if (!h160) return null
+  const primary = (await getMoneyMarketPositions(h160)).find(p => p.role === 'primary')
+  if (!primary) return null
+  if (primary.healthFactor === 'inf') return Infinity
+  const hf = Number(primary.healthFactor) / 1e18
+  return Number.isFinite(hf) ? hf : null
+}
+
 // Per-reserve money-market balances reconstructed from indexed aToken/vDebt
 // anchors and event deltas. Reused by account/tag positions and Hollar metrics.
 export interface MmReserve {
@@ -6775,11 +6795,53 @@ export async function getAssets(): Promise<AssetListItem[]> {
 
 // What the activity token filter shows and searches on — nothing else. It is a
 // projection of the same cached directory, so the option list and its value-ranked
-// ordering are identical to the full payload's; it just leaves behind the prices,
-// totals, holder counts and weekly sparklines (57% of 74 kB) the combo never reads.
-export interface AssetFilterItem { assetId: number; symbol: string; name: string | null }
+// ordering are identical to the full payload's; it just leaves behind the totals,
+// holder counts and weekly sparklines (57% of 74 kB) the combo never reads.
+// `price` rides along (one number per row) because a price-alert form has to be
+// able to say what the token costs right now, and re-fetching the full directory
+// — or one asset detail — to learn one number would cost far more than this.
+export interface AssetFilterItem { assetId: number; symbol: string; name: string | null; price: number | null }
 export async function getAssetFilterOptions(): Promise<AssetFilterItem[]> {
-  return (await getAssets()).map(a => ({ assetId: a.assetId, symbol: a.symbol, name: a.name }))
+  return (await getAssets()).map(a => ({ assetId: a.assetId, symbol: a.symbol, name: a.name, price: a.price }))
+}
+
+// The pallet.call and pallet.Event names actually present in the indexed data, so
+// a filter box and an alert form can OFFER names instead of asking to be told one.
+//
+// Read from exactly the two tables the notification matchers window over
+// (`raw_extrinsics.call_name`, `raw_events.event_name`) — a suggestion the
+// matcher cannot match would be worse than no suggestion at all. Both columns
+// are LowCardinality and both tables are `ORDER BY (block_height, …)`, so the
+// distinct is a dictionary read over a primary-key range rather than a scan: the
+// window is the last FILTER_NAME_WINDOW_BLOCKS blocks (≈2 months at 6s), which
+// bounds the read AND is what makes the list current — a pallet removed by a
+// runtime upgrade stops being offered instead of being suggested forever.
+export interface FilterNames { calls: string[]; events: string[] }
+const FILTER_NAME_WINDOW_BLOCKS = 1_000_000
+const FILTER_NAME_CACHE_MS = 3_600_000
+
+async function distinctNames(table: string, column: string): Promise<string[]> {
+  const res = await client.query({
+    // max(block_height) over the sort-key prefix is a part-metadata read, so the
+    // window resolves without a scan of its own.
+    query: `SELECT DISTINCT ${column} AS name
+            FROM price_data.${table}
+            WHERE block_height > (SELECT max(block_height) FROM price_data.${table}) - {window:UInt32}
+            ORDER BY name`,
+    query_params: { window: FILTER_NAME_WINDOW_BLOCKS },
+    format: 'JSONEachRow',
+  })
+  return (await res.json<{ name: string }>()).map(r => r.name).filter(Boolean)
+}
+
+export async function getFilterNames(): Promise<FilterNames> {
+  return cached('explorer:filter-names', FILTER_NAME_CACHE_MS, async () => {
+    const [calls, events] = await Promise.all([
+      distinctNames('raw_extrinsics', 'call_name'),
+      distinctNames('raw_events', 'event_name'),
+    ])
+    return { calls, events }
+  })
 }
 
 
@@ -11019,8 +11081,38 @@ const COLLECTIVE_VOTE_EVENTS = ['Council.Voted', 'TechnicalCommittee.Voted']
 function shortProposalHash(hash: string): string {
   return /^0x[0-9a-f]+$/i.test(hash) && hash.length > 18 ? `${hash.slice(0, 8)}…${hash.slice(-6)}` : hash
 }
-async function getCollectiveVotes(accounts: string[], limit: number, from?: string, to?: string): Promise<VoteRow[]> {
-  const list = sqlAccountList(accounts)
+
+export interface RawCollectiveVoteEvent {
+  block_height: number
+  ts: string
+  event_index: number
+  extrinsic_index: number | null
+  event_name: string
+  args_json: string
+}
+
+// One collective vote event as a VoteRow. Shared by the windowed source below and
+// by the extrinsic/block detail page, so no two surfaces can describe the same
+// event differently. `voted` is the chain's own boolean (aye = true).
+export function collectiveVoteRow(e: RawCollectiveVoteEvent, hdx: AssetRef): VoteRow {
+  const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
+  const account = argStr(args, 'account')
+  const hash = argStr(args, 'proposalHash')
+  return {
+    blockHeight: e.block_height, timestamp: e.ts, eventIndex: e.event_index, extrinsicIndex: e.extrinsic_index,
+    account: account && ACCOUNT_RE.test(account) ? accountRef(account) : null,
+    pallet: e.event_name === 'Council.Voted' ? 'Council' : 'Technical Committee',
+    action: 'Voted', referendum: hash ? shortProposalHash(hash) : null,
+    side: args.voted === true ? 'Aye' : args.voted === false ? 'Nay' : 'Vote',
+    conviction: null, amount: null, asset: hdx, valueUsd: 0,
+  }
+}
+
+// The collective votes in one window (whole chain when `accounts` is absent, one
+// account set when it is present). Bounded by the block window, the tiny
+// event-name set and its own LIMIT — never a FINAL read or an unbounded join.
+async function getCollectiveVotes(accounts: string[] | undefined, limit: number, from?: string, to?: string): Promise<VoteRow[]> {
+  const list = accounts ? sqlAccountList(accounts) : null
   if (list === "''") return []
   const bound = timeWindow(from, to) ?? '1'
   const res = await client.query({
@@ -11028,12 +11120,12 @@ async function getCollectiveVotes(accounts: string[], limit: number, from?: stri
             FROM price_data.raw_events
             WHERE ${bound}
               AND event_name IN (${sqlEventNameList(COLLECTIVE_VOTE_EVENTS)})
-              AND JSONExtractString(args_json,'account') IN (${list})
+              ${list ? `AND JSONExtractString(args_json,'account') IN (${list})` : ''}
             ORDER BY block_height DESC, event_index DESC
             LIMIT {limit:UInt32}`,
     query_params: { limit }, format: 'JSONEachRow',
   })
-  const events = await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; args_json: string }>()
+  const events = await res.json<RawCollectiveVoteEvent>()
   const hdx = asset(0)
   // raw_events is a ReplacingMergeTree read without FINAL; dedup any re-ingested
   // rows by (block, event_index) so a re-index can't emit a duplicate vote.
@@ -11043,19 +11135,117 @@ async function getCollectiveVotes(accounts: string[], limit: number, from?: stri
     const key = `${e.block_height}:${e.event_index}`
     if (seen.has(key)) continue
     seen.add(key)
-    const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
-    const account = argStr(args, 'account')
-    const hash = argStr(args, 'proposalHash')
-    out.push({
-      blockHeight: e.block_height, timestamp: e.ts, eventIndex: e.event_index, extrinsicIndex: e.extrinsic_index,
-      account: account && ACCOUNT_RE.test(account) ? accountRef(account) : null,
-      pallet: e.event_name === 'Council.Voted' ? 'Council' : 'Technical Committee',
-      action: 'Voted', referendum: hash ? shortProposalHash(hash) : null,
-      side: args.voted === true ? 'Aye' : args.voted === false ? 'Nay' : 'Vote',
-      conviction: null, amount: null, asset: hdx, valueUsd: 0,
-    })
+    out.push(collectiveVoteRow(e, hdx))
   }
   return out
+}
+
+// Whether a feed's value/token filter can admit a collective vote at all.
+//
+// A collective vote locks no capital: the row carries no amount and no USD value,
+// so ANY value floor — USD or token units — rejects it on the built row, and the
+// only asset a governance row is denominated in is HDX. A filtered feed therefore
+// SKIPS the source instead of reading rows its own predicate would drop, and the
+// vote category's exact total (getGlobalActivityTotal) skips the same count under
+// the same condition, which is what keeps the total equal to the feed.
+export function collectiveVotesAdmitted(filters: ValueListFilters): boolean {
+  if (filters.min != null) return false
+  const tokenIds = assetIdsForToken(filters.token)
+  return tokenIds == null || tokenIds.includes(0)
+}
+
+// The whole collective-vote history of a window, newest first, cached and shared
+// by every page of the vote feed. Enumerated rather than paged on purpose: the
+// merged pager below translates ranks against it, which needs the complete set,
+// and the source holds a few thousand events all-time so reading it whole costs
+// less than the two extra queries a paged translation would take.
+const COLLECTIVE_VOTE_WINDOW_CAP = 100_000
+async function collectiveVoteWindow(from?: string, to?: string): Promise<VoteRow[]> {
+  const tw = timeWindow(from, to)
+  const rows = await cached(`explorer:collective-votes:${await liveHeadTag(Boolean(tw))}:${from ?? ''}:${to ?? ''}`,
+    tw ? 30_000 : LIVE_CACHE_MS,
+    () => getCollectiveVotes(undefined, COLLECTIVE_VOTE_WINDOW_CAP, from, to))
+  // A truncated enumeration would silently mis-rank the merged page, so it is
+  // refused instead. The cap is ~30x the events the pallets have ever emitted.
+  if (rows.length >= COLLECTIVE_VOTE_WINDOW_CAP) throw activityQueryTooBroad()
+  return rows
+}
+
+const voteNewestFirst = (a: VoteRow, b: VoteRow) => b.blockHeight - a.blockHeight || b.eventIndex - a.eventIndex
+
+// Where the indexed source's read has to start, and how deep, for the merged page
+// at `offset` to be exact: `collectiveCount` rows can sit above the page, so the
+// window starts that many ranks early and carries them on top of the page size.
+export function voteFeedGovWindow(limit: number, offset: number, collectiveCount: number): { start: number; limit: number } {
+  const lead = Math.min(offset, collectiveCount)
+  return { start: offset - lead, limit: limit + lead }
+}
+
+// The merge's rank translation, split out from the reads so its exactness is
+// testable without a ClickHouse-shaped fake. `gov` is the indexed source's page
+// starting at rank `govStart` of ITS OWN newest-first ordering; `collective` is
+// the COMPLETE collective set for the same window, also newest first.
+//
+// With `govStart === 0` the merged ordering is complete from rank 0 and the page
+// is a plain slice. Above it, the first indexed row anchors the translation: every
+// collective row newer than it is known, so its merged rank is exact and the page
+// is the slice at that distance.
+export function mergeVoteFeedPage(
+  gov: readonly VoteRow[], collective: readonly VoteRow[],
+  limit: number, offset: number, govStart: number,
+): VoteRow[] {
+  if (govStart === 0) return [...gov, ...collective].sort(voteNewestFirst).slice(offset, offset + limit)
+  // The indexed source ran out above this page, so with at most `offset - govStart`
+  // collective rows left the merged feed cannot reach the page at all.
+  const first = gov[0]
+  if (!first) return []
+  const above = collective.filter(row => voteNewestFirst(row, first) < 0).length
+  const rank = govStart + above
+  return [...gov, ...collective.slice(above)].sort(voteNewestFirst).slice(offset - rank, offset - rank + limit)
+}
+
+// One page of the chain-wide vote feed: the indexed conviction/Democracy source
+// merged with the collective (Council / Technical Committee) votes.
+//
+// The two sources have very different shapes. vote_activity is large and pages in
+// SQL — the tab is thousands of pages deep and a page at the end of it is still a
+// ~50 ms read — while the collective source is a few thousand rows all-time.
+// Pulling BOTH to `offset + limit` in memory would have cost the deep pages that
+// read, so the small source is enumerated whole and used to translate ranks: a
+// vote_activity window starting `n` rows early holds every row the merged page
+// can contain, and the merged rank of its first row is exact because every
+// collective row newer than that row is known.
+async function getVoteFeedRows(
+  limit: number, from: string | undefined, to: string | undefined, offset: number,
+  valueFilters: ValueListFilters, withCollective: boolean,
+): Promise<VoteRow[]> {
+  const govPage = (pageLimit: number, pageOffset: number) =>
+    getRecentVotes(pageLimit, from, to, pageOffset, {}, undefined, valueFilters)
+  if (!withCollective) return govPage(limit, offset)
+  // The identity filter is judged on the voter, so it belongs to the RANKING —
+  // applied to the merged page afterwards it would return a short page, exactly
+  // as it would for the indexed source (which applies it inside its own walk).
+  const wantsNamed = valueFilters.identity ? valueFilters.identity === 'named' : null
+  const collective = (await collectiveVoteWindow(from, to))
+    .filter(row => wantsNamed == null || accountIsNamed(row.account, valueFilters.viewerTagged) === wantsNamed)
+  if (!collective.length) return govPage(limit, offset)
+  const window = voteFeedGovWindow(limit, offset, collective.length)
+  const gov = await govPage(window.limit, window.start)
+  return mergeVoteFeedPage(gov, collective, limit, offset, window.start)
+}
+
+// The collective side of the vote category's exact total, over exactly the
+// predicate the feed read it under. DISTINCT (block, event) because raw_events is
+// replayable and the feed dedupes the same way.
+async function countCollectiveVotes(from?: string, to?: string): Promise<number> {
+  const bound = timeWindow(from, to) ?? '1'
+  const res = await client.query({
+    query: `SELECT toString(uniqExact((block_height, event_index))) AS c FROM price_data.raw_events
+            WHERE ${bound}
+              AND event_name IN (${sqlEventNameList(COLLECTIVE_VOTE_EVENTS)})`,
+    format: 'JSONEachRow',
+  })
+  return Number((await res.json<{ c: string }>())[0]?.c ?? 0)
 }
 
 // Account/tag Votes tab: OpenGov + Democracy rows come from the indexed
@@ -11934,13 +12124,11 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     who: t.who, to: null, asset: null, assetIn: t.assetIn, assetOut: t.assetOut, amount: null, amountIn: t.amountIn, amountOut: t.amountOut, valueUsd: t.valueUsd,
     dca: t.dca, linkBlock: t.linkBlock, linkIndex: t.linkIndex,
   })
-  const toVoteRow = (v: VoteRow): ActivityRow => ({
-    type: 'vote', blockHeight: v.blockHeight, timestamp: v.timestamp, eventIndex: v.eventIndex, extrinsicIndex: v.extrinsicIndex,
-    who: v.account, to: null, asset: v.asset, assetIn: null, assetOut: null, amount: v.amount, amountIn: null, amountOut: null, valueUsd: v.valueUsd,
-    votePallet: v.pallet, voteAction: v.action, voteRef: v.referendum, voteSide: v.side, voteConviction: v.conviction,
-    ...referendumRefFields(v.pallet, v.referendum),
-    linkBlock: v.blockHeight, linkIndex: v.extrinsicIndex,
-  })
+  // Whether the collective (Council / Technical Committee) votes join this
+  // window's vote source. Decided on the caller's OWN filters, not on the
+  // possibly value-stripped source filters, because a row the real predicate
+  // rejects must not be read at all (see collectiveVotesAdmitted).
+  const withCollective = collectiveVotesAdmitted(filters)
 
   let rows: ActivityRow[]
   // Where this window's page starts. Decided by the same predicate the window
@@ -12084,7 +12272,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
           ? loadClassifiedSource('staking', (sourceLimit, sourceFrom) => getRecentStaking(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
           : Promise.resolve([]),
         needsFullClassification
-          ? loadClassifiedSource('vote', (sourceLimit, sourceFrom) => getRecentVotes(sourceLimit, sourceFrom, to, 0, {}, undefined, sourceFilters))
+          ? loadClassifiedSource('vote', (sourceLimit, sourceFrom) => getVoteFeedRows(sourceLimit, sourceFrom, to, 0, sourceFilters, withCollective))
           : Promise.resolve([]),
       ])
       const sourceFilteredTransfers = sourceValueFiltered
@@ -12134,7 +12322,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         { key: 'reward', fetchSize: sourceFetchSize('reward'), rawSize: rewards.length, rows: rewards, oldest: oldestOf(rewards) },
         { key: 'liquidity', fetchSize: sourceFetchSize('liquidity'), rawSize: liquidity.length, rows: liquidity, oldest: oldestOf(liquidity) },
         { key: 'staking', fetchSize: sourceFetchSize('staking'), rawSize: staking.length, rows: staking, oldest: oldestOf(staking) },
-        { key: 'vote', fetchSize: sourceFetchSize('vote'), rawSize: votes.length, rows: votes.map(toVoteRow), oldest: oldestOf(votes) },
+        { key: 'vote', fetchSize: sourceFetchSize('vote'), rawSize: votes.length, rows: votes.map(voteActivityRow), oldest: oldestOf(votes) },
         { key: 'mm', fetchSize: sourceFetchSize('mm'), rawSize: mm.length, rows: userMm, oldest: oldestOf(mm) },
         { key: 'otc', fetchSize: sourceFetchSize('otc'), rawSize: otc.length, rows: otc, oldest: oldestOf(otc) },
         { key: 'xcm', fetchSize: sourceFetchSize('xcm'), rawSize: xcm.length, rows: xcm, oldest: oldestOf(xcm) },
@@ -12208,7 +12396,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     else if (type === 'otc') rows = await getRecentOtc(fetchN, from, to, 0, filters, action)
     else if (type === 'xcm') rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters), getRecentNttOut(fetchN, from, to, undefined, 0, filters), getRecentNttIn(fetchN, from, to, undefined, 0, filters)])).flat()
     else if (type === 'staking') rows = await getRecentStaking(fetchN, from, to, undefined, 0, filters, undefined, action)
-    else rows = (await getRecentVotes(fetchN, from, to, 0, {}, undefined, filters)).map(toVoteRow)
+    else rows = (await getVoteFeedRows(fetchN, from, to, 0, filters, withCollective)).map(voteActivityRow)
   } else if (type === 'liquidity') {
     rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'liquidity')]
   } else if (type === 'mm') {
@@ -12220,7 +12408,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
   } else if (type === 'staking') {
     rows = await getRecentStaking(limit, from, to, undefined, offset, filters)
   } else {
-    rows = (await getRecentVotes(limit, from, to, offset, {}, undefined, filters)).map(toVoteRow)
+    rows = (await getVoteFeedRows(limit, from, to, offset, filters, withCollective)).map(voteActivityRow)
   }
   if (locallyPaged && !classified) sourceSaturated = rows.length >= fetchN
   if (!plumbingApplied) rows = await suppressActivityPlumbing(rows)
@@ -12235,14 +12423,24 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
 // How long the chain-wide Activity feed is under exactly the filters the page is
 // showing, so its pager numbers real pages and its last page is one jump away.
 //
-// Only a category whose page IS one source's rows, ordered and offset by
-// ClickHouse, can be counted this way: the count is that source's own predicate,
-// so it cannot drift from the rows. `vote` qualifies. vote_activity is read
-// newest-first under SQL LIMIT/OFFSET; its row builder turns every event it
+// Only a category whose page IS its sources' rows, ordered and offset without
+// classification, can be counted this way: the count is those sources' own
+// predicates, so it cannot drift from the rows. `vote` qualifies. vote_activity is
+// read newest-first under SQL LIMIT/OFFSET; its row builder turns every event it
 // returns into exactly one feed row; neither plumbing rule can remove one (both
 // only ever drop transfer rows); and its value filter is the same exact
 // event-time predicate `rowMeetsExactUsdMinimum` re-applies to the built rows, so
 // a filtered total matches the filtered feed.
+//
+// The vote feed is TWO such sources — vote_activity plus the collective (Council /
+// Technical Committee) votes out of raw_events — so the total is their union,
+// counted under exactly the conditions the feed reads them under: each source's
+// own distinct (block, event) count, and the collective side omitted precisely
+// when `collectiveVotesAdmitted` kept it out of the feed (any value floor, or a
+// token filter that excludes HDX). Both sources are read newest-first with no
+// cross-source classification, so no row can be counted in one and dropped in the
+// other; getVoteFeedRows' rank translation only decides WHICH rows a page shows,
+// never how many the feed holds.
 //
 // Nothing else does, for two different reasons. Staking is read the same way, but
 // its row builder discards source events three ways — suppressGigaCompanionEvents
@@ -12290,16 +12488,19 @@ export async function getGlobalActivityTotal(
       // Votes lock HDX only, so any other token filter selects nothing.
       if (tokenIds != null && !tokenIds.includes(0)) return { total: 0, complete: true }
       const amountFilter = eventValueFilterSql('0', voteAmountSqlExpr(), 'block_timestamp', filters, prices, 'vote_price')
-      const res = await client.query({
-        query: `SELECT toString(uniqExact((block_height, event_index))) AS c
-                FROM price_data.vote_activity FINAL
-                ${amountFilter.joinSql}
-                WHERE ${tw ?? '1'}
-                  AND event_name IN ('ConvictionVoting.Voted','Democracy.Voted')
-                  ${amountFilter.predicateSql}`,
-        format: 'JSONEachRow',
-      })
-      return { total: Number((await res.json<{ c: string }>())[0]?.c ?? 0), complete: true }
+      const [res, collective] = await Promise.all([
+        client.query({
+          query: `SELECT toString(uniqExact((block_height, event_index))) AS c
+                  FROM price_data.vote_activity FINAL
+                  ${amountFilter.joinSql}
+                  WHERE ${tw ?? '1'}
+                    AND event_name IN ('ConvictionVoting.Voted','Democracy.Voted')
+                    ${amountFilter.predicateSql}`,
+          format: 'JSONEachRow',
+        }),
+        collectiveVotesAdmitted(filters) ? countCollectiveVotes(from, to) : 0,
+      ])
+      return { total: Number((await res.json<{ c: string }>())[0]?.c ?? 0) + collective, complete: true }
     })
 }
 
@@ -13334,6 +13535,15 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
       })
     }
 
+    // Collective (Council / Technical Committee) votes, through the same builder
+    // the merged feed reads them with — so /vote/<block>-e<index> resolves for one
+    // of them and says exactly what the feed said. No hook variant: a collective
+    // vote needs a member origin, so it always has an extrinsic (the same reason
+    // getBlockHookActivity has no vote arm for the conviction pallets either).
+    for (const e of events.filter(ev => COLLECTIVE_VOTE_EVENTS.includes(ev.event_name))) {
+      rows.push(voteActivityRow(collectiveVoteRow(e, hdx)))
+    }
+
     const eventIndices = events.map(e => e.event_index).join(',')
     if (eventIndices) {
       const mmRes = await client.query({
@@ -14271,30 +14481,13 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     const rewardsP: Promise<ActivityRow[]> = (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')
       ? getRecentRewardClaims(fetchN, from, to, undefined, [assetId], undefined, undefined, fixedAssetFilters)
       : Promise.resolve([])
-    const votesP: Promise<ActivityRow[]> = wantVotes ? getRecentVotes(fetchN, from, to, 0, {}, undefined, queryFilters).then(rows => rows.map(v => ({
-      type: 'vote' as const,
-      blockHeight: v.blockHeight,
-      timestamp: v.timestamp,
-      eventIndex: v.eventIndex,
-      extrinsicIndex: v.extrinsicIndex,
-      who: v.account,
-      to: null,
-      asset: v.asset,
-      assetIn: null,
-      assetOut: null,
-      amount: v.amount,
-      amountIn: null,
-      amountOut: null,
-      valueUsd: v.valueUsd,
-      votePallet: v.pallet,
-      voteAction: v.action,
-      voteRef: v.referendum,
-      ...referendumRefFields(v.pallet, v.referendum),
-      voteSide: v.side,
-      voteConviction: v.conviction,
-      linkBlock: v.blockHeight,
-      linkIndex: v.extrinsicIndex,
-    }))) : Promise.resolve([])
+    // Votes reach an asset feed only for HDX (`wantVotes` requires assetId 0),
+    // which is what governance capital is denominated in. Both vote sources join
+    // it, through the same builder every other feed uses, so the HDX page and the
+    // chain-wide vote tab classify a collective vote identically.
+    const votesP: Promise<ActivityRow[]> = wantVotes
+      ? getVoteFeedRows(fetchN, from, to, 0, queryFilters, collectiveVotesAdmitted(queryFilters)).then(rows => rows.map(voteActivityRow))
+      : Promise.resolve([])
 
     const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, nttOut, nttIn, mm, otc, staking, votes] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, nttOutP, nttInP, mmP, otcP, stakingP, votesP])
     // Drop transfer legs of the asset's own trades (hops/fee legs share the extrinsic).
@@ -15998,12 +16191,21 @@ async function enumeratedActivityRowsUncached(
   const depth = EXACT_SMALL_SOURCE_ROWS + 1
   const xcmDepth = EXACT_XCM_SOURCE_ROWS + 1
   const need = enumeratedSourceNeed(type)
-  const [otc, dcaFailures, rewards, staking, votes, xcmLegs, nttLegs] = await Promise.all([
+  const [otc, dcaFailures, rewards, staking, voteLegs, xcmLegs, nttLegs] = await Promise.all([
     need.otc ? getRecentOtc(depth, from, to, 0, {}, undefined, accounts) : [],
     need.dcaFailures ? getRecentDcaFailures(depth, from, to, accounts) : [],
     need.rewards ? getRecentRewardClaims(depth, from, to, accounts) : [],
     need.staking ? getRecentStaking(depth, from, to, accounts, 0, {}, undefined, undefined) : [],
-    need.votes ? getRecentVotes(depth, from, to, 0, {}, accounts, {}).then(rows => rows.map(voteActivityRow)) : [],
+    // Two vote sources, each read to its own cap and landing in the one `votes`
+    // slot the classifier expects: the indexed conviction/Democracy rows, and the
+    // collective (Council / Technical Committee) votes out of raw_events. The
+    // collective read is keyed on the real VOTER account — account_activity_v3
+    // indexes a 32-byte proposal hash as if it were an account, so an arm built on
+    // that index would hand a hash-shaped "account" its own votes.
+    need.votes ? Promise.all([
+      getRecentVotes(depth, from, to, 0, {}, accounts, {}).then(rows => rows.map(voteActivityRow)),
+      getCollectiveVotes(accounts, depth, from, to).then(rows => rows.map(voteActivityRow)),
+    ]) : [],
     // The three XCM legs each have their own limit, so saturation is per leg: the
     // concatenation reaching a cap says nothing about whether one leg was exhausted.
     need.xcm ? Promise.all([
@@ -16017,12 +16219,13 @@ async function enumeratedActivityRowsUncached(
     ]) : [],
   ])
   const capped: [ActivityRow[], number][] = [
-    [otc, depth], [dcaFailures, depth], [rewards, depth], [staking, depth], [votes, depth],
+    [otc, depth], [dcaFailures, depth], [rewards, depth], [staking, depth],
+    ...voteLegs.map(leg => [leg, depth] as [ActivityRow[], number]),
     ...xcmLegs.map(leg => [leg, xcmDepth] as [ActivityRow[], number]),
     ...nttLegs.map(leg => [leg, depth] as [ActivityRow[], number]),
   ]
   if (capped.some(([rows, cap]) => rows.length >= cap)) return null
-  return { otc, dcaFailures, rewards, staking, votes, xcm: xcmLegs.flat(), ntt: nttLegs.flat() }
+  return { otc, dcaFailures, rewards, staking, votes: voteLegs.flat(), xcm: xcmLegs.flat(), ntt: nttLegs.flat() }
 }
 
 // Which types this path can count exactly, in the order the reasoning above splits
@@ -16803,9 +17006,20 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const staking = exact ? exact.enumerated.staking
     : wantStaking ? await getRecentStaking(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
   noteSource(staking.length, oldestWindowBlock(staking, r => r.blockHeight))
-  const voteRows: ActivityRow[] = exact ? exact.enumerated.votes
-    : wantVotes ? (await getRecentVotes(catFetch, from, to, 0, {}, accounts, queryFilters)).map(voteActivityRow) : []
-  noteSource(voteRows.length, oldestWindowBlock(voteRows, r => r.blockHeight))
+  const govVotes = exact || !wantVotes ? []
+    : (await getRecentVotes(catFetch, from, to, 0, {}, accounts, queryFilters)).map(voteActivityRow)
+  // Collective (Council / Technical Committee) votes are a source of their own,
+  // read newest-first under its own limit — so it contributes its own frontier
+  // rather than borrowing the indexed source's. Skipped under a filter no
+  // amountless row can satisfy (collectiveVotesAdmitted).
+  const collectiveVotes = exact || !wantVotes || !collectiveVotesAdmitted(queryFilters) ? []
+    : (await getCollectiveVotes(accounts, catFetch, from, to)).map(voteActivityRow)
+  const voteRows: ActivityRow[] = exact ? exact.enumerated.votes : [...govVotes, ...collectiveVotes]
+  if (exact) noteSource(voteRows.length, oldestWindowBlock(voteRows, r => r.blockHeight))
+  else {
+    noteSource(govVotes.length, oldestWindowBlock(govVotes, r => r.blockHeight))
+    noteSource(collectiveVotes.length, oldestWindowBlock(collectiveVotes, r => r.blockHeight))
+  }
   const rewards = exact ? exact.enumerated.rewards
     : (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')
     ? await getRecentRewardClaims(catFetch, from, to, accounts, tokenIds, undefined, undefined, queryFilters)
@@ -21425,7 +21639,15 @@ const TRANSFER_EVENTS = ['Balances.Transfer', 'Tokens.Transfer', 'Currencies.Tra
 // LiquidityAdded naming the same owner and asset (routerHopLiquiditySql's
 // predicate; suppressPositionCreatedCompanions in the in-memory builders).
 const LIQUIDITY_EVENTS = ['Omnipool.LiquidityAdded', 'Omnipool.LiquidityRemoved', 'Omnipool.PositionCreated', 'Stableswap.LiquidityAdded', 'Stableswap.LiquidityRemoved', 'XYK.LiquidityAdded', 'XYK.LiquidityRemoved', 'XYK.PoolCreated', 'XYK.PoolDestroyed', 'OmnipoolLiquidityMining.RewardClaimed', 'XYKLiquidityMining.RewardClaimed']
-const VOTE_EVENTS = ['ConvictionVoting.Voted', 'Democracy.Voted']
+// Every event the vote CATEGORY renders: the capital-locking conviction/Democracy
+// votes plus the collective (Council / Technical Committee) ones the feed merges
+// in. Used for the daily histogram's name set and for transfer subordination (a
+// collective vote's extrinsic owns its fee/plumbing legs like any other activity).
+// Governance rows are HDX-denominated whichever pallet cast them — a collective
+// vote locks nothing but is still an HDX-tagged row in every feed (its VoteRow
+// carries the HDX descriptor with no amount), so the HDX token predicates below
+// and the histogram MV's `asset_refs` treat all four names alike.
+const VOTE_EVENTS = ['ConvictionVoting.Voted', 'Democracy.Voted', ...COLLECTIVE_VOTE_EVENTS]
 const sqlNames = (names: readonly string[]) => names.map(n => `'${n}'`).join(',')
 
 export async function getDailyActivity(scope: string, filters: DailyFilters = {}): Promise<{ date: string; value: number }[]> {

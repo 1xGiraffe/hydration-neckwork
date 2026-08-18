@@ -63,6 +63,9 @@ export type Route =
   | { name: 'omnipool' }
   | { name: 'liquidity' }
   | { name: 'link-device' } // QR login handoff target; the code rides in the fragment
+  // Alert channels, rules and inbox. Reachable logged out — that page is the
+  // conversion surface every "Get notified" button points at.
+  | { name: 'notifications' }
   | { name: 'notfound'; path: string }
 
 // Internal nav event the store listens to (pushState/replaceState don't fire
@@ -145,6 +148,7 @@ export function parseRoute(loc: string): Route {
     case 'omnipool': return { name: 'omnipool' }
     case 'liquidity': return { name: 'liquidity' }
     case 'link-device': return { name: 'link-device' }
+    case 'notifications': return { name: 'notifications' }
     default:
       if ((ACTIVITY_SLUGS as readonly string[]).includes(parts[0])) {
         const slug = parts[0] as ActivitySlug
@@ -299,6 +303,9 @@ export const paths = {
   lists: () => '/lists',
   list: (id: string) => `/list/${encodeURIComponent(id)}`,
   linkDevice: () => '/link-device',
+  // The page's three tabs are query state (`?tab=alerts`), like every other
+  // tabbed surface; the inbox is the default and carries no parameter.
+  notifications: (tab?: 'alerts' | 'channels' | null) => (tab ? `/notifications?tab=${tab}` : '/notifications'),
 }
 
 export function Link({ to, children, className, title, ariaLabel, tabIndex, onClick, style, data }: { to: string; children: ReactNode; className?: string; title?: string; ariaLabel?: string; tabIndex?: number; onClick?: (e: MouseEvent) => void; style?: CSSProperties; data?: Record<string, string> }) {

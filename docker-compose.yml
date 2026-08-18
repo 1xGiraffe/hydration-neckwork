@@ -529,6 +529,18 @@ services:
       # Sourcify-compatible routes answer for.
       - SMART_CONTRACT_VERIFIER_URL=${SMART_CONTRACT_VERIFIER_URL:-http://smart-contract-verifier:8050}
       - EVM_CHAIN_ID=${EVM_CHAIN_ID:-222222}
+      # Notifications. All optional: with no VAPID pair Web Push registration
+      # answers 503, with no bot token the Telegram long-poll loop never starts,
+      # and both simply report as unconfigured to the client. Never commit
+      # populated values — these are credentials.
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
+      - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
+      - VAPID_SUBJECT=${VAPID_SUBJECT:-}
+      # Origin the links inside a notification point at, and the evaluator's
+      # tick interval.
+      - EXPLORER_PUBLIC_URL=${EXPLORER_PUBLIC_URL:-}
+      - NOTIFY_EVAL_MS=${NOTIFY_EVAL_MS:-}
     networks:
       - neckwork
 

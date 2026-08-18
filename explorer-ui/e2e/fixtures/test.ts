@@ -3,8 +3,10 @@ import { expect, test as base } from '@playwright/test'
 import { mockSync, buildAccountsForViewer } from '../../tests/fixtures/mockApi'
 import type { ActivityRow } from '../../src/types'
 import type {
-  AccountRef, ListDetailResponse, ListTagDetail, ListSummaryRef, MeResponse, TagMapResponse, TagDetail,
+  AccountRef, ListDetailResponse, ListTagDetail, ListSummaryRef, MeResponse, Tag, TagMapResponse, TagDetail,
+  NotificationChannel, NotificationInboxRow, NotificationKind, NotificationRule, WebPushSubscriptionInput,
 } from '../../src/types'
+import { KIND_LABELS, canonicalRuleParams, ruleTagTarget } from '../../src/notificationKinds'
 
 // The wallet-login identity every mock session resolves to, and the bearer
 // token `/user/auth/verify` hands back for it — fixed strings so a spec can
@@ -87,6 +89,46 @@ export interface UserMockState {
   // straight off the SAME rows the plain directory ranks, not fetched from a
   // separate aggregate.
   listTagSummaryOverrides: Record<string, Partial<TagDetail>>
+  notifications: NotificationMockState
+}
+
+// Everything under /user/notifications, as one mutable object. `vapidPublicKey`
+// and `telegramBot` default to configured, because that is the interesting
+// page — a spec proving the "not configured on this deployment" copy sets them
+// to '' before navigating. `webPushSubscriptions` is a capture log: the whole
+// point of a push spec is asserting on the subscription the browser handed
+// over, so the mock keeps every one it was POSTed.
+export interface NotificationMockState {
+  channels: NotificationChannel[]
+  rules: NotificationRule[]
+  inbox: NotificationInboxRow[]
+  vapidPublicKey: string
+  telegramBot: string
+  // code → status. A spec calls claimTelegramLink() to flip the pending code
+  // the UI is polling, standing in for someone tapping /start in the bot.
+  telegramLinks: Record<string, 'pending' | 'claimed' | 'expired'>
+  webPushSubscriptions: WebPushSubscriptionInput[]
+  nextId: number
+}
+
+export const E2E_VAPID_PUBLIC_KEY = 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U'
+export const E2E_TELEGRAM_BOT = 'hydration_explorer_bot'
+// The fixed code every link request in a spec gets, so a spec can build the
+// expected deep link without reading it back out of the page.
+export const E2E_TELEGRAM_LINK_CODE = 'a1b2c3d4e5f6'
+export const E2E_TELEGRAM_USERNAME = 'e2etester'
+
+function freshNotifications(): NotificationMockState {
+  return {
+    channels: [],
+    rules: [],
+    inbox: [],
+    vapidPublicKey: E2E_VAPID_PUBLIC_KEY,
+    telegramBot: E2E_TELEGRAM_BOT,
+    telegramLinks: {},
+    webPushSubscriptions: [],
+    nextId: 1,
+  }
 }
 
 function freshState(): UserMockState {
@@ -99,7 +141,77 @@ function freshState(): UserMockState {
     order: [],
     tagMap: { lists: [{ listId: 'system', name: 'Hydration', tags: [] }] },
     listTagSummaryOverrides: {},
+    notifications: freshNotifications(),
   }
+}
+
+// The summary line the API's own describeRule() produces. Kept deliberately
+// coarse — a spec asserts on the KIND label and whatever `name` it chose, and
+// pinning the server's exact phrasing here would make this fixture a second
+// (drifting) copy of that module.
+function mockRuleSummary(kind: NotificationKind, params: Record<string, unknown>): string {
+  const describe = (k: string, v: unknown): string => {
+    if (k !== 'target' || !v || typeof v !== 'object') return `${k} ${String(v)}`
+    const t = v as Record<string, unknown>
+    return t.kind === 'address' ? `address ${String(t.address)}` : `tag ${String(t.tagId)}`
+  }
+  const parts = Object.entries(params).map(([k, v]) => describe(k, v))
+  return parts.length ? `${KIND_LABELS[kind].toLowerCase()} — ${parts.join(', ')}` : KIND_LABELS[kind].toLowerCase()
+}
+
+// The display fields the API resolves for a tag target, from whatever the
+// viewer's tag map knows about that tag — the real route reads the same two
+// sources (system tags and the viewer's own lists) before answering. A tag
+// nobody in this state has heard of still gets a label, so a rule created
+// against one never renders as a blank pill.
+function mockTargetDisplay(state: UserMockState, params: Record<string, unknown>): Partial<NotificationRule> {
+  const target = ruleTagTarget({ kind: 'account-activity', params })
+  if (!target || target.kind === 'address') return {}
+  // A system tag comes from the shared directory (it is public, and the same
+  // for every viewer); a list tag only from the viewer's own map.
+  if (target.kind === 'tag') {
+    const tag = (mockSync<Tag[]>('/explorer/tags') ?? []).find(t => t.tagId === target.tagId)
+    if (tag) return { targetLabel: tag.name, targetIcon: tag.icon, targetColor: tag.color, targetMemberCount: tag.memberCount }
+  } else {
+    const lib = (state.tagMap?.lists ?? []).find(l => l.listId === target.listId)
+    const tag = lib?.tags.find(t => t.tagId === target.tagId)
+    if (tag) return { targetLabel: tag.name, targetIcon: tag.icon, targetColor: tag.color, targetMemberCount: tag.members.length }
+  }
+  return { targetLabel: target.tagId }
+}
+
+// Flip a pending Telegram link code to claimed and attach the channel it
+// creates, exactly as the bot's /start handler would. With no `code`, claims
+// whichever code is currently pending (there is only ever one in a flow).
+export function claimTelegramLink(state: UserMockState, code?: string): void {
+  const n = state.notifications
+  const target = code ?? Object.keys(n.telegramLinks).find(c => n.telegramLinks[c] === 'pending')
+  if (!target) return
+  n.telegramLinks[target] = 'claimed'
+  if (!n.channels.some(c => c.kind === 'telegram')) {
+    n.channels.push({ id: `chan-telegram-${n.nextId++}`, kind: 'telegram', label: '', verified: true, username: E2E_TELEGRAM_USERNAME })
+  }
+}
+
+// Push a notification into the inbox (and bump the unread count with it) —
+// there is no evaluator here, so a spec that needs inbox rows seeds them.
+export function seedInboxRow(state: UserMockState, row: Partial<NotificationInboxRow> = {}): NotificationInboxRow {
+  const n = state.notifications
+  const full: NotificationInboxRow = {
+    id: `notif-${n.nextId++}`,
+    ruleId: n.rules[0]?.id ?? 'rule-1',
+    kind: 'large-trade',
+    kindLabel: KIND_LABELS['large-trade'],
+    title: 'Large trade: 4.87M HDX → 106k USDT',
+    body: 'Swapped on Omnipool for $106k.',
+    url: '/activity',
+    blockHeight: 12_848_601,
+    read: false,
+    createdAt: '2026-07-15 11:59:00',
+    ...row,
+  }
+  n.inbox.unshift(full)
+  return full
 }
 
 // A list tag's own aggregate view, built from either an OWNED list
@@ -235,6 +347,148 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
   }
 
   let m: RegExpMatchArray | null
+
+  // ── notifications ───────────────────────────────────────────────────────
+  // The full management surface, stateful: a rule created through the UI is
+  // there on the next overview, a mute round-trips, a delete removes it. The
+  // evaluator has no counterpart here — inbox rows are seeded by the spec
+  // (seedInboxRow) rather than produced.
+  const notify = state.notifications
+  if (method === 'GET' && path === '/user/notifications/overview') {
+    await fulfillJson(route, 200, {
+      channels: notify.channels,
+      rules: notify.rules,
+      unread: notify.inbox.filter(r => !r.read).length,
+      vapidPublicKey: notify.vapidPublicKey,
+      telegramBot: notify.telegramBot,
+    })
+    return
+  }
+  if (method === 'POST' && path === '/user/notifications/channels/webpush') {
+    if (!notify.vapidPublicKey) { await fulfillJson(route, 503, { error: 'Web Push is not configured on this deployment' }); return }
+    const { subscription, label } = bodyOf(route) as { subscription?: WebPushSubscriptionInput; label?: string }
+    if (!subscription?.endpoint || !subscription.keys?.p256dh || !subscription.keys?.auth) {
+      await fulfillJson(route, 400, { error: 'Invalid push subscription' })
+      return
+    }
+    notify.webPushSubscriptions.push(subscription)
+    // The API describes a webpush channel by its endpoint HOST alone — never
+    // the endpoint or its keys — so the mock derives the same field.
+    let host = ''
+    try { host = new URL(subscription.endpoint).host } catch { host = '' }
+    const channel: NotificationChannel = { id: `chan-webpush-${notify.nextId++}`, kind: 'webpush', label: label ?? '', verified: true, endpointHost: host }
+    notify.channels.push(channel)
+    await fulfillJson(route, 200, channel)
+    return
+  }
+  if (method === 'POST' && path === '/user/notifications/channels/telegram/link') {
+    if (!notify.telegramBot) { await fulfillJson(route, 503, { error: 'Telegram is not configured on this deployment' }); return }
+    notify.telegramLinks[E2E_TELEGRAM_LINK_CODE] = 'pending'
+    await fulfillJson(route, 200, {
+      code: E2E_TELEGRAM_LINK_CODE,
+      url: `https://t.me/${notify.telegramBot}?start=${E2E_TELEGRAM_LINK_CODE}`,
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    })
+    return
+  }
+  if (method === 'GET' && (m = path.match(/^\/user\/notifications\/channels\/telegram\/link\/([^/]+)$/))) {
+    await fulfillJson(route, 200, { status: notify.telegramLinks[decodeURIComponent(m[1])] ?? 'expired' })
+    return
+  }
+  if (method === 'POST' && (m = path.match(/^\/user\/notifications\/channels\/([^/]+)\/test$/))) {
+    const channel = notify.channels.find(c => c.id === decodeURIComponent(m![1]))
+    if (!channel) { await fulfillJson(route, 404, { error: 'Channel not found' }); return }
+    await fulfillJson(route, 200, { ok: true })
+    return
+  }
+  if (method === 'DELETE' && (m = path.match(/^\/user\/notifications\/channels\/([^/]+)$/))) {
+    const id = decodeURIComponent(m[1])
+    notify.channels = notify.channels.filter(c => c.id !== id)
+    // A rule that named only this channel falls back to "all channels",
+    // matching the store's own empty-is-all rule.
+    for (const rule of notify.rules) rule.channels = rule.channels.filter(c => c !== id)
+    await fulfillJson(route, 200, { ok: true })
+    return
+  }
+  if (method === 'POST' && path === '/user/notifications/rules') {
+    const body = bodyOf(route) as { kind?: NotificationKind; params?: Record<string, unknown>; name?: string; channels?: string[]; cooldownS?: number }
+    if (!body.kind || !KIND_LABELS[body.kind]) { await fulfillJson(route, 400, { error: 'Invalid alert' }); return }
+    const params = body.params ?? {}
+    // Idempotent create, exactly as the route is: an equivalent rule (same kind,
+    // equivalent parameters — a legacy `{ address }` and a `{ target }` naming
+    // the same account ARE equivalent) is returned as it stands, flagged
+    // `existing`, instead of making a second one. That is what makes a double
+    // click, or two surfaces expressing the same subscription, harmless.
+    const key = canonicalRuleParams(body.kind, params)
+    const already = notify.rules.find(r => r.kind === body.kind && canonicalRuleParams(r.kind, r.params) === key)
+    if (already) { await fulfillJson(route, 200, { ...already, existing: true }); return }
+    const rule: NotificationRule = {
+      id: `rule-${notify.nextId++}`,
+      kind: body.kind,
+      kindLabel: KIND_LABELS[body.kind],
+      name: body.name ?? '',
+      summary: mockRuleSummary(body.kind, params),
+      params,
+      ...mockTargetDisplay(state, params),
+      channels: body.channels ?? [],
+      muted: false,
+      cooldownS: body.cooldownS ?? 0,
+    }
+    notify.rules.push(rule)
+    await fulfillJson(route, 200, rule)
+    return
+  }
+  if (method === 'PATCH' && (m = path.match(/^\/user\/notifications\/rules\/([^/]+)$/))) {
+    const rule = notify.rules.find(r => r.id === decodeURIComponent(m![1]))
+    if (!rule) { await fulfillJson(route, 404, { error: 'not found' }); return }
+    const body = bodyOf(route) as { muted?: boolean; name?: string; params?: Record<string, unknown>; channels?: string[]; cooldownS?: number }
+    if (body.muted != null) rule.muted = body.muted
+    if (body.name != null) rule.name = body.name
+    if (body.params != null) {
+      rule.params = body.params
+      rule.summary = mockRuleSummary(rule.kind, body.params)
+      Object.assign(rule, { targetLabel: undefined, targetIcon: undefined, targetColor: undefined, targetMemberCount: undefined }, mockTargetDisplay(state, body.params))
+    }
+    if (body.channels != null) rule.channels = body.channels
+    if (body.cooldownS != null) rule.cooldownS = body.cooldownS
+    await fulfillJson(route, 200, rule)
+    return
+  }
+  if (method === 'DELETE' && (m = path.match(/^\/user\/notifications\/rules\/([^/]+)$/))) {
+    const id = decodeURIComponent(m[1])
+    notify.rules = notify.rules.filter(r => r.id !== id)
+    await fulfillJson(route, 200, { ok: true })
+    return
+  }
+  if (method === 'GET' && path === '/user/notifications/inbox') {
+    const limit = Number(url.searchParams.get('limit') ?? 50)
+    const offset = Number(url.searchParams.get('offset') ?? 0)
+    await fulfillJson(route, 200, {
+      rows: notify.inbox.slice(offset, offset + limit),
+      unread: notify.inbox.filter(r => !r.read).length,
+      total: notify.inbox.length,
+    })
+    return
+  }
+  if (method === 'POST' && path === '/user/notifications/inbox/read') {
+    const { ids } = bodyOf(route) as { ids?: string[] }
+    let marked = 0
+    for (const row of notify.inbox) {
+      if (row.read || (ids && !ids.includes(row.id))) continue
+      row.read = true
+      marked++
+    }
+    await fulfillJson(route, 200, { ok: true, marked, unread: notify.inbox.filter(r => !r.read).length })
+    return
+  }
+  // Empties the history and nothing else — the rules stay exactly as they are,
+  // which is the distinction the confirm copy makes.
+  if (method === 'POST' && path === '/user/notifications/inbox/clear') {
+    const cleared = notify.inbox.length
+    notify.inbox = []
+    await fulfillJson(route, 200, { ok: true, cleared, unread: 0 })
+    return
+  }
 
   if (method === 'GET' && (m = path.match(/^\/user\/lists\/([^/]+)$/))) {
     const lib = state.lists.find(l => l.listId === decodeURIComponent(m![1]))
