@@ -6,7 +6,7 @@ import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../
 import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ConvictionTag, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
 import { LIQ_LABELS, MM_LABELS } from '../components/activityColors'
 import { Crumbs, F, AddrPill, AssetChip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge } from '../components/ui'
-import { convictionLabel, voteSideLabel } from '../utils/voteRows'
+import { convictionLabel, voteSideLabel, voteSubjectLabel } from '../utils/voteRows'
 
 export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: string }) {
   const label = activityLabel(slug)
@@ -48,7 +48,8 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
 
   const eventId = row?.eventIndex != null ? `${row.blockHeight}-${row.eventIndex}` : null
   const voteSub = row?.type === 'vote'
-    ? [voteSideLabel(row.voteSide), convictionLabel(row.voteConviction), row.voteRefTitle ?? (row.voteRef ? `Referendum #${row.voteRef}` : null)].filter(Boolean).join(' · ')
+    ? [voteSideLabel(row.voteSide), convictionLabel(row.voteConviction),
+      row.voteRef ? voteSubjectLabel(row.voteRef, row.voteRefPallet, row.voteRefTitle) : null].filter(Boolean).join(' · ')
     : ''
   return (
     <div className="wrap">
@@ -108,6 +109,13 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
               {row.voteRef && row.voteRefPallet && <>
                 <div className="dt">Referendum</div>
                 <div className="dd"><Link to={paths.referendum(row.voteRefPallet, row.voteRef)} className="ref-link">Open referendum #{row.voteRef}</Link></div>
+              </>}
+              {/* A collective (Council / Technical Committee) vote has no referendum
+                  page to open: it names a proposal hash, and which committee cast it
+                  is the fact that page would have carried. */}
+              {row.voteRef && !row.voteRefPallet && <>
+                <div className="dt">Motion</div>
+                <div className="dd"><span className="mono">{row.voteRef}</span>{row.votePallet && <span className="muted"> · {row.votePallet}</span>}</div>
               </>}
             </>}
             {row.type === 'otc' && <>
