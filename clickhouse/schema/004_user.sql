@@ -1,4 +1,5 @@
--- User-authored explorer state (profiles, sessions, tag lists). Unlike every
+-- User-authored explorer state (profiles, sessions, tag lists, notification
+-- subscriptions and their inbox). Unlike every
 -- other table, this data is NOT reproducible from raw chain data: it is written
 -- only by the api service and must be preserved across projection rebuilds and
 -- backed up (see ops/backup-user-tables.sh). Same idiom as account_tags:
@@ -11,3 +12,15 @@ CREATE TABLE IF NOT EXISTS price_data.user_tags (list_id String, tag_id String, 
 CREATE TABLE IF NOT EXISTS price_data.user_tag_members (list_id String, tag_id String, account_id String, position UInt32 DEFAULT 0, deleted UInt8 DEFAULT 0, created_at DateTime DEFAULT now(), updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (list_id, tag_id, account_id) SETTINGS index_granularity = 256;
 CREATE TABLE IF NOT EXISTS price_data.user_list_subscriptions (list_id String, account_id String, status LowCardinality(String), origin LowCardinality(String), deleted UInt8 DEFAULT 0, created_at DateTime DEFAULT now(), updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (list_id, account_id) SETTINGS index_granularity = 64;
 CREATE TABLE IF NOT EXISTS price_data.user_list_order (account_id String, list_ids Array(String), deleted UInt8 DEFAULT 0, created_at DateTime DEFAULT now(), updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY account_id SETTINGS index_granularity = 64;
+-- Notifications. `config` and `params` are opaque JSON blobs written and read
+-- only by the api service: a channel config holds a push endpoint + its keys or
+-- a Telegram chat id, and rule params hold whatever the rule kind's schema
+-- accepts — both are private user data that no other read path may surface.
+-- The inbox is the durable record of every notification that was produced,
+-- whether or not any channel actually delivered it; its TTL bounds that history
+-- to 180 days. `user_notification_state` is the evaluator's small key/value
+-- store (live-head cursor, per-rule armed state for threshold triggers).
+CREATE TABLE IF NOT EXISTS price_data.user_notification_channels (channel_id String, account_id String, kind LowCardinality(String), config String DEFAULT '', label String DEFAULT '', verified UInt8 DEFAULT 0, deleted UInt8 DEFAULT 0, created_at DateTime DEFAULT now(), updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY channel_id SETTINGS index_granularity = 64;
+CREATE TABLE IF NOT EXISTS price_data.user_notification_rules (rule_id String, account_id String, kind LowCardinality(String), name String DEFAULT '', params String DEFAULT '', channels Array(String) DEFAULT [], muted UInt8 DEFAULT 0, cooldown_s UInt32 DEFAULT 0, deleted UInt8 DEFAULT 0, created_at DateTime DEFAULT now(), updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY rule_id SETTINGS index_granularity = 64;
+CREATE TABLE IF NOT EXISTS price_data.user_notification_inbox (notification_id String, account_id String, rule_id String, kind LowCardinality(String), title String, body String DEFAULT '', url String DEFAULT '', block_height UInt32 DEFAULT 0, read UInt8 DEFAULT 0, deleted UInt8 DEFAULT 0, created_at DateTime DEFAULT now(), updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY notification_id TTL created_at + INTERVAL 180 DAY SETTINGS index_granularity = 256;
+CREATE TABLE IF NOT EXISTS price_data.user_notification_state (key String, value String DEFAULT '', deleted UInt8 DEFAULT 0, created_at DateTime DEFAULT now(), updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY key SETTINGS index_granularity = 64;
