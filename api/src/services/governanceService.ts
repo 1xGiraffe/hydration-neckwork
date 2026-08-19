@@ -4,6 +4,8 @@ import { convictionName, decodeVoteByte, weightedVotePower } from './convictionW
 import { assetDescriptor } from './explorerAssets.ts'
 import { accountRef, ensurePrices, nestedRemovalRefs, nestedVoteInfos, removalRefsFromPermitData, voteFromPermitData, type AccountRef, type AssetRef } from './explorerService.ts'
 import { referendumTitles } from './referendumTitleService.ts'
+import { pendingNodeApi } from './pendingHeadService.ts'
+import { curveThresholdPerbill, PERBILL, perbillOfRational, trackById, undecidingTimeoutBlocks, type TrackDef } from './referendaTracks.ts'
 
 // Governance referendum detail.
 //
@@ -125,6 +127,82 @@ export interface ReferendumDetail {
   voters: ReferendumVoter[]
   votesShown: number
   votesTotal: number
+  // Every lifecycle event, in block order — the referendum's own history, from
+  // submission through deposits and phase changes to the deposit refunds that
+  // trail the conclusion. Already loaded to derive `status`; here it is shown.
+  timeline: ReferendumTimelineEntry[]
+  // The track's parameters (OpenGov only; Democracy predates tracks). Present
+  // for concluded referenda too — the name belongs in the header regardless.
+  trackInfo: ReferendumTrackRef | null
+  // The pallet's CURRENT tally, read live from Referenda.ReferendumInfoFor —
+  // the figure the lifecycle events cannot carry while the referendum runs (see
+  // OnChainTally). Conviction-weighted and inclusive of delegated power, like
+  // the final tally. Null when the referendum is concluded (the concluding
+  // event's tally is the last word), the storage read is unavailable, or the
+  // pallet is Democracy.
+  liveTally: LiveReferendumTally | null
+  // Where the referendum stands in its track's lifecycle and when each phase
+  // ends, for the progress strip. Null once concluded (and for Democracy).
+  progress: ReferendumProgress | null
+}
+
+export interface ReferendumTimelineEntry {
+  event: string
+  blockHeight: number
+  extrinsicIndex: number | null
+  timestamp: string
+}
+
+export interface ReferendumTrackRef {
+  id: number
+  name: string
+  // Parachain blocks, straight from the runtime constant. The UI turns them
+  // into durations with the nominal slot time, never a pinned seconds-per-block.
+  preparePeriod: number
+  decisionPeriod: number
+  confirmPeriod: number
+  minEnactmentPeriod: number
+  decisionDeposit: string
+}
+
+export interface LiveReferendumTally {
+  ayes: string
+  nays: string
+  support: string
+  // balances.totalIssuance at the same read — the denominator the pallet's own
+  // support curve divides by. Null if that read failed independently.
+  electorate: string | null
+}
+
+// One gauge of the two OpenGov thresholds: where the referendum stands against
+// the track curve at this moment of the decision period. Perbill (1e9 = 100%).
+export interface ReferendumGauge {
+  // Null when no figure exists to compare (no live tally and no indexed votes).
+  currentPerbill: number | null
+  thresholdPerbill: number
+  passing: boolean | null
+  // What `currentPerbill` was computed from. 'chain' is ReferendumInfoFor's own
+  // tally; 'attributed' is the indexed direct votes, which miss delegated power.
+  source: 'chain' | 'attributed' | null
+}
+
+export interface ReferendumProgress {
+  phase: 'preparing' | 'deciding' | 'confirming'
+  decisionDepositPlaced: boolean
+  submittedBlock: number
+  decisionStartBlock: number | null
+  // decisionStart + the track's decisionPeriod: when deciding stops — approval
+  // by then or rejection. A confirmation straddling this boundary runs on.
+  decisionEndBlock: number | null
+  confirmStartBlock: number | null
+  confirmEndBlock: number | null
+  // Preparing only: the earliest block deciding can begin (submitted +
+  // preparePeriod; an occupied track can hold it longer), and the block the
+  // pallet times the referendum out if the decision deposit never arrives.
+  earliestDecisionBlock: number | null
+  timeoutBlock: number | null
+  approval: ReferendumGauge | null
+  support: ReferendumGauge | null
 }
 
 let client: ClickHouseClient
@@ -241,6 +319,133 @@ export function onChainTallyFrom(rows: Pick<LifecycleRow, 'event_name' | 'block_
     return { ...tally, final: isConcludingEvent(rows[i].event_name), blockHeight: rows[i].block_height, timestamp: rows[i].ts }
   }
   return null
+}
+
+// Which lifecycle phase a still-running OpenGov referendum is in, from its
+// event history alone. Null once any concluding event exists (or before the
+// Submitted row is indexed): a concluded referendum has no phase to report.
+//
+// Confirmation can abort — support dipping below the curve mid-confirm emits
+// Referenda.ConfirmAborted and the referendum falls back to deciding — and then
+// begin again, so "confirming" means the LAST ConfirmStarted with no
+// ConfirmAborted after it, not any ConfirmStarted at all.
+export function opengovPhase(rows: Pick<LifecycleRow, 'event_name' | 'block_height'>[]): {
+  phase: 'preparing' | 'deciding' | 'confirming'
+  submittedBlock: number
+  decisionStartBlock: number | null
+  confirmStartBlock: number | null
+  decisionDepositPlaced: boolean
+} | null {
+  if (rows.some(row => isConcludingEvent(row.event_name))) return null
+  const submitted = rows.find(row => row.event_name === 'Referenda.Submitted')
+  if (!submitted) return null
+  let decisionStartBlock: number | null = null
+  let confirmStartBlock: number | null = null
+  let decisionDepositPlaced = false
+  for (const row of rows) {
+    if (row.event_name === 'Referenda.DecisionStarted') decisionStartBlock ??= row.block_height
+    else if (row.event_name === 'Referenda.DecisionDepositPlaced') decisionDepositPlaced = true
+    else if (row.event_name === 'Referenda.ConfirmStarted') confirmStartBlock = row.block_height
+    else if (row.event_name === 'Referenda.ConfirmAborted') confirmStartBlock = null
+  }
+  return {
+    phase: confirmStartBlock != null ? 'confirming' : decisionStartBlock != null ? 'deciding' : 'preparing',
+    submittedBlock: submitted.block_height,
+    decisionStartBlock,
+    confirmStartBlock,
+    decisionDepositPlaced,
+  }
+}
+
+// The live tally out of Referenda.ReferendumInfoFor, plus the total issuance its
+// support share divides by. This is the ONE figure a running referendum has that
+// the indexed events cannot supply (see OnChainTally) — conviction-weighted,
+// delegation included, current as of the read.
+//
+// A single storage read against the pending layer's already-connected node,
+// held for the same window as the running-referendum detail cache and requested
+// only for referenda with no concluding event — at most the few a track-capped
+// chain can have deciding at once, so this stays a bounded point read, not
+// request-time RPC fan-out. Null (never a guess) when the pending layer is
+// down, the referendum is not Ongoing on chain, or the shape surprises.
+async function liveReferendumState(index: number): Promise<LiveReferendumTally | null> {
+  return cached(`explorer:referendum:live:${index}`, RUNNING_TTL_MS, async () => {
+    const api = pendingNodeApi()
+    if (!api) return null
+    try {
+      const info = (await api.query.referenda.referendumInfoFor(index)).toJSON() as
+        { ongoing?: { tally?: { ayes?: unknown; nays?: unknown; support?: unknown } } } | null
+      const tally = info?.ongoing?.tally
+      if (!tally) return null
+      // polkadot.js JSON renders u128s above 2^53 as 0x-hex, smaller ones as numbers.
+      const planck = (value: unknown): string | null => {
+        if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return String(value)
+        if (typeof value === 'string' && /^(0x[0-9a-fA-F]+|\d+)$/.test(value)) return BigInt(value).toString()
+        return null
+      }
+      const ayes = planck(tally.ayes), nays = planck(tally.nays), support = planck(tally.support)
+      if (ayes == null || nays == null || support == null) return null
+      // The support curve divides by ACTIVE issuance (pallet_conviction_voting
+      // tallies against Currency::active_issuance = total − inactive), not total.
+      // On this chain the inactive share is ~2.18B of 6.42B HDX, so using total
+      // understated every support figure by a third.
+      const electorate = await Promise.all([api.query.balances.totalIssuance(), api.query.balances.inactiveIssuance()])
+        .then(([total, inactive]) => {
+          const t = planck(total.toJSON()), i = planck(inactive.toJSON())
+          return t == null ? null : (BigInt(t) - BigInt(i ?? '0')).toString()
+        })
+        .catch(() => null)
+      return { ayes, nays, support, electorate }
+    } catch {
+      return null
+    }
+  })
+}
+
+// The two Subsquare-style gauges and the phase-boundary blocks, computed from
+// the lifecycle, the track constants and the head block. The threshold curves
+// take x = the elapsed fraction of the decision period; before deciding starts
+// there is no x and the gauges stay null.
+export function progressFrom(
+  phaseInfo: NonNullable<ReturnType<typeof opengovPhase>>,
+  track: TrackDef,
+  headBlock: number,
+  live: LiveReferendumTally | null,
+  direct: Pick<ReferendumDetail['directTally'], 'ayes' | 'nays' | 'support'>,
+): ReferendumProgress {
+  const { phase, submittedBlock, decisionStartBlock, confirmStartBlock, decisionDepositPlaced } = phaseInfo
+  let approval: ReferendumGauge | null = null
+  let support: ReferendumGauge | null = null
+  if (decisionStartBlock != null && track.decisionPeriod > 0) {
+    const x = Math.round(Math.min(Math.max(headBlock - decisionStartBlock, 0), track.decisionPeriod) / track.decisionPeriod * PERBILL)
+    const gauge = (curve: TrackDef['minApproval'], current: number | null, source: ReferendumGauge['source']): ReferendumGauge => {
+      const thresholdPerbill = curveThresholdPerbill(curve, x)
+      return { currentPerbill: current, thresholdPerbill, passing: current == null ? null : current >= thresholdPerbill, source: current == null ? null : source }
+    }
+    if (live) {
+      approval = gauge(track.minApproval, perbillOfRational(big(live.ayes), big(live.ayes) + big(live.nays)), 'chain')
+      support = gauge(track.minSupport, live.electorate ? perbillOfRational(big(live.support), big(live.electorate)) : null, 'chain')
+    } else {
+      // The indexed direct votes: the chain's tally minus delegated power. The
+      // support share needs the electorate, which only the live read carries,
+      // so without it the support gauge shows the bar it must clear alone.
+      approval = gauge(track.minApproval, perbillOfRational(big(direct.ayes), big(direct.ayes) + big(direct.nays)), 'attributed')
+      support = gauge(track.minSupport, null, null)
+    }
+  }
+  return {
+    phase,
+    decisionDepositPlaced,
+    submittedBlock,
+    decisionStartBlock,
+    decisionEndBlock: decisionStartBlock != null ? decisionStartBlock + track.decisionPeriod : null,
+    confirmStartBlock,
+    confirmEndBlock: confirmStartBlock != null ? confirmStartBlock + track.confirmPeriod : null,
+    earliestDecisionBlock: decisionStartBlock == null ? submittedBlock + track.preparePeriod : null,
+    timeoutBlock: decisionStartBlock == null && !decisionDepositPlaced ? submittedBlock + undecidingTimeoutBlocks() : null,
+    approval,
+    support,
+  }
 }
 
 export interface VoteEventRow {
@@ -743,14 +948,19 @@ export function indirectTallyFrom(onChain: OnChainTally | null, direct: Referend
   // Only a FINAL chain tally shares a moment with the direct sum. A decision-start
   // snapshot predates most of the votes, so their difference measures elapsed time,
   // not delegation — on OpenGov 370 it would have reported the whole 770M gap as
-  // delegated power.
+  // delegated power. (The LIVE storage tally does share the moment; getReferendum
+  // routes it through tallyResidual directly.)
   if (!onChain?.final) return null
+  return tallyResidual(onChain, direct)
+}
+
+export function tallyResidual(chain: Pick<ReferendumTally, 'ayes' | 'nays'>, direct: Pick<ReferendumDetail['directTally'], 'ayes' | 'nays'>): ReferendumTally | null {
   const diff = (chainValue: string, directValue: string) => {
     const delta = big(chainValue) - big(directValue)
     return delta > 0n ? delta.toString() : '0'
   }
-  const ayes = diff(onChain.ayes, direct.ayes)
-  const nays = diff(onChain.nays, direct.nays)
+  const ayes = diff(chain.ayes, direct.ayes)
+  const nays = diff(chain.nays, direct.nays)
   return ayes === '0' && nays === '0' ? null : { ayes, nays, support: null }
 }
 
@@ -831,26 +1041,28 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
   const ttlMs = lifecycle.some(row => isConcludingEvent(row.event_name)) ? CONCLUDED_TTL_MS : RUNNING_TTL_MS
 
   return cached(`explorer:referendum:${pallet}:${index}:${limit}`, ttlMs, async () => {
+    // Deposit refunds and other housekeeping land long after the vote closes, and
+    // votes cannot be cast after it, so vote windows end at the CONCLUSION. Using
+    // the last lifecycle event instead widened some windows enough to read
+    // hundreds of MB of call JSON.
+    const conclusionBlock = [...lifecycle].reverse().find(row => isConcludingEvent(row.event_name))?.block_height ?? null
+    // A running referendum needs the head twice: to close its vote window and to
+    // place "now" on its track's decision-period clock. A concluded one needs
+    // neither, so the read is skipped.
+    const headBlock = conclusionBlock == null && lifecycle.length
+      ? await (async () => {
+        const headRes = await client.query({ query: 'SELECT max(block_height) AS h FROM price_data.blocks', format: 'JSONEachRow' })
+        return Number((await headRes.json<{ h: number }>())[0]?.h ?? lifecycle[lifecycle.length - 1].block_height)
+      })()
+      : null
     const votes = pallet === 'democracy'
       ? await loadDemocracyVotes(index)
-      : await (async () => {
-        // Votes can only be cast between submission and conclusion, so the
-        // referendum's own lifecycle bounds every vote read. Without lifecycle rows
-        // there is nothing to bound and nothing to show.
-        if (!lifecycle.length) return [] as VoteEventRow[]
-        const first = lifecycle[0].block_height
-        // Deposit refunds and other housekeeping land long after the vote closes, and
-        // votes cannot be cast after it, so the window ends at the CONCLUSION. Using
-        // the last lifecycle event instead widened some windows enough to read
-        // hundreds of MB of call JSON.
-        const conclusionBlock = [...lifecycle].reverse().find(row => isConcludingEvent(row.event_name))?.block_height
-        let end = conclusionBlock
-        if (end == null) {
-          const headRes = await client.query({ query: 'SELECT max(block_height) AS h FROM price_data.blocks', format: 'JSONEachRow' })
-          end = Number((await headRes.json<{ h: number }>())[0]?.h ?? lifecycle[lifecycle.length - 1].block_height)
-        }
-        return loadConvictionVotes(index, first, end)
-      })()
+      // Votes can only be cast between submission and conclusion, so the
+      // referendum's own lifecycle bounds every vote read. Without lifecycle rows
+      // there is nothing to bound and nothing to show.
+      : lifecycle.length
+        ? await loadConvictionVotes(index, lifecycle[0].block_height, conclusionBlock ?? headBlock ?? lifecycle[lifecycle.length - 1].block_height)
+        : ([] as VoteEventRow[])
 
     if (!lifecycle.length && !votes.length) return null
 
@@ -861,9 +1073,8 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
 
     // Withdrawals only count up to the moment the referendum closed (see
     // loadWithdrawals); a still-open referendum has no such ceiling.
-    const concludedAtBlock = [...lifecycle].reverse().find(row => isConcludingEvent(row.event_name))?.block_height
     const withdrawals = lifecycle.length
-      ? await loadWithdrawals(pallet, index, lifecycle[0].block_height, concludedAtBlock != null ? concludedAtBlock - 1 : 0xffff_ffff)
+      ? await loadWithdrawals(pallet, index, lifecycle[0].block_height, conclusionBlock != null ? conclusionBlock - 1 : 0xffff_ffff)
       : new Map<string, VotePosition>()
 
     const latest = latestVotePerAccount(votes)
@@ -886,12 +1097,17 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
       : executedBlock != null ? await democracyProposalHash(executedBlock, index) : null
     const proposalCall = proposalHash ? await loadProposalCall(proposalHash) : null
 
+    const trackId = typeof submittedArgs.track === 'number' ? submittedArgs.track : null
+    const track = pallet === 'opengov' && trackId != null ? trackById(trackId) : null
+    const phaseInfo = pallet === 'opengov' ? opengovPhase(lifecycle) : null
+    const liveTally = phaseInfo && track ? await liveReferendumState(index) : null
+
     return {
       pallet,
       index,
       title: titles.get(`${pallet}:${index}`) ?? null,
       subsquareUrl: subsquareUrl(pallet, index),
-      track: typeof submittedArgs.track === 'number' ? submittedArgs.track : null,
+      track: trackId,
       proposalHash,
       proposalCall,
       status: referendumStatusFrom(pallet, lifecycle.map(row => row.event_name)),
@@ -902,10 +1118,24 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
       asset: assetRef,
       onChainTally,
       directTally,
-      indirectTally: indirectTallyFrom(onChainTally, directTally),
+      // The residual next to a FINAL tally as before; while running, the live
+      // storage tally shares the direct sum's moment just as well, so the same
+      // subtraction is delegation there too (± the seconds between the two reads).
+      indirectTally: indirectTallyFrom(onChainTally, directTally) ?? (liveTally ? tallyResidual(liveTally, directTally) : null),
       voters: voters.slice(0, limit),
       votesShown: Math.min(voters.length, limit),
       votesTotal: voters.length,
+      timeline: lifecycle.map(row => ({ event: row.event_name, blockHeight: row.block_height, extrinsicIndex: row.extrinsic_index, timestamp: row.ts })),
+      trackInfo: track ? {
+        id: track.id, name: track.name,
+        preparePeriod: track.preparePeriod, decisionPeriod: track.decisionPeriod,
+        confirmPeriod: track.confirmPeriod, minEnactmentPeriod: track.minEnactmentPeriod,
+        decisionDeposit: track.decisionDeposit,
+      } : null,
+      liveTally,
+      progress: phaseInfo && track && headBlock != null
+        ? progressFrom(phaseInfo, track, headBlock, liveTally, directTally)
+        : null,
     }
   })
 }
