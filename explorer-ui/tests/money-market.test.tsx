@@ -99,11 +99,13 @@ describe('primary-first Money Market presentation', () => {
   it('shares profile debt and tab calculations between accounts and tags', () => {
     const markets = [position(), supplemental]
     expect(moneyMarketDebtUsd(markets)).toBe(6_240)
-    expect(profileTabs(3, markets, 2, 1, { total: 42, complete: true }, 7)).toEqual([
+    expect(profileTabs(3, markets, 2, 1, { total: 42, complete: true }, 7, false, 120, 340)).toEqual([
       { key: 'overview', label: 'Overview' },
       { key: 'balances', label: 'Balances', count: 3 },
       { key: 'positions', label: 'Positions', count: 5 },
       { key: 'activity', label: 'Activity', count: 42, countAtLeast: false },
+      { key: 'extrinsics', label: 'Extrinsics', count: 120 },
+      { key: 'events', label: 'Events', count: 340 },
       { key: 'votes', label: 'Votes', count: 7 },
     ])
   })
