@@ -21,7 +21,7 @@ import { FilterZone, useFilters } from './Filters'
 import { EvRow, ExtRow } from './ActivityRows'
 import { ActivityTable } from './ActivityTable'
 import { eventFilterFields, extrinsicFilterFields, activityFilterFields } from './activityFilters'
-import { EmptyRow, ErrorRow, F, Pager, ActivityChips, TableSkeleton, normalizeActivityAction, normalizeActivityType, pendingRows, LiveAnchor } from './ui'
+import { EmptyRow, ErrorRow, Pager, ActivityChips, TableSkeleton, normalizeActivityAction, normalizeActivityType, pendingRows, LiveAnchor } from './ui'
 import { PAGE_SIZE, activityListCount, eventListCount, extrinsicListCount, hasNextPage, pageCount } from '../utils/activityPaging'
 import type { ListCountQuery } from '../api/explorer'
 
@@ -33,7 +33,11 @@ type ActivityScope =
 // Account, system-tag and list-tag detail pages expose the same activity
 // controls. All three APIs are queried through disabled hooks here so one
 // implementation owns their filtering, pagination, totals, and table layout.
-export function ScopedActivity({ scope }: { scope: ActivityScope }) {
+//
+// Which of the three lists shows is the PAGE's decision: Activity, Extrinsics
+// and Events are first-level detail tabs (`?view=`), so the host passes the one
+// its view selected rather than this component running a second tab bar.
+export function ScopedActivity({ scope, tab }: { scope: ActivityScope; tab: 'activity' | 'extrinsics' | 'events' }) {
   const accountAddress = scope.kind === 'account' ? scope.address : null
   const systemTagId = scope.kind === 'tag' ? scope.tagId : null
   const listId = scope.kind === 'list-tag' ? scope.listId : null
@@ -43,8 +47,7 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const tagCounts = useTagActivityCounts(systemTagId)
   const listTagCounts = useListTagActivityCounts(listId, listTagId)
   const counts = scope.kind === 'account' ? accountCounts : scope.kind === 'tag' ? tagCounts : listTagCounts
-  const rawTab = useQueryValue('atab', 'activity')
-  const activeTab = rawTab === 'extrinsics' || rawTab === 'events' ? rawTab : 'activity'
+  const activeTab = tab
   const activityType = normalizeActivityType(useQueryValue('type', 'all'))
   // `contract` is the account page's contract sub-tab key — reserved so a
   // lingering ?contract=read never reads as a filter value here.
@@ -83,13 +86,6 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const countNote = total == null
     ? (count ? 'too much history to count exactly' : undefined)
     : count?.complete === false ? 'older history beyond the counted window' : undefined
-  // The unfiltered activity length doubles as the tab badge. When no filter is
-  // set it IS the total above, so the two share one request.
-  const accountActivityTotal = useAccountListCount(accountAddress, activityListCount('all', '', {}))
-  const tagActivityTotal = useTagListCount(systemTagId, activityListCount('all', '', {}))
-  const listTagActivityTotal = useListTagListCount(listId, listTagId, activityListCount('all', '', {}))
-  const activityCount = (scope.kind === 'account' ? accountActivityTotal : scope.kind === 'tag' ? tagActivityTotal : listTagActivityTotal).data
-  const activityTotal = activityCount?.total
 
   const commonActivityArgs = [
     activityType,
@@ -159,20 +155,11 @@ export function ScopedActivity({ scope }: { scope: ActivityScope }) {
   const showSigner = scope.kind === 'tag' || scope.kind === 'list-tag' || showOrigin
   const extrinsicColumns = 6 + (showSigner ? 1 : 0) + (showOrigin ? 1 : 0)
 
-  const setActiveTab = (tab: string | null) => setQuery({ atab: tab, apage: null })
   const setActivityType = (value: string) => setQuery({ type: value === 'all' ? null : value, action: null, apage: null })
   const setPage = (nextPage: number) => setQuery({ apage: nextPage > 0 ? String(nextPage) : null })
 
   return (
     <>
-      <div className="tabs">
-        {/* A partial total is the newest rows of a longer feed, so the badge reads
-            "210k+" rather than claiming that is all the account did. */}
-        <button className={activeTab === 'activity' ? 'active' : ''} onClick={() => setActiveTab(null)}>Activity{activityTotal != null ? <> <span className="cnt">{F.int(activityTotal)}{activityCount?.complete === false ? '+' : ''}</span></> : null}</button>
-        <button className={activeTab === 'extrinsics' ? 'active' : ''} onClick={() => setActiveTab('extrinsics')}>Extrinsics{counts.data ? <> <span className="cnt">{F.int(counts.data.extrinsics)}</span></> : null}</button>
-        <button className={activeTab === 'events' ? 'active' : ''} onClick={() => setActiveTab('events')}>Events{counts.data ? <> <span className="cnt">{F.int(counts.data.events)}</span></> : null}</button>
-      </div>
-
       {activeTab === 'activity' && <>
         <ActivityChips value={activityType} onChange={setActivityType} />
         <FilterZone
