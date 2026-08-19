@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
-import { useAddress, useAddressHistory, useAddressValueEvents, useAccountListCount, useStats } from '../hooks/useExplorerData'
+import { useAddress, useAddressHistory, useAddressValueEvents, useAccountActivityCounts, useAccountListCount, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, useQueryValue, setQuery } from '../router'
@@ -49,7 +49,11 @@ export function Account({ address }: { address: string }) {
   // the page states in time, so they convert at the chain's measured pace.
   const { data: stats } = useStats(!!data?.activeDcas?.length || !!data?.proxy)
   const canonicalAddress = data ? (data.evmAddress ?? data.ss58Polkadot) : null
-  const view = useQueryValue('view', 'overview')
+  const rawView = useQueryValue('view', 'overview')
+  const legacyAtab = useQueryValue('atab', '')
+  // Old links nested Extrinsics/Events under ?view=activity&atab=…; both are
+  // first-level views now, so those URLs land on the promoted tab.
+  const view = rawView === 'activity' && (legacyAtab === 'extrinsics' || legacyAtab === 'events') ? legacyAtab : rawView
   // Only the Balances treemap reads the per-asset balance history, and it is 98-99%
   // of the history payload — so the Overview asks for the value series alone. The
   // need latches: a reader who lands on `?view=balances` gets the full shape on the
@@ -64,6 +68,9 @@ export function Account({ address }: { address: string }) {
   // on a feed too deep to count (rather than showing an overshooting estimate).
   const activityTotal = useAccountListCount(canonicalAddress, activityListCount('all', '', {}))
   const votesTotal = useAccountListCount(canonicalAddress, voteListCount())
+  // Raw extrinsic/event counts badge the two promoted tabs; ScopedActivity asks
+  // for the same key, so the two share one request.
+  const activityCounts = useAccountActivityCounts(address)
   const headBlock = stats?.headBlock ?? 0
 
   // Document title mirrors the header's display-name logic: best-known name
@@ -98,7 +105,7 @@ export function Account({ address }: { address: string }) {
           const explicitEvmBinding = data.aliases.find(alias => alias.relationship === 'explicit_binding' && alias.evmAddress)?.evmAddress
           // Debt counts from every market and is netted out of the portfolio Value.
           const debtUsd = moneyMarketDebtUsd(mmList)
-          const tabs = profileTabs(data.balances.length, mmList, data.activeDcas?.length ?? 0, data.liquidityPositions?.length ?? 0, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract)
+          const tabs = profileTabs(data.balances.length, mmList, data.activeDcas?.length ?? 0, data.liquidityPositions?.length ?? 0, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
@@ -222,7 +229,11 @@ export function Account({ address }: { address: string }) {
                 </Suspense>
               )}
 
-              {activeView === 'activity' && <ScopedActivity scope={{ kind: 'account', address }} />}
+              {activeView === 'activity' && <ScopedActivity scope={{ kind: 'account', address }} tab="activity" />}
+
+              {activeView === 'extrinsics' && <ScopedActivity scope={{ kind: 'account', address }} tab="extrinsics" />}
+
+              {activeView === 'events' && <ScopedActivity scope={{ kind: 'account', address }} tab="events" />}
 
               {activeView === 'votes' && <VotesTab scope={{ kind: 'account', address }} />}
             </>

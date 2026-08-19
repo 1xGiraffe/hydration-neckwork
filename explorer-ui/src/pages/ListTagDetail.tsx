@@ -1,4 +1,4 @@
-import { useListTag, useListTagListCount, useListTagMembers, useListTagValueEvents, useMe } from '../hooks/useUser'
+import { useListTag, useListTagActivityCounts, useListTagListCount, useListTagMembers, useListTagValueEvents, useMe } from '../hooks/useUser'
 import { useSession } from '../session'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -51,7 +51,12 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
   const now = useNow()
   const { data: stats } = useStats(!!data?.activeDcas?.length)
   const headBlock = stats?.headBlock ?? 0
-  const view = useQueryValue('view', 'overview')
+  const rawView = useQueryValue('view', 'overview')
+  const legacyAtab = useQueryValue('atab', '')
+  // Old links nested Extrinsics/Events under ?view=activity&atab=…; both are
+  // first-level views now, so those URLs land on the promoted tab.
+  const view = rawView === 'activity' && (legacyAtab === 'extrinsics' || legacyAtab === 'events') ? legacyAtab : rawView
+  const activityCounts = useListTagActivityCounts(listId, tagId)
 
   if (!session) {
     return (
@@ -86,7 +91,7 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
           const supplementalDebts = mmList
             .filter(p => p !== primaryMarket && Number(p.totalDebtBase) > 0)
             .map(p => ({ key: p.marketKey, label: p.market, usd: Number(p.totalDebtBase) / 1e8 }))
-          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined)
+          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined, undefined, activityCounts.data?.extrinsics, activityCounts.data?.events)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
@@ -163,7 +168,11 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
               {liquidityPositions.length > 0 && <LiquidityPositionsTable positions={liquidityPositions} />}
               </>)}
 
-              {activeView === 'activity' && <ScopedActivity scope={{ kind: 'list-tag', listId, tagId }} />}
+              {activeView === 'activity' && <ScopedActivity scope={{ kind: 'list-tag', listId, tagId }} tab="activity" />}
+
+              {activeView === 'extrinsics' && <ScopedActivity scope={{ kind: 'list-tag', listId, tagId }} tab="extrinsics" />}
+
+              {activeView === 'events' && <ScopedActivity scope={{ kind: 'list-tag', listId, tagId }} tab="events" />}
 
               {activeView === 'votes' && <VotesTab scope={{ kind: 'list-tag', listId, tagId }} />}
             </>
