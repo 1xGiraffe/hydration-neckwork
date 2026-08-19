@@ -1,3 +1,5 @@
+import { blake2AsU8a } from '@polkadot/util-crypto'
+import { compactToU8a, stringToU8a, u8aConcat, u8aToHex } from '@polkadot/util'
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached } from './cache.ts'
 import { convictionName, decodeVoteByte, weightedVotePower } from './convictionWeight.ts'
@@ -151,7 +153,14 @@ export interface ReferendumTimelineEntry {
   blockHeight: number
   extrinsicIndex: number | null
   timestamp: string
+  // Only on the enactment entry, and only when the event said which it was: whether the
+  // approved call ran (`ok`), ran and errored (`failed`), or was never available to run
+  // (`unavailable`). Absent everywhere else, including on an enactment event whose result
+  // could not be read — an unreadable result is not a failed one.
+  outcome?: ReferendumEnactmentOutcome
 }
+
+export type ReferendumEnactmentOutcome = 'ok' | 'failed' | 'unavailable'
 
 export interface ReferendumTrackRef {
   id: number
@@ -291,6 +300,87 @@ async function loadLifecycle(pallet: ReferendumPallet, index: number): Promise<L
     format: 'JSONEachRow',
   })
   return res.json<LifecycleRow>()
+}
+
+// ---- enactment ----
+
+// The scheduler name pallet_referenda gives an approved referendum's enactment:
+// `blake2_256(SCALE((ASSEMBLY_ID, "enactment", index)))`, with ASSEMBLY_ID = *b"assembly".
+// SCALE of that tuple is the eight ASSEMBLY_ID bytes verbatim ([u8; 8] is fixed-width, so it
+// carries no length prefix), then compact-prefixed "enactment", then the index as a
+// little-endian u32.
+//
+// The hash only runs one way, which is why the enactment cannot be projected out of
+// raw_events the way the lifecycle events are: a Scheduler event names its task and nothing
+// else, so no materialized view can decide which referendum it belongs to. The page computes
+// the name it wants instead and reads scheduler_named_dispatches by it.
+export function referendumEnactmentTaskId(index: number): string {
+  const tag = stringToU8a('enactment')
+  const idx = new Uint8Array(4)
+  new DataView(idx.buffer).setUint32(0, index, true)
+  return u8aToHex(blake2AsU8a(u8aConcat(stringToU8a('assembly'), compactToU8a(tag.length), tag, idx), 256))
+}
+
+interface EnactmentRow {
+  event_name: string
+  block_height: number
+  event_index: number
+  extrinsic_index: number | null
+  ts: string
+  args_json: string
+}
+
+// Which of the three things happened to the scheduled call. Null when the event did not say:
+// a Scheduler.Dispatched always carries a `result`, so an absent or unparseable one is a data
+// fault to surface as "unknown", never to round down to a failure.
+export function enactmentOutcomeFrom(eventName: string, argsJson: string): ReferendumEnactmentOutcome | null {
+  if (eventName === 'Scheduler.CallUnavailable') return 'unavailable'
+  try {
+    const kind = (JSON.parse(argsJson) as { result?: { __kind?: unknown } }).result?.__kind
+    return kind === 'Ok' ? 'ok' : typeof kind === 'string' ? 'failed' : null
+  } catch { return null }
+}
+
+// The enactment outcome for one OpenGov referendum. A point lookup on the table's ORDER BY
+// prefix, so FINAL collapses this task's rows and nothing else. A name is scheduled once and
+// consumed on dispatch, so the first row is the enactment.
+async function loadEnactment(index: number): Promise<EnactmentRow | null> {
+  const res = await client.query({
+    query: `SELECT event_name, block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts, args_json
+            FROM price_data.scheduler_named_dispatches FINAL
+            WHERE task_id = {task:String}
+            ORDER BY block_height, event_index`,
+    query_params: { task: referendumEnactmentTaskId(index) },
+    format: 'JSONEachRow',
+  })
+  return (await res.json<EnactmentRow>())[0] ?? null
+}
+
+// The lifecycle rows and the enactment as one list in block order.
+//
+// A merge rather than an append: the enactment sits between a referendum's conclusion and the
+// deposit refunds that trail it, which can be far later. Referendum 33 was confirmed at
+// 7,050,930, its call was already unavailable at 7,051,030, and its submission deposit only
+// came back at 7,262,897 — appending would have dated the enactment after that. The sort is
+// stable, so same-block lifecycle rows keep the event_index order the query returned them in.
+export function referendumTimelineFrom(
+  lifecycle: Pick<LifecycleRow, 'event_name' | 'block_height' | 'extrinsic_index' | 'ts'>[],
+  enactment: EnactmentRow | null,
+): ReferendumTimelineEntry[] {
+  const entries: ReferendumTimelineEntry[] = lifecycle.map(row => ({
+    event: row.event_name, blockHeight: row.block_height, extrinsicIndex: row.extrinsic_index, timestamp: row.ts,
+  }))
+  if (enactment) {
+    const outcome = enactmentOutcomeFrom(enactment.event_name, enactment.args_json)
+    entries.push({
+      event: enactment.event_name,
+      blockHeight: enactment.block_height,
+      extrinsicIndex: enactment.extrinsic_index,
+      timestamp: enactment.ts,
+      ...(outcome ? { outcome } : {}),
+    })
+  }
+  return entries.sort((a, b) => a.blockHeight - b.blockHeight)
 }
 
 export function tallyFromArgs(argsJson: string): ReferendumTally | null {
@@ -1097,6 +1187,12 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
       : executedBlock != null ? await democracyProposalHash(executedBlock, index) : null
     const proposalCall = proposalHash ? await loadProposalCall(proposalHash) : null
 
+    // Only an approved OpenGov referendum has an enactment to look up. Democracy states its
+    // own in Democracy.Executed, which the lifecycle projection already carries.
+    const approved = pallet === 'opengov'
+      && lifecycle.some(row => row.event_name === 'Referenda.Confirmed' || row.event_name === 'Referenda.Approved')
+    const enactment = approved ? await loadEnactment(index) : null
+
     const trackId = typeof submittedArgs.track === 'number' ? submittedArgs.track : null
     const track = pallet === 'opengov' && trackId != null ? trackById(trackId) : null
     const phaseInfo = pallet === 'opengov' ? opengovPhase(lifecycle) : null
@@ -1125,7 +1221,7 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
       voters: voters.slice(0, limit),
       votesShown: Math.min(voters.length, limit),
       votesTotal: voters.length,
-      timeline: lifecycle.map(row => ({ event: row.event_name, blockHeight: row.block_height, extrinsicIndex: row.extrinsic_index, timestamp: row.ts })),
+      timeline: referendumTimelineFrom(lifecycle, enactment),
       trackInfo: track ? {
         id: track.id, name: track.name,
         preparePeriod: track.preparePeriod, decisionPeriod: track.decisionPeriod,
