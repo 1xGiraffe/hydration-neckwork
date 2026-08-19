@@ -198,10 +198,26 @@ const GOOD_EVENTS = new Set(['Referenda.Confirmed', 'Referenda.Approved', 'Democ
 const BAD_EVENTS = new Set(['Referenda.Rejected', 'Referenda.Cancelled', 'Referenda.TimedOut', 'Referenda.Killed', 'Referenda.ConfirmAborted', 'Democracy.NotPassed', 'Democracy.Cancelled', 'Democracy.Vetoed'])
 const PHASE_EVENTS = new Set(['Referenda.Submitted', 'Referenda.DecisionStarted', 'Referenda.ConfirmStarted', 'Democracy.Started'])
 
-function dotClass(event: string): string {
-  if (GOOD_EVENTS.has(event)) return 'good'
-  if (BAD_EVENTS.has(event)) return 'bad'
-  if (PHASE_EVENTS.has(event)) return 'phase'
+// An OpenGov enactment is a Scheduler event, so its name says only that a scheduled task ran
+// — the referendum's own events stop at Confirmed. What it MEANS is in the outcome, which is
+// why these two read off that and not off the event name: a dispatch that errored and a call
+// that was gone by enactment time are both "confirmed but never took effect".
+const OUTCOME_LABELS: Record<string, string> = {
+  ok: 'Executed',
+  failed: 'Execution failed',
+  unavailable: 'Call unavailable',
+}
+
+function entryLabel(entry: ReferendumTimelineEntry): string {
+  if (entry.outcome) return OUTCOME_LABELS[entry.outcome] ?? entry.outcome
+  return EVENT_LABELS[entry.event] ?? entry.event.replace(/^[^.]+\./, '')
+}
+
+function dotClass(entry: ReferendumTimelineEntry): string {
+  if (entry.outcome) return entry.outcome === 'ok' ? 'good' : 'bad'
+  if (GOOD_EVENTS.has(entry.event)) return 'good'
+  if (BAD_EVENTS.has(entry.event)) return 'bad'
+  if (PHASE_EVENTS.has(entry.event)) return 'phase'
   return 'admin'
 }
 
@@ -210,8 +226,8 @@ export function ReferendumTimeline({ timeline, now }: { timeline: ReferendumTime
     <div className="panel ref-timeline">
       {timeline.map(entry => (
         <div className="ref-tl-row" key={`${entry.blockHeight}-${entry.event}`}>
-          <span className={`ref-tl-dot ${dotClass(entry.event)}`} />
-          <span className="ref-tl-label">{EVENT_LABELS[entry.event] ?? entry.event.replace(/^[^.]+\./, '')}</span>
+          <span className={`ref-tl-dot ${dotClass(entry)}`} />
+          <span className="ref-tl-label">{entryLabel(entry)}</span>
           <span className="ref-tl-when mono">
             <MomentLink at={entry} now={now} />
             <span className="ref-tl-block muted"> · #{entry.blockHeight.toLocaleString('en-US')}</span>

@@ -1250,6 +1250,9 @@ export interface ReferendumTimelineEntry {
   blockHeight: number
   extrinsicIndex: number | null
   timestamp: string
+  // Enactment entries only, and only when the event said which it was. Absent on an
+  // enactment whose result could not be read, which reads as neither success nor failure.
+  outcome?: 'ok' | 'failed' | 'unavailable'
 }
 
 export interface ReferendumTrackRef {

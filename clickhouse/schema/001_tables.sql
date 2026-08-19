@@ -394,3 +394,18 @@ CREATE TABLE IF NOT EXISTS price_data.money_market_liquidation_calls (`account_i
 -- reads `tally` (ayes/nays/support) off whichever event last published one, `track` and
 -- `proposal.hash` off Referenda.Submitted, and the whole 2,646-row payload is 361 KiB.
 CREATE TABLE IF NOT EXISTS price_data.referendum_lifecycle_events (`pallet` LowCardinality(String), `ref_index` UInt32, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `args_json` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (pallet, ref_index, block_height, event_index) SETTINGS index_granularity = 1024;
+
+-- Scheduler tasks that ran under a NAME, keyed by that name. The referendum pages read it
+-- for the OpenGov enactment: pallet_referenda schedules an approved referendum's call with
+-- schedule_named under blake2_256(SCALE(("assembly", "enactment", index))), so the index is
+-- recoverable in one direction only — the reader hashes and looks the id up here, which no
+-- materialized view over raw_events could do in reverse (see referendumEnactmentTaskId).
+-- Keyed task-first for that point lookup; (block_height, event_index) completes it into the
+-- raw_events event identity, so the key is unique per source row and a sound replacement key.
+-- Only Scheduler.Dispatched and Scheduler.CallUnavailable name their task, and only 545 of
+-- the 218,470 such events carry an id at all (the other 217,925 dispatches are anonymous
+-- agenda entries), so PARTITION BY tuple() and index_granularity = 1024 for the same reasons
+-- as referendum_lifecycle_events above: no read is time-bounded and the whole table is three
+-- granules. args_json is carried undecoded because the outcome shape is open-ended — Ok, a
+-- Module error, or no result field at all on CallUnavailable.
+CREATE TABLE IF NOT EXISTS price_data.scheduler_named_dispatches (`task_id` String, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `args_json` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (task_id, block_height, event_index) SETTINGS index_granularity = 1024;
