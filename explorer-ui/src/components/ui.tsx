@@ -1553,7 +1553,7 @@ export function AssetDetailSkeleton() {
       <ChartCardSkeleton metrics={4} legend headClass="pf-head-asset" />
       <TabsSkeleton tabs={2} />
       <div className="activity-chips activity-chips-skeleton" aria-hidden="true">
-        {Array.from({ length: 6 }).map((_, i) => <span key={i} className="sk-bar" style={{ width: i === 0 ? 48 : 86, animationDelay: `${(i % 5) * 80}ms` }} />)}
+        <span className="sk-bar" style={{ width: '100%' }} />
       </div>
       <ActivityPanelSkeleton rows={5} />
     </>
@@ -1709,7 +1709,12 @@ export function ActivityChips({ value, onChange, action, onAction }: {
   const actions = ACTIVITY_ACTIONS[active]
   return (
     <div className="activity-chips">
-      {ACTIVITY_CHIPS.map(c => <button key={c.v} className={`activity-chip${active === c.v ? ' on' : ''}`} onClick={() => onChange(c.v)}>{c.label}</button>)}
+      {/* Preis-style segmented bar: one full-width rounded track, the accent
+          pill glides between segments (tabsInk writes --ink-left/--ink-width).
+          On phones the track keeps its shape and scrolls horizontally. */}
+      <div className="seg-bar" role="group" aria-label="Activity type">
+        {ACTIVITY_CHIPS.map(c => <button key={c.v} type="button" aria-pressed={active === c.v} className={`seg-btn${active === c.v ? ' active' : ''}`} onClick={() => onChange(c.v)}>{c.label}</button>)}
+      </div>
       {actions && onAction && (
         <select className="activity-action" value={normalizeActivityAction(active, action ?? '')} onChange={e => onAction(e.target.value)} aria-label="Action filter">
           <option value="">All actions</option>

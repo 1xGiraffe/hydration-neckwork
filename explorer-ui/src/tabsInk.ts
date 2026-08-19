@@ -8,7 +8,10 @@
 // prefers-reduced-motion the ink renders too, just without sliding (the
 // global reduced-motion CSS zeroes its transition).
 
-const BAR_SELECTOR = '.tabs'
+// Underline bars and segmented pill bars share the mechanism; each bar's CSS
+// decides what its ink looks like (a 2px line under .tabs, a full-height pill
+// inside .seg-bar).
+const BAR_SELECTOR = '.tabs, .seg-bar'
 
 function activeButton(bar: HTMLElement): HTMLElement | null {
   for (const child of bar.children) {

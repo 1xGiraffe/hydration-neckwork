@@ -68,7 +68,7 @@ test('the smol toggle is URL-addressable', async ({ page }) => {
   await page.goto('/activity?smol=show')
   await expect(toggle).not.toHaveClass(/hiding/)
   // And it rides along when switching category chips.
-  await page.locator('.activity-chip', { hasText: 'Transfer' }).click()
+  await page.locator('.seg-btn', { hasText: 'Transfer' }).click()
   await expect(page).toHaveURL(/smol=show/)
 })
 
