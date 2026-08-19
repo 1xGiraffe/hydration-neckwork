@@ -138,6 +138,17 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.money_market_liquidation_calls
 -- rather than a refIndex) and the Democracy.Voted exclusion that keeps 53,327 vote events
 -- out of a lifecycle table.
 CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.referendum_lifecycle_events_mv TO price_data.referendum_lifecycle_events (`pallet` LowCardinality(String), `ref_index` UInt32, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `args_json` String, `ingested_at` DateTime) AS SELECT if(event_name LIKE 'Democracy.%', 'democracy', 'opengov') AS pallet, toUInt32(if(event_name LIKE 'Democracy.%', JSONExtractInt(args_json, 'refIndex'), JSONExtractInt(args_json, 'index'))) AS ref_index, block_height, event_index, extrinsic_index, block_timestamp, event_name, args_json, ingested_at FROM price_data.raw_events WHERE ((event_name LIKE 'Referenda.%') AND JSONHas(args_json, 'index')) OR ((event_name LIKE 'Democracy.%') AND (event_name != 'Democracy.Voted') AND JSONHas(args_json, 'refIndex'));
+-- Named scheduler outcomes, keyed by the task name so a reader that can compute a name can
+-- find its outcome (the OpenGov enactment; see scheduler_named_dispatches). Both terminal
+-- named events are kept, because they are different answers to "did the approved call run":
+-- Scheduler.Dispatched carries a result (Ok, or a Module error), while
+-- Scheduler.CallUnavailable means the preimage was gone by enactment time and the call never
+-- ran at all — OpenGov referendum 33 is confirmed and has exactly that. Scheduler.Scheduled
+-- and Scheduler.Canceled are deliberately absent: they report {when, index} and never the
+-- name, so they cannot be attributed to a task. The JSONHas guard keeps the 217,925 anonymous
+-- agenda dispatches out; event_name IN (…) prunes on the set(200) skip index, which the
+-- LIKE 'Scheduler.%' form above could not use.
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.scheduler_named_dispatches_mv TO price_data.scheduler_named_dispatches (`task_id` String, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `args_json` String, `ingested_at` DateTime) AS SELECT JSONExtractString(args_json, 'id') AS task_id, block_height, event_index, extrinsic_index, block_timestamp, event_name, args_json, ingested_at FROM price_data.raw_events WHERE (event_name IN ('Scheduler.Dispatched', 'Scheduler.CallUnavailable')) AND JSONHas(args_json, 'id');
 -- Stableswap pool state is only stored inside raw_block_snapshots.payload_json; these two MVs
 -- project it onto queryable tables. State samples share the 600-block grid of the omnipool/xyk
 -- history MVs so all three families bucket identically. The `assets` field has two serializations
