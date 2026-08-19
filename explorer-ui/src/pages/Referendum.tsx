@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { useReferendum } from '../hooks/useExplorerData'
+import { useReferendum, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths } from '../router'
@@ -8,6 +8,7 @@ import { VoteBubbles } from '../components/VoteBubbles'
 import { VotesTable, type VoteTableRow } from '../components/VotesTable'
 import { ProposalCall } from '../components/ProposalCall'
 import { NotifyButton } from '../components/NotifyButton'
+import { ReferendumProgressCard, ReferendumTimeline } from '../components/ReferendumProgress'
 import { ayeSharePct, orderVoters, selectTally, type DisplayTally, type SideFilter, type VoteSort } from '../utils/referendumVotes'
 
 const PALLET_LABEL: Record<string, string> = { opengov: 'OpenGov', democracy: 'Democracy' }
@@ -33,7 +34,7 @@ export function TallySummary({ tally, voters, decimals }: { tally: DisplayTally;
   const votesWord = voters === 1 ? 'vote' : 'votes'
   return (
     <>
-      <div className="dt">{tally.source === 'chain' ? 'On-chain tally' : 'Attributed votes'}</div>
+      <div className="dt">{tally.source === 'chain' ? (tally.live ? 'On-chain tally · live' : 'On-chain tally') : 'Attributed votes'}</div>
       {/* dd-stack: .dd is a flex ROW, which put the bar beside the numbers and collapsed
           it to zero width (its children are percentages). */}
       <div className="dd dd-stack">
@@ -72,6 +73,9 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
   const { data, isLoading, isError } = useReferendum(pallet, index)
   const [sort, setSort] = useState<VoteSort>('time')
   const [side, setSide] = useState<SideFilter>('all')
+  // The head block dates the progress strip's countdowns, so it is only worth
+  // polling while there is a running referendum to place on its track's clock.
+  const { data: stats } = useStats(!!data?.progress)
   const now = useNow()
   const shown = useMemo(() => orderVoters(data?.voters ?? [], sort, side), [data?.voters, sort, side])
   // Row objects keyed on the voter, not rebuilt per render: sorting and the side chips
@@ -105,7 +109,7 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
         ]} />
         <div className="page-title">
           {data?.title ?? label}
-          <span className="sub">{data ? `${PALLET_LABEL[pallet] ?? pallet} #${index} · ${data.status}${data.track != null ? ` · track ${data.track}` : ''}` : ''}</span>
+          <span className="sub">{data ? `${PALLET_LABEL[pallet] ?? pallet} #${index} · ${data.status}${data.trackInfo ? ` · ${data.trackInfo.name.replace(/_/g, ' ')} track` : data.track != null ? ` · track ${data.track}` : ''}` : ''}</span>
         </div>
       </div>
 
@@ -126,6 +130,12 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
               />
               <a href={data.subsquareUrl} target="_blank" rel="noopener" className="ext-link">Open in Subsquare ↗</a>
             </div>
+            {/* Where a running referendum stands on its track: the phase clocks
+                and the two threshold gauges. A concluded referendum has no
+                progress — its timeline below is the whole story. */}
+            {data.progress && data.trackInfo && stats && (
+              <ReferendumProgressCard progress={data.progress} track={data.trackInfo} stats={stats} now={now} />
+            )}
             <div className="detail-card">
               <div className="dl">
                 <TallySummary tally={tally} voters={data.directTally.voters} decimals={data.asset.decimals} />
@@ -150,6 +160,13 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
 
               </div>
             </div>
+
+            {/* The referendum's own history: every lifecycle event the chain
+                emitted for it, submission through deposit refunds. */}
+            {(data.timeline?.length ?? 0) > 0 && <>
+              <div className="sec-title" style={{ marginTop: 22 }}>Timeline</div>
+              <ReferendumTimeline timeline={data.timeline} now={now} />
+            </>}
 
             {/* What the referendum would actually DO. Only place a reader can see it: the
                 chain stores it as SCALE bytes behind the hash. */}
