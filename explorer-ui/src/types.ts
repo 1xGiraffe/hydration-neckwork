@@ -1239,6 +1239,59 @@ export interface ReferendumDetail {
   voters: ReferendumVoter[]
   votesShown: number
   votesTotal: number
+  timeline: ReferendumTimelineEntry[]
+  trackInfo: ReferendumTrackRef | null
+  liveTally: LiveReferendumTally | null
+  progress: ReferendumProgress | null
+}
+
+export interface ReferendumTimelineEntry {
+  event: string
+  blockHeight: number
+  extrinsicIndex: number | null
+  timestamp: string
+}
+
+export interface ReferendumTrackRef {
+  id: number
+  name: string
+  // Parachain block counts from the runtime constant; turn into durations with
+  // the nominal slot time (blockSeconds), never a hardcoded pace.
+  preparePeriod: number
+  decisionPeriod: number
+  confirmPeriod: number
+  minEnactmentPeriod: number
+  decisionDeposit: string
+}
+
+// The pallet's CURRENT tally from chain storage — the running-referendum figure
+// the lifecycle events cannot carry. Conviction-weighted, delegation included.
+export interface LiveReferendumTally {
+  ayes: string
+  nays: string
+  support: string
+  electorate: string | null
+}
+
+export interface ReferendumGauge {
+  currentPerbill: number | null
+  thresholdPerbill: number
+  passing: boolean | null
+  source: 'chain' | 'attributed' | null
+}
+
+export interface ReferendumProgress {
+  phase: 'preparing' | 'deciding' | 'confirming'
+  decisionDepositPlaced: boolean
+  submittedBlock: number
+  decisionStartBlock: number | null
+  decisionEndBlock: number | null
+  confirmStartBlock: number | null
+  confirmEndBlock: number | null
+  earliestDecisionBlock: number | null
+  timeoutBlock: number | null
+  approval: ReferendumGauge | null
+  support: ReferendumGauge | null
 }
 
 // A user-authored tag list: a named, ownable collection of tags an account

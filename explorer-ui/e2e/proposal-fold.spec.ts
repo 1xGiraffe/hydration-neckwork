@@ -49,6 +49,7 @@ async function installReferendum(page: Page, entryCount: number) {
         ayeVoters: 0, nayVoters: 0, splitVoters: 0, voters: 0,
       },
       indirectTally: null, voters: [], votesShown: 0, votesTotal: 0,
+      timeline: [], trackInfo: null, liveTally: null, progress: null,
     }),
   }))
 }

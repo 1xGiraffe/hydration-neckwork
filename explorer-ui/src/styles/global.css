@@ -2841,6 +2841,58 @@ a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offs
    and keeps the body font rather than the mono of the amounts above it. */
 .tally-note { font-size: 12px; line-height: 1.45; color: var(--text-low); max-width: 74ch; }
 
+/* ---- referendum progress: the track's phase clocks + threshold gauges ----
+   Deliberately quiet: thin tracks, one accent for phase fills, semantic
+   green/red reserved for the gauge verdicts — the page already has a loud
+   tally bar one card below. */
+.ref-progress { margin-bottom: 14px; padding: 13px 16px 15px; }
+.ref-phases { display: flex; gap: 22px; }
+.ref-phase { flex: 1; min-width: 0; }
+.ref-phase-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.ref-phase-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-low); white-space: nowrap; }
+.ref-phase.current .ref-phase-label { color: var(--text-high); }
+.ref-phase-note { font-size: 11px; color: var(--text-medium); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ref-phase.future .ref-phase-note { color: var(--text-low); }
+.ref-eta-date { color: var(--text-low); }
+.ref-phase-bar { height: 5px; border-radius: 3px; background: color-mix(in srgb, var(--text-low) 14%, transparent); overflow: hidden; }
+.ref-phase-fill { height: 100%; border-radius: 3px; background: var(--accent); transition: width .6s ease; }
+.ref-phase.future .ref-phase-fill, .ref-phase.done .ref-phase-fill { background: color-mix(in srgb, var(--accent) 40%, transparent); }
+/* Phones: the phases stack, and the note keeps its full text. */
+@media (max-width: 720px) {
+  .ref-phases { flex-direction: column; gap: 10px; }
+  .ref-phase-note { white-space: normal; }
+}
+
+.ref-gauges { display: flex; gap: 22px; margin-top: 13px; padding-top: 13px; border-top: 1px solid var(--border); }
+.ref-gauge { flex: 1; min-width: 0; }
+.ref-gauge-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.ref-gauge-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-low); }
+.ref-gauge-nums { font-size: 11px; }
+.ref-gauge.pass .ref-gauge-current { color: var(--green); font-weight: 600; }
+.ref-gauge.fail .ref-gauge-current { color: var(--red); font-weight: 600; }
+/* The tick can sit at 0 or 100%, so the bar must not clip it. */
+.ref-gauge-bar { position: relative; height: 5px; border-radius: 3px; background: color-mix(in srgb, var(--text-low) 14%, transparent); }
+.ref-gauge-fill { height: 100%; border-radius: 3px; }
+.ref-gauge.pass .ref-gauge-fill { background: var(--green); }
+.ref-gauge.fail .ref-gauge-fill { background: var(--red); }
+.ref-gauge.unknown .ref-gauge-fill { background: var(--text-low); }
+.ref-gauge-tick { position: absolute; top: -2px; bottom: -2px; width: 1.5px; border-radius: 1px; background: var(--text-medium); }
+.ref-gauge-note { margin-top: 5px; font-size: 11px; color: var(--text-low); }
+@media (max-width: 720px) { .ref-gauges { flex-direction: column; gap: 12px; } }
+
+/* ---- referendum timeline: one row per lifecycle event ---- */
+.ref-timeline { padding: 6px 14px; }
+.ref-tl-row { display: flex; align-items: baseline; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+.ref-tl-row:last-child { border-bottom: 0; }
+.ref-tl-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; align-self: center; }
+.ref-tl-dot.good { background: var(--green); }
+.ref-tl-dot.bad { background: var(--red); }
+/* Only outcomes carry color; ordinary lifecycle rows keep a quiet dot. */
+.ref-tl-dot.phase, .ref-tl-dot.admin { background: color-mix(in srgb, var(--text-low) 45%, transparent); }
+.ref-tl-label { flex: 1; min-width: 0; font-size: 13px; color: var(--text-high); }
+.ref-tl-when { font-size: 12px; white-space: nowrap; }
+@media (max-width: 720px) { .ref-tl-block { display: none; } }
+
 /* One cluster, both sides. Bubbles are anchors so the app's global hover card and
    click-through work exactly as they do on any other account pill. */
 /* A bubble carries its side's colour twice: a full-strength ring, so the cluster

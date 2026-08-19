@@ -27,13 +27,22 @@ export interface DisplayTally {
   nays: string
   support: string | null
   source: 'chain' | 'attributed'
+  // A 'chain' tally read from live storage while the referendum runs, as
+  // opposed to one lifted off its concluding event. Same authority (the
+  // pallet's own conviction-weighted figure, delegation included) — it just
+  // isn't the last word yet.
+  live?: boolean
   // The chain figure this reconstruction replaced, when there was one.
   snapshot?: OnChainTally
 }
 
-export function selectTally(data: Pick<ReferendumDetail, 'onChainTally' | 'directTally'>): DisplayTally {
+export function selectTally(data: Pick<ReferendumDetail, 'onChainTally' | 'directTally' | 'liveTally'>): DisplayTally {
   const chain = data.onChainTally
   if (chain?.final) return { ayes: chain.ayes, nays: chain.nays, support: chain.support, source: 'chain' }
+  // A running referendum with a reachable node shows the pallet's live tally —
+  // current AND complete, where the attributed sum misses delegated power.
+  const live = data.liveTally ?? null
+  if (live) return { ayes: live.ayes, nays: live.nays, support: live.support, source: 'chain', live: true }
   return {
     ayes: data.directTally.ayes,
     nays: data.directTally.nays,
