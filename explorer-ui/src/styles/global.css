@@ -972,10 +972,29 @@ svg { display: block; }
 /* combined activity */
 .pill-badge { display: inline-block; font-family: 'GeistMono'; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; padding: 3px 9px; border-radius: 9999px; white-space: nowrap; }
 .asset-flow { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.activity-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.activity-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 12px; }
 .activity-chip { font-family: 'GeistMono'; font-size: 11px; letter-spacing: 0.04em; padding: 6px 13px; border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); color: var(--text-medium); transition: color .14s, background .14s, border-color .14s, transform 90ms ease; }
 .activity-chip:hover { color: var(--text-high); }
 .activity-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* The activity type filter as one segmented control (preis's interval picker
+   look): a full-width rounded track whose accent pill glides between segments.
+   tabsInk.ts writes --ink-left/--ink-width off the .active button, exactly as
+   for .tabs — only this bar's ::before draws a pill, not an underline. On
+   narrow screens the track scrolls sideways instead of wrapping, so it keeps
+   its rounded left/right edges. */
+.seg-bar { position: relative; flex: 1 1 100%; display: flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 9999px; background: var(--panel); overflow-x: auto; scrollbar-width: none; }
+.seg-bar::-webkit-scrollbar { display: none; }
+.seg-bar.has-ink::before { content: ''; position: absolute; top: 3px; bottom: 3px;
+  left: var(--ink-left, 0); width: var(--ink-width, 0);
+  border-radius: 9999px; background: var(--accent); pointer-events: none; }
+.seg-bar.ink-live::before { transition: left 200ms var(--ease-standard), width 200ms var(--ease-standard); }
+.seg-btn { position: relative; z-index: 1; flex: 1 0 auto; padding: 6px 13px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 11px; letter-spacing: 0.04em; color: var(--text-medium); white-space: nowrap; text-align: center; transition: color 160ms, transform 90ms ease; }
+.seg-btn:hover { color: var(--text-high); }
+.seg-btn:active { transform: scale(0.96); }
+.seg-btn.active { color: #fff; }
+/* No-JS fallback: without the ink the active segment paints itself. */
+.seg-bar:not(.has-ink) .seg-btn.active { background: var(--accent); }
 .activity-action {
   all: unset; box-sizing: border-box; height: 29px; line-height: 27px; padding: 0 13px;
   border: 1px solid var(--border); border-radius: 9999px; background: var(--panel);
@@ -2112,7 +2131,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .acct-head-skeleton .sk-bal-label { width: 54px; height: 9px; }
 .acct-head-skeleton .sk-bal-value { width: 132px; height: 24px; }
 .sec-title-skeleton .sk-bar { width: 104px; height: 10px; }
-.activity-chips-skeleton .sk-bar { height: 29px; border-radius: 9999px; }
+.activity-chips-skeleton .sk-bar { height: 34px; border-radius: 9999px; }
 .exp-skeleton .exp-h .sk-bar { width: 86px; height: 9px; }
 .exp-kv-skeleton { grid-template-columns: 120px 1fr; }
 .exp-kv-skeleton .sk-bar { height: 11px; }
