@@ -21582,15 +21582,21 @@ export async function getListTagActivity(listId: string, tagId: string, members:
   if (!valid.length) return []
   return getScopedAccountActivity(valid, listTagScope(listId, tagId, valid), type, limit, offset, action, filters, from, to)
 }
+// The cacheKey MUST name the list kind as well as the scope: both builders
+// compose `explorer:<cacheKey>:<limit>:<offset>:<from>:<to>:<filterKey>`, so a
+// bare shared scope made the unfiltered extrinsics and events keys byte-equal —
+// whichever was asked first within the 8s TTL fed the OTHER list its payload,
+// and the events tab crashed rendering extrinsic rows (CallPill on a row with
+// no `name`). The addr-*/tag-* callers already carry this prefix.
 export async function getListTagExtrinsics(listId: string, tagId: string, members: string[], limit = 25, offset = 0, filters: ExtrinsicListFilters = {}, from?: string, to?: string): Promise<ExtrinsicSummary[]> {
   const valid = listTagMembers(members)
   if (!valid.length) return []
-  return getAccountExtrinsics(valid, limit, offset, listTagScope(listId, tagId, valid), filters, from, to)
+  return getAccountExtrinsics(valid, limit, offset, `list-tag-extrinsics:${listTagScope(listId, tagId, valid)}`, filters, from, to)
 }
 export async function getListTagEvents(listId: string, tagId: string, members: string[], limit = 25, offset = 0, filters: EventListFilters = {}, from?: string, to?: string): Promise<EventRow[]> {
   const valid = listTagMembers(members)
   if (!valid.length) return []
-  return getAccountEvents(valid, limit, offset, listTagScope(listId, tagId, valid), filters, from, to)
+  return getAccountEvents(valid, limit, offset, `list-tag-events:${listTagScope(listId, tagId, valid)}`, filters, from, to)
 }
 export async function getListTagVotes(listId: string, tagId: string, members: string[], limit = 25, offset = 0, from?: string, to?: string, filters: VoteListFilters = {}): Promise<VoteRow[]> {
   const valid = listTagMembers(members)
