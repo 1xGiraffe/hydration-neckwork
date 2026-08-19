@@ -33,7 +33,7 @@ test('account detail activity tabs expose the same filters as the global lists',
   await expect(page.locator('.filters input[type="date"]')).toHaveCount(2)
   await page.getByPlaceholder('Call name').fill('transfer')
   await page.locator('.filters select').selectOption('failed')
-  await expect(page).toHaveURL(/atab=extrinsics/)
+  await expect(page).toHaveURL(/view=extrinsics/)
   await expect(page).toHaveURL(/call=transfer/)
   await expect(page).toHaveURL(/result=failed/)
 
@@ -43,7 +43,7 @@ test('account detail activity tabs expose the same filters as the global lists',
   await expect(page.getByPlaceholder('Event name')).toBeVisible()
   await expect(page.locator('.filters input[type="date"]')).toHaveCount(2)
   await page.getByPlaceholder('Event name').fill('transfer')
-  await expect(page).toHaveURL(/atab=events/)
+  await expect(page).toHaveURL(/view=events/)
   await expect(page).toHaveURL(/event=transfer/)
 })
 

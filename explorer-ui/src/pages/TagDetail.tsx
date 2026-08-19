@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState } from 'react'
-import { useTag, useTagListCount, useTagMembers, useTagValueEvents, useStats } from '../hooks/useExplorerData'
+import { useTag, useTagActivityCounts, useTagListCount, useTagMembers, useTagValueEvents, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, useQueryValue, setQuery } from '../router'
@@ -97,7 +97,12 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
   const now = useNow()
   const { data: stats } = useStats(!!data?.activeDcas?.length)
   const headBlock = stats?.headBlock ?? 0
-  const view = useQueryValue('view', 'overview')
+  const rawView = useQueryValue('view', 'overview')
+  const legacyAtab = useQueryValue('atab', '')
+  // Old links nested Extrinsics/Events under ?view=activity&atab=…; both are
+  // first-level views now, so those URLs land on the promoted tab.
+  const view = rawView === 'activity' && (legacyAtab === 'extrinsics' || legacyAtab === 'events') ? legacyAtab : rawView
+  const activityCounts = useTagActivityCounts(tagId)
 
   return (
     <div className="wrap">
@@ -123,7 +128,7 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
           const supplementalDebts = mmList
             .filter(p => p !== primaryMarket && Number(p.totalDebtBase) > 0)
             .map(p => ({ key: p.marketKey, label: p.market, usd: Number(p.totalDebtBase) / 1e8 }))
-          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined)
+          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined, undefined, activityCounts.data?.extrinsics, activityCounts.data?.events)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
@@ -196,7 +201,11 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
               {liquidityPositions.length > 0 && <LiquidityPositionsTable positions={liquidityPositions} />}
               </>)}
 
-              {activeView === 'activity' && <ScopedActivity scope={{ kind: 'tag', tagId }} />}
+              {activeView === 'activity' && <ScopedActivity scope={{ kind: 'tag', tagId }} tab="activity" />}
+
+              {activeView === 'extrinsics' && <ScopedActivity scope={{ kind: 'tag', tagId }} tab="extrinsics" />}
+
+              {activeView === 'events' && <ScopedActivity scope={{ kind: 'tag', tagId }} tab="events" />}
 
               {activeView === 'votes' && <VotesTab scope={{ kind: 'tag', tagId }} />}
             </>

@@ -209,6 +209,9 @@ export function profileTabs(
   activity?: ListCount,
   votesCount?: number,
   hasContract?: boolean,
+  // Raw extrinsic/event counts for the flattened first-level tabs.
+  extrinsicsCount?: number,
+  eventsCount?: number,
 ): DetailTab[] {
   const positionCount = mmPositionCount(markets) + dcaCount + liquidityPositionCount
   return [
@@ -217,6 +220,11 @@ export function profileTabs(
     ...(positionCount > 0 ? [{ key: 'positions', label: 'Positions', count: positionCount }] : []),
     ...(hasContract ? [{ key: 'contract', label: 'Contract' }] : []),
     { key: 'activity', label: 'Activity', ...(activity?.total == null ? {} : { count: activity.total, countAtLeast: !activity.complete }) },
+    // Extrinsics and Events are first-level tabs, not sub-tabs of Activity: all
+    // three are ways of listing what the account did, and burying two of them
+    // one level down made them invisible.
+    { key: 'extrinsics', label: 'Extrinsics', ...(extrinsicsCount == null ? {} : { count: extrinsicsCount }) },
+    { key: 'events', label: 'Events', ...(eventsCount == null ? {} : { count: eventsCount }) },
     ...(votesCount && votesCount > 0 ? [{ key: 'votes', label: 'Votes', count: votesCount }] : []),
   ]
 }
