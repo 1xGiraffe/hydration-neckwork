@@ -78,6 +78,23 @@ export function compactUsd(v: number): string {
 // resolved list tag — which the server holds per recipient (userListService's
 // tag map) rather than on the shared ref, exactly like AddrPill resolves it
 // client-side. Keeping it a parameter is what keeps this module pure.
+/**
+ * A rough wall-clock span for a message: one unit, no false precision. Reading a
+ * schedule's length as a duration is what separates a 90-second burst from a
+ * standing order — an execution COUNT does not ("25.1M executions").
+ */
+export function humanDuration(ms: number): string {
+  const s = ms / 1000
+  if (s < 90) return `${Math.round(s)}s`
+  const min = s / 60
+  if (min < 90) return `${Math.round(min)} min`
+  const h = min / 60
+  if (h < 36) return `${Math.round(h)}h`
+  const d = h / 24
+  if (d < 365) return `${compactAmount(d)} days`
+  return `${compactAmount(d / 365)} years`
+}
+
 export interface RenderAccount {
   accountId: string
   address: string

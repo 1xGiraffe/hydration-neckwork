@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { dcaHourlyValueUsd, evaluateDcaStart, dcaPricedAsset, type DcaScheduleRow } from '../src/notifications/evaluator.ts'
+import { dcaHourlyValueUsd, dcaRuntimeMs, evaluateDcaStart, dcaPricedAsset, type DcaScheduleRow } from '../src/notifications/evaluator.ts'
 import type { NotificationRule } from '../src/notifications/notificationStore.ts'
 import { parseRuleParams } from '../src/notifications/notificationRules.ts'
 
@@ -114,5 +114,32 @@ describe('matching a DCA start', () => {
   it('ignores a schedule outside the window', () => {
     const rows = [schedule({ blockHeight: 50, totalAmount: '0' })]
     expect(evaluateDcaStart(rows, [tradeRule({})], WINDOW, priceHdx, 4_800)).toHaveLength(0)
+  })
+})
+
+// How long a schedule will run, which is what tells a reader whether it is a
+// 90-second burst or a standing order. Counting executions alone read as
+// nonsense: a sell-everything schedule reported "25.1M executions".
+describe('how long a DCA schedule runs', () => {
+  it('is the executions times the period, in wall clock', () => {
+    // 3 executions, 6 blocks apart, ~4.8s a block
+    expect(dcaRuntimeMs(schedule(), 4_800)).toBe(3 * 6 * 4_800)
+  })
+
+  it('is unknown for an unbounded schedule', () => {
+    expect(dcaRuntimeMs(schedule({ totalAmount: '0' }), 4_800)).toBeNull()
+  })
+
+  it('is unknown when the amounts cannot give an execution count', () => {
+    expect(dcaRuntimeMs(schedule({ amountPer: '0' }), 4_800)).toBeNull()
+  })
+
+  // 25.1M executions six blocks apart is ~23 years — a duration reads as
+  // "effectively forever" where a count does not.
+  it('reaches years for a sell-everything schedule', () => {
+    const ms = dcaRuntimeMs(schedule({ totalAmount: '349300000000000000000000' }), 4_800)
+
+    expect(ms).not.toBeNull()
+    expect(ms! / (365 * 86_400_000)).toBeGreaterThan(10)
   })
 })
