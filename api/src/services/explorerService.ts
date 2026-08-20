@@ -8167,7 +8167,7 @@ export interface ActivityRow {
   // `assetB`). Token filters match against these too, so a pool-side asset the
   // row does not display still keeps its row.
   assetRefs?: number[]
-  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'Destroy'   // Create = pool creation; Destroy = pool closure (no value); Claim = LM reward claim
+  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy'   // Create = pool creation; Destroy = pool closure (no value); Claim = LM reward claim; ClaimReferral = referral-program reward claim
   mmAction?: string          // money-market: Supply/Borrow/Repay/Withdraw/LiquidationCall
   mmMarketKey?: string       // absent for legacy/unknown pools; `core` is primary
   mmMarket?: string          // display label; UI only calls out supplemental markets
@@ -11822,7 +11822,12 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
 // so this works immediately without an indexer backfill:
 //   - Referrals.Claimed owns its HDX payout;
 //   - the incentives controller claim call owns each reward-asset payout.
-async function getRecentRewardClaims(limit: number, from?: string, to?: string, accounts?: string[], assetIds?: number[], height?: number, extrinsicIndex?: number, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
+// `only` restricts the window to one claim source. The two sources are merged
+// and TRUNCATED to `limit`, so a caller that keeps just one kind must not fetch
+// a mixed window: filtering it afterwards under-fills the page, and a pager with
+// no exact total reads a short page as the end of the list (ClaimReferral page 1
+// returned 22 of 25 while 10k claims sat deeper).
+async function getRecentRewardClaims(limit: number, from?: string, to?: string, accounts?: string[], assetIds?: number[], height?: number, extrinsicIndex?: number, filters: ValueListFilters = {}, only?: 'referral' | 'incentive'): Promise<ActivityRow[]> {
   if (assetIds != null && !assetIds.length) return []
   const prices = await ensurePrices()
   const tw = timeWindow(from, to)
@@ -11834,34 +11839,52 @@ async function getRecentRewardClaims(limit: number, from?: string, to?: string, 
   const referralAssetFilter = assetIds != null && !assetIds.includes(0) ? 'AND 0' : ''
   const referralAmountExpr = `toString(toUInt256OrZero(JSONExtractString(e.args_json,'referrerRewards')) + toUInt256OrZero(JSONExtractString(e.args_json,'tradeRewards')))`
   const referralValueFilter = eventValueFilterSql('0', referralAmountExpr, 'e.block_timestamp', filters, prices, 'referral_claim_price')
-  const referralRes = await client.query({
-    // A claim's displayed amount is the SAME 256-bit sum the min-value predicate is
-    // pushed down as, so it is stated once: re-adding it in TypeScript from a shipped
-    // payload is how a page comes to filter on a value its rows do not show.
-    query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index, e.extrinsic_index,
-              JSONExtractString(e.args_json,'who') AS who,
-              ${referralAmountExpr} AS amount
-            FROM (
-              SELECT block_height, block_timestamp, event_index, extrinsic_index, event_name, args_json
-              FROM price_data.referral_claim_activity FINAL
-              WHERE ${rawBound}
-            ) AS e
-            ${referralValueFilter.joinSql}
-            WHERE e.event_name = 'Referrals.Claimed'
-              ${accountFilter} ${referralAssetFilter} ${referralValueFilter.predicateSql}
-            ORDER BY e.block_height DESC, e.event_index DESC LIMIT {limit:UInt32}`,
-    query_params: { limit, height: height ?? 0, extrinsicIndex: extrinsicIndex ?? 0 }, format: 'JSONEachRow',
-  })
-  const out: ActivityRow[] = []
-  for (const r of await referralRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; who: string; amount: string }>()) {
-    const a = asset(0)
-    out.push({
-      type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
-      who: r.who ? accountRef(r.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
-      amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
-      liqAction: 'Claim', linkBlock: r.block_height, linkIndex: r.extrinsic_index,
+  const fetchReferralPage = async (bound: string, pageLimit: number): Promise<ActivityRow[]> => {
+    const res = await client.query({
+      // A claim's displayed amount is the SAME 256-bit sum the min-value predicate is
+      // pushed down as, so it is stated once: re-adding it in TypeScript from a shipped
+      // payload is how a page comes to filter on a value its rows do not show.
+      query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index, e.extrinsic_index,
+                JSONExtractString(e.args_json,'who') AS who,
+                ${referralAmountExpr} AS amount
+              FROM (
+                SELECT block_height, block_timestamp, event_index, extrinsic_index, event_name, args_json
+                FROM price_data.referral_claim_activity FINAL
+                WHERE ${bound}
+              ) AS e
+              ${referralValueFilter.joinSql}
+              WHERE e.event_name = 'Referrals.Claimed'
+                ${accountFilter} ${referralAssetFilter} ${referralValueFilter.predicateSql}
+              ORDER BY e.block_height DESC, e.event_index DESC LIMIT {limit:UInt32}`,
+      query_params: { limit: pageLimit, height: height ?? 0, extrinsicIndex: extrinsicIndex ?? 0 }, format: 'JSONEachRow',
     })
+    const rows: ActivityRow[] = []
+    for (const r of await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; who: string; amount: string }>()) {
+      const a = asset(0)
+      rows.push({
+        type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
+        who: r.who ? accountRef(r.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
+        amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
+        // Its own action, not the LM 'Claim': a referral payout claims trade-referral
+        // rewards, not a liquidity position's farm rewards, and the feed filter
+        // and badge both name that difference.
+        liqAction: 'ClaimReferral', linkBlock: r.block_height, linkIndex: r.extrinsic_index,
+      })
+    }
+    return rows
   }
+  // The value filter is enforced in the SQL above; identity/viewer-tag filters are
+  // decided on the BUILT row (hasRowLevelFilter), so under them the referral source
+  // walks deeper until the page fills. Filtering one fixed window instead under-fills
+  // a saturated page, which the action path's window guard turns into a 503 telling
+  // the reader to narrow the filter they just set.
+  const out: ActivityRow[] = only === 'incentive'
+    ? []
+    : filters.identity != null
+      ? (await fetchFilteredDeep(height != null ? rawBound : tw, limit, fetchReferralPage,
+          r => activityRowMatchesFilters(r, { identity: filters.identity, viewerTagged: filters.viewerTagged }),
+          r => r.blockHeight, r => r.eventIndex ?? -1, r => `${r.blockHeight}:${r.eventIndex}`)).slice(0, limit)
+      : await fetchReferralPage(rawBound, limit)
 
   const transferAssetExpr = `if(e.event_name = 'Balances.Transfer', 0, ${currencyIdSql('e.args_json')})`
   const incentiveAccountFilter = accountList ? `AND JSONExtractString(e.args_json,'to') IN (${accountList})` : ''
@@ -11914,7 +11937,7 @@ async function getRecentRewardClaims(limit: number, from?: string, to?: string, 
   }
 
   let pageState: { scanned: number; cursor: { blockHeight: number; eventIndex: number } | null } = { scanned: 0, cursor: null }
-  const confirmed = await fetchFilteredDeep(height != null ? rawBound : tw, limit, async (candidateBound, pageLimit) => {
+  const confirmed = only === 'referral' ? [] : await fetchFilteredDeep(height != null ? rawBound : tw, limit, async (candidateBound, pageLimit) => {
     const candidates = await fetchIncentiveCandidates(candidateBound, pageLimit)
     const last = candidates.at(-1)
     pageState = {
@@ -12513,16 +12536,23 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     }
   } else if (action) {
     // Sub-type filtering breaks SQL paging — fetch a window and page locally.
-    if (type === 'liquidity') rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters, action), ...(action === 'Claim' ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'liquidity') : [])]
-    else if (type === 'mm') rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters, action)).filter(r => !isModuleAcct(r.who)), ...(action === 'ClaimRewards' ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'mm') : [])]
+    // 'ClaimReferral' has no liquidity-pallet events behind it — the rows come from
+    // the reward-claims builder alone, so the event-list fetch is skipped outright.
+    if (type === 'liquidity') rows = [
+      ...(action === 'ClaimReferral' ? [] : await getRecentLiquidity(fetchN, from, to, 0, filters, action)),
+      ...(action === 'Claim' || action === 'ClaimReferral'
+        ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'referral')).filter(r => r.type === 'liquidity' && r.liqAction === action)
+        : []),
+    ]
+    else if (type === 'mm') rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters, action)).filter(r => !isModuleAcct(r.who)), ...(action === 'ClaimRewards' ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'incentive')).filter(r => r.type === 'mm') : [])]
     else if (type === 'otc') rows = await getRecentOtc(fetchN, from, to, 0, filters, action)
     else if (type === 'xcm') rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters), getRecentNttOut(fetchN, from, to, undefined, 0, filters), getRecentNttIn(fetchN, from, to, undefined, 0, filters)])).flat()
     else if (type === 'staking') rows = await getRecentStaking(fetchN, from, to, undefined, 0, filters, undefined, action)
     else rows = (await getVoteFeedRows(fetchN, from, to, 0, filters, withCollective)).map(voteActivityRow)
   } else if (type === 'liquidity') {
-    rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'liquidity')]
+    rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'referral')).filter(r => r.type === 'liquidity')]
   } else if (type === 'mm') {
-    rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters)).filter(r => !isModuleAcct(r.who)), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token))).filter(r => r.type === 'mm')]
+    rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters)).filter(r => !isModuleAcct(r.who)), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'incentive')).filter(r => r.type === 'mm')]
   } else if (type === 'otc') {
     rows = await getRecentOtc(limit, from, to, offset, filters)
   } else if (type === 'xcm') {
@@ -21816,10 +21846,11 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
         else if (filters.action === 'swap') names = SWAP_EVENTS
         else names = [...SWAP_EVENTS, ...OTC_EVENT_NAMES, 'DCA.TradeFailed']
       } else if (type === 'liquidity') {
-        // Referral claims render as a liquidity 'Claim' row without being a liquidity
-        // event, so they join the selection the shared inverse returns.
-        names = filters.action === 'Claim'
-          ? [...liquidityActionEventNames('Claim'), 'Referrals.Claimed']
+        // Referral claims render as liquidity rows without being liquidity-pallet
+        // events; they carry their own 'ClaimReferral' action, so only that filter
+        // selects Referrals.Claimed — the LM 'Claim' no longer includes it.
+        names = filters.action === 'ClaimReferral'
+          ? ['Referrals.Claimed']
           : liquidityActionEventNames(filters.action)
       } else if (type === 'staking') {
         names = filters.action && STAKING_ACTION_EVENTS[filters.action] ? STAKING_ACTION_EVENTS[filters.action] : STAKING_EVENT_NAMES

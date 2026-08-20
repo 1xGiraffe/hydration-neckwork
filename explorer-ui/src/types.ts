@@ -774,7 +774,7 @@ export interface ActivityRow {
   voteRef?: string | null
   voteSide?: string
   voteConviction?: string | null
-  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'Destroy'   // Create = pool creation; Destroy = pool closure; Claim = LM rewards
+  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy'   // Create = pool creation; Destroy = pool closure; Claim = LM rewards; ClaimReferral = referral rewards
   dca?: boolean
   dcaStatus?: 'failed'
   dcaError?: string

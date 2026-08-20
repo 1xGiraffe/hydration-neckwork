@@ -572,7 +572,8 @@ export function activityPath(row: ActivityRow): string {
       case 'liquidity': return row.liqAction === 'Remove' ? 'remove-liquidity'
         : row.liqAction === 'Create' ? 'create-pool'
           : row.liqAction === 'Destroy' ? 'destroy-pool'
-            : row.liqAction === 'Claim' ? 'claim-rewards' : 'add-liquidity'
+            : row.liqAction === 'Claim' ? 'claim-rewards'
+              : row.liqAction === 'ClaimReferral' ? 'claim-referral-rewards' : 'add-liquidity'
       case 'mm': return MM_SLUG[row.mmAction ?? ''] ?? 'lend'
       case 'staking': return 'staking'
       case 'vote': return 'vote'
@@ -595,6 +596,7 @@ const ACTIVITY_LABEL: Record<ActivityRow['type'], string> = {
   mm: 'Money market', dca: 'DCA', staking: 'Staking', vote: 'Vote', otc: 'OTC',
 }
 function activityHeadline(row: ActivityRow): string {
+  if (row.type === 'liquidity' && row.liqAction === 'ClaimReferral') return 'Claim referral rewards'
   if (row.type === 'liquidity' && row.liqAction) return `${row.liqAction} liquidity`
   if (row.type === 'mm' && row.mmAction) return row.mmAction
   if (row.type === 'otc' && row.otcAction) return `OTC ${row.otcAction.toLowerCase()}`
