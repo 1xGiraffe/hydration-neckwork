@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { getAssetLiquidity, getOmnipoolDetail, getPoolDetail, getPoolsIndex } from '../services/poolService.ts'
+import { getAssetLiquidity, getOmnipoolAssetLps, getOmnipoolDetail, getPoolDetail, getPoolLps, getPoolsIndex } from '../services/poolService.ts'
 import { getAssetActivity, getPoolSwaps } from '../services/explorerService.ts'
 
 // Liquidity-pool endpoints: the asset Liquidity tab, stableswap/XYK pool detail
@@ -52,4 +52,33 @@ export async function poolsRoutes(fastify: FastifyInstance) {
     if (!assetId.success) return reply.status(400).send({ error: 'Invalid asset id' })
     return getAssetLiquidity(assetId.data)
   })
+
+  // A pool's liquidity providers: holders of its share token, largest first,
+  // with XYK farm-deposited principal attributed to its economic owners.
+  fastify.get('/explorer/pool/:poolId/lps', async (req, reply) => {
+    const poolId = uint32Schema.safeParse((req.params as { poolId: string }).poolId)
+    if (!poolId.success) return reply.status(400).send({ error: 'Invalid pool id' })
+    const { limit, offset } = pageParams(req.query as Record<string, string | undefined>)
+    const lps = await getPoolLps(poolId.data, limit, offset)
+    if (!lps) return reply.status(404).send({ error: 'Pool not found' })
+    return lps
+  })
+
+  // One omnipool asset's LP ranking: economic owners of its position NFTs
+  // (bare and farmed), plus the protocol's own accountless shares.
+  fastify.get('/explorer/omnipool/:assetId/lps', async (req, reply) => {
+    const assetId = uint32Schema.safeParse((req.params as { assetId: string }).assetId)
+    if (!assetId.success) return reply.status(400).send({ error: 'Invalid asset id' })
+    const { limit, offset } = pageParams(req.query as Record<string, string | undefined>)
+    const lps = await getOmnipoolAssetLps(assetId.data, limit, offset)
+    if (!lps) return reply.status(404).send({ error: 'Asset not in the Omnipool' })
+    return lps
+  })
+}
+
+// Shared limit/offset clamping for the LP lists (default one 10-row page).
+function pageParams(q: { limit?: string; offset?: string }): { limit: number; offset: number } {
+  const limit = Math.min(100, Math.max(1, Number(q.limit ?? 10) || 10))
+  const offset = Math.max(0, Number(q.offset ?? 0) || 0)
+  return { limit, offset }
 }

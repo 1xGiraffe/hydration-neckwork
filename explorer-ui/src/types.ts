@@ -956,6 +956,49 @@ export interface PoolDetail {
   }
 }
 
+// A stableswap/XYK pool's liquidity providers: holders of its share token,
+// largest first, with XYK farm-deposited principal attributed to its owners.
+export interface PoolLpRow {
+  rank: number
+  account: AccountRef
+  shares: string
+  farmedShares: string | null   // included in `shares`
+  sharePct: number | null
+  valueUsd: number | null
+}
+export interface PoolLpsResponse {
+  poolId: number
+  shareToken: AssetRef
+  totalShares: string
+  tvlUsd: number | null
+  total: number
+  lps: PoolLpRow[]
+}
+
+// One omnipool asset's LP ranking. `account` is null exactly once — the
+// protocol's own shares, which have no position NFT.
+export interface OmnipoolLpRow {
+  rank: number
+  account: AccountRef | null
+  protocol?: boolean
+  positions: number
+  farmedPositions: number
+  shares: string
+  sharePct: number | null
+  amount: string     // current withdrawable asset leg
+  hubAmount: string  // current withdrawable H2O leg
+  valueUsd: number | null
+}
+export interface OmnipoolAssetLpsResponse {
+  asset: AssetRef
+  totalShares: string
+  protocolShares: string
+  lpCount: number
+  positionCount: number
+  total: number
+  lps: OmnipoolLpRow[]
+}
+
 export interface OmnipoolAssetRow {
   asset: AssetRef
   reserve: string

@@ -470,6 +470,22 @@ export function useAssetLiquidity(assetId: number, enabled: boolean) {
 export function usePoolDetail(poolId: number) {
   return useQuery({ queryKey: ['pool', poolId], queryFn: ({ signal }) => api.poolDetail(poolId, signal), staleTime: 120_000 })
 }
+export function usePoolLps(poolId: number, offset: number, limit: number) {
+  // The LP rankings page server-side; the previous page is held on screen while
+  // the next one answers (and marked pending), like every other paged table.
+  return useQuery({
+    queryKey: ['pool-lps', poolId, offset, limit],
+    queryFn: ({ signal }) => api.poolLps(poolId, offset, limit, signal),
+    staleTime: 120_000, placeholderData: keepPreviousData,
+  })
+}
+export function useOmnipoolLps(assetId: number, offset: number, limit: number, enabled: boolean) {
+  return useQuery({
+    queryKey: ['omnipool-lps', assetId, offset, limit],
+    queryFn: ({ signal }) => api.omnipoolLps(assetId, offset, limit, signal),
+    staleTime: 120_000, enabled, placeholderData: keepPreviousData,
+  })
+}
 export function useOmnipool() {
   return useQuery({ queryKey: ['omnipool'], queryFn: ({ signal }) => api.omnipool(signal), staleTime: 120_000 })
 }
