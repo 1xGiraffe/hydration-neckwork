@@ -1441,6 +1441,7 @@ export interface DeviceSession { id: string; label: string; createdVia: string; 
 export type NotificationKind =
   | 'account-activity' | 'large-trade' | 'large-transfer' | 'price' | 'health-factor'
   | 'referendum' | 'tc-motion' | 'safety' | 'extrinsic' | 'event'
+  | 'protocol-revenue' | 'liquidation'
 // A channel is described by what is safe to show: a web-push channel by its
 // endpoint's HOST (never the endpoint or its keys), a Telegram channel by its
 // @username (never the chat id). The server never sends the credential itself.

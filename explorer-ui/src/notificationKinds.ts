@@ -12,6 +12,7 @@ import type { NotificationKind, NotificationRule, NotificationTarget } from './t
 export const NOTIFICATION_KINDS: readonly NotificationKind[] = [
   'account-activity', 'large-trade', 'large-transfer', 'price', 'health-factor',
   'referendum', 'tc-motion', 'safety', 'extrinsic', 'event',
+  'protocol-revenue', 'liquidation',
 ]
 
 // Display names for the kind itself (rule picker, rules list, inbox grouping).
@@ -26,6 +27,8 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   safety: 'Safety action',
   extrinsic: 'Extrinsic matcher',
   event: 'Event matcher',
+  'protocol-revenue': 'Protocol revenue',
+  liquidation: 'Liquidation',
 }
 
 // One line of "what this kind watches", shown under the kind in the picker.
@@ -40,6 +43,8 @@ export const KIND_HINTS: Record<NotificationKind, string> = {
   safety: 'Circuit breakers, pauses, freezes and lockdowns.',
   extrinsic: 'A specific call, by pallet and method.',
   event: 'A specific runtime event, by pallet and method.',
+  'protocol-revenue': 'An extrinsic earning the protocol more than a threshold — the protocol share, not the LPs\'.',
+  liquidation: 'A money-market position being liquidated, chain-wide or for one account.',
 }
 
 // The activity-type union the explorer feed routes accept. A rule naming a type

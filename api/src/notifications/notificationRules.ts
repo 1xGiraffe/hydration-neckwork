@@ -8,6 +8,7 @@ import { z } from 'zod'
 export const NOTIFICATION_KINDS = [
   'account-activity', 'large-trade', 'large-transfer', 'price', 'health-factor',
   'referendum', 'tc-motion', 'safety', 'extrinsic', 'event',
+  'protocol-revenue', 'liquidation',
 ] as const
 export type NotificationKind = typeof NOTIFICATION_KINDS[number]
 
@@ -143,6 +144,25 @@ export const largeTradeParams = valueFloorParams.extend({
   dcaStart: z.boolean().default(true),
 })
 
+// What the protocol itself earned on one extrinsic, LP share excluded. A floor is
+// mandatory for the same reason large-trade has one: a routed swap earns the protocol
+// fractions of a cent, so an unbounded rule fires on essentially every extrinsic, and
+// the row lane shares one window query per kind — an unbounded rule is a fan-out
+// problem for every subscriber, not just its owner.
+export const protocolRevenueParams = z.object({
+  minUsd: z.number().min(1),
+}).strict()
+
+// Liquidations are rare (single digits per thousands of blocks), so unlike the
+// large-value kinds this one needs no floor to stay bounded — `minUsd` is offered for
+// owners who only care about big ones. An optional target narrows it to one account or
+// tag; without one the rule watches the whole chain.
+const liquidationShape = z.object({
+  minUsd: z.number().min(0).optional(),
+  target: accountActivityTarget.optional(),
+}).strict()
+export const liquidationParams = z.preprocess(normalizeAccountActivityParams, liquidationShape)
+
 export const priceParams = z.object({
   assetId,
   direction: z.enum(['above', 'below']),
@@ -213,6 +233,8 @@ export const ruleParamSchemas = {
   safety: safetyParams,
   extrinsic: extrinsicParams,
   event: eventParams,
+  'protocol-revenue': protocolRevenueParams,
+  liquidation: liquidationParams,
 } as const satisfies Record<NotificationKind, z.ZodType>
 
 export type RuleParams = {
@@ -226,6 +248,8 @@ export type RuleParams = {
   safety: z.infer<typeof safetyParams>
   extrinsic: z.infer<typeof extrinsicParams>
   event: z.infer<typeof eventParams>
+  'protocol-revenue': z.infer<typeof protocolRevenueParams>
+  liquidation: z.infer<typeof liquidationParams>
 }
 
 export type ParsedRuleParams<K extends NotificationKind = NotificationKind> = RuleParams[K]
@@ -329,6 +353,19 @@ export function describeRule(
       const p = parsed.params as RuleParams['event']
       return `event ${p.section}.${p.method ?? '*'}`
     }
+    case 'protocol-revenue': {
+      const p = parsed.params as RuleParams['protocol-revenue']
+      return `extrinsics earning the protocol over ${usd(p.minUsd)}`
+    }
+    case 'liquidation': {
+      const p = parsed.params as RuleParams['liquidation']
+      const floor = p.minUsd ? ` over ${usd(p.minUsd)}` : ''
+      if (!p.target) return `liquidations${floor}`
+      if (p.target.kind === 'address') return `liquidations${floor} of ${shortAddr(p.target.address)}`
+      const label = targetLabelOf?.(p.target) ?? null
+      if (p.target.kind === 'tag') return `liquidations${floor} of ${label ? `tag "${label.name}"` : 'a tag'}`
+      return `liquidations${floor} of ${label ? `"${label.name}" (${label.listName ?? 'a list'})` : 'a list tag'}`
+    }
   }
 }
 
@@ -344,4 +381,6 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   safety: 'Safety action',
   extrinsic: 'Extrinsic matcher',
   event: 'Event matcher',
+  'protocol-revenue': 'Protocol revenue',
+  liquidation: 'Liquidation',
 }
