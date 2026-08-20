@@ -262,6 +262,44 @@ const titleHtml = (line: string | RenderPart[], url: string) => {
   return out.join(' ').trim()
 }
 
+/**
+ * A digest: one headline plus a bullet per entry, where every bullet keeps the
+ * entry's OWN links — its headline run points at that entry's page, and an
+ * account inside it points at the account. Flattening entries to text made every
+ * row in a digest unreachable, which is the whole reason to open one.
+ *
+ * `more` counts the entries not listed.
+ */
+export function renderList(input: {
+  title: string | RenderPart[]
+  path: string
+  entries: readonly RenderInput[]
+  more?: number
+}): RenderedNotification {
+  const path = input.path.startsWith('/') ? input.path : `/${input.path}`
+  const url = explorerUrl(path)
+  const entryUrl = (e: RenderInput) => explorerUrl(e.path.startsWith('/') ? e.path : `/${e.path}`)
+  const firstDetail = (e: RenderInput) => (e.body ?? []).find(line => joinText(line))
+  const bulletText = (e: RenderInput) => {
+    const detail = firstDetail(e)
+    const head = joinText(e.title)
+    return `• ${detail ? `${head} — ${joinText(detail)}` : head}`
+  }
+  const bulletHtml = (e: RenderInput) => {
+    const detail = firstDetail(e)
+    const head = titleHtml(e.title, entryUrl(e))
+    return `• ${detail ? `${head} — ${joinHtml(detail)}` : head}`
+  }
+  const more = input.more && input.more > 0 ? [`and ${input.more} more`] : []
+  return {
+    title: joinText(input.title),
+    body: [...input.entries.map(bulletText), ...more].join('\n'),
+    path,
+    url,
+    telegramHtml: [titleHtml(input.title, url), ...input.entries.map(bulletHtml), ...more.map(escapeHtml)].join('\n'),
+  }
+}
+
 export function renderNotification(input: RenderInput): RenderedNotification {
   const title = joinText(input.title)
   const lines = (input.body ?? []).map(joinText).filter(Boolean)
