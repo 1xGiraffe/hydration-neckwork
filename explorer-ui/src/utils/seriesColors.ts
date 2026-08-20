@@ -1,22 +1,33 @@
-// Keeping the bands of one chart tellable apart.
+// Keeping asset colours tellable apart.
 //
 // Asset colours are sampled from each asset's own icon, which is what makes a
 // chip, a legend and a band agree on what an asset looks like. It only breaks
-// down when one chart holds two assets from the same family: pool 690 stacks
+// down when a surface holds two assets from the same family: pool 690 stacks
 // vDOT (#e6007a) against aDOT (#e43583), both Polkadot pink, and the 100% area
 // chart read as a single blob with a line through it. Measured with the
 // palette validator: ΔE 3.3 for NORMAL vision, against a floor of 15 — not a
 // colour-vision-deficiency edge case, simply two colours nobody can separate.
 //
-// So a series keeps its own colour whenever it can, and only a band that
-// collides with one already used in the same chart is rotated away in OKLCH
-// until it clears the floor. Hue rotation preserves the lightness and chroma
-// the surface was chosen against, so a nudged band stays legible on the same
-// background, and the walk is deterministic: the same chart always resolves to
-// the same colours.
+// The contract is IDENTITY BY DEFAULT: an asset's chart colour is its
+// icon-sampled colour, byte-identical, unless it truly collides with another —
+// two near-duplicates like vDOT/aDOT or the two WETH listings, not merely
+// "both purple-ish". On a collision the colour keeps its hue and chroma
+// exactly and shifts only LIGHTNESS, by small steps — darker/lighter SHADES of
+// the same colour, which is how family members read as related yet distinct.
+// There is no hue rotation anywhere: when the shade steps exhaust the walk
+// settles for the shade farthest from everything taken rather than leaving
+// the colour's family. The walk is deterministic: the same input always
+// resolves to the same colours. Collisions are resolved once, app-wide, by
+// resolveAssetChartColors (used by utils/iconColor's central resolver), so
+// the same asset wears the same colour on every chart.
 
-const FLOOR = 15          // OKLab ΔE ×100 — the validator's normal-vision floor
-const STEPS = [28, -28, 56, -56, 84, -84, 112, -112, 140, -140, 168, -168, 180]
+// OKLab ΔE ×100 below which two colours are the-same-colour to a reader.
+// Tight on purpose: DOT/vDOT/aDOT pinks measure 3–5 apart and the WETH/GETH
+// greys 3–6, while genuinely different colours sit well above 10.
+const FLOOR = 8
+// Shade steps, nearest first: hue and chroma stay exact, only L moves. The
+// widest steps exist for three/four-way pile-ups (DOT/vDOT/aDOT plus HDX).
+const L_STEPS = [0.08, -0.08, 0.16, -0.16, 0.24, -0.24]
 
 function srgbToLinear(c: number): number {
   return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
@@ -66,25 +77,69 @@ export function colorDistance(a: string, b: string): number {
   return Math.hypot(la[0] - lb[0], la[1] - lb[1], la[2] - lb[2]) * 100
 }
 
-function rotateHue(hex: string, degrees: number): string {
+// A shade of the same colour: same hue and chroma, shifted lightness. Clamped
+// inside the visible band so a shade never collapses into black/white; when
+// the clamp eats most of the step the candidate is no real shade — null.
+function shiftLightness(hex: string, dl: number): string | null {
   const lab = hexToOklab(hex)
-  if (!lab) return hex
-  const [L, a, b] = lab
-  const chroma = Math.hypot(a, b)
-  const hue = Math.atan2(b, a) + (degrees * Math.PI) / 180
-  return oklabToHex([L, Math.cos(hue) * chroma, Math.sin(hue) * chroma])
+  if (!lab) return null
+  const L = Math.min(0.93, Math.max(0.25, lab[0] + dl))
+  if (Math.abs(L - lab[0]) < Math.abs(dl) * 0.6) return null
+  return oklabToHex([L, lab[1], lab[2]])
 }
 
-// Colours for one chart's series, in order, each far enough from the ones
+// One colour against the taken ones: itself unless it truly collides, else the
+// nearest shade that clears, else — never a different hue — the shade farthest
+// from everything taken.
+function separateOne(color: string, taken: readonly string[], floor: number): string {
+  const clash = (candidate: string) => taken.some(t => colorDistance(t, candidate) < floor)
+  if (!hexToOklab(color) || !clash(color)) return color
+  const shades = L_STEPS.map(dl => shiftLightness(color, dl)).filter((c): c is string => c != null)
+  const clear = shades.find(candidate => !clash(candidate))
+  if (clear) return clear
+  let best = color
+  let bestDist = -1
+  for (const candidate of shades) {
+    const d = Math.min(...taken.map(t => colorDistance(t, candidate)))
+    if (d > bestDist) { best = candidate; bestDist = d }
+  }
+  return best
+}
+
+// Colours for one list of series, in order, each far enough from the ones
 // before it. Anything unparseable (a CSS variable like the "Other" band) passes
 // through untouched.
 export function separateSeriesColors(colors: readonly string[], floor = FLOOR): string[] {
   const out: string[] = []
-  for (const color of colors) {
-    const clash = (candidate: string) => out.some(taken => colorDistance(taken, candidate) < floor)
-    if (!hexToOklab(color) || !clash(color)) { out.push(color); continue }
-    const rotated = STEPS.map(d => rotateHue(color, d)).find(candidate => !clash(candidate))
-    out.push(rotated ?? color)
+  for (const color of colors) out.push(separateOne(color, out, floor))
+  return out
+}
+
+// THE app-wide assignment of chart colours to assets: every asset that gets
+// charted anywhere resolves here, in one canonical order, so the same asset
+// wears the same colour on every surface (Omnipool bar vs its history, a pool
+// row vs the pool page, a treemap tile vs a legend). Canonical order is
+// assetId ascending — the established listing keeps its exact icon colour and
+// a newer near-duplicate takes the shade — which also makes the result
+// independent of which page happened to ask first. `key` is the caller's
+// colour identity; duplicate keys resolve once (lowest assetId wins).
+export function resolveAssetChartColors(
+  entries: readonly { key: string; assetId: number; base: string }[],
+  floor = FLOOR,
+): Map<string, string> {
+  const byKey = new Map<string, { key: string; assetId: number; base: string }>()
+  for (const e of entries) {
+    const prev = byKey.get(e.key)
+    if (!prev || e.assetId < prev.assetId) byKey.set(e.key, e)
+  }
+  const ordered = [...byKey.values()].sort((a, b) =>
+    a.assetId - b.assetId || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+  const out = new Map<string, string>()
+  const taken: string[] = []
+  for (const e of ordered) {
+    const color = separateOne(e.base, taken, floor)
+    out.set(e.key, color)
+    taken.push(color)
   }
   return out
 }
