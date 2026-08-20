@@ -1,3 +1,4 @@
+import { base58Encode } from '@polkadot/util-crypto'
 import type { Block } from '../types/support.ts'
 import * as storage from '../types/storage.ts'
 import type { AssetMetadata } from './types.ts'
@@ -110,9 +111,64 @@ function normalizedHex(value: unknown, bytes?: number): string | null {
 }
 
 export interface AssetOrigin {
-  ecosystem: 'polkadot' | 'ethereum'
+  ecosystem: 'polkadot' | 'ethereum' | 'solana' | 'sui'
   chainId: string
   assetId: string | null
+}
+
+// Wormhole-bridged assets are registered under a purely local location —
+// `X3(GeneralKey("wh"), GeneralIndex(<wormhole chain id>), GeneralKey(<32-byte token id>))` —
+// so no consensus junction names their chain and only the Wormhole chain id identifies it.
+// The ids here are Wormhole's, not the chains' own: mapping them is what turns
+// `GeneralIndex(30)` into Base rather than a chain that does not exist. Only chains
+// Hydration actually carries are mapped; an unmapped one stays unresolved rather than
+// naming a chain we cannot verify.
+const WORMHOLE_MARKER = '0x7768'
+const WORMHOLE_ORIGIN_CHAINS: Record<string, Pick<AssetOrigin, 'ecosystem' | 'chainId'>> = {
+  '1': { ecosystem: 'solana', chainId: '101' },
+  '2': { ecosystem: 'ethereum', chainId: '1' },
+  '21': { ecosystem: 'sui', chainId: '0x35834a8a' },
+  '30': { ecosystem: 'ethereum', chainId: '8453' },
+}
+
+// A GeneralKey's `data` is a fixed 32-byte field and `length` says how many of those
+// bytes are the key, so the padding has to come off before the key means anything —
+// `0x0900` and `0x7768` both arrive padded to 32 bytes.
+function generalKeyData(junction: Record<string, unknown>, bytes?: number): string | null {
+  const details = junctionPayload(junction) ?? junction
+  const padded = normalizedHex(details.data)
+  if (padded == null) return null
+  const declared = typeof details.length === 'number' ? details.length : null
+  const key = declared != null && declared * 2 <= padded.length - 2
+    ? `0x${padded.slice(2, 2 + declared * 2)}`
+    : padded
+  return bytes == null || key.length === 2 + bytes * 2 ? key : null
+}
+
+// The token id is always 32 bytes; each ecosystem's canonical form is a different
+// projection of the same bytes — an EVM address is the low 20, a Solana mint is
+// base58, and a Sui coin type stays hex.
+function wormholeAssetId(ecosystem: AssetOrigin['ecosystem'], tokenKey: string): string | null {
+  const body = tokenKey.slice(2)
+  if (ecosystem === 'ethereum') {
+    return /^0{24}[0-9a-f]{40}$/.test(body) ? `0x${body.slice(24)}` : null
+  }
+  if (ecosystem === 'solana') return base58Encode(Buffer.from(body, 'hex'))
+  return tokenKey
+}
+
+function extractWormholeOrigin(location: unknown): AssetOrigin | null {
+  if (objectRecord(location)?.parents !== 0) return null
+  const junctions = locationJunctions(location)
+  if (junctions.length !== 3) return null
+  const [marker, chain, token] = junctions
+  if (marker.__kind !== 'GeneralKey' || generalKeyData(marker, 2) !== WORMHOLE_MARKER) return null
+  if (chain.__kind !== 'GeneralIndex' || token.__kind !== 'GeneralKey') return null
+  const originChain = WORMHOLE_ORIGIN_CHAINS[String(chain.value)]
+  const tokenKey = generalKeyData(token, 32)
+  if (originChain == null || tokenKey == null) return null
+  const assetId = wormholeAssetId(originChain.ecosystem, tokenKey)
+  return assetId ? { ...originChain, assetId } : null
 }
 
 // Decode the same generic origin tuple Hydration UI uses for icon lookup:
@@ -120,6 +176,9 @@ export interface AssetOrigin {
 // GlobalConsensus/AccountKey20 locations instead of reducing every origin to a
 // nullable parachain id.
 export function extractAssetOrigin(location: unknown): AssetOrigin | null {
+  const wormhole = extractWormholeOrigin(location)
+  if (wormhole) return wormhole
+
   const junctions = locationJunctions(location)
   const consensus = junctions.find(j => j.__kind === 'GlobalConsensus')
   const network = consensus ? (junctionPayload(consensus) ?? consensus) : null
@@ -144,8 +203,7 @@ export function extractAssetOrigin(location: unknown): AssetOrigin | null {
     const details = junctionPayload(originJunction) ?? originJunction
     assetId = normalizedHex(details.key, 20)
   } else if (originJunction?.__kind === 'GeneralKey') {
-    const details = junctionPayload(originJunction) ?? originJunction
-    assetId = normalizedHex(details.data)
+    assetId = generalKeyData(originJunction)
   }
   return { ecosystem: 'polkadot', chainId: String(parachainId), assetId }
 }
