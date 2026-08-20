@@ -9,6 +9,7 @@ import { NotifyButton } from '../components/NotifyButton'
 import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
+import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
 import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, MoneyMarketPositions, ActiveDcaTable, LiquidityPositionsTable } from '../components/AccountSections'
 import { BalancesTreemap } from '../components/BalancesTreemap'
 import { useTagMapVersion } from '../userTags'
@@ -91,7 +92,7 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
           const supplementalDebts = mmList
             .filter(p => p !== primaryMarket && Number(p.totalDebtBase) > 0)
             .map(p => ({ key: p.marketKey, label: p.market, usd: Number(p.totalDebtBase) / 1e8 }))
-          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined, undefined, activityCounts.data?.extrinsics, activityCounts.data?.events)
+          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined, undefined, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
@@ -119,7 +120,7 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
                     {listSummary && <span className="muted"> · <ListProvenanceLink listId={listId} listName={listSummary.name} owner={listSummary.owner} /></span>}
                   </div>
                 </div>
-                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} valueUsd={data.portfolioUsd - debtUsd} valueHint={
+                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} revenueUsd={data.revenueUsd} valueUsd={data.portfolioUsd - debtUsd} valueHint={
                   (primaryDebtUsd > 0 || supplementalDebts.length > 0) && <div className="hint">
                       {primaryDebtUsd > 0 && <>primary {F.usd(primarySupplyUsd)} lent · −{F.usd(primaryDebtUsd)} borrowed</>}
                       {supplementalDebts.map((m, i) => <span key={m.key}>{(primaryDebtUsd > 0 || i > 0) && <span aria-hidden="true"> · </span>}<span className="mm-secondary-debt">{m.label} debt −{F.usd(m.usd)}</span></span>)}
@@ -175,6 +176,8 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
               {activeView === 'events' && <ScopedActivity scope={{ kind: 'list-tag', listId, tagId }} tab="events" />}
 
               {activeView === 'votes' && <VotesTab scope={{ kind: 'list-tag', listId, tagId }} />}
+
+              {activeView === 'revenue' && <RevenueBreakdownTab scope={{ kind: 'list-tag', listId, tagId }} />}
             </>
           )
         })()}
