@@ -1,13 +1,12 @@
 import { useState } from 'react'
-import { usePoolActivity, usePoolDetail } from '../hooks/useExplorerData'
+import { usePoolActivity, usePoolDetail, usePoolLps } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
-import { AddrPill, Ago, AreaChart, AssetAmount, AssetChip, AssetIcon, ChartSkeleton, compactAmount, Crumbs, Dash, EmptyRow, F, PoolBadge, rowNav } from '../components/ui'
+import { accountHref, AddrPill, Ago, AreaChart, AssetAmount, AssetChip, AssetIcon, ChartSkeleton, compactAmount, Crumbs, Dash, EmptyRow, F, Pager, pendingRows, PoolBadge, rowNav, TableSkeleton } from '../components/ui'
 import { ChartLegend, MultiLineChart, ShareBar, StackedAreaChart, type ShareSegment } from '../components/HdxCharts'
 import { ActivityTable } from '../components/ActivityTable'
 import { useAssetColors } from '../utils/iconColor'
-import { separateSeriesColors } from '../utils/seriesColors'
 import type { PegSourceInfo, PoolDetail as PoolDetailData } from '../types'
 
 // One stableswap or XYK pool, addressed by its share/LP token id: current
@@ -35,7 +34,14 @@ function PoolBody({ d }: { d: PoolDetailData }) {
   // USD hides that rotation inside the pool's own growth (see compSeries).
   const [compUnit, setCompUnit] = useState<'share' | 'usd'>('share')
   const now = useNow()
-  const colorFor = useAssetColors(d.assets.map(a => a.asset))
+  // Register everything this page charts — history rows can hold assets the
+  // pool no longer does; colorFor is the app-wide resolved colour, so a family
+  // pair (vDOT/aDOT) is already separated and stays the same on every surface.
+  const colorFor = useAssetColors([
+    ...d.assets.map(a => a.asset),
+    ...d.history.composition.map(c => c.asset),
+    ...(d.history.pegs ?? []).map(p => p.asset),
+  ])
   // The pool's OWN activity, not its share token's: a swap through this pool
   // moves its member assets, so an asset-pinned feed on the share token shows
   // liquidity and share trades while the pool's swaps are invisible.
@@ -44,12 +50,9 @@ function PoolBody({ d }: { d: PoolDetailData }) {
   const hasPegs = d.assets.some(a => a.peg != null && a.peg.price !== 1)
   const ramping = d.amplification != null && d.amplification.current !== d.amplification.final
 
-  // Same separation as the stacked chart below: two segments of one family are
-  // otherwise one indistinguishable block.
-  const segmentColors = separateSeriesColors(d.assets.map(a => colorFor(a.asset)))
   const shareSegments: ShareSegment[] = d.tvlUsd != null
     ? d.assets.map((a, i) => ({
-        key: `${a.asset.assetId}:${i}`, label: a.asset.symbol, color: segmentColors[i], value: a.usd ?? 0,
+        key: `${a.asset.assetId}:${i}`, label: a.asset.symbol, color: colorFor(a.asset), value: a.usd ?? 0,
         tip: <><span className="t-d">{a.asset.symbol}</span><span className="t-row">{F.amount(a.amount, a.asset.decimals)} {a.asset.symbol}</span><span className="t-row">{F.usd(a.usd)}</span></>,
       }))
     : []
@@ -65,13 +68,8 @@ function PoolBody({ d }: { d: PoolDetailData }) {
   // absolute scale stays one click away (and in the TVL chart below).
   const bucketTotals = d.history.buckets.map((_, i) =>
     d.history.composition.reduce((s, c) => s + (c.usd[i] ?? 0), 0))
-  // Two assets of one family sample to the same icon colour — vDOT and aDOT are
-  // both Polkadot pink — and a stack of them reads as one band. Separated per
-  // chart, so an asset keeps its own colour unless it would be invisible next
-  // to one already used here.
-  const compColors = separateSeriesColors(d.history.composition.map(c => colorFor(c.asset)))
-  const compSeries = d.history.composition.map((c, ci) => ({
-    key: String(c.asset.assetId), label: c.asset.symbol, color: compColors[ci],
+  const compSeries = d.history.composition.map(c => ({
+    key: String(c.asset.assetId), label: c.asset.symbol, color: colorFor(c.asset),
     values: compUnit === 'share'
       ? c.usd.map((v, i) => (v == null || !(bucketTotals[i] > 0) ? null : (v / bucketTotals[i]) * 100))
       : c.usd,
@@ -172,6 +170,8 @@ function PoolBody({ d }: { d: PoolDetailData }) {
         </>
       )}
 
+      <PoolLpsSection d={d} />
+
       {d.paramEvents.length > 0 && (
         <>
           <div className="sec-title">Parameter changes</div>
@@ -196,6 +196,49 @@ function PoolBody({ d }: { d: PoolDetailData }) {
       {activityRows.length || activity.isLoading
         ? <ActivityTable rows={activityRows} now={now} loading={activity.isLoading && !activityRows.length} pageSize={12} error={activity.error} onRetry={() => { void activity.refetch() }} />
         : <div className="panel"><table className="tbl"><tbody><EmptyRow cols={5}>No activity yet</EmptyRow></tbody></table></div>}
+    </>
+  )
+}
+
+// The pool's liquidity providers: holders of its share token, largest first,
+// with XYK farm-deposited principal attributed to its economic owners (rows
+// marked "farm"). Share % and value are fractions of the SAME LP supply and
+// TVL shown above, so the section reconciles with the pool card by
+// construction. Custodial holders (the Omnipool holding a listed share token,
+// the money market's vaults) appear as their tagged accounts.
+const LPS_PAGE = 10
+function PoolLpsSection({ d }: { d: PoolDetailData }) {
+  const [page, setPage] = useState(0)
+  const lps = usePoolLps(d.poolId, page * LPS_PAGE, LPS_PAGE)
+  const rows = lps.data?.lps ?? []
+  const total = lps.data?.total ?? 0
+  const totalPages = Math.max(1, Math.ceil(total / LPS_PAGE))
+  if (lps.isError) return null
+  return (
+    <>
+      <div className="sec-title">Liquidity providers
+        {lps.data && <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · {F.int(total)} {total === 1 ? 'holder' : 'holders'} of {d.shareToken.symbol}</span>}
+      </div>
+      <div className="panel"><table className="tbl">
+        <thead><tr><th style={{ width: 50 }}>#</th><th>Provider</th><th className="r">Shares</th><th className="r">Share</th><th className="r">Value</th></tr></thead>
+        <tbody {...pendingRows(lps.isPlaceholderData)}>
+          {lps.isLoading && !rows.length ? <TableSkeleton cols={5} rows={6} />
+            : rows.length ? rows.map(r => (
+              <tr key={r.account.accountId} {...rowNav(accountHref(r.account))}>
+                <td data-label="Rank" className="mono muted">{r.rank}</td>
+                <td data-label="Provider"><AddrPill account={r.account} noCopy />
+                  {r.farmedShares && <span className="badge" style={{ marginLeft: 6, background: 'var(--lavender-soft)', color: 'var(--lavender-deep)' }}
+                    title={`${F.amount(r.farmedShares, d.shareToken.decimals)} of these shares are deposited in a liquidity-mining farm`}>farm</span>}
+                </td>
+                <td data-label="Shares" className="r mono">{F.amount(r.shares, d.shareToken.decimals)}</td>
+                <td data-label="Share" className="r mono muted">{r.sharePct != null ? `${r.sharePct.toFixed(1)}%` : '—'}</td>
+                <td data-label="Value" className="r mono">{r.valueUsd != null ? F.usd(r.valueUsd) : <Dash />}</td>
+              </tr>
+            )) : <EmptyRow cols={5}>No liquidity providers</EmptyRow>}
+        </tbody>
+      </table>
+      {totalPages > 1 && <Pager page={page} totalPages={totalPages} onPage={setPage} />}
+      </div>
     </>
   )
 }

@@ -74,7 +74,7 @@ describe('every list that holds rows has a surface that marks them', () => {
       'useAccountActivity', 'useAccountEvents', 'useAccountExtrinsics', 'useAccountVotes',
       'useAccounts', 'useActivity', 'useAssetActivity', 'useBlocks',
       'useContractEvents', 'useContractTransactions', 'useContracts', 'useDaily', 'useEvents',
-      'useExtrinsics', 'useHolders', 'useTagActivity', 'useTagEvents',
+      'useExtrinsics', 'useHolders', 'useOmnipoolLps', 'usePoolLps', 'useTagActivity', 'useTagEvents',
       'useTagExtrinsics', 'useTagVotes', 'useTagVotesByReferendum',
     ])
     expect(holdingHooks.filter(h => CHART_ONLY.includes(h))).toEqual(CHART_ONLY)
@@ -88,6 +88,8 @@ describe('every list that holds rows has a surface that marks them', () => {
       '../src/pages/Blocks.tsx': 1,
       '../src/pages/Accounts.tsx': 1,
       '../src/pages/AssetDetail.tsx': 2,        // activity feed + holders
+      '../src/pages/PoolDetail.tsx': 1,          // liquidity providers
+      '../src/components/AssetLiquidity.tsx': 1, // top Omnipool LPs
       '../src/components/ScopedActivity.tsx': 3, // activity, extrinsics, events tabs
       '../src/components/VotesTab.tsx': 1,
       '../src/components/ContractActivityTab.tsx': 2, // transactions + events sub-tabs

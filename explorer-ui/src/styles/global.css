@@ -3369,3 +3369,11 @@ a.rev-pill-label:hover { color: var(--accent); }
 }
 .rev-breakdown-tbl { margin-top: 12px; }
 .rev-note { color: var(--text-low); font-size: 12.5px; max-width: 720px; margin: 18px 2px 8px; line-height: 1.55; }
+/* ── Top liquidity providers (asset Liquidity tab) ─────────────────────────────
+   The section header is a disclosure button. The global button reset strips
+   everything (see .fn-head), so it wears the surrounding .sec-title type via
+   font/color inherit, with a caret that reflects the expanded state. */
+.lp-expand { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; }
+.lp-expand:hover { color: var(--text-high); }
+.lp-expand:focus-visible { outline: 2px solid var(--sky-deep); outline-offset: 2px; border-radius: 4px; }
+.lp-expand .caret { color: var(--text-low); }
