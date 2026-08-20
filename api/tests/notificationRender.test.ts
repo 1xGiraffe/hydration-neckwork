@@ -69,7 +69,7 @@ describe('account notation parity with AddrPill', () => {
     expect(accountNotation(base()).label).toBeNull()
     expect(accountText(base())).toBe('🐍 15Da…BDRLZ')
     expect(accountText(base({ address: EVM }))).toBe('🐍 0x531a…2f99a')
-    expect(accountText(base({ tag: { name: 'Kraken' } }))).toBe('🐍 Kraken (15Da…BDRLZ)')
+    expect(accountText(base({ tag: { name: 'Kraken' } }))).toBe('🐍 Kraken (RLZ)')
   })
 })
 
@@ -112,13 +112,13 @@ describe('telegram HTML', () => {
     expect(rendered.title).toContain('<b>evil</b> & co')
   })
 
-  it('renders a named account as emoji + bold label + linked short address', () => {
+  it('renders a named account as emoji + bold label + linked address tail', () => {
     const rendered = renderNotification({
       title: 'Safety action',
       body: [[account(base({ tag: { name: 'Kraken' } }))]],
       path: '/security',
     })
-    expect(rendered.telegramHtml).toContain(`🐍 <b>Kraken</b> (<a href="${ORIGIN}/account/${SS58}"><code>15Da…BDRLZ</code></a>)`)
+    expect(rendered.telegramHtml).toContain(`🐍 <b>Kraken</b> (<a href="${ORIGIN}/account/${SS58}">RLZ</a>)`)
     // The headline itself carries the link — the message needs no separate
     // "open" line (and the OS notification preview stays free of link chrome).
     expect(rendered.telegramHtml.startsWith(`<a href="${ORIGIN}/security"><b>Safety action</b></a>`)).toBe(true)
@@ -127,7 +127,7 @@ describe('telegram HTML', () => {
 
   it('links a bare account once, without a duplicated label', () => {
     const rendered = renderNotification({ title: 'x', body: [[account(base())]], path: '/security' })
-    expect(rendered.telegramHtml).toContain(`🐍 <a href="${ORIGIN}/account/${SS58}"><code>15Da…BDRLZ</code></a>`)
+    expect(rendered.telegramHtml).toContain(`🐍 <a href="${ORIGIN}/account/${SS58}">15Da…BDRLZ</a>`)
   })
 
   // The emoji comes off an AccountRef the server assembled, so this is defence
@@ -148,7 +148,7 @@ describe('renderNotification', () => {
     })
     expect(rendered).toMatchObject({
       title: 'Large trade',
-      body: '🐍 Kraken (15Da…BDRLZ) traded $1.23M',
+      body: '🐍 Kraken (RLZ) traded $1.23M',
       // The site-relative path is what the inbox row and the SPA read; the
       // absolute url is for push payloads and Telegram.
       path: '/activity',

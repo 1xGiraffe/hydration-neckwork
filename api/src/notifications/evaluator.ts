@@ -16,7 +16,7 @@ import {
   commitNotifications, prepareNotifications, sendOutbound, type DeliverableNotification,
 } from './delivery.ts'
 import {
-  describeRule, KIND_LABELS, REFERENDUM_PHASES, TC_MOTION_PHASES,
+  KIND_LABELS, REFERENDUM_PHASES, TC_MOTION_PHASES,
   type NotificationKind, type RuleParams,
 } from './notificationRules.ts'
 import {
@@ -681,31 +681,39 @@ const PHASE_LABEL: Record<ReferendumPhase, string> = {
 
 // Asset ids in human-facing summaries read as tickers, from the same registry
 // the rest of the api renders symbols from.
-const symbolOf = (assetId: number): string => assetDescriptor(assetId).symbol
 
 // One match → the {title, body, path} the shared renderer turns into all three
 // surfaces. Pure: everything it needs is already on the match.
-export function renderMatch(match: RuleMatch, rule: NotificationRule, viewerTag: ViewerTag): RenderInput {
+// `rule` is kept in the signature (every caller has one to hand and a lane may
+// need it again) but no message is shaped by it now that the health-factor body
+// no longer restates the rule description.
+export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag: ViewerTag): RenderInput {
   const p = match.payload
   switch (p.lane) {
     case 'activity': {
       const row = p.row
       const title: RenderPart[] = [textPart(activityHeadline(row))]
       if (row.who) title.push(textPart('by'), accountPart(renderAccount(row.who, viewerTag)))
-      return { title, body: [activityAmountLine(row, viewerTag), [textPart(`Block ${row.blockHeight}`)]], path: activityPath(row) }
+      return { title, body: [activityAmountLine(row, viewerTag)], path: activityPath(row) }
     }
     case 'safety':
       return {
         title: [textPart(p.event.label)],
-        body: [p.event.detail, [textPart(`Block ${p.event.blockHeight}`)]],
+        body: [p.event.detail],
         path: '/security',
       }
-    case 'referendum':
+    case 'referendum': {
+      // What the proposal IS matters more than which phase boundary it crossed,
+      // so the headline carries the title and the state change reads underneath.
+      // With no title yet (the submitted phase parks until one exists) the state
+      // change is all there is, and becomes the headline.
+      const change = `Referendum #${p.row.index} ${PHASE_LABEL[p.row.phase]}`
       return {
-        title: [textPart(`Referendum #${p.row.index} ${PHASE_LABEL[p.row.phase]}`)],
-        body: [p.title ?? '', p.row.track == null ? '' : `Track ${p.row.track}`],
+        title: [textPart(p.title || change)],
+        body: p.title ? [change] : [],
         path: `/referendum/opengov/${p.row.index}`,
       }
+    }
     case 'tc-motion': {
       const row = p.row
       const body: (string | RenderPart[])[] = []
@@ -722,7 +730,6 @@ export function renderMatch(match: RuleMatch, rule: NotificationRule, viewerTag:
       if (row.yes != null || row.no != null) body.push(`${row.yes ?? 0} aye / ${row.no ?? 0} nay`)
       if (row.threshold != null) body.push(`Threshold ${row.threshold}`)
       if (row.ok != null) body.push(row.ok ? 'Dispatched successfully' : 'Dispatch failed')
-      body.push([textPart(`Block ${row.blockHeight}`)])
       return {
         title: [textPart(`TC motion ${shortHash(row.proposalHash)} ${TC_MOTION_PHASE_LABEL[row.phase]}`)],
         body,
@@ -738,14 +745,13 @@ export function renderMatch(match: RuleMatch, rule: NotificationRule, viewerTag:
     case 'event':
       return {
         title: [textPart('Event'), codePart(p.row.name)],
-        body: [[textPart(`Block ${p.row.blockHeight}`)]],
+        body: [],
         path: `/event/${p.row.blockHeight}-${p.row.eventIndex}`,
       }
     case 'extrinsic': {
       const title: RenderPart[] = [textPart(p.row.success ? 'Extrinsic' : 'Failed extrinsic'), codePart(p.row.callName)]
       const body: (string | RenderPart[])[] = []
       if (p.row.signer) body.push([textPart('Signed by'), accountPart(renderAccount(p.row.signer, viewerTag))])
-      body.push([textPart(`Block ${p.row.blockHeight}`)])
       return { title, body, path: `/extrinsic/${p.row.blockHeight}-${p.row.extrinsicIndex}` }
     }
     case 'price': {
@@ -769,14 +775,17 @@ export function renderMatch(match: RuleMatch, rule: NotificationRule, viewerTag:
       const size = unbounded
         ? 'Unbounded schedule'
         : `${compactAmount(Math.max(1, Math.round(dcaExecutions(row))))} executions, every ${compactAmount(row.periodBlocks)} blocks`
-      return { title, body: [rate, [textPart(size)], [textPart(`Block ${row.blockHeight}`)]], path: `/dca/${row.id}` }
+      return { title, body: [rate, [textPart(size)]], path: `/dca/${row.id}` }
     }
     case 'health-factor': {
       const title: RenderPart[] = [textPart(`Health factor ${compactAmount(p.value)}`)]
       if (p.account) title.push(textPart('—'), accountPart(renderAccount(p.account, viewerTag)))
       return {
         title,
-        body: [[textPart(`Below the ${compactAmount(p.threshold)} you set. ${describeRule(rule.kind, rule.params, symbolOf, t => resolveActivityTarget(rule.accountId, t))}.`)]],
+        // The headline already names the value and whose position it is, so the
+        // body states the threshold once and stops. Appending the rule
+        // description repeated both, mid-sentence and lowercase.
+        body: [[textPart(`Below the ${compactAmount(p.threshold)} you set.`)]],
         path: `/account/${encodeURIComponent(p.account?.address ?? p.address)}`,
       }
     }
@@ -888,7 +897,6 @@ export function renderDigest(rule: NotificationRule, rendered: readonly Rendered
   // A tag target is named from the rule OWNER's point of view — the same
   // resolution the rules list shows them, so a digest cannot describe a rule
   // differently from the page that created it.
-  const label = rule.name || describeRule(rule.kind, rule.params, symbolOf, t => resolveActivityTarget(rule.accountId, t))
   // Each entry keeps its own detail line (amounts, direction, USD, counterparty) —
   // listing headlines alone threw away everything the single-match message says.
   // An entry with no body still reads as a bare headline.
@@ -899,7 +907,9 @@ export function renderDigest(rule: NotificationRule, rendered: readonly Rendered
   const more = total - listed.length
   return renderNotification({
     title: [textPart(`${total} × ${KIND_LABELS[rule.kind]}`)],
-    body: [label, ...listed.map(t => `• ${t}`), ...(more > 0 ? [`and ${more} more`] : [])],
+    // No rule label: the reader knows what they subscribed to, and the entries
+    // say what happened.
+    body: [...listed.map(t => `• ${t}`), ...(more > 0 ? [`and ${more} more`] : [])],
     path: '/notifications',
   })
 }
