@@ -125,10 +125,10 @@ function voteLabel(action: string | null | undefined): string {
 // are the pool's lifecycle bookends, distinct from an ordinary Add/Remove trade,
 // and the family has no dedicated closure/negative variant to reach for instead.
 const LIQ_COLORS: Record<string, string> = {
-  Add: CAT.liquidity, Remove: CAT.liquidityRemove, Create: CAT.liquidityCreate, Destroy: CAT.liquidityCreate, Claim: CAT.liquidityClaim,
+  Add: CAT.liquidity, Remove: CAT.liquidityRemove, Create: CAT.liquidityCreate, Destroy: CAT.liquidityCreate, Claim: CAT.liquidityClaim, ClaimReferral: CAT.liquidityClaim,
 }
 export const LIQ_LABELS: Record<string, string> = {
-  Add: 'Add liquidity', Remove: 'Remove liquidity', Create: 'Create pool', Destroy: 'Destroy pool', Claim: 'Claim LP Rewards',
+  Add: 'Add liquidity', Remove: 'Remove liquidity', Create: 'Create pool', Destroy: 'Destroy pool', Claim: 'Claim LP Rewards', ClaimReferral: 'Claim Referral Rewards',
 }
 const OTC_COLORS: Record<string, string> = {
   // Placing and pulling an offer both only move an offer around — neither moves
