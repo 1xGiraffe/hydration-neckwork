@@ -1081,14 +1081,40 @@ async function largeValueMatches(
   rules: NotificationRule[], window: BlockWindow, budget: FetchBudget,
 ): Promise<{ matches: RuleMatch[]; deferred: boolean }> {
   const groups = groupRules(rules, rule => largeValueKey(rule.params as RuleParams['large-trade']))
+  // The feed walks HISTORY until `limit` rows clear the value floor — and a rule
+  // whose floor matches almost nothing (a $10k floor on one token) walks past
+  // the read guard and throws too-broad on every tick, wedging the whole lane
+  // behind one rule. Day-bounding the fetch to the window's own days caps the
+  // walk absolutely; the rows are block-filtered to the exact window by
+  // evaluateLargeValue either way. A missing bound (block not in the blocks
+  // table yet) falls back to the unbounded fetch rather than skipping the tick.
+  const bounds = await windowDayBounds(window)
   return visitGroups(kind, groups, budget, async group => {
     const params = group.map(r => r.params as RuleParams['large-trade'])
     const min = Math.min(...params.map(p => p.minUsd))
     const assetId = params[0].assetId
     const filters = { min, unit: 'usd' as const, ...(assetId == null ? {} : { token: String(assetId) }) }
-    const rows = await fetchActivityPage(limit => getRecentActivity(limit, undefined, undefined, 0, feedType, filters), window)
+    const rows = await fetchActivityPage(limit => getRecentActivity(limit, bounds?.from, bounds?.to, 0, feedType, filters), window)
     return evaluateLargeValue(rows, group, window)
   })
+}
+
+// The window's block range as feed day bounds (the feed's time filter is
+// day-granular), so a windowed fetch scans at most two days instead of walking
+// all history for a rare match. null when either boundary block has no row yet.
+async function windowDayBounds(window: BlockWindow): Promise<{ from: string; to: string } | null> {
+  if (!client) return null
+  try {
+    const res = await client.query({
+      query: `SELECT toString(toDate(min(block_timestamp))) AS f, toString(toDate(max(block_timestamp))) AS t, count() AS n
+              FROM price_data.blocks WHERE block_height IN ({from:UInt32}, {to:UInt32})`,
+      query_params: { from: Math.max(window.from, 1), to: window.to },
+      format: 'JSONEachRow',
+    })
+    const row = (await res.json<{ f: string; t: string; n: string }>())[0]
+    if (!row || Number(row.n) < 1 || !/^\d{4}-\d{2}-\d{2}$/.test(row.f)) return null
+    return { from: row.f, to: /^\d{4}-\d{2}-\d{2}$/.test(row.t) ? row.t : row.f }
+  } catch { return null }
 }
 
 function groupRules(rules: readonly NotificationRule[], keyOf: (rule: NotificationRule) => string): Map<string, NotificationRule[]> {
