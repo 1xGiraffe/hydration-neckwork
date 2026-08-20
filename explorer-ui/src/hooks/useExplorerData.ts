@@ -344,6 +344,14 @@ export function useReferendum(pallet: 'opengov' | 'democracy', index: number) {
 // Lazy per-account / per-tag activity totals (extrinsic + event counts). The
 // first hit can take a few seconds server-side, so no live polling and a long
 // staleTime — badges simply appear once the count query resolves.
+// The Protocol Revenue tab payload. Derived-table freshness (~2h tail), so no
+// polling — a long staleTime keeps tab flips free.
+export function useAccountRevenueBreakdown(address: string | null) {
+  return useQuery({ queryKey: ['account-revenue-breakdown', address], queryFn: ({ signal }) => api.accountRevenueBreakdown(address as string, signal), enabled: !!address, staleTime: 300_000 })
+}
+export function useTagRevenueBreakdown(tagId: string | null) {
+  return useQuery({ queryKey: ['tag-revenue-breakdown', tagId], queryFn: ({ signal }) => api.tagRevenueBreakdown(tagId as string, signal), enabled: !!tagId, staleTime: 300_000 })
+}
 export function useAccountActivityCounts(address: string | null) {
   return useQuery({ queryKey: ['account-activity-counts', address], queryFn: ({ signal }) => api.accountActivityCounts(address as string, signal), enabled: !!address, staleTime: 600_000 })
 }

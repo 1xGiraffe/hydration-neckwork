@@ -11,6 +11,7 @@ import { ScopedActivity } from '../components/ScopedActivity'
 import { NotifyButton } from '../components/NotifyButton'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
+import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
 import { useSession } from '../session'
 import { requestConnect } from '../connectDialog'
 import { useAddressLists, useAddressTaggedIn, useMe } from '../hooks/useUser'
@@ -105,7 +106,7 @@ export function Account({ address }: { address: string }) {
           const explicitEvmBinding = data.aliases.find(alias => alias.relationship === 'explicit_binding' && alias.evmAddress)?.evmAddress
           // Debt counts from every market and is netted out of the portfolio Value.
           const debtUsd = moneyMarketDebtUsd(mmList)
-          const tabs = profileTabs(data.balances.length, mmList, data.activeDcas?.length ?? 0, data.liquidityPositions?.length ?? 0, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events)
+          const tabs = profileTabs(data.balances.length, mmList, data.activeDcas?.length ?? 0, data.liquidityPositions?.length ?? 0, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
@@ -236,6 +237,8 @@ export function Account({ address }: { address: string }) {
               {activeView === 'events' && <ScopedActivity scope={{ kind: 'account', address }} tab="events" />}
 
               {activeView === 'votes' && <VotesTab scope={{ kind: 'account', address }} />}
+
+              {activeView === 'revenue' && <RevenueBreakdownTab scope={{ kind: 'account', address }} />}
             </>
           )
         })()}
