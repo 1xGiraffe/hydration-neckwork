@@ -610,7 +610,7 @@ export interface CloseAccountsResponse {
 }
 
 export interface SearchResult {
-  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum'
+  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool'
   value: string
   label?: string
   desc?: string   // asset-type: the descriptive name (e.g. DOT → "Polkadot")
@@ -631,6 +631,10 @@ export interface SearchResult {
   pallet?: 'opengov' | 'democracy'
   index?: number
   status?: string
+  // Pool-type results: the venue and current TVL for the caption; `value` is
+  // the pool id ('omnipool' for the Omnipool itself), `asset` the icon.
+  poolKind?: 'omnipool' | 'stableswap' | 'xyk'
+  tvlUsd?: number | null
 }
 
 // Directory row for /explorer/tags. Members themselves come from the tag detail
