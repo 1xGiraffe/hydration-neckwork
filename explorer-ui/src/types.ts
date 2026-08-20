@@ -291,6 +291,7 @@ export interface TradeDetail {
   extrinsicFee: string | null
   route: TradeHop[]
   dca: boolean
+  revenue?: ActivityRevenue
 }
 
 export interface DailyPoint { date: string; value: number }
@@ -706,8 +707,20 @@ export interface TradeRow {
   linkIndex?: number | null
 }
 
+/**
+ * Protocol revenue the activity's EXTRINSIC generated. ABSENT means the revenue
+ * model has not booked that block yet (it trails the head by ~1000 blocks), NOT
+ * that the action earned nothing — a zero is spelled out with the field present.
+ */
+export interface ActivityRevenue {
+  protocolUsd: number
+  lpUsd: number
+  streams: { stream: string; usd: number }[]
+}
+
 export interface ActivityRow {
   type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc'
+  revenue?: ActivityRevenue
   // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
   finalized?: boolean
   // true = still in the transaction pool, values are a dry-run PROJECTION.
@@ -1229,6 +1242,7 @@ export interface DcaExecutionDetail {
   executionPrice: number | null
   period: number
   failureReason: FailureReason | null
+  revenue?: ActivityRevenue
 }
 
 export interface ReferendumVoter {

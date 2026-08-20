@@ -316,7 +316,7 @@ export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pe
   const fresh = useNewRows(keys, !!live)
   return (
     <div className="panel"><LiveAnchor anchorRef={anchorRef} /><table className="tbl">
-      <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
+      <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r" title="Protocol revenue this extrinsic generated">Protocol revenue</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
       <tbody {...pendingRows(pending)}>
         {loading && !rows.length ? <TableSkeleton cols={cols} rows={pageSize} />
           : error && !rows.length ? <ErrorRow cols={cols} title="Couldn’t load activity" error={error} onRetry={onRetry} />
@@ -346,6 +346,9 @@ export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pe
                     <td data-label="Type"><ActivityBadge r={r} /></td>
                     {!noActor && <td data-label="Account">{r.who ? <AddrPill account={r.who} noCopy /> : <Dash />}</td>}
                     <td data-label="Activity"><ActivityDesc r={r} /></td>
+                    {/* A dash is "not booked yet", never "$0": the revenue model trails
+                        the head, and the field is only present once the block is booked. */}
+                    <td data-label="Protocol revenue" className="r mono muted">{r.revenue ? F.usd(r.revenue.protocolUsd) : <Dash />}</td>
                     <td data-label="Value" className="r mono">{r.valueUsd != null ? F.usd(r.valueUsd) : <Dash />}</td>
                     <td data-label="Time" className="r mono muted">{mempool ? <><PoolChip /><Waiting ts={r.timestamp} now={now} /></> : <Ago ts={r.timestamp} now={now} />}</td>
                   </tr>

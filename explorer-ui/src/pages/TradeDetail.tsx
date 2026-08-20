@@ -5,6 +5,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect } from '../router'
 import { Crumbs, F, AddrPill, AssetChip, StatusBadge, MomentLink, SkeletonRows } from '../components/ui'
 import type { TradeHop } from '../types'
+import { RevenueRow } from '../components/RevenueRow'
 
 const HDX_ASSET: TradeHop['assetIn'] = { assetId: 0, symbol: 'HDX', name: 'Hydration', decimals: 12, parachainId: null }
 
@@ -117,6 +118,7 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
                   </span>
                 </div>
                 <div className="dt">Value</div><div className="dd mono">{F.usd(data.valueUsd)}</div>
+                <RevenueRow revenue={data.revenue} />
                 {data.executionPrice != null && <>
                   <div className="dt">Execution price</div>
                   <div className="dd">

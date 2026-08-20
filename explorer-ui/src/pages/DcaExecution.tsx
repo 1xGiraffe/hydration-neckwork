@@ -4,6 +4,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
 import { Crumbs, F, AddrPill, AssetChip, AssetAmount, StatusBadge, FinalizedBadge, FailureReasonRow, SkeletonRows, MomentLink } from '../components/ui'
 import { DcaResolve } from './DcaSchedule'
+import { RevenueRow } from '../components/RevenueRow'
 
 // One DCA execution attempt: the block/time it ran, the swap it performed (or,
 // for a failed attempt, the intended sell and the decoded failure reason), and
@@ -46,6 +47,7 @@ export function DcaExecution({ height, eventIndex }: { height: number; eventInde
             {data.amountOut != null && <> → <AssetAmount asset={data.assetOut} raw={data.amountOut} /></>}
           </span></div>
           {data.valueUsd != null && <><div className="dt">Value</div><div className="dd mono">{F.usd(data.valueUsd)}</div></>}
+          <RevenueRow revenue={data.revenue} />
           {data.executionPrice != null && <>
             <div className="dt">Execution price</div>
             <div className="dd"><span className="asset-flow">
