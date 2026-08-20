@@ -4,15 +4,15 @@ import * as Dialog from '@radix-ui/react-dialog'
 import { ACTIVITY_ACTIONS, F, noAutofill } from './ui'
 import { Combo, tokenFilterOptions } from './Filters'
 import { nameOptionsInPallet, palletOptions } from './activityFilters'
-import { AlertTargetPicker, type TargetOption } from './AlertTargetPicker'
+import { addressOption, AlertTargetPicker, type TargetOption } from './AlertTargetPicker'
 import { useFilterNames } from '../hooks/useExplorerData'
 import {
   ACTIVITY_TYPES, COOLDOWN_CHOICES, HEALTH_FACTOR_DEFAULT, HEALTH_FACTOR_MAX, HEALTH_FACTOR_MIN,
   HEALTH_FACTOR_PRESETS, KIND_HINTS, KIND_LABELS, LARGE_VALUE_MIN_USD, NOTIFICATION_KINDS, PRICE_STEP_PCTS,
   REFERENDUM_PHASES, REFERENDUM_TRACKS, SAFETY_KINDS, TC_MOTION_PHASES, USD_FLOOR_PRESETS, isAddressLike,
-  isPalletNameLike, priceAtStep, priceStepLabel, suggestPriceDirection, targetParams,
+  isPalletNameLike, priceAtStep, priceStepLabel, readTarget, suggestPriceDirection, targetParams,
 } from '../notificationKinds'
-import type { AssetFilterItem, NotificationKind, NotificationRuleInput, NotificationTarget } from '../types'
+import type { AssetFilterItem, NotificationKind, NotificationRule, NotificationRuleInput, NotificationTarget } from '../types'
 
 // "New alert": pick what to watch, then fill in that kind's own parameters.
 // The field set per kind mirrors api/src/notifications/notificationRules.ts —
@@ -55,6 +55,49 @@ function presetValues(preset: AlertPreset | null | undefined): AlertFormValues {
   for (const [key, value] of Object.entries(preset.params ?? {})) values[key] = String(value)
   if (preset.lockAsset) values.assetId = String(preset.lockAsset.assetId)
   return values
+}
+
+// An existing rule's SERVER params → the form's state, the reverse of
+// buildRuleParams. Scalars flatten to strings like a preset's do; the union
+// targets become picker options — a tag one dressed with the display fields the
+// rules table already carries, an address one with the plain address pill.
+function seededTarget(rule: NotificationRule, raw: unknown): TargetOption | null {
+  const target = readTarget({ target: raw } as Record<string, unknown>)
+  if (!target) return null
+  if (target.kind === 'address') return addressOption(target.address)
+  return {
+    key: target.kind === 'tag' ? `tag:${target.tagId}` : `list-tag:${target.listId}:${target.tagId}`,
+    target,
+    label: rule.targetLabel ?? target.tagId,
+    icon: rule.targetIcon,
+    color: rule.targetColor,
+  }
+}
+
+export function seedFromRule(rule: NotificationRule): {
+  values: AlertFormValues
+  phases: string[]
+  motionPhases: string[]
+  safetyKinds: string[]
+  target: TargetOption | null
+  signerTarget: TargetOption | null
+} {
+  const p = rule.params
+  const values: AlertFormValues = {}
+  for (const [key, value] of Object.entries(p)) {
+    if (value == null || typeof value === 'object' || typeof value === 'boolean') continue
+    values[key] = String(value)
+  }
+  // Booleans and unions take their form spellings.
+  if (rule.kind === 'extrinsic' && typeof p.success === 'boolean') values.success = p.success ? 'yes' : 'no'
+  return {
+    values,
+    phases: rule.kind === 'referendum' && Array.isArray(p.phases) ? p.phases.map(String) : [],
+    motionPhases: rule.kind === 'tc-motion' && Array.isArray(p.phases) ? p.phases.map(String) : [],
+    safetyKinds: rule.kind === 'safety' && Array.isArray(p.kinds) ? p.kinds.map(String) : [],
+    target: seededTarget(rule, p.target),
+    signerTarget: typeof p.signer === 'string' && p.signer ? addressOption(p.signer) : null,
+  }
 }
 
 function num(value: string): number | undefined {
@@ -228,7 +271,7 @@ function PresetChips({ options, value, onPick, label, disabled }: {
   )
 }
 
-export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKind, preset, submitLabel, onSubmit }: {
+export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKind, preset, submitLabel, onSubmit, editRule }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   assets: AssetFilterItem[]
@@ -245,16 +288,22 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
   // create with the rule that was already there; the dialog then says so in
   // place rather than treating a harmless duplicate as an error.
   onSubmit: (input: NotificationRuleInput) => Promise<{ existing?: boolean } | void>
+  // An existing rule to EDIT: the kind is fixed, every field arrives seeded from
+  // the rule's own params, and submit hands the parent the same input shape —
+  // the parent patches instead of creating. Name and frequency are always sent,
+  // so clearing them clears them.
+  editRule?: NotificationRule | null
 }) {
-  const [kind, setKind] = useState<NotificationKind>(preset?.kind ?? initialKind ?? 'large-trade')
-  const [values, setValues] = useState<AlertFormValues>(() => presetValues(preset))
-  const [target, setTarget] = useState<TargetOption | null>(null)
-  const [signerTarget, setSignerTarget] = useState<TargetOption | null>(null)
-  const [phases, setPhases] = useState<string[]>([])
-  const [motionPhases, setMotionPhases] = useState<string[]>([])
-  const [safetyKinds, setSafetyKinds] = useState<string[]>([])
-  const [name, setName] = useState(preset?.name ?? '')
-  const [cooldownS, setCooldownS] = useState(0)
+  const seed = editRule ? seedFromRule(editRule) : null
+  const [kind, setKind] = useState<NotificationKind>(editRule?.kind ?? preset?.kind ?? initialKind ?? 'large-trade')
+  const [values, setValues] = useState<AlertFormValues>(() => seed?.values ?? presetValues(preset))
+  const [target, setTarget] = useState<TargetOption | null>(seed?.target ?? null)
+  const [signerTarget, setSignerTarget] = useState<TargetOption | null>(seed?.signerTarget ?? null)
+  const [phases, setPhases] = useState<string[]>(seed?.phases ?? [])
+  const [motionPhases, setMotionPhases] = useState<string[]>(seed?.motionPhases ?? [])
+  const [safetyKinds, setSafetyKinds] = useState<string[]>(seed?.safetyKinds ?? [])
+  const [name, setName] = useState(editRule?.name ?? preset?.name ?? '')
+  const [cooldownS, setCooldownS] = useState(editRule?.cooldownS ?? 0)
   const [error, setError] = useState<string | null>(null)
   // "You already have this one" — a note, not an error: the create is idempotent,
   // so nothing went wrong and nothing was duplicated.
@@ -272,9 +321,12 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
   if (open !== wasOpen) {
     setWasOpen(open)
     if (open) {
-      setKind(preset?.kind ?? initialKind ?? 'large-trade')
-      setValues(presetValues(preset)); setTarget(null); setSignerTarget(null); setPhases([]); setMotionPhases([]); setSafetyKinds([])
-      setName(preset?.name ?? ''); setCooldownS(0); setError(null); setExistingNote(false)
+      const freshSeed = editRule ? seedFromRule(editRule) : null
+      setKind(editRule?.kind ?? preset?.kind ?? initialKind ?? 'large-trade')
+      setValues(freshSeed?.values ?? presetValues(preset))
+      setTarget(freshSeed?.target ?? null); setSignerTarget(freshSeed?.signerTarget ?? null)
+      setPhases(freshSeed?.phases ?? []); setMotionPhases(freshSeed?.motionPhases ?? []); setSafetyKinds(freshSeed?.safetyKinds ?? [])
+      setName(editRule?.name ?? preset?.name ?? ''); setCooldownS(editRule?.cooldownS ?? 0); setError(null); setExistingNote(false)
     }
   }
 
@@ -313,15 +365,19 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
     })
     if (!built.ok) { setError(built.error); return }
     try {
-      const result = await onSubmit({
-        kind,
-        params: built.params,
-        ...(name.trim() ? { name: name.trim() } : {}),
-        ...(cooldownS ? { cooldownS } : {}),
-      })
+      // An edit always carries name and frequency, so clearing either clears
+      // it on the rule; a create keeps omitting what was never set.
+      const result = await onSubmit(editRule
+        ? { kind, params: built.params, name: name.trim(), cooldownS }
+        : {
+          kind,
+          params: built.params,
+          ...(name.trim() ? { name: name.trim() } : {}),
+          ...(cooldownS ? { cooldownS } : {}),
+        })
       if (result?.existing) setExistingNote(true)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not create the alert')
+      setError(e instanceof Error ? e.message : editRule ? 'Could not save the alert' : 'Could not create the alert')
     }
   }
 
@@ -330,8 +386,8 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
   // With a preset the title names the intent the surface offered and the token it
   // offered it for — "Price alert · DOT" — because the reader clicked something
   // specific and the dialog has to be recognisably the answer to it.
-  const intent = preset ? (preset.label ?? KIND_LABELS[preset.kind]) : 'New alert'
-  const title = preset && lockAsset ? `${intent} · ${lockAsset.symbol}` : intent
+  const intent = editRule ? `Edit alert · ${KIND_LABELS[editRule.kind]}` : preset ? (preset.label ?? KIND_LABELS[preset.kind]) : 'New alert'
+  const title = !editRule && preset && lockAsset ? `${intent} · ${lockAsset.symbol}` : intent
   const catalogue = kind === 'event' ? filterNames.data?.events ?? [] : filterNames.data?.calls ?? []
   const pallets = palletOptions(catalogue, kind === 'event' ? 'event' : 'call')
   const methods = nameOptionsInPallet(catalogue, values.section ?? '')
@@ -363,9 +419,9 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
               </div>
             )}
 
-            {/* A preset decided the kind, so the picker would only offer a way to
-                turn this dialog into a different one. */}
-            {!preset && (
+            {/* A preset (or the rule under edit) decided the kind, so the picker
+                would only offer a way to turn this dialog into a different one. */}
+            {!preset && !editRule && (
               <div className="field">
                 <label htmlFor="alert-kind">Watch</label>
                 <select id="alert-kind" value={kind} disabled={pending} onChange={e => { setKind(e.target.value as NotificationKind); setError(null) }}>
@@ -619,7 +675,7 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
           </div>
           <div className="dialog-foot">
             <button type="button" className="btn primary" onClick={() => void submit()} disabled={pending}>
-              {submitLabel ?? (preset ? 'Save alert' : 'Create alert')}
+              {submitLabel ?? (editRule ? 'Save changes' : preset ? 'Save alert' : 'Create alert')}
             </button>
           </div>
         </Dialog.Content>
