@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Notifications, ChannelsSection, RulesSection, InboxSection, notificationTab, notificationTabs } from '../src/pages/Notifications'
 import { NotificationBell } from '../src/components/NotificationBell'
 import { NotifyButton } from '../src/components/NotifyButton'
-import { actionOptions, buildRuleParams } from '../src/components/NewAlertDialog'
+import { actionOptions, buildRuleParams, seedFromRule } from '../src/components/NewAlertDialog'
 import { nameOptionsInPallet, palletOptions } from '../src/components/activityFilters'
 import { ACTIVITY_ACTIONS, F, healthFactorDisplay } from '../src/components/ui'
 import { optionFromSearchResult, optionFromUserTag, rawAddressOption, targetOptions } from '../src/components/AlertTargetPicker'
@@ -334,7 +334,7 @@ describe('the preset alert dialog', () => {
   // surface already decided is shown rather than offered: no kind picker, the
   // token as a fixed chip, and a title naming the intent and the token.
   it('hides what the surface already decided', () => {
-    expect(dialog).toContain('{!preset && (')
+    expect(dialog).toContain('{!preset && !editRule && (')
     expect(dialog).toContain('`${intent} · ${lockAsset.symbol}`')
     expect(dialog).toContain('className="notif-chip alert-locked-token"')
     expect(dialog).toContain("preset ? 'Save alert' : 'Create alert'")
@@ -781,5 +781,36 @@ describe('subscribedLabel', () => {
   it('collapses only the generic labels, where the page is the subject', () => {
     expect(subscribedLabel('Get notified')).toBe('Alerting ✓')
     expect(subscribedLabel('Notify')).toBe('Alerting ✓')
+  })
+})
+
+// Editing seeds the form from a rule's SERVER params and submit rebuilds them;
+// the round trip must land on the same subscription, or an untouched edit would
+// silently rewrite the rule.
+describe('edit dialog round trip — seedFromRule ∘ buildRuleParams', () => {
+  const rule = (kind: NotificationKind, params: Record<string, unknown>, extra: Partial<NotificationRule> = {}): NotificationRule =>
+    ({ id: 'r', kind, kindLabel: '', name: '', summary: '', params, channels: [], muted: false, cooldownS: 0, ...extra })
+
+  const roundTrip = (r: NotificationRule) => {
+    const seed = seedFromRule(r)
+    const built = buildRuleParams(r.kind, seed.values, {
+      phases: seed.phases, motionPhases: seed.motionPhases, safetyKinds: seed.safetyKinds,
+      target: seed.target?.target ?? null, signerTarget: seed.signerTarget?.target ?? null,
+    })
+    expect(built.ok).toBe(true)
+    if (built.ok) expect(sameRuleParams(r.kind, r.params, built.params)).toBe(true)
+  }
+
+  it('reproduces every kind of rule unchanged', () => {
+    roundTrip(rule('price', { assetId: 5, direction: 'below', price: 0.5 }))
+    roundTrip(rule('large-trade', { minUsd: 1000, assetId: 0 }))
+    roundTrip(rule('large-transfer', { minUsd: 10000 }))
+    roundTrip(rule('health-factor', { target: { kind: 'address', address: FOX_ADDRESS }, threshold: 1.6 }))
+    roundTrip(rule('health-factor', { target: { kind: 'tag', tagId: 'treasury' }, threshold: 1.1 }, { targetLabel: 'Treasury' }))
+    roundTrip(rule('account-activity', { target: { kind: 'tag', tagId: 'kraken' }, type: 'trade', minUsd: 50 }, { targetLabel: 'Kraken' }))
+    roundTrip(rule('referendum', { phases: ['submitted', 'confirmed'], track: '5' }))
+    roundTrip(rule('tc-motion', { phases: ['proposed'] }))
+    roundTrip(rule('extrinsic', { section: 'omnipool', method: 'sell', success: false, signer: FOX_ADDRESS }))
+    roundTrip(rule('event', { section: 'referenda', method: 'submitted' }))
   })
 })

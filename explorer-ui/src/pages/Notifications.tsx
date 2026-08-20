@@ -70,8 +70,12 @@ export function Notifications() {
   const assets = useAssetFilterOptions()
   const now = useNow()
   const createRule = useNotificationMutation(userApi.createNotificationRule)
+  const patchRule = useNotificationMutation(userApi.updateNotificationRule)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [dialogMounted, setDialogMounted] = useState(false)
+  // The rule the dialog is editing; null = the dialog creates. Cleared when the
+  // dialog closes so "+ New alert" never opens seeded with the last edit.
+  const [editRule, setEditRule] = useState<NotificationRule | null>(null)
   const openDialog = () => { setDialogMounted(true); setDialogOpen(true) }
   const channels = overview.data?.channels ?? []
   const rules = overview.data?.rules ?? []
@@ -103,6 +107,7 @@ export function Notifications() {
               channels={channels}
               loading={overview.isLoading}
               onNew={openDialog}
+              onEdit={rule => { setEditRule(rule); setDialogMounted(true); setDialogOpen(true) }}
             />
           )}
 
@@ -122,12 +127,20 @@ export function Notifications() {
         <Suspense fallback={null}>
           <NewAlertDialog
             open={dialogOpen}
-            onOpenChange={setDialogOpen}
+            onOpenChange={open => { setDialogOpen(open); if (!open) setEditRule(null) }}
             assets={assets.data ?? []}
-            pending={createRule.isPending}
+            pending={createRule.isPending || patchRule.isPending}
+            editRule={editRule}
             onSubmit={async (input: NotificationRuleInput) => {
-              await createRule.mutateAsync([input])
+              if (editRule) {
+                // The dialog rebuilt the full params, so the patch replaces them
+                // wholesale; name and frequency arrive always, so clearing sticks.
+                await patchRule.mutateAsync([editRule.id, { params: input.params, name: input.name ?? '', cooldownS: input.cooldownS ?? 0 }])
+              } else {
+                await createRule.mutateAsync([input])
+              }
               setDialogOpen(false)
+              setEditRule(null)
             }}
           />
         </Suspense>
@@ -427,11 +440,12 @@ function ChannelRow({ channel, onChanged }: { channel: NotificationChannel; onCh
 
 /* ── rules ──────────────────────────────────────────────────────────────── */
 
-export function RulesSection({ rules, channels, loading, onNew }: {
+export function RulesSection({ rules, channels, loading, onNew, onEdit }: {
   rules: NotificationRule[]
   channels: NotificationChannel[]
   loading?: boolean
   onNew?: () => void
+  onEdit?: (rule: NotificationRule) => void
 }) {
   const update = useNotificationMutation(userApi.updateNotificationRule)
   const remove = useNotificationMutation(userApi.deleteNotificationRule)
@@ -479,6 +493,9 @@ export function RulesSection({ rules, channels, loading, onNew }: {
                   <td data-label="Frequency" className="r mono muted">{cooldownLabel(rule.cooldownS)}</td>
                   <td data-label="Actions" className="r">
                     <span className="notif-row-actions">
+                      {onEdit && (
+                        <button type="button" className="btn sm" onClick={() => onEdit(rule)}>Edit</button>
+                      )}
                       <button type="button" className="btn sm" disabled={update.isPending}
                         aria-pressed={rule.muted}
                         onClick={() => update.mutate([rule.id, { muted: !rule.muted }])}>
