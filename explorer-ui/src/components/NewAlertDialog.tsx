@@ -160,6 +160,24 @@ export function buildRuleParams(
         ...(kind === 'large-trade' && v.dcaStart === 'no' ? { dcaStart: false } : {}),
       } }
     }
+    // Judged on the protocol's own share, so the floor is small by nature: a routed
+    // swap earns the protocol fractions of a cent, while a liquidation can earn
+    // hundreds. Any floor at all is what keeps the rule from firing on everything.
+    case 'protocol-revenue': {
+      const minUsd = num(v.minUsd ?? '')
+      if (minUsd == null || minUsd < 1) return { ok: false, error: 'Set a floor of at least $1' }
+      return { ok: true, params: { minUsd } }
+    }
+    // Liquidations are rare enough to need no floor, and the target is optional: with
+    // none the rule watches every liquidation on the chain.
+    case 'liquidation': {
+      const target = sets.target ?? (isAddressLike(address) ? ({ kind: 'address', address } as const) : null)
+      const minUsd = num(v.minUsd ?? '')
+      return { ok: true, params: {
+        ...(target ? targetParams(target) : {}),
+        ...(minUsd != null && minUsd > 0 ? { minUsd } : {}),
+      } }
+    }
     case 'price': {
       const assetId = num(v.assetId ?? '')
       if (assetId == null) return { ok: false, error: 'Pick a token' }
@@ -448,6 +466,32 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
                 <label htmlFor="alert-hf-target" className="field-label">Whose position</label>
                 <AlertTargetPicker inputId="alert-hf-target" value={target} onChange={setTarget}
                   onTextChange={t => set('address', t)} disabled={pending} />
+              </div>
+            )}
+
+            {kind === 'liquidation' && (
+              <div className="field">
+                {/* Optional, unlike the other target kinds: with nothing picked the
+                    rule watches every liquidation on the chain, which is the common
+                    case. A tag follows its membership live. */}
+                <label htmlFor="alert-liq-target" className="field-label">Whose position (optional)</label>
+                <AlertTargetPicker inputId="alert-liq-target" value={target} onChange={setTarget}
+                  onTextChange={t => set('address', t)} disabled={pending} />
+              </div>
+            )}
+
+            {(kind === 'liquidation' || kind === 'protocol-revenue') && (
+              <div className="field">
+                <label htmlFor="alert-min-rev">
+                  {kind === 'protocol-revenue' ? 'Protocol earns over (USD)' : 'Position over (USD, optional)'}
+                </label>
+                <input {...noAutofill} id="alert-min-rev" type="number"
+                  min={kind === 'protocol-revenue' ? 1 : 0}
+                  placeholder={kind === 'protocol-revenue' ? '10' : 'any size'}
+                  value={values.minUsd ?? ''} disabled={pending} onChange={e => set('minUsd', e.target.value)} />
+                {/* The protocol's own share of the fees, not the LPs'. A big routed
+                    swap can pay LPs handsomely and the protocol very little. */}
+                <div className="muted" style={{ fontSize: 11 }}>{KIND_HINTS[kind]}</div>
               </div>
             )}
 
