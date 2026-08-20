@@ -131,8 +131,17 @@ const valueFloorParams = z.object({
   assetId: assetId.optional(),
   minUsd: z.number().min(100),
 }).strict()
-export const largeTradeParams = valueFloorParams
 export const largeTransferParams = valueFloorParams
+// A DCA schedule is a standing order over the same feed, so a large-trade rule
+// also answers "did somebody just start pushing this much per hour?". Opt-OUT:
+// a rule stored before this shipped carries no flag and must behave as enabled.
+// `.default(true)` rather than `.optional()` keeps the parsed params explicit —
+// rule creation is idempotent on the canonical params, and an implied default
+// would give one rule two canonical keys. large-transfer has no DCA to start, so
+// it keeps the bare schema and rejects the flag.
+export const largeTradeParams = valueFloorParams.extend({
+  dcaStart: z.boolean().default(true),
+})
 
 export const priceParams = z.object({
   assetId,

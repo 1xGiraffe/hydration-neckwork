@@ -90,6 +90,7 @@ export function seedFromRule(rule: NotificationRule): {
   }
   // Booleans and unions take their form spellings.
   if (rule.kind === 'extrinsic' && typeof p.success === 'boolean') values.success = p.success ? 'yes' : 'no'
+  if (rule.kind === 'large-trade' && typeof p.dcaStart === 'boolean') values.dcaStart = p.dcaStart ? 'yes' : 'no'
   return {
     values,
     phases: rule.kind === 'referendum' && Array.isArray(p.phases) ? p.phases.map(String) : [],
@@ -150,7 +151,14 @@ export function buildRuleParams(
       const minUsd = num(v.minUsd ?? '')
       if (minUsd == null || minUsd < LARGE_VALUE_MIN_USD) return { ok: false, error: `Set a floor of at least $${LARGE_VALUE_MIN_USD}` }
       const assetId = num(v.assetId ?? '')
-      return { ok: true, params: { minUsd, ...(assetId != null ? { assetId } : {}) } }
+      return { ok: true, params: {
+        minUsd,
+        ...(assetId != null ? { assetId } : {}),
+        // Only the trade kind has DCA schedules to watch — the transfer schema
+        // rejects the flag. Omitting it means ON (the server defaults it), so the
+        // form only ever sends the explicit opt-out.
+        ...(kind === 'large-trade' && v.dcaStart === 'no' ? { dcaStart: false } : {}),
+      } }
     }
     case 'price': {
       const assetId = num(v.assetId ?? '')
@@ -526,6 +534,21 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
                   value={values.minUsd ?? ''} disabled={pending} onChange={e => set('minUsd', e.target.value)} />
                 <PresetChips options={USD_FLOOR_PRESETS} value={values.minUsd ?? ''} label="Value floor presets"
                   disabled={pending} onPick={v => set('minUsd', v)} />
+              </div>
+            )}
+
+            {/* A DCA schedule is a standing order, so it is judged on the lower of
+                its hourly rate and its whole size — the same floor, read as a rate.
+                On unless turned off, so an alert written before this existed keeps
+                behaving the way its owner expects. */}
+            {kind === 'large-trade' && (
+              <div className="field">
+                <label htmlFor="alert-dca-start">DCA schedules</label>
+                <select id="alert-dca-start" value={values.dcaStart === 'no' ? 'no' : 'yes'} disabled={pending}
+                  onChange={e => set('dcaStart', e.target.value)}>
+                  <option value="yes">Also alert when one starts at this rate per hour</option>
+                  <option value="no">Only alert on individual trades</option>
+                </select>
               </div>
             )}
 
