@@ -8,13 +8,13 @@ import type { MouseEvent, ReactNode, CSSProperties } from 'react'
 // preis-ui (window events + a single store), but using the History API so URLs
 // are clean (no `#`). Deep links work from static nginx via `try_files … /index.html`.
 
-const ACTIVITY_SLUGS = ['swap', 'dca', 'transfer', 'cross-chain', 'add-liquidity', 'remove-liquidity', 'create-pool', 'destroy-pool', 'claim-rewards', 'lend', 'withdraw', 'borrow', 'repay', 'liquidate', 'staking', 'vote', 'otc-place', 'otc-pull', 'otc-fill'] as const
+const ACTIVITY_SLUGS = ['swap', 'dca', 'transfer', 'cross-chain', 'add-liquidity', 'remove-liquidity', 'create-pool', 'destroy-pool', 'claim-rewards', 'claim-referral-rewards', 'lend', 'withdraw', 'borrow', 'repay', 'liquidate', 'staking', 'vote', 'otc-place', 'otc-pull', 'otc-fill'] as const
 export type ActivitySlug = typeof ACTIVITY_SLUGS[number]
 const ACTIVITY_ID_RE = /^\d+-(?:e)?\d+$/
 // Activity feed tab that lists this slug's rows (crumbs + malformed-id fallback).
 export const ACTIVITY_SLUG_TAB: Record<ActivitySlug, string> = {
   swap: 'trade', dca: 'trade', transfer: 'transfer', 'cross-chain': 'xcm',
-  'add-liquidity': 'liquidity', 'remove-liquidity': 'liquidity', 'create-pool': 'liquidity', 'destroy-pool': 'liquidity', 'claim-rewards': 'all',
+  'add-liquidity': 'liquidity', 'remove-liquidity': 'liquidity', 'create-pool': 'liquidity', 'destroy-pool': 'liquidity', 'claim-rewards': 'all', 'claim-referral-rewards': 'liquidity',
   lend: 'mm', withdraw: 'mm', borrow: 'mm', repay: 'mm', liquidate: 'mm',
   staking: 'stake', vote: 'vote',
   // OTC folds under the Trade activity tab (rows keep their own otc-* slugs).
