@@ -273,13 +273,21 @@ function matchRows<T>(
   return out
 }
 
+// 'dca' is not a row type. The feed categorises DCA executions under the Trade
+// chip and keeps a `dca` flag for the badge — `normalizeActivityTypeKey` maps the
+// FETCH the same way — so a rule naming 'dca' means "a trade row carrying the
+// flag". Comparing the rule's word to `row.type` ('dca' === 'trade') matched
+// nothing and silenced every dca rule outright.
+const activityTypeSelects = (row: ActivityRow, type: string): boolean =>
+  type === 'dca' ? row.type === 'trade' && row.dca === true : activityTypeMatchesFamily(row.type, type)
+
 export function evaluateAccountActivity(rows: readonly ActivityRow[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
   return rules.flatMap(rule => {
     const p = rule.params as RuleParams['account-activity']
     const type = activityTypeForFeed(p.type)
     return matchRows(rows, rule, window, r => r.blockHeight, activityIdentity,
       r => isFinalRow(r)
-        && (type === 'all' || activityTypeMatchesFamily(r.type, type))
+        && (type === 'all' || activityTypeSelects(r, type))
         && activityRowMatchesAction(r, p.action)
         && (p.minUsd == null || (r.valueUsd != null && r.valueUsd >= p.minUsd)),
       row => ({ lane: 'activity', row }))
