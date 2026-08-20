@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached } from './cache.ts'
-import { runtimeSlotDurationMs } from './runtimeConstants.ts'
+import { runtimeParaBlockMs } from './runtimeConstants.ts'
 
 // One home for "how long is a Hydration block".
 //
@@ -12,11 +12,15 @@ import { runtimeSlotDurationMs } from './runtimeConstants.ts'
 //     schedules, `ParachainSystem.LastRelayChainBlockNumber` extrapolation)
 //     keeps the hard 6000 in `NOMINAL_RELAY_BLOCK_MS` and must never be routed
 //     through the parachain pace.
-//  2. The parachain's NOMINAL slot time, `MILLISECS_PER_BLOCK` in the runtime
-//     (`aura.slotDuration`, 6000 today, 2000 after the planned upgrade). Every
-//     runtime block-count constant is DERIVED from it — `DAYS`, the GIGAHDX
-//     cooldown, conviction lock periods — so it is the right slope for turning
-//     one of those block counts into a duration.
+//  2. The parachain's NOMINAL block interval, `MILLISECS_PER_BLOCK` in the
+//     runtime (6000 today, 2000 after the planned upgrade). Every runtime
+//     block-count constant is DERIVED from it — `DAYS`, the GIGAHDX cooldown,
+//     conviction lock periods — so it is the right slope for turning one of
+//     those block counts into a duration. It is NOT `aura.slotDuration`:
+//     runtime 440 decouples the author slot (which stays 6000) from the block
+//     interval, so that constant reads 6000 on both sides of the switch. See
+//     `runtimeParaBlockMs` for the two wall-clock-premised constants that do
+//     track it.
 //  3. The parachain's MEASURED pace. Elastic scaling means real production runs
 //     ahead of the nominal slot: ~5.4–5.8s per block against a 6000ms nominal
 //     as of Aug 2026. It is the right number for "how many blocks did the chain
@@ -164,7 +168,7 @@ export const blocksPerHour = (msPerBlock: number): number => 3_600_000 / clampBl
 // constant instead would make one bad 100-block read report 6s throughput on a
 // 2s chain for a whole cache window even while metadata says 2000ms.
 function degradedNominalMs(): number {
-  return runtimeSlotDurationMs() ?? heldNominalMs ?? NOMINAL_PARA_BLOCK_MS
+  return runtimeParaBlockMs() ?? heldNominalMs ?? NOMINAL_PARA_BLOCK_MS
 }
 
 async function readAvgBlockMs(client: ClickHouseClient): Promise<number> {
@@ -273,7 +277,7 @@ let heldNominalMs: number | null = null
 export async function resolveParaBlockTime(client: ClickHouseClient): Promise<ResolvedBlockTime> {
   return cached('blocktime:nominal-para', 300_000, async () => {
     const decision = decideParaBlockTime(
-      runtimeSlotDurationMs(),
+      runtimeParaBlockMs(),
       await measuredParaBlockMsOrNull(client),
       heldNominalMs,
     )

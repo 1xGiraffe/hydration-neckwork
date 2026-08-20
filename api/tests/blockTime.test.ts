@@ -7,14 +7,51 @@ import {
 
 vi.mock('../src/services/runtimeConstants.ts', async importOriginal => ({
   ...(await importOriginal<typeof import('../src/services/runtimeConstants.ts')>()),
-  runtimeSlotDurationMs: vi.fn(() => 2_000),
+  runtimeParaBlockMs: vi.fn(() => 2_000),
 }))
+import { paraBlockMsFromConstants } from '../src/services/runtimeConstants.ts'
 import { fusePeriodPinWarning, parseFusePeriodBlocks, shouldLogFusePinWarning } from '../src/services/securityService.ts'
 import { gigaUnbondingBlocks, parseGigaUnbondingBlocks } from '../src/services/lockBreakdownService.ts'
 
 // Hydration's block time is ~6s today and 2s is planned. Everything derived
 // from it either measures the chain or is pinned with a documented migration
 // action; these pin the arithmetic that decides which.
+
+// Runtime 440 DECOUPLES the author slot from the block interval: SLOT_DURATION
+// stays 6000 while MILLISECS_PER_BLOCK drops to 2000, and
+// AllowMultipleBlocksPerSlot lets one author produce 3 blocks per slot. So
+// `aura.slotDuration` reads 6000 before AND after the switch — the one metadata
+// constant that looks authoritative and silently is not. These pin the
+// replacement: constants that are fixed WALL-CLOCK quantities expressed in
+// blocks, which therefore divide out to the block time on both sides.
+describe('paraBlockMsFromConstants', () => {
+  // system.blockHashCount = 4h of blocks; gigaHdx.cooldownPeriod = 28d of blocks
+  it('reads 6000 from the pre-upgrade runtime', () => {
+    expect(paraBlockMsFromConstants(2_400, 403_200)).toBe(6_000)
+  })
+
+  it('reads 2000 from runtime 440, where aura.slotDuration still says 6000', () => {
+    expect(paraBlockMsFromConstants(7_200, 1_209_600)).toBe(2_000)
+  })
+
+  it('works from either constant alone', () => {
+    expect(paraBlockMsFromConstants(7_200, null)).toBe(2_000)
+    expect(paraBlockMsFromConstants(null, 1_209_600)).toBe(2_000)
+    expect(paraBlockMsFromConstants(null, null)).toBeNull()
+  })
+
+  // Disagreement means one of the two wall-clock premises (4h / 28d) changed.
+  // Picking a side would silently rescale every projected date, so refuse and
+  // let the caller fall back to the measured ladder.
+  it('refuses when the two constants disagree rather than picking one', () => {
+    expect(paraBlockMsFromConstants(7_200, 403_200)).toBeNull()
+  })
+
+  it('refuses a value that does not divide the wall-clock premise exactly', () => {
+    expect(paraBlockMsFromConstants(7_000, null)).toBeNull()
+    expect(paraBlockMsFromConstants(0, null)).toBeNull()
+  })
+})
 
 describe('avgBlockMsSql', () => {
   it('averages the newest sample of indexed blocks', () => {

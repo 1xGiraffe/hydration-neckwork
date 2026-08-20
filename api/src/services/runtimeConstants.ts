@@ -41,12 +41,61 @@ function constantNumber(pallet: string, name: string, max: number): number | nul
   return Number(raw)
 }
 
-// `MILLISECS_PER_BLOCK` — the parachain's nominal slot time. 6000 today, 2000
-// after the planned upgrade. This is the AUTHORITATIVE answer to "how long is a
-// block scheduled to take"; blockTime.ts prefers it over inferring the same
-// number from indexed block timestamps.
+// `aura.slotDuration` — the AUTHOR SLOT length, which is NOT the block time and
+// must never be used as one.
+//
+// Runtime 440 decouples the two: `SLOT_DURATION` stays 6000 while
+// `MILLISECS_PER_BLOCK` becomes 2000, and `AllowMultipleBlocksPerSlot = true`
+// lets one author produce 3 blocks inside its slot
+// (runtime/hydradx/src/system.rs: `type SlotDuration = ConstU64<SLOT_DURATION>`).
+// So this constant reads 6000 before AND after the switch. It is kept because
+// the slot length is a real quantity, but the block time comes from
+// `runtimeParaBlockMs()` below.
 export function runtimeSlotDurationMs(): number | null {
   return constantNumber('aura', 'slotDuration', 600_000)
+}
+
+// `system.blockHashCount` — recent block hashes retained. Declared as a fixed
+// WALL-CLOCK retention (4 hours), so the runtime restates the block count when
+// the block time changes: 2400 at 6s, 7200 at 2s.
+export function runtimeBlockHashCount(): number | null {
+  return constantNumber('system', 'blockHashCount', 10_000_000)
+}
+
+// Wall-clock premises behind the two constants we derive the block time from.
+// Each is a fixed duration the runtime expresses in blocks, so dividing it by
+// the published block count yields the milliseconds per block on either side of
+// the 2s switch.
+const BLOCK_HASH_RETENTION_MS = 4 * 3_600_000
+const GIGA_COOLDOWN_MS = 28 * 86_400_000
+
+// Exact integer division only: a premise that no longer divides cleanly means
+// the wall-clock quantity itself changed, which is a fact we must not guess at.
+function msPerBlock(totalMs: number, blocks: number | null): number | null {
+  if (blocks == null || blocks <= 0) return null
+  return totalMs % blocks === 0 ? totalMs / blocks : null
+}
+
+// The parachain's nominal MILLISECONDS PER BLOCK, derived from constants that
+// actually track it (see the note on `runtimeSlotDurationMs` for why the
+// obvious one does not). Two independent pallets publish a wall-clock quantity
+// in blocks; when both are readable they must agree. A disagreement means one
+// of the premises above changed, so we return null and let the caller fall back
+// to the measured ladder rather than silently rescaling every projected date.
+export function paraBlockMsFromConstants(
+  blockHashCount: number | null,
+  gigaCooldownBlocks: number | null,
+): number | null {
+  const fromHashCount = msPerBlock(BLOCK_HASH_RETENTION_MS, blockHashCount)
+  const fromCooldown = msPerBlock(GIGA_COOLDOWN_MS, gigaCooldownBlocks)
+  if (fromHashCount != null && fromCooldown != null) {
+    return fromHashCount === fromCooldown ? fromHashCount : null
+  }
+  return fromHashCount ?? fromCooldown
+}
+
+export function runtimeParaBlockMs(): number | null {
+  return paraBlockMsFromConstants(runtimeBlockHashCount(), runtimeGigaCooldownBlocks())
 }
 
 // `gigaHdx.cooldownPeriod` — parachain blocks an unstake waits before it
