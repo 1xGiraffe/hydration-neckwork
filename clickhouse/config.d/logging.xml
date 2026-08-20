@@ -1,0 +1,71 @@
+<clickhouse>
+    <!--
+      System-log retention.
+
+      The stock image logs at `trace` and enables every system log with NO
+      retention. Measured on this deployment 2026-08-20, after ~10 weeks:
+
+        system.text_log                283.65 GiB   4,731,849,347 rows
+        system.query_log                77.64 GiB
+        system.processors_profile_log   60.50 GiB
+        system.trace_log                27.64 GiB
+        ... total                      461.10 GiB
+
+      against 158 GiB for price_data — i.e. the observability of the database
+      was 74% of the database, growing ~6 GiB/day, and it had eaten the disk
+      down to 6% free. None of it is read by this project.
+
+      Retention is expressed as a TTL rather than a cap so the tables stay
+      useful for the profiling AGENTS.md asks for ("Performance engineering →
+      Measure and prove" correlates a bounded window across the browser
+      waterfall, Fastify logs and system.query_log) while being unable to run
+      away again.
+
+      Note query_log is also PRIVILEGED under AGENTS.md: it records the queries
+      that carry `user_sessions` token hashes, so bounding its retention is a
+      security property, not only a disk one.
+    -->
+
+    <!-- `trace` is what makes text_log enormous; it also drives the on-disk
+         clickhouse-server.log. `information` keeps startup/shutdown, errors and
+         schema events. -->
+    <logger>
+        <level>information</level>
+    </logger>
+
+    <!-- Kept, but at warning and a short window: the 4.7 billion rows above
+         were almost entirely per-query trace spam. -->
+    <text_log>
+        <level>warning</level>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </text_log>
+
+    <!-- Per-query processor profiling — worth having during an investigation,
+         not worth 1.4 GiB/day in perpetuity. -->
+    <processors_profile_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </processors_profile_log>
+
+    <trace_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </trace_log>
+    <asynchronous_metric_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </asynchronous_metric_log>
+
+    <query_log>
+        <ttl>event_date + INTERVAL 14 DAY DELETE</ttl>
+    </query_log>
+    <query_views_log>
+        <ttl>event_date + INTERVAL 14 DAY DELETE</ttl>
+    </query_views_log>
+    <query_metric_log>
+        <ttl>event_date + INTERVAL 14 DAY DELETE</ttl>
+    </query_metric_log>
+    <part_log>
+        <ttl>event_date + INTERVAL 14 DAY DELETE</ttl>
+    </part_log>
+    <metric_log>
+        <ttl>event_date + INTERVAL 14 DAY DELETE</ttl>
+    </metric_log>
+</clickhouse>
