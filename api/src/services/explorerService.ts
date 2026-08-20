@@ -7285,6 +7285,102 @@ async function revenueByAccount(accounts: string[]): Promise<Map<string, number>
   return positiveAccountVolumes(await res.json<{ account_id: string; volume_usd: number }>())
 }
 
+/**
+ * Protocol revenue attributed to an activity. The unit is the EXTRINSIC: fees,
+ * penalties and liquidator profit for one user action land on several event
+ * indices inside it, so the extrinsic is the smallest thing whose revenue adds
+ * up. `lpUsd` is the share that went to liquidity providers rather than the
+ * protocol — on a routed trade it is often the larger half, and showing only the
+ * protocol slice would understate what the action generated.
+ */
+export interface ActivityRevenue {
+  protocolUsd: number
+  lpUsd: number
+  streams: { stream: string; usd: number }[]
+}
+
+const revenueKey = (blockHeight: number, extrinsicIndex: number | null): string =>
+  `${blockHeight}:${extrinsicIndex ?? 'b'}`
+
+/**
+ * Revenue for a page of rows in ONE query. `revenue_events` is
+ * ORDER BY (block_height, event_index, …) and partitioned by month, so scoping
+ * to the page's blocks prunes on the primary key; the join to `raw_events` maps
+ * each revenue event to the extrinsic that caused it. Events with no extrinsic
+ * (on-initialize hooks) are the BLOCK's revenue and are keyed separately, never
+ * folded into an extrinsic that did not earn them.
+ */
+export async function revenueByExtrinsic(
+  keys: readonly { blockHeight: number; extrinsicIndex: number | null }[],
+): Promise<Map<string, ActivityRevenue>> {
+  const blocks = [...new Set(keys.map(k => k.blockHeight).filter(b => Number.isFinite(b) && b > 0))]
+  const out = new Map<string, ActivityRevenue>()
+  if (!blocks.length) return out
+  const res = await client.query({
+    query: `
+      SELECT r.block_height AS block_height, e.extrinsic_index AS extrinsic_index, r.stream AS stream,
+             toFloat64(sumIf(r.amount_usd, ${PROTOCOL_REVENUE_PREDICATE_SQL})) AS protocol_usd,
+             toFloat64(sumIf(r.amount_usd, r.dest = 'lp')) AS lp_usd
+      FROM price_data.revenue_events AS r
+      INNER JOIN (
+        SELECT block_height, event_index, extrinsic_index
+        FROM price_data.raw_events
+        WHERE block_height IN ({blocks:Array(UInt32)})
+      ) AS e ON e.block_height = r.block_height AND e.event_index = r.event_index
+      WHERE r.block_height IN ({blocks:Array(UInt32)})
+      GROUP BY block_height, extrinsic_index, stream`,
+    query_params: { blocks },
+    format: 'JSONEachRow',
+  })
+  for (const row of await res.json<{ block_height: number; extrinsic_index: number | null; stream: string; protocol_usd: number; lp_usd: number }>()) {
+    const key = revenueKey(Number(row.block_height), row.extrinsic_index == null ? null : Number(row.extrinsic_index))
+    const entry = out.get(key) ?? { protocolUsd: 0, lpUsd: 0, streams: [] }
+    entry.protocolUsd += Number(row.protocol_usd) || 0
+    entry.lpUsd += Number(row.lp_usd) || 0
+    const usd = Number(row.protocol_usd) || 0
+    if (usd > 0) entry.streams.push({ stream: row.stream, usd })
+    out.set(key, entry)
+  }
+  for (const entry of out.values()) entry.streams.sort((a, b) => b.usd - a.usd)
+  return out
+}
+
+/**
+ * How far `revenue_events` has been booked. The model is filled by a
+ * partition-incremental derivation, so it trails the chain head (measured ~1000
+ * blocks). Readers need the watermark to tell "earned nothing" from "not booked
+ * yet" — without it a fresh row reads as $0, which is a wrong number rather than
+ * a missing one.
+ */
+async function revenueBookedThroughBlock(): Promise<number> {
+  return cached('explorer:revenue-watermark', 60_000, async () => {
+    const res = await client.query({
+      query: 'SELECT max(block_height) AS head FROM price_data.revenue_events',
+      format: 'JSONEachRow',
+    })
+    return Number((await res.json<{ head: number | null }>())[0]?.head ?? 0)
+  })
+}
+
+/**
+ * Attaches revenue per extrinsic. Within the booked range the field is ALWAYS
+ * set, zeros included, so its presence means "this is what the action earned".
+ * Above the watermark it is left absent, meaning "not booked yet" — never zero.
+ */
+export async function applyActivityRevenue(rows: ActivityRow[]): Promise<void> {
+  if (!rows.length) return
+  const [map, bookedThrough] = await Promise.all([
+    revenueByExtrinsic(rows.map(r => ({ blockHeight: r.blockHeight, extrinsicIndex: r.extrinsicIndex }))),
+    revenueBookedThroughBlock(),
+  ])
+  if (!bookedThrough) return
+  for (const row of rows) {
+    if (row.blockHeight > bookedThrough) continue
+    row.revenue = map.get(revenueKey(row.blockHeight, row.extrinsicIndex))
+      ?? { protocolUsd: 0, lpUsd: 0, streams: [] }
+  }
+}
+
 // ---- protocol revenue breakdown (the Protocol Revenue detail tab) ----
 
 export interface RevenueBreakdownAsset { asset: AssetRef; usd: number }
@@ -8179,6 +8275,8 @@ export interface ActivityRow {
   // `assetB`). Token filters match against these too, so a pool-side asset the
   // row does not display still keeps its row.
   assetRefs?: number[]
+  /** Protocol revenue the row's EXTRINSIC generated (absent when it generated none). */
+  revenue?: ActivityRevenue
   liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy'   // Create = pool creation; Destroy = pool closure (no value); Claim = LM reward claim; ClaimReferral = referral-program reward claim
   mmAction?: string          // money-market: Supply/Borrow/Repay/Withdraw/LiquidationCall
   mmMarketKey?: string       // absent for legacy/unknown pools; `core` is primary
@@ -12133,7 +12231,7 @@ async function recentActivityPage(limit: number, from?: string, to?: string, off
     // page of the same feed, and the enrichment below writes to its rows.
     const sliceOffset = locallyPaged ? offset : 0
     const page = rows.slice(sliceOffset, sliceOffset + limit).map(row => ({ ...row }))
-    await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page)])
+    await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page), applyActivityRevenue(page)])
     // Page 0 of the plain live feed leads with the BASIC unfinalized rows
     // (pending trades and transfers); dated, deeper and action-filtered views
     // stay finalized-only.
@@ -17271,7 +17369,7 @@ async function growAccountActivityWindow(
 async function getAccountActivity(accounts: string[], limit: number, type = 'all', offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[]> {
   const located = await locatedAccountActivityPage(accounts, type, limit, offset, action, filters, from, to)
   const page = located ?? await windowedAccountActivityPage(accounts, type, limit, offset, action, filters, from, to)
-  await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page)])
+  await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page), applyActivityRevenue(page)])
   return page
 }
 
