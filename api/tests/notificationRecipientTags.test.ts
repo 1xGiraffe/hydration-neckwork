@@ -55,25 +55,29 @@ describe('recipient tag notation', () => {
     const tag = await createTag(READER, mine.listId, { name: 'Kraken hot' })
     await setTagMembers(READER, mine.listId, tag.tagId, [WHALE], [])
 
-    expect(label(READER, ref(WHALE, SS58))).toBe('🐋 Kraken hot (15Da…BDRLZ)')
+    expect(label(READER, ref(WHALE, SS58))).toBe('🐋 Kraken hot (RLZ)')
     // The same account, for somebody without that list, is nobody's Kraken hot.
     expect(label(STRANGER, ref(WHALE, SS58))).toBe('🐋 15Da…BDRLZ')
     // …and still renders under whatever public identity it does have.
     expect(label(STRANGER, ref(WHALE, SS58, { identity: { display: 'bkchr', verified: true, email: '', web: '', twitter: '' } })))
-      .toBe('🐋 bkchr ✓ (15Da…BDRLZ)')
+      .toBe('🐋 bkchr ✓ (RLZ)')
   })
 
   // A tag standing in for one of SEVERAL members is ambiguous in the UI, which
   // adds AddrPill's `·xyz` suffix. A message has no glyph layer and already
   // carries the short address in parentheses, so that same disambiguation is
   // present by construction — the label never stands alone.
-  it('keeps the short address alongside a multi-member tag, so two members never read alike', async () => {
+  it('keeps the address tail alongside a multi-member tag, so two members never read alike', async () => {
     const mine = await ensurePersonalList(READER)
     const tag = await createTag(READER, mine.listId, { name: 'Kraken' })
     await setTagMembers(READER, mine.listId, tag.tagId, [WHALE, TREASURY], [])
 
-    expect(label(READER, ref(WHALE, SS58))).toBe('🐋 Kraken (15Da…BDRLZ)')
-    expect(label(READER, ref(TREASURY, OTHER_SS58))).toBe('🐋 Kraken (13QP…mzHZJ)')
+    const first = label(READER, ref(WHALE, SS58))
+    const second = label(READER, ref(TREASURY, OTHER_SS58))
+    expect(first).toBe('🐋 Kraken (RLZ)')
+    expect(second).toBe('🐋 Kraken (HZJ)')
+    // The point of the tail: one tag over two accounts still reads as two.
+    expect(first).not.toBe(second)
   })
 
   it('resolves both sides of a transfer, and the actor, through the same recipient map', async () => {
@@ -91,8 +95,8 @@ describe('recipient tag notation', () => {
     const rule = { ruleId: 'r1', accountId: READER, kind: 'account-activity', name: '', params: {}, channels: [], muted: false, cooldownS: 0 } as NotificationRule
 
     const rendered = renderNotification(renderMatch(match, rule, viewerTagResolver(READER)))
-    expect(rendered.title).toBe('Transfer by 🐋 Desk (15Da…BDRLZ)')
-    expect(rendered.body).toContain('to 🐋 Desk (13QP…mzHZJ)')
+    expect(rendered.title).toBe('Transfer by 🐋 Desk (RLZ)')
+    expect(rendered.body).toContain('to 🐋 Desk (HZJ)')
     // A different recipient sees the same event without the borrowed names.
     const forStranger = renderNotification(renderMatch(match, rule, viewerTagResolver(STRANGER)))
     expect(forStranger.title).toBe('Transfer by 🐋 15Da…BDRLZ')
@@ -112,7 +116,7 @@ describe('the system slot in the recipient\'s list order', () => {
     // resolver hands the account back to accountNotation's system-tag step.
     expect(viewerTagResolver(READER)(TREASURY)).toBeNull()
     expect(label(READER, ref(TREASURY, SS58, { tag: { name: 'Treasury' } as AccountRef['tag'] })))
-      .toBe('🐋 Treasury (15Da…BDRLZ)')
+      .toBe('🐋 Treasury (RLZ)')
   })
 
   it('lets a list ordered above the system slot outrank the system tag', async () => {
@@ -122,7 +126,7 @@ describe('the system slot in the recipient\'s list order', () => {
     await setListOrder(READER, [mine.listId, SYSTEM_LIST_ID])
 
     expect(label(READER, ref(TREASURY, SS58, { tag: { name: 'Treasury' } as AccountRef['tag'] })))
-      .toBe('🐋 The treasury (15Da…BDRLZ)')
+      .toBe('🐋 The treasury (RLZ)')
   })
 
   // The slot claims an account only when it actually HAS a system tag; an
@@ -135,6 +139,6 @@ describe('the system slot in the recipient\'s list order', () => {
     await subscribePublic(READER, shared.listId)
     await setListOrder(READER, [SYSTEM_LIST_ID, shared.listId])
 
-    expect(label(READER, ref(WHALE, SS58))).toBe('🐋 Desk (15Da…BDRLZ)')
+    expect(label(READER, ref(WHALE, SS58))).toBe('🐋 Desk (RLZ)')
   })
 })
