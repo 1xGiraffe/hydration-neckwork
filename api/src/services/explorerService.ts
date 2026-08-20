@@ -5493,7 +5493,7 @@ async function loadOmnipoolState(): Promise<Map<number, OmnipoolAssetState>> {
 // Omnipool remove-liquidity (full position) → (asset out, hub/LRNA out), mirroring
 // the node's calculate_remove_liquidity_state_changes (withdrawalFee = 0). Verified
 // bit-exact against the official indexer's per-position liquidityAmount.
-const OMNI_FIXED = 10n ** 18n
+export const OMNI_FIXED = 10n ** 18n
 export function omnipoolRemoveLiquidity(st: OmnipoolAssetState, pos: DecodedPosition): { liquidity: bigint; hub: bigint } {
   const { reserve: R, hub: Q, shares: S } = st
   if (S <= 0n || pos.priceDen === 0n) return { liquidity: 0n, hub: 0n }
@@ -5599,7 +5599,9 @@ export interface OmnipoolAccountClaim {
 // 1337 NFT held by the LM pallet and a collection 2584 deposit NFT held by the
 // user; exclude that custody NFT and keep only the deposit owner so a position
 // can never be counted as both bare and farmed.
-async function reconstructAllOmnipoolPositions(): Promise<OwnedDecodedLpPosition[]> {
+// Exported for poolService's per-asset LP ranking, which caches one shared
+// generation of this (60s SWR) and groups it per (asset, owner).
+export async function reconstructAllOmnipoolPositions(): Promise<OwnedDecodedLpPosition[]> {
   const res = await client.query({
     query: `
       WITH

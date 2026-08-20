@@ -1,6 +1,10 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cachedSwr } from './cache.ts'
-import { accountRef, ensurePrices, hasExplorerClient, initExplorerService, type AccountRef, type AssetRef, type PriceInfo } from './explorerService.ts'
+import {
+  accountRef, ensurePrices, hasExplorerClient, initExplorerService,
+  omnipoolRemoveLiquidity, reconstructAllOmnipoolPositions, resolveDisplayAccountId,
+  type AccountRef, type AssetRef, type PriceInfo,
+} from './explorerService.ts'
 import { assetDescriptor, priceAssetId } from './explorerAssets.ts'
 import { stableswapPoolAccount } from './tagService.ts'
 import { hasDriftingPegs, parseStableswapPools, pegPrice, type StableswapPoolSnapshot } from './stableswapSnapshot.ts'
@@ -151,7 +155,7 @@ export interface OmnipoolResponse {
 
 // current state (latest snapshot, shared by all pool surfaces)
 
-export interface OmnipoolAssetSnapshot { assetId: number; reserve: bigint; hub: bigint; shares: bigint; cap: bigint; tradable: number }
+export interface OmnipoolAssetSnapshot { assetId: number; reserve: bigint; hub: bigint; shares: bigint; protocolShares: bigint; cap: bigint; tradable: number }
 export interface XykPoolSnapshot {
   lpAssetId: number | null
   poolAccount: string
@@ -169,7 +173,7 @@ export interface CurrentPools {
   xykByAccount: Map<string, XykPoolSnapshot>
 }
 
-interface SnapshotOmniAsset { asset_id: number; hub_reserve: string; reserve: string; shares: string; cap?: string; tradable?: number }
+interface SnapshotOmniAsset { asset_id: number; hub_reserve: string; reserve: string; shares: string; protocol_shares?: string; cap?: string; tradable?: number }
 interface SnapshotXykPool { pool_account: string; asset_a: number; asset_b: number; reserve_a: string; reserve_b: string }
 
 function safeJson(s: string | null | undefined): unknown {
@@ -206,6 +210,7 @@ export async function loadCurrentPools(): Promise<CurrentPools> {
         reserve: BigInt(a.reserve),
         hub: BigInt(a.hub_reserve),
         shares: BigInt(a.shares),
+        protocolShares: BigInt(a.protocol_shares ?? '0'),
         cap: BigInt(a.cap ?? '0'),
         tradable: Number(a.tradable ?? 0),
       })
@@ -1279,4 +1284,264 @@ export async function getOmnipoolDetail(): Promise<OmnipoolResponse> {
       history: { buckets: chartBuckets, tvlUsd: chartTvl, composition: chartComposition },
     }
   })
+}
+
+// ── Liquidity providers ───────────────────────────────────────────────────────
+//
+// Who owns a pool. Stableswap/XYK LPs are the holders of the pool's fungible
+// share token; Omnipool LPs are the economic owners of the per-asset position
+// NFTs (bare collection-1337 holders, or collection-2584 deposit holders while
+// the position sits in a liquidity-mining farm). Both lists rank by shares and
+// reconcile EXACTLY against the pool's own totals, verified on the live data:
+// Σ share balances = total issuance for every live stableswap pool, and
+// Σ position shares + protocol_shares = the snapshot's total shares for all
+// omnipool assets (gap 0 to the raw unit).
+//
+// Custody that this list deliberately does NOT re-attribute: share tokens the
+// Omnipool itself holds (a stableswap share listed as an omnipool asset) and
+// money-market aToken vault custody appear as their custodial accounts, which
+// are tagged — the deep breakdown is the custodian's own LP list, one click
+// away. XYK farm principal IS re-attributed (below), because the intervals
+// table gives the per-owner split exactly.
+
+// modl + "XYK///LM" — the XYK liquidity-mining pot that holds farm-deposited LP
+// share tokens (its balance matches the open farm principal to the raw unit).
+const XYK_LM_ACCOUNT = ('0x' + Buffer.from('modlXYK///LM', 'latin1').toString('hex')).padEnd(66, '0')
+
+export interface PoolLpRow {
+  rank: number
+  account: AccountRef
+  shares: string
+  // Share-token principal currently deposited in an XYK liquidity-mining farm,
+  // attributed to its economic owner. Already included in `shares`.
+  farmedShares: string | null
+  sharePct: number | null
+  valueUsd: number | null
+}
+export interface PoolLpsResponse {
+  poolId: number
+  shareToken: AssetRef
+  totalShares: string
+  tvlUsd: number | null
+  total: number
+  lps: PoolLpRow[]
+}
+
+export interface PoolLpEntry { accountId: string; shares: bigint; farmedShares: bigint }
+
+// Fold direct share-token balances with farm-attributed principal. Attributed
+// custody REPLACES the LM pot's balance — never adds to it — so the fold
+// conserves the total exactly; any pot remainder the intervals do not cover
+// (normally zero, possibly a mid-block race between the balance snapshot and
+// the interval rebuild) stays visible on the tagged pot account rather than
+// being scaled away or fabricated onto owners.
+export function foldPoolLpEntries(
+  direct: { accountId: string; balance: bigint }[],
+  farmed: { accountId: string; shares: bigint }[],
+  potAccountId: string,
+  resolve: (id: string) => string = id => id,
+): PoolLpEntry[] {
+  const byAccount = new Map<string, PoolLpEntry>()
+  const entry = (id: string): PoolLpEntry => {
+    let e = byAccount.get(id)
+    if (!e) { e = { accountId: id, shares: 0n, farmedShares: 0n }; byAccount.set(id, e) }
+    return e
+  }
+  for (const d of direct) entry(resolve(d.accountId)).shares += d.balance
+  let farmedTotal = 0n
+  for (const f of farmed) farmedTotal += f.shares
+  if (farmedTotal > 0n) {
+    const pot = byAccount.get(resolve(potAccountId))
+    if (pot) pot.shares -= pot.shares < farmedTotal ? pot.shares : farmedTotal
+    for (const f of farmed) {
+      const e = entry(resolve(f.accountId))
+      e.shares += f.shares
+      e.farmedShares += f.shares
+    }
+  }
+  return [...byAccount.values()]
+    .filter(e => e.shares > 0n)
+    .sort((a, b) => (a.shares === b.shares ? (a.accountId < b.accountId ? -1 : 1) : (b.shares > a.shares ? 1 : -1)))
+}
+
+// Fraction of `total` that `shares` is, exact to 1e-12 via integer scaling —
+// share amounts exceed 2^53, so a float division of the raw values would drift.
+const SHARE_FRACTION_SCALE = 10n ** 12n
+export function shareFraction(shares: bigint, total: bigint): number | null {
+  if (total <= 0n) return null
+  return Number((shares * SHARE_FRACTION_SCALE) / total) / 1e12
+}
+
+async function loadPoolLpEntries(poolId: number, kind: 'stableswap' | 'xyk'): Promise<PoolLpEntry[]> {
+  const [balRes, farmRes] = await Promise.all([
+    client.query({
+      // Latest-balance aggregate only (the same source the holders page reads):
+      // share tokens are plain substrate Tokens balances, and Σ balances equals
+      // the pool's total issuance exactly, so there is nothing to top up.
+      query: `SELECT account_id, toString(bal) AS balance FROM (
+                SELECT account_id, toUInt256OrZero(argMaxMerge(total_state)) AS bal
+                FROM price_data.account_asset_latest_balances
+                WHERE asset_id = {asset:String} GROUP BY account_id
+              ) WHERE bal > 0`,
+      query_params: { asset: String(poolId) }, format: 'JSONEachRow',
+    }),
+    kind === 'xyk'
+      ? client.query({
+          query: `SELECT account_id, toString(sum(toInt256(principal_shares_raw))) AS shares
+                  FROM price_data.xyk_farm_principal_intervals FINAL
+                  WHERE lp_asset_id = {id:Int32} AND valid_to_block = 0
+                  GROUP BY account_id`,
+          query_params: { id: poolId }, format: 'JSONEachRow',
+        })
+      : null,
+  ])
+  const direct = (await balRes.json<{ account_id: string; balance: string }>())
+    .map(r => ({ accountId: r.account_id, balance: BigInt(r.balance) }))
+  const farmed = farmRes
+    ? (await farmRes.json<{ account_id: string; shares: string }>())
+        .map(r => ({ accountId: r.account_id, shares: BigInt(r.shares) }))
+        .filter(f => f.shares > 0n)
+    : []
+  return foldPoolLpEntries(direct, farmed, XYK_LM_ACCOUNT, resolveDisplayAccountId)
+}
+
+// Paginated LP list for a stableswap/XYK pool, ranked by shares. Share % and
+// value are fractions of the SAME totalIssuance/tvlUsd the pool page shows, so
+// the two surfaces can never disagree. The full ranked fold is cached once per
+// pool; pages are deterministic slices of it.
+export async function getPoolLps(poolId: number, limit: number, offset: number): Promise<PoolLpsResponse | null> {
+  const detail = await getPoolDetail(poolId)
+  if (!detail) return null
+  const entries = await cachedSwr(`explorer:pool-lps:${poolId}`, 30_000, 300_000, () => loadPoolLpEntries(poolId, detail.kind))
+  const totalShares = BigInt(detail.totalIssuance || '0')
+  const lps = entries.slice(offset, offset + limit).map((e, i) => {
+    const frac = shareFraction(e.shares, totalShares)
+    return {
+      rank: offset + i + 1,
+      account: accountRef(e.accountId),
+      shares: e.shares.toString(),
+      farmedShares: e.farmedShares > 0n ? e.farmedShares.toString() : null,
+      sharePct: frac != null ? frac * 100 : null,
+      valueUsd: frac != null && detail.tvlUsd != null ? detail.tvlUsd * frac : null,
+    }
+  })
+  return {
+    poolId,
+    shareToken: detail.shareToken,
+    totalShares: detail.totalIssuance,
+    tvlUsd: detail.tvlUsd,
+    total: entries.length,
+    lps,
+  }
+}
+
+// One omnipool asset's LP ranking. `account` is null exactly once — the
+// protocol's own shares (`protocol_shares`), which have no position NFT.
+export interface OmnipoolLpRow {
+  rank: number
+  account: AccountRef | null
+  protocol?: true
+  positions: number
+  farmedPositions: number
+  shares: string
+  sharePct: number | null
+  amount: string     // current withdrawable asset leg (Σ over the owner's positions)
+  hubAmount: string  // current withdrawable H2O leg
+  valueUsd: number | null
+}
+export interface OmnipoolAssetLpsResponse {
+  asset: AssetRef
+  totalShares: string
+  protocolShares: string
+  lpCount: number        // distinct LP owners, protocol row excluded
+  positionCount: number
+  total: number          // pageable rows, protocol row included
+  lps: OmnipoolLpRow[]
+}
+
+export interface OmnipoolLpPositionInput { accountId: string; shares: bigint; liquidity: bigint; hub: bigint; farmed: boolean }
+export interface OmnipoolLpGroup { accountId: string | null; positions: number; farmedPositions: number; shares: bigint; liquidity: bigint; hub: bigint }
+
+// Group one asset's positions by economic owner and rank by shares. The
+// protocol's shares participate in the ranking as an accountless row: they are
+// real pool ownership (for some assets the largest), so hiding them would make
+// the visible shares sum to a fraction nobody could reconcile. Their value is
+// the proportional reserve claim — protocol shares carry no position entry
+// price, so the NFT withdraw math (and its hub leg) does not apply.
+export function groupOmnipoolLps(
+  positions: OmnipoolLpPositionInput[],
+  protocolShares: bigint,
+  reserve: bigint,
+  totalShares: bigint,
+): OmnipoolLpGroup[] {
+  const byAccount = new Map<string, OmnipoolLpGroup>()
+  for (const p of positions) {
+    let g = byAccount.get(p.accountId)
+    if (!g) { g = { accountId: p.accountId, positions: 0, farmedPositions: 0, shares: 0n, liquidity: 0n, hub: 0n }; byAccount.set(p.accountId, g) }
+    g.positions += 1
+    if (p.farmed) g.farmedPositions += 1
+    g.shares += p.shares
+    g.liquidity += p.liquidity
+    g.hub += p.hub
+  }
+  const out = [...byAccount.values()]
+  if (protocolShares > 0n) {
+    out.push({
+      accountId: null, positions: 0, farmedPositions: 0, shares: protocolShares,
+      liquidity: totalShares > 0n ? (reserve * protocolShares) / totalShares : 0n, hub: 0n,
+    })
+  }
+  return out.sort((a, b) => (a.shares === b.shares
+    ? ((a.accountId ?? '') < (b.accountId ?? '') ? -1 : 1)
+    : (b.shares > a.shares ? 1 : -1)))
+}
+
+// Paginated LP ranking for one omnipool asset. The position reconstruction is
+// the exact query the account directory's claim refresher runs (owner-resolved,
+// bare/farmed deduplicated), cached once and shared by every asset; per-owner
+// value is the position withdraw math the account pages use, so an LP's row
+// here and their account page agree.
+export async function getOmnipoolAssetLps(assetId: number, limit: number, offset: number): Promise<OmnipoolAssetLpsResponse | null> {
+  const [pools, prices, positions] = await Promise.all([
+    loadCurrentPools(),
+    ensurePrices(),
+    cachedSwr('explorer:omnipool-lps:positions', 60_000, 300_000, reconstructAllOmnipoolPositions),
+  ])
+  const st = pools.omnipool.get(assetId)
+  if (!st) return null
+  const state = { reserve: st.reserve, hub: st.hub, shares: st.shares }
+  const inputs: OmnipoolLpPositionInput[] = positions
+    .filter(p => p.dec.assetId === assetId)
+    .map(p => {
+      const { liquidity, hub } = omnipoolRemoveLiquidity(state, p.dec)
+      return { accountId: p.accountId, shares: p.dec.shares, liquidity, hub, farmed: p.venue === 'Omnipool Farm' }
+    })
+  const groups = groupOmnipoolLps(inputs, st.protocolShares, st.reserve, st.shares)
+  const lps = groups.slice(offset, offset + limit).map((g, i) => {
+    const frac = shareFraction(g.shares, st.shares)
+    const assetUsd = usdOf(prices, assetId, g.liquidity)
+    const hubUsd = g.hub > 0n ? usdOf(prices, LRNA_ASSET_ID, g.hub) : 0
+    return {
+      rank: offset + i + 1,
+      account: g.accountId != null ? accountRef(g.accountId) : null,
+      ...(g.accountId == null ? { protocol: true as const } : {}),
+      positions: g.positions,
+      farmedPositions: g.farmedPositions,
+      shares: g.shares.toString(),
+      sharePct: frac != null ? frac * 100 : null,
+      amount: g.liquidity.toString(),
+      hubAmount: g.hub.toString(),
+      // Unknowable legs make the value unknown, never silently smaller.
+      valueUsd: assetUsd == null || hubUsd == null ? null : assetUsd + hubUsd,
+    }
+  })
+  return {
+    asset: asset(assetId),
+    totalShares: st.shares.toString(),
+    protocolShares: st.protocolShares.toString(),
+    lpCount: groups.filter(g => g.accountId != null).length,
+    positionCount: inputs.length,
+    total: groups.length,
+    lps,
+  }
 }
