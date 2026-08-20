@@ -3,6 +3,7 @@ import { validateBlockRange } from '../blockRange.js'
 import { config } from '../config.js'
 import { isSwapEvent } from '../registry/swapEvents.js'
 import { AssetRegistryTracker } from '../registry/tracker.js'
+import { hasAssetRegistryMetadataEvent } from '../registry/events.js'
 import { AtokenReserveMap } from '../registry/atokenReserves.js'
 import { PoolCompositionCache } from '../pool/compositionCache.js'
 import { updateErc20Registry } from '../evm/balances.js'
@@ -603,7 +604,12 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
         }
       }
 
-      const changedAssets = await tracePhase(blockHeight, 'asset_registry', () => registry.maybeSnapshot(blockHeight, block.header))
+      // Force the scan when this block carries an asset-registry event: the raw
+      // pipeline sees every event, and the snapshot payload written for this and
+      // every following block must carry the post-change registry (a rename that
+      // waits for the periodic scan bakes the OLD name into ~100 minutes of
+      // snapshot payloads, which replay/backfill then treats as era truth).
+      const changedAssets = await tracePhase(blockHeight, 'asset_registry', () => registry.maybeSnapshot(blockHeight, block.header, { force: hasAssetRegistryMetadataEvent(block.events) }))
       if (changedAssets.length > 0) await atokenReserves.refresh()
       const atokenEquivalences = registry.getAtokenEquivalences(atokenReserves.underlyings)
       const atokenIds = registry.getAtokenIds(atokenReserves.underlyings)

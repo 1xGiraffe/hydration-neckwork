@@ -39,6 +39,15 @@ export const processor = new SubstrateBatchProcessor()
       'Broadcast.Swapped',
       'Broadcast.Swapped2',
       'Broadcast.Swapped3',
+      // Asset-registry changes (a rename, a new registration, a location fix)
+      // must reach the live block's event list: the indexer forces a registry
+      // re-scan when it SEES one of these, and without the subscription the
+      // live path never sees them — a TC-dispatched rename then waits for the
+      // periodic scan instead of landing at its own block.
+      'AssetRegistry.Registered',
+      'AssetRegistry.Updated',
+      'AssetRegistry.MetadataSet',
+      'AssetRegistry.LocationSet',
     ],
   })
 
