@@ -351,6 +351,43 @@ export function evaluateLargeValue(rows: readonly ActivityRow[], rules: readonly
   })
 }
 
+// What the protocol itself earned on this extrinsic, LP share excluded.
+//
+// A row whose revenue is not known yet must NOT read as 0: the field is absent until
+// the block's events are queryable, and the lane's cursor only moves forward — deciding
+// "no match" now would drop the row for good. Returning false leaves it to the tick
+// that sees the revenue, because the cursor is already clamped to the source head.
+export function revenueRowMatches(row: ActivityRow, params: RuleParams['protocol-revenue']): boolean {
+  return row.revenue != null && row.revenue.protocolUsd >= params.minUsd
+}
+
+// A liquidation is money-market activity whose action is the liquidation call itself;
+// borrows and supplies against the same market are not liquidations. An unvalued row
+// still counts when no floor was set, but never passes a floor the owner chose.
+export function liquidationRowMatches(row: ActivityRow, params: RuleParams['liquidation']): boolean {
+  if (row.type !== 'mm' || row.mmAction !== 'LiquidationCall') return false
+  if (params.minUsd == null) return true
+  return row.valueUsd != null && row.valueUsd >= params.minUsd
+}
+
+export function evaluateProtocolRevenue(rows: readonly ActivityRow[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
+  return rules.flatMap(rule => {
+    const p = rule.params as RuleParams['protocol-revenue']
+    return matchRows(rows, rule, window, r => r.blockHeight, activityIdentity,
+      r => isFinalRow(r) && revenueRowMatches(r, p),
+      row => ({ lane: 'activity', row }))
+  })
+}
+
+export function evaluateLiquidations(rows: readonly ActivityRow[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
+  return rules.flatMap(rule => {
+    const p = rule.params as RuleParams['liquidation']
+    return matchRows(rows, rule, window, r => r.blockHeight, activityIdentity,
+      r => isFinalRow(r) && liquidationRowMatches(r, p),
+      row => ({ lane: 'activity', row }))
+  })
+}
+
 // Every asset a row references, matching the feed's own multi-asset filter
 // semantics: nested pool assets and both sides of a pair count.
 export function activityReferencesAsset(row: ActivityRow, assetId: number): boolean {
@@ -455,6 +492,8 @@ export interface RowLaneRows {
   'account-activity': readonly ActivityRow[]
   'large-trade': readonly ActivityRow[]
   'large-transfer': readonly ActivityRow[]
+  'protocol-revenue': readonly ActivityRow[]
+  liquidation: readonly ActivityRow[]
   safety: readonly SafetyEvent[]
   referendum: readonly ReferendumEventRow[]
   'tc-motion': readonly TcMotionEventRow[]
@@ -462,7 +501,7 @@ export interface RowLaneRows {
   extrinsic: readonly ChainExtrinsicRow[]
 }
 export type RowLaneKind = keyof RowLaneRows
-export const ROW_LANE_KINDS: RowLaneKind[] = ['account-activity', 'large-trade', 'large-transfer', 'safety', 'referendum', 'tc-motion', 'event', 'extrinsic']
+export const ROW_LANE_KINDS: RowLaneKind[] = ['account-activity', 'large-trade', 'large-transfer', 'protocol-revenue', 'liquidation', 'safety', 'referendum', 'tc-motion', 'event', 'extrinsic']
 
 export function evaluateRowKind<K extends RowLaneKind>(
   kind: K, rows: RowLaneRows[K], rules: readonly NotificationRule[], window: BlockWindow,
@@ -472,6 +511,8 @@ export function evaluateRowKind<K extends RowLaneKind>(
     case 'account-activity': return evaluateAccountActivity(rows as RowLaneRows['account-activity'], rules, window)
     case 'large-trade':
     case 'large-transfer': return evaluateLargeValue(rows as RowLaneRows['large-trade'], rules, window)
+    case 'protocol-revenue': return evaluateProtocolRevenue(rows as RowLaneRows['protocol-revenue'], rules, window)
+    case 'liquidation': return evaluateLiquidations(rows as RowLaneRows['liquidation'], rules, window)
     case 'safety': return evaluateSafety(rows as RowLaneRows['safety'], rules, window)
     case 'referendum': return evaluateReferendum(rows as RowLaneRows['referendum'], rules, window, titleFor)
     case 'tc-motion': return evaluateTcMotion(rows as RowLaneRows['tc-motion'], rules, window)
@@ -694,7 +735,15 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
       const row = p.row
       const title: RenderPart[] = [textPart(activityHeadline(row))]
       if (row.who) title.push(textPart('by'), accountPart(renderAccount(row.who, viewerTag)))
-      return { title, body: [activityAmountLine(row, viewerTag)], path: activityPath(row) }
+      const body: (string | RenderPart[])[] = [activityAmountLine(row, viewerTag)]
+      // Only the lanes that watch revenue ask the feed to attach it, so the field's
+      // presence is the signal that this alert is about revenue — no need to branch on
+      // the rule's kind. Absent means nobody computed it (a lane that opted out, or a
+      // block whose events are not queryable yet), which is not the same as $0.00.
+      if (row.revenue) {
+        body.push([textPart('Protocol revenue'), usdPart(row.revenue.protocolUsd)])
+      }
+      return { title, body, path: activityPath(row) }
     }
     case 'safety':
       return {
@@ -1162,6 +1211,16 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
       const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
       return { kind, matches: [...matches, ...dca], nextCursor: deferred ? cursor : covered }
     }
+    case 'protocol-revenue':
+    case 'liquidation': {
+      const { matches, deferred } = kind === 'protocol-revenue'
+        ? await protocolRevenueMatches(rules, window, { left: SOURCE_FETCH_CAP })
+        : await liquidationMatches(rules, window, { left: SOURCE_FETCH_CAP })
+      // Same source as the large-value lanes, so the same rule applies: never step
+      // the cursor past the blocks that source has actually shown.
+      const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
+      return { kind, matches, nextCursor: deferred ? cursor : covered }
+    }
     case 'referendum': return { kind, ...await referendumMatches(rules, window), nextCursor: window.to }
     case 'tc-motion': return { kind, matches: evaluateTcMotion(await queryWindowTcMotions(window), rules, window), nextCursor: window.to }
     case 'event': return { kind, matches: evaluateEvents(await queryWindowEvents(rules, window), rules, window), nextCursor: window.to }
@@ -1220,17 +1279,58 @@ function activitySourceKey(rule: NotificationRule): string | null {
 // must stop contributing rows immediately, without the rule being touched.
 async function fetchTargetActivity(
   target: RuleParams['account-activity']['target'], viewer: string,
-  limit: number, filters: { min?: number; unit?: 'usd' },
+  limit: number, filters: { min?: number; unit?: 'usd' }, type = 'all',
+  opts: { revenue?: boolean } = { revenue: false },
 ): Promise<ActivityRow[] | null> {
   switch (target.kind) {
-    case 'address': return getAddressActivity(target.address, 'all', limit, 0, undefined, filters)
-    case 'tag': return getTagActivity(target.tagId, 'all', limit, 0, undefined, filters)
+    case 'address': return getAddressActivity(target.address, type, limit, 0, undefined, filters, undefined, undefined, opts)
+    case 'tag': return getTagActivity(target.tagId, type, limit, 0, undefined, filters, undefined, undefined, opts)
     default: {
       const resolved = resolveActivityTarget(viewer, target)
       if (!resolved) return []
-      return getListTagActivity(target.listId, target.tagId, resolved.members, 'all', limit, 0, undefined, filters)
+      return getListTagActivity(target.listId, target.tagId, resolved.members, type, limit, 0, undefined, filters, undefined, undefined, opts)
     }
   }
+}
+
+// Both new lanes read the activity feed the large-value lanes already read, so
+// neither adds a source. Revenue is opt-in per page (it costs a read of its own), and
+// these are the only lanes that ask for it: a liquidation message reports the revenue
+// the liquidation produced, which is most of the point of watching one.
+async function protocolRevenueMatches(
+  rules: NotificationRule[], window: BlockWindow, budget: FetchBudget,
+): Promise<{ matches: RuleMatch[]; deferred: boolean }> {
+  // No server-side revenue filter exists, so every rule reads the SAME page whatever
+  // its floor — one group, one fetch, floors applied per rule in the evaluator.
+  const groups = groupRules(rules, () => 'all')
+  const bounds = await windowDayBounds(window)
+  return visitGroups('protocol-revenue', groups, budget, async group => {
+    const rows = await fetchActivityPage(
+      limit => getRecentActivity(limit, bounds?.from, bounds?.to, 0, 'all', {}, undefined, { revenue: true }),
+      window)
+    return evaluateProtocolRevenue(rows, group, window)
+  })
+}
+
+async function liquidationMatches(
+  rules: NotificationRule[], window: BlockWindow, budget: FetchBudget,
+): Promise<{ matches: RuleMatch[]; deferred: boolean }> {
+  // The fetch differs only by target, so rules sharing one target share a page. An
+  // untargeted rule watches the whole chain and reads the plain mm feed.
+  const groups = groupRules(rules, rule => {
+    const target = (rule.params as RuleParams['liquidation']).target
+    if (!target) return 'chain'
+    return activitySourceKey({ ...rule, params: { ...rule.params as object, target } } as NotificationRule) ?? 'unreadable'
+  })
+  const bounds = await windowDayBounds(window)
+  return visitGroups('liquidation', groups, budget, async group => {
+    const target = (group[0].params as RuleParams['liquidation']).target
+    const rows = await fetchActivityPage(limit => target
+      ? fetchTargetActivity(target, group[0].accountId, limit, {}, 'mm', { revenue: true })
+      : getRecentActivity(limit, bounds?.from, bounds?.to, 0, 'mm', {}, undefined, { revenue: true }),
+      window)
+    return evaluateLiquidations(rows, group, window)
+  })
 }
 
 async function accountActivityMatches(rules: NotificationRule[], window: BlockWindow, budget: FetchBudget): Promise<{ matches: RuleMatch[]; deferred: boolean }> {
@@ -1284,7 +1384,8 @@ async function largeValueMatches(
     const min = Math.min(...params.map(p => p.minUsd))
     const assetId = params[0].assetId
     const filters = { min, unit: 'usd' as const, ...(assetId == null ? {} : { token: String(assetId) }) }
-    const rows = await fetchActivityPage(limit => getRecentActivity(limit, bounds?.from, bounds?.to, 0, feedType, filters), window)
+    // No large-value rule reads revenue, so this lane must not pay for attaching it.
+    const rows = await fetchActivityPage(limit => getRecentActivity(limit, bounds?.from, bounds?.to, 0, feedType, filters, undefined, { revenue: false }), window)
     return evaluateLargeValue(rows, group, window)
   })
 }
