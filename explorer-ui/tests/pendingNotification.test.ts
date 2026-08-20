@@ -114,7 +114,7 @@ describe('new-alert form → rule params', () => {
     expect(buildRuleParams('price', { assetId: '0', direction: 'below', price: '0.02' }, noSets))
       .toEqual({ ok: true, params: { assetId: 0, direction: 'below', price: 0.02 } })
     expect(buildRuleParams('health-factor', { address: OWL, threshold: '' }, noSets))
-      .toEqual({ ok: true, params: { address: OWL, threshold: 1.1 } })
+      .toEqual({ ok: true, params: { target: { kind: 'address', address: OWL }, threshold: 1.1 } })
     expect(buildRuleParams('extrinsic', { section: 'Omnipool', method: '', success: 'no', signer: '' }, noSets))
       .toEqual({ ok: true, params: { section: 'Omnipool', success: false } })
     expect(buildRuleParams('event', { section: 'Referenda', method: 'Submitted' }, noSets))

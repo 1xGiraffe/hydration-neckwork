@@ -54,7 +54,7 @@ export function resolveActivityTarget(viewer: string, target: AccountActivityTar
 
 /** The rule's activity target, for the kinds that have one. */
 export function activityTargetOf(kind: NotificationKind, params: unknown): AccountActivityTarget | null {
-  if (kind !== 'account-activity') return null
+  if (kind !== 'account-activity' && kind !== 'health-factor') return null
   const target = (params as RuleParams['account-activity'] | undefined)?.target
   return target && typeof target === 'object' ? target : null
 }

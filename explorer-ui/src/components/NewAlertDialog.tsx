@@ -117,12 +117,16 @@ export function buildRuleParams(
       return { ok: true, params: { assetId, direction: v.direction === 'below' ? 'below' : 'above', price } }
     }
     case 'health-factor': {
-      if (!isAddressLike(address)) return { ok: false, error: 'Enter an SS58 or 0x address to watch' }
+      // The picker's selection wins; a pasted, never-picked address still counts
+      // (same contract as account-activity above). A tag watches every member's
+      // position.
+      const target = sets.target ?? (isAddressLike(address) ? ({ kind: 'address', address } as const) : null)
+      if (!target) return { ok: false, error: 'Pick an account or tag to watch, or paste an SS58 or 0x address' }
       const threshold = num(v.threshold ?? '') ?? HEALTH_FACTOR_DEFAULT
       if (threshold < HEALTH_FACTOR_MIN || threshold > HEALTH_FACTOR_MAX) {
         return { ok: false, error: `The threshold must be between ${HEALTH_FACTOR_MIN} and ${HEALTH_FACTOR_MAX}` }
       }
-      return { ok: true, params: { address, threshold } }
+      return { ok: true, params: { ...targetParams(target), threshold } }
     }
     case 'referendum': {
       const track = (v.track ?? '').trim()
@@ -373,9 +377,13 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
 
             {kind === 'health-factor' && (
               <div className="field">
-                <label htmlFor="alert-address">Address</label>
-                <input {...noAutofill} id="alert-address" className="mono" placeholder="SS58 or 0x…" maxLength={64}
-                  value={values.address ?? ''} disabled={pending} onChange={e => set('address', e.target.value)} />
+                {/* The same picker as account-activity: an account by name or
+                    address, a tag by its name, the viewer's own account offered
+                    before anything is typed. A tag watches every member's
+                    position — membership is followed live. */}
+                <label htmlFor="alert-hf-target" className="field-label">Whose position</label>
+                <AlertTargetPicker inputId="alert-hf-target" value={target} onChange={setTarget}
+                  onTextChange={t => set('address', t)} disabled={pending} />
               </div>
             )}
 
