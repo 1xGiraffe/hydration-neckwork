@@ -9,7 +9,7 @@ import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts
 import { weightedFromLabels } from './convictionWeight.ts'
 import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
-import { PROTOCOL_REVENUE_PREDICATE_SQL } from './revenueStreams.ts'
+import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, INCENTIVES_REWARD_POT } from './tagService.ts'
 import { identityForAccount, searchIdentitiesByDisplay, type AccountIdentity } from './identityService.ts'
 import { normalizeAddress, hydrationAddress, polkadotAddress, reservedH160AccountId, type NormalizedAddress } from './addressIdentity.ts'
@@ -7332,7 +7332,22 @@ export async function revenueByExtrinsic(
     query_params: { blocks },
     format: 'JSONEachRow',
   })
-  for (const row of await res.json<{ block_height: number; extrinsic_index: number | null; stream: string; protocol_usd: number; lp_usd: number }>()) {
+  collectRevenueRows(out, await res.json())
+  return out
+}
+
+interface RevenueSumRow {
+  block_height: number
+  extrinsic_index: number | null
+  stream: string
+  protocol_usd: number
+  lp_usd: number
+}
+
+// Folds per-(extrinsic, stream) sums into one entry per extrinsic. Shared so the
+// booked read and the recomputed tail can never disagree on shape or ordering.
+function collectRevenueRows(out: Map<string, ActivityRevenue>, rows: readonly RevenueSumRow[]): void {
+  for (const row of rows) {
     const key = revenueKey(Number(row.block_height), row.extrinsic_index == null ? null : Number(row.extrinsic_index))
     const entry = out.get(key) ?? { protocolUsd: 0, lpUsd: 0, streams: [] }
     entry.protocolUsd += Number(row.protocol_usd) || 0
@@ -7342,7 +7357,31 @@ export async function revenueByExtrinsic(
     out.set(key, entry)
   }
   for (const entry of out.values()) entry.streams.sort((a, b) => b.usd - a.usd)
-  return out
+}
+
+// The newest of THESE blocks whose event rows are visible. Deliberately not
+// indexedRawHead: that reads raw_ingestion_state, which names a block before its
+// event rows land (the same skew that let a notification lane advance past unseen
+// blocks). Revenue recomputed for a block whose events are not in yet would read as
+// a real $0.00, so coverage stops here and those rows keep their dash.
+//
+// Scoped to the page's own blocks rather than a cached global head: a shared head
+// cached even briefly goes stale within a block or two, and every block past it
+// loses its revenue for no reason. Restricted to the block set this is primary-key
+// pruned and exact.
+async function visibleEventHeadWithin(blocks: readonly number[]): Promise<number> {
+  if (!blocks.length) return 0
+  const res = await client.query({
+    query: 'SELECT max(block_height) AS head FROM price_data.raw_events WHERE block_height IN ({blocks:Array(UInt32)})',
+    query_params: { blocks: [...blocks] },
+    format: 'JSONEachRow',
+  })
+  return Number((await res.json<{ head: number | null }>())[0]?.head ?? 0)
+}
+
+// ClickHouse DateTime literal (UTC) for the tail window's upper bound.
+function revenueTailAnchor(): string {
+  return new Date(Date.now() + 60_000).toISOString().slice(0, 19).replace('T', ' ')
 }
 
 /**
@@ -7392,13 +7431,117 @@ export function attachRevenue(
   }
 }
 
+// Every revenue stream but one is a pure function of a single event, so the rows
+// for a narrow block set can be recomputed instead of waited for. `hollar_borrow`
+// is the exception and is excluded here: it is an accrual with no event behind it
+// (every row sits at block 0), so it can never belong to an activity row.
+const EVENTFUL_REVENUE_STREAMS = REVENUE_STREAMS.filter(
+  (s): s is EventfulRevenueStream => s !== 'hollar_borrow',
+)
+
+/** The streams the read-time tail recomputes. Asserted in revenueTailStreams.test.ts. */
+export function eventfulRevenueStreams(): readonly EventfulRevenueStream[] {
+  return EVENTFUL_REVENUE_STREAMS
+}
+
+// The stream builders bind an anchored time window. The block set is what actually
+// prunes the read, so the window only has to be wide enough to contain the unbooked
+// tail — it is a bound, not a filter we rely on.
+const REVENUE_TAIL_WINDOW_HOURS = 6
+
+// The derivation publishes only up to an hour boundary, so the newest ~1-2h of
+// blocks are unbooked. Recomputing those blocks per event measured identical to the
+// booked figures, stream by stream, so a live row shows its real revenue rather than
+// a dash until the next partition rewrite.
+export function blocksNeedingRevenueTail(
+  rows: readonly { blockHeight: number }[],
+  bookedThrough: number,
+): number[] {
+  const blocks = new Set<number>()
+  for (const row of rows) {
+    if (!Number.isFinite(row.blockHeight) || row.blockHeight <= 0) continue
+    if (row.blockHeight > bookedThrough) blocks.add(row.blockHeight)
+  }
+  return [...blocks].sort((a, b) => a - b)
+}
+
+// How far a page may claim revenue coverage. The recomputed blocks, but never past
+// the events the recomputation reads: the feed leads raw_events, and a block whose
+// events are not visible yet produces no rows — which downstream is indistinguishable
+// from "earned nothing". Clamping keeps those rows on their dash.
+export function revenueCoverageThrough(
+  bookedThrough: number,
+  tailBlocks: readonly number[],
+  visibleEventHead: number,
+): number {
+  if (!tailBlocks.length) return bookedThrough
+  const highest = tailBlocks[tailBlocks.length - 1]
+  return Math.max(bookedThrough, Math.min(highest, visibleEventHead))
+}
+
+// Same shape as revenueByExtrinsic, but computed from raw events rather than read
+// from the derived table.
+//
+// One query per stream, run concurrently, rather than a single UNION ALL: the
+// streams cost wildly different amounts (hsm_revenue alone was 185ms of a 440ms
+// union while matching nothing), and unioned they add up instead of overlapping.
+// Skipping the streams whose events are absent would be faster still, but nothing
+// exports a stream's source event names — hardcoding them here would drift
+// silently the first time a stream's SQL changed, and a silently-missing stream is
+// exactly the failure this feature cannot have.
+async function revenueTailByExtrinsic(blocks: readonly number[]): Promise<Map<string, ActivityRevenue>> {
+  const out = new Map<string, ActivityRevenue>()
+  if (!blocks.length) return out
+  const query_params = { blocks: [...blocks], anchor: revenueTailAnchor(), hours: REVENUE_TAIL_WINDOW_HOURS }
+  const perStream = await Promise.all(EVENTFUL_REVENUE_STREAMS.map(async stream => {
+    const res = await client.query({
+      query: `
+        SELECT r.block_height AS block_height, e.extrinsic_index AS extrinsic_index, r.stream AS stream,
+               toFloat64(sumIf(r.amount_usd, ${PROTOCOL_REVENUE_PREDICATE_SQL})) AS protocol_usd,
+               toFloat64(sumIf(r.amount_usd, r.dest = 'lp')) AS lp_usd
+        FROM (${buildRevenueEventRowsSql(stream, 'block_height IN ({blocks:Array(UInt32)})')}) AS r
+        INNER JOIN (
+          SELECT block_height, event_index, extrinsic_index
+          FROM price_data.raw_events
+          WHERE block_height IN ({blocks:Array(UInt32)})
+        ) AS e ON e.block_height = r.block_height AND e.event_index = r.event_index
+        GROUP BY block_height, extrinsic_index, stream`,
+      query_params,
+      format: 'JSONEachRow',
+    })
+    return res.json<RevenueSumRow>()
+  }))
+  for (const rows of perStream) collectRevenueRows(out, rows)
+  return out
+}
+
 export async function applyActivityRevenue(rows: readonly RevenueBearing[]): Promise<void> {
   if (!rows.length) return
   const [map, bookedThrough] = await Promise.all([
     revenueByExtrinsic(rows.map(r => ({ blockHeight: r.blockHeight, extrinsicIndex: r.extrinsicIndex }))),
     revenueBookedThroughBlock(),
   ])
-  attachRevenue(rows, map, bookedThrough)
+  // Blocks past the derivation's hour boundary get the same figures computed from
+  // their own events, so a live row reports real revenue instead of a dash. A
+  // failure here is not worth failing the page over: the rows simply fall back to
+  // the dash they would have shown anyway.
+  const tailBlocks = blocksNeedingRevenueTail(rows, bookedThrough)
+  let coveredThrough = bookedThrough
+  if (tailBlocks.length) {
+    try {
+      const [tail, visibleHead] = await Promise.all([
+        revenueTailByExtrinsic(tailBlocks),
+        visibleEventHeadWithin(tailBlocks),
+      ])
+      for (const [key, entry] of tail) map.set(key, entry)
+      // Only as far as the events are visible: the live feed runs ahead of
+      // raw_events, and those blocks would otherwise report a confident $0.00.
+      coveredThrough = revenueCoverageThrough(bookedThrough, tailBlocks, visibleHead)
+    } catch (error) {
+      console.warn('[explorer] revenue tail recompute unavailable', { blocks: tailBlocks.length }, (error as Error).message)
+    }
+  }
+  attachRevenue(rows, map, coveredThrough)
 }
 
 // ---- protocol revenue breakdown (the Protocol Revenue detail tab) ----
@@ -12264,7 +12407,13 @@ async function recentActivityPage(limit: number, from?: string, to?: string, off
     // stay finalized-only.
     if (livePage0) {
       const pending = await pendingActivityRows(type, filters, page[0]?.blockHeight ?? 0)
-      if (pending.length) return [...pending, ...page].slice(0, limit)
+      // These lead the feed, so they are the rows most likely to be read. They
+      // are merged after the enrichment above, so revenue has to be attached
+      // here or the newest rows on the page would always show a dash.
+      if (pending.length) {
+        await applyActivityRevenue(pending)
+        return [...pending, ...page].slice(0, limit)
+      }
     }
     return page
   })
