@@ -255,8 +255,9 @@ describe('parked submissions survive a restart', () => {
     await loadReferendumTitles()
     setHead(1_010)
     await runEvaluatorTick()
-    expect(inbox().map(r => String(r.title))).toEqual(['Referendum #412 submitted'])
-    expect(inbox()[0].body).toContain('Add HDX liquidity to the Omnipool')
+    // The proposal leads; the state change reads underneath it.
+    expect(inbox().map(r => String(r.title))).toEqual(['Add HDX liquidity to the Omnipool'])
+    expect(inbox()[0].body).toContain('Referendum #412 submitted')
     expect(evaluatorParkedSubmissions()[412]).toBeUndefined()
 
     // And never again.
