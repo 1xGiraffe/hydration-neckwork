@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   cursorKey, evaluatorCounters, evaluatorCursors, initEvaluator, notificationIdFor,
-  resetEvaluatorForTests, runEvaluatorTick, startNotificationEvaluator, stopNotificationEvaluator,
+  MAX_OUTBOUND_SENDS, resetEvaluatorForTests, runEvaluatorTick, startNotificationEvaluator,
+  stopNotificationEvaluator,
 } from '../src/notifications/evaluator.ts'
 import {
   createRule, getNotificationState, initNotifications, loadNotifications,
@@ -206,7 +207,10 @@ describe('evaluator cursor', () => {
 })
 
 describe('evaluator delivery', () => {
-  it('gives every match its own inbox row but sends one digest per rule per tick', async () => {
+  // Matches in DIFFERENT blocks are different events, so each gets its own message
+  // rather than being folded into one per-tick digest. Six blocks against a cap of
+  // five means the two oldest collapse and the four newest send individually.
+  it('gives every match its own inbox row and one outbound message per block', async () => {
     await watchOmnipool()
     await runEvaluatorTick()
     setHead(1_006)
@@ -214,10 +218,24 @@ describe('evaluator delivery', () => {
     await runEvaluatorTick()
     await flush()
     expect(inbox()).toHaveLength(6)
-    expect(sends).toHaveLength(1)
-    expect(sends[0]).toContain('6 × Event matcher')
-    expect(sends[0]).toContain('and 1 more')
+    expect(sends).toHaveLength(MAX_OUTBOUND_SENDS)
+    expect(sends[0]).toContain('2 × Event matcher')
+    for (const one of sends.slice(1)) expect(one).not.toContain('×')
     expect(evaluatorCounters().coalesced).toBe(1)
+  })
+
+  it('merges only the matches that share a block', async () => {
+    await watchOmnipool()
+    await runEvaluatorTick()
+    setHead(1_002)
+    // Two in block 1_001, one in 1_002.
+    tables.raw_events = [swapAt(1_001, 0), swapAt(1_001, 1), swapAt(1_002, 0)]
+    await runEvaluatorTick()
+    await flush()
+    expect(inbox()).toHaveLength(3)
+    expect(sends).toHaveLength(2)
+    expect(sends[0]).toContain('2 × Event matcher')
+    expect(sends[1]).not.toContain('×')
   })
 
   it('suppresses the outbound message inside a cooldown without losing the inbox row', async () => {
@@ -270,10 +288,12 @@ describe('evaluator delivery', () => {
     expect(rows).toHaveLength(21)                  // 20 detail rows plus one digest
     expect(client.inserts.filter(i => i.table.endsWith('user_notification_inbox'))).toHaveLength(before + 1)
     expect(rows.at(-1)?.title).toBe('80 × Event matcher')
-    // One outbound message for the whole tick, naming the total.
-    expect(sends).toHaveLength(1)
-    expect(sends[0]).toContain('100 × Event matcher')
-    expect(sends[0]).toContain('and 95 more')
+    // Outbound is bounded by the per-tick cap however many blocks matched: the
+    // oldest blocks collapse into one digest, the newest keep their own message
+    // (two matches per block here, so each of those is itself a 2x digest).
+    expect(sends).toHaveLength(MAX_OUTBOUND_SENDS)
+    expect(sends[0]).toContain('92 × Event matcher')
+    for (const one of sends.slice(1)) expect(one).toContain('2 × Event matcher')
   })
 
   it('stays silent for a muted rule', async () => {
