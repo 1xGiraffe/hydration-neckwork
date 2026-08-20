@@ -26,7 +26,7 @@ import {
 import { resolveActivityTarget } from './ruleTargets.ts'
 import {
   account as accountPart, amount as amountPart, code as codePart, compactAmount, compactUsd,
-  renderList, renderNotification, shortHash, text as textPart, usd as usdPart,
+  humanDuration, renderList, renderNotification, shortHash, text as textPart, usd as usdPart,
   type RenderAccount, type RenderInput, type RenderPart, type RenderedNotification,
 } from './render.ts'
 
@@ -229,7 +229,7 @@ export type MatchPayload =
   | { lane: 'extrinsic'; row: ChainExtrinsicRow }
   | { lane: 'price'; assetId: number; direction: 'above' | 'below'; threshold: number; value: number }
   | { lane: 'health-factor'; address: string; account: AccountRef | null; threshold: number; value: number }
-  | { lane: 'dca-start'; row: DcaScheduleRow; hourlyUsd: number; perExecutionUsd: number }
+  | { lane: 'dca-start'; row: DcaScheduleRow; hourlyUsd: number; perExecutionUsd: number; runtimeMs: number | null }
 
 /** A DCA schedule as it was created: the standing order, not any one execution. */
 export interface DcaScheduleRow {
@@ -771,10 +771,11 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
       // The rate is what the rule matched on; the size says whether it is a burst
       // or a standing order, which the rate alone cannot tell you.
       const rate: RenderPart[] = [usdPart(p.hourlyUsd), textPart('per hour ·'), usdPart(p.perExecutionUsd), textPart('per trade')]
-      const unbounded = /^0*$/.test(row.totalAmount.trim())
-      const size = unbounded
+      // How long it runs, not how many times it fires: "25.1M executions" is
+      // arithmetically right on a sell-everything schedule and useless to read.
+      const size = p.runtimeMs == null
         ? 'Unbounded schedule'
-        : `${compactAmount(Math.max(1, Math.round(dcaExecutions(row))))} executions, every ${compactAmount(row.periodBlocks)} blocks`
+        : `${compactAmount(dcaExecutions(row))} executions over ~${humanDuration(p.runtimeMs)}`
       return { title, body: [rate, [textPart(size)]], path: `/dca/${row.id}` }
     }
     case 'health-factor': {
@@ -790,6 +791,18 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
       }
     }
   }
+}
+
+/**
+ * Wall clock the schedule will run for, or null when it is unbounded (or the
+ * amounts give no execution count). A duration is what tells a reader whether a
+ * schedule is a burst or a standing order; the execution count alone read as
+ * nonsense on a sell-everything schedule.
+ */
+export function dcaRuntimeMs(row: DcaScheduleRow, blockMs: number): number | null {
+  const executions = dcaExecutions(row)
+  if (executions <= 0 || !(row.periodBlocks > 0) || !(blockMs > 0)) return null
+  return executions * row.periodBlocks * blockMs
 }
 
 /** How many executions a bounded schedule will run. 0 for an unbounded one. */
@@ -829,7 +842,7 @@ export function evaluateDcaStart(
       },
       row => {
         const { hourlyUsd, perExecutionUsd } = dcaHourly(row, valueUsd, blockMs)
-        return { lane: 'dca-start', row, hourlyUsd, perExecutionUsd }
+        return { lane: 'dca-start', row, hourlyUsd, perExecutionUsd, runtimeMs: dcaRuntimeMs(row, blockMs) }
       })
   })
 }
