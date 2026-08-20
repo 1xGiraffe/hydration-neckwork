@@ -12379,21 +12379,29 @@ function activityReadFailure(error: unknown): Error {
 
 // Unified Activity feed. `type` selects a single category server-side (so the UI
 // chips paginate correctly through that category) or 'all' for the merged feed.
-export async function getRecentActivity(limit: number, from?: string, to?: string, offset = 0, type = 'all', filters: ValueListFilters = {}, action?: string): Promise<ActivityRow[]> {
+// Attaching revenue costs a read of its own (the unbooked tail is recomputed per
+// event), so it is opt-in: the explorer surfaces want it on every page, while the
+// notification evaluator reads this same feed every few seconds and must not pay for
+// it unless a rule actually looks at revenue. Default on — every existing caller is
+// a display path.
+export interface ActivityPageOptions { revenue?: boolean }
+
+export async function getRecentActivity(limit: number, from?: string, to?: string, offset = 0, type = 'all', filters: ValueListFilters = {}, action?: string, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {
   try {
-    return await recentActivityPage(limit, from, to, offset, type, filters, action)
+    return await recentActivityPage(limit, from, to, offset, type, filters, action, opts)
   } catch (error) {
     throw activityReadFailure(error)
   }
 }
 
-async function recentActivityPage(limit: number, from?: string, to?: string, offset = 0, type = 'all', filters: ValueListFilters = {}, action?: string): Promise<ActivityRow[]> {
+async function recentActivityPage(limit: number, from?: string, to?: string, offset = 0, type = 'all', filters: ValueListFilters = {}, action?: string, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {
+  const withRevenue = opts.revenue !== false
   const tw = timeWindow(from, to)
   type = normalizeActivityTypeKey(type)
   // Page 0 of the plain live feed also leads with transaction-pool rows, merged
   // OUTSIDE the cache (see below) so a pool change costs no read.
   const livePage0 = offset === 0 && !tw && !action
-  const settled = await cached(`explorer:activity:${await liveFeedTag(Boolean(tw), datedWindowIsClosed(to))}:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  const settled = await cached(`explorer:activity:${await liveFeedTag(Boolean(tw), datedWindowIsClosed(to))}:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}:${withRevenue ? 'rev' : 'norev'}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const { rows, locallyPaged } = await activityWindow(limit, from, to, offset, type, filters, action)
     // A locally paged window holds the whole filtered ordering, so this page
     // starts at `offset`; a SQL-paged read already returned the page itself.
@@ -12401,7 +12409,11 @@ async function recentActivityPage(limit: number, from?: string, to?: string, off
     // page of the same feed, and the enrichment below writes to its rows.
     const sliceOffset = locallyPaged ? offset : 0
     const page = rows.slice(sliceOffset, sliceOffset + limit).map(row => ({ ...row }))
-    await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page), applyActivityRevenue(page)])
+    await Promise.all([
+      applyHistoricalUsd(page, activityHistPick),
+      applyXcmJourneys(page),
+      ...(withRevenue ? [applyActivityRevenue(page)] : []),
+    ])
     // Page 0 of the plain live feed leads with the BASIC unfinalized rows
     // (pending trades and transfers); dated, deeper and action-filtered views
     // stay finalized-only.
@@ -12411,7 +12423,7 @@ async function recentActivityPage(limit: number, from?: string, to?: string, off
       // are merged after the enrichment above, so revenue has to be attached
       // here or the newest rows on the page would always show a dash.
       if (pending.length) {
-        await applyActivityRevenue(pending)
+        if (withRevenue) await applyActivityRevenue(pending)
         return [...pending, ...page].slice(0, limit)
       }
     }
@@ -17544,10 +17556,14 @@ async function growAccountActivityWindow(
 // it holds, so the page is refused rather than silently omitting older history — and
 // a page that only ENDS past it is served short rather than withheld, because a total
 // counts a complete window to exactly there.
-async function getAccountActivity(accounts: string[], limit: number, type = 'all', offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[]> {
+async function getAccountActivity(accounts: string[], limit: number, type = 'all', offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {
   const located = await locatedAccountActivityPage(accounts, type, limit, offset, action, filters, from, to)
   const page = located ?? await windowedAccountActivityPage(accounts, type, limit, offset, action, filters, from, to)
-  await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page), applyActivityRevenue(page)])
+  await Promise.all([
+    applyHistoricalUsd(page, activityHistPick),
+    applyXcmJourneys(page),
+    ...(opts.revenue !== false ? [applyActivityRevenue(page)] : []),
+  ])
   return page
 }
 
@@ -17702,6 +17718,7 @@ async function getScopedAccountActivity(
   filters: ValueListFilters,
   from?: string,
   to?: string,
+  opts: ActivityPageOptions = {},
 ): Promise<ActivityRow[]> {
   const window = timeWindow(from, to)
   noteHotActivityScope(cacheScope, accounts)
@@ -17709,8 +17726,11 @@ async function getScopedAccountActivity(
   // still reaching today — is keyed by the account's own activity height, so the
   // TTL is only a backstop (see datedWindowIsClosed).
   const mark = window && datedWindowIsClosed(to) ? 0 : await accountActivityWatermark(accounts)
-  return cached(`explorer:${cacheScope}:activity:w${mark}:${type}:${limit}:${offset}:${action ?? ''}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, window ? 30_000 : 60_000,
-    () => getAccountActivity(accounts, limit, type, offset, action, filters, from, to))
+  // The revenue flag changes what the entry HOLDS, so it is part of the key: a page
+  // cached without revenue must never be served to a caller that needs it.
+  const revTag = opts.revenue === false ? 'norev' : 'rev'
+  return cached(`explorer:${cacheScope}:activity:w${mark}:${type}:${limit}:${offset}:${action ?? ''}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${revTag}`, window ? 30_000 : 60_000,
+    () => getAccountActivity(accounts, limit, type, offset, action, filters, from, to, opts))
 }
 
 // ── Keeping the shared enumerated read warm ───────────────────────────────────
@@ -17804,10 +17824,10 @@ async function prewarmHotActivitySnapshots(): Promise<void> {
 // Account detail feeds resolve the address to the same related-account set used
 // by getAddress. Unknown addresses return null so routes can distinguish them
 // from recognized accounts with no activity.
-export async function getAddressActivity(addressInput: string, type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[] | null> {
+export async function getAddressActivity(addressInput: string, type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string, opts: ActivityPageOptions = {}): Promise<ActivityRow[] | null> {
   const resolved = await resolveRelatedAccounts(addressInput)
   if (!resolved) return null
-  return getScopedAccountActivity(resolved.related, `account:${resolved.norm.accountId}`, type, limit, offset, action, filters, from, to)
+  return getScopedAccountActivity(resolved.related, `account:${resolved.norm.accountId}`, type, limit, offset, action, filters, from, to, opts)
 }
 
 // The account's signed extrinsics (paginated). Same shape as getRecentExtrinsics
@@ -21959,10 +21979,10 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
 }
 
 // Tag feeds use the same account-set implementations as account detail feeds.
-export async function getTagActivity(tagId: string, type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[] | null> {
+export async function getTagActivity(tagId: string, type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string, opts: ActivityPageOptions = {}): Promise<ActivityRow[] | null> {
   const members = tagMembers(tagId)
   if (!members) return null
-  return getScopedAccountActivity(members, `tag:${tagId}`, type, limit, offset, action, filters, from, to)
+  return getScopedAccountActivity(members, `tag:${tagId}`, type, limit, offset, action, filters, from, to, opts)
 }
 export async function getTagExtrinsics(tagId: string, limit = 25, offset = 0, filters: ExtrinsicListFilters = {}, from?: string, to?: string): Promise<ExtrinsicSummary[] | null> {
   const members = tagMembers(tagId)
@@ -22018,10 +22038,10 @@ export async function getListTagDetail(listId: string, presentation: ListTagPres
   const scope = listTagScope(listId, presentation.tagId, valid)
   return buildTagDetailForMembers(presentation, valid, { summary, cacheKey: `explorer:${scope}${summary ? ':summary' : ''}`, scope })
 }
-export async function getListTagActivity(listId: string, tagId: string, members: string[], type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[]> {
+export async function getListTagActivity(listId: string, tagId: string, members: string[], type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {
   const valid = listTagMembers(members)
   if (!valid.length) return []
-  return getScopedAccountActivity(valid, listTagScope(listId, tagId, valid), type, limit, offset, action, filters, from, to)
+  return getScopedAccountActivity(valid, listTagScope(listId, tagId, valid), type, limit, offset, action, filters, from, to, opts)
 }
 // The cacheKey MUST name the list kind as well as the scope: both builders
 // compose `explorer:<cacheKey>:<limit>:<offset>:<from>:<to>:<filterKey>`, so a

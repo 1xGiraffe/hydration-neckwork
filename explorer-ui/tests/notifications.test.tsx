@@ -738,8 +738,10 @@ describe('confirm dialogs', () => {
 describe('rule-kind registry mirror', () => {
   it('names every kind the API knows', () => {
     // The UI's copy exists so a form can be built without a round trip; a kind
-    // missing a label would render a blank option in the picker.
-    expect(NOTIFICATION_KINDS).toHaveLength(10)
+    // missing a label would render a blank option in the picker. The count is
+    // spelled out so adding a kind on one side alone fails here rather than
+    // shipping a picker entry with no form behind it.
+    expect(NOTIFICATION_KINDS).toHaveLength(12)
     for (const kind of NOTIFICATION_KINDS) expect(KIND_LABELS[kind]).toBeTruthy()
   })
 
