@@ -4,7 +4,6 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, Link } from '../router'
 import { AssetIcon, Crumbs, Dash, EmptyRow, F, PoolBadge, rowNav, TableSkeleton } from '../components/ui'
 import { useAssetColors } from '../utils/iconColor'
-import { separateSeriesColors } from '../utils/seriesColors'
 import type { PoolCompositionEntry, PoolListEntry } from '../types'
 
 // Where the chain's money sits.
@@ -25,8 +24,8 @@ const DUST_USD = 100
 
 // A pool's composition as one bar, at row scale: no axes, no tooltip, no
 // hover state — the pool's own page carries the full chart. Segments are the
-// assets' own icon colours, separated when two of a family would otherwise be
-// the same colour (vDOT and aDOT are both Polkadot pink).
+// assets' app-wide resolved colours (a family pair like vDOT/aDOT is already
+// separated centrally), so a row's bar matches the pool page it links to.
 function CompositionBar({ composition, colors }: { composition: PoolCompositionEntry[]; colors: string[] }) {
   const priced = composition.filter(c => (c.usd ?? 0) > 0)
   if (!priced.length) return <span className="muted mono comp-none">no priced legs</span>
@@ -45,7 +44,7 @@ function CompositionBar({ composition, colors }: { composition: PoolCompositionE
 
 function PoolRow({ p }: { p: PoolListEntry }) {
   const colorFor = useAssetColors(p.composition.map(c => c.asset))
-  const colors = separateSeriesColors(p.composition.map(c => colorFor(c.asset)))
+  const colors = p.composition.map(c => colorFor(c.asset))
   const to = p.kind === 'omnipool' ? paths.omnipool() : p.poolId != null ? paths.pool(p.poolId) : undefined
   // Four icons is where a row stops reading as a set and starts reading as a
   // crowd; the rest is a count, and the bar already shows the whole mixture.
