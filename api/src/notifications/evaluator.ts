@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
 import { assetDescriptor } from '../services/explorerAssets.ts'
+import { avgBlockMsSql, clampBlockMs, NOMINAL_PARA_BLOCK_MS } from '../services/blockTime.ts'
 import {
   accountRef, activityRowMatchesAction, activityTypeMatchesFamily, ensurePrices,
   getAddressActivity, getListTagActivity, getPrimaryHealthFactor, getRecentActivity, getTagActivity,
@@ -107,6 +108,9 @@ const SOURCE_FETCH_CAP = 25
 const RAW_WINDOW_CAP = 5_000
 // Matches listed by name in a coalesced message before it says "and N more".
 const COALESCE_LIST = 5
+// Upper bound on outbound messages per rule per tick (see outboundGroups): a
+// catch-up window holds dozens of blocks and must not arrive as a push burst.
+export const MAX_OUTBOUND_SENDS = 5
 // Inbox rows one rule may write in one tick. The oldest matches keep their own
 // detail row and the remainder collapses into a single digest row, so a rule on
 // a busy pallet costs a bounded write instead of thousands.
@@ -205,6 +209,22 @@ export type MatchPayload =
   | { lane: 'extrinsic'; row: ChainExtrinsicRow }
   | { lane: 'price'; assetId: number; direction: 'above' | 'below'; threshold: number; value: number }
   | { lane: 'health-factor'; address: string; account: AccountRef | null; threshold: number; value: number }
+  | { lane: 'dca-start'; row: DcaScheduleRow; hourlyUsd: number; perExecutionUsd: number }
+
+/** A DCA schedule as it was created: the standing order, not any one execution. */
+export interface DcaScheduleRow {
+  id: number
+  blockHeight: number
+  who: string
+  assetIn: number
+  assetOut: number
+  /** 'Sell' prices `amountPer` in assetIn, 'Buy' in assetOut — the MV writes whichever leg was fixed. */
+  direction: string
+  amountPer: string
+  /** '0' on chain means unbounded. */
+  totalAmount: string
+  periodBlocks: number
+}
 
 export interface RuleMatch {
   ruleId: string
@@ -716,6 +736,21 @@ export function renderMatch(match: RuleMatch, rule: NotificationRule, viewerTag:
         path: `/asset/${p.assetId}`,
       }
     }
+    case 'dca-start': {
+      const row = p.row
+      const inSym = assetDescriptor(row.assetIn).symbol
+      const outSym = assetDescriptor(row.assetOut).symbol
+      const title: RenderPart[] = [textPart(`DCA started ${inSym} → ${outSym}`)]
+      if (row.who) title.push(textPart('by'), accountPart(renderAccount(accountRef(row.who), viewerTag)))
+      // The rate is what the rule matched on; the size says whether it is a burst
+      // or a standing order, which the rate alone cannot tell you.
+      const rate: RenderPart[] = [usdPart(p.hourlyUsd), textPart('per hour ·'), usdPart(p.perExecutionUsd), textPart('per trade')]
+      const unbounded = /^0*$/.test(row.totalAmount.trim())
+      const size = unbounded
+        ? 'Unbounded schedule'
+        : `${compactAmount(Math.max(1, Math.round(dcaExecutions(row))))} executions, every ${compactAmount(row.periodBlocks)} blocks`
+      return { title, body: [rate, [textPart(size)], [textPart(`Block ${row.blockHeight}`)]], path: `/dca/${row.id}` }
+    }
     case 'health-factor': {
       const title: RenderPart[] = [textPart(`Health factor ${compactAmount(p.value)}`)]
       if (p.account) title.push(textPart('—'), accountPart(renderAccount(p.account, viewerTag)))
@@ -728,6 +763,103 @@ export function renderMatch(match: RuleMatch, rule: NotificationRule, viewerTag:
   }
 }
 
+/** How many executions a bounded schedule will run. 0 for an unbounded one. */
+export function dcaExecutions(row: DcaScheduleRow): number {
+  const per = toBigIntOrNull(row.amountPer)
+  const total = toBigIntOrNull(row.totalAmount)
+  if (per == null || total == null || per === 0n || total === 0n) return 0
+  return Number(total / per)
+}
+
+/** The asset `amountPer`/`totalAmount` are denominated in, per direction. */
+export const dcaPricedAsset = (row: DcaScheduleRow): number =>
+  (row.direction === 'Buy' ? row.assetOut : row.assetIn)
+
+/**
+ * Matches DCA *starts* for the large-trade rules that want them. A schedule is a
+ * standing order, so it is judged on what an hour of it is worth rather than on
+ * any single execution, and it alerts once — identity is the schedule id.
+ *
+ * `dcaStart: false` opts a rule out. The asset scope matches either leg, the same
+ * way `activityReferencesAsset` treats a swap.
+ */
+export function evaluateDcaStart(
+  rows: readonly DcaScheduleRow[],
+  rules: readonly NotificationRule[],
+  window: BlockWindow,
+  valueUsd: (assetId: number, raw: string) => number | null,
+  blockMs: number,
+): RuleMatch[] {
+  return rules.flatMap(rule => {
+    const p = rule.params as RuleParams['large-trade']
+    if (p.dcaStart === false) return []
+    return matchRows(rows, rule, window, r => r.blockHeight, r => `dca:${r.id}`,
+      row => {
+        if (p.assetId != null && row.assetIn !== p.assetId && row.assetOut !== p.assetId) return false
+        return dcaHourly(row, valueUsd, blockMs).hourlyUsd >= p.minUsd
+      },
+      row => {
+        const { hourlyUsd, perExecutionUsd } = dcaHourly(row, valueUsd, blockMs)
+        return { lane: 'dca-start', row, hourlyUsd, perExecutionUsd }
+      })
+  })
+}
+
+function dcaHourly(
+  row: DcaScheduleRow, valueUsd: (assetId: number, raw: string) => number | null, blockMs: number,
+): { hourlyUsd: number; perExecutionUsd: number } {
+  const asset = dcaPricedAsset(row)
+  const perExecutionUsd = valueUsd(asset, row.amountPer) ?? 0
+  const totalRaw = toBigIntOrNull(row.totalAmount)
+  const totalUsd = totalRaw == null || totalRaw === 0n ? null : valueUsd(asset, row.totalAmount)
+  return { hourlyUsd: dcaHourlyValueUsd(perExecutionUsd, totalUsd, row.periodBlocks, blockMs), perExecutionUsd }
+}
+
+const toBigIntOrNull = (raw: string): bigint | null => {
+  try { return BigInt(raw) } catch { return null }
+}
+
+/**
+ * What an hour of a DCA schedule is actually worth, in USD.
+ *
+ * Its RATE alone overstates a short burst — a three-execution schedule reads as
+ * thousands per hour while only ever moving a few hundred — and its TOTAL alone
+ * ignores a large slow schedule that pushes real size every hour. The lower of
+ * the two is the honest answer. `totalUsd` null means the schedule is unbounded
+ * (`total_amount` 0 on chain), where only the rate bounds it.
+ */
+export function dcaHourlyValueUsd(
+  perExecutionUsd: number, totalUsd: number | null, periodBlocks: number, blockMs: number,
+): number {
+  if (!(perExecutionUsd > 0) || !(periodBlocks > 0) || !(blockMs > 0)) return 0
+  const rate = perExecutionUsd * 3_600_000 / (periodBlocks * blockMs)
+  return totalUsd == null ? rate : Math.min(rate, totalUsd)
+}
+
+/**
+ * How a rule's matches for one tick become outbound messages. Matches sharing a
+ * block are ONE event and merge; matches in different blocks are different events
+ * and must not be — a 6s tick spans more than one ~4.8s block, so collapsing the
+ * whole tick turned unrelated swaps into a single digest.
+ *
+ * Over `maxSends` the OLDEST blocks collapse into one leading digest, because a
+ * catch-up window (the 600-block clamp, or a rewound cursor) holds dozens of
+ * blocks and one push each would arrive as a burst. Nothing is dropped and chain
+ * order is preserved. Input must be sorted oldest-first.
+ */
+export function outboundGroups<T extends { blockHeight: number }>(matches: readonly T[], maxSends: number): T[][] {
+  if (!matches.length) return []
+  const byBlock: T[][] = []
+  for (const match of matches) {
+    const last = byBlock[byBlock.length - 1]
+    if (last && last[0].blockHeight === match.blockHeight) last.push(match)
+    else byBlock.push([match])
+  }
+  if (byBlock.length <= maxSends) return byBlock
+  const keep = Math.max(1, maxSends - 1)
+  return [byBlock.slice(0, byBlock.length - keep).flat(), ...byBlock.slice(byBlock.length - keep)]
+}
+
 // One message for several matches of one rule. `total` is how many matches the
 // digest stands for, which is not `rendered.length`: only the few matches the
 // message lists by name are ever rendered, so a rule that matched thousands of
@@ -737,7 +869,13 @@ export function renderDigest(rule: NotificationRule, rendered: readonly Rendered
   // resolution the rules list shows them, so a digest cannot describe a rule
   // differently from the page that created it.
   const label = rule.name || describeRule(rule.kind, rule.params, symbolOf, t => resolveActivityTarget(rule.accountId, t))
-  const listed = rendered.slice(0, COALESCE_LIST).map(r => r.title)
+  // Each entry keeps its own detail line (amounts, direction, USD, counterparty) —
+  // listing headlines alone threw away everything the single-match message says.
+  // An entry with no body still reads as a bare headline.
+  const listed = rendered.slice(0, COALESCE_LIST).map(r => {
+    const detail = r.body.split('\n')[0]?.trim()
+    return detail ? `${r.title} — ${detail}` : r.title
+  })
   const more = total - listed.length
   return renderNotification({
     title: [textPart(`${total} × ${KIND_LABELS[rule.kind]}`)],
@@ -978,7 +1116,12 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
     case 'large-transfer': {
       const feedType = kind === 'large-trade' ? 'trade' : 'transfer'
       const { matches, deferred } = await largeValueMatches(kind, feedType, rules, window, { left: SOURCE_FETCH_CAP })
-      return { kind, matches, nextCursor: deferred ? cursor : window.to }
+      // A large-trade rule also watches DCA STARTS: a standing order pushing this
+      // much per hour is the same event to a subscriber as one big swap. Only the
+      // trade kind has schedules to watch, and a deferred fetch must not let the
+      // cursor step over them either.
+      const dca = kind === 'large-trade' ? await dcaStartMatches(rules, window) : []
+      return { kind, matches: [...matches, ...dca], nextCursor: deferred ? cursor : window.to }
     }
     case 'referendum': return { kind, ...await referendumMatches(rules, window), nextCursor: window.to }
     case 'tc-motion': return { kind, matches: evaluateTcMotion(await queryWindowTcMotions(window), rules, window), nextCursor: window.to }
@@ -1419,6 +1562,69 @@ const argNumber = (args: Record<string, unknown>, key: string): number | null =>
 // committee has emitted a few thousand events in the chain's whole history, and
 // the event-name set index makes a 600-block window a near-empty scan — so this
 // needs no projection of its own, unlike the referendum lane's.
+// The DCA-start half of the large-trade lane: value each new schedule at
+// event-time prices and hand it to the pure matcher. Prices come from the shared
+// map the rest of the loop already uses; a schedule whose asset has no price
+// values at 0 and simply does not clear any floor.
+async function dcaStartMatches(rules: NotificationRule[], window: BlockWindow): Promise<RuleMatch[]> {
+  const enabled = rules.filter(r => (r.params as RuleParams['large-trade']).dcaStart !== false)
+  if (!enabled.length) return []
+  const rows = await queryWindowDcaSchedules(window)
+  if (!rows.length) return []
+  const prices = await ensurePrices()
+  const valueUsd = (assetId: number, raw: string): number | null => {
+    const price = prices.get(assetId)?.price
+    if (price == null) return null
+    const human = humanAmount(raw, assetDescriptor(assetId).decimals)
+    return human == null ? null : human * price
+  }
+  return evaluateDcaStart(rows, enabled, window, valueUsd, await paraBlockMsForEvaluator())
+}
+
+// The measured parachain slot, so a schedule's rate is not computed against a
+// nominal 6s while the chain runs ~4.8s (and 2s is planned). Cached for a minute:
+// it moves with runtime upgrades, not between ticks.
+let blockMsCache: { ms: number; at: number } | null = null
+async function paraBlockMsForEvaluator(): Promise<number> {
+  if (blockMsCache && Date.now() - blockMsCache.at < 60_000) return blockMsCache.ms
+  let ms = NOMINAL_PARA_BLOCK_MS
+  try {
+    if (client) {
+      const res = await client.query({ query: avgBlockMsSql(), format: 'JSONEachRow' })
+      const row = (await res.json<{ ms: number | string | null }>())[0]
+      ms = clampBlockMs(Number(row?.ms))
+    }
+  } catch { ms = NOMINAL_PARA_BLOCK_MS }
+  blockMsCache = { ms, at: Date.now() }
+  return ms
+}
+
+// DCA schedules created in the window, from the schedule-first projection (a few
+// rows per schedule, so a block-window scan is cheap). `total_amount` '0' is an
+// unbounded schedule and is carried through verbatim for the matcher to read.
+async function queryWindowDcaSchedules(window: BlockWindow): Promise<DcaScheduleRow[]> {
+  if (!client) return []
+  const res = await client.query({
+    query: `SELECT id, block_height, who, asset_in, asset_out, direction, amount_per, total_amount, period
+            FROM price_data.dca_schedules
+            WHERE block_height > {from:UInt32} AND block_height <= {to:UInt32}
+            ORDER BY block_height DESC
+            LIMIT {cap:UInt32}`,
+    query_params: { from: window.from, to: window.to, cap: RAW_WINDOW_CAP },
+    format: 'JSONEachRow',
+  })
+  const rows = await res.json<{
+    id: number | string; block_height: number; who: string; asset_in: number; asset_out: number
+    direction: string; amount_per: string; total_amount: string; period: number
+  }>()
+  if (rows.length >= RAW_WINDOW_CAP) counters.truncatedPages++
+  return rows.map(r => ({
+    id: Number(r.id), blockHeight: r.block_height, who: r.who,
+    assetIn: r.asset_in, assetOut: r.asset_out, direction: r.direction,
+    amountPer: String(r.amount_per), totalAmount: String(r.total_amount), periodBlocks: r.period,
+  }))
+}
+
 async function queryWindowTcMotions(window: BlockWindow): Promise<TcMotionEventRow[]> {
   if (!client) return []
   const res = await client.query({
@@ -1746,11 +1952,21 @@ async function dispatch(matches: RuleMatch[]): Promise<boolean> {
       if (muffled) counters.cooldownSuppressed++
       const channels = muffled ? [] : channelsForRule(rule)
       if (!channels.length) return
-      if (list.length > 1) counters.coalesced++
-      // One message per rule per tick: the single match itself, or a digest
-      // naming the first few and counting the rest.
-      const message = list.length === 1 ? rendered[0] : renderDigest(rule, rendered.slice(0, COALESCE_LIST), list.length)
-      sends.push({ ruleId, accountId: rule.accountId, message, tag: ruleId, channels })
+      // One message per BLOCK rather than per tick. The push `tag` must carry the
+      // block too: a repeated tag REPLACES the previous notification on the
+      // device, which would silently re-collapse exactly what this split exists
+      // to separate. Only the entries a digest actually lists get rendered, so a
+      // huge collapsed group stays cheap.
+      const renderedFor = new Map(detailed.map((match, i) => [match, rendered[i]] as const))
+      for (const group of outboundGroups(list, MAX_OUTBOUND_SENDS)) {
+        if (group.length > 1) counters.coalesced++
+        const shown = group.slice(0, COALESCE_LIST).map(match => renderedFor.get(match) ?? render(match))
+        const message = group.length === 1 ? shown[0] : renderDigest(rule, shown, group.length)
+        sends.push({
+          ruleId, accountId: rule.accountId, message, channels,
+          tag: `${ruleId}:${group[group.length - 1].blockHeight}`,
+        })
+      }
     })
   }
 
