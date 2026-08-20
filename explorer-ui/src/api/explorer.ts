@@ -1,10 +1,10 @@
 import type {
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
-  AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail,
+  AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail, RevenueBreakdown,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard,
   RevenueDashboard, RevenueFlowResponse, RevenueRange, HollarDashboard, SecurityDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
-  AssetLiquidity, PoolDetail, OmnipoolDetail,
+  AssetLiquidity, PoolDetail, OmnipoolDetail, PoolLpsResponse, OmnipoolAssetLpsResponse,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
   AccountRef, DeviceLinkResponse, DeviceLinkStatus, DeviceSession, EvmReceipt, PoolsIndexResponse,
@@ -153,6 +153,13 @@ export const api = {
   // routed swap's hops name the pool's members, not its share token.
   poolActivity: (poolId: number, limit = 25, signal?: AbortSignal) =>
     getJson<ActivityRow[]>(withQuery(`/explorer/pool/${poolId}/activity`, { limit }), signal),
+  // A pool's liquidity providers (share-token holders, farm principal
+  // attributed), and one omnipool asset's LP ranking (position owners plus the
+  // protocol's own shares). Both paged server-side over the full ranking.
+  poolLps: (poolId: number, offset = 0, limit = 10, signal?: AbortSignal) =>
+    getJson<PoolLpsResponse>(withQuery(`/explorer/pool/${poolId}/lps`, { offset, limit }), signal),
+  omnipoolLps: (assetId: number, offset = 0, limit = 10, signal?: AbortSignal) =>
+    getJson<OmnipoolAssetLpsResponse>(withQuery(`/explorer/omnipool/${assetId}/lps`, { offset, limit }), signal),
   holders: (assetId: number, offset = 0, limit = 100, signal?: AbortSignal) => getJson<HoldersResponse>(withQuery(`/explorer/holders/${assetId}`, { offset, limit }), signal),
   address: (address: string, signal?: AbortSignal) => getJson<AddressDetail>(`/explorer/address/${encodeURIComponent(address)}`, signal),
   // Lightweight variant for the hover card: the API skips LP/DCA/proxy/multisig so

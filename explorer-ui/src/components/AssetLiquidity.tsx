@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import type { AssetLiquiditySource, AssetRef } from '../types'
-import { useAssetLiquidity } from '../hooks/useExplorerData'
+import { useAssetLiquidity, useOmnipoolLps } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { Link, paths } from '../router'
-import { AssetAmount, Ago, ChartSkeleton, Dash, F, PoolBadge, rowNav } from './ui'
+import { accountHref, AddrPill, AssetAmount, Ago, ChartSkeleton, Dash, EmptyRow, F, Pager, pendingRows, PoolBadge, rowNav, TableSkeleton } from './ui'
 import { ChartLegend, ShareBar, StackedAreaChart, type ShareSegment } from './HdxCharts'
 import { useAssetColors } from '../utils/iconColor'
 
@@ -59,6 +59,62 @@ function SourceCard({ s, asset }: { s: AssetLiquiditySource; asset: AssetRef }) 
   return to
     ? <Link to={to} className="hdx-card hdx-card-link" ariaLabel={`${s.name} pool`}>{body}</Link>
     : <div className="hdx-card">{body}</div>
+}
+
+// The asset's top Omnipool liquidity providers: economic owners of its
+// position NFTs (bare or deposited in a liquidity-mining farm — rows marked
+// "farm"), plus the protocol's own accountless shares, ranked by share of the
+// asset's total Omnipool shares. Collapsed by default and fetched only once
+// opened; 10 rows per page over the full ranking.
+const LPS_PAGE = 10
+function OmnipoolLpsSection({ asset }: { asset: AssetRef }) {
+  const [open, setOpen] = useState(false)
+  const [page, setPage] = useState(0)
+  const lps = useOmnipoolLps(asset.assetId, page * LPS_PAGE, LPS_PAGE, open)
+  const rows = lps.data?.lps ?? []
+  const total = lps.data?.total ?? 0
+  const totalPages = Math.max(1, Math.ceil(total / LPS_PAGE))
+  return (
+    <>
+      <div className="sec-title">
+        <button type="button" className="lp-expand" aria-expanded={open} onClick={() => setOpen(o => !o)}>
+          <span className="caret">{open ? '▾' : '▸'}</span> Top liquidity providers
+        </button>
+        {open && lps.data && <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · {F.int(lps.data.lpCount)} {lps.data.lpCount === 1 ? 'provider' : 'providers'} across {F.int(lps.data.positionCount)} positions</span>}
+      </div>
+      {open && (
+        lps.isError
+          ? <div className="detail-card" style={{ padding: 24, textAlign: 'center', color: 'var(--text-medium)' }}>Failed to load the liquidity providers</div>
+          : <div className="panel"><table className="tbl">
+              <thead><tr><th style={{ width: 50 }}>#</th><th>Provider</th><th className="r">Positions</th><th className="r">Amount</th><th className="r">Share</th><th className="r">Value</th></tr></thead>
+              <tbody {...pendingRows(lps.isPlaceholderData)}>
+                {lps.isLoading && !rows.length ? <TableSkeleton cols={6} rows={LPS_PAGE} />
+                  : rows.length ? rows.map(r => (
+                    <tr key={r.account?.accountId ?? 'protocol'} {...(r.account ? rowNav(accountHref(r.account)) : {})}>
+                      <td data-label="Rank" className="mono muted">{r.rank}</td>
+                      <td data-label="Provider">
+                        {r.account ? <AddrPill account={r.account} noCopy />
+                          : <span className="badge" style={{ background: 'var(--lavender-soft)', color: 'var(--lavender-deep)' }}
+                              title="Shares the Omnipool protocol owns itself (protocol_shares) — no position NFT exists for them">Omnipool protocol</span>}
+                        {r.farmedPositions > 0 && <span className="badge" style={{ marginLeft: 6, background: 'var(--lavender-soft)', color: 'var(--lavender-deep)' }}
+                          title={`${r.farmedPositions} of the ${r.positions} positions are deposited in a liquidity-mining farm`}>farm</span>}
+                      </td>
+                      <td data-label="Positions" className="r mono muted">{r.positions > 0 ? F.int(r.positions) : '—'}</td>
+                      <td data-label="Amount" className="r">
+                        <AssetAmount asset={asset} raw={r.amount} link={false} />
+                        {r.hubAmount !== '0' && <div className="muted" style={{ fontSize: 11 }}>+ {F.amount(r.hubAmount, 12)} H2O</div>}
+                      </td>
+                      <td data-label="Share" className="r mono muted">{r.sharePct != null ? `${r.sharePct.toFixed(1)}%` : '—'}</td>
+                      <td data-label="Value" className="r mono">{r.valueUsd != null ? F.usd(r.valueUsd) : <Dash />}</td>
+                    </tr>
+                  )) : <EmptyRow cols={6}>No liquidity providers</EmptyRow>}
+              </tbody>
+            </table>
+            {totalPages > 1 && <Pager page={page} totalPages={totalPages} onPage={setPage} />}
+            </div>
+      )}
+    </>
+  )
 }
 
 export function AssetLiquidityTab({ asset }: { asset: AssetRef }) {
@@ -129,6 +185,11 @@ export function AssetLiquidityTab({ asset }: { asset: AssetRef }) {
           )}
         </>
       )}
+
+      {/* The asset's Omnipool LP ranking, right after the Omnipool breakdown
+          above. H2O (asset 1) is the hub — it has no position NFTs, so no LP
+          list exists for it. */}
+      {asset.assetId !== 1 && data.sources.some(s => s.kind === 'omnipool') && <OmnipoolLpsSection asset={asset} />}
 
       {history.buckets.length > 1 && (
         <>
