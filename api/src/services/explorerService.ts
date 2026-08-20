@@ -1241,13 +1241,25 @@ async function indexedRawHead(): Promise<number> {
 export function headCacheTag(head: number | null): string {
   return head == null ? 'tw' : `h${head}`
 }
-async function liveHeadTag(timeWindowed = false): Promise<string> {
-  return headCacheTag(timeWindowed ? null : await indexedRawHead())
+// A dated window earns the head-less tag only once it can no longer gain rows.
+// `to` naming a day that has already ended is the whole condition: a window that
+// reaches today keeps growing as blocks arrive, so under a constant tag its page
+// freezes for the cache's full TTL and every row that lands meanwhile is
+// invisible. Readers that only move forward — the notification evaluator's
+// per-kind cursor — step past those rows and never look again, which is a silent
+// permanent loss rather than a stale render. Dates are compared as UTC day
+// strings, matching `timeWindow`'s literals and ClickHouse's own timezone.
+const utcToday = (): string => new Date().toISOString().slice(0, 10)
+export function datedWindowIsClosed(to?: string, today: string = utcToday()): boolean {
+  return !!to && DATE_RE.test(to) && to < today
+}
+async function liveHeadTag(timeWindowed = false, closed = false): Promise<string> {
+  return headCacheTag(timeWindowed && closed ? null : await indexedRawHead())
 }
 // Tag for the feeds that merge PENDING (unfinalized) rows: a new best block
 // must invalidate their pages just like a newly ingested finalized one.
-async function liveFeedTag(timeWindowed = false): Promise<string> {
-  if (timeWindowed) return 'tw'
+async function liveFeedTag(timeWindowed = false, closed = false): Promise<string> {
+  if (timeWindowed && closed) return 'tw'
   const head = await indexedRawHead()
   const best = pendingBestHeight()
   return best > head ? `h${head}p${best}` : `h${head}`
@@ -2257,7 +2269,7 @@ export async function getRecentExtrinsics(limit: number, signedOnly: boolean, fr
   // are merged OUTSIDE the cache (see below), so the pool moving costs no read
   // at all — the cached page stays keyed on the block watermarks alone.
   const livePage0 = offset === 0 && !tw && !filters.call?.trim() && !filters.result && !filters.origin
-  const finalized = await cached(`explorer:extrinsics:${await liveFeedTag(Boolean(tw))}:${limit}:${offset}:${signedOnly}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  const finalized = await cached(`explorer:extrinsics:${await liveFeedTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${signedOnly}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const callFilter = filters.call?.trim() ? textNameFilter('call_name', 'callName') : ''
     const resultFilter = filters.result === 'success' ? 'AND success = 1' : filters.result === 'failed' ? 'AND success = 0' : ''
     const rows = await withFeedWindow(tw, limit, offset + limit, async (bound) => {
@@ -2607,7 +2619,7 @@ async function moneyMarketExtrinsicsForTransfers(rows: TransferRow[]): Promise<S
 
 async function getRecentTransfers(limit: number, from?: string, to?: string, offset = 0, userOnly = false, filters: ValueListFilters = {}, suppressMoneyMarket = false): Promise<TransferRow[]> {
   const tw = timeWindow(from, to)
-  return cached(`explorer:transfers:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${userOnly}:${filterKey(filters)}:${suppressMoneyMarket}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:transfers:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${userOnly}:${filterKey(filters)}:${suppressMoneyMarket}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
     const useAssetTransferReadModel = tokenIds != null
@@ -6903,7 +6915,7 @@ async function uniqueEventRows(rows: EventSourceRow[]): Promise<EventRow[]> {
 export async function getRecentEvents(limit: number, from?: string, to?: string, offset = 0, filters: EventListFilters = {}): Promise<EventRow[]> {
   const tw = timeWindow(from, to)
   const livePage0 = offset === 0 && !tw && !filters.event?.trim()
-  const settled = await cached(`explorer:events:${await liveFeedTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  const settled = await cached(`explorer:events:${await liveFeedTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const eventFilter = filters.event?.trim() ? textNameFilter('event_name', 'eventName') : ''
     const rows = await withFeedWindow(tw, limit, offset + limit, async (bound) => {
       // A page cut by OFFSET reads every skipped row too, and args_json is ZSTD(6) —
@@ -7397,7 +7409,7 @@ export async function getListTagRevenueBreakdown(listId: string, tagId: string, 
 // trade and attribute it to the extrinsic signer (or the AMM `who` when unsigned).
 async function getRecentTrades(limit: number, from?: string, to?: string, offset = 0, filters: ValueListFilters = {}): Promise<TradeRow[]> {
   const tw = timeWindow(from, to)
-  return cached(`explorer:trades:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:trades:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
     const tokenIds = assetIdsForToken(filters.token)
@@ -8636,7 +8648,7 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
   // An action no liquidity event produces selects nothing — the same answer the merged
   // feed's activityRowMatchesAction gives it, reached without an empty `IN ()`.
   if (!liqEvents.length) return []
-  return cached(`explorer:liquidity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:liquidity:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
     const assetExpr = 'asset_id'
@@ -8966,7 +8978,7 @@ function outboundXcmRow(
 async function getRecentXcm(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:xcm-activity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:xcm-activity:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
     const senderFilter = acctList ? `AND sender IN (${acctList})` : ''
@@ -9520,7 +9532,7 @@ async function fetchDecodedXcmDeep(
 async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:xcmoutr-activity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:xcmoutr-activity:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     if (acctList === "''") return []
     const prices = await ensurePrices()
     const bound = tw ?? '1'
@@ -9586,7 +9598,7 @@ async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, 
 async function getRecentXcmIn(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:xcmin-activity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:xcmin-activity:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     if (acctList === "''") return []
     const prices = await ensurePrices()
     const bound = tw ?? '1'
@@ -10184,7 +10196,7 @@ async function nttLogsFor(pairs: Iterable<string>): Promise<Map<string, NttExtri
 async function getRecentNttOut(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:ntt-out:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:ntt-out:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     if (acctList === "''") return []
     const minters = await nttMinterAccounts()
     if (!minters.size) return []
@@ -10269,7 +10281,7 @@ async function getRecentNttOut(limit: number, from?: string, to?: string, accoun
 async function getRecentNttIn(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:ntt-in:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:ntt-in:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     if (acctList === "''") return []
     const minters = await nttMinterAccounts()
     if (!minters.size) return []
@@ -10346,7 +10358,7 @@ async function getRecentMoneyMarket(limit: number, from?: string, to?: string, o
   const eventNames = moneyMarketEventNames(action)
   if (!eventNames.length) return []
   const tw = timeWindow(from, to)
-  return cached(`explorer:mm-activity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:mm-activity:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
     const reserveFilter = tokenIds == null ? '' : tokenIds.length
@@ -10541,7 +10553,7 @@ export function stakingAmountSql(gigaAssetId: number): string {
 async function getRecentStaking(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}, assetId?: number, action?: string): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:staking-activity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${assetId ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:staking-activity:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${assetId ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const bound = tw ?? '1'
     const tokenIds = assetIdsForToken(filters.token)
@@ -10758,7 +10770,7 @@ interface RawOtcActivityEvent { block_height: number; ts: string; event_index: n
 async function getRecentOtc(limit: number, from?: string, to?: string, offset = 0, filters: ValueListFilters = {}, action?: string, accounts?: string[]): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const accountSet = accounts?.length ? new Set(accounts.map(account => account.toLowerCase())) : null
-  return cached(`explorer:otc-activity:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}:${accounts?.join(',') ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:otc-activity:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}:${accounts?.join(',') ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
     const postFilter = tokenIds != null || accountSet != null || hasRowLevelFilter(filters)
@@ -11090,7 +11102,7 @@ async function voteCallRowsForTuples(tuples: string[]): Promise<VoteCallRow[]> {
 async function getRecentVotes(limit: number, from?: string, to?: string, offset = 0, filters: VoteListFilters = {}, accounts?: string[], valueFilters: ValueListFilters = {}): Promise<VoteRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:votes:${await liveHeadTag(Boolean(tw))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}:${filterKey(valueFilters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:votes:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}:${filterKey(valueFilters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const bound = tw ?? '1'
     const eventFilter = "AND event_name IN ('ConvictionVoting.Voted','Democracy.Voted')"
@@ -11284,7 +11296,7 @@ export function collectiveVotesAdmitted(filters: ValueListFilters): boolean {
 const COLLECTIVE_VOTE_WINDOW_CAP = 100_000
 async function collectiveVoteWindow(from?: string, to?: string): Promise<VoteRow[]> {
   const tw = timeWindow(from, to)
-  const rows = await cached(`explorer:collective-votes:${await liveHeadTag(Boolean(tw))}:${from ?? ''}:${to ?? ''}`,
+  const rows = await cached(`explorer:collective-votes:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${from ?? ''}:${to ?? ''}`,
     tw ? 30_000 : LIVE_CACHE_MS,
     () => getCollectiveVotes(undefined, COLLECTIVE_VOTE_WINDOW_CAP, from, to))
   // A truncated enumeration would silently mis-rank the merged page, so it is
@@ -12113,7 +12125,7 @@ async function recentActivityPage(limit: number, from?: string, to?: string, off
   // Page 0 of the plain live feed also leads with transaction-pool rows, merged
   // OUTSIDE the cache (see below) so a pool change costs no read.
   const livePage0 = offset === 0 && !tw && !action
-  const settled = await cached(`explorer:activity:${await liveFeedTag(Boolean(tw))}:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  const settled = await cached(`explorer:activity:${await liveFeedTag(Boolean(tw), datedWindowIsClosed(to))}:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const { rows, locallyPaged } = await activityWindow(limit, from, to, offset, type, filters, action)
     // A locally paged window holds the whole filtered ordering, so this page
     // starts at `offset`; a SQL-paged read already returned the page itself.
@@ -17417,9 +17429,10 @@ async function getScopedAccountActivity(
 ): Promise<ActivityRow[]> {
   const window = timeWindow(from, to)
   noteHotActivityScope(cacheScope, accounts)
-  // A dated view is history and cannot change; a live one is keyed by the
-  // account's own activity height, so the TTL is only a backstop.
-  const mark = window ? 0 : await accountActivityWatermark(accounts)
+  // A CLOSED dated view is history and cannot change; a live one — or a dated one
+  // still reaching today — is keyed by the account's own activity height, so the
+  // TTL is only a backstop (see datedWindowIsClosed).
+  const mark = window && datedWindowIsClosed(to) ? 0 : await accountActivityWatermark(accounts)
   return cached(`explorer:${cacheScope}:activity:w${mark}:${type}:${limit}:${offset}:${action ?? ''}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, window ? 30_000 : 60_000,
     () => getAccountActivity(accounts, limit, type, offset, action, filters, from, to))
 }
