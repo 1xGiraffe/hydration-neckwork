@@ -6,7 +6,6 @@ import { paths } from '../router'
 import { AddrPill, AreaChart, AssetAmount, AssetChip, ChartSkeleton, Crumbs, Dash, F, rowNav } from '../components/ui'
 import { ChartLegend, ShareBar, StackedAreaChart, type ShareSegment } from '../components/HdxCharts'
 import { useAssetColors } from '../utils/iconColor'
-import { separateSeriesColors } from '../utils/seriesColors'
 import type { AssetRef } from '../types'
 
 // The Omnipool: Hydration's shared-liquidity pool where every listed asset
@@ -28,7 +27,11 @@ export function Omnipool() {
   // magnitude, so the share view is the readable default — the TVL chart below
   // carries the absolute scale; USD stays one click away.
   const [unit, setUnit] = useState<'share' | 'usd'>('share')
-  const colorFor = useAssetColors(data ? [...data.assets.map(r => r.asset), HUB_ASSET] : [])
+  // Register everything this page charts (history rows can hold delisted
+  // assets the current table no longer has; -1 is the synthetic "Other" band).
+  const colorFor = useAssetColors(data
+    ? [...data.assets.map(r => r.asset), ...data.history.composition.map(c => c.asset).filter(a => a.assetId !== -1), HUB_ASSET]
+    : [])
 
   const body = () => {
     if (!data) return null
@@ -55,14 +58,13 @@ export function Omnipool() {
     // id so their legend entries stay tellable apart.
     const symbolCounts = new Map<string, number>()
     for (const c of data.history.composition) symbolCounts.set(c.asset.symbol, (symbolCounts.get(c.asset.symbol) ?? 0) + 1)
-    // Two listings of one asset family sample to the same icon colour (the
-    // legend already tells them apart by id; the bands must too).
-    const compColors = separateSeriesColors(data.history.composition.map(c =>
-      c.asset.assetId === -1 ? OTHER_COLOR : colorFor(c.asset)))
-    const compSeries = data.history.composition.map((c, ci) => ({
+    // colorFor is the app-wide resolved colour (family lookalikes already
+    // separated centrally), so the bands match the Composition bar above and
+    // every other surface this asset is charted on.
+    const compSeries = data.history.composition.map(c => ({
       key: String(c.asset.assetId),
       label: (symbolCounts.get(c.asset.symbol) ?? 0) > 1 ? `${c.asset.symbol} #${c.asset.assetId}` : c.asset.symbol,
-      color: compColors[ci],
+      color: c.asset.assetId === -1 ? OTHER_COLOR : colorFor(c.asset),
       values: unit === 'share'
         ? c.usd.map((v, i) => (v == null || !(bucketTotals[i] > 0) ? null : (v / bucketTotals[i]) * 100))
         : c.usd,
