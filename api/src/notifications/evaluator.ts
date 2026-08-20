@@ -136,6 +136,26 @@ export function resolveWindow(cursor: number, head: number): { window: BlockWind
 
 export const inWindow = (blockHeight: number, w: BlockWindow): boolean => blockHeight > w.from && blockHeight <= w.to
 
+/**
+ * How far a FEED-BACKED lane may advance its cursor: only as far as its source
+ * has demonstrably reached.
+ *
+ * The cursor is anchored on the raw ingestion head, but the activity feed is
+ * keyed and built on its own head (`indexedRawHead` — all pipelines, a 1.5s
+ * cache, plus an SSE-published floor), and ClickHouse gives no ordering between
+ * the insert that moves `raw_ingestion_state` and the inserts that carry a
+ * block's rows. A window can therefore name blocks the page provably could not
+ * have contained, and because the cursor only moves forward, stepping over them
+ * loses them for good rather than late.
+ *
+ * Clamping holds those blocks back for the next window to re-read. It never
+ * regresses below `from`: the lane has already accounted for everything at or
+ * below its own cursor.
+ */
+export function windowCoveredTo(window: BlockWindow, sourceHead: number): number {
+  return Math.max(window.from, Math.min(window.to, sourceHead))
+}
+
 // Finality gate: the pending-head layer marks its rows `finalized: false` and
 // the transaction pool marks its projections `mempool: true`. Neither is a fact
 // yet, and a reorg would make a sent notification unretractable.
@@ -1109,8 +1129,10 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
     case 'account-activity': {
       const { matches, deferred } = await accountActivityMatches(rules, window, { left: SOURCE_FETCH_CAP })
       // A deferred group has not seen this window yet, so the cursor waits for
-      // it rather than stepping over its rows.
-      return { kind, matches, nextCursor: deferred ? cursor : window.to }
+      // it rather than stepping over its rows. Blocks the SOURCE has not revealed
+      // yet wait the same way (see windowCoveredTo).
+      const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
+      return { kind, matches, nextCursor: deferred ? cursor : covered }
     }
     case 'large-trade':
     case 'large-transfer': {
@@ -1121,7 +1143,8 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
       // trade kind has schedules to watch, and a deferred fetch must not let the
       // cursor step over them either.
       const dca = kind === 'large-trade' ? await dcaStartMatches(rules, window) : []
-      return { kind, matches: [...matches, ...dca], nextCursor: deferred ? cursor : window.to }
+      const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
+      return { kind, matches: [...matches, ...dca], nextCursor: deferred ? cursor : covered }
     }
     case 'referendum': return { kind, ...await referendumMatches(rules, window), nextCursor: window.to }
     case 'tc-motion': return { kind, matches: evaluateTcMotion(await queryWindowTcMotions(window), rules, window), nextCursor: window.to }
@@ -1597,6 +1620,24 @@ async function paraBlockMsForEvaluator(): Promise<number> {
   } catch { ms = NOMINAL_PARA_BLOCK_MS }
   blockMsCache = { ms, at: Date.now() }
   return ms
+}
+
+// The newest block whose ROWS are actually visible, as opposed to the newest the
+// ingestion state claims. Every block produces events and the activity views are
+// filled by the same insert that fills raw_events, so this is a completeness
+// watermark for every feed-backed lane — and unlike a source-specific max (the
+// newest block that happened to hold a swap) it advances on every block, so a
+// quiet stretch never strands the cursor behind the 600-block clamp.
+async function visibleSourceHead(): Promise<number | null> {
+  if (!client) return null
+  try {
+    const res = await client.query({
+      query: 'SELECT max(block_height) AS head FROM price_data.raw_events',
+      format: 'JSONEachRow',
+    })
+    const head = Number((await res.json<{ head: number | string | null }>())[0]?.head ?? 0)
+    return Number.isFinite(head) && head > 0 ? head : null
+  } catch { return null }
 }
 
 // DCA schedules created in the window, from the schedule-first projection (a few
