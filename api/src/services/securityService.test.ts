@@ -106,6 +106,27 @@ describe('decodePausedKey', () => {
   it('refuses a key too short to hold both names', () => {
     expect(decodePausedKey('0x' + '00'.repeat(32))).toBeNull()
   })
+
+  // SCALE compact is single-byte only for 0..63. Runtime 440 raises
+  // TransactionPause's MAX_STR_LENGTH from 40 to 64, so a name of exactly 64
+  // bytes becomes storable — and it prefixes as TWO bytes ((64 << 2) | 0b01),
+  // which a `b[off] >> 2` read misparses as length 0 and drops the whole row.
+  it('reads a name at the 64-byte bound, where compact goes two-byte', () => {
+    const compact = (n: number) => n < 64
+      ? [n << 2]
+      : [((n << 2) | 0b01) & 0xff, ((n << 2) | 0b01) >> 8]
+    const name = (s: string) => Buffer.from([...compact(s.length), ...Buffer.from(s, 'utf8')]).toString('hex')
+    const long = 'a'.repeat(64)
+    const key = '0x' + '00'.repeat(32) + '11'.repeat(8) + name('PolkadotXcm') + name(long)
+    expect(decodePausedKey(key)).toEqual({ pallet: 'PolkadotXcm', call: long })
+  })
+
+  it('still reads a name at 63 bytes, the last single-byte compact length', () => {
+    const name = (s: string) => (s.length * 4).toString(16).padStart(2, '0') + Buffer.from(s, 'utf8').toString('hex')
+    const edge = 'b'.repeat(63)
+    const key = '0x' + '00'.repeat(32) + '11'.repeat(8) + name('Router') + name(edge)
+    expect(decodePausedKey(key)).toEqual({ pallet: 'Router', call: edge })
+  })
 })
 
 describe('assetIdFromBlakeKey', () => {

@@ -234,8 +234,18 @@ export function decodePausedKey(storageKey: string): { pallet: string; call: str
   let off = 40
   const readName = (): string | null => {
     if (off >= b.length) return null
-    const len = b[off] >> 2 // names are far below 64 bytes, so the 1-byte compact form always applies
-    off += 1
+    // SCALE compact: the low two bits pick the width. Single-byte covers 0..63,
+    // two-byte 64..16383. TransactionPause's MAX_STR_LENGTH is 64 from runtime
+    // 440 (was 40), so a maximum-length name is exactly the two-byte case —
+    // reading it as one byte yields length 0 and silently drops the entry. The
+    // BoundedVec cannot reach the four-byte form, so those modes are refused.
+    const mode = b[off] & 0b11
+    let len: number
+    if (mode === 0b00) { len = b[off] >> 2; off += 1 }
+    else if (mode === 0b01) {
+      if (off + 1 >= b.length) return null
+      len = ((b[off] | (b[off + 1] << 8)) >>> 2); off += 2
+    } else return null
     if (off + len > b.length) return null
     const s = Buffer.from(b.slice(off, off + len)).toString('utf8')
     off += len
