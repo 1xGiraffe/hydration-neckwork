@@ -7299,7 +7299,7 @@ export interface ActivityRevenue {
   streams: { stream: string; usd: number }[]
 }
 
-const revenueKey = (blockHeight: number, extrinsicIndex: number | null): string =>
+export const revenueKey = (blockHeight: number, extrinsicIndex: number | null): string =>
   `${blockHeight}:${extrinsicIndex ?? 'b'}`
 
 /**
@@ -7367,18 +7367,38 @@ async function revenueBookedThroughBlock(): Promise<number> {
  * set, zeros included, so its presence means "this is what the action earned".
  * Above the watermark it is left absent, meaning "not booked yet" — never zero.
  */
-export async function applyActivityRevenue(rows: ActivityRow[]): Promise<void> {
-  if (!rows.length) return
-  const [map, bookedThrough] = await Promise.all([
-    revenueByExtrinsic(rows.map(r => ({ blockHeight: r.blockHeight, extrinsicIndex: r.extrinsicIndex }))),
-    revenueBookedThroughBlock(),
-  ])
+// Anything carrying a block + extrinsic and a slot to hold the answer: an activity
+// row, or a single trade/extrinsic detail.
+export interface RevenueBearing {
+  blockHeight: number
+  extrinsicIndex: number | null
+  revenue?: ActivityRevenue
+}
+
+// `revenue_events` is derived and trails the raw head, so "no row" is ambiguous —
+// earned nothing, or not booked yet. The watermark disambiguates: at or below it,
+// absence is a real zero; above it, the field stays absent so the UI shows a dash
+// rather than asserting $0.00.
+export function attachRevenue(
+  rows: readonly RevenueBearing[],
+  map: ReadonlyMap<string, ActivityRevenue>,
+  bookedThrough: number,
+): void {
   if (!bookedThrough) return
   for (const row of rows) {
     if (row.blockHeight > bookedThrough) continue
     row.revenue = map.get(revenueKey(row.blockHeight, row.extrinsicIndex))
       ?? { protocolUsd: 0, lpUsd: 0, streams: [] }
   }
+}
+
+export async function applyActivityRevenue(rows: readonly RevenueBearing[]): Promise<void> {
+  if (!rows.length) return
+  const [map, bookedThrough] = await Promise.all([
+    revenueByExtrinsic(rows.map(r => ({ blockHeight: r.blockHeight, extrinsicIndex: r.extrinsicIndex }))),
+    revenueBookedThroughBlock(),
+  ])
+  attachRevenue(rows, map, bookedThrough)
 }
 
 // ---- protocol revenue breakdown (the Protocol Revenue detail tab) ----
@@ -7734,6 +7754,7 @@ export interface TradeDetail {
   extrinsicFee: string | null
   route: TradeHop[]
   dca: boolean
+  revenue?: ActivityRevenue
 }
 
 function tradeHopFee(name: string, args: Record<string, unknown>, outId: number): TradeHop['fee'] {
@@ -7908,7 +7929,10 @@ export async function getTradeDetail(height: number, index: number, routeEvent?:
       route,
       dca: callName.startsWith('DCA.'),
     }
-    await applyHistoricalUsd([detail], d => ({ assetId: d.assetOut.assetId, decimals: d.assetOut.decimals, raw: d.amountOut, ts: d.timestamp }))
+    await Promise.all([
+      applyHistoricalUsd([detail], d => ({ assetId: d.assetOut.assetId, decimals: d.assetOut.decimals, raw: d.amountOut, ts: d.timestamp })),
+      applyActivityRevenue([detail]),
+    ])
     return detail
   })
 }
@@ -7983,7 +8007,10 @@ export async function getTradeDetailByEvent(height: number, eventIndex: number):
       dca: !!dca,
     }
     await attachHookSwapActors([detail])
-    await applyHistoricalUsd([detail], d => ({ assetId: d.assetOut.assetId, decimals: d.assetOut.decimals, raw: d.amountOut, ts: d.timestamp }))
+    await Promise.all([
+      applyHistoricalUsd([detail], d => ({ assetId: d.assetOut.assetId, decimals: d.assetOut.decimals, raw: d.amountOut, ts: d.timestamp })),
+      applyActivityRevenue([detail]),
+    ])
     return detail
   })
 }
@@ -12981,6 +13008,7 @@ export interface DcaExecutionDetail {
   executionPrice: number | null
   period: number
   failureReason: FailureReason | null
+  revenue?: ActivityRevenue
 }
 
 // A schedule's amount-per denomination follows its order type: a Sell order
@@ -13108,6 +13136,7 @@ export async function getDcaExecution(height: number, eventIndex: number): Promi
       : d.amountOut != null
         ? { assetId: aOut.assetId, decimals: aOut.decimals, raw: d.amountOut, ts: d.timestamp }
         : null)
+    await applyActivityRevenue([detail])
     return detail
   })
 }
@@ -13926,7 +13955,7 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
       if (!all.some(x => x.type === 'liquidity')) return true
       return !(r.type === 'trade' && ((r.assetIn && isShareAssetId(r.assetIn.assetId)) || (r.assetOut && isShareAssetId(r.assetOut.assetId))))
     }))
-    await Promise.all([applyHistoricalUsd(deduped, activityHistPick), applyXcmJourneys(deduped)])
+    await Promise.all([applyHistoricalUsd(deduped, activityHistPick), applyXcmJourneys(deduped), applyActivityRevenue(deduped)])
     return deduped
   })
 }
@@ -13965,7 +13994,7 @@ export async function getBlockActivity(height: number): Promise<ActivityRow[]> {
         if (ax !== bx) return ax - bx
         return (a.eventIndex ?? 0) - (b.eventIndex ?? 0)
       })
-    await Promise.all([applyHistoricalUsd(merged, activityHistPick), applyXcmJourneys(merged)])
+    await Promise.all([applyHistoricalUsd(merged, activityHistPick), applyXcmJourneys(merged), applyActivityRevenue(merged)])
     return merged
   })
 }

@@ -5,6 +5,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../router'
 import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ConvictionTag, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
 import { LIQ_LABELS, MM_LABELS } from '../components/activityColors'
+import { RevenueRow } from '../components/RevenueRow'
 import { Crumbs, F, AddrPill, AssetChip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge } from '../components/ui'
 import { convictionLabel, voteSideLabel, voteSubjectLabel } from '../utils/voteRows'
 
@@ -84,6 +85,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
                 so the description drops what that already says (see ActivityDesc). */}
             <div className="dt">Activity</div><div className="dd"><ActivityDesc r={row} headed /></div>
             <div className="dt">Value</div><div className="dd mono">{F.usd(row.valueUsd)}</div>
+            <RevenueRow revenue={row.revenue} />
             {row.who && <><div className="dt">Account</div><div className="dd"><AddrPill account={row.who} /></div></>}
             {row.type === 'transfer' && row.to && <><div className="dt">To</div><div className="dd"><AddrPill account={row.to} /></div></>}
             {row.type === 'xcm' && row.xcmDir === 'in' && row.fromTxUrl && <><div className="dt">Origin transaction</div><div className="dd"><a className="ext-link" href={row.fromTxUrl} target="_blank" rel="noopener">{explorerSiteName(row.fromTxUrl)} ↗</a></div></>}
