@@ -59,7 +59,7 @@ export function arbDirectionFromRaw(raw: number): 'in' | 'out' | null {
   return null
 }
 
-export interface RawHsmCollateralEvent { block: number; args: Record<string, unknown> }
+export interface RawHsmCollateralEvent { block: number; name: string; args: Record<string, unknown> }
 export interface FoldedHsmCollateral {
   assetId: number
   poolId: number | null
@@ -79,11 +79,19 @@ function optionValue(opt: unknown): string | null {
   return null
 }
 
-// Folds HSM.CollateralAdded + HSM.CollateralUpdated (ordered ascending by
+// Folds HSM.CollateralAdded + HSM.CollateralUpdated + HSM.CollateralRemoved
+// (ordered ascending by
 // block/event index) into each collateral's CURRENT parameters. CollateralUpdated
 // only carries the fields that were touched by that call (Option<T> per field —
 // an absent key means "unchanged"); maxInHolding is Option<Option<Balance>>, so
 // an explicit `{__kind:'None'}` clears a previously-set cap.
+//
+// CollateralRemoved deletes the entry outright: a delisted collateral is not a
+// collateral with different parameters, and the HSM will neither buy nor sell
+// it. Deleting (rather than flagging) is also what makes a later re-add start
+// from defaults instead of inheriting the retired parameters. The event name is
+// the only possible discriminator here — CollateralRemoved carries just
+// `assetId`, which is byte-identical to a no-op CollateralUpdated.
 //
 // buyBackFee is Permill (1e6 denom) and buybackRate is Perbill (1e9 denom).
 // Folding every update chronologically yields the current values even when an
@@ -96,6 +104,7 @@ export function foldHsmCollateralParams(events: RawHsmCollateralEvent[]): Map<nu
     const a = e.args
     const assetId = Number(a.assetId)
     if (!Number.isFinite(assetId)) continue
+    if (e.name === 'HSM.CollateralRemoved') { byAsset.delete(assetId); continue }
     const prev = byAsset.get(assetId)
     byAsset.set(assetId, {
       assetId,
@@ -268,13 +277,13 @@ async function loadHollarStablePools(): Promise<HollarStablePool[]> {
 
 async function loadHsmCollateralEvents(): Promise<RawHsmCollateralEvent[]> {
   const res = await client.query({
-    query: `SELECT block_height AS block, args_json
+    query: `SELECT block_height AS block, event_name AS name, args_json
             FROM price_data.hsm_activity FINAL
-            WHERE event_name IN ('HSM.CollateralAdded', 'HSM.CollateralUpdated')
+            WHERE event_name IN ('HSM.CollateralAdded', 'HSM.CollateralUpdated', 'HSM.CollateralRemoved')
             ORDER BY block_height ASC, event_index ASC`,
     format: 'JSONEachRow',
   })
-  return (await res.json<{ block: number; args_json: string }>()).map(r => ({ block: r.block, args: safeJsonObj(r.args_json) }))
+  return (await res.json<{ block: number; name: string; args_json: string }>()).map(r => ({ block: r.block, name: r.name, args: safeJsonObj(r.args_json) }))
 }
 
 // Reconstructed aToken balances win where present, because the event fold is
