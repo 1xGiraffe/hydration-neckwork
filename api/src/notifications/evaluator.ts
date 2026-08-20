@@ -713,7 +713,7 @@ export function renderMatch(match: RuleMatch, rule: NotificationRule, viewerTag:
       if (p.account) title.push(textPart('—'), accountPart(renderAccount(p.account, viewerTag)))
       return {
         title,
-        body: [[textPart(`Below the ${compactAmount(p.threshold)} you set. ${describeRule(rule.kind, rule.params, symbolOf)}.`)]],
+        body: [[textPart(`Below the ${compactAmount(p.threshold)} you set. ${describeRule(rule.kind, rule.params, symbolOf, t => resolveActivityTarget(rule.accountId, t))}.`)]],
         path: `/account/${encodeURIComponent(p.account?.address ?? p.address)}`,
       }
     }
@@ -1525,36 +1525,111 @@ async function priceMatches(): Promise<RuleMatch[]> {
 async function healthFactorMatches(): Promise<RuleMatch[]> {
   const rules = activeRulesByKind('health-factor')
   if (!rules.length) return []
+
+  // Each rule's watched addresses: its one address, or the target tag's current
+  // members (resolved live, so the membership follows the tag). A tag is capped:
+  // every member costs a health-factor read per tick, and a rule on a 1,000
+  // account tag would spend the whole tick budget on one subscriber. The cap
+  // takes the tag's own member order.
+  const MAX_TAG_MEMBERS = 50
+  const watched = new Map<string, string[]>()
+  for (const rule of rules) {
+    const p = rule.params as RuleParams['health-factor']
+    if (p.target.kind === 'address') { watched.set(rule.ruleId, [p.target.address]); continue }
+    const resolved = resolveActivityTarget(rule.accountId, p.target)
+    watched.set(rule.ruleId, (resolved?.members ?? []).slice(0, MAX_TAG_MEMBERS))
+  }
+
   // One lookup per ADDRESS: several rules on one position (a warning threshold
-  // and a panic threshold) are the common shape, and they read the same number.
+  // and a panic threshold), or one address in several watched tags, still read
+  // the same number once.
   const byAddress = new Map<string, number | null>()
-  for (const address of new Set(rules.map(r => (r.params as RuleParams['health-factor']).address))) {
+  for (const address of new Set([...watched.values()].flat())) {
     // Unreadable is NOT zero: an address with no primary-market position, or a
     // position whose health factor cannot be read, must never look like an
     // imminent liquidation.
     byAddress.set(address, await getPrimaryHealthFactor(address).catch(() => null))
   }
-  const inputs: ThresholdInput[] = rules.map(rule => {
+
+  // Arm state is PER (rule, member) — one member crossing must not disarm the
+  // rule for the others — but persisted as one row per rule (the same
+  // armStateKey the store deletes with the rule): an address rule keeps the
+  // legacy plain ArmState shape, a tag rule bundles `{ members: { addr: state } }`.
+  const MEMBER_KEY_SEP = '\n'
+  const prev = new Map<string, ArmState>()
+  for (const rule of rules) {
+    const raw = getNotificationState(armStateKey(rule.ruleId))
+    const single = parseArmState(raw)
+    const addresses = watched.get(rule.ruleId) ?? []
+    if (single && addresses.length === 1) { prev.set(`${rule.ruleId}${MEMBER_KEY_SEP}${addresses[0]}`, single); continue }
+    const bundled = parseMemberArmStates(raw)
+    if (bundled) for (const [addr, state] of bundled) prev.set(`${rule.ruleId}${MEMBER_KEY_SEP}${addr}`, state)
+  }
+
+  const inputs: ThresholdInput[] = rules.flatMap(rule => {
     const p = rule.params as RuleParams['health-factor']
-    return { ruleId: rule.ruleId, direction: 'below' as const, threshold: p.threshold, value: byAddress.get(p.address) ?? null }
+    return (watched.get(rule.ruleId) ?? []).map(address => ({
+      ruleId: `${rule.ruleId}${MEMBER_KEY_SEP}${address}`,
+      direction: 'below' as const, threshold: p.threshold,
+      value: byAddress.get(address) ?? null,
+    }))
   })
-  const { fired, next } = evaluateThreshold(inputs, loadArmStates(rules))
-  await persistArmStates(next)
+  const { fired, next } = evaluateThreshold(inputs, prev)
+
+  // Group the changed member states back into their rule's one row. The row is
+  // rewritten whole, so unchanged members must ride along or they would reset.
+  const changedRules = new Set([...next.keys()].map(key => key.split(MEMBER_KEY_SEP)[0]))
+  for (const ruleId of changedRules) {
+    const addresses = watched.get(ruleId) ?? []
+    const states = new Map<string, ArmState>()
+    for (const address of addresses) {
+      const key = `${ruleId}${MEMBER_KEY_SEP}${address}`
+      const state = next.get(key) ?? prev.get(key)
+      if (state) states.set(address, state)
+    }
+    const rule = rules.find(r => r.ruleId === ruleId)
+    const isSingleAddress = rule && (rule.params as RuleParams['health-factor']).target.kind === 'address'
+    const value = isSingleAddress && states.size === 1
+      ? JSON.stringify([...states.values()][0])
+      : JSON.stringify({ members: Object.fromEntries(states) })
+    await setNotificationState(armStateKey(ruleId), value)
+  }
+
   const byId = new Map(rules.map(r => [r.ruleId, r]))
   return fired.map(f => {
-    const rule = byId.get(f.ruleId)!
-    const p = rule.params as RuleParams['health-factor']
-    const norm = normalizeAddress(p.address)
+    const sep = f.ruleId.indexOf(MEMBER_KEY_SEP)
+    const ruleId = f.ruleId.slice(0, sep)
+    const address = f.ruleId.slice(sep + 1)
+    const rule = byId.get(ruleId)!
+    const norm = normalizeAddress(address)
     return {
-      ruleId: rule.ruleId, accountId: rule.accountId, kind: rule.kind,
-      identity: `below:${f.epoch}`, blockHeight: 0,
+      ruleId, accountId: rule.accountId, kind: rule.kind,
+      // The member is part of the identity: two members of one tag crossing in
+      // the same tick are two alerts, not one deduplicated away.
+      identity: `below:${address}:${f.epoch}`, blockHeight: 0,
       payload: {
-        lane: 'health-factor', address: p.address,
+        lane: 'health-factor', address,
         account: norm ? accountRef(norm.accountId) : null,
         threshold: f.threshold, value: f.value,
       } as MatchPayload,
     }
   })
+}
+
+// The bundled per-member arm-state row a tag-target health-factor rule keeps
+// (see healthFactorMatches). null for the legacy plain shape or garbage.
+export function parseMemberArmStates(raw: string | null): Map<string, ArmState> | null {
+  if (!raw) return null
+  try {
+    const o = JSON.parse(raw) as { members?: Record<string, unknown> }
+    if (!o?.members || typeof o.members !== 'object') return null
+    const out = new Map<string, ArmState>()
+    for (const [addr, value] of Object.entries(o.members)) {
+      const state = parseArmState(JSON.stringify(value))
+      if (state) out.set(addr, state)
+    }
+    return out
+  } catch { return null }
 }
 
 /* ============ dispatch ============ */

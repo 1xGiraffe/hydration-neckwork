@@ -256,11 +256,15 @@ function normalizeParams(kind: NotificationKind, params: Record<string, unknown>
         minUsd: Number.isFinite(minUsd) && minUsd > 0 ? minUsd : undefined,
       }
     }
-    case 'health-factor':
+    case 'health-factor': {
+      // Same target union (and the same legacy `{ address }` acceptance) as
+      // account-activity, so a stored rule and a fresh button compare equal.
+      const target = readTarget(p)
       return {
-        address: typeof p.address === 'string' ? normalizeAddress(p.address) : p.address,
+        target: target && target.kind === 'address' ? { kind: 'address', address: normalizeAddress(target.address) } : target,
         threshold: Number(p.threshold ?? HEALTH_FACTOR_DEFAULT),
       }
+    }
     case 'extrinsic':
       return {
         section: String(p.section ?? '').trim().toLowerCase(),
@@ -320,7 +324,7 @@ export function assetRuleCount<R extends { kind: NotificationKind; params: Recor
 
 // Whether a rule carries a tag target the rules table should draw as a pill.
 export function ruleTagTarget(rule: Pick<NotificationRule, 'kind' | 'params'>): NotificationTarget | null {
-  if (rule.kind !== 'account-activity') return null
+  if (rule.kind !== 'account-activity' && rule.kind !== 'health-factor') return null
   const target = readTarget(rule.params)
   return target && target.kind !== 'address' ? target : null
 }

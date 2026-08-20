@@ -516,8 +516,25 @@ describe('buildRuleParams — account-activity targets', () => {
   it('leaves the other kinds\' parameters exactly as they were', () => {
     expect(buildRuleParams('price', { assetId: '0', price: '0.03', direction: 'below' }, sets))
       .toEqual({ ok: true, params: { assetId: 0, direction: 'below', price: 0.03 } })
+  })
+
+  // Health factor takes the same target union as account-activity: the picker's
+  // pick wins, pasted-but-never-picked text still counts, and a tag watches
+  // every member's position.
+  it('builds a health-factor rule from the picker, the pasted text, or a tag', () => {
     expect(buildRuleParams('health-factor', { address: FOX_ADDRESS }, sets))
-      .toEqual({ ok: true, params: { address: FOX_ADDRESS, threshold: 1.1 } })
+      .toEqual({ ok: true, params: { target: { kind: 'address', address: FOX_ADDRESS }, threshold: 1.1 } })
+    expect(buildRuleParams('health-factor', { threshold: '1.6' }, { ...sets, target: { kind: 'tag', tagId: 'treasury' } }))
+      .toEqual({ ok: true, params: { target: { kind: 'tag', tagId: 'treasury' }, threshold: 1.6 } })
+    expect(buildRuleParams('health-factor', {}, sets).ok).toBe(false)
+  })
+
+  // A stored legacy `{ address }` health-factor rule and the fresh target form
+  // must compare as the same subscription.
+  it('treats the legacy health-factor address form as the same rule as its target form', () => {
+    expect(sameRuleParams('health-factor',
+      { address: FOX_ADDRESS, threshold: 1.1 },
+      { target: { kind: 'address', address: FOX_ADDRESS }, threshold: 1.1 })).toBe(true)
   })
 
   // The signer field is the account typeahead too, and picking a row EMPTIES the

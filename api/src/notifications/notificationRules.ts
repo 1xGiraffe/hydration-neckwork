@@ -140,10 +140,27 @@ export const priceParams = z.object({
   price: z.number().positive(),
 }).strict()
 
-export const healthFactorParams = z.object({
-  address,
+const healthFactorShape = z.object({
+  // Whose position(s): one address, or a tag whose members are all watched —
+  // the same target union as account-activity, resolved live per tick, so an
+  // account added to the tag later is watched from the next tick.
+  target: accountActivityTarget,
   threshold: z.number().min(0.5).max(10).default(1.1),
 }).strict()
+
+// The pre-target spelling — `{ address, threshold }` — is still accepted and
+// rewritten into the address target, exactly like account-activity above: rules
+// persisted before targets existed re-parse on every load and normalize in
+// place, and a client that still posts the old shape keeps working.
+export function normalizeHealthFactorParams(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+  const o = { ...(value as Record<string, unknown>) }
+  if (o.target === undefined && typeof o.address === 'string') o.target = { kind: 'address', address: o.address }
+  delete o.address
+  return o
+}
+
+export const healthFactorParams = z.preprocess(normalizeHealthFactorParams, healthFactorShape)
 
 // `track` accepts either form and stores the numeric id, so the matcher only
 // ever compares an id to the id the chain reported.
@@ -274,7 +291,10 @@ export function describeRule(
     }
     case 'health-factor': {
       const p = parsed.params as RuleParams['health-factor']
-      return `health factor below ${p.threshold} for ${shortAddr(p.address)}`
+      if (p.target.kind === 'address') return `health factor below ${p.threshold} for ${shortAddr(p.target.address)}`
+      const label = targetLabelOf?.(p.target) ?? null
+      if (p.target.kind === 'tag') return `health factor below ${p.threshold} in tag "${label?.name ?? 'a tag'}"`
+      return `health factor below ${p.threshold} in ${label ? `"${label.name}" (${label.listName ?? 'a list'})` : 'a list tag'}`
     }
     case 'referendum': {
       const p = parsed.params as RuleParams['referendum']
