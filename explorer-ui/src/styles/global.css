@@ -1193,6 +1193,10 @@ svg { display: block; }
 .dl .dt { padding: 14px 18px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); border-bottom: 1px solid var(--separator); display: flex; align-items: center; }
 .dl .dd { padding: 14px 18px; border-bottom: 1px solid var(--separator); font-size: 13px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .dl .dd.mono { font-family: 'GeistMono'; }
+/* The per-stream breakdown under a revenue figure. `.dd` is a wrapping flex row,
+   so the basis is what puts the breakdown on its own line under the total
+   instead of trailing it as another inline item. */
+.dl .dd .revenue-streams { flex-basis: 100%; font-size: 11px; }
 .dl .dt:nth-last-child(2), .dl .dd:last-child { border-bottom: 0; }
 @media (max-width: 720px){ .dl .dt { border-bottom: 0; padding-bottom: 2px; } }
 
