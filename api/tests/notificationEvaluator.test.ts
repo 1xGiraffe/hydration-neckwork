@@ -463,9 +463,9 @@ describe('renderMatch', () => {
 describe('renderDigest', () => {
   it('lists five matches by name and counts the rest', () => {
     const r = rule('large-trade', { minUsd: 1_000 }, { name: 'Whale watch' })
-    const rendered = Array.from({ length: 6 }, (_, i) =>
-      renderNotification({ title: `Swap ${i}`, path: '/activity' }))
-    const digest = renderDigest(r, rendered)
+    // Entries are render INPUTS: a digest keeps each bullet's own links.
+    const entries = Array.from({ length: 6 }, (_, i) => ({ title: `Swap ${i}`, path: '/activity' }))
+    const digest = renderDigest(r, entries)
     expect(digest.title).toBe('6 × Large trade')
     // The rule's own name is deliberately absent: the reader knows what they
     // subscribed to, and the entries say what happened.
@@ -478,7 +478,7 @@ describe('renderDigest', () => {
 
   it('lists the entries alone, with no rule description, and no empty remainder', () => {
     const digest = renderDigest(rule('large-trade', { minUsd: 5_000 }), [
-      renderNotification({ title: 'a', path: '/x' }), renderNotification({ title: 'b', path: '/x' }),
+      { title: 'a', path: '/x' }, { title: 'b', path: '/x' },
     ])
     expect(digest.body).not.toContain('trades over $5k')
     expect(digest.body).toBe('• a\n• b')

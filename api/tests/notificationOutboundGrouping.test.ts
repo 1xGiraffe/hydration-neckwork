@@ -56,18 +56,17 @@ describe('a digest line', () => {
   }
 
   it('carries the entry detail, not just its headline', () => {
-    const entry = renderNotification({
-      title: 'Swap', body: [[text('10k HDX → 1 DOT ·'), usd(105)]], path: '/a',
-    })
+    const entry = { title: 'Swap', body: [[text('10k HDX → 1 DOT ·'), usd(105)]], path: '/a' }
 
     const digest = renderDigest(rule, [entry])
 
     expect(digest.body).toContain('Swap')
-    expect(digest.body).toContain(entry.body.split('\n')[0])
+    // The entry's own detail line survives into the bullet.
+    expect(digest.body).toContain(renderNotification(entry).body.split('\n')[0])
   })
 
   it('still renders an entry that has no detail line', () => {
-    const entry = renderNotification({ title: 'Swap 0', path: '/a' })
+    const entry = { title: 'Swap 0', path: '/a' }
 
     const digest = renderDigest(rule, [entry])
 

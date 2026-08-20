@@ -26,7 +26,7 @@ import {
 import { resolveActivityTarget } from './ruleTargets.ts'
 import {
   account as accountPart, amount as amountPart, code as codePart, compactAmount, compactUsd,
-  renderNotification, shortHash, text as textPart, usd as usdPart,
+  renderList, renderNotification, shortHash, text as textPart, usd as usdPart,
   type RenderAccount, type RenderInput, type RenderPart, type RenderedNotification,
 } from './render.ts'
 
@@ -893,24 +893,17 @@ export function outboundGroups<T extends { blockHeight: number }>(matches: reado
 // digest stands for, which is not `rendered.length`: only the few matches the
 // message lists by name are ever rendered, so a rule that matched thousands of
 // rows costs five renders.
-export function renderDigest(rule: NotificationRule, rendered: readonly RenderedNotification[], total = rendered.length): RenderedNotification {
-  // A tag target is named from the rule OWNER's point of view — the same
-  // resolution the rules list shows them, so a digest cannot describe a rule
-  // differently from the page that created it.
-  // Each entry keeps its own detail line (amounts, direction, USD, counterparty) —
-  // listing headlines alone threw away everything the single-match message says.
-  // An entry with no body still reads as a bare headline.
-  const listed = rendered.slice(0, COALESCE_LIST).map(r => {
-    const detail = r.body.split('\n')[0]?.trim()
-    return detail ? `${r.title} — ${detail}` : r.title
-  })
-  const more = total - listed.length
-  return renderNotification({
+export function renderDigest(rule: NotificationRule, entries: readonly RenderInput[], total = entries.length): RenderedNotification {
+  // Entries arrive as INPUTS, not rendered text: renderList needs their parts and
+  // their own paths to keep each bullet's links (the entry's page, and any account
+  // in it). Only the few a digest lists are ever built, so a rule that matched
+  // thousands of rows still costs five renders.
+  const listed = entries.slice(0, COALESCE_LIST)
+  return renderList({
     title: [textPart(`${total} × ${KIND_LABELS[rule.kind]}`)],
-    // No rule label: the reader knows what they subscribed to, and the entries
-    // say what happened.
-    body: [...listed.map(t => `• ${t}`), ...(more > 0 ? [`and ${more} more`] : [])],
     path: '/notifications',
+    entries: listed,
+    more: total - listed.length,
   })
 }
 
@@ -1973,7 +1966,8 @@ async function dispatch(matches: RuleMatch[]): Promise<boolean> {
       // inbox stays a readable ledger and the write stays bounded.
       const detailed = list.slice(0, INBOX_ROWS_PER_RULE)
       const overflow = list.slice(INBOX_ROWS_PER_RULE)
-      const render = (match: RuleMatch) => renderNotification(renderMatch(match, rule, viewerTag))
+      const inputFor = (match: RuleMatch) => renderMatch(match, rule, viewerTag)
+      const render = (match: RuleMatch) => renderNotification(inputFor(match))
       const rendered = detailed.map(render)
       for (const [i, match] of detailed.entries()) {
         notifications.push({
@@ -1990,7 +1984,7 @@ async function dispatch(matches: RuleMatch[]): Promise<boolean> {
         notifications.push({
           notificationId: notificationIdFor(ruleId, identity),
           accountId: rule.accountId, ruleId, kind: rule.kind,
-          rendered: renderDigest(rule, overflow.slice(0, COALESCE_LIST).map(render), overflow.length),
+          rendered: renderDigest(rule, overflow.slice(0, COALESCE_LIST).map(inputFor), overflow.length),
           blockHeight: overflow[overflow.length - 1].blockHeight,
         })
       }
@@ -2011,8 +2005,10 @@ async function dispatch(matches: RuleMatch[]): Promise<boolean> {
       const renderedFor = new Map(detailed.map((match, i) => [match, rendered[i]] as const))
       for (const group of outboundGroups(list, MAX_OUTBOUND_SENDS)) {
         if (group.length > 1) counters.coalesced++
-        const shown = group.slice(0, COALESCE_LIST).map(match => renderedFor.get(match) ?? render(match))
-        const message = group.length === 1 ? shown[0] : renderDigest(rule, shown, group.length)
+        const shown = group.slice(0, COALESCE_LIST)
+        const message = group.length === 1
+          ? (renderedFor.get(shown[0]) ?? render(shown[0]))
+          : renderDigest(rule, shown.map(inputFor), group.length)
         sends.push({
           ruleId, accountId: rule.accountId, message, channels,
           tag: `${ruleId}:${group[group.length - 1].blockHeight}`,
