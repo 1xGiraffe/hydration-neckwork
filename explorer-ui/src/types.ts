@@ -1715,3 +1715,20 @@ export interface SecurityDashboard {
     outstandingWhitelisted: { callHash: string; blockHeight: number; blockTimestamp: string }[]
   }
 }
+
+// ---- protocol revenue breakdown (the Protocol Revenue detail tab) ----
+
+export interface RevenueBreakdownAsset { asset: AssetRef; usd: number }
+export interface RevenueBreakdownStream {
+  stream: string
+  usd: number
+  assets: RevenueBreakdownAsset[]
+  // The folded tail past the top assets, so a stream row still adds up
+  // without hundreds of dust lines.
+  otherUsd: number
+  otherCount: number
+}
+export interface RevenueBreakdown {
+  totalUsd: number
+  streams: RevenueBreakdownStream[]
+}

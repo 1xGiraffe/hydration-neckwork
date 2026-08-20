@@ -9,6 +9,7 @@ import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
+import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
 import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, MoneyMarketPositions, ActiveDcaTable, LiquidityPositionsTable } from '../components/AccountSections'
 import { BalancesTreemap } from '../components/BalancesTreemap'
 import { NotifyButton } from '../components/NotifyButton'
@@ -128,7 +129,7 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
           const supplementalDebts = mmList
             .filter(p => p !== primaryMarket && Number(p.totalDebtBase) > 0)
             .map(p => ({ key: p.marketKey, label: p.market, usd: Number(p.totalDebtBase) / 1e8 }))
-          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined, undefined, activityCounts.data?.extrinsics, activityCounts.data?.events)
+          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined, undefined, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
@@ -208,6 +209,8 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
               {activeView === 'events' && <ScopedActivity scope={{ kind: 'tag', tagId }} tab="events" />}
 
               {activeView === 'votes' && <VotesTab scope={{ kind: 'tag', tagId }} />}
+
+              {activeView === 'revenue' && <RevenueBreakdownTab scope={{ kind: 'tag', tagId }} />}
             </>
           )
         })()}
