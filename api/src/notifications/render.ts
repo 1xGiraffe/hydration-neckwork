@@ -139,12 +139,18 @@ export function accountNotation(account: RenderAccount): AccountNotation {
   return { emoji, label: null, short }
 }
 
-// Plain-text form: a named account shows its label with the short address in
-// parentheses (the pill's title attribute, flattened); a bare one is just the
-// emoji and the short address, never the address twice.
+// The three characters the UI highlights at the end of an address. A NAMED
+// account already says which account it is, so repeating a truncated address
+// beside the name is noise — the tail is there to disambiguate two accounts
+// sharing a name, not to be read as an address.
+export const addressTail = (addr: string): string => addr.slice(-3)
+
+// Plain-text form: a named account shows its label with the address tail in
+// parentheses; a bare one has nothing else to identify it and keeps the short
+// address in full.
 export function accountText(account: RenderAccount): string {
   const n = accountNotation(account)
-  return n.label ? `${n.emoji} ${n.label} (${n.short})` : `${n.emoji} ${n.short}`
+  return n.label ? `${n.emoji} ${n.label} (${addressTail(account.address)})` : `${n.emoji} ${n.short}`
 }
 
 /* ============ Telegram HTML ============ */
@@ -161,7 +167,13 @@ export function escapeHtml(text: string): string {
 function accountHtml(account: RenderAccount): string {
   const n = accountNotation(account)
   const href = escapeHtml(explorerUrl(`/account/${encodeURIComponent(account.address)}`))
-  const link = `<a href="${href}"><code>${escapeHtml(n.short)}</code></a>`
+  // The linked run is whatever the text form shows: the tail for a named
+  // account, the whole short address for a bare one.
+  const shown = n.label ? addressTail(account.address) : n.short
+  // A plain link, NOT <code>: Telegram renders a code span as a tap-to-COPY
+  // entity, which wins over the anchor wrapping it — so the address tail copied
+  // instead of opening the account. Monospace is not worth losing the link.
+  const link = `<a href="${href}">${escapeHtml(shown)}</a>`
   const emoji = escapeHtml(n.emoji)
   return n.label ? `${emoji} <b>${escapeHtml(n.label)}</b> (${link})` : `${emoji} ${link}`
 }
@@ -230,10 +242,25 @@ const joinHtml = (line: string | RenderPart[]) => lineParts(line).map(partHtml).
 // the headline IS the way into the explorer, so the message needs no separate
 // "open" line. An account keeps its own notation (which already bolds its
 // label and links its address) rather than being wrapped a second time.
-const titleHtml = (line: string | RenderPart[], url: string) =>
-  lineParts(line)
-    .map(p => (p.kind === 'text' ? `<a href="${escapeHtml(url)}"><b>${escapeHtml(p.text)}</b></a>` : partHtml(p)))
-    .join(' ').trim()
+const titleHtml = (line: string | RenderPart[], url: string) => {
+  // The headline is ONE way into the explorer, so CONSECUTIVE text runs share a
+  // single anchor. Wrapping each run separately produced an anchor per run — and
+  // a link around punctuation like the bare em-dash in "Health factor 1.06 —
+  // <account>". A non-text part (an account) ends the run: it links elsewhere.
+  const out: string[] = []
+  let run: string[] = []
+  const flush = () => {
+    if (!run.length) return
+    out.push(`<a href="${escapeHtml(url)}"><b>${escapeHtml(run.join(' '))}</b></a>`)
+    run = []
+  }
+  for (const part of lineParts(line)) {
+    if (part.kind === 'text') run.push(part.text)
+    else { flush(); out.push(partHtml(part)) }
+  }
+  flush()
+  return out.join(' ').trim()
+}
 
 export function renderNotification(input: RenderInput): RenderedNotification {
   const title = joinText(input.title)

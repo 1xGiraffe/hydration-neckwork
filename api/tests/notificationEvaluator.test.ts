@@ -424,7 +424,7 @@ describe('renderMatch', () => {
     })
     const out = renderNotification(renderMatch(match({ lane: 'activity', row }, 'large-transfer'), r, noViewerTag))
     expect(out.title).toBe('Transfer by 🐋 15Da…BDRLZ')
-    expect(out.body).toContain('4.87M HDX to ⚙️ py/trsry (7L53…WM3C1) · $106k')
+    expect(out.body).toContain('4.87M HDX to ⚙️ py/trsry (3C1) · $106k')
     expect(out.url).toMatch(/\/transfer\/1050-e7$/)
     expect(out.telegramHtml).toContain('<b>py/trsry</b>')
   })
@@ -467,18 +467,21 @@ describe('renderDigest', () => {
       renderNotification({ title: `Swap ${i}`, path: '/activity' }))
     const digest = renderDigest(r, rendered)
     expect(digest.title).toBe('6 × Large trade')
-    expect(digest.body).toContain('Whale watch')
+    // The rule's own name is deliberately absent: the reader knows what they
+    // subscribed to, and the entries say what happened.
+    expect(digest.body).not.toContain('Whale watch')
     expect(digest.body).toContain('• Swap 0')
     expect(digest.body).toContain('• Swap 4')
     expect(digest.body).not.toContain('• Swap 5')
     expect(digest.body).toContain('and 1 more')
   })
 
-  it('falls back to the rule description when the alert is unnamed', () => {
+  it('lists the entries alone, with no rule description, and no empty remainder', () => {
     const digest = renderDigest(rule('large-trade', { minUsd: 5_000 }), [
       renderNotification({ title: 'a', path: '/x' }), renderNotification({ title: 'b', path: '/x' }),
     ])
-    expect(digest.body).toContain('trades over $5k')
+    expect(digest.body).not.toContain('trades over $5k')
+    expect(digest.body).toBe('• a\n• b')
     expect(digest.body).not.toContain('and 0 more')
   })
 })
