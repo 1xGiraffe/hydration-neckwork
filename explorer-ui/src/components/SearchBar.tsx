@@ -4,7 +4,7 @@ import { api } from '../api/explorer'
 import { navigate, paths } from '../router'
 import type { SearchResult } from '../types'
 import { searchUserTags, useTagMapVersion } from '../userTags'
-import { AccountEmoji, AssetIcon, ShortAddr, TagIcon, noAutofill } from './ui'
+import { AccountEmoji, AssetIcon, F, ShortAddr, TagIcon, noAutofill } from './ui'
 
 // A viewer's own list tag, resolved client-side (see userTags.searchUserTags)
 // rather than through the shared, anonymous /explorer/search — that endpoint is
@@ -32,6 +32,7 @@ export function routeFor(r: Hit): string {
     // Pallet is part of the referendum's identity (Democracy and OpenGov both
     // index from 0), so both fields are needed to build its route.
     case 'referendum': return r.pallet && r.index != null ? paths.referendum(r.pallet, r.index) : paths.dashboard()
+    case 'pool': return r.value === 'omnipool' ? paths.omnipool() : paths.pool(Number(r.value))
     default: return paths.dashboard()
   }
 }
@@ -42,7 +43,7 @@ export function hitKey(r: Hit): string {
   return r.type === 'user-tag' ? `user-tag:${r.listId}:${r.tagId}` : `${r.type}:${r.value}`
 }
 export const TYPE_LABEL: Record<Hit['type'], string> = {
-  block: 'Block', extrinsic: 'Extrinsic', address: 'Account', asset: 'Asset', tag: 'Tag', 'user-tag': 'Tag', referendum: 'Referendum',
+  block: 'Block', extrinsic: 'Extrinsic', address: 'Account', asset: 'Asset', tag: 'Tag', 'user-tag': 'Tag', referendum: 'Referendum', pool: 'Pool',
 }
 
 // Account results use the same avatar and shortened-address treatment as account
@@ -89,6 +90,18 @@ export function SearchResultBody({ r }: { r: Hit }) {
       <span className="sr-acct">
         <TagIcon icon={r.icon ?? ''} title={r.label || r.value} />
         <span className="sr-acct-name"><span className="mono">{r.label || r.value}</span></span>
+      </span>
+    )
+  }
+  if (r.type === 'pool') {
+    const venue = r.poolKind === 'omnipool' ? 'Omnipool' : r.poolKind === 'stableswap' ? 'Stableswap' : 'Isolated pool'
+    return (
+      <span className="sr-acct">
+        {r.asset && <AssetIcon assetId={r.asset.assetId} iconAssetId={r.asset.iconAssetId} symbol={r.asset.symbol} size={20} parachainId={r.asset.parachainId} origin={r.asset.origin} />}
+        <span className="sr-acct-name">
+          <span className="mono">{r.label || r.value}</span>
+          <span className="sr-desc">{venue}{r.tvlUsd != null ? ` · ${F.usd(r.tvlUsd)} TVL` : ''}</span>
+        </span>
       </span>
     )
   }

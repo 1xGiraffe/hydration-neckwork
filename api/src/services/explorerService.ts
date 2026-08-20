@@ -21995,7 +21995,7 @@ export async function getDailyAccounts(): Promise<{ date: string; active: number
 
 // search
 export interface SearchResult {
-  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum'
+  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool'
   value: string
   label?: string
   desc?: string   // asset-type: the descriptive name (e.g. DOT → "Polkadot")
@@ -22015,6 +22015,12 @@ export interface SearchResult {
   // build its route (`/referendum/:pallet/:index`). `status` is the lifecycle word
   // (e.g. "deciding", "approved") so the dropdown needs no follow-up fetch.
   pallet?: ReferendumPallet
+  // Pool-type enrichment: the venue and current TVL, so the dropdown can rank
+  // and caption the hit without a follow-up fetch. `value` is the pool id
+  // ('omnipool' for the Omnipool itself), `asset` the icon to draw — the share
+  // token for a stableswap, the largest leg for an XYK pair.
+  poolKind?: 'omnipool' | 'stableswap' | 'xyk'
+  tvlUsd?: number | null
   index?: number
   status?: string
 }
@@ -22259,6 +22265,9 @@ const MAX_CONTRACT_NAME_RESULTS = 5
 
 // Cap on referendum results (index or title match) in one search response.
 const MAX_REFERENDUM_RESULTS = 8
+// Pool-name hits are ranked by TVL, so five covers every pool a reader can
+// plausibly mean while a broad substring ('pool') stays scannable.
+const MAX_POOL_RESULTS = 5
 // Bounded snapshot of the whole referendum directory (Democracy 0-206, OpenGov
 // 0-369 as of writing — governance moves far slower than blocks or accounts, so
 // this ceiling comfortably covers the foreseeable count). getReferenda caches this
@@ -22277,6 +22286,31 @@ function referendumSearchResult(r: ReferendumListRow): SearchResult {
 // matcher below: without it, tag results came back in directory/insertion
 // order, so an exact "Treasury" tag sat under "Moonbeam Treasury" and
 // "Polkadot Treasury" merely because they were inserted first.
+// The pool directory as a search source. Fail-soft: pool hits are additive, so
+// a pools-index failure (or, in unit tests, an unwired poolService client) must
+// cost the pool entries alone, never the whole search response.
+async function poolDirectoryForSearch(): Promise<import('./poolService.ts').PoolListEntry[]> {
+  try {
+    const { getPoolsIndex } = await import('./poolService.ts')
+    return (await getPoolsIndex()).pools
+  } catch {
+    return []
+  }
+}
+
+function poolSearchResult(p: import('./poolService.ts').PoolListEntry): SearchResult {
+  return {
+    type: 'pool',
+    value: p.kind === 'omnipool' ? 'omnipool' : String(p.poolId),
+    label: p.name,
+    poolKind: p.kind,
+    tvlUsd: p.tvlUsd,
+    // A stableswap's identity is its share token; an XYK pair shows its largest
+    // leg. The Omnipool hit deliberately carries no asset — no single icon is it.
+    asset: p.kind === 'stableswap' && p.poolId != null ? assetDescriptor(p.poolId) : p.kind === 'xyk' ? p.composition[0]?.asset : undefined,
+  }
+}
+
 function nameMatchRank(name: string, ql: string): number {
   const t = name.toLowerCase()
   if (t === ql) return 0
@@ -22312,6 +22346,10 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
       ...directory.filter(r => String(r.index) !== query && String(r.index).startsWith(query)),
     ].slice(0, MAX_REFERENDUM_RESULTS)
     for (const r of refHits) results.push(referendumSearchResult(r))
+
+    // Pool id — the share/LP asset id the pool pages route by (e.g. 690).
+    const poolHit = (await poolDirectoryForSearch()).find(p => p.poolId === h)
+    if (poolHit) results.push(poolSearchResult(poolHit))
   }
 
   // extrinsic id "height-index"
@@ -22432,6 +22470,19 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
       .sort((x, y) => x.rank - y.rank || x.a.symbol.length - y.a.symbol.length)
       .slice(0, 6)
     for (const { a } of ranked) results.push({ type: 'asset', value: String(a.assetId), label: a.symbol, desc: a.name ?? undefined, asset: a })
+  }
+
+  // Pool name — the /liquidity directory ('Omnipool', '2-Pool-GDOT',
+  // 'DOT / MYTH', …). Matching hits are ordered by TVL, not match tier: a
+  // reader typing a fragment shared by several pools ('pool', 'DOT') means the
+  // big one far more often than the best string match.
+  if (/[A-Za-z]/.test(query)) {
+    const ql = query.toLowerCase()
+    const poolHits = (await poolDirectoryForSearch())
+      .filter(p => nameMatchRank(p.name, ql) >= 0)
+      .sort((a, b) => (b.tvlUsd ?? -1) - (a.tvlUsd ?? -1))
+      .slice(0, MAX_POOL_RESULTS)
+    for (const p of poolHits) results.push(poolSearchResult(p))
   }
 
   // Identity name — case-insensitive substring on Identity.IdentityOf display
