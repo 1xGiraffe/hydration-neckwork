@@ -9,6 +9,7 @@ import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts
 import { weightedFromLabels } from './convictionWeight.ts'
 import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
+import { PROTOCOL_REVENUE_PREDICATE_SQL } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, INCENTIVES_REWARD_POT } from './tagService.ts'
 import { identityForAccount, searchIdentitiesByDisplay, type AccountIdentity } from './identityService.ts'
 import { normalizeAddress, hydrationAddress, polkadotAddress, reservedH160AccountId, type NormalizedAddress } from './addressIdentity.ts'
@@ -7271,6 +7272,125 @@ async function revenueByAccount(accounts: string[]): Promise<Map<string, number>
   })
   return positiveAccountVolumes(await res.json<{ account_id: string; volume_usd: number }>())
 }
+
+// ---- protocol revenue breakdown (the Protocol Revenue detail tab) ----
+
+export interface RevenueBreakdownAsset { asset: AssetRef; usd: number }
+export interface RevenueBreakdownStream {
+  stream: string
+  usd: number
+  assets: RevenueBreakdownAsset[]
+  // The folded tail past the top assets, so a long-tail trader's stream row
+  // still adds up without shipping hundreds of dust lines.
+  otherUsd: number
+  otherCount: number
+}
+export interface RevenueBreakdown {
+  totalUsd: number
+  streams: RevenueBreakdownStream[]
+}
+
+const REVENUE_BREAKDOWN_ASSETS_SHOWN = 12
+
+// Fold the two sources into the response shape. STREAM TOTALS come from
+// account_revenue — the exact rows the header's "Protocol revenue" stat sums,
+// so the tab's total can never disagree with it. ASSET sub-rows come from the
+// per-event grain, which only the eventful streams have: the borrow streams
+// (hollar_borrow, asset_reserve) are attributed to borrowers pro-rata by the
+// revenue job and carry no per-account events, so hollar_borrow shows its one
+// asset by definition and asset_reserve stays a single line. Streams sorted by
+// revenue, assets sorted by revenue with the tail aggregated.
+// Exported for tests; the SQL below feeds it.
+export function foldRevenueBreakdown(
+  totals: { stream: string; usd: number }[],
+  rows: { stream: string; asset_id: number; usd: number }[],
+): RevenueBreakdown {
+  const byStream = new Map<string, { stream: string; asset_id: number; usd: number }[]>()
+  for (const row of rows) {
+    if (!(row.usd > 0)) continue
+    const list = byStream.get(row.stream)
+    if (list) list.push(row)
+    else byStream.set(row.stream, [row])
+  }
+  const streams: RevenueBreakdownStream[] = []
+  for (const total of totals) {
+    if (!(total.usd > 0)) continue
+    const list = byStream.get(total.stream) ?? (total.stream === 'hollar_borrow'
+      ? [{ stream: total.stream, asset_id: HOLLAR_ASSET_ID, usd: total.usd }]
+      : [])
+    list.sort((a, b) => b.usd - a.usd)
+    const shown = list.slice(0, REVENUE_BREAKDOWN_ASSETS_SHOWN)
+    const tail = list.slice(REVENUE_BREAKDOWN_ASSETS_SHOWN)
+    streams.push({
+      stream: total.stream,
+      usd: total.usd,
+      assets: shown.map(r => ({ asset: assetDescriptor(r.asset_id), usd: r.usd })),
+      otherUsd: tail.reduce((s, r) => s + r.usd, 0),
+      otherCount: tail.length,
+    })
+  }
+  streams.sort((a, b) => b.usd - a.usd)
+  return { totalUsd: streams.reduce((s, st) => s + st.usd, 0), streams }
+}
+
+// Where the protocol revenue this account (or group) generated came from:
+// per stream, and inside each stream per asset (see foldRevenueBreakdown for
+// the two sources and why). Same up-to-~2h derived-table freshness as the
+// header stat. ~0.34s cold on the heaviest account (1.5M revenue rows), held
+// for five minutes.
+async function scopedRevenueBreakdown(accounts: string[], cacheKey: string): Promise<RevenueBreakdown> {
+  const safe = [...new Set(accounts.map(a => a.toLowerCase()).filter(a => ACCOUNT_RE.test(a)))]
+  if (!safe.length) return { totalUsd: 0, streams: [] }
+  return cached(`explorer:${cacheKey}`, 5 * 60_000, async () => {
+    const list = sqlAccountList(safe)
+    const [totalsRes, rowsRes] = await Promise.all([
+      client.query({
+        query: `
+          SELECT stream, toFloat64(sum(revenue_usd)) AS usd
+          FROM price_data.account_revenue
+          WHERE account IN (${list})
+          GROUP BY stream`,
+        format: 'JSONEachRow',
+      }),
+      client.query({
+        query: `
+          SELECT stream, asset_id, toFloat64(sum(amount_usd)) AS usd
+          FROM price_data.revenue_events FINAL
+          WHERE account IN (${list}) AND ${PROTOCOL_REVENUE_PREDICATE_SQL}
+          GROUP BY stream, asset_id
+          HAVING usd > 0`,
+        format: 'JSONEachRow',
+      }),
+    ])
+    const totals = await totalsRes.json<{ stream: string; usd: number }>()
+    const rows = await rowsRes.json<{ stream: string; asset_id: number; usd: number }>()
+    return foldRevenueBreakdown(totals, rows)
+  })
+}
+
+export async function getAddressRevenueBreakdown(addressInput: string): Promise<RevenueBreakdown | null> {
+  const resolved = await resolveRelatedAccounts(addressInput)
+  if (!resolved) return null
+  // Same account set as the header stat (revenueByAccount via getAddress):
+  // the related substrate accounts plus each one's truncated-H160 alias.
+  const accounts = [...resolved.related, ...[...resolved.related].map(evmAccountForm).filter((a): a is string => a != null)]
+  return scopedRevenueBreakdown(accounts, `account-revbd:${resolved.norm.accountId}`)
+}
+
+export async function getTagRevenueBreakdown(tagId: string): Promise<RevenueBreakdown | null> {
+  const members = tagMembers(tagId)
+  if (!members) return null
+  const accounts = [...members, ...members.map(evmAccountForm).filter((a): a is string => a != null)]
+  return scopedRevenueBreakdown(accounts, `tag-revbd:${tagId}`)
+}
+
+export async function getListTagRevenueBreakdown(listId: string, tagId: string, members: string[]): Promise<RevenueBreakdown> {
+  const valid = listTagMembers(members)
+  if (!valid.length) return { totalUsd: 0, streams: [] }
+  const accounts = [...valid, ...valid.map(evmAccountForm).filter((a): a is string => a != null)]
+  return scopedRevenueBreakdown(accounts, `list-tag-revbd:${listTagScope(listId, tagId, valid)}`)
+}
+
 // One trade per extrinsic (or per event for pallet-internal swaps), summarizing
 // all hops/legs. A routed swap emits Router.Executed (net in→out) plus per-hop
 // AMM events and many transfer legs (pool/fee/referral) — we keep just the net

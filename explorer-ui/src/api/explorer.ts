@@ -180,6 +180,9 @@ export const api = {
   // Governance votes cast by the account (OpenGov + Democracy + collectives).
   accountVotes: (address: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<VoteRow[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/votes`, { offset, limit, from, to }), signal),
+  // Where the protocol revenue this account generated came from (stream × asset).
+  accountRevenueBreakdown: (address: string, signal?: AbortSignal) =>
+    getJson<RevenueBreakdown>(`/explorer/address/${encodeURIComponent(address)}/revenue-breakdown`, signal),
   accountActivityCounts: (address: string, signal?: AbortSignal) => getJson<TabCounts>(`/explorer/address/${encodeURIComponent(address)}/counts`, signal),
   // How many rows one list holds under exactly the filters it is showing. `total` is
   // exact for the rows it covers; `complete: false` = the list runs deeper than the
@@ -207,6 +210,8 @@ export const api = {
     getJson<EventRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/events`, { offset, limit, from, to, ...filters }), signal),
   tagVotes: (tagId: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<VoteRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/votes`, { offset, limit, from, to }), signal),
+  tagRevenueBreakdown: (tagId: string, signal?: AbortSignal) =>
+    getJson<RevenueBreakdown>(`/explorer/tag/${encodeURIComponent(tagId)}/revenue-breakdown`, signal),
   // Grouped mode of the votes tab: one row per referendum, members combined.
   tagVotesByReferendum: (tagId: string, offset = 0, limit = 25, signal?: AbortSignal) =>
     getJson<VotesByReferendumPage>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/votes-by-referendum`, { offset, limit }), signal),
@@ -330,6 +335,8 @@ export const userApi = {
     authedJson<ExtrinsicSummary[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/extrinsics`, { offset, limit, from, to, ...filters }), undefined, signal),
   listTagEvents: (listId: string, tagId: string, offset = 0, limit = 25, from?: string, to?: string, filters?: EventFilters, signal?: AbortSignal) =>
     authedJson<EventRow[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/events`, { offset, limit, from, to, ...filters }), undefined, signal),
+  listTagRevenueBreakdown: (listId: string, tagId: string, signal?: AbortSignal) =>
+    authedJson<RevenueBreakdown>('GET', `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/revenue-breakdown`, undefined, signal),
   listTagVotes: (listId: string, tagId: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
     authedJson<VoteRow[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/votes`, { offset, limit, from, to }), undefined, signal),
   listTagVotesByReferendum: (listId: string, tagId: string, offset = 0, limit = 25, signal?: AbortSignal) =>

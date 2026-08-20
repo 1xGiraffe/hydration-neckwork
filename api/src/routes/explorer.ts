@@ -13,6 +13,7 @@ import {
   getAddressValueEvents, getTagValueEvents,
   getTagActivity, getTagExtrinsics, getTagEvents,
   getAddressVotes, getTagVotes, getTagVotesByReferendum,
+  getAddressRevenueBreakdown, getTagRevenueBreakdown,
   isLocatedActivityRequest,
   normalizeAccountSort,
   type AccountSort,
@@ -617,6 +618,16 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return rows
   })
 
+  // The Protocol Revenue tab: where the revenue this tag's members generated
+  // came from — per stream, per asset within the stream.
+  fastify.get('/explorer/tag/:tagId/revenue-breakdown', async (req, reply) => {
+    const params = tagParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
+    const breakdown = await getTagRevenueBreakdown(params.data.tagId)
+    if (!breakdown) return reply.status(404).send({ error: 'Tag not found' })
+    return breakdown
+  })
+
   // The Votes tab's grouped mode: one row per referendum the tag's members
   // voted on, members' latest votes combined.
   fastify.get('/explorer/tag/:tagId/votes-by-referendum', async (req, reply) => {
@@ -700,6 +711,16 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const rows = await getAddressVotes(params.data.address, limitParam(q, 25), offset, dateParam(q, 'from'), dateParam(q, 'to'))
     if (!rows) return reply.status(404).send({ error: 'Address not recognized' })
     return rows
+  })
+
+  // The Protocol Revenue tab: where the revenue this account generated came
+  // from — per stream, per asset within the stream.
+  fastify.get('/explorer/address/:address/revenue-breakdown', async (req, reply) => {
+    const params = addressParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const breakdown = await getAddressRevenueBreakdown(params.data.address)
+    if (!breakdown) return reply.status(404).send({ error: 'Address not recognized' })
+    return breakdown
   })
 
   fastify.get('/explorer/address/:address/counts', async (req, reply) => {

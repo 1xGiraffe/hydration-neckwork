@@ -212,6 +212,9 @@ export function profileTabs(
   // Raw extrinsic/event counts for the flattened first-level tabs.
   extrinsicsCount?: number,
   eventsCount?: number,
+  // Header-stat revenue total; the Protocol Revenue tab exists exactly when
+  // the stat does, so the two can never disagree about whether there is any.
+  revenueUsd?: number,
 ): DetailTab[] {
   const positionCount = mmPositionCount(markets) + dcaCount + liquidityPositionCount
   return [
@@ -226,6 +229,7 @@ export function profileTabs(
     { key: 'extrinsics', label: 'Extrinsics', ...(extrinsicsCount == null ? {} : { count: extrinsicsCount }) },
     { key: 'events', label: 'Events', ...(eventsCount == null ? {} : { count: eventsCount }) },
     ...(votesCount && votesCount > 0 ? [{ key: 'votes', label: 'Votes', count: votesCount }] : []),
+    ...(revenueUsd && revenueUsd > 0 ? [{ key: 'revenue', label: 'Protocol Revenue' }] : []),
   ]
 }
 

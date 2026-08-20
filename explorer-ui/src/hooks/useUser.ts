@@ -163,6 +163,15 @@ export function useListTagEvents(listId: string | null, tagId: string | null, of
     placeholderData: keepPreviousData,
   }), key, offset === 0)
 }
+export function useListTagRevenueBreakdown(listId: string | null, tagId: string | null) {
+  const session = useSession()
+  return useQuery({
+    queryKey: ['list-tag-revenue-breakdown', listId, tagId],
+    queryFn: ({ signal }) => userApi.listTagRevenueBreakdown(listId as string, tagId as string, signal),
+    enabled: !!session && !!listId && !!tagId,
+    staleTime: 300_000,
+  })
+}
 export function useListTagVotes(listId: string | null, tagId: string | null, offset = 0, from?: string, to?: string) {
   const session = useSession()
   const ri = useInterval()

@@ -12,6 +12,7 @@ import {
   type ValueListFilters,
   getHolders, getHoldersForViewerFold,
   getListTagDetail, getListTagActivity, getListTagExtrinsics, getListTagEvents, getListTagVotes,
+  getListTagRevenueBreakdown,
   getListTagVotesByReferendum, getListTagTabCounts, getListTagListTotal, getListTagValueEvents,
 } from '../services/explorerService.ts'
 import { setProfileName, setProfileAvatar, clearProfileAvatar, profileForAccount, UserDataError } from '../services/userProfileService.ts'
@@ -652,6 +653,17 @@ export async function userRoutes(fastify: FastifyInstance) {
     const offset = activityOffsetParam(q, 'vote')
     if (offset == null) return reply.status(400).send({ error: `Votes offset must be between 0 and ${maxActivityOffsetFor('vote')}` })
     return getListTagVotes(resolved.listId, resolved.tagId, resolved.tag.members, limitParam(q, 25), offset, dateParam(q, 'from'), dateParam(q, 'to'))
+  })
+
+  // The Protocol Revenue tab: where the revenue this tag's members generated
+  // came from — per stream, per asset within the stream.
+  fastify.get('/user/list-tag/:listId/:tagId/revenue-breakdown', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const resolved = requireListTag(req, reply, accountId)
+    if (!resolved) return
+    return getListTagRevenueBreakdown(resolved.listId, resolved.tagId, resolved.tag.members)
   })
 
   // Grouped-mode counterpart of the votes route above — one row per referendum.
