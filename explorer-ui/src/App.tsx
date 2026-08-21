@@ -14,6 +14,7 @@ const ExtrinsicDetail = lazy(() => import('./pages/ExtrinsicDetail').then(m => (
 const TradeDetailPage = lazy(() => import('./pages/TradeDetail').then(m => ({ default: m.TradeDetailPage })))
 const DcaSchedule = lazy(() => import('./pages/DcaSchedule').then(m => ({ default: m.DcaSchedule })))
 const Referendum = lazy(() => import('./pages/Referendum').then(m => ({ default: m.Referendum })))
+const Governance = lazy(() => import('./pages/Governance').then(m => ({ default: m.Governance })))
 const DcaResolve = lazy(() => import('./pages/DcaSchedule').then(m => ({ default: m.DcaResolve })))
 const DcaExecution = lazy(() => import('./pages/DcaExecution').then(m => ({ default: m.DcaExecution })))
 const ActivityDetailPage = lazy(() => import('./pages/ActivityDetail').then(m => ({ default: m.ActivityDetailPage })))
@@ -76,6 +77,7 @@ export default function App() {
           : <ActivityDetailPage slug={route.slug} id={route.id} />
       case 'dca-schedule': return <DcaSchedule scheduleId={route.scheduleId} />
       case 'referendum': return <Referendum pallet={route.pallet} index={route.index} />
+      case 'governance': return <Governance />
       case 'dca-execution': return <DcaExecution height={route.height} eventIndex={route.eventIndex} />
       case 'dca-resolve': return <DcaResolve height={route.height} index={route.index} kind={route.kind} />
       case 'events': return <Events />

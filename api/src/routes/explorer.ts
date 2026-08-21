@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
-import { getReferenda, getReferendum, parseReferendumPallet } from '../services/governanceService.ts'
+import { getCollectiveMotions, getGovernanceOverview, getGovernanceReferenda, getReferenda, getReferendum, getTreasuryTips, parseReferendumPallet } from '../services/governanceService.ts'
 import { extrinsicEncoded } from '../services/extrinsicBytes.ts'
 import { evmTransactionReceipt } from '../services/evmReceipt.ts'
 import {
@@ -355,6 +355,38 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const detail = await getReferendum(pallet, params.data.index, limit)
     if (!detail) return reply.status(404).send({ error: 'Referendum not found' })
     return detail
+  })
+
+  // The /governance page: live OpenGov cards + per-body counts.
+  fastify.get('/explorer/governance', async () => getGovernanceOverview())
+
+  // The unified referendum directory (OpenGov + the historical Democracy),
+  // filterable and exactly counted — the page's tables.
+  fastify.get('/explorer/governance/referenda', async (req, reply) => {
+    const q = req.query as Record<string, unknown>
+    const pallet = parseReferendumPallet(q.pallet ?? 'opengov')
+    if (!pallet) return reply.status(400).send({ error: "Referendum pallet must be 'opengov' or 'democracy'" })
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    const status = typeof q.status === 'string' && q.status.length <= 24 ? q.status : undefined
+    const track = typeof q.track === 'string' && /^\d+$/.test(q.track) ? Number(q.track) : undefined
+    return getGovernanceReferenda(pallet, status, track, limitParam(q, 25), offset)
+  })
+
+  fastify.get('/explorer/governance/motions', async (req, reply) => {
+    const q = req.query as Record<string, unknown>
+    const body = q.body === 'council' ? 'council' as const : q.body === 'tc' ? 'tc' as const : null
+    if (!body) return reply.status(400).send({ error: "Motion body must be 'tc' or 'council'" })
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    return getCollectiveMotions(body, limitParam(q, 25), offset)
+  })
+
+  fastify.get('/explorer/governance/tips', async (req, reply) => {
+    const q = req.query as Record<string, unknown>
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    return getTreasuryTips(limitParam(q, 25), offset)
   })
 
   fastify.get('/explorer/referenda', async (req, reply) => {

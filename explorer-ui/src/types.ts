@@ -1283,6 +1283,7 @@ export interface ReferendumDetail {
   pallet: 'opengov' | 'democracy'
   index: number
   title: string | null
+  proposer: AccountRef | null
   subsquareUrl: string
   track: number | null
   proposalHash: string | null
@@ -1356,6 +1357,10 @@ export interface ReferendumProgress {
   timeoutBlock: number | null
   approval: ReferendumGauge | null
   support: ReferendumGauge | null
+  // OpenGov's bars decay, so trailing them today is normal: 'on-track' clears
+  // them by confirmableAtBlock if the tally holds; 'short' cannot clear them by
+  // the period end without new votes.
+  projection: { state: 'passing' | 'on-track' | 'short'; confirmableAtBlock: number | null } | null
 }
 
 // A user-authored tag list: a named, ownable collection of tags an account
@@ -1751,3 +1756,62 @@ export interface RevenueBreakdown {
   totalUsd: number
   streams: RevenueBreakdownStream[]
 }
+
+// ---- /governance ----
+
+export interface GovernanceTrackRef { id: number; name: string }
+
+export interface GovernanceReferendumRow {
+  pallet: 'opengov' | 'democracy'
+  index: number
+  title: string | null
+  status: string
+  voters: number | null
+  blockHeight: number
+  timestamp: string
+  track: GovernanceTrackRef | null
+  // The submit extrinsic's signer (OpenGov only; Democracy proposals were
+  // tabled from a queue and name no single submitter).
+  proposer: AccountRef | null
+}
+export interface GovernanceReferendaPage { total: number; rows: GovernanceReferendumRow[] }
+
+export interface ActiveReferendumCard {
+  index: number
+  title: string | null
+  status: string
+  track: GovernanceTrackRef | null
+  proposer: AccountRef | null
+  submittedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
+  progress: ReferendumProgress | null
+  tally: { ayes: string; nays: string; support: string | null; source: 'live' | 'snapshot' } | null
+}
+export interface GovernanceOverview {
+  active: ActiveReferendumCard[]
+  counts: { opengov: number; democracy: number; tcMotions: number; councilMotions: number; tips: number }
+}
+
+export interface CollectiveMotionRow {
+  index: number
+  hash: string
+  proposer: AccountRef | null
+  threshold: number
+  ayes: number
+  nays: number
+  call: string | null
+  status: 'open' | 'approved' | 'disapproved' | 'executed' | 'failed'
+  proposedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string }
+  closedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
+}
+export interface CollectiveMotionsPage { total: number; rows: CollectiveMotionRow[] }
+
+export interface TreasuryTipRow {
+  hash: string
+  reason: string | null
+  beneficiary: AccountRef | null
+  payout: string | null
+  status: 'open' | 'closing' | 'closed' | 'retracted'
+  openedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string }
+  closedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
+}
+export interface TreasuryTipsPage { total: number; rows: TreasuryTipRow[] }
