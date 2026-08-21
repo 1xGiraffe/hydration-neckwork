@@ -1425,7 +1425,7 @@ async function refreshPrices(): Promise<Map<number, PriceInfo>> {
   } catch { /* serve stale on error */ }
   return priceMap
 }
-function usdValue(prices: Map<number, PriceInfo>, assetId: number, raw: string, decimals: number): number | null {
+export function usdValue(prices: Map<number, PriceInfo>, assetId: number, raw: string, decimals: number): number | null {
   const p = prices.get(assetId)
   if (!p) return null
   const amt = Number(raw) / 10 ** decimals

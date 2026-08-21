@@ -3442,3 +3442,4 @@ a.rev-pill-label:hover { color: var(--accent); }
   .gov-title-cell { max-width: none; }
 }
 .ref-short { color: var(--red); }
+.sec-usd { font-size: 11px; white-space: nowrap; }

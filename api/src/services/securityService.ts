@@ -4,7 +4,7 @@ import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import { substrateStorageBatch, substrateAllKeys, SUBSTRATE_RPC_URL } from './substrateRpc.ts'
 import { cachedSwr } from './cache.ts'
 import { nominalBlockMsMismatch, resolveParaBlockTime, type ResolvedBlockTime } from './blockTime.ts'
-import { accountRef, ensurePrices, mmMarkets, parachainName, type AccountRef, type AssetRef, type PriceInfo } from './explorerService.ts'
+import { accountRef, ensurePrices, mmMarkets, parachainName, usdValue, type AccountRef, type AssetRef, type PriceInfo } from './explorerService.ts'
 import { assetDescriptor } from './explorerAssets.ts'
 import { loadCurrentPools } from './poolService.ts'
 import { resolveModuleError } from './runtimeErrorNames.ts'
@@ -622,6 +622,11 @@ export interface FuseRow {
   status: FuseVerdict['status']
   limit: string
   used: string
+  // Today's dollar meaning of the allowance and of what this period minted —
+  // the token amounts alone hide that a WETH fuse and a PINK fuse differ by
+  // six orders of magnitude. Null when the asset has no price.
+  limitUsd: number | null
+  usedUsd: number | null
   headroom: string
   usagePct: number
   untilBlock: number | null
@@ -854,7 +859,7 @@ async function buildSecurityDashboard(): Promise<SecurityDashboard> {
     chainAsOf: snap ? new Date(snap.takenAt).toISOString() : null,
     chainBlock: snap?.headBlock ?? null,
     withdraw: buildWithdrawView(snap, limitEvents),
-    fuses: buildFuses(snap, registryLimits, lockdownRows, releaseTotal, headBlock),
+    fuses: buildFuses(snap, registryLimits, lockdownRows, releaseTotal, headBlock, prices),
     perBlock: buildPerBlock(snap, pools, prices, peaks),
     trips: buildTrips(tripRows),
     freezes: buildFreezes(snap, pools, pauseEvents, stableTradability, omniTradabilityHistory),
@@ -1268,6 +1273,7 @@ function buildFuses(
   lockdownRows: LimitEventRow[],
   releaseTotal: number,
   headBlock: number,
+  prices: Map<number, PriceInfo>,
 ): SecurityDashboard['fuses'] {
   const lockdowns = pairLockdowns(lockdownRows)
   const perAssetLockdowns = new Map<number, number>()
@@ -1286,6 +1292,8 @@ function buildFuses(
       status: verdict?.status ?? (limitRaw === 0n ? 'frozen' : 'unarmed'),
       limit: limitRaw.toString(),
       used: (verdict?.usedRaw ?? 0n).toString(),
+      limitUsd: usdValue(prices, assetId, limitRaw.toString(), descriptor.decimals),
+      usedUsd: usdValue(prices, assetId, (verdict?.usedRaw ?? 0n).toString(), descriptor.decimals),
       headroom: (verdict?.headroomRaw ?? limitRaw).toString(),
       usagePct: verdict?.usagePct ?? 0,
       untilBlock: verdict?.untilBlock ?? null,
