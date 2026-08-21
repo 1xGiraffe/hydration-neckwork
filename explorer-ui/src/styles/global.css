@@ -576,6 +576,8 @@ svg { display: block; }
 .crumbs .sep { color: var(--text-lowest); }
 .page-title { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 34px; letter-spacing: 0; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; row-gap: 2px; }
 .page-title .sub { font-family: 'GeistMono'; font-size: 13px; color: var(--text-medium); font-weight: 400; letter-spacing: 0; }
+/* An enacted referendum whose dispatched call errored: the status word alone turns red. */
+.page-title .sub .ref-status-failed { color: var(--red); }
 
 /* ============ DASHBOARD HERO (search-first) ============ */
 .hero { padding: 40px 0 36px; text-align: center; border-bottom: 1px solid var(--separator); margin-bottom: 32px; }
