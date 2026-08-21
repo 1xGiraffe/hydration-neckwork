@@ -1289,6 +1289,8 @@ export interface ReferendumDetail {
   proposalHash: string | null
   proposalCall: { pallet: string; callName: string; args: unknown; encoded: string | null; byteLength: number; decodeError: string | null } | null
   status: string
+  // How the approved call's enactment went (OpenGov only, null until it runs).
+  enactment: 'ok' | 'failed' | 'unavailable' | null
   submittedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
   concludedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
   asset: AssetRef
@@ -1778,6 +1780,8 @@ export interface GovernanceReferendumRow {
   // The submit extrinsic's signer (OpenGov only; Democracy proposals were
   // tabled from a queue and name no single submitter).
   proposer: AccountRef | null
+  // How the approved call's enactment went (OpenGov only, null until it runs).
+  enactment: 'ok' | 'failed' | 'unavailable' | null
 }
 export interface GovernanceReferendaPage { total: number; rows: GovernanceReferendumRow[] }
 

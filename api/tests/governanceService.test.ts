@@ -5,6 +5,7 @@ import {
   convictionName,
   convictionTenths,
   decodeVoteByte,
+  getReferenda,
   getReferendum,
   indirectTallyFrom,
   initGovernanceService,
@@ -13,6 +14,7 @@ import {
   latestVotePerAccount,
   onChainTallyFrom,
   parseReferendumPallet,
+  referendumEnactmentTaskId,
   referendumStatusFrom,
   subsquareUrl,
   tallyFromArgs,
@@ -504,6 +506,81 @@ describe('on-chain tally extraction', () => {
 // governance_vote_calls projection, so raw_calls is only ever touched for the handful
 // of wrapper extrinsics whose payload has to be decoded — by exact block, never by
 // range.
+// The directory's status word follows the call, not just the vote: an approved
+// referendum whose scheduled enactment has dispatched reads 'executed', and a
+// dispatch that errored still reads 'executed' but carries the fault for the
+// badge to color. A CallUnavailable is not an execution and stays 'approved'.
+describe('directory enactment upgrade', () => {
+  const directoryRow = (index: number, events: string[]) => ({
+    pallet: 'opengov', ref_index: index, events, block_height: 9_000_000 + index,
+    ts: '2026-08-01 00:00:00', track_id: 5, submit_block: 8_000_000, submit_ext: -1,
+  })
+  const APPROVED = ['Referenda.Submitted', 'Referenda.Approved', 'Referenda.Confirmed']
+
+  it('upgrades approved to executed on dispatch, red-flags a failed call, skips CallUnavailable', async () => {
+    const query = vi.fn(async ({ query }: { query: string }) => ({
+      json: async () => {
+        if (query.includes('scheduler_named_dispatches')) {
+          return [
+            { task_id: referendumEnactmentTaskId(40), event_name: 'Scheduler.Dispatched', args_json: '{"result":{"__kind":"Ok"}}' },
+            { task_id: referendumEnactmentTaskId(41), event_name: 'Scheduler.Dispatched', args_json: '{"result":{"__kind":"Err"}}' },
+            { task_id: referendumEnactmentTaskId(42), event_name: 'Scheduler.CallUnavailable', args_json: '{}' },
+            // A named scheduler task that is no referendum's enactment.
+            { task_id: '0x' + 'de'.repeat(32), event_name: 'Scheduler.Dispatched', args_json: '{"result":{"__kind":"Ok"}}' },
+          ]
+        }
+        if (query.includes('referendum_lifecycle_events')) {
+          return [
+            directoryRow(40, APPROVED), directoryRow(41, APPROVED), directoryRow(42, APPROVED),
+            directoryRow(43, ['Referenda.Submitted', 'Referenda.Rejected']),
+          ]
+        }
+        return []
+      },
+    }))
+    initGovernanceService({ query } as never)
+    initExplorerService({ query } as never)
+    initReferendumTitleService({ query } as never)
+
+    const byIndex = new Map((await getReferenda(123, 0)).map(row => [row.index, row]))
+    expect(byIndex.get(40)).toMatchObject({ status: 'executed', enactment: 'ok' })
+    expect(byIndex.get(41)).toMatchObject({ status: 'executed', enactment: 'failed' })
+    expect(byIndex.get(42)).toMatchObject({ status: 'approved', enactment: 'unavailable' })
+    expect(byIndex.get(43)).toMatchObject({ status: 'rejected', enactment: null })
+  })
+})
+
+// The detail page's status word follows the call the same way the directory's does.
+describe('detail page enactment upgrade', () => {
+  it('reads an approved referendum whose call errored as executed, carrying the fault', async () => {
+    const query = vi.fn(async ({ query }: { query: string }) => ({
+      json: async () => {
+        if (query.includes('scheduler_named_dispatches')) {
+          return [{
+            event_name: 'Scheduler.Dispatched', block_height: 9_930_000, event_index: 2,
+            extrinsic_index: null, ts: '2025-10-16 00:00:00', args_json: '{"result":{"__kind":"Err"}}',
+          }]
+        }
+        if (query.includes('referendum_lifecycle_events')) {
+          return [
+            { event_name: 'Referenda.Submitted', block_height: 9_900_000, extrinsic_index: 3, ts: '2025-10-14 00:00:00', args_json: '{"index":230,"track":1}' },
+            { event_name: 'Referenda.Confirmed', block_height: 9_920_000, extrinsic_index: null, ts: '2025-10-15 00:00:00', args_json: '{"index":230,"tally":{"ayes":"10","nays":"0","support":"5"}}' },
+          ]
+        }
+        return []
+      },
+    }))
+    initGovernanceService({ query } as never)
+    initExplorerService({ query } as never)
+    initReferendumTitleService({ query } as never)
+
+    const detail = await getReferendum('opengov', 230, 7)
+    expect(detail).toMatchObject({ status: 'executed', enactment: 'failed' })
+    // The history keeps the enactment as its own entry; refunds etc stay untouched.
+    expect(detail!.timeline.some(entry => entry.outcome === 'failed')).toBe(true)
+  })
+})
+
 describe('referendum page read bounds', () => {
   const rowsFor = (query: string): unknown[] => {
     if (query.includes('price_data.referendum_lifecycle_events')) {

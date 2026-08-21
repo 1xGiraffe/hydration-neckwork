@@ -132,7 +132,10 @@ describe('the named-dispatch projection declaration matches what the reader sele
   })
 
   it('reads it by the derived name, with FINAL bounded by that key', () => {
-    expect(occurrences(governanceService, 'price_data.scheduler_named_dispatches FINAL')).toBe(1)
+    // Two reads and only two: the detail page's point lookup on the key prefix,
+    // and the directory's bulk read — the latter unbounded on purpose, because
+    // the projection IS the 545 named rows and the directory wants all of them.
+    expect(occurrences(governanceService, 'price_data.scheduler_named_dispatches FINAL')).toBe(2)
     expect(governanceService).toContain('WHERE task_id = {task:String}')
     // Never the raw table: the id is only on 545 of its rows and finding them means decoding
     // args_json on every Scheduler event the scan reaches.
