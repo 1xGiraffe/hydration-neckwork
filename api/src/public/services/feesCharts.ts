@@ -296,16 +296,18 @@ const STREAM_MARKER: Record<Exclude<FeesStreamType, 'borrow_apr'>, string> = {
  * count in `total` and in neither share, which understates both before that
  * boundary exactly as the projection's coverage does.
  *
- * On `protocol` (the hub/H2O fee) every destination is protocol revenue, so
- * `protocol` and `total` take all rows and `burned` is the burn component.
+ * On `protocol` (the hub/H2O fee) `burned` is the burn component and `total` takes all
+ * rows. `protocol` is NOT all rows: since 2026-03 the burned/treasury split stopped and
+ * every hub fee leg is paid to the Omnipool account, so it stays in the pool. Counting
+ * the stream in full reported 21% of one 30-day window as protocol revenue that the
+ * protocol never received. The exception is a fee retained in the protocol-provided HDX
+ * position, which the derivation marks 'pol'.
  */
-export function feesDestinationPredicateSql(streamType: 'asset' | 'protocol', destination: FeesDestination): string {
-  if (streamType === 'asset') {
-    if (destination === 'lp') return "dest = 'lp'"
-    if (destination === 'protocol') return "dest IN ('protocol', 'burned')"
-    return '1'
-  }
-  return destination === 'burned' ? "dest = 'burned'" : '1'
+export function feesDestinationPredicateSql(destination: FeesDestination): string {
+  if (destination === 'lp') return "dest = 'lp'"
+  if (destination === 'protocol') return "dest IN ('protocol', 'burned', 'pol')"
+  if (destination === 'burned') return "dest = 'burned'"
+  return '1'
 }
 
 /**
@@ -318,8 +320,10 @@ export function feesDestinationPredicateSql(streamType: 'asset' | 'protocol', de
  */
 export function buildFeesStreamSql(streamType: Exclude<FeesStreamType, 'borrow_apr'>, destination: FeesDestination): string {
   const stream = STREAM_TO_REVENUE[streamType]
+  // The destination split applies to the two omnipool fee streams; the money-market
+  // streams have a single destination and take every row.
   const destSql = streamType === 'asset' || streamType === 'protocol'
-    ? feesDestinationPredicateSql(streamType, destination)
+    ? feesDestinationPredicateSql(destination)
     : '1'
   return `${STREAM_MARKER[streamType]}
 WITH (
