@@ -245,6 +245,16 @@ describe('referendum matching', () => {
     expect(matches[0].payload).toMatchObject({ lane: 'referendum', title: 'Add HDX liquidity' })
   })
 
+  it('treats the executed phase as one more filterable phase, outcome riding along', () => {
+    const r = rule('referendum', { phases: ['executed'] })
+    const rows = [row(), row({ blockHeight: 1_060, phase: 'executed', track: null, outcome: 'ok' })]
+    const matches = evaluateReferendum(rows, [r], W)
+    expect(matches.map(m => m.identity)).toEqual(['101:executed'])
+    expect(matches[0].payload).toMatchObject({ lane: 'referendum', row: { outcome: 'ok' } })
+    // And a rule with no phase filter hears about enactments without opting in.
+    expect(evaluateReferendum(rows, [rule('referendum', {})], W)).toHaveLength(2)
+  })
+
   it('matches a track filter against the numeric track id, and keeps an unknown track', () => {
     const r = rule('referendum', { track: '1' })
     expect(evaluateReferendum([row({ track: 1 })], [r], W)).toHaveLength(1)
@@ -449,6 +459,21 @@ describe('renderMatch', () => {
       rule('health-factor', { address: WHALE, threshold: 1.1 }), noViewerTag))
     expect(hf.title).toContain('Health factor 1.04')
     expect(hf.url).toContain(`/account/${encodeURIComponent(WHALE)}`)
+  })
+
+  it('says how an enactment went, not just that it happened', () => {
+    const r = rule('referendum', {})
+    const refRow = (outcome: 'ok' | 'failed' | 'unavailable' | null) =>
+      ({ lane: 'referendum' as const, row: { blockHeight: 1_050, eventIndex: 3, index: 101, phase: 'executed' as const, track: null, outcome }, title: 'Add HDX liquidity' })
+    expect(renderNotification(renderMatch(match(refRow('ok'), 'referendum'), r, noViewerTag)).body)
+      .toContain('Referendum #101 executed')
+    expect(renderNotification(renderMatch(match(refRow('failed'), 'referendum'), r, noViewerTag)).body)
+      .toContain('the call FAILED')
+    expect(renderNotification(renderMatch(match(refRow('unavailable'), 'referendum'), r, noViewerTag)).body)
+      .toContain('unavailable at enactment')
+    const out = renderNotification(renderMatch(match(refRow('ok'), 'referendum'), r, noViewerTag))
+    expect(out.title).toContain('Add HDX liquidity')
+    expect(out.url).toMatch(/\/referendum\/opengov\/101$/)
   })
 
   it('escapes chain-derived text on the Telegram side', () => {
