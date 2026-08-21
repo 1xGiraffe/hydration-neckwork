@@ -69,12 +69,10 @@ export function SmolToggle({ hiding, onToggle }: { hiding: boolean; onToggle: ()
 // promise alerts the reader never asked for. So: express it exactly, or hide.
 // The `all` tab keeps the trade rule it has always produced — a narrowing the
 // reader can see in the button's own copy, never a widening.
-// The preposition follows the server's own summary for that kind: a trade
-// happens ON a token, a transfer is OF one.
-const NOTIFIABLE_TABS: Record<string, { kind: 'large-trade' | 'large-transfer'; noun: string; of: string }> = {
-  all: { kind: 'large-trade', noun: 'Trades', of: 'on' },
-  trade: { kind: 'large-trade', noun: 'Trades', of: 'on' },
-  transfer: { kind: 'large-transfer', noun: 'Transfers', of: 'of' },
+const NOTIFIABLE_TABS: Record<string, { kind: 'large-trade' | 'large-transfer' }> = {
+  all: { kind: 'large-trade' },
+  trade: { kind: 'large-trade' },
+  transfer: { kind: 'large-transfer' },
 }
 export function notifiableFilters(type: string, token: string | undefined, min: string | undefined): PendingNotification | null {
   const tab = NOTIFIABLE_TABS[type]
@@ -83,8 +81,11 @@ export function notifiableFilters(type: string, token: string | undefined, min: 
   if (!tab) return null
   if (!token || !Number.isInteger(assetId) || assetId < 0) return null
   if (!min || !Number.isFinite(minUsd) || minUsd < LARGE_VALUE_MIN_USD) return null
-  // The name is display copy, so the floor reads on the app's own rough scale.
-  return { kind: tab.kind, params: { assetId, minUsd }, name: `${tab.noun} over ${F.usd(minUsd)} ${tab.of} asset ${assetId}` }
+  // No name: the server already describes a rule exactly, and it is the side that
+  // holds the asset registry — naming it here produced "on asset 1000625" where the
+  // server says "on sUSDe", and a Title-cased name sitting in the same slot as a
+  // lowercase summary made the list read inconsistently. One source, one wording.
+  return { kind: tab.kind, params: { assetId, minUsd } }
 }
 
 export function Activity() {
@@ -105,14 +106,14 @@ export function Activity() {
   // isPlaceholderData: these rows answer the PREVIOUS filter/tab/page, kept on screen
   // while the new one loads. A high "$ from" here takes tens of seconds, so without
   // marking them the feed reads as ignoring the filter (see pendingRows).
-  const { data, isFetching, isPlaceholderData, error, refetch, anchorRef } = useActivity(PAGE, f.from, f.to, page * PAGE, type, { token: f.token, min: activityMin, identity: f.identity }, action || undefined)  // filters applied server-side
+  const { data, isFetching, isPlaceholderData, error, refetch, anchorRef } = useActivity(PAGE, f.from, f.to, page * PAGE, type, { token: f.token, min: activityMin, minRevenue: f.minRevenue, identity: f.identity }, action || undefined)  // filters applied server-side
   // The pager's two bounds, under exactly the filters above: how many rows the feed
   // holds where the API can count it (the vote feed pages in SQL over one source, so
   // its length is that source's own count), and always how deep the API serves this
   // category. The categories assembled from several sources report no total, so they
   // get no page numbers — but their › arrow still stops at the servable depth
   // instead of walking a reader into a refused request.
-  const { data: count } = useActivityCount(type, f.from, f.to, { token: f.token, min: activityMin, identity: f.identity }, action || undefined)
+  const { data: count } = useActivityCount(type, f.from, f.to, { token: f.token, min: activityMin, minRevenue: f.minRevenue, identity: f.identity }, action || undefined)
   // The daily histogram mirrors the active tab + action/token filters.
   const { data: daily } = useDaily('activity', { type, action: action || undefined, token: f.token || undefined })
   const assets = useAssetFilterOptions()

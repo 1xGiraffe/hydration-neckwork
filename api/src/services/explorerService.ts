@@ -680,6 +680,10 @@ export interface EventListFilters { event?: string }
 export interface ValueListFilters {
   token?: string
   min?: number
+  // A floor on what the PROTOCOL earned on the row's extrinsic — a different
+  // question from the row's own value, and answered on the protocol share alone
+  // (a big routed swap can pay LPs handsomely and the protocol very little).
+  minRevenue?: number
   unit?: 'usd' | 'token'
   identity?: 'named' | 'unnamed'
   // Accounts THIS viewer has tagged, in their own lists or ones they subscribe
@@ -8775,6 +8779,12 @@ export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFi
       .filter((id): id is number => id != null)
     if (!rowIds.some(id => tokenIds.includes(id))) return false
   }
+  if (filters.minRevenue != null) {
+    // Absent means nobody computed it yet (the block's events are not queryable),
+    // which is not the same as "under the floor". A filtered view excludes the
+    // unknown rather than asserting it does not qualify.
+    if (row.revenue == null || row.revenue.protocolUsd < filters.minRevenue) return false
+  }
   if (filters.min != null) {
     if (filters.unit === 'token') {
       const picks = [
@@ -12394,8 +12404,165 @@ export async function getRecentActivity(limit: number, from?: string, to?: strin
   }
 }
 
-async function recentActivityPage(limit: number, from?: string, to?: string, offset = 0, type = 'all', filters: ValueListFilters = {}, action?: string, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {
+// A revenue floor cannot be pushed into SQL by any activity source, so post-filtering
+// the feed means materialising every row in range to keep a handful: measured, a $1,000
+// floor either hung or tripped the read guard, because the newest 25 such extrinsics
+// reach back 18 months.
+//
+// So this filter is answered from the other end. `revenue_events` already knows which
+// extrinsics earned what, and there are very few of them, so the candidates are found
+// first and only their rows are built. Cost then follows the PAGE, not the sparsity:
+// measured 0.4-0.6s for $1, $100 and $1,000 alike, against a hang for the last.
+const REVENUE_CANDIDATE_BLOCK_SLACK = 20
+const REVENUE_BUILD_CONCURRENCY = 6
+
+// Run at most `limit` of these at a time, preserving result order.
+async function mapWithConcurrency<T, R>(
+  items: readonly T[], limit: number, run: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length)
+  let next = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) return
+      out[i] = await run(items[i])
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return out
+}
+
+// Candidate blocks, newest first. A plain aggregate with no join — joining raw_events
+// unrestricted is what cost 18s, so the block set is resolved before any join.
+async function revenueCandidateBlocks(
+  minUsd: number, want: number, from?: string, to?: string,
+): Promise<{ blocks: number[]; oldestDay: string | null; newestDay: string | null }> {
+  const bounds = [
+    from ? 'block_timestamp >= toDateTime({from:String})' : '1',
+    to ? 'block_timestamp < toDateTime({to:String}) + INTERVAL 1 DAY' : '1',
+  ].join(' AND ')
+  const res = await client.query({
+    query: `SELECT b, toString(toDate(ts)) AS d FROM (
+              SELECT block_height AS b, min(block_timestamp) AS ts FROM price_data.revenue_events
+              WHERE ${PROTOCOL_REVENUE_PREDICATE_SQL} AND ${bounds}
+              GROUP BY b HAVING sum(amount_usd) >= {min:Float64}
+              ORDER BY b DESC LIMIT {want:UInt32})
+            ORDER BY b DESC`,
+    query_params: { min: minUsd, want, ...(from ? { from } : {}), ...(to ? { to } : {}) },
+    format: 'JSONEachRow',
+  })
+  const rows = await res.json<{ b: number; d: string }>()
+  const days = rows.map(r => r.d).filter(Boolean).sort()
+  return {
+    blocks: rows.map(r => Number(r.b)),
+    oldestDay: days[0] ?? null,
+    newestDay: days[days.length - 1] ?? null,
+  }
+}
+
+// How far apart the candidates sit, in days.
+function daySpan(oldest: string, newest: string): number {
+  return Math.round((Date.parse(`${newest}T00:00:00Z`) - Date.parse(`${oldest}T00:00:00Z`)) / 86_400_000) + 1
+}
+
+// Beyond this the candidates are too scattered for the feed to walk to them, and
+// building their rows directly is the cheaper answer.
+const REVENUE_DENSE_SPAN_DAYS = 3
+
+// The extrinsics within those blocks that clear the floor. Same join as before, now
+// primary-key pruned to the block set, which is what makes it milliseconds.
+async function revenueCandidateExtrinsics(
+  blocks: readonly number[], minUsd: number,
+): Promise<{ blockHeight: number; extrinsicIndex: number | null }[]> {
+  if (!blocks.length) return []
+  const res = await client.query({
+    query: `SELECT e.block_height AS b, e.extrinsic_index AS xi
+            FROM price_data.revenue_events r
+            INNER JOIN (
+              SELECT block_height, event_index, extrinsic_index FROM price_data.raw_events
+              WHERE block_height IN ({blocks:Array(UInt32)})
+            ) AS e ON e.block_height = r.block_height AND e.event_index = r.event_index
+            WHERE r.block_height IN ({blocks:Array(UInt32)}) AND ${PROTOCOL_REVENUE_PREDICATE_SQL}
+            GROUP BY b, xi HAVING sum(r.amount_usd) >= {min:Float64}
+            ORDER BY b DESC, xi DESC`,
+    query_params: { blocks: [...blocks], min: minUsd },
+    format: 'JSONEachRow',
+  })
+  return (await res.json<{ b: number; xi: number | null }>())
+    .map(r => ({ blockHeight: Number(r.b), extrinsicIndex: r.xi == null ? null : Number(r.xi) }))
+}
+
+// Build only the candidates' own rows. An extrinsic-backed candidate comes from
+// getExtrinsicActivity; a candidate with no extrinsic is a block hook (a DCA execution,
+// a scheduler payout), whose rows only getBlockActivity can produce — so its block is
+// built once and the extrinsic-less rows taken from it.
+async function revenueFilteredActivityPage(
+  limit: number, offset: number, type: string, filters: ValueListFilters,
+  action?: string, from?: string, to?: string,
+): Promise<ActivityRow[]> {
+  const minUsd = filters.minRevenue!
+  const want = offset + limit
+  const { blocks } = await revenueCandidateBlocks(minUsd, want * 2 + REVENUE_CANDIDATE_BLOCK_SLACK, from, to)
+  const candidates = await revenueCandidateExtrinsics(blocks, minUsd)
+  if (!candidates.length) return []
+  // Only enough candidates to fill the page. They are newest-first and each paying
+  // extrinsic yields at least one row, so `want` plus slack always covers it — and the
+  // cap is what keeps the cost on the page: an extrinsic-less candidate is a block hook
+  // whose rows only the whole-block builder can produce, and building every dense-floor
+  // candidate that way cost 64s where the page needs under two.
+  const picked = candidates.slice(0, want + REVENUE_CANDIDATE_BLOCK_SLACK)
+  const hookBlocks = [...new Set(picked.filter(c => c.extrinsicIndex == null).map(c => c.blockHeight))]
+  // Each builder is several queries, so firing a whole page of them at once is what
+  // made a dense floor take a minute: ~54 in flight contended with each other and with
+  // the live feed. Bounded, the same work is under two seconds.
+  const jobs: (() => Promise<ActivityRow[]>)[] = [
+    ...picked
+      .filter(c => c.extrinsicIndex != null)
+      .map(c => () => getExtrinsicActivity(c.blockHeight, c.extrinsicIndex!, { revenue: false }).catch(() => [] as ActivityRow[])),
+    ...hookBlocks.map(height => async () => (await getBlockActivity(height, { revenue: false }).catch(() => [] as ActivityRow[]))
+      .filter(row => row.extrinsicIndex == null)),
+  ]
+  const built = await mapWithConcurrency(jobs, REVENUE_BUILD_CONCURRENCY, job => job())
+  // Once, for every row collected — not inside each builder. Per-builder attach meant a
+  // page ran ~45 revenue reads instead of two, which is where the half-minute went.
+  const collected = built.flat()
+  await applyActivityRevenue(collected)
+  const rows = collected
+    // The floor is re-applied per ROW because the candidate set is per EXTRINSIC: an
+    // extrinsic that cleared it carries every row it produced, not only the paying one.
+    .filter(row => activityRowMatchesFilters(row, filters) && activityRowMatchesAction(row, action))
+    .filter(row => type === 'all' || activityTypeMatchesFamily(row.type, type))
+    .sort((a, b) => b.blockHeight - a.blockHeight || (b.eventIndex ?? -1) - (a.eventIndex ?? -1))
+  return rows.slice(offset, offset + limit)
+}
+
+async function recentActivityPage(limit: number, from?: string, to?: string, offset = 0, type = 'all', filters: ValueListFilters = {}, action?: string, opts: ActivityPageOptions = {}, revenueRouteResolved = false): Promise<ActivityRow[]> {
   const withRevenue = opts.revenue !== false
+  // A revenue floor is answered by whichever route suits where the candidates ARE.
+  // Locating them is cheap either way, and the span is what decides:
+  //
+  //  - clustered (a low floor: most extrinsics clear $1, so they are contiguous and
+  //    recent) — read the feed over their own days and filter the built rows. One feed
+  //    read beats building each candidate: at $1 a page needs ~45 candidates, and
+  //    building those was ~225 queries contending with live ingestion on the hot
+  //    partition, measured 32s against ~1.5s for the dated read.
+  //  - scattered (a high floor: the newest 25 extrinsics earning $1,000+ span 18
+  //    months) — the feed cannot walk that far, so build the candidates' rows directly.
+  //    Their blocks are old and static, and it lands in well under a second.
+  if (filters.minRevenue != null && !revenueRouteResolved) {
+    const { blocks, oldestDay, newestDay } = await revenueCandidateBlocks(
+      filters.minRevenue, (offset + limit) * 2 + REVENUE_CANDIDATE_BLOCK_SLACK, from, to)
+    if (!blocks.length) return []
+    const dense = oldestDay && newestDay && daySpan(oldestDay, newestDay) <= REVENUE_DENSE_SPAN_DAYS
+    if (dense) {
+      return recentActivityPage(limit, from ?? oldestDay!, to ?? newestDay!, offset, type, filters, action, opts, true)
+    }
+    return cached(
+      `explorer:activity-rev:${await liveFeedTag(Boolean(timeWindow(from, to)), datedWindowIsClosed(to))}:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}`,
+      timeWindow(from, to) ? 30_000 : LIVE_CACHE_MS,
+      () => revenueFilteredActivityPage(limit, offset, type, filters, action, from, to))
+  }
   const tw = timeWindow(from, to)
   type = normalizeActivityTypeKey(type)
   // Page 0 of the plain live feed also leads with transaction-pool rows, merged
@@ -12598,7 +12765,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     // exact identities. Widening the swap/liquidity/XCM/etc. feeds alongside
     // a sparse transfer filter made a 25-row page enumerate >100k unrelated
     // rows and could never complete under the ClickHouse result guard.
-    const deferredValueFilter = filters.min != null && filters.unit !== 'token'
+    const deferredValueFilter = (filters.min != null && filters.unit !== 'token') || filters.minRevenue != null
     const sourceFilters = deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
     for (;;) {
       const transfers = await getRecentTransfers(fetchN, from, to, 0, true, sourceFilters)
@@ -12607,6 +12774,9 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       plumbingApplied = true
       sourceSaturated = transfers.length >= fetchN
       if (deferredValueFilter && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
+      // The dense route reaches here with a narrow date range; no source can express a
+      // revenue floor in SQL, so it is decided on built rows.
+      if (filters.minRevenue != null) await applyActivityRevenue(rows)
       const visibleRows = rows
         .filter(row => activityRowMatchesFilters(row, filters) && activityRowMatchesAction(row, action))
         .sort((left, right) => right.blockHeight - left.blockHeight || (right.eventIndex ?? -1) - (left.eventIndex ?? -1))
@@ -12639,7 +12809,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     // before LIMIT more cheaply than repeatedly widening a sparse candidate
     // window. Other activity families still defer USD filtering until their
     // bounded candidates have been classified and valued below.
-    const deferredValueFilter = filters.min != null
+    const deferredValueFilter = filters.min != null || filters.minRevenue != null
       && filters.unit !== 'token'
       && !(type === 'trade' && filters.token)
     // A four-figure USD floor is sparse enough that the cheap unfiltered
@@ -12787,6 +12957,9 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       plumbingApplied = true
       if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
       if (deferredValueFilter && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
+      // The dense route reaches here with a narrow date range; no source can express a
+      // revenue floor in SQL, so it is decided on built rows.
+      if (filters.minRevenue != null) await applyActivityRevenue(rows)
       const visibleRows = rows.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
         .sort((a, b) => b.blockHeight - a.blockHeight || (b.eventIndex ?? -1) - (a.eventIndex ?? -1))
       const cutoff = completeActivityPageCutoff(visibleRows, want)
@@ -13698,7 +13871,7 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
   })
 }
 
-export async function getExtrinsicActivity(height: number, index: number): Promise<ActivityRow[]> {
+export async function getExtrinsicActivity(height: number, index: number, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {
   return cached(`explorer:extrinsic-activity:${height}:${index}`, 10000, async () => {
     const prices = await ensurePrices()
     const evRes = await client.query({
@@ -14116,12 +14289,16 @@ export async function getExtrinsicActivity(height: number, index: number): Promi
       if (!all.some(x => x.type === 'liquidity')) return true
       return !(r.type === 'trade' && ((r.assetIn && isShareAssetId(r.assetIn.assetId)) || (r.assetOut && isShareAssetId(r.assetOut.assetId))))
     }))
-    await Promise.all([applyHistoricalUsd(deduped, activityHistPick), applyXcmJourneys(deduped), applyActivityRevenue(deduped)])
+    await Promise.all([
+      applyHistoricalUsd(deduped, activityHistPick),
+      applyXcmJourneys(deduped),
+      ...(opts.revenue === false ? [] : [applyActivityRevenue(deduped)]),
+    ])
     return deduped
   })
 }
 
-export async function getBlockActivity(height: number): Promise<ActivityRow[]> {
+export async function getBlockActivity(height: number, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {
   return cached(`explorer:block-activity:${height}`, 10000, async () => {
     const extRes = await client.query({
       query: `SELECT DISTINCT extrinsic_index
@@ -14155,7 +14332,11 @@ export async function getBlockActivity(height: number): Promise<ActivityRow[]> {
         if (ax !== bx) return ax - bx
         return (a.eventIndex ?? 0) - (b.eventIndex ?? 0)
       })
-    await Promise.all([applyHistoricalUsd(merged, activityHistPick), applyXcmJourneys(merged), applyActivityRevenue(merged)])
+    await Promise.all([
+      applyHistoricalUsd(merged, activityHistPick),
+      applyXcmJourneys(merged),
+      ...(opts.revenue === false ? [] : [applyActivityRevenue(merged)]),
+    ])
     return merged
   })
 }

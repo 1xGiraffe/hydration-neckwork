@@ -13,7 +13,7 @@ import { Ago, Copy, Crumbs, DetailTabs, EmptyRow, F, TableSkeleton, TagIcon } fr
 import type { DetailTab } from '../components/ui'
 import { NotifyButton } from '../components/NotifyButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
-import { cooldownLabel, deleteRuleConfirmBody, ruleTagTarget } from '../notificationKinds'
+import { cooldownLabel, deleteRuleConfirmBody, ruleTagTarget, ruleHeadline } from '../notificationKinds'
 import { disablePush, enablePush, isStandalone, pushAvailability } from '../push'
 import type { NotificationChannel, NotificationInboxRow, NotificationRule, NotificationRuleInput } from '../types'
 
@@ -473,7 +473,7 @@ export function RulesSection({ rules, channels, loading, onNew, onEdit }: {
                     <div className="notif-row-title">
                       <span className="badge notif-kind">{rule.kindLabel}</span>
                       <RuleTargetPill rule={rule} />
-                      {rule.name || rule.summary}
+                      {ruleHeadline(rule)}
                       {rule.muted && <span className="badge pending">muted</span>}
                     </div>
                     {rule.name ? <div className="notif-row-meta">{rule.summary}</div> : null}
