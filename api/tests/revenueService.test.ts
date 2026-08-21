@@ -96,7 +96,7 @@ describe('getRevenueDashboard', () => {
     // REPLACE PARTITION.
     const totalsQuery = seen.find(s => s.query.includes('-- rev:dashboard:totals'))!.query
     expect(totalsQuery).toContain("(stream = 'network_fee' AND block_timestamp <= toDateTime('2026-08-14 10:00:00'))")
-    expect(totalsQuery).toContain("stream != 'omnipool_asset_fee' OR dest IN ('protocol', 'burned')")
+    expect(totalsQuery).toContain("stream != 'omnipool_asset_fee' OR dest IN ('protocol', 'burned', 'pol')")
     const tailQuery = seen.find(s => s.query.includes('-- rev:network_fee'))!.query
     expect(tailQuery).toContain("block_timestamp > toDateTime('2026-08-14 10:00:00')")
   })

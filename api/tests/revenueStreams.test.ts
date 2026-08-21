@@ -166,10 +166,15 @@ describe('omnipool fee streams', () => {
   })
 
   it('exports the protocol-revenue predicate the explorer and account model share', () => {
-    // Asset-fee legs count as protocol revenue only when routed out of the pool
-    // (or burned); lp stays with LPs and legacy unknown legs stay unclassified.
+    // Fee legs count as protocol revenue when routed out of the pool, burned, or
+    // retained in the protocol-provided HDX position ('pol'). A leg left with the pool
+    // ('lp') never counts — on EITHER fee stream, which is the correction: since
+    // 2026-03 every hub fee leg is paid to the Omnipool account, and counting the hub
+    // stream in full booked 21% of a 30-day window the protocol never received. Legacy
+    // asset-fee legs whose destination the chain never recorded stay unclassified.
     expect(PROTOCOL_REVENUE_PREDICATE_SQL).toContain('omnipool_asset_fee')
-    expect(PROTOCOL_REVENUE_PREDICATE_SQL).toContain("dest IN ('protocol', 'burned')")
+    expect(PROTOCOL_REVENUE_PREDICATE_SQL).toContain("dest IN ('protocol', 'burned', 'pol')")
+    expect(PROTOCOL_REVENUE_PREDICATE_SQL).toContain("dest != 'lp'")
   })
 })
 
