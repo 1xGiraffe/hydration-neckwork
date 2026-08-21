@@ -333,6 +333,35 @@ export function useAccountVotes(address: string | null, offset = 0, from?: strin
 // timer: a concluded referendum can never gain another vote, so there is nothing left
 // to poll for. The API holds a running referendum for one block and a concluded one for
 // a minute, so a poll here is not answered with the figures the last one already showed.
+// The /governance page. The overview holds the live cards, so it polls at the
+// feed cadence while mounted; the tables poll nothing — a motion or archive row
+// changes rarely and a refresh is a click away.
+export function useGovernanceOverview() {
+  const ri = useInterval(LIVE_MS, true)
+  return useQuery({ queryKey: ['governance'], queryFn: ({ signal }) => api.governance(signal), refetchInterval: ri, staleTime: 5_000 })
+}
+export function useGovernanceReferenda(pallet: 'opengov' | 'democracy', status?: string, track?: number, offset = 0, enabled = true) {
+  return useQuery({
+    queryKey: ['governance-referenda', pallet, status ?? '', track ?? -1, offset],
+    queryFn: ({ signal }) => api.governanceReferenda(pallet, status, track, offset, 25, signal),
+    enabled, staleTime: 30_000, placeholderData: keepPreviousData,
+  })
+}
+export function useGovernanceMotions(body: 'tc' | 'council', offset = 0, enabled = true) {
+  return useQuery({
+    queryKey: ['governance-motions', body, offset],
+    queryFn: ({ signal }) => api.governanceMotions(body, offset, 25, signal),
+    enabled, staleTime: 30_000, placeholderData: keepPreviousData,
+  })
+}
+export function useGovernanceTips(offset = 0, enabled = true) {
+  return useQuery({
+    queryKey: ['governance-tips', offset],
+    queryFn: ({ signal }) => api.governanceTips(offset, 25, signal),
+    enabled, staleTime: 60_000, placeholderData: keepPreviousData,
+  })
+}
+
 export function useReferendum(pallet: 'opengov' | 'democracy', index: number) {
   return useQuery({
     queryKey: ['referendum', pallet, index],
