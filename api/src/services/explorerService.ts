@@ -20523,11 +20523,20 @@ export function getTagMemberAccounts(tagId: string, sort: AccountSort = 'value')
 
 // The directory rows for exactly these accounts — one row each, never folded
 // under the tag they all share. Powers a tag page's member list, so a tag reads
-// like the directory it is a slice of.
-export function getAccountsForMembers(members: string[], sort: AccountSort = 'value'): Promise<AccountsPage> {
+// like the directory it is a slice of. `keepOrder` returns the rows in the
+// CALLER's member sequence instead of the directory sort — a user list tag's
+// members carry the order their owner arranged them in, and the page should
+// show that arrangement, not re-rank it by value.
+export async function getAccountsForMembers(members: string[], sort: AccountSort = 'value', keepOrder = false): Promise<AccountsPage> {
   const ids = [...new Set(members.map(m => m.toLowerCase()))].sort()
-  if (!ids.length) return Promise.resolve({ rows: [], total: 0 })
-  return accountsPage(0, Math.min(ids.length, 500), sort, false, undefined, ids)
+  if (!ids.length) return { rows: [], total: 0 }
+  const page = await accountsPage(0, Math.min(ids.length, 500), sort, false, undefined, ids)
+  if (!keepOrder) return page
+  const position = new Map(members.map((m, i) => [m.toLowerCase(), i]))
+  const rows = [...page.rows].sort((a, b) =>
+    (position.get(a.account?.accountId?.toLowerCase() ?? '') ?? Number.MAX_SAFE_INTEGER)
+    - (position.get(b.account?.accountId?.toLowerCase() ?? '') ?? Number.MAX_SAFE_INTEGER))
+  return { ...page, rows }
 }
 
 export function getAccountsForViewerFold(offset: number, limit: number, sort: AccountSort, fold: ViewerFold): Promise<AccountsPage> {
