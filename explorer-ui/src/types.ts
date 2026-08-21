@@ -1576,6 +1576,11 @@ export interface SecurityFuse {
   periodEndBlock: number | null
   category: 'local' | 'external' | null
   lockdownCount: number
+  // Today's dollar meaning of the allowance and of what this period minted —
+  // the token amounts alone hide that a WETH fuse and a PINK fuse differ by
+  // six orders of magnitude. Null when the asset has no price.
+  limitUsd: number | null
+  usedUsd: number | null
 }
 
 export interface SecurityLockdown {
