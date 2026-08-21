@@ -52,7 +52,7 @@ export function ScopedActivity({ scope, tab }: { scope: ActivityScope; tab: 'act
   // `contract` is the account page's contract sub-tab key — reserved so a
   // lingering ?contract=read never reads as a filter value here.
   const filterOptions = { reservedKeys: ['page', 'tab', 'view', 'atab', 'type', 'apage', 'contract'], pageKey: 'apage' }
-  const activityFilters = useFilters({ ...filterOptions, keys: ['action', 'token', 'from', 'to', 'min', 'identity'] })
+  const activityFilters = useFilters({ ...filterOptions, keys: ['action', 'token', 'from', 'to', 'min', 'minRevenue', 'identity'] })
   const extrinsicFilters = useFilters({ ...filterOptions, keys: ['call', 'result', 'origin', 'from', 'to'] })
   const eventFilters = useFilters({ ...filterOptions, keys: ['event', 'from', 'to'] })
   const activityAction = normalizeActivityAction(activityType, activityFilters.values.action ?? '')
@@ -93,7 +93,12 @@ export function ScopedActivity({ scope, tab }: { scope: ActivityScope; tab: 'act
     activityAction || undefined,
     activityFilters.values.from,
     activityFilters.values.to,
-    { token: activityFilters.values.token, min: minimumUsd, identity: activityFilters.values.identity },
+    {
+      token: activityFilters.values.token,
+      min: minimumUsd,
+      minRevenue: activityFilters.values.minRevenue || undefined,
+      identity: activityFilters.values.identity,
+    },
   ] as const
   const accountActivity = useAccountActivity(activeTab === 'activity' ? accountAddress : null, ...commonActivityArgs)
   const tagActivity = useTagActivity(activeTab === 'activity' ? systemTagId : null, ...commonActivityArgs)

@@ -67,7 +67,7 @@ export function offeredPages(args: {
 // exactly how the pager used to advertise 49 pages of a 26-page feed. Splitting the
 // builders per tab also keeps one tab's filters out of another tab's cache key, so
 // switching tabs does not re-count.
-export interface ActivityFilterValues { token?: string; min?: string; from?: string; to?: string; identity?: string }
+export interface ActivityFilterValues { token?: string; min?: string; minRevenue?: string; from?: string; to?: string; identity?: string }
 export interface ExtrinsicFilterValues { call?: string; result?: string; origin?: string; from?: string; to?: string }
 export interface EventFilterValues { event?: string; from?: string; to?: string }
 
@@ -82,6 +82,7 @@ export function activityListCount(type: string, action: string, values: Activity
     min: set(values.min),
     // The pager's total must move with every filter the list shows, or a
     // filtered list offers pages that hold nothing.
+    minRevenue: set(values.minRevenue),
     identity: set(values.identity),
     from: set(values.from),
     to: set(values.to),

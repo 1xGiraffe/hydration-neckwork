@@ -46,7 +46,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
   const activityType = normalizeActivityType(useQueryValue('type', 'all'))
   // Activities filters — the same set as the global feed minus the token combo
   // (this page IS the token filter). `page` resets whenever a filter changes.
-  const activityFilters = useFilters({ reservedKeys: ['tab', 'type', 'page', 'hpage'], pageKey: 'page', keys: ['action', 'from', 'to', 'min'] })
+  const activityFilters = useFilters({ reservedKeys: ['tab', 'type', 'page', 'hpage'], pageKey: 'page', keys: ['action', 'from', 'to', 'min', 'minRevenue'] })
   const activityAction = normalizeActivityAction(activityType, activityFilters.values.action ?? '')
   const requestedPage = parseInt(q.get('page') ?? '', 10)
   const activityPage = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 0
@@ -66,7 +66,8 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
   // one page further is a refused request. Only `maxOffset` is read here: the total
   // that comes with it is the chain-wide feed's length, not this asset's.
   const activityBound = useActivityCount(activityType, activityFilters.values.from, activityFilters.values.to,
-    { min: activityFilters.values.min || undefined }, activityAction || undefined)
+    { min: activityFilters.values.min || undefined, minRevenue: activityFilters.values.minRevenue || undefined },
+    activityAction || undefined)
   const activityPages = offeredPages({ page: activityPage, rowsOnPage: assetActivity.length, maxOffset: activityBound.data?.maxOffset, pageSize: ACTIVITY_PAGE })
   // Holders are paginated server-side (no cap) — fetched only while the tab is open.
   const HOLDERS_PAGE = 50
