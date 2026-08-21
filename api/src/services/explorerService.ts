@@ -8774,6 +8774,21 @@ export function accountIsNamed(who: AccountRef | null | undefined, viewerTagged?
   return !!viewerTagged?.has(who.accountId.toLowerCase())
 }
 
+/**
+ * The protocol-revenue floor. Deliberately NOT part of activityRowMatchesFilters: that
+ * predicate runs inside ~25 per-source builders BEFORE revenue is attached, where every
+ * row's figure is absent — so the floor dropped everything, and an account list filtered
+ * at $1 came back empty while its rows carried $1.25.
+ *
+ * Absent still means nobody computed it (the block's events are not queryable yet),
+ * which is not the same as "under the floor": a filtered view excludes the unknown
+ * rather than asserting it does not qualify.
+ */
+export function revenueFloorPasses(row: ActivityRow, minRevenue: number | undefined): boolean {
+  if (minRevenue == null) return true
+  return row.revenue != null && row.revenue.protocolUsd >= minRevenue
+}
+
 export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFilters): boolean {
   // Named / unnamed, judged on the row's ACTOR — the account the row is BY.
   // A row with no actor at all (a block hook, a scheduler payout) has no
@@ -8789,12 +8804,6 @@ export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFi
     const rowIds = [row.asset?.assetId, row.assetIn?.assetId, row.assetOut?.assetId, ...(row.assetRefs ?? [])]
       .filter((id): id is number => id != null)
     if (!rowIds.some(id => tokenIds.includes(id))) return false
-  }
-  if (filters.minRevenue != null) {
-    // Absent means nobody computed it yet (the block's events are not queryable),
-    // which is not the same as "under the floor". A filtered view excludes the
-    // unknown rather than asserting it does not qualify.
-    if (row.revenue == null || row.revenue.protocolUsd < filters.minRevenue) return false
   }
   if (filters.min != null) {
     if (filters.unit === 'token') {
@@ -12425,6 +12434,10 @@ export async function getRecentActivity(limit: number, from?: string, to?: strin
 // first and only their rows are built. Cost then follows the PAGE, not the sparsity:
 // measured 0.4-0.6s for $1, $100 and $1,000 alike, against a hang for the last.
 const REVENUE_CANDIDATE_BLOCK_SLACK = 20
+
+// How much deeper a scoped (account/tag) list reads when a revenue floor is set, so the
+// page it returns is still a full page after the floor is applied.
+const REVENUE_FLOOR_SCOPED_OVERREAD = 8
 const REVENUE_BUILD_CONCURRENCY = 6
 
 // Run at most `limit` of these at a time, preserving result order.
@@ -12542,6 +12555,7 @@ async function revenueFilteredActivityPage(
   const rows = collected
     // The floor is re-applied per ROW because the candidate set is per EXTRINSIC: an
     // extrinsic that cleared it carries every row it produced, not only the paying one.
+    .filter(row => revenueFloorPasses(row, minUsd))
     .filter(row => activityRowMatchesFilters(row, filters) && activityRowMatchesAction(row, action))
     .filter(row => type === 'all' || activityTypeMatchesFamily(row.type, type))
     .sort((a, b) => b.blockHeight - a.blockHeight || (b.eventIndex ?? -1) - (a.eventIndex ?? -1))
@@ -12786,8 +12800,11 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       sourceSaturated = transfers.length >= fetchN
       if (deferredValueFilter && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
       // The dense route reaches here with a narrow date range; no source can express a
-      // revenue floor in SQL, so it is decided on built rows.
-      if (filters.minRevenue != null) await applyActivityRevenue(rows)
+      // revenue floor in SQL, so it is decided on built rows once they carry the figure.
+      if (filters.minRevenue != null) {
+        await applyActivityRevenue(rows)
+        rows = rows.filter(r => revenueFloorPasses(r, filters.minRevenue))
+      }
       const visibleRows = rows
         .filter(row => activityRowMatchesFilters(row, filters) && activityRowMatchesAction(row, action))
         .sort((left, right) => right.blockHeight - left.blockHeight || (right.eventIndex ?? -1) - (left.eventIndex ?? -1))
@@ -12969,8 +12986,11 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
       if (deferredValueFilter && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
       // The dense route reaches here with a narrow date range; no source can express a
-      // revenue floor in SQL, so it is decided on built rows.
-      if (filters.minRevenue != null) await applyActivityRevenue(rows)
+      // revenue floor in SQL, so it is decided on built rows once they carry the figure.
+      if (filters.minRevenue != null) {
+        await applyActivityRevenue(rows)
+        rows = rows.filter(r => revenueFloorPasses(r, filters.minRevenue))
+      }
       const visibleRows = rows.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
         .sort((a, b) => b.blockHeight - a.blockHeight || (b.eventIndex ?? -1) - (a.eventIndex ?? -1))
       const cutoff = completeActivityPageCutoff(visibleRows, want)
@@ -17749,14 +17769,23 @@ async function growAccountActivityWindow(
 // a page that only ENDS past it is served short rather than withheld, because a total
 // counts a complete window to exactly there.
 async function getAccountActivity(accounts: string[], limit: number, type = 'all', offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {
-  const located = await locatedAccountActivityPage(accounts, type, limit, offset, action, filters, from, to)
-  const page = located ?? await windowedAccountActivityPage(accounts, type, limit, offset, action, filters, from, to)
+  // A revenue floor can only be judged once the rows carry the figure, which happens
+  // below — so the page is read WIDER and cut to size afterwards, or a filtered list
+  // would return a near-empty page whatever it actually holds. An account's feed is
+  // bounded by the account, so reading deeper is cheap here in a way it is not on the
+  // chain-wide feed (which answers the same filter from revenue_events instead).
+  const floor = filters.minRevenue
+  const readLimit = floor == null ? limit : (offset + limit) * REVENUE_FLOOR_SCOPED_OVERREAD
+  const readOffset = floor == null ? offset : 0
+  const located = await locatedAccountActivityPage(accounts, type, readLimit, readOffset, action, filters, from, to)
+  const page = located ?? await windowedAccountActivityPage(accounts, type, readLimit, readOffset, action, filters, from, to)
   await Promise.all([
     applyHistoricalUsd(page, activityHistPick),
     applyXcmJourneys(page),
-    ...(opts.revenue !== false ? [applyActivityRevenue(page)] : []),
+    ...(opts.revenue !== false || floor != null ? [applyActivityRevenue(page)] : []),
   ])
-  return page
+  if (floor == null) return page
+  return page.filter(row => revenueFloorPasses(row, floor)).slice(offset, offset + limit)
 }
 
 // Null when this request has no exact plan, when the located blocks and the classifier
