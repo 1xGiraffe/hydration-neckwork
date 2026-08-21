@@ -33,6 +33,11 @@ export function activityFilterFields(type: string, assets: AssetFilterItem[], in
     IDENTITY_FIELD,
     ...DATE_FIELDS,
     { kind: 'number', key: 'min', placeholder: '$ from' },
+    // What the PROTOCOL earned on the row's extrinsic, which is a different question
+    // from the row's own value: a $13.7k liquidation earned $458 while a $13.7k
+    // stablecoin swap earns cents. Always USD — there is no token denomination to
+    // pick — so it deliberately ignores the unit toggle.
+    { kind: 'number', key: 'minRevenue', placeholder: '$ revenue from' },
   ]
 }
 

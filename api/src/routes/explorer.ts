@@ -155,6 +155,9 @@ export function valueFilters(q: Record<string, unknown>): ValueListFilters {
   return {
     token: textParam(q, 'token', 64),
     min: numParam(q, 'min'),
+    // Always in USD — protocol revenue has no token denomination to choose, so it
+    // deliberately does not read `unit`.
+    minRevenue: numParam(q, 'minRevenue'),
     unit,
     ...(identity ? { identity } : {}),
   }
@@ -184,6 +187,9 @@ const FILTER_PARAM_RULES: { key: string; accepts: (raw: string) => boolean; expe
   // exactly what `numParam` already resolves it to. Only a value that is not a
   // number at all would silently disappear.
   { key: 'min', accepts: raw => z.coerce.number().finite().safeParse(raw).success, expected: 'a number' },
+  // Same rule as `min`, and for the same reason: a floor that is not a number at all
+  // would silently widen the request to every row.
+  { key: 'minRevenue', accepts: raw => z.coerce.number().finite().safeParse(raw).success, expected: 'a number' },
   { key: 'from', accepts: raw => isCalendarDay(raw), expected: 'YYYY-MM-DD' },
   { key: 'to', accepts: raw => isCalendarDay(raw), expected: 'YYYY-MM-DD' },
 ]
