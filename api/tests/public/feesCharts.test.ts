@@ -208,14 +208,18 @@ describe('stream SQL', () => {
   })
 
   it('maps the destination matrix onto the rows destination class', async () => {
-    // asset: lp = the pool account's share; protocol = routed out or burned;
-    // total = everything including the legacy pre-2025-01-25 legs whose
-    // destination the chain never recorded (counted in total, claimed by
-    // neither share). hub: every destination is protocol revenue, burned is
-    // the burn component alone.
+    // lp = the pool account's share; protocol = routed out, burned, or retained in the
+    // protocol-provided HDX position; total = everything, including the legacy
+    // pre-2025-01-25 legs whose destination the chain never recorded (counted in total,
+    // claimed by neither share).
+    //
+    // The hub fee follows the same rule now. It used to take every row for `protocol`,
+    // which stopped being true in 2026-03 when the burned/treasury split ended and every
+    // leg began going to the pool.
     expect(await build('asset', 'lp')).toContain("dest = 'lp'")
-    expect(await build('asset', 'protocol')).toContain("dest IN ('protocol', 'burned')")
+    expect(await build('asset', 'protocol')).toContain("dest IN ('protocol', 'burned', 'pol')")
     expect(await build('asset', 'total')).not.toContain("dest = 'lp'")
+    expect(await build('protocol', 'protocol')).toContain("dest IN ('protocol', 'burned', 'pol')")
     expect(await build('protocol', 'burned')).toContain("(dest = 'burned')")
     expect(await build('protocol', 'total')).not.toContain("(dest = 'burned')")
   })

@@ -120,9 +120,13 @@ const EVENTFUL: readonly EventfulRevenueStream[]
 
 const USD_UNIT = 1e12
 
-/** The TS twin of PROTOCOL_REVENUE_PREDICATE_SQL. */
-function isProtocolRevenue(stream: string, dest: string): boolean {
-  return stream !== 'omnipool_asset_fee' || dest === 'protocol' || dest === 'burned'
+/**
+ * The TS twin of PROTOCOL_REVENUE_PREDICATE_SQL — kept in step by
+ * tests/protocolRevenueTwin.test.ts, which evaluates both over every combination.
+ */
+export function isProtocolRevenue(stream: string, dest: string): boolean {
+  if (dest === 'lp') return false
+  return stream !== 'omnipool_asset_fee' || dest === 'protocol' || dest === 'burned' || dest === 'pol'
 }
 
 function chTimestamp(seconds: number): string {

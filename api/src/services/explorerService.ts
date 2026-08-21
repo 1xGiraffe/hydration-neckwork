@@ -7415,6 +7415,7 @@ async function revenueBookedThroughBlock(): Promise<number> {
 export interface RevenueBearing {
   blockHeight: number
   extrinsicIndex: number | null
+  eventIndex?: number | null
   revenue?: ActivityRevenue
 }
 
@@ -7428,10 +7429,20 @@ export function attachRevenue(
   bookedThrough: number,
 ): void {
   if (!bookedThrough) return
+  // Revenue belongs to the EXTRINSIC, but an extrinsic can produce several rows — a
+  // liquidation seizes collateral AND swaps it, yielding a LiquidationCall row and a
+  // trade row. Reporting it on both showed each liquidation twice with the figure
+  // duplicated, and made the internal collateral swap look like a swap that earned it.
+  // So it goes to the extrinsic's earliest row: the cause, not its consequences.
+  const owner = new Map<string, RevenueBearing>()
   for (const row of rows) {
     if (row.blockHeight > bookedThrough) continue
-    row.revenue = map.get(revenueKey(row.blockHeight, row.extrinsicIndex))
-      ?? { protocolUsd: 0, lpUsd: 0, streams: [] }
+    const key = revenueKey(row.blockHeight, row.extrinsicIndex)
+    const held = owner.get(key)
+    if (!held || (row.eventIndex ?? Infinity) < (held.eventIndex ?? Infinity)) owner.set(key, row)
+  }
+  for (const [key, row] of owner) {
+    row.revenue = map.get(key) ?? { protocolUsd: 0, lpUsd: 0, streams: [] }
   }
 }
 

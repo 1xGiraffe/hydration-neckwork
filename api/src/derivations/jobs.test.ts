@@ -568,7 +568,7 @@ describe('accountRevenueEventfulInsertSql', () => {
     expect(sql).toContain("stream NOT IN ('hollar_borrow', 'asset_reserve')")
     // The shared protocol predicate: lp/burned/unknown omnipool asset-fee legs
     // exist only for the public destination matrix and are never account revenue.
-    expect(sql).toContain("(stream != 'omnipool_asset_fee' OR dest IN ('protocol', 'burned'))")
+    expect(sql).toContain("(stream != 'omnipool_asset_fee' OR dest IN ('protocol', 'burned', 'pol')) AND dest != 'lp'")
     expect(sql).toContain('GROUP BY account, stream')
     expect(sql).toContain('toYYYYMM(block_timestamp) = 202608')
   })
