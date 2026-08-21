@@ -3,6 +3,9 @@ import { renderMatch } from '../src/notifications/evaluator.ts'
 import { renderNotification } from '../src/notifications/render.ts'
 import type { NotificationRule } from '../src/notifications/notificationStore.ts'
 
+// No viewer tags in play: every account renders by its public name or its address.
+const noTags = () => null
+
 const rule = {
   ruleId: 'r1', accountId: '0xacct', kind: 'liquidation', name: 'Liquidations',
   params: {}, channels: [], muted: false, cooldownS: 0,
@@ -24,7 +27,7 @@ const match = (revenue: unknown) => ({
 // knowledge of the rule's kind to decide whether the line belongs.
 describe('the protocol revenue line in a message', () => {
   it('reports what the protocol earned when the row carries it', () => {
-    const rendered = renderNotification(renderMatch(match({ protocolUsd: 458.4, lpUsd: 321.39, streams: [] }), rule, null))
+    const rendered = renderNotification(renderMatch(match({ protocolUsd: 458.4, lpUsd: 321.39, streams: [] }), rule, noTags))
 
     expect(rendered.body).toContain('Protocol revenue')
     expect(rendered.body).toMatch(/\$458/)
@@ -34,13 +37,13 @@ describe('the protocol revenue line in a message', () => {
   // does one whose block is too new to have booked or recomputed events. Inventing
   // "$0.00" there would state a number nobody computed.
   it('is left out entirely when the row carries no revenue', () => {
-    const rendered = renderNotification(renderMatch(match(undefined), rule, null))
+    const rendered = renderNotification(renderMatch(match(undefined), rule, noTags))
 
     expect(rendered.body).not.toContain('Protocol revenue')
   })
 
   it('still reports a genuine zero, which is a computed answer', () => {
-    const rendered = renderNotification(renderMatch(match({ protocolUsd: 0, lpUsd: 0, streams: [] }), rule, null))
+    const rendered = renderNotification(renderMatch(match({ protocolUsd: 0, lpUsd: 0, streams: [] }), rule, noTags))
 
     expect(rendered.body).toContain('Protocol revenue')
   })
