@@ -53,7 +53,7 @@ export const ACTIVITY_TYPES = ['all', 'transfer', 'trade', 'dca', 'liquidity', '
 export type NotificationActivityType = typeof ACTIVITY_TYPES[number]
 
 // Referenda lifecycle phases the evaluator watches.
-export const REFERENDUM_PHASES = ['submitted', 'deciding', 'confirmed', 'rejected', 'cancelled', 'timed-out', 'killed'] as const
+export const REFERENDUM_PHASES = ['submitted', 'deciding', 'confirmed', 'executed', 'rejected', 'cancelled', 'timed-out', 'killed'] as const
 export type ReferendumPhase = typeof REFERENDUM_PHASES[number]
 
 // Technical Committee motion phases the evaluator watches. Its own kind, never a

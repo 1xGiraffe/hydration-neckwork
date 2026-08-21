@@ -10,6 +10,7 @@ import {
 } from '../services/explorerService.ts'
 import { getSecurityDashboard, type SafetyEvent } from '../services/securityService.ts'
 import { isGenericReferendumTitle, referendumTitleFor } from '../services/referendumTitleService.ts'
+import { enactmentOutcomeFrom, referendumEnactmentTaskId } from '../services/governanceService.ts'
 import { tagMapFor } from '../services/userListService.ts'
 import { tagForAccount } from '../services/tagService.ts'
 import {
@@ -194,6 +195,8 @@ export interface ReferendumEventRow {
   phase: ReferendumPhase
   /** Track id, when the event carries one (Submitted/DecisionStarted only). */
   track: number | null
+  /** Executed phase only: how the enactment went (see enactmentOutcomeFrom). */
+  outcome?: 'ok' | 'failed' | 'unavailable' | null
 }
 
 export type TcMotionPhase = typeof TC_MOTION_PHASES[number]
@@ -717,7 +720,7 @@ const TC_MOTION_PHASE_LABEL: Record<TcMotionPhase, string> = {
 
 const PHASE_LABEL: Record<ReferendumPhase, string> = {
   submitted: 'submitted', deciding: 'entered its decision period', confirmed: 'confirmed',
-  rejected: 'rejected', cancelled: 'cancelled', 'timed-out': 'timed out', killed: 'killed',
+  executed: 'executed', rejected: 'rejected', cancelled: 'cancelled', 'timed-out': 'timed out', killed: 'killed',
 }
 
 // Asset ids in human-facing summaries read as tickers, from the same registry
@@ -756,7 +759,14 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
       // so the headline carries the title and the state change reads underneath.
       // With no title yet (the submitted phase parks until one exists) the state
       // change is all there is, and becomes the headline.
-      const change = `Referendum #${p.row.index} ${PHASE_LABEL[p.row.phase]}`
+      // An enactment's message says how it went — a failed call is exactly what
+      // a subscriber wants to hear about, and 'executed' would paper over it.
+      const phaseText = p.row.phase === 'executed'
+        ? p.row.outcome === 'failed' ? 'executed — the call FAILED'
+          : p.row.outcome === 'unavailable' ? 'approved, but its call was unavailable at enactment'
+            : 'executed'
+        : PHASE_LABEL[p.row.phase]
+      const change = `Referendum #${p.row.index} ${phaseText}`
       return {
         title: [textPart(p.title || change)],
         body: p.title ? [change] : [],
@@ -1497,6 +1507,53 @@ async function queryWindowReferenda(window: BlockWindow): Promise<ReferendumEven
   return out
 }
 
+// Enactments are Scheduler events that name their TASK, never their referendum
+// — the task id is a one-way hash — so the lane runs the hash the other way:
+// every known referendum index's enactment task id, grown as the chain mints
+// new indexes, matched against the window's named dispatches. ~400 blake2
+// hashes once, then a Map hit per dispatch.
+const enactmentTaskIndex = new Map<string, number>()
+let enactmentTasksBuiltTo = -1
+function enactmentIndexFor(taskId: string, maxIndex: number): number | undefined {
+  for (let i = enactmentTasksBuiltTo + 1; i <= maxIndex; i++) enactmentTaskIndex.set(referendumEnactmentTaskId(i), i)
+  enactmentTasksBuiltTo = Math.max(enactmentTasksBuiltTo, maxIndex)
+  return enactmentTaskIndex.get(taskId)
+}
+
+// The window's enactments as 'executed' phase rows. The dispatches table is
+// small (one row per named scheduler dispatch), and most windows have none.
+async function queryWindowEnactments(window: BlockWindow): Promise<ReferendumEventRow[]> {
+  if (!client) return []
+  const res = await client.query({
+    query: `SELECT task_id, block_height, event_index, event_name, args_json
+            FROM price_data.scheduler_named_dispatches
+            WHERE block_height > {from:UInt32} AND block_height <= {to:UInt32}
+            ORDER BY block_height, event_index`,
+    query_params: { from: window.from, to: window.to },
+    format: 'JSONEachRow',
+  })
+  const dispatches = await res.json<{ task_id: string; block_height: number; event_index: number; event_name: string; args_json: string }>()
+  if (!dispatches.length) return []
+  const maxRes = await client.query({
+    query: `SELECT max(ref_index) AS ref_index FROM price_data.referendum_lifecycle_events WHERE pallet = 'opengov'`,
+    format: 'JSONEachRow',
+  })
+  const maxIndex = (await maxRes.json<{ ref_index: number }>()).reduce((m, r) => Math.max(m, Number(r.ref_index)), -1)
+  const out: ReferendumEventRow[] = []
+  for (const d of dispatches) {
+    const index = enactmentIndexFor(d.task_id, maxIndex)
+    // Named dispatches that are not referendum enactments (other scheduled
+    // tasks) simply do not resolve to an index.
+    if (index == null) continue
+    out.push({
+      blockHeight: Number(d.block_height), eventIndex: Number(d.event_index),
+      index, phase: 'executed', track: null,
+      outcome: enactmentOutcomeFrom(d.event_name, d.args_json),
+    })
+  }
+  return out
+}
+
 function trackFromArgs(argsJson: string): number | null {
   try {
     const track = (JSON.parse(argsJson || '{}') as { track?: unknown }).track
@@ -1528,7 +1585,7 @@ async function fillReferendumTracks(rows: ReferendumEventRow[]): Promise<void> {
 }
 
 async function referendumMatches(rules: NotificationRule[], window: BlockWindow): Promise<{ matches: RuleMatch[]; commit?: () => void }> {
-  const rows = await queryWindowReferenda(window)
+  const rows = [...await queryWindowReferenda(window), ...await queryWindowEnactments(window)]
   if (rows.length && rules.some(r => (r.params as RuleParams['referendum']).track)) await fillReferendumTracks(rows)
   // Titles are off-chain (SubSquare) and already in memory; a referendum the
   // refresher has not seen yet simply renders without one — except at SUBMITTED,

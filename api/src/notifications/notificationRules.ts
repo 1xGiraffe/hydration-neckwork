@@ -17,7 +17,7 @@ export type NotificationKind = typeof NOTIFICATION_KINDS[number]
 // naming a type the feed cannot filter would silently never match.
 export const ACTIVITY_TYPES = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc'] as const
 // Referenda lifecycle phases the row lane watches.
-export const REFERENDUM_PHASES = ['submitted', 'deciding', 'confirmed', 'rejected', 'cancelled', 'timed-out', 'killed'] as const
+export const REFERENDUM_PHASES = ['submitted', 'deciding', 'confirmed', 'executed', 'rejected', 'cancelled', 'timed-out', 'killed'] as const
 // Technical Committee motion phases the row lane watches. STRICTLY separate from
 // the referendum kind: a TC motion is a committee's own procedural business, and
 // most people subscribing to "referenda" are asking about public votes — folding
