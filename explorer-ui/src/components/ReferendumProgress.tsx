@@ -114,7 +114,18 @@ export function ReferendumProgressCard({ progress, track, stats, now }: {
       note: <Countdown target={progress.confirmEndBlock} stats={stats} now={now} prefix="confirms" />,
     })
   } else {
-    segments.push({ key: 'confirm', label: 'Confirm', state: 'future', pct: 0, note: <>{periodLabel(track.confirmPeriod)}</> })
+    // While deciding, the confirm segment says when confirmation could BEGIN:
+    // the moment the decaying bars meet today's tally ('on-track'), or that
+    // they never will as voted ('short').
+    const projection = progress.projection
+    segments.push({
+      key: 'confirm', label: 'Confirm', state: 'future', pct: 0,
+      note: projection?.state === 'on-track' && projection.confirmableAtBlock != null
+        ? <Countdown target={projection.confirmableAtBlock} stats={stats} now={now} prefix="can start" />
+        : projection?.state === 'short'
+          ? <span className="ref-short">needs more votes to reach it</span>
+          : <>{periodLabel(track.confirmPeriod)}</>,
+    })
   }
 
   return (

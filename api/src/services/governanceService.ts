@@ -7,7 +7,7 @@ import { assetDescriptor } from './explorerAssets.ts'
 import { accountRef, ensurePrices, nestedRemovalRefs, nestedVoteInfos, removalRefsFromPermitData, voteFromPermitData, type AccountRef, type AssetRef } from './explorerService.ts'
 import { referendumTitles } from './referendumTitleService.ts'
 import { pendingNodeApi } from './pendingHeadService.ts'
-import { curveThresholdPerbill, PERBILL, perbillOfRational, trackById, undecidingTimeoutBlocks, type TrackDef } from './referendaTracks.ts'
+import { curveCrossingX, curveThresholdPerbill, PERBILL, perbillOfRational, trackById, undecidingTimeoutBlocks, type TrackDef } from './referendaTracks.ts'
 
 // Governance referendum detail.
 //
@@ -76,6 +76,9 @@ export interface ReferendumDetail {
   pallet: ReferendumPallet
   index: number
   title: string | null
+  // Who signed the submit extrinsic (OpenGov only; Democracy proposals were
+  // tabled from a queue and name no single submitter).
+  proposer: AccountRef | null
   subsquareUrl: string
   track: number | null
   proposalHash: string | null
@@ -212,6 +215,15 @@ export interface ReferendumProgress {
   timeoutBlock: number | null
   approval: ReferendumGauge | null
   support: ReferendumGauge | null
+  // Where the referendum is HEADED, not just where it stands: OpenGov's bars
+  // decay over the decision period, so trailing them today is the healthy
+  // normal. 'passing' clears both bars now; 'on-track' will clear them by
+  // `confirmableAtBlock` if the tally holds; 'short' cannot clear them by the
+  // period's end without new votes.
+  projection: {
+    state: 'passing' | 'on-track' | 'short'
+    confirmableAtBlock: number | null
+  } | null
 }
 
 let client: ClickHouseClient
@@ -523,6 +535,25 @@ export function progressFrom(
       support = gauge(track.minSupport, null, null)
     }
   }
+  // The projection: with both currents known, find when the decaying bars meet
+  // them. The crossing x is the LATER of the two gauges' crossings; a crossing
+  // past the period end (or a gauge below its end-of-period floor) is 'short'.
+  let projection: ReferendumProgress['projection'] = null
+  if (decisionStartBlock != null && approval?.currentPerbill != null && support?.currentPerbill != null) {
+    if (approval.passing && support.passing) {
+      projection = { state: 'passing', confirmableAtBlock: null }
+    } else {
+      const crossA = curveCrossingX(track.minApproval, approval.currentPerbill)
+      const crossS = curveCrossingX(track.minSupport, support.currentPerbill)
+      if (crossA == null || crossS == null) {
+        projection = { state: 'short', confirmableAtBlock: null }
+      } else {
+        const cross = Math.max(crossA, crossS)
+        const block = decisionStartBlock + Math.ceil(cross / PERBILL * track.decisionPeriod)
+        projection = { state: 'on-track', confirmableAtBlock: Math.max(block, headBlock + 1) }
+      }
+    }
+  }
   return {
     phase,
     decisionDepositPlaced,
@@ -535,6 +566,7 @@ export function progressFrom(
     timeoutBlock: decisionStartBlock == null && !decisionDepositPlaced ? submittedBlock + undecidingTimeoutBlocks() : null,
     approval,
     support,
+    projection,
   }
 }
 
@@ -1193,6 +1225,19 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
       && lifecycle.some(row => row.event_name === 'Referenda.Confirmed' || row.event_name === 'Referenda.Approved')
     const enactment = approved ? await loadEnactment(index) : null
 
+    // The proposer: the submit extrinsic's signer (effective signer for proxied
+    // and EVM-signed submissions).
+    let proposer: AccountRef | null = null
+    if (pallet === 'opengov' && submitted?.extrinsic_index != null) {
+      const signerRes = await client.query({
+        query: `SELECT ifNull(signer, effective_signer) AS who FROM price_data.raw_extrinsics
+                WHERE block_height = {b:UInt32} AND extrinsic_index = {i:UInt32} LIMIT 1`,
+        query_params: { b: submitted.block_height, i: submitted.extrinsic_index }, format: 'JSONEachRow',
+      })
+      const who = (await signerRes.json<{ who: string | null }>())[0]?.who
+      if (who && /^0x[0-9a-f]{64}$/i.test(who)) proposer = accountRef(who.toLowerCase())
+    }
+
     const trackId = typeof submittedArgs.track === 'number' ? submittedArgs.track : null
     const track = pallet === 'opengov' && trackId != null ? trackById(trackId) : null
     const phaseInfo = pallet === 'opengov' ? opengovPhase(lifecycle) : null
@@ -1202,6 +1247,7 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
       pallet,
       index,
       title: titles.get(`${pallet}:${index}`) ?? null,
+      proposer,
       subsquareUrl: subsquareUrl(pallet, index),
       track: trackId,
       proposalHash,
@@ -1251,7 +1297,15 @@ export interface ReferendumListRow {
   voters: number | null
   blockHeight: number
   timestamp: string
+  // OpenGov enrichment (null for Democracy): the track off the Submitted event,
+  // and the account that signed the submit extrinsic (effective signer for
+  // proxied/EVM submissions). Democracy proposals were tabled from a queue and
+  // name no single submitter.
+  track: GovernanceTrackRef | null
+  proposer: AccountRef | null
 }
+
+export interface GovernanceTrackRef { id: number; name: string }
 
 // Referendum directory: every referendum either pallet has recorded, newest first.
 // Grouped on the projection's own key prefix, so the whole directory is the three
@@ -1269,18 +1323,48 @@ export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumL
     const [res, titles] = await Promise.all([
       client.query({
         query: `
-          SELECT pallet, ref_index, groupArray(event_name) AS events, max(block_height) AS block_height,
-                 toString(max(block_timestamp)) AS ts
-          FROM price_data.referendum_lifecycle_events FINAL
-          GROUP BY pallet, ref_index
+          SELECT pallet, ref_index, events, last_block AS block_height, ts, track_id, submit_block, submit_ext
+          FROM (
+            -- The inner aggregate must NOT alias max(block_height) to the column's
+            -- own name: the alias shadows the column for the submit_block
+            -- aggregate, which ClickHouse rejects as nested aggregation.
+            SELECT pallet, ref_index, groupArray(event_name) AS events, max(block_height) AS last_block,
+                   toString(max(block_timestamp)) AS ts,
+                   if(countIf(event_name = 'Referenda.Submitted') > 0,
+                      anyIf(JSONExtractInt(args_json, 'track'), event_name = 'Referenda.Submitted'), -1) AS track_id,
+                   anyIf(block_height, event_name = 'Referenda.Submitted') AS submit_block,
+                   anyIf(ifNull(extrinsic_index, -1), event_name = 'Referenda.Submitted') AS submit_ext
+            FROM price_data.referendum_lifecycle_events FINAL
+            GROUP BY pallet, ref_index
+          )
           ORDER BY block_height DESC, pallet ASC, ref_index DESC
           LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         query_params: { limit, offset }, format: 'JSONEachRow',
       }),
       referendumTitles(),
     ])
-    return (await res.json<{ pallet: string; ref_index: number; events: string[]; block_height: number; ts: string }>()).map(row => {
+    const raw = await res.json<{ pallet: string; ref_index: number; events: string[]; block_height: number; ts: string; track_id: number; submit_block: number; submit_ext: number }>()
+    // Every submit extrinsic's signer in one primary-key batch (~400 tuples);
+    // the directory result is cached, so this is not a per-request read.
+    const submitKeys = raw.filter(r => r.pallet === 'opengov' && Number(r.submit_ext) >= 0)
+      .map(r => `(${r.submit_block},${r.submit_ext})`)
+    const signerByKey = new Map<string, string>()
+    if (submitKeys.length) {
+      const signerRes = await client.query({
+        query: `SELECT block_height, extrinsic_index, ifNull(signer, effective_signer) AS who
+                FROM price_data.raw_extrinsics
+                WHERE (block_height, extrinsic_index) IN (${submitKeys.join(',')})`,
+        format: 'JSONEachRow',
+      })
+      for (const row of await signerRes.json<{ block_height: number; extrinsic_index: number; who: string | null }>()) {
+        if (row.who && /^0x[0-9a-f]{64}$/i.test(row.who)) signerByKey.set(`${row.block_height}:${row.extrinsic_index}`, row.who.toLowerCase())
+      }
+    }
+    return raw.map(row => {
       const pallet = row.pallet as ReferendumPallet
+      const trackId = Number(row.track_id)
+      const track = pallet === 'opengov' && trackId >= 0 ? trackById(trackId) : null
+      const who = signerByKey.get(`${row.submit_block}:${row.submit_ext}`)
       return {
         pallet,
         index: Number(row.ref_index),
@@ -1289,7 +1373,324 @@ export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumL
         voters: null,
         blockHeight: Number(row.block_height),
         timestamp: row.ts,
+        track: track ? { id: track.id, name: track.name } : trackId >= 0 ? { id: trackId, name: `track ${trackId}` } : null,
+        proposer: who ? accountRef(who) : null,
       }
     })
   })
+}
+
+/* ============ the /governance page ============ */
+
+export type GovernanceReferendumRow = ReferendumListRow
+export interface GovernanceReferendaPage { total: number; rows: GovernanceReferendumRow[] }
+
+// The whole referendum directory (~600 rows, a few KB) — the single projection
+// read getReferenda already caches, held whole and filtered per request, which
+// is what gives the page exact totals and free status/track filters.
+async function governanceDirectory(): Promise<GovernanceReferendumRow[]> {
+  return getReferenda(2000, 0)
+}
+
+export async function getGovernanceReferenda(
+  pallet: ReferendumPallet, status?: string, track?: number, limit = 25, offset = 0,
+): Promise<GovernanceReferendaPage> {
+  const rows = (await governanceDirectory()).filter(row =>
+    row.pallet === pallet
+    && (!status || row.status === status)
+    && (track == null || row.track?.id === track))
+  return { total: rows.length, rows: rows.slice(offset, offset + limit) }
+}
+
+// The status words a pallet's rows can actually carry — the page's status
+// filter offers exactly these rather than a hardcoded list that drifts.
+export function governanceStatusOptions(pallet: ReferendumPallet): string[] {
+  const table = pallet === 'opengov' ? OPENGOV_STATUS : DEMOCRACY_STATUS
+  return [...new Set(table.map(([, status]) => status))]
+}
+
+// One RUNNING OpenGov referendum, enriched for the live cards: track, phase
+// clocks and the freshest tally — everything the /governance hero shows without
+// the voters reconstruction the detail page pays for.
+export interface ActiveReferendumCard {
+  index: number
+  title: string | null
+  status: string
+  track: GovernanceTrackRef | null
+  proposer: AccountRef | null
+  submittedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
+  progress: ReferendumProgress | null
+  // 'live' is the pallet's current storage tally; 'snapshot' the decision-start
+  // figure every later vote has moved past (shown, but labeled).
+  tally: { ayes: string; nays: string; support: string | null; source: 'live' | 'snapshot' } | null
+}
+
+export interface GovernanceOverview {
+  active: ActiveReferendumCard[]
+  counts: { opengov: number; democracy: number; tcMotions: number; councilMotions: number; tips: number }
+}
+
+const ACTIVE_STATUSES = new Set(['submitted', 'deciding', 'confirming'])
+
+export async function getGovernanceOverview(): Promise<GovernanceOverview> {
+  return cached('explorer:governance:overview', 6_000, async () => {
+    const directory = await governanceDirectory()
+    const activeRows = directory.filter(row => row.pallet === 'opengov' && ACTIVE_STATUSES.has(row.status))
+    const headRes = activeRows.length
+      ? await client.query({ query: 'SELECT max(block_height) AS h FROM price_data.blocks', format: 'JSONEachRow' })
+      : null
+    const head = headRes ? Number((await headRes.json<{ h: number }>())[0]?.h ?? 0) : 0
+    const active = await Promise.all(activeRows.map(async row => {
+      const lifecycle = await cached(`explorer:referendum:lifecycle:opengov:${row.index}`, RUNNING_TTL_MS, () => loadLifecycle('opengov', row.index))
+      const phaseInfo = opengovPhase(lifecycle)
+      const track = row.track ? trackById(row.track.id) : null
+      const live = phaseInfo && track ? await liveReferendumState(row.index) : null
+      const snapshot = onChainTallyFrom(lifecycle)
+      const submitted = lifecycle.find(r => r.event_name === 'Referenda.Submitted')
+      return {
+        index: row.index,
+        title: row.title,
+        status: row.status,
+        track: row.track,
+        proposer: row.proposer,
+        submittedAt: submitted ? { blockHeight: submitted.block_height, extrinsicIndex: submitted.extrinsic_index, timestamp: submitted.ts } : null,
+        progress: phaseInfo && track && head > 0
+          ? progressFrom(phaseInfo, track, head, live, { ayes: '0', nays: '0', support: '0' })
+          : null,
+        tally: live
+          ? { ayes: live.ayes, nays: live.nays, support: live.support, source: 'live' as const }
+          : snapshot ? { ayes: snapshot.ayes, nays: snapshot.nays, support: snapshot.support, source: 'snapshot' as const } : null,
+      }
+    }))
+    const [motionsTc, motionsCouncil, tips] = await Promise.all([
+      collectiveMotions('TechnicalCommittee'), collectiveMotions('Council'), treasuryTips(),
+    ])
+    return {
+      active,
+      counts: {
+        opengov: directory.filter(r => r.pallet === 'opengov').length,
+        democracy: directory.filter(r => r.pallet === 'democracy').length,
+        tcMotions: motionsTc.length,
+        councilMotions: motionsCouncil.length,
+        tips: tips.length,
+      },
+    }
+  })
+}
+
+/* ---- collective motions (Technical Committee + the historical Council) ---- */
+
+export interface CollectiveMotionRow {
+  index: number
+  hash: string
+  proposer: AccountRef | null
+  threshold: number
+  ayes: number
+  nays: number
+  // What the motion DOES: the proposed call's name, with a batch summarized by
+  // its inner calls ("Utility.batch_all · AssetRegistry.update ×9") — decoded
+  // from the propose extrinsic, which raw_calls carries in full.
+  call: string | null
+  status: 'open' | 'approved' | 'disapproved' | 'executed' | 'failed'
+  proposedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string }
+  closedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
+}
+export interface CollectiveMotionsPage { total: number; rows: CollectiveMotionRow[] }
+
+// The proposed call, summarized to one line. A batch counts its inner calls per
+// name; anything unparseable stays null rather than guessing.
+export function motionCallSummary(argsJson: string): string | null {
+  try {
+    const proposal = (JSON.parse(argsJson) as { proposal?: { __kind?: string; value?: { __kind?: string; calls?: { __kind?: string; value?: { __kind?: string } }[] } } }).proposal
+    if (!proposal?.__kind) return null
+    const name = `${proposal.__kind}.${proposal.value?.__kind ?? ''}`.replace(/\.$/, '')
+    const calls = proposal.value?.calls
+    if (!Array.isArray(calls) || !calls.length) return name
+    const counts = new Map<string, number>()
+    for (const c of calls) {
+      const inner = `${c?.__kind ?? '?'}.${c?.value?.__kind ?? '?'}`
+      counts.set(inner, (counts.get(inner) ?? 0) + 1)
+    }
+    const parts = [...counts.entries()].sort((a, b) => b[1] - a[1])
+    const shown = parts.slice(0, 2).map(([n, c]) => (c > 1 ? `${n} ×${c}` : n))
+    const more = parts.length > 2 ? ` +${parts.length - 2} more` : ''
+    return `${name} · ${shown.join(', ')}${more}`
+  } catch { return null }
+}
+
+const MOTION_EVENTS = ['Proposed', 'Voted', 'Approved', 'Disapproved', 'Closed', 'Executed'] as const
+
+async function collectiveMotions(pallet: 'TechnicalCommittee' | 'Council'): Promise<CollectiveMotionRow[]> {
+  return cached(`explorer:governance:motions:${pallet}`, 60_000, async () => {
+    const names = MOTION_EVENTS.map(n => `${pallet}.${n}`)
+    const res = await client.query({
+      query: `SELECT block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts, event_name, args_json
+              FROM price_data.raw_events
+              WHERE event_name IN (${names.map(n => `'${n}'`).join(',')})
+              ORDER BY block_height, event_index`,
+      format: 'JSONEachRow',
+    })
+    const events = await res.json<{ block_height: number; event_index: number; extrinsic_index: number | null; ts: string; event_name: string; args_json: string }>()
+    const parse = (json: string) => { try { return JSON.parse(json) as Record<string, unknown> } catch { return {} } }
+    const motions: (CollectiveMotionRow & { proposeKey: string })[] = []
+    // A hash names a CALL, not a motion — the same call proposed twice is two
+    // motions — so hash events attach to the latest open instance of their hash.
+    const latestByHash = new Map<string, CollectiveMotionRow & { proposeKey: string }>()
+    for (const ev of events) {
+      const args = parse(ev.args_json)
+      const hash = String(args.proposalHash ?? '')
+      const kind = ev.event_name.slice(pallet.length + 1)
+      if (kind === 'Proposed') {
+        const proposer = typeof args.account === 'string' && /^0x[0-9a-f]{64}$/i.test(args.account) ? accountRef(args.account.toLowerCase()) : null
+        const motion: CollectiveMotionRow & { proposeKey: string } = {
+          index: Number(args.proposalIndex ?? -1),
+          hash,
+          proposer,
+          threshold: Number(args.threshold ?? 0),
+          ayes: 1, nays: 0,   // proposing votes aye implicitly in this pallet's UI sense
+          call: null,
+          status: 'open',
+          proposedAt: { blockHeight: ev.block_height, extrinsicIndex: ev.extrinsic_index, timestamp: ev.ts },
+          closedAt: null,
+          proposeKey: `${ev.block_height}:${ev.extrinsic_index ?? -1}`,
+        }
+        motions.push(motion)
+        latestByHash.set(hash, motion)
+        continue
+      }
+      const motion = latestByHash.get(hash)
+      if (!motion) continue
+      const moment = { blockHeight: ev.block_height, extrinsicIndex: ev.extrinsic_index, timestamp: ev.ts }
+      if (kind === 'Voted') {
+        motion.ayes = Number(args.yes ?? motion.ayes)
+        motion.nays = Number(args.no ?? motion.nays)
+      } else if (kind === 'Closed') {
+        motion.ayes = Number(args.yes ?? motion.ayes)
+        motion.nays = Number(args.no ?? motion.nays)
+        motion.closedAt = moment
+      } else if (kind === 'Approved') {
+        motion.status = 'approved'; motion.closedAt = moment
+      } else if (kind === 'Disapproved') {
+        motion.status = 'disapproved'; motion.closedAt = moment
+      } else if (kind === 'Executed') {
+        const result = (args.result as { __kind?: string } | undefined)?.__kind
+        motion.status = result === 'Ok' ? 'executed' : 'failed'
+        motion.closedAt = moment
+      }
+    }
+    // What each motion proposes, off its propose extrinsic (raw_calls carries the
+    // full decoded inner call). Keyed by (block, extrinsic) of the Proposed event.
+    const keys = motions.filter(m => m.proposedAt.extrinsicIndex != null)
+      .map(m => `(${m.proposedAt.blockHeight},${m.proposedAt.extrinsicIndex})`)
+    if (keys.length) {
+      const callRes = await client.query({
+        query: `SELECT block_height, extrinsic_index, args_json
+                FROM price_data.raw_calls
+                WHERE (block_height, extrinsic_index) IN (${keys.join(',')})
+                  AND call_name = '${pallet}.propose'
+                ORDER BY length(call_address) ASC`,
+        format: 'JSONEachRow',
+      })
+      const byKey = new Map<string, string>()
+      for (const row of await callRes.json<{ block_height: number; extrinsic_index: number; args_json: string }>()) {
+        const key = `${row.block_height}:${row.extrinsic_index}`
+        if (!byKey.has(key)) byKey.set(key, row.args_json)
+      }
+      for (const motion of motions) {
+        const argsJson = byKey.get(motion.proposeKey)
+        if (argsJson) motion.call = motionCallSummary(argsJson)
+      }
+    }
+    motions.reverse()   // newest first
+    return motions.map(({ proposeKey: _unused, ...row }) => row)
+  })
+}
+
+export async function getCollectiveMotions(body: 'tc' | 'council', limit = 25, offset = 0): Promise<CollectiveMotionsPage> {
+  const rows = await collectiveMotions(body === 'tc' ? 'TechnicalCommittee' : 'Council')
+  return { total: rows.length, rows: rows.slice(offset, offset + limit) }
+}
+
+/* ---- treasury tips (historical; the pallet went quiet in 2025-01) ---- */
+
+export interface TreasuryTipRow {
+  hash: string
+  // The tip's reason — by convention a URL or a short sentence, carried as
+  // bytes in the report_awesome/tip_new call.
+  reason: string | null
+  beneficiary: AccountRef | null
+  payout: string | null
+  status: 'open' | 'closing' | 'closed' | 'retracted'
+  openedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string }
+  closedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
+}
+export interface TreasuryTipsPage { total: number; rows: TreasuryTipRow[] }
+
+async function treasuryTips(): Promise<TreasuryTipRow[]> {
+  return cached('explorer:governance:tips', 300_000, async () => {
+    const res = await client.query({
+      query: `SELECT block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts, event_name, args_json
+              FROM price_data.raw_events
+              WHERE event_name IN ('Tips.NewTip', 'Tips.TipClosing', 'Tips.TipClosed', 'Tips.TipRetracted')
+              ORDER BY block_height, event_index`,
+      format: 'JSONEachRow',
+    })
+    const events = await res.json<{ block_height: number; event_index: number; extrinsic_index: number | null; ts: string; event_name: string; args_json: string }>()
+    const parse = (json: string) => { try { return JSON.parse(json) as Record<string, unknown> } catch { return {} } }
+    const byHash = new Map<string, TreasuryTipRow>()
+    for (const ev of events) {
+      const args = parse(ev.args_json)
+      const hash = String(args.tipHash ?? '')
+      const moment = { blockHeight: ev.block_height, extrinsicIndex: ev.extrinsic_index, timestamp: ev.ts }
+      if (ev.event_name === 'Tips.NewTip') {
+        byHash.set(hash, { hash, reason: null, beneficiary: null, payout: null, status: 'open', openedAt: moment, closedAt: null })
+        continue
+      }
+      const tip = byHash.get(hash)
+      if (!tip) continue
+      if (ev.event_name === 'Tips.TipClosing') tip.status = 'closing'
+      else if (ev.event_name === 'Tips.TipClosed') {
+        tip.status = 'closed'
+        tip.closedAt = moment
+        tip.payout = typeof args.payout === 'string' || typeof args.payout === 'number' ? String(args.payout) : null
+        if (typeof args.who === 'string' && /^0x[0-9a-f]{64}$/i.test(args.who)) tip.beneficiary = accountRef(args.who.toLowerCase())
+      } else if (ev.event_name === 'Tips.TipRetracted') { tip.status = 'retracted'; tip.closedAt = moment }
+    }
+    const tips = [...byHash.values()]
+    // Reason + beneficiary from the opening call — the events never carry them.
+    const keys = tips.filter(t => t.openedAt.extrinsicIndex != null)
+      .map(t => `(${t.openedAt.blockHeight},${t.openedAt.extrinsicIndex})`)
+    if (keys.length) {
+      const callRes = await client.query({
+        query: `SELECT block_height, extrinsic_index, args_json
+                FROM price_data.raw_calls
+                WHERE (block_height, extrinsic_index) IN (${keys.join(',')})
+                  AND call_name IN ('Tips.report_awesome', 'Tips.tip_new')
+                ORDER BY length(call_address) ASC`,
+        format: 'JSONEachRow',
+      })
+      const byKey = new Map<string, Record<string, unknown>>()
+      for (const row of await callRes.json<{ block_height: number; extrinsic_index: number; args_json: string }>()) {
+        const key = `${row.block_height}:${row.extrinsic_index}`
+        if (!byKey.has(key)) byKey.set(key, parse(row.args_json))
+      }
+      for (const tip of tips) {
+        const args = byKey.get(`${tip.openedAt.blockHeight}:${tip.openedAt.extrinsicIndex}`)
+        if (!args) continue
+        if (typeof args.reason === 'string' && args.reason.startsWith('0x')) {
+          try { tip.reason = Buffer.from(args.reason.slice(2), 'hex').toString('utf8') } catch { /* stays null */ }
+        }
+        if (!tip.beneficiary && typeof args.who === 'string' && /^0x[0-9a-f]{64}$/i.test(args.who)) {
+          tip.beneficiary = accountRef(args.who.toLowerCase())
+        }
+      }
+    }
+    tips.reverse()
+    return tips
+  })
+}
+
+export async function getTreasuryTips(limit = 25, offset = 0): Promise<TreasuryTipsPage> {
+  const rows = await treasuryTips()
+  return { total: rows.length, rows: rows.slice(offset, offset + limit) }
 }
