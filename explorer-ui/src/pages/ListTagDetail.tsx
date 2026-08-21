@@ -137,7 +137,7 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
                   the rows load; their names are already known. */}
               <div className="sec-title">Accounts · {members.length}</div>
               {memberRows.data?.rows.length
-                ? <AccountsTable rows={memberRows.data.rows} skeletonRows={Math.min(members.length, 12)} />
+                ? <AccountsTable rows={memberRows.data.rows} skeletonRows={Math.min(members.length, 12)} memberView />
                 : <div className="panel"><table className="tbl">
                   <thead><tr><th>Account</th></tr></thead>
                   <tbody>
