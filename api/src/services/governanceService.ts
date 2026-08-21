@@ -88,6 +88,8 @@ export interface ReferendumDetail {
   // than implying the referendum has no proposal.
   proposalCall: { pallet: string; callName: string; args: unknown; encoded: string | null; byteLength: number; decodeError: string | null } | null
   status: string
+  // How the approved call's enactment went (OpenGov only, null until it runs).
+  enactment: ReferendumEnactmentOutcome | null
   submittedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
   concludedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
   asset: AssetRef
@@ -351,6 +353,30 @@ export function enactmentOutcomeFrom(eventName: string, argsJson: string): Refer
     const kind = (JSON.parse(argsJson) as { result?: { __kind?: unknown } }).result?.__kind
     return kind === 'Ok' ? 'ok' : typeof kind === 'string' ? 'failed' : null
   } catch { return null }
+}
+
+// Every referendum's enactment outcome at once, for the directory: the whole dispatch table
+// (a few hundred rows) matched against the task ids of every index up to `maxIndex`. Named
+// dispatches that are not enactments simply resolve to no index.
+async function loadEnactmentOutcomes(maxIndex: number): Promise<Map<number, ReferendumEnactmentOutcome>> {
+  const res = await client.query({
+    query: `SELECT task_id, event_name, args_json
+            FROM price_data.scheduler_named_dispatches FINAL
+            ORDER BY block_height, event_index`,
+    format: 'JSONEachRow',
+  })
+  const dispatches = await res.json<{ task_id: string; event_name: string; args_json: string }>()
+  const indexByTask = new Map<string, number>()
+  for (let i = 0; i <= maxIndex; i++) indexByTask.set(referendumEnactmentTaskId(i), i)
+  const out = new Map<number, ReferendumEnactmentOutcome>()
+  for (const d of dispatches) {
+    const index = indexByTask.get(d.task_id)
+    const outcome = index == null ? null : enactmentOutcomeFrom(d.event_name, d.args_json)
+    // Later rows win: a CallUnavailable that is retried and dispatched next block
+    // should read as its dispatch.
+    if (index != null && outcome) out.set(index, outcome)
+  }
+  return out
 }
 
 // The enactment outcome for one OpenGov referendum. A point lookup on the table's ORDER BY
@@ -1224,6 +1250,7 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
     const approved = pallet === 'opengov'
       && lifecycle.some(row => row.event_name === 'Referenda.Confirmed' || row.event_name === 'Referenda.Approved')
     const enactment = approved ? await loadEnactment(index) : null
+    const enactmentOutcome = enactment ? enactmentOutcomeFrom(enactment.event_name, enactment.args_json) : null
 
     // The proposer: the submit extrinsic's signer (effective signer for proxied
     // and EVM-signed submissions).
@@ -1252,7 +1279,14 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
       track: trackId,
       proposalHash,
       proposalCall,
-      status: referendumStatusFrom(pallet, lifecycle.map(row => row.event_name)),
+      // Same upgrade as the directory: an approved referendum whose call has run
+      // reads 'executed' — its true final state (a CallUnavailable is not an
+      // execution and stays 'approved', with the fault in `enactment`).
+      status: (() => {
+        const status = referendumStatusFrom(pallet, lifecycle.map(row => row.event_name))
+        return status === 'approved' && (enactmentOutcome === 'ok' || enactmentOutcome === 'failed') ? 'executed' : status
+      })(),
+      enactment: enactmentOutcome,
       submittedAt: submitted ? { blockHeight: submitted.block_height, extrinsicIndex: submitted.extrinsic_index, timestamp: submitted.ts } : null,
       // A conclusion is usually a block hook rather than an extrinsic, so its extrinsic
       // index is legitimately null and the UI falls back to a plain timestamp.
@@ -1303,6 +1337,9 @@ export interface ReferendumListRow {
   // name no single submitter.
   track: GovernanceTrackRef | null
   proposer: AccountRef | null
+  // How the approved call's enactment went (OpenGov only, null until it runs).
+  // 'ok'/'failed' upgrade the status word to 'executed'; the badge colors on this.
+  enactment: ReferendumEnactmentOutcome | null
 }
 
 export interface GovernanceTrackRef { id: number; name: string }
@@ -1348,6 +1385,8 @@ export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumL
     // the directory result is cached, so this is not a per-request read.
     const submitKeys = raw.filter(r => r.pallet === 'opengov' && Number(r.submit_ext) >= 0)
       .map(r => `(${r.submit_block},${r.submit_ext})`)
+    const maxOpengovIndex = raw.reduce((m, r) => (r.pallet === 'opengov' ? Math.max(m, Number(r.ref_index)) : m), -1)
+    const enactments = maxOpengovIndex >= 0 ? await loadEnactmentOutcomes(maxOpengovIndex) : new Map<number, ReferendumEnactmentOutcome>()
     const signerByKey = new Map<string, string>()
     if (submitKeys.length) {
       const signerRes = await client.query({
@@ -1365,11 +1404,17 @@ export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumL
       const trackId = Number(row.track_id)
       const track = pallet === 'opengov' && trackId >= 0 ? trackById(trackId) : null
       const who = signerByKey.get(`${row.submit_block}:${row.submit_ext}`)
+      const status = referendumStatusFrom(pallet, row.events)
+      const enactment = pallet === 'opengov' ? enactments.get(Number(row.ref_index)) ?? null : null
       return {
         pallet,
         index: Number(row.ref_index),
         title: titles.get(`${pallet}:${Number(row.ref_index)}`) ?? null,
-        status: referendumStatusFrom(pallet, row.events),
+        // An approved referendum whose call has run reads 'executed' — its true
+        // final state. A CallUnavailable is not an execution, so it stays
+        // 'approved' with the fault carried in `enactment`.
+        status: status === 'approved' && (enactment === 'ok' || enactment === 'failed') ? 'executed' : status,
+        enactment,
         voters: null,
         blockHeight: Number(row.block_height),
         timestamp: row.ts,
@@ -1406,7 +1451,10 @@ export async function getGovernanceReferenda(
 // filter offers exactly these rather than a hardcoded list that drifts.
 export function governanceStatusOptions(pallet: ReferendumPallet): string[] {
   const table = pallet === 'opengov' ? OPENGOV_STATUS : DEMOCRACY_STATUS
-  return [...new Set(table.map(([, status]) => status))]
+  const statuses = [...new Set(table.map(([, status]) => status))]
+  // 'executed' is not in the lifecycle table — it is the enactment upgrade of
+  // 'approved' (see getReferenda) — but it is a status the rows carry.
+  return pallet === 'opengov' ? [...statuses, 'executed'] : statuses
 }
 
 // One RUNNING OpenGov referendum, enriched for the live cards: track, phase
