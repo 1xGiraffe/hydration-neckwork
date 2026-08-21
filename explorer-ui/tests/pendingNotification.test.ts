@@ -67,10 +67,12 @@ describe('pending notification handoff', () => {
 
 describe('activity filters → alert rule', () => {
   it('expresses a token + USD floor as a large-trade rule', () => {
+    // No name: the server describes the rule, and it is the side that holds the
+    // asset registry — naming it here read "on asset 1000625" where the server says
+    // "on sUSDe", and put Title case in the same slot as a lowercase summary.
     expect(notifiableFilters('all', '0', '10000')).toEqual({
       kind: 'large-trade',
       params: { assetId: 0, minUsd: 10_000 },
-      name: 'Trades over $10k on asset 0',
     })
     expect(notifiableFilters('trade', '0', '10000')?.kind).toBe('large-trade')
   })
@@ -80,7 +82,6 @@ describe('activity filters → alert rule', () => {
     expect(notifiableFilters('transfer', '0', '10000')).toEqual({
       kind: 'large-transfer',
       params: { assetId: 0, minUsd: 10_000 },
-      name: 'Transfers over $10k of asset 0',
     })
   })
 

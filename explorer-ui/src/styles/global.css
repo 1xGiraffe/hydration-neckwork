@@ -2347,6 +2347,11 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 /* The filter zone's `extra` slot, when it holds more than one control — one
    flex child keeps .filter-head's space-between layout intact. */
 .filter-extra { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+/* The smol toggle and the Notify pill sit side by side here, so they share the
+   toggle's height and pill radius — .btn.sm is 26px, which read as a shorter button
+   beside a 34px one. Scoped to this row: elsewhere a .notify-btn sits among other
+   .btn.sm and should keep matching THEM. */
+.filter-extra .notify-btn { height: 34px; padding: 0 13px; border-radius: 9999px; }
 
 /* Logged-out teaser. Two columns on desktop, stacked on phones. */
 .notif-hero { display: flex; gap: 24px; align-items: flex-start; padding: 26px 24px; flex-wrap: wrap; }

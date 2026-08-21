@@ -77,7 +77,10 @@ function withQuery(path: string, values: Record<string, QueryValue>): string {
   return encoded ? `${path}?${encoded}` : path
 }
 
-export interface ValueFilters { token?: string; min?: string; identity?: string }
+// `minRevenue` is a floor on what the PROTOCOL earned on the row's extrinsic, which
+// is a different question from `min` (the row's own value) and always in USD — it has
+// no token denomination, so the unit toggle does not apply to it.
+export interface ValueFilters { token?: string; min?: string; minRevenue?: string; identity?: string }
 export interface ExtrinsicFilters { call?: string; result?: string; origin?: string }
 export interface EventFilters { event?: string }
 // Which list on an account/tag detail page a total is being asked for, plus the

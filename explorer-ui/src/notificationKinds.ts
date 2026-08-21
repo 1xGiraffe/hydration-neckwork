@@ -282,6 +282,14 @@ function normalizeParams(kind: NotificationKind, params: Record<string, unknown>
         section: String(p.section ?? '').trim().toLowerCase(),
         method: typeof p.method === 'string' ? p.method.trim().toLowerCase() : undefined,
       }
+    // The server fills `dcaStart` in from its schema default, so a stored rule is
+    // never byte-identical to what a Notify button asked for. Without the default
+    // applied on both sides the button reads "not subscribed" forever — it stays off
+    // after a successful create, and clicking again makes a duplicate. Only
+    // large-trade has DCA schedules to watch; large-transfer's schema rejects the
+    // flag, so nothing is invented for it.
+    case 'large-trade':
+      return { ...p, dcaStart: p.dcaStart === false ? false : true }
     default:
       return p
   }
@@ -344,6 +352,15 @@ export function ruleTagTarget(rule: Pick<NotificationRule, 'kind' | 'params'>): 
 // How a rule is named where it is about to be removed: the name its owner gave
 // it, else the server's summary — the same two strings, in the same order, the
 // rules table leads with.
+// A rule's headline reads as a title wherever it is shown, but it comes from two
+// places: a name the owner typed, or the server's summary, which is written lowercase
+// so it can also sit mid-sentence ("Alerting on trades over $10k"). Capitalising at
+// the display site is what makes the list consistent without breaking those uses.
+export function ruleHeadline(rule: { name?: string; summary?: string }): string {
+  const text = (rule.name || rule.summary || '').trim()
+  return text ? text[0].toUpperCase() + text.slice(1) : ''
+}
+
 export function ruleSubject(rule: { name?: string; summary?: string }): string {
   return (rule.name || rule.summary || '').trim() || 'this alert'
 }
