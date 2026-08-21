@@ -594,7 +594,10 @@ export async function userRoutes(fastify: FastifyInstance) {
     if (!accountId) return
     const resolved = requireListTag(req, reply, accountId)
     if (!resolved) return
-    return getAccountsForMembers(resolved.tag.members, accountSortParam(req.query as Record<string, unknown>))
+    // The owner's own arrangement is the default order; an explicit ?sort
+    // (a column header click) still re-ranks like the directory.
+    const q = req.query as Record<string, unknown>
+    return getAccountsForMembers(resolved.tag.members, accountSortParam(q), typeof q.sort !== 'string')
   })
 
   fastify.get('/user/list-tag/:listId/:tagId/activity', async (req, reply) => {
