@@ -109,7 +109,14 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
         ]} />
         <div className="page-title">
           {data?.title ?? label}
-          <span className="sub">{data ? `${PALLET_LABEL[pallet] ?? pallet} #${index} · ${data.status}${data.trackInfo ? ` · ${data.trackInfo.name.replace(/_/g, ' ')} track` : data.track != null ? ` · track ${data.track}` : ''}` : ''}</span>
+          <span className="sub">{data && <>
+            {`${PALLET_LABEL[pallet] ?? pallet} #${index} · `}
+            {/* Enacted but the dispatched call errored: the status word turns red. */}
+            {data.enactment === 'failed'
+              ? <span className="ref-status-failed" title="Enacted, but the dispatched call failed">{data.status} (call failed)</span>
+              : data.status}
+            {data.trackInfo ? ` · ${data.trackInfo.name.replace(/_/g, ' ')} track` : data.track != null ? ` · track ${data.track}` : ''}
+          </>}</span>
         </div>
       </div>
 

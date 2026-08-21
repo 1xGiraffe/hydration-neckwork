@@ -34,10 +34,12 @@ function statusTone(status: string): 'good' | 'almost' | 'bad' | 'neutral' | 'qu
   if (/^(deciding|open|closing|submitted|started)$/.test(status)) return 'neutral'
   return 'quiet'
 }
-function StatusBadge({ status, failing }: { status: string; failing?: boolean }) {
+function StatusBadge({ status, failing, failedCall }: { status: string; failing?: boolean; failedCall?: boolean }) {
   // A deciding referendum whose tally can never clear the decaying bars is the
   // one in-flight state worth a red word: it says where things are HEADED.
   if (failing) return <span className="badge gov-status bad" title={`Still ${status}, but as voted today it cannot pass`}>not passing</span>
+  // Approved and enacted, but the dispatched call errored: the same word, red.
+  if (failedCall) return <span className="badge gov-status bad" title="Enacted, but the dispatched call failed">{status}</span>
   return <span className={`badge gov-status ${statusTone(status)}`}>{status}</span>
 }
 
@@ -115,7 +117,7 @@ function ReferendaTable({ pallet, page, onPage, shortIndexes }: { pallet: 'openg
   // an unfiltered first page fetch would be needed for exact option lists, but
   // the status vocabulary is small and fixed per pallet, so it is inlined.
   const statusOptions = pallet === 'opengov'
-    ? ['submitted', 'deciding', 'confirming', 'approved', 'rejected', 'cancelled', 'timed out', 'killed']
+    ? ['submitted', 'deciding', 'confirming', 'approved', 'executed', 'rejected', 'cancelled', 'timed out', 'killed']
     : ['started', 'passed', 'not passed', 'executed', 'cancelled', 'vetoed']
   const trackOptions = ['root', 'whitelisted_caller', 'referendum_canceller', 'referendum_killer', 'general_admin', 'treasurer', 'spender', 'tipper', 'omnipool_admin', 'economic_parameters']
   return (
@@ -152,7 +154,7 @@ function RefRow({ r, now, showTrack, failing }: { r: GovernanceReferendumRow; no
       <td data-label="Title" className="gov-title-cell">{r.title ?? <span className="muted">—</span>}</td>
       {showTrack && <td data-label="Track" className="muted">{r.track ? trackLabel(r.track.name) : <Dash />}</td>}
       {showTrack && <td data-label="Proposer">{r.proposer ? <AddrPill account={r.proposer} noCopy /> : <Dash />}</td>}
-      <td data-label="Status"><StatusBadge status={r.status} failing={failing} /></td>
+      <td data-label="Status"><StatusBadge status={r.status} failing={failing} failedCall={r.enactment === 'failed'} /></td>
       <td data-label="Last activity" className="r mono"><MomentLink at={{ blockHeight: r.blockHeight, extrinsicIndex: null, timestamp: r.timestamp }} now={now} /></td>
     </tr>
   )
