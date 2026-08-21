@@ -41,6 +41,7 @@ const IT = {
   events: { to: paths.events(), label: 'Events', match: ['events', 'event'] } as NavItem,
   contracts: { to: paths.contracts(), label: 'Contracts', match: ['contracts'] } as NavItem,
   security: { to: paths.security(), label: 'Security', match: ['security'] } as NavItem,
+  governance: { to: paths.governance(), label: 'Governance', match: ['governance', 'referendum'] } as NavItem,
 }
 // Liquidity lives under Assets at every width; the trigger navigates to Assets
 // so the menu lists only Liquidity. Security leads the Chain menu (it is the
@@ -48,8 +49,8 @@ const IT = {
 const ASSETS_GROUP: NavGroup = { label: 'Assets', items: [IT.assets, IT.liquidity], menuItems: [IT.liquidity] }
 const CHAIN_GROUP: NavGroup = {
   label: 'Chain',
-  items: [IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.security],
-  menuItems: [IT.security, IT.blocks, IT.extrinsics, IT.events, IT.contracts],
+  items: [IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.security, IT.governance],
+  menuItems: [IT.security, IT.governance, IT.blocks, IT.extrinsics, IT.events, IT.contracts],
 }
 // Mid-width fold (861–1119px, CSS-gated): HDX/HOLLAR/Revenue and the Assets
 // group collapse into this single wider Assets dropdown so the topbar search

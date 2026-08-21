@@ -74,7 +74,8 @@ describe('every list that holds rows has a surface that marks them', () => {
       'useAccountActivity', 'useAccountEvents', 'useAccountExtrinsics', 'useAccountVotes',
       'useAccounts', 'useActivity', 'useAssetActivity', 'useBlocks',
       'useContractEvents', 'useContractTransactions', 'useContracts', 'useDaily', 'useEvents',
-      'useExtrinsics', 'useHolders', 'useOmnipoolLps', 'usePoolLps', 'useTagActivity', 'useTagEvents',
+      'useExtrinsics', 'useGovernanceMotions', 'useGovernanceReferenda', 'useGovernanceTips',
+      'useHolders', 'useOmnipoolLps', 'usePoolLps', 'useTagActivity', 'useTagEvents',
       'useTagExtrinsics', 'useTagVotes', 'useTagVotesByReferendum',
     ])
     expect(holdingHooks.filter(h => CHART_ONLY.includes(h))).toEqual(CHART_ONLY)
@@ -93,6 +94,7 @@ describe('every list that holds rows has a surface that marks them', () => {
       '../src/components/ScopedActivity.tsx': 3, // activity, extrinsics, events tabs
       '../src/components/VotesTab.tsx': 1,
       '../src/components/ContractActivityTab.tsx': 2, // transactions + events sub-tabs
+      '../src/pages/Governance.tsx': 3,          // referenda, motions, tips tables
     }
     for (const [path, expected] of Object.entries(surfaces)) {
       const src = read(path)

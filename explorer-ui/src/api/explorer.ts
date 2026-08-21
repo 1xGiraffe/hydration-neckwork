@@ -1,7 +1,7 @@
 import type {
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
-  AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail, RevenueBreakdown,
+  AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail, RevenueBreakdown, GovernanceOverview, GovernanceReferendaPage, CollectiveMotionsPage, TreasuryTipsPage,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard,
   RevenueDashboard, RevenueFlowResponse, RevenueRange, HollarDashboard, SecurityDashboard, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
   AssetLiquidity, PoolDetail, OmnipoolDetail, PoolLpsResponse, OmnipoolAssetLpsResponse,
@@ -213,6 +213,13 @@ export const api = {
     getJson<EventRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/events`, { offset, limit, from, to, ...filters }), signal),
   tagVotes: (tagId: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<VoteRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/votes`, { offset, limit, from, to }), signal),
+  governance: (signal?: AbortSignal) => getJson<GovernanceOverview>('/explorer/governance', signal),
+  governanceReferenda: (pallet: 'opengov' | 'democracy', status?: string, track?: number, offset = 0, limit = 25, signal?: AbortSignal) =>
+    getJson<GovernanceReferendaPage>(withQuery('/explorer/governance/referenda', { pallet, status, track, offset, limit }), signal),
+  governanceMotions: (body: 'tc' | 'council', offset = 0, limit = 25, signal?: AbortSignal) =>
+    getJson<CollectiveMotionsPage>(withQuery('/explorer/governance/motions', { body, offset, limit }), signal),
+  governanceTips: (offset = 0, limit = 25, signal?: AbortSignal) =>
+    getJson<TreasuryTipsPage>(withQuery('/explorer/governance/tips', { offset, limit }), signal),
   tagRevenueBreakdown: (tagId: string, signal?: AbortSignal) =>
     getJson<RevenueBreakdown>(`/explorer/tag/${encodeURIComponent(tagId)}/revenue-breakdown`, signal),
   // Grouped mode of the votes tab: one row per referendum, members combined.

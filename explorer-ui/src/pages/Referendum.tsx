@@ -3,7 +3,7 @@ import { useReferendum, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths } from '../router'
-import { Crumbs, F, SkeletonRows, MomentLink } from '../components/ui'
+import { AddrPill, Crumbs, F, SkeletonRows, MomentLink } from '../components/ui'
 import { VoteBubbles } from '../components/VoteBubbles'
 import { VotesTable, type VoteTableRow } from '../components/VotesTable'
 import { ProposalCall } from '../components/ProposalCall'
@@ -104,7 +104,7 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
       <div className="page-head">
         <Crumbs items={[
           { label: 'Home', to: paths.dashboard() },
-          { label: 'Activity', to: `${paths.activity()}?tab=vote` },
+          { label: 'Governance', to: paths.governance() },
           { label: label },
         ]} />
         <div className="page-title">
@@ -148,6 +148,10 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
                     {F.amount(data.indirectTally.ayes, data.asset.decimals)} AYE · {F.amount(data.indirectTally.nays, data.asset.decimals)} NAY
                     <span className="muted"> — in the chain tally, with no Voted event of its own</span>
                   </div>
+                </>}
+                {data.proposer && <>
+                  <div className="dt">Proposed by</div>
+                  <div className="dd"><AddrPill account={data.proposer} /></div>
                 </>}
                 {data.submittedAt && <>
                   <div className="dt">Submitted</div>
