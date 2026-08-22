@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { MoneyMarketPositions, mmPositionCount, moneyMarketDebtUsd, profileTabs } from '../src/components/AccountSections'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MoneyMarketPositions, ProfileStats, mmPositionCount, moneyMarketDebtUsd, profileTabs } from '../src/components/AccountSections'
 import { ActivityBadge } from '../src/components/ActivityTable'
 import { DetailTabs } from '../src/components/ui'
-import type { MoneyMarketPosition, ActivityRow } from '../src/types'
+import { Account } from '../src/pages/Account'
+import type { AddressDetail, MoneyMarketPosition, ActivityRow } from '../src/types'
 
 function position(overrides: Partial<MoneyMarketPosition> = {}): MoneyMarketPosition {
   return {
@@ -129,6 +131,57 @@ describe('primary-first Money Market presentation', () => {
   it('labels a tag aggregate as the lowest real member health', () => {
     const html = renderToStaticMarkup(<MoneyMarketPositions markets={[position({ simAccount: '0xabc' })]} />)
     expect(html).toContain('Lowest member health')
+  })
+})
+
+// Both surfaces show Value as portfolio MINUS money-market debt, so the stat is
+// netted against a loan no balance row holds and turns negative once the debt
+// outgrows the wallet — the fixture below holds $1,000 and owes $40 in the primary
+// market plus $6,200 in GIGAHDX, which reads as "-$5.24k" beside a balance list
+// holding nothing that explains it. The breakdown row under the stats is the only
+// place either overview names the borrow at all, and the markets are isolated, so
+// it names each one that carries debt rather than blending them.
+describe('the Value stat names the money-market debt it nets out', () => {
+  const borrowing = [position(), supplemental]
+
+  it('breaks the debt down per isolated market, primary first', () => {
+    const html = renderToStaticMarkup(<ProfileStats valueUsd={-5_240} moneyMarket={borrowing} />)
+
+    expect(html).toContain('acct-stats-hint')
+    expect(html).toContain('primary $100 lent · −$40.00 borrowed')
+    expect(html).toContain('GIGAHDX debt −$6.2k')
+  })
+
+  it('leaves the row off entirely when nothing is borrowed', () => {
+    const lender = position({ totalDebtBase: '0', reserves: [] })
+
+    expect(renderToStaticMarkup(<ProfileStats valueUsd={100} moneyMarket={[lender]} />)).not.toContain('acct-stats-hint')
+    expect(renderToStaticMarkup(<ProfileStats valueUsd={100} moneyMarket={[]} />)).not.toContain('acct-stats-hint')
+    expect(renderToStaticMarkup(<ProfileStats valueUsd={100} />)).not.toContain('acct-stats-hint')
+  })
+
+  // The account page owns no copy of this breakdown — it hands ProfileStats the
+  // same market list the tag pages do. It was the one surface that passed none,
+  // so a borrower's own page showed a negative Value and never mentioned either
+  // market's loan, while every tag listing that same account did.
+  it('renders on the account page, not just on tag aggregates', () => {
+    const address = '15' + 'Bo7rower'.repeat(5) + 'x'
+    const detail: AddressDetail = {
+      input: address, kind: 'substrate', accountId: '0x' + 'ab'.repeat(32), emoji: '🦊',
+      evmAddress: null, ss58: address, ss58Polkadot: address, tag: null, identity: null,
+      relatedAccountIds: [], aliases: [], balances: [], topAssets: [], portfolioUsd: 1_000,
+      moneyMarket: borrowing,
+    }
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['address', address], detail)
+
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}><Account address={address} /></QueryClientProvider>,
+    )
+
+    expect(html).toContain('-$5.24k')          // portfolio $1,000 − $6,240 of debt
+    expect(html).toContain('primary $100 lent · −$40.00 borrowed')
+    expect(html).toContain('GIGAHDX debt −$6.2k')
   })
 })
 
