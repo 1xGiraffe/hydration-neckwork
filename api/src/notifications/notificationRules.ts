@@ -26,9 +26,25 @@ export const REFERENDUM_PHASES = ['submitted', 'deciding', 'confirmed', 'execute
 // rather than by the collective); `Closed` keeps its own phase because a motion
 // can close without ever being approved or disapproved.
 export const TC_MOTION_PHASES = ['proposed', 'voted', 'approved', 'disapproved', 'executed', 'closed'] as const
-// The safety-timeline action kinds securityService emits (including the
-// freeze/unfreeze pair); a rule may narrow to a subset.
-export const SAFETY_KINDS = ['limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze'] as const
+// Everything one security subscription can report, and the only vocabulary a
+// safety rule narrows on. It spans two sources on purpose — there is exactly ONE
+// security kind, so a subscriber cannot end up half-covered:
+//
+//   * indexed Hydration actions on the Security ledger (circuit-breaker limits,
+//     transaction pauses, withdraw lockdowns, asset freezes, and the Wormhole
+//     NTT managers' own governance and queue logs);
+//   * states of the Wormhole bridge nothing on Hydration indexes — a backing
+//     deficit, an origin-chain rate-limiter queue, an origin manager's pause
+//     flag, and a rate-limit fuse running out.
+//
+// Which source delivers which event is fixed by the delivery matrix in
+// evaluator.ts (SAFETY_ROW_LANE_KINDS / SAFETY_SNAPSHOT_KINDS), so no event can
+// arrive twice. A rule may narrow to any subset.
+export const SAFETY_KINDS = [
+  'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze',
+  'deficit', 'queued', 'released', 'fuse',
+] as const
+export type SafetyKind = typeof SAFETY_KINDS[number]
 
 // Hydration's OpenGov tracks, id → runtime name, transcribed from the runtime's
 // own `TRACKS_DATA` (`runtime/hydradx/src/governance/tracks.rs` in
@@ -206,8 +222,20 @@ export const tcMotionParams = z.object({
   phases: z.array(z.enum(TC_MOTION_PHASES)).min(1).optional(),
 }).strict()
 
+// An absent `kinds` means every event: the point of the kind is "tell me when
+// something is wrong with the protocol", and narrowing is the exception.
+//
+// The two floors belong to the two LEVEL events. Both defaults are explicit
+// rather than optional (the large-trade `dcaStart` precedent) so one rule has
+// one canonical parameter set: a bell posting `params: {}` and a stored rule
+// carrying the defaults have to be the same subscription, or pressing the bell
+// again would mint a second rule beside the one it already owns.
 export const safetyParams = z.object({
   kinds: z.array(z.enum(SAFETY_KINDS)).min(1).optional(),
+  /** USD floor a backing deficit must pass before it is worth reporting. */
+  deficitUsd: z.number().min(0).default(100),
+  /** Origin rate-limit utilization, in percent, at which the fuse event fires. */
+  fusePct: z.number().min(0).max(100).default(90),
 }).strict()
 
 export const extrinsicParams = z.object({
@@ -341,7 +369,14 @@ export function describeRule(
     }
     case 'safety': {
       const p = parsed.params as RuleParams['safety']
-      return `safety actions — ${p.kinds?.length ? p.kinds.join(', ') : 'all kinds'}`
+      // A floor is stated only for an event the rule NAMES. An unnarrowed rule
+      // watches everything and reads as such; spelling out both defaults it
+      // never chose would bury what it actually watches.
+      const floors: string[] = []
+      if (p.kinds?.includes('deficit')) floors.push(`deficit ≥ ${usd(p.deficitUsd)}`)
+      if (p.kinds?.includes('fuse')) floors.push(`fuse ≥ ${p.fusePct}%`)
+      const events = p.kinds?.length ? p.kinds.join(', ') : 'every action'
+      return `Security · ${floors.length ? `${floors.join(', ')} · ` : ''}${events}`
     }
     case 'extrinsic': {
       const p = parsed.params as RuleParams['extrinsic']
@@ -378,7 +413,7 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   'health-factor': 'Health factor',
   referendum: 'Referendum',
   'tc-motion': 'TC motion',
-  safety: 'Safety action',
+  safety: 'Security',
   extrinsic: 'Extrinsic matcher',
   event: 'Event matcher',
   'protocol-revenue': 'Protocol revenue',

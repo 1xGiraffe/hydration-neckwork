@@ -518,7 +518,7 @@ export function RulesSection({ rules, channels, loading, onNew, onEdit }: {
         <span className="muted">Quick add</span>
         <NotifyButton rule={{ kind: 'referendum', params: {}, name: 'New referenda' }} label="Watch referenda" manage={false} />
         <NotifyButton rule={{ kind: 'tc-motion', params: {}, name: 'TC motions' }} label="Watch TC motions" manage={false} />
-        <NotifyButton rule={{ kind: 'safety', params: {}, name: 'Safety actions' }} label="Watch safety actions" manage={false} />
+        <NotifyButton rule={{ kind: 'safety', params: {}, name: 'Security' }} label="Watch security events" manage={false} />
       </div>
       {confirmRule && (
         <ConfirmDialog

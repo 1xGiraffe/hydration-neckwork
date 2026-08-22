@@ -27,6 +27,7 @@ import { getHdxDashboard } from '../services/hdxService.ts'
 import { FLOW_CURSOR_RE, REVENUE_RANGES, getRevenueDashboard, getRevenueFlow } from '../services/revenueService.ts'
 import { getHollarDashboard } from '../services/hollarService.ts'
 import { getSecurityDashboard } from '../services/securityService.ts'
+import { getWormholeBridgeDetail } from '../services/wormholeNttService.ts'
 import { countLiquiditySources } from '../services/poolService.ts'
 import { ACCOUNT_AFFINITY_BUSY_CODE, getCloseAccounts, getCloseAccountsForTag } from '../services/accountAffinityService.ts'
 
@@ -846,6 +847,10 @@ export async function explorerRoutes(fastify: FastifyInstance) {
 
   fastify.get('/explorer/security', async () => {
     return getSecurityDashboard()
+  })
+
+  fastify.get('/explorer/security/wormhole', async () => {
+    return getWormholeBridgeDetail()
   })
 
   fastify.get('/explorer/search', async (req) => {

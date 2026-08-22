@@ -131,6 +131,10 @@ function mockData(): SecurityDashboard {
       memberSetAtBlock: 12_563_525,
       outstandingWhitelisted: [{ callHash: '0x95dddfa3a727e46ac23c451d603846dafd4c8d50f0ae1144ab99077dd9dc650a', blockHeight: 11_168_260, blockTimestamp: '2026-01-30 22:00:12' }],
     },
+    // The Wormhole overview card and section have their own suite
+    // (security-wormhole.test.tsx); here the summary is absent, which is the
+    // state before the first custody snapshot.
+    wormhole: null,
   }
 }
 

@@ -499,6 +499,12 @@ export function useHollarDashboard() {
 export function useSecurityDashboard() {
   return useQuery({ queryKey: ['security-dashboard'], queryFn: ({ signal }) => api.security(signal), refetchInterval: 60_000, staleTime: 30_000 })
 }
+// Wormhole backing detail. The custody snapshot behind it is rebuilt every 120s
+// on the API's background refresher, so a 60s poll keeps the beams within one
+// cycle of the origin chains without ever out-running the reader.
+export function useWormholeBridge() {
+  return useQuery({ queryKey: ['security-wormhole'], queryFn: ({ signal }) => api.securityWormhole(signal), refetchInterval: 60_000, staleTime: 30_000 })
+}
 // Pool surfaces follow the dashboard shape: one query, no polling — pool
 // history advances on a ~2h grid, so 120s staleness costs nothing.
 export function useAssetLiquidity(assetId: number, enabled: boolean) {

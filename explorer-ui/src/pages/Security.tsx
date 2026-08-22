@@ -11,6 +11,7 @@ import {
 import { DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
 import { NotifyButton } from '../components/NotifyButton'
 import { FuseGrid, LoadMeter, YearBars } from '../components/SecurityPanels'
+import { WormholeFuseStrip, WormholeSection } from '../components/WormholeSection'
 import {
   AUDITS, CONTROL_ORIGINS, SECURITY_LINKS, UNPAUSABLE, fmtBlocks, fmtDuration, fmtPct, loadColor,
 } from '../utils/security'
@@ -32,6 +33,7 @@ const LARGE_MOVEMENT_USD = 100_000
 // offset the tile they clicked happened to sit at.
 const SECTION_LABELS: Record<SecuritySection, string> = {
   'cross-chain': 'Cross-chain',
+  wormhole: 'Wormhole',
   omnipool: 'Omnipool',
   'money-market': 'Money market',
   freezes: 'Freezes',
@@ -40,6 +42,7 @@ const SECTION_LABELS: Record<SecuritySection, string> = {
 }
 const SECTION_BLURB: Record<SecuritySection, string> = {
   'cross-chain': 'what caps value entering and leaving the chain',
+  wormhole: 'whether every bridged token still has custody behind it',
   omnipool: 'what each block allows, and when it bit',
   'money-market': 'solvency, bad debt and liquidations',
   freezes: 'what is switched off right now',
@@ -62,14 +65,18 @@ function SectionNav({ active }: { active: SecuritySection }) {
 }
 
 // One dot colour per ledger entry kind: red when a control clamped down, green
-// when one was released, sky for a configuration change.
+// when one was released, sky for a configuration change. A bridge transfer a
+// rate limiter holds back is amber like a pause and green like an unpause when
+// it comes free — the same two states, on the bridge rather than on a pallet.
 const KIND_COLOR: Record<string, string> = {
   lockdown: 'var(--red)',
   freeze: 'var(--red)',
   pause: 'var(--amber)',
+  queued: 'var(--amber)',
   'lockdown-lifted': 'var(--green)',
   unfreeze: 'var(--green)',
   unpause: 'var(--green)',
+  released: 'var(--green)',
   limit: 'var(--sky)',
 }
 
@@ -90,6 +97,32 @@ function OverviewCard({ section, label, value, sub, tone }: {
       <div className="hs">{sub}</div>
     </Link>
   )
+}
+
+// Wormhole backing, said in one line. The card holds its place before the first
+// snapshot exists: a missing figure is a dash, never a zero, because "nothing is
+// in deficit" and "nothing has been measured" are opposite answers.
+function WormholeCard({ w }: { w: SecurityDashboard['wormhole'] }) {
+  if (!w) {
+    return <OverviewCard section="wormhole" label="Wormhole backing" value={<Dash />} sub="no custody snapshot yet" />
+  }
+  // A graded shortfall with no USD figure is one in an asset with no live
+  // price — the verdict stands, the dollar amount does not.
+  const shortfall = w.deficitUsd != null && w.deficitUsd > 0 ? F.usd(w.deficitUsd) : null
+  const value = w.worstStatus === 'deficit' ? (shortfall ? `${shortfall} backing deficit` : 'Backing deficit')
+    : w.worstStatus === 'attention' ? (shortfall ? `${shortfall} small shortfall` : 'Small shortfall')
+      : w.worstStatus === 'unverified' || w.worstStatus === 'unconfigured' ? 'Custody unread'
+        : 'Fully backed'
+  const tone = w.worstStatus === 'deficit' ? 'var(--red)'
+    : w.worstStatus === 'attention' ? 'var(--amber)'
+      : w.worstStatus === 'unverified' || w.worstStatus === 'unconfigured' ? 'var(--text-low)'
+        : 'var(--green)'
+  const parts = [`${F.int(w.assets)} assets`]
+  if (w.lockedUsd != null) parts.push(`${F.usd(w.lockedUsd)} locked`)
+  if (w.inflightCount != null) parts.push(`${F.int(w.inflightCount)} in flight`)
+  // An empty release queue is the normal state and says nothing worth a clause.
+  if (w.queuedCount) parts.push(`${F.int(w.queuedCount)} queued`)
+  return <OverviewCard section="wormhole" label="Wormhole backing" value={value} tone={tone} sub={parts.join(' · ')} />
 }
 
 function Overview({ d, now, nominalSec }: { d: SecurityDashboard; now: number; nominalSec: number }) {
@@ -123,12 +156,15 @@ function Overview({ d, now, nominalSec }: { d: SecurityDashboard; now: number; n
         <Link className="sec-inline-link" to={paths.security('cross-chain')}>See the ingress detail →</Link>
       </>} />
 
+      <WormholeFuseStrip now={now} />
+
       <SecTitle title="Everything else" />
       <div className="hdx-cards sec-ov">
         <OverviewCard section="cross-chain" label="Deposit fuses"
           value={shut ? `${F.int(shut)} shut` : hottest ? fmtPct(hottest.usagePct) : 'idle'}
           tone={shut ? 'var(--red)' : hottest ? loadColor(hottest.usagePct) : undefined}
           sub={shut ? shutSub : hottest ? `${hottest.asset.symbol} is the fullest of ${F.int(loadedFuses.length)} carrying load` : 'no asset is minting against its limit'} />
+        <WormholeCard w={d.wormhole} />
         <OverviewCard section="omnipool" label="Per-block limits"
           value={fmtPct(peak)} tone={loadColor(peak)}
           sub={`busiest block in ${d.perBlock.peakWindowDays} days, against its allowance`} />
@@ -161,10 +197,7 @@ function Overview({ d, now, nominalSec }: { d: SecurityDashboard; now: number; n
           sub={d.runtime.lastUpgrade ? <>upgraded <Ago ts={d.runtime.lastUpgrade.blockTimestamp} now={now} /> · {F.int(d.runtime.upgrades)} in total</> : 'no upgrade recorded'} />
       </div>
 
-      <div className="sec-title-row">
-        <SecTitle title="Latest safety action" />
-        <NotifyButton rule={{ kind: 'safety', params: {}, name: 'Safety actions' }} label="Get notified" title="Alert me on every circuit breaker, pause, freeze and lockdown" />
-      </div>
+      <SecTitle title="Latest safety action" />
       <Ledger events={d.timeline.slice(0, 6)} now={now} compact />
     </>
   )
@@ -1009,6 +1042,10 @@ export function Security({ section }: { section: SecuritySection | null }) {
       // Value entering and leaving the chain: the egress budget it is charged
       // against, and the per-asset fuse on the way in.
       case 'cross-chain': return <><WithdrawSection d={d} now={now} /><FuseSection d={d} headBlock={headBlock} now={now} blockSec={blockSec} nominalSec={nominalSec} /></>
+      // Wormhole assets are backed by custody on another chain, so their safety
+      // question is a balance comparison rather than a rate limit — its own
+      // snapshot, on its own page.
+      case 'wormhole': return <WormholeSection now={now} />
       // What a block allows in the pool, the largest real moves against those
       // allowances, and every time a limit rejected something.
       case 'omnipool': return <><PerBlockSection d={d} /><LiquidityMovesSection d={d} now={now} /><TripsSection d={d} now={now} /></>
@@ -1025,9 +1062,15 @@ export function Security({ section }: { section: SecuritySection | null }) {
         <Crumbs items={section
           ? [{ label: 'Home', to: paths.dashboard() }, { label: 'Security', to: paths.security() }, { label: SECTION_LABELS[section] }]
           : [{ label: 'Home', to: paths.dashboard() }, { label: 'Security' }]} />
-        <div className="page-title">
-          {section ? SECTION_LABELS[section] : 'Security'}
-          <span className="sub">{section ? SECTION_BLURB[section] : 'circuit breakers, freezes and the levers that can stop the chain'}</span>
+        <div className="sec-page-title-row">
+          <div className="page-title">
+            {section ? SECTION_LABELS[section] : 'Security'}
+            <span className="sub">{section ? SECTION_BLURB[section] : 'circuit breakers, freezes and the levers that can stop the chain'}</span>
+          </div>
+          {/* The one place to subscribe: a single Security rule covers every
+              safety action and every Wormhole backing or rate-limit event. */}
+          <NotifyButton rule={{ kind: 'safety', params: {}, name: 'Security' }} label="Get notified"
+            title="Alert me on every circuit breaker, pause, freeze, lockdown, and Wormhole backing or rate-limit event" />
         </div>
       </div>
       {isError
@@ -1036,13 +1079,16 @@ export function Security({ section }: { section: SecuritySection | null }) {
           <>
             {section == null && <Ribbon d={data} now={now} />}
             {section != null && <SectionNav active={section} />}
-            {!data.chainAsOf && (
+            {/* The Wormhole section reads none of the dashboard's chain state and
+                states its own sources, so the page's chain-state banner and
+                footnote would both be about something else there. */}
+            {!data.chainAsOf && section !== 'wormhole' && (
               <div className="pf-card sec-warn">
                 Chain state is unavailable, so the live limits and their consumption are not shown. Everything else comes from indexed history and is current.
               </div>
             )}
             {body(data)}
-            {data.chainAsOf && (
+            {data.chainAsOf && section !== 'wormhole' && (
               <div className="hdx-note sec-asof">
                 Limits and consumption read from chain state at block {F.int(headBlock)}, <Ago ts={data.chainAsOf} now={now} />. History indexed through block {F.int(data.head.blockHeight)}.
               </div>

@@ -10279,7 +10279,7 @@ const NTT_TRANSFER_SENT_TOPIC = '0xe54e51e42099622516fa3b48e9733581c9dbdcb771caf
 // Wormhole's own chain numbering → the URN the rest of this file names chains by, so a
 // destination gets its display name, address encoding and explorer link from
 // externalChainRef rather than a second mapping that could disagree with it.
-const WORMHOLE_CHAIN_URNS: Record<number, string> = {
+export const WORMHOLE_CHAIN_URNS: Record<number, string> = {
   1: 'urn:ocn:solana:101',
   2: 'urn:ocn:ethereum:1',
   4: 'urn:ocn:ethereum:56',       // BNB Chain
@@ -10365,7 +10365,7 @@ export function nttMinterLegExclusionSql(minters: Map<number, string>, assetExpr
 // ever listed, so it is cached rather than joined into every read; the latest
 // registration for an asset wins, since a manager can be replaced.
 let nttMinterCache: { at: number; byAsset: Map<number, string> } | null = null
-async function nttMinterAccounts(): Promise<Map<number, string>> {
+export async function nttMinterAccounts(): Promise<Map<number, string>> {
   if (nttMinterCache && Date.now() - nttMinterCache.at < 300_000) return nttMinterCache.byAsset
   const byAsset = new Map<number, string>()
   try {
@@ -10392,7 +10392,7 @@ async function nttMinterAccounts(): Promise<Map<number, string>> {
 // The bare manager/minter H160 back out of its widened account id — h160AccountId
 // prefixes '45544800' and pads, so bytes 4..24 are the address. The transfer tables
 // hold the widened form; the manager's own logs hold the bare one.
-function nttMinterH160(account: string): string {
+export function nttMinterH160(account: string): string {
   return '0x' + account.slice(10, 50)
 }
 
@@ -12414,7 +12414,14 @@ function activityReadFailure(error: unknown): Error {
 // notification evaluator reads this same feed every few seconds and must not pay for
 // it unless a rule actually looks at revenue. Default on — every existing caller is
 // a display path.
-export interface ActivityPageOptions { revenue?: boolean }
+//
+// `forwardOnly` names the OTHER kind of caller: a reader whose cursor only moves
+// forward and can never come back for a row it did not see. The shared classified
+// window is stale-while-revalidate on a key with no head in it, so a dated or
+// sparse page can be a minute old — invisible to a UI reader, a permanent loss to
+// this one. It puts the read on the head-keyed window instead: one build per block
+// rather than one per minute, for a page that is complete when it is read.
+export interface ActivityPageOptions { revenue?: boolean; forwardOnly?: boolean }
 
 export async function getRecentActivity(limit: number, from?: string, to?: string, offset = 0, type = 'all', filters: ValueListFilters = {}, action?: string, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {
   try {
@@ -12593,8 +12600,12 @@ async function recentActivityPage(limit: number, from?: string, to?: string, off
   // Page 0 of the plain live feed also leads with transaction-pool rows, merged
   // OUTSIDE the cache (see below) so a pool change costs no read.
   const livePage0 = offset === 0 && !tw && !action
-  const settled = await cached(`explorer:activity:${await liveFeedTag(Boolean(tw), datedWindowIsClosed(to))}:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}:${withRevenue ? 'rev' : 'norev'}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
-    const { rows, locallyPaged } = await activityWindow(limit, from, to, offset, type, filters, action)
+  // The forward-only flag is part of the key, not just of the build: the page a UI
+  // reader cached for this same head was sliced from the shared stale window, and
+  // serving it to the evaluator would hand back exactly the rows the flag exists to
+  // avoid.
+  const settled = await cached(`explorer:activity:${await liveFeedTag(Boolean(tw), datedWindowIsClosed(to))}:${type}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}:${withRevenue ? 'rev' : 'norev'}${opts.forwardOnly ? ':fwd' : ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+    const { rows, locallyPaged } = await activityWindow(limit, from, to, offset, type, filters, action, opts.forwardOnly)
     // A locally paged window holds the whole filtered ordering, so this page
     // starts at `offset`; a SQL-paged read already returned the page itself.
     // Copy the rows the page publishes: the window is shared with every other
@@ -12643,9 +12654,9 @@ interface ActivityWindow { rows: ActivityRow[]; locallyPaged: boolean }
 // deep is never blocked on a rebuild.
 async function activityWindow(
   limit: number, from: string | undefined, to: string | undefined, offset: number,
-  type: string, filters: ValueListFilters, action?: string,
+  type: string, filters: ValueListFilters, action?: string, forwardOnly = false,
 ): Promise<ActivityWindow> {
-  const plan = activityWindowPlan(limit, offset, type, from, to, filters, action)
+  const plan = activityWindowPlan(limit, offset, type, from, to, filters, action, forwardOnly)
   // A page cut by SQL OFFSET is its own window — the offset is part of the read —
   // so it stays on the per-page cache above.
   if (!plan) return buildActivityWindow(limit, from, to, offset, type, filters, action)
@@ -12694,7 +12705,7 @@ export interface ActivityWindowPlan { key: string; depth: number; live: boolean 
 // TTL below.
 export function activityWindowPlan(
   limit: number, offset: number, type: string, from: string | undefined, to: string | undefined,
-  filters: ValueListFilters, action?: string,
+  filters: ValueListFilters, action?: string, forwardOnly = false,
 ): ActivityWindowPlan | null {
   const category = normalizeActivityTypeKey(type)
   if (!activityPagesInMemory(category, action)) return null
@@ -12702,9 +12713,22 @@ export function activityWindowPlan(
   return {
     key: `explorer:activity-window:${category}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}:${depth}`,
     depth,
+    // A window may drop the head only when it can no longer GAIN rows. A dated
+    // window still reaching today keeps growing, so it stays head-keyed however
+    // long its TTL is — reading "has a date filter" as "is historical" froze it
+    // for the whole freshness period instead.
+    //
+    // The exact-value condition is a COST rule rather than a correctness one: a
+    // sparse floor widens every source, and a reader who can re-read the page
+    // loses nothing by seeing it a minute old. A forward-only reader can lose
+    // everything — see `forwardOnly` on ActivityPageOptions — so it overrides
+    // that rule and pays one build per block for a page complete when read.
+    //
+    // The depth rule is neither and stands unconditionally: a deeper bucket is a
+    // different window, and only the page that owns offset 0 may claim this one.
     live: depth === activityWindowDepth(limit)
-      && !timeWindow(from, to)
-      && !activityExactValueFiltered(category, filters),
+      && !(timeWindow(from, to) && datedWindowIsClosed(to))
+      && (forwardOnly || !activityExactValueFiltered(category, filters)),
   }
 }
 

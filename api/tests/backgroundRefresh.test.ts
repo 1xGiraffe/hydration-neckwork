@@ -6,10 +6,12 @@ const hdx = vi.fn(async () => {})
 const proxy = vi.fn(async () => {})
 const erc20 = vi.fn(async () => {})
 const contractCode = vi.fn(async () => {})
+const wormhole = vi.fn(async () => {})
 vi.mock('../src/services/hdxService.ts', () => ({ refreshHdxSnapshot: () => hdx() }))
 vi.mock('../src/services/proxyMultisigService.ts', () => ({ refreshProxyMultisig: () => proxy() }))
 vi.mock('../src/services/erc20WalletService.ts', () => ({ refreshErc20Wallets: () => erc20() }))
 vi.mock('../src/services/contractRegistryService.ts', () => ({ refreshContractCode: () => contractCode() }))
+vi.mock('../src/services/wormholeNttService.ts', () => ({ refreshWormholeBacking: () => wormhole() }))
 
 const { startBackgroundRefresh, stopBackgroundRefresh, dueTasks } = await import('../src/services/backgroundRefresh.ts')
 
@@ -30,10 +32,16 @@ describe('dueTasks cadence', () => {
     expect(dueTasks(15).map(t => t.name)).toContain('contract-code')
     expect(dueTasks(30).map(t => t.name)).toContain('contract-code')
   })
+
+  // A backing shortfall is the one finding on this scheduler worth minutes
+  // rather than an hour, so the cycle runs at the base cadence.
+  it('schedules the Wormhole backing check on every tick (~60s)', () => {
+    for (const tick of [1, 2, 3, 4]) expect(dueTasks(tick).map(t => t.name), `tick ${tick}`).toContain('wormhole-backing')
+  })
 })
 
 describe('startBackgroundRefresh scheduling', () => {
-  beforeEach(() => { vi.useFakeTimers(); hdx.mockClear(); proxy.mockClear(); erc20.mockClear() })
+  beforeEach(() => { vi.useFakeTimers(); hdx.mockClear(); proxy.mockClear(); erc20.mockClear(); wormhole.mockClear() })
   afterEach(() => { stopBackgroundRefresh(); vi.useRealTimers() })
 
   it('runs an initial pass of all tasks once, then locks+proxy every 60s and erc20 every 180s', async () => {
@@ -44,12 +52,14 @@ describe('startBackgroundRefresh scheduling', () => {
     expect(proxy).toHaveBeenCalledTimes(1)
     expect(erc20).toHaveBeenCalledTimes(1)
 
-    // ticks 1 and 2 (60s, 120s): locks + proxy only
+    // ticks 1 and 2 (60s, 120s): locks + proxy + wormhole each tick
     await vi.advanceTimersByTimeAsync(60_000)
+    expect(wormhole).toHaveBeenCalledTimes(2)
     await vi.advanceTimersByTimeAsync(60_000)
     expect(hdx).toHaveBeenCalledTimes(3)
     expect(proxy).toHaveBeenCalledTimes(3)
     expect(erc20).toHaveBeenCalledTimes(1)
+    expect(wormhole).toHaveBeenCalledTimes(3)
 
     // tick 3 (180s): erc20 joins
     await vi.advanceTimersByTimeAsync(60_000)
