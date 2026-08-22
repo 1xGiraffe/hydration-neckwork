@@ -76,12 +76,13 @@ test.describe('Security page — desktop', () => {
     await page.goto('/security')
     // The overview leads with the instruments and one card per area.
     await expect(page.locator('.sec-title', { hasText: 'Value leaving the chain' })).toBeVisible()
-    await expect(page.locator('.sec-ov-card')).toHaveCount(9)
+    await expect(page.locator('.sec-ov-card')).toHaveCount(10)
     // No nav row on the overview — the tiles are the way in.
     await expect(page.locator('.sec-section-nav')).toHaveCount(0)
 
     const cases: [string, string, string][] = [
       ['Cross-chain', 'cross-chain', 'Withdraw limit'],
+      ['Wormhole', 'wormhole', 'Backing, per asset'],
       ['Omnipool', 'omnipool', 'Per-block limits'],
       ['Money market', 'money-market', 'Solvency'],
       ['Freezes', 'freezes', 'Freezes & pauses'],
@@ -221,12 +222,12 @@ test.describe('Security page — mobile', () => {
     expect(widest).toBeLessThanOrEqual(390)
   })
 
-  // Seven tabs cannot fit one 390px row, and the shared bar scrolls with no visible
-  // affordance — two destinations were simply unreachable. The bar wraps here.
+  // The section tabs cannot fit one 390px row, and the shared bar scrolls with no
+  // visible affordance — destinations were simply unreachable. The bar wraps here.
   test('every section is reachable without a sideways scroll', async ({ page }) => {
     await page.goto('/security/omnipool')
     const buttons = page.locator('.sec-section-nav .sec-nav-link')
-    await expect(buttons).toHaveCount(7)
+    await expect(buttons).toHaveCount(8)
 
     const geometry = await buttons.evaluateAll(els => els.map(e => {
       const r = e.getBoundingClientRect()
@@ -240,7 +241,7 @@ test.describe('Security page — mobile', () => {
   })
 
   test('no section overflows the page or clips a cell', async ({ page }) => {
-    for (const tab of ['', 'cross-chain', 'omnipool', 'money-market', 'freezes', 'ledger', 'guardians']) {
+    for (const tab of ['', 'cross-chain', 'wormhole', 'omnipool', 'money-market', 'freezes', 'ledger', 'guardians']) {
       await page.goto('/security' + (tab ? `/${tab}` : ''))
       await expect(page.locator('.sec-title').first()).toBeVisible()
 

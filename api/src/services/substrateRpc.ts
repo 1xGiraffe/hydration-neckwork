@@ -8,13 +8,15 @@ export const SUBSTRATE_RPC_URL = process.env.RAW_EVM_RPC_URL?.trim() || 'https:/
 const MAX_BATCH = 80
 
 // Batched state_getStorage — chunked JSON-RPC batches, position-mapped results
-// (null for missing storage or transport errors).
-export async function substrateStorageBatch(keys: string[]): Promise<(string | null)[]> {
+// (null for missing storage or transport errors). `at` pins every key to one
+// block hash, so a set of values read together describes a single chain state
+// rather than several consecutive ones; omitted, the node answers at its head.
+export async function substrateStorageBatch(keys: string[], at?: string | null): Promise<(string | null)[]> {
   if (!keys.length) return []
   const out: (string | null)[] = keys.map(() => null)
   for (let start = 0; start < keys.length; start += MAX_BATCH) {
     const chunk = keys.slice(start, start + MAX_BATCH)
-    const body = chunk.map((k, i) => ({ jsonrpc: '2.0', id: i, method: 'state_getStorage', params: [k] }))
+    const body = chunk.map((k, i) => ({ jsonrpc: '2.0', id: i, method: 'state_getStorage', params: at ? [k, at] : [k] }))
     const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 6000)
     try {
       const res = await fetch(SUBSTRATE_RPC_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctrl.signal, body: JSON.stringify(body) })

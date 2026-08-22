@@ -24,7 +24,7 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   'health-factor': 'Health factor',
   referendum: 'Referendum',
   'tc-motion': 'TC motion',
-  safety: 'Safety action',
+  safety: 'Security',
   extrinsic: 'Extrinsic matcher',
   event: 'Event matcher',
   'protocol-revenue': 'Protocol revenue',
@@ -40,7 +40,7 @@ export const KIND_HINTS: Record<NotificationKind, string> = {
   'health-factor': 'A money-market position falling toward liquidation.',
   referendum: 'Governance referenda entering the phases you care about.',
   'tc-motion': 'Technical Committee motions — proposals, member votes and outcomes.',
-  safety: 'Circuit breakers, pauses, freezes and lockdowns.',
+  safety: 'Circuit breakers, pauses, freezes, lockdowns, and the Wormhole bridge losing its backing or filling a rate limit.',
   extrinsic: 'A specific call, by pallet and method.',
   event: 'A specific runtime event, by pallet and method.',
   'protocol-revenue': 'An extrinsic earning the protocol more than a threshold — the protocol share, not the LPs\'.',
@@ -62,9 +62,23 @@ export type ReferendumPhase = typeof REFERENDUM_PHASES[number]
 export const TC_MOTION_PHASES = ['proposed', 'voted', 'approved', 'disapproved', 'executed', 'closed'] as const
 export type TcMotionPhase = typeof TC_MOTION_PHASES[number]
 
-// The safety-timeline action kinds the security service emits.
-export const SAFETY_KINDS = ['limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze'] as const
+// Everything the one security kind can alert on: the safety-timeline actions
+// the security service emits from indexed rows, and the Wormhole bridge states
+// the backing snapshot watches. One kind, so no event is ever delivered twice —
+// `pause`/`unpause` cover a manager on either chain, `queued`/`released` a
+// transfer a rate limiter took hold of and let go, `deficit` bridged supply
+// that lost its custody backing, and `fuse` a rate limit close to spent.
+export const SAFETY_KINDS = [
+  'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze',
+  'deficit', 'queued', 'released', 'fuse',
+] as const
 export type SafetyKind = typeof SAFETY_KINDS[number]
+// The two numeric floors, restated from the server's own schema defaults so the
+// form shows the values an omitted parameter would get: how much bridged supply
+// may go unbacked before `deficit` fires, and how spent a rate limit has to be
+// before `fuse` does.
+export const SAFETY_DEFICIT_DEFAULT_USD = 100
+export const SAFETY_FUSE_DEFAULT_PCT = 90
 
 // Hydration's OpenGov tracks, id → runtime name. The chain reports the numeric
 // id, so a rule stores the id and a picker offers the name; the server accepts
@@ -290,6 +304,17 @@ function normalizeParams(kind: NotificationKind, params: Record<string, unknown>
     // flag, so nothing is invented for it.
     case 'large-trade':
       return { ...p, dcaStart: p.dcaStart === false ? false : true }
+    // Same reason as above: both security floors have schema defaults, so a
+    // stored rule carries numbers the "Get notified" button never sent. Without
+    // the defaults applied on both sides that button would read "not subscribed"
+    // forever. An empty event set is "every event", which is what omitting the
+    // key means — the generic canonicalizer already drops it.
+    case 'safety':
+      return {
+        ...p,
+        deficitUsd: Number(p.deficitUsd ?? SAFETY_DEFICIT_DEFAULT_USD),
+        fusePct: Number(p.fusePct ?? SAFETY_FUSE_DEFAULT_PCT),
+      }
     default:
       return p
   }

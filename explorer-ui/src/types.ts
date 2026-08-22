@@ -1745,6 +1745,196 @@ export interface SecurityDashboard {
     memberSetAtBlock: number | null
     outstandingWhitelisted: { callHash: string; blockHeight: number; blockTimestamp: string }[]
   }
+  // Null until the backing snapshot has run once; the overview card renders the
+  // slot either way rather than disappearing.
+  wormhole: WormholeSummary | null
+}
+
+// ---- Wormhole NTT backing (Security → Wormhole) ----
+//
+// Every Wormhole asset is locked in custody on its origin chain and minted on
+// Hydration. The two must agree once every transfer that has not landed is
+// counted — those still in flight, and those the origin chain's rate limiter is
+// holding in its release queue:
+//   locked = issuance + inflightIn + inflightOut + queued + residual
+// A positive residual is custody the chain does not owe — benign, and the state
+// the seeded migration left behind. A negative residual means supply exceeds
+// its backing, which is what this surface exists to catch.
+//
+// Raw integer amounts stay strings at the row's own `decimals`. A null is a
+// value that could not be read, never a zero.
+export type WormholeStatus = 'ok' | 'surplus' | 'attention' | 'deficit' | 'unverified' | 'unconfigured'
+
+export interface WormholeSummary {
+  assets: number
+  lockedUsd: number | null
+  issuanceUsd: number | null
+  // Null when Wormholescan is not configured, so in-flight is unchecked rather
+  // than known to be empty.
+  inflightCount: number | null
+  inflightUsd: number | null
+  // Transfers the origin chain's own inbound rate limiter is holding back:
+  // burned here, redeemed there, not yet released from custody.
+  queuedCount: number | null
+  queuedUsd: number | null
+  worstStatus: WormholeStatus
+  // Total absolute USD of the negative residuals, 0 when every asset is covered.
+  deficitUsd: number | null
+  surplusUsd: number | null
+  asOf: string | null
+}
+
+export interface WormholeAssetRow {
+  assetId: string
+  symbol: string
+  decimals: number
+  originChainId: number
+  originChainName: string
+  // Canonical display form for the origin chain: 0x… on EVM and Sui, base58 on Solana.
+  originToken: string | null
+  manager: string
+  mode: 'burning' | 'locking' | null
+  pausedLocal: boolean | null
+  pausedOrigin: boolean | null
+  peer: string | null
+  issuance: string | null
+  // Gap-closing mints parked at 0x…dEaD: counted by issuance but permanently
+  // out of circulation, so they need no custody and leave the equation.
+  burned: string | null
+  locked: string | null
+  inflightIn: string | null
+  inflightOut: string | null
+  inflightCount: number | null
+  // Held at the origin rate limiter. Null when custody could not be read, or
+  // when the origin chain's family has no queue reader (Sui) — those keep
+  // degrading to visible surplus, never to a hidden shortfall.
+  queued: string | null
+  queuedCount: number | null
+  residual: string | null
+  // The four NTT rate limiters this asset passes through, or null when the
+  // origin chain is unconfigured/unread. Every leg is the same instrument: a
+  // bucket that refills linearly over `durationSec`, and a transfer larger than
+  // what is left is not rejected — it is held for one whole window.
+  limits: WormholeLimits | null
+  // All-time NTT flows, and the part of supply they do not explain — the legacy
+  // pre-NTT remainder, which should hold constant per asset.
+  flows: { mintedIn: string; burnedOut: string; nonNtt: string | null }
+  issuanceUsd: number | null
+  lockedUsd: number | null
+  residualUsd: number | null
+  status: WormholeStatus
+  statusDetail: string
+  transfers14d: { out: number; in: number }
+}
+
+// One NTT rate limiter, read live. Raw amounts are integers at the ASSET's own
+// decimals, whatever units the chain holding the limiter counts in.
+export interface WormholeFuse {
+  limit: string
+  // What the bucket holds right now, after refilling since the last transfer.
+  capacity: string
+  // (limit − capacity) / limit × 100, clamped to 0..100.
+  utilizationPct: number
+  // The refill window, read from the manager rather than assumed — 86 400s on
+  // every leg today.
+  durationSec: number
+  lastConsumedAt: string | null
+}
+
+// Direction names are Hydration-centric: `in` is the origin chain's outbound
+// leg (a transfer entering Hydration), `out` its inbound leg (the release of a
+// transfer leaving Hydration — the leg that holds a queued release). The two
+// local legs are read for honesty: they are set so high in practice that the
+// origin side carries every real limit.
+export interface WormholeLimits {
+  in: WormholeFuse | null
+  out: WormholeFuse | null
+  localOut: WormholeFuse | null
+  localIn: WormholeFuse | null
+}
+
+export interface WormholeInflightOp {
+  id: string
+  direction: 'in' | 'out'
+  assetId: string | null
+  symbol: string | null
+  amount: string | null
+  amountUsd: number | null
+  fromChainId: number
+  toChainId: number
+  sequence: string
+  sentAt: string | null
+  sourceTx: string | null
+}
+
+// A transfer that arrived at its origin chain and was refused release by that
+// chain's inbound rate limiter. It is neither in flight nor settled: the tokens
+// are burned on Hydration and still sitting in origin custody. Once
+// `releasableAt` passes, anyone can call completeInboundQueuedTransfer to let
+// it out — a queued release is a delay, not a loss.
+export interface WormholeQueuedRelease {
+  // The NTT message digest. It is not a transaction, so it links nowhere; the
+  // surface shows it short and copyable instead.
+  digest: string
+  assetId: string
+  symbol: string
+  amount: string
+  amountUsd: number | null
+  // The origin chain holding the release.
+  chainId: number
+  recipient: string | null
+  queuedAt: string | null
+  releasableAt: string | null
+  releasable: boolean
+}
+
+export interface WormholeTransferRow {
+  direction: 'in' | 'out'
+  assetId: string
+  symbol: string
+  amount: string
+  // Event-time valuation; null when the asset had no price at that block.
+  amountUsd: number | null
+  account: string | null
+  // Full account descriptor for the pill; `account` stays the raw id for links.
+  accountRef: AccountRef | null
+  counterpartyChainId: number
+  blockHeight: number
+  eventIndex: number
+  extrinsicIndex: number | null
+  timestamp: string
+  sequence: string | null
+}
+
+// One origin chain's custody reader. `configured` is whether the deployment has
+// an endpoint for it at all; `ok` is whether the last poll answered.
+export interface WormholeChainState {
+  chainId: number
+  name: string
+  family: 'evm' | 'solana' | 'sui'
+  configured: boolean
+  ok: boolean
+  asOf: string | null
+}
+
+export interface WormholeBridgeDetail {
+  assets: WormholeAssetRow[]
+  inflight: WormholeInflightOp[]
+  // Newest first.
+  queued: WormholeQueuedRelease[]
+  recent: WormholeTransferRow[]
+  totals: {
+    lockedUsd: number | null
+    issuanceUsd: number | null
+    inflightUsd: number | null
+    deficitUsd: number | null
+    surplusUsd: number | null
+  }
+  chains: WormholeChainState[]
+  scan: { configured: boolean; ok: boolean; asOf: string | null }
+  hydrationChainId: number
+  asOf: string | null
+  indexedThrough: { block: number; at: string } | null
 }
 
 // ---- protocol revenue breakdown (the Protocol Revenue detail tab) ----

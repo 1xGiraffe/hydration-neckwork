@@ -19,14 +19,17 @@ import {
   HEALTH_FACTOR_MAX, HEALTH_FACTOR_MIN, HEALTH_FACTOR_PRESETS, KIND_LABELS, LARGE_VALUE_MIN_USD,
   NOTIFICATION_KINDS, PRICE_STEP_PCTS, priceAtStep, priceStepLabel, readTarget, REFERENDUM_PHASES,
   REFERENDUM_TRACKS, ruleSubject, ruleTagTarget,
-  TC_MOTION_PHASES,
+  TC_MOTION_PHASES, SAFETY_DEFICIT_DEFAULT_USD, SAFETY_FUSE_DEFAULT_PCT,
   SAFETY_KINDS, sameRuleParams, suggestPriceDirection, USD_FLOOR_PRESETS, subscribedLabel } from '../src/notificationKinds'
 import {
   MOCK_NOTIFICATION_CHANNELS, MOCK_NOTIFICATION_INBOX, MOCK_NOTIFICATION_RULES,
   MOCK_NOTIFICATION_TELEGRAM_BOT, MOCK_NOTIFICATION_UNREAD, MOCK_NOTIFICATION_VAPID_KEY,
   MOCK_NOTIFICATIONS_OVERVIEW, mockSync,
 } from './fixtures/mockApi'
-import type { AssetDetail as AssetDetailResponse, AssetFilterItem, FilterNames, NotificationRule, SearchResult, SecurityDashboard } from '../src/types'
+import type {
+  AssetDetail as AssetDetailResponse, AssetFilterItem, FilterNames, NotificationKind, NotificationRule,
+  SearchResult, SecurityDashboard,
+} from '../src/types'
 
 // No jsdom/@testing-library in this repo's test setup (see tests/render.test.tsx),
 // so every render test asserts on the static markup string. Sections take their
@@ -197,6 +200,19 @@ describe('Notifications — rules', () => {
     expect(html).toContain('1h')
   })
 
+  // The chain-wide feeds with no page of their own to be subscribed from —
+  // security among them, since a bridge deficit is exactly the thing nobody is
+  // looking at the page for when it happens. Security is ONE entry: the bridge
+  // is part of that kind, not a second subscription beside it.
+  it('offers the chain-wide feeds as quick adds', () => {
+    expect(html).toContain('Quick add')
+    for (const label of ['Watch referenda', 'Watch TC motions', 'Watch security events']) {
+      expect(html, label).toContain(label)
+    }
+    expect(html).not.toContain('Wormhole')
+    expect(html).not.toContain('Watch safety actions')
+  })
+
   it('invites a first alert rather than showing an empty table', () => {
     const empty = render(<RulesSection rules={[]} channels={[]} onNew={() => {}} />)
     expect(empty).toContain('No alerts yet')
@@ -257,12 +273,36 @@ describe('topbar bell', () => {
 })
 
 describe('per-surface subscribe affordances', () => {
-  it('offers a safety alert beside the security page\'s latest safety action', () => {
+  it('offers a security alert beside the security page\'s latest safety action', () => {
     const html = render(<Security section={null} />, qc =>
       qc.setQueryData(['security-dashboard'], mockSync<SecurityDashboard>('/explorer/security')))
     expect(html).toContain('Latest safety action')
     expect(html).toContain('Get notified')
-    expect(html).toContain('Alert me on every circuit breaker, pause, freeze and lockdown')
+    // One kind, so the promise names the bridge as well as the pallets.
+    expect(html).toContain('Alert me on every circuit breaker, pause, freeze, lockdown, and Wormhole backing or rate-limit event')
+  })
+
+  // Subscribing to security lives in exactly two places: the Security page head
+  // and the notifications quick-add. Both create the SAME one rule, and no other
+  // surface carries a security NotifyButton — one group, one button per page.
+  it('keeps the one security subscription in the page head and nowhere else', () => {
+    const notifySources = (file: string) => {
+      const source = readFileSync(new URL(file, import.meta.url), 'utf8')
+      return [...source.matchAll(/<NotifyButton rule=\{\{ kind: '([a-z-]+)', params: \{\}, name: '([^']+)' \}\}/g)]
+        .map(m => ({ kind: m[1] as NotificationKind, params: {}, name: m[2] }))
+    }
+    const security = notifySources('../src/pages/Security.tsx')
+    expect(security).toEqual([{ kind: 'safety', params: {}, name: 'Security' }])
+    // The Wormhole section deliberately carries none — the page head covers it.
+    expect(notifySources('../src/components/WormholeSection.tsx')).toEqual([])
+    // The head button resolves against the stored rule the server wrote with its
+    // defaults filled in, which is the only form it is ever read back in.
+    const stored: NotificationRule = {
+      id: 'rule-security', kind: 'safety', kindLabel: 'Security', name: 'Security', summary: '',
+      params: { deficitUsd: SAFETY_DEFICIT_DEFAULT_USD, fusePct: SAFETY_FUSE_DEFAULT_PCT },
+      channels: [], muted: false, cooldownS: 0,
+    }
+    expect(findEquivalentRule([stored], security[0])?.id).toBe('rule-security')
   })
 
   it('offers three prefilled alerts in the asset header', () => {
@@ -578,6 +618,72 @@ describe('buildRuleParams — the two governance kinds stay apart', () => {
   })
 })
 
+// Security: one kind over the chain's safety actions AND the Wormhole bridge's
+// states, eleven event chips and two numbers, where each number belongs to one
+// event alone. An empty chip set is every event, so both numbers apply then.
+describe('buildRuleParams — security', () => {
+  const sets = { phases: [], motionPhases: [], safetyKinds: [] }
+
+  it('watches every event with nothing picked, and no numbers of its own', () => {
+    expect(buildRuleParams('safety', {}, sets)).toEqual({ ok: true, params: {} })
+  })
+
+  it('sends the chosen events and the numbers behind them', () => {
+    expect(buildRuleParams('safety', {}, { ...sets, safetyKinds: ['pause', 'freeze'] }))
+      .toEqual({ ok: true, params: { kinds: ['pause', 'freeze'] } })
+    expect(buildRuleParams('safety', { deficitUsd: '2500', fusePct: '50' }, { ...sets, safetyKinds: ['deficit', 'fuse'] }))
+      .toEqual({ ok: true, params: { kinds: ['deficit', 'fuse'], deficitUsd: 2500, fusePct: 50 } })
+  })
+
+  it('leaves a number out when its own event is not watched', () => {
+    // Each field is hidden in that state, so a value left over from toggling the
+    // chip off must not travel with the rule.
+    expect(buildRuleParams('safety', { deficitUsd: '2500', fusePct: '50' }, { ...sets, safetyKinds: ['queued', 'released'] }))
+      .toEqual({ ok: true, params: { kinds: ['queued', 'released'] } })
+    expect(buildRuleParams('safety', { deficitUsd: '2500', fusePct: '50' }, { ...sets, safetyKinds: ['deficit'] }))
+      .toEqual({ ok: true, params: { kinds: ['deficit'], deficitUsd: 2500 } })
+    expect(buildRuleParams('safety', { deficitUsd: '2500', fusePct: '50' }, { ...sets, safetyKinds: ['fuse'] }))
+      .toEqual({ ok: true, params: { kinds: ['fuse'], fusePct: 50 } })
+  })
+
+  it('refuses a negative floor and a percentage that is not one', () => {
+    expect(buildRuleParams('safety', { deficitUsd: '-5' }, sets).ok).toBe(false)
+    expect(buildRuleParams('safety', { fusePct: '140' }, sets).ok).toBe(false)
+    expect(buildRuleParams('safety', { fusePct: '-1' }, sets).ok).toBe(false)
+  })
+
+  // The server fills both numbers in from its schema defaults, so a stored rule
+  // is never byte-identical to what the "Get notified" button asked for —
+  // without the defaults applied on both sides that button reads "not
+  // subscribed" forever.
+  it('reads defaulted numbers as the same subscription as omitted ones', () => {
+    expect(sameRuleParams('safety', {}, { deficitUsd: SAFETY_DEFICIT_DEFAULT_USD, fusePct: SAFETY_FUSE_DEFAULT_PCT })).toBe(true)
+    expect(sameRuleParams('safety', {}, { deficitUsd: SAFETY_DEFICIT_DEFAULT_USD })).toBe(true)
+    expect(sameRuleParams('safety', {}, { deficitUsd: 2500 })).toBe(false)
+    expect(sameRuleParams('safety', {}, { fusePct: 50 })).toBe(false)
+    // An empty event list is what omitting the key means.
+    expect(sameRuleParams('safety', {}, { kinds: [] })).toBe(true)
+    // Chip order is not part of the subscription.
+    expect(sameRuleParams('safety', { kinds: ['fuse', 'deficit'] }, { kinds: ['deficit', 'fuse'] })).toBe(true)
+  })
+
+  it('offers all eleven event kinds in the dialog, each number behind its own chip', () => {
+    const dialog = readFileSync(new URL('../src/components/NewAlertDialog.tsx', import.meta.url), 'utf8')
+    expect(dialog).toContain("kind === 'safety'")
+    expect(dialog).toContain('options={SAFETY_KINDS}')
+    expect(dialog).toContain('label="Security event kinds"')
+    expect(dialog).toContain("safetyKinds.includes('deficit')")
+    expect(dialog).toContain("safetyKinds.includes('fuse')")
+    expect(dialog).toContain('Deficit over (USD)')
+    expect(dialog).toContain('Fuse threshold (%)')
+    expect(SAFETY_KINDS).toHaveLength(11)
+    expect(SAFETY_KINDS).toEqual([
+      'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze',
+      'deficit', 'queued', 'released', 'fuse',
+    ])
+  })
+})
+
 /* ── the new-alert form's input assists ──────────────────────────────────── */
 
 describe('the pallet/name pickers', () => {
@@ -745,6 +851,16 @@ describe('rule-kind registry mirror', () => {
     for (const kind of NOTIFICATION_KINDS) expect(KIND_LABELS[kind]).toBeTruthy()
   })
 
+  // The bridge is not a kind of its own: it is part of `safety`, which is what
+  // keeps one event from being delivered down two subscriptions.
+  it('keeps the folded-in bridge kind out of the registry and the forms', () => {
+    expect(NOTIFICATION_KINDS).not.toContain('wormhole')
+    expect(KIND_LABELS.safety).toBe('Security')
+    for (const file of ['../src/notificationKinds.ts', '../src/components/NewAlertDialog.tsx', '../src/pages/Notifications.tsx']) {
+      expect(readFileSync(new URL(file, import.meta.url), 'utf8'), file).not.toContain("'wormhole'")
+    }
+  })
+
   // The mirror is a copy, so nothing but this test keeps it a copy. A value the
   // server does not know is a rule that can never match; one it knows and the UI
   // does not is a subscription nobody can create.
@@ -757,6 +873,7 @@ describe('rule-kind registry mirror', () => {
     }
     expect([...NOTIFICATION_KINDS]).toEqual(literals('NOTIFICATION_KINDS'))
     expect([...ACTIVITY_TYPES]).toEqual(literals('ACTIVITY_TYPES'))
+    // The one security kind's whole event set, chain-side and bridge-side.
     expect([...SAFETY_KINDS]).toEqual(literals('SAFETY_KINDS'))
     expect([...REFERENDUM_PHASES]).toEqual(literals('REFERENDUM_PHASES'))
     expect([...TC_MOTION_PHASES]).toEqual(literals('TC_MOTION_PHASES'))
@@ -774,7 +891,7 @@ describe('subscribedLabel', () => {
   it('turns Watch into Watching', () => {
     expect(subscribedLabel('Watch referenda')).toBe('Watching referenda ✓')
     expect(subscribedLabel('Watch TC motions')).toBe('Watching TC motions ✓')
-    expect(subscribedLabel('Watch safety actions')).toBe('Watching safety actions ✓')
+    expect(subscribedLabel('Watch security events')).toBe('Watching security events ✓')
   })
   it('keeps a specific subject and appends the check', () => {
     expect(subscribedLabel('Price alert')).toBe('Price alert ✓')
@@ -814,5 +931,9 @@ describe('edit dialog round trip — seedFromRule ∘ buildRuleParams', () => {
     roundTrip(rule('tc-motion', { phases: ['proposed'] }))
     roundTrip(rule('extrinsic', { section: 'omnipool', method: 'sell', success: false, signer: FOX_ADDRESS }))
     roundTrip(rule('event', { section: 'referenda', method: 'submitted' }))
+    roundTrip(rule('safety', {}))
+    roundTrip(rule('safety', { kinds: ['pause', 'freeze'] }))
+    roundTrip(rule('safety', { kinds: ['deficit', 'fuse'], deficitUsd: 2500, fusePct: 50 }))
+    roundTrip(rule('safety', { kinds: ['queued', 'released'] }))
   })
 })

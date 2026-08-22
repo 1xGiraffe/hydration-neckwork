@@ -341,7 +341,7 @@ describe('inbox', () => {
     const page = await f.inject({ method: 'GET', url: '/user/notifications/inbox?limit=10', headers: auth() })
     expect(page.statusCode).toBe(200)
     // The row's link is site-relative: the SPA renders it with <Link to={url}>.
-    expect(page.json().rows[0]).toMatchObject({ id: 'n1', ruleId: 'r1', kind: 'safety', kindLabel: 'Safety action', title: 'Safety action', url: '/security', read: false })
+    expect(page.json().rows[0]).toMatchObject({ id: 'n1', ruleId: 'r1', kind: 'safety', kindLabel: 'Security', title: 'Safety action', url: '/security', read: false })
     const read = await f.inject({ method: 'POST', url: '/user/notifications/inbox/read', headers: auth(), payload: { ids: ['n1'] } })
     expect(read.statusCode).toBe(200)
     expect(read.json()).toMatchObject({ ok: true, marked: 1 })

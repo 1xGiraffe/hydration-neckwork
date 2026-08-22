@@ -9,7 +9,8 @@ import { useFilterNames } from '../hooks/useExplorerData'
 import {
   ACTIVITY_TYPES, COOLDOWN_CHOICES, HEALTH_FACTOR_DEFAULT, HEALTH_FACTOR_MAX, HEALTH_FACTOR_MIN,
   HEALTH_FACTOR_PRESETS, KIND_HINTS, KIND_LABELS, LARGE_VALUE_MIN_USD, NOTIFICATION_KINDS, PRICE_STEP_PCTS,
-  REFERENDUM_PHASES, REFERENDUM_TRACKS, SAFETY_KINDS, TC_MOTION_PHASES, USD_FLOOR_PRESETS, isAddressLike,
+  REFERENDUM_PHASES, REFERENDUM_TRACKS, SAFETY_DEFICIT_DEFAULT_USD, SAFETY_FUSE_DEFAULT_PCT, SAFETY_KINDS,
+  TC_MOTION_PHASES, USD_FLOOR_PRESETS, isAddressLike,
   isPalletNameLike, priceAtStep, priceStepLabel, readTarget, suggestPriceDirection, targetParams,
 } from '../notificationKinds'
 import type { AssetFilterItem, NotificationKind, NotificationRule, NotificationRuleInput, NotificationTarget } from '../types'
@@ -208,8 +209,27 @@ export function buildRuleParams(
     // phases (or the other way round) — the server rejects the crossed spelling too.
     case 'tc-motion':
       return { ok: true, params: sets.motionPhases.length ? { phases: sets.motionPhases } : {} }
-    case 'safety':
-      return { ok: true, params: sets.safetyKinds.length ? { kinds: sets.safetyKinds } : {} }
+    // One kind covers every security event, so each of the two numbers belongs
+    // to one event alone and is only sent while that event is watched — an
+    // empty chip set being "every event", both count as watched there too.
+    // Omitting a number means the server's own default.
+    case 'safety': {
+      const kinds = sets.safetyKinds
+      const watches = (kind: string) => !kinds.length || kinds.includes(kind)
+      const deficitUsd = num(v.deficitUsd ?? '')
+      const fusePct = num(v.fusePct ?? '')
+      if (watches('deficit') && deficitUsd != null && deficitUsd < 0) {
+        return { ok: false, error: 'The deficit floor cannot be negative' }
+      }
+      if (watches('fuse') && fusePct != null && (fusePct < 0 || fusePct > 100)) {
+        return { ok: false, error: 'The fuse threshold must be between 0 and 100' }
+      }
+      return { ok: true, params: {
+        ...(kinds.length ? { kinds } : {}),
+        ...(watches('deficit') && deficitUsd != null ? { deficitUsd } : {}),
+        ...(watches('fuse') && fusePct != null ? { fusePct } : {}),
+      } }
+    }
     case 'extrinsic': {
       const section = (v.section ?? '').trim()
       if (!isPalletNameLike(section)) return { ok: false, error: 'Enter a pallet name, e.g. Omnipool' }
@@ -675,13 +695,49 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
               </div>
             )}
 
+            {/* One card for every security event — the chain's own safety
+                actions and the Wormhole bridge's states in one chip set, so no
+                event can arrive twice and none is missed by subscribing to the
+                wrong half. Each number belongs to one event, so it appears only
+                while that event is watched — and an empty set watches
+                everything, both of them included. */}
             {kind === 'safety' && (
-              <div className="field">
-                <label className="field-label">Actions</label>
-                <ChipSet options={SAFETY_KINDS} selected={safetyKinds} label="Safety action kinds" disabled={pending}
-                  onToggle={value => setSafetyKinds(current => toggle(current, value))} />
-                <div className="muted" style={{ fontSize: 11 }}>{safetyKinds.length ? `${safetyKinds.length} selected` : 'None selected — every safety action.'}</div>
-              </div>
+              <>
+                <div className="field">
+                  <label className="field-label">Events</label>
+                  <ChipSet options={SAFETY_KINDS} selected={safetyKinds} label="Security event kinds" disabled={pending}
+                    onToggle={value => setSafetyKinds(current => toggle(current, value))} />
+                  <div className="muted" style={{ fontSize: 11 }}>{safetyKinds.length ? `${safetyKinds.length} selected` : 'None selected — every security event.'}</div>
+                </div>
+                {(!safetyKinds.length || safetyKinds.includes('deficit')) && (
+                  <div className="field">
+                    <label htmlFor="alert-safety-deficit">Deficit over (USD)</label>
+                    <input {...noAutofill} id="alert-safety-deficit" type="number" min={0}
+                      placeholder={String(SAFETY_DEFICIT_DEFAULT_USD)}
+                      value={values.deficitUsd ?? ''} disabled={pending} onChange={e => set('deficitUsd', e.target.value)} />
+                    {/* Custody runs a few units either way by design, so a floor
+                        is what separates the seeded noise from supply that has
+                        genuinely lost its backing. */}
+                    <div className="muted" style={{ fontSize: 11 }}>
+                      How much bridged supply may go unbacked before this alerts.
+                    </div>
+                  </div>
+                )}
+                {(!safetyKinds.length || safetyKinds.includes('fuse')) && (
+                  <div className="field">
+                    <label htmlFor="alert-safety-fuse">Fuse threshold (%)</label>
+                    <input {...noAutofill} id="alert-safety-fuse" type="number" min={0} max={100}
+                      placeholder={String(SAFETY_FUSE_DEFAULT_PCT)}
+                      value={values.fusePct ?? ''} disabled={pending} onChange={e => set('fusePct', e.target.value)} />
+                    {/* Below the limit rather than at it: past the fuse a
+                        transfer is held for a whole window, so the alert is
+                        worth having while there is still headroom to use. */}
+                    <div className="muted" style={{ fontSize: 11 }}>
+                      How much of a bridge rate limit may be spent before this alerts. The other events have no threshold.
+                    </div>
+                  </div>
+                )}
+              </>
             )}
 
             {(kind === 'extrinsic' || kind === 'event') && (

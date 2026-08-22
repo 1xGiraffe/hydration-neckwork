@@ -541,6 +541,14 @@ services:
       # tick interval.
       - EXPLORER_PUBLIC_URL=${EXPLORER_PUBLIC_URL:-}
       - NOTIFY_EVAL_MS=${NOTIFY_EVAL_MS:-}
+      # Wormhole NTT backing check. Optional origin-chain RPC map (JSON keyed by
+      # Wormhole chain id) for reading the custody that backs the bridged supply;
+      # empty disables custody reads and the affected assets report as
+      # unconfigured. Wormholescan resolves in-flight transfers; empty disables
+      # it. Never commit populated values — the RPC map carries API keys.
+      - WORMHOLE_ORIGIN_RPC_URLS=${WORMHOLE_ORIGIN_RPC_URLS:-}
+      # Unset-only default (no colon): setting it EMPTY is the disable switch.
+      - WORMHOLE_SCAN_URL=${WORMHOLE_SCAN_URL-https://api.wormholescan.io}
     networks:
       - neckwork
 
