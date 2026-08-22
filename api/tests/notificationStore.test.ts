@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   initNotifications, loadNotifications,
   createWebPushChannel, upsertTelegramChannel, deleteChannel, removeChannelById, setChannelVerified,
@@ -252,6 +252,29 @@ describe('notification rules', () => {
     await loadNotifications()
     expect(allRules().map(r => r.ruleId)).toEqual(['r4'])
     expect(channelsFor(OWNER).map(c => c.channelId)).toEqual(['c2'])
+  })
+
+  // A retired kind is the realistic case: `wormhole` was folded into `safety`,
+  // and a row written by the previous build can still be in the table. Loading
+  // must skip it with a log line rather than throwing, which would take every
+  // other subscription down with it.
+  it('skips a row naming a retired kind, loudly, and loads the rest', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const seeded = fakeClient({
+      user_notification_rules: [
+        { rule_id: 'retired', account_id: OWNER, kind: 'wormhole', name: '', params: '{"events":["deficit"]}', channels: [], muted: 0, cooldown_s: 0 },
+        { rule_id: 'live', account_id: OWNER, kind: 'safety', name: '', params: '{}', channels: [], muted: 0, cooldown_s: 0 },
+      ],
+    })
+    initNotifications(seeded)
+    await expect(loadNotifications()).resolves.toBeUndefined()
+    expect(allRules().map(r => r.ruleId)).toEqual(['live'])
+    // The id, never the params: a rule's parameters are private user data.
+    const logged = warn.mock.calls.map(c => String(c[0])).join('\n')
+    expect(logged).toContain('retired')
+    expect(logged).toContain('wormhole')
+    expect(logged).not.toContain('deficit')
+    warn.mockRestore()
   })
 })
 

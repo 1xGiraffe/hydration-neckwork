@@ -8,6 +8,8 @@ import type {
   AssetLiquidity, AssetLiquiditySource, PoolDetail, OmnipoolDetail, PoolCompositionEntry,
   HollarDashboard, HollarCollateral, HollarArbDay, HollarTradeDay, HollarPool, HollarPegPoint,
   SecurityDashboard, SecurityFuse, SecurityPerBlockRow, SecurityLiquidityMove,
+  WormholeAssetRow, WormholeBridgeDetail, WormholeFuse, WormholeInflightOp, WormholeQueuedRelease, WormholeSummary,
+  WormholeTransferRow,
   TradeDetail as TradeDetailResponse,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse,
   NotificationChannel, NotificationRule, NotificationInboxRow, NotificationsOverview,
@@ -1386,6 +1388,350 @@ function buildSecurity(): SecurityDashboard {
       memberSetAtBlock: TIP - 300_000,
       outstandingWhitelisted: [{ callHash: '0x95dddfa3a727e46ac23c451d603846dafd4c8d50f0ae1144ab99077dd9dc650a', blockHeight: TIP - 120_000, blockTimestamp: tsAt(TIP - 120_000) }],
     },
+    wormhole: wormholeSummary(),
+  }
+}
+
+/* ---------- Wormhole NTT backing ----------
+   One asset per state the page has to tell apart: two covered exactly, a seeded
+   surplus, a real deficit, a shortfall small enough to be seed noise, and an
+   asset whose origin chain nobody configured. Two Ethereum assets also carry a
+   release held at the origin rate limiter — one past its timer, one still
+   counting down. Every amount is a raw integer at the asset's own decimals and
+   every residual is derived from those integers, so the beams, the table and
+   the totals cannot disagree. */
+const WH_HYDRATION_CHAIN = 73
+const WH_ETHEREUM = 2
+const WH_SOLANA = 1
+const WH_SUI = 21
+const WH_ASOF = tsMs(MOCK_NOW_MS - 48_000)
+const WH_SCAN_ASOF = tsMs(MOCK_NOW_MS - 31_000)
+
+// [limit, capacity left now, hours since last consumed] in whole tokens.
+type WhFuseSpec = [number, number, number | null]
+
+// Every Hydration-side NTT manager is configured at the u64 trimmed ceiling, so
+// the local legs can never bind and the origin side carries every real limit.
+// The same number on every asset, which is what lets the page say so from data.
+const WH_LOCAL_LIMIT = 184_467_440_737
+// One rolling window, the same on every leg of every chain.
+const WH_LIMIT_WINDOW_SEC = 86_400
+
+interface WhSpec {
+  assetId: number
+  symbol: string
+  decimals: number
+  price: number
+  chainId: number
+  chainName: string
+  issuance: number
+  // Gap-closing mints parked at the dead address — inside issuance, outside
+  // circulation, so the residual must not move when both rise together.
+  burned?: number
+  locked: number | null
+  inflightIn: number
+  inflightOut: number
+  inflightCount: number | null
+  // Held at the origin rate limiter. Null on the chains whose family has no
+  // queue reader (Sui), which is not the same answer as zero. Custody
+  // still holds a queued release, so `locked` includes it and the residual —
+  // and therefore the row's verdict — is unchanged by it.
+  queued: number | null
+  queuedCount: number | null
+  // The origin chain's two rate limiters, in whole tokens: [limit, capacity
+  // left now, hours since the leg was last consumed]. Null on a chain nobody
+  // configured, which is what makes its fuse tiles read as unread rather than
+  // as a limiter nothing has touched. Hydration's own two legs are the same
+  // deliberate near-infinity on every asset, so they are not spelled out per
+  // spec (see WH_LOCAL_LIMIT).
+  limits: { in: WhFuseSpec; out: WhFuseSpec } | null
+  status: WormholeAssetRow['status']
+  statusDetail: string
+  pausedOrigin?: boolean
+  mintedIn: number
+  burnedOut: number
+  transfers14d: { out: number; in: number }
+  peer: string
+  originToken: string
+}
+
+const WH_SPECS: WhSpec[] = [
+  {
+    assetId: 1000752, symbol: 'SOL', decimals: 9, price: 168.5, chainId: WH_SOLANA, chainName: 'Solana',
+    issuance: 18_400, locked: null, inflightIn: 0, inflightOut: 0, inflightCount: null,
+    queued: null, queuedCount: null,
+    limits: null,
+    status: 'unconfigured',
+    statusDetail: 'Solana is not configured on this deployment, so custody cannot be read.',
+    mintedIn: 26_000, burnedOut: 9_100, transfers14d: { out: 11, in: 14 },
+    peer: 'NTtAaoDJUECKrRhKrbVy9dhbdVK5CvfXNv5tKQFbvHB',
+    originToken: 'So11111111111111111111111111111111111111112',
+  },
+  {
+    assetId: 1000753, symbol: 'SUI', decimals: 9, price: 1.42, chainId: WH_SUI, chainName: 'Sui',
+    issuance: 2_000_000, locked: 1_999_991.18, inflightIn: 0, inflightOut: 0, inflightCount: 0,
+    queued: null, queuedCount: null,
+    // Some room used on the way in, untouched on the way out.
+    limits: { in: [100_000, 88_500, 9], out: [100_000, 100_000, null] },
+    status: 'attention',
+    statusDetail: 'Custody is 8.82 SUI short of the minted supply — a few dollars, and unchanged since the origin manager was seeded.',
+    mintedIn: 1_400_000, burnedOut: 320_000, transfers14d: { out: 6, in: 9 },
+    peer: '0x5f0d7cba9d6a1f4b4c6a2d92e07b3c8a1b5e4d6f7a8c9b0d1e2f3a4b5c6d7e8f',
+    originToken: '0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI',
+  },
+  {
+    assetId: 20, symbol: 'WETH', decimals: 18, price: 3204.4, chainId: WH_ETHEREUM, chainName: 'Ethereum',
+    issuance: 640, locked: 642.5, inflightIn: 0, inflightOut: 2.5, inflightCount: 1,
+    queued: 0, queuedCount: 0,
+    // The hot one: two thirds of the day's entry allowance already spent.
+    limits: { in: [10_000, 3_400, 2], out: [10_000, 9_997.5, 1] },
+    status: 'ok',
+    statusDetail: 'Custody covers every token minted, with one transfer still in flight.',
+    mintedIn: 5_100, burnedOut: 4_600, transfers14d: { out: 18, in: 21 },
+    peer: '0x3c2b1a9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b',
+    originToken: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+  },
+  {
+    assetId: 1000745, symbol: 'sUSDS', decimals: 18, price: 1.0, chainId: WH_ETHEREUM, chainName: 'Ethereum',
+    // 12 of the minted total sit at the dead address; the residual ignores them.
+    issuance: 1_240_012, burned: 12, locked: 1_322_500, inflightIn: 0, inflightOut: 0, inflightCount: 0,
+    queued: 2_500, queuedCount: 1,
+    // The release leg is nearly spent, which is exactly why this asset has a
+    // transfer sitting in the origin manager's queue.
+    limits: { in: [100_000, 100_000, null], out: [100_000, 20_001.033576, 20] },
+    status: 'surplus', pausedOrigin: true,
+    statusDetail: 'Custody holds 80,000 sUSDS more than Hydration has minted, which is how the origin manager was funded.',
+    mintedIn: 900_000, burnedOut: 40_000, transfers14d: { out: 3, in: 7 },
+    peer: '0x8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b',
+    originToken: '0xa3931d71877c0e7a3148cb7eb4463524fec27fbd',
+  },
+  {
+    assetId: 19, symbol: 'WBTC', decimals: 8, price: 67_241.1, chainId: WH_ETHEREUM, chainName: 'Ethereum',
+    issuance: 12, locked: 11.98, inflightIn: 0, inflightOut: 0, inflightCount: 0,
+    queued: 0, queuedCount: 0,
+    // A fully refilled entry leg: 0% consumed, and no fill drawn for it.
+    limits: { in: [10, 10, null], out: [10, 9.6, 6] },
+    status: 'deficit',
+    statusDetail: 'Minted supply exceeds custody by 0.02 WBTC, and no transfer in flight accounts for it.',
+    mintedIn: 41, burnedOut: 30, transfers14d: { out: 4, in: 5 },
+    peer: '0x1f2e3d4c5b6a7988a9b0c1d2e3f4a5b6c7d8e9f0',
+    originToken: '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599',
+  },
+  {
+    assetId: 22, symbol: 'USDC', decimals: 6, price: 0.9999, chainId: WH_ETHEREUM, chainName: 'Ethereum',
+    issuance: 227_000, locked: 233_800, inflightIn: 5_000, inflightOut: 0, inflightCount: 1,
+    queued: 1_800, queuedCount: 1,
+    // The live-probe numbers: a 100k entry limit with 93,411.583448 left, which
+    // is 6.588416552% consumed.
+    limits: { in: [100_000, 93_411.583448, 3], out: [100_000, 98_200, 5] },
+    status: 'ok',
+    statusDetail: 'Custody covers every token minted, with one transfer still in flight.',
+    mintedIn: 3_100_000, burnedOut: 2_874_000, transfers14d: { out: 22, in: 26 },
+    peer: '0x9e8d7c6b5a4938271605f4e3d2c1b0a998877665',
+    originToken: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+  },
+]
+
+// One rate limiter, from whole-token figures. The utilization is derived from
+// the raw integers rather than stated, so a tile's fill can never disagree with
+// the two exact amounts in its own tooltip.
+function whFuse(s: WhSpec, [limit, capacity, agoHours]: WhFuseSpec, whole = false): WormholeFuse {
+  // The local legs are whole tokens far past what a float can hold exactly, so
+  // their raw value is scaled as digits rather than through `raw`.
+  const scale = (v: number) => whole ? BigInt(v) * 10n ** BigInt(s.decimals) : BigInt(raw(v, s.decimals))
+  const l = scale(limit)
+  const c = scale(capacity)
+  const used = l - c
+  return {
+    limit: l.toString(),
+    capacity: c.toString(),
+    utilizationPct: l === 0n ? 0 : Number((used * 1_000_000_000n) / l) / 10_000_000,
+    durationSec: WH_LIMIT_WINDOW_SEC,
+    // Anchored to WALL-CLOCK now, like whQueued's release timers: a fuse's last
+    // use is read against the real Date.now(), so a fixed anchor would drift
+    // until "last consumed" outran the very window it refills over.
+    lastConsumedAt: agoHours == null ? null : tsMs(Date.now() - agoHours * 3_600_000),
+  }
+}
+
+function whRow(s: WhSpec): WormholeAssetRow {
+  const big = (v: number) => BigInt(raw(v, s.decimals))
+  const issuance = big(s.issuance)
+  const burned = big(s.burned ?? 0)
+  const inflightIn = big(s.inflightIn)
+  const inflightOut = big(s.inflightOut)
+  const locked = s.locked == null ? null : big(s.locked)
+  const queued = s.queued == null ? null : big(s.queued)
+  const residual = locked == null ? null : locked - (issuance - burned) - inflightIn - inflightOut - (queued ?? 0n)
+  const usd = (v: bigint) => (Number(v) / 10 ** s.decimals) * s.price
+  const unread = s.locked == null
+  return {
+    assetId: String(s.assetId), symbol: s.symbol, decimals: s.decimals,
+    originChainId: s.chainId, originChainName: s.chainName,
+    originToken: s.originToken,
+    manager: hx(s.assetId * 7 + 11, 40),
+    mode: 'burning',
+    pausedLocal: false,
+    pausedOrigin: unread ? null : s.pausedOrigin === true,
+    peer: s.peer,
+    issuance: issuance.toString(),
+    burned: unread ? null : burned.toString(),
+    locked: locked == null ? null : locked.toString(),
+    inflightIn: unread ? null : inflightIn.toString(),
+    inflightOut: unread ? null : inflightOut.toString(),
+    inflightCount: s.inflightCount,
+    queued: queued == null ? null : queued.toString(),
+    queuedCount: s.queuedCount,
+    residual: residual == null ? null : residual.toString(),
+    // The two local legs are read whenever the origin's are, and carry the same
+    // deliberate near-infinity everywhere — the fact the page's note is built on.
+    limits: s.limits == null ? null : {
+      in: whFuse(s, s.limits.in),
+      out: whFuse(s, s.limits.out),
+      localOut: whFuse(s, [WH_LOCAL_LIMIT, WH_LOCAL_LIMIT, null], true),
+      localIn: whFuse(s, [WH_LOCAL_LIMIT, WH_LOCAL_LIMIT, null], true),
+    },
+    flows: {
+      mintedIn: big(s.mintedIn).toString(),
+      burnedOut: big(s.burnedOut).toString(),
+      nonNtt: (issuance - big(s.mintedIn) + big(s.burnedOut)).toString(),
+    },
+    issuanceUsd: usd(issuance),
+    lockedUsd: locked == null ? null : usd(locked),
+    residualUsd: residual == null ? null : usd(residual),
+    status: s.status,
+    statusDetail: s.statusDetail,
+    transfers14d: s.transfers14d,
+  }
+}
+
+// The last 25 settled transfers, alternating direction so both readings of the
+// table are exercised, newest first.
+function whTransfers(): WormholeTransferRow[] {
+  const settled = WH_SPECS.filter(s => s.status !== 'unconfigured')
+  return [0, 1, 2, 3, 4, 5].map(i => {
+    const s = settled[i % settled.length]
+    const height = TIP - 40 - i * 190
+    // Sized in dollars, so a WBTC transfer is a fraction of a coin and a USDC
+    // one is thousands of tokens — and neither exceeds the asset's own supply.
+    const amount = (i % 2 === 0 ? 2_500 : 9_100) / s.price
+    return {
+      direction: (i % 2 === 0 ? 'in' : 'out') as WormholeTransferRow['direction'],
+      assetId: String(s.assetId), symbol: s.symbol,
+      amount: raw(amount, s.decimals),
+      amountUsd: amount * s.price,
+      account: [A.fox, A.owl, A.binance][i % 3].address,
+      accountRef: [A.fox, A.owl, A.binance][i % 3],
+      counterpartyChainId: s.chainId,
+      blockHeight: height, eventIndex: 12 + i, extrinsicIndex: i % 3 === 2 ? null : 2 + i,
+      timestamp: tsAt(height),
+      sequence: String(4_100 + i * 7),
+    }
+  })
+}
+
+function whInflight(): WormholeInflightOp[] {
+  const usdc = WH_SPECS.find(s => s.symbol === 'USDC')!
+  const weth = WH_SPECS.find(s => s.symbol === 'WETH')!
+  return [
+    {
+      id: `${WH_ETHEREUM}/000000000000000000000000db5c1f8a3b6d4e2f7a90c1b2d3e4f5a6b7c8d9e0/18412`,
+      direction: 'in', assetId: String(usdc.assetId), symbol: usdc.symbol,
+      amount: raw(usdc.inflightIn, usdc.decimals), amountUsd: usdc.inflightIn * usdc.price,
+      fromChainId: WH_ETHEREUM, toChainId: WH_HYDRATION_CHAIN, sequence: '18412',
+      sentAt: tsMs(MOCK_NOW_MS - 4 * 60_000), sourceTx: hx(9_101, 64),
+    },
+    {
+      id: `${WH_HYDRATION_CHAIN}/0000000000000000000000005a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b/244`,
+      direction: 'out', assetId: String(weth.assetId), symbol: weth.symbol,
+      amount: raw(weth.inflightOut, weth.decimals), amountUsd: weth.inflightOut * weth.price,
+      fromChainId: WH_HYDRATION_CHAIN, toChainId: WH_ETHEREUM, sequence: '244',
+      sentAt: tsMs(MOCK_NOW_MS - 11 * 60_000), sourceTx: hx(9_102, 64),
+    },
+  ]
+}
+
+// Both states a queued release can be in: one whose rate-limit timer has
+// already run out (anyone can complete it) and one still counting down. Newest
+// first, and each amount is exactly the `queued` its asset row carries, so the
+// panel's rows and the assets table's in-flight cell cannot disagree.
+function whQueued(): WormholeQueuedRelease[] {
+  const usdc = WH_SPECS.find(s => s.symbol === 'USDC')!
+  const susds = WH_SPECS.find(s => s.symbol === 'sUSDS')!
+  const HOUR = 3_600_000
+  // Release timers anchor to WALL-CLOCK now rather than MOCK_NOW_MS, for the
+  // reason hdxBreakdown's unlock dates do: the panel counts them against the
+  // real Date.now(), so a fixed anchor would drift and eventually flip a
+  // still-locked release into a releasable one.
+  const at = (hours: number) => tsMs(Date.now() + hours * HOUR)
+  return [
+    {
+      digest: hx(9_201, 64),
+      assetId: String(usdc.assetId), symbol: usdc.symbol,
+      amount: raw(usdc.queued!, usdc.decimals), amountUsd: usdc.queued! * usdc.price,
+      chainId: usdc.chainId, recipient: hx(9_203, 40),
+      queuedAt: at(-20), releasableAt: at(4),
+      releasable: false,
+    },
+    {
+      digest: hx(9_202, 64),
+      assetId: String(susds.assetId), symbol: susds.symbol,
+      amount: raw(susds.queued!, susds.decimals), amountUsd: susds.queued! * susds.price,
+      chainId: susds.chainId, recipient: hx(9_204, 40),
+      queuedAt: at(-26), releasableAt: at(-2),
+      releasable: true,
+    },
+  ]
+}
+
+export function buildSecurityWormhole(): WormholeBridgeDetail {
+  const assets = WH_SPECS.map(whRow).sort((a, b) => (b.issuanceUsd ?? -1) - (a.issuanceUsd ?? -1))
+  const inflight = whInflight()
+  const queued = whQueued()
+  const sum = (pick: (r: WormholeAssetRow) => number | null) =>
+    assets.reduce<number | null>((t, r) => { const v = pick(r); return v == null ? t : (t ?? 0) + v }, null)
+  return {
+    assets,
+    inflight,
+    queued,
+    recent: whTransfers(),
+    totals: {
+      lockedUsd: sum(r => r.lockedUsd),
+      issuanceUsd: sum(r => r.issuanceUsd),
+      inflightUsd: inflight.reduce((t, o) => t + (o.amountUsd ?? 0), 0),
+      deficitUsd: assets.reduce((t, r) => t + (r.residualUsd != null && r.residualUsd < 0 ? -r.residualUsd : 0), 0),
+      surplusUsd: assets.reduce((t, r) => t + (r.residualUsd != null && r.residualUsd > 0 ? r.residualUsd : 0), 0),
+    },
+    chains: [
+      { chainId: WH_ETHEREUM, name: 'Ethereum', family: 'evm', configured: true, ok: true, asOf: WH_ASOF },
+      { chainId: WH_SOLANA, name: 'Solana', family: 'solana', configured: false, ok: false, asOf: null },
+      { chainId: WH_SUI, name: 'Sui', family: 'sui', configured: true, ok: true, asOf: WH_ASOF },
+    ],
+    scan: { configured: true, ok: true, asOf: WH_SCAN_ASOF },
+    hydrationChainId: WH_HYDRATION_CHAIN,
+    asOf: WH_ASOF,
+    indexedThrough: { block: TIP, at: tsAt(TIP) },
+  }
+}
+
+// The dashboard's summary block is folded out of the same snapshot, so the
+// overview card and the section it opens can never disagree.
+function wormholeSummary(): WormholeSummary {
+  const d = buildSecurityWormhole()
+  const worst = (['deficit', 'attention', 'unverified', 'unconfigured', 'surplus', 'ok'] as const)
+    .find(s => d.assets.some(r => r.status === s)) ?? 'ok'
+  return {
+    assets: d.assets.length,
+    lockedUsd: d.totals.lockedUsd,
+    issuanceUsd: d.totals.issuanceUsd,
+    inflightCount: d.inflight.length,
+    inflightUsd: d.totals.inflightUsd,
+    queuedCount: d.queued.length,
+    queuedUsd: d.queued.reduce((t, q) => t + (q.amountUsd ?? 0), 0),
+    worstStatus: worst,
+    deficitUsd: d.totals.deficitUsd,
+    surplusUsd: d.totals.surplusUsd,
+    asOf: d.asOf,
   }
 }
 
@@ -1686,6 +2032,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   { re: /^\/explorer\/hdx$/, fn: () => buildHdx() },
   { re: /^\/explorer\/hollar$/, fn: () => buildHollar() },
   { re: /^\/explorer\/security$/, fn: () => buildSecurity() },
+  { re: /^\/explorer\/security\/wormhole$/, fn: () => buildSecurityWormhole() },
   { re: /^\/explorer\/accounts$/, fn: (_m, qs) => buildAccounts(Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 50), qs.get('sort') ?? 'value') },
   { re: /^\/explorer\/contracts$/, fn: (_m, qs) => buildContracts(Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 50), qs.get('sort') ?? 'created') },
   { re: /^\/explorer\/contract\/compiler-versions$/, fn: () => ({ versions: ['v0.8.19+commit.7dd6d404', 'v0.8.10+commit.fc410830'] }) },

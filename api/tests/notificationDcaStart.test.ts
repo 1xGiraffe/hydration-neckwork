@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { dcaHourlyValueUsd, dcaRuntimeMs, evaluateDcaStart, dcaPricedAsset, type DcaScheduleRow } from '../src/notifications/evaluator.ts'
+import { dcaHourly, dcaHourlyValueUsd, evaluateDcaStart, dcaPricedAsset, type DcaScheduleRow } from '../src/notifications/evaluator.ts'
 import type { NotificationRule } from '../src/notifications/notificationStore.ts'
 import { parseRuleParams } from '../src/notifications/notificationRules.ts'
 
@@ -117,29 +117,68 @@ describe('matching a DCA start', () => {
   })
 })
 
-// How long a schedule will run, which is what tells a reader whether it is a
-// 90-second burst or a standing order. Counting executions alone read as
-// nonsense: a sell-everything schedule reported "25.1M executions".
+// A Buy schedule's two figures live in DIFFERENT denominations: `amountPer`
+// fixes the bought leg (assetOut) while `totalAmount` is always the budget of
+// the SOLD asset (the pallet reserves the spend currency). Pricing both with
+// one asset silently disabled the budget cap and inflated the execution count.
+describe('a Buy schedule prices each figure in its own denomination', () => {
+  // Live regression, schedule 35173 (block 13,735,677): buy 666.666666 USDT
+  // (asset 10, 6 dec) every 6 blocks from a 192,833.7486 HDX budget (asset 0,
+  // 12 dec, ~$0.00723). Priced as USDT, the budget read as ~$1.9e11, the
+  // min(rate, budget) cap never bit, and a ~$1.4k schedule alerted at $81.6k/h.
+  const buy = (): DcaScheduleRow => schedule({
+    id: 35_173, assetIn: 0, assetOut: 10, direction: 'Buy',
+    amountPer: '666666666', totalAmount: '192833748648285486', periodBlocks: 6,
+  })
+  const price = (assetId: number, raw: string): number | null =>
+    assetId === 10 ? Number(raw) / 1e6
+      : assetId === 0 ? Number(raw) / 1e12 * 0.00723
+        : null
+  const BUY_BLOCK_MS = 4_900
+
+  it('caps the first hour at the sold-asset budget, not at the extrapolated rate', () => {
+    const plan = dcaHourly(buy(), price, BUY_BLOCK_MS)
+    expect(plan.perExecutionUsd).toBeCloseTo(666.666666, 3)
+    expect(plan.totalUsd).toBeCloseTo(1_394.19, 1)
+    // The uncapped rate would be ~$81.6k/hour — the number that must never fire.
+    expect(plan.hourlyUsd).toBeCloseTo(1_394.19, 1)
+  })
+
+  it('stays silent when the budget-capped hour is under the floor', () => {
+    expect(evaluateDcaStart([buy()], [tradeRule({ minUsd: 5_000 })], WINDOW, price, BUY_BLOCK_MS)).toHaveLength(0)
+  })
+
+  it('carries the plan into the payload when it does fire', () => {
+    const matches = evaluateDcaStart([buy()], [tradeRule({ minUsd: 1_000 })], WINDOW, price, BUY_BLOCK_MS)
+    expect(matches).toHaveLength(1)
+    const p = matches[0].payload as { executions: number | null; runtimeMs: number | null; periodMs: number }
+    // ~2 purchases before the budget runs dry — not the 289 million a raw
+    // cross-denomination division produced.
+    expect(p.executions).toBe(2)
+    expect(p.periodMs).toBe(6 * BUY_BLOCK_MS)
+    expect(p.runtimeMs).toBe(2 * 6 * BUY_BLOCK_MS)
+  })
+})
+
+// How long a schedule plans to run, from the same per-denomination figures.
 describe('how long a DCA schedule runs', () => {
-  it('is the executions times the period, in wall clock', () => {
+  it('is exact for a Sell, whose division is unitless', () => {
     // 3 executions, 6 blocks apart, ~4.8s a block
-    expect(dcaRuntimeMs(schedule(), 4_800)).toBe(3 * 6 * 4_800)
+    const m = evaluateDcaStart([schedule({ totalAmount: '0' })], [tradeRule({})], WINDOW, priceHdx, 4_800)
+    expect((m[0].payload as { runtimeMs: number | null }).runtimeMs).toBeNull()
+    expect(dcaHourly(schedule(), priceHdx, 4_800).executions).toBe(3)
   })
 
-  it('is unknown for an unbounded schedule', () => {
-    expect(dcaRuntimeMs(schedule({ totalAmount: '0' }), 4_800)).toBeNull()
-  })
-
-  it('is unknown when the amounts cannot give an execution count', () => {
-    expect(dcaRuntimeMs(schedule({ amountPer: '0' }), 4_800)).toBeNull()
+  it('is unknown for an unbounded schedule or when the amounts give no count', () => {
+    expect(dcaHourly(schedule({ totalAmount: '0' }), priceHdx, 4_800).executions).toBeNull()
+    expect(dcaHourly(schedule({ amountPer: '0' }), priceHdx, 4_800).executions).toBeNull()
   })
 
   // 25.1M executions six blocks apart is ~23 years — a duration reads as
   // "effectively forever" where a count does not.
   it('reaches years for a sell-everything schedule', () => {
-    const ms = dcaRuntimeMs(schedule({ totalAmount: '349300000000000000000000' }), 4_800)
-
-    expect(ms).not.toBeNull()
-    expect(ms! / (365 * 86_400_000)).toBeGreaterThan(10)
+    const plan = dcaHourly(schedule({ totalAmount: '349300000000000000000000' }), priceHdx, 4_800)
+    expect(plan.executions).not.toBeNull()
+    expect((plan.executions! * 6 * 4_800) / (365 * 86_400_000)).toBeGreaterThan(10)
   })
 })

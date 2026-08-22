@@ -177,7 +177,16 @@ export async function loadNotifications(): Promise<void> {
     })
   }
   for (const r of await ruleRes.json<{ rule_id: string; account_id: string; kind: string; name?: string; params?: string; channels?: string[]; muted?: number; cooldown_s?: number }>()) {
-    if (!isNotificationKind(r.kind)) continue
+    // A row naming a kind this build no longer has is SKIPPED, never fatal: a
+    // kind can be retired (the Wormhole alerts folded into `safety`) while rows
+    // written by the previous build are still in the table, and a loader that
+    // threw would take every other subscription down with it. The row itself is
+    // left alone — its owner still sees the rule, and a later build could
+    // reintroduce the kind. Only the id is logged; params are private.
+    if (!isNotificationKind(r.kind)) {
+      console.warn(`[notifications] rule ${r.rule_id} names unknown kind '${r.kind}'; skipped`)
+      continue
+    }
     let params: unknown
     try { params = JSON.parse(r.params || '{}') } catch { continue }
     // A row whose params no longer satisfy their kind's schema is dropped
@@ -606,7 +615,10 @@ export async function deleteNotificationState(key: string): Promise<void> {
 //
 // Entries age out after the same seven days the seed query reads: nothing older
 // can still be re-matched (the window clamp is 600 blocks), so keeping it would
-// only grow the set for as long as the process lives.
+// only grow the set for as long as the process lives. The one identity that can
+// outlive the window is a safety `queued:<digest>` for a transfer the origin
+// limiter holds longer than the TTL; its lane emits a digest once per process,
+// so the cost of the aged-out entry is a single repeat after a restart.
 export function hasNotification(notificationId: string): boolean { return recentNotificationIds.has(notificationId) }
 
 export function rememberNotification(notificationId: string, seenAtMs = Date.now()): void {

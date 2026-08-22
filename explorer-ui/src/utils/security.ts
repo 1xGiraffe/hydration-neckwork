@@ -1,3 +1,5 @@
+import type { WormholeStatus } from '../types'
+
 // Security-page pure helpers and the static reference tables the page renders
 // beside its live data. Kept out of the component module so the load scale and
 // the origin matrix can be imported by tests and by the page without dragging
@@ -98,6 +100,52 @@ export const AUDITS: Audit[] = [
   { date: 'Sep 2022', firm: 'Runtime Verification', scope: 'Omnipool' },
   { date: 'Mar 2022', firm: 'BlockScience', scope: 'Omnipool economics' },
 ]
+
+// Wormhole backing — how each parity verdict reads, and where a custody handle
+// can be inspected on the chain that holds it.
+//
+// Severity runs deficit → attention → unverified → unconfigured → surplus → ok:
+// an unread chain outranks a surplus because "we cannot tell" is a worse answer
+// than "there is more custody than needed", which is the seeded steady state.
+export const WORMHOLE_SEVERITY: Record<WormholeStatus, number> = {
+  deficit: 5, attention: 4, unverified: 3, unconfigured: 2, surplus: 1, ok: 0,
+}
+
+export interface WormholeStatusMeta {
+  // Badge wording in the assets table.
+  label: string
+  // Shared `.badge` modifier; `wh-quiet` is the page's own neutral chip.
+  badge: string
+  // The same verdict as a colour, for the beam edge and the overview card.
+  tone: string
+}
+export const WORMHOLE_STATUS: Record<WormholeStatus, WormholeStatusMeta> = {
+  ok: { label: 'Backed', badge: 'ok', tone: 'var(--green)' },
+  surplus: { label: 'Surplus', badge: 'finalized', tone: 'var(--sky)' },
+  attention: { label: 'Attention', badge: 'pending', tone: 'var(--amber)' },
+  deficit: { label: 'Deficit', badge: 'fail', tone: 'var(--red)' },
+  unverified: { label: 'Unverified', badge: 'pending', tone: 'var(--amber)' },
+  unconfigured: { label: 'Unconfigured', badge: 'wh-quiet', tone: 'var(--text-low)' },
+}
+
+// Where a custody handle lives, per Wormhole chain id. Each chain names its own
+// kind of thing: an EVM account, a Solana account, a Sui object.
+const WORMHOLE_EXPLORERS: Record<number, { base: string; kind: string }> = {
+  1: { base: 'https://solscan.io/account/', kind: 'Solscan' },
+  2: { base: 'https://etherscan.io/address/', kind: 'Etherscan' },
+  21: { base: 'https://suivision.xyz/object/', kind: 'SuiVision' },
+  30: { base: 'https://basescan.org/address/', kind: 'BaseScan' },
+}
+export function wormholeExplorerLink(chainId: number, handle: string | null): { href: string; kind: string } | null {
+  const meta = WORMHOLE_EXPLORERS[chainId]
+  if (!meta || !handle) return null
+  return { href: meta.base + encodeURIComponent(handle), kind: meta.kind }
+}
+
+// A Wormhole operation on the bridge's own explorer, keyed by its operation id.
+export function wormholescanLink(id: string): string {
+  return `https://wormholescan.io/#/tx/${encodeURIComponent(id)}`
+}
 
 export const SECURITY_LINKS = {
   audits: 'https://github.com/galacticcouncil/hydration-security',

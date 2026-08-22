@@ -2318,6 +2318,9 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    same baseline instead of pushing a row of its own. */
 .sec-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .sec-title-row .sec-title { margin-right: auto; }
+/* The Security page head carries the one subscribe button, beside the title. */
+.sec-page-title-row { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.sec-page-title-row .page-title { margin-right: auto; }
 
 /* Per-surface subscribe affordance. Two shapes: the small pill (.notify-btn,
    plain .btn.sm) and the quiet `ext-link` variant for a detail page's existing
@@ -3160,10 +3163,16 @@ tr.row-muted td { opacity: .55; }
 
 /* Overview cards are buttons that switch tabs, so they carry the card's own look
    with a button's affordance rather than a link's. */
-/* Nine summary cards read as three rows of three rather than auto-fit's ragged
-   last row, so the fixed count wins here. */
+/* The summary cards read as rows of three rather than auto-fit's ragged last
+   row, so the fixed count wins here. A card left alone on the last row stretches
+   across it instead of sitting in a column of empty space. */
 .sec-ov { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-@media (max-width: 1119px) { .sec-ov { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.sec-ov > :last-child:nth-child(3n + 1) { grid-column: 1 / -1; }
+@media (max-width: 1119px) {
+  .sec-ov { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sec-ov > :last-child:nth-child(3n + 1) { grid-column: auto; }
+  .sec-ov > :last-child:nth-child(odd) { grid-column: 1 / -1; }
+}
 .sec-ov-card { text-align: left; cursor: pointer; transition: border-color 140ms, background 140ms; }
 .sec-ov-card:hover { border-color: var(--text-low); background: var(--panel-hover); }
 .sec-ov-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -3259,6 +3268,127 @@ tr.row-muted td { opacity: .55; }
 .ribbon .sec-ribbon-cell { border-radius: 10px; transition: background 140ms; }
 .ribbon .sec-ribbon-cell:hover { background: var(--panel-hover); }
 .ribbon .sec-ribbon-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Security → Wormhole
+   The signature element is the beam board: one horizontal beam per bridged
+   asset, where the bar is what Hydration minted plus what is still moving, and
+   a single high-contrast tick is what the origin chain holds in custody. The
+   two sides are normalized against whichever is larger, so every beam spans the
+   full width and the only thing to read is where the tick lands — flush with
+   the end is fully backed, short of it is not. Sizes follow the beam height. */
+.wh-beams { display: flex; flex-direction: column; gap: 15px; }
+.wh-beam-row { display: flex; flex-direction: column; gap: 6px; }
+.wh-beam-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.wh-beam {
+  position: relative; height: 20px; border-radius: 6px; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--separator);
+}
+/* Custody that could not be read: the track keeps its shape but says openly
+   that its right-hand side is unknown — dashed, with the supply bar quietened
+   so a full-width beam never reads as a full-width answer. */
+.wh-beam.unread { border-style: dashed; }
+.wh-beam.unread .wh-minted {
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  box-shadow: inset -2px 0 0 color-mix(in srgb, currentColor 50%, transparent);
+}
+.wh-seg { position: absolute; top: 0; bottom: 0; transition: left 480ms var(--ease-out-soft), width 480ms var(--ease-out-soft); }
+/* Minted supply, in the asset's own brand hue (set inline as `color`): a soft
+   fill so a whole column of beams stays quiet, with a solid inset edge at full
+   strength so the bar's end is exact however thin the segment is. */
+.wh-minted { background: color-mix(in srgb, currentColor 34%, transparent); box-shadow: inset -2px 0 0 currentColor; }
+/* Transfers between the chains, hatched because they are neither minted nor in
+   custody — they are the reason the two sides may legitimately disagree. A
+   floor of 3px keeps a real transfer visible against a million-token bar
+   without inflating the geometry it is measured on. */
+.wh-flight {
+  min-width: 3px;
+  background: repeating-linear-gradient(135deg,
+    color-mix(in srgb, var(--text-medium) 62%, transparent) 0 2px,
+    transparent 2px 5px);
+}
+/* Burned here, redeemed there, and refused release by the origin chain's own
+   inbound rate limiter. Hatched like an in-flight segment, because it explains
+   the same gap between the two sides — and tinted amber, because unlike a
+   transfer in flight it will not clear on its own: somebody has to complete it.
+   Keeps the same 3px floor for the same reason. */
+.wh-queued {
+  min-width: 3px;
+  background: repeating-linear-gradient(135deg,
+    color-mix(in srgb, var(--amber) 70%, transparent) 0 2px,
+    transparent 2px 5px);
+}
+/* Supply custody does not cover, drawn over the stretch of bar it eats into.
+   A shortfall is the one thing on this page that may never be too small to
+   see, so it keeps a floor the same way an in-flight segment does. */
+.wh-gap {
+  background: color-mix(in srgb, var(--red) 30%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--red) 60%, transparent);
+}
+/* A small shortfall (inside the attention grade) warns without shouting. */
+.wh-gap.warn {
+  background: color-mix(in srgb, var(--amber) 34%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 65%, transparent);
+}
+/* Custody beyond what the chain owes — expected, and deliberately unalarming. */
+.wh-spare { background: color-mix(in srgb, var(--text-low) 20%, transparent); }
+.wh-tick {
+  /* Placement is inline: clamped `left` when custody reaches the bar's end,
+     right-anchored beside the gap floor when it does not. */
+  position: absolute; top: 0; bottom: 0; width: 3px; z-index: 3;
+  background: var(--text-high);
+  transition: left 480ms var(--ease-out-soft), right 480ms var(--ease-out-soft);
+}
+.wh-beam-foot { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--text-medium); }
+.wh-beam-foot .wh-delta { margin-left: auto; }
+@media (prefers-reduced-motion: reduce) { .wh-seg, .wh-tick { transition: none; } }
+
+/* The legend explains the beam's shapes, so each key is the shape itself rather
+   than a colour dot. */
+.sec-legend .wh-key { width: 13px; height: 9px; border-radius: 2px; }
+.sec-legend .wh-key.minted { background: color-mix(in srgb, var(--text-medium) 34%, transparent); box-shadow: inset -2px 0 0 var(--text-medium); }
+.sec-legend .wh-key.flight { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--text-medium) 62%, transparent) 0 2px, transparent 2px 5px); }
+.sec-legend .wh-key.queued { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--amber) 70%, transparent) 0 2px, transparent 2px 5px); }
+.sec-legend .wh-key.tick { width: 3px; border-radius: 1px; background: var(--text-high); }
+.sec-legend .wh-key.gap { background: color-mix(in srgb, var(--red) 30%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--red) 60%, transparent); }
+.sec-legend .wh-key.spare { background: color-mix(in srgb, var(--text-low) 20%, transparent); }
+
+/* Assets table: the chip names the token, the address under it names the
+   manager contract that mints it. */
+.wh-asset { display: inline-flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.wh-mgr { font-size: 10.5px; color: var(--text-low); }
+.wh-mgr:hover { color: var(--accent); }
+.wh-origin { display: inline-flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.wh-chain { color: var(--text-high); }
+.wh-out { font-family: 'GeistMono'; font-size: 10.5px; color: var(--accent); white-space: nowrap; }
+.wh-out:hover { text-decoration: underline; }
+.wh-count { color: var(--text-lowest); }
+.wh-route .wh-hop { color: var(--text-high); white-space: nowrap; }
+.wh-route .wh-hop:hover { color: var(--accent); }
+.wh-arrow { color: var(--text-lowest); padding: 0 3px; }
+.badge.wh-quiet { background: var(--panel); color: var(--text-low); }
+/* A queued release sits in the same table as a transfer in flight, so its route
+   is stated rather than linked (a digest is not a transaction anywhere). */
+.wh-queued-row .wh-route .wh-hop { cursor: help; }
+.wh-release { white-space: nowrap; font-size: 11.5px; color: var(--text-medium); }
+/* Past its timer the release is anybody's to complete — the one thing on this
+   surface that is an invitation rather than a report. */
+.wh-release.ready { color: var(--green); }
+.wh-digest { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; }
+.wh-digest .mono { font-size: 10.5px; }
+/* A footnote naming several sources is prose, not a caption: it reads left, at
+   a measure, rather than centred like the one-line one it sits in place of. */
+/* Left-aligned across the content column — provenance reads as a paragraph,
+   not a centered caption. */
+.sec-asof.sec-wh-asof { text-align: left; }
+
+@media (max-width: 720px) {
+  .wh-beams { gap: 18px; }
+  .wh-beam { height: 18px; }
+  .wh-beam-foot .wh-delta { margin-left: 0; }
+  /* Both cells hold two parts that would otherwise be crushed against the
+     label; they stack under it instead. */
+  .sec-tbl tbody td[data-label="Origin"] .wh-origin { justify-content: flex-end; }
+}
 
 /* ── /revenue — the revenue river ─────────────────────────────────────────────
    Incomes drift from the right edge into the treasury counter (top → bottom on

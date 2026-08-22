@@ -30,11 +30,18 @@ describe('rule kind registry', () => {
     expect([...ACTIVITY_TYPES]).toEqual(activityTypes)
   })
 
-  // The safety lane reads securityService's timeline kinds, including the
-  // freeze/unfreeze pair added with the frozen-fuse work.
+  // The security kind spans two sources. Its LEDGER half must name kinds
+  // securityService actually emits; its bridge-state half (deficit, released,
+  // fuse) exists only in the Wormhole monitor's snapshot and has no counterpart
+  // there. `queued` is in both — Hydration-side queue logs on the ledger,
+  // origin-side queues in the snapshot.
   it('covers every safety timeline kind the security service emits', () => {
     const src = readFileSync(join(srcDir, 'services/securityService.ts'), 'utf8')
-    for (const kind of SAFETY_KINDS) expect(src, kind).toContain(`'${kind}'`)
+    const snapshotOnly = new Set(['deficit', 'released', 'fuse'])
+    for (const kind of SAFETY_KINDS) {
+      if (snapshotOnly.has(kind)) continue
+      expect(src, kind).toContain(`'${kind}'`)
+    }
   })
 })
 
@@ -142,7 +149,7 @@ describe('describeRule', () => {
     expect(describeRule('referendum', { track: '1' })).toBe('referenda — any phase on whitelisted_caller')
     expect(describeRule('tc-motion', {})).toBe('technical committee motions — any phase')
     expect(describeRule('tc-motion', { phases: ['voted', 'approved'] })).toBe('technical committee motions — voted, approved')
-    expect(describeRule('safety', {})).toBe('safety actions — all kinds')
+    expect(describeRule('safety', {})).toBe('Security · every action')
     expect(describeRule('extrinsic', { section: 'Utility', success: false })).toBe('extrinsic Utility.* (failed)')
     expect(describeRule('event', { section: 'Balances', method: 'Slashed' })).toBe('event Balances.Slashed')
     expect(REFERENDUM_PHASES.length).toBeGreaterThan(0)

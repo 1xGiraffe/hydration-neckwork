@@ -11,10 +11,10 @@ import {
 const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
 
 const PAGE = 25
-const plan = (offset: number, extra: Partial<{ limit: number; type: string; from: string; to: string; min: number; unit: 'usd' | 'token'; token: string; action: string }> = {}) =>
+const plan = (offset: number, extra: Partial<{ limit: number; type: string; from: string; to: string; min: number; unit: 'usd' | 'token'; token: string; action: string; live: boolean }> = {}) =>
   activityWindowPlan(
     extra.limit ?? PAGE, offset, extra.type ?? 'all', extra.from, extra.to,
-    { token: extra.token, min: extra.min, unit: extra.unit }, extra.action,
+    { token: extra.token, min: extra.min, unit: extra.unit }, extra.action, extra.live,
   )
 
 // A page of the merged, trade, transfer, liquidity, money-market or cross-chain feed
@@ -124,12 +124,47 @@ describe('window freshness', () => {
     expect(plan(7)!.live).toBe(true)
   })
 
-  it('takes deeper, dated and exact-value windows off the live TTL', () => {
+  it('takes deeper, closed-dated and exact-value windows off the live TTL', () => {
     expect(plan(PAGE)!.live).toBe(false)
     expect(plan(2_300)!.live).toBe(false)
     expect(plan(0, { to: '2024-01-01' })!.live).toBe(false)
     expect(plan(0, { min: 1_000 })!.live).toBe(false)
     expect(plan(0, { min: 95_000 })!.live).toBe(false)
+  })
+
+  // A dated window that reaches TODAY is a live window wearing a historical key: it
+  // keeps gaining rows, so a key without the head freezes it for the whole TTL. The
+  // page cache above already reads this off `datedWindowIsClosed`; the window under it
+  // was reading "has a date filter", which is the trap, and it is what silenced the
+  // notification lanes — they day-bound their fetch, so every one of their reads was
+  // dated-but-open and landed on the minute-old shared window.
+  it('keeps a dated window that still reaches today on the live TTL', () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10)
+
+    expect(plan(0, { from: today, to: today })!.live).toBe(true)
+    expect(plan(0, { from: yesterday, to: today })!.live).toBe(true)
+    // No upper bound at all reaches today by definition.
+    expect(plan(0, { from: '2024-01-01' })!.live).toBe(true)
+    // A window whose day has ended can no longer gain rows and keeps the shared TTL.
+    expect(plan(0, { from: yesterday, to: yesterday })!.live).toBe(false)
+  })
+
+  // A reader whose cursor only moves forward — the notification evaluator — can never
+  // come back for a row it did not see, so the sparse-floor COST rule above is not a
+  // trade it can make: a page up to ACTIVITY_WINDOW_FRESH_MS old, read while its cursor
+  // tracks the live head, loses every row that landed inside the freshness period.
+  // Measured 2026-08-21: one large-trade notification against 66 qualifying rows that
+  // day, and ten straight DCA executions of schedule 33789 (~$1.1k each) silent.
+  it('gives a forward-only reader a head-keyed window even under a sparse floor', () => {
+    expect(plan(0, { min: 95_000 })!.live).toBe(false)
+    expect(plan(0, { min: 95_000, live: true })!.live).toBe(true)
+    expect(plan(0, { min: 1_000, live: true })!.live).toBe(true)
+    // Depth is not a cost rule: a deeper bucket is a different window, and the page
+    // that asked for it is the one that must stay on the shared TTL.
+    expect(plan(PAGE, { live: true })!.live).toBe(false)
+    // Nor does it resurrect a window that can no longer gain rows.
+    expect(plan(0, { to: '2024-01-01', live: true })!.live).toBe(false)
   })
 
   it('spends the live TTL on the head-keyed live branch and the window TTL on the rest', () => {
