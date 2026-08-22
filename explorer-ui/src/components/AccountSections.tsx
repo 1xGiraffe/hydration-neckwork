@@ -233,17 +233,46 @@ export function profileTabs(
   ]
 }
 
-export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUsd, valueUsd, valueHint }: {
+// The Value stat is portfolio MINUS money-market debt on every surface that shows
+// it, so a borrower's headline figure is netted against a loan the balance list
+// never holds — and goes negative once the debt outgrows the wallet. This is the
+// row that names that subtraction: what the primary market lent and borrowed,
+// then each supplemental market (GIGAHDX, BIL, …) carrying debt of its own. The
+// markets are isolated, so each is named separately rather than blended into one
+// figure that would hide which one is levered. Returns null when nothing is
+// borrowed, so the caller renders no row at all rather than an empty one.
+function moneyMarketValueBreakdown(markets: MoneyMarketPosition[]): ReactNode {
+  const primary = markets.find(p => p.role === 'primary') ?? markets.find(p => p.marketKey === 'core')
+  const primarySupplyUsd = Number(primary?.totalSuppliedBase ?? primary?.totalCollateralBase ?? 0) / 1e8
+  const primaryDebtUsd = Number(primary?.totalDebtBase ?? 0) / 1e8
+  const supplementalDebts = markets
+    .filter(p => p !== primary && Number(p.totalDebtBase) > 0)
+    .map(p => ({ key: p.marketKey, label: p.market, usd: Number(p.totalDebtBase) / 1e8 }))
+  if (primaryDebtUsd <= 0 && !supplementalDebts.length) return null
+  return (
+    <div className="hint">
+      {primaryDebtUsd > 0 && <>primary {F.usd(primarySupplyUsd)} lent · −{F.usd(primaryDebtUsd)} borrowed</>}
+      {supplementalDebts.map((m, i) => <span key={m.key}>{(primaryDebtUsd > 0 || i > 0) && <span aria-hidden="true"> · </span>}<span className="mm-secondary-debt">{m.label} debt −{F.usd(m.usd)}</span></span>)}
+    </div>
+  )
+}
+
+export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUsd, valueUsd, moneyMarket }: {
   tradingVolumeUsd?: number | null
   liquidationVolumeUsd?: number | null
   // Protocol revenue earned from this account (fees paid, penalties, interest).
   revenueUsd?: number | null
   valueUsd: number
-  valueHint?: ReactNode
+  // The positions `valueUsd` was already netted against. Owned by this component
+  // rather than each page, so the account and tag surfaces cannot drift into
+  // explaining the same subtraction differently — or, as the account page did,
+  // not at all.
+  moneyMarket?: MoneyMarketPosition[]
 }) {
   const trading = tradingVolumeUsd ?? 0
   const liquidation = liquidationVolumeUsd ?? 0
   const revenue = revenueUsd ?? 0
+  const valueHint = moneyMarket?.length ? moneyMarketValueBreakdown(moneyMarket) : null
   return (
     <>
     <div className="acct-stats">
