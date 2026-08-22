@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
 import {
+  SAFETY_ROW_LANE_KINDS, SAFETY_SNAPSHOT_KINDS,
   activityIdentity, activityPath, activityReferencesAsset, armStateKey, evaluateAccountActivity,
   evaluateEvents, evaluateExtrinsics, evaluateLargeValue, evaluateReferendum, evaluateRowKind,
   evaluateSafety, evaluateThreshold, inWindow, isFinalRow, nameMatches, notificationIdFor,
@@ -549,18 +550,28 @@ describe('primary-market health factor', () => {
 
 /* ============ registry parity ============ */
 
-// A safety rule can only narrow to a kind the timeline actually emits. The two
-// lists live in different files (the rule registry and the dashboard builder),
-// so a new action kind that reaches the timeline without reaching the registry
-// would be unsubscribable — and one removed from the timeline would leave a
-// rule that can never match.
+// A safety rule can only narrow to a kind one of its two lanes actually emits.
+// The lists live in three files (the rule registry, the dashboard builder, the
+// evaluator's delivery matrix), so a new action kind reaching a lane without
+// reaching the registry would be unsubscribable — and one removed from a lane
+// would leave a rule that can never match.
 describe('safety kinds registry', () => {
-  it('names exactly the kinds securityService puts on the timeline', () => {
+  it('names exactly the kinds securityService puts on the ledger', () => {
     const source = readFileSync(new URL('../src/services/securityService.ts', import.meta.url), 'utf8')
-    const timeline = source.slice(source.indexOf('function buildTimeline('), source.indexOf('\n// `TechnicalCommittee.set_members('))
+    // From the Wormhole manager builder through buildTimeline: everything that
+    // becomes a SafetyEvent row.
+    const ledger = source.slice(
+      source.indexOf('export function buildWormholeSafetyEvents('),
+      source.indexOf('\n// `TechnicalCommittee.set_members('))
     const emitted = new Set(
-      [...timeline.matchAll(/kind: ([^\n]+),/g)]
+      [...ledger.matchAll(/kind: ([^\n]+),/g)]
         .flatMap(m => [...m[1].matchAll(/'([a-z-]+)'/g)].map(q => q[1])))
-    expect([...emitted].sort()).toEqual([...SAFETY_KINDS].sort())
+    expect([...emitted].sort()).toEqual([...SAFETY_ROW_LANE_KINDS].sort())
+  })
+
+  // The bridge-state half is not indexed anywhere, so its only registry is the
+  // matrix itself; together the two lanes must cover the whole vocabulary.
+  it('leaves no safety kind without a lane', () => {
+    expect([...new Set([...SAFETY_ROW_LANE_KINDS, ...SAFETY_SNAPSHOT_KINDS])].sort()).toEqual([...SAFETY_KINDS].sort())
   })
 })

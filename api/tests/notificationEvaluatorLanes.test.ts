@@ -12,7 +12,7 @@ vi.mock('../src/services/securityService.ts', () => ({
   getSecurityDashboard: async () => ({ timeline: [...timeline] }),
 }))
 
-interface ActivityCall { kind: 'address' | 'recent'; address?: string; type?: string; action?: string; filters?: Record<string, unknown> }
+interface ActivityCall { kind: 'address' | 'recent'; address?: string; type?: string; action?: string; filters?: Record<string, unknown>; opts?: Record<string, unknown> }
 const activityCalls: ActivityCall[] = []
 let activityRows: Record<string, unknown>[] = []
 vi.mock('../src/services/explorerService.ts', async importOriginal => {
@@ -23,8 +23,8 @@ vi.mock('../src/services/explorerService.ts', async importOriginal => {
       activityCalls.push({ kind: 'address', address, type, action, filters })
       return activityRows
     },
-    getRecentActivity: async (_limit: number, _from?: string, _to?: string, _offset = 0, type = 'all', filters: Record<string, unknown> = {}) => {
-      activityCalls.push({ kind: 'recent', type, filters })
+    getRecentActivity: async (_limit: number, _from?: string, _to?: string, _offset = 0, type = 'all', filters: Record<string, unknown> = {}, _action?: string, opts: Record<string, unknown> = {}) => {
+      activityCalls.push({ kind: 'recent', type, filters, opts })
       return activityRows
     },
     getPrimaryHealthFactor: async (address: string) => {
@@ -286,6 +286,30 @@ describe('activity source fan-out', () => {
     expect(new Set(inbox().map(r => String(r.rule_id)))).toEqual(new Set([trades.ruleId, transfers.ruleId]))
     expect(evaluatorCursors()['large-transfer']).toBe(1_010)
     expect(evaluatorCursors()['large-trade']).toBe(1_010)
+  })
+
+  // Every lane that reads the GLOBAL feed day-bounds its fetch (a sparse floor
+  // walks all history otherwise), and a dated read is served the shared
+  // stale-while-revalidate window: a page up to a minute old, on a key with no
+  // head in it. The cursor meanwhile tracks the live head, so rows that landed
+  // inside that minute were stepped over for good — measured 2026-08-21, one
+  // large-trade notification against 66 qualifying rows. These lanes must
+  // therefore declare themselves forward-only, which puts them on the head-keyed
+  // window. The scoped feeds are keyed on their own accounts' activity height and
+  // need nothing.
+  it('reads the global feed as a forward-only reader, so no lane is served a stale window', async () => {
+    await createRule(OWNER, { kind: 'large-trade', params: { minUsd: 1_000 } })
+    await createRule(OWNER, { kind: 'large-transfer', params: { minUsd: 1_000 } })
+    await createRule(OWNER, { kind: 'protocol-revenue', params: { minUsd: 10 } })
+    await createRule(OWNER, { kind: 'liquidation', params: {} })
+    await runEvaluatorTick()
+    setHead(1_010)
+    activityCalls.length = 0
+    await runEvaluatorTick()
+
+    const global = activityCalls.filter(c => c.kind === 'recent')
+    expect(global.map(c => c.type).sort()).toEqual(['all', 'mm', 'trade', 'transfer'])
+    expect(global.every(c => c.opts?.forwardOnly === true)).toBe(true)
   })
 
   // The cap is per kind: the row lane visits the kinds in a fixed order, and a

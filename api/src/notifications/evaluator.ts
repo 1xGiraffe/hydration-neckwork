@@ -18,8 +18,11 @@ import {
 } from './delivery.ts'
 import {
   KIND_LABELS, REFERENDUM_PHASES, TC_MOTION_PHASES,
-  type NotificationKind, type RuleParams,
+  type NotificationKind, type RuleParams, type SafetyKind,
 } from './notificationRules.ts'
+import {
+  getWormholeAlertState, getWormholeSnapshotGeneration, type WormholeAlertState,
+} from '../services/wormholeNttService.ts'
 import {
   activeRulesByKind, armStateKey, channelsFor, getChannel, getNotificationState, setNotificationState,
   type NotificationChannel, type NotificationRule,
@@ -232,7 +235,19 @@ export type MatchPayload =
   | { lane: 'extrinsic'; row: ChainExtrinsicRow }
   | { lane: 'price'; assetId: number; direction: 'above' | 'below'; threshold: number; value: number }
   | { lane: 'health-factor'; address: string; account: AccountRef | null; threshold: number; value: number }
-  | { lane: 'dca-start'; row: DcaScheduleRow; hourlyUsd: number; perExecutionUsd: number; runtimeMs: number | null }
+  | { lane: 'dca-start'; row: DcaScheduleRow; hourlyUsd: number; perExecutionUsd: number
+      /** Budget of the sold asset in USD; null for an unbounded schedule. */
+      totalUsd: number | null
+      /** Planned executions — exact for a Sell, USD-estimated for a Buy. */
+      executions: number | null
+      periodMs: number; runtimeMs: number | null }
+  | { lane: 'safety-state'; event: SafetyStateEvent; symbol: string; chainName: string
+      /** Deficit only: how much minted supply has no custody behind it. */
+      deficitUsd?: number
+      /** Queue events only. */
+      digest?: string; amount?: number; releasableAt?: string | null
+      /** Fuse only: which leg, how spent it is, and what it is spending. */
+      direction?: FuseDirection; utilizationPct?: number; limit?: number; durationSec?: number }
 
 /** A DCA schedule as it was created: the standing order, not any one execution. */
 export interface DcaScheduleRow {
@@ -399,6 +414,45 @@ export function activityReferencesAsset(row: ActivityRow, assetId: number): bool
     || row.assetOut?.assetId === assetId
     || (row.assetRefs?.includes(assetId) ?? false)
 }
+
+/* ============ the security delivery matrix ============ */
+
+// There is ONE security kind, fed by two lanes, and every event has exactly one
+// of them as its path. Nothing below is a preference: an event reachable from
+// both lanes would be delivered twice to the same subscriber, with two different
+// identities, and no amount of deduplication downstream could collapse them.
+//
+//   event              | ROW lane (indexed Security ledger) | SNAPSHOT lane (bridge state)
+//   -------------------+------------------------------------+------------------------------
+//   limit              | yes, incl. Wormhole manager limits  | never
+//   pause / unpause    | yes — HYDRATION side only, incl.    | ORIGIN side only
+//                      |   the local NTT managers            |
+//   lockdown, freeze…  | yes                                 | never
+//   queued             | HYDRATION-side queue logs (the two  | ORIGIN-side queues, from the
+//                      |   TransferQueued topics)            |   monitor's queue set
+//   released           | never (no log marks a release)      | yes, on a digest seen held
+//   deficit            | never (not an indexed fact at all)  | yes
+//   fuse               | never (an origin limiter's level)   | yes
+//
+// The two pause halves are what makes this delicate: the snapshot carries BOTH
+// flags, and reporting its `pausedLocal` would restate the ledger's own row.
+// `safetySnapshotMatches` therefore reads the origin flag only.
+//
+// One thing must never reach either lane: a GAP-CLOSING MINT. Those are sent to
+// the dead address (0x…dEaD), so they raise `Tokens.TotalIssuance` and the
+// dead-address balance by the same amount in the same block. The bridge monitor
+// subtracts the second from the first before it computes a residual (see
+// `classifyBacking`'s `burned` term), so the residual does not move and the
+// deficit event stays silent. Anyone changing that subtraction is changing
+// whether fixing a gap pages every subscriber about a gap.
+export const SAFETY_ROW_LANE_KINDS: readonly SafetyKind[] = [
+  'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze', 'queued',
+]
+/** The events the bridge snapshot delivers; `queued` and the pause pair are split by SIDE, not by kind. */
+export const SAFETY_SNAPSHOT_KINDS = ['deficit', 'queued', 'released', 'fuse', 'pause', 'unpause'] as const
+export type SafetyStateEvent = typeof SAFETY_SNAPSHOT_KINDS[number]
+/** Hydration-centric fuse legs: `in` is the entry limiter, `out` the release leg of an exit. */
+export type FuseDirection = 'in' | 'out'
 
 export function evaluateSafety(events: readonly SafetyEvent[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
   return rules.flatMap(rule => {
@@ -581,6 +635,44 @@ export function evaluateThreshold(
   return { fired, next }
 }
 
+/** A boolean the lane watches for transitions rather than for a level. */
+export interface FlagInput { key: string; value: boolean | null }
+export interface FlagFlip { key: string; value: boolean; epoch: number }
+
+/**
+ * Edge-triggered evaluation of a boolean state.
+ *
+ * The persisted shape is the same `ArmState` the threshold lanes keep, so the
+ * store's per-rule row and its deletion-with-the-rule work unchanged: here
+ * `lastValue` carries the last observed flag as 1 or 0 and `armed` is always
+ * true (a flag has no hysteresis band to re-arm through).
+ *
+ * First sight only records — a rule created while a manager is already paused
+ * waits for a genuine flip, the same rule `evaluateThreshold` follows — and an
+ * unreadable flag changes nothing at all.
+ */
+export function evaluateStateFlip(
+  inputs: readonly FlagInput[],
+  prev: ReadonlyMap<string, ArmState>,
+): { fired: FlagFlip[]; next: Map<string, ArmState> } {
+  const fired: FlagFlip[] = []
+  const next = new Map<string, ArmState>()
+  for (const input of inputs) {
+    if (input.value == null) continue
+    const now = input.value ? 1 : 0
+    const cur = prev.get(input.key)
+    if (!cur || cur.lastValue == null) {
+      next.set(input.key, { armed: true, lastValue: now, epoch: cur?.epoch ?? 0 })
+      continue
+    }
+    if (cur.lastValue === now) continue
+    const epoch = cur.epoch + 1
+    fired.push({ key: input.key, value: input.value, epoch })
+    next.set(input.key, { armed: true, lastValue: now, epoch })
+  }
+  return { fired, next }
+}
+
 // Defined in the store, where deleting a rule also deletes its state row.
 export { armStateKey }
 
@@ -726,6 +818,14 @@ const PHASE_LABEL: Record<ReferendumPhase, string> = {
 // Asset ids in human-facing summaries read as tickers, from the same registry
 // the rest of the api renders symbols from.
 
+// When a rate-limited transfer can be let out. Anyone may call the release once
+// the window has opened, which is the actionable part of the message.
+export function wormholeReleaseText(releasableAt: string | null, nowMs = Date.now()): string {
+  const at = releasableAt ? Date.parse(releasableAt) : NaN
+  if (!Number.isFinite(at)) return 'held until the limiter releases it'
+  return at <= nowMs ? 'releasable now' : `releasable in ${humanDuration(at - nowMs)}`
+}
+
 // One match → the {title, body, path} the shared renderer turns into all three
 // surfaces. Pure: everything it needs is already on the match.
 // `rule` is kept in the signature (every caller has one to hand and a lane may
@@ -827,15 +927,72 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
       const outSym = assetDescriptor(row.assetOut).symbol
       const title: RenderPart[] = [textPart(`DCA started ${inSym} → ${outSym}`)]
       if (row.who) title.push(textPart('by'), accountPart(renderAccount(accountRef(row.who), viewerTag)))
-      // The rate is what the rule matched on; the size says whether it is a burst
-      // or a standing order, which the rate alone cannot tell you.
-      const rate: RenderPart[] = [usdPart(p.hourlyUsd), textPart('per hour ·'), usdPart(p.perExecutionUsd), textPart('per trade')]
-      // How long it runs, not how many times it fires: "25.1M executions" is
-      // arithmetically right on a sell-everything schedule and useless to read.
-      const size = p.runtimeMs == null
-        ? 'Unbounded schedule'
-        : `${compactAmount(dcaExecutions(row))} executions over ~${humanDuration(p.runtimeMs)}`
-      return { title, body: [rate, [textPart(size)]], path: `/dca/${row.id}` }
+      // The notification states the PLAN: what each trade moves, how often, and
+      // what the first hour adds up to — which is the figure the rule matched on
+      // (the hourly rate capped by the budget, so a small bounded schedule never
+      // reads as its extrapolated rate).
+      const plan: RenderPart[] = [
+        usdPart(p.perExecutionUsd), textPart(`per trade every ${humanDuration(p.periodMs)} · first hour ≈`), usdPart(p.hourlyUsd),
+      ]
+      // The size line: the budget bounds it, or nothing does.
+      const size: RenderPart[] = p.totalUsd == null
+        ? [textPart('Unbounded schedule')]
+        : [
+            textPart('Budget ≈'), usdPart(p.totalUsd),
+            ...(p.executions != null && p.runtimeMs != null
+              ? [textPart(`· ~${compactAmount(p.executions)} executions over ~${humanDuration(p.runtimeMs)}`)]
+              : []),
+          ]
+      return { title, body: [plan, size], path: `/dca/${row.id}` }
+    }
+    case 'safety-state': {
+      // Every one of these is a statement about the bridge's own state, so they
+      // all open the same page; the headline carries which asset and which leg.
+      const path = '/security/wormhole'
+      if (p.event === 'deficit') {
+        return {
+          title: [textPart(`${p.symbol} backing deficit`)],
+          body: [[usdPart(p.deficitUsd ?? 0), textPart(`of ${p.symbol} supply has no custody behind it on ${p.chainName}.`)]],
+          path,
+        }
+      }
+      if (p.event === 'queued' || p.event === 'released') {
+        const held = p.event === 'queued'
+        const when = wormholeReleaseText(p.releasableAt ?? null)
+        return {
+          title: [textPart(`${p.symbol} ${held ? 'held by' : 'released by'} ${p.chainName}'s rate limiter`)],
+          body: [[
+            amountPart(p.amount ?? 0, p.symbol),
+            textPart(held ? `· ${when}` : '· the transfer has left custody'),
+          ], [codePart(shortHash(p.digest ?? ''))]],
+          path,
+        }
+      }
+      if (p.event === 'fuse') {
+        // The fuse fires BEFORE the limit binds, so the message has to say what
+        // happens past it — the queue is the consequence somebody acts to avoid.
+        const leg = p.direction === 'out' ? 'release' : 'entry'
+        const window = humanDuration((p.durationSec ?? 0) * 1000)
+        return {
+          title: [textPart(`${p.symbol} ${leg} fuse nearly spent`)],
+          body: [[
+            textPart(`The ${p.chainName} ${leg} fuse for ${p.symbol} is at ${compactAmount(p.utilizationPct ?? 0)}% of its`),
+            amountPart(p.limit ?? 0, p.symbol),
+            textPart(`per ${window} limit — beyond it, transfers are held for ${window}.`),
+          ]],
+          path,
+        }
+      }
+      // Only the ORIGIN manager's flag reaches this lane; a Hydration-side pause
+      // is an indexed log and arrives on the ledger (see the delivery matrix).
+      const paused = p.event === 'pause'
+      return {
+        title: [textPart(`${p.symbol} Wormhole transfers ${paused ? 'paused' : 'resumed'}`)],
+        body: [paused
+          ? `The ${p.symbol} manager on ${p.chainName} is paused, so no ${p.symbol} can cross the bridge in either direction.`
+          : `The ${p.symbol} manager on ${p.chainName} is running again.`],
+        path,
+      }
     }
     case 'health-factor': {
       const title: RenderPart[] = [textPart(`Health factor ${compactAmount(p.value)}`)]
@@ -852,27 +1009,8 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
   }
 }
 
-/**
- * Wall clock the schedule will run for, or null when it is unbounded (or the
- * amounts give no execution count). A duration is what tells a reader whether a
- * schedule is a burst or a standing order; the execution count alone read as
- * nonsense on a sell-everything schedule.
- */
-export function dcaRuntimeMs(row: DcaScheduleRow, blockMs: number): number | null {
-  const executions = dcaExecutions(row)
-  if (executions <= 0 || !(row.periodBlocks > 0) || !(blockMs > 0)) return null
-  return executions * row.periodBlocks * blockMs
-}
-
-/** How many executions a bounded schedule will run. 0 for an unbounded one. */
-export function dcaExecutions(row: DcaScheduleRow): number {
-  const per = toBigIntOrNull(row.amountPer)
-  const total = toBigIntOrNull(row.totalAmount)
-  if (per == null || total == null || per === 0n || total === 0n) return 0
-  return Number(total / per)
-}
-
-/** The asset `amountPer`/`totalAmount` are denominated in, per direction. */
+/** The asset `amountPer` is denominated in, per direction — `totalAmount` is
+ * NOT this asset on a Buy: the budget is always the sold asset (assetIn). */
 export const dcaPricedAsset = (row: DcaScheduleRow): number =>
   (row.direction === 'Buy' ? row.assetOut : row.assetIn)
 
@@ -900,20 +1038,52 @@ export function evaluateDcaStart(
         return dcaHourly(row, valueUsd, blockMs).hourlyUsd >= p.minUsd
       },
       row => {
-        const { hourlyUsd, perExecutionUsd } = dcaHourly(row, valueUsd, blockMs)
-        return { lane: 'dca-start', row, hourlyUsd, perExecutionUsd, runtimeMs: dcaRuntimeMs(row, blockMs) }
+        const plan = dcaHourly(row, valueUsd, blockMs)
+        return {
+          lane: 'dca-start', row,
+          hourlyUsd: plan.hourlyUsd, perExecutionUsd: plan.perExecutionUsd, totalUsd: plan.totalUsd,
+          executions: plan.executions, periodMs: row.periodBlocks * blockMs,
+          runtimeMs: plan.executions == null || plan.executions <= 0
+            ? null
+            : plan.executions * row.periodBlocks * blockMs,
+        }
       })
   })
 }
 
-function dcaHourly(
+export function dcaHourly(
   row: DcaScheduleRow, valueUsd: (assetId: number, raw: string) => number | null, blockMs: number,
-): { hourlyUsd: number; perExecutionUsd: number } {
-  const asset = dcaPricedAsset(row)
-  const perExecutionUsd = valueUsd(asset, row.amountPer) ?? 0
+): { hourlyUsd: number; perExecutionUsd: number; totalUsd: number | null; executions: number | null } {
+  // The two figures live in DIFFERENT denominations on a Buy: `amountPer` fixes
+  // the bought leg (assetOut) while `totalAmount` is always the BUDGET of the
+  // sold asset (assetIn) — the pallet reserves the spend currency. Pricing both
+  // with one asset made a 192k-HDX ($1.4k) budget read as ~$10^11 of USDT, so
+  // the min(rate, budget) cap never bit and a $1.4k schedule alerted as $81.6k/h.
+  const perExecutionUsd = valueUsd(dcaPricedAsset(row), row.amountPer) ?? 0
   const totalRaw = toBigIntOrNull(row.totalAmount)
-  const totalUsd = totalRaw == null || totalRaw === 0n ? null : valueUsd(asset, row.totalAmount)
-  return { hourlyUsd: dcaHourlyValueUsd(perExecutionUsd, totalUsd, row.periodBlocks, blockMs), perExecutionUsd }
+  const totalUsd = totalRaw == null || totalRaw === 0n ? null : valueUsd(row.assetIn, row.totalAmount)
+  return {
+    hourlyUsd: dcaHourlyValueUsd(perExecutionUsd, totalUsd, row.periodBlocks, blockMs),
+    perExecutionUsd,
+    totalUsd,
+    executions: dcaExecutionsPlanned(row, perExecutionUsd, totalUsd),
+  }
+}
+
+/**
+ * How many executions the schedule plans. Exact for a Sell (both figures share
+ * assetIn, so the raw division is unitless); estimated through USD for a Buy
+ * (the budget buys a price-dependent number of fixed-size purchases); null for
+ * an unbounded schedule or when the estimate has no price to stand on.
+ */
+export function dcaExecutionsPlanned(
+  row: DcaScheduleRow, perExecutionUsd: number, totalUsd: number | null,
+): number | null {
+  const per = toBigIntOrNull(row.amountPer)
+  const total = toBigIntOrNull(row.totalAmount)
+  if (per == null || total == null || per === 0n || total === 0n) return null
+  if (row.direction !== 'Buy') return Number(total / per)
+  return totalUsd != null && perExecutionUsd > 0 ? Math.max(1, Math.floor(totalUsd / perExecutionUsd)) : null
 }
 
 const toBigIntOrNull = (raw: string): bigint | null => {
@@ -992,6 +1162,10 @@ let client: ClickHouseClient | null = null
 let timer: ReturnType<typeof setInterval> | null = null
 let inFlight = false
 let tick = 0
+// The Wormhole snapshot generation the security half of the snapshot lane last
+// ran against. -1 so the first tick always runs it, whatever the monitor has
+// already published.
+let lastSecurityGeneration = -1
 const lastSendAtMs = new Map<string, number>()
 // Per-kind cursors, authoritative in memory and persisted on a timer (see
 // flushCursors). `dirtyCursors` is what has moved since the last write.
@@ -1094,6 +1268,7 @@ export function resetEvaluatorForTests(): void {
   client = null
   inFlight = false
   tick = 0
+  lastSecurityGeneration = -1
   lastSendAtMs.clear()
   cursors.clear()
   dirtyCursors.clear()
@@ -1101,6 +1276,8 @@ export function resetEvaluatorForTests(): void {
   parkedDirty = false
   rotation.clear()
   cursorsPersistedAtMs = 0
+  seenOriginQueued.clear()
+  originQueuedMemo.clear()
   for (const k of Object.keys(counters) as (keyof typeof counters)[]) counters[k] = 0
 }
 
@@ -1139,7 +1316,14 @@ export async function runEvaluatorTick(): Promise<void> {
         if (outcome) lanes.push(outcome)
       })
     }
-    const snapshot = tick % SNAPSHOT_EVERY_TICKS === 1 ? await runSnapshotLane() : []
+    // The bridge monitor publishes in steps, so the security half of the
+    // snapshot lane follows its generation counter as well as the rhythm — an
+    // integer compare, no I/O, on a tick that would otherwise do nothing.
+    const generation = getWormholeSnapshotGeneration()
+    const onRhythm = tick % SNAPSHOT_EVERY_TICKS === 1
+    const security = onRhythm || generation !== lastSecurityGeneration
+    if (security) lastSecurityGeneration = generation
+    const snapshot = onRhythm || security ? await runSnapshotLane({ values: onRhythm, security }) : []
     const matches = [...lanes.flatMap(l => l.matches), ...snapshot]
     // Cursors move only once this tick's matches are durably in the inbox: a
     // failed write with an advanced cursor would lose them for good.
@@ -1316,7 +1500,7 @@ async function protocolRevenueMatches(
   const bounds = await windowDayBounds(window)
   return visitGroups('protocol-revenue', groups, budget, async group => {
     const rows = await fetchActivityPage(
-      limit => getRecentActivity(limit, bounds?.from, bounds?.to, 0, 'all', {}, undefined, { revenue: true }),
+      limit => getRecentActivity(limit, bounds?.from, bounds?.to, 0, 'all', {}, undefined, FORWARD_ONLY_REVENUE_PAGE),
       window)
     return evaluateProtocolRevenue(rows, group, window)
   })
@@ -1337,7 +1521,7 @@ async function liquidationMatches(
     const target = (group[0].params as RuleParams['liquidation']).target
     const rows = await fetchActivityPage(limit => target
       ? fetchTargetActivity(target, group[0].accountId, limit, {}, 'mm', { revenue: true })
-      : getRecentActivity(limit, bounds?.from, bounds?.to, 0, 'mm', {}, undefined, { revenue: true }),
+      : getRecentActivity(limit, bounds?.from, bounds?.to, 0, 'mm', {}, undefined, FORWARD_ONLY_REVENUE_PAGE),
       window)
     return evaluateLiquidations(rows, group, window)
   })
@@ -1376,6 +1560,22 @@ async function accountActivityMatches(rules: NotificationRule[], window: BlockWi
 // starving the other (see SOURCE_FETCH_CAP).
 const largeValueKey = (p: RuleParams['large-trade']): string => (p.assetId == null ? '' : String(p.assetId))
 
+// How every lane that reads the GLOBAL feed must ask for its page.
+//
+// `forwardOnly` is the load-bearing half: these lanes day-bound their fetch (a
+// sparse floor walks all history otherwise), and a dated read is served the
+// shared classified window — stale-while-revalidate, on a key that carries no
+// head. Their cursor tracks the live head every tick, so a row that landed while
+// that window was fresh sat below the cursor by the time it appeared and was
+// never seen again. Measured live 2026-08-21: 66 trades cleared a $500 HDX floor
+// and ONE of them notified; every one of the ten ~$1.1k DCA executions of
+// schedule 33789 that day was silent. Declaring the reader forward-only puts the
+// page on the head-keyed window: one build per block, complete when it is read.
+//
+// `revenue` stays per lane — only the two revenue-reading lanes pay for it.
+const FORWARD_ONLY_PAGE = { revenue: false, forwardOnly: true } as const
+const FORWARD_ONLY_REVENUE_PAGE = { revenue: true, forwardOnly: true } as const
+
 async function largeValueMatches(
   kind: 'large-trade' | 'large-transfer', feedType: 'trade' | 'transfer',
   rules: NotificationRule[], window: BlockWindow, budget: FetchBudget,
@@ -1395,7 +1595,7 @@ async function largeValueMatches(
     const assetId = params[0].assetId
     const filters = { min, unit: 'usd' as const, ...(assetId == null ? {} : { token: String(assetId) }) }
     // No large-value rule reads revenue, so this lane must not pay for attaching it.
-    const rows = await fetchActivityPage(limit => getRecentActivity(limit, bounds?.from, bounds?.to, 0, feedType, filters, undefined, { revenue: false }), window)
+    const rows = await fetchActivityPage(limit => getRecentActivity(limit, bounds?.from, bounds?.to, 0, feedType, filters, undefined, FORWARD_ONLY_PAGE), window)
     return evaluateLargeValue(rows, group, window)
   })
 }
@@ -1934,10 +2134,29 @@ async function queryWindowExtrinsics(rules: NotificationRule[], window: BlockWin
 
 /* ============ snapshot lane ============ */
 
-async function runSnapshotLane(): Promise<RuleMatch[]> {
+/**
+ * Which halves of the snapshot lane this tick runs.
+ *
+ * The value triggers keep the fixed rhythm: a price and a health factor move
+ * continuously, so there is no event to react to and a fifth of the ticks is the
+ * resolution they were sized for.
+ *
+ * The security half is different — its source publishes in steps, and the step
+ * is observable for free (an in-memory counter on the Wormhole monitor). So it
+ * also runs on ANY tick where the monitor published a new snapshot, which takes
+ * a confirmed backing shortfall from "up to 30s behind its snapshot" to "one 6s
+ * tick behind it". The rhythm stays as the floor for everything a generation
+ * bump does not cover.
+ */
+async function runSnapshotLane(run: { values: boolean; security: boolean }): Promise<RuleMatch[]> {
   const matches: RuleMatch[] = []
-  await guard('price', async () => { matches.push(...await priceMatches()) })
-  await guard('health-factor', async () => { matches.push(...await healthFactorMatches()) })
+  if (run.values) {
+    await guard('price', async () => { matches.push(...await priceMatches()) })
+    await guard('health-factor', async () => { matches.push(...await healthFactorMatches()) })
+  }
+  if (run.security) {
+    await guard('safety-state', async () => { matches.push(...await safetySnapshotMatches()) })
+  }
   return matches
 }
 
@@ -2070,6 +2289,198 @@ async function healthFactorMatches(): Promise<RuleMatch[]> {
     }
   })
 }
+
+/* ============ safety snapshot lane ============ */
+
+// Digests seen queued at some point in THIS process. A release is only reported
+// for a digest that was observed held first: the monitor's queue set is a
+// snapshot of what is held right now, so a digest simply being absent proves
+// nothing about whether it was ever there. Restarting therefore drops the
+// pending release rather than inventing one.
+const seenOriginQueued = new Set<string>()
+
+// Arm-state keys inside one rule's bundled row. The separator cannot appear in
+// an asset id, a side or a direction, so a key round-trips.
+const STATE_KEY_SEP = '\n'
+const wantsSafetyEvent = (params: RuleParams['safety'], event: SafetyKind): boolean =>
+  !params.kinds?.length || params.kinds.includes(event)
+
+/**
+ * The bridge-state half of the security kind. It reads the Wormhole monitor's
+ * in-memory snapshot — never the chain, never the activity feed — so it costs
+ * nothing beyond the rules it has, and it states exactly the verdict
+ * `/security/wormhole` shows.
+ *
+ * Nothing here is anchored on a block window: a backing deficit, an origin
+ * rate-limiter queue, an origin manager's pause flag and a fuse's utilization
+ * are all CURRENT STATE, which is the sanctioned exception to window anchoring.
+ * Persisted arm state per rule bounds how often each can refire, and the queue
+ * events carry a deterministic identity that the inbox-seeded recent-id set
+ * collapses across restarts.
+ *
+ * It delivers only what no indexed row carries — see the delivery matrix above
+ * `evaluateSafety`. Concretely: the ORIGIN pause flag only (a Hydration-side
+ * pause is a manager log on the ledger) and the ORIGIN queue set only (a
+ * Hydration-side queue would emit its own TransferQueued log).
+ */
+async function safetySnapshotMatches(): Promise<RuleMatch[]> {
+  const rules = activeRulesByKind('safety')
+  if (!rules.length) return []
+  const state = await getWormholeAlertState()
+  // No snapshot yet is not "nothing is wrong": a monitor that has measured
+  // nothing must not report a clean bridge, and it must not arm anything either.
+  if (!state) return []
+
+  const matches: RuleMatch[] = []
+  for (const rule of rules) {
+    const params = rule.params as RuleParams['safety']
+    const prev = parseMemberArmStates(getNotificationState(armStateKey(rule.ruleId))) ?? new Map<string, ArmState>()
+    const next = new Map(prev)
+    let changed = false
+
+    if (wantsSafetyEvent(params, 'deficit')) {
+      const { fired, next: armed } = evaluateThreshold(
+        state.assets.map(a => ({
+          ruleId: `deficit${STATE_KEY_SEP}${a.assetId}`,
+          direction: 'above' as const,
+          threshold: params.deficitUsd,
+          // A shortfall is a NEGATIVE residual, so the watched value is its
+          // magnitude — but only once the classifier has graded it. A negative
+          // residual with any other status is either an unconfirmed first
+          // reading (the sampling skew the confirmation pass exists to refute)
+          // or an unverifiable gap on a deployment that is not checking
+          // in-flight transfers, where every routine transfer opens one; paging
+          // on either would contradict the page the alert links to. A readable
+          // clean reading is 0 so the threshold can re-arm; an unread residual
+          // is null and changes nothing — an unreadable custody balance must
+          // never read as a total deficit.
+          value: a.residualUsd == null ? null
+            : a.status === 'deficit' || a.status === 'attention' ? Math.max(0, -a.residualUsd)
+              : 0,
+        })),
+        prev,
+      )
+      for (const [key, arm] of armed) { next.set(key, arm); changed = true }
+      for (const fire of fired) {
+        const assetId = Number(fire.ruleId.slice(fire.ruleId.indexOf(STATE_KEY_SEP) + 1))
+        const asset = state.assets.find(a => a.assetId === assetId)
+        if (!asset) continue
+        matches.push(stateMatch(rule, `deficit:${assetId}:${fire.epoch}`, {
+          lane: 'safety-state', event: 'deficit', symbol: asset.symbol, chainName: asset.originChainName, deficitUsd: fire.value,
+        }))
+      }
+    }
+
+    // A fuse warns BEFORE the limit binds: past it the origin limiter holds the
+    // transfer for a whole refill window, which is what the 'queued' event
+    // reports. Only the ORIGIN legs are evaluated — Hydration's own are uncapped
+    // at the u64 trimmed ceiling, so their utilization is meaninglessly ~0; were
+    // that ever to change, the origin table would still be the operative one,
+    // because a transfer has to clear both.
+    if (wantsSafetyEvent(params, 'fuse')) {
+      const legs = state.assets.flatMap(a => FUSE_DIRECTIONS.map(dir => ({ asset: a, dir, fuse: a.fuses[dir] })))
+      const { fired, next: armed } = evaluateThreshold(
+        legs.map(leg => ({
+          ruleId: `fuse${STATE_KEY_SEP}${leg.asset.assetId}:${leg.dir}`,
+          direction: 'above' as const,
+          threshold: params.fusePct,
+          // An unread origin limiter is null, not 0%: a chain that failed to
+          // answer must neither fire nor re-arm anything.
+          value: leg.fuse?.utilizationPct ?? null,
+        })),
+        prev,
+      )
+      for (const [key, arm] of armed) { next.set(key, arm); changed = true }
+      for (const fire of fired) {
+        const key = fire.ruleId.slice(fire.ruleId.indexOf(STATE_KEY_SEP) + 1)
+        const leg = legs.find(l => `${l.asset.assetId}:${l.dir}` === key)
+        if (!leg?.fuse) continue
+        matches.push(stateMatch(rule, `fuse:${leg.asset.assetId}:${leg.dir}:${fire.epoch}`, {
+          lane: 'safety-state', event: 'fuse', symbol: leg.asset.symbol, chainName: leg.asset.originChainName,
+          direction: leg.dir, utilizationPct: fire.value, limit: leg.fuse.limit, durationSec: leg.fuse.durationSec,
+        }))
+      }
+    }
+
+    // Both directions come out of ONE flip evaluation, so a rule narrowed to
+    // 'pause' still tracks the unpause that has to happen before it can fire
+    // again; the unwanted side is dropped at the match, not at the state.
+    if (wantsSafetyEvent(params, 'pause') || wantsSafetyEvent(params, 'unpause')) {
+      const inputs: FlagInput[] = state.assets.map(a => ({
+        key: `pause${STATE_KEY_SEP}${a.assetId}:origin`, value: a.pausedOrigin,
+      }))
+      const { fired, next: flipped } = evaluateStateFlip(inputs, prev)
+      for (const [key, arm] of flipped) { next.set(key, arm); changed = true }
+      for (const flip of fired) {
+        const event: SafetyStateEvent = flip.value ? 'pause' : 'unpause'
+        if (!wantsSafetyEvent(params, event)) continue
+        const [assetIdText] = flip.key.slice(flip.key.indexOf(STATE_KEY_SEP) + 1).split(':')
+        const asset = state.assets.find(a => a.assetId === Number(assetIdText))
+        if (!asset) continue
+        matches.push(stateMatch(rule, `${event}:${assetIdText}:origin:${flip.epoch}`, {
+          lane: 'safety-state', event, symbol: asset.symbol, chainName: asset.originChainName,
+        }))
+      }
+    }
+
+    const held = new Set(state.queued.map(q => q.digest))
+    if (wantsSafetyEvent(params, 'queued')) {
+      for (const entry of state.queued) {
+        // Announced on the pass that first sees it, not on every pass: the
+        // monitor keeps probing a digest for as long as the limiter holds it —
+        // weeks, past the inbox dedup set's TTL — and re-emitting it each tick
+        // would page subscribers again whenever it outlives that window. After
+        // a restart the set is empty, so a still-held digest re-emits once and
+        // the inbox dedup collapses it unless it has already outlived the TTL.
+        if (seenOriginQueued.has(entry.digest)) continue
+        matches.push(stateMatch(rule, `queued:${entry.digest}`, {
+          lane: 'safety-state', event: 'queued', symbol: entry.symbol, chainName: entry.chainName,
+          digest: entry.digest, amount: entry.amount, releasableAt: entry.releasableAt,
+        }))
+      }
+    }
+    if (wantsSafetyEvent(params, 'released')) {
+      for (const digest of seenOriginQueued) {
+        if (held.has(digest)) continue
+        const remembered = originQueuedMemo.get(digest)
+        if (!remembered) continue
+        matches.push(stateMatch(rule, `released:${digest}`, {
+          lane: 'safety-state', event: 'released', symbol: remembered.symbol, chainName: remembered.chainName,
+          digest, amount: remembered.amount, releasableAt: remembered.releasableAt,
+        }))
+      }
+    }
+
+    if (changed) await setNotificationState(armStateKey(rule.ruleId), JSON.stringify({ members: Object.fromEntries(next) }))
+  }
+
+  // Remembered AFTER the rules ran, so a digest that appeared and vanished
+  // between two ticks cannot fire its release in the same pass that first saw it.
+  for (const entry of state.queued) {
+    seenOriginQueued.add(entry.digest)
+    originQueuedMemo.set(entry.digest, entry)
+  }
+  for (const digest of [...seenOriginQueued]) {
+    if (!state.queued.some(q => q.digest === digest)) { seenOriginQueued.delete(digest); originQueuedMemo.delete(digest) }
+  }
+  return matches
+}
+
+const FUSE_DIRECTIONS: readonly FuseDirection[] = ['in', 'out']
+
+// What a queued transfer looked like while it was held, so its release can be
+// described after it has left the snapshot.
+const originQueuedMemo = new Map<string, WormholeAlertState['queued'][number]>()
+
+const stateMatch = (rule: NotificationRule, identity: string, payload: MatchPayload): RuleMatch => ({
+  ruleId: rule.ruleId,
+  accountId: rule.accountId,
+  kind: rule.kind,
+  identity,
+  // A bridge state has no block of its own; the identity is what dedupes it.
+  blockHeight: 0,
+  payload,
+})
 
 // The bundled per-member arm-state row a tag-target health-factor rule keeps
 // (see healthFactorMatches). null for the legacy plain shape or garbage.

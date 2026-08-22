@@ -8,6 +8,8 @@ import { accountRef, ensurePrices, mmMarkets, parachainName, usdValue, type Acco
 import { assetDescriptor } from './explorerAssets.ts'
 import { loadCurrentPools } from './poolService.ts'
 import { resolveModuleError } from './runtimeErrorNames.ts'
+import { getWormholeManagers, getWormholeSummary, type WormholeManagerRef, type WormholeSummary } from './wormholeNttService.ts'
+import { parseNttLimitUpdate, parseNttPauseEvent, parseNttQueuedTransfer, TOPIC } from './wormholeNtt.ts'
 
 // The Security dashboard: Hydration's circuit breakers, freezes and the origins
 // that can lift them.
@@ -792,6 +794,11 @@ export interface SecurityDashboard {
     memberSetAtBlock: number | null
     outstandingWhitelisted: { callHash: string; blockHeight: number; blockTimestamp: string }[]
   }
+  // Wormhole NTT backing, rolled up from its own snapshot (see
+  // wormholeNttService). Null until that snapshot has run once, so a deployment
+  // without origin-chain access simply carries no block rather than a made-up
+  // verdict; the detail lives at /explorer/security/wormhole.
+  wormhole: WormholeSummary | null
 }
 
 const asset = (id: number): AssetRef => assetDescriptor(id)
@@ -828,7 +835,7 @@ export async function getSecurityDashboard(): Promise<SecurityDashboard> {
 
 async function buildSecurityDashboard(): Promise<SecurityDashboard> {
   const snap = snapshot
-  const [head, pools, lockdownRows, releaseTotal, limitEvents, registryLimitRows, pauseEvents, tripRows, peaks, omniTradabilityHistory, stableTradability, whitelisted, memberSet, solvency, liquidations, liquidityMoves, runtime] = await Promise.all([
+  const [head, pools, lockdownRows, releaseTotal, limitEvents, registryLimitRows, pauseEvents, tripRows, peaks, omniTradabilityHistory, stableTradability, whitelisted, memberSet, solvency, liquidations, liquidityMoves, runtime, wormhole, wormholeManagerEvents] = await Promise.all([
     queryHead(),
     loadCurrentPools(),
     queryLockdownEvents(),
@@ -846,6 +853,8 @@ async function buildSecurityDashboard(): Promise<SecurityDashboard> {
     queryLiquidations(),
     queryLargestLiquidityMoves(),
     queryRuntime(),
+    getWormholeSummary(),
+    queryWormholeManagerEvents(),
   ])
 
   const headBlock = snap?.headBlock ?? head.block_height
@@ -874,12 +883,13 @@ async function buildSecurityDashboard(): Promise<SecurityDashboard> {
       upgrades: Number(runtime?.upgrades ?? 0),
       lastUpgrade: runtime ? { blockHeight: runtime.block_height, blockTimestamp: runtime.block_timestamp } : null,
     },
-    timeline: buildTimeline(limitEvents, pauseEvents, lockdownRows, omniTradabilityHistory, registryLimitRows),
+    timeline: buildTimeline(limitEvents, pauseEvents, lockdownRows, omniTradabilityHistory, registryLimitRows, wormholeManagerEvents),
     guardians: {
       techCommittee: buildTechCommittee(memberSet),
       memberSetAtBlock: memberSet?.block_height ?? null,
       outstandingWhitelisted: whitelisted.map(w => ({ callHash: w.call_hash, blockHeight: w.block_height, blockTimestamp: w.block_timestamp })),
     },
+    wormhole,
   }
 }
 
@@ -947,6 +957,127 @@ async function queryRegistryLimitEvents(): Promise<RegistryLimitRow[]> {
     format: 'JSONEachRow',
   })
   return res.json<RegistryLimitRow>()
+}
+
+export interface WormholeManagerEventRow {
+  block_height: number
+  block_timestamp: string
+  extrinsic_index: number | null
+  event_index: number
+  contract: string
+  topics: string[]
+  data: string
+}
+
+// Actions on Hydration's own Wormhole NTT managers: the pause pair, the two
+// rate-limit configuration events, and the two queue events a local limiter
+// would emit. The manager set comes from the backing monitor's
+// `EVMAccounts.NttMinterSet` discovery, so a newly bridged asset is covered with
+// no change here — and the two decoy managers that discovery already excludes (a
+// test deployment and a superseded duplicate) can never reach the ledger.
+//
+// These are the HYDRATION side. Their origin-chain counterparts have no indexed
+// row anywhere and reach a subscriber through the safety SNAPSHOT lane instead;
+// the delivery matrix in notifications/evaluator.ts is what keeps the two from
+// reporting the same event twice.
+async function queryWormholeManagerEvents(): Promise<WormholeManagerEventRow[]> {
+  const managers = getWormholeManagers()
+  if (!managers.length) return []
+  const topics = [
+    TOPIC.paused, TOPIC.notPaused, TOPIC.outboundLimitUpdated, TOPIC.inboundLimitUpdated,
+    TOPIC.outboundTransferQueued, TOPIC.inboundTransferQueued,
+  ]
+  const quoted = (values: readonly string[]) => values.map(v => `'${v.replace(/'/g, '')}'`).join(',')
+  const res = await client.query({
+    query: `SELECT block_height, block_timestamp, extrinsic_index, event_index,
+                   lower(contract_address) AS contract, topics, data
+            FROM price_data.raw_evm_logs
+            WHERE lower(contract_address) IN (${quoted(managers.map(m => m.manager))})
+              AND topic0 IN (${quoted(topics)})
+            ORDER BY block_height, event_index
+            LIMIT 1 BY block_height, event_index`,
+    format: 'JSONEachRow',
+  })
+  return res.json<WormholeManagerEventRow>()
+}
+
+// A hash shortened the way the explorer shortens one (`F.shortHash`), so a
+// digest on the ledger reads as it does on the page.
+const shortDigest = (hash: string): string => (hash.length > 18 ? `${hash.slice(0, 8)}…${hash.slice(-6)}` : hash)
+
+// The ledger entries those logs become. A limit is emitted already untrimmed to
+// the manager's token decimals, so it reads at the asset's own precision.
+//
+// The labels carry the direction and the new value (or the queue slot) because a
+// safety event's identity is (block, extrinsic, kind, asset, label): two limit
+// updates on one manager inside a single governance batch would otherwise
+// collapse into one notification.
+export function buildWormholeSafetyEvents(
+  rows: readonly WormholeManagerEventRow[],
+  managers: readonly WormholeManagerRef[],
+): SafetyEvent[] {
+  const byManager = new Map(managers.map(m => [m.manager, m]))
+  const out: SafetyEvent[] = []
+  for (const row of rows) {
+    const manager = byManager.get(row.contract.toLowerCase())
+    if (!manager) continue
+    const descriptor = asset(manager.assetId)
+    const base = {
+      blockHeight: row.block_height,
+      blockTimestamp: row.block_timestamp,
+      extrinsicIndex: extrinsicIndexOf(row.extrinsic_index),
+      asset: descriptor,
+    }
+    const paused = parseNttPauseEvent(row.topics)
+    if (paused != null) {
+      out.push({
+        ...base,
+        kind: paused ? 'pause' : 'unpause',
+        label: `Wormhole ${manager.symbol} manager ${paused ? 'paused' : 'unpaused'}`,
+        detail: paused
+          ? `Transfers of ${manager.symbol} over Wormhole are halted in both directions until the manager is unpaused.`
+          : `Transfers of ${manager.symbol} over Wormhole have resumed.`,
+      })
+      continue
+    }
+    const queued = parseNttQueuedTransfer(row.topics, row.data)
+    if (queued) {
+      // The event names the queue slot, never the amount, so the label carries
+      // the slot instead: the safety identity is (block, extrinsic, kind, asset,
+      // label), and a batch that queued two transfers of one asset in one
+      // extrinsic would otherwise collapse into a single notification.
+      const which = queued.direction === 'outbound'
+        ? `#${queued.sequence}`
+        : shortDigest(queued.digest ?? '')
+      const where = queued.direction === 'outbound'
+        ? `leaving Hydration for ${manager.originChainName}`
+        : `arriving from ${manager.originChainName}`
+      out.push({
+        ...base,
+        kind: 'queued',
+        label: `Wormhole ${manager.symbol} ${queued.direction} transfer queued ${which}`,
+        detail: `A ${manager.symbol} transfer ${where} exceeded Hydration's rate limit and is held by the limiter until its window refills.`,
+      })
+      continue
+    }
+    const update = parseNttLimitUpdate(row.topics, row.data)
+    if (!update) continue
+    const amount = (raw: bigint) => `${fuseAmount(raw, manager.decimals)} ${manager.symbol}`
+    const where = update.direction === 'outbound'
+      ? `leaving Hydration for ${manager.originChainName}`
+      : `arriving from ${manager.originChainName}`
+    // The previous value is only worth stating when it reads differently: the
+    // managers were configured by repeating the same uncapped limit, and "(was
+    // 184,467,440,737)" beside the identical new figure reads as an error.
+    const was = amount(update.oldLimit) === amount(update.newLimit) ? '' : ` (was ${amount(update.oldLimit)})`
+    out.push({
+      ...base,
+      kind: 'limit',
+      label: `Wormhole ${manager.symbol} ${update.direction} limit set to ${amount(update.newLimit)}`,
+      detail: `Transfers of ${manager.symbol} ${where} over Wormhole are limited to ${amount(update.newLimit)} in a rolling window${was}.`,
+    })
+  }
+  return out
 }
 
 // TransactionPause emits only on a real state change, so pause/unpause events are
@@ -1738,8 +1869,12 @@ function buildTimeline(
   lockdownRows: LimitEventRow[],
   tradabilityHistory: LimitEventRow[],
   registryLimitRows: RegistryLimitRow[],
+  wormholeManagerEvents: readonly WormholeManagerEventRow[] = [],
 ): SafetyEvent[] {
-  const out: SafetyEvent[] = [...registryLimitChanges(registryLimitRows)]
+  const out: SafetyEvent[] = [
+    ...registryLimitChanges(registryLimitRows),
+    ...buildWormholeSafetyEvents(wormholeManagerEvents, getWormholeManagers()),
+  ]
   const rationalText = (v: unknown): string => {
     if (Array.isArray(v) && v.length === 2) return `${(Number(v[0]) / Number(v[1]) * 100).toFixed(2)}%`
     return 'disabled'

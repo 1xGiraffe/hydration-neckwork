@@ -66,6 +66,7 @@ import { initHollarService } from './services/hollarService.ts'
 import { initPoolService } from './services/poolService.ts'
 import { initSecurityService } from './services/securityService.ts'
 import { initErc20WalletService } from './services/erc20WalletService.ts'
+import { initWormholeNttService } from './services/wormholeNttService.ts'
 import { startBackgroundRefresh, stopBackgroundRefresh } from './services/backgroundRefresh.ts'
 import { initAccountAffinityService } from './services/accountAffinityService.ts'
 import { ensureSnakewatchEmojiSourceLoaded } from './services/omniwatchIdentity.ts'
@@ -262,6 +263,9 @@ async function start() {
     initPendingHeadService(client)
     startPendingHeadService()
     initErc20WalletService(client)
+    // Must precede startBackgroundRefresh(): its initial pass discovers the NTT
+    // asset set from ClickHouse before it reads any chain.
+    initWormholeNttService(client)
     // Must precede startBackgroundRefresh(): its initial pass runs the
     // contract-code snapshot refresher, which reads and writes ClickHouse.
     initContractRegistryService(client)
