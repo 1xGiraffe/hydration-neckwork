@@ -4,7 +4,7 @@ import type {
   TransferRow, EventRow, TradeRow, ActivityRow, MoneyMarketResponse, AssetDetail, HoldersResponse,
   AddressDetail, AddressBalance, CloseAccountsResponse, TagDetail, SearchResult, AssetListItem, TopAccountRow, AccountsPage, DailyPoint, Tag,
   ContractInfo, ContractsPage, ContractTransactionsPage, ContractEventsPage, ContractEventRow, DecodedEvmCall, EvmLogDecode, EvmReceipt, EvmTransactionFacts,
-  AccountRef, AssetRef, AssetLiquidationDay, AssetLiquidationTotal, HdxDashboard, HdxCohort, HdxLockType, HdxUnlockBucket, HdxDailyFlow, HdxMover,
+  AccountRef, AssetRef, FeePayment, AssetLiquidationDay, AssetLiquidationTotal, HdxDashboard, HdxCohort, HdxLockType, HdxUnlockBucket, HdxDailyFlow, HdxMover,
   AssetLiquidity, AssetLiquiditySource, PoolDetail, OmnipoolDetail, PoolCompositionEntry,
   HollarDashboard, HollarCollateral, HollarArbDay, HollarTradeDay, HollarPool, HollarPegPoint,
   SecurityDashboard, SecurityFuse, SecurityPerBlockRow, SecurityLiquidityMove,
@@ -338,13 +338,50 @@ function genExtrinsic(height: number, idx: number): ExtrinsicDetail {
         { eventIndex: 3, name: 'System.ExtrinsicSuccess', args: { weight: 412_000_000 } },
       ]
       : [{ eventIndex: 0, name: 'System.ExtrinsicFailed', args: { dispatch_error: 'Token.BelowMinimum' } }]
+  const feePayment = mockFeePayment(height, idx, isEvmTx, isInherent)
   return {
     blockHeight: height, index: idx, hash: hx(height * 17 + idx, 64), timestamp: tsAt(height),
     signer: isInherent ? null : signer, success: isInherent || isEvmTx ? true : success, callName,
-    fee: isInherent || isEvmTx ? null : raw(0.002 + r() * 0.05, 12), version: 4, tip: isInherent ? null : '0',
+    fee: isInherent || isEvmTx ? null : raw(0.002 + r() * 0.05, 12), version: 4,
+    // An Ethereum.transact extrinsic has no substrate fee OR tip figure — the EVM
+    // charges its own gas and no TransactionFeePaid is emitted.
+    tip: mockTip(idx, isEvmTx, isInherent),
     callArgs, error: success || isInherent || isEvmTx ? null : { module: 'Tokens', error: 'BelowMinimum' }, events,
+    ...(feePayment ? { feePayment } : {}),
     ...((call.startsWith('EVM') || isEvmTx) && !isInherent ? { evmCalls: [evmCallDecode(height, idx, amt)] } : {}),
     ...(isEvmTx ? { evmTx: MOCK_EVM_TX_FACTS } : {}),
+  }
+}
+
+/** The mock's non-HDX fee payers, by extrinsic index within a block. */
+const MOCK_FEE_CURRENCY: Record<number, number> = { 3: 5, 4: 10 }
+// The one extrinsic index that tips, so a surface which shows the tip only when
+// there is one has both shapes reachable from a fixed URL. Its HDX figure and
+// its share of the fee asset's fee+tip charge have to agree, the way the api's
+// proportional split makes them agree on chain.
+const MOCK_TIP_INDEX = 4
+const MOCK_TIP_HDX = raw(0.5, 12)
+function mockTip(idx: number, isEvmTx: boolean, isInherent: boolean): string | null {
+  if (isInherent || isEvmTx) return null
+  return idx === MOCK_TIP_INDEX ? MOCK_TIP_HDX : '0'
+}
+
+// The fee currency an extrinsic settled in, when that is not HDX. The api derives
+// this from the extrinsic's own balance events (extrinsicFeePayment.ts), so the
+// mock has to state it the same way: an EVM transaction pays in WETH and has no
+// substrate tip figure at all (tipAmount null → the row reads as unknown), while
+// a nominated-currency payer pays fee and tip in that asset.
+function mockFeePayment(height: number, idx: number, isEvmTx: boolean, isInherent: boolean): FeePayment | null {
+  if (isInherent) return null
+  if (isEvmTx) return { asset: aref(assetById.get(20)!), amount: raw(0.0000031, 18), tipAmount: null }
+  const assetId = MOCK_FEE_CURRENCY[idx]
+  const a = assetId != null ? assetById.get(assetId) : undefined
+  if (!a) return null
+  const amount = raw(0.0041 * (1 + (height % 7) / 10), a.decimals)
+  return {
+    asset: aref(a),
+    amount,
+    tipAmount: idx === MOCK_TIP_INDEX ? raw(0.0041 * 3, a.decimals) : '0',
   }
 }
 
@@ -2119,6 +2156,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
         valueUsd: amtIn * aIn.price, executionPrice: aIn.price / aOut.price,
         limit: { kind: 'minReceived', amount: raw(amtOut * 0.985, aOut.decimals), asset: aref(aOut), marginPct: 1.52 },
         extrinsicFee: '12000000000000',
+        extrinsicTip: '3000000000000',
         route: [
           { pool: 'Aave', poolId: null, assetIn: aref(aIn), assetOut: aref(mid), amountIn: null, amountOut: null, fee: null },
           { pool: 'Omnipool', poolId: null, assetIn: aref(mid), assetOut: aref(aOut), amountIn: raw(amtMid, mid.decimals), amountOut: raw(amtOut, aOut.decimals), fee: { amount: raw(amtOut * 0.0025, aOut.decimals), asset: aref(aOut) } },
@@ -2138,7 +2176,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
         who: A.fox, venue: 'Router', direction: 'Sell',
         assetIn: aref(aIn), assetOut: aref(aOut), amountIn: raw(amtIn, aIn.decimals), amountOut: raw(amtOut, aOut.decimals),
         valueUsd: amtIn * aIn.price, executionPrice: aIn.price / aOut.price,
-        limit: null, extrinsicFee: null,
+        limit: null, extrinsicFee: null, extrinsicTip: null,
         route: [{ pool: 'Router', poolId: null, assetIn: aref(aIn), assetOut: aref(aOut), amountIn: raw(amtIn, aIn.decimals), amountOut: raw(amtOut, aOut.decimals), fee: null }],
         dca: false,
       } satisfies TradeDetailResponse
