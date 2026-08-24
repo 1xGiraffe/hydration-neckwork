@@ -3,11 +3,9 @@ import { useTrade } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect } from '../router'
-import { Crumbs, F, AddrPill, AssetChip, StatusBadge, MomentLink, SkeletonRows } from '../components/ui'
+import { Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, MomentLink, SkeletonRows } from '../components/ui'
 import type { TradeHop } from '../types'
 import { RevenueRow } from '../components/RevenueRow'
-
-const HDX_ASSET: TradeHop['assetIn'] = { assetId: 0, symbol: 'HDX', name: 'Hydration', decimals: 12, parachainId: null }
 
 // Route flow: in-asset →(pool)→ … →(pool)→ out-asset. Amount labels come from
 // the hop events; eventless Aave 1:1 wraps infer values from adjacent hops.
@@ -134,7 +132,8 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
                 <div className="dt">Result</div><div className="dd"><StatusBadge ok={data.success} /></div>
                 {extId && <><div className="dt">Extrinsic</div><div className="dd mono"><Link to={paths.extrinsic(extId)} className="hash">{extId}</Link></div></>}
                 {!extId && eventId && <><div className="dt">Event</div><div className="dd mono"><Link to={paths.event(eventId)} className="hash">{eventId}</Link></div></>}
-                {data.extrinsicFee && <><div className="dt">Fee</div><div className="dd"><AssetAmount asset={HDX_ASSET} amount={data.extrinsicFee} /></div></>}
+                {(data.extrinsicFee || data.feePayment) && <><div className="dt">Fee</div><div className="dd"><FeeAmount payment={data.feePayment} hdxRaw={data.extrinsicFee} /></div></>}
+                {hasTip(data.feePayment, data.extrinsicTip) && <><div className="dt">Tip</div><div className="dd"><FeeAmount payment={data.feePayment} hdxRaw={data.extrinsicTip} part="tip" /></div></>}
               </div></div>
 
               {hasRoute && <>

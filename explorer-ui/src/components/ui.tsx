@@ -2,7 +2,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, FocusEvent as ReactFocusEvent, ReactNode, KeyboardEvent, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { Link, paths, navigate } from '../router'
-import type { AccountRef, AssetOrigin, AssetRef, FailureReason } from '../types'
+import type { AccountRef, AssetOrigin, AssetRef, FailureReason, FeePayment } from '../types'
 import { parseUtcTimestamp } from '../utils/time'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { voteSideLabel } from '../utils/voteRows'
@@ -173,12 +173,6 @@ export const F = {
     if (v == null || !Number.isFinite(v)) return '—'
     return (v * 100).toFixed(1) + '%'
   },
-  hdxFee: (raw: string | null | undefined) => {
-    if (raw == null || raw === '') return '—'
-    const v = Number(raw) / 1e12
-    if (!Number.isFinite(v) || v === 0) return '0 HDX'
-    return (v < 0.001 ? '<0.001' : v.toFixed(v < 1 ? 4 : 3)) + ' HDX'
-  },
   ago: (ts: string, now = Date.now()) => {
     const t = parseUtcTimestamp(ts); if (!Number.isFinite(t)) return '—'
     const s = Math.max(0, Math.floor((now - t) / 1000))
@@ -280,6 +274,54 @@ export function Dash() {
 // and browsers reparent it).
 export function AssetAmount({ asset, raw, formatted, link = true }: { asset: AssetRef; raw?: string | null; formatted?: string; link?: boolean }) {
   return <span className="trade-leg"><AssetChip asset={asset} link={link} /> <span className="mono">{formatted ?? (raw != null ? F.amount(raw, asset.decimals) : '—')}</span></span>
+}
+
+// The native asset, for the surfaces that render an amount the chain denominates
+// in HDX without naming an asset alongside it (a transaction fee, a tip).
+export const NATIVE_ASSET: AssetRef = { assetId: 0, iconAssetId: 0, symbol: 'HDX', name: 'Hydration', decimals: 12, parachainId: null }
+
+// A transaction fee, in the asset it was actually charged in.
+//
+// The chain computes every fee in HDX, but an account can nominate any accepted
+// currency to pay in (EVM accounts default to WETH) — so for roughly a fifth of
+// fee-paying extrinsics the HDX figure names an asset that never left the
+// account. When the API resolved what was really debited (`payment`), that is
+// the whole truth of the row and replaces the HDX number; `hdxRaw` carries the
+// ordinary HDX-paying case.
+//
+// Either way it renders as the explorer's amount convention — icon, ticker, then
+// the figure — so a fee reads the same whichever asset paid it, and the one that
+// is not HDX is legible as such at a glance rather than by its magnitude. The
+// exact raw amount stays on the title, since a converted fee can be small enough
+// to round away entirely.
+// Whether the extrinsic actually tipped, in whichever asset paid. Surfaces that
+// curate their rows (an activity, a swap, a hover card) spend a line on the tip
+// only when there is one — most transactions carry none, so an unconditional
+// "Tip 0" would be noise, and the extrinsic's own page states it either way.
+export function hasTip(payment?: FeePayment | null, hdxTipRaw?: string | null): boolean {
+  const raw = payment ? payment.tipAmount : hdxTipRaw
+  return raw != null && raw !== '' && !/^0*$/.test(raw)
+}
+
+export function FeeAmount({ payment, hdxRaw, part = 'fee', link = true }: {
+  payment?: FeePayment | null
+  hdxRaw?: string | null
+  part?: 'fee' | 'tip'
+  link?: boolean
+}) {
+  const asset = payment?.asset ?? NATIVE_ASSET
+  // A tip is zero only when there was an HDX figure saying so. An EVM
+  // transaction has none — its priority fee is bundled into the gas charge and
+  // cannot be separated — so the tip there is unknown, not zero.
+  const raw = payment
+    ? (part === 'tip' ? payment.tipAmount ?? (hdxRaw != null ? '0' : null) : payment.amount)
+    : hdxRaw
+  if (raw == null || raw === '') return <Dash />
+  return (
+    <span title={`${F.preciseAmount(raw, asset.decimals)} ${asset.symbol}`}>
+      <AssetAmount asset={asset} raw={raw} link={link} />
+    </span>
+  )
 }
 
 // Short address with the final three characters highlighted.
