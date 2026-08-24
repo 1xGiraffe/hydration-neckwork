@@ -210,6 +210,78 @@ describe('getRevenueFlow', () => {
     expect(flow.drips[0].usdPerBlock).toBeCloseTo(0.006, 9)
   })
 
+  it('divides a sparse pool\'s multi-hour lump by the hours it covers', async () => {
+    // gigahdx is touched every few days: the index delta booked at one hour is
+    // several hours of interest. Reading that lump AS an hourly rate overstates
+    // the drip by the size of the gap.
+    vi.setSystemTime(NOW + 1_980_000)
+    const { initRevenueService, getRevenueFlow } = await service()
+    const nowSec = Math.floor((NOW + 1_980_000) / 1000)
+    const hour = Math.floor(nowSec / 3_600) * 3_600
+    const ch = (s: number) => new Date(s * 1000).toISOString().slice(0, 19).replace('T', ' ')
+    const { client } = fakeClient({
+      raw_ingestion_state: [{ head: 13_600_000 }],
+      money_market_reserve_state_history: [
+        { bucket: ch(hour - 5 * 3_600), pool_address: '0xquiet', debt_scaled: '3600000000000000000000', borrow_index: '1000000000000000000000000000' },
+        { bucket: ch(hour), pool_address: '0xquiet', debt_scaled: '3600000000000000000000', borrow_index: '1001000000000000000000000000' },
+      ],
+      ohlc_1h: [{ bucket: ch(hour - 5 * 3_600), close: '1' }],
+      atoken_reserve_map: [{ pool: '0xquiet', market: 'gigahdx' }],
+    })
+    initRevenueService(client)
+    const flow = await getRevenueFlow(null)
+    // 3.6 HOLLAR accrued over FIVE hours = 0.72/h at $1 → $0.0012/block at 6s.
+    expect(flow.drips).toHaveLength(1)
+    expect(flow.drips[0].usdPerBlock).toBeCloseTo(0.0012, 9)
+  })
+
+  it('still drips a pool whose last observation is older than two days', async () => {
+    // The lookback must span the sparsest market's touch interval, or a pool
+    // quiet for longer than the window contributes no drip at all and the
+    // river silently under-reports that market's whole share.
+    vi.setSystemTime(NOW + 2_160_000)
+    const { initRevenueService, getRevenueFlow } = await service()
+    const nowSec = Math.floor((NOW + 2_160_000) / 1000)
+    const hour = Math.floor(nowSec / 3_600) * 3_600
+    const stale = hour - 60 * 3_600
+    const ch = (s: number) => new Date(s * 1000).toISOString().slice(0, 19).replace('T', ' ')
+    const { client } = fakeClient({
+      raw_ingestion_state: [{ head: 13_600_000 }],
+      money_market_reserve_state_history: [
+        { bucket: ch(stale - 3_600), pool_address: '0xstale', debt_scaled: '3600000000000000000000', borrow_index: '1000000000000000000000000000' },
+        { bucket: ch(stale), pool_address: '0xstale', debt_scaled: '3600000000000000000000', borrow_index: '1001000000000000000000000000' },
+      ],
+      ohlc_1h: [{ bucket: ch(stale - 3_600), close: '1' }],
+      atoken_reserve_map: [{ pool: '0xstale', market: 'gigahdx' }],
+    })
+    initRevenueService(client)
+    const flow = await getRevenueFlow(null)
+    expect(flow.drips).toHaveLength(1)
+    expect(flow.drips[0].usdPerBlock).toBeCloseTo(0.006, 9)
+  })
+
+  it('emits no drip for a pool whose debt has gone to zero', async () => {
+    // Carrying a rate forward from the last observation is only honest while
+    // there is still debt to accrue on. A repaid-to-zero pool must not drip.
+    vi.setSystemTime(NOW + 2_340_000)
+    const { initRevenueService, getRevenueFlow } = await service()
+    const nowSec = Math.floor((NOW + 2_340_000) / 1000)
+    const hour = Math.floor(nowSec / 3_600) * 3_600
+    const ch = (s: number) => new Date(s * 1000).toISOString().slice(0, 19).replace('T', ' ')
+    const { client } = fakeClient({
+      raw_ingestion_state: [{ head: 13_600_000 }],
+      money_market_reserve_state_history: [
+        { bucket: ch(hour - 3_600), pool_address: '0xrepaid', debt_scaled: '3600000000000000000000', borrow_index: '1000000000000000000000000000' },
+        { bucket: ch(hour), pool_address: '0xrepaid', debt_scaled: '0', borrow_index: '1001000000000000000000000000' },
+      ],
+      ohlc_1h: [{ bucket: ch(hour - 3_600), close: '1' }],
+      atoken_reserve_map: [{ pool: '0xrepaid', market: 'core' }],
+    })
+    initRevenueService(client)
+    const flow = await getRevenueFlow(null)
+    expect(flow.drips).toEqual([])
+  })
+
   it('pins the cursor grammar', async () => {
     const { FLOW_CURSOR_RE } = await service()
     expect(FLOW_CURSOR_RE.test('123-45-0')).toBe(true)
