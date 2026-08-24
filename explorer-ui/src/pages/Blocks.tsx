@@ -40,29 +40,53 @@ export function Blocks() {
   const rows = data ?? []
   const fresh = useNewRows(rows.map(b => String(b.height)), page === 0)
 
-  // Inter-block times (recent window, page-independent). Hydration mostly runs
-  // at its scheduled pace with occasional relay-backing stalls (30s+); the chart
-  // clamps outliers and pins its baseline to 0 so the normal line stays visible.
+  // Seconds per block over the recent window, measured per TIMESTAMP SEGMENT
+  // rather than per block pair.
+  //
+  // A block's timestamp is its Aura slot's, and since runtime 440 set
+  // `AllowMultipleBlocksPerSlot` one author fills a 6s slot with three ~2s
+  // blocks — so three consecutive blocks carry the SAME timestamp and the naive
+  // per-pair delta series reads 6,0,0,6,0,0. Averaging that after dropping the
+  // zeros (which is what a `d > 0` guard does) reports the slot length as the
+  // block time: it read a flat 6.00s median while the chain ran at 2s.
+  //
+  // So each segment spans consecutive DISTINCT timestamps and is divided by the
+  // heights it covers. That is the block time at any granularity: it degrades to
+  // the plain gap when a slot holds one block, gives 6/3 = 2s when it holds
+  // three, and still lifts on a stall, which is what the chart is for.
   const byHeight = [...(recent ?? [])].sort((a, b) => a.height - b.height)
-  const deltas: number[] = []
+  const rates: number[] = []
+  let segStart = byHeight[0]
   for (let i = 1; i < byHeight.length; i++) {
-    if (byHeight[i].height - byHeight[i - 1].height !== 1) continue
-    const d = (parseUtcTimestamp(byHeight[i].timestamp) - parseUtcTimestamp(byHeight[i - 1].timestamp)) / 1000
-    if (d > 0 && d < MAX_GAP_SECONDS) deltas.push(d)
+    if (byHeight[i].height - byHeight[i - 1].height !== 1) { segStart = byHeight[i]; continue }
+    const gap = (parseUtcTimestamp(byHeight[i].timestamp) - parseUtcTimestamp(segStart.timestamp)) / 1000
+    // Still inside the same slot — the segment is not closed yet.
+    if (gap === 0) continue
+    const blocks = byHeight[i].height - segStart.height
+    const perBlock = gap / blocks
+    if (perBlock > 0 && gap < MAX_GAP_SECONDS) rates.push(perBlock)
+    segStart = byHeight[i]
   }
-  const avg = deltas.length ? deltas.reduce((a, b) => a + b, 0) / deltas.length : 0
-  // The reference line is the window's own median block, not a fixed target: the
-  // chain publishes no target block time, and a hard-coded one is wrong for every
-  // era but the one it was written in (blocks have run at 12s, run at ~6s and are
-  // heading for 2s). The median is the typical block — a stall lifts the average
-  // above it and leaves it where it is, which is exactly what the line is for.
-  const sorted = [...deltas].sort((a, b) => a - b)
+  // The window's aggregate is its total span over its total height, not the mean
+  // of the segments: that weights each segment by the blocks it actually carries,
+  // and it is the one figure no timestamp granularity can distort.
+  const spanned = rates.length ? byHeight.filter(b => parseUtcTimestamp(b.timestamp) > 0) : []
+  const first = spanned[0], last = spanned[spanned.length - 1]
+  const totalSpan = first && last ? (parseUtcTimestamp(last.timestamp) - parseUtcTimestamp(first.timestamp)) / 1000 : 0
+  const totalBlocks = first && last ? last.height - first.height : 0
+  const avg = totalBlocks > 0 && totalSpan > 0 ? totalSpan / totalBlocks : 0
+  // The reference line is the window's own median segment, not a fixed target:
+  // the chain publishes no target block time, and a hard-coded one is wrong for
+  // every era but the one it was written in (blocks have run at 12s, ran at ~6s
+  // and now run at 2s). The median is the typical block — a stall lifts the
+  // average above it and leaves it where it is, which is what the line is for.
+  const sorted = [...rates].sort((a, b) => a - b)
   const mid = sorted.length >> 1
   const median = !sorted.length ? 0 : sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
   // Before two consecutive blocks are in the window there is no median to draw,
   // so the chain's measured pace scales the placeholder.
   const pace = median || blockSeconds(stats.data?.avgBlockSec)
-  const chartData = deltas.map(d => Math.min(d, pace * CLAMP_FACTOR))
+  const chartData = rates.map(d => Math.min(d, pace * CLAMP_FACTOR))
   const pages = offeredPages({ page, rowsOnPage: rows.length, rowCount: counts?.blocks, maxOffset: counts?.maxOffset })
 
   return (
@@ -79,7 +103,7 @@ export function Blocks() {
           the series landed — this page's whole layout shift. */}
       {!recent ? <ChartCardSkeleton metrics={1} /> : (
       <div className="pf-card">
-        <div className="pf-head"><div className="pf-now" title="Mean gap between consecutive blocks in the recent window">mean {avg ? avg.toFixed(2) + 's' : '—'}</div><div className="pf-chg muted" title="The typical block: half the window is quicker, half slower. A stall lifts the mean and leaves this where it is.">median {median ? median.toFixed(2) + 's' : '—'}</div></div>
+        <div className="pf-head"><div className="pf-now" title="The recent window's total elapsed time over the blocks it covers">mean {avg ? avg.toFixed(2) + 's' : '—'}</div><div className="pf-chg muted" title="The typical block: half the window is quicker, half slower. A stall lifts the mean and leaves this where it is.">median {median ? median.toFixed(2) + 's' : '—'}</div></div>
         <AreaChart data={chartData.length > 1 ? chartData : [pace, pace]} h={120} target={pace} floor={0} color={UNFILTERED_COLOR} valueFmt={v => v.toFixed(2) + 's'} />
       </div>
       )}
