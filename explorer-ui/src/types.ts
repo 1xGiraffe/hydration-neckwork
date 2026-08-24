@@ -289,6 +289,10 @@ export interface TradeDetail {
   executionPrice: number | null
   limit: { kind: 'minReceived' | 'maxPaid'; amount: string; asset: AssetRef; marginPct: number | null } | null
   extrinsicFee: string | null
+  extrinsicTip: string | null
+  // Set when the fee did not settle in HDX; shown instead of `extrinsicFee` and
+  // `extrinsicTip`, whose tip slot it carries as `tipAmount`.
+  feePayment?: FeePayment
   route: TradeHop[]
   dca: boolean
   revenue?: ActivityRevenue
@@ -393,9 +397,19 @@ export interface EvmTransactionFacts {
 export interface EvmReceipt { gasUsed: string; effectiveGasPrice: string | null }
 
 export interface ExtrinsicEvent { eventIndex: number; name: string; args: unknown; decoded?: boolean; evmDecoded?: EvmLogDecode }
+// What the fee actually cost, when the signer's fee currency is not HDX (or when
+// there is no HDX figure at all — an EVM transaction). `fee`/`tip` still carry
+// the HDX-equivalent the chain computed; a surface holding this shows it INSTEAD.
+export interface FeePayment {
+  asset: AssetRef
+  amount: string
+  tipAmount: string | null
+}
+
 export interface ExtrinsicDetail extends ExtrinsicSummary {
   version: number
   tip: string | null
+  feePayment?: FeePayment
   callArgs: unknown
   error: unknown
   errorReason: FailureReason | null

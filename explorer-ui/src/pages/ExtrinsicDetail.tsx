@@ -4,7 +4,7 @@ import { useEvmReceipt, useExtrinsic, useExtrinsicActivity, useStats } from '../
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, redirect } from '../router'
-import { Crumbs, F, AddrPill, CallPill, StatusBadge, MempoolResultBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows } from '../components/ui'
+import { Crumbs, F, AddrPill, CallPill, FeeAmount, StatusBadge, MempoolResultBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows } from '../components/ui'
 import { api } from '../api/explorer'
 import { ActivityTable, PoolChip } from '../components/ActivityTable'
 import { EvmCallCard, EvmLogView } from '../components/EvmDecoded'
@@ -162,8 +162,8 @@ export function ExtrinsicDetail({ id }: { id: string }) {
               {!data.success && data.errorReason && <FailureReasonRow reason={data.errorReason} />}
               {data.signer
                 ? <><div className="dt">Signer</div><div className="dd"><AddrPill account={data.signer} /></div>
-                  <div className="dt">Fee</div><div className="dd mono">{F.hdxFee(data.fee)}</div>
-                  <div className="dt">Tip</div><div className="dd mono">{F.hdxFee(data.tip)}</div></>
+                  <div className="dt">Fee</div><div className="dd mono"><FeeAmount payment={data.feePayment} hdxRaw={data.fee} /></div>
+                  <div className="dt">Tip</div><div className="dd mono"><FeeAmount payment={data.feePayment} hdxRaw={data.tip} part="tip" /></div></>
                 : <><div className="dt">Type</div><div className="dd"><span className="badge pending" style={{ background: 'var(--panel)', color: 'var(--text-medium)' }}>Inherent</span></div></>}
               {data.callName === 'Ethereum.transact' && <EvmTxRows tx={data.evmTx} callArgs={data.callArgs} />}
             </div></div>
@@ -201,7 +201,20 @@ export function ExtrinsicDetail({ id }: { id: string }) {
             )}
 
             {tab === 'json' && (() => {
-              const json = { block_height: data.blockHeight, extrinsic_index: data.index, extrinsic_hash: data.hash, call_name: data.callName, signer: data.signer?.address ?? null, success: data.success, fee: data.fee, tip: data.tip, call_args: data.callArgs }
+              const json = {
+                block_height: data.blockHeight, extrinsic_index: data.index, extrinsic_hash: data.hash,
+                call_name: data.callName, signer: data.signer?.address ?? null, success: data.success,
+                fee: data.fee, tip: data.tip,
+                // `fee`/`tip` are the HDX-equivalent the chain computed; this is what
+                // was actually debited, when that was a different asset.
+                ...(data.feePayment ? {
+                  fee_asset: data.feePayment.asset.symbol,
+                  fee_asset_id: data.feePayment.asset.assetId,
+                  fee_paid: data.feePayment.amount,
+                  tip_paid: data.feePayment.tipAmount,
+                } : {}),
+                call_args: data.callArgs,
+              }
               return <>
                 <div className="json-copy-row"><CopyTextButton label="copy JSON" text={JSON.stringify(json, null, 2)} /></div>
                 <JsonView value={json} />

@@ -6,7 +6,7 @@ import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../
 import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ConvictionTag, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
 import { LIQ_LABELS, MM_LABELS } from '../components/activityColors'
 import { RevenueRow } from '../components/RevenueRow'
-import { Crumbs, F, AddrPill, AssetChip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge } from '../components/ui'
+import { Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge } from '../components/ui'
 import { convictionLabel, voteSideLabel, voteSubjectLabel } from '../utils/voteRows'
 
 export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: string }) {
@@ -134,7 +134,8 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {ext && <>
               <div className="dt">Call</div><div className="dd"><CallPill name={ext.callName} /></div>
               <div className="dt">Result</div><div className="dd"><StatusBadge ok={ext.success} /></div>
-              {ext.fee && <><div className="dt">Fee</div><div className="dd mono">{F.exact(ext.fee, 12)} HDX</div></>}
+              {(ext.fee || ext.feePayment) && <><div className="dt">Fee</div><div className="dd mono"><FeeAmount payment={ext.feePayment} hdxRaw={ext.fee} /></div></>}
+              {hasTip(ext.feePayment, ext.tip) && <><div className="dt">Tip</div><div className="dd mono"><FeeAmount payment={ext.feePayment} hdxRaw={ext.tip} part="tip" /></div></>}
             </>}
           </div></div>
         )}

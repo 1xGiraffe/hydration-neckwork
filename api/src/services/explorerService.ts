@@ -26,6 +26,7 @@ import {
   type MultisigOperationState,
 } from './onBehalfActivity.ts'
 import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
+import { FEE_BALANCE_EVENTS, deriveFeePayment, hasSubstrateFee, type FeePaymentEvent } from './extrinsicFeePayment.ts'
 import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx, type XcmJourneySource } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
@@ -2324,9 +2325,21 @@ export async function getRecentExtrinsics(limit: number, signedOnly: boolean, fr
 }
 
 // single extrinsic
+// What the fee actually cost the payer, when that is not the HDX figure `fee`
+// states. Present only when the extrinsic settled its fee in a non-native asset,
+// or when there is no HDX figure to state at all (the EVM shape — see
+// extrinsicFeePayment.ts). Absent for an ordinary HDX-paying extrinsic, so a
+// reader that has it should show it INSTEAD of `fee`/`tip`.
+export interface FeePayment {
+  asset: AssetRef
+  amount: string
+  tipAmount: string | null
+}
+
 export interface ExtrinsicDetail extends ExtrinsicSummary {
   version: number
   tip: string | null
+  feePayment?: FeePayment
   callArgs: unknown
   error: unknown
   errorReason: FailureReason | null
@@ -2393,6 +2406,23 @@ interface ExtrinsicDetailRow {
   spec_version: number
 }
 
+// Resolve the fee's real asset for a surface that already holds the extrinsic's
+// events. Withheld only for a plain HDX substrate fee: `fee`/`tip` already state
+// that exactly, down to the tip split the runtime performed itself, so
+// re-deriving it from the treasury deposit could only lose precision. A zero
+// substrate fee is NOT that case — an `EVM.call` dispatched `Pays::No` reports
+// `actualFee: 0` and charges real gas, so an HDX-paying one still needs this.
+function feePaymentOf(
+  events: readonly FeePaymentEvent[],
+  payer: string | null,
+  fee: string | null,
+  tip: string | null,
+): FeePayment | undefined {
+  const derived = deriveFeePayment(events, payer, fee, tip)
+  if (!derived || (derived.assetId === 0 && hasSubstrateFee(fee, tip))) return undefined
+  return { asset: asset(derived.assetId), amount: derived.amount, tipAmount: derived.tipAmount }
+}
+
 async function hydrateExtrinsicDetail(row: ExtrinsicDetailRow): Promise<ExtrinsicDetail> {
   const eventResult = await client.query({
     query: `SELECT event_index, event_name, args_json FROM price_data.raw_events
@@ -2413,6 +2443,7 @@ async function hydrateExtrinsicDetail(row: ExtrinsicDetailRow): Promise<Extrinsi
   const callArgs = safeJson(row.call_args_json)
   const evmCalls = await decodeEvmCallSites(row.call_name, callArgs)
   const evmTx = evmTransactionFacts(events)
+  const feePayment = feePaymentOf(events, row.signer, row.fee, row.tip)
 
   return {
     blockHeight: row.block_height,
@@ -2429,6 +2460,7 @@ async function hydrateExtrinsicDetail(row: ExtrinsicDetailRow): Promise<Extrinsi
     error: row.error_json ? safeJson(row.error_json) : null,
     errorReason: row.success === 1 ? null : dispatchErrorReason(row.error_json, row.spec_version, resolveModuleError),
     events,
+    ...(feePayment ? { feePayment } : {}),
     ...(evmCalls.length ? { evmCalls } : {}),
     ...(evmTx ? { evmTx } : {}),
   }
@@ -7910,6 +7942,10 @@ export interface TradeDetail {
   executionPrice: number | null   // assetOut per 1 assetIn
   limit: { kind: 'minReceived' | 'maxPaid'; amount: string; asset: AssetRef; marginPct: number | null } | null
   extrinsicFee: string | null
+  extrinsicTip: string | null
+  // Set when the fee did not settle in HDX; show this instead of `extrinsicFee`
+  // and `extrinsicTip`, whose tip slot it carries as `tipAmount`.
+  feePayment?: FeePayment
   route: TradeHop[]
   dca: boolean
   revenue?: ActivityRevenue
@@ -8009,7 +8045,10 @@ async function inferredRouterRoute(height: number, eventIndex: number, netAmts: 
 export async function getTradeDetail(height: number, index: number, routeEvent?: number): Promise<TradeDetail | null> {
   return cached(`explorer:trade:${height}:${index}:${routeEvent ?? ''}`, 60_000, async () => {
     const prices = await ensurePrices()
-    const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
+    // The fee-currency events ride along in the same read rather than a second
+    // round trip, then are partitioned straight back out: the route slicing
+    // below counts on `evRows` holding swap events only.
+    const names = [...SWAP_EVENTS, ...FEE_BALANCE_EVENTS].map(n => `'${n}'`).join(',')
     const [evRes, extRes] = await Promise.all([
       client.query({
         query: `SELECT event_index, event_name, args_json, toString(block_timestamp) AS ts
@@ -8019,13 +8058,17 @@ export async function getTradeDetail(height: number, index: number, routeEvent?:
         query_params: { h: height, i: index }, format: 'JSONEachRow',
       }),
       client.query({
-        query: `SELECT toString(block_timestamp) AS ts, extrinsic_hash, success, signer, effective_signer, fee, call_name, call_args_json
+        query: `SELECT toString(block_timestamp) AS ts, extrinsic_hash, success, signer, effective_signer, fee, tip, call_name, call_args_json
                 FROM price_data.raw_extrinsics
                 WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32} LIMIT 1`,
         query_params: { h: height, i: index }, format: 'JSONEachRow',
       }),
     ])
-    const evRows = await evRes.json<{ event_index: number; event_name: string; args_json: string; ts: string }>()
+    const allRows = await evRes.json<{ event_index: number; event_name: string; args_json: string; ts: string }>()
+    const feeEventNames = new Set<string>(FEE_BALANCE_EVENTS)
+    const feeEvents: FeePaymentEvent[] = allRows.filter(r => feeEventNames.has(r.event_name))
+      .map(r => ({ name: r.event_name, args: safeJson(r.args_json) }))
+    const evRows = allRows.filter(r => !feeEventNames.has(r.event_name))
     if (!evRows.length) return null
     const allEvs = evRows.map(r => ({ idx: r.event_index, name: r.event_name, ts: r.ts, args: (safeJson(r.args_json) ?? {}) as Record<string, unknown> }))
     // Slice the addressed route out, by the same boundaries the feed groups on.
@@ -8033,7 +8076,7 @@ export async function getTradeDetail(height: number, index: number, routeEvent?:
     const evs = routeEvent == null ? allEvs
       : allEvs.filter(e => e.idx > routeStartAfter(netIndices, routeEvent) && e.idx <= routeEvent)
     if (!evs.length) return null
-    const ext = (await extRes.json<{ ts: string; extrinsic_hash: string; success: number | boolean; signer: string | null; effective_signer: string | null; fee: string | null; call_name: string; call_args_json: string }>())[0]
+    const ext = (await extRes.json<{ ts: string; extrinsic_hash: string; success: number | boolean; signer: string | null; effective_signer: string | null; fee: string | null; tip: string | null; call_name: string; call_args_json: string }>())[0]
     const callName = ext?.call_name ?? ''
     const callArgs = (safeJson(ext?.call_args_json ?? '') ?? {}) as Record<string, unknown>
 
@@ -8084,6 +8127,13 @@ export async function getTradeDetail(height: number, index: number, routeEvent?:
       executionPrice: inNum > 0 && outNum > 0 ? outNum / inNum : null,
       limit,
       extrinsicFee: ext?.fee ?? null,
+      extrinsicTip: ext?.tip ?? null,
+      // The fee is charged to whoever SIGNED — a proxy or multisig dispatch pays
+      // it out of the signatory's fee currency, not `who`'s.
+      ...(() => {
+        const payment = feePaymentOf(feeEvents, ext?.signer ?? ext?.effective_signer ?? null, ext?.fee ?? null, ext?.tip ?? null)
+        return payment ? { feePayment: payment } : {}
+      })(),
       route,
       dca: callName.startsWith('DCA.'),
     }
@@ -8161,6 +8211,7 @@ export async function getTradeDetailByEvent(height: number, eventIndex: number):
       executionPrice: inNum > 0 && outNum > 0 ? outNum / inNum : null,
       limit: null,
       extrinsicFee: null,
+      extrinsicTip: null,
       route,
       dca: !!dca,
     }
