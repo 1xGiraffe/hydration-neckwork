@@ -494,6 +494,13 @@ async function marketKeyByPool(): Promise<Map<string, string>> {
 }
 
 /**
+ * Far enough back to find the sparsest market's last touch: gigahdx's HOLLAR
+ * reserve is observed every few days, and a lookback shorter than a pool's
+ * touch interval drops that pool from the river entirely.
+ */
+const DRIP_LOOKBACK_HOURS = 14 * 24
+
+/**
  * The borrow drip: HOLLAR interest accrues every block, so the river shows it
  * as a per-block trickle at the LAST OBSERVED hourly accrual rate — measured
  * from our own booked math (hollarBorrowHourlyRows over the last closed
@@ -501,11 +508,19 @@ async function marketKeyByPool(): Promise<Map<string, string>> {
  * agree at hour grain. Reserve-factor interest has no drip while
  * MintedToTreasury lies dormant; when mints resume they surface as booked
  * history, never as invented flow items.
+ *
+ * A booked row is an AMOUNT over `hoursCovered`, not an hourly figure: the
+ * markets differ by orders of magnitude in how often they are touched (core
+ * every few minutes, gigahdx every few days), so a quiet pool's row can carry
+ * days of interest. Divide by the span to recover the rate, and look back far
+ * enough to FIND the sparse markets at all — a window shorter than a pool's
+ * touch interval drops that pool's whole share from the river rather than
+ * showing it late.
  */
 async function borrowDrips(blockSeconds: number): Promise<RevenueFlowResponse['drips']> {
   return cached('revenue:drips', 60_000, async () => {
     const nowSeconds = Math.floor(Date.now() / 1000)
-    const rows = await hollarBorrowHourlyRows(client, nowSeconds - 48 * 3_600, nowSeconds)
+    const rows = await hollarBorrowHourlyRows(client, nowSeconds - DRIP_LOOKBACK_HOURS * 3_600, nowSeconds)
     if (!rows.length) return []
     // EACH pool's latest observed accrual, carried forward: the rate is a step
     // function and the view emits rows only for hours a reserve was touched,
@@ -519,12 +534,15 @@ async function borrowDrips(blockSeconds: number): Promise<RevenueFlowResponse['d
     }
     const markets = await marketKeyByPool()
     return [...latest.values()]
-      .filter(r => r.usd1e12 > 0n)
+      // Debt fully repaid means nothing is accruing any more, so carrying this
+      // pool's last rate forward would invent flow the chain is not producing.
+      .filter(r => r.usd1e12 > 0n && r.debtScaledAfter > 0n)
       .map(r => ({
         key: r.poolAddress,
         label: `HOLLAR interest · ${markets.get(r.poolAddress) ?? 'money market'}`,
         stream: 'hollar_borrow' as RevenueStream,
-        usdPerBlock: (Number(r.usd1e12) / USD_UNIT) * (blockSeconds / 3_600),
+        // Integer-divide the money, then scale to a per-block rate.
+        usdPerBlock: (Number(r.usd1e12 / BigInt(r.hoursCovered)) / USD_UNIT) * (blockSeconds / 3_600),
       }))
       .sort((a, b) => b.usdPerBlock - a.usdPerBlock)
   })

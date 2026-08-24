@@ -272,4 +272,35 @@ describe('hollarBorrowHourlyRows', () => {
     expect(rows).toHaveLength(2)
     for (const row of rows) expect(row.usd1e12).toBe(row.amountPlanck * 3n / 10n ** 6n)
   })
+
+  it('reports how many hours a sparse pool\'s accrual actually covers', async () => {
+    // A quiet market is observed only when something touches it. The view emits
+    // no row for the hours between, so the index delta booked at the later hour
+    // is FIVE hours of interest, not one. Consumers that read the amount as a
+    // RATE need the span to divide by; without it a lump reads 5x too high.
+    const { client } = fakeClient({
+      'money_market_reserve_state_history': [
+        { bucket: ch(t0), pool_address: '0xquiet', debt_scaled: '1000000000000000000000', borrow_index: '1000000000000000000000000000' },
+        { bucket: ch(t0 + 5 * H), pool_address: '0xquiet', debt_scaled: '1000000000000000000000', borrow_index: '1001000000000000000000000000' },
+      ],
+      'ohlc_1h': [{ bucket: ch(t0), close: '1' }],
+    })
+    const rows = await hollarBorrowHourlyRows(client, t0, t0 + 5 * H)
+    expect(rows).toHaveLength(1)
+    // The amount itself is unchanged — booking must stay byte-identical.
+    expect(rows[0].amountPlanck).toBe(10n ** 18n)
+    expect(rows[0].hoursCovered).toBe(5)
+  })
+
+  it('reports a contiguous pool\'s accrual as covering one hour', async () => {
+    const { client } = fakeClient({
+      'money_market_reserve_state_history': [
+        { bucket: ch(t0), pool_address: '0xbusy', debt_scaled: '1000000000000000000000', borrow_index: '1000000000000000000000000000' },
+        { bucket: ch(t0 + H), pool_address: '0xbusy', debt_scaled: '1000000000000000000000', borrow_index: '1001000000000000000000000000' },
+      ],
+      'ohlc_1h': [{ bucket: ch(t0), close: '1' }],
+    })
+    const rows = await hollarBorrowHourlyRows(client, t0, t0 + H)
+    expect(rows[0].hoursCovered).toBe(1)
+  })
 })
