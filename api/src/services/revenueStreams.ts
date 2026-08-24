@@ -576,6 +576,23 @@ export interface HollarHourlyRow {
   amountPlanck: bigint
   /** The same interest in 1e-12 USD, valued at the candle closed by `hour`. */
   usd1e12: bigint
+  /**
+   * How many hours this row's accrual actually spans — the gap back to the
+   * previous index observation for the same pool, at least 1.
+   *
+   * The view emits a row only for an hour the reserve was touched, so a quiet
+   * market's index delta covers every untouched hour before it. The AMOUNT is
+   * correct either way (the index carries all of it, which is why booking sums
+   * to the closed form), but a consumer reading the amount as a RATE must
+   * divide by this or a multi-day lump reads as one hour of interest.
+   */
+  hoursCovered: number
+  /**
+   * Scaled debt observed AT `hour`, i.e. after the accrual. Zero means the
+   * pool's debt was fully repaid, so there is nothing left accruing and a rate
+   * carried forward from this row would be inventing flow.
+   */
+  debtScaledAfter: bigint
 }
 
 /** Per-bucket HOLLAR debt/index — see feesCharts.ts for the view's contract. */
@@ -678,22 +695,35 @@ export async function hollarBorrowHourlyRows(
     const observed = new Map(rows.map(r => [bucketSeconds(r.bucket), r]))
     let prevDebt: bigint | null = null
     let prevIndex: bigint | null = null
+    // The hour of the observation `prevIndex` came from — the far end of the
+    // span each accrual covers. Tracked alongside prevIndex rather than per
+    // iteration so a delta-only hour (index 0) does not shorten the span to a
+    // gap the index was never differenced across.
+    let prevIndexHour: number | null = null
     for (let t = first - HOUR; t <= endSeconds; t += HOUR) {
       const row = observed.get(t)
       if (!row) continue
       const debt = BigInt(row.debt_scaled)
       const index = BigInt(row.borrow_index)
-      if (prevDebt != null && prevIndex != null && index > prevIndex && t >= first) {
+      if (prevDebt != null && prevIndex != null && prevIndexHour != null && index > prevIndex && t >= first) {
         const planck = (prevDebt * (index - prevIndex)) / RAY
         const usd = (planck * (priceAtHour.get(t) ?? 0n)) / HOLLAR_UNIT
         if (planck > 0n) {
-          out.push({ hour: t, poolAddress, reserveAddress: HOLLAR_RESERVE_ADDRESS, amountPlanck: planck, usd1e12: usd })
+          out.push({
+            hour: t, poolAddress, reserveAddress: HOLLAR_RESERVE_ADDRESS,
+            amountPlanck: planck, usd1e12: usd,
+            hoursCovered: Math.max(1, Math.round((t - prevIndexHour) / HOUR)),
+            debtScaledAfter: debt,
+          })
         }
       }
       // An index of 0 is a delta-only hour the view could not carry an index
       // into; keep the previous index rather than differencing to zero.
       prevDebt = debt
-      if (index > 0n) prevIndex = index
+      if (index > 0n) {
+        prevIndex = index
+        prevIndexHour = t
+      }
     }
   }
   out.sort((a, b) => a.hour - b.hour || (a.poolAddress < b.poolAddress ? -1 : 1))
