@@ -61,9 +61,16 @@ import { DECIMAL_STRINGS, scaledUsd } from './poolVolumes.ts'
 //  * money-market/pepl_liquidation_profit
 //                        — the profit the protocol's own liquidator booked.
 //  * money-market/asset_reserve
-//                        — the reserve-factor share of borrow interest
-//                          (`MintedToTreasury`). Zero since 2026-06-25; the
-//                          incumbent reports zeros for the same reason.
+//                        — the reserve-factor share of borrow interest, booked
+//                          when Aave MINTS it (`MintedToTreasury`). No mint has
+//                          fired since 2026-06-25, so recent windows are empty.
+//                          The factor itself is NOT zero: the protocol's cut
+//                          keeps accruing on-chain in each reserve's
+//                          `accruedToTreasury` (12 of 27 reserves held a
+//                          non-zero balance when last read) and is simply
+//                          unrecognised until someone calls `mintToTreasury`.
+//                          The incumbent is empty for the same mechanical
+//                          reason, not because the two agree there is nothing.
 //  * hollar/borrow_apr   — interest accrued on HOLLAR debt, all protocol
 //                          revenue (facilitator-minted, no suppliers). Computed
 //                          in TS from the reserve-state view — see

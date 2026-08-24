@@ -339,7 +339,7 @@ LIMIT 10`,
     // weights the account_revenue job uses, with the weights window ending at
     // the stream's cold mark — the last booked hour — so a borrower who only
     // opened debt after the mark takes no share of interest booked before
-    // they borrowed. asset_reserve (dormant since
+    // they borrowed. asset_reserve (no mint booked since
     // 2026-06-25) joins from account_revenue for months FULLY inside the
     // range — exact for "all", and a mint in a partial boundary month simply
     // stays out of the ranking rather than being time-scaled onto payers.
@@ -560,10 +560,14 @@ export async function getRevenueFlow(after: string | null): Promise<RevenueFlowR
   const items = rows
     .filter(row => isProtocolRevenue(row.stream, row.dest))
     // asset_reserve (MintedToTreasury) rides along as ITEMS: there is no
-    // reserve-factor drip (the accrual is not continuously booked, and the
-    // factor has been 0 since 2026-06-25), so each mint is revenue the river
-    // has not streamed yet. Only hollar_borrow has a drip, and its hourly
-    // reserve rows never reach the flow (they are not eventful-stream rows).
+    // reserve-factor drip because that accrual is not observable from events at
+    // all — it accumulates in each reserve's on-chain `accruedToTreasury` and
+    // becomes a row only when someone calls `mintToTreasury` (last 2026-06-25),
+    // so each mint is revenue the river has not streamed yet. The factor is not
+    // zero; a drip would have to be modelled from chain state rather than
+    // measured from our books, which is why there isn't one. Only hollar_borrow
+    // drips, and its hourly reserve rows never reach the flow (they are not
+    // eventful-stream rows).
     .filter(row => scaledUsd(row.amount_usd) > 0n)
     .filter(row => (after ? afterCursor(row, cursor) : tailSeconds(row) > nowSeconds - FLOW_SEED_SECONDS))
     .slice(-FLOW_MAX_ITEMS)
