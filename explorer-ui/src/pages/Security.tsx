@@ -357,12 +357,12 @@ function FuseTable({ d, headBlock, blockSec }: { d: SecurityDashboard; headBlock
                     numbers alone hide. */}
                 <td data-label="24h limit" className="r">
                   <AssetAmount asset={r.asset} raw={r.limit} link={false} />
-                  {r.limitUsd != null && <span className="muted mono sec-usd"> · {F.usd(r.limitUsd)}</span>}
+                  {r.limitUsd != null && <span className="muted mono sec-usd">{F.usd(r.limitUsd)}</span>}
                 </td>
                 <td data-label="Minted" className={`r${dormant ? ' cell-empty' : ''}`}>
                   {dormant ? <Dash /> : <>
                     <AssetAmount asset={r.asset} raw={r.used} link={false} />
-                    {r.usedUsd != null && <span className="muted mono sec-usd"> · {F.usd(r.usedUsd)}</span>}
+                    {r.usedUsd != null && <span className="muted mono sec-usd">{F.usd(r.usedUsd)}</span>}
                   </>}
                 </td>
                 <td data-label="Used" className={`r mono${dormant ? ' cell-empty' : ''}`} style={{ color: r.usagePct > 0 ? loadColor(r.usagePct) : undefined }}>
