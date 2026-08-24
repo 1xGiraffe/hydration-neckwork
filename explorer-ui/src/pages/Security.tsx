@@ -431,10 +431,9 @@ function FuseBoard({ d, explain, loadedOnly, note }: { d: SecurityDashboard; exp
       {shown.length
         ? <FuseGrid fuses={shown} />
         : <div className="hdx-note">No asset is minting against its limit right now.</div>}
+      {/* No colour key: green/amber/red on a fill bar reads as headroom without
+          being told, and the three swatches were the widest thing in the row. */}
       <div className="sec-legend">
-        <span><i style={{ background: 'var(--green)' }} />under half</span>
-        <span><i style={{ background: 'var(--amber)' }} />over half</span>
-        <span><i style={{ background: 'var(--red)' }} />over three quarters or locked</span>
         <span className="muted">
           {loadedOnly
             ? <>showing the {loaded.length} carrying load of {d.fuses.rows.length}</>
