@@ -512,7 +512,7 @@ function AssetsTable({ d }: { d: WormholeBridgeDetail }) {
                 <td data-label="Locked" className={`r${r.locked == null ? ' cell-empty' : ''}`}>
                   {r.locked == null ? <Dash /> : <>
                     <span className="mono" title={`${F.exact(r.locked, r.decimals)} ${r.symbol}`}>{F.amount(r.locked, r.decimals)}</span>
-                    {r.lockedUsd != null && <span className="muted mono sec-usd"> · {F.usd(r.lockedUsd)}</span>}
+                    {r.lockedUsd != null && <span className="muted mono sec-usd">{F.usd(r.lockedUsd)}</span>}
                   </>}
                 </td>
                 <td data-label="Minted" className={`r${r.issuance == null ? ' cell-empty' : ''}`}>
@@ -520,7 +520,7 @@ function AssetsTable({ d }: { d: WormholeBridgeDetail }) {
                     <span className="mono" title={r.burned != null && r.burned !== '0'
                       ? `${F.exact(r.issuance, r.decimals)} ${r.symbol} minted · ${F.exact(r.burned, r.decimals)} burned at the dead address (needs no custody)`
                       : `${F.exact(r.issuance, r.decimals)} ${r.symbol}`}>{F.amount(r.issuance, r.decimals)}</span>
-                    {r.issuanceUsd != null && <span className="muted mono sec-usd"> · {F.usd(r.issuanceUsd)}</span>}
+                    {r.issuanceUsd != null && <span className="muted mono sec-usd">{F.usd(r.issuanceUsd)}</span>}
                   </>}
                 </td>
                 <td data-label="In flight" className={`r mono muted${pending == null || pending === 0n ? ' cell-empty' : ''}`}
@@ -539,7 +539,7 @@ function AssetsTable({ d }: { d: WormholeBridgeDetail }) {
                   {r.residual == null ? <Dash /> : r.residual === '0' ? <span className="muted">0</span> : <>
                     {r.residual.startsWith('-') ? '' : '+'}{F.amount(r.residual, r.decimals)}
                     {r.residualUsd != null && Math.abs(r.residualUsd) >= 0.005 &&
-                      <span className="sec-usd"> · {r.residualUsd < 0 ? '' : '+'}{F.usd(r.residualUsd)}</span>}
+                      <span className="sec-usd">{r.residualUsd < 0 ? '' : '+'}{F.usd(r.residualUsd)}</span>}
                   </>}
                 </td>
                 <td data-label="Status" className="r">
@@ -609,7 +609,7 @@ function InflightPanel({ d, queued, now, name }: {
                     : <span className="muted">unmatched</span>}</td>
                   <td data-label="Amount" className="r">
                     {amount(op)}
-                    {op.amountUsd != null && <span className="muted mono sec-usd"> · {F.usd(op.amountUsd)}</span>}
+                    {op.amountUsd != null && <span className="muted mono sec-usd">{F.usd(op.amountUsd)}</span>}
                   </td>
                   <td data-label="Sent" className={`r${op.sentAt == null ? ' cell-empty' : ''}`}>
                     {op.sentAt == null ? <Dash /> : <Ago ts={op.sentAt} now={now} />}
@@ -629,7 +629,7 @@ function InflightPanel({ d, queued, now, name }: {
                     <td data-label="Asset"><AssetChip asset={assetRef({ assetId: q.assetId, symbol: q.symbol, decimals: dec })} /></td>
                     <td data-label="Amount" className="r">
                       <span className="mono" title={`${F.exact(q.amount, dec)} ${q.symbol}`}>{F.amount(q.amount, dec)}</span>
-                      {q.amountUsd != null && <span className="muted mono sec-usd"> · {F.usd(q.amountUsd)}</span>}
+                      {q.amountUsd != null && <span className="muted mono sec-usd">{F.usd(q.amountUsd)}</span>}
                     </td>
                     <td data-label="Release" className="r"><ReleaseTiming q={q} now={now} /></td>
                     {/* A digest names a message, not a transaction, so it links
@@ -671,7 +671,7 @@ function TransfersTable({ d, now, name }: { d: WormholeBridgeDetail; now: number
               <td data-label="Asset"><AssetChip asset={assetRef({ assetId: r.assetId, symbol: r.symbol, decimals: dec(r) })} /></td>
               <td data-label="Amount" className="r">
                 <span className="mono" title={`${F.exact(r.amount, dec(r))} ${r.symbol}`}>{F.amount(r.amount, dec(r))}</span>
-                {r.amountUsd != null && <span className="muted mono sec-usd"> · {F.usd(r.amountUsd)}</span>}
+                {r.amountUsd != null && <span className="muted mono sec-usd">{F.usd(r.amountUsd)}</span>}
               </td>
               <td data-label="Account" className={r.accountRef ? undefined : 'cell-empty'}>
                 {r.accountRef ? <AddrPill account={r.accountRef} /> : <Dash />}

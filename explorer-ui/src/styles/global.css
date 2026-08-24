@@ -3574,4 +3574,9 @@ a.rev-pill-label:hover { color: var(--accent); }
   .gov-title-cell { max-width: none; }
 }
 .ref-short { color: var(--red); }
-.sec-usd { font-size: 11px; white-space: nowrap; }
+/* Always its own line under the token amount. As an inline span the line break
+   between amount and dollar hint fell wherever each cell's width dictated, so
+   half a column wrapped and half did not, and the amounts zigzagged vertically
+   (the cross-chain fuse table split 36/34 when measured). A block makes every
+   priced cell the same two-line shape at every viewport. */
+.sec-usd { display: block; font-size: 11px; white-space: nowrap; }
