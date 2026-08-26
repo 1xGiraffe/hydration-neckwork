@@ -175,7 +175,7 @@ export function ExtrinsicDetail({ id }: { id: string }) {
               <button className={tab === 'json' ? 'active' : ''} onClick={() => setTab('json')}>Raw JSON</button>
             </div>
 
-            {tab === 'activity' && <ActivityTable rows={activityRows} now={now} loading={activity.isFetching && !activityRows.length} />}
+            {tab === 'activity' && <ActivityTable rows={activityRows} now={now} loading={activity.isFetching && !activityRows.length} dcaExecutionLinks />}
 
             {tab === 'params' && (
               <>

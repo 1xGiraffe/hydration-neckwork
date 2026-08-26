@@ -89,7 +89,7 @@ Keep in mind for new models:
 ## Explorer semantics
 
 - Render the user's highest-level economic action and suppress internal plumbing legs. Classification must remain symmetric across global, block, extrinsic, account, asset, and tag activity surfaces.
-- Every activity needs a stable event identity and canonical URL. DCA activity links represent schedules; an individual execution is addressable from the schedule page via its execution event (`/dca/<block>-e<eventIndex>`). OTC cancellation is called **Pull** in product copy. Always write **HOLLAR** in uppercase.
+- Every activity needs a stable event identity and canonical URL. DCA activity links represent schedules; an individual execution is addressable via its execution event (`/dca/<block>-e<eventIndex>`) from the schedule page and from the block/extrinsic pages, whose DCA rows link to executions (a scheduling extrinsic shows only its schedule's first execution). OTC cancellation is called **Pull** in product copy. Always write **HOLLAR** in uppercase.
 - The Omnipool hub asset (registry id 1) is called **H2O** everywhere — UI copy, API field descriptions, docs, comments. Never write LRNA (its legacy name) except when quoting an on-chain identifier that literally spells it.
 - Activity is the sole domain and API term; do not restore Stream names, routes, or compatibility aliases.
 - Display and copy user addresses as canonical SS58 or H160 forms, never raw AccountId public-key hex. Preserve real identity/tag context across local and cross-chain account pills.

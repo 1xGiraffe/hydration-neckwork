@@ -14341,10 +14341,10 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       })
     }
 
-    // A DCA-scheduling extrinsic performs no trades itself — surface the
-    // executions its schedule has performed so far (newest first, capped: a
-    // long-running schedule can have tens of thousands), each linking to its
-    // own execution block.
+    // A DCA-scheduling extrinsic performs no trades itself — surface its
+    // schedule's FIRST execution as the one representative row (the schedule
+    // can run for months; the full list lives on the schedule page, one click
+    // away through the execution detail).
     for (const e of events.filter(ev => ev.event_name === 'DCA.Scheduled')) {
       const sArgs = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
       const scheduleId = Number(sArgs.id)
@@ -14358,7 +14358,7 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
                        toString(amount_in) AS amount_in, toString(amount_out) AS amount_out
                 FROM price_data.dca_events FINAL
                 WHERE id = {sid:UInt64} AND event_name = 'DCA.TradeExecuted'
-                ORDER BY block_height DESC, event_index DESC LIMIT 50`,
+                ORDER BY block_height ASC, event_index ASC LIMIT 1`,
         query_params: { sid: scheduleId }, format: 'JSONEachRow',
       })
       for (const x of await exRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; amount_in: string; amount_out: string }>()) {
