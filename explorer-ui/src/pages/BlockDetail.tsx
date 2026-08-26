@@ -100,7 +100,7 @@ export function BlockDetail({ height }: { height: number }) {
               <button className={tab === 'events' ? 'active' : ''} onClick={() => setTab('events')}>Events <span className="cnt">{data.eventCount}</span></button>
             </div>
 
-            {tab === 'activity' && <ActivityTable rows={activityRows} now={now} loading={activity.isFetching && !activityRows.length} />}
+            {tab === 'activity' && <ActivityTable rows={activityRows} now={now} loading={activity.isFetching && !activityRows.length} dcaExecutionLinks />}
 
             {tab === 'exts' && (
               <div className="panel"><table className="tbl">
