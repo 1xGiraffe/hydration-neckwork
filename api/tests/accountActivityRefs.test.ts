@@ -96,7 +96,7 @@ describe('account-activity reference reads limit per account, then merge', () =>
     const helperEnd = explorerService.indexOf('function accountActivityRefsSql', helperStart)
     expect(helperStart).toBeGreaterThan(-1)
 
-    expect(occurrences(explorerService, 'FROM price_data.account_activity_v3\n')).toBe(5)
+    expect(occurrences(explorerService, 'FROM price_data.account_activity_v3\n')).toBe(6)
     for (let at = explorerService.indexOf('FROM price_data.account_activity_v3\n'); at > -1;
       at = explorerService.indexOf('FROM price_data.account_activity_v3\n', at + 1)) {
       if (at > helperStart && at < helperEnd) continue
@@ -127,13 +127,14 @@ describe('the account activity index has exactly one table behind it', () => {
   it('leaves no reader on the retired table', () => {
     expect(explorerService.match(bare)).toBeNull()
     expect(affinityService.match(bare)).toBeNull()
-    // And the readers that moved are all still there: five in the explorer service
+    // And the readers that moved are all still there: six in the explorer service
     // (the helper's merged and per-account arms, the vote-count prefilter, the
-    // events total, the leaderboard's reference pool) and two in the affinity
-    // service (direct transfers, CEX interactions). The ninth is the account
-    // activity watermark, which reads only max(block_height) for the account —
-    // it is what keeps an idle account's page from rebuilding every few seconds.
-    expect(occurrences(explorerService, 'price_data.account_activity_v3')).toBe(9)
+    // events total, the leaderboard's reference pool, and the OTC maker's own
+    // reserve rows) and two in the affinity service (direct transfers, CEX
+    // interactions). The tenth is the account activity watermark, which reads
+    // only max(block_height) for the account — it is what keeps an idle
+    // account's page from rebuilding every few seconds.
+    expect(occurrences(explorerService, 'price_data.account_activity_v3')).toBe(10)
     expect(occurrences(affinityService, 'price_data.account_activity_v3')).toBe(2)
   })
 
@@ -151,7 +152,7 @@ describe('the account activity index has exactly one table behind it', () => {
   // collapsed by the callers' own GROUP BY / groupBitmap instead.
   it('keeps every repointed read off FINAL', () => {
     const reads = explorerService.split('FROM price_data.account_activity_v3\n').slice(1)
-    expect(reads).toHaveLength(5)
+    expect(reads).toHaveLength(6)
     for (const read of reads) expect(read.slice(0, 400)).not.toContain('FINAL')
 
     const affinityReads = affinityService.split('FROM price_data.account_activity_v3\n').slice(1)
