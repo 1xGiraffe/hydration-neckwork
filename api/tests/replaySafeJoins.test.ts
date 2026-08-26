@@ -34,8 +34,8 @@ describe('dca_events row reads are replay-safe', () => {
     ['account activity executions', /AND e\.event_name='DCA\.TradeExecuted' AND e\.who IN \(/g],
     // The failed attempts the same feed merges in.
     ['account activity failures', /AND e\.event_name = 'DCA\.TradeFailed'/g],
-    // The schedule's executions listed under a DCA.Scheduled extrinsic.
-    ['extrinsic detail executions', /AND event_name = 'DCA\.TradeExecuted'\s+ORDER BY block_height DESC, event_index DESC LIMIT 50/g],
+    // The schedule's first execution shown under a DCA.Scheduled extrinsic.
+    ['extrinsic detail executions', /AND event_name = 'DCA\.TradeExecuted'\s+ORDER BY block_height ASC, event_index ASC LIMIT 1/g],
     // The block's hook executions on the block activity feed.
     ['block detail executions', /WHERE block_height = \{h:UInt32\} AND event_name = 'DCA\.TradeExecuted'\s+ORDER BY event_index/g],
     // Executions done and amount filled on the active-schedule list.

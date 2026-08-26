@@ -133,8 +133,9 @@ export function activitySlug(r: ActivityRow): ActivitySlug {
 }
 export function activityId(r: ActivityRow, dcaExecutionLink = false): string | null {
   // DCA rows link to their owning SCHEDULE page, not a single fill — except on
-  // the schedule page itself, where each row IS one execution and links to its
-  // own execution detail (/dca/<block>-e<eventIndex>).
+  // the schedule, block and extrinsic pages, where a row IS one execution and
+  // links to its own execution detail (/dca/<block>-e<eventIndex>), which in
+  // turn links to the schedule.
   if (!dcaExecutionLink && (r.type === 'dca' || r.dca) && r.dcaScheduleId != null) return String(r.dcaScheduleId)
   if (r.eventIndex != null) return `${r.blockHeight}-e${r.eventIndex}`
   if (r.extrinsicIndex != null) return `${r.blockHeight}-${r.extrinsicIndex}`
