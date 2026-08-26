@@ -44,6 +44,16 @@ function mockData(): HdxDashboard {
       dca: { buy: { orders: 46, hdxPerDay: 2.1e6 }, sell: { orders: 13, hdxPerDay: 6.4e5 } },
     },
     churn: { weekly: [{ weekStart: '2026-07-06', newHolders: 220, exitedHolders: 180 }] },
+    structure: {
+      weeks: ['2026-06-29', '2026-07-06'],
+      ownership: {
+        treasury: [2.1e9, 2.1e9], protocol: [3.1e8, 3.1e8], kraken: [2.4e8, 2.4e8],
+        top10: [1.0e9, 1.0e9], top11to100: [1.3e9, 1.3e9], top101to1000: [9.6e8, 9.6e8], rest: [4.4e8, 4.4e8],
+      },
+      effectiveHolders: [84, 85],
+      hodl: { under3m: [9.9e7, 9.9e7], m3to12: [1.7e8, 1.7e8], y1to2: [7.7e8, 7.7e8], over2y: [2.66e9, 2.66e9] },
+      backfilledAllocationHdx: 0,
+    },
     topMovers: { accumulators: [], distributors: [] },
     gigaMarket: null,
     gigaLiquidations: null,

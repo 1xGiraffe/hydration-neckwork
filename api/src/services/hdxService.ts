@@ -341,6 +341,24 @@ export interface HdxUnlockBucket { label: string; fromTs: string; toTs: string; 
 export interface HdxDailyFlow { date: string; buyHdx: number; sellHdx: number; buyers: number; sellers: number }
 export interface HdxMover { account: AccountRef; balanceHdx: number; boughtHdx: number; soldHdx: number; netHdx: number }
 
+// Full-era weekly series behind the "Who holds HDX" and "Holder loyalty"
+// charts. Classes: the Treasury account, protocol plumbing (module accounts
+// and tagged pool/reserve accounts), Kraken custody (its tagged hot wallets),
+// and everyone else ("users"). User tranches, the Lorenz curves and the HODL
+// age bands rank ONLY the user class.
+export interface HdxStructure {
+  weeks: string[]                       // contiguous Mondays, whole balance-observation era
+  ownership: {
+    treasury: number[]; protocol: number[]; kraken: number[]
+    top10: number[]; top11to100: number[]; top101to1000: number[]; rest: number[]
+  }
+  effectiveHolders: number[]            // 1 / HHI over user balances — "equivalent equal holders"
+  hodl: { under3m: number[]; m3to12: number[]; y1to2: number[]; over2y: number[] } // user HDX by holder age
+  // HDX of later allocation-realization mints counted into the treasury /
+  // protocol bands from the series start (0 when none happened yet).
+  backfilledAllocationHdx: number
+}
+
 export interface HdxDashboard {
   price: number | null
   change24h: number | null
@@ -368,6 +386,7 @@ export interface HdxDashboard {
     dca: { buy: { orders: number; hdxPerDay: number }; sell: { orders: number; hdxPerDay: number } }
   }
   churn: { weekly: { weekStart: string; newHolders: number; exitedHolders: number }[] }
+  structure: HdxStructure
   topMovers: { accumulators: HdxMover[]; distributors: HdxMover[] }
   // GIGAHDX money-market reserves (stHDX collateral, HOLLAR borrows); null
   // until the aToken anchor exists or when the market isn't deployed.
@@ -403,8 +422,8 @@ const iso = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace
 
 export async function getHdxDashboard(): Promise<HdxDashboard> {
   return cached('explorer:hdx-dashboard', 300_000, async () => {
-    const [prices, head, paraMs, supply, flows, dca, churn, movers, gigaMarket] = await Promise.all([
-      ensurePrices(), loadHead(), paraBlockMs(client), loadSupplyCohorts(), loadDailyFlows(), loadDcaFlows(), loadChurn(), loadTopMovers(),
+    const [prices, head, paraMs, supply, flows, dca, churn, structure, movers, gigaMarket] = await Promise.all([
+      ensurePrices(), loadHead(), paraBlockMs(client), loadSupplyCohorts(), loadDailyFlows(), loadDcaFlows(), loadChurn(), loadStructure(), loadTopMovers(),
       getGigaMarketStats().catch(() => null),
     ])
     const gigaLiquidations = await getGigaLiquidationLevels().catch(() => null)
@@ -506,6 +525,7 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
       },
       flows: { daily: flows, dca },
       churn,
+      structure,
       topMovers: movers,
       gigaMarket,
       gigaLiquidations,
@@ -670,6 +690,310 @@ async function loadChurn(): Promise<HdxDashboard['churn']> {
       byWeek.set(r.wk_new, e)
     }
     return { weekly: [...byWeek.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([weekStart, v]) => ({ weekStart, ...v })) }
+  })
+}
+
+// ── Weekly holder structure (ownership history + HODL age bands) ─────────────
+
+// Balance observations before this Monday cover only ~26 accounts and include a
+// genesis distribution pot recorded 1e12× too high; from here the observation
+// era is comprehensive (21k+ accounts appear in this week). The structure
+// series starts here rather than presenting the sparse prefix as history.
+export const HDX_BALANCE_SERIES_START = '2022-07-04'
+
+// The 'kraken' tag is the exchange's custody hot wallets; 'hdx-kraken-lp' is the
+// wallet running its HDX market-making inventory. Both are one custodian
+// balance, not holder decentralization, so they get their own class.
+const KRAKEN_TAG_IDS = ['kraken', 'hdx-kraken-lp']
+// Non-modl accounts that are still protocol plumbing: AMM pool accounts and
+// money-market reserve contracts. HDX inside them is pooled/custodial, not a
+// holder's wallet balance. Module (modl) accounts match by prefix instead.
+const POOL_TAG_IDS = ['xyk-pools', 'stableswap-pools', 'lbp-pools', 'money-market']
+const TREASURY_ACCOUNT = '0x6d6f646c70792f74727372790000000000000000000000000000000000000000'
+
+const tagAccountsSql = (ids: string[]) =>
+  `(SELECT groupArray(account_id) FROM price_data.account_tags FINAL WHERE label_id IN (${ids.map(t => `'${t}'`).join(',')}) AND deleted = 0)`
+
+export interface HdxStructureWeekRow {
+  week: string
+  treasury: number; protocol: number; kraken: number
+  user_total: number
+  top10: number; top100: number; top1000: number
+  hhi: number
+  age_0_3m: number; age_3_12m: number; age_1_2y: number; age_2y: number
+}
+
+// Assemble the payload's per-week arrays from the SQL rows. Pure so the
+// effective-holder arithmetic and the rest-tranche derivation are unit-testable.
+export function buildHdxStructure(rows: HdxStructureWeekRow[]): Pick<HdxStructure, 'weeks' | 'ownership' | 'effectiveHolders' | 'hodl'> {
+  return {
+    weeks: rows.map(r => r.week),
+    ownership: {
+      treasury: rows.map(r => r.treasury),
+      protocol: rows.map(r => r.protocol),
+      kraken: rows.map(r => r.kraken),
+      top10: rows.map(r => r.top10),
+      top11to100: rows.map(r => r.top100),
+      top101to1000: rows.map(r => r.top1000),
+      rest: rows.map(r => Math.max(0, r.user_total - r.top10 - r.top100 - r.top1000)),
+    },
+    effectiveHolders: rows.map(r => (r.hhi > 0 ? Math.round(1 / r.hhi) : 0)),
+    hodl: {
+      under3m: rows.map(r => r.age_0_3m),
+      m3to12: rows.map(r => r.age_3_12m),
+      y1to2: rows.map(r => r.age_1_2y),
+      over2y: rows.map(r => r.age_2y),
+    },
+  }
+}
+
+// A rotation link: fresh wallet `b` was born of dying wallet `a`'s funds
+// (b's first balance is ≥90% funded by a within b's birth week, and a's
+// balance hit zero within a fortnight). `aFirstnz` is a's first-nonzero week.
+export interface HdxRotationLinkRow { b: string; a: string; aFirstnz: string }
+
+// Resolve rotation chains to their root: serial rotators (a → b → c) pass the
+// ORIGINAL wallet's first-nonzero week all the way down, so a move between own
+// wallets never resets the holding age. Cycles (defensive — the fresh-wallet
+// birth condition shouldn't allow them) fall back to the direct parent.
+export function resolveRotationAnchors(rows: HdxRotationLinkRow[]): { accounts: string[]; anchors: string[] } {
+  const parent = new Map(rows.map(r => [r.b, r]))
+  const anchorOf = (acc: string, seen: Set<string>): string | null => {
+    const link = parent.get(acc)
+    if (!link || seen.has(acc)) return null
+    seen.add(acc)
+    return anchorOf(link.a, seen) ?? link.aFirstnz
+  }
+  const accounts: string[] = [], anchors: string[] = []
+  for (const b of parent.keys()) {
+    const anchor = anchorOf(b, new Set())
+    if (anchor) { accounts.push(b); anchors.push(anchor) }
+  }
+  return { accounts, anchors }
+}
+
+export interface HdxAllocationMintRow { week: string; cls: string; hdx: number }
+
+// Allocation-realization mints (single Balances.Deposit of ≥ 10M HDX — organic
+// deposits like fee payouts and drips are orders of magnitude smaller) are the
+// on-chain moment a pre-committed allocation (growth pot, completed vesting)
+// starts to float. Economically that supply existed all along, so the
+// ownership history counts each mint in its recipient's band from the series
+// start instead of showing a supply cliff at the realization block. Only
+// treasury/protocol recipients are backfilled: retro-adding to a user-class
+// wallet would fabricate its past top-N ranking, and those mints are ~10M HDX
+// — invisible at chart scale. Returns the total HDX it backfilled.
+export function backfillAllocationMints(
+  ownership: HdxStructure['ownership'],
+  weeks: string[],
+  mints: HdxAllocationMintRow[],
+): number {
+  let total = 0
+  for (const m of mints) {
+    if (m.cls !== 'treasury' && m.cls !== 'protocol') continue
+    if (!(m.hdx > 0) || m.week <= weeks[0]) continue // already inside the observed balances
+    const band = ownership[m.cls]
+    for (let i = 0; i < weeks.length && weeks[i] < m.week; i++) band[i] += m.hdx
+    total += m.hdx
+  }
+  return total
+}
+
+// Weekly closing HDX balance per account, forward-filled onto the full Monday
+// grid (an account keeps its last observed close until the next observation),
+// then aggregated per week into ownership classes, user top-N tranches, HHI
+// and holder-age bands. ~11M dense rows, ~5s — computed once per cache TTL.
+// account_balance_weekly's balance_state argMax picks each week's LAST
+// observation, so a within-week round trip collapses to its closing state.
+async function loadStructure(): Promise<HdxStructure> {
+  return cached('explorer:hdx-structure:model', 3_600_000, async () => {
+    // USER accounts only (no modl, no pool/Kraken custody), balances as sorted
+    // per-account (week, balance) arrays — the base for links and Lorenz.
+    // Consumers must declare `special_accts` in their WITH clause.
+    const userSeqCtes = `
+      obs AS (
+        SELECT account_id, week_start AS w,
+          toFloat64(toUInt256OrZero(argMaxMerge(balance_state))) / 1e12 AS bal
+        FROM price_data.account_balance_weekly
+        WHERE asset_id = '0' AND NOT startsWith(account_id, '0x6d6f646c')
+        GROUP BY account_id, w
+      ),
+      seq AS (
+        SELECT account_id,
+          arraySort(groupArray(w)) AS ws,
+          arraySort((b, ww) -> ww, groupArray(bal), groupArray(w)) AS bs
+        FROM obs
+        WHERE NOT has(special_accts, account_id)
+        GROUP BY account_id
+      )`
+    // Rotation links resolve BEFORE the main query — the HODL age bands need
+    // the inherited anchors as parameters. A move between own wallets then
+    // counts as continuous holding instead of resetting to "under 3m".
+    const linkRes = await client.query({
+      query: `
+        WITH
+        ${tagAccountsSql(KRAKEN_TAG_IDS)} AS kraken_accts,
+        ${tagAccountsSql([...KRAKEN_TAG_IDS, ...POOL_TAG_IDS])} AS special_accts,
+        kraken_forwarders AS (
+          SELECT DISTINCT from_account FROM price_data.transfer_activity
+          WHERE asset_id = 0 AND has(kraken_accts, to_account)
+        ),
+        ${userSeqCtes},
+        births AS (
+          SELECT account_id,
+            arrayFilter((ww, bb) -> bb > 0, ws, bs)[1] AS nzw,
+            arrayFilter(bb -> bb > 0, bs)[1] AS first_close
+          FROM seq
+          WHERE length(arrayFilter(bb -> bb > 0, bs)) > 0
+        ),
+        exits AS (
+          SELECT account_id, groupArray(t.1) AS ews
+          FROM (SELECT account_id, ws, arrayMap(b -> b > 0, bs) AS nzs FROM seq)
+          ARRAY JOIN arrayFilter(x -> x.2 = 1, arrayZip(ws,
+            arrayMap(i -> if(NOT nzs[i] AND i > 1 AND nzs[i - 1], 1, 0), arrayEnumerate(ws)))) AS t
+          GROUP BY account_id
+        )
+        SELECT x.b AS b, x.a AS a, toString(bi2.nzw) AS a_firstnz
+        FROM (
+          SELECT b, argMax(a, amt) AS a
+          FROM (
+            -- all funding from a within b's birth week, summed: a rotation
+            -- often arrives as several transfers, none alone ≥90% of the close
+            SELECT ta.to_account AS b, ta.account AS a,
+              sum(toFloat64OrZero(ta.amount)) / 1e12 AS amt
+            FROM price_data.account_transfer_activity ta
+            INNER JOIN births bi ON bi.account_id = ta.to_account
+            INNER JOIN exits e ON e.account_id = ta.account
+            WHERE ta.asset_id = 0 AND ta.from_account = ta.account AND ta.to_account != ta.account
+              AND toMonday(ta.block_timestamp) BETWEEN bi.nzw - 7 AND bi.nzw
+              AND arrayExists(x -> x >= toMonday(ta.block_timestamp) AND x <= toMonday(ta.block_timestamp) + 14, e.ews)
+              AND ta.to_account NOT IN (SELECT from_account FROM kraken_forwarders)
+            GROUP BY b, a
+            HAVING amt >= 0.9 * any(bi.first_close)
+          )
+          GROUP BY b
+        ) x
+        INNER JOIN births bi2 ON bi2.account_id = x.a`,
+      format: 'JSONEachRow',
+    })
+    const linkRows = (await linkRes.json<{ b: string; a: string; a_firstnz: string }>())
+      .map(r => ({ b: String(r.b), a: String(r.a), aFirstnz: String(r.a_firstnz) }))
+    const rot = resolveRotationAnchors(linkRows)
+    // transform() needs non-empty constant arrays — a sentinel keeps the shape.
+    const rotAccs = ['0x__none__', ...rot.accounts]
+    const rotAnchors = ['2100-01-01', ...rot.anchors]
+    // The dense-fill query runs ALONE before the lighter two fire in parallel:
+    // a fully concurrent cold burst can brush ClickHouse's 20s execution cap.
+    const structureRes = await client.query({
+      query: `
+        WITH
+        (SELECT toMonday(max(block_timestamp)) FROM price_data.blocks) AS wmax,
+        ${tagAccountsSql(KRAKEN_TAG_IDS)} AS kraken_accts,
+        ${tagAccountsSql(POOL_TAG_IDS)} AS pool_accts,
+        obs AS (
+          SELECT account_id, week_start AS w,
+            toFloat64(toUInt256OrZero(argMaxMerge(balance_state))) / 1e12 AS bal
+          FROM price_data.account_balance_weekly
+          WHERE asset_id = '0'
+          GROUP BY account_id, w
+        ),
+        seq AS (
+          SELECT account_id,
+            arraySort(groupArray(w)) AS ws,
+            arraySort((b, ww) -> ww, groupArray(bal), groupArray(w)) AS bs,
+            arrayFilter((ww, b) -> b > 0, ws, bs) AS nzws
+          FROM obs GROUP BY account_id
+        ),
+        filled AS (
+          SELECT account_id,
+            if(length(nzws) > 0, nzws[1], toDate('2100-01-01')) AS firstnz,
+            arrayMap(j -> ws[1] + 7 * toInt32(j), range(toUInt64((wmax - ws[1]) / 7) + 1)) AS gw,
+            arrayFill(x -> x >= 0,
+              arrayMap(p -> if(p > 0, bs[p], -1.),
+                arrayMap(j -> indexOf(ws, ws[1] + 7 * toInt32(j)), range(toUInt64((wmax - ws[1]) / 7) + 1)))) AS fb
+          FROM seq
+        ),
+        sel AS (
+          SELECT
+            multiIf(
+              account_id = '${TREASURY_ACCOUNT}', 'treasury',
+              startsWith(account_id, '0x6d6f646c') OR has(pool_accts, account_id), 'protocol',
+              has(kraken_accts, account_id), 'kraken',
+              'user') AS cls,
+            t.1 AS week, t.2 AS bal,
+            -- holding age from the account's own first balance OR its rotation
+            -- chain's root (whichever is older) — see resolveRotationAnchors
+            dateDiff('day', least(firstnz,
+              transform(account_id, {rotAccs:Array(String)}, {rotAnchors:Array(Date)}, toDate('2100-01-01'))), t.1) AS age_days
+          FROM filled
+          ARRAY JOIN arrayZip(gw, fb) AS t
+          WHERE t.2 > 0 AND t.1 >= toDate({start:String})
+        )
+        SELECT toString(week) AS week,
+          treasury, protocol, kraken, user_total,
+          top10, top100, top1000,
+          if(user_total > 0, hhi_raw / (user_total * user_total), 0) AS hhi,
+          age_0_3m, age_3_12m, age_1_2y, age_2y
+        FROM (
+          SELECT week,
+            sumIf(bal, cls = 'treasury') AS treasury,
+            sumIf(bal, cls = 'protocol') AS protocol,
+            sumIf(bal, cls = 'kraken') AS kraken,
+            sumIf(bal, cls = 'user') AS user_total,
+            arraySort(x -> -x, groupArrayIf(bal, cls = 'user')) AS ub,
+            arraySum(arraySlice(ub, 1, 10)) AS top10,
+            arraySum(arraySlice(ub, 11, 90)) AS top100,
+            arraySum(arraySlice(ub, 101, 900)) AS top1000,
+            arraySum(arrayMap(x -> x * x, ub)) AS hhi_raw,
+            -- band edges at week multiples (13/52/104 weeks): every date here
+            -- is a Monday, so age is always a whole number of weeks
+            sumIf(bal, cls = 'user' AND age_days < 91) AS age_0_3m,
+            sumIf(bal, cls = 'user' AND age_days >= 91 AND age_days < 364) AS age_3_12m,
+            sumIf(bal, cls = 'user' AND age_days >= 364 AND age_days < 728) AS age_1_2y,
+            sumIf(bal, cls = 'user' AND age_days >= 728) AS age_2y
+          FROM sel GROUP BY week
+        ) ORDER BY week`,
+      query_params: { start: HDX_BALANCE_SERIES_START, rotAccs, rotAnchors },
+      format: 'JSONEachRow',
+    })
+    // Allocation-realization mints, classified like every other balance (see
+    // backfillAllocationMints). The 10M-HDX floor is a 20-character raw amount.
+    const mintQuery = client.query({
+      query: `
+        WITH
+        ${tagAccountsSql(KRAKEN_TAG_IDS)} AS kraken_accts,
+        ${tagAccountsSql(POOL_TAG_IDS)} AS pool_accts
+        SELECT toString(toMonday(block_timestamp)) AS week,
+          multiIf(
+            who = '${TREASURY_ACCOUNT}', 'treasury',
+            startsWith(who, '0x6d6f646c') OR has(pool_accts, who), 'protocol',
+            has(kraken_accts, who), 'kraken',
+            'user') AS cls,
+          sum(toFloat64(JSONExtractString(args_json, 'amount')) / 1e12) AS hdx
+        FROM price_data.raw_events
+        WHERE event_name = 'Balances.Deposit'
+          AND length(JSONExtractString(args_json, 'amount')) >= 20
+          AND (JSONExtractString(args_json, 'who') AS who) != ''
+        GROUP BY week, cls ORDER BY week`,
+      format: 'JSONEachRow',
+    })
+    const mintRes = await mintQuery
+    const rows = (await structureRes.json<Record<string, unknown>>()).map(r => {
+      const num = (k: string) => Number(r[k] ?? 0)
+      return {
+        week: String(r.week),
+        treasury: num('treasury'), protocol: num('protocol'), kraken: num('kraken'),
+        user_total: num('user_total'),
+        top10: num('top10'), top100: num('top100'), top1000: num('top1000'),
+        hhi: num('hhi'),
+        age_0_3m: num('age_0_3m'), age_3_12m: num('age_3_12m'), age_1_2y: num('age_1_2y'), age_2y: num('age_2y'),
+      }
+    })
+    const mintRows = (await mintRes.json<{ week: string; cls: string; hdx: number }>())
+      .map(r => ({ week: String(r.week), cls: String(r.cls), hdx: Number(r.hdx) }))
+    const base = buildHdxStructure(rows)
+    const backfilledAllocationHdx = backfillAllocationMints(base.ownership, base.weeks, mintRows)
+    return { ...base, backfilledAllocationHdx }
   })
 }
 

@@ -4,12 +4,12 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
 import { Crumbs, F, AddrPill, AssetIcon, ChartSkeleton, EmptyRow, compactAmount } from '../components/ui'
 import {
-  fmtHdx, cohortColor,
-  ChartLegend, ShareBar, StackedColumnChart, MirroredBarChart, GigaLiquidationChart,
+  fmtHdx, cohortColor, OWNERSHIP_COLORS, AGE_COLORS,
+  ChartLegend, ShareBar, StackedColumnChart, MirroredBarChart, StackedAreaChart, GigaLiquidationChart,
 } from '../components/HdxCharts'
 import { LOCK_ORDER, lockColor } from '../components/lockColors'
-import type { ShareSegment, StackColumn, MirrorBar } from '../components/HdxCharts'
-import type { HdxDashboard, HdxLockType, HdxMover } from '../types'
+import type { ShareSegment, StackColumn, MirrorBar, AreaSeries } from '../components/HdxCharts'
+import type { HdxDashboard, HdxStructure, HdxLockType, HdxMover } from '../types'
 import { ChartTooltipRow as TipRow, DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
 import { monthDayLabel as mdLabel, monthLabel as monLabel } from '../utils/dashboardDates'
 
@@ -294,6 +294,106 @@ function FlowsSection({ d }: { d: HdxDashboard }) {
   )
 }
 
+// ── holder structure history (ownership + loyalty) ──────────────────────────
+// Shared helpers for the weekly full-era series. The 1e-9 floor keeps a class
+// that never existed in early weeks (e.g. Kraken pre-listing) from drawing a
+// zero-thick band edge — StackedAreaChart treats null as absent.
+const pct1 = (v: number) => `${v.toFixed(1)}%`
+const last = <T,>(a: T[]): T => a[a.length - 1]
+// Value ~52 weekly rows back, for "vs 1y ago" deltas (null when too young).
+function yearAgo<T>(a: T[]): T | null { return a.length > 52 ? a[a.length - 53] : null }
+function deltaPp(now: number, then: number | null): string | null {
+  if (then == null) return null
+  const d = now - then
+  return `${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(1)}pp vs 1y ago`
+}
+
+const OWNERSHIP_BANDS: { key: keyof HdxStructure['ownership']; label: string }[] = [
+  { key: 'treasury', label: 'Treasury' },
+  { key: 'protocol', label: 'Protocol & pools' },
+  { key: 'kraken', label: 'Kraken' },
+  { key: 'top10', label: 'Top 10' },
+  { key: 'top11to100', label: 'Top 11–100' },
+  { key: 'top101to1000', label: 'Top 101–1k' },
+  { key: 'rest', label: 'Smaller holders' },
+]
+
+// 6. ownership over time
+function OwnershipSection({ s }: { s: HdxStructure }) {
+  const o = s.ownership
+  const series: AreaSeries[] = OWNERSHIP_BANDS.map(b => ({
+    key: b.key, label: b.label, color: OWNERSHIP_COLORS[b.key],
+    values: o[b.key].map(v => (v > 0 ? v : null)),
+  }))
+  const userTotal = s.weeks.map((_, i) => o.top10[i] + o.top11to100[i] + o.top101to1000[i] + o.rest[i])
+  const top10Share = s.weeks.map((_, i) => (userTotal[i] > 0 ? o.top10[i] / userTotal[i] * 100 : null))
+  const totalNow = s.weeks.map((_, i) => OWNERSHIP_BANDS.reduce((sum, b) => sum + o[b.key][i], 0))
+  const effNow = last(s.effectiveHolders)
+  const effThen = yearAgo(s.effectiveHolders)
+  const t10Now = last(top10Share) ?? 0
+  return (
+    <>
+      <SecTitle title="Who holds HDX" subtitle="weekly since Jul 2022" />
+      <div className="pf-card">
+        <ChartLegend items={series.map(b => ({ label: b.label, color: b.color }))} />
+        <StackedAreaChart buckets={s.weeks} series={series} h={240} />
+        <div className="hdx-cards" style={{ marginTop: 14 }}>
+          <div className="hdx-card">
+            <div className="hk"><i style={{ background: OWNERSHIP_COLORS.top10 }} />Top 10 hold</div>
+            <div className="hv">{pct1(t10Now)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>of user-held</span></div>
+            <div className="hs">{deltaPp(t10Now, yearAgo(top10Share) ?? null) ?? '—'}</div>
+          </div>
+          <div className="hdx-card">
+            <div className="hk">Effective holders</div>
+            <div className="hv">{F.int(effNow)}</div>
+            <div className="hs">equal-size equivalent (1/HHI){effThen != null ? ` · ${effNow >= effThen ? '+' : '−'}${F.int(Math.abs(effNow - effThen))} vs 1y ago` : ''}</div>
+          </div>
+          <div className="hdx-card">
+            <div className="hk"><i style={{ background: OWNERSHIP_COLORS.kraken }} />Kraken custody</div>
+            <div className="hv">{fmtHdx(last(o.kraken))} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
+            <div className="hs">{pct1(last(o.kraken) / last(totalNow) * 100)} of total supply</div>
+          </div>
+          <div className="hdx-card">
+            <div className="hk"><i style={{ background: OWNERSHIP_COLORS.treasury }} />Treasury</div>
+            <div className="hv">{fmtHdx(last(o.treasury))} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
+            <div className="hs">{pct1(last(o.treasury) / last(totalNow) * 100)} of total supply</div>
+          </div>
+        </div>
+        <div className="hdx-note">
+          Tranches rank user accounts only — the Treasury, module &amp; pool accounts and Kraken's tagged custody wallets are carved out above.
+          Kraken and pool accounts carry today's tags across the whole history.
+          {s.backfilledAllocationHdx > 0 && <> Allocations minted later ({fmtHdx(s.backfilledAllocationHdx)} — growth pots, completed vesting) are counted in their band from the start, so realizing them on-chain doesn't read as new supply.</>}
+        </div>
+      </div>
+    </>
+  )
+}
+
+// 7. holder loyalty (HODL waves)
+const AGE_BANDS: { key: keyof HdxStructure['hodl']; label: string }[] = [
+  { key: 'over2y', label: 'Held 2y+' },
+  { key: 'y1to2', label: '1–2y' },
+  { key: 'm3to12', label: '3–12m' },
+  { key: 'under3m', label: 'Under 3m' },
+]
+function LoyaltySection({ s }: { s: HdxStructure }) {
+  const series: AreaSeries[] = AGE_BANDS.map(b => ({
+    key: b.key, label: b.label, color: AGE_COLORS[b.key],
+    values: s.hodl[b.key].map(v => (v > 0 ? v : null)),
+  }))
+  return (
+    <>
+      <SecTitle title="Holder loyalty" subtitle="how long user-held HDX has been held" />
+      <div className="pf-card">
+        <ChartLegend items={series.map(b => ({ label: b.label, color: b.color }))} />
+        <StackedAreaChart buckets={s.weeks} series={series} h={220} />
+        <div className="hdx-note">Age counts from an account's first nonzero HDX balance — an account that exits and returns keeps its
+          original age, and a wallet that empties into a single fresh wallet passes its age on, so moving between own wallets counts as continuous holding.</div>
+      </div>
+    </>
+  )
+}
+
 // 6. holder churn
 function ChurnSection({ d }: { d: HdxDashboard }) {
   const weeks = d.churn.weekly
@@ -361,10 +461,12 @@ function HdxSkeleton() {
     <>
       <ChartSkeleton h={78} />
       <SecTitle title="Holder distribution" /><ChartSkeleton h={230} />
+      <SecTitle title="Who holds HDX" subtitle="weekly since Jul 2022" /><ChartSkeleton h={480} />
       <SecTitle title="Locks" /><ChartSkeleton h={230} />
       <SecTitle title="Upcoming unlocks" /><ChartSkeleton h={280} />
       <SecTitle title="Buys vs sells" subtitle="60 days" /><ChartSkeleton h={250} />
       <SecTitle title="New vs exited holders" subtitle="weekly" /><ChartSkeleton h={210} />
+      <SecTitle title="Holder loyalty" subtitle="how long user-held HDX has been held" /><ChartSkeleton h={280} />
       <SecTitle title="Top movers" subtitle="7 days" /><ChartSkeleton h={240} />
     </>
   )
@@ -385,11 +487,13 @@ export function Hdx() {
           <>
             <Ribbon d={data} />
             <HolderSection d={data} />
+            <OwnershipSection s={data.structure} />
             <LocksSection d={data} />
             <UnlocksSection d={data} />
             <GigaMarketSection d={data} />
             <FlowsSection d={data} />
             <ChurnSection d={data} />
+            <LoyaltySection s={data.structure} />
             <MoversSection d={data} />
           </>
         )}
