@@ -8528,6 +8528,12 @@ export interface ActivityRow {
   voteRef?: string | null
   voteSide?: string
   voteConviction?: string | null
+  // xcm outbound: the message left through the xcm EXECUTOR, not through pallet_xcm's own
+  // delivery. Set only by the arm and the extrinsic-page path that decode those sends, and
+  // read by suppressSubordinateActivityRows: a swap in the same extrinsic bought this send
+  // its delivery fee, so it folds behind this row. A pallet_xcm/XTokens send carries no such
+  // claim over a swap batched beside it — that swap is one the user chose to make.
+  xcmExecuted?: true
   destChain?: string         // xcm outbound: destination chain name
   destParachainId?: number | null
   destAccount?: {
@@ -9459,7 +9465,77 @@ const XCM_BARRIER_EVENTS_SQL = XCM_BARRIER_EVENTS.map(n => `'${n}'`).join(',')
 const XCM_SENT_XTOKENS_EVENTS = ['XTokens.TransferredAssets', 'XTokens.TransferredMultiAssets']
 const XCM_SENT_XTOKENS_EVENTS_SQL = XCM_SENT_XTOKENS_EVENTS.map(n => `'${n}'`).join(',')
 const XCM_SENT_EVENTS_SQL = [...XCM_SENT_XTOKENS_EVENTS, 'PolkadotXcm.Sent'].map(n => `'${n}'`).join(',')
+// The only trace an executor-dispatched send leaves behind; see emitsExecutedOutboundXcm
+// for why the send list above cannot see those messages at all.
+const XCM_EXECUTED_SEND_EVENT = 'XcmpQueue.XcmpMessageSent'
 const isXTokensSentEvent = (name: string): boolean => XCM_SENT_XTOKENS_EVENTS.includes(name)
+// Hydration sets `type XcmEventEmitter = ()` (runtime/hydradx/src/xcm.rs), so a message
+// the xcm-EXECUTOR dispatches (InitiateReserveWithdraw, DepositReserveAsset,
+// InitiateTransfer, ExportMessage) leaves only `XcmpQueue.XcmpMessageSent`;
+// `PolkadotXcm.Sent` is deposited solely where pallet_xcm itself delivers. The send list
+// above therefore cannot see the modern `PolkadotXcm.execute` / EVM-dispatch-precompile
+// path at all — 2,974 extrinsics, and rising from ~120/month in 2025 to ~320/month.
+//
+// `alreadyClaimed` is the load-bearing half: 1,248 extrinsics carry BOTH markers (pallet_xcm
+// delivered AND the executor queued the XCMP leg), and those already have a row from
+// parseOutboundXcm — re-emitting doubles them. A SWAP row must NOT suppress the send,
+// though: the SDK builds every fee-bearing bridge as
+// `Utility.batch_all([Router.buy, PolkadotXcm.execute])`, so yielding to a trade row hid
+// the bridge behind its own delivery-fee purchase.
+//
+// Kept as pure fns so the emit-time guard and any suppression site share one definition,
+// the same way isDcaFeeLegSwap does.
+export function emitsExecutedOutboundXcm(hasXcmpMessageSent: boolean, existingRowTypes: readonly string[]): boolean {
+  return hasXcmpMessageSent && !existingRowTypes.includes('xcm')
+}
+// Once the send has a row, a swap in the same extrinsic is the delivery-fee purchase that
+// funded it, not a trade the user made — the same extrinsic-keyed ownership
+// suppressActivityPlumbing already applies to transfer legs. Confirmed on chain: fee-bearing
+// bridges decode to `0x0d02` (Utility.batch_all) while standalone swaps are their own
+// extrinsic.
+export function isBridgePlumbingSwap(extrinsicSentXcm: boolean): boolean {
+  return extrinsicSentXcm
+}
+// The two above serve the extrinsic page, which holds the whole event list. The FEED arms
+// hold one page of rows and have to find their candidates in SQL, so they need the same
+// decision expressed over sets of extrinsic keys: which marker extrinsics are NOT already
+// covered by getRecentXcm. Same precedence as emitsExecutedOutboundXcm — the legacy arm
+// wins the 1,248 both-marker extrinsics — reached from the other direction.
+const executedXcmExtrinsicKey = (blockHeight: number, extrinsicIndex: number | null): string =>
+  `${blockHeight}:${extrinsicIndex ?? ''}`
+export function executedXcmSendExtrinsics(markerExts: readonly string[], legacyExts: readonly string[]): Set<string> {
+  const legacy = new Set(legacyExts)
+  return new Set(markerExts.filter(key => !legacy.has(key)))
+}
+// A fee-bearing bridge withdraws from the user AND from pallet pots (routerex on the fee
+// swap, the destination's sovereign on the transfer leg). Only the user's leg is the
+// economic action, so this is the one admission rule both the extrinsic page and the feed
+// arm apply to a candidate withdrawal.
+export function admitsExecutedXcmWithdrawal(who: string, amount: string): boolean {
+  return Boolean(who) && Boolean(amount) && amount !== '0' && !RESERVED_ACCOUNT_RE.test(who)
+}
+// A send extrinsic emits exactly ONE message — 2,650 of 2,650 measured — so a bridge send is
+// ONE activity, not one row per asset that left. Its other admitted withdrawal legs are the
+// cost of the send: the XCM fee(s), plus the input leg of any Router call batched in to buy
+// them. The executor withdraws in program order (WithdrawAsset/BuyExecution for the fees
+// first, the payload last, and a batched Router leg runs before PolkadotXcm.execute at all),
+// so the PAYLOAD is the highest-event_index leg.
+//
+// Population check: across every multi-leg send the legs this drops are the fee assets
+// (HDX 0, DOT 5) and swap inputs, which is why it also keeps the right leg in the reverse
+// shape — Router.sell(USDC->DOT) batched with a DOT send. Ordering beats value here: it needs
+// no price (a missing price would silently elect the wrong leg) and it survives a payload
+// smaller than its own fee. Folded per (extrinsic, ACCOUNT): ~40 sends withdraw from two
+// accounts, and each account's feed must still show its own send.
+export function executedXcmPayloadLegs<T>(legs: readonly T[], key: (leg: T) => string, order: (leg: T) => number): T[] {
+  const payload = new Map<string, T>()
+  for (const leg of legs) {
+    const k = key(leg)
+    const held = payload.get(k)
+    if (!held || order(leg) > order(held)) payload.set(k, leg)
+  }
+  return [...payload.values()]
+}
 // The execution CONTEXT switched with the barrier names: since the migration,
 // messages process in on_initialize (hook context, extrinsic_index NULL); before
 // it, they processed inside the parachainSystem.set_validation_data INHERENT, so
@@ -9936,6 +10012,147 @@ async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, 
       blocks => xcmOutRemoteRowsForBlocks(blocks, prices, whoIn),
       row => activityRowMatchesFilters(row, filters),
       `xcmoutr:${acctList ?? ''}:${filterKey(filters)}`,
+    )
+    return rows.slice(offset, offset + limit)
+  })
+}
+
+// Executor-dispatched OUTBOUND sends: a SIGNED extrinsic whose message left through the xcm
+// executor rather than through pallet_xcm's own delivery, so `XcmpQueue.XcmpMessageSent` is
+// its only trace. raw_xcm_activity.sender is NULL on all 271,574 of those rows (versus 0 of
+// the XTokens rows), which is why getRecentXcm's `sender IN (…)` scoping cannot reach one:
+// there is nothing to match on. So this arm inverts the lookup. The user's own
+// Currencies.Withdrawn rows are what actually left the chain, so THEY are the row identity
+// and the marker is only a filter — and since `who` is the sort-key prefix of the account
+// projection, that makes the account-scoped read a reverse primary-key walk of the account's
+// own rows, the same shape every other account-scoped XCM arm uses.
+//
+// The arbitrary XCM program is not decoded, so the destination stays unresolved rather than
+// guessed, per the "keep unresolved XCM explicit" rule. The extrinsic page emits the
+// identical rows from the events it already holds (see emitsExecutedOutboundXcm).
+async function xcmExecutedRowsForBlocks(blocks: number[], prices: Map<number, PriceInfo>, whoIn?: Set<string>): Promise<ActivityRow[]> {
+  const list = sqlUIntList(blocks)
+  if (!list) return []
+  const withdrawalColumns = 'block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, who, asset_id, amount'
+  const withdrawalBound = `block_height IN (${list}) AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NOT NULL`
+  const [sendRes, wdRes] = await Promise.all([
+    // Both marker families in one read: which of this block's extrinsics sent a message,
+    // and which of those getRecentXcm already covers. `extrinsic_index IS NOT NULL` keeps
+    // the 5,497 hook-context marker rows out — a remote-initiated send has no local
+    // extrinsic and belongs to xcmOutRemoteRowsForBlocks.
+    client.query({
+      query: `SELECT DISTINCT block_height, extrinsic_index, name
+              FROM price_data.raw_xcm_activity
+              WHERE block_height IN (${list}) AND source_kind = 'event' AND extrinsic_index IS NOT NULL
+                AND name IN ('${XCM_EXECUTED_SEND_EVENT}', ${XCM_SENT_EVENTS_SQL})`,
+      format: 'JSONEachRow',
+    }),
+    // Same account-first/parent split, and for the same reason, as the sibling arm:
+    // `whoIn` stays the authority on membership, so prefiltering on `who` only shrinks
+    // the granules read.
+    whoIn
+      ? client.query({
+        query: `SELECT ${withdrawalColumns}
+                FROM ${xcmEventActivityByAccountTable()}
+                WHERE who IN (${sqlAccountList([...whoIn])}) AND ${withdrawalBound}`,
+        format: 'JSONEachRow',
+      })
+      : client.query({
+        query: `SELECT ${withdrawalColumns}
+                FROM ${xcmEventActivityTable()}
+                WHERE ${withdrawalBound}`,
+        format: 'JSONEachRow',
+      }),
+  ])
+  const markerExts: string[] = []
+  const legacyExts: string[] = []
+  for (const send of await sendRes.json<{ block_height: number; extrinsic_index: number | null; name: string }>()) {
+    const key = executedXcmExtrinsicKey(send.block_height, send.extrinsic_index)
+    if (send.name === XCM_EXECUTED_SEND_EVENT) markerExts.push(key)
+    else legacyExts.push(key)
+  }
+  const claimed = executedXcmSendExtrinsics(markerExts, legacyExts)
+  if (!claimed.size) return []
+  const admitted = (await wdRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; who: string; asset_id: number; amount: string }>())
+    .filter(w => admitsExecutedXcmWithdrawal(w.who, w.amount)
+      && (!whoIn || whoIn.has(w.who))
+      && claimed.has(executedXcmExtrinsicKey(w.block_height, w.extrinsic_index)))
+  const rows: ActivityRow[] = []
+  // One row per send, per account: the fee legs are the cost of this row, not siblings of it.
+  for (const w of executedXcmPayloadLegs(
+    admitted,
+    leg => `${executedXcmExtrinsicKey(leg.block_height, leg.extrinsic_index)}:${leg.who}`,
+    leg => leg.event_index,
+  )) {
+    const { who, amount, asset_id: cid } = w
+    const a = asset(cid)
+    rows.push({
+      type: 'xcm', blockHeight: w.block_height, timestamp: w.ts, eventIndex: w.event_index, extrinsicIndex: w.extrinsic_index,
+      who: accountRef(who), to: null, asset: a, assetIn: null, assetOut: null,
+      amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, amount, a.decimals),
+      xcmDir: 'out', xcmExecuted: true, linkBlock: w.block_height, linkIndex: w.extrinsic_index,
+    })
+  }
+  return rows.sort(compareActivityRowsNewestFirst)
+}
+
+async function getRecentXcmExecuted(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
+  const tw = timeWindow(from, to)
+  const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
+  return cached(`explorer:xcmexec-activity:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+    if (acctList === "''") return []
+    const prices = await ensurePrices()
+    const bound = tw ?? '1'
+    const want = offset + limit
+    const tokenIds = assetIdsForToken(filters.token)
+    const candidateValue = eventValueFilterSql('asset_id', 'amount', 'block_timestamp', filters, prices, 'xcm_executed_price')
+    const candidateToken = assetIdFilterSql('asset_id', tokenIds)
+    // Only ~2,974 extrinsics in all of history sent this way, so an unpruned candidate walk
+    // would read every Currencies.Withdrawn row (11.6M) to find them. The semi-join makes
+    // the marker's own block set the bound instead: 271,574 key-ordered rows, one small
+    // block_height set, and the candidate read then only touches blocks where a message
+    // actually left. `pageBound` is pushed into it too — raw_xcm_activity carries both
+    // block_height and block_timestamp — so a windowed page never builds the whole set.
+    const markerBlocks = (pageBound: string): string =>
+      `block_height IN (
+         SELECT block_height FROM price_data.raw_xcm_activity
+         WHERE (${pageBound}) AND source_kind = 'event' AND extrinsic_index IS NOT NULL
+           AND name = '${XCM_EXECUTED_SEND_EVENT}'
+       )`
+    // Everything below the FROM is identical between the two arms; only the table and the
+    // `who` prefilter differ, exactly as in getRecentXcmOutRemote. The reserved-account
+    // exclusion is stated on both because admitsExecutedXcmWithdrawal drops those rows in
+    // the decode anyway — carrying them as candidates could only cost work, and a
+    // structural pot holds millions of withdrawals that can never become a row.
+    const candidateTail = (pageBound: string): string =>
+      `${candidateValue.joinSql}
+       WHERE ${pageBound}
+         AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NOT NULL
+         AND NOT match(who, '${RESERVED_ACCOUNT_RE.source}')
+         AND ${markerBlocks(pageBound)}
+         ${candidateToken} ${candidateValue.predicateSql}`
+    const pageOrder = 'ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}'
+    const fetchBlocks = async (pageBound: string, pageLimit: number) => {
+      const res = await client.query({
+        query: acctList
+          ? `SELECT block_height FROM ${xcmEventActivityByAccountTable()}
+             ${candidateTail(pageBound)} AND who IN (${acctList})
+             ${pageOrder}`
+          : `SELECT block_height FROM ${xcmEventActivityTable()}
+             ${candidateTail(pageBound)}
+             ${pageOrder}`,
+        query_params: { limit: pageLimit }, format: 'JSONEachRow',
+      })
+      return res.json<{ block_height: number }>()
+    }
+    const whoIn = accounts && accounts.length ? new Set(accounts) : undefined
+    const rows = await fetchDecodedXcmDeep(
+      bound,
+      want,
+      fetchBlocks,
+      blocks => xcmExecutedRowsForBlocks(blocks, prices, whoIn),
+      row => activityRowMatchesFilters(row, filters),
+      `xcmexec:${acctList ?? ''}:${filterKey(filters)}`,
     )
     return rows.slice(offset, offset + limit)
   })
@@ -11896,10 +12113,21 @@ function activityExtrinsicSet(rows: ActivityRow[]): Set<string> {
 // This deliberately works on ActivityRow rather than event names so every feed
 // (global/account/tag/asset/block/detail) applies exactly the same rule after
 // its source-specific rows have been constructed.
+// also owns the transfers that share its block and one of its accounts.
+//
+//
 export function suppressSubordinateActivityRows<T extends ActivityRow>(rows: T[]): T[] {
   const semanticByExtrinsic = new Set<string>()
   const semanticHookAccounts = new Map<number, Set<string>>()
+  // Extrinsics whose message left through the xcm executor. A swap in one of those bought the
+  // send its delivery fee — the SDK builds every fee-bearing bridge as
+  // `Utility.batch_all([Router.buy, PolkadotXcm.execute])` — so it folds behind the send the
+  // same way a transfer leg does. Gated on the row's own `xcmExecuted` claim, never on "an xcm
+  // row shares this extrinsic": a deliberate batch of a swap and an XTokens send is two
+  // actions the user chose, and both keep their rows.
+  const executedSendExtrinsics = new Set<string>()
   for (const row of rows) {
+    if (row.xcmExecuted && row.extrinsicIndex != null) executedSendExtrinsics.add(`${row.blockHeight}:${row.extrinsicIndex}`)
     if (row.type === 'transfer') continue
     if (row.extrinsicIndex != null) {
       semanticByExtrinsic.add(`${row.blockHeight}:${row.extrinsicIndex}`)
@@ -11912,6 +12140,8 @@ export function suppressSubordinateActivityRows<T extends ActivityRow>(rows: T[]
     semanticHookAccounts.set(row.blockHeight, blockAccounts)
   }
   return rows.filter(row => {
+    if (row.type === 'trade' && row.extrinsicIndex != null
+      && executedSendExtrinsics.has(`${row.blockHeight}:${row.extrinsicIndex}`)) return false
     if (row.type !== 'transfer') return true
     if (row.extrinsicIndex != null) return !semanticByExtrinsic.has(`${row.blockHeight}:${row.extrinsicIndex}`)
     const owners = semanticHookAccounts.get(row.blockHeight)
@@ -12925,10 +13155,10 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     let sourceFilters = sourceValueFiltered
       ? filters
       : deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
-    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'nttOut' | 'nttIn' | 'staking' | 'vote'
+    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'xcmExecuted' | 'nttOut' | 'nttIn' | 'staking' | 'vote'
     const classifiedSourceKeys: ClassifiedSourceKey[] = [
       'transfer', 'trade', 'dca', 'reward', 'liquidity', 'mm', 'otc',
-      'xcm', 'xcmIn', 'xcmOutRemote', 'nttOut', 'nttIn', 'staking', 'vote',
+      'xcm', 'xcmIn', 'xcmOutRemote', 'xcmExecuted', 'nttOut', 'nttIn', 'staking', 'vote',
     ]
     const exactSeedSize = activitySourceSeedSize(want)
     const exactSourceLimits = Object.fromEntries(classifiedSourceKeys.map(key => [key, sourceValueFiltered ? exactSeedSize : fetchN])) as Record<ClassifiedSourceKey, number>
@@ -12947,7 +13177,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       })
     }
     for (;;) {
-      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, nttOut, nttIn, staking, votes] = await Promise.all([
+      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, staking, votes] = await Promise.all([
         needsFullClassification
           ? loadClassifiedSource('transfer', (sourceLimit, sourceFrom) => getRecentTransfers(sourceLimit, sourceFrom, to, 0, true, sourceFilters))
           : Promise.resolve([]),
@@ -12977,6 +13207,9 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
           : Promise.resolve([]),
         needsFullClassification
           ? loadClassifiedSource('xcmOutRemote', (sourceLimit, sourceFrom) => getRecentXcmOutRemote(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
+          : Promise.resolve([]),
+        needsFullClassification
+          ? loadClassifiedSource('xcmExecuted', (sourceLimit, sourceFrom) => getRecentXcmExecuted(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
           : Promise.resolve([]),
         needsFullClassification
           ? loadClassifiedSource('nttOut', (sourceLimit, sourceFrom) => getRecentNttOut(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
@@ -13044,6 +13277,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         { key: 'xcm', fetchSize: sourceFetchSize('xcm'), rawSize: xcm.length, rows: xcm, oldest: oldestOf(xcm) },
         { key: 'xcmIn', fetchSize: sourceFetchSize('xcmIn'), rawSize: xcmIn.length, rows: xcmIn, oldest: oldestOf(xcmIn) },
         { key: 'xcmOutRemote', fetchSize: sourceFetchSize('xcmOutRemote'), rawSize: xcmOutRemote.length, rows: xcmOutRemote, oldest: oldestOf(xcmOutRemote) },
+        { key: 'xcmExecuted', fetchSize: sourceFetchSize('xcmExecuted'), rawSize: xcmExecuted.length, rows: xcmExecuted, oldest: oldestOf(xcmExecuted) },
         { key: 'nttOut', fetchSize: sourceFetchSize('nttOut'), rawSize: nttOut.length, rows: nttOut, oldest: oldestOf(nttOut) },
         { key: 'nttIn', fetchSize: sourceFetchSize('nttIn'), rawSize: nttIn.length, rows: nttIn, oldest: oldestOf(nttIn) },
       ]
@@ -13123,7 +13357,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     ]
     else if (type === 'mm') rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters, action)).filter(r => !isModuleAcct(r.who)), ...(action === 'ClaimRewards' ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'incentive')).filter(r => r.type === 'mm') : [])]
     else if (type === 'otc') rows = await getRecentOtc(fetchN, from, to, 0, filters, action)
-    else if (type === 'xcm') rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters), getRecentNttOut(fetchN, from, to, undefined, 0, filters), getRecentNttIn(fetchN, from, to, undefined, 0, filters)])).flat()
+    else if (type === 'xcm') rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters), getRecentXcmExecuted(fetchN, from, to, undefined, 0, filters), getRecentNttOut(fetchN, from, to, undefined, 0, filters), getRecentNttIn(fetchN, from, to, undefined, 0, filters)])).flat()
     else if (type === 'staking') rows = await getRecentStaking(fetchN, from, to, undefined, 0, filters, undefined, action)
     else rows = (await getVoteFeedRows(fetchN, from, to, 0, filters, withCollective)).map(voteActivityRow)
   } else if (type === 'liquidity') {
@@ -13133,7 +13367,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
   } else if (type === 'otc') {
     rows = await getRecentOtc(limit, from, to, offset, filters)
   } else if (type === 'xcm') {
-    rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters), getRecentNttOut(fetchN, from, to, undefined, 0, filters), getRecentNttIn(fetchN, from, to, undefined, 0, filters)])).flat()
+    rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters), getRecentXcmExecuted(fetchN, from, to, undefined, 0, filters), getRecentNttOut(fetchN, from, to, undefined, 0, filters), getRecentNttIn(fetchN, from, to, undefined, 0, filters)])).flat()
   } else if (type === 'staking') {
     rows = await getRecentStaking(limit, from, to, undefined, offset, filters)
   } else {
@@ -14073,30 +14307,43 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       }
     }
 
-    // Manually-executed outbound XCM (PolkadotXcm.execute): the message leaves
-    // via XcmpQueue.XcmpMessageSent with no Sent/TransferredAssets event, so
-    // the user's withdrawal events are the only trace of what left. Emit them
-    // as xcm-out rows (the arbitrary program isn't parsed — destination stays
-    // unknown). Skipped when the extrinsic already produced trade/xcm rows.
-    if (events.some(e => e.event_name === 'XcmpQueue.XcmpMessageSent') && !rows.some(r => r.type === 'xcm' || r.type === 'trade')) {
-      const seenWd = new Set<string>()
-      for (const e of events) {
-        if (e.event_name !== 'Currencies.Withdrawn') continue
-        const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
-        const who = argStr(args, 'who')
-        const amount = argStr(args, 'amount')
-        const cid = argInt(args, 'currencyId', 'currency_id')
-        if (!who || !amount || amount === '0' || RESERVED_ACCOUNT_RE.test(who)) continue
-        const key = `${who}:${cid}:${amount}`
-        if (seenWd.has(key)) continue
-        seenWd.add(key)
+    // Executor-dispatched outbound XCM (PolkadotXcm.execute, or a RuntimeCall through the
+    // EVM dispatch precompile): the message leaves via XcmpQueue.XcmpMessageSent with no
+    // Sent/TransferredAssets event, so the user's withdrawal events are the only trace of
+    // what left. Emit them as xcm-out rows (the arbitrary program isn't parsed —
+    // destination stays unknown, per the "keep unresolved XCM explicit" rule). Skipped only
+    // when an xcm row already exists; see emitsExecutedOutboundXcm for why a trade row must
+    // NOT suppress it.
+    const sentExecutedXcm = events.some(e => e.event_name === XCM_EXECUTED_SEND_EVENT)
+    if (emitsExecutedOutboundXcm(sentExecutedXcm, rows.map(r => r.type))) {
+      // Same fold, same key, same order as the feed arm (xcmExecutedRowsForBlocks): a send is
+      // one activity, and the surfaces must not disagree about how many rows it is.
+      const legs = events
+        .filter(e => e.event_name === 'Currencies.Withdrawn')
+        .map(e => {
+          const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
+          return { e, who: argStr(args, 'who'), amount: argStr(args, 'amount'), cid: argInt(args, 'currencyId', 'currency_id') }
+        })
+        .filter(leg => admitsExecutedXcmWithdrawal(leg.who, leg.amount))
+      for (const { e, who, amount, cid } of executedXcmPayloadLegs(
+        legs,
+        leg => `${executedXcmExtrinsicKey(leg.e.block_height, leg.e.extrinsic_index)}:${leg.who}`,
+        leg => leg.e.event_index,
+      )) {
         const a = asset(cid)
         rows.push({
           type: 'xcm', blockHeight: e.block_height, timestamp: e.ts, eventIndex: e.event_index, extrinsicIndex: e.extrinsic_index,
           who: accountRef(who), to: null, asset: a, assetIn: null, assetOut: null,
           amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, amount, a.decimals),
-          xcmDir: 'out', linkBlock: e.block_height, linkIndex: e.extrinsic_index,
+          xcmDir: 'out', xcmExecuted: true, linkBlock: e.block_height, linkIndex: e.extrinsic_index,
         })
+      }
+      // The bridge is the user's highest-level action here, so the swap beside it is the
+      // delivery-fee purchase that funded it, not a trade they made. Drop it once the send
+      // has a row — the same extrinsic-keyed ownership suppressActivityPlumbing applies to
+      // transfer legs, which cannot express this because it only ever removes transfers.
+      if (isBridgePlumbingSwap(sentExecutedXcm) && rows.some(r => r.type === 'xcm')) {
+        for (let i = rows.length - 1; i >= 0; i--) if (rows[i].type === 'trade') rows.splice(i, 1)
       }
     }
 
@@ -15112,6 +15359,13 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
         .then(rows => rows.filter(row => row.asset?.assetId === assetId))
       : Promise.resolve([])
 
+    // Executor-dispatched sends of this asset — the bridge legs that leave with no
+    // PolkadotXcm.Sent/XTokens event at all, so no other arm on this surface can see them.
+    const xcmExecutedP: Promise<ActivityRow[]> = wantXcm
+      ? getRecentXcmExecuted(fetchN, from, to, undefined, 0, { ...fixedAssetFilters, token: String(assetId) })
+        .then(rows => rows.filter(row => row.asset?.assetId === assetId))
+      : Promise.resolve([])
+
     // Wormhole NTT sends and arrivals of this asset — the same builders every other
     // surface uses, scoped by the token filter they already push into SQL.
     const nttOutP: Promise<ActivityRow[]> = wantXcm
@@ -15228,7 +15482,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       ? getVoteFeedRows(fetchN, from, to, 0, queryFilters, collectiveVotesAdmitted(queryFilters)).then(rows => rows.map(voteActivityRow))
       : Promise.resolve([])
 
-    const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, nttOut, nttIn, mm, otc, staking, votes] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, nttOutP, nttInP, mmP, otcP, stakingP, votesP])
+    const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, staking, votes] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, xcmExecutedP, nttOutP, nttInP, mmP, otcP, stakingP, votesP])
     // Drop transfer legs of the asset's own trades (hops/fee legs share the extrinsic).
     const tradeExtrinsics = new Set(trades.filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
     const stakingExtrinsics = activityExtrinsicSet(staking)
@@ -15241,7 +15495,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)))
     const userTrades = dropShareRoutedTrades(trades, activityExtrinsicSet(liquidity))
     const userMm = mm.filter(r => !isModuleAcct(r.who))
-    let rows = await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...nttOut, ...nttIn, ...userMm, ...otc])
+    let rows = await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc])
     if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
     rows = rows.filter(r => activityRowMatchesAction(r, action))
     // The token key is meaningless here (the asset IS fixed); min applies the
@@ -15249,13 +15503,13 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
     rows = rows.filter(r => activityRowMatchesFilters(r, { ...filters, token: undefined }))
     rows.sort(compareActivityRowsNewestFirst)
-    const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, votes, xcm, xcmIn, xcmOutRemote, nttOut, nttIn, mm, otc]
+    const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, votes, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc]
       : type === 'transfer' ? [transfers]
         : type === 'trade' ? [trades, dcaFailures, otc]
           : type === 'liquidity' ? [liquidity, rewards]
             : type === 'mm' ? [mm, rewards]
               : type === 'otc' ? [otc]
-                : type === 'xcm' ? [xcm, xcmIn, xcmOutRemote, nttOut, nttIn]
+                : type === 'xcm' ? [xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn]
                   : type === 'staking' ? [staking]
                     : [votes]
     if (rows.length < want && saturationSources.some(source => source.length >= fetchN)) throw activityQueryTooBroad()
@@ -16945,12 +17199,13 @@ async function enumeratedActivityRowsUncached(
       getRecentVotes(depth, from, to, 0, {}, accounts, {}).then(rows => rows.map(voteActivityRow)),
       getCollectiveVotes(accounts, depth, from, to).then(rows => rows.map(voteActivityRow)),
     ]) : [],
-    // The three XCM legs each have their own limit, so saturation is per leg: the
+    // The four XCM legs each have their own limit, so saturation is per leg: the
     // concatenation reaching a cap says nothing about whether one leg was exhausted.
     need.xcm ? Promise.all([
       getRecentXcm(xcmDepth, from, to, accounts, 0, {}),
       getRecentXcmIn(xcmDepth, from, to, accounts, 0, {}),
       getRecentXcmOutRemote(xcmDepth, from, to, accounts, 0, {}),
+      getRecentXcmExecuted(xcmDepth, from, to, accounts, 0, {}),
     ]) : [],
     need.ntt ? Promise.all([
       getRecentNttOut(depth, from, to, accounts, 0, {}),
@@ -17736,6 +17991,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
       getRecentXcm(catFetch, from, to, accounts, 0, queryFilters),
       getRecentXcmIn(catFetch, from, to, accounts, 0, queryFilters),
       getRecentXcmOutRemote(catFetch, from, to, accounts, 0, queryFilters),
+      getRecentXcmExecuted(catFetch, from, to, accounts, 0, queryFilters),
       getRecentNttOut(catFetch, from, to, accounts, 0, queryFilters),
       getRecentNttIn(catFetch, from, to, accounts, 0, queryFilters),
     ])
