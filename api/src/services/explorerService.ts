@@ -18404,8 +18404,15 @@ async function countAccountActivity(accounts: string[], type: string, action: st
 // while a DCA execution is attributed to the schedule's OWNER, whom the
 // per-account event index does not name — measured against 17 recently active
 // accounts, that was the single case where the index sat 12 blocks behind a
-// trade the feed was already showing. dca_events is scanned by `who` (5.7M
-// rows) and the pair together costs ~30ms.
+// trade the feed was already showing.
+//
+// dca_events is ORDER BY (event_name, block_height, …), so `who` prunes nothing
+// and that arm reads the table. What it is asked, though, is only whether it
+// beats the first arm — so it is bounded by that height, which puts a range on
+// the key's SECOND column and leaves each event_name's granules above it. Same
+// answer (a lower DCA height could never have won the `greatest`), 7.32M rows
+// down to 705k. At ~2,000 of these an hour it was the second-largest read in the
+// deployment.
 async function accountActivityWatermark(accounts: string[]): Promise<number> {
   if (!accounts.length) return 0
   // Briefly cached: one page asks for several lists at once, and they should
@@ -18413,9 +18420,11 @@ async function accountActivityWatermark(accounts: string[]): Promise<number> {
   return cached(`explorer:acct-watermark:${accounts.join(',')}`, 2_000, async () => {
     try {
       const res = await client.query({
-        query: `SELECT greatest(
-                  (SELECT max(block_height) FROM price_data.account_activity_v3 WHERE account IN {accounts:Array(String)}),
-                  (SELECT max(block_height) FROM price_data.dca_events WHERE who IN {accounts:Array(String)})
+        query: `WITH (SELECT max(block_height) FROM price_data.account_activity_v3 WHERE account IN {accounts:Array(String)}) AS indexed
+                SELECT greatest(
+                  indexed,
+                  (SELECT max(block_height) FROM price_data.dca_events
+                   WHERE who IN {accounts:Array(String)} AND block_height > indexed)
                 ) AS w`,
         query_params: { accounts }, format: 'JSONEachRow',
       })
