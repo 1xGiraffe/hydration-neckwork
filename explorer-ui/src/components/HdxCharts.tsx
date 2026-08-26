@@ -30,6 +30,31 @@ const COHORT_COLORS: Record<string, string> = {
 }
 export function cohortColor(key: string): string { return COHORT_COLORS[key] ?? 'var(--text-low)' }
 
+// Ownership-over-time classes. Entity colors are fixed: the Treasury wears a
+// near-white grey (the big neutral block at the chart floor) over the darker
+// protocol-plumbing grey, Kraken its tag purple (#7b6cf6 — the hue its account
+// pill wears everywhere), and the user tranches reuse the cohort ramp so
+// "Top 10" is the same whale blue as the Holder distribution bar above.
+// Adjacent non-ramp pairs are CVD-checked; the blue ramp is ordinal on purpose.
+export const OWNERSHIP_COLORS: Record<string, string> = {
+  treasury: '#DDE3ED',
+  protocol: 'var(--neutral)',
+  kraken: '#7b6cf6',
+  top10: COHORT_COLORS.whale,
+  top11to100: COHORT_COLORS.dolphin,
+  top101to1000: COHORT_COLORS.fish,
+  rest: COHORT_COLORS.shrimp,
+}
+
+// Holder-age bands (HODL waves): one sequential violet ramp, dark→light =
+// oldest→newest, so loyalty literally deepens toward the chart floor.
+export const AGE_COLORS: Record<string, string> = {
+  over2y: '#5E35A8',
+  y1to2: '#9165D6',
+  m3to12: '#BC9BE8',
+  under3m: '#E3D3F7',
+}
+
 /* ============ legend ============ */
 // Small legend row: colored dot + label (GeistMono 11px, reuses .bal-legend).
 export function ChartLegend({ items }: { items: { label: string; color: string }[] }) {

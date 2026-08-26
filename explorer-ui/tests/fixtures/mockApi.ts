@@ -1257,6 +1257,36 @@ function buildHdx(): HdxDashboard {
     },
     flows: { daily, dca: { buy: { orders: 46, hdxPerDay: 2.1e6 }, sell: { orders: 13, hdxPerDay: 6.4e5 } } },
     churn: { weekly },
+    structure: (() => {
+      // Full-era weekly holder structure: ~4 years of Mondays with a slow
+      // treasury/tranche drift and deepening HODL bands — deterministic via
+      // the shared rng like every other series here.
+      const N_WEEKS = 210
+      const monday = (i: number) => { const d = new Date(now - (N_WEEKS - 1 - i) * 7 * day); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return iso(d.getTime()) }
+      const weeks = Array.from({ length: N_WEEKS }, (_, i) => monday(i))
+      const grow = (from: number, to: number, jitter: number) =>
+        Array.from({ length: N_WEEKS }, (_, i) => Math.round(from + (to - from) * (i / (N_WEEKS - 1)) + (r() - 0.5) * jitter))
+      return {
+        weeks,
+        ownership: {
+          treasury: grow(2.3e9, 2.1e9, 4e7),
+          protocol: grow(1e6, 3.1e8, 8e6),
+          kraken: grow(0, 2.4e8, 6e6).map((v, i) => (i < 30 ? 0 : v)), // pre-listing gap
+          top10: grow(1.5e9, 1.05e9, 3e7),
+          top11to100: grow(1.4e9, 1.3e9, 3e7),
+          top101to1000: grow(8e8, 9.6e8, 2e7),
+          rest: grow(3e8, 4.4e8, 1e7),
+        },
+        effectiveHolders: grow(38, 85, 4),
+        hodl: {
+          under3m: grow(9e8, 1e8, 3e7),
+          m3to12: grow(6e8, 1.7e8, 2e7),
+          y1to2: grow(1e8, 7.7e8, 2e7),
+          over2y: grow(0, 2.66e9, 4e7).map((v, i) => (i < 20 ? 0 : v)),
+        },
+        backfilledAllocationHdx: 1.999e9,
+      }
+    })(),
     topMovers: {
       accumulators: Array.from({ length: 6 }, (_, i) => mover(i, 1)).sort((a, b) => b.netHdx - a.netHdx),
       distributors: Array.from({ length: 6 }, (_, i) => mover(i + 3, -1)).sort((a, b) => a.netHdx - b.netHdx),
