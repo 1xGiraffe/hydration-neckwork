@@ -351,24 +351,80 @@ export function getWormholeManagers(): WormholeManagerRef[] {
 
 interface LocationRow { asset_id: number; args: string; symbol: string | null; decimals: number | null; min_block: number }
 
+// Discovery re-derived the `wh` location map from raw_events on every cycle, and
+// that read prunes on nothing: `event_name` is not in the sort key and the
+// filter is a LIKE over args_json, so it scanned 18.8M rows — 88 times an hour —
+// to rebuild a map that only moves when an asset is registered or relocated.
+//
+// It is made incremental on the property the aggregate already has: argMax over
+// the union of two disjoint block ranges is argMax over the whole, so the part
+// below a settled floor is kept and only newer blocks are re-read. The floor
+// trails the head by the usual reorg margin, so anything a reorg could rewrite
+// is in the re-read window.
+const WH_LOCATION_REORG_MARGIN_BLOCKS = 600
+let whLocationCache: { upTo: number; byAsset: Map<number, { args: string; block: number }> } | null = null
+// A minimum over an append-only event: once non-zero it can never move, because
+// a later NttMinterSet can only land at a HIGHER block.
+let nttMinterMinBlock = 0
+
+/** Discovery's incremental state. The registry is append-only on chain, so
+ *  production never needs this; a test that shrinks its fake registry does. */
+export function resetWormholeDiscoveryForTests(): void {
+  whLocationCache = null
+  nttMinterMinBlock = 0
+}
+
 async function discoverAssets(): Promise<{ assets: DiscoveredAsset[]; minBlock: number }> {
   const minters = await nttMinterAccounts()
   if (!minters.size) return { assets: [], minBlock: 0 }
-  const res = await client.query({
-    query: `WITH loc AS (
-              SELECT toUInt32(JSONExtractInt(args_json, 'assetId')) AS asset_id,
-                     argMax(args_json, block_height) AS args
+  const from = whLocationCache?.upTo ?? -1
+  const [locRes, headRow] = await Promise.all([
+    client.query({
+      query: `SELECT toUInt32(JSONExtractInt(args_json, 'assetId')) AS asset_id,
+                     argMax(args_json, block_height) AS args,
+                     max(block_height) AS block
               FROM price_data.raw_events
               WHERE event_name IN ('AssetRegistry.LocationSet', 'AssetRegistry.Registered')
                 AND args_json LIKE '%"0x7768%'
-              GROUP BY asset_id
-            )
-            SELECT loc.asset_id AS asset_id, loc.args AS args, a.symbol AS symbol, a.decimals AS decimals,
-                   (SELECT min(block_height) FROM price_data.raw_events WHERE event_name = 'EVMAccounts.NttMinterSet') AS min_block
-            FROM loc LEFT JOIN (SELECT asset_id, symbol, decimals FROM price_data.assets FINAL) AS a USING (asset_id)`,
+                AND block_height > {from:Int64}
+              GROUP BY asset_id`,
+      query_params: { from }, format: 'JSONEachRow',
+    }),
+    queryIndexedHead(),
+  ])
+  const byAsset = new Map(whLocationCache?.byAsset ?? [])
+  for (const r of await locRes.json<{ asset_id: number; args: string; block: number }>()) {
+    const prev = byAsset.get(Number(r.asset_id))
+    // Strictly newer wins, which is exactly what argMax over the whole range did.
+    if (!prev || Number(r.block) >= prev.block) byAsset.set(Number(r.asset_id), { args: r.args, block: Number(r.block) })
+  }
+  // An unread head leaves the floor where it was: nothing new is settled, so
+  // the next cycle simply re-reads the same window.
+  const floor = headRow == null ? from : Math.max(from, headRow - WH_LOCATION_REORG_MARGIN_BLOCKS)
+  // Only entries settled at or below the floor may be kept: one above it has to
+  // be re-read, or a reorg that moved a location would never be seen again.
+  whLocationCache = { upTo: floor, byAsset: new Map([...byAsset].filter(([, v]) => v.block <= floor)) }
+  if (!nttMinterMinBlock) {
+    const minRes = await client.query({
+      query: `SELECT min(block_height) AS min_block FROM price_data.raw_events WHERE event_name = 'EVMAccounts.NttMinterSet'`,
+      format: 'JSONEachRow',
+    })
+    nttMinterMinBlock = Number((await minRes.json<{ min_block: number }>())[0]?.min_block ?? 0) || 0
+  }
+  const ids = [...byAsset.keys()]
+  const metaRes = await client.query({
+    query: `SELECT asset_id, symbol, decimals FROM price_data.assets FINAL WHERE asset_id IN (${ids.join(',') || '0'})`,
     format: 'JSONEachRow',
   })
-  const rows = await res.json<LocationRow>()
+  const meta = new Map((await metaRes.json<{ asset_id: number; symbol: string | null; decimals: number | null }>())
+    .map(m => [Number(m.asset_id), m]))
+  const rows: LocationRow[] = [...byAsset].map(([asset_id, v]) => ({
+    asset_id,
+    args: v.args,
+    symbol: meta.get(asset_id)?.symbol ?? null,
+    decimals: meta.get(asset_id)?.decimals ?? null,
+    min_block: nttMinterMinBlock,
+  }))
   const assets: DiscoveredAsset[] = []
   let minBlock = 0
   for (const row of rows) {

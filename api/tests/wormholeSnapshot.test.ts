@@ -62,7 +62,7 @@ vi.mock('../src/services/explorerAssets.ts', () => ({
 
 const {
   refreshWormholeBacking, runWormholeBackingConfirmation, cancelWormholeBackingConfirmation,
-  getWormholeBridgeDetail, getWormholeSummary, initWormholeNttService,
+  getWormholeBridgeDetail, getWormholeSummary, initWormholeNttService, resetWormholeDiscoveryForTests,
 } = await import('../src/services/wormholeNttService.ts')
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -108,8 +108,17 @@ function fakeClient(): ClickHouseClient {
     query: async ({ query }: { query: string }) => {
       queries.push(query)
       if (query.includes('raw_blocks')) return { json: async () => [{ block_height: 13_728_047, block_timestamp: '2026-08-22 08:00:00' }] }
+      // Discovery reads the registry incrementally, so the three facts it used to
+      // take from one joined read now arrive separately: the `wh` locations with
+      // the block each was last set at, the minter floor, and the symbol/decimals.
       if (query.includes('AssetRegistry.LocationSet')) {
-        return { json: async () => registry.map(a => ({ asset_id: a.assetId, args: locationArgs(a), symbol: a.symbol, decimals: a.decimals, min_block: 13_378_659 })) }
+        return { json: async () => registry.map(a => ({ asset_id: a.assetId, args: locationArgs(a), block: 13_400_000 })) }
+      }
+      // Specific to the minter FLOOR read — the minter set itself is read by
+      // another query naming the same event.
+      if (query.includes('min(block_height) AS min_block')) return { json: async () => [{ min_block: 13_378_659 }] }
+      if (query.includes('price_data.assets')) {
+        return { json: async () => registry.map(a => ({ asset_id: a.assetId, symbol: a.symbol, decimals: a.decimals })) }
       }
       if (query.includes('raw_evm_logs')) return { json: async () => [] }
       if (query.includes('Tokens.Withdrawn')) return { json: async () => [] }
@@ -330,6 +339,9 @@ const fetchStub = fetchImpl as unknown as typeof fetch
 
 beforeEach(() => {
   queries = []
+  // Discovery keeps its registry read incrementally, and these cases vary the
+  // fake registry between them — on chain it only ever grows.
+  resetWormholeDiscoveryForTests()
   ethChainReachable = true
   scanReachable = true
   scanOps = []
@@ -545,7 +557,11 @@ function historyClient(): ClickHouseClient {
       queries.push(query)
       if (query.includes('raw_blocks')) return { json: async () => [{ block_height: 13_728_100, block_timestamp: '2026-08-22 08:00:00' }] }
       if (query.includes('AssetRegistry.LocationSet')) {
-        return { json: async () => [USDC, SUI].map(a => ({ asset_id: a.assetId, args: locationArgs(a), symbol: a.symbol, decimals: a.decimals, min_block: 13_378_659 })) }
+        return { json: async () => [USDC, SUI].map(a => ({ asset_id: a.assetId, args: locationArgs(a), block: 13_400_000 })) }
+      }
+      if (query.includes('min(block_height) AS min_block')) return { json: async () => [{ min_block: 13_378_659 }] }
+      if (query.includes('price_data.assets')) {
+        return { json: async () => [USDC, SUI].map(a => ({ asset_id: a.assetId, symbol: a.symbol, decimals: a.decimals })) }
       }
       if (query.includes('raw_evm_logs')) return { json: async () => [SUI_SEND_LOG, USDC_RECEIVE_LOG, USDC_REDEEMED_LOG] }
       if (query.includes('Tokens.Withdrawn')) return { json: async () => TOKEN_LEGS }
@@ -716,7 +732,11 @@ function queueClient(): ClickHouseClient {
       queries.push(query)
       if (query.includes('raw_blocks')) return { json: async () => [{ block_height: 13_728_100, block_timestamp: '2026-08-22 08:00:00' }] }
       if (query.includes('AssetRegistry.LocationSet')) {
-        return { json: async () => [SUSDS, PRIME].map(a => ({ asset_id: a.assetId, args: locationArgs(a), symbol: a.symbol, decimals: a.decimals, min_block: 13_378_659 })) }
+        return { json: async () => [SUSDS, PRIME].map(a => ({ asset_id: a.assetId, args: locationArgs(a), block: 13_400_000 })) }
+      }
+      if (query.includes('min(block_height) AS min_block')) return { json: async () => [{ min_block: 13_378_659 }] }
+      if (query.includes('price_data.assets')) {
+        return { json: async () => [SUSDS, PRIME].map(a => ({ asset_id: a.assetId, symbol: a.symbol, decimals: a.decimals })) }
       }
       if (query.includes('raw_evm_logs')) return { json: async () => [SUSDS_SEND_LOG, PRIME_SEND_LOG] }
       return { json: async () => [] }
@@ -852,7 +872,11 @@ function pinnedClient(head: number): ClickHouseClient {
       queries.push(query)
       if (query.includes('raw_blocks')) return { json: async () => [{ block_height: head, block_timestamp: '2026-08-22 09:22:00' }] }
       if (query.includes('AssetRegistry.LocationSet')) {
-        return { json: async () => [USDC].map(a => ({ asset_id: a.assetId, args: locationArgs(a), symbol: a.symbol, decimals: a.decimals, min_block: 13_378_659 })) }
+        return { json: async () => [USDC].map(a => ({ asset_id: a.assetId, args: locationArgs(a), block: 13_400_000 })) }
+      }
+      if (query.includes('min(block_height) AS min_block')) return { json: async () => [{ min_block: 13_378_659 }] }
+      if (query.includes('price_data.assets')) {
+        return { json: async () => [USDC].map(a => ({ asset_id: a.assetId, symbol: a.symbol, decimals: a.decimals })) }
       }
       return { json: async () => [] }
     },
@@ -1109,7 +1133,11 @@ function outboundClient(): ClickHouseClient {
       queries.push(query)
       if (query.includes('raw_blocks')) return { json: async () => [{ block_height: 13_728_100, block_timestamp: '2026-08-22 08:00:00' }] }
       if (query.includes('AssetRegistry.LocationSet')) {
-        return { json: async () => [USDC].map(a => ({ asset_id: a.assetId, args: locationArgs(a), symbol: a.symbol, decimals: a.decimals, min_block: 13_378_659 })) }
+        return { json: async () => [USDC].map(a => ({ asset_id: a.assetId, args: locationArgs(a), block: 13_400_000 })) }
+      }
+      if (query.includes('min(block_height) AS min_block')) return { json: async () => [{ min_block: 13_378_659 }] }
+      if (query.includes('price_data.assets')) {
+        return { json: async () => [USDC].map(a => ({ asset_id: a.assetId, symbol: a.symbol, decimals: a.decimals })) }
       }
       if (query.includes('raw_evm_logs')) return { json: async () => [OUTBOUND_SEND_LOG] }
       return { json: async () => [] }
@@ -1198,7 +1226,11 @@ describe('the confirmation merge and other assets’ in-flight rows', () => {
         queries.push(query)
         if (query.includes('raw_blocks')) return { json: async () => [{ block_height: 13_730_752, block_timestamp: '2026-08-22 09:22:00' }] }
         if (query.includes('AssetRegistry.LocationSet')) {
-          return { json: async () => [USDC, SUSDS].map(a => ({ asset_id: a.assetId, args: locationArgs(a), symbol: a.symbol, decimals: a.decimals, min_block: 13_378_659 })) }
+          return { json: async () => [USDC, SUSDS].map(a => ({ asset_id: a.assetId, args: locationArgs(a), block: 13_400_000 })) }
+        }
+        if (query.includes('min(block_height) AS min_block')) return { json: async () => [{ min_block: 13_378_659 }] }
+        if (query.includes('price_data.assets')) {
+          return { json: async () => [USDC, SUSDS].map(a => ({ asset_id: a.assetId, symbol: a.symbol, decimals: a.decimals })) }
         }
         return { json: async () => [] }
       },
