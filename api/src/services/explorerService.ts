@@ -11236,31 +11236,132 @@ function resolveOtcAction(action?: string): string | undefined {
   if (!action) return undefined
   return OTC_ACTION_ALIASES[action] ?? action
 }
-interface OtcPlacedLeg { assetIn: number; assetOut: number; amountIn: string; amountOut: string; partiallyFillable: boolean }
-// Batched orderId → Placed-event legs, shared by Cancelled (Pull) and
-// Filled/PartiallyFilled (Fill) row construction — neither carries asset
-// identity itself, only the order's original Placed event does. Missing ids
-// (e.g. a Fill whose Placed row predates the indexed window) are simply
-// absent from the returned map; callers render the row without legs.
+export interface OtcPlacedLeg { assetIn: number; assetOut: number; amountIn: string; amountOut: string; partiallyFillable: boolean; maker: string | null }
+
+// The order's MAKER — the account that owns it. No OTC event names them: Placed
+// and Cancelled carry no account at all, and Filled/PartiallyFilled name only
+// the taker. What does name them is the reserve the pallet takes at placement:
+// the maker's `assetOut` is reserved immediately before the Placed event in the
+// same block, for exactly `amountOut`.
+//
+// That identity beats the placing extrinsic's signer on both ends. A signer is
+// missing entirely for the 33 governance-dispatched placements (no extrinsic at
+// all, so no signer to fall back to), and it is the wrong account for a
+// multisig placement, where the order belongs to the multisig and the signer is
+// whichever member submitted the final approval. Measured over every order on
+// chain: 1,560 of 1,560 resolve, agreeing with the signer wherever one exists
+// except those two cases.
+const OTC_RESERVE_EVENTS_SQL = `'Tokens.Reserved','Balances.Reserved'`
+// Balances.Reserved is HDX and carries no currencyId of its own.
+const OTC_RESERVE_ASSET_SQL = `if(event_name = 'Balances.Reserved', 0, toUInt32(JSONExtractInt(args_json,'currencyId')))`
+
+// Batched orderId → Placed-event legs and maker, shared by Placed, Cancelled
+// (Pull) and Filled/PartiallyFilled (Fill) row construction — none of them
+// carries asset identity or the order's owner itself, only the order's original
+// Placed event and the reserve beside it do. Missing ids (e.g. a Fill whose
+// Placed row predates the indexed window) are simply absent from the returned
+// map; callers render the row without legs.
+// An order's legs and its owner are fixed the moment it is placed, so a
+// resolved id is memoized below the ingested head exactly like voteCallRowsForTuples'
+// tuples. That matters because the reserve join reads raw_events across every
+// placing block — 58ms for one asset page's worth of orders against ~1ms for the
+// legs alone — and a deep filtered page re-asks for the same ids on every page
+// it walks. Only ids that RESOLVED are kept: an id with no Placed row may simply
+// not be indexed yet.
+const OTC_PLACED_MEMO_MAX = 20_000
+const OTC_PLACED_FINALITY_MARGIN_BLOCKS = 600
+const otcPlacedMemo = new Map<string, OtcPlacedLeg>()
+
 async function getOtcPlacedLegsByOrderId(orderIds: Array<string | number>): Promise<Map<string, OtcPlacedLeg>> {
-  const list = sqlUIntList(orderIds)
   const out = new Map<string, OtcPlacedLeg>()
+  const misses: Array<string | number> = []
+  for (const id of new Set(orderIds.map(String))) {
+    const hit = otcPlacedMemo.get(id)
+    if (hit) out.set(id, hit)
+    else misses.push(id)
+  }
+  const list = sqlUIntList(misses)
   if (!list) return out
+  // The reserve side is read from raw_events bounded to the placing BLOCKS —
+  // that table is ordered by block height, so this is a primary-key read of a
+  // handful of blocks. (The account-scoped direction below inverts it onto
+  // account_activity_v3 instead, for the same reason in reverse.)
   const res = await client.query({
-    query: `SELECT args_json FROM ${otcActivityTable()} WHERE event_name = 'OTC.Placed' AND JSONExtractUInt(args_json,'orderId') IN (${list})`,
+    query: `WITH placed AS (
+              SELECT toUInt32(JSONExtractUInt(args_json,'orderId')) AS order_id, block_height, event_index,
+                     toUInt32(JSONExtractInt(args_json,'assetIn')) AS asset_in,
+                     toUInt32(JSONExtractInt(args_json,'assetOut')) AS asset_out,
+                     JSONExtractString(args_json,'amountIn') AS amount_in,
+                     JSONExtractString(args_json,'amountOut') AS amount_out,
+                     JSONExtractBool(args_json,'partiallyFillable') AS partially_fillable
+              FROM ${otcActivityTable()}
+              WHERE event_name = 'OTC.Placed' AND JSONExtractUInt(args_json,'orderId') IN (${list})
+            )
+            SELECT p.order_id AS order_id, any(p.block_height) AS placed_block,
+                   any(p.asset_in) AS asset_in, any(p.asset_out) AS asset_out,
+                   any(p.amount_in) AS amount_in, any(p.amount_out) AS amount_out,
+                   any(p.partially_fillable) AS partially_fillable,
+                   argMax(r.who, r.event_index) AS maker
+            FROM placed AS p
+            LEFT JOIN (
+              SELECT block_height, event_index, ${OTC_RESERVE_ASSET_SQL} AS asset_id,
+                     JSONExtractString(args_json,'who') AS who, JSONExtractString(args_json,'amount') AS amount
+              FROM price_data.raw_events
+              WHERE event_name IN (${OTC_RESERVE_EVENTS_SQL}) AND block_height IN (SELECT block_height FROM placed)
+            ) AS r
+              ON r.block_height = p.block_height AND r.event_index < p.event_index
+             AND r.asset_id = p.asset_out AND r.amount = p.amount_out
+            GROUP BY p.order_id`,
     format: 'JSONEachRow',
   })
-  for (const r of await res.json<{ args_json: string }>()) {
-    const args = (safeJson(r.args_json) ?? {}) as Record<string, unknown>
-    const orderId = argStr(args, 'orderId')
-    if (!orderId) continue
-    out.set(orderId, {
-      assetIn: argInt(args, 'assetIn'), assetOut: argInt(args, 'assetOut'),
-      amountIn: argStr(args, 'amountIn'), amountOut: argStr(args, 'amountOut'),
-      partiallyFillable: args.partiallyFillable === true,
-    })
+  type Row = { order_id: number; placed_block: number; asset_in: number; asset_out: number; amount_in: string; amount_out: string; partially_fillable: number | boolean; maker: string }
+  const rows = await res.json<Row>()
+  const memoFloor = rows.length ? (await indexedRawHead()) - OTC_PLACED_FINALITY_MARGIN_BLOCKS : 0
+  for (const r of rows) {
+    const leg: OtcPlacedLeg = {
+      assetIn: r.asset_in, assetOut: r.asset_out,
+      amountIn: r.amount_in, amountOut: r.amount_out,
+      partiallyFillable: r.partially_fillable === true || r.partially_fillable === 1,
+      maker: r.maker && ACCOUNT_RE.test(r.maker) ? r.maker : null,
+    }
+    out.set(String(r.order_id), leg)
+    if (r.placed_block > memoFloor) continue
+    if (otcPlacedMemo.size >= OTC_PLACED_MEMO_MAX) {
+      let drop = OTC_PLACED_MEMO_MAX / 10
+      for (const old of otcPlacedMemo.keys()) { otcPlacedMemo.delete(old); if (--drop <= 0) break }
+    }
+    otcPlacedMemo.set(String(r.order_id), leg)
   }
   return out
+}
+
+// The orders an account MAKES, found from the account's own side of the same
+// reserve. account_activity_v3 is ordered by account, so this is an
+// account-first read: the maker's reserve rows come back by primary key and the
+// tiny OTC model is matched against them, rather than scanning every placement
+// on chain to ask who owns it.
+//
+// This is what puts a fill on the maker's feed at all. A fill names only the
+// taker, and its settlement legs are suppressed as plumbing on BOTH sides
+// (otcSettlementExtrinsics), so without this the maker's page showed nothing
+// whatsoever for an order of theirs being filled.
+async function otcOrderIdsForAccounts(accounts: string[]): Promise<number[]> {
+  const list = sqlAccountList(accounts)
+  if (list === "''") return []
+  const res = await client.query({
+    query: `SELECT DISTINCT toUInt32(JSONExtractUInt(p.args_json,'orderId')) AS order_id
+            FROM ${otcActivityTable('p')}
+            INNER JOIN (
+              SELECT block_height, event_index, asset_id, amount
+              FROM price_data.account_activity_v3
+              WHERE account IN (${list}) AND event_name IN (${OTC_RESERVE_EVENTS_SQL})
+            ) AS r ON r.block_height = p.block_height
+            WHERE p.event_name = 'OTC.Placed' AND r.event_index < p.event_index
+              AND r.asset_id = toUInt32(JSONExtractInt(p.args_json,'assetOut'))
+              AND toString(r.amount) = JSONExtractString(p.args_json,'amountOut')`,
+    format: 'JSONEachRow',
+  })
+  return (await res.json<{ order_id: number }>()).map(r => r.order_id)
 }
 
 // Per-event → ActivityRow construction shared by every OTC surface (main feed,
@@ -11268,7 +11369,7 @@ async function getOtcPlacedLegsByOrderId(orderIds: Array<string | number>): Prom
 // stakingRowFromEvent's factoring). `signerFallback` supplies `who` for
 // Place/Cancelled (no `who` arg on those events, and no signer for the rare
 // hook-context rows); Fill/PartiallyFilled read `who` from args instead.
-function otcRowFromEvent(
+export function otcRowFromEvent(
   e: { block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; args_json: string },
   prices: Map<number, PriceInfo>,
   placedById: Map<string, OtcPlacedLeg>,
@@ -11281,7 +11382,14 @@ function otcRowFromEvent(
     to: null, asset: null, amount: null, otcOrderId: orderId,
     linkBlock: e.block_height, linkIndex: e.extrinsic_index,
   }
-  const signerWho = opts.signerFallback && ACCOUNT_RE.test(opts.signerFallback) ? accountRef(opts.signerFallback) : null
+  const signerWho = opts.signerFallback && ACCOUNT_RE.test(opts.signerFallback) ? opts.signerFallback : null
+  // The order's owner outranks the signer as the actor on a Place/Pull row: it
+  // is the account whose funds the order holds, it exists for a placement no
+  // extrinsic signed, and for a multisig placement the signer is a member
+  // rather than the account the order belongs to.
+  const orderMaker = placedById.get(String(orderId))?.maker ?? null
+  const makerOrSigner = orderMaker ?? signerWho
+  const makerWho = makerOrSigner ? accountRef(makerOrSigner) : null
 
   if (e.event_name === 'OTC.Placed') {
     // Actor pays (locks) the order's assetOut and receives its assetIn —
@@ -11292,7 +11400,7 @@ function otcRowFromEvent(
     const amountIn = argStr(args, 'amountOut')
     const amountOut = argStr(args, 'amountIn')
     return {
-      ...base, who: signerWho, assetIn: aIn, assetOut: aOut, amountIn, amountOut,
+      ...base, who: makerWho, assetIn: aIn, assetOut: aOut, amountIn, amountOut,
       valueUsd: usdValue(prices, aOut.assetId, amountOut, aOut.decimals) ?? usdValue(prices, aIn.assetId, amountIn, aIn.decimals),
       otcAction: 'Place', otcPartiallyFillable: args.partiallyFillable === true,
     }
@@ -11306,7 +11414,7 @@ function otcRowFromEvent(
     const amountIn = placed ? placed.amountOut : null
     const amountOut = placed ? placed.amountIn : null
     return {
-      ...base, who: signerWho, assetIn: aIn, assetOut: aOut, amountIn, amountOut,
+      ...base, who: makerWho, assetIn: aIn, assetOut: aOut, amountIn, amountOut,
       valueUsd: aOut && amountOut != null
         ? (usdValue(prices, aOut.assetId, amountOut, aOut.decimals) ?? (aIn && amountIn != null ? usdValue(prices, aIn.assetId, amountIn, aIn.decimals) : null))
         : null,
@@ -11317,6 +11425,10 @@ function otcRowFromEvent(
   // OTC.Filled / OTC.PartiallyFilled — asset identity comes from the order
   // (assetIn/assetOut have no field on these events); amounts are the taker's
   // own amountIn/amountOut, straight from the event (not flipped).
+  // A fill settles between two accounts, so it names both: `who` is the taker
+  // who called it, `to` the maker whose order it consumed — the same
+  // actor→counterparty shape a transfer row uses, and what lets the maker's own
+  // feed carry the fill at all.
   const placed = placedById.get(String(orderId))
   const who = argStr(args, 'who')
   const aIn = placed ? asset(placed.assetIn) : null
@@ -11324,7 +11436,8 @@ function otcRowFromEvent(
   const amountIn = argStr(args, 'amountIn')
   const amountOut = argStr(args, 'amountOut')
   return {
-    ...base, who: who && ACCOUNT_RE.test(who) ? accountRef(who) : null, assetIn: aIn, assetOut: aOut, amountIn, amountOut,
+    ...base, to: orderMaker ? accountRef(orderMaker) : null,
+    who: who && ACCOUNT_RE.test(who) ? accountRef(who) : null, assetIn: aIn, assetOut: aOut, amountIn, amountOut,
     valueUsd: aOut ? (usdValue(prices, aOut.assetId, amountOut, aOut.decimals) ?? (aIn ? usdValue(prices, aIn.assetId, amountIn, aIn.decimals) : null)) : null,
     otcAction: 'Fill', otcPartial: e.event_name === 'OTC.PartiallyFilled', otcFee: argStr(args, 'fee'),
   }
@@ -11343,23 +11456,34 @@ async function getRecentOtc(limit: number, from?: string, to?: string, offset = 
     const want = offset + limit
     const resolvedAction = resolveOtcAction(action)
     const names = (resolvedAction && OTC_ACTION_EVENTS[resolvedAction] ? OTC_ACTION_EVENTS[resolvedAction] : OTC_EVENT_NAMES).map(n => `'${n}'`).join(',')
+    // Every order this account owns, resolved once for the whole feed rather
+    // than per page: an account makes a handful of orders over its life, and
+    // the set is what the third reference arm below is built from.
+    const makerOrderIds = accountSet ? await otcOrderIdsForAccounts(accounts!) : []
     const fetchPage = async (bound: string, pageLimit: number, pageOffset: number): Promise<ActivityRow[]> => {
       // An account OTC feed used to start at every OTC event, then resolve
       // signers and discard almost all rows in JS. Filled events expose `who`
       // and are already in account_activity_v3; Placed/Cancelled are owned by the
-      // signing extrinsic. Combine those two account-first reference sets before
+      // signing extrinsic. Combine those account-first reference sets before
       // reading raw event payloads, preserving the exact later row builder.
       // The OTC-event side is bounded exactly like the page it feeds: the read
       // below takes the newest `pageOffset + pageLimit` OTC rows, so an event
       // older than the account's (pageOffset + pageLimit)-th newest OTC
       // reference can never appear on it. The signer side stays unbounded.
+      //
+      // The third arm is the account's own ORDERS. Neither of the first two
+      // reaches a maker: a fill names only the taker, and an order placed by
+      // governance or by a multisig was signed by nobody or by a member. It is
+      // an id list rather than a join because the account's order set is small
+      // and already in hand.
+      const makerRef = makerOrderIds.length ? ` OR toUInt32(JSONExtractUInt(e.args_json,'orderId')) IN (${sqlUIntList(makerOrderIds)})` : ''
       const accountRefs = accountSet
         ? `AND ((e.block_height, e.event_index) IN (
               ${accountActivityRefsQuery(accounts!, `event_name IN (${names})`, bound, pageLimit, pageOffset)}
             ) OR (e.block_height, e.extrinsic_index) IN (
               SELECT block_height, extrinsic_index FROM price_data.raw_extrinsics
               WHERE signer IN (${sqlAccountList(accounts!)}) OR effective_signer IN (${sqlAccountList(accounts!)})
-            ))`
+            )${makerRef})`
         : ''
       const res = await client.query({
         query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index, e.extrinsic_index, e.event_name, e.args_json
@@ -11375,8 +11499,9 @@ async function getRecentOtc(limit: number, from?: string, to?: string, offset = 
       })
       const rawOtc = await res.json<RawOtcActivityEvent>()
       if (!rawOtc.length) return []
-      const lookupIds = rawOtc.filter(r => r.event_name !== 'OTC.Placed')
-        .map(r => argInt((safeJson(r.args_json) ?? {}) as Record<string, unknown>, 'orderId'))
+      // Placed rows are looked up too: they carry their own legs, but not the
+      // maker the same query resolves.
+      const lookupIds = rawOtc.map(r => argInt((safeJson(r.args_json) ?? {}) as Record<string, unknown>, 'orderId'))
       const [placedById, signers] = await Promise.all([
         getOtcPlacedLegsByOrderId(lookupIds),
         actorsFor(rawOtc.filter(r => r.event_name === 'OTC.Placed' || r.event_name === 'OTC.Cancelled').map(r => [r.block_height, r.extrinsic_index] as [number, number | null])),
@@ -11393,8 +11518,14 @@ async function getRecentOtc(limit: number, from?: string, to?: string, offset = 
     if (postFilter) {
       // Token/min need the order's Placed legs (joined after fetch) — walk full
       // history in pages until enough filtered rows exist.
+      // Either END of the row belongs to the account: a fill's `who` is the
+      // taker and its `to` the maker, and the maker's feed is the one this row
+      // was missing from.
+      const involves = (r: ActivityRow): boolean => accountSet == null
+        || (r.who != null && accountSet.has(r.who.accountId.toLowerCase()))
+        || (r.to != null && accountSet.has(r.to.accountId.toLowerCase()))
       const deep = await fetchFilteredDeep(tw, want, (bound, pageLimit) => fetchPage(bound, pageLimit, 0),
-        r => activityRowMatchesFilters(r, filters) && (accountSet == null || (r.who != null && accountSet.has(r.who.accountId.toLowerCase()))),
+        r => activityRowMatchesFilters(r, filters) && involves(r),
         r => r.blockHeight, r => r.eventIndex ?? -1, r => `${r.blockHeight}:${r.eventIndex}`)
       return deep.slice(offset, offset + limit)
     }
@@ -12113,9 +12244,23 @@ function activityExtrinsicSet(rows: ActivityRow[]): Set<string> {
 // This deliberately works on ActivityRow rather than event names so every feed
 // (global/account/tag/asset/block/detail) applies exactly the same rule after
 // its source-specific rows have been constructed.
+// Whether a hook-context semantic row — one with no extrinsic to be owned by —
 // also owns the transfers that share its block and one of its accounts.
 //
+// An OTC placement or pull does not: what it moves is a RESERVE, and a reserve
+// never reaches the transfer feed, so claiming the block can only swallow a
+// transfer that happens to sit beside it. (A fill DOES settle in transfers, but
+// a fill always carries an extrinsic and is owned by that instead.) These rows
+// carried no account at all until the maker resolved, which is what used to
+// keep the treasury's funding leg visible next to a governance-dispatched
+// placement in the same block.
 //
+// Exported because planExactActivity mirrors this same split when it counts a
+// transfer feed: two copies of the rule is how a total and its page drift apart.
+export function hookActivityOwnsBlockTransfers(row: ActivityRow): boolean {
+  return !(row.type === 'otc' && row.otcAction !== 'Fill')
+}
+
 export function suppressSubordinateActivityRows<T extends ActivityRow>(rows: T[]): T[] {
   const semanticByExtrinsic = new Set<string>()
   const semanticHookAccounts = new Map<number, Set<string>>()
@@ -12133,6 +12278,7 @@ export function suppressSubordinateActivityRows<T extends ActivityRow>(rows: T[]
       semanticByExtrinsic.add(`${row.blockHeight}:${row.extrinsicIndex}`)
       continue
     }
+    if (!hookActivityOwnsBlockTransfers(row)) continue
     const accounts = [row.who?.accountId, row.to?.accountId].filter((a): a is string => !!a).map(a => a.toLowerCase())
     if (!accounts.length) continue
     const blockAccounts = semanticHookAccounts.get(row.blockHeight) ?? new Set<string>()
@@ -14555,8 +14701,7 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
     // extrinsic_index, so every fill is covered by this per-extrinsic path.
     const otcEvents = events.filter(e => OTC_EVENT_NAMES.includes(e.event_name))
     if (otcEvents.length) {
-      const lookupIds = otcEvents.filter(e => e.event_name !== 'OTC.Placed')
-        .map(e => argInt((safeJson(e.args_json) ?? {}) as Record<string, unknown>, 'orderId'))
+      const lookupIds = otcEvents.map(e => argInt((safeJson(e.args_json) ?? {}) as Record<string, unknown>, 'orderId'))
       const placedById = await getOtcPlacedLegsByOrderId(lookupIds)
       for (const e of otcEvents) {
         const row = otcRowFromEvent(e, prices, placedById, { signerFallback: signer })
@@ -14945,11 +15090,12 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
   }
 
   // Extrinsic-less OTC place/pull — same construction as getRecentOtc's
-  // hook-context handling (who=null; no signer to resolve).
+  // hook-context handling. There is no signer to resolve here, which is exactly
+  // why the actor comes from the order's own reserve: these rows used to render
+  // with no account at all.
   const otcHookEvents = await otcRes.json<RawOtcActivityEvent>()
   if (otcHookEvents.length) {
-    const lookupIds = otcHookEvents.filter(e => e.event_name !== 'OTC.Placed')
-      .map(e => argInt((safeJson(e.args_json) ?? {}) as Record<string, unknown>, 'orderId'))
+    const lookupIds = otcHookEvents.map(e => argInt((safeJson(e.args_json) ?? {}) as Record<string, unknown>, 'orderId'))
     const placedById = await getOtcPlacedLegsByOrderId(lookupIds)
     for (const e of otcHookEvents) {
       const row = otcRowFromEvent(e, prices, placedById, {})
@@ -17352,7 +17498,7 @@ async function planExactActivity(
     // which is exactly the split suppressSubordinateActivityRows makes.
     const signed = new Set(all.filter(row => row.extrinsicIndex != null)
       .map(row => `${row.blockHeight}:${row.extrinsicIndex}`))
-    const owners = new Set(all.filter(row => row.extrinsicIndex == null)
+    const owners = new Set(all.filter(row => row.extrinsicIndex == null && hookActivityOwnsBlockTransfers(row))
       .flatMap(row => [row.who?.accountId, row.to?.accountId]
         .filter((id): id is string => !!id)
         .map(id => `${row.blockHeight}:${id.toLowerCase()}`)))
