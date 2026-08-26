@@ -1105,6 +1105,21 @@ export interface HdxStructure {
   effectiveHolders: number[]
   hodl: { under3m: number[]; m3to12: number[]; y1to2: number[]; over2y: number[] }
   backfilledAllocationHdx: number
+  // Monthly full-era trend series (null before a series starts). See api
+  // hdxService.HdxStructure for semantics.
+  trends: {
+    months: string[]
+    stakedClassic: (number | null)[]
+    stakedGiga: (number | null)[]
+    liquidFloat: (number | null)[]
+    realizedPrice: (number | null)[]
+    marketPrice: (number | null)[]
+    top100Share: (number | null)[]
+    krakenHdx: (number | null)[]
+    buybackHdx: (number | null)[]
+    traders: (number | null)[]
+    gov: { quarters: string[]; capital: number[]; voters: number[] }
+  }
 }
 
 export interface HdxDashboard {
@@ -1159,6 +1174,22 @@ export interface HollarPool {
   partners: { asset: AssetRef; amount: number; usd: number | null }[]
   hollarSharePct: number | null
 }
+// Full-era HOLLAR trend series (see api hollarService.HollarTrends).
+export interface HollarTrends {
+  weeks: string[]
+  composition: { stableswap: number[]; omnipool: number[]; protocol: number[]; bridged: number[]; wallets: number[] }
+  holders: (number | null)[]
+  peg: { close: (number | null)[]; low: (number | null)[]; high: (number | null)[] }
+  debt: (number | null)[]
+  borrowers: (number | null)[]
+  revenueCumUsd: (number | null)[]
+  depth: { stableswap: (number | null)[]; omnipool: (number | null)[] }
+  months: string[]
+  stableSharePct: (number | null)[]
+  pegStats: { uptime50Pct: number; uptime25Pct: number; maxAbsDevBps: number } | null
+  rates: { label: string; pct: number; prevPct: number | null; since: string }[]
+}
+
 export interface HollarDashboard {
   price: number | null
   change24h: number | null
@@ -1173,6 +1204,7 @@ export interface HollarDashboard {
     lastArb: { ts: string; direction: 'in' | 'out'; asset: AssetRef; hollarAmount: number } | null
   }
   pools: HollarPool[]
+  trends: HollarTrends
 }
 
 export interface TagDetail {

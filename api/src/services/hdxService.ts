@@ -357,6 +357,25 @@ export interface HdxStructure {
   // HDX of later allocation-realization mints counted into the treasury /
   // protocol bands from the series start (0 when none happened yet).
   backfilledAllocationHdx: number
+  // Monthly full-era trend series (grid = last day of each month since the
+  // balance-observation era began; null where a series hasn't started yet):
+  // staking sinks and the liquid float they leave, the market's aggregate
+  // cost basis vs price, whale share, Kraken custody, the treasury's
+  // cumulative buyback, and participation (traders monthly, governance
+  // capital quarterly on its own grid).
+  trends: {
+    months: string[]
+    stakedClassic: (number | null)[]    // HDX under the classic staking pallet (cumulative)
+    stakedGiga: (number | null)[]       // HDX under GIGAHDX (cumulative)
+    liquidFloat: (number | null)[]      // user-held supply minus staked (both stay in user balances — staking locks, it doesn't transfer)
+    realizedPrice: (number | null)[]    // aggregate cost basis of user-held HDX, USD
+    marketPrice: (number | null)[]      // monthly close, USD
+    top100Share: (number | null)[]      // top-100 user wallets' share of user-held supply, %
+    krakenHdx: (number | null)[]        // tagged Kraken custody balance
+    buybackHdx: (number | null)[]       // cumulative HDX the treasury bought via its DCA buybacks
+    traders: (number | null)[]          // unique non-module accounts trading HDX that month
+    gov: { quarters: string[]; capital: number[]; voters: number[] } // per-quarter max-vote capital + unique voters
+  }
 }
 
 export interface HdxDashboard {
@@ -772,6 +791,21 @@ export function resolveRotationAnchors(rows: HdxRotationLinkRow[]): { accounts: 
   return { accounts, anchors }
 }
 
+// Align month-keyed rows onto the trend grid: absent months are null, so a
+// chart line starts where its data does instead of at a fabricated zero.
+export function alignMonthly(months: string[], rows: { m: string; v: number }[]): (number | null)[] {
+  const byM = new Map(rows.map(r => [r.m, r.v]))
+  return months.map(m => byM.get(m) ?? null)
+}
+
+// Forward-fill a CUMULATIVE series' gaps: a month with no activity emits no
+// row, but the running total still stands. Leading nulls stay null (the
+// series hasn't started).
+export function carryForward(values: (number | null)[]): (number | null)[] {
+  let prev: number | null = null
+  return values.map(v => (v != null ? (prev = v) : prev))
+}
+
 export interface HdxAllocationMintRow { week: string; cls: string; hdx: number }
 
 // Allocation-realization mints (single Balances.Deposit of ≥ 10M HDX — organic
@@ -806,7 +840,7 @@ export function backfillAllocationMints(
 // account_balance_weekly's balance_state argMax picks each week's LAST
 // observation, so a within-week round trip collapses to its closing state.
 async function loadStructure(): Promise<HdxStructure> {
-  return cached('explorer:hdx-structure:model', 3_600_000, async () => {
+  return cached('explorer:hdx-structure:model:2', 3_600_000, async () => {
     // USER accounts only (no modl, no pool/Kraken custody), balances as sorted
     // per-account (week, balance) arrays — the base for links and Lorenz.
     // Consumers must declare `special_accts` in their WITH clause.
@@ -977,7 +1011,166 @@ async function loadStructure(): Promise<HdxStructure> {
         GROUP BY week, cls ORDER BY week`,
       format: 'JSONEachRow',
     })
-    const mintRes = await mintQuery
+    // ── Monthly trend queries (all validated against live data; each < 1s) ──
+    const monthsSql = `arrayMap(i -> toLastDayOfMonth(addMonths(toDate('2022-07-01'), i)),
+      range(toUInt64(dateDiff('month', toDate('2022-07-01'), today()) + 1)))`
+    // Staking sinks, cumulative per month. Classic staking uses its lock; the
+    // GigaHdx migration DOUBLE-EMITS GigaHdx.Staked next to MigratedFromLegacy,
+    // so only Staked is summed (counting both overcounts by ~1B) while the
+    // matching classic ForceUnstaked drains the classic side — the migration
+    // then reads as a handoff between the two bands, not new stake.
+    const stakedQuery = client.query({
+      query: `
+        SELECT toString(m) AS m,
+          round(sum(classic_delta) OVER (ORDER BY m) / 1e12, 0) AS classic,
+          round(sum(giga_delta) OVER (ORDER BY m) / 1e12, 0) AS giga
+        FROM (
+          SELECT toStartOfMonth(block_timestamp) AS m,
+            sumIf(toFloat64OrZero(JSONExtractString(args_json, 'stake')), event_name IN ('Staking.PositionCreated', 'Staking.StakeAdded'))
+            - sumIf(toFloat64OrZero(JSONExtractString(args_json, 'unlockedStake')), event_name = 'Staking.Unstaked')
+            - sumIf(toFloat64OrZero(JSONExtractString(args_json, 'stake')), event_name = 'Staking.ForceUnstaked') AS classic_delta,
+            sumIf(toFloat64OrZero(JSONExtractString(args_json, 'amount')), event_name IN ('GigaHdx.Staked', 'GigaHdx.UnstakeCancelled'))
+            - sumIf(toFloat64OrZero(JSONExtractString(args_json, 'payout')), event_name = 'GigaHdx.Unstaked') AS giga_delta
+          FROM price_data.staking_activity
+          GROUP BY m
+        ) ORDER BY m`,
+      format: 'JSONEachRow',
+    })
+    // Tagged Kraken custody balance as of each month end.
+    const krakenQuery = client.query({
+      query: `
+        SELECT toString(toStartOfMonth(cut)) AS m, round(sum(bal) / 1e12, 0) AS v
+        FROM (
+          SELECT cut, account_id, argMaxIf(balf, week_start, week_start <= cut) AS bal
+          FROM (
+            SELECT account_id, week_start, toFloat64(toUInt256OrZero(argMaxMerge(balance_state))) AS balf
+            FROM price_data.account_balance_weekly
+            WHERE asset_id = '0' AND week_start >= toDate({start:String})
+              AND account_id IN (SELECT account_id FROM price_data.account_tags FINAL
+                                 WHERE label_id IN (${KRAKEN_TAG_IDS.map(t => `'${t}'`).join(',')}) AND deleted = 0)
+            GROUP BY account_id, week_start
+          )
+          ARRAY JOIN ${monthsSql} AS cut
+          GROUP BY cut, account_id
+        ) GROUP BY m ORDER BY m`,
+      query_params: { start: HDX_BALANCE_SERIES_START },
+      format: 'JSONEachRow',
+    })
+    // Cumulative HDX the treasury bought through its own buy-side DCA
+    // schedules (revenue recycled into HDX — schedule 30104 et al.).
+    const buybackQuery = client.query({
+      query: `
+        SELECT toString(m) AS m, round(sum(hdx) OVER (ORDER BY m), 0) AS v
+        FROM (
+          SELECT toStartOfMonth(e.block_timestamp) AS m, sum(toFloat64OrZero(e.amount_out)) / 1e12 AS hdx
+          FROM price_data.dca_events e FINAL
+          INNER JOIN (
+            SELECT id FROM price_data.dca_schedules
+            WHERE who = '${TREASURY_ACCOUNT}' AND asset_out = 0 AND asset_in != 0
+          ) s ON e.id = s.id
+          WHERE e.event_name = 'DCA.TradeExecuted'
+          GROUP BY m
+        ) ORDER BY m`,
+      format: 'JSONEachRow',
+    })
+    // Monthly close, USD (ohlc_1d is keyed (asset_id, interval_start)).
+    const priceQuery = client.query({
+      query: `
+        SELECT toString(toStartOfMonth(interval_start)) AS m, toFloat64(argMaxMerge(close_state)) AS v
+        FROM price_data.ohlc_1d WHERE asset_id = 0 GROUP BY m ORDER BY m`,
+      format: 'JSONEachRow',
+    })
+    // Unique non-module accounts trading HDX per month.
+    const tradersQuery = client.query({
+      query: `
+        SELECT toString(toStartOfMonth(b.block_timestamp)) AS m, uniqExact(t.account) AS v
+        FROM price_data.trade_volume_by_account t
+        INNER JOIN price_data.blocks b ON t.block_height = b.block_height
+        WHERE t.asset_id = 0 AND NOT startsWith(t.account, '0x6d6f646c')
+        GROUP BY m ORDER BY m`,
+      format: 'JSONEachRow',
+    })
+    // Capital active in governance per quarter: per voter the LARGEST single
+    // vote (the lock that capital carries), summed — naive turnout re-counts
+    // the same capital on every referendum (3× supply). Spans Democracy and
+    // OpenGov via the (pallet, ref_index) key.
+    const govQuery = client.query({
+      query: `
+        SELECT toString(q) AS q, round(sum(max_cap) / 1e12, 0) AS capital, uniqExact(who) AS voters
+        FROM (
+          SELECT q, who, max(cap) AS max_cap FROM (
+            SELECT toStartOfQuarter(block_timestamp) AS q, who, (pallet, ref_index) AS ref,
+              argMax(if(vote_kind = 'Standard', toFloat64OrZero(balance),
+                toFloat64OrZero(aye) + toFloat64OrZero(nay) + toFloat64OrZero(abstain)),
+                (block_height, ifNull(extrinsic_index, 0))) AS cap
+            FROM price_data.governance_vote_calls WHERE success = 1 AND vote_kind != ''
+            GROUP BY q, who, ref
+          ) GROUP BY q, who
+        ) GROUP BY q ORDER BY q`,
+      format: 'JSONEachRow',
+    })
+    // Aggregate cost basis (realized price) of user-held HDX, plus user supply
+    // and the top-100 share, as of each month end. Account-level accounting:
+    // balance increases are bought at that week's close (weeks before the
+    // price era at the first observed close), decreases release cost
+    // proportionally. arrayFold carries (cost history, prev balance, cost).
+    const realizedQuery = client.query({
+      query: `
+        WITH
+        ${tagAccountsSql([...KRAKEN_TAG_IDS, ...POOL_TAG_IDS])} AS special_accts,
+        (SELECT mapFromArrays(groupArray(w), groupArray(toFloat64(px))) FROM (
+          SELECT toStartOfWeek(interval_start, 1) AS w, argMaxMerge(close_state) AS px
+          FROM price_data.ohlc_1d WHERE asset_id = 0 GROUP BY w
+        )) AS pmap,
+        -- assumeNotNull: a Nullable scalar here would poison the arrayFold
+        -- accumulator type (lambda returns Nullable, accumulator is not)
+        assumeNotNull((SELECT min(toStartOfWeek(interval_start, 1)) FROM price_data.ohlc_1d WHERE asset_id = 0)) AS price_era,
+        assumeNotNull((SELECT toFloat64(argMaxMerge(close_state)) FROM price_data.ohlc_1d WHERE asset_id = 0
+          AND toStartOfWeek(interval_start, 1) = (SELECT min(toStartOfWeek(interval_start, 1)) FROM price_data.ohlc_1d WHERE asset_id = 0))) AS seed_px
+        SELECT toString(toStartOfMonth(cut)) AS m,
+          round(sum(bal_asof) / 1e12, 0) AS user_supply,
+          round(sum(cost_asof) / sum(bal_asof / 1e12), 8) AS realized_price,
+          round(arraySum(arraySlice(arrayReverseSort(groupArray(bal_asof)), 1, 100)) / sum(bal_asof) * 100, 2) AS top100_share
+        FROM (
+          SELECT cut,
+            arrayLastIndex(x -> x <= cut, ws) AS idx,
+            if(idx = 0, 0., bsF[idx]) AS bal_asof,
+            if(idx = 0, 0., costs[idx]) AS cost_asof
+          FROM (
+            SELECT account_id, ws, bsF,
+              arrayFold((acc, t) -> tuple(
+                  arrayPushBack(acc.1,
+                    if(t.2 >= acc.2,
+                       acc.3 + ((t.2 - acc.2) / 1e12) * if(t.1 < price_era, seed_px, pmap[t.1]),
+                       acc.3 * if(acc.2 > 0., t.2 / acc.2, 0.))),
+                  t.2,
+                  if(t.2 >= acc.2,
+                     acc.3 + ((t.2 - acc.2) / 1e12) * if(t.1 < price_era, seed_px, pmap[t.1]),
+                     acc.3 * if(acc.2 > 0., t.2 / acc.2, 0.))
+                ), arrayZip(ws, bsF), tuple(emptyArrayFloat64(), 0., 0.)).1 AS costs
+            FROM (
+              SELECT account_id,
+                arraySort(groupArray(w)) AS ws,
+                arraySort((b, ww) -> ww, groupArray(balF), groupArray(w)) AS bsF
+              FROM (
+                SELECT account_id, week_start AS w,
+                  toFloat64(toUInt256OrZero(argMaxMerge(balance_state))) AS balF
+                FROM price_data.account_balance_weekly
+                WHERE asset_id = '0' AND NOT startsWith(account_id, '0x6d6f646c')
+                  AND NOT has(special_accts, account_id)
+                GROUP BY account_id, week_start
+              ) GROUP BY account_id
+            )
+          )
+          ARRAY JOIN ${monthsSql} AS cut
+        )
+        WHERE bal_asof > 0 OR cost_asof > 0
+        GROUP BY m HAVING sum(bal_asof) > 0 ORDER BY m`,
+      format: 'JSONEachRow',
+    })
+    const [mintRes, stakedRes, krakenRes, buybackRes, priceRes, tradersRes, govRes, realizedRes] = await Promise.all([
+      mintQuery, stakedQuery, krakenQuery, buybackQuery, priceQuery, tradersQuery, govQuery, realizedQuery,
+    ])
     const rows = (await structureRes.json<Record<string, unknown>>()).map(r => {
       const num = (k: string) => Number(r[k] ?? 0)
       return {
@@ -993,7 +1186,41 @@ async function loadStructure(): Promise<HdxStructure> {
       .map(r => ({ week: String(r.week), cls: String(r.cls), hdx: Number(r.hdx) }))
     const base = buildHdxStructure(rows)
     const backfilledAllocationHdx = backfillAllocationMints(base.ownership, base.weeks, mintRows)
-    return { ...base, backfilledAllocationHdx }
+
+    // Assemble the monthly trend grid. The grid spans the balance era to the
+    // current month; every series aligns by month key, cumulative series carry
+    // their running total across silent months.
+    const mv = async (res: { json<T>(): Promise<T[]> }) =>
+      (await res.json<{ m: string; v: number }>()).map(r => ({ m: String(r.m), v: Number(r.v) }))
+    const stakedRows = (await stakedRes.json<{ m: string; classic: number; giga: number }>())
+      .map(r => ({ m: String(r.m), classic: Number(r.classic), giga: Number(r.giga) }))
+    const realizedRows = (await realizedRes.json<{ m: string; user_supply: number; realized_price: number; top100_share: number }>())
+      .map(r => ({ m: String(r.m), user_supply: Number(r.user_supply), realized_price: Number(r.realized_price), top100_share: Number(r.top100_share) }))
+    const govRows = (await govRes.json<{ q: string; capital: number; voters: number }>())
+      .map(r => ({ q: String(r.q), capital: Number(r.capital), voters: Number(r.voters) }))
+    const [krakenRows, buybackRows, priceRows, tradersRows] = await Promise.all([mv(krakenRes), mv(buybackRes), mv(priceRes), mv(tradersRes)])
+    const months = realizedRows.map(r => r.m)
+    const stakedClassic = carryForward(alignMonthly(months, stakedRows.map(r => ({ m: r.m, v: r.classic }))))
+    const stakedGiga = carryForward(alignMonthly(months, stakedRows.map(r => ({ m: r.m, v: r.giga }))))
+    const userSupply = alignMonthly(months, realizedRows.map(r => ({ m: r.m, v: r.user_supply })))
+    return {
+      ...base,
+      backfilledAllocationHdx,
+      trends: {
+        months,
+        stakedClassic,
+        stakedGiga,
+        liquidFloat: months.map((_, i) =>
+          userSupply[i] != null ? userSupply[i]! - (stakedClassic[i] ?? 0) - (stakedGiga[i] ?? 0) : null),
+        realizedPrice: alignMonthly(months, realizedRows.map(r => ({ m: r.m, v: r.realized_price }))),
+        marketPrice: alignMonthly(months, priceRows),
+        top100Share: alignMonthly(months, realizedRows.map(r => ({ m: r.m, v: r.top100_share }))),
+        krakenHdx: alignMonthly(months, krakenRows),
+        buybackHdx: carryForward(alignMonthly(months, buybackRows)),
+        traders: alignMonthly(months, tradersRows),
+        gov: { quarters: govRows.map(r => r.q), capital: govRows.map(r => r.capital), voters: govRows.map(r => r.voters) },
+      },
+    }
   })
 }
 
