@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { correctVestingLocks, decodeCompactBig, gigaUnbondingBlocks, moverAccountFilterSql, nonNegativeUIntDifferenceSql } from '../src/services/hdxService.ts'
+import { backfillAllocationMints, buildHdxStructure, correctVestingLocks, decodeCompactBig, gigaUnbondingBlocks, moverAccountFilterSql, nonNegativeUIntDifferenceSql, resolveRotationAnchors, type HdxStructureWeekRow } from '../src/services/hdxService.ts'
 import { hexToU8a } from '@polkadot/util'
 
 describe('decodeCompactBig', () => {
@@ -104,5 +104,87 @@ describe('moverAccountFilterSql — module accounts in top movers', () => {
 
   it('falls back to the plain exclusion when no tagged module accounts exist', () => {
     expect(moverAccountFilterSql([])).toBe("NOT startsWith(account, '0x6d6f646c')")
+  })
+})
+
+// The structure payload's arithmetic: effective holders inverts the HHI, and
+// the "rest" tranche is the user total the top tranches leave behind (floored
+// at zero against float dust).
+describe('buildHdxStructure — weekly holder-structure payload', () => {
+  const row = (over: Partial<HdxStructureWeekRow> = {}): HdxStructureWeekRow => ({
+    week: '2022-07-04',
+    treasury: 100, protocol: 10, kraken: 20,
+    user_total: 1000,
+    top10: 400, top100: 300, top1000: 200,
+    hhi: 0.02,
+    age_0_3m: 100, age_3_12m: 200, age_1_2y: 300, age_2y: 400,
+    ...over,
+  })
+
+  it('derives the rest tranche from the user total and never lets float dust push it negative', () => {
+    const s = buildHdxStructure([
+      row(),
+      row({ week: '2022-07-11', user_total: 900 - 1e-9 }),
+    ])
+    expect(s.ownership.rest).toEqual([100, 0])
+  })
+
+  it('inverts HHI into effective holders and maps the age bands', () => {
+    const s = buildHdxStructure([row()])
+    expect(s.effectiveHolders).toEqual([50])
+    expect(s.weeks).toEqual(['2022-07-04'])
+    expect(s.hodl).toEqual({ under3m: [100], m3to12: [200], y1to2: [300], over2y: [400] })
+  })
+})
+
+// Allocation-realization mints are counted in their recipient class's band
+// from the series start (the allocation existed before it was on-chain);
+// mints to user-class wallets and pre-series mints are left untouched.
+describe('backfillAllocationMints — no supply cliff at realization', () => {
+  const weeks = ['2025-06-02', '2025-06-09', '2025-06-16', '2025-06-23']
+  const own = () => ({
+    treasury: [100, 100, 100, 2000], protocol: [10, 10, 10, 10], kraken: [0, 0, 0, 0],
+    top10: [0, 0, 0, 0], top11to100: [0, 0, 0, 0], top101to1000: [0, 0, 0, 0], rest: [0, 0, 0, 0],
+  })
+  it('adds each treasury/protocol mint to every week before its realization', () => {
+    const o = own()
+    const total = backfillAllocationMints(o, weeks, [
+      { week: '2025-06-23', cls: 'treasury', hdx: 1900 },
+      { week: '2025-06-16', cls: 'protocol', hdx: 50 },
+    ])
+    expect(total).toBe(1950)
+    expect(o.treasury).toEqual([2000, 2000, 2000, 2000]) // cliff gone
+    expect(o.protocol).toEqual([60, 60, 10, 10])
+  })
+  it('ignores user-class mints and mints at or before the series start', () => {
+    const o = own()
+    const total = backfillAllocationMints(o, weeks, [
+      { week: '2025-06-23', cls: 'user', hdx: 500 },
+      { week: '2025-06-02', cls: 'treasury', hdx: 500 }, // = weeks[0], already observed
+    ])
+    expect(total).toBe(0)
+    expect(o.treasury).toEqual([100, 100, 100, 2000])
+  })
+})
+
+// Rotation chains resolve to the ORIGINAL wallet's first-nonzero week, so a
+// serial rotator's current wallet carries the oldest age; cycles fall back to
+// the direct parent instead of recursing forever.
+describe('resolveRotationAnchors — serial rotations keep the original age', () => {
+  it('follows a → b → c to the root anchor', () => {
+    const r = resolveRotationAnchors([
+      { b: 'c', a: 'b', aFirstnz: '2024-01-01' },
+      { b: 'b', a: 'a', aFirstnz: '2022-05-02' },
+    ])
+    expect(Object.fromEntries(r.accounts.map((x, i) => [x, r.anchors[i]])))
+      .toEqual({ b: '2022-05-02', c: '2022-05-02' })
+  })
+  it('survives a defensive cycle by using the direct parent anchor', () => {
+    const r = resolveRotationAnchors([
+      { b: 'x', a: 'y', aFirstnz: '2023-01-02' },
+      { b: 'y', a: 'x', aFirstnz: '2023-02-06' },
+    ])
+    expect(r.accounts.sort()).toEqual(['x', 'y'])
+    expect(r.anchors.length).toBe(2)
   })
 })

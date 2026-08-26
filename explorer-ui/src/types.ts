@@ -1093,6 +1093,20 @@ export interface RevenueFlowResponse {
   blockSeconds: number
 }
 
+// Full-era weekly holder-structure series (see api hdxService.HdxStructure).
+// Treasury, protocol plumbing and Kraken custody are carved out of the user
+// class; tranches and HODL bands describe user accounts only.
+export interface HdxStructure {
+  weeks: string[]
+  ownership: {
+    treasury: number[]; protocol: number[]; kraken: number[]
+    top10: number[]; top11to100: number[]; top101to1000: number[]; rest: number[]
+  }
+  effectiveHolders: number[]
+  hodl: { under3m: number[]; m3to12: number[]; y1to2: number[]; over2y: number[] }
+  backfilledAllocationHdx: number
+}
+
 export interface HdxDashboard {
   price: number | null
   change24h: number | null
@@ -1111,6 +1125,7 @@ export interface HdxDashboard {
   }
   flows: { daily: HdxDailyFlow[]; dca: { buy: { orders: number; hdxPerDay: number }; sell: { orders: number; hdxPerDay: number } } }
   churn: { weekly: { weekStart: string; newHolders: number; exitedHolders: number }[] }
+  structure: HdxStructure
   topMovers: { accumulators: HdxMover[]; distributors: HdxMover[] }
   gigaMarket: GigaMarketReserveStat[] | null
   gigaLiquidations: GigaLiquidations | null
