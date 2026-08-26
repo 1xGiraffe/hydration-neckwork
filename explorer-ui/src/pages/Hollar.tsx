@@ -5,9 +5,9 @@ import { useNow } from '../hooks/useNow'
 import { Link, paths } from '../router'
 import { AssetAmount, Crumbs, F, AssetChip, Ago, AreaChart, ChartSkeleton, TableSkeleton, EmptyRow } from '../components/ui'
 import { useAssetColors } from '../utils/iconColor'
-import { ChartLegend, ShareBar, MirroredBarChart } from '../components/HdxCharts'
-import type { ShareSegment, MirrorBar } from '../components/HdxCharts'
-import type { AssetRef, HollarDashboard, HollarCollateral, HollarPool } from '../types'
+import { ChartLegend, ShareBar, MirroredBarChart, StackedAreaChart, MultiLineChart } from '../components/HdxCharts'
+import type { ShareSegment, MirrorBar, AreaSeries } from '../components/HdxCharts'
+import type { AssetRef, HollarDashboard, HollarTrends, HollarCollateral, HollarPool } from '../types'
 import { ChartTooltipRow as TipRow, DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
 import { monthDayLabel as mdLabel } from '../utils/dashboardDates'
 
@@ -268,16 +268,188 @@ function LiquiditySection({ d }: { d: HollarDashboard }) {
   )
 }
 
+
+// ── full-era trend sections (all series data-validated before charting) ─────
+const trendSub = (text: string) => (
+  <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · {text}</span>
+)
+const lastNum = (a: (number | null)[]): number | null => {
+  for (let i = a.length - 1; i >= 0; i--) if (a[i] != null) return a[i]
+  return null
+}
+
+// peg since launch: weekly close with the intraweek low/high band, in dollars —
+// MultiLineChart's dashed $1.00 reference line IS the peg.
+function PegHistorySection({ t }: { t: HollarTrends }) {
+  const lines: AreaSeries[] = [
+    { key: 'high', label: 'Weekly high', color: 'var(--neutral-cool)', values: t.peg.high },
+    { key: 'close', label: 'Close', color: 'var(--accent)', values: t.peg.close },
+    { key: 'low', label: 'Weekly low', color: 'var(--neutral-cool)', values: t.peg.low },
+  ]
+  const st = t.pegStats
+  return (
+    <>
+      <SecTitle title="Peg since launch" subtitle="weekly close and intraweek range" />
+      <div className="pf-card">
+        <ChartLegend items={[{ label: 'Close', color: 'var(--accent)' }, { label: 'Weekly range', color: 'var(--neutral-cool)' }]} />
+        <MultiLineChart buckets={t.weeks} series={lines} h={190} yFmt={v => '$' + v.toFixed(4)} />
+        {st && (
+          <div className="hdx-cards" style={{ marginTop: 14 }}>
+            <div className="hdx-card">
+              <div className="hk">Within ±50 bps</div>
+              <div className="hv">{st.uptime50Pct.toFixed(1)}%</div>
+              <div className="hs">of daily closes, since launch</div>
+            </div>
+            <div className="hdx-card">
+              <div className="hk">Within ±25 bps</div>
+              <div className="hv">{st.uptime25Pct.toFixed(1)}%</div>
+              <div className="hs">of daily closes, since launch</div>
+            </div>
+            <div className="hdx-card">
+              <div className="hk">Worst ever</div>
+              <div className="hv">{Math.round(st.maxAbsDevBps)} bps</div>
+              <div className="hs">deepest intraday wick — HOLLAR has never been a full cent off the peg</div>
+            </div>
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
+// supply composition + holders
+const COMPOSITION_BANDS: { key: keyof HollarTrends['composition']; label: string; color: string }[] = [
+  { key: 'stableswap', label: 'Stablepools', color: 'var(--sky)' },
+  { key: 'omnipool', label: 'Omnipool', color: 'var(--sky-deep)' },
+  { key: 'protocol', label: 'Protocol pots', color: 'var(--neutral)' },
+  { key: 'bridged', label: 'Bridged out', color: '#9165D6' },
+  { key: 'wallets', label: 'Wallets', color: '#2FA89D' },
+]
+function SupplyHoldersSection({ t }: { t: HollarTrends }) {
+  const bands: AreaSeries[] = COMPOSITION_BANDS.map(b => ({
+    key: b.key, label: b.label, color: b.color,
+    values: t.composition[b.key].map(v => (v > 0 ? v : null)),
+  }))
+  const holdersSeries: AreaSeries[] = [
+    { key: 'holders', label: 'Holders', color: 'var(--cat-liquidity)', values: t.holders.map(v => (v && v > 0 ? v : null)) },
+  ]
+  const supplyNow = COMPOSITION_BANDS.reduce((s2, b) => s2 + (lastNum(t.composition[b.key]) ?? 0), 0)
+  const holdersNow = lastNum(t.holders) ?? 0
+  const holdersFirst = t.holders.find(v => v != null && v > 0) ?? 0
+  return (
+    <>
+      <SecTitle title="Supply & holders" subtitle="where minted HOLLAR sits, and who holds it" />
+      <div className="pf-card">
+        <div className="sec-title" style={{ marginBottom: 6 }}>Supply composition{trendSub('the stack top is total supply')}</div>
+        <ChartLegend items={COMPOSITION_BANDS.map(b => ({ label: b.label, color: b.color }))} />
+        <StackedAreaChart buckets={t.weeks} series={bands} h={200} />
+        <div className="sec-title" style={{ margin: '18px 0 6px' }}>Holders{trendSub(`accounts holding more than 0.01 HOLLAR — ${F.int(holdersFirst)} at launch, ${F.int(holdersNow)} now`)}</div>
+        <StackedAreaChart buckets={t.weeks} series={holdersSeries} h={150} showShare={false} yFmt={v => F.int(Math.round(v))} />
+        <div className="hdx-note">Total supply is {fmtAmt(supplyNow)} HOLLAR. "Bridged out" sits on sibling-chain sovereign accounts;
+          "Protocol pots" are pallet accounts (bonds, incentives). Balances come from the ERC-20 ledger — HOLLAR's substrate side holds under 0.3%.</div>
+      </div>
+    </>
+  )
+}
+
+// borrowing: debt outstanding, borrowers, cumulative interest revenue
+function BorrowingSection({ t }: { t: HollarTrends }) {
+  // The borrowed series wears HOLLAR's own brand color — the same icon-sampled
+  // hue its pool segments use (useAssetColors), not the generic borrow gold.
+  const colorFor = useAssetColors([HOLLAR_ASSET])
+  const hollarColor = colorFor(HOLLAR_ASSET)
+  const debtSeries: AreaSeries[] = [
+    { key: 'debt', label: 'HOLLAR borrowed', color: hollarColor, values: t.debt.map(v => (v && v > 0 ? v : null)) },
+  ]
+  const borrowersSeries: AreaSeries[] = [
+    { key: 'borrowers', label: 'Borrowers', color: '#3f88dd', values: t.borrowers.map(v => (v && v > 0 ? v : null)) },
+  ]
+  const revenueSeries: AreaSeries[] = [
+    { key: 'rev', label: 'Cumulative interest', color: 'var(--green)', values: t.revenueCumUsd.map(v => (v && v > 0 ? v : null)) },
+  ]
+  const debtNow = lastNum(t.debt) ?? 0
+  const borrowersNow = lastNum(t.borrowers) ?? 0
+  const revNow = lastNum(t.revenueCumUsd) ?? 0
+  return (
+    <>
+      <SecTitle title="Borrowing" subtitle="HOLLAR is minted by borrowing it against collateral" />
+      <div className="pf-card">
+        <div className="sec-title" style={{ marginBottom: 6 }}>HOLLAR borrowed{trendSub('all markets — winter deleveraging, then regrowth to an all-time high')}</div>
+        <StackedAreaChart buckets={t.weeks} series={debtSeries} h={180} showShare={false} yFmt={v => fmtAmt(v)} />
+        <div className="hdx-cards" style={{ marginTop: 14 }}>
+          <div className="hdx-card">
+            <div className="hk"><i style={{ background: hollarColor }} />Borrowed now</div>
+            <div className="hv">{fmtAmt(debtNow)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HOLLAR</span></div>
+            <div className="hs">an all-time high</div>
+          </div>
+          <div className="hdx-card">
+            <div className="hk"><i style={{ background: '#3f88dd' }} />Borrowers</div>
+            <div className="hv">{F.int(borrowersNow)}</div>
+            <div className="hs">grew straight through the winter deleveraging</div>
+          </div>
+          <div className="hdx-card">
+            <div className="hk"><i style={{ background: 'var(--green)' }} />Interest earned</div>
+            <div className="hv">{F.usd(revNow)}</div>
+            <div className="hs">cumulative protocol revenue from HOLLAR borrows</div>
+          </div>
+          {t.rates.map(r => (
+            <div className="hdx-card" key={r.label}>
+              <div className="hk">{r.label} rate</div>
+              <div className="hv">{r.pct.toFixed(2)}%</div>
+              <div className="hs">{r.prevPct != null ? `${r.prevPct > r.pct ? 'cut' : 'raised'} from ${r.prevPct.toFixed(2)}% on ${r.since}` : `since ${r.since}`}</div>
+            </div>
+          ))}
+        </div>
+        <div className="sec-title" style={{ margin: '18px 0 6px' }}>Borrowers{trendSub('accounts with open HOLLAR debt')}</div>
+        <StackedAreaChart buckets={t.weeks} series={borrowersSeries} h={150} showShare={false} yFmt={v => F.int(Math.round(v))} />
+        <div className="sec-title" style={{ margin: '18px 0 6px' }}>Interest revenue{trendSub('cumulative USD booked from HOLLAR borrow interest')}</div>
+        <StackedAreaChart buckets={t.weeks} series={revenueSeries} h={150} showShare={false} yFmt={v => F.usd(v)} />
+        <div className="hdx-note">The March 2026 rate cut landed at the demand trough — borrowing has grown roughly eightfold since.</div>
+      </div>
+    </>
+  )
+}
+
+// market: stable-market share + pool depth history
+function MarketSection({ t }: { t: HollarTrends }) {
+  const shareLine: AreaSeries[] = [
+    { key: 'share', label: 'HOLLAR share', color: 'var(--accent)', values: t.stableSharePct },
+  ]
+  const depthBands: AreaSeries[] = [
+    { key: 'ss', label: 'Stablepools', color: 'var(--sky)', values: t.depth.stableswap.map(v => (v && v > 0 ? v : null)) },
+    { key: 'om', label: 'Omnipool', color: 'var(--sky-deep)', values: t.depth.omnipool.map(v => (v && v > 0 ? v : null)) },
+  ]
+  const shareNow = lastNum(t.stableSharePct)
+  return (
+    <>
+      <SecTitle title="Market" subtitle="HOLLAR's place among Hydration's stablecoins" />
+      <div className="pf-card">
+        <div className="sec-title" style={{ marginBottom: 6 }}>Share of stablecoin volume{trendSub(`now ${shareNow != null ? shareNow.toFixed(1) : '—'}% of stable-vs-stable trading`)}</div>
+        <MultiLineChart buckets={t.months} series={shareLine} h={170} yFmt={v => `${v.toFixed(1)}%`} floorZero />
+        <div className="sec-title" style={{ margin: '18px 0 6px' }}>HOLLAR in pools{trendSub('liquidity depth — recovering for two months')}</div>
+        <ChartLegend items={depthBands.map(b => ({ label: b.label, color: b.color }))} />
+        <StackedAreaChart buckets={t.weeks} series={depthBands} h={170} />
+        <div className="hdx-note">Share counts each routed trade once across all pools. Part of the rise is other stables' volume
+          shrinking — HOLLAR is winning share of a smaller local stable market.</div>
+      </div>
+    </>
+  )
+}
+
 // loading skeleton (per section)
 function HollarSkeleton() {
   return (
     <>
       <ChartSkeleton h={78} />
       <SecTitle title="Peg" subtitle="30 days" /><ChartSkeleton h={280} />
+      <SecTitle title="Peg since launch" subtitle="weekly close and intraweek range" /><ChartSkeleton h={330} />
+      <SecTitle title="Supply & holders" subtitle="where minted HOLLAR sits, and who holds it" /><ChartSkeleton h={430} />
       <SecTitle title="Stability Module" subtitle="HSM" />
       <div className="panel"><table className="tbl"><tbody><TableSkeleton cols={8} rows={4} /></tbody></table></div>
       <ChartSkeleton h={210} />
       <ChartSkeleton h={210} />
+      <SecTitle title="Borrowing" subtitle="HOLLAR is minted by borrowing it against collateral" /><ChartSkeleton h={600} />
+      <SecTitle title="Market" subtitle="HOLLAR's place among Hydration's stablecoins" /><ChartSkeleton h={420} />
       <SecTitle title="Liquidity" /><ChartSkeleton h={230} />
     </>
   )
@@ -299,7 +471,11 @@ export function Hollar() {
           <>
             <Ribbon d={data} />
             <PegSection d={data} />
+            <PegHistorySection t={data.trends} />
+            <SupplyHoldersSection t={data.trends} />
             <HsmSection d={data} now={now} />
+            <BorrowingSection t={data.trends} />
+            <MarketSection t={data.trends} />
             <LiquiditySection d={data} />
           </>
         )}

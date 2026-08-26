@@ -56,6 +56,23 @@ function mockData(): HollarDashboard {
         hollarSharePct: 49.8,
       },
     ],
+    trends: {
+      weeks: ['2025-09-22', '2025-09-29', '2025-10-06'],
+      composition: {
+        stableswap: [2.4e6, 2.9e6, 3.1e6], omnipool: [0, 0, 4e5], protocol: [1.5e5, 1.6e5, 1.7e5],
+        bridged: [0, 0, 1e6], wallets: [2e4, 3e4, 5e4],
+      },
+      holders: [57, 63, 70],
+      peg: { close: [0.9985, 0.999, 0.9992], low: [0.997, 0.9982, 0.9985], high: [1.0002, 1.0004, 1.0001] },
+      debt: [2.0e6, 2.4e6, 2.9e6],
+      borrowers: [118, 130, 141],
+      revenueCumUsd: [1_400, 3_200, 5_400],
+      depth: { stableswap: [2.4e6, 2.9e6, 3.1e6], omnipool: [null, null, 4e5] },
+      months: ['2025-09-01', '2025-10-01'],
+      stableSharePct: [5.1, 8.9],
+      pegStats: { uptime50Pct: 97.9, uptime25Pct: 81.4, maxAbsDevBps: 97.5 },
+      rates: [{ label: 'Core market', pct: 4.402, prevPct: 4.879, since: '2026-03-03' }],
+    },
   }
 }
 

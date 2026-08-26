@@ -3,6 +3,7 @@ import { cached } from './cache.ts'
 import { ensurePrices, getMoneyMarketReserves, type AssetRef, type PriceInfo } from './explorerService.ts'
 import { assetDescriptor } from './explorerAssets.ts'
 import { parsePoolAssetIds } from './stableswapSnapshot.ts'
+import { alignMonthly, carryForward } from './hdxService.ts'
 
 // HOLLAR (asset 222) dashboard — peg, HSM (HOLLAR Stability Module) state and
 // stableswap-pool liquidity. CH-only: no substrate RPC. HSM collateral params
@@ -166,6 +167,28 @@ export interface HollarPool {
   partners: { asset: AssetRef; amount: number; usd: number | null }[]
   hollarSharePct: number | null
 }
+// Full-era weekly/monthly trend series (HOLLAR launched 2025-09-22). All
+// balance-shaped series come from erc20_transfer_deltas — HOLLAR lives almost
+// entirely on its ERC-20 side (the substrate Tokens tables see < 0.3% of it),
+// and the zero address's running balance is minted supply. Debt is
+// reconstructed Aave-style: scaled Borrow/Repay/LiquidationCall amounts × the
+// variable borrow index. Nulls mark weeks before a series starts.
+export interface HollarTrends {
+  weeks: string[]
+  composition: { stableswap: number[]; omnipool: number[]; protocol: number[]; bridged: number[]; wallets: number[] }
+  holders: (number | null)[]            // accounts holding > 0.01 HOLLAR
+  peg: { close: (number | null)[]; low: (number | null)[]; high: (number | null)[] } // weekly USD price band
+  debt: (number | null)[]               // HOLLAR borrowed, all markets
+  borrowers: (number | null)[]          // accounts with > 0.5 HOLLAR open debt
+  revenueCumUsd: (number | null)[]      // cumulative hollar_borrow revenue
+  depth: { stableswap: (number | null)[]; omnipool: (number | null)[] } // HOLLAR in pools
+  months: string[]
+  stableSharePct: (number | null)[]     // HOLLAR share of stable-vs-stable trade volume
+  pegStats: { uptime50Pct: number; uptime25Pct: number; maxAbsDevBps: number } | null
+  // Borrow-rate step history per market, ordered by market launch (core first).
+  rates: { label: string; pct: number; prevPct: number | null; since: string }[]
+}
+
 export interface HollarDashboard {
   price: number | null
   change24h: number | null
@@ -180,6 +203,7 @@ export interface HollarDashboard {
     lastArb: { ts: string; direction: 'in' | 'out'; asset: AssetRef; hollarAmount: number } | null
   }
   pools: HollarPool[]
+  trends: HollarTrends
 }
 
 // ClickHouse loaders
@@ -387,12 +411,307 @@ async function loadTradesDaily(): Promise<HollarTradeDay[]> {
   return fillDays(CHART_WINDOW_DAYS, d => ({ date: d, ...(byDay.get(d) ?? { bought: 0, sold: 0 }) }))
 }
 
+// full-era trends
+
+const HOLLAR_LAUNCH_MONDAY = '2025-09-22' // the genesis mint's week (a Monday)
+const HOLLAR_ERC20 = '0x531a654d1696ed52e7275a8cede955e82620f99a'
+const ZERO_H160 = '0x0000000000000000000000000000000000000000'
+// The stable assets HOLLAR competes with (USDT/USDC/aUSD*/sUSD*/HUSD*
+// families, decimals-normalized in-query). LP share tokens are excluded so a
+// pool deposit doesn't double-count as volume.
+const STABLE_SET = [7, 10, 21, 22, 23, 45, 46, 222, 1002, 1003, 1046, 1110, 1111, 1112, 1113, 1000625, 1000626, 1000745, 1000766, 1000767]
+
+// Monday grid from launch to now, in TS so a fresh database aligns to nulls.
+function hollarWeekGrid(): string[] {
+  const start = new Date(`${HOLLAR_LAUNCH_MONDAY}T00:00:00Z`).getTime()
+  const out: string[] = []
+  for (let t = start; t <= Date.now(); t += 7 * 86_400_000) out.push(new Date(t).toISOString().slice(0, 10))
+  return out
+}
+function hollarMonthGrid(): string[] {
+  const out: string[] = []
+  const d = new Date(`${HOLLAR_LAUNCH_MONDAY.slice(0, 7)}-01T00:00:00Z`)
+  while (d.getTime() <= Date.now()) { out.push(d.toISOString().slice(0, 10)); d.setUTCMonth(d.getUTCMonth() + 1) }
+  return out
+}
+
+async function loadHollarTrends(): Promise<HollarTrends> {
+  return cached('explorer:hollar-trends:model', 3_600_000, async () => {
+    // Supply composition, weekly cumulative per destination class. Tags match
+    // on the H160 truncation (first 20 bytes of the substrate account id);
+    // modl/sibl prefixes survive the truncation, so bridge sovereigns and
+    // pallet pots classify even without a tag row.
+    const compositionQuery = client.query({
+      query: `
+        WITH tags AS (
+          SELECT substring(account_id, 1, 42) AS h, any(label_id) AS lbl
+          FROM price_data.account_tags FINAL
+          WHERE label_id IN ('stableswap-pools','omnipool','money-market','pallet-pots','treasury','liquidity-mining','incentive-pot','contracts','sovereigns','xyk-pools','lbp-pools')
+          GROUP BY h)
+        SELECT toString(w) AS week,
+          round(sum(sumIf(d, cat = 'stableswap')) OVER (ORDER BY w) / 1e18, 0) AS stableswap,
+          round(sum(sumIf(d, cat = 'omnipool'))   OVER (ORDER BY w) / 1e18, 0) AS omnipool,
+          round(sum(sumIf(d, cat = 'bridged'))    OVER (ORDER BY w) / 1e18, 0) AS bridged,
+          round(sum(sumIf(d, cat = 'protocol'))   OVER (ORDER BY w) / 1e18, 0) AS protocol,
+          round(sum(sumIf(d, cat = 'wallets'))    OVER (ORDER BY w) / 1e18, 0) AS wallets
+        FROM (
+          SELECT
+            multiIf(t.lbl = 'stableswap-pools', 'stableswap',
+                    t.lbl = 'omnipool', 'omnipool',
+                    t.lbl = 'sovereigns', 'bridged',
+                    t.lbl != '' OR startsWith(b.holder, '0x6d6f646c') OR startsWith(b.holder, '0x7369626c'), 'protocol',
+                    'wallets') AS cat,
+            toStartOfWeek(b.block_timestamp, 1) AS w, sum(toFloat64(b.balance_delta)) AS d
+          FROM price_data.erc20_transfer_deltas b
+          LEFT JOIN tags t ON b.holder = t.h
+          WHERE b.holder != '${ZERO_H160}' AND b.contract_address = '${HOLLAR_ERC20}'
+          GROUP BY cat, w
+        ) GROUP BY w ORDER BY week`,
+      format: 'JSONEachRow',
+    })
+    // Holders over 0.01 HOLLAR: per-holder weekly running balance, count the
+    // 0/1 threshold-crossing deltas so the weekly count is a running sum.
+    const holdersQuery = client.query({
+      query: `
+        WITH weekly AS (
+          SELECT holder, toStartOfWeek(block_timestamp, 1) AS w, sum(toFloat64(balance_delta)) AS d
+          FROM price_data.erc20_transfer_deltas
+          WHERE holder != '${ZERO_H160}' AND contract_address = '${HOLLAR_ERC20}'
+          GROUP BY holder, w),
+        states AS (
+          SELECT holder, w, sum(d) OVER (PARTITION BY holder ORDER BY w) AS bal FROM weekly),
+        flagdelta AS (
+          SELECT holder, w,
+            if(bal > 1e16, 1, 0)
+              - lagInFrame(if(bal > 1e16, 1, 0), 1, 0) OVER (PARTITION BY holder ORDER BY w
+                ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS df
+          FROM states)
+        SELECT toString(w) AS week, toInt64(sum(sum(df)) OVER (ORDER BY w)) AS v
+        FROM flagdelta GROUP BY w ORDER BY week`,
+      format: 'JSONEachRow',
+    })
+    // Weekly USD peg band from daily candles.
+    const pegQuery = client.query({
+      query: `
+        SELECT toString(toStartOfWeek(interval_start, 1)) AS week,
+          round(toFloat64(argMaxMerge(close_state)), 6) AS close,
+          round(toFloat64(minMerge(low_state)), 6) AS low,
+          round(toFloat64(maxMerge(high_state)), 6) AS high
+        FROM price_data.ohlc_1d WHERE asset_id = {id:UInt32}
+        GROUP BY week ORDER BY week`,
+      query_params: { id: HOLLAR_ASSET_ID },
+      format: 'JSONEachRow',
+    })
+    const pegStatsQuery = client.query({
+      query: `
+        SELECT
+          round(100 * countIf(abs(c - 1) <= 0.0050) / count(), 1) AS up50,
+          round(100 * countIf(abs(c - 1) <= 0.0025) / count(), 1) AS up25,
+          round(max(greatest(abs(l - 1), abs(h - 1))) * 10000, 1) AS maxdev
+        FROM (
+          SELECT toFloat64(argMaxMerge(close_state)) AS c, toFloat64(minMerge(low_state)) AS l, toFloat64(maxMerge(high_state)) AS h
+          FROM price_data.ohlc_1d WHERE asset_id = {id:UInt32} GROUP BY interval_start
+        )`,
+      query_params: { id: HOLLAR_ASSET_ID },
+      format: 'JSONEachRow',
+    })
+    // HOLLAR debt outstanding + open borrowers, weekly as-of. Aave math: each
+    // Borrow/Repay/LiquidationCall is divided by the borrow index at its own
+    // block (ASOF) into scaled debt; the as-of balance is scaled × the index
+    // then. Liquidations must be included or the series drifts high.
+    const debtEventsSql = `
+      ev AS (
+        SELECT pool_address AS pool, lower(JSONExtractString(decoded_args_json, 'user')) AS debtor,
+          toUInt64(block_height) * 1000000 + event_index AS k, block_timestamp AS ts,
+          multiIf(event_name = 'Borrow',  toFloat64(JSONExtractString(decoded_args_json, 'amount')),
+                  event_name = 'Repay', - toFloat64(JSONExtractString(decoded_args_json, 'amount')),
+                  - toFloat64(JSONExtractString(decoded_args_json, 'debtToCover'))) / 1e18 AS amt
+        FROM price_data.raw_money_market_events
+        WHERE (event_name IN ('Borrow', 'Repay') AND asset_address = '${HOLLAR_ERC20}')
+           OR (event_name = 'LiquidationCall' AND JSONExtractString(decoded_args_json, 'debtAsset') = '${HOLLAR_ERC20}')
+      ),
+      idx0 AS (
+        SELECT pool_address AS pool, toUInt64(block_height) * 1000000 + event_index AS k, block_timestamp AS ts,
+               toFloat64(variable_borrow_index) / 1e27 AS vbi
+        FROM price_data.money_market_reserve_indices
+        WHERE reserve_address = '${HOLLAR_ERC20}'
+      ),
+      weeks AS (
+        SELECT toDate('${HOLLAR_LAUNCH_MONDAY}') + number * 7 AS wstart,
+               toDateTime(toDate('${HOLLAR_LAUNCH_MONDAY}') + number * 7 + 7) AS wend
+        FROM numbers(200) WHERE wstart <= today()
+      )`
+    const debtQuery = client.query({
+      query: `
+        WITH ${debtEventsSql},
+        scaled AS (
+          SELECT ev.pool AS pool, ev.ts AS ts, ev.k AS k, ev.amt / if(idx0.vbi < 0.5, 1, idx0.vbi) AS samt
+          FROM ev ASOF LEFT JOIN idx0 ON ev.pool = idx0.pool AND ev.k >= idx0.k
+        ),
+        cum0 AS (SELECT pool, ts, k, sum(samt) OVER (PARTITION BY pool ORDER BY k) AS scum FROM scaled),
+        cum AS (SELECT pool, ts, argMax(scum, k) AS scum FROM cum0 GROUP BY pool, ts),
+        idx AS (SELECT pool, ts, argMax(vbi, k) AS vbi FROM idx0 GROUP BY pool, ts),
+        wp AS (SELECT wstart, wend, pool FROM weeks CROSS JOIN (SELECT DISTINCT pool FROM ev) AS p),
+        a AS (SELECT wp.wstart AS wstart, wp.wend AS wend, wp.pool AS pool, cum.scum AS scum
+              FROM wp ASOF LEFT JOIN cum ON wp.pool = cum.pool AND wp.wend >= cum.ts),
+        b AS (SELECT a.wstart AS wstart, a.pool AS pool, a.scum AS scum, idx.vbi AS vbi
+              FROM a ASOF LEFT JOIN idx ON a.pool = idx.pool AND a.wend >= idx.ts)
+        SELECT toString(wstart) AS week, round(sum(scum * if(vbi < 0.5, 1, vbi)), 0) AS v
+        FROM b GROUP BY wstart ORDER BY week`,
+      format: 'JSONEachRow',
+    })
+    const borrowersQuery = client.query({
+      query: `
+        WITH ${debtEventsSql},
+        scaled AS (
+          SELECT ev.pool AS pool, ev.debtor AS debtor, ev.ts AS ts, ev.k AS k,
+                 ev.amt / if(idx0.vbi < 0.5, 1, idx0.vbi) AS samt
+          FROM ev ASOF LEFT JOIN idx0 ON ev.pool = idx0.pool AND ev.k >= idx0.k
+        ),
+        cum0 AS (SELECT pool, debtor, ts, k, sum(samt) OVER (PARTITION BY pool, debtor ORDER BY k) AS scum FROM scaled),
+        cum AS (SELECT pool, debtor, ts, argMax(scum, k) AS scum FROM cum0 GROUP BY pool, debtor, ts),
+        wp AS (SELECT wstart, wend, pool, debtor FROM weeks CROSS JOIN (SELECT DISTINCT pool, debtor FROM ev) AS p),
+        a AS (SELECT wp.wstart AS wstart, wp.debtor AS debtor, cum.scum AS scum
+              FROM wp ASOF LEFT JOIN cum ON wp.pool = cum.pool AND wp.debtor = cum.debtor AND wp.wend >= cum.ts)
+        SELECT toString(wstart) AS week, toInt64(uniqExactIf(debtor, scum > 0.5)) AS v
+        FROM a GROUP BY wstart ORDER BY week`,
+      format: 'JSONEachRow',
+    })
+    const revenueQuery = client.query({
+      query: `
+        SELECT toString(toStartOfWeek(block_timestamp, 1)) AS week,
+               round(sum(sum(amount_usd)) OVER (ORDER BY toStartOfWeek(block_timestamp, 1)), 0) AS v
+        FROM price_data.revenue_events WHERE stream = 'hollar_borrow'
+        GROUP BY toStartOfWeek(block_timestamp, 1) ORDER BY week`,
+      format: 'JSONEachRow',
+    })
+    // HOLLAR sitting in its stableswap pools (discovered by has(asset_ids, 222),
+    // never a hardcoded pool list) and in the Omnipool, weekly as-of.
+    const depthQuery = client.query({
+      query: `
+        WITH ss AS (
+          SELECT toStartOfWeek(block_timestamp, 1) AS w, pool_id,
+            argMax(toFloat64(reserves_raw[indexOf(asset_ids, {id:UInt32})]), block_height) / 1e18 AS r
+          FROM price_data.stableswap_pool_state_history
+          WHERE has(asset_ids, {id:UInt32})
+          GROUP BY w, pool_id),
+        om AS (
+          SELECT toStartOfWeek(block_timestamp, 1) AS w,
+            argMax(toFloat64(reserve_raw), block_height) / 1e18 AS r
+          FROM price_data.omnipool_pool_state_history WHERE asset_id = {id:UInt32} GROUP BY w)
+        SELECT toString(ssw.w) AS week, round(ssw.r, 0) AS stableswap, round(ifNull(om.r, 0), 0) AS omnipool
+        FROM (SELECT w, sum(r) AS r FROM ss GROUP BY w) ssw
+        LEFT JOIN om ON om.w = ssw.w
+        ORDER BY week`,
+      query_params: { id: HOLLAR_ASSET_ID },
+      format: 'JSONEachRow',
+    })
+    // HOLLAR's share of stable-vs-stable trade volume. Legs with an empty
+    // op_key (non-routed swaps) get a synthetic per-event key — grouping them
+    // together would collapse 23% of legs into one op. Volume counts each op
+    // once at max(in, out).
+    const shareQuery = client.query({
+      query: `
+        WITH dec AS (
+          SELECT asset_id, decimals FROM price_data.assets
+          WHERE asset_id IN (${STABLE_SET.join(',')})
+        ),
+        ops AS (
+          SELECT toStartOfMonth(min(l.block_timestamp)) AS mo, l.asset_id AS aid,
+            greatest(sumIf(toFloat64(l.amount), l.leg_kind = 'in'),
+                     sumIf(toFloat64(l.amount), l.leg_kind = 'out')) / pow(10, any(d.decimals)) AS vol
+          FROM price_data.pool_swap_legs l
+          INNER JOIN dec d ON l.asset_id = d.asset_id
+          WHERE l.leg_kind IN ('in', 'out')
+          GROUP BY if(l.op_key = '', concat('e', toString(l.block_height), ':', toString(l.event_index)), l.op_key), l.asset_id
+        )
+        SELECT toString(mo) AS m, round(sumIf(vol, aid = {id:UInt32}) / sum(vol) * 100, 1) AS v
+        FROM ops WHERE mo >= toDate('${HOLLAR_LAUNCH_MONDAY}') - 30
+        GROUP BY mo ORDER BY mo`,
+      query_params: { id: HOLLAR_ASSET_ID },
+      format: 'JSONEachRow',
+    })
+    // Borrow-rate steps per market (3 values ever — cards, not a chart).
+    const ratesQuery = client.query({
+      query: `
+        SELECT contract_address AS pool,
+          round(toFloat64(JSONExtractString(decoded_args_json, 'variableBorrowRate')) / 1e25, 3) AS pct,
+          toString(min(toDate(block_timestamp))) AS since
+        FROM price_data.raw_evm_logs
+        WHERE event_name = 'ReserveDataUpdated' AND has(assets, '${HOLLAR_ERC20}')
+        GROUP BY pool, pct ORDER BY pool, since`,
+      format: 'JSONEachRow',
+    })
+
+    const [compRes, holdersRes, pegRes, pegStatsRes, debtRes, borrowersRes, revenueRes, depthRes, shareRes, ratesRes] = await Promise.all([
+      compositionQuery, holdersQuery, pegQuery, pegStatsQuery, debtQuery, borrowersQuery, revenueQuery, depthQuery, shareQuery, ratesQuery,
+    ])
+
+    const weeks = hollarWeekGrid()
+    const months = hollarMonthGrid()
+    const wv = async (res: { json<T>(): Promise<T[]> }) =>
+      (await res.json<{ week: string; v: number }>()).map(r => ({ m: String(r.week), v: Number(r.v) }))
+    const compRows = (await compRes.json<{ week: string; stableswap: number; omnipool: number; bridged: number; protocol: number; wallets: number }>())
+      .map(r => ({ week: String(r.week), stableswap: Number(r.stableswap), omnipool: Number(r.omnipool), bridged: Number(r.bridged), protocol: Number(r.protocol), wallets: Number(r.wallets) }))
+    const pegRows = (await pegRes.json<{ week: string; close: number; low: number; high: number }>())
+      .map(r => ({ week: String(r.week), close: Number(r.close), low: Number(r.low), high: Number(r.high) }))
+    const depthRows = (await depthRes.json<{ week: string; stableswap: number; omnipool: number }>())
+      .map(r => ({ week: String(r.week), stableswap: Number(r.stableswap), omnipool: Number(r.omnipool) }))
+    const shareRows = (await shareRes.json<{ m: string; v: number }>()).map(r => ({ m: String(r.m), v: Number(r.v) }))
+    const pegStatsRow = (await pegStatsRes.json<{ up50: number; up25: number; maxdev: number }>())[0]
+    const ratesRows = (await ratesRes.json<{ pool: string; pct: number; since: string }>())
+      .map(r => ({ pool: String(r.pool), pct: Number(r.pct), since: String(r.since) }))
+
+    const compBand = (k: 'stableswap' | 'omnipool' | 'bridged' | 'protocol' | 'wallets') =>
+      carryForward(alignMonthly(weeks, compRows.map(r => ({ m: r.week, v: r[k] })))).map(v => v ?? 0)
+    // Rate cards: pools ordered by first appearance (the core market launched
+    // 10 months before GIGAHDX); within a pool, the last step is current.
+    const poolOrder = [...new Set(ratesRows.map(r => r.pool))]
+      .sort((a, b) => (ratesRows.find(r => r.pool === a)!.since < ratesRows.find(r => r.pool === b)!.since ? -1 : 1))
+    const rates = poolOrder.map((pool, i) => {
+      const steps = ratesRows.filter(r => r.pool === pool).sort((a, b) => (a.since < b.since ? -1 : 1))
+      const cur = steps[steps.length - 1]
+      return {
+        label: i === 0 ? 'Core market' : 'GIGAHDX market',
+        pct: cur.pct,
+        prevPct: steps.length > 1 ? steps[steps.length - 2].pct : null,
+        since: cur.since,
+      }
+    })
+
+    return {
+      weeks,
+      composition: {
+        stableswap: compBand('stableswap'), omnipool: compBand('omnipool'),
+        protocol: compBand('protocol'), bridged: compBand('bridged'), wallets: compBand('wallets'),
+      },
+      holders: carryForward(alignMonthly(weeks, await wv(holdersRes))),
+      peg: {
+        close: alignMonthly(weeks, pegRows.map(r => ({ m: r.week, v: r.close }))),
+        low: alignMonthly(weeks, pegRows.map(r => ({ m: r.week, v: r.low }))),
+        high: alignMonthly(weeks, pegRows.map(r => ({ m: r.week, v: r.high }))),
+      },
+      debt: alignMonthly(weeks, await wv(debtRes)),
+      borrowers: alignMonthly(weeks, await wv(borrowersRes)),
+      revenueCumUsd: carryForward(alignMonthly(weeks, await wv(revenueRes))),
+      depth: {
+        stableswap: carryForward(alignMonthly(weeks, depthRows.map(r => ({ m: r.week, v: r.stableswap })))),
+        omnipool: carryForward(alignMonthly(weeks, depthRows.map(r => ({ m: r.week, v: r.omnipool })))),
+      },
+      months,
+      stableSharePct: alignMonthly(months, shareRows),
+      pegStats: pegStatsRow ? { uptime50Pct: Number(pegStatsRow.up50), uptime25Pct: Number(pegStatsRow.up25), maxAbsDevBps: Number(pegStatsRow.maxdev) } : null,
+      rates,
+    }
+  })
+}
+
 // dashboard payload
 
 export async function getHollarDashboard(): Promise<HollarDashboard> {
   return cached(`explorer:hollar-dashboard:model`, 300_000, async () => {
-    const [prices, peg, supplyRaw, stablePools, collateralEvents, lastArbByAsset, arbitrageDaily, tradesDaily] = await Promise.all([
-      ensurePrices(), loadPeg(), loadSupply(), loadHollarStablePools(), loadHsmCollateralEvents(), loadLastArbByAsset(), loadArbitrageDaily(), loadTradesDaily(),
+    const [prices, peg, supplyRaw, stablePools, collateralEvents, lastArbByAsset, arbitrageDaily, tradesDaily, trends] = await Promise.all([
+      ensurePrices(), loadPeg(), loadSupply(), loadHollarStablePools(), loadHsmCollateralEvents(), loadLastArbByAsset(), loadArbitrageDaily(), loadTradesDaily(), loadHollarTrends(),
     ])
     const px = prices.get(HOLLAR_ASSET_ID)
 
@@ -467,6 +786,7 @@ export async function getHollarDashboard(): Promise<HollarDashboard> {
       supply: { total: supplyRaw.total, holders: supplyRaw.holders, inStablepools, inOmnipool: supplyRaw.omnipool, other },
       hsm: { totalHoldingsUsd, collaterals, arbitrageDaily, tradesDaily, lastArb },
       pools,
+      trends,
     }
   })
 }

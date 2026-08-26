@@ -1285,6 +1285,34 @@ function buildHdx(): HdxDashboard {
           over2y: grow(0, 2.66e9, 4e7).map((v, i) => (i < 20 ? 0 : v)),
         },
         backfilledAllocationHdx: 1.999e9,
+        trends: (() => {
+          // ~4 years of month starts; series start at staggered offsets like
+          // the real data (staking from month 14, buybacks from month 27, …).
+          const N = 50
+          const monthStart = (i: number) => { const d = new Date(now); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - (N - 1 - i)); return iso(d.getTime()).slice(0, 8) + '01' }
+          const months = Array.from({ length: N }, (_, i) => monthStart(i))
+          const ramp = (from: number, to: number, startAt: number, jitter = 0) =>
+            months.map((_, i) => (i < startAt ? null : Math.round(from + (to - from) * ((i - startAt) / Math.max(1, N - 1 - startAt)) + (r() - 0.5) * jitter)))
+          const stakedClassic = ramp(5e8, 2.0e9, 14, 4e7).map((v, i) => (i >= N - 2 ? 8.3e8 : v))
+          const stakedGiga = months.map((_, i) => (i < N - 2 ? null : i === N - 2 ? 1.0e9 : 1.28e9))
+          return {
+            months,
+            stakedClassic,
+            stakedGiga,
+            liquidFloat: ramp(3.9e9, 1.6e9, 0, 5e7),
+            realizedPrice: months.map((_, i) => (i < 9 ? null : +(0.005 + 0.004 * Math.min(1, (i - 9) / 18)).toFixed(4))),
+            marketPrice: months.map((_, i) => (i < 9 ? null : +(0.009 + 0.009 * Math.sin(i / 5) * (r() * 0.4 + 0.6)).toFixed(4))),
+            top100Share: ramp(70, 64, 0, 2).map(v => (v != null ? +v.toFixed(1) : null)),
+            krakenHdx: ramp(2.1e8, 2.4e8, 6, 1e7).map((v, i) => (v != null && i > 20 ? Math.round(4.8e8 - (i - 20) * 8e6) : v)),
+            buybackHdx: ramp(1.8e7, 4.86e8, 27, 0),
+            traders: ramp(400, 550, 6, 120).map((v, i) => (v != null && i > 28 && i < 44 ? Math.round(3000 - (i - 28) * 150) : v)),
+            gov: {
+              quarters: Array.from({ length: 17 }, (_, i) => { const d = new Date(Date.UTC(2022, 6 + i * 3, 1)); return d.toISOString().slice(0, 10) }),
+              capital: Array.from({ length: 17 }, (_, i) => Math.round(2e6 + i * 7e7 + r() * 1e8)),
+              voters: Array.from({ length: 17 }, (_, i) => Math.round(18 + i * 60 + r() * 300)),
+            },
+          }
+        })(),
       }
     })(),
     topMovers: {
@@ -1872,6 +1900,42 @@ function buildHollar(): HollarDashboard {
       lastArb: { ts: '2026-07-08 20:05:00', direction: 'in', asset: sUSDe, hollarAmount: 4_200 },
     },
     pools,
+    trends: (() => {
+      // 49 launch-era weeks, deterministic via the local rng like the rest.
+      const r = rng(222)
+      const N = 49
+      const week = (i: number) => { const d = new Date(Date.UTC(2025, 8, 22) + i * 7 * 86_400_000); return d.toISOString().slice(0, 10) }
+      const weeks = Array.from({ length: N }, (_, i) => week(i))
+      const ramp = (from: number, to: number, startAt = 0, jitter = 0) =>
+        weeks.map((_, i) => (i < startAt ? null : Math.round(from + (to - from) * ((i - startAt) / Math.max(1, N - 1 - startAt)) + (r() - 0.5) * jitter)))
+      return {
+        weeks,
+        composition: {
+          stableswap: ramp(2.4e6, 4.6e6, 0, 4e5).map(v => v ?? 0),
+          omnipool: ramp(0, 2.3e6, 11, 3e5).map(v => v ?? 0),
+          protocol: ramp(1.5e5, 1.66e6, 0, 1e5).map(v => v ?? 0),
+          bridged: ramp(0, 3.7e6, 10, 0).map(v => v ?? 0),
+          wallets: ramp(2e4, 3.4e5, 0, 5e4).map(v => v ?? 0),
+        },
+        holders: ramp(57, 326, 0, 8),
+        peg: {
+          close: weeks.map((_, i) => +(1 - 0.001 + 0.0008 * Math.sin(i / 5) + (r() - 0.5) * 0.0006).toFixed(6)),
+          low: weeks.map((_, i) => +(1 - 0.003 + 0.001 * Math.sin(i / 5)).toFixed(6)),
+          high: weeks.map((_, i) => +(1 + 0.0005 + 0.0004 * Math.cos(i / 4)).toFixed(6)),
+        },
+        debt: weeks.map((_, i) => Math.round(i < 12 ? 2e6 + i * 3.5e5 : i < 20 ? 6.2e6 - (i - 12) * 6e5 : 1.4e6 + (i - 20) * 4e5)),
+        borrowers: ramp(118, 281, 0, 10),
+        revenueCumUsd: ramp(1_400, 266_600, 0, 0),
+        depth: { stableswap: ramp(2.4e6, 4.6e6, 0, 3e5), omnipool: ramp(0, 2.3e6, 11, 2e5) },
+        months: Array.from({ length: 12 }, (_, i) => { const d = new Date(Date.UTC(2025, 8 + i, 1)); return d.toISOString().slice(0, 10) }),
+        stableSharePct: Array.from({ length: 12 }, (_, i) => +(5.1 + i * 2.7 + r()).toFixed(1)),
+        pegStats: { uptime50Pct: 97.9, uptime25Pct: 81.4, maxAbsDevBps: 97.5 },
+        rates: [
+          { label: 'Core market', pct: 4.402, prevPct: 4.879, since: '2026-03-03' },
+          { label: 'GIGAHDX market', pct: 8.618, prevPct: null, since: '2026-07-01' },
+        ],
+      }
+    })(),
   }
 }
 

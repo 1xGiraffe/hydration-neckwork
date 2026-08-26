@@ -5,13 +5,14 @@ import { Link, paths } from '../router'
 import { Crumbs, F, AddrPill, AssetIcon, ChartSkeleton, EmptyRow, compactAmount } from '../components/ui'
 import {
   fmtHdx, cohortColor, OWNERSHIP_COLORS, AGE_COLORS,
-  ChartLegend, ShareBar, StackedColumnChart, MirroredBarChart, StackedAreaChart, GigaLiquidationChart,
+  ChartLegend, ShareBar, StackedColumnChart, MirroredBarChart, StackedAreaChart, MultiLineChart, GigaLiquidationChart,
 } from '../components/HdxCharts'
 import { LOCK_ORDER, lockColor } from '../components/lockColors'
 import type { ShareSegment, StackColumn, MirrorBar, AreaSeries } from '../components/HdxCharts'
 import type { HdxDashboard, HdxStructure, HdxLockType, HdxMover } from '../types'
 import { ChartTooltipRow as TipRow, DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
 import { monthDayLabel as mdLabel, monthLabel as monLabel } from '../utils/dashboardDates'
+import { useMediaQuery } from '../hooks/useMediaQuery'
 
 const UNLOCK_KEYS = ['gigahdx', 'vesting', 'vote'] as const
 const LOCK_LABELS: Record<string, string> = { vote: 'Vote', staking: 'Staking', gigahdx: 'GIGAHDX', vesting: 'Vesting', other: 'Other' }
@@ -369,6 +370,168 @@ function OwnershipSection({ s }: { s: HdxStructure }) {
   )
 }
 
+// ── full-era trend sections (all series data-validated before charting) ─────
+const trendSub = (text: string) => (
+  <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · {text}</span>
+)
+// "Sep ’25" month label for x-ticks and tooltips on the monthly trend grids.
+const monthYearShort = (d: string) => {
+  const t = Date.parse(`${d}T00:00:00Z`)
+  return Number.isFinite(t) ? new Date(t).toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' }).replace(' ', ' ’') : d
+}
+const quarterLabel = (d: string) => {
+  const t = new Date(`${d}T00:00:00Z`)
+  return `Q${Math.floor(t.getUTCMonth() / 3) + 1} ’${String(t.getUTCFullYear()).slice(2)}`
+}
+const lastNum = (a: (number | null)[]): number | null => {
+  for (let i = a.length - 1; i >= 0; i--) if (a[i] != null) return a[i]
+  return null
+}
+
+// 6b. supply sinks: staked HDX and the liquid float it leaves
+function SupplySinksSection({ s }: { s: HdxStructure }) {
+  const t = s.trends
+  const staked: AreaSeries[] = [
+    { key: 'classic', label: 'Staking', color: 'var(--cat-stake)', values: t.stakedClassic.map(v => (v ? v : null)) },
+    { key: 'giga', label: 'GIGAHDX', color: lockColor('gigahdx'), values: t.stakedGiga.map(v => (v ? v : null)), hatch: true },
+  ]
+  const float: AreaSeries[] = [
+    { key: 'float', label: 'Liquid float', color: 'var(--cat-liquidity)', values: t.liquidFloat },
+  ]
+  const stakedNow = (lastNum(t.stakedClassic) ?? 0) + (lastNum(t.stakedGiga) ?? 0)
+  const floatNow = lastNum(t.liquidFloat) ?? 0
+  const floatStart = t.liquidFloat.find(v => v != null) ?? 0
+  return (
+    <>
+      <SecTitle title="Supply sinks" subtitle="staked HDX and the liquid float it leaves" />
+      <div className="pf-card">
+        <div className="sec-title" style={{ marginBottom: 6 }}>Staked HDX{trendSub('classic staking handed off to GIGAHDX in July 2026')}</div>
+        <ChartLegend items={staked.map(x => ({ label: x.label, color: x.color }))} />
+        <StackedAreaChart buckets={t.months} series={staked} h={190} />
+        <div className="sec-title" style={{ margin: '18px 0 6px' }}>Liquid float{trendSub('user-held HDX not locked in staking')}</div>
+        <StackedAreaChart buckets={t.months} series={float} h={160} showShare={false} />
+        <div className="hdx-cards" style={{ marginTop: 14 }}>
+          <div className="hdx-card">
+            <div className="hk"><i style={{ background: 'var(--cat-stake)' }} />Staked</div>
+            <div className="hv">{fmtHdx(stakedNow)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
+            <div className="hs">{(stakedNow / (stakedNow + floatNow) * 100).toFixed(1)}% of user-held supply</div>
+          </div>
+          <div className="hdx-card">
+            <div className="hk"><i style={{ background: 'var(--cat-liquidity)' }} />Liquid float</div>
+            <div className="hv">{fmtHdx(floatNow)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
+            <div className="hs">{floatStart > 0 ? `−${((1 - floatNow / floatStart) * 100).toFixed(0)}% since ${monthYearShort(t.months[0])}` : '—'}</div>
+          </div>
+        </div>
+        <div className="hdx-note">Staked HDX stays in its owner's wallet under a lock, so both series live inside user-held supply.
+          The float still carries vote and vesting locks — this is the unstaked share, not free-to-sell supply.</div>
+      </div>
+    </>
+  )
+}
+
+// 6c. cost basis & accumulation
+function CostBasisSection({ s }: { s: HdxStructure }) {
+  const t = s.trends
+  // "Treasury bought back" wraps the card badge at 390px — shorten on phones.
+  const narrow = useMediaQuery('(max-width: 720px)')
+  const priceLines: AreaSeries[] = [
+    { key: 'market', label: 'Market price', color: 'var(--accent)', values: t.marketPrice },
+    { key: 'realized', label: 'Cost basis', color: 'var(--neutral-cool)', values: t.realizedPrice },
+  ]
+  const px = lastNum(t.marketPrice), rp = lastNum(t.realizedPrice)
+  const mvrv = px != null && rp != null && rp > 0 ? px / rp : null
+  const buyback: AreaSeries[] = [
+    { key: 'buyback', label: 'Bought back', color: 'var(--green)', values: t.buybackHdx },
+  ]
+  const whaleLine: AreaSeries[] = [
+    { key: 'top100', label: 'Top-100 share', color: cohortColor('whale'), values: t.top100Share },
+  ]
+  const kraken: AreaSeries[] = [
+    { key: 'kraken', label: 'Kraken custody', color: OWNERSHIP_COLORS.kraken, values: t.krakenHdx.map(v => (v ? v : null)) },
+  ]
+  const buybackNow = lastNum(t.buybackHdx) ?? 0
+  const krakenNow = lastNum(t.krakenHdx) ?? 0
+  const krakenPeak = Math.max(...t.krakenHdx.map(v => v ?? 0))
+  return (
+    <>
+      <SecTitle title="Cost basis & accumulation" subtitle="what holders paid, and who is soaking up supply" />
+      <div className="pf-card">
+        <div className="sec-title" style={{ marginBottom: 6 }}>Price vs cost basis{trendSub('the aggregate price user-held HDX was acquired at')}</div>
+        <ChartLegend items={priceLines.map(x => ({ label: x.label, color: x.color }))} />
+        <MultiLineChart buckets={t.months} series={priceLines} h={190} yFmt={v => `$${v.toFixed(4)}`} floorZero />
+        <div className="hdx-cards" style={{ marginTop: 14 }}>
+          <div className="hdx-card">
+            <div className="hk"><i style={{ background: 'var(--accent)' }} />Price / cost basis</div>
+            <div className="hv">{mvrv != null ? mvrv.toFixed(2) : '—'}</div>
+            <div className="hs">{mvrv != null ? (mvrv >= 1 ? `holders are ${((mvrv - 1) * 100).toFixed(0)}% in profit in aggregate` : `holders are ${((1 - mvrv) * 100).toFixed(0)}% underwater in aggregate`) : ''}</div>
+          </div>
+          <div className="hdx-card">
+            <div className="hk"><i style={{ background: 'var(--green)' }} />{narrow ? 'Treasury BB' : 'Treasury bought back'}</div>
+            <div className="hv">{fmtHdx(buybackNow)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
+            <div className="hs">revenue recycled into HDX since Oct 2024</div>
+          </div>
+          <div className="hdx-card">
+            <div className="hk"><i style={{ background: OWNERSHIP_COLORS.kraken }} />Kraken custody</div>
+            <div className="hv">{fmtHdx(krakenNow)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
+            <div className="hs">−{krakenPeak > 0 ? ((1 - krakenNow / krakenPeak) * 100).toFixed(0) : 0}% from its {fmtHdx(krakenPeak)} peak</div>
+          </div>
+        </div>
+        <div className="sec-title" style={{ margin: '18px 0 6px' }}>Treasury buyback{trendSub('cumulative HDX the protocol bought with its own revenue')}</div>
+        <StackedAreaChart buckets={t.months} series={buyback} h={160} showShare={false} />
+        <div className="sec-title" style={{ margin: '18px 0 6px' }}>Top-100 share of user supply{trendSub('whales have re-accumulated since the 2025 trough')}</div>
+        <MultiLineChart buckets={t.months} series={whaleLine} h={160} yFmt={v => `${v.toFixed(1)}%`} />
+        <div className="sec-title" style={{ margin: '18px 0 6px' }}>Kraken custody{trendSub('HDX on the tagged exchange wallets — halved from the 2024 peak')}</div>
+        <StackedAreaChart buckets={t.months} series={kraken} h={160} showShare={false} />
+        <div className="hdx-note">Cost basis is account-level: balance increases are booked at that week's close (pre-price-era holdings at the
+          first known close), decreases release cost proportionally — wallet moves therefore re-book at current prices.
+          Kraken custody counts the tagged hot wallets on Hydration, not the exchange's global books.</div>
+      </div>
+    </>
+  )
+}
+
+// 6d. participation
+function ParticipationSection({ s }: { s: HdxStructure }) {
+  const t = s.trends
+  const govCols: StackColumn[] = t.gov.quarters.map((q, i) => ({
+    key: q,
+    label: i % 2 === 0 ? quarterLabel(q) : '',
+    segments: [{ key: 'gov', label: 'Capital voting', color: 'var(--cat-vote)', value: t.gov.capital[i] }],
+    tip: (
+      <>
+        <span className="t-d">{quarterLabel(q)}</span>
+        <TipRow color="var(--cat-vote)" label="Capital voting" value={fmtHdx(t.gov.capital[i]) + ' HDX'} />
+        <TipRow label="Voters" value={F.int(t.gov.voters[i])} />
+      </>
+    ),
+  }))
+  const traderStep = Math.max(1, Math.floor(t.months.length / 7))
+  const traderCols: StackColumn[] = t.months.map((m, i) => ({
+    key: m,
+    label: i % traderStep === 0 && i < t.months.length - 2 ? monthYearShort(m) : '',
+    segments: [{ key: 'traders', label: 'Traders', color: 'var(--neutral-cool)', value: t.traders[i] ?? 0 }],
+    tip: (
+      <>
+        <span className="t-d">{monthYearShort(m)}</span>
+        <TipRow color="var(--neutral-cool)" label="Unique traders" value={F.int(t.traders[i] ?? 0)} />
+      </>
+    ),
+  }))
+  return (
+    <>
+      <SecTitle title="Participation" subtitle="who shows up — capital in governance, wallets on the market" />
+      <div className="pf-card">
+        <div className="sec-title" style={{ marginBottom: 6 }}>Capital in governance{trendSub('each voter counted once per quarter at their largest vote')}</div>
+        <StackedColumnChart columns={govCols} h={180} />
+        <div className="sec-title" style={{ margin: '18px 0 6px' }}>Monthly active traders{trendSub('unique wallets trading HDX — activity has concentrated into fewer, larger hands')}</div>
+        <StackedColumnChart columns={traderCols} h={160} yFmt={v => F.int(Math.round(v))} />
+        <div className="hdx-note">Trader counts exclude module accounts. Governance capital spans Democracy and OpenGov;
+          the same capital voting on many referenda in a quarter is counted once, at its largest single vote.</div>
+      </div>
+    </>
+  )
+}
+
 // 7. holder loyalty (HODL waves)
 const AGE_BANDS: { key: keyof HdxStructure['hodl']; label: string }[] = [
   { key: 'over2y', label: 'Held 2y+' },
@@ -462,11 +625,14 @@ function HdxSkeleton() {
       <ChartSkeleton h={78} />
       <SecTitle title="Holder distribution" /><ChartSkeleton h={230} />
       <SecTitle title="Who holds HDX" subtitle="weekly since Jul 2022" /><ChartSkeleton h={480} />
+      <SecTitle title="Supply sinks" subtitle="staked HDX and the liquid float it leaves" /><ChartSkeleton h={430} />
       <SecTitle title="Locks" /><ChartSkeleton h={230} />
       <SecTitle title="Upcoming unlocks" /><ChartSkeleton h={280} />
       <SecTitle title="Buys vs sells" subtitle="60 days" /><ChartSkeleton h={250} />
       <SecTitle title="New vs exited holders" subtitle="weekly" /><ChartSkeleton h={210} />
       <SecTitle title="Holder loyalty" subtitle="how long user-held HDX has been held" /><ChartSkeleton h={280} />
+      <SecTitle title="Cost basis & accumulation" subtitle="what holders paid, and who is soaking up supply" /><ChartSkeleton h={640} />
+      <SecTitle title="Participation" subtitle="who shows up — capital in governance, wallets on the market" /><ChartSkeleton h={400} />
       <SecTitle title="Top movers" subtitle="7 days" /><ChartSkeleton h={240} />
     </>
   )
@@ -488,12 +654,15 @@ export function Hdx() {
             <Ribbon d={data} />
             <HolderSection d={data} />
             <OwnershipSection s={data.structure} />
+            <SupplySinksSection s={data.structure} />
             <LocksSection d={data} />
             <UnlocksSection d={data} />
             <GigaMarketSection d={data} />
             <FlowsSection d={data} />
             <ChurnSection d={data} />
             <LoyaltySection s={data.structure} />
+            <CostBasisSection s={data.structure} />
+            <ParticipationSection s={data.structure} />
             <MoversSection d={data} />
           </>
         )}
