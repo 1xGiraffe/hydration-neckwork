@@ -23,7 +23,9 @@ const usdc = (over: Partial<BackingInput> = {}): BackingInput => ({
   scanEnabled: true,
   lookbackDays: 14,
   // Most cases here exercise the classifier itself, so they present an already
-  // confirmed reading; the damping rule has its own block below.
+  // confirmed reading taken this cycle; the damping rule and the carried-over
+  // custody rule each have their own block below.
+  custodyFresh: true,
   downgradeConfirmed: true,
   ...over,
 })
@@ -101,7 +103,8 @@ describe('classifyBacking with in-flight known', () => {
       originConfigured: true,
       scanEnabled: true,
       lookbackDays: 14,
-      downgradeConfirmed: true,
+      custodyFresh: true,
+    downgradeConfirmed: true,
     })
     expect(sui.status).toBe('attention')
 
@@ -118,7 +121,8 @@ describe('classifyBacking with in-flight known', () => {
       priceUsd: 500,
       originConfigured: true,
       scanEnabled: true,
-      downgradeConfirmed: true,
+      custodyFresh: true,
+    downgradeConfirmed: true,
       lookbackDays: 14,
     }).status).toBe('deficit')
 
@@ -170,7 +174,8 @@ describe('classifyBacking with the origin rate-limiter queue', () => {
       originConfigured: true,
       scanEnabled: true,
       lookbackDays: 14,
-      downgradeConfirmed: true,
+      custodyFresh: true,
+    downgradeConfirmed: true,
       ...over,
     })
     const blind = susds({})
@@ -232,7 +237,8 @@ describe('classifyBacking with supply burned at the dead address', () => {
       originConfigured: true,
       scanEnabled: true,
       lookbackDays: 14,
-      downgradeConfirmed: true,
+      custodyFresh: true,
+    downgradeConfirmed: true,
       ...over,
     })
     const gross = sui({})
@@ -280,6 +286,30 @@ describe('classifyBacking with supply burned at the dead address', () => {
     }))
     expect(verdict.residual).toBe(-shortfall)
     expect(verdict.status).toBe('deficit')
+  })
+})
+
+describe('classifyBacking when custody is a carried-over reading', () => {
+  // An origin chain that stops answering keeps its last custody balance rather
+  // than blanking the row, which is right for the surplus side and wrong for
+  // the shortfall side: the carried figure and the freshly read supply describe
+  // different moments, and the same failed read is what would have said whether
+  // an outbound transfer had already been unlocked out of that balance.
+  it('holds a shortfall at unverified rather than grading it', () => {
+    const verdict = classifyBacking(usdc({ locked: 227_031_998_904n - 175_000_000n, custodyFresh: false }))
+    expect(verdict.status).toBe('unverified')
+    expect(verdict.residual).toBe(-175_000_000n)
+    expect(verdict.detail).toMatch(/could not be read this cycle/i)
+  })
+
+  it('still grades the same shortfall once custody is read again', () => {
+    expect(classifyBacking(usdc({ locked: 227_031_998_904n - 175_000_000n })).status).toBe('deficit')
+  })
+
+  it('leaves a balanced or surplus reading alone', () => {
+    // Both are the safe direction, and a stale balance cannot invent them.
+    expect(classifyBacking(usdc({ custodyFresh: false })).status).toBe('ok')
+    expect(classifyBacking(usdc({ locked: 227_031_998_904n + 175_000_000n, custodyFresh: false })).status).toBe('surplus')
   })
 })
 

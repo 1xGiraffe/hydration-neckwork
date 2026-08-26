@@ -182,6 +182,35 @@ describe('decideInflight — outbound', () => {
     expect(decideInflight(normalizeScanOperations([outRow('32', false)]), context({ outboundSends: [stale] }))).toEqual([])
   })
 
+  it('keeps a send the destination already executed settled when that chain goes unread', () => {
+    // The live case this pins: Base executed the unlock minutes after the send,
+    // the manager confirmed it for hours, and then the origin RPC stopped
+    // answering. Custody survives the outage as the last-read (post-unlock)
+    // balance, so re-counting the transfer as in flight subtracts the same
+    // amount twice — a shortfall exactly the size of the transfer. Execution is
+    // permanent, so what was witnessed once outranks a scan that never saw it.
+    const executedOutbound = new Set([`0x${'32'.padStart(64, '0')}`])
+    expect(decideInflight(normalizeScanOperations([outRow('32', false)]), context({ outboundSends: [send()], executedOutbound }))).toEqual([])
+    // It is keyed by digest, so another send to the same chain still reports.
+    const other = decideInflight(
+      normalizeScanOperations([outRow('33', false)]),
+      context({ outboundSends: [send({ sequence: '33', digest: `0x${'33'.padStart(64, '0')}` })], executedOutbound }),
+    )
+    expect(other.map(op => op.sequence)).toEqual(['33'])
+  })
+
+  it('lets the remembered execution win over a chain set that has not heard of it', () => {
+    // The per-chain set only carries digests the cycle actually asked about —
+    // one already resolved is not asked again — so a present set must not read
+    // as "everything else is pending".
+    const executedOutbound = new Set([`0x${'32'.padStart(64, '0')}`])
+    const executedOutboundByChain = new Map([[2, new Set<string>()]])
+    expect(decideInflight(
+      normalizeScanOperations([outRow('32', false)]),
+      context({ outboundSends: [send()], executedOutbound, executedOutboundByChain }),
+    )).toEqual([])
+  })
+
   it('never counts a queued send as in flight as well', () => {
     // A send the origin's rate limiter is holding was redeemed there, and the
     // queued term already subtracts it. Counting it in both places subtracts

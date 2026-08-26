@@ -152,6 +152,12 @@ interface CustodyRead {
   decimals: number | null
   paused: boolean | null
   at: number
+  /**
+   * Set on a reading carried over from an earlier cycle because the origin
+   * chain did not answer this one. The figure is still the best available and
+   * still shown; what it may not do is carry a shortfall to a verdict.
+   */
+  stale?: boolean
 }
 
 // One manager's two rate-limiter legs, named from THAT manager's point of view
@@ -1439,16 +1445,13 @@ async function readBackingCycle(
         queueRead = await readEvmQueued(url, targets, timeline.sends, queueCtx, queueCutoffMs)
       }
     }
+    // An execution is permanent, so what this cycle learned joins the persistent
+    // set and stays resolved whether or not the chain answers again. The set is
+    // handed to `decideInflight` whole; the per-chain entry stays this cycle's
+    // own answer, which is what "the chain was asked and said no" means.
     if (executed) {
       for (const digest of executed) executedDigests.add(digest)
-      // The persistent cache rides along: an execution is permanent, so a
-      // digest confirmed on an earlier cycle stays resolved without being
-      // asked about again.
-      const merged = new Set(executed)
-      for (const send of timeline.sends) {
-        if (send.toChain === chainId && executedDigests.has(send.digest)) merged.add(send.digest)
-      }
-      executedOutboundByChain.set(chainId, merged)
+      executedOutboundByChain.set(chainId, executed)
     }
     for (const target of targets) {
       const fresh = fuseRead.get(target.asset.assetId)
@@ -1468,8 +1471,12 @@ async function readBackingCycle(
     let newest: number | null = null
     for (const target of targets) {
       const fresh = read.get(target.asset.assetId)
-      const value = fresh ?? lastCustody.get(target.asset.assetId)
       if (fresh) lastCustody.set(target.asset.assetId, fresh)
+      // A carried-over reading is marked as one on its way out, so the verdict
+      // can tell "custody is this" from "custody was this when we last got an
+      // answer". The remembered entry itself stays unmarked.
+      const remembered = lastCustody.get(target.asset.assetId)
+      const value = fresh ?? (remembered ? { ...remembered, stale: true } : undefined)
       if (!value) continue
       custody.set(target.asset.assetId, value)
       newest = newest == null ? value.at : Math.max(newest, value.at)
@@ -1545,6 +1552,7 @@ async function readBackingCycle(
     redeemedInbound: timeline.redeemedKeys,
     outboundSends,
     executedOutboundByChain,
+    executedOutbound: executedDigests,
     unresolvedOutboundByChain,
     queuedOutbound: new Set(queued.map(q => q.sendKey).filter((k): k is string => k != null)),
     nowMs,
@@ -1884,6 +1892,7 @@ function assetBacking(
     symbol: asset.symbol,
     priceUsd: prices.get(asset.assetId)?.price ?? null,
     originConfigured,
+    custodyFresh: custody != null && custody.stale !== true,
     scanEnabled,
     lookbackDays: LOOKBACK_DAYS,
     downgradeConfirmed: gradeUndamped || (snap.downgradeConfirmed.get(asset.assetId) ?? false),
