@@ -72,10 +72,17 @@ describe('the account-scoped XCM readers use the account-first projection', () =
     // barrier reads (whose payload neither sibling carries), the global arm of the
     // remote-pull withdrawal decode, the pre-migration inherent-context family read
     // (the hook-only walk projection cannot hold those rows), the asset surface, and
-    // the NTT arrival candidates' global arm. One definition + ten call sites — the
-    // hook-context inbound deposit run moved to the block-first projection below, and the
-    // executed-send arm's two global halves are the newest pair.
-    expect(occurrences(explorerService, 'xcmEventActivityTable(')).toBe(15)
+    // the NTT arrival candidates' global arm. One definition + nine call sites — the
+    // hook-context inbound deposit run moved to the block-first projection below.
+    //
+    // The executed-send arm's GLOBAL withdrawal half is deliberately not among them.
+    // That read names an event family with no asset, which leaves block_height
+    // unreachable in this table's key, so it scanned every asset range of
+    // Currencies.Withdrawn however few blocks it asked about — 2.00M rows for 46.
+    // raw_events is keyed by block_height and answers the same rows from the
+    // claimed blocks for 81.7k, with the MV's own extraction inlined.
+    expect(occurrences(explorerService, 'xcmEventActivityTable(')).toBe(14)
+    expect(functionBody('xcmExecutedRowsForBlocks')).not.toContain('${xcmEventActivityTable()}')
     expect(functionBody('xcmInRowsForBlocks')).not.toContain('xcmEventActivityByAccountTable')
   })
 

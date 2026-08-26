@@ -10033,46 +10033,69 @@ async function getRecentXcmOutRemote(limit: number, from?: string, to?: string, 
 async function xcmExecutedRowsForBlocks(blocks: number[], prices: Map<number, PriceInfo>, whoIn?: Set<string>): Promise<ActivityRow[]> {
   const list = sqlUIntList(blocks)
   if (!list) return []
-  const withdrawalColumns = 'block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, who, asset_id, amount'
-  const withdrawalBound = `block_height IN (${list}) AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NOT NULL`
-  const [sendRes, wdRes] = await Promise.all([
+  // The marker read first, alone. `xcm_event_activity` is keyed
+  // (event_name, asset_id, block_height, …), and naming an event family without
+  // an asset leaves block_height unreachable — so the withdrawal read prunes
+  // nothing and scans every asset range of Currencies.Withdrawn, which is what
+  // put it at 25s on a wide candidate window. Running it AFTER the markers costs
+  // one round trip and pays for it many times over: the rows that survive are
+  // exactly those in a CLAIMED extrinsic, so the block set shrinks from every
+  // candidate block to the few that actually sent a message through the executor.
+  // The `claimed` filter below is unchanged and still decides membership.
+  const sendRes = await client.query({
     // Both marker families in one read: which of this block's extrinsics sent a message,
     // and which of those getRecentXcm already covers. `extrinsic_index IS NOT NULL` keeps
     // the 5,497 hook-context marker rows out — a remote-initiated send has no local
     // extrinsic and belongs to xcmOutRemoteRowsForBlocks.
-    client.query({
-      query: `SELECT DISTINCT block_height, extrinsic_index, name
-              FROM price_data.raw_xcm_activity
-              WHERE block_height IN (${list}) AND source_kind = 'event' AND extrinsic_index IS NOT NULL
-                AND name IN ('${XCM_EXECUTED_SEND_EVENT}', ${XCM_SENT_EVENTS_SQL})`,
-      format: 'JSONEachRow',
-    }),
-    // Same account-first/parent split, and for the same reason, as the sibling arm:
-    // `whoIn` stays the authority on membership, so prefiltering on `who` only shrinks
-    // the granules read.
-    whoIn
-      ? client.query({
-        query: `SELECT ${withdrawalColumns}
-                FROM ${xcmEventActivityByAccountTable()}
-                WHERE who IN (${sqlAccountList([...whoIn])}) AND ${withdrawalBound}`,
-        format: 'JSONEachRow',
-      })
-      : client.query({
-        query: `SELECT ${withdrawalColumns}
-                FROM ${xcmEventActivityTable()}
-                WHERE ${withdrawalBound}`,
-        format: 'JSONEachRow',
-      }),
-  ])
+    query: `SELECT DISTINCT block_height, extrinsic_index, name
+            FROM price_data.raw_xcm_activity
+            WHERE block_height IN (${list}) AND source_kind = 'event' AND extrinsic_index IS NOT NULL
+              AND name IN ('${XCM_EXECUTED_SEND_EVENT}', ${XCM_SENT_EVENTS_SQL})`,
+    format: 'JSONEachRow',
+  })
   const markerExts: string[] = []
   const legacyExts: string[] = []
+  const claimedBlocks = new Set<number>()
   for (const send of await sendRes.json<{ block_height: number; extrinsic_index: number | null; name: string }>()) {
     const key = executedXcmExtrinsicKey(send.block_height, send.extrinsic_index)
     if (send.name === XCM_EXECUTED_SEND_EVENT) markerExts.push(key)
     else legacyExts.push(key)
+    claimedBlocks.add(send.block_height)
   }
   const claimed = executedXcmSendExtrinsics(markerExts, legacyExts)
   if (!claimed.size) return []
+  const withdrawalColumns = 'block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, who, asset_id, amount'
+  const claimedList = sqlUIntList([...claimedBlocks])
+  if (!claimedList) return []
+  const withdrawalBound = `block_height IN (${claimedList}) AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NOT NULL`
+  // Same account-first/parent split, and for the same reason, as the sibling arm:
+  // `whoIn` stays the authority on membership, so prefiltering on `who` only shrinks
+  // the granules read.
+  const wdRes = await (whoIn
+    ? client.query({
+      query: `SELECT ${withdrawalColumns}
+              FROM ${xcmEventActivityByAccountTable()}
+              WHERE who IN (${sqlAccountList([...whoIn])}) AND ${withdrawalBound}`,
+      format: 'JSONEachRow',
+    })
+    // Global arm: read raw_events, not the projection. `xcm_event_activity` is
+    // keyed (event_name, asset_id, block_height, …) and this names an event
+    // family with no asset, so block_height stays unreachable and it scans every
+    // asset range of Currencies.Withdrawn whatever the block set — 2.00M rows
+    // for the same 46. raw_events IS keyed by block_height, so the claimed
+    // blocks prune it to 81.7k. The three extracted columns are the MV's own
+    // expressions for this event, verified byte-identical over the same window;
+    // Currencies.Withdrawn always carries `currencyId`, which is the only branch
+    // of the MV's asset_id multiIf this family can take.
+    : client.query({
+      query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index,
+                     JSONExtractString(args_json, 'who') AS who,
+                     toUInt32(greatest(0, JSONExtractInt(args_json, 'currencyId'))) AS asset_id,
+                     JSONExtractString(args_json, 'amount') AS amount
+              FROM price_data.raw_events
+              WHERE ${withdrawalBound}`,
+      format: 'JSONEachRow',
+    }))
   const admitted = (await wdRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; who: string; asset_id: number; amount: string }>())
     .filter(w => admitsExecutedXcmWithdrawal(w.who, w.amount)
       && (!whoIn || whoIn.has(w.who))
