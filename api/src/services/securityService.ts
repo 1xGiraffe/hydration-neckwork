@@ -1098,7 +1098,23 @@ async function queryPauseEvents(): Promise<PauseEventRow[]> {
 // Circuit-breaker rejections from all four places a Module error surfaces. The
 // error index is the first byte of the 4-byte LE error field; the name depends on
 // the runtime that raised it, so the block's spec_version travels with the row.
-async function queryTrips(): Promise<TripSourceRow[]> {
+//
+// None of the four arms has an index to prune with — the pallet index and the
+// error byte both live inside JSON — so an unbounded read scans raw_extrinsics
+// and raw_events end to end for what is, across four years of chain, 253 rows.
+// On the dashboard's 20-second rebuild that came to 24 billion rows an hour,
+// three quarters of everything this deployment read.
+//
+// A block bound is what the arms CAN prune on, so the read is made incremental:
+// everything below a settled floor is read once and kept, and each rebuild asks
+// only about the blocks above it. That keeps the answer identical rather than
+// merely close — chain history below the floor cannot change, and the floor
+// trails the head by the same reorg margin the other memos in this codebase use,
+// so a reorg can only touch blocks that are re-read every time anyway.
+const TRIP_REORG_MARGIN_BLOCKS = 600
+let tripCache: { upTo: number; rows: TripSourceRow[] } | null = null
+
+async function queryTripsAbove(fromBlock: number): Promise<TripSourceRow[]> {
   const moduleIndex = `JSONExtractUInt(error_json, 'value', 'index')`
   const errorByte = (col: string) => `reinterpretAsUInt8(substring(unhex(substring(JSONExtractString(${col}, 'value', 'error'), 3)), 1, 1))`
   const res = await client.query({
@@ -1109,7 +1125,8 @@ async function queryTrips(): Promise<TripSourceRow[]> {
                ${errorByte('e.error_json')} AS error_index, 'extrinsic' AS source
         FROM price_data.raw_extrinsics e
         INNER JOIN price_data.raw_blocks b ON b.block_height = e.block_height
-        WHERE e.success = 0 AND JSONExtractString(e.error_json, '__kind') = 'Module'
+        WHERE e.block_height > ${fromBlock}
+          AND e.success = 0 AND JSONExtractString(e.error_json, '__kind') = 'Module'
           AND ${moduleIndex.replace('error_json', 'e.error_json')} = ${CIRCUIT_BREAKER_PALLET_INDEX}
         UNION ALL
         SELECT ev.block_height, ev.block_timestamp, ev.extrinsic_index, ev.event_name,
@@ -1118,7 +1135,8 @@ async function queryTrips(): Promise<TripSourceRow[]> {
                ev.event_name
         FROM price_data.raw_events ev
         INNER JOIN price_data.raw_blocks b ON b.block_height = ev.block_height
-        WHERE ev.event_name IN ('Utility.BatchInterrupted', 'Utility.ItemFailed')
+        WHERE ev.block_height > ${fromBlock}
+          AND ev.event_name IN ('Utility.BatchInterrupted', 'Utility.ItemFailed')
           AND JSONExtractUInt(ev.args_json, 'error', 'value', 'index') = ${CIRCUIT_BREAKER_PALLET_INDEX}
         UNION ALL
         SELECT ev.block_height, ev.block_timestamp, ev.extrinsic_index, ev.event_name,
@@ -1127,13 +1145,43 @@ async function queryTrips(): Promise<TripSourceRow[]> {
                ev.event_name
         FROM price_data.raw_events ev
         INNER JOIN price_data.raw_blocks b ON b.block_height = ev.block_height
-        WHERE ev.event_name = 'Multisig.MultisigExecuted'
+        WHERE ev.block_height > ${fromBlock}
+          AND ev.event_name = 'Multisig.MultisigExecuted'
           AND JSONExtractUInt(ev.args_json, 'result', 'value', 'value', 'index') = ${CIRCUIT_BREAKER_PALLET_INDEX}
       )
       ORDER BY block_height DESC`,
     format: 'JSONEachRow',
   })
   return res.json<TripSourceRow>()
+}
+
+/**
+ * One incremental step: what the whole history is now, and what may be kept.
+ *
+ * The floor never moves backwards. A head that reads lower than the last one —
+ * a restarted ingester, a lagging replica — would otherwise drop rows out of the
+ * cache while the next read only asks about blocks above the OLD floor, and the
+ * window between the two would be in neither.
+ */
+export function mergeTripWindow(
+  cached: { upTo: number; rows: TripSourceRow[] } | null,
+  fresh: readonly TripSourceRow[],
+  headBlock: number,
+  margin = TRIP_REORG_MARGIN_BLOCKS,
+): { next: { upTo: number; rows: TripSourceRow[] }; all: TripSourceRow[] } {
+  const all = [...fresh, ...(cached?.rows ?? [])].sort((a, b) => b.block_height - a.block_height)
+  const floor = Math.max(cached?.upTo ?? -1, headBlock - margin)
+  return { next: { upTo: floor, rows: all.filter(r => r.block_height <= floor) }, all }
+}
+
+async function queryTrips(): Promise<TripSourceRow[]> {
+  const from = tripCache?.upTo ?? -1
+  const [head, fresh] = await Promise.all([queryHead(), queryTripsAbove(from)])
+  // Newest first, as the single read returned them — `buildTrips` takes the
+  // newest 25 enforcement rows straight off the front.
+  const { next, all } = mergeTripWindow(tripCache, fresh, head.block_height)
+  tripCache = next
+  return all
 }
 
 // The largest single-block |net| Omnipool volume per asset over the peak window.
@@ -1295,15 +1343,40 @@ async function queryMarketSolvency(): Promise<Map<string, SolvencyRow>> {
 
 interface LiquidationCountRow { day: string; week: string; month: string; total: string; last: string | null }
 interface LiquidationEventRow { block_height: number; block_timestamp: string; extrinsic_index: number | null; args_json: string }
+
+// `event_name` is not in raw_events' sort key, so counting the 8,640 liquidations
+// four years of chain hold read 14.3M rows — 160 times an hour on the dashboard's
+// 20-second rebuild. A block bound is the one thing that key CAN prune on, and
+// both halves of the answer accept one: the three sliding windows cannot reach
+// past 30 days, and the count below a settled floor is a number that never
+// changes again. Same floor rule as the trips read above, for the same reason.
+const LIQUIDATION_REORG_MARGIN_BLOCKS = 600
+let liquidationCache: { upTo: number; total: number; last: string | null } | null = null
+
 async function queryLiquidations(): Promise<{ counts: LiquidationCountRow; recent: LiquidationEventRow[] }> {
+  const from = liquidationCache?.upTo ?? -1
+  // The floor is settled BEFORE the read so the two ranges the count is split
+  // into are exact: what may now be folded into the running total, and what
+  // stays outside it and is recounted every time.
+  const head = await queryHead()
+  const floor = Math.max(from, head.block_height - LIQUIDATION_REORG_MARGIN_BLOCKS)
   const [countRes, recentRes] = await Promise.all([
     client.query({
-      query: `SELECT countIf(block_timestamp > now() - INTERVAL 1 DAY) AS day,
+      // The window read starts at whichever is older: 30 days back, or the first
+      // block not yet folded into the running total. In steady state that is the
+      // 30-day floor, and a cold start (from = -1) reads everything exactly once.
+      query: `WITH (SELECT min(block_height) FROM price_data.blocks
+                    WHERE block_timestamp > now() - INTERVAL 30 DAY) AS month_from
+              SELECT countIf(block_timestamp > now() - INTERVAL 1 DAY) AS day,
                      countIf(block_timestamp > now() - INTERVAL 7 DAY) AS week,
                      countIf(block_timestamp > now() - INTERVAL 30 DAY) AS month,
-                     count() AS total, toString(max(block_timestamp)) AS last
-              FROM price_data.raw_events WHERE event_name = 'Liquidation.Liquidated'`,
-      format: 'JSONEachRow',
+                     countIf(block_height > {from:Int64} AND block_height <= {floor:Int64}) AS added,
+                     countIf(block_height > {floor:Int64}) AS above,
+                     toString(max(block_timestamp)) AS last
+              FROM price_data.raw_events
+              WHERE event_name = 'Liquidation.Liquidated'
+                AND block_height >= least(month_from, toUInt32(greatest({from:Int64} + 1, 0)))`,
+      query_params: { from, floor }, format: 'JSONEachRow',
     }),
     client.query({
       query: `SELECT block_height, block_timestamp, extrinsic_index, args_json
@@ -1312,8 +1385,41 @@ async function queryLiquidations(): Promise<{ counts: LiquidationCountRow; recen
       format: 'JSONEachRow',
     }),
   ])
-  const counts = (await countRes.json<LiquidationCountRow>())[0] ?? { day: '0', week: '0', month: '0', total: '0', last: null }
-  return { counts, recent: await recentRes.json<LiquidationEventRow>() }
+  const win = (await countRes.json<LiquidationWindowRow>())[0]
+  const merged = mergeLiquidationWindow(liquidationCache, win, floor)
+  liquidationCache = merged.next
+  return { counts: merged.counts, recent: await recentRes.json<LiquidationEventRow>() }
+}
+
+export interface LiquidationWindowRow {
+  day: string; week: string; month: string; added: string; above: string; last: string | null
+}
+
+/**
+ * The running total and the newest timestamp, carried across an incremental read.
+ *
+ * The count is split at the floor on purpose. `added` is the range that has just
+ * become settled and folds into the total once; `above` is the unsettled tail,
+ * recounted on every read and never folded in — which is what makes a repeated
+ * read idempotent rather than double-counting the blocks it saw last time.
+ *
+ * `last` takes the newer of the two: the window read cannot see a liquidation
+ * older than 30 days, but the cache still remembers one.
+ */
+export function mergeLiquidationWindow(
+  cached: { upTo: number; total: number; last: string | null } | null,
+  win: LiquidationWindowRow | undefined,
+  floor: number,
+): { counts: LiquidationCountRow; next: { upTo: number; total: number; last: string | null } } {
+  const w = win ?? { day: '0', week: '0', month: '0', added: '0', above: '0', last: null }
+  const settled = (cached?.total ?? 0) + Number(w.added || 0)
+  // A 1970 timestamp is ClickHouse's empty-set max, not a real liquidation.
+  const fresh = w.last && !w.last.startsWith('1970') ? w.last : null
+  const last = [cached?.last, fresh].filter((v): v is string => !!v).sort().at(-1) ?? null
+  return {
+    counts: { day: w.day, week: w.week, month: w.month, total: String(settled + Number(w.above || 0)), last },
+    next: { upTo: floor, total: settled, last },
+  }
 }
 
 // The biggest single Omnipool liquidity events in the window. Ranked by raw amount
