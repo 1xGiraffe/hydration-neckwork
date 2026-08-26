@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- chart primitives + shared fmtHdx/color-token module (mirrors ui.tsx) */
-import { useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { compactAmount } from './ui'
 import { useMediaQuery } from '../hooks/useMediaQuery'
@@ -68,6 +68,26 @@ export function ChartLegend({ items }: { items: { label: string; color: string }
 // Clamp a tooltip's left % so a translateX(-50%) tip doesn't spill the card edge.
 function tipLeft(pct: number): string { return `${Math.min(91, Math.max(9, pct))}%` }
 
+// Touch has no hover-out: a tapped tooltip deliberately stays open so it can be
+// read after the finger lifts, but it then needs a way OFF the screen. Clear it
+// when the next pointerdown lands anywhere outside the chart (the capture phase
+// beats stopPropagation in whatever was tapped instead).
+function useClearOnOutsidePointer(clear: () => void, active: boolean) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  // `clear` is an inline arrow, so the listener re-subscribes per render — but
+  // only while a tooltip is open, and renders then only happen on hover moves.
+  useEffect(() => {
+    if (!active) return
+    const onDown = (e: PointerEvent) => {
+      const el = ref.current
+      if (el && e.target instanceof Node && !el.contains(e.target)) clear()
+    }
+    document.addEventListener('pointerdown', onDown, true)
+    return () => document.removeEventListener('pointerdown', onDown, true)
+  }, [active, clear])
+  return ref
+}
+
 /* ============ 100%-stacked horizontal share bar ============ */
 export interface ShareSegment { key: string; label: string; color: string; value: number; tip: ReactNode }
 
@@ -76,6 +96,7 @@ export interface ShareSegment { key: string; label: string; color: string; value
 export function ShareBar({ segments, h = 44 }: { segments: ShareSegment[]; h?: number }) {
   const clipId = useId()
   const [hover, setHover] = useState<{ leftPct: number; tip: ReactNode } | null>(null)
+  const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
   const segs = segments.filter(s => s.value > 0)
   const total = segs.reduce((s, x) => s + x.value, 0)
   if (!segs.length || total <= 0) return <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, padding: '12px 0' }}>No data.</div>
@@ -83,7 +104,7 @@ export function ShareBar({ segments, h = 44 }: { segments: ShareSegment[]; h?: n
   for (let i = 0, run = 0; i < segs.length; i++) { offsets.push(run); run += segs[i].value }
   const rects = segs.map((s, i) => ({ ...s, x0: offsets[i] / total * 100, w: s.value / total * 100 }))
   return (
-    <div className="hdx-chart-wrap" onMouseLeave={() => setHover(null)}>
+    <div ref={wrapRef} className="hdx-chart-wrap" onMouseLeave={() => setHover(null)}>
       <svg width="100%" height={h} role="img">
         <defs><clipPath id={clipId}><rect x="0" y="0" width="100%" height={h} rx="8" /></clipPath></defs>
         <g clipPath={`url(#${clipId})`}>
@@ -177,6 +198,7 @@ export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCap
   columns: StackColumn[]; h?: number; separatorAt?: number; separatorCaption?: string; yFmt?: (v: number) => string
 }) {
   const [hover, setHover] = useState<number | null>(null)
+  const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
   const n = columns.length
   const totals = columns.map(c => c.segments.reduce((s, x) => s + x.value, 0))
   // Single shared axis for weekly and monthly. Detect the tall-bucket cluster
@@ -192,7 +214,7 @@ export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCap
   const colX = (i: number) => padL + i * bw
   const gy = (t: number) => padT + (1 - t) * plotH
   return (
-    <div className="hdx-chart-wrap" onMouseLeave={() => setHover(null)}>
+    <div ref={wrapRef} className="hdx-chart-wrap" onMouseLeave={() => setHover(null)}>
       <svg className="day-chart" viewBox={`0 0 ${W} ${h}`}>
         {[0, 0.5, 1].map(t => (
           <g key={t}>
@@ -251,7 +273,11 @@ export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCap
 
 
 /* ============ stacked area (pool composition over time) ============ */
-export interface AreaSeries { key: string; label: string; color: string; values: (number | null)[] }
+// `hatch` overlays a faint light diagonal texture on the band's fill and a
+// light halo under its top edge — for brand-black bands (GIGAHDX) that would
+// otherwise vanish into a dark background. The light marks disappear on light
+// surfaces, where the black fill carries itself.
+export interface AreaSeries { key: string; label: string; color: string; values: (number | null)[]; hatch?: boolean }
 
 // Cumulative stack tops, bottom-up in the order given (largest first from the
 // API). A null contributes nothing to its bucket — the band is absent there,
@@ -302,7 +328,9 @@ function dateTicks(n: number): number[] {
 export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, showShare = true }: {
   buckets: string[]; series: AreaSeries[]; h?: number; yFmt?: (v: number) => string; showShare?: boolean
 }) {
+  const hatchId = useId()
   const [hover, setHover] = useState<number | null>(null)
+  const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
   const n = buckets.length
   const { tops, max: rawMax } = stackSeries(series)
   if (n < 2 || !series.length || !(rawMax > 0)) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>Not enough history.</div>
@@ -329,7 +357,7 @@ export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, show
   }
   const hoverTotal = hover != null ? series.reduce((s, x) => s + (x.values[hover] ?? 0), 0) : 0
   return (
-    <div className="hdx-chart-wrap apx-wrap" onPointerDown={onMove} onPointerMove={onMove}
+    <div ref={wrapRef} className="hdx-chart-wrap apx-wrap" onPointerDown={onMove} onPointerMove={onMove}
       onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null) }}>
       <svg className="day-chart" viewBox={`0 0 ${W} ${h}`}>
         {[0, 0.5, 1].map(t => (
@@ -338,9 +366,18 @@ export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, show
             <text className="hdx-ax" x={padL - 8} y={(sy(max * t) + 3).toFixed(1)} textAnchor="end">{yFmt(max * t)}</text>
           </g>
         ))}
+        {series.some(x => x.hatch) && (
+          <defs>
+            <pattern id={hatchId} patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(45)">
+              <line x1="0" y1="0" x2="0" y2="7" stroke="rgba(255,255,255,0.28)" strokeWidth="1.6" />
+            </pattern>
+          </defs>
+        )}
         {bands.map(({ s, area, edge }) => (
           <g key={s.key}>
             <path d={area} fill={s.color} fillOpacity={0.42} />
+            {s.hatch && <path d={area} fill={`url(#${hatchId})`} />}
+            {s.hatch && <path d={edge} fill="none" stroke="rgba(255,255,255,0.45)" strokeWidth="4.5" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />}
             <path d={edge} fill="none" stroke={s.color} strokeWidth="2" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
           </g>
         ))}
@@ -368,16 +405,19 @@ export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, show
 // shared axis zoomed to the data (pegs sit at 1.05–1.65, a zero base would
 // flatten the drift that is the whole story); the unit peg 1.0 gets a dashed
 // reference line only when it is in view. Lines break at nulls.
-export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) => v.toFixed(4) }: {
-  buckets: string[]; series: AreaSeries[]; h?: number; yFmt?: (v: number) => string
+// `floorZero` clamps the axis floor at 0 — a price or share axis must not pad
+// into negative territory when the data sits near its floor.
+export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) => v.toFixed(4), floorZero }: {
+  buckets: string[]; series: AreaSeries[]; h?: number; yFmt?: (v: number) => string; floorZero?: boolean
 }) {
   const [hover, setHover] = useState<number | null>(null)
+  const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
   const n = buckets.length
   const flat = series.flatMap(s => s.values).filter((v): v is number => v != null)
   if (n < 2 || !flat.length) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>Not enough history.</div>
   const lo = Math.min(...flat), hi = Math.max(...flat)
   const pad = Math.max((hi - lo) * 0.08, hi * 0.0005)
-  const min = lo - pad, max = hi + pad
+  const min = floorZero ? Math.max(0, lo - pad) : lo - pad, max = hi + pad
   const W = 860, padL = 56, padR = 6, padT = 12, padB = 18
   const plotW = W - padL - padR, plotH = h - padT - padB
   const sx = (i: number) => padL + (i / (n - 1)) * plotW
@@ -390,7 +430,7 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
     setHover(Math.min(n - 1, Math.max(0, i)))
   }
   return (
-    <div className="hdx-chart-wrap apx-wrap" onPointerDown={onMove} onPointerMove={onMove}
+    <div ref={wrapRef} className="hdx-chart-wrap apx-wrap" onPointerDown={onMove} onPointerMove={onMove}
       onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null) }}>
       <svg className="day-chart" viewBox={`0 0 ${W} ${h}`}>
         {[0, 0.5, 1].map(t => {
@@ -437,6 +477,7 @@ export interface GigaLiqPoint { price: number; stHdx: number }
 // already under water clamp into the bucket nearest the current price.
 export function GigaLiquidationChart({ currentPrice, points, h = 190 }: { currentPrice: number; points: GigaLiqPoint[]; h?: number }) {
   const [hover, setHover] = useState<number | null>(null)
+  const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
   const W = 860, padL = 46, padR = 14, padT = 10, padB = 24
   const BUCKETS = 28
   const plotW = W - padL - padR, plotH = h - padT - padB
@@ -460,7 +501,7 @@ export function GigaLiquidationChart({ currentPrice, points, h = 190 }: { curren
   // x ticks at −75 / −50 / −25% of spot, when inside the domain
   const ticks = [0.75, 0.5, 0.25].map(d => currentPrice * (1 - d)).filter(p => p > minP)
   return (
-    <div className="hdx-chart-wrap giga-liq-chart" onMouseLeave={() => setHover(null)}>
+    <div ref={wrapRef} className="hdx-chart-wrap giga-liq-chart" onMouseLeave={() => setHover(null)}>
       <svg className="day-chart" viewBox={`0 0 ${W} ${h}`}>
         {[1, 0.5].map(t => (
           <g key={t}>
@@ -548,6 +589,7 @@ export function MirroredBarChart({ data, h = 190, xTicks, upColor = 'var(--green
   data: MirrorBar[]; h?: number; xTicks?: { i: number; label: string }[]; upColor?: string; downColor?: string
 }) {
   const [hover, setHover] = useState<number | null>(null)
+  const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
   // Same phone treatment as DayBarChart: keep the most recent 30 bars so each
   // stays wide enough to tap-inspect; ticks shift with the dropped prefix.
   const narrow = useMediaQuery('(max-width: 720px)')
@@ -571,7 +613,7 @@ export function MirroredBarChart({ data, h = 190, xTicks, upColor = 'var(--green
   // differently from "no activity at all" once the cap is set by louder days.
   const minBarH = 1.5
   return (
-    <div className="hdx-chart-wrap" onMouseLeave={() => setHover(null)}>
+    <div ref={wrapRef} className="hdx-chart-wrap" onMouseLeave={() => setHover(null)}>
       <svg className="day-chart" viewBox={`0 0 ${W} ${h}`}>
         {bars.map((d, i) => {
           const x = padX + i * bw
