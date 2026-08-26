@@ -123,6 +123,9 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {row.type === 'otc' && <>
               <div className="dt">Order ID</div><div className="dd mono">#{row.otcOrderId}</div>
               <div className="dt">Action</div><div className="dd">{row.otcAction ?? '—'}</div>
+              {/* The Account row above is the taker who called the fill; this is
+                  the account whose order it consumed. */}
+              {row.otcAction === 'Fill' && row.to && <><div className="dt">Maker</div><div className="dd"><AddrPill account={row.to} /></div></>}
               {row.otcAction === 'Place' && <><div className="dt">Partially fillable</div><div className="dd">{row.otcPartiallyFillable ? 'Yes' : 'No'}</div></>}
               {row.otcAction === 'Fill' && <><div className="dt">Partial fill</div><div className="dd">{row.otcPartial ? 'Yes' : 'No'}</div></>}
               {row.otcAction === 'Fill' && row.otcFee != null && row.assetOut && <><div className="dt">Fee</div><div className="dd mono">{F.exact(row.otcFee, row.assetOut.decimals)} <AssetChip asset={row.assetOut} /></div></>}

@@ -575,3 +575,64 @@ describe('safety kinds registry', () => {
     expect([...new Set([...SAFETY_ROW_LANE_KINDS, ...SAFETY_SNAPSHOT_KINDS])].sort()).toEqual([...SAFETY_KINDS].sort())
   })
 })
+
+/* ============ an OTC fill reaches the maker's rules ============ */
+
+// A fill names only the taker on chain, so a maker watching their own account
+// used to be told nothing when an order of theirs was consumed — the row was
+// not on their feed at all. Now that it is (with the maker as `to`), it has to
+// pass the same trade rules a swap does, and say who took it.
+describe('OTC fills on the maker side', () => {
+  const MAKER = '0x' + 'cc'.repeat(32)
+  const otcFill = (over: Partial<ActivityRow> = {}): ActivityRow => activity({
+    type: 'otc', otcAction: 'Fill', otcPartial: true, otcOrderId: 1_548,
+    who: ref(OWNER), to: ref(MAKER), ...over,
+  })
+
+  it('matches a trade rule, an otc rule and an unrestricted one alike', () => {
+    for (const type of [undefined, 'trade', 'otc']) {
+      const r = rule('account-activity', { target: { kind: 'address', address: WHALE }, type })
+      expect(evaluateAccountActivity([otcFill()], [r], W)).toHaveLength(1)
+    }
+  })
+
+  it('is still excluded by a rule that asked for a different family or action', () => {
+    const other = rule('account-activity', { target: { kind: 'address', address: WHALE }, type: 'transfer' })
+    expect(evaluateAccountActivity([otcFill()], [other], W)).toHaveLength(0)
+    const swaps = rule('account-activity', { target: { kind: 'address', address: WHALE }, type: 'trade', action: 'swap' })
+    expect(evaluateAccountActivity([otcFill()], [swaps], W)).toHaveLength(0)
+    const fills = rule('account-activity', { target: { kind: 'address', address: WHALE }, type: 'trade', action: 'otc-fill' })
+    expect(evaluateAccountActivity([otcFill()], [fills], W)).toHaveLength(1)
+  })
+
+  // Both ends of a fill are somebody's account. A rule set up on the taker and a
+  // rule set up on the maker are two different subscriptions to the same
+  // settlement, and each is entitled to its own notification — the matcher tests
+  // the ROW's family and value, never which side of it the target sits on.
+  it('matches a rule configured for the taker and one configured for the maker alike', () => {
+    const takerRule = rule('account-activity', { target: { kind: 'address', address: WHALE }, type: 'trade' })
+    const makerRule = rule('account-activity', { target: { kind: 'address', address: MAKER }, type: 'trade' })
+    const row = otcFill()
+    expect(evaluateAccountActivity([row], [takerRule], W)).toHaveLength(1)
+    expect(evaluateAccountActivity([row], [makerRule], W)).toHaveLength(1)
+    // Both at once: one row, one match per rule, and two distinct notifications.
+    const both = evaluateAccountActivity([row], [takerRule, makerRule], W)
+    expect(both).toHaveLength(2)
+    expect(both.map(m => m.identity)).toEqual(['1050-e7', '1050-e7'])
+    expect(new Set(both.map(m => notificationIdFor(m.ruleId, m.identity))).size).toBe(2)
+  })
+
+  it('keeps a stable identity and opens the fill, not the block', () => {
+    expect(activityIdentity(otcFill())).toBe('1050-e7')
+    expect(activityPath(otcFill())).toBe('/otc-fill/1050-e7')
+  })
+
+  it('names the taker in the headline and the maker on the line under it', () => {
+    const r = rule('account-activity', { target: { kind: 'address', address: WHALE }, type: 'trade' })
+    const [hit] = evaluateAccountActivity([otcFill()], [r], W)
+    const out = renderNotification(renderMatch(hit, r, noViewerTag))
+    expect(out.title).toContain('OTC fill by')
+    expect(out.body).toContain('to')
+    expect(out.url).toMatch(/\/otc-fill\/1050-e7$/)
+  })
+})

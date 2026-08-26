@@ -259,11 +259,16 @@ export function ActivityDesc({ r, headed }: { r: ActivityRow; headed?: boolean }
     return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.assetIn} /> <span className="mono">{F.amount(r.amountIn, r.assetIn.decimals)}</span></span> → <span className="trade-leg"><AssetChip asset={r.assetOut} /> <span className="mono">{F.amount(r.amountOut, r.assetOut.decimals)}</span></span>{r.dcaStatus === 'failed' && <span className="muted">Failed attempt</span>}</span>
   }
   if (r.type === 'otc') {
+    // A fill has two accounts. The Account column carries the taker who called
+    // it, so the maker whose order it consumed goes where a transfer's
+    // recipient goes — the trailing pill — and the row reads the same way:
+    // actor on the left, counterparty at the end.
+    const maker = r.to ? <AddrPill account={r.to} noCopy /> : null
     // Pull rows without an enriched leg pair (the Placed-by-orderId lookup
     // missed) render the order id alone — same fallback the design calls out.
     // Kept even when headed: with no legs the order id is all this phrase has to say.
-    if (!r.assetIn || !r.assetOut) return <span className="asset-flow"><span className="muted">Order #{r.otcOrderId}</span></span>
-    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.assetIn} /> <span className="mono">{F.amount(r.amountIn, r.assetIn.decimals)}</span></span> → <span className="trade-leg"><AssetChip asset={r.assetOut} /> <span className="mono">{F.amount(r.amountOut, r.assetOut.decimals)}</span></span>{headed ? null : <span className="muted">#{r.otcOrderId}</span>}</span>
+    if (!r.assetIn || !r.assetOut) return <span className="asset-flow"><span className="muted">Order #{r.otcOrderId}</span>{maker}</span>
+    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.assetIn} /> <span className="mono">{F.amount(r.amountIn, r.assetIn.decimals)}</span></span> → <span className="trade-leg"><AssetChip asset={r.assetOut} /> <span className="mono">{F.amount(r.amountOut, r.assetOut.decimals)}</span></span>{headed ? null : <span className="muted">#{r.otcOrderId}</span>}{maker}</span>
   }
   if (r.type === 'liquidity' && r.liqAction === 'Create' && r.assetIn && r.assetOut) {
     // Pool creation seeds two assets — show both legs side by side.
