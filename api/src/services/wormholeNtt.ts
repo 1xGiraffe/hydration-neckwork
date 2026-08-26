@@ -941,6 +941,11 @@ export interface BackingInput {
   symbol: string
   priceUsd: number | null
   originConfigured: boolean
+  // Whether `locked` was read from the origin chain on THIS cycle. A chain that
+  // failed to answer keeps its last balance rather than blanking the row, which
+  // is the right call for the surplus side and not for the shortfall side — see
+  // the guard in `classifyBacking`.
+  custodyFresh: boolean
   scanEnabled: boolean
   lookbackDays: number
   // Whether a shortfall has been read on two consecutive cycles. Every input to
@@ -1020,6 +1025,19 @@ export function classifyBacking(input: BackingInput): BackingVerdict {
   }
   if (residual >= -tol) {
     return { status: 'ok', residual, detail: `Custody covers the minted supply and every transfer still in flight. ${window}` }
+  }
+  // A shortfall measured against a balance this cycle could not read is not a
+  // finding. The carried-over custody figure and the freshly read supply state
+  // different moments, and the read that failed is the same one that says which
+  // transfers the origin has already unlocked — so the two halves of the
+  // equation degrade in opposite directions and the gap between them looks
+  // exactly like missing backing.
+  if (!input.custodyFresh) {
+    return {
+      status: 'unverified',
+      residual,
+      detail: `Custody could not be read this cycle, so this shortfall stands against the last balance the origin chain reported rather than a current one.${burnedNote}`,
+    }
   }
   // One cycle is not a finding: hold the row on the safe side of the line and
   // say why, rather than raising a shortfall the next cycle may erase.
@@ -1287,7 +1305,17 @@ export interface InflightContext {
   // which an unlock has reduced custody while the transfer still counts as in
   // flight — which reads as a deficit the size of that transfer — cannot open.
   // A chain absent from this map falls back to the counts below, then the scan.
+  //
+  // It carries only the digests THIS cycle asked about; one already resolved is
+  // never asked again, so it is not a complete statement on its own.
   executedOutboundByChain?: Map<number, ReadonlySet<string>>
+  // Every digest a target chain has confirmed executed, on this cycle or any
+  // earlier one. An execution is permanent, so this outranks both the per-chain
+  // sets and the scan: a chain that fails to answer must not un-resolve a
+  // redemption already witnessed, or its unlock — which has already left the
+  // custody balance the cycle carries over — is subtracted a second time as a
+  // transfer still in flight.
+  executedOutbound?: ReadonlySet<string>
   // Per target chain, how many of OUR sends that chain's own state says are
   // still unredeemed. Present only for chains Wormholescan cannot resolve (Sui);
   // absent means "trust the scan".
@@ -1351,6 +1379,7 @@ export function decideInflight(ops: readonly NormalizedScanOp[], ctx: InflightCo
     if (send.sentAtMs < cutoff) continue
     const key = vaaKey(ctx.hydrationChainId, send.emitterAddress, send.sequence)
     if (ctx.queuedOutbound?.has(key)) continue
+    if (ctx.executedOutbound?.has(send.digest)) continue
     const scanOp = scanByKey.get(key)
     let pending: boolean
     const executed = ctx.executedOutboundByChain?.get(send.toChain)
