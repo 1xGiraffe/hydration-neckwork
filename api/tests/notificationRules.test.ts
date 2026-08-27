@@ -135,7 +135,10 @@ describe('rule param validation', () => {
 describe('describeRule', () => {
   it('summarizes each kind in one line', () => {
     expect(describeRule('account-activity', { address: SS58, type: 'trade', minUsd: 5000 }))
-      .toBe('trade activity over $5k by 15Da…BDRLZ')
+      // No address in the sentence: every surface that shows it draws the
+      // account beside it as a pill, and repeating a truncated address there is
+      // what made a rule read its own address twice.
+      .toBe('trade activity over $5k')
     expect(describeRule('large-trade', { assetId: 0, minUsd: 10_000 })).toBe('trades over $10k on asset 0')
     expect(describeRule('price', { assetId: 5, direction: 'below', price: 0.005 })).toBe('asset 5 price below $0.005')
     // With the asset registry to hand, an id reads as its ticker.
@@ -204,5 +207,25 @@ describe('OpenGov tracks', () => {
     expect(new Set(REFERENDUM_TRACKS.map(t => t.name)).size).toBe(REFERENDUM_TRACKS.length)
     expect(referendumTrackName(8)).toBe('omnipool_admin')
     expect(referendumTrackName(42)).toBeNull()
+  })
+})
+
+// Where the account is drawn beside the sentence, the sentence must not repeat
+// it. Address targets used to spell out a truncated address that the rule's
+// auto-generated name ALSO spelled out, so one row said "Activity of 1C1rAh…"
+// twice over.
+describe('describeRule — an address target names no account', () => {
+  const ADDR = '15DajYeqgb4ADkb8scVCcNaXjfM1SV9PLvqjNDkpH6kBDRLZ'
+  it('leaves the account to the pill for every kind that targets one', () => {
+    expect(describeRule('account-activity', { target: { kind: 'address', address: ADDR } })).toBe('any activity')
+    expect(describeRule('health-factor', { target: { kind: 'address', address: ADDR }, threshold: 1.2 }))
+      .toBe('health factor below 1.2')
+    expect(describeRule('liquidation', { target: { kind: 'address', address: ADDR } })).toBe('liquidations')
+  })
+
+  it('still names a TAG, which the pill alone would not identify by list', () => {
+    const tag = () => ({ name: 'Treasury', members: [], memberCount: 2, icon: '', color: '' })
+    expect(describeRule('account-activity', { target: { kind: 'tag', tagId: 't' } }, () => '', tag))
+      .toBe('Any activity by tag "Treasury"')
   })
 })
