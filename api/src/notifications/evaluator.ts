@@ -127,6 +127,11 @@ const CURSOR_PERSIST_MS = 60_000
 // threshold before the rule can fire again, so a level oscillating on the line
 // produces one notification rather than a stream.
 const HYSTERESIS = 0.02
+// How long one outbound message shadows an identical one (see claimOutbound).
+// Long enough to cover the lanes drifting apart — two rules matching one event
+// can land in different ticks, because each kind carries its own cursor — and
+// short enough that a genuinely recurring alert is never swallowed.
+const OUTBOUND_DEDUP_MS = 10 * 60_000
 
 export interface BlockWindow { from: number; to: number }
 
@@ -279,6 +284,22 @@ export interface RuleMatch {
 // ReplacingMergeTree key and the recent-id set both collapse.
 export function notificationIdFor(ruleId: string, identity: string): string {
   return createHash('sha256').update(`${ruleId}:${identity}`).digest('hex')
+}
+
+// Two DIFFERENT rules routinely describe one on-chain event: a large-trade
+// floor and an account-activity rule on a tag the trader belongs to both match
+// the same swap, and the reader's phone buzzes once per rule with the same
+// words. What identifies a buzz is its wording AT A BLOCK — rules whose wording
+// differs are telling the reader different things and both still arrive, and
+// the block keeps a rule's OWN per-block messages apart when a catch-up window
+// renders several of them identically ("2 × Event matcher" for block after
+// block), which the outbound split exists to separate.
+export function outboundIdentity(accountId: string, blockHeight: number, message: RenderedNotification): string {
+  return createHash('sha256')
+    // NUL-joined: a body is free text that may hold any printable separator,
+    // so the one byte it cannot hold is what keeps the encoding injective.
+    .update([accountId, String(blockHeight), message.path, message.title, message.body].join('\0'))
+    .digest('hex')
 }
 
 // Activity rows are identified the way the explorer's own activity URLs are
@@ -1154,7 +1175,7 @@ export function renderDigest(rule: NotificationRule, entries: readonly RenderInp
 const counters = {
   ticks: 0, errors: 0, seeded: 0, skippedBlocks: 0, truncatedPages: 0,
   matches: 0, delivered: 0, coalesced: 0, cooldownSuppressed: 0,
-  deferredGroups: 0, sourceFetches: 0, digested: 0,
+  deferredGroups: 0, sourceFetches: 0, digested: 0, outboundDuplicates: 0,
 }
 export function evaluatorCounters(): Readonly<typeof counters> { return { ...counters } }
 
@@ -1167,6 +1188,32 @@ let tick = 0
 // already published.
 let lastSecurityGeneration = -1
 const lastSendAtMs = new Map<string, number>()
+// When each recently sent message was last delivered, keyed by outboundIdentity.
+const lastOutboundAtMs = new Map<string, number>()
+
+/**
+ * Claims the right to send `message` to `accountId`, false when an identical
+ * one already went out inside the dedup window.
+ *
+ * Deliberately NOT part of the inbox path: the inbox stays a complete per-rule
+ * ledger — the same split the cooldown already makes, where a muffled rule
+ * still records everything it matched — so a reader can always see which of
+ * their alerts fired. Only the buzz is collapsed.
+ */
+function claimOutbound(send: PendingSend, nowMs: number): boolean {
+  // Swept here rather than on a timer: the map only grows when something is
+  // sent, so the send path is the only place it can need collecting.
+  if (lastOutboundAtMs.size > 512) {
+    for (const [key, at] of lastOutboundAtMs) {
+      if (nowMs - at > OUTBOUND_DEDUP_MS) lastOutboundAtMs.delete(key)
+    }
+  }
+  const key = outboundIdentity(send.accountId, send.blockHeight, send.message)
+  const last = lastOutboundAtMs.get(key)
+  if (last != null && nowMs - last <= OUTBOUND_DEDUP_MS) return false
+  lastOutboundAtMs.set(key, nowMs)
+  return true
+}
 // Per-kind cursors, authoritative in memory and persisted on a timer (see
 // flushCursors). `dirtyCursors` is what has moved since the last write.
 const cursors = new Map<RowLaneKind, number>()
@@ -1270,6 +1317,7 @@ export function resetEvaluatorForTests(): void {
   tick = 0
   lastSecurityGeneration = -1
   lastSendAtMs.clear()
+  lastOutboundAtMs.clear()
   cursors.clear()
   dirtyCursors.clear()
   parked = null
@@ -2515,6 +2563,8 @@ interface PendingSend {
   ruleId: string
   accountId: string
   message: RenderedNotification
+  /** Newest block the message covers; part of its outbound identity. */
+  blockHeight: number
   tag: string
   channels: NotificationChannel[]
 }
@@ -2591,9 +2641,10 @@ async function dispatch(matches: RuleMatch[]): Promise<boolean> {
         const message = group.length === 1
           ? (renderedFor.get(shown[0]) ?? render(shown[0]))
           : renderDigest(rule, shown.map(inputFor), group.length)
+        const blockHeight = group[group.length - 1].blockHeight
         sends.push({
-          ruleId, accountId: rule.accountId, message, channels,
-          tag: `${ruleId}:${group[group.length - 1].blockHeight}`,
+          ruleId, accountId: rule.accountId, message, channels, blockHeight,
+          tag: `${ruleId}:${blockHeight}`,
         })
       }
     })
@@ -2612,8 +2663,16 @@ async function dispatch(matches: RuleMatch[]): Promise<boolean> {
   // overlapping window is a replay, not news, and it must not restart the
   // cooldown clock either.
   const fresh = new Set(prepared.rows.map(r => r.ruleId))
+  const sentAt = Date.now()
   for (const send of sends) {
     if (!fresh.has(send.ruleId)) continue
+    // A second rule describing the same event in the same words adds nothing,
+    // and — like a replayed match — it must not restart the cooldown clock
+    // either: nothing was sent, so nothing should be counted as sent.
+    if (!claimOutbound(send, sentAt)) {
+      counters.outboundDuplicates++
+      continue
+    }
     lastSendAtMs.set(send.ruleId, Date.now())
     sendOutbound(send.accountId, send.message, send.tag, send.channels)
   }
