@@ -5,9 +5,9 @@ import { api } from '../api/explorer'
 import { useMe } from '../hooks/useUser'
 import { useSession } from '../session'
 import { isAddressLike } from '../notificationKinds'
-import { searchUserTags, useTagMapVersion, type UserTagSearchHit } from '../userTags'
-import type { NotificationTarget, SearchResult } from '../types'
-import { AccountEmoji, ShortAddr, TagIcon, noAutofill } from './ui'
+import { resolveTag, searchUserTags, useTagMapVersion, type UserTagSearchHit } from '../userTags'
+import type { AccountRef, NotificationTarget, SearchResult } from '../types'
+import { AccountEmoji, ShortAddr, TagIcon, noAutofill, tagMemberSuffix } from './ui'
 
 // What an account-activity alert watches, chosen the way anything else on the
 // explorer is found: by typing. The same three sources the global search bar
@@ -33,6 +33,9 @@ export interface TargetOption {
   emoji?: string
   emojiUrl?: string
   emojiName?: string
+  // The account's system/directory tag, as the server resolved it. `resolveTag`
+  // needs it to find a system tag; a user-list tag it finds from the account id.
+  tag?: AccountRef['tag']
   identity?: string
   identityVerified?: boolean
   // Tag rows
@@ -113,35 +116,69 @@ export function rawAddressOption(text: string): TargetOption | null {
   return isAddressLike(text) ? addressOption(text.trim()) : null
 }
 
-// An address row the search already resolved carries its own emoji and identity.
-// One typed, pasted, or read back off a saved rule does not — so it is resolved
-// through the same ref endpoint the rest of the app uses, and only falls back to
-// a bare address while that is in flight. Never to a locally invented emoji.
-function useResolvedOption(option: TargetOption): TargetOption {
-  const address = option.target.kind === 'address' && !option.emoji ? option.address ?? null : null
+// Every address on screen at once, resolved in ONE call. A search hit carries an
+// emoji and an identity but no TAG, and an address typed, pasted or read back
+// off a saved rule carries nothing at all — so nothing here can draw the account
+// the way the rest of the app draws it without asking. The endpoint takes twenty
+// addresses, which is more than a dropdown ever shows.
+function useAddressRefs(options: readonly (TargetOption | null)[]): Map<string, AccountRef> {
+  const addresses = useMemo(() => [...new Set(options
+    .filter((o): o is TargetOption => !!o && o.target.kind === 'address')
+    .map(o => o.address ?? '')
+    .filter(Boolean))].sort().slice(0, 20), [options])
   const refQuery = useQuery({
-    queryKey: ['alert-target-ref', address],
-    queryFn: ({ signal }) => api.accountRefs([address!], signal),
-    enabled: !!address,
+    queryKey: ['alert-target-refs', addresses.join(',')],
+    queryFn: ({ signal }) => api.accountRefs(addresses, signal),
+    enabled: addresses.length > 0,
     staleTime: 300_000,
     retry: false,
   })
-  const ref = refQuery.data?.[0] ?? null
+  return useMemo(() => {
+    const out = new Map<string, AccountRef>()
+    addresses.forEach((a, i) => {
+      const ref = refQuery.data?.[i]
+      if (ref) out.set(a.toLowerCase(), ref)
+    })
+    return out
+  }, [addresses, refQuery.data])
+}
+
+// The resolved ref folded over an option: the account id (which is what the
+// emoji is derived from), the tag, and the identity the search may not have had.
+function withRef(option: TargetOption, ref: AccountRef | undefined): TargetOption {
   if (!ref) return option
   return {
     ...option,
     accountId: ref.accountId,
     address: ref.address,
-    emoji: ref.emoji,
-    emojiUrl: ref.emojiUrl,
-    emojiName: ref.emojiName,
+    emoji: option.emoji ?? ref.emoji,
+    emojiUrl: option.emojiUrl ?? ref.emojiUrl,
+    emojiName: option.emojiName ?? ref.emojiName,
+    tag: ref.tag,
     identity: option.identity ?? ref.profile?.name ?? ref.identity?.display ?? undefined,
     identityVerified: option.identityVerified ?? ref.identity?.verified ?? false,
   }
 }
 
-function OptionBody({ option: raw }: { option: TargetOption }) {
-  const option = useResolvedOption(raw)
+function OptionBody({ option }: { option: TargetOption }) {
+  useTagMapVersion()   // the viewer's own tags decide the label — see AddrPill
+  // A tagged account reads as its tag everywhere else in the app: the group's
+  // icon and name, and the last three characters of the address to tell one
+  // member from another. Same shape as UserTagPill, without its link — inside a
+  // picker a click chooses the row rather than navigating away from the dialog.
+  const tag = option.target.kind === 'address' && option.accountId
+    ? resolveTag({ accountId: option.accountId, tag: option.tag ?? null })
+    : null
+  if (tag) {
+    return (
+      <>
+        <TagIcon icon={tag.icon} title={tag.name} className="sr-emoji" />
+        <span className="tag" style={tag.color ? { color: tag.color } : undefined}>{tag.name}</span>
+        {tagMemberSuffix(tag, option.address ?? '')}
+        {option.note && <span className="sr-desc">{option.note}</span>}
+      </>
+    )
+  }
   if (option.target.kind !== 'address') {
     return (
       <>
@@ -223,7 +260,11 @@ export function AlertTargetPicker({ value, onChange, onTextChange, disabled, inp
   const options = addressOnly ? all.filter(o => o.target.kind === 'address') : all
   // A pasted address the search does not know is still a target.
   const fallback = query && !options.length ? rawAddressOption(query) : null
-  const rows = fallback ? [fallback] : options
+  const rawRows = fallback ? [fallback] : options
+  // Chip and rows together, so one call answers for everything on screen.
+  const refs = useAddressRefs(useMemo(() => [value, ...rawRows], [value, rawRows]))
+  const rows = useMemo(() => rawRows.map(o => withRef(o, refs.get((o.address ?? '').toLowerCase()))), [rawRows, refs])
+  const shownValue = value ? withRef(value, refs.get((value.address ?? '').toLowerCase())) : null
 
   async function runSearch(raw: string) {
     const q = raw.trim()
@@ -287,7 +328,7 @@ export function AlertTargetPicker({ value, onChange, onTextChange, disabled, inp
       <div className={`acct-picker-box${disabled ? ' disabled' : ''}`} onClick={() => inputRef.current?.focus()}>
         {value && (
           <span className="acct-chip">
-            <span className="acct-chip-label"><OptionBody option={value} /></span>
+            <span className="acct-chip-label"><OptionBody option={shownValue ?? value} /></span>
             <button type="button" className="acct-chip-x" aria-label={`Clear ${value.label}`} disabled={disabled}
               onClick={() => { onChange(null); inputRef.current?.focus() }}>×</button>
           </span>
