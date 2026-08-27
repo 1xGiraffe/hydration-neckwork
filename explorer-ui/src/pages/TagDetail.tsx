@@ -133,7 +133,7 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
                   variant="link"
                   label="Get notified"
                   title={`Alert me on activity by anyone tagged ${data.name}`}
-                  rule={{ kind: 'account-activity', params: { target: { kind: 'tag', tagId } }, name: `Activity of ${data.name}` }}
+                  rule={{ kind: 'account-activity', params: { target: { kind: 'tag', tagId } } }}
                 />
               </div>
               <div className="acct-head">
