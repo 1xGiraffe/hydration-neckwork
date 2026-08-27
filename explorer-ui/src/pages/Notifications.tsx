@@ -9,7 +9,7 @@ import { useNow } from '../hooks/useNow'
 import { useAssetFilterOptions } from '../hooks/useExplorerData'
 import { refreshNotifications, useNotificationInbox, useNotificationMutation, useNotificationsOverview } from '../hooks/useNotifications'
 import { Link, paths, setQuery, useQueryValue } from '../router'
-import { Ago, Copy, Crumbs, DetailTabs, EmptyRow, F, TableSkeleton, TagIcon } from '../components/ui'
+import { AddrPill, Ago, Copy, Crumbs, DetailTabs, EmptyRow, F, TableSkeleton, TagIcon } from '../components/ui'
 import type { DetailTab } from '../components/ui'
 import { NotifyButton } from '../components/NotifyButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
@@ -541,9 +541,12 @@ export function RulesSection({ rules, channels, loading, onNew, onEdit }: {
 }
 
 // A tag target renders as the tag itself — icon, its own colour and, when the
-// tag stands for more than one account, how many. An address target says
-// nothing here: the server's summary already spells the account out.
+// tag stands for more than one account, how many. An address target renders as
+// the account, through the same pill the rest of the app uses: emoji, the
+// viewer's own tag or the on-chain identity, and the short address. The summary
+// beside it no longer repeats the address, so the pill is what names it.
 function RuleTargetPill({ rule }: { rule: NotificationRule }) {
+  if (rule.targetAccount) return <AddrPill account={rule.targetAccount} noCopy />
   const target = ruleTagTarget(rule)
   if (!target || !rule.targetLabel) return null
   const to = target.kind === 'list-tag' || target.kind === 'tag' ? paths.tag(target.tagId) : null

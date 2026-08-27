@@ -24,9 +24,11 @@ describe('health-factor target params', () => {
     expect(parseRuleParams('health-factor', { threshold: 1.1 }).ok).toBe(false)
   })
 
-  it('describes an address rule by its address and a tag rule by the resolved tag name', () => {
+  it('describes an address rule by the threshold alone and a tag rule by the resolved tag name', () => {
+    // The account is drawn as a pill beside the sentence, so the sentence says
+    // what is watched rather than repeating whose account it is.
     expect(describeRule('health-factor', { address: ADDR, threshold: 1.2 }, () => ''))
-      .toContain('health factor below 1.2 for')
+      .toBe('health factor below 1.2')
     expect(describeRule('health-factor', { target: { kind: 'tag', tagId: 'treasury' }, threshold: 1.2 }, () => '',
       () => ({ name: 'Treasury', members: [], memberCount: 0, icon: '', color: '' })))
       .toBe('health factor below 1.2 in tag "Treasury"')

@@ -1,4 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- the picker plus the pure option builders its tests exercise directly */
+import { useQuery } from '@tanstack/react-query'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { api } from '../api/explorer'
 import { useMe } from '../hooks/useUser'
@@ -50,7 +51,12 @@ const looksAddr = (s?: string) => !!s && (s.startsWith('0x') || /^[1-9A-HJ-NP-Za
 
 export function addressOption(address: string, extra: Partial<TargetOption> = {}): TargetOption {
   const addr = address.trim()
-  return { key: `address:${addr.toLowerCase()}`, target: { kind: 'address', address: addr }, label: addr, address: addr, accountId: addr, ...extra }
+  // NOT `accountId: addr`. The emoji is derived from the canonical AccountId32,
+  // so seeding it with whichever form was typed picks a different animal than
+  // the one this account wears everywhere else — a sloth where the rest of the
+  // app draws a duck. An option that does not KNOW the account id says so, and
+  // `OptionBody` resolves it rather than guessing.
+  return { key: `address:${addr.toLowerCase()}`, target: { kind: 'address', address: addr }, label: addr, address: addr, ...extra }
 }
 
 export function optionFromSearchResult(r: SearchResult): TargetOption | null {
@@ -107,7 +113,35 @@ export function rawAddressOption(text: string): TargetOption | null {
   return isAddressLike(text) ? addressOption(text.trim()) : null
 }
 
-function OptionBody({ option }: { option: TargetOption }) {
+// An address row the search already resolved carries its own emoji and identity.
+// One typed, pasted, or read back off a saved rule does not — so it is resolved
+// through the same ref endpoint the rest of the app uses, and only falls back to
+// a bare address while that is in flight. Never to a locally invented emoji.
+function useResolvedOption(option: TargetOption): TargetOption {
+  const address = option.target.kind === 'address' && !option.emoji ? option.address ?? null : null
+  const refQuery = useQuery({
+    queryKey: ['alert-target-ref', address],
+    queryFn: ({ signal }) => api.accountRefs([address!], signal),
+    enabled: !!address,
+    staleTime: 300_000,
+    retry: false,
+  })
+  const ref = refQuery.data?.[0] ?? null
+  if (!ref) return option
+  return {
+    ...option,
+    accountId: ref.accountId,
+    address: ref.address,
+    emoji: ref.emoji,
+    emojiUrl: ref.emojiUrl,
+    emojiName: ref.emojiName,
+    identity: option.identity ?? ref.profile?.name ?? ref.identity?.display ?? undefined,
+    identityVerified: option.identityVerified ?? ref.identity?.verified ?? false,
+  }
+}
+
+function OptionBody({ option: raw }: { option: TargetOption }) {
+  const option = useResolvedOption(raw)
   if (option.target.kind !== 'address') {
     return (
       <>
@@ -120,7 +154,8 @@ function OptionBody({ option }: { option: TargetOption }) {
   }
   return (
     <>
-      <AccountEmoji account={{ emoji: option.emoji, emojiName: option.emojiName, emojiUrl: option.emojiUrl, accountId: option.accountId ?? option.address ?? '' }} className="sr-emoji" />
+      {(option.emoji || option.accountId)
+        && <AccountEmoji account={{ emoji: option.emoji, emojiName: option.emojiName, emojiUrl: option.emojiUrl, accountId: option.accountId ?? '' }} className="sr-emoji" />}
       {option.identity && <span className="acct-picker-name">{option.identity}{option.identityVerified && <span className="id-verified" title="Verified identity"> ✓</span>}</span>}
       <span className="mono acct-picker-addr"><ShortAddr addr={option.address ?? option.label} /></span>
       {option.note && <span className="sr-desc">{option.note}</span>}

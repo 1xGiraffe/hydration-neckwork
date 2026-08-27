@@ -1550,6 +1550,9 @@ export interface NotificationRule {
   targetMemberCount?: number
   targetIcon?: string
   targetColor?: string
+  // An address target has no tag to name, so the server resolves the account
+  // itself — the same ref every other surface draws an account from.
+  targetAccount?: AccountRef | null
   // Set by POST /rules when an equivalent rule already existed: the create is
   // idempotent, so a double click (or a second surface subscribing to the same
   // thing) gets the rule back instead of a duplicate.

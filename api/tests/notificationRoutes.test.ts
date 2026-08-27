@@ -204,12 +204,32 @@ describe('rules', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json()).toMatchObject({
       kind: 'account-activity', kindLabel: 'Account activity', name: 'watch',
-      summary: 'trade activity over $5k by 15Da…BDRLZ', channels: [], muted: false, cooldownS: 0,
+      summary: 'trade activity over $5k', channels: [], muted: false, cooldownS: 0,
       // The pre-target spelling is normalized into the address target before it
       // is stored, so both spellings answer with the current one.
       params: { target: { kind: 'address', address: SS58 }, type: 'trade', minUsd: 5000 },
     })
     expect(rulesFor(OWNER)).toHaveLength(1)
+  })
+
+  // An address target resolves to no TAG, so the row used to carry nothing the
+  // list could draw an account from — and fell back to the truncated address
+  // that had been baked into the rule's name. The account travels with the rule
+  // instead, resolved the way every other surface resolves one: keyed on the
+  // canonical account id, which is also what the emoji is derived from.
+  it('carries the resolved account for an address target', async () => {
+    const f = await build()
+    const res = await f.inject({
+      method: 'POST', url: '/user/notifications/rules', headers: auth(),
+      payload: { kind: 'account-activity', params: { address: SS58 } },
+    })
+    expect(res.statusCode).toBe(200)
+    const rule = res.json()
+    expect(rule.targetAccount).toMatchObject({ accountId: expect.stringMatching(/^0x[0-9a-f]{64}$/) })
+    expect(rule.targetAccount.accountId).not.toBe(SS58)
+    // Nothing was baked into the name, and the summary no longer repeats it.
+    expect(rule.name).toBe('')
+    expect(rule.summary).not.toContain('…')
   })
 
   it('rejects an unknown kind with 400 and bad params with 422', async () => {
