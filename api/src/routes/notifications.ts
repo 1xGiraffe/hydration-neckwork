@@ -12,6 +12,8 @@ import {
 import { NOTIFICATION_KINDS, describeRule, KIND_LABELS, type NotificationKind } from '../notifications/notificationRules.ts'
 import { activityTargetOf, resolveActivityTarget } from '../notifications/ruleTargets.ts'
 import { assetDescriptor } from '../services/explorerAssets.ts'
+import { accountRef, resolveDisplayAccountId } from '../services/explorerService.ts'
+import { normalizeAddress } from '../services/addressIdentity.ts'
 import { renderNotification, text } from '../notifications/render.ts'
 import { sendToChannel, vapidPublicKey, webPushConfigured, telegramConfigured } from '../notifications/delivery.ts'
 import { createTelegramLink, telegramLinkStatus, telegramBotUsername } from '../notifications/telegramBot.ts'
@@ -63,7 +65,32 @@ function ruleRef(r: NotificationRule) {
     ...(resolved
       ? { targetLabel: resolved.name, targetMemberCount: resolved.memberCount, targetIcon: resolved.icon, targetColor: resolved.color }
       : {}),
+    // An ADDRESS target resolves to nothing above — there is no tag to name — so
+    // it ships the account itself, resolved exactly as every other surface
+    // resolves one. Without it the rules list had no way to draw the account and
+    // fell back to the bare truncated address baked into the rule's name.
+    ...(addressTargetOf(r) ? { targetAccount: addressRefOf(addressTargetOf(r)!) } : {}),
   }
+}
+
+// The address a rule watches, whichever kind carries one. `activityTargetOf`
+// answers for the two kinds the EVALUATOR groups by; a liquidation rule targets
+// an account too and its row deserves the same pill.
+function addressTargetOf(r: NotificationRule): string | null {
+  const activity = activityTargetOf(r.kind, r.params)
+  if (activity?.kind === 'address') return activity.address
+  if (r.kind !== 'liquidation') return null
+  const t = (r.params as { target?: { kind?: string; address?: string } }).target
+  return t?.kind === 'address' && typeof t.address === 'string' ? t.address : null
+}
+
+// The account behind an address target, or null for an address that no longer
+// parses. `resolveDisplayAccountId` first, so the ref is keyed the same way the
+// explorer keys one — an EVM account and its substrate form are one account, and
+// the emoji is derived from that id rather than from whichever form was typed.
+function addressRefOf(address: string) {
+  const n = normalizeAddress(address)
+  return n ? accountRef(resolveDisplayAccountId(n.accountId)) : null
 }
 
 // `notificationId` is the deterministic dedup identity; the client only ever

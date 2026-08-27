@@ -95,7 +95,7 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
                   variant="link"
                   label="Get notified"
                   title={`Alert me on activity by anyone tagged ${data.name}`}
-                  rule={{ kind: 'account-activity', params: { target: { kind: 'list-tag', listId, tagId } }, name: `Activity of ${data.name}` }}
+                  rule={{ kind: 'account-activity', params: { target: { kind: 'list-tag', listId, tagId } } }}
                 />
               </div>
               <div className="acct-head">

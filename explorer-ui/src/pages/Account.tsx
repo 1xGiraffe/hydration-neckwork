@@ -120,7 +120,7 @@ export function Account({ address }: { address: string }) {
                   variant="link"
                   label="Get notified"
                   title="Alert me on this account's activity"
-                  rule={{ kind: 'account-activity', params: { target: { kind: 'address', address: canonicalAddress ?? address } }, name: `Activity of ${F.shortAddr(canonicalAddress ?? address)}` }}
+                  rule={{ kind: 'account-activity', params: { target: { kind: 'address', address: canonicalAddress ?? address } } }}
                 />
                 <a className="ext-link" href={hydrationAppUrl(canonicalAddress ?? address)} target="_blank" rel="noopener">Open in Hydration ↗</a>
               </div>

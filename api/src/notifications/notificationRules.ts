@@ -330,7 +330,11 @@ export function describeRule(
       const p = parsed.params as RuleParams['account-activity']
       const filtered = p.action ? `${p.action} activity` : p.type && p.type !== 'all' ? `${p.type} activity` : null
       const floor = p.minUsd ? ` over ${usd(p.minUsd)}` : ''
-      if (p.target.kind === 'address') return `${filtered ?? 'activity'}${floor} by ${shortAddr(p.target.address)}`
+      // An address target names no group, and every surface that shows this
+      // sentence shows the account beside it as a pill — so the sentence says
+      // WHAT is watched and the pill says whose. Repeating a truncated address
+      // here is what made a rule read "Activity of 1C1rAh…kR3nv" twice over.
+      if (p.target.kind === 'address') return `${filtered ?? 'any activity'}${floor}`
       // A tag target names a group rather than an account, so an unfiltered rule
       // reads "Any activity by …" instead of the address form's bare "activity".
       const what = `${filtered ?? 'Any activity'}${floor}`
@@ -352,7 +356,7 @@ export function describeRule(
     }
     case 'health-factor': {
       const p = parsed.params as RuleParams['health-factor']
-      if (p.target.kind === 'address') return `health factor below ${p.threshold} for ${shortAddr(p.target.address)}`
+      if (p.target.kind === 'address') return `health factor below ${p.threshold}`
       const label = targetLabelOf?.(p.target) ?? null
       if (p.target.kind === 'tag') return `health factor below ${p.threshold} in tag "${label?.name ?? 'a tag'}"`
       return `health factor below ${p.threshold} in ${label ? `"${label.name}" (${label.listName ?? 'a list'})` : 'a list tag'}`
@@ -396,7 +400,7 @@ export function describeRule(
       const p = parsed.params as RuleParams['liquidation']
       const floor = p.minUsd ? ` over ${usd(p.minUsd)}` : ''
       if (!p.target) return `liquidations${floor}`
-      if (p.target.kind === 'address') return `liquidations${floor} of ${shortAddr(p.target.address)}`
+      if (p.target.kind === 'address') return `liquidations${floor}`
       const label = targetLabelOf?.(p.target) ?? null
       if (p.target.kind === 'tag') return `liquidations${floor} of ${label ? `tag "${label.name}"` : 'a tag'}`
       return `liquidations${floor} of ${label ? `"${label.name}" (${label.listName ?? 'a list'})` : 'a list tag'}`
