@@ -4437,43 +4437,120 @@ export async function getGigaMarketStats(): Promise<GigaMarketReserveStat[] | nu
   })
 }
 
-// GIGAHDX liquidation levels. In this isolated market ALL collateral is
-// HDX-priced (stHDX) and all debt is a $1-stable (HOLLAR), so the health
-// factor falls linearly with the HDX price and a position crosses HF = 1 at
-// exactly currentPrice / HF. Positions already below HF 1 keep their (higher)
+// GIGAHDX liquidation levels. A position is liquidatable once its collateral,
+// valued by the MARKET's own oracle, stops covering the debt at the liquidation
+// threshold — so the level is `debt / (collateral × LT)` and carries no price
+// term at all. That matters: the market prices stHDX off a lagging feed, and
+// today it reads ~19% above the Omnipool spot HDX price. Deriving the level as
+// `spot / HF` mixes the two — an HF computed against the oracle divided by a
+// price from somewhere else — and understates every level by exactly that gap.
+//
+// The level comes out per stHDX; stHDX is a staking receipt worth MORE than one
+// HDX (it accrues rewards), so the HDX price the reader compares against is
+// `perStHdx / hdxPerStHdx`. Positions already liquidatable keep their (higher)
 // derived price -- the chart clamps them into its top bucket.
 export interface GigaLiquidationPoint { price: number; stHdx: number }
-interface GigaPositionRow { total_collateral_base: string; total_debt_base: string; health_factor: string }
-export function liquidationPointsFromPositions(rows: GigaPositionRow[], currentPrice: number): GigaLiquidationPoint[] {
+export interface GigaPositionRow {
+  total_debt_base: string
+  current_liquidation_threshold: string
+  /** stHDX collateral backing the position, in whole tokens. */
+  collateral: number
+}
+export interface GigaPositionQueryRow extends Omit<GigaPositionRow, 'collateral'> {
+  holder: string
+  total_collateral_base: string
+}
+
+/**
+ * The market's own stHDX price, recovered from what it says each position's
+ * collateral is worth. Every borrower is valued by one oracle read, so each row
+ * carries the same quotient and the median is that price — taken as a median
+ * rather than a ratio of sums so a borrower whose collateral is not all
+ * enabled, and whose quotient is therefore low, moves nothing.
+ *
+ * Read this way rather than called: the price lives in an EVM oracle contract,
+ * and a request path may not reach for the chain.
+ */
+export function oraclePriceFromPositions(rows: readonly (GigaPositionRow & { total_collateral_base: string })[]): number | null {
+  const quotients = rows
+    .filter(r => r.collateral > 0 && Number(r.total_collateral_base) > 0)
+    .map(r => Number(r.total_collateral_base) / 1e8 / r.collateral)
+    .sort((a, b) => a - b)
+  if (!quotients.length) return null
+  const mid = quotients.length >> 1
+  const median = quotients.length % 2 ? quotients[mid] : (quotients[mid - 1] + quotients[mid]) / 2
+  return median > 0 ? median : null
+}
+export function liquidationPointsFromPositions(rows: GigaPositionRow[], hdxPerStHdx: number): GigaLiquidationPoint[] {
   const out: GigaLiquidationPoint[] = []
-  if (!(currentPrice > 0)) return out
+  if (!(hdxPerStHdx > 0)) return out
   for (const r of rows) {
-    const debt = Number(r.total_debt_base)
-    const collateralUsd = Number(r.total_collateral_base) / 1e8
-    const hf = Number(r.health_factor) / 1e18
-    if (!(debt > 0) || !(collateralUsd > 0) || !Number.isFinite(hf) || hf <= 0) continue
-    out.push({ price: currentPrice / hf, stHdx: collateralUsd / currentPrice })
+    const debtUsd = Number(r.total_debt_base) / 1e8
+    // Basis points on chain (7000 = 70%).
+    const lt = Number(r.current_liquidation_threshold) / 10_000
+    if (!(debtUsd > 0) || !(r.collateral > 0) || !(lt > 0)) continue
+    out.push({ price: debtUsd / (r.collateral * lt) / hdxPerStHdx, stHdx: r.collateral })
   }
   return out.sort((a, b) => a.price - b.price)
 }
 
-export interface GigaLiquidations { currentPrice: number; points: GigaLiquidationPoint[] }
-export async function getGigaLiquidationLevels(): Promise<GigaLiquidations | null> {
-  return cached('explorer:giga-liquidations', 300_000, async () => {
-    const pool = (await getMmReserveTokens()).find(t => t.marketKey === 'gigahdx')?.poolProxy
-    const currentPrice = (await ensurePrices()).get(0)?.price
-    if (!pool || !(currentPrice != null && currentPrice > 0)) return null
-    // Latest position per borrower in this market; the MV keeps it current.
-    const res = await client.query({
-      query: `SELECT toString(${mmPositionField('total_collateral_base')}) AS total_collateral_base,
-                     toString(${mmPositionField('total_debt_base')}) AS total_debt_base,
-                     toString(${mmPositionField('health_factor')}) AS health_factor
-              FROM (${latestMoneyMarketPositionsSql('pool_address = {pool:String}')})
-              WHERE ${mmPositionField('total_debt_base')} > 0`,
-      query_params: { pool: pool.toLowerCase() }, format: 'JSONEachRow',
-    })
-    const points = liquidationPointsFromPositions(await res.json<GigaPositionRow>(), currentPrice)
-    return points.length ? { currentPrice, points } : null
+/**
+ * `currentPrice` is the price the chart's whole axis is stated against, so it
+ * is the MARKET's own valuation of the collateral (expressed per HDX), not the
+ * Omnipool spot price: liquidation is decided by the pool's oracle, and only a
+ * distance measured in that same price means anything. The two are the same
+ * number in a quiet market — measured within ±0.5% of each other all through
+ * 2026-08-27 — and come apart on a sharp move: the oracle is smoothed, so when
+ * HDX fell ~18% in an hour it sat 20% high and was still 17% high a day later.
+ *
+ * That gap is itself risk, and stating levels against spot would hide it: with
+ * the oracle above spot, positions keep approaching liquidation while the
+ * market goes nowhere, purely as the feed catches up. `spotPrice` rides along
+ * so the page can show both rather than silently swapping one for the other.
+ */
+export interface GigaLiquidations { currentPrice: number; spotPrice: number; points: GigaLiquidationPoint[] }
+/**
+ * `hdxPerStHdx` is the GIGAHDX staking exchange rate, which only the chain
+ * knows — it is read by the HDX dashboard's background snapshot and passed in,
+ * because a request path must not enumerate chain storage itself. Without it
+ * the levels cannot be expressed as HDX prices, and the chart is withheld
+ * rather than drawn against an assumed 1:1.
+ */
+export async function getGigaLiquidationLevels(hdxPerStHdx: number): Promise<GigaLiquidations | null> {
+  if (!(hdxPerStHdx > 0)) return null
+  return cached(`explorer:giga-liquidations:${hdxPerStHdx.toFixed(8)}`, 300_000, async () => {
+    const token = (await getMmReserveTokens()).find(t => t.marketKey === 'gigahdx' && assetIdFromMmAddress(t.asset) === 670)
+    const spotPrice = (await ensurePrices()).get(0)?.price
+    const b0 = await aTokenAnchorBlock()
+    if (!token || !b0 || !(spotPrice != null && spotPrice > 0)) return null
+    const [indices, holdings, res] = await Promise.all([
+      reserveIndicesNow(),
+      reconstructAllActiveMoneyMarketScaled([token.aToken], b0),
+      // Latest position per borrower in this market; the MV keeps it current.
+      client.query({
+        query: `SELECT holder,
+                       toString(${mmPositionField('total_collateral_base')}) AS total_collateral_base,
+                       toString(${mmPositionField('total_debt_base')}) AS total_debt_base,
+                       toString(${mmPositionField('current_liquidation_threshold')}) AS current_liquidation_threshold
+                FROM (${latestMoneyMarketPositionsSql('pool_address = {pool:String}')})
+                WHERE ${mmPositionField('total_debt_base')} > 0`,
+        query_params: { pool: token.poolProxy.toLowerCase() }, format: 'JSONEachRow',
+      }),
+    ])
+    const idx = indices.get(`${token.poolProxy.toLowerCase()}:${token.asset.toLowerCase()}`)
+    if (!idx) return null
+    const dec = 10 ** (asset(670).decimals ?? 12)
+    const collateralOf = new Map<string, number>()
+    for (const h of holdings) {
+      if (h.contract !== token.aToken.toLowerCase()) continue
+      collateralOf.set(h.holder.toLowerCase(), Number((h.scaled * idx.liq) / ATOKEN_RAY) / dec)
+    }
+    const rows = (await res.json<GigaPositionQueryRow>())
+      .map(r => ({ ...r, collateral: collateralOf.get(r.holder.toLowerCase()) ?? 0 }))
+    const oracle = oraclePriceFromPositions(rows)
+    const points = liquidationPointsFromPositions(rows, hdxPerStHdx)
+    if (!oracle || !points.length) return null
+    return { currentPrice: oracle / hdxPerStHdx, spotPrice, points }
   })
 }
 
