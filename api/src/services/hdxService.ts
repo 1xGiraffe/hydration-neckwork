@@ -1,5 +1,5 @@
 import type { ClickHouseClient } from '../db/client.ts'
-import { xxhashAsU8a } from '@polkadot/util-crypto'
+import { blake2AsU8a, xxhashAsU8a } from '@polkadot/util-crypto'
 import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
 import { decodeCompact } from './proxyMultisigService.ts'
@@ -27,6 +27,25 @@ const PENDING_UNSTAKES_PREFIX = prefix('GigaHdx', 'PendingUnstakes')
 const VESTING_PREFIX = prefix('Vesting', 'VestingSchedules')
 const VOTING_FOR_PREFIX = prefix('ConvictionVoting', 'VotingFor')
 const RELAY_HEIGHT_KEY = prefix('ParachainSystem', 'LastRelayChainBlockNumber')
+// The three single keys behind the GIGAHDX exchange rate (see loadGigahdxRate).
+// The pallet calls the staked total `TotalLocked`, not `TotalStaked` — a wrong
+// name here is a key that simply does not exist, which reads as an empty value
+// rather than an error, so the test pins the derived key itself.
+const GIGA_TOTAL_LOCKED_KEY = prefix('GigaHdx', 'TotalLocked')
+const STHDX_ASSET_ID = 670
+const STHDX_ISSUANCE_KEY = (() => {
+  const id = new Uint8Array(4)
+  new DataView(id.buffer).setUint32(0, STHDX_ASSET_ID, true)
+  // Tokens.TotalIssuance is Twox64Concat-keyed on the asset id.
+  return u8aToHex(u8aConcat(hexToU8a(prefix('Tokens', 'TotalIssuance')), xxhashAsU8a(id, 64), id))
+})()
+const GIGA_POT_ACCOUNT = (() => {
+  const p = u8aConcat(new TextEncoder().encode('modl'), new TextEncoder().encode('gigahdx!'))
+  return u8aConcat(p, new Uint8Array(32 - p.length))
+})()
+const GIGA_POT_ACCOUNT_KEY = u8aToHex(u8aConcat(
+  hexToU8a(prefix('System', 'Account')), blake2AsU8a(GIGA_POT_ACCOUNT, 128), GIGA_POT_ACCOUNT,
+))
 
 const u32At = (b: Uint8Array, off: number) => (b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24)) >>> 0
 function u128At(b: Uint8Array, off: number): bigint {
@@ -76,6 +95,7 @@ interface HdxChainSnapshot {
   pendingUnstakes: PendingUnstake[]
   vestingSchedules: VestingScheduleAgg[]
   voteLockAccounts: VoteLockAccount[]
+  gigahdxHdxPerShare: number          // HDX backing one stHDX (see loadGigahdxRate)
 }
 
 let snapshot: HdxChainSnapshot | null = null
@@ -261,6 +281,35 @@ async function loadVoteLocks(): Promise<Map<string, VoteClassState[]> | null> {
   return byAccount
 }
 
+/**
+ * HDX backing one stHDX (GIGAHDX), read from three single storage keys.
+ *
+ * Staked HDX is held in two places: `GigaHdx.TotalLocked`, and the gigahdx!
+ * pot, which carries what has accrued to stakers but has not been folded into
+ * the total yet. Both back the same receipts, so the rate is their sum over the
+ * stHDX issuance — leaving the pot out prices stHDX ~0.26% low.
+ *
+ * Above 1 and rising: a receipt is worth more HDX the longer the pool earns.
+ * (Quoted the other way round — GIGAHDX per HDX — it reads just under 1.)
+ */
+export async function loadGigahdxRate(): Promise<number | null> {
+  const [staked, pot, issuance] = await substrateStorageBatch([
+    GIGA_TOTAL_LOCKED_KEY, GIGA_POT_ACCOUNT_KEY, STHDX_ISSUANCE_KEY,
+  ])
+  if (!staked || !issuance) return null
+  const issued = u128At(hexToU8a(issuance), 0)
+  if (issued <= 0n) return null
+  // AccountInfo: nonce/consumers/providers/sufficients (4 × u32), then free.
+  const potFree = pot ? u128At(hexToU8a(pot), 16) : 0n
+  const rate = Number(u128At(hexToU8a(staked), 0) + potFree) / Number(issued)
+  // Floored at 1 exactly as the pallet's `exchange_rate()` floors it — a sub-1
+  // reading is only reachable through privileged drains, and the chain does not
+  // let that artefact into pricing math either. The upper bound is the sanity
+  // check: the pool has never doubled, so anything past it is a bad decode.
+  if (!Number.isFinite(rate) || rate >= 2) return null
+  return Math.max(1, rate)
+}
+
 // ParachainSystem.LastRelayChainBlockNumber: plain u32 — the relay block the
 // current parachain head was built against.
 async function loadRelayHeight(): Promise<number | null> {
@@ -270,8 +319,10 @@ async function loadRelayHeight(): Promise<number | null> {
 }
 
 async function refresh(): Promise<void> {
-  const [locks, pending, vesting, votes, relayHeight] = await Promise.all([loadLocks(), loadPendingUnstakes(), loadVesting(), loadVoteLocks(), loadRelayHeight()])
-  if (!locks || !pending || !vesting || !votes || relayHeight == null) {
+  const [locks, pending, vesting, votes, relayHeight, gigahdxRate] = await Promise.all([
+    loadLocks(), loadPendingUnstakes(), loadVesting(), loadVoteLocks(), loadRelayHeight(), loadGigahdxRate(),
+  ])
+  if (!locks || !pending || !vesting || !votes || relayHeight == null || gigahdxRate == null) {
     if (!snapshot) console.error('[hdx] chain snapshot incomplete, retrying next cycle')
     return // keep last good snapshot
   }
@@ -293,6 +344,7 @@ async function refresh(): Promise<void> {
     pendingUnstakes: pending,
     vestingSchedules: vesting,
     voteLockAccounts,
+    gigahdxHdxPerShare: gigahdxRate,
   }
   // Persist the per-account breakdown snapshot (account/tag balance pages read
   // it from ClickHouse). Failures keep the previous published generation and
@@ -445,7 +497,11 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
       ensurePrices(), loadHead(), paraBlockMs(client), loadSupplyCohorts(), loadDailyFlows(), loadDcaFlows(), loadChurn(), loadStructure(), loadTopMovers(),
       getGigaMarketStats().catch(() => null),
     ])
-    const gigaLiquidations = await getGigaLiquidationLevels().catch(() => null)
+    // Needs the staking exchange rate to express levels as HDX prices; without
+    // a snapshot there is none, and the chart is withheld rather than assumed.
+    const gigaLiquidations = snapshot
+      ? await getGigaLiquidationLevels(snapshot.gigahdxHdxPerShare).catch(() => null)
+      : null
     const px = prices.get(0)
     const snap = snapshot
     // PARACHAIN heights (GIGAHDX unstake expiries, conviction prior unlocks) at

@@ -1147,7 +1147,10 @@ export interface HdxDashboard {
 }
 
 export interface GigaMarketReserveStat { asset: AssetRef; supplied: number; suppliedUsd: number | null; debt: number; debtUsd: number | null; suppliers: number; borrowers: number }
-export interface GigaLiquidations { currentPrice: number; points: { price: number; stHdx: number }[] }
+// `currentPrice` is the money market's own valuation of HDX — the price that
+// decides liquidation — and `spotPrice` is Omnipool's. They agree in a quiet
+// market and separate on a sharp move, because the oracle is smoothed.
+export interface GigaLiquidations { currentPrice: number; spotPrice: number; points: { price: number; stHdx: number }[] }
 
 export interface HollarPegPoint { ts: string; close: number }
 export interface HollarCollateral {
