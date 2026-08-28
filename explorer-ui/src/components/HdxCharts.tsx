@@ -475,6 +475,11 @@ export interface GigaLiqPoint { price: number; stHdx: number }
 // per-price-bucket amounts; the tooltip adds the cumulative reading ("if HDX
 // falls to $X, everything at higher levels has already liquidated"). Positions
 // already under water clamp into the bucket nearest the current price.
+// HDX trades far below a cent, so a liquidation level needs six decimals to say
+// anything. Shared with the caption beside the chart, which quotes the same
+// prices and must not round them differently.
+export const fmtLiqPrice = (v: number) => '$' + (v < 0.01 ? v.toFixed(6) : v.toFixed(4))
+
 export function GigaLiquidationChart({ currentPrice, points, h = 190 }: { currentPrice: number; points: GigaLiqPoint[]; h?: number }) {
   const [hover, setHover] = useState<number | null>(null)
   const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
@@ -496,7 +501,7 @@ export function GigaLiquidationChart({ currentPrice, points, h = 190 }: { curren
   const y = (v: number) => padT + (1 - v / max) * plotH
   const priceAt = (i: number) => minP + i / BUCKETS * span
   const fmt = (v: number) => v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(0)}k` : v.toFixed(0)
-  const fmtP = (v: number) => '$' + (v < 0.01 ? v.toFixed(6) : v.toFixed(4))
+  const fmtP = fmtLiqPrice
   const dropPct = (price: number) => `−${Math.max(0, (1 - price / currentPrice) * 100).toFixed(0)}%`
   // x ticks at −75 / −50 / −25% of spot, when inside the domain
   const ticks = [0.75, 0.5, 0.25].map(d => currentPrice * (1 - d)).filter(p => p > minP)

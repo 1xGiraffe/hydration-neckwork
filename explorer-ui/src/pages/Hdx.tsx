@@ -4,7 +4,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
 import { Crumbs, F, AddrPill, AssetIcon, ChartSkeleton, EmptyRow, compactAmount } from '../components/ui'
 import {
-  fmtHdx, cohortColor, OWNERSHIP_COLORS, AGE_COLORS,
+  fmtHdx, fmtLiqPrice, cohortColor, OWNERSHIP_COLORS, AGE_COLORS,
   ChartLegend, ShareBar, StackedColumnChart, MirroredBarChart, StackedAreaChart, MultiLineChart, GigaLiquidationChart,
 } from '../components/HdxCharts'
 import { LOCK_ORDER, lockColor } from '../components/lockColors'
@@ -92,6 +92,17 @@ function GigaMarketSection({ d }: { d: HdxDashboard }) {
             <div className="sec-title" style={{ marginBottom: 6 }}>Liquidation levels <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}>
               · {fmtHdx(d.gigaLiquidations.points.reduce((a, p) => a + p.stHdx, 0))} GIGAHDX at risk across {d.gigaLiquidations.points.length} borrowers — how much becomes liquidatable as the HDX price falls
             </span></div>
+            {/* The axis is stated against the money market's own price, because
+                that is the one liquidation is decided on. It is smoothed, so it
+                trails a sharp move — while it is above spot these positions
+                keep approaching liquidation with the market standing still, and
+                naming both prices is the only way that shows. */}
+            <div className="hdx-note">
+              Levels are the money market's own price, which is what liquidation is decided on — now {fmtLiqPrice(d.gigaLiquidations.currentPrice)}.
+              {Math.abs(1 - d.gigaLiquidations.spotPrice / d.gigaLiquidations.currentPrice) >= 0.005 && (
+                <> Omnipool trades at {fmtLiqPrice(d.gigaLiquidations.spotPrice)}, {((1 - d.gigaLiquidations.spotPrice / d.gigaLiquidations.currentPrice) * 100).toFixed(1)}% lower: the oracle is smoothed and still catching up, so these positions keep closing on liquidation even if the market goes nowhere.</>
+              )}
+            </div>
             <GigaLiquidationChart currentPrice={d.gigaLiquidations.currentPrice} points={d.gigaLiquidations.points} />
           </div>
         )}
