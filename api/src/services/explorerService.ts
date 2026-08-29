@@ -13196,7 +13196,7 @@ async function activityWindow(
     }
     return plan.live
       ? cached(`${key}:${await liveHeadTag()}`, LIVE_CACHE_MS, build)
-      : cachedSwr(key, ACTIVITY_WINDOW_FRESH_MS, ACTIVITY_WINDOW_STALE_MS, build)
+      : cachedSwr(key, ACTIVITY_WINDOW_FRESH_MS, plan.staleMs ?? ACTIVITY_WINDOW_STALE_MS, build)
   }
   const want = offset + limit
   try {
@@ -13219,7 +13219,16 @@ async function activityWindow(
 const ACTIVITY_WINDOW_FRESH_MS = 60_000
 const ACTIVITY_WINDOW_STALE_MS = 5 * 60_000
 
-export interface ActivityWindowPlan { key: string; depth: number; live: boolean }
+export interface ActivityWindowPlan { key: string; depth: number; live: boolean; staleMs?: number }
+
+// How long a token-filtered merge window may serve stale while it revalidates.
+// This shape's build is minutes, not seconds (see activityTokenMergeFiltered),
+// and stale-while-revalidate only prevents blocking while the VALUE OUTLIVES
+// ONE REBUILD: with the shared 5-minute stale budget a ~5-minute build expires
+// the entry it is refreshing, and every reader lands on a cold, blocking miss
+// again — the budget must exceed the build time by a wide margin, not the
+// polling interval.
+const ACTIVITY_TOKEN_MERGE_STALE_MS = 30 * 60_000
 
 // The shared window a request pages from, or null when the request's read already
 // IS its page. The key names the window — feed shape and proven depth — and
@@ -13237,6 +13246,7 @@ export function activityWindowPlan(
   const category = normalizeActivityTypeKey(type)
   if (!activityPagesInMemory(category, action)) return null
   const depth = activityWindowDepth(offset + limit)
+  const tokenMerge = activityTokenMergeFiltered(category, filters)
   return {
     key: `explorer:activity-window:${category}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${action ?? ''}:${depth}`,
     depth,
@@ -13245,18 +13255,36 @@ export function activityWindowPlan(
     // long its TTL is — reading "has a date filter" as "is historical" froze it
     // for the whole freshness period instead.
     //
-    // The exact-value condition is a COST rule rather than a correctness one: a
-    // sparse floor widens every source, and a reader who can re-read the page
-    // loses nothing by seeing it a minute old. A forward-only reader can lose
+    // The exact-value and token-merge conditions are COST rules rather than
+    // correctness ones: a sparse floor (or a token filter on the multi-source
+    // merge) widens every source, and a reader who can re-read the page loses
+    // nothing by seeing it a minute old. A forward-only reader can lose
     // everything — see `forwardOnly` on ActivityPageOptions — so it overrides
-    // that rule and pays one build per block for a page complete when read.
+    // both rules and pays one build per block for a page complete when read.
     //
     // The depth rule is neither and stands unconditionally: a deeper bucket is a
     // different window, and only the page that owns offset 0 may claim this one.
     live: depth === activityWindowDepth(limit)
       && !(timeWindow(from, to) && datedWindowIsClosed(to))
-      && (forwardOnly || !activityExactValueFiltered(category, filters)),
+      && (forwardOnly || (!activityExactValueFiltered(category, filters) && !tokenMerge)),
+    ...(tokenMerge ? { staleMs: ACTIVITY_TOKEN_MERGE_STALE_MS } : {}),
   }
+}
+
+// The other expensive window shape, beside the sparse value floor: a token
+// filter on the MERGED category. 'all' fans out to every source and the token
+// must match every referenced asset (nested pool assets and both pair sides
+// included), so a ubiquitous token turns classification into minutes of work —
+// measured 2026-08-29: `type=all&token=0&min=10` (HDX) built for ~5 minutes
+// while `type=trade` under the same filters answers in 90 ms, because trade
+// and transfer sources push the token into SQL on asset-first keys. On the
+// per-block live key that build restarted every block, could never finish
+// inside its own freshness, and the concurrent pile-up starved the whole api
+// for ~25 minutes (486 responses >5 s in one hour; the edge served the combo
+// as 499/504 on every sampled day back to 2026-08-15). Off the live key it is
+// one build per freshness window, shared by every poller.
+export function activityTokenMergeFiltered(type: string, filters: ValueListFilters): boolean {
+  return normalizeActivityTypeKey(type) === 'all' && filters.token != null
 }
 
 // Which categories build a page by slicing rows held in memory. Classification, an

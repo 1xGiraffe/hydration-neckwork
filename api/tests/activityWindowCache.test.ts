@@ -132,6 +132,41 @@ describe('window freshness', () => {
     expect(plan(0, { min: 95_000 })!.live).toBe(false)
   })
 
+  // The 2026-08-29 incident: `type=all&token=0&min=10` — the page default floor
+  // plus the HDX token filter on the merged feed — built for ~5 minutes per
+  // window, and on the per-block live key that build restarted every block and
+  // piled up until the whole api starved (486 responses >5 s in one hour). The
+  // token filter on the MERGE is a cost class of its own: every source must
+  // match the token against every referenced asset, however small the floor.
+  it('takes a token-filtered merged window off the live TTL, whatever the floor', () => {
+    expect(plan(0, { token: '0', min: 10 })!.live).toBe(false)
+    expect(plan(0, { token: '0' })!.live).toBe(false)
+    expect(plan(0, { token: '5', min: 10 })!.live).toBe(false)
+    expect(plan(PAGE, { token: '0', min: 10 })!.live).toBe(false)
+  })
+
+  it('gives the token-filtered merge a stale budget that outlives its own rebuild', () => {
+    // Stale-while-revalidate only prevents blocking while the value OUTLIVES one
+    // rebuild: with the shared 5-minute budget a ~5-minute build expires the very
+    // entry it is refreshing and every reader is back on a cold, blocking miss.
+    expect(plan(0, { token: '0', min: 10 })!.staleMs).toBe(30 * 60_000)
+    expect(plan(PAGE, { token: '0' })!.staleMs).toBe(30 * 60_000)
+    // Every other demoted window keeps the shared budget (staleMs unset).
+    expect(plan(0, { min: 1_000 })!.staleMs).toBeUndefined()
+    expect(plan(PAGE)!.staleMs).toBeUndefined()
+  })
+
+  it('keeps token-filtered trade and transfer windows live: their token pushes into SQL', () => {
+    expect(plan(0, { type: 'trade', token: '0', min: 10 })!.live).toBe(true)
+    expect(plan(0, { type: 'transfer', token: '0', min: 10 })!.live).toBe(true)
+  })
+
+  it('lets a forward-only reader override the token cost rule, like the value rule', () => {
+    // The notification evaluator cannot re-read a page it stepped past, so it
+    // pays one build per block for a complete page (see ActivityPageOptions).
+    expect(plan(0, { token: '0', min: 10, live: true })!.live).toBe(true)
+  })
+
   // A dated window that reaches TODAY is a live window wearing a historical key: it
   // keeps gaining rows, so a key without the head freezes it for the whole TTL. The
   // page cache above already reads this off `datedWindowIsClosed`; the window under it
@@ -171,7 +206,9 @@ describe('window freshness', () => {
     // The live branch must carry the ingested-head tag: its freshness comes
     // from per-block key rotation, not the TTL (which is only GC there).
     const live = explorerService.match(/\? cached\(`\$\{key\}:\$\{await liveHeadTag\(\)\}`, LIVE_CACHE_MS, build\)/g) ?? []
-    const windowed = explorerService.match(/: cachedSwr\(key, ACTIVITY_WINDOW_FRESH_MS, ACTIVITY_WINDOW_STALE_MS, build\)/g) ?? []
+    // The stale budget is the plan's to override (the token-filtered merge needs
+    // one that outlives its own rebuild); the shared constant stays the default.
+    const windowed = explorerService.match(/: cachedSwr\(key, ACTIVITY_WINDOW_FRESH_MS, plan\.staleMs \?\? ACTIVITY_WINDOW_STALE_MS, build\)/g) ?? []
 
     expect(live).toHaveLength(1)
     expect(windowed).toHaveLength(1)
