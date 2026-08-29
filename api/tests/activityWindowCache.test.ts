@@ -297,6 +297,16 @@ describe('activityExactValueFiltered', () => {
     // A token-keyed swap read applies the USD predicate before its own LIMIT.
     expect(activityExactValueFiltered('trade', { min: 95_000, token: 'HDX' })).toBe(false)
     expect(activityExactValueFiltered('all', { min: 95_000, token: 'HDX' })).toBe(true)
+    // A token filter on the merged feed makes ANY USD floor sparse (the probe
+    // widened all fifteen sources through the ×4 ladder for HDX at $10), so it
+    // takes the exact path whatever the floor — but only with a floor to push
+    // down, and only on the merge: trade's token filter is already a cheap SQL
+    // pushdown, and token-without-floor fills the probe instantly.
+    expect(activityExactValueFiltered('all', { min: 10, token: '0' })).toBe(true)
+    expect(activityExactValueFiltered('all', { min: 10 })).toBe(false)
+    expect(activityExactValueFiltered('all', { token: '0' })).toBe(false)
+    expect(activityExactValueFiltered('all', { min: 10, token: '0', unit: 'token' })).toBe(false)
+    expect(activityExactValueFiltered('trade', { min: 10, token: '0' })).toBe(false)
   })
 
   it('is used by both the builder and the window plan, and defined once', () => {
