@@ -24,3 +24,18 @@ CREATE TABLE IF NOT EXISTS price_data.user_notification_channels (channel_id Str
 CREATE TABLE IF NOT EXISTS price_data.user_notification_rules (rule_id String, account_id String, kind LowCardinality(String), name String DEFAULT '', params String DEFAULT '', channels Array(String) DEFAULT [], muted UInt8 DEFAULT 0, cooldown_s UInt32 DEFAULT 0, deleted UInt8 DEFAULT 0, created_at DateTime DEFAULT now(), updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY rule_id SETTINGS index_granularity = 64;
 CREATE TABLE IF NOT EXISTS price_data.user_notification_inbox (notification_id String, account_id String, rule_id String, kind LowCardinality(String), title String, body String DEFAULT '', url String DEFAULT '', block_height UInt32 DEFAULT 0, read UInt8 DEFAULT 0, deleted UInt8 DEFAULT 0, created_at DateTime DEFAULT now(), updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY notification_id TTL created_at + INTERVAL 180 DAY SETTINGS index_granularity = 256;
 CREATE TABLE IF NOT EXISTS price_data.user_notification_state (key String, value String DEFAULT '', deleted UInt8 DEFAULT 0, created_at DateTime DEFAULT now(), updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY key SETTINGS index_granularity = 64;
+-- Data API (hydration-data host) control plane. Tokens store the sha256 of the
+-- raw `hdd_…` secret only — the raw value is shown once at creation and never
+-- persisted; `token_prefix` (first 12 chars) exists purely so the owner can
+-- recognize a token in a list. Written by the explorer api (mint/revoke) and by
+-- api-data's throttled last_used_at refresh, which re-reads the current row via
+-- INSERT…SELECT so it can never resurrect a revoked token with stale fields.
+CREATE TABLE IF NOT EXISTS price_data.user_api_tokens (token_hash String, account_id String, label String DEFAULT '', token_prefix String DEFAULT '', created_at DateTime DEFAULT now(), last_used_at DateTime DEFAULT toDateTime(0), deleted UInt8 DEFAULT 0, updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY token_hash SETTINGS index_granularity = 64;
+-- Per-account rate-limit overrides for the Data API; absence of a row means the
+-- env defaults (DATA_API_DEFAULT_PER_MINUTE / DATA_API_DEFAULT_PER_DAY) apply.
+CREATE TABLE IF NOT EXISTS price_data.user_api_limits (account_id String, per_minute UInt32, per_day UInt32, note String DEFAULT '', updated_by String DEFAULT '', deleted UInt8 DEFAULT 0, updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY account_id SETTINGS index_granularity = 64;
+-- Data API usage metering: one row per (account, UTC hour), REPLACED with the
+-- running total on each flush (never summed additively — api-data seeds its
+-- in-memory counter from the stored row after a restart, so a flush is
+-- idempotent under replay and a restart loses at most one flush interval).
+CREATE TABLE IF NOT EXISTS price_data.user_api_usage (account_id String, hour_start DateTime, requests UInt64, rejected UInt64, updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (account_id, hour_start) TTL hour_start + INTERVAL 400 DAY SETTINGS index_granularity = 256;
