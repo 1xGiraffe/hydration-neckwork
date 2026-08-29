@@ -541,6 +541,12 @@ services:
       # tick interval.
       - EXPLORER_PUBLIC_URL=${EXPLORER_PUBLIC_URL:-}
       - NOTIFY_EVAL_MS=${NOTIFY_EVAL_MS:-}
+      # Data API control plane (routes/apiTokens.ts): the admin allowlist and
+      # the default limits the admin page reports beside overrides. Must match
+      # the api-data service's values.
+      - ADMIN_ACCOUNT_IDS=${ADMIN_ACCOUNT_IDS:-}
+      - DATA_API_DEFAULT_PER_MINUTE=${DATA_API_DEFAULT_PER_MINUTE:-}
+      - DATA_API_DEFAULT_PER_DAY=${DATA_API_DEFAULT_PER_DAY:-}
       # Wormhole NTT backing check. Optional origin-chain RPC map (JSON keyed by
       # Wormhole chain id) for reading the custody that backs the bridged supply;
       # empty disables custody reads and the affected assets report as
@@ -618,6 +624,46 @@ services:
       # served as null; the rest of the response is unaffected.
       - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
       - EXPLORER_OCELLOIDS_TOKEN=${EXPLORER_OCELLOIDS_TOKEN:-}
+    networks:
+      - neckwork
+
+  # Data API (~/.g/hydraken-api-concept.md): the token-authenticated /v1 REST
+  # surface for external developers at hydration-data.neckwork.net. Fourth
+  # process on the shared api image; no RPC access needed, and deliberately NO
+  # nginx micro-cache in front (a URI-keyed shared cache is unsafe for
+  # authenticated responses, and per-user metering must see every request) —
+  # the edge proxies straight to this container. Token CRUD lives on the
+  # explorer `api` (control plane); this process only reads user_api_tokens/
+  # user_api_limits and writes user_api_usage.
+  api-data:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: hydration-neckwork-api
+    container_name: hydration-neckwork-api-data
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      schema-bootstrap:
+        condition: service_completed_successfully
+    command: ["./node_modules/.bin/tsx", "src/data/server.ts"]
+    ports:
+      - "3003:3000"
+    environment:
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - DATA_API_PORT=3000
+      # Admin wallet accounts (comma-separated 0x-64-hex): exempt from rate
+      # limits here; the same list gates the admin routes on `api`.
+      - ADMIN_ACCOUNT_IDS=${ADMIN_ACCOUNT_IDS:-}
+      # Per-account defaults when user_api_limits has no override. Must match
+      # what `api` reports on the admin page (same variables there).
+      - DATA_API_DEFAULT_PER_MINUTE=${DATA_API_DEFAULT_PER_MINUTE:-}
+      - DATA_API_DEFAULT_PER_DAY=${DATA_API_DEFAULT_PER_DAY:-}
+      # 401 context / docs links.
+      - DATA_API_PUBLIC_URL=${DATA_API_PUBLIC_URL:-}
+      - EXPLORER_PUBLIC_URL=${EXPLORER_PUBLIC_URL:-}
     networks:
       - neckwork
 
