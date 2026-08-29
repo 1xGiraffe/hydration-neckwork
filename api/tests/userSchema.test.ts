@@ -27,15 +27,27 @@ describe('004_user.sql', () => {
       'user_profiles', 'user_avatars', 'user_sessions', 'user_lists', 'user_tags', 'user_tag_members',
       'user_list_subscriptions', 'user_list_order',
       'user_notification_channels', 'user_notification_rules', 'user_notification_inbox', 'user_notification_state',
+      'user_api_tokens', 'user_api_limits', 'user_api_usage',
     ]
     for (const t of tables) {
       const stmt = statements.find(s => s.includes(`price_data.${t}`))
       expect(stmt, t).toBeDefined()
       expect(stmt, t).toContain('CREATE TABLE IF NOT EXISTS')
       expect(stmt, t).toContain('ReplacingMergeTree(updated_at)')
-      expect(stmt, t).toContain('deleted')
+      // user_api_usage is the one non-tombstoned table: it is a metering
+      // counter whose rows are REPLACED with running totals and aged out by
+      // TTL — there is nothing to soft-delete.
+      if (t !== 'user_api_usage') expect(stmt, t).toContain('deleted')
     }
     expect(statements).toHaveLength(tables.length)
+  })
+
+  // The Data API's usage metering must age out on its own (like the inbox) and
+  // its rows are replaced-by-running-total, so its version column must be the
+  // write time — see the flush seeding in api/src/data/services/auth.ts.
+  it('bounds api usage with a TTL', () => {
+    const stmt = statements.find(s => s.includes('price_data.user_api_usage'))
+    expect(stmt).toContain('TTL hour_start + INTERVAL 400 DAY')
   })
 
   // Ordered membership (B3): a fresh database gets the column from this

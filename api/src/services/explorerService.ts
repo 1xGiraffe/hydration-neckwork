@@ -1,4 +1,5 @@
 import type { ClickHouseClient } from '../db/client.ts'
+import { OMNI_FIXED, omnipoolRemoveLiquidity, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
 import { cached, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
 import { NOMINAL_BLOCKS_PER_HOUR, blocksPerHour, measuredParaBlockMs, paraBlockMs } from './blockTime.ts'
 import { referendumTitleFor, referendumTitleKey } from './referendumTitleService.ts'
@@ -5590,12 +5591,14 @@ function mmCollateralShortfallUsd(moneyMarket: MoneyMarketPosition | null, folde
 // hubAmount: the position's H2O (LRNA hub) leg, present for Omnipool positions
 // whose withdraw value includes a hub component (already folded into valueUsd).
 export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string }
-export interface DecodedPosition { assetId: number; amount: bigint; shares: bigint; priceNum: bigint; priceDen: bigint }
+// The position arithmetic lives in services/lpMath.ts (shared with the Data
+// API, which may not import this module); re-exported for the callers and
+// tests that reach it through here.
+export { OMNI_FIXED, omnipoolRemoveLiquidity, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
 
 // Omnipool state (per-asset reserve/hub/shares) for LP withdraw value
 // Reads the latest per-block stableswap/omnipool snapshot (raw_block_snapshots →
-// omnipool.assets[]). Used by the omnipool remove-liquidity math below.
-export interface OmnipoolAssetState { reserve: bigint; hub: bigint; shares: bigint }
+// omnipool.assets[]). Used by the omnipool remove-liquidity math.
 let omniState = new Map<number, OmnipoolAssetState>()
 let omniStateAt = 0
 async function loadOmnipoolState(): Promise<Map<number, OmnipoolAssetState>> {
@@ -5615,23 +5618,6 @@ async function loadOmnipoolState(): Promise<Map<number, OmnipoolAssetState>> {
     if (m.size) { omniState = m; omniStateAt = Date.now() }
   } catch { /* keep last good */ }
   return omniState
-}
-// Omnipool remove-liquidity (full position) → (asset out, hub/LRNA out), mirroring
-// the node's calculate_remove_liquidity_state_changes (withdrawalFee = 0). Verified
-// bit-exact against the official indexer's per-position liquidityAmount.
-export const OMNI_FIXED = 10n ** 18n
-export function omnipoolRemoveLiquidity(st: OmnipoolAssetState, pos: DecodedPosition): { liquidity: bigint; hub: bigint } {
-  const { reserve: R, hub: Q, shares: S } = st
-  if (S <= 0n || pos.priceDen === 0n) return { liquidity: 0n, hub: 0n }
-  const price = pos.priceNum * OMNI_FIXED / pos.priceDen
-  const pxr = (price * R) / OMNI_FIXED + 1n
-  const lt = Q * OMNI_FIXED < price * R
-  const gt = Q * OMNI_FIXED > price * R
-  const deltaB = lt ? ((pxr - Q) * pos.shares) / (pxr + Q) + 1n : 0n
-  const deltaShares = pos.shares - deltaB
-  const liquidity = (R * deltaShares) / S
-  const hub = gt ? ((Q * (Q - pxr)) / (Q + pxr) * deltaShares) / S : 0n
-  return { liquidity, hub }
 }
 const LRNA_ASSET_ID = 1   // hub asset (H2O / LRNA), 12 decimals
 // Value a decoded omnipool position (asset leg + LRNA/hub leg) in USD.
@@ -5662,15 +5648,6 @@ export function omnipoolLegsForBucket(positions: HistoricalOwnedPosition[]): { p
     out.push({ positionId, assetId, liquidity, hub })
   }
   return out
-}
-
-// XYK LP redeemable reserve legs for `shares` of a pool with raw reserves `reserveA/B` and
-// `totalShares` outstanding — amountX = floor(reserveX * shares / totalShares). Integer/
-// bigint throughout (values exceed 2^53); callers convert to USD only after this. Shared by
-// direct wallet LP balances and collection-5389 farm-deposit principal (Phase 2, XYK).
-export function xykShareLegs(shares: bigint, reserveA: bigint, reserveB: bigint, totalShares: bigint): { amountA: bigint; amountB: bigint } {
-  if (totalShares <= 0n || shares <= 0n) return { amountA: 0n, amountB: 0n }
-  return { amountA: (reserveA * shares) / totalShares, amountB: (reserveB * shares) / totalShares }
 }
 
 // Current open omnipool positions owned by a set of accounts, reconstructed from
