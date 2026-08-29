@@ -133,6 +133,81 @@ The `api-public` service (`api/src/public/`, same image as `api`, own process be
   The legacy omnipool buy-fee side flips at the runtime upgrade at block 4,221,778 (fee on the IN
   asset before, OUT asset after) — the MV and its tests pin this; see the spec's legacy-era note.
 
+## Data API
+
+The `api-data` service (`api/src/data/`, same image as `api`, own process on port 3003,
+host hydration-data.neckwork.net) serves external developers a token-authenticated,
+per-account rate-limited REST surface over the public explorer dataset. Like the public
+API it is a **versioned frozen contract**; concept: `~/.g/hydraken-api-concept.md`.
+
+- Changes within `/v1` are additive-only; renaming, retyping, or removing a field or
+  route requires a `/v2`. The full route set is pinned by
+  `api/tests/data/openapi.test.ts` (EXPECTED_PATHS) — extending the surface means
+  extending that list in the same change.
+- Every route declares zod request/response schemas, carries its normative semantics in
+  its OpenAPI `description` (the Scalar portal at `/docs` is the single documentation
+  source), and has an explicit entry in `api/src/data/cacheControl.ts` — authenticated
+  responses are `private, max-age=N`, unmatched routes ship `no-store`, and there is
+  deliberately NO nginx micro-cache in front (URI-keyed shared caching is unsafe for
+  authenticated responses, and per-account metering must see every request). In-process
+  caches use `data:`-prefixed keys; live feeds key on the indexed head via
+  `services/head.ts`.
+- `api/src/data/**` may import only the allow-list pinned by
+  `api/tests/data/isolation.test.ts` (`db/client`, `config`, `types`, and the
+  `cache`/`explorerAssets`/`valuation`/`lpMath` services). Never `explorerService`, never
+  `userAuthService`, never `public/**`; nothing outside `src/data/` imports from it.
+  Address parsing/rendering is self-contained in `data/services/address.ts`. Pure domain
+  arithmetic both surfaces need (the LP position math) lives in a leaf module under
+  `services/` that `explorerService` re-exports — never restated in the data tree.
+- CURRENT pool state is the newest `raw_block_snapshots` row (`data/services/poolSnapshot.ts`,
+  one point read per block, exact at the head); the 600-block state-history tables serve
+  history only. Current prices are `asset_price_latest` (009); historical flows are priced
+  through `data/services/eventTimePrices.ts` (closed hourly candle ≤30 days before the row).
+- Auth/limits invariants (`data/services/auth.ts`): tokens are `hdd_` + 64 hex, stored
+  as sha256 in `user_api_tokens`, resolved per request through a 30 s positive / 10 s
+  negative in-process cache — no boot-time load, so mint/revoke on the explorer takes
+  effect within seconds without restarts. All tokens of one account share the account's
+  fixed per-minute and per-UTC-day windows (env defaults
+  `DATA_API_DEFAULT_PER_MINUTE`/`_PER_DAY`, per-account overrides in
+  `user_api_limits`); `ADMIN_ACCOUNT_IDS` accounts are exempt from enforcement but
+  still metered. Usage flushes to `user_api_usage` by REPLACING the (account, hour) row
+  with a running total seeded from storage after a restart — never an additive insert.
+  The throttled `last_used_at` refresh must stay an INSERT…SELECT of the CURRENT row
+  gated on `deleted = 0`, or it could resurrect a revoked token.
+- The control plane lives on the explorer api (`api/src/routes/apiTokens.ts` +
+  `services/userApiTokenService.ts`): token CRUD under `/user/api-tokens`
+  (session-gated) and the admin surface under `/user/admin/*` (allowlist-gated,
+  404-invisible to non-admins). `api-data` only ever reads
+  `user_api_tokens`/`user_api_limits` and writes `user_api_usage`.
+- Its read models live in `clickhouse/schema/009_data.sql` (hash-first, account-first,
+  asset-first and contract-first projections). The by-account twins CHAIN off their
+  MV-fed sources (`pool_swap_legs`, `dca_events`, `staking_activity`,
+  `liquidity_activity`, `governance_vote_calls`) so extraction logic exists once;
+  replay safety rides the source's replacement identity. Selective filters the sort key
+  cannot prune (`call=`, `name=`) require a bounded window
+  (`requireBoundedWindow`) rather than a wider timeout.
+- Feed mechanics live once, in `data/services/feed.ts` (window quartet, `(block, index)`
+  keyset cursor, replay dedup, `versionedPageSql`) and `data/schemas/common.ts`
+  (`requireCursor`/`requirePositionCursor`/`feedPage`); a new feed composes them rather
+  than restating them. A page over a key-prefixed table orders by the sort key ONLY and
+  applies the `ingested_at` version tie-break outside the bounded read
+  (`versionedPageSql`): appending it inside the `ORDER BY` defeats read-in-order and
+  turns the page into a whole-prefix scan (measured 5–20× the rows). Mixed ASC/DESC
+  over the key columns does the same.
+- Never alias a SELECT expression to the name of a column it reads when the statement
+  references that name again (`toString(x) AS x … WHERE x < …`, `argMax(b, b) AS b,
+  argMax(a, b)`): ClickHouse resolves the later reference to the alias. The data test
+  fake client runs every query through `tests/data/sqlGuard.ts`, so this fails the
+  route's own test; HAVING is the one clause where targeting the alias is intended.
+- One wire shape per entity: an entity reached through two routes (a vote under an
+  account and under its referendum, a staking event globally and per account, an OTC
+  event in an order's history and in an account's fills, a fee leg on a fill and on a
+  netted trade) is the same zod object, declared once in a `routes/*Shared.ts` module.
+  Every event row is `eventName`, every call `callName`; accounts on the wire are always
+  `zAccountRef`, never raw hex. Caches over closed-hour/closed-day sources (`stats`, the
+  600-block pool-state grid, the reserve-index fold) key on the window and a plain TTL,
+  not the live head — a head key on a source that moves once an hour never hits.
+
 ## UI
 
 - Reuse existing components, formatting conventions, tokens, and interaction patterns before adding variants.

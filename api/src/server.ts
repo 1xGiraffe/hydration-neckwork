@@ -23,6 +23,8 @@ import { initLiveHeadService, stopLiveHeadService } from './services/liveHeadSer
 import { initPendingHeadService, startPendingHeadService, stopPendingHeadService } from './services/pendingHeadService.ts'
 import { tagRoutes } from './routes/tags.ts'
 import { userRoutes } from './routes/user.ts'
+import { apiTokenRoutes } from './routes/apiTokens.ts'
+import { initUserApiTokenService } from './services/userApiTokenService.ts'
 import { listsRoutes } from './routes/lists.ts'
 import { verificationRoutes, collapseDuplicateSlashes } from './routes/verification.ts'
 import { loadExplorerAssets, stopExplorerAssetsRefresh } from './services/explorerAssets.ts'
@@ -210,6 +212,7 @@ await fastify.register(poolsRoutes)
 await fastify.register(liveRoutes)
 await fastify.register(tagRoutes)
 await fastify.register(userRoutes)
+await fastify.register(apiTokenRoutes)
 await fastify.register(notificationRoutes)
 await fastify.register(listsRoutes)
 await fastify.register(verificationRoutes)
@@ -272,6 +275,7 @@ async function start() {
     initContractVerificationService(client)
     await initUserAuthService(client)
     initUserProfileService(client)
+    initUserApiTokenService(client)
     initUserListService(client)
     initNotifications(client)
     initEvaluator(client)

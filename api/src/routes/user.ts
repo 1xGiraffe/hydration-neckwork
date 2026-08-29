@@ -16,6 +16,7 @@ import {
   getListTagVotesByReferendum, getListTagTabCounts, getListTagListTotal, getListTagValueEvents,
 } from '../services/explorerService.ts'
 import { setProfileName, setProfileAvatar, clearProfileAvatar, profileForAccount, UserDataError } from '../services/userProfileService.ts'
+import { isApiAdmin } from '../services/userApiTokenService.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
 import {
   ensurePersonalList, ownedListsFor, subscriptionsFor, invitesFor, listOrderFor, tagMapFor, directoryFoldFor,
@@ -54,6 +55,9 @@ const verifyBody = z.object({ address: z.string().min(3).max(128), nonce: z.stri
 export async function meResponse(accountId: string) {
   return {
     account: accountRef(accountId),
+    // Cosmetic only (shows the admin nav entry): the admin routes check the
+    // allowlist server-side themselves and 404 for everyone else.
+    apiAdmin: isApiAdmin(accountId),
     profile: profileForAccount(accountId),
     lists: ownedListsFor(accountId).map(listSummaryRef),
     subscriptions: subscriptionsFor(accountId).map(listSummaryRef),
