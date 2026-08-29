@@ -13317,7 +13317,18 @@ export function activityExactValueFiltered(type: string, filters: ValueListFilte
   return filters.min != null
     && filters.unit !== 'token'
     && !(normalizeActivityTypeKey(type) === 'trade' && !!filters.token)
-    && filters.min >= 1_000
+    // A four-figure floor is sparse whatever else is set. A token filter on the
+    // MERGED feed makes any USD floor sparse the same way: the probe fetches the
+    // token's candidates without the floor, and for a small-denomination token
+    // (HDX at $10) almost none survive, so the probe re-fetched all fifteen
+    // sources through the ×4 widening ladder — measured 2026-08-30, one
+    // args_json source alone read 93 GiB per 3 minutes of rebuild and the cold
+    // build took ~22 s. The exact reads are token-bounded, which keeps each
+    // source's event-time ASOF predicate selective — the very condition the
+    // min ≥ $1000 rule was measured under. (`type=trade` keeps its exemption:
+    // its token filter is a SQL pushdown that fills the probe instantly, and
+    // the token-without-floor merge keeps the probe for the same reason.)
+    && (filters.min >= 1_000 || (normalizeActivityTypeKey(type) === 'all' && filters.token != null))
 }
 
 async function buildActivityWindow(limit: number, from: string | undefined, to: string | undefined, offset: number, type: string, filters: ValueListFilters, action?: string): Promise<ActivityWindow> {
