@@ -41,7 +41,11 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': {
+      // Regex with a trailing slash, not the '/api' prefix: a bare prefix also
+      // captures PAGE routes that merely start with it — /api-tokens was
+      // proxied upstream as '-tokens' instead of being served as the SPA.
+      // Production nginx matches `location /api/` and never had the problem.
+      '^/api/': {
         target: 'http://localhost:3000',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
@@ -52,7 +56,11 @@ export default defineConfig({
   preview: {
     port: 5175,
     proxy: {
-      '/api': {
+      // Regex with a trailing slash, not the '/api' prefix: a bare prefix also
+      // captures PAGE routes that merely start with it — /api-tokens was
+      // proxied upstream as '-tokens' instead of being served as the SPA.
+      // Production nginx matches `location /api/` and never had the problem.
+      '^/api/': {
         target: 'http://localhost:3000',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
