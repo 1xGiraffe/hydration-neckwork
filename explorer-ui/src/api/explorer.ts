@@ -8,6 +8,7 @@ import type {
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
   AccountRef, DeviceLinkResponse, DeviceLinkStatus, DeviceSession, EvmReceipt, PoolsIndexResponse,
+  ApiTokensResponse, CreatedApiToken, ApiUsersResponse,
   NotificationChannel, NotificationRule, NotificationRuleInput, NotificationRulePatch,
   NotificationsOverview, NotificationInboxPage, NotificationTelegramLink, NotificationLinkStatus,
   WebPushSubscriptionInput,
@@ -303,6 +304,18 @@ export const userApi = {
   claimDeviceLink: (code: string) => authedJson<LoginResponse>('POST', '/user/auth/device-link/claim', { code }),
   sessions: (signal?: AbortSignal) => authedJson<{ sessions: DeviceSession[] }>('GET', '/user/sessions', undefined, signal),
   revokeSession: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/sessions/${encodeURIComponent(id)}`),
+  // Data API tokens (the hydration-data host authenticates with these; CRUD
+  // lives here where the wallet session is). The create response is the ONLY
+  // place the raw secret ever appears.
+  apiTokens: (signal?: AbortSignal) => authedJson<ApiTokensResponse>('GET', '/user/api-tokens', undefined, signal),
+  createApiToken: (label: string) => authedJson<CreatedApiToken>('POST', '/user/api-tokens', { label }),
+  revokeApiToken: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/api-tokens/${encodeURIComponent(id)}`),
+  // Admin (allowlist-gated server-side; 404 for everyone else).
+  apiUsers: (signal?: AbortSignal) => authedJson<ApiUsersResponse>('GET', '/user/admin/api-users', undefined, signal),
+  setApiUserLimits: (accountId: string, body: { perMinute: number; perDay: number; note?: string }) =>
+    authedJson<{ ok: true }>('PUT', `/user/admin/api-users/${encodeURIComponent(accountId)}/limits`, body),
+  clearApiUserLimits: (accountId: string) => authedJson<{ ok: true }>('DELETE', `/user/admin/api-users/${encodeURIComponent(accountId)}/limits`),
+  adminRevokeApiToken: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/admin/api-tokens/${encodeURIComponent(id)}`),
   me: (signal?: AbortSignal) => authedJson<MeResponse>('GET', '/user/me', undefined, signal),
   tagMap: (signal?: AbortSignal) => authedJson<TagMapResponse>('GET', '/user/tag-map', undefined, signal),
   setProfileName: (name: string) => authedJson<ProfileRef>('PUT', '/user/profile', { name }),

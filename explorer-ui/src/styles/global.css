@@ -2293,6 +2293,11 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .device-name { color: var(--text-high); font-weight: 500; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .device-tag { font-size: 10px; }
 .device-meta { color: var(--text-low); font-size: 12px; margin-top: 2px; }
+/* The one-time API-token reveal (ApiTokens.tsx): the device-row box holding a
+   wrap-anywhere secret plus the shared copy button — the value has no spaces,
+   so without break-all it would force the dialog wide on mobile. */
+.token-reveal { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+.token-reveal-value { flex: 1; min-width: 0; word-break: break-all; font-size: 12.5px; color: var(--text-high); user-select: all; }
 /* ── Notifications ───────────────────────────────────────────────────────
    The topbar bell, the /notifications page, and the "Get notified" button
    every other surface carries. No new tokens or motion: the badge is the

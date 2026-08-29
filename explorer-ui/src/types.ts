@@ -1487,12 +1487,46 @@ export interface TagMapResponse { lists: TagMapList[] }
 
 export interface MeResponse {
   account: AccountRef
+  // Cosmetic client-side guard for the Data-API admin surface (shows the menu
+  // entry / page); the server 404s non-admins on every admin route regardless.
+  // Optional so a response from an older API build still parses.
+  apiAdmin?: boolean
   profile: ProfileRef | null
   lists: ListSummaryRef[]
   subscriptions: ListSummaryRef[]
   invites: ListSummaryRef[]
   order: string[]
 }
+
+// ── Data API tokens (hydration-data host; control plane on the explorer api) ──
+export interface ApiTokenInfo {
+  id: string           // the token hash — the revocation handle, never the secret
+  label: string
+  tokenPrefix: string  // first 12 chars of the raw token, for recognition
+  createdAt: string    // 'YYYY-MM-DD HH:MM:SS' (UTC)
+  lastUsedAt: string | null
+}
+// The raw `hdd_…` secret rides ONLY on the create response and is shown once.
+export interface CreatedApiToken extends ApiTokenInfo { token: string }
+export interface ApiTokensResponse { tokens: ApiTokenInfo[]; maxTokens: number; docsUrl: string }
+
+export interface ApiLimits { perMinute: number; perDay: number; override: boolean; note: string }
+export interface ApiUserUsage {
+  requests24h: number
+  rejected24h: number
+  requests7d: number
+  requests30d: number
+  lastActiveHour: string | null
+}
+export interface ApiUserRow {
+  account: AccountRef
+  tokenCount: number
+  labels: string[]
+  lastUsedAt: string | null
+  limits: ApiLimits
+  usage: ApiUserUsage
+}
+export interface ApiUsersResponse { defaults: { perMinute: number; perDay: number }; users: ApiUserRow[] }
 
 export interface LoginChallengeResponse { nonce: string; message: string }
 export interface LoginResponse { token: string; me: MeResponse }

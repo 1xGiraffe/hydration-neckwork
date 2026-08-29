@@ -112,10 +112,11 @@ function ProfileAvatar({ account }: { account?: AccountRef }) {
 // Desktop compact login control: a Connect button logged out, or the account's
 // avatar + name opening a small menu (My account / Lists / Log out) logged
 // in. Escape and an outside click close the menu, same as the drawer below.
-function AccountMenuButton({ session, account, invites, theme, onToggleTheme, onConnect, onDevices }: {
+function AccountMenuButton({ session, account, invites, apiAdmin, theme, onToggleTheme, onConnect, onDevices }: {
   session: ReturnType<typeof useSession>
   account: AccountRef | undefined
   invites: number
+  apiAdmin: boolean
   theme: 'dark' | 'light'
   onToggleTheme: () => void
   onConnect: () => void
@@ -173,6 +174,8 @@ function AccountMenuButton({ session, account, invites, theme, onToggleTheme, on
         <div className="account-menu">
           <Link to={paths.account(session.address)} onClick={() => setOpen(false)}>My account</Link>
           <Link to={paths.lists()} onClick={() => setOpen(false)}>Lists{invites > 0 && <span className="invite-badge">{invites}</span>}</Link>
+          <Link to={paths.apiTokens()} onClick={() => setOpen(false)}>API tokens</Link>
+          {apiAdmin && <Link to={paths.apiAdmin()} onClick={() => setOpen(false)}>API admin</Link>}
           <button type="button" className="menu-row" onClick={() => { setOpen(false); onDevices() }}>Devices</button>
           {/* The standalone topbar toggle is hidden while logged in — the menu
               is its home then, so the chrome stays one control shorter. */}
@@ -189,9 +192,10 @@ function AccountMenuButton({ session, account, invites, theme, onToggleTheme, on
 // popover would be one flyout too many. Notifications is deliberately absent
 // here and in the desktop menu: the topbar bell is always visible, so a menu
 // row would be a second door to the same room.
-function DrawerAccountSection({ session, invites, onConnect, onDevices, onNavigate }: {
+function DrawerAccountSection({ session, invites, apiAdmin, onConnect, onDevices, onNavigate }: {
   session: ReturnType<typeof useSession>
   invites: number
+  apiAdmin: boolean
   onConnect: () => void
   onDevices: () => void
   onNavigate: () => void
@@ -208,6 +212,8 @@ function DrawerAccountSection({ session, invites, onConnect, onDevices, onNaviga
       <div className="sec-lbl">Account</div>
       <Link to={paths.account(session.address)} onClick={onNavigate}>My account</Link>
       <Link to={paths.lists()} onClick={onNavigate}>Lists{invites > 0 && <span className="invite-badge">{invites}</span>}</Link>
+      <Link to={paths.apiTokens()} onClick={onNavigate}>API tokens</Link>
+      {apiAdmin && <Link to={paths.apiAdmin()} onClick={onNavigate}>API admin</Link>}
       <button type="button" className="drawer-row" onClick={() => { onNavigate(); onDevices() }}>Devices</button>
       <button type="button" className="drawer-row" onClick={() => { onNavigate(); void logout() }}>Log out</button>
     </div>
@@ -222,6 +228,7 @@ export function Topbar({ route }: { route: Route }) {
   const me = useMe()
   const account = me.data?.account
   const invites = me.data?.invites.length ?? 0
+  const apiAdmin = me.data?.apiAdmin === true
   // The unread badge and the logged-out→login→create handoff both belong to the
   // one component that is mounted on every page.
   const notifications = useNotificationsOverview()
@@ -335,7 +342,7 @@ export function Topbar({ route }: { route: Route }) {
         <div className="topbar-right">
           {!session && <ThemeToggle onClick={toggleTheme} />}
           <NotificationBell unread={unread} />
-          <AccountMenuButton session={session} account={account} invites={invites} theme={theme} onToggleTheme={toggleTheme} onConnect={openConnect} onDevices={openDevices} />
+          <AccountMenuButton session={session} account={account} invites={invites} apiAdmin={apiAdmin} theme={theme} onToggleTheme={toggleTheme} onConnect={openConnect} onDevices={openDevices} />
           <button ref={drawerTriggerRef} className="nav-burger" onClick={() => setDrawer(true)} aria-label="Open menu" aria-expanded={drawer} aria-haspopup="dialog">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
           </button>
@@ -354,7 +361,7 @@ export function Topbar({ route }: { route: Route }) {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
               </button>
             </div>
-            <DrawerAccountSection session={session} invites={invites} onConnect={() => { setDrawer(false); openConnect() }} onDevices={() => { setDrawer(false); openDevices() }} onNavigate={() => setDrawer(false)} />
+            <DrawerAccountSection session={session} invites={invites} apiAdmin={apiAdmin} onConnect={() => { setDrawer(false); openConnect() }} onDevices={() => { setDrawer(false); openDevices() }} onNavigate={() => setDrawer(false)} />
             <div className="drawer-sec">
               <div className="sec-lbl">Explore</div>
               {DRAWER_LINKS.map(it => (
