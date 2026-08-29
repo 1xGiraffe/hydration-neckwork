@@ -67,6 +67,12 @@ function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: numb
   return pending
 }
 
+// Test-only: a fresh app under test must not see the previous test's entries.
+export function resetCacheForTests(): void {
+  store.clear()
+  inflight.clear()
+}
+
 export async function cached<T>(key: string, ttlMs: number, fn: () => Promise<T>): Promise<T> {
   assertDuration('ttlMs', ttlMs)
   const now = Date.now()
