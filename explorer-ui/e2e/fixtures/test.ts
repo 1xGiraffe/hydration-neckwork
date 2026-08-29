@@ -5,6 +5,7 @@ import type { ActivityRow } from '../../src/types'
 import type {
   AccountRef, ListDetailResponse, ListTagDetail, ListSummaryRef, MeResponse, Tag, TagMapResponse, TagDetail,
   NotificationChannel, NotificationInboxRow, NotificationKind, NotificationRule, WebPushSubscriptionInput,
+  ApiTokenInfo, ApiUserRow,
 } from '../../src/types'
 import { KIND_LABELS, canonicalRuleParams, ruleTagTarget } from '../../src/notificationKinds'
 
@@ -90,6 +91,13 @@ export interface UserMockState {
   // separate aggregate.
   listTagSummaryOverrides: Record<string, Partial<TagDetail>>
   notifications: NotificationMockState
+  // Data API control plane: the session's own tokens, the admin roster, and
+  // whether /user/me reports this session as an API admin. Admin routes 404
+  // unless `apiAdmin` — mirroring the real allowlist gate.
+  apiAdmin: boolean
+  apiTokens: ApiTokenInfo[]
+  apiUsers: ApiUserRow[]
+  nextApiTokenId: number
 }
 
 // Everything under /user/notifications, as one mutable object. `vapidPublicKey`
@@ -142,8 +150,15 @@ function freshState(): UserMockState {
     tagMap: { lists: [{ listId: 'system', name: 'Hydration', tags: [] }] },
     listTagSummaryOverrides: {},
     notifications: freshNotifications(),
+    apiAdmin: false,
+    apiTokens: [],
+    apiUsers: [],
+    nextApiTokenId: 1,
   }
 }
+
+// The defaults the real admin overview reports beside overrides.
+export const E2E_API_LIMIT_DEFAULTS = { perMinute: 30, perDay: 20000 }
 
 // The summary line the API's own describeRule() produces. Kept deliberately
 // coarse — a spec asserts on the KIND label and whatever `name` it chose, and
@@ -237,6 +252,7 @@ function buildListTagDetail(state: UserMockState, listId: string, tagId: string)
 function buildMe(state: UserMockState): MeResponse {
   return {
     account: state.account,
+    apiAdmin: state.apiAdmin,
     profile: state.account.profile ?? null,
     lists: state.lists,
     subscriptions: state.subscriptions,
@@ -300,6 +316,72 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
 
   if (method === 'GET' && path === '/user/me') { await fulfillJson(route, 200, buildMe(state)); return }
   if (method === 'GET' && path === '/user/tag-map') { await fulfillJson(route, 200, state.tagMap); return }
+
+  // ── Data API control plane ──────────────────────────────────────────────
+  // Stateful like the notifications mock: a minted token is there on the next
+  // GET, a revoked one is gone, and the raw secret rides ONLY on the create
+  // response — exactly the property the api-tokens spec exists to prove.
+  if (method === 'GET' && path === '/user/api-tokens') {
+    await fulfillJson(route, 200, { tokens: state.apiTokens, maxTokens: 10, docsUrl: 'https://hydration-data.neckwork.net/docs' })
+    return
+  }
+  if (method === 'POST' && path === '/user/api-tokens') {
+    if (state.apiTokens.length >= 10) { await fulfillJson(route, 422, { error: 'At most 10 active tokens per account — revoke one first' }); return }
+    const { label } = bodyOf(route) as { label?: string }
+    const n = state.nextApiTokenId++
+    const raw = `hdd_${String(n).padStart(4, '0').repeat(16)}`
+    const info: ApiTokenInfo = {
+      id: `${'f'.repeat(60)}${String(n).padStart(4, '0')}`,
+      label: label ?? '',
+      tokenPrefix: raw.slice(0, 12),
+      createdAt: '2026-08-28 12:00:00',
+      lastUsedAt: null,
+    }
+    state.apiTokens.push(info)
+    await fulfillJson(route, 200, { ...info, token: raw })
+    return
+  }
+  {
+    const m = /^\/user\/api-tokens\/([0-9a-f]{64})$/.exec(path)
+    if (method === 'DELETE' && m) {
+      const at = state.apiTokens.findIndex(t => t.id === m[1])
+      if (at < 0) { await fulfillJson(route, 404, { error: 'Unknown token' }); return }
+      state.apiTokens.splice(at, 1)
+      await fulfillJson(route, 200, { ok: true })
+      return
+    }
+  }
+  if (path.startsWith('/user/admin/')) {
+    // Invisible to non-admins, like the real allowlist gate.
+    if (!state.apiAdmin) { await fulfillJson(route, 404, { error: 'Not found' }); return }
+    if (method === 'GET' && path === '/user/admin/api-users') {
+      await fulfillJson(route, 200, { defaults: E2E_API_LIMIT_DEFAULTS, users: state.apiUsers })
+      return
+    }
+    const limits = /^\/user\/admin\/api-users\/([^/]+)\/limits$/.exec(path)
+    if (limits) {
+      const row = state.apiUsers.find(u => u.account.accountId === decodeURIComponent(limits[1]) || u.account.address === decodeURIComponent(limits[1]))
+      if (!row) { await fulfillJson(route, 404, { error: 'Unknown account' }); return }
+      if (method === 'PUT') {
+        const body = bodyOf(route) as { perMinute: number; perDay: number; note?: string }
+        if (!Number.isInteger(body.perMinute) || body.perMinute < 1) { await fulfillJson(route, 422, { error: 'perMinute must be at least 1' }); return }
+        row.limits = { perMinute: body.perMinute, perDay: body.perDay, override: true, note: body.note ?? '' }
+        await fulfillJson(route, 200, { ok: true })
+        return
+      }
+      if (method === 'DELETE') {
+        row.limits = { ...E2E_API_LIMIT_DEFAULTS, override: false, note: '' }
+        await fulfillJson(route, 200, { ok: true })
+        return
+      }
+    }
+    const adminToken = /^\/user\/admin\/api-tokens\/([0-9a-f]{64})$/.exec(path)
+    if (method === 'DELETE' && adminToken) {
+      state.apiTokens = state.apiTokens.filter(t => t.id !== adminToken[1])
+      await fulfillJson(route, 200, { ok: true })
+      return
+    }
+  }
   if (method === 'GET' && path === '/user/invites') { await fulfillJson(route, 200, state.invites); return }
   // The accounts directory, folded under THIS session's own tag map —
   // buildAccountsForViewer walks state.tagMap the same priority order
