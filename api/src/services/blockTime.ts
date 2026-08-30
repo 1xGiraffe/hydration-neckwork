@@ -101,7 +101,20 @@ export interface ResolvedBlockTime {
 export function avgBlockMsSql(sampleBlocks = 100): string {
   const n = Math.max(2, Math.round(sampleBlocks))
   return `SELECT toFloat64(dateDiff('millisecond', min(block_timestamp), max(block_timestamp)) / greatest(count() - 1, 1)) AS ms
-    FROM (SELECT block_timestamp FROM price_data.blocks ORDER BY block_height DESC LIMIT ${n})`
+    FROM (${newestBlockTimestampsSql(n)})`
+}
+
+// The timestamps of the newest `n` indexed blocks, newest first. Bounded on the
+// key as well as ordered by it: `ORDER BY block_height DESC LIMIT n` alone is
+// served by read-in-order, which still opens one granule per part of the live
+// partition — measured 1.99M rows for a 100-row sample, on a read the live header
+// repeats every block — while `max(block_height)` is answered from the parts'
+// minmax index. The bound leaves twice the sample below the head so a height the
+// writer has not filled yet cannot shorten it.
+export function newestBlockTimestampsSql(n: number): string {
+  return `SELECT block_timestamp FROM price_data.blocks
+      WHERE block_height > (SELECT max(block_height) FROM price_data.blocks) - ${2 * n}
+      ORDER BY block_height DESC LIMIT ${n}`
 }
 
 // Blocks produced in the last 24 hours. Dividing a fixed span of WALL CLOCK by
