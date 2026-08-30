@@ -1,7 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { OMNI_FIXED, omnipoolRemoveLiquidity, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
 import { cached, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
-import { NOMINAL_BLOCKS_PER_HOUR, blocksPerHour, measuredParaBlockMs, paraBlockMs } from './blockTime.ts'
+import { NOMINAL_BLOCKS_PER_HOUR, blocksPerHour, measuredParaBlockMs, newestBlockTimestampsSql, paraBlockMs } from './blockTime.ts'
 import { referendumTitleFor, referendumTitleKey } from './referendumTitleService.ts'
 // Type-only: governanceService imports value exports back from this file (accountRef,
 // ensurePrices, …), so a runtime import here would cycle. search() reaches getReferenda
@@ -1831,12 +1831,13 @@ export async function getStats(): Promise<ExplorerStats> {
           SELECT
             toUInt64(head) AS head_block,
             (SELECT toString(max(block_timestamp)) FROM price_data.raw_blocks WHERE block_height = head) AS head_time,
-            -- The displayed average block time. Same measurement as
-            -- blockTime.ts's avgBlockMsSql (in seconds, not ms) but folded into
-            -- this query so the Live header costs one read rather than two; the
-            -- helper is the one behaviour depends on, this one is only shown.
+            -- The displayed average block time. Same measurement and the same
+            -- key-bounded sample as blockTime.ts's avgBlockMsSql (in seconds,
+            -- not ms) but folded into this query so the Live header costs one
+            -- read rather than two; the helper is the one behaviour depends on,
+            -- this one is only shown.
             (SELECT toFloat64(dateDiff('second', min(block_timestamp), max(block_timestamp)) / greatest(count() - 1, 1))
-               FROM (SELECT block_timestamp FROM price_data.blocks ORDER BY block_height DESC LIMIT 100)) AS avg_block
+               FROM (${newestBlockTimestampsSql(100)})) AS avg_block
         `,
         format: 'JSONEachRow',
       }),

@@ -59,6 +59,9 @@ describe('avgBlockMsSql', () => {
     expect(sql).toContain('price_data.blocks')
     expect(sql).not.toContain('price_data.raw_blocks')
     expect(sql).toContain('ORDER BY block_height DESC LIMIT 100')
+    // Bounded on the key as well as ordered by it: read-in-order alone still
+    // opens a granule per part of the live partition (1.99M rows for 100).
+    expect(sql).toContain('WHERE block_height > (SELECT max(block_height) FROM price_data.blocks) - 200')
     expect(sql).toContain("dateDiff('millisecond'")
     // count()-1 intervals between count() samples, and never a division by zero.
     expect(sql).toContain('greatest(count() - 1, 1)')
