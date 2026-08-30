@@ -134,7 +134,9 @@ describe('the account activity index has exactly one table behind it', () => {
     // interactions). The tenth is the account activity watermark, which reads
     // only max(block_height) for the account — it is what keeps an idle
     // account's page from rebuilding every few seconds.
-    expect(occurrences(explorerService, 'price_data.account_activity_v3')).toBe(10)
+    // 9: the account watermark reads its max block from account_activity_bounds,
+    // the max-state twin, rather than aggregating the v3 prefix.
+    expect(occurrences(explorerService, 'price_data.account_activity_v3')).toBe(9)
     expect(occurrences(affinityService, 'price_data.account_activity_v3')).toBe(2)
   })
 
