@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
-  collectiveVoteRow, collectiveVotesAdmitted, mergeVoteFeedPage, voteFeedGovWindow,
+  collectiveVoteRow, collectiveVotesAdmitted, mergeVoteFeedPage, selectCollectiveVoteEvents, timeWindowMatcher, voteFeedGovWindow,
   type AssetRef, type VoteRow,
 } from '../src/services/explorerService.ts'
 import { loadExplorerAssets, stopExplorerAssetsRefresh } from '../src/services/explorerAssets.ts'
@@ -152,5 +152,52 @@ describe('which feeds admit a collective vote', () => {
     expect(at).toBeGreaterThan(-1)
     const body = src.slice(at, src.indexOf('\n}', at))
     expect(body).toContain('collectiveVotesAdmitted(filters) ? countCollectiveVotes(from, to) : 0')
+  })
+})
+
+/* ── the in-process ledger's window ───────────────────────────────────────── */
+
+// The whole family lives in an in-process ledger (rareEventLedger.ts), so the
+// window, account and limit the SQL read used to apply are applied over its rows.
+// What must match the old read exactly: newest first, the account arg compared as
+// the same string, and the day bounds inclusive on both ends.
+describe('selectCollectiveVoteEvents', () => {
+  const OTHER = '0x' + '22'.repeat(32)
+  const STRANGER = '0x' + '33'.repeat(32)
+  const at = (block: number, index: number, ts: string, voter = VOTER) => ({ ...event({ block, index, args: { account: voter } }), ts })
+  const ledger = [
+    at(100, 1, '2026-07-31 23:59:59'),
+    at(200, 1, '2026-08-01 00:00:00'),
+    at(200, 2, '2026-08-01 00:00:00', OTHER),
+    at(300, 1, '2026-08-02 12:00:00'),
+    at(400, 1, '2026-08-03 00:00:00'),
+  ]
+
+  it('returns the newest events first and stops at the limit', () => {
+    expect(selectCollectiveVoteEvents(ledger, undefined, undefined, undefined, 2).map(e => `${e.block_height}:${e.event_index}`)).toEqual(['400:1', '300:1'])
+  })
+
+  it('matches the account arg exactly, as the SQL read did', () => {
+    expect(selectCollectiveVoteEvents(ledger, [OTHER], undefined, undefined, 10).map(e => `${e.block_height}:${e.event_index}`)).toEqual(['200:2'])
+    expect(selectCollectiveVoteEvents(ledger, [STRANGER], undefined, undefined, 10)).toEqual([])
+  })
+
+  it('bounds the day window inclusively on both ends', () => {
+    expect(selectCollectiveVoteEvents(ledger, undefined, '2026-08-01', '2026-08-02', 10).map(e => `${e.block_height}:${e.event_index}`)).toEqual(['300:1', '200:2', '200:1'])
+  })
+})
+
+describe('timeWindowMatcher', () => {
+  it('mirrors timeWindow(): from midnight of `from` through the whole of `to`', () => {
+    const within = timeWindowMatcher('2026-08-01', '2026-08-31')
+    expect(within('2026-07-31 23:59:59')).toBe(false)
+    expect(within('2026-08-01 00:00:00')).toBe(true)
+    expect(within('2026-08-31 23:59:59')).toBe(true)
+    expect(within('2026-09-01 00:00:00')).toBe(false)
+  })
+
+  it('leaves an absent or malformed bound open', () => {
+    expect(timeWindowMatcher(undefined, undefined)('1970-01-01 00:00:00')).toBe(true)
+    expect(timeWindowMatcher('yesterday', undefined)('1970-01-01 00:00:00')).toBe(true)
   })
 })
