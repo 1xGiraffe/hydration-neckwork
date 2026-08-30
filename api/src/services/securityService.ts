@@ -3,6 +3,7 @@ import { xxhashAsU8a } from '@polkadot/util-crypto'
 import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import { substrateStorageBatch, substrateAllKeys, SUBSTRATE_RPC_URL } from './substrateRpc.ts'
 import { cachedSwr } from './cache.ts'
+import { RareEventLedger } from './rareEventLedger.ts'
 import { nominalBlockMsMismatch, resolveParaBlockTime, type ResolvedBlockTime } from './blockTime.ts'
 import { accountRef, ensurePrices, mmMarkets, parachainName, usdValue, type AccountRef, type AssetRef, type PriceInfo } from './explorerService.ts'
 import { assetDescriptor } from './explorerAssets.ts'
@@ -348,6 +349,29 @@ let refreshInFlight: Promise<void> | null = null
 // the previous one keeps being served until the rebuild lands.
 let snapshotGeneration = 0
 
+// The two raw_events families this service reads WHOLE — every asset-registry
+// event that could carry a deposit-fuse limit, and every whitelist action — held
+// in process and extended by block (see rareEventLedger.ts). Both are small
+// (1,644 and 199 rows) and both were read on every 20 s dashboard rebuild, the
+// registry one on the 60 s chain-state refresh as well; on raw_events the
+// event-name index still left 6.3M rows / 700 MiB and 3.9M / 190 MiB per read.
+export interface RegistryEventRow extends RegistryLimitRow { event_index: number }
+const registryLimitLedger = new RareEventLedger<RegistryEventRow>({
+  eventNames: ['AssetRegistry.Registered', 'AssetRegistry.Updated'],
+  columnsSql: `block_height, block_timestamp, extrinsic_index, event_index,
+               JSONExtractInt(args_json, 'assetId') AS asset_id,
+               JSONExtractString(args_json, 'xcmRateLimit') AS xcm_rate_limit`,
+  head: async () => (await queryHead()).block_height,
+  client: () => client,
+})
+export interface WhitelistEventRow { block_height: number; block_timestamp: string; event_index: number; event_name: string; call_hash: string }
+const whitelistLedger = new RareEventLedger<WhitelistEventRow>({
+  eventNames: ['Whitelist.CallWhitelisted', 'Whitelist.WhitelistedCallDispatched'],
+  columnsSql: `block_height, block_timestamp, event_index, event_name, JSONExtractString(args_json, 'callHash') AS call_hash`,
+  head: async () => (await queryHead()).block_height,
+  client: () => client,
+})
+
 // Every asset that currently declares an `xcm_rate_limit`, reconstructed from the
 // registry's own events: `Registered`/`Updated` both carry the asset's full state,
 // so the newest event per asset IS the current registry entry. Verified against
@@ -357,24 +381,22 @@ let snapshotGeneration = 0
 // only an unset limit disarms the fuse; `Some(0)` arms it with no headroom, which
 // is the strictest setting there is and has to be visible.
 async function loadRegistryLimits(): Promise<Map<number, bigint>> {
-  const res = await client.query({
-    query: `SELECT asset_id, xcm_rate_limit
-            FROM (
-              SELECT JSONExtractInt(args_json, 'assetId') AS asset_id,
-                     JSONExtractString(args_json, 'xcmRateLimit') AS xcm_rate_limit,
-                     row_number() OVER (PARTITION BY asset_id ORDER BY block_height DESC, event_index DESC) AS rn
-              FROM price_data.raw_events
-              WHERE event_name IN ('AssetRegistry.Registered', 'AssetRegistry.Updated')
-            )
-            WHERE rn = 1 AND xcm_rate_limit != '' AND xcm_rate_limit != 'null'`,
-    format: 'JSONEachRow',
-  })
-  const rows = await res.json<{ asset_id: number; xcm_rate_limit: string }>()
-  const out = new Map<number, bigint>()
+  return registryLimitsFromEvents(await registryLimitLedger.rows())
+}
+
+export function registryLimitsFromEvents(rows: readonly RegistryEventRow[]): Map<number, bigint> {
+  const newest = new Map<number, RegistryEventRow>()
   for (const r of rows) {
+    const assetId = Number(r.asset_id)
+    const prev = newest.get(assetId)
+    if (!prev || r.block_height > prev.block_height || (r.block_height === prev.block_height && r.event_index > prev.event_index)) newest.set(assetId, r)
+  }
+  const out = new Map<number, bigint>()
+  for (const [assetId, r] of newest) {
+    if (r.xcm_rate_limit === '' || r.xcm_rate_limit === 'null') continue
     try {
       const limit = BigInt(r.xcm_rate_limit)
-      if (limit >= 0n) out.set(Number(r.asset_id), limit)
+      if (limit >= 0n) out.set(assetId, limit)
     } catch { /* non-numeric payload — the asset simply has no readable limit */ }
   }
   return out
@@ -947,16 +969,13 @@ async function queryLimitEvents(): Promise<LimitEventRow[]> {
 // so the rows that leave the limit alone are dropped by registryLimitChanges
 // rather than here — the diff needs to see them to know nothing moved.
 async function queryRegistryLimitEvents(): Promise<RegistryLimitRow[]> {
-  const res = await client.query({
-    query: `SELECT block_height, block_timestamp, extrinsic_index,
-                   JSONExtractInt(args_json, 'assetId') AS asset_id,
-                   JSONExtractString(args_json, 'xcmRateLimit') AS xcm_rate_limit
-            FROM price_data.raw_events
-            WHERE event_name IN ('AssetRegistry.Registered', 'AssetRegistry.Updated')
-            ORDER BY asset_id, block_height, event_index`,
-    format: 'JSONEachRow',
-  })
-  return res.json<RegistryLimitRow>()
+  return registryLimitEventsByAsset(await registryLimitLedger.rows())
+}
+
+// Grouped by asset and ordered by block within each — the order registryLimitChanges
+// diffs in.
+export function registryLimitEventsByAsset(rows: readonly RegistryEventRow[]): RegistryEventRow[] {
+  return [...rows].sort((a, b) => Number(a.asset_id) - Number(b.asset_id) || a.block_height - b.block_height || a.event_index - b.event_index)
 }
 
 export interface WormholeManagerEventRow {
@@ -1188,7 +1207,17 @@ async function queryTrips(): Promise<TripSourceRow[]> {
 // Net is the pallet's own quantity (`volume_in - volume_out` for the asset), and
 // both legs of every Omnipool sell/buy contribute — router aggregates are excluded
 // so a routed trade is counted once, at the pool level the breaker guards.
+//
+// Held five minutes and revalidated in the background: the answer is a maximum
+// over a month, which one more block moves only when it sets a new record, and
+// the read walks both legs of 30 days of Omnipool swaps (~3.4M rows) — on the
+// dashboard's 20 s rebuild that was 4,250 walks a day for a figure that changed
+// a handful of times.
 async function queryPeakBlockVolume(): Promise<Map<number, PeakRow>> {
+  return cachedSwr('explorer:security:peak-block-volume', 5 * 60_000, 15 * 60_000, queryPeakBlockVolumeUncached)
+}
+
+async function queryPeakBlockVolumeUncached(): Promise<Map<number, PeakRow>> {
   const res = await client.query({
     query: `
       WITH legs AS (
@@ -1249,21 +1278,22 @@ async function queryStableswapTradability(): Promise<TradabilityEventRow[]> {
 // Call hashes the technical committee whitelisted that no referendum has
 // dispatched yet — each remains dispatchable on the fast whitelisted-caller track.
 async function queryOutstandingWhitelistedCalls(): Promise<WhitelistRow[]> {
-  const res = await client.query({
-    query: `SELECT w.call_hash AS call_hash, w.block_height AS block_height, w.block_timestamp AS block_timestamp
-            FROM (
-              SELECT JSONExtractString(args_json, 'callHash') AS call_hash, max(block_height) AS block_height, max(block_timestamp) AS block_timestamp
-              FROM price_data.raw_events WHERE event_name = 'Whitelist.CallWhitelisted' GROUP BY call_hash
-            ) w
-            LEFT JOIN (
-              SELECT DISTINCT JSONExtractString(args_json, 'callHash') AS call_hash
-              FROM price_data.raw_events WHERE event_name = 'Whitelist.WhitelistedCallDispatched'
-            ) d ON d.call_hash = w.call_hash
-            WHERE d.call_hash = ''
-            ORDER BY w.block_height DESC`,
-    format: 'JSONEachRow',
-  })
-  return res.json<WhitelistRow>()
+  return outstandingWhitelistedCalls(await whitelistLedger.rows())
+}
+
+// Newest whitelisting first; a hash whitelisted more than once reports its newest,
+// and a hash that was EVER dispatched is settled whatever came before or after.
+export function outstandingWhitelistedCalls(rows: readonly WhitelistEventRow[]): WhitelistRow[] {
+  const whitelisted = new Map<string, WhitelistRow>()
+  const dispatched = new Set<string>()
+  for (const r of rows) {
+    if (r.event_name === 'Whitelist.WhitelistedCallDispatched') { dispatched.add(r.call_hash); continue }
+    const prev = whitelisted.get(r.call_hash)
+    if (!prev || r.block_height > prev.block_height) {
+      whitelisted.set(r.call_hash, { call_hash: r.call_hash, block_height: r.block_height, block_timestamp: r.block_timestamp })
+    }
+  }
+  return [...whitelisted.values()].filter(w => !dispatched.has(w.call_hash)).sort((a, b) => b.block_height - a.block_height)
 }
 
 // Solvency per configured market: how much is borrowed, and how much of that sits

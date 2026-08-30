@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { OMNI_FIXED, omnipoolRemoveLiquidity, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
 import { cached, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
 import { NOMINAL_BLOCKS_PER_HOUR, blocksPerHour, measuredParaBlockMs, newestBlockTimestampsSql, paraBlockMs } from './blockTime.ts'
+import { RareEventLedger } from './rareEventLedger.ts'
 import { referendumTitleFor, referendumTitleKey } from './referendumTitleService.ts'
 // Type-only: governanceService imports value exports back from this file (accountRef,
 // ensurePrices, …), so a runtime import here would cycle. search() reaches getReferenda
@@ -12033,36 +12034,61 @@ export function collectiveVoteRow(e: RawCollectiveVoteEvent, hdx: AssetRef): Vot
   }
 }
 
+// Every collective vote event, held in process (see rareEventLedger.ts) and
+// extended by block. The family is ~3k rows all-time and is read on every account
+// page; on raw_events the event-name index still left 3–5M rows of args_json to
+// read per call — 13k reads and 2.1 TiB a day. The ledger's replacement key is
+// (block, event_index), so a replayed raw range cannot emit a duplicate vote.
+const collectiveVoteLedger = new RareEventLedger<RawCollectiveVoteEvent>({
+  eventNames: COLLECTIVE_VOTE_EVENTS,
+  columnsSql: 'block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json',
+  head: () => indexedRawHead(),
+  client: () => client,
+})
+
 // The collective votes in one window (whole chain when `accounts` is absent, one
-// account set when it is present). Bounded by the block window, the tiny
-// event-name set and its own LIMIT — never a FINAL read or an unbounded join.
+// account set when it is present), newest first, at most `limit`.
 async function getCollectiveVotes(accounts: string[] | undefined, limit: number, from?: string, to?: string): Promise<VoteRow[]> {
-  const list = accounts ? sqlAccountList(accounts) : null
-  if (list === "''") return []
-  const bound = timeWindow(from, to) ?? '1'
-  const res = await client.query({
-    query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
-            FROM price_data.raw_events
-            WHERE ${bound}
-              AND event_name IN (${sqlEventNameList(COLLECTIVE_VOTE_EVENTS)})
-              ${list ? `AND JSONExtractString(args_json,'account') IN (${list})` : ''}
-            ORDER BY block_height DESC, event_index DESC
-            LIMIT {limit:UInt32}`,
-    query_params: { limit }, format: 'JSONEachRow',
-  })
-  const events = await res.json<RawCollectiveVoteEvent>()
+  if (accounts && sqlAccountList(accounts) === "''") return []
   const hdx = asset(0)
-  // raw_events is a ReplacingMergeTree read without FINAL; dedup any re-ingested
-  // rows by (block, event_index) so a re-index can't emit a duplicate vote.
-  const seen = new Set<string>()
-  const out: VoteRow[] = []
-  for (const e of events) {
-    const key = `${e.block_height}:${e.event_index}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    out.push(collectiveVoteRow(e, hdx))
+  return selectCollectiveVoteEvents(await collectiveVoteLedger.rows(), accounts, from, to, limit).map(e => collectiveVoteRow(e, hdx))
+}
+
+// The newest `limit` events of the ledger inside the day window whose `account`
+// arg names one of `accounts` (any voter when absent). `rows` is the ledger's
+// ascending order; the account test is the same exact string match the SQL
+// `JSONExtractString(args_json,'account') IN (…)` read applied.
+export function selectCollectiveVoteEvents(
+  rows: readonly RawCollectiveVoteEvent[],
+  accounts: readonly string[] | undefined,
+  from: string | undefined,
+  to: string | undefined,
+  limit: number,
+): RawCollectiveVoteEvent[] {
+  const within = timeWindowMatcher(from, to)
+  const voters = accounts ? new Set(accounts.filter(a => ACCOUNT_RE.test(a))) : null
+  const out: RawCollectiveVoteEvent[] = []
+  for (let i = rows.length - 1; i >= 0 && out.length < limit; i--) {
+    const e = rows[i]
+    if (!within(e.ts)) continue
+    if (voters && !voters.has(argStr((safeJson(e.args_json) ?? {}) as Record<string, unknown>, 'account'))) continue
+    out.push(e)
   }
   return out
+}
+
+// The in-memory twin of timeWindow(): whether a `YYYY-MM-DD HH:MM:SS` timestamp
+// falls inside the same day range — `from` inclusive from midnight, `to`
+// inclusive through the end of its day. The fixed format compares as text.
+export function timeWindowMatcher(from?: string, to?: string): (ts: string) => boolean {
+  const lower = from && DATE_RE.test(from) ? `${from} 00:00:00` : null
+  const upper = to && DATE_RE.test(to) ? `${nextUtcDay(to)} 00:00:00` : null
+  return ts => (lower == null || ts >= lower) && (upper == null || ts < upper)
+}
+
+function nextUtcDay(day: string): string {
+  const [y, m, d] = day.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10)
 }
 
 // Whether a feed's value/token filter can admit a collective vote at all.
