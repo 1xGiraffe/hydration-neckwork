@@ -17000,7 +17000,10 @@ function accountLiquidityArm(list: string, bound: string, eventNames: readonly s
   const tokenFilter = armTokenFilter(tokenIds, ids => `hasAny(asset_refs, [${ids}])`)
   const source = liquidityScopedSourceSql(bound, list)
   const routerHop = routerHopLiquiditySql(bound, 'asset_id', { sourceSql: source })
-  return `SELECT block_height, count() AS rows FROM ${source}
+  // A derived table on the left of a JOIN needs an alias (ClickHouse 26 rejects
+  // it otherwise); the column names stay unqualified because none collides with
+  // the route side's rh_* names.
+  return `SELECT block_height, count() AS rows FROM ${source} AS la
     ${routerHop.joinSql}
     WHERE event_name IN (${sqlEventNameList([...eventNames])})
       ${routerHop.predicateSql}
@@ -18223,7 +18226,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
                 asset_b AS asset_b,
                 pool_account AS pool_acc,
                 asset_refs AS asset_refs
-              FROM ${liquiditySource}
+              FROM ${liquiditySource} AS la
               ${routerHopLiquiditySql(pageBound, liquidityAssetExpr, { sourceSql: liquiditySource }).joinSql}
               WHERE event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
                 ${routerHopLiquiditySql(pageBound, liquidityAssetExpr).predicateSql}
