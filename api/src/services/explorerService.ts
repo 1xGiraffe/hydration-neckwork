@@ -929,7 +929,7 @@ export function isAmountlessLiquidityEvent(eventName: string): boolean {
 // OTHER liquidity_activity row today — Add/Remove/Claim carry no `pool` arg — but
 // that is a fact about today's runtime args, not a schema guarantee. Every read
 // that admits a viewed account through `pool_account` rather than `who` (see
-// liquidityWhoOrPoolSql) confines that arm to this set, so a future runtime that
+// liquidityScopedSourceSql) confines that arm to this set, so a future runtime that
 // starts stamping a `pool` field on XYK.LiquidityAdded/Removed cannot silently
 // attribute an ordinary LP's add/remove to the pool account's own feed. This is
 // also the intended product boundary: a pool account's page shows its own
@@ -15501,7 +15501,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
             asset_b AS asset_b,
             pool_account AS pool_acc
           FROM price_data.liquidity_activity
-          ${routerHopLiquiditySql(pageBound, 'asset_id', 'has(asset_refs, {assetId:UInt32})').joinSql}
+          ${routerHopLiquiditySql(pageBound, 'asset_id', { sourceSql: 'price_data.liquidity_activity', whereSql: 'has(asset_refs, {assetId:UInt32})' }).joinSql}
           WHERE ${pageBound}
             AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
             AND who NOT LIKE '0x6d6f646c%'
@@ -16742,7 +16742,7 @@ function accountSwapTradeArm(list: string, bound: string, tokenIds?: number[]): 
         SELECT block_height, extrinsic_index FROM price_data.liquidation_extrinsics))
       AND NOT ((rep_in IN (${shareAssetIdsSql()}) OR rep_out IN (${shareAssetIdsSql()}))
         AND (block_height, ext_index) IN (
-          SELECT block_height, extrinsic_index FROM price_data.liquidity_activity
+          SELECT block_height, extrinsic_index FROM price_data.liquidity_activity_by_account
           WHERE ${bound} AND who IN (${list}) AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
             AND extrinsic_index IS NOT NULL))
     GROUP BY block_height`
@@ -16807,11 +16807,36 @@ function accountDcaTradeArm(list: string, bound: string, tokenIds?: number[]): A
 // list: a viewed account should only ever be admitted through `pool_account` for
 // pool creation/destruction, never for an ordinary LP's add/remove on that pool,
 // even if a future runtime upgrade started populating `pool_account` more widely.
-// Shared verbatim by every liquidity_activity read that needs this admission test
-// — accountLiquidityArm, semanticExtrinsicSql, and the liquidity page read in
-// collectAccountActivity — so the three cannot drift into classifying differently.
-function liquidityWhoOrPoolSql(list: string): string {
-  return `(who IN (${list}) OR (pool_account IN (${list}) AND event_name IN (${sqlEventNameList([...POOL_LIFECYCLE_EVENTS])})))`
+// The liquidity rows an account set is admitted to — the account's own rows plus
+// the lifecycle rows of a pool it IS — as a derived table the account reads take
+// the place of `liquidity_activity`. Shared verbatim by every such read
+// (accountLiquidityArm, semanticExtrinsicSql, and the liquidity page read in
+// collectAccountActivity), so the three cannot drift into classifying differently.
+//
+// The admission is one OR, but it is split by which key can serve each half:
+//
+//   - `who IN` reads `liquidity_activity_by_account`, the MV-fed twin keyed
+//     (who, block_height, event_index) and populated from the same rows (verified
+//     row-for-row against the source, same newest block), so `who` prunes by key.
+//     On the source — keyed (block_height, event_index) — the same predicate
+//     scanned all 5M rows, ~345 MiB of the 66-char `who` column per read, and an
+//     exact count reads it five times: that made the counter the largest read in
+//     the deployment (15 TiB a day) for an answer the twin serves from 15 MiB.
+//   - The pool arm names the POOL account, which is no key on either table, so it
+//     stays on the source, where its lifecycle event test is selective enough to be
+//     nearly free (XYK.PoolCreated/PoolDestroyed: 1,746 rows chain-wide, 122 KiB).
+//
+// The arms are disjoint (`who NOT IN`), so UNION ALL is the OR exactly. `bound`
+// is applied inside both — a key predicate on either table — so a caller may
+// repeat it outside or not.
+function liquidityScopedSourceSql(bound: string, list: string): string {
+  const columns = 'block_height, block_timestamp, event_index, extrinsic_index, event_name, who, asset_id, amount, amount_a, asset_b, pool_account, asset_refs'
+  return `(SELECT ${columns} FROM price_data.liquidity_activity_by_account
+      WHERE ${bound} AND who IN (${list})
+    UNION ALL
+    SELECT ${columns} FROM price_data.liquidity_activity
+      WHERE ${bound} AND who NOT IN (${list}) AND pool_account IN (${list})
+        AND event_name IN (${sqlEventNameList([...POOL_LIFECYCLE_EVENTS])}))`
 }
 
 // The router uses a stablepool's add_liquidity / remove_liquidity_one_asset as a SWAP
@@ -16848,17 +16873,19 @@ function shareTokenFoldSql(assetExpr: string): string {
 // It has to run BEFORE the caller's LIMIT — 1.38M of the 1.41M Stableswap liquidity events
 // are router hops, so filtering finished pages would empty them and desync every count.
 //
-// `candidateScopeSql` is the caller's own row filter (its who/pool or asset
-// predicate). When given, the route join is bounded to the blocks that hold a
-// scope-matching Stableswap liquidity row — the only rows whose predicate ever
-// consults the route arrays — instead of aggregating EVERY router route the
-// bound admits. On the full-history account arms (the activity-count sweep runs
-// them with bound = 1) that aggregation hashed all ~1.9M routed extrinsics per
-// query: ~700 MiB of hash table and half the query's rows for routes no row
-// looks at. Identical results by construction: a row outside the scope fails
-// the caller's own WHERE regardless of the join, and every consulted row's
-// block is in the set.
-export function routerHopLiquiditySql(bound: string, assetExpr = 'asset_id', candidateScopeSql?: string): { joinSql: string; predicateSql: string } {
+// `candidateScope` is the caller's own row source: the table or derived table it
+// reads liquidity rows FROM (an account read hands over its account-first
+// source, see liquidityScopedSourceSql) and, optionally, its own row predicate
+// (the asset surface's asset test). When given, the route join is bounded to the
+// blocks that hold a scope-matching Stableswap liquidity row — the only rows
+// whose predicate ever consults the route arrays — instead of aggregating EVERY
+// router route the bound admits. On the full-history account arms (the
+// activity-count sweep runs them with bound = 1) that aggregation hashed all
+// ~1.9M routed extrinsics per query: ~700 MiB of hash table and half the query's
+// rows for routes no row looks at. Identical results by construction: a row
+// outside the scope fails the caller's own WHERE regardless of the join, and
+// every consulted row's block is in the set.
+export function routerHopLiquiditySql(bound: string, assetExpr = 'asset_id', candidateScope?: { sourceSql: string; whereSql?: string }): { joinSql: string; predicateSql: string } {
   // The Omnipool.PositionCreated arm is the SQL twin of
   // suppressPositionCreatedCompanions: a PositionCreated row renders only when no
   // LiquidityAdded in its block names the same account and asset — what survives
@@ -16870,11 +16897,11 @@ export function routerHopLiquiditySql(bound: string, assetExpr = 'asset_id', can
   // inside a block at an event index, and a companion LiquidityAdded sits at a
   // different index of the same block, so reusing the row bound verbatim let a
   // companion escape suppression whenever a page ended between the two.
-  const routeBlockScope = candidateScopeSql
+  const routeBlockScope = candidateScope
     ? `
             AND block_height IN (
-              SELECT block_height FROM price_data.liquidity_activity
-              WHERE ${bound} AND (${candidateScopeSql})
+              SELECT block_height FROM ${candidateScope.sourceSql}
+              WHERE ${bound} AND (${candidateScope.whereSql ?? '1'})
                 AND event_name IN (${sqlEventNameList([...STABLESWAP_LIQUIDITY_EVENTS])}))`
     : ''
   return {
@@ -16932,17 +16959,17 @@ export function isRouterHopLiquidity(eventName: string, who: string, assetId: nu
 // liquidity_activity has an asset_id outside its own asset_refs), so this is exactly
 // the `[row.asset, …row.assetRefs]` test the classifier applies.
 //
-// Both the count arm and the page read carry the same liquidityWhoOrPoolSql
-// predicate: if they diverge the tab counts rows it will not render, which is the
+// Both the count arm and the page read read the same liquidityScopedSourceSql
+// source: if they diverge the tab counts rows it will not render, which is the
 // exact failure the liquidityActionEventNames comment warns of.
 function accountLiquidityArm(list: string, bound: string, eventNames: readonly string[], tokenIds?: number[]): ActivityCountArm {
   if (!eventNames.length) return emptyActivityCountArm()
   const tokenFilter = armTokenFilter(tokenIds, ids => `hasAny(asset_refs, [${ids}])`)
-  const routerHop = routerHopLiquiditySql(bound, 'asset_id', liquidityWhoOrPoolSql(list))
-  return `SELECT block_height, count() AS rows FROM price_data.liquidity_activity
+  const source = liquidityScopedSourceSql(bound, list)
+  const routerHop = routerHopLiquiditySql(bound, 'asset_id', { sourceSql: source })
+  return `SELECT block_height, count() AS rows FROM ${source}
     ${routerHop.joinSql}
-    WHERE ${bound} AND ${liquidityWhoOrPoolSql(list)}
-      AND event_name IN (${sqlEventNameList([...eventNames])})
+    WHERE event_name IN (${sqlEventNameList([...eventNames])})
       ${routerHop.predicateSql}
       ${tokenFilter}
     GROUP BY block_height`
@@ -17097,8 +17124,8 @@ function semanticExtrinsicSql(list: string, evmList: string, bound: string, enum
   const arms = [
     `SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index FROM price_data.account_swap_activity FINAL
        WHERE ${bound} AND account IN (${list}) AND extrinsic_index IS NOT NULL`,
-    `SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index FROM price_data.liquidity_activity
-       WHERE ${bound} AND ${liquidityWhoOrPoolSql(list)} AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
+    `SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index FROM ${liquidityScopedSourceSql(bound, list)}
+       WHERE event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
          AND extrinsic_index IS NOT NULL`,
   ]
   // Money-market rows are EVM logs; the substrate extrinsic that emitted them is
@@ -17131,11 +17158,15 @@ function semanticExtrinsicSql(list: string, evmList: string, bound: string, enum
 // block-only one, so an unrelated transfer in a busy block is not swallowed.
 function hookOwnerSql(list: string, accounts: string[], evmList: string, bound: string, enumeratedOwners: [number, string][]): string {
   const who = (column: string) => resolvedAccountIdSql(column, accounts)
+  // Both arms read the account-first twins (who, block_height, event_index):
+  // `dca_events` is keyed (event_name, block_height, …) and `liquidity_activity`
+  // (block_height, event_index), so on the sources `who` pruned nothing and each
+  // arm scanned its table whole (271 MiB and 345 MiB per count).
   const arms = [
-    `SELECT e.block_height AS block_height, ${who('e.who')} AS owner FROM price_data.dca_events AS e FINAL
+    `SELECT e.block_height AS block_height, ${who('e.who')} AS owner FROM price_data.dca_events_by_account AS e FINAL
        WHERE ${bound.replaceAll('block_height', 'e.block_height').replaceAll('block_timestamp', 'e.block_timestamp')}
          AND e.event_name IN ('DCA.TradeExecuted','DCA.TradeFailed') AND e.who IN (${list})`,
-    // Bare `who IN (${list})` here, not liquidityWhoOrPoolSql's who-OR-pool_account —
+    // Bare `who IN (${list})` here, not liquidityScopedSourceSql's who-OR-pool_account —
     // safe only because this arm is confined to extrinsic_index IS NULL and no
     // lifecycle row has one: 0 of 1746 XYK.PoolCreated/PoolDestroyed rows carry a null
     // extrinsic_index, verified chain-wide. If a hook-dispatched pool destruction ever
@@ -17143,7 +17174,7 @@ function hookOwnerSql(list: string, accounts: string[], evmList: string, bound: 
     // (fillMissingLiquidityAmounts) — it would own no hook sibling here, so its
     // withdrawal legs would surface on the pool's page as raw transfers instead of
     // folding behind the liquidity row.
-    `SELECT block_height, ${who('who')} AS owner FROM price_data.liquidity_activity
+    `SELECT block_height, ${who('who')} AS owner FROM price_data.liquidity_activity_by_account
        WHERE ${bound} AND who IN (${list}) AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
          AND extrinsic_index IS NULL`,
   ]
@@ -18150,6 +18181,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     // liquidityAssetExpr — else this account's HOLLAR Stableswap LP rows drop out.
     const liquidityTokenFilter = tokenIds == null ? '' : tokenIds.length ? `AND hasAny(asset_refs, [${tokenIds.join(',')}])` : 'AND 0'
     const fetchLiquidityPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
+      const liquiditySource = liquidityScopedSourceSql(pageBound, list)
       const liqRes = await client.query({
         query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
                 who AS who,
@@ -18158,11 +18190,9 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
                 asset_b AS asset_b,
                 pool_account AS pool_acc,
                 asset_refs AS asset_refs
-              FROM price_data.liquidity_activity
-              ${routerHopLiquiditySql(pageBound, liquidityAssetExpr, liquidityWhoOrPoolSql(list)).joinSql}
-              WHERE ${pageBound}
-                AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
-                AND ${liquidityWhoOrPoolSql(list)}
+              FROM ${liquiditySource}
+              ${routerHopLiquiditySql(pageBound, liquidityAssetExpr, { sourceSql: liquiditySource }).joinSql}
+              WHERE event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
                 ${routerHopLiquiditySql(pageBound, liquidityAssetExpr).predicateSql}
                 ${liquidityTokenFilter}
               ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
@@ -18509,13 +18539,12 @@ async function countAccountActivity(accounts: string[], type: string, action: st
 // accounts, that was the single case where the index sat 12 blocks behind a
 // trade the feed was already showing.
 //
-// dca_events is ORDER BY (event_name, block_height, …), so `who` prunes nothing
-// and that arm reads the table. What it is asked, though, is only whether it
-// beats the first arm — so it is bounded by that height, which puts a range on
-// the key's SECOND column and leaves each event_name's granules above it. Same
-// answer (a lower DCA height could never have won the `greatest`), 7.32M rows
-// down to 705k. At ~2,000 of these an hour it was the second-largest read in the
-// deployment.
+// The DCA arm reads `dca_events_by_account`, keyed (who, block_height, …), so the
+// account's rows come back by primary key. What it is asked is only whether it
+// beats the first arm, so it is bounded by that height too — a range on the key's
+// SECOND column that leaves the account's granules above it. (On the source,
+// keyed (event_name, block_height, …), `who` pruned nothing; this arm ran ~2,000
+// times an hour and was the second-largest read in the deployment.)
 async function accountActivityWatermark(accounts: string[]): Promise<number> {
   if (!accounts.length) return 0
   // Briefly cached: one page asks for several lists at once, and they should
@@ -18526,7 +18555,7 @@ async function accountActivityWatermark(accounts: string[]): Promise<number> {
         query: `WITH (SELECT max(block_height) FROM price_data.account_activity_v3 WHERE account IN {accounts:Array(String)}) AS indexed
                 SELECT greatest(
                   indexed,
-                  (SELECT max(block_height) FROM price_data.dca_events
+                  (SELECT max(block_height) FROM price_data.dca_events_by_account
                    WHERE who IN {accounts:Array(String)} AND block_height > indexed)
                 ) AS w`,
         query_params: { accounts }, format: 'JSONEachRow',
