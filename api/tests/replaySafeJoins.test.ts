@@ -29,29 +29,38 @@ describe('dca_events row reads are replay-safe', () => {
   // Each read is pinned by the predicate that identifies it — asserted to occur
   // exactly once, so a second undeduplicated copy of the same read fails here too —
   // and the FROM clause it is reached through has to carry FINAL.
-  const perRowReads: [string, RegExp][] = [
+  // Account reads take the (who, block_height, event_index) twin, which replaces
+  // on the same identity, so FINAL means the same thing on either table.
+  const sourceFinal = /^price_data\.dca_events(\s+AS\s+\w+)?\s+FINAL/
+  const twinFinal = /^price_data\.dca_events_by_account\s+AS\s+e\s+FINAL/
+  const perRowReads: [string, RegExp, RegExp][] = [
     // The account feed's own executions — one activity row per execution.
-    ['account activity executions', /AND e\.event_name='DCA\.TradeExecuted' AND e\.who IN \(/g],
-    // The failed attempts the same feed merges in.
-    ['account activity failures', /AND e\.event_name = 'DCA\.TradeFailed'/g],
+    ['account activity executions', /AND e\.event_name='DCA\.TradeExecuted' AND e\.who IN \(/g, twinFinal],
+    // The failed attempts the same feed merges in; the table is chosen per call
+    // (twin for an account, source for the global and per-block reads).
+    ['account activity failures', /AND e\.event_name = 'DCA\.TradeFailed'/g, /FROM \$\{table\} AS e FINAL/],
     // The schedule's first execution shown under a DCA.Scheduled extrinsic.
-    ['extrinsic detail executions', /AND event_name = 'DCA\.TradeExecuted'\s+ORDER BY block_height ASC, event_index ASC LIMIT 1/g],
+    ['extrinsic detail executions', /AND event_name = 'DCA\.TradeExecuted'\s+ORDER BY block_height ASC, event_index ASC LIMIT 1/g, sourceFinal],
     // The block's hook executions on the block activity feed.
-    ['block detail executions', /WHERE block_height = \{h:UInt32\} AND event_name = 'DCA\.TradeExecuted'\s+ORDER BY event_index/g],
+    ['block detail executions', /WHERE block_height = \{h:UInt32\} AND event_name = 'DCA\.TradeExecuted'\s+ORDER BY event_index/g, sourceFinal],
     // Executions done and amount filled on the active-schedule list.
-    ['active schedule progress', /WHERE event_name='DCA\.TradeExecuted' AND id IN \(/g],
+    ['active schedule progress', /WHERE event_name='DCA\.TradeExecuted' AND id IN \(/g, sourceFinal],
   ]
 
-  for (const [name, anchor] of perRowReads) {
+  for (const [name, anchor, finalRead] of perRowReads) {
     it(`resolves replacements before ${name}`, () => {
       const hits = [...explorerService.matchAll(anchor)]
       expect(hits.length, name).toBe(1)
 
       const at = hits[0].index
       const from = explorerService.lastIndexOf('price_data.dca_events', at)
-      expect(explorerService.slice(from, at), name).toMatch(/^price_data\.dca_events(\s+AS\s+\w+)?\s+FINAL/)
+      expect(explorerService.slice(from, at), name).toMatch(finalRead)
     })
   }
+
+  it('lets the failures read choose only between the source and its account twin', () => {
+    expect(explorerService).toContain("const table = accounts?.length ? 'price_data.dca_events_by_account' : 'price_data.dca_events'")
+  })
 })
 
 // raw_blocks/raw_extrinsics/raw_events all replace on their event identity, so a

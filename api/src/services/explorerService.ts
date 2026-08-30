@@ -12845,6 +12845,10 @@ export function dcaScheduleJoinSql(columns: string[]): string {
 async function getRecentDcaFailures(limit: number, from?: string, to?: string, accounts?: string[], assetIds?: number[], height?: number): Promise<ActivityRow[]> {
   if (assetIds != null && !assetIds.length) return []
   const accountFilter = accounts?.length ? `AND e.who IN (${sqlAccountList(accounts)})` : ''
+  // An account read takes the (who, block_height, event_index) twin so the
+  // account prunes by key; the global and per-block reads keep the event-keyed
+  // source, whose first key column is the event name they filter on.
+  const table = accounts?.length ? 'price_data.dca_events_by_account' : 'price_data.dca_events'
   const assetFilter = assetIds != null
     ? `AND (s.asset_in IN (${assetIds.join(',')}) OR s.asset_out IN (${assetIds.join(',')}))`
     : ''
@@ -12859,7 +12863,7 @@ async function getRecentDcaFailures(limit: number, from?: string, to?: string, a
               ifNull(s.amount_per, '') AS amount_per,
               s.block_height AS schedule_block, s.extrinsic_index AS schedule_index,
               e.error AS error
-            FROM price_data.dca_events AS e FINAL
+            FROM ${table} AS e FINAL
             ${dcaScheduleJoinSql(['asset_in', 'asset_out', 'direction', 'amount_per', 'block_height', 'extrinsic_index'])}
             WHERE ${bound} AND e.event_name = 'DCA.TradeFailed'
               ${accountFilter} ${assetFilter}
@@ -16808,8 +16812,11 @@ function accountSwapTradeArm(list: string, bound: string, tokenIds?: number[]): 
 const DCA_LEG_AMOUNT_IN_SQL =
   `if(event_name IN ('XYK.SellExecuted','XYK.BuyExecuted','LBP.SellExecuted','LBP.BuyExecuted'), '', amount_in)`
 function accountDcaTradeArm(list: string, bound: string, tokenIds?: number[]): ActivityCountArm {
+  // Account-first twin: dca_events is keyed (event_name, block_height, …), so
+  // `who` pruned nothing there and this arm read the table whole (271 MiB per
+  // count); (who, block_height, event_index) serves the account's rows by key.
   const execs = `SELECT e.block_height AS block_height, e.event_index AS event_index, e.amount_in AS amount_in
-    FROM price_data.dca_events AS e FINAL
+    FROM price_data.dca_events_by_account AS e FINAL
     WHERE ${bound.replaceAll('block_height', 'e.block_height').replaceAll('block_timestamp', 'e.block_timestamp')}
       AND e.event_name = 'DCA.TradeExecuted' AND e.who IN (${list})`
   if (tokenIds == null) return `SELECT block_height, count() AS rows FROM (${execs}) GROUP BY block_height`
@@ -18142,7 +18149,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     const dcaExecRes = await client.query({
       query: `SELECT e.block_height, e.event_index, toString(e.block_timestamp) AS ts, e.who AS who,
                 toString(e.id) AS id, e.amount_in, e.amount_out
-              FROM price_data.dca_events AS e FINAL
+              FROM price_data.dca_events_by_account AS e FINAL
               ${dcaScheduleJoinSql(['asset_in', 'asset_out'])}
               ${dcaValueFilter.joinSql}
               WHERE ${bound.replaceAll('block_height', 'e.block_height').replaceAll('block_timestamp', 'e.block_timestamp')}
@@ -19308,7 +19315,7 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
     // marker instead: the blocks holding a DCA.TradeExecuted for a scoped account
     // are excluded from the per-event candidates below (extrinsic-null only, so a
     // signed swap the account happens to make in the same block still surfaces).
-    const dcaExecsSql = `SELECT id, block_height, event_index, block_timestamp, who, amount_out FROM price_data.dca_events
+    const dcaExecsSql = `SELECT id, block_height, event_index, block_timestamp, who, amount_out FROM price_data.dca_events_by_account
                     WHERE event_name = 'DCA.TradeExecuted' AND who IN (${list}) AND ${bound}`
     const [eventRes, liqRes, dcaRes, windowRes, xcmSentRes, dcaWindowRes] = await Promise.all([
       client.query({
@@ -19468,7 +19475,7 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
       // Which windows' blocks are DCA executions, and of which schedule — the
       // scoring collapses their hook swaps under the schedule, not 'swap'.
       !windows.length ? Promise.resolve(null) : client.query({
-        query: `SELECT toUInt32(id) AS schedule_id, block_height FROM price_data.dca_events
+        query: `SELECT toUInt32(id) AS schedule_id, block_height FROM price_data.dca_events_by_account
                 WHERE event_name = 'DCA.TradeExecuted' AND who IN (${list}) AND (${windowCondFor('block_height')})
                 GROUP BY schedule_id, block_height`,
         format: 'JSONEachRow',
