@@ -18582,12 +18582,16 @@ async function countAccountActivity(accounts: string[], type: string, action: st
 // accounts, that was the single case where the index sat 12 blocks behind a
 // trade the feed was already showing.
 //
-// The DCA arm reads `dca_events_by_account`, keyed (who, block_height, …), so the
-// account's rows come back by primary key. What it is asked is only whether it
-// beats the first arm, so it is bounded by that height too — a range on the key's
-// SECOND column that leaves the account's granules above it. (On the source,
-// keyed (event_name, block_height, …), `who` pruned nothing; this arm ran ~2,000
-// times an hour and was the second-largest read in the deployment.)
+// The indexed arm reads `account_activity_bounds`, the max-state twin keyed by
+// account: `max(block_height)` over account_activity_v3 itself walked the whole
+// account prefix (625k rows / 43 MiB for a busy account, ~40k reads a day), since
+// an aggregate has no early stop even on the key. The DCA arm reads
+// `dca_events_by_account`, keyed (who, block_height, …), so the account's rows
+// come back by primary key. What it is asked is only whether it beats the first
+// arm, so it is bounded by that height too — a range on the key's SECOND column
+// that leaves the account's granules above it. (On the source, keyed
+// (event_name, block_height, …), `who` pruned nothing; this arm ran ~2,000 times
+// an hour and was the second-largest read in the deployment.)
 async function accountActivityWatermark(accounts: string[]): Promise<number> {
   if (!accounts.length) return 0
   // Briefly cached: one page asks for several lists at once, and they should
@@ -18595,7 +18599,7 @@ async function accountActivityWatermark(accounts: string[]): Promise<number> {
   return cached(`explorer:acct-watermark:${accounts.join(',')}`, 2_000, async () => {
     try {
       const res = await client.query({
-        query: `WITH (SELECT max(block_height) FROM price_data.account_activity_v3 WHERE account IN {accounts:Array(String)}) AS indexed
+        query: `WITH (SELECT maxMerge(last_block_state) FROM price_data.account_activity_bounds WHERE account IN {accounts:Array(String)}) AS indexed
                 SELECT greatest(
                   indexed,
                   (SELECT max(block_height) FROM price_data.dca_events_by_account
