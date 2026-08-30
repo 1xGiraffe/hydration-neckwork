@@ -3,6 +3,7 @@ import {
   allowanceFor, assetIdFromBlakeKey, classifyFuse, committeeThresholds, decayedAccumulator,
   decodeLockdownState, decodeOptionalRational, decodePausedKey, decodeRational,
   decodeWithdrawAccumulator, decodeWithdrawConfig, egressSinkChain, pairLockdowns, rationalPct, registryLimitChanges, withdrawConfigText,
+  outstandingWhitelistedCalls, registryLimitEventsByAsset, registryLimitsFromEvents,
   replayPauses, tradabilityStateName, tradableLabels, type LockdownState,
 } from './securityService.ts'
 
@@ -417,5 +418,60 @@ describe('egressSinkChain', () => {
   })
   it('returns null for an account that is not a sibling sovereign', () => {
     expect(egressSinkChain('0x6d6f646c70792f74727372790000000000000000000000000000000000000000')).toBeNull()
+  })
+})
+
+// The registry and whitelist families are read whole from an in-process ledger,
+// so the two SQL derivations they used to be — newest-row-per-asset and the
+// whitelisted-minus-dispatched anti-join — are pure functions over its rows.
+const registryEvent = (asset: number, block: number, index: number, limit: string) =>
+  ({ block_height: block, block_timestamp: `2026-08-01 00:00:${String(index).padStart(2, '0')}`, extrinsic_index: 1, event_index: index, asset_id: asset, xcm_rate_limit: limit })
+
+describe('registryLimitsFromEvents', () => {
+  it('takes the newest event per asset, by block then event index, whatever order the rows arrive in', () => {
+    const limits = registryLimitsFromEvents([registryEvent(5, 200, 1, '20'), registryEvent(5, 100, 1, '10'), registryEvent(5, 200, 3, '30'), registryEvent(7, 50, 0, '7')])
+    expect(limits.get(5)).toBe(30n)
+    expect(limits.get(7)).toBe(7n)
+  })
+
+  it('keeps a declared zero and drops an unset, null, negative, or unreadable limit', () => {
+    const limits = registryLimitsFromEvents([
+      registryEvent(1, 10, 0, '0'), registryEvent(2, 10, 1, ''), registryEvent(3, 10, 2, 'null'),
+      registryEvent(4, 10, 3, 'abc'), registryEvent(6, 10, 4, '-5'),
+    ])
+    expect(limits.get(1)).toBe(0n)
+    expect([...limits.keys()]).toEqual([1])
+  })
+
+  it('lets a later event clear the limit an earlier one set', () => {
+    expect(registryLimitsFromEvents([registryEvent(5, 100, 1, '10'), registryEvent(5, 200, 1, 'null')]).has(5)).toBe(false)
+  })
+})
+
+describe('registryLimitEventsByAsset', () => {
+  it('groups by asset and orders by block, then event index, within each', () => {
+    const rows = registryLimitEventsByAsset([registryEvent(7, 50, 0, 'a'), registryEvent(5, 200, 3, 'c'), registryEvent(5, 200, 1, 'b'), registryEvent(5, 100, 1, 'a')])
+    expect(rows.map(r => `${r.asset_id}@${r.block_height}:${r.event_index}`)).toEqual(['5@100:1', '5@200:1', '5@200:3', '7@50:0'])
+  })
+})
+
+describe('outstandingWhitelistedCalls', () => {
+  const whitelist = (hash: string, block: number, dispatched = false) => ({
+    block_height: block, block_timestamp: `ts${block}`, event_index: 0,
+    event_name: dispatched ? 'Whitelist.WhitelistedCallDispatched' : 'Whitelist.CallWhitelisted', call_hash: hash,
+  })
+
+  it('lists the hashes whitelisted and never dispatched, newest first', () => {
+    const out = outstandingWhitelistedCalls([whitelist('0xa', 10), whitelist('0xb', 20), whitelist('0xb', 25, true), whitelist('0xc', 30)])
+    expect(out.map(o => o.call_hash)).toEqual(['0xc', '0xa'])
+    expect(out[1]).toEqual({ call_hash: '0xa', block_height: 10, block_timestamp: 'ts10' })
+  })
+
+  it('reports a hash whitelisted twice at its newest whitelisting', () => {
+    expect(outstandingWhitelistedCalls([whitelist('0xa', 10), whitelist('0xa', 40)])).toEqual([{ call_hash: '0xa', block_height: 40, block_timestamp: 'ts40' }])
+  })
+
+  it('treats a dispatch as settling the hash whichever side of the whitelisting it lands on', () => {
+    expect(outstandingWhitelistedCalls([whitelist('0xa', 10, true), whitelist('0xa', 40)])).toEqual([])
   })
 })
