@@ -11436,6 +11436,11 @@ async function getOtcPlacedLegsByOrderId(orderIds: Array<string | number>): Prom
 async function otcOrderIdsForAccounts(accounts: string[]): Promise<number[]> {
   const list = sqlAccountList(accounts)
   if (list === "''") return []
+  // The reserve read is bounded to the blocks that hold a placement: `event_name`
+  // is not in account_activity_v3's key, so without it the read walked the whole
+  // account prefix (60 MiB on a busy account per page, 8k pages a day); the
+  // placement block set is a few thousand heights, and (account, block_height)
+  // IS the key.
   const res = await client.query({
     query: `SELECT DISTINCT toUInt32(JSONExtractUInt(p.args_json,'orderId')) AS order_id
             FROM ${otcActivityTable('p')}
@@ -11443,6 +11448,7 @@ async function otcOrderIdsForAccounts(accounts: string[]): Promise<number[]> {
               SELECT block_height, event_index, asset_id, amount
               FROM price_data.account_activity_v3
               WHERE account IN (${list}) AND event_name IN (${OTC_RESERVE_EVENTS_SQL})
+                AND block_height IN (SELECT block_height FROM ${otcActivityTable()} WHERE event_name = 'OTC.Placed')
             ) AS r ON r.block_height = p.block_height
             WHERE p.event_name = 'OTC.Placed' AND r.event_index < p.event_index
               AND r.asset_id = toUInt32(JSONExtractInt(p.args_json,'assetOut'))
