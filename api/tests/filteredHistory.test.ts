@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import { transferReadNeedsWholeBound, fetchFilteredDeep, activitySourceCoversCutoff, activitySourcesNeedingMore, completeActivityPageCutoff, activityCutoffFromDate, activitySourceSeedSize, historicalPriceHour } from '../src/services/explorerService.ts'
 
@@ -160,5 +161,21 @@ describe('deep filtered history', () => {
 
     expect(rows.map(row => row.eventIndex)).toEqual([2])
     expect(run).toHaveBeenCalledTimes(3)
+  })
+})
+
+// The trade source's post-USD-filter walk takes fetchFilteredDeep's request-scaled
+// first page. A fixed 25,000-row first page built and valued every candidate before
+// slicing a 16-row seed — ~2 s per head on the HDX trade feed at $10, slower than
+// one block, so the UI's per-block refetch cancelled it forever (16% of those
+// requests abandoned at the edge).
+describe('getRecentTrades deep walk', () => {
+  it('lets the first page scale with the request instead of pinning it at 25k rows', () => {
+    const src = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
+    const at = src.indexOf('async function getRecentTrades(')
+    expect(at).toBeGreaterThan(-1)
+    const fn = src.slice(at, src.indexOf('\n}\n', at))
+    expect(fn).toContain('fetchFilteredDeep(tw, want,')
+    expect(fn).not.toMatch(/pageSize: 25_000/)
   })
 })

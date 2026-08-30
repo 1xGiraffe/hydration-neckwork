@@ -7881,6 +7881,16 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
       return out
     }
     if (postUsdFilter) {
+      // The walk's first page scales with the request (fetchFilteredDeep's
+      // default, doubling per page after that). A fixed 25,000-row first page
+      // built and valued every candidate — DCA claims, signers, historical
+      // prices — before slicing a 16-row seed: on the HDX trade feed at $10,
+      // where 23% of swaps clear the floor and the unfiltered probe lands just
+      // short of a page, that was ~2 s per head. A build slower than one block
+      // is cancelled by the UI's next refetch, so under load the feed never
+      // settled (measured 2026-08-30: 1,705 of ~10,500 requests abandoned).
+      // The walk still runs to `want` matches or the end of history, so a
+      // sparse floor keeps its full-history answer at a few more round trips.
       let pageState: { scanned: number; cursor: { blockHeight: number; eventIndex: number } | null } = { scanned: 0, cursor: null }
       const deep = await fetchFilteredDeep(tw, want, async (bound, pageLimit) => {
         let raw = await fetchRaw(bound, pageLimit)
@@ -7903,7 +7913,7 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
       }, row => rowMeetsExactUsdMinimum(row, filters.min!),
       row => row.blockHeight, row => row.eventIndex,
       tradeRowKey,
-      { pageSize: 25_000, pageState: () => pageState })
+      { pageState: () => pageState })
       return deep.slice(offset, offset + limit)
     }
     const rows = await withFeedWindow(tw, scanLimit, scanLimit, bound => fetchRaw(bound, scanLimit))
