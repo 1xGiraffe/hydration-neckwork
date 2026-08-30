@@ -263,10 +263,14 @@ describe('POOL_LIFECYCLE_EVENTS confines the pool_account admission arm', () => 
   })
 
   it('scopes pool_account inside its own event_name test, not the caller’s', () => {
-    const at = explorerService.indexOf('function liquidityWhoOrPoolSql')
+    const at = explorerService.indexOf('function liquidityScopedSourceSql')
     expect(at).toBeGreaterThan(-1)
     const body = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
-    expect(body).toMatch(/pool_account IN \(\$\{list\}\) AND event_name IN \(\$\{sqlEventNameList\(\[\.\.\.POOL_LIFECYCLE_EVENTS\]\)\}\)/)
+    expect(body).toMatch(/pool_account IN \(\$\{list\}\)\s+AND event_name IN \(\$\{sqlEventNameList\(\[\.\.\.POOL_LIFECYCLE_EVENTS\]\)\}\)/)
+    // The `who` half reads the account-first twin; the pool half stays on the
+    // source and is kept disjoint from it, so the UNION ALL is the OR exactly.
+    expect(body).toContain('FROM price_data.liquidity_activity_by_account\n      WHERE ${bound} AND who IN (${list})')
+    expect(body).toContain('FROM price_data.liquidity_activity\n      WHERE ${bound} AND who NOT IN (${list}) AND pool_account IN (${list})')
   })
 
   // The failure this guards: reverting any one of the three sites to the old
@@ -280,19 +284,28 @@ describe('POOL_LIFECYCLE_EVENTS confines the pool_account admission arm', () => 
   // accountLiquidityArm (the liquidity count arm), semanticExtrinsicSql (the transfer
   // count arm's suppression context), and collectAccountActivity's liquidity page read
   // must all call the one shared builder — not three copies that can drift apart.
-  it('is shared verbatim by all three liquidity_activity reads that admit a pool account', () => {
-    // 5 = the three reads' own WHERE arms plus the two candidate scopes the
-    // account arms hand routerHopLiquiditySql — the same shared builder either way.
-    expect((explorerService.match(/liquidityWhoOrPoolSql\(list\)/g) ?? []).length).toBe(5)
+  it('is shared verbatim by all three liquidity reads that admit a pool account', () => {
+    // 4 = the definition plus the three reads. Each read hands its source to
+    // routerHopLiquiditySql as the candidate scope too, so the admission is never
+    // stated a second time.
+    expect((explorerService.match(/liquidityScopedSourceSql\(/g) ?? []).length).toBe(4)
     for (const name of ['accountLiquidityArm', 'semanticExtrinsicSql']) {
       const at = explorerService.indexOf(`function ${name}`)
       expect(at, name).toBeGreaterThan(-1)
       const fn = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
-      expect(fn, name).toContain('liquidityWhoOrPoolSql(list)')
+      expect(fn, name).toContain('liquidityScopedSourceSql(bound, list)')
     }
     // The page read is a closure inside collectAccountActivity, not a top-level
     // function `body()` can extract by name — assert its call site directly.
-    expect(explorerService).toContain('AND ${liquidityWhoOrPoolSql(list)}\n                ${routerHopLiquiditySql(pageBound, liquidityAssetExpr).predicateSql}\n                ${liquidityTokenFilter}')
+    expect(explorerService).toContain('const liquiditySource = liquidityScopedSourceSql(pageBound, list)')
+    expect(explorerService).toContain('FROM ${liquiditySource}\n              ${routerHopLiquiditySql(pageBound, liquidityAssetExpr, { sourceSql: liquiditySource }).joinSql}')
+  })
+
+  // The failure this guards: an account read moved back onto the block-keyed
+  // source with a `who IN` predicate compiles, returns the same rows, and scans
+  // the 5M-row table whole again — five times per exact count.
+  it('leaves no account-scoped read on the block-keyed liquidity_activity', () => {
+    expect(explorerService).not.toMatch(/FROM price_data\.liquidity_activity(?!_by_account)[\s\S]{0,300}?\bwho IN \(\$\{list\}\)/)
   })
 })
 

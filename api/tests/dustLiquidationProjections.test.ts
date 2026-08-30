@@ -78,7 +78,9 @@ describe('dust and liquidation projections replace the raw_events scans', () => 
   it('bounds both source reads in the swap trade arm', () => {
     const arm = functionBody('accountSwapTradeArm')
     expect(occurrences(arm, '${bound}')).toBe(2)
-    expect(arm).toContain('FROM price_data.liquidity_activity\n          WHERE ${bound}')
+    // The share-leg exclusion reads the account-first twin: the arm names `who`,
+    // which the block-keyed source could not prune on.
+    expect(arm).toContain('FROM price_data.liquidity_activity_by_account\n          WHERE ${bound}')
   })
 })
 
