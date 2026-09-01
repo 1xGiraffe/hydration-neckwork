@@ -16,8 +16,14 @@ export type NotificationKind = typeof NOTIFICATION_KINDS[number]
 // (`activityTypes` in routes/explorer.ts, pinned by a parity test): a rule
 // naming a type the feed cannot filter would silently never match.
 export const ACTIVITY_TYPES = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc'] as const
-// Referenda lifecycle phases the row lane watches.
-export const REFERENDUM_PHASES = ['submitted', 'deciding', 'confirmed', 'executed', 'rejected', 'cancelled', 'timed-out', 'killed'] as const
+// Referenda lifecycle phases the row lane watches. `confirming` and `confirmed`
+// are two different moments and both are news: the chain announces entry into
+// the confirmation period (ConfirmStarted) long before the period ends and the
+// referendum passes (Confirmed). `confirm-aborted` is the mirror the pair needs
+// — support fell away mid-confirmation and the referendum dropped back to
+// deciding — because a subscriber told a referendum entered confirmation and
+// never told it left has been handed a claim the chain has since falsified.
+export const REFERENDUM_PHASES = ['submitted', 'deciding', 'confirming', 'confirm-aborted', 'confirmed', 'executed', 'rejected', 'cancelled', 'timed-out', 'killed'] as const
 // Technical Committee motion phases the row lane watches. STRICTLY separate from
 // the referendum kind: a TC motion is a committee's own procedural business, and
 // most people subscribing to "referenda" are asking about public votes — folding
