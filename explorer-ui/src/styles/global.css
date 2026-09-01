@@ -3510,8 +3510,9 @@ a.rev-pill-label:hover { color: var(--accent); }
   .rev-controls { justify-content: flex-start; margin-bottom: 0; }
   /* Three short tabs never scroll, so the mobile tab bars' right-edge
      "scroll for more" fade (see the .tabs mask below) only chews the last
-     button; exempt this selector from it. */
-  .rev-controls .tabs { -webkit-mask-image: none; mask-image: none; }
+     button; exempt these selectors from it (.sec-title-row hosts the staker
+     section's timeframe tabs). */
+  .rev-controls .tabs, .sec-title-row .tabs { -webkit-mask-image: none; mask-image: none; }
 }
 .rev-breakdown-tbl { margin-top: 12px; }
 
@@ -3535,6 +3536,18 @@ a.rev-pill-label:hover { color: var(--accent); }
   .revbd-asset td:first-child { padding-left: 22px; }
 }
 .rev-note { color: var(--text-low); font-size: 12.5px; max-width: 720px; margin: 18px 2px 8px; line-height: 1.55; }
+
+/* Staker distributions: the stat ribbon rides inside the chart card, above the
+   columns, with the /omnipool-style unit toggle on its right, separated from
+   the chart by the card's own hairline. */
+.rev-stakers-head { display: flex; align-items: flex-start; gap: 12px; margin: 0 0 14px; padding: 0 0 14px; border-bottom: 1px solid var(--separator); }
+.rev-stakers-head .liq-toggle { margin-left: auto; flex-shrink: 0; }
+.rev-stakers-ribbon { display: flex; justify-content: flex-start; margin: 0; padding: 0; }
+.rev-stakers-ribbon .cell { align-items: flex-start; padding: 0 28px 0 0; }
+@media (max-width: 620px) {
+  .rev-stakers-ribbon { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px 10px; flex: 1; }
+  .rev-stakers-ribbon .cell { padding: 0; }
+}
 
 /* ── Top liquidity providers (asset Liquidity tab) ─────────────────────────────
    The section header is a disclosure button. The global button reset strips

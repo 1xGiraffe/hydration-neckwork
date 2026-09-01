@@ -3,7 +3,7 @@ import type {
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
   AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail, RevenueBreakdown, GovernanceOverview, GovernanceReferendaPage, CollectiveMotionsPage, TreasuryTipsPage,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard,
-  RevenueDashboard, RevenueFlowResponse, RevenueRange, HollarDashboard, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
+  RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, HollarDashboard, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
   AssetLiquidity, PoolDetail, OmnipoolDetail, PoolLpsResponse, OmnipoolAssetLpsResponse,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
@@ -240,6 +240,9 @@ export const api = {
   filterNames: (signal?: AbortSignal) => getJson<FilterNames>('/explorer/filter-names', signal),
   hdx: (signal?: AbortSignal) => getJson<HdxDashboard>('/explorer/hdx', signal),
   revenue: (range: RevenueRange = '30d', signal?: AbortSignal) => getJson<RevenueDashboard>(withQuery('/explorer/revenue', { range }), signal),
+  // The staker-distributions section carries its own timeframe, so it reads its
+  // own endpoint rather than the dashboard's.
+  revenueStakers: (range: RevenueRange = 'all', signal?: AbortSignal) => getJson<StakerDistributions>(withQuery('/explorer/revenue/stakers', { range }), signal),
   // Live feed: the head tag busts the edge micro-cache the moment a block lands.
   revenueFlow: (after?: string | null, signal?: AbortSignal) => getJson<RevenueFlowResponse>(withQuery('/explorer/revenue/flow', { after: after || undefined, h: liveHeadTag() || undefined }), signal),
   hollar: (signal?: AbortSignal) => getJson<HollarDashboard>('/explorer/hollar', signal),
