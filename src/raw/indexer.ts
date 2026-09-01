@@ -32,6 +32,7 @@ import {
   toJsonString,
 } from './json.js'
 import { assertMoneyMarketPositionConfig, extractMoneyMarketRows, snapshotMoneyMarketPositions } from './moneyMarket.js'
+import { synthesizeNestedCallRows, type EvmExecution, type RuntimeCallDecoder } from './nestedCalls.js'
 import { createClickHouseClient } from '../db/client.js'
 import { minutesFromEnvironment } from '../util/env.js'
 import { MS_PER_MINUTE, crossedChainTimeBoundary } from '../util/chainTimeCadence.js'
@@ -94,15 +95,16 @@ function serializeBlock(
 }
 
 // Recover the initiating account for natively-unsigned *user* extrinsics whose
-// Substrate signature is absent (signer null). evmSenderByExt maps each
-// extrinsic index to the H160 from its Ethereum.Executed event, if any.
+// Substrate signature is absent (signer null). evmExecutionByExt maps each
+// extrinsic index to the H160 sender (and exit reason) from its
+// Ethereum.Executed event, if any.
 function recoverEffectiveSigner(
   extrinsic: RawExtrinsic,
-  evmSenderByExt: Map<number, string>,
+  evmExecutionByExt: Map<number, EvmExecution>,
 ): string | null {
   const callName = extrinsic.call?.name
   if (callName === 'Ethereum.transact') {
-    return evmAccountForm(evmSenderByExt.get(extrinsic.index))
+    return evmAccountForm(evmExecutionByExt.get(extrinsic.index)?.from ?? undefined)
   }
   if (callName === 'MultiTransactionPayment.dispatch_permit') {
     return evmAccountForm((extrinsic.call?.args as { from?: unknown } | undefined)?.from)
@@ -114,7 +116,7 @@ function serializeExtrinsic(
   extrinsic: RawExtrinsic,
   blockTimestamp: string,
   ingestSource: string,
-  evmSenderByExt: Map<number, string>,
+  evmExecutionByExt: Map<number, EvmExecution>,
 ): RawExtrinsicRow {
   const signer = extractSigner(extrinsic.signature)
   return {
@@ -124,7 +126,7 @@ function serializeExtrinsic(
     extrinsic_hash: extrinsic.hash ?? '',
     version: extrinsic.version ?? 0,
     signer,
-    effective_signer: signer == null ? recoverEffectiveSigner(extrinsic, evmSenderByExt) : null,
+    effective_signer: signer == null ? recoverEffectiveSigner(extrinsic, evmExecutionByExt) : null,
     fee: extrinsic.fee?.toString() ?? null,
     tip: extrinsic.tip?.toString() ?? null,
     success: extrinsic.success ? 1 : 0,
@@ -509,24 +511,47 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       ctx.store.addBlocks([serializeBlock(block.header, ingestSource)])
 
       // Ethereum.transact carries no Substrate signature; its real sender is the
-      // H160 surfaced by the Ethereum.Executed event in the same extrinsic.
-      const evmSenderByExt = new Map<number, string>()
+      // H160 surfaced by the Ethereum.Executed event in the same extrinsic. The
+      // exit reason rides along for the nested-call synthesis below: the extrinsic
+      // succeeds even when the EVM execution reverted, so the exit reason is the
+      // only truth about whether a dispatch-precompile call actually ran.
+      const evmExecutionByExt = new Map<number, EvmExecution>()
       for (const event of block.events) {
         if (event.name !== 'Ethereum.Executed' || event.extrinsicIndex == null) continue
-        const from = (event.args as { from?: unknown } | undefined)?.from
-        if (typeof from === 'string') evmSenderByExt.set(event.extrinsicIndex, from)
+        const args = event.args as { from?: unknown; exitReason?: { __kind?: unknown } } | undefined
+        const from = args?.from
+        const exitKind = args?.exitReason?.__kind
+        evmExecutionByExt.set(event.extrinsicIndex, {
+          from: typeof from === 'string' ? from : null,
+          exitKind: typeof exitKind === 'string' ? exitKind : null,
+        })
       }
 
-      const extrinsicRows = block.extrinsics.map(extrinsic => serializeExtrinsic(extrinsic, blockTimestamp, ingestSource, evmSenderByExt))
+      const extrinsicRows = block.extrinsics.map(extrinsic => serializeExtrinsic(extrinsic, blockTimestamp, ingestSource, evmExecutionByExt))
       const callRows = block.calls.map(call => serializeCall(call, blockTimestamp, ingestSource))
       const eventRows = block.events.map(event => serializeEvent(event, blockTimestamp, ingestSource))
 
+      // Inner calls of the wrappers subsquid does not decompose (dispatch
+      // precompile calldata, gasless permits, Dispatcher.*), as identifiable
+      // synthetic raw_calls rows — see nestedCalls.ts for the invariants.
+      const runtime = block.header._runtime
+      const decodeRuntimeCall: RuntimeCallDecoder = hex => {
+        const record = runtime.toCallRecord(runtime.decodeCall(hex))
+        return { name: record.name, args: JSON.parse(toJsonString(record.args ?? null)) as unknown }
+      }
+      const synthetic = synthesizeNestedCallRows({
+        rows: callRows,
+        evmExecutionByExtrinsic: evmExecutionByExt,
+        decodeCall: decodeRuntimeCall,
+      })
+
       ctx.store.addExtrinsics(extrinsicRows)
       ctx.store.addCalls(callRows)
+      ctx.store.addCalls(synthetic.rows)
       ctx.store.addEvents(eventRows)
 
       extrinsicsPersisted += extrinsicRows.length
-      callsPersisted += callRows.length
+      callsPersisted += callRows.length + synthetic.rows.length
       eventsPersisted += eventRows.length
 
       const accountAliasRows = block.events.flatMap(event => aliasRowsForBoundEvent(event, blockTimestamp, ingestSource))
@@ -555,7 +580,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       ctx.store.addAccountAliases(accountAliasRows)
       ctx.store.addEvmLogs(evmLogRows)
       ctx.store.addBalanceObservations(balances.observations)
-      ctx.store.addParserWarnings([...balances.warnings, ...moneyMarket.warnings])
+      ctx.store.addParserWarnings([...balances.warnings, ...moneyMarket.warnings, ...synthetic.warnings])
       ctx.store.addMoneyMarketEvents(moneyMarket.events)
       ctx.store.addMoneyMarketPositions(moneyMarket.positions)
       ctx.store.addMoneyMarketReserves(moneyMarket.reserves)
@@ -566,7 +591,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       aliasRowsPersisted += accountAliasRows.length
       evmLogsPersisted += evmLogRows.length
       balanceRowsPersisted += balances.observations.length
-      parserWarningsPersisted += balances.warnings.length + moneyMarket.warnings.length + evmLogRows.filter(row => row.warning != null).length
+      parserWarningsPersisted += balances.warnings.length + moneyMarket.warnings.length + synthetic.warnings.length + evmLogRows.filter(row => row.warning != null).length
       moneyMarketRowsPersisted += moneyMarket.events.length + moneyMarket.positions.length + moneyMarket.reserves.length
       xcmRowsPersisted += xcmBridgeOperations.xcmActivity.length +
         xcmBridgeOperations.bridgeEvidence.length +
