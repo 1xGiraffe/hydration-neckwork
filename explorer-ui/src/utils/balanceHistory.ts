@@ -8,7 +8,7 @@ import type { AssetBalanceHistory } from '../types'
 // "Indexed from" caption (their authoritative data begins at the node anchor) but
 // still share the same axis start rather than truncating the window. Falls back to
 // the asset's own points only when it isn't on the shared axis (pre-alignment data).
-export function balanceChartSeries(selected: AssetBalanceHistory, all: AssetBalanceHistory[]): { series: number[]; dates: string[] } {
+export function balanceChartSeries(selected: AssetBalanceHistory, all: AssetBalanceHistory[]): { series: number[]; dates: string[]; blocks: number[] } {
   const cur = selected
   const usable = all.filter(h => h.points.length >= 1)
   const axisTs = usable.reduce((a, h) => (h.points.length > a.length ? h.points.map(p => p.ts) : a), [] as string[])
@@ -17,5 +17,9 @@ export function balanceChartSeries(selected: AssetBalanceHistory, all: AssetBala
   let last = 0
   const series = onAxis ? axisTs.map(ts => { const v = balByTs.get(ts); if (v != null) last = v; return last }) : cur.points.map(p => p.balance)
   const dates = onAxis ? axisTs : cur.points.map(p => p.ts)
-  return { series, dates }
+  // End-of-bucket block heights parallel to the series, so a chart-zoom window
+  // can be named in exact block space.
+  const axisPoints = usable.reduce((a, h) => (h.points.length > a.length ? h.points : a), [] as AssetBalanceHistory['points'])
+  const blocks = onAxis ? axisPoints.map(p => p.blockHeight) : cur.points.map(p => p.blockHeight)
+  return { series, dates, blocks }
 }

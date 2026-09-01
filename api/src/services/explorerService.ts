@@ -1,4 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
+import { blockClock } from './blockClock.ts'
+import { makeBucketing, type Bucketing } from './bucketLadder.ts'
 import { OMNI_FIXED, omnipoolRemoveLiquidity, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
 import { cached, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
 import { NOMINAL_BLOCKS_PER_HOUR, blocksPerHour, measuredParaBlockMs, newestBlockTimestampsSql, paraBlockMs } from './blockTime.ts'
@@ -3892,7 +3894,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
 // only by the Balances treemap — the value chart needs the two series alone. Both
 // halves come out of one cached walk, so this trims transfer and parse bytes, not
 // query work.
-export async function getAddressHistory(addressInput: string, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; balanceHistory: AssetBalanceHistory[] } | null> {
+export async function getAddressHistory(addressInput: string, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] } | null> {
   const detail = await getAddress(addressInput)
   if (!detail) return null
   // The reconstruction is cached under the same scope key the value-event jump
@@ -3905,6 +3907,41 @@ export async function getAddressHistory(addressInput: string, opts: { seriesOnly
   return {
     portfolioSeries,
     portfolioDates: history.portfolioDates,
+    // Additive: the end-of-bucket block heights let the chart-zoom refinement
+    // name its window in exact block space (no timestamp->height scan).
+    portfolioBlocks: history.portfolioBlocks,
+    balanceHistory: opts.seriesOnly ? [] : history.balanceHistory,
+  }
+}
+
+/**
+ * Chart-zoom refinement: the same reconstruction re-bucketed over a caller-
+ * provided block window. No final-point pin — a mid-history window must end at
+ * its own last bucket, not at live net worth — and no daily downsample, since
+ * sub-daily resolution is the refinement's whole point.
+ */
+export async function getAddressHistoryWindow(addressInput: string, fromBlock: number, toBlock: number, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] } | null> {
+  const detail = await getAddress(addressInput)
+  if (!detail) return null
+  const history = await getAccountHistoryWindowed(detail.relatedAccountIds, `addr:${detail.accountId}`, fromBlock, toBlock)
+  return {
+    portfolioSeries: history.portfolioSeries,
+    portfolioDates: history.portfolioDates,
+    portfolioBlocks: history.portfolioBlocks,
+    balanceHistory: opts.seriesOnly ? [] : history.balanceHistory,
+  }
+}
+
+/** The tag twin of getAddressHistoryWindow, over the tag's member set + EVM twins. */
+export async function getTagHistoryWindow(tagId: string, fromBlock: number, toBlock: number, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] } | null> {
+  const tag = getTagRecord(tagId)
+  if (!tag || !tag.members.length) return null
+  const accounts = [...new Set([...tag.members, ...tag.members.map(evmAccountForm).filter(Boolean) as string[]])]
+  const history = await getAccountHistoryWindowed(accounts, `tag:${tagId}`, fromBlock, toBlock)
+  return {
+    portfolioSeries: history.portfolioSeries,
+    portfolioDates: history.portfolioDates,
+    portfolioBlocks: history.portfolioBlocks,
     balanceHistory: opts.seriesOnly ? [] : history.balanceHistory,
   }
 }
@@ -6060,12 +6097,14 @@ async function getXykPositions(accounts: string[], balances: AddressBalance[]): 
 // See the value-history path in getAccountHistory.
 export interface OmnipoolHistoryLeg { assetId: number; liquidity: bigint; hub: bigint }
 export interface OmnipoolPrincipalHistory { legsByBucket: OmnipoolHistoryLeg[][]; assetIds: number[]; fromBucket: number | null }
-export async function loadOmnipoolPrincipalHistory(accounts: string[], minb: number, bucket: number, n: number): Promise<OmnipoolPrincipalHistory> {
+export async function loadOmnipoolPrincipalHistory(accounts: string[], bk: Bucketing): Promise<OmnipoolPrincipalHistory> {
+  const n = bk.N
+  const minb = bk.floorHeight
   const empty: OmnipoolPrincipalHistory = { legsByBucket: Array.from({ length: n + 1 }, () => []), assetIds: [], fromBucket: null }
   const accs = [...new Set(accounts.map(a => a.toLowerCase()))].filter(a => /^0x[0-9a-f]{64}$/.test(a))
   if (!accs.length) return empty
-  const maxb = minb + bucket * n
-  const bucketEndBlock = (b: number) => Math.min(maxb, minb + (b + 1) * bucket - 1)
+  const maxb = bk.endHeight(n)
+  const bucketEndBlock = (b: number) => bk.endHeight(b)
 
   // 1) Ownership intervals overlapping the range (account-bounded).
   const ivRes = await client.query({
@@ -6119,7 +6158,7 @@ export async function loadOmnipoolPrincipalHistory(accounts: string[], minb: num
   if (assetIds.length) {
     const poolRes = await client.query({
       query: `SELECT asset_id,
-                toInt32(greatest(-1, least(${n}, intDiv(toInt64(block_height) - ${minb}, ${bucket})))) AS b,
+                ${bk.ofTsCarry('block_timestamp')} AS b,
                 argMax(reserve_raw, block_height) AS reserve,
                 argMax(hub_reserve_raw, block_height) AS hub_reserve,
                 argMax(shares_raw, block_height) AS shares
@@ -6175,11 +6214,13 @@ export interface XykPrincipalHistory {
   stateByLp: Map<number, (XykBucketState | undefined)[]>
   farmSharesByLp: Map<number, bigint[]>
 }
-export async function loadXykPrincipalHistory(accounts: string[], candidateAssetIds: number[], minb: number, bucket: number, n: number): Promise<XykPrincipalHistory> {
+export async function loadXykPrincipalHistory(accounts: string[], candidateAssetIds: number[], bk: Bucketing): Promise<XykPrincipalHistory> {
+  const n = bk.N
+  const minb = bk.floorHeight
   const empty: XykPrincipalHistory = { lpAssetIds: new Set(), underlyingAssetIds: [], stateByLp: new Map(), farmSharesByLp: new Map() }
   const accs = [...new Set(accounts.map(a => a.toLowerCase()))].filter(a => /^0x[0-9a-f]{64}$/.test(a))
-  const maxb = minb + bucket * n
-  const bucketEndBlock = (b: number) => Math.min(maxb, minb + (b + 1) * bucket - 1)
+  const maxb = bk.endHeight(n)
+  const bucketEndBlock = (b: number) => bk.endHeight(b)
 
   // 1) Farm principal intervals → per (lp, bucket) summed active principal.
   const farmSharesByLp = new Map<number, bigint[]>()
@@ -6221,7 +6262,7 @@ export async function loadXykPrincipalHistory(accounts: string[], candidateAsset
   {
     const resvRes = await client.query({
       query: `SELECT pool_account,
-                toInt32(greatest(-1, least(${n}, intDiv(toInt64(block_height) - ${minb}, ${bucket})))) AS b,
+                ${bk.ofTsCarry('block_timestamp')} AS b,
                 argMax(asset_a, block_height) AS aa, argMax(asset_b, block_height) AS ab,
                 argMax(reserve_a_raw, block_height) AS ra, argMax(reserve_b_raw, block_height) AS rb
               FROM price_data.xyk_pool_reserve_history WHERE pool_account IN {pools:Array(String)} AND block_height <= ${maxb}
@@ -6247,7 +6288,7 @@ export async function loadXykPrincipalHistory(accounts: string[], candidateAsset
   {
     const tRes = await client.query({
       query: `SELECT lp_asset_id,
-                toInt32(greatest(-1, least(${n}, intDiv(toInt64(block_height) - ${minb}, ${bucket})))) AS b,
+                ${bk.ofHeightCarry('block_height')} AS b,
                 argMax(total_shares_raw, block_height) AS total
               FROM price_data.xyk_lp_total_shares_history WHERE lp_asset_id IN {lps:Array(Int32)} AND block_height <= ${maxb}
               GROUP BY lp_asset_id, b ORDER BY lp_asset_id, b`,
@@ -15876,9 +15917,8 @@ function historyH160(accountId: string): string | null {
 // avoiding a double count while making the balance tabs agree with live balances.
 async function appendMoneyMarketBalanceRows(
   accounts: string[],
-  minBlock: number,
-  bucketSize: number,
-  lastBucket: number,
+  maxBlock: number,
+  bk: Bucketing,
   rows: HistoryBalanceRow[],
 ): Promise<Map<string, number>> {
   const availableFromBucket = new Map<string, number>()
@@ -15895,7 +15935,7 @@ async function appendMoneyMarketBalanceRows(
   })
   const contracts = [...new Set(tokens.map(token => token.aToken.toLowerCase()))]
   if (!contracts.length) return availableFromBucket
-  const anchorBucket = Math.max(0, Math.min(lastBucket, Math.floor((Math.max(anchorBlock, minBlock) - minBlock) / bucketSize)))
+  const anchorBucket = bk.bucketOfHeight(anchorBlock)
 
   const [anchorRes, deltaRes] = await Promise.all([
     client.query({
@@ -15909,14 +15949,15 @@ async function appendMoneyMarketBalanceRows(
     }),
     client.query({
       query: `SELECT holder, contract_address AS contract,
-                toUInt32(least(intDiv(greatest(block_height, {minBlock:UInt32}) - {minBlock:UInt32}, {bucketSize:UInt32}), {lastBucket:UInt32})) AS b,
+                ${bk.ofTs('block_timestamp')} AS b,
                 toString(sum(scaled_delta)) AS delta
               FROM price_data.atoken_scaled_deltas FINAL
               WHERE holder IN ({holders:Array(String)})
                 AND contract_address IN ({contracts:Array(String)})
                 AND block_height > {anchorBlock:UInt32}
+                AND block_height <= {maxBlock:UInt32}
               GROUP BY holder, contract, b ORDER BY holder, contract, b`,
-      query_params: { holders, contracts, anchorBlock, minBlock, bucketSize, lastBucket }, format: 'JSONEachRow',
+      query_params: { holders, contracts, anchorBlock, maxBlock }, format: 'JSONEachRow',
     }),
   ])
   const anchors = await anchorRes.json<{ holder: string; contract: string; scaled: string }>()
@@ -15939,17 +15980,17 @@ async function appendMoneyMarketBalanceRows(
   const usedTokens = [...new Set([...state.values()].map(entry => tokenByContract.get(entry.contract)).filter(Boolean) as MmReserveToken[])]
   const pools = [...new Set(usedTokens.map(token => token.poolProxy.toLowerCase()))]
   const reserves = [...new Set(usedTokens.map(token => token.asset.toLowerCase()))]
-  const indexCut = Math.max(anchorBlock, minBlock)
   const indexRes = await client.query({
     query: `SELECT pool_address AS pool, reserve_address AS reserve,
-              toUInt32(least(intDiv(greatest(block_height, {indexCut:UInt32}, {minBlock:UInt32}) - {minBlock:UInt32}, {bucketSize:UInt32}), {lastBucket:UInt32})) AS b,
+              toUInt32(greatest(${anchorBucket}, ${bk.ofTs('block_timestamp')})) AS b,
               toString(argMax(liquidity_index, tuple(block_height,event_index,ingested_at))) AS liquidity_index
             -- No FINAL, same reason as reserveIndicesNow: the argMax key already
             -- covers the replacement key and version column.
             FROM price_data.money_market_reserve_indices
             WHERE pool_address IN ({pools:Array(String)}) AND reserve_address IN ({reserves:Array(String)})
+              AND block_height <= {maxBlock:UInt32}
             GROUP BY pool, reserve, b ORDER BY pool, reserve, b`,
-    query_params: { pools, reserves, indexCut, minBlock, bucketSize, lastBucket }, format: 'JSONEachRow',
+    query_params: { pools, reserves, maxBlock }, format: 'JSONEachRow',
   })
   const indicesByReserve = new Map<string, ScaledBalanceBucket[]>()
   for (const row of await indexRes.json<{ pool: string; reserve: string; b: number; liquidity_index: string }>()) {
@@ -15969,7 +16010,7 @@ async function appendMoneyMarketBalanceRows(
     const indexSeries = indicesByReserve.get(`${token.poolProxy.toLowerCase()}:${token.asset.toLowerCase()}`)
     if (!indexSeries?.length) continue
     availableFromBucket.set(String(displayId), anchorBucket)
-    for (const point of reconstructATokenBalanceBuckets(anchorBucket, lastBucket, entry.anchor, entry.deltas, indexSeries)) {
+    for (const point of reconstructATokenBalanceBuckets(anchorBucket, bk.N, entry.anchor, entry.deltas, indexSeries)) {
       rows.push({
         account_id: `${entry.holder}#mm:${entry.contract}`,
         asset_id: String(displayId),
@@ -15981,29 +16022,16 @@ async function appendMoneyMarketBalanceRows(
   return availableFromBucket
 }
 
-// TS mirror of the `least(intDiv(block_height - minb, bucketSize), lastBucket)`
-// bucket expression every history query shares. The clamp puts the whole ragged
-// tail above minb + lastBucket·bucketSize into the last bucket.
-export function bucketOfHeight(height: number, minBlock: number, bucketSize: number, lastBucket: number): number {
-  return Math.min(Math.floor((height - minBlock) / bucketSize), lastBucket)
-}
-
-// The one height whose timestamp is each bucket's end: the last height the bucket
-// covers, plus maxBlock for the clamped tail bucket. Heights past maxBlock are
-// dropped so a bucket the account's range never reaches stays absent — exactly as
-// it was under a `block_height BETWEEN minBlock AND maxBlock` scan.
-export function bucketEndHeightsForRange(minBlock: number, maxBlock: number, bucketSize: number, lastBucket: number): number[] {
-  return [...new Set(
-    Array.from({ length: lastBucket }, (_, b) => minBlock + (b + 1) * bucketSize - 1)
-      .concat(maxBlock)
-      .filter(height => height >= minBlock && height <= maxBlock))]
+/** Unix seconds as the `YYYY-MM-DD HH:MM:SS` string every history point carries. */
+function formatUtcSeconds(sec: number): string {
+  return new Date(sec * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
 }
 
 // MM positions are re-snapshotted periodically by the raw indexer (every N
 // blocks, every borrower — not just on the borrower's own MM events), so the
 // stored net is dense and the series forward-fills only across a short gap before
 // the caller pins the final point to the live net worth.
-async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] }> {
+async function getAccountHistory(accounts: string[], window?: { fromBlock: number; toBlock: number }): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] }> {
   const list = sqlAccountList(accounts)
   if (list === "''") return { portfolioSeries: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
   // Single ordinary accounts are already selective in the account-first exact
@@ -16027,65 +16055,64 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   })
   const rng = (await rangeRes.json<{ minb: number; maxb: number; mint: number; maxt: number }>())[0]
   if (!rng || !rng.maxb || rng.maxb <= rng.minb) return { portfolioSeries: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
-  const N = 180
-  const BUCKET = Math.max(1, Math.floor((rng.maxb - rng.minb) / N))
-  // Real end-of-bucket timestamps from the blocks table. Block time changed from
-  // 12s to 6s over the chain's life, so interpolating between the range endpoints
-  // mislabels mid-range buckets by months (block 7.19M: real 2025-03, interpolated
-  // 2024-09) — wrong hover dates and wrong perf windows. Interpolation remains
-  // only as the fallback for buckets with no indexed block.
-  //
-  // Read just the one height that decides each bucket rather than the account's
-  // whole block range: block_timestamp is monotone in block_height and `blocks` is
-  // complete (uniqExact(block_height) = max - min + 1), so a bucket's max timestamp
-  // is the timestamp AT its last height and every boundary height exists. 181 point
-  // lookups touch 180 marks / 11.8 MiB where the range GROUP BY touched 1,526 marks
-  // / 96.4 MiB, and this runs once per account history, per sparkline and per tag
-  // chart — enough executions to make the range scan one of the API's largest reads.
-  const bucketEndHeights = bucketEndHeightsForRange(rng.minb, rng.maxb, BUCKET, N)
-  const tsRes = await client.query({
-    query: `SELECT toUInt32(least(intDiv(block_height - ${rng.minb}, ${BUCKET}), ${N})) AS b, toString(max(block_timestamp)) AS ts
-            FROM price_data.blocks WHERE block_height IN (${bucketEndHeights.join(',')})
-            GROUP BY b`,
-    format: 'JSONEachRow',
-  })
-  const tsByBucket = new Map<number, string>()
-  for (const r of await tsRes.json<{ b: number; ts: string }>()) tsByBucket.set(r.b, r.ts)
-  // On a complete `blocks` every requested height resolves, so a gap means the table
-  // has holes and the interpolated fallback is about to relabel buckets by months.
-  // Say so rather than letting a plausible date hide a broken source table.
-  const wantedBuckets = new Set(bucketEndHeights.map(height => bucketOfHeight(height, rng.minb, BUCKET, N)))
-  if (tsByBucket.size < wantedBuckets.size) {
-    console.error(`[Explorer] account history: ${wantedBuckets.size - tsByBucket.size}/${wantedBuckets.size} bucket-end heights missing from price_data.blocks over ${rng.minb}-${rng.maxb}; those dates fall back to interpolation`)
+  // A chart-zoom refinement clamps the reconstruction to the caller's block
+  // window: the same reconstruction, re-bucketed over [fromBlock, toBlock] on the
+  // wall-clock ladder (bucketLadder) rather than by block count.
+  // Every source query folds pre-window rows into bucket 0 (the opening value —
+  // the validated carry-in) and bounds itself at the clamped maxb, so a
+  // mid-history window neither loses its opening balances nor lets future rows
+  // pollute its final bucket.
+  // The range runs to the CHAIN HEAD, not to this account's last observation. A
+  // balance persists until it changes, so ending at the last change implies "no
+  // information after" — it left an active account's line ~90 minutes short of
+  // now, and a WINDOW asking for a later end got silently clamped back to the
+  // last change. Extended before the window clamp so the clamp is the window's.
+  const clock = await blockClock(client)
+  if (clock.hours.length) {
+    const headSec = Math.min(clock.hours[clock.hours.length - 1] + 3_600, Math.floor(Date.now() / 1000))
+    const headHeight = clock.heights[clock.heights.length - 1]
+    if (headSec > rng.maxt) rng.maxt = headSec
+    if (headHeight > rng.maxb) rng.maxb = headHeight
   }
-  const tsInterpolated = (b: number) => { const frac = N > 0 ? b / N : 0; const sec = rng.mint + frac * (rng.maxt - rng.mint); return new Date(sec * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '') }
-  const tsAt = (b: number) => tsByBucket.get(b) ?? tsInterpolated(b)
-
-  // An hourly close is sufficient unless a dynamic block bucket boundary splits
-  // that hour. Fetch the exact block span of only those boundary hours; the
-  // balance query below unions their raw observations with hourly closes, so the
-  // winner of every original block bucket remains bit-for-bit identical.
-  let boundaryBalancePredicate = '0'
-  if (useAccountBalanceHourly) {
-    const boundaryHeights = Array.from({ length: N }, (_, i) => rng.minb + (i + 1) * BUCKET)
-      .filter(height => height <= rng.maxb)
-    if (boundaryHeights.length) {
-      const boundaryRes = await client.query({
-        query: `WITH boundary_hours AS (
-            SELECT DISTINCT toStartOfHour(block_timestamp) AS hour FROM price_data.blocks
-            WHERE block_height IN (${boundaryHeights.join(',')})
-          )
-          SELECT min(block_height) AS first,max(block_height) AS last
-          FROM price_data.blocks WHERE toStartOfHour(block_timestamp) IN boundary_hours
-          GROUP BY toStartOfHour(block_timestamp) ORDER BY first`,
-        format: 'JSONEachRow',
-      })
-      const ranges = await boundaryRes.json<{ first: number; last: number }>()
-      if (ranges.length) boundaryBalancePredicate = ranges
-        .map(range => `(block_height>=${range.first} AND block_height<=${range.last})`)
-        .join(' OR ')
+  if (window) {
+    rng.minb = Math.max(Number(rng.minb), window.fromBlock)
+    rng.maxb = Math.min(Number(rng.maxb), window.toBlock)
+    if (rng.maxb <= rng.minb) return { portfolioSeries: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
+    // Real endpoint timestamps for the interpolated-date FALLBACK — left at the
+    // account's global range they would mislabel every fallback date by the
+    // account's whole lifetime. `blocks` is complete, so both lookups resolve.
+    const endpointRes = await client.query({
+      query: `SELECT block_height AS h, toUnixTimestamp(block_timestamp) AS t
+              FROM price_data.blocks WHERE block_height IN (${rng.minb}, ${rng.maxb})`,
+      format: 'JSONEachRow',
+    })
+    for (const r of await endpointRes.json<{ h: number; t: number }>()) {
+      if (Number(r.h) === rng.minb) rng.mint = Number(r.t)
+      if (Number(r.h) === rng.maxb) rng.maxt = Number(r.t)
     }
   }
+  // Wall-clock buckets, not block-count ones. A block-count bucket's DURATION is
+  // a function of block time, which went 12s -> 6s -> 2s over the chain's life,
+  // so a single series carried 2.6-day points early and 0.95-day points at the
+  // head. That is what forced the charts to place points by TIME while the zoom
+  // window addressed them by INDEX, and every conversion between the two was a
+  // chance to be wrong. A ladder step is the same duration for every point, so
+  // index and time finally mean the same thing.
+  // Boundary heights come from the shared chain clock, not a per-account query:
+  // the wall-clock -> height mapping is a property of the CHAIN, so one cached
+  // index serves every request. Every ladder step is a whole number of hours, so
+  // each boundary lands on a mark the clock already holds.
+  const bk = makeBucketing(clock, rng.mint, rng.maxt, rng.minb)
+  const N = bk.N
+  // A bucket is dated by its END — the value it carries is the balance as at that
+  // instant — and the last bucket closes at the range end rather than past it.
+  const tsAt = (b: number) => formatUtcSeconds(bk.endSec(b))
+  const bucketEndHeight = (b: number) => bk.endHeight(b)
+  const bucketOfTs = (tsExpr: string) => bk.ofTs(tsExpr)
+  // No boundary-hour reconciliation any more: a bucket boundary is an hour mark
+  // by construction, so an hourly close can no longer straddle one. The query
+  // that recovered the split hours, and the UNION arm that folded their raw
+  // observations back in, are both gone with it.
 
   // Bucket per (account, asset): for a multi-account tag each account's balance
   // must be forward-filled INDEPENDENTLY and only THEN summed per bucket. A single
@@ -16095,8 +16122,10 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   // bucket. (For the single-account case this collapses to the original behaviour.)
   const balRes = await client.query({
     query: useAccountBalanceHourly
-      ? `SELECT account_id, asset_id,
-          toUInt32(least(intDiv(candidate_block - ${rng.minb}, ${BUCKET}), ${N})) AS b,
+      // The hourly model is bucketed by its OWN interval, which a whole-hour
+      // bucket boundary can no longer split — so the raw-observation UNION that
+      // used to repair split hours is gone.
+      ? `SELECT account_id, asset_id, ${bucketOfTs('interval_start')} AS b,
           toString(argMax(balance, candidate_block)) AS bal
         FROM (
           SELECT account_id, asset_id, interval_start,
@@ -16105,20 +16134,13 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
           FROM price_data.account_balance_hourly
           WHERE account_id IN (${list})
           GROUP BY account_id, asset_id, interval_start
-          UNION ALL
-          SELECT account_id,asset_id,toDateTime(0) AS interval_start,
-            toString(argMax(toUInt256OrZero(total),tuple(block_height,observation_id,ingested_at))) AS balance,
-            argMax(block_height,tuple(block_height,observation_id,ingested_at)) AS candidate_block
-          FROM price_data.account_balance_history
-          WHERE account_id IN (${list}) AND (${boundaryBalancePredicate})
-          GROUP BY account_id,asset_id,
-            toUInt32(least(intDiv(block_height - ${rng.minb}, ${BUCKET}), ${N}))
         )
+        WHERE candidate_block <= ${rng.maxb}
         GROUP BY account_id, asset_id, b ORDER BY asset_id, account_id, b`
-      : `SELECT account_id, asset_id, toUInt32(least(intDiv(block_height - ${rng.minb}, ${BUCKET}), ${N})) AS b,
+      : `SELECT account_id, asset_id, ${bucketOfTs('block_timestamp')} AS b,
           toString(argMax(toUInt256OrZero(total), tuple(block_height, observation_id, ingested_at))) AS bal
         FROM price_data.account_balance_history
-        WHERE account_id IN (${list})
+        WHERE account_id IN (${list}) AND block_height <= ${rng.maxb}
         GROUP BY account_id, asset_id, b ORDER BY asset_id, account_id, b`,
     format: 'JSONEachRow',
   })
@@ -16148,12 +16170,13 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
     const logRes = await client.query({
       query: `
         SELECT holder AS w,
-          toUInt32(least(intDiv(greatest(block_height, ${rng.minb}) - ${rng.minb}, ${BUCKET}), ${N})) AS b,
+          ${bucketOfTs('block_timestamp')} AS b,
           toString(sum(balance_delta)) AS net
         FROM price_data.erc20_transfer_deltas FINAL
         WHERE contract_address = {c:String} AND holder IN ({ws:Array(String)})
+          AND block_height <= {maxb:UInt32}
         GROUP BY w, b ORDER BY w, b`,
-      query_params: { c: ea.contract, ws: [...h160For.keys()] }, format: 'JSONEachRow',
+      query_params: { c: ea.contract, ws: [...h160For.keys()], maxb: rng.maxb }, format: 'JSONEachRow',
     }).catch(() => null)
     if (!logRes) continue
     let cumBy = ''
@@ -16168,7 +16191,7 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
       if (accountId) balRows.push({ account_id: `${accountId}#erc20`, asset_id: String(ea.assetId), b: r.b, bal: (cum < 0n ? 0n : cum).toString() })
     }
   }
-  const mmAvailableFromBucket = await appendMoneyMarketBalanceRows(accounts, rng.minb, BUCKET, N, balRows)
+  const mmAvailableFromBucket = await appendMoneyMarketBalanceRows(accounts, rng.maxb, bk, balRows)
   const assetIds = [...new Set(balRows.map(r => r.asset_id))]
   if (!assetIds.length) return { portfolioSeries: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
   // Open omnipool LP positions (bare + farmed) for the period LP-value reconstruction
@@ -16179,11 +16202,11 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   // full history. Loaded before the price query so the assets of historically-owned
   // (incl. since-closed) positions are priced, and before openPositions so the
   // fallback reconstruction query is skipped entirely when the new path is active.
-  const omniHist = await loadOmnipoolPrincipalHistory(accounts, rng.minb, BUCKET, N)
+  const omniHist = await loadOmnipoolPrincipalHistory(accounts, bk)
   const omniAssetIds = omniHist ? omniHist.assetIds : []
   // Historical XYK LP principal (direct wallet shareToken balances + collection-5389 farm
   // deposits) valued at pool NAV. Loaded before the price query so both pool assets are priced.
-  const xykHist = await loadXykPrincipalHistory(accounts, assetIds.map(Number), rng.minb, BUCKET, N)
+  const xykHist = await loadXykPrincipalHistory(accounts, assetIds.map(Number), bk)
   // aTokens have no price feed of their own — query the underlying reserve's
   // historical prices for them (priceAssetId maps aPRIME→PRIME, etc.).
   const priceIdFor = new Map(assetIds.map(id => [id, String(priceAssetId(Number(id)))]))
@@ -16294,13 +16317,26 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
       // Plot every observed bucket, plus the final bucket so the line is forward-
       // filled to "now" (the balance persists after its last change). This also
       // gives sparsely-observed assets a 2nd point, so they render a real line.
-      if (observedBucket[b] || b === N) points.push({ ts: tsAt(b), blockHeight: rng.minb + b * BUCKET, balance: combined[b] })
+      // End-of-bucket height, the SAME convention as the portfolio series' rawBlocks
+      // below — it must be the height whose timestamp is tsAt(b), or the point's
+      // block and its date name moments a whole bucket apart and a chart-zoom
+      // refinement (which names its window in block space) fetches the bucket
+      // before the one the window selected.
+      if (observedBucket[b] || b === N) points.push({ ts: tsAt(b), blockHeight: bucketEndHeight(b), balance: combined[b] })
     }
     // Collapse to one point per calendar day (keep the day's last observation),
     // matching the portfolio series' downsampleDaily so a short window (fewer days
     // than buckets) never plots multiple points on the same date.
+    //
+    // NOT when windowed, for the same reason the portfolio series skips it below:
+    // a windowed reconstruction re-buckets 180 times INSIDE the zoom window (~53
+    // minutes each on a week, against ~a day in the base view), and that finer
+    // resolution is the entire product of refetch-on-zoom. Collapsing it back to
+    // one point per day discards ~96% of what the query just computed and leaves
+    // the refined series barely longer than the coarse slice it replaces — which
+    // useZoomRefine then declines to substitute, so the zoom reveals nothing.
     if (points.length) {
-      const dailyPoints = downsampleDailyPoints(points)
+      const dailyPoints = window ? points : downsampleDailyPoints(points)
       if (hasNonZeroVisibleBalance(dailyPoints)) balanceHistory.push({
         asset: a,
         current: combined[N],
@@ -16366,7 +16402,7 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   // and account-first it degrades to 1,738,112 rows / 470 ms.
   const mmRes = await client.query({
     query: `SELECT account_id, pool_address AS pool,
-              toUInt32(least(intDiv(block_height - ${rng.minb}, ${BUCKET}), ${N})) AS b,
+              ${bk.ofHeight('block_height')} AS b,
               argMax(toFloat64(total_collateral_base), ${moneyMarketPositionOrderSql()}) / 1e8 AS collat,
               argMax(toFloat64(total_debt_base), ${moneyMarketPositionOrderSql()}) / 1e8 AS debt
             FROM price_data.account_money_market_position_history
@@ -16445,7 +16481,8 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
 
   // Drop leading zero buckets, keep a clean series.
   let start = 0; while (start < portfolio.length - 1 && portfolio[start] === 0) start++
-  const alignedBalanceHistory = alignBalanceHistoryDailyPoints(balanceHistory)
+  // Windowed responses keep per-bucket resolution; see alignBalanceHistoryDailyPoints.
+  const alignedBalanceHistory = alignBalanceHistoryDailyPoints(balanceHistory, Boolean(window))
   alignedBalanceHistory.sort((x, y) => (y.current * (prices.get(y.asset.assetId)?.price ?? 0)) - (x.current * (prices.get(x.asset.assetId)?.price ?? 0)))
   const rawSeries = portfolio.slice(start).map(v => +v.toFixed(2))
   const rawDates = Array.from({ length: portfolio.length - start }, (_, k) => tsAt(start + k))
@@ -16454,12 +16491,14 @@ async function getAccountHistory(accounts: string[]): Promise<{ portfolioSeries:
   // delta reflects live in the half-open block span between the two end blocks.
   const rawBlocks = Array.from({ length: portfolio.length - start }, (_, k) => {
     const b = start + k
-    return b >= N ? rng.maxb : rng.minb + (b + 1) * BUCKET - 1
+    return bucketEndHeight(b)
   })
   // Collapse to one point per calendar day (keep the latest of each day) so the
   // chart never shows the same date on adjacent points when the window spans
   // fewer days than buckets. Long windows (≫70 days) are unaffected.
-  const { series: portfolioSeries, dates: portfolioDates, blocks: portfolioBlocks } = downsampleDaily(rawSeries, rawDates, rawBlocks)
+  const { series: portfolioSeries, dates: portfolioDates, blocks: portfolioBlocks } = window
+    ? { series: rawSeries, dates: rawDates, blocks: rawBlocks }
+    : downsampleDaily(rawSeries, rawDates, rawBlocks)
   // Return every asset that has a historical balance (sorted by current value),
   // not just the top N — the per-asset chip list should be complete.
   return { portfolioSeries, portfolioDates, portfolioBlocks, balanceHistory: alignedBalanceHistory }
@@ -16513,6 +16552,17 @@ function accountSetFingerprint(accounts: string[]): string {
   return createHash('sha1').update([...accounts].map(a => a.toLowerCase()).sort().join(',')).digest('hex').slice(0, 12)
 }
 
+/**
+ * Windowed twin of getAccountHistoryShared. Its own key namespace (`:w:`) —
+ * a windowed reconstruction must never collide with the full-history entry the
+ * detail page and sparklines share. Historical windows barely move, so the TTL
+ * can be generous without staleness showing.
+ */
+function getAccountHistoryWindowed(accounts: string[], scopeKey: string, fromBlock: number, toBlock: number): Promise<Awaited<ReturnType<typeof getAccountHistory>>> {
+  const key = `explorer:account-history:${scopeKey}:w:${fromBlock}-${toBlock}:${accountSetFingerprint(accounts)}`
+  return cached(key, ACCOUNT_HISTORY_TTL_MS, () => getAccountHistory(accounts, { fromBlock, toBlock }))
+}
+
 function getAccountHistoryShared(accounts: string[], scopeKey: string): Promise<Awaited<ReturnType<typeof getAccountHistory>>> {
   const key = `explorer:account-history:${scopeKey}:${accountSetFingerprint(accounts)}`
   return cached(key, ACCOUNT_HISTORY_TTL_MS, () => getAccountHistory(accounts))
@@ -16535,14 +16585,26 @@ export function hasNonZeroVisibleBalance(points: AssetBalancePoint[]): boolean {
   return points.some(p => Number.isFinite(p.balance) && p.balance > 0)
 }
 
-export function alignBalanceHistoryDailyPoints(history: AssetBalanceHistory[]): AssetBalanceHistory[] {
+/**
+ * Project every asset onto one shared axis, keyed by calendar day.
+ *
+ * `perPoint` keys on the exact bucket timestamp instead, and a WINDOWED
+ * (chart-zoom) reconstruction must pass it: that path re-buckets 180 times inside
+ * the window — ~53 minutes across a week, against ~a day in the base view — and
+ * day-keying folds all of it straight back to one point per day, so the refined
+ * series arrives no finer than the coarse slice it was fetched to replace. Every
+ * asset is bucketed by the same `tsAt(b)`, so the exact-ts union axis is still one
+ * entry per bucket with every asset aligned to it.
+ */
+export function alignBalanceHistoryDailyPoints(history: AssetBalanceHistory[], perPoint = false): AssetBalanceHistory[] {
   const visible = history.filter(h => hasNonZeroVisibleBalance(h.points))
   if (!visible.length) return []
+  const keyOf = (ts: string) => (perPoint ? ts : ts.slice(0, 10))
 
   const axisByDay = new Map<string, AssetBalancePoint>()
   for (const h of visible) {
     for (const p of h.points) {
-      const day = p.ts.slice(0, 10)
+      const day = keyOf(p.ts)
       const existing = axisByDay.get(day)
       if (!existing || p.ts > existing.ts) axisByDay.set(day, p)
     }
@@ -16552,7 +16614,7 @@ export function alignBalanceHistoryDailyPoints(history: AssetBalanceHistory[]): 
   let start = 0
   while (
     start < axis.length - 1 &&
-    !visible.some(h => h.points.some(p => p.ts.slice(0, 10) === axis[start].ts.slice(0, 10) && Number.isFinite(p.balance) && p.balance > 0))
+    !visible.some(h => h.points.some(p => keyOf(p.ts) === keyOf(axis[start].ts) && Number.isFinite(p.balance) && p.balance > 0))
   ) {
     start++
   }
@@ -16560,11 +16622,11 @@ export function alignBalanceHistoryDailyPoints(history: AssetBalanceHistory[]): 
 
   return visible.map(h => {
     const byDay = new Map<string, AssetBalancePoint>()
-    for (const p of h.points) byDay.set(p.ts.slice(0, 10), p)
+    for (const p of h.points) byDay.set(keyOf(p.ts), p)
 
     let lastBalance = 0
     const points = trimmedAxis.map(axisPoint => {
-      const p = byDay.get(axisPoint.ts.slice(0, 10))
+      const p = byDay.get(keyOf(axisPoint.ts))
       if (p) lastBalance = p.balance
       return {
         ts: axisPoint.ts,
@@ -20575,6 +20637,49 @@ export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
   })
 }
 
+// The chart-zoom refinement window: the same proven OHLC views getAssetDetail
+// reads daily closes from, at the finest interval whose candle count fits the
+// caller's point budget. Everything else mirrors the daily read — priceAssetId
+// aliasing, close > 0, interval_start labels — so a refined window is the same
+// series, just denser.
+const PRICE_WINDOW_INTERVALS = [
+  { key: '5min', view: 'ohlc_5min_query', seconds: 300 },
+  { key: '15min', view: 'ohlc_15min_query', seconds: 900 },
+  { key: '30min', view: 'ohlc_30min_query', seconds: 1_800 },
+  { key: '1h', view: 'ohlc_1h_query', seconds: 3_600 },
+  { key: '4h', view: 'ohlc_4h_query', seconds: 14_400 },
+  { key: '1d', view: 'ohlc_1d_query', seconds: 86_400 },
+] as const
+
+export interface AssetPriceWindow { interval: string; priceSeries: number[]; priceDates: string[] }
+
+export async function getAssetPriceWindow(assetId: number, fromSec: number, toSec: number, points: number): Promise<AssetPriceWindow> {
+  const span = Math.max(1, toSec - fromSec)
+  const iv = PRICE_WINDOW_INTERVALS.find(x => span / x.seconds <= points) ?? PRICE_WINDOW_INTERVALS[PRICE_WINDOW_INTERVALS.length - 1]
+  // Quantize the window to the interval so equal-looking zooms share a cache
+  // entry instead of fragmenting the cache by the pixel the drag ended on.
+  const from = Math.floor(fromSec / iv.seconds) * iv.seconds
+  const to = Math.ceil(toSec / iv.seconds) * iv.seconds
+  return cached(`explorer:asset-prices:${assetId}:${iv.key}:${from}:${to}`, 60_000, async () => {
+    const fmt = (s: number) => new Date(s * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
+    const res = await client.query({
+      query: `SELECT toString(interval_start) AS ts, toFloat64(close) AS px
+              FROM price_data.${iv.view}(asset_id={id:UInt32}, start_time={s:DateTime}, end_time={e:DateTime})
+              WHERE close > 0
+              ORDER BY interval_start`,
+      query_params: { id: priceAssetId(assetId), s: fmt(from), e: fmt(to) }, format: 'JSONEachRow',
+    })
+    const priceSeries: number[] = []
+    const priceDates: string[] = []
+    for (const r of await res.json<{ ts: string; px: number }>()) {
+      if (!(r.px > 0)) continue
+      priceDates.push(r.ts)
+      priceSeries.push(r.px)
+    }
+    return { interval: iv.key, priceSeries, priceDates }
+  })
+}
+
 // all accounts ranked by portfolio (tag-grouped)
 export interface TopAccountRow {
   account: AccountRef | null
@@ -22631,6 +22736,7 @@ export interface TagDetail {
   activeDcas?: ActiveDca[]
   portfolioSeries: number[]
   portfolioDates: string[]
+  portfolioBlocks: number[]
   balanceHistory: AssetBalanceHistory[]
 }
 
@@ -22716,7 +22822,10 @@ async function loadTagDetailSnapshot(tagId: string, membershipKey: string): Prom
   if (!row || row.membership_key !== membershipKey || Number(row.age) > TAG_DETAIL_REQUEST_MAX_AGE_SECONDS) return null
   try {
     const detail = JSON.parse(row.payload_json) as TagDetail
-    return detail?.tagId === tagId && Array.isArray(detail.members) ? detail : null
+    // portfolioBlocks arrived with the chart-zoom refinement; a payload
+    // serialized before it exists is otherwise valid for its whole membership
+    // life, so treat its absence as staleness and rebuild.
+    return detail?.tagId === tagId && Array.isArray(detail.members) && Array.isArray(detail.portfolioBlocks) ? detail : null
   } catch { return null }
 }
 
@@ -22819,7 +22928,7 @@ async function buildTagDetailForMembers(
     // and DCA — neither shown on the card — are skipped in summary.
     const [history, bareLp, farmLp, xykLp, activeDcas] = await Promise.all([
       summary
-        ? Promise.resolve({ portfolioSeries: [] as number[], portfolioDates: [] as string[], balanceHistory: [] as AssetBalanceHistory[] })
+        ? Promise.resolve({ portfolioSeries: [] as number[], portfolioDates: [] as string[], portfolioBlocks: [] as number[], balanceHistory: [] as AssetBalanceHistory[] })
         : getAccountHistoryShared(tagHistoryAccounts, opts.scope),
       getOmnipoolPositions(members),
       getFarmingPositions(members),
@@ -22862,7 +22971,7 @@ async function buildTagDetailForMembers(
       ...(liquidationVolumeUsd > 0 ? { liquidationVolumeUsd } : {}),
       ...(revenueUsd > 0 ? { revenueUsd } : {}),
       moneyMarket, liquidityPositions: [...lpPositions, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)), activeDcas,
-      portfolioSeries, portfolioDates: history.portfolioDates,
+      portfolioSeries, portfolioDates: history.portfolioDates, portfolioBlocks: history.portfolioBlocks,
       // Holdings without indexed historical observations remain absent rather
       // than being projected backward from their current balance.
       balanceHistory: summary ? [] : history.balanceHistory,
@@ -22956,6 +23065,20 @@ export async function getListTagDetail(listId: string, presentation: ListTagPres
   const scope = listTagScope(listId, presentation.tagId, valid)
   return buildTagDetailForMembers(presentation, valid, { summary, cacheKey: `explorer:${scope}${summary ? ':summary' : ''}`, scope })
 }
+/** The list-tag twin of getTagHistoryWindow: same member set and scope key the detail uses. */
+export async function getListTagHistoryWindow(listId: string, tagId: string, members: string[], fromBlock: number, toBlock: number, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] } | null> {
+  const valid = listTagMembers(members)
+  if (!valid.length) return null
+  const accounts = [...new Set([...valid, ...valid.map(evmAccountForm).filter(Boolean) as string[]])]
+  const history = await getAccountHistoryWindowed(accounts, listTagScope(listId, tagId, valid), fromBlock, toBlock)
+  return {
+    portfolioSeries: history.portfolioSeries,
+    portfolioDates: history.portfolioDates,
+    portfolioBlocks: history.portfolioBlocks,
+    balanceHistory: opts.seriesOnly ? [] : history.balanceHistory,
+  }
+}
+
 export async function getListTagActivity(listId: string, tagId: string, members: string[], type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {
   const valid = listTagMembers(members)
   if (!valid.length) return []

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { testBucketing } from './support/bucketing.ts'
 import {
   initExplorerService,
   loadOmnipoolPrincipalHistory,
@@ -76,6 +77,7 @@ describe('omnipoolLegsForBucket', () => {
 describe('loadOmnipoolPrincipalHistory', () => {
   // minb=1000, bucket=10, n=5 → bucketEndBlock: b0=1009,b1=1019,b2=1029,b3=1039,b4=1049,b5=1050.
   const minb = 1000, bucket = 10, n = 5
+  const bk = testBucketing(minb, bucket, n)
   const poolState: OmnipoolAssetState = { reserve: 1_000_000n, hub: 500_000n, shares: 2_000_000n }
   const posState: DecodedPosition = { assetId: 10, amount: 1000n, shares: 1000n, priceNum: 10n ** 18n, priceDen: 10n ** 18n }
 
@@ -95,7 +97,7 @@ describe('loadOmnipoolPrincipalHistory', () => {
       ],
     }))
 
-    const hist = await loadOmnipoolPrincipalHistory([ACC], minb, bucket, n)
+    const hist = await loadOmnipoolPrincipalHistory([ACC], bk)
     const expected = omnipoolRemoveLiquidity(poolState, posState)
 
     expect(hist.assetIds).toEqual([10])
@@ -119,7 +121,7 @@ describe('loadOmnipoolPrincipalHistory', () => {
       ],
       pool: [{ asset_id: 10, b: -1, reserve: '1000000', hub_reserve: '500000', shares: '2000000' }],
     }))
-    const hist = await loadOmnipoolPrincipalHistory([ACC], minb, bucket, n)
+    const hist = await loadOmnipoolPrincipalHistory([ACC], bk)
     // Destroyed at 1035: present through bucket 3 (end 1039 sees the destroy → none), so
     // legs exist for buckets 0..2 (ends 1009,1019,1029 < 1035) and vanish from bucket 3.
     expect(hist.legsByBucket[2]).toHaveLength(1)

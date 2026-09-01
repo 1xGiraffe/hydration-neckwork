@@ -348,7 +348,7 @@ function OwnershipSection({ s }: { s: HdxStructure }) {
       <SecTitle title="Who holds HDX" subtitle="weekly since Jul 2022" />
       <div className="pf-card">
         <ChartLegend items={series.map(b => ({ label: b.label, color: b.color }))} />
-        <StackedAreaChart buckets={s.weeks} series={series} h={240} />
+        <StackedAreaChart buckets={s.weeks} series={series} h={240} zoomKey="zown" />
         <div className="hdx-cards" style={{ marginTop: 14 }}>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: OWNERSHIP_COLORS.top10 }} />Top 10 hold</div>
@@ -418,9 +418,9 @@ function SupplySinksSection({ s }: { s: HdxStructure }) {
       <div className="pf-card">
         <div className="sec-title" style={{ marginBottom: 6 }}>Staked HDX{trendSub('classic staking handed off to GIGAHDX in July 2026')}</div>
         <ChartLegend items={staked.map(x => ({ label: x.label, color: x.color }))} />
-        <StackedAreaChart buckets={t.months} series={staked} h={190} />
+        <StackedAreaChart buckets={t.months} series={staked} h={190} zoomKey="zstk" />
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Liquid float{trendSub('user-held HDX not locked in staking')}</div>
-        <StackedAreaChart buckets={t.months} series={float} h={160} showShare={false} />
+        <StackedAreaChart buckets={t.months} series={float} h={160} showShare={false} zoomKey="zflt" />
         <div className="hdx-cards" style={{ marginTop: 14 }}>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: 'var(--cat-stake)' }} />Staked</div>
@@ -469,7 +469,7 @@ function CostBasisSection({ s }: { s: HdxStructure }) {
       <div className="pf-card">
         <div className="sec-title" style={{ marginBottom: 6 }}>Price vs cost basis{trendSub('the aggregate price user-held HDX was acquired at')}</div>
         <ChartLegend items={priceLines.map(x => ({ label: x.label, color: x.color }))} />
-        <MultiLineChart buckets={t.months} series={priceLines} h={190} yFmt={v => `$${v.toFixed(4)}`} floorZero />
+        <MultiLineChart buckets={t.months} series={priceLines} h={190} yFmt={v => `$${v.toFixed(4)}`} floorZero zoomKey="zpvc" />
         <div className="hdx-cards" style={{ marginTop: 14 }}>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: 'var(--accent)' }} />Price / cost basis</div>
@@ -488,11 +488,11 @@ function CostBasisSection({ s }: { s: HdxStructure }) {
           </div>
         </div>
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Treasury buyback{trendSub('cumulative HDX the protocol bought with its own revenue')}</div>
-        <StackedAreaChart buckets={t.months} series={buyback} h={160} showShare={false} />
+        <StackedAreaChart buckets={t.months} series={buyback} h={160} showShare={false} zoomKey="zbb" />
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Top-100 share of user supply{trendSub('whales have re-accumulated since the 2025 trough')}</div>
-        <MultiLineChart buckets={t.months} series={whaleLine} h={160} yFmt={v => `${v.toFixed(1)}%`} />
+        <MultiLineChart buckets={t.months} series={whaleLine} h={160} yFmt={v => `${v.toFixed(1)}%`} zoomKey="zt100" />
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Kraken custody{trendSub('HDX on the tagged exchange wallets — halved from the 2024 peak')}</div>
-        <StackedAreaChart buckets={t.months} series={kraken} h={160} showShare={false} />
+        <StackedAreaChart buckets={t.months} series={kraken} h={160} showShare={false} zoomKey="zkr" />
         <div className="hdx-note">Cost basis is account-level: balance increases are booked at that week's close (pre-price-era holdings at the
           first known close), decreases release cost proportionally — wallet moves therefore re-book at current prices.
           Kraken custody counts the tagged hot wallets on Hydration, not the exchange's global books.</div>
@@ -560,7 +560,7 @@ function LoyaltySection({ s }: { s: HdxStructure }) {
       <SecTitle title="Holder loyalty" subtitle="how long user-held HDX has been held" />
       <div className="pf-card">
         <ChartLegend items={series.map(b => ({ label: b.label, color: b.color }))} />
-        <StackedAreaChart buckets={s.weeks} series={series} h={220} />
+        <StackedAreaChart buckets={s.weeks} series={series} h={220} zoomKey="zhodl" />
         <div className="hdx-note">Age counts from an account's first nonzero HDX balance — an account that exits and returns keeps its
           original age, and a wallet that empties into a single fresh wallet passes its age on, so moving between own wallets counts as continuous holding.</div>
       </div>

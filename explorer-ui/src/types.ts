@@ -574,7 +574,9 @@ export interface AddressDetail {
 
 export interface AssetBalancePoint { ts: string; blockHeight: number; balance: number }
 export interface AssetBalanceHistory { asset: AssetRef; current: number; points: AssetBalancePoint[]; availableFrom?: string }
-export interface AccountHistoryResponse { portfolioSeries: number[]; portfolioDates: string[]; balanceHistory: AssetBalanceHistory[] }
+export interface AccountHistoryResponse { portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks?: number[]; balanceHistory: AssetBalanceHistory[] }
+// Chart-zoom refinement: the asset's closes over a window at a server-picked interval.
+export interface AssetPriceWindow { interval: string; priceSeries: number[]; priceDates: string[] }
 
 // One of the account/tag's largest value-changing events (big transfers in/out,
 // swaps, liquidity moves, cross-chain flows, liquidations) — the value chart's
@@ -1238,6 +1240,7 @@ export interface TagDetail {
   activeDcas?: ActiveDca[]
   portfolioSeries: number[]
   portfolioDates?: string[]
+  portfolioBlocks?: number[]
   balanceHistory: AssetBalanceHistory[]
 }
 

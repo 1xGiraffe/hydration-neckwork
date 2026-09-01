@@ -3,7 +3,6 @@ import {
   buildComposition,
   buildParamEvents,
   carrySeries,
-  dailyGrid,
   decodePegSource,
   foldTopSeries,
   rankPools,
@@ -46,16 +45,6 @@ describe('tradableFlags', () => {
     expect(tradableFlags(15)).toEqual(['Sell', 'Buy', 'Add', 'Remove'])
     expect(tradableFlags(3)).toEqual(['Sell', 'Buy'])
     expect(tradableFlags(0)).toEqual(['Frozen'])
-  })
-})
-
-describe('dailyGrid', () => {
-  it('builds an inclusive continuous day axis', () => {
-    expect(dailyGrid('2026-02-27', '2026-03-02')).toEqual(['2026-02-27', '2026-02-28', '2026-03-01', '2026-03-02'])
-  })
-
-  it('returns empty on malformed bounds', () => {
-    expect(dailyGrid('nope', '2026-03-02')).toEqual([])
   })
 })
 

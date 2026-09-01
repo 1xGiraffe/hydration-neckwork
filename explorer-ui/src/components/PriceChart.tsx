@@ -4,6 +4,8 @@ import { performancePoints } from './performance'
 import { CAT, UNFILTERED_COLOR } from './activityColors'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { ChartTip, F } from './ui'
+import { ZoomReset, ZoomSelection, fracOfTime, useChartZoom, useZoomRefine } from './chartZoom'
+import type { RefinedSeries } from './chartZoom'
 import type { AssetLiquidationDay, AssetLiquidations, AssetRef } from '../types'
 
 const W = 820, H = 190, padTop = 14, padBot = 14
@@ -145,32 +147,86 @@ export function foldIntoBuckets(byDay: Map<number, LiquidationBucket>, bucketOfP
 // Asset price chart with an EMA7 overlay, an availability-based performance row,
 // money-market liquidation bars, and a crosshair tooltip that reads price and
 // liquidation together over one span.
-export function PriceChart({ data, dates, price, change24h, liquidations, asset }: {
+export function PriceChart({ data, dates, price, change24h, liquidations, asset, refine, zoomKey }: {
   data: number[]; dates?: string[]; price: number | null; change24h: number | null
   liquidations?: AssetLiquidations | null; asset?: AssetRef
+  /** Zoom refinement loader: a finer series for base-index window [lo, hi]. */
+  refine?: (fromSec: number, toSec: number, points: number) => Promise<RefinedSeries | null>
+  /** Query-param name persisting the zoom window (back-navigable, shareable). */
+  zoomKey?: string
 }) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const [hover, setHover] = useState<{ k: number; xPct: number; yPct: number; label: string; price: string; ema: string } | null>(null)
   const narrow = useMediaQuery('(max-width: 720px)')
+  // Gesture zoom over the daily series (chartZoom.tsx): the plot spans the whole
+  // wrapper, so the plot fraction is the wrapper fraction. Zooming re-runs the
+  // bucketing over the window, so a multi-year chart's weekly readout refines
+  // back to days as the window narrows.
+  // The window is absolute time, so the hook takes the series' point times.
+  const seriesTimes = useMemo(
+    () => (dates && dates.length === data.length ? dates.map(d => Math.floor(Date.parse(d.replace(' ', 'T') + 'Z') / 1000)) : []),
+    [dates, data.length],
+  )
+  const zoom = useChartZoom(
+    seriesTimes,
+    e => {
+      const r = wrapRef.current?.getBoundingClientRect()
+      return r?.width ? Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) : 0
+    },
+    () => setHover(null),
+    zoomKey,
+  )
+  // A refined window (finer OHLC interval, fetched on zoom) substitutes for the
+  // coarse slice — same span, more candles.
+  const refined = useZoomRefine(zoom, refine, narrow ? MAX_BUCKETS_NARROW : MAX_BUCKETS)
+  const vData = useMemo(() => refined?.data ?? (zoom.zoomed ? data.slice(zoom.lo, zoom.hi + 1) : data), [refined, data, zoom.zoomed, zoom.lo, zoom.hi])
+  const vDates = useMemo(() => refined?.dates ?? (zoom.zoomed && dates ? dates.slice(zoom.lo, zoom.hi + 1) : dates), [refined, dates, zoom.zoomed, zoom.lo, zoom.hi])
+  // Liquidation days outside the window must DROP, not snap to the window's edge
+  // point (the snap exists for OHLC gaps, and an edge bar claiming months of
+  // out-of-window seizures would be a lie).
+  const liqDays = useMemo(() => {
+    const days = liquidations?.days
+    if (!days || !zoom.zoomed || !dates || dates.length !== data.length) return days
+    const from = dates[zoom.lo].slice(0, 10), to = dates[zoom.hi].slice(0, 10)
+    return days.filter(d => { const day = d.date.slice(0, 10); return day >= from && day <= to })
+  }, [liquidations, zoom.zoomed, zoom.lo, zoom.hi, dates, data])
 
-  // Pure geometry over the series: two path strings a thousand-odd points long, the
-  // EMA pass, the bucketing, the liquidation bars and the performance row. It
-  // changes only when the series does, but the page around this chart re-renders
+  // The performance chips and the headline price read the FULL series — their
+  // windows (24H, 7D, …) are calendar claims that must not follow the zoom.
+  const perfItems = useMemo(() => {
+    if (!data || data.length < 2) return []
+    return [
+      ...(change24h != null ? [{ label: '24H', value: change24h }] : []),
+      ...performancePoints(data, dates && dates.length === data.length ? dates : undefined),
+    ]
+  }, [data, dates, change24h])
+  const last = data && data.length ? data[data.length - 1] : 0
+
+  // Pure geometry over the (windowed) series: two path strings a thousand-odd
+  // points long, the EMA pass, the bucketing and the liquidation bars. It changes
+  // only when the series or window does, but the page around this chart re-renders
   // once a second on the shared clock, so without the memo the whole lot is rebuilt
   // every tick — and again on every crosshair move.
   const geom = useMemo(() => {
-    if (!data || data.length < 2) return null
-    const n = data.length
-    const min = Math.min(...data), max = Math.max(...data)
+    if (!vData || vData.length < 2) return null
+    const n = vData.length
+    const min = Math.min(...vData), max = Math.max(...vData)
     // Span full width so the line/EMA align with the hover crosshair (0..100% across
     // the container); a horizontal inset leaves the first/last points hoverable but
     // with no line drawn there.
-    const sx = (i: number) => i / (n - 1) * W
+    // The same TIME domain the zoom window and its shade use, so the line and the
+    // selection cannot sit on different axes. Index spacing remains the fallback
+    // when the dates are not a usable axis.
+    const axisDates = vDates && vDates.length === vData.length ? vDates : undefined
+    const vTimes = axisDates && axisDates.length === n ? axisDates.map(d => Math.floor(Date.parse(d.replace(' ', 'T') + 'Z') / 1000)) : null
+    const viewSpan = zoom.view.to - zoom.view.from
+    const timeAxis = vTimes != null && viewSpan > 0 && vTimes.every(Number.isFinite)
+    const sx = (i: number) => (timeAxis ? (vTimes![i] - zoom.view.from) / viewSpan : n > 1 ? i / (n - 1) : 0) * W
     const sy = (v: number) => padTop + (1 - (v - min) / ((max - min) || 1)) * (H - padTop - padBot)
     // The LINE stays at full daily resolution — it is a path, so its detail costs no
     // addressability, and a week-smoothed curve would hide the volatility that is
     // the point of a price chart. Only the readout and the bars bucket.
-    const line = data.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
+    const line = vData.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
     const area = `${line} L ${sx(n - 1).toFixed(1)} ${H - padBot} L ${sx(0).toFixed(1)} ${H - padBot} Z`
     const col = LINE_COLOR
 
@@ -178,19 +234,25 @@ export function PriceChart({ data, dates, price, change24h, liquidations, asset 
     // buckets; the tooltip samples it at the bucket's close.
     const k = 2 / 8
     const ema: number[] = []
-    data.forEach((v, i) => ema.push(i ? v * k + ema[i - 1] * (1 - k) : v))
+    vData.forEach((v, i) => ema.push(i ? v * k + ema[i - 1] * (1 - k) : v))
     const emaLine = ema.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
 
-    const dated = dates && dates.length === data.length ? dates : undefined
+    const dated = vDates && vDates.length === vData.length ? vDates : undefined
+    // Sub-daily candles (a refined window): the EMA7 overlay is defined over
+    // DAILY closes and would silently become an EMA of hours, so it hides; and
+    // the per-point readout labels carry the time, not just the date.
+    const parseTs = (d: string) => Date.parse(d.replace(' ', 'T') + 'Z')
+    const subDaily = dated != null && n > 1 && (parseTs(dated[n - 1]) - parseTs(dated[0])) / (n - 1) < 43_200_000
     const size = chooseBucketSize(n, narrow ? MAX_BUCKETS_NARROW : MAX_BUCKETS)
     const buckets = buildBuckets(dated, n, size)
+    if (subDaily && dated) for (const bk of buckets) bk.label = dated[bk.mid].slice(0, 16)
     const bucketOfPoint = new Int32Array(n)
     buckets.forEach((b, kIdx) => { for (let i = b.i0; i <= b.i1; i++) bucketOfPoint[i] = kIdx })
 
     // Liquidation bars, on their own scale, rising from the plot floor. A bar spans
     // exactly the bucket it sums, so its width is a claim about time the chart can
     // keep — a bar wider than its span would be pointing at days it does not cover.
-    const liq = foldIntoBuckets(liquidationBuckets(liquidations?.days, dated, n), bucketOfPoint)
+    const liq = foldIntoBuckets(liquidationBuckets(liqDays, dated, n), bucketOfPoint)
     const barMax = Math.max(...[...liq.values()].map(b => b.valueUsd), 0)
     const barSpan = (H - padTop - padBot) * BAR_MAX_FRAC
     const slot = W / (n - 1)
@@ -203,22 +265,23 @@ export function PriceChart({ data, dates, price, change24h, liquidations, asset 
       }
     })
 
-    // perf reads the daily series, so the chips keep their exact windows.
-    const perfItems = [
-      ...(change24h != null ? [{ label: '24H', value: change24h }] : []),
-      ...performancePoints(data, dated),
-    ]
-    return { n, sx, sy, line, area, col, ema, emaLine, dated, perfItems, last: data[n - 1], size, buckets, bucketOfPoint, liq, bars }
-  }, [data, dates, change24h, liquidations, narrow])
+    return { n, sx, sy, line, area, col, ema, emaLine, subDaily, size, buckets, bucketOfPoint, liq, bars }
+    // The view's BOUNDS, not the object: it is rebuilt every render, so depending
+    // on it would recompute the whole geometry on every clock tick. The bounds
+    // must be in here — a drag that narrows the window without changing which
+    // base points bracket it leaves the slice identical, and the line would stay
+    // drawn on the outgoing time domain while the shade moved to the new one.
+  }, [vData, vDates, liqDays, narrow, zoom.view.from, zoom.view.to])
 
   if (!geom) return null
-  const { n, sx, sy, line, area, col, ema, emaLine, perfItems, last, size, buckets, bucketOfPoint, liq, bars } = geom
+  const { n, sx, sy, line, area, col, ema, emaLine, subDaily, size, buckets, bucketOfPoint, liq, bars } = geom
 
   const perf = (label: string, val: number) => (
     <span key={label} className="perf"><span className="pk">{label}</span><span className="pv" style={{ color: val >= 0 ? 'var(--green)' : 'var(--red)' }}>{val >= 0 ? '+' : ''}{val.toFixed(2)}%</span></span>
   )
 
   function onMove(e: React.PointerEvent) {
+    if (zoom.selecting || zoom.pinching) return
     const wrap = wrapRef.current; if (!wrap) return
     const r = wrap.getBoundingClientRect()
     const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width))
@@ -227,8 +290,8 @@ export function PriceChart({ data, dates, price, change24h, liquidations, asset 
     const bucket = buckets[bucketOfPoint[Math.round(frac * (n - 1))]]
     const i = bucket.mid
     setHover({
-      k: bucketOfPoint[i], xPct: sx(i) / W * 100, yPct: sy(data[i]) / H * 100,
-      label: bucket.label, price: F.priceUsd(data[i]), ema: F.priceUsd(ema[i]),
+      k: bucketOfPoint[i], xPct: sx(i) / W * 100, yPct: sy(vData[i]) / H * 100,
+      label: bucket.label, price: F.priceUsd(vData[i]), ema: F.priceUsd(ema[i]),
     })
   }
 
@@ -240,8 +303,13 @@ export function PriceChart({ data, dates, price, change24h, liquidations, asset 
         <div className="pf-now">{F.priceUsd(price ?? last)}</div>
         <div className="perf-row">{perfItems.map(p => perf(p.label, p.value))}</div>
       </div>
-      {/* Same pointer wiring as AreaChart (ui.tsx): touch scrubs, tap sticks, mouse leave clears. */}
-      <div className="apx-wrap" ref={wrapRef} onPointerDown={onMove} onPointerMove={onMove}
+      {/* Same pointer wiring as AreaChart (ui.tsx): touch scrubs, tap sticks, mouse
+          leave clears; a mouse drag selects a zoom window, pinch zooms on touch,
+          double-click resets (chartZoom.tsx). */}
+      <div className="apx-wrap" ref={wrapRef} data-zoom-key={zoomKey}
+        onPointerDown={e => { zoom.onPointerDown(e); onMove(e) }}
+        onPointerMove={e => { zoom.onPointerMove(e); onMove(e) }}
+        onPointerUp={zoom.onPointerUp} onPointerCancel={zoom.onPointerCancel} onDoubleClick={zoom.onDoubleClick}
         onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null) }}>
         <svg className="apx-chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
           <defs><linearGradient id="apxg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={col} stopOpacity="0.26" /><stop offset="100%" stopColor={col} stopOpacity="0" /></linearGradient></defs>
@@ -252,15 +320,24 @@ export function PriceChart({ data, dates, price, change24h, liquidations, asset 
             <rect key={b.index} x={b.x.toFixed(1)} y={(H - padBot - b.h).toFixed(1)} width={b.w.toFixed(1)} height={b.h.toFixed(1)}
               fill={BAR_COLOR} fillOpacity={hover?.k === b.index ? 0.95 : 0.55} />
           ))}
-          <path d={emaLine} fill="none" stroke="var(--lavender)" strokeWidth="1.4" strokeDasharray="4 3" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+          {!subDaily && <path d={emaLine} fill="none" stroke="var(--lavender)" strokeWidth="1.4" strokeDasharray="4 3" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />}
           <path d={line} fill="none" stroke={col} strokeWidth="2" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
         </svg>
-        {hover && <div className="apx-cross"><div className="apx-vline" style={{ left: `${hover.xPct}%` }} /><div className="apx-dot" style={{ left: `${hover.xPct}%`, top: `${hover.yPct}%` }} /></div>}
-        {hover && (
+        {zoom.preview && (() => {
+          // Placed on the view's time domain, so the shade tracks the cursor
+          // exactly rather than stepping between candles.
+          const pw = zoom.preview
+          const day = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 10)
+          return <ZoomSelection aPct={fracOfTime(zoom.view, pw.from) * 100} bPct={fracOfTime(zoom.view, pw.to) * 100}
+            label={`${day(pw.from)} – ${day(pw.to)}`} />
+        })()}
+        {zoom.zoomed && !zoom.sel && <ZoomReset onReset={zoom.reset} />}
+        {hover && !zoom.selecting && <div className="apx-cross"><div className="apx-vline" style={{ left: `${hover.xPct}%` }} /><div className="apx-dot" style={{ left: `${hover.xPct}%`, top: `${hover.yPct}%` }} /></div>}
+        {hover && !zoom.selecting && (
           <ChartTip xPct={hover.xPct}>
             <span className="t-d">{hover.label}</span>
             <span className="t-p">{hover.price}</span>
-            <span className="t-e">EMA {hover.ema}</span>
+            {!subDaily && <span className="t-e">EMA {hover.ema}</span>}
             {/* Liquidation and price in one tooltip, over the same span: the bar is
                 sized by value, so the value leads and the token amount follows it. */}
             {hovered && liquidations && asset && (
@@ -274,7 +351,7 @@ export function PriceChart({ data, dates, price, change24h, liquidations, asset 
       </div>
       <div className="bal-legend" style={{ marginTop: 10 }}>
         <span><i style={{ background: col }} />Price</span>
-        <span><i style={{ background: 'var(--lavender)' }} />EMA7</span>
+        {!subDaily && <span><i style={{ background: 'var(--lavender)' }} />EMA7</span>}
         {bars.length > 0 && <span><i style={{ background: BAR_COLOR }} />Liquidations{size !== 'day' && <span className="muted"> per {size}</span>}</span>}
       </div>
     </div>

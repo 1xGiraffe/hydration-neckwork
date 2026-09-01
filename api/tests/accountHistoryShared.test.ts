@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { resampleValueSeriesToTrailingYear, SPARK_WEEKS } from '../src/services/explorerService.ts'
+import { alignBalanceHistoryDailyPoints, resampleValueSeriesToTrailingYear, SPARK_WEEKS } from '../src/services/explorerService.ts'
 
 const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
 
@@ -19,7 +19,13 @@ const fn = (name: string) => {
 describe('the shared reconstruction outlives an account-value generation', () => {
   it('keys on the scope and account set alone', () => {
     const sites = [...explorerService.matchAll(/`explorer:account-history:[^`]*`/g)].map(match => match[0])
-    expect(sites).toEqual(['`explorer:account-history:${scopeKey}:${accountSetFingerprint(accounts)}`'])
+    // The windowed twin (chart-zoom refinement) carries its block window in its
+    // own `:w:` namespace — still no value-generation in the key, so both
+    // entries outlive a generation the same way.
+    expect(sites).toEqual([
+      '`explorer:account-history:${scopeKey}:w:${fromBlock}-${toBlock}:${accountSetFingerprint(accounts)}`',
+      '`explorer:account-history:${scopeKey}:${accountSetFingerprint(accounts)}`',
+    ])
   })
 
   // The entry has to outlast several directory prewarm passes to be worth anything:
@@ -147,5 +153,60 @@ describe('an older reconstruction resamples to the same trailing year', () => {
     expect(firstNonZero).toBeGreaterThan(0)
     expect(series.slice(0, firstNonZero).every(v => v === 0)).toBe(true)
     expect(series.slice(firstNonZero).every(v => v > 0)).toBe(true)
+  })
+})
+
+describe('windowed history keeps the resolution it just computed', () => {
+  const body = () => fn('getAccountHistory')
+
+  it('gates the per-asset daily collapse on the window', () => {
+    expect(body()).toMatch(/window \? points : downsampleDailyPoints\(points\)/)
+  })
+
+  it('leaves no unconditional per-asset collapse behind', () => {
+    expect(body()).not.toMatch(/=\s*downsampleDailyPoints\(points\)\s*\n/)
+  })
+
+  it('keeps the portfolio series gated the same way', () => {
+    // Pinned so the two paths cannot drift apart again.
+    expect(body()).toContain('? { series: rawSeries, dates: rawDates, blocks: rawBlocks }')
+    expect(body()).toMatch(/:\s*downsampleDaily\(rawSeries, rawDates, rawBlocks\)/)
+  })
+})
+
+// The shared axis is keyed on the calendar day, which is right for the base view
+// (its buckets are already ~a day wide) but destroys a windowed reconstruction:
+// re-bucketing 180 times inside a week-long zoom yields ~53-minute points, and
+// day-keying folds them straight back to one per day. `perPoint` keys on the exact
+// bucket timestamp instead. Every asset is bucketed by the same tsAt(b), so the
+// exact-ts union axis is still one entry per bucket with every asset on it.
+describe('alignBalanceHistoryDailyPoints', () => {
+  const pt = (ts: string, balance: number, blockHeight = 1) => ({ ts, blockHeight, balance })
+  const hist = (symbol: string, points: ReturnType<typeof pt>[]) =>
+    ({ asset: { assetId: symbol, symbol, decimals: 12 }, current: 0, points }) as unknown as Parameters<typeof alignBalanceHistoryDailyPoints>[0][number]
+
+  const intraday = () => [
+    hist('A', [pt('2026-08-25 10:00:00', 5, 10), pt('2026-08-25 23:30:00', 7, 20)]),
+    hist('B', [pt('2026-08-25 23:30:00', 3, 20)]),
+  ]
+
+  it('collapses a day to its last point by default', () => {
+    const out = alignBalanceHistoryDailyPoints(intraday())
+    expect(out.map(h => h.points.map(p => p.ts))).toEqual([
+      ['2026-08-25 23:30:00'],
+      ['2026-08-25 23:30:00'],
+    ])
+  })
+
+  it('keeps every bucket when perPoint is set', () => {
+    const out = alignBalanceHistoryDailyPoints(intraday(), true)
+    expect(out[0].points.map(p => p.ts)).toEqual(['2026-08-25 10:00:00', '2026-08-25 23:30:00'])
+    expect(out[0].points.map(p => p.balance)).toEqual([5, 7])
+  })
+
+  it('forward-fills an asset that has no point at an axis bucket', () => {
+    // B is absent at 10:00; it must carry its opening 0, not borrow A's value.
+    const out = alignBalanceHistoryDailyPoints(intraday(), true)
+    expect(out[1].points.map(p => p.balance)).toEqual([0, 3])
   })
 })

@@ -75,7 +75,7 @@ function PegSection({ d }: { d: HollarDashboard }) {
     <>
       <SecTitle title="Peg" subtitle="30 days" />
       <div className="pf-card">
-        <AreaChart data={data} dates={dates} target={1} valueFmt={v => '$' + v.toFixed(4)} />
+        <AreaChart data={data} dates={dates} target={1} valueFmt={v => '$' + v.toFixed(4)} zoomKey="zpeg" />
         <div className="hdx-cards">
           <div className="hdx-card">
             <div className="hk">Within ±25 bps</div>
@@ -292,7 +292,7 @@ function PegHistorySection({ t }: { t: HollarTrends }) {
       <SecTitle title="Peg since launch" subtitle="weekly close and intraweek range" />
       <div className="pf-card">
         <ChartLegend items={[{ label: 'Close', color: 'var(--accent)' }, { label: 'Weekly range', color: 'var(--neutral-cool)' }]} />
-        <MultiLineChart buckets={t.weeks} series={lines} h={190} yFmt={v => '$' + v.toFixed(4)} />
+        <MultiLineChart buckets={t.weeks} series={lines} h={190} yFmt={v => '$' + v.toFixed(4)} zoomKey="zpegw" />
         {st && (
           <div className="hdx-cards" style={{ marginTop: 14 }}>
             <div className="hdx-card">
@@ -342,9 +342,9 @@ function SupplyHoldersSection({ t }: { t: HollarTrends }) {
       <div className="pf-card">
         <div className="sec-title" style={{ marginBottom: 6 }}>Supply composition{trendSub('the stack top is total supply')}</div>
         <ChartLegend items={COMPOSITION_BANDS.map(b => ({ label: b.label, color: b.color }))} />
-        <StackedAreaChart buckets={t.weeks} series={bands} h={200} />
+        <StackedAreaChart buckets={t.weeks} series={bands} h={200} zoomKey="zsup" />
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Holders{trendSub(`accounts holding more than 0.01 HOLLAR — ${F.int(holdersFirst)} at launch, ${F.int(holdersNow)} now`)}</div>
-        <StackedAreaChart buckets={t.weeks} series={holdersSeries} h={150} showShare={false} yFmt={v => F.int(Math.round(v))} />
+        <StackedAreaChart buckets={t.weeks} series={holdersSeries} h={150} showShare={false} yFmt={v => F.int(Math.round(v))} zoomKey="zhold" />
         <div className="hdx-note">Total supply is {fmtAmt(supplyNow)} HOLLAR. "Bridged out" sits on sibling-chain sovereign accounts;
           "Protocol pots" are pallet accounts (bonds, incentives). Balances come from the ERC-20 ledger — HOLLAR's substrate side holds under 0.3%.</div>
       </div>
@@ -375,7 +375,7 @@ function BorrowingSection({ t }: { t: HollarTrends }) {
       <SecTitle title="Borrowing" subtitle="HOLLAR is minted by borrowing it against collateral" />
       <div className="pf-card">
         <div className="sec-title" style={{ marginBottom: 6 }}>HOLLAR borrowed{trendSub('all markets — winter deleveraging, then regrowth to an all-time high')}</div>
-        <StackedAreaChart buckets={t.weeks} series={debtSeries} h={180} showShare={false} yFmt={v => fmtAmt(v)} />
+        <StackedAreaChart buckets={t.weeks} series={debtSeries} h={180} showShare={false} yFmt={v => fmtAmt(v)} zoomKey="zdebt" />
         <div className="hdx-cards" style={{ marginTop: 14 }}>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: hollarColor }} />Borrowed now</div>
@@ -401,9 +401,9 @@ function BorrowingSection({ t }: { t: HollarTrends }) {
           ))}
         </div>
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Borrowers{trendSub('accounts with open HOLLAR debt')}</div>
-        <StackedAreaChart buckets={t.weeks} series={borrowersSeries} h={150} showShare={false} yFmt={v => F.int(Math.round(v))} />
+        <StackedAreaChart buckets={t.weeks} series={borrowersSeries} h={150} showShare={false} yFmt={v => F.int(Math.round(v))} zoomKey="zbor" />
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Interest revenue{trendSub('cumulative USD booked from HOLLAR borrow interest')}</div>
-        <StackedAreaChart buckets={t.weeks} series={revenueSeries} h={150} showShare={false} yFmt={v => F.usd(v)} />
+        <StackedAreaChart buckets={t.weeks} series={revenueSeries} h={150} showShare={false} yFmt={v => F.usd(v)} zoomKey="zrev" />
         <div className="hdx-note">The March 2026 rate cut landed at the demand trough — borrowing has grown roughly eightfold since.</div>
       </div>
     </>
@@ -425,10 +425,10 @@ function MarketSection({ t }: { t: HollarTrends }) {
       <SecTitle title="Market" subtitle="HOLLAR's place among Hydration's stablecoins" />
       <div className="pf-card">
         <div className="sec-title" style={{ marginBottom: 6 }}>Share of stablecoin volume{trendSub(`now ${shareNow != null ? shareNow.toFixed(1) : '—'}% of stable-vs-stable trading`)}</div>
-        <MultiLineChart buckets={t.months} series={shareLine} h={170} yFmt={v => `${v.toFixed(1)}%`} floorZero />
+        <MultiLineChart buckets={t.months} series={shareLine} h={170} yFmt={v => `${v.toFixed(1)}%`} floorZero zoomKey="zshare" />
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>HOLLAR in pools{trendSub('liquidity depth — recovering for two months')}</div>
         <ChartLegend items={depthBands.map(b => ({ label: b.label, color: b.color }))} />
-        <StackedAreaChart buckets={t.weeks} series={depthBands} h={170} />
+        <StackedAreaChart buckets={t.weeks} series={depthBands} h={170} zoomKey="zdep" />
         <div className="hdx-note">Share counts each routed trade once across all pools. Part of the rise is other stables' volume
           shrinking — HOLLAR is winning share of a smaller local stable market.</div>
       </div>

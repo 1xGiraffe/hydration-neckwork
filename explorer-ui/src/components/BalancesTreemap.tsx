@@ -6,7 +6,7 @@ import { BalanceBreakdown } from './BalanceBreakdown'
 import { useQueryValue, setQuery } from '../router'
 import { squarify } from '../utils/squarify'
 import { useAssetColor } from '../utils/iconColor'
-import type { AddressBalance, AssetBalanceHistory, AssetRef } from '../types'
+import type { AccountHistoryResponse, AddressBalance, AssetBalanceHistory, AssetRef } from '../types'
 
 // Balances rendered as a value-weighted treemap that doubles as the selector for
 // the per-asset balance history: each holding is a tile sized by its USD value
@@ -242,8 +242,9 @@ function lastHeldDate(hist: AssetBalanceHistory | null): string | null {
 // map so it never clips at a container edge and reads the same on click and tap.
 // Adapts when value/amount don't apply: unpriced holdings omit value, and assets
 // held only in the past show a "last held" note in place of a live amount.
-function FocusedDetail({ balance, hist, allHistory }: {
+function FocusedDetail({ balance, hist, allHistory, refineWindow }: {
   balance: AddressBalance | null; hist: AssetBalanceHistory | null; allHistory: AssetBalanceHistory[]
+  refineWindow?: (fromBlock: number, toBlock: number) => Promise<AccountHistoryResponse | null>
 }) {
   const asset = balance?.asset ?? hist?.asset
   if (!asset) return null
@@ -280,7 +281,7 @@ function FocusedDetail({ balance, hist, allHistory }: {
         <div className="tm-detail-note">Not currently held{lastHeld ? ` · last held ${lastHeld.slice(0, 10)}` : ''}</div>
       )}
       {hist
-        ? <AssetBalanceChart selected={hist} all={allHistory} />
+        ? <AssetBalanceChart selected={hist} all={allHistory} refineWindow={refineWindow} />
         : <div className="tm-hist">
             <div className="tm-hist-head"><span className="tm-metric-label">Balance history</span></div>
             <div className="muted" style={{ padding: '16px 0', fontFamily: 'GeistMono', fontSize: 12 }}>No balance history indexed.</div>
@@ -355,7 +356,10 @@ function BalanceRows({ hidden, unpriced, historical, selectedId, onSelect }: {
   )
 }
 
-export function BalancesTreemap({ balances, balanceHistory = [] }: { balances: AddressBalance[]; balanceHistory?: AssetBalanceHistory[] }) {
+export function BalancesTreemap({ balances, balanceHistory = [], refineWindow }: {
+  balances: AddressBalance[]; balanceHistory?: AssetBalanceHistory[]
+  refineWindow?: (fromBlock: number, toBlock: number) => Promise<AccountHistoryResponse | null>
+}) {
   const priced = useMemo(
     () => balances.filter(b => b.valueUsd != null && b.valueUsd > 0).sort((a, b) => (b.valueUsd ?? 0) - (a.valueUsd ?? 0)),
     [balances],
@@ -500,7 +504,7 @@ export function BalancesTreemap({ balances, balanceHistory = [] }: { balances: A
         {active?.kind === 'other' && otherCell
           ? <OtherDetail members={otherCell.members} value={otherCell.value} share={otherCell.value / total} selectedId={activeId} onSelect={selectAsset} />
           : active?.kind === 'asset' && (
-            <FocusedDetail balance={balanceById.get(active.id) ?? null} hist={historyById.get(active.id) ?? null} allHistory={balanceHistory} />
+            <FocusedDetail balance={balanceById.get(active.id) ?? null} hist={historyById.get(active.id) ?? null} allHistory={balanceHistory} refineWindow={refineWindow} />
           )}
         {(hidden.length > 0 || unpriced.length > 0 || historical.length > 0) && (
           <BalanceRows hidden={hidden} unpriced={unpriced} historical={historical} selectedId={activeId} onSelect={selectAsset} />

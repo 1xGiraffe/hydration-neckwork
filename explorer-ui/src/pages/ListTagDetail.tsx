@@ -1,3 +1,5 @@
+import { userApi } from '../api/explorer'
+import { blockRangeForWindow } from '../utils/chartRefine'
 import { useListTag, useListTagActivityCounts, useListTagListCount, useListTagMembers, useListTagValueEvents, useMe } from '../hooks/useUser'
 import { useSession } from '../session'
 import { useNow } from '../hooks/useNow'
@@ -83,6 +85,8 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
           const liquidityPositions = data.liquidityPositions ?? []
           const portfolioSeries = data.portfolioSeries ?? []
           const balanceHistory = data.balanceHistory ?? []
+          // Zoom refinement needs the base points' block heights, aligned 1:1.
+          const historyBlocks = data.portfolioBlocks && data.portfolioBlocks.length === portfolioSeries.length ? data.portfolioBlocks : undefined
           const debtUsd = moneyMarketDebtUsd(mmList)
           const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined, undefined, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
@@ -143,11 +147,18 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
                   </tbody>
                 </table></div>}
 
-              <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data} />
+              <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data}
+                refine={historyBlocks ? async (fromSec, toSec) => {
+                  const range = blockRangeForWindow(data.portfolioDates ?? [], historyBlocks, fromSec, toSec)
+                  if (!range) return null
+                  const w = await userApi.listTagHistoryWindow(listId, tagId, range.fromBlock, range.toBlock)
+                  return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates } : null
+                } : undefined} />
               </>)}
 
               {activeView === 'balances' && (
-              <BalancesTreemap balances={balances} balanceHistory={balanceHistory} />
+              <BalancesTreemap balances={balances} balanceHistory={balanceHistory}
+                refineWindow={(fromBlock, toBlock) => userApi.listTagHistoryWindow(listId, tagId, fromBlock, toBlock)} />
               )}
 
               {activeView === 'positions' && (<>

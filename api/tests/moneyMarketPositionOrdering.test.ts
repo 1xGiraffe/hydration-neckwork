@@ -31,7 +31,9 @@ describe('money-market position history ordering', () => {
     expect(bucketStart).toBeGreaterThan(-1)
     expect(bucketQuery.length).toBeGreaterThan(200)
     expect(bucketQuery.length).toBeLessThan(900)
-    expect(bucketQuery).toContain('intDiv(block_height - ${rng.minb}, ${BUCKET})')
+    // This source carries no timestamp, so it is the one bucketed through the
+    // wall-clock boundaries in block space rather than from a DateTime column.
+    expect(bucketQuery).toContain("${bk.ofHeight('block_height')}")
   })
 
   it('reads the bucket pass account-first', () => {
