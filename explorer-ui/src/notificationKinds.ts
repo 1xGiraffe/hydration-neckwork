@@ -52,8 +52,10 @@ export const KIND_HINTS: Record<NotificationKind, string> = {
 export const ACTIVITY_TYPES = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc'] as const
 export type NotificationActivityType = typeof ACTIVITY_TYPES[number]
 
-// Referenda lifecycle phases the evaluator watches.
-export const REFERENDUM_PHASES = ['submitted', 'deciding', 'confirmed', 'executed', 'rejected', 'cancelled', 'timed-out', 'killed'] as const
+// Referenda lifecycle phases the evaluator watches. `confirming` (entering the
+// confirmation period) and `confirmed` (surviving it) are two different moments,
+// and `confirm-aborted` is the fall back out of the former.
+export const REFERENDUM_PHASES = ['submitted', 'deciding', 'confirming', 'confirm-aborted', 'confirmed', 'executed', 'rejected', 'cancelled', 'timed-out', 'killed'] as const
 export type ReferendumPhase = typeof REFERENDUM_PHASES[number]
 
 // Technical Committee motion phases the evaluator watches. Its own kind, never a

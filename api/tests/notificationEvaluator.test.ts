@@ -5,7 +5,8 @@ import {
   activityIdentity, activityPath, activityReferencesAsset, armStateKey, evaluateAccountActivity,
   evaluateEvents, evaluateExtrinsics, evaluateLargeValue, evaluateReferendum, evaluateRowKind,
   evaluateSafety, evaluateThreshold, inWindow, isFinalRow, nameMatches, notificationIdFor,
-  pageMissedRows, parseArmState, renderDigest, renderMatch, resolveWindow, safetyIdentity,
+  pageMissedRows, parseArmState, REFERENDUM_PHASE_BY_EVENT,
+  renderDigest, renderMatch, resolveWindow, safetyIdentity,
   type ArmState, type BlockWindow, type ChainEventRow, type ChainExtrinsicRow, type ReferendumEventRow,
   type RuleMatch, type ThresholdInput, type ViewerTag,
 } from '../src/notifications/evaluator.ts'
@@ -254,6 +255,44 @@ describe('referendum matching', () => {
     expect(matches[0].payload).toMatchObject({ lane: 'referendum', row: { outcome: 'ok' } })
     // And a rule with no phase filter hears about enactments without opting in.
     expect(evaluateReferendum(rows, [rule('referendum', {})], W)).toHaveLength(2)
+  })
+
+  // Entering confirmation is the phase a passing referendum's watchers care most
+  // about — it is the first moment the outcome is in sight — and the chain
+  // announces it with its own event. Referendum #396 crossed it at block
+  // 14074297 having notified its watchers of `submitted` and `deciding`, and
+  // nobody heard, because the lane read only the phases either side of it.
+  it('reports entering confirmation, and falling back out of it', () => {
+    expect(REFERENDUM_PHASE_BY_EVENT['Referenda.ConfirmStarted']).toBe('confirming')
+    expect(REFERENDUM_PHASE_BY_EVENT['Referenda.ConfirmAborted']).toBe('confirm-aborted')
+    const rows = [
+      row({ blockHeight: 1_060, phase: 'confirming', track: null }),
+      row({ blockHeight: 1_070, phase: 'confirm-aborted', track: null }),
+    ]
+    expect(evaluateReferendum(rows, [rule('referendum', { phases: ['confirming'] })], W).map(m => m.identity))
+      .toEqual(['101:confirming@1060'])
+    // And a rule naming no phases hears both without opting in — which is what
+    // every rule stored as `{}` is.
+    expect(evaluateReferendum(rows, [rule('referendum', {})], W)).toHaveLength(2)
+  })
+
+  // Confirmation can abort and begin again (four referenda on this chain have
+  // done it). Keyed on the phase alone, the second entry would carry the first
+  // one's identity and the inbox — a ReplacingMergeTree on that id — would
+  // silently swallow it. The `voted` precedent: block-key the repeatable phases.
+  it('keeps a re-entered confirmation distinct from the first', () => {
+    const rows = [
+      row({ blockHeight: 1_050, phase: 'confirming', track: null }),
+      row({ blockHeight: 1_060, phase: 'confirm-aborted', track: null }),
+      row({ blockHeight: 1_070, phase: 'confirming', track: null }),
+    ]
+    const ids = evaluateReferendum(rows, [rule('referendum', {})], W).map(m => m.identity)
+    expect(new Set(ids).size).toBe(3)
+    expect(ids).toEqual(['101:confirming@1050', '101:confirm-aborted@1060', '101:confirming@1070'])
+    // The once-only phases keep their stable identity, so an overlapping window
+    // re-evaluating them still deduplicates.
+    expect(evaluateReferendum([row({ phase: 'confirmed' })], [rule('referendum', {})], W)[0].identity)
+      .toBe('101:confirmed')
   })
 
   it('matches a track filter against the numeric track id, and keeps an unknown track', () => {
