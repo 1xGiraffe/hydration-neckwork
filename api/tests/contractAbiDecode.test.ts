@@ -4,6 +4,8 @@ import {
   buildAbiIndexes,
   decodeFunctionInput,
   decodeEventLog,
+  decodeEvmCallSites,
+  decodeEvmLogArgs,
   getContractAbiIndexes,
 } from '../src/services/contractAbiDecode.ts'
 import {
@@ -312,6 +314,7 @@ describe('getContractAbiIndexes', () => {
         queries.push(query)
         return {
           json: async () => {
+            if (query.includes('evm_logs_by_contract')) return []
             if (query.includes('FROM price_data.contract_abis')) {
               if (query.includes('abi_json !=')) {
                 // verified-map load shape
@@ -362,5 +365,162 @@ describe('getContractAbiIndexes', () => {
     queries.length = 0
     expect(await getContractAbiIndexes('0x' + '99'.repeat(20))).toBeNull()
     expect(queries).toEqual([])
+  })
+})
+
+describe('proxy-aware decoding', () => {
+  // keccak('Upgraded(address)') — the upgrade event the ERC1967/OZ/Aave proxy
+  // families all emit. The vector is pinned independently below; the fake
+  // client rejects a scan for any other topic, so production wiring is pinned
+  // through behavior.
+  const UPGRADED_TOPIC0 = '0xbc7cd75a20ee27fd9adebab32041f755214dbc6bffa90cc0225b39da2e5c2d3b'
+
+  it('hashes Upgraded(address) to the pinned topic0', () => {
+    expect(keccakAsHex('Upgraded(address)').toLowerCase()).toBe(UPGRADED_TOPIC0)
+  })
+
+  const topicAddr = (addr: string) => `0x${addrWord(addr)}`
+  const transferEvent = (names: [string, string, string]) => ({
+    type: 'event',
+    name: 'Transfer',
+    anonymous: false,
+    inputs: [
+      { name: names[0], type: 'address', indexed: true },
+      { name: names[1], type: 'address', indexed: true },
+      { name: names[2], type: 'uint256', indexed: false },
+    ],
+  })
+  const PROXY_ABI = [
+    {
+      type: 'event',
+      name: 'Upgraded',
+      anonymous: false,
+      inputs: [{ name: 'implementation', type: 'address', indexed: true }],
+    },
+  ]
+  const transferLog = (emitter: string) => ({
+    log: {
+      address: emitter,
+      topics: [TRANSFER_TOPIC0, topicAddr(ADDR_A), topicAddr(ADDR_B)],
+      data: `0x${word('0de0b6b3a7640000')}`,
+    },
+  })
+
+  // `upgraded` maps a scanned address to its Upgraded log topics, newest
+  // upgrade first — the order the production scan query returns.
+  function proxyFakeClient(
+    contracts: { address: string; abi: unknown; source?: string }[],
+    upgraded: Record<string, string[][]>,
+  ): ClickHouseClient {
+    return {
+      query: async ({ query, query_params }: { query: string; query_params?: Record<string, unknown> }) => ({
+        json: async () => {
+          if (query.includes('evm_logs_by_contract')) {
+            if (query_params?.topic0 !== UPGRADED_TOPIC0) throw new Error(`scan for unexpected topic0: ${query_params?.topic0}`)
+            return (upgraded[String(query_params?.address)] ?? []).map(topics => ({ topics }))
+          }
+          if (query.includes('FROM price_data.contract_abis')) {
+            if (query.includes('abi_json !=')) {
+              return contracts.map(c => ({
+                address: c.address, contract_name: 'X', compiler_version: 'v0.8.19',
+                match_type: 'FULL', source: c.source ?? 'verified', code_hash: '0xcc',
+                verified_at: '2026-08-31 10:00:00.000', abi_present: 1,
+              }))
+            }
+            const c = contracts.find(c => c.address === String(query_params?.address))
+            return c ? [{ abi_json: JSON.stringify(c.abi), contract_name: 'X', source: c.source ?? 'verified' }] : []
+          }
+          if (query.includes('FROM price_data.contract_sources')) return []
+          throw new Error(`unexpected query: ${query}`)
+        },
+      }),
+    } as unknown as ClickHouseClient
+  }
+
+  it('decodes a log emitted by a verified proxy through its implementation ABI', async () => {
+    const PROXY = '0x' + 'a1'.repeat(20)
+    const IMPL = '0x' + 'a2'.repeat(20)
+    initContractVerificationService(proxyFakeClient(
+      [{ address: PROXY, abi: PROXY_ABI }, { address: IMPL, abi: [transferEvent(['from', 'to', 'value'])] }],
+      { [PROXY]: [[UPGRADED_TOPIC0, topicAddr(IMPL)]] },
+    ))
+    await loadVerifiedContracts()
+
+    const decoded = await decodeEvmLogArgs(transferLog(PROXY))
+    expect(decoded?.name).toBe('Transfer')
+    expect(decoded?.params.map(p => p.name)).toEqual(['from', 'to', 'value'])
+    expect(decoded?.params[2].value).toBe('1000000000000000000')
+
+    // The proxy's own events still decode through its own ABI.
+    const own = await decodeEvmLogArgs({ log: { address: PROXY, topics: [UPGRADED_TOPIC0, topicAddr(IMPL)], data: '0x' } })
+    expect(own?.name).toBe('Upgraded')
+  })
+
+  it('prefers the proxy own ABI over the implementation on a signature collision', async () => {
+    const PROXY = '0x' + 'b1'.repeat(20)
+    const IMPL = '0x' + 'b2'.repeat(20)
+    initContractVerificationService(proxyFakeClient(
+      [
+        { address: PROXY, abi: [transferEvent(['pFrom', 'pTo', 'pValue'])] },
+        { address: IMPL, abi: [transferEvent(['from', 'to', 'value'])] },
+      ],
+      { [PROXY]: [[UPGRADED_TOPIC0, topicAddr(IMPL)]] },
+    ))
+    await loadVerifiedContracts()
+    const decoded = await decodeEvmLogArgs(transferLog(PROXY))
+    expect(decoded?.params.map(p => p.name)).toEqual(['pFrom', 'pTo', 'pValue'])
+  })
+
+  it('prefers the newest implementation when upgrades disagree', async () => {
+    const PROXY = '0x' + 'c1'.repeat(20)
+    const NEW_IMPL = '0x' + 'c2'.repeat(20)
+    const OLD_IMPL = '0x' + 'c3'.repeat(20)
+    initContractVerificationService(proxyFakeClient(
+      [
+        { address: PROXY, abi: PROXY_ABI },
+        { address: NEW_IMPL, abi: [transferEvent(['nFrom', 'nTo', 'nValue'])] },
+        { address: OLD_IMPL, abi: [transferEvent(['oFrom', 'oTo', 'oValue'])] },
+      ],
+      { [PROXY]: [[UPGRADED_TOPIC0, topicAddr(NEW_IMPL)], [UPGRADED_TOPIC0, topicAddr(OLD_IMPL)]] },
+    ))
+    await loadVerifiedContracts()
+    const decoded = await decodeEvmLogArgs(transferLog(PROXY))
+    expect(decoded?.params.map(p => p.name)).toEqual(['nFrom', 'nTo', 'nValue'])
+  })
+
+  it('ignores implementations without a decode-eligible verified ABI', async () => {
+    const PROXY = '0x' + 'd1'.repeat(20)
+    const UNVERIFIED_IMPL = '0x' + 'd2'.repeat(20)
+    const MANUAL_IMPL = '0x' + 'd3'.repeat(20)
+    initContractVerificationService(proxyFakeClient(
+      [
+        { address: PROXY, abi: PROXY_ABI },
+        { address: MANUAL_IMPL, abi: [transferEvent(['from', 'to', 'value'])], source: 'manual' },
+      ],
+      { [PROXY]: [[UPGRADED_TOPIC0, topicAddr(MANUAL_IMPL)], [UPGRADED_TOPIC0, topicAddr(UNVERIFIED_IMPL)]] },
+    ))
+    await loadVerifiedContracts()
+    expect(await decodeEvmLogArgs(transferLog(PROXY))).toBeNull()
+  })
+
+  it('decodes proxy-targeted calldata with the implementation ABI', async () => {
+    const PROXY = '0x' + 'e1'.repeat(20)
+    const IMPL = '0x' + 'e2'.repeat(20)
+    const implAbi = [{
+      type: 'function',
+      name: 'transfer',
+      stateMutability: 'nonpayable',
+      inputs: [{ name: 'to', type: 'address' }, { name: 'value', type: 'uint256' }],
+      outputs: [],
+    }]
+    initContractVerificationService(proxyFakeClient(
+      [{ address: PROXY, abi: PROXY_ABI }, { address: IMPL, abi: implAbi }],
+      { [PROXY]: [[UPGRADED_TOPIC0, topicAddr(IMPL)]] },
+    ))
+    await loadVerifiedContracts()
+    const input = `${TRANSFER_SELECTOR}${addrWord(ADDR_B)}${word('01')}`
+    const [site] = await decodeEvmCallSites('EVM.call', { target: PROXY, input })
+    expect(site?.call.decoded).toBe(true)
+    expect(site?.call.decoded && site.call.name).toBe('transfer')
   })
 })

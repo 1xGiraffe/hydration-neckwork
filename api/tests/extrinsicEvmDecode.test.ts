@@ -183,6 +183,8 @@ function fakeClient(): ClickHouseClient {
       return {
         json: async () => {
           const q = opts.query
+          // Proxy-implementation scan: neither address is a proxy here.
+          if (q.includes('evm_logs_by_contract')) return []
           if (q.includes('FROM price_data.contract_abis')) {
             if (q.includes('abi_present')) {
               return [{
@@ -274,12 +276,14 @@ describe('detail-surface decoding', () => {
     expect(event?.args).toEqual(TRANSFER_LOG)
   })
 
-  it('is page-bounded: one cached ABI read total, no other decode queries', async () => {
-    // All prior tests decoded five surfaces across four requests; the ABI was
-    // read from ClickHouse exactly once, everything else came from the rows the
-    // pages had already fetched.
+  it('is page-bounded: one cached ABI read and one cached proxy scan total, no other decode queries', async () => {
+    // All prior tests decoded five surfaces across four requests; the ABI and
+    // the proxy-implementation scan were each read from ClickHouse exactly once
+    // (both cached per emitter), everything else came from the rows the pages
+    // had already fetched.
     expect(seen.filter(q => q.includes('contract_abis') && !q.includes('abi_present'))).toHaveLength(1)
-    const allowed = /contract_abis|contract_sources|raw_extrinsics|raw_events/
+    expect(seen.filter(q => q.includes('evm_logs_by_contract'))).toHaveLength(1)
+    const allowed = /contract_abis|contract_sources|raw_extrinsics|raw_events|evm_logs_by_contract/
     expect(seen.filter(q => !allowed.test(q))).toEqual([])
   })
 
