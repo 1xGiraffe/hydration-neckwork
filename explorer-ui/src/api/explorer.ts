@@ -3,7 +3,7 @@ import type {
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
   AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail, RevenueBreakdown, GovernanceOverview, GovernanceReferendaPage, CollectiveMotionsPage, TreasuryTipsPage,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard,
-  RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, HollarDashboard, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
+  RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, AssetPriceWindow, HollarDashboard, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
   AssetLiquidity, PoolDetail, OmnipoolDetail, PoolLpsResponse, OmnipoolAssetLpsResponse,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
@@ -148,6 +148,15 @@ export const api = {
   assetLiquidity: (assetId: number, signal?: AbortSignal) => getJson<AssetLiquidity>(`/explorer/asset/${assetId}/liquidity`, signal),
   poolDetail: (poolId: number, signal?: AbortSignal) => getJson<PoolDetail>(`/explorer/pool/${poolId}`, signal),
   omnipool: (signal?: AbortSignal) => getJson<OmnipoolDetail>('/explorer/omnipool', signal),
+  // Chart-zoom refinement for the pool histories: the same models rebuilt on the
+  // finest ladder grain that fits `points` (never below an hour) instead of the
+  // daily default. fromTs/toTs — `from`/`to` are reserved by the API's filter guard.
+  assetLiquidityWindow: (assetId: number, fromTs: number, toTs: number, points: number, signal?: AbortSignal) =>
+    getJson<AssetLiquidity>(withQuery(`/explorer/asset/${assetId}/liquidity`, { fromTs, toTs, points }), signal),
+  poolDetailWindow: (poolId: number, fromTs: number, toTs: number, points: number, signal?: AbortSignal) =>
+    getJson<PoolDetail>(withQuery(`/explorer/pool/${poolId}`, { fromTs, toTs, points }), signal),
+  omnipoolWindow: (fromTs: number, toTs: number, points: number, signal?: AbortSignal) =>
+    getJson<OmnipoolDetail>(withQuery('/explorer/omnipool', { fromTs, toTs, points }), signal),
   // Same endpoint as the global activities feed, with the asset id pinned.
   assetActivity: (assetId: number, type = 'all', offset = 0, limit = 40, action?: string, from?: string, to?: string, min?: string, signal?: AbortSignal) =>
     getJson<ActivityRow[]>(withQuery('/explorer/activity', { asset: assetId, type, offset, limit, action, from, to, min }), signal),
@@ -243,6 +252,12 @@ export const api = {
   // The staker-distributions section carries its own timeframe, so it reads its
   // own endpoint rather than the dashboard's.
   revenueStakers: (range: RevenueRange = 'all', signal?: AbortSignal) => getJson<StakerDistributions>(withQuery('/explorer/revenue/stakers', { range }), signal),
+  // Chart-zoom refinement loaders: a finer series for a zoomed window. The
+  // history windows are named in exact block space (the base series carries its
+  // end-of-bucket block heights).
+  assetPrices: (assetId: number, from: number, to: number, points: number, signal?: AbortSignal) => getJson<AssetPriceWindow>(withQuery(`/explorer/asset/${assetId}/prices`, { fromTs: from, toTs: to, points }), signal),
+  addressHistoryWindow: (address: string, fromBlock: number, toBlock: number, signal?: AbortSignal) => getJson<AccountHistoryResponse>(withQuery(`/explorer/address/${encodeURIComponent(address)}/history`, { fromBlock, toBlock }), signal),
+  tagHistoryWindow: (tagId: string, fromBlock: number, toBlock: number, signal?: AbortSignal) => getJson<AccountHistoryResponse>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/history`, { fromBlock, toBlock }), signal),
   // Live feed: the head tag busts the edge micro-cache the moment a block lands.
   revenueFlow: (after?: string | null, signal?: AbortSignal) => getJson<RevenueFlowResponse>(withQuery('/explorer/revenue/flow', { after: after || undefined, h: liveHeadTag() || undefined }), signal),
   hollar: (signal?: AbortSignal) => getJson<HollarDashboard>('/explorer/hollar', signal),
@@ -341,6 +356,9 @@ export const userApi = {
   // because a private list's tag contents are owner/subscriber-only.
   listTag: (listId: string, tagId: string, signal?: AbortSignal) =>
     authedJson<TagDetail>('GET', `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}`, undefined, signal),
+  // Chart-zoom refinement over the list tag's member set (block window).
+  listTagHistoryWindow: (listId: string, tagId: string, fromBlock: number, toBlock: number, signal?: AbortSignal) =>
+    authedJson<AccountHistoryResponse>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/history`, { fromBlock, toBlock }), undefined, signal),
   // The same activity feeds as the public ones, with the viewer's OWN and
   // subscribed tags counting as names for the identity filter. Identical params
   // and response shape, so a caller swaps endpoints and reads it unchanged.

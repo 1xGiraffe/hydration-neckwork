@@ -26,7 +26,7 @@ vi.mock('../src/services/explorerService.ts', async importOriginal => {
       return {
         tagId: presentation.tagId, name: presentation.name, color: presentation.color, note: presentation.note, icon: presentation.icon,
         members: members.map(stubRef), balances: [], topAssets: [], portfolioUsd: 0,
-        moneyMarket: [], liquidityPositions: [], activeDcas: [], portfolioSeries: [], portfolioDates: [], balanceHistory: [],
+        moneyMarket: [], liquidityPositions: [], activeDcas: [], portfolioSeries: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [],
       } satisfies TagDetail
     }),
     getListTagActivity: vi.fn(async () => []),

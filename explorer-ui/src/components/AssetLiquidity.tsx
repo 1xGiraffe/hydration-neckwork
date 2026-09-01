@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import type { AssetLiquiditySource, AssetRef } from '../types'
+import { api } from '../api/explorer'
+import type { AssetLiquidity, AssetLiquiditySource, AssetRef } from '../types'
 import { useAssetLiquidity, useOmnipoolLps } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { Link, paths } from '../router'
@@ -141,12 +142,20 @@ export function AssetLiquidityTab({ asset }: { asset: AssetRef }) {
   const cards = data.sources.filter(isCard)
   const rest = data.sources.filter(s => !isCard(s))
   const history = data.history
-  const series = history.series.map((s, i) => ({
+  const toSeries = (rows: AssetLiquidity['history']['series']) => rows.map((s, i) => ({
     key: s.key,
     label: s.label,
     color: s.key === 'other' ? OTHER_COLOR : SERIES_COLORS[i % SERIES_COLORS.length],
     values: unit === 'amount' ? s.amounts : s.usd,
   }))
+  const series = toSeries(history.series)
+  // Zooming refetches the window on the finest ladder grain that fits — hourly
+  // for a few days — instead of magnifying the daily series.
+  const refineLiquidity = async (fromTs: number, toTs: number, points: number) => {
+    if (!(toTs > fromTs)) return null
+    const w = await api.assetLiquidityWindow(asset.assetId, fromTs, toTs, points)
+    return { buckets: w.history.buckets, series: toSeries(w.history.series) }
+  }
 
   return (
     <>
@@ -201,7 +210,7 @@ export function AssetLiquidityTab({ asset }: { asset: AssetRef }) {
           </div>
           <div className="pf-card">
             <ChartLegend items={series.map(s => ({ label: s.label, color: s.color }))} />
-            <StackedAreaChart buckets={history.buckets} series={series} yFmt={unit === 'usd' ? F.usd : undefined} />
+            <StackedAreaChart buckets={history.buckets} series={series} yFmt={unit === 'usd' ? F.usd : undefined} zoomKey="zliq" refine={refineLiquidity} />
           </div>
         </>
       )}

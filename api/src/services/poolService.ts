@@ -1,4 +1,5 @@
 import type { ClickHouseClient } from '../db/client.ts'
+import { DAILY_GRAIN, keySeconds, type HistoryGrain } from './historyGrain.ts'
 import { cachedSwr } from './cache.ts'
 import {
   accountRef, ensurePrices, hasExplorerClient, initExplorerService,
@@ -15,8 +16,10 @@ import { hasDriftingPegs, parseStableswapPools, pegPrice, type StableswapPoolSna
 // asset card and the pool page it links to can never disagree); history comes
 // from the MV-backed state-history tables on the shared 600-block grid
 // (omnipool_pool_state_history, stableswap_pool_state_history,
-// xyk_pool_reserve_history), bucketed daily. Bucketed USD uses only day candles
-// fully closed by the bucket boundary, so history series end at yesterday —
+// xyk_pool_reserve_history), bucketed daily by default and on the finest ladder
+// grain that fits when a window is given (see historyGrain). Bucketed USD uses
+// only candles fully closed by the bucket boundary — day candles for a day
+// grain, hour candles below it — so the daily series end at yesterday —
 // current values live in the current-state sections. Pool TVL is null unless
 // every leg is priced; peg multipliers scale the internal trading curve and are
 // displayed, never applied to USD.
@@ -276,16 +279,6 @@ export function tradableFlags(bits: number): string[] {
   return out
 }
 
-// Continuous daily axis (inclusive), 'YYYY-MM-DD'.
-export function dailyGrid(firstDay: string, lastDay: string): string[] {
-  const out: string[] = []
-  const start = Date.parse(`${firstDay}T00:00:00Z`)
-  const end = Date.parse(`${lastDay}T00:00:00Z`)
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return out
-  for (let t = start; t <= end; t += 86_400_000) out.push(new Date(t).toISOString().slice(0, 10))
-  return out
-}
-
 // Align sparse day→value points onto the grid, carrying the last value forward
 // only between the series' first sample and `lastDay` (default: its last
 // sample). Outside that range the series is null — a delisted asset or
@@ -452,10 +445,13 @@ function lastClosedDay(): string {
   return new Date(Date.now() - 86_400_000).toISOString().slice(0, 10)
 }
 
-// Daily closes for a set of assets (price-alias applied), day → close. The 1d
-// candle for day D closes at D+1 00:00 UTC, so it is fully closed for every
-// bucket the histories chart (they end at yesterday).
-async function dailyCloses(assetIds: number[]): Promise<Map<number, Map<string, number>>> {
+// Closes for a set of assets (price-alias applied), bucket key → close, at the
+// grain the history is built on. A day bucket reads the 1d candle, which for day
+// D closes at D+1 00:00 UTC and so is fully closed for every bucket the daily
+// histories chart (they end at yesterday); an hour bucket reads the 1h candle
+// for the same reason one step down. Valuing an hourly bucket at a DAY close
+// would price a zoomed window at up to 23 hours stale.
+async function gridCloses(assetIds: number[], grain: HistoryGrain): Promise<Map<number, Map<string, number>>> {
   const out = new Map<number, Map<string, number>>()
   if (!assetIds.length) return out
   const aliasByPrice = new Map<number, number[]>()
@@ -464,10 +460,10 @@ async function dailyCloses(assetIds: number[]): Promise<Map<number, Map<string, 
     aliasByPrice.set(pid, [...(aliasByPrice.get(pid) ?? []), id])
   }
   const res = await client.query({
-    query: `SELECT asset_id, toString(toDate(interval_start)) AS d, toFloat64(argMaxMerge(close_state)) AS close
-            FROM price_data.ohlc_1d
+    query: `SELECT asset_id, ${grain.keySql('interval_start')} AS d, toFloat64(argMaxMerge(close_state)) AS close
+            FROM price_data.${grain.daily ? 'ohlc_1d' : 'ohlc_1h'}
             WHERE asset_id IN {ids:Array(UInt32)}
-            GROUP BY asset_id, interval_start`,
+            GROUP BY asset_id, d`,
     query_params: { ids: [...aliasByPrice.keys()] },
     format: 'JSONEachRow',
   })
@@ -637,46 +633,59 @@ async function formerSourcesForAsset(pools: CurrentPools, assetId: number): Prom
   return out.sort((a, b) => (b.lastActiveBlock ?? -1) - (a.lastActiveBlock ?? -1))
 }
 
-async function assetLiquidityHistory(pools: CurrentPools, assetId: number): Promise<AssetLiquidityResponse['history']> {
+async function assetLiquidityHistory(
+  pools: CurrentPools,
+  assetId: number,
+  grain: HistoryGrain = DAILY_GRAIN,
+  win?: { fromSec: number; toSec: number },
+): Promise<AssetLiquidityResponse['history']> {
   const dec = asset(assetId).decimals
-  const end = lastClosedDay()
+  // A windowed request ends at the window, not at yesterday's close: its buckets
+  // are hours, so waiting for a day to close would drop the whole window.
+  const end = win ? grain.keyOf(win.toSec) : lastClosedDay()
+  const upTo = win ? ` AND block_timestamp <= toDateTime(${win.toSec})` : ''
 
   // Per-day last sample per source. Amounts are parsed from raw strings and
   // display-normalized once, at the edge.
-  const seriesPoints: { key: string; label: string; live: boolean; points: Map<string, number> }[] = []
+  const seriesPoints: { key: string; label: string; live: boolean; points: Map<string, number>; lastTs: number }[] = []
 
   if (assetId === LRNA_ASSET_ID) {
     const res = await client.query({
-      query: `SELECT d, toString(sum(hub)) AS v FROM (
-                SELECT asset_id, toString(toDate(block_timestamp)) AS d,
+      query: `SELECT d, toString(sum(hub)) AS v, max(last_ts) AS last_ts FROM (
+                SELECT asset_id, ${grain.keySql('block_timestamp')} AS d, toUnixTimestamp(max(block_timestamp)) AS last_ts,
                        argMax(toUInt256OrZero(hub_reserve_raw), block_height) AS hub
-                FROM price_data.omnipool_pool_state_history GROUP BY asset_id, d
+                FROM price_data.omnipool_pool_state_history WHERE 1 ${upTo} GROUP BY asset_id, d
               ) GROUP BY d ORDER BY d`,
       format: 'JSONEachRow',
     })
     const points = new Map<string, number>()
-    for (const r of await res.json<{ d: string; v: string }>()) points.set(r.d, Number(BigInt(r.v)) / 10 ** dec)
-    if (points.size) seriesPoints.push({ key: 'omnipool', label: 'Omnipool (hub)', live: true, points })
+    let lastTs = 0
+    for (const r of await res.json<{ d: string; v: string; last_ts: number }>()) { points.set(r.d, Number(BigInt(r.v)) / 10 ** dec); lastTs = Math.max(lastTs, Number(r.last_ts)) }
+    if (points.size) seriesPoints.push({ key: 'omnipool', label: 'Omnipool (hub)', live: true, points, lastTs })
   } else {
     const res = await client.query({
-      query: `SELECT toString(toDate(block_timestamp)) AS d, toString(argMax(toUInt256OrZero(reserve_raw), block_height)) AS v
-              FROM price_data.omnipool_pool_state_history WHERE asset_id = {id:Int32} GROUP BY d ORDER BY d`,
+      query: `SELECT ${grain.keySql('block_timestamp')} AS d, toString(argMax(toUInt256OrZero(reserve_raw), block_height)) AS v, toUnixTimestamp(max(block_timestamp)) AS last_ts
+              FROM price_data.omnipool_pool_state_history WHERE asset_id = {id:Int32} ${upTo} GROUP BY d ORDER BY d`,
       query_params: { id: assetId }, format: 'JSONEachRow',
     })
     const points = new Map<string, number>()
-    for (const r of await res.json<{ d: string; v: string }>()) points.set(r.d, Number(BigInt(r.v)) / 10 ** dec)
-    if (points.size) seriesPoints.push({ key: 'omnipool', label: 'Omnipool', live: pools.omnipool.has(assetId), points })
+    let lastTs = 0
+    for (const r of await res.json<{ d: string; v: string; last_ts: number }>()) { points.set(r.d, Number(BigInt(r.v)) / 10 ** dec); lastTs = Math.max(lastTs, Number(r.last_ts)) }
+    if (points.size) seriesPoints.push({ key: 'omnipool', label: 'Omnipool', live: pools.omnipool.has(assetId), points, lastTs })
   }
 
   const ssRes = await client.query({
-    query: `SELECT pool_id, toString(toDate(block_timestamp)) AS d,
-                   argMax(asset_ids, block_height) AS ids, argMax(reserves_raw, block_height) AS rs
-            FROM price_data.stableswap_pool_state_history WHERE has(asset_ids, {id:UInt32})
+    query: `SELECT pool_id, ${grain.keySql('block_timestamp')} AS d,
+                   argMax(asset_ids, block_height) AS ids, argMax(reserves_raw, block_height) AS rs,
+                   toUnixTimestamp(max(block_timestamp)) AS last_ts
+            FROM price_data.stableswap_pool_state_history WHERE has(asset_ids, {id:UInt32}) ${upTo}
             GROUP BY pool_id, d ORDER BY pool_id, d`,
     query_params: { id: assetId }, format: 'JSONEachRow',
   })
   const ssPoints = new Map<number, Map<string, number>>()
-  for (const r of await ssRes.json<{ pool_id: number; d: string; ids: number[]; rs: string[] }>()) {
+  const ssLast = new Map<number, number>()
+  for (const r of await ssRes.json<{ pool_id: number; d: string; ids: number[]; rs: string[]; last_ts: number }>()) {
+    ssLast.set(r.pool_id, Math.max(ssLast.get(r.pool_id) ?? 0, Number(r.last_ts)))
     const idx = r.ids.indexOf(assetId)
     if (idx === -1 || !r.rs[idx]) continue
     let m = ssPoints.get(r.pool_id)
@@ -684,7 +693,7 @@ async function assetLiquidityHistory(pools: CurrentPools, assetId: number): Prom
     m.set(r.d, Number(BigInt(r.rs[idx])) / 10 ** dec)
   }
   for (const [poolId, points] of ssPoints) {
-    seriesPoints.push({ key: `ss:${poolId}`, label: asset(poolId).symbol, live: pools.stableswap.has(poolId), points })
+    seriesPoints.push({ key: `ss:${poolId}`, label: asset(poolId).symbol, live: pools.stableswap.has(poolId), points, lastTs: ssLast.get(poolId) ?? 0 })
   }
 
   // XYK: every pool (live or destroyed) that ever contained the asset, from the
@@ -697,19 +706,21 @@ async function assetLiquidityHistory(pools: CurrentPools, assetId: number): Prom
   const xykAccounts = (await xykRegRes.json<{ pool_account: string }>()).map(r => r.pool_account)
   if (xykAccounts.length) {
     const res = await client.query({
-      query: `SELECT pool_account, toString(toDate(block_timestamp)) AS d,
+      query: `SELECT pool_account, ${grain.keySql('block_timestamp')} AS d,
                      toString(argMax(if(asset_a = {id:Int32}, toUInt256OrZero(reserve_a_raw), toUInt256OrZero(reserve_b_raw)), block_height)) AS v,
-                     argMax(if(asset_a = {id:Int32}, asset_b, asset_a), block_height) AS partner
+                     argMax(if(asset_a = {id:Int32}, asset_b, asset_a), block_height) AS partner,
+                     toUnixTimestamp(max(block_timestamp)) AS last_ts
               FROM price_data.xyk_pool_reserve_history
-              WHERE pool_account IN {accs:Array(String)} AND (asset_a = {id:Int32} OR asset_b = {id:Int32})
+              WHERE pool_account IN {accs:Array(String)} AND (asset_a = {id:Int32} OR asset_b = {id:Int32}) ${upTo}
               GROUP BY pool_account, d ORDER BY pool_account, d`,
       query_params: { id: assetId, accs: xykAccounts }, format: 'JSONEachRow',
     })
-    const byAccount = new Map<string, { partner: number; points: Map<string, number> }>()
-    for (const r of await res.json<{ pool_account: string; d: string; v: string; partner: number }>()) {
+    const byAccount = new Map<string, { partner: number; points: Map<string, number>; lastTs: number }>()
+    for (const r of await res.json<{ pool_account: string; d: string; v: string; partner: number; last_ts: number }>()) {
       let e = byAccount.get(r.pool_account)
-      if (!e) { e = { partner: r.partner, points: new Map() }; byAccount.set(r.pool_account, e) }
+      if (!e) { e = { partner: r.partner, points: new Map(), lastTs: 0 }; byAccount.set(r.pool_account, e) }
       e.partner = r.partner
+      e.lastTs = Math.max(e.lastTs, Number(r.last_ts))
       e.points.set(r.d, Number(BigInt(r.v)) / 10 ** dec)
     }
     for (const [account, e] of byAccount) {
@@ -718,6 +729,7 @@ async function assetLiquidityHistory(pools: CurrentPools, assetId: number): Prom
         label: xykName(assetId, e.partner),
         live: pools.xykByAccount.has(account),
         points: e.points,
+        lastTs: e.lastTs,
       })
     }
   }
@@ -728,10 +740,16 @@ async function assetLiquidityHistory(pools: CurrentPools, assetId: number): Prom
   for (const s of seriesPoints) {
     for (const d of s.points.keys()) if (firstDay == null || d < firstDay) firstDay = d
   }
-  const buckets = dailyGrid(firstDay!, end)
+  const buckets = grain.grid(win ? win.fromSec : keySeconds(firstDay!), keySeconds(end))
 
-  const closes = (await dailyCloses([assetId])).get(assetId) ?? new Map<string, number>()
+  const closes = (await gridCloses([assetId], grain)).get(assetId) ?? new Map<string, number>()
   const series: AssetLiquiditySeries[] = seriesPoints.map(s => {
+    // A source whose last sample predates the window died before it. Its value
+    // would otherwise land in the carry-in bucket and draw a single point at the
+    // window's left edge, implying liquidity that had been gone for years.
+    if (win && s.lastTs < win.fromSec) {
+      return { key: s.key, label: s.label, amounts: buckets.map(() => null), usd: buckets.map(() => null) }
+    }
     const amounts = carrySeries(buckets, s.points, s.live ? end : undefined)
     const usd = amounts.map((a, i) => {
       if (a == null) return null
@@ -825,13 +843,14 @@ export function rankPools(entries: PoolListEntry[]): PoolListResponse {
   return { totalTvlUsd, pools }
 }
 
-export async function getAssetLiquidity(assetId: number): Promise<AssetLiquidityResponse> {
-  return cachedSwr(`explorer:asset-liquidity:${assetId}`, 60_000, 300_000, async () => {
+export async function getAssetLiquidity(assetId: number, grain: HistoryGrain = DAILY_GRAIN, win?: { fromSec: number; toSec: number }): Promise<AssetLiquidityResponse> {
+  const wk = win ? `:w:${grain.stepSec}:${win.fromSec}-${win.toSec}` : ''
+  return cachedSwr(`explorer:asset-liquidity:${assetId}${wk}`, 60_000, 300_000, async () => {
     const [pools, prices] = await Promise.all([loadCurrentPools(), ensurePrices()])
     const sources = currentSourcesForAsset(pools, prices, assetId)
     const [former, history] = await Promise.all([
       formerSourcesForAsset(pools, assetId),
-      assetLiquidityHistory(pools, assetId),
+      assetLiquidityHistory(pools, assetId, grain, win),
     ])
     let totalAmount = 0n
     for (const s of sources) totalAmount += BigInt(s.assetAmount)
@@ -852,7 +871,11 @@ async function blockTimestamp(block: number): Promise<string | null> {
 
 interface SsHistoryRow { d: string; ids: number[]; rs: string[]; peg_num: string[]; peg_den: string[]; issuance: string }
 
-async function stableswapDetail(poolId: number, pools: CurrentPools, prices: Map<number, PriceInfo>): Promise<PoolDetailResponse | null> {
+async function stableswapDetail(
+  poolId: number, pools: CurrentPools, prices: Map<number, PriceInfo>,
+  grain: HistoryGrain = DAILY_GRAIN, win?: { fromSec: number; toSec: number },
+): Promise<PoolDetailResponse | null> {
+  const upTo = win ? ` AND block_timestamp <= toDateTime(${win.toSec})` : ''
   const [paramRes, histRes] = await Promise.all([
     client.query({
       query: `SELECT block_height, toString(block_timestamp) AS block_timestamp, event_name, args_json
@@ -861,11 +884,11 @@ async function stableswapDetail(poolId: number, pools: CurrentPools, prices: Map
       query_params: { id: poolId }, format: 'JSONEachRow',
     }),
     client.query({
-      query: `SELECT toString(toDate(block_timestamp)) AS d,
+      query: `SELECT ${grain.keySql('block_timestamp')} AS d,
                      argMax(asset_ids, block_height) AS ids, argMax(reserves_raw, block_height) AS rs,
                      argMax(peg_num, block_height) AS peg_num, argMax(peg_den, block_height) AS peg_den,
                      argMax(total_issuance_raw, block_height) AS issuance
-              FROM price_data.stableswap_pool_state_history WHERE pool_id = {id:UInt32}
+              FROM price_data.stableswap_pool_state_history WHERE pool_id = {id:UInt32} ${upTo}
               GROUP BY d ORDER BY d`,
       query_params: { id: poolId }, format: 'JSONEachRow',
     }),
@@ -924,11 +947,14 @@ async function stableswapDetail(poolId: number, pools: CurrentPools, prices: Map
   const shareDec = asset(poolId).decimals
 
   // History: composition, TVL (all-legs rule per day), drifting pegs, LP issuance.
-  const end = lastClosedDay()
+  const end = win ? grain.keyOf(win.toSec) : lastClosedDay()
   const histAssetIds = [...new Set(histRows.flatMap(r => r.ids))]
-  const closes = await dailyCloses(histAssetIds)
+  const closes = await gridCloses(histAssetIds, grain)
   const firstDay = histRows[0]?.d
-  const buckets = firstDay ? dailyGrid(firstDay, destroyed ? lastHist.d : end) : []
+  const lastKey = destroyed ? lastHist.d : end
+  const buckets = firstDay
+    ? grain.grid(win ? win.fromSec : keySeconds(firstDay), keySeconds(lastKey))
+    : []
   const history = buildStableswapHistory(buckets, histRows, histAssetIds, closes, shareDec)
 
   return {
@@ -1028,7 +1054,11 @@ function buildStableswapHistory(
   }
 }
 
-async function xykDetail(lpAssetId: number, pools: CurrentPools, prices: Map<number, PriceInfo>): Promise<PoolDetailResponse | null> {
+async function xykDetail(
+  lpAssetId: number, pools: CurrentPools, prices: Map<number, PriceInfo>,
+  grain: HistoryGrain = DAILY_GRAIN, win?: { fromSec: number; toSec: number },
+): Promise<PoolDetailResponse | null> {
+  const upTo = win ? ` AND block_timestamp <= toDateTime(${win.toSec})` : ''
   const regRes = await client.query({
     query: `SELECT lp_asset_id, pool_account, asset_a, asset_b, created_block FROM price_data.xyk_pool_registry FINAL WHERE lp_asset_id = {id:Int32} LIMIT 1`,
     query_params: { id: lpAssetId }, format: 'JSONEachRow',
@@ -1042,11 +1072,11 @@ async function xykDetail(lpAssetId: number, pools: CurrentPools, prices: Map<num
   const live = current != null && current.lpAssetId === lpAssetId
   const [histRes, sharesRes, createdAt] = await Promise.all([
     client.query({
-      query: `SELECT toString(toDate(block_timestamp)) AS d,
+      query: `SELECT ${grain.keySql('block_timestamp')} AS d,
                      argMax(asset_a, block_height) AS aa, argMax(asset_b, block_height) AS ab,
                      toString(argMax(toUInt256OrZero(reserve_a_raw), block_height)) AS ra,
                      toString(argMax(toUInt256OrZero(reserve_b_raw), block_height)) AS rb
-              FROM price_data.xyk_pool_reserve_history WHERE pool_account = {acc:String}
+              FROM price_data.xyk_pool_reserve_history WHERE pool_account = {acc:String} ${upTo}
               GROUP BY d ORDER BY d`,
       query_params: { acc: reg.pool_account }, format: 'JSONEachRow',
     }),
@@ -1071,10 +1101,12 @@ async function xykDetail(lpAssetId: number, pools: CurrentPools, prices: Map<num
     ? buildComposition(prices, legs)
     : { entries: legs.map(l => ({ asset: asset(l.assetId), amount: l.raw.toString(), usd: null, sharePct: null })), tvlUsd: null }
 
-  const end = lastClosedDay()
+  const end = win ? grain.keyOf(win.toSec) : lastClosedDay()
   const histAssetIds = [...new Set(histRows.flatMap(r => [r.aa, r.ab]))]
-  const closes = await dailyCloses(histAssetIds)
-  const buckets = histRows.length ? dailyGrid(histRows[0].d, live ? end : lastHist.d) : []
+  const closes = await gridCloses(histAssetIds, grain)
+  const buckets = histRows.length
+    ? grain.grid(win ? win.fromSec : keySeconds(histRows[0].d), keySeconds(live ? end : lastHist.d))
+    : []
 
   const compPoints = new Map<number, Map<string, number>>()
   for (const r of histRows) {
@@ -1127,15 +1159,16 @@ async function xykDetail(lpAssetId: number, pools: CurrentPools, prices: Map<num
   }
 }
 
-export async function getPoolDetail(poolId: number): Promise<PoolDetailResponse | null> {
-  return cachedSwr(`explorer:pool:${poolId}:model`, 30_000, 300_000, async () => {
+export async function getPoolDetail(poolId: number, grain: HistoryGrain = DAILY_GRAIN, win?: { fromSec: number; toSec: number }): Promise<PoolDetailResponse | null> {
+  const wk = win ? `:w:${grain.stepSec}:${win.fromSec}-${win.toSec}` : ''
+  return cachedSwr(`explorer:pool:${poolId}:model${wk}`, 30_000, 300_000, async () => {
     const [pools, prices] = await Promise.all([loadCurrentPools(), ensurePrices()])
     // Live or destroyed stableswap pool first (params/history rows survive
     // destruction), otherwise an XYK LP token; ids never collide (XYK share
     // tokens are ≥ 1,000,000).
-    const ss = await stableswapDetail(poolId, pools, prices)
+    const ss = await stableswapDetail(poolId, pools, prices, grain, win)
     if (ss) return ss
-    return xykDetail(poolId, pools, prices)
+    return xykDetail(poolId, pools, prices, grain, win)
   })
 }
 
@@ -1179,8 +1212,10 @@ export function selectCompositionSeries(usdByAsset: Map<number, (number | null)[
   return { ids, restIds: ranked.slice(Math.max(0, topN - pinned.length)) }
 }
 
-export async function getOmnipoolDetail(): Promise<OmnipoolResponse> {
-  return cachedSwr('explorer:omnipool:model', 30_000, 300_000, async () => {
+export async function getOmnipoolDetail(grain: HistoryGrain = DAILY_GRAIN, win?: { fromSec: number; toSec: number }): Promise<OmnipoolResponse> {
+  const wk = win ? `:w:${grain.stepSec}:${win.fromSec}-${win.toSec}` : ''
+  const upTo = win ? ` AND block_timestamp <= toDateTime(${win.toSec})` : ''
+  return cachedSwr(`explorer:omnipool:model${wk}`, 30_000, 300_000, async () => {
     const [pools, prices] = await Promise.all([loadCurrentPools(), ensurePrices()])
 
     let hubTotal = 0n
@@ -1205,23 +1240,35 @@ export async function getOmnipoolDetail(): Promise<OmnipoolResponse> {
     // current USD + Other. Series terminate at each asset's last sample, so
     // delisted assets end instead of forward-filling stale reserves.
     const histRes = await client.query({
-      query: `SELECT asset_id, toString(toDate(block_timestamp)) AS d,
-                     toString(argMax(toUInt256OrZero(reserve_raw), block_height)) AS v
-              FROM price_data.omnipool_pool_state_history GROUP BY asset_id, d ORDER BY asset_id, d`,
+      query: `SELECT asset_id, ${grain.keySql('block_timestamp')} AS d,
+                     toString(argMax(toUInt256OrZero(reserve_raw), block_height)) AS v,
+                     toUnixTimestamp(max(block_timestamp)) AS last_ts
+              FROM price_data.omnipool_pool_state_history ${upTo ? `WHERE 1 ${upTo}` : ''} GROUP BY asset_id, d ORDER BY asset_id, d`,
       format: 'JSONEachRow',
     })
     const pointsByAsset = new Map<number, Map<string, number>>()
-    for (const r of await histRes.json<{ asset_id: number; d: string; v: string }>()) {
+    const lastByAsset = new Map<number, number>()
+    for (const r of await histRes.json<{ asset_id: number; d: string; v: string; last_ts: number }>()) {
       let m = pointsByAsset.get(r.asset_id)
       if (!m) { m = new Map(); pointsByAsset.set(r.asset_id, m) }
       m.set(r.d, Number(BigInt(r.v)) / 10 ** assetDescriptor(r.asset_id).decimals)
+      lastByAsset.set(r.asset_id, Math.max(lastByAsset.get(r.asset_id) ?? 0, Number(r.last_ts)))
     }
+    // An asset DELISTED before the window still has a last pre-window row, and the
+    // carry-in folds it into bucket 0 — so the first bucket alone showed assets
+    // that had left the pool years earlier and its total came out nearly double
+    // (22.4M against 12.5M, from USDT/DOT/2-Pool/CFG/4-Pool). The state history is
+    // sampled on a 600-block grid, so anything still in the pool has rows INSIDE
+    // any multi-hour window; no rows there means it is gone.
+    if (win) for (const [id, last] of lastByAsset) if (last < win.fromSec) pointsByAsset.delete(id)
 
-    const end = lastClosedDay()
+    const end = win ? grain.keyOf(win.toSec) : lastClosedDay()
     let firstDay: string | null = null
     for (const m of pointsByAsset.values()) for (const d of m.keys()) if (firstDay == null || d < firstDay) firstDay = d
-    const buckets = firstDay ? dailyGrid(firstDay, end) : []
-    const closes = await dailyCloses([...pointsByAsset.keys()])
+    const buckets = firstDay
+      ? grain.grid(win ? win.fromSec : keySeconds(firstDay), keySeconds(end))
+      : []
+    const closes = await gridCloses([...pointsByAsset.keys()], grain)
 
     const amountsByAsset = new Map<number, (number | null)[]>()
     const usdByAsset = new Map<number, (number | null)[]>()

@@ -1,6 +1,8 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
+import { blockRangeForWindow } from '../utils/chartRefine'
 import { useAddress, useAddressHistory, useAddressValueEvents, useAccountActivityCounts, useAccountListCount, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
+import { api } from '../api/explorer'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, Copy, ShortAddr, ProfilePageSkeleton, DetailTabs, moduleName, emojiName, TagIcon, AccountEmoji, UserTagPill, rowNav, EmptyRow } from '../components/ui'
@@ -63,6 +65,11 @@ export function Account({ address }: { address: string }) {
   const [needBalanceHistory, setNeedBalanceHistory] = useState(view === 'balances')
   if (view === 'balances' && !needBalanceHistory) setNeedBalanceHistory(true)
   const history = useAddressHistory(canonicalAddress, !needBalanceHistory)
+  // Zoom refinement needs the base points' block heights, aligned 1:1 with the
+  // series actually charted (the /history one — the detail-payload fallback
+  // series carries no blocks, so it simply doesn't refine).
+  const historyBlocks = history.data?.portfolioBlocks && history.data.portfolioBlocks.length === history.data.portfolioSeries.length
+    ? history.data.portfolioBlocks : undefined
   const valueEvents = useAddressValueEvents(canonicalAddress)
   // The Activity tab badge is the exact length of the activity list, shared with
   // the list's own unfiltered total; absent while it resolves, and absent for good
@@ -211,11 +218,18 @@ export function Account({ address }: { address: string }) {
 
               <ListsSection publicLists={libs.data ?? []} ownLists={isOwn ? (me.data?.lists ?? []) : []} isOwn={isOwn} />
 
-              <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={history.data?.portfolioSeries ?? data.portfolioSeries ?? []} dates={history.data?.portfolioDates ?? data.portfolioDates} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} loading={history.isLoading || (history.isFetching && !history.data)} valueEvents={valueEvents.data} />
+              <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={history.data?.portfolioSeries ?? data.portfolioSeries ?? []} dates={history.data?.portfolioDates ?? data.portfolioDates} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} loading={history.isLoading || (history.isFetching && !history.data)} valueEvents={valueEvents.data}
+                refine={historyBlocks ? async (fromSec, toSec) => {
+                  const range = blockRangeForWindow(history.data?.portfolioDates ?? data.portfolioDates ?? [], historyBlocks, fromSec, toSec)
+                  if (!range) return null
+                  const w = await api.addressHistoryWindow(canonicalAddress ?? address, range.fromBlock, range.toBlock)
+                  return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates } : null
+                } : undefined} />
               </>)}
 
               {activeView === 'balances' && (
-              <BalancesTreemap balances={data.balances} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} />
+              <BalancesTreemap balances={data.balances} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory}
+                refineWindow={(fromBlock, toBlock) => api.addressHistoryWindow(canonicalAddress ?? address, fromBlock, toBlock)} />
               )}
 
               {activeView === 'positions' && (<>

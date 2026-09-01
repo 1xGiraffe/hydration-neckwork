@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { api } from '../api/explorer'
+import { windowRefine } from '../utils/chartRefine'
 import { usePoolActivity, usePoolDetail, usePoolLps } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -81,6 +83,27 @@ function PoolBody({ d }: { d: PoolDetailData }) {
   }))
   const issuancePoints = (d.history.issuance ?? []).map((v, i) => ({ b: d.history.buckets[i], v })).filter(p => p.v != null)
 
+  // Zooming refetches the window on the finest ladder grain that fits, so the
+  // composition and peg charts gain real intra-day detail instead of magnifying
+  // the daily series. Built from the same mappings as above, on the fetched grid.
+  const refineWindowed = <T,>(map: (h: PoolDetailData['history']) => T) => async (fromTs: number, toTs: number, points: number) => {
+    if (!(toTs > fromTs) || d.poolId == null) return null
+    const w = await api.poolDetailWindow(d.poolId, fromTs, toTs, points)
+    return { buckets: w.history.buckets, series: map(w.history) as never }
+  }
+  const compFrom = (h: PoolDetailData['history']) => {
+    const totals = h.buckets.map((_, i) => h.composition.reduce((sum, c) => sum + (c.usd[i] ?? 0), 0))
+    return h.composition.map(c => ({
+      key: String(c.asset.assetId), label: c.asset.symbol, color: colorFor(c.asset),
+      values: compUnit === 'share'
+        ? c.usd.map((v, i) => (v == null || !(totals[i] > 0) ? null : (v / totals[i]) * 100))
+        : c.usd,
+    }))
+  }
+  const pegFrom = (h: PoolDetailData['history']) => (h.pegs ?? []).map(p => ({
+    key: String(p.asset.assetId), label: p.asset.symbol, color: colorFor(p.asset), values: p.prices,
+  }))
+
   return (
     <>
       <div className="detail-card"><div className="dl">
@@ -131,7 +154,9 @@ function PoolBody({ d }: { d: PoolDetailData }) {
       {tvlPoints.length > 1 && (
         <>
           <div className="sec-title">TVL</div>
-          <div className="pf-card"><AreaChart data={tvlPoints.map(p => p.v!)} dates={tvlPoints.map(p => p.b)} color="var(--sky-deep)" floor={0} /></div>
+          <div className="pf-card"><AreaChart data={tvlPoints.map(p => p.v!)} dates={tvlPoints.map(p => p.b)} color="var(--sky-deep)" floor={0} zoomKey="ztvl"
+            refine={windowRefine((f, t, n) => api.poolDetailWindow(d.poolId ?? 0, f, t, n),
+              r => r.history.buckets.map((b, i) => ({ b, v: r.history.tvlUsd[i] })))} /></div>
         </>
       )}
 
@@ -145,7 +170,7 @@ function PoolBody({ d }: { d: PoolDetailData }) {
           </div>
           <div className="pf-card">
             <ChartLegend items={compSeries.map(s => ({ label: s.label, color: s.color }))} />
-            <StackedAreaChart buckets={d.history.buckets} series={compSeries}
+            <StackedAreaChart zoomKey="zcomp" buckets={d.history.buckets} series={compSeries} refine={refineWindowed(compFrom)}
               yFmt={compUnit === 'share' ? v => `${parseFloat(v.toFixed(1))}%` : F.usd} showShare={compUnit === 'usd'} />
           </div>
         </>
@@ -158,7 +183,7 @@ function PoolBody({ d }: { d: PoolDetailData }) {
           </div>
           <div className="pf-card">
             <ChartLegend items={pegSeries.map(s => ({ label: s.label, color: s.color }))} />
-            <MultiLineChart buckets={d.history.buckets} series={pegSeries} yFmt={fmtPeg} />
+            <MultiLineChart buckets={d.history.buckets} series={pegSeries} yFmt={fmtPeg} zoomKey="zpeg" refine={refineWindowed(pegFrom)} />
           </div>
         </>
       )}
@@ -166,7 +191,9 @@ function PoolBody({ d }: { d: PoolDetailData }) {
       {issuancePoints.length > 1 && (
         <>
           <div className="sec-title">LP supply</div>
-          <div className="pf-card"><AreaChart data={issuancePoints.map(p => p.v!)} dates={issuancePoints.map(p => p.b)} color="var(--lavender-deep)" floor={0} valueFmt={v => `${compactAmount(v)} shares`} /></div>
+          <div className="pf-card"><AreaChart data={issuancePoints.map(p => p.v!)} dates={issuancePoints.map(p => p.b)} color="var(--lavender-deep)" floor={0} valueFmt={v => `${compactAmount(v)} shares`} zoomKey="zlp"
+            refine={windowRefine((f, t, n) => api.poolDetailWindow(d.poolId ?? 0, f, t, n),
+              r => (r.history.issuance ?? []).map((v, i) => ({ b: r.history.buckets[i], v })))} /></div>
         </>
       )}
 

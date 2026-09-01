@@ -1,6 +1,8 @@
 import { lazy, Suspense, useState } from 'react'
+import { blockRangeForWindow } from '../utils/chartRefine'
 import { useTag, useTagActivityCounts, useTagListCount, useTagMembers, useTagValueEvents, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
+import { api } from '../api/explorer'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, useQueryValue, setQuery } from '../router'
 import { Crumbs, AddrPill, Copy, ProfilePageSkeleton, DetailTabs, TableSkeleton, TagIcon, accountHref, rowNav } from '../components/ui'
@@ -120,6 +122,8 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
           const liquidityPositions = data.liquidityPositions ?? []
           const portfolioSeries = data.portfolioSeries ?? []
           const balanceHistory = data.balanceHistory ?? []
+          // Zoom refinement needs the base points' block heights, aligned 1:1.
+          const tagHistoryBlocks = data.portfolioBlocks && data.portfolioBlocks.length === portfolioSeries.length ? data.portfolioBlocks : undefined
           const debtUsd = moneyMarketDebtUsd(mmList)
           const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined, undefined, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
@@ -176,11 +180,18 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
 
               <CloseAccountsSection tagId={tagId} />
 
-              <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data} />
+              <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data}
+                refine={tagHistoryBlocks ? async (fromSec, toSec) => {
+                  const range = blockRangeForWindow(data.portfolioDates ?? [], tagHistoryBlocks, fromSec, toSec)
+                  if (!range) return null
+                  const w = await api.tagHistoryWindow(tagId, range.fromBlock, range.toBlock)
+                  return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates } : null
+                } : undefined} />
               </>)}
 
               {activeView === 'balances' && (
-              <BalancesTreemap balances={balances} balanceHistory={balanceHistory} />
+              <BalancesTreemap balances={balances} balanceHistory={balanceHistory}
+                refineWindow={(fromBlock, toBlock) => api.tagHistoryWindow(tagId, fromBlock, toBlock)} />
               )}
 
               {activeView === 'positions' && (<>

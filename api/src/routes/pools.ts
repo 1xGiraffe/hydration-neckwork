@@ -2,15 +2,36 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { getAssetLiquidity, getOmnipoolAssetLps, getOmnipoolDetail, getPoolDetail, getPoolLps, getPoolsIndex } from '../services/poolService.ts'
 import { getAssetActivity, getPoolSwaps } from '../services/explorerService.ts'
+import { DAILY_GRAIN, grainForWindow } from '../services/historyGrain.ts'
 
 // Liquidity-pool endpoints: the asset Liquidity tab, stableswap/XYK pool detail
 // pages (keyed by the share/LP asset id) and the Omnipool page. All models are
 // SWR-cached in poolService; routes stay thin.
 const uint32Schema = z.coerce.number().int().min(0).max(4_294_967_295)
 
+// Chart-zoom refinement, shared by the three history-bearing pool endpoints:
+// with a window the history is rebuilt on the finest ladder grain that fits the
+// point budget (never below an hour) instead of the daily default, so zooming
+// reveals detail the daily series cannot express. `fromTs`/`toTs`, not
+// `from`/`to`: the plugin-wide filter guard reserves those as calendar-day
+// params. Without a window every response is byte-for-byte what it was.
+const windowSchema = z.object({
+  fromTs: z.coerce.number().int().min(0).max(0xffff_ffff),
+  toTs: z.coerce.number().int().min(0).max(0xffff_ffff),
+  points: z.coerce.number().int().min(10).max(400).optional(),
+})
+
+function historyWindow(query: unknown): { grain: typeof DAILY_GRAIN; win?: { fromSec: number; toSec: number } } {
+  const q = windowSchema.safeParse(query)
+  if (!q.success || q.data.toTs <= q.data.fromTs) return { grain: DAILY_GRAIN }
+  const win = { fromSec: q.data.fromTs, toSec: q.data.toTs }
+  return { grain: grainForWindow(win.fromSec, win.toSec, q.data.points ?? 180), win }
+}
+
 export async function poolsRoutes(fastify: FastifyInstance) {
-  fastify.get('/explorer/omnipool', async () => {
-    return getOmnipoolDetail()
+  fastify.get('/explorer/omnipool', async req => {
+    const { grain, win } = historyWindow(req.query)
+    return getOmnipoolDetail(grain, win)
   })
 
   // Every pool on the chain, largest first — the /liquidity index.
@@ -21,7 +42,8 @@ export async function poolsRoutes(fastify: FastifyInstance) {
   fastify.get('/explorer/pool/:poolId', async (req, reply) => {
     const poolId = uint32Schema.safeParse((req.params as { poolId: string }).poolId)
     if (!poolId.success) return reply.status(400).send({ error: 'Invalid pool id' })
-    const detail = await getPoolDetail(poolId.data)
+    const { grain, win } = historyWindow(req.query)
+    const detail = await getPoolDetail(poolId.data, grain, win)
     if (!detail) return reply.status(404).send({ error: 'Pool not found' })
     return detail
   })
@@ -50,7 +72,8 @@ export async function poolsRoutes(fastify: FastifyInstance) {
   fastify.get('/explorer/asset/:assetId/liquidity', async (req, reply) => {
     const assetId = uint32Schema.safeParse((req.params as { assetId: string }).assetId)
     if (!assetId.success) return reply.status(400).send({ error: 'Invalid asset id' })
-    return getAssetLiquidity(assetId.data)
+    const { grain, win } = historyWindow(req.query)
+    return getAssetLiquidity(assetId.data, grain, win)
   })
 
   // A pool's liquidity providers: holders of its share token, largest first,

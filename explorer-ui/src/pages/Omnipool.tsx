@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { api } from '../api/explorer'
+import { windowRefine } from '../utils/chartRefine'
 import { useOmnipool } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -70,6 +72,24 @@ export function Omnipool() {
         : c.usd,
     }))
     const tvlPoints = data.history.buckets.map((b, i) => ({ b, v: data.history.tvlUsd[i] })).filter(p => p.v != null)
+    // Same mapping as compSeries, applied to a window refetched on the finest
+    // ladder grain that fits — hourly for a few days, instead of daily.
+    const compFrom = (h: typeof data.history) => {
+      const totals = h.buckets.map((_, i) => h.composition.reduce((sum, c) => sum + (c.usd[i] ?? 0), 0))
+      return h.composition.map(c => ({
+        key: String(c.asset.assetId),
+        label: (symbolCounts.get(c.asset.symbol) ?? 0) > 1 ? `${c.asset.symbol} #${c.asset.assetId}` : c.asset.symbol,
+        color: c.asset.assetId === -1 ? OTHER_COLOR : colorFor(c.asset),
+        values: unit === 'share'
+          ? c.usd.map((v, i) => (v == null || !(totals[i] > 0) ? null : (v / totals[i]) * 100))
+          : c.usd,
+      }))
+    }
+    const refineComposition = async (fromTs: number, toTs: number, points: number) => {
+      if (!(toTs > fromTs)) return null
+      const w = await api.omnipoolWindow(fromTs, toTs, points)
+      return { buckets: w.history.buckets, series: compFrom(w.history) }
+    }
 
     return (
       <>
@@ -111,7 +131,9 @@ export function Omnipool() {
         {tvlPoints.length > 1 && (
           <>
             <div className="sec-title">TVL</div>
-            <div className="pf-card"><AreaChart data={tvlPoints.map(p => p.v!)} dates={tvlPoints.map(p => p.b)} color="var(--sky-deep)" floor={0} /></div>
+            <div className="pf-card"><AreaChart data={tvlPoints.map(p => p.v!)} dates={tvlPoints.map(p => p.b)} color="var(--sky-deep)" floor={0} zoomKey="ztvl"
+              refine={windowRefine((f, t, n) => api.omnipoolWindow(f, t, n),
+                r => r.history.buckets.map((b, i) => ({ b, v: r.history.tvlUsd[i] })))} /></div>
           </>
         )}
 
@@ -125,7 +147,7 @@ export function Omnipool() {
             </div>
             <div className="pf-card">
               <ChartLegend items={compSeries.map(s => ({ label: s.label, color: s.color }))} />
-              <StackedAreaChart buckets={data.history.buckets} series={compSeries}
+              <StackedAreaChart zoomKey="zcomp" buckets={data.history.buckets} series={compSeries} refine={refineComposition}
                 yFmt={unit === 'share' ? v => `${parseFloat(v.toFixed(1))}%` : F.usd} showShare={unit === 'usd'} />
             </div>
           </>
