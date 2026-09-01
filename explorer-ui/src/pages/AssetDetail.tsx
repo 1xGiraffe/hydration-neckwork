@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
 import { useActivityCount, useAsset, useAssetActivity, useAssetDcas, useHolders, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
+import { api } from '../api/explorer'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, useQuery, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, AssetIcon, AssetAmount, AddrPill, AssetDetailSkeleton, TableSkeleton, EmptyRow, rowNav, accountHref, TagGroupPill, ActivityChips, Pager, normalizeActivityType, normalizeActivityAction, Dash, pendingRows } from '../components/ui'
@@ -134,7 +135,17 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
                   <a className="ext-link" style={{ marginLeft: 'auto', textTransform: 'none', letterSpacing: 0 }} href={preisPairUrl(assetId)} target="_blank" rel="noopener">Open in preis ↗</a>
                 </div>
                 <PriceChart data={data.priceSeries} dates={data.priceDates} price={a.price} change24h={a.change24h}
-                  liquidations={data.liquidations} asset={a} />
+                  liquidations={data.liquidations} asset={a} zoomKey="zp"
+                  refine={(dates => dates && dates.length === data.priceSeries.length
+                    ? async (fromSec: number, toSec: number, points: number) => {
+                      // Base points are daily closes stamped at their interval start;
+                      // pad `to` by a day so the last day's finer candles are included.
+                      const from = fromSec, to = toSec + 86_400
+                      if (!Number.isFinite(from) || !Number.isFinite(to)) return null
+                      const w = await api.assetPrices(assetId, from, to, points)
+                      return w.priceSeries.length > 1 ? { data: w.priceSeries, dates: w.priceDates } : null
+                    }
+                    : undefined)(data.priceDates)} />
               </>
             )}
 

@@ -11,7 +11,7 @@ import {
   getRecentActivity, getAssetActivity, getGlobalActivityTotal, getAddressActivity, getTagActivity,
   type ValueListFilters,
   getHolders, getHoldersForViewerFold,
-  getListTagDetail, getListTagActivity, getListTagExtrinsics, getListTagEvents, getListTagVotes,
+  getListTagDetail, getListTagHistoryWindow, getListTagActivity, getListTagExtrinsics, getListTagEvents, getListTagVotes,
   getListTagRevenueBreakdown,
   getListTagVotesByReferendum, getListTagTabCounts, getListTagListTotal, getListTagValueEvents,
 } from '../services/explorerService.ts'
@@ -30,7 +30,7 @@ import {
   limitParam, offsetParam, badOffset, textParam, valueFilters, activityTypeParam,
   extrinsicFilters, eventFilters, dateParam, activityOffsetParam, boundedActivityOffset,
   maxActivityOffsetFor, maxScopedActivityOffsetFor, scopedListQuery, listTabSchema,
-  unusableFilterParam, accountSortParam, uint32Param,
+  unusableFilterParam, accountSortParam, uint32Param, historyWindowSchema,
 } from './explorer.ts'
 
 // Authenticated, per-user endpoints. Everything here is invisible to the shared
@@ -588,6 +588,22 @@ export async function userRoutes(fastify: FastifyInstance) {
     const detail = await getListTagDetail(listId, { tagId, name: tag.name, color: tag.color, icon: tag.icon, note: tag.note }, tag.members, { summary })
     if (!detail) return reply.status(404).send({ error: 'Tag not found' })
     return detail
+  })
+
+  // Chart-zoom refinement over the list tag's member set (block window). Same
+  // visibility rule as the detail — owner or subscriber, 404 otherwise.
+  fastify.get('/user/list-tag/:listId/:tagId/history', async (req, reply) => {
+    noStore(reply)
+    const accountId = requireUser(req, reply)
+    if (!accountId) return
+    const resolved = requireListTag(req, reply, accountId)
+    if (!resolved) return
+    const q = req.query as Record<string, unknown>
+    const w = historyWindowSchema.safeParse(q)
+    if (!w.success) return reply.status(400).send({ error: 'Invalid block window' })
+    const windowed = await getListTagHistoryWindow(resolved.listId, resolved.tagId, resolved.tag.members, w.data.fromBlock, w.data.toBlock, { seriesOnly: q.series === '1' })
+    if (!windowed) return reply.status(404).send({ error: 'Tag not found' })
+    return windowed
   })
 
   // The list tag's members as DIRECTORY rows — same shape and same renderer as

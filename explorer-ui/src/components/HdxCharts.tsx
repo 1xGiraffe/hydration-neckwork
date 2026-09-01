@@ -1,7 +1,8 @@
 /* eslint-disable react-refresh/only-export-components -- chart primitives + shared fmtHdx/color-token module (mirrors ui.tsx) */
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { compactAmount } from './ui'
+import { ZoomReset, ZoomSelection, bracketToView, fracOfTime, useChartZoom, useZoomRefineValue } from './chartZoom'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 
 /* ============ formatting ============ */
@@ -325,21 +326,90 @@ function dateTicks(n: number): number[] {
 // hover follow StackedColumnChart / AreaChart conventions; no animation.
 // `showShare={false}` drops the tooltip's per-bucket share suffix — a chart
 // already plotting shares (100%-stacked mode) would repeat every value.
-export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, showShare = true }: {
+const AREA_W = 860, AREA_PAD_L = 46, AREA_PAD_R = 6
+/** Bucket keys -> unix seconds, for either grain the API emits. */
+function bucketSecs(keys: string[]): number[] {
+  return keys.map(b => Math.floor(Date.parse(b.includes(' ') ? `${b.replace(' ', 'T')}Z` : `${b}T00:00:00Z`) / 1000))
+}
+
+/** The inverse, in the `YYYY-MM-DD HH:MM:SS` shape the tooltips parse. */
+function bucketKeyOf(sec: number): string {
+  return new Date(sec * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
+}
+
+/** What a refined multi-series payload looks like: one grid, every band on it. */
+export interface RefinedGrid { buckets: string[]; series: AreaSeries[] }
+
+// Stable identity: this goes into the refine effect's deps.
+const acceptGrid = (r: RefinedGrid, span: number) =>
+  r.buckets.length > span && r.series.every(s => s.values.length === r.buckets.length)
+
+export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, showShare = true, zoomKey, refine }: {
   buckets: string[]; series: AreaSeries[]; h?: number; yFmt?: (v: number) => string; showShare?: boolean
+  /** Query-param name persisting the zoom window (back-navigable, shareable). */
+  zoomKey?: string
+  /** Refetch-on-zoom: a finer grid for base-index window [lo, hi]. */
+  refine?: (fromSec: number, toSec: number, points: number) => Promise<RefinedGrid | null>
 }) {
   const hatchId = useId()
   const [hover, setHover] = useState<number | null>(null)
   const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
-  const n = buckets.length
-  const { tops, max: rawMax } = stackSeries(series)
-  if (n < 2 || !series.length || !(rawMax > 0)) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>Not enough history.</div>
+  const W = AREA_W, padL = AREA_PAD_L, padR = AREA_PAD_R, padT = 12, padB = 18
+  const plotW = W - padL - padR
+  // Absolute-time window: the hook needs only the buckets' instants.
+  const bucketTimes = useMemo(() => bucketSecs(buckets), [buckets])
+  // Gesture zoom (chartZoom.tsx): plot fractions exclude the y-axis gutter.
+  const zoom = useChartZoom(
+    bucketTimes,
+    e => {
+      const r = (wrapRef.current ?? (e.currentTarget as HTMLElement)).getBoundingClientRect()
+      if (!r.width) return 0
+      return Math.min(1, Math.max(0, (((e.clientX - r.left) / r.width) * W - padL) / plotW))
+    },
+    () => setHover(null),
+    zoomKey,
+  )
+  // A refined grid replaces the coarse slice wholesale: buckets and every band
+  // come from one fetch, so they cannot end up drawn on different grids.
+  const refined = useZoomRefineValue(zoom, refine, 180, acceptGrid)
+  const rawBuckets = refined?.buckets ?? (zoom.zoomed ? buckets.slice(zoom.lo, zoom.hi + 1) : buckets)
+  const rawSeries = refined?.series ?? (zoom.zoomed ? series.map(s => ({ ...s, values: s.values.slice(zoom.lo, zoom.hi + 1) })) : series)
+  // Clip to the window: a bucket outside it maps past this chart's axis gutter and
+  // draws to the container edge, and a coarse slice with a couple of interior
+  // points would cover part of the width until the refined grid arrives.
+  const clip = zoom.zoomed ? bracketToView(bucketSecs(rawBuckets), zoom.view, rawSeries.map(s => s.values)) : null
+  const useClip = clip != null && clip.times.length >= 2
+  const vBuckets = useClip ? clip.times.map(bucketKeyOf) : rawBuckets
+  const vSeries = useClip ? rawSeries.map((s, i) => ({ ...s, values: clip.series[i] })) : rawSeries
+  const n = vBuckets.length
+  const { tops, max: rawMax } = stackSeries(vSeries)
+  if (n < 2 || !vSeries.length || !(rawMax > 0)) {
+    return (
+      <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12, position: 'relative' }}>
+        Not enough history.
+        {zoom.zoomed && <ZoomReset onReset={zoom.reset} />}
+      </div>
+    )
+  }
   const max = niceAxisMax(rawMax)
-  const W = 860, padL = 46, padR = 6, padT = 12, padB = 18
-  const plotW = W - padL - padR, plotH = h - padT - padB
-  const sx = (i: number) => padL + (i / (n - 1)) * plotW
+  const plotH = h - padT - padB
+  // Positions come from the view's TIME domain, the same one the zoom window and
+  // its selection shade use — index spacing would put the line and the shade on
+  // different axes, which is the mismatch this whole model exists to remove. It
+  // falls back to index spacing when the buckets are not a usable time axis.
+  const vTimes = bucketSecs(vBuckets)
+  const viewSpan = zoom.view.to - zoom.view.from
+  const timeAxis = viewSpan > 0 && vTimes.length === n && vTimes.every(Number.isFinite)
+  // Clamped into the plot: the slice deliberately keeps the point on each side of
+  // the window so the line reaches both edges, and this chart's plot is inset by a
+  // y-axis gutter — unclamped, those points draw over the axis and out to the
+  // container edge. Only the DRAWN x is clamped; the tooltip still names the
+  // point's real time, and for a forward-filled series the bracketing value is
+  // the correct value at the edge anyway.
+  const xf = (i: number) => Math.min(1, Math.max(0, timeAxis ? (vTimes[i] - zoom.view.from) / viewSpan : n > 1 ? i / (n - 1) : 0))
+  const sx = (i: number) => padL + xf(i) * plotW
   const sy = (v: number) => padT + (1 - v / max) * plotH
-  const bands = series.map((s, k) => {
+  const bands = vSeries.map((s, k) => {
     const top = tops[k]
     const bottom = k === 0 ? null : tops[k - 1]
     const fwd = top.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
@@ -349,15 +419,30 @@ export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, show
     return { s, area: `${fwd} ${back} Z`, edge: fwd }
   })
   function onMove(e: React.PointerEvent) {
+    if (zoom.selecting || zoom.pinching) return
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
     if (!r.width) return
     const x = ((e.clientX - r.left) / r.width) * W
-    const i = Math.round(((x - padL) / plotW) * (n - 1))
+    const f = (x - padL) / plotW
+    let i = Math.round(f * (n - 1))
+    if (timeAxis) {
+      // Nearest point along the same time axis the line is drawn on.
+      let best = 0
+      for (let k = 1; k < n; k++) if (Math.abs(xf(k) - f) < Math.abs(xf(best) - f)) best = k
+      i = best
+    }
     setHover(Math.min(n - 1, Math.max(0, i)))
   }
-  const hoverTotal = hover != null ? series.reduce((s, x) => s + (x.values[hover] ?? 0), 0) : 0
+  const selPct = (f: number) => (padL + Math.min(1, Math.max(0, f)) * plotW) / W * 100
+  // Back/forward can change the window without a gesture; a stale hover index
+  // past the new slice must not address it.
+  if (hover != null && hover > n - 1) setHover(null)
+  const hoverTotal = hover != null && hover <= n - 1 ? vSeries.reduce((s, x) => s + (x.values[hover] ?? 0), 0) : 0
   return (
-    <div ref={wrapRef} className="hdx-chart-wrap apx-wrap" onPointerDown={onMove} onPointerMove={onMove}
+    <div ref={wrapRef} className="hdx-chart-wrap apx-wrap" data-zoom-key={zoomKey}
+      onPointerDown={e => { zoom.onPointerDown(e); onMove(e) }}
+      onPointerMove={e => { zoom.onPointerMove(e); onMove(e) }}
+      onPointerUp={zoom.onPointerUp} onPointerCancel={zoom.onPointerCancel} onDoubleClick={zoom.onDoubleClick}
       onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null) }}>
       <svg className="day-chart" viewBox={`0 0 ${W} ${h}`}>
         {[0, 0.5, 1].map(t => (
@@ -382,20 +467,29 @@ export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, show
           </g>
         ))}
         {dateTicks(n).map(i => (
-          <text key={i} className="hdx-ax" x={sx(i).toFixed(1)} y={h - 4} textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>{monthTick(buckets[i])}</text>
+          <text key={i} className="hdx-ax" x={sx(i).toFixed(1)} y={h - 4} textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>{monthTick(vBuckets[i])}</text>
         ))}
-        {hover != null && <line x1={sx(hover).toFixed(1)} x2={sx(hover).toFixed(1)} y1={padT} y2={h - padB} stroke="var(--text-medium)" strokeOpacity="0.55" />}
+        {hover != null && !zoom.selecting && <line x1={sx(hover).toFixed(1)} x2={sx(hover).toFixed(1)} y1={padT} y2={h - padB} stroke="var(--text-medium)" strokeOpacity="0.55" />}
       </svg>
-      {hover != null && (
+      {hover != null && !zoom.selecting && (
         <div className="hdx-tip" style={{ left: tipLeft(sx(hover) / W * 100), top: 2 }}>
-          <span className="t-d">{buckets[hover]}</span>
-          {series.map(s => s.values[hover] != null && (
+          <span className="t-d">{vBuckets[hover]}</span>
+          {vSeries.map(s => s.values[hover] != null && (
             <span key={s.key} className="t-row"><i style={{ background: s.color }} />{s.label}
               <span className="tv">{yFmt(s.values[hover]!)}{showShare && hoverTotal > 0 && <span className="muted"> · {(s.values[hover]! / hoverTotal * 100).toFixed(1)}%</span>}</span>
             </span>
           ))}
         </div>
       )}
+      {zoom.preview && (() => {
+        // The shade IS the window a lift commits, on the view's time domain, so
+        // it tracks the cursor instead of stepping between buckets.
+        const pw = zoom.preview
+        const day = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 10)
+        return <ZoomSelection aPct={selPct(fracOfTime(zoom.view, pw.from))} bPct={selPct(fracOfTime(zoom.view, pw.to))}
+          label={`${day(pw.from)} – ${day(pw.to)}`} />
+      })()}
+      {zoom.zoomed && !zoom.sel && <ZoomReset onReset={zoom.reset} />}
     </div>
   )
 }
@@ -407,30 +501,98 @@ export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, show
 // reference line only when it is in view. Lines break at nulls.
 // `floorZero` clamps the axis floor at 0 — a price or share axis must not pad
 // into negative territory when the data sits near its floor.
-export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) => v.toFixed(4), floorZero }: {
+const LINE_W = 860, LINE_PAD_L = 56, LINE_PAD_R = 6
+export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) => v.toFixed(4), floorZero, zoomKey, refine }: {
   buckets: string[]; series: AreaSeries[]; h?: number; yFmt?: (v: number) => string; floorZero?: boolean
+  /** Query-param name persisting the zoom window (back-navigable, shareable). */
+  zoomKey?: string
+  /** Refetch-on-zoom: a finer grid for base-index window [lo, hi]. */
+  refine?: (fromSec: number, toSec: number, points: number) => Promise<RefinedGrid | null>
 }) {
   const [hover, setHover] = useState<number | null>(null)
   const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
-  const n = buckets.length
-  const flat = series.flatMap(s => s.values).filter((v): v is number => v != null)
-  if (n < 2 || !flat.length) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>Not enough history.</div>
+  const W = LINE_W, padL = LINE_PAD_L, padR = LINE_PAD_R, padT = 12, padB = 18
+  const plotW = W - padL - padR
+  // Absolute-time window: the hook needs only the buckets' instants.
+  const bucketTimes = useMemo(() => bucketSecs(buckets), [buckets])
+  // Gesture zoom (chartZoom.tsx): plot fractions exclude the y-axis gutter. The
+  // y-axis already fits the data, so a zoomed window re-fits vertically too.
+  const zoom = useChartZoom(
+    bucketTimes,
+    e => {
+      const r = (wrapRef.current ?? (e.currentTarget as HTMLElement)).getBoundingClientRect()
+      if (!r.width) return 0
+      return Math.min(1, Math.max(0, (((e.clientX - r.left) / r.width) * W - padL) / plotW))
+    },
+    () => setHover(null),
+    zoomKey,
+  )
+  // A refined grid replaces the coarse slice wholesale: buckets and every band
+  // come from one fetch, so they cannot end up drawn on different grids.
+  const refined = useZoomRefineValue(zoom, refine, 180, acceptGrid)
+  const rawBuckets = refined?.buckets ?? (zoom.zoomed ? buckets.slice(zoom.lo, zoom.hi + 1) : buckets)
+  const rawSeries = refined?.series ?? (zoom.zoomed ? series.map(s => ({ ...s, values: s.values.slice(zoom.lo, zoom.hi + 1) })) : series)
+  // Clip to the window: a bucket outside it maps past this chart's axis gutter and
+  // draws to the container edge, and a coarse slice with a couple of interior
+  // points would cover part of the width until the refined grid arrives.
+  const clip = zoom.zoomed ? bracketToView(bucketSecs(rawBuckets), zoom.view, rawSeries.map(s => s.values)) : null
+  const useClip = clip != null && clip.times.length >= 2
+  const vBuckets = useClip ? clip.times.map(bucketKeyOf) : rawBuckets
+  const vSeries = useClip ? rawSeries.map((s, i) => ({ ...s, values: clip.series[i] })) : rawSeries
+  const n = vBuckets.length
+  const flat = vSeries.flatMap(s => s.values).filter((v): v is number => v != null)
+  if (n < 2 || !flat.length) {
+    return (
+      <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12, position: 'relative' }}>
+        Not enough history.
+        {zoom.zoomed && <ZoomReset onReset={zoom.reset} />}
+      </div>
+    )
+  }
   const lo = Math.min(...flat), hi = Math.max(...flat)
   const pad = Math.max((hi - lo) * 0.08, hi * 0.0005)
   const min = floorZero ? Math.max(0, lo - pad) : lo - pad, max = hi + pad
-  const W = 860, padL = 56, padR = 6, padT = 12, padB = 18
-  const plotW = W - padL - padR, plotH = h - padT - padB
-  const sx = (i: number) => padL + (i / (n - 1)) * plotW
+  const plotH = h - padT - padB
+  // Positions come from the view's TIME domain, the same one the zoom window and
+  // its selection shade use — index spacing would put the line and the shade on
+  // different axes, which is the mismatch this whole model exists to remove. It
+  // falls back to index spacing when the buckets are not a usable time axis.
+  const vTimes = bucketSecs(vBuckets)
+  const viewSpan = zoom.view.to - zoom.view.from
+  const timeAxis = viewSpan > 0 && vTimes.length === n && vTimes.every(Number.isFinite)
+  // Clamped into the plot: the slice deliberately keeps the point on each side of
+  // the window so the line reaches both edges, and this chart's plot is inset by a
+  // y-axis gutter — unclamped, those points draw over the axis and out to the
+  // container edge. Only the DRAWN x is clamped; the tooltip still names the
+  // point's real time, and for a forward-filled series the bracketing value is
+  // the correct value at the edge anyway.
+  const xf = (i: number) => Math.min(1, Math.max(0, timeAxis ? (vTimes[i] - zoom.view.from) / viewSpan : n > 1 ? i / (n - 1) : 0))
+  const sx = (i: number) => padL + xf(i) * plotW
   const sy = (v: number) => padT + (1 - (v - min) / ((max - min) || 1)) * plotH
+  // Back/forward can change the window without a gesture; a stale hover index
+  // past the new slice must not address it.
+  if (hover != null && hover > n - 1) setHover(null)
   function onMove(e: React.PointerEvent) {
+    if (zoom.selecting || zoom.pinching) return
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
     if (!r.width) return
     const x = ((e.clientX - r.left) / r.width) * W
-    const i = Math.round(((x - padL) / plotW) * (n - 1))
+    const f = (x - padL) / plotW
+    let i = Math.round(f * (n - 1))
+    if (timeAxis) {
+      // Nearest point along the same time axis the line is drawn on.
+      let best = 0
+      for (let k = 1; k < n; k++) if (Math.abs(xf(k) - f) < Math.abs(xf(best) - f)) best = k
+      i = best
+    }
     setHover(Math.min(n - 1, Math.max(0, i)))
   }
+  const selPct = (f: number) => (padL + Math.min(1, Math.max(0, f)) * plotW) / W * 100
   return (
-    <div ref={wrapRef} className="hdx-chart-wrap apx-wrap" onPointerDown={onMove} onPointerMove={onMove}
+    <div ref={wrapRef} className="hdx-chart-wrap apx-wrap" data-zoom-key={zoomKey}
+      onPointerDown={e => { zoom.onPointerDown(e); onMove(e) }}
+      onPointerMove={e => { zoom.onPointerMove(e); onMove(e) }}
+      onPointerUp={zoom.onPointerUp} onPointerCancel={zoom.onPointerCancel} onDoubleClick={zoom.onDoubleClick}
       onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null) }}>
       <svg className="day-chart" viewBox={`0 0 ${W} ${h}`}>
         {[0, 0.5, 1].map(t => {
@@ -443,7 +605,7 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
           )
         })}
         {min < 1 && max > 1 && <line x1={padL} x2={W - padR} y1={sy(1).toFixed(1)} y2={sy(1).toFixed(1)} stroke="var(--text-low)" strokeDasharray="3 4" strokeOpacity="0.6" />}
-        {series.map(s => (
+        {vSeries.map(s => (
           <g key={s.key}>
             {lineRuns(s.values).map(([a, b]) => a === b
               ? <circle key={a} cx={sx(a).toFixed(1)} cy={sy(s.values[a]!).toFixed(1)} r="2.5" fill={s.color} />
@@ -452,18 +614,27 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
           </g>
         ))}
         {dateTicks(n).map(i => (
-          <text key={i} className="hdx-ax" x={sx(i).toFixed(1)} y={h - 4} textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>{monthTick(buckets[i])}</text>
+          <text key={i} className="hdx-ax" x={sx(i).toFixed(1)} y={h - 4} textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>{monthTick(vBuckets[i])}</text>
         ))}
-        {hover != null && <line x1={sx(hover).toFixed(1)} x2={sx(hover).toFixed(1)} y1={padT} y2={h - padB} stroke="var(--text-medium)" strokeOpacity="0.55" />}
+        {hover != null && !zoom.selecting && <line x1={sx(hover).toFixed(1)} x2={sx(hover).toFixed(1)} y1={padT} y2={h - padB} stroke="var(--text-medium)" strokeOpacity="0.55" />}
       </svg>
-      {hover != null && (
+      {hover != null && !zoom.selecting && (
         <div className="hdx-tip" style={{ left: tipLeft(sx(hover) / W * 100), top: 2 }}>
-          <span className="t-d">{buckets[hover]}</span>
-          {series.map(s => s.values[hover] != null && (
+          <span className="t-d">{vBuckets[hover]}</span>
+          {vSeries.map(s => s.values[hover] != null && (
             <span key={s.key} className="t-row"><i style={{ background: s.color }} />{s.label} <span className="tv">{yFmt(s.values[hover]!)}</span></span>
           ))}
         </div>
       )}
+      {zoom.preview && (() => {
+        // The shade IS the window a lift commits, on the view's time domain, so
+        // it tracks the cursor instead of stepping between buckets.
+        const pw = zoom.preview
+        const day = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 10)
+        return <ZoomSelection aPct={selPct(fracOfTime(zoom.view, pw.from))} bPct={selPct(fracOfTime(zoom.view, pw.to))}
+          label={`${day(pw.from)} – ${day(pw.to)}`} />
+      })()}
+      {zoom.zoomed && !zoom.sel && <ZoomReset onReset={zoom.reset} />}
     </div>
   )
 }
