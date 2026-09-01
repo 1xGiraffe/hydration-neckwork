@@ -39,10 +39,17 @@ function ContractRow({ c, now }: { c: ContractInfo; now: number }) {
           {c.destroyed && <span className="badge" style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }} title="No code at this address anymore (selfdestructed or removed); history stays addressable">destroyed</span>}
         </span>
       </td>
-      <td data-label="Deployer" className={emptyIf(creation.method === 'unknown') ? 'cell-empty' : undefined}>
+      {/* The factory note is a second item competing with the pill for a column
+          sized for one address, so it is a card-layout-only label (see the
+          .factory-note rule): on desktop the cell carries the attribution in its
+          title, and the pill's `</>` glyph already says the deployer is itself a
+          contract. The Created cell reads "first seen" for exactly these rows. */}
+      <td data-label="Deployer"
+        className={emptyIf(creation.method === 'unknown') ? 'cell-empty' : undefined}
+        title={creation.method === 'factory' && creation.factory ? 'Deployed internally by this contract (first-log attribution)' : undefined}>
         <span className="cell-inline">
           {creation.method === 'create' && creation.deployer ? <AddrPill account={creation.deployer} noCopy />
-            : creation.method === 'factory' && creation.factory ? <><AddrPill account={creation.factory} noTag noCopy /><span className="muted mono" style={{ fontSize: 11 }} title="Deployed internally by this contract (first-log attribution)">factory</span></>
+            : creation.method === 'factory' && creation.factory ? <><AddrPill account={creation.factory} noTag noCopy /><span className="muted mono factory-note" style={{ fontSize: 11 }}>factory</span></>
               : <Dash />}
         </span>
       </td>
