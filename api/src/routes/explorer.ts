@@ -24,7 +24,7 @@ import {
   type ValueListFilters,
 } from '../services/explorerService.ts'
 import { getHdxDashboard } from '../services/hdxService.ts'
-import { FLOW_CURSOR_RE, REVENUE_RANGES, getRevenueDashboard, getRevenueFlow } from '../services/revenueService.ts'
+import { FLOW_CURSOR_RE, REVENUE_RANGES, getRevenueDashboard, getRevenueFlow, getStakerDistributions } from '../services/revenueService.ts'
 import { getHollarDashboard } from '../services/hollarService.ts'
 import { getSecurityDashboard } from '../services/securityService.ts'
 import { getWormholeBridgeDetail } from '../services/wormholeNttService.ts'
@@ -839,6 +839,14 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const q = z.object({ after: z.string().regex(FLOW_CURSOR_RE).optional() }).safeParse(req.query)
     if (!q.success) return reply.status(400).send({ error: 'Invalid cursor' })
     return getRevenueFlow(q.data.after ?? null)
+  })
+
+  // The staker-distributions section carries its own timeframe (defaults to the
+  // full history), so it reads its own endpoint rather than the dashboard's.
+  fastify.get('/explorer/revenue/stakers', async (req, reply) => {
+    const q = z.object({ range: z.enum(REVENUE_RANGES).default('all') }).safeParse(req.query)
+    if (!q.success) return reply.status(400).send({ error: 'Invalid range' })
+    return getStakerDistributions(q.data.range)
   })
 
   fastify.get('/explorer/hollar', async () => {

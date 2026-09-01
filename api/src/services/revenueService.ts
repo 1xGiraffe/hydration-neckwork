@@ -37,7 +37,8 @@ import {
   type EventfulRevenueStream,
   type RevenueStream,
 } from './revenueStreams.ts'
-import { DECIMAL_STRINGS, scaledUsd } from './valuation.ts'
+import { modlAccountId } from './tagService.ts'
+import { DECIMAL_STRINGS, OMNIPOOL_ACCOUNT, scaledUsd } from './valuation.ts'
 
 let client: ClickHouseClient
 
@@ -84,6 +85,15 @@ function bucketStartSeconds(range: RevenueRange, t: number): number {
 }
 
 export interface RevenuePoint { t: number; usd: number }
+export type StakerPot = 'staking' | 'gigahdx' | 'gigarwd'
+export interface StakerPoint { t: number; hdx: number; usd: number }
+export interface StakerDistributions {
+  range: RevenueRange
+  bucketSeconds: number
+  series: { pot: StakerPot; points: StakerPoint[] }[]
+  totals: { hdx: number; usd: number }
+  allTime: { hdx: number; usd: number }
+}
 export interface RevenueDashboard {
   totals: { day: number; week: number; month: number; allTime: number }
   history: {
@@ -224,6 +234,162 @@ function tailHours(marks: Map<RevenueStream, string>, nowSeconds: number): numbe
     if (seconds < oldest) oldest = seconds
   }
   return Math.min(MAX_TAIL_HOURS, Math.max(1, Math.ceil((nowSeconds - oldest) / 3_600) + 1))
+}
+
+// ---------------------------------------------------------------------------
+// Staker distributions — the trade-fee HDX handed to the staking pots
+// ---------------------------------------------------------------------------
+
+/**
+ * The three pots stakers are paid from, keyed by pallet account. The runtime's
+ * fee processor converts the non-LP Omnipool fee share to HDX and splits it
+ * 15% gigahdx! (GIGAHDX yield) / 25% gigarwd! (voting rewards) / 5% staking#
+ * (legacy staking); before 2026-06-22 the referrals-pallet converter and the
+ * Omnipool's direct in-HDX fee legs played the same role.
+ */
+const STAKER_POT_BY_ACCOUNT: Record<string, StakerPot> = {
+  [modlAccountId('staking#')]: 'staking',
+  [modlAccountId('gigahdx!')]: 'gigahdx',
+  [modlAccountId('gigarwd!')]: 'gigarwd',
+}
+const STAKER_POTS_ORDERED: readonly StakerPot[] = ['staking', 'gigahdx', 'gigarwd']
+
+/**
+ * The from-account whitelist IS the revenue boundary: only the protocol's fee
+ * converters count. Treasury incentive drips into the same pots are programme
+ * outflows, not fee revenue, and stay outside deliberately — as do the
+ * gigarwd!↔gigarwd!alc allocation round-trips and third-party dust.
+ */
+const STAKER_FEE_SOURCES: readonly string[] = [
+  modlAccountId('feeproc/'), // fee processor, 2026-06-22 →
+  modlAccountId('referral'), // referrals-pallet converter (legacy era)
+  OMNIPOOL_ACCOUNT, // direct in-HDX fee legs (legacy era)
+]
+
+const HDX_UNIT = 1e12
+
+const quotedList = (values: readonly string[]): string => values.map(v => `'${v}'`).join(', ')
+
+/**
+ * Fee-derived HDX inflows into the staking pots, hour-collapsed BEFORE the
+ * price join: every transfer inside an hour shares the same last-closed 1h
+ * candle under the event-time rule, so the collapse is exact and the ASOF join
+ * touches thousands of hour rows instead of millions of legacy per-trade legs
+ * (measured 18.4s → 0.5s all-time). FINAL is bounded by the three-pot
+ * primary-key prefix, and a replayed range's replacement rows share the row's
+ * block_timestamp, so the client's partition-scoped FINAL setting cannot split
+ * a replace pair across partitions. An unpriced hour keeps usd = 0 — explicit
+ * incompleteness, same rule as the revenue streams.
+ */
+function stakerInflowsSql(marker: string, bucketExpr: string | null, startSql: string | null): string {
+  return `-- rev:dashboard:${marker}
+WITH pot_inflows AS (
+  SELECT toStartOfHour(block_timestamp) AS hour_start, account AS pot,
+         toUInt32(0) AS hdx_asset, sum(toDecimal256(amount, 0)) AS amount
+  FROM price_data.account_transfer_activity FINAL
+  WHERE account IN (${quotedList(Object.keys(STAKER_POT_BY_ACCOUNT))})
+    AND to_account = account AND asset_id = 0
+    AND from_account IN (${quotedList(STAKER_FEE_SOURCES)})
+    ${startSql ? `AND block_timestamp >= toDateTime('${startSql}')` : ''}
+  GROUP BY hour_start, pot
+)
+SELECT pot${bucketExpr ? `, toUnixTimestamp(${bucketExpr}) AS t` : ''},
+       toString(sum(r.amount)) AS amount,
+       toString(sum(if(p.close > 0,
+         divideDecimal(multiplyDecimal(r.amount, toDecimal256(p.close, 12), 12), toDecimal256(${10n ** 12n}, 0), 12),
+         toDecimal256(0, 12)))) AS usd
+FROM pot_inflows r
+ASOF LEFT JOIN (
+  SELECT asset_id, interval_start + INTERVAL 1 HOUR AS price_time, argMaxMerge(close_state) AS close
+  FROM price_data.ohlc_1h
+  WHERE asset_id = 0
+  GROUP BY asset_id, interval_start
+) p ON p.asset_id = r.hdx_asset AND p.price_time <= r.hour_start
+GROUP BY pot${bucketExpr ? ', t ORDER BY t' : ''}`
+}
+
+interface StakerRow { pot: string; t?: number; amount: string; usd: string }
+
+/**
+ * All-time pot totals, cached once ACROSS ranges: the scan reads the pots'
+ * full transfer slices (~10M rows), and the figure moves by well under a
+ * display digit per freshness window, so every range's tiles share one scan.
+ */
+async function stakerAllTimeTotals(): Promise<{ hdx: bigint; usd: bigint }> {
+  return cachedSwr('revenue:stakers:alltime', 60_000, 300_000, async () => {
+    const res = await client.query({
+      query: stakerInflowsSql('stakers-alltime', null, null),
+      format: 'JSONEachRow',
+      clickhouse_settings: DECIMAL_STRINGS,
+    })
+    let hdx = 0n
+    let usd = 0n
+    for (const row of await res.json<StakerRow>()) {
+      if (!STAKER_POT_BY_ACCOUNT[row.pot]) continue
+      hdx += BigInt(row.amount)
+      usd += scaledUsd(row.usd)
+    }
+    return { hdx, usd }
+  })
+}
+
+/**
+ * The staker-distributions section reads this endpoint directly — it carries
+ * its OWN range, independent of the dashboard's timeframe tabs, so the full
+ * history is one request whatever window the rest of the page shows.
+ */
+export async function getStakerDistributions(range: RevenueRange): Promise<StakerDistributions> {
+  return cachedSwr(`revenue:stakers:${range}`, 60_000, 300_000, async () => {
+    const nowSeconds = Math.floor(Date.now() / 1000)
+    const rangeStart = RANGE_SECONDS[range] == null ? 0 : nowSeconds - (RANGE_SECONDS[range] ?? 0)
+    const seriesQuery = client.query({
+      query: stakerInflowsSql(
+        'stakers-series',
+        RANGE_BUCKET_SQL[range].replace('block_timestamp', 'r.hour_start'),
+        rangeStart > 0 ? chTimestamp(rangeStart) : null,
+      ),
+      format: 'JSONEachRow',
+      clickhouse_settings: DECIMAL_STRINGS,
+    })
+    // The all-range series already spans everything — only bounded ranges need
+    // the shared all-time totals for their tiles.
+    const allTimePromise = range === 'all' ? null : stakerAllTimeTotals()
+
+    // Integer planck/1e-12-USD sums end to end, one float conversion at the wire.
+    const bySeries = new Map<StakerPot, Map<number, { hdx: bigint; usd: bigint }>>()
+    let rangeHdx = 0n
+    let rangeUsd = 0n
+    for (const row of await (await seriesQuery).json<StakerRow>()) {
+      const pot = STAKER_POT_BY_ACCOUNT[row.pot]
+      if (!pot || row.t == null) continue
+      const hdx = BigInt(row.amount)
+      const usd = scaledUsd(row.usd)
+      const series = bySeries.get(pot) ?? new Map<number, { hdx: bigint; usd: bigint }>()
+      const point = series.get(Number(row.t)) ?? { hdx: 0n, usd: 0n }
+      point.hdx += hdx
+      point.usd += usd
+      series.set(Number(row.t), point)
+      bySeries.set(pot, series)
+      rangeHdx += hdx
+      rangeUsd += usd
+    }
+    const allTime = allTimePromise ? await allTimePromise : { hdx: rangeHdx, usd: rangeUsd }
+
+    return {
+      range,
+      bucketSeconds: RANGE_BUCKET_SECONDS[range],
+      series: STAKER_POTS_ORDERED
+        .filter(pot => (bySeries.get(pot)?.size ?? 0) > 0)
+        .map(pot => ({
+          pot,
+          points: [...(bySeries.get(pot) ?? new Map<number, { hdx: bigint; usd: bigint }>())]
+            .sort(([a], [b]) => a - b)
+            .map(([t, v]) => ({ t, hdx: Number(v.hdx) / HDX_UNIT, usd: Number(v.usd) / USD_UNIT })),
+        })),
+      totals: { hdx: Number(rangeHdx) / HDX_UNIT, usd: Number(rangeUsd) / USD_UNIT },
+      allTime: { hdx: Number(allTime.hdx) / HDX_UNIT, usd: Number(allTime.usd) / USD_UNIT },
+    }
+  })
 }
 
 export async function getRevenueDashboard(range: RevenueRange): Promise<RevenueDashboard> {
