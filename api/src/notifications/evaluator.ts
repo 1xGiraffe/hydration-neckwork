@@ -485,6 +485,21 @@ export function evaluateSafety(events: readonly SafetyEvent[], rules: readonly N
   })
 }
 
+// A referendum's dedup identity is (index, phase): one Confirmed is one
+// notification however often an overlapping window re-evaluates it. Confirmation
+// is the exception, because it is the one part of the lifecycle that REPEATS —
+// support can fall away mid-period, aborting it back to deciding, and the
+// referendum can enter confirmation again later. Keyed on the phase alone the
+// second entry would carry the first one's id and the inbox, a ReplacingMergeTree
+// on exactly that id, would swallow it. So those two phases key on their block,
+// the same answer the `voted` phase needed in the TC lane.
+const REPEATABLE_PHASES = new Set<ReferendumPhase>(['confirming', 'confirm-aborted'])
+export function referendumIdentity(row: ReferendumEventRow): string {
+  return REPEATABLE_PHASES.has(row.phase)
+    ? `${row.index}:${row.phase}@${row.blockHeight}`
+    : `${row.index}:${row.phase}`
+}
+
 export function evaluateReferendum(
   rows: readonly ReferendumEventRow[],
   rules: readonly NotificationRule[],
@@ -495,7 +510,7 @@ export function evaluateReferendum(
     const p = rule.params as RuleParams['referendum']
     const phases = p.phases?.length ? new Set<string>(p.phases) : null
     const track = p.track?.trim().toLowerCase()
-    return matchRows(rows, rule, window, r => r.blockHeight, r => `${r.index}:${r.phase}`,
+    return matchRows(rows, rule, window, r => r.blockHeight, referendumIdentity,
       r => (!phases || phases.has(r.phase))
         // A track filter can only reject an event whose track is KNOWN. The
         // chain puts the track on Submitted and DecisionStarted; the loop
@@ -832,7 +847,12 @@ const TC_MOTION_PHASE_LABEL: Record<TcMotionPhase, string> = {
 }
 
 const PHASE_LABEL: Record<ReferendumPhase, string> = {
-  submitted: 'submitted', deciding: 'entered its decision period', confirmed: 'confirmed',
+  submitted: 'submitted', deciding: 'entered its decision period',
+  // Named for the transition, not the state, so the pair cannot be misread as
+  // one another: a referendum that ENTERED confirmation has not been confirmed.
+  confirming: 'entered its confirmation period',
+  'confirm-aborted': 'fell out of confirmation, back to deciding',
+  confirmed: 'confirmed',
   executed: 'executed', rejected: 'rejected', cancelled: 'cancelled', 'timed-out': 'timed out', killed: 'killed',
 }
 
@@ -1719,9 +1739,11 @@ async function fetchActivityPage(
   return rows
 }
 
-const REFERENDUM_PHASE_BY_EVENT: Record<string, ReferendumPhase> = {
+export const REFERENDUM_PHASE_BY_EVENT: Record<string, ReferendumPhase> = {
   'Referenda.Submitted': 'submitted',
   'Referenda.DecisionStarted': 'deciding',
+  'Referenda.ConfirmStarted': 'confirming',
+  'Referenda.ConfirmAborted': 'confirm-aborted',
   'Referenda.Confirmed': 'confirmed',
   'Referenda.Rejected': 'rejected',
   'Referenda.Cancelled': 'cancelled',
