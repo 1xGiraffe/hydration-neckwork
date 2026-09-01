@@ -737,18 +737,30 @@ svg { display: block; }
    row (desktop only — below 720px the cell is the card's title line) so the pill
    is the part that gives way and the check always stays on the line. The deployer
    is always a short address pill, so it can afford the difference. */
-/* 240 + 148 measured: a contract name plus its ·xyz tail, glyph, copy and check
-   need ~222px, and a deployer's short-address pill ~113px. Splitting the same
-   388px this way keeps the deployer's highlighted last-three visible, which is
-   the part that identifies it. */
+/* 240 + 176 measured: a contract name plus its ·xyz tail, glyph, copy and check
+   need ~222px, and a deployer pill 144px — a factory deployer is itself a
+   contract, so its pill carries the `</>` glyph and is 25px wider than the EOA
+   pill the earlier 148px cap was measured on. Keeping the cap above the widest
+   pill is what keeps the highlighted last-three visible, which is the part that
+   identifies the address. */
 .contracts-tbl td[data-label="Contract"] { max-width: 240px; }
-.contracts-tbl td[data-label="Deployer"] { max-width: 148px; }
+.contracts-tbl td[data-label="Deployer"] { max-width: 176px; }
 /* The one-line layout lives on an inner span, NEVER on the `td`: `display: flex`
    on a table cell takes it out of table layout, so the browser wraps it in an
    anonymous cell and the whole row grew from 47px to 95px. */
 @media (min-width: 721px) {
   .contracts-tbl .cell-inline { display: flex; align-items: center; gap: 5px; min-width: 0; white-space: nowrap; overflow: hidden; }
   .contracts-tbl .cell-inline .addr-wrap { min-width: 0; }
+  /* A shrunk pill must clip its own address, never paint it over the sibling
+     beside it: min-width:0 on the pill lets the flex row squeeze it, but the
+     address span defaults to overflow:visible, so its glyphs used to render
+     outside the pill box and land on top of the next item (measured 47px of
+     overlap on a factory row). Same treatment the tag already gets. */
+  .contracts-tbl .cell-inline .addr-pill .a { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* The word costs 51px in a column that has room for the address and nothing
+     else; the td's title carries it on this layout. It stays visible in the
+     card layout below, where the cell spans the full width. */
+  .contracts-tbl .factory-note { display: none; }
 }
 /* Destroyed contracts stay listed (history is addressable) but read as gone. */
 .contracts-tbl tr.contract-destroyed td { opacity: 0.55; }
