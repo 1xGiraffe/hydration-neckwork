@@ -25,12 +25,17 @@ function parseAdmins(value: string | undefined): Set<string> {
   return out
 }
 
+// This service's own origin. Absolute URLs the API hands out (the 401's docs
+// pointer, the base URL /llms.txt teaches a client to call) are built from it.
+const publicUrl = (process.env.DATA_API_PUBLIC_URL?.trim() || 'https://hydration-data.neckwork.net').replace(/\/$/, '')
+
 export const dataConfig = {
   defaultPerMinute: parseCount(process.env.DATA_API_DEFAULT_PER_MINUTE, 'DATA_API_DEFAULT_PER_MINUTE', 30),
   defaultPerDay: parseCount(process.env.DATA_API_DEFAULT_PER_DAY, 'DATA_API_DEFAULT_PER_DAY', 20_000),
   adminAccountIds: parseAdmins(process.env.ADMIN_ACCOUNT_IDS),
+  publicUrl,
   // Where a 401's context points a developer: the docs portal on this host and
   // the explorer's token-management page.
-  docsUrl: (process.env.DATA_API_PUBLIC_URL?.trim() || 'https://hydration-data.neckwork.net').replace(/\/$/, '') + '/docs',
+  docsUrl: publicUrl + '/docs',
   createTokenUrl: (process.env.EXPLORER_PUBLIC_URL?.trim() || 'https://hydration-explorer.neckwork.net').replace(/\/$/, '') + '/api-tokens',
 } as const
