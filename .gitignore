@@ -10,6 +10,8 @@ logs/
 docker-compose.override.yml
 test-results/
 .playwright-mcp/
+# tsc --build incremental cache
+*.tsbuildinfo
 
 /*.png
 
