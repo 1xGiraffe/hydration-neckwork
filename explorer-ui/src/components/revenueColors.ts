@@ -1,4 +1,5 @@
-import type { RevenueStream } from '../types'
+import { lockColor } from './lockColors'
+import type { RevenueStream, StakerPot } from '../types'
 
 // One color and one label per revenue stream, shared by the river, the
 // history chart, the breakdown and the legend so a stream reads as the same
@@ -41,3 +42,22 @@ export const REVENUE_STREAMS_ORDERED: RevenueStream[] = [
   'network_fee', 'hollar_borrow', 'omnipool_asset_fee', 'pepl_liquidation_profit',
   'omnipool_protocol_fee', 'asset_reserve', 'hsm_revenue', 'liquidation_penalty',
 ]
+
+// The staker-distribution stack wears the /hdx lock palette (lockColors.ts) —
+// the SAME entity keeps the SAME hue on every chart: legacy staking is stake
+// violet, the GIGAHDX yield pot wears the GIGAHDX brand black, and voting
+// rewards wear vote lavender (they are earned by voting).
+export const STAKER_POT_COLOR: Record<StakerPot, string> = {
+  staking: lockColor('staking'),
+  gigahdx: lockColor('gigahdx'),
+  gigarwd: lockColor('vote'),
+}
+
+export const STAKER_POT_LABEL: Record<StakerPot, string> = {
+  staking: 'Legacy staking',
+  gigahdx: 'GIGAHDX yield',
+  gigarwd: 'GIGAHDX voting rewards',
+}
+
+/** Stacking/legend order: the pots in the order they historically appeared. */
+export const STAKER_POTS_ORDERED: StakerPot[] = ['staking', 'gigahdx', 'gigarwd']

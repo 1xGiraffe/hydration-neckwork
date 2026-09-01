@@ -1063,6 +1063,15 @@ export type RevenueStream =
 export type RevenueRange = '30d' | '1y' | 'all'
 
 export interface RevenuePoint { t: number; usd: number }
+export type StakerPot = 'staking' | 'gigahdx' | 'gigarwd'
+export interface StakerPoint { t: number; hdx: number; usd: number }
+export interface StakerDistributions {
+  range: RevenueRange
+  bucketSeconds: number
+  series: { pot: StakerPot; points: StakerPoint[] }[]
+  totals: { hdx: number; usd: number }
+  allTime: { hdx: number; usd: number }
+}
 export interface RevenueDashboard {
   totals: { day: number; week: number; month: number; allTime: number }
   history: {

@@ -348,3 +348,72 @@ describe('split marks under a mid-request refresh', () => {
     expect(tailQuery).toContain("block_timestamp > toDateTime('2026-08-14 10:00:00')")
   })
 })
+
+describe('getStakerDistributions', () => {
+  const STAKING_POT = '0x6d6f646c7374616b696e67230000000000000000000000000000000000000000'
+  const GIGAHDX_POT = '0x6d6f646c67696761686478210000000000000000000000000000000000000000'
+  const GIGARWD_POT = '0x6d6f646c67696761727764210000000000000000000000000000000000000000'
+
+  it('serves per-pot bucketed inflows with range totals and a separate all-time scan', async () => {
+    vi.setSystemTime(NOW + 3_200_000)
+    const { initRevenueService, getStakerDistributions } = await service()
+    const dayStart = Math.floor((NOW + 3_200_000) / 1000 / 86_400) * 86_400
+    const { seen, client } = fakeClient({
+      '-- rev:dashboard:stakers-series': [
+        { pot: STAKING_POT, t: dayStart, amount: '5000000000000', usd: '0.05' },
+        { pot: GIGAHDX_POT, t: dayStart, amount: '15000000000000', usd: '0.15' },
+        { pot: GIGARWD_POT, t: dayStart, amount: '25000000000000', usd: '0.25' },
+        // An account outside the pot map must be ignored, not misfiled.
+        { pot: `0x${'cc'.repeat(32)}`, t: dayStart, amount: '99000000000000', usd: '0.99' },
+      ],
+      '-- rev:dashboard:stakers-alltime': [
+        { pot: STAKING_POT, amount: '200000000000000000000', usd: '2000' },
+        { pot: GIGARWD_POT, amount: '3000000000000000000', usd: '30' },
+      ],
+    })
+    initRevenueService(client)
+    const dist = await getStakerDistributions('30d')
+
+    expect(dist.range).toBe('30d')
+    expect(dist.bucketSeconds).toBe(86_400)
+    expect(dist.series.map(s => s.pot)).toEqual(['staking', 'gigahdx', 'gigarwd'])
+    expect(dist.series[0].points).toEqual([{ t: dayStart, hdx: 5, usd: 0.05 }])
+    expect(dist.totals.hdx).toBeCloseTo(45, 9)
+    expect(dist.totals.usd).toBeCloseTo(0.45, 9)
+    expect(dist.allTime.hdx).toBeCloseTo(203_000_000, 6)
+    expect(dist.allTime.usd).toBeCloseTo(2_030, 9)
+
+    // The from-account whitelist IS the revenue boundary: the fee converters
+    // are in, the treasury (incentive drips) must never be.
+    const seriesQuery = seen.find(s => s.query.includes('-- rev:dashboard:stakers-series'))!.query
+    expect(seriesQuery).toContain("from_account IN ('0x6d6f646c66656570726f632f0000000000000000000000000000000000000000'")
+    expect(seriesQuery).not.toContain('0x6d6f646c70792f7472737279')
+    expect(seriesQuery).toContain('to_account = account AND asset_id = 0')
+  })
+
+  it('derives the all-time totals from the all-range series without a second scan', async () => {
+    vi.setSystemTime(NOW + 3_600_000)
+    const { initRevenueService, getStakerDistributions } = await service()
+    const { seen, client } = fakeClient({
+      '-- rev:dashboard:stakers-series': [
+        { pot: GIGAHDX_POT, t: 1_700_000_000, amount: '7000000000000', usd: '0.07' },
+      ],
+    })
+    initRevenueService(client)
+    const dist = await getStakerDistributions('all')
+    expect(dist.allTime).toEqual(dist.totals)
+    expect(dist.allTime.hdx).toBeCloseTo(7, 9)
+    expect(seen.filter(s => s.query.includes('-- rev:dashboard:stakers-alltime'))).toHaveLength(0)
+  })
+
+  it('answers an empty model with zeros and no synthetic points', async () => {
+    vi.setSystemTime(NOW + 3_900_000)
+    const { initRevenueService, getStakerDistributions } = await service()
+    const { client } = fakeClient({})
+    initRevenueService(client)
+    const dist = await getStakerDistributions('1y')
+    expect(dist.series).toEqual([])
+    expect(dist.totals).toEqual({ hdx: 0, usd: 0 })
+    expect(dist.allTime).toEqual({ hdx: 0, usd: 0 })
+  })
+})
