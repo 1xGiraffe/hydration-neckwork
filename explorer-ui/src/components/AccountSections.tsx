@@ -145,8 +145,9 @@ function valueEventMarker(ev: ValueEvent): ChartMarker {
 // lengths line up (else a value-only tooltip). `valueEvents` (scope-agnostic —
 // the parent fetches per account or tag) flag the largest transfers/swaps/
 // liquidations as clickable markers on the chart's time axis.
-export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanceHistory, loading, valueEvents }: {
+export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanceHistory, loading, valueEvents, refine }: {
   title: string; netUsd: number; series: number[]; dates?: string[]; balanceHistory?: AssetBalanceHistory[]; loading?: boolean; valueEvents?: ValueEvent[] | null
+  refine?: (fromSec: number, toSec: number, points: number) => Promise<{ data: number[]; dates: string[] } | null>
 }) {
   if (!series || series.length <= 1) {
     return loading ? (
@@ -180,7 +181,7 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
       <div className="sec-title">{title}</div>
       <div className="pf-card">
         <div className="pf-head"><div className="pf-now">{F.usd(netUsd)}</div>{perfItems.length > 0 && <div className="perf-row">{perfItems.map(p => perf(p.label, p.value))}</div>}</div>
-        <AreaChart data={series} h={180} dates={dates} markers={markers} />
+        <AreaChart data={series} h={180} dates={dates} markers={markers} refine={refine} zoomKey="zv" />
       </div>
     </>
   )

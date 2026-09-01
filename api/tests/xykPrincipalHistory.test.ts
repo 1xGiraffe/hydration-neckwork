@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { testBucketing } from './support/bucketing.ts'
 import { initExplorerService, loadXykPrincipalHistory, xykShareLegs } from '../src/services/explorerService.ts'
 
 const ACC = `0x${'bb'.repeat(32)}`
@@ -47,6 +48,7 @@ describe('xykShareLegs', () => {
 
 describe('loadXykPrincipalHistory', () => {
   const minb = 1000, bucket = 10, n = 5
+  const bk = testBucketing(minb, bucket, n)
   const registry = [{ lp_asset_id: 42, pool_account: '0xpool', asset_a: 10, asset_b: 20 }]
   const reserves = [{ pool_account: '0xpool', b: -1, ra: '1000000', rb: '2000000' }]
   const totals = [{ lp_asset_id: 42, b: -1, total: '1000000' }]
@@ -56,7 +58,7 @@ describe('loadXykPrincipalHistory', () => {
       farm: [{ lp_asset_id: 42, principal_shares_raw: '500', valid_from_block: 1005, valid_to_block: 0 }],
       registry, reserves, totals,
     }))
-    const hist = await loadXykPrincipalHistory([ACC], [], minb, bucket, n)
+    const hist = await loadXykPrincipalHistory([ACC], [], bk)
     expect([...hist.lpAssetIds]).toEqual([42])
     expect(hist.underlyingAssetIds.sort()).toEqual([10, 20])
     // Deposit active from block 1005 → owned at every bucket end (1009..1050):
@@ -67,7 +69,7 @@ describe('loadXykPrincipalHistory', () => {
 
   it('resolves a directly-held LP token (candidate asset) even with no farm deposit', async () => {
     initExplorerService(fakeClient({ farm: [], registry, reserves, totals }))
-    const hist = await loadXykPrincipalHistory([ACC], [42], minb, bucket, n)
+    const hist = await loadXykPrincipalHistory([ACC], [42], bk)
     expect([...hist.lpAssetIds]).toEqual([42])
     expect(hist.farmSharesByLp.size).toBe(0)
     expect(hist.stateByLp.get(42)![0]).toMatchObject({ reserveA: 1_000_000n, totalShares: 1_000_000n })
@@ -85,20 +87,20 @@ describe('loadXykPrincipalHistory', () => {
       reserves: [{ pool_account: '0xpool', b: -1, aa: 5, ab: 252525, ra: '3000000', rb: '9000000' }],
       totals: [{ lp_asset_id: 42, b: -1, total: '1000000' }],
     }))
-    const hist = await loadXykPrincipalHistory([ACC], [42], minb, bucket, n)
+    const hist = await loadXykPrincipalHistory([ACC], [42], bk)
     const st = hist.stateByLp.get(42)![0]!
     expect(st).toMatchObject({ assetA: 5, assetB: 252525, reserveA: 3_000_000n, reserveB: 9_000_000n })
   })
 
   it('falls back to registry order for legacy reserve rows without snapshot asset ids', async () => {
     initExplorerService(fakeClient({ farm: [], registry, reserves, totals }))  // reserves have no aa/ab
-    const hist = await loadXykPrincipalHistory([ACC], [42], minb, bucket, n)
+    const hist = await loadXykPrincipalHistory([ACC], [42], bk)
     expect(hist.stateByLp.get(42)![0]).toMatchObject({ assetA: 10, assetB: 20, reserveA: 1_000_000n, reserveB: 2_000_000n })
   })
 
   it('returns empty when the account touches no XYK LP (no candidates, no farm)', async () => {
     initExplorerService(fakeClient({ farm: [], registry: [], reserves: [], totals: [] }))
-    const hist = await loadXykPrincipalHistory([ACC], [], minb, bucket, n)
+    const hist = await loadXykPrincipalHistory([ACC], [], bk)
     expect(hist.lpAssetIds.size).toBe(0)
     expect(hist.underlyingAssetIds).toEqual([])
   })

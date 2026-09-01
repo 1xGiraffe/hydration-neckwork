@@ -7,6 +7,8 @@ import { parseUtcTimestamp } from '../utils/time'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { voteSideLabel } from '../utils/voteRows'
 import { CAT, LIQ_LABELS, MM_LABELS } from './activityColors'
+import { ZoomReset, ZoomSelection, bracketToView, fracOfTime, useChartZoom, useZoomRefine } from './chartZoom'
+import type { RefinedSeries } from './chartZoom'
 import { resolveTag, useTagMapVersion } from '../userTags'
 import type { ResolvedTag } from '../userTags'
 
@@ -206,14 +208,26 @@ export const F = {
 
 // Short ISO date (YYYY-MM-DD) from an indexer UTC timestamp, '' when unparseable.
 // Shared by the chart tooltips (AreaChart, BalanceHistory).
+/** A window bound as the `YYYY-MM-DD HH:MM:SS` shape tsDate/tsDateTime parse. */
+function windowStamp(sec: number): string {
+  return new Date(sec * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
+}
+
 function tsDate(ts: string): string {
   const t = parseUtcTimestamp(ts)
   return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 10) : ''
 }
 
+// Date + time, for series whose points are closer than a day (a refined zoom
+// window) — a date-only label would repeat across neighbouring points.
+function tsDateTime(ts: string): string {
+  const t = parseUtcTimestamp(ts)
+  return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 16).replace('T', ' ') : ''
+}
+
 // The chart's time axis: parsed timestamps and [t0, span], but ONLY when every
 // point has a parseable, non-decreasing date with a positive overall span. Null
-// tells the caller to fall back to index spacing. timeFractions (the line) and
+// tells the caller to fall back to index spacing. viewFractions (the line) and
 // the event markers both key off this one guard so they always share an x axis.
 function timeAxisSpan(n: number, dates?: string[]): { ts: number[]; t0: number; span: number } | null {
   if (!dates || dates.length !== n) return null
@@ -224,12 +238,19 @@ function timeAxisSpan(n: number, dates?: string[]): { ts: number[]; t0: number; 
   return { ts, t0: ts[0], span }
 }
 
-// Per-point x fraction (0..1) for a chart. Proportional to time when the dates
-// form a usable axis; otherwise evenly spaced by index.
-function timeFractions(n: number, dates?: string[]): number[] {
+/**
+ * Per-point x fraction (0..1) across an explicit time DOMAIN — the zoom window, not the
+ * drawn data's extent. Those differ whenever a refined series does not start and
+ * end exactly on the window's edges, and drawing the line on one domain while
+ * placing the selection shade on the other is precisely the mismatch that put
+ * earlier drag labels a bucket off. One domain, one answer.
+ */
+function viewFractions(n: number, dates: string[] | undefined, view: { from: number; to: number }): number[] {
   const axis = timeAxisSpan(n, dates)
-  if (!axis) return Array.from({ length: n }, (_, i) => i / (n - 1))
-  return axis.ts.map(t => (t - axis.t0) / axis.span)
+  if (!axis) return Array.from({ length: n }, (_, i) => (n > 1 ? i / (n - 1) : 0))
+  const span = view.to - view.from
+  if (!(span > 0)) return axis.ts.map(() => 0)
+  return axis.ts.map(t => (t / 1000 - view.from) / span)
 }
 
 // Relative time ("3m ago") that reveals the absolute UTC timestamp on hover.
@@ -1180,9 +1201,13 @@ function ChartMarkerFlag({ cluster, open, onOpen, onClose }: {
 // `markers` flags notable events on the same time axis (see ChartMarker).
 // The viewBox is fixed and the svg is stretched to its container (height `h`).
 const W = 820, padT = 14, padB = 14
-export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt = F.usd, markers }: {
+export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt = F.usd, markers, refine, zoomKey }: {
   data: number[]; h?: number; target?: number; color?: string; floor?: number
   dates?: string[]; valueFmt?: (v: number) => string; markers?: ChartMarker[]
+  /** Zoom refinement loader: a finer series for base-index window [lo, hi]. */
+  refine?: (fromSec: number, toSec: number, points: number) => Promise<RefinedSeries | null>
+  /** Query-param name persisting the zoom window (back-navigable, shareable). */
+  zoomKey?: string
 }) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const [hover, setHover] = useState<{ xPct: number; yPct: number; val: string; date: string } | null>(null)
@@ -1190,50 +1215,107 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
   // On phones 1.5% of the chart is a few px — caps would collide, so cluster
   // wider there. Same breakpoint as the stylesheet's table→card switch.
   const narrow = useMediaQuery('(max-width: 720px)')
+  // The BASE series' point times in unix SECONDS — the unit the zoom window,
+  // the URL and the windowed endpoints all speak. (parseUtcTimestamp returns
+  // milliseconds; handing those to the zoom put the window 55,000 years out.)
+  // Null when the dates are not a usable axis, which is the same guard the
+  // line's x positions key on.
+  const baseTimes = useMemo(() => {
+    if (!data || !timeAxisSpan(data.length, dates)) return null
+    return dates!.map(d => Math.floor(parseUtcTimestamp(d) / 1000))
+  }, [data, dates])
+  // Gesture zoom: the plot spans the whole wrapper, so the plot fraction is the
+  // wrapper fraction. A window change drops hover/marker state that indexes the
+  // outgoing slice.
+  // The window is absolute time, so the zoom needs only the series' point times
+  // — no fraction↔index mapping, and nothing to reconcile when a refined series
+  // is drawn on a different extent than the slice it replaced.
+  const zoom = useChartZoom(
+    baseTimes ?? [],
+    e => {
+      const r = wrapRef.current?.getBoundingClientRect()
+      return r?.width ? Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) : 0
+    },
+    () => { setHover(null); setOpenMark(null) },
+    zoomKey,
+  )
+  // Everything below sees only the zoom window; the axes, markers and tooltip
+  // recompute for it through the exact code paths the full view uses. When a
+  // refinement loader answered for this window, its finer series substitutes
+  // for the coarse slice — same span, more points.
+  const refined = useZoomRefine(zoom, refine, narrow ? 90 : 180)
+  // The view's bounds, memoized: `zoom.view` is rebuilt every render, so a memo
+  // depending on the object would recompute the whole curve on every clock tick.
+  // The bounds must be a dependency all the same — a drag that narrows the window
+  // without changing which base points bracket it leaves the slice identical, and
+  // the line would stay drawn on the outgoing domain while the shade moved on.
+  const view = useMemo(() => ({ from: zoom.view.from, to: zoom.view.to }), [zoom.view.from, zoom.view.to])
+  const slicedData = useMemo(() => (zoom.zoomed ? data.slice(zoom.lo, zoom.hi + 1) : data), [data, zoom.zoomed, zoom.lo, zoom.hi])
+  const slicedDates = useMemo(() => (zoom.zoomed && dates ? dates.slice(zoom.lo, zoom.hi + 1) : dates), [dates, zoom.zoomed, zoom.lo, zoom.hi])
+  const rawVData = refined?.data ?? slicedData
+  const rawVDates = refined?.dates ?? slicedDates
+  // Clip to the window so the line spans it exactly: a point outside would draw
+  // past the axis, and a coarse slice holding only a couple of interior points
+  // would cover part of the width until the refined series lands.
+  const { vData, vDates } = useMemo(() => {
+    if (!zoom.zoomed || !rawVDates || rawVDates.length !== rawVData.length) return { vData: rawVData, vDates: rawVDates }
+    const times = rawVDates.map(d => Math.floor(parseUtcTimestamp(d) / 1000))
+    if (!times.every(Number.isFinite)) return { vData: rawVData, vDates: rawVDates }
+    const clipped = bracketToView(times, view, [rawVData])
+    if (clipped.times.length < 2) return { vData: rawVData, vDates: rawVDates }
+    return {
+      vData: clipped.series[0].map(v => v ?? 0),
+      vDates: clipped.times.map(t => new Date(t * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')),
+    }
+  }, [rawVData, rawVDates, zoom.zoomed, view])
 
   // Pure geometry over the series. Every portfolio and balance chart in the app is
   // one of these, and the pages holding them re-render once a second on the shared
   // clock, so rebuilding the path strings in render meant recomputing the whole
   // curve every tick and on every crosshair move.
   const geom = useMemo(() => {
-    if (!data || data.length < 2) return null
+    if (!vData || vData.length < 2) return null
     // `floor` pins the baseline (e.g. 0) so small values don't glue to the bottom.
-    const min = floor != null ? floor : Math.min(...data, target ?? Infinity), max = Math.max(...data, target ?? -Infinity)
+    const min = floor != null ? floor : Math.min(...vData, target ?? Infinity), max = Math.max(...vData, target ?? -Infinity)
     // X positions are proportional to TIME when a parseable date accompanies every
     // point (portfolio/balance history buckets cover unequal time spans, so index
     // spacing would distort the shape); index spacing is the fallback.
-    const xFrac = timeFractions(data.length, dates)
+    const xFrac = viewFractions(vData.length, vDates, view)
     // Span the full width edge-to-edge so the line matches the hover crosshair, which
     // maps 0..100% across the container. A horizontal inset would leave the first/last
     // points hoverable (value shown) but with no line drawn at that x.
     const sx = (i: number) => xFrac[i] * W
     const sy = (v: number) => padT + (1 - (v - min) / ((max - min) || 1)) * (h - padT - padB)
-    const line = data.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
-    const area = `${line} L ${sx(data.length - 1).toFixed(1)} ${h - padB} L ${sx(0).toFixed(1)} ${h - padB} Z`
-    const up = data[data.length - 1] >= data[0]
+    const line = vData.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
+    const area = `${line} L ${sx(vData.length - 1).toFixed(1)} ${h - padB} L ${sx(0).toFixed(1)} ${h - padB} Z`
+    const up = vData[vData.length - 1] >= vData[0]
     return { xFrac, sy, line, area, col: color ?? (up ? 'var(--green)' : 'var(--red)'), gid: 'ag' + Math.round(min * 1000 + max) }
-  }, [data, dates, target, floor, h, color])
+  }, [vData, vDates, target, floor, h, color, view])
 
   // Markers key off the EXACT axis the line uses (timeAxisSpan is the same guard
-  // as timeFractions): render only when the line is time-proportional, so a flag
+  // as viewFractions): render only when the line is time-proportional, so a flag
   // never drifts off a curve that fell back to index spacing.
   const markClusters = useMemo(() => {
-    const markAxis = markers?.length ? timeAxisSpan(data?.length ?? 0, dates) : null
+    const markAxis = markers?.length ? timeAxisSpan(vData?.length ?? 0, vDates) : null
     return markers && markAxis ? clusterChartMarkers(markers, markAxis.t0, markAxis.span, narrow ? 0.045 : 0.015) : []
-  }, [markers, data, dates, narrow])
+  }, [markers, vData, vDates, narrow])
 
   if (!geom) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>Not enough history.</div>
   const { xFrac, sy, line, area, col, gid } = geom
+  // Points closer than half a day label with their time, not just the date.
+  const viewSpanMs = vDates && vDates.length > 1 ? parseUtcTimestamp(vDates[vDates.length - 1]) - parseUtcTimestamp(vDates[0]) : NaN
+  const subDaily = Number.isFinite(viewSpanMs) && viewSpanMs > 0 && viewSpanMs / (vData.length - 1) < 43_200_000
 
   function onMove(e: ReactPointerEvent) {
+    if (zoom.selecting || zoom.pinching) return
     const wrap = wrapRef.current; if (!wrap) return
     const r = wrap.getBoundingClientRect(); if (!r.width) return
     const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width))
     // Snap to the point nearest the cursor in x-space (time-aware when dates drive x).
     let i = 0
     for (let k = 1; k < xFrac.length; k++) if (Math.abs(xFrac[k] - frac) < Math.abs(xFrac[i] - frac)) i = k
-    const ts = dates?.[i]
-    setHover({ xPct: xFrac[i] * 100, yPct: sy(data[i]) / h * 100, val: valueFmt(data[i]), date: ts ? tsDate(ts) : '' })
+    const ts = vDates?.[i]
+    setHover({ xPct: xFrac[i] * 100, yPct: sy(vData[i]) / h * 100, val: valueFmt(vData[i]), date: ts ? (subDaily ? tsDateTime(ts) : tsDate(ts)) : '' })
   }
 
   return (
@@ -1241,7 +1323,12 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
     // moment a finger lands, touch-action: pan-y (.apx-wrap) keeps horizontal drags
     // scrubbing instead of scrolling, and only a mouse leaving clears the hover —
     // a lifted finger fires pointerleave too, but the tapped point should stick.
-    <div className="apx-wrap" ref={wrapRef} onPointerDown={onMove} onPointerMove={onMove}
+    // A mouse DRAG selects a zoom window and a two-finger pinch zooms on touch
+    // (chartZoom.tsx); double-click resets.
+    <div className="apx-wrap" ref={wrapRef} data-zoom-key={zoomKey}
+      onPointerDown={e => { zoom.onPointerDown(e); onMove(e) }}
+      onPointerMove={e => { zoom.onPointerMove(e); onMove(e) }}
+      onPointerUp={zoom.onPointerUp} onPointerCancel={zoom.onPointerCancel} onDoubleClick={zoom.onDoubleClick}
       onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null) }}>
       <svg className="apx-chart" viewBox={`0 0 ${W} ${h}`} preserveAspectRatio="none">
         <defs><linearGradient id={gid} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={col} stopOpacity="0.26" /><stop offset="100%" stopColor={col} stopOpacity="0" /></linearGradient></defs>
@@ -1257,15 +1344,25 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
           ))}
         </div>
       )}
-      {hover && <div className="apx-cross"><div className="apx-vline" style={{ left: `${hover.xPct}%` }} /><div className="apx-dot" style={{ left: `${hover.xPct}%`, top: `${hover.yPct}%` }} /></div>}
+      {hover && !zoom.selecting && <div className="apx-cross"><div className="apx-vline" style={{ left: `${hover.xPct}%` }} /><div className="apx-dot" style={{ left: `${hover.xPct}%`, top: `${hover.yPct}%` }} /></div>}
       {/* The crosshair value tip yields while a marker tip is open — the two
           would otherwise overlap at the top edge. */}
-      {hover && openMark == null && (
+      {hover && !zoom.selecting && openMark == null && (
         <ChartTip xPct={hover.xPct}>
           {hover.date && <span className="t-d">{hover.date}</span>}
           <span className="t-p">{hover.val}</span>
         </ChartTip>
       )}
+      {zoom.preview && (() => {
+        // The shade IS the window a lift commits, placed on the view's own time
+        // domain — so it tracks the cursor continuously instead of snapping to
+        // whatever the base series' step happens to be.
+        const pw = zoom.preview
+        const pct = (t: number) => fracOfTime(zoom.view, t) * 100
+        const label = `${tsDate(windowStamp(pw.from))} – ${tsDate(windowStamp(pw.to))}`
+        return <ZoomSelection aPct={pct(pw.from)} bPct={pct(pw.to)} label={label} />
+      })()}
+      {zoom.zoomed && !zoom.sel && <ZoomReset onReset={zoom.reset} />}
     </div>
   )
 }

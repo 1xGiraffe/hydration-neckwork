@@ -11,6 +11,7 @@ import {
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressListTotal, getTagListTotal,
   getAddressValueEvents, getTagValueEvents,
+  getAssetPriceWindow, getAddressHistoryWindow, getTagHistoryWindow,
   getTagActivity, getTagExtrinsics, getTagEvents,
   getAddressVotes, getTagVotes, getTagVotesByReferendum,
   getAddressRevenueBreakdown, getTagRevenueBreakdown,
@@ -54,6 +55,12 @@ export function accountSortParam(q: Record<string, unknown>): AccountSort {
   return (sort.success ? normalizeAccountSort(sort.data) : 'value') as AccountSort
 }
 const addressParam = z.object({ address: z.string().min(1).max(128) })
+// Chart-zoom refinement window, in exact block space (the base series carries
+// its end-of-bucket block heights, so no timestamp->height scan is needed).
+export const historyWindowSchema = z.object({
+  fromBlock: z.coerce.number().int().min(0).max(0xffff_ffff),
+  toBlock: z.coerce.number().int().min(1).max(0xffff_ffff),
+}).refine(w => w.toBlock > w.fromBlock, { message: 'toBlock must exceed fromBlock' })
 const analyzableAddressParam = z.object({ address: z.string().min(3).max(128) })
 const tagParam = z.object({ tagId: z.string().min(1).max(64) })
 // The multi-source categories assemble one candidate window per source, classify
@@ -567,6 +574,23 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return { ...detail, liquiditySourceCount }
   })
 
+  // Chart-zoom refinement: the asset's closes over [from, to] (unix seconds) at
+  // the finest OHLC interval whose candle count fits `points`. Additive — the
+  // detail payload keeps serving the full daily series.
+  fastify.get('/explorer/asset/:assetId/prices', async (req, reply) => {
+    const params = z.object({ assetId: uint32Param }).safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid asset id' })
+    // fromTs/toTs, not from/to: the plugin-wide filter guard reserves those
+    // names for calendar-day list filters.
+    const q = z.object({
+      fromTs: z.coerce.number().int().min(0).max(0xffff_ffff),
+      toTs: z.coerce.number().int().min(1).max(0xffff_ffff),
+      points: z.coerce.number().int().min(10).max(400).default(180),
+    }).safeParse(req.query)
+    if (!q.success || q.data.toTs <= q.data.fromTs) return reply.status(400).send({ error: 'Invalid window' })
+    return getAssetPriceWindow(params.data.assetId, q.data.fromTs, q.data.toTs, q.data.points)
+  })
+
   // Ongoing DCA schedules trading one asset, split into buys (schedules
   // acquiring it) and sells (schedules disposing of it). Chain-wide there are
   // only a few dozen live schedules, so the list is unpaginated.
@@ -603,6 +627,19 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const page = getTagMemberAccounts(params.data.tagId, accountSortParam(req.query as Record<string, unknown>))
     if (!page) return reply.status(404).send({ error: 'Tag not found' })
     return page
+  })
+
+  // Chart-zoom refinement over a tag's member set. The tag payload itself
+  // carries the full history, so only block windows are served here.
+  fastify.get('/explorer/tag/:tagId/history', async (req, reply) => {
+    const params = tagParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid tag' })
+    const q = req.query as Record<string, unknown>
+    const w = historyWindowSchema.safeParse(q)
+    if (!w.success) return reply.status(400).send({ error: 'Invalid block window' })
+    const windowed = await getTagHistoryWindow(params.data.tagId, w.data.fromBlock, w.data.toBlock, { seriesOnly: q.series === '1' })
+    if (!windowed) return reply.status(404).send({ error: 'Tag not recognized' })
+    return windowed
   })
 
   fastify.get('/explorer/tag/:tagId/close-accounts', async (req, reply) => {
@@ -696,11 +733,20 @@ export async function explorerRoutes(fastify: FastifyInstance) {
 
   // `series=1` returns the value series with an empty `balanceHistory` — the shape
   // the Overview chart uses. Absent (or any other value) returns the full history
-  // the Balances treemap needs.
+  // the Balances treemap needs. `fromBlock`+`toBlock` (chart-zoom refinement)
+  // re-bucket the same reconstruction over that block window instead.
   fastify.get('/explorer/address/:address/history', async (req, reply) => {
     const params = addressParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const q = req.query as Record<string, unknown>
     const seriesOnly = (req.query as { series?: string })?.series === '1'
+    if (q.fromBlock != null || q.toBlock != null) {
+      const w = historyWindowSchema.safeParse(q)
+      if (!w.success) return reply.status(400).send({ error: 'Invalid block window' })
+      const windowed = await getAddressHistoryWindow(params.data.address, w.data.fromBlock, w.data.toBlock, { seriesOnly })
+      if (!windowed) return reply.status(404).send({ error: 'Address not recognized' })
+      return windowed
+    }
     const history = await getAddressHistory(params.data.address, { seriesOnly })
     if (!history) return reply.status(404).send({ error: 'Address not recognized' })
     return history
