@@ -152,6 +152,12 @@ API it is a **versioned frozen contract**; concept: `~/.g/hydraken-api-concept.m
   authenticated responses, and per-account metering must see every request). In-process
   caches use `data:`-prefixed keys; live feeds key on the indexed head via
   `services/head.ts`.
+- Four surfaces answer without a token (`AUTH_EXEMPT` in `data/app.ts`): `/v1/status`,
+  `/openapi.json`, `/docs`, and `/llms.txt`. The last is RENDERED from the OpenAPI document
+  (`data/services/llmsTxt.ts`) — a compact orientation for automated clients, never a
+  hand-written second copy of the route list, so a new route appears in it the moment it
+  registers. Keep it a map: framing text and per-route summaries only, no parameters or
+  response schemas (`api/tests/data/llmsTxt.test.ts` pins completeness and the size budget).
 - `api/src/data/**` may import only the allow-list pinned by
   `api/tests/data/isolation.test.ts` (`db/client`, `config`, `types`, and the
   `cache`/`explorerAssets`/`valuation`/`lpMath` services). Never `explorerService`, never
