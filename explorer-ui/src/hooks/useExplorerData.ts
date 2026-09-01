@@ -490,6 +490,9 @@ export function useHdxDashboard() {
 export function useRevenueDashboard(range: RevenueRange) {
   return useQuery({ queryKey: ['revenue-dashboard', range], queryFn: ({ signal }) => api.revenue(range, signal), staleTime: 60_000 })
 }
+export function useStakerDistributions(range: RevenueRange) {
+  return useQuery({ queryKey: ['revenue-stakers', range], queryFn: ({ signal }) => api.revenueStakers(range, signal), staleTime: 60_000 })
+}
 export function useHollarDashboard() {
   return useQuery({ queryKey: ['hollar-dashboard'], queryFn: ({ signal }) => api.hollar(signal), staleTime: 120_000 })
 }
