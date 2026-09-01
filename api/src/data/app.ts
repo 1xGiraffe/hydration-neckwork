@@ -12,6 +12,7 @@ import { dataConfig } from './config.ts'
 import {
   checkRateLimit, initDataAuth, isTokenShaped, recordUsage, resolveToken, unauthenticatedIpAllowed,
 } from './services/auth.ts'
+import { renderLlmsTxt } from './services/llmsTxt.ts'
 import { statusRoutes } from './routes/status.ts'
 import { blocksRoutes } from './routes/blocks.ts'
 import { extrinsicsRoutes } from './routes/extrinsics.ts'
@@ -71,11 +72,13 @@ declare module 'fastify' {
   }
 }
 
-// The three surfaces a developer must be able to reach WITHOUT a token: the
-// status probe, the OpenAPI document, and the docs portal that teaches them how
-// to get a token in the first place. /favicon.ico rides along so a browser on
-// the docs page gets a clean 404 instead of a 401 in its console.
-const AUTH_EXEMPT = [/^\/v1\/status$/, /^\/openapi\.json$/, /^\/docs(\/|$)/, /^\/docs$/, /^\/favicon\.ico$/]
+// The surfaces a developer — or their agent — must be able to reach WITHOUT a
+// token: the status probe, the OpenAPI document, the docs portal that teaches
+// them how to get a token in the first place, and /llms.txt, the compact
+// orientation an automated client reads before deciding what to call.
+// /favicon.ico rides along so a browser on the docs page gets a clean 404
+// instead of a 401 in its console.
+const AUTH_EXEMPT = [/^\/v1\/status$/, /^\/openapi\.json$/, /^\/llms\.txt$/, /^\/docs(\/|$)/, /^\/docs$/, /^\/favicon\.ico$/]
 
 export function isAuthExempt(path: string): boolean {
   return AUTH_EXEMPT.some(pattern => pattern.test(path))
@@ -133,7 +136,7 @@ const GETTING_STARTED = [
   'REST access to the full public Hydration on-chain dataset: chain core (blocks, extrinsics, events), accounts (balances, history, transfers, trades, DeFi positions), assets and prices, pools and trades, governance, staking, XCM and EVM, plus aggregate stats. Everything answers from purpose-built ClickHouse projections; typical reads are tens of milliseconds.',
   '## Getting started',
   '1. **Get a token**: sign in to the [Hydration Explorer](' + dataConfig.createTokenUrl.replace(/\/api-tokens$/, '') + ') with your wallet and create an API token under **API tokens** (' + dataConfig.createTokenUrl + '). The `hdd_…` secret is shown exactly once.',
-  '2. **Send it as a Bearer header** on every request: `Authorization: Bearer hdd_…`. Only `/v1/status`, `/openapi.json` and `/docs` work without one.',
+  '2. **Send it as a Bearer header** on every request: `Authorization: Bearer hdd_…`. Only `/v1/status`, `/openapi.json`, `/llms.txt` and `/docs` work without one.',
   '3. **Watch the rate-limit headers**: every response carries `X-RateLimit-Limit-Minute`, `X-RateLimit-Remaining-Minute`, `X-RateLimit-Limit-Day`, `X-RateLimit-Remaining-Day`. All tokens of one account share the account\'s budget. A 429 carries `Retry-After` and the current usage in the error context; higher limits are granted per account — ask.',
   '## Conventions',
   '- **Addresses** are accepted as SS58 (any prefix), H160, or 0x-prefixed 32-byte public-key hex; responses carry the canonical form (`address`: Polkadot SS58, or the H160 for an EVM account) plus `accountIdHex`.',
@@ -208,6 +211,15 @@ export async function buildDataApp({ client, logger = true, onRoute }: DataAppOp
 
   // The raw document, for codegen and the contract tests.
   app.get('/openapi.json', { schema: { hide: true } }, async () => app.swagger())
+
+  // The agent-readable map of the same document (llmstxt.org). Rendered once
+  // on first request — the OpenAPI document is fixed after `ready()` — and
+  // served as markdown so a client can read it without a JSON parse.
+  let llmsTxt: string | null = null
+  app.get('/llms.txt', { schema: { hide: true } }, async (_req, reply) => {
+    llmsTxt ??= renderLlmsTxt(app.swagger(), dataConfig.publicUrl)
+    return reply.type('text/markdown; charset=utf-8').send(llmsTxt)
+  })
 
   registerCacheControl(app)
 

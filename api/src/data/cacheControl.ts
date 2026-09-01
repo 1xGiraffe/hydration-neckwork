@@ -11,13 +11,14 @@ import type { FastifyInstance } from 'fastify'
 // shared across users because all data here is public — the token is metering,
 // not access control.
 //
-// The three unauthenticated surfaces (/v1/status, the OpenAPI document, the
-// docs portal) are `public` and edge-cacheable.
+// The unauthenticated surfaces (/v1/status, the OpenAPI document, /llms.txt,
+// the docs portal) are `public` and edge-cacheable.
 type Visibility = 'public' | 'private'
 
 export const DATA_CACHE_CONTROL: Array<[RegExp, number, Visibility]> = [
   [/^\/v1\/status$/, 3, 'public'],
   [/^\/openapi\.json$/, 60, 'public'],
+  [/^\/llms\.txt$/, 300, 'public'],
   [/^\/docs/, 60, 'public'],
 
   // Chain core. Feeds track the head (3 s ≈ one block today); point reads are

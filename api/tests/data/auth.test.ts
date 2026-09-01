@@ -17,10 +17,11 @@ afterEach(async () => {
 })
 
 describe('authentication', () => {
-  it('serves the three exempt surfaces without a token', async () => {
+  it('serves the exempt surfaces without a token', async () => {
     app = await freshDataApp(fakeDataClient())
     expect((await app.inject('/v1/status')).statusCode).toBe(200)
     expect((await app.inject('/openapi.json')).statusCode).toBe(200)
+    expect((await app.inject('/llms.txt')).statusCode).toBe(200)
     expect((await app.inject('/docs')).statusCode).toBeLessThan(400)
   })
 
