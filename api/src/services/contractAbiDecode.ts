@@ -1,6 +1,6 @@
 import { keccakAsHex } from '@polkadot/util-crypto'
 import { cached } from './cache.ts'
-import { getContractAbiPayload, verifiedContractInfo } from './contractVerificationService.ts'
+import { getContractAbiPayload, getProxyImplementations, verifiedContractInfo } from './contractVerificationService.ts'
 
 // Read-time ABI decoding for detail surfaces (§9). A verified contract's ABI is
 // compiled into selector/topic0 indexes once per (address, verifiedAt) and then
@@ -464,12 +464,43 @@ function decodeEligible(source: string): boolean {
 // of needing an eviction API (same pattern as the ABI/sources payload caches).
 // Warm hits cost zero ClickHouse reads — the single primary-key ABI fetch runs
 // at most once per (address, verifiedAt) per hour.
-export async function getContractAbiIndexes(address: string): Promise<AbiIndexes | null> {
-  const addr = address.toLowerCase()
+async function ownAbiIndexes(addr: string): Promise<AbiIndexes | null> {
   const info = verifiedContractInfo(addr)
   if (!info?.abiPresent || !decodeEligible(info.source)) return null
   return cached(`contract:abi-index:${addr}:${info.verifiedAt}`, 3_600_000, async () => {
     const payload = await getContractAbiPayload(addr)
     return payload ? buildAbiIndexes(payload.abi) : null
   })
+}
+
+// Precedence on a signature collision: the address's own ABI, then newer
+// implementations over older ones — an upgraded-away ABI must not shadow the
+// one currently emitting.
+function mergeAbiIndexes(own: AbiIndexes, impls: AbiIndexes[]): AbiIndexes {
+  const functionsBySelector = new Map(own.functionsBySelector)
+  const eventsByTopic0 = new Map(own.eventsByTopic0)
+  for (const impl of impls) {
+    for (const [k, v] of impl.functionsBySelector) if (!functionsBySelector.has(k)) functionsBySelector.set(k, v)
+    for (const [k, v] of impl.eventsByTopic0) if (!eventsByTopic0.has(k)) eventsByTopic0.set(k, v)
+  }
+  return { functionsBySelector, eventsByTopic0 }
+}
+
+// A proxy's logs and calldata are the implementation's, so a verified address's
+// index also folds in the verified ABIs of every implementation its own
+// Upgraded events name (one level — an implementation that is itself a proxy is
+// not chased, mirroring the UI's proxyDetect). Unverified addresses still
+// short-circuit in memory with no query, and a non-proxy returns its own cached
+// index object unchanged; the merge itself is a per-call Map copy, cheap next
+// to the cached components it composes.
+export async function getContractAbiIndexes(address: string): Promise<AbiIndexes | null> {
+  const addr = address.toLowerCase()
+  const own = await ownAbiIndexes(addr)
+  if (!own) return null
+  const implIndexes: AbiIndexes[] = []
+  for (const impl of await getProxyImplementations(addr)) {
+    const indexes = await ownAbiIndexes(impl)
+    if (indexes) implIndexes.push(indexes)
+  }
+  return implIndexes.length === 0 ? own : mergeAbiIndexes(own, implIndexes)
 }

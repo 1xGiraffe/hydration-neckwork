@@ -270,6 +270,54 @@ export async function getContractAbiPayload(address: string): Promise<{ address:
   })
 }
 
+// keccak('Upgraded(address)') — the upgrade event the ERC1967/UUPS/OZ/Aave
+// proxy families all emit, including from the constructor, so a proxy's
+// implementation history is already in indexed logs and needs no RPC storage
+// read (contrast the UI's proxyDetect.ts, which reads the EIP-1967 slot live).
+const UPGRADED_TOPIC0 = '0xbc7cd75a20ee27fd9adebab32041f755214dbc6bffa90cc0225b39da2e5c2d3b'
+
+// The implementation addresses a proxy has pointed to, newest upgrade first,
+// deduplicated. Read via the contract-first log index and a primary-key IN on
+// raw_evm_logs (the data-API page pattern), so the scan stays bounded even for
+// a chatty contract. Bounded to the 8 newest implementations: Upgraded is an
+// ordinary event any contract can fake-emit, so the list must not be allowed
+// to grow with emissions. Empty for non-proxies; the empty result is cached
+// too, so a page of logs costs at most one scan per emitter per TTL.
+export async function getProxyImplementations(address: string): Promise<string[]> {
+  const addr = normalizeAddressParam(address)
+  return cached(`contract:proxy-impls:${addr}`, 600_000, async () => {
+    const rows = await client
+      .query({
+        query: `
+          SELECT topics
+          FROM price_data.raw_evm_logs
+          WHERE (block_height, event_index) IN (
+            SELECT block_height, event_index
+            FROM price_data.evm_logs_by_contract
+            WHERE contract_address = {address:String} AND topic0 = {topic0:String}
+            ORDER BY block_height DESC, event_index DESC
+            LIMIT 24)
+            AND contract_address = {address:String} AND topic0 = {topic0:String}
+          ORDER BY block_height DESC, event_index DESC`,
+        query_params: { address: addr, topic0: UPGRADED_TOPIC0 },
+        format: 'JSONEachRow',
+      })
+      .then(r => r.json<{ topics: string[] }>())
+    const impls: string[] = []
+    for (const row of rows) {
+      if (!Array.isArray(row.topics) || row.topics.length !== 2) continue
+      // The implementation is the indexed arg: a left-padded 20-byte address.
+      const m = String(row.topics[1]).toLowerCase().match(/^0x0{24}([0-9a-f]{40})$/)
+      if (!m || /^0{40}$/.test(m[1])) continue
+      const impl = `0x${m[1]}`
+      if (impl === addr || impls.includes(impl)) continue
+      impls.push(impl)
+      if (impls.length >= 8) break
+    }
+    return impls
+  })
+}
+
 export interface ContractSourcesPayload {
   address: string
   files: { path: string; content: string }[]
