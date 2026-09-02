@@ -1,6 +1,7 @@
 FROM docker:27-cli
 
-RUN apk add --no-cache bash coreutils gawk grep
+# curl is needed by the raw-live reorg check (chain_getBlockHash)
+RUN apk add --no-cache bash coreutils gawk grep curl
 
 WORKDIR /etc/hydration-neckwork
 
