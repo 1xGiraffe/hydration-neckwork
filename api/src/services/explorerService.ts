@@ -16180,6 +16180,123 @@ async function appendMoneyMarketBalanceRows(
   return availableFromBucket
 }
 
+// Daily supplied-collateral (aToken) balance for ONE holder over a caller-supplied
+// ascending `YYYY-MM-DD` grid — the single-account, calendar-grained twin of
+// appendMoneyMarketBalanceRows, for dashboards plotting an account's collateral
+// through time (the HSM's stablecoin reserves). Same reconstruction: scaled
+// principal accrues per day from the anchor snapshot, then each day multiplies by
+// the last liquidity index observed that day, carried forward across quiet days —
+// so rebasing interest still moves the curve on a day with no supply or withdraw.
+// A day the reconstruction cannot reach (before the anchor, which is its only
+// starting point) carries null, never a 0 standing in for an unknown balance.
+export interface AtokenDailyBalanceSeries { asset: AssetRef; underlyingId: number; values: (string | null)[] }
+
+// Day key -> bucket index on an ascending `YYYY-MM-DD` grid. A day BEFORE the
+// grid folds into bucket 0: its deltas and its liquidity index belong to the
+// opening balance, not to a point on the chart. A day past the grid's end is
+// dropped rather than clamped onto the last bucket, which would post a future
+// movement onto the newest visible day.
+export function dayGridBucketOf(days: string[]): (day: string) => number | null {
+  const byDay = new Map(days.map((d, i) => [d, i]))
+  const first = days[0]
+  return day => byDay.get(day) ?? (first != null && day < first ? 0 : null)
+}
+
+export async function getAtokenSuppliedDailyHistory(h160: string, days: string[]): Promise<AtokenDailyBalanceSeries[]> {
+  const holder = h160.toLowerCase()
+  if (!/^0x[0-9a-f]{40}$/.test(holder) || days.length < 2) return []
+  const anchorBlock = await aTokenAnchorBlock()
+  if (!anchorBlock) return []
+  const tokens = (await getMmReserveTokens()).filter(t => assetIdFromMmAddress(t.asset) != null)
+  const contracts = [...new Set(tokens.map(t => t.aToken.toLowerCase()))]
+  if (!contracts.length) return []
+  const bucketOf = dayGridBucketOf(days)
+  const endTime = `${days[days.length - 1]} 23:59:59`
+
+  const [anchorRes, deltaRes] = await Promise.all([
+    client.query({
+      query: `SELECT lower(contract_address) AS contract, toString(scaled_balance) AS scaled
+              FROM price_data.atoken_scaled_anchor FINAL
+              WHERE holder = {holder:String} AND contract_address IN ({contracts:Array(String)})
+                AND anchor_block = {anchorBlock:UInt32}`,
+      query_params: { holder, contracts, anchorBlock }, format: 'JSONEachRow',
+    }),
+    client.query({
+      query: `SELECT contract_address AS contract, toString(toDate(block_timestamp)) AS day,
+                toString(sum(scaled_delta)) AS delta
+              FROM price_data.atoken_scaled_deltas FINAL
+              WHERE holder = {holder:String} AND contract_address IN ({contracts:Array(String)})
+                AND block_height > {anchorBlock:UInt32} AND block_timestamp <= {end:DateTime}
+              GROUP BY contract, day ORDER BY contract, day`,
+      query_params: { holder, contracts, anchorBlock, end: endTime }, format: 'JSONEachRow',
+    }),
+  ])
+  const anchorByContract = new Map<string, string>()
+  for (const r of await anchorRes.json<{ contract: string; scaled: string }>()) anchorByContract.set(r.contract, r.scaled)
+  const deltasByContract = new Map<string, ScaledBalanceBucket[]>()
+  for (const r of await deltaRes.json<{ contract: string; day: string; delta: string }>()) {
+    const b = bucketOf(r.day)
+    if (b == null) continue
+    const list = deltasByContract.get(r.contract) ?? []
+    list.push({ b, value: r.delta })
+    deltasByContract.set(r.contract, list)
+  }
+  const held = tokens.filter(t => {
+    const c = t.aToken.toLowerCase()
+    return BigInt(anchorByContract.get(c) ?? '0') !== 0n || deltasByContract.has(c)
+  })
+  if (!held.length) return []
+
+  // Index history for the held reserves only. No FINAL, same reason as
+  // reserveIndicesNow: the argMax key covers the replacement key and version.
+  const indexRes = await client.query({
+    query: `SELECT pool_address AS pool, reserve_address AS reserve, toString(toDate(block_timestamp)) AS day,
+              toString(argMax(liquidity_index, tuple(block_height,event_index,ingested_at))) AS liquidity_index
+            FROM price_data.money_market_reserve_indices
+            WHERE pool_address IN ({pools:Array(String)}) AND reserve_address IN ({reserves:Array(String)})
+              AND block_height > {anchorBlock:UInt32} AND block_timestamp <= {end:DateTime}
+            GROUP BY pool, reserve, day ORDER BY pool, reserve, day`,
+    query_params: {
+      pools: [...new Set(held.map(t => t.poolProxy.toLowerCase()))],
+      reserves: [...new Set(held.map(t => t.asset.toLowerCase()))],
+      anchorBlock, end: endTime,
+    },
+    format: 'JSONEachRow',
+  })
+  const indicesByReserve = new Map<string, ScaledBalanceBucket[]>()
+  for (const r of await indexRes.json<{ pool: string; reserve: string; day: string; liquidity_index: string }>()) {
+    const b = bucketOf(r.day)
+    if (b == null) continue
+    const key = `${r.pool}:${r.reserve}`
+    const series = indicesByReserve.get(key) ?? []
+    // A pre-grid observation lands on bucket 0 repeatedly; the last one wins,
+    // which is the index in force when the grid opens.
+    series.push({ b, value: r.liquidity_index })
+    indicesByReserve.set(key, series)
+  }
+
+  const out: AtokenDailyBalanceSeries[] = []
+  for (const t of held) {
+    const contract = t.aToken.toLowerCase()
+    const underlyingId = assetIdFromMmAddress(t.asset)
+    if (underlyingId == null) continue
+    const indexSeries = indicesByReserve.get(`${t.poolProxy.toLowerCase()}:${t.asset.toLowerCase()}`)
+    if (!indexSeries?.length) continue
+    const displayId = displayAssetId(UNDERLYING_TO_ATOKEN_ID[underlyingId] ?? underlyingId)
+    const points = reconstructATokenBalanceBuckets(
+      0, days.length - 1, anchorByContract.get(contract) ?? '0',
+      deltasByContract.get(contract) ?? [], indexSeries,
+    )
+    const values: (string | null)[] = new Array(days.length).fill(null)
+    for (const p of points) {
+      if (p.b < 0 || p.b >= days.length) continue
+      values[p.b] = rescaleRaw(p.value, asset(underlyingId).decimals, asset(displayId).decimals)
+    }
+    out.push({ asset: asset(displayId), underlyingId, values })
+  }
+  return out
+}
+
 /** Unix seconds as the `YYYY-MM-DD HH:MM:SS` string every history point carries. */
 function formatUtcSeconds(sec: number): string {
   return new Date(sec * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
