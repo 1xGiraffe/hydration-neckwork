@@ -28,18 +28,27 @@ import { liveHeadTag } from '../live'
 // activity window — instead of a bare status.
 export class ApiError extends Error {
   status: number
-  constructor(status: number, message: string) {
+  /**
+   * The rejection body's own fields. A 404 from a lookup addressed by block
+   * coordinates carries `blockIndexed`/`headBound` (see the API's
+   * `describeLookupMiss`), which is what tells a "not indexed yet" miss apart
+   * from a bad id — the retry policy in `queryRetry.ts` reads them.
+   */
+  body: ApiErrorBody
+  constructor(status: number, message: string, body: ApiErrorBody = {}) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.body = body
   }
 }
+export interface ApiErrorBody { error?: string; message?: string; blockIndexed?: boolean; headBound?: number }
 
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`/api${path}`, { signal })
   if (!response.ok) {
-    const body = await response.json().catch(() => null) as { error?: string; message?: string } | null
-    throw new ApiError(response.status, body?.message || body?.error || `${response.status} ${response.statusText}`)
+    const body = await response.json().catch(() => null) as ApiErrorBody | null
+    throw new ApiError(response.status, body?.message || body?.error || `${response.status} ${response.statusText}`, body ?? {})
   }
   return response.json() as Promise<T>
 }

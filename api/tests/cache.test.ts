@@ -76,6 +76,46 @@ describe('cached', () => {
     await expect(cachedSwr('swr', 100, 1000, load)).resolves.toBe('second')
   })
 
+  // Every lookup addressed by block coordinates or a hash can be asked for
+  // something the finalized index does not hold YET (raw-live trails the chain
+  // by 35-65s). Storing that answer is what made a fresh /swap link 404 for a
+  // full minute after its rows had landed.
+  it('never stores a negative answer, so a miss re-asks instead of expiring', async () => {
+    const { cachedFound } = await import('../src/services/cache.ts')
+    const load = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 1 })
+      .mockResolvedValueOnce({ id: 2 })
+
+    await expect(cachedFound('miss', 60_000, load)).resolves.toBeNull()
+    await expect(cachedFound('miss', 60_000, load)).resolves.toEqual({ id: 1 })
+    // The hit caches normally — a third call inside the TTL must not re-read.
+    await expect(cachedFound('miss', 60_000, load)).resolves.toEqual({ id: 1 })
+    expect(load).toHaveBeenCalledTimes(2)
+  })
+
+  it('treats an empty list as negative too (an activity lookup answers with rows)', async () => {
+    const { cachedFound } = await import('../src/services/cache.ts')
+    const load = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ row: 1 }])
+
+    await expect(cachedFound('rows', 60_000, load)).resolves.toEqual([])
+    await expect(cachedFound('rows', 60_000, load)).resolves.toEqual([{ row: 1 }])
+    expect(load).toHaveBeenCalledTimes(2)
+  })
+
+  it('still collapses concurrent misses onto one read', async () => {
+    const { cachedFound } = await import('../src/services/cache.ts')
+    const load = vi.fn(async () => {
+      await new Promise(resolve => setTimeout(resolve, 1))
+      return null
+    })
+
+    await Promise.all([cachedFound('single-flight', 1000, load), cachedFound('single-flight', 1000, load)])
+    expect(load).toHaveBeenCalledTimes(1)
+  })
+
   it('rejects invalid cache lifetimes', async () => {
     const { cached, cachedSwr } = await import('../src/services/cache.ts')
     const load = vi.fn(async () => 'value')

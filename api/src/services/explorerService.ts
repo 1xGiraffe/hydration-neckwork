@@ -2,7 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { blockClock } from './blockClock.ts'
 import { makeBucketing, type Bucketing } from './bucketLadder.ts'
 import { OMNI_FIXED, omnipoolRemoveLiquidity, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
-import { cached, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
+import { cached, cachedFound, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
 import { NOMINAL_BLOCKS_PER_HOUR, blocksPerHour, measuredParaBlockMs, newestBlockTimestampsSql, paraBlockMs } from './blockTime.ts'
 import { RareEventLedger } from './rareEventLedger.ts'
 import { referendumTitleFor, referendumTitleKey } from './referendumTitleService.ts'
@@ -14,7 +14,7 @@ import { weightedFromLabels } from './convictionWeight.ts'
 import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
-import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, INCENTIVES_REWARD_POT } from './tagService.ts'
+import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, INCENTIVES_REWARD_POT } from './tagService.ts'
 import { identityForAccount, searchIdentitiesByDisplay, type AccountIdentity } from './identityService.ts'
 import { normalizeAddress, hydrationAddress, polkadotAddress, reservedH160AccountId, type NormalizedAddress } from './addressIdentity.ts'
 import { accountIcon, emojisMatchingName, emojiNameFor, parseSuffixEmojiQuery } from './omniwatchIdentity.ts'
@@ -39,7 +39,7 @@ import { resolveModuleError } from './runtimeErrorNames.ts'
 import { profileForAccount } from './userProfileService.ts'
 import { parsePoolAssetIds } from './stableswapSnapshot.ts'
 import { findMempoolTx, findPendingBlock, findPendingExtrinsic, findPendingExtrinsicByHash, mempoolTxs, pendingBestHeight, pendingBlocksDesc, type MempoolTx, type PendingBlock, type PendingExtrinsicRow } from './pendingHeadService.ts'
-import { buildMempoolActivities, buildPendingActivities, type PendingActivity } from './pendingActivity.ts'
+import { buildMempoolActivities, buildPendingActivities, type PendingActivity, type PendingTradeActivity } from './pendingActivity.ts'
 
 let client: ClickHouseClient
 export function initExplorerService(c: ClickHouseClient): void { client = c }
@@ -811,6 +811,19 @@ const TRANSFER_CALL_NAMES = new Set([
   'XTokens.transfer_multiassets', 'XTokens.transfer_with_fee', 'XTokens.transfer_multiasset_with_fee',
 ])
 
+// Liquidity actors that are module (modl) accounts stay hidden as plumbing —
+// EXCEPT the tagged economic ones (economicModuleAccounts: e.g. the Treasury).
+// A governance-dispatched treasury LP pull/re-add (scheduler-enacted, so
+// extrinsic-less and `who` = modlpy/trsry) is a real economic action the
+// treasury's own tag page already shows; the block page, the global feed and
+// the asset feed must classify it identically (the symmetry rule).
+function liquidityWhoExclusionSql(column = 'who'): string {
+  const economic = economicModuleAccounts(allTags()).map(a => `'${a}'`).join(',')
+  return economic.length
+    ? `AND (${column} NOT LIKE '0x6d6f646c%' OR ${column} IN (${economic}))`
+    : `AND ${column} NOT LIKE '0x6d6f646c%'`
+}
+
 // XCM sovereign / system accounts — sibling-parachain (`sibl`), sovereign
 // parachain (`para`) and relay (`Parent`) — are bridge plumbing, never a user's
 // own transfer. Distinct from the `modl` pallet pots, which include genuine
@@ -1241,6 +1254,38 @@ async function indexedRawHead(): Promise<number> {
     return Number((await res.json<{ head: number | null }>())[0]?.head ?? 0)
   })
   return Math.max(probed, pushedRawHead)
+}
+
+/**
+ * Why a lookup addressed by block coordinates found nothing.
+ *
+ * `raw-live` follows the FINALIZED head, so every detail page linked from a
+ * wallet right after the action it describes is asked for a block that exists
+ * on chain and not yet in ClickHouse — 35-65s of finality, measured. A bare 404
+ * cannot tell that apart from a mistyped id, so the miss says whether the BLOCK
+ * is in the index at all: the client keeps waiting while it is not, and fails
+ * fast once it is (the block is there and holds no such row).
+ *
+ * `blockIndexed` reads raw_events rather than `indexedRawHead()` on purpose —
+ * the ingestion-state row names a block before its event rows land, and it is
+ * the rows a lookup needs. `headBound` fences a far-future height, which is
+ * never going to arrive within a page's patience.
+ */
+export interface LookupMiss { blockIndexed: boolean; headBound: number }
+export async function describeLookupMiss(height: number): Promise<LookupMiss> {
+  const [blockIndexed, head] = await Promise.all([
+    // Only the POSITIVE answer caches: "not indexed yet" is exactly the state
+    // that is about to change, and it is what the retry is asking about.
+    cachedFound(`explorer:block-indexed:${height}`, 10_000, async () => {
+      const res = await client.query({
+        query: 'SELECT count() > 0 AS present FROM price_data.raw_events WHERE block_height = {h:UInt32}',
+        query_params: { h: height }, format: 'JSONEachRow',
+      })
+      return Number((await res.json<{ present: number }>())[0]?.present ?? 0) === 1
+    }, present => present),
+    indexedRawHead(),
+  ])
+  return { blockIndexed, headBound: Math.max(head, pendingBestHeight()) }
 }
 
 // Cache-key tag for a feed page: live pages carry the ingested head, so a page
@@ -2206,7 +2251,7 @@ export async function getBlock(height: number): Promise<BlockDetail | null> {
   // pending read never enters the 10s cache below, so it can't outlive itself.
   const pending = findPendingBlock(height)
   if (pending) return pendingBlockDetail(pending)
-  return cached(`explorer:block:${height}`, 10000, async () => {
+  return cachedFound(`explorer:block:${height}`, 10000, async () => {
     const [blockRes, extRes, evRes, evListRes] = await Promise.all([
       client.query({
         query: `SELECT block_height, toString(block_timestamp) AS ts, block_hash, parent_hash, state_root, extrinsics_root, author, spec_version
@@ -2503,9 +2548,6 @@ function poolShare(limit: number): number {
   return Math.max(3, Math.floor(limit / 3))
 }
 
-// Thrown by the hash lookup's cache builder so a miss propagates as an error
-// (which cached() does not store) rather than as a cached null.
-class ExtrinsicNotFound extends Error {}
 export async function getExtrinsic(hash: string): Promise<ExtrinsicDetail | null> {
   if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) return null
   // Pending first (see getBlock) — this is the lookup a just-submitted
@@ -2517,11 +2559,11 @@ export async function getExtrinsic(hash: string): Promise<ExtrinsicDetail | null
   // pool-to-block handoff so this page never flashes "not found").
   const pooled = findMempoolTx(hash)
   if (pooled) return mempoolExtrinsicDetail(pooled)
-  // A miss is NOT cached: a hash asked for while its block is between the
-  // pending layer and ClickHouse would otherwise 404 for the whole TTL, long
-  // after the extrinsic became readable. Misses are cheap and rare; a hit
-  // caches normally.
-  const found = await cached(`explorer:extrinsic:${hash.toLowerCase()}`, 10000, async () => {
+  // A miss is NOT cached (cachedFound): a hash asked for while its block is
+  // between the pending layer and ClickHouse would otherwise 404 for the whole
+  // TTL, long after the extrinsic became readable. Misses are cheap and rare;
+  // a hit caches normally.
+  return cachedFound(`explorer:extrinsic:${hash.toLowerCase()}`, 10000, async () => {
     const res = await client.query({
       query: `SELECT e.block_height AS block_height, e.extrinsic_index AS extrinsic_index, e.extrinsic_hash AS extrinsic_hash,
                      toString(e.block_timestamp) AS ts, e.version AS version,
@@ -2536,14 +2578,8 @@ export async function getExtrinsic(hash: string): Promise<ExtrinsicDetail | null
     const row = (await res.json<ExtrinsicDetailRow>())[0]
     if (row) return hydrateExtrinsicDetail(row)
     const evm = await evmTransactionExtrinsic(hash.toLowerCase())
-    const resolved = evm ? await getExtrinsicAt(evm.blockHeight, evm.extrinsicIndex) : null
-    if (!resolved) throw new ExtrinsicNotFound()
-    return resolved
-  }).catch(error => {
-    if (error instanceof ExtrinsicNotFound) return null
-    throw error
+    return evm ? await getExtrinsicAt(evm.blockHeight, evm.extrinsicIndex) : null
   })
-  return found
 }
 
 // recent transfers
@@ -6650,7 +6686,7 @@ export async function getExtrinsicAt(height: number, index: number): Promise<Ext
   // marked so the client keeps refetching until the finalized row lands.
   const pending = findPendingExtrinsic(height, index)
   if (pending) return pendingExtrinsicDetail(pending.block, pending.ext)
-  return cached(`explorer:extrinsic-at:${height}:${index}`, 10000, async () => {
+  return cachedFound(`explorer:extrinsic-at:${height}:${index}`, 10000, async () => {
     const res = await client.query({
       query: `SELECT e.block_height AS block_height, e.extrinsic_index AS extrinsic_index, e.extrinsic_hash AS extrinsic_hash,
                      toString(e.block_timestamp) AS ts, e.version AS version,
@@ -6681,7 +6717,7 @@ export interface EventDetail {
   extrinsic: ExtrinsicSummary | null
 }
 export async function getEventAt(height: number, index: number): Promise<EventDetail | null> {
-  return cached(`explorer:event-at:${height}:${index}`, 10000, async () => {
+  return cachedFound(`explorer:event-at:${height}:${index}`, 10000, async () => {
     const res = await client.query({
       query: `SELECT block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts, event_name, args_json
               FROM price_data.raw_events
@@ -8056,6 +8092,10 @@ export interface TradeDetail {
   route: TradeHop[]
   dca: boolean
   revenue?: ActivityRevenue
+  // false = served from the pending (unfinalized) layer: the trade is real but
+  // its block can still reorganize, the fee has not settled, and the route
+  // carries no per-hop amounts. Absent = finalized.
+  finalized?: boolean
 }
 
 function tradeHopFee(name: string, args: Record<string, unknown>, outId: number): TradeHop['fee'] {
@@ -8146,11 +8186,85 @@ async function inferredRouterRoute(height: number, eventIndex: number, netAmts: 
   return route
 }
 
+// A trade from the PENDING layer, so a swap linked the moment a wallet made it
+// resolves ~40s before its block finalizes instead of answering "not found".
+// The fold is the pending activity feed's own (first input, last output across
+// the extrinsic's Broadcast legs) — not a second classifier — and the result is
+// deliberately partial, which `finalized: false` tells the client:
+//   - amounts are the legs' own, valued at CURRENT prices (a pending row lives
+//     ~40s, so event-time and now coincide for practical purposes);
+//   - the route is the CALL's declared hops, without per-hop amounts: the fold
+//     carries the ends of the route, and inventing the middle would be a guess;
+//   - the fee is charged at settlement, so it stays absent rather than showing
+//     a zero the block has not decided yet.
+function pendingTradeDetail(
+  ext: PendingExtrinsicRow,
+  row: PendingTradeActivity,
+  prices: Awaited<ReturnType<typeof ensurePrices>>,
+): TradeDetail {
+  const aIn = asset(row.assetIn), aOut = asset(row.assetOut)
+  const inNum = Number(row.amountIn) / 10 ** aIn.decimals
+  const outNum = Number(row.amountOut) / 10 ** aOut.decimals
+  const callArgs = (ext.callArgs ?? {}) as Record<string, unknown>
+  const limitSpec = parseTradeLimit(ext.callName, callArgs)
+  return {
+    blockHeight: row.blockHeight,
+    timestamp: row.timestamp,
+    extrinsicIndex: ext.index,
+    eventIndex: row.eventIndex,
+    hash: ext.hash,
+    success: ext.success,
+    who: accountRef(ext.signerId ?? row.swapper),
+    venue: ext.callName.split('.')[0],
+    direction: /\.buy$/.test(ext.callName) ? 'Buy' : 'Sell',
+    assetIn: aIn, assetOut: aOut, amountIn: row.amountIn, amountOut: row.amountOut,
+    valueUsd: usdValue(prices, aOut.assetId, row.amountOut, aOut.decimals),
+    executionPrice: inNum > 0 && outNum > 0 ? outNum / inNum : null,
+    limit: limitSpec ? {
+      kind: limitSpec.kind, amount: limitSpec.amount, asset: asset(limitSpec.assetId),
+      marginPct: limitMarginPct(limitSpec.kind, limitSpec.amount, limitSpec.kind === 'maxPaid' ? row.amountIn : row.amountOut),
+    } : null,
+    extrinsicFee: null,
+    extrinsicTip: ext.tip,
+    route: parseRouteHops(callArgs).map(spec => ({
+      pool: spec.pool, poolId: spec.poolId, assetIn: asset(spec.assetIn), assetOut: asset(spec.assetOut),
+      amountIn: null, amountOut: null, fee: null,
+    })),
+    dca: ext.callName.startsWith('DCA.'),
+    finalized: false,
+  }
+}
+
+/**
+ * The pending trade an addressed extrinsic/event names, or null when the block
+ * is not in the pending layer (already finalized, or too old for the map).
+ * `match` picks the row: by extrinsic index for `/swap/<block>-<index>`, by any
+ * of the extrinsic's swap legs for the event form.
+ */
+async function pendingTrade(height: number, match: (row: PendingTradeActivity, ext: PendingExtrinsicRow) => boolean): Promise<TradeDetail | null> {
+  const block = findPendingBlock(height)
+  if (!block) return null
+  for (const a of buildPendingActivities(block)) {
+    if (a.kind !== 'trade' || a.extrinsicIndex == null) continue
+    const ext = block.extrinsics.find(e => e.index === a.extrinsicIndex)
+    if (!ext || !match(a, ext)) continue
+    return pendingTradeDetail(ext, a, await ensurePrices())
+  }
+  return null
+}
+
 // `routeEvent` addresses ONE route of a batch that dispatched several: the events of
 // the route it closes, rather than every swap event the extrinsic emitted. Without it
 // a link to the second route's event answered with the first route's trade.
 export async function getTradeDetail(height: number, index: number, routeEvent?: number): Promise<TradeDetail | null> {
-  return cached(`explorer:trade:${height}:${index}:${routeEvent ?? ''}`, 60_000, async () => {
+  // Pending first (see getBlock). A batch's individual routes are a finalized
+  // distinction — the pending fold is one row per extrinsic — so an addressed
+  // route waits for the classifier rather than being answered approximately.
+  if (routeEvent == null) {
+    const pending = await pendingTrade(height, row => row.extrinsicIndex === index)
+    if (pending) return pending
+  }
+  return cachedFound(`explorer:trade:${height}:${index}:${routeEvent ?? ''}`, 60_000, async () => {
     const prices = await ensurePrices()
     // The fee-currency events ride along in the same read rather than a second
     // round trip, then are partitioned straight back out: the route slicing
@@ -8699,7 +8813,7 @@ export interface ActivityRow {
 
 type BasicRowBase = {
   blockHeight: number; timestamp: string; eventIndex: number; extrinsicIndex: number | null
-  linkBlock: null; linkIndex: null; finalized: false
+  linkBlock: number | null; linkIndex: number | null; finalized: false
 }
 
 // BASIC unfinalized activity rows for page 0 of the plain live feed: trades
@@ -8716,10 +8830,15 @@ function basicActivityRow(a: PendingActivity, prices: Awaited<ReturnType<typeof 
     timestamp: a.timestamp,
     eventIndex: a.eventIndex,
     extrinsicIndex: a.extrinsicIndex,
-    // Trade/transfer detail pages need the finalized row — pending rows
-    // carry no link target and the client keeps them non-navigable.
-    linkBlock: null,
-    linkIndex: null,
+    // A pending row IS addressable: the block, extrinsic, trade and activity
+    // detail lookups all answer from this same layer, so the row links to its
+    // own coordinates (the extrinsic that dispatched it, where it has one) and
+    // opens a page marked unfinalized. A row with no extrinsic — a hook-phase
+    // swap — has nothing to point at until finality, and a MEMPOOL row (height
+    // 0, a synthetic extrinsic 0 — see buildMempoolActivities) has no block at
+    // all: it is addressed by hash, through its extrinsic page.
+    linkBlock: a.blockHeight > 0 && a.extrinsicIndex != null ? a.blockHeight : null,
+    linkIndex: a.blockHeight > 0 ? a.extrinsicIndex : null,
     finalized: false as const,
   }
   if (a.kind === 'mm') {
@@ -9157,7 +9276,7 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
           WHERE ${bound}
             AND event_name IN (${sqlEventNameList(liqEvents)})
             ${tokenRefsFilter}
-            AND who NOT LIKE '0x6d6f646c%'
+            ${liquidityWhoExclusionSql()}
             ${routerHop.predicateSql}
             ${tokenFilter}
             ${amountFilter.predicateSql}
@@ -9715,7 +9834,7 @@ function xcmMessageId(barrier: Pick<XcmBarrierRow, 'message_id'>): string | null
 // message (Transact/swap) cuts the walk at its first non-deposit event, so only
 // what the message actually credited to a user account surfaces.
 const XCM_IN_DEPOSIT_EVENTS = ['Currencies.Deposited', 'Tokens.Deposited', 'Balances.Deposit']
-const XCM_IN_WALK_EVENTS = [...XCM_IN_DEPOSIT_EVENTS, 'Balances.Issued', 'Balances.Endowed', 'Tokens.Endowed', 'Balances.Minted', 'System.NewAccount']
+export const XCM_IN_WALK_EVENTS = [...XCM_IN_DEPOSIT_EVENTS, 'Balances.Issued', 'Balances.Endowed', 'Tokens.Endowed', 'Balances.Minted', 'System.NewAccount']
 const RESERVED_ACCOUNT_RE = /^0x(6d6f646c|7369626c|70617261)/ // modl / sibl / para prefixes
 const sqlEventNameList = (names: string[]): string => names.map(n => `'${n}'`).join(',')
 
@@ -9728,15 +9847,27 @@ const sqlEventNameList = (names: string[]): string => names.map(n => `'${n}'`).j
 // not be deposited traps it here — and it lands directly before the barrier, which
 // is precisely where a contiguity rule cannot survive it.
 //
+// `EVM.Log` is the second: an ERC20-backed asset keeps its balances in a contract, so
+// the currency adapter mirrors every leg as an ERC20 Transfer log and emits no
+// Tokens.Deposited at all. HOLLAR (222) arrives that way — EVM.Log, Currencies.Deposited,
+// EVM.Log, Currencies.Deposited, barrier — so the mirror separates the beneficiary's
+// credit from the treasury fee credit above it and the run ended one step short of the
+// user: 149 of the first 151 HOLLAR arrivals decoded to nothing at all. The log is the
+// bookkeeping half of a credit the run already walks, never a credit of its own, so
+// crossing it can only reunite a run the mirror split.
+//
 // Deliberately NOT crossable: MessageQueue.*, DmpQueue.* and XcmpQueue.Success/Fail.
 // Each of those closes or reports a DIFFERENT message, so crossing one would let a
-// run reach into the message before it.
-const XCM_WALK_CROSSABLE_EVENTS = [
+// run reach into the message before it. Nor `EVM.Executed`/`EVM.ExecutedFailed`: those
+// mark a program the message DISPATCHED rather than a balance it credited, and they are
+// what cuts the walk on a Transact — a Moonbeam MRL message moves sub-cent WETH fee legs
+// inside its own execution, which are not credits this message made.
+export const XCM_WALK_CROSSABLE_EVENTS = [
   'PolkadotXcm.AssetsTrapped', 'PolkadotXcm.AssetsClaimed', 'PolkadotXcm.FeesPaid',
   'PolkadotXcm.Sent', 'PolkadotXcm.Attempted', 'PolkadotXcm.SupportedVersionChanged',
   'PolkadotXcm.VersionNotifyRequested', 'PolkadotXcm.VersionChangeNotified',
   'PolkadotXcm.VersionNotifyStarted', 'PolkadotXcm.VersionMigrationFinished',
-  'XcmpQueue.XcmpMessageSent',
+  'XcmpQueue.XcmpMessageSent', 'EVM.Log',
 ]
 
 // The event indices one inbound message credited, walking back from its barrier.
@@ -14103,7 +14234,7 @@ async function resolveDcaTradedPair(scheduleId: number, storedIn: number, stored
 // event (block_height + event_index). Bounded primary-key lookups only; the
 // failure reason is decoded on demand from the raw event, like extrinsics.
 export async function getDcaExecution(height: number, eventIndex: number): Promise<DcaExecutionDetail | null> {
-  return cached(`explorer:dca-exec:${height}:${eventIndex}`, 60_000, async () => {
+  return cachedFound(`explorer:dca-exec:${height}:${eventIndex}`, 60_000, async () => {
     // Nearest-following resolution: an execution's swap legs always PRECEDE
     // its closing TradeExecuted/TradeFailed event, so any event id from inside
     // the bundle (an activity row's Broadcast leg, a Router event) resolves to
@@ -14386,7 +14517,7 @@ async function dcaScheduleTerms(scheduleId: number, blockHeight: number, extrins
 }
 
 export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25): Promise<DcaScheduleDetail | null> {
-  return cached(`explorer:dca-schedule:${scheduleId}:${offset}:${limit}`, 8000, async () => {
+  return cachedFound(`explorer:dca-schedule:${scheduleId}:${offset}:${limit}`, 8000, async () => {
     const prices = await ensurePrices()
     const [schedRes, lifeRes, totalRes, exRes, planRes, cadenceRes] = await Promise.all([
       client.query({
@@ -14561,8 +14692,27 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
   })
 }
 
+/**
+ * The pending block's basic activity rows, filtered — the shared body behind
+ * the pending arm of the block and extrinsic activity lookups, so both answer
+ * with the SAME rows the live feed publishes rather than a second reading.
+ * Never cached: the pending map prunes as soon as ClickHouse serves the block,
+ * and an entry that outlived that would hide the finalized classification.
+ */
+async function pendingActivityRowsOf(block: PendingBlock, keep: (a: PendingActivity) => boolean): Promise<ActivityRow[]> {
+  const prices = await ensurePrices()
+  return buildPendingActivities(block)
+    .filter(keep)
+    .map(a => basicActivityRow(a, prices, 'all', undefined))
+    .filter((r): r is ActivityRow => r != null)
+}
+
 export async function getExtrinsicActivity(height: number, index: number, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {
-  return cached(`explorer:extrinsic-activity:${height}:${index}`, 10000, async () => {
+  // Pending first (see getBlockActivity) — this is what the extrinsic page's
+  // Activity section reads, and an unfinalized extrinsic has its own rows.
+  const pendingExt = findPendingExtrinsic(height, index)
+  if (pendingExt) return pendingActivityRowsOf(pendingExt.block, a => a.extrinsicIndex === index)
+  return cachedFound(`explorer:extrinsic-activity:${height}:${index}`, 10000, async () => {
     const prices = await ensurePrices()
     const evRes = await client.query({
       query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, ifNull(call_address, '') AS call_address, args_json
@@ -15001,7 +15151,15 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
 }
 
 export async function getBlockActivity(height: number, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {
-  return cached(`explorer:block-activity:${height}`, 10000, async () => {
+  // Pending first (see getBlock): every kind the pending layer decodes — trades,
+  // transfers, money-market actions, outbound XCM — is served from memory while
+  // the block waits for finality, so an activity detail page linked from a
+  // wallet finds its row instead of showing "not found" for ~40s. The rows are
+  // the feed's own basic ones, marked unfinalized; the kinds this layer does not
+  // decode (liquidity, staking, votes, OTC) simply appear at finality.
+  const pendingBlock = findPendingBlock(height)
+  if (pendingBlock) return pendingActivityRowsOf(pendingBlock, () => true)
+  return cachedFound(`explorer:block-activity:${height}`, 10000, async () => {
     const extRes = await client.query({
       query: `SELECT DISTINCT extrinsic_index
               FROM price_data.raw_extrinsics
@@ -15119,7 +15277,7 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
               FROM price_data.raw_events
               WHERE block_height = {h:UInt32} AND extrinsic_index IS NULL
                 AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
-                AND who NOT LIKE '0x6d6f646c%'
+                ${liquidityWhoExclusionSql()}
               ORDER BY event_index`,
       query_params: { h: height },
       format: 'JSONEachRow',
@@ -15582,7 +15740,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
           ${routerHopLiquiditySql(pageBound, 'asset_id', { sourceSql: 'price_data.liquidity_activity', whereSql: 'has(asset_refs, {assetId:UInt32})' }).joinSql}
           WHERE ${pageBound}
             AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
-            AND who NOT LIKE '0x6d6f646c%'
+            ${liquidityWhoExclusionSql()}
             ${routerHopLiquiditySql(pageBound).predicateSql}
             AND has(asset_refs, {assetId:UInt32})
           ORDER BY block_height DESC, event_index DESC

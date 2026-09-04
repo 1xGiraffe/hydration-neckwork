@@ -39,13 +39,23 @@ test('an unfinalized extrinsic detail page shows the Pending badge', async ({ pa
   await expect(page.locator('.detail-card .badge.finalized')).toBeVisible()
 })
 
-test('the activity feed dims unfinalized rows and keeps them non-navigable', async ({ page }) => {
+test('the activity feed dims unfinalized rows but still links them', async ({ page }) => {
   await page.goto('/activity')
   const pendingRow = page.locator('table.tbl tbody tr.unfinalized').first()
   await expect(pendingRow).toBeVisible()
-  // No detail page exists until the finalized classifier runs.
-  await expect(pendingRow).not.toHaveClass(/clickable/)
-  await expect(pendingRow).not.toHaveAttribute('data-activity', /.+/)
+  // The detail lookups answer from the same pending layer the row came from, so
+  // the row navigates and its page marks itself unfinalized — dimming says "may
+  // still reorganize", not "no page yet".
+  await expect(pendingRow).toHaveClass(/clickable/)
+  await expect(pendingRow).toHaveAttribute('data-activity', /.+/)
+})
+
+test('a mempool row stays non-navigable — nothing has included it yet', async ({ page }) => {
+  await page.goto('/activity')
+  const mempoolRow = page.locator('table.tbl tbody tr.mempool').first()
+  await expect(mempoolRow).toBeVisible()
+  await expect(mempoolRow).not.toHaveClass(/clickable/)
+  await expect(mempoolRow).not.toHaveAttribute('data-activity', /.+/)
 })
 
 // The smol toggle round-trips through the URL: toggling writes ?smol=…, and a

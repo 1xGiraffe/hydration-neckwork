@@ -3,7 +3,9 @@ import { useTrade } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect } from '../router'
-import { Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, MomentLink, SkeletonRows } from '../components/ui'
+import { Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, MomentLink, SkeletonRows, AwaitingBlockCard } from '../components/ui'
+import { blockOf } from '../utils/activityIds'
+import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import type { TradeHop } from '../types'
 import { RevenueRow } from '../components/RevenueRow'
 
@@ -78,7 +80,11 @@ function AssetAmount({ asset, amount }: { asset: TradeHop['assetIn']; amount: st
 }
 
 export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swap' | 'dca' }) {
-  const { data, isLoading, isError } = useTrade(id)
+  const { data, isLoading, isError, failureReason } = useTrade(id)
+  // Opened before its block was indexed: the finalized index trails the chain,
+  // so the page says it is waiting (and keeps asking) rather than claiming
+  // there is no such trade. See useAwaitingBlock.
+  const awaiting = useAwaitingBlock(blockOf(id), isError || failureReason != null, failureReason)
   const now = useNow()
   const label = slug === 'dca' ? 'DCA' : 'Swap'
   useDocumentTitle(`${label} ${id}`)
@@ -96,7 +102,8 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
         <div className="page-title">{label} <span className="num">{id}</span>{data && <span className="sub">{data.direction.toLowerCase()} via {data.venue}</span>}</div>
       </div>
 
-      {isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>No trade found in this extrinsic</div>
+      {awaiting ? <AwaitingBlockCard height={blockOf(id)} />
+        : isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>No trade found in this extrinsic</div>
         : isLoading || !data ? <div className="detail-card"><SkeletonRows /></div> : (() => {
           const extId = data.extrinsicIndex != null ? `${data.blockHeight}-${data.extrinsicIndex}` : null
           const eventId = data.eventIndex != null ? `${data.blockHeight}-${data.eventIndex}` : null
@@ -129,7 +136,15 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
                 </>}
                 {data.who && <><div className="dt">Trader</div><div className="dd"><AddrPill account={data.who} /></div></>}
                 <div className="dt">When</div><div className="dd mono"><MomentLink at={data} now={now} /></div>
-                <div className="dt">Result</div><div className="dd"><StatusBadge ok={data.success} /></div>
+                <div className="dt">Result</div>
+                <div className="dd">
+                  <StatusBadge ok={data.success} />
+                  {/* Served from the pending layer: the trade is real, its block
+                      can still reorganize, and the fee and per-hop amounts
+                      arrive with finality (the query keeps refetching until
+                      then). Absent `finalized` means the finalized row. */}
+                  {data.finalized === false && <FinalizedBadge finalized={false} />}
+                </div>
                 {extId && <><div className="dt">Extrinsic</div><div className="dd mono"><Link to={paths.extrinsic(extId)} className="hash">{extId}</Link></div></>}
                 {!extId && eventId && <><div className="dt">Event</div><div className="dd mono"><Link to={paths.event(eventId)} className="hash">{eventId}</Link></div></>}
                 {(data.extrinsicFee || data.feePayment) && <><div className="dt">Fee</div><div className="dd"><FeeAmount payment={data.feePayment} hdxRaw={data.extrinsicFee} /></div></>}
