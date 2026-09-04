@@ -37,7 +37,11 @@ function mockData(): HdxDashboard {
       unlockableNowHdx: 6.7e8,
       activeVoteHdx: 7.8e8,
       stakingAnytimeHdx: 1.2e9,
-      gigaPending: { count: 12, totalHdx: 1.4e6, nextUnlockTs: '2026-07-16 00:00:00' },
+      nowHdx: { gigahdx: 4.2e8, vesting: 2.5e8, vote: 0 },
+      gigaPending: {
+        count: 12, totalHdx: 1.4e6, nextUnlockTs: '2026-07-16 00:00:00',
+        maturedCount: 5, maturedHdx: 9e5,
+      },
     },
     flows: {
       daily: [{ date: '2026-07-13', buyHdx: 2e6, sellHdx: 1e6, buyers: 300, sellers: 200 }],
@@ -91,5 +95,72 @@ describe('HDX Locks section — vesting shows only HDX still on schedule', () =>
     queryClient.setQueryData(['hdx-dashboard'], data)
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Hdx /></QueryClientProvider>)
     expect(html).not.toContain('vested but unclaimed')
+  })
+})
+
+// Matured GIGAHDX unstakes have no future date, so they used to fall out of the
+// dated buckets and be summed into a figure the page never rendered — 11.2M HDX
+// of claimable balance simply absent. They belong in a leading "now" column,
+// overlap-corrected like every other slice.
+describe('HDX Upcoming unlocks — claimable-now column', () => {
+  const render = (data: HdxDashboard) => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['hdx-dashboard'], data)
+    return renderToStaticMarkup(<QueryClientProvider client={queryClient}><Hdx /></QueryClientProvider>)
+  }
+
+  // Claimable-now balance is NOT a time bucket, and as a bar it was both a
+  // category error and the largest column on the chart. It reads as stat cards
+  // above the axis instead, GIGAHDX first because it is the actionable one.
+  it('renders the claimable-now breakdown outside the chart', () => {
+    const html = render(mockData())
+    expect(html).toContain('Claimable now')
+    expect(html).not.toContain('>now<')
+  })
+
+  it('leads the breakdown with GIGAHDX, ahead of the far larger lock kinds', () => {
+    const html = render(mockData())
+    const claimable = html.slice(html.indexOf('Claimable now'))
+    expect(claimable.indexOf('GIGAHDX')).toBeLessThan(claimable.indexOf('Vesting'))
+  })
+
+  // It is context, not a headline: the same balance may sit there for years
+  // (dormant vote locks, vested-but-unclaimed), so it must not carry the weight
+  // of the stat-card grid the Locks section uses for real figures.
+  it('renders claimable-now as a caption, not as stat cards', () => {
+    const html = render(mockData())
+    // Slice forward from the label to the NEXT chart, not the page's first one.
+    const at = html.indexOf('Claimable now')
+    const block = html.slice(at, html.indexOf('day-chart', at))
+    expect(block.length).toBeGreaterThan(0)
+    expect(block).not.toContain('hdx-card')
+    expect(block).not.toContain('sec-title')
+  })
+
+  it('marks each kind with its series colour swatch', () => {
+    const html = render(mockData())
+    const at = html.indexOf('Claimable now')
+    const block = html.slice(at, html.indexOf('day-chart', at))
+    // mockData has gigahdx + vesting releasable, vote at zero — one dot each.
+    expect(block.match(/border-radius:50%/g) ?? []).toHaveLength(2)
+  })
+
+  it('omits the claimable-now block when nothing is releasable', () => {
+    const data = mockData()
+    data.unlocks.nowHdx = { gigahdx: 0, vesting: 0, vote: 0 }
+    expect(render(data)).not.toContain('Claimable now')
+  })
+
+  it('reports how much of the GIGAHDX pending pool has matured', () => {
+    const html = render(mockData())
+    expect(html).toContain('5 matured')
+  })
+
+  it('omits the matured note while every position is still cooling', () => {
+    const data = mockData()
+    data.unlocks.gigaPending.maturedCount = 0
+    data.unlocks.gigaPending.maturedHdx = 0
+    const html = render(data)
+    expect(html).not.toContain('matured')
   })
 })

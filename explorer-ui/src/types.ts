@@ -1149,9 +1149,13 @@ export interface HdxDashboard {
     buckets: HdxUnlockBucket[]                     // 8 weekly then monthly buckets
     laterHdx: { gigahdx: number; vesting: number; vote: number }
     unlockableNowHdx: number
+    nowHdx: { gigahdx: number; vesting: number; vote: number } // leading "now" column
     activeVoteHdx: number
     stakingAnytimeHdx: number
-    gigaPending: { count: number; totalHdx: number; nextUnlockTs: string | null }
+    gigaPending: {
+      count: number; totalHdx: number; nextUnlockTs: string | null
+      maturedCount: number; maturedHdx: number
+    }
   }
   flows: { daily: HdxDailyFlow[]; dca: { buy: { orders: number; hdxPerDay: number }; sell: { orders: number; hdxPerDay: number } } }
   churn: { weekly: { weekStart: string; newHolders: number; exitedHolders: number }[] }
