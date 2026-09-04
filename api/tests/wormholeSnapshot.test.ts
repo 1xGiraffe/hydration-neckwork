@@ -574,6 +574,11 @@ function historyClient(): ClickHouseClient {
 
 describe('transfer history composed from the indexed logs', () => {
   beforeEach(async () => {
+    // Pinned just after the fixture's two transfers, so they stay inside the
+    // 14-day window forever — measured against the real clock, the inbound leg
+    // aged out and the direction counts silently became zero.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(Date.parse('2026-08-22T09:00:00Z'))
     registry = [USDC, SUI]
     minters.clear()
     minters.set(USDC.assetId, widen(USDC.manager))
@@ -582,6 +587,7 @@ describe('transfer history composed from the indexed logs', () => {
     initWormholeNttService(historyClient())
     await refreshWormholeBacking()
   })
+  afterEach(() => { vi.useRealTimers() })
 
   it('reads the outbound send from the burn and names its sender', async () => {
     const detail = await getWormholeBridgeDetail()
