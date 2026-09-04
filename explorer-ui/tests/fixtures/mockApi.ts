@@ -1250,6 +1250,9 @@ function buildHdx(): HdxDashboard {
     unlocks: {
       buckets,
       laterHdx: { gigahdx: 9.2e7, vesting: 1.6e8, vote: 1.4e8 },
+      // The leading "now" column, split by lock kind and summing to
+      // unlockableNowHdx — the cards read the split, the ribbon the total.
+      nowHdx: { gigahdx: 1.2e7, vesting: 2.3e8, vote: 4.28e8 },
       unlockableNowHdx: 6.7e8,
       activeVoteHdx: 7.8e8,
       stakingAnytimeHdx: 1.24e9,

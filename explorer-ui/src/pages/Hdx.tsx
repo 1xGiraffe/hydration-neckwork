@@ -199,19 +199,21 @@ function LocksSection({ d }: { d: HdxDashboard }) {
 }
 
 // 4. unlock timeline
-// GIGAHDX unstakes carry a fixed 28-day unbond, so they can only ever land in
-// the first four weekly buckets (≤28d) — never later ones. Drop it from those
-// tooltips (and the "later" bucket) so we don't imply a lock type that can
-// never have a value there.
-const GIGA_UNLOCK_WEEKS = 4
+// A GIGAHDX unstake matures a fixed cooldown after it is requested, so the
+// series stops well before the monthly buckets and showing it in the later
+// tooltips would imply a lock type that can never have a value there. The
+// cooldown is a runtime constant that has already been rescaled once (403,200
+// → 1,209,600 blocks with the 6s → 2s change), so derive the cut-off from the
+// data instead of restating a day count that goes stale silently.
 const NON_GIGA_KEYS = UNLOCK_KEYS.filter(k => k !== 'gigahdx')
 function UnlocksSection({ d }: { d: HdxDashboard }) {
-  const { buckets, laterHdx, gigaPending } = d.unlocks
+  const { buckets, laterHdx, nowHdx, gigaPending } = d.unlocks
   const weeklyN = Math.min(8, buckets.length)
+  const lastGigaBucket = buckets.reduce((last, b, i) => (b.gigahdx > 0 ? i : last), -1)
   // 30-day monthly buckets can straddle month boundaries — blank out a label
   // that would repeat its neighbour ("Dec Dec") instead of showing it twice.
   const monthLabels = buckets.map((b, i) => (i < weeklyN ? mdLabel(b.fromTs) : monLabel(b.fromTs)))
-  const keysFor = (i: number) => (i < GIGA_UNLOCK_WEEKS ? UNLOCK_KEYS : NON_GIGA_KEYS)
+  const keysFor = (i: number) => (i <= lastGigaBucket ? UNLOCK_KEYS : NON_GIGA_KEYS)
   const columns: StackColumn[] = buckets.map((b, i) => {
     const keys = keysFor(i)
     return {
@@ -227,6 +229,18 @@ function UnlocksSection({ d }: { d: HdxDashboard }) {
       ),
     }
   })
+  // Everything already releasable. Overlap-corrected like the rest of the
+  // series: a matured GIGAHDX unstake whose tokens another lock still covers is
+  // not counted, because releasing it frees nothing.
+  //
+  // Deliberately NOT a column. It has no date, so it is not a time bucket, and
+  // as a bar it was the largest thing on the chart — hundreds of millions of
+  // dormant vote locks and vested-but-unclaimed HDX that may sit there for
+  // years, flattening the dated series that actually says when balance moves.
+  // GIGAHDX leads the cards: it is two orders of magnitude smaller than the
+  // other kinds and the only one with a deadline worth acting on.
+  const nowTotal = UNLOCK_KEYS.reduce((s, k) => s + nowHdx[k], 0)
+  const nowKeys = UNLOCK_KEYS.filter(k => nowHdx[k] > 0)
   columns.push({
     key: 'later',
     label: 'later',
@@ -243,11 +257,32 @@ function UnlocksSection({ d }: { d: HdxDashboard }) {
     <>
       <SecTitle title="Upcoming unlocks" />
       <div className="pf-card">
+        {nowTotal > 0 && (
+          // Dots are 6px rather than the legend's 8px: they tie each figure to
+          // its series without giving this caption the weight of the legend
+          // below it.
+          <div className="hdx-note" style={{ marginTop: 0, marginBottom: 10 }}>
+            Claimable now, an unlock or claim call away —{' '}
+            {nowKeys.map((k, i) => (
+              <span key={k} style={{ whiteSpace: 'nowrap' }}>
+                {i > 0 && ' · '}
+                <i style={{
+                  display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+                  background: lockColor(k), marginRight: 5, verticalAlign: 'middle',
+                }} />
+                {LOCK_LABELS[k]} {fmtHdx(nowHdx[k])}
+              </span>
+            ))}
+            {nowKeys.length > 1 && ` (${fmtHdx(nowTotal)} total)`}
+          </div>
+        )}
         <ChartLegend items={UNLOCK_KEYS.map(k => ({ label: LOCK_LABELS[k], color: lockColor(k) }))} />
         <StackedColumnChart columns={columns} h={200} separatorAt={weeklyN} separatorCaption="weekly → monthly" />
         {gigaPending.count > 0 && (
           <div className="hdx-note">
-            GIGAHDX: {F.int(gigaPending.count)} pending unstakes · {fmtHdx(gigaPending.totalHdx)} HDX{gigaPending.nextUnlockTs ? ` · next ${mdLabel(gigaPending.nextUnlockTs)}` : ''}
+            GIGAHDX: {F.int(gigaPending.count)} pending unstakes · {fmtHdx(gigaPending.totalHdx)} HDX
+            {gigaPending.maturedCount > 0 ? ` · ${F.int(gigaPending.maturedCount)} matured (${fmtHdx(gigaPending.maturedHdx)} HDX claimable)` : ''}
+            {gigaPending.nextUnlockTs ? ` · next ${mdLabel(gigaPending.nextUnlockTs)}` : ''}
           </div>
         )}
       </div>
