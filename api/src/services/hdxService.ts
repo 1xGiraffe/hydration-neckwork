@@ -27,6 +27,7 @@ const PENDING_UNSTAKES_PREFIX = prefix('GigaHdx', 'PendingUnstakes')
 const VESTING_PREFIX = prefix('Vesting', 'VestingSchedules')
 const VOTING_FOR_PREFIX = prefix('ConvictionVoting', 'VotingFor')
 const RELAY_HEIGHT_KEY = prefix('ParachainSystem', 'LastRelayChainBlockNumber')
+const TWO_SEC_SWITCH_KEY = prefix('Parameters', 'TwoSecBlocksSince')
 // The three single keys behind the GIGAHDX exchange rate (see loadGigahdxRate).
 // The pallet calls the staked total `TotalLocked`, not `TotalStaked` — a wrong
 // name here is a key that simply does not exist, which reads as an empty value
@@ -96,11 +97,104 @@ interface HdxChainSnapshot {
   vestingSchedules: VestingScheduleAgg[]
   voteLockAccounts: VoteLockAccount[]
   gigahdxHdxPerShare: number          // HDX backing one stHDX (see loadGigahdxRate)
+  // One entry per account that has a binding unlock timeline. Empty when the
+  // breakdown pass failed — the unlock series then falls back to per-source.
+  timelines: TimelineSliceJson[][]
 }
 
 let snapshot: HdxChainSnapshot | null = null
 
 const toHdx = (raw: bigint) => Number(raw / 10n ** (HDX_DECIMALS - 4n)) / 1e4
+
+// The unlock series the dashboard charts. One key per lock kind that has its
+// own schedule; `staking` and the deposit-shaped sources have none.
+export type UnlockKey = 'gigahdx' | 'vesting' | 'vote'
+// A binding-timeline slice names the lock(s) that were holding the balance when
+// the envelope dropped, joining ties with '+'. Attribute a tie to the DATED
+// lock that actually gates the release: a conviction prior and a GIGAHDX unbond
+// covering the same tokens both have to elapse, but it is the later-clearing
+// dated one that decides when the balance moves, and `vote` is the one cause
+// here that can also be cleared on demand. Splitting the amount across keys
+// would invent a division the envelope does not have.
+const UNLOCK_KEY_PRIORITY: UnlockKey[] = ['gigahdx', 'vesting', 'vote']
+export function unlockKeyForCause(cause: string): UnlockKey | null {
+  const parts = new Set(cause.split('+'))
+  return UNLOCK_KEY_PRIORITY.find(k => parts.has(k)) ?? null
+}
+
+// Persisted form of one binding-timeline slice (serializeTimeline in
+// lockBreakdownService): amount in planck, `until` an ISO instant.
+// `conditional` marks a step that only exists if the holder acts first — the
+// ghdxlock source projects one for the still-STAKED portion ("if this holder
+// unstaked now, it frees one cooldown from now"). No such unstake has been
+// requested, so it is a hypothetical, not a pending unlock.
+export interface TimelineSliceJson { state: string; cause: string; amount: string; until?: string; conditional?: boolean; linear?: boolean }
+export interface UnlockSeries {
+  now: Record<UnlockKey, number>          // already releasable (no date to wait for)
+  buckets: Record<UnlockKey, number>[]    // one per time bucket, same order as `buckets`
+  later: Record<UnlockKey, number>        // dated beyond the last bucket
+  active: Record<UnlockKey, number>       // open-ended: no date until the holder acts
+}
+
+// Aggregate per-account BINDING timelines into the dashboard's unlock series.
+//
+// Locks overlap — they all bite the same free balance — so a lock's own
+// schedule overstates what it releases: a matured GIGAHDX unbond frees nothing
+// while an equal conviction prior still binds the same tokens. Summing each
+// lock source independently double-counts exactly that. buildBindingTimeline
+// already walks the max-envelope per account and attributes each drop to a
+// cause, so aggregating ITS slices is what makes the chart show only unlocks
+// that really result in an unlock.
+export function unlockSeriesFromTimelines(
+  timelines: TimelineSliceJson[][],
+  buckets: { from: number; to: number }[],
+  nowMs: number,
+): UnlockSeries {
+  const zero = (): Record<UnlockKey, number> => ({ gigahdx: 0, vesting: 0, vote: 0 })
+  const out: UnlockSeries = { now: zero(), buckets: buckets.map(() => zero()), later: zero(), active: zero() }
+  const horizon = buckets.length ? buckets[buckets.length - 1].to : nowMs
+  for (const slices of timelines) {
+    // A LINEAR slice (vesting) releases continuously from the previous dated
+    // step (or now) to its own date — the timeline stores it as one slice at
+    // the END so overlap attribution stays exact, but charting it as a point
+    // mass would pile a whole schedule into the final bucket. Track the
+    // segment start as the walk's previous step and spread linear amounts
+    // over their span, proportionally to each bucket's overlap.
+    let segStart = nowMs
+    for (const s of slices) {
+      // Hypothetical steps are not upcoming unlocks: live, 573 conditional
+      // GIGAHDX slices carried 502M HDX — 23x the entire pending pool — and
+      // would have swamped the real series with stake nobody has moved.
+      if (s.conditional) continue
+      const key = unlockKeyForCause(s.cause)
+      if (!key) continue
+      const hdx = toHdx(BigInt(s.amount))
+      if (hdx <= 0) continue
+      if (s.state === 'active') { out.active[key] += hdx; continue }
+      // A releasable slice, and any dated one whose date has already passed,
+      // needs no waiting — both belong in the "now" column.
+      const ts = s.until ? Date.parse(s.until) : nowMs
+      if (s.state === 'releasable' || ts <= nowMs) { out.now[key] += hdx; continue }
+      const from = Math.max(nowMs, Math.min(segStart, ts))
+      if (s.until) segStart = ts
+      if (s.linear && ts - from > 0) {
+        const span = ts - from
+        for (const [i, b] of buckets.entries()) {
+          const overlap = Math.min(b.to, ts) - Math.max(b.from, from)
+          if (overlap > 0) out.buckets[i][key] += hdx * (overlap / span)
+        }
+        const tail = ts - Math.max(from, horizon)
+        if (tail > 0) out.later[key] += hdx * (tail / span)
+        continue
+      }
+      if (ts >= horizon) { out.later[key] += hdx; continue }
+      const i = buckets.findIndex(b => ts >= b.from && ts < b.to)
+      if (i >= 0) out.buckets[i][key] += hdx
+      else out.later[key] += hdx
+    }
+  }
+  return out
+}
 
 // Balances.Locks value: Vec<{id: [u8;8], amount: u128, reasons: u8}>. Keeps the
 // raw per-account rows too — they feed the per-account breakdown snapshot.
@@ -142,16 +236,63 @@ async function loadLocks(): Promise<{ lockTypes: LockTypeTotal[]; lockAccounts: 
   return { lockTypes, lockAccounts, voteLockByAccount, rows }
 }
 
+// When a pending unstake matures — an exact port of
+// `pallet_gigahdx::Pallet::cooldown_expires_at`.
+//
+// `GigaHdx.PendingUnstakes` stores only (account, startBlock) → amount. The
+// maturity block is not stored anywhere: the runtime recomputes it on every
+// `unlock`, so this has to reproduce that arithmetic rather than guess it.
+//
+// Three readings are wrong, and each looks plausible:
+//   - `startBlock + CooldownPeriod` — right only for positions opened after the
+//     switch. Runtime 440 tripled the constant (403,200 → 1,209,600) when slot
+//     time went 6s → 2s, so applying today's value to an older position adds
+//     806,400 phantom blocks.
+//   - `startBlock + 403,200` (the old constant) — matures too early.
+//   - the `expiresAt` recorded in the `GigaHdx.Unstaked` event — computed under
+//     the old rule at request time, and STALE for any position straddling the
+//     switch. It is the trap that looks most authoritative.
+//
+// What the runtime actually does is preserve the remaining WALL-CLOCK cooldown:
+// the blocks still outstanding at the switch are tripled, because blocks now
+// arrive three times as fast.
+//
+// `switchBlock` is `parameters.twoSecBlocksSince` (a storage value, not a
+// metadata constant); `u32::MAX` is its unset sentinel, meaning no switch has
+// happened and the plain cooldown applies.
+export function cooldownExpiresAt(startBlock: number, switchBlock: number, cooldownBlocks: number): number {
+  if (switchBlock === 0xFFFFFFFF || startBlock >= switchBlock) return startBlock + cooldownBlocks
+  const oldExpiresAt = startBlock + Math.floor(cooldownBlocks / 3)
+  if (oldExpiresAt <= switchBlock) return oldExpiresAt
+  return switchBlock + (oldExpiresAt - switchBlock) * 3
+}
+
+export function withCooldownExpiries(
+  positions: PendingUnstake[],
+  switchBlock: number,
+  cooldownBlocks: number,
+): PendingUnstake[] {
+  return positions
+    .map(p => ({ ...p, expiryBlock: cooldownExpiresAt(p.startBlock, switchBlock, cooldownBlocks) }))
+    // Straddling positions have their remainders tripled, so start order no
+    // longer implies maturity order. Callers read the head as the next unlock.
+    .sort((a, b) => a.expiryBlock - b.expiryBlock)
+}
+
+// `parameters.twoSecBlocksSince` — the block the 6s → 2s switch landed on.
+// Unset reads as the u32::MAX sentinel, which cooldownExpiresAt handles.
+async function loadTwoSecSwitchBlock(): Promise<number | null> {
+  const [raw] = await substrateStorageBatch([TWO_SEC_SWITCH_KEY])
+  if (!raw) return 0xFFFFFFFF // storage empty ⇒ the pallet's own default
+  return u32At(hexToU8a(raw), 0)
+}
+
 // GigaHdx.PendingUnstakes: double map Blake2_128Concat(account) →
 // Twox64Concat(positionId u32) → payout u128. The position id is the unstake's
 // parachain start block.
-async function loadPendingUnstakes(): Promise<PendingUnstake[] | null> {
+async function loadPendingUnstakes(switchBlock: number): Promise<PendingUnstake[] | null> {
   const keys = await substrateAllKeys(PENDING_UNSTAKES_PREFIX)
   const values = await substrateStorageBatch(keys)
-  // One answer for the whole enumeration, so every expiry in a snapshot is
-  // derived from the same cooldown (read from runtime metadata when the node is
-  // reachable — see lockBreakdownService).
-  const unbondingBlocks = gigaUnbondingBlocks()
   const out: PendingUnstake[] = []
   for (let i = 0; i < keys.length; i++) {
     const raw = values[i]
@@ -163,9 +304,9 @@ async function loadPendingUnstakes(): Promise<PendingUnstake[] | null> {
     const accountId = u8aToHex(tail.slice(16, 48))
     const startBlock = u32At(tail, 56)
     const payout = u128At(hexToU8a(raw), 0)
-    out.push({ accountId, startBlock, expiryBlock: startBlock + unbondingBlocks, payoutHdx: toHdx(payout), payoutRaw: payout })
+    out.push({ accountId, startBlock, expiryBlock: 0, payoutHdx: toHdx(payout), payoutRaw: payout })
   }
-  return keys.length && !out.length ? null : out.sort((a, b) => a.expiryBlock - b.expiryBlock)
+  return keys.length && !out.length ? null : withCooldownExpiries(out, switchBlock, gigaUnbondingBlocks())
 }
 
 // Vesting.VestingSchedules: Vec<{start u32, period u32, periodCount u32,
@@ -319,8 +460,11 @@ async function loadRelayHeight(): Promise<number | null> {
 }
 
 async function refresh(): Promise<void> {
+  const switchBlock = await loadTwoSecSwitchBlock()
   const [locks, pending, vesting, votes, relayHeight, gigahdxRate] = await Promise.all([
-    loadLocks(), loadPendingUnstakes(), loadVesting(), loadVoteLocks(), loadRelayHeight(), loadGigahdxRate(),
+    loadLocks(),
+    switchBlock == null ? Promise.resolve(null) : loadPendingUnstakes(switchBlock),
+    loadVesting(), loadVoteLocks(), loadRelayHeight(), loadGigahdxRate(),
   ])
   if (!locks || !pending || !vesting || !votes || relayHeight == null || gigahdxRate == null) {
     if (!snapshot) console.error('[hdx] chain snapshot incomplete, retrying next cycle')
@@ -336,19 +480,15 @@ async function refresh(): Promise<void> {
       hasActive: classes.some(c => c.hasActiveVotes),
     })
   }
-  snapshot = {
-    at: Date.now(),
-    relayHeight,
-    lockTypes: locks.lockTypes,
-    lockAccounts: locks.lockAccounts,
-    pendingUnstakes: pending,
-    vestingSchedules: vesting,
-    voteLockAccounts,
-    gigahdxHdxPerShare: gigahdxRate,
-  }
-  // Persist the per-account breakdown snapshot (account/tag balance pages read
-  // it from ClickHouse). Failures keep the previous published generation and
-  // never invalidate the in-memory dashboard snapshot above.
+  // Per-account breakdown rows. The account/tag balance pages read these from
+  // ClickHouse, and the dashboard's unlock series is aggregated from the
+  // per-account BINDING timelines among them — a lock's own schedule overstates
+  // what it frees when another lock covers the same tokens.
+  //
+  // Failures keep the previous published generation, and leave `timelines`
+  // empty so the dashboard falls back to the per-source series below rather
+  // than reporting no unlocks at all.
+  let timelines: TimelineSliceJson[][] = []
   try {
     const [head, paraMs] = await Promise.all([loadHead(), paraBlockMs(client)])
     const rows = await collectLockBreakdownRows({
@@ -361,10 +501,25 @@ async function refresh(): Promise<void> {
       headTsMs: head.ts,
       paraBlockMs: paraMs,
     })
+    timelines = rows
+      .filter(r => r.kind === 'timeline' && r.detail)
+      .map(r => { try { return JSON.parse(r.detail) as TimelineSliceJson[] } catch { return [] } })
+      .filter(s => s.length > 0)
     const outcome = await persistLockSnapshot(client, rows, { blockHeight: head.height, relayHeight })
-    console.info('[hdx] lock breakdown', { rows: rows.length, outcome })
+    console.info('[hdx] lock breakdown', { rows: rows.length, timelines: timelines.length, outcome })
   } catch (err) {
     console.error('[hdx] lock breakdown snapshot failed', err)
+  }
+  snapshot = {
+    at: Date.now(),
+    relayHeight,
+    lockTypes: locks.lockTypes,
+    lockAccounts: locks.lockAccounts,
+    pendingUnstakes: pending,
+    vestingSchedules: vesting,
+    voteLockAccounts,
+    gigahdxHdxPerShare: gigahdxRate,
+    timelines,
   }
 }
 
@@ -448,9 +603,16 @@ export interface HdxDashboard {
     buckets: HdxUnlockBucket[]
     laterHdx: { gigahdx: number; vesting: number; vote: number }
     unlockableNowHdx: number
+    // Releasable right now, split by the lock that held it — the leading "now"
+    // column. Sums to unlockableNowHdx.
+    nowHdx: { gigahdx: number; vesting: number; vote: number }
     activeVoteHdx: number
     stakingAnytimeHdx: number
-    gigaPending: { count: number; totalHdx: number; nextUnlockTs: string | null }
+    gigaPending: {
+      count: number; totalHdx: number; nextUnlockTs: string | null
+      // Positions past their cooldown (claimable with an unlock call).
+      maturedCount: number; maturedHdx: number
+    }
   }
   flows: {
     daily: HdxDailyFlow[]
@@ -534,7 +696,26 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
       if (b) b[type] += hdx
     }
     let undeterminedVoteHdx = 0
-    if (snap) {
+    // What is releasable right now, split by the lock that was holding it.
+    let nowByType = { gigahdx: 0, vesting: 0, vote: 0 }
+    // Preferred path: aggregate the per-account BINDING timelines, so a balance
+    // held by two overlapping locks is counted once and attributed to the one
+    // that actually gates it. The per-source path below double-counts that and
+    // survives only as a fallback for a failed breakdown pass.
+    if (snap?.timelines.length) {
+      const series = unlockSeriesFromTimelines(snap.timelines, edges, now)
+      buckets.forEach((b, i) => {
+        b.gigahdx = series.buckets[i].gigahdx
+        b.vesting = series.buckets[i].vesting
+        b.vote = series.buckets[i].vote
+      })
+      later.gigahdx = series.later.gigahdx
+      later.vesting = series.later.vesting
+      later.vote = series.later.vote
+      nowByType = series.now
+      unlockableNow = series.now.gigahdx + series.now.vesting + series.now.vote
+      undeterminedVoteHdx = series.active.vote
+    } else if (snap) {
       for (const p of snap.pendingUnstakes) put('gigahdx', blockTs(p.expiryBlock), p.payoutHdx)
       for (const v of snap.voteLockAccounts) {
         // Open-ended while the account still votes/delegates (conviction period
@@ -563,6 +744,11 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
     }
     const gigaPendingTotal = snap?.pendingUnstakes.reduce((a, p) => a + p.payoutHdx, 0) ?? 0
     const nextGiga = snap?.pendingUnstakes.find(p => blockTs(p.expiryBlock) > now)
+    // Positions whose cooldown has elapsed: claimable with an unlock call. This
+    // counts POSITIONS, so it stays a true statement about the pallet even
+    // where another lock still covers the same tokens — the chart's "now"
+    // column is the overlap-corrected view of what actually frees.
+    const gigaMatured = snap?.pendingUnstakes.filter(p => blockTs(p.expiryBlock) <= now) ?? []
 
     const lockTypes = (snap?.lockTypes ?? [])
       .map(t => ({ ...(LOCK_LABELS[t.id] ?? { key: 'other', label: 'Other' }), accounts: t.accounts, totalHdx: t.totalHdx }))
@@ -594,9 +780,16 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
         buckets: buckets.map(({ from: _f, to: _t, ...rest }) => rest),
         laterHdx: later,
         unlockableNowHdx: unlockableNow,
+        nowHdx: nowByType,
         activeVoteHdx: undeterminedVoteHdx,
         stakingAnytimeHdx: folded.find(t => t.key === 'staking')?.totalHdx ?? 0,
-        gigaPending: { count: snap?.pendingUnstakes.length ?? 0, totalHdx: gigaPendingTotal, nextUnlockTs: nextGiga ? iso(blockTs(nextGiga.expiryBlock)) : null },
+        gigaPending: {
+          count: snap?.pendingUnstakes.length ?? 0,
+          totalHdx: gigaPendingTotal,
+          nextUnlockTs: nextGiga ? iso(blockTs(nextGiga.expiryBlock)) : null,
+          maturedCount: gigaMatured.length,
+          maturedHdx: gigaMatured.reduce((a, p) => a + p.payoutHdx, 0),
+        },
       },
       flows: { daily: flows, dca },
       churn,
@@ -776,10 +969,17 @@ async function loadChurn(): Promise<HdxDashboard['churn']> {
 // series starts here rather than presenting the sparse prefix as history.
 export const HDX_BALANCE_SERIES_START = '2022-07-04'
 
-// The 'kraken' tag is the exchange's custody hot wallets; 'hdx-kraken-lp' is the
-// wallet running its HDX market-making inventory. Both are one custodian
-// balance, not holder decentralization, so they get their own class.
-const KRAKEN_TAG_IDS = ['kraken', 'hdx-kraken-lp']
+// The exchange's custody hot wallets, which are one custodian balance rather
+// than holder decentralization, so they get their own class.
+//
+// Deliberately the 'kraken' tag ALONE. 'hdx-kraken-lp' — the wallet running the
+// HDX market-making inventory — used to be merged in here on the grounds that
+// it is the same custodian, which made the /hdx "Kraken custody" card read
+// ~4.1M above the /tag/kraken page for the same name with nothing disclosing
+// the difference. A figure that cannot be reconciled with the tag it is named
+// after costs more than the extra precision was worth; the LP wallet now falls
+// into the user class like any other holder.
+const KRAKEN_TAG_IDS = ['kraken']
 // Non-modl accounts that are still protocol plumbing: AMM pool accounts and
 // money-market reserve contracts. HDX inside them is pooled/custodial, not a
 // holder's wallet balance. Module (modl) accounts match by prefix instead.
