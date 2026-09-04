@@ -698,20 +698,26 @@ async function loadHollarTrends(): Promise<HollarTrends> {
 
     const compBand = (k: 'stableswap' | 'omnipool' | 'bridged' | 'protocol' | 'wallets') =>
       carryForward(alignMonthly(weeks, compRows.map(r => ({ m: r.week, v: r[k] })))).map(v => v ?? 0)
-    // Rate cards: pools ordered by first appearance (the core market launched
-    // 10 months before GIGAHDX); within a pool, the last step is current.
-    const poolOrder = [...new Set(ratesRows.map(r => r.pool))]
-      .sort((a, b) => (ratesRows.find(r => r.pool === a)!.since < ratesRows.find(r => r.pool === b)!.since ? -1 : 1))
-    const rates = poolOrder.map((pool, i) => {
-      const steps = ratesRows.filter(r => r.pool === pool).sort((a, b) => (a.since < b.since ? -1 : 1))
-      const cur = steps[steps.length - 1]
-      return {
-        label: i === 0 ? 'Core market' : 'GIGAHDX market',
-        pct: cur.pct,
-        prevPct: steps.length > 1 ? steps[steps.length - 2].pct : null,
-        since: cur.since,
-      }
-    })
+    // Rate cards, one per market that lists HOLLAR — named and ordered by the
+    // configured market set, the same names the money-market pages use, because
+    // every isolated market sets its own borrow rate. A pool the deployment does
+    // not configure is still shown, under its address, rather than borrowing a
+    // neighbour's name. Within a market the last step is current.
+    const marketOrder = new Map(mmMarkets().map((m, i) => [m.poolProxy, { label: m.label, order: i }]))
+    const marketOf = (pool: string) =>
+      marketOrder.get(pool.toLowerCase()) ?? { label: `${pool.slice(0, 8)}…`, order: marketOrder.size }
+    const rates = [...new Set(ratesRows.map(r => r.pool))]
+      .sort((a, b) => marketOf(a).order - marketOf(b).order || (a < b ? -1 : 1))
+      .map(pool => {
+        const steps = ratesRows.filter(r => r.pool === pool).sort((a, b) => (a.since < b.since ? -1 : 1))
+        const cur = steps[steps.length - 1]
+        return {
+          label: marketOf(pool).label,
+          pct: cur.pct,
+          prevPct: steps.length > 1 ? steps[steps.length - 2].pct : null,
+          since: cur.since,
+        }
+      })
 
     return {
       weeks,
