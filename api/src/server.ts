@@ -70,6 +70,9 @@ import { initSecurityService } from './services/securityService.ts'
 import { initErc20WalletService } from './services/erc20WalletService.ts'
 import { initWormholeNttService } from './services/wormholeNttService.ts'
 import { startBackgroundRefresh, stopBackgroundRefresh } from './services/backgroundRefresh.ts'
+import { getHdxDashboard } from './services/hdxService.ts'
+import { getHollarDashboard } from './services/hollarService.ts'
+import { getRevenueDashboard, getStakerDistributions } from './services/revenueService.ts'
 import { initAccountAffinityService } from './services/accountAffinityService.ts'
 import { ensureSnakewatchEmojiSourceLoaded } from './services/omniwatchIdentity.ts'
 import { initXcmJourneyService } from './services/xcmJourneyService.ts'
@@ -390,6 +393,22 @@ async function start() {
     // Activity totals for viewers' own list tags: a single-file background lane, so a
     // page never computes one (see explorerService).
     startFoldActivitySweep()
+    // Dashboard warmup: the /hdx cold build alone runs ~15s of ClickHouse
+    // (loadStructure's rotation-link scan reads ~19 GiB). The dashboards serve
+    // stale-while-revalidate now, but a fresh process has nothing stale to
+    // serve, so compute each once off-request. Sequential on purpose — a
+    // parallel burst of the heavy structure queries can brush ClickHouse's 20s
+    // execution cap (see loadStructure's own ordering note).
+    void (async () => {
+      for (const [name, warm] of [
+        ['hdx', () => getHdxDashboard()],
+        ['hollar', () => getHollarDashboard()],
+        ['revenue', () => getRevenueDashboard('30d')],
+        ['revenue-stakers', () => getStakerDistributions('30d')],
+      ] as const) {
+        try { await warm() } catch (err) { console.error(`[API] ${name} dashboard warmup failed`, err) }
+      }
+    })()
   } catch (err) {
     fastify.log.error(err)
     await fastify.close().catch(async closeError => {

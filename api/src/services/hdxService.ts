@@ -4,7 +4,7 @@ import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
 import { decodeCompact } from './proxyMultisigService.ts'
 import { collectLockBreakdownRows, gigaUnbondingBlocks, persistLockSnapshot, type LockRow } from './lockBreakdownService.ts'
-import { cached } from './cache.ts'
+import { cachedSwr } from './cache.ts'
 import { NOMINAL_RELAY_BLOCK_MS, paraBlockMs } from './blockTime.ts'
 import { allTags, economicModuleAccounts } from './tagService.ts'
 import { accountRef, ensurePrices, cutoffHeightForWindow, getGigaMarketStats, getGigaLiquidationLevels, type AccountRef, type GigaMarketReserveStat, type GigaLiquidations } from './explorerService.ts'
@@ -654,7 +654,10 @@ export function nonNegativeUIntDifferenceSql(total: string, spent: string): stri
 const iso = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
 
 export async function getHdxDashboard(): Promise<HdxDashboard> {
-  return cached('explorer:hdx-dashboard', 300_000, async () => {
+  // SWR: the cold build is ~15-17s (loadStructure's rotation-link scan alone
+  // reads ~19 GiB), so an expired entry must serve instantly and revalidate in
+  // the background — a request must never block on the recompute.
+  return cachedSwr('explorer:hdx-dashboard', 300_000, 48 * 3_600_000, async () => {
     const [prices, head, paraMs, supply, flows, dca, churn, structure, movers, gigaMarket] = await Promise.all([
       ensurePrices(), loadHead(), paraBlockMs(client), loadSupplyCohorts(), loadDailyFlows(), loadDcaFlows(), loadChurn(), loadStructure(), loadTopMovers(),
       getGigaMarketStats().catch(() => null),
@@ -923,7 +926,7 @@ async function loadDcaFlows(): Promise<HdxDashboard['flows']['dca']> {
 }
 
 async function loadChurn(): Promise<HdxDashboard['churn']> {
-  return cached(`explorer:hdx-churn:model`, 1_800_000, async () => {
+  return cachedSwr(`explorer:hdx-churn:model`, 1_800_000, 48 * 3_600_000, async () => {
     const res = await client.query({
       query: `
         WITH lifetime AS (
@@ -1096,7 +1099,7 @@ export function backfillAllocationMints(
 // account_balance_weekly's balance_state argMax picks each week's LAST
 // observation, so a within-week round trip collapses to its closing state.
 async function loadStructure(): Promise<HdxStructure> {
-  return cached('explorer:hdx-structure:model:2', 3_600_000, async () => {
+  return cachedSwr('explorer:hdx-structure:model:2', 3_600_000, 48 * 3_600_000, async () => {
     // USER accounts only (no modl, no pool/Kraken custody), balances as sorted
     // per-account (week, balance) arrays — the base for links and Lorenz.
     // Consumers must declare `special_accts` in their WITH clause.
