@@ -34,8 +34,8 @@ export interface Config {
   LRNA_ASSET_ID: number
   // Assets that can bridge Omnipool state into USD pricing.
   OMNIPOOL_BRIDGE_IDS: number[]
-  // Canonical USD references. These are treated as a peer basket.
-  USD_REFERENCE_IDS: number[]
+  // Dollar references that anchor Omnipool pricing, as peer baskets in falling preference.
+  USD_REFERENCE_BASKETS: number[][]
   // Minimum bottleneck liquidity for non-Omnipool graph paths to be used as price observations.
   GRAPH_MIN_PATH_LIQUIDITY_USD: number
 }
@@ -99,9 +99,14 @@ export const config: Config = {
   // Assets that can bridge Omnipool pricing into the stable basket.
   // 222 is deliberately treated as a bridge, not as a canonical USD reference.
   OMNIPOOL_BRIDGE_IDS: [10, 22, 222],
-  // USD references are treated symmetrically: the basket stays centered on $1,
-  // while any 10/22 deviation is split across both assets instead of privileging 10.
-  USD_REFERENCE_IDS: [10, 22],
+  // The block's dollar anchor is the deepest Omnipool member of the first basket
+  // that has one. Members of a basket are peers: it stays centered on $1, and any
+  // 10/22 deviation is split across both assets instead of privileging 10. A later
+  // basket anchors — and is seeded at $1 — only while no member of an earlier one
+  // is in the Omnipool: DAI (Acala Wormhole, 2) was the pool's only dollar asset
+  // from launch until USDT joined, and is thinly traded today, so it must never
+  // carry a $1 seed while USDT/USDC are present.
+  USD_REFERENCE_BASKETS: [[10, 22], [2]],
   // 0 (no gate) on purpose: any positive floor permanently unprices every asset
   // whose only venue is an isolated pool below it (PEN, NEURO, UNQ, SUB, NODL, …
   // were dark for five weeks under the previous 12 000), and the surfaces that
