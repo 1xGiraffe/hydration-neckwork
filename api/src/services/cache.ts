@@ -45,19 +45,21 @@ function prune(now: number): void {
   }
 }
 
-function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: number, fn: () => Promise<T>, generation?: number): Promise<T> {
+function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: number, fn: () => Promise<T>, generation?: number, keepIf?: (value: T) => boolean): Promise<T> {
   const pending = (async () => {
     try {
       const value = await fn()
       const resolvedAt = Date.now()
-      store.set(key, {
-        value,
-        ...(freshMs == null ? {} : { freshUntil: resolvedAt + freshMs }),
-        ...(generation == null ? {} : { generation }),
-        expiresAt: resolvedAt + staleMs,
-        lastAccessedAt: nextAccess(),
-      })
-      prune(resolvedAt)
+      if (keepIf == null || keepIf(value)) {
+        store.set(key, {
+          value,
+          ...(freshMs == null ? {} : { freshUntil: resolvedAt + freshMs }),
+          ...(generation == null ? {} : { generation }),
+          expiresAt: resolvedAt + staleMs,
+          lastAccessedAt: nextAccess(),
+        })
+        prune(resolvedAt)
+      }
       return value
     } finally {
       inflight.delete(key)
@@ -87,6 +89,43 @@ export async function cached<T>(key: string, ttlMs: number, fn: () => Promise<T>
   if (pending) return pending
 
   return loadAndCache(key, undefined, ttlMs, fn)
+}
+
+/**
+ * `cached`, except a NEGATIVE answer is never stored.
+ *
+ * Every lookup addressed by block coordinates or an extrinsic hash can be asked
+ * for something that exists on chain but has not reached ClickHouse yet:
+ * `raw-live` follows the FINALIZED head (see `src/raw/flushPolicy.ts`), so a
+ * just-made action is 35-65s from being readable. Caching that miss makes the
+ * 404 outlive the wait — measured on `/explorer/trade`, the rows landed 6s into
+ * a probe and the endpoint kept answering 404 for the remaining 54s of its 60s
+ * TTL, i.e. the cache, not finality, was most of what the user waited for.
+ * A miss here is one primary-key point read, so re-running it beats serving a
+ * "not found" that has already stopped being true.
+ *
+ * Negative means null/undefined or an empty array; `isFound` overrides that for
+ * a payload whose emptiness lives in a field.
+ */
+export async function cachedFound<T>(key: string, ttlMs: number, fn: () => Promise<T>, isFound: (value: T) => boolean = isNonEmpty): Promise<T> {
+  assertDuration('ttlMs', ttlMs)
+  const now = Date.now()
+  const hit = store.get(key) as Entry<T> | undefined
+  if (hit && hit.expiresAt > now) {
+    hit.lastAccessedAt = nextAccess()
+    return hit.value
+  }
+  if (hit) store.delete(key)
+
+  const pending = inflight.get(key) as Promise<T> | undefined
+  if (pending) return pending
+
+  return loadAndCache(key, undefined, ttlMs, fn, undefined, isFound)
+}
+
+function isNonEmpty(value: unknown): boolean {
+  if (value == null) return false
+  return Array.isArray(value) ? value.length > 0 : true
 }
 
 // Stale-while-revalidate variant for results that are expensive to compute but

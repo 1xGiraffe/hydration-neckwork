@@ -163,11 +163,7 @@ export const SLUG_TYPES: Record<ActivitySlug, ActivityRow['type'][]> = {
   'otc-place': ['otc'], 'otc-pull': ['otc'], 'otc-fill': ['otc'],
 }
 
-export function parseId(id: string): { height: number; eventIndex: number | null; extrinsicIndex: number | null } | null {
-  const m = /^(\d+)-(e)?(\d+)$/.exec(id)
-  if (!m) return null
-  return { height: Number(m[1]), eventIndex: m[2] ? Number(m[3]) : null, extrinsicIndex: m[2] ? null : Number(m[3]) }
-}
+export { parseId } from '../utils/activityIds'
 
 // Canonical URL for a resolved row, or null when the current slug+id are already canonical.
 export function canonicalTarget(row: ActivityRow, slug: ActivitySlug, id: string): string | null {
@@ -338,17 +334,20 @@ export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pe
                 // unfinalized row on inclusion. Their hash link is the one
                 // navigation that already works.
                 const mempool = r.mempool === true
-                // Unfinalized rows have no detail page yet (the classifier runs
-                // at finality) — dimmed and non-navigable until then.
+                // Unfinalized rows ARE navigable: the block, extrinsic, trade and
+                // activity detail lookups all answer from the same pending layer
+                // this row came from, so the page opens (marked unfinalized) and
+                // upgrades itself when the block settles. A row with no
+                // coordinates to link — a hook-phase swap — still has no target.
                 const unfinalized = r.finalized === false && !mempool
-                const nav = aid && !unfinalized && !mempool ? rowNav(paths.activityDetail(slug, aid)) : null
+                const nav = aid && !mempool ? rowNav(paths.activityDetail(slug, aid)) : null
                 const k = keys[i]
                 const className = [nav?.className, dim ? 'dim' : null, fresh.has(k) ? 'row-new' : null, unfinalized ? 'unfinalized' : null, mempool ? 'mempool' : null].filter(Boolean).join(' ') || undefined
                 const title = mempool ? 'In the transaction pool — the outcome shown is a dry-run projection, not yet in any block'
                   : unfinalized ? 'Awaiting finality — may still reorganize' : undefined
                 const showExt = slug !== 'swap' && slug !== 'dca' && r.extrinsicIndex != null && !mempool
                 return (
-                  <tr key={k} {...(nav ?? {})} className={className} title={title} {...(aid && !unfinalized && !mempool ? { 'data-activity': `${slug}/${aid}` } : {})} {...(showExt ? { 'data-ext': `${r.blockHeight}-${r.extrinsicIndex}` } : {})}>
+                  <tr key={k} {...(nav ?? {})} className={className} title={title} {...(aid && !mempool ? { 'data-activity': `${slug}/${aid}` } : {})} {...(showExt ? { 'data-ext': `${r.blockHeight}-${r.extrinsicIndex}` } : {})}>
                     <td data-label="Type"><ActivityBadge r={r} /></td>
                     {!noActor && <td data-label="Account">{r.who ? <AddrPill account={r.who} noCopy /> : <Dash />}</td>}
                     <td data-label="Activity"><ActivityDesc r={r} /></td>

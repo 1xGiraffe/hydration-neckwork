@@ -3,7 +3,8 @@ import { useBlock, useBlockActivity, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate } from '../router'
-import { Crumbs, F, AddrPill, CallPill, StatusBadge, FinalizedBadge, JsonView, SkeletonRows, EmptyRow, Dash } from '../components/ui'
+import { Crumbs, F, AddrPill, CallPill, StatusBadge, FinalizedBadge, JsonView, SkeletonRows, EmptyRow, Dash, AwaitingBlockCard } from '../components/ui'
+import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { ActivityTable } from '../components/ActivityTable'
 import { EvmLogView } from '../components/EvmDecoded'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
@@ -56,7 +57,8 @@ export function BlockDetail({ height }: { height: number }) {
   const now = useNow(1000)
   // Future blocks short-circuit before the API fetch: the backend can't serve a
   // not-yet-indexed height, so we render a live countdown instead.
-  const { data, isLoading, isError } = useBlock(isFuture ? null : height)
+  const { data, isLoading, isError, failureReason } = useBlock(isFuture ? null : height)
+  const awaiting = useAwaitingBlock(height, isError || failureReason != null, failureReason)
   const activity = useBlockActivity(data ? height : null)
   const [tab, setTab] = useState<'activity' | 'exts' | 'events'>('activity')
   const activityRows = activity.data ?? []
@@ -77,6 +79,7 @@ export function BlockDetail({ height }: { height: number }) {
       </div>
 
       {isFuture ? <FutureBlock height={height} head={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />
+        : awaiting ? <AwaitingBlockCard height={height} />
         : isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Block not found</div>
         : isLoading || !data ? <div className="detail-card"><SkeletonRows /></div> : (
           <>

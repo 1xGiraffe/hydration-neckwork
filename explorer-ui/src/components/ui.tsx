@@ -1496,6 +1496,26 @@ export function DetailTabs({ tabs, active, onChange }: { tabs: DetailTab[]; acti
     </div>
   )
 }
+/**
+ * A detail page whose block has not reached the index yet (see queryRetry.ts).
+ * The action exists on chain; the explorer serves FINALIZED blocks, which trail
+ * the chain head by about a minute, so a link followed straight from a wallet
+ * arrives early. Saying that beats a "not found" (wrong) and an endless
+ * skeleton (mute), and the query behind it keeps asking — the page fills itself
+ * in with no reload.
+ */
+export function AwaitingBlockCard({ height }: { height?: number | null }) {
+  return (
+    <div className="detail-card awaiting-block" role="status">
+      <span className="ab-dot" aria-hidden="true" />
+      <span className="ab-text">
+        <span className="ab-title">Waiting for {height != null ? <>block <span className="mono">{F.int(height)}</span></> : 'this block'} to be indexed</span>
+        <span className="ab-sub">The explorer indexes finalized blocks, which trail the chain head by about a minute. This page fills in by itself.</span>
+      </span>
+    </div>
+  )
+}
+
 export function SkeletonRows({ rows = 8 }: { rows?: number }) {
   const labels = ['42%', '34%', '48%', '40%', '55%', '36%', '46%', '32%']
   const values = ['28%', '46%', '72%', '38%', '56%', '64%', '34%', '52%']

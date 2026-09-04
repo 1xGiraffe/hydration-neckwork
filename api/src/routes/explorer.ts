@@ -15,6 +15,7 @@ import {
   getTagActivity, getTagExtrinsics, getTagEvents,
   getAddressVotes, getTagVotes, getTagVotesByReferendum,
   getAddressRevenueBreakdown, getTagRevenueBreakdown,
+  describeLookupMiss,
   isLocatedActivityRequest,
   normalizeAccountSort,
   type AccountSort,
@@ -326,11 +327,22 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return getRecentBlocks(limitParam(q, 25), offset)
   })
 
+  // A lookup addressed by block coordinates found nothing. The body says
+  // whether the BLOCK is in the index yet (describeLookupMiss), because a
+  // client cannot otherwise tell the two misses apart: raw-live follows the
+  // FINALIZED head, so a page linked from a wallet the moment it acted is
+  // asking about a block that is 35-65s from being readable, while a mistyped
+  // or stale id is asking about a block that is already there. The first is
+  // worth waiting for and the second must fail fast — see
+  // explorer-ui/src/queryRetry.ts for the other half of this contract.
+  const notIndexedYet = async (reply: FastifyReply, height: number, error: string) =>
+    reply.status(404).send({ error, ...(await describeLookupMiss(height)) })
+
   fastify.get('/explorer/block/:height', async (req, reply) => {
     const params = z.object({ height: uint32Param }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid block height' })
     const block = await getBlock(params.data.height)
-    if (!block) return reply.status(404).send({ error: 'Block not found' })
+    if (!block) return notIndexedYet(reply, params.data.height, 'Block not found')
     return block
   })
 
@@ -338,7 +350,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = z.object({ height: uint32Param }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid block height' })
     const block = await getBlock(params.data.height)
-    if (!block) return reply.status(404).send({ error: 'Block not found' })
+    if (!block) return notIndexedYet(reply, params.data.height, 'Block not found')
     return getBlockActivity(params.data.height)
   })
 
@@ -408,6 +420,9 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = z.object({ hash: z.string().regex(/^0x[0-9a-fA-F]{64}$/) }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid extrinsic hash' })
     const ext = await getExtrinsic(params.data.hash)
+    // A hash names no block, so this miss cannot say whether the block is
+    // indexed yet. It barely needs to: getExtrinsic answers from the pending
+    // layer and the transaction pool, which cover the whole pre-finality window.
     if (!ext) return reply.status(404).send({ error: 'Extrinsic not found' })
     return ext
   })
@@ -439,7 +454,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = z.object({ height: uint32Param, index: uint32Param }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid execution reference' })
     const detail = await getDcaExecution(params.data.height, params.data.index)
-    if (!detail) return reply.status(404).send({ error: 'DCA execution not found' })
+    if (!detail) return notIndexedYet(reply, params.data.height, 'DCA execution not found')
     return detail
   })
 
@@ -448,7 +463,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (!params.success) return reply.status(400).send({ error: 'Invalid reference' })
     const kind = (req.query as Record<string, unknown>).kind === 'extrinsic' ? 'extrinsic' : 'event'
     const scheduleId = await getDcaScheduleIdAt(params.data.height, params.data.index, kind)
-    if (scheduleId == null) return reply.status(404).send({ error: 'No DCA execution there' })
+    if (scheduleId == null) return notIndexedYet(reply, params.data.height, 'No DCA execution there')
     return { scheduleId }
   })
 
@@ -456,7 +471,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = z.object({ height: uint32Param, index: uint32Param }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid extrinsic id' })
     const ext = await getExtrinsicAt(params.data.height, params.data.index)
-    if (!ext) return reply.status(404).send({ error: 'Extrinsic not found' })
+    if (!ext) return notIndexedYet(reply, params.data.height, 'Extrinsic not found')
     return ext
   })
 
@@ -475,7 +490,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = z.object({ height: uint32Param, index: uint32Param }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid extrinsic id' })
     const ext = await getExtrinsicAt(params.data.height, params.data.index)
-    if (!ext) return reply.status(404).send({ error: 'Extrinsic not found' })
+    if (!ext) return notIndexedYet(reply, params.data.height, 'Extrinsic not found')
     return getExtrinsicActivity(params.data.height, params.data.index)
   })
 
@@ -496,7 +511,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = z.object({ height: uint32Param, index: uint32Param }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid trade id' })
     const trade = await getTradeDetail(params.data.height, params.data.index)
-    if (!trade) return reply.status(404).send({ error: 'Trade not found' })
+    if (!trade) return notIndexedYet(reply, params.data.height, 'Trade not found')
     return trade
   })
 
@@ -506,7 +521,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = z.object({ height: uint32Param, index: uint32Param }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid trade event id' })
     const trade = await getTradeDetailByEvent(params.data.height, params.data.index)
-    if (!trade) return reply.status(404).send({ error: 'Trade not found' })
+    if (!trade) return notIndexedYet(reply, params.data.height, 'Trade not found')
     return trade
   })
 
@@ -524,7 +539,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = z.object({ height: uint32Param, index: uint32Param }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid event id' })
     const ev = await getEventAt(params.data.height, params.data.index)
-    if (!ev) return reply.status(404).send({ error: 'Event not found' })
+    if (!ev) return notIndexedYet(reply, params.data.height, 'Event not found')
     return ev
   })
 

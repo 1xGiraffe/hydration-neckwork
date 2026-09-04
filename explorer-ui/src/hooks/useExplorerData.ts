@@ -2,6 +2,8 @@ import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { api, userApi } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
 import { useHeadStream, BLOCK_STALE_MS, LIVE_MS } from '../live'
+import { detailWait } from '../queryRetry'
+import { blockOf } from '../utils/activityIds'
 import { useHeldRows } from './useHeldRows'
 import { getSession } from '../session'
 import { tagMapStatus, hasUserTagMembers, useTagMapVersion } from '../userTags'
@@ -116,12 +118,32 @@ export function useCounts() {
 export function pendingRefetchMs(data: unknown): number | false {
   return (data as { finalized?: boolean } | undefined)?.finalized === false ? 2_500 : false
 }
+// The same rule for a LIST response: an activity list served from the pending
+// layer carries unfinalized rows, and the finalized classification replaces
+// them (with the kinds that layer does not decode alongside) within ~40s.
+export function pendingRowsRefetchMs(rows: unknown): number | false {
+  return Array.isArray(rows) && rows.some(r => (r as { finalized?: boolean })?.finalized === false) ? 2_500 : false
+}
 
 export function useBlock(height: number | null) {
-  return useQuery({ queryKey: ['block', height], queryFn: ({ signal }) => api.block(height as number, signal), enabled: height != null, staleTime: 60_000, refetchInterval: q => pendingRefetchMs(q.state.data) })
+  return useQuery({ queryKey: ['block', height], queryFn: ({ signal }) => api.block(height as number, signal), enabled: height != null, staleTime: 60_000, refetchInterval: q => pendingRefetchMs(q.state.data), ...detailWait(height) })
 }
 export function useBlockActivity(height: number | null, enabled = true) {
-  return useQuery({ queryKey: ['block-activity', height], queryFn: ({ signal }) => api.blockActivity(height as number, signal), enabled: height != null && enabled, staleTime: 60_000 })
+  // A block above the finalized boundary is served from the pending layer,
+  // whose rows are the basic ones (trades, transfers, money-market, outbound
+  // XCM) — so keep asking until the finalized classifier's list replaces them.
+  // The rows cannot say that themselves when the list is empty, or when the
+  // reader followed a link to a kind this layer does not decode.
+  const { data: stats } = useStats(enabled && height != null)
+  const beforeFinality = stats != null && height != null && height > stats.finalizedBlock
+  return useQuery({
+    queryKey: ['block-activity', height],
+    queryFn: ({ signal }) => api.blockActivity(height as number, signal),
+    enabled: height != null && enabled,
+    staleTime: 60_000,
+    refetchInterval: q => (beforeFinality ? 2_500 : pendingRowsRefetchMs(q.state.data)),
+    ...detailWait(height),
+  })
 }
 export function useExtrinsic(id: string | null) {
   return useQuery({
@@ -133,6 +155,7 @@ export function useExtrinsic(id: string | null) {
     enabled: !!id,
     staleTime: 60_000,
     refetchInterval: q => pendingRefetchMs(q.state.data),
+    ...detailWait(blockOf(id)),
   })
 }
 // Gas for one EVM transaction. Asked only for an `Ethereum.transact` extrinsic a
@@ -152,7 +175,7 @@ export function useDcaSchedule(scheduleId: number, offset = 0) {
   return useQuery({ queryKey: ['dca-schedule', scheduleId, offset], queryFn: ({ signal }) => api.dcaSchedule(scheduleId, offset, 25, signal), staleTime: 8000 })
 }
 export function useDcaExecution(height: number, eventIndex: number) {
-  return useQuery({ queryKey: ['dca-execution', height, eventIndex], queryFn: ({ signal }) => api.dcaExecution(height, eventIndex, signal), retry: false, staleTime: 60_000 })
+  return useQuery({ queryKey: ['dca-execution', height, eventIndex], queryFn: ({ signal }) => api.dcaExecution(height, eventIndex, signal), staleTime: 60_000, ...detailWait(height) })
 }
 export function useExtrinsicActivity(id: string | null, enabled = true) {
   return useQuery({
@@ -163,6 +186,8 @@ export function useExtrinsicActivity(id: string | null, enabled = true) {
     },
     enabled: !!id && enabled,
     staleTime: 60_000,
+    refetchInterval: q => pendingRowsRefetchMs(q.state.data),
+    ...detailWait(blockOf(id)),
   })
 }
 export function useTrade(id: string | null) {
@@ -176,6 +201,8 @@ export function useTrade(id: string | null) {
     },
     enabled: !!id && /^\d+-(?:e)?\d+$/.test(id),
     staleTime: 60_000,
+    refetchInterval: q => pendingRefetchMs(q.state.data),
+    ...detailWait(blockOf(id)),
   })
 }
 export function useEventAt(id: string | null) {
@@ -187,6 +214,7 @@ export function useEventAt(id: string | null) {
     },
     enabled: !!id && /^\d+-\d+$/.test(id),
     staleTime: 60_000,
+    ...detailWait(blockOf(id)),
   })
 }
 export function useAsset(assetId: number | null) {
