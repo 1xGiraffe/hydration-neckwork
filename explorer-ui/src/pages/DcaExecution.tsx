@@ -2,7 +2,8 @@ import { useDcaExecution, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
-import { Crumbs, F, AddrPill, AssetChip, AssetAmount, StatusBadge, FinalizedBadge, FailureReasonRow, SkeletonRows, MomentLink } from '../components/ui'
+import { Crumbs, F, AddrPill, AssetChip, AssetAmount, StatusBadge, FinalizedBadge, FailureReasonRow, SkeletonRows, MomentLink, AwaitingBlockCard } from '../components/ui'
+import { isAwaitingBlock } from '../queryRetry'
 import { DcaResolve } from './DcaSchedule'
 import { RevenueRow } from '../components/RevenueRow'
 
@@ -10,7 +11,7 @@ import { RevenueRow } from '../components/RevenueRow'
 // for a failed attempt, the intended sell and the decoded failure reason), and
 // a link up to its owning schedule.
 export function DcaExecution({ height, eventIndex }: { height: number; eventIndex: number }) {
-  const { data, isLoading, isError } = useDcaExecution(height, eventIndex)
+  const { data, isLoading, isError, failureReason } = useDcaExecution(height, eventIndex)
   const { data: stats } = useStats(!!data)
   const now = useNow()
   useDocumentTitle(`DCA execution ${height}-e${eventIndex}`)
@@ -18,6 +19,13 @@ export function DcaExecution({ height, eventIndex }: { height: number; eventInde
   // Legacy event-form links carried the swap event index, not the DCA event
   // index, so nothing resolves exactly there — fall back to the schedule
   // resolver (old behavior) rather than dead-ending.
+  //
+  // Only a 404 the API itself described as "the block is not indexed yet" waits
+  // here (queryRetry.ts), never the finality heuristic useAwaitingBlock also
+  // applies: an unfinalized block IS readable from the pending layer, so the
+  // resolver answers a legacy link right away, and making it wait for finality
+  // instead would delay a page that was already correct.
+  if (isAwaitingBlock(failureReason, height)) return <AwaitingBlockCard height={height} />
   if (isError) return <DcaResolve height={height} index={eventIndex} kind="event" />
 
   const crumbs = [

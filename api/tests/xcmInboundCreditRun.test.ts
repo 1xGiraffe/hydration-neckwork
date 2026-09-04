@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { xcmCreditRun } from '../src/services/explorerService.ts'
+import { XCM_IN_WALK_EVENTS, XCM_WALK_CROSSABLE_EVENTS, xcmCreditRun } from '../src/services/explorerService.ts'
 
 // The beneficiaries of an inbound XCM message are not named by any XCM event, so they
 // are reconstructed by walking BACK from the message's MessageQueue.Processed over the
@@ -11,6 +11,18 @@ import { xcmCreditRun } from '../src/services/explorerService.ts'
 // run may step over.
 function run(barrier: number, previousBarrier: number, family: number[], crossable: number[]): number[] {
   return xcmCreditRun(barrier, previousBarrier, i => family.includes(i), i => crossable.includes(i))
+}
+
+// A block given as the ordered event NAMES of one message, classified by the same two
+// lists the walk's queries are built from — so which names the run may cross is pinned
+// against real block shapes rather than against a hand-picked index set.
+function runNames(names: string[]): number[] {
+  const barrier = names.length - 1
+  return xcmCreditRun(
+    barrier, -1,
+    i => XCM_IN_WALK_EVENTS.includes(names[i]),
+    i => XCM_WALK_CROSSABLE_EVENTS.includes(names[i]),
+  )
 }
 
 describe('the inbound credit run', () => {
@@ -57,5 +69,31 @@ describe('the inbound credit run', () => {
   // are actual credits.
   it('returns every walked family index, credit or sibling', () => {
     expect(run(4, -1, [0, 1, 2, 3], [])).toEqual([3, 2, 1, 0])
+  })
+
+  // Hydration 13959494 — 12,300 HOLLAR from AssetHub. HOLLAR's balances live in an ERC20
+  // contract, so the currency adapter mirrors every leg as an EVM.Log Transfer and emits
+  // no Tokens.Deposited at all: the mirror sits between the treasury fee credit and the
+  // beneficiary's. Stopping there ended the run one step short of the user and the whole
+  // message decoded to nothing — 149 of the first 151 HOLLAR arrivals appeared nowhere.
+  it('steps over the ERC20 mirror of an ERC20-backed asset', () => {
+    expect(runNames([
+      'EVM.Log', 'Currencies.Withdrawn', // the sending chain's sovereign account
+      'EVM.Log', 'Currencies.Deposited', // the beneficiary
+      'EVM.Log', 'Currencies.Deposited', // the XCM fee, to the treasury
+      'MessageQueue.Processed',
+    ])).toEqual([5, 3])
+  })
+
+  // The other half of that rule. Hydration 13045949 — a Moonbeam MRL message that runs a
+  // Transact: EVM.Executed marks a program the message DISPATCHED, and what it moved is
+  // not a credit this message made, so the run must still stop there. Crossing the log
+  // without crossing the execution is what keeps the remote-execution cut intact.
+  it('still stops at an EVM execution the message dispatched', () => {
+    expect(runNames([
+      'Tokens.Deposited', 'EVM.Log', 'EVM.Executed',
+      'Balances.Deposit', 'Currencies.Deposited',
+      'MessageQueue.Processed',
+    ])).toEqual([4, 3])
   })
 })

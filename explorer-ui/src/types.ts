@@ -296,6 +296,10 @@ export interface TradeDetail {
   route: TradeHop[]
   dca: boolean
   revenue?: ActivityRevenue
+  // false = served from the pending (unfinalized) layer: the trade is real but
+  // its block can still reorganize, the fee has not settled, and the route
+  // carries no per-hop amounts. Absent = finalized.
+  finalized?: boolean
 }
 
 export interface DailyPoint { date: string; value: number }

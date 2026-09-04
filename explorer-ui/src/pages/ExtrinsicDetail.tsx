@@ -4,7 +4,9 @@ import { useEvmReceipt, useExtrinsic, useExtrinsicActivity, useStats } from '../
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, redirect } from '../router'
-import { Crumbs, F, AddrPill, CallPill, FeeAmount, StatusBadge, MempoolResultBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows } from '../components/ui'
+import { Crumbs, F, AddrPill, CallPill, FeeAmount, StatusBadge, MempoolResultBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows, AwaitingBlockCard } from '../components/ui'
+import { blockOf } from '../utils/activityIds'
+import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { api } from '../api/explorer'
 import { ActivityTable, PoolChip } from '../components/ActivityTable'
 import { EvmCallCard, EvmLogView } from '../components/EvmDecoded'
@@ -89,7 +91,8 @@ function EvmTxRows({ tx, callArgs }: { tx?: EvmTransactionFacts; callArgs: unkno
 }
 
 export function ExtrinsicDetail({ id }: { id: string }) {
-  const { data, isLoading, isError } = useExtrinsic(id)
+  const { data, isLoading, isError, failureReason } = useExtrinsic(id)
+  const awaiting = useAwaitingBlock(blockOf(id), isError || failureReason != null, failureReason)
   // A transaction still in the pool has no block coordinates — its hash stays
   // the page's identity, and the 2.5s pending poll below walks it through
   // pool → unfinalized → finalized in place, without a refresh.
@@ -140,7 +143,8 @@ export function ExtrinsicDetail({ id }: { id: string }) {
         </div>
       </div>
 
-      {isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Extrinsic not found</div>
+      {awaiting ? <AwaitingBlockCard height={blockOf(id)} />
+        : isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Extrinsic not found</div>
         : isLoading || !data ? <div className="detail-card"><SkeletonRows /></div> : (
           <>
             <div className="detail-card"><div className="dl">

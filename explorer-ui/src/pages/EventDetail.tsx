@@ -2,13 +2,16 @@ import { useEventAt, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
-import { Crumbs, AddrPill, CallPill, StatusBadge, FinalizedBadge, MomentLink, ParamsTable, SkeletonRows } from '../components/ui'
+import { Crumbs, AddrPill, CallPill, StatusBadge, FinalizedBadge, MomentLink, ParamsTable, SkeletonRows, AwaitingBlockCard } from '../components/ui'
+import { blockOf } from '../utils/activityIds'
+import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { EvmLogView } from '../components/EvmDecoded'
 
 export function EventDetail({ id }: { id: string }) {
   useDocumentTitle(`Event ${id}`)
   const validId = /^\d+-\d+$/.test(id)
-  const { data, isLoading, isError } = useEventAt(validId ? id : null)
+  const { data, isLoading, isError, failureReason } = useEventAt(validId ? id : null)
+  const awaiting = useAwaitingBlock(blockOf(id), isError || failureReason != null, failureReason)
   const { data: stats } = useStats(!!data)
   const now = useNow()
   const args = (data?.args && typeof data.args === 'object') ? data.args as Record<string, unknown> : {}
@@ -24,6 +27,7 @@ export function EventDetail({ id }: { id: string }) {
       </div>
 
       {!validId ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Invalid event id</div>
+        : awaiting ? <AwaitingBlockCard height={blockOf(id)} />
         : isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Event not found</div>
         : isLoading || !data ? <div className="detail-card"><SkeletonRows /></div> : (
           <>
