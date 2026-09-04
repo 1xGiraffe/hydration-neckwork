@@ -1958,9 +1958,13 @@ function buildHollar(): HollarDashboard {
         months: Array.from({ length: 12 }, (_, i) => { const d = new Date(Date.UTC(2025, 8 + i, 1)); return d.toISOString().slice(0, 10) }),
         stableSharePct: Array.from({ length: 12 }, (_, i) => +(5.1 + i * 2.7 + r()).toFixed(1)),
         pegStats: { uptime50Pct: 97.9, uptime25Pct: 81.4, maxAbsDevBps: 97.5 },
+        // One card per isolated market that lists HOLLAR, named as the
+        // money-market pages name them — three of them, so the mock carries the
+        // multi-market shape rather than the two-market special case.
         rates: [
-          { label: 'Core market', pct: 4.402, prevPct: 4.879, since: '2026-03-03' },
-          { label: 'GIGAHDX market', pct: 8.618, prevPct: null, since: '2026-07-01' },
+          { label: 'Money Market', pct: 4.402, prevPct: 4.879, since: '2026-03-03' },
+          { label: 'GIGAHDX', pct: 8.618, prevPct: null, since: '2026-07-01' },
+          { label: 'BIL', pct: 9.531, prevPct: null, since: '2026-08-31' },
         ],
       }
     })(),

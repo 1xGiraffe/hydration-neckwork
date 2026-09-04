@@ -434,7 +434,7 @@ function BorrowingSection({ t }: { t: HollarTrends }) {
             <div className="hs">cumulative protocol revenue from HOLLAR borrows</div>
           </div>
           {t.rates.map(r => (
-            <div className="hdx-card" key={r.label}>
+            <div className="hdx-card" key={`${r.label}-${r.since}`}>
               <div className="hk">{r.label} rate</div>
               <div className="hv">{r.pct.toFixed(2)}%</div>
               <div className="hs">{r.prevPct != null ? `${r.prevPct > r.pct ? 'cut' : 'raised'} from ${r.prevPct.toFixed(2)}% on ${r.since}` : `since ${r.since}`}</div>
