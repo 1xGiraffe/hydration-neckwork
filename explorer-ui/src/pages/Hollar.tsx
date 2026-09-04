@@ -1,13 +1,15 @@
+/* eslint-disable react-refresh/only-export-components -- the page plus the pure peg-refine helper its test exercises directly */
+import { useMemo } from 'react'
 import type { ReactNode } from 'react'
 import { useHollarDashboard } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useNow } from '../hooks/useNow'
 import { Link, paths } from '../router'
-import { AssetAmount, Crumbs, F, AssetChip, Ago, AreaChart, ChartSkeleton, TableSkeleton, EmptyRow } from '../components/ui'
+import { AssetAmount, Crumbs, F, AssetChip, Ago, ChartSkeleton, TableSkeleton, EmptyRow } from '../components/ui'
 import { useAssetColors } from '../utils/iconColor'
 import { ChartLegend, ShareBar, MirroredBarChart, StackedAreaChart, MultiLineChart } from '../components/HdxCharts'
-import type { ShareSegment, MirrorBar, AreaSeries } from '../components/HdxCharts'
-import type { AssetRef, HollarDashboard, HollarTrends, HollarCollateral, HollarPool } from '../types'
+import type { ShareSegment, MirrorBar, AreaSeries, RefinedGrid } from '../components/HdxCharts'
+import type { AssetRef, HollarDashboard, HollarTrends, HollarCollateral, HollarPegPoint, HollarPool } from '../types'
 import { ChartTooltipRow as TipRow, DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
 import { monthDayLabel as mdLabel } from '../utils/dashboardDates'
 
@@ -63,38 +65,6 @@ function Ribbon({ d }: { d: HollarDashboard }) {
         </span>
       ))}
     </div>
-  )
-}
-
-// 2. peg
-function PegSection({ d }: { d: HollarDashboard }) {
-  const { peg } = d
-  const data = peg.hourly.map(h => h.close)
-  const dates = peg.hourly.map(h => h.ts)
-  return (
-    <>
-      <SecTitle title="Peg" subtitle="30 days" />
-      <div className="pf-card">
-        <AreaChart data={data} dates={dates} target={1} valueFmt={v => '$' + v.toFixed(4)} zoomKey="zpeg" />
-        <div className="hdx-cards">
-          <div className="hdx-card">
-            <div className="hk">Within ±25 bps</div>
-            <div className="hv">{peg.within25bpsPct != null ? peg.within25bpsPct.toFixed(1) + '%' : '—'}</div>
-            <div className="hs">of hourly closes · 30d</div>
-          </div>
-          <div className="hdx-card">
-            <div className="hk">Max deviation</div>
-            <div className="hv" style={peg.maxDevBps != null ? { color: bpsColor(peg.maxDevBps) } : undefined}>{peg.maxDevBps != null ? fmtBps(peg.maxDevBps) : '—'}</div>
-            <div className="hs">30d</div>
-          </div>
-          <div className="hdx-card">
-            <div className="hk">Range</div>
-            <div className="hv">{peg.min30d != null && peg.max30d != null ? `$${peg.min30d.toFixed(4)} – $${peg.max30d.toFixed(4)}` : '—'}</div>
-            <div className="hs">30d</div>
-          </div>
-        </div>
-      </div>
-    </>
   )
 }
 
@@ -278,40 +248,81 @@ const lastNum = (a: (number | null)[]): number | null => {
   return null
 }
 
-// peg since launch: weekly close with the intraweek low/high band, in dollars —
+// peg: weekly close inside the intraweek low/high range, in dollars —
 // MultiLineChart's dashed $1.00 reference line IS the peg.
-function PegHistorySection({ t }: { t: HollarTrends }) {
-  const lines: AreaSeries[] = [
-    { key: 'high', label: 'Weekly high', color: 'var(--neutral-cool)', values: t.peg.high },
-    { key: 'close', label: 'Close', color: 'var(--accent)', values: t.peg.close },
-    { key: 'low', label: 'Weekly low', color: 'var(--neutral-cool)', values: t.peg.low },
-  ]
+//
+// One peg chart, not two: zooming into the last 30 days swaps in the hourly
+// closes the payload already carries (hourlyPegRefine), so the recent fine
+// structure is a gesture away instead of a second, near-duplicate section.
+const PEG_CLOSE_COLOR = 'var(--text-high)'      // the reading itself — neutral ink, not a category hue
+const PEG_RANGE_COLOR = 'var(--neutral-cool)'   // its context — a quiet cool grey envelope
+const HOUR = 3_600
+const tsSec = (ts: string) => Math.floor(Date.parse(`${ts.replace(' ', 'T')}Z`) / 1000)
+
+// Refetch-on-zoom served from the payload: no request, and no partial answers —
+// a window reaching back before the hourly coverage keeps the weekly slice,
+// since refining it would draw one month's detail across a year of plot.
+export function hourlyPegRefine(hourly: HollarPegPoint[]): ((fromSec: number, toSec: number) => Promise<RefinedGrid | null>) | undefined {
+  if (hourly.length < 3) return undefined
+  const first = tsSec(hourly[0].ts)
+  return async (fromSec, toSec) => {
+    if (!(fromSec >= first)) return null
+    const pts = hourly.filter(hp => { const s = tsSec(hp.ts); return s >= fromSec - HOUR && s <= toSec + HOUR })
+    if (pts.length < 3) return null
+    return { buckets: pts.map(p => p.ts), series: [{ key: 'close', label: 'Close', color: PEG_CLOSE_COLOR, values: pts.map(p => p.close) }] }
+  }
+}
+
+function PegSection({ d }: { d: HollarDashboard }) {
+  const t = d.trends
+  const p = d.peg
   const st = t.pegStats
+  // Close last so it draws over the range's hairline bounds.
+  const lines: AreaSeries[] = [
+    { key: 'high', label: 'Weekly high', color: PEG_RANGE_COLOR, values: t.peg.high },
+    { key: 'low', label: 'Weekly low', color: PEG_RANGE_COLOR, values: t.peg.low },
+    { key: 'close', label: 'Close', color: PEG_CLOSE_COLOR, values: t.peg.close },
+  ]
+  const refine = useMemo(() => hourlyPegRefine(p.hourly), [p.hourly])
+  const has30d = p.min30d != null && p.max30d != null
   return (
     <>
-      <SecTitle title="Peg since launch" subtitle="weekly close and intraweek range" />
+      <SecTitle title="Peg" subtitle="weekly close inside the intraweek range, since launch" />
       <div className="pf-card">
-        <ChartLegend items={[{ label: 'Close', color: 'var(--accent)' }, { label: 'Weekly range', color: 'var(--neutral-cool)' }]} />
-        <MultiLineChart buckets={t.weeks} series={lines} h={190} yFmt={v => '$' + v.toFixed(4)} zoomKey="zpegw" />
-        {st && (
+        <ChartLegend items={[{ label: 'Close', color: PEG_CLOSE_COLOR }, { label: 'Weekly range', color: PEG_RANGE_COLOR }]} />
+        <MultiLineChart buckets={t.weeks} series={lines} band={{ lo: 'low', hi: 'high', label: 'Weekly range' }}
+          h={200} yFmt={v => '$' + v.toFixed(4)} zoomKey="zpegw" refine={refine} />
+        {(has30d || st) && (
           <div className="hdx-cards" style={{ marginTop: 14 }}>
-            <div className="hdx-card">
-              <div className="hk">Within ±50 bps</div>
-              <div className="hv">{st.uptime50Pct.toFixed(1)}%</div>
-              <div className="hs">of daily closes, since launch</div>
-            </div>
-            <div className="hdx-card">
-              <div className="hk">Within ±25 bps</div>
-              <div className="hv">{st.uptime25Pct.toFixed(1)}%</div>
-              <div className="hs">of daily closes, since launch</div>
-            </div>
-            <div className="hdx-card">
-              <div className="hk">Worst ever</div>
-              <div className="hv">{Math.round(st.maxAbsDevBps)} bps</div>
-              <div className="hs">deepest intraday wick — HOLLAR has never been a full cent off the peg</div>
-            </div>
+            {has30d && (
+              <div className="hdx-card">
+                <div className="hk">Last 30 days</div>
+                <div className="hv">{`$${p.min30d!.toFixed(4)} – $${p.max30d!.toFixed(4)}`}</div>
+                <div className="hs">hourly closes{p.within25bpsPct != null ? ` · ${p.within25bpsPct.toFixed(1)}% within ±25 bps` : ''}</div>
+              </div>
+            )}
+            {st && (
+              <>
+                <div className="hdx-card">
+                  <div className="hk">Within ±25 bps</div>
+                  <div className="hv">{st.uptime25Pct.toFixed(1)}%</div>
+                  <div className="hs">of daily closes, since launch</div>
+                </div>
+                <div className="hdx-card">
+                  <div className="hk">Within ±50 bps</div>
+                  <div className="hv">{st.uptime50Pct.toFixed(1)}%</div>
+                  <div className="hs">of daily closes, since launch</div>
+                </div>
+                <div className="hdx-card">
+                  <div className="hk">Worst ever</div>
+                  <div className="hv">{Math.round(st.maxAbsDevBps)} bps</div>
+                  <div className="hs">deepest intraday wick — HOLLAR has never been a full cent off the peg</div>
+                </div>
+              </>
+            )}
           </div>
         )}
+        <div className="hdx-note">Drag across the chart to zoom into a window; inside the last 30 days it refines to hourly closes.</div>
       </div>
     </>
   )
@@ -441,11 +452,11 @@ function HollarSkeleton() {
   return (
     <>
       <ChartSkeleton h={78} />
-      <SecTitle title="Peg" subtitle="30 days" /><ChartSkeleton h={280} />
-      <SecTitle title="Peg since launch" subtitle="weekly close and intraweek range" /><ChartSkeleton h={330} />
+      <SecTitle title="Peg" subtitle="since launch · weekly close inside the intraweek range" /><ChartSkeleton h={340} />
       <SecTitle title="Supply & holders" subtitle="where minted HOLLAR sits, and who holds it" /><ChartSkeleton h={430} />
       <SecTitle title="Stability Module" subtitle="HSM" />
       <div className="panel"><table className="tbl"><tbody><TableSkeleton cols={8} rows={4} /></tbody></table></div>
+      <ChartSkeleton h={210} />
       <ChartSkeleton h={210} />
       <ChartSkeleton h={210} />
       <SecTitle title="Borrowing" subtitle="HOLLAR is minted by borrowing it against collateral" /><ChartSkeleton h={600} />
@@ -471,7 +482,6 @@ export function Hollar() {
           <>
             <Ribbon d={data} />
             <PegSection d={data} />
-            <PegHistorySection t={data.trends} />
             <SupplyHoldersSection t={data.trends} />
             <HsmSection d={data} now={now} />
             <BorrowingSection t={data.trends} />
