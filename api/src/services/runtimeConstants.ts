@@ -15,9 +15,11 @@ import { pendingNodeApi } from './pendingHeadService.ts'
 // be consulted"; it must never be treated as a value, and every caller here
 // falls back to a documented pin.
 //
-// Verified against the live runtime (spec 435, Aug 2026):
-//   aura.slotDuration        = 6000       (MILLISECS_PER_BLOCK)
-//   gigaHdx.cooldownPeriod   = 403200     (28 days of 6s blocks)
+// Verified against the live runtime (spec 440, Sep 2026):
+//   aura.slotDuration        = 6000       (NOT rescaled with the slot time —
+//                                          blocks measure ~2.14s since spec 440)
+//   gigaHdx.cooldownPeriod   = 1209600    (28 nominal days of 2s blocks; was
+//                                          403200 up to block 13,762,621)
 // and, for contrast, pallet_circuit_breaker publishes ONLY its three default
 // limit rationals — its `Period = DAYS` is not a metadata constant at all,
 // which is why securityService still has to pin that one by hand.
@@ -99,9 +101,13 @@ export function runtimeParaBlockMs(): number | null {
 }
 
 // `gigaHdx.cooldownPeriod` — parachain blocks an unstake waits before it
-// matures. The runtime is expected to rescale it at the 2s upgrade so the
-// cooldown stays 28 days (403 200 → 1 209 600), which is exactly the kind of
-// silent redefinition a pinned copy would miss.
+// matures. The runtime rescaled it at the 2s upgrade to keep the cooldown at 28
+// nominal days (403 200 → 1 209 600 at spec 440, block 13,762,621) — exactly the
+// kind of silent redefinition a pinned copy would have missed.
+//
+// It describes a cooldown starting NOW, so it does not date a position opened
+// under the previous value: those keep the expiry they were given
+// (hdxService.withIndexedExpiries reads it from the event instead).
 export function runtimeGigaCooldownBlocks(): number | null {
   return constantNumber('gigaHdx', 'cooldownPeriod', 100_000_000)
 }

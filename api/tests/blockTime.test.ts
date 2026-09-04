@@ -276,15 +276,20 @@ describe('parseGigaUnbondingBlocks', () => {
 describe('gigaUnbondingBlocks', () => {
   // No node connection in a unit test, so runtimeConstants reports null and the
   // resolver must land on the documented pin rather than throwing or reporting 0.
+  // The pin tracks the LIVE constant: runtime 440 moved it to 1,209,600 with the
+  // 6s → 2s rescale, keeping the nominal 28 days. Pinning the superseded 403,200
+  // would understate the wait threefold and show positions as claimable early.
   it('falls back to the pinned 28-day cooldown with no chain and no override', () => {
-    expect(gigaUnbondingBlocks()).toBe(403_200)
+    expect(gigaUnbondingBlocks()).toBe(1_209_600)
   })
 
   it('prefers an explicit operator override over everything', () => {
     const previous = process.env.GIGA_UNBONDING_BLOCKS
-    process.env.GIGA_UNBONDING_BLOCKS = '1209600'
+    // Deliberately not the pinned default, or this would pass even if the
+    // override were ignored entirely.
+    process.env.GIGA_UNBONDING_BLOCKS = '654321'
     try {
-      expect(gigaUnbondingBlocks()).toBe(1_209_600)
+      expect(gigaUnbondingBlocks()).toBe(654_321)
     } finally {
       if (previous == null) delete process.env.GIGA_UNBONDING_BLOCKS
       else process.env.GIGA_UNBONDING_BLOCKS = previous
