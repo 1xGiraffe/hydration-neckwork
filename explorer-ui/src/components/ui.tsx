@@ -1061,8 +1061,14 @@ export function Sparkline({ data, w = 110, h = 30, change7d }: { data: number[];
 
 // Crosshair tooltip clamped inside its chart wrap: `left` is re-measured after
 // every render so an edge hover can't stick out of the card, which made the
-// whole page horizontally scrollable on phones. Shared by AreaChart/PriceChart.
-export function ChartTip({ xPct, children }: { xPct: number; children: ReactNode }) {
+// whole page horizontally scrollable on phones. The clamp has to be measured in
+// pixels — a percentage bound cannot know the tooltip's own width, and a wide
+// card (date + every band + a total) then overhangs a 390px screen.
+// `className` selects the tooltip's own styling: the price charts' single-line
+// `apx-tip`, or the dashboard charts' stacked `hdx-tip` (HdxCharts).
+export function ChartTip({ xPct, className = 'apx-tip', top, children }: {
+  xPct: number; className?: string; top?: number; children: ReactNode
+}) {
   const ref = useRef<HTMLDivElement>(null)
   useLayoutEffect(() => {
     const el = ref.current, wrap = el?.parentElement
@@ -1071,7 +1077,7 @@ export function ChartTip({ xPct, children }: { xPct: number; children: ReactNode
     const x = w <= half * 2 ? w / 2 : Math.min(Math.max(xPct / 100 * w, half), w - half)
     el.style.left = `${x}px`
   })
-  return <div className="apx-tip" ref={ref}>{children}</div>
+  return <div className={className} ref={ref} style={top != null ? { top } : undefined}>{children}</div>
 }
 
 /* ============ chart event markers ============ */

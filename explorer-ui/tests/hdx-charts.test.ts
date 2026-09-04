@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { stackHeights, stackedColumnMax, niceAxisMax, fmtHdxTick, readableBarMax, stackSeries, lineRuns } from '../src/components/HdxCharts'
+import { stackHeights, stackedColumnMax, niceAxisMax, fmtHdxTick, readableBarMax, stackSeries, lineRuns, axisTick, seriesGrainSec, tipDate } from '../src/components/HdxCharts'
 
 describe('stackedColumnMax — high unlock clusters do not flatten the chart', () => {
   it('uses the largest value when the distribution has no separated high tail', () => {
@@ -228,5 +228,46 @@ describe('lineRuns — null-gap segmentation', () => {
   it('handles all-null and all-present series', () => {
     expect(lineRuns([null, null])).toEqual([])
     expect(lineRuns([1, 2, 3])).toEqual([[0, 2]])
+  })
+})
+
+// A zoomed window's four ticks must not all read the same month, and a
+// zoom-refined hourly grid must not print raw `YYYY-MM-DD HH:MM:SS` keys.
+describe('axisTick — label granularity follows the drawn window', () => {
+  it('uses month + year across eras (and with no usable time axis)', () => {
+    expect(axisTick('2026-08-14', 400 * 86_400)).toBe('Aug ’26')
+    expect(axisTick('2026-08-14', 0)).toBe('Aug ’26')
+  })
+
+  it('uses month + day inside a few months', () => {
+    expect(axisTick('2026-08-14', 30 * 86_400)).toBe('Aug 14')
+  })
+
+  it('adds the clock once the window is down to a day or two', () => {
+    expect(axisTick('2026-08-14 07:00:00', 36 * 3_600, 3_600)).toBe('Aug 14 07:00')
+  })
+
+  it('never prints a clock the series does not carry', () => {
+    // A daily series zoomed under two days: four ticks reading "Sep 3 00:00"
+    // claim an intraday reading that does not exist.
+    expect(axisTick('2026-08-14', 36 * 3_600, 86_400)).toBe('Aug 14')
+  })
+
+  it('passes an unparseable key through', () => {
+    expect(axisTick('week 3', 86_400)).toBe('week 3')
+  })
+})
+
+describe('seriesGrainSec / tipDate — a label no finer than the data', () => {
+  it('takes the smallest gap between drawn points as the grain', () => {
+    expect(seriesGrainSec([0, 86_400, 172_800])).toBe(86_400)
+    expect(seriesGrainSec([0, 86_400, 90_000])).toBe(3_600)
+    expect(seriesGrainSec([1_000])).toBe(0)
+  })
+
+  it('drops the clip-added midnight from a daily tooltip and keeps an hourly one', () => {
+    expect(tipDate('2026-08-14 00:00:00', 86_400)).toBe('2026-08-14')
+    expect(tipDate('2026-08-14 07:00:00', 3_600)).toBe('2026-08-14 07:00')
+    expect(tipDate('week 3', 86_400)).toBe('week 3')
   })
 })
