@@ -31,6 +31,7 @@ import {
 } from './onBehalfActivity.ts'
 import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
 import { FEE_BALANCE_EVENTS, deriveFeePayment, hasSubstrateFee, type FeePaymentEvent } from './extrinsicFeePayment.ts'
+import { PRICE_LOOKBACK_DAYS } from './valuation.ts'
 import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx, type XcmJourneySource } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
@@ -1509,13 +1510,16 @@ function priceTransformArrays(prices: Map<number, PriceInfo>): { idsSql: string;
 
 // historical (block-time) valuation
 // A flow (trade, transfer, liquidation) is worth what it was worth WHEN it
-// happened, so we value its raw amount at the latest completed hourly close,
-// never the current price or a close later in the event's hour. The per-block
-// price table (price_data.prices)
-// would be exact, but an ASOF join against it loads every price tick in the
-// events' block span — and majors tick every block, so a whale trading across
-// the whole chain would pull tens of millions of rows. The pre-aggregated
-// hourly close is one row per asset/hour, so the joined side stays bounded.
+// happened, never what it is worth now. The FEED values a page of flows at the
+// latest completed hourly close (`applyHistoricalUsd`): an ASOF join against the
+// per-block price table would load every price tick in the events' block span —
+// and majors tick every block, so a whale trading across the whole chain would
+// pull tens of millions of rows — while the pre-aggregated hourly close is one
+// row per asset/hour, so the joined side stays bounded. A single trade DETAIL is
+// valued at the pre-trade per-block spot of its most reliably priced leg instead
+// (`applyEventTimeUsd`): one event's block window is bounded by construction, and
+// the closed-candle rule is the right compaction for a bucketed history, not for
+// one event, where it can be an hour stale.
 
 // Every aliased asset — aTokens, bonds and pool shares alike — values through the
 // same terminal priced id its current-price path uses. Pool shares have no
@@ -1683,13 +1687,19 @@ async function historicalCloses(pairs: { assetId: number; ts: string }[]): Promi
 interface ExactUsdLeg { raw: bigint; decimals: number; priceAtoms: bigint; closeRaw: string }
 const exactHistoricalValues = new WeakMap<object, ExactUsdLeg[]>()
 
+// A USD price string as an integer count of 1e-12 USD, or null when it is not
+// exactly representable at that scale (every price_data price is, being Decimal(38,12)).
+function priceAtomsOf(priceRaw: string): bigint | null {
+  const price = decimalFraction(priceRaw)
+  const scaled = price.numerator * HISTORICAL_PRICE_SCALE
+  if (scaled % price.denominator !== 0n) return null
+  return scaled / price.denominator
+}
+
 function exactUsdLeg(raw: string | null | undefined, decimals: number, closeRaw: string | undefined): ExactUsdLeg | null {
   if (!raw || !/^\d+$/.test(raw) || !closeRaw) return null
-  const close = decimalFraction(closeRaw)
-  const scaled = close.numerator * HISTORICAL_PRICE_SCALE
-  if (scaled % close.denominator !== 0n) return null
-  const priceAtoms = scaled / close.denominator
-  if (priceAtoms <= 0n) return null
+  const priceAtoms = priceAtomsOf(closeRaw)
+  if (priceAtoms == null || priceAtoms <= 0n) return null
   return { raw: BigInt(raw), decimals, priceAtoms, closeRaw }
 }
 
@@ -1704,8 +1714,9 @@ function exactUsdMeetsMinimum(legs: ExactUsdLeg[], minimum: number): boolean {
   const threshold = decimalFraction(minimum)
   return valueNumerator * threshold.denominator >= threshold.numerator * valueDenominator
 }
-// valueUsd basis pickers per row shape: a trade/activity is valued on its OUT leg
-// (the asset received), a transfer/liquidity/mm flow on the moved asset.
+// valueUsd basis pickers per FEED row shape: a trade/activity row is valued on its
+// OUT leg (the asset received), a transfer/liquidity/mm flow on the moved asset.
+// A trade detail page instead picks its more reliably priced leg (applyEventTimeUsd).
 type HistPick = { assetId: number; decimals: number; raw: string; ts: string } | null
 function activityHistPick(r: ActivityRow): HistPick {
   // Create rows already carry their combined BLOCK-TIME value (both seed legs, see
@@ -1747,6 +1758,180 @@ function rowMeetsExactUsdMinimum(row: object & { valueUsd: number | null }, mini
   const exact = exactHistoricalValues.get(row)
   if (exact) return exactUsdMeetsMinimum(exact, minimum)
   return row.valueUsd != null && Number.isFinite(row.valueUsd) && row.valueUsd >= minimum
+}
+
+// Event-time valuation of ONE swap from its most reliably priced leg.
+//
+// Price source — the pre-trade per-block spot: the newest price_data.prices row
+// STRICTLY below the event block. The event block's own row already reflects the
+// pool after the swap, so pricing at the event block would let a large trade in a
+// thin pool inflate its own recorded value. AGENTS.md's closed-candle rule is for
+// bucketed histories; a single flow takes the latest price known at the event.
+//
+// Leg choice is a total order over the legs and their price rows, so it is a pure
+// function of the swap and never depends on which leg is IN or OUT — a swap and its
+// mirror image value off the same leg, and two page loads cannot disagree:
+//   1. a PINNED leg beats a floating one. Pinned = the leg's own pre-trade price is
+//      within PINNED_USD_TOLERANCE_ATOMS of $1, so its dollar price cannot have moved
+//      materially between the observation and the fill, whereas a floating leg can
+//      (DOT doubled inside the hour of block 1,708,547). The block's USD reference
+//      basket is the exact case — the indexer seeds a sole anchor at exactly
+//      1.000000000000 and centres a two-member basket so its members average exactly
+//      $1 — and every other near-par stable is the approximately exact case. The
+//      valued price is always the observed row, never an assumed $1, so a depegged
+//      stable simply stops being pinned. This is the signal the API can see: the
+//      basket itself is indexer configuration (USD_REFERENCE_BASKETS) and is not
+//      restated here.
+//   2. fewer hops — 0 is Omnipool-direct; each hop derives the price through a
+//      thinner isolated pool.
+//   3. the fresher row (higher block).
+//   4. the lower asset id: arbitrary, but deterministic and direction-free.
+//
+// Staleness: a row older than PRICE_LOOKBACK_DAYS before the event is rejected —
+// a dead or delisted feed must not price an event with an arbitrarily old row. Rows
+// are read in two bounded stages: SPOT_NEAR_WINDOW_BLOCKS below the event resolves
+// every live feed and needs no timestamp check (2,000 blocks is 6.7 h at the
+// slowest block time the chain has run), then SPOT_FAR_WINDOW_BLOCKS for the
+// leftovers, whose block timestamps are compared with the event's. There is no
+// closed-candle third stage on purpose: ohlc_1h is an hour-compaction of these same
+// rows (every dead feed's last candle is the hour of its last row), so a candle can
+// never be fresher than the newest row and would only re-surface a price the bound
+// rejected. A leg with no usable row is unpriced; a swap with no priced leg keeps
+// valueUsd null.
+export interface EventTimeSwapLeg { assetId: number; decimals: number; raw: string }
+export interface EventTimeSwapPick { block: number; legs: EventTimeSwapLeg[] }
+export interface PreTradeSpot { priceRaw: string; hops: number; block: number }
+
+const SPOT_NEAR_WINDOW_BLOCKS = 2_000
+// More than 30 days of blocks at the fastest block time the chain has run (2 s), so
+// the time bound, not the window, decides staleness.
+const SPOT_FAR_WINDOW_BLOCKS = 1_500_000
+// Legs read together must share a right side of (chunk span + window) blocks per asset.
+const SPOT_CHUNK_SPAN_BLOCKS = 20_000
+const SPOT_STALENESS_SEC = PRICE_LOOKBACK_DAYS * 86_400
+const PINNED_USD_TOLERANCE_ATOMS = HISTORICAL_PRICE_SCALE / 100n
+
+export function isPinnedToUsd(priceRaw: string): boolean {
+  const atoms = priceAtomsOf(priceRaw)
+  if (atoms == null || atoms <= 0n) return false
+  const deviation = atoms > HISTORICAL_PRICE_SCALE ? atoms - HISTORICAL_PRICE_SCALE : HISTORICAL_PRICE_SCALE - atoms
+  return deviation <= PINNED_USD_TOLERANCE_ATOMS
+}
+
+function compareLegReliability(a: { assetId: number; spot: PreTradeSpot }, b: { assetId: number; spot: PreTradeSpot }): number {
+  const pinnedA = isPinnedToUsd(a.spot.priceRaw), pinnedB = isPinnedToUsd(b.spot.priceRaw)
+  if (pinnedA !== pinnedB) return pinnedA ? -1 : 1
+  if (a.spot.hops !== b.spot.hops) return a.spot.hops - b.spot.hops
+  if (a.spot.block !== b.spot.block) return b.spot.block - a.spot.block
+  return a.assetId - b.assetId
+}
+
+// The leg a swap is valued from, or null when no leg has a usable pre-trade price.
+export function chooseEventTimeLeg<T extends { assetId: number; spot: PreTradeSpot | null }>(legs: T[]): (T & { spot: PreTradeSpot }) | null {
+  let best: (T & { spot: PreTradeSpot }) | null = null
+  for (const leg of legs) {
+    if (!leg.spot) continue
+    const priced = leg as T & { spot: PreTradeSpot }
+    if (!best || compareLegReliability(priced, best) < 0) best = priced
+  }
+  return best
+}
+
+function spotKey(priceId: number, block: number): string { return `${priceId}|${block}` }
+
+// Newest price row strictly below each (price id, event block) pair within
+// `windowBlocks` of it. One bounded ASOF per chunk: the left side is the pairs,
+// the right side is the pairs' assets over (chunk span + window) blocks.
+async function preTradeSpots(pairs: { priceId: number; block: number }[], windowBlocks: number): Promise<Map<string, PreTradeSpot>> {
+  const out = new Map<string, PreTradeSpot>()
+  if (!pairs.length) return out
+  const sorted = [...pairs].sort((a, b) => a.block - b.block)
+  const chunks: typeof sorted[] = []
+  for (const pair of sorted) {
+    const current = chunks.at(-1)
+    if (current && pair.block - current[0].block <= SPOT_CHUNK_SPAN_BLOCKS && current.length < 2_000) current.push(pair)
+    else chunks.push([pair])
+  }
+  const results = await mapChunksConcurrently(chunks, 1, CHUNK_QUERY_CONCURRENCY, async ([batch]) => {
+    const ids = [...new Set(batch.map(p => p.priceId))]
+    const lo = Math.max(0, batch[0].block - windowBlocks)
+    const hi = batch[batch.length - 1].block
+    const tuples = batch.map(p => `(${p.priceId},${p.block})`).join(',')
+    const res = await client.query({
+      query: `-- explorer:pre-trade-spot
+        SELECT l.asset_id AS asset_id, l.event_block AS event_block,
+               p.block_height AS price_block, toString(p.usd_price) AS price_raw, p.hops AS hops
+        FROM (
+          SELECT toUInt32(tupleElement(t, 1)) AS asset_id, toUInt32(tupleElement(t, 2)) AS event_block
+          FROM (SELECT arrayJoin([${tuples}]) AS t)
+        ) l
+        ASOF INNER JOIN (
+          SELECT asset_id, block_height, usd_price, hops
+          FROM price_data.prices
+          WHERE asset_id IN ({ids:Array(UInt32)}) AND block_height >= {lo:UInt32} AND block_height < {hi:UInt32}
+        ) p ON p.asset_id = l.asset_id AND p.block_height < l.event_block`,
+      query_params: { ids, lo, hi }, format: 'JSONEachRow',
+    })
+    return res.json<{ asset_id: number; event_block: number; price_block: number; price_raw: string; hops: number }>()
+  })
+  for (const rows of results) {
+    for (const r of rows) {
+      if (!(Number(r.price_raw) > 0)) continue
+      out.set(spotKey(Number(r.asset_id), Number(r.event_block)), { priceRaw: r.price_raw, hops: Number(r.hops), block: Number(r.price_block) })
+    }
+  }
+  return out
+}
+
+async function blockUnixTimes(heights: number[]): Promise<Map<number, number>> {
+  const out = new Map<number, number>()
+  if (!heights.length) return out
+  const res = await client.query({
+    query: `SELECT block_height, toUnixTimestamp(block_timestamp) AS ts FROM price_data.blocks WHERE block_height IN ({hs:Array(UInt32)})`,
+    query_params: { hs: heights }, format: 'JSONEachRow',
+  })
+  for (const r of await res.json<{ block_height: number; ts: number }>()) out.set(Number(r.block_height), Number(r.ts))
+  return out
+}
+
+// Rewrite each row's valueUsd to its event-time value from the most reliably
+// priced leg `pick` names (see the rule above), recording the exact integer legs
+// for `rowMeetsExactUsdMinimum` as `applyHistoricalUsd` does.
+export async function applyEventTimeUsd<T extends object>(rows: T[], pick: (r: T) => EventTimeSwapPick | null): Promise<void> {
+  const picks = rows.map(pick)
+  const wanted = new Map<string, { priceId: number; block: number }>()
+  for (const p of picks) {
+    if (!p) continue
+    for (const leg of p.legs) {
+      const priceId = historicalPriceAssetId(leg.assetId)
+      wanted.set(spotKey(priceId, p.block), { priceId, block: p.block })
+    }
+  }
+  if (!wanted.size) return
+  const spots = await preTradeSpots([...wanted.values()], SPOT_NEAR_WINDOW_BLOCKS)
+  const missing = [...wanted.entries()].filter(([key]) => !spots.has(key)).map(([, pair]) => pair)
+  if (missing.length) {
+    const far = await preTradeSpots(missing, SPOT_FAR_WINDOW_BLOCKS)
+    const heights = new Set<number>()
+    for (const [key, spot] of far) { heights.add(spot.block); heights.add(wanted.get(key)!.block) }
+    const times = await blockUnixTimes([...heights])
+    for (const [key, spot] of far) {
+      const eventTime = times.get(wanted.get(key)!.block)
+      const priceTime = times.get(spot.block)
+      if (eventTime == null || priceTime == null || eventTime - priceTime > SPOT_STALENESS_SEC) continue
+      spots.set(key, spot)
+    }
+  }
+  rows.forEach((row, i) => {
+    const p = picks[i]
+    if (!p) return
+    const chosen = chooseEventTimeLeg(p.legs.map(leg => ({ ...leg, spot: spots.get(spotKey(historicalPriceAssetId(leg.assetId), p.block)) ?? null })))
+    const leg = chosen ? exactUsdLeg(chosen.raw, chosen.decimals, chosen.spot.priceRaw) : null
+    if (leg) exactHistoricalValues.set(row, [leg])
+    else exactHistoricalValues.delete(row)
+    const amount = chosen ? Number(chosen.raw) / 10 ** chosen.decimals : NaN
+    ;(row as { valueUsd: number | null }).valueUsd = leg != null && Number.isFinite(amount) ? amount * Number(leg.closeRaw) : null
+  })
 }
 
 // stableswap share-token NAV pricing
@@ -8359,15 +8544,34 @@ export async function getTradeDetail(height: number, index: number, routeEvent?:
       dca: callName.startsWith('DCA.'),
     }
     await Promise.all([
-      applyHistoricalUsd([detail], d => ({ assetId: d.assetOut.assetId, decimals: d.assetOut.decimals, raw: d.amountOut, ts: d.timestamp })),
+      applyEventTimeUsd([detail], tradeDetailValuePick),
       applyActivityRevenue([detail]),
     ])
     return detail
   })
 }
 
+// Both legs of the net trade: the detail is valued from whichever is the more
+// reliably priced at the event (applyEventTimeUsd), not from the OUT leg alone.
+function tradeDetailValuePick(d: TradeDetail): EventTimeSwapPick {
+  return {
+    block: d.blockHeight,
+    legs: [
+      { assetId: d.assetIn.assetId, decimals: d.assetIn.decimals, raw: d.amountIn },
+      { assetId: d.assetOut.assetId, decimals: d.assetOut.decimals, raw: d.amountOut },
+    ],
+  }
+}
+
 export async function getTradeDetailByEvent(height: number, eventIndex: number): Promise<TradeDetail | null> {
-  return cached(`explorer:trade-event:${height}:${eventIndex}`, 60_000, async () => {
+  // Pending first (see getTradeDetail). Any swap leg of the extrinsic resolves
+  // to its trade: the pending feed anchors a row at the FIRST Broadcast leg
+  // while the finalized classifier anchors it at the Router event, so a link
+  // taken during the pending window names a different event than the same trade
+  // will carry a minute later — and both must open it.
+  const pending = await pendingTrade(height, (_row, ext) => ext.events.some(e => e.swap != null && e.eventIndex === eventIndex))
+  if (pending) return pending
+  return cachedFound(`explorer:trade-event:${height}:${eventIndex}`, 60_000, async () => {
     const prices = await ensurePrices()
     const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
     const evRes = await client.query({
@@ -8438,7 +8642,7 @@ export async function getTradeDetailByEvent(height: number, eventIndex: number):
     }
     await attachHookSwapActors([detail])
     await Promise.all([
-      applyHistoricalUsd([detail], d => ({ assetId: d.assetOut.assetId, decimals: d.assetOut.decimals, raw: d.amountOut, ts: d.timestamp })),
+      applyEventTimeUsd([detail], tradeDetailValuePick),
       applyActivityRevenue([detail]),
     ])
     return detail
