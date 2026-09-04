@@ -30,14 +30,23 @@ import { runtimeGigaCooldownBlocks } from './runtimeConstants.ts'
 export type BreakdownKind = 'lock' | 'reserve' | 'hold' | 'deposit'
 
 // GigaHdx unstakes mature after `gigaHdx.cooldownPeriod` parachain blocks —
-// 403,200, i.e. 28 days at today's 6s slot time (verified against the live
-// runtime, spec 435).
+// 1,209,600, i.e. 28 nominal days at the 2s slot time (verified against the
+// live runtime, spec 440; block 13,762,621 raised it from 403,200 when the
+// rescale landed, so measured ~2.14s makes the real wait ~30 days).
 //
 // Unlike the deposit fuse's period this one IS published in metadata, so it is
 // READ rather than pinned (runtimeConstants.ts, an in-memory property access on
-// the pending layer's connection). The runtime is expected to rescale it at the
-// 2s upgrade so the cooldown stays 28 days — 1,209,600 blocks — and reading it
-// makes that self-correcting.
+// the pending layer's connection), which is what carried it across the rescale
+// without a redeploy.
+//
+// Reading it is NOT sufficient on its own, though: this constant only ever
+// describes a cooldown starting NOW. A position's expiry is fixed when it is
+// requested and the runtime honours that, so applying the current value to a
+// position opened under the previous one overstated 79 of them by 806,400
+// blocks (~18.7 days) and hid every matured unstake. Per-position expiries come
+// from the indexed GigaHdx.Unstaked.expiresAt instead — see
+// hdxService.withIndexedExpiries — and this value now only dates a cooldown
+// that has not started yet.
 //
 // Resolution order, most explicit first:
 //   1. GIGA_UNBONDING_BLOCKS  an operator override; wins over everything, so a
@@ -50,7 +59,7 @@ export type BreakdownKind = 'lock' | 'reserve' | 'hold' | 'deposit'
 // pendingUnstakes expiry, the conditional 28-day GIGAHDX step in the binding
 // timeline); the expiry blocks of unstakes already on chain are absolute block
 // numbers and stay correct either way.
-const DEFAULT_GIGA_UNBONDING_BLOCKS = 403_200
+const DEFAULT_GIGA_UNBONDING_BLOCKS = 1_209_600
 // null when unset or unusable — the caller falls through to the next source.
 export function parseGigaUnbondingBlocks(raw: string | undefined): number | null {
   const value = raw?.trim()
