@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { alignMonthly, backfillAllocationMints, buildHdxStructure, carryForward, correctVestingLocks, decodeCompactBig, gigaUnbondingBlocks, moverAccountFilterSql, nonNegativeUIntDifferenceSql, resolveRotationAnchors, type HdxStructureWeekRow } from '../src/services/hdxService.ts'
+import { alignMonthly, backfillAllocationMints, buildHdxStructure, carryForward, correctVestingLocks, decodeCompactBig, gigaUnbondingBlocks, moverAccountFilterSql, nonNegativeUIntDifferenceSql, resolveRotationAnchors, cooldownExpiresAt, unlockKeyForCause, unlockSeriesFromTimelines, withCooldownExpiries, type HdxStructureWeekRow } from '../src/services/hdxService.ts'
 import { hexToU8a } from '@polkadot/util'
 
 describe('decodeCompactBig', () => {
@@ -27,8 +27,13 @@ describe('decodeCompactBig', () => {
 })
 
 describe('GIGAHDX unbonding', () => {
-  it('uses the protocol 28-day parachain-block delay', () => {
-    expect(gigaUnbondingBlocks()).toBe(28 * 24 * 600)
+  // Only the LAST-RESORT default, used when neither GIGA_UNBONDING_BLOCKS nor
+  // runtime metadata answers. Per-position expiries no longer come from this at
+  // all — see withIndexedExpiries — so it is reached only for a position whose
+  // GigaHdx.Unstaked event is not indexed yet. 28 nominal days of 2s blocks,
+  // matching gigaHdx.cooldownPeriod since runtime 440.
+  it('defaults to 28 days of 2s parachain blocks when nothing else answers', () => {
+    expect(gigaUnbondingBlocks()).toBe(28 * 24 * 1800)
   })
 })
 
@@ -203,5 +208,209 @@ describe('trend grid helpers — alignMonthly / carryForward', () => {
   it('carries a cumulative total across silent months but not before the series starts', () => {
     expect(carryForward([null, 10, null, null])).toEqual([null, 10, 10, 10])
     expect(carryForward([null, null, 3, 4])).toEqual([null, null, 3, 4])
+  })
+})
+
+// GigaHdx.PendingUnstakes storage carries only (account, startBlock) → amount:
+// the maturity block is NOT stored, the runtime RECOMPUTES it on every unlock
+// via pallet_gigahdx::cooldown_expires_at. It is not startBlock + the current
+// cooldown, and it is not the expiresAt recorded in the GigaHdx.Unstaked event
+// either — runtime 440 switched 6s → 2s blocks and tripled CooldownPeriod
+// (403,200 → 1,209,600), and a position that straddles the switch keeps its
+// remaining WALL-CLOCK cooldown by having the leftover blocks tripled. The
+// event's expiresAt was computed under the old rule and is stale for exactly
+// those positions.
+//
+// Verified three ways: the pallet source; 65 historical unlocks with zero
+// violations and a 5-block minimum overshoot on a straddling position; and the
+// Hydration app's own countdown.
+describe('cooldownExpiresAt — port of pallet_gigahdx::cooldown_expires_at', () => {
+  const SWITCH = 13_762_620   // parameters.twoSecBlocksSince, live
+  const COOLDOWN = 1_209_600  // gigaHdx.cooldownPeriod, live
+
+  it('adds the full cooldown to a position opened at or after the switch', () => {
+    expect(cooldownExpiresAt(14_102_268, SWITCH, COOLDOWN)).toBe(14_102_268 + 1_209_600)
+    expect(cooldownExpiresAt(SWITCH, SWITCH, COOLDOWN)).toBe(SWITCH + 1_209_600)
+  })
+
+  it('keeps the old 6s cooldown for a position that matured before the switch', () => {
+    // start + 403,200 = 13,749,927, still short of the switch
+    expect(cooldownExpiresAt(13_346_727, SWITCH, COOLDOWN)).toBe(13_749_927)
+  })
+
+  it('triples the blocks left at the switch, preserving wall-clock', () => {
+    // start 13,369,693: old expiry 13,772,893 is 10,273 blocks past the switch,
+    // so those become 30,819 two-second blocks. Confirmed on chain: this
+    // position unlocked 5 blocks after 13,793,439.
+    expect(cooldownExpiresAt(13_369_693, SWITCH, COOLDOWN)).toBe(13_793_439)
+    // The account whose page prompted this: matches the app's ~4 days, not the
+    // event's stale 13,934,973 (which had already passed).
+    expect(cooldownExpiresAt(13_531_773, SWITCH, COOLDOWN)).toBe(14_279_679)
+  })
+
+  it('treats the unset u32::MAX sentinel as "no switch happened"', () => {
+    expect(cooldownExpiresAt(13_531_773, 0xFFFFFFFF, COOLDOWN)).toBe(13_531_773 + 1_209_600)
+  })
+})
+
+describe('withCooldownExpiries', () => {
+  const A = '0x' + 'aa'.repeat(32)
+  const pos = (startBlock: number) =>
+    ({ accountId: A, startBlock, expiryBlock: 0, payoutHdx: 1, payoutRaw: 10n ** 12n })
+
+  it('stamps each position with its recomputed expiry', () => {
+    const out = withCooldownExpiries([pos(13_531_773)], 13_762_620, 1_209_600)
+    expect(out[0].expiryBlock).toBe(14_279_679)
+  })
+
+  it('re-sorts by the recomputed expiry so the earliest unlock is first', () => {
+    // Straddling positions get tripled remainders, so start order does not
+    // imply maturity order once a post-switch position is in the mix.
+    const out = withCooldownExpiries([pos(13_760_000), pos(13_346_727)], 13_762_620, 1_209_600)
+    expect(out.map(p => p.startBlock)).toEqual([13_346_727, 13_760_000])
+  })
+})
+
+// Locks overlap: they all bite the same free balance, so the binding amount is
+// the MAX across lock sources, not the sum. buildBindingTimeline already
+// resolves that per account and attributes each envelope drop to a cause; the
+// dashboard must aggregate THOSE slices rather than re-summing raw per-source
+// amounts (which double-counted an account whose ghdxlock and pyconvot cover
+// the same tokens).
+describe('unlockSeriesFromTimelines — overlap-corrected unlock buckets', () => {
+  const HDX = 10n ** 12n
+  const now = Date.UTC(2026, 8, 2)
+  const day = 86_400_000
+  const buckets = [
+    { from: now, to: now + 7 * day },
+    { from: now + 7 * day, to: now + 14 * day },
+  ]
+  const slices = (...s: { state: string; cause: string; amount: bigint; until?: number; conditional?: boolean; linear?: boolean }[]) =>
+    s.map(x => ({
+      state: x.state, cause: x.cause, amount: x.amount.toString(),
+      ...(x.until ? { until: new Date(x.until).toISOString() } : {}),
+      ...(x.conditional ? { conditional: true } : {}),
+      ...(x.linear ? { linear: true } : {}),
+    }))
+
+  it('counts an overlapping gigahdx+vote account once, not twice', () => {
+    // One account, 2.65M frozen, covered by BOTH a matured ghdxlock and an equal
+    // conviction prior. The timeline emits a single slice for the real release.
+    const r = unlockSeriesFromTimelines(
+      [slices({ state: 'scheduled', cause: 'gigahdx+vote', amount: 2_646_564n * HDX, until: now + 3 * day })],
+      buckets, now,
+    )
+    expect(r.buckets[0].gigahdx).toBeCloseTo(2_646_564, 0)
+    expect(r.buckets[0].vote).toBe(0)
+    expect(r.buckets[0].gigahdx + r.buckets[0].vote + r.buckets[0].vesting).toBeCloseTo(2_646_564, 0)
+  })
+
+  it('puts already-releasable balance in the now column, attributed by cause', () => {
+    const r = unlockSeriesFromTimelines(
+      [slices({ state: 'releasable', cause: 'gigahdx', amount: 11_236_878n * HDX })],
+      buckets, now,
+    )
+    expect(r.now.gigahdx).toBeCloseTo(11_236_878, 0)
+    expect(r.buckets[0].gigahdx).toBe(0)
+  })
+
+  it('routes a scheduled slice past the horizon to later, and open-ended to active', () => {
+    const r = unlockSeriesFromTimelines(
+      [slices(
+        { state: 'scheduled', cause: 'vesting', amount: 500n * HDX, until: now + 90 * day },
+        { state: 'active', cause: 'vote', amount: 300n * HDX },
+      )],
+      buckets, now,
+    )
+    expect(r.later.vesting).toBeCloseTo(500, 0)
+    expect(r.active.vote).toBeCloseTo(300, 0)
+    expect(r.buckets.every(b => b.vesting === 0)).toBe(true)
+  })
+
+  // The ghdxlock source emits a CONDITIONAL step for the still-staked portion:
+  // "if this holder unstaked right now, it would free one cooldown from now".
+  // Nobody has requested it, so it is not an upcoming unlock — live, 573 such
+  // slices carried 502M HDX, 23x the entire pending pool, and would have
+  // dwarfed the real series.
+  it('excludes a conditional step, which is a hypothetical not a pending unlock', () => {
+    const r = unlockSeriesFromTimelines(
+      [slices({ state: 'scheduled', cause: 'gigahdx', amount: 502_062_216n * HDX, until: now + 3 * day, conditional: true })],
+      buckets, now,
+    )
+    expect(r.buckets[0].gigahdx).toBe(0)
+    expect(r.now.gigahdx).toBe(0)
+    expect(r.later.gigahdx).toBe(0)
+    expect(r.active.gigahdx).toBe(0)
+  })
+
+  // A vesting schedule releases continuously; its timeline slice sits at the
+  // schedule END (overlap attribution needs one step), flagged linear. The
+  // chart must spread it over its span — a point mass at the end date piled a
+  // whole multi-month schedule into one bucket (live: 7.03M HDX all in the
+  // month of the schedule end, nothing in the months it actually vests over).
+  it('spreads a linear slice evenly over its span', () => {
+    const r = unlockSeriesFromTimelines(
+      [slices({ state: 'scheduled', cause: 'vesting', amount: 1_400n * HDX, until: now + 14 * day, linear: true })],
+      buckets, now,
+    )
+    expect(r.buckets[0].vesting).toBeCloseTo(700, 6)
+    expect(r.buckets[1].vesting).toBeCloseTo(700, 6)
+    expect(r.later.vesting).toBeCloseTo(0, 6)
+  })
+
+  it('sends the linear tail past the horizon to later, pro-rata', () => {
+    const r = unlockSeriesFromTimelines(
+      [slices({ state: 'scheduled', cause: 'vesting', amount: 2_800n * HDX, until: now + 28 * day, linear: true })],
+      buckets, now,
+    )
+    expect(r.buckets[0].vesting).toBeCloseTo(700, 6)
+    expect(r.buckets[1].vesting).toBeCloseTo(700, 6)
+    expect(r.later.vesting).toBeCloseTo(1_400, 6)
+  })
+
+  it('starts a linear spread at the previous dated step, not at now', () => {
+    const r = unlockSeriesFromTimelines(
+      [slices(
+        { state: 'scheduled', cause: 'vote', amount: 100n * HDX, until: now + 7 * day },
+        { state: 'scheduled', cause: 'vesting', amount: 1_400n * HDX, until: now + 21 * day, linear: true },
+      )],
+      buckets, now,
+    )
+    // Buckets are half-open [from, to): a step at exactly +7d opens bucket 2.
+    expect(r.buckets[1].vote).toBeCloseTo(100, 6)
+    expect(r.buckets[0].vesting).toBeCloseTo(0, 6)
+    // The vesting drop accrued over [+7d, +21d]: half inside bucket 2, half past the horizon.
+    expect(r.buckets[1].vesting).toBeCloseTo(700, 6)
+    expect(r.later.vesting).toBeCloseTo(700, 6)
+  })
+
+  it('sums across accounts into the bucket holding each slice date', () => {
+    const r = unlockSeriesFromTimelines(
+      [
+        slices({ state: 'scheduled', cause: 'gigahdx', amount: 10n * HDX, until: now + 1 * day }),
+        slices({ state: 'scheduled', cause: 'gigahdx', amount: 25n * HDX, until: now + 9 * day }),
+      ],
+      buckets, now,
+    )
+    expect(r.buckets[0].gigahdx).toBeCloseTo(10, 0)
+    expect(r.buckets[1].gigahdx).toBeCloseTo(25, 0)
+  })
+})
+
+describe('unlockKeyForCause', () => {
+  it('maps a single cause to its series key', () => {
+    expect(unlockKeyForCause('gigahdx')).toBe('gigahdx')
+    expect(unlockKeyForCause('vesting')).toBe('vesting')
+    expect(unlockKeyForCause('vote')).toBe('vote')
+  })
+
+  it('attributes a tie to the dated lock that gates the release, not the vote', () => {
+    expect(unlockKeyForCause('gigahdx+vote')).toBe('gigahdx')
+    expect(unlockKeyForCause('vote+vesting')).toBe('vesting')
+  })
+
+  it('ignores causes with no series of their own', () => {
+    expect(unlockKeyForCause('staking')).toBe(null)
+    expect(unlockKeyForCause('')).toBe(null)
   })
 })
