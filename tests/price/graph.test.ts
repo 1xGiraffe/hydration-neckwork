@@ -476,7 +476,7 @@ describe('resolvePrices', () => {
       [10],
       [[34, 1007]],
       new Map(),
-      [10],
+      [[10]],
       { minGraphPathLiquidityUsd: 12_000 },
     );
 
@@ -530,7 +530,7 @@ describe('resolvePrices', () => {
       [10],
       [[34, 1007]],
       new Map([[4200, 100n * one18]]),
-      [10],
+      [[10]],
       {
         minGraphPathLiquidityUsd: 12_000,
         lpEquivalences: new Map([[4200, 420]]),
@@ -1318,7 +1318,7 @@ describe('Fallback 2: non-USDT anchor with stableswap spot price', () => {
 
     const { prices } = resolvePrices(
       omnipoolAssets, [], stableswapPools, decimals,
-      10, 1, [10, 22, 222], [], new Map(), [10, 22],
+      10, 1, [10, 22, 222], [], new Map(), [[10, 22]],
     );
 
     const usdtPrice = parseFloat(prices.get(10)!);
@@ -1364,7 +1364,7 @@ describe('Fallback 2: non-USDT anchor with stableswap spot price', () => {
 
     const { prices } = resolvePrices(
       omnipoolAssets, [], stableswapPools, decimals,
-      10, 1, [10, 22, 222], [], new Map(), [10, 22],
+      10, 1, [10, 22, 222], [], new Map(), [[10, 22]],
     );
 
     // HOLLAR should NOT be $1.00 — it should reflect the depeg
@@ -1427,7 +1427,7 @@ describe('Fallback 2: non-USDT anchor with stableswap spot price', () => {
 
     const { prices } = resolvePrices(
       omnipoolAssets, [], stableswapPools, decimals,
-      10, 1, [10, 22, 222], [[10, 1002]], new Map(), [10, 22],
+      10, 1, [10, 22, 222], [[10, 1002]], new Map(), [[10, 22]],
     );
 
     const lrnaPrice = parseFloat(prices.get(1)!);
@@ -1472,7 +1472,7 @@ describe('Fallback 2: non-USDT anchor with stableswap spot price', () => {
 
     const { prices } = resolvePrices(
       omnipoolAssets, [], stableswapPools, decimals,
-      10, 1, [10, 22, 222], [], new Map(), [10, 22],
+      10, 1, [10, 22, 222], [], new Map(), [[10, 22]],
     );
 
     expect(prices.get(102)).toBe('0.800000000000');
@@ -1496,7 +1496,7 @@ describe('Fallback 2: non-USDT anchor with stableswap spot price', () => {
     // No stableswap pools at all
     const { prices } = resolvePrices(
       omnipoolAssets, [], [], decimals,
-      10, 1, [222], [], new Map(), [10, 22],
+      10, 1, [222], [], new Map(), [[10, 22]],
     );
 
     expect(prices.size).toBe(2);
@@ -1530,7 +1530,7 @@ describe('Fallback 2: non-USDT anchor with stableswap spot price', () => {
 
     const { prices } = resolvePrices(
       omnipoolAssets, xykPools, stableswapPools, decimals,
-      10, 1, [10, 22, 222], [], new Map(), [10, 22],
+      10, 1, [10, 22, 222], [], new Map(), [[10, 22]],
     );
 
     expect(prices.get(10)).toBeDefined();
@@ -1585,7 +1585,7 @@ describe('Fallback 2: non-USDT anchor with stableswap spot price', () => {
 
     const { prices } = resolvePrices(
       omnipoolAssets, [], stableswapPools, decimals,
-      10, 1, [10, 22, 222], [[5, 1001]], new Map([[690, 11_074035652408871725027224n]]), [10, 22],
+      10, 1, [10, 22, 222], [[5, 1001]], new Map([[690, 11_074035652408871725027224n]]), [[10, 22]],
     );
 
     expect(prices.get(5)).toBeDefined();
@@ -1656,7 +1656,7 @@ describe('Fallback 2: non-USDT anchor with stableswap spot price', () => {
 
     const { prices, hopCounts } = resolvePrices(
       omnipoolAssets, xykPools, stableswapPools, decimals,
-      10, 1, [10, 22, 222], [[5, 1001]], new Map([[690, 11_074035652408871725027224n]]), [10, 22],
+      10, 1, [10, 22, 222], [[5, 1001]], new Map([[690, 11_074035652408871725027224n]]), [[10, 22]],
     );
 
     expect(prices.get(1001)).toBeDefined();
@@ -1664,5 +1664,69 @@ describe('Fallback 2: non-USDT anchor with stableswap spot price', () => {
     expect(hopCounts.get(5)).toBe(0);
     expect(prices.get(690)).toBeDefined();
     expect(prices.get(69)).toBeUndefined();
+  });
+});
+
+describe('USD reference basket preference', () => {
+  const state = (hubReserve: bigint, reserve: bigint): OmnipoolAssetState => ({
+    hubReserve, reserve, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
+  });
+  // 12-decimal HDX, 18-decimal DAI, 10-decimal DOT, 6-decimal USDT/USDC.
+  const decimals: AssetDecimals = new Map([[0, 12], [1, 12], [2, 18], [5, 10], [10, 6], [22, 6]]);
+  const canonicalThenDai: number[][] = [[10, 22], [2]];
+
+  it('anchors on the canonical basket whenever a member is in the Omnipool, exactly as without later baskets', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [10, state(1_000_000_000_000_000n, 1_000_000_000n)],          // 1000 H2O : 1000 USDT
+      [2, state(1_000_000_000_000_000n, 1_050_000_000_000_000_000_000n)], // 1000 H2O : 1050 DAI (off peg)
+      [5, state(1_000_000_000_000_000n, 40_000_000_000_000n)],       // 1000 H2O : 4000 DOT
+    ]);
+
+    const withFallback = resolvePrices(omnipoolAssets, [], [], decimals, 10, 1, [10, 22, 222], [], new Map(), canonicalThenDai);
+    const canonicalOnly = resolvePrices(omnipoolAssets, [], [], decimals, 10, 1, [10, 22, 222], [], new Map(), [[10, 22]]);
+
+    expect(withFallback.prices).toEqual(canonicalOnly.prices);
+    expect(withFallback.hopCounts).toEqual(canonicalOnly.hopCounts);
+    expect(withFallback.unpricedConnected).toEqual(canonicalOnly.unpricedConnected);
+    // DAI is an ordinary Omnipool asset here: priced by the pool, never seeded at $1.
+    expect(withFallback.prices.get(1)).toBe('1.000000000000');
+    expect(withFallback.prices.get(2)).toBe('0.952380952380');
+    expect(withFallback.prices.get(5)).toBe('0.250000000000');
+  });
+
+  it('anchors on the next basket while no member of an earlier one is in the Omnipool', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [0, state(1_000_000_000_000_000n, 6_500_000_000_000_000_000n)],    // 1000 H2O : 6.5M HDX
+      [2, state(1_000_000_000_000_000n, 26_000_000_000_000_000_000_000n)], // 1000 H2O : 26000 DAI
+      [5, state(1_000_000_000_000_000n, 40_000_000_000_000n)],           // 1000 H2O : 4000 DOT
+    ]);
+
+    const { prices, hopCounts } = resolvePrices(omnipoolAssets, [], [], decimals, 10, 1, [10, 22, 222], [], new Map(), canonicalThenDai);
+
+    expect(prices.get(2)).toBe('1.000000000000');
+    expect(prices.get(1)).toBe('26.000000000000');
+    expect(prices.get(5)).toBe('6.500000000000');
+    expect(prices.get(0)).toBe('0.004000000000');
+    expect(hopCounts.get(2)).toBe(0);
+    expect(hopCounts.get(5)).toBe(0);
+    // The absent canonical basket is not seeded: a $1 row for an asset the pool
+    // does not hold would be a fabricated price.
+    expect(prices.has(10)).toBe(false);
+    expect(prices.has(22)).toBe(false);
+  });
+
+  it('with no basket in the Omnipool, still seeds the canonical basket and leaves H2O unpriced', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [0, state(1_000_000_000_000_000n, 6_500_000_000_000_000_000n)],
+      [5, state(1_000_000_000_000_000n, 40_000_000_000_000n)],
+    ]);
+
+    const { prices } = resolvePrices(omnipoolAssets, [], [], decimals, 10, 1, [10, 22, 222], [], new Map(), canonicalThenDai);
+
+    expect(prices.get(10)).toBe('1.000000000000');
+    expect(prices.get(22)).toBe('1.000000000000');
+    expect(prices.has(1)).toBe(false);
+    expect(prices.has(2)).toBe(false);
+    expect(prices.has(5)).toBe(false);
   });
 });
