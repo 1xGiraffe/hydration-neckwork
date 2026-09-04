@@ -6,17 +6,25 @@ import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../
 import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ConvictionTag, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
 import { LIQ_LABELS, MM_LABELS } from '../components/activityColors'
 import { RevenueRow } from '../components/RevenueRow'
-import { Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge } from '../components/ui'
+import { Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
+import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { convictionLabel, voteSideLabel, voteSubjectLabel } from '../utils/voteRows'
 
 export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: string }) {
   const label = activityLabel(slug)
   useDocumentTitle(`${label} ${id}`)
   const ref = parseId(id)
-  const { data: rows, isLoading, isError } = useBlockActivity(ref?.height ?? null)
+  const { data: rows, isLoading, isError, failureReason } = useBlockActivity(ref?.height ?? null)
   const row = rows?.find(r =>
     SLUG_TYPES[slug].includes(r.type)
     && (ref!.eventIndex != null ? r.eventIndex === ref!.eventIndex : r.extrinsicIndex === ref!.extrinsicIndex))
+  // Two ways this page is early rather than wrong: the block is not in the
+  // index at all, or it is served from the pending layer, which decodes trades,
+  // transfers, money-market actions and outbound XCM — so a liquidity, staking,
+  // vote or OTC link lands on a list that genuinely does not hold its row until
+  // the classifier runs at finality. Both wait (and keep asking) instead of
+  // asserting there is no such activity. See useAwaitingBlock.
+  const awaiting = useAwaitingBlock(ref?.height ?? null, isError || failureReason != null || (rows != null && !row), failureReason)
   const extId = row?.extrinsicIndex != null ? `${row.blockHeight}-${row.extrinsicIndex}` : null
   const { data: ext } = useExtrinsic(extId)
   const { data: stats } = useStats(!!row)
@@ -29,7 +37,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
   // a family the event never belonged to and strands the reader one click from what
   // it is. So resolve the event to its extrinsic and hand over to the activity that
   // owns it. Fetched only on that miss, so the found path costs nothing extra.
-  const missedEventId = rows && !row && ref?.eventIndex != null ? `${ref.height}-${ref.eventIndex}` : null
+  const missedEventId = rows && !row && !awaiting && ref?.eventIndex != null ? `${ref.height}-${ref.eventIndex}` : null
   const { data: missedEvent } = useEventAt(missedEventId)
   const handover = missedEvent ? subordinateActivityTarget(rows ?? [], missedEvent.extrinsicIndex) : null
 
@@ -66,6 +74,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
       </div>
 
       {!ref ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Invalid activity id</div>
+        : awaiting ? <AwaitingBlockCard height={ref.height} />
         : isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>No {label.toLowerCase()} activity found at {id}</div>
         : rows && !row && missedEventId && !missedEvent ? <div className="detail-card"><SkeletonRows /></div>
         : rows && !row && handover ? <div className="detail-card"><SkeletonRows /></div>

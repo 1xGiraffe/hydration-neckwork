@@ -1202,6 +1202,18 @@ svg { display: block; }
 
 /* ============ DETAIL CARD ============ */
 .detail-card { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 18px; overflow: hidden; }
+/* "Waiting for block N" — a detail page opened before its block was indexed.
+   Deliberately quiet: this is data on its way, not a failure, so it reads like
+   a status line rather than an error card. The dot breathes to say the page is
+   still asking (and stops under prefers-reduced-motion, like every animation
+   here). */
+.awaiting-block { display: flex; align-items: flex-start; gap: 12px; padding: 20px 22px; }
+.awaiting-block .ab-dot { flex: 0 0 auto; width: 9px; height: 9px; margin-top: 4px; border-radius: 50%; background: var(--sky-deep); animation: ab-breathe 1.8s var(--ease-standard) infinite; }
+.awaiting-block .ab-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.awaiting-block .ab-title { font-size: 13px; color: var(--text-high); }
+.awaiting-block .ab-sub { font-size: 12px; color: var(--text-low); }
+@keyframes ab-breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .awaiting-block .ab-dot { animation: none; } }
 .dl { display: grid; grid-template-columns: 200px 1fr; }
 @media (max-width: 720px){ .dl { grid-template-columns: 1fr; } }
 .dl .dt { padding: 14px 18px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); border-bottom: 1px solid var(--separator); display: flex; align-items: center; }
