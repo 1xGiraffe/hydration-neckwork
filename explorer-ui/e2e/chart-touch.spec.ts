@@ -5,6 +5,10 @@ import type { Locator } from '@playwright/test'
 // browser claiming the gesture), the tap-set point sticks after the finger
 // lifts, and the tooltip is clamped inside the chart so it can never widen
 // the page into horizontal scroll on narrow screens.
+//
+// Two renderers share the `.apx-wrap` gesture surface: the price charts carry
+// `.apx-tip`, the dashboard charts (HdxCharts) `.hdx-tip`, so each test names
+// the tooltip of the chart it scrubs.
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true })
 
 // Dispatch a pointer event of the given type at a horizontal fraction of the
@@ -37,7 +41,7 @@ test('touch drag scrubs the peg chart crosshair and sticks after lift', async ({
   await expect(wrap).toHaveCSS('touch-action', 'pan-y')
 
   await pointerAt(wrap, 'pointerdown', 0.25)
-  const tip = page.locator('.apx-tip')
+  const tip = wrap.locator('.hdx-tip')
   await expect(tip).toBeVisible()
   const before = await tip.textContent()
 
@@ -55,7 +59,7 @@ test('peg chart tooltip is clamped inside the page at both edges', async ({ page
   await page.goto('/hollar')
   const wrap = page.locator('.apx-wrap').first()
   await expect(wrap).toBeVisible()
-  const tip = page.locator('.apx-tip')
+  const tip = wrap.locator('.hdx-tip')
 
   await pointerAt(wrap, 'pointerdown', 1)
   await expect(tip).toBeVisible()
@@ -98,8 +102,8 @@ test('mouse hover still clears when the pointer leaves the chart', async ({ page
   const box = (await wrap.boundingBox())!
 
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
-  await expect(page.locator('.apx-tip')).toBeVisible()
+  await expect(wrap.locator('.hdx-tip')).toBeVisible()
 
   await page.mouse.move(box.x + box.width / 2, box.y + box.height + 60)
-  await expect(page.locator('.apx-tip')).toHaveCount(0)
+  await expect(wrap.locator('.hdx-tip')).toHaveCount(0)
 })

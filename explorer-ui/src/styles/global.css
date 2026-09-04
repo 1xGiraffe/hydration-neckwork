@@ -2614,6 +2614,8 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .hdx-tip .t-row { display: flex; align-items: center; gap: 6px; color: var(--text-medium); }
 .hdx-tip .t-row i { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .hdx-tip .t-row .tv { margin-left: auto; padding-left: 12px; color: var(--text-high); font-weight: 600; }
+/* The stack total: a summed row, ruled off from the bands it adds up. */
+.hdx-tip .t-total { margin-top: 2px; padding-top: 4px; border-top: 1px solid var(--separator); color: var(--text-high); }
 .hdx-ax { font-family: 'GeistMono'; font-size: 10px; fill: var(--text-low); }
 .ribbon .cell .s { font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); }
 .hdx-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 14px; }

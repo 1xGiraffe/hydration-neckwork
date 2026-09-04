@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- chart primitives + shared fmtHdx/color-token module (mirrors ui.tsx) */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { compactAmount } from './ui'
+import { ChartTip, compactAmount } from './ui'
 import { ZoomReset, ZoomSelection, bracketToView, fracOfTime, useChartZoom, useZoomRefineValue } from './chartZoom'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 
@@ -66,9 +66,6 @@ export function ChartLegend({ items }: { items: { label: string; color: string }
   )
 }
 
-// Clamp a tooltip's left % so a translateX(-50%) tip doesn't spill the card edge.
-function tipLeft(pct: number): string { return `${Math.min(91, Math.max(9, pct))}%` }
-
 // Touch has no hover-out: a tapped tooltip deliberately stays open so it can be
 // read after the finger lifts, but it then needs a way OFF the screen. Clear it
 // when the next pointerdown lands anywhere outside the chart (the capture phase
@@ -118,7 +115,7 @@ export function ShareBar({ segments, h = 44 }: { segments: ShareSegment[]; h?: n
           ))}
         </g>
       </svg>
-      {hover && <div className="hdx-tip" style={{ left: tipLeft(hover.leftPct), top: h + 8 }}>{hover.tip}</div>}
+      {hover && <ChartTip className="hdx-tip" xPct={hover.leftPct} top={h + 8}>{hover.tip}</ChartTip>}
     </div>
   )
 }
@@ -266,7 +263,7 @@ export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCap
         })}
       </svg>
       {hover != null && columns[hover] && (
-        <div className="hdx-tip" style={{ left: tipLeft((colX(hover) + bw / 2) / W * 100), top: 2 }}>{columns[hover].tip}</div>
+        <ChartTip className="hdx-tip" xPct={(colX(hover) + bw / 2) / W * 100} top={2}>{columns[hover].tip}</ChartTip>
       )}
     </div>
   )
@@ -309,9 +306,48 @@ export function lineRuns(values: (number | null)[]): [number, number][] {
   return runs
 }
 
-const monthTick = (d: string) => {
-  const t = Date.parse(`${d}T00:00:00Z`)
-  return Number.isFinite(t) ? new Date(t).toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' }).replace(' ', ' ’') : d
+// X tick label at the granularity the DRAWN window justifies: month + year
+// across eras, month + day inside a few months, and the clock once a
+// zoom-refined window is down to a day or two — otherwise all four ticks of a
+// zoomed window read the same "Aug ’26", and an hourly grid printed its full
+// `YYYY-MM-DD HH:MM:SS` key. `spanSec` 0 (no usable time axis) keeps the
+// month + year form.
+//
+// `grainSec` caps that: the clock is only ever printed for a series whose points
+// are finer than a day. A daily series zoomed under two days would otherwise
+// label every tick "Sep 3 00:00" — a clock the data does not carry, which reads
+// as intraday precision that isn't there.
+export function axisTick(key: string, spanSec: number, grainSec = 0): string {
+  const t = Date.parse(key.includes(' ') ? `${key.replace(' ', 'T')}Z` : `${key}T00:00:00Z`)
+  if (!Number.isFinite(t)) return key
+  const d = new Date(t)
+  const day = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
+  if (!(spanSec > 0) || spanSec > 150 * 86_400) return d.toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' }).replace(' ', ' ’')
+  if (spanSec > 2 * 86_400 || grainSec >= 86_400) return day
+  return `${day} ${d.toISOString().slice(11, 16)}`
+}
+
+/**
+ * Tooltip date at the series' own resolution: a daily point names its day, a
+ * finer point adds the clock. Clipping a zoom window re-keys buckets to the full
+ * `YYYY-MM-DD HH:MM:SS` form, so without this a daily chart's tooltip gains a
+ * ` 00:00:00` the moment it is zoomed.
+ */
+export function tipDate(key: string, grainSec: number): string {
+  if (!/^\d{4}-\d{2}-\d{2}/.test(key)) return key
+  return grainSec > 0 && grainSec < 86_400 ? key.slice(0, 16) : key.slice(0, 10)
+}
+
+// The drawn series' own resolution: the smallest gap between consecutive points.
+// A single point (or a non-time axis) has no grain, hence 0 — "unknown", which
+// leaves the tick formatter's window-based behaviour unchanged.
+export function seriesGrainSec(times: number[]): number {
+  let grain = 0
+  for (let i = 1; i < times.length; i++) {
+    const gap = times[i] - times[i - 1]
+    if (gap > 0 && (grain === 0 || gap < grain)) grain = gap
+  }
+  return grain
 }
 // Four evenly spaced x-axis date ticks (first/last + thirds).
 function dateTicks(n: number): number[] {
@@ -344,8 +380,10 @@ export interface RefinedGrid { buckets: string[]; series: AreaSeries[] }
 const acceptGrid = (r: RefinedGrid, span: number) =>
   r.buckets.length > span && r.series.every(s => s.values.length === r.buckets.length)
 
-export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, showShare = true, zoomKey, refine }: {
+export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, showShare = true, totalLabel, zoomKey, refine }: {
   buckets: string[]; series: AreaSeries[]; h?: number; yFmt?: (v: number) => string; showShare?: boolean
+  /** Adds a summed stack-top row under the bands in the tooltip, under this label. */
+  totalLabel?: string
   /** Query-param name persisting the zoom window (back-navigable, shareable). */
   zoomKey?: string
   /** Refetch-on-zoom: a finer grid for base-index window [lo, hi]. */
@@ -400,6 +438,8 @@ export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, show
   const vTimes = bucketSecs(vBuckets)
   const viewSpan = zoom.view.to - zoom.view.from
   const timeAxis = viewSpan > 0 && vTimes.length === n && vTimes.every(Number.isFinite)
+  // The drawn points' own spacing bounds how precisely a label may name them.
+  const grainSec = timeAxis ? seriesGrainSec(vTimes) : 0
   // Clamped into the plot: the slice deliberately keeps the point on each side of
   // the window so the line reaches both edges, and this chart's plot is inset by a
   // y-axis gutter — unclamped, those points draw over the axis and out to the
@@ -467,19 +507,24 @@ export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, show
           </g>
         ))}
         {dateTicks(n).map(i => (
-          <text key={i} className="hdx-ax" x={sx(i).toFixed(1)} y={h - 4} textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>{monthTick(vBuckets[i])}</text>
+          <text key={i} className="hdx-ax" x={sx(i).toFixed(1)} y={h - 4} textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>{axisTick(vBuckets[i], timeAxis ? viewSpan : 0, grainSec)}</text>
         ))}
         {hover != null && !zoom.selecting && <line x1={sx(hover).toFixed(1)} x2={sx(hover).toFixed(1)} y1={padT} y2={h - padB} stroke="var(--text-medium)" strokeOpacity="0.55" />}
       </svg>
       {hover != null && !zoom.selecting && (
-        <div className="hdx-tip" style={{ left: tipLeft(sx(hover) / W * 100), top: 2 }}>
-          <span className="t-d">{vBuckets[hover]}</span>
+        <ChartTip className="hdx-tip" xPct={sx(hover) / W * 100} top={2}>
+          <span className="t-d">{tipDate(vBuckets[hover], grainSec)}</span>
           {vSeries.map(s => s.values[hover] != null && (
             <span key={s.key} className="t-row"><i style={{ background: s.color }} />{s.label}
               <span className="tv">{yFmt(s.values[hover]!)}{showShare && hoverTotal > 0 && <span className="muted"> · {(s.values[hover]! / hoverTotal * 100).toFixed(1)}%</span>}</span>
             </span>
           ))}
-        </div>
+          {/* The stack top is a quantity of its own on a chart whose bands share a
+              unit (collateral, TVL) — reading it off the axis is guesswork. */}
+          {totalLabel && vSeries.length > 1 && hoverTotal > 0 && (
+            <span className="t-row t-total">{totalLabel}<span className="tv">{yFmt(hoverTotal)}</span></span>
+          )}
+        </ChartTip>
       )}
       {zoom.preview && (() => {
         // The shade IS the window a lift commits, on the view's time domain, so
@@ -502,8 +547,15 @@ export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, show
 // `floorZero` clamps the axis floor at 0 — a price or share axis must not pad
 // into negative territory when the data sits near its floor.
 const LINE_W = 860, LINE_PAD_L = 56, LINE_PAD_R = 6
-export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) => v.toFixed(4), floorZero, zoomKey, refine }: {
+export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) => v.toFixed(4), floorZero, band, zoomKey, refine }: {
   buckets: string[]; series: AreaSeries[]; h?: number; yFmt?: (v: number) => string; floorZero?: boolean
+  /**
+   * Draw two of the series as one filled low/high envelope: a RANGE reads as an
+   * area between its bounds, not as two more measurements. `lo`/`hi` name the
+   * pair's keys and `label` the single tooltip row that replaces their two. A
+   * refined window carrying only the main line simply has no pair, and no band.
+   */
+  band?: { lo: string; hi: string; label: string }
   /** Query-param name persisting the zoom window (back-navigable, shareable). */
   zoomKey?: string
   /** Refetch-on-zoom: a finer grid for base-index window [lo, hi]. */
@@ -560,6 +612,8 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
   const vTimes = bucketSecs(vBuckets)
   const viewSpan = zoom.view.to - zoom.view.from
   const timeAxis = viewSpan > 0 && vTimes.length === n && vTimes.every(Number.isFinite)
+  // The drawn points' own spacing bounds how precisely a label may name them.
+  const grainSec = timeAxis ? seriesGrainSec(vTimes) : 0
   // Clamped into the plot: the slice deliberately keeps the point on each side of
   // the window so the line reaches both edges, and this chart's plot is inset by a
   // y-axis gutter — unclamped, those points draw over the axis and out to the
@@ -569,6 +623,26 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
   const xf = (i: number) => Math.min(1, Math.max(0, timeAxis ? (vTimes[i] - zoom.view.from) / viewSpan : n > 1 ? i / (n - 1) : 0))
   const sx = (i: number) => padL + xf(i) * plotW
   const sy = (v: number) => padT + (1 - (v - min) / ((max - min) || 1)) * plotH
+  // The band's bounds are ordinary series, so they slice, clip and refine with
+  // everything else; only their DRAWING is joined here. Filled per contiguous
+  // run where both bounds exist — a gap in either leaves the envelope open
+  // rather than closing it across missing weeks.
+  const bLo = band ? vSeries.find(s => s.key === band.lo) : undefined
+  const bHi = band ? vSeries.find(s => s.key === band.hi) : undefined
+  const bandKeys = bLo && bHi ? [bLo.key, bHi.key] : []
+  const bandAreas = bLo && bHi
+    ? lineRuns(bHi.values.map((v, i) => (v != null && bLo.values[i] != null ? v : null)))
+      .filter(([a, b]) => b > a)
+      .map(([a, b]) => {
+        const up = []
+        const down = []
+        for (let i = a; i <= b; i++) {
+          up.push(`${i === a ? 'M' : 'L'} ${sx(i).toFixed(1)} ${sy(bHi.values[i]!).toFixed(1)}`)
+          down.push(`L ${sx(b - (i - a)).toFixed(1)} ${sy(bLo.values[b - (i - a)]!).toFixed(1)}`)
+        }
+        return `${up.join(' ')} ${down.join(' ')} Z`
+      })
+    : []
   // Back/forward can change the window without a gesture; a stale hover index
   // past the new slice must not address it.
   if (hover != null && hover > n - 1) setHover(null)
@@ -604,27 +678,38 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
             </g>
           )
         })}
+        {bandAreas.map((d, i) => <path key={`band${i}`} d={d} fill={bHi!.color} fillOpacity={0.2} />)}
         {min < 1 && max > 1 && <line x1={padL} x2={W - padR} y1={sy(1).toFixed(1)} y2={sy(1).toFixed(1)} stroke="var(--text-low)" strokeDasharray="3 4" strokeOpacity="0.6" />}
-        {vSeries.map(s => (
-          <g key={s.key}>
-            {lineRuns(s.values).map(([a, b]) => a === b
-              ? <circle key={a} cx={sx(a).toFixed(1)} cy={sy(s.values[a]!).toFixed(1)} r="2.5" fill={s.color} />
-              : <path key={a} d={s.values.slice(a, b + 1).map((v, j) => `${j ? 'L' : 'M'} ${sx(a + j).toFixed(1)} ${sy(v!).toFixed(1)}`).join(' ')}
-                  fill="none" stroke={s.color} strokeWidth="2" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />)}
-          </g>
-        ))}
+        {vSeries.map(s => {
+          // A band bound is the edge of a filled range, so it wears a hairline
+          // instead of the full 2px a standalone line gets.
+          const edge = bandKeys.includes(s.key)
+          return (
+            <g key={s.key} strokeOpacity={edge ? 0.5 : 1}>
+              {lineRuns(s.values).map(([a, b]) => a === b
+                ? <circle key={a} cx={sx(a).toFixed(1)} cy={sy(s.values[a]!).toFixed(1)} r="2.5" fill={s.color} fillOpacity={edge ? 0.5 : 1} />
+                : <path key={a} d={s.values.slice(a, b + 1).map((v, j) => `${j ? 'L' : 'M'} ${sx(a + j).toFixed(1)} ${sy(v!).toFixed(1)}`).join(' ')}
+                    fill="none" stroke={s.color} strokeWidth={edge ? 1 : 2} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />)}
+            </g>
+          )
+        })}
         {dateTicks(n).map(i => (
-          <text key={i} className="hdx-ax" x={sx(i).toFixed(1)} y={h - 4} textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>{monthTick(vBuckets[i])}</text>
+          <text key={i} className="hdx-ax" x={sx(i).toFixed(1)} y={h - 4} textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>{axisTick(vBuckets[i], timeAxis ? viewSpan : 0, grainSec)}</text>
         ))}
         {hover != null && !zoom.selecting && <line x1={sx(hover).toFixed(1)} x2={sx(hover).toFixed(1)} y1={padT} y2={h - padB} stroke="var(--text-medium)" strokeOpacity="0.55" />}
       </svg>
       {hover != null && !zoom.selecting && (
-        <div className="hdx-tip" style={{ left: tipLeft(sx(hover) / W * 100), top: 2 }}>
-          <span className="t-d">{vBuckets[hover]}</span>
-          {vSeries.map(s => s.values[hover] != null && (
+        <ChartTip className="hdx-tip" xPct={sx(hover) / W * 100} top={2}>
+          <span className="t-d">{tipDate(vBuckets[hover], grainSec)}</span>
+          {vSeries.filter(s => !bandKeys.includes(s.key)).map(s => s.values[hover] != null && (
             <span key={s.key} className="t-row"><i style={{ background: s.color }} />{s.label} <span className="tv">{yFmt(s.values[hover]!)}</span></span>
           ))}
-        </div>
+          {/* One row for the pair: a range is read as an interval, not as two numbers. */}
+          {bLo && bHi && bLo.values[hover] != null && bHi.values[hover] != null && (
+            <span className="t-row"><i style={{ background: bHi.color, opacity: 0.5 }} />{band!.label}
+              <span className="tv">{yFmt(bLo.values[hover]!)} – {yFmt(bHi.values[hover]!)}</span></span>
+          )}
+        </ChartTip>
       )}
       {zoom.preview && (() => {
         // The shade IS the window a lift commits, on the view's time domain, so
@@ -707,11 +792,11 @@ export function GigaLiquidationChart({ currentPrice, points, h = 190 }: { curren
         ))}
       </svg>
       {hover != null && (
-        <div className="hdx-tip" style={{ left: tipLeft((padL + hover * bw + bw / 2) / W * 100), top: 2 }}>
+        <ChartTip className="hdx-tip" xPct={(padL + hover * bw + bw / 2) / W * 100} top={2}>
           <span className="t-d">if HDX falls to {fmtP(priceAt(hover))} ({dropPct(priceAt(hover))})</span>
           <span className="t-row"><i style={{ background: 'var(--red)' }} />at this level<span className="tv">{fmt(sums[hover])} GIGAHDX</span></span>
           <span className="t-row">cumulative<span className="tv">{fmt(cum[hover])} GIGAHDX ({totalAtRisk > 0 ? (cum[hover] / totalAtRisk * 100).toFixed(0) : 0}% of at-risk)</span></span>
-        </div>
+        </ChartTip>
       )}
     </div>
   )
@@ -821,7 +906,7 @@ export function MirroredBarChart({ data, h = 190, xTicks, upColor = 'var(--green
         })}
       </svg>
       {hover != null && bars[hover] && (
-        <div className="hdx-tip" style={{ left: tipLeft((padX + hover * bw + bw / 2) / W * 100), top: 2 }}>{bars[hover].tip}</div>
+        <ChartTip className="hdx-tip" xPct={(padX + hover * bw + bw / 2) / W * 100} top={2}>{bars[hover].tip}</ChartTip>
       )}
     </div>
   )
