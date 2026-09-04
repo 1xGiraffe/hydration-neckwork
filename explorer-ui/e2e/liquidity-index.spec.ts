@@ -54,9 +54,13 @@ test('a row opens the pool it names', async ({ page }) => {
 
 test('reaches /liquidity from the nav, and the nav says where you are', async ({ page }) => {
   await page.goto('/assets')
-  await page.getByRole('navigation').getByRole('link', { name: 'Liquidity' }).click()
+  // Liquidity lives under the Assets dropdown at every width (Topbar.tsx), so
+  // the trigger has to be opened before its entry can be clicked.
+  await page.locator('.nav .nav-unfold-group .nav-trigger').hover()
+  await page.locator('.nav .nav-unfold-group .nav-menu a', { hasText: 'Liquidity' }).click()
   await expect(page).toHaveURL(/\/liquidity$/)
-  await expect(page.getByRole('navigation').getByRole('link', { name: 'Liquidity' })).toHaveClass(/on|active/)
+  // A pool route highlights its group, so the trigger is what reads "on".
+  await expect(page.locator('.nav .nav-unfold-group .nav-trigger')).toHaveClass(/on|active/)
 })
 
 test('no horizontal overflow at 390px', async ({ page }) => {
