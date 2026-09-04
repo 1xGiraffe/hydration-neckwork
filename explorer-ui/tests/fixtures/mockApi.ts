@@ -1866,6 +1866,31 @@ function buildHollar(): HollarDashboard {
   ]
   const totalHoldingsUsd = collaterals.reduce((s, c) => s + (c.holdingsUsd ?? 0), 0)
 
+  // Reserves, daily from launch. One series per collateral, each ending exactly
+  // on that collateral's current holding so the chart's head agrees with the
+  // table above it; the two collaterals the module has spent down end at zero.
+  const reserveHistory = (() => {
+    const launch = Date.UTC(2025, 8, 22)
+    const days: string[] = []
+    for (let t = launch; t <= HOLLAR_MOCK_ANCHOR; t += DAY) days.push(new Date(t).toISOString().slice(0, 10))
+    const series = collaterals.map(c => {
+      const r2 = rng(c.asset.assetId)
+      const now = Number(c.holdings) / 10 ** c.asset.decimals
+      const peak = Math.max(now * 1.6, 60_000)
+      return {
+        asset: c.asset,
+        values: days.map((_, i) => {
+          if (i === days.length - 1) return now
+          const f = i / Math.max(1, days.length - 1)
+          // Ramp up over the first third, then drift toward the current holding.
+          const shape = f < 0.33 ? peak * (f / 0.33) : peak + (now - peak) * ((f - 0.33) / 0.67)
+          return Math.max(0, Math.round(shape * (0.9 + r2() * 0.2)))
+        }),
+      }
+    })
+    return { days, series }
+  })()
+
   // Sparse — most days are quiet, matching the live "last arb 1.8 days ago" norm.
   const arbitrageDaily: HollarArbDay[] = Array.from({ length: 60 }, (_, i) => {
     const daysAgo = 59 - i
@@ -1899,7 +1924,7 @@ function buildHollar(): HollarDashboard {
     peg: { hourly, within25bpsPct, maxDevBps, min30d: Math.min(...closes), max30d: Math.max(...closes) },
     supply: { total, holders: 4_215, inStablepools, inOmnipool, other },
     hsm: {
-      totalHoldingsUsd, collaterals, arbitrageDaily, tradesDaily,
+      totalHoldingsUsd, collaterals, reserveHistory, arbitrageDaily, tradesDaily,
       lastArb: { ts: '2026-07-08 20:05:00', direction: 'in', asset: sUSDe, hollarAmount: 4_200 },
     },
     pools,

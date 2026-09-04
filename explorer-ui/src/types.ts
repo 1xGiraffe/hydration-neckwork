@@ -1185,6 +1185,9 @@ export interface HollarCollateral {
   lastArbTs: string | null
   lastArbDirection: 'in' | 'out' | null
 }
+// One collateral's balance in the HSM, daily since launch — null on days the
+// aToken reconstruction cannot reach (before its anchor snapshot).
+export interface HollarReserveSeries { asset: AssetRef; values: (number | null)[] }
 export interface HollarArbDay { date: string; hollarIn: number; hollarOut: number }
 export interface HollarTradeDay { date: string; bought: number; sold: number }
 export interface HollarPool {
@@ -1221,6 +1224,7 @@ export interface HollarDashboard {
   hsm: {
     totalHoldingsUsd: number
     collaterals: HollarCollateral[]
+    reserveHistory: { days: string[]; series: HollarReserveSeries[] }
     arbitrageDaily: HollarArbDay[]
     tradesDaily: HollarTradeDay[]
     lastArb: { ts: string; direction: 'in' | 'out'; asset: AssetRef; hollarAmount: number } | null

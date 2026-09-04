@@ -112,6 +112,35 @@ function HsmCollateralTable({ collaterals, now }: { collaterals: HollarCollatera
   )
 }
 
+// HSM reserves through time: one band per collateral the module has held, in
+// token units. Every approved collateral is a dollar stablecoin, so the stack
+// top reads as the module's reserve value — and the bands wear their tokens'
+// icon-sampled colors, the same identity the collateral table and pool cards use.
+function ReservesChart({ d }: { d: HollarDashboard }) {
+  const { days, series } = d.hsm.reserveHistory
+  const colorFor = useAssetColors(series.map(s => s.asset))
+  const bands: AreaSeries[] = series.map(s => ({
+    key: String(s.asset.assetId), label: s.asset.symbol, color: colorFor(s.asset), values: s.values,
+  }))
+  if (!bands.length) return null
+  const reservesNow = series.reduce((sum, s) => sum + (lastNum(s.values) ?? 0), 0)
+  return (
+    <>
+      <SecTitle title="Reserves" subtitle="collateral held by the module, since launch" />
+      <div className="pf-card">
+        <ChartLegend items={bands.map(b => ({ label: b.label, color: b.color }))} />
+        <StackedAreaChart buckets={days} series={bands} h={200} yFmt={v => fmtAmt(v)} totalLabel="Total reserves" zoomKey="zhsmres" />
+        <div className="hdx-note">
+          The module holds {fmtAmt(reservesNow)} tokens of collateral today, all of it dollar-pegged, so the stack top also
+          reads as its reserve value. It takes collateral IN when a user buys HOLLAR from it and spends it OUT when it buys
+          HOLLAR back, so the curve is the running record of those two flows — plus the money-market interest it earns in
+          between, since every approved collateral sits supplied as an aToken. Drag across the chart to zoom into a window.
+        </div>
+      </div>
+    </>
+  )
+}
+
 function ArbitrageChart({ d, now }: { d: HollarDashboard; now: number }) {
   const daily = d.hsm.arbitrageDaily
   const bars: MirrorBar[] = daily.map(a => ({
@@ -172,6 +201,7 @@ function HsmSection({ d, now }: { d: HollarDashboard; now: number }) {
       <SecTitle title="Stability Module" subtitle="HSM" />
       <HsmCollateralTable collaterals={d.hsm.collaterals} now={now} />
       <div className="hdx-note" style={{ margin: '12px 0 24px' }}>{HSM_EXPLAINER}</div>
+      <ReservesChart d={d} />
       <ArbitrageChart d={d} now={now} />
       <TradesChart d={d} />
     </>
