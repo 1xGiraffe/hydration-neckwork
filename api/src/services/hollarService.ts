@@ -436,7 +436,7 @@ function hollarMonthGrid(): string[] {
 }
 
 async function loadHollarTrends(): Promise<HollarTrends> {
-  return cached('explorer:hollar-trends:model', 3_600_000, async () => {
+  return cachedSwr('explorer:hollar-trends:model', 3_600_000, 48 * 3_600_000, async () => {
     // Supply composition, weekly cumulative per destination class. Tags match
     // on the H160 truncation (first 20 bytes of the substrate account id);
     // modl/sibl prefixes survive the truncation, so bridge sovereigns and
