@@ -41,6 +41,7 @@ const CHARTS: { key: string; path: string; note?: string }[] = [
   { key: 'zdep', path: '/hollar' },
   { key: 'zshare', path: '/hollar' },
   { key: 'zpegw', path: '/hollar' },
+  { key: 'zhsmres', path: '/hollar', note: 'HSM reserves' },
 ]
 
 /** The block-time chart plots a live tail, so a persisted window is meaningless. */

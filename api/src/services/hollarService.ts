@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
-import { cached } from './cache.ts'
-import { ensurePrices, getMoneyMarketReserves, type AssetRef, type PriceInfo } from './explorerService.ts'
+import { cachedSwr } from './cache.ts'
+import { ensurePrices, getAtokenSuppliedDailyHistory, getMoneyMarketReserves, mmMarkets, type AssetRef, type PriceInfo } from './explorerService.ts'
 import { assetDescriptor } from './explorerAssets.ts'
 import { parsePoolAssetIds } from './stableswapSnapshot.ts'
 import { alignMonthly, carryForward } from './hdxService.ts'
@@ -156,6 +156,9 @@ export interface HollarCollateral {
   lastArbTs: string | null
   lastArbDirection: 'in' | 'out' | null
 }
+// One collateral's balance in the HSM, daily since launch (null before the
+// reconstruction reaches back — see getAtokenSuppliedDailyHistory).
+export interface HollarReserveSeries { asset: AssetRef; values: (number | null)[] }
 export interface HollarArbDay { date: string; hollarIn: number; hollarOut: number }
 export interface HollarTradeDay { date: string; bought: number; sold: number }
 export interface HollarPool {
@@ -198,6 +201,7 @@ export interface HollarDashboard {
   hsm: {
     totalHoldingsUsd: number
     collaterals: HollarCollateral[]
+    reserveHistory: { days: string[]; series: HollarReserveSeries[] }
     arbitrageDaily: HollarArbDay[]
     tradesDaily: HollarTradeDay[]
     lastArb: { ts: string; direction: 'in' | 'out'; asset: AssetRef; hollarAmount: number } | null
@@ -347,6 +351,28 @@ async function loadHsmHoldings(assetIds: number[]): Promise<Map<number, string>>
   return mergeHsmHoldings(assetIds, reconstructed, folded)
 }
 
+// The HSM's collateral reserves through time. Every approved collateral is held
+// as an aToken (the pallet's substrate pots are empty — supplying the collateral
+// to the money market is what earns on it), so the whole balance is the aToken
+// reconstruction for the pallet account's EVM alias, per day. Includes a delisted
+// collateral's history: the series follow what the account HELD, not the current
+// collateral list. Largest current holding first, the order the stacked chart
+// draws bottom-up.
+async function loadHsmReserveHistory(days: string[]): Promise<HollarReserveSeries[]> {
+  const hsmH160 = '0x' + HSM_ACCOUNT.slice(2, 42)
+  const series = await getAtokenSuppliedDailyHistory(hsmH160, days)
+  const last = (values: (number | null)[]): number => {
+    for (let i = values.length - 1; i >= 0; i--) if (values[i] != null) return values[i]!
+    return 0
+  }
+  return series
+    .map(s => ({
+      asset: s.asset,
+      values: s.values.map(v => (v == null ? null : Number(v) / 10 ** s.asset.decimals)),
+    }))
+    .sort((a, b) => last(b.values) - last(a.values))
+}
+
 interface LastArb { ts: string; direction: 'in' | 'out'; hollarAmount: number }
 // True (unbounded) last-arbitrage-per-asset — the 60d chart window can miss a
 // collateral that simply hasn't needed rebalancing recently, so this is a
@@ -426,6 +452,14 @@ function hollarWeekGrid(): string[] {
   const start = new Date(`${HOLLAR_LAUNCH_MONDAY}T00:00:00Z`).getTime()
   const out: string[] = []
   for (let t = start; t <= Date.now(); t += 7 * 86_400_000) out.push(new Date(t).toISOString().slice(0, 10))
+  return out
+}
+// Day grid on the same launch anchor, for the HSM reserve history — a stock that
+// moves with every arbitrage, so a weekly close would hide most of its motion.
+function hollarDayGrid(): string[] {
+  const start = new Date(`${HOLLAR_LAUNCH_MONDAY}T00:00:00Z`).getTime()
+  const out: string[] = []
+  for (let t = start; t <= Date.now(); t += 86_400_000) out.push(new Date(t).toISOString().slice(0, 10))
   return out
 }
 function hollarMonthGrid(): string[] {
@@ -709,9 +743,11 @@ async function loadHollarTrends(): Promise<HollarTrends> {
 // dashboard payload
 
 export async function getHollarDashboard(): Promise<HollarDashboard> {
-  return cached(`explorer:hollar-dashboard:model`, 300_000, async () => {
-    const [prices, peg, supplyRaw, stablePools, collateralEvents, lastArbByAsset, arbitrageDaily, tradesDaily, trends] = await Promise.all([
+  return cachedSwr(`explorer:hollar-dashboard:model`, 300_000, 48 * 3_600_000, async () => {
+    const reserveDays = hollarDayGrid()
+    const [prices, peg, supplyRaw, stablePools, collateralEvents, lastArbByAsset, arbitrageDaily, tradesDaily, trends, reserveSeries] = await Promise.all([
       ensurePrices(), loadPeg(), loadSupply(), loadHollarStablePools(), loadHsmCollateralEvents(), loadLastArbByAsset(), loadArbitrageDaily(), loadTradesDaily(), loadHollarTrends(),
+      loadHsmReserveHistory(reserveDays),
     ])
     const px = prices.get(HOLLAR_ASSET_ID)
 
@@ -784,7 +820,11 @@ export async function getHollarDashboard(): Promise<HollarDashboard> {
       pegDeviationBps: px ? (px.price - 1) * 10000 : null,
       peg,
       supply: { total: supplyRaw.total, holders: supplyRaw.holders, inStablepools, inOmnipool: supplyRaw.omnipool, other },
-      hsm: { totalHoldingsUsd, collaterals, arbitrageDaily, tradesDaily, lastArb },
+      hsm: {
+        totalHoldingsUsd, collaterals,
+        reserveHistory: { days: reserveDays, series: reserveSeries },
+        arbitrageDaily, tradesDaily, lastArb,
+      },
       pools,
       trends,
     }

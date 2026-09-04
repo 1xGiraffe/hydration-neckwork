@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { alignBalanceHistoryDailyPoints, hasNonZeroVisibleBalance, reconstructATokenBalanceBuckets } from '../src/services/explorerService.ts'
+import { alignBalanceHistoryDailyPoints, dayGridBucketOf, hasNonZeroVisibleBalance, reconstructATokenBalanceBuckets } from '../src/services/explorerService.ts'
 import type { AssetBalanceHistory, AssetBalancePoint, AssetRef } from '../src/services/explorerService.ts'
 
 const point = (balance: number): AssetBalancePoint => ({ ts: '2026-07-07 00:00:00', blockHeight: 1, balance })
@@ -50,6 +50,24 @@ describe('alignBalanceHistoryDailyPoints', () => {
     ])
 
     expect(aligned.map(h => h.asset.symbol)).toEqual(['BBB'])
+  })
+})
+
+describe('dayGridBucketOf', () => {
+  const days = ['2026-07-01', '2026-07-02', '2026-07-03']
+
+  it('maps each grid day to its own bucket', () => {
+    expect(days.map(dayGridBucketOf(days))).toEqual([0, 1, 2])
+  })
+
+  it('folds a pre-grid day into the opening bucket', () => {
+    // A supply made before the window is part of the balance the window opens
+    // with — dropping it would understate every later day.
+    expect(dayGridBucketOf(days)('2026-06-30')).toBe(0)
+  })
+
+  it('drops a day past the grid instead of clamping it onto the last one', () => {
+    expect(dayGridBucketOf(days)('2026-07-04')).toBeNull()
   })
 })
 
