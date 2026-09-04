@@ -43,7 +43,7 @@ export interface ListSummary {
 }
 
 export const LIMITS = {
-  listsPerUser: 50, tagsPerList: 200, membersPerTag: 2_000, membersPerList: 20_000,
+  listsPerUser: 50, tagsPerList: 1_000, membersPerTag: 2_000, membersPerList: 20_000,
   subscriptionsPerUser: 200, nameLen: 48, noteLen: 280,
 } as const
 
