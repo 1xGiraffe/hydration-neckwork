@@ -39,6 +39,23 @@ describe('calculateLRNAPrice', () => {
     expect(lrnaPrice).toBe('2.000000000000');
   });
 
+  it('prices H2O exactly from an 18-decimal dollar anchor', () => {
+    const daiState: OmnipoolAssetState = {
+      hubReserve: 1000000000000000n,           // 1000 H2O (12 decimals)
+      reserve: 26000000000000000000000n,       // 26000 DAI (18 decimals)
+      shares: 0n,
+      protocolShares: 0n,
+      cap: 0n,
+      tradable: 0,
+    };
+
+    // (26000e18 * 1e12) / (1000e12 * 1e18) = 26, computed in integers: the
+    // 18-decimal scale must not be routed through a float.
+    expect(calculateLRNAPrice(daiState, 18)).toBe('26.000000000000');
+    // One extra DAI atom cannot move the 12-decimal result.
+    expect(calculateLRNAPrice({ ...daiState, reserve: daiState.reserve + 1n }, 18)).toBe('26.000000000000');
+  });
+
   it('handles zero hub reserve', () => {
     const usdState: OmnipoolAssetState = {
       hubReserve: 0n,

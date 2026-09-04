@@ -140,6 +140,22 @@ function findBestOmnipoolBridge(
   return best;
 }
 
+// The dollar anchor is the deepest Omnipool member of the highest-preference
+// reference basket that has one; that basket is the block's USD reference set.
+// With no basket in the pool, the canonical (first) basket still seeds the
+// stable graph and H2O falls through to the externally priced bridges.
+function selectUsdAnchor(
+  omnipoolAssets: Map<number, OmnipoolAssetState>,
+  usdReferenceBaskets: number[][],
+): { referenceIds: number[]; bridge: { assetId: number; state: OmnipoolAssetState } | null } {
+  for (const basket of usdReferenceBaskets) {
+    const bridge = findBestOmnipoolBridge(omnipoolAssets, basket);
+    if (bridge) return { referenceIds: basket, bridge };
+  }
+
+  return { referenceIds: usdReferenceBaskets[0] ?? [], bridge: null };
+}
+
 function getBestStableQuote(
   assetInId: number,
   assetOutId: number,
@@ -917,7 +933,8 @@ export function buildGraph(
 // Resolve all asset prices denominated in USD.
 //
 // Strategy:
-// 1. Prefer a direct Omnipool USD reference (10/22 basket)
+// 1. Anchor H2O on the dollar reference present in the Omnipool: the deepest
+//    member of the highest-preference basket in `usdReferenceBaskets`
 // 2. Fallback: externally priced Omnipool bridge assets, including stable LP bridges priced by NAV
 // 3. Compute all Omnipool prices via LRNA
 // 4. Iteratively resolve XYK + Stableswap + aToken equivalences
@@ -931,7 +948,7 @@ export function resolvePrices(
   omnipoolBridgeIds: number[] = [10],
   atokenEquivalences: [number, number][] = [],
   totalIssuances: Map<number, bigint> = new Map(),
-  usdReferenceIds: number[] = [_legacyUsdReferenceAssetId],
+  usdReferenceBaskets: number[][] = [[_legacyUsdReferenceAssetId]],
   options: ResolvePriceOptions = {},
 ): ResolvedPrices {
   const prices = new Map<number, string>();
@@ -982,6 +999,8 @@ export function resolvePrices(
   };
 
   let lrnaPrice: string | null = null;
+  const { referenceIds: usdReferenceIds, bridge: directReferenceBridge } =
+    selectUsdAnchor(omnipoolAssets, usdReferenceBaskets);
   const referenceUsdPrices = buildUsdReferencePrices(usdReferenceIds, stableswapPools, decimals);
 
   const seedReferencePrices = () => {
@@ -993,7 +1012,6 @@ export function resolvePrices(
   // Keep the stable USD basket available even when Omnipool has no safe USD anchor yet.
   seedReferencePrices();
 
-  const directReferenceBridge = findBestOmnipoolBridge(omnipoolAssets, usdReferenceIds);
   if (directReferenceBridge) {
     try {
       const bridgeDecimals = decimals.get(directReferenceBridge.assetId) ?? 6;
