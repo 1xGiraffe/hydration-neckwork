@@ -1,3 +1,4 @@
+import type { ClickHouseSettings } from '@clickhouse/client'
 import type { ClickHouseClient } from '../db/client.js'
 
 export interface OHLCTableSpec {
@@ -142,17 +143,25 @@ export async function restoreRollbackOHLCPrefix(
   }
 }
 
+/**
+ * Clear and recompute every OHLC table's buckets in the range (for the given
+ * assets, or all) from `prices`. `settings` bounds each rebuild INSERT…SELECT —
+ * a repair runs against the live ClickHouse, so a caller passes an explicit
+ * memory/thread ceiling.
+ */
 export async function rebuildOHLCForTimeRange(
   client: ClickHouseClient,
   startTime: string,
   endTime: string,
   assetIds?: readonly number[],
+  settings: ClickHouseSettings = {},
 ): Promise<void> {
   await clearOHLCForTimeRange(client, startTime, endTime, assetIds)
 
   for (const spec of OHLC_TABLE_SPECS) {
     await client.command({
       query: buildRebuildOHLCQuery(spec, startTime, endTime, assetIds),
+      clickhouse_settings: settings,
     })
   }
 }
