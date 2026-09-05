@@ -2354,8 +2354,16 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 /* A section title with a control on its right (Security's safety ledger, the
    alerts list). The title keeps its own vertical rhythm; the control rides the
    same baseline instead of pushing a row of its own. */
-.sec-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.sec-title-row .sec-title { margin-right: auto; }
+/* The section title's 24px/12px vertical margins move onto the row here: a flex
+   row centres items on their MARGIN boxes, so a control beside a title still
+   wearing those margins sat 6px above the title's text (measured). With the
+   spacing on the row, a button, a link or a tab strip lines up with the text. */
+.sec-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 24px 0 12px; }
+.sec-title-row .sec-title { margin: 0 auto 0 0; }
+/* A tab strip standing alone under a header wears 24px/16px margins of its own;
+   on a title row those would stack inside the row's spacing and pull the strip
+   4px under the title text. The row spaces the section — the strip does not. */
+.sec-title-row .tabs { margin: 0; }
 /* The Security page head carries the one subscribe button, beside the title. */
 .sec-page-title-row { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
 .sec-page-title-row .page-title { margin-right: auto; }

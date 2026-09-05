@@ -282,7 +282,13 @@ export function ListsSection({ publicLists, ownLists, isOwn }: {
   if (!rows.length && !isOwn) return null
   return (
     <>
-      <div className="sec-title">Lists{rows.length > 0 ? ` · ${rows.length}` : ''}</div>
+      {/* The section's action sits on its title line, above the box — where the
+          page header keeps "Edit profile" — not trailing under the table like a
+          "view more" link would. */}
+      <div className="sec-title-row">
+        <div className="sec-title">Lists{rows.length > 0 ? ` · ${rows.length}` : ''}</div>
+        {isOwn && <Link to={paths.lists()} className="ext-link">Manage lists</Link>}
+      </div>
       <div className="panel"><table className="tbl">
         <thead><tr><th>List</th><th className="r">Accounts</th></tr></thead>
         <tbody>
@@ -302,7 +308,6 @@ export function ListsSection({ publicLists, ownLists, isOwn }: {
             ))}
         </tbody>
       </table></div>
-      {isOwn && <div className="ext-link-row"><Link to={paths.lists()} className="ext-link">Manage lists →</Link></div>}
     </>
   )
 }
