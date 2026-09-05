@@ -27,6 +27,10 @@ const ALLOWED_SHARED = new Set([
   // builders the derivations jobs and the explorer revenue surfaces use, so
   // the public series and the explorer can never drift apart.
   'services/revenueStreams.ts',
+  // The money-market cap model — /lending/v1/caps and the explorer's cap alert
+  // read one composition of the configurator events, facilitator buckets and
+  // reserve state, so a subscriber is paged about the number the route serves.
+  'services/moneyMarketCaps.ts',
 ])
 
 // Not a shared source module: the api package manifest, imported for the
