@@ -28,6 +28,8 @@ export interface TradeAssetAmount {
 
 export interface DecodedRawTrade {
   account: string | null
+  /** `fillerType.__kind` of a Broadcast trade — what tells an Omnipool hub hop from any other pool's fill. Absent on a legacy pallet event. */
+  filler?: string
   inputs: TradeAssetAmount[]
   outputs: TradeAssetAmount[]
 }
@@ -85,12 +87,14 @@ export function decodeRawTrade(row: RawTradeEventRow): DecodedRawTrade | null {
   const outputs = parseAssetAmounts(args.outputs)
   const fillerType = (args.fillerType as { __kind?: string } | undefined)?.__kind
   const operation = (args.operation as { __kind?: string } | undefined)?.__kind
+  const filler = typeof fillerType === 'string' ? { filler: fillerType } : {}
   if (row.event_name === 'Broadcast.Swapped' && operation === 'ExactOut' && (fillerType === 'XYK' || fillerType === 'LBP') && inputs.length === 1 && outputs.length === 1) {
     return {
       account: normalizeAccount(args.swapper),
+      ...filler,
       inputs: [{ assetId: inputs[0].assetId, amount: outputs[0].amount }],
       outputs: [{ assetId: outputs[0].assetId, amount: inputs[0].amount }],
     }
   }
-  return { account: normalizeAccount(args.swapper), inputs, outputs }
+  return { account: normalizeAccount(args.swapper), ...filler, inputs, outputs }
 }
