@@ -4,10 +4,12 @@ import { normalizeAddress } from '../services/addressIdentity.ts'
 import { assetDescriptor } from '../services/explorerAssets.ts'
 import { avgBlockMsSql, clampBlockMs, NOMINAL_PARA_BLOCK_MS } from '../services/blockTime.ts'
 import {
-  accountRef, activityRowMatchesAction, activityTypeMatchesFamily, ensurePrices,
-  getAddressActivity, getListTagActivity, getPrimaryHealthFactor, getRecentActivity, getTagActivity,
+  accountRef, activityRowMatchesAction, activityTypeMatchesFamily, assetIdFromMmAddress, ensurePrices,
+  getAddressActivity, getListTagActivity, getMarketHealthFactor, getRecentActivity, getTagActivity,
+  mmMarketByKey, mmReserveIdsForAsset,
   type AccountRef, type ActivityRow,
 } from '../services/explorerService.ts'
+import { capIsFull, moneyMarketCapStates, tokenAmount, type ReserveCapState } from '../services/moneyMarketCaps.ts'
 import { getSecurityDashboard, type SafetyEvent } from '../services/securityService.ts'
 import { isGenericReferendumTitle, referendumTitleFor } from '../services/referendumTitleService.ts'
 import { enactmentOutcomeFrom, referendumEnactmentTaskId } from '../services/governanceService.ts'
@@ -30,7 +32,7 @@ import {
 import { resolveActivityTarget } from './ruleTargets.ts'
 import {
   account as accountPart, amount as amountPart, code as codePart, compactAmount, compactUsd,
-  humanDuration, renderList, renderNotification, shortHash, text as textPart, usd as usdPart,
+  humanDuration, renderList, renderNotification, shortAddress, shortHash, text as textPart, usd as usdPart,
   type RenderAccount, type RenderInput, type RenderPart, type RenderedNotification,
 } from './render.ts'
 
@@ -46,10 +48,11 @@ import {
 //     `(cursor, head]`: one source read per KIND — or, for the two activity
 //     kinds, per watched address/asset — never per rule, with every rule's own
 //     filters re-applied to the shared rows by a pure function;
-//   * the SNAPSHOT lane, every fifth tick, for the two value triggers (price,
-//     health factor) that describe a level rather than an event. They are
-//     edge-triggered with a persisted armed flag, so a value parked just past
-//     its threshold produces one notification, not one every 30 seconds.
+//   * the SNAPSHOT lane, every fifth tick, for the value triggers (price, health
+//     factor, money-market cap) that describe a level rather than an event.
+//     They are edge-triggered with a persisted armed flag, so a value parked
+//     just past its threshold produces one notification, not one every 30
+//     seconds.
 //
 // All I/O lives in the loop below; every matching decision is a pure function
 // over already-fetched rows, which is what the tests exercise.
@@ -239,7 +242,17 @@ export type MatchPayload =
   | { lane: 'event'; row: ChainEventRow }
   | { lane: 'extrinsic'; row: ChainExtrinsicRow }
   | { lane: 'price'; assetId: number; direction: 'above' | 'below'; threshold: number; value: number }
-  | { lane: 'health-factor'; address: string; account: AccountRef | null; threshold: number; value: number }
+  | { lane: 'health-factor'; address: string; account: AccountRef | null; threshold: number; value: number
+      /** The isolated market's display label — a health factor means nothing without saying whose. */
+      market: string }
+  | { lane: 'mm-cap'; market: string; side: CapSide
+      /** true = the cap was reached, false = the reserve opened up again. */
+      full: boolean
+      assetId: number | null; symbol: string | null; reserveAddress: string
+      /** Whole tokens: what the side holds now, and the cap it is held against. */
+      used: number; cap: number
+      /** Whole tokens: the cap at the previous reading, when the flip was the cap's own doing. */
+      capChangedFrom?: number }
   | { lane: 'dca-start'; row: DcaScheduleRow; hourlyUsd: number; perExecutionUsd: number
       /** Budget of the sold asset in USD; null for an unbounded schedule. */
       totalUsd: number | null
@@ -1041,11 +1054,29 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
       return {
         title,
         // The headline already names the value and whose position it is, so the
-        // body states the threshold once and stops. Appending the rule
-        // description repeated both, mid-sentence and lowercase.
-        body: [[textPart(`Below the ${compactAmount(p.threshold)} you set.`)]],
+        // body names the market — the markets are isolated, and a borrower in two
+        // has two health factors — states the threshold once, and stops.
+        body: [[textPart(`${p.market} · below the ${compactAmount(p.threshold)} you set.`)]],
         path: `/account/${encodeURIComponent(p.account?.address ?? p.address)}`,
       }
+    }
+    case 'mm-cap': {
+      // A reserve outside the registry still reads, by its address.
+      const name = p.symbol ?? (p.assetId != null ? `#${p.assetId}` : shortAddress(p.reserveAddress))
+      const borrow = p.side === 'borrow'
+      const title = p.full
+        ? `${name} ${p.side} cap reached · ${p.market}`
+        : `${name} can be ${borrow ? 'borrowed' : 'supplied'} again · ${p.market}`
+      // Reached: what is held against what. Open: what is free, which is the
+      // figure the reader acts on.
+      const body: (string | RenderPart[])[] = [p.full
+        ? [textPart(borrow ? 'Borrowed' : 'Supplied'), amountPart(p.used, name), textPart('of the'), amountPart(p.cap, name), textPart('cap.')]
+        : [amountPart(Math.max(0, p.cap - p.used), name), textPart(`of the ${compactAmount(p.cap)} cap is free to ${borrow ? 'borrow' : 'supply'}.`)]]
+      // The cap moving is as much an event as the balance moving; say which it was.
+      if (p.capChangedFrom != null && p.capChangedFrom !== p.cap) {
+        body.push([textPart(`The cap was ${p.capChangedFrom > p.cap ? 'lowered' : 'raised'} from ${compactAmount(p.capChangedFrom)} to`), amountPart(p.cap, name), textPart('.')])
+      }
+      return { title: [textPart(title)], body, path: p.assetId != null ? `/asset/${p.assetId}` : '/security/money-market' }
     }
   }
 }
@@ -1346,6 +1377,7 @@ export function resetEvaluatorForTests(): void {
   cursorsPersistedAtMs = 0
   seenOriginQueued.clear()
   originQueuedMemo.clear()
+  lastCapSeen.clear()
   for (const k of Object.keys(counters) as (keyof typeof counters)[]) counters[k] = 0
 }
 
@@ -2223,6 +2255,7 @@ async function runSnapshotLane(run: { values: boolean; security: boolean }): Pro
   if (run.values) {
     await guard('price', async () => { matches.push(...await priceMatches()) })
     await guard('health-factor', async () => { matches.push(...await healthFactorMatches()) })
+    await guard('mm-cap', async () => { matches.push(...await mmCapMatches()) })
   }
   if (run.security) {
     await guard('safety-state', async () => { matches.push(...await safetySnapshotMatches()) })
@@ -2274,25 +2307,32 @@ async function healthFactorMatches(): Promise<RuleMatch[]> {
   // members (resolved live, so the membership follows the tag). A tag is capped:
   // every member costs a health-factor read per tick, and a rule on a 1,000
   // account tag would spend the whole tick budget on one subscriber. The cap
-  // takes the tag's own member order.
+  // takes the tag's own member order. Every address is read in the rule's own
+  // market — the markets are isolated, and a rule watches exactly one of them.
   const MAX_TAG_MEMBERS = 50
-  const watched = new Map<string, string[]>()
+  const watched = new Map<string, { market: string; addresses: string[] }>()
   for (const rule of rules) {
     const p = rule.params as RuleParams['health-factor']
-    if (p.target.kind === 'address') { watched.set(rule.ruleId, [p.target.address]); continue }
-    const resolved = resolveActivityTarget(rule.accountId, p.target)
-    watched.set(rule.ruleId, (resolved?.members ?? []).slice(0, MAX_TAG_MEMBERS))
+    const addresses = p.target.kind === 'address'
+      ? [p.target.address]
+      : (resolveActivityTarget(rule.accountId, p.target)?.members ?? []).slice(0, MAX_TAG_MEMBERS)
+    watched.set(rule.ruleId, { market: p.market, addresses })
   }
 
-  // One lookup per ADDRESS: several rules on one position (a warning threshold
-  // and a panic threshold), or one address in several watched tags, still read
-  // the same number once.
-  const byAddress = new Map<string, number | null>()
-  for (const address of new Set([...watched.values()].flat())) {
-    // Unreadable is NOT zero: an address with no primary-market position, or a
-    // position whose health factor cannot be read, must never look like an
-    // imminent liquidation.
-    byAddress.set(address, await getPrimaryHealthFactor(address).catch(() => null))
+  // One lookup per (market, address): several rules on one position (a warning
+  // threshold and a panic threshold), or one address in several watched tags,
+  // still read the same number once.
+  const positionKey = (market: string, address: string) => `${market}:${address}`
+  const byPosition = new Map<string, number | null>()
+  for (const { market, addresses } of watched.values()) {
+    for (const address of addresses) {
+      const key = positionKey(market, address)
+      if (byPosition.has(key)) continue
+      // Unreadable is NOT zero: an address with no position in this market, or a
+      // position whose health factor cannot be read, must never look like an
+      // imminent liquidation.
+      byPosition.set(key, await getMarketHealthFactor(address, market).catch(() => null))
+    }
   }
 
   // Arm state is PER (rule, member) — one member crossing must not disarm the
@@ -2304,18 +2344,19 @@ async function healthFactorMatches(): Promise<RuleMatch[]> {
   for (const rule of rules) {
     const raw = getNotificationState(armStateKey(rule.ruleId))
     const single = parseArmState(raw)
-    const addresses = watched.get(rule.ruleId) ?? []
+    const addresses = watched.get(rule.ruleId)?.addresses ?? []
     if (single && addresses.length === 1) { prev.set(`${rule.ruleId}${MEMBER_KEY_SEP}${addresses[0]}`, single); continue }
     const bundled = parseMemberArmStates(raw)
     if (bundled) for (const [addr, state] of bundled) prev.set(`${rule.ruleId}${MEMBER_KEY_SEP}${addr}`, state)
   }
 
   const inputs: ThresholdInput[] = rules.flatMap(rule => {
-    const p = rule.params as RuleParams['health-factor']
-    return (watched.get(rule.ruleId) ?? []).map(address => ({
+    const { threshold } = rule.params as RuleParams['health-factor']
+    const { market, addresses } = watched.get(rule.ruleId)!
+    return addresses.map(address => ({
       ruleId: `${rule.ruleId}${MEMBER_KEY_SEP}${address}`,
-      direction: 'below' as const, threshold: p.threshold,
-      value: byAddress.get(address) ?? null,
+      direction: 'below' as const, threshold,
+      value: byPosition.get(positionKey(market, address)) ?? null,
     }))
   })
   const { fired, next } = evaluateThreshold(inputs, prev)
@@ -2324,7 +2365,7 @@ async function healthFactorMatches(): Promise<RuleMatch[]> {
   // rewritten whole, so unchanged members must ride along or they would reset.
   const changedRules = new Set([...next.keys()].map(key => key.split(MEMBER_KEY_SEP)[0]))
   for (const ruleId of changedRules) {
-    const addresses = watched.get(ruleId) ?? []
+    const addresses = watched.get(ruleId)?.addresses ?? []
     const states = new Map<string, ArmState>()
     for (const address of addresses) {
       const key = `${ruleId}${MEMBER_KEY_SEP}${address}`
@@ -2345,6 +2386,7 @@ async function healthFactorMatches(): Promise<RuleMatch[]> {
     const ruleId = f.ruleId.slice(0, sep)
     const address = f.ruleId.slice(sep + 1)
     const rule = byId.get(ruleId)!
+    const market = (rule.params as RuleParams['health-factor']).market
     const norm = normalizeAddress(address)
     return {
       ruleId, accountId: rule.accountId, kind: rule.kind,
@@ -2355,9 +2397,116 @@ async function healthFactorMatches(): Promise<RuleMatch[]> {
         lane: 'health-factor', address,
         account: norm ? accountRef(norm.accountId) : null,
         threshold: f.threshold, value: f.value,
+        market: mmMarketByKey(market)?.label ?? market,
       } as MatchPayload,
     }
   })
+}
+
+/* ============ money-market caps ============ */
+
+const CAP_SIDES = ['borrow', 'supply'] as const
+export type CapSide = typeof CAP_SIDES[number]
+
+// What one side of a reserve holds, against the cap it is held against — and
+// whether a cap of exactly 0 is Aave's "no cap" sentinel (a configurator cap)
+// or a frozen HOLLAR facilitator bucket.
+const capSideOf = (reserve: ReserveCapState, side: CapSide): { used: bigint; cap: bigint | null; zeroIsNoCap: boolean } =>
+  (side === 'borrow'
+    ? { used: reserve.debt, cap: reserve.borrowCap, zeroIsNoCap: reserve.borrowCapSource !== 'facilitator' }
+    : { used: reserve.supplied, cap: reserve.supplyCap, zeroIsNoCap: true })
+
+// The cap each reserve side had at the previous evaluation, so a flip the cap
+// itself caused — governance lowering it under what is borrowed, or raising it
+// back above — can say so. Process-lifetime rather than persisted: after a
+// restart the first flip states the numbers without the cause, which is a
+// smaller loss than persisting a second row per rule for a sentence. Rebuilt
+// from each snapshot whole, so a reserve that leaves it is forgotten.
+let lastCapSeen = new Map<string, bigint>()
+const capMemoKey = (reserve: ReserveCapState, side: CapSide) => `${reserve.poolAddress}:${reserve.reserveAddress}:${side}`
+
+/**
+ * The cap kind: per rule, every capped side of every reserve in its market (or
+ * of its one token), read through `capIsFull`'s hysteresis and flipped by
+ * `evaluateStateFlip`. A reserve is CURRENT STATE like a price — the sanctioned
+ * exception to window anchoring — and its flips are edge-triggered against a
+ * per-rule bundled arm row keyed `${side}\n${reserve}`, so a cap parked over
+ * the line pages once, not every 30 seconds.
+ *
+ * A rule's market is matched to reserves by POOL ADDRESS, the same identity
+ * explorerService keys markets on: the indexer's reserve map carries its own
+ * market-key strings, and the two env-extended lists agree only by convention.
+ *
+ * The state is read ONCE per tick for every rule (the shared reader is cached),
+ * and an empty model is not "every cap is open": a reserve view with no anchor
+ * must neither fire nor record anything.
+ */
+async function mmCapMatches(): Promise<RuleMatch[]> {
+  const rules = activeRulesByKind('mm-cap')
+  if (!rules.length || !client) return []
+  const reserves = await moneyMarketCapStates(client, assetIdFromMmAddress)
+  if (!reserves.length) return []
+
+  const matches: RuleMatch[] = []
+  for (const rule of rules) {
+    const p = rule.params as RuleParams['mm-cap']
+    const market = mmMarketByKey(p.market)
+    if (!market) continue
+    // A token narrows to its reserve, through every alias the money market
+    // files rows under (an aToken to its underlying, GDOT to 2-Pool-GDOT).
+    const wanted = p.assetId == null ? null : new Set(mmReserveIdsForAsset(p.assetId))
+    const scope = reserves.filter(r => r.poolAddress.toLowerCase() === market.poolProxy
+      && (wanted == null || (r.assetId != null && wanted.has(r.assetId))))
+    const sides = new Map(scope.flatMap(reserve => CAP_SIDES.map(side => {
+      const key = `${side}${STATE_KEY_SEP}${reserve.reserveAddress}`
+      return [key, { reserve, side, key, ...capSideOf(reserve, side) }] as const
+    })))
+    const prev = parseMemberArmStates(getNotificationState(armStateKey(rule.ruleId))) ?? new Map<string, ArmState>()
+    const inputs: FlagInput[] = [...sides.values()].map(s => {
+      const last = prev.get(s.key)?.lastValue
+      return { key: s.key, value: capIsFull(last == null ? null : last === 1, s.used, s.cap, s.zeroIsNoCap) }
+    })
+    const { fired, next } = evaluateStateFlip(inputs, prev)
+    for (const flip of fired) {
+      const s = sides.get(flip.key)
+      if (!s || s.cap == null) continue
+      // The cap's own move is stated only when it points the way the flip went:
+      // a cap raised in the same window as a fill did not cause the fill.
+      const previousCap = lastCapSeen.get(capMemoKey(s.reserve, s.side))
+      const capMoved = previousCap != null && previousCap !== s.cap && (previousCap > s.cap) === flip.value
+      matches.push(stateMatch(rule, `${s.side}:${s.reserve.reserveAddress}:${flip.value ? 'reached' : 'open'}:${flip.epoch}`, {
+        lane: 'mm-cap', market: market.label, side: s.side, full: flip.value,
+        assetId: s.reserve.assetId, symbol: s.reserve.symbol, reserveAddress: s.reserve.reserveAddress,
+        used: tokenAmount(s.used, s.reserve.decimals), cap: tokenAmount(s.cap, s.reserve.decimals),
+        ...(capMoved ? { capChangedFrom: tokenAmount(previousCap, s.reserve.decimals) } : {}),
+      }))
+    }
+    // The row is rebuilt from the sides that HAVE a state this tick (the same
+    // pruning healthFactorMatches does from its watched set): a side whose cap
+    // was removed or whose reserve was delisted takes its reading with it, so
+    // its return is a first sight — recorded, never fired against a stale value.
+    const kept = new Map<string, ArmState>()
+    for (const input of inputs) {
+      if (input.value == null) continue
+      const state = next.get(input.key) ?? prev.get(input.key)
+      if (state) kept.set(input.key, state)
+    }
+    if (next.size || kept.size !== prev.size) {
+      await setNotificationState(armStateKey(rule.ruleId), JSON.stringify({ members: Object.fromEntries(kept) }))
+    }
+  }
+
+  // Remembered AFTER the rules ran, so this tick's flips compared against the
+  // cap the previous tick saw.
+  const seen = new Map<string, bigint>()
+  for (const reserve of reserves) {
+    for (const side of CAP_SIDES) {
+      const { cap } = capSideOf(reserve, side)
+      if (cap != null) seen.set(capMemoKey(reserve, side), cap)
+    }
+  }
+  lastCapSeen = seen
+  return matches
 }
 
 /* ============ safety snapshot lane ============ */

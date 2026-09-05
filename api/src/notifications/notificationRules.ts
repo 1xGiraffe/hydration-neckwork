@@ -8,7 +8,7 @@ import { z } from 'zod'
 export const NOTIFICATION_KINDS = [
   'account-activity', 'large-trade', 'large-transfer', 'price', 'health-factor',
   'referendum', 'tc-motion', 'safety', 'extrinsic', 'event',
-  'protocol-revenue', 'liquidation',
+  'protocol-revenue', 'liquidation', 'mm-cap',
 ] as const
 export type NotificationKind = typeof NOTIFICATION_KINDS[number]
 
@@ -110,6 +110,15 @@ const assetId = z.number().int().min(0).max(4_294_967_295)
 // Both id spaces are checked for real existence at creation time — this only
 // keeps a shape that could never name either out of the store.
 const tagIdent = z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Expected a tag id')
+// An isolated money market, by the key the explorer configures it under ('core',
+// 'gigahdx', 'bil', …). The markets are isolated pools with their own health
+// factors and their own caps, so a rule about either names one. Only the shape is
+// checked here — the configured set lives in explorerService, and existence is
+// checked at creation time (ruleTargets.ts), the way tag ids are.
+const marketKey = z.string().trim().min(1).max(32).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, 'Expected a money market key')
+// The primary market's key. A health-factor rule written before markets existed
+// watched the primary market, so an absent `market` re-parses into exactly that.
+export const PRIMARY_MARKET_KEY = 'core'
 
 // What an account-activity rule watches. An address watches one account; a tag
 // watches whatever the tag holds AT EVALUATION TIME, which is the point of the
@@ -197,6 +206,11 @@ const healthFactorShape = z.object({
   // account added to the tag later is watched from the next tick.
   target: accountActivityTarget,
   threshold: z.number().min(0.5).max(10).default(1.1),
+  // Which isolated market's position. A borrower in two markets has two health
+  // factors, and a rule watches exactly one of them — never a blend. The default
+  // is explicit rather than optional so one subscription has one canonical
+  // parameter set (the `dcaStart` precedent).
+  market: marketKey.default(PRIMARY_MARKET_KEY),
 }).strict()
 
 // The pre-target spelling — `{ address, threshold }` — is still accepted and
@@ -212,6 +226,17 @@ export function normalizeHealthFactorParams(value: unknown): unknown {
 }
 
 export const healthFactorParams = z.preprocess(normalizeHealthFactorParams, healthFactorShape)
+
+// One market's borrow and supply caps: every capped reserve of the market, or
+// one token's. A reserve reads as "reached" when its headroom under the cap is
+// gone and "open again" when headroom is back, whichever side moved — borrowing
+// or repaying, supplying or withdrawing, or governance lowering or raising the
+// cap itself. Deliberately one rule per market rather than per reserve and side:
+// the question is "can I borrow HOLLAR on GIGAHDX again", not a matrix.
+export const mmCapParams = z.object({
+  market: marketKey,
+  assetId: assetId.optional(),
+}).strict()
 
 // `track` accepts either form and stores the numeric id, so the matcher only
 // ever compares an id to the id the chain reported.
@@ -269,6 +294,7 @@ export const ruleParamSchemas = {
   event: eventParams,
   'protocol-revenue': protocolRevenueParams,
   liquidation: liquidationParams,
+  'mm-cap': mmCapParams,
 } as const satisfies Record<NotificationKind, z.ZodType>
 
 export type RuleParams = {
@@ -284,6 +310,7 @@ export type RuleParams = {
   event: z.infer<typeof eventParams>
   'protocol-revenue': z.infer<typeof protocolRevenueParams>
   liquidation: z.infer<typeof liquidationParams>
+  'mm-cap': z.infer<typeof mmCapParams>
 }
 
 export type ParsedRuleParams<K extends NotificationKind = NotificationKind> = RuleParams[K]
@@ -322,12 +349,20 @@ const assetLabel = (assetId: number, symbolOf?: AssetSymbolLookup): string =>
  */
 export type TargetLabelLookup = (target: AccountActivityTarget) => { name: string; listName?: string } | null
 
+/**
+ * Money market key → its display label ('gigahdx' → "GIGAHDX"). Passed in like
+ * the other two lookups: the configured markets live in explorerService. Without
+ * one the key itself stands in, which still says which market.
+ */
+export type MarketLabelLookup = (key: string) => string | null
+const marketLabel = (key: string, labelOf?: MarketLabelLookup): string => labelOf?.(key) ?? key
+
 // One line describing what a rule watches, used by the rules list, the inbox
 // and the human-facing parts of a message. Falls back to the bare kind for
 // params that no longer parse, so an unreadable rule still renders.
 export function describeRule(
   kind: NotificationKind, params: unknown,
-  symbolOf?: AssetSymbolLookup, targetLabelOf?: TargetLabelLookup,
+  symbolOf?: AssetSymbolLookup, targetLabelOf?: TargetLabelLookup, marketLabelOf?: MarketLabelLookup,
 ): string {
   const parsed = parseRuleParams(kind, params)
   if (!parsed.ok) return KIND_LABELS[kind]
@@ -362,10 +397,18 @@ export function describeRule(
     }
     case 'health-factor': {
       const p = parsed.params as RuleParams['health-factor']
-      if (p.target.kind === 'address') return `health factor below ${p.threshold}`
+      // The primary market is what "health factor" has always meant here, so it
+      // goes unnamed; any other market is the news and leads the sentence.
+      const what = `${p.market === PRIMARY_MARKET_KEY ? '' : `${marketLabel(p.market, marketLabelOf)} `}health factor below ${p.threshold}`
+      if (p.target.kind === 'address') return what
       const label = targetLabelOf?.(p.target) ?? null
-      if (p.target.kind === 'tag') return `health factor below ${p.threshold} in tag "${label?.name ?? 'a tag'}"`
-      return `health factor below ${p.threshold} in ${label ? `"${label.name}" (${label.listName ?? 'a list'})` : 'a list tag'}`
+      if (p.target.kind === 'tag') return `${what} in tag "${label?.name ?? 'a tag'}"`
+      return `${what} in ${label ? `"${label.name}" (${label.listName ?? 'a list'})` : 'a list tag'}`
+    }
+    case 'mm-cap': {
+      const p = parsed.params as RuleParams['mm-cap']
+      const scope = p.assetId === undefined ? 'reserve caps' : `${assetLabel(p.assetId, symbolOf)} cap`
+      return `${scope} on ${marketLabel(p.market, marketLabelOf)}`
     }
     case 'referendum': {
       const p = parsed.params as RuleParams['referendum']
@@ -428,4 +471,5 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   event: 'Event matcher',
   'protocol-revenue': 'Protocol revenue',
   liquidation: 'Liquidation',
+  'mm-cap': 'Money market cap',
 }

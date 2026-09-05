@@ -111,7 +111,10 @@ function envContractAssetMap(): Record<string, number> {
   }
 }
 const MM_CONTRACT_ASSET: Record<string, number> = { '0x531a654d1696ed52e7275a8cede955e82620f99a': 222, ...envContractAssetMap() }
-function assetIdFromMmAddress(addr: string): number | null {
+// A money-market reserve address → its registry asset id: the ERC-20 precompile
+// encodes the id, and a deployed contract (HOLLAR) is looked up. Exported for the
+// cap alert, which reads reserves by address and names them by ticker.
+export function assetIdFromMmAddress(addr: string): number | null {
   const h = (addr ?? '').toLowerCase().replace(/^0x/, '')
   if (MM_CONTRACT_ASSET['0x' + h] != null) return MM_CONTRACT_ASSET['0x' + h]
   if (h.length === 40 && /^0{30}01/.test(h)) return parseInt(h.slice(32), 16)
@@ -4242,6 +4245,10 @@ const MM_MARKETS: ApiMmMarket[] = (() => {
 export function mmMarkets(): readonly ApiMmMarket[] { return MM_MARKETS }
 const MM_MARKET_BY_POOL = new Map<string, ApiMmMarket>(MM_MARKETS.map(m => [m.poolProxy, m]))
 const MM_MARKET_BY_KEY = new Map<string, ApiMmMarket>(MM_MARKETS.map(m => [m.key, m]))
+// One configured market by its key ('core', 'gigahdx', …), or undefined for a key
+// no deployment configured — which is how a notification rule naming a market is
+// validated at creation and labelled at render time.
+export function mmMarketByKey(key: string): ApiMmMarket | undefined { return MM_MARKET_BY_KEY.get(key) }
 const MM_MARKET_ORDER = new Map<string, number>(MM_MARKETS.map((m, i) => [m.key, i]))
 const configuredMmPoolsSql = () => MM_MARKETS.map(m => `'${m.poolProxy}'`).join(',')
 const supplementalMmPoolsSql = () => MM_MARKETS.filter(m => m.role === 'supplemental').map(m => `'${m.poolProxy}'`).join(',') || "''"
@@ -4430,24 +4437,33 @@ async function getMoneyMarketPositions(h160: string): Promise<MoneyMarketPositio
   })
 }
 
-// One address's PRIMARY-market health factor, as a number (Infinity = no debt,
-// null = no position or an unreadable address). The two markets are isolated, so
-// this deliberately reads the primary market alone and never blends a
-// supplemental (GIGAHDX) position into it — the same rule the account page,
-// the directory and DefiSim follow.
+// One address's health factor in ONE market, as a number (Infinity = no debt,
+// null = no position there, an unknown market, or an unreadable address). The
+// markets are isolated, so this reads exactly the named market and never blends
+// another position into it — the same rule the account page, the directory and
+// DefiSim follow. A health-factor alert names its market and reads through here.
 //
 // Shares getMoneyMarketPositions' 15s cache, so a watcher polling several
-// addresses costs one point lookup per address per cache period.
-export async function getPrimaryHealthFactor(addressInput: string): Promise<number | null> {
+// addresses costs one point lookup per address per cache period, whatever the
+// number of markets it asks about.
+export async function getMarketHealthFactor(addressInput: string, marketKey: string): Promise<number | null> {
+  if (!MM_MARKET_BY_KEY.has(marketKey)) return null
   const norm = normalizeAddress(addressInput)
   if (!norm) return null
   const h160 = norm.evmAddress ?? mmH160ForAccount(norm.accountId)
   if (!h160) return null
-  const primary = (await getMoneyMarketPositions(h160)).find(p => p.role === 'primary')
-  if (!primary) return null
-  if (primary.healthFactor === 'inf') return Infinity
-  const hf = Number(primary.healthFactor) / 1e18
+  const position = (await getMoneyMarketPositions(h160)).find(p => p.marketKey === marketKey)
+  if (!position) return null
+  if (position.healthFactor === 'inf') return Infinity
+  const hf = Number(position.healthFactor) / 1e18
   return Number.isFinite(hf) ? hf : null
+}
+
+// The primary market's health factor alone — what every primary-only surface
+// (the directory, DefiSim, tag risk) means by "the" health factor.
+export async function getPrimaryHealthFactor(addressInput: string): Promise<number | null> {
+  const primary = MM_MARKETS.find(m => m.role === 'primary')
+  return primary ? getMarketHealthFactor(addressInput, primary.key) : null
 }
 
 // Per-reserve money-market balances reconstructed from indexed aToken/vDebt

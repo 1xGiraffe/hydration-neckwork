@@ -1,3 +1,4 @@
+import { mmMarketByKey } from '../services/explorerService.ts'
 import { getTag as getSystemTag } from '../services/tagService.ts'
 import { canView, getList, tagDisplayIcon } from '../services/userListService.ts'
 import type { AccountActivityTarget, NotificationKind, RuleParams } from './notificationRules.ts'
@@ -59,12 +60,25 @@ export function activityTargetOf(kind: NotificationKind, params: unknown): Accou
   return target && typeof target === 'object' ? target : null
 }
 
+/** The money market a rule names, for the kinds that name one. */
+export function ruleMarketOf(kind: NotificationKind, params: unknown): string | null {
+  if (kind !== 'health-factor' && kind !== 'mm-cap') return null
+  const market = (params as RuleParams['mm-cap'] | undefined)?.market
+  return typeof market === 'string' ? market : null
+}
+
 /**
  * Creation-time validation, in the store's own vocabulary: a 422 message, or
  * null when the params name nothing that has to exist. Deliberately does NOT
  * name the id it could not resolve — rule params are private user data.
+ *
+ * A market key is checked against the deployment's configured markets the same
+ * way a tag id is checked against the directory: the registry only knows the
+ * shape, and a rule on a market nobody configured could never match.
  */
 export function ruleTargetError(viewer: string, kind: NotificationKind, params: unknown): string | null {
+  const market = ruleMarketOf(kind, params)
+  if (market != null && !mmMarketByKey(market)) return 'That money market does not exist'
   const target = activityTargetOf(kind, params)
   if (!target || target.kind === 'address') return null
   if (target.kind === 'tag') {
