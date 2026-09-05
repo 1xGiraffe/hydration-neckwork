@@ -89,9 +89,9 @@ const FACILITATOR_ROWS: Row[] = [
 
 function fakeClient(overrides: Record<string, Row[]> = {}) {
   const byMarker: Record<string, Row[]> = {
-    '-- pub:mm:reserve-state': RESERVE_ROWS,
-    '-- pub:caps:aave': CAP_EVENT_ROWS,
-    '-- pub:caps:facilitator': FACILITATOR_ROWS,
+    '-- mm:reserve-state': RESERVE_ROWS,
+    '-- mm:caps:aave': CAP_EVENT_ROWS,
+    '-- mm:caps:facilitator': FACILITATOR_ROWS,
     'FROM price_data.prices': [{ asset_id: 5, price: '0.75' }],
     ...overrides,
   }
@@ -219,7 +219,7 @@ describe('GET /lending/v1/caps', () => {
   })
 
   it('serves an empty array when the money-market reserve model has no state', async () => {
-    const { app, stop } = await freshApp(fakeClient({ '-- pub:mm:reserve-state': [] }))
+    const { app, stop } = await freshApp(fakeClient({ '-- mm:reserve-state': [] }))
     try {
       const res = await app.inject('/lending/v1/caps')
       expect(res.statusCode).toBe(200)
@@ -235,7 +235,7 @@ describe('GET /lending/v1/caps', () => {
     // …))` — both queries are rejected at runtime, and a mocked client cannot see
     // it. Two rules keep them valid: filters are table-qualified, and an aggregate
     // alias never reuses a source column's name.
-    const source = readFileSync(new URL('../../src/public/services/lendingCaps.ts', import.meta.url), 'utf8')
+    const source = readFileSync(new URL('../../src/services/moneyMarketCaps.ts', import.meta.url), 'utf8')
     expect(source).toContain('WHERE raw_evm_logs.topic0 IN')
     expect(source).toContain('WHERE raw_money_market_reserves.event_name IN')
     // No aggregate is aliased back onto the column it reads.
@@ -246,8 +246,8 @@ describe('GET /lending/v1/caps', () => {
   })
 
   it('computes whole-token amounts and utilization on the integers', async () => {
-    const { tokenAmount, utilizationRatio, configuratorMarkets, orderCaps } =
-      await import('../../src/public/services/lendingCaps.ts')
+    const { tokenAmount, utilizationRatio, configuratorMarkets } = await import('../../src/services/moneyMarketCaps.ts')
+    const { orderCaps } = await import('../../src/public/services/lendingCaps.ts')
 
     // A 27-digit HOLLAR debt: the division happens on the bigint, so only the
     // precision a double cannot hold is lost.

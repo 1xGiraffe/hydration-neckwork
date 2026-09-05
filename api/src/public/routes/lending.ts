@@ -13,7 +13,7 @@ import { lendingCaps } from '../services/lendingCaps.ts'
 
 const zCap = z.object({
   asset: z.string().describe('The reserve asset\'s registry name, e.g. "Hydrated Dollar".'),
-  borrowCap: z.number().nullable().describe('Maximum borrowable, in whole tokens. Null when no cap has ever been set for this reserve. `0` is Aave\'s own "no cap" sentinel, not a freeze.'),
+  borrowCap: z.number().nullable().describe('Maximum borrowable, in whole tokens. Null when no cap has ever been set for this reserve. For a `poolConfigurator` cap, `0` is Aave\'s own "no cap" sentinel, not a freeze; a `facilitator` bucket capacity of `0` is the opposite — a frozen facilitator nothing more can be minted against.'),
   currentBorrow: z.number().describe('Currently borrowed, in whole tokens, including accrued interest.'),
   available: z.number().nullable().describe('`borrowCap - currentBorrow`. Null when there is no cap to be available against; can be negative if a cap was lowered below current borrowing.'),
   borrowCapSource: z.enum(['facilitator', 'poolConfigurator']).nullable().describe('Which on-chain control set `borrowCap`: the market\'s HOLLAR facilitator bucket capacity, or the pool configurator\'s Aave borrow cap.'),

@@ -107,7 +107,7 @@ function fullClient() {
       { in_usd: '1000.000000000000', out_usd: '999.000000000000' },
       { in_usd: '500.000000000000', out_usd: '505.500000000000' },
     ],
-    '-- pub:mm:reserve-state': RESERVE_ROWS,
+    '-- mm:reserve-state': RESERVE_ROWS,
     'FROM price_data.prices': PRICE_ROWS,
   })
 }
@@ -179,7 +179,7 @@ describe('GET /v1/stats/platform', () => {
       '-- pub:vol:routed': [],
       // The reserve-state view returns no rows at all while atoken_scaled_anchor
       // holds no snapshot — the one-way RPC failure the 007 header describes.
-      '-- pub:mm:reserve-state': [],
+      '-- mm:reserve-state': [],
       'FROM price_data.prices': PRICE_ROWS,
     })
     const { app, stop } = await freshApp(client)
