@@ -528,9 +528,12 @@ export function ListDetail({ listId }: { listId: string }) {
 
             {isOwner && activeView === 'tags' && (
               <>
+                {/* Above the panels and right-aligned, like every other section
+                    action (the account header's "Edit profile", the alerts list's
+                    "+ New alert") — not trailing under the last tag panel. */}
+                <div className="ext-link-row"><button type="button" className="ext-link" style={{ cursor: 'pointer' }} onClick={() => setNewTagOpen(true)}>+ New tag</button></div>
                 {!data.tags.length && <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, marginBottom: 16 }}>No tags yet.</div>}
                 {orderedTags.map(tag => <TagPanel key={tag.tagId} listId={listId} tag={tag} isOwner={isOwner} />)}
-                <div className="ext-link-row"><button type="button" className="ext-link" style={{ cursor: 'pointer' }} onClick={() => setNewTagOpen(true)}>+ New tag</button></div>
               </>
             )}
 
