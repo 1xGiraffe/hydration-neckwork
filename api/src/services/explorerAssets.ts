@@ -89,6 +89,13 @@ export function allExplorerAssets(): ExplorerAsset[] {
 
 // Resolve an asset id to a lightweight descriptor, falling back to a synthetic
 // entry for ids not in the registry so the UI always has a symbol + decimals.
+// Whether the registry has this asset at all — `assetDescriptor` answers with a
+// placeholder otherwise, and a caller about to scale an amount by its decimals
+// must know the difference between a real 12 and the placeholder's.
+export function knownExplorerAsset(assetId: number): boolean {
+  return cache.has(assetId)
+}
+
 export function assetDescriptor(assetId: number): ExplorerAsset {
   return cache.get(assetId) ?? {
     assetId,
