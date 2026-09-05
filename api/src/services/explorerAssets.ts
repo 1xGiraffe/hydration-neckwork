@@ -34,7 +34,10 @@ interface AssetRow {
 const cache = new Map<number, ExplorerAsset>()
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 let loadInflight: Promise<void> | null = null
-const H2O_ASSET_ID = 1
+// The Omnipool hub asset. The on-chain registry still spells it LRNA / Lerna;
+// every surface names it H2O (AGENTS.md), so both registry loaders — this one
+// and the preis/market-stats loader in assetsService — rename it on load.
+export const H2O_ASSET_ID = 1
 
 async function loadExplorerAssetsUncached(client: ClickHouseClient): Promise<void> {
   const res = await client.query({
