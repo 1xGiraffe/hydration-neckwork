@@ -563,10 +563,37 @@ describe('buildRuleParams — account-activity targets', () => {
   // every member's position.
   it('builds a health-factor rule from the picker, the pasted text, or a tag', () => {
     expect(buildRuleParams('health-factor', { address: FOX_ADDRESS }, sets))
-      .toEqual({ ok: true, params: { target: { kind: 'address', address: FOX_ADDRESS }, threshold: 1.1 } })
+      .toEqual({ ok: true, params: { target: { kind: 'address', address: FOX_ADDRESS }, threshold: 1.1, market: 'core' } })
     expect(buildRuleParams('health-factor', { threshold: '1.6' }, { ...sets, target: { kind: 'tag', tagId: 'treasury' } }))
-      .toEqual({ ok: true, params: { target: { kind: 'tag', tagId: 'treasury' }, threshold: 1.6 } })
+      .toEqual({ ok: true, params: { target: { kind: 'tag', tagId: 'treasury' }, threshold: 1.6, market: 'core' } })
     expect(buildRuleParams('health-factor', {}, sets).ok).toBe(false)
+  })
+
+  // The money markets are isolated, so a health-factor rule names which one it
+  // watches. The primary market is the server's default; the form sends it
+  // explicitly, and a stored rule carrying it compares equal to a bare button.
+  it('names the market a health-factor rule watches, defaulting to the primary one', () => {
+    expect(buildRuleParams('health-factor', { address: FOX_ADDRESS, market: 'gigahdx' }, sets))
+      .toEqual({ ok: true, params: { target: { kind: 'address', address: FOX_ADDRESS }, threshold: 1.1, market: 'gigahdx' } })
+    expect(sameRuleParams('health-factor', { address: FOX_ADDRESS }, { address: FOX_ADDRESS, threshold: 1.1, market: 'core' })).toBe(true)
+    expect(sameRuleParams('health-factor', { address: FOX_ADDRESS, market: 'gigahdx' }, { address: FOX_ADDRESS })).toBe(false)
+    // An emptied select ('' after switching kinds) means the default too, so
+    // what the form shows and what it sends never part ways.
+    expect(buildRuleParams('health-factor', { address: FOX_ADDRESS, market: '' }, sets))
+      .toEqual({ ok: true, params: { target: { kind: 'address', address: FOX_ADDRESS }, threshold: 1.1, market: 'core' } })
+    expect(sameRuleParams('health-factor', { address: FOX_ADDRESS, market: '' }, { address: FOX_ADDRESS })).toBe(true)
+  })
+
+  // One cap rule per market, optionally one token of it — the market is the
+  // one thing it cannot do without.
+  it('builds a cap rule from a market and an optional token', () => {
+    expect(buildRuleParams('mm-cap', { market: 'gigahdx' }, sets)).toEqual({ ok: true, params: { market: 'gigahdx' } })
+    expect(buildRuleParams('mm-cap', { market: 'gigahdx', assetId: '222' }, sets)).toEqual({ ok: true, params: { market: 'gigahdx', assetId: 222 } })
+    const bad = buildRuleParams('mm-cap', {}, sets)
+    expect(bad.ok).toBe(false)
+    expect(bad.ok === false && bad.error).toContain('market')
+    expect(KIND_LABELS['mm-cap']).toBe('Money market cap')
+    expect(NOTIFICATION_KINDS).toContain('mm-cap')
   })
 
   // A stored legacy `{ address }` health-factor rule and the fresh target form
@@ -847,7 +874,7 @@ describe('rule-kind registry mirror', () => {
     // missing a label would render a blank option in the picker. The count is
     // spelled out so adding a kind on one side alone fails here rather than
     // shipping a picker entry with no form behind it.
-    expect(NOTIFICATION_KINDS).toHaveLength(12)
+    expect(NOTIFICATION_KINDS).toHaveLength(13)
     for (const kind of NOTIFICATION_KINDS) expect(KIND_LABELS[kind]).toBeTruthy()
   })
 

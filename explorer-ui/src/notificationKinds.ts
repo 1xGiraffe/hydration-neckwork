@@ -12,7 +12,7 @@ import type { NotificationKind, NotificationRule, NotificationTarget } from './t
 export const NOTIFICATION_KINDS: readonly NotificationKind[] = [
   'account-activity', 'large-trade', 'large-transfer', 'price', 'health-factor',
   'referendum', 'tc-motion', 'safety', 'extrinsic', 'event',
-  'protocol-revenue', 'liquidation',
+  'protocol-revenue', 'liquidation', 'mm-cap',
 ]
 
 // Display names for the kind itself (rule picker, rules list, inbox grouping).
@@ -29,6 +29,7 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   event: 'Event matcher',
   'protocol-revenue': 'Protocol revenue',
   liquidation: 'Liquidation',
+  'mm-cap': 'Money market cap',
 }
 
 // One line of "what this kind watches", shown under the kind in the picker.
@@ -37,7 +38,7 @@ export const KIND_HINTS: Record<NotificationKind, string> = {
   'large-trade': 'Any trade over a threshold, chain-wide or on one token.',
   'large-transfer': 'Any transfer over a threshold, chain-wide or of one token.',
   price: 'A token crossing a price, in either direction.',
-  'health-factor': 'A money-market position falling toward liquidation.',
+  'health-factor': 'A position in one money market falling toward liquidation.',
   referendum: 'Governance referenda entering the phases you care about.',
   'tc-motion': 'Technical Committee motions — proposals, member votes and outcomes.',
   safety: 'Circuit breakers, pauses, freezes, lockdowns, and the Wormhole bridge losing its backing or filling a rate limit.',
@@ -45,7 +46,13 @@ export const KIND_HINTS: Record<NotificationKind, string> = {
   event: 'A specific runtime event, by pallet and method.',
   'protocol-revenue': 'An extrinsic earning the protocol more than a threshold — the protocol share, not the LPs\'.',
   liquidation: 'A money-market position being liquidated, chain-wide or for one account.',
+  'mm-cap': 'A money market\'s borrow or supply cap being reached, or opening up again — every reserve, or one token.',
 }
+
+// The market a health-factor rule watches when none is named: the server's own
+// default, restated so the form opens on it and a stored rule compares equal to
+// a bare button. Every deployment's primary market carries this key.
+export const HEALTH_FACTOR_DEFAULT_MARKET = 'core'
 
 // The activity-type union the explorer feed routes accept. A rule naming a type
 // the feed cannot filter would silently never match.
@@ -280,10 +287,12 @@ function normalizeParams(kind: NotificationKind, params: Record<string, unknown>
     case 'health-factor': {
       // Same target union (and the same legacy `{ address }` acceptance) as
       // account-activity, so a stored rule and a fresh button compare equal.
+      // The market has a server default too, applied here for the same reason.
       const target = readTarget(p)
       return {
         target: target && target.kind === 'address' ? { kind: 'address', address: normalizeAddress(target.address) } : target,
         threshold: Number(p.threshold ?? HEALTH_FACTOR_DEFAULT),
+        market: typeof p.market === 'string' && p.market ? p.market : HEALTH_FACTOR_DEFAULT_MARKET,
       }
     }
     case 'extrinsic':
