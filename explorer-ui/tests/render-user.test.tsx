@@ -158,6 +158,16 @@ describe('ListsSection — account page tag lists (owned public lists)', () => {
     expect(html).toContain('Manage lists')
     expect(hrefOf(html, 'Manage lists')).toBe('/lists')
   })
+
+  // A section's action sits on its title line, above the box — the way the
+  // page header's "Edit profile" sits above the header card — not trailing
+  // under the table like a "view more" link.
+  it('puts the manage link on the title row, above the table', () => {
+    const html = renderToStaticMarkup(<ListsSection publicLists={[publicLib]} ownLists={[publicLib]} isOwn />)
+    expect(html).toContain('class="sec-title-row"')
+    expect(html.indexOf('Manage lists')).toBeLessThan(html.indexOf('<table'))
+    expect(html).not.toContain('Manage lists →')
+  })
 })
 
 // TaggedInHint is intentionally a SEPARATE component from ListsSection above:
