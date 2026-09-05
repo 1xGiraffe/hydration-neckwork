@@ -1570,7 +1570,10 @@ export interface DeviceSession { id: string; label: string; createdVia: string; 
 export type NotificationKind =
   | 'account-activity' | 'large-trade' | 'large-transfer' | 'price' | 'health-factor'
   | 'referendum' | 'tc-motion' | 'safety' | 'extrinsic' | 'event'
-  | 'protocol-revenue' | 'liquidation'
+  | 'protocol-revenue' | 'liquidation' | 'mm-cap'
+// One isolated money market a health-factor or cap rule can name, as the
+// deployment configures it. The overview ships the list; the forms offer it.
+export interface NotificationMarket { key: string; label: string; role: 'primary' | 'supplemental' }
 // A channel is described by what is safe to show: a web-push channel by its
 // endpoint's HOST (never the endpoint or its keys), a Telegram channel by its
 // @username (never the chat id). The server never sends the credential itself.
@@ -1639,6 +1642,8 @@ export interface NotificationsOverview {
   unread: number
   vapidPublicKey: string
   telegramBot: string
+  // Absent on a server that predates market-scoped rules.
+  markets?: NotificationMarket[]
 }
 export interface NotificationInboxPage { rows: NotificationInboxRow[]; unread: number; total: number }
 // `/explorer/filter-names` — the pallet.call and pallet.Event names present in the

@@ -114,8 +114,10 @@ describe('new-alert form → rule params', () => {
       .toEqual({ ok: true, params: { minUsd: 10_000 } })
     expect(buildRuleParams('price', { assetId: '0', direction: 'below', price: '0.02' }, noSets))
       .toEqual({ ok: true, params: { assetId: 0, direction: 'below', price: 0.02 } })
+    // The market is the one default sent explicitly: the server fills it in
+    // too, and a stored rule has to compare equal to the button that made it.
     expect(buildRuleParams('health-factor', { address: OWL, threshold: '' }, noSets))
-      .toEqual({ ok: true, params: { target: { kind: 'address', address: OWL }, threshold: 1.1 } })
+      .toEqual({ ok: true, params: { target: { kind: 'address', address: OWL }, threshold: 1.1, market: 'core' } })
     expect(buildRuleParams('extrinsic', { section: 'Omnipool', method: '', success: 'no', signer: '' }, noSets))
       .toEqual({ ok: true, params: { section: 'Omnipool', success: false } })
     expect(buildRuleParams('event', { section: 'Referenda', method: 'Submitted' }, noSets))
