@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- the page plus the pure tag-order helper its tests exercise directly */
 import { lazy, Suspense, useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import { userApi } from '../api/explorer'
@@ -362,6 +363,21 @@ function ShareChips({ shares, onRevoke, revoking }: {
   )
 }
 
+// Render order of a list's tag panels: the tags created in this session first,
+// newest at the top — directly under the "+ New tag" control that made them —
+// then the server's alphabetical order for everything else. Resolved against
+// the live `tags` on every render, so a session-new tag that got deleted just
+// drops out (no ghost panel) and one that got renamed stays pinned under its
+// unchanged tagId.
+export function orderTagPanels<T extends { tagId: string }>(tags: readonly T[], sessionNewTagIds: readonly string[]): T[] {
+  const isSessionNew = new Set(sessionNewTagIds)
+  const tagById = new Map(tags.map(t => [t.tagId, t]))
+  return [
+    ...[...sessionNewTagIds].reverse().map(id => tagById.get(id)).filter((t): t is T => !!t),
+    ...tags.filter(t => !isSessionNew.has(t.tagId)),
+  ]
+}
+
 export function ListDetail({ listId }: { listId: string }) {
   const session = useSession()
   const { data, isLoading, isError } = useList(listId, !!session)
@@ -386,10 +402,10 @@ export function ListDetail({ listId }: { listId: string }) {
   // listDetailResponse), but re-sorting after every create would make a
   // just-created tag jump straight into the middle of the list the instant
   // its name sorts before an existing one, reading as if it moved or briefly
-  // vanished. Pinning it to the bottom instead — until the page unmounts,
-  // since this state (like a ref) starts fresh on remount, so navigating
-  // away/reopening/reloading always shows the honest alphabetical order —
-  // keeps a session's own creations predictable without touching the
+  // vanished. Pinning it to the top instead (see orderTagPanels) — until the
+  // page unmounts, since this state (like a ref) starts fresh on remount, so
+  // navigating away/reopening/reloading always shows the honest alphabetical
+  // order — keeps a session's own creations predictable without touching the
   // server's stable ordering. Plain state rather than a ref: the ordering
   // below feeds directly into JSX, and reading a ref's value to compute
   // render output is exactly what react-hooks/refs forbids.
@@ -452,17 +468,7 @@ export function ListDetail({ listId }: { listId: string }) {
       {isError ? (
         <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>List not found</div>
       ) : isLoading || !data ? <ProfilePageSkeleton /> : (() => {
-        // Render order: the server's alphabetical tags minus this session's
-        // new ones, then the new ones in creation order at the end. Resolved
-        // against `data.tags` (not cached) on every render, so a session-new
-        // tag that got deleted just drops out (no ghost panel) and one that
-        // got renamed stays pinned at the bottom under its unchanged tagId.
-        const isSessionNew = new Set(sessionNewTagIds)
-        const tagById = new Map(data.tags.map(t => [t.tagId, t]))
-        const orderedTags = [
-          ...data.tags.filter(t => !isSessionNew.has(t.tagId)),
-          ...sessionNewTagIds.map(id => tagById.get(id)).filter((t): t is ListTagDetail => !!t),
-        ]
+        const orderedTags = orderTagPanels(data.tags, sessionNewTagIds)
         return (
           <>
             <div className="acct-head">
