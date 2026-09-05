@@ -1,9 +1,11 @@
 import { pathToFileURL } from 'node:url'
+import type { ClickHouseSettings } from '@clickhouse/client'
 import { createClickHouseClient, type ClickHouseClient } from '../db/client.js'
 import type { PriceRow, TradeVolumeRow } from '../db/schema.js'
 import { rebuildOHLCForTimeRange } from '../ohlc/repair.js'
 import { ALL_SWAP_EVENT_NAMES, BROADCAST_SWAP_EVENT_NAMES, LEGACY_SWAP_EVENT_NAMES, decodeRawTrade, type DecodedRawTrade, type RawTradeEventRow, type TradeAssetAmount } from './tradeEventDecoder.js'
 import { aggregateTradeVolumeRows, decimalToScaledBigInt, formatDecimal128, sumBigIntStrings, sumDecimal128Strings, sumVolumeFields } from '../blocks/volumeMath.js'
+import { foldOmnipoolHubHops } from '../blocks/hubHops.js'
 export { decimalToScaledBigInt, formatDecimal128 } from '../blocks/volumeMath.js'
 const DEFAULT_CHUNK_SIZE = 5_000
 const DEFAULT_SAFETY_LAG_BLOCKS = 100
@@ -74,6 +76,8 @@ interface RepairChunkResult {
   events: number
   tradeRows: number
   priceKeys: number
+  /** Targeted legs the block indexed no price for, booked as live did: no price row. */
+  unpricedLegs: number
 }
 
 function parsePositiveInt(value: string | undefined): number | undefined {
@@ -221,10 +225,14 @@ function normalizeDateTime(value: string): string {
   return parsed.toISOString().slice(0, 19).replace('T', ' ')
 }
 
-function calculateUsdVolume(nativeAmount: bigint, price: string | undefined, decimals: number | undefined): string {
+/**
+ * A leg's USD volume at the indexed event-time price, or null when the block
+ * indexed no positive price for the asset (or its snapshot no decimals) — the
+ * live extractor's "unpriced" case, never a guess from a neighbouring block.
+ */
+function calculateUsdVolume(nativeAmount: bigint, price: string | undefined, decimals: number | undefined): string | null {
   if (nativeAmount === 0n) return '0.000000000000'
-  if (!price) throw new Error('Cannot repair non-zero trade volume without an indexed event-time price')
-  if (decimals == null) throw new Error('Cannot repair non-zero trade volume without snapshot asset decimals')
+  if (!price || decimals == null) return null
   return formatDecimal128((nativeAmount * decimalToScaledBigInt(price)) / (10n ** BigInt(decimals)))
 }
 
@@ -237,8 +245,8 @@ function calculateLegUsdVolume(
   leg: TradeLeg,
   blockHeight: number,
   aliases: AliasState,
-  prices: Map<string, string>
-): string {
+  prices: Map<string, string>,
+): string | null {
   const originalPrice = positivePrice(prices, blockHeight, leg.assetId)
   if (originalPrice) {
     return calculateUsdVolume(leg.amount, originalPrice, aliases.decimals.get(leg.assetId))
@@ -264,6 +272,49 @@ function zeroPriceVolume(blockHeight: number, assetId: number): PriceVolumeRow {
 
 export function decodeTrade(row: RawEventRow): DecodedTrade | null {
   return decodeRawTrade(row)
+}
+
+/**
+ * Raw swap rows (ordered by block and event index) → one block's trades at a
+ * time, with each routed Omnipool trade's two hub hops folded back into the one
+ * trade the pallet executed — the same walk the live extractor makes over a
+ * block's events (src/blocks/hubHops.ts), so a repaired history books the hub
+ * asset exactly as new blocks do.
+ */
+export function decodeBlockTrades(rows: readonly RawEventRow[]): Array<{ blockHeight: number; trade: DecodedTrade }> {
+  const out: Array<{ blockHeight: number; trade: DecodedTrade }> = []
+  let block: RawEventRow['block_height'] | null = null
+  let trades: DecodedTrade[] = []
+  const flush = () => {
+    if (block == null) return
+    for (const trade of foldOmnipoolHubHops(trades, t => t.account)) out.push({ blockHeight: block, trade })
+    trades = []
+  }
+  for (const row of rows) {
+    if (row.block_height !== block) { flush(); block = row.block_height }
+    const trade = decodeTrade(row)
+    if (trade && (trade.inputs.length > 0 || trade.outputs.length > 0)) trades.push(trade)
+  }
+  flush()
+  return out
+}
+
+// Every read the repair issues is a bounded range scan, but it runs against the
+// ClickHouse the live deployment serves from, so each one carries an explicit
+// memory and thread ceiling (AGENTS.md: an unbounded history pass reaches the
+// box's OOM killer, and writing nothing does not make a query safe).
+const BOUNDED_QUERY_SETTINGS: ClickHouseSettings = { max_memory_usage: '3000000000', max_threads: 4 }
+
+// Keys per `IN ({…:Array})` lookup. A query parameter travels in the HTTP query
+// string, which ClickHouse caps at 128 KiB per field: a busy 20,000-block chunk
+// names more event blocks than fit ("HTML Form Exception: Field value too long"),
+// so key lists are sent in slices of this size.
+const KEY_LOOKUP_BATCH_SIZE = 4_000
+
+export function chunked<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
+  return out
 }
 
 function parseEquivalenceList(value: unknown): [number, number][] {
@@ -395,13 +446,28 @@ function tradeKey(row: TradeVolumeRow): string {
   return `${row.asset_id}:${row.block_height}:${row.account}`
 }
 
+/**
+ * One trade's per-account and per-asset volume rows. `targetAssetIds` is the
+ * repair's asset scope: only legs of a targeted (canonical) asset are written.
+ *
+ * A targeted leg whose asset has no indexed price at event time gets NO price
+ * row, exactly as the live path wrote none: the extractor books an unpriced leg
+ * as zero USD, and the writer keeps no price row for it, because a row priced
+ * at 0 would put a 0 low into every candle of its bucket. It is counted in
+ * `unpricedLegs` so a run can tell an 8-hour price gap from a broken price
+ * load. The account ledger keeps the native amount, unpriced, as live does. A
+ * leg outside the scope is booked unpriced too — its rows are discarded anyway.
+ */
 export function rowsForTrade(
   trade: DecodedTrade,
   blockHeight: number,
   aliases: AliasState,
-  prices: Map<string, string>
-): { tradeRows: TradeVolumeRow[]; priceRows: PriceVolumeRow[] } {
+  prices: Map<string, string>,
+  targetAssetIds?: Set<number>,
+): { tradeRows: TradeVolumeRow[]; priceRows: PriceVolumeRow[]; unpricedLegs: number } {
   const { inputs, outputs } = canonicalTradeLegs(trade, aliases)
+  const targeted = (leg: TradeLeg) => matchesAssetFilter(targetAssetIds, leg.canonicalAssetId)
+  let unpricedLegs = 0
   const outputOriginalsByCanonical = originalsByCanonicalAsset(outputs)
   const inputOriginalsByCanonical = originalsByCanonicalAsset(inputs)
   const tradeRowsByAsset = new Map<number, TradeVolumeRow>()
@@ -438,10 +504,15 @@ export function rowsForTrade(
   for (const input of inputs) {
     if (isCanonicalSelfConversion(input, outputOriginalsByCanonical)) continue
 
-    const usdVolume = calculateLegUsdVolume(input, blockHeight, aliases, prices)
-    const priceRow = priceRowForAsset(input.canonicalAssetId)
-    priceRow.native_volume_sell = sumBigIntStrings(priceRow.native_volume_sell, input.amount.toString())
-    priceRow.usd_volume_sell = sumDecimal128Strings(priceRow.usd_volume_sell, usdVolume)
+    const priced = calculateLegUsdVolume(input, blockHeight, aliases, prices)
+    const usdVolume = priced ?? '0.000000000000'
+    if (priced == null && targeted(input)) {
+      unpricedLegs += 1
+    } else {
+      const priceRow = priceRowForAsset(input.canonicalAssetId)
+      priceRow.native_volume_sell = sumBigIntStrings(priceRow.native_volume_sell, input.amount.toString())
+      priceRow.usd_volume_sell = sumDecimal128Strings(priceRow.usd_volume_sell, usdVolume)
+    }
 
     const tradeRow = tradeRowForAsset(input.canonicalAssetId)
     if (tradeRow) {
@@ -453,10 +524,15 @@ export function rowsForTrade(
   for (const output of outputs) {
     if (isCanonicalSelfConversion(output, inputOriginalsByCanonical)) continue
 
-    const usdVolume = calculateLegUsdVolume(output, blockHeight, aliases, prices)
-    const priceRow = priceRowForAsset(output.canonicalAssetId)
-    priceRow.native_volume_buy = sumBigIntStrings(priceRow.native_volume_buy, output.amount.toString())
-    priceRow.usd_volume_buy = sumDecimal128Strings(priceRow.usd_volume_buy, usdVolume)
+    const priced = calculateLegUsdVolume(output, blockHeight, aliases, prices)
+    const usdVolume = priced ?? '0.000000000000'
+    if (priced == null && targeted(output)) {
+      unpricedLegs += 1
+    } else {
+      const priceRow = priceRowForAsset(output.canonicalAssetId)
+      priceRow.native_volume_buy = sumBigIntStrings(priceRow.native_volume_buy, output.amount.toString())
+      priceRow.usd_volume_buy = sumDecimal128Strings(priceRow.usd_volume_buy, usdVolume)
+    }
 
     const tradeRow = tradeRowForAsset(output.canonicalAssetId)
     if (tradeRow) {
@@ -468,6 +544,7 @@ export function rowsForTrade(
   return {
     tradeRows: [...tradeRowsByAsset.values()],
     priceRows: [...priceRowsByAsset.values()],
+    unpricedLegs,
   }
 }
 
@@ -635,6 +712,7 @@ async function queryRawEvents(client: ClickHouseClient, from: number, to: number
       broadcast_names: BROADCAST_SWAP_EVENT_NAMES,
     },
     format: 'JSONEachRow',
+    clickhouse_settings: BOUNDED_QUERY_SETTINGS,
   })
   return await result.json<RawEventRow>()
 }
@@ -645,17 +723,21 @@ async function querySnapshots(
 ): Promise<Map<number, AliasState>> {
   if (blockHeights.length === 0) return new Map()
 
-  const result = await client.query({
-    query: `
-      SELECT block_height, payload_json
-      FROM price_data.raw_block_snapshots FINAL
-      WHERE block_height IN ({blocks:Array(UInt32)})
-    `,
-    query_params: { blocks: blockHeights },
-    format: 'JSONEachRow',
-  })
-  const rows = await result.json<SnapshotRow>()
-  return new Map(rows.map(row => [row.block_height, aliasStateFromSnapshot(row.payload_json)]))
+  const out = new Map<number, AliasState>()
+  for (const blocks of chunked(blockHeights, KEY_LOOKUP_BATCH_SIZE)) {
+    const result = await client.query({
+      query: `
+        SELECT block_height, payload_json
+        FROM price_data.raw_block_snapshots FINAL
+        WHERE block_height IN ({blocks:Array(UInt32)})
+      `,
+      query_params: { blocks },
+      format: 'JSONEachRow',
+      clickhouse_settings: BOUNDED_QUERY_SETTINGS,
+    })
+    for (const row of await result.json<SnapshotRow>()) out.set(row.block_height, aliasStateFromSnapshot(row.payload_json))
+  }
+  return out
 }
 
 async function queryPricesForAssets(client: ClickHouseClient, from: number, to: number, assetIds: number[]): Promise<Map<string, string>> {
@@ -670,6 +752,7 @@ async function queryPricesForAssets(client: ClickHouseClient, from: number, to: 
     `,
     query_params: { from, to, asset_ids: assetIds },
     format: 'JSONEachRow',
+    clickhouse_settings: BOUNDED_QUERY_SETTINGS,
   })
   const rows = await result.json<{ block_height: number; asset_id: number; usd_price: string }>()
   return new Map(rows.map(row => [priceKey(row.block_height, row.asset_id), row.usd_price]))
@@ -707,6 +790,7 @@ async function queryExistingNonZeroPriceRows(
     `,
     query_params: ids && ids.length > 0 ? { from, to, asset_ids: ids } : { from, to },
     format: 'JSONEachRow',
+    clickhouse_settings: BOUNDED_QUERY_SETTINGS,
   })
   return await result.json<ExistingPriceRow>()
 }
@@ -719,27 +803,32 @@ async function queryExistingPriceRowsForCorrectedKeys(
   const assetIds = [...new Set(correctedRows.map(row => row.asset_id))]
   if (blockHeights.length === 0 || assetIds.length === 0) return []
 
-  const result = await client.query({
-    query: `
-      SELECT
-        p.block_height AS block_height,
-        p.asset_id AS asset_id,
-        toString(b.block_timestamp) AS block_timestamp,
-        toString(usd_price) AS usd_price,
-        toString(native_volume_buy) AS native_volume_buy,
-        toString(native_volume_sell) AS native_volume_sell,
-        toString(usd_volume_buy) AS usd_volume_buy,
-        toString(usd_volume_sell) AS usd_volume_sell,
-        hops
-      FROM (SELECT * FROM price_data.prices FINAL) AS p
-      INNER JOIN price_data.blocks AS b ON b.block_height = p.block_height
-      WHERE p.block_height IN ({blocks:Array(UInt32)})
-        AND p.asset_id IN ({asset_ids:Array(UInt32)})
-    `,
-    query_params: { blocks: blockHeights, asset_ids: assetIds },
-    format: 'JSONEachRow',
-  })
-  return await result.json<ExistingPriceRow>()
+  const out: ExistingPriceRow[] = []
+  for (const blocks of chunked(blockHeights, KEY_LOOKUP_BATCH_SIZE)) {
+    const result = await client.query({
+      query: `
+        SELECT
+          p.block_height AS block_height,
+          p.asset_id AS asset_id,
+          toString(b.block_timestamp) AS block_timestamp,
+          toString(usd_price) AS usd_price,
+          toString(native_volume_buy) AS native_volume_buy,
+          toString(native_volume_sell) AS native_volume_sell,
+          toString(usd_volume_buy) AS usd_volume_buy,
+          toString(usd_volume_sell) AS usd_volume_sell,
+          hops
+        FROM (SELECT * FROM price_data.prices FINAL) AS p
+        INNER JOIN price_data.blocks AS b ON b.block_height = p.block_height
+        WHERE p.block_height IN ({blocks:Array(UInt32)})
+          AND p.asset_id IN ({asset_ids:Array(UInt32)})
+      `,
+      query_params: { blocks, asset_ids: assetIds },
+      format: 'JSONEachRow',
+      clickhouse_settings: BOUNDED_QUERY_SETTINGS,
+    })
+    out.push(...await result.json<ExistingPriceRow>())
+  }
+  return out
 }
 
 function mergeExistingPriceRows(rows: ExistingPriceRow[]): ExistingPriceRow[] {
@@ -793,10 +882,7 @@ async function repairChunk(
   }
 ): Promise<RepairChunkResult> {
   const events = await queryRawEvents(client, options.from, options.to, options.unifiedSwapFromBlock)
-  const trades = events.flatMap(row => {
-    const trade = decodeTrade(row)
-    return trade && (trade.inputs.length > 0 || trade.outputs.length > 0) ? [{ blockHeight: row.block_height, trade }] : []
-  })
+  const trades = decodeBlockTrades(events)
   const eventBlocks = [...new Set(trades.map(row => row.blockHeight))]
   const snapshots = await querySnapshots(client, eventBlocks)
   const missingSnapshots = eventBlocks.filter(blockHeight => !snapshots.has(blockHeight))
@@ -818,8 +904,9 @@ async function repairChunk(
   const generated = trades.map(({ blockHeight, trade }) => {
     const aliases = snapshots.get(blockHeight)
     if (!aliases) throw new Error(`Missing aliases for block ${blockHeight}`)
-    return rowsForTrade(trade, blockHeight, aliases, prices)
+    return rowsForTrade(trade, blockHeight, aliases, prices, options.targetAssetIds)
   })
+  const unpricedLegs = generated.reduce((count, item) => count + item.unpricedLegs, 0)
   const tradeRows = aggregateTradeRows(generated.flatMap(item => item.tradeRows))
     .filter(row => matchesAssetFilter(options.targetAssetIds, row.asset_id))
   const correctedPriceRows = aggregatePriceVolumeRows(generated.flatMap(item => item.priceRows))
@@ -859,6 +946,7 @@ async function repairChunk(
     events: events.length,
     tradeRows: tradeRows.length,
     priceKeys: priceKeysToDelete.length,
+    unpricedLegs,
   }
 }
 
@@ -902,6 +990,7 @@ async function main(): Promise<void> {
     let totalEvents = 0
     let totalTradeRows = 0
     let totalPriceKeys = 0
+    let totalUnpricedLegs = 0
 
     if (args.targets.has('trade-volume') || args.targets.has('prices')) {
       for (let start = from; start <= to; start += args.chunkSize) {
@@ -917,15 +1006,21 @@ async function main(): Promise<void> {
         totalEvents += result.events
         totalTradeRows += result.tradeRows
         totalPriceKeys += result.priceKeys
-        console.log(`[volume-repair] ${start}..${end}: ${result.events} events -> ${result.tradeRows} account rows, ${result.priceKeys} price keys`)
+        totalUnpricedLegs += result.unpricedLegs
+        const unpriced = result.unpricedLegs > 0 ? `, ${result.unpricedLegs} legs unpriced at event time (no price row written, as live)` : ''
+        console.log(`[volume-repair] ${start}..${end}: ${result.events} events -> ${result.tradeRows} account rows, ${result.priceKeys} price keys${unpriced}`)
       }
     }
+    // A handful of unpriced legs is a price gap the live indexer had too; a
+    // flood of them means the run's price load is broken, and the operator
+    // should see that before trusting the rewritten rows.
+    if (totalUnpricedLegs > 0) console.warn(`[volume-repair] ${totalUnpricedLegs} targeted legs had no indexed event-time price and were written without a price row`)
 
     if (args.targets.has('ohlc')) {
       const { startTime, endTime } = await blockTimeBounds(client, from, to)
       if (args.apply) {
         console.log(`[volume-repair] Rebuilding OHLC intervals for ${startTime}..${endTime}`)
-        await rebuildOHLCForTimeRange(client, startTime, endTime, targetAssetIds)
+        await rebuildOHLCForTimeRange(client, startTime, endTime, targetAssetIds, BOUNDED_QUERY_SETTINGS)
       } else {
         console.log(`[volume-repair] Would rebuild OHLC intervals for ${startTime}..${endTime}`)
       }
