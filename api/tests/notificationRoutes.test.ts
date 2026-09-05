@@ -87,7 +87,13 @@ describe('overview', () => {
     const res = await f.inject({ method: 'GET', url: '/user/notifications/overview', headers: auth() })
     expect(res.statusCode).toBe(200)
     expect(res.headers['cache-control']).toBe('no-store')
-    expect(res.json()).toEqual({ channels: [], rules: [], unread: 0, vapidPublicKey: 'test-public-key', telegramBot: 'hydration_explorer_bot' })
+    expect(res.json()).toEqual({
+      channels: [], rules: [], unread: 0, vapidPublicKey: 'test-public-key', telegramBot: 'hydration_explorer_bot',
+      // The configured isolated markets, primary first — what the two market
+      // forms offer, since the client cannot know a deployment's set.
+      markets: expect.arrayContaining([{ key: 'core', label: 'Money Market', role: 'primary' }, { key: 'gigahdx', label: 'GIGAHDX', role: 'supplemental' }]),
+    })
+    expect(res.json().markets[0].role).toBe('primary')
   })
 
   it('reports both channels as unconfigured when their env is absent', async () => {

@@ -12,7 +12,7 @@ import {
 import { NOTIFICATION_KINDS, describeRule, KIND_LABELS, type NotificationKind } from '../notifications/notificationRules.ts'
 import { activityTargetOf, resolveActivityTarget } from '../notifications/ruleTargets.ts'
 import { assetDescriptor } from '../services/explorerAssets.ts'
-import { accountRef, resolveDisplayAccountId } from '../services/explorerService.ts'
+import { accountRef, mmMarketByKey, mmMarkets, resolveDisplayAccountId } from '../services/explorerService.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
 import { renderNotification, text } from '../notifications/render.ts'
 import { sendToChannel, vapidPublicKey, webPushConfigured, telegramConfigured } from '../notifications/delivery.ts'
@@ -57,7 +57,12 @@ function ruleRef(r: NotificationRule) {
     kind: r.kind,
     kindLabel: KIND_LABELS[r.kind],
     name: r.name,
-    summary: describeRule(r.kind, r.params, assetId => assetDescriptor(assetId).symbol, t => resolveActivityTarget(r.accountId, t)),
+    summary: describeRule(
+      r.kind, r.params,
+      assetId => assetDescriptor(assetId).symbol,
+      t => resolveActivityTarget(r.accountId, t),
+      key => mmMarketByKey(key)?.label ?? null,
+    ),
     params: r.params,
     channels: r.channels,
     muted: r.muted,
@@ -145,6 +150,10 @@ export async function notificationRoutes(fastify: FastifyInstance) {
       unread: await unreadCount(accountId),
       vapidPublicKey: webPushConfigured() ? vapidPublicKey() : '',
       telegramBot: telegramConfigured() ? telegramBotUsername() : '',
+      // The isolated money markets a health-factor or cap rule can name, in
+      // display order — the deployment's configuration, not a list the client
+      // could know on its own.
+      markets: mmMarkets().map(m => ({ key: m.key, label: m.label, role: m.role })),
     }
   })
 

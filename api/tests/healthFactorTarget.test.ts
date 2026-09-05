@@ -10,12 +10,13 @@ const ADDR = '0x' + 'ab'.repeat(20)   // H160 form — the params schema takes S
 describe('health-factor target params', () => {
   it('normalizes the legacy address form into an address target', () => {
     const parsed = healthFactorParams.parse({ address: ADDR, threshold: 1.6 })
-    expect(parsed).toEqual({ target: { kind: 'address', address: ADDR }, threshold: 1.6 })
+    // …and, having been written before markets existed, into the primary market.
+    expect(parsed).toEqual({ target: { kind: 'address', address: ADDR }, threshold: 1.6, market: 'core' })
   })
 
   it('accepts tag and list-tag targets and defaults the threshold', () => {
     expect(healthFactorParams.parse({ target: { kind: 'tag', tagId: 'treasury' } }))
-      .toEqual({ target: { kind: 'tag', tagId: 'treasury' }, threshold: 1.1 })
+      .toEqual({ target: { kind: 'tag', tagId: 'treasury' }, threshold: 1.1, market: 'core' })
     expect(healthFactorParams.parse({ target: { kind: 'list-tag', listId: 'l1', tagId: 't1' } }).target)
       .toEqual({ kind: 'list-tag', listId: 'l1', tagId: 't1' })
   })

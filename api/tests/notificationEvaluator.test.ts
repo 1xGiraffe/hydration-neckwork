@@ -16,7 +16,7 @@ import type { NotificationRule } from '../src/notifications/notificationStore.ts
 import { SAFETY_KINDS, type NotificationKind } from '../src/notifications/notificationRules.ts'
 import type { SafetyEvent } from '../src/services/securityService.ts'
 import {
-  getPrimaryHealthFactor, initExplorerService, mmMarkets,
+  getMarketHealthFactor, getPrimaryHealthFactor, initExplorerService, mmMarkets,
   type AccountRef, type ActivityRow, type AssetRef,
 } from '../src/services/explorerService.ts'
 import { fakeClient } from './helpers/userFakes.ts'
@@ -495,10 +495,48 @@ describe('renderMatch', () => {
     expect(price.url).toMatch(/\/asset\/0$/)
 
     const hf = renderNotification(renderMatch(
-      match({ lane: 'health-factor', address: WHALE, account: null, threshold: 1.1, value: 1.04 }, 'health-factor'),
+      match({ lane: 'health-factor', address: WHALE, account: null, threshold: 1.1, value: 1.04, market: 'Money Market' }, 'health-factor'),
       rule('health-factor', { address: WHALE, threshold: 1.1 }), noViewerTag))
     expect(hf.title).toContain('Health factor 1.04')
     expect(hf.url).toContain(`/account/${encodeURIComponent(WHALE)}`)
+  })
+
+  // The markets are isolated, so a health factor is meaningless without saying
+  // whose it is — the body names the market every time.
+  it('names the market a health factor belongs to', () => {
+    const hf = renderNotification(renderMatch(
+      match({ lane: 'health-factor', address: WHALE, account: null, threshold: 1.1, value: 1.04, market: 'GIGAHDX' }, 'health-factor'),
+      rule('health-factor', { address: WHALE, threshold: 1.1, market: 'gigahdx' }), noViewerTag))
+    expect(hf.title).toContain('Health factor 1.04')
+    expect(hf.body).toContain('GIGAHDX')
+    expect(hf.body).toContain('1.1')
+  })
+
+  it('states a cap flip in the words of its side, with what is used and what is free', () => {
+    const r = rule('mm-cap', { market: 'gigahdx' })
+    const cap = (over: Partial<Extract<RuleMatch['payload'], { lane: 'mm-cap' }>>) => renderNotification(renderMatch(match({
+      lane: 'mm-cap', market: 'GIGAHDX', side: 'borrow', full: true, reserveAddress: '0x531a654d1696ed52e7275a8cede955e82620f99a',
+      assetId: 222, symbol: 'HOLLAR', used: 503_084.11, cap: 500_000, ...over,
+    }, 'mm-cap'), r, noViewerTag))
+    const reached = cap({})
+    expect(reached.title).toBe('HOLLAR borrow cap reached · GIGAHDX')
+    expect(reached.body).toContain('503k')
+    expect(reached.body).toContain('500k HOLLAR')
+    expect(reached.url).toMatch(/\/asset\/222$/)
+    const open = cap({ full: false, used: 450_000 })
+    expect(open.title).toBe('HOLLAR can be borrowed again · GIGAHDX')
+    expect(open.body).toContain('50k HOLLAR')
+    const supply = cap({ side: 'supply', market: 'Money Market', symbol: 'DOT', assetId: 5, used: 25_000_000, cap: 25_000_000 })
+    expect(supply.title).toBe('DOT supply cap reached · Money Market')
+    expect(cap({ side: 'supply', full: false, symbol: 'DOT', assetId: 5, used: 20_000_000, cap: 25_000_000 }).title)
+      .toBe('DOT can be supplied again · GIGAHDX')
+    // A reserve outside the registry still reads, by its address.
+    const unknown = cap({ assetId: null, symbol: null })
+    expect(unknown.title).toContain('0x531a…0f99a')
+    expect(unknown.url).toMatch(/\/security\/money-market$/)
+    // A flip the cap itself caused says so, in the direction it moved.
+    expect(cap({ used: 400_000, cap: 300_000, capChangedFrom: 500_000 }).body).toContain('lowered from 500k to 300k HOLLAR')
+    expect(cap({ full: false, used: 400_000, cap: 600_000, capChangedFrom: 300_000 }).body).toContain('raised from 300k to 600k HOLLAR')
   })
 
   it('says how an enactment went, not just that it happened', () => {
@@ -584,6 +622,16 @@ describe('primary-market health factor', () => {
     initExplorerService(fakeClient({ money_market_latest_positions: [position(supplementalPool, WAD)] }))
     expect(await getPrimaryHealthFactor('0x' + '33'.repeat(20))).toBeNull()
     expect(await getPrimaryHealthFactor('not-an-address')).toBeNull()
+  })
+
+  it('reads a supplemental market by its key, and an unknown key as nothing', async () => {
+    initExplorerService(fakeClient({
+      money_market_latest_positions: [position(primaryPool, WAD * 105n / 100n), position(supplementalPool, WAD * 5n)],
+    }))
+    const supplementalKey = mmMarkets().find(m => m.role === 'supplemental')!.key
+    expect(await getMarketHealthFactor('0x' + '44'.repeat(20), supplementalKey)).toBeCloseTo(5, 6)
+    expect(await getMarketHealthFactor('0x' + '44'.repeat(20), 'core')).toBeCloseTo(1.05, 6)
+    expect(await getMarketHealthFactor('0x' + '44'.repeat(20), 'no-such-market')).toBeNull()
   })
 })
 
