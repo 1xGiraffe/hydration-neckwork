@@ -485,6 +485,49 @@ describe('extractVolumeFromSwaps', () => {
     });
   });
 
+  // A routed Omnipool trade is two broadcast hops through the hub asset. The
+  // pallet event beside them names the user's two assets; the hub leg is the
+  // pool's plumbing and must not read as H2O volume.
+  it('books a two-hop Omnipool trade to its two user assets and nothing to the hub asset', () => {
+    const pallet = createMockEvent('Omnipool.SellExecuted', {
+      who: 'router', assetIn: 5, assetOut: 10, amountIn: 1000000000000n, amountOut: 2000000000000n,
+      hubAmountIn: 700000000000n, hubAmountOut: 697000000000n, assetFeeAmount: 0n, protocolFeeAmount: 0n,
+    });
+    const hopOut = createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Omnipool' }, operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 5, amount: 1000000000000n }], outputs: [{ asset: 1, amount: 700000000000n }],
+      fees: [], swapper: 'alice', filler: 'pool', operationStack: [],
+    });
+    const hopIn = createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Omnipool' }, operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 1, amount: 697000000000n }], outputs: [{ asset: 10, amount: 2000000000000n }],
+      fees: [], swapper: 'alice', filler: 'pool', operationStack: [],
+    });
+    const hubPrices: PriceMap = new Map([...prices, [1, '5.000000000000']]);
+    const hubDecimals: AssetDecimals = new Map([...decimals, [1, 12]]);
+
+    const rows = extractVolumeFromSwaps([pallet, hopOut, hopIn], 100, 323, hubPrices, hubDecimals);
+
+    expect(rows.map(r => r.asset_id)).toEqual([5, 10]);
+    expect(rows[0]).toMatchObject({ asset_id: 5, native_volume_sell: '1000000000000', usd_volume_sell: '2.000000000000' });
+    expect(rows[1]).toMatchObject({ asset_id: 10, native_volume_buy: '2000000000000', usd_volume_buy: '3.000000000000' });
+  });
+
+  it('still books a lone hop that sells or buys the hub asset itself', () => {
+    const sellHub = createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Omnipool' }, operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 1, amount: 1040000000000n }], outputs: [{ asset: 5, amount: 2000000000000n }],
+      fees: [], swapper: 'router', filler: 'pool', operationStack: [],
+    });
+    const hubPrices: PriceMap = new Map([...prices, [1, '5.000000000000']]);
+    const hubDecimals: AssetDecimals = new Map([...decimals, [1, 12]]);
+
+    const rows = extractVolumeFromSwaps([sellHub], 100, 323, hubPrices, hubDecimals);
+
+    expect(rows.map(r => r.asset_id)).toEqual([1, 5]);
+    expect(rows[0]).toMatchObject({ asset_id: 1, native_volume_sell: '1040000000000', usd_volume_sell: '5.200000000000' });
+  });
+
   it('applies the v282 Broadcast.Swapped exact-out XYK amount correction', () => {
     const event = createMockEvent('Broadcast.Swapped', {
       fillerType: { __kind: 'XYK', value: 123 },
@@ -630,6 +673,25 @@ describe('extractTradeVolumeFromSwaps', () => {
       usd_volume_buy: '3.000000000000',
       trade_count: 1,
     });
+  });
+
+  it('counts a two-hop Omnipool trade once per user asset, with no hub-asset row for the account', () => {
+    const hopOut = createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Omnipool' }, operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 5, amount: 1000000000000n }], outputs: [{ asset: 1, amount: 700000000000n }],
+      fees: [], swapper: 'alice', filler: 'pool', operationStack: [],
+    });
+    const hopIn = createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Omnipool' }, operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 1, amount: 697000000000n }], outputs: [{ asset: 10, amount: 2000000000000n }],
+      fees: [], swapper: 'alice', filler: 'pool', operationStack: [],
+    });
+    const hubPrices: PriceMap = new Map([...prices, [1, '5.000000000000']]);
+    const hubDecimals: AssetDecimals = new Map([...decimals, [1, 12]]);
+
+    const rows = extractTradeVolumeFromSwaps([hopOut, hopIn], 100, 323, hubPrices, hubDecimals);
+
+    expect(rows.map(r => [r.asset_id, r.account, r.trade_count])).toEqual([[5, 'alice', 1], [10, 'alice', 1]]);
   });
 
   it('aggregates repeated broadcast trades by asset, block, and account', () => {
