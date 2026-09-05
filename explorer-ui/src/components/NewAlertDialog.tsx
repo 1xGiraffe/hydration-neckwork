@@ -6,14 +6,15 @@ import { Combo, tokenFilterOptions } from './Filters'
 import { nameOptionsInPallet, palletOptions } from './activityFilters'
 import { addressOption, AlertTargetPicker, type TargetOption } from './AlertTargetPicker'
 import { useFilterNames } from '../hooks/useExplorerData'
+import { useNotificationsOverview } from '../hooks/useNotifications'
 import {
-  ACTIVITY_TYPES, COOLDOWN_CHOICES, HEALTH_FACTOR_DEFAULT, HEALTH_FACTOR_MAX, HEALTH_FACTOR_MIN,
+  ACTIVITY_TYPES, COOLDOWN_CHOICES, HEALTH_FACTOR_DEFAULT, HEALTH_FACTOR_DEFAULT_MARKET, HEALTH_FACTOR_MAX, HEALTH_FACTOR_MIN,
   HEALTH_FACTOR_PRESETS, KIND_HINTS, KIND_LABELS, LARGE_VALUE_MIN_USD, NOTIFICATION_KINDS, PRICE_STEP_PCTS,
   REFERENDUM_PHASES, REFERENDUM_TRACKS, SAFETY_DEFICIT_DEFAULT_USD, SAFETY_FUSE_DEFAULT_PCT, SAFETY_KINDS,
   TC_MOTION_PHASES, USD_FLOOR_PRESETS, isAddressLike,
   isPalletNameLike, priceAtStep, priceStepLabel, readTarget, suggestPriceDirection, targetParams,
 } from '../notificationKinds'
-import type { AssetFilterItem, NotificationKind, NotificationRule, NotificationRuleInput, NotificationTarget } from '../types'
+import type { AssetFilterItem, NotificationKind, NotificationMarket, NotificationRule, NotificationRuleInput, NotificationTarget } from '../types'
 
 // "New alert": pick what to watch, then fill in that kind's own parameters.
 // The field set per kind mirrors api/src/notifications/notificationRules.ts —
@@ -189,14 +190,25 @@ export function buildRuleParams(
     case 'health-factor': {
       // The picker's selection wins; a pasted, never-picked address still counts
       // (same contract as account-activity above). A tag watches every member's
-      // position.
+      // position — in the ONE market the rule names, since the markets are
+      // isolated and a borrower in two has two health factors. The market is sent
+      // explicitly, default included, so a stored rule and the form agree.
       const target = sets.target ?? (isAddressLike(address) ? ({ kind: 'address', address } as const) : null)
       if (!target) return { ok: false, error: 'Pick an account or tag to watch, or paste an SS58 or 0x address' }
       const threshold = num(v.threshold ?? '') ?? HEALTH_FACTOR_DEFAULT
       if (threshold < HEALTH_FACTOR_MIN || threshold > HEALTH_FACTOR_MAX) {
         return { ok: false, error: `The threshold must be between ${HEALTH_FACTOR_MIN} and ${HEALTH_FACTOR_MAX}` }
       }
-      return { ok: true, params: { ...targetParams(target), threshold } }
+      const market = (v.market ?? '').trim() || HEALTH_FACTOR_DEFAULT_MARKET
+      return { ok: true, params: { ...targetParams(target), threshold, market } }
+    }
+    // One rule per market: every capped reserve of it, or one token's. The market
+    // is the one thing the rule cannot do without.
+    case 'mm-cap': {
+      const market = (v.market ?? '').trim()
+      if (!market) return { ok: false, error: 'Pick the money market to watch' }
+      const assetId = num(v.assetId ?? '')
+      return { ok: true, params: { market, ...(assetId != null ? { assetId } : {}) } }
     }
     case 'referendum': {
       const track = (v.track ?? '').trim()
@@ -359,6 +371,11 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
   // accept free text, since a name too new for the catalogue's window is still a
   // perfectly good matcher.
   const filterNames = useFilterNames()
+  // The isolated money markets a health-factor or cap rule can name, as this
+  // deployment configures them. Off the overview the topbar already keeps warm,
+  // so the two market forms cost no request of their own.
+  const markets: NotificationMarket[] = useNotificationsOverview().data?.markets ?? []
+  const shownMarket = (values.market ?? '').trim() || (kind === 'health-factor' ? HEALTH_FACTOR_DEFAULT_MARKET : '')
 
   // Prop-change reset, the same pattern ListFormDialog/ConnectDialog use: every
   // open starts from a clean form so a previous attempt's half-filled fields
@@ -571,7 +588,45 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
                 <PresetChips options={HEALTH_FACTOR_PRESETS.map(v => ({ value: v, label: v.toFixed(1) }))}
                   value={values.threshold ?? ''} label="Health factor presets" disabled={pending}
                   onPick={v => set('threshold', v)} />
-                <div className="muted" style={{ fontSize: 11 }}>Primary money market only — a GIGAHDX position has its own health factor.</div>
+              </div>
+            )}
+
+            {/* The markets are isolated pools: a borrower in two has two health
+                factors, and a cap belongs to one market's reserve. Both kinds
+                therefore pick ONE market; the health-factor form opens on the
+                primary one, which is what its rules have always meant. */}
+            {(kind === 'health-factor' || kind === 'mm-cap') && (
+              <div className="field">
+                <label htmlFor="alert-market">Money market</label>
+                {/* One effective market for what the select SHOWS and what submit
+                    sends: an empty value (the box cleared on the cap form, then
+                    the kind switched) means the health-factor default, exactly
+                    as buildRuleParams reads it. */}
+                <select id="alert-market" value={shownMarket} disabled={pending} onChange={e => set('market', e.target.value)}>
+                  {kind === 'mm-cap' && <option value="">Pick a market</option>}
+                  {markets.map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
+                  {/* The shown market may be one the overview has not listed —
+                      the list not loaded yet, or a rule under edit naming a market
+                      the deployment no longer configures. Keep it selectable and
+                      visible rather than rendering a blank choice that submits. */}
+                  {shownMarket && !markets.some(m => m.key === shownMarket) && (
+                    <option value={shownMarket}>{shownMarket === HEALTH_FACTOR_DEFAULT_MARKET ? 'Primary money market' : shownMarket}</option>
+                  )}
+                </select>
+                <div className="muted" style={{ fontSize: 11 }}>
+                  {kind === 'health-factor'
+                    ? 'Each market has its own health factor; this rule watches this one only.'
+                    : 'Every capped reserve of this market, on both the borrow and the supply side.'}
+                </div>
+              </div>
+            )}
+
+            {kind === 'mm-cap' && (
+              <div className="field">
+                <label className="field-label">Token</label>
+                <Combo value={values.assetId ?? ''} placeholder="Every reserve" label="Token"
+                  options={tokenOptions} onChange={v => set('assetId', v)} />
+                <div className="muted" style={{ fontSize: 11 }}>Optional — narrow to one reserve, e.g. HOLLAR.</div>
               </div>
             )}
 
