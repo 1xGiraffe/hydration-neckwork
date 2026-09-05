@@ -1,5 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import type { Asset } from '../types.ts'
+import { H2O_ASSET_ID } from './explorerAssets.ts'
 
 interface AssetRow {
   asset_id: number
@@ -75,10 +76,14 @@ async function loadAssetsUncached(client: ClickHouseClient): Promise<void> {
     if (row.symbol.includes('-Pool')) continue
     if (isAToken(row.symbol)) continue
 
+    // The hub asset reads H2O on every surface, whatever the chain registry
+    // spells it — the same rename explorerAssets applies for the explorer.
+    const symbol = row.asset_id === H2O_ASSET_ID ? 'H2O' : row.symbol
+    const name = row.asset_id === H2O_ASSET_ID ? symbol : row.name
     assetCache.set(row.asset_id, {
       assetId: row.asset_id,
-      symbol: row.symbol,
-      name: row.name === row.symbol ? null : row.name,
+      symbol,
+      name: name === symbol ? null : name,
       decimals: row.decimals,
       isStablecoin: STABLECOIN_SYMBOLS.has(row.symbol),
       isUsdPegged: USD_PEGGED_SYMBOLS.has(row.symbol),
