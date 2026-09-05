@@ -210,6 +210,41 @@ describe('OpenGov tracks', () => {
   })
 })
 
+// The money markets are isolated pools with their own health factors and their
+// own caps, so a rule about either names WHICH market it watches. A health-factor
+// rule written before markets existed watched the primary one, and re-parses
+// into exactly that.
+describe('money-market rules name their market', () => {
+  const marketLabel = (key: string) => (key === 'gigahdx' ? 'GIGAHDX' : key === 'core' ? 'Money Market' : null)
+
+  it('defaults a health-factor rule to the primary market and accepts another', () => {
+    const core = parseRuleParams('health-factor', { address: SS58 })
+    expect(core.ok && core.params.market).toBe('core')
+    const giga = parseRuleParams('health-factor', { address: SS58, market: 'gigahdx' })
+    expect(giga.ok && giga.params.market).toBe('gigahdx')
+    expect(parseRuleParams('health-factor', { address: SS58, market: 'not a market!' }).ok).toBe(false)
+  })
+
+  it('accepts one cap rule per market, optionally narrowed to a token', () => {
+    expect(parseRuleParams('mm-cap', { market: 'gigahdx' }).ok).toBe(true)
+    expect(parseRuleParams('mm-cap', { market: 'gigahdx', assetId: 222 }).ok).toBe(true)
+    expect(parseRuleParams('mm-cap', {}).ok).toBe(false)
+    expect(parseRuleParams('mm-cap', { market: 'gigahdx', minUsd: 5 }).ok).toBe(false)
+    expect(KIND_LABELS['mm-cap']).toBe('Money market cap')
+  })
+
+  it('names the market in a summary unless it is the primary one', () => {
+    expect(describeRule('health-factor', { address: SS58, threshold: 1.1 })).toBe('health factor below 1.1')
+    expect(describeRule('health-factor', { address: SS58, threshold: 1.1, market: 'gigahdx' }, undefined, undefined, marketLabel))
+      .toBe('GIGAHDX health factor below 1.1')
+    expect(describeRule('mm-cap', { market: 'gigahdx' }, undefined, undefined, marketLabel)).toBe('reserve caps on GIGAHDX')
+    expect(describeRule('mm-cap', { market: 'gigahdx', assetId: 222 }, id => (id === 222 ? 'HOLLAR' : `#${id}`), undefined, marketLabel))
+      .toBe('HOLLAR cap on GIGAHDX')
+    // Without a label lookup the key stands in rather than nothing.
+    expect(describeRule('mm-cap', { market: 'bil' })).toBe('reserve caps on bil')
+  })
+})
+
 // Where the account is drawn beside the sentence, the sentence must not repeat
 // it. Address targets used to spell out a truncated address that the rule's
 // auto-generated name ALSO spelled out, so one row said "Activity of 1C1rAh…"

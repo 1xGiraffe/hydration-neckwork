@@ -27,14 +27,23 @@ vi.mock('../src/services/explorerService.ts', async importOriginal => {
       activityCalls.push({ kind: 'recent', type, filters, opts })
       return activityRows
     },
-    getPrimaryHealthFactor: async (address: string) => {
-      healthFactorCalls.push(address)
-      return healthFactors.get(address) ?? null
+    getMarketHealthFactor: async (address: string, market: string) => {
+      healthFactorCalls.push(`${market}:${address}`)
+      return healthFactors.get(`${market}:${address}`) ?? null
     },
   }
 })
+// Health factors keyed `${market}:${address}`, the way the lane asks for them.
 const healthFactorCalls: string[] = []
 const healthFactors = new Map<string, number | null>()
+
+// The cap lane's source, replaced whole: the reserve list is the thing under
+// test, and the real reader is a ClickHouse query.
+let capStates: ReserveCapState[] = []
+vi.mock('../src/services/moneyMarketCaps.ts', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/moneyMarketCaps.ts')>()
+  return { ...actual, moneyMarketCapStates: async () => capStates }
+})
 
 import {
   cursorKey, evaluatorCounters, evaluatorCursors, initEvaluator, resetEvaluatorForTests, runEvaluatorTick,
@@ -44,7 +53,8 @@ import {
   createRule, initNotifications, loadNotifications, setNotificationState,
 } from '../src/notifications/notificationStore.ts'
 import { resetDeliveryStateForTests } from '../src/notifications/delivery.ts'
-import type { ActivityRow } from '../src/services/explorerService.ts'
+import { mmMarkets, type ActivityRow } from '../src/services/explorerService.ts'
+import type { ReserveCapState } from '../src/services/moneyMarketCaps.ts'
 import { fakeClient, insertedRows, type FakeClient } from './helpers/userFakes.ts'
 
 const OWNER = '0x' + 'aa'.repeat(32)
@@ -81,6 +91,7 @@ beforeEach(async () => {
   activityRows = []
   healthFactorCalls.length = 0
   healthFactors.clear()
+  capStates = []
   tables = { raw_ingestion_state: [{ head: 1_000 }], raw_events: [], raw_extrinsics: [], referendum_lifecycle_events: [] }
   client = fakeClient(tables as unknown as Record<string, Record<string, unknown>[]>)
   initNotifications(client)
@@ -330,27 +341,180 @@ describe('activity source fan-out', () => {
 /* ============ health factor: one lookup per address ============ */
 
 describe('health-factor lane', () => {
-  it('reads one health factor per address, not one per rule', async () => {
-    healthFactors.set(ADDRESSES[0], 2)
-    healthFactors.set(ADDRESSES[1], 3)
+  it('reads one health factor per address and market, not one per rule', async () => {
+    healthFactors.set(`core:${ADDRESSES[0]}`, 2)
+    healthFactors.set(`core:${ADDRESSES[1]}`, 3)
     await createRule(OWNER, { kind: 'health-factor', params: { address: ADDRESSES[0], threshold: 1.1 } })
     await createRule(OWNER, { kind: 'health-factor', params: { address: ADDRESSES[0], threshold: 1.5 } })
     await createRule(OWNER, { kind: 'health-factor', params: { address: ADDRESSES[1], threshold: 1.1 } })
     await runEvaluatorTick()
-    expect(healthFactorCalls.sort()).toEqual([ADDRESSES[0], ADDRESSES[1]].sort())
+    expect(healthFactorCalls.sort()).toEqual([`core:${ADDRESSES[0]}`, `core:${ADDRESSES[1]}`].sort())
   })
 
   it('fires every rule whose threshold the shared value crossed', async () => {
-    healthFactors.set(ADDRESSES[0], 2)
+    healthFactors.set(`core:${ADDRESSES[0]}`, 2)
     await createRule(OWNER, { kind: 'health-factor', params: { address: ADDRESSES[0], threshold: 1.1 } })
     await createRule(OWNER, { kind: 'health-factor', params: { address: ADDRESSES[0], threshold: 1.5 } })
     await runEvaluatorTick()                       // arms both
-    healthFactors.set(ADDRESSES[0], 1.2)
+    healthFactors.set(`core:${ADDRESSES[0]}`, 1.2)
     setHead(1_030)
     for (let i = 0; i < 5; i++) await runEvaluatorTick()
     // Only the 1.5 rule crossed; the 1.1 one is still armed.
     expect(inbox()).toHaveLength(1)
     expect(String(inbox()[0].title)).toContain('Health factor 1.2')
+  })
+
+  // The markets are isolated: a rule on the GIGAHDX position reads THAT
+  // position, and a primary-market position at 1.02 must not fire it.
+  it('reads the market the rule names, never the primary one in its place', async () => {
+    healthFactors.set(`core:${ADDRESSES[0]}`, 1.02)
+    healthFactors.set(`gigahdx:${ADDRESSES[0]}`, 3)
+    await createRule(OWNER, { kind: 'health-factor', params: { address: ADDRESSES[0], threshold: 1.1, market: 'gigahdx' } })
+    await runEvaluatorTick()
+    expect(healthFactorCalls).toEqual([`gigahdx:${ADDRESSES[0]}`])
+    setHead(1_030)
+    for (let i = 0; i < 5; i++) await runEvaluatorTick()
+    expect(inbox()).toHaveLength(0)
+    healthFactors.set(`gigahdx:${ADDRESSES[0]}`, 1.05)
+    for (let i = 0; i < 5; i++) await runEvaluatorTick()
+    expect(inbox()).toHaveLength(1)
+    expect(String(inbox()[0].title)).toContain('Health factor 1.05')
+    expect(String(inbox()[0].body)).toContain('GIGAHDX')
+  })
+})
+
+/* ============ money-market caps: a state flip per reserve side ============ */
+
+describe('money-market cap lane', () => {
+  const E18 = 10n ** 18n
+  const HOLLAR = '0x531a654d1696ed52e7275a8cede955e82620f99a'
+  // A rule's market is matched to reserves by pool address, so the fixtures
+  // sit on the configured markets' real pool proxies.
+  const poolOf = (market: string) => mmMarkets().find(m => m.key === market)!.poolProxy
+  const hollarOn = (market: string, debt: bigint, borrowCap: bigint | null = 500_000n * E18): ReserveCapState => ({
+    poolAddress: poolOf(market), reserveAddress: HOLLAR,
+    assetId: 222, symbol: 'HOLLAR', decimals: 18, supplied: 0n, debt,
+    borrowCap, borrowCapSource: borrowCap == null ? null : 'facilitator', supplyCap: null,
+  })
+  const dotOnCore = (supplied: bigint): ReserveCapState => ({
+    poolAddress: poolOf('core'), reserveAddress: '0x0000000000000000000000000000000100000005',
+    assetId: 5, symbol: 'DOT', decimals: 10, supplied, debt: 0n,
+    borrowCap: 17_000_000n * 10n ** 10n, borrowCapSource: 'poolConfigurator', supplyCap: 25_000_000n * 10n ** 10n,
+  })
+  const snapshotTicks = async () => { for (let i = 0; i < 5; i++) await runEvaluatorTick() }
+
+  it('announces a reserve filling its cap and opening again, once each', async () => {
+    capStates = [hollarOn('gigahdx', 400_000n * E18)]
+    await createRule(OWNER, { kind: 'mm-cap', params: { market: 'gigahdx' } })
+    await runEvaluatorTick()                       // first sight only records
+    expect(inbox()).toHaveLength(0)
+    setHead(1_030)
+    capStates = [hollarOn('gigahdx', 503_084n * E18)]
+    await snapshotTicks()
+    expect(inbox()).toHaveLength(1)
+    expect(String(inbox()[0].title)).toBe('HOLLAR borrow cap reached · GIGAHDX')
+    // Interest carries it further over the cap: nothing new.
+    capStates = [hollarOn('gigahdx', 504_000n * E18)]
+    await snapshotTicks()
+    expect(inbox()).toHaveLength(1)
+    // A small repay inside the band is not "open again".
+    capStates = [hollarOn('gigahdx', 499_000n * E18)]
+    await snapshotTicks()
+    expect(inbox()).toHaveLength(1)
+    capStates = [hollarOn('gigahdx', 450_000n * E18)]
+    await snapshotTicks()
+    expect(inbox()).toHaveLength(2)
+    expect(String(inbox()[1].title)).toBe('HOLLAR can be borrowed again · GIGAHDX')
+    expect(String(inbox()[1].body)).toContain('50k HOLLAR')
+  })
+
+  it('watches only the named market, and only the named token when one is set', async () => {
+    capStates = [hollarOn('gigahdx', 400_000n * E18), hollarOn('bil', 100_000n * E18, 250_000n * E18), dotOnCore(20_000_000n * 10n ** 10n)]
+    await createRule(OWNER, { kind: 'mm-cap', params: { market: 'core', assetId: 222 } })
+    await createRule(OWNER, { kind: 'mm-cap', params: { market: 'bil' } })
+    await runEvaluatorTick()
+    setHead(1_030)
+    // GIGAHDX fills (nobody watches it), DOT's supply cap fills (the core rule is on HOLLAR only).
+    capStates = [hollarOn('gigahdx', 503_084n * E18), hollarOn('bil', 100_000n * E18, 250_000n * E18), dotOnCore(25_000_000n * 10n ** 10n)]
+    await snapshotTicks()
+    expect(inbox()).toHaveLength(0)
+    // BIL fills: its rule fires.
+    capStates = [hollarOn('gigahdx', 503_084n * E18), hollarOn('bil', 250_028n * E18, 250_000n * E18), dotOnCore(25_000_000n * 10n ** 10n)]
+    await snapshotTicks()
+    expect(inbox()).toHaveLength(1)
+    expect(String(inbox()[0].title)).toBe('HOLLAR borrow cap reached · BIL')
+  })
+
+  // The headroom is read against the cap AS IT STANDS: governance lowering a
+  // cap under what is already borrowed fills the reserve as surely as borrowing
+  // does, and raising it opens the reserve as surely as a repay — and the
+  // message says which it was.
+  it('announces a cap lowered under current use, and one raised back above it', async () => {
+    capStates = [hollarOn('gigahdx', 400_000n * E18, 500_000n * E18)]
+    await createRule(OWNER, { kind: 'mm-cap', params: { market: 'gigahdx' } })
+    await runEvaluatorTick()
+    setHead(1_030)
+    capStates = [hollarOn('gigahdx', 400_000n * E18, 300_000n * E18)]
+    await snapshotTicks()
+    expect(inbox()).toHaveLength(1)
+    expect(String(inbox()[0].title)).toBe('HOLLAR borrow cap reached · GIGAHDX')
+    expect(String(inbox()[0].body)).toContain('lowered from 500k')
+    capStates = [hollarOn('gigahdx', 400_000n * E18, 600_000n * E18)]
+    await snapshotTicks()
+    expect(inbox()).toHaveLength(2)
+    expect(String(inbox()[1].title)).toBe('HOLLAR can be borrowed again · GIGAHDX')
+    expect(String(inbox()[1].body)).toContain('raised from 300k')
+    // A cap raised in the same breath as a whale filled it did not cause the
+    // fill, so the message does not say it did.
+    capStates = [hollarOn('gigahdx', 699_800n * E18, 700_000n * E18)]
+    await snapshotTicks()
+    expect(inbox()).toHaveLength(3)
+    expect(String(inbox()[2].title)).toBe('HOLLAR borrow cap reached · GIGAHDX')
+    expect(String(inbox()[2].body)).not.toContain('raised')
+  })
+
+  // A facilitator bucket wound down to zero is a cap of zero, not "no cap":
+  // nothing can be minted against it, so it reads as reached.
+  it('treats a facilitator capacity of zero as a cap that has been reached', async () => {
+    capStates = [hollarOn('bil', 100_000n * E18, 250_000n * E18)]
+    await createRule(OWNER, { kind: 'mm-cap', params: { market: 'bil' } })
+    await runEvaluatorTick()
+    setHead(1_030)
+    capStates = [hollarOn('bil', 100_000n * E18, 0n)]
+    await snapshotTicks()
+    expect(inbox()).toHaveLength(1)
+    expect(String(inbox()[0].title)).toBe('HOLLAR borrow cap reached · BIL')
+    expect(String(inbox()[0].body)).toContain('lowered from 250k to 0 HOLLAR')
+  })
+
+  // A side that leaves the rule's scope — its cap removed, its reserve
+  // delisted — takes its arm state with it, so a reappearance is a first
+  // sight (recorded, never fired) rather than a flip against a stale reading.
+  it('forgets a side that lost its cap, so its return does not replay an old state', async () => {
+    capStates = [hollarOn('gigahdx', 503_084n * E18)]
+    await createRule(OWNER, { kind: 'mm-cap', params: { market: 'gigahdx' } })
+    await runEvaluatorTick()                       // records full
+    setHead(1_030)
+    capStates = [hollarOn('gigahdx', 503_084n * E18, null)]
+    await snapshotTicks()
+    capStates = [hollarOn('gigahdx', 503_084n * E18, 900_000n * E18)]
+    await snapshotTicks()
+    expect(inbox()).toHaveLength(0)
+    // Recorded as open on its return; the next fill is news again.
+    capStates = [hollarOn('gigahdx', 899_900n * E18, 900_000n * E18)]
+    await snapshotTicks()
+    expect(inbox()).toHaveLength(1)
+  })
+
+  it('reports a supply cap in supply words', async () => {
+    capStates = [dotOnCore(20_000_000n * 10n ** 10n)]
+    await createRule(OWNER, { kind: 'mm-cap', params: { market: 'core' } })
+    await runEvaluatorTick()
+    setHead(1_030)
+    capStates = [dotOnCore(25_000_000n * 10n ** 10n)]
+    await snapshotTicks()
+    expect(inbox()).toHaveLength(1)
+    expect(String(inbox()[0].title)).toBe('DOT supply cap reached · Money Market')
   })
 })
 
