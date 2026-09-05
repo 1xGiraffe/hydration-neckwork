@@ -6,7 +6,7 @@ import { AddrPill, UserTagPill } from '../src/components/ui'
 import { ListsSection, TaggedInHint } from '../src/pages/Account'
 import { Lists } from '../src/pages/Lists'
 import { Tags } from '../src/pages/Tags'
-import { ListDetail } from '../src/pages/ListDetail'
+import { ListDetail, orderTagPanels } from '../src/pages/ListDetail'
 import { ListTagDetail } from '../src/pages/ListTagDetail'
 import { TagDetail } from '../src/pages/TagDetail'
 import { setTagMap, setTagMapError } from '../src/userTags'
@@ -397,5 +397,25 @@ describe('TagDetail — routing between system and user-tag views', () => {
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId={USER_TAG_ID} /></QueryClientProvider>)
     expect(html).not.toMatch(/log in/i)
     expect(html).toContain(`>${USER_TAG_ID}<`)
+  })
+})
+
+// The "+ New tag" control sits above the tag panels, so a tag made in this
+// session appears right under it — newest first — instead of trailing the
+// server's alphabetical order at the bottom, where it used to land.
+describe('ListDetail — where a new tag lands', () => {
+  const tags = [{ tagId: 'a', name: 'Alpha' }, { tagId: 'm', name: 'Mid' }, { tagId: 'z', name: 'Zed' }]
+
+  it('keeps the server order when nothing was created this session', () => {
+    expect(orderTagPanels(tags, []).map(t => t.tagId)).toEqual(['a', 'm', 'z'])
+  })
+
+  it('pins this session\'s new tags to the top, newest first, ahead of the alphabetical rest', () => {
+    // Created 'm' first, then 'z': 'z' is the newest and leads.
+    expect(orderTagPanels(tags, ['m', 'z']).map(t => t.tagId)).toEqual(['z', 'm', 'a'])
+  })
+
+  it('drops a session-new tag that has since been deleted rather than leaving a ghost', () => {
+    expect(orderTagPanels(tags, ['gone', 'z']).map(t => t.tagId)).toEqual(['z', 'a', 'm'])
   })
 })
