@@ -117,7 +117,7 @@ The `api-public` service (`api/src/public/`, same image as `api`, own process be
   cache, so they take the `no-store` default.
 - `api/src/public/**` may import only the allow-list pinned by `api/tests/public/isolation.test.ts`
   (`db/client`, `config`, `types`, and the `cache`/`explorerAssets`/`ohlcvService`/`poolService`/
-  `volumeService`/`valuation`/`revenueStreams` services). Never `explorerService`. The one sanctioned transitive coupling —
+  `volumeService`/`valuation`/`revenueStreams`/`moneyMarketCaps` services). Never `explorerService`. The one sanctioned transitive coupling —
   `initPoolService` wiring an explorerService client when none is set — is documented at the
   guard in `poolService.ts`; keep it non-clobbering.
 - Numeric semantics (single-side netted volume, fee/protocol-fee split, APR/APY definitions,

@@ -1,6 +1,7 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cachedSwr } from '../../services/cache.ts'
 import { assetDescriptor } from '../../services/explorerAssets.ts'
+import { rawUnits, readReserveStateRows } from '../../services/moneyMarketCaps.ts'
 import { iso } from '../schemas/common.ts'
 import { currentPrices, priceFor, usdScaled } from './accountBalances.ts'
 import { assetIdFromReserveAddress } from './moneyMarketEvents.ts'
@@ -38,41 +39,8 @@ import { assetIdFromReserveAddress } from './moneyMarketEvents.ts'
 //    the newest generation and a delisted one is frozen at an older stamp.
 //    Verified on the live map: all 27 rows share one `updated_at`. Rows behind it
 //    are excluded here — from the totals AND from the per-reserve lists — rather
-//    than reported as current state.
-//
-// The generation is resolved INSIDE the query rather than passed in from a cached
-// read, for the same reason the account snapshots are (accountBalances.ts): a
-// generation resolved a moment ago can already have been superseded.
-const RESERVE_STATE_SQL = `-- pub:mm:reserve-state
-WITH (SELECT max(updated_at) FROM price_data.atoken_reserve_map) AS map_generation
-SELECT s.pool_address                                AS pool_address,
-       s.reserve_address                             AS reserve_address,
-       m.market_key                                  AS market_key,
-       m.atoken                                      AS atoken,
-       s.block_height                                AS block_height,
-       toString(s.block_timestamp)                   AS block_timestamp,
-       toString(s.supplied)                          AS supplied,
-       toString(s.debt)                              AS debt,
-       toUInt8(m.updated_at >= map_generation)       AS listed
-FROM price_data.money_market_reserve_state_current AS s
-LEFT JOIN (
-  SELECT DISTINCT lower(asset_address) AS reserve_address, lower(pool_proxy) AS pool_address,
-                  market_key, lower(atoken) AS atoken, updated_at
-  FROM price_data.atoken_reserve_map FINAL
-) AS m ON m.reserve_address = s.reserve_address AND m.pool_address = s.pool_address
-ORDER BY market_key, reserve_address`
-
-interface ReserveStateRow {
-  pool_address: string
-  reserve_address: string
-  market_key: string | null
-  atoken: string | null
-  block_height: string | number
-  block_timestamp: string
-  supplied: string
-  debt: string
-  listed: string | number
-}
+//    than reported as current state. The query that reports the generation
+//    comparison (`listed`) is the shared one in services/moneyMarketCaps.ts.
 
 /** One reserve of one isolated money market, at the newest indexed state. */
 export interface MmReserveState {
@@ -111,11 +79,6 @@ export interface MoneyMarketSupply {
   delistedCount: number
 }
 
-function rawUnits(value: string | number | null | undefined): bigint {
-  const input = String(value ?? '').trim()
-  return /^-?\d+$/.test(input) ? BigInt(input) : 0n
-}
-
 /**
  * A venue whose every asset is unpriced is unknown rather than empty — the rule
  * platformStats.venueTvlUsd applies to a pool venue, applied here to the money
@@ -137,11 +100,7 @@ function totalSuppliedUsd(reserves: MmReserveState[]): bigint | null {
  */
 export function moneyMarketSupply(client: ClickHouseClient): Promise<MoneyMarketSupply> {
   return cachedSwr('pub:mm:supply', 60_000, 300_000, async () => {
-    const [res, prices] = await Promise.all([
-      client.query({ query: RESERVE_STATE_SQL, format: 'JSONEachRow' }),
-      currentPrices(client),
-    ])
-    const rows = await res.json<ReserveStateRow>()
+    const [rows, prices] = await Promise.all([readReserveStateRows(client), currentPrices(client)])
     const reserves: MmReserveState[] = []
     let delistedCount = 0
     for (const row of rows) {

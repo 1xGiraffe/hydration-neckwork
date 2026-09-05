@@ -71,7 +71,7 @@ function fakeClient(overrides: Record<string, Row[]> = {}) {
     '-- pub:vol:anchor': [ANCHOR_ROW],
     '-- pub:webstats:volume': [{ total_usd: '20252129.000501492452' }],
     '-- pub:webstats:accounts': [{ accounts: '115318' }],
-    '-- pub:mm:reserve-state': RESERVE_ROWS,
+    '-- mm:reserve-state': RESERVE_ROWS,
     'FROM price_data.prices': PRICE_ROWS,
     // /v1/stats/platform's volume half, so the reconciliation case can read the
     // TVL components this endpoint folds from.
