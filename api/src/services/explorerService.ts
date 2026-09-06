@@ -8931,6 +8931,26 @@ async function extrinsicIndexFor(pairs: [number, number | null][]): Promise<Map<
   return out
 }
 
+// A cost an outbound cross-chain send paid besides its payload. `delivery` is the
+// XCM/bridge execution fee that left with the message (the fee item of an XTokens
+// send, the BuyExecution legs of an executor-dispatched send, the GLMR an MRL relay
+// funded remote execution with); `relayer` is a payment to a relayer so the transfer
+// is claimed at the destination without the sender (the Wormhole Executor, paid in
+// WETH — Hydration's EVM native currency — or an MRL arbiter fee). `purchase` is the
+// same-extrinsic swap that bought the fee asset when the sender did not hold it:
+// what the fee cost in the asset they actually spent. That swap is not a trade the
+// user made, so it renders here and nowhere else.
+export interface XcmFeeLeg {
+  kind: 'delivery' | 'relayer'
+  asset: AssetRef
+  amount: string
+  valueUsd: number | null
+  // 'source' (the default): taken on Hydration up front. 'destination': deducted from
+  // the bridged amount when it arrives.
+  settlement?: 'source' | 'destination'
+  purchase?: { asset: AssetRef; amount: string; valueUsd: number | null } | null
+}
+
 // unified activity
 export interface ActivityRow {
   type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond'
@@ -8999,6 +9019,9 @@ export interface ActivityRow {
     profile?: { name: string; avatarVersion: number } | null
   }
   xcmDir?: 'in' | 'out'      // xcm: transfer direction relative to Hydration
+  // xcm outbound: what the send cost besides its payload (see XcmFeeLeg). Absent when
+  // the send paid nothing the row does not already show.
+  xcmFees?: XcmFeeLeg[]
   fromChain?: string         // xcm inbound: origin chain name
   fromParachainId?: number | null
   // Source account of an inbound transfer, resolved from the Ocelloids
@@ -9674,10 +9697,26 @@ function xcmJunctions(interior: unknown): Record<string, unknown>[] {
 // Amounts are RAW candidates — the caller maps each to a substrate asset by
 // matching the same-extrinsic Currencies.Withdrawn, which also discards fee
 // legs and chain-internal noise. Null = not a user-sent transfer.
-export function parseOutboundXcm(argsRaw: unknown): { sender: string; amounts: string[]; dest: Pick<ActivityRow, 'destChain' | 'destParachainId' | 'destAccount'> } | null {
+export interface ParsedOutboundXcm {
+  sender: string
+  // The RAW payload amounts — the legs that transferred value. A fee-only leg is not
+  // among them; it is reported under `fee` instead.
+  amounts: string[]
+  dest: Pick<ActivityRow, 'destChain' | 'destParachainId' | 'destAccount'>
+  // The leg the message names as its fee when that leg is NOT also a payload: the
+  // XTokens fee item beside another asset, or a pallet_xcm BuyExecution asset withdrawn
+  // beside the asset it pays for. Null when the send pays from its own payload.
+  fee: { amount: string } | null
+  // A pallet_xcm message carrying a Transact is a remote CALL, not a transfer (MRL
+  // funded Moonbeam's GMP precompile this way). It carries no payload here; a sibling
+  // send in the same extrinsic to the same chain is what funded it.
+  transact: boolean
+}
+export function parseOutboundXcm(argsRaw: unknown): ParsedOutboundXcm | null {
   const args = argsRaw as {
     sender?: string
     assets?: { fun?: { value?: string } }[]
+    fee?: { fun?: { value?: string } }
     dest?: { parents?: number; interior?: { value?: unknown } }
     origin?: { interior?: unknown }
     destination?: { parents?: number; interior?: { value?: unknown } }
@@ -9691,7 +9730,14 @@ export function parseOutboundXcm(argsRaw: unknown): { sender: string; amounts: s
       const amount = leg?.fun?.value
       if (amount && !amounts.includes(amount)) amounts.push(amount)
     }
-    return { sender: args.sender, amounts, dest: xcmDestination(args) }
+    // XTokens names one leg as the fee item. Beside another asset that leg is the
+    // send's delivery fee (1 GLMR beside sUSDS on an MRL send, DOT beside USDT to Asset
+    // Hub) and not a transfer of its own — 23,741 multi-asset sends rendered it as a
+    // second cross-chain row. A single-leg send transfers and pays from one asset, so
+    // it keeps its leg and reports no separate fee.
+    const feeAmount = args.fee?.fun?.value
+    const fee = amounts.length > 1 && typeof feeAmount === 'string' && amounts.includes(feeAmount) ? feeAmount : null
+    return { sender: args.sender, amounts: fee ? amounts.filter(a => a !== fee) : amounts, dest: xcmDestination(args), fee: fee ? { amount: fee } : null, transact: false }
   }
 
   if (args.origin && Array.isArray(args.message)) {
@@ -9707,7 +9753,9 @@ export function parseOutboundXcm(argsRaw: unknown): { sender: string; amounts: s
     if (!senderId) return null
     const amounts: string[] = []
     const feeAmounts = new Set<string>()
+    let transact = false
     for (const ins of args.message) {
+      if (ins.__kind === 'Transact') transact = true
       // BuyExecution names the asset consumed as the XCM execution fee (it is
       // withdrawn by WithdrawAsset too, so it would otherwise become a candidate).
       if (ins.__kind === 'BuyExecution') {
@@ -9730,6 +9778,7 @@ export function parseOutboundXcm(argsRaw: unknown): { sender: string; amounts: s
     // appear as its own cross-chain activity. A single-asset message keeps its
     // asset (it both transfers and pays its own fee).
     const transferAmounts = amounts.length > 1 ? amounts.filter(a => !feeAmounts.has(a)) : amounts
+    const feeOnly = amounts.length > 1 ? amounts.find(a => feeAmounts.has(a)) : undefined
     const dest = xcmDestination({ dest: args.destination })
     // Sent's destination names only the chain; the beneficiary account lives in
     // the message's DepositAsset instruction.
@@ -9742,10 +9791,150 @@ export function parseOutboundXcm(argsRaw: unknown): { sender: string; amounts: s
       const id = typeof b32?.id === 'string' ? b32.id : typeof b20?.key === 'string' ? b20.key : undefined
       dest.destAccount = externalAccountRef(id, meta)
     }
-    return { sender: senderId, amounts: transferAmounts.length ? transferAmounts : amounts, dest }
+    // A Transact message withdraws and pays at the DESTINATION: none of its amounts is
+    // a Hydration leg, so it carries no payload here.
+    return { sender: senderId, amounts: transact ? [] : transferAmounts.length ? transferAmounts : amounts, dest, fee: feeOnly ? { amount: feeOnly } : null, transact }
   }
 
   return null
+}
+
+// Hydration's EVM native currency is WETH (asset 20): an EVM `msg.value` is a WETH
+// transfer, which is what a Wormhole Executor relay payment is.
+export const EVM_GAS_ASSET_ID = 20
+// Executor.RequestForExecution(address indexed quoterAddress, uint256 amtPaid, uint16 dstChain,
+//                              bytes32 dstAddr, address refundAddr, bytes signedQuote,
+//                              bytes requestBytes, bytes relayInstructions)
+// The Wormhole Executor is the relayer the SDK's `transferViaExecutor` pays so an NTT
+// transfer is delivered on the destination without the sender redeeming it (chain def
+// `wormhole.executor`, 0xd633d8d1… on Hydration). `amtPaid` is the msg.value the
+// sender attached, in WETH, and equals the Tokens.Transfer into the contract's account
+// byte for byte (verified on 14250166-2: 459216013967671).
+export const WORMHOLE_EXECUTOR_REQUEST_TOPIC = '0xd870d87e4a7c33d0943b0a3d2822b174e239cc55c169af14cc56467a4489e3b5'
+export function decodeExecutorRequest(topics: string[], data: string): { amountPaid: string } | null {
+  if (topics[0]?.toLowerCase() !== WORMHOLE_EXECUTOR_REQUEST_TOPIC) return null
+  const body = (data ?? '').replace(/^0x/, '')
+  if (body.length < 64) return null
+  const amountPaid = BigInt('0x' + body.slice(0, 64)).toString()
+  return amountPaid === '0' ? null : { amountPaid }
+}
+// The Wormhole TokenBridge call an MRL send had Moonbeam execute on the user's behalf —
+// `transferTokens(address token, uint256 amount, uint16 recipientChain, bytes32 recipient,
+// uint256 arbiterFee, uint32 nonce)` — SCALE-wrapped in the Transact's
+// `EthereumXcm.transact` call. `arbiterFee` is the relayer fee Wormhole deducts from
+// the bridged amount at the destination (290 of 2,008 MRL sends set one); it is in the
+// token's own units, which mirror Hydration's registry decimals for every MRL asset.
+const MRL_TRANSFER_TOKENS_SELECTOR = '0f5287b0'
+export function decodeMrlTransferTokens(encodedHex: string): { amount: string; recipientChain: number; arbiterFee: string } | null {
+  const hex = (encodedHex ?? '').replace(/^0x/, '').toLowerCase()
+  const at = hex.indexOf(MRL_TRANSFER_TOKENS_SELECTOR)
+  if (at < 0) return null
+  const words = hex.slice(at + MRL_TRANSFER_TOKENS_SELECTOR.length)
+  if (words.length < 64 * 6) return null
+  const word = (i: number) => words.slice(i * 64, (i + 1) * 64)
+  const amount = BigInt('0x' + word(1)).toString()
+  const recipientChain = Number(BigInt('0x' + word(2)))
+  const arbiterFee = BigInt('0x' + word(4)).toString()
+  return { amount, recipientChain, arbiterFee }
+}
+// Whether a PolkadotXcm.Sent's message is a remote call (see ParsedOutboundXcm.transact).
+function sentMessageIsTransact(argsRaw: unknown): boolean {
+  const message = (argsRaw as { message?: { __kind?: string }[] } | null)?.message
+  return Array.isArray(message) && message.some(ins => ins?.__kind === 'Transact')
+}
+function xcmFeeLeg(kind: XcmFeeLeg['kind'], assetId: number, amount: string, prices: Map<number, PriceInfo>, settlement?: XcmFeeLeg['settlement']): XcmFeeLeg {
+  const a = asset(assetId)
+  return { kind, asset: a, amount, valueUsd: usdValue(prices, a.assetId, amount, a.decimals), ...(settlement ? { settlement } : {}) }
+}
+// The fee legs of one send, read the same way on every surface. `fee` is the message's
+// own fee item resolved to a substrate asset through the same-extrinsic withdrawal of
+// that amount (`assetOf`), exactly as the payload legs are. A single-leg send whose
+// extrinsic also dispatched a Transact to the same chain funded that remote call: MRL
+// relayed inbound Wormhole transfers by buying GLMR, sending it to Moonbeam and
+// executing the GMP precompile in one batch, so the GLMR leg IS the fee, and saying so
+// is what lets the swap that bought it fold behind the send instead of standing as a
+// trade the user made.
+function outboundXcmFeeLegs(parsed: ParsedOutboundXcm, assetOf: (amount: string) => number | undefined, prices: Map<number, PriceInfo>, transactToSameChain: boolean): XcmFeeLeg[] {
+  const fees: XcmFeeLeg[] = []
+  if (parsed.fee) {
+    const feeAsset = assetOf(parsed.fee.amount)
+    if (feeAsset != null) fees.push(xcmFeeLeg('delivery', feeAsset, parsed.fee.amount, prices))
+  } else if (transactToSameChain && parsed.amounts.length === 1) {
+    const funding = assetOf(parsed.amounts[0])
+    if (funding != null) fees.push(xcmFeeLeg('delivery', funding, parsed.amounts[0], prices))
+  }
+  return fees
+}
+// The Transact destinations dispatched from each extrinsic, keyed `${block}:${extrinsic}`
+// → parachain ids, from the extrinsic's own PolkadotXcm.Sent events.
+function transactDestinationsByExtrinsic(sentEvents: { block_height: number; extrinsic_index: number | null; args_json: string }[]): Map<string, Set<number>> {
+  const out = new Map<string, Set<number>>()
+  for (const e of sentEvents) {
+    if (e.extrinsic_index == null) continue
+    const args = safeJson(e.args_json)
+    if (!sentMessageIsTransact(args)) continue
+    const dest = xcmDestination({ dest: (args as { destination?: { parents?: number; interior?: { value?: unknown } } }).destination })
+    if (dest.destParachainId == null) continue
+    const key = `${e.block_height}:${e.extrinsic_index}`
+    const set = out.get(key) ?? new Set<number>()
+    set.add(dest.destParachainId)
+    out.set(key, set)
+  }
+  return out
+}
+// The fee legs of an executor-dispatched send: every admitted withdrawal that is not
+// its payload (see executedXcmPayloadLegs), keyed the same way. A batched Router leg's
+// INPUT is among them — the user withdrew HDX to buy the DOT fee — and is not a fee but
+// the fee's purchase; `attachFeePurchases` resolves that against the extrinsic's swaps.
+export function executedXcmCostLegs<T>(legs: readonly T[], key: (leg: T) => string, order: (leg: T) => number): Map<string, T[]> {
+  const payload = new Map(executedXcmPayloadLegs(legs, key, order).map(leg => [key(leg), leg]))
+  const costs = new Map<string, T[]>()
+  for (const leg of legs) {
+    const k = key(leg)
+    if (payload.get(k) === leg) continue
+    const list = costs.get(k) ?? []
+    list.push(leg)
+    costs.set(k, list)
+  }
+  return costs
+}
+// A swap in the send's extrinsic explains its fee legs: a cost leg equal to the swap's
+// INPUT is the purchase (not a fee), and the leg carrying the swap's OUTPUT asset gets
+// that purchase attached. Returns the legs that remain fees. Same rule the shared fold
+// applies to built rows (suppressSubordinateActivityRows); the executor arms call it at
+// build time because their cost legs are already in hand there.
+export function attachFeePurchases(fees: XcmFeeLeg[], swaps: readonly { assetIn: number; amountIn: string; assetOut: number; valueInUsd?: number | null }[], prices?: Map<number, PriceInfo>): XcmFeeLeg[] {
+  let out = fees
+  for (const swap of swaps) {
+    out = out.filter(leg => !(leg.asset.assetId === swap.assetIn && leg.amount === swap.amountIn))
+    const bought = out.find(leg => leg.asset.assetId === swap.assetOut && !leg.purchase)
+    if (bought) {
+      const a = asset(swap.assetIn)
+      // The purchase's own value is what the swap's out-leg was worth when no price map is
+      // at hand; applyXcmFeeUsd restates both at the event-time close afterwards.
+      bought.purchase = { asset: a, amount: swap.amountIn, valueUsd: prices ? usdValue(prices, a.assetId, swap.amountIn, a.decimals) : swap.valueInUsd ?? null }
+    }
+  }
+  return out
+}
+// Event-time value for the fee legs and purchases the rows carry — the same hourly
+// close applyHistoricalUsd values the rows themselves with. Legs are valued in place.
+async function applyXcmFeeUsd(rows: readonly ActivityRow[]): Promise<void> {
+  const picks: { leg: { asset: AssetRef; amount: string; valueUsd: number | null }; ts: string }[] = []
+  for (const row of rows) {
+    for (const fee of row.xcmFees ?? []) {
+      picks.push({ leg: fee, ts: row.timestamp })
+      if (fee.purchase) picks.push({ leg: fee.purchase, ts: row.timestamp })
+    }
+  }
+  if (!picks.length) return
+  const closes = await historicalCloses(picks.map(p => ({ assetId: p.leg.asset.assetId, ts: p.ts })))
+  for (const { leg, ts } of picks) {
+    const close = closes.get(historicalPriceKey(leg.asset.assetId, ts))
+    if (!close) continue
+    const amt = Number(leg.amount) / 10 ** leg.asset.decimals
+    leg.valueUsd = Number.isFinite(amt) ? amt * Number(close) : leg.valueUsd
+  }
 }
 
 function outboundXcmRow(
@@ -9755,9 +9944,11 @@ function outboundXcmRow(
   amount: string,
   destination: Pick<ActivityRow, 'destChain' | 'destParachainId' | 'destAccount'>,
   prices: Map<number, PriceInfo>,
+  fees: XcmFeeLeg[] = [],
 ): ActivityRow {
   const transferAsset = asset(assetId)
   return {
+    ...(fees.length ? { xcmFees: fees } : {}),
     type: 'xcm',
     blockHeight: event.block_height,
     timestamp: event.ts,
@@ -9874,15 +10065,19 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
       // The rare extrinsic emitting both events yields one row set: the legacy
       // event wins and the pallet_xcm mirror is suppressed.
       const xtokensExts = new Set(legacyPairs.map(event => `${event.block_height}:${event.extrinsic_index}`))
+      const transactDests = transactDestinationsByExtrinsic(evs.filter(event => event.name === 'PolkadotXcm.Sent'))
       const out: ActivityRow[] = []
       for (const event of evs) {
         if (event.name === 'PolkadotXcm.Sent' && xtokensExts.has(`${event.block_height}:${event.extrinsic_index}`)) continue
         const parsed = parseOutboundXcm(safeJson(event.args_json))
         if (!parsed) continue
+        const extKey = `${event.block_height}:${event.extrinsic_index}`
+        const assetOf = (amount: string) => wmap.get(`${extKey}:${amount}`)
+        const fees = outboundXcmFeeLegs(parsed, assetOf, prices, parsed.dest.destParachainId != null && (transactDests.get(extKey)?.has(parsed.dest.destParachainId) ?? false))
         for (const amount of parsed.amounts) {
-          const assetId = wmap.get(`${event.block_height}:${event.extrinsic_index}:${amount}`)
+          const assetId = assetOf(amount)
           if (assetId == null) continue
-          out.push(outboundXcmRow(event, parsed.sender, assetId, amount, parsed.dest, prices))
+          out.push(outboundXcmRow(event, parsed.sender, assetId, amount, parsed.dest, prices, fees))
         }
       }
       await applyHistoricalUsd(out, activityHistPick)
@@ -10567,23 +10762,56 @@ async function xcmExecutedRowsForBlocks(blocks: number[], prices: Map<number, Pr
     .filter(w => admitsExecutedXcmWithdrawal(w.who, w.amount)
       && (!whoIn || whoIn.has(w.who))
       && claimed.has(executedXcmExtrinsicKey(w.block_height, w.extrinsic_index)))
+  // The swaps batched into the claimed extrinsics: a Router leg's input withdrawal is a
+  // cost leg the read above cannot tell from a fee, and its output is the fee it bought.
+  const swapsByExt = await routerNetSwapsByExtrinsic(claimedList)
+  const legKey = (leg: { block_height: number; extrinsic_index: number | null; who: string }) => `${executedXcmExtrinsicKey(leg.block_height, leg.extrinsic_index)}:${leg.who}`
+  const costs = executedXcmCostLegs(admitted, legKey, leg => leg.event_index)
   const rows: ActivityRow[] = []
   // One row per send, per account: the fee legs are the cost of this row, not siblings of it.
-  for (const w of executedXcmPayloadLegs(
-    admitted,
-    leg => `${executedXcmExtrinsicKey(leg.block_height, leg.extrinsic_index)}:${leg.who}`,
-    leg => leg.event_index,
-  )) {
+  for (const w of executedXcmPayloadLegs(admitted, legKey, leg => leg.event_index)) {
     const { who, amount, asset_id: cid } = w
     const a = asset(cid)
+    const fees = attachFeePurchases(
+      (costs.get(legKey(w)) ?? []).map(leg => xcmFeeLeg('delivery', leg.asset_id, leg.amount, prices)),
+      swapsByExt.get(executedXcmExtrinsicKey(w.block_height, w.extrinsic_index)) ?? [], prices)
     rows.push({
       type: 'xcm', blockHeight: w.block_height, timestamp: w.ts, eventIndex: w.event_index, extrinsicIndex: w.extrinsic_index,
       who: accountRef(who), to: null, asset: a, assetIn: null, assetOut: null,
       amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, amount, a.decimals),
-      xcmDir: 'out', xcmExecuted: true, linkBlock: w.block_height, linkIndex: w.extrinsic_index,
+      xcmDir: 'out', xcmExecuted: true, ...(fees.length ? { xcmFees: fees } : {}), linkBlock: w.block_height, linkIndex: w.extrinsic_index,
     })
   }
   return rows.sort(compareActivityRowsNewestFirst)
+}
+type RouterNetSwap = { assetIn: number; amountIn: string; assetOut: number }
+// The Router net summaries of the signed extrinsics in these blocks, keyed
+// `${block}:${extrinsic}` — a block-keyed primary-key read.
+async function routerNetSwapsByExtrinsic(blockListSql: string): Promise<Map<string, RouterNetSwap[]>> {
+  const out = new Map<string, RouterNetSwap[]>()
+  if (!blockListSql) return out
+  const res = await client.query({
+    query: `SELECT block_height, extrinsic_index,
+                   toUInt32(greatest(0, JSONExtractInt(args_json,'assetIn'))) AS asset_in,
+                   toUInt32(greatest(0, JSONExtractInt(args_json,'assetOut'))) AS asset_out,
+                   JSONExtractString(args_json,'amountIn') AS amount_in
+            FROM price_data.raw_events
+            WHERE block_height IN (${blockListSql}) AND extrinsic_index IS NOT NULL AND event_name IN (${ROUTER_NET_EVENTS_SQL})`,
+    format: 'JSONEachRow',
+  })
+  for (const r of await res.json<{ block_height: number; extrinsic_index: number; asset_in: number; asset_out: number; amount_in: string }>()) {
+    const key = executedXcmExtrinsicKey(r.block_height, r.extrinsic_index)
+    const list = out.get(key) ?? []
+    list.push({ assetIn: r.asset_in, amountIn: r.amount_in, assetOut: r.asset_out })
+    out.set(key, list)
+  }
+  return out
+}
+function routerNetSwapsOf(events: readonly { event_name: string; args_json: string }[]): RouterNetSwap[] {
+  return events.filter(e => isRouterNet(e.event_name)).map(e => {
+    const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
+    return { assetIn: argInt(args, 'assetIn'), amountIn: argStr(args, 'amountIn'), assetOut: argInt(args, 'assetOut') }
+  })
 }
 
 async function getRecentXcmExecuted(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
@@ -11159,6 +11387,9 @@ interface NttExtrinsicLogs {
   sent: NttSentLog[]
   redeemed: Set<string>     // manager H160s that logged TransferRedeemed here
   sourceChains: number[]    // one entry per decoded ReceivedMessage
+  // WETH paid to the Wormhole Executor (RequestForExecution.amtPaid), one per request —
+  // the relayer fee of a send delivered without the sender redeeming it.
+  executorPaid: string[]
 }
 
 // The NTT logs of the given `block:extrinsic` pairs, decoded — one bounded
@@ -11182,7 +11413,7 @@ function nttMemoBlock(key: string): number {
 // flag surviving on a shared memo entry would eat the pairing of every later
 // request. `redeemed`/`sourceChains` are only read, so they stay shared.
 function nttLogsCopy(entry: NttExtrinsicLogs): NttExtrinsicLogs {
-  return { sent: entry.sent.map(s => ({ manager: s.manager, sent: s.sent })), redeemed: entry.redeemed, sourceChains: entry.sourceChains }
+  return { sent: entry.sent.map(s => ({ manager: s.manager, sent: s.sent })), redeemed: entry.redeemed, sourceChains: entry.sourceChains, executorPaid: [...entry.executorPaid] }
 }
 async function nttLogsFor(pairs: Iterable<string>): Promise<Map<string, NttExtrinsicLogs>> {
   const requested = [...new Set(pairs)]
@@ -11205,7 +11436,7 @@ async function nttLogsFor(pairs: Iterable<string>): Promise<Map<string, NttExtri
       query: `SELECT block_height, event_index, extrinsic_index, lower(contract_address) AS contract, topics, data
               FROM price_data.raw_evm_logs
               WHERE (block_height, extrinsic_index) IN (${tuples})
-                AND topic0 IN ('${NTT_TRANSFER_SENT_TOPIC}','${NTT_RECEIVED_MESSAGE_TOPIC}','${NTT_TRANSFER_REDEEMED_TOPIC}')
+                AND topic0 IN ('${NTT_TRANSFER_SENT_TOPIC}','${NTT_RECEIVED_MESSAGE_TOPIC}','${NTT_TRANSFER_REDEEMED_TOPIC}','${WORMHOLE_EXECUTOR_REQUEST_TOPIC}')
               LIMIT 1 BY block_height, event_index`,
       format: 'JSONEachRow',
     })
@@ -11214,9 +11445,11 @@ async function nttLogsFor(pairs: Iterable<string>): Promise<Map<string, NttExtri
   const fetched = new Map<string, NttExtrinsicLogs>()
   for (const log of chunks.flat()) {
     const key = `${log.block_height}:${log.extrinsic_index}`
-    const entry = fetched.get(key) ?? { sent: [], redeemed: new Set<string>(), sourceChains: [] }
+    const entry = fetched.get(key) ?? { sent: [], redeemed: new Set<string>(), sourceChains: [], executorPaid: [] }
     const topic0 = log.topics[0]?.toLowerCase()
     if (topic0 === NTT_TRANSFER_REDEEMED_TOPIC) entry.redeemed.add(log.contract)
+    const paid = decodeExecutorRequest(log.topics, log.data)
+    if (paid) entry.executorPaid.push(paid.amountPaid)
     const sent = decodeNttTransferSent(log.topics, log.data)
     if (sent) entry.sent.push({ manager: log.contract, sent })
     const received = decodeNttReceivedMessage(log.topics, log.data)
@@ -11308,6 +11541,10 @@ async function getRecentNttOut(limit: number, from?: string, to?: string, accoun
             row.destAccount = ref.account
           }
         }
+        // The Executor payment is claimed once per extrinsic, by the first send built
+        // from it (a batch of several sends and one request is not a shape the SDK builds).
+        const paid = entry?.executorPaid.shift()
+        if (paid) row.xcmFees = [xcmFeeLeg('relayer', EVM_GAS_ASSET_ID, paid, prices)]
         out.push(row)
       }
       await applyHistoricalUsd(out, activityHistPick)
@@ -11571,6 +11808,82 @@ function stakingRowFromEvent(
   return { row, who, assetId: parts.assetId, amount: parts.amount }
 }
 
+// The routed trades that only bought a cross-chain send its fee, as SQL — the mirror of
+// the fold suppressSubordinateActivityRows applies to built rows, for the surfaces that
+// read trades without their send beside them: the exact count arm, and the trade-only
+// feeds (a Trade tab fetches no xcm context). One row per (extrinsic, fee asset);
+// `all_trades = 1` marks an executor-dispatched send, where every trade in the extrinsic
+// is the fee purchase (isBridgePlumbingSwap). `blocksSql` bounds every read to the blocks
+// holding the trades in question, and `withdrawalsSql` is the Currencies.Withdrawn read
+// that resolves a fee amount to its asset — the same amount match the row builders make.
+//
+// The three shapes, each verified on chain: an executor send (XcmpMessageSent alone);
+// a Wormhole NTT send paying the Executor in WETH (RequestForExecution); and a message
+// naming a fee item — XTokens' `fee` beside another asset, or the single leg of a send
+// whose extrinsic also dispatched a Transact to the same chain (an MRL relay funded that
+// remote call with it).
+function feePurchaseSwapSelectSql(blocksSql: string, withdrawalsSql: string): string {
+  const sends = (names: string) => `SELECT block_height, extrinsic_index, name, args_json FROM price_data.raw_xcm_activity
+      WHERE block_height IN (${blocksSql}) AND source_kind = 'event' AND extrinsic_index IS NOT NULL AND name IN (${names})`
+  return `
+    SELECT block_height, extrinsic_index, toUInt32(0) AS fee_asset, toUInt8(1) AS all_trades
+    FROM (${sends(`'${XCM_EXECUTED_SEND_EVENT}'`)})
+    WHERE (block_height, extrinsic_index) NOT IN (SELECT block_height, extrinsic_index FROM (${sends(XCM_SENT_EVENTS_SQL)}))
+    UNION ALL
+    SELECT DISTINCT block_height, extrinsic_index, toUInt32(${EVM_GAS_ASSET_ID}) AS fee_asset, toUInt8(0) AS all_trades
+    FROM price_data.raw_evm_logs
+    WHERE block_height IN (${blocksSql}) AND extrinsic_index IS NOT NULL AND topic0 = '${WORMHOLE_EXECUTOR_REQUEST_TOPIC}'
+    UNION ALL
+    SELECT s.block_height, s.extrinsic_index, w.asset_id AS fee_asset, toUInt8(0) AS all_trades
+    FROM (
+      SELECT block_height, extrinsic_index,
+             multiIf(
+               name IN (${XCM_SENT_XTOKENS_EVENTS_SQL}) AND JSONLength(args_json, 'assets') > 1, JSONExtractString(args_json, 'fee', 'fun', 'value'),
+               name IN (${XCM_SENT_XTOKENS_EVENTS_SQL}) AND JSONLength(args_json, 'assets') = 1 AND has_transact, JSONExtractString(args_json, 'assets', 1, 'fun', 'value'),
+               name = 'PolkadotXcm.Sent' AND NOT is_transact AND has_transact, JSONExtractString(args_json, 'message', 1, 'value', 1, 'fun', 'value'),
+               '') AS fee_amount
+      FROM (
+        SELECT block_height, extrinsic_index, name, args_json,
+               position(args_json, '"__kind":"Transact"') > 0 AS is_transact,
+               max(is_transact) OVER (PARTITION BY block_height, extrinsic_index) AS has_transact
+        FROM (${sends(XCM_SENT_EVENTS_SQL)})
+      )
+      WHERE fee_amount != ''
+    ) AS s
+    INNER JOIN (${withdrawalsSql}) AS w
+      ON w.block_height = s.block_height AND w.extrinsic_index = s.extrinsic_index AND w.amount = s.fee_amount`
+}
+// The trades of one built page that are fee purchases, by their `${block}:${extrinsic}`
+// key (every trade of an executor send) and `${block}:${extrinsic}:${assetOut}` key.
+// Bounded to the page's own blocks; the withdrawal read is block-first over raw_events,
+// the table those blocks prune.
+export interface FeePurchaseSwapKeys { extrinsics: Set<string>; byAsset: Set<string> }
+async function feePurchaseSwapKeys(trades: readonly { blockHeight: number; extrinsicIndex: number | null }[]): Promise<FeePurchaseSwapKeys> {
+  const out: FeePurchaseSwapKeys = { extrinsics: new Set(), byAsset: new Set() }
+  const blocks = [...new Set(trades.filter(t => t.extrinsicIndex != null).map(t => t.blockHeight))]
+  if (!blocks.length) return out
+  const chunks = await mapChunksConcurrently(blocks, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const blocksSql = chunk.join(',')
+    const res = await client.query({
+      query: feePurchaseSwapSelectSql(blocksSql, `SELECT block_height, extrinsic_index,
+          toUInt32(greatest(0, JSONExtractInt(args_json, 'currencyId'))) AS asset_id, JSONExtractString(args_json, 'amount') AS amount
+        FROM price_data.raw_events
+        WHERE block_height IN (${blocksSql}) AND extrinsic_index IS NOT NULL AND event_name = 'Currencies.Withdrawn'`),
+      format: 'JSONEachRow',
+    })
+    return res.json<{ block_height: number; extrinsic_index: number; fee_asset: number; all_trades: number }>()
+  })
+  for (const r of chunks.flat()) {
+    if (Number(r.all_trades)) out.extrinsics.add(`${r.block_height}:${r.extrinsic_index}`)
+    else out.byAsset.add(`${r.block_height}:${r.extrinsic_index}:${r.fee_asset}`)
+  }
+  return out
+}
+function isFeePurchaseSwap(keys: FeePurchaseSwapKeys, t: { blockHeight: number; extrinsicIndex: number | null; assetOut: AssetRef | null }): boolean {
+  if (t.extrinsicIndex == null) return false
+  return keys.extrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)
+    || (t.assetOut != null && keys.byAsset.has(`${t.blockHeight}:${t.extrinsicIndex}:${t.assetOut.assetId}`))
+}
 // Staking action label (as shown/filtered in the UI) → source event name.
 const STAKING_ACTION_EVENTS: Record<string, string[]> = {
   'Stake': ['Staking.PositionCreated'],
@@ -12922,8 +13235,23 @@ export function suppressSubordinateActivityRows<T extends ActivityRow>(rows: T[]
   // row shares this extrinsic": a deliberate batch of a swap and an XTokens send is two
   // actions the user chose, and both keep their rows.
   const executedSendExtrinsics = new Set<string>()
+  // Sends whose fee legs name what they needed, by extrinsic. A trade in the same
+  // extrinsic whose OUTPUT is one of those assets bought that fee: it folds behind the
+  // send as the leg's `purchase`, because the reader's action was the bridge, and the
+  // swap is what the bridge cost them. Gated on the send's own fee claim — an xcm row
+  // with no fee legs beside a swap says nothing about that swap, so a deliberate
+  // `batch_all([Router.sell, XTokens.transfer])` keeps both rows. The send is replaced
+  // by a copy: arms cache their rows, and a purchase attached in place would outlive the
+  // request that saw the trade.
+  const feeSends = new Map<string, T[]>()
   for (const row of rows) {
     if (row.xcmExecuted && row.extrinsicIndex != null) executedSendExtrinsics.add(`${row.blockHeight}:${row.extrinsicIndex}`)
+    if (row.type === 'xcm' && row.xcmDir === 'out' && row.xcmFees?.length && row.extrinsicIndex != null) {
+      const key = `${row.blockHeight}:${row.extrinsicIndex}`
+      const list = feeSends.get(key) ?? []
+      list.push(row)
+      feeSends.set(key, list)
+    }
     if (row.type === 'transfer') continue
     if (row.extrinsicIndex != null) {
       semanticByExtrinsic.add(`${row.blockHeight}:${row.extrinsicIndex}`)
@@ -12936,7 +13264,25 @@ export function suppressSubordinateActivityRows<T extends ActivityRow>(rows: T[]
     for (const account of accounts) blockAccounts.add(account)
     semanticHookAccounts.set(row.blockHeight, blockAccounts)
   }
+  const replacedSends = new Map<T, T>()
+  const feePurchases = new Set<T>()
+  if (feeSends.size) {
+    for (const row of rows) {
+      if (row.type !== 'trade' || row.extrinsicIndex == null || !row.assetIn || !row.assetOut || !row.amountIn) continue
+      const sends = feeSends.get(`${row.blockHeight}:${row.extrinsicIndex}`)
+      if (!sends) continue
+      const swap = { assetIn: row.assetIn.assetId, amountIn: row.amountIn, assetOut: row.assetOut.assetId, valueInUsd: row.valueUsd }
+      for (const send of sends) {
+        const current = replacedSends.get(send) ?? send
+        const fees = current.xcmFees ?? []
+        if (!fees.some(fee => fee.asset.assetId === swap.assetOut)) continue
+        replacedSends.set(send, { ...current, xcmFees: attachFeePurchases(fees.map(fee => ({ ...fee, purchase: fee.purchase ?? null })), [swap]) })
+        feePurchases.add(row)
+      }
+    }
+  }
   return rows.filter(row => {
+    if (row.type === 'trade' && feePurchases.has(row)) return false
     if (row.type === 'trade' && row.extrinsicIndex != null
       && executedSendExtrinsics.has(`${row.blockHeight}:${row.extrinsicIndex}`)) return false
     if (row.type !== 'transfer') return true
@@ -12946,7 +13292,7 @@ export function suppressSubordinateActivityRows<T extends ActivityRow>(rows: T[]
     return ![row.who?.accountId, row.to?.accountId]
       .filter((a): a is string => !!a)
       .some(account => owners.has(account.toLowerCase()))
-  })
+  }).map(row => replacedSends.get(row) ?? row)
 }
 
 // A dust cleanup is emitted as Tokens.Transfer immediately followed by the tokens
@@ -12982,7 +13328,9 @@ async function suppressDustTransferRows<T extends ActivityRow>(rows: T[]): Promi
 }
 
 async function suppressActivityPlumbing<T extends ActivityRow>(rows: T[]): Promise<T[]> {
-  return suppressDustTransferRows(suppressSubordinateActivityRows(rows))
+  const out = await suppressDustTransferRows(suppressSubordinateActivityRows(rows))
+  await applyXcmFeeUsd(out)
+  return out
 }
 
 // Transfer-only pages still need the same semantic ownership decision as the
@@ -14080,6 +14428,11 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
             ...activityExtrinsicSet(liquidity),
             ...await liquidityExtrinsicsForShareTrades(trades),
           ])
+      // A fee purchase folds behind its send (suppressSubordinateActivityRows) when the
+      // send is in the page; the Trade tab fetches no xcm context, so the same rule is
+      // asked of SQL — the one the count arm mirrors — and applied AFTER the fold, so a
+      // send that is in the page still receives the purchase before the trade goes.
+      const feeSwapKeys = await feePurchaseSwapKeys(trades)
       const userTrades = dropShareRoutedTrades(trades, liquidityExtrinsics)
       // Drop swap-internal transfer legs: any transfer in a trade's extrinsic, or
       // touching a pallet/pool account (hops, fees, referral pot). OTC fills
@@ -14140,7 +14493,8 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       // reward claim, vote, or XCM journey can reappear merely because the
       // caller selected `type=transfer`.
       const classificationPages = type === 'trade' ? sourcePages : allSources
-      rows = await suppressActivityPlumbing(classificationPages.flatMap(source => source.rows))
+      rows = (await suppressActivityPlumbing(classificationPages.flatMap(source => source.rows)))
+        .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
       plumbingApplied = true
       if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
       if (deferredValueFilter && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
@@ -15168,14 +15522,35 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
     // through pallet_xcm) the legacy event wins so the transfer isn't doubled.
     const xcmEvents = events.filter(e => isXTokensSentEvent(e.event_name) || e.event_name === 'PolkadotXcm.Sent')
     const xcmLegacyExts = new Set(xcmEvents.filter(e => isXTokensSentEvent(e.event_name)).map(e => `${e.block_height}:${e.extrinsic_index}`))
+    const xcmTransactDests = transactDestinationsByExtrinsic(xcmEvents.filter(e => e.event_name === 'PolkadotXcm.Sent'))
     for (const e of xcmEvents) {
       if (e.event_name === 'PolkadotXcm.Sent' && xcmLegacyExts.has(`${e.block_height}:${e.extrinsic_index}`)) continue
       const parsed = parseOutboundXcm(safeJson(e.args_json))
       if (!parsed) continue
+      const fees = outboundXcmFeeLegs(parsed, amount => withdrawnByAmount.get(amount), prices,
+        parsed.dest.destParachainId != null && (xcmTransactDests.get(`${e.block_height}:${e.extrinsic_index}`)?.has(parsed.dest.destParachainId) ?? false))
       for (const amount of parsed.amounts) {
         const cid = withdrawnByAmount.get(amount)
         if (cid == null) continue
-        rows.push(outboundXcmRow(e, parsed.sender, cid, amount, parsed.dest, prices))
+        rows.push(outboundXcmRow(e, parsed.sender, cid, amount, parsed.dest, prices, fees))
+      }
+    }
+    // An MRL send had Moonbeam call the Wormhole TokenBridge for the user; the arbiter
+    // fee in that call is a relayer fee Wormhole deducts from the bridged amount at the
+    // destination, and the only trace of it is the Transact's calldata.
+    if (xcmTransactDests.size && rows.some(r => r.type === 'xcm' && r.xcmDir === 'out')) {
+      const sendCalls = await client.query({
+        query: `SELECT args_json FROM price_data.raw_calls
+                WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32} AND call_name = 'PolkadotXcm.send'`,
+        query_params: { h: height, i: index }, format: 'JSONEachRow',
+      })
+      for (const c of await sendCalls.json<{ args_json: string }>()) {
+        const encoded = /"encoded":"(0x[0-9a-fA-F]+)"/.exec(c.args_json)?.[1]
+        const decoded = encoded ? decodeMrlTransferTokens(encoded) : null
+        if (!decoded || decoded.arbiterFee === '0') continue
+        const send = rows.find(r => r.type === 'xcm' && r.xcmDir === 'out' && r.amount === decoded.amount && r.asset)
+        if (!send?.asset) continue
+        send.xcmFees = [...(send.xcmFees ?? []), xcmFeeLeg('relayer', send.asset.assetId, decoded.arbiterFee, prices, 'destination')]
       }
     }
 
@@ -15197,17 +15572,20 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
           return { e, who: argStr(args, 'who'), amount: argStr(args, 'amount'), cid: argInt(args, 'currencyId', 'currency_id') }
         })
         .filter(leg => admitsExecutedXcmWithdrawal(leg.who, leg.amount))
-      for (const { e, who, amount, cid } of executedXcmPayloadLegs(
-        legs,
-        leg => `${executedXcmExtrinsicKey(leg.e.block_height, leg.e.extrinsic_index)}:${leg.who}`,
-        leg => leg.e.event_index,
-      )) {
+      const legKey = (leg: { e: { block_height: number; extrinsic_index: number | null }; who: string }) => `${executedXcmExtrinsicKey(leg.e.block_height, leg.e.extrinsic_index)}:${leg.who}`
+      const costs = executedXcmCostLegs(legs, legKey, leg => leg.e.event_index)
+      const batchedSwaps = routerNetSwapsOf(events)
+      for (const payload of executedXcmPayloadLegs(legs, legKey, leg => leg.e.event_index)) {
+        const { e, who, amount, cid } = payload
         const a = asset(cid)
+        // Same cost legs and the same swap resolution as the feed arm: a fee the batched
+        // Router leg bought carries that purchase, and the Router leg's own input is not a fee.
+        const fees = attachFeePurchases((costs.get(legKey(payload)) ?? []).map(leg => xcmFeeLeg('delivery', leg.cid, leg.amount, prices)), batchedSwaps, prices)
         rows.push({
           type: 'xcm', blockHeight: e.block_height, timestamp: e.ts, eventIndex: e.event_index, extrinsicIndex: e.extrinsic_index,
           who: accountRef(who), to: null, asset: a, assetIn: null, assetOut: null,
           amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, amount, a.decimals),
-          xcmDir: 'out', xcmExecuted: true, linkBlock: e.block_height, linkIndex: e.extrinsic_index,
+          xcmDir: 'out', xcmExecuted: true, ...(fees.length ? { xcmFees: fees } : {}), linkBlock: e.block_height, linkIndex: e.extrinsic_index,
         })
       }
       // The bridge is the user's highest-level action here, so the swap beside it is the
@@ -15230,12 +15608,15 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       const sentLogs: NttSentLog[] = []
       const redeemedManagers = new Set<string>()
       const sourceChains: number[] = []
+      const executorPaid: string[] = []
       for (const e of events) {
         if (e.event_name !== 'EVM.Log') continue
         const log = ((safeJson(e.args_json) ?? {}) as { log?: { address?: string; topics?: string[]; data?: string } }).log
         if (!log?.topics || !Array.isArray(log.topics)) continue
         const contract = (log.address ?? '').toLowerCase()
         if (log.topics[0]?.toLowerCase() === NTT_TRANSFER_REDEEMED_TOPIC) redeemedManagers.add(contract)
+        const paid = decodeExecutorRequest(log.topics, log.data ?? '')
+        if (paid) executorPaid.push(paid.amountPaid)
         const sent = decodeNttTransferSent(log.topics, log.data ?? '')
         if (sent) sentLogs.push({ manager: contract, sent })
         const received = decodeNttReceivedMessage(log.topics, log.data ?? '')
@@ -15269,6 +15650,10 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
             row.destAccount = ref.account
           }
         }
+        // Same claim-once rule as getRecentNttOut: the Executor payment belongs to the
+        // first send built from this extrinsic.
+        const paid = executorPaid.shift()
+        if (paid) row.xcmFees = [xcmFeeLeg('relayer', EVM_GAS_ASSET_ID, paid, prices)]
         rows.push(row)
       }
       for (const e of events) {
@@ -16400,9 +16785,13 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)))
+    // The asset page sees the fee purchase (an HDX or GLMR page) without the send it
+    // funded (a sUSDS page), so the fold is asked of SQL here (see feePurchaseSwapSelectSql).
+    const feeSwapKeys = await feePurchaseSwapKeys(trades)
     const userTrades = dropShareRoutedTrades(trades, activityExtrinsicSet(liquidity))
     const userMm = mm.filter(r => !isModuleAcct(r.who))
-    let rows = await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc])
+    let rows = (await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc]))
+      .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
     if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
     rows = rows.filter(r => activityRowMatchesAction(r, action))
     // The token key is meaningless here (the asset IS fixed); min applies the
@@ -17485,6 +17874,9 @@ const SWAP_GROUP_KEY_SQL = 'ifNull(toInt64(extrinsic_index), -toInt64(event_inde
 // named does not pull the route in on one side only.
 function accountSwapTradeArm(list: string, bound: string, tokenIds?: number[]): ActivityCountArm {
   const tokenFilter = armTokenFilter(tokenIds, ids => `(rep_in IN (${ids}) OR rep_out IN (${ids}))`)
+  const accountSwapBlocks = `SELECT block_height FROM price_data.account_swap_activity WHERE ${bound} AND account IN (${list})`
+  const accountWithdrawals = `SELECT block_height, extrinsic_index, asset_id, amount FROM ${xcmEventActivityByAccountTable()}
+      WHERE who IN (${list}) AND event_name = 'Currencies.Withdrawn' AND block_height IN (${accountSwapBlocks})`
   return `SELECT block_height, count() AS rows FROM (
       SELECT block_height, ext_index, route.1 AS rep_in, route.2 AS rep_out
       FROM (
@@ -17519,6 +17911,12 @@ function accountSwapTradeArm(list: string, bound: string, tokenIds?: number[]): 
           SELECT block_height, extrinsic_index FROM price_data.liquidity_activity_by_account
           WHERE ${bound} AND who IN (${list}) AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
             AND extrinsic_index IS NOT NULL))
+      -- A swap that only bought a cross-chain send its fee is that send's cost, not a
+      -- trade (suppressSubordinateActivityRows / isFeePurchaseSwap): every trade of an
+      -- executor send, or the one whose output is the fee asset. Bounded to the account's
+      -- own swap blocks and its own withdrawals.
+      AND NOT ((block_height, ext_index) IN (SELECT block_height, extrinsic_index FROM (${feePurchaseSwapSelectSql(accountSwapBlocks, accountWithdrawals)}) WHERE all_trades = 1)
+        OR (block_height, ext_index, rep_out) IN (SELECT block_height, extrinsic_index, fee_asset FROM (${feePurchaseSwapSelectSql(accountSwapBlocks, accountWithdrawals)}) WHERE all_trades = 0))
     GROUP BY block_height`
 }
 
@@ -19124,9 +19522,13 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
     !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
     !(t.extrinsicIndex != null && liqCreateExt.has(`${t.blockHeight}:${t.extrinsicIndex}`)))
+  // Same SQL rule the exact count's swap arm applies (accountSwapTradeArm), so the
+  // Trade tab — which fetches no xcm context — and its total agree on a fee purchase.
+  const feeSwapKeys = await feePurchaseSwapKeys(trades)
   const userTrades = dropShareRoutedTrades(trades, activityExtrinsicSet(liq))
   const userMm = mmTx.filter(r => !isModuleAcct(r.who))
-  let merged = await suppressActivityPlumbing([...userTrades, ...scopedTransfers, ...dcaTrades, ...rewards, ...liq, ...staking, ...bonds, ...voteRows, ...userMm, ...otc, ...xcm])
+  let merged = (await suppressActivityPlumbing([...userTrades, ...scopedTransfers, ...dcaTrades, ...rewards, ...liq, ...staking, ...bonds, ...voteRows, ...userMm, ...otc, ...xcm]))
+    .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
   if (type && type !== 'all') merged = merged.filter(r => activityTypeMatchesFamily(r.type, type))
   merged = merged.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
   if (exact) {

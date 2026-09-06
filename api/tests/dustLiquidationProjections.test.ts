@@ -75,9 +75,11 @@ describe('dust and liquidation projections replace the raw_events scans', () => 
   // A from/to request must prune partitions in every source arm. The share-routed-trade
   // exclusion was the one subquery without the bound: it read all 5.03M liquidity rows /
   // 342 MiB for a window holding 19,920 of them.
-  it('bounds both source reads in the swap trade arm', () => {
+  it('bounds every source read in the swap trade arm', () => {
     const arm = functionBody('accountSwapTradeArm')
-    expect(occurrences(arm, '${bound}')).toBe(2)
+    // The candidate read, the share-leg exclusion, and the block scope the fee-purchase
+    // exclusion (feePurchaseSwapSelectSql) prunes its send/log/withdrawal reads with.
+    expect(occurrences(arm, '${bound}')).toBe(3)
     // The share-leg exclusion reads the account-first twin: the arm names `who`,
     // which the block-keyed source could not prune on.
     expect(arm).toContain('FROM price_data.liquidity_activity_by_account\n          WHERE ${bound}')

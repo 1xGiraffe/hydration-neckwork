@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { Fragment, useEffect } from 'react'
 import { useBlockActivity, useEventAt, useExtrinsic, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -106,6 +106,17 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {row.type === 'xcm' && row.destTxUrl && <><div className="dt">Destination transaction</div><div className="dd"><a className="ext-link" href={row.destTxUrl} target="_blank" rel="noopener">{explorerSiteName(row.destTxUrl)} ↗</a></div></>}
             {row.type === 'xcm' && row.messageId && <><div className="dt">Message ID</div><div className="dd mono" style={{ overflowWrap: 'anywhere' }}>{row.messageId}</div></>}
             {row.type === 'xcm' && row.bridge && <><div className="dt">Bridge</div><div className="dd">{row.bridge}</div></>}
+            {/* What the send cost beyond its payload. A swap batched in to buy the fee
+                asset is not a trade the sender made, so it is not a row of its own: it
+                reads here, against the fee it paid for. */}
+            {row.type === 'xcm' && row.xcmFees?.map((fee, i) => <Fragment key={i}>
+              <div className="dt">{fee.kind === 'relayer' ? 'Relayer fee' : 'Delivery fee'}</div>
+              <div className="dd mono xcm-fee">
+                <span>{F.exact(fee.amount, fee.asset.decimals)} <AssetChip asset={fee.asset} />{fee.valueUsd != null && <span className="muted"> · {F.usd(fee.valueUsd)}</span>}</span>
+                {fee.settlement === 'destination' && <span className="muted">deducted from the bridged amount at the destination</span>}
+                {fee.purchase && <span className="muted">bought with {F.amount(fee.purchase.amount, fee.purchase.asset.decimals)} <AssetChip asset={fee.purchase.asset} />{fee.purchase.valueUsd != null && <> · {F.usd(fee.purchase.valueUsd)}</>}</span>}
+              </div>
+            </Fragment>)}
             {/* Both read the badge's own label maps, so this page cannot name an
                 action differently from the row that led here. */}
             {row.type === 'mm' && <><div className="dt">Action</div><div className="dd">{MM_LABELS[row.mmAction ?? ''] ?? row.mmAction ?? '—'}</div></>}
