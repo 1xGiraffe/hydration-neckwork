@@ -739,7 +739,7 @@ export interface ActivityRevenue {
 }
 
 export interface ActivityRow {
-  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc'
+  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond'
   revenue?: ActivityRevenue
   // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
   finalized?: boolean
@@ -800,6 +800,12 @@ export interface ActivityRow {
   mmMarketKey?: string
   mmMarket?: string
   stakingAction?: string
+  // Bonds pallet: Issue mints bond tokens against the underlying parked in the pot,
+  // Redeem burns them for the underlying 1:1 after maturity. `asset`/`amount` are
+  // the BOND token; `bondFee` is the issuance fee in the underlying's raw units.
+  bondAction?: 'Issue' | 'Redeem'
+  bondFee?: string | null
+  bondUnderlying?: AssetRef | null
   votePallet?: string
   voteRefPallet?: 'opengov' | 'democracy' | null
   voteRefTitle?: string | null

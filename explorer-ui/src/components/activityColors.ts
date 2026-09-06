@@ -40,6 +40,9 @@ export const CAT = {
   stakeReward: 'var(--cat-stake-reward)',
   stakeMigrate: 'var(--cat-stake-migrate)',
   stakeCancel: 'var(--cat-stake-cancel)',
+  // bonds — teal
+  bond: 'var(--cat-bond)',
+  bondRedeem: 'var(--cat-bond-redeem)',
   // movement, governance, outcome
   transfer: 'var(--cat-transfer)',
   xcm: 'var(--cat-xcm)',
@@ -59,6 +62,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   transfer: CAT.transfer,
   xcm: CAT.xcm,
   stake: CAT.stake,
+  bond: CAT.bond,
   vote: CAT.vote,
 }
 // Charts that are not scoped to a category — the unfiltered activity histogram,
@@ -130,6 +134,15 @@ const LIQ_COLORS: Record<string, string> = {
 export const LIQ_LABELS: Record<string, string> = {
   Add: 'Add liquidity', Remove: 'Remove liquidity', Create: 'Create pool', Destroy: 'Destroy pool', Claim: 'Claim LP Rewards', ClaimReferral: 'Claim Referral Rewards',
 }
+// A bond's two acts are its lifecycle bookends — the issue that mints it against the
+// underlying, the redemption that burns it for the underlying — so each gets its own
+// shade of the family's teal.
+export const BOND_LABELS: Record<string, string> = {
+  Issue: 'Bond issue', Redeem: 'Bond redeem',
+}
+const BOND_COLORS: Record<string, string> = {
+  Issue: CAT.bond, Redeem: CAT.bondRedeem,
+}
 const OTC_COLORS: Record<string, string> = {
   // Placing and pulling an offer both only move an offer around — neither moves
   // value — so they share a shade; their labels differ.
@@ -147,6 +160,10 @@ export function activityBadge(r: ActivityRow): { label: string; col: string } {
   if (r.type === 'staking') {
     const a = r.stakingAction || 'Staking'
     return { label: a, col: stakingColor(a) }
+  }
+  if (r.type === 'bond') {
+    const a = r.bondAction ?? ''
+    return { label: BOND_LABELS[a] ?? 'Bond', col: BOND_COLORS[a] ?? CAT.bond }
   }
   if (r.type === 'vote') return { label: voteLabel(r.voteAction), col: voteColor(r.voteAction) }
   if (r.type === 'liquidity') {

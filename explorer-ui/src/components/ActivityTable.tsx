@@ -3,7 +3,7 @@ import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
 import { F, AddrPill, AssetChip, rowNav, Ago, Waiting, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor, ContractGlyph } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
-import { activityBadge } from './activityColors'
+import { activityBadge, BOND_LABELS } from './activityColors'
 import { resolveTag, useTagMapVersion } from '../userTags'
 import { convictionLabel, voteSubjectLabel } from '../utils/voteRows'
 import type { ActivityRow } from '../types'
@@ -126,6 +126,7 @@ export function activitySlug(r: ActivityRow): ActivitySlug {
     case 'liquidity': return r.liqAction === 'Remove' ? 'remove-liquidity' : r.liqAction === 'Create' ? 'create-pool' : r.liqAction === 'Destroy' ? 'destroy-pool' : r.liqAction === 'Claim' ? 'claim-rewards' : r.liqAction === 'ClaimReferral' ? 'claim-referral-rewards' : 'add-liquidity'
     case 'mm': return MM_SLUG[r.mmAction ?? ''] ?? 'lend'
     case 'staking': return 'staking'
+    case 'bond': return r.bondAction === 'Redeem' ? 'bond-redeem' : 'bond-issue'
     case 'vote': return 'vote'
     case 'otc': return r.otcAction === 'Pull' ? 'otc-pull' : r.otcAction === 'Fill' ? 'otc-fill' : 'otc-place'
     default: return 'transfer'
@@ -150,6 +151,7 @@ const SLUG_LABEL: Record<ActivitySlug, string> = {
   lend: 'Lend', withdraw: 'Withdraw', borrow: 'Borrow', repay: 'Repay',
   liquidate: 'Liquidate', staking: 'Staking', vote: 'Vote',
   'otc-place': 'OTC place', 'otc-pull': 'OTC pull', 'otc-fill': 'OTC fill',
+  'bond-issue': BOND_LABELS.Issue, 'bond-redeem': BOND_LABELS.Redeem,
 }
 export function activityLabel(slug: ActivitySlug): string { return SLUG_LABEL[slug] }
 
@@ -161,6 +163,7 @@ export const SLUG_TYPES: Record<ActivitySlug, ActivityRow['type'][]> = {
   lend: ['mm'], withdraw: ['mm'], borrow: ['mm'], repay: ['mm'], liquidate: ['mm'],
   staking: ['staking'], vote: ['vote'],
   'otc-place': ['otc'], 'otc-pull': ['otc'], 'otc-fill': ['otc'],
+  'bond-issue': ['bond'], 'bond-redeem': ['bond'],
 }
 
 export { parseId } from '../utils/activityIds'
@@ -270,7 +273,7 @@ export function ActivityDesc({ r, headed }: { r: ActivityRow; headed?: boolean }
     // Pool creation seeds two assets — show both legs side by side.
     return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.assetIn} /> <span className="mono">{F.amount(r.amountIn, r.assetIn.decimals)}</span></span> + <span className="trade-leg"><AssetChip asset={r.assetOut} /> <span className="mono">{F.amount(r.amountOut, r.assetOut.decimals)}</span></span></span>
   }
-  if ((r.type === 'mm' || r.type === 'liquidity' || r.type === 'staking') && r.asset) {
+  if ((r.type === 'mm' || r.type === 'liquidity' || r.type === 'staking' || r.type === 'bond') && r.asset) {
     return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span></span>
   }
   if (r.type === 'vote' && r.asset) {

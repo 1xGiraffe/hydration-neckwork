@@ -6,7 +6,7 @@ import type { AccountRef, AssetOrigin, AssetRef, FailureReason, FeePayment } fro
 import { parseUtcTimestamp } from '../utils/time'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { voteSideLabel } from '../utils/voteRows'
-import { CAT, LIQ_LABELS, MM_LABELS } from './activityColors'
+import { BOND_LABELS, CAT, LIQ_LABELS, MM_LABELS } from './activityColors'
 import { ZoomReset, ZoomSelection, bracketToView, fracOfTime, useChartZoom, useZoomRefine } from './chartZoom'
 import type { RefinedSeries } from './chartZoom'
 import { resolveTag, useTagMapVersion } from '../userTags'
@@ -1833,7 +1833,7 @@ export function rowNav(to: string) {
 // value maps to the backend activity `type` filter; 'all' is the unfiltered feed.
 const ACTIVITY_CHIPS: { v: string; label: string }[] = [
   { v: 'all', label: 'All' }, { v: 'trade', label: 'Trade' }, { v: 'mm', label: 'Borrow' }, { v: 'liquidity', label: 'Liquidity' },
-  { v: 'transfer', label: 'Transfer' }, { v: 'xcm', label: 'Cross-chain' }, { v: 'stake', label: 'Stake' }, { v: 'vote', label: 'Vote' },
+  { v: 'transfer', label: 'Transfer' }, { v: 'xcm', label: 'Cross-chain' }, { v: 'stake', label: 'Stake' }, { v: 'bond', label: 'Bond' }, { v: 'vote', label: 'Vote' },
 ]
 const ACTIVITY_CHIP_VALUES = new Set(ACTIVITY_CHIPS.map(c => c.v))
 export function normalizeActivityType(value: string): string {
@@ -1859,6 +1859,8 @@ export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = 
   // Staking values ARE their labels — the server sends the action as a word, not a
   // runtime event name — so there is no mapping here to keep in step.
   stake: [{ v: 'Stake', label: 'Stake' }, { v: 'Add stake', label: 'Add stake' }, { v: 'Unstake', label: 'Unstake' }, { v: 'Force unstake', label: 'Force unstake' }, { v: 'Staking reward', label: 'Staking reward' }, { v: 'GIGAHDX Stake', label: 'GIGAHDX Stake' }, { v: 'GIGAHDX Unstake', label: 'GIGAHDX Unstake' }, { v: 'GIGAHDX Cancel Unstake', label: 'GIGAHDX Cancel Unstake' }, { v: 'GIGAHDX Unlock', label: 'GIGAHDX Unlock' }, { v: 'GIGAHDX Migrate', label: 'GIGAHDX Migrate' }, { v: 'GIGAHDX Reward', label: 'GIGAHDX Reward' }, { v: 'Collator payout', label: 'Collator payout' }],
+  // Bond values are the server's action words too; the labels are the badges'.
+  bond: [{ v: 'Issue', label: BOND_LABELS.Issue }, { v: 'Redeem', label: BOND_LABELS.Redeem }],
   // The value is the chain's own term; the label is how this app writes that side —
   // taken from the same mapping the badges use, so the two cannot diverge.
   vote: [{ v: 'Aye', label: voteSideLabel('Aye') }, { v: 'Nay', label: voteSideLabel('Nay') }],

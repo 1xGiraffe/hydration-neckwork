@@ -77,6 +77,7 @@ export type PendingActivity = PendingTradeActivity | PendingTransferActivity | P
 // at the cost of a plain ERC-20 transfer waiting for finality to show up.
 const CLASSIFIED_ACTION_PALLETS = new Set([
   'gigahdx', 'gigahdxrewards', 'staking', 'collatorrewards',   // staking family
+  'bonds',                                                     // bond issue / redeem
   'omnipool', 'stableswap', 'xyk', 'lbp',                      // liquidity
   'otc', 'dca', 'referrals',
   'xtokens', 'polkadotxcm', 'xcmpqueue',                       // cross-chain
