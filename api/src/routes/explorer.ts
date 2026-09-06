@@ -38,7 +38,7 @@ import { ACCOUNT_AFFINITY_BUSY_CODE, getCloseAccounts, getCloseAccountsForTag } 
 // once here rather than in the eight places the service branches on it.
 // Exported so the notification rule registry's own copy (which must stay free
 // of this module's route/service imports) can be pinned equal to it by test.
-export const activityTypes = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc']
+export const activityTypes = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc', 'bond']
 const ACTIVITY_TYPE_ALIASES: Record<string, string> = { stake: 'staking' }
 export const uint32Param = z.coerce.number().int().min(0).max(0xffff_ffff)
 
@@ -88,7 +88,7 @@ const MAX_ACTIVITY_OFFSET = 2_500
 // This is what withheld /activity?tab=vote&page=490: the vote feed is 4,844 pages of
 // 25 and 92% of them sat behind a cap that costs it 51ms to serve.
 const MAX_NARROW_ACTIVITY_OFFSET = 250_000
-const NARROW_ACTIVITY_TYPES = new Set(['vote', 'staking', 'otc'])
+const NARROW_ACTIVITY_TYPES = new Set(['vote', 'staking', 'otc', 'bond'])
 export const maxActivityOffsetFor = (type: string) =>
   NARROW_ACTIVITY_TYPES.has(type) ? MAX_NARROW_ACTIVITY_OFFSET : MAX_ACTIVITY_OFFSET
 // A WINDOWED account/tag activity request — one carrying a min-USD floor, the single

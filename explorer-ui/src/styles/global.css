@@ -114,6 +114,9 @@
   --cat-stake-migrate: #C44DD8;
   --cat-stake-cancel: #9C7BB8;
 
+  --cat-bond: #4FD1C5;
+  --cat-bond-redeem: #22948A;
+
   --cat-transfer: var(--neutral);
   --cat-xcm: var(--neutral-cool);
   --cat-vote: #DFB1F3;
@@ -199,6 +202,9 @@
   --cat-stake-reward: #7B6FC4;
   --cat-stake-migrate: #A02BB5;
   --cat-stake-cancel: #7A5C90;
+
+  --cat-bond: #17877D;
+  --cat-bond-redeem: #0C5A53;
 
   --cat-transfer: var(--neutral);
   --cat-xcm: var(--neutral-cool);

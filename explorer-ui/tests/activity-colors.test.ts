@@ -19,6 +19,7 @@ describe('activity category coding', () => {
       mm: [CAT.borrow, CAT.borrowWithdraw, CAT.borrowLend, CAT.borrowRepay, CAT.borrowClaim, CAT.bad],
       liquidity: [CAT.liquidity, CAT.liquidityRemove, CAT.liquidityCreate, CAT.liquidityClaim],
       stake: [CAT.stake, CAT.stakeExit, CAT.stakeReward, CAT.stakeMigrate, CAT.stakeCancel],
+      bond: [CAT.bond, CAT.bondRedeem],
       vote: [CAT.vote, CAT.aye, CAT.nay],
       xcm: [CAT.xcm],
     }
@@ -30,6 +31,7 @@ describe('activity category coding', () => {
       mm: v => row({ type: 'mm', mmAction: v }),
       liquidity: v => row({ type: 'liquidity', liqAction: v as ActivityRow['liqAction'] }),
       stake: v => row({ type: 'staking', stakingAction: v }),
+      bond: v => row({ type: 'bond', bondAction: v as ActivityRow['bondAction'] }),
       vote: v => row({ type: 'vote', voteAction: v }),
       xcm: () => row({ type: 'xcm' }),
     }
@@ -43,7 +45,7 @@ describe('activity category coding', () => {
   })
 
   it('never falls through to the unstyled default for a known activity type', () => {
-    const types: ActivityRow['type'][] = ['transfer', 'trade', 'xcm', 'liquidity', 'mm', 'dca', 'staking', 'vote', 'otc']
+    const types: ActivityRow['type'][] = ['transfer', 'trade', 'xcm', 'liquidity', 'mm', 'dca', 'staking', 'vote', 'otc', 'bond']
     for (const type of types) {
       expect(activityBadge(row({ type })).col, type).not.toBe('var(--text-medium)')
     }
@@ -86,6 +88,7 @@ describe('activity category coding', () => {
       // stay apart is what the act DOES.
       staking: ['Stake', 'Unstake', 'Staking reward', 'GIGAHDX Migrate', 'GIGAHDX Cancel Unstake']
         .map(a => row({ type: 'staking', stakingAction: a })),
+      bond: (['Issue', 'Redeem'] as const).map(a => row({ type: 'bond', bondAction: a })),
     }
     for (const [fam, rows] of Object.entries(families)) {
       const cols = rows.map(r => activityBadge(r).col)

@@ -4,7 +4,7 @@ import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../router'
 import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ConvictionTag, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
-import { LIQ_LABELS, MM_LABELS } from '../components/activityColors'
+import { BOND_LABELS, LIQ_LABELS, MM_LABELS } from '../components/activityColors'
 import { RevenueRow } from '../components/RevenueRow'
 import { Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
@@ -68,6 +68,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
           {row?.type === 'xcm' && <span className="sub">{row.xcmDir === 'in' ? `in from ${row.fromChain ?? '?'}` : `out to ${row.destChain ?? '?'}`}</span>}
           {row?.type === 'mm' && row.mmMarket && <span className="sub">{row.mmMarket}</span>}
           {row?.type === 'staking' && row.stakingAction && <span className="sub">{row.stakingAction}</span>}
+          {row?.type === 'bond' && row.bondAction && <span className="sub">{BOND_LABELS[row.bondAction]}</span>}
           {row?.type === 'vote' && voteSub && <span className="sub">{voteSub}</span>}
           {row?.type === 'otc' && row.otcOrderId != null && <span className="sub">order #{row.otcOrderId}</span>}
         </div>
@@ -110,6 +111,14 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {row.type === 'mm' && <><div className="dt">Action</div><div className="dd">{MM_LABELS[row.mmAction ?? ''] ?? row.mmAction ?? '—'}</div></>}
             {row.type === 'liquidity' && <><div className="dt">Action</div><div className="dd">{LIQ_LABELS[row.liqAction ?? ''] ?? LIQ_LABELS.Add}</div></>}
             {row.type === 'staking' && <><div className="dt">Action</div><div className="dd">{row.stakingAction ?? '—'}</div></>}
+            {row.type === 'bond' && <>
+              <div className="dt">Action</div><div className="dd">{BOND_LABELS[row.bondAction ?? ''] ?? '—'}</div>
+              {/* What the bond stands for: the asset it was issued against and redeems
+                  for 1:1 at maturity. The issue fee is charged in that asset too, and
+                  stays with the Treasury. */}
+              {row.bondUnderlying && <><div className="dt">Underlying</div><div className="dd"><AssetChip asset={row.bondUnderlying} /></div></>}
+              {row.bondAction === 'Issue' && row.bondFee != null && row.bondUnderlying && <><div className="dt">Issue fee</div><div className="dd mono">{F.exact(row.bondFee, row.bondUnderlying.decimals)} <AssetChip asset={row.bondUnderlying} /></div></>}
+            </>}
             {row.type === 'vote' && <>
               {/* The subtitle carries these too, but a subtitle is scenery: a reader
                   looking for how hard somebody voted looks down the labelled rows, the

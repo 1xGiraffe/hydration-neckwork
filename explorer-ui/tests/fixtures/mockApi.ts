@@ -577,6 +577,7 @@ function mockExtrinsicActivity(height: number, index: number): ActivityRow[] {
   if (/transfer/i.test(x.callName)) return [{ ...base, type: x.callName.startsWith('XTokens') ? 'xcm' : 'transfer', to: ACCS[(index + 1) % ACCS.length], asset: aref(aIn), amount: raw(amount, aIn.decimals), destChain: x.callName.startsWith('XTokens') ? 'Moonbeam' : undefined }]
   if (/liquidity/i.test(x.callName)) return [{ ...base, type: 'liquidity', asset: aref(aIn), amount: raw(amount, aIn.decimals), liqAction: 'Add' }]
   if (/staking/i.test(x.callName)) return [{ ...base, type: 'staking', asset: aref(ASSETS[0]), amount: raw(amount, ASSETS[0].decimals), stakingAction: 'Stake' }]
+  if (/bonds/i.test(x.callName)) return [{ ...base, type: 'bond', asset: aref(aIn), amount: raw(amount, aIn.decimals), bondAction: 'Redeem', bondFee: null, bondUnderlying: aref(aIn) }]
   if (/DCA/i.test(x.callName)) return [{ ...base, type: 'trade', assetIn: aref(aIn), assetOut: aref(aOut), amountIn: raw(amount, aIn.decimals), amountOut: raw(amount * aIn.price / aOut.price, aOut.decimals), dca: true, dcaScheduleId: 33546 }]
   if (/EVM/i.test(x.callName)) return [{ ...base, type: 'mm', asset: aref(aIn), amount: raw(amount, aIn.decimals), mmAction: 'Supply' }]
   return [{ ...base, type: 'trade', assetIn: aref(aIn), assetOut: aref(aOut), amountIn: raw(amount, aIn.decimals), amountOut: raw(amount * aIn.price / aOut.price, aOut.decimals) }]
