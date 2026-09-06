@@ -59,13 +59,14 @@ describe('the account-scoped XCM readers use the account-first projection', () =
   })
 
   it('routes the account-scoped reads to the account-first table, and only those', () => {
-    // One definition + six call sites: the inbound candidate arm, the remote-outbound
+    // One definition + seven call sites: the inbound candidate arm, the remote-outbound
     // candidate arm, the remote-outbound withdrawal decode, the NTT arrival candidate
-    // arm, and both halves of the executed-send arm (its candidate walk and its
+    // arm, both halves of the executed-send arm (its candidate walk and its
     // withdrawal decode — that arm's candidate IS a Currencies.Withdrawn row, so it is
-    // account-first for exactly the reason the others are).
-    expect(occurrences(explorerService, 'xcmEventActivityByAccountTable(')).toBe(7)
-    for (const site of ['getRecentXcmIn', 'getRecentXcmOutRemote', 'xcmOutRemoteRowsForBlocks', 'getRecentNttIn', 'getRecentXcmExecuted', 'xcmExecutedRowsForBlocks']) {
+    // account-first for exactly the reason the others are), and the swap count arm's
+    // fee-asset resolution, which names the account's own withdrawals.
+    expect(occurrences(explorerService, 'xcmEventActivityByAccountTable(')).toBe(8)
+    for (const site of ['getRecentXcmIn', 'getRecentXcmOutRemote', 'xcmOutRemoteRowsForBlocks', 'getRecentNttIn', 'getRecentXcmExecuted', 'xcmExecutedRowsForBlocks', 'accountSwapTradeArm']) {
       expect(functionBody(site), site).toContain('${xcmEventActivityByAccountTable()}')
     }
     // What stays on the parent: the global candidate walks, the outbound reads, the
