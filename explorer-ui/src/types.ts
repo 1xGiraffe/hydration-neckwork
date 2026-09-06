@@ -738,6 +738,20 @@ export interface ActivityRevenue {
   streams: { stream: string; usd: number }[]
 }
 
+// What an outbound cross-chain send cost besides its payload: the delivery fee that
+// left with the message, or a relayer paid so the transfer is claimed at the
+// destination. `purchase` is the same-extrinsic swap that bought the fee asset — the
+// feed folds that swap behind the send, and this is where it is shown instead.
+export interface XcmFeeLeg {
+  kind: 'delivery' | 'relayer'
+  asset: AssetRef
+  amount: string
+  valueUsd: number | null
+  // 'destination': deducted from the bridged amount on arrival (an MRL arbiter fee).
+  settlement?: 'source' | 'destination'
+  purchase?: { asset: AssetRef; amount: string; valueUsd: number | null } | null
+}
+
 export interface ActivityRow {
   type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond'
   revenue?: ActivityRevenue
@@ -781,6 +795,7 @@ export interface ActivityRow {
     contractName?: string
   }
   xcmDir?: 'in' | 'out'      // xcm: transfer direction relative to Hydration
+  xcmFees?: XcmFeeLeg[]      // xcm outbound: the send's costs beyond its payload
   fromChain?: string         // xcm inbound: origin chain name
   fromParachainId?: number | null
   // Source account of an inbound transfer (best-effort — resolved server-side
