@@ -197,6 +197,10 @@ function inheritATokenOrigins(): void {
 // underlying at maturity). Runs on every registry refresh, so new bonds appear
 // automatically. Best-effort: a failed lookup leaves bonds as bare ids, never the
 // rest of the registry.
+// bond id → the asset it redeems for, one entry per Bonds.TokenCreated. The bond
+// activity builders read it to tell a bond from any other aliased asset and to list
+// the underlying beside the bond in a row's asset references.
+export const BOND_UNDERLYING_ID: Record<number, number> = {}
 async function injectBonds(client: ClickHouseClient): Promise<void> {
   let rows: { bond_id: number; underlying: number; maturity: string }[]
   try {
@@ -230,6 +234,7 @@ async function injectBonds(client: ClickHouseClient): Promise<void> {
     })
     // Price/value through the underlying (feeds priceAssetId + the SQL alias).
     PRICE_ALIAS_ID[bondId] = Number(r.underlying)
+    BOND_UNDERLYING_ID[bondId] = Number(r.underlying)
   }
 }
 

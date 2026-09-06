@@ -23,6 +23,8 @@ describe('activitySlug', () => {
     expect(activitySlug({ ...base, type: 'mm', mmAction: 'LiquidationCall' })).toBe('liquidate')
     expect(activitySlug({ ...base, type: 'mm', mmAction: 'Repay' })).toBe('repay')
     expect(activitySlug({ ...base, type: 'staking', stakingAction: 'GIGAHDX Stake' })).toBe('staking')
+    expect(activitySlug({ ...base, type: 'bond', bondAction: 'Issue' })).toBe('bond-issue')
+    expect(activitySlug({ ...base, type: 'bond', bondAction: 'Redeem' })).toBe('bond-redeem')
     expect(activitySlug({ ...base, type: 'vote', voteSide: 'Aye' })).toBe('vote')
     expect(activitySlug({ ...base, type: 'otc', otcAction: 'Place' })).toBe('otc-place')
     expect(activitySlug({ ...base, type: 'otc', otcAction: 'Pull' })).toBe('otc-pull')
@@ -108,6 +110,12 @@ describe('SLUG_TYPES', () => {
     expect(SLUG_TYPES['otc-place']).toEqual(['otc'])
     expect(SLUG_TYPES['otc-pull']).toEqual(['otc'])
     expect(SLUG_TYPES['otc-fill']).toEqual(['otc'])
+  })
+  it('maps both bond slugs to the bond type and labels them like the badges', () => {
+    expect(SLUG_TYPES['bond-issue']).toEqual(['bond'])
+    expect(SLUG_TYPES['bond-redeem']).toEqual(['bond'])
+    expect(activityLabel('bond-issue')).toBe('Bond issue')
+    expect(activityLabel('bond-redeem')).toBe('Bond redeem')
   })
 })
 

@@ -15,7 +15,7 @@ export type NotificationKind = typeof NOTIFICATION_KINDS[number]
 // Mirrors the activity-type union the explorer feed routes accept
 // (`activityTypes` in routes/explorer.ts, pinned by a parity test): a rule
 // naming a type the feed cannot filter would silently never match.
-export const ACTIVITY_TYPES = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc'] as const
+export const ACTIVITY_TYPES = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc', 'bond'] as const
 // Referenda lifecycle phases the row lane watches. `confirming` and `confirmed`
 // are two different moments and both are news: the chain announces entry into
 // the confirmation period (ConfirmStarted) long before the period ends and the

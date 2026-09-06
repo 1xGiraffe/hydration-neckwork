@@ -56,7 +56,7 @@ export const HEALTH_FACTOR_DEFAULT_MARKET = 'core'
 
 // The activity-type union the explorer feed routes accept. A rule naming a type
 // the feed cannot filter would silently never match.
-export const ACTIVITY_TYPES = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc'] as const
+export const ACTIVITY_TYPES = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc', 'bond'] as const
 export type NotificationActivityType = typeof ACTIVITY_TYPES[number]
 
 // Referenda lifecycle phases the evaluator watches. `confirming` (entering the
