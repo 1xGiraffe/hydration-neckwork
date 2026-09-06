@@ -11,7 +11,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
+import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, INCENTIVES_REWARD_POT } from './tagService.ts'
@@ -8933,7 +8933,7 @@ async function extrinsicIndexFor(pairs: [number, number | null][]): Promise<Map<
 
 // unified activity
 export interface ActivityRow {
-  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc'
+  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond'
   blockHeight: number
   timestamp: string
   eventIndex?: number | null
@@ -8959,6 +8959,15 @@ export interface ActivityRow {
   mmMarketKey?: string       // absent for legacy/unknown pools; `core` is primary
   mmMarket?: string          // display label; UI only calls out supplemental markets
   stakingAction?: string
+  // Bonds pallet: Issue mints bond tokens against the underlying parked in the pot,
+  // Redeem burns them for the underlying 1:1 after maturity. `asset`/`amount` are the
+  // BOND token; `bondFee` is the issuance fee in the underlying's raw units (an
+  // Issue only; the Treasury keeps it).
+  bondAction?: 'Issue' | 'Redeem'
+  bondFee?: string | null
+  // The asset the bond was issued against and redeems for (null when the bond
+  // registry has no entry for it yet).
+  bondUnderlying?: AssetRef | null
   votePallet?: string
   // Referendum identity for the row's link, plus the off-chain title. Set only for
   // ConvictionVoting/Democracy rows: Council and Technical Committee votes are not
@@ -9213,10 +9222,10 @@ export function compareActivityRowsNewestFirst(a: ActivityRow, b: ActivityRow): 
 // A stable numeric rank per row family, so a tie on (block, event, extrinsic)
 // still resolves identically every time the feed is built.
 const ACTIVITY_KIND_RANK: Record<string, number> = {
-  trade: 0, otc: 1, liquidity: 2, mm: 3, xcm: 4, staking: 5, vote: 6, transfer: 7,
+  trade: 0, otc: 1, liquidity: 2, mm: 3, xcm: 4, staking: 5, bond: 6, vote: 7, transfer: 8,
 }
 function activityKindRank(r: ActivityRow): number {
-  return ACTIVITY_KIND_RANK[r.type] ?? 8
+  return ACTIVITY_KIND_RANK[r.type] ?? 9
 }
 
 // Pair rows that belong together by ADJACENCY rather than by a shared key, when the
@@ -11689,6 +11698,136 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
   })
 }
 
+// Bonds (Bonds pallet). Two acts: an ISSUE moves `amount + fee` of the underlying
+// out of the issuer — the amount into the bonds pallet pot, the fee to the
+// Treasury — and mints `amount` bond tokens to the issuer; a REDEEM burns bond
+// tokens once the bond has matured and pays the underlying back 1:1 out of the
+// pot. The row shows the BOND token (its registry entry is synthesised from
+// Bonds.TokenCreated, see explorerAssets.injectBonds), values through the
+// underlying (PRICE_ALIAS_ID) and lists the underlying in assetRefs, so a token
+// filter on either the bond or what it redeems for finds the row. Everything else
+// in the extrinsic is plumbing that folds behind it like any other module leg:
+// the pot/Treasury transfers, and the insufficient-asset existential deposit the
+// Treasury refunds (1 HDX, Balances.Unlocked + Transfer) when the last bond token
+// leaves the redeemer's account.
+//
+// Treasury bonds are issued by governance, so their Issued event has no extrinsic
+// (a Dispatcher/Scheduler hook row); user-issued bonds and every redemption carry
+// one. Same event list in every builder — extrinsic page, block hook, windowed
+// feed, account/asset feeds — so the surfaces stay symmetric.
+export const BOND_EVENT_NAMES = ['Bonds.Issued', 'Bonds.Redeemed']
+const BOND_ACTION_EVENTS: Record<string, string[]> = {
+  Issue: ['Bonds.Issued'],
+  Redeem: ['Bonds.Redeemed'],
+}
+export interface BondActivityParts { who: string; bondId: number; amount: string; fee: string | null; action: 'Issue' | 'Redeem' }
+export function bondActivityParts(eventName: string, args: Record<string, unknown>): BondActivityParts | null {
+  const bondId = argInt(args, 'bondId', 'bond_id')
+  if (eventName === 'Bonds.Issued') {
+    // A zero-amount issue still created the bond class (the issuer paid the fee for
+    // it), so it stays a row — the amount is the fact, not a missing field.
+    return { who: argStr(args, 'issuer'), bondId, amount: argStr(args, 'amount') || '0', fee: argStr(args, 'fee') || null, action: 'Issue' }
+  }
+  if (eventName === 'Bonds.Redeemed') return { who: argStr(args, 'who'), bondId, amount: argStr(args, 'amount'), fee: null, action: 'Redeem' }
+  return null
+}
+// SQL mirrors of bondActivityParts for the value push-down: the bond id is the
+// priced asset (aliased to its underlying by priceAliasIdSql) and `amount` is the
+// bond amount both events carry — the same fields the built row displays.
+const BOND_ASSET_SQL = `toUInt32(greatest(0, JSONExtractInt(args_json,'bondId')))`
+const BOND_AMOUNT_SQL = `JSONExtractString(args_json,'amount')`
+// The asset a bond redeems for — the bond registry's own entry, not the terminal
+// id priceAssetId walks to (a bond over a share token redeems for the share, not
+// for what the share is priced through). Null for anything that is not a bond.
+export function bondUnderlyingId(assetId: number): number | null {
+  const underlying = BOND_UNDERLYING_ID[assetId]
+  return underlying != null && underlying !== assetId ? underlying : null
+}
+// The bond ids a token filter admits: the bond itself, or a bond whose underlying
+// is the requested token. null = unfiltered; empty = nothing can match.
+function bondIdsForTokens(tokenIds: number[] | undefined, assetId?: number): number[] | null {
+  const wanted = new Set<number>([...(tokenIds ?? []), ...(assetId != null ? [assetId] : [])])
+  if (!wanted.size) return null
+  return allExplorerAssets()
+    .filter(a => {
+      const underlying = bondUnderlyingId(a.assetId)
+      return underlying != null && (wanted.has(a.assetId) || wanted.has(underlying))
+    })
+    .map(a => a.assetId)
+}
+// Per-event → ActivityRow construction shared by every bond builder (mirrors
+// stakingRowFromEvent). `signerFallback` supplies `who` for an event whose actor
+// field is empty or malformed.
+function bondRowFromEvent(
+  e: { block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; args_json: string },
+  prices: Map<number, PriceInfo>,
+  opts: { signerFallback?: string | null } = {},
+): { row: ActivityRow; who: string; bondId: number; amount: string } | null {
+  const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
+  const parts = bondActivityParts(e.event_name, args)
+  if (!parts || parts.bondId <= 0 || !/^\d+$/.test(parts.amount)) return null
+  const a = asset(parts.bondId)
+  const underlying = bondUnderlyingId(parts.bondId)
+  const row: ActivityRow = {
+    type: 'bond', blockHeight: e.block_height, timestamp: e.ts, eventIndex: e.event_index, extrinsicIndex: e.extrinsic_index,
+    who: parts.who && ACCOUNT_RE.test(parts.who) ? accountRef(parts.who) : opts.signerFallback ? accountRef(opts.signerFallback) : null,
+    to: null, asset: a, assetIn: null, assetOut: null,
+    amount: parts.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, parts.amount, a.decimals),
+    ...(underlying != null ? { assetRefs: [underlying] } : {}),
+    bondAction: parts.action, bondFee: parts.fee, bondUnderlying: underlying != null ? asset(underlying) : null,
+    linkBlock: e.block_height, linkIndex: e.extrinsic_index,
+  }
+  return { row, who: parts.who, bondId: parts.bondId, amount: parts.amount }
+}
+type RawBondActivityEvent = { block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; args_json: string }
+// Windowed bond feed — the shape of getRecentStaking over the bond_activity table.
+// Action, token and USD-minimum predicates are all pushed into SQL (the action is an
+// event name, the token a bond-id list, the value the aliased hourly close), so the
+// page is SQL-exact; the built rows are re-checked with the same predicates only to
+// keep the event-time valuation and the displayed row in agreement. `identity` is
+// the one filter decided on the built row, so it walks history like every other
+// source with a row-level filter.
+async function getRecentBonds(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}, assetId?: number, action?: string): Promise<ActivityRow[]> {
+  const tw = timeWindow(from, to)
+  const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
+  return cached(`explorer:bond-activity:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${assetId ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+    const prices = await ensurePrices()
+    const bound = tw ?? '1'
+    const bondIds = bondIdsForTokens(assetIdsForToken(filters.token), assetId)
+    if (bondIds && !bondIds.length) return []
+    if (action && !BOND_ACTION_EVENTS[action]) return []
+    const names = (action ? BOND_ACTION_EVENTS[action] : BOND_EVENT_NAMES).map(n => `'${n}'`).join(',')
+    const accountFilter = acctList ? `AND who IN (${acctList})` : ''
+    const bondFilter = bondIds ? `AND ${BOND_ASSET_SQL} IN (${bondIds.join(',')})` : ''
+    const valueFilter = eventValueFilterSql(BOND_ASSET_SQL, BOND_AMOUNT_SQL, 'block_timestamp', filters, prices, 'bond_price')
+    const run = async (b: string, pageLimit: number, pageOffset: number) => {
+      const res = await client.query({
+        query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
+                FROM price_data.bond_activity FINAL
+                ${valueFilter.joinSql}
+                WHERE ${b} AND event_name IN (${names}) ${accountFilter} ${bondFilter}
+                ${valueFilter.predicateSql}
+                ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
+        query_params: { limit: pageLimit, offset: pageOffset }, format: 'JSONEachRow',
+      })
+      return res.json<RawBondActivityEvent>()
+    }
+    const build = async (raw: RawBondActivityEvent[]) => {
+      const rows = raw.map(r => bondRowFromEvent(r, prices)?.row).filter((r): r is ActivityRow => r != null)
+      await applyHistoricalUsd(rows, activityHistPick)
+      return rows
+    }
+    if (filters.identity != null) {
+      const want = offset + limit
+      const deep = await fetchFilteredDeep(tw, want, async (b, pageLimit) => build(await run(b, pageLimit, 0)),
+        r => activityRowMatchesFilters(r, filters), r => r.blockHeight, r => r.eventIndex ?? -1, r => `${r.blockHeight}:${r.eventIndex}`)
+      return deep.slice(offset, offset + limit)
+    }
+    const raw = acctList ? await run(bound, limit, offset) : await withFeedWindow(tw, limit, offset + limit, b => run(b, limit, offset))
+    return (await build(raw)).filter(r => activityRowMatchesFilters(r, filters))
+  })
+}
+
 // OTC (place / pull / fill)
 // OTC.Placed/Cancelled carry no `who` — the actor is the extrinsic signer
 // (batched via signersFor, the same attribution pattern trades use for their
@@ -12879,6 +13018,7 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
     ...SWAP_EVENTS,
     ...LIQUIDITY_EVENTS,
     ...STAKING_EVENT_NAMES,
+    ...BOND_EVENT_NAMES,
     ...VOTE_EVENTS,
     'DCA.TradeExecuted', 'DCA.TradeFailed', 'Referrals.Claimed',
     ...OTC_EVENT_NAMES,
@@ -12934,7 +13074,9 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
       semanticExtrinsics.add(`${event.block_height}:${event.extrinsic_index}`)
       continue
     }
-    addHookAccount(event.block_height, argStr(args, 'who') || argStr(args, 'voter'))
+    // Bonds.Issued names its actor `issuer` (a governance-issued Treasury bond is a
+    // hook row whose pot legs are Treasury ↔ bonds pot transfers).
+    addHookAccount(event.block_height, argStr(args, 'who') || argStr(args, 'voter') || argStr(args, 'issuer'))
   }
 
   // Money-market logs do not store the substrate extrinsic directly. Resolve
@@ -13331,6 +13473,7 @@ export function activityRowMatchesAction(r: ActivityRow, action?: string): boole
     case 'otc': return r.otcAction === resolveOtcAction(action)
     case 'mm': return r.mmAction === action
     case 'staking': return r.stakingAction === action
+    case 'bond': return r.bondAction === action
     case 'liquidity': return r.liqAction === action
     case 'vote': return (r.voteSide ?? '') === action
     case 'xcm': return (r.xcmDir ?? 'out') === action
@@ -13856,10 +13999,10 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     let sourceFilters = sourceValueFiltered
       ? filters
       : deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
-    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'xcmExecuted' | 'nttOut' | 'nttIn' | 'staking' | 'vote'
+    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'xcmExecuted' | 'nttOut' | 'nttIn' | 'staking' | 'bond' | 'vote'
     const classifiedSourceKeys: ClassifiedSourceKey[] = [
       'transfer', 'trade', 'dca', 'reward', 'liquidity', 'mm', 'otc',
-      'xcm', 'xcmIn', 'xcmOutRemote', 'xcmExecuted', 'nttOut', 'nttIn', 'staking', 'vote',
+      'xcm', 'xcmIn', 'xcmOutRemote', 'xcmExecuted', 'nttOut', 'nttIn', 'staking', 'bond', 'vote',
     ]
     const exactSeedSize = activitySourceSeedSize(want)
     const exactSourceLimits = Object.fromEntries(classifiedSourceKeys.map(key => [key, sourceValueFiltered ? exactSeedSize : fetchN])) as Record<ClassifiedSourceKey, number>
@@ -13878,7 +14021,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       })
     }
     for (;;) {
-      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, staking, votes] = await Promise.all([
+      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, staking, bonds, votes] = await Promise.all([
         needsFullClassification
           ? loadClassifiedSource('transfer', (sourceLimit, sourceFrom) => getRecentTransfers(sourceLimit, sourceFrom, to, 0, true, sourceFilters))
           : Promise.resolve([]),
@@ -13922,6 +14065,9 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
           ? loadClassifiedSource('staking', (sourceLimit, sourceFrom) => getRecentStaking(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
           : Promise.resolve([]),
         needsFullClassification
+          ? loadClassifiedSource('bond', (sourceLimit, sourceFrom) => getRecentBonds(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
+          : Promise.resolve([]),
+        needsFullClassification
           ? loadClassifiedSource('vote', (sourceLimit, sourceFrom) => getVoteFeedRows(sourceLimit, sourceFrom, to, 0, sourceFilters, withCollective))
           : Promise.resolve([]),
       ])
@@ -13942,11 +14088,13 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       // their transfer legs the same way trades/staking/mm do.
       const tradeExtrinsics = new Set(trades.filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
       const stakingExtrinsics = activityExtrinsicSet(staking)
+      const bondExtrinsics = activityExtrinsicSet(bonds)
       const mmExtrinsics = activityExtrinsicSet(mm)
       const otcExtrinsics = activityExtrinsicSet(otc)
       const userTransfers = sourceFilteredTransfers.filter(t =>
         !(t.extrinsicIndex != null && tradeExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+        !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !isModuleAcct(t.from) && !isModuleAcct(t.to))
@@ -13972,6 +14120,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         { key: 'reward', fetchSize: sourceFetchSize('reward'), rawSize: rewards.length, rows: rewards, oldest: oldestOf(rewards) },
         { key: 'liquidity', fetchSize: sourceFetchSize('liquidity'), rawSize: liquidity.length, rows: liquidity, oldest: oldestOf(liquidity) },
         { key: 'staking', fetchSize: sourceFetchSize('staking'), rawSize: staking.length, rows: staking, oldest: oldestOf(staking) },
+        { key: 'bond', fetchSize: sourceFetchSize('bond'), rawSize: bonds.length, rows: bonds, oldest: oldestOf(bonds) },
         { key: 'vote', fetchSize: sourceFetchSize('vote'), rawSize: votes.length, rows: votes.map(voteActivityRow), oldest: oldestOf(votes) },
         { key: 'mm', fetchSize: sourceFetchSize('mm'), rawSize: mm.length, rows: userMm, oldest: oldestOf(mm) },
         { key: 'otc', fetchSize: sourceFetchSize('otc'), rawSize: otc.length, rows: otc, oldest: oldestOf(otc) },
@@ -14060,6 +14209,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     else if (type === 'otc') rows = await getRecentOtc(fetchN, from, to, 0, filters, action)
     else if (type === 'xcm') rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters), getRecentXcmExecuted(fetchN, from, to, undefined, 0, filters), getRecentNttOut(fetchN, from, to, undefined, 0, filters), getRecentNttIn(fetchN, from, to, undefined, 0, filters)])).flat()
     else if (type === 'staking') rows = await getRecentStaking(fetchN, from, to, undefined, 0, filters, undefined, action)
+    else if (type === 'bond') rows = await getRecentBonds(fetchN, from, to, undefined, 0, filters, undefined, action)
     else rows = (await getVoteFeedRows(fetchN, from, to, 0, filters, withCollective)).map(voteActivityRow)
   } else if (type === 'liquidity') {
     rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'referral')).filter(r => r.type === 'liquidity')]
@@ -14071,6 +14221,8 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters), getRecentXcmExecuted(fetchN, from, to, undefined, 0, filters), getRecentNttOut(fetchN, from, to, undefined, 0, filters), getRecentNttIn(fetchN, from, to, undefined, 0, filters)])).flat()
   } else if (type === 'staking') {
     rows = await getRecentStaking(limit, from, to, undefined, offset, filters)
+  } else if (type === 'bond') {
+    rows = await getRecentBonds(limit, from, to, undefined, offset, filters)
   } else {
     rows = (await getVoteFeedRows(limit, from, to, offset, filters, withCollective)).map(voteActivityRow)
   }
@@ -15181,6 +15333,11 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       if (built) rows.push(built.row)
     }
 
+    for (const e of events.filter(ev => BOND_EVENT_NAMES.includes(ev.event_name))) {
+      const built = bondRowFromEvent(e, prices, { signerFallback: signer })
+      if (built) rows.push(built.row)
+    }
+
     const voteEvents = events.filter(e => e.event_name === 'ConvictionVoting.Voted' || e.event_name === 'Democracy.Voted')
     const convictionCalls = new Map<string, { ref: string | null; details: VoteDetails }>()
     const convictionCallInfos: { ref: string | null; details: VoteDetails }[] = []
@@ -15426,7 +15583,7 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
   const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
   const transferPlumbing = [...ammPoolAccounts(), ...(await mmReserveAccountIds())]
   const transferPlumbingList = transferPlumbing.length ? transferPlumbing.map(a => `'${a}'`).join(',') : "''"
-  const [swapRes, dcaRes, xcmInRows, xcmOutRemoteRows, stakingRes, transferRes, liquidityRes, mmRes, otcRes] = await Promise.all([
+  const [swapRes, dcaRes, xcmInRows, xcmOutRemoteRows, stakingRes, transferRes, liquidityRes, mmRes, otcRes, bondRes] = await Promise.all([
     client.query({
       query: `SELECT event_index, event_name, args_json, toString(block_timestamp) AS ts
               FROM price_data.raw_events
@@ -15527,6 +15684,16 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
       query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
               FROM price_data.raw_events
               WHERE block_height = {h:UInt32} AND extrinsic_index IS NULL AND event_name IN (${sqlEventNameList(OTC_EVENT_NAMES)})
+              ORDER BY event_index`,
+      query_params: { h: height },
+      format: 'JSONEachRow',
+    }),
+    // Extrinsic-less bond issues — Treasury bonds are issued by governance (a
+    // Dispatcher/Scheduler dispatch), so their Bonds.Issued lands in the hook phase.
+    client.query({
+      query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
+              FROM price_data.raw_events
+              WHERE block_height = {h:UInt32} AND extrinsic_index IS NULL AND event_name IN (${sqlEventNameList(BOND_EVENT_NAMES)})
               ORDER BY event_index`,
       query_params: { h: height },
       format: 'JSONEachRow',
@@ -15685,6 +15852,12 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
     }
   }
 
+  // Extrinsic-less bonds — the shared bondRowFromEvent builder, as everywhere else.
+  for (const e of await bondRes.json<RawBondActivityEvent>()) {
+    const built = bondRowFromEvent(e, prices)
+    if (built) rows.push(built.row)
+  }
+
   return rows
 }
 
@@ -15811,6 +15984,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     // already implies wantTransfers), plus its own `type=otc` request.
     const wantOtc = type === 'all' || type === 'otc' || wantTrades
     const wantStaking = type === 'all' || type === 'staking' || wantTransfers
+    const wantBonds = type === 'all' || type === 'bond' || wantTransfers
     const wantVotes = (type === 'all' || type === 'vote' || wantTransfers) && assetId === 0
 
     const transfersP: Promise<ActivityRow[]> = wantTransfers ? (async () => {
@@ -16199,6 +16373,9 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     })() : Promise.resolve([])
 
     const stakingP: Promise<ActivityRow[]> = wantStaking ? getRecentStaking(fetchN, from, to, undefined, 0, queryFilters, assetId) : Promise.resolve([])
+    // A bond row is reached from the bond's own page and from its underlying's
+    // (getRecentBonds admits either id).
+    const bondsP: Promise<ActivityRow[]> = wantBonds ? getRecentBonds(fetchN, from, to, undefined, 0, queryFilters, assetId) : Promise.resolve([])
     const rewardsP: Promise<ActivityRow[]> = (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')
       ? getRecentRewardClaims(fetchN, from, to, undefined, [assetId], undefined, undefined, fixedAssetFilters)
       : Promise.resolve([])
@@ -16210,20 +16387,22 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       ? getVoteFeedRows(fetchN, from, to, 0, queryFilters, collectiveVotesAdmitted(queryFilters)).then(rows => rows.map(voteActivityRow))
       : Promise.resolve([])
 
-    const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, staking, votes] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, xcmExecutedP, nttOutP, nttInP, mmP, otcP, stakingP, votesP])
+    const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, staking, bonds, votes] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, xcmExecutedP, nttOutP, nttInP, mmP, otcP, stakingP, bondsP, votesP])
     // Drop transfer legs of the asset's own trades (hops/fee legs share the extrinsic).
     const tradeExtrinsics = new Set(trades.filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
     const stakingExtrinsics = activityExtrinsicSet(staking)
+    const bondExtrinsics = activityExtrinsicSet(bonds)
     const mmExtrinsics = activityExtrinsicSet(mm)
     const otcExtrinsics = activityExtrinsicSet(otc)
     const userTransfers = transfers.filter(t =>
       !(t.extrinsicIndex != null && tradeExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+      !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)))
     const userTrades = dropShareRoutedTrades(trades, activityExtrinsicSet(liquidity))
     const userMm = mm.filter(r => !isModuleAcct(r.who))
-    let rows = await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc])
+    let rows = await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc])
     if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
     rows = rows.filter(r => activityRowMatchesAction(r, action))
     // The token key is meaningless here (the asset IS fixed); min applies the
@@ -16231,7 +16410,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
     rows = rows.filter(r => activityRowMatchesFilters(r, { ...filters, token: undefined }))
     rows.sort(compareActivityRowsNewestFirst)
-    const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, votes, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc]
+    const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, bonds, votes, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc]
       : type === 'transfer' ? [transfers]
         : type === 'trade' ? [trades, dcaFailures, otc]
           : type === 'liquidity' ? [liquidity, rewards]
@@ -16239,7 +16418,8 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
               : type === 'otc' ? [otc]
                 : type === 'xcm' ? [xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn]
                   : type === 'staking' ? [staking]
-                    : [votes]
+                    : type === 'bond' ? [bonds]
+                      : [votes]
     if (rows.length < want && saturationSources.some(source => source.length >= fetchN)) throw activityQueryTooBroad()
     const page = rows.slice(offset, offset + limit)
     await applyXcmJourneys(page)
@@ -17980,6 +18160,7 @@ interface EnumeratedActivity {
   dcaFailures: ActivityRow[]
   rewards: ActivityRow[]
   staking: ActivityRow[]
+  bonds: ActivityRow[]
   votes: ActivityRow[]
   xcm: ActivityRow[]
   // Wormhole NTT sends and arrivals — cross-chain rows like xcm's, kept as their own
@@ -17990,7 +18171,7 @@ interface EnumeratedActivity {
 // Every enumerated row. All of them are non-transfer, so a transfer feed needs each
 // one's extrinsic or hook owner to decide which transfers are its plumbing.
 function enumeratedActivityAll(e: EnumeratedActivity): ActivityRow[] {
-  return [...e.otc, ...e.dcaFailures, ...e.rewards, ...e.staking, ...e.votes, ...e.xcm, ...e.ntt]
+  return [...e.otc, ...e.dcaFailures, ...e.rewards, ...e.staking, ...e.bonds, ...e.votes, ...e.xcm, ...e.ntt]
 }
 
 // Which enumerated sources one type's feed needs. Exactly the `want*` flags
@@ -18003,7 +18184,7 @@ function enumeratedActivityAll(e: EnumeratedActivity): ActivityRow[] {
 // therefore produce the same array, as do `liquidity` and `mm` with their one. That is
 // why the cache key names the SOURCE SET rather than the type — two types that read the
 // same history share one entry instead of reading it twice under two names.
-const ENUMERATED_SOURCE_NAMES = ['otc', 'dcaFailures', 'rewards', 'staking', 'votes', 'xcm', 'ntt'] as const
+const ENUMERATED_SOURCE_NAMES = ['otc', 'dcaFailures', 'rewards', 'staking', 'bonds', 'votes', 'xcm', 'ntt'] as const
 type EnumeratedSourceName = typeof ENUMERATED_SOURCE_NAMES[number]
 function enumeratedSourceNeed(type: string): Record<EnumeratedSourceName, boolean> {
   const wantTransfers = type === 'all' || type === 'transfer'
@@ -18013,6 +18194,7 @@ function enumeratedSourceNeed(type: string): Record<EnumeratedSourceName, boolea
     // Referral claims render as liquidity, incentive claims as mm.
     rewards: type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm',
     staking: type === 'all' || type === 'staking' || wantTransfers,
+    bonds: type === 'all' || type === 'bond' || wantTransfers,
     votes: type === 'all' || type === 'vote' || wantTransfers,
     xcm: type === 'all' || type === 'xcm' || wantTransfers,
     ntt: type === 'all' || type === 'xcm' || wantTransfers,
@@ -18087,11 +18269,12 @@ async function enumeratedActivityRowsUncached(
   const depth = EXACT_SMALL_SOURCE_ROWS + 1
   const xcmDepth = EXACT_XCM_SOURCE_ROWS + 1
   const need = enumeratedSourceNeed(type)
-  const [otc, dcaFailures, rewards, staking, voteLegs, xcmLegs, nttLegs] = await Promise.all([
+  const [otc, dcaFailures, rewards, staking, bonds, voteLegs, xcmLegs, nttLegs] = await Promise.all([
     need.otc ? getRecentOtc(depth, from, to, 0, {}, undefined, accounts) : [],
     need.dcaFailures ? getRecentDcaFailures(depth, from, to, accounts) : [],
     need.rewards ? getRecentRewardClaims(depth, from, to, accounts) : [],
     need.staking ? getRecentStaking(depth, from, to, accounts, 0, {}, undefined, undefined) : [],
+    need.bonds ? getRecentBonds(depth, from, to, accounts, 0, {}, undefined, undefined) : [],
     // Two vote sources, each read to its own cap and landing in the one `votes`
     // slot the classifier expects: the indexed conviction/Democracy rows, and the
     // collective (Council / Technical Committee) votes out of raw_events. The
@@ -18116,13 +18299,13 @@ async function enumeratedActivityRowsUncached(
     ]) : [],
   ])
   const capped: [ActivityRow[], number][] = [
-    [otc, depth], [dcaFailures, depth], [rewards, depth], [staking, depth],
+    [otc, depth], [dcaFailures, depth], [rewards, depth], [staking, depth], [bonds, depth],
     ...voteLegs.map(leg => [leg, depth] as [ActivityRow[], number]),
     ...xcmLegs.map(leg => [leg, xcmDepth] as [ActivityRow[], number]),
     ...nttLegs.map(leg => [leg, depth] as [ActivityRow[], number]),
   ]
   if (capped.some(([rows, cap]) => rows.length >= cap)) return null
-  return { otc, dcaFailures, rewards, staking, votes: voteLegs.flat(), xcm: xcmLegs.flat(), ntt: nttLegs.flat() }
+  return { otc, dcaFailures, rewards, staking, bonds, votes: voteLegs.flat(), xcm: xcmLegs.flat(), ntt: nttLegs.flat() }
 }
 
 // Which types this path can count exactly, in the order the reasoning above splits
@@ -18135,7 +18318,7 @@ async function enumeratedActivityRowsUncached(
 // at once, which is sound because the families are disjoint — a row belongs to exactly
 // one of them.
 const EXACTLY_COUNTABLE_ACTIVITY_TYPES = new Set([
-  'all', 'transfer', 'trade', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'otc',
+  'all', 'transfer', 'trade', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'bond', 'otc',
 ])
 
 // Whether this request is paged by locating its ranks rather than by widening a
@@ -18459,6 +18642,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const wantOtc = type === 'all' || type === 'otc' || wantTrades
   const wantXcm = type === 'all' || type === 'xcm' || wantTransfers
   const wantStaking = type === 'all' || type === 'staking' || wantTransfers
+  const wantBonds = type === 'all' || type === 'bond' || wantTransfers
   const wantVotes = type === 'all' || type === 'vote' || wantTransfers
   // 1. The account's signed swaps. Signer scope and value predicates are joined
   // before LIMIT so a rare token/value match cannot sit beyond a signer window.
@@ -18903,6 +19087,9 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const staking = exact ? exact.enumerated.staking
     : wantStaking ? await getRecentStaking(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
   noteSource(staking.length, oldestWindowBlock(staking, r => r.blockHeight))
+  const bonds = exact ? exact.enumerated.bonds
+    : wantBonds ? await getRecentBonds(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
+  noteSource(bonds.length, oldestWindowBlock(bonds, r => r.blockHeight))
   const govVotes = exact || !wantVotes ? []
     : (await getRecentVotes(catFetch, from, to, 0, {}, accounts, queryFilters)).map(voteActivityRow)
   // Collective (Council / Technical Committee) votes are a source of their own,
@@ -18930,14 +19117,16 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   // trade — see toTradeRow). When a single category is requested, filter to it so
   // rare types (e.g. dca, mm) aren't starved out by the slice below.
   const stakingExtrinsics = activityExtrinsicSet(staking)
+  const bondExtrinsics = activityExtrinsicSet(bonds)
   const mmExtrinsics = activityExtrinsicSet(mmTx)
   const scopedTransfers = transfers.filter(t =>
     !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+    !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
     !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
     !(t.extrinsicIndex != null && liqCreateExt.has(`${t.blockHeight}:${t.extrinsicIndex}`)))
   const userTrades = dropShareRoutedTrades(trades, activityExtrinsicSet(liq))
   const userMm = mmTx.filter(r => !isModuleAcct(r.who))
-  let merged = await suppressActivityPlumbing([...userTrades, ...scopedTransfers, ...dcaTrades, ...rewards, ...liq, ...staking, ...voteRows, ...userMm, ...otc, ...xcm])
+  let merged = await suppressActivityPlumbing([...userTrades, ...scopedTransfers, ...dcaTrades, ...rewards, ...liq, ...staking, ...bonds, ...voteRows, ...userMm, ...otc, ...xcm])
   if (type && type !== 'all') merged = merged.filter(r => activityTypeMatchesFamily(r.type, type))
   merged = merged.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
   if (exact) {
@@ -23699,13 +23888,15 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
           : liquidityActionEventNames(filters.action)
       } else if (type === 'staking') {
         names = filters.action && STAKING_ACTION_EVENTS[filters.action] ? STAKING_ACTION_EVENTS[filters.action] : STAKING_EVENT_NAMES
+      } else if (type === 'bond') {
+        names = filters.action ? (BOND_ACTION_EVENTS[filters.action] ?? []) : BOND_EVENT_NAMES
       } else if (type === 'vote') names = VOTE_EVENTS
       else if (type === 'otc') {
         const otcAction = resolveOtcAction(filters.action)
         names = otcAction && OTC_ACTION_EVENTS[otcAction] ? OTC_ACTION_EVENTS[otcAction] : OTC_EVENT_NAMES
         ignoreToken = true
       } else {
-        names = [...TRANSFER_EVENTS, ...SWAP_EVENTS, ...LIQUIDITY_EVENTS, ...VOTE_EVENTS, ...STAKING_EVENT_NAMES, ...OTC_EVENT_NAMES]
+        names = [...TRANSFER_EVENTS, ...SWAP_EVENTS, ...LIQUIDITY_EVENTS, ...VOTE_EVENTS, ...STAKING_EVENT_NAMES, ...BOND_EVENT_NAMES, ...OTC_EVENT_NAMES]
       }
       const assetFilter = ignoreToken || tokenIds == null ? '' : !tokenIds.length
         ? 'AND 0'
@@ -23752,6 +23943,13 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
       } else if (type === 'staking') {
         const names = filters.action && STAKING_ACTION_EVENTS[filters.action] ? STAKING_ACTION_EVENTS[filters.action] : STAKING_EVENT_NAMES
         query = daily('raw_events', `event_name IN (${sqlNames(names)})${sp(stakingTok)}`)
+      } else if (type === 'bond') {
+        // The bond's own small table, filtered like the feed: by action (an event
+        // name) and by token (the bond id, or a bond whose underlying is the token).
+        const names = filters.action ? (BOND_ACTION_EVENTS[filters.action] ?? []) : BOND_EVENT_NAMES
+        const bondIds = bondIdsForTokens(tokenIds)
+        const bondTok = bondIds == null ? '' : bondIds.length ? `AND ${BOND_ASSET_SQL} IN (${bondIds.join(',')})` : 'AND 0'
+        query = daily('bond_activity', `${names.length ? `event_name IN (${sqlNames(names)})` : '0'}${sp(bondTok)}`)
       } else if (type === 'vote') {
         const side = filters.action === 'Aye' ? ` AND JSONExtractInt(args_json, 'vote', 'vote') >= 128`
           : filters.action === 'Nay' ? ` AND JSONExtractInt(args_json, 'vote', 'vote') < 128 AND JSONExtractString(args_json, 'vote', '__kind') = 'Standard'` : ''
@@ -23803,7 +24001,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
       } else {
         // 'all' — union of raw_events categories; OR each category's own token
         // predicate so the count mirrors the merged activity for the selected token.
-        const allEvents = sqlNames([...TRANSFER_EVENTS, ...SWAP_EVENTS, ...LIQUIDITY_EVENTS, ...VOTE_EVENTS, ...STAKING_EVENT_NAMES, ...OTC_EVENT_NAMES])
+        const allEvents = sqlNames([...TRANSFER_EVENTS, ...SWAP_EVENTS, ...LIQUIDITY_EVENTS, ...VOTE_EVENTS, ...STAKING_EVENT_NAMES, ...BOND_EVENT_NAMES, ...OTC_EVENT_NAMES])
         let where = `event_name IN (${allEvents})`
         if (tokenIds != null) {
           if (!tokenIds.length) where += ' AND 0'
@@ -23818,6 +24016,8 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
             ]
             if (tokenIds.includes(0) || tokenIds.includes(670)) parts.push(`(event_name IN (${sqlNames(STAKING_EVENT_NAMES)}))`)
             if (tokenIds.includes(0)) parts.push(`(event_name IN (${sqlNames(VOTE_EVENTS)}))`)
+            const bondIds = bondIdsForTokens(tokenIds)
+            if (bondIds?.length) parts.push(`(event_name IN (${sqlNames(BOND_EVENT_NAMES)}) AND ${BOND_ASSET_SQL} IN (${bondIds.join(',')}))`)
             where += ` AND (${parts.join(' OR ')})`
           }
         }

@@ -809,6 +809,7 @@ export function activityPath(row: ActivityRow): string {
               : row.liqAction === 'ClaimReferral' ? 'claim-referral-rewards' : 'add-liquidity'
       case 'mm': return MM_SLUG[row.mmAction ?? ''] ?? 'lend'
       case 'staking': return 'staking'
+      case 'bond': return row.bondAction === 'Redeem' ? 'bond-redeem' : 'bond-issue'
       case 'vote': return 'vote'
       case 'otc': return row.otcAction === 'Pull' ? 'otc-pull' : row.otcAction === 'Fill' ? 'otc-fill' : 'otc-place'
       default: return 'transfer'
@@ -826,13 +827,14 @@ const MM_SLUG: Record<string, string> = {
 
 const ACTIVITY_LABEL: Record<ActivityRow['type'], string> = {
   transfer: 'Transfer', trade: 'Swap', xcm: 'Cross-chain', liquidity: 'Liquidity',
-  mm: 'Money market', dca: 'DCA', staking: 'Staking', vote: 'Vote', otc: 'OTC',
+  mm: 'Money market', dca: 'DCA', staking: 'Staking', vote: 'Vote', otc: 'OTC', bond: 'Bond',
 }
 function activityHeadline(row: ActivityRow): string {
   if (row.type === 'liquidity' && row.liqAction === 'ClaimReferral') return 'Claim referral rewards'
   if (row.type === 'liquidity' && row.liqAction) return `${row.liqAction} liquidity`
   if (row.type === 'mm' && row.mmAction) return row.mmAction
   if (row.type === 'otc' && row.otcAction) return `OTC ${row.otcAction.toLowerCase()}`
+  if (row.type === 'bond' && row.bondAction) return `Bond ${row.bondAction.toLowerCase()}`
   if (row.type === 'trade' && row.dca) return 'DCA swap'
   return ACTIVITY_LABEL[row.type]
 }
