@@ -109,7 +109,8 @@ describe('Hollar dashboard page', () => {
     expect(html).toContain('aUSDC')
     expect(html).toContain('sUSDe')
     expect(html).toContain('HOLLAR / USDC + USDT')
-    expect(html).toContain('Balanced ≈ 33.3%')
+    // The share reads on its own; the "balanced ≈ N%" reference was dropped.
+    expect(html).not.toContain('balanced ≈')
   })
 
   it('charts the stability module reserves, one band per collateral it has held', () => {
