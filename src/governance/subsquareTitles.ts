@@ -56,7 +56,13 @@ function decodeEntities(text: string): string {
 // platform"), so a naive parse would store that junk as ref 9999's name — the same
 // absent-value-looks-real trap that made a missing DCA order read as HDX->HDX.
 // Anything that is only the site's own branding is therefore not a title.
-const GENERIC_TITLE = /^\s*subsquare\b|governance\s+platform\s*$/i
+//
+// The platform's NAME is only branding when it is the whole title. SubSquare funds
+// its own upkeep through Hydration governance, so "Subsquare maintenance proposal
+// for hydration <year>" is a real referendum title — one per year (2, 238, 401) —
+// and a prefix test discarded all three every cycle. The branding is still caught
+// by its tail, which is what the live site actually returns for a missing post.
+const GENERIC_TITLE = /^\s*subsquare\s*$|governance\s+platform\s*$/i
 
 export function parseSubsquareTitle(html: string): string | null {
   const match = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)
