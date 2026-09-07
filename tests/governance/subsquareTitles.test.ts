@@ -40,6 +40,17 @@ describe('parseSubsquareTitle', () => {
     expect(parseSubsquareTitle('<title>Hydration governance platform</title>')).toBeNull()
   })
 
+  // ...but the platform's name is branding only when it is the WHOLE title.
+  // SubSquare funds its own upkeep through Hydration governance, so these are real
+  // referenda — 2, 238 and 401, one per year — and a prefix test dropped every one
+  // of them while the fetcher re-requested them forever.
+  it('keeps a real title that opens with the platform name', () => {
+    expect(parseSubsquareTitle('<title data-next-head="">Subsquare maintenance proposal for hydration 2026</title>'))
+      .toBe('Subsquare maintenance proposal for hydration 2026')
+    expect(parseSubsquareTitle('<title>SubSquare maintenance proposal for hydration 2024</title>'))
+      .toBe('SubSquare maintenance proposal for hydration 2024')
+  })
+
   it('decodes the entities SubSquare emits', () => {
     expect(parseSubsquareTitle('<title>Increase vDOT supply cap &amp; other parameter changes</title>'))
       .toBe('Increase vDOT supply cap & other parameter changes')
