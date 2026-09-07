@@ -216,9 +216,6 @@ function poolLabel(p: HollarPool): string {
   return 'HOLLAR / ' + p.partners.map(pt => pt.asset.symbol).join(' + ')
 }
 function PoolCard({ p }: { p: HollarPool }) {
-  // 50% balance only holds for a 2-asset pool — for N partners the balanced
-  // reference is 100/(N+1)% for HOLLAR plus N partner assets.
-  const balancedPct = 100 / (p.partners.length + 1)
   // Each segment uses its token's icon-sampled brand color (central useAssetColors),
   // so a pool's composition reads by asset — consistent with the icons/legend — and
   // every asset (incl. ones with no curated color) gets its real hue automatically.
@@ -240,10 +237,7 @@ function PoolCard({ p }: { p: HollarPool }) {
     <Link to={paths.pool(p.poolId)} className="hdx-card hdx-card-link" style={{ gap: 10 }} ariaLabel={`${poolLabel(p)} pool`}>
       <div className="hk" style={{ flexWrap: 'wrap', rowGap: 2 }}><span>{poolLabel(p)}</span><span className="cap">{F.usd(p.tvlUsd)} TVL</span></div>
       <ShareBar segments={segs} h={26} />
-      <div className="hs">
-        HOLLAR {p.hollarSharePct != null ? p.hollarSharePct.toFixed(1) + '%' : '—'}
-        <span className="muted" title={`Balanced ≈ ${balancedPct.toFixed(1)}% for a ${p.partners.length + 1}-asset pool`}> (balanced ≈ {balancedPct.toFixed(1)}%)</span>
-      </div>
+      <div className="hs">HOLLAR {p.hollarSharePct != null ? p.hollarSharePct.toFixed(1) + '%' : '—'}</div>
       <div className="hs">{p.partners.map((pt, i) => <span key={i}>{i > 0 && ' · '}<AssetAmount asset={pt.asset} formatted={fmtAmt(pt.amount)} link={false} /></span>)}</div>
     </Link>
   )
