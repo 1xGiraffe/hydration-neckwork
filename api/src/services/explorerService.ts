@@ -1725,6 +1725,10 @@ function activityHistPick(r: ActivityRow): HistPick {
   // Create rows already carry their combined BLOCK-TIME value (both seed legs, see
   // enrichPoolCreations); Destroy rows carry no value at all by construction.
   if (r.type === 'liquidity' && (r.liqAction === 'Create' || r.liqAction === 'Destroy')) return null
+  // An intent row is valued on its IN leg — what the order holds (Place/Cancel/
+  // Expire) or what a fill took — the leg its SQL value mirror (getRecentIntents)
+  // judges; its OUT leg is a limit the order may never reach.
+  if (r.type === 'intent') return r.assetIn && r.amountIn != null ? { assetId: r.assetIn.assetId, decimals: r.assetIn.decimals, raw: r.amountIn, ts: r.timestamp } : null
   if (r.assetOut && r.amountOut != null) return { assetId: r.assetOut.assetId, decimals: r.assetOut.decimals, raw: r.amountOut, ts: r.timestamp }
   if (r.asset && r.amount != null) return { assetId: r.asset.assetId, decimals: r.asset.decimals, raw: r.amount, ts: r.timestamp }
   return null
@@ -2590,6 +2594,10 @@ export interface ExtrinsicDetail extends ExtrinsicSummary {
   // The Ethereum-native identity and outcome of an `Ethereum.transact`
   // extrinsic; absent on every other call. Additive.
   evmTx?: EvmTransactionFacts
+  // What an `ICE.submit_solution` settled: its fills, the pot's routing trades and
+  // the fee it swept. Present only for that call, and only once its
+  // ICE.SolutionExecuted event is indexed. Additive.
+  iceSolution?: IceSolutionPanel
 }
 
 // What the Ethereum.Executed event states about the transaction its extrinsic
@@ -2682,6 +2690,7 @@ async function hydrateExtrinsicDetail(row: ExtrinsicDetailRow): Promise<Extrinsi
   const evmCalls = await decodeEvmCallSites(row.call_name, callArgs)
   const evmTx = evmTransactionFacts(events)
   const feePayment = feePaymentOf(events, row.signer, row.fee, row.tip)
+  const iceSolution = row.call_name === 'ICE.submit_solution' ? await iceSolutionPanel(row.block_height, row.extrinsic_index, row.ts, events) : null
 
   return {
     blockHeight: row.block_height,
@@ -2701,6 +2710,7 @@ async function hydrateExtrinsicDetail(row: ExtrinsicDetailRow): Promise<Extrinsi
     ...(feePayment ? { feePayment } : {}),
     ...(evmCalls.length ? { evmCalls } : {}),
     ...(evmTx ? { evmTx } : {}),
+    ...(iceSolution ? { iceSolution } : {}),
   }
 }
 
@@ -6754,6 +6764,11 @@ interface ActiveDcaScheduleRow {
   amt_per: string; total: string; period: number
 }
 
+// The events after which a schedule no longer runs. Runtime 443 added two: a live
+// schedule is converted into a DCA intent (Migrated) or, when it cannot be, ended
+// with its remainder refunded (MigrationCancelled). Either one leaves the live lists.
+const DCA_ENDED_EVENTS_SQL = "'DCA.Completed','DCA.Terminated','DCA.Migrated','DCA.MigrationCancelled'"
+
 async function getActiveDcas(accounts: string[]): Promise<ActiveDca[]> {
   const list = sqlAccountList(accounts)
   if (list === "''") return []
@@ -6765,7 +6780,7 @@ async function getActiveDcas(accounts: string[]): Promise<ActiveDca[]> {
               FROM price_data.dca_schedules
               WHERE who IN (${list})
                 AND id NOT IN (
-                  SELECT id FROM price_data.dca_events WHERE event_name IN ('DCA.Completed','DCA.Terminated')
+                  SELECT id FROM price_data.dca_events WHERE event_name IN (${DCA_ENDED_EVENTS_SQL})
                 )
               ORDER BY block_height DESC`,
       format: 'JSONEachRow',
@@ -6853,7 +6868,7 @@ export async function getAssetDcas(assetId: number): Promise<AssetDcas> {
               FROM price_data.dca_schedules FINAL
               WHERE (asset_in = {id:UInt32} OR asset_out = {id:UInt32})
                 AND id NOT IN (
-                  SELECT id FROM price_data.dca_events WHERE event_name IN ('DCA.Completed','DCA.Terminated')
+                  SELECT id FROM price_data.dca_events WHERE event_name IN (${DCA_ENDED_EVENTS_SQL})
                 )
               ORDER BY block_height DESC`,
       query_params: { id: assetId }, format: 'JSONEachRow',
@@ -6874,7 +6889,7 @@ async function countAssetDcas(assetId: number): Promise<number> {
             FROM price_data.dca_schedules
             WHERE (asset_in = {id:UInt32} OR asset_out = {id:UInt32})
               AND id NOT IN (
-                SELECT id FROM price_data.dca_events WHERE event_name IN ('DCA.Completed','DCA.Terminated')
+                SELECT id FROM price_data.dca_events WHERE event_name IN (${DCA_ENDED_EVENTS_SQL})
               )`,
     query_params: { id: assetId }, format: 'JSONEachRow',
   })
@@ -8953,7 +8968,7 @@ export interface XcmFeeLeg {
 
 // unified activity
 export interface ActivityRow {
-  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond'
+  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond' | 'intent'
   blockHeight: number
   timestamp: string
   eventIndex?: number | null
@@ -8988,6 +9003,17 @@ export interface ActivityRow {
   // The asset the bond was issued against and redeems for (null when the bond
   // registry has no entry for it yet).
   bondUnderlying?: AssetRef | null
+  // ICE intents (limit orders and DCA intents). `intentId` is the u128 as a decimal
+  // string; `intentSeq` is its low 64 bits — the short "#n" handle the UI shows.
+  intentId?: string
+  intentSeq?: number
+  intentKind?: 'swap' | 'dca'
+  intentAction?: IntentAction
+  intentPartial?: boolean
+  intentDeadline?: string | null
+  intentRemainingBudget?: string | null
+  intentMigratedFrom?: number | null
+  intentForward?: string | null
   votePallet?: string
   // Referendum identity for the row's link, plus the off-chain title. Set only for
   // ConvictionVoting/Democracy rows: Council and Technical Committee votes are not
@@ -9245,10 +9271,10 @@ export function compareActivityRowsNewestFirst(a: ActivityRow, b: ActivityRow): 
 // A stable numeric rank per row family, so a tie on (block, event, extrinsic)
 // still resolves identically every time the feed is built.
 const ACTIVITY_KIND_RANK: Record<string, number> = {
-  trade: 0, otc: 1, liquidity: 2, mm: 3, xcm: 4, staking: 5, bond: 6, vote: 7, transfer: 8,
+  trade: 0, otc: 1, liquidity: 2, mm: 3, xcm: 4, staking: 5, intent: 6, bond: 7, vote: 8, transfer: 9,
 }
 function activityKindRank(r: ActivityRow): number {
-  return ACTIVITY_KIND_RANK[r.type] ?? 9
+  return ACTIVITY_KIND_RANK[r.type] ?? 10
 }
 
 // Pair rows that belong together by ADJACENCY rather than by a shared key, when the
@@ -12472,6 +12498,495 @@ async function getRecentOtc(limit: number, from?: string, to?: string, offset = 
   })
 }
 
+// ---------------------------------------------------------------------------
+// ICE intents. A swap intent is the product's "limit order"; a dca intent is the
+// new DCA. Only Intent.IntentSubmitted names the owner and the assets — every
+// later event carries the id alone — so orders live in intent_orders and are
+// joined at request time. Fills happen inside the unsigned ICE.submit_solution.
+// ---------------------------------------------------------------------------
+export const ICE_POT_ACCOUNT = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
+export const ICE_FEE_ACCOUNT = '0x6d6f646c6963655f666565230000000000000000000000000000000000000000'
+export type IntentAction = 'Place' | 'Fill' | 'PartialFill' | 'DcaTrade' | 'Cancel' | 'Expire'
+// The partial-resolution event is spelled `IntentResovedPartially` on chain (sic).
+export const INTENT_EVENT_NAMES = ['Intent.IntentSubmitted', 'Intent.IntentResolved', 'Intent.IntentResovedPartially', 'Intent.IntentCanceled', 'Intent.IntentExpired', 'Intent.DcaTradeExecuted']
+export const INTENT_ACTION_EVENTS: Record<IntentAction, string[]> = {
+  Place: ['Intent.IntentSubmitted'], Fill: ['Intent.IntentResolved'], PartialFill: ['Intent.IntentResovedPartially'],
+  DcaTrade: ['Intent.DcaTradeExecuted'], Cancel: ['Intent.IntentCanceled'], Expire: ['Intent.IntentExpired'],
+}
+const INTENT_EVENT_ACTION: Record<string, IntentAction> = Object.fromEntries(
+  Object.entries(INTENT_ACTION_EVENTS).flatMap(([a, names]) => names.map(n => [n, a as IntentAction])),
+)
+// The UI's action dropdown sends hyphenated slugs (`intent-fill` covers both the
+// full and the partial resolution); the bare action words are accepted too.
+const INTENT_ACTION_ALIASES: Record<string, IntentAction[]> = {
+  'intent-place': ['Place'], 'intent-fill': ['Fill', 'PartialFill'], 'intent-dca-trade': ['DcaTrade'],
+  'intent-cancel': ['Cancel'], 'intent-expire': ['Expire'],
+}
+export function resolveIntentActions(action?: string): IntentAction[] | undefined {
+  if (!action) return undefined
+  // Own-property tests on both maps: a plain lookup or `in` would admit prototype
+  // keys (`toString`, `constructor`) as actions.
+  const own = (map: object): boolean => Object.prototype.hasOwnProperty.call(map, action)
+  if (own(INTENT_ACTION_ALIASES)) return INTENT_ACTION_ALIASES[action]
+  return own(INTENT_ACTION_EVENTS) ? [action as IntentAction] : undefined
+}
+
+export interface IntentOrder {
+  intentId: string; seq: number; owner: string; kind: 'swap' | 'dca'
+  assetIn: number; assetOut: number; amountIn: string; amountOut: string
+  partial: boolean; partialMin: string | null; slippagePpm: number; budget: string | null; period: number
+  deadlineMs: number | null; forwardContract: string | null
+  blockHeight: number; extrinsicIndex: number | null; timestamp: string
+}
+export interface IntentActivityParts {
+  action: IntentAction; intentId: string; owner: string | null
+  amountIn: string | null; amountOut: string | null; remainingBudget: string | null
+}
+// u128 ids arrive as strings, small test ids as numbers; amounts likewise.
+function intentNum(v: unknown): string | null {
+  if (typeof v === 'string' && /^\d+$/.test(v)) return v
+  if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return BigInt(Math.trunc(v)).toString()
+  if (typeof v === 'bigint' && v >= 0n) return v.toString()
+  return null
+}
+// The low 64 bits of the u128 id — the short "#n" handle the UI shows. A JS number
+// holds it exactly only below 2^53; above that it is a rounded DISPLAY handle and
+// never a key — the decimal-string `intentId` is the identity everywhere.
+export function intentSeqOf(intentId: string): number {
+  return Number(BigInt(intentId) & 0xffffffffffffffffn)
+}
+export function intentActivityParts(eventName: string, args: Record<string, unknown>): IntentActivityParts | null {
+  const action = INTENT_EVENT_ACTION[eventName]
+  if (!action) return null
+  const intentId = intentNum(args.id)
+  if (intentId == null) return null
+  if (action === 'Place') {
+    const intent = args.intent as { data?: { value?: Record<string, unknown> } } | undefined
+    const v = intent?.data?.value ?? {}
+    const owner = typeof args.owner === 'string' && ACCOUNT_RE.test(args.owner) ? args.owner : null
+    return { action, intentId, owner, amountIn: intentNum(v.amountIn), amountOut: intentNum(v.amountOut), remainingBudget: null }
+  }
+  return {
+    action, intentId, owner: null,
+    amountIn: intentNum(args.amountIn), amountOut: intentNum(args.amountOut),
+    remainingBudget: action === 'DcaTrade' ? intentNum(args.remainingBudget) : null,
+  }
+}
+
+export type RawIntentOrderRow = {
+  intent_id: string; seq: string | number; owner: string; kind: string; asset_in: number; asset_out: number
+  amount_in: string; amount_out: string; partial: number; partial_min: string; slippage_ppm: number; budget: string
+  period: number; deadline_ms: string | number; forward_contract: string; block_height: number; extrinsic_index: number | null; ts: string
+}
+export function intentOrderFromRow(r: RawIntentOrderRow): IntentOrder {
+  // `seq` is the u64 low half of the id as a JS number: exact only below 2^53, a
+  // rounded display handle above it, never a key (`intentId` is the identity).
+  return {
+    intentId: String(r.intent_id), seq: Number(r.seq), owner: r.owner, kind: r.kind === 'dca' ? 'dca' : 'swap',
+    assetIn: Number(r.asset_in), assetOut: Number(r.asset_out), amountIn: r.amount_in, amountOut: r.amount_out,
+    partial: Number(r.partial) === 1, partialMin: r.partial_min || null, slippagePpm: Number(r.slippage_ppm),
+    budget: r.budget || null, period: Number(r.period), deadlineMs: Number(r.deadline_ms) > 0 ? Number(r.deadline_ms) : null,
+    forwardContract: r.forward_contract || null, blockHeight: Number(r.block_height), extrinsicIndex: r.extrinsic_index, timestamp: r.ts,
+  }
+}
+// Orders are immutable once placed, so a resolved order can be memoised for the
+// process lifetime; a miss is re-queried (the order may simply not be indexed yet).
+const intentOrderMemo = new Map<string, IntentOrder>()
+export async function getIntentOrders(ids: string[]): Promise<Map<string, IntentOrder>> {
+  const out = new Map<string, IntentOrder>()
+  const missing: string[] = []
+  for (const id of new Set(ids)) {
+    if (!/^\d+$/.test(id)) continue
+    const hit = intentOrderMemo.get(id)
+    if (hit) out.set(id, hit); else missing.push(id)
+  }
+  if (missing.length) {
+    // The key predicate sits on the inner relation: `toString(intent_id) AS intent_id`
+    // in the same statement would capture a `WHERE intent_id IN …` (ClickHouse
+    // resolves the later reference to the alias) and compare strings to u128s.
+    const res = await client.query({
+      query: `SELECT toString(intent_id) AS intent_id, seq, owner, kind, asset_in, asset_out, amount_in, amount_out, partial, partial_min, slippage_ppm, budget, period, deadline_ms, forward_contract, block_height, extrinsic_index, toString(block_timestamp) AS ts
+              FROM (
+                SELECT intent_id, seq, owner, kind, asset_in, asset_out, amount_in, amount_out, partial, partial_min, slippage_ppm, budget, period, deadline_ms, forward_contract, block_height, block_timestamp, extrinsic_index
+                FROM price_data.intent_orders FINAL
+                WHERE intent_id IN (${missing.map(id => `toUInt128('${id}')`).join(',')})
+              )`,
+      format: 'JSONEachRow',
+    })
+    for (const r of await res.json<RawIntentOrderRow>()) {
+      const o = intentOrderFromRow(r)
+      intentOrderMemo.set(o.intentId, o)
+      out.set(o.intentId, o)
+    }
+  }
+  return out
+}
+
+export type RawIntentEvent = { block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; args_json: string }
+// Per-event → ActivityRow construction shared by every intent surface (mirrors
+// otcRowFromEvent). `orders` supplies the actor and the pair for every event after
+// the placement; `signerFallback` names the actor only when neither the event nor
+// its order does.
+export function intentRowFromEvent(
+  e: RawIntentEvent,
+  prices: Map<number, PriceInfo>,
+  orders: Map<string, IntentOrder>,
+  opts: { signerFallback?: string | null } = {},
+): { row: ActivityRow; intentId: string; owner: string | null } | null {
+  const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
+  const parts = intentActivityParts(e.event_name, args)
+  if (!parts) return null
+  const order = orders.get(parts.intentId) ?? null
+  // A placement is self-describing; every other row needs its order for the
+  // actor and the pair. A row whose order is unknown still renders its amounts.
+  const placed = parts.action === 'Place' ? (args.intent as { data?: { __kind?: string; value?: Record<string, unknown> }; deadline?: unknown; onResolved?: { value?: { contract?: string } } | null } | undefined) : undefined
+  const kind: 'swap' | 'dca' | undefined = order?.kind ?? (placed?.data?.__kind === 'Dca' ? 'dca' : placed?.data?.__kind === 'Swap' ? 'swap' : undefined)
+  const assetInId = order?.assetIn ?? (placed ? Number(placed.data?.value?.assetIn) : NaN)
+  const assetOutId = order?.assetOut ?? (placed ? Number(placed.data?.value?.assetOut) : NaN)
+  const aIn = Number.isFinite(assetInId) ? asset(assetInId) : null
+  const aOut = Number.isFinite(assetOutId) ? asset(assetOutId) : null
+  const owner = parts.owner ?? order?.owner ?? (opts.signerFallback && ACCOUNT_RE.test(opts.signerFallback) ? opts.signerFallback : null)
+  // Fills carry realized amounts; Place/Cancel/Expire show the order's limits.
+  const amountIn = parts.amountIn ?? order?.amountIn ?? null
+  const amountOut = parts.amountOut ?? order?.amountOut ?? null
+  const deadlineMs = order?.deadlineMs ?? (placed ? Number(intentNum(placed.deadline) ?? 0) || null : null)
+  const partial = order?.partial ?? (placed ? (placed.data?.value?.partial as { __kind?: string } | undefined)?.__kind === 'Yes' : undefined)
+  const forward = order?.forwardContract ?? placed?.onResolved?.value?.contract ?? null
+  const row: ActivityRow = {
+    type: 'intent', blockHeight: e.block_height, timestamp: e.ts, eventIndex: e.event_index, extrinsicIndex: e.extrinsic_index,
+    who: owner ? accountRef(owner) : null, to: null, asset: null, assetIn: aIn, assetOut: aOut,
+    amount: null, amountIn, amountOut,
+    valueUsd: aIn && amountIn ? usdValue(prices, aIn.assetId, amountIn, aIn.decimals) : null,
+    ...(aIn && aOut ? { assetRefs: [aIn.assetId, aOut.assetId] } : {}),
+    intentId: parts.intentId, intentSeq: intentSeqOf(parts.intentId), intentKind: kind, intentAction: parts.action,
+    intentPartial: partial, intentDeadline: deadlineMs ? new Date(deadlineMs).toISOString() : null,
+    intentRemainingBudget: parts.remainingBudget, intentForward: forward,
+    linkBlock: e.block_height, linkIndex: e.extrinsic_index,
+  }
+  return { row, intentId: parts.intentId, owner }
+}
+
+// SQL mirrors for the value push-down. The feed's valued asset is the order's
+// asset_in, which lives in intent_orders, and its amount is the event's own
+// realized amount_in (fills, DCA trades) or else the order's (Place/Cancel/Expire)
+// — the choice intentRowFromEvent makes. eventValueFilterSql builds its ASOF join
+// and predicate from bare column expressions, so the events ⟕ orders join is
+// wrapped in a subquery that exposes these as plain columns and the value filter
+// is applied outside it. An event whose order is not indexed gets the join's
+// defaults ('' / 0, and 0 is HDX), so `owner != ''` gates every order-derived
+// predicate: such a row has no pair and no value, exactly as its built row has.
+const INTENT_ASSET_SQL = 'asset_in'
+const INTENT_AMOUNT_SQL = 'amount_in_eff'
+const INTENT_HAS_AMOUNT_SQL = `(owner != '' AND amount_in_eff != '')`
+type RawIntentFeedEvent = RawIntentEvent & { intent_id: string }
+// Windowed intent feed — the shape of getRecentBonds over intent_events joined to
+// intent_orders. Action, account, token/asset and USD-minimum predicates are pushed
+// into SQL; the built rows are re-checked with the same predicates so the event-time
+// valuation and the displayed row agree. Two filters are decided on the built row
+// alone and so walk history like every other row-level filter: `identity`, and a
+// token-unit floor, which activityRowMatchesFilters judges on the row's OUT-first
+// leg — a single-leg SQL mirror would under-admit it.
+export async function getRecentIntents(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}, assetId?: number, action?: string): Promise<ActivityRow[]> {
+  const tw = timeWindow(from, to)
+  const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
+  // Every supplied account malformed degrades the list to "''", and '' is exactly the
+  // owner the LEFT JOIN gives an event whose order is unknown — so that list would
+  // select the orphan rows rather than nothing (mirrors getActiveDcas).
+  if (acctList === "''") return []
+  return cached(`explorer:intent-activity:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${assetId ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+    const prices = await ensurePrices()
+    const actions = resolveIntentActions(action)
+    if (action && !actions) return []
+    const names = (actions ? actions.flatMap(a => INTENT_ACTION_EVENTS[a]) : INTENT_EVENT_NAMES).map(n => `'${n}'`).join(',')
+    // A token or asset filter matches either side of the order's pair.
+    const pairSql = (ids: number[]) => ids.length ? `AND owner != '' AND (asset_in IN (${ids.join(',')}) OR asset_out IN (${ids.join(',')}))` : 'AND 0'
+    const tokenIds = assetIdsForToken(filters.token)
+    const pushValue = filters.min != null && filters.unit !== 'token'
+    const valueFilter = pushValue
+      ? eventValueFilterSql(INTENT_ASSET_SQL, INTENT_AMOUNT_SQL, 'block_timestamp', filters, prices, 'intent_price', { hasAmountExpr: INTENT_HAS_AMOUNT_SQL })
+      : { joinSql: '', predicateSql: '' }
+    const rowFilter = [
+      acctList ? `AND owner != '' AND owner IN (${acctList})` : '',
+      assetId != null ? pairSql(Number.isInteger(assetId) && assetId >= 0 ? [assetId] : []) : '',
+      tokenIds ? pairSql(tokenIds) : '',
+      valueFilter.predicateSql,
+    ].join(' ')
+    const run = async (bound: string, pageLimit: number, pageOffset: number) => {
+      const res = await client.query({
+        query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json, toString(intent_id) AS intent_id
+                FROM (
+                  SELECT ie.block_height AS block_height, ie.block_timestamp AS block_timestamp, ie.event_index AS event_index, ie.extrinsic_index AS extrinsic_index,
+                         ie.event_name AS event_name, ie.args_json AS args_json, ie.intent_id AS intent_id,
+                         o.owner AS owner, o.asset_in AS asset_in, o.asset_out AS asset_out,
+                         if(ie.amount_in != '', ie.amount_in, o.amount_in) AS amount_in_eff
+                  FROM (
+                    SELECT intent_id, block_height, block_timestamp, event_index, extrinsic_index, event_name, args_json, amount_in
+                    FROM price_data.intent_events FINAL
+                    WHERE ${bound} AND event_name IN (${names})
+                  ) AS ie
+                  LEFT JOIN (
+                    SELECT intent_id, owner, asset_in, asset_out, amount_in FROM price_data.intent_orders FINAL
+                  ) AS o ON o.intent_id = ie.intent_id
+                ) AS x
+                ${valueFilter.joinSql}
+                WHERE 1 ${rowFilter}
+                ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
+        query_params: { limit: pageLimit, offset: pageOffset }, format: 'JSONEachRow',
+      })
+      return res.json<RawIntentFeedEvent>()
+    }
+    const build = async (raw: RawIntentFeedEvent[]) => {
+      const orders = await getIntentOrders(raw.map(r => r.intent_id))
+      const rows = raw.map(r => intentRowFromEvent(r, prices, orders)?.row).filter((r): r is ActivityRow => r != null)
+      await applyHistoricalUsd(rows, activityHistPick)
+      return rows
+    }
+    if (filters.identity != null || (filters.min != null && !pushValue)) {
+      const want = offset + limit
+      const deep = await fetchFilteredDeep(tw, want, async (b, pageLimit) => build(await run(b, pageLimit, 0)),
+        r => activityRowMatchesFilters(r, filters), r => r.blockHeight, r => r.eventIndex ?? -1, r => `${r.blockHeight}:${r.eventIndex}`)
+      return deep.slice(offset, offset + limit)
+    }
+    return (await build(await run(tw ?? '1', limit, offset))).filter(r => activityRowMatchesFilters(r, filters))
+  })
+}
+
+// ---------------------------------------------------------------------------
+// One intent's order page. The order row is immutable; everything else is read
+// from intent_events keyed by the intent id (FINAL: the table replaces on
+// ingested_at) — the short lifecycle in full, the fills paged, and the totals
+// summed in SQL so a long-running DCA intent never streams every trade to sum it.
+// ---------------------------------------------------------------------------
+export type IntentOrderStatus = 'open' | 'partially-filled' | 'filled' | 'completed' | 'cancelled' | 'expired'
+export interface IntentOrderDetail {
+  order: IntentOrder; owner: AccountRef | null; assetIn: AssetRef; assetOut: AssetRef; status: IntentOrderStatus
+  filledIn: string; filledOut: string; fills: ActivityRow[]; fillsTotal: number
+  dca: { remainingBudget: string | null; lastExecutionBlock: number | null; nextEligibleBlock: number | null } | null
+  callbacks: { queueId: string; queuedAt: { block: number; extrinsicIndex: number | null; timestamp: string }; fees: string | null; executed: { block: number; result: 'ok' | 'error'; error: string | null } | null }[]
+  migratedFrom: number | null
+  limitPriceOutPerIn: string | null   // amountOut/amountIn as decimal string (12 dp), swap intents only
+  links: { submission: { block: number; extrinsicIndex: number | null }; solutions: { block: number; extrinsicIndex: number | null }[] }
+}
+// `events` = the lifecycle event names in chain order. A cancel or an expiry is
+// terminal whatever came before it; a DCA intent is open until DcaCompleted.
+export function intentOrderStatus(kind: 'swap' | 'dca', events: string[]): IntentOrderStatus {
+  if (events.includes('Intent.IntentCanceled')) return 'cancelled'
+  if (events.includes('Intent.IntentExpired')) return 'expired'
+  if (kind === 'dca') return events.includes('Intent.DcaCompleted') ? 'completed' : 'open'
+  if (events.includes('Intent.IntentResolved')) return 'filled'
+  if (events.includes('Intent.IntentResovedPartially')) return 'partially-filled'
+  return 'open'
+}
+const INTENT_FILL_EVENTS = ['Intent.IntentResolved', 'Intent.IntentResovedPartially', 'Intent.DcaTradeExecuted']
+const LIMIT_PRICE_DP = 12
+// The order's limit as OUT per IN in whole units — out/10^dOut ÷ in/10^dIn, carried
+// to 12 decimal places in integer arithmetic (truncated, never rounded). Null for a
+// zero or unreadable input amount.
+export function limitPriceOutPerIn(amountIn: string, decimalsIn: number, amountOut: string, decimalsOut: number): string | null {
+  if (!/^\d+$/.test(amountIn) || !/^\d+$/.test(amountOut)) return null
+  const inRaw = BigInt(amountIn)
+  if (inRaw === 0n) return null
+  const scaled = BigInt(amountOut) * 10n ** BigInt(decimalsIn + LIMIT_PRICE_DP) / (inRaw * 10n ** BigInt(decimalsOut))
+  const digits = scaled.toString().padStart(LIMIT_PRICE_DP + 1, '0')
+  return `${digits.slice(0, -LIMIT_PRICE_DP)}.${digits.slice(-LIMIT_PRICE_DP)}`
+}
+// A LazyExecutor.Executed outcome: `result` is a Result<(), DispatchError>-shaped
+// enum. The error names the variant (and the nested one for a Module error's
+// shape) rather than a decoded pallet error — that decode wants the spec version,
+// and a callback failure is rare enough to read from the extrinsic page.
+function lazyExecutorOutcome(args: Record<string, unknown>): { result: 'ok' | 'error'; error: string | null } {
+  const result = args.result as { __kind?: unknown; value?: unknown } | undefined
+  if (result?.__kind === 'Ok') return { result: 'ok', error: null }
+  const value = result?.value
+  if (typeof value === 'string') return { result: 'error', error: value }
+  const kind = (value as { __kind?: unknown } | null | undefined)?.__kind
+  const inner = ((value as { value?: { __kind?: unknown } } | null | undefined)?.value)?.__kind
+  if (typeof kind === 'string') return { result: 'error', error: typeof inner === 'string' ? `${kind}.${inner}` : kind }
+  return { result: 'error', error: typeof result?.__kind === 'string' ? result.__kind : null }
+}
+type RawIntentLifecycleRow = { event_name: string; block_height: number; ts: string; event_index: number; extrinsic_index: number | null; queue_id: string; args_json: string }
+type RawIntentFillTotals = {
+  n: string | number; n_full: string | number; n_partial: string | number; n_dca: string | number
+  tin: string; tout: string; last_block: number | string; last_rb: string
+}
+// The newest solution extrinsics an order page links to. A DCA intent trading every
+// period accumulates one per trade without limit; the page shows the latest ones.
+const INTENT_SOLUTION_LINKS = 200
+// The schedule a DCA.Migrated row names (its `id`), or null when unreadable — never
+// 0, which is a real schedule id.
+export function dcaMigratedScheduleId(args: Record<string, unknown>): number | null {
+  const id = intentNum(args.id)
+  return id != null && id.length <= 15 ? Number(id) : null
+}
+export async function getIntentOrder(intentId: string, offset = 0, limit = 25): Promise<IntentOrderDetail | null> {
+  if (!/^\d+$/.test(intentId)) return null
+  // A miss is not cached (cachedFound): the order may be a block away from
+  // ClickHouse, and a cached 404 would outlive that wait.
+  return cachedFound(`explorer:intent:${intentId}:${offset}:${limit}`, 15000, async () => {
+    const order = (await getIntentOrders([intentId])).get(intentId)
+    if (!order) return null
+    const prices = await ensurePrices()
+    const fillNames = sqlEventNameList(INTENT_FILL_EVENTS)
+    // intent_events is keyed (block_height, event_index), not by intent: no event of
+    // an order can precede its placement block, so `block_height >= sb` is what
+    // prunes each read to the order's own stretch of the table.
+    const idParam = { id: intentId, sb: order.blockHeight }
+    const [lifeRes, fillRes, totalRes, solRes] = await Promise.all([
+      // Everything but the fills: placement, cancel/expiry, DcaCompleted, the
+      // Forward callbacks queued for this intent, and the DCA.Migrated row (the MV
+      // keys it by the new intent's id). Short by construction.
+      client.query({
+        query: `SELECT event_name, block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, toString(queue_id) AS queue_id, args_json
+                FROM price_data.intent_events FINAL
+                WHERE block_height >= {sb:UInt32} AND intent_id = toUInt128({id:String}) AND event_name NOT IN (${fillNames})
+                ORDER BY block_height ASC, event_index ASC`,
+        query_params: idParam, format: 'JSONEachRow',
+      }),
+      client.query({
+        query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
+                FROM price_data.intent_events FINAL
+                WHERE block_height >= {sb:UInt32} AND intent_id = toUInt128({id:String}) AND event_name IN (${fillNames})
+                ORDER BY block_height DESC, event_index DESC LIMIT {lim:UInt32} OFFSET {off:UInt32}`,
+        query_params: { ...idParam, lim: limit, off: offset }, format: 'JSONEachRow',
+      }),
+      // Totals over every fill: counts per kind (for the status), the filled
+      // amounts and the newest DCA trade's remaining budget.
+      client.query({
+        query: `SELECT count() AS n,
+                       countIf(event_name = 'Intent.IntentResolved') AS n_full,
+                       countIf(event_name = 'Intent.IntentResovedPartially') AS n_partial,
+                       countIf(event_name = 'Intent.DcaTradeExecuted') AS n_dca,
+                       toString(sum(toUInt256OrZero(amount_in))) AS tin,
+                       toString(sum(toUInt256OrZero(amount_out))) AS tout,
+                       max(block_height) AS last_block,
+                       argMax(remaining_budget, toUInt64(block_height) * 4294967296 + event_index) AS last_rb
+                FROM price_data.intent_events FINAL
+                WHERE block_height >= {sb:UInt32} AND intent_id = toUInt128({id:String}) AND event_name IN (${fillNames})`,
+        query_params: idParam, format: 'JSONEachRow',
+      }),
+      // The solution extrinsics that touched the order, newest first and bounded: a
+      // read of its own rather than an array aggregate, so neither the aggregate
+      // state nor the response grows with a long-running DCA intent's trade count.
+      client.query({
+        query: `SELECT DISTINCT block_height, extrinsic_index
+                FROM price_data.intent_events FINAL
+                WHERE block_height >= {sb:UInt32} AND intent_id = toUInt128({id:String}) AND event_name IN (${fillNames})
+                ORDER BY block_height DESC, extrinsic_index DESC LIMIT {cap:UInt32}`,
+        query_params: { ...idParam, cap: INTENT_SOLUTION_LINKS }, format: 'JSONEachRow',
+      }),
+    ])
+    const life = await lifeRes.json<RawIntentLifecycleRow>()
+    const fillRows = await fillRes.json<RawIntentEvent>()
+    const totals = (await totalRes.json<RawIntentFillTotals>())[0]
+    const solutionRows = await solRes.json<{ block_height: number; extrinsic_index: number | null }>()
+    const names = life.map(l => l.event_name)
+    if (Number(totals?.n_full ?? 0) > 0) names.push('Intent.IntentResolved')
+    if (Number(totals?.n_partial ?? 0) > 0) names.push('Intent.IntentResovedPartially')
+    if (Number(totals?.n_dca ?? 0) > 0) names.push('Intent.DcaTradeExecuted')
+    const status = intentOrderStatus(order.kind, names)
+
+    const orders = new Map([[intentId, order]])
+    const fills = fillRows.map(e => intentRowFromEvent(e, prices, orders)?.row).filter((r): r is ActivityRow => r != null)
+    await applyHistoricalUsd(fills, activityHistPick)
+
+    // Forward callbacks: Queued rows carry the intent id, Executed rows only the
+    // queue id, so the outcome is joined here. Executed can only follow Queued, which
+    // bounds the read to blocks at or after the first queue.
+    const queued = life.filter(l => l.event_name === 'LazyExecutor.Queued').map(l => {
+      const args = (safeJson(l.args_json) ?? {}) as Record<string, unknown>
+      const queueId = l.queue_id !== '0' ? l.queue_id : intentNum(args.id)
+      return queueId ? { queueId, row: l, fees: intentNum(args.fees) } : null
+    }).filter((q): q is NonNullable<typeof q> => q != null)
+    const executedByQueue = new Map<string, { block: number; result: 'ok' | 'error'; error: string | null }>()
+    if (queued.length) {
+      const exRes = await client.query({
+        query: `SELECT toString(queue_id) AS queue_id, block_height, args_json
+                FROM price_data.intent_events FINAL
+                WHERE event_name = 'LazyExecutor.Executed' AND block_height >= {from:UInt32}
+                  AND queue_id IN (${queued.map(q => `toUInt128('${q.queueId}')`).join(',')})
+                ORDER BY block_height ASC, event_index ASC`,
+        query_params: { from: Math.min(...queued.map(q => q.row.block_height)) }, format: 'JSONEachRow',
+      })
+      for (const r of await exRes.json<{ queue_id: string; block_height: number; args_json: string }>()) {
+        if (executedByQueue.has(r.queue_id)) continue
+        executedByQueue.set(r.queue_id, { block: Number(r.block_height), ...lazyExecutorOutcome((safeJson(r.args_json) ?? {}) as Record<string, unknown>) })
+      }
+    }
+    const callbacks: IntentOrderDetail['callbacks'] = queued.map(q => ({
+      queueId: q.queueId,
+      queuedAt: { block: q.row.block_height, extrinsicIndex: q.row.extrinsic_index, timestamp: q.row.ts },
+      fees: q.fees,
+      executed: executedByQueue.get(q.queueId) ?? null,
+    }))
+
+    const migratedRow = life.find(l => l.event_name === 'DCA.Migrated')
+    const migratedFrom = migratedRow ? dcaMigratedScheduleId((safeJson(migratedRow.args_json) ?? {}) as Record<string, unknown>) : null
+    const lastBlock = Number(totals?.last_block ?? 0) || null
+    const lastRemaining = totals?.last_rb && /^\d+$/.test(totals.last_rb) ? totals.last_rb : null
+    const aIn = asset(order.assetIn), aOut = asset(order.assetOut)
+    const solutions = solutionRows.map(r => ({ block: Number(r.block_height), extrinsicIndex: r.extrinsic_index == null ? null : Number(r.extrinsic_index) }))
+    return {
+      order,
+      owner: ACCOUNT_RE.test(order.owner) ? accountRef(order.owner) : null,
+      assetIn: aIn, assetOut: aOut,
+      status,
+      filledIn: totals?.tin ?? '0', filledOut: totals?.tout ?? '0',
+      fills, fillsTotal: Number(totals?.n ?? 0),
+      // Before its first trade the order's budget is untouched and the pallet has
+      // not stated a slot yet — the next eligible block is unknown, not "now".
+      dca: order.kind === 'dca' ? {
+        remainingBudget: lastRemaining ?? order.budget,
+        lastExecutionBlock: lastBlock,
+        nextEligibleBlock: status === 'open' && lastBlock != null && order.period > 0 ? lastBlock + order.period : null,
+      } : null,
+      callbacks,
+      migratedFrom,
+      limitPriceOutPerIn: order.kind === 'swap' ? limitPriceOutPerIn(order.amountIn, aIn.decimals, order.amountOut, aOut.decimals) : null,
+      links: { submission: { block: order.blockHeight, extrinsicIndex: order.extrinsicIndex }, solutions },
+    }
+  })
+}
+
+// One `ICE.submit_solution` extrinsic's outcome: the fills it settled, the pot's own
+// trades that routed the unmatched remainder, and the fee it swept.
+export interface IceSolutionPanel { intentsExecuted: number; tradesExecuted: number; score: string; builtAt: number; fills: ActivityRow[]; potTrades: ActivityRow[]; feeSwept: { asset: AssetRef; amount: string; valueUsd: number | null }[]; matchedInUsd: number | null; routedInUsd: number | null }
+// Built from the extrinsic's own events plus the activity rows its page already
+// builds (getExtrinsicActivity keeps the pot's trades). The fee sweep is counted on
+// Currencies.Transferred alone: the pallet emits a Tokens.Transfer/Balances.Transfer
+// for the same leg, and counting both doubled it. Null until the solution's
+// ICE.SolutionExecuted event is indexed — a failed solution settled nothing.
+async function iceSolutionPanel(height: number, index: number, ts: string, events: ExtrinsicDetail['events']): Promise<IceSolutionPanel | null> {
+  const executed = events.find(e => e.name === 'ICE.SolutionExecuted')
+  if (!executed) return null
+  const args = (executed.args != null && typeof executed.args === 'object' ? executed.args : {}) as Record<string, unknown>
+  const prices = await ensurePrices()
+  const activity = await getExtrinsicActivity(height, index)
+  const fills = activity.filter(r => r.type === 'intent')
+  const potTrades = activity.filter(r => r.type === 'trade' && r.who?.accountId.toLowerCase() === ICE_POT_ACCOUNT)
+  const feeSwept: IceSolutionPanel['feeSwept'] = []
+  for (const e of events) {
+    if (e.name !== 'Currencies.Transferred') continue
+    const a = (e.args != null && typeof e.args === 'object' ? e.args : {}) as Record<string, unknown>
+    if (argStr(a, 'from').toLowerCase() !== ICE_POT_ACCOUNT || argStr(a, 'to').toLowerCase() !== ICE_FEE_ACCOUNT) continue
+    const amount = argStr(a, 'amount')
+    if (!/^\d+$/.test(amount)) continue
+    const fee = asset(argInt(a, 'currencyId', 'currency_id', 'assetId', 'asset_id'))
+    feeSwept.push({ asset: fee, amount, valueUsd: usdValue(prices, fee.assetId, amount, fee.decimals) })
+  }
+  await applyHistoricalUsd(feeSwept, f => ({ assetId: f.asset.assetId, decimals: f.asset.decimals, raw: f.amount, ts }))
+  // Both split figures need every row valued; one unpriced leg makes both unknown.
+  const sum = (rows: ActivityRow[]): number | null => rows.reduce<number | null>((acc, r) => acc == null || r.valueUsd == null ? null : acc + r.valueUsd, 0)
+  const fillsUsd = sum(fills), routedUsd = sum(potTrades)
+  const num = (v: unknown): number => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
+  return {
+    intentsExecuted: num(args.intentsExecuted), tradesExecuted: num(args.tradesExecuted),
+    score: intentNum(args.score) ?? '0', builtAt: num(args.builtAt),
+    fills, potTrades, feeSwept,
+    matchedInUsd: fillsUsd == null || routedUsd == null ? null : Math.max(0, fillsUsd - routedUsd),
+    routedInUsd: fillsUsd == null || routedUsd == null ? null : routedUsd,
+  }
+}
+
 export interface VoteRow {
   // Conviction-weighted power, planck. Null for a collective vote, which has neither a
   // balance nor a conviction — no weight to report rather than a misleading zero.
@@ -13327,8 +13842,19 @@ async function suppressDustTransferRows<T extends ActivityRow>(rows: T[]): Promi
     || !dustKeys.has(`${r.blockHeight}:${r.eventIndex}:${r.who.accountId.toLowerCase()}:${r.asset.assetId}:${r.amount}`))
 }
 
-async function suppressActivityPlumbing<T extends ActivityRow>(rows: T[]): Promise<T[]> {
-  const out = await suppressDustTransferRows(suppressSubordinateActivityRows(rows))
+// Inside an ICE solution the pot's AMM trades are how the fills were produced,
+// not trades of their own: fold them wherever the fills are shown. The pot's own
+// account page and the extrinsic/block pages keep them (`keepPot`) — there the
+// question is what the pot did, and how the solution executed.
+export function suppressIcePotSettlementTrades<T extends ActivityRow>(rows: T[], keepPot = false): T[] {
+  if (keepPot) return rows
+  const intentKeys = new Set(rows.filter(r => r.type === 'intent' && r.extrinsicIndex != null).map(r => `${r.blockHeight}:${r.extrinsicIndex}`))
+  if (!intentKeys.size) return rows
+  return rows.filter(r => !(r.type === 'trade' && r.who?.accountId.toLowerCase() === ICE_POT_ACCOUNT && r.extrinsicIndex != null && intentKeys.has(`${r.blockHeight}:${r.extrinsicIndex}`)))
+}
+
+async function suppressActivityPlumbing<T extends ActivityRow>(rows: T[], opts: { keepPot?: boolean } = {}): Promise<T[]> {
+  const out = await suppressDustTransferRows(suppressIcePotSettlementTrades(suppressSubordinateActivityRows(rows), opts.keepPot))
   await applyXcmFeeUsd(out)
   return out
 }
@@ -13367,6 +13893,7 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
     ...LIQUIDITY_EVENTS,
     ...STAKING_EVENT_NAMES,
     ...BOND_EVENT_NAMES,
+    ...INTENT_EVENT_NAMES,
     ...VOTE_EVENTS,
     'DCA.TradeExecuted', 'DCA.TradeFailed', 'Referrals.Claimed',
     ...OTC_EVENT_NAMES,
@@ -13423,8 +13950,10 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
       continue
     }
     // Bonds.Issued names its actor `issuer` (a governance-issued Treasury bond is a
-    // hook row whose pot legs are Treasury ↔ bonds pot transfers).
-    addHookAccount(event.block_height, argStr(args, 'who') || argStr(args, 'voter') || argStr(args, 'issuer'))
+    // hook row whose pot legs are Treasury ↔ bonds pot transfers). Intent.IntentSubmitted
+    // names its actor `owner` (a DCA schedule migrated in on_initialize is a hook
+    // placement; the migration's DCA.Migrated row names the same owner).
+    addHookAccount(event.block_height, argStr(args, 'who') || argStr(args, 'voter') || argStr(args, 'issuer') || argStr(args, 'owner'))
   }
 
   // Money-market logs do not store the substrate extrinsic directly. Resolve
@@ -13806,12 +14335,13 @@ async function liquidityExtrinsicsForShareTrades(trades: TradeRow[]): Promise<Se
 }
 // 'dca' is categorized under the Trade chip (rows keep their dca flag for the badge).
 function normalizeActivityTypeKey(type: string): string { return type === 'dca' ? 'trade' : type }
-// OTC is categorized under the Trade chip: a requested `type=trade` also matches otc
-// rows (still tagged `type: 'otc'` — they keep their own badges/slugs/detail
-// pages, only the categorization/filter changes). `type=otc` still selects
-// only otc rows (kept working as an API nicety; the UI never sends it).
+// OTC and ICE intents are categorized under the Trade chip: a requested `type=trade`
+// also matches otc and intent rows (still tagged `type: 'otc'` / `type: 'intent'` —
+// they keep their own badges/slugs/detail pages, only the categorization/filter
+// changes). `type=otc` / `type=intent` still select only their own rows (kept
+// working as an API nicety; the UI never sends them).
 export function activityTypeMatchesFamily(rowType: ActivityRow['type'], type: string): boolean {
-  return rowType === type || (type === 'trade' && rowType === 'otc')
+  return rowType === type || (type === 'trade' && (rowType === 'otc' || rowType === 'intent'))
 }
 // Per-category action filter (the sub-type select next to the chips).
 export function activityRowMatchesAction(r: ActivityRow, action?: string): boolean {
@@ -13822,6 +14352,13 @@ export function activityRowMatchesAction(r: ActivityRow, action?: string): boole
     case 'mm': return r.mmAction === action
     case 'staking': return r.stakingAction === action
     case 'bond': return r.bondAction === action
+    case 'intent': {
+      // The Trade chip's DCA filter keeps showing DCA activity after the DCA →
+      // intent migration: a DCA intent's trade is what an old schedule's execution was.
+      if (action === 'dca') return r.intentKind === 'dca' && r.intentAction === 'DcaTrade'
+      const a = resolveIntentActions(action)
+      return !!a && !!r.intentAction && a.includes(r.intentAction)
+    }
     case 'liquidity': return r.liqAction === action
     case 'vote': return (r.voteSide ?? '') === action
     case 'xcm': return (r.xcmDir ?? 'out') === action
@@ -14201,9 +14738,9 @@ export function activityTokenMergeFiltered(type: string, filters: ValueListFilte
 // pages by, so a window may only be shared across offsets where it holds.
 export function activityPagesInMemory(type: string, action?: string): boolean {
   const category = normalizeActivityTypeKey(type)
-  // Failed DCA executions and the OTC actions are exact, independently pageable
-  // event families; the builder reads them at the page's own offset.
-  if (category === 'trade' && (action === 'dca-failed' || otcOnlyActivityAction(action))) return false
+  // Failed DCA executions, the OTC actions and the intent actions are exact,
+  // independently pageable event families; the builder reads them at the page's own offset.
+  if (category === 'trade' && (action === 'dca-failed' || otcOnlyActivityAction(action) || isIntentOnlyTradeRequest(category, action))) return false
   if (category === 'all' || category === 'trade' || category === 'transfer') return true
   if (action) return true
   return category === 'liquidity' || category === 'mm' || category === 'xcm'
@@ -14212,6 +14749,21 @@ export function activityPagesInMemory(type: string, action?: string): boolean {
 function otcOnlyActivityAction(action?: string): boolean {
   const otcAction = resolveOtcAction(action)
   return !!otcAction && !!OTC_ACTION_EVENTS[otcAction]
+}
+
+// A Trade-tab request for an intent action (`intent-place | intent-fill |
+// intent-cancel | intent-expire | intent-dca-trade`, or an intent action word). No
+// swap, failed-DCA or OTC row can satisfy one, so the builders answer it from the
+// intent source alone: getRecentIntents pushes the action into its event names and
+// pages in SQL, so the request costs one read and an empty family is an empty page.
+// Read through the shared Trade classifier instead, the family's other sources
+// filled their windows without producing a match and the builder widened them to
+// the read guard — a 503 while no intent rows exist at all, where `type=intent`
+// with the same action answers `[]`. A word the OTC resolver also claims (`Place`,
+// `Fill`) keeps its OTC meaning, the precedence the Trade builder's branch order
+// already gives it.
+export function isIntentOnlyTradeRequest(type: string, action?: string): boolean {
+  return normalizeActivityTypeKey(type) === 'trade' && resolveIntentActions(action) !== undefined && !otcOnlyActivityAction(action)
 }
 
 // Whether a value floor is sparse enough that the classified builder skips the
@@ -14282,6 +14834,11 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     // Sending them through the shared Trade classifier widens the unrelated
     // swap source forever because no swap can satisfy an otc-* action.
     rows = await getRecentOtc(limit, from, to, offset, filters, action)
+  } else if (isIntentOnlyTradeRequest(type, action)) {
+    // The intent actions are the intent source's own page (see
+    // isIntentOnlyTradeRequest): the same SQL-paged read `type=intent` takes, with
+    // the action pushed into the event names.
+    rows = await getRecentIntents(limit, from, to, undefined, offset, filters, undefined, action)
   } else if (type === 'transfer') {
     // Pull only transfer candidates, then resolve semantic ownership by their
     // exact identities. Widening the swap/liquidity/XCM/etc. feeds alongside
@@ -14347,10 +14904,10 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     let sourceFilters = sourceValueFiltered
       ? filters
       : deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
-    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'xcmExecuted' | 'nttOut' | 'nttIn' | 'staking' | 'bond' | 'vote'
+    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'xcmExecuted' | 'nttOut' | 'nttIn' | 'staking' | 'bond' | 'intent' | 'vote'
     const classifiedSourceKeys: ClassifiedSourceKey[] = [
       'transfer', 'trade', 'dca', 'reward', 'liquidity', 'mm', 'otc',
-      'xcm', 'xcmIn', 'xcmOutRemote', 'xcmExecuted', 'nttOut', 'nttIn', 'staking', 'bond', 'vote',
+      'xcm', 'xcmIn', 'xcmOutRemote', 'xcmExecuted', 'nttOut', 'nttIn', 'staking', 'bond', 'intent', 'vote',
     ]
     const exactSeedSize = activitySourceSeedSize(want)
     const exactSourceLimits = Object.fromEntries(classifiedSourceKeys.map(key => [key, sourceValueFiltered ? exactSeedSize : fetchN])) as Record<ClassifiedSourceKey, number>
@@ -14369,7 +14926,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       })
     }
     for (;;) {
-      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, staking, bonds, votes] = await Promise.all([
+      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, staking, bonds, intents, votes] = await Promise.all([
         needsFullClassification
           ? loadClassifiedSource('transfer', (sourceLimit, sourceFrom) => getRecentTransfers(sourceLimit, sourceFrom, to, 0, true, sourceFilters))
           : Promise.resolve([]),
@@ -14415,6 +14972,9 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         needsFullClassification
           ? loadClassifiedSource('bond', (sourceLimit, sourceFrom) => getRecentBonds(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
           : Promise.resolve([]),
+        // Intents fold under the trade family like otc, so they are read for the trade
+        // tab as well as under full classification.
+        loadClassifiedSource('intent', (sourceLimit, sourceFrom) => getRecentIntents(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters)),
         needsFullClassification
           ? loadClassifiedSource('vote', (sourceLimit, sourceFrom) => getVoteFeedRows(sourceLimit, sourceFrom, to, 0, sourceFilters, withCollective))
           : Promise.resolve([]),
@@ -14442,12 +15002,14 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       const tradeExtrinsics = new Set(trades.filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
       const stakingExtrinsics = activityExtrinsicSet(staking)
       const bondExtrinsics = activityExtrinsicSet(bonds)
+      const intentExtrinsics = activityExtrinsicSet(intents)
       const mmExtrinsics = activityExtrinsicSet(mm)
       const otcExtrinsics = activityExtrinsicSet(otc)
       const userTransfers = sourceFilteredTransfers.filter(t =>
         !(t.extrinsicIndex != null && tradeExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+        !(t.extrinsicIndex != null && intentExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !isModuleAcct(t.from) && !isModuleAcct(t.to))
@@ -14474,6 +15036,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         { key: 'liquidity', fetchSize: sourceFetchSize('liquidity'), rawSize: liquidity.length, rows: liquidity, oldest: oldestOf(liquidity) },
         { key: 'staking', fetchSize: sourceFetchSize('staking'), rawSize: staking.length, rows: staking, oldest: oldestOf(staking) },
         { key: 'bond', fetchSize: sourceFetchSize('bond'), rawSize: bonds.length, rows: bonds, oldest: oldestOf(bonds) },
+        { key: 'intent', fetchSize: sourceFetchSize('intent'), rawSize: intents.length, rows: intents, oldest: oldestOf(intents) },
         { key: 'vote', fetchSize: sourceFetchSize('vote'), rawSize: votes.length, rows: votes.map(voteActivityRow), oldest: oldestOf(votes) },
         { key: 'mm', fetchSize: sourceFetchSize('mm'), rawSize: mm.length, rows: userMm, oldest: oldestOf(mm) },
         { key: 'otc', fetchSize: sourceFetchSize('otc'), rawSize: otc.length, rows: otc, oldest: oldestOf(otc) },
@@ -14484,9 +15047,13 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         { key: 'nttOut', fetchSize: sourceFetchSize('nttOut'), rawSize: nttOut.length, rows: nttOut, oldest: oldestOf(nttOut) },
         { key: 'nttIn', fetchSize: sourceFetchSize('nttIn'), rawSize: nttIn.length, rows: nttIn, oldest: oldestOf(nttIn) },
       ]
+      // The trade family's sources — swaps, failed DCA schedules, OTC and intents —
+      // selected by key: a positional pick silently swapped otc for mm when a source
+      // was inserted above it.
+      const TRADE_FAMILY_SOURCES: ClassifiedSourceKey[] = ['trade', 'dca', 'otc', 'intent']
       const sourcePages = type === 'trade'
-        ? [allSources[1], allSources[2], allSources[8]]
-        : type === 'transfer' ? [allSources[0]] : allSources
+        ? allSources.filter(source => TRADE_FAMILY_SOURCES.includes(source.key))
+        : type === 'transfer' ? allSources.filter(source => source.key === 'transfer') : allSources
       sourceSaturated = sourcePages.some(source => source.rawSize >= source.fetchSize)
       // A transfer-only result still needs the other categories as
       // classification context. Otherwise the transfer leg of an LP action,
@@ -14564,6 +15131,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     else if (type === 'xcm') rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters), getRecentXcmExecuted(fetchN, from, to, undefined, 0, filters), getRecentNttOut(fetchN, from, to, undefined, 0, filters), getRecentNttIn(fetchN, from, to, undefined, 0, filters)])).flat()
     else if (type === 'staking') rows = await getRecentStaking(fetchN, from, to, undefined, 0, filters, undefined, action)
     else if (type === 'bond') rows = await getRecentBonds(fetchN, from, to, undefined, 0, filters, undefined, action)
+    else if (type === 'intent') rows = await getRecentIntents(fetchN, from, to, undefined, 0, filters, undefined, action)
     else rows = (await getVoteFeedRows(fetchN, from, to, 0, filters, withCollective)).map(voteActivityRow)
   } else if (type === 'liquidity') {
     rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'referral')).filter(r => r.type === 'liquidity')]
@@ -14577,6 +15145,8 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     rows = await getRecentStaking(limit, from, to, undefined, offset, filters)
   } else if (type === 'bond') {
     rows = await getRecentBonds(limit, from, to, undefined, offset, filters)
+  } else if (type === 'intent') {
+    rows = await getRecentIntents(limit, from, to, undefined, offset, filters)
   } else {
     rows = (await getVoteFeedRows(limit, from, to, offset, filters, withCollective)).map(voteActivityRow)
   }
@@ -14729,11 +15299,18 @@ export interface DcaScheduleDetail {
   // the balance is the one thing that can date their end and give them a share
   // to be "filled" against. Null everywhere else.
   fundingBalance: string | null
-  status: 'active' | 'completed' | 'terminated' | 'cancelled'
+  status: 'active' | 'completed' | 'terminated' | 'cancelled' | 'migrated' | 'migration-cancelled'
   statusAt: string | null
   // Named DispatchError reason for hook (error) terminations, null when the
   // error is a metadata-indexed module error or the schedule wasn't terminated.
   statusReason: string | null
+  // Runtime 443 moved live schedules onto ICE intents. A migrated schedule names the
+  // intent that took its place (a u128 as a decimal string); one the runtime could
+  // not migrate names why (the MigrationCancelled reason) and what it refunded, in
+  // the sold asset's raw units. All three are null on every other schedule.
+  migratedToIntentId?: string | null
+  migrationReason?: string | null
+  migrationRefunded?: string | null
   executions: { count: number; failed: number; attempts: number; totalIn: string; totalOut: string }
   rows: ActivityRow[]
 }
@@ -14764,13 +15341,32 @@ export async function getDcaScheduleIdAt(height: number, index: number, kind: 'e
 // dca.terminate call ("cancelled"); one from a block hook is the pallet ending
 // the schedule on an error ("terminated"). The previous latest-execution-event
 // heuristic mislabelled error terminations that left a pending plan.
+//
+// A migration outcome (runtime 443) outranks everything: it is the newest fact
+// about a schedule that was live at the upgrade, and it is what names the intent
+// that replaced it or the reason none did. Pre-443 schedules never carry either
+// event, so their answers are unchanged.
 export function dcaScheduleStatus(
   terminated: boolean,
   completed: boolean,
   manualTerminate: boolean,
+  migrated = false,
+  migrationCancelled = false,
 ): DcaScheduleDetail['status'] {
+  if (migrated) return 'migrated'
+  if (migrationCancelled) return 'migration-cancelled'
   if (terminated) return manualTerminate ? 'cancelled' : 'terminated'
   return completed ? 'completed' : 'active'
+}
+
+// The MigrationCancelled reason as dca_events stores it: the raw `reason` JSON —
+// an enum, so either a bare string or `{"__kind": …}`. Null when unreadable.
+export function dcaMigrationReason(raw: string | null | undefined): string | null {
+  if (!raw) return null
+  const parsed = safeJson(raw)
+  if (typeof parsed === 'string' && parsed) return parsed
+  const kind = (parsed as { __kind?: unknown } | null)?.__kind
+  return typeof kind === 'string' && kind ? kind : null
 }
 
 export interface FailureReason { label: string; docs: string | null }
@@ -15242,6 +15838,37 @@ async function dcaScheduleTerms(scheduleId: number, blockHeight: number, extrins
   }
 }
 
+// The intent a migrated schedule became. intent_events keys its DCA.Migrated row by
+// that intent's id (the MV extracts `intentId`), so this is a primary-key point read
+// of the same column the block page's `intentMigratedFrom` link is built from — the
+// two surfaces agree by construction. Null until the row is indexed or when the id
+// did not extract (0 is never a real id: ids are `(deadline_ms << 64) | counter`).
+async function dcaMigratedIntentId(row: { bh: number; ei: number } | undefined): Promise<string | null> {
+  if (!row) return null
+  const res = await client.query({
+    query: `SELECT toString(intent_id) AS intent_id FROM price_data.intent_events FINAL
+            WHERE block_height = {bh:UInt32} AND event_index = {ei:UInt32} AND event_name = 'DCA.Migrated' LIMIT 1`,
+    query_params: { bh: row.bh, ei: row.ei }, format: 'JSONEachRow',
+  })
+  const v = (await res.json<{ intent_id: string }>())[0]?.intent_id
+  return v && /^\d+$/.test(v) && v !== '0' ? v : null
+}
+
+// What a schedule the runtime could not migrate was refunded, in the sold asset's
+// raw units. dca_events folds only the cancel's `reason` (its `error` column); the
+// refund has no column anywhere, so — like DCA.Terminated's error — it is one
+// primary-key point lookup per schedule, never a per-row read.
+async function dcaMigrationRefund(row: { bh: number; ei: number } | undefined): Promise<string | null> {
+  if (!row) return null
+  const res = await client.query({
+    query: `SELECT replaceAll(JSONExtractRaw(args_json, 'refunded'), '"', '') AS refunded FROM price_data.raw_events
+            WHERE event_name = 'DCA.MigrationCancelled' AND block_height = {bh:UInt32} AND event_index = {ei:UInt32} LIMIT 1`,
+    query_params: { bh: row.bh, ei: row.ei }, format: 'JSONEachRow',
+  })
+  const v = (await res.json<{ refunded: string }>())[0]?.refunded
+  return v && /^\d+$/.test(v) ? v : null
+}
+
 export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25): Promise<DcaScheduleDetail | null> {
   return cachedFound(`explorer:dca-schedule:${scheduleId}:${offset}:${limit}`, 8000, async () => {
     const prices = await ensurePrices()
@@ -15253,12 +15880,15 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
         query_params: { sid: scheduleId }, format: 'JSONEachRow',
       }),
       client.query({
+        // `error` carries the MigrationCancelled reason (dca_events_mv writes the raw
+        // `reason` there); it is '' for every other lifecycle event.
         query: `SELECT event_name, toString(max(block_timestamp)) AS ts,
                        argMax(block_height, block_timestamp) AS bh,
                        argMax(event_index, block_timestamp) AS ei,
-                       argMax(ifNull(toInt64(extrinsic_index), -1), block_timestamp) AS xi
+                       argMax(ifNull(toInt64(extrinsic_index), -1), block_timestamp) AS xi,
+                       argMax(error, block_timestamp) AS err
                 FROM price_data.dca_events
-                WHERE id = {sid:UInt64} AND event_name IN ('DCA.Completed','DCA.Terminated') GROUP BY event_name`,
+                WHERE id = {sid:UInt64} AND event_name IN (${DCA_ENDED_EVENTS_SQL}) GROUP BY event_name`,
         query_params: { sid: scheduleId }, format: 'JSONEachRow',
       }),
       client.query({
@@ -15311,12 +15941,15 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
       if (recovered) Object.assign(sched, recovered)
     }
     const terms = await dcaScheduleTerms(scheduleId, sched.block_height, sched.extrinsic_index)
-    const life = await lifeRes.json<{ event_name: string; ts: string; bh: number; ei: number; xi: number }>()
+    const life = await lifeRes.json<{ event_name: string; ts: string; bh: number; ei: number; xi: number; err: string }>()
     const totals = (await totalRes.json<{ n: string; failed: string; attempts: string; tin: string; tout: string }>())[0]
     const pair = await resolveDcaTradedPair(scheduleId, sched.asset_in, sched.asset_out, sched.who)
     const aIn = asset(pair.assetIn), aOut = asset(pair.assetOut)
     const terminated = life.find(l => l.event_name === 'DCA.Terminated')
     const completed = life.find(l => l.event_name === 'DCA.Completed')
+    const migrated = life.find(l => l.event_name === 'DCA.Migrated')
+    const migrationCancelled = life.find(l => l.event_name === 'DCA.MigrationCancelled')
+    const ended = terminated ?? completed ?? migrated ?? migrationCancelled
     const executionRows = await exRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; amount_in: string; amount_out: string; error: string }>()
     const rows: ActivityRow[] = executionRows.map(x => {
       const failed = x.event_name === 'DCA.TradeFailed'
@@ -15349,7 +15982,12 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
       })
       statusReason = dcaTerminationReason((await errRes.json<{ error: string }>())[0]?.error)
     }
-    const status = dcaScheduleStatus(!!terminated, !!completed, terminated != null && Number(terminated.xi) >= 0)
+    const [migratedToIntentId, migrationRefunded] = await Promise.all([
+      dcaMigratedIntentId(migrated),
+      dcaMigrationRefund(migrationCancelled),
+    ])
+    const migrationReason = migrationCancelled ? dcaMigrationReason(migrationCancelled.err) : null
+    const status = dcaScheduleStatus(!!terminated, !!completed, terminated != null && Number(terminated.xi) >= 0, !!migrated, !!migrationCancelled)
     // A Buy order fixes the amount it BUYS, a Sell the amount it sells — value the
     // per-trade amount on the leg its own order type names. The budget is always
     // in the sold asset.
@@ -15365,7 +16003,7 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
       // executions traded in. A schedule too young for a completed hourly close
       // has no close to read — today's price is then the only honest answer, and
       // usdBasis says so.
-      const endedTs = (terminated ?? completed)?.ts ?? sched.ts
+      const endedTs = ended?.ts ?? sched.ts
       const closes = await historicalCloses([
         { assetId: perAsset.assetId, ts: endedTs },
         ...(budgeted ? [{ assetId: aIn.assetId, ts: endedTs }] : []),
@@ -15407,8 +16045,9 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
       fundingBalance,
       nextExecutionBlock: Number((await planRes.json<{ nb: number }>())[0]?.nb ?? 0) || null,
       status,
-      statusAt: (terminated ?? completed)?.ts ?? null,
+      statusAt: ended?.ts ?? null,
       statusReason,
+      migratedToIntentId, migrationReason, migrationRefunded,
       executions: {
         count: Number(totals?.n ?? 0), failed: Number(totals?.failed ?? 0), attempts: Number(totals?.attempts ?? 0),
         totalIn: totals?.tin ?? '0', totalOut: totals?.tout ?? '0',
@@ -15723,6 +16362,18 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       if (built) rows.push(built.row)
     }
 
+    // Intents: fills land inside the unsigned ICE.submit_solution, a placement or a
+    // cancel is the owner's own call. The order supplies the actor and the pair for
+    // every event after the placement.
+    const intentEvents = events.filter(ev => INTENT_EVENT_NAMES.includes(ev.event_name))
+    if (intentEvents.length) {
+      const orders = await getIntentOrders(intentEvents.map(ev => intentActivityParts(ev.event_name, (safeJson(ev.args_json) ?? {}) as Record<string, unknown>)?.intentId ?? ''))
+      for (const ev of intentEvents) {
+        const built = intentRowFromEvent(ev, prices, orders, { signerFallback: signer })
+        if (built) rows.push(built.row)
+      }
+    }
+
     const voteEvents = events.filter(e => e.event_name === 'ConvictionVoting.Voted' || e.event_name === 'Democracy.Voted')
     const convictionCalls = new Map<string, { ref: string | null; details: VoteDetails }>()
     const convictionCallInfos: { ref: string | null; details: VoteDetails }[] = []
@@ -15883,6 +16534,7 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
     rows.push(...await getRecentRewardClaims(100, undefined, undefined, undefined, undefined, height, index))
 
     const seen = new Set<string>()
+    // The extrinsic page shows how a solution executed, so the pot's settlement trades stay.
     const deduped = await suppressActivityPlumbing(rows.filter(r => {
       const key = `${r.type}:${r.blockHeight}:${r.extrinsicIndex ?? ''}:${r.asset?.assetId ?? r.assetIn?.assetId ?? ''}:${r.who?.accountId ?? ''}:${r.to?.accountId ?? ''}:${r.amount ?? r.amountIn ?? ''}:${r.amountOut ?? ''}:${r.voteRef ?? ''}:${r.mmAction ?? r.stakingAction ?? r.liqAction ?? ''}`
       if (seen.has(key)) return false
@@ -15902,7 +16554,7 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       // rather than a separate trade — the mirror of dropShareRoutedTrades.
       if (!all.some(x => x.type === 'liquidity')) return true
       return !(r.type === 'trade' && ((r.assetIn && isShareAssetId(r.assetIn.assetId)) || (r.assetOut && isShareAssetId(r.assetOut.assetId))))
-    }))
+    }), { keepPot: true })
     await Promise.all([
       applyHistoricalUsd(deduped, activityHistPick),
       applyXcmJourneys(deduped),
@@ -15941,13 +16593,15 @@ export async function getBlockActivity(height: number, opts: ActivityPageOptions
     ])
 
     const seen = new Set<string>()
+    // Like the extrinsic page, the block page shows everything its extrinsics did —
+    // the ICE pot's settlement trades beside the fills they produced.
     const merged = (await suppressActivityPlumbing([...extRows, ...hookRows, ...dcaFailureRows]
       .filter(r => {
         const key = `${r.type}:${r.blockHeight}:${r.extrinsicIndex ?? ''}:${r.eventIndex ?? ''}:${r.asset?.assetId ?? r.assetIn?.assetId ?? ''}:${r.assetOut?.assetId ?? ''}:${r.who?.accountId ?? ''}:${r.to?.accountId ?? ''}:${r.amount ?? r.amountIn ?? ''}:${r.amountOut ?? ''}`
         if (seen.has(key)) return false
         seen.add(key)
         return true
-      })))
+      }), { keepPot: true }))
       .sort((a, b) => {
         const ax = a.extrinsicIndex ?? Number.MAX_SAFE_INTEGER
         const bx = b.extrinsicIndex ?? Number.MAX_SAFE_INTEGER
@@ -15968,7 +16622,7 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
   const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
   const transferPlumbing = [...ammPoolAccounts(), ...(await mmReserveAccountIds())]
   const transferPlumbingList = transferPlumbing.length ? transferPlumbing.map(a => `'${a}'`).join(',') : "''"
-  const [swapRes, dcaRes, xcmInRows, xcmOutRemoteRows, stakingRes, transferRes, liquidityRes, mmRes, otcRes, bondRes] = await Promise.all([
+  const [swapRes, dcaRes, xcmInRows, xcmOutRemoteRows, stakingRes, transferRes, liquidityRes, mmRes, otcRes, bondRes, intentRes, intentMigratedRes] = await Promise.all([
     client.query({
       query: `SELECT event_index, event_name, args_json, toString(block_timestamp) AS ts
               FROM price_data.raw_events
@@ -16080,6 +16734,25 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
               FROM price_data.raw_events
               WHERE block_height = {h:UInt32} AND extrinsic_index IS NULL AND event_name IN (${sqlEventNameList(BOND_EVENT_NAMES)})
               ORDER BY event_index`,
+      query_params: { h: height },
+      format: 'JSONEachRow',
+    }),
+    // Extrinsic-less intent events — a DCA schedule migrated in on_initialize places
+    // its intent from the hook phase, and an expiry is swept there.
+    client.query({
+      query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
+              FROM price_data.intent_events FINAL
+              WHERE block_height = {h:UInt32} AND extrinsic_index IS NULL AND event_name IN (${sqlEventNameList(INTENT_EVENT_NAMES)})
+              ORDER BY event_index`,
+      query_params: { h: height },
+      format: 'JSONEachRow',
+    }),
+    // The schedule each migrated intent replaced: DCA.Migrated { id, who, intentId }
+    // lands in the same block as the placement it made.
+    client.query({
+      query: `SELECT toString(intent_id) AS intent_id, JSONExtractUInt(args_json, 'id') AS schedule_id
+              FROM price_data.intent_events FINAL
+              WHERE block_height = {h:UInt32} AND event_name = 'DCA.Migrated'`,
       query_params: { h: height },
       format: 'JSONEachRow',
     }),
@@ -16243,6 +16916,23 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
     if (built) rows.push(built.row)
   }
 
+  // Extrinsic-less intents — the shared intentRowFromEvent builder; a placement the
+  // DCA migration made carries the schedule it replaced. Both responses are read
+  // whether or not they hold rows, so neither pins its pooled socket.
+  const intentHookEvents = await intentRes.json<RawIntentEvent>()
+  const migratedFrom = new Map((await intentMigratedRes.json<{ intent_id: string; schedule_id: number | string }>())
+    .map(m => [m.intent_id, Number(m.schedule_id)] as [string, number]))
+  if (intentHookEvents.length) {
+    const orders = await getIntentOrders(intentHookEvents.map(e => intentActivityParts(e.event_name, (safeJson(e.args_json) ?? {}) as Record<string, unknown>)?.intentId ?? ''))
+    for (const e of intentHookEvents) {
+      const built = intentRowFromEvent(e, prices, orders, { signerFallback: null })
+      if (!built) continue
+      const scheduleId = migratedFrom.get(built.intentId)
+      if (built.row.intentAction === 'Place' && scheduleId != null && Number.isFinite(scheduleId)) built.row.intentMigratedFrom = scheduleId
+      rows.push(built.row)
+    }
+  }
+
   return rows
 }
 
@@ -16357,11 +17047,16 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     // Transfers: filter by asset and user-facing accounts in SQL before limiting,
     // otherwise busy module/pool activity can fill a page and hide real transfers.
     type = normalizeActivityTypeKey(type)
+    // An intent action on the Trade tab reads the intent source alone (see
+    // isIntentOnlyTradeRequest): the swap, failed-DCA and OTC sources — and the
+    // liquidity context that exists to classify swaps — contribute nothing to it,
+    // and a busy asset's swaps filling their window read as this page being too broad.
+    const intentOnly = isIntentOnlyTradeRequest(type, action)
     const wantTransfers = type === 'all' || type === 'transfer'
     // Classification context: the Transfers view must exclude trade/staking/MM
     // legs, and Trades must yield share-routed legs to Liquidity — so those
     // categories are fetched whenever their exclusion sets are needed.
-    const wantTrades = type === 'all' || type === 'trade' || wantTransfers
+    const wantTrades = !intentOnly && (type === 'all' || type === 'trade' || wantTransfers)
     const wantLiquidity = type === 'all' || type === 'liquidity' || wantTrades
     const wantXcm = type === 'all' || type === 'xcm' || wantTransfers
     const wantMm = type === 'all' || type === 'mm' || wantTransfers
@@ -16370,6 +17065,9 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     const wantOtc = type === 'all' || type === 'otc' || wantTrades
     const wantStaking = type === 'all' || type === 'staking' || wantTransfers
     const wantBonds = type === 'all' || type === 'bond' || wantTransfers
+    // intent folds under the trade chip/type like otc — fetched whenever trade is,
+    // plus its own `type=intent` request and the Trade tab's intent actions.
+    const wantIntents = type === 'all' || type === 'intent' || wantTrades || intentOnly
     const wantVotes = (type === 'all' || type === 'vote' || wantTransfers) && assetId === 0
 
     const transfersP: Promise<ActivityRow[]> = wantTransfers ? (async () => {
@@ -16761,6 +17459,11 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     // A bond row is reached from the bond's own page and from its underlying's
     // (getRecentBonds admits either id).
     const bondsP: Promise<ActivityRow[]> = wantBonds ? getRecentBonds(fetchN, from, to, undefined, 0, queryFilters, assetId) : Promise.resolve([])
+    // An intent row is reached from either side of its order's pair (getRecentIntents
+    // admits the asset as assetIn or assetOut). An intent-only request pushes its
+    // action into the read, so the one source it has cannot saturate on rows the
+    // action then drops.
+    const intentsP: Promise<ActivityRow[]> = wantIntents ? getRecentIntents(fetchN, from, to, undefined, 0, queryFilters, assetId, intentOnly ? action : undefined) : Promise.resolve([])
     const rewardsP: Promise<ActivityRow[]> = (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')
       ? getRecentRewardClaims(fetchN, from, to, undefined, [assetId], undefined, undefined, fixedAssetFilters)
       : Promise.resolve([])
@@ -16772,17 +17475,19 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       ? getVoteFeedRows(fetchN, from, to, 0, queryFilters, collectiveVotesAdmitted(queryFilters)).then(rows => rows.map(voteActivityRow))
       : Promise.resolve([])
 
-    const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, staking, bonds, votes] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, xcmExecutedP, nttOutP, nttInP, mmP, otcP, stakingP, bondsP, votesP])
+    const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, staking, bonds, intents, votes] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, xcmExecutedP, nttOutP, nttInP, mmP, otcP, stakingP, bondsP, intentsP, votesP])
     // Drop transfer legs of the asset's own trades (hops/fee legs share the extrinsic).
     const tradeExtrinsics = new Set(trades.filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
     const stakingExtrinsics = activityExtrinsicSet(staking)
     const bondExtrinsics = activityExtrinsicSet(bonds)
+    const intentExtrinsics = activityExtrinsicSet(intents)
     const mmExtrinsics = activityExtrinsicSet(mm)
     const otcExtrinsics = activityExtrinsicSet(otc)
     const userTransfers = transfers.filter(t =>
       !(t.extrinsicIndex != null && tradeExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+      !(t.extrinsicIndex != null && intentExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)))
     // The asset page sees the fee purchase (an HDX or GLMR page) without the send it
@@ -16790,7 +17495,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     const feeSwapKeys = await feePurchaseSwapKeys(trades)
     const userTrades = dropShareRoutedTrades(trades, activityExtrinsicSet(liquidity))
     const userMm = mm.filter(r => !isModuleAcct(r.who))
-    let rows = (await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc]))
+    let rows = (await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc, ...intents]))
       .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
     if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
     rows = rows.filter(r => activityRowMatchesAction(r, action))
@@ -16799,16 +17504,17 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
     rows = rows.filter(r => activityRowMatchesFilters(r, { ...filters, token: undefined }))
     rows.sort(compareActivityRowsNewestFirst)
-    const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, bonds, votes, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc]
+    const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, bonds, intents, votes, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc]
       : type === 'transfer' ? [transfers]
-        : type === 'trade' ? [trades, dcaFailures, otc]
+        : type === 'trade' ? [trades, dcaFailures, otc, intents]
           : type === 'liquidity' ? [liquidity, rewards]
             : type === 'mm' ? [mm, rewards]
               : type === 'otc' ? [otc]
                 : type === 'xcm' ? [xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn]
                   : type === 'staking' ? [staking]
                     : type === 'bond' ? [bonds]
-                      : [votes]
+                      : type === 'intent' ? [intents]
+                        : [votes]
     if (rows.length < want && saturationSources.some(source => source.length >= fetchN)) throw activityQueryTooBroad()
     const page = rows.slice(offset, offset + limit)
     await applyXcmJourneys(page)
@@ -18559,6 +19265,7 @@ interface EnumeratedActivity {
   rewards: ActivityRow[]
   staking: ActivityRow[]
   bonds: ActivityRow[]
+  intents: ActivityRow[]
   votes: ActivityRow[]
   xcm: ActivityRow[]
   // Wormhole NTT sends and arrivals — cross-chain rows like xcm's, kept as their own
@@ -18569,7 +19276,7 @@ interface EnumeratedActivity {
 // Every enumerated row. All of them are non-transfer, so a transfer feed needs each
 // one's extrinsic or hook owner to decide which transfers are its plumbing.
 function enumeratedActivityAll(e: EnumeratedActivity): ActivityRow[] {
-  return [...e.otc, ...e.dcaFailures, ...e.rewards, ...e.staking, ...e.bonds, ...e.votes, ...e.xcm, ...e.ntt]
+  return [...e.otc, ...e.dcaFailures, ...e.rewards, ...e.staking, ...e.bonds, ...e.intents, ...e.votes, ...e.xcm, ...e.ntt]
 }
 
 // Which enumerated sources one type's feed needs. Exactly the `want*` flags
@@ -18582,7 +19289,7 @@ function enumeratedActivityAll(e: EnumeratedActivity): ActivityRow[] {
 // therefore produce the same array, as do `liquidity` and `mm` with their one. That is
 // why the cache key names the SOURCE SET rather than the type — two types that read the
 // same history share one entry instead of reading it twice under two names.
-const ENUMERATED_SOURCE_NAMES = ['otc', 'dcaFailures', 'rewards', 'staking', 'bonds', 'votes', 'xcm', 'ntt'] as const
+const ENUMERATED_SOURCE_NAMES = ['otc', 'dcaFailures', 'rewards', 'staking', 'bonds', 'intents', 'votes', 'xcm', 'ntt'] as const
 type EnumeratedSourceName = typeof ENUMERATED_SOURCE_NAMES[number]
 function enumeratedSourceNeed(type: string): Record<EnumeratedSourceName, boolean> {
   const wantTransfers = type === 'all' || type === 'transfer'
@@ -18593,6 +19300,8 @@ function enumeratedSourceNeed(type: string): Record<EnumeratedSourceName, boolea
     rewards: type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm',
     staking: type === 'all' || type === 'staking' || wantTransfers,
     bonds: type === 'all' || type === 'bond' || wantTransfers,
+    // Intents fold under the trade family like otc.
+    intents: type === 'all' || type === 'intent' || type === 'trade' || wantTransfers,
     votes: type === 'all' || type === 'vote' || wantTransfers,
     xcm: type === 'all' || type === 'xcm' || wantTransfers,
     ntt: type === 'all' || type === 'xcm' || wantTransfers,
@@ -18667,12 +19376,13 @@ async function enumeratedActivityRowsUncached(
   const depth = EXACT_SMALL_SOURCE_ROWS + 1
   const xcmDepth = EXACT_XCM_SOURCE_ROWS + 1
   const need = enumeratedSourceNeed(type)
-  const [otc, dcaFailures, rewards, staking, bonds, voteLegs, xcmLegs, nttLegs] = await Promise.all([
+  const [otc, dcaFailures, rewards, staking, bonds, intents, voteLegs, xcmLegs, nttLegs] = await Promise.all([
     need.otc ? getRecentOtc(depth, from, to, 0, {}, undefined, accounts) : [],
     need.dcaFailures ? getRecentDcaFailures(depth, from, to, accounts) : [],
     need.rewards ? getRecentRewardClaims(depth, from, to, accounts) : [],
     need.staking ? getRecentStaking(depth, from, to, accounts, 0, {}, undefined, undefined) : [],
     need.bonds ? getRecentBonds(depth, from, to, accounts, 0, {}, undefined, undefined) : [],
+    need.intents ? getRecentIntents(depth, from, to, accounts, 0, {}, undefined, undefined) : [],
     // Two vote sources, each read to its own cap and landing in the one `votes`
     // slot the classifier expects: the indexed conviction/Democracy rows, and the
     // collective (Council / Technical Committee) votes out of raw_events. The
@@ -18697,13 +19407,13 @@ async function enumeratedActivityRowsUncached(
     ]) : [],
   ])
   const capped: [ActivityRow[], number][] = [
-    [otc, depth], [dcaFailures, depth], [rewards, depth], [staking, depth], [bonds, depth],
+    [otc, depth], [dcaFailures, depth], [rewards, depth], [staking, depth], [bonds, depth], [intents, depth],
     ...voteLegs.map(leg => [leg, depth] as [ActivityRow[], number]),
     ...xcmLegs.map(leg => [leg, xcmDepth] as [ActivityRow[], number]),
     ...nttLegs.map(leg => [leg, depth] as [ActivityRow[], number]),
   ]
   if (capped.some(([rows, cap]) => rows.length >= cap)) return null
-  return { otc, dcaFailures, rewards, staking, bonds, votes: voteLegs.flat(), xcm: xcmLegs.flat(), ntt: nttLegs.flat() }
+  return { otc, dcaFailures, rewards, staking, bonds, intents, votes: voteLegs.flat(), xcm: xcmLegs.flat(), ntt: nttLegs.flat() }
 }
 
 // Which types this path can count exactly, in the order the reasoning above splits
@@ -18716,7 +19426,7 @@ async function enumeratedActivityRowsUncached(
 // at once, which is sound because the families are disjoint — a row belongs to exactly
 // one of them.
 const EXACTLY_COUNTABLE_ACTIVITY_TYPES = new Set([
-  'all', 'transfer', 'trade', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'bond', 'otc',
+  'all', 'transfer', 'trade', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'bond', 'intent', 'otc',
 ])
 
 // Whether this request is paged by locating its ranks rather than by widening a
@@ -19028,11 +19738,17 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const noteSource = (fetched: number, oldestBlock: number | null): void => {
     sourceWindows.push({ fetched, limit: catFetch, oldestBlock })
   }
+  // An intent action on the Trade tab reads the intent source alone (see
+  // isIntentOnlyTradeRequest): the swap, DCA and OTC reads — and the liquidity
+  // context that exists to classify swaps — contribute nothing to it, and a busy
+  // account's swaps filling their window kept the windowed path widening to the
+  // source ceiling before refusing the page.
+  const intentOnly = isIntentOnlyTradeRequest(type, action)
   const wantTransfers = type === 'all' || type === 'transfer'
   // Classification context: Transfers excludes trade/staking/MM legs, Trades
   // yields share-routed legs to Liquidity — fetch what the exclusions need.
-  const wantTrades = type === 'all' || type === 'trade' || wantTransfers
-  const wantDca = type === 'all' || type === 'trade' || wantTransfers
+  const wantTrades = !intentOnly && (type === 'all' || type === 'trade' || wantTransfers)
+  const wantDca = !intentOnly && (type === 'all' || type === 'trade' || wantTransfers)
   const wantLiquidity = type === 'all' || type === 'liquidity' || wantTrades
   const wantMm = type === 'all' || type === 'mm' || wantTransfers
   // otc folds under the trade chip/type — fetch it whenever trade is (wantTrades
@@ -19041,6 +19757,10 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const wantXcm = type === 'all' || type === 'xcm' || wantTransfers
   const wantStaking = type === 'all' || type === 'staking' || wantTransfers
   const wantBonds = type === 'all' || type === 'bond' || wantTransfers
+  // intent folds under the trade chip/type like otc — fetched whenever trade is,
+  // plus its own `type=intent` request and the Trade tab's intent actions. Owner
+  // scope comes from intent_orders.
+  const wantIntents = type === 'all' || type === 'intent' || wantTrades || intentOnly
   const wantVotes = type === 'all' || type === 'vote' || wantTransfers
   // 1. The account's signed swaps. Signer scope and value predicates are joined
   // before LIMIT so a rare token/value match cannot sit beyond a signer window.
@@ -19488,6 +20208,9 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const bonds = exact ? exact.enumerated.bonds
     : wantBonds ? await getRecentBonds(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
   noteSource(bonds.length, oldestWindowBlock(bonds, r => r.blockHeight))
+  const intents = exact ? exact.enumerated.intents
+    : wantIntents ? await getRecentIntents(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
+  noteSource(intents.length, oldestWindowBlock(intents, r => r.blockHeight))
   const govVotes = exact || !wantVotes ? []
     : (await getRecentVotes(catFetch, from, to, 0, {}, accounts, queryFilters)).map(voteActivityRow)
   // Collective (Council / Technical Committee) votes are a source of their own,
@@ -19516,10 +20239,12 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   // rare types (e.g. dca, mm) aren't starved out by the slice below.
   const stakingExtrinsics = activityExtrinsicSet(staking)
   const bondExtrinsics = activityExtrinsicSet(bonds)
+  const intentExtrinsics = activityExtrinsicSet(intents)
   const mmExtrinsics = activityExtrinsicSet(mmTx)
   const scopedTransfers = transfers.filter(t =>
     !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
     !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+    !(t.extrinsicIndex != null && intentExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
     !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
     !(t.extrinsicIndex != null && liqCreateExt.has(`${t.blockHeight}:${t.extrinsicIndex}`)))
   // Same SQL rule the exact count's swap arm applies (accountSwapTradeArm), so the
@@ -19527,7 +20252,9 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const feeSwapKeys = await feePurchaseSwapKeys(trades)
   const userTrades = dropShareRoutedTrades(trades, activityExtrinsicSet(liq))
   const userMm = mmTx.filter(r => !isModuleAcct(r.who))
-  let merged = (await suppressActivityPlumbing([...userTrades, ...scopedTransfers, ...dcaTrades, ...rewards, ...liq, ...staking, ...bonds, ...voteRows, ...userMm, ...otc, ...xcm]))
+  // The ICE pot's own page keeps its settlement trades: there they are what it did.
+  const keepPot = accounts.some(a => a.toLowerCase() === ICE_POT_ACCOUNT)
+  let merged = (await suppressActivityPlumbing([...userTrades, ...scopedTransfers, ...dcaTrades, ...rewards, ...liq, ...staking, ...bonds, ...intents, ...voteRows, ...userMm, ...otc, ...xcm], { keepPot }))
     .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
   if (type && type !== 'all') merged = merged.filter(r => activityTypeMatchesFamily(r.type, type))
   merged = merged.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
@@ -24273,14 +25000,28 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
     if (scope === 'activity' && type !== 'mm' && type !== 'xcm') {
       let names: readonly string[]
       let ignoreToken = false
+      // Intent rows carry asset_refs on the placement alone: Intent.IntentSubmitted
+      // names the pair, every later event carries the id only (spec §5.1). Over an
+      // intent-only name list a token filter therefore tests the placements and counts
+      // the fills, DCA trades, cancels and expiries without token filtering.
+      let intentOnly = false
+      const intentActions = resolveIntentActions(filters.action)
+      const intentActionNames = (intentActions ?? []).flatMap(a => INTENT_ACTION_EVENTS[a])
       if (type === 'transfer') names = TRANSFER_EVENTS
       else if (type === 'trade') {
+        // otc and intents fold under Trade: no sub-action selected merges swap+otc+intent
+        // counts (mirrors the activity's row merge); an otc or intent sub-action narrows
+        // to just that event set, as activityRowMatchesAction does.
         const otcAction = resolveOtcAction(filters.action)
         if (filters.action === 'dca-failed') { names = ['DCA.TradeFailed']; ignoreToken = true }
-        else if (filters.action === 'dca') { names = ['DCA.TradeExecuted', 'DCA.TradeFailed']; ignoreToken = true }
+        // The dca action admits a DCA intent's trade too (activityRowMatchesAction's
+        // intent arm), so the bars count Intent.DcaTradeExecuted as well — or the
+        // chart empties as schedules migrate while the list keeps its rows.
+        else if (filters.action === 'dca') { names = ['DCA.TradeExecuted', 'DCA.TradeFailed', 'Intent.DcaTradeExecuted']; ignoreToken = true }
         else if (otcAction && OTC_ACTION_EVENTS[otcAction]) { names = OTC_ACTION_EVENTS[otcAction]; ignoreToken = true }
+        else if (intentActions) { names = intentActionNames; intentOnly = true }
         else if (filters.action === 'swap') names = SWAP_EVENTS
-        else names = [...SWAP_EVENTS, ...OTC_EVENT_NAMES, 'DCA.TradeFailed']
+        else names = [...SWAP_EVENTS, ...OTC_EVENT_NAMES, ...INTENT_EVENT_NAMES, 'DCA.TradeFailed']
       } else if (type === 'liquidity') {
         // Referral claims render as liquidity rows without being liquidity-pallet
         // events; they carry their own 'ClaimReferral' action, so only that filter
@@ -24292,17 +25033,21 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
         names = filters.action && STAKING_ACTION_EVENTS[filters.action] ? STAKING_ACTION_EVENTS[filters.action] : STAKING_EVENT_NAMES
       } else if (type === 'bond') {
         names = filters.action ? (BOND_ACTION_EVENTS[filters.action] ?? []) : BOND_EVENT_NAMES
+      } else if (type === 'intent') {
+        names = filters.action ? intentActionNames : INTENT_EVENT_NAMES
+        intentOnly = true
       } else if (type === 'vote') names = VOTE_EVENTS
       else if (type === 'otc') {
         const otcAction = resolveOtcAction(filters.action)
         names = otcAction && OTC_ACTION_EVENTS[otcAction] ? OTC_ACTION_EVENTS[otcAction] : OTC_EVENT_NAMES
         ignoreToken = true
       } else {
-        names = [...TRANSFER_EVENTS, ...SWAP_EVENTS, ...LIQUIDITY_EVENTS, ...VOTE_EVENTS, ...STAKING_EVENT_NAMES, ...BOND_EVENT_NAMES, ...OTC_EVENT_NAMES]
+        names = [...TRANSFER_EVENTS, ...SWAP_EVENTS, ...LIQUIDITY_EVENTS, ...VOTE_EVENTS, ...STAKING_EVENT_NAMES, ...BOND_EVENT_NAMES, ...INTENT_EVENT_NAMES, ...OTC_EVENT_NAMES]
       }
       const assetFilter = ignoreToken || tokenIds == null ? '' : !tokenIds.length
         ? 'AND 0'
-        : `AND hasAny(asset_refs, [${tokenIds.join(',')}])`
+        : intentOnly ? `AND (event_name != 'Intent.IntentSubmitted' OR hasAny(asset_refs, [${tokenIds.join(',')}]))`
+          : `AND hasAny(asset_refs, [${tokenIds.join(',')}])`
       // An action no event in this category produces selects nothing — the same answer
       // the list gives it — rather than an empty `IN ()`.
       const nameFilter = names.length ? `event_name IN (${sqlNames(names)})` : '0'
@@ -24403,7 +25148,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
       } else {
         // 'all' — union of raw_events categories; OR each category's own token
         // predicate so the count mirrors the merged activity for the selected token.
-        const allEvents = sqlNames([...TRANSFER_EVENTS, ...SWAP_EVENTS, ...LIQUIDITY_EVENTS, ...VOTE_EVENTS, ...STAKING_EVENT_NAMES, ...BOND_EVENT_NAMES, ...OTC_EVENT_NAMES])
+        const allEvents = sqlNames([...TRANSFER_EVENTS, ...SWAP_EVENTS, ...LIQUIDITY_EVENTS, ...VOTE_EVENTS, ...STAKING_EVENT_NAMES, ...BOND_EVENT_NAMES, ...INTENT_EVENT_NAMES, ...OTC_EVENT_NAMES])
         let where = `event_name IN (${allEvents})`
         if (tokenIds != null) {
           if (!tokenIds.length) where += ' AND 0'
@@ -24420,6 +25165,8 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
             if (tokenIds.includes(0)) parts.push(`(event_name IN (${sqlNames(VOTE_EVENTS)}))`)
             const bondIds = bondIdsForTokens(tokenIds)
             if (bondIds?.length) parts.push(`(event_name IN (${sqlNames(BOND_EVENT_NAMES)}) AND ${BOND_ASSET_SQL} IN (${bondIds.join(',')}))`)
+            // Only the placement names the pair (see the histogram path above).
+            parts.push(`(event_name = 'Intent.IntentSubmitted' AND (toUInt32(JSONExtractInt(args_json,'intent','data','value','assetIn')) IN (${ids}) OR toUInt32(JSONExtractInt(args_json,'intent','data','value','assetOut')) IN (${ids})))`)
             where += ` AND (${parts.join(' OR ')})`
           }
         }

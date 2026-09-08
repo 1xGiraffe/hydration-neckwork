@@ -7,6 +7,7 @@ import {
   getStats, getRecentBlocks, getBlock, getRecentExtrinsics, getExtrinsic, getExtrinsicAt,
   getExtrinsicActivity, getBlockActivity,
   getHolders, getAddress, getAddressHistory, search, getAssets, getAssetFilterOptions, getFilterNames, getAccounts, getDcaSchedule, getDcaScheduleIdAt, getDcaExecution,
+  getIntentOrder,
   getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getGlobalActivityTotal, getMoneyMarket, getAssetDetail, getAssetDcas, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag, getTagMemberAccounts,
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressListTotal, getTagListTotal,
@@ -28,6 +29,7 @@ import {
 import { getHdxDashboard } from '../services/hdxService.ts'
 import { FLOW_CURSOR_RE, REVENUE_RANGES, getRevenueDashboard, getRevenueFlow, getStakerDistributions } from '../services/revenueService.ts'
 import { getHollarDashboard } from '../services/hollarService.ts'
+import { getIceDashboard } from '../services/iceService.ts'
 import { getSecurityDashboard } from '../services/securityService.ts'
 import { getWormholeBridgeDetail } from '../services/wormholeNttService.ts'
 import { countLiquiditySources } from '../services/poolService.ts'
@@ -38,7 +40,7 @@ import { ACCOUNT_AFFINITY_BUSY_CODE, getCloseAccounts, getCloseAccountsForTag } 
 // once here rather than in the eight places the service branches on it.
 // Exported so the notification rule registry's own copy (which must stay free
 // of this module's route/service imports) can be pinned equal to it by test.
-export const activityTypes = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc', 'bond']
+export const activityTypes = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc', 'bond', 'intent']
 const ACTIVITY_TYPE_ALIASES: Record<string, string> = { stake: 'staking' }
 export const uint32Param = z.coerce.number().int().min(0).max(0xffff_ffff)
 
@@ -88,7 +90,7 @@ const MAX_ACTIVITY_OFFSET = 2_500
 // This is what withheld /activity?tab=vote&page=490: the vote feed is 4,844 pages of
 // 25 and 92% of them sat behind a cap that costs it 51ms to serve.
 const MAX_NARROW_ACTIVITY_OFFSET = 250_000
-const NARROW_ACTIVITY_TYPES = new Set(['vote', 'staking', 'otc', 'bond'])
+const NARROW_ACTIVITY_TYPES = new Set(['vote', 'staking', 'otc', 'bond', 'intent'])
 export const maxActivityOffsetFor = (type: string) =>
   NARROW_ACTIVITY_TYPES.has(type) ? MAX_NARROW_ACTIVITY_OFFSET : MAX_ACTIVITY_OFFSET
 // A WINDOWED account/tag activity request — one carrying a min-USD floor, the single
@@ -445,6 +447,26 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (offset == null) return badOffset(reply)
     const detail = await getDcaSchedule(params.data.scheduleId, offset, limitParam(q, 25))
     if (!detail) return reply.status(404).send({ error: 'DCA schedule not found' })
+    return detail
+  })
+
+  // An ICE intent (limit order / DCA intent), addressed by its u128 id as a decimal
+  // string. A miss is described, never negatively cached (see getIntentOrder).
+  fastify.get('/explorer/intent/:intentId', async (req, reply) => {
+    // A u128 spans 39 decimal digits without filling them: '9'×39 passes the width
+    // check and reaches toUInt128 in getIntentOrders, which ClickHouse refuses — a
+    // 500 for a malformed id. Bound the value too. The refinement repeats the digit
+    // test because zod still runs it over a value the regex already rejected, and
+    // BigInt throws on a non-numeral.
+    const params = z.object({
+      intentId: z.string().regex(/^\d{1,39}$/).refine(id => /^\d+$/.test(id) && BigInt(id) <= 2n ** 128n - 1n, { message: 'Invalid intent id' }),
+    }).safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid intent id' })
+    const q = req.query as Record<string, unknown>
+    const offset = offsetParam(q)
+    if (offset == null) return badOffset(reply)
+    const detail = await getIntentOrder(params.data.intentId, offset, limitParam(q, 25))
+    if (!detail) return reply.status(404).send({ error: 'Intent not found', intentId: params.data.intentId, hint: 'not indexed yet, or never existed' })
     return detail
   })
 
@@ -912,6 +934,10 @@ export async function explorerRoutes(fastify: FastifyInstance) {
 
   fastify.get('/explorer/hollar', async () => {
     return getHollarDashboard()
+  })
+
+  fastify.get('/explorer/ice', async () => {
+    return getIceDashboard()
   })
 
   fastify.get('/explorer/security', async () => {

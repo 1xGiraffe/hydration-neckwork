@@ -267,9 +267,12 @@ export type MatchPayload =
       /** Fuse only: which leg, how spent it is, and what it is spending. */
       direction?: FuseDirection; utilizationPct?: number; limit?: number; durationSec?: number }
 
-/** A DCA schedule as it was created: the standing order, not any one execution. */
+/** A DCA schedule as it was created: the standing order, not any one execution.
+ * Since runtime 443 a DCA intent is one too: `intentId` names it (its u128 id as a
+ * decimal string) and `id` is then its short `seq` handle, never a schedule id. */
 export interface DcaScheduleRow {
   id: number
+  intentId?: string
   blockHeight: number
   who: string
   assetIn: number
@@ -370,8 +373,12 @@ function matchRows<T>(
 // FETCH the same way — so a rule naming 'dca' means "a trade row carrying the
 // flag". Comparing the rule's word to `row.type` ('dca' === 'trade') matched
 // nothing and silenced every dca rule outright.
-const activityTypeSelects = (row: ActivityRow, type: string): boolean =>
-  type === 'dca' ? row.type === 'trade' && row.dca === true : activityTypeMatchesFamily(row.type, type)
+// A DCA intent (runtime 443's DCA) is a `dca` row to a rule as well, so a rule
+// written for the old schedules survives the migration instead of going silent.
+export const activityTypeSelects = (row: ActivityRow, type: string): boolean =>
+  type === 'dca'
+    ? (row.type === 'trade' && row.dca === true) || (row.type === 'intent' && row.intentKind === 'dca')
+    : activityTypeMatchesFamily(row.type, type)
 
 export function evaluateAccountActivity(rows: readonly ActivityRow[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
   return rules.flatMap(rule => {
@@ -392,15 +399,31 @@ export function evaluateAccountActivity(rows: readonly ActivityRow[], rules: rea
 // anything left to check once the feed has been asked the right question: the
 // rows are already of the kind's type, so only the USD floor and the optional
 // asset scope remain.
+//
+// Within the Trade family the row's ACTION decides whether it is news at all,
+// before the floor is applied (largeTradeRowEligible).
 export function evaluateLargeValue(rows: readonly ActivityRow[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
   return rules.flatMap(rule => {
     const p = rule.params as RuleParams['large-trade']
     return matchRows(rows, rule, window, r => r.blockHeight, activityIdentity,
-      r => isFinalRow(r)
+      r => isFinalRow(r) && largeTradeRowEligible(r)
         && r.valueUsd != null && r.valueUsd >= p.minUsd
         && (p.assetId == null || activityReferencesAsset(r, p.assetId)),
       row => ({ lane: 'activity', row }))
   })
+}
+
+// A placement is rare and each one is news; a fill is a trade; a cancel traded
+// nothing and placed nothing (an OTC Pull no longer fires). A DCA-intent placement
+// is a standing order and is judged by dcaStartMatches on its per-hour notional,
+// not here.
+export function largeTradeRowEligible(r: ActivityRow): boolean {
+  if (r.type === 'otc') return r.otcAction === 'Place' || r.otcAction === 'Fill'
+  if (r.type === 'intent') {
+    if (r.intentAction === 'Place') return r.intentKind === 'swap'
+    return r.intentAction === 'Fill' || r.intentAction === 'PartialFill' || r.intentAction === 'DcaTrade'
+  }
+  return true
 }
 
 // What the protocol itself earned on this extrinsic, LP share excluded.
@@ -810,6 +833,7 @@ export function activityPath(row: ActivityRow): string {
       case 'mm': return MM_SLUG[row.mmAction ?? ''] ?? 'lend'
       case 'staking': return 'staking'
       case 'bond': return row.bondAction === 'Redeem' ? 'bond-redeem' : 'bond-issue'
+      case 'intent': return INTENT_SLUG[row.intentAction ?? ''] ?? 'intent-place'
       case 'vote': return 'vote'
       case 'otc': return row.otcAction === 'Pull' ? 'otc-pull' : row.otcAction === 'Fill' ? 'otc-fill' : 'otc-place'
       default: return 'transfer'
@@ -817,6 +841,8 @@ export function activityPath(row: ActivityRow): string {
   })()
   // A DCA execution's canonical page is its SCHEDULE, matching the UI.
   if ((row.type === 'dca' || row.dca) && row.dcaScheduleId != null) return `/dca/${row.dcaScheduleId}`
+  // An intent row's canonical page is its ORDER (every lifecycle event links to it).
+  if (row.type === 'intent' && row.intentId) return `/intent/${row.intentId}`
   const id = activityIdentity(row)
   return id ? `/${slug}/${id}` : `/block/${row.blockHeight}`
 }
@@ -824,10 +850,20 @@ const MM_SLUG: Record<string, string> = {
   Supply: 'lend', Withdraw: 'withdraw', Borrow: 'borrow', Repay: 'repay',
   LiquidationCall: 'liquidate', Liquidate: 'liquidate', ClaimRewards: 'claim-rewards',
 }
+// The UI's slugs for an intent row (activitySlug), used only when the row lacks its
+// order id — the canonical link is the order page.
+const INTENT_SLUG: Record<string, string> = {
+  Place: 'intent-place', Fill: 'intent-fill', PartialFill: 'intent-fill', DcaTrade: 'intent-dca-trade',
+  Cancel: 'intent-cancel', Expire: 'intent-expire',
+}
+// Product copy: a swap intent is a limit order, a dca intent is the new DCA.
+const INTENT_VERB: Record<string, string> = {
+  Place: 'placed', Fill: 'filled', PartialFill: 'partially filled', DcaTrade: 'trade', Cancel: 'cancelled', Expire: 'expired',
+}
 
 const ACTIVITY_LABEL: Record<ActivityRow['type'], string> = {
   transfer: 'Transfer', trade: 'Swap', xcm: 'Cross-chain', liquidity: 'Liquidity',
-  mm: 'Money market', dca: 'DCA', staking: 'Staking', vote: 'Vote', otc: 'OTC', bond: 'Bond',
+  mm: 'Money market', dca: 'DCA', staking: 'Staking', vote: 'Vote', otc: 'OTC', bond: 'Bond', intent: 'Intent',
 }
 function activityHeadline(row: ActivityRow): string {
   if (row.type === 'liquidity' && row.liqAction === 'ClaimReferral') return 'Claim referral rewards'
@@ -835,6 +871,10 @@ function activityHeadline(row: ActivityRow): string {
   if (row.type === 'mm' && row.mmAction) return row.mmAction
   if (row.type === 'otc' && row.otcAction) return `OTC ${row.otcAction.toLowerCase()}`
   if (row.type === 'bond' && row.bondAction) return `Bond ${row.bondAction.toLowerCase()}`
+  if (row.type === 'intent' && row.intentAction) {
+    const noun = row.intentKind === 'dca' ? 'DCA intent' : row.intentKind === 'swap' ? 'Limit order' : 'Intent'
+    return `${noun} ${INTENT_VERB[row.intentAction] ?? row.intentAction.toLowerCase()}`
+  }
   if (row.type === 'trade' && row.dca) return 'DCA swap'
   return ACTIVITY_LABEL[row.type]
 }
@@ -981,7 +1021,7 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
       const row = p.row
       const inSym = assetDescriptor(row.assetIn).symbol
       const outSym = assetDescriptor(row.assetOut).symbol
-      const title: RenderPart[] = [textPart(`DCA started ${inSym} → ${outSym}`)]
+      const title: RenderPart[] = [textPart(`${row.intentId ? 'DCA intent' : 'DCA'} started ${inSym} → ${outSym}`)]
       if (row.who) title.push(textPart('by'), accountPart(renderAccount(accountRef(row.who), viewerTag)))
       // The notification states the PLAN: what each trade moves, how often, and
       // what the first hour adds up to — which is the figure the rule matched on
@@ -999,7 +1039,8 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
               ? [textPart(`· ~${compactAmount(p.executions)} executions over ~${humanDuration(p.runtimeMs)}`)]
               : []),
           ]
-      return { title, body: [plan, size], path: `/dca/${row.id}` }
+      // An intent-backed start opens the order page; a schedule its schedule page.
+      return { title, body: [plan, size], path: row.intentId ? `/intent/${row.intentId}` : `/dca/${row.id}` }
     }
     case 'safety-state': {
       // Every one of these is a statement about the bridge's own state, so they
@@ -1106,7 +1147,9 @@ export function evaluateDcaStart(
   return rules.flatMap(rule => {
     const p = rule.params as RuleParams['large-trade']
     if (p.dcaStart === false) return []
-    return matchRows(rows, rule, window, r => r.blockHeight, r => `dca:${r.id}`,
+    // A seq and a schedule id live in different number spaces, so an intent keeps
+    // its own identity prefix rather than colliding with schedule `id`s.
+    return matchRows(rows, rule, window, r => r.blockHeight, r => r.intentId ? `intent:${r.intentId}` : `dca:${r.id}`,
       row => {
         if (p.assetId != null && row.assetIn !== p.assetId && row.assetOut !== p.assetId) return false
         return dcaHourly(row, valueUsd, blockMs).hourlyUsd >= p.minUsd
@@ -2070,7 +2113,10 @@ const argNumber = (args: Record<string, unknown>, key: string): number | null =>
 async function dcaStartMatches(rules: NotificationRule[], window: BlockWindow): Promise<RuleMatch[]> {
   const enabled = rules.filter(r => (r.params as RuleParams['large-trade']).dcaStart !== false)
   if (!enabled.length) return []
-  const rows = await queryWindowDcaSchedules(window)
+  // Two sources, one shape: the old pallet's schedules and runtime 443's DCA
+  // intents. Both are standing orders and both are judged on the same hourly notional.
+  const [schedules, intents] = await Promise.all([queryWindowDcaSchedules(window), queryWindowDcaIntents(window)])
+  const rows = [...schedules, ...intents]
   if (!rows.length) return []
   const prices = await ensurePrices()
   const valueUsd = (assetId: number, raw: string): number | null => {
@@ -2142,6 +2188,42 @@ async function queryWindowDcaSchedules(window: BlockWindow): Promise<DcaSchedule
     assetIn: r.asset_in, assetOut: r.asset_out, direction: r.direction,
     amountPer: String(r.amount_per), totalAmount: String(r.total_amount), periodBlocks: r.period,
   }))
+}
+
+// A DCA intent placed in the window, in the schedule shape the matcher and the
+// renderer already read. The intent fixes what each trade SELLS (`amountIn`) and
+// budgets in that same asset, which is exactly the old Sell schedule's shape; a
+// rolling intent (no budget) is '0' as an unbounded schedule is on chain. `id` is the
+// short seq handle for display; `intentId` is the identity and the link.
+export type RawDcaIntentOrderRow = {
+  intent_id: string; seq: string | number; owner: string; asset_in: number; asset_out: number
+  amount_in: string; budget: string; period: number; block_height: number
+}
+export function dcaIntentScheduleRow(r: RawDcaIntentOrderRow): DcaScheduleRow {
+  return {
+    id: Number(r.seq), intentId: String(r.intent_id), blockHeight: Number(r.block_height), who: r.owner,
+    assetIn: Number(r.asset_in), assetOut: Number(r.asset_out), direction: 'Sell',
+    amountPer: String(r.amount_in), totalAmount: /^\d+$/.test(r.budget ?? '') ? r.budget : '0', periodBlocks: Number(r.period),
+  }
+}
+
+// DCA intents placed in the window. intent_orders is keyed by id, so this walks
+// the table — one row per order ever placed, replay-deduplicated by FINAL; small
+// today, a watch item as intents replace the old schedules.
+async function queryWindowDcaIntents(window: BlockWindow): Promise<DcaScheduleRow[]> {
+  if (!client) return []
+  const res = await client.query({
+    query: `SELECT toString(intent_id) AS intent_id, seq, owner, asset_in, asset_out, amount_in, budget, period, block_height
+            FROM price_data.intent_orders FINAL
+            WHERE kind = 'dca' AND block_height > {from:UInt32} AND block_height <= {to:UInt32}
+            ORDER BY block_height DESC
+            LIMIT {cap:UInt32}`,
+    query_params: { from: window.from, to: window.to, cap: RAW_WINDOW_CAP },
+    format: 'JSONEachRow',
+  })
+  const rows = await res.json<RawDcaIntentOrderRow>()
+  if (rows.length >= RAW_WINDOW_CAP) counters.truncatedPages++
+  return rows.map(dcaIntentScheduleRow)
 }
 
 async function queryWindowTcMotions(window: BlockWindow): Promise<TcMotionEventRow[]> {
