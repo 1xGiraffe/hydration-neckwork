@@ -13,7 +13,7 @@ import type {
   TradeDetail as TradeDetailResponse,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse,
   NotificationChannel, NotificationRule, NotificationInboxRow, NotificationsOverview,
-  FilterNames,
+  FilterNames, IntentOrderDetail, IceSolutionPanel, IceDashboard,
 } from '../../src/types'
 
 /* ---------- deterministic helpers ---------- */
@@ -578,6 +578,9 @@ function mockExtrinsicActivity(height: number, index: number): ActivityRow[] {
   if (/liquidity/i.test(x.callName)) return [{ ...base, type: 'liquidity', asset: aref(aIn), amount: raw(amount, aIn.decimals), liqAction: 'Add' }]
   if (/staking/i.test(x.callName)) return [{ ...base, type: 'staking', asset: aref(ASSETS[0]), amount: raw(amount, ASSETS[0].decimals), stakingAction: 'Stake' }]
   if (/bonds/i.test(x.callName)) return [{ ...base, type: 'bond', asset: aref(aIn), amount: raw(amount, aIn.decimals), bondAction: 'Redeem', bondFee: null, bondUnderlying: aref(aIn) }]
+  // A limit order's placement: the u128 intent id is one past u64, so the decimal
+  // string is the only shape that carries it; intentSeq is its short #0 handle.
+  if (/intent/i.test(x.callName)) return [{ ...base, type: 'intent', assetIn: aref(aIn), assetOut: aref(aOut), amountIn: raw(amount, aIn.decimals), amountOut: raw(amount * aIn.price / aOut.price, aOut.decimals), intentId: '18446744073709551616', intentSeq: 0, intentKind: 'swap', intentAction: 'Place', intentPartial: false, intentDeadline: null }]
   if (/DCA/i.test(x.callName)) return [{ ...base, type: 'trade', assetIn: aref(aIn), assetOut: aref(aOut), amountIn: raw(amount, aIn.decimals), amountOut: raw(amount * aIn.price / aOut.price, aOut.decimals), dca: true, dcaScheduleId: 33546 }]
   if (/EVM/i.test(x.callName)) return [{ ...base, type: 'mm', asset: aref(aIn), amount: raw(amount, aIn.decimals), mmAction: 'Supply' }]
   return [{ ...base, type: 'trade', assetIn: aref(aIn), assetOut: aref(aOut), amountIn: raw(amount, aIn.decimals), amountOut: raw(amount * aIn.price / aOut.price, aOut.decimals) }]
@@ -2183,6 +2186,25 @@ function mockLiquiditySourceCount(assetId: number): number {
     + (assetId === XYK_POOL.assetA || assetId === XYK_POOL.assetB ? 1 : 0)
 }
 
+// The ICE venue as it stands at launch: runtime-443 defaults on the status strip
+// and not one intent yet, so every section renders its empty state. The old DCA
+// schedules are all still waiting for the migration switch.
+function buildIce(): IceDashboard {
+  const DAY = 86_400_000
+  const today = Math.floor(MOCK_NOW_MS / DAY) * DAY
+  const days = Array.from({ length: 30 }, (_, i) => new Date(today - (29 - i) * DAY).toISOString().slice(0, 10))
+  return {
+    status: { solverMode: 'V4', protocolFeePpm: 200, dcaMigrationEnabled: false, uniswapV3: null, asOfBlock: 14362830 },
+    openOrders: { total: 0, limit: 0, dca: 0, byAsset: [] },
+    fillsPerDay: days.map(day => ({ day, fills: 0, solutions: 0, usd: 0, matchedUsd: 0, routedUsd: 0 })),
+    quality: { medianTimeToFillSec: null, partialShare: null, cancelRate: null, expiryRate: null, priceVsLimitBp: { p10: null, p50: null, p90: null } },
+    feeRevenue: { perDay: days.map(day => ({ day, usd: 0 })), potHoldings: [] },
+    migration: { migrated: 0, cancelled: 0, byReason: [], remainingSchedules: 1_240, perDay: days.map(day => ({ day, migrated: 0, cancelled: 0 })) },
+    topPairs: [],
+    generatedAt: new Date(MOCK_NOW_MS).toISOString(),
+  }
+}
+
 const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => unknown }[] = [
   { re: /^\/explorer\/stats$/, fn: () => ({ headBlock: TIP, finalizedBlock: TIP - 2, headTime: tsAt(TIP), avgBlockSec: 5.7, nominalBlockSec: 6, transfers24h: 18204, extrinsics24h: 42318, activeAccounts24h: 7120, hdxPrice: 0.02184 } satisfies ExplorerStats) },
   { re: /^\/indexer$/, fn: () => ({ blockHeight: TIP, blockTimestamp: tsAt(TIP), lagSeconds: 6, chainBlockHeight: TIP + 1, blocksBehindHead: 1 } satisfies IndexerStatus) },
@@ -2195,6 +2217,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   { re: /^\/explorer\/filter-names$/, fn: () => MOCK_FILTER_NAMES },
   { re: /^\/explorer\/hdx$/, fn: () => buildHdx() },
   { re: /^\/explorer\/hollar$/, fn: () => buildHollar() },
+  { re: /^\/explorer\/ice$/, fn: () => buildIce() },
   { re: /^\/explorer\/security$/, fn: () => buildSecurity() },
   { re: /^\/explorer\/security\/wormhole$/, fn: () => buildSecurityWormhole() },
   { re: /^\/explorer\/accounts$/, fn: (_m, qs) => buildAccounts(Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 50), qs.get('sort') ?? 'value') },
@@ -2612,6 +2635,9 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       }
     },
   },
+  // An ICE intent's order page. Any decimal id answers; the low 64 bits are its #seq
+  // and an odd seq is a DCA intent, so both kinds have a page under the mock.
+  { re: /^\/explorer\/intent\/(\d+)$/, fn: (m, qs) => mockIntentOrder(m[1], Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 25)) },
   { re: /^\/explorer\/address\/(.+)$/, fn: (m) => buildAddress(decodeURIComponent(m[1])) },
   { re: /^\/explorer\/tag\/(.+)\/counts$/, fn: () => ({ extrinsics: 1451, extrinsicsOnBehalf: 0, events: 26787, votes: 0 }) },
   {
@@ -2759,6 +2785,93 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/value-events$/, fn: () => [] as ValueEvent[] },
   { re: /^\/user\/list-tag\/([^/]+)\/([^/]+)$/, fn: (m) => decodeURIComponent(m[2]) === MOCK_LIST_TAG_DETAIL.tagId ? MOCK_LIST_TAG_DETAIL : undefined },
 ]
+
+/* ---------- ICE intents (runtime 443) ---------- */
+// The same order the mock's intent Place row names (see mockExtrinsicActivity):
+// 2^64 is limit order #0, filled in two solutions, with the callback its fill queued.
+// 2^64 + 1 is DCA intent #1, the order DCA schedule 33546 was migrated onto, still
+// open with most of its budget ahead of it. Fills are DcaTrade/Fill rows with their
+// own event coordinates, so the page's row links resolve like the schedule page's.
+const U64 = 1n << 64n
+function mockIntentOrder(id: string, offset: number, limit: number): IntentOrderDetail | undefined {
+  if (!/^\d+$/.test(id)) return undefined
+  const seq = Number(BigInt(id) & (U64 - 1n))
+  const dot = aref(assetById.get(5)!)
+  if (seq % 2 === 1) {
+    const hdx = aref(assetById.get(0)!)
+    const budget = raw(5000, 10)
+    const trades = [100, 400].map((ago, i) => ({
+      type: 'intent', blockHeight: TIP - ago, timestamp: tsAt(TIP - ago), eventIndex: 6, extrinsicIndex: 1,
+      who: A.fox, to: null, asset: null, assetIn: dot, assetOut: hdx, amount: null,
+      amountIn: raw(12.5, 10), amountOut: raw(12.5 * 4.4422 / 0.02184, 12), valueUsd: 55.5,
+      intentId: id, intentSeq: seq, intentKind: 'dca', intentAction: 'DcaTrade',
+      intentRemainingBudget: raw(5000 - 12.5 * (2 - i), 10),
+    })) as ActivityRow[]
+    return {
+      order: {
+        intentId: id, seq, owner: A.fox.accountId, kind: 'dca', assetIn: 5, assetOut: 0,
+        amountIn: budget, amountOut: '0', partial: false, partialMin: null, slippagePpm: 30_000,
+        budget, period: 300, deadlineMs: null, forwardContract: null,
+        blockHeight: TIP - 600, extrinsicIndex: null, timestamp: tsAt(TIP - 600),
+      },
+      owner: A.fox, assetIn: dot, assetOut: hdx, status: 'open',
+      filledIn: raw(25, 10), filledOut: raw(25 * 4.4422 / 0.02184, 12),
+      fills: trades.slice(offset, offset + limit), fillsTotal: trades.length,
+      dca: { remainingBudget: raw(4975, 10), lastExecutionBlock: TIP - 100, nextEligibleBlock: TIP + 200 },
+      callbacks: [], migratedFrom: 33546, limitPriceOutPerIn: null,
+      links: { submission: { block: TIP - 600, extrinsicIndex: null }, solutions: [{ block: TIP - 100, extrinsicIndex: 1 }, { block: TIP - 400, extrinsicIndex: 1 }] },
+    }
+  }
+  const usdt = aref(assetById.get(10)!)
+  const fills = [
+    { ago: 470, eventIndex: 6, amountIn: 600, amountOut: 2715, action: 'Fill' as const },
+    { ago: 480, eventIndex: 5, amountIn: 400, amountOut: 1810, action: 'PartialFill' as const },
+  ].map(f => ({
+    type: 'intent', blockHeight: TIP - f.ago, timestamp: tsAt(TIP - f.ago), eventIndex: f.eventIndex, extrinsicIndex: 1,
+    who: A.fox, to: null, asset: null, assetIn: dot, assetOut: usdt, amount: null,
+    amountIn: raw(f.amountIn, 10), amountOut: raw(f.amountOut, 6), valueUsd: f.amountOut,
+    intentId: id, intentSeq: seq, intentKind: 'swap', intentAction: f.action,
+  })) as ActivityRow[]
+  return {
+    order: {
+      intentId: id, seq, owner: A.fox.accountId, kind: 'swap', assetIn: 5, assetOut: 10,
+      amountIn: raw(1000, 10), amountOut: raw(4500, 6), partial: true, partialMin: raw(100, 10), slippagePpm: 0,
+      budget: null, period: 0, deadlineMs: MOCK_NOW_MS + 3 * 86_400_000, forwardContract: null,
+      blockHeight: TIP - 500, extrinsicIndex: 2, timestamp: tsAt(TIP - 500),
+    },
+    owner: A.fox, assetIn: dot, assetOut: usdt, status: 'filled',
+    filledIn: raw(1000, 10), filledOut: raw(4525, 6),
+    fills: fills.slice(offset, offset + limit), fillsTotal: fills.length,
+    dca: null,
+    callbacks: [{
+      queueId: (U64 + 84n).toString(),
+      queuedAt: { block: TIP - 470, extrinsicIndex: 1, timestamp: tsAt(TIP - 470) },
+      fees: raw(0.35, 12),
+      executed: { block: TIP - 469, result: 'ok', error: null },
+    }],
+    migratedFrom: null, limitPriceOutPerIn: '4.500000000000',
+    links: { submission: { block: TIP - 500, extrinsicIndex: 2 }, solutions: [{ block: TIP - 470, extrinsicIndex: 1 }, { block: TIP - 480, extrinsicIndex: 1 }] },
+  }
+}
+// What one `ICE.submit_solution` did: the limit order's two fills above matched
+// against each other's counter-flow, the pot routing the remainder through the
+// Omnipool, and the fee it swept. Not wired to any mock extrinsic — the mock's
+// extrinsic identities are fixed — so a test attaches it to one itself.
+export function mockIceSolution(): IceSolutionPanel {
+  const order = mockIntentOrder(U64.toString(), 0, 25)!
+  const dot = aref(assetById.get(5)!), usdt = aref(assetById.get(10)!)
+  const potTrades: ActivityRow[] = [{
+    type: 'trade', blockHeight: TIP - 470, timestamp: tsAt(TIP - 470), eventIndex: 3, extrinsicIndex: 1,
+    who: A.treasury, to: null, asset: null, assetIn: dot, assetOut: usdt, amount: null,
+    amountIn: raw(150, 10), amountOut: raw(666, 6), valueUsd: 666,
+  }]
+  return {
+    intentsExecuted: 2, tradesExecuted: 1, score: '1000000000000', builtAt: TIP - 471,
+    fills: order.fills, potTrades,
+    feeSwept: [{ asset: usdt, amount: raw(2.26, 6), valueUsd: 2.26 }],
+    matchedInUsd: 4525 - 666, routedInUsd: 666,
+  }
+}
 
 const mockTags: Tag[] = [
   { tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', note: 'Exchange — hot + deposit wallets', icon: '/tag-icons/kraken.jpg', memberCount: 2 },

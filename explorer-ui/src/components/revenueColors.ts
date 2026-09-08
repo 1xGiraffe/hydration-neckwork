@@ -8,8 +8,10 @@ import type { RevenueStream, StakerPot } from '../types'
 // fees (the deep blue is the hub/H2O fee), HOLLAR sage (--hollar, the brand pair from ui.tsx) for HOLLAR interest,
 // borrow amber for the reserve factor, red/orange for the liquidation pair,
 // HDX pink for network fees (paid to the treasury in HDX terms), lavender for
-// the HSM. The palette was validated for adjacent-pair CVD separation in BOTH
-// themes in the stack order below.
+// the HSM, and the intent family's --cat-intent for the ICE matched fee, so the
+// fee and the intent activity badges keep one hue in both themes. The palette
+// was validated for adjacent-pair CVD separation in BOTH themes in the stack
+// order below.
 export const REVENUE_STREAM_COLOR: Record<RevenueStream, string> = {
   omnipool_asset_fee: 'var(--cat-liquidity)',
   omnipool_protocol_fee: 'var(--cat-liquidity-remove)',
@@ -18,6 +20,7 @@ export const REVENUE_STREAM_COLOR: Record<RevenueStream, string> = {
   asset_reserve: 'var(--amber)',
   hollar_borrow: 'var(--hollar)',
   hsm_revenue: 'var(--lavender)',
+  ice_matched_fee: 'var(--cat-intent)',
   network_fee: 'var(--accent)',
 }
 
@@ -30,6 +33,8 @@ export const REVENUE_STREAM_LABEL: Record<RevenueStream, string> = {
   asset_reserve: 'Borrow interest share',
   hollar_borrow: 'HOLLAR interest',
   hsm_revenue: 'HSM revenue',
+  // The 200 ppm protocol fee on intent-to-intent matched volume, swept per solution.
+  ice_matched_fee: 'ICE matched fee',
   network_fee: 'Network fees',
 }
 
@@ -40,7 +45,7 @@ export const REVENUE_STREAM_LABEL: Record<RevenueStream, string> = {
  */
 export const REVENUE_STREAMS_ORDERED: RevenueStream[] = [
   'network_fee', 'hollar_borrow', 'omnipool_asset_fee', 'pepl_liquidation_profit',
-  'omnipool_protocol_fee', 'asset_reserve', 'hsm_revenue', 'liquidation_penalty',
+  'omnipool_protocol_fee', 'asset_reserve', 'hsm_revenue', 'ice_matched_fee', 'liquidation_penalty',
 ]
 
 // The staker-distribution stack wears the /hdx lock palette (lockColors.ts) —

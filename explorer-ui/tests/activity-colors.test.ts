@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { activityBadge, categoryColor, CAT, UNFILTERED_COLOR } from '../src/components/activityColors'
+import { activityBadge, categoryColor, intentLabel, CAT, UNFILTERED_COLOR } from '../src/components/activityColors'
 import { ACTIVITY_ACTIONS } from '../src/components/ui'
 import type { ActivityRow } from '../src/types'
 
@@ -9,17 +9,34 @@ function row(r: Partial<ActivityRow>): ActivityRow {
   return r as ActivityRow
 }
 
+// Intents are the Trade filter list's newest values (the chips have no Intent tab),
+// so the Trade family admits the violet ramp beside its own orange. The slug each
+// filter value carries maps to the action the server fills the row with.
+const INTENT_FAMILY = [CAT.intent, CAT.intentFill, CAT.intentCancel, CAT.intentDca]
+const INTENT_SLUG_ACTION: Record<string, NonNullable<ActivityRow['intentAction']>> = {
+  'intent-place': 'Place', 'intent-fill': 'Fill', 'intent-cancel': 'Cancel', 'intent-expire': 'Expire', 'intent-dca-trade': 'DcaTrade',
+}
+function slugAction(v: string): NonNullable<ActivityRow['intentAction']> {
+  const a = INTENT_SLUG_ACTION[v]
+  if (!a) throw new Error(`${v} is not an intent filter value`)
+  return a
+}
+function intentRow(action: ActivityRow['intentAction']): ActivityRow {
+  return row({ type: 'intent', intentKind: action === 'DcaTrade' ? 'dca' : 'swap', intentAction: action })
+}
+
 // The coding is only worth anything if a hue means one thing. These pin the parts
 // that would silently drift: a new action falling through to the grey default, or
 // a family leaking into a hue that belongs to another.
 describe('activity category coding', () => {
   it('gives every action in the shared filter list a color from its own family', () => {
     const family: Record<string, string[]> = {
-      trade: [CAT.trade, CAT.tradeDca, CAT.tradeFill, CAT.tradePlace, CAT.bad],
+      trade: [CAT.trade, CAT.tradeDca, CAT.tradeFill, CAT.tradePlace, CAT.bad, ...INTENT_FAMILY],
       mm: [CAT.borrow, CAT.borrowWithdraw, CAT.borrowLend, CAT.borrowRepay, CAT.borrowClaim, CAT.bad],
       liquidity: [CAT.liquidity, CAT.liquidityRemove, CAT.liquidityCreate, CAT.liquidityClaim],
       stake: [CAT.stake, CAT.stakeExit, CAT.stakeReward, CAT.stakeMigrate, CAT.stakeCancel],
       bond: [CAT.bond, CAT.bondRedeem],
+      intent: INTENT_FAMILY,
       vote: [CAT.vote, CAT.aye, CAT.nay],
       xcm: [CAT.xcm],
     }
@@ -27,11 +44,13 @@ describe('activity category coding', () => {
     const build: Record<string, (v: string) => ActivityRow> = {
       trade: v => v.startsWith('otc-')
         ? row({ type: 'otc', otcAction: (v.slice(4, 5).toUpperCase() + v.slice(5)) as ActivityRow['otcAction'] })
+        : v.startsWith('intent-') ? intentRow(slugAction(v))
         : row({ type: 'trade', dca: v.startsWith('dca'), dcaStatus: v === 'dca-failed' ? 'failed' : undefined }),
       mm: v => row({ type: 'mm', mmAction: v }),
       liquidity: v => row({ type: 'liquidity', liqAction: v as ActivityRow['liqAction'] }),
       stake: v => row({ type: 'staking', stakingAction: v }),
       bond: v => row({ type: 'bond', bondAction: v as ActivityRow['bondAction'] }),
+      intent: v => intentRow(v as ActivityRow['intentAction']),
       vote: v => row({ type: 'vote', voteAction: v }),
       xcm: () => row({ type: 'xcm' }),
     }
@@ -45,7 +64,7 @@ describe('activity category coding', () => {
   })
 
   it('never falls through to the unstyled default for a known activity type', () => {
-    const types: ActivityRow['type'][] = ['transfer', 'trade', 'xcm', 'liquidity', 'mm', 'dca', 'staking', 'vote', 'otc', 'bond']
+    const types: ActivityRow['type'][] = ['transfer', 'trade', 'xcm', 'liquidity', 'mm', 'dca', 'staking', 'vote', 'otc', 'bond', 'intent']
     for (const type of types) {
       expect(activityBadge(row({ type })).col, type).not.toBe('var(--text-medium)')
     }
@@ -89,6 +108,9 @@ describe('activity category coding', () => {
       staking: ['Stake', 'Unstake', 'Staking reward', 'GIGAHDX Migrate', 'GIGAHDX Cancel Unstake']
         .map(a => row({ type: 'staking', stakingAction: a })),
       bond: (['Issue', 'Redeem'] as const).map(a => row({ type: 'bond', bondAction: a })),
+      // PartialFill shares Fill's shade and Expire shares Cancel's (see the grouping
+      // test below); what must stay apart is place, fill, leave, and a DCA's trade.
+      intent: (['Place', 'Fill', 'Cancel', 'DcaTrade'] as const).map(a => intentRow(a)),
     }
     for (const [fam, rows] of Object.entries(families)) {
       const cols = rows.map(r => activityBadge(r).col)
@@ -105,6 +127,30 @@ describe('activity category coding', () => {
     same('Staking reward', 'GIGAHDX Reward')
     expect(activityBadge(row({ type: 'otc', otcAction: 'Pull' })).col)
       .toBe(activityBadge(row({ type: 'otc', otcAction: 'Place' })).col)
+    // A partial fill IS a fill, and an expiry IS the order leaving unfilled — each
+    // wears its sibling's shade and the label tells them apart.
+    expect(activityBadge(intentRow('PartialFill')).col).toBe(activityBadge(intentRow('Fill')).col)
+    expect(activityBadge(intentRow('Expire')).col).toBe(activityBadge(intentRow('Cancel')).col)
+  })
+
+  // The product calls a swap intent a limit order and a dca intent a DCA intent, and
+  // every surface says so in those words. The Trade filter list reads them from the
+  // same function the badge does, so the two cannot diverge.
+  it('names intents in the product\'s words, on the badge and in the filter list alike', () => {
+    expect(activityBadge(intentRow('Place')).label).toBe('Limit order placed')
+    expect(activityBadge(intentRow('Fill')).label).toBe('Limit order filled')
+    expect(activityBadge(intentRow('PartialFill')).label).toBe('Limit order partially filled')
+    expect(activityBadge(intentRow('Cancel')).label).toBe('Limit order cancelled')
+    expect(activityBadge(intentRow('Expire')).label).toBe('Limit order expired')
+    expect(activityBadge(intentRow('DcaTrade')).label).toBe('DCA intent trade')
+    expect(intentLabel('dca', 'Place')).toBe('DCA intent placed')
+    expect(intentLabel('dca', 'Cancel')).toBe('DCA intent cancelled')
+    expect(intentLabel(undefined, undefined)).toBe('Intent')
+    expect(ACTIVITY_ACTIONS.trade).toContainEqual({ v: 'intent-place', label: 'Limit order placed' })
+    expect(ACTIVITY_ACTIONS.trade).toContainEqual({ v: 'intent-fill', label: 'Limit order filled' })
+    expect(ACTIVITY_ACTIONS.trade).toContainEqual({ v: 'intent-cancel', label: 'Limit order cancelled' })
+    expect(ACTIVITY_ACTIONS.trade).toContainEqual({ v: 'intent-expire', label: 'Limit order expired' })
+    expect(ACTIVITY_ACTIONS.trade).toContainEqual({ v: 'intent-dca-trade', label: 'DCA intent trade' })
   })
 
   it('keeps movement grey and out of the hues that carry meaning elsewhere', () => {
@@ -137,6 +183,8 @@ describe('activity category coding', () => {
     // dca and otc are surfaced under the Trade feed, so they answer to its color.
     expect(categoryColor('dca')).toBe(CAT.trade)
     expect(categoryColor('otc')).toBe(CAT.trade)
+    // Intents are filed under Trade too, but own their violet where a surface names them.
+    expect(categoryColor('intent')).toBe(CAT.intent)
     // An unfiltered view is not a category; it takes a neutral slate no family owns.
     expect(categoryColor('all')).toBe(UNFILTERED_COLOR)
     expect(UNFILTERED_COLOR).toBe('var(--chart-neutral)')

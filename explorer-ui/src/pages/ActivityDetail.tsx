@@ -4,7 +4,7 @@ import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../router'
 import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ConvictionTag, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
-import { BOND_LABELS, LIQ_LABELS, MM_LABELS } from '../components/activityColors'
+import { BOND_LABELS, LIQ_LABELS, MM_LABELS, intentLabel } from '../components/activityColors'
 import { RevenueRow } from '../components/RevenueRow'
 import { Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
@@ -69,6 +69,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
           {row?.type === 'mm' && row.mmMarket && <span className="sub">{row.mmMarket}</span>}
           {row?.type === 'staking' && row.stakingAction && <span className="sub">{row.stakingAction}</span>}
           {row?.type === 'bond' && row.bondAction && <span className="sub">{BOND_LABELS[row.bondAction]}</span>}
+          {row?.type === 'intent' && <span className="sub">{intentLabel(row.intentKind, row.intentAction)}</span>}
           {row?.type === 'vote' && voteSub && <span className="sub">{voteSub}</span>}
           {row?.type === 'otc' && row.otcOrderId != null && <span className="sub">order #{row.otcOrderId}</span>}
         </div>
@@ -93,7 +94,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
           <div className="detail-card"><div className="dl">
             {/* headed: this page states the row's context in its own title and subtitle,
                 so the description drops what that already says (see ActivityDesc). */}
-            <div className="dt">Activity</div><div className="dd"><ActivityDesc r={row} headed /></div>
+            <div className="dt">Activity</div><div className="dd"><ActivityDesc r={row} headed now={now} /></div>
             <div className="dt">Value</div><div className="dd mono">{F.usd(row.valueUsd)}</div>
             <RevenueRow revenue={row.revenue} />
             {row.who && <><div className="dt">Account</div><div className="dd"><AddrPill account={row.who} /></div></>}
@@ -158,6 +159,20 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
               {row.otcAction === 'Place' && <><div className="dt">Partially fillable</div><div className="dd">{row.otcPartiallyFillable ? 'Yes' : 'No'}</div></>}
               {row.otcAction === 'Fill' && <><div className="dt">Partial fill</div><div className="dd">{row.otcPartial ? 'Yes' : 'No'}</div></>}
               {row.otcAction === 'Fill' && row.otcFee != null && row.assetOut && <><div className="dt">Fee</div><div className="dd mono">{F.exact(row.otcFee, row.assetOut.decimals)} <AssetChip asset={row.assetOut} /></div></>}
+            </>}
+            {row.type === 'intent' && <>
+              {/* The order is what this event belongs to; its page lists every event of
+                  its life. The short #seq is its handle, the full u128 its identity. The
+                  Activity row above already states the limit or the legs, so the rest
+                  here is the order's terms as labelled rows. */}
+              {row.intentId != null && <><div className="dt">Order</div><div className="dd mono"><Link to={paths.intent(row.intentId)} className="hash">#{row.intentSeq ?? row.intentId}</Link>{row.intentSeq != null && <span className="muted"> · {row.intentId}</span>}</div></>}
+              <div className="dt">Kind</div><div className="dd">{intentLabel(row.intentKind, undefined)}</div>
+              <div className="dt">Action</div><div className="dd">{intentLabel(row.intentKind, row.intentAction)}</div>
+              {row.intentAction === 'Place' && <><div className="dt">Partial fills</div><div className="dd">{row.intentPartial ? 'Allowed' : 'Not allowed'}</div></>}
+              {row.intentDeadline && <><div className="dt">Deadline</div><div className="dd mono">{F.datetime(row.intentDeadline)}</div></>}
+              {row.intentForward && <><div className="dt">Forward contract</div><div className="dd mono" style={{ overflowWrap: 'anywhere' }}>{row.intentForward}</div></>}
+              {row.intentRemainingBudget != null && row.assetIn && <><div className="dt">Remaining budget</div><div className="dd mono">{F.exact(row.intentRemainingBudget, row.assetIn.decimals)} <AssetChip asset={row.assetIn} /></div></>}
+              {row.intentMigratedFrom != null && <><div className="dt">Migrated from</div><div className="dd mono"><Link to={paths.dcaSchedule(row.intentMigratedFrom)} className="hash">DCA schedule #{row.intentMigratedFrom}</Link></div></>}
             </>}
             {row.dca && row.dcaStatus === 'failed' && <><div className="dt">Result</div><div className="dd"><StatusBadge ok={false} /></div></>}
             <div className="dt">When</div><div className="dd mono"><MomentLink at={row} now={now} /> <FinalizedBadge finalized={row.blockHeight <= (stats?.finalizedBlock ?? -1)} /></div>

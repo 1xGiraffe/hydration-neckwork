@@ -423,7 +423,28 @@ export interface ExtrinsicDetail extends ExtrinsicSummary {
   evmCalls?: DecodedEvmCall[]
   // Present only on `Ethereum.transact`.
   evmTx?: EvmTransactionFacts
+  // Present only on `ICE.submit_solution`: what the solver's batch did.
+  iceSolution?: IceSolutionPanel
 }
+
+// ICE intents (runtime 443). A swap intent is the product's limit order, a dca intent
+// its DCA. Amounts are raw units of the order's assets; `intentId` is the u128 as a
+// decimal string (it starts past u64, so it is never a number) and `seq` its low 64
+// bits, the short "#n" handle.
+export type IntentOrderStatus = 'open' | 'partially-filled' | 'filled' | 'completed' | 'cancelled' | 'expired'
+export interface IntentOrder { intentId: string; seq: number; owner: string; kind: 'swap' | 'dca'; assetIn: number; assetOut: number; amountIn: string; amountOut: string; partial: boolean; partialMin: string | null; slippagePpm: number; budget: string | null; period: number; deadlineMs: number | null; forwardContract: string | null; blockHeight: number; extrinsicIndex: number | null; timestamp: string }
+export interface IntentOrderDetail {
+  order: IntentOrder; owner: AccountRef | null; assetIn: AssetRef; assetOut: AssetRef; status: IntentOrderStatus
+  filledIn: string; filledOut: string; fills: ActivityRow[]; fillsTotal: number
+  dca: { remainingBudget: string | null; lastExecutionBlock: number | null; nextEligibleBlock: number | null } | null
+  callbacks: { queueId: string; queuedAt: { block: number; extrinsicIndex: number | null; timestamp: string }; fees: string | null; executed: { block: number; result: 'ok' | 'error'; error: string | null } | null }[]
+  migratedFrom: number | null
+  limitPriceOutPerIn: string | null
+  links: { submission: { block: number; extrinsicIndex: number | null }; solutions: { block: number; extrinsicIndex: number | null }[] }
+}
+// One `ICE.submit_solution` extrinsic's outcome: the fills it settled, the pot's own
+// trades that routed the unmatched remainder, and the fee it swept.
+export interface IceSolutionPanel { intentsExecuted: number; tradesExecuted: number; score: string; builtAt: number; fills: ActivityRow[]; potTrades: ActivityRow[]; feeSwept: { asset: AssetRef; amount: string; valueUsd: number | null }[]; matchedInUsd: number | null; routedInUsd: number | null }
 
 export interface TransferRow {
   blockHeight: number
@@ -753,7 +774,7 @@ export interface XcmFeeLeg {
 }
 
 export interface ActivityRow {
-  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond'
+  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond' | 'intent'
   revenue?: ActivityRevenue
   // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
   finalized?: boolean
@@ -839,6 +860,20 @@ export interface ActivityRow {
   otcPartial?: boolean            // fill came from OTC.PartiallyFilled
   otcPartiallyFillable?: boolean  // Placed order property
   otcFee?: string                 // fills; denominated in assetOut
+  // ICE intents (runtime 443). A `swap` intent is the product's limit order, a `dca`
+  // intent its DCA. `intentId` is the u128 as a decimal string — it starts past u64,
+  // so it is never a number; `intentSeq` is its low 64 bits, the short "#n" handle.
+  // A Place row's legs are the limit (amountIn sold for at least amountOut); a fill's
+  // legs are what moved. Filed under the Trade feed, like OTC.
+  intentId?: string
+  intentSeq?: number
+  intentKind?: 'swap' | 'dca'
+  intentAction?: 'Place' | 'Fill' | 'PartialFill' | 'DcaTrade' | 'Cancel' | 'Expire'
+  intentPartial?: boolean                 // Place: partial fills allowed
+  intentDeadline?: string | null          // Place: when the order stops standing (ISO)
+  intentRemainingBudget?: string | null   // DcaTrade: budget left after this trade, raw units of assetIn
+  intentMigratedFrom?: number | null      // Place: the DCA schedule this intent replaced
+  intentForward?: string | null           // fills: the contract the settlement was forwarded to
 }
 
 export interface VoteRow {
@@ -1086,7 +1121,7 @@ export interface HdxMover { account: AccountRef; balanceHdx: number; boughtHdx: 
 export type RevenueStream =
   | 'omnipool_asset_fee' | 'omnipool_protocol_fee' | 'liquidation_penalty'
   | 'pepl_liquidation_profit' | 'asset_reserve' | 'hollar_borrow'
-  | 'hsm_revenue' | 'network_fee'
+  | 'hsm_revenue' | 'ice_matched_fee' | 'network_fee'
 export type RevenueRange = '30d' | '1y' | 'all'
 
 export interface RevenuePoint { t: number; usd: number }
@@ -1254,6 +1289,19 @@ export interface HollarDashboard {
   trends: HollarTrends
 }
 
+// The ICE intent venue (runtime 443): status, open orders, fills, execution
+// quality, the matched-volume fee and the DCA→intent migration (api iceService).
+export interface IceDashboard {
+  status: { solverMode: 'V4' | 'Passthrough' | 'Disabled'; protocolFeePpm: number; dcaMigrationEnabled: boolean; uniswapV3: { factory: string; swapRouter: string; quoter: string } | null; asOfBlock: number }
+  openOrders: { total: number; limit: number; dca: number; byAsset: { asset: AssetRef; reserved: string; reservedUsd: number | null; orders: number }[] }
+  fillsPerDay: { day: string; fills: number; solutions: number; usd: number; matchedUsd: number; routedUsd: number }[]
+  quality: { medianTimeToFillSec: number | null; partialShare: number | null; cancelRate: number | null; expiryRate: number | null; priceVsLimitBp: { p10: number | null; p50: number | null; p90: number | null } }
+  feeRevenue: { perDay: { day: string; usd: number }[]; potHoldings: { asset: AssetRef; amount: string; valueUsd: number | null }[] }
+  migration: { migrated: number; cancelled: number; byReason: { reason: string; count: number }[]; remainingSchedules: number; perDay: { day: string; migrated: number; cancelled: number }[] }
+  topPairs: { assetIn: AssetRef; assetOut: AssetRef; fills: number; usd: number }[]
+  generatedAt: string
+}
+
 export interface TagDetail {
   tagId: string
   name: string
@@ -1323,10 +1371,16 @@ export interface DcaScheduleDetail {
   // Owner's spendable balance of the sold asset, on live open-ended schedules
   // only: what dates an order that has no budget to exhaust.
   fundingBalance: string | null
-  status: 'active' | 'completed' | 'terminated' | 'cancelled'
+  status: 'active' | 'completed' | 'terminated' | 'cancelled' | 'migrated' | 'migration-cancelled'
   statusAt: string | null
   // Named termination reason for error terminations (e.g. "token frozen").
   statusReason: string | null
+  // Runtime 443 moved live schedules onto ICE intents. A migrated schedule names the
+  // intent that took its place; one the runtime could not migrate names why, and what
+  // it refunded (raw units of the sold asset).
+  migratedToIntentId?: string | null
+  migrationReason?: string | null
+  migrationRefunded?: string | null
   executions: { count: number; failed: number; attempts: number; totalIn: string; totalOut: string }
   rows: ActivityRow[]
 }

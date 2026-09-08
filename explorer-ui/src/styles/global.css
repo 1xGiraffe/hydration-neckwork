@@ -117,6 +117,11 @@
   --cat-bond: #4FD1C5;
   --cat-bond-redeem: #22948A;
 
+  --cat-intent: #7C5CFF;
+  --cat-intent-fill: #5B3FD6;
+  --cat-intent-cancel: #A99BFF;
+  --cat-intent-dca: #9D7BFF;
+
   --cat-transfer: var(--neutral);
   --cat-xcm: var(--neutral-cool);
   --cat-vote: #DFB1F3;
@@ -205,6 +210,11 @@
 
   --cat-bond: #17877D;
   --cat-bond-redeem: #0C5A53;
+
+  --cat-intent: #9F86FF;
+  --cat-intent-fill: #7F66E6;
+  --cat-intent-cancel: #C4B8FF;
+  --cat-intent-dca: #B59CFF;
 
   --cat-transfer: var(--neutral);
   --cat-xcm: var(--neutral-cool);
