@@ -3,6 +3,7 @@ import * as v282 from '../v282'
 import * as v305 from '../v305'
 import * as v313 from '../v313'
 import * as v323 from '../v323'
+import * as v443 from '../v443'
 
 export const swapped =  {
     name: 'Broadcast.Swapped',
@@ -93,6 +94,25 @@ export const swapped3 =  {
             outputs: sts.array(() => v323.Asset),
             fees: sts.array(() => v323.Fee),
             operationStack: sts.array(() => v323.ExecutionType),
+        })
+    ),
+    /**
+     * Trade executed.
+     *
+     * Runtime 443: `Filler` gained the `UniswapV3` variant (Uniswap v3 as a router
+     * venue). Amounts, fees and the operation stack are unchanged from v323.
+     */
+    v443: new EventType(
+        'Broadcast.Swapped3',
+        sts.struct({
+            swapper: v443.AccountId32,
+            filler: v443.AccountId32,
+            fillerType: v443.Filler,
+            operation: v443.TradeOperation,
+            inputs: sts.array(() => v443.Asset),
+            outputs: sts.array(() => v443.Asset),
+            fees: sts.array(() => v443.Fee),
+            operationStack: sts.array(() => v443.ExecutionType),
         })
     ),
 }
