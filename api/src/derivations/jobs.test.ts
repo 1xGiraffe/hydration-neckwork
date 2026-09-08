@@ -521,7 +521,7 @@ describe('revenueEventsInsertSql', () => {
   it('covers every eventful stream exactly once per partition', () => {
     expect(REVENUE_EVENT_STREAMS_INSERTED).toEqual([
       'omnipool_asset_fee', 'omnipool_protocol_fee', 'liquidation_penalty',
-      'pepl_liquidation_profit', 'asset_reserve', 'hsm_revenue', 'network_fee',
+      'pepl_liquidation_profit', 'asset_reserve', 'hsm_revenue', 'ice_matched_fee', 'network_fee',
     ])
   })
 })

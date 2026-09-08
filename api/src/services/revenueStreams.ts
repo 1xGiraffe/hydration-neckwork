@@ -47,6 +47,7 @@ export const REVENUE_STREAMS = [
   'asset_reserve',
   'hollar_borrow',
   'hsm_revenue',
+  'ice_matched_fee',
   'network_fee',
 ] as const
 export type RevenueStream = (typeof REVENUE_STREAMS)[number]
@@ -115,6 +116,14 @@ export function attributablePayerSql(expr: string): string {
 
 /** The Aave collector — see the feesCharts.ts note; the liquidation cut and MintedToTreasury land here. */
 export const AAVE_COLLECTOR = '0xe52567ff06acd6cbe7ba94dc777a3126e180b6d9'
+
+/**
+ * The ICE solver's two pallet accounts (`modlice_ice#` / `modlice_fee#`, pubkey
+ * hex). Every matched intent settles through the pot; the matched-volume
+ * protocol fee is swept from it to the fee account at the end of each solution.
+ */
+export const ICE_POT_ACCOUNT = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
+export const ICE_FEE_ACCOUNT = '0x6d6f646c6963655f666565230000000000000000000000000000000000000000'
 
 /** The Omnipool's hub asset (H2O); its fee legs are the protocol fee, never an asset fee. */
 const HUB_ASSET_ID = 1
@@ -470,6 +479,42 @@ WHERE usd > 0`
 }
 
 /**
+ * The ICE matched-volume protocol fee. At the end of every `ICE.submit_solution`
+ * the runtime sweeps the fee (200 ppm of the intent-to-intent matched volume)
+ * from the settlement pot to the fee account as an ordinary Currencies.transfer,
+ * so that one `Currencies.Transferred` from pot to fee account IS the stream.
+ * The runtime emits a paired `Tokens.Transfer` / `Balances.Transfer` for the
+ * same movement; reading either beside it would book the fee twice. The payer
+ * is the matched set, not one account, so rows carry no payer and no
+ * destination class — protocol revenue in full, like asset_reserve. The amount
+ * is a u128 that serialises as a number or a string depending on magnitude,
+ * hence the raw-then-unquote read. The zero guard mirrors network_fee's: a
+ * solution with no matched volume sweeps nothing.
+ */
+function iceMatchedFeeRowsSql(extra: string): string {
+  return `-- rev:ice_matched_fee
+WITH sweeps AS (
+  SELECT block_height, event_index, min(block_timestamp) AS block_time,
+         argMax(toUInt32(JSONExtractUInt(args_json, 'currencyId')), ingested_at) AS asset_id,
+         argMax(toUInt256OrZero(replaceAll(JSONExtractRaw(args_json, 'amount'), '"', '')), ingested_at) AS amount
+  FROM price_data.raw_events
+  WHERE event_name = 'Currencies.Transferred'
+    AND ${WINDOW}
+    AND (${extra})
+    AND JSONExtractString(args_json, 'from') = '${ICE_POT_ACCOUNT}'
+    AND JSONExtractString(args_json, 'to') = '${ICE_FEE_ACCOUNT}'
+  GROUP BY block_height, event_index
+),
+rows AS (
+  SELECT block_height, block_time, event_index, toUInt16(0) AS leg_index, '' AS dest, '' AS account,
+         asset_id, amount
+  FROM sweeps
+  WHERE amount > 0
+)
+${valuedTailSql('ice_matched_fee')}`
+}
+
+/**
  * Network fees — the two arms described in the module header. Both arms carry
  * a positive-amount guard: ~5% of TransactionFeePaid rows are paysFee-No zeros
  * and a zero deposit is nothing.
@@ -558,6 +603,8 @@ export function buildRevenueEventRowsSql(stream: EventfulRevenueStream, extraPre
       return assetReserveRowsSql(extraPredicate)
     case 'hsm_revenue':
       return hsmRevenueRowsSql(extraPredicate)
+    case 'ice_matched_fee':
+      return iceMatchedFeeRowsSql(extraPredicate)
     case 'network_fee':
       return networkFeeRowsSql(extraPredicate)
   }

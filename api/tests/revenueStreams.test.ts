@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
+  ICE_FEE_ACCOUNT,
+  ICE_POT_ACCOUNT,
   PROTOCOL_REVENUE_PREDICATE_SQL,
   REVENUE_EVENT_COLUMNS,
   REVENUE_STREAMS,
@@ -213,6 +215,45 @@ describe('asset_reserve', () => {
     expect(sql).toContain("'MintedToTreasury'")
     expect(sql).toContain("'amountMinted'")
     expect(sql).toMatch(/'' AS account/)
+  })
+})
+
+describe('ice_matched_fee', () => {
+  const sql = buildRevenueEventRowsSql('ice_matched_fee')
+
+  it('is listed once, right after hsm_revenue, so every ordered consumer agrees', () => {
+    expect(REVENUE_STREAMS.indexOf('ice_matched_fee')).toBe(REVENUE_STREAMS.indexOf('hsm_revenue') + 1)
+    expect(REVENUE_STREAMS.filter(s => s === 'ice_matched_fee')).toHaveLength(1)
+  })
+
+  it('reads the pot → fee-account sweep as ONE Currencies.Transferred, in that direction', () => {
+    expect(sql).toContain('-- rev:ice_matched_fee')
+    expect(sql).toContain("event_name = 'Currencies.Transferred'")
+    expect(sql).toContain(`JSONExtractString(args_json, 'from') = '${ICE_POT_ACCOUNT}'`)
+    expect(sql).toContain(`JSONExtractString(args_json, 'to') = '${ICE_FEE_ACCOUNT}'`)
+    // The runtime emits a paired Tokens.Transfer / Balances.Transfer for the same
+    // movement; reading either beside Currencies.Transferred books the fee twice.
+    expect(sql).not.toContain("'Tokens.Transfer'")
+    expect(sql).not.toContain("'Balances.Transfer'")
+  })
+
+  it('names two distinct pallet accounts', () => {
+    expect(ICE_POT_ACCOUNT).not.toBe(ICE_FEE_ACCOUNT)
+    for (const account of [ICE_POT_ACCOUNT, ICE_FEE_ACCOUNT]) {
+      expect(account).toMatch(/^0x6d6f646c[0-9a-f]{56}$/)
+    }
+  })
+
+  it('books the transferred currency and a u128 amount whether it was serialised as number or string', () => {
+    expect(sql).toContain("JSONExtractUInt(args_json, 'currencyId')")
+    expect(sql).toContain(`toUInt256OrZero(replaceAll(JSONExtractRaw(args_json, 'amount'), '"', ''))`)
+    expect(sql).toMatch(/argMax/)
+  })
+
+  it('is protocol revenue with no payer: the matched set paid it, not one account', () => {
+    expect(sql).toMatch(/'' AS dest/)
+    expect(sql).toMatch(/'' AS account/)
+    expect(sql).not.toContain('startsWith')
   })
 })
 
