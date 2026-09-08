@@ -441,6 +441,45 @@ function decodeSwapEvent(event: EventLike): DecodedSwap | null {
   }
 }
 
+// Typegen arms are structural pins on the block's runtime metadata: one new enum
+// variant anywhere in the event makes every arm return false and, before runtime
+// 443, the swap was silently dropped from volume. When no arm matches, decode the
+// JSON form the block's own metadata produces (the same path the raw indexer's
+// args_json comes from), validate the swap shape, and warn once per spec version
+// so the missing arm gets added instead of the loss going unnoticed.
+const jsonFallbackWarned = new Set<string>();
+
+function jsonBroadcastTrade(event: EventLike): DecodedTrade | null {
+  const runtime = event.block._runtime;
+  if (typeof runtime?.decodeJsonEventRecordArguments !== 'function') return null;
+  const args = runtime.decodeJsonEventRecordArguments(event) as Record<string, unknown> | null;
+  if (!args || typeof args !== 'object') return null;
+  const fillerKind = (args.fillerType as { __kind?: unknown } | undefined)?.__kind;
+  if (typeof args.swapper !== 'string' || typeof fillerKind !== 'string') return null;
+  const legs = (value: unknown): Array<{ asset: number; amount: bigint }> | null => {
+    if (!Array.isArray(value)) return null;
+    const out: Array<{ asset: number; amount: bigint }> = [];
+    for (const item of value) {
+      const asset = (item as { asset?: unknown })?.asset;
+      const amount = (item as { amount?: unknown })?.amount;
+      if (typeof asset !== 'number') return null;
+      if (typeof amount !== 'string' && typeof amount !== 'number' && typeof amount !== 'bigint') return null;
+      out.push({ asset, amount: BigInt(amount) });
+    }
+    return out;
+  };
+  const inputs = legs(args.inputs);
+  const outputs = legs(args.outputs);
+  if (!inputs || !outputs) return null;
+  const specVersion = runtime.specVersion ?? 'unknown';
+  const key = `${event.name}@${specVersion}`;
+  if (!jsonFallbackWarned.has(key)) {
+    jsonFallbackWarned.add(key);
+    console.warn(`[extractVolume] ${event.name} matched no typegen arm at spec ${specVersion}; decoded from block metadata instead — add a typegen arm for this runtime`);
+  }
+  return broadcastTrade({ swapper: args.swapper, fillerType: { __kind: fillerKind }, inputs, outputs });
+}
+
 function decodeTradeEvent(event: EventLike): DecodedTrade | null {
   const legacySwap = decodeSwapEvent(event);
   if (legacySwap) {
@@ -471,6 +510,10 @@ function decodeTradeEvent(event: EventLike): DecodedTrade | null {
     }
 
     if (name === 'Broadcast.Swapped3') {
+      if (broadcast.swapped3.v443.is(event)) {
+        return broadcastTrade(broadcast.swapped3.v443.decode(event));
+      }
+
       if (broadcast.swapped3.v323.is(event)) {
         return broadcastTrade(broadcast.swapped3.v323.decode(event));
       }
@@ -478,6 +521,11 @@ function decodeTradeEvent(event: EventLike): DecodedTrade | null {
       if (broadcast.swapped3.v313.is(event)) {
         return broadcastTrade(broadcast.swapped3.v313.decode(event));
       }
+    }
+
+    if (name.startsWith('Broadcast.Swapped')) {
+      const fallback = jsonBroadcastTrade(event);
+      if (fallback) return fallback;
     }
 
     console.warn(`[extractVolume] Unable to decode swap event: ${name} (no matching version)`);
