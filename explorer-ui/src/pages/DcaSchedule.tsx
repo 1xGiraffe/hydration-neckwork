@@ -31,6 +31,9 @@ function OrderLine({ data, cadence }: { data: DcaScheduleDetail; cadence: number
 
 const STATUS_TONE: Record<DcaScheduleDetail['status'], string> = {
   active: 'var(--green)', completed: 'var(--sky)', terminated: 'var(--red)', cancelled: 'var(--text-low)',
+  // Runtime 443 moved live schedules onto ICE intents: a migration is the schedule
+  // finishing by other means, a failed one is a termination.
+  migrated: 'var(--sky)', 'migration-cancelled': 'var(--red)',
 }
 
 // The dollar figure beside a planned amount. A live schedule still has that money
@@ -124,6 +127,12 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
                   <OrderLine data={data} cadence={cadence?.seconds ?? 0} />
                   <div className="dca-hero-facts">
                     <span className="dca-state" style={{ color: STATUS_TONE[data.status] }}>● {data.status}</span>
+                    {/* Runtime 443 ended every live schedule by migrating it onto an ICE
+                        intent, so this schedule's story continues on that page; one the
+                        runtime could not migrate names why and what came back. */}
+                    {data.status === 'migrated' && data.migratedToIntentId && <span>Migrated to <Link to={paths.intent(data.migratedToIntentId)} className="hash" title={`Intent ${data.migratedToIntentId}`}>intent</Link></span>}
+                    {data.status === 'migration-cancelled' && data.migrationReason && <span>{data.migrationReason}</span>}
+                    {data.status === 'migration-cancelled' && data.migrationRefunded != null && <span>refunded <span className="mono">{F.amount(data.migrationRefunded, data.assetIn.decimals)} {data.assetIn.symbol}</span></span>}
                     {/* Separators are drawn by CSS between the facts that survive, so
                         a wrap never strands a dangling "·" at the end of a line. */}
                     {countdown && <span>{countdown.secondsUntil > 0

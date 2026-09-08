@@ -3,7 +3,7 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Revenue } from '../src/pages/Revenue'
-import { REVENUE_STREAMS_ORDERED, REVENUE_STREAM_COLOR, STAKER_POT_COLOR } from '../src/components/revenueColors'
+import { REVENUE_STREAMS_ORDERED, REVENUE_STREAM_COLOR, REVENUE_STREAM_LABEL, STAKER_POT_COLOR } from '../src/components/revenueColors'
 import type { RevenueDashboard, StakerDistributions } from '../src/types'
 
 // Deterministic fixture: two streams over two day-buckets, one attributed payer.
@@ -124,6 +124,14 @@ describe('Revenue page', () => {
     // duplicates would make two streams indistinguishable.
     const colors = REVENUE_STREAMS_ORDERED.map(s => REVENUE_STREAM_COLOR[s])
     expect(new Set(colors).size).toBe(colors.length)
+  })
+
+  it('stacks the ICE matched fee right after HSM revenue, with its own color and label', () => {
+    // The API's stream list appends ice_matched_fee after hsm_revenue; the UI's
+    // legend/stack order follows it so the two surfaces agree on adjacency.
+    expect(REVENUE_STREAMS_ORDERED.indexOf('ice_matched_fee')).toBe(REVENUE_STREAMS_ORDERED.indexOf('hsm_revenue') + 1)
+    expect(REVENUE_STREAM_LABEL.ice_matched_fee).toBe('ICE matched fee')
+    expect(REVENUE_STREAM_COLOR.ice_matched_fee).toBe('var(--cat-intent)')
   })
 
   it('keeps one color per staker pot', () => {

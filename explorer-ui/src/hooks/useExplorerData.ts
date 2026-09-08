@@ -174,6 +174,11 @@ export function useEvmReceipt(txHash: string | null | undefined) {
 export function useDcaSchedule(scheduleId: number, offset = 0) {
   return useQuery({ queryKey: ['dca-schedule', scheduleId, offset], queryFn: ({ signal }) => api.dcaSchedule(scheduleId, offset, 25, signal), staleTime: 8000 })
 }
+// An order's lifecycle is short and its fills arrive with the solutions that settle
+// them, so the page re-reads at the API's own cache period rather than live-polling.
+export function useIntentOrder(intentId: string, offset = 0) {
+  return useQuery({ queryKey: ['intent-order', intentId, offset], queryFn: ({ signal }) => api.intentOrder(intentId, offset, 25, signal), staleTime: 15_000 })
+}
 export function useDcaExecution(height: number, eventIndex: number) {
   return useQuery({ queryKey: ['dca-execution', height, eventIndex], queryFn: ({ signal }) => api.dcaExecution(height, eventIndex, signal), staleTime: 60_000, ...detailWait(height) })
 }
@@ -523,6 +528,9 @@ export function useStakerDistributions(range: RevenueRange) {
 }
 export function useHollarDashboard() {
   return useQuery({ queryKey: ['hollar-dashboard'], queryFn: ({ signal }) => api.hollar(signal), staleTime: 120_000 })
+}
+export function useIceDashboard() {
+  return useQuery({ queryKey: ['ice-dashboard'], queryFn: ({ signal }) => api.ice(signal), staleTime: 120_000 })
 }
 // The circuit-breaker snapshot behind this refreshes every 60s on the API's
 // coordinated node-full refresher, so a matching poll keeps the fuse fills and

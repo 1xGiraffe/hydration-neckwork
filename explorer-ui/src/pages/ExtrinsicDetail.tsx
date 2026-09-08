@@ -4,14 +4,60 @@ import { useEvmReceipt, useExtrinsic, useExtrinsicActivity, useStats } from '../
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, redirect } from '../router'
-import { Crumbs, F, AddrPill, CallPill, FeeAmount, StatusBadge, MempoolResultBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows, AwaitingBlockCard } from '../components/ui'
+import { Crumbs, F, AddrPill, AssetAmount, CallPill, FeeAmount, StatusBadge, MempoolResultBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows, AwaitingBlockCard } from '../components/ui'
 import { blockOf } from '../utils/activityIds'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { api } from '../api/explorer'
 import { ActivityTable, PoolChip } from '../components/ActivityTable'
 import { EvmCallCard, EvmLogView } from '../components/EvmDecoded'
 import { evmTransactionEnvelope } from '../utils/evmDecoded'
-import type { EvmTransactionFacts } from '../types'
+import type { EvmTransactionFacts, IceSolutionPanel } from '../types'
+
+// What one ICE solution did, on the extrinsic page that IS the solver's submission.
+// Two figures split its work: the value it MATCHED — intents settled against each
+// other's counter-flow, the part no pool saw — and the value it ROUTED, the
+// remainder the pot traded through the pools on the intents' behalf. Both are null
+// when any leg is unpriced: a partial sum would read as a smaller solution.
+export function IceSolutionCard({ panel, now }: { panel: IceSolutionPanel; now: number }) {
+  return <>
+    <div className="sec-title" style={{ marginTop: 22 }}>ICE solution</div>
+    <div className="detail-card"><div className="dl">
+      <div className="dt">Executed</div>
+      <div className="dd mono">{F.int(panel.intentsExecuted)} {panel.intentsExecuted === 1 ? 'intent' : 'intents'}
+        <span className="muted"> · {F.int(panel.tradesExecuted)} {panel.tradesExecuted === 1 ? 'trade' : 'trades'}</span>
+      </div>
+      <div className="dt">Score</div>
+      <div className="dd mono">{panel.score}<span className="muted"> · the solver’s claim the runtime accepted</span></div>
+      <div className="dt">Built at</div>
+      <div className="dd mono">block <Link to={paths.block(panel.builtAt)} className="hash">{F.int(panel.builtAt)}</Link>
+        <span className="muted"> · the state the solution was computed against</span>
+      </div>
+      <div className="dt">Matched</div>
+      <div className="dd mono">{F.usd(panel.matchedInUsd)}<span className="muted"> · intents settled against each other, off the pools</span></div>
+      <div className="dt">Routed</div>
+      <div className="dd mono">{F.usd(panel.routedInUsd)}<span className="muted"> · the remainder the pot traded through the pools</span></div>
+      <div className="dt">Fees swept</div>
+      <div className="dd">{panel.feeSwept.length === 0
+        ? <span className="muted">none</span>
+        : panel.feeSwept.map((f, i) => (
+          <span key={`${f.asset.assetId}-${i}`}>{i > 0 && <span className="muted"> · </span>}<AssetAmount asset={f.asset} raw={f.amount} />
+            {f.valueUsd != null && <span className="muted mono"> {F.usd(f.valueUsd)}</span>}
+          </span>
+        ))}
+      </div>
+    </div></div>
+    {/* Each row is one event of this extrinsic, so it links to its own page, as the
+        Activity tab's rows do. */}
+    {panel.fills.length > 0 && <>
+      <div className="sec-title">Fills</div>
+      <ActivityTable rows={panel.fills} now={now} dcaExecutionLinks />
+    </>}
+    {panel.potTrades.length > 0 && <>
+      <div className="sec-title">Pot trades</div>
+      <ActivityTable rows={panel.potTrades} now={now} dcaExecutionLinks />
+    </>}
+  </>
+}
 
 // Copies the extrinsic's SCALE bytes, fetched on demand: extrinsics are stored decoded,
 // so the encoded form comes from the chain (see extrinsicBytes.ts — re-encoding from
@@ -171,6 +217,8 @@ export function ExtrinsicDetail({ id }: { id: string }) {
                 : <><div className="dt">Type</div><div className="dd"><span className="badge pending" style={{ background: 'var(--panel)', color: 'var(--text-medium)' }}>Inherent</span></div></>}
               {data.callName === 'Ethereum.transact' && <EvmTxRows tx={data.evmTx} callArgs={data.callArgs} />}
             </div></div>
+
+            {data.iceSolution && <IceSolutionCard panel={data.iceSolution} now={now} />}
 
             <div className="tabs">
               <button className={tab === 'activity' ? 'active' : ''} onClick={() => setTab('activity')}>Activity {activityRows.length > 0 && <span className="cnt">{activityRows.length}</span>}</button>
