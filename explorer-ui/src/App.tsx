@@ -13,6 +13,7 @@ const Extrinsics = lazy(() => import('./pages/Extrinsics').then(m => ({ default:
 const ExtrinsicDetail = lazy(() => import('./pages/ExtrinsicDetail').then(m => ({ default: m.ExtrinsicDetail })))
 const TradeDetailPage = lazy(() => import('./pages/TradeDetail').then(m => ({ default: m.TradeDetailPage })))
 const DcaSchedule = lazy(() => import('./pages/DcaSchedule').then(m => ({ default: m.DcaSchedule })))
+const Intent = lazy(() => import('./pages/Intent').then(m => ({ default: m.Intent })))
 const Referendum = lazy(() => import('./pages/Referendum').then(m => ({ default: m.Referendum })))
 const Governance = lazy(() => import('./pages/Governance').then(m => ({ default: m.Governance })))
 const DcaResolve = lazy(() => import('./pages/DcaSchedule').then(m => ({ default: m.DcaResolve })))
@@ -37,6 +38,7 @@ const Liquidity = lazy(() => import('./pages/Liquidity').then(m => ({ default: m
 const Hdx = lazy(() => import('./pages/Hdx').then(m => ({ default: m.Hdx })))
 const Revenue = lazy(() => import('./pages/Revenue').then(m => ({ default: m.Revenue })))
 const Hollar = lazy(() => import('./pages/Hollar').then(m => ({ default: m.Hollar })))
+const Ice = lazy(() => import('./pages/Ice').then(m => ({ default: m.Ice })))
 const LinkDevice = lazy(() => import('./pages/LinkDevice').then(m => ({ default: m.LinkDevice })))
 const Notifications = lazy(() => import('./pages/Notifications').then(m => ({ default: m.Notifications })))
 const ApiTokens = lazy(() => import('./pages/ApiTokens').then(m => ({ default: m.ApiTokens })))
@@ -78,6 +80,7 @@ export default function App() {
           ? <TradeDetailPage id={route.id} slug="swap" />
           : <ActivityDetailPage slug={route.slug} id={route.id} />
       case 'dca-schedule': return <DcaSchedule scheduleId={route.scheduleId} />
+      case 'intent': return <Intent intentId={route.intentId} />
       case 'referendum': return <Referendum pallet={route.pallet} index={route.index} />
       case 'governance': return <Governance />
       case 'dca-execution': return <DcaExecution height={route.height} eventIndex={route.eventIndex} />
@@ -97,6 +100,7 @@ export default function App() {
       case 'hdx': return <Hdx />
       case 'revenue': return <Revenue />
       case 'hollar': return <Hollar />
+      case 'ice': return <Ice />
       case 'asset': return <AssetDetail assetId={route.assetId} />
       case 'holders': return <AssetDetail assetId={route.assetId} initialTab="holders" />
       case 'pool': return <PoolDetail poolId={route.poolId} />

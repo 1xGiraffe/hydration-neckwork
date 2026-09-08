@@ -3,7 +3,7 @@ import type {
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
   AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail, RevenueBreakdown, GovernanceOverview, GovernanceReferendaPage, CollectiveMotionsPage, TreasuryTipsPage,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard,
-  RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, AssetPriceWindow, HollarDashboard, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas,
+  RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, AssetPriceWindow, HollarDashboard, IceDashboard, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas, IntentOrderDetail,
   AssetLiquidity, PoolDetail, OmnipoolDetail, PoolLpsResponse, OmnipoolAssetLpsResponse,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
@@ -141,6 +141,8 @@ export const api = {
   dcaSchedule: (scheduleId: number, offset = 0, limit = 25, signal?: AbortSignal) => getJson<DcaScheduleDetail>(withQuery(`/explorer/dca/${scheduleId}`, { offset, limit }), signal),
   dcaScheduleAt: (height: number, index: number, kind: 'event' | 'extrinsic', signal?: AbortSignal) => getJson<{ scheduleId: number }>(withQuery(`/explorer/dca-at/${height}/${index}`, { kind }), signal),
   dcaExecution: (height: number, index: number, signal?: AbortSignal) => getJson<DcaExecutionDetail>(`/explorer/dca/exec/${height}/${index}`, signal),
+  // The id is the u128 as a decimal string and travels as text end to end.
+  intentOrder: (intentId: string, offset = 0, limit = 25, signal?: AbortSignal) => getJson<IntentOrderDetail>(withQuery(`/explorer/intent/${intentId}`, { offset, limit }), signal),
   trade: (height: number, index: number, signal?: AbortSignal) => getJson<TradeDetail>(`/explorer/trade/${height}/${index}`, signal),
   tradeEvent: (height: number, index: number, signal?: AbortSignal) => getJson<TradeDetail>(`/explorer/trade-event/${height}/${index}`, signal),
   events: (limit = 25, from?: string, to?: string, offset = 0, filters?: EventFilters, signal?: AbortSignal) => getJson<EventRow[]>(withQuery('/explorer/events', { limit, offset, from, to, ...filters, h: liveHeadTag() || undefined }), signal),
@@ -270,6 +272,7 @@ export const api = {
   // Live feed: the head tag busts the edge micro-cache the moment a block lands.
   revenueFlow: (after?: string | null, signal?: AbortSignal) => getJson<RevenueFlowResponse>(withQuery('/explorer/revenue/flow', { after: after || undefined, h: liveHeadTag() || undefined }), signal),
   hollar: (signal?: AbortSignal) => getJson<HollarDashboard>('/explorer/hollar', signal),
+  ice: (signal?: AbortSignal) => getJson<IceDashboard>('/explorer/ice', signal),
   security: (signal?: AbortSignal) => getJson<SecurityDashboard>('/explorer/security', signal),
   securityWormhole: (signal?: AbortSignal) => getJson<WormholeBridgeDetail>('/explorer/security/wormhole', signal),
   accounts: (offset = 0, limit = 50, sort: AccountSort = 'value', signal?: AbortSignal) => getJson<AccountsPage>(withQuery('/explorer/accounts', { offset, limit, sort }), signal),

@@ -8,7 +8,7 @@ import type { MouseEvent, ReactNode, CSSProperties } from 'react'
 // preis-ui (window events + a single store), but using the History API so URLs
 // are clean (no `#`). Deep links work from static nginx via `try_files … /index.html`.
 
-const ACTIVITY_SLUGS = ['swap', 'dca', 'transfer', 'cross-chain', 'add-liquidity', 'remove-liquidity', 'create-pool', 'destroy-pool', 'claim-rewards', 'claim-referral-rewards', 'lend', 'withdraw', 'borrow', 'repay', 'liquidate', 'staking', 'vote', 'otc-place', 'otc-pull', 'otc-fill', 'bond-issue', 'bond-redeem'] as const
+const ACTIVITY_SLUGS = ['swap', 'dca', 'transfer', 'cross-chain', 'add-liquidity', 'remove-liquidity', 'create-pool', 'destroy-pool', 'claim-rewards', 'claim-referral-rewards', 'lend', 'withdraw', 'borrow', 'repay', 'liquidate', 'staking', 'vote', 'otc-place', 'otc-pull', 'otc-fill', 'bond-issue', 'bond-redeem', 'intent-place', 'intent-fill', 'intent-cancel', 'intent-expire', 'intent-dca-trade'] as const
 export type ActivitySlug = typeof ACTIVITY_SLUGS[number]
 const ACTIVITY_ID_RE = /^\d+-(?:e)?\d+$/
 // Activity feed tab that lists this slug's rows (crumbs + malformed-id fallback).
@@ -20,6 +20,9 @@ export const ACTIVITY_SLUG_TAB: Record<ActivitySlug, string> = {
   // OTC folds under the Trade activity tab (rows keep their own otc-* slugs).
   'otc-place': 'trade', 'otc-pull': 'trade', 'otc-fill': 'trade',
   'bond-issue': 'bond', 'bond-redeem': 'bond',
+  // Intents fold under Trade as OTC does — a limit order is a trade the chain has yet
+  // to make (rows keep their own intent-* slugs).
+  'intent-place': 'trade', 'intent-fill': 'trade', 'intent-cancel': 'trade', 'intent-expire': 'trade', 'intent-dca-trade': 'trade',
 }
 
 // One section per part of the protocol, so a page never mixes two domains: the
@@ -37,6 +40,9 @@ export type Route =
   | { name: 'extrinsic'; id: string } // "height-index"
   | { name: 'activity-detail'; slug: ActivitySlug; id: string } // "height-index"
   | { name: 'dca-schedule'; scheduleId: number }
+  // An ICE intent's order page. The id is a u128 as a decimal string: it starts past
+  // u64, so it is never a number, and it has no dash, so it is never an activity id.
+  | { name: 'intent'; intentId: string }
   | { name: 'referendum'; pallet: 'opengov' | 'democracy'; index: number }
   | { name: 'governance' }
   | { name: 'dca-execution'; height: number; eventIndex: number }
@@ -58,6 +64,7 @@ export type Route =
   | { name: 'assets' }
   | { name: 'hdx' }
   | { name: 'hollar' }
+  | { name: 'ice' }
   | { name: 'revenue' }
   | { name: 'asset'; assetId: number }
   | { name: 'holders'; assetId: number }
@@ -140,8 +147,16 @@ export function parseRoute(loc: string): Route {
       if (pallet && parts[2] && isSafeId(parts[2])) return { name: 'referendum', pallet, index: Number(parts[2]) }
       return { name: 'activity' }
     }
+    // /intent/<u128>: its own case, deliberately not an ACTIVITY_SLUGS entry — the
+    // bare integer fails ACTIVITY_ID_RE, so as a slug it would silently fall back to
+    // the tab. A malformed id lands on the Trade tab, where intents are listed.
+    case 'intent':
+      return parts[1] && /^\d{1,39}$/.test(parts[1])
+        ? { name: 'intent', intentId: parts[1] }
+        : { name: 'legacy', to: '/activity?tab=trade' }
     case 'hdx': return { name: 'hdx' }
     case 'hollar': return { name: 'hollar' }
+    case 'ice': return { name: 'ice' }
     case 'revenue': return { name: 'revenue' }
     case 'asset':
       return parts[1] && isSafeId(parts[1]) ? { name: 'asset', assetId: Number(parts[1]) } : { name: 'assets' }
@@ -288,6 +303,9 @@ export const paths = {
   extrinsicAt: (h: number, i: number) => `/extrinsic/${h}-${i}`,
   activityDetail: (slug: ActivitySlug, id: string) => `/${slug}/${id}`,
   dcaSchedule: (scheduleId: number) => `/dca/${scheduleId}`,
+  // An ICE intent's page (the order — every event of its life). The id is the u128 as
+  // a decimal string, never a number.
+  intent: (intentId: string) => `/intent/${intentId}`,
   referendum: (pallet: 'opengov' | 'democracy', index: number | string) => `/referendum/${pallet}/${index}`,
   governance: () => '/governance',
   events: () => '/events',
@@ -303,6 +321,7 @@ export const paths = {
   assets: () => '/assets',
   hdx: () => '/hdx',
   hollar: () => '/hollar',
+  ice: () => '/ice',
   revenue: () => '/revenue',
   asset: (assetId: number) => `/asset/${assetId}`,
   holders: (assetId: number) => `/holders/${assetId}`,

@@ -26,7 +26,7 @@ const vote: ActivityRow = {
 
 describe('ActivityDesc — vote', () => {
   it('carries the referendum, the side and the conviction in a list', () => {
-    const html = renderToStaticMarkup(<ActivityDesc r={vote} />)
+    const html = renderToStaticMarkup(<ActivityDesc now={0} r={vote} />)
     expect(html).toContain('#368')
     expect(html).toContain('Tip Request for DIA Oracle Services on Hydration')
     expect(html).toContain('AYE')
@@ -38,13 +38,13 @@ describe('ActivityDesc — vote', () => {
   })
 
   it('gives the no-lock vote its real weight instead of the word None', () => {
-    const html = renderToStaticMarkup(<ActivityDesc r={{ ...vote, voteConviction: 'None' }} />)
+    const html = renderToStaticMarkup(<ActivityDesc now={0} r={{ ...vote, voteConviction: 'None' }} />)
     expect(html).toContain('>0.1x<')
     expect(html).not.toContain('>None<')
   })
 
   it('keeps only the locked capital when the page header already says the rest', () => {
-    const html = renderToStaticMarkup(<ActivityDesc r={vote} headed />)
+    const html = renderToStaticMarkup(<ActivityDesc now={0} r={vote} headed />)
     expect(html).toContain('HDX')
     expect(html).toContain('24.9')
     expect(html).not.toContain('#368')
@@ -68,7 +68,7 @@ describe('ActivityDesc — cross-chain', () => {
   const local = /class="chain-badge chain-badge-local"/
 
   it('names the destination chain in a list', () => {
-    expect(renderToStaticMarkup(<ActivityDesc r={out} />)).toContain('Moonbeam')
+    expect(renderToStaticMarkup(<ActivityDesc now={0} r={out} />)).toContain('Moonbeam')
   })
 
   // Unlike every other family, a hop keeps both ends on a headed surface: the two
@@ -76,21 +76,21 @@ describe('ActivityDesc — cross-chain', () => {
   // same as drawing the journey. This is what a detail page reading only "AAVE 30.4"
   // was missing.
   it('draws the whole journey on a headed surface too', () => {
-    const html = renderToStaticMarkup(<ActivityDesc r={out} headed />)
+    const html = renderToStaticMarkup(<ActivityDesc now={0} r={out} headed />)
     expect(html).toContain('Moonbeam')
     expect(html).toMatch(local)
     expect(html).toContain('0x1111111111111111111111111111111111111111')
   })
 
   it('names both ends of an inbound hop with no resolved origin account', () => {
-    const html = renderToStaticMarkup(<ActivityDesc r={inbound} headed />)
+    const html = renderToStaticMarkup(<ActivityDesc now={0} r={inbound} headed />)
     expect(html).toContain('AssetHub')
     expect(html).toMatch(local)
     expect(html).toContain('→')
   })
 
   it('leaves no dangling arrow when nothing is left to point at', () => {
-    const html = renderToStaticMarkup(<ActivityDesc r={{ ...out, destChain: undefined, destAccount: undefined }} headed />)
+    const html = renderToStaticMarkup(<ActivityDesc now={0} r={{ ...out, destChain: undefined, destAccount: undefined }} headed />)
     expect(html).not.toContain('→')
     // Nor a local badge opposite nothing, which would read as a destination.
     expect(html).not.toMatch(local)
@@ -99,18 +99,18 @@ describe('ActivityDesc — cross-chain', () => {
   // Which side the local badge lands on is the direction: the chain the balance left
   // for an outbound hop, the chain it reached for an inbound one.
   it('puts Hydration on the receiving side of an inbound hop', () => {
-    const html = renderToStaticMarkup(<ActivityDesc r={inbound} />)
+    const html = renderToStaticMarkup(<ActivityDesc now={0} r={inbound} />)
     expect(html.indexOf('AssetHub')).toBeLessThan(html.search(local))
   })
 
   it('puts Hydration on the sending side of an outbound hop', () => {
-    const html = renderToStaticMarkup(<ActivityDesc r={out} />)
+    const html = renderToStaticMarkup(<ActivityDesc now={0} r={out} />)
     expect(html.search(local)).toBeLessThan(html.indexOf('Moonbeam'))
   })
 
   it('leaves a same-chain transfer with no chain badges at all', () => {
     const transfer: ActivityRow = { ...base, type: 'transfer', asset: hdx, amount: '1000000000000', to: null }
-    expect(renderToStaticMarkup(<ActivityDesc r={transfer} />)).not.toMatch(local)
+    expect(renderToStaticMarkup(<ActivityDesc now={0} r={transfer} />)).not.toMatch(local)
   })
 })
 
@@ -121,15 +121,15 @@ describe('ActivityDesc — OTC', () => {
   }
 
   it('trails the order id in a list', () => {
-    expect(renderToStaticMarkup(<ActivityDesc r={fill} />)).toContain('#91')
+    expect(renderToStaticMarkup(<ActivityDesc now={0} r={fill} />)).toContain('#91')
   })
 
   it('drops the order id the header already carries', () => {
-    expect(renderToStaticMarkup(<ActivityDesc r={fill} headed />)).not.toContain('#91')
+    expect(renderToStaticMarkup(<ActivityDesc now={0} r={fill} headed />)).not.toContain('#91')
   })
 
   it('keeps the order id when the legs are unknown — nothing else identifies the row', () => {
     const legless = { ...fill, assetIn: null, assetOut: null }
-    expect(renderToStaticMarkup(<ActivityDesc r={legless} headed />)).toContain('Order #91')
+    expect(renderToStaticMarkup(<ActivityDesc now={0} r={legless} headed />)).toContain('Order #91')
   })
 })

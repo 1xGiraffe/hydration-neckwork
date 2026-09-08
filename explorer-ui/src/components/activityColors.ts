@@ -43,6 +43,11 @@ export const CAT = {
   // bonds — teal
   bond: 'var(--cat-bond)',
   bondRedeem: 'var(--cat-bond-redeem)',
+  // intents — violet (limit orders and DCA intents)
+  intent: 'var(--cat-intent)',
+  intentFill: 'var(--cat-intent-fill)',
+  intentCancel: 'var(--cat-intent-cancel)',
+  intentDca: 'var(--cat-intent-dca)',
   // movement, governance, outcome
   transfer: 'var(--cat-transfer)',
   xcm: 'var(--cat-xcm)',
@@ -63,6 +68,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   xcm: CAT.xcm,
   stake: CAT.stake,
   bond: CAT.bond,
+  intent: CAT.intent,
   vote: CAT.vote,
 }
 // Charts that are not scoped to a category — the unfiltered activity histogram,
@@ -143,6 +149,24 @@ export const BOND_LABELS: Record<string, string> = {
 const BOND_COLORS: Record<string, string> = {
   Issue: CAT.bond, Redeem: CAT.bondRedeem,
 }
+// The product's words: a swap intent is a limit order, a dca intent is a DCA intent.
+// One function names every intent row — the badge, the Trade filter list, the slug
+// labels and the detail page all read from it, so no surface can say it differently.
+const INTENT_KIND_WORD: Record<string, string> = { swap: 'Limit order', dca: 'DCA intent' }
+const INTENT_ACTION_WORD: Record<string, string> = { Place: 'placed', Fill: 'filled', PartialFill: 'partially filled', DcaTrade: 'trade', Cancel: 'cancelled', Expire: 'expired' }
+export function intentLabel(kind: string | undefined, action: string | undefined): string {
+  return `${INTENT_KIND_WORD[kind ?? ''] ?? 'Intent'} ${INTENT_ACTION_WORD[action ?? ''] ?? ''}`.trim()
+}
+// The same words as a table, keyed `${kind}:${action}`, for a surface that wants a
+// lookup rather than a call. Derived, so it cannot drift from intentLabel.
+export const INTENT_LABELS: Record<string, string> = Object.fromEntries(
+  Object.keys(INTENT_KIND_WORD).flatMap(kind => Object.keys(INTENT_ACTION_WORD).map(action => [`${kind}:${action}`, intentLabel(kind, action)])))
+// Placing an order, filling it, leaving it (cancelled or expired) and a DCA intent's
+// trade are the four acts a reader tells apart; a partial fill IS a fill and an
+// expiry IS the order leaving, so each shares its sibling's shade.
+const INTENT_COLORS: Record<string, string> = {
+  Place: CAT.intent, Fill: CAT.intentFill, PartialFill: CAT.intentFill, DcaTrade: CAT.intentDca, Cancel: CAT.intentCancel, Expire: CAT.intentCancel,
+}
 const OTC_COLORS: Record<string, string> = {
   // Placing and pulling an offer both only move an offer around — neither moves
   // value — so they share a shade; their labels differ.
@@ -165,6 +189,7 @@ export function activityBadge(r: ActivityRow): { label: string; col: string } {
     const a = r.bondAction ?? ''
     return { label: BOND_LABELS[a] ?? 'Bond', col: BOND_COLORS[a] ?? CAT.bond }
   }
+  if (r.type === 'intent') return { label: intentLabel(r.intentKind, r.intentAction), col: INTENT_COLORS[r.intentAction ?? ''] ?? CAT.intent }
   if (r.type === 'vote') return { label: voteLabel(r.voteAction), col: voteColor(r.voteAction) }
   if (r.type === 'liquidity') {
     const a = r.liqAction ?? ''
