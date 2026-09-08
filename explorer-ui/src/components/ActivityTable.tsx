@@ -1,9 +1,11 @@
 /* eslint-disable react-refresh/only-export-components -- activity table exports slug/id/label helpers alongside its components */
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
-import { F, AddrPill, AssetChip, rowNav, Ago, Waiting, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor, ContractGlyph } from './ui'
+import { F, AddrPill, AssetChip, AssetAmount, rowNav, Ago, Waiting, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor, ContractGlyph } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
-import { activityBadge, BOND_LABELS } from './activityColors'
+import { activityBadge, BOND_LABELS, intentLabel } from './activityColors'
+import { parseUtcTimestamp } from '../utils/time'
+import { fmtDuration } from '../utils/dca'
 import { resolveTag, useTagMapVersion } from '../userTags'
 import { convictionLabel, voteSubjectLabel } from '../utils/voteRows'
 import type { ActivityRow } from '../types'
@@ -127,10 +129,20 @@ export function activitySlug(r: ActivityRow): ActivitySlug {
     case 'mm': return MM_SLUG[r.mmAction ?? ''] ?? 'lend'
     case 'staking': return 'staking'
     case 'bond': return r.bondAction === 'Redeem' ? 'bond-redeem' : 'bond-issue'
+    // A partial fill is a fill: one slug covers both (the badge tells them apart).
+    case 'intent': return r.intentAction === 'Place' ? 'intent-place' : r.intentAction === 'Cancel' ? 'intent-cancel' : r.intentAction === 'Expire' ? 'intent-expire' : r.intentAction === 'DcaTrade' ? 'intent-dca-trade' : 'intent-fill'
     case 'vote': return 'vote'
     case 'otc': return r.otcAction === 'Pull' ? 'otc-pull' : r.otcAction === 'Fill' ? 'otc-fill' : 'otc-place'
     default: return 'transfer'
   }
+}
+// The coordinates a row occupies in its block — the id every activity detail page is
+// addressed by. activityId() prefers a row's HOME over these for the families whose
+// rows are one step of a longer thing.
+function coordinateId(r: ActivityRow): string | null {
+  if (r.eventIndex != null) return `${r.blockHeight}-e${r.eventIndex}`
+  if (r.extrinsicIndex != null) return `${r.blockHeight}-${r.extrinsicIndex}`
+  return null
 }
 export function activityId(r: ActivityRow, dcaExecutionLink = false): string | null {
   // DCA rows link to their owning SCHEDULE page, not a single fill — except on
@@ -138,9 +150,19 @@ export function activityId(r: ActivityRow, dcaExecutionLink = false): string | n
   // links to its own execution detail (/dca/<block>-e<eventIndex>), which in
   // turn links to the schedule.
   if (!dcaExecutionLink && (r.type === 'dca' || r.dca) && r.dcaScheduleId != null) return String(r.dcaScheduleId)
-  if (r.eventIndex != null) return `${r.blockHeight}-e${r.eventIndex}`
-  if (r.extrinsicIndex != null) return `${r.blockHeight}-${r.extrinsicIndex}`
-  return null
+  // An intent row follows the same rule: its ORDER page from a feed (the full u128 id,
+  // a decimal string), its own event on the block and extrinsic pages. Without an
+  // order id it takes the coordinates — /intent-fill/<h>-e<i> resolves like any slug.
+  if (r.type === 'intent' && !dcaExecutionLink && r.intentId != null) return r.intentId
+  return coordinateId(r)
+}
+// Where a row's link goes, for the id activityId() chose. Coordinates live under the
+// row's slug (/otc-fill/<h>-e<i>, /intent-fill/<h>-e<i>) and a DCA schedule id under
+// /dca; an intent's ORDER id is the one id with a page elsewhere, /intent/<id>. It is
+// recognised by VALUE, not by the row's type — an intent row handed its coordinates
+// must land on its slug page, never on /intent/<h>-e<i>.
+export function activityHref(r: ActivityRow, id: string): string {
+  return r.type === 'intent' && id === r.intentId ? paths.intent(id) : paths.activityDetail(activitySlug(r), id)
 }
 // A slug names a URL, and `claim-rewards` is the URL of BOTH reward claims (see
 // SLUG_TYPES), so its label stays the family-neutral one — which claim a row is
@@ -152,6 +174,8 @@ const SLUG_LABEL: Record<ActivitySlug, string> = {
   liquidate: 'Liquidate', staking: 'Staking', vote: 'Vote',
   'otc-place': 'OTC place', 'otc-pull': 'OTC pull', 'otc-fill': 'OTC fill',
   'bond-issue': BOND_LABELS.Issue, 'bond-redeem': BOND_LABELS.Redeem,
+  'intent-place': intentLabel('swap', 'Place'), 'intent-fill': intentLabel('swap', 'Fill'), 'intent-cancel': intentLabel('swap', 'Cancel'), 'intent-expire': intentLabel('swap', 'Expire'),
+  'intent-dca-trade': intentLabel('dca', 'DcaTrade'),
 }
 export function activityLabel(slug: ActivitySlug): string { return SLUG_LABEL[slug] }
 
@@ -164,6 +188,7 @@ export const SLUG_TYPES: Record<ActivitySlug, ActivityRow['type'][]> = {
   staking: ['staking'], vote: ['vote'],
   'otc-place': ['otc'], 'otc-pull': ['otc'], 'otc-fill': ['otc'],
   'bond-issue': ['bond'], 'bond-redeem': ['bond'],
+  'intent-place': ['intent'], 'intent-fill': ['intent'], 'intent-cancel': ['intent'], 'intent-expire': ['intent'], 'intent-dca-trade': ['intent'],
 }
 
 export { parseId } from '../utils/activityIds'
@@ -171,7 +196,9 @@ export { parseId } from '../utils/activityIds'
 // Canonical URL for a resolved row, or null when the current slug+id are already canonical.
 export function canonicalTarget(row: ActivityRow, slug: ActivitySlug, id: string): string | null {
   const canonicalSlug = activitySlug(row)
-  const canonicalId = activityId(row) ?? id
+  // An intent row's activityId is its ORDER — the row link's target. This page is the
+  // one event, addressed by coordinates like every other activity page.
+  const canonicalId = (row.type === 'intent' ? coordinateId(row) : activityId(row)) ?? id
   return canonicalSlug !== slug || canonicalId !== id ? paths.activityDetail(canonicalSlug, canonicalId) : null
 }
 
@@ -188,9 +215,12 @@ export function subordinateActivityTarget(rows: ActivityRow[], extrinsicIndex: n
   const owners = rows.filter(r => r.extrinsicIndex === extrinsicIndex)
   if (owners.length !== 1) return null
   const owner = owners[0]
-  const ownerId = activityId(owner)
+  // The reader arrived at one block's event, so an intent owner hands over to its own
+  // event (coordinates under its slug, as an OTC fill does), not to the order page. A
+  // DCA owner keeps handing over to its schedule, as before.
+  const ownerId = activityId(owner, owner.type === 'intent')
   return ownerId
-    ? paths.activityDetail(activitySlug(owner), ownerId)
+    ? activityHref(owner, ownerId)
     : paths.extrinsic(`${owner.blockHeight}-${owner.extrinsicIndex}`)
 }
 
@@ -222,11 +252,23 @@ export function ActivityBadge({ r }: { r: ActivityRow }) {
   return <span className="activity-badge-group"><span className="pill-badge" style={{ color: col, background: `color-mix(in srgb, ${col} 15%, transparent)` }}>{label}</span>{supplementalMarket && <span className={`mm-activity-market${marketClass}`}>{supplementalMarket}</span>}{partial && <span className="mm-activity-market">{partial}</span>}</span>
 }
 
+// When a limit order stops standing — future-facing where Ago is past-facing. Once
+// the moment has passed the phrase says only that: whether the order filled or
+// expired first is the order page's to tell.
+function IntentDeadline({ iso, now }: { iso: string; now: number }) {
+  const t = parseUtcTimestamp(iso)
+  if (!Number.isFinite(t)) return null
+  const left = (t - now) / 1000
+  return <span className="muted" title={F.datetime(iso)}>{left > 0 ? `expires in ${fmtDuration(left)}` : 'deadline passed'}</span>
+}
+
 // One row's activity, as a phrase. `headed` marks a surface whose page HEADER
 // already states the row's context — the detail pages do, a list row has no header
 // above it — so there the phrase drops the facts the header repeats and keeps only
 // what it alone carries (the assets and amounts).
-export function ActivityDesc({ r, headed }: { r: ActivityRow; headed?: boolean }) {
+// `now` is the caller's shared clock (the one its Ago column ticks on); it drives the
+// one relative phrase here, an order's deadline, so every row on a surface agrees.
+export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: boolean; now: number }) {
   // A hop's two ends ARE its phrase, so cross-chain is the one family that keeps
   // them on a headed surface too. Naming one end in a page subtitle is not the same
   // as drawing the journey: this page's Activity row used to read "AAVE 30.4" and
@@ -256,6 +298,29 @@ export function ActivityDesc({ r, headed }: { r: ActivityRow; headed?: boolean }
   }
   if ((r.type === 'trade' || r.type === 'dca') && r.assetIn && r.assetOut) {
     return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.assetIn} /> <span className="mono">{F.amount(r.amountIn, r.assetIn.decimals)}</span></span> → <span className="trade-leg"><AssetChip asset={r.assetOut} /> <span className="mono">{F.amount(r.amountOut, r.assetOut.decimals)}</span></span>{r.dcaStatus === 'failed' && <span className="muted">Failed attempt</span>}</span>
+  }
+  if (r.type === 'intent' && r.assetIn && r.assetOut) {
+    // A fill — or a DCA intent's trade — moved value and reads like a swap. A
+    // placement states the limit: what is sold, and the least it must fetch, with the
+    // terms that bound it. A cancel or expiry restates that limit as what was left
+    // standing. The short #seq is the order's handle in a list; a headed page carries
+    // it (and the terms) as labelled rows instead.
+    const traded = r.intentAction === 'Fill' || r.intentAction === 'PartialFill' || r.intentAction === 'DcaTrade'
+    const seq = headed || r.intentSeq == null ? null : <span className="muted">#{r.intentSeq}</span>
+    if (traded) {
+      return <span className="asset-flow"><AssetAmount asset={r.assetIn} raw={r.amountIn} /> → <AssetAmount asset={r.assetOut} raw={r.amountOut} />
+        {!headed && r.intentAction === 'DcaTrade' && r.intentRemainingBudget != null && <span className="muted">{F.amount(r.intentRemainingBudget, r.assetIn.decimals)} {r.assetIn.symbol} left</span>}
+        {seq}</span>
+    }
+    // A DCA intent sells its budget in slices the pallet sizes, so its placement names
+    // the whole budget and the asset it buys — there is no single limit to state.
+    const limit = r.intentKind === 'dca'
+      ? <><AssetAmount asset={r.assetIn} raw={r.amountIn} /> → <AssetChip asset={r.assetOut} /></>
+      : <>sell <AssetAmount asset={r.assetIn} raw={r.amountIn} /> for ≥ <AssetAmount asset={r.assetOut} raw={r.amountOut} /></>
+    return <span className="asset-flow">{limit}
+      {!headed && r.intentPartial && <span className="muted">partial fills</span>}
+      {!headed && r.intentDeadline && <IntentDeadline iso={r.intentDeadline} now={now} />}
+      {seq}</span>
   }
   if (r.type === 'otc') {
     // A fill has two accounts. The Account column carries the taker who called
@@ -343,7 +408,7 @@ export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pe
                 // upgrades itself when the block settles. A row with no
                 // coordinates to link — a hook-phase swap — still has no target.
                 const unfinalized = r.finalized === false && !mempool
-                const nav = aid && !mempool ? rowNav(paths.activityDetail(slug, aid)) : null
+                const nav = aid && !mempool ? rowNav(activityHref(r, aid)) : null
                 const k = keys[i]
                 const className = [nav?.className, dim ? 'dim' : null, fresh.has(k) ? 'row-new' : null, unfinalized ? 'unfinalized' : null, mempool ? 'mempool' : null].filter(Boolean).join(' ') || undefined
                 const title = mempool ? 'In the transaction pool — the outcome shown is a dry-run projection, not yet in any block'
@@ -353,7 +418,7 @@ export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pe
                   <tr key={k} {...(nav ?? {})} className={className} title={title} {...(aid && !mempool ? { 'data-activity': `${slug}/${aid}` } : {})} {...(showExt ? { 'data-ext': `${r.blockHeight}-${r.extrinsicIndex}` } : {})}>
                     <td data-label="Type"><ActivityBadge r={r} /></td>
                     {!noActor && <td data-label="Account">{r.who ? <AddrPill account={r.who} noCopy /> : <Dash />}</td>}
-                    <td data-label="Activity"><ActivityDesc r={r} /></td>
+                    <td data-label="Activity"><ActivityDesc r={r} now={now} /></td>
                     {/* A dash is "not booked yet", never "$0": the revenue model trails
                         the head, and the field is only present once the block is booked. */}
                     <td data-label="Protocol revenue" className="r mono muted">{r.revenue ? F.usd(r.revenue.protocolUsd) : <Dash />}</td>

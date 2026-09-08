@@ -6,7 +6,7 @@ import type { AccountRef, AssetOrigin, AssetRef, FailureReason, FeePayment } fro
 import { parseUtcTimestamp } from '../utils/time'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { voteSideLabel } from '../utils/voteRows'
-import { BOND_LABELS, CAT, LIQ_LABELS, MM_LABELS } from './activityColors'
+import { BOND_LABELS, CAT, LIQ_LABELS, MM_LABELS, intentLabel } from './activityColors'
 import { ZoomReset, ZoomSelection, bracketToView, fracOfTime, useChartZoom, useZoomRefine } from './chartZoom'
 import type { RefinedSeries } from './chartZoom'
 import { resolveTag, useTagMapVersion } from '../userTags'
@@ -1839,6 +1839,7 @@ const ACTIVITY_CHIP_VALUES = new Set(ACTIVITY_CHIPS.map(c => c.v))
 export function normalizeActivityType(value: string): string {
   if (value === 'dca') return 'trade'   // dca is surfaced under the Trade feed (server does the same)
   if (value === 'otc') return 'trade'   // otc is surfaced under the Trade feed (server does the same)
+  if (value === 'intent') return 'trade'   // intents too: a limit order is a trade the chain has yet to make
   return ACTIVITY_CHIP_VALUES.has(value) ? value : 'all'
 }
 
@@ -1846,12 +1847,15 @@ export function normalizeActivityType(value: string): string {
 export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = {
   // Labels mirror the badges the activity table renders for each row, so the
   // filter names exactly what it filters — the renamed ones read from the badge's
-  // own map rather than restating it. OTC (place/pull/fill) is folded in
-  // here alongside swap/dca — otc rows keep their own badges/slugs/detail
-  // pages, only the Trade categorization changes.
+  // own map rather than restating it. OTC (place/pull/fill) and ICE intents are
+  // folded in here alongside swap/dca — their rows keep their own badges/slugs/
+  // detail pages, only the Trade categorization changes. The intent values are
+  // slugs (intent-fill covers partial fills too); their labels are the badge's own.
   trade: [
     { v: 'swap', label: 'Swap' }, { v: 'dca', label: 'DCA' }, { v: 'dca-failed', label: 'Failed DCA' },
     { v: 'otc-place', label: 'OTC place' }, { v: 'otc-pull', label: 'OTC pull' }, { v: 'otc-fill', label: 'OTC fill' },
+    { v: 'intent-place', label: intentLabel('swap', 'Place') }, { v: 'intent-fill', label: intentLabel('swap', 'Fill') }, { v: 'intent-cancel', label: intentLabel('swap', 'Cancel') }, { v: 'intent-expire', label: intentLabel('swap', 'Expire') },
+    { v: 'intent-dca-trade', label: intentLabel('dca', 'DcaTrade') },
   ],
   xcm: [{ v: 'out', label: 'Outgoing' }, { v: 'in', label: 'Incoming' }],
   liquidity: [{ v: 'Add', label: 'Add liquidity' }, { v: 'Remove', label: 'Remove liquidity' }, { v: 'Create', label: 'Create pool' }, { v: 'Destroy', label: 'Destroy pool' }, { v: 'Claim', label: LIQ_LABELS.Claim }, { v: 'ClaimReferral', label: LIQ_LABELS.ClaimReferral }],

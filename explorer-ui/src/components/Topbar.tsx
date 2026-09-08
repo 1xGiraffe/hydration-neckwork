@@ -35,6 +35,7 @@ const IT = {
   liquidity: { to: paths.liquidity(), label: 'Liquidity', match: ['liquidity', 'pool', 'omnipool'] } as NavItem,
   hdx: { to: paths.hdx(), label: 'HDX', match: ['hdx'] } as NavItem,
   hollar: { to: paths.hollar(), label: 'HOLLAR', match: ['hollar'] } as NavItem,
+  // /ice (ICE dashboard) is deliberately URL-only until the venue has live activity — no nav entry yet.
   revenue: { to: paths.revenue(), label: 'Revenue', match: ['revenue'] } as NavItem,
   blocks: { to: paths.blocks(), label: 'Blocks', match: ['blocks', 'block'] } as NavItem,
   extrinsics: { to: paths.extrinsics(), label: 'Extrinsics', match: ['extrinsics', 'extrinsic'] } as NavItem,
