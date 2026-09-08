@@ -25,10 +25,11 @@ describe('DCA failure errors come from the read model', () => {
     expect(failed).toContain("JSONExtractRaw(args_json, 'error') AS error")
 
     // Both MVs insert into the same table, so the executed-event MV has to carry the
-    // column too — it just has no error to report.
+    // column too. Its only error is a DCA migration's cancel reason; every other row
+    // it writes (Executed, Completed, Terminated, Migrated) carries ''.
     const executed = statement(views, 'dca_events_mv')
     expect(executed).toContain('`error` String')
-    expect(executed).toContain("'' AS error")
+    expect(executed).toContain("if(event_name = 'DCA.MigrationCancelled', JSONExtractRaw(args_json, 'reason'), '') AS error")
   })
 
   it('reads the column instead of re-decoding raw_events on the failure feeds', () => {

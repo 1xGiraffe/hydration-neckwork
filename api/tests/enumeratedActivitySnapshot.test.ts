@@ -30,12 +30,12 @@ describe('the enumerated activity snapshot is one shared read', () => {
     expect(enumeratedActivityKey(accounts, 'all')).toBe(enumeratedActivityKey(accounts, 'transfer'))
     expect(enumeratedActivityKey(accounts, 'liquidity')).toBe(enumeratedActivityKey(accounts, 'mm'))
 
-    // And the types whose source sets genuinely differ stay apart: the nine countable
-    // types collapse to seven entries and no further. Any future type that silently joined
+    // And the types whose source sets genuinely differ stay apart: the eleven countable
+    // types collapse to nine entries and no further. Any future type that silently joined
     // one of these groups would have to justify itself here.
-    const countable = ['all', 'transfer', 'trade', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'otc']
-    expect(new Set(countable.map(type => enumeratedActivityKey(accounts, type))).size).toBe(7)
-    expect(enumeratedActivityKey(accounts, 'all')).toContain(':otc+dcaFailures+rewards+staking+bonds+votes+xcm+ntt:')
+    const countable = ['all', 'transfer', 'trade', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'otc', 'bond', 'intent']
+    expect(new Set(countable.map(type => enumeratedActivityKey(accounts, type))).size).toBe(9)
+    expect(enumeratedActivityKey(accounts, 'all')).toContain(':otc+dcaFailures+rewards+staking+bonds+intents+votes+xcm+ntt:')
   })
 
   // The account set is a set, not a list: two callers resolving the same related accounts

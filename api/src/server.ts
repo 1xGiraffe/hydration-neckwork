@@ -65,6 +65,7 @@ import { initProxyMultisigService } from './services/proxyMultisigService.ts'
 import { initHdxService } from './services/hdxService.ts'
 import { initRevenueService } from './services/revenueService.ts'
 import { initHollarService } from './services/hollarService.ts'
+import { initIceService } from './services/iceService.ts'
 import { initPoolService } from './services/poolService.ts'
 import { initSecurityService } from './services/securityService.ts'
 import { initErc20WalletService } from './services/erc20WalletService.ts'
@@ -72,6 +73,7 @@ import { initWormholeNttService } from './services/wormholeNttService.ts'
 import { startBackgroundRefresh, stopBackgroundRefresh } from './services/backgroundRefresh.ts'
 import { getHdxDashboard } from './services/hdxService.ts'
 import { getHollarDashboard } from './services/hollarService.ts'
+import { getIceDashboard } from './services/iceService.ts'
 import { getRevenueDashboard, getStakerDistributions } from './services/revenueService.ts'
 import { initAccountAffinityService } from './services/accountAffinityService.ts'
 import { ensureSnakewatchEmojiSourceLoaded } from './services/omniwatchIdentity.ts'
@@ -133,6 +135,7 @@ const CACHE_CONTROL: [RegExp, number][] = [
   [/^\/explorer\/revenue\/flow$/, 2],
   [/^\/explorer\/revenue$/, 60],
   [/^\/explorer\/hollar/, 300],
+  [/^\/explorer\/ice/, 300],
   [/^\/explorer\/address\/[^/]+\/close-accounts/, 900],
   [/^\/explorer\/address\/[^/]+\/history/, 120],
   [/^\/explorer\/(address|tag)\/[^/]+\/counts/, 600],
@@ -260,6 +263,7 @@ async function start() {
     initHdxService(client)
     initRevenueService(client)
     initHollarService(client)
+    initIceService(client)
     initPoolService(client)
     initSecurityService(client)
     initLiveHeadService(client)
@@ -403,6 +407,7 @@ async function start() {
       for (const [name, warm] of [
         ['hdx', () => getHdxDashboard()],
         ['hollar', () => getHollarDashboard()],
+        ['ice', () => getIceDashboard()],
         ['revenue', () => getRevenueDashboard('30d')],
         ['revenue-stakers', () => getStakerDistributions('30d')],
       ] as const) {

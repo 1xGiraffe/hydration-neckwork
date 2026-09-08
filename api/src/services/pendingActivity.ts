@@ -78,6 +78,7 @@ export type PendingActivity = PendingTradeActivity | PendingTransferActivity | P
 const CLASSIFIED_ACTION_PALLETS = new Set([
   'gigahdx', 'gigahdxrewards', 'staking', 'collatorrewards',   // staking family
   'bonds',                                                     // bond issue / redeem
+  'intent', 'ice', 'lazyexecutor',                             // ICE intents: fills and forwards move funds through the pot
   'omnipool', 'stableswap', 'xyk', 'lbp',                      // liquidity
   'otc', 'dca', 'referrals',
   'xtokens', 'polkadotxcm', 'xcmpqueue',                       // cross-chain
