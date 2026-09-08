@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { TypeKind } from '@subsquid/substrate-runtime/lib/metadata';
 import {
   calculateUsdVolume,
   extractTradeVolumeFromSwaps,
@@ -10,6 +11,8 @@ import {
 import type { PriceMap, AssetDecimals } from '../../src/price/types.ts';
 import type { PriceRow } from '../../src/db/schema.ts';
 import { isSwapEvent } from '../../src/registry/swapEvents.ts';
+import { sts, type RuntimeCtx } from '../../src/types/support.ts';
+import { broadcast } from '../../src/types/events.ts';
 
 function createMockEvent(name: string, args: unknown) {
   const runtime = {
@@ -634,6 +637,126 @@ describe('extractVolumeFromSwaps', () => {
       native_volume_sell: '2000000000000000000',
       usd_volume_sell: '2.500000000000',
     });
+  });
+});
+
+// Broadcast.Swapped3's argument types as a block's metadata lays them out, with the
+// Filler enum parameterised: `.is()` matches a typegen arm structurally against this,
+// so an event built over the spec-443 table selects an arm the way a real block does.
+const FILLER_323 = ['AAVE', 'HSM', 'LBP', 'OTC', 'Omnipool', 'Stableswap', 'XYK'];
+const FILLER_443 = [...FILLER_323, 'UniswapV3'];
+const SWAPPED3_ARGS_TI = 15;
+
+function swapped3Metadata(fillerVariants: string[]): sts.ScaleType[] {
+  const U32 = 0, U128 = 1, ACCOUNT = 2, FILLER = 3, OPERATION = 4, ASSET = 5, ASSETS = 6,
+    DESTINATION = 7, FEE = 8, FEES = 9, U32_PAIR = 10, BYTES = 11, XCM_KEY = 12, EXECUTION = 13, STACK = 14;
+  const variants = (names: string[], payload: Record<string, number> = {}) => ({
+    kind: TypeKind.Variant as const,
+    variants: names.map((name, index) => ({ index, name, fields: name in payload ? [{ type: payload[name] }] : [] })),
+  });
+  const composite = (fields: Record<string, number>) => ({
+    kind: TypeKind.Composite as const,
+    fields: Object.entries(fields).map(([name, type]) => ({ name, type })),
+  });
+  return [
+    { kind: TypeKind.Primitive, primitive: 'U32' },
+    { kind: TypeKind.Primitive, primitive: 'U128' },
+    { kind: TypeKind.HexBytesArray, len: 32 },
+    variants(fillerVariants, { OTC: U32, Stableswap: U32, XYK: U32 }),
+    variants(['ExactIn', 'ExactOut', 'Limit', 'LiquidityAdd', 'LiquidityRemove']),
+    composite({ asset: U32, amount: U128 }),
+    { kind: TypeKind.Sequence, type: ASSET },
+    variants(['Account', 'Burned'], { Account: ACCOUNT }),
+    composite({ asset: U32, amount: U128, destination: DESTINATION }),
+    { kind: TypeKind.Sequence, type: FEE },
+    { kind: TypeKind.Tuple, tuple: [U32, U32] },
+    { kind: TypeKind.HexBytes },
+    { kind: TypeKind.Tuple, tuple: [BYTES, U32] },
+    variants(['Batch', 'DCA', 'Omnipool', 'Router', 'Xcm', 'XcmExchange'],
+      { Batch: U32, DCA: U32_PAIR, Omnipool: U32, Router: U32, Xcm: XCM_KEY, XcmExchange: U32 }),
+    { kind: TypeKind.Sequence, type: EXECUTION },
+    composite({
+      swapper: ACCOUNT, filler: ACCOUNT, fillerType: FILLER, operation: OPERATION,
+      inputs: ASSETS, outputs: ASSETS, fees: FEES, operationStack: STACK,
+    }),
+  ];
+}
+
+// A runtime stub that does what EACRegistry.checkType does: match the arm's sts type
+// against the event's metadata type. Unlike createMockEvent it can decline an arm.
+function metadataEvent(name: string, args: unknown, types: sts.ScaleType[]) {
+  const runtime = {
+    specVersion: 443,
+    events: {
+      checkType: (eventName: string, type: sts.Type) =>
+        eventName === name && type.match(sts.getTypeChecker(types), types[SWAPPED3_ARGS_TI]),
+    },
+    decodeJsonEventRecordArguments: (event: { args: unknown }) => event.args,
+  };
+  return { name, args, block: { _runtime: runtime as unknown as RuntimeCtx['_runtime'] } };
+}
+
+// Runtime 443 added the UniswapV3 filler. These cases pin arm selection over the
+// spec-443 metadata, the flow of a UniswapV3 fill into volume rows, and the
+// metadata-driven fallback for an event no arm recognises.
+describe('decodeTradeEvent under runtime 443', () => {
+  const uniswapArgs = {
+    swapper: '0x169858b96fc71cedfcaff0542dfbfd9e4fa824f9afad4c3e304f9ab529bf7d5f',
+    filler: '0x4554480069003a65189f6ed993d3bd3e2b74f1db39f405ce0000000000000000',
+    fillerType: { __kind: 'UniswapV3' },
+    operation: { __kind: 'ExactIn' },
+    inputs: [{ asset: 10, amount: 1000000n }],
+    outputs: [{ asset: 5, amount: 250000000000n }],
+    fees: [],
+    operationStack: [{ __kind: 'Router', value: 11029407 }],
+  };
+
+  it('decodes a UniswapV3 fill through the v443 arm', () => {
+    const event = metadataEvent('Broadcast.Swapped3', uniswapArgs, swapped3Metadata(FILLER_443));
+    expect(broadcast.swapped3.v443.is(event)).toBe(true);
+    expect(broadcast.swapped3.v323.is(event)).toBe(false);
+    expect(broadcast.swapped3.v313.is(event)).toBe(false);
+
+    const prices: PriceMap = new Map([[10, '1.000000000000'], [5, '4.000000000000']]);
+    const decimals: AssetDecimals = new Map([[10, 6], [5, 12]]);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const rows = extractVolumeFromSwaps([event], 14362843, 443, prices, decimals, id => id);
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.find(r => r.asset_id === 10)?.usd_volume_sell).toBe('1.000000000000');
+      // the arm decoded it: the metadata fallback would produce the same rows, but warns
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('still selects the v323 arm, and not v443, over the spec-323 metadata', () => {
+    const event = metadataEvent('Broadcast.Swapped3', uniswapArgs, swapped3Metadata(FILLER_323));
+    expect(broadcast.swapped3.v323.is(event)).toBe(true);
+    expect(broadcast.swapped3.v443.is(event)).toBe(false);
+  });
+
+  it('falls back to the block metadata decode when no typegen arm matches', () => {
+    const runtime = {
+      events: { checkType: () => false },
+      decodeJsonEventRecordArguments: (e: { args: unknown }) => e.args,
+    };
+    const event = { name: 'Broadcast.Swapped3', args: uniswapArgs, block: { _runtime: runtime } };
+    const prices: PriceMap = new Map([[10, '1.000000000000'], [5, '4.000000000000']]);
+    const decimals: AssetDecimals = new Map([[10, 6], [5, 12]]);
+    const rows = extractVolumeFromSwaps([event], 14362843, 999, prices, decimals, id => id);
+    expect(rows.find(r => r.asset_id === 10)?.usd_volume_sell).toBe('1.000000000000');
+  });
+
+  it('does not fall back for a payload missing the swap fields', () => {
+    const runtime = {
+      events: { checkType: () => false },
+      decodeJsonEventRecordArguments: () => ({ something: 'else' }),
+    };
+    const event = { name: 'Broadcast.Swapped3', args: {}, block: { _runtime: runtime } };
+    const rows = extractVolumeFromSwaps([event], 14362843, 999, new Map(), new Map(), id => id);
+    expect(rows).toEqual([]);
   });
 });
 
