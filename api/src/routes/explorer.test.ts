@@ -1,13 +1,15 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { unusableFilterParam } from './explorer.ts'
+import Fastify from 'fastify'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { explorerRoutes, unusableFilterParam } from './explorer.ts'
 import {
   liqActionFor, liquidityActionEventNames, isAmountlessLiquidityEvent, liquidityRowAmount,
   evmTransactionFacts, getExtrinsic, search, initExplorerService,
 } from '../services/explorerService.ts'
 import type { PriceInfo } from '../services/explorerService.ts'
 import { initGovernanceService } from '../services/governanceService.ts'
+import { initIceService } from '../services/iceService.ts'
 import { evmTransactionReceipt } from '../services/evmReceipt.ts'
 import type { ClickHouseClient } from '../db/client.ts'
 
@@ -57,7 +59,7 @@ describe('unusableFilterParam', () => {
   it('reports the first unusable filter with what it expected', () => {
     expect(unusableFilterParam({ type: 'staking', min: 'abc' })).toEqual({
       key: 'type',
-      expected: 'all, transfer, trade, dca, liquidity, mm, xcm, stake, vote, otc, bond',
+      expected: 'all, transfer, trade, dca, liquidity, mm, xcm, stake, vote, otc, bond, intent',
     })
   })
 
@@ -380,5 +382,84 @@ describe('evmTransactionReceipt', () => {
       jsonrpc: '2.0', id: 1, result: { gasUsed: '0x56f36' },
     }), { status: 200 }))
     expect(await evmTransactionReceipt('0x' + 'a6'.repeat(32))).toEqual({ gasUsed: '356150', effectiveGasPrice: null })
+  })
+})
+
+// The order page's endpoint. An id is a u128 as a decimal string (never a number:
+// every real id is above 2^64), and a miss is described rather than negatively
+// cached — the order may simply not have reached ClickHouse yet.
+describe('GET /explorer/intent/:intentId', () => {
+  const app = Fastify()
+  beforeAll(async () => { await app.register(explorerRoutes) })
+  afterAll(async () => { await app.close() })
+
+  it('refuses an id that is not a decimal integer', async () => {
+    for (const bad of ['abc', '0x10', '-1', '1'.repeat(40)]) {
+      const res = await app.inject(`/explorer/intent/${bad}`)
+      expect(res.statusCode, bad).toBe(400)
+      expect(res.json()).toEqual({ error: 'Invalid intent id' })
+    }
+  })
+
+  it('bounds the value at u128 max, not just the digit count', async () => {
+    const { client, sql } = stubClient(() => [])
+    initExplorerService(client)
+    // 39 nines fits the width and overflows the type: toUInt128 would throw, a 500.
+    const over = await app.inject(`/explorer/intent/${'9'.repeat(39)}`)
+    expect(over.statusCode).toBe(400)
+    expect(over.json()).toEqual({ error: 'Invalid intent id' })
+    expect(sql).toHaveLength(0)
+    // The maximum itself is a legal id and reaches the order lookup.
+    const max = '340282366920938463463374607431768211455'
+    const res = await app.inject(`/explorer/intent/${max}`)
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'Intent not found', intentId: max, hint: 'not indexed yet, or never existed' })
+    expect(sql).toHaveLength(1)
+  })
+
+  it('describes a miss the way the DCA and trade pages do', async () => {
+    const { client, sql } = stubClient(() => [])
+    initExplorerService(client)
+    const res = await app.inject('/explorer/intent/18446744073709551623')
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'Intent not found', intentId: '18446744073709551623', hint: 'not indexed yet, or never existed' })
+    // The order lookup is the only read a miss costs.
+    expect(sql).toHaveLength(1)
+    expect(sql[0]).toContain('price_data.intent_orders FINAL')
+  })
+
+  it('refuses a malformed offset before reading anything', async () => {
+    const { client, sql } = stubClient(() => [])
+    initExplorerService(client)
+    const res = await app.inject('/explorer/intent/18446744073709551623?offset=-1')
+    expect(res.statusCode).toBe(400)
+    expect(sql).toHaveLength(0)
+  })
+})
+
+// The ICE dashboard endpoint: one model behind the SWR cache, built from bounded
+// reads only. Against a database with no intent yet it is the launch state.
+describe('GET /explorer/ice', () => {
+  const app = Fastify()
+  beforeAll(async () => { await app.register(explorerRoutes) })
+  afterAll(async () => { await app.close() })
+
+  it('answers the launch-state model when nothing has happened on the venue', async () => {
+    const { client, sql } = stubClient(() => [])
+    initExplorerService(client)
+    initIceService(client)
+    const res = await app.inject('/explorer/ice')
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.status).toEqual({ solverMode: 'V4', protocolFeePpm: 200, dcaMigrationEnabled: false, uniswapV3: null, asOfBlock: 14362830 })
+    expect(body.openOrders).toEqual({ total: 0, limit: 0, dca: 0, byAsset: [] })
+    expect(body.fillsPerDay).toHaveLength(30)
+    expect(body.quality.priceVsLimitBp).toEqual({ p10: null, p50: null, p90: null })
+    expect(body.migration.byReason).toEqual([])
+    expect(body.topPairs).toEqual([])
+    // Every read went through the injected client, capped and launch-bounded.
+    expect(sql.some(q => q.includes('price_data.intent_orders FINAL'))).toBe(true)
+    expect(sql.some(q => q.includes("stream = 'ice_matched_fee'"))).toBe(true)
+    expect(sql.filter(q => q.includes('SETTINGS max_memory_usage=1000000000, max_threads=2'))).toHaveLength(12)
   })
 })
