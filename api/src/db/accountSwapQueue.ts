@@ -81,6 +81,28 @@ export function accountSwapDestinationRows(
     if (!extrinsic) continue
     const accounts = [...new Set([extrinsic.signer, extrinsic.effective_signer].filter((account): account is string => !!account))]
     const signer = extrinsic.signer || extrinsic.effective_signer || ''
+    if (!accounts.length) {
+      // An UNSIGNED extrinsic — ICE.submit_solution, the off-chain worker's solution —
+      // has an extrinsic and no signer of any form; its Router swaps are the ICE pot's,
+      // which only the Broadcast event names. Read like a hook swap's actor.
+      const swapper = hookActors.get(tupleKey(row.block_height, row.event_index))
+      if (!swapper) continue
+      out.push({
+        account: swapper,
+        block_height: row.block_height,
+        event_index: row.event_index,
+        extrinsic_index: row.extrinsic_index,
+        block_timestamp: row.block_timestamp,
+        event_name: row.event_name,
+        signer: '',
+        asset_in: row.asset_in,
+        asset_out: row.asset_out,
+        amount_in: row.amount_in,
+        amount_out: row.amount_out,
+        ingested_at: row.ingested_at,
+      })
+      continue
+    }
     for (const account of accounts) {
       out.push({
         account,
@@ -227,13 +249,15 @@ async function queueExtrinsics(client: ClickHouseClient, rows: AccountSwapQueueR
   return out
 }
 
-// Resolve the hook rows of a batch against swap_actor, which pairs the Broadcast
-// event's swapper with the Router operation id that Router.Executed reports as
-// `eventId`. via_dca = 0 keeps DCA executions out: they are already the DCA path's
-// rows, and a second copy here would double every schedule on its owner's page.
-async function hookSwapActors(client: ClickHouseClient, rows: AccountSwapQueueRow[]): Promise<HookSwapActors> {
+// Resolve the actorless rows of a batch — hook swaps, and the swaps of an unsigned
+// extrinsic — against swap_actor, which pairs the Broadcast event's swapper with the
+// Router operation id that Router.Executed reports as `eventId`. via_dca = 0 keeps
+// DCA executions out: they are already the DCA path's rows, and a second copy here
+// would double every schedule on its owner's page.
+async function hookSwapActors(client: ClickHouseClient, rows: AccountSwapQueueRow[], extrinsics: AccountSwapExtrinsic[] = []): Promise<HookSwapActors> {
   const out: HookSwapActors = new Map()
-  const hooks = rows.filter(row => row.extrinsic_index == null)
+  const signed = new Set(extrinsics.filter(e => e.signer || e.effective_signer).map(e => tupleKey(e.block_height, e.extrinsic_index)))
+  const hooks = rows.filter(row => row.extrinsic_index == null || !signed.has(tupleKey(row.block_height, row.extrinsic_index)))
   if (!hooks.length) return out
   const tuples = [...new Set(hooks.map(row => `(${row.block_height},${row.event_index})`))]
   for (let start = 0; start < tuples.length; start += 5_000) {
@@ -309,8 +333,8 @@ export async function drainAccountSwapActivityQueue(
   for (let batch = 0; batch < maxBatches; batch++) {
     const queued = await queuePage(client, cursor, batchSize)
     if (!queued.length) break
-    const [extrinsics, hookActors] = await Promise.all([queueExtrinsics(client, queued), hookSwapActors(client, queued)])
-    const destination = accountSwapDestinationRows(queued, extrinsics, hookActors)
+    const extrinsics = await queueExtrinsics(client, queued)
+    const destination = accountSwapDestinationRows(queued, extrinsics, await hookSwapActors(client, queued, extrinsics))
     if (destination.length) {
       await client.insert({ table: 'price_data.account_swap_activity', values: destination, format: 'JSONEachRow' })
     }

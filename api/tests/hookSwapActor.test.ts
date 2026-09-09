@@ -57,17 +57,29 @@ describe('attachHookSwapActors — one resolution shared by every surface', () =
   })
 
   // Only rows nothing cheaper attributed: a signer, or the DCA execution that
-  // claimed the swap. Asking for the rest would be wasted work on every page.
-  it('asks only for hook rows that are still actorless', () => {
+  // claimed the swap. Asking for the rest would be wasted work on every page. Not
+  // gated on "no extrinsic": an UNSIGNED extrinsic (ICE.submit_solution, the OCW's
+  // solution) has an extrinsic index and no signer, and its Router swaps name the ICE
+  // pot only through the Broadcast event — the same read a hook swap needs.
+  it('asks for every swap row that is still actorless, hook or unsigned extrinsic', () => {
     const body = explorerService.match(/async function attachHookSwapActors[^]*?\n}/)?.[0] ?? ''
-    expect(body).toMatch(/!r\.who && r\.extrinsicIndex == null && r\.eventIndex != null/)
+    expect(body).toMatch(/!r\.who && r\.eventIndex != null/)
+    expect(body).not.toMatch(/extrinsicIndex == null/)
     expect(body).toMatch(/if \(!pending\.length\) return/)
   })
 
   // Classification has to stay symmetric across surfaces (AGENTS.md), so the swap
-  // detail, the trade feed, the asset feed and the block page all run the same pass.
+  // detail (by extrinsic and by event), the trade feed, the asset feed, the block page
+  // and the extrinsic page all run the same pass.
   it('runs on every surface that renders a swap', () => {
-    expect(explorerService.match(/await attachHookSwapActors\(/g)).toHaveLength(4)
+    expect(explorerService.match(/await attachHookSwapActors\(/g)).toHaveLength(6)
+  })
+
+  // The account page reads the account-first projection instead, whose signer-less
+  // rows exist only because the Broadcast swapper keyed them to this account — so
+  // the row's account IS the actor, and the ICE pot's page names the pot on its trades.
+  it('names the account itself on a signer-less row of the account page', () => {
+    expect(explorerService).toMatch(/const who = rep\.signer \|\| rep\.account/)
   })
 })
 

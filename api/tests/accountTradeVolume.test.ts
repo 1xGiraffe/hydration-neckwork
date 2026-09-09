@@ -218,9 +218,12 @@ describe('partition block range', () => {
     }
   })
 
-  it('bounds every raw_events leg of the rebuild', () => {
+  it('bounds every source read of the rebuild', () => {
     const sql = buildPartitionInsertSql('197501')
-    expect(sql.match(/block_height >= 13147200 AND block_height < 13370400/g)).toHaveLength(4)
+    // Four raw_events reads, plus the intent fills and the pot's settlement legs.
+    // 8 = the six Broadcast/legacy/intent bounds + the direct v3 swap read and its
+    // routed-hop exclusion (2026-09-09).
+    expect(sql.match(/block_height >= 13147200 AND block_height < 13370400/g)).toHaveLength(8)
     // The original expression stays for exactness.
     expect(sql).toContain('toYYYYMM(toDateTime(block_height * 12)) = 197501')
   })
@@ -228,5 +231,65 @@ describe('partition block range', () => {
   it('rejects a malformed partition rather than scanning everything', () => {
     expect(() => partitionBlockRange('nonsense')).toThrow()
     expect(() => partitionBlockRange('197513')).toThrow()
+  })
+})
+
+// ICE intents settle through the solver's pot: the pot runs the AMM routes (Broadcast
+// swapper = pot) and the owner only pays into and receives out of it. Measured on the
+// first solutions, every DCA trade of intent #34 booked $190.20 of volume to the pot
+// and nothing to its owner. An owner's trade IS their fill — the Intent event's
+// amounts, or, for the budget-exhausting DcaCompleted that states none, the pot's
+// settlement legs — while the pot keeps its routes, as the fee processor keeps its
+// conversions.
+describe('ICE intent fills as owner trades', () => {
+  const sql = buildPartitionInsertSql('202609')
+
+  it('reads the partition\'s fills from the intent tables, deduplicated, from runtime 443 on', () => {
+    expect(sql).toContain('FROM price_data.intent_events FINAL')
+    expect(sql).toContain('FROM price_data.intent_orders FINAL')
+    for (const name of ['Intent.IntentResolved', 'Intent.IntentResovedPartially', 'Intent.DcaTradeExecuted', 'Intent.DcaCompleted']) {
+      expect(sql, name).toContain(`'${name}'`)
+    }
+    expect(sql).toContain('block_height >= 14362830')
+    // Still only the four raw_events reads: the fills come from their own tables.
+    expect(sql.match(/FROM price_data\.raw_events FINAL/g)).toHaveLength(5)
+  })
+
+  it('nets an owner\'s fill as one trade keyed on its Intent event: asset_in out, asset_out in', () => {
+    expect(sql.match(/FROM intent_trades\n/g)).toHaveLength(2)
+    expect(sql).toContain('1099511627776 + event_index AS trade_key, block_time, asset_in, -amount_in')
+    expect(sql).toContain('1099511627776 + event_index, block_time, asset_out, amount_out')
+  })
+
+  it('reads a completion\'s amounts from the pot\'s settlement legs, for a single claimant only', () => {
+    expect(sql).toContain('FROM price_data.transfer_activity_by_time FINAL')
+    expect(sql).toContain("event_name = 'Currencies.Transferred'")
+    expect(sql).toContain("'0x6d6f646c6963655f696365230000000000000000000000000000000000000000'")
+    // Sibling fills that state their amounts are subtracted; two completions of one
+    // owner in one asset cannot be split and contribute nothing.
+    expect(sql).toContain('if(c.n = 1, greatest(')
+    expect(sql).toContain("event_name != 'Intent.DcaCompleted'")
+  })
+
+  it('leaves the pot\'s own Broadcast legs on the pot', () => {
+    expect(sql).not.toMatch(/if\(JSONExtractString\(args_json,'swapper'\) = '0x6d6f646c6963655f69636523/)
+  })
+})
+
+// A direct EVM swap in a concentrated-liquidity pool has no Broadcast event; the
+// pool's Swap log is the trade and its recipient the trader. A routed hop through
+// the same pool already reaches `legs` through its UniswapV3 Swapped3, so its
+// extrinsic is excluded here — counting both would double the route.
+describe('direct concentrated-liquidity swaps', () => {
+  const sql = buildPartitionInsertSql('202609')
+  it('reads the pool Swap logs, names the recipient in ETH-prefixed form, and yields to routed hops', () => {
+    expect(sql).toContain("FROM price_data.uniswap_v3_events FINAL WHERE kind = 'pool' AND event_name = 'Swap'")
+    expect(sql).toContain("concat('0x45544800', substring(e.counterparty, 3, 40), '0000000000000000') AS account")
+    expect(sql).toContain("JSONExtractString(args_json, 'fillerType', '__kind') = 'UniswapV3'")
+    expect(sql).toContain('FROM v3_direct')
+  })
+  it('resolves tokens through the registry or the precompile rule and drops strangers', () => {
+    expect(sql).toContain("FROM price_data.assets WHERE evm_address != ''")
+    expect(sql).toContain('asset0 != 4294967295 AND asset1 != 4294967295')
   })
 })

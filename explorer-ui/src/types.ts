@@ -300,6 +300,11 @@ export interface TradeDetail {
   // its block can still reorganize, the fee has not settled, and the route
   // carries no per-hop amounts. Absent = finalized.
   finalized?: boolean
+  // The ICE pot's trade inside an ICE.submit_solution: the intents (limit orders,
+  // DCA intents) this settlement leg filled, with their owners.
+  iceIntents?: { intentId: string; intentSeq: number; intentKind: 'swap' | 'dca' | null; intentAction: string; owner: AccountRef | null }[]
+  // A concentrated-liquidity swap's pool contract (links the venue to its page).
+  poolAddress?: string
 }
 
 export interface DailyPoint { date: string; value: number }
