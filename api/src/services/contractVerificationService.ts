@@ -564,6 +564,10 @@ export async function submitVerification(input: SubmitInput): Promise<SubmitOutc
 
 async function runVerification(job: JobState, input: SubmitInput): Promise<void> {
   const result = await verifyStandardJson({
+    // `deployedBytecode` stays the verbatim eth_getCode answer wherever it is
+    // stored or read back; passing the address is what lets the client zero a
+    // library's call protection on the way out to the verifier.
+    address: job.address,
     bytecode: job.deployedBytecode,
     compilerVersion: input.compilerVersion,
     stdJsonInput: input.stdJsonInput,
