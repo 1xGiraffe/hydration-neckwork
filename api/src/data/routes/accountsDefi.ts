@@ -13,6 +13,7 @@ import {
 import { dcaSchedules } from '../services/dcaData.ts'
 import { votesForVoter } from '../services/governance.ts'
 import { liquidityPositions } from '../services/lpPositions.ts'
+import { LIQUIDITY_ACTIONS, type LiquidityAction } from '../services/uniswapV3Liquidity.ts'
 import { UNSEEN_IS_EMPTY, inWindow, requireParsedAddress, windowKey, zAccountFeedQuery, zAccountParams } from './accountsShared.ts'
 import { PRE_ROUTER_NOTE, zSchedule } from './dcaShared.ts'
 import { zOtcEvent } from './otcShared.ts'
@@ -71,13 +72,21 @@ const zLiquidityItem = z.object({
   extrinsicIndex: z.number().int().nullable(),
   extrinsicHash: z.string().nullable().describe('Hash of the carrying extrinsic; null for a block-hook row.'),
   timestamp: zIsoTimestamp,
-  eventName: z.string(),
+  eventName: z.string().describe('The pallet event (`Omnipool.LiquidityAdded`, …) or, for a concentrated-liquidity act, the contract class and log (`UniswapV3PositionManager.IncreaseLiquidity`, `UniswapV3Vault.Deposit`, `UniswapV3Pool.Mint`, …).'),
+  action: z.enum(LIQUIDITY_ACTIONS as [LiquidityAction, ...LiquidityAction[]]).nullable().describe('The act: Add, Remove, CollectFees (a Uniswap v3 collect beyond the principal a same-extrinsic decrease/burn booked), Claim (a liquidity-mining reward), Create/Destroy (an XYK pool).'),
   assetId: zAssetId,
   amount: z.string().nullable(),
   amountA: z.string().nullable(),
+  amountB: z.string().nullable().describe('The `assetB` side of a concentrated-liquidity act (token1); null for pallet events, which carry at most one amount.'),
   assetB: zAssetId.nullable(),
   poolAccount: z.string().nullable(),
   assetRefs: z.array(zAssetId),
+  poolAddress: z.string().nullable().describe('The Uniswap v3 pool contract the act is in (the poolKey of the uniswapv3 venue); null for pallet events.'),
+  tokenId: z.string().nullable().describe('The position NFT id for an act through the NonfungiblePositionManager.'),
+  tickLower: z.number().int().nullable().describe('The position\'s tick range (manager and pool-direct acts).'),
+  tickUpper: z.number().int().nullable(),
+  vault: z.string().nullable().describe('The Gamma vault contract for a vault deposit/withdrawal.'),
+  shares: z.string().nullable().describe('Vault shares minted or burned by the deposit/withdrawal, raw units.'),
 })
 
 const zLpLeg = z.object({
@@ -87,13 +96,13 @@ const zLpLeg = z.object({
 })
 
 const zLpPosition = z.object({
-  venue: z.enum(['omnipool', 'stableswap', 'xyk']),
+  venue: z.enum(['omnipool', 'stableswap', 'xyk', 'uniswapv3', 'gamma']).describe("'uniswapv3' is a concentrated-liquidity position NFT held through a NonfungiblePositionManager; 'gamma' a Gamma Strategies vault share balance in such a pool."),
   farmed: z.boolean().describe('Held through a liquidity-mining deposit (Omnipool: collection-2584 deposit NFT; XYK: farm principal) rather than directly.'),
-  positionId: z.string().nullable().describe('The Omnipool position NFT id; null for fungible pool shares.'),
-  poolKey: z.string().describe("The venue's own pool key, as on the fill feeds: 'omnipool', a stableswap pool id, an XYK pool account."),
-  shareAssetId: zAssetId.nullable().describe('The LP share token (a stableswap pool\'s share asset is its pool id; an XYK pool\'s its LP asset); null for an Omnipool position.'),
-  shares: z.string().describe('Raw shares held (Omnipool: the position\'s shares; stableswap/XYK: the share-token amount or farmed principal).'),
-  legs: z.array(zLpLeg).describe('What redeeming the whole position now returns: Omnipool positions carry their asset leg plus an H2O (asset 1) leg when the pool price moved against the entry price; stableswap and XYK redeem pro-rata over every reserve.'),
+  positionId: z.string().nullable().describe('The Omnipool position NFT id, or a Uniswap v3 position\'s NFT token id; null for fungible pool shares.'),
+  poolKey: z.string().describe("The venue's own pool key, as on the fill feeds: 'omnipool', a stableswap pool id, an XYK pool account, a Uniswap v3 pool contract (uniswapv3), a vault contract (gamma)."),
+  shareAssetId: zAssetId.nullable().describe('The LP share token (a stableswap pool\'s share asset is its pool id; an XYK pool\'s its LP asset); null for an Omnipool or Uniswap v3 position and for a vault share the registry has not listed.'),
+  shares: z.string().describe('Raw shares held (Omnipool: the position\'s shares; stableswap/XYK: the share-token amount or farmed principal; uniswapv3: the position\'s liquidity L; gamma: the vault-share balance).'),
+  legs: z.array(zLpLeg).describe('What redeeming the whole position now returns: Omnipool positions carry their asset leg plus an H2O (asset 1) leg when the pool price moved against the entry price; stableswap and XYK redeem pro-rata over every reserve; a Uniswap v3 position states the principal left in it (increases − decreases of both tokens, uncollected fees excluded); a Gamma share redeems pro-rata over the vault\'s totals (its newest rebalance plus the deposits and withdrawals since).'),
   valueUsd: z.string().nullable().describe('Sum of the legs at current prices; null when any leg is unpriced.'),
 })
 
@@ -298,7 +307,10 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
     schema: {
       tags: ['accounts'],
       summary: 'Liquidity actions by the account',
-      description: 'Omnipool/Stableswap/XYK liquidity adds and removals plus liquidity-mining reward claims, account-first. `assetRefs` names every asset the event references (both pool sides included). ' + UNSEEN_IS_EMPTY,
+      description: [
+        'Omnipool/Stableswap/XYK liquidity adds and removals plus liquidity-mining reward claims, account-first. `assetRefs` names every asset the event references (both pool sides included). ' + UNSEEN_IS_EMPTY,
+        'Concentrated-liquidity (Uniswap v3) acts are in the same feed, restated from the pools\' EVM logs with the explorer\'s act rules: a position opened or closed through the NonfungiblePositionManager (`IncreaseLiquidity` → Add, `DecreaseLiquidity` → Remove, attributed to the NFT\'s holder at that moment, with the pool and tick range read from the pool log beside it), a manager `Collect` as CollectFees for what it paid BEYOND the principal a DecreaseLiquidity in the same extrinsic booked (a collect that only settled principal is not an act; a collect made in a later transaction than its decrease reports its whole payout), a Gamma vault `Deposit`/`Withdraw` for the beneficiary, and a pool\'s own `Mint`/`Burn`/`Collect` only when the owner is no announced manager or vault (a burn(0) poke never is). `assetId`/`amount` are token0, `assetB`/`amountB` token1; an act whose tokens the registry cannot name is omitted rather than published with an invented asset. A vault Rebalance is the operator\'s act and names no account.',
+      ].join('\n\n'),
       params: zAccountParams,
       querystring: zAccountFeedQuery,
       response: { 200: zFeedPage(zLiquidityItem), 400: zError },
@@ -326,7 +338,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
       response: {
         200: z.object({
           items: z.array(zLpPosition),
-          asOfBlock: z.number().int().describe('The pool-state snapshot block the legs were computed at.'),
+          asOfBlock: z.number().int().describe('The pool-state snapshot block the Omnipool, stableswap and XYK legs were computed at; concentrated-liquidity positions are read at the head of their own event projection.'),
           totals: z.object({ valueUsd: z.string().describe('Sum of every priced position, 2 decimals.') }),
         }),
         400: zError,

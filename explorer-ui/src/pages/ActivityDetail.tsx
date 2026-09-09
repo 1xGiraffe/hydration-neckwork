@@ -6,7 +6,7 @@ import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../
 import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ConvictionTag, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
 import { BOND_LABELS, LIQ_LABELS, MM_LABELS, intentLabel } from '../components/activityColors'
 import { RevenueRow } from '../components/RevenueRow'
-import { Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
+import { PoolBadge, Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { convictionLabel, voteSideLabel, voteSubjectLabel } from '../utils/voteRows'
 
@@ -122,6 +122,10 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
                 action differently from the row that led here. */}
             {row.type === 'mm' && <><div className="dt">Action</div><div className="dd">{MM_LABELS[row.mmAction ?? ''] ?? row.mmAction ?? '—'}</div></>}
             {row.type === 'liquidity' && <><div className="dt">Action</div><div className="dd">{LIQ_LABELS[row.liqAction ?? ''] ?? LIQ_LABELS.Add}</div></>}
+            {/* A concentrated-liquidity act names its pool, and the position NFT or the vault it went through. */}
+            {row.poolAddress && <><div className="dt">Pool</div><div className="dd"><Link to={paths.v3Pool(row.poolAddress)} className="hash mono">{row.poolAddress.slice(0, 10)}…{row.poolAddress.slice(-6)}</Link> <PoolBadge pool="Uniswap v3" /></div></>}
+            {row.v3TokenId && <><div className="dt">Position</div><div className="dd mono">#{row.v3TokenId}</div></>}
+            {row.v3Vault && <><div className="dt">Vault</div><div className="dd mono">{row.v3Vault.slice(0, 10)}…{row.v3Vault.slice(-6)} <span className="muted">Gamma vault</span></div></>}
             {row.type === 'staking' && <><div className="dt">Action</div><div className="dd">{row.stakingAction ?? '—'}</div></>}
             {row.type === 'bond' && <>
               <div className="dt">Action</div><div className="dd">{BOND_LABELS[row.bondAction ?? ''] ?? '—'}</div>

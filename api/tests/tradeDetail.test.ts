@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { swapEventAmounts, parseTradeLimit, parseRouteHops, limitMarginPct } from '../src/services/explorerService.ts'
+import { swapEventAmounts, parseTradeLimit, parseRouteHops, limitMarginPct, routeHopVenue } from '../src/services/explorerService.ts'
 
 // Trade-detail parsing: swap-event amount extraction (XYK uses amount/salePrice/
 // buyPrice instead of amountIn/amountOut), slippage-limit extraction per call
@@ -62,6 +62,14 @@ describe('parseRouteHops', () => {
   })
   it('returns [] when there is no route', () => {
     expect(parseRouteHops({ assetIn: 9 })).toEqual([])
+  })
+  // Runtime 443: PoolType::UniswapV3(fee) carries the FEE TIER in the enum's value,
+  // which is not a pool id — read as one it rendered "UniswapV3 #3000".
+  it('reads a UniswapV3(fee) hop as the venue plus its fee tier, never a pool id', () => {
+    const hops = parseRouteHops({ route: [{ pool: { __kind: 'UniswapV3', value: 3000 }, assetIn: 1001, assetOut: 222 }] })
+    expect(hops).toEqual([{ pool: 'Uniswap v3 0.3%', poolId: null, feeTier: 3000, assetIn: 1001, assetOut: 222 }])
+    expect(routeHopVenue({ __kind: 'UniswapV3' })).toEqual({ pool: 'Uniswap v3', poolId: null })
+    expect(routeHopVenue({ __kind: 'Stableswap', value: 111 })).toEqual({ pool: 'Stableswap', poolId: 111 })
   })
 })
 

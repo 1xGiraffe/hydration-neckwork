@@ -163,9 +163,9 @@ describe('ClickHouseStore retry idempotency', () => {
     const fake = new FakeClickHouseClient()
     const store = new ClickHouseStore(fake as any, 10_000)
 
-    store.addAssets([{ asset_id: 1, symbol: 'ONE', name: 'One', decimals: 12, parachain_id: null }])
+    store.addAssets([{ asset_id: 1, symbol: 'ONE', name: 'One', decimals: 12, parachain_id: null, evm_address: '' }])
     await store.flushAssets()
-    store.addAssets([{ asset_id: 1, symbol: 'ONE2', name: 'One v2', decimals: 12, parachain_id: null }])
+    store.addAssets([{ asset_id: 1, symbol: 'ONE2', name: 'One v2', decimals: 12, parachain_id: null, evm_address: '' }])
     await store.flushAssets()
 
     expect(fake.inserts.map(insert => insert.values.map((row: any) => row.symbol))).toEqual([['ONE'], ['ONE2']])

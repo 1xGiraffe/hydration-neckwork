@@ -415,8 +415,15 @@ ORDER BY venue, pool_key, low_asset_id, high_asset_id`
 /**
  * The pool a ticker was filled in. The Omnipool is one global pool; every other
  * venue carries a key (a stableswap pool id, an XYK pool account, an aToken
- * contract account, an OTC order id), so the venue prefix keeps two pools of
- * different venues from colliding on the same id.
+ * contract account, an OTC order id, a Uniswap v3 pool contract), so the venue
+ * prefix keeps two pools of different venues from colliding on the same id.
+ *
+ * A concentrated-liquidity pool's pair is named like every other venue's, through
+ * the aliased symbols: the aDOT/HOLLAR pool prints `DOT_HOLLAR` under
+ * `uniswapv3:0x5c62…`, because aDOT is priced as DOT and the ticker names the
+ * market being made (1 aDOT redeems 1 DOT), exactly as pool 690's aDOT leg reads
+ * `DOT` and the stablepools' aUSDT legs read `USDT`. The pool_id keeps it a row
+ * of its own beside any DOT_HOLLAR market elsewhere.
  *
  * This is the one field whose CONTENT differs from the old feed, which repeated
  * ticker_id here. Naming the real pool is what lets a pair appear once per pool
@@ -508,7 +515,7 @@ function warnOnDroppedPairs(unnamedPairs: number, unnamed: Set<number>, indistin
  * use — the same non-clobbering guard platformStats.ts applies.
  */
 let wiredClient: ClickHouseClient | null = null
-function ensurePoolService(client: ClickHouseClient): void {
+export function ensurePoolService(client: ClickHouseClient): void {
   if (wiredClient === client) return
   initPoolService(client)
   wiredClient = client
@@ -536,6 +543,8 @@ function liquidityResolver(index: PoolListResponse, xykShareTokenByAccount: Map<
     new Map(index.pools.filter(p => p.kind === kind && p.poolId != null).map(p => [String(p.poolId), p.tvlUsd]))
   const stableswap = byKind('stableswap')
   const xyk = byKind('xyk')
+  // A concentrated-liquidity pool is keyed by its contract on both sides.
+  const uniswapV3 = new Map(index.pools.filter(p => p.kind === 'uniswapv3' && p.address).map(p => [p.address as string, p.tvlUsd]))
   return (venue, poolKey, assetIds) => {
     if (venue === 'omnipool') {
       const legs = omnipool?.composition.filter(entry => assetIds.includes(entry.asset.assetId)) ?? []
@@ -548,6 +557,7 @@ function liquidityResolver(index: PoolListResponse, xykShareTokenByAccount: Map<
       const shareToken = xykShareTokenByAccount.get(poolKey)
       return shareToken == null ? null : xyk.get(shareToken) ?? null
     }
+    if (venue === 'uniswapv3') return uniswapV3.get(poolKey.toLowerCase()) ?? null
     return null
   }
 }

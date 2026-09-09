@@ -231,7 +231,7 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
                       <AssetChip asset={data.route[0].assetIn} />
                       {data.route.map((hop, i) => (
                         <Fragment key={`${hop.pool}-${hop.assetIn.assetId}-${hop.assetOut.assetId}-${i}`}>
-                          <PoolBadge pool={hop.pool} poolId={hop.poolId} to={poolHref(hop.pool, hop.poolId)} />
+                          <PoolBadge pool={hop.pool} poolId={hop.poolId} to={poolHref(hop.pool, hop.poolId, hop.poolAddress)} />
                           <AssetChip asset={hop.assetOut} />
                         </Fragment>
                       ))}

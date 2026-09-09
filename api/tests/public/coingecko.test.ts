@@ -279,6 +279,31 @@ describe('buildTickers', () => {
     expect(new Set(tickers.map(t => t.ticker_id))).toEqual(new Set(['HOLLAR_USDC']))
   })
 
+  it('names a concentrated-liquidity pool by its aliased symbols under its contract pool_id', async () => {
+    const { buildTickers } = await import('../../src/public/services/coingecko.ts')
+    // The aDOT/HOLLAR Uniswap v3 pool: aDOT (1001) is priced as DOT, so the ticker
+    // names the DOT market it makes — the same rule pool 690's aDOT leg follows —
+    // and the pool_id is the venue-prefixed pool CONTRACT, the pool key the v3 legs
+    // carry (the poolKey of /v1/pools/uniswapv3/volumes and the DexScreener pair id).
+    const pool = '0x5c6208a3c316a801f8996750aa7b6f45fc988548'
+    const [ticker] = buildTickers([sqlRow({
+      venue: 'uniswapv3', pool_key: pool, low_asset_id: 222, high_asset_id: 1001,
+      low_volume: '46.181299507238469000', high_volume: '0.042181124500000000',
+      last_ratio: '1094.833744213046000000', max_ratio: '1094.833744213046000000', min_ratio: '1094.833744213046000000',
+    })], (venue, poolKey) => (venue === 'uniswapv3' && poolKey === pool ? 4700.5 : null))
+    expect(ticker.ticker_id).toBe('DOT_HOLLAR')
+    expect(ticker.base_currency).toBe('DOT')
+    expect(ticker.target_currency).toBe('HOLLAR')
+    expect(ticker.pool_id).toBe(`uniswapv3:${pool}`)
+    // HOLLAR is the low id, so the SQL ratio is HOLLAR per aDOT; DOT is the base
+    // (the high id), so the feed's base-per-target convention publishes the
+    // reciprocal (1/1094.83 — the incumbent's orientation, never flipped here) and
+    // the DOT side, 0.0422, as the base volume.
+    expect(ticker.last_price).toBeCloseTo(1 / 1094.833744213046, 12)
+    expect(ticker.base_volume).toBeCloseTo(0.0421811245, 10)
+    expect(ticker.liquidity_in_usd).toBe(4700.5)
+  })
+
   it('falls back to the raw registry symbols for a real market between two entries of one token', async () => {
     const { buildTickers } = await import('../../src/public/services/coingecko.ts')
     // The 3-Pool trades aUSDT against AssetHub USDT: both normalise to USDT, so

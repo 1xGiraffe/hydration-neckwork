@@ -71,6 +71,7 @@ const ROW_DESCRIPTION = [
   '`swapper` is resolved in order of authority: Broadcast.Swapped\'s swapper (the account the router traded FOR, which is the proxied or multisig account when the extrinsic ran on behalf of one), then the owner of the DCA execution the swap belongs to, then the extrinsic\'s signatory, then the pool event\'s own `who`. A hook-dispatched swap older than the Broadcast events (block 6,837,789) that no DCA execution claims reports null rather than being credited to a pallet.',
   '`operationType` is the side the user fixed: a pool event names it, a routed trade\'s call names it, and a batched or hook-dispatched route leaves it null rather than guessed.',
   '`dca` names the schedule a hook-dispatched execution belongs to, matched to its DCA.TradeExecuted event by block and per-trade amount.',
+  'COVERAGE: this feed is the substrate swap-event model, so a Router-routed trade through a concentrated-liquidity (Uniswap v3) pool is here like any other route, but a DIRECT EVM swap against such a pool (SwapRouter02 or any contract, no Broadcast event) is not. Those fills are served per pool by `/v1/pools/uniswapv3/volumes`, by the DexScreener `uniswapv3` pairs, and by the Data API\'s fill feeds.',
 ].join('\n\n')
 
 const SCOPE_DESCRIPTION = [

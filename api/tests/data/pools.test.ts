@@ -1,6 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { AUTH, fakeDataClient, freshDataApp } from './helpers.ts'
+import { loadExplorerAssets } from '../../src/services/explorerAssets.ts'
+import type { ClickHouseClient } from '../../src/db/client.ts'
 import { encodeAddress } from '@polkadot/util-crypto'
 
 // Contract tests for /v1/pools*: the snapshot (with the delisted flag), the
@@ -42,6 +44,20 @@ function legRow(overrides: Row): Row {
 
 let app: FastifyInstance | undefined
 
+// The v3 distribution scales its prices by the tokens' decimals, so the shared
+// registry snapshot has to hold them (aDOT 10, HOLLAR 18).
+beforeAll(async () => {
+  await loadExplorerAssets(fakeDataClient(
+    query => (query.includes('FROM price_data.assets FINAL')
+      ? [
+          { asset_id: 1001, symbol: 'aDOT', name: 'aDOT', decimals: 10, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
+          { asset_id: 222, symbol: 'HOLLAR', name: 'Hydrated Dollar', decimals: 18, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
+        ]
+      : undefined),
+    query => (query.includes('Bonds.TokenCreated') ? [] : undefined),
+  ) as unknown as ClickHouseClient)
+})
+
 afterEach(async () => {
   await app?.close()
   app = undefined
@@ -52,11 +68,19 @@ describe('GET /v1/pools', () => {
     const client = fakeDataClient(
       snapshotHandler,
       query => (query.includes('-- data:pools:xyk-registry') ? [{ pool_account: XYK_POOL, lp_asset_id: 1000086 }] : undefined),
+      // The concentrated-liquidity pools come from their own projection; a chain
+      // without one answers an empty list, not an absent field.
+      query => (query.includes('-- data:pools:uniswapv3') ? [] : undefined),
     )
     app = await freshDataApp(client)
     const res = await app.inject({ url: '/v1/pools', headers: AUTH })
     expect(res.statusCode).toBe(200)
     const body = res.json()
+    expect(body.uniswapV3).toEqual([])
+    // ClickHouse wants the alias BEFORE FINAL (`t AS p FINAL`); the other order is a
+    // syntax error that turned the whole /v1/pools answer into a 500.
+    const v3Query = client.query.mock.calls.map(c => (c[0] as { query: string }).query).find(q => q.includes('-- data:pools:uniswapv3\n'))
+    expect(v3Query).toContain('FROM price_data.uniswap_v3_pools AS p FINAL')
     expect(body.omnipool).toEqual([
       { assetId: '5', reserve: '111', hubReserve: '222', shares: '333', protocolShares: '44', blockHeight: 13931400 },
     ])
@@ -103,6 +127,121 @@ describe('pool histories', () => {
     const res = await app.inject({ url: '/v1/pools/omnipool/424242/history', headers: AUTH })
     expect(res.statusCode).toBe(404)
     expect(res.json().error.context.hint).toBe('list Omnipool assets via /v1/pools')
+  })
+
+  it('states active liquidity as the open ranges straddling the tick, not the last swap\'s field', async () => {
+    const POOL = '0x5c6208a3c316a801f8996750aa7b6f45fc988548'
+    const client = fakeDataClient(
+      snapshotHandler,
+      query => (query.includes('-- data:pools:xyk-registry') ? [] : undefined),
+      query => (query.includes('-- data:pools:uniswapv3-active-liquidity')
+        ? [{ pool: POOL, liquidity: '4504017577969432095' }]
+        : undefined),
+      query => (query.includes('-- data:pools:uniswapv3')
+        ? [{ pool: POOL, token0: '0x02639ec01313c8775fae74f2dad1118c8a8a86da', token1: '0x531a654d1696ed52e7275a8cede955e82620f99a', asset0: 1001, asset1: 222, fee: 3000, tick_spacing: 60, created_block: 14359646, sqrt_price: '862203316974439708502410565924684', tick: 185907, swaps: 2, priced_rows: 3, last_block: 14404139 }]
+        : undefined),
+    )
+    app = await freshDataApp(client)
+    const res = await app.inject({ url: '/v1/pools', headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    // The pool's last swap crossed out of its only range and reported 0; the range still stands.
+    expect(res.json().uniswapV3).toEqual([
+      { pool: POOL, token0: '0x02639ec01313c8775fae74f2dad1118c8a8a86da', token1: '0x531a654d1696ed52e7275a8cede955e82620f99a', asset0: '1001', asset1: '222', fee: 3000, tickSpacing: 60, sqrtPriceX96: '862203316974439708502410565924684', tick: 185907, liquidity: '4504017577969432095', createdBlock: 14359646, blockHeight: 14404139 },
+    ])
+  })
+
+  it('serves one pool\'s liquidity distribution: ticks, segments and the ranges behind them', async () => {
+    const POOL = '0x5c6208a3c316a801f8996750aa7b6f45fc988548'
+    const VAULT = '0xa206d0959813f17c17c87147271c49065438648a'
+    const client = fakeDataClient(
+      query => (query.includes('-- v3:liquidity:ranges')
+        ? [{ owner: VAULT, tick_lower: 184860, tick_upper: 186840, net: '4504017577969432095', mints: 2 }]
+        : undefined),
+      query => (query.includes('-- v3:liquidity:state')
+        ? [{ tick: 185907, sqrt: '862203316974439708502410565924684', priced: 3, last_block: 14404139, n: 193 }]
+        : undefined),
+      query => (query.includes('-- data:pools:uniswapv3')
+        ? [{ pool: POOL, token0: '0x02639ec01313c8775fae74f2dad1118c8a8a86da', token1: '0x531a654d1696ed52e7275a8cede955e82620f99a', asset0: 1001, asset1: 222, fee: 3000, tick_spacing: 60, created_block: 14359646, sqrt_price: '862203316974439708502410565924684', tick: 185907, swaps: 2, priced_rows: 3, last_block: 14404139 }]
+        : undefined),
+    )
+    app = await freshDataApp(client)
+    const res = await app.inject({ url: `/v1/pools/uniswapv3/${POOL.toUpperCase().replace('0X', '0x')}/liquidity`, headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body).toMatchObject({ pool: POOL, asset0: '1001', asset1: '222', fee: 3000, tickSpacing: 60, tick: 185907, liquidity: '4504017577969432095', blockHeight: 14404139 })
+    expect(body.ticks.map((t: { tick: number; liquidityNet: string; liquidityGross: string }) => [t.tick, t.liquidityNet, t.liquidityGross])).toEqual([
+      [184860, '4504017577969432095', '4504017577969432095'],
+      [186840, '-4504017577969432095', '4504017577969432095'],
+    ])
+    // Both tokens are registry assets, so every tick carries its price.
+    expect(body.ticks[0].price).toBe('1.06651360727')
+    expect(body.segments).toHaveLength(1)
+    // The price sits inside the range, so it holds both tokens.
+    expect(BigInt(body.segments[0].amount0) > 0n && BigInt(body.segments[0].amount1) > 0n).toBe(true)
+    expect(body.ranges).toEqual([
+      { owner: VAULT, tickLower: 184860, tickUpper: 186840, priceLower: '1.06651360727', priceUpper: '1.30002711029', liquidity: '4504017577969432095', amount0: body.segments[0].amount0, amount1: body.segments[0].amount1, positions: 2, inRange: true },
+    ])
+    // The pool key is lower-cased before it is bound.
+    for (const seen of client.seen.filter(x => x.query.includes('-- v3:liquidity:'))) expect(seen.params.pool).toBe(POOL)
+  })
+
+  it('404s a contract that is no concentrated-liquidity pool, with the enumeration hint', async () => {
+    const client = fakeDataClient(
+      query => (query.includes('-- data:pools:uniswapv3') ? [] : undefined),
+    )
+    app = await freshDataApp(client)
+    const res = await app.inject({ url: '/v1/pools/uniswapv3/0x1111111111111111111111111111111111111111/liquidity', headers: AUTH })
+    expect(res.statusCode).toBe(404)
+    expect(res.json().error.context.hint).toBe('list the concentrated-liquidity pools via /v1/pools (uniswapV3)')
+  })
+
+  it('pages a Uniswap v3 pool history per swap on the position cursor', async () => {
+    const POOL = '0x5c6208a3c316a801f8996750aa7b6f45fc988548'
+    const client = fakeDataClient(
+      (query, params) => {
+        if (!query.includes('-- data:pools:uniswapv3-history')) return undefined
+        const rows = [
+          { block_height: 14397741, event_index: 14, ts: '2026-09-09 09:44:24', event_name: 'Swap', sqrt_price: '8296', tick: 185842, liq: '6653831914530704', amount0_s: '-1124332283', amount1_s: '132942843369061750', ingested_at: 'x' },
+          { block_height: 14395782, event_index: 34, ts: '2026-09-09 08:30:30', event_name: 'Swap', sqrt_price: '8295', tick: 185060, liq: '5534876290645021', amount0_s: '-421811245', amount1_s: '46181299507238469', ingested_at: 'x' },
+          { block_height: 14359650, event_index: 3, ts: '2026-09-08 10:37:30', event_name: 'Initialize', sqrt_price: '8290', tick: 184990, liq: '0', amount0_s: '0', amount1_s: '0', ingested_at: 'x' },
+        ]
+        return rows.filter(r => params.cb == null || r.block_height < Number(params.cb) || (r.block_height === Number(params.cb) && r.event_index < Number(params.ci)))
+      },
+    )
+    app = await freshDataApp(client)
+    const first = await app.inject({ url: `/v1/pools/uniswapv3/${POOL.toUpperCase().replace('0X', '0x')}/history?limit=2`, headers: AUTH })
+    expect(first.statusCode).toBe(200)
+    const page1 = first.json()
+    expect(page1.items).toEqual([
+      { blockHeight: 14397741, eventIndex: 14, timestamp: '2026-09-09T09:44:24.000Z', eventName: 'Swap', sqrtPriceX96: '8296', tick: 185842, liquidity: '6653831914530704', amount0: '-1124332283', amount1: '132942843369061750' },
+      { blockHeight: 14395782, eventIndex: 34, timestamp: '2026-09-09T08:30:30.000Z', eventName: 'Swap', sqrtPriceX96: '8295', tick: 185060, liquidity: '5534876290645021', amount0: '-421811245', amount1: '46181299507238469' },
+    ])
+    expect(page1.hasMore).toBe(true)
+    // The pool key is lower-cased before it is bound.
+    const read = client.seen.find(s => s.query.includes('-- data:pools:uniswapv3-history'))!
+    expect(read.params.pool).toBe(POOL)
+    expect(read.query).toContain("kind = 'pool' AND event_name IN ('Swap', 'Initialize')")
+    const second = await app.inject({ url: `/v1/pools/uniswapv3/${POOL}/history?limit=2&cursor=${page1.nextCursor}`, headers: AUTH })
+    // Initialize carries the starting price only.
+    expect(second.json().items).toEqual([
+      { blockHeight: 14359650, eventIndex: 3, timestamp: '2026-09-08T10:37:30.000Z', eventName: 'Initialize', sqrtPriceX96: '8290', tick: 184990, liquidity: null, amount0: null, amount1: null },
+    ])
+    expect(second.json().hasMore).toBe(false)
+    expect(second.headers['cache-control']).toBe('private, max-age=30')
+  })
+
+  it('404s an unknown Uniswap v3 pool and 400s a key that is not a contract address', async () => {
+    const client = fakeDataClient(
+      query => (query.includes('-- data:pools:uniswapv3-history') ? [] : undefined),
+      query => (query.includes('-- data:pools:uniswapv3') ? [] : undefined),
+    )
+    app = await freshDataApp(client)
+    const missing = await app.inject({ url: `/v1/pools/uniswapv3/0x${'ab'.repeat(20)}/history`, headers: AUTH })
+    expect(missing.statusCode).toBe(404)
+    expect(missing.json().error.context.hint).toMatch(/\/v1\/pools/)
+    const bad = await app.inject({ url: '/v1/pools/uniswapv3/notapool/history', headers: AUTH })
+    expect(bad.statusCode).toBe(400)
+    expect(bad.json().error.message).toMatch(/pool contract address/)
   })
 
   it('normalizes an SS58 XYK pool account to its stored hex', async () => {
@@ -177,8 +316,8 @@ describe('GET /v1/pools/:venue/:poolKey/volumes', () => {
     app = await freshDataApp(fakeDataClient(
       query => (query.includes('-- data:pools:volumes')
         ? [
-          { bucket_start: '2026-08-20 00:00:00', asset_id: 5, leg_kind: 'in', amount: '123', legs: '7' },
-          { bucket_start: '2026-08-20 00:00:00', asset_id: 0, leg_kind: 'out', amount: '456', legs: '7' },
+          { bucket_start: '2026-08-20 00:00:00', asset_id: 5, side: 'in', amount: '123', legs: '7' },
+          { bucket_start: '2026-08-20 00:00:00', asset_id: 0, side: 'out', amount: '456', legs: '7' },
         ]
         : undefined),
     ))
@@ -188,6 +327,23 @@ describe('GET /v1/pools/:venue/:poolKey/volumes', () => {
       { bucket: '2026-08-20T00:00:00.000Z', assetId: '5', side: 'in', amount: '123', legCount: 7 },
       { bucket: '2026-08-20T00:00:00.000Z', assetId: '0', side: 'out', amount: '456', legCount: 7 },
     ])
+  })
+
+  it('takes the fold below its cut and the pool\'s deduplicated raw legs above it', async () => {
+    const client = fakeDataClient(query => (query.includes('-- data:pools:volumes') ? [] : undefined))
+    app = await freshDataApp(client)
+    const res = await app.inject({ url: '/v1/pools/uniswapv3/0x5c6208a3c316a801f8996750aa7b6f45fc988548/volumes?bucket=hour', headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    const { query, params } = client.seen.find(s => s.query.includes('-- data:pools:volumes'))!
+    // One cut for both arms: the first hour the fold does not hold.
+    expect(query).toContain('WITH (SELECT max(hour) + INTERVAL 1 HOUR FROM price_data.pool_swap_hourly) AS cut')
+    expect(query).toMatch(/FROM price_data\.pool_swap_hourly[\s\S]*AND hour < cut/)
+    expect(query).toMatch(/FROM price_data\.pool_swap_legs[\s\S]*AND block_timestamp >= cut/)
+    // The raw arm collapses the leg replacement key BEFORE summing, and is key-pruned.
+    expect(query).toContain('GROUP BY block_height, event_index, leg_kind, leg_index')
+    expect(query).toMatch(/argMax\(amount, ingested_at\)/)
+    expect(query.match(/venue = \{venue:String\} AND pool_key = \{poolKey:String\}/g)).toHaveLength(2)
+    expect(params).toMatchObject({ venue: 'uniswapv3', poolKey: '0x5c6208a3c316a801f8996750aa7b6f45fc988548' })
   })
 
   it('bounds the window at 90 days', async () => {

@@ -152,7 +152,7 @@ describe('periodAggregate', () => {
 })
 
 describe('stream SQL', () => {
-  async function build(streamType: 'asset' | 'protocol' | 'liquidation_penalty' | 'pepl_liquidation_profit' | 'asset_reserve' | 'hsm_revenue', destination: string = 'protocol') {
+  async function build(streamType: 'asset' | 'protocol' | 'liquidation_penalty' | 'pepl_liquidation_profit' | 'asset_reserve' | 'hsm_revenue' | 'uniswap_v3_fee', destination: string = 'protocol') {
     const { buildFeesStreamSql } = await import('../../src/public/services/feesCharts.ts')
     return buildFeesStreamSql(streamType, destination as never)
   }
@@ -169,6 +169,7 @@ describe('stream SQL', () => {
       pepl_liquidation_profit: '-- rev:pepl_liquidation_profit',
       asset_reserve: '-- rev:asset_reserve',
       hsm_revenue: '-- rev:hsm_revenue',
+      uniswap_v3_fee: '-- rev:uniswap_v3_fee',
     } as const
     for (const [streamType, marker] of Object.entries(markers)) {
       const sql = await build(streamType as never, streamType === 'asset' ? 'total' : 'protocol')
@@ -259,7 +260,13 @@ describe('request validation', () => {
       ['money-market', 'asset_reserve', 'protocol'],
       ['hollar', 'borrow_apr', 'protocol'], ['hollar', 'hsm_revenue', 'protocol'],
     ]) expect(isValidCombination(combo[0], combo[1], combo[2]), combo.join('+')).toBe(true)
-    expect(FEES_COMBINATIONS.length).toBe(11)
+    // The incumbent's eleven plus the concentrated-liquidity stream (2026-09-09),
+    // which is only ever protocol revenue: a vault's fee share to the Treasury and a
+    // pool's CollectProtocol.
+    expect(FEES_COMBINATIONS.length).toBe(12)
+    expect(isValidCombination('uniswap-v3', 'uniswap_v3_fee', 'protocol')).toBe(true)
+    expect(isValidCombination('uniswap-v3', 'uniswap_v3_fee', 'lp')).toBe(false)
+    expect(isValidCombination('omnipool', 'uniswap_v3_fee', 'protocol')).toBe(false)
     expect(isValidCombination('hollar', 'asset', 'protocol')).toBe(false)
     expect(isValidCombination('omnipool', 'hsm_revenue', 'protocol')).toBe(false)
   })
