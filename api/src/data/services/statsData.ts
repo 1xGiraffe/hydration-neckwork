@@ -97,9 +97,13 @@ export async function volumeStats(client: ClickHouseClient, options: VolumeOptio
 // Revenue
 // ---------------------------------------------------------------------------
 
+// The `stream` filter's vocabulary: every stream the derivations write into
+// revenue_events (api/src/services/revenueStreams.ts REVENUE_STREAMS — not
+// importable here; keep the two in step, a stream missing here can be read
+// under scope=all but not asked for by name).
 export const REVENUE_STREAMS = [
   'omnipool_asset_fee', 'omnipool_protocol_fee', 'liquidation_penalty', 'pepl_liquidation_profit',
-  'asset_reserve', 'hollar_borrow', 'hsm_revenue', 'network_fee',
+  'asset_reserve', 'hollar_borrow', 'hsm_revenue', 'ice_matched_fee', 'uniswap_v3_fee', 'network_fee',
 ] as const
 
 // The canonical protocol-revenue predicate, restated from
@@ -211,12 +215,63 @@ async function activeAccounts(client: ClickHouseClient, from: number, to: number
 // TVL: the live pool snapshot valued at fresh current prices.
 // ---------------------------------------------------------------------------
 
+export const TVL_VENUES = ['omnipool', 'stableswap', 'xyk', 'uniswapv3'] as const
+export type TvlVenue = (typeof TVL_VENUES)[number]
+
 export interface TvlResult {
   totalUsd: string
-  venues: Array<{ venue: 'omnipool' | 'stableswap' | 'xyk'; tvlUsd: string }>
+  venues: Array<{ venue: TvlVenue; tvlUsd: string }>
   asOfBlock: number
   /** Live pool assets that have no fresh price and therefore contribute 0. */
   unpricedAssets: string[]
+}
+
+interface UniswapV3Holding { pool: string; assetId: number; balance: bigint }
+
+// A concentrated-liquidity pool's holdings, implied by its own logs: what was
+// minted in and swapped in, less what collects (LP and protocol) paid out, plus
+// flash-loan fees. The per-block pool snapshot the pallet venues are read from
+// does not carry v3 pools — their state lives in the EVM — so this is the fold
+// the explorer's pool page applies too (uniswapV3Service.v3PoolStats). Tokens
+// resolve through assets.evm_address or the `0x…01 + id` precompile; a pool with
+// a token neither names has no holding here.
+async function uniswapV3Holdings(client: ClickHouseClient): Promise<UniswapV3Holding[]> {
+  const hex = (expr: string) => `replaceRegexpOne(lower(${expr}), '^0x', '')`
+  const precompile = (expr: string) => `if(length(${hex(expr)}) = 40 AND substring(${hex(expr)}, 1, 32) = '00000000000000000000000000000001', toInt64(reinterpretAsUInt32(reverse(unhex(substring(${hex(expr)}, 33, 8))))), toInt64(-1))`
+  const res = await client.query({
+    query: `-- data:stats:tvl:uniswapv3
+WITH token_assets AS (
+  SELECT lower(evm_address) AS addr, any(asset_id) AS asset_id FROM price_data.assets WHERE evm_address != '' GROUP BY addr
+),
+balances AS (
+  SELECT contract_address,
+         sumIf(amount0, event_name = 'Mint') + sumIf(amount0, event_name = 'Swap') - sumIf(amount0, event_name IN ('Collect', 'CollectProtocol')) + sumIf(toInt256(aux0) - amount0, event_name = 'Flash') AS bal0,
+         sumIf(amount1, event_name = 'Mint') + sumIf(amount1, event_name = 'Swap') - sumIf(amount1, event_name IN ('Collect', 'CollectProtocol')) + sumIf(toInt256(aux1) - amount1, event_name = 'Flash') AS bal1
+  FROM price_data.uniswap_v3_events FINAL
+  WHERE kind = 'pool'
+  GROUP BY contract_address
+)
+SELECT p.pool_address AS pool,
+       if(t0.asset_id > 0, toInt64(t0.asset_id), ${precompile('p.token0')}) AS asset0,
+       if(t1.asset_id > 0, toInt64(t1.asset_id), ${precompile('p.token1')}) AS asset1,
+       toString(greatest(b.bal0, toInt256(0))) AS balance0, toString(greatest(b.bal1, toInt256(0))) AS balance1
+FROM price_data.uniswap_v3_pools AS p FINAL
+LEFT JOIN token_assets AS t0 ON t0.addr = lower(p.token0)
+LEFT JOIN token_assets AS t1 ON t1.addr = lower(p.token1)
+LEFT JOIN balances AS b ON b.contract_address = p.pool_address
+ORDER BY p.pool_address`,
+    format: 'JSONEachRow',
+  })
+  const rows = await res.json<{ pool: string; asset0: number | string; asset1: number | string; balance0: string; balance1: string }>()
+  const out: UniswapV3Holding[] = []
+  for (const row of rows) {
+    for (const [asset, balance] of [[row.asset0, row.balance0], [row.asset1, row.balance1]] as const) {
+      const assetId = Number(asset)
+      if (assetId < 0) continue
+      out.push({ pool: row.pool, assetId, balance: /^\d+$/.test(String(balance)) ? BigInt(String(balance)) : 0n })
+    }
+  }
+  return out
 }
 
 function usdOf(reserve: bigint, assetId: number, prices: Map<number, bigint>, unpriced: Set<string>): bigint {
@@ -233,7 +288,7 @@ function usdOf(reserve: bigint, assetId: number, prices: Map<number, bigint>, un
 // dead pool is simply absent — and the price map holds only feeds inside the
 // freshness bound, so nothing here can value a stale row or a stale close.
 export async function tvlStats(client: ClickHouseClient): Promise<TvlResult> {
-  const [snapshot, prices] = await Promise.all([poolSnapshot(client), freshPriceMap(client)])
+  const [snapshot, prices, v3Holdings] = await Promise.all([poolSnapshot(client), freshPriceMap(client), uniswapV3Holdings(client)])
   const unpriced = new Set<string>()
   let omnipoolUsd = 0n
   for (const a of snapshot.omnipool.values()) omnipoolUsd += usdOf(a.reserve, a.assetId, prices, unpriced)
@@ -246,12 +301,15 @@ export async function tvlStats(client: ClickHouseClient): Promise<TvlResult> {
     xykUsd += usdOf(p.reserveA, p.assetA, prices, unpriced)
     xykUsd += usdOf(p.reserveB, p.assetB, prices, unpriced)
   }
+  let uniswapV3Usd = 0n
+  for (const h of v3Holdings) uniswapV3Usd += usdOf(h.balance, h.assetId, prices, unpriced)
   return {
-    totalUsd: renderUsd(omnipoolUsd + stableswapUsd + xykUsd),
+    totalUsd: renderUsd(omnipoolUsd + stableswapUsd + xykUsd + uniswapV3Usd),
     venues: [
       { venue: 'omnipool', tvlUsd: renderUsd(omnipoolUsd) },
       { venue: 'stableswap', tvlUsd: renderUsd(stableswapUsd) },
       { venue: 'xyk', tvlUsd: renderUsd(xykUsd) },
+      { venue: 'uniswapv3', tvlUsd: renderUsd(uniswapV3Usd) },
     ],
     asOfBlock: snapshot.blockHeight,
     unpricedAssets: [...unpriced].sort((a, b) => Number(a) - Number(b)),

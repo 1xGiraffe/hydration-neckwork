@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { getAssetLiquidity, getOmnipoolAssetLps, getOmnipoolDetail, getPoolDetail, getPoolLps, getPoolsIndex } from '../services/poolService.ts'
-import { getAssetActivity, getPoolSwaps } from '../services/explorerService.ts'
+import { getAssetLiquidity, getOmnipoolAssetLps, getOmnipoolDetail, getPoolDetail, getPoolLps, getPoolsIndex, getUniswapV3PoolDetail, getUniswapV3PoolHistory, getUniswapV3PoolLiquidity } from '../services/poolService.ts'
+import { getAssetActivity, getPoolSwaps, getV3PoolActivity } from '../services/explorerService.ts'
 import { DAILY_GRAIN, grainForWindow } from '../services/historyGrain.ts'
 
 // Liquidity-pool endpoints: the asset Liquidity tab, stableswap/XYK pool detail
@@ -37,6 +37,45 @@ export async function poolsRoutes(fastify: FastifyInstance) {
   // Every pool on the chain, largest first — the /liquidity index.
   fastify.get('/explorer/pools', async () => {
     return getPoolsIndex()
+  })
+
+  // A concentrated-liquidity (Uniswap v3) pool, addressed by its contract. Declared
+  // before the share-token route: `v3` is a static segment, so the router prefers it.
+  const evmAddress = z.string().regex(/^0x[0-9a-fA-F]{40}$/)
+  fastify.get('/explorer/pool/v3/:address', async (req, reply) => {
+    const address = evmAddress.safeParse((req.params as { address: string }).address)
+    if (!address.success) return reply.status(400).send({ error: 'Invalid pool address' })
+    const detail = await getUniswapV3PoolDetail(address.data)
+    if (!detail) return reply.status(404).send({ error: 'Pool not found' })
+    return detail
+  })
+  // The pool's time series (price OHLC, volume, fees, liquidity, holdings): the whole
+  // life at the coarsest grain that fits `points`, or a `fromTs`/`toTs` window refined
+  // down the ladder — and, for a short window with few swaps, swap by swap.
+  fastify.get('/explorer/pool/v3/:address/history', async (req, reply) => {
+    const address = evmAddress.safeParse((req.params as { address: string }).address)
+    if (!address.success) return reply.status(400).send({ error: 'Invalid pool address' })
+    const q = windowSchema.safeParse(req.query)
+    const win = q.success && q.data.toTs > q.data.fromTs ? { fromSec: q.data.fromTs, toSec: q.data.toTs } : undefined
+    const points = q.success ? (q.data.points ?? 180) : 180
+    const history = await getUniswapV3PoolHistory(address.data, win, points)
+    if (!history) return reply.status(404).send({ error: 'Pool not found' })
+    return history
+  })
+  // The pool's liquidity distribution now: initialised ticks, the liquidity between
+  // them and the open ranges by owner, valued at the current tick.
+  fastify.get('/explorer/pool/v3/:address/liquidity', async (req, reply) => {
+    const address = evmAddress.safeParse((req.params as { address: string }).address)
+    if (!address.success) return reply.status(400).send({ error: 'Invalid pool address' })
+    const dist = await getUniswapV3PoolLiquidity(address.data)
+    if (!dist) return reply.status(404).send({ error: 'Pool not found' })
+    return dist
+  })
+  fastify.get('/explorer/pool/v3/:address/activity', async (req, reply) => {
+    const address = evmAddress.safeParse((req.params as { address: string }).address)
+    if (!address.success) return reply.status(400).send({ error: 'Invalid pool address' })
+    const limit = Math.min(100, Math.max(1, Number((req.query as { limit?: string }).limit ?? 25) || 25))
+    return getV3PoolActivity(address.data, limit)
   })
 
   fastify.get('/explorer/pool/:poolId', async (req, reply) => {

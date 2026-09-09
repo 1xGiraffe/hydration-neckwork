@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import { allExplorerAssets } from '../../services/explorerAssets.ts'
 import { xykPoolMeta } from './poolVolumes.ts'
+import { uniswapV3PoolMeta } from '../../services/poolService.ts'
 import { publicStatus } from './status.ts'
 
 // The DexScreener DEX-adapter surface: /dexscreener/{latest-block,asset,pair,events}.
@@ -56,8 +57,14 @@ export const HUB_ASSET_ID = 1
  *
  * A route that hops through one of those still reports its Omnipool/stableswap/XYK
  * legs; only the excluded venue's own leg is absent.
+ *
+ * `uniswapv3` (2026-09-09) is the concentrated-liquidity pools on Hydration's EVM:
+ * a pool per (token0, token1, fee) contract, keyed by that contract. Its fills
+ * arrive as a Router-routed hop's Broadcast leg or, for a direct EVM swap, from
+ * the pool's own Swap log (the uniswap_v3_legs derivation, minutes behind). The
+ * pool's holdings are not its price, so no `reserves` are published for it.
  */
-export const DEX_VENUES = ['omnipool', 'stableswap', 'xyk'] as const
+export const DEX_VENUES = ['omnipool', 'stableswap', 'xyk', 'uniswapv3'] as const
 export type DexVenue = (typeof DEX_VENUES)[number]
 
 /**
@@ -440,6 +447,8 @@ export function orderPairSides(forms: PairIdForms, a: number, b: number): [numbe
  *
  *  * XYK — the pool ACCOUNT alone. An XYK pool has exactly one registered pair, so
  *    the assets carry no information the account does not.
+ *  * Uniswap v3 — the pool CONTRACT alone (0x + 40 hex), for the same reason: one
+ *    pool is one pair at one fee tier.
  *  * Omnipool — `<omnipool pallet account>-<asset0>-<asset1>`. Every asset trades
  *    against the LRNA hub and only against it.
  *  * Stableswap — `<pool account>-<asset0>-<asset1>`, the pool's on-chain account
@@ -451,7 +460,7 @@ export function orderPairSides(forms: PairIdForms, a: number, b: number): [numbe
  * whichever way a fill traded it.
  */
 export function pairId(forms: PairIdForms, venue: DexVenue, poolKey: string, a: number, b: number): string {
-  if (venue === 'xyk') return poolKey
+  if (venue === 'xyk' || venue === 'uniswapv3') return poolKey.toLowerCase()
   const [asset0, asset1] = orderPairSides(forms, a, b)
   const pool = venue === 'omnipool' ? OMNIPOOL_ACCOUNT : forms.accountByPoolId.get(Number(poolKey)) ?? poolKey
   return `${pool}-${wireAssetId(forms, asset0)}-${wireAssetId(forms, asset1)}`
@@ -480,11 +489,14 @@ export interface PairIdShape {
 export function parsePairIdShape(id: string): PairIdShape | null {
   const parts = (id ?? '').trim().toLowerCase().split('-')
   const [pool, ...assets] = parts
-  const poolOk = POOL_ACCOUNT_RE.test(pool) || DECIMAL_RE.test(pool)
+  const poolOk = POOL_ACCOUNT_RE.test(pool) || DECIMAL_RE.test(pool) || CONTRACT_RE.test(pool)
   if (!poolOk) return null
-  // A bare pool id is only the XYK form, which is an account. A decimal alone
-  // names no pair.
-  if (assets.length === 0) return POOL_ACCOUNT_RE.test(pool) ? { pool, assets } : null
+  // A 20-byte pool component is a v3 pool, whose pair is the pool itself: it never
+  // carries asset components.
+  if (CONTRACT_RE.test(pool) && assets.length > 0) return null
+  // A bare pool id is the XYK form (a 32-byte account) or a concentrated-liquidity
+  // pool (a 20-byte contract). A decimal alone names no pair.
+  if (assets.length === 0) return POOL_ACCOUNT_RE.test(pool) || CONTRACT_RE.test(pool) ? { pool, assets } : null
   if (assets.length !== 2) return null
   if (!assets.every(token => DECIMAL_RE.test(token) || CONTRACT_RE.test(token))) return null
   if (assets[0] === assets[1]) return null
@@ -640,13 +652,14 @@ export function poolUniverse(client: ClickHouseClient): Promise<PoolUniverse> {
 export async function dexScreenerPair(client: ClickHouseClient, id: string): Promise<DexScreenerPair | null> {
   const shape = parsePairIdShape(id)
   if (!shape) return null
-  const [forms, xyk] = await Promise.all([pairIdForms(client), xykPoolMeta(client)])
+  const [forms, xyk, v3] = await Promise.all([pairIdForms(client), xykPoolMeta(client), uniswapV3PoolMeta()])
   const { poolIdByAccount } = forms
 
   const venue: DexVenue | null = shape.pool === OMNIPOOL_ACCOUNT ? 'omnipool'
     : poolIdByAccount.has(shape.pool) || DECIMAL_RE.test(shape.pool) ? 'stableswap'
       : xyk.has(shape.pool) ? 'xyk'
-        : null
+        : v3.has(shape.pool) ? 'uniswapv3'
+          : null
   if (!venue) return null
   const poolKey = venue === 'stableswap'
     ? String(poolIdByAccount.get(shape.pool) ?? Number(shape.pool))
@@ -659,6 +672,10 @@ export async function dexScreenerPair(client: ClickHouseClient, id: string): Pro
     const resolved = shape.assets.map(token => resolveAssetRef(forms, token))
     if (resolved.some(assetId => assetId == null)) return null
     sides = [resolved[0] as number, resolved[1] as number]
+  } else if (venue === 'uniswapv3') {
+    const meta = v3.get(shape.pool)
+    if (meta?.token0 == null || meta.token1 == null) return null
+    sides = [meta.token0, meta.token1]
   } else {
     const meta = xyk.get(shape.pool)
     if (meta?.assetA == null || meta.assetB == null) return null
@@ -698,6 +715,11 @@ async function holdsPair(client: ClickHouseClient, venue: DexVenue, poolId: stri
     if (!assets) return false
     const member = (id: number) => id === pool || assets.includes(id)
     return member(a0) && member(a1)
+  }
+  if (venue === 'uniswapv3') {
+    const meta = (await uniswapV3PoolMeta()).get(poolId.toLowerCase())
+    if (!meta) return false
+    return [meta.token0, meta.token1].includes(a0) && [meta.token0, meta.token1].includes(a1)
   }
   const meta = (await xykPoolMeta(client)).get(poolId)
   if (!meta) return false
@@ -878,6 +900,20 @@ ASOF LEFT JOIN (
   WHERE block_height >= {reserveFrom:UInt32} AND block_height <= {toBlock:UInt32}
   GROUP BY pool_id, block_height
 ) h ON h.pool_id = toUInt32OrZero(f.pool_key) AND h.block_height <= f.block_height
+ORDER BY f.block_height, f.event_index
+LIMIT ${MAX_EVENTS + 1}`
+
+// No reserve join: a concentrated pool's holdings are not its price (see DEX_VENUES),
+// so `reserve_block` is 0 and the reader omits `reserves`.
+const UNISWAPV3_EVENTS_SQL = `-- pub:ds:events:uniswapv3
+WITH ${fillsCteSql('uniswapv3')}
+SELECT f.pool_key AS pool_key, f.block_height AS block_height, f.event_index AS event_index,
+       f.block_ts AS block_ts, f.swapper AS swapper, f.op_key AS op_key,
+       f.extrinsic_index AS extrinsic_index,
+       f.in_asset AS in_asset, f.in_amount AS in_amount,
+       f.out_asset AS out_asset, f.out_amount AS out_amount,
+       0 AS reserve_block
+FROM fills f
 ORDER BY f.block_height, f.event_index
 LIMIT ${MAX_EVENTS + 1}`
 
@@ -1147,10 +1183,11 @@ export async function dexScreenerEvents(client: ClickHouseClient, fromBlock: num
     const res = await client.query({ query, query_params, format: 'JSONEachRow' })
     return res.json<T>()
   }
-  const [omnipool, stableswap, xyk, forms] = await Promise.all([
+  const [omnipool, stableswap, xyk, uniswapV3, forms] = await Promise.all([
     run<OmnipoolFillRow>(OMNIPOOL_EVENTS_SQL),
     run<StableswapFillRow>(STABLESWAP_EVENTS_SQL),
     run<XykFillRow>(XYK_EVENTS_SQL),
+    run<FillRow>(UNISWAPV3_EVENTS_SQL),
     pairIdForms(client),
   ])
   // A fill touching an asset the registry cannot resolve is DROPPED, not priced
@@ -1170,6 +1207,7 @@ export async function dexScreenerEvents(client: ClickHouseClient, fromBlock: num
     ...omnipool.filter(servable).map(row => toEvent(row, 'omnipool', forms, omnipoolReserves(row, forms))),
     ...stableswap.filter(servable).map(row => toEvent(row, 'stableswap', forms, stableswapReserves(row, forms))),
     ...xyk.filter(servable).map(row => toEvent(row, 'xyk', forms, xykReserves(row, forms))),
+    ...uniswapV3.filter(servable).map(row => toEvent(row, 'uniswapv3', forms, undefined)),
   ]
   if (skipped.size) warnSkipped(skipped)
   if (events.length > MAX_EVENTS) {

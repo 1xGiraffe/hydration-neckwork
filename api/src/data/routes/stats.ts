@@ -5,7 +5,7 @@ import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import { zAssetId, zError, zIsoTimestamp, zTimeParam } from '../schemas/common.ts'
 import {
-  ACTIVITY_KINDS, REVENUE_STREAMS, activityCounts, resolveWindow, revenueStats, tvlStats, volumeStats,
+  ACTIVITY_KINDS, REVENUE_STREAMS, TVL_VENUES, activityCounts, resolveWindow, revenueStats, tvlStats, volumeStats,
 } from '../services/statsData.ts'
 import { zVenue } from './tradesShared.ts'
 
@@ -35,7 +35,7 @@ const zActivityRow = z.object({
 
 const zTvl = z.object({
   totalUsd: z.string(),
-  venues: z.array(z.object({ venue: z.enum(['omnipool', 'stableswap', 'xyk']), tvlUsd: z.string() })),
+  venues: z.array(z.object({ venue: z.enum(TVL_VENUES), tvlUsd: z.string() })),
   asOfBlock: z.number().int(),
   unpricedAssets: z.array(zAssetId).describe('Live pool assets with no recent price — they contribute 0 rather than a stale valuation.'),
 })
@@ -51,6 +51,7 @@ export const statsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
         'Sums over the hourly leg pre-aggregate: rows are always PER ASSET AND SIDE (raw integers of different assets cannot be added), and `groupBy` picks the extra dimension — the venue, the asset itself, or `venue:poolKey`. Only in/out legs are summed; fee legs restate value the trade legs already carry and adding them double-counts.',
         'Only CLOSED hours exist in the source by construction, so the current hour is absent and a bucket can gain nothing once its hour has closed — the freshness bound is one derivations cycle (~10 minutes) behind live trades.',
         'Windows: default the last 7 days; at most 30 days for `bucket=hour` and 366 days for `bucket=day`. `venue=`/`asset=` narrow the read.',
+        'Freshness: the pre-aggregate holds CLOSED hours and a live month is republished about once a day, so the newest buckets can lag the head by up to ~24 hours (a per-pool series with a raw tail is /v1/pools/{venue}/{poolKey}/volumes). The `uniswapv3` venue is the concentrated-liquidity pools on Hydration\'s EVM; it appears here once its legs are folded.',
       ].join('\n\n'),
       querystring: z.object({
         groupBy: z.enum(['venue', 'asset', 'pool']).default('venue'),
@@ -126,6 +127,7 @@ export const statsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
       description: [
         'Latest pool reserves × latest prices, per venue. Delisted assets and dead pools are excluded (each venue keeps only entries at its own state frontier — the histories retain a dead entry\'s last row forever), and a live asset with no recent price contributes 0 and is listed in `unpricedAssets` rather than being valued at an arbitrarily old close.',
         'Venues NEST: the Omnipool holds stableswap share tokens (GDOT, GETH, …), so their liquidity can appear both as the share token\'s value in `omnipool` and as component reserves in `stableswap`; `totalUsd` is the plain sum of the venues. Omnipool hub (H2O) reserves are the pool\'s internal accounting side and are not added separately.',
+        '`uniswapv3` is the concentrated-liquidity pools on Hydration\'s EVM, valued from the holdings their own logs imply (mints and swaps in, LP and protocol collects out, flash fees) at current prices — there is no per-block state snapshot of an EVM pool. A pool whose token the registry cannot name contributes nothing.',
       ].join('\n\n'),
       response: { 200: zTvl },
     },

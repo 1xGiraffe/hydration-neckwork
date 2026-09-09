@@ -4,7 +4,7 @@ import type {
   AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail, RevenueBreakdown, GovernanceOverview, GovernanceReferendaPage, CollectiveMotionsPage, TreasuryTipsPage,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard,
   RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, AssetPriceWindow, HollarDashboard, IceDashboard, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas, IntentOrderDetail,
-  AssetLiquidity, PoolDetail, OmnipoolDetail, PoolLpsResponse, OmnipoolAssetLpsResponse,
+  AssetLiquidity, PoolDetail, UniswapV3PoolDetail, UniswapV3PoolHistory, UniswapV3PoolLiquidity, OmnipoolDetail, PoolLpsResponse, OmnipoolAssetLpsResponse,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
   AccountRef, DeviceLinkResponse, DeviceLinkStatus, DeviceSession, EvmReceipt, PoolsIndexResponse,
@@ -158,6 +158,16 @@ export const api = {
   assetDcas: (assetId: number, signal?: AbortSignal) => getJson<AssetDcas>(`/explorer/asset/${assetId}/dcas`, signal),
   assetLiquidity: (assetId: number, signal?: AbortSignal) => getJson<AssetLiquidity>(`/explorer/asset/${assetId}/liquidity`, signal),
   poolDetail: (poolId: number, signal?: AbortSignal) => getJson<PoolDetail>(`/explorer/pool/${poolId}`, signal),
+  // A concentrated-liquidity pool by its contract, and its own activity (swaps in it,
+  // positions and vault acts on it).
+  v3Pool: (address: string, signal?: AbortSignal) => getJson<UniswapV3PoolDetail>(`/explorer/pool/v3/${address}`, signal),
+  v3PoolActivity: (address: string, limit = 25, signal?: AbortSignal) => getJson<ActivityRow[]>(withQuery(`/explorer/pool/v3/${address}/activity`, { limit }), signal),
+  // The pool's series: whole life at a ladder grain, or a fromTs/toTs window refined
+  // down to the swaps (same parameters as the other windowed pool histories).
+  v3PoolHistory: (address: string, signal?: AbortSignal) => getJson<UniswapV3PoolHistory>(`/explorer/pool/v3/${address}/history`, signal),
+  v3PoolLiquidity: (address: string, signal?: AbortSignal) => getJson<UniswapV3PoolLiquidity>(`/explorer/pool/v3/${address}/liquidity`, signal),
+  v3PoolHistoryWindow: (address: string, fromTs: number, toTs: number, points: number, signal?: AbortSignal) =>
+    getJson<UniswapV3PoolHistory>(withQuery(`/explorer/pool/v3/${address}/history`, { fromTs, toTs, points }), signal),
   omnipool: (signal?: AbortSignal) => getJson<OmnipoolDetail>('/explorer/omnipool', signal),
   // Chart-zoom refinement for the pool histories: the same models rebuilt on the
   // finest ladder grain that fits `points` (never below an hour) instead of the

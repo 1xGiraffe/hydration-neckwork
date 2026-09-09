@@ -1,3 +1,5 @@
+import { EVM_LOG_EVENT_NAME, decodeUniswapV3Log, evmLogOf, uniswapV3SwapTrade, type UniswapV3PoolIndex } from '../price/uniswapV3.js'
+
 export const LEGACY_SWAP_EVENT_NAMES = [
   'Omnipool.SellExecuted',
   'Omnipool.BuyExecuted',
@@ -19,6 +21,8 @@ export interface RawTradeEventRow {
   block_height: number
   event_name: string
   args_json: string
+  /** Needed to pair a pool's Swap log with the Broadcast fill of its extrinsic; absent on rows read before it was selected. */
+  extrinsic_index?: number | null
 }
 
 export interface TradeAssetAmount {
@@ -52,6 +56,20 @@ function parseAssetAmounts(value: unknown): TradeAssetAmount[] {
     if (typeof asset !== 'number' || (typeof amount !== 'string' && typeof amount !== 'number' && typeof amount !== 'bigint')) return []
     return [{ assetId: asset, amount: BigInt(amount) }]
   })
+}
+
+/**
+ * A concentrated-liquidity pool's `Swap` log (an `EVM.Log` row) as a trade, when
+ * the pool is one of `pools`. Whether it is booked is the caller's call: a
+ * router-routed hop also emits a Broadcast fill in the same extrinsic.
+ */
+export function decodeRawUniswapV3Swap(row: RawTradeEventRow, pools: UniswapV3PoolIndex): DecodedRawTrade | null {
+  if (row.event_name !== EVM_LOG_EVENT_NAME) return null
+  const log = evmLogOf(JSON.parse(row.args_json))
+  const decoded = log ? decodeUniswapV3Log(log) : null
+  if (decoded?.kind !== 'swap') return null
+  const swap = uniswapV3SwapTrade(decoded, pools)
+  return swap ? { account: swap.account, filler: swap.filler, inputs: swap.inputs, outputs: swap.outputs } : null
 }
 
 export function decodeRawTrade(row: RawTradeEventRow): DecodedRawTrade | null {

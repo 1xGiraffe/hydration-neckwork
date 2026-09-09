@@ -135,17 +135,27 @@ describe('GET /v1/stats/tvl', () => {
             xyk: { pools: [{ pool_account: `0x${'99'.repeat(32)}`, asset_a: 5, asset_b: 7, reserve_a: '2000000000000', reserve_b: '3000000000000' }] },
           }) }]
         : undefined),
+      // The concentrated-liquidity pools are not in the pallet snapshot: their
+      // holdings are folded from their own logs. 1 token of asset 5 and 2 of
+      // asset 10 — a token the registry cannot name (asset -1) is skipped.
+      query => (query.includes('-- data:stats:tvl:uniswapv3')
+        ? [
+            { pool: '0x5c6208a3c316a801f8996750aa7b6f45fc988548', asset0: 5, asset1: 10, balance0: '1000000000000', balance1: '2000000000000' },
+            { pool: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', asset0: -1, asset1: 10, balance0: '5', balance1: '0' },
+          ]
+        : undefined),
     )
     app = await freshDataApp(client)
     const res = await app.inject({ url: '/v1/stats/tvl', headers: AUTH })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({
-      // omnipool $10 + stableswap $1 + xyk $5 (asset 7 unpriced -> 0).
-      totalUsd: '16.00',
+      // omnipool $10 + stableswap $1 + xyk $5 (asset 7 unpriced -> 0) + uniswapv3 $4.50.
+      totalUsd: '20.50',
       venues: [
         { venue: 'omnipool', tvlUsd: '10.00' },
         { venue: 'stableswap', tvlUsd: '1.00' },
         { venue: 'xyk', tvlUsd: '5.00' },
+        { venue: 'uniswapv3', tvlUsd: '4.50' },
       ],
       asOfBlock: 9_000_000,
       unpricedAssets: ['7'],

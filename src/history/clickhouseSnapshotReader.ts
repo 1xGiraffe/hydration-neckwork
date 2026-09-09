@@ -211,6 +211,7 @@ function parseSnapshot(payloadJson: string, options: ParseSnapshotOptions = {}):
     origin_ecosystem: asset.originEcosystem ?? null,
     origin_chain_id: asset.originChainId ?? null,
     origin_asset_id: asset.originAssetId ?? null,
+    evm_address: typeof asset.evmAddress === 'string' ? asset.evmAddress.toLowerCase() : '',
   }))
 
   const nativeAssetRow = options.nativeAssetRow
@@ -307,6 +308,7 @@ export function diffAssetRows(
       || previous.origin_ecosystem !== row.origin_ecosystem
       || previous.origin_chain_id !== row.origin_chain_id
       || previous.origin_asset_id !== row.origin_asset_id
+      || previous.evm_address !== row.evm_address
   })
 }
 

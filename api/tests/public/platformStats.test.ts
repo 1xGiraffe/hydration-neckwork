@@ -25,10 +25,13 @@ const POOLS_INDEX = {
     // so neither its aToken leg nor its share token may be folded out.
     { kind: 'stableswap', poolId: 999, name: 'dead', tvlUsd: null, sharePct: null, composition: [leg(1001, 9_000_000)], hasPegs: false },
     { kind: 'xyk', poolId: 123, name: 'HDX / DOT', tvlUsd: 130_125.33, sharePct: null, composition: [], hasPegs: false },
+    // A concentrated-liquidity pool is keyed by its contract, has no share token,
+    // and holds aDOT as token0 — an aToken leg the inverse fold must count.
+    { kind: 'uniswapv3', poolId: null, address: '0x5c6208a3c316a801f8996750aa7b6f45fc988548', name: 'aDOT / HOLLAR 0.3%', tvlUsd: 4_700.5, sharePct: null, composition: [leg(1001, 2_300), leg(222, 2_400.5)], hasPegs: false },
   ],
 }
-/** aDOT 2 000 000 + 500 000 and aETH 100 000, all inside priced pools. */
-const POOLED_ATOKEN_USD = 2_600_000
+/** aDOT 2 000 000 + 500 000 + 2 300 and aETH 100 000, all inside priced pools. */
+const POOLED_ATOKEN_USD = 2_602_300
 
 // No getOmnipoolDetail: the Omnipool's TVL is already in the pool index, computed
 // by the same rule, and calling that model would drag a whole-table history
@@ -101,7 +104,9 @@ function fullClient() {
           { pool_key: '690', volume_usd: '250.250000000000', fee_usd: '0.100000000000' },
           { pool_key: '102', volume_usd: '10.000000000000', fee_usd: '0.004000000000' },
         ]
-      : [{ pool_key: `0x${'a'.repeat(64)}`, volume_usd: '7.500000000000', fee_usd: '0.022500000000' }]),
+      : params.venue === 'uniswapv3'
+        ? [{ pool_key: '0x5c6208a3c316a801f8996750aa7b6f45fc988548', volume_usd: '0.180000000000', fee_usd: '0.000500000000' }]
+        : [{ pool_key: `0x${'a'.repeat(64)}`, volume_usd: '7.500000000000', fee_usd: '0.022500000000' }]),
     '-- pub:vol:xyk-pools': [],
     '-- pub:vol:routed': [
       { in_usd: '1000.000000000000', out_usd: '999.000000000000' },
@@ -147,14 +152,17 @@ describe('GET /v1/stats/platform', () => {
           omnipoolUsd: '11088705.84',
           stableswapUsd: '18353575.94',
           xykUsd: '130125.33',
+          // The concentrated-liquidity venue is a pooled venue like the other three.
+          uniswapV3Usd: '4700.50',
           // 1 000 DOT at $0.75. The delisted row's 9 900 DOT is not in it, and the
           // figure is NOT added to totalUsd, which stays the pooled sum.
           moneyMarketSupplyUsd: '750.00',
           // No pool-share collateral in this fixture's money market…
           moneyMarketFoldedUsd: '0.00',
-          // …but the pools do hold aTokens, and the unpriced pool's 9 M is excluded.
-          pooledATokenUsd: '2600000.00',
-          totalUsd: '29572407.11',
+          // …but the pools do hold aTokens (the v3 pool's aDOT among them), and the
+          // unpriced pool's 9 M is excluded.
+          pooledATokenUsd: '2602300.00',
+          totalUsd: '29577107.61',
         },
         // Both halves of the response carry the surface's 2-decimal USD shape.
         volume24h: {
@@ -162,6 +170,7 @@ describe('GET /v1/stats/platform', () => {
           omnipoolUsd: '1500.00',
           stableswapUsd: '260.25',
           xykUsd: '7.50',
+          uniswapV3Usd: '0.18',
           // 1000 (in side wins) + 505.5 (out side wins)
           totalRoutedUsd: '1505.50',
         },
@@ -218,15 +227,15 @@ describe('GET /v1/stats/platform', () => {
     ]
     const components = tvlComponents(POOLS_INDEX.pools, { reserves, suppliedUsd: 12_000_000_000_000_000_000n, delistedCount: 0 } as never)
     expect(components.moneyMarketFoldedUsd).toBe('4000000.00')
-    expect(components.pooledATokenUsd).toBe('2600000.00')
+    expect(components.pooledATokenUsd).toBe('2602300.00')
 
     // direct + custody = displayed + attributed custody, with no remainder.
     const cents = (value: string) => decimalToScaled(value, 12)
     const headline = foldedPlatformTvl(components) as bigint
     expect(cents(components.totalUsd as string) + cents(components.moneyMarketSupplyUsd as string))
       .toBe(headline + cents(components.moneyMarketFoldedUsd as string) + cents(components.pooledATokenUsd as string))
-    // 29 572 407.11 + 12 000 000 − 4 000 000 − 2 600 000
-    expect(formatUsd(headline)).toBe('34972407.11')
+    // 29 577 107.61 + 12 000 000 − 4 000 000 − 2 602 300
+    expect(formatUsd(headline)).toBe('34974807.61')
 
     // Null in, null out: an unknown component makes the headline unknown.
     expect(foldedPlatformTvl({ ...components, moneyMarketSupplyUsd: null })).toBeNull()
@@ -256,6 +265,9 @@ describe('GET /v1/stats/platform', () => {
     ]
     // Not one stableswap pool could be priced: unknown, not zero.
     expect(venueTvlUsd(pools, 'stableswap')).toBeNull()
+    // The concentrated-liquidity venue follows the same rule.
+    expect(venueTvlUsd([{ kind: 'uniswapv3', tvlUsd: null }], 'uniswapv3')).toBeNull()
+    expect(venueTvlUsd([{ kind: 'uniswapv3', tvlUsd: 4_700.5 }, { kind: 'uniswapv3', tvlUsd: null }], 'uniswapv3')).toBe(4_700.5)
     // One unpriced XYK pool among priced ones contributes nothing and no null.
     expect(venueTvlUsd(pools, 'xyk')).toBe(130_125.33)
     // A venue with no pools at all really is zero.

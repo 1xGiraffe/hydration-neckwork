@@ -265,6 +265,9 @@ export interface VerificationJob {
 export interface TradeHop {
   pool: string
   poolId: number | null
+  // A concentrated-liquidity hop: its fee tier and the pool contract the badge links to.
+  feeTier?: number
+  poolAddress?: string
   assetIn: AssetRef
   assetOut: AssetRef
   amountIn: string | null
@@ -507,7 +510,9 @@ export interface MmReserve {
   debtUsd: number | null
   collateral: boolean
 }
-export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string }
+// A concentrated-liquidity position (venue 'Uniswap v3' / 'Gamma vault') holds two tokens:
+// `asset`/`amount` are token0, `assetB`/`amountB` token1; it links to its pool page.
+export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string; assetB?: AssetRef; amountB?: string; poolAddress?: string; tokenId?: string }
 export interface ActiveDca {
   id: number; assetIn: AssetRef; assetOut: AssetRef; direction: string
   amountPerTrade: string; totalAmount: string; filledAmount: string; remainingAmount: string | null
@@ -680,7 +685,7 @@ export interface SearchResult {
   status?: string
   // Pool-type results: the venue and current TVL for the caption; `value` is
   // the pool id ('omnipool' for the Omnipool itself), `asset` the icon.
-  poolKind?: 'omnipool' | 'stableswap' | 'xyk'
+  poolKind?: 'omnipool' | 'stableswap' | 'xyk' | 'uniswapv3'
   tvlUsd?: number | null
 }
 
@@ -854,7 +859,11 @@ export interface ActivityRow {
   voteRef?: string | null
   voteSide?: string
   voteConviction?: string | null
-  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy'   // Create = pool creation; Destroy = pool closure; Claim = LM rewards; ClaimReferral = referral rewards
+  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy' | 'CollectFees' | 'Rebalance'   // Create = pool creation; Destroy = pool closure; Claim = LM rewards; ClaimReferral = referral rewards; CollectFees / Rebalance = concentrated-liquidity position fees / vault re-ranging
+  // Concentrated-liquidity (Uniswap v3) rows: the pool contract, the position NFT, the Gamma vault.
+  poolAddress?: string
+  v3TokenId?: string
+  v3Vault?: string
   dca?: boolean
   dcaStatus?: 'failed'
   dcaError?: string
@@ -966,13 +975,14 @@ export interface AssetDetail {
 
 // liquidity pools (asset Liquidity tab, pool detail, Omnipool page)
 
-export type PoolKind = 'omnipool' | 'stableswap' | 'xyk'
+export type PoolKind = 'omnipool' | 'stableswap' | 'xyk' | 'uniswapv3'
 export interface PoolCompositionEntry { asset: AssetRef; amount: string; usd: number | null; sharePct: number | null }
 // Every pool on the chain, largest first (the /liquidity index). A pool is a
 // mixture, so each entry carries its own composition and the page draws it.
 export interface PoolListEntry {
   kind: PoolKind
   poolId: number | null
+  address?: string                 // a concentrated-liquidity pool's contract (kind 'uniswapv3')
   name: string
   tvlUsd: number | null
   sharePct: number | null
@@ -987,6 +997,7 @@ export interface PoolsIndexResponse {
 export interface AssetLiquiditySource {
   kind: PoolKind
   poolId: number | null            // share/LP asset id; null for the Omnipool
+  address?: string                 // a concentrated-liquidity pool's contract
   name: string
   tvlUsd: number | null
   assetAmount: string              // raw units of the page's asset in this pool
@@ -1052,6 +1063,133 @@ export interface PoolDetail {
     pegs: { asset: AssetRef; prices: (number | null)[] }[] | null
     issuance: (number | null)[] | null
   }
+}
+
+// A concentrated-liquidity (Uniswap v3) pool, addressed by its contract: what its
+// own logs imply about balances, price and in-range liquidity, the positions in
+// it, and the Gamma vault that manages positions for depositors.
+export interface UniswapV3PositionRow {
+  manager: string
+  tokenId: string
+  owner: AccountRef | null
+  tickLower: number
+  tickUpper: number
+  priceLower: number
+  priceUpper: number
+  inRange: boolean
+  liquidity: string
+  amount0: string
+  amount1: string
+  usd: number | null
+  openedBlock: number
+  openedAt: string
+  lastBlock: number
+}
+export interface UniswapV3VaultInfo {
+  address: string
+  account: AccountRef
+  createdBlock: number
+  createdAt: string
+  shares: string
+  depositors: number
+  deposits: number
+  withdrawals: number
+  rebalances: number
+  total0: string
+  total1: string
+  tvlUsd: number | null
+  fees0: string
+  fees1: string
+  feesUsd: number | null
+  feeDivisor: number | null
+  feeSharePct: number | null
+  lastRebalanceBlock: number | null
+  lastRebalanceAt: string | null
+  lastRebalanceTick: number | null
+  ranges: { tickLower: number; tickUpper: number; priceLower: number; priceUpper: number; liquidity: string; inRange: boolean }[]
+}
+export interface UniswapV3PoolDetail {
+  kind: 'uniswapv3'
+  address: string
+  account: AccountRef
+  name: string
+  factory: string
+  fee: number
+  feeTier: string
+  tickSpacing: number
+  createdBlock: number
+  createdAt: string
+  createdExtrinsic: number | null
+  token0: AssetRef
+  token1: AssetRef
+  assets: PoolCompositionEntry[]
+  tvlUsd: number | null
+  price: { token1PerToken0: number | null; token0PerToken1: number | null; tick: number | null; sqrtPriceX96: string | null }
+  liquidity: string | null
+  protocolFee: { feeProtocol0: number; feeProtocol1: number; sharePct: number | null }
+  swaps: number
+  volume: { all0: string; all1: string; allUsd: number | null; day0: string; day1: string; dayUsd: number | null; feesAllUsd: number | null; feesDayUsd: number | null }
+  feesCollected: { amount0: string; amount1: string; usd: number | null }
+  firstSwapAt: string | null
+  lastSwapAt: string | null
+  lastSwapBlock: number | null
+  positions: UniswapV3PositionRow[]
+  vault: UniswapV3VaultInfo | null
+  priceHistory: { ts: string; blockHeight: number; price: number }[]
+}
+
+// A concentrated-liquidity pool's time series: price OHLC (token1 per token0),
+// volume, gross swap fees, active liquidity and event-implied holdings per bucket —
+// the whole life at a ladder grain, or a zoomed window down to single swaps.
+export interface UniswapV3HistoryPoint {
+  bucket: string
+  t: number
+  open: number | null
+  high: number | null
+  low: number | null
+  close: number | null
+  swaps: number
+  volume0: string
+  volume1: string
+  volumeUsd: number | null
+  fees0: string
+  fees1: string
+  feesUsd: number | null
+  liquidity: string | null
+  balance0: string
+  balance1: string
+  tvlUsd: number | null
+  blockHeight: number | null
+}
+export interface UniswapV3PoolHistory {
+  pool: string
+  grain: { kind: 'ladder'; stepSec: number } | { kind: 'swap' }
+  fromSec: number
+  toSec: number
+  points: UniswapV3HistoryPoint[]
+  token0: AssetRef
+  token1: AssetRef
+  fee: number
+  vaultRanges: { priceLower: number; priceUpper: number; liquidity: string }[]
+}
+
+// Where a concentrated-liquidity pool's liquidity sits now: the initialised ticks the
+// open ranges imply, the liquidity between consecutive ticks (with the tokens each
+// segment holds at the current price) and the open ranges by owner.
+export interface UniswapV3PoolLiquidity {
+  pool: string
+  token0: AssetRef
+  token1: AssetRef
+  fee: number
+  tickSpacing: number
+  blockHeight: number | null
+  tick: number | null
+  sqrtPriceX96: string | null
+  price: number | null
+  liquidity: string | null
+  ticks: { tick: number; price: number; liquidityNet: string; liquidityGross: string }[]
+  segments: { tickLower: number; tickUpper: number; priceLower: number; priceUpper: number; liquidity: string; amount0: string; amount1: string }[]
+  ranges: { owner: string; ownerKind: 'vault' | 'manager' | 'direct'; tickLower: number; tickUpper: number; priceLower: number; priceUpper: number; liquidity: string; amount0: string; amount1: string; positions: number; inRange: boolean }[]
 }
 
 // A stableswap/XYK pool's liquidity providers: holders of its share token,
@@ -1126,7 +1264,7 @@ export interface HdxMover { account: AccountRef; balanceHdx: number; boughtHdx: 
 export type RevenueStream =
   | 'omnipool_asset_fee' | 'omnipool_protocol_fee' | 'liquidation_penalty'
   | 'pepl_liquidation_profit' | 'asset_reserve' | 'hollar_borrow'
-  | 'hsm_revenue' | 'ice_matched_fee' | 'network_fee'
+  | 'hsm_revenue' | 'ice_matched_fee' | 'uniswap_v3_fee' | 'network_fee'
 export type RevenueRange = '30d' | '1y' | 'all'
 
 export interface RevenuePoint { t: number; usd: number }
@@ -1332,7 +1470,7 @@ export interface TagDetail {
 
 // One leg of a DCA schedule's route. Only Stableswap names a specific pool; the
 // other venues are a single pool each.
-export interface DcaRouteHop { pool: string; poolId: number | null; assetIn: AssetRef; assetOut: AssetRef }
+export interface DcaRouteHop { pool: string; poolId: number | null; feeTier?: number; poolAddress?: string; assetIn: AssetRef; assetOut: AssetRef }
 
 export interface DcaScheduleDetail {
   scheduleId: number

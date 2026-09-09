@@ -1,4 +1,4 @@
-import type { OmnipoolAssetState, XYKPool, StableswapPool, AssetDecimals, PriceMap, GraphEdge, EdgeKind, QueueEntry, ResolvedPrices } from './types.ts';
+import type { OmnipoolAssetState, XYKPool, UniswapV3PoolEdge, StableswapPool, AssetDecimals, PriceMap, GraphEdge, EdgeKind, QueueEntry, ResolvedPrices } from './types.ts';
 import { calculateLRNAPrice, calculateOmnipoolPrices } from './omnipool.ts';
 import { calculateSpotPrice } from './stableswap.ts';
 
@@ -22,6 +22,8 @@ export interface ResolvePriceOptions {
   minGraphPathLiquidityUsd?: number | bigint
   maxObservationsPerAsset?: number
   lpEquivalences?: Map<number, number> | ReadonlyArray<readonly [number, number]>
+  /** Concentrated-liquidity pools at their current price, as virtual-reserve constant-product edges. */
+  uniswapV3Pools?: UniswapV3PoolEdge[]
 }
 
 interface PricePathObservation {
@@ -732,6 +734,7 @@ export function buildGraph(
   atokenEquivalences: [number, number][],
   decimals: AssetDecimals,
   totalIssuances: Map<number, bigint> = new Map(),
+  uniswapV3Pools: UniswapV3PoolEdge[] = [],
 ): Map<number, GraphEdge[]> {
   const graph = new Map<number, GraphEdge[]>();
   let maxPoolLiquidity = 0n;
@@ -741,13 +744,14 @@ export function buildGraph(
     graph.get(from)!.push(edge);
   };
 
-  // XYK pool edges (bidirectional)
-  for (const pool of xykPools) {
-    if (pool.reserveA === 0n || pool.reserveB === 0n) continue;
+  // Constant-product edges (bidirectional): an XYK pool's real reserves, or a
+  // concentrated-liquidity pool's virtual reserves at its current price.
+  const addConstantProductEdges = (pool: XYKPool, kind: 'xyk' | 'uniswapv3') => {
+    if (pool.reserveA === 0n || pool.reserveB === 0n) return;
 
     const decimalsA = decimals.get(pool.assetA);
     const decimalsB = decimals.get(pool.assetB);
-    if (decimalsA === undefined || decimalsB === undefined) continue;
+    if (decimalsA === undefined || decimalsB === undefined) return;
 
     // Normalize reserves to 18 decimals for liquidity comparison
     const normA = normalizeReserve(pool.reserveA, pool.assetA, decimals);
@@ -761,7 +765,7 @@ export function buildGraph(
     addEdge(pool.assetA, {
       toAsset: pool.assetB,
       poolId: null,
-      kind: 'xyk',
+      kind,
       liquidity,
       computePrice: (knownPrice: bigint, _precision: number): bigint => {
         if (pool.reserveA === 0n || pool.reserveB === 0n) return 0n;
@@ -777,7 +781,7 @@ export function buildGraph(
     addEdge(pool.assetB, {
       toAsset: pool.assetA,
       poolId: null,
-      kind: 'xyk',
+      kind,
       liquidity,
       computePrice: (knownPrice: bigint, _precision: number): bigint => {
         if (pool.reserveA === 0n || pool.reserveB === 0n) return 0n;
@@ -788,7 +792,10 @@ export function buildGraph(
       computeLiquidityUsd: (knownPrice: bigint, computedPrice: bigint): bigint =>
         conservativePoolLiquidityUsd(normB, normA, knownPrice, computedPrice),
     });
-  }
+  };
+
+  for (const pool of xykPools) addConstantProductEdges(pool, 'xyk');
+  for (const pool of uniswapV3Pools) addConstantProductEdges(pool, 'uniswapv3');
 
   // Stableswap pool edges: every (assetI, assetJ) pair gets bidirectional edges
   for (const pool of stableswapPools) {
@@ -919,7 +926,7 @@ export function buildGraph(
   }
 
   // Sort each adjacency list: primary = liquidity desc, secondary = pool-type rank
-  const kindRank: Record<EdgeKind, number> = { atoken: 0, stableswap: 1, xyk: 2 };
+  const kindRank: Record<EdgeKind, number> = { atoken: 0, stableswap: 1, xyk: 2, uniswapv3: 2 };
   for (const edges of graph.values()) {
     edges.sort((a, b) => {
       if (b.liquidity !== a.liquidity) return b.liquidity > a.liquidity ? 1 : -1;
@@ -937,7 +944,7 @@ export function buildGraph(
 //    member of the highest-preference basket in `usdReferenceBaskets`
 // 2. Fallback: externally priced Omnipool bridge assets, including stable LP bridges priced by NAV
 // 3. Compute all Omnipool prices via LRNA
-// 4. Iteratively resolve XYK + Stableswap + aToken equivalences
+// 4. Iteratively resolve XYK + Uniswap v3 + Stableswap + aToken equivalences
 export function resolvePrices(
   omnipoolAssets: Map<number, OmnipoolAssetState>,
   xykPools: XYKPool[],
@@ -1125,7 +1132,7 @@ export function resolvePrices(
   const omnipoolPricedAssets = new Set(prices.keys());
 
   // Build adjacency graph from all non-Omnipool pools + aToken equivalences
-  const graph = buildGraph(xykPools, stableswapPools, atokenEquivalences, decimals, totalIssuances);
+  const graph = buildGraph(xykPools, stableswapPools, atokenEquivalences, decimals, totalIssuances, options.uniswapV3Pools ?? []);
 
   // Convert Omnipool seed prices from 12-decimal strings to 24-decimal bigints
   const seeds = new Map<number, bigint>();

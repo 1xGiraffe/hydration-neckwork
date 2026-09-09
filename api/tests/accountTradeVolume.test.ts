@@ -16,7 +16,7 @@ describe('buildPartitionInsertSql', () => {
     // legacy legs, and the DCA executions the legacy legs are keyed on) must read
     // FINAL or a mid-replay recompute doubles trade legs.
     const sql = buildPartitionInsertSql('202601')
-    expect(sql.match(/FROM price_data\.raw_events FINAL/g)).toHaveLength(4)
+    expect(sql.match(/FROM price_data\.raw_events FINAL/g)).toHaveLength(5)
     expect(sql).not.toMatch(/FROM price_data\.raw_events(?! FINAL)/)
   })
 

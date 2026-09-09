@@ -19,6 +19,12 @@ const ALLOWED_SHARED = new Set([
   'services/explorerAssets.ts',
   'services/valuation.ts',
   'services/lpMath.ts',
+  // The concentrated-liquidity position reader (pure math + its own SQL over the
+  // uniswap_v3_* projection); a leaf like lpMath — it imports only the client type.
+  'services/uniswapV3Positions.ts',
+  // The same pool's range book (active liquidity, tick table, segments): one
+  // definition shared by the explorer, the public API and this one. Also a leaf.
+  'services/uniswapV3Ranges.ts',
 ])
 
 function walk(dir: string, prefix = ''): string[] {

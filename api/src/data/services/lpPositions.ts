@@ -1,6 +1,7 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
 import { HUB_ASSET_ID, OMNI_FIXED, omnipoolRemoveLiquidity, stableswapShareLegs, xykShareLegs } from '../../services/lpMath.ts'
+import { loadV3AccountPositions, v3AccountPositions } from '../../services/uniswapV3Positions.ts'
 import { renderUsd } from '../../services/valuation.ts'
 import type { ParsedAddress } from './address.ts'
 import { freshPriceMap } from './assetsData.ts'
@@ -23,6 +24,12 @@ import { xykLpAssetIds } from './poolsData.ts'
 //    principal (`farmed`, from the LP reconstruction the derivations service
 //    refreshes), each redeemed pro-rata against the pool's reserves and total
 //    shares.
+//  * Uniswap v3 — one position per NonfungiblePositionManager NFT the account's
+//    EVM address holds (services/uniswapV3Positions), stated as the principal left
+//    in it (increases − decreases, both tokens; uncollected fees excluded), and
+//  * Gamma — the account's vault-share balance redeemed pro-rata over the vault's
+//    totals. Both read the uniswap_v3_events projection at its head rather than
+//    the pool-state snapshot block.
 //
 // USD is at the current price (positions are holdings, not flows); an asset
 // with no fresh price leaves `valueUsd` null on its leg and the position.
@@ -30,7 +37,7 @@ import { xykLpAssetIds } from './poolsData.ts'
 export interface LpLeg { assetId: string; amount: string; valueUsd: string | null }
 
 export interface LpPositionItem {
-  venue: 'omnipool' | 'stableswap' | 'xyk'
+  venue: 'omnipool' | 'stableswap' | 'xyk' | 'uniswapv3' | 'gamma'
   farmed: boolean
   positionId: string | null
   poolKey: string
@@ -176,12 +183,17 @@ async function xykTotalShares(client: ClickHouseClient, lpAssetIds: number[]): P
 }
 
 export async function liquidityPositions(client: ClickHouseClient, parsed: ParsedAddress): Promise<LpPositionsResult> {
-  const [snapshot, prices, lpByPool, omni, farmed] = await Promise.all([
+  // The EVM side of the account: its bound H160, else the runtime's truncation of
+  // the AccountId32 (the first 20 bytes), which is where a substrate account's
+  // position NFTs and vault shares are held.
+  const h160 = parsed.evmAddress ?? `0x${parsed.accountId.slice(2, 42)}`
+  const [snapshot, prices, lpByPool, omni, farmed, v3] = await Promise.all([
     poolSnapshot(client),
     freshPriceMap(client),
     xykLpAssetIds(client),
     omnipoolPositions(client, parsed.accountId),
     xykFarmedShares(client, parsed.accountId),
+    loadV3AccountPositions(client, [h160]),
   ])
   const poolByLp = new Map<number, string>()
   for (const [pool, lp] of lpByPool) poolByLp.set(lp, pool)
@@ -224,6 +236,15 @@ export async function liquidityPositions(client: ClickHouseClient, parsed: Parse
       const { amountA, amountB } = xykShareLegs(shares, pool.reserveA, pool.reserveB, total)
       assembled.push(assemble('xyk', isFarmed, null, poolAccount, String(lp), shares, [{ assetId: pool.assetA, amount: amountA }, { assetId: pool.assetB, amount: amountB }], prices))
     }
+  }
+
+  // A position whose token contracts the registry cannot name has no legs to state
+  // and is left out rather than shown with a guessed asset.
+  for (const p of v3AccountPositions(v3)) {
+    if (p.asset0 == null || p.asset1 == null) continue
+    const legs = [{ assetId: p.asset0, amount: p.amount0 }, { assetId: p.asset1, amount: p.amount1 }]
+    if (p.kind === 'position') assembled.push(assemble('uniswapv3', false, p.tokenId ?? null, p.pool ?? p.manager ?? '', null, p.shares, legs, prices))
+    else assembled.push(assemble('gamma', false, null, p.vault ?? '', null, p.shares, legs, prices))
   }
 
   let totalUsd = 0n

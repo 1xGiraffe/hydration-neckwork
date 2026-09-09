@@ -652,10 +652,20 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
 }
 
 // Venue → badge colour, so the LP products read apart at a glance: NFT-held
-// Omnipool positions (bare / farmed) vs wallet-held stableswap pool shares. All
-// three are liquidity, so they stay inside that family's blues rather than
-// borrowing a hue that means something else elsewhere.
-const LP_VENUE_COLORS: Record<string, string> = { Omnipool: CAT.liquidity, 'Omnipool Farm': CAT.liquidityCreate, Stablepool: 'var(--sky-deep)' }
+// Omnipool positions (bare / farmed) vs wallet-held stableswap pool shares, and
+// the concentrated-liquidity pair (a position NFT, a vault share). All of them are
+// liquidity, so they stay inside that family's blues rather than borrowing a hue
+// that means something else elsewhere.
+const LP_VENUE_COLORS: Record<string, string> = {
+  Omnipool: CAT.liquidity, 'Omnipool Farm': CAT.liquidityCreate, Stablepool: 'var(--sky-deep)',
+  'Uniswap v3': CAT.liquidityClaim, 'Gamma vault': 'var(--sky-deep)',
+}
+// What the row is, under the asset symbol: fungible shares, or the position NFT.
+function lpPositionName(p: LpPosition): string {
+  if (p.venue === 'Stablepool') return 'Pool shares'
+  if (p.venue === 'Gamma vault') return 'Vault shares'
+  return `Position #${p.tokenId ?? p.positionId}`
+}
 
 export function LiquidityPositionsTable({ positions }: { positions: LpPosition[] }) {
   if (!positions.length) return null
@@ -669,18 +679,21 @@ export function LiquidityPositionsTable({ positions }: { positions: LpPosition[]
         <tbody>
           {positions.map(p => {
             const col = LP_VENUE_COLORS[p.venue] ?? CAT.liquidity
+            // A two-token position (concentrated liquidity) is the pool's, not one asset's.
+            const to = p.poolAddress ? paths.v3Pool(p.poolAddress) : paths.asset(p.asset.assetId)
             return (
-              <tr key={p.positionId} {...rowNav(paths.asset(p.asset.assetId))}>
+              <tr key={p.positionId} {...rowNav(to)}>
                 <td data-label="Pool asset">
                   <div className="asset-row">
                     <AssetIcon assetId={p.asset.assetId} iconAssetId={p.asset.iconAssetId} symbol={p.asset.symbol} size={30} parachainId={p.asset.parachainId} origin={p.asset.origin} />
-                    <div className="ar-meta"><span className="ar-sym">{p.asset.symbol}</span><span className="ar-name">{p.venue === 'Stablepool' ? 'Pool shares' : `Position #${p.positionId}`}</span></div>
+                    <div className="ar-meta"><span className="ar-sym">{p.asset.symbol}{p.assetB ? ` / ${p.assetB.symbol}` : ''}</span><span className="ar-name">{lpPositionName(p)}</span></div>
                   </div>
                 </td>
                 <td data-label="Venue"><span className="badge" style={{ background: `color-mix(in srgb, ${col} 14%, transparent)`, color: col }}>{p.venue}</span></td>
                 <td data-label="Amount" className="r mono">
                   {F.amount(p.amount, p.asset.decimals)} {p.asset.symbol}
                   {p.hubAmount && <div className="muted" style={{ fontSize: 11, fontWeight: 400 }}>+ {F.amount(p.hubAmount, 12)} H2O</div>}
+                  {p.assetB && p.amountB != null && <div className="muted" style={{ fontSize: 11, fontWeight: 400 }}>+ {F.amount(p.amountB, p.assetB.decimals)} {p.assetB.symbol}</div>}
                 </td>
                 <td data-label="Value" className="r mono">{F.usd(p.valueUsd)}</td>
               </tr>

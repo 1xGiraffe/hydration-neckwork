@@ -20,6 +20,17 @@ export interface XYKPool {
 }
 
 /**
+ * A concentrated-liquidity (Uniswap v3) pool flattened to the constant-product
+ * pool tangent to its curve at the current price: reserveA/reserveB are the
+ * VIRTUAL reserves x = L·2^96/√P and y = L·√P/2^96 in raw token units (assetA =
+ * token0, assetB = token1), so the graph prices it exactly like an XYK pool
+ * whose depth is the in-range liquidity.
+ */
+export interface UniswapV3PoolEdge extends XYKPool {
+  poolAddress: string;
+}
+
+/**
  * Stableswap pool with amplification curve
  */
 export interface StableswapPool {
@@ -42,7 +53,7 @@ export type AssetDecimals = Map<number, number>;
  */
 export type PriceMap = Map<number, string>;
 
-export type EdgeKind = 'xyk' | 'stableswap' | 'atoken';
+export type EdgeKind = 'xyk' | 'stableswap' | 'atoken' | 'uniswapv3';
 
 export interface GraphEdge {
   toAsset: number;

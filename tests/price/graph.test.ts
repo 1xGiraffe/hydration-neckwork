@@ -1730,3 +1730,148 @@ describe('USD reference basket preference', () => {
     expect(prices.has(5)).toBe(false);
   });
 });
+
+describe('Uniswap v3 edges', () => {
+  // The aDOT/HOLLAR pool at its 2026-09-09 state, flattened to virtual reserves:
+  // √P = 862203316974439708502410565924684, L = 2118967809806757 → x0/x1 below.
+  const v3Pool = {
+    poolAddress: '0x5c6208a3c316a801f8996750aa7b6f45fc988548',
+    assetA: 1001,
+    assetB: 222,
+    reserveA: 194712688634n,
+    reserveB: 23059743103956470264n,
+  };
+  const decimals: AssetDecimals = new Map([[5, 10], [1001, 10], [222, 18], [10, 6]]);
+
+  it('buildGraph gives a concentrated-liquidity pool bidirectional edges of its own kind', () => {
+    const graph = buildGraph([], [], [], decimals, new Map(), [v3Pool]);
+
+    expect(graph.get(1001)!.map(e => [e.toAsset, e.kind])).toEqual([[222, 'uniswapv3']]);
+    expect(graph.get(222)!.map(e => [e.toAsset, e.kind])).toEqual([[1001, 'uniswapv3']]);
+    // knowing aDOT at $1.18, HOLLAR comes out at ≈ $0.9964 (24-decimal)
+    const hollar24 = graph.get(1001)![0].computePrice(1_180_000_000_000_000_000_000_000n, 24);
+    expect(hollar24).toBe(996372646270715880315549n);
+    // and the edge weighs the pool's virtual depth, not an unbounded path
+    expect(graph.get(1001)![0].computeLiquidityUsd!(1_180_000_000_000_000_000_000_000n, hollar24)).toBeGreaterThan(22n * 10n ** 18n);
+  });
+
+  it('a pool with no in-range liquidity or an unknown decimal is no edge', () => {
+    expect(buildGraph([], [], [], decimals, new Map(), [{ ...v3Pool, reserveA: 0n }]).size).toBe(0);
+    expect(buildGraph([], [], [], decimals, new Map(), [{ ...v3Pool, assetB: 4242 }]).size).toBe(0);
+  });
+
+  it('resolvePrices prices an otherwise unconnected token through the v3 edge, one hop from its seed', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [10, { hubReserve: 1000000000000n, reserve: 1000000n, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 }],
+      [5, { hubReserve: 1180000000000n, reserve: 10000000000n, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 }],
+    ]);
+    const { prices, hopCounts } = resolvePrices(
+      omnipoolAssets, [], [], decimals, 10, 1, [10], [[5, 1001]], new Map(), [[10]],
+      { uniswapV3Pools: [v3Pool] },
+    );
+
+    expect(prices.get(5)).toBe('1.180000000000');
+    expect(prices.get(1001)).toBe('1.180000000000');
+    expect(prices.get(222)).toBe('0.996372646270');
+    expect(hopCounts.get(222)).toBe(1);
+  });
+
+  it('never overrides an Omnipool-priced asset and honours the path-liquidity floor like an XYK edge', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [10, { hubReserve: 1000000000000n, reserve: 1000000n, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 }],
+      [5, { hubReserve: 1180000000000n, reserve: 10000000000n, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 }],
+      // HOLLAR priced by the Omnipool at $1.00 — the v3 edge must not move it
+      [222, { hubReserve: 1000000000000n, reserve: 1000000000000000000n, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 }],
+    ]);
+    const guarded = resolvePrices(
+      omnipoolAssets, [], [], decimals, 10, 1, [10], [[5, 1001]], new Map(), [[10]],
+      { uniswapV3Pools: [v3Pool] },
+    );
+    expect(guarded.prices.get(222)).toBe('1.000000000000');
+    expect(guarded.hopCounts.get(222)).toBe(0);
+
+    // A $46-deep virtual pool is under a $1,000 floor: the token stays unpriced.
+    const withoutHollar = new Map([...omnipoolAssets].filter(([id]) => id !== 222));
+    const thin = resolvePrices(
+      withoutHollar, [], [], decimals, 10, 1, [10], [[5, 1001]], new Map(), [[10]],
+      { uniswapV3Pools: [v3Pool], minGraphPathLiquidityUsd: 1000 },
+    );
+    expect(thin.prices.has(222)).toBe(false);
+    expect(thin.unpricedConnected).toEqual([222]);
+  });
+});
+
+describe('Uniswap v3 edge as the only market for a wrapper', () => {
+  // aDOT (1001) is DOT's (5) aToken: an exact 1:1 wrapper pair from Aave's
+  // reserves, independent of where either trades. The scenario: the Omnipool has
+  // no aDOT/DOT position any more, HOLLAR is priced, and the only venue touching
+  // aDOT is the concentrated-liquidity aDOT/HOLLAR pool.
+  const v3Pool = {
+    poolAddress: '0x5c6208a3c316a801f8996750aa7b6f45fc988548',
+    assetA: 1001,
+    assetB: 222,
+    reserveA: 194712688634n,
+    reserveB: 23059743103956470264n,
+  };
+  const decimals: AssetDecimals = new Map([[5, 10], [1001, 10], [222, 18], [10, 6]]);
+  const usdt = { hubReserve: 1000000000000n, reserve: 1000000n, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 };
+
+  it('prices DOT through its aToken’s v3 edge: HOLLAR price × pool price, one hop, and the aToken stays an alias', () => {
+    // HOLLAR at $1.00 as an Omnipool member; no DOT and no aDOT anywhere else.
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [10, usdt],
+      [222, { hubReserve: 1000000000000n, reserve: 1000000000000000000n, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 }],
+    ]);
+    const { prices, hopCounts, unpricedConnected } = resolvePrices(
+      omnipoolAssets, [], [], decimals, 10, 1, [10], [[5, 1001]], new Map(), [[10]],
+      { uniswapV3Pools: [v3Pool] },
+    );
+
+    // pool price: 23059743103956470264 / 194712688634 raw → 1.1842958600 HOLLAR per aDOT
+    expect(prices.get(222)).toBe('1.000000000000');
+    expect(prices.get(1001)).toBe('1.184295860004');
+    expect(prices.get(5)).toBe('1.184295860004');
+    expect(hopCounts.get(5)).toBe(1);
+    expect(hopCounts.get(1001)).toBe(1);
+    expect(unpricedConnected).toEqual([]);
+    // 1001 is still the alias of 5 — the indexer's row filter (atokenIds) keeps
+    // it out of price_data.prices exactly as when aDOT sat in the Omnipool.
+  });
+
+  it('prices DOT the same way when HOLLAR is only a stable reference, and the price scales with HOLLAR’s', () => {
+    // No Omnipool at all: HOLLAR is a member of the USD reference basket.
+    const { prices, hopCounts } = resolvePrices(
+      new Map(), [], [], decimals, 222, 1, [222], [[5, 1001]], new Map(), [[222]],
+      { uniswapV3Pools: [v3Pool] },
+    );
+    expect(prices.get(222)).toBe('1.000000000000');
+    expect(prices.get(5)).toBe('1.184295860004');
+    expect(hopCounts.get(5)).toBe(1);
+
+    // HOLLAR at $0.99 → DOT at 0.99 × 1.18429586
+    const stable = { hubReserve: 990000000000n, reserve: 1000000000000000000n, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 };
+    const cheaper = resolvePrices(
+      new Map<number, OmnipoolAssetState>([[10, usdt], [222, stable]]), [], [], decimals, 10, 1, [10], [[5, 1001]], new Map(), [[10]],
+      { uniswapV3Pools: [v3Pool] },
+    );
+    expect(cheaper.prices.get(222)).toBe('0.990000000000');
+    expect(cheaper.prices.get(5)).toBe('1.172452901404');
+  });
+
+  it('mirror: HOLLAR priced only through the v3 edge when DOT/aDOT are priced elsewhere', () => {
+    const omnipoolAssets = new Map<number, OmnipoolAssetState>([
+      [10, usdt],
+      [5, { hubReserve: 1180000000000n, reserve: 10000000000n, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 }],
+    ]);
+    const { prices, hopCounts } = resolvePrices(
+      omnipoolAssets, [], [], decimals, 10, 1, [10], [[5, 1001]], new Map(), [[10]],
+      { uniswapV3Pools: [v3Pool] },
+    );
+    expect(prices.get(5)).toBe('1.180000000000');
+    expect(prices.get(1001)).toBe('1.180000000000');
+    expect(hopCounts.get(1001)).toBe(0);
+    // 1.18 / 1.18429586 = 0.99637…
+    expect(prices.get(222)).toBe('0.996372646270');
+    expect(hopCounts.get(222)).toBe(1);
+  });
+});

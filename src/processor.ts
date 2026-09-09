@@ -1,5 +1,6 @@
 import { SubstrateBatchProcessor } from '@subsquid/substrate-processor'
 import { config } from './config.js'
+import { UNISWAP_V3_POOL_TOPIC0S } from './price/uniswapV3.js'
 
 export const processor = new SubstrateBatchProcessor()
   .setGateway({
@@ -51,6 +52,18 @@ export const processor = new SubstrateBatchProcessor()
     ],
   })
 
+  // Concentrated-liquidity (Uniswap v3) pools live on the EVM and speak only
+  // through logs: PoolCreated announces a pool, Initialize/Swap/Mint/Burn move
+  // its price and in-range liquidity, and a direct-EVM Swap is volume no
+  // Broadcast event reports (src/price/uniswapV3.ts). Selected by topic0, not
+  // as the whole `EVM.Log` stream: measured on 2026-09-08, every EVM.Log was
+  // 95,905 events/day against 58,074 for everything else this processor asks
+  // for, and two of them were pool logs. The five signatures are exact — the
+  // aToken Mint/Burn share the names, not the hashes.
+  .addEvmLog({
+    topic0: [...UNISWAP_V3_POOL_TOPIC0S],
+  })
+
   // Subscribe to System.set_storage calls
   // These are sudo/governance calls that directly write storage, bypassing events.
   // SQD's addCall automatically unwraps calls nested inside utility.batch,
@@ -71,5 +84,9 @@ export const processor = new SubstrateBatchProcessor()
     event: {
       args: true,
       name: true,
+      // A router-routed v3 hop emits both the pool's Swap log and a
+      // Broadcast.Swapped3 in the same extrinsic; the extrinsic index is what
+      // keeps the volume extractor from booking that swap twice.
+      extrinsicIndex: true,
     },
   })

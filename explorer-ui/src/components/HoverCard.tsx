@@ -7,7 +7,7 @@ import { F, AssetIcon, AssetChip, AssetAmount, FeeAmount, hasTip, AddrPill, Call
 import { ayeSharePct, selectTally } from '../utils/referendumVotes'
 import { dcaCadence, dcaProgress, fmtDuration } from '../utils/dca'
 import { resolveTag, allAssociations, useTagMapVersion, listForTag, tagMapStatus, looksLikeUserTagId } from '../userTags'
-import type { AssetRef } from '../types'
+import type { AssetRef, TradeHop } from '../types'
 
 // Global hover preview cards for account (.addr-pill), tag (/tag/… links),
 // asset (.asset-chip), trade ([data-activity] with slug swap / /swap/…), DCA
@@ -367,7 +367,11 @@ function TradeHover({ id }: { id: string }) {
   const { data } = useTrade(id)
   if (!data) return <div className="hc-sub mono">Loading…</div>
   const detailId = data.extrinsicIndex != null ? `${data.blockHeight}-${data.extrinsicIndex}` : data.eventIndex != null ? `${data.blockHeight}-e${data.eventIndex}` : id
-  const hops = data.route.length ? data.route : [{ pool: data.venue, poolId: null, assetIn: data.assetIn, assetOut: data.assetOut }]
+  // A route-less trade (a direct pool swap) is one hop through its venue; a
+  // concentrated-liquidity swap names its pool contract, so that hop links to it.
+  const hops: Pick<TradeHop, 'pool' | 'poolId' | 'poolAddress' | 'assetIn' | 'assetOut'>[] = data.route.length
+    ? data.route
+    : [{ pool: data.venue, poolId: null, poolAddress: data.poolAddress, assetIn: data.assetIn, assetOut: data.assetOut }]
   return (
     <>
       <div className="hc-head">
@@ -383,7 +387,7 @@ function TradeHover({ id }: { id: string }) {
         <div className="hc-route-title"><span>Route</span><span className="mono">{hops.length} hop{hops.length === 1 ? '' : 's'}</span></div>
         {hops.map((h, i) => (
           <div className="hc-hop" key={`${h.pool}-${h.assetIn.assetId}-${h.assetOut.assetId}-${i}`}>
-            <PoolBadge pool={h.pool} poolId={h.poolId} to={poolHref(h.pool, h.poolId)} />
+            <PoolBadge pool={h.pool} poolId={h.poolId} to={poolHref(h.pool, h.poolId, h.poolAddress)} />
             <span className="hc-hop-assets">
               <span className="trade-leg"><AssetIcon assetId={h.assetIn.assetId} iconAssetId={h.assetIn.iconAssetId} symbol={h.assetIn.symbol} size={16} parachainId={h.assetIn.parachainId} origin={h.assetIn.origin} /><span className="mono">{h.assetIn.symbol}</span></span>
               <span className="muted">→</span>
