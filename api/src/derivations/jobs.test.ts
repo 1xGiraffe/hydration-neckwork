@@ -12,6 +12,7 @@ import {
   stalePartitionsSql,
   partitionsNeedingRebuild,
   poolSwapHourlyInsertSql,
+  uniswapV3LegsInsertSql,
   poolSwapHourlyStalePartitionsSql,
   POOL_SWAP_HOURLY_REFRESH_HOURS,
   REVENUE_EVENT_STREAMS_INSERTED,
@@ -167,6 +168,36 @@ describe('swap_source_partition_watermarks projection', () => {
     expect(table).not.toContain('AggregateFunction(count')
   })
 
+  // A direct EVM swap in a concentrated-liquidity pool has no Broadcast row, so the
+  // raw_events MV above never sees it; the netting's v3_direct arm reads the pool's
+  // Swap log instead, and a month whose only new swap was one of those must still
+  // re-mark stale. The second MV watches exactly that log, into the same index.
+  describe('the raw_evm_logs twin for the v3 Swap logs', () => {
+    const v3 = schemaStatement('006_public.sql', 'swap_source_partition_watermarks_v3_mv')
+    const v3Direct = readFileSync(fileURLToPath(new URL('../services/accountTradeVolume.ts', import.meta.url)), 'utf8')
+
+    it('feeds the same watermark table with the same four columns', () => {
+      expect(v3).toContain('TO price_data.swap_source_partition_watermarks')
+      for (const col of ['max(ingested_at) AS src_ingest', 'max(block_height) AS src_maxb', 'max(block_timestamp) AS src_max_ts']) {
+        expect(v3).toContain(col)
+        expect(mv).toContain(col)
+      }
+    })
+
+    it('keys on the same synthetic block-space partition clock as the raw_events MV', () => {
+      expect(v3).toContain('toYYYYMM(toDateTime(block_height * 12)) AS p')
+    })
+
+    it('watches the pool Swap topic the v3_direct netting arm consumes, from raw_evm_logs', () => {
+      const swapTopic = '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67'
+      expect(v3).toContain('FROM price_data.raw_evm_logs')
+      expect(v3).toContain(`topic0 = '${swapTopic}'`)
+      // The netting arm reads the decoded projection of that same log.
+      expect(v3Direct).toContain("FROM price_data.uniswap_v3_events FINAL WHERE kind = 'pool' AND event_name = 'Swap'")
+      const v3EventsMv = schemaStatement('010_uniswap_v3.sql', 'uniswap_v3_pool_events_mv')
+      expect(v3EventsMv).toContain(`topic0 = '${swapTopic}', 'Swap'`)
+    })
+  })
 })
 
 describe('stalePartitionsSql', () => {
@@ -446,7 +477,9 @@ describe('revenue_source_partition_watermarks projection', () => {
   it('keys every feeding MV on the derived tables partition expression', () => {
     const sql = readFileSync(SCHEMA_DIR + '008_revenue.sql', 'utf8')
     const mvs = sql.split(';').filter(s => s.includes('MATERIALIZED VIEW'))
-    expect(mvs.length).toBe(6)
+    // 7 = the six before + revenue_source_wm_uniswap_v3_mv (v3 vault fee share and
+    // pool protocol collects, 2026-09-09).
+    expect(mvs.length).toBe(7)
     for (const mv of mvs) {
       expect(mv).toContain('toYYYYMM(block_timestamp) AS p')
       expect(mv).toContain('TO price_data.revenue_source_partition_watermarks')
@@ -521,8 +554,46 @@ describe('revenueEventsInsertSql', () => {
   it('covers every eventful stream exactly once per partition', () => {
     expect(REVENUE_EVENT_STREAMS_INSERTED).toEqual([
       'omnipool_asset_fee', 'omnipool_protocol_fee', 'liquidation_penalty',
-      'pepl_liquidation_profit', 'asset_reserve', 'hsm_revenue', 'ice_matched_fee', 'network_fee',
+      'pepl_liquidation_profit', 'asset_reserve', 'hsm_revenue', 'ice_matched_fee', 'uniswap_v3_fee', 'network_fee',
     ])
+  })
+})
+
+// Direct EVM swaps in the concentrated-liquidity pools reach pool_swap_legs through
+// this job. Three rules make it honest: a swap whose extrinsic already has a
+// Router-routed uniswapv3 leg is NOT re-booked (the route counts it once, with its
+// op_key), a token neither the registry nor the precompile rule can name drops the
+// swap rather than booking it as asset 0, and the fee leg is the pool fee taken from
+// the input.
+describe('uniswapV3LegsInsertSql', () => {
+  const sql = uniswapV3LegsInsertSql(14_390_000)
+
+  // The Broadcast MV leaves the venue to this job (its filler is the router, not the
+  // pool), so a routed hop is booked HERE with the route's Router id — matched to the
+  // hop's UniswapV3 Swapped3 by extrinsic and input amount — and nets with its
+  // siblings; a direct swap gets one op_key of its own.
+  it('keys a routed hop on its Router id and a direct swap on its own log', () => {
+    expect(sql).toContain("JSONExtractString(args_json, 'fillerType', '__kind') = 'UniswapV3'")
+    expect(sql).toMatch(/extractGroups\(args_json, '.*Router.*'\)\[1\]\) AS router_id/)
+    expect(sql).toContain("if(router_id > 0, toString(router_id), concat('evm:', toString(block_height), ':', toString(event_index))) AS op_key")
+    expect(sql).not.toContain('NOT IN (SELECT block_height, ext FROM routed)')
+  })
+
+  it('reads the pool tokens from the pools projection and drops an unresolvable token', () => {
+    expect(sql).toContain('INNER JOIN price_data.uniswap_v3_pools p ON p.pool_address = e.contract_address')
+    expect(sql).toContain("FROM price_data.assets WHERE evm_address != ''")
+    expect(sql).toContain('asset0 != 4294967295 AND asset1 != 4294967295')
+  })
+
+  it('books in, out and the LP fee leg off the input amount, and only above the overlap floor', () => {
+    expect(sql).toContain("tuple(toUInt8(3), asset_in, intDiv(amount_in * toUInt256(fee), toUInt256(1000000)), 'account', pool_account)")
+    expect(sql).toContain("CAST(legs[leg_i].1 AS Enum8('in' = 1, 'out' = 2, 'fee' = 3)) AS leg_kind")
+    expect(sql).toContain('block_height > 14390000')
+    expect(sql).toContain('INSERT INTO price_data.pool_swap_legs (venue, pool_key, block_height, event_index, leg_index, leg_kind, asset_id, amount, fee_dest, fee_recipient, swapper, op_key, extrinsic_index, block_timestamp, ingested_at)')
+  })
+
+  it('names the swapper in the ETH-prefixed account form and never a raw H160', () => {
+    expect(sql).toContain("concat('0x45544800', substring(recipient, 3, 40), '0000000000000000')")
   })
 })
 

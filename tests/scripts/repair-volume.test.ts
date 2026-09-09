@@ -319,3 +319,54 @@ describe('volume repair helpers', () => {
     expect([...args.targets]).toEqual(['trade-volume'])
   })
 })
+
+describe('volume repair: Uniswap v3 pool swaps', () => {
+  const POOL = '0x5c6208a3c316a801f8996750aa7b6f45fc988548'
+  const pools = new Map([[POOL, { token0AssetId: 1001, token1AssetId: 222 }]])
+  const swapRow = (block_height: number, extrinsic_index: number) => ({
+    block_height,
+    extrinsic_index,
+    event_name: 'EVM.Log',
+    args_json: JSON.stringify({
+      log: {
+        address: POOL,
+        topics: [
+          '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67',
+          '0x0000000000000000000000005a79de848626994c4099640ef5c48fd65dae4159',
+          '0x0000000000000000000000006e896769ddecd994f63e5772218a820918e0ff6f',
+        ],
+        data: '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffe6dbabd300000000000000000000000000000000000000000000000000a411a5b06516450000000000000000000000000000000000002a5f9ddcd191e225a5b8b880afcb0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002d5f3',
+      },
+    }),
+  })
+  const routedRow = (block_height: number, extrinsic_index: number) => ({
+    block_height,
+    extrinsic_index,
+    event_name: 'Broadcast.Swapped3',
+    args_json: JSON.stringify({
+      swapper: '0xrouted', fillerType: { __kind: 'UniswapV3' }, operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 222, amount: '46181299507238469' }], outputs: [{ asset: 1001, amount: '421811245' }],
+    }),
+  })
+
+  // The repair reads the same raw rows the live extractor saw as events, so a
+  // pool's Swap log is a trade of the recipient — and is dropped when the
+  // extrinsic's Broadcast fill already booked the hop.
+  it('decodes a direct swap from its EVM.Log row and skips the log of a routed one', () => {
+    const trades = decodeBlockTrades([
+      swapRow(14395782, 4),
+      swapRow(14395790, 2), routedRow(14395790, 2),
+      swapRow(14395791, 2), routedRow(14395791, 3),
+    ], pools)
+    expect(trades.map(t => [t.blockHeight, t.trade.account, t.trade.filler, t.trade.inputs, t.trade.outputs])).toEqual([
+      [14395782, '0x455448006e896769ddecd994f63e5772218a820918e0ff6f0000000000000000', 'UniswapV3', [{ assetId: 222, amount: 46181299507238469n }], [{ assetId: 1001, amount: 421811245n }]],
+      [14395790, '0xrouted', 'UniswapV3', [{ assetId: 222, amount: 46181299507238469n }], [{ assetId: 1001, amount: 421811245n }]],
+      [14395791, '0x455448006e896769ddecd994f63e5772218a820918e0ff6f0000000000000000', 'UniswapV3', [{ assetId: 222, amount: 46181299507238469n }], [{ assetId: 1001, amount: 421811245n }]],
+      [14395791, '0xrouted', 'UniswapV3', [{ assetId: 222, amount: 46181299507238469n }], [{ assetId: 1001, amount: 421811245n }]],
+    ])
+  })
+
+  it('ignores EVM.Log rows without a pool index', () => {
+    expect(decodeBlockTrades([swapRow(14395782, 4)])).toEqual([])
+  })
+})

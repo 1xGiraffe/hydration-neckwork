@@ -201,7 +201,7 @@ export const assetsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
     schema: {
       tags: ['assets'],
       summary: 'Swaps touching one asset, newest first',
-      description: 'Asset-first projection (asset_swap_activity): every swap event naming the asset on either side, including the legacy per-pallet events and Router.Executed rows (which carry no actor — `who` is null there; Broadcast-era actor attribution lives on /v1/trades).',
+      description: 'Asset-first projection (asset_swap_activity): every SUBSTRATE swap event naming the asset on either side, including the legacy per-pallet events and Router.Executed rows (which carry no actor — `who` is null there; Broadcast-era actor attribution lives on /v1/trades). A direct EVM swap against a concentrated-liquidity (Uniswap v3) pool emits no substrate event and is not in this projection; those fills are on /v1/pools/uniswapv3/{pool}/trades and /v1/trades?venue=uniswapv3 (a Router-routed hop through such a pool is here like any other route).',
       params: z.object({ id: zAssetId }),
       querystring: zFeedWithWindow,
       response: { 200: zFeedPage(z.object({

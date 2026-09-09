@@ -11,6 +11,7 @@ import {
   DEDUP_SLACK, dedupPage, orderSql, positionCursorSql, versionedPageSql, windowSql,
   type Order, type PositionCursor, type WindowFilters,
 } from './feed.ts'
+import { V3_LIQUIDITY_H160_PARAM, substrateLiquidityAction, uniswapV3LiquidityCtesSql, type LiquidityAction } from './uniswapV3Liquidity.ts'
 
 // The per-account DeFi feeds: trades, DCA, OTC, staking, votes, liquidity,
 // XCM, money market, liquidations, protocol fees. All account-first reads.
@@ -395,32 +396,89 @@ export interface AccountLiquidityEvent {
   extrinsicIndex: number | null
   timestamp: string
   eventName: string
+  action: LiquidityAction | null
   assetId: string
   amount: string | null
   amountA: string | null
+  amountB: string | null
   assetB: string | null
   poolAccount: string | null
   assetRefs: string[]
+  poolAddress: string | null
+  tokenId: string | null
+  tickLower: number | null
+  tickUpper: number | null
+  vault: string | null
+  shares: string | null
 }
 
+interface LiquidityRow {
+  block_height: number
+  event_index: number
+  extrinsic_index: number | null
+  ts: string
+  event_name: string
+  action: string
+  asset_id: number
+  amount: string
+  amount_a: string
+  amount_b: string
+  asset_b: number
+  pool_account: string
+  asset_refs: number[]
+  pool_address: string
+  token_id: string
+  tick_lower: number | null
+  tick_upper: number | null
+  vault: string
+  shares: string
+}
+
+// The feed is two arms over one (block, event_index) keyset: the pallet events
+// from the account-first projection, and the concentrated-liquidity acts
+// restated from uniswap_v3_events (services/uniswapV3Liquidity.ts). Each arm is
+// windowed, cursored and bounded on its own — the substrate read stays a
+// key-prefix scan that stops at the bound — and the union is ordered and cut
+// once more. The v3 arm's columns are shaped to the substrate row: token0 is the
+// `assetId` side (`amount`), token1 the `assetB` side (`amountB`).
+const LIQUIDITY_COLUMNS = 'block_height, event_index, extrinsic_index, ts, event_name, action, asset_id, amount, amount_a, amount_b, asset_b, pool_account, asset_refs, pool_address, token_id, tick_lower, tick_upper, vault, shares'
+
 export async function accountLiquidity(client: ClickHouseClient, parsed: ParsedAddress, options: PositionFeedOptions): Promise<{ items: Array<WithExtrinsicHash<AccountLiquidityEvent>>; hasMore: boolean }> {
-  const params: Record<string, unknown> = { account: parsed.accountId, bound: options.limit + 1 + DEDUP_SLACK }
+  const params: Record<string, unknown> = { account: parsed.accountId, [V3_LIQUIDITY_H160_PARAM]: h160For(parsed), bound: options.limit + 1 + DEDUP_SLACK }
+  const tail = `${windowSql(options, params)}${positionCursorSql(options.order, 'event_index', params, options.cursor)}`
+  const order = orderSql(options.order, 'event_index')
   const res = await client.query({
     query: `-- data:accounts:liquidity
-        SELECT block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts, event_name,
-               asset_id, amount, amount_a, asset_b, pool_account, asset_refs
-        FROM price_data.liquidity_activity_by_account
-        WHERE who = {account:String}${windowSql(options, params)}${positionCursorSql(options.order, 'event_index', params, options.cursor)}
-        ORDER BY ${orderSql(options.order, 'event_index')}
+        WITH ${uniswapV3LiquidityCtesSql()}
+        SELECT ${LIQUIDITY_COLUMNS} FROM (
+          SELECT ${LIQUIDITY_COLUMNS} FROM (
+            SELECT block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts, event_name, '' AS action,
+                   asset_id, amount, amount_a, '' AS amount_b, asset_b, pool_account, asset_refs,
+                   '' AS pool_address, '' AS token_id, CAST(NULL, 'Nullable(Int32)') AS tick_lower, CAST(NULL, 'Nullable(Int32)') AS tick_upper,
+                   '' AS vault, '' AS shares
+            FROM price_data.liquidity_activity_by_account
+            WHERE who = {account:String}${tail}
+            ORDER BY ${order}
+            LIMIT {bound:UInt32}
+          )
+          UNION ALL
+          SELECT ${LIQUIDITY_COLUMNS} FROM (
+            SELECT block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts, event_name, action,
+                   asset0 AS asset_id, amount0_s AS amount, '' AS amount_a, amount1_s AS amount_b, asset1 AS asset_b, '' AS pool_account, [asset0, asset1] AS asset_refs,
+                   pool_addr AS pool_address, token_id_s AS token_id, tick_lower, tick_upper, vault, shares
+            FROM v3_acts
+            WHERE 1${tail}
+            ORDER BY ${order}
+            LIMIT {bound:UInt32}
+          )
+        )
+        ORDER BY ${order}
         LIMIT {bound:UInt32}`,
     query_params: params,
     format: 'JSONEachRow',
   })
-  const { page, hasMore } = dedupPage(
-    await res.json<{ block_height: number; event_index: number; extrinsic_index: number | null; ts: string; event_name: string; asset_id: number; amount: string; amount_a: string; asset_b: number; pool_account: string; asset_refs: number[] }>(),
-    row => `${row.block_height}:${row.event_index}`,
-    options.limit,
-  )
+  const { page, hasMore } = dedupPage(await res.json<LiquidityRow>(), row => `${row.block_height}:${row.event_index}`, options.limit)
+  const str = (value: string | null | undefined): string | null => (value ? String(value) : null)
   return {
     items: await attachExtrinsicHashes(client, page.map(row => ({
       blockHeight: Number(row.block_height),
@@ -428,12 +486,20 @@ export async function accountLiquidity(client: ClickHouseClient, parsed: ParsedA
       extrinsicIndex: row.extrinsic_index == null ? null : Number(row.extrinsic_index),
       timestamp: iso(row.ts),
       eventName: row.event_name,
+      action: (row.action || substrateLiquidityAction(row.event_name)) as LiquidityAction | null,
       assetId: String(row.asset_id),
-      amount: row.amount || null,
-      amountA: row.amount_a || null,
+      amount: str(row.amount),
+      amountA: str(row.amount_a),
+      amountB: str(row.amount_b),
       assetB: Number(row.asset_b) > 0 ? String(row.asset_b) : null,
-      poolAccount: row.pool_account || null,
+      poolAccount: str(row.pool_account),
       assetRefs: (row.asset_refs ?? []).map(String),
+      poolAddress: str(row.pool_address),
+      tokenId: str(row.token_id),
+      tickLower: row.tick_lower == null ? null : Number(row.tick_lower),
+      tickUpper: row.tick_upper == null ? null : Number(row.tick_upper),
+      vault: str(row.vault),
+      shares: str(row.shares),
     }))),
     hasMore,
   }

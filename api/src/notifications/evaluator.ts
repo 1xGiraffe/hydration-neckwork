@@ -831,7 +831,9 @@ export function activityPath(row: ActivityRow): string {
         : row.liqAction === 'Create' ? 'create-pool'
           : row.liqAction === 'Destroy' ? 'destroy-pool'
             : row.liqAction === 'Claim' ? 'claim-rewards'
-              : row.liqAction === 'ClaimReferral' ? 'claim-referral-rewards' : 'add-liquidity'
+              : row.liqAction === 'ClaimReferral' ? 'claim-referral-rewards'
+                : row.liqAction === 'CollectFees' ? 'collect-fees'
+                  : row.liqAction === 'Rebalance' ? 'rebalance' : 'add-liquidity'
       case 'mm': return MM_SLUG[row.mmAction ?? ''] ?? 'lend'
       case 'staking': return 'staking'
       case 'bond': return row.bondAction === 'Redeem' ? 'bond-redeem' : 'bond-issue'
@@ -869,6 +871,9 @@ const ACTIVITY_LABEL: Record<ActivityRow['type'], string> = {
 }
 function activityHeadline(row: ActivityRow): string {
   if (row.type === 'liquidity' && row.liqAction === 'ClaimReferral') return 'Claim referral rewards'
+  // The concentrated-liquidity acts read as the UI labels them (LIQ_LABELS).
+  if (row.type === 'liquidity' && row.liqAction === 'CollectFees') return 'Collect fees'
+  if (row.type === 'liquidity' && row.liqAction === 'Rebalance') return 'Rebalance vault'
   if (row.type === 'liquidity' && row.liqAction) return `${row.liqAction} liquidity`
   if (row.type === 'mm' && row.mmAction) return row.mmAction
   if (row.type === 'otc' && row.otcAction) return `OTC ${row.otcAction.toLowerCase()}`

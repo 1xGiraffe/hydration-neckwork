@@ -50,7 +50,7 @@ describe('which revenue rows are the protocol’s', () => {
   })
 
   it('leaves every other stream counted in full', () => {
-    for (const stream of ['network_fee', 'hsm_revenue', 'ice_matched_fee', 'liquidation_penalty', 'pepl_liquidation_profit', 'asset_reserve']) {
+    for (const stream of ['network_fee', 'hsm_revenue', 'ice_matched_fee', 'uniswap_v3_fee', 'liquidation_penalty', 'pepl_liquidation_profit', 'asset_reserve']) {
       expect(evaluate(PROTOCOL_REVENUE_PREDICATE_SQL, { stream, dest: '' })).toBe(true)
     }
   })

@@ -45,7 +45,7 @@ function CompositionBar({ composition, colors }: { composition: PoolCompositionE
 function PoolRow({ p }: { p: PoolListEntry }) {
   const colorFor = useAssetColors(p.composition.map(c => c.asset))
   const colors = p.composition.map(c => colorFor(c.asset))
-  const to = p.kind === 'omnipool' ? paths.omnipool() : p.poolId != null ? paths.pool(p.poolId) : undefined
+  const to = p.kind === 'omnipool' ? paths.omnipool() : p.kind === 'uniswapv3' && p.address ? paths.v3Pool(p.address) : p.poolId != null ? paths.pool(p.poolId) : undefined
   // Four icons is where a row stops reading as a set and starts reading as a
   // crowd; the rest is a count, and the bar already shows the whole mixture.
   const shown = p.composition.slice(0, 4)
@@ -64,7 +64,7 @@ function PoolRow({ p }: { p: PoolListEntry }) {
           <span className="liq-name">
             <span className="liq-title">{p.name}</span>
             <span className="liq-sub">
-              <PoolBadge pool={p.kind === 'omnipool' ? 'Omnipool' : p.kind === 'stableswap' ? 'Stableswap' : 'XYK'} />
+              <PoolBadge pool={p.kind === 'omnipool' ? 'Omnipool' : p.kind === 'stableswap' ? 'Stableswap' : p.kind === 'uniswapv3' ? 'Uniswap v3' : 'XYK'} />
             </span>
           </span>
         </div>
@@ -102,7 +102,7 @@ export function Liquidity() {
           <tbody>
             {isLoading ? <TableSkeleton cols={4} rows={12} />
               : !rows.length ? <EmptyRow cols={4}>No pools</EmptyRow>
-                : rows.map(p => <PoolRow key={`${p.kind}:${p.poolId ?? 'omnipool'}`} p={p} />)}
+                : rows.map(p => <PoolRow key={`${p.kind}:${p.address ?? p.poolId ?? 'omnipool'}`} p={p} />)}
           </tbody>
         </table>
       </div>

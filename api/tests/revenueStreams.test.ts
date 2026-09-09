@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   ICE_FEE_ACCOUNT,
-  ICE_POT_ACCOUNT,
+  ICE_POT_ACCOUNT, TREASURY_H160,
   PROTOCOL_REVENUE_PREDICATE_SQL,
   REVENUE_EVENT_COLUMNS,
   REVENUE_STREAMS,
@@ -272,6 +272,44 @@ describe('ice_matched_fee', () => {
     expect(sql).toMatch(/'' AS dest/)
     expect(sql).toMatch(/'' AS account/)
     expect(sql).not.toContain('startsWith')
+  })
+})
+
+describe('uniswap_v3_fee', () => {
+  const sql = buildRevenueEventRowsSql('uniswap_v3_fee')
+
+  it('is listed once, right after ice_matched_fee, so every ordered consumer agrees', () => {
+    expect(REVENUE_STREAMS.indexOf('uniswap_v3_fee')).toBe(REVENUE_STREAMS.indexOf('ice_matched_fee') + 1)
+    expect(REVENUE_STREAMS.filter(s => s === 'uniswap_v3_fee')).toHaveLength(1)
+  })
+
+  // The Gamma vault pays its fee share as a plain ERC-20 Transfer to the Treasury's EVM
+  // address; only a vault the projection announced counts, or any contract paying the
+  // treasury would read as pool revenue.
+  it('reads the vault fee share as a Transfer from a known vault to the Treasury address', () => {
+    expect(sql).toContain('-- rev:uniswap_v3_fee')
+    expect(sql).toContain("event_name = 'Transfer'")
+    expect(sql).toContain(`lower(JSONExtractString(decoded_args_json, 'to')) = '${TREASURY_H160}'`)
+    expect(sql).toContain('IN (SELECT vault_address FROM price_data.uniswap_v3_vaults FINAL)')
+    expect(TREASURY_H160).toBe('0x6d6f646c70792f74727372790000000000000000')
+  })
+
+  // Only the factory owner can collect a pool's protocol fee, so the collect is
+  // protocol revenue whoever it names as recipient.
+  it('books a pool CollectProtocol in full, whoever received it', () => {
+    expect(sql).toContain("event_name = 'CollectProtocol'")
+    expect(sql).not.toContain("'CollectProtocol' AND counterparty")
+  })
+
+  // A token the registry cannot name must not become asset 0 (HDX) by default.
+  it('resolves the token through the registry or the precompile rule and drops strangers', () => {
+    expect(sql).toContain("FROM price_data.assets WHERE evm_address != ''")
+    expect(sql).toContain('asset_id != 4294967295')
+  })
+
+  it('is protocol revenue with no payer', () => {
+    expect(sql).toMatch(/'' AS dest/)
+    expect(sql).toMatch(/'' AS account/)
   })
 })
 

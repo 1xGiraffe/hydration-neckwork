@@ -166,6 +166,22 @@ describe('large-trade matching', () => {
     expect(evaluateLargeValue(rows, [usdtOnly], W).map(m => m.blockHeight)).toEqual([1_020])
   })
 
+  // A concentrated-liquidity swap is an ordinary trade row (type 'trade', its pool
+  // named): the value floor and the asset scope judge it like a pallet swap, and an
+  // account-activity rule's action filter takes it as a swap and its LP acts by name.
+  it('judges a concentrated-liquidity swap like any swap, and its LP acts by their action', () => {
+    const pool = '0x5c6208a3c316a801f8996750aa7b6f45fc988548'
+    const swap = activity({ blockHeight: 1_040, eventIndex: 34, extrinsicIndex: 4, poolAddress: pool, valueUsd: 5_000, assetIn: asset(222, 'HOLLAR', 18), assetOut: asset(1001, 'aDOT', 10), assetRefs: [222, 1001, 5] })
+    expect(evaluateLargeValue([swap], [rule('large-trade', { minUsd: 1_000 })], W)).toHaveLength(1)
+    expect(evaluateLargeValue([swap], [rule('large-trade', { minUsd: 1_000, assetId: 5 })], W)).toHaveLength(1)
+    expect(evaluateLargeValue([swap], [rule('large-trade', { minUsd: 10_000 })], W)).toHaveLength(0)
+    expect(evaluateAccountActivity([swap], [rule('account-activity', { address: WHALE, type: 'trade', action: 'swap' })], W)).toHaveLength(1)
+    const collect = activity({ type: 'liquidity', liqAction: 'CollectFees', poolAddress: pool, v3TokenId: '1', valueUsd: 12 })
+    expect(evaluateAccountActivity([collect], [rule('account-activity', { address: WHALE, type: 'liquidity', action: 'CollectFees' })], W)).toHaveLength(1)
+    expect(evaluateAccountActivity([collect], [rule('account-activity', { address: WHALE, type: 'liquidity', action: 'Add' })], W)).toHaveLength(0)
+    expect(evaluateAccountActivity([collect], [rule('account-activity', { address: WHALE, type: 'liquidity' })], W)).toHaveLength(1)
+  })
+
   it('counts a nested pool asset as a reference', () => {
     const row = activity({ assetRefs: [102] })
     expect(activityReferencesAsset(row, 102)).toBe(true)
@@ -470,6 +486,25 @@ describe('renderMatch', () => {
     expect(activityPath(activity({ type: 'transfer' }))).toBe('/transfer/1050-e7')
     expect(activityPath(activity({ type: 'mm', mmAction: 'Borrow' }))).toBe('/borrow/1050-e7')
     expect(activityPath(activity({ type: 'trade', dca: true, dcaScheduleId: 42 }))).toBe('/dca/42')
+  })
+
+  // Concentrated-liquidity rows: a pool swap is a trade row keyed by its Swap log
+  // (served by /swap/<block>-e<n> through getTradeDetailByEvent), and the two new
+  // liquidity actions have their own slugs in the UI (ActivityTable.activitySlug).
+  it('links concentrated-liquidity rows the way the UI does', () => {
+    const pool = '0x5c6208a3c316a801f8996750aa7b6f45fc988548'
+    expect(activityPath(activity({ poolAddress: pool, eventIndex: 34, extrinsicIndex: 4 }))).toBe('/swap/1050-e34')
+    expect(activityPath(activity({ type: 'liquidity', liqAction: 'CollectFees', poolAddress: pool, v3TokenId: '1' }))).toBe('/collect-fees/1050-e7')
+    expect(activityPath(activity({ type: 'liquidity', liqAction: 'Rebalance', poolAddress: pool, v3Vault: '0xa206d0959813f17c17c87147271c49065438648a' }))).toBe('/rebalance/1050-e7')
+    expect(activityPath(activity({ type: 'liquidity', liqAction: 'Add', poolAddress: pool }))).toBe('/add-liquidity/1050-e7')
+  })
+
+  it('headlines the concentrated-liquidity acts in product words', () => {
+    const r = rule('account-activity', { address: WHALE })
+    const headline = (row: ActivityRow) => renderNotification(renderMatch(match({ lane: 'activity', row }, 'account-activity'), r, noViewerTag)).title
+    expect(headline(activity({ type: 'liquidity', liqAction: 'CollectFees', asset: asset(1001, 'aDOT', 10), amount: '5' }))).toContain('Collect fees')
+    expect(headline(activity({ type: 'liquidity', liqAction: 'Rebalance', who: null }))).toContain('Rebalance vault')
+    expect(headline(activity({ type: 'liquidity', liqAction: 'Add' }))).toContain('Add liquidity')
   })
 
   it('renders a swap with the shared account notation and rough number scale', () => {

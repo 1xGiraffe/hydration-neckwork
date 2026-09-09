@@ -831,8 +831,10 @@ export function FailureReasonRow({ reason }: { reason: FailureReason }) {
 // The pool page a venue hop resolves to: the Omnipool has its own page, a
 // named pool id (stableswap share asset / XYK LP token) has /pool/:id, and
 // anything else (OTC, AAVE, HSM…) has no pool page.
-export function poolHref(pool: string, poolId?: number | null): string | undefined {
+export function poolHref(pool: string, poolId?: number | null, poolAddress?: string | null): string | undefined {
   if (pool === 'Omnipool') return paths.omnipool()
+  // A concentrated-liquidity pool is its contract, not a share token.
+  if (poolAddress) return paths.v3Pool(poolAddress)
   return poolId != null ? paths.pool(poolId) : undefined
 }
 export function PoolBadge({ pool, poolId, to }: { pool: string; poolId?: number | null; to?: string }) {
@@ -1321,7 +1323,10 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
     let i = 0
     for (let k = 1; k < xFrac.length; k++) if (Math.abs(xFrac[k] - frac) < Math.abs(xFrac[i] - frac)) i = k
     const ts = vDates?.[i]
-    setHover({ xPct: xFrac[i] * 100, yPct: sy(vData[i]) / h * 100, val: valueFmt(vData[i]), date: ts ? (subDaily ? tsDateTime(ts) : tsDate(ts)) : '' })
+    setHover({
+      xPct: xFrac[i] * 100, yPct: sy(vData[i]) / h * 100, val: valueFmt(vData[i]),
+      date: ts ? (subDaily ? tsDateTime(ts) : tsDate(ts)) : '',
+    })
   }
 
   return (
@@ -1858,7 +1863,7 @@ export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = 
     { v: 'intent-dca-trade', label: intentLabel('dca', 'DcaTrade') },
   ],
   xcm: [{ v: 'out', label: 'Outgoing' }, { v: 'in', label: 'Incoming' }],
-  liquidity: [{ v: 'Add', label: 'Add liquidity' }, { v: 'Remove', label: 'Remove liquidity' }, { v: 'Create', label: 'Create pool' }, { v: 'Destroy', label: 'Destroy pool' }, { v: 'Claim', label: LIQ_LABELS.Claim }, { v: 'ClaimReferral', label: LIQ_LABELS.ClaimReferral }],
+  liquidity: [{ v: 'Add', label: 'Add liquidity' }, { v: 'Remove', label: 'Remove liquidity' }, { v: 'Create', label: 'Create pool' }, { v: 'Destroy', label: 'Destroy pool' }, { v: 'Claim', label: LIQ_LABELS.Claim }, { v: 'ClaimReferral', label: LIQ_LABELS.ClaimReferral }, { v: 'CollectFees', label: LIQ_LABELS.CollectFees }, { v: 'Rebalance', label: LIQ_LABELS.Rebalance }],
   mm: [{ v: 'Supply', label: MM_LABELS.Supply }, { v: 'Withdraw', label: 'Withdraw' }, { v: 'Borrow', label: 'Borrow' }, { v: 'Repay', label: 'Repay' }, { v: 'LiquidationCall', label: MM_LABELS.LiquidationCall }, { v: 'ClaimRewards', label: MM_LABELS.ClaimRewards }],
   // Staking values ARE their labels — the server sends the action as a word, not a
   // runtime event name — so there is no mapping here to keep in step.

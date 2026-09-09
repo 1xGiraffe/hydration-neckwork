@@ -96,7 +96,7 @@ export function swapEventFilterSql(): string {
 // second divided by 12, and the bound is exclusive at the next month's first block.
 // "Synthetic" is load-bearing: 12 is a partitioning constant, decoupled from the
 // chain's real block time (~12-15s until Q3 2025, ~6s since, 2s next), and it must stay identical across all
-// five sites — see the note above account_trade_volume in
+// six sites — see the note above account_trade_volume in
 // clickhouse/schema/001_tables.sql. Do not re-pin it at a block-time change; a
 // faster chain just makes each partition span fewer real days (~15 at 6s, ~5 at 2s,
 // so proportionally more partitions go stale per real day and this job rebuilds
@@ -202,10 +202,102 @@ legacy AS (
   // (18 dec), and valuing the bond's integer as DOT booked 10,000,000 DOT —
   // $77.3M of volume for a $1,562 trade. 26 such buys inflated the whole
   // account_trade_volume leaderboard by $815.2M.
+  // ICE intents settle through the solver's pot: the pot runs the AMM routes (its
+  // Broadcast legs, swapper = pot, stay the pot's — the routes it ran, as the fee
+  // processor keeps its conversions) and the owner only pays into and receives out
+  // of it. The owner's trade is the FILL: the Intent event's amounts for a resolve,
+  // a partial or a DCA trade; for the budget-exhausting DcaCompleted, which states
+  // none, the pot's settlement legs for that (solution, owner, asset) less the
+  // sibling fills that state theirs — exact for one completion per (owner, asset)
+  // in a solution, and nothing rather than a split guess for two. Keyed on the
+  // Intent event, in the event-anchored space clear of router ids.
+  const intentFills = `
+intent_fills AS (
+  SELECT e.block_height AS block_height, e.extrinsic_index AS extrinsic_index, e.event_index AS event_index,
+         e.block_timestamp AS block_time, e.event_name AS event_name,
+         lower(o.owner) AS account, o.asset_in AS asset_in, o.asset_out AS asset_out,
+         toDecimal256(if(e.amount_in = '', '0', e.amount_in), 0) AS stated_in,
+         toDecimal256(if(e.amount_out = '', '0', e.amount_out), 0) AS stated_out
+  FROM (SELECT intent_id, block_height, assumeNotNull(extrinsic_index) AS extrinsic_index, event_index, block_timestamp, event_name, amount_in, amount_out
+        FROM price_data.intent_events FINAL
+        WHERE event_name IN (${INTENT_FILL_EVENTS}) AND extrinsic_index IS NOT NULL AND block_height >= ${ICE_MIN_BLOCK} AND ${pf}) e
+  INNER JOIN (SELECT intent_id, owner, asset_in, asset_out FROM price_data.intent_orders FINAL) o ON o.intent_id = e.intent_id
+),
+pot_legs AS (
+  SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index,
+         lower(from_account) AS src, lower(to_account) AS dst, asset_id, toDecimal256(if(amount = '', '0', amount), 0) AS amount
+  FROM price_data.transfer_activity_by_time FINAL
+  WHERE event_name = 'Currencies.Transferred' AND extrinsic_index IS NOT NULL AND block_height >= ${ICE_MIN_BLOCK} AND ${pf}
+    AND (from_account = '${ICE_POT_ACCOUNT}' OR to_account = '${ICE_POT_ACCOUNT}')
+),
+moved AS (
+  SELECT block_height, extrinsic_index, if(dst = '${ICE_POT_ACCOUNT}', src, dst) AS account, asset_id,
+         if(dst = '${ICE_POT_ACCOUNT}', 'in', 'out') AS dir, sum(amount) AS amount
+  FROM pot_legs GROUP BY block_height, extrinsic_index, account, asset_id, dir
+),
+stated AS (
+  SELECT block_height, extrinsic_index, account, asset_in AS asset_id, 'in' AS dir, sum(stated_in) AS amount
+  FROM intent_fills WHERE event_name != 'Intent.DcaCompleted' GROUP BY block_height, extrinsic_index, account, asset_id
+  UNION ALL
+  SELECT block_height, extrinsic_index, account, asset_out, 'out', sum(stated_out)
+  FROM intent_fills WHERE event_name != 'Intent.DcaCompleted' GROUP BY block_height, extrinsic_index, account, asset_out
+),
+claims AS (
+  SELECT block_height, extrinsic_index, account, asset_in AS asset_id, 'in' AS dir, count() AS n
+  FROM intent_fills WHERE event_name = 'Intent.DcaCompleted' GROUP BY block_height, extrinsic_index, account, asset_id
+  UNION ALL
+  SELECT block_height, extrinsic_index, account, asset_out, 'out', count()
+  FROM intent_fills WHERE event_name = 'Intent.DcaCompleted' GROUP BY block_height, extrinsic_index, account, asset_out
+),
+completion AS (
+  SELECT c.block_height AS block_height, c.extrinsic_index AS extrinsic_index, c.account AS account, c.asset_id AS asset_id, c.dir AS dir,
+         if(c.n = 1, greatest(m.amount - s.amount, toDecimal256(0, 0)), toDecimal256(0, 0)) AS amount
+  FROM claims c
+  LEFT JOIN moved m ON m.block_height = c.block_height AND m.extrinsic_index = c.extrinsic_index AND m.account = c.account AND m.asset_id = c.asset_id AND m.dir = c.dir
+  LEFT JOIN stated s ON s.block_height = c.block_height AND s.extrinsic_index = c.extrinsic_index AND s.account = c.account AND s.asset_id = c.asset_id AND s.dir = c.dir
+),
+intent_trades AS (
+  SELECT f.block_height AS block_height, f.event_index AS event_index, f.block_time AS block_time, f.account AS account,
+         f.asset_in AS asset_in, f.asset_out AS asset_out,
+         if(f.event_name = 'Intent.DcaCompleted', ci.amount, f.stated_in) AS amount_in,
+         if(f.event_name = 'Intent.DcaCompleted', co.amount, f.stated_out) AS amount_out
+  FROM intent_fills f
+  LEFT JOIN completion ci ON ci.block_height = f.block_height AND ci.extrinsic_index = f.extrinsic_index AND ci.account = f.account AND ci.asset_id = f.asset_in AND ci.dir = 'in'
+  LEFT JOIN completion co ON co.block_height = f.block_height AND co.extrinsic_index = f.extrinsic_index AND co.account = f.account AND co.asset_id = f.asset_out AND co.dir = 'out'
+)`
+  // Direct EVM swaps in the concentrated-liquidity (Uniswap v3) pools emit no Broadcast,
+  // so the pool's own Swap log is the trade; the trader is the log's recipient in its
+  // ETH-prefixed account form. A Router-routed hop through the pool has a `UniswapV3`
+  // Swapped3 in its extrinsic and is already in `legs` through it, so those extrinsics
+  // are left out here. Tokens resolve through the registry's contract addresses or the
+  // `0x…01 + id` asset precompile; a swap whose token neither names is dropped rather
+  // than booked as asset 0.
+  const v3Asset = (tokenExpr: string, joined: string) => {
+    const hex = `replaceRegexpOne(lower(${tokenExpr}), '^0x', '')`
+    return `if(${joined} > 0, toUInt32(${joined}), if(length(${hex}) = 40 AND substring(${hex}, 1, 32) = '00000000000000000000000000000001', toUInt32(reinterpretAsUInt32(reverse(unhex(substring(${hex}, 33, 8))))), toUInt32(4294967295)))`
+  }
+  const v3Direct = `
+v3_direct AS (
+  SELECT concat('0x45544800', substring(e.counterparty, 3, 40), '0000000000000000') AS account,
+         e.block_height AS block_height, e.event_index AS event_index, e.block_timestamp AS block_time,
+         ${v3Asset('p.token0', 't0.asset_id')} AS asset0, ${v3Asset('p.token1', 't1.asset_id')} AS asset1,
+         if(e.amount0 > 0, asset0, asset1) AS asset_in, if(e.amount0 > 0, asset1, asset0) AS asset_out,
+         toDecimal256(toString(toUInt256(if(e.amount0 > 0, e.amount0, e.amount1))), 0) AS amount_in,
+         toDecimal256(toString(toUInt256(abs(if(e.amount0 > 0, e.amount1, e.amount0)))), 0) AS amount_out
+  FROM (SELECT block_height, event_index, extrinsic_index, block_timestamp, contract_address, counterparty, amount0, amount1
+        FROM price_data.uniswap_v3_events FINAL WHERE kind = 'pool' AND event_name = 'Swap' AND ${pf}) e
+  INNER JOIN price_data.uniswap_v3_pools p ON p.pool_address = e.contract_address
+  LEFT JOIN (SELECT lower(evm_address) AS addr, any(asset_id) AS asset_id FROM price_data.assets WHERE evm_address != '' GROUP BY addr) t0 ON t0.addr = lower(p.token0)
+  LEFT JOIN (SELECT lower(evm_address) AS addr, any(asset_id) AS asset_id FROM price_data.assets WHERE evm_address != '' GROUP BY addr) t1 ON t1.addr = lower(p.token1)
+  WHERE e.counterparty != '' AND asset0 != 4294967295 AND asset1 != 4294967295
+    AND (e.block_height, ifNull(e.extrinsic_index, 4294967295)) NOT IN (
+      SELECT block_height, ifNull(extrinsic_index, 4294967295) FROM price_data.raw_events FINAL
+      WHERE event_name = 'Broadcast.Swapped3' AND JSONExtractString(args_json, 'fillerType', '__kind') = 'UniswapV3' AND ${pf})
+)`
   return `
 INSERT INTO ${targetTable}
   (account, block_height, trade_key, volume_usd, net_in_usd, net_out_usd, trade_count, computed_at)
-WITH${legacyLegs},
+WITH${legacyLegs},${intentFills},${v3Direct},
 legs AS (
   SELECT JSONExtractString(args_json,'swapper') AS account, block_height, ${bcastKey} AS trade_key,
          block_timestamp AS block_time, JSONExtractInt(leg,'asset') AS asset_id,
@@ -235,6 +327,18 @@ legs AS (
                               event_name = 'LBP.BuyExecuted', JSONExtractString(args_json,'buyPrice'),
                               JSONExtractString(args_json,'amountOut')), 0)
   FROM legacy
+  UNION ALL
+  SELECT account, block_height, ${anchor} + event_index AS trade_key, block_time, asset_in, -amount_in
+  FROM intent_trades
+  UNION ALL
+  SELECT account, block_height, ${anchor} + event_index, block_time, asset_out, amount_out
+  FROM intent_trades
+  UNION ALL
+  SELECT account, block_height, ${anchor} + event_index AS trade_key, block_time, asset_in, -amount_in
+  FROM v3_direct
+  UNION ALL
+  SELECT account, block_height, ${anchor} + event_index, block_time, asset_out, amount_out
+  FROM v3_direct
 ),
 net AS (
   SELECT account, block_height, trade_key, any(block_time) AS block_time, asset_id, sum(samt) AS net_amt

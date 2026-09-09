@@ -5,6 +5,7 @@ import { AssetRegistryTracker } from './registry/tracker.js'
 import { AtokenReserveMap } from './registry/atokenReserves.js'
 import { PoolCompositionCache } from './pool/compositionCache.js'
 import { resolvePrices } from './price/graph.js'
+import { UniswapV3PoolTracker } from './price/uniswapV3.js'
 import { config } from './config.js'
 import { validateBlockRange } from './blockRange.js'
 import { deriveOmnipoolAccount, deriveStableswapPoolAccount } from './util/account.js'
@@ -98,6 +99,7 @@ function syncRegistryPricingState(
   registry: AssetRegistryTracker,
   existingLpEquivalences: Map<number, number>,
   atokenUnderlyings: Map<string, number>,
+  uniswapV3Pools: UniswapV3PoolTracker,
 ): {
   atokenEquivalences: [number, number][]
   atokenIds: Set<number>
@@ -116,7 +118,9 @@ function syncRegistryPricingState(
     aaveTokenIds.add(displayId)
   }
 
-  updateErc20Registry(registry.getErc20Contracts(), aaveTokenIds)
+  const erc20Contracts = registry.getErc20Contracts()
+  updateErc20Registry(erc20Contracts, aaveTokenIds)
+  uniswapV3Pools.setErc20Contracts(erc20Contracts)
 
   return { atokenEquivalences, atokenIds, lpEquivalences }
 }
@@ -500,6 +504,12 @@ export async function run(options: RunOptions = {}): Promise<void> {
   })
   let historicalRegistryInitialized = false
   const compositionCache = new PoolCompositionCache()
+  // Concentrated-liquidity pools, fed from every block's EVM logs. Seeded with
+  // what is indexed below the first block this run processes: a resumed run
+  // starts after its checkpoint, a ranged or fresh one at `startBlock` itself.
+  const uniswapV3Pools = new UniswapV3PoolTracker()
+  const resumesAfterCheckpoint = options.fromBlock == null && lastProcessedBlock > 0
+  await uniswapV3Pools.loadFromClickHouse(resumesAfterCheckpoint ? startBlock : Math.max(0, startBlock - 1))
   let previousHistoricalSnapshot: HistoricalSnapshotState | null = null
 
   let lastLogBlock = startBlock
@@ -516,6 +526,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
     // Previous prices for carry-forward optimization
   let previousPrices: Map<number, string> | null = null
   let lastUnpricedKey = ''
+  let lastUniswapV3EdgeKey = ''
   let atokenEquivalences: [number, number][] = []
   let atokenIds: Set<number> = new Set()
   // Authoritative wrapper↔base relation from Aave's initialized reserves; a
@@ -644,6 +655,9 @@ export async function run(options: RunOptions = {}): Promise<void> {
 
       const hasSetStorageAffectingPools = detectPoolAffectingSetStorage(block.calls)
       const hasAssetRegistryChange = hasAssetRegistryMetadataEvent(block.events)
+      // Every block, processed or skipped: a Mint in a quiet block still moves
+      // the edge, and a pool's Swap is volume this block must book.
+      const uniswapV3Changes = uniswapV3Pools.processEvents(block.events)
       let currentAtokenEquivalences = atokenEquivalences
       let currentAtokenIds = atokenIds
       let currentLpEquivalences = lpEquivalences
@@ -682,7 +696,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
           await registry.maybeSnapshot(blockHeight, block.header, { force: true })
           await atokenReserves.refresh()
           ;({ atokenEquivalences, atokenIds, lpEquivalences } =
-            syncRegistryPricingState(registry, lpEquivalences, atokenReserves.underlyings))
+            syncRegistryPricingState(registry, lpEquivalences, atokenReserves.underlyings, uniswapV3Pools))
           historicalRegistryInitialized = true
         }
 
@@ -731,7 +745,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
           if (hasPoolAffectingTransfer && hasSwapEvents) break
         }
 
-        if (!hasPoolAffectingTransfer && !hasSetStorageAffectingPools && !compositionChanged && !hasSwapEvents && previousPrices !== null) {
+        if (!hasPoolAffectingTransfer && !hasSetStorageAffectingPools && !compositionChanged && !hasSwapEvents && !uniswapV3Changes.changed && uniswapV3Changes.swaps === 0 && previousPrices !== null) {
           shouldProcess = false
         } else {
           omnipoolAssets = historicalSnapshot.omnipoolAssets
@@ -757,7 +771,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
         if (newAssets.length > 0 || hasAssetRegistryChange) {
           await atokenReserves.refresh()
           ;({ atokenEquivalences, atokenIds, lpEquivalences } =
-            syncRegistryPricingState(registry, lpEquivalences, atokenReserves.underlyings))
+            syncRegistryPricingState(registry, lpEquivalences, atokenReserves.underlyings, uniswapV3Pools))
         }
 
         currentAtokenEquivalences = atokenEquivalences
@@ -812,7 +826,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
           if (hasPoolAffectingTransfer && hasSwapEvents) break
         }
 
-        if (!hasPoolAffectingTransfer && !hasSetStorageAffectingPools && !compositionChanged && !hasSwapEvents && previousPrices !== null) {
+        if (!hasPoolAffectingTransfer && !hasSetStorageAffectingPools && !compositionChanged && !hasSwapEvents && !uniswapV3Changes.changed && uniswapV3Changes.swaps === 0 && previousPrices !== null) {
           shouldProcess = false
         } else {
           try {
@@ -853,6 +867,16 @@ export async function run(options: RunOptions = {}): Promise<void> {
 
       blocksProcessed++
 
+      const uniswapV3Edges = uniswapV3Pools.edges()
+      // Logged when the set of pools offering an edge changes, so the venue's
+      // presence in the graph can be read off the worker's log.
+      const uniswapV3EdgeKey = uniswapV3Edges.map(edge => edge.poolAddress).sort().join(',')
+      if (uniswapV3EdgeKey !== lastUniswapV3EdgeKey) {
+        const described = uniswapV3Edges.map(edge => `${edge.poolAddress} ${edge.assetA}/${edge.assetB} x=${edge.reserveA} y=${edge.reserveB}`)
+        console.log(`[UniswapV3] Block ${blockHeight}: ${uniswapV3Edges.length} pool edges in the price graph${described.length ? `: ${described.join('; ')}` : ''}`)
+        lastUniswapV3EdgeKey = uniswapV3EdgeKey
+      }
+
       const { prices, hopCounts, unpricedConnected } = resolvePrices(
         omnipoolAssets,
         xykPools,
@@ -867,6 +891,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
         {
           minGraphPathLiquidityUsd: config.GRAPH_MIN_PATH_LIQUIDITY_USD,
           lpEquivalences: currentLpEquivalences,
+          uniswapV3Pools: uniswapV3Edges,
         },
       )
 
@@ -891,14 +916,17 @@ export async function run(options: RunOptions = {}): Promise<void> {
         return currentLpEquivalences.get(canonicalId) ?? canonicalId
       }
 
-      // Extract volume from swap events in this block
+      // Extract volume from swap events in this block (Broadcast fills plus the
+      // direct-EVM swaps on known concentrated-liquidity pools)
+      const volumeOptions = { uniswapV3Pools: uniswapV3Pools.poolIndex() }
       const volumeRows = extractVolumeFromSwaps(
         block.events,
         blockHeight,
         specVersion,
         prices,
         decimals,
-        canonicalVolumeAssetId
+        canonicalVolumeAssetId,
+        volumeOptions,
       )
       const tradeVolumeRows = extractTradeVolumeFromSwaps(
         block.events,
@@ -906,7 +934,8 @@ export async function run(options: RunOptions = {}): Promise<void> {
         specVersion,
         prices,
         decimals,
-        canonicalVolumeAssetId
+        canonicalVolumeAssetId,
+        volumeOptions,
       )
       swapEventsProcessed += block.events.filter(event => isSwapEvent(event.name, specVersion)).length
 

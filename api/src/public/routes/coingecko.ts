@@ -22,7 +22,7 @@ const zTicker = z.object({
   last_price: z.number().describe('Base units per one target unit, from the most recent fill in the window.'),
   base_volume: z.number().describe('Base-asset volume over the window, counting both trade directions.'),
   target_volume: z.number().describe('Target-asset volume over the window, counting both trade directions.'),
-  pool_id: z.string().describe('`omnipool`, or `<venue>:<pool key>` — a stableswap pool id, an XYK pool account, an aToken contract account, an OTC order id.'),
+  pool_id: z.string().describe('`omnipool`, or `<venue>:<pool key>` — a stableswap pool id, an XYK pool account, an aToken contract account, an OTC order id, a Uniswap v3 pool contract (`uniswapv3:0x…`).'),
   liquidity_in_usd: z.number().describe('Current USD depth behind the pair. 0 where the venue holds no reserves (money-market wraps, OTC) or the pool is unpriced.'),
   high: z.number(),
   low: z.number(),

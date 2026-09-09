@@ -30,6 +30,7 @@ function assetRow(metadata: AssetMetadata): AssetRow {
     origin_ecosystem: metadata.originEcosystem ?? null,
     origin_chain_id: metadata.originChainId ?? null,
     origin_asset_id: metadata.originAssetId ?? null,
+    evm_address: metadata.evmAddress ?? '',
   }
 }
 
@@ -41,6 +42,7 @@ function assetMetadataChanged(previous: AssetMetadata, current: AssetMetadata): 
     || previous.originEcosystem !== current.originEcosystem
     || previous.originChainId !== current.originChainId
     || previous.originAssetId !== current.originAssetId
+    || previous.evmAddress !== current.evmAddress
 }
 
 /**
@@ -379,6 +381,7 @@ export class AssetRegistryTracker {
         origin_ecosystem: nativeAssetMetadata.originEcosystem ?? null,
         origin_chain_id: nativeAssetMetadata.originChainId ?? null,
         origin_asset_id: nativeAssetMetadata.originAssetId ?? null,
+        evm_address: nativeAssetMetadata.evmAddress ?? '',
       })
     }
   }
@@ -649,16 +652,7 @@ export class AssetRegistryTracker {
   getAssetRows(): AssetRow[] {
     return [...this.cache.entries()]
       .sort((a, b) => a[0] - b[0])
-      .map(([, metadata]) => ({
-        asset_id: metadata.assetId,
-        symbol: metadata.symbol,
-        name: metadata.name,
-        decimals: metadata.decimals,
-        parachain_id: metadata.parachainId ?? null,
-        origin_ecosystem: metadata.originEcosystem ?? null,
-        origin_chain_id: metadata.originChainId ?? null,
-        origin_asset_id: metadata.originAssetId ?? null,
-      }))
+      .map(([, metadata]) => assetRow(metadata))
   }
 
   getAssetsMetadata(): AssetMetadata[] {

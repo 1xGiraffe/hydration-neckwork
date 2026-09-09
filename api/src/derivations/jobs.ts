@@ -8,6 +8,7 @@
 //   - omnipool_position_owner_intervals  bounded full recompute, atomic staging swap
 //   - xyk_farm_principal_intervals       bounded full recompute, atomic staging swap
 //   - xyk_lp_total_shares_history        bounded full recompute, atomic staging swap
+//   - uniswap_v3_legs                    incremental by block, replay-safe re-insert (no tracking table)
 //   - revenue_events                     partition-diff incremental (MV-fed watermark index)
 //   - account_revenue                    partition-diff incremental, keyed on revenue_events
 //
@@ -149,7 +150,7 @@ async function atomicFullReplace(
 // (clickhouse/schema), an MV over the same swap-row filter. Asking raw_events
 // directly meant a full-table aggregate every cycle: the derived partition key
 // is toYYYYMM(toDateTime(block_height * 12)) — a synthetic block-space clock, not
-// the chain's block time, identical at all five sites and not to be re-pinned at a
+// the chain's block time, identical at all six sites and not to be re-pinned at a
 // block-time change (see clickhouse/schema/001_tables.sql above
 // account_trade_volume) — which ClickHouse cannot invert into a primary-key range, and raw_events is partitioned on real
 // block_timestamp, so neither form of pruning applied. max() is idempotent under
@@ -409,6 +410,98 @@ export async function runPoolSwapHourly(client: ClickHouseClient): Promise<Deriv
   }
   const counted = await client.query({
     query: `SELECT count() AS n FROM ${live} WHERE toYYYYMM(hour) IN (${stale.join(',')})`,
+    format: 'JSONEachRow',
+  })
+  return { model, rows: Number((await counted.json<{ n: string }>())[0]?.n ?? 0) }
+}
+
+// ───────────────────────── uniswap_v3_legs ─────────────────────────
+// Every swap in a concentrated-liquidity pool reaches pool_swap_legs (the public/data
+// API's fill source) through this job, from the pool's own Swap log. Not the Broadcast
+// MV, for two reasons: the runtime's `UniswapV3` Broadcast names the SwapRouter as
+// filler and never the pool (pool_swap_legs_mv excludes the kind), and a direct EVM
+// swap emits no Broadcast at all. A job rather than an MV because the leg needs the
+// pool's tokens (a JOIN on uniswap_v3_pools, filled by a sibling MV of the same raw
+// insert — order between MVs is not defined). Legs: in, out, and the LP fee
+// (amount_in × fee / 1e6, kept by the pool). The swapper is the log's recipient in
+// its ETH-prefixed account form. op_key: a Router-routed hop takes the route's Router
+// id from the `UniswapV3` Swapped3 of the same extrinsic (matched on the input amount)
+// so the route nets across its hops like every other venue's; a direct swap takes
+// `evm:<block>:<event>` — unique per fill, so consumers that fold fills into trades by
+// op_key see each as its own trade, and the prefix marks the source. Re-running
+// re-inserts an overlap window and the leg identity's ReplacingMergeTree collapses
+// it — no tracking table.
+export const UNISWAP_V3_LEGS_OVERLAP_BLOCKS = 5_000
+
+export function uniswapV3LegsInsertSql(sinceBlock: number): string {
+  const since = Math.max(0, Math.trunc(sinceBlock))
+  const precompile = (expr: string) => {
+    const hex = `replaceRegexpOne(lower(${expr}), '^0x', '')`
+    return `if(length(${hex}) = 40 AND substring(${hex}, 1, 32) = '00000000000000000000000000000001', toUInt32(reinterpretAsUInt32(reverse(unhex(substring(${hex}, 33, 8))))), toUInt32(4294967295))`
+  }
+  return `INSERT INTO price_data.pool_swap_legs (venue, pool_key, block_height, event_index, leg_index, leg_kind, asset_id, amount, fee_dest, fee_recipient, swapper, op_key, extrinsic_index, block_timestamp, ingested_at)
+WITH token_assets AS (
+  SELECT lower(evm_address) AS addr, any(asset_id) AS asset_id
+  FROM price_data.assets WHERE evm_address != '' GROUP BY addr
+),
+routed AS (
+  -- The Router routes that hopped through a v3 pool, keyed by extrinsic and input amount:
+  -- the runtime emits one UniswapV3 Swapped3 per hop with the route's operationStack.
+  SELECT block_height, ifNull(extrinsic_index, 4294967295) AS ext,
+         JSONExtractString(JSONExtractArrayRaw(args_json, 'inputs')[1], 'amount') AS amount_in,
+         toUInt64OrZero(extractGroups(args_json, '"__kind":"Router","value":(\\d+)')[1]) AS router_id
+  FROM price_data.raw_events
+  WHERE event_name = 'Broadcast.Swapped3' AND block_height > ${since}
+    AND JSONExtractString(args_json, 'fillerType', '__kind') = 'UniswapV3'
+),
+swaps AS (
+  SELECT e.block_height AS block_height, e.event_index AS event_index, e.extrinsic_index AS extrinsic_index, e.block_timestamp AS block_timestamp,
+         e.contract_address AS pool, e.counterparty AS recipient, e.amount0 AS amount0, e.amount1 AS amount1,
+         p.token0 AS token0, p.token1 AS token1, p.fee AS fee,
+         if(t0.asset_id > 0, toUInt32(t0.asset_id), ${precompile('p.token0')}) AS asset0,
+         if(t1.asset_id > 0, toUInt32(t1.asset_id), ${precompile('p.token1')}) AS asset1
+  FROM (
+    SELECT block_height, event_index, extrinsic_index, block_timestamp, contract_address, counterparty, amount0, amount1
+    FROM price_data.uniswap_v3_events FINAL
+    WHERE kind = 'pool' AND event_name = 'Swap' AND block_height > ${since}
+  ) e
+  INNER JOIN price_data.uniswap_v3_pools p ON p.pool_address = e.contract_address
+  LEFT JOIN token_assets t0 ON t0.addr = lower(p.token0)
+  LEFT JOIN token_assets t1 ON t1.addr = lower(p.token1)
+  WHERE asset0 != 4294967295 AND asset1 != 4294967295
+),
+sided AS (
+  SELECT *,
+         if(amount0 > 0, asset0, asset1) AS asset_in, if(amount0 > 0, asset1, asset0) AS asset_out,
+         toUInt256(if(amount0 > 0, amount0, amount1)) AS amount_in,
+         toUInt256(abs(if(amount0 > 0, amount1, amount0))) AS amount_out,
+         concat('0x45544800', substring(pool, 3, 40), '0000000000000000') AS pool_account,
+         (SELECT max(router_id) FROM routed r WHERE r.block_height = swaps.block_height AND r.ext = ifNull(swaps.extrinsic_index, 4294967295) AND r.amount_in = toString(toUInt256(if(amount0 > 0, amount0, amount1)))) AS router_id,
+         [tuple(toUInt8(1), asset_in, amount_in, '', ''),
+          tuple(toUInt8(2), asset_out, amount_out, '', ''),
+          tuple(toUInt8(3), asset_in, intDiv(amount_in * toUInt256(fee), toUInt256(1000000)), 'account', pool_account)] AS legs
+  FROM swaps
+)
+SELECT 'uniswapv3' AS venue, pool AS pool_key, block_height, event_index, toUInt16(leg_i - 1) AS leg_index,
+       CAST(legs[leg_i].1 AS Enum8('in' = 1, 'out' = 2, 'fee' = 3)) AS leg_kind,
+       legs[leg_i].2 AS asset_id, toString(legs[leg_i].3) AS amount, legs[leg_i].4 AS fee_dest, legs[leg_i].5 AS fee_recipient,
+       if(recipient != '', concat('0x45544800', substring(recipient, 3, 40), '0000000000000000'), '') AS swapper,
+       if(router_id > 0, toString(router_id), concat('evm:', toString(block_height), ':', toString(event_index))) AS op_key, extrinsic_index, block_timestamp, now() AS ingested_at
+FROM sided
+ARRAY JOIN arrayEnumerate(legs) AS leg_i
+SETTINGS max_memory_usage = 2000000000, max_threads = 4`
+}
+
+export async function runUniswapV3Legs(client: ClickHouseClient): Promise<DerivationResult> {
+  const model = 'uniswap_v3_legs'
+  const head = await client.query({
+    query: `SELECT max(block_height) AS b FROM price_data.pool_swap_legs WHERE venue = 'uniswapv3'`,
+    format: 'JSONEachRow',
+  })
+  const since = Math.max(0, Number((await head.json<{ b: number | string }>())[0]?.b ?? 0) - UNISWAP_V3_LEGS_OVERLAP_BLOCKS)
+  await client.command({ query: uniswapV3LegsInsertSql(since) })
+  const counted = await client.query({
+    query: `SELECT count() AS n FROM price_data.pool_swap_legs WHERE venue = 'uniswapv3' AND block_height > ${since}`,
     format: 'JSONEachRow',
   })
   return { model, rows: Number((await counted.json<{ n: string }>())[0]?.n ?? 0) }

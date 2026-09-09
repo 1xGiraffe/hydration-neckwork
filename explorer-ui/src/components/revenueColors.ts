@@ -21,6 +21,10 @@ export const REVENUE_STREAM_COLOR: Record<RevenueStream, string> = {
   hollar_borrow: 'var(--hollar)',
   hsm_revenue: 'var(--lavender)',
   ice_matched_fee: 'var(--cat-intent)',
+  // The protocol's take from the concentrated-liquidity pools (a Gamma vault's fee
+  // share to the Treasury; a pool's protocol fee once referendum 403 enables it):
+  // the liquidity family's pool-lifecycle shade, unused by any other stream.
+  uniswap_v3_fee: 'var(--cat-liquidity-create)',
   network_fee: 'var(--accent)',
 }
 
@@ -35,6 +39,7 @@ export const REVENUE_STREAM_LABEL: Record<RevenueStream, string> = {
   hsm_revenue: 'HSM revenue',
   // The 200 ppm protocol fee on intent-to-intent matched volume, swept per solution.
   ice_matched_fee: 'ICE matched fee',
+  uniswap_v3_fee: 'Uniswap v3 pool fees',
   network_fee: 'Network fees',
 }
 
@@ -45,7 +50,7 @@ export const REVENUE_STREAM_LABEL: Record<RevenueStream, string> = {
  */
 export const REVENUE_STREAMS_ORDERED: RevenueStream[] = [
   'network_fee', 'hollar_borrow', 'omnipool_asset_fee', 'pepl_liquidation_profit',
-  'omnipool_protocol_fee', 'asset_reserve', 'hsm_revenue', 'ice_matched_fee', 'liquidation_penalty',
+  'omnipool_protocol_fee', 'asset_reserve', 'hsm_revenue', 'ice_matched_fee', 'uniswap_v3_fee', 'liquidation_penalty',
 ]
 
 // The staker-distribution stack wears the /hdx lock palette (lockColors.ts) —

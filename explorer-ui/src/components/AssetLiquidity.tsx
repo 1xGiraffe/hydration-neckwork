@@ -14,7 +14,7 @@ import { useAssetColors } from '../utils/iconColor'
 // come from /explorer/asset/:id/liquidity — the same loaders the pool pages
 // read, so a card and the page it links to always agree.
 
-const KIND_LABEL: Record<AssetLiquiditySource['kind'], string> = { omnipool: 'Omnipool', stableswap: 'Stableswap', xyk: 'XYK' }
+const KIND_LABEL: Record<AssetLiquiditySource['kind'], string> = { omnipool: 'Omnipool', stableswap: 'Stableswap', xyk: 'XYK', uniswapv3: 'Uniswap v3' }
 
 // Fixed ordinal palette for the history's source bands (identity per series
 // position — the API orders by peak size and folds the tail into Other, which
@@ -22,8 +22,9 @@ const KIND_LABEL: Record<AssetLiquiditySource['kind'], string> = { omnipool: 'Om
 const SERIES_COLORS = ['var(--sky-deep)', 'var(--lavender-deep)', 'var(--green)', 'var(--amber)', 'var(--sky)', 'var(--lavender)']
 const OTHER_COLOR = 'var(--text-low)'
 
-function poolPath(s: { kind: AssetLiquiditySource['kind']; poolId: number | null }): string | null {
+function poolPath(s: { kind: AssetLiquiditySource['kind']; poolId: number | null; address?: string }): string | null {
   if (s.kind === 'omnipool') return paths.omnipool()
+  if (s.kind === 'uniswapv3') return s.address ? paths.v3Pool(s.address) : null
   return s.poolId != null ? paths.pool(s.poolId) : null
 }
 

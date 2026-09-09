@@ -549,6 +549,19 @@ export function useWormholeBridge() {
 export function useAssetLiquidity(assetId: number, enabled: boolean) {
   return useQuery({ queryKey: ['asset-liquidity', assetId], queryFn: ({ signal }) => api.assetLiquidity(assetId, signal), staleTime: 120_000, enabled })
 }
+export function useV3Pool(address: string) {
+  return useQuery({ queryKey: ['v3-pool', address], queryFn: ({ signal }) => api.v3Pool(address, signal), staleTime: 30_000 })
+}
+export function useV3PoolHistory(address: string) {
+  return useQuery({ queryKey: ['v3-pool-history', address], queryFn: ({ signal }) => api.v3PoolHistory(address, signal), staleTime: 60_000 })
+}
+export function useV3PoolLiquidity(address: string) {
+  return useQuery({ queryKey: ['v3-pool-liquidity', address], queryFn: ({ signal }) => api.v3PoolLiquidity(address, signal), staleTime: 30_000 })
+}
+export function useV3PoolActivity(address: string, limit = 25) {
+  const ri = useInterval()
+  return useQuery({ queryKey: ['v3-pool-activity', address, limit], queryFn: ({ signal }) => api.v3PoolActivity(address, limit, signal), staleTime: BLOCK_STALE_MS, refetchInterval: ri })
+}
 export function usePoolDetail(poolId: number) {
   return useQuery({ queryKey: ['pool', poolId], queryFn: ({ signal }) => api.poolDetail(poolId, signal), staleTime: 120_000 })
 }

@@ -3,11 +3,12 @@ import { useTrade } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect } from '../router'
-import { Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, MomentLink, SkeletonRows, AwaitingBlockCard } from '../components/ui'
+import { Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, MomentLink, PoolBadge, poolHref, SkeletonRows, AwaitingBlockCard } from '../components/ui'
 import { blockOf } from '../utils/activityIds'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import type { TradeHop } from '../types'
 import { RevenueRow } from '../components/RevenueRow'
+import { intentLabel } from '../components/activityColors'
 
 // Route flow: in-asset →(pool)→ … →(pool)→ out-asset. Amount labels come from
 // the hop events; eventless Aave 1:1 wraps infer values from adjacent hops.
@@ -19,7 +20,10 @@ function RouteFlow({ hops }: { hops: TradeHop[] }) {
       {hops.map((h, i) => (
         <span className="trade-hop" key={i}>
           <span className="hop-arrow">
-            <span className="hop-pool">{h.pool}{h.poolId != null ? ` #${h.poolId}` : ''}</span>
+            {/* A concentrated-liquidity hop names its pool contract, so the venue links to the pool page. */}
+            {h.poolAddress
+              ? <Link to={paths.v3Pool(h.poolAddress)} className="hop-pool">{h.pool}</Link>
+              : <span className="hop-pool">{h.pool}{h.poolId != null ? ` #${h.poolId}` : ''}</span>}
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="2" y1="12" x2="20" y2="12" /><polyline points="14 6 20 12 14 18" /></svg>
           </span>
           <AssetChip asset={h.assetOut} />
@@ -99,7 +103,7 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Activity', to: '/activity?tab=trade' }, { label: id }]} />
-        <div className="page-title">{label} <span className="num">{id}</span>{data && <span className="sub">{data.direction.toLowerCase()} via {data.venue}</span>}</div>
+        <div className="page-title">{label} <span className="num">{id}</span>{data && <span className="sub">{data.direction.toLowerCase()} via {data.poolAddress ? <Link to={paths.v3Pool(data.poolAddress)} className="hash">{data.venue}</Link> : data.venue}</span>}</div>
       </div>
 
       {awaiting ? <AwaitingBlockCard height={blockOf(id)} />
@@ -173,7 +177,7 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
                       <tbody>
                         {route.map((h, i) => (
                           <tr key={i}>
-                            <td data-label="Pool"><span className="badge" style={{ background: 'color-mix(in srgb, var(--cat-liquidity) 15%, transparent)', color: 'var(--cat-liquidity)' }}>{h.pool}{h.poolId != null ? ` #${h.poolId}` : ''}</span></td>
+                            <td data-label="Pool"><PoolBadge pool={h.pool} poolId={h.poolId} to={poolHref(h.pool, h.poolId, h.poolAddress)} /></td>
                             <td data-label="In"><RouteAmount asset={h.assetIn} amount={h.displayAmountIn} /></td>
                             <td data-label="Out" className="r"><RouteAmount asset={h.assetOut} amount={h.displayAmountOut} /></td>
                             <td data-label="Pool fee" className="r">{h.fee ? <AssetAmount asset={h.fee.asset} amount={h.fee.amount} /> : <span className="muted mono">—</span>}</td>

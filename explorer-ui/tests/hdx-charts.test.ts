@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { stackHeights, stackedColumnMax, niceAxisMax, fmtHdxTick, readableBarMax, stackSeries, lineRuns, axisTick, seriesGrainSec, tipDate } from '../src/components/HdxCharts'
+import { stackHeights, stackedColumnMax, niceAxisMax, fmtHdxTick, readableBarMax, stackSeries, lineRuns, axisTick, seriesGrainSec, tipDate, zoneSpan } from '../src/components/HdxCharts'
 
 describe('stackedColumnMax — high unlock clusters do not flatten the chart', () => {
   it('uses the largest value when the distribution has no separated high tail', () => {
@@ -269,5 +269,27 @@ describe('seriesGrainSec / tipDate — a label no finer than the data', () => {
     expect(tipDate('2026-08-14 00:00:00', 86_400)).toBe('2026-08-14')
     expect(tipDate('2026-08-14 07:00:00', 3_600)).toBe('2026-08-14 07:00')
     expect(tipDate('week 3', 86_400)).toBe('week 3')
+  })
+})
+
+describe('zoneSpan', () => {
+  // A vault's managed band is drawn behind the lines, never measured — so it clips
+  // to the plot instead of dragging the y-domain across its whole width.
+  it('places a zone inside the domain as fractions from the top', () => {
+    const z = zoneSpan({ from: 1.1, to: 1.2 }, 1.0, 1.3)!
+    expect(z.top).toBeCloseTo(1 / 3, 12)
+    expect(z.bottom).toBeCloseTo(2 / 3, 12)
+    expect(z).toMatchObject({ covers: false, loInside: true, hiInside: true })
+  })
+  it('clips a zone that reaches past an edge and says which edge is still visible', () => {
+    const wide = zoneSpan({ from: 0.5, to: 2.0 }, 1.0, 1.3)
+    expect(wide).toMatchObject({ top: 0, bottom: 1, covers: true, loInside: false, hiInside: false })
+    const below = zoneSpan({ from: 0.5, to: 1.1 }, 1.0, 1.3)
+    expect(below).toMatchObject({ bottom: 1, loInside: false, hiInside: true })
+  })
+  it('drops a zone the window cannot see, and a degenerate domain', () => {
+    expect(zoneSpan({ from: 2.0, to: 3.0 }, 1.0, 1.3)).toBeNull()
+    expect(zoneSpan({ from: 0.1, to: 0.2 }, 1.0, 1.3)).toBeNull()
+    expect(zoneSpan({ from: 1.1, to: 1.2 }, 1.2, 1.2)).toBeNull()
   })
 })

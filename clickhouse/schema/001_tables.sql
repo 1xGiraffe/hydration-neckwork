@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS price_data.account_swap_activity_queue (`queued_at` D
 CREATE TABLE IF NOT EXISTS price_data.account_swap_activity_queue_seed (`id` UInt8, `seeded_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(seeded_at) ORDER BY id SETTINGS index_granularity = 64;
 CREATE TABLE IF NOT EXISTS price_data.account_swap_activity_queue_state (`id` UInt8, `queued_at` DateTime64(3), `block_height` UInt32, `event_index` UInt32, `ingested_at` DateTime, `updated_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(updated_at) ORDER BY id SETTINGS index_granularity = 64;
 CREATE TABLE IF NOT EXISTS price_data.account_tags (`label_id` String, `label_name` String, `color` String DEFAULT '', `note` String DEFAULT '', `icon` String DEFAULT '', `account_id` String, `deleted` UInt8 DEFAULT 0, `created_at` DateTime DEFAULT now(), `updated_at` DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (label_id, account_id) SETTINGS index_granularity = 8192;
--- `toDateTime(block_height * 12)` — the synthetic block clock, five sites.
+-- `toDateTime(block_height * 12)` — the synthetic block clock, six sites.
 -- ────────────────────────────────────────────────────────────────────────────
 -- The 12 here is NOT the chain's block time — the chain ran at ~12-15s until
 -- Q3 2025, ~6s since, and is migrating to 2s; the constant matched the early
@@ -45,12 +45,14 @@ CREATE TABLE IF NOT EXISTS price_data.account_tags (`label_id` String, `label_na
 --   * A "month" partition is 216,000 blocks of block-space, which is ~15 real
 --     days at 6s and ~5 at 2s. The partitions get smaller in wall-clock terms as
 --     the chain speeds up; they do not get wrong.
---   * The five sites must carry the SAME constant or partitions stop lining up
+--   * The six sites must carry the SAME constant or partitions stop lining up
 --     and REPLACE PARTITION publishes into the wrong bucket:
 --       001_tables.sql: account_trade_volume, prices, trade_volume_by_account,
 --                       account_trade_volume_staging (a staging twin's PARTITION BY
 --                       must match its live table byte for byte)
 --       003_materialized_views.sql: swap_source_partition_watermarks_mv
+--       006_public.sql: swap_source_partition_watermarks_v3_mv (the same index,
+--                       fed from raw_evm_logs Swap logs)
 --       api/src/services/accountTradeVolume.ts: MS_PER_BLOCK
 --       api/src/derivations/jobs.ts: the partition SQL and its intDiv(..., 12) inverse
 --   * DO NOT "fix" this at a block-time change. Re-pinning it to a new block time
@@ -69,7 +71,7 @@ CREATE TABLE IF NOT EXISTS price_data.account_trade_volume (`account` String, `b
 CREATE TABLE IF NOT EXISTS price_data.account_transfer_activity (`account` String, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `call_address` Nullable(String), `from_account` String, `to_account` String, `amount` String, `asset_id` UInt32) ENGINE = ReplacingMergeTree PARTITION BY toYYYYMM(block_timestamp) ORDER BY (account, block_height, event_index) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.activity_histogram_events (`day` Date, `block_height` UInt32, `event_index` UInt32, `activity_index` UInt32, `event_name` LowCardinality(String), `asset_refs` Array(UInt32), `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(day) ORDER BY (block_height, event_index) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.asset_swap_activity (`asset_id` UInt32, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `who` String, `asset_in` UInt32, `asset_out` UInt32, `amount_in` String, `amount_out` String) ENGINE = ReplacingMergeTree PARTITION BY toYYYYMM(block_timestamp) ORDER BY (asset_id, block_height, event_index) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS price_data.assets (`asset_id` UInt32, `symbol` String, `name` String, `decimals` UInt8, `parachain_id` Nullable(UInt32), `origin_ecosystem` Nullable(String), `origin_chain_id` Nullable(String), `origin_asset_id` Nullable(String)) ENGINE = ReplacingMergeTree ORDER BY asset_id SETTINGS index_granularity = 8192;
+CREATE TABLE IF NOT EXISTS price_data.assets (`asset_id` UInt32, `symbol` String, `name` String, `decimals` UInt8, `parachain_id` Nullable(UInt32), `origin_ecosystem` Nullable(String), `origin_chain_id` Nullable(String), `origin_asset_id` Nullable(String), `evm_address` String DEFAULT '') ENGINE = ReplacingMergeTree ORDER BY asset_id SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.atoken_reserve_map (`asset_address` String, `atoken` String, `vdebt` String, `pool_proxy` String, `market_key` LowCardinality(String), `updated_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (asset_address, atoken) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.atoken_scaled_anchor (`contract_address` String, `holder` String, `scaled_balance` Int256, `anchor_block` UInt32, `updated_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (contract_address, holder) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.atoken_scaled_deltas (`contract_address` String, `holder` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `event_name` LowCardinality(String), `leg_index` UInt8, `scaled_delta` Int256, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (holder, contract_address, block_height, event_index, leg_index) SETTINGS index_granularity = 4096;

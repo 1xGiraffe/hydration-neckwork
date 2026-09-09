@@ -3,7 +3,8 @@ import type { ClickHouseSettings } from '@clickhouse/client'
 import { createClickHouseClient, type ClickHouseClient } from '../db/client.js'
 import type { PriceRow, TradeVolumeRow } from '../db/schema.js'
 import { rebuildOHLCForTimeRange } from '../ohlc/repair.js'
-import { ALL_SWAP_EVENT_NAMES, BROADCAST_SWAP_EVENT_NAMES, LEGACY_SWAP_EVENT_NAMES, decodeRawTrade, type DecodedRawTrade, type RawTradeEventRow, type TradeAssetAmount } from './tradeEventDecoder.js'
+import { ALL_SWAP_EVENT_NAMES, BROADCAST_SWAP_EVENT_NAMES, LEGACY_SWAP_EVENT_NAMES, decodeRawTrade, decodeRawUniswapV3Swap, type DecodedRawTrade, type RawTradeEventRow, type TradeAssetAmount } from './tradeEventDecoder.js'
+import { EVM_LOG_EVENT_NAME, resolveEvmTokenAssetId, routedUniswapV3Extrinsics, type UniswapV3PoolIndex, type UniswapV3PoolTokens } from '../price/uniswapV3.js'
 import { aggregateTradeVolumeRows, decimalToScaledBigInt, formatDecimal128, sumBigIntStrings, sumDecimal128Strings, sumVolumeFields } from '../blocks/volumeMath.js'
 import { foldOmnipoolHubHops } from '../blocks/hubHops.js'
 export { decimalToScaledBigInt, formatDecimal128 } from '../blocks/volumeMath.js'
@@ -281,19 +282,33 @@ export function decodeTrade(row: RawEventRow): DecodedTrade | null {
  * block's events (src/blocks/hubHops.ts), so a repaired history books the hub
  * asset exactly as new blocks do.
  */
-export function decodeBlockTrades(rows: readonly RawEventRow[]): Array<{ blockHeight: number; trade: DecodedTrade }> {
+export function decodeBlockTrades(
+  rows: readonly RawEventRow[],
+  uniswapV3Pools: UniswapV3PoolIndex = new Map(),
+): Array<{ blockHeight: number; trade: DecodedTrade }> {
   const out: Array<{ blockHeight: number; trade: DecodedTrade }> = []
   let block: RawEventRow['block_height'] | null = null
-  let trades: DecodedTrade[] = []
+  // A pool's Swap log (EVM.Log) counts only when no Broadcast fill of its
+  // extrinsic already booked the hop — the same rule as the live extractor.
+  let slots: Array<{ trade: DecodedTrade; extrinsicIndex: number | null | undefined; fromPoolLog: boolean }> = []
   const flush = () => {
     if (block == null) return
+    const routed = routedUniswapV3Extrinsics(slots.filter(slot => !slot.fromPoolLog).map(slot => ({ filler: slot.trade.filler, extrinsicIndex: slot.extrinsicIndex })))
+    const trades = slots
+      .filter(slot => !slot.fromPoolLog || slot.extrinsicIndex == null || !routed.has(slot.extrinsicIndex))
+      .map(slot => slot.trade)
     for (const trade of foldOmnipoolHubHops(trades, t => t.account)) out.push({ blockHeight: block, trade })
-    trades = []
+    slots = []
   }
   for (const row of rows) {
     if (row.block_height !== block) { flush(); block = row.block_height }
+    if (row.event_name === EVM_LOG_EVENT_NAME) {
+      const swap = decodeRawUniswapV3Swap(row, uniswapV3Pools)
+      if (swap) slots.push({ trade: swap, extrinsicIndex: row.extrinsic_index, fromPoolLog: true })
+      continue
+    }
     const trade = decodeTrade(row)
-    if (trade && (trade.inputs.length > 0 || trade.outputs.length > 0)) trades.push(trade)
+    if (trade && (trade.inputs.length > 0 || trade.outputs.length > 0)) slots.push({ trade, extrinsicIndex: row.extrinsic_index, fromPoolLog: false })
   }
   flush()
   return out
@@ -691,16 +706,28 @@ export async function resolveRange(client: ClickHouseClient, args: Args): Promis
   return { from: range.from, to: Math.min(range.to, safeTip), safeTip }
 }
 
-async function queryRawEvents(client: ClickHouseClient, from: number, to: number, unifiedSwapFromBlock: number): Promise<RawEventRow[]> {
+async function queryRawEvents(
+  client: ClickHouseClient,
+  from: number,
+  to: number,
+  unifiedSwapFromBlock: number,
+  uniswapV3PoolAddresses: readonly string[] = [],
+): Promise<RawEventRow[]> {
+  // Pool Swap logs are EVM.Log rows whose log address is a known pool; the JSON
+  // read runs only over the chunk's EVM.Log rows, which the name filter isolates.
+  const poolLogArm = uniswapV3PoolAddresses.length > 0
+    ? `OR (event_name = {evm_log:String} AND lower(JSONExtractString(args_json, 'log', 'address')) IN ({pools:Array(String)}))`
+    : ''
   const result = await client.query({
     query: `
-      SELECT block_height, event_name, args_json
+      SELECT block_height, event_name, args_json, extrinsic_index
       FROM price_data.raw_events FINAL
       WHERE block_height BETWEEN {from:UInt32} AND {to:UInt32}
         AND (
           (block_height < {unified_from:UInt32} AND event_name IN ({legacy_names:Array(String)}))
           OR
           (block_height >= {unified_from:UInt32} AND event_name IN ({broadcast_names:Array(String)}))
+          ${poolLogArm}
         )
       ORDER BY block_height, event_index
     `,
@@ -710,11 +737,47 @@ async function queryRawEvents(client: ClickHouseClient, from: number, to: number
       unified_from: unifiedSwapFromBlock,
       legacy_names: LEGACY_SWAP_EVENT_NAMES,
       broadcast_names: BROADCAST_SWAP_EVENT_NAMES,
+      evm_log: EVM_LOG_EVENT_NAME,
+      pools: [...uniswapV3PoolAddresses],
     },
     format: 'JSONEachRow',
     clickhouse_settings: BOUNDED_QUERY_SETTINGS,
   })
   return await result.json<RawEventRow>()
+}
+
+/**
+ * Known concentrated-liquidity pools with both tokens resolved to asset ids —
+ * the pools table plus the registry's persisted ERC-20 contracts
+ * (`assets.evm_address`) and the asset precompile rule. A pool whose token the
+ * registry does not name is left out, as live leaves it out.
+ */
+export async function loadUniswapV3PoolIndex(client: ClickHouseClient): Promise<Map<string, UniswapV3PoolTokens>> {
+  const [poolResult, assetResult] = await Promise.all([
+    client.query({
+      query: `SELECT pool_address, token0, token1 FROM price_data.uniswap_v3_pools FINAL`,
+      format: 'JSONEachRow',
+    }),
+    client.query({
+      query: `SELECT asset_id, evm_address FROM price_data.assets FINAL WHERE evm_address != ''`,
+      format: 'JSONEachRow',
+    }),
+  ])
+  const assetsByContract = new Map<string, number>()
+  for (const row of await assetResult.json<{ asset_id: number; evm_address: string }>()) {
+    assetsByContract.set(row.evm_address.toLowerCase(), Number(row.asset_id))
+  }
+  const index = new Map<string, UniswapV3PoolTokens>()
+  for (const row of await poolResult.json<{ pool_address: string; token0: string; token1: string }>()) {
+    const token0AssetId = resolveEvmTokenAssetId(row.token0, assetsByContract)
+    const token1AssetId = resolveEvmTokenAssetId(row.token1, assetsByContract)
+    if (token0AssetId == null || token1AssetId == null || token0AssetId === token1AssetId) {
+      console.warn(`[volume-repair] Uniswap v3 pool ${row.pool_address} has an unresolved token (${row.token0}/${row.token1}); its swaps are not repaired`)
+      continue
+    }
+    index.set(row.pool_address.toLowerCase(), { token0AssetId, token1AssetId })
+  }
+  return index
 }
 
 async function querySnapshots(
@@ -879,10 +942,11 @@ async function repairChunk(
     targets: Set<RepairTarget>
     targetAssetIds?: Set<number>
     apply: boolean
+    uniswapV3Pools: UniswapV3PoolIndex
   }
 ): Promise<RepairChunkResult> {
-  const events = await queryRawEvents(client, options.from, options.to, options.unifiedSwapFromBlock)
-  const trades = decodeBlockTrades(events)
+  const events = await queryRawEvents(client, options.from, options.to, options.unifiedSwapFromBlock, [...options.uniswapV3Pools.keys()])
+  const trades = decodeBlockTrades(events, options.uniswapV3Pools)
   const eventBlocks = [...new Set(trades.map(row => row.blockHeight))]
   const snapshots = await querySnapshots(client, eventBlocks)
   const missingSnapshots = eventBlocks.filter(blockHeight => !snapshots.has(blockHeight))
@@ -983,7 +1047,8 @@ async function main(): Promise<void> {
     const targets = [...args.targets].join(', ')
     const targetAssetIds = sortedAssetIds(args.assetIds)
     const unifiedSwapFromBlock = await getUnifiedSwapFromBlock(client)
-    console.log(`[volume-repair] ${args.apply ? 'APPLY' : 'DRY RUN'} ${from}..${to} (${targets}), chunk=${args.chunkSize}, safe_tip=${safeTip}`)
+    const uniswapV3Pools = await loadUniswapV3PoolIndex(client)
+    console.log(`[volume-repair] ${args.apply ? 'APPLY' : 'DRY RUN'} ${from}..${to} (${targets}), chunk=${args.chunkSize}, safe_tip=${safeTip}, uniswap_v3_pools=${uniswapV3Pools.size}`)
     if (targetAssetIds) console.log(`[volume-repair] asset filter: ${targetAssetIds.join(', ')}`)
     if (!args.apply) console.log('[volume-repair] Pass --apply to mutate ClickHouse.')
 
@@ -1002,6 +1067,7 @@ async function main(): Promise<void> {
           targets: args.targets,
           targetAssetIds: args.assetIds,
           apply: args.apply,
+          uniswapV3Pools,
         })
         totalEvents += result.events
         totalTradeRows += result.tradeRows

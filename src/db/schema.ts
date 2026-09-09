@@ -38,6 +38,9 @@ export interface AssetRow {
   origin_ecosystem?: string | null
   origin_chain_id?: string | null
   origin_asset_id?: string | null
+  // Deployed ERC-20 contract of an `Erc20` registry asset (lowercase 0x + 40 hex),
+  // '' for every other asset — what lets SQL map an EVM token address to its id.
+  evm_address: string
 }
 
 export interface IndexerStateRow {

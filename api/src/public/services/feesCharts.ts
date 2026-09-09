@@ -94,14 +94,22 @@ import { DECIMAL_STRINGS, scaledUsd } from './poolVolumes.ts'
 // the debt. `money_market_reserve_rates` remains the source for the APR a caller
 // would quote; it is not the source for interest earned.
 
-/** Product groupings, exactly as the UI's `ProductType` enum spells them. */
-export const FEES_PRODUCT_TYPES = ['omnipool', 'money-market', 'hollar'] as const
+/**
+ * Product groupings, exactly as the UI's `ProductType` enum spells them, plus
+ * `uniswap-v3`: the concentrated-liquidity pools on Hydration's EVM (runtime 443),
+ * which the incumbent never had. It is an ADDITION to the matrix — every
+ * combination the incumbent accepts is still accepted unchanged.
+ */
+export const FEES_PRODUCT_TYPES = ['omnipool', 'money-market', 'hollar', 'uniswap-v3'] as const
 export type FeesProductType = (typeof FEES_PRODUCT_TYPES)[number]
 
-/** Streams, exactly as the UI's `StreamType` enum spells them. */
+/**
+ * Streams, exactly as the UI's `StreamType` enum spells them, plus `uniswap_v3_fee`
+ * (the canonical revenue stream key, as the money-market and HOLLAR entries are).
+ */
 export const FEES_STREAM_TYPES = [
   'asset', 'protocol', 'liquidation_penalty', 'pepl_liquidation_profit',
-  'asset_reserve', 'borrow_apr', 'hsm_revenue',
+  'asset_reserve', 'borrow_apr', 'hsm_revenue', 'uniswap_v3_fee',
 ] as const
 export type FeesStreamType = (typeof FEES_STREAM_TYPES)[number]
 
@@ -152,6 +160,9 @@ export const FEES_COMBINATIONS: ReadonlyArray<[FeesProductType, FeesStreamType, 
   ['money-market', 'asset_reserve', 'protocol'],
   ['hollar', 'borrow_apr', 'protocol'],
   ['hollar', 'hsm_revenue', 'protocol'],
+  // Not in the incumbent's matrix: the Uniswap v3 pools' protocol take (a Gamma
+  // vault's fee share sent to the Treasury, and a pool's CollectProtocol).
+  ['uniswap-v3', 'uniswap_v3_fee', 'protocol'],
 ]
 
 export const FEES_TOTAL_MESSAGE
@@ -242,6 +253,7 @@ export const AGGREGATE_MODE: Record<FeesStreamType, 'sum' | 'mean'> = {
   asset_reserve: 'sum',
   borrow_apr: 'sum',
   hsm_revenue: 'mean',
+  uniswap_v3_fee: 'sum',
 }
 
 export function aggregate(values: number[], mode: 'sum' | 'mean'): number {
@@ -281,6 +293,7 @@ const STREAM_TO_REVENUE: Record<Exclude<FeesStreamType, 'borrow_apr'>, EventfulR
   pepl_liquidation_profit: 'pepl_liquidation_profit',
   asset_reserve: 'asset_reserve',
   hsm_revenue: 'hsm_revenue',
+  uniswap_v3_fee: 'uniswap_v3_fee',
 }
 
 /** The marker comment each stream's query carries (test/dispatch anchor). */
@@ -291,6 +304,7 @@ const STREAM_MARKER: Record<Exclude<FeesStreamType, 'borrow_apr'>, string> = {
   pepl_liquidation_profit: '-- pub:fees:pepl-profit',
   asset_reserve: '-- pub:fees:asset-reserve',
   hsm_revenue: '-- pub:fees:hsm-revenue',
+  uniswap_v3_fee: '-- pub:fees:uniswap-v3',
 }
 
 /**
@@ -327,8 +341,8 @@ export function feesDestinationPredicateSql(destination: FeesDestination): strin
  */
 export function buildFeesStreamSql(streamType: Exclude<FeesStreamType, 'borrow_apr'>, destination: FeesDestination): string {
   const stream = STREAM_TO_REVENUE[streamType]
-  // The destination split applies to the two omnipool fee streams; the money-market
-  // streams have a single destination and take every row.
+  // The destination split applies to the two omnipool fee streams; the money-market,
+  // HOLLAR and Uniswap v3 streams have a single destination and take every row.
   const destSql = streamType === 'asset' || streamType === 'protocol'
     ? feesDestinationPredicateSql(destination)
     : '1'

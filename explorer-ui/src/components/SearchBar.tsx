@@ -32,7 +32,7 @@ export function routeFor(r: Hit): string {
     // Pallet is part of the referendum's identity (Democracy and OpenGov both
     // index from 0), so both fields are needed to build its route.
     case 'referendum': return r.pallet && r.index != null ? paths.referendum(r.pallet, r.index) : paths.dashboard()
-    case 'pool': return r.value === 'omnipool' ? paths.omnipool() : paths.pool(Number(r.value))
+    case 'pool': return r.value === 'omnipool' ? paths.omnipool() : r.poolKind === 'uniswapv3' ? paths.v3Pool(r.value) : paths.pool(Number(r.value))
     default: return paths.dashboard()
   }
 }
@@ -94,7 +94,7 @@ export function SearchResultBody({ r }: { r: Hit }) {
     )
   }
   if (r.type === 'pool') {
-    const venue = r.poolKind === 'omnipool' ? 'Omnipool' : r.poolKind === 'stableswap' ? 'Stableswap' : 'Isolated pool'
+    const venue = r.poolKind === 'omnipool' ? 'Omnipool' : r.poolKind === 'stableswap' ? 'Stableswap' : r.poolKind === 'uniswapv3' ? 'Concentrated pool' : 'Isolated pool'
     return (
       <span className="sr-acct">
         {r.asset && <AssetIcon assetId={r.asset.assetId} iconAssetId={r.asset.iconAssetId} symbol={r.asset.symbol} size={20} parachainId={r.asset.parachainId} origin={r.asset.origin} />}
