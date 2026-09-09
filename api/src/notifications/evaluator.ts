@@ -413,14 +413,16 @@ export function evaluateLargeValue(rows: readonly ActivityRow[], rules: readonly
   })
 }
 
-// A placement is rare and each one is news; a fill is a trade; a cancel traded
-// nothing and placed nothing (an OTC Pull no longer fires). A DCA-intent placement
-// is a standing order and is judged by dcaStartMatches on its per-hour notional,
-// not here.
+// An order is not a trade until somebody takes it. Placing an OTC order or a
+// limit order (swap intent) reserves funds and moves nothing, and a pull, cancel
+// or expiry only undoes that, so none of them is a large trade — the placements
+// used to fire (a 1.2M HDX OTC order was announced as a $15k trade every time its
+// maker re-placed it) and the user asked for fills alone. A fill realizes the
+// value and is judged like a swap. A DCA-intent placement is a standing order and
+// is judged by dcaStartMatches on its per-hour notional, not here.
 export function largeTradeRowEligible(r: ActivityRow): boolean {
-  if (r.type === 'otc') return r.otcAction === 'Place' || r.otcAction === 'Fill'
+  if (r.type === 'otc') return r.otcAction === 'Fill'
   if (r.type === 'intent') {
-    if (r.intentAction === 'Place') return r.intentKind === 'swap'
     return r.intentAction === 'Fill' || r.intentAction === 'PartialFill' || r.intentAction === 'DcaTrade'
   }
   return true

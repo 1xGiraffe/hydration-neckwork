@@ -171,6 +171,27 @@ describe('large-trade matching', () => {
     expect(activityReferencesAsset(row, 102)).toBe(true)
     expect(activityReferencesAsset(row, 103)).toBe(false)
   })
+
+  // An order is not a trade until somebody takes it. Placing an OTC order or a
+  // limit order (swap intent) reserves funds and trades nothing, and a pull,
+  // cancel or expiry undoes that — only a fill moves value, so only a fill can be
+  // a large trade. The user asked for exactly this after placements of the same
+  // 1.2M HDX OTC order kept arriving as "large trades".
+  it('fires on order fills alone, never on a placement or a cancel', () => {
+    const big = rule('large-trade', { minUsd: 1_000 })
+    const rows = [
+      activity({ blockHeight: 1_010, eventIndex: 1, valueUsd: 15_400, type: 'otc', otcAction: 'Place', otcOrderId: 1_600 }),
+      activity({ blockHeight: 1_011, eventIndex: 1, valueUsd: 15_400, type: 'otc', otcAction: 'Pull', otcOrderId: 1_600 }),
+      activity({ blockHeight: 1_012, eventIndex: 1, valueUsd: 15_400, type: 'otc', otcAction: 'Fill', otcOrderId: 1_600 }),
+      activity({ blockHeight: 1_020, eventIndex: 1, valueUsd: 15_400, type: 'intent', intentAction: 'Place', intentKind: 'swap', intentId: '7' }),
+      activity({ blockHeight: 1_021, eventIndex: 1, valueUsd: 15_400, type: 'intent', intentAction: 'Cancel', intentKind: 'swap', intentId: '7' }),
+      activity({ blockHeight: 1_022, eventIndex: 1, valueUsd: 15_400, type: 'intent', intentAction: 'Expire', intentKind: 'swap', intentId: '7' }),
+      activity({ blockHeight: 1_023, eventIndex: 1, valueUsd: 15_400, type: 'intent', intentAction: 'PartialFill', intentKind: 'swap', intentId: '7' }),
+      activity({ blockHeight: 1_024, eventIndex: 1, valueUsd: 15_400, type: 'intent', intentAction: 'Fill', intentKind: 'swap', intentId: '7' }),
+      activity({ blockHeight: 1_030, eventIndex: 1, valueUsd: 15_400, type: 'intent', intentAction: 'DcaTrade', intentKind: 'dca', intentId: '8' }),
+    ]
+    expect(evaluateLargeValue(rows, [big], W).map(m => m.blockHeight)).toEqual([1_012, 1_023, 1_024, 1_030])
+  })
 })
 
 // The exact sibling of large-trade over the transfer feed: the loop asks the
