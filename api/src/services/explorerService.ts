@@ -41,6 +41,8 @@ import { profileForAccount } from './userProfileService.ts'
 import { parsePoolAssetIds } from './stableswapSnapshot.ts'
 import { findMempoolTx, findPendingBlock, findPendingExtrinsic, findPendingExtrinsicByHash, mempoolTxs, pendingBestHeight, pendingBlocksDesc, type MempoolTx, type PendingBlock, type PendingExtrinsicRow } from './pendingHeadService.ts'
 import { buildMempoolActivities, buildPendingActivities, type PendingActivity, type PendingTradeActivity } from './pendingActivity.ts'
+import { feeTierLabel, loadV3Registry, v3ActivitiesAt, v3FeedActivities, v3PoolForHop, v3SwapAt, type V3Activity, type V3Registry } from './uniswapV3Service.ts'
+import { loadV3AccountPositions, v3AccountPositions } from './uniswapV3Positions.ts'
 
 let client: ClickHouseClient
 export function initExplorerService(c: ClickHouseClient): void { client = c }
@@ -1722,6 +1724,9 @@ function exactUsdMeetsMinimum(legs: ExactUsdLeg[], minimum: number): boolean {
 // A trade detail page instead picks its more reliably priced leg (applyEventTimeUsd).
 type HistPick = { assetId: number; decimals: number; raw: string; ts: string } | null
 function activityHistPick(r: ActivityRow): HistPick {
+  // A concentrated-liquidity LP row is worth BOTH its legs; the out-leg pick below
+  // would re-value it as token1 alone.
+  if (r.type === 'liquidity' && r.poolAddress) return null
   // Create rows already carry their combined BLOCK-TIME value (both seed legs, see
   // enrichPoolCreations); Destroy rows carry no value at all by construction.
   if (r.type === 'liquidity' && (r.liqAction === 'Create' || r.liqAction === 'Destroy')) return null
@@ -4047,10 +4052,11 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // LP positions stay even in summary — they count toward the displayed value, so
     // dropping them would make the hover's value disagree with the detail page. Only
     // DCA/proxy/multisig (below), which the card never shows, are skipped.
-    const [bareLp, farmLp, xykLp, activeDcas] = await Promise.all([
+    const [bareLp, farmLp, xykLp, v3Lp, activeDcas] = await Promise.all([
       getOmnipoolPositions([...related]),
       getFarmingPositions([...related]),
       getXykPositions([...related], balances),
+      getUniswapV3Positions([...related]),
       summary ? Promise.resolve([]) : getActiveDcas([...related]),
     ])
     // Proxy & multisig relations (in-memory indexes refreshed by the
@@ -4080,7 +4086,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // added: the staked HDX principal is already counted (it's locked-but-free HDX in
     // the wallet balance), and the official Hydration net worth excludes the
     // pot-held, loyalty-slashable pending rewards.
-    const lpPositions = [...bareLp, ...farmLp, ...xykLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
+    const lpPositions = [...bareLp, ...farmLp, ...xykLp, ...v3Lp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
     // Only NFT-held positions add value here — stableLp rows are wallet balances
     // already counted in portfolioUsd, they're appended for display only.
     const lpUsd = lpPositions.reduce((s, p) => s + (p.valueUsd ?? 0), 0)
@@ -5876,7 +5882,10 @@ function mmCollateralShortfallUsd(moneyMarket: MoneyMarketPosition | null, folde
 // tables provide current ownership and position state without per-request RPC.
 // hubAmount: the position's H2O (LRNA hub) leg, present for Omnipool positions
 // whose withdraw value includes a hub component (already folded into valueUsd).
-export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string }
+// A concentrated-liquidity position (venue 'Uniswap v3' or 'Gamma vault') holds TWO
+// tokens: `asset`/`amount` carry token0, `assetB`/`amountB` token1; it links to its
+// pool page (`poolAddress`) and a manager position names its NFT (`tokenId`).
+export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string; assetB?: AssetRef; amountB?: string; poolAddress?: string; tokenId?: string }
 // The position arithmetic lives in services/lpMath.ts (shared with the Data
 // API, which may not import this module); re-exported for the callers and
 // tests that reach it through here.
@@ -6332,6 +6341,41 @@ async function getXykPositions(accounts: string[], balances: AddressBalance[]): 
       const valueUsd = usdA == null || usdB == null ? null : usdA + usdB
       out.push({ positionId: `xyk:${lp}:${venue === 'XYK Farm' ? 'farm' : 'direct'}`, asset: asset(lp), amount: amountA.toString(), shares: shares.toString(), valueUsd, venue })
     }
+  }
+  return out.sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
+}
+
+// Concentrated-liquidity positions: position NFTs held through a manager and Gamma
+// vault shares (uniswapV3Positions), each valued at the current price of both legs
+// and null when either is unpriced, like XYK. Neither is a substrate balance — the
+// NFT is no token and the vault share is an ERC-20 the registry does not list yet —
+// so their value is new to the portfolio, not a wallet row restated.
+async function getUniswapV3Positions(accounts: string[]): Promise<LpPosition[]> {
+  const h160s = [...new Set(accounts.map(evmAccountForm).filter((x): x is string => x != null).map(x => '0x' + x.slice(10, 50)))]
+  if (!h160s.length) return []
+  const [raw, registry, prices] = await Promise.all([loadV3AccountPositions(client, h160s), v3Registry(), ensureAccountValuePrices()])
+  // The registry resolves a token three ways (precompile, aToken reserve map, deployed
+  // ERC-20); the module's own SQL fallback answers what it does not know.
+  const registryAsset = (addr: string): number | null => {
+    for (const pool of registry.pools.values()) {
+      if (pool.token0 === addr) return pool.asset0
+      if (pool.token1 === addr) return pool.asset1
+    }
+    return null
+  }
+  const out: LpPosition[] = []
+  for (const p of v3AccountPositions(raw, registryAsset)) {
+    if (p.asset0 == null || p.asset1 == null) continue
+    const a0 = asset(p.asset0), a1 = asset(p.asset1)
+    const usd0 = usdValue(prices, a0.assetId, p.amount0.toString(), a0.decimals)
+    const usd1 = usdValue(prices, a1.assetId, p.amount1.toString(), a1.decimals)
+    out.push({
+      positionId: p.kind === 'position' ? `v3:${p.manager}:${p.tokenId}` : `gamma:${p.vault}`,
+      asset: a0, amount: p.amount0.toString(), assetB: a1, amountB: p.amount1.toString(), shares: p.shares.toString(),
+      valueUsd: usd0 == null || usd1 == null ? null : usd0 + usd1,
+      venue: p.kind === 'position' ? 'Uniswap v3' : 'Gamma vault',
+      ...(p.pool ? { poolAddress: p.pool } : {}), ...(p.tokenId ? { tokenId: p.tokenId } : {}),
+    })
   }
   return out.sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
 }
@@ -7539,7 +7583,9 @@ export function swapRouteReps<T extends SwapGroupRow>(rows: T[], prefer: (row: T
 // number alone merges a swap in extrinsic N with an unrelated event at index N in
 // the same block, so the space belongs in the key. This list must stay identical to
 // the swap-event list in clickhouse/schema/003_materialized_views.sql.
-const HISTOGRAM_SWAP_EVENTS_SQL = `'Router.Executed','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted','LBP.SellExecuted','LBP.BuyExecuted'`
+// 'UniswapV3.Swap' is a swap-class name too, so a routed v3 hop's Swap log shares its
+// extrinsic's identity with the Router.Executed row and the trade counts once.
+const HISTOGRAM_SWAP_EVENTS_SQL = `'Router.Executed','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted','LBP.SellExecuted','LBP.BuyExecuted','UniswapV3.Swap'`
 const SWAP_EVENTS = ['Router.Executed', 'Router.RouteExecuted', 'Omnipool.SellExecuted', 'Omnipool.BuyExecuted', 'Stableswap.SellExecuted', 'Stableswap.BuyExecuted', 'XYK.SellExecuted', 'XYK.BuyExecuted', 'LBP.SellExecuted', 'LBP.BuyExecuted']
 // The router's net-trade summary was emitted as Router.RouteExecuted before the
 // pallet renamed it to Router.Executed (block ~4,542,080); both carry the same
@@ -8269,15 +8315,37 @@ export function parseTradeLimit(callName: string, args: Record<string, unknown>)
   }
 }
 
+// The venue a route hop names, from the call's `PoolType` enum. Every pallet venue
+// is its kind, with the Stableswap pool id in `poolId`. `UniswapV3(fee)` carries the
+// FEE TIER in the enum's value — not a pool id, so it must not land in `poolId`
+// (it would render "#3000") — and the pool it means is the one holding the hop's
+// pair at that tier, resolved through the registry by attachV3HopPools.
+export const V3_HOP_VENUE = 'Uniswap v3'
+export function routeHopVenue(pool: unknown): { pool: string; poolId: number | null; feeTier?: number } {
+  const p = pool as Record<string, unknown> | string | undefined
+  const kind = typeof p === 'object' && p ? String(p.__kind ?? 'Pool') : typeof p === 'string' ? p : 'Pool'
+  const value = typeof p === 'object' && p && typeof p.value === 'number' ? p.value as number : null
+  if (kind === 'UniswapV3') return { pool: value != null ? `${V3_HOP_VENUE} ${feeTierLabel(value)}` : V3_HOP_VENUE, poolId: null, ...(value != null ? { feeTier: value } : {}) }
+  return { pool: kind, poolId: value }
+}
+export interface RouteHopSpec { pool: string; poolId: number | null; feeTier?: number; assetIn: number; assetOut: number }
 // Route hops from a Router call's args ([] for direct AMM calls / wrapped calls).
-export function parseRouteHops(args: Record<string, unknown>): { pool: string; poolId: number | null; assetIn: number; assetOut: number }[] {
+export function parseRouteHops(args: Record<string, unknown>): RouteHopSpec[] {
   const route = Array.isArray(args.route) ? args.route as Record<string, unknown>[] : []
-  return route.map(h => {
-    const pool = h.pool as Record<string, unknown> | string | undefined
-    const kind = typeof pool === 'object' && pool ? String(pool.__kind ?? 'Pool') : typeof pool === 'string' ? pool : 'Pool'
-    const poolId = typeof pool === 'object' && pool && typeof pool.value === 'number' ? pool.value as number : null
-    return { pool: kind, poolId, assetIn: Number(h.assetIn), assetOut: Number(h.assetOut) }
-  }).filter(h => Number.isFinite(h.assetIn) && Number.isFinite(h.assetOut))
+  return route.map(h => ({ ...routeHopVenue(h.pool), assetIn: Number(h.assetIn), assetOut: Number(h.assetOut) }))
+    .filter(h => Number.isFinite(h.assetIn) && Number.isFinite(h.assetOut))
+}
+// The pool contract behind every `UniswapV3(fee)` hop of a route, so its badge can
+// link to /pool/<address>. Mutates and returns the hops; a no-op without such a hop.
+export async function attachV3HopPools<T extends { feeTier?: number; assetIn: AssetRef; assetOut: AssetRef; poolAddress?: string }>(hops: T[]): Promise<T[]> {
+  if (!hops.some(h => h.feeTier != null)) return hops
+  const registry = await v3Registry()
+  for (const h of hops) {
+    if (h.feeTier == null) continue
+    const pool = v3PoolForHop(registry, h.assetIn.assetId, h.assetOut.assetId, h.feeTier)
+    if (pool) h.poolAddress = pool.address
+  }
+  return hops
 }
 
 // Headroom between the executed amount and the protection limit, in percent:
@@ -8292,6 +8360,10 @@ export function limitMarginPct(kind: 'minReceived' | 'maxPaid', limitAmount: str
 export interface TradeHop {
   pool: string
   poolId: number | null
+  // A concentrated-liquidity hop: its fee tier (hundredths of a bip) and the pool
+  // contract the badge links to (absent when the registry knows no such pool).
+  feeTier?: number
+  poolAddress?: string
   assetIn: AssetRef
   assetOut: AssetRef
   amountIn: string | null   // executed amounts when the hop emitted an event
@@ -8464,7 +8536,7 @@ function pendingTradeDetail(
     extrinsicFee: null,
     extrinsicTip: ext.tip,
     route: parseRouteHops(callArgs).map(spec => ({
-      pool: spec.pool, poolId: spec.poolId, assetIn: asset(spec.assetIn), assetOut: asset(spec.assetOut),
+      pool: spec.pool, poolId: spec.poolId, ...(spec.feeTier != null ? { feeTier: spec.feeTier } : {}), assetIn: asset(spec.assetIn), assetOut: asset(spec.assetOut),
       amountIn: null, amountOut: null, fee: null,
     })),
     dca: ext.callName.startsWith('DCA.'),
@@ -8485,7 +8557,9 @@ async function pendingTrade(height: number, match: (row: PendingTradeActivity, e
     if (a.kind !== 'trade' || a.extrinsicIndex == null) continue
     const ext = block.extrinsics.find(e => e.index === a.extrinsicIndex)
     if (!ext || !match(a, ext)) continue
-    return pendingTradeDetail(ext, a, await ensurePrices())
+    const detail = pendingTradeDetail(ext, a, await ensurePrices())
+    await attachV3HopPools(detail.route)
+    return detail
   }
   return null
 }
@@ -8549,14 +8623,26 @@ export async function getTradeDetail(height: number, index: number, routeEvent?:
 
     const hopEvents = evs.filter(e => !isRouterNet(e.name))
     const routeSpecs = parseRouteHops(callArgs)
+    // A concentrated-liquidity hop emits no substrate swap event; its amounts and
+    // LP fee (amountIn × fee / 1e6, taken from the input) come from the pool's Swap
+    // log in the same extrinsic, read only when the route has such a hop.
+    const v3Swaps = routeSpecs.some(spec => spec.feeTier != null)
+      ? (await v3ActivitiesAt(await v3Registry(), height, index)).filter(a => a.kind === 'swap')
+      : []
     const route: TradeHop[] = routeSpecs.length
-      ? routeSpecs.map(spec => {
+      ? await attachV3HopPools(routeSpecs.map(spec => {
           // Match the executed event for this hop by its asset pair; Aave wrap
           // hops emit no event and keep null amounts (1:1 wraps).
           const ev = hopEvents.find(e => { const a = swapEventAmounts(e.name, e.args); return a.assetIn === spec.assetIn && a.assetOut === spec.assetOut })
           const a = ev ? swapEventAmounts(ev.name, ev.args) : null
-          return { pool: spec.pool, poolId: spec.poolId, assetIn: asset(spec.assetIn), assetOut: asset(spec.assetOut), amountIn: a?.amountIn || null, amountOut: a?.amountOut || null, fee: ev ? tradeHopFee(ev.name, ev.args, spec.assetOut) : null }
-        })
+          const v3 = spec.feeTier != null ? v3Swaps.find(x => x.assetIn === spec.assetIn && x.assetOut === spec.assetOut) : undefined
+          const v3Fee = v3?.amountIn && spec.feeTier != null ? { amount: (BigInt(v3.amountIn) * BigInt(spec.feeTier) / 1_000_000n).toString(), asset: asset(spec.assetIn) } : null
+          return {
+            pool: spec.pool, poolId: spec.poolId, ...(spec.feeTier != null ? { feeTier: spec.feeTier } : {}), assetIn: asset(spec.assetIn), assetOut: asset(spec.assetOut),
+            amountIn: a?.amountIn || v3?.amountIn || null, amountOut: a?.amountOut || v3?.amountOut || null,
+            fee: ev ? tradeHopFee(ev.name, ev.args, spec.assetOut) : v3Fee,
+          }
+        }))
       : hopEvents.map(swapEventToHop)
 
     const limitSpec = parseTradeLimit(callName, callArgs)
@@ -8661,7 +8747,11 @@ export async function getTradeDetailByEvent(height: number, eventIndex: number):
       query_params: { h: height, e: eventIndex }, format: 'JSONEachRow',
     })
     const ev = (await evRes.json<{ event_index: number; extrinsic_index: number | null; event_name: string; args_json: string; ts: string }>())[0]
-    if (!ev) return null
+    if (!ev) {
+      // A concentrated-liquidity swap has no substrate swap event: its pool's Swap log is the row.
+      const v3 = await v3SwapAt(await v3Registry(), height, eventIndex)
+      return v3 ? v3TradeDetail(v3, prices) : null
+    }
     if (ev.extrinsic_index != null) {
       // Which route of the extrinsic this event belongs to, so a batch's second swap
       // opens its own trade instead of its neighbour's.
@@ -9043,7 +9133,12 @@ export interface ActivityRow {
   assetRefs?: number[]
   /** Protocol revenue the row's EXTRINSIC generated (absent when it generated none). */
   revenue?: ActivityRevenue
-  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy'   // Create = pool creation; Destroy = pool closure (no value); Claim = LM reward claim; ClaimReferral = referral-program reward claim
+  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy' | 'CollectFees' | 'Rebalance'   // Create = pool creation; Destroy = pool closure (no value); Claim = LM reward claim; ClaimReferral = referral-program reward claim; CollectFees = a concentrated-liquidity position collecting its earned fees; Rebalance = a vault operator re-ranging its positions
+  // Concentrated-liquidity (Uniswap v3) rows: the pool contract the act is in, the
+  // position NFT it concerns (manager positions), the Gamma vault it went through.
+  poolAddress?: string
+  v3TokenId?: string
+  v3Vault?: string
   mmAction?: string          // money-market: Supply/Borrow/Repay/Withdraw/LiquidationCall
   mmMarketKey?: string       // absent for legacy/unknown pools; `core` is primary
   mmMarket?: string          // display label; UI only calls out supplemental markets
@@ -9650,6 +9745,175 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
     }
     return withFeedWindow(tw, limit, offset + limit, (bound) => fetchPage(bound, limit, offset))
   })
+}
+// ---------------------------------------------------------------------------
+// Concentrated liquidity (Uniswap v3) pools — read through uniswapV3Service and
+// rendered as ordinary trade / liquidity rows.
+// ---------------------------------------------------------------------------
+
+/** The pools, vaults and managers the chain has announced (SWR-cached in the service). */
+export async function v3Registry(): Promise<V3Registry> {
+  return loadV3Registry(assetIdFromMmAddress)
+}
+
+// The ids a v3 row answers a token filter with: the pool's tokens plus each aToken's
+// reserve (a DOT filter should find the aDOT/HOLLAR pool) — and the inverse for a
+// reserve-side filter reaching a pool that holds its aToken.
+function v3AssetAliases(assetId: number): number[] {
+  return [...new Set([assetId, UNDERLYING_TO_ATOKEN_ID[assetId], ATOKEN_UNDERLYING_ID[assetId]].filter((id): id is number => id != null))]
+}
+
+function v3PoolsForAssets(registry: V3Registry, assetIds: number[]): string[] {
+  return [...new Set(assetIds.flatMap(v3AssetAliases).flatMap(id => registry.byAsset.get(id) ?? []))]
+}
+
+// V3Activity → ActivityRow. `who` is the account the log names (recipient, position
+// owner, vault beneficiary); a Mint straight into the pool names only contracts, so
+// the extrinsic's signer stands for it.
+async function v3ActivityRows(acts: V3Activity[], prices: Map<number, PriceInfo>): Promise<ActivityRow[]> {
+  if (!acts.length) return []
+  const unsigned = acts.filter(a => a.whoAccountId == null && a.extrinsicIndex != null).map(a => [a.blockHeight, a.extrinsicIndex] as [number, number | null])
+  const [signers, routed] = await Promise.all([
+    unsigned.length ? actorsFor(unsigned) : new Map<string, string>(),
+    routedV3SwapExtrinsics(acts.filter(a => a.kind === 'swap' && a.extrinsicIndex != null).map(a => [a.blockHeight, a.extrinsicIndex as number])),
+  ])
+  const out: ActivityRow[] = []
+  for (const a of acts) {
+    // A Router-routed hop through the pool is already the route's trade (swap_activity
+    // renders it, the exact count's swap arm counts it): its Swap log is not a second one.
+    if (a.kind === 'swap' && a.extrinsicIndex != null && routed.has(`${a.blockHeight}:${a.extrinsicIndex}`)) continue
+    const who = a.whoAccountId ?? (a.extrinsicIndex != null ? signers.get(`${a.blockHeight}:${a.extrinsicIndex}`) : undefined) ?? null
+    const common = {
+      blockHeight: a.blockHeight, timestamp: a.timestamp, eventIndex: a.eventIndex, extrinsicIndex: a.extrinsicIndex,
+      who: who ? accountRef(who) : null, to: null, linkBlock: a.blockHeight, linkIndex: a.extrinsicIndex,
+      ...(a.pool ? { poolAddress: a.pool } : {}), ...(a.tokenId ? { v3TokenId: a.tokenId } : {}), ...(a.vault ? { v3Vault: a.vault } : {}),
+    }
+    if (a.kind === 'swap') {
+      if (a.assetIn == null || a.assetOut == null || a.amountIn == null || a.amountOut == null) continue
+      const aIn = asset(a.assetIn), aOut = asset(a.assetOut)
+      out.push({
+        type: 'trade', ...common, asset: null, assetIn: aIn, assetOut: aOut, amount: null, amountIn: a.amountIn, amountOut: a.amountOut,
+        valueUsd: usdValue(prices, aOut.assetId, a.amountOut, aOut.decimals),
+        assetRefs: [...new Set([...v3AssetAliases(aIn.assetId), ...v3AssetAliases(aOut.assetId)])], dca: false,
+      })
+      continue
+    }
+    if (a.asset0 == null || a.asset1 == null) continue
+    const a0 = asset(a.asset0), a1 = asset(a.asset1)
+    const usd0 = usdValue(prices, a0.assetId, a.amount0, a0.decimals)
+    const usd1 = usdValue(prices, a1.assetId, a.amount1, a1.decimals)
+    out.push({
+      type: 'liquidity', ...common, asset: a0, amount: a.amount0, assetIn: a0, assetOut: a1, amountIn: a.amount0, amountOut: a.amount1,
+      valueUsd: usd0 == null && usd1 == null ? null : (usd0 ?? 0) + (usd1 ?? 0),
+      assetRefs: [...new Set([...v3AssetAliases(a0.assetId), ...v3AssetAliases(a1.assetId)])],
+      liqAction: a.action,
+    })
+  }
+  return out
+}
+
+// A feed page of v3 rows: swaps (`swap`), LP acts (`liquidity`) or both, newest first,
+// optionally narrowed to the pools holding an asset / the token filter and to the acts
+// of some accounts. The venue is small, so filters are applied on built rows and no
+// deep walker is needed.
+async function getRecentV3Rows(
+  kind: 'swap' | 'liquidity' | 'all', limit: number, from?: string, to?: string, offset = 0, filters: ValueListFilters = {},
+  scope: { accounts?: string[]; assetId?: number; action?: string } = {},
+): Promise<ActivityRow[]> {
+  const registry = await v3Registry()
+  if (!registry.pools.size) return []
+  const tw = timeWindow(from, to)
+  let pools: string[] | undefined
+  const scopeAssets = scope.assetId != null ? [scope.assetId] : assetIdsForToken(filters.token)
+  if (scopeAssets != null) {
+    pools = v3PoolsForAssets(registry, scopeAssets)
+    if (!pools.length) return []
+  }
+  const accountsH160 = scope.accounts
+    ? [...new Set(scope.accounts.map(evmAccountForm).filter((x): x is string => x != null).map(x => '0x' + x.slice(10, 50)))]
+    : undefined
+  if (scope.accounts && !accountsH160?.length) return []
+  const key = `explorer:v3:${kind}:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${scope.assetId ?? ''}:${scope.action ?? ''}:${(accountsH160 ?? []).join(',')}`
+  return cached(key, tw ? 30000 : LIVE_CACHE_MS, async () => {
+    const prices = await ensurePrices()
+    const want = offset + limit
+    const acts = await v3FeedActivities(registry, { bound: tw ?? '1', kind, accountsH160, pools, limit: Math.min(Math.max(want * 4, 50), 2_000) })
+    let rows = await v3ActivityRows(acts, prices)
+    if (scope.accounts) {
+      // A row whose actor only the extrinsic knew was admitted unverified above; now that
+      // it has a signer, keep it only when the signer is one of the scoped accounts.
+      const wanted = new Set(scope.accounts.flatMap(a => [a.toLowerCase(), evmAccountForm(a.toLowerCase()) ?? '']))
+      rows = rows.filter(r => r.who != null && (wanted.has(r.who.accountId.toLowerCase()) || wanted.has(evmAccountForm(r.who.accountId.toLowerCase()) ?? '')))
+    }
+    if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
+    rows = rows.filter(r => activityRowMatchesFilters(r, { ...filters, token: undefined }) && activityRowMatchesAction(r, scope.action))
+    return rows.slice(offset, want)
+  })
+}
+
+// `block:extrinsic` keys as a ClickHouse tuple list `(b,e),(b,e)` for an IN predicate.
+// (Interpolating the key verbatim once produced `(14395782:4)`, a syntax error that
+// took every v3-bearing account page down with it.)
+export function blockExtrinsicTupleList(keys: readonly string[]): string {
+  return keys.map(k => { const at = k.indexOf(':'); return `(${Number(k.slice(0, at))},${Number(k.slice(at + 1))})` }).join(',')
+}
+
+// The (block:extrinsic) keys among `pairs` whose extrinsic executed a Router route —
+// a v3 Swap log inside one is a hop of that route, not a trade of its own.
+async function routedV3SwapExtrinsics(pairs: [number, number][]): Promise<Set<string>> {
+  const keys = [...new Set(pairs.map(([h, e]) => `${h}:${e}`))]
+  if (!keys.length) return new Set()
+  const tuples = blockExtrinsicTupleList(keys)
+  const res = await client.query({
+    query: `SELECT DISTINCT block_height, extrinsic_index FROM price_data.swap_activity
+            WHERE (block_height, extrinsic_index) IN (${tuples}) AND event_name IN (${ROUTER_NET_EVENTS_SQL})`,
+    format: 'JSONEachRow',
+  })
+  return new Set((await res.json<{ block_height: number; extrinsic_index: number }>()).map(r => `${r.block_height}:${r.extrinsic_index}`))
+}
+
+/** A v3 pool's own recent activity — swaps in it, positions and vault acts on it. */
+export async function getV3PoolActivity(address: string, limit = 25): Promise<ActivityRow[]> {
+  const registry = await v3Registry()
+  const pool = registry.pools.get(address.toLowerCase())
+  if (!pool) return []
+  return cached(`explorer:v3-pool-activity:${pool.address}:${limit}:${await liveHeadTag()}`, LIVE_CACHE_MS, async () => {
+    const prices = await ensurePrices()
+    const acts = await v3FeedActivities(registry, { kind: 'all', pools: [pool.address], limit })
+    const rows = await v3ActivityRows(acts, prices)
+    await Promise.all([applyHistoricalUsd(rows, activityHistPick), applyActivityRevenue(rows)])
+    return rows
+  })
+}
+
+// The /swap/<block>-e<n> page for a swap that only exists as a pool log.
+async function v3TradeDetail(act: V3Activity, prices: Map<number, PriceInfo>): Promise<TradeDetail | null> {
+  if (act.assetIn == null || act.assetOut == null || act.amountIn == null || act.amountOut == null) return null
+  const registry = await v3Registry()
+  const pool = act.pool ? registry.pools.get(act.pool) : undefined
+  const ext = act.extrinsicIndex == null ? undefined : (await client.query({
+    query: `SELECT extrinsic_hash, toString(fee) AS fee, toString(tip) AS tip, toUInt8(success) AS success, ifNull(effective_signer, ifNull(signer, '')) AS signer
+            FROM price_data.raw_extrinsics WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32} LIMIT 1`,
+    query_params: { h: act.blockHeight, i: act.extrinsicIndex }, format: 'JSONEachRow',
+  }).then(r => r.json<{ extrinsic_hash: string; fee: string; tip: string; success: number; signer: string }>()))[0]
+  const who = act.whoAccountId ?? (ext?.signer || null)
+  const aIn = asset(act.assetIn), aOut = asset(act.assetOut)
+  const inNum = Number(act.amountIn) / 10 ** aIn.decimals
+  const outNum = Number(act.amountOut) / 10 ** aOut.decimals
+  // The pool fee is taken from the input: amountIn × fee / 1e6, to the pool's LPs.
+  const fee = pool ? (BigInt(act.amountIn) * BigInt(pool.fee) / 1_000_000n).toString() : null
+  const venue = pool ? `Uniswap v3 ${feeTierLabel(pool.fee)}` : 'Uniswap v3'
+  return {
+    blockHeight: act.blockHeight, timestamp: act.timestamp, extrinsicIndex: act.extrinsicIndex, eventIndex: act.eventIndex,
+    hash: ext?.extrinsic_hash ?? null, success: ext ? Number(ext.success) === 1 : true,
+    who: who ? accountRef(who) : null, venue, direction: 'Sell',
+    assetIn: aIn, assetOut: aOut, amountIn: act.amountIn, amountOut: act.amountOut,
+    valueUsd: usdValue(prices, aOut.assetId, act.amountOut, aOut.decimals),
+    executionPrice: inNum > 0 && Number.isFinite(outNum / inNum) ? outNum / inNum : null,
+    limit: null, extrinsicFee: ext?.fee ?? null, extrinsicTip: ext?.tip ?? null,
+    route: [{ pool: venue, poolId: null, assetIn: aIn, assetOut: aOut, amountIn: act.amountIn, amountOut: act.amountOut, fee: fee ? { amount: fee, asset: aIn } : null }],
+    dca: false, ...(act.pool ? { poolAddress: act.pool } : {}),
+  }
 }
 interface XcmNetworkMeta { name: string; subscan?: string; ss58?: number }
 // A parachain's product name, for surfaces that hold a bare para id — a sibling
@@ -12629,7 +12893,8 @@ export function intentActivityParts(eventName: string, args: Record<string, unkn
   return {
     action, intentId, owner: null,
     amountIn: intentNum(args.amountIn), amountOut: intentNum(args.amountOut),
-    remainingBudget: action === 'DcaTrade' ? intentNum(args.remainingBudget) : null,
+    // A completion is the trade that spent the last of the budget: nothing is left.
+    remainingBudget: action !== 'DcaTrade' ? null : eventName === INTENT_DCA_COMPLETED ? '0' : intentNum(args.remainingBudget),
   }
 }
 
@@ -12969,7 +13234,7 @@ function lazyExecutorOutcome(args: Record<string, unknown>): { result: 'ok' | 'e
 }
 type RawIntentLifecycleRow = { event_name: string; block_height: number; ts: string; event_index: number; extrinsic_index: number | null; queue_id: string; args_json: string }
 type RawIntentFillTotals = {
-  n: string | number; n_full: string | number; n_partial: string | number; n_dca: string | number
+  n: string | number; n_full: string | number; n_partial: string | number; n_dca: string | number; n_done: string | number
   tin: string; tout: string; last_block: number | string; last_rb: string
 }
 // The newest solution extrinsics an order page links to. A DCA intent trading every
@@ -13109,12 +13374,13 @@ export async function getIntentOrder(intentId: string, offset = 0, limit = 25): 
       owner: ACCOUNT_RE.test(order.owner) ? accountRef(order.owner) : null,
       assetIn: aIn, assetOut: aOut,
       status,
-      filledIn: totals?.tin ?? '0', filledOut: totals?.tout ?? '0',
+      filledIn: plus(totals?.tin, done?.amountIn), filledOut: plus(totals?.tout, done?.amountOut),
       fills, fillsTotal: Number(totals?.n ?? 0),
       // Before its first trade the order's budget is untouched and the pallet has
-      // not stated a slot yet — the next eligible block is unknown, not "now".
+      // not stated a slot yet — the next eligible block is unknown, not "now". After
+      // the completion nothing is left: the pallet unreserved the remainder.
       dca: order.kind === 'dca' ? {
-        remainingBudget: lastRemaining ?? order.budget,
+        remainingBudget: status === 'completed' ? '0' : lastRemaining ?? order.budget,
         lastExecutionBlock: lastBlock,
         nextEligibleBlock: status === 'open' && lastBlock != null && order.period > 0 ? lastBlock + order.period : null,
       } : null,
@@ -15109,10 +15375,10 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     let sourceFilters = sourceValueFiltered
       ? filters
       : deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
-    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'xcmExecuted' | 'nttOut' | 'nttIn' | 'staking' | 'bond' | 'intent' | 'vote'
+    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'xcmExecuted' | 'nttOut' | 'nttIn' | 'staking' | 'bond' | 'intent' | 'vote' | 'v3Trade' | 'v3Liquidity'
     const classifiedSourceKeys: ClassifiedSourceKey[] = [
       'transfer', 'trade', 'dca', 'reward', 'liquidity', 'mm', 'otc',
-      'xcm', 'xcmIn', 'xcmOutRemote', 'xcmExecuted', 'nttOut', 'nttIn', 'staking', 'bond', 'intent', 'vote',
+      'xcm', 'xcmIn', 'xcmOutRemote', 'xcmExecuted', 'nttOut', 'nttIn', 'staking', 'bond', 'intent', 'vote', 'v3Trade', 'v3Liquidity',
     ]
     const exactSeedSize = activitySourceSeedSize(want)
     const exactSourceLimits = Object.fromEntries(classifiedSourceKeys.map(key => [key, sourceValueFiltered ? exactSeedSize : fetchN])) as Record<ClassifiedSourceKey, number>
@@ -15131,7 +15397,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       })
     }
     for (;;) {
-      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, staking, bonds, intents, votes] = await Promise.all([
+      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, staking, bonds, intents, votes, v3Trades, v3Liquidity] = await Promise.all([
         needsFullClassification
           ? loadClassifiedSource('transfer', (sourceLimit, sourceFrom) => getRecentTransfers(sourceLimit, sourceFrom, to, 0, true, sourceFilters))
           : Promise.resolve([]),
@@ -15183,6 +15449,12 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         needsFullClassification
           ? loadClassifiedSource('vote', (sourceLimit, sourceFrom) => getVoteFeedRows(sourceLimit, sourceFrom, to, 0, sourceFilters, withCollective))
           : Promise.resolve([]),
+        // Concentrated-liquidity swaps join the trade family like otc; their LP acts are
+        // liquidity, read under full classification like the pallet pools'.
+        loadClassifiedSource('v3Trade', (sourceLimit, sourceFrom) => getRecentV3Rows('swap', sourceLimit, sourceFrom, to, 0, sourceFilters)),
+        needsFullClassification
+          ? loadClassifiedSource('v3Liquidity', (sourceLimit, sourceFrom) => getRecentV3Rows('liquidity', sourceLimit, sourceFrom, to, 0, sourceFilters))
+          : Promise.resolve([]),
       ])
       const sourceFilteredTransfers = sourceValueFiltered
         ? await suppressTransferCandidates(transfers)
@@ -15205,6 +15477,8 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       // AMM swap's pool-internal Withdrawn/Deposited), so their extrinsics own
       // their transfer legs the same way trades/staking/mm do.
       const tradeExtrinsics = new Set(trades.filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
+      // A Router-routed v3 hop already stands as the route's trade; its Swap log is not a second one.
+      const userV3Trades = v3Trades.filter(r => !(r.extrinsicIndex != null && tradeExtrinsics.has(`${r.blockHeight}:${r.extrinsicIndex}`)))
       const stakingExtrinsics = activityExtrinsicSet(staking)
       const bondExtrinsics = activityExtrinsicSet(bonds)
       const intentExtrinsics = activityExtrinsicSet(intents)
@@ -15242,6 +15516,8 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         { key: 'staking', fetchSize: sourceFetchSize('staking'), rawSize: staking.length, rows: staking, oldest: oldestOf(staking) },
         { key: 'bond', fetchSize: sourceFetchSize('bond'), rawSize: bonds.length, rows: bonds, oldest: oldestOf(bonds) },
         { key: 'intent', fetchSize: sourceFetchSize('intent'), rawSize: intents.length, rows: intents, oldest: oldestOf(intents) },
+        { key: 'v3Trade', fetchSize: sourceFetchSize('v3Trade'), rawSize: v3Trades.length, rows: userV3Trades, oldest: oldestOf(v3Trades) },
+        { key: 'v3Liquidity', fetchSize: sourceFetchSize('v3Liquidity'), rawSize: v3Liquidity.length, rows: v3Liquidity, oldest: oldestOf(v3Liquidity) },
         { key: 'vote', fetchSize: sourceFetchSize('vote'), rawSize: votes.length, rows: votes.map(voteActivityRow), oldest: oldestOf(votes) },
         { key: 'mm', fetchSize: sourceFetchSize('mm'), rawSize: mm.length, rows: userMm, oldest: oldestOf(mm) },
         { key: 'otc', fetchSize: sourceFetchSize('otc'), rawSize: otc.length, rows: otc, oldest: oldestOf(otc) },
@@ -15327,6 +15603,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     // the reward-claims builder alone, so the event-list fetch is skipped outright.
     if (type === 'liquidity') rows = [
       ...(action === 'ClaimReferral' ? [] : await getRecentLiquidity(fetchN, from, to, 0, filters, action)),
+      ...(action === 'ClaimReferral' ? [] : await getRecentV3Rows('liquidity', fetchN, from, to, 0, filters, { action })),
       ...(action === 'Claim' || action === 'ClaimReferral'
         ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'referral')).filter(r => r.type === 'liquidity' && r.liqAction === action)
         : []),
@@ -15339,7 +15616,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     else if (type === 'intent') rows = await getRecentIntents(fetchN, from, to, undefined, 0, filters, undefined, action)
     else rows = (await getVoteFeedRows(fetchN, from, to, 0, filters, withCollective)).map(voteActivityRow)
   } else if (type === 'liquidity') {
-    rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'referral')).filter(r => r.type === 'liquidity')]
+    rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters), ...await getRecentV3Rows('liquidity', fetchN, from, to, 0, filters), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'referral')).filter(r => r.type === 'liquidity')]
   } else if (type === 'mm') {
     rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters)).filter(r => !isModuleAcct(r.who)), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'incentive')).filter(r => r.type === 'mm')]
   } else if (type === 'otc') {
@@ -15452,7 +15729,7 @@ export async function getGlobalActivityTotal(
 // A DCA schedule is the canonical unit: initiation, lifecycle status, execution
 // totals, and a paged execution list belong to the schedule page.
 // One leg of a schedule's route, with its assets resolved for display.
-export interface DcaRouteHop { pool: string; poolId: number | null; assetIn: AssetRef; assetOut: AssetRef }
+export interface DcaRouteHop { pool: string; poolId: number | null; feeTier?: number; poolAddress?: string; assetIn: AssetRef; assetOut: AssetRef }
 
 export interface DcaScheduleDetail {
   scheduleId: number
@@ -15880,7 +16157,7 @@ async function recoverDcaScheduleOrder(blockHeight: number, extrinsicIndex: numb
 
 // One leg of the path a schedule trades through. Stableswap names the pool it uses;
 // the other venues are a single pool each, so only Stableswap carries an id.
-export interface DcaRouteLeg { pool: string; poolId: number | null; assetIn: number; assetOut: number }
+export interface DcaRouteLeg { pool: string; poolId: number | null; feeTier?: number; assetIn: number; assetOut: number }
 
 // What DCA.Scheduled says about a schedule's terms beyond the pair and the size:
 // the order's own price bound, and the route it trades through.
@@ -15918,7 +16195,7 @@ function dcaOrderTerms(orderValue: unknown): DcaOrderTerms | null {
       const kind = typeof pool.__kind === 'string' ? pool.__kind : ''
       const assetIn = int(l.assetIn), assetOut = int(l.assetOut)
       if (!kind || assetIn == null || assetOut == null) return []
-      return [{ pool: kind, poolId: int(pool.value), assetIn, assetOut }]
+      return [{ ...routeHopVenue(pool), assetIn, assetOut }]
     })
     : null
   return {
@@ -16244,9 +16521,9 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
       // Only the bound the order's own direction defines is meaningful.
       minAmountOut: sched.direction === 'Buy' ? null : terms.minAmountOut,
       maxAmountIn: sched.direction === 'Buy' ? terms.maxAmountIn : null,
-      route: terms.route?.map(leg => ({
-        pool: leg.pool, poolId: leg.poolId, assetIn: asset(leg.assetIn), assetOut: asset(leg.assetOut),
-      })) ?? null,
+      route: terms.route ? await attachV3HopPools(terms.route.map(leg => ({
+        pool: leg.pool, poolId: leg.poolId, ...(leg.feeTier != null ? { feeTier: leg.feeTier } : {}), assetIn: asset(leg.assetIn), assetOut: asset(leg.assetOut),
+      }))) : null,
       fundingBalance,
       nextExecutionBlock: Number((await planRes.json<{ nb: number }>())[0]?.nb ?? 0) || null,
       status,
@@ -16741,6 +17018,14 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
     }
 
     rows.push(...await getRecentRewardClaims(100, undefined, undefined, undefined, undefined, height, index))
+    // Concentrated-liquidity pools act through EVM logs (no substrate trade or liquidity
+    // event), so their swaps, positions and vault acts are read from the v3 projection. A
+    // Router-routed v3 hop is already the route's trade above; its Swap log is not another.
+    const v3Acts = await v3ActivitiesAt(await v3Registry(), height, index)
+    if (v3Acts.length) {
+      const v3Rows = await v3ActivityRows(v3Acts, prices)
+      rows.push(...v3Rows.filter(r => !(r.type === 'trade' && swapEvents.length > 0)))
+    }
 
     const seen = new Set<string>()
     // The extrinsic page shows how a solution executed, so the pot's settlement trades stay.
@@ -17673,6 +17958,10 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     // action into the read, so the one source it has cannot saturate on rows the
     // action then drops.
     const intentsP: Promise<ActivityRow[]> = wantIntents ? getRecentIntents(fetchN, from, to, undefined, 0, queryFilters, assetId, intentOnly ? action : undefined) : Promise.resolve([])
+    // Concentrated-liquidity pools holding the asset: swaps join the trade family, position
+    // and vault acts the liquidity family.
+    const v3TradesP: Promise<ActivityRow[]> = wantTrades ? getRecentV3Rows('swap', fetchN, from, to, 0, queryFilters, { assetId }) : Promise.resolve([])
+    const v3LiquidityP: Promise<ActivityRow[]> = wantLiquidity ? getRecentV3Rows('liquidity', fetchN, from, to, 0, queryFilters, { assetId, action: type === 'liquidity' ? action : undefined }) : Promise.resolve([])
     const rewardsP: Promise<ActivityRow[]> = (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')
       ? getRecentRewardClaims(fetchN, from, to, undefined, [assetId], undefined, undefined, fixedAssetFilters)
       : Promise.resolve([])
@@ -17684,9 +17973,10 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       ? getVoteFeedRows(fetchN, from, to, 0, queryFilters, collectiveVotesAdmitted(queryFilters)).then(rows => rows.map(voteActivityRow))
       : Promise.resolve([])
 
-    const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, staking, bonds, intents, votes] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, xcmExecutedP, nttOutP, nttInP, mmP, otcP, stakingP, bondsP, intentsP, votesP])
+    const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, staking, bonds, intents, votes, v3Trades, v3Liquidity] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, xcmExecutedP, nttOutP, nttInP, mmP, otcP, stakingP, bondsP, intentsP, votesP, v3TradesP, v3LiquidityP])
     // Drop transfer legs of the asset's own trades (hops/fee legs share the extrinsic).
     const tradeExtrinsics = new Set(trades.filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
+    const userV3Trades = v3Trades.filter(r => !(r.extrinsicIndex != null && tradeExtrinsics.has(`${r.blockHeight}:${r.extrinsicIndex}`)))
     const stakingExtrinsics = activityExtrinsicSet(staking)
     const bondExtrinsics = activityExtrinsicSet(bonds)
     const intentExtrinsics = activityExtrinsicSet(intents)
@@ -17704,7 +17994,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     const feeSwapKeys = await feePurchaseSwapKeys(trades)
     const userTrades = dropShareRoutedTrades(trades, activityExtrinsicSet(liquidity))
     const userMm = mm.filter(r => !isModuleAcct(r.who))
-    let rows = (await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc, ...intents]))
+    let rows = (await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc, ...intents, ...userV3Trades, ...v3Liquidity]))
       .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
     if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
     rows = rows.filter(r => activityRowMatchesAction(r, action))
@@ -17713,10 +18003,10 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
     rows = rows.filter(r => activityRowMatchesFilters(r, { ...filters, token: undefined }))
     rows.sort(compareActivityRowsNewestFirst)
-    const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, bonds, intents, votes, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc]
+    const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, bonds, intents, votes, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, v3Trades, v3Liquidity]
       : type === 'transfer' ? [transfers]
-        : type === 'trade' ? [trades, dcaFailures, otc, intents]
-          : type === 'liquidity' ? [liquidity, rewards]
+        : type === 'trade' ? [trades, dcaFailures, otc, intents, v3Trades]
+          : type === 'liquidity' ? [liquidity, rewards, v3Liquidity]
             : type === 'mm' ? [mm, rewards]
               : type === 'otc' ? [otc]
                 : type === 'xcm' ? [xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn]
@@ -19480,12 +19770,16 @@ interface EnumeratedActivity {
   // Wormhole NTT sends and arrivals — cross-chain rows like xcm's, kept as their own
   // slot because their reads, caps and builders are their own.
   ntt: ActivityRow[]
+  // Concentrated-liquidity (Uniswap v3) swaps and LP acts of the accounts: a small
+  // venue read whole, its swaps counted under the trade family and its acts under
+  // liquidity by the same type test the page applies.
+  v3: ActivityRow[]
 }
 
 // Every enumerated row. All of them are non-transfer, so a transfer feed needs each
 // one's extrinsic or hook owner to decide which transfers are its plumbing.
 function enumeratedActivityAll(e: EnumeratedActivity): ActivityRow[] {
-  return [...e.otc, ...e.dcaFailures, ...e.rewards, ...e.staking, ...e.bonds, ...e.intents, ...e.votes, ...e.xcm, ...e.ntt]
+  return [...e.otc, ...e.dcaFailures, ...e.rewards, ...e.staking, ...e.bonds, ...e.intents, ...e.votes, ...e.xcm, ...e.ntt, ...e.v3]
 }
 
 // Which enumerated sources one type's feed needs. Exactly the `want*` flags
@@ -19514,6 +19808,8 @@ function enumeratedSourceNeed(type: string): Record<EnumeratedSourceName, boolea
     votes: type === 'all' || type === 'vote' || wantTransfers,
     xcm: type === 'all' || type === 'xcm' || wantTransfers,
     ntt: type === 'all' || type === 'xcm' || wantTransfers,
+    // v3 swaps are trade-family rows and v3 position/vault acts liquidity rows.
+    v3: type === 'all' || type === 'trade' || type === 'liquidity' || wantTransfers,
   }
 }
 
@@ -19614,15 +19910,16 @@ async function enumeratedActivityRowsUncached(
       getRecentNttOut(depth, from, to, accounts, 0, {}),
       getRecentNttIn(depth, from, to, accounts, 0, {}),
     ]) : [],
+    need.v3 ? getRecentV3Rows('all', depth, from, to, 0, {}, { accounts }) : [],
   ])
   const capped: [ActivityRow[], number][] = [
-    [otc, depth], [dcaFailures, depth], [rewards, depth], [staking, depth], [bonds, depth], [intents, depth],
+    [otc, depth], [dcaFailures, depth], [rewards, depth], [staking, depth], [bonds, depth], [intents, depth], [v3, depth],
     ...voteLegs.map(leg => [leg, depth] as [ActivityRow[], number]),
     ...xcmLegs.map(leg => [leg, xcmDepth] as [ActivityRow[], number]),
     ...nttLegs.map(leg => [leg, depth] as [ActivityRow[], number]),
   ]
   if (capped.some(([rows, cap]) => rows.length >= cap)) return null
-  return { otc, dcaFailures, rewards, staking, bonds, intents, votes: voteLegs.flat(), xcm: xcmLegs.flat(), ntt: nttLegs.flat() }
+  return { otc, dcaFailures, rewards, staking, bonds, intents, votes: voteLegs.flat(), xcm: xcmLegs.flat(), ntt: nttLegs.flat(), v3 }
 }
 
 // Which types this path can count exactly, in the order the reasoning above splits
@@ -19990,7 +20287,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     const swapAmountFilter = eventValueFilterSql(swapAssetExpr, swapAmountExpr, swapTimeExpr, queryFilters, prices, 'account_trade_price')
     const swapRes = await client.query({
       query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-          asset_in, asset_out, amount_in, amount_out, signer
+          asset_in, asset_out, amount_in, amount_out, signer, account
           FROM price_data.account_swap_activity FINAL
           ${swapAmountFilter.joinSql}
           WHERE ${bound} AND account IN (${list})
@@ -20000,7 +20297,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
           LIMIT {n:UInt32}`,
       query_params: { n: catFetch }, format: 'JSONEachRow',
     })
-    const swapRows = await swapRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; asset_in: number; asset_out: number; amount_in: string; amount_out: string; signer: string }>()
+    const swapRows = await swapRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; asset_in: number; asset_out: number; amount_in: string; amount_out: string; signer: string; account: string }>()
     noteSource(swapRows.length, oldestWindowBlock(swapRows, r => r.block_height))
     const liqExt = await liquidationExtrinsics(swapRows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null]))
     for (const rep of swapRouteReps(swapRows)) {
@@ -20423,6 +20720,15 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const intents = exact ? exact.enumerated.intents
     : wantIntents ? await getRecentIntents(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
   noteSource(intents.length, oldestWindowBlock(intents, r => r.blockHeight))
+  // Concentrated-liquidity acts of the accounts: swaps under the trade family, position and
+  // vault acts under liquidity. Not part of an exact plan's enumeration (its count does
+  // not include them either).
+  const v3Rows = exact ? exact.enumerated.v3
+    : !(type === 'all' || type === 'trade' || type === 'liquidity') ? []
+      : await getRecentV3Rows(type === 'trade' ? 'swap' : type === 'liquidity' ? 'liquidity' : 'all', catFetch, from, to, 0, queryFilters, { accounts, action })
+  noteSource(v3Rows.length, oldestWindowBlock(v3Rows, r => r.blockHeight))
+  const accountTradeExtrinsics = new Set(trades.filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
+  const v3Acts = v3Rows.filter(r => !(r.type === 'trade' && r.extrinsicIndex != null && accountTradeExtrinsics.has(`${r.blockHeight}:${r.extrinsicIndex}`)))
   const govVotes = exact || !wantVotes ? []
     : (await getRecentVotes(catFetch, from, to, 0, {}, accounts, queryFilters)).map(voteActivityRow)
   // Collective (Council / Technical Committee) votes are a source of their own,
@@ -24951,16 +25257,17 @@ async function buildTagDetailForMembers(
     let moneyMarket = await aggregateMoneyMarket(mmMembers)
     // LP stays (it feeds the displayed value); only the heavy portfolio-history walk
     // and DCA — neither shown on the card — are skipped in summary.
-    const [history, bareLp, farmLp, xykLp, activeDcas] = await Promise.all([
+    const [history, bareLp, farmLp, xykLp, v3Lp, activeDcas] = await Promise.all([
       summary
-        ? Promise.resolve({ portfolioSeries: [] as number[], portfolioDates: [] as string[], portfolioBlocks: [] as number[], balanceHistory: [] as AssetBalanceHistory[] })
+        ? Promise.resolve({ portfolioSeries: [] as number[], portfolioSeriesExHdx: [] as number[], portfolioDates: [] as string[], portfolioBlocks: [] as number[], balanceHistory: [] as AssetBalanceHistory[] })
         : getAccountHistoryShared(tagHistoryAccounts, opts.scope),
       getOmnipoolPositions(members),
       getFarmingPositions(members),
       getXykPositions(members, balances),
+      getUniswapV3Positions(members),
       summary ? Promise.resolve([]) : getActiveDcas(members),
     ])
-    const lpPositions = [...bareLp, ...farmLp, ...xykLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
+    const lpPositions = [...bareLp, ...farmLp, ...xykLp, ...v3Lp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
     // Staking-backed markets (GIGAHDX): collateral is the already-counted locked HDX,
     // so don't fold it into balances/portfolio (see getAddress). Debt still counts.
     const countedMm = moneyMarket.filter(p => !p.stakingBacked)
@@ -25164,6 +25471,39 @@ export async function getListTagValueEvents(listId: string, tagId: string, membe
 // exclusions and $-value filters aren't replicated here (a coarse histogram).
 export interface DailyFilters { type?: string; action?: string; token?: string }
 const TRANSFER_EVENTS = ['Balances.Transfer', 'Tokens.Transfer', 'Currencies.Transferred']
+// Concentrated-liquidity rows of activity_histogram_events (uniswap_v3_histogram_mv in
+// 010): the pool's own Swap/Mint/Burn/Collect stand for manager positions as well —
+// a manager's IncreaseLiquidity/DecreaseLiquidity/Collect is 1:1 with the pool row it
+// causes and only the pool row names the pool — and the vault's Deposit/Withdraw/
+// Rebalance stand for the vault (its pool rows are plumbing). Grouped by the action
+// the feed gives the act, so the bars follow the action filter like the list.
+const V3_SWAP_HISTOGRAM_EVENTS = ['UniswapV3.Swap']
+const V3_LIQUIDITY_HISTOGRAM_EVENTS: Record<string, string[]> = {
+  Add: ['UniswapV3.Mint', 'Gamma.Deposit'], Remove: ['UniswapV3.Burn', 'Gamma.Withdraw'],
+  CollectFees: ['UniswapV3.Collect'], Rebalance: ['Gamma.Rebalance'],
+}
+const V3_LIQUIDITY_HISTOGRAM_NAMES = Object.values(V3_LIQUIDITY_HISTOGRAM_EVENTS).flat()
+export const V3_HISTOGRAM_NAMES = [...V3_SWAP_HISTOGRAM_EVENTS, ...V3_LIQUIDITY_HISTOGRAM_NAMES]
+export function v3LiquidityHistogramNames(action?: string): string[] {
+  return action ? (V3_LIQUIDITY_HISTOGRAM_EVENTS[action] ?? []) : V3_LIQUIDITY_HISTOGRAM_NAMES
+}
+// The token-filter arm for the v3 histogram rows, which carry no asset_refs: a row is
+// the token's when its log came from a pool holding the token, or that pool's vault,
+// read through uniswap_v3_events at the same (block, event) identity. Pools come from
+// the registry with the feed's aliases (a DOT filter reaches the aDOT/HOLLAR pool);
+// no pool for the token means no arm, and the rows fall to the asset_refs test.
+export async function v3HistogramTokenArm(names: readonly string[], tokenIds: readonly number[]): Promise<string> {
+  const v3Names = names.filter(n => V3_HISTOGRAM_NAMES.includes(n))
+  if (!v3Names.length || !tokenIds.length) return ''
+  const registry = await v3Registry()
+  const pools = v3PoolsForAssets(registry, [...tokenIds])
+  if (!pools.length) return ''
+  const vaults = [...registry.vaults.values()].filter(v => v.pool && pools.includes(v.pool)).map(v => v.address)
+  const contracts = [...pools, ...vaults].map(a => `'${a.toLowerCase().replace(/[^0-9a-fx]/g, '')}'`).join(',')
+  return ` OR (event_name IN (${sqlNames(v3Names)}) AND (block_height, event_index) IN (
+            SELECT block_height, event_index FROM price_data.uniswap_v3_events
+            WHERE block_timestamp > now() - INTERVAL 90 DAY AND contract_address IN (${contracts})))`
+}
 // Omnipool.PositionCreated is a liquidity source for ONE shape only: a token
 // listing's `add_token` mints the seed position to a designated owner without
 // emitting Omnipool.LiquidityAdded, so the grant is invisible unless this event
@@ -25254,12 +25594,13 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
         names = otcAction && OTC_ACTION_EVENTS[otcAction] ? OTC_ACTION_EVENTS[otcAction] : OTC_EVENT_NAMES
         ignoreToken = true
       } else {
-        names = [...TRANSFER_EVENTS, ...SWAP_EVENTS, ...LIQUIDITY_EVENTS, ...VOTE_EVENTS, ...STAKING_EVENT_NAMES, ...BOND_EVENT_NAMES, ...INTENT_EVENT_NAMES, ...OTC_EVENT_NAMES]
+        names = [...TRANSFER_EVENTS, ...SWAP_EVENTS, ...LIQUIDITY_EVENTS, ...VOTE_EVENTS, ...STAKING_EVENT_NAMES, ...BOND_EVENT_NAMES, ...INTENT_EVENT_NAMES, ...OTC_EVENT_NAMES, ...V3_HISTOGRAM_NAMES]
       }
+      const v3Arm = ignoreToken || intentOnly || !tokenIds?.length ? '' : await v3HistogramTokenArm(names, tokenIds)
       const assetFilter = ignoreToken || tokenIds == null ? '' : !tokenIds.length
         ? 'AND 0'
         : intentOnly ? `AND (event_name != 'Intent.IntentSubmitted' OR hasAny(asset_refs, [${tokenIds.join(',')}]))`
-          : `AND hasAny(asset_refs, [${tokenIds.join(',')}])`
+          : `AND (hasAny(asset_refs, [${tokenIds.join(',')}])${v3Arm})`
       // An action no event in this category produces selects nothing — the same answer
       // the list gives it — rather than an empty `IN ()`.
       const nameFilter = names.length ? `event_name IN (${sqlNames(names)})` : '0'
@@ -25456,7 +25797,7 @@ export interface SearchResult {
   // and caption the hit without a follow-up fetch. `value` is the pool id
   // ('omnipool' for the Omnipool itself), `asset` the icon to draw — the share
   // token for a stableswap, the largest leg for an XYK pair.
-  poolKind?: 'omnipool' | 'stableswap' | 'xyk'
+  poolKind?: 'omnipool' | 'stableswap' | 'xyk' | 'uniswapv3'
   tvlUsd?: number | null
   index?: number
   status?: string
@@ -25738,13 +26079,14 @@ async function poolDirectoryForSearch(): Promise<import('./poolService.ts').Pool
 function poolSearchResult(p: import('./poolService.ts').PoolListEntry): SearchResult {
   return {
     type: 'pool',
-    value: p.kind === 'omnipool' ? 'omnipool' : String(p.poolId),
+    // A concentrated-liquidity pool is its contract address; the others their share id.
+    value: p.kind === 'omnipool' ? 'omnipool' : p.kind === 'uniswapv3' ? (p.address ?? '') : String(p.poolId),
     label: p.name,
     poolKind: p.kind,
     tvlUsd: p.tvlUsd,
-    // A stableswap's identity is its share token; an XYK pair shows its largest
-    // leg. The Omnipool hit deliberately carries no asset — no single icon is it.
-    asset: p.kind === 'stableswap' && p.poolId != null ? assetDescriptor(p.poolId) : p.kind === 'xyk' ? p.composition[0]?.asset : undefined,
+    // A stableswap's identity is its share token; an XYK pair or a v3 pool shows its
+    // largest leg. The Omnipool hit deliberately carries no asset — no single icon is it.
+    asset: p.kind === 'stableswap' && p.poolId != null ? assetDescriptor(p.poolId) : p.kind === 'xyk' || p.kind === 'uniswapv3' ? p.composition[0]?.asset : undefined,
   }
 }
 
@@ -25826,6 +26168,15 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
   // A 64-hex value is ambiguous (could be an AccountId32 or a block/extrinsic hash);
   // only offer it as an account when it didn't resolve to a known hash.
   const seenAccounts = new Set<string>()
+  // A concentrated-liquidity pool, or its vault, by contract address. The H160 is an
+  // account as well (below), but the pool page is what the address means.
+  if (/^0x[0-9a-fA-F]{40}$/.test(query)) {
+    const registry = await v3Registry()
+    const lc = query.toLowerCase()
+    const poolAddress = registry.pools.has(lc) ? lc : registry.vaults.get(lc)?.pool ?? null
+    const hit = poolAddress ? (await poolDirectoryForSearch()).find(p => p.kind === 'uniswapv3' && p.address === poolAddress) : undefined
+    if (hit) results.push(poolSearchResult(hit))
+  }
   const norm = await canonicalizeAddress(query)
   if (norm?.accountId && (!is64Hex || !hashHit)) {
     const id = identityForAccount(norm.accountId)

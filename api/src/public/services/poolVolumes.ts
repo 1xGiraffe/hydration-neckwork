@@ -92,7 +92,7 @@ export const WINDOW_DAYS: Record<VolumeWindow, number> = { '1h': 1 / 24, '24h': 
 export type RoutedWindow = '1h' | '24h'
 
 /** Venues that carry a pool key rather than a single global pool. */
-export type PoolVenue = 'stableswap' | 'xyk'
+export type PoolVenue = 'stableswap' | 'xyk' | 'uniswapv3'
 
 export interface OmnipoolVolumeItem {
   assetId: string

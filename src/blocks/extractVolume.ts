@@ -20,6 +20,14 @@ import * as stableswap from '../types/stableswap/events.js';
 import * as broadcast from '../types/broadcast/events.js';
 import { foldOmnipoolHubHops } from './hubHops.js';
 import { aggregateTradeVolumeRows, sumBigIntStrings, sumDecimal128Strings, sumVolumeFields } from './volumeMath.js';
+import {
+  EVM_LOG_EVENT_NAME,
+  decodeUniswapV3Log,
+  evmLogOf,
+  routedUniswapV3Extrinsics,
+  uniswapV3SwapTrade,
+  type UniswapV3PoolIndex,
+} from '../price/uniswapV3.js';
 
 /**
  * Unified swap event structure across all pool types
@@ -43,9 +51,25 @@ interface DecodedTrade {
   trader?: string | null;
   /** `fillerType.__kind` of a Broadcast trade; absent on a legacy pallet event. */
   filler?: string;
+  /**
+   * The Broadcast `filler` ACCOUNT (distinct from `filler`, which is the venue
+   * kind): the account the runtime named as filling the trade, a pool for an AMM
+   * venue and the party on the other side for a peer-to-peer one.
+   */
+  fillerAccount?: string | null;
 }
 
 export type AssetCanonicalizer = (assetId: number) => number;
+
+export interface ExtractVolumeOptions {
+  /**
+   * Concentrated-liquidity pools whose tokens resolved to asset ids, by pool
+   * address. With one or more, a pool's `Swap` log in `EVM.Log` is booked as a
+   * trade unless the same extrinsic also carries a `Broadcast.Swapped3` from the
+   * UniswapV3 venue — the router-routed case, which is already counted.
+   */
+  uniswapV3Pools?: UniswapV3PoolIndex;
+}
 
 interface CanonicalTradeLeg extends DecodedTradeAssetAmount {
   canonicalAssetId: number;
@@ -58,6 +82,8 @@ interface EventLike {
   name: string;
   block: { _runtime: any };
   args: unknown;
+  /** Set for events in the ApplyExtrinsic phase when the processor requests the field. */
+  extrinsicIndex?: number;
 }
 
 function canonicalTradeLegs(
@@ -123,6 +149,7 @@ function normalizeAccount(value: unknown): string | null {
 
 function broadcastTrade(decoded: {
   swapper: unknown;
+  filler?: unknown;
   fillerType: { __kind: string };
   inputs: Array<{ asset: number; amount: bigint }>;
   outputs: Array<{ asset: number; amount: bigint }>;
@@ -477,7 +504,7 @@ function jsonBroadcastTrade(event: EventLike): DecodedTrade | null {
     jsonFallbackWarned.add(key);
     console.warn(`[extractVolume] ${event.name} matched no typegen arm at spec ${specVersion}; decoded from block metadata instead — add a typegen arm for this runtime`);
   }
-  return broadcastTrade({ swapper: args.swapper, fillerType: { __kind: fillerKind }, inputs, outputs });
+  return broadcastTrade({ swapper: args.swapper, filler: args.filler, fillerType: { __kind: fillerKind }, inputs, outputs });
 }
 
 function decodeTradeEvent(event: EventLike): DecodedTrade | null {
@@ -498,6 +525,7 @@ function decodeTradeEvent(event: EventLike): DecodedTrade | null {
       return decorateLegacyBroadcastTrade({
         eventName: name,
         trader: normalizeAccount(decoded.swapper),
+        fillerAccount: normalizeAccount(decoded.filler),
         fillerType: decoded.fillerType.__kind,
         operation: decoded.operation.__kind,
         inputs: decoded.inputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
@@ -539,6 +567,7 @@ function decodeTradeEvent(event: EventLike): DecodedTrade | null {
 function decorateLegacyBroadcastTrade({
   eventName,
   trader,
+  fillerAccount,
   fillerType,
   operation,
   inputs,
@@ -546,6 +575,7 @@ function decorateLegacyBroadcastTrade({
 }: {
   eventName: string;
   trader?: string | null;
+  fillerAccount?: string | null;
   fillerType: string;
   operation: string;
   inputs: DecodedTradeAssetAmount[];
@@ -562,12 +592,13 @@ function decorateLegacyBroadcastTrade({
     return {
       trader,
       filler: fillerType,
+      fillerAccount,
       inputs: [{ assetId: inputs[0].assetId, amount: outputs[0].amount }],
       outputs: [{ assetId: outputs[0].assetId, amount: inputs[0].amount }],
     };
   }
 
-  return { trader, filler: fillerType, inputs, outputs };
+  return { trader, filler: fillerType, fillerAccount, inputs, outputs };
 }
 
 /**
@@ -576,19 +607,47 @@ function decorateLegacyBroadcastTrade({
  * hubHops.ts). Both volume extractors read trades through here so the hub asset
  * is booked the same way for candles and for per-account volume.
  */
-function decodeBlockTrades(events: Array<EventLike>, blockHeight: number, specVersion: number): DecodedTrade[] {
-  const trades: DecodedTrade[] = [];
+function decodeBlockTrades(
+  events: Array<EventLike>,
+  blockHeight: number,
+  specVersion: number,
+  options: ExtractVolumeOptions = {},
+): DecodedTrade[] {
+  const uniswapV3Pools = options.uniswapV3Pools;
+  const readPoolLogs = uniswapV3Pools != null && uniswapV3Pools.size > 0;
+  // Event order is kept; a pool's Swap log is only decided once the whole block
+  // is read, because the Broadcast fill of a routed hop follows the log in its
+  // extrinsic.
+  const slots: Array<{ trade: DecodedTrade; extrinsicIndex?: number; fromPoolLog: boolean }> = [];
   for (const event of events) {
-    if (!isSwapEvent(event.name, specVersion)) {
+    if (isSwapEvent(event.name, specVersion)) {
+      const trade = decodeTradeEvent(event);
+      if (!trade) {
+        console.warn(`[extractVolume] Skipping event ${event.name} at block ${blockHeight} (decode failed)`);
+        continue;
+      }
+      slots.push({ trade, extrinsicIndex: event.extrinsicIndex, fromPoolLog: false });
       continue;
     }
-    const trade = decodeTradeEvent(event);
-    if (!trade) {
-      console.warn(`[extractVolume] Skipping event ${event.name} at block ${blockHeight} (decode failed)`);
-      continue;
-    }
-    trades.push(trade);
+    if (!readPoolLogs || event.name !== EVM_LOG_EVENT_NAME) continue;
+    const log = evmLogOf(event.args);
+    const decoded = log ? decodeUniswapV3Log(log) : null;
+    if (decoded?.kind !== 'swap') continue;
+    const swap = uniswapV3SwapTrade(decoded, uniswapV3Pools);
+    if (!swap) continue;
+    slots.push({
+      trade: { trader: swap.account, filler: swap.filler, inputs: swap.inputs, outputs: swap.outputs },
+      extrinsicIndex: event.extrinsicIndex,
+      fromPoolLog: true,
+    });
   }
+
+  const routedExtrinsics = routedUniswapV3Extrinsics(
+    slots.filter(slot => !slot.fromPoolLog).map(slot => ({ filler: slot.trade.filler, extrinsicIndex: slot.extrinsicIndex })),
+  );
+  const trades = slots
+    .filter(slot => !slot.fromPoolLog || slot.extrinsicIndex == null || !routedExtrinsics.has(slot.extrinsicIndex))
+    .map(slot => slot.trade);
   return foldOmnipoolHubHops(trades, trade => trade.trader);
 }
 
@@ -610,11 +669,12 @@ export function extractVolumeFromSwaps(
   specVersion: number,
   prices: PriceMap,
   decimals: AssetDecimals,
-  canonicalizeAssetId: AssetCanonicalizer = assetId => assetId
+  canonicalizeAssetId: AssetCanonicalizer = assetId => assetId,
+  options: ExtractVolumeOptions = {},
 ): PriceRow[] {
   const volumeRows: PriceRow[] = [];
 
-  for (const trade of decodeBlockTrades(events, blockHeight, specVersion)) {
+  for (const trade of decodeBlockTrades(events, blockHeight, specVersion, options)) {
     // Generate volume rows from all input and output asset legs
     const rows = tradeToVolumeRows(trade, blockHeight, prices, decimals, canonicalizeAssetId);
     volumeRows.push(...rows);
@@ -699,11 +759,12 @@ export function extractTradeVolumeFromSwaps(
   specVersion: number,
   prices: PriceMap,
   decimals: AssetDecimals,
-  canonicalizeAssetId: AssetCanonicalizer = assetId => assetId
+  canonicalizeAssetId: AssetCanonicalizer = assetId => assetId,
+  options: ExtractVolumeOptions = {},
 ): TradeVolumeRow[] {
   const tradeRows: TradeVolumeRow[] = [];
 
-  for (const trade of decodeBlockTrades(events, blockHeight, specVersion)) {
+  for (const trade of decodeBlockTrades(events, blockHeight, specVersion, options)) {
     tradeRows.push(...tradeToAccountVolumeRows(trade, blockHeight, prices, decimals, canonicalizeAssetId));
   }
 

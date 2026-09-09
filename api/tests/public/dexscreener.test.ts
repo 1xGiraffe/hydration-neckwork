@@ -161,6 +161,10 @@ describe('pair ids', () => {
     // account does not — and the previous adapter's ids omit them.
     expect(pairId(await forms(), 'xyk', XYK_ACCOUNT, 0, 5)).toBe(XYK_ACCOUNT)
     expect(pairId(await forms(), 'xyk', XYK_ACCOUNT, 5, 0)).toBe(XYK_ACCOUNT)
+    // A concentrated-liquidity pool is its contract alone, lowercased, whichever
+    // way the pair traded — one pool is one pair at one fee tier.
+    expect(pairId(await forms(), 'uniswapv3', '0x5C6208A3c316a801f8996750aa7b6f45fc988548', 1001, 222)).toBe('0x5c6208a3c316a801f8996750aa7b6f45fc988548')
+    expect(pairId(await forms(), 'uniswapv3', '0x5c6208a3c316a801f8996750aa7b6f45fc988548', 222, 1001)).toBe('0x5c6208a3c316a801f8996750aa7b6f45fc988548')
   })
 
   it('names a stableswap pool by its on-chain account, not its pool id', async () => {
@@ -206,6 +210,10 @@ describe('pair ids', () => {
   it('accepts every id shape it emits, plus the legacy ones, and rejects malformed ids', async () => {
     const { parsePairIdShape } = await import('../../src/public/services/dexscreener.ts')
     expect(parsePairIdShape(XYK_ACCOUNT)).toEqual({ pool: XYK_ACCOUNT, assets: [] })
+    // A bare 20-byte contract is a concentrated-liquidity pool; with asset
+    // components it is malformed (the pool IS the pair).
+    expect(parsePairIdShape('0x5C6208A3c316a801f8996750aa7b6f45fc988548')).toEqual({ pool: '0x5c6208a3c316a801f8996750aa7b6f45fc988548', assets: [] })
+    expect(parsePairIdShape('0x5c6208a3c316a801f8996750aa7b6f45fc988548-1001-222')).toBeNull()
     expect(parsePairIdShape(`${OMNIPOOL_ACCOUNT}-1-${HOLLAR_CONTRACT}`))
       .toEqual({ pool: OMNIPOOL_ACCOUNT, assets: ['1', HOLLAR_CONTRACT] })
     // Legacy: a stableswap pool named by its decimal pool id, and either asset order.
@@ -551,14 +559,22 @@ describe('the events queries', () => {
 
   it('binds the block range as parameters and bounds the reserve scan with it', async () => {
     const queries = await queriesFor('/dexscreener/events?fromBlock=9000000&toBlock=9000100')
-    expect(queries).toHaveLength(3)
+    // Omnipool, stableswap, XYK and the concentrated-liquidity pools.
+    expect(queries).toHaveLength(4)
     for (const { query, params } of queries) {
       expect(params.fromBlock).toBe(9000000)
       expect(params.toBlock).toBe(9000100)
+      expect(params.reserveFrom).toBe(9000000 - 1200)
+      if (query.includes('pub:ds:events:uniswapv3')) {
+        // A concentrated pool's holdings are not its price, so no reserve join at
+        // all: the reader sees reserve_block 0 and omits `reserves`.
+        expect(query).not.toMatch(/ASOF LEFT JOIN/)
+        expect(query).toMatch(/0 AS reserve_block/)
+        continue
+      }
       // The reserve history is only read from one staleness window below the
       // request, so a delisted asset's ancient final row is never scanned, and
       // the join stays a bounded read rather than a whole-table ASOF.
-      expect(params.reserveFrom).toBe(9000000 - 1200)
       expect(query).toMatch(/ASOF LEFT JOIN/)
       expect(query).toMatch(/block_height >= \{reserveFrom:UInt32\}/)
     }
@@ -571,10 +587,12 @@ describe('the events queries', () => {
     }
   })
 
-  it('reads only the three AMM venues, never the money-market or OTC facades', async () => {
+  it('reads only the four AMM venues, never the money-market or OTC facades', async () => {
+    // The three pallet AMMs plus the concentrated-liquidity (Uniswap v3) pools
+    // (2026-09-09); aave, otc, hsm and lbp stay out for the reasons on DEX_VENUES.
     const venues = (await queriesFor('/dexscreener/events?fromBlock=1&toBlock=10'))
       .map(({ query }) => /venue = '(\w+)'/.exec(query)?.[1])
-    expect(venues.sort()).toEqual(['omnipool', 'stableswap', 'xyk'])
+    expect(venues.sort()).toEqual(['omnipool', 'stableswap', 'uniswapv3', 'xyk'])
   })
 })
 

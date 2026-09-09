@@ -236,16 +236,75 @@ describe('GET /v1/accounts/:address/votes', () => {
 })
 
 describe('GET /v1/accounts/:address/liquidity', () => {
-  it('maps the liquidity event columns', async () => {
-    const client = fakeDataClient(query => (query.includes('-- data:accounts:liquidity')
-      ? [{ block_height: 600, event_index: 8, extrinsic_index: 2, ts: '2026-08-01 00:00:00', event_name: 'Omnipool.LiquidityAdded', asset_id: 5, amount: '100', amount_a: '', asset_b: 0, pool_account: '', asset_refs: [5] }]
-      : undefined))
+  // The v3 arm's columns come back beside the pallet event's, shaped alike.
+  const V3_POOL = '0x5c6208a3c316a801f8996750aa7b6f45fc988548'
+  const V3_ROW = {
+    block_height: 700, event_index: 24, extrinsic_index: 3, ts: '2026-09-09 08:30:30', event_name: 'UniswapV3PositionManager.IncreaseLiquidity', action: 'Add',
+    asset_id: 1001, amount: '421811246', amount_a: '', amount_b: '299999999999999996', asset_b: 222, pool_account: '', asset_refs: [1001, 222],
+    pool_address: V3_POOL, token_id: '1', tick_lower: 184980, tick_upper: 185100, vault: '', shares: '',
+  }
+  const SUBSTRATE_ROW = {
+    block_height: 600, event_index: 8, extrinsic_index: 2, ts: '2026-08-01 00:00:00', event_name: 'Omnipool.LiquidityAdded', action: '',
+    asset_id: 5, amount: '100', amount_a: '', amount_b: '', asset_b: 0, pool_account: '', asset_refs: [5],
+    pool_address: '', token_id: '', tick_lower: null, tick_upper: null, vault: '', shares: '',
+  }
+
+  it('maps the liquidity event columns and names the pallet event\'s act', async () => {
+    const client = fakeDataClient(query => (query.includes('-- data:accounts:liquidity') ? [SUBSTRATE_ROW] : undefined))
     app = await freshDataApp(client)
     const res = await app.inject({ url: `/v1/accounts/${ACC}/liquidity`, headers: AUTH })
     expect(res.json().items[0]).toEqual({
       blockHeight: 600, eventIndex: 8, extrinsicIndex: 2, extrinsicHash: null, timestamp: '2026-08-01T00:00:00.000Z',
-      eventName: 'Omnipool.LiquidityAdded', assetId: '5', amount: '100', amountA: null, assetB: null, poolAccount: null, assetRefs: ['5'],
+      eventName: 'Omnipool.LiquidityAdded', action: 'Add', assetId: '5', amount: '100', amountA: null, amountB: null, assetB: null, poolAccount: null, assetRefs: ['5'],
+      poolAddress: null, tokenId: null, tickLower: null, tickUpper: null, vault: null, shares: null,
     })
+  })
+
+  it('serves a concentrated-liquidity act with its pool, position and range beside the pallet events', async () => {
+    const client = fakeDataClient(query => (query.includes('-- data:accounts:liquidity') ? [V3_ROW, SUBSTRATE_ROW] : undefined))
+    app = await freshDataApp(client)
+    const res = await app.inject({ url: `/v1/accounts/${ACC}/liquidity`, headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    const [v3, substrate] = res.json().items
+    expect(v3).toEqual({
+      blockHeight: 700, eventIndex: 24, extrinsicIndex: 3, extrinsicHash: null, timestamp: '2026-09-09T08:30:30.000Z',
+      eventName: 'UniswapV3PositionManager.IncreaseLiquidity', action: 'Add',
+      // token0 is the assetId side, token1 the assetB side.
+      assetId: '1001', amount: '421811246', amountA: null, amountB: '299999999999999996', assetB: '222', poolAccount: null, assetRefs: ['1001', '222'],
+      poolAddress: V3_POOL, tokenId: '1', tickLower: 184980, tickUpper: 185100, vault: null, shares: null,
+    })
+    expect(substrate.action).toBe('Add')
+    // The v3 arm is matched by the account's EVM identity: the first 20 bytes of a
+    // substrate key, or the H160 itself for an EVM account.
+    const read = client.seen.find(s => s.query.includes('-- data:accounts:liquidity'))!
+    expect(read.params.h160).toBe(ACC.slice(0, 42))
+    expect(read.params.account).toBe(ACC)
+  })
+
+  it('restates the explorer\'s v3 act rules in the SQL: owner at the time, plumbing excluded, fees beyond principal', async () => {
+    const client = fakeDataClient(query => (query.includes('-- data:accounts:liquidity') ? [] : undefined))
+    app = await freshDataApp(client)
+    await app.inject({ url: `/v1/accounts/${ACC}/liquidity?limit=5`, headers: AUTH })
+    const { query } = client.seen.find(s => s.query.includes('-- data:accounts:liquidity'))!
+    // Both arms are windowed, cursored and bounded on their own, then merged.
+    expect(query.match(/LIMIT \{bound:UInt32\}/g)).toHaveLength(3)
+    expect(query).toContain('FROM price_data.liquidity_activity_by_account')
+    expect(query).toContain('FROM v3_acts')
+    // The NFT holder at the act's moment — the nearest preceding ERC-721 transfer.
+    expect(query).toMatch(/ASOF INNER JOIN v3_token_holders AS h ON .*h\.pos <= r\.pos/)
+    // A manager's or vault's pool rows are plumbing; a burn(0) poke is never an act.
+    expect(query).toContain('AND owner NOT IN (SELECT contract_address FROM v3_managers)')
+    expect(query).toContain('AND owner NOT IN (SELECT vault_address FROM v3_vaults)')
+    expect(query).toContain("AND NOT (event_name = 'Burn' AND liquidity = 0)")
+    // CollectFees is what the collect paid beyond the same-extrinsic principal.
+    expect(query).toContain("if(r.mgr_event = 'Collect', greatest(r.amount0 - d.dec0, toInt256(0)), r.amount0) AS a0")
+    expect(query).toContain("WHERE r.mgr_event != 'Collect' OR a0 > 0 OR a1 > 0")
+    // A vault act goes to its beneficiary, `to`, else the sender.
+    expect(query).toMatch(/if\(v\.counterparty != '' AND v\.counterparty != '0x0{40}', v\.counterparty, v\.actor\) = \{h160:String\}/)
+    // The alias sits BEFORE FINAL, the only order ClickHouse parses.
+    expect(query).toContain('FROM price_data.uniswap_v3_pools AS p FINAL')
+    expect(query).toContain('FROM price_data.uniswap_v3_events AS v FINAL')
+    expect(query).not.toMatch(/FINAL AS \w+/)
   })
 })
 

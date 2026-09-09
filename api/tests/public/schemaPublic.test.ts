@@ -63,9 +63,10 @@ describe('006_public.sql', () => {
   })
 
   it('every statement parses through the bootstrap splitter and only creates', () => {
-    // 5 projections + 9 source MVs + pool_swap_hourly, its staging twin, and
-    // the compact hourly source-watermark table.
-    expect(statements).toHaveLength(18)
+    // 5 projections + 9 source MVs + pool_swap_hourly, its staging twin, the
+    // compact hourly source-watermark table, and the raw_evm_logs twin of the
+    // account_trade_volume staleness watermark (the v3 pool Swap logs).
+    expect(statements).toHaveLength(19)
     for (const statement of statements) expect(statement.startsWith('CREATE ')).toBe(true)
     // No DROP/ALTER/INSERT: the file is re-applied on every deployment start, and a
     // destructive or additive statement there would wipe or double-count live data.
@@ -296,6 +297,13 @@ describe('006_public.sql', () => {
     // always has a destination and only the Account variant carries a recipient.
     expect(mv).toContain(noSpace(`lower(JSONExtractString(x, 'destination', '__kind'))`))
     expect(mv).toContain(noSpace(`JSONExtractString(x, 'destination', 'value')`))
+  })
+
+  // The UniswapV3 Broadcast names the SwapRouter as filler, so keying on it would
+  // collapse every concentrated pool onto one key; the uniswap_v3_legs derivation
+  // books that venue from the pool's own log instead.
+  it('leaves the UniswapV3 filler to the uniswap_v3_legs derivation', () => {
+    expect(noSpace(statementFor('pool_swap_legs_mv'))).toContain(noSpace("AND filler_kind != 'UniswapV3'"))
   })
 
   it('keys pool_key per venue so no venue collapses onto an empty string', () => {

@@ -4,6 +4,7 @@ import {
   buildParamEvents,
   carrySeries,
   decodePegSource,
+  drawableSeries,
   foldTopSeries,
   rankPools,
   selectCompositionSeries,
@@ -64,6 +65,24 @@ describe('carrySeries', () => {
   it('a destroyed series ends at its last sample instead of forward-filling to now', () => {
     const points = new Map([['2026-01-01', 5], ['2026-01-02', 7]])
     expect(carrySeries(grid, points)).toEqual([5, 7, null, null, null])
+  })
+})
+
+describe('drawableSeries', () => {
+  const s = (key: string, amounts: (number | null)[]): AssetLiquiditySeries => ({
+    key, label: key, amounts, usd: amounts.map(a => (a == null ? null : a * 2)),
+  })
+
+  it('drops a source with nothing to draw in the window, keeping the ones that have a point', () => {
+    // A pool created after the last closed bucket, or one that died before the
+    // window, has an all-null series: publishing it puts a legend entry and a
+    // flat baseline band on the chart for a pool that was not there.
+    expect(drawableSeries([s('omnipool', [1, 2]), s('v3:new', [null, null]), s('xyk:dead', [null, null])]).map(x => x.key))
+      .toEqual(['omnipool'])
+    // A source with a single point stays: that is the pool's whole life so far.
+    expect(drawableSeries([s('v3:new', [null, 5])]).map(x => x.key)).toEqual(['v3:new'])
+    // A zero-valued point is a measurement, not an absence.
+    expect(drawableSeries([s('drained', [null, 0])]).map(x => x.key)).toEqual(['drained'])
   })
 })
 

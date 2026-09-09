@@ -547,7 +547,26 @@ export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, show
 // `floorZero` clamps the axis floor at 0 — a price or share axis must not pad
 // into negative territory when the data sits near its floor.
 const LINE_W = 860, LINE_PAD_L = 56, LINE_PAD_R = 6
-export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) => v.toFixed(4), floorZero, band, zoomKey, refine }: {
+/** A horizontal value band (a vault's managed range, a peg corridor). */
+export interface ChartZone { from: number; to: number; label?: string; color?: string }
+
+/**
+ * Where a zone lands on a chart whose y-domain is [min, max], as fractions from
+ * the TOP: a zone reaching past an edge is clipped to it rather than dropped, so a
+ * band wider than the drawn window still reads as "we are inside it". `covers` is
+ * true when it fills the plot — then the tint says nothing and only its label does.
+ */
+export function zoneSpan(zone: ChartZone, min: number, max: number): { top: number; bottom: number; covers: boolean; loInside: boolean; hiInside: boolean } | null {
+  const span = max - min
+  if (!(span > 0)) return null
+  const lo = Math.min(zone.from, zone.to), hi = Math.max(zone.from, zone.to)
+  if (hi <= min || lo >= max) return null
+  const top = Math.max(0, (max - hi) / span)
+  const bottom = Math.min(1, (max - lo) / span)
+  return { top, bottom, covers: bottom - top > 0.95, loInside: lo > min, hiInside: hi < max }
+}
+
+export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) => v.toFixed(4), floorZero, band, zones, markLast, zoomKey, refine }: {
   buckets: string[]; series: AreaSeries[]; h?: number; yFmt?: (v: number) => string; floorZero?: boolean
   /**
    * Draw two of the series as one filled low/high envelope: a RANGE reads as an
@@ -556,6 +575,15 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
    * refined window carrying only the main line simply has no pair, and no band.
    */
   band?: { lo: string; hi: string; label: string }
+  /**
+   * Horizontal value bands behind the lines — a vault's managed range, a peg
+   * corridor. They are drawn, never measured: keeping them out of the y-domain is
+   * the point, because a band several times wider than the window would flatten
+   * every line inside it. Clipped to the plot, labelled at the right edge.
+   */
+  zones?: ChartZone[]
+  /** Mark the newest point of each drawn line, so "where it stands now" is visible without hovering. */
+  markLast?: boolean
   /** Query-param name persisting the zoom window (back-navigable, shareable). */
   zoomKey?: string
   /** Refetch-on-zoom: a finer grid for base-index window [lo, hi]. */
@@ -678,6 +706,24 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
             </g>
           )
         })}
+        {(zones ?? []).map((z, i) => {
+          const span = zoneSpan(z, min, max)
+          if (!span) return null
+          const y0 = padT + span.top * plotH, y1 = padT + span.bottom * plotH
+          const colour = z.color ?? 'var(--text-low)'
+          return (
+            <g key={`zone${i}`}>
+              {!span.covers && <rect x={padL} y={y0.toFixed(1)} width={plotW} height={Math.max(1, y1 - y0).toFixed(1)} fill={colour} fillOpacity={0.12} />}
+              {span.hiInside && <line x1={padL} x2={W - padR} y1={y0.toFixed(1)} y2={y0.toFixed(1)} stroke={colour} strokeOpacity={0.65} strokeDasharray="4 3" />}
+              {span.loInside && <line x1={padL} x2={W - padR} y1={y1.toFixed(1)} y2={y1.toFixed(1)} stroke={colour} strokeOpacity={0.65} strokeDasharray="4 3" />}
+              {/* Labelled only where an edge is visible: a zone filling the plot is
+                  named by the legend, and its label would float in open space. */}
+              {z.label && (span.hiInside || span.loInside) && (
+                <text className="hdx-ax" x={W - padR - 4} y={(span.hiInside ? y0 + 11 : y1 - 5).toFixed(1)} textAnchor="end" style={{ fill: colour }}>{z.label}</text>
+              )}
+            </g>
+          )
+        })}
         {bandAreas.map((d, i) => <path key={`band${i}`} d={d} fill={bHi!.color} fillOpacity={0.2} />)}
         {min < 1 && max > 1 && <line x1={padL} x2={W - padR} y1={sy(1).toFixed(1)} y2={sy(1).toFixed(1)} stroke="var(--text-low)" strokeDasharray="3 4" strokeOpacity="0.6" />}
         {vSeries.map(s => {
@@ -692,6 +738,14 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
                     fill="none" stroke={s.color} strokeWidth={edge ? 1 : 2} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />)}
             </g>
           )
+        })}
+        {markLast && vSeries.filter(s => !bandKeys.includes(s.key)).map(s => {
+          // The newest drawn point, so "where it stands now" needs no hover.
+          for (let i = s.values.length - 1; i >= 0; i--) {
+            if (s.values[i] == null) continue
+            return <circle key={`last${s.key}`} cx={sx(i).toFixed(1)} cy={sy(s.values[i]!).toFixed(1)} r="3.5" fill={s.color} stroke="var(--bg-elev)" strokeWidth="1.5" />
+          }
+          return null
         })}
         {dateTicks(n).map(i => (
           <text key={i} className="hdx-ax" x={sx(i).toFixed(1)} y={h - 4} textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>{axisTick(vBuckets[i], timeAxis ? viewSpan : 0, grainSec)}</text>

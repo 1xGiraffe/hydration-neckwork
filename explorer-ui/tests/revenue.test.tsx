@@ -132,6 +132,9 @@ describe('Revenue page', () => {
     expect(REVENUE_STREAMS_ORDERED.indexOf('ice_matched_fee')).toBe(REVENUE_STREAMS_ORDERED.indexOf('hsm_revenue') + 1)
     expect(REVENUE_STREAM_LABEL.ice_matched_fee).toBe('ICE matched fee')
     expect(REVENUE_STREAM_COLOR.ice_matched_fee).toBe('var(--cat-intent)')
+    // uniswap_v3_fee follows ice_matched_fee in the API's list too (2026-09-09).
+    expect(REVENUE_STREAMS_ORDERED.indexOf('uniswap_v3_fee')).toBe(REVENUE_STREAMS_ORDERED.indexOf('ice_matched_fee') + 1)
+    expect(REVENUE_STREAM_LABEL.uniswap_v3_fee).toBe('Uniswap v3 pool fees')
   })
 
   it('keeps one color per staker pot', () => {

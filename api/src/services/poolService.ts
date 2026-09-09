@@ -3,9 +3,11 @@ import { DAILY_GRAIN, keySeconds, type HistoryGrain } from './historyGrain.ts'
 import { cachedSwr } from './cache.ts'
 import {
   accountRef, ensurePrices, hasExplorerClient, initExplorerService,
-  omnipoolRemoveLiquidity, reconstructAllOmnipoolPositions, resolveDisplayAccountId,
+  omnipoolRemoveLiquidity, reconstructAllOmnipoolPositions, resolveDisplayAccountId, v3Registry,
   type AccountRef, type AssetRef, type PriceInfo,
 } from './explorerService.ts'
+import { v3PoolHistory, v3PoolLiquidity, type V3History, type V3HistoryPool, type V3PoolLiquidity } from './uniswapV3History.ts'
+import { ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, sqrtPriceX96ToPrice, tickToPrice, v3ManagerPositions, v3PoolStats, v3PricePoints, v3VaultStats, type V3Pool, type V3Registry } from './uniswapV3Service.ts'
 import { assetDescriptor, priceAssetId } from './explorerAssets.ts'
 import { stableswapPoolAccount } from './tagService.ts'
 import { hasDriftingPegs, parseStableswapPools, pegPrice, type StableswapPoolSnapshot } from './stableswapSnapshot.ts'
@@ -40,6 +42,10 @@ let client: ClickHouseClient
 export function initPoolService(c: ClickHouseClient): void {
   client = c
   if (!hasExplorerClient()) initExplorerService(c)
+  // The concentrated-liquidity registry is read by every pool surface (index, asset
+  // sources, detail, the public/CoinGecko/DexScreener venues), so it is wired here
+  // rather than in each process's boot: a process that has pools has v3 pools.
+  initUniswapV3Service(c)
 }
 
 const LRNA_ASSET_ID = 1
@@ -67,8 +73,10 @@ function usdOf(prices: Map<number, PriceInfo>, assetId: number, raw: bigint): nu
 
 export interface PoolCompositionEntry { asset: AssetRef; amount: string; usd: number | null; sharePct: number | null }
 export interface AssetLiquiditySource {
-  kind: 'omnipool' | 'stableswap' | 'xyk'
+  kind: 'omnipool' | 'stableswap' | 'xyk' | 'uniswapv3'
   poolId: number | null
+  // A concentrated-liquidity pool is addressed by its contract, not a share token.
+  address?: string
   name: string
   tvlUsd: number | null
   assetAmount: string
@@ -301,6 +309,18 @@ export function carrySeries(grid: string[], points: Map<string, number>, lastDay
     out.push(current)
   }
   return out
+}
+
+/**
+ * Only the sources with something to draw. A series can be all-null: a pool that
+ * died before a requested window, or one created after the last closed bucket (a
+ * brand-new concentrated-liquidity pool, whose first mint is today). Published, it
+ * puts a legend entry and a flat band at the baseline on the chart for a pool that
+ * was not there over the range drawn — so it is dropped instead. A zero value is a
+ * measurement and stays.
+ */
+export function drawableSeries(series: AssetLiquiditySeries[]): AssetLiquiditySeries[] {
+  return series.filter(s => s.amounts.some(v => v != null))
 }
 
 // Keep the N series with the largest peak value and fold the rest into one
@@ -570,7 +590,10 @@ function omnipoolTvl(pools: CurrentPools, prices: Map<number, PriceInfo>): numbe
 
 export async function countLiquiditySources(assetId: number): Promise<number> {
   const [pools, prices] = await Promise.all([loadCurrentPools(), ensurePrices()])
-  return currentSourcesForAsset(pools, prices, assetId).length
+  // The same union getAssetLiquidity serves, so the tab's count and its rows agree
+  // (the concentrated-liquidity pools made the count read 2 against 3 rows).
+  const v3 = await uniswapV3SourcesForAsset(prices, assetId)
+  return currentSourcesForAsset(pools, prices, assetId).length + v3.length
 }
 
 async function formerSourcesForAsset(pools: CurrentPools, assetId: number): Promise<FormerLiquiditySource[]> {
@@ -734,6 +757,36 @@ async function assetLiquidityHistory(
     }
   }
 
+  // Concentrated-liquidity pools holding the asset: the balance the pool's own logs
+  // imply (mints and swaps in, collects out — v3PoolStats's definition), as a running
+  // total sampled at each bucket's close. The venue is a few thousand rows, read
+  // pool-first. Yield an aToken side accrues is booked by no log and stays out.
+  for (const pool of (await resolvedV3Pools()).filter(p => p.asset0 === assetId || p.asset1 === assetId)) {
+    const side = pool.asset0 === assetId ? 0 : 1
+    const res = await client.query({
+      query: `SELECT ${grain.keySql('block_timestamp')} AS d, toString(sum(delta)) AS v, toUnixTimestamp(max(block_timestamp)) AS last_ts
+              FROM (
+                SELECT block_timestamp,
+                       multiIf(event_name IN ('Mint', 'Swap'), amount${side},
+                               event_name IN ('Collect', 'CollectProtocol'), -amount${side},
+                               event_name = 'Flash', toInt256(aux${side}) - amount${side}, toInt256(0)) AS delta
+                FROM price_data.uniswap_v3_events FINAL
+                WHERE kind = 'pool' AND contract_address = {pool:String}
+                  AND event_name IN ('Mint', 'Swap', 'Collect', 'CollectProtocol', 'Flash') ${upTo}
+              ) GROUP BY d ORDER BY d`,
+      query_params: { pool: pool.address }, format: 'JSONEachRow',
+    })
+    const points = new Map<string, number>()
+    let running = 0n
+    let lastTs = 0
+    for (const r of await res.json<{ d: string; v: string; last_ts: number }>()) {
+      running += BigInt(r.v)
+      lastTs = Math.max(lastTs, Number(r.last_ts))
+      points.set(r.d, Number(running > 0n ? running : 0n) / 10 ** dec)
+    }
+    if (points.size) seriesPoints.push({ key: `v3:${pool.address.slice(2, 10)}`, label: v3PoolName(pool), live: true, points, lastTs })
+  }
+
   if (!seriesPoints.length) return { buckets: [], series: [] }
 
   let firstDay: string | null = null
@@ -759,7 +812,7 @@ async function assetLiquidityHistory(
     return { key: s.key, label: s.label, amounts, usd }
   })
 
-  return { buckets, series: foldTopSeries(series, 5) }
+  return { buckets, series: foldTopSeries(drawableSeries(series), 5) }
 }
 
 // ── Every pool, largest first ─────────────────────────────────────────────────
@@ -774,8 +827,9 @@ async function assetLiquidityHistory(
 // Everything here comes from the snapshot loadCurrentPools already caches, so
 // the whole index is one pass over data the asset and pool pages share.
 export interface PoolListEntry {
-  kind: 'omnipool' | 'stableswap' | 'xyk'
-  poolId: number | null            // share/LP asset id; null for the Omnipool
+  kind: 'omnipool' | 'stableswap' | 'xyk' | 'uniswapv3'
+  poolId: number | null            // share/LP asset id; null for the Omnipool and for a v3 pool
+  address?: string                 // a concentrated-liquidity pool's contract
   name: string
   tvlUsd: number | null
   sharePct: number | null          // of all pooled value
@@ -823,6 +877,8 @@ export async function getPoolsIndex(): Promise<PoolListResponse> {
       })
     }
 
+    entries.push(...await uniswapV3IndexEntries(prices))
+
     return rankPools(entries)
   })
 }
@@ -847,7 +903,7 @@ export async function getAssetLiquidity(assetId: number, grain: HistoryGrain = D
   const wk = win ? `:w:${grain.stepSec}:${win.fromSec}-${win.toSec}` : ''
   return cachedSwr(`explorer:asset-liquidity:${assetId}${wk}`, 60_000, 300_000, async () => {
     const [pools, prices] = await Promise.all([loadCurrentPools(), ensurePrices()])
-    const sources = currentSourcesForAsset(pools, prices, assetId)
+    const sources = [...currentSourcesForAsset(pools, prices, assetId), ...await uniswapV3SourcesForAsset(prices, assetId)]
     const [former, history] = await Promise.all([
       formerSourcesForAsset(pools, assetId),
       assetLiquidityHistory(pools, assetId, grain, win),
@@ -1591,4 +1647,314 @@ export async function getOmnipoolAssetLps(assetId: number, limit: number, offset
     total: groups.length,
     lps,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Concentrated-liquidity (Uniswap v3) pools. State is what the pool's own logs
+// imply (uniswapV3Service): balances from mints, swaps and collects; price and
+// in-range liquidity from the last Swap/Initialize. An aToken side accrues yield
+// the pool never books, so a balance can run slightly under the contract's.
+// ---------------------------------------------------------------------------
+
+export interface UniswapV3PositionRow {
+  manager: string
+  tokenId: string
+  owner: AccountRef | null
+  tickLower: number
+  tickUpper: number
+  priceLower: number
+  priceUpper: number
+  inRange: boolean
+  liquidity: string
+  amount0: string
+  amount1: string
+  usd: number | null
+  openedBlock: number
+  openedAt: string
+  lastBlock: number
+}
+export interface UniswapV3VaultInfo {
+  address: string
+  account: AccountRef
+  createdBlock: number
+  createdAt: string
+  shares: string
+  depositors: number
+  deposits: number
+  withdrawals: number
+  rebalances: number
+  total0: string
+  total1: string
+  tvlUsd: number | null
+  fees0: string
+  fees1: string
+  feesUsd: number | null
+  /** 1/feeDivisor of the vault's earned fees goes to the fee recipient (the Treasury). */
+  feeDivisor: number | null
+  feeSharePct: number | null
+  lastRebalanceBlock: number | null
+  lastRebalanceAt: string | null
+  lastRebalanceTick: number | null
+  ranges: { tickLower: number; tickUpper: number; priceLower: number; priceUpper: number; liquidity: string; inRange: boolean }[]
+}
+export interface UniswapV3PoolDetail {
+  kind: 'uniswapv3'
+  address: string
+  account: AccountRef
+  name: string
+  factory: string
+  fee: number
+  feeTier: string
+  tickSpacing: number
+  createdBlock: number
+  createdAt: string
+  createdExtrinsic: number | null
+  token0: AssetRef
+  token1: AssetRef
+  assets: PoolCompositionEntry[]
+  tvlUsd: number | null
+  price: { token1PerToken0: number | null; token0PerToken1: number | null; tick: number | null; sqrtPriceX96: string | null }
+  /** Liquidity of the ranges straddling the current tick (the pool's L), null before the pool was initialised. */
+  liquidity: string | null
+  /** The protocol's share of every swap fee: 1/feeProtocol per token side (0 = off). Set by referendum 403 to 1/4. */
+  protocolFee: { feeProtocol0: number; feeProtocol1: number; sharePct: number | null }
+  swaps: number
+  volume: { all0: string; all1: string; allUsd: number | null; day0: string; day1: string; dayUsd: number | null; feesAllUsd: number | null; feesDayUsd: number | null }
+  feesCollected: { amount0: string; amount1: string; usd: number | null }
+  firstSwapAt: string | null
+  lastSwapAt: string | null
+  lastSwapBlock: number | null
+  positions: UniswapV3PositionRow[]
+  vault: UniswapV3VaultInfo | null
+  priceHistory: { ts: string; blockHeight: number; price: number }[]
+}
+
+function v3PoolName(pool: V3Pool): string {
+  const a0 = pool.asset0 != null ? asset(pool.asset0).symbol : `${pool.token0.slice(0, 8)}…`
+  const a1 = pool.asset1 != null ? asset(pool.asset1).symbol : `${pool.token1.slice(0, 8)}…`
+  return `${a0} / ${a1} ${feeTierLabel(pool.fee)}`
+}
+
+function nonNegative(raw: string): bigint {
+  try { const v = BigInt(raw); return v > 0n ? v : 0n } catch { return 0n }
+}
+
+// A swap's volume is one side of it; the two sides are (near) equal in value, so the
+// venue's volume is their mean when both are priced and the priced side otherwise.
+function sidedUsd(prices: Map<number, PriceInfo>, asset0: number, raw0: string, asset1: number, raw1: string): number | null {
+  const u0 = usdOf(prices, asset0, nonNegative(raw0))
+  const u1 = usdOf(prices, asset1, nonNegative(raw1))
+  if (u0 != null && u1 != null) return (u0 + u1) / 2
+  return u0 ?? u1
+}
+
+function v3PoolAccount(address: string): AccountRef {
+  return accountRef(ethPrefixedAccountId(address) ?? address)
+}
+
+async function resolvedV3Pools(registry?: V3Registry): Promise<V3Pool[]> {
+  const reg = registry ?? await v3Registry()
+  return [...reg.pools.values()].filter(p => p.asset0 != null && p.asset1 != null)
+}
+
+/** The /liquidity index rows for every v3 pool whose tokens the registry knows. */
+async function uniswapV3IndexEntries(prices: Map<number, PriceInfo>): Promise<PoolListEntry[]> {
+  const out: PoolListEntry[] = []
+  for (const pool of await resolvedV3Pools()) {
+    const stats = await v3PoolStats(pool.address)
+    if (!stats) continue
+    const { entries: composition, tvlUsd } = buildComposition(prices, [
+      { assetId: pool.asset0 as number, raw: nonNegative(stats.balance0) },
+      { assetId: pool.asset1 as number, raw: nonNegative(stats.balance1) },
+    ])
+    out.push({ kind: 'uniswapv3', poolId: null, address: pool.address, name: v3PoolName(pool), tvlUsd, sharePct: null, composition, hasPegs: false })
+  }
+  return out
+}
+
+/** The v3 pools an asset (or its aToken / reserve alias) sits in, as asset-page liquidity sources. */
+async function uniswapV3SourcesForAsset(prices: Map<number, PriceInfo>, assetId: number): Promise<AssetLiquiditySource[]> {
+  const out: AssetLiquiditySource[] = []
+  for (const pool of await resolvedV3Pools()) {
+    const idx = pool.asset0 === assetId ? 0 : pool.asset1 === assetId ? 1 : -1
+    if (idx === -1) continue
+    const stats = await v3PoolStats(pool.address)
+    if (!stats) continue
+    const { entries, tvlUsd } = buildComposition(prices, [
+      { assetId: pool.asset0 as number, raw: nonNegative(stats.balance0) },
+      { assetId: pool.asset1 as number, raw: nonNegative(stats.balance1) },
+    ])
+    out.push({
+      kind: 'uniswapv3', poolId: null, address: pool.address, name: v3PoolName(pool), tvlUsd,
+      assetAmount: entries[idx].amount, assetUsd: entries[idx].usd, assetSharePct: entries[idx].sharePct,
+      composition: entries, hasPegs: false,
+    })
+  }
+  return out
+}
+
+/** Token ids and fee per v3 pool, for surfaces that key volumes by pool address (the public API). */
+export async function uniswapV3PoolMeta(): Promise<Map<string, { token0: number | null; token1: number | null; fee: number }>> {
+  const reg = await v3Registry()
+  return new Map([...reg.pools.values()].map(p => [p.address, { token0: p.asset0, token1: p.asset1, fee: p.fee }]))
+}
+
+export async function getUniswapV3PoolDetail(address: string): Promise<UniswapV3PoolDetail | null> {
+  const addr = address.toLowerCase()
+  return cachedSwr(`explorer:v3-pool:${addr}`, 30_000, 300_000, async () => {
+    const registry = await v3Registry()
+    const pool = registry.pools.get(addr)
+    if (!pool || pool.asset0 == null || pool.asset1 == null) return null
+    const [prices, stats, positions, points] = await Promise.all([ensurePrices(), v3PoolStats(pool.address), v3ManagerPositions(registry, pool.address), v3PricePoints(pool.address)])
+    if (!stats) return null
+    const a0 = asset(pool.asset0), a1 = asset(pool.asset1)
+    const priceOfSqrt = (sqrt: string | null) => sqrt && sqrt !== '0' ? sqrtPriceX96ToPrice(BigInt(sqrt), a0.decimals, a1.decimals) : null
+    const tickPrice = (tick: number) => tickToPrice(tick, a0.decimals, a1.decimals)
+    const p10 = priceOfSqrt(stats.lastSqrtPriceX96)
+    const tick = stats.lastTick
+    const { entries, tvlUsd } = buildComposition(prices, [
+      { assetId: pool.asset0, raw: nonNegative(stats.balance0) },
+      { assetId: pool.asset1, raw: nonNegative(stats.balance1) },
+    ])
+    const allUsd = sidedUsd(prices, pool.asset0, stats.volume0, pool.asset1, stats.volume1)
+    const dayUsd = sidedUsd(prices, pool.asset0, stats.volume24h0, pool.asset1, stats.volume24h1)
+    const feeRate = pool.fee / 1_000_000
+    // Uniswap semantics: feeProtocol n means 1/n of the swap fee goes to the protocol,
+    // the rest to LPs; the two token sides can differ, the share shown is the mean.
+    const protoShare = [stats.feeProtocol0, stats.feeProtocol1].map(n => (n > 0 ? 1 / n : 0))
+    const protocolSharePct = protoShare.some(x => x > 0) ? ((protoShare[0] + protoShare[1]) / 2) * 100 : null
+    const lpShare = 1 - (protoShare[0] + protoShare[1]) / 2
+    const feesCollectedUsd = (() => {
+      const u0 = usdOf(prices, pool.asset0 as number, nonNegative(stats.fees0))
+      const u1 = usdOf(prices, pool.asset1 as number, nonNegative(stats.fees1))
+      return u0 == null && u1 == null ? null : (u0 ?? 0) + (u1 ?? 0)
+    })()
+    const positionRows: UniswapV3PositionRow[] = positions.map(pos => {
+      const u0 = usdOf(prices, pool.asset0 as number, nonNegative(pos.amount0))
+      const u1 = usdOf(prices, pool.asset1 as number, nonNegative(pos.amount1))
+      return {
+        manager: pos.manager, tokenId: pos.tokenId, owner: pos.owner ? v3PoolAccount(pos.owner) : null,
+        tickLower: pos.tickLower, tickUpper: pos.tickUpper, priceLower: tickPrice(pos.tickLower), priceUpper: tickPrice(pos.tickUpper),
+        inRange: tick != null && pos.tickLower <= tick && tick < pos.tickUpper,
+        liquidity: pos.liquidity, amount0: nonNegative(pos.amount0).toString(), amount1: nonNegative(pos.amount1).toString(),
+        usd: u0 == null && u1 == null ? null : (u0 ?? 0) + (u1 ?? 0),
+        openedBlock: pos.openedBlock, openedAt: pos.openedAt, lastBlock: pos.lastBlock,
+      }
+    })
+    let vault: UniswapV3VaultInfo | null = null
+    if (pool.vault) {
+      const vs = await v3VaultStats(pool.vault)
+      if (vs) {
+        const u0 = usdOf(prices, pool.asset0, nonNegative(vs.total0))
+        const u1 = usdOf(prices, pool.asset1, nonNegative(vs.total1))
+        const f0 = usdOf(prices, pool.asset0, nonNegative(vs.fees0))
+        const f1 = usdOf(prices, pool.asset1, nonNegative(vs.fees1))
+        vault = {
+          address: pool.vault.address, account: v3PoolAccount(pool.vault.address), createdBlock: pool.vault.createdBlock, createdAt: pool.vault.createdAt,
+          shares: vs.shares, depositors: vs.depositors, deposits: vs.deposits, withdrawals: vs.withdrawals, rebalances: vs.rebalances,
+          total0: nonNegative(vs.total0).toString(), total1: nonNegative(vs.total1).toString(),
+          tvlUsd: u0 == null && u1 == null ? null : (u0 ?? 0) + (u1 ?? 0),
+          fees0: vs.fees0, fees1: vs.fees1, feesUsd: f0 == null && f1 == null ? null : (f0 ?? 0) + (f1 ?? 0),
+          feeDivisor: vs.feeDivisor, feeSharePct: vs.feeDivisor ? 100 / vs.feeDivisor : null,
+          lastRebalanceBlock: vs.lastRebalanceBlock, lastRebalanceAt: vs.lastRebalanceAt, lastRebalanceTick: vs.lastRebalanceTick,
+          ranges: vs.ranges.map(r => ({
+            ...r, priceLower: tickPrice(r.tickLower), priceUpper: tickPrice(r.tickUpper),
+            inRange: tick != null && r.tickLower <= tick && tick < r.tickUpper,
+          })),
+        }
+      }
+    }
+    return {
+      kind: 'uniswapv3', address: pool.address, account: v3PoolAccount(pool.address), name: v3PoolName(pool), factory: pool.factory,
+      fee: pool.fee, feeTier: feeTierLabel(pool.fee), tickSpacing: pool.tickSpacing,
+      createdBlock: pool.createdBlock, createdAt: pool.createdAt, createdExtrinsic: pool.createdExtrinsic,
+      token0: a0, token1: a1, assets: entries, tvlUsd,
+      price: { token1PerToken0: p10, token0PerToken1: p10 != null && p10 > 0 ? 1 / p10 : null, tick, sqrtPriceX96: stats.lastSqrtPriceX96 },
+      liquidity: stats.inRangeLiquidity, swaps: stats.swapCount,
+      protocolFee: { feeProtocol0: stats.feeProtocol0, feeProtocol1: stats.feeProtocol1, sharePct: protocolSharePct },
+      volume: {
+        all0: stats.volume0, all1: stats.volume1, allUsd, day0: stats.volume24h0, day1: stats.volume24h1, dayUsd,
+        feesAllUsd: allUsd != null ? allUsd * feeRate * lpShare : null, feesDayUsd: dayUsd != null ? dayUsd * feeRate * lpShare : null,
+      },
+      feesCollected: { amount0: stats.fees0, amount1: stats.fees1, usd: feesCollectedUsd },
+      firstSwapAt: stats.firstSwapAt, lastSwapAt: stats.lastSwapAt, lastSwapBlock: stats.lastSwapBlock,
+      positions: positionRows, vault,
+      priceHistory: points.map(pt => ({ ts: pt.ts, blockHeight: pt.blockHeight, price: priceOfSqrt(pt.sqrtPriceX96) ?? 0 })).filter(pt => pt.price > 0),
+    }
+  })
+}
+
+/** The tokens and decimals the history builder needs for a v3 pool, or null for an unknown / unresolved pool. */
+export async function uniswapV3HistoryPool(address: string): Promise<(V3HistoryPool & { vault: string | null; tickSpacing: number }) | null> {
+  const registry = await v3Registry()
+  const pool = registry.pools.get(address.toLowerCase())
+  if (!pool || pool.asset0 == null || pool.asset1 == null) return null
+  return {
+    address: pool.address, asset0: pool.asset0, asset1: pool.asset1,
+    decimals0: asset(pool.asset0).decimals, decimals1: asset(pool.asset1).decimals, fee: pool.fee,
+    vault: pool.vault?.address ?? null, tickSpacing: pool.tickSpacing,
+  }
+}
+
+export type V3RangeOwnerKind = 'vault' | 'manager' | 'direct'
+export interface UniswapV3PoolLiquidityResponse extends Omit<V3PoolLiquidity, 'ranges'> {
+  token0: AssetRef
+  token1: AssetRef
+  fee: number
+  tickSpacing: number
+  /** Open positions by owner and range, deepest first; `ownerKind` says whether the owner is a Gamma vault, the position manager (the NFT holders' positions) or a contract minting for itself. */
+  ranges: (V3PoolLiquidity['ranges'][number] & { ownerKind: V3RangeOwnerKind })[]
+}
+
+/**
+ * The pool's liquidity distribution now — the tick table and segments the Hydration
+ * UI's "Liquidity distribution" chart draws, and the open ranges behind them. Served
+ * to the explorer's pool page and to /v1/pools/uniswapv3/{pool}/liquidity alike.
+ */
+export async function getUniswapV3PoolLiquidity(address: string): Promise<UniswapV3PoolLiquidityResponse | null> {
+  const pool = await uniswapV3HistoryPool(address)
+  if (!pool) return null
+  return cachedSwr(`explorer:v3-liquidity:${pool.address}`, 30_000, 300_000, async () => {
+    const [dist, registry] = await Promise.all([v3PoolLiquidity(client, pool), v3Registry()])
+    const kindOf = (owner: string): V3RangeOwnerKind => {
+      const o = owner.toLowerCase()
+      if (registry.vaults.has(o)) return 'vault'
+      if (registry.managers.has(o)) return 'manager'
+      return 'direct'
+    }
+    return {
+      ...dist, token0: asset(pool.asset0), token1: asset(pool.asset1), fee: pool.fee, tickSpacing: pool.tickSpacing,
+      ranges: dist.ranges.map(r => ({ ...r, ownerKind: kindOf(r.owner) })),
+    }
+  })
+}
+
+export interface UniswapV3PoolHistoryResponse extends V3History {
+  token0: AssetRef
+  token1: AssetRef
+  fee: number
+  /** The vault's live tick ranges as prices, so the chart can draw where its liquidity sits. */
+  vaultRanges: { priceLower: number; priceUpper: number; liquidity: string }[]
+}
+
+/**
+ * The pool page's series: the whole life at the coarsest ladder grain that fits the
+ * point budget, or a zoomed window on the finest grain that does — down to the swaps
+ * themselves. Windowed reads are keyed on their bounds; the full view is SWR-cached
+ * like every other pool history.
+ */
+export async function getUniswapV3PoolHistory(address: string, win?: { fromSec: number; toSec: number }, points = 180): Promise<UniswapV3PoolHistoryResponse | null> {
+  const pool = await uniswapV3HistoryPool(address)
+  if (!pool) return null
+  const key = `explorer:v3-history:${pool.address}:${points}${win ? `:w:${win.fromSec}-${win.toSec}` : ''}`
+  return cachedSwr(key, win ? 30_000 : 60_000, win ? 60_000 : 600_000, async () => {
+    const [history, detail] = await Promise.all([
+      v3PoolHistory(client, pool, win ? { fromSec: win.fromSec, toSec: win.toSec, points } : { points }),
+      getUniswapV3PoolDetail(pool.address),
+    ])
+    return {
+      ...history, token0: asset(pool.asset0), token1: asset(pool.asset1), fee: pool.fee,
+      vaultRanges: (detail?.vault?.ranges ?? []).map(r => ({ priceLower: r.priceLower, priceUpper: r.priceUpper, liquidity: r.liquidity })),
+    }
+  })
 }

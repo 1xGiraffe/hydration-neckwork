@@ -21,6 +21,7 @@ import {
   runAccountTradeVolume,
   runOmnipoolOwnerIntervals,
   runPoolSwapHourly,
+  runUniswapV3Legs,
   runRevenueEvents,
   runXykFarmIntervals,
   runXykTotalShares,
@@ -63,6 +64,9 @@ const JOBS: DerivationJob[] = [
   // No needsAssets: pool_swap_hourly stores raw integer leg sums and no
   // valuation, so it has no dependency on the registry's decimals or price
   // aliases and stays correct on a cycle whose registry refresh failed.
+  // Before pool_swap_hourly's turn next cycle: a direct v3 swap's legs land here and
+  // the hourly job's watermark then re-marks their month stale.
+  { model: 'uniswap_v3_legs', run: runUniswapV3Legs },
   { model: 'pool_swap_hourly', run: runPoolSwapHourly },
   { model: 'omnipool_owner_intervals', run: runOmnipoolOwnerIntervals },
   { model: 'xyk_farm_intervals', run: runXykFarmIntervals },

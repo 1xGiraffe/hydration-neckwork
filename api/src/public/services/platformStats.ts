@@ -17,7 +17,8 @@ import { omnipoolVolumes, poolVolumes, routedTradesUsd } from './poolVolumes.ts'
 //    indexed block. `asOf`/`blockHeight` describe THAT anchor; the TVL snapshot is
 //    the newest block state and may sit a few blocks apart.
 //
-// `totalUsd` remains the POOLED total — omnipool + stableswap + xyk. The
+// `totalUsd` remains the POOLED total — omnipool + stableswap + xyk + the
+// concentrated-liquidity (Uniswap v3) pools. The
 // money-market figure is reported beside it and deliberately NOT added in,
 // because the pooled total and the money-market total OVERLAP IN BOTH
 // DIRECTIONS (AGENTS.md, the folded-asset conservation rule):
@@ -27,8 +28,9 @@ import { omnipoolVolumes, poolVolumes, routedTradesUsd } from './poolVolumes.ts'
 //    IS a claim on a pool whose reserves are already in `stableswapUsd`.
 //  * `pooledATokenUsd` — pools → money market. The pools themselves DEPOSIT into
 //    the money market and hold the receipt: pool 690 holds aDOT, 4200 holds aETH,
-//    the stablepools hold aUSDT/aUSDC/aEURC/aSOL, 10055 holds BIL, and the
-//    Omnipool holds aDOT (asset 1001) directly. Every one of those aTokens is
+//    the stablepools hold aUSDT/aUSDC/aEURC/aSOL, 10055 holds BIL, the
+//    Omnipool holds aDOT (asset 1001) directly, and the aDOT/HOLLAR Uniswap v3
+//    pool holds aDOT as its token0. Every one of those aTokens is
 //    also inside `moneyMarketSupplyUsd`, because the pool is one of the reserve's
 //    suppliers. Measured 2026-08-13: $8.58 M across ten priced pools, of which
 //    aDOT alone is $3.23 M — 74% of the core market's DOT reserve is deposited by
@@ -58,6 +60,12 @@ export interface PlatformStats {
     stableswapUsd: string | null
     xykUsd: string | null
     /**
+     * The concentrated-liquidity (Uniswap v3) pools' event-implied holdings at
+     * current prices — part of `totalUsd` like the three pallet venues. A pool
+     * whose tokens the registry cannot name has no TVL and contributes nothing.
+     */
+    uniswapV3Usd: string | null
+    /**
      * Every money-market reserve's supplied side at current prices, across all
      * three isolated markets. Null — never 0 — when the reserve-state model has
      * no rows (no aToken anchor) or nothing in it could be priced. Not part of
@@ -74,6 +82,8 @@ export interface PlatformStats {
     omnipoolUsd: string
     stableswapUsd: string
     xykUsd: string
+    /** The Uniswap v3 pools' fills, single-counted like the other venues (routed hops and direct EVM swaps alike). */
+    uniswapV3Usd: string
     /**
      * Netted end-to-end: a multi-hop route counts once, so per-venue sums exceed
      * it. Trades that are only an aToken wrap are excluded — see `all_aave` in
@@ -106,7 +116,7 @@ export function tvlUsdString(value: number | null): string | null {
  * priced among them is unknown, not empty: reporting 0 there would publish a
  * broken price feed as a collapsed venue.
  */
-export function venueTvlUsd(pools: Array<{ kind: string; tvlUsd: number | null }>, kind: 'stableswap' | 'xyk'): number | null {
+export function venueTvlUsd(pools: Array<{ kind: string; tvlUsd: number | null }>, kind: 'stableswap' | 'xyk' | 'uniswapv3'): number | null {
   const venue = pools.filter(p => p.kind === kind)
   const priced = venue.filter(p => p.tvlUsd != null)
   if (venue.length > 0 && priced.length === 0) return null
@@ -220,6 +230,7 @@ export interface TvlComponents {
   omnipoolUsd: string | null
   stableswapUsd: string | null
   xykUsd: string | null
+  uniswapV3Usd: string | null
   moneyMarketSupplyUsd: string | null
   moneyMarketFoldedUsd: string | null
   pooledATokenUsd: string | null
@@ -238,8 +249,9 @@ export function tvlComponents(pools: FoldablePool[], moneyMarket: MoneyMarketSup
   const omnipoolUsd = pools.find(p => p.kind === 'omnipool')?.tvlUsd ?? null
   const stableswapUsd = venueTvlUsd(pools, 'stableswap')
   const xykUsd = venueTvlUsd(pools, 'xyk')
-  const totalUsd = sumKnownTvl([omnipoolUsd, stableswapUsd, xykUsd])
-  warnOnUnknownTvl({ omnipool: omnipoolUsd, stableswap: stableswapUsd, xyk: xykUsd })
+  const uniswapV3Usd = venueTvlUsd(pools, 'uniswapv3')
+  const totalUsd = sumKnownTvl([omnipoolUsd, stableswapUsd, xykUsd, uniswapV3Usd])
+  warnOnUnknownTvl({ omnipool: omnipoolUsd, stableswap: stableswapUsd, xyk: xykUsd, uniswapv3: uniswapV3Usd })
 
   const shareIds = poolShareAssetIds(pools)
   const folded = moneyMarket.suppliedUsd == null ? null : moneyMarketFoldedUsd(moneyMarket.reserves, shareIds)
@@ -247,6 +259,7 @@ export function tvlComponents(pools: FoldablePool[], moneyMarket: MoneyMarketSup
     omnipoolUsd: tvlUsdString(omnipoolUsd),
     stableswapUsd: tvlUsdString(stableswapUsd),
     xykUsd: tvlUsdString(xykUsd),
+    uniswapV3Usd: tvlUsdString(uniswapV3Usd),
     moneyMarketSupplyUsd: moneyMarket.suppliedUsd == null ? null : formatUsd(moneyMarket.suppliedUsd),
     moneyMarketFoldedUsd: folded == null ? null : formatUsd(folded),
     // Always known when the pooled total is: it is summed over the priced pools
@@ -289,11 +302,12 @@ export function foldedPlatformTvl(components: TvlComponents): bigint | null {
 export async function platformStats(client: ClickHouseClient): Promise<PlatformStats> {
   return cachedSwr('pub:stats:platform', 60_000, 300_000, async () => {
     ensurePoolService(client)
-    const [index, omniVolume, stableVolume, xykVolume, routed, moneyMarket] = await Promise.all([
+    const [index, omniVolume, stableVolume, xykVolume, v3Volume, routed, moneyMarket] = await Promise.all([
       getPoolsIndex(),
       omnipoolVolumes(client, VOLUME_WINDOW),
       poolVolumes(client, 'stableswap', VOLUME_WINDOW),
       poolVolumes(client, 'xyk', VOLUME_WINDOW),
+      poolVolumes(client, 'uniswapv3', VOLUME_WINDOW),
       routedTradesUsd(client, VOLUME_WINDOW),
       moneyMarketSupply(client),
     ])
@@ -312,6 +326,7 @@ export async function platformStats(client: ClickHouseClient): Promise<PlatformS
         omnipoolUsd: omniVolume.totalVolumeUsd,
         stableswapUsd: stableVolume.totalVolumeUsd,
         xykUsd: xykVolume.totalVolumeUsd,
+        uniswapV3Usd: v3Volume.totalVolumeUsd,
         totalRoutedUsd: routed.totalUsd,
       },
     }

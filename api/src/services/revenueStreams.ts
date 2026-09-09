@@ -48,6 +48,7 @@ export const REVENUE_STREAMS = [
   'hollar_borrow',
   'hsm_revenue',
   'ice_matched_fee',
+  'uniswap_v3_fee',
   'network_fee',
 ] as const
 export type RevenueStream = (typeof REVENUE_STREAMS)[number]
@@ -123,6 +124,12 @@ export const AAVE_COLLECTOR = '0xe52567ff06acd6cbe7ba94dc777a3126e180b6d9'
  * protocol fee is swept from it to the fee account at the end of each solution.
  */
 export const ICE_POT_ACCOUNT = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
+// The Treasury's EVM address: the first 20 bytes of `modlpy/trsry…` — where a Gamma vault
+// sends its fee share and where a pool's CollectProtocol would land.
+export const TREASURY_H160 = '0x6d6f646c70792f74727372790000000000000000'
+// Pool CollectProtocol(sender, recipient, amount0, amount1) — the protocol fee of a
+// concentrated-liquidity pool being collected by the factory owner.
+export const UNISWAP_V3_COLLECT_PROTOCOL_TOPIC = '0x596b573906218d3411850b26a6b437d6c4522fdb43d2d2386263f86d50b8b151'
 export const ICE_FEE_ACCOUNT = '0x6d6f646c6963655f666565230000000000000000000000000000000000000000'
 
 /** The Omnipool's hub asset (H2O); its fee legs are the protocol fee, never an asset fee. */
@@ -538,6 +545,75 @@ ${valuedTailSql('ice_matched_fee')}`
 }
 
 /**
+ * Concentrated-liquidity (Uniswap v3) pool fees the protocol keeps. Two arms:
+ *   * the Gamma vault's cut — Hypervisor `_zeroBurn`/`rebalance` send
+ *     `fees / fee` (SetFee(255) → 1/255) of the LP fees its positions earned to
+ *     `feeRecipient`, which the operator's rebalance calls set to the Treasury's
+ *     EVM address — one ERC-20 `Transfer` per token from a vault the
+ *     uniswap_v3_vaults projection knows;
+ *   * a pool's `CollectProtocol` — the pool's protocol fee (referendum 403 sets
+ *     `setFeeProtocol(4, 4)` on the aDOT/HOLLAR pool: 1/4 of every swap fee accrues
+ *     to the protocol) as the factory owner collects it. Only that owner can collect,
+ *     so the recipient is protocol-controlled whoever it is; the collect is the
+ *     realization and is booked in full.
+ * Swap fees themselves stay with the LPs and are not revenue. The token is an EVM
+ * contract: an asset precompile decodes to its id, a deployed ERC-20 (aDOT, HOLLAR)
+ * resolves through the registry's `assets.evm_address`; a token neither knows is
+ * dropped rather than booked as asset 0 (HDX). No payer: the vault's LPs paid it.
+ */
+function uniswapV3FeeRowsSql(extra: string): string {
+  const token = 'lower(f.token)'
+  const hex = `replaceRegexpOne(${token}, '^0x', '')`
+  const precompile = `if(length(${hex}) = 40 AND substring(${hex}, 1, 32) = '00000000000000000000000000000001', toUInt32(reinterpretAsUInt32(reverse(unhex(substring(${hex}, 33, 8))))), toUInt32(4294967295))`
+  return `-- rev:uniswap_v3_fee
+WITH token_assets AS (
+  SELECT lower(evm_address) AS addr, any(asset_id) AS asset_id
+  FROM price_data.assets WHERE evm_address != '' GROUP BY addr
+),
+vault_fees AS (
+  SELECT block_height, event_index, min(block_timestamp) AS block_time,
+         argMax(lower(contract_address), ingested_at) AS token,
+         argMax(toUInt256OrZero(JSONExtractString(decoded_args_json, 'value')), ingested_at) AS amount
+  FROM price_data.raw_evm_logs
+  WHERE event_name = 'Transfer'
+    AND ${WINDOW}
+    AND (${extra})
+    AND lower(JSONExtractString(decoded_args_json, 'to')) = '${TREASURY_H160}'
+    AND lower(JSONExtractString(decoded_args_json, 'from')) IN (SELECT vault_address FROM price_data.uniswap_v3_vaults FINAL)
+  GROUP BY block_height, event_index
+),
+protocol_collects AS (
+  SELECT block_height, event_index, block_timestamp AS block_time, contract_address, amount0, amount1
+  FROM price_data.uniswap_v3_events FINAL
+  WHERE kind = 'pool' AND event_name = 'CollectProtocol'
+    AND ${WINDOW}
+    AND (${extra})
+),
+protocol_fees AS (
+  SELECT c.block_height AS block_height, c.event_index AS event_index, c.block_time AS block_time,
+         toUInt16(leg_i - 1) AS leg_index, leg.1 AS token, leg.2 AS amount
+  FROM protocol_collects c
+  INNER JOIN price_data.uniswap_v3_pools p ON p.pool_address = c.contract_address
+  ARRAY JOIN [tuple(p.token0, toUInt256(greatest(c.amount0, toInt256(0)))), tuple(p.token1, toUInt256(greatest(c.amount1, toInt256(0))))] AS leg, arrayEnumerate([1, 2]) AS leg_i
+),
+fees AS (
+  SELECT block_height, event_index, block_time, toUInt16(0) AS leg_index, token, amount FROM vault_fees
+  UNION ALL
+  SELECT block_height, event_index, block_time, leg_index, token, amount FROM protocol_fees
+),
+rows AS (
+  SELECT f.block_height AS block_height, f.block_time AS block_time, f.event_index AS event_index, f.leg_index AS leg_index,
+         '' AS dest, '' AS account,
+         if(t.asset_id > 0, toUInt32(t.asset_id), ${precompile}) AS asset_id,
+         f.amount AS amount
+  FROM fees f
+  LEFT JOIN token_assets t ON t.addr = ${token}
+  WHERE f.amount > 0 AND asset_id != 4294967295
+)
+${valuedTailSql('uniswap_v3_fee')}`
+}
+
+/**
  * Network fees — the two arms described in the module header. Both arms carry
  * a positive-amount guard: ~5% of TransactionFeePaid rows are paysFee-No zeros
  * and a zero deposit is nothing.
@@ -628,6 +704,8 @@ export function buildRevenueEventRowsSql(stream: EventfulRevenueStream, extraPre
       return hsmRevenueRowsSql(extraPredicate)
     case 'ice_matched_fee':
       return iceMatchedFeeRowsSql(extraPredicate)
+    case 'uniswap_v3_fee':
+      return uniswapV3FeeRowsSql(extraPredicate)
     case 'network_fee':
       return networkFeeRowsSql(extraPredicate)
   }

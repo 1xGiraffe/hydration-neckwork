@@ -65,6 +65,8 @@ const EXPECTED_PATHS = [
   '/v1/pools/omnipool/{assetId}/history',
   '/v1/pools/stableswap/{poolId}/history',
   '/v1/pools/xyk/{poolAccount}/history',
+  '/v1/pools/uniswapv3/{pool}/history',
+  '/v1/pools/uniswapv3/{pool}/liquidity',
   '/v1/pools/{venue}/{poolKey}/trades',
   '/v1/pools/{venue}/{poolKey}/volumes',
   '/v1/trades',

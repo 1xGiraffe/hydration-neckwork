@@ -134,11 +134,16 @@ function voteLabel(action: string | null | undefined): string {
 // Destroy (pool closure) shares Create's shade rather than a new token — the two
 // are the pool's lifecycle bookends, distinct from an ordinary Add/Remove trade,
 // and the family has no dedicated closure/negative variant to reach for instead.
+// CollectFees (a concentrated-liquidity position collecting its earned fees) is a
+// claim like the LM rewards; Rebalance (a vault operator re-ranging its positions)
+// is pool lifecycle, so it wears Create's shade.
 const LIQ_COLORS: Record<string, string> = {
   Add: CAT.liquidity, Remove: CAT.liquidityRemove, Create: CAT.liquidityCreate, Destroy: CAT.liquidityCreate, Claim: CAT.liquidityClaim, ClaimReferral: CAT.liquidityClaim,
+  CollectFees: CAT.liquidityClaim, Rebalance: CAT.liquidityCreate,
 }
 export const LIQ_LABELS: Record<string, string> = {
   Add: 'Add liquidity', Remove: 'Remove liquidity', Create: 'Create pool', Destroy: 'Destroy pool', Claim: 'Claim LP Rewards', ClaimReferral: 'Claim Referral Rewards',
+  CollectFees: 'Collect fees', Rebalance: 'Rebalance vault',
 }
 // A bond's two acts are its lifecycle bookends — the issue that mints it against the
 // underlying, the redemption that burns it for the underlying — so each gets its own

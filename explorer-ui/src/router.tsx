@@ -70,6 +70,8 @@ export type Route =
   | { name: 'asset'; assetId: number }
   | { name: 'holders'; assetId: number }
   | { name: 'pool'; poolId: number }
+  // /pool/<0x…40 hex> — a concentrated-liquidity pool, addressed by its contract.
+  | { name: 'v3pool'; address: string }
   | { name: 'omnipool' }
   | { name: 'liquidity' }
   | { name: 'link-device' } // QR login handoff target; the code rides in the fragment
@@ -166,6 +168,7 @@ export function parseRoute(loc: string): Route {
     // /pool/<shareAssetId> — stableswap pools and XYK pairs are both addressed
     // by their share/LP token id; the Omnipool has its own page.
     case 'pool':
+      if (parts[1] && /^0x[0-9a-fA-F]{40}$/.test(parts[1])) return { name: 'v3pool', address: parts[1].toLowerCase() }
       return parts[1] && isSafeId(parts[1]) ? { name: 'pool', poolId: Number(parts[1]) } : { name: 'assets' }
     case 'omnipool': return { name: 'omnipool' }
     case 'liquidity': return { name: 'liquidity' }
@@ -327,6 +330,7 @@ export const paths = {
   asset: (assetId: number) => `/asset/${assetId}`,
   holders: (assetId: number) => `/holders/${assetId}`,
   pool: (poolId: number) => `/pool/${poolId}`,
+  v3Pool: (address: string) => `/pool/${address.toLowerCase()}`,
   omnipool: () => '/omnipool',
   liquidity: () => '/liquidity',
   lists: () => '/lists',

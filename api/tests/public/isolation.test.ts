@@ -31,6 +31,9 @@ const ALLOWED_SHARED = new Set([
   // read one composition of the configurator events, facilitator buckets and
   // reserve state, so a subscriber is paged about the number the route serves.
   'services/moneyMarketCaps.ts',
+  // The concentrated-liquidity pool history: one builder serves the explorer's pool
+  // page and /v1/pools/uniswapv3/:pool/history, so the two cannot disagree on a bucket.
+  'services/uniswapV3History.ts',
 ])
 
 // Not a shared source module: the api package manifest, imported for the

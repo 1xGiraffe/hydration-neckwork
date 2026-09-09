@@ -28,14 +28,18 @@ describe('the enumerated activity snapshot is one shared read', () => {
   // for `all` and `transfer` — 6.1% of activity requests — under two names.
   it('keys on the source set, so types reading the same sources share one entry', () => {
     expect(enumeratedActivityKey(accounts, 'all')).toBe(enumeratedActivityKey(accounts, 'transfer'))
-    expect(enumeratedActivityKey(accounts, 'liquidity')).toBe(enumeratedActivityKey(accounts, 'mm'))
+    // `liquidity` reads the concentrated-liquidity acts on top of the reward claims `mm`
+    // shares with it, so the two no longer collapse (they did until 2026-09-09).
+    expect(enumeratedActivityKey(accounts, 'liquidity')).not.toBe(enumeratedActivityKey(accounts, 'mm'))
+    expect(enumeratedActivityKey(accounts, 'liquidity')).toContain(':rewards+v3:')
 
     // And the types whose source sets genuinely differ stay apart: the eleven countable
-    // types collapse to nine entries and no further. Any future type that silently joined
-    // one of these groups would have to justify itself here.
+    // types collapse to ten entries and no further (`liquidity` parted from `mm` when the
+    // concentrated-liquidity acts joined it, 2026-09-09). Any future type that silently
+    // joined one of these groups would have to justify itself here.
     const countable = ['all', 'transfer', 'trade', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'otc', 'bond', 'intent']
-    expect(new Set(countable.map(type => enumeratedActivityKey(accounts, type))).size).toBe(9)
-    expect(enumeratedActivityKey(accounts, 'all')).toContain(':otc+dcaFailures+rewards+staking+bonds+intents+votes+xcm+ntt:')
+    expect(new Set(countable.map(type => enumeratedActivityKey(accounts, type))).size).toBe(10)
+    expect(enumeratedActivityKey(accounts, 'all')).toContain(':otc+dcaFailures+rewards+staking+bonds+intents+votes+xcm+ntt+v3:')
   })
 
   // The account set is a set, not a list: two callers resolving the same related accounts

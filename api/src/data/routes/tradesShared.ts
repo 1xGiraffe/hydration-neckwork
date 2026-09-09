@@ -5,7 +5,9 @@ import { zAccountRef, zAssetId, zIsoTimestamp } from '../schemas/common.ts'
 // and the swap-fill wire shape shared by /v1/trades and
 // /v1/pools/{venue}/{poolKey}/trades.
 
-export const VENUES = ['omnipool', 'stableswap', 'xyk', 'aave', 'otc', 'hsm', 'lbp'] as const
+// `uniswapv3`: the concentrated-liquidity pools on Hydration's EVM — a Router-routed hop's
+// Broadcast fill, or a direct EVM swap's pool log (uniswap_v3_legs derivation).
+export const VENUES = ['omnipool', 'stableswap', 'xyk', 'aave', 'otc', 'hsm', 'lbp', 'uniswapv3'] as const
 export type Venue = (typeof VENUES)[number]
 export const zVenue = z.enum(VENUES)
 

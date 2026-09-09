@@ -192,5 +192,6 @@ export function nativeAssetInfoToRow(nativeAsset: NativeAssetInfo): AssetRow {
     origin_ecosystem: null,
     origin_chain_id: null,
     origin_asset_id: null,
+    evm_address: '',
   }
 }
