@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { activityTypes } from '../src/routes/explorer'
-import { ICE_POT_ACCOUNT, INTENT_EVENT_NAMES, activityPagesInMemory, activityRowMatchesAction, activityTypeMatchesFamily, activityWindowPlan, dcaMigratedScheduleId, dcaMigrationReason, dcaScheduleStatus, intentActivityParts, intentOrderStatus, intentRowFromEvent, intentSeqOf, isIntentOnlyTradeRequest, limitPriceOutPerIn, resolveIntentActions, suppressIcePotSettlementTrades, type ActivityRow, type IntentOrder } from '../src/services/explorerService'
+import { ICE_POT_ACCOUNT, INTENT_EVENT_NAMES, activityPagesInMemory, activityRowMatchesAction, activityTypeMatchesFamily, activityWindowPlan, dcaMigratedScheduleId, dcaMigrationReason, dcaScheduleStatus, iceMatchedInUsd, iceSettlementAmounts, intentActivityParts, intentOrderStatus, intentRowFromEvent, intentSeqOf, isIntentOnlyTradeRequest, limitPriceOutPerIn, resolveIntentActions, suppressIcePotSettlementTrades, type ActivityRow, type IceSettlementFill, type IceSettlementLeg, type IntentOrder } from '../src/services/explorerService'
 import type { PriceInfo } from '../src/services/explorerService'
 import { isClassifiedAction } from '../src/services/pendingActivity'
 import { activityPath, activityTypeSelects, dcaHourly, dcaIntentScheduleRow, evaluateDcaStart, largeTradeRowEligible, renderMatch, type RuleMatch } from '../src/notifications/evaluator'
@@ -40,6 +40,8 @@ describe('intent schema', () => {
   it('counts intent feed events in the histogram, with asset refs on the placement', () => {
     const line = mvs.split('\n').find(l => l.includes('price_data.activity_histogram_events_mv'))!
     for (const name of FEED_EVENTS) expect(line, name).toContain(`'${name}'`)
+    // The budget-exhausting trade of a DCA intent is DcaCompleted alone: its bar too.
+    expect(line).toContain("'Intent.DcaCompleted'")
     expect(line).toContain("event_name = 'Intent.IntentSubmitted', arrayDistinct([toUInt32(greatest(0, JSONExtractInt(args_json, 'intent', 'data', 'value', 'assetIn')))")
   })
   it('records DCA migration outcomes in dca_events', () => {
@@ -50,30 +52,55 @@ describe('intent schema', () => {
   })
 })
 
-// shape-derived from runtime 443 metadata; replace with real args_json when the first intents land
-const OWNER = '0xb2927ffd2bbb0a73a317ab830e2dccd5e30cb0231c3ce7224be0f233b330742f'
-const ID = '340282366920938463463374607431768211455' // (u64::MAX << 64 | u64::MAX) style magnitude: > 2^64
-const submitted = { id: ID, owner: OWNER, intent: { data: { __kind: 'Swap', value: { assetIn: 9, assetOut: 10, amountIn: '1000000000000000000000', amountOut: '25000000', partial: { __kind: 'Yes', value: '100000000000000000000' } } }, deadline: '1788960000000', onResolved: null } }
-const resolved = { id: ID, amountIn: '1000000000000000000000', amountOut: '25100000' }
-const dcaTrade = { id: ID, amountIn: '10000000', amountOut: '3', remainingBudget: '90000000' }
-const ID_SEQ7 = '18446744073709551623' // 2^64 + 7: high half 1, low half (seq) 7 — a seq the u64::MAX id cannot pin
-const order: IntentOrder = { intentId: ID, seq: 18446744073709551615, owner: OWNER, kind: 'swap', assetIn: 9, assetOut: 10, amountIn: '1000000000000000000000', amountOut: '25000000', partial: true, partialMin: '100000000000000000000', slippagePpm: 0, budget: null, period: 0, deadlineMs: 1788960000000, forwardContract: null, blockHeight: 14400000, extrinsicIndex: 2, timestamp: '2026-09-09 10:00:00' }
+// Real payloads from the first mainnet intents (runtime 443, 2026-09-09):
+//   submitted = Intent.IntentSubmitted  14396667-e7  (Intent.submit_intent, extrinsic 2)
+//   resolved  = Intent.IntentResolved   14396670-e57 (ICE.submit_solution, extrinsic 2)
+//   dcaTrade  = Intent.DcaTradeExecuted 14402274-e60 (ICE.submit_solution, extrinsic 2)
+//   dcaDone   = Intent.DcaCompleted     14402317-e73 (ICE.submit_solution, extrinsic 2): the budget-exhausting
+//               trade of a DCA intent emits DcaCompleted { id } INSTEAD of DcaTradeExecuted
+//               (pallet_intent::intent_resolved), so the final fill carries no amounts of its own.
+//   order / dcaOrderRow = the intent_orders rows those placements made.
+// None of the first 35 orders carried a deadline or a Forward callback, so `intent.deadline` and
+// `intent.onResolved` are absent from the JSON (None is omitted). The id's high 64 bits are the
+// PLACEMENT time (generate_new_intent_id(now)), not a deadline: 1788944634000 ms = 09:03:54 UTC.
+const OWNER = '0x1ad9d16ce64de2df5b556e1c0cf58b8428e6ce66d68d6b3eb28b69706cf8a829'
+const ID = '33000203825434002837989228544000'      // seq 0
+const DCA_ID = '33000433376717256079649538048034'  // seq 34
+const submitted = { id: ID, owner: OWNER, intent: { data: { __kind: 'Swap', value: { assetIn: 10, assetOut: 1001, amountIn: '8610630', amountOut: '72230122863', partial: { __kind: 'No' } } } } }
+const resolved = { id: ID, amountIn: '8610630', amountOut: '72585831293' }
+const dcaTrade = { id: DCA_ID, amountIn: '190218680', amountOut: '189916449', remainingBudget: '380437361' }
+const dcaDone = { id: DCA_ID }
+const ID_SEQ7 = '18446744073709551623' // 2^64 + 7: high half 1, low half (seq) 7 — a seq the real ids (0, 34) cannot pin
+const order: IntentOrder = { intentId: ID, seq: 0, owner: OWNER, kind: 'swap', assetIn: 10, assetOut: 1001, amountIn: '8610630', amountOut: '72230122863', partial: false, partialMin: null, slippagePpm: 0, budget: null, period: 0, deadlineMs: null, forwardContract: null, blockHeight: 14396667, extrinsicIndex: 2, timestamp: '2026-09-09 09:03:54' }
+const dcaOrderRow: IntentOrder = { intentId: DCA_ID, seq: 34, owner: OWNER, kind: 'dca', assetIn: 1003, assetOut: 1000766, amountIn: '190218680', amountOut: '10000', partial: false, partialMin: null, slippagePpm: 30000, budget: '570656041', period: 18, deadlineMs: null, forwardContract: null, blockHeight: 14402251, extrinsicIndex: 2, timestamp: '2026-09-09 12:31:18' }
+// The settlement legs of 14402317/2 (Currencies.Transferred): e17 owner→pot 190218680 aUSDC, e65 pot→owner 189907076 USDC.
+const doneLegs: IceSettlementLeg[] = [
+  { blockHeight: 14402317, extrinsicIndex: 2, from: OWNER, to: ICE_POT_ACCOUNT, assetId: 1003, amount: '190218680' },
+  { blockHeight: 14402317, extrinsicIndex: 2, from: ICE_POT_ACCOUNT, to: OWNER, assetId: 1000766, amount: '189907076' },
+]
+const doneFill: IceSettlementFill = { blockHeight: 14402317, extrinsicIndex: 2, eventIndex: 73, eventName: 'Intent.DcaCompleted', intentId: DCA_ID, amountIn: null, amountOut: null }
 const prices = new Map<number, PriceInfo>()
 
 describe('intentActivityParts', () => {
   it('reads a placement', () => {
-    expect(intentActivityParts('Intent.IntentSubmitted', submitted)).toEqual({ action: 'Place', intentId: ID, owner: OWNER, amountIn: '1000000000000000000000', amountOut: '25000000', remainingBudget: null })
+    expect(intentActivityParts('Intent.IntentSubmitted', submitted)).toEqual({ action: 'Place', intentId: ID, owner: OWNER, amountIn: '8610630', amountOut: '72230122863', remainingBudget: null })
   })
   it('reads a fill, a partial fill, a DCA trade, a cancel and an expiry', () => {
     expect(intentActivityParts('Intent.IntentResolved', resolved)?.action).toBe('Fill')
     expect(intentActivityParts('Intent.IntentResovedPartially', resolved)?.action).toBe('PartialFill')
-    expect(intentActivityParts('Intent.DcaTradeExecuted', dcaTrade)).toMatchObject({ action: 'DcaTrade', remainingBudget: '90000000' })
+    expect(intentActivityParts('Intent.DcaTradeExecuted', dcaTrade)).toMatchObject({ action: 'DcaTrade', amountIn: '190218680', amountOut: '189916449', remainingBudget: '380437361' })
     expect(intentActivityParts('Intent.IntentCanceled', { id: ID })).toMatchObject({ action: 'Cancel', amountIn: null })
     expect(intentActivityParts('Intent.IntentExpired', { id: ID })).toMatchObject({ action: 'Expire' })
   })
+  // The pallet emits DcaCompleted { id } in place of the final DcaTradeExecuted, so it IS
+  // the DCA's last trade: nothing is left of the budget, and the amounts come from the
+  // settlement legs (iceSettlementAmounts), never from the event.
+  it('reads a DCA completion as the final trade, with nothing left', () => {
+    expect(intentActivityParts('Intent.DcaCompleted', dcaDone)).toEqual({ action: 'DcaTrade', intentId: DCA_ID, owner: null, amountIn: null, amountOut: null, remainingBudget: '0' })
+  })
   it('accepts a numeric id and rejects unrelated events', () => {
     expect(intentActivityParts('Intent.IntentCanceled', { id: 42 })?.intentId).toBe('42')
-    expect(intentActivityParts('Intent.DcaCompleted', { id: ID })).toBeNull()
+    expect(intentActivityParts('ICE.SolutionExecuted', { intentsExecuted: '1' })).toBeNull()
     expect(intentActivityParts('Bonds.Issued', {})).toBeNull()
   })
 })
@@ -94,34 +121,114 @@ describe('resolveIntentActions', () => {
 })
 
 describe('intentRowFromEvent', () => {
-  const ev = (event_name: string, args: unknown, extrinsic_index: number | null = 2) => ({ block_height: 14400010, ts: '2026-09-09 10:00:30', event_index: 7, extrinsic_index, event_name, args_json: JSON.stringify(args) })
+  const ev = (event_name: string, args: unknown, extrinsic_index: number | null = 2, at: { block_height?: number; event_index?: number } = {}) =>
+    ({ block_height: 14396670, ts: '2026-09-09 09:04:00', event_index: 57, ...at, extrinsic_index, event_name, args_json: JSON.stringify(args) })
   it('builds a fill for the order owner with realized amounts', () => {
     const out = intentRowFromEvent(ev('Intent.IntentResolved', resolved), prices, new Map([[ID, order]]))
     expect(out?.owner).toBe(OWNER)
-    expect(out?.row).toMatchObject({ type: 'intent', intentAction: 'Fill', intentId: ID, intentSeq: 18446744073709551615, intentKind: 'swap', amountIn: '1000000000000000000000', amountOut: '25100000', linkBlock: 14400010, linkIndex: 2 })
-    expect(out?.row.assetIn?.assetId).toBe(9)
-    expect(out?.row.assetOut?.assetId).toBe(10)
+    expect(out?.row).toMatchObject({ type: 'intent', intentAction: 'Fill', intentId: ID, intentSeq: 0, intentKind: 'swap', amountIn: '8610630', amountOut: '72585831293', linkBlock: 14396670, linkIndex: 2 })
+    expect(out?.row.assetIn?.assetId).toBe(10)
+    expect(out?.row.assetOut?.assetId).toBe(1001)
     expect(out?.row.who?.accountId).toBe(OWNER)
   })
   it('builds a placement from the event alone when the order map is empty', () => {
     const out = intentRowFromEvent(ev('Intent.IntentSubmitted', submitted, null), prices, new Map())
-    expect(out?.row).toMatchObject({ type: 'intent', intentAction: 'Place', intentPartial: true, amountIn: '1000000000000000000000', amountOut: '25000000' })
-    expect(out?.row.intentDeadline).toBe(new Date(1788960000000).toISOString())
+    expect(out?.row).toMatchObject({ type: 'intent', intentAction: 'Place', intentKind: 'swap', intentPartial: false, amountIn: '8610630', amountOut: '72230122863', intentDeadline: null, intentForward: null })
+    expect(out?.row.assetIn?.assetId).toBe(10)
     expect(out?.row.extrinsicIndex).toBeNull()
+  })
+  // No real order has carried a deadline yet (all 35 first placements omit it), so the
+  // deadline path is pinned on the real payload with the field added in the metadata's shape.
+  it('reads a deadline when the placement carries one', () => {
+    const withDeadline = { ...submitted, intent: { ...submitted.intent, deadline: '1788960000000' } }
+    expect(intentRowFromEvent(ev('Intent.IntentSubmitted', withDeadline, null), prices, new Map())?.row.intentDeadline).toBe(new Date(1788960000000).toISOString())
   })
   it('keeps a fill whose order is unknown, with no actor', () => {
     const out = intentRowFromEvent(ev('Intent.IntentResolved', resolved), prices, new Map())
     expect(out?.row.who).toBeNull()
     expect(out?.row.assetIn).toBeNull()
-    expect(out?.row.amountIn).toBe('1000000000000000000000')
+    expect(out?.row.amountIn).toBe('8610630')
   })
   it('values a cancel on the remaining input and carries the order limits', () => {
     const out = intentRowFromEvent(ev('Intent.IntentCanceled', { id: ID }), prices, new Map([[ID, order]]))
-    expect(out?.row).toMatchObject({ intentAction: 'Cancel', amountIn: '1000000000000000000000', amountOut: '25000000' })
+    expect(out?.row).toMatchObject({ intentAction: 'Cancel', amountIn: '8610630', amountOut: '72230122863' })
+  })
+  it("builds the DCA's final trade from DcaCompleted with the settlement legs' amounts", () => {
+    const done = ev('Intent.DcaCompleted', dcaDone, 2, { block_height: 14402317, event_index: 73 })
+    const settlements = iceSettlementAmounts([doneFill], new Map([[DCA_ID, dcaOrderRow]]), doneLegs)
+    const out = intentRowFromEvent(done, prices, new Map([[DCA_ID, dcaOrderRow]]), { settlements })
+    expect(out?.row).toMatchObject({ type: 'intent', intentAction: 'DcaTrade', intentKind: 'dca', intentId: DCA_ID, intentSeq: 34, amountIn: '190218680', amountOut: '189907076', intentRemainingBudget: '0', linkBlock: 14402317, linkIndex: 2 })
+    expect(out?.row.who?.accountId).toBe(OWNER)
+    expect(out?.row.assetIn?.assetId).toBe(1003)
+    expect(out?.row.assetOut?.assetId).toBe(1000766)
+  })
+  // The order's per-period amount is what the DCA USUALLY trades, not what this trade did:
+  // a completion without its legs stays amountless rather than showing a plausible number.
+  it('leaves a completion without settlement legs amountless', () => {
+    const done = ev('Intent.DcaCompleted', dcaDone, 2, { block_height: 14402317, event_index: 73 })
+    const out = intentRowFromEvent(done, prices, new Map([[DCA_ID, dcaOrderRow]]))
+    expect(out?.row).toMatchObject({ intentAction: 'DcaTrade', amountIn: null, amountOut: null, valueUsd: null })
+    expect(out?.row.who?.accountId).toBe(OWNER)
   })
   it('carries the seq from the low 64 bits of an id above 2^64', () => {
     const out = intentRowFromEvent(ev('Intent.IntentCanceled', { id: ID_SEQ7 }), prices, new Map())
     expect(out?.row).toMatchObject({ intentId: ID_SEQ7, intentSeq: 7 })
+  })
+})
+
+// pallet_ice moves each fill through the pot: owner→pot in the order's asset_in, pot→owner
+// in its asset_out (Currencies.Transferred). For DcaTradeExecuted rows the event states the
+// same numbers as the legs (14402274: 190218680 in / 189916449 out, transfer for transfer),
+// so for a DcaCompleted — which states none — the legs ARE the amounts.
+describe('iceSettlementAmounts', () => {
+  const orders = new Map([[DCA_ID, dcaOrderRow]])
+  it('reads the final DCA trade of 14402317/2 from its two legs', () => {
+    expect(iceSettlementAmounts([doneFill], orders, doneLegs).get('14402317:73')).toEqual({ amountIn: '190218680', amountOut: '189907076' })
+  })
+  it('subtracts the sibling fills that state their own amounts', () => {
+    const sibling: IceSettlementFill = { ...doneFill, eventIndex: 60, eventName: 'Intent.DcaTradeExecuted', intentId: 'other', amountIn: '100', amountOut: '50' }
+    const otherOrder: IntentOrder = { ...dcaOrderRow, intentId: 'other', seq: 35 }
+    const legs: IceSettlementLeg[] = [
+      { ...doneLegs[0], amount: '190218780' },
+      { ...doneLegs[1], amount: '189907126' },
+    ]
+    expect(iceSettlementAmounts([doneFill, sibling], new Map([...orders, ['other', otherOrder]]), legs).get('14402317:73')).toEqual({ amountIn: '190218680', amountOut: '189907076' })
+  })
+  it('refuses to split two completions of one owner in the same asset', () => {
+    const twin: IceSettlementFill = { ...doneFill, eventIndex: 90, intentId: 'twin' }
+    const twinOrder: IntentOrder = { ...dcaOrderRow, intentId: 'twin', seq: 36 }
+    const out = iceSettlementAmounts([doneFill, twin], new Map([...orders, ['twin', twinOrder]]), doneLegs)
+    expect(out.get('14402317:73')).toEqual({ amountIn: null, amountOut: null })
+    expect(out.get('14402317:90')).toEqual({ amountIn: null, amountOut: null })
+  })
+  it('keys legs by solution: a leg of another extrinsic or block is not this fill', () => {
+    const elsewhere = doneLegs.map(l => ({ ...l, extrinsicIndex: 3 }))
+    expect(iceSettlementAmounts([doneFill], orders, elsewhere).get('14402317:73')).toEqual({ amountIn: null, amountOut: null })
+  })
+  it('has nothing for an unknown order and skips a hook row', () => {
+    expect(iceSettlementAmounts([doneFill], new Map(), doneLegs).get('14402317:73')).toEqual({ amountIn: null, amountOut: null })
+    expect(iceSettlementAmounts([{ ...doneFill, extrinsicIndex: null }], orders, doneLegs).size).toBe(0)
+  })
+})
+
+// Matched (intent-to-intent) volume is what the fills took in beyond what the pot routed
+// through the AMMs, per input asset: intent_in − pool_in, floored at zero, valued at the
+// fills' own event-time price. A difference of USD valuations read price noise as matched
+// volume ($0.08 on a fully routed solution).
+describe('iceMatchedInUsd', () => {
+  const base = { blockHeight: 14402317, timestamp: '2026-09-09 12:34:00', eventIndex: 0, extrinsicIndex: 2, who: null, to: null, asset: null, assetOut: null, amount: null, amountOut: null }
+  const fill = (assetId: number, amountIn: string, valueUsd: number | null): ActivityRow => ({ ...base, type: 'intent', assetIn: { assetId, decimals: 6 } as any, amountIn, valueUsd })
+  const pot = (assetId: number, amountIn: string, valueUsd: number | null): ActivityRow => ({ ...base, type: 'trade', assetIn: { assetId, decimals: 6 } as any, amountIn, valueUsd })
+  it('is zero for a fully routed solution however the two legs were priced', () => {
+    // 14402317/2: the fill paid 190218680 aUSDC ($190.20 at its price), the pot routed the same 190218680 ($190.12 at its own).
+    expect(iceMatchedInUsd([fill(1003, '190218680', 190.199212)], [pot(1003, '190218680', 190.119543)])).toBe(0)
+  })
+  it('values the unrouted remainder at the fills\' own price', () => {
+    expect(iceMatchedInUsd([fill(1003, '100', 100), fill(1003, '100', 100)], [pot(1003, '150', 150)])).toBeCloseTo(50, 9)
+  })
+  it('is unknown when a matched asset has no valued fill, and zero with no fills', () => {
+    expect(iceMatchedInUsd([fill(1003, '100', null)], [])).toBeNull()
+    expect(iceMatchedInUsd([], [pot(1003, '150', 150)])).toBe(0)
   })
 })
 
@@ -145,7 +252,9 @@ describe('intent wiring', () => {
     const start = src.indexOf('const semanticNames = [')
     const block = src.slice(start, src.indexOf(']', start))
     expect(block).toContain('...INTENT_EVENT_NAMES')
-    expect(INTENT_EVENT_NAMES).toHaveLength(6)
+    // The six lifecycle events plus DcaCompleted, the DCA's final trade.
+    expect(INTENT_EVENT_NAMES).toHaveLength(7)
+    expect(INTENT_EVENT_NAMES).toContain('Intent.DcaCompleted')
   })
   it("counts a DCA intent's trade under the Trade chip's dca action in the histogram", () => {
     // The list admits it through activityRowMatchesAction's intent arm; the bars over
@@ -157,6 +266,7 @@ describe('intent wiring', () => {
     const dca = body.split('\n').filter(l => l.includes("filters.action === 'dca')") && l.includes('names = ['))
     expect(dca).toHaveLength(1)
     expect(dca[0]).toContain("'Intent.DcaTradeExecuted'")
+    expect(dca[0]).toContain("'Intent.DcaCompleted'")
     expect(activityRowMatchesAction({ type: 'intent', intentKind: 'dca', intentAction: 'DcaTrade' } as any, 'dca')).toBe(true)
   })
   it('links an intent row to its order page', () => {
@@ -238,6 +348,12 @@ describe('suppressIcePotSettlementTrades', () => {
   })
   it('leaves a feed without intent rows untouched', () => {
     expect(suppressIcePotSettlementTrades([potTrade, userTrade])).toEqual([potTrade, userTrade])
+  })
+  // The solution is an UNSIGNED extrinsic, so a pot trade built from the signer alone has
+  // no actor and matches nothing here: attachHookSwapActors must have named the pot first.
+  it('cannot fold an actorless pot trade — the swapper has to be attached before', () => {
+    const actorless: ActivityRow = { ...potTrade, who: null }
+    expect(suppressIcePotSettlementTrades([fill, actorless])).toEqual([fill, actorless])
   })
 })
 
@@ -357,40 +473,41 @@ describe('notification parity', () => {
     expect(title(intent('Expire', 'swap'))).toBe('Limit order expired')
   })
 
-  // A DCA-intent placement is judged like an old schedule: per-hour notional.
+  // A DCA-intent placement is judged like an old schedule: per-hour notional. The row is
+  // intent 34's intent_orders row (14402251-e15): 190.21868 aUSDC every 18 blocks, budget 570.656041.
   const dcaOrder = (over: Record<string, unknown> = {}) => ({
-    intent_id: ID_SEQ7, seq: 7, owner: OWNER, asset_in: 5, asset_out: 10,
-    amount_in: '100000000000', budget: '', period: 1800, block_height: 14400000, ...over,
+    intent_id: DCA_ID, seq: 34, owner: OWNER, asset_in: 1003, asset_out: 1000766,
+    amount_in: '190218680', budget: '570656041', period: 18, block_height: 14402251, ...over,
   })
-  // DOT at $4 (10 dp); nothing else priced.
-  const priceDot = (assetId: number, raw: string): number | null => assetId === 5 ? Number(BigInt(raw) / 100000n) / 1e5 * 4 : null
+  // aUSDC at $1 (6 dp); nothing else priced.
+  const priceUsdc = (assetId: number, raw: string): number | null => assetId === 1003 ? Number(raw) / 1e6 : null
 
-  it('maps a rolling and a budgeted dca intent order onto the schedule shape', () => {
+  it('maps a budgeted and a rolling dca intent order onto the schedule shape', () => {
     expect(dcaIntentScheduleRow(dcaOrder())).toEqual({
-      id: 7, intentId: ID_SEQ7, blockHeight: 14400000, who: OWNER, assetIn: 5, assetOut: 10,
-      direction: 'Sell', amountPer: '100000000000', totalAmount: '0', periodBlocks: 1800,
+      id: 34, intentId: DCA_ID, blockHeight: 14402251, who: OWNER, assetIn: 1003, assetOut: 1000766,
+      direction: 'Sell', amountPer: '190218680', totalAmount: '570656041', periodBlocks: 18,
     })
-    expect(dcaIntentScheduleRow(dcaOrder({ budget: '500000000000' })).totalAmount).toBe('500000000000')
+    expect(dcaIntentScheduleRow(dcaOrder({ budget: '' })).totalAmount).toBe('0')
   })
 
   it('values an hour of a dca intent as perTradeUsd × 3600 / (period × 2) at 2 s blocks, capped by the budget', () => {
-    // 10 DOT = $40 per trade every 1800 blocks → 40 × 3600 / (1800 × 2) = $40/h
-    expect(dcaHourly(dcaIntentScheduleRow(dcaOrder()), priceDot, 2000).hourlyUsd).toBeCloseTo(40, 9)
-    // every 600 blocks → 40 × 3600 / (600 × 2) = $120/h
-    expect(dcaHourly(dcaIntentScheduleRow(dcaOrder({ period: 600 })), priceDot, 2000).hourlyUsd).toBeCloseTo(120, 9)
-    // a 5 DOT ($20) budget caps the hour
-    expect(dcaHourly(dcaIntentScheduleRow(dcaOrder({ budget: '50000000000' })), priceDot, 2000).hourlyUsd).toBeCloseTo(20, 9)
+    // $190.21868 every 18 blocks → 190.21868 × 3600 / 36 = $19,021.868/h, capped by the $570.656041 budget
+    expect(dcaHourly(dcaIntentScheduleRow(dcaOrder()), priceUsdc, 2000).hourlyUsd).toBeCloseTo(570.656041, 6)
+    // rolling (no budget): the full hourly rate
+    expect(dcaHourly(dcaIntentScheduleRow(dcaOrder({ budget: '' })), priceUsdc, 2000).hourlyUsd).toBeCloseTo(19021.868, 3)
+    // every 1800 blocks → 190.21868 × 3600 / 3600 = $190.22/h, under the budget
+    expect(dcaHourly(dcaIntentScheduleRow(dcaOrder({ period: 1800 })), priceUsdc, 2000).hourlyUsd).toBeCloseTo(190.21868, 5)
   })
 
   it('fires a DCA-intent start under its own identity and links the order page', () => {
     const rule: NotificationRule = { ruleId: 'r', accountId: OWNER, kind: 'large-trade', name: '', params: { minUsd: 100, dcaStart: true }, channels: [], muted: false, cooldownS: 0 }
-    const row = dcaIntentScheduleRow(dcaOrder({ period: 600 }))
-    const matches = evaluateDcaStart([row], [rule], { from: 14399999, to: 14400000 }, priceDot, 2000)
+    const row = dcaIntentScheduleRow(dcaOrder())
+    const matches = evaluateDcaStart([row], [rule], { from: 14402250, to: 14402251 }, priceUsdc, 2000)
     expect(matches).toHaveLength(1)
-    expect(matches[0].identity).toBe(`intent:${ID_SEQ7}`)
+    expect(matches[0].identity).toBe(`intent:${DCA_ID}`)
     const out = renderNotification(renderMatch(matches[0] as RuleMatch, rule, () => null))
-    expect(out.title).toContain(`DCA intent started ${assetDescriptor(5).symbol} → ${assetDescriptor(10).symbol}`)
-    expect(out.url).toMatch(new RegExp(`/intent/${ID_SEQ7}$`))
-    expect(evaluateDcaStart([row], [{ ...rule, params: { minUsd: 100, dcaStart: false } }], { from: 14399999, to: 14400000 }, priceDot, 2000)).toHaveLength(0)
+    expect(out.title).toContain(`DCA intent started ${assetDescriptor(1003).symbol} → ${assetDescriptor(1000766).symbol}`)
+    expect(out.url).toMatch(new RegExp(`/intent/${DCA_ID}$`))
+    expect(evaluateDcaStart([row], [{ ...rule, params: { minUsd: 100, dcaStart: false } }], { from: 14402250, to: 14402251 }, priceUsdc, 2000)).toHaveLength(0)
   })
 })
