@@ -320,11 +320,14 @@ describe('notification parity', () => {
   const otc = (otcAction: 'Place' | 'Pull' | 'Fill'): ActivityRow => ({ ...base, type: 'otc', otcAction })
   const intent = (intentAction: ActivityRow['intentAction'], intentKind: 'swap' | 'dca' = 'swap'): ActivityRow => ({ ...base, type: 'intent', intentAction, intentKind, intentId: ID })
 
-  it('admits placements and fills to the large-trade lane and never a cancel', () => {
-    expect(largeTradeRowEligible(otc('Place'))).toBe(true)
+  // Placements were admitted at first (an "order placed" alert); the user pulled
+  // them after a re-placed 1.2M HDX OTC order kept arriving as a $15k trade — an
+  // order trades nothing until it is filled.
+  it('admits fills to the large-trade lane and never a placement or a cancel', () => {
+    expect(largeTradeRowEligible(otc('Place'))).toBe(false)
     expect(largeTradeRowEligible(otc('Fill'))).toBe(true)
     expect(largeTradeRowEligible(otc('Pull'))).toBe(false)
-    expect(largeTradeRowEligible(intent('Place', 'swap'))).toBe(true)
+    expect(largeTradeRowEligible(intent('Place', 'swap'))).toBe(false)
     expect(largeTradeRowEligible(intent('Place', 'dca'))).toBe(false)
     expect(largeTradeRowEligible(intent('Fill'))).toBe(true)
     expect(largeTradeRowEligible(intent('PartialFill'))).toBe(true)
