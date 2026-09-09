@@ -135,6 +135,18 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
                   </div>
                 </>}
                 {data.who && <><div className="dt">Trader</div><div className="dd"><AddrPill account={data.who} /></div></>}
+                {/* The ICE pot's trade inside a solution is how an order was filled: say whose. */}
+                {data.iceIntents && data.iceIntents.length > 0 && <>
+                  <div className="dt">ICE settlement for</div>
+                  <div className="dd">
+                    {data.iceIntents.map(i => (
+                      <span key={i.intentId} className="asset-flow" data-testid="ice-intent">
+                        <Link to={paths.intent(i.intentId)}>{intentLabel(i.intentKind ?? undefined, undefined)} <span className="num">#{i.intentSeq}</span></Link>
+                        {i.owner && <> · <AddrPill account={i.owner} /></>}
+                      </span>
+                    ))}
+                  </div>
+                </>}
                 <div className="dt">When</div><div className="dd mono"><MomentLink at={data} now={now} /></div>
                 <div className="dt">Result</div>
                 <div className="dd">

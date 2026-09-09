@@ -18,6 +18,13 @@ const BROADCAST_MIN_BLOCK = 6_837_788
 const EVENT_ANCHOR_OFFSET = 1_099_511_627_776n // 2^40 — event-index anchors clear of real router ids
 const LEGACY_EVENTS = "'Omnipool.SellExecuted','Omnipool.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','LBP.SellExecuted','LBP.BuyExecuted'"
 const BROADCAST_EVENTS = "'Broadcast.Swapped','Broadcast.Swapped2','Broadcast.Swapped3'"
+// ICE intents (runtime 443, block 14362830): a fill is the owner's trade. The four
+// events that settle an intent — the last of a DCA is DcaCompleted alone, with no
+// amounts of its own — and the solver's holding pot (`modlice_ice#`), through which
+// every fill moves as one Currencies.Transferred in and one out.
+const ICE_MIN_BLOCK = 14_362_830
+const INTENT_FILL_EVENTS = "'Intent.IntentResolved','Intent.IntentResovedPartially','Intent.DcaTradeExecuted','Intent.DcaCompleted'"
+const ICE_POT_ACCOUNT = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
 
 // Source for per-account trading volume: the de-duped net-trade model, whose
 // derivations job keeps every partition covered. One summable USD column per

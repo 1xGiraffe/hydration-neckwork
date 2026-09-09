@@ -457,9 +457,10 @@ describe('GET /explorer/ice', () => {
     expect(body.quality.priceVsLimitBp).toEqual({ p10: null, p50: null, p90: null })
     expect(body.migration.byReason).toEqual([])
     expect(body.topPairs).toEqual([])
-    // Every read went through the injected client, capped and launch-bounded.
+    // Every read went through the injected client, capped and launch-bounded — the
+    // twelve bucket/status reads plus the DCA completions' own read (loadCompletionFills).
     expect(sql.some(q => q.includes('price_data.intent_orders FINAL'))).toBe(true)
     expect(sql.some(q => q.includes("stream = 'ice_matched_fee'"))).toBe(true)
-    expect(sql.filter(q => q.includes('SETTINGS max_memory_usage=1000000000, max_threads=2'))).toHaveLength(12)
+    expect(sql.filter(q => q.includes('SETTINGS max_memory_usage=1000000000, max_threads=2'))).toHaveLength(13)
   })
 })
