@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { ICE_LAUNCH_BLOCK, bpQuantiles, foldMigration, latestGovernanceStatus, priceVsLimitBp, type GovernanceEventRow, type MigrationRow } from '../src/services/iceService.ts'
+import { ICE_LAUNCH_BLOCK, bpQuantiles, foldFills, foldMigration, latestGovernanceStatus, priceVsLimitBp, type GovernanceEventRow, type MigrationRow } from '../src/services/iceService.ts'
 
 const iceService = readFileSync(new URL('../src/services/iceService.ts', import.meta.url), 'utf8')
 
@@ -112,6 +112,63 @@ describe('bpQuantiles', () => {
   it('reads the nearest-rank deciles of the sorted sample', () => {
     expect(bpQuantiles([5, -3, 0, 12, 7, 1, -1, 3, 9, 2])).toEqual({ p10: -3, p50: 2, p90: 9 })
     expect(bpQuantiles([4])).toEqual({ p10: 4, p50: 4, p90: 4 })
+  })
+})
+
+// The first day of the venue (2026-09-09, 51 solutions): the dashboard reported
+// $112,582 "routed" against $16,577 of fills. Every hop of a route has an `in` leg
+// on the pot's projection — 247 legs over 54 routes — so a 4-hop route (USDT →
+// aUSDT → HOLLAR → H2O → aDOT) was counted four times, hub and intermediates
+// included. Routed is what each ROUTE took in, once: the per-asset net of its legs.
+describe('foldFills', () => {
+  const days = ['2026-09-09']
+  const solutions = new Map([['2026-09-09', 3]])
+  // Intent #34's three DCA trades (14402274/96/317): 3 × 190218680 aUSDC in, valued
+  // $570.60 off the fills' legs; the pot routed the same 570656040 aUSDC, valued
+  // $570.36 off its input leg.
+  const fills = [{ hour: '2026-09-09 12:00:00', day: '2026-09-09', a_in: 1003, a_out: 1000766, fills: '3', sum_in: '570656040', sum_out: '569735289', block: 14402317, valueUsd: 570.597636 }]
+  const routed = [{ hour: '2026-09-09 12:00:00', day: '2026-09-09', asset_id: 1003, sum_in: '570656040', block: 14402317, valueUsd: 570.363313 }]
+
+  it('reports the fills once, the routes once, and no matched volume on a fully routed day', () => {
+    expect(foldFills(fills, routed, solutions, days)).toEqual([
+      { day: '2026-09-09', fills: 3, solutions: 3, usd: 570.597636, matchedUsd: 0, routedUsd: 570.363313 },
+    ])
+  })
+
+  it('reads matched volume from the raw shortfall of the routes, priced like the fills', () => {
+    // 60 aUSDC more filled than routed → $60 at the fills' $1.0000 per aUSDC (570.597636 / 570.656040).
+    const more = [{ ...fills[0], sum_in: '630656040', valueUsd: 630.597636 }]
+    const [day] = foldFills(more, routed, solutions, days)
+    expect(day.matchedUsd).toBeCloseTo(60_000_000 * (630.597636 / 630_656_040), 6)
+    expect(day.routedUsd).toBe(570.363313)
+  })
+
+  it('never reads a valuation gap between the two legs as matched volume', () => {
+    // Same raw amounts, routed valued higher than the fills: still zero, not clamped noise.
+    const [day] = foldFills(fills, [{ ...routed[0], valueUsd: 571.9 }], solutions, days)
+    expect(day.matchedUsd).toBe(0)
+  })
+
+  it('grids every requested day, empty ones at zero', () => {
+    expect(foldFills([], [], new Map(), ['2026-09-08', '2026-09-09'])).toEqual([
+      { day: '2026-09-08', fills: 0, solutions: 0, usd: 0, matchedUsd: 0, routedUsd: 0 },
+      { day: '2026-09-09', fills: 0, solutions: 0, usd: 0, matchedUsd: 0, routedUsd: 0 },
+    ])
+  })
+})
+
+describe('routed and fill reads', () => {
+  it('nets each route per asset on its op_key and keeps the positive side only', () => {
+    expect(iceService).toContain('GROUP BY block_height, op_key, asset_id')
+    expect(iceService).toContain("greatest(toInt256(sumIf(toUInt256OrZero(amount), leg_kind = 'in')) - toInt256(sumIf(toUInt256OrZero(amount), leg_kind = 'out')), toInt256(0)) AS net_in")
+    expect(iceService).toContain('WHERE net_in > 0')
+    // Never the bare per-hop sum again.
+    expect(iceService).not.toMatch(/leg_kind = 'in'\n\s+GROUP BY hour, day, asset_id/)
+  })
+  it("counts a DCA intent's completing trade as a fill, with the settlement reader's amounts", () => {
+    expect(iceService).toContain("event_name = '${DCA_COMPLETED_EVENT}'")
+    expect(iceService).toContain('buckets.push(...await loadCompletionFills())')
+    expect(iceService).toContain('iceSettlementsFor(rows, await getIntentOrders(rows.map(r => r.intent_id)))')
   })
 })
 

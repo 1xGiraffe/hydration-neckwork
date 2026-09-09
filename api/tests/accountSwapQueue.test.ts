@@ -61,4 +61,24 @@ describe('account swap queue', () => {
     // Keyed by the swap's own event, not merely its block.
     expect(accountSwapDestinationRows([hook], [], new Map([['42:9', 'someone-else']]))).toEqual([])
   })
+
+  // An UNSIGNED extrinsic — ICE.submit_solution, the OCW's solution — has an extrinsic
+  // index but no signer of any form, so the signer rule attributed its Router swaps to
+  // nobody and the ICE pot's own page never saw them. The Broadcast event names the pot
+  // as swapper, the same way it names a hook swap's actor.
+  it('attributes an unsigned extrinsic\'s swap to its Broadcast swapper', () => {
+    const rows = accountSwapDestinationRows([queued], [
+      { block_height: 42, extrinsic_index: 3, signer: null, effective_signer: null },
+    ], new Map([['42:7', 'ice-pot']]))
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ account: 'ice-pot', extrinsic_index: 3, block_height: 42, event_index: 7, signer: '' })
+  })
+
+  it('drops an unsigned extrinsic\'s swap with no resolved swapper, and never overrides a signer', () => {
+    const unsigned = [{ block_height: 42, extrinsic_index: 3, signer: null, effective_signer: null }]
+    expect(accountSwapDestinationRows([queued], unsigned, new Map())).toEqual([])
+    const signed = accountSwapDestinationRows([queued], [{ block_height: 42, extrinsic_index: 3, signer: 'alice', effective_signer: null }], new Map([['42:7', 'ice-pot']]))
+    expect(signed.map(row => row.account)).toEqual(['alice'])
+  })
 })

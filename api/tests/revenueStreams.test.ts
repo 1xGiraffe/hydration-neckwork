@@ -167,6 +167,24 @@ describe('omnipool fee streams', () => {
     }
   })
 
+  // The pot pays the pool fees of the routes it runs for the intents it settles, so
+  // the payer is the intent OWNER — exactly one when the solution settled one owner's
+  // intents (every solution so far); several owners' fills in one solution cannot
+  // split its routes between them and stay unattributed, as a pallet payer does.
+  it("attributes the ICE pot's route fees to the solution's single intent owner", () => {
+    const marker = "toYYYYMM(block_timestamp) = 209901"
+    for (const stream of ['omnipool_asset_fee', 'omnipool_protocol_fee'] as const) {
+      const sql = buildRevenueEventRowsSql(stream, marker)
+      expect(sql, stream).toContain('FROM price_data.intent_events FINAL')
+      expect(sql, stream).toContain('FROM price_data.intent_orders FINAL')
+      expect(sql, stream).toContain("if(uniqExact(o.owner) = 1, any(o.owner), '') AS owner")
+      expect(sql, stream).toContain(`if(f.swapper = '${ICE_POT_ACCOUNT}' AND i.owner != '', i.owner,`)
+      // The owner read is bounded like every other source read of the stream.
+      const reads = sql.split(marker).length - 1
+      expect(reads, stream).toBeGreaterThanOrEqual(stream === 'omnipool_protocol_fee' ? 3 : 2)
+    }
+  })
+
   it('exports the protocol-revenue predicate the explorer and account model share', () => {
     // Fee legs count as protocol revenue when routed out of the pool, burned, or
     // retained in the protocol-provided HDX position ('pol'). A leg left with the pool

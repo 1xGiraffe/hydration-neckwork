@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cachedSwr } from './cache.ts'
-import { ICE_FEE_ACCOUNT, ICE_POT_ACCOUNT, applyEventTimeUsd, dcaMigrationReason, ensurePrices, usdValue, type AssetRef, type PriceInfo } from './explorerService.ts'
+import { ICE_FEE_ACCOUNT, ICE_POT_ACCOUNT, applyEventTimeUsd, dcaMigrationReason, ensurePrices, getIntentOrders, iceSettlementsFor, usdValue, type AssetRef, type PriceInfo, type RawIntentEvent } from './explorerService.ts'
 import { assetDescriptor } from './explorerAssets.ts'
 
 // ICE dashboard — the intent venue runtime 443 added: swap intents (the product's
@@ -27,8 +27,11 @@ const TOP_PAIRS = 10
 // window rather than left to the client's result-row ceiling to reject.
 const BP_SAMPLE_LIMIT = 50_000
 // A fill is any settlement the solver made for an intent: a limit order's full or
-// partial resolution, or one DCA-intent trade. A terminal event closes the intent.
+// partial resolution, or one DCA-intent trade. These three state their amounts; the
+// budget-exhausting DCA trade is `Intent.DcaCompleted` alone, read separately below
+// with its amounts recovered from the settlement legs. A terminal event closes the intent.
 const FILL_EVENTS_SQL = ['Intent.IntentResolved', 'Intent.IntentResovedPartially', 'Intent.DcaTradeExecuted'].map(n => `'${n}'`).join(', ')
+const DCA_COMPLETED_EVENT = 'Intent.DcaCompleted'
 const TERMINAL_EVENTS_SQL = ['Intent.IntentResolved', 'Intent.IntentCanceled', 'Intent.IntentExpired', 'Intent.DcaCompleted'].map(n => `'${n}'`).join(', ')
 
 const asset = (id: number): AssetRef => assetDescriptor(id)
@@ -277,26 +280,70 @@ async function loadFillBuckets(): Promise<Valued<FillBucketRow>[]> {
     format: 'JSONEachRow',
   })
   const buckets: Valued<FillBucketRow>[] = (await res.json<FillBucketRow>()).map(r => ({ ...r, valueUsd: null }))
+  buckets.push(...await loadCompletionFills())
   await applyEventTimeUsd(buckets, b => ({ block: Number(b.block), legs: [priceLeg(b.a_in, b.sum_in), priceLeg(b.a_out, b.sum_out)] }))
   return buckets
+}
+// The DCA intents' final trades: one DcaCompleted per intent, so one row each, with
+// the amounts the feed's own settlement reader recovers from the pot's legs. A
+// completion whose legs cannot be told apart counts as a fill with no amounts.
+type CompletionRow = RawIntentEvent & { hour: string; day: string; intent_id: string; a_in: number; a_out: number }
+async function loadCompletionFills(): Promise<Valued<FillBucketRow>[]> {
+  const res = await client.query({
+    query: `
+      SELECT toString(toStartOfHour(ie.block_timestamp)) AS hour, toString(toDate(ie.block_timestamp)) AS day,
+        ie.block_height AS block_height, toString(ie.block_timestamp) AS ts, ie.event_index AS event_index, ie.extrinsic_index AS extrinsic_index,
+        ie.event_name AS event_name, ie.args_json AS args_json, toString(ie.intent_id) AS intent_id, o.asset_in AS a_in, o.asset_out AS a_out
+      FROM (
+        SELECT intent_id, block_height, block_timestamp, event_index, extrinsic_index, event_name, args_json
+        FROM price_data.intent_events FINAL
+        WHERE block_height >= {launch:UInt32} AND block_timestamp >= now() - INTERVAL ${WINDOW_DAYS} DAY
+          AND event_name = '${DCA_COMPLETED_EVENT}'
+      ) AS ie
+      INNER JOIN (
+        SELECT intent_id, asset_in, asset_out FROM price_data.intent_orders FINAL WHERE block_height >= {launch:UInt32}
+      ) AS o ON o.intent_id = ie.intent_id
+      ORDER BY ie.block_height, ie.event_index
+      SETTINGS max_memory_usage=1000000000, max_threads=2`,
+    query_params: { launch: ICE_LAUNCH_BLOCK },
+    format: 'JSONEachRow',
+  })
+  const rows = await res.json<CompletionRow>()
+  if (!rows.length) return []
+  const settled = await iceSettlementsFor(rows, await getIntentOrders(rows.map(r => r.intent_id)))
+  return rows.map(r => {
+    const s = settled.get(`${r.block_height}:${r.event_index}`)
+    return { hour: r.hour, day: r.day, a_in: r.a_in, a_out: r.a_out, fills: '1', sum_in: s?.amountIn ?? '0', sum_out: s?.amountOut ?? '0', block: r.block_height, valueUsd: null }
+  })
 }
 function priceLeg(assetId: number, raw: string): { assetId: number; decimals: number; raw: string } {
   const a = asset(assetId)
   return { assetId: a.assetId, decimals: a.decimals, raw }
 }
 
-// What the solver routed through the AMMs: the pot's own IN legs, per hour and
-// asset, from the swapper-first projection (the pot is one account), valued the
-// same way as the fills so matched = fills − routed compares like with like.
+// What the solver routed through the AMMs: what each of the pot's ROUTES took in,
+// once per route. A route is several Broadcast hops sharing one op_key, and every
+// hop has an `in` leg — summing them counted a 4-hop route four times (the hub
+// asset and the intermediates included; $112.6k "routed" against $16.6k of fills).
+// Netting the route's legs per asset cancels each intermediate (bought by one hop,
+// sold by the next; the hub's `in` is its `out` less the protocol fee) and leaves
+// the route's input on its positive side, valued the same way as the fills so
+// matched = fills − routed compares like with like.
 interface RoutedBucketRow { hour: string; day: string; asset_id: number; sum_in: string; block: number }
 async function loadRoutedBuckets(): Promise<Valued<RoutedBucketRow>[]> {
   const res = await client.query({
     query: `
-      SELECT toString(toStartOfHour(block_timestamp)) AS hour, toString(toDate(block_timestamp)) AS day, asset_id,
-        toString(sum(toUInt256OrZero(amount))) AS sum_in, max(block_height) AS block
-      FROM price_data.pool_swap_legs_by_account FINAL
-      WHERE swapper = {pot:String} AND block_height >= {launch:UInt32}
-        AND block_timestamp >= now() - INTERVAL ${WINDOW_DAYS} DAY AND leg_kind = 'in'
+      SELECT toString(toStartOfHour(t)) AS hour, toString(toDate(t)) AS day, asset_id,
+        toString(sum(net_in)) AS sum_in, max(block) AS block
+      FROM (
+        SELECT min(block_timestamp) AS t, block_height AS block, op_key, asset_id,
+          greatest(toInt256(sumIf(toUInt256OrZero(amount), leg_kind = 'in')) - toInt256(sumIf(toUInt256OrZero(amount), leg_kind = 'out')), toInt256(0)) AS net_in
+        FROM price_data.pool_swap_legs_by_account FINAL
+        WHERE swapper = {pot:String} AND block_height >= {launch:UInt32}
+          AND block_timestamp >= now() - INTERVAL ${WINDOW_DAYS} DAY AND leg_kind IN ('in', 'out')
+        GROUP BY block_height, op_key, asset_id
+      )
+      WHERE net_in > 0
       GROUP BY hour, day, asset_id
       ORDER BY hour
       SETTINGS max_memory_usage=1000000000, max_threads=2`,
@@ -494,21 +541,42 @@ export function foldMigration(rows: MigrationRow[], remaining: number, days: str
   }
 }
 
-function foldFills(fills: Valued<FillBucketRow>[], routed: Valued<RoutedBucketRow>[], solutions: Map<string, number>, days: string[]): IceDashboard['fillsPerDay'] {
-  const byDay = new Map<string, { fills: number; usd: number; routedUsd: number }>()
+// Matched volume never touched an AMM: per day and input asset, what the fills took
+// in less what the pot's routes took in — `intent_in − pool_in`, the pallet's own
+// matched-fee base, in raw units and floored at zero — valued at the day's fills'
+// own implied price for that asset. Never a difference of two USD figures: the fill
+// and the route are priced off different legs, and that read price noise as
+// matched volume on days that routed every unit.
+export function foldFills(fills: readonly Valued<FillBucketRow>[], routed: readonly Valued<RoutedBucketRow>[], solutions: ReadonlyMap<string, number>, days: readonly string[]): IceDashboard['fillsPerDay'] {
+  const byDay = new Map<string, { fills: number; usd: number; routedUsd: number; inRaw: Map<number, bigint>; inUsd: Map<number, number>; routedRaw: Map<number, bigint> }>()
   const at = (day: string) => {
-    const e = byDay.get(day) ?? { fills: 0, usd: 0, routedUsd: 0 }
+    const e = byDay.get(day) ?? { fills: 0, usd: 0, routedUsd: 0, inRaw: new Map(), inUsd: new Map(), routedRaw: new Map() }
     byDay.set(day, e)
     return e
   }
-  for (const b of fills) { const e = at(b.day); e.fills += Number(b.fills); e.usd += b.valueUsd ?? 0 }
-  for (const b of routed) at(b.day).routedUsd += b.valueUsd ?? 0
+  const raw = (v: string): bigint => /^\d+$/.test(v) ? BigInt(v) : 0n
+  for (const b of fills) {
+    const e = at(b.day)
+    e.fills += Number(b.fills)
+    e.usd += b.valueUsd ?? 0
+    e.inRaw.set(b.a_in, (e.inRaw.get(b.a_in) ?? 0n) + raw(b.sum_in))
+    if (b.valueUsd != null) e.inUsd.set(b.a_in, (e.inUsd.get(b.a_in) ?? 0) + b.valueUsd)
+  }
+  for (const b of routed) {
+    const e = at(b.day)
+    e.routedUsd += b.valueUsd ?? 0
+    e.routedRaw.set(b.asset_id, (e.routedRaw.get(b.asset_id) ?? 0n) + raw(b.sum_in))
+  }
   return days.map(day => {
-    const e = byDay.get(day) ?? { fills: 0, usd: 0, routedUsd: 0 }
-    // Matched volume never touched an AMM: what the fills moved less what the pot
-    // routed. Clamped — the two sides are valued off different legs, so a fully
-    // routed day can land a few cents either side of zero.
-    return { day, fills: e.fills, solutions: solutions.get(day) ?? 0, usd: e.usd, matchedUsd: Math.max(0, e.usd - e.routedUsd), routedUsd: e.routedUsd }
+    const e = byDay.get(day) ?? { fills: 0, usd: 0, routedUsd: 0, inRaw: new Map<number, bigint>(), inUsd: new Map<number, number>(), routedRaw: new Map<number, bigint>() }
+    let matchedUsd = 0
+    for (const [assetId, intentIn] of e.inRaw) {
+      const matched = intentIn - (e.routedRaw.get(assetId) ?? 0n)
+      const priced = e.inUsd.get(assetId)
+      if (matched <= 0n || priced == null || intentIn === 0n) continue
+      matchedUsd += Number(matched) * (priced / Number(intentIn))
+    }
+    return { day, fills: e.fills, solutions: solutions.get(day) ?? 0, usd: e.usd, matchedUsd, routedUsd: e.routedUsd }
   })
 }
 

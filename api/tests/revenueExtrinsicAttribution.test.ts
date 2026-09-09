@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { attachRevenue, revenueKey, type ActivityRevenue, type RevenueBearing } from '../src/services/explorerService.ts'
+import { ICE_POT_ACCOUNT, attachRevenue, revenueKey, type ActivityRevenue, type RevenueBearing } from '../src/services/explorerService.ts'
 
 // Revenue is an EXTRINSIC-level fact, but an extrinsic can produce several activity
 // rows. A liquidation is the case that matters: it seizes collateral AND swaps it, so
@@ -78,6 +78,32 @@ describe('revenue on an extrinsic with several activity rows', () => {
   // reports what the extrinsic earned.
   it('reports on a lone row, as a detail page shows', () => {
     const rows: RevenueBearing[] = [{ blockHeight: 100, extrinsicIndex: 9, eventIndex: 231 }]
+
+    attachRevenue(rows, map, 200)
+
+    expect(rows[0].revenue?.protocolUsd).toBe(1037.64)
+  })
+
+  // An ICE solution is the other case: the pot's AMM trade (Router.Executed, the earlier
+  // event) is how the fill was produced, and the intent row that follows it is what the
+  // reader did. The extrinsic's revenue belongs to the fill, not to the settlement leg —
+  // on the extrinsic page both rows are shown, so "earliest" alone would hand it to the pot.
+  it('prefers the fill over the ICE pot\'s settlement trade, whatever the event order', () => {
+    const pot = { accountId: ICE_POT_ACCOUNT, address: '13UVJyLmBA4JGs43RL75dRQbjBNomwPmNBZf9nPyQjZJ3CHF' } as RevenueBearing['who']
+    const rows: RevenueBearing[] = [
+      { blockHeight: 100, extrinsicIndex: 9, eventIndex: 57, type: 'trade', who: pot },
+      { blockHeight: 100, extrinsicIndex: 9, eventIndex: 60, type: 'intent', who: null },
+    ]
+
+    attachRevenue(rows, map, 200)
+
+    expect(rows[1].revenue?.protocolUsd).toBe(1037.64)
+    expect(rows[0].revenue).toBeUndefined()
+  })
+
+  it('still reports a solution with only the pot\'s trade on that trade', () => {
+    const pot = { accountId: ICE_POT_ACCOUNT, address: '13UVJyLmBA4JGs43RL75dRQbjBNomwPmNBZf9nPyQjZJ3CHF' } as RevenueBearing['who']
+    const rows: RevenueBearing[] = [{ blockHeight: 100, extrinsicIndex: 9, eventIndex: 57, type: 'trade', who: pot }]
 
     attachRevenue(rows, map, 200)
 

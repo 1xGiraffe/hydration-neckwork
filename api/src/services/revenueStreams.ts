@@ -213,6 +213,28 @@ ASOF LEFT JOIN ${priceSourceSql()} p
 // Per-stream builders
 // ---------------------------------------------------------------------------
 
+/**
+ * The owner behind the ICE pot's swaps, per solution extrinsic. The pot pays the pool
+ * fees of the routes it runs for the intents it settles, so the payer of those fees
+ * is the intent OWNER — exactly one when the solution settled one owner's intents
+ * (every solution so far); several owners' fills in one solution cannot split its
+ * routes between them and blank to the unattributed bucket, as a pallet payer does.
+ * The four events are the ones that settle an intent (the last trade of a DCA is
+ * DcaCompleted alone); the owner comes from the order they name.
+ */
+function iceSolutionOwnerSql(extra: string): string {
+  return `SELECT e.block_height AS block_height, e.extrinsic_index AS extrinsic_index,
+         if(uniqExact(o.owner) = 1, any(o.owner), '') AS owner
+  FROM (
+    SELECT intent_id, block_height, assumeNotNull(extrinsic_index) AS extrinsic_index
+    FROM price_data.intent_events FINAL
+    WHERE event_name IN ('Intent.IntentResolved', 'Intent.IntentResovedPartially', 'Intent.DcaTradeExecuted', 'Intent.DcaCompleted')
+      AND extrinsic_index IS NOT NULL AND ${WINDOW} AND (${extra})
+  ) AS e
+  INNER JOIN (SELECT intent_id, owner FROM price_data.intent_orders FINAL) AS o ON o.intent_id = e.intent_id
+  GROUP BY block_height, extrinsic_index`
+}
+
 function omnipoolFeeRowsSql(stream: 'omnipool_asset_fee' | 'omnipool_protocol_fee', extra: string): string {
   const hub = stream === 'omnipool_protocol_fee' ? `asset_id = ${HUB_ASSET_ID}` : `asset_id != ${HUB_ASSET_ID}`
   // FINAL rather than GROUP BY + argMax: the table's ORDER BY is the leg
@@ -245,10 +267,11 @@ WITH rows AS (
                  f.fee_recipient = '${OMNIPOOL_ACCOUNT}', 'lp',
                  f.fee_recipient != '', 'protocol',
                  'unknown') AS dest,
-         ${attributablePayerSql('f.swapper')} AS account,
+         if(f.swapper = '${ICE_POT_ACCOUNT}' AND i.owner != '', i.owner, ${attributablePayerSql('f.swapper')}) AS account,
          f.asset_id AS asset_id, f.amount AS amount
   FROM price_data.pool_swap_legs AS f FINAL
   ${soldJoin}
+  LEFT JOIN (${iceSolutionOwnerSql(extra)}) AS i ON i.block_height = f.block_height AND i.extrinsic_index = f.extrinsic_index
   WHERE f.venue = 'omnipool' AND f.leg_kind = 'fee' AND f.${hub}
     AND ${windowOn('f')}
     AND (${extra})
