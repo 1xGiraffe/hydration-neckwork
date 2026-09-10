@@ -788,15 +788,33 @@ function currencyIdSql(args = 'args_json'): string {
     0
   )`
 }
+// The ICE solver's pot. Every intent's funds pass through it — the owner's input
+// on the way in, the fill on the way out — so it is named here, above the
+// plumbing-pot list that has to reference it, rather than in the ICE section.
+export const ICE_POT_ACCOUNT = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
+export const ICE_FEE_ACCOUNT = '0x6d6f646c6963655f666565230000000000000000000000000000000000000000'
+
 // Module pots whose transfer legs are pure swap/fee plumbing on an ACCOUNT
 // page (the trade/dca rows already represent the action): router hops, pool
-// legs, fee sweeps. Other pallet pots — treasury (donations/funding), vesting
-// payouts, LM reward claims — are the account's real value movements and stay
-// visible. The GLOBAL transfer feed keeps its blanket module exclusion.
-const NOISY_TRANSFER_POTS = [
+// legs, fee sweeps, ICE settlement. Other pallet pots — treasury
+// (donations/funding), vesting payouts, LM reward claims — are the account's
+// real value movements and stay visible. The GLOBAL transfer feed keeps its
+// blanket module exclusion.
+export const NOISY_TRANSFER_POTS = [
   '0x6d6f646c726f7574657265780000000000000000000000000000000000000000', // routerex (swap hops)
   '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000', // omnipool (pool legs)
   '0x6d6f646c66656570726f632f0000000000000000000000000000000000000000', // feeproc/ (fee sweeps)
+  // ICE settlement legs. An intent moves the owner's input INTO the pot and the
+  // fill back OUT of it, both as ordinary Currencies/Tokens transfers against the
+  // owner's own account — so they survive every other exclusion and read as two
+  // transfers the owner never made. They are the intent row's own mechanics:
+  // measured over ICE's whole history (from block 14,396,667), all 671 pot legs
+  // across 134 extrinsics sit in an extrinsic emitting an `Intent.*`/`ICE.*`
+  // event, and none are hook-phase. Dropping them in SQL makes the fold
+  // unconditional; leaving it to suppressSubordinateActivityRows made it depend
+  // on the intent row happening to be in the same assembled set, so a settlement
+  // showed as two transfers that a later read replaced with one intent row.
+  ICE_POT_ACCOUNT,
 ]
 const noisyPotList = () => NOISY_TRANSFER_POTS.map(a => `'${a}'`).join(',')
 
@@ -12891,8 +12909,8 @@ async function getRecentOtc(limit: number, from?: string, to?: string, offset = 
 // later event carries the id alone — so orders live in intent_orders and are
 // joined at request time. Fills happen inside the unsigned ICE.submit_solution.
 // ---------------------------------------------------------------------------
-export const ICE_POT_ACCOUNT = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
-export const ICE_FEE_ACCOUNT = '0x6d6f646c6963655f666565230000000000000000000000000000000000000000'
+// ICE_POT_ACCOUNT / ICE_FEE_ACCOUNT are declared with the plumbing-pot list above,
+// which names the pot.
 export type IntentAction = 'Place' | 'Fill' | 'PartialFill' | 'DcaTrade' | 'Cancel' | 'Expire'
 // The partial-resolution event is spelled `IntentResovedPartially` on chain (sic).
 // `Intent.DcaCompleted` is a DcaTrade too: pallet_intent::intent_resolved emits it
