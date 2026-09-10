@@ -592,6 +592,10 @@ export interface AddressDetail {
   // accounts list icons and the hover card.
   topAssets: { asset: AssetRef; valueUsd: number }[]
   portfolioUsd: number
+  // `portfolioUsd` with HDX and HDX LP taken out. Present only for holders whose
+  // own token dominates the balance sheet (the Treasury), so the ex-HDX tile and
+  // chart line exist exactly where the API ships the figure.
+  portfolioExHdxUsd?: number
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
   revenueUsd?: number
@@ -603,13 +607,14 @@ export interface AddressDetail {
   multisigMemberships?: MultisigMembership[]
   contract?: ContractInfo | null      // deployed EVM contract at this address
   portfolioSeries?: number[]
+  portfolioSeriesExHdx?: number[]
   portfolioDates?: string[]
   balanceHistory?: AssetBalanceHistory[]
 }
 
 export interface AssetBalancePoint { ts: string; blockHeight: number; balance: number }
 export interface AssetBalanceHistory { asset: AssetRef; current: number; points: AssetBalancePoint[]; availableFrom?: string }
-export interface AccountHistoryResponse { portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks?: number[]; balanceHistory: AssetBalanceHistory[] }
+export interface AccountHistoryResponse { portfolioSeries: number[]; portfolioSeriesExHdx?: number[]; portfolioDates: string[]; portfolioBlocks?: number[]; balanceHistory: AssetBalanceHistory[] }
 // Chart-zoom refinement: the asset's closes over a window at a server-picked interval.
 export interface AssetPriceWindow { interval: string; priceSeries: number[]; priceDates: string[] }
 
@@ -1456,6 +1461,8 @@ export interface TagDetail {
   // Up to 4 largest combined holdings (see AddressDetail.topAssets).
   topAssets: { asset: AssetRef; valueUsd: number }[]
   portfolioUsd: number
+  // See AddressDetail.portfolioExHdxUsd — the tag-wide twin over its member set.
+  portfolioExHdxUsd?: number
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
   revenueUsd?: number
@@ -1463,6 +1470,7 @@ export interface TagDetail {
   liquidityPositions?: LpPosition[]
   activeDcas?: ActiveDca[]
   portfolioSeries: number[]
+  portfolioSeriesExHdx?: number[]
   portfolioDates?: string[]
   portfolioBlocks?: number[]
   balanceHistory: AssetBalanceHistory[]

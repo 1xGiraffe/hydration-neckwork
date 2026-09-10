@@ -145,9 +145,14 @@ function valueEventMarker(ev: ValueEvent): ChartMarker {
 // lengths line up (else a value-only tooltip). `valueEvents` (scope-agnostic —
 // the parent fetches per account or tag) flag the largest transfers/swaps/
 // liquidations as clickable markers on the chart's time axis.
-export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanceHistory, loading, valueEvents, refine }: {
+export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanceHistory, loading, valueEvents, refine, exHdxSeries, exHdxNetUsd }: {
   title: string; netUsd: number; series: number[]; dates?: string[]; balanceHistory?: AssetBalanceHistory[]; loading?: boolean; valueEvents?: ValueEvent[] | null
-  refine?: (fromSec: number, toSec: number, points: number) => Promise<{ data: number[]; dates: string[] } | null>
+  refine?: (fromSec: number, toSec: number, points: number) => Promise<{ data: number[]; dates: string[]; overlay?: number[] }| null>
+  /** The same curve with HDX and HDX LP taken out, for holders whose own token
+   *  dominates the balance sheet (the Treasury). Absent everywhere else, so the
+   *  second line and the legend exist exactly where the API ships the series. */
+  exHdxSeries?: number[]
+  exHdxNetUsd?: number
 }) {
   if (!series || series.length <= 1) {
     return loading ? (
@@ -176,12 +181,33 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
     { label: '1Y', days: 365 },
   ], { minBase: 1, maxRatio: 20 })
   const markers = valueEvents?.length ? valueEvents.map(valueEventMarker) : undefined
+  // The second curve renders only when it covers the same points as the total; a
+  // mismatched length means the two came from different reconstructions, and the
+  // comparison a reader would draw from them would be wrong.
+  const overlay = exHdxSeries && exHdxSeries.length === series.length
+    ? { data: exHdxSeries, label: 'Ex-HDX', color: 'var(--sky)' }
+    : undefined
+  // The total keeps its own green/red directional tint and its area fill — the
+  // ex-HDX curve is an addition to that chart, not a restyling of it. The legend
+  // swatch therefore reads the direction off the FULL series, which is the state
+  // the legend is read in; a zoom retints the line by its own slice, exactly as it
+  // always has on the single-curve chart.
+  const totalUp = series[series.length - 1] >= series[0]
   return (
     <>
       <div className="sec-title">{title}</div>
       <div className="pf-card">
         <div className="pf-head"><div className="pf-now">{F.usd(netUsd)}</div>{perfItems.length > 0 && <div className="perf-row">{perfItems.map(p => perf(p.label, p.value))}</div>}</div>
-        <AreaChart data={series} h={180} dates={dates} markers={markers} refine={refine} zoomKey="zv" />
+        {/* Legend only with two curves: it names them and carries the ex-HDX figure
+            beside the headline, so the lower line has a number the reader can
+            attach to it without hovering. */}
+        {overlay && (
+          <div className="pf-legend">
+            <span className="pf-key"><i className="pf-swatch" style={{ background: totalUp ? 'var(--green)' : 'var(--red)' }} />Total</span>
+            <span className="pf-key"><i className="pf-swatch" style={{ background: 'var(--sky)' }} />Ex-HDX{exHdxNetUsd != null && <span className="pf-key-val">{F.usd(exHdxNetUsd)}</span>}</span>
+          </div>
+        )}
+        <AreaChart data={series} h={180} dates={dates} markers={markers} refine={refine} zoomKey="zv" label="Total" overlay={overlay} />
       </div>
     </>
   )
@@ -258,12 +284,18 @@ function moneyMarketValueBreakdown(markets: MoneyMarketPosition[]): ReactNode {
   )
 }
 
-export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUsd, valueUsd, moneyMarket }: {
+export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUsd, valueUsd, exHdxValueUsd, moneyMarket }: {
   tradingVolumeUsd?: number | null
   liquidationVolumeUsd?: number | null
   // Protocol revenue earned from this account (fees paid, penalties, interest).
   revenueUsd?: number | null
   valueUsd: number
+  // `valueUsd` with HDX and HDX LP taken out. Shipped only for holders whose own
+  // token dominates the balance sheet (the Treasury), so — like revenueUsd — the
+  // tile exists exactly when the figure does. Rendered even at/above `valueUsd`
+  // (an account with no HDX) rather than hidden on a threshold: on a surface that
+  // advertises the split, a missing tile reads as missing data.
+  exHdxValueUsd?: number | null
   // The positions `valueUsd` was already netted against. Owned by this component
   // rather than each page, so the account and tag surfaces cannot drift into
   // explaining the same subtraction differently — or, as the account page did,
@@ -290,6 +322,12 @@ export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUs
             four stat tiles on one line on phones. */}
         <div className="lab"><span className="lab-wide">Protocol revenue</span><span className="lab-narrow">Revenue</span></div>
         <div className="amt">{F.usd(revenue)}</div>
+      </div>}
+      {exHdxValueUsd != null && <div className="acct-bal subtle">
+        {/* Same wide/narrow pair as Protocol revenue — "Ex-HDX value" where the row
+            has room, "Ex-HDX" on phones, so the tiles stay on one line. */}
+        <div className="lab"><span className="lab-wide">Ex-HDX value</span><span className="lab-narrow">Ex-HDX</span></div>
+        <div className="amt">{F.usd(exHdxValueUsd)}</div>
       </div>}
       <div className="acct-bal">
         <div className="lab">Value</div>

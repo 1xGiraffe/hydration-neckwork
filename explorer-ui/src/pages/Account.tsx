@@ -172,7 +172,7 @@ export function Account({ address }: { address: string }) {
                       no list on purpose (the contents stay behind the login). */}
                   <TaggedInHint taggedIn={taggedIn.data ?? []} session={session} />
                 </div>
-                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} revenueUsd={data.revenueUsd} valueUsd={data.portfolioUsd - debtUsd} moneyMarket={mmList} />
+                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} revenueUsd={data.revenueUsd} valueUsd={data.portfolioUsd - debtUsd} exHdxValueUsd={data.portfolioExHdxUsd == null ? null : data.portfolioExHdxUsd - debtUsd} moneyMarket={mmList} />
               </div>
 
               <DetailTabs tabs={tabs} active={activeView} onChange={k => setQuery({ view: k === 'overview' ? null : k })} />
@@ -219,11 +219,16 @@ export function Account({ address }: { address: string }) {
               <ListsSection publicLists={libs.data ?? []} ownLists={isOwn ? (me.data?.lists ?? []) : []} isOwn={isOwn} />
 
               <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={history.data?.portfolioSeries ?? data.portfolioSeries ?? []} dates={history.data?.portfolioDates ?? data.portfolioDates} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} loading={history.isLoading || (history.isFetching && !history.data)} valueEvents={valueEvents.data}
+                exHdxSeries={history.data?.portfolioSeriesExHdx ?? data.portfolioSeriesExHdx} exHdxNetUsd={data.portfolioExHdxUsd == null ? undefined : data.portfolioExHdxUsd - debtUsd}
                 refine={historyBlocks ? async (fromSec, toSec) => {
                   const range = blockRangeForWindow(history.data?.portfolioDates ?? data.portfolioDates ?? [], historyBlocks, fromSec, toSec)
                   if (!range) return null
                   const w = await api.addressHistoryWindow(canonicalAddress ?? address, range.fromBlock, range.toBlock)
-                  return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates } : null
+                  // The refined window carries the ex-HDX curve only when it covers
+                  // the same points; useZoomRefine drops a half-refined payload, so
+                  // handing over a mismatched pair would lose the zoom entirely.
+                  const overlay = w.portfolioSeriesExHdx?.length === w.portfolioSeries.length ? w.portfolioSeriesExHdx : undefined
+                  return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates, overlay } : null
                 } : undefined} />
               </>)}
 
