@@ -1722,11 +1722,25 @@ function exactUsdMeetsMinimum(legs: ExactUsdLeg[], minimum: number): boolean {
 // valueUsd basis pickers per FEED row shape: a trade/activity row is valued on its
 // OUT leg (the asset received), a transfer/liquidity/mm flow on the moved asset.
 // A trade detail page instead picks its more reliably priced leg (applyEventTimeUsd).
-type HistPick = { assetId: number; decimals: number; raw: string; ts: string } | null
-function activityHistPick(r: ActivityRow): HistPick {
+//
+// A pick may name SEVERAL legs, for a row whose value is their sum rather than any
+// one of them (a concentrated-liquidity LP act moves both of a pool's tokens). Every
+// named leg must then price, or the row's value is unknown — the same rule pool
+// creation applies (enrichPoolCreations), and for the same reason: a sum missing one
+// leg is a plausible-looking wrong number, not a partial one.
+type HistLeg = { assetId: number; decimals: number; raw: string; ts: string }
+type HistPick = HistLeg | HistLeg[] | null
+export function activityHistPick(r: ActivityRow): HistPick {
   // A concentrated-liquidity LP row is worth BOTH its legs; the out-leg pick below
   // would re-value it as token1 alone.
-  if (r.type === 'liquidity' && r.poolAddress) return null
+  if (r.type === 'liquidity' && r.poolAddress) {
+    return r.assetIn && r.assetOut && r.amountIn != null && r.amountOut != null
+      ? [
+          { assetId: r.assetIn.assetId, decimals: r.assetIn.decimals, raw: r.amountIn, ts: r.timestamp },
+          { assetId: r.assetOut.assetId, decimals: r.assetOut.decimals, raw: r.amountOut, ts: r.timestamp },
+        ]
+      : null
+  }
   // Create rows already carry their combined BLOCK-TIME value (both seed legs, see
   // enrichPoolCreations); Destroy rows carry no value at all by construction.
   if (r.type === 'liquidity' && (r.liqAction === 'Create' || r.liqAction === 'Destroy')) return null
@@ -1746,23 +1760,27 @@ function transferHistPick(r: TransferRow): HistPick {
 }
 // Rewrite each row's valueUsd to its block-time value. `pick` returns the asset
 // + raw amount that valueUsd represents (the OUT leg of a trade, the moved asset
-// of a transfer, …) and the row's timestamp, or null to leave the row untouched.
-async function applyHistoricalUsd<T>(rows: T[], pick: (r: T) => { assetId: number; decimals: number; raw: string; ts: string } | null): Promise<void> {
-  const picks = rows.map(pick)
-  const pairs = picks.filter((p): p is NonNullable<typeof p> => p != null).map(p => ({ assetId: p.assetId, ts: p.ts }))
+// of a transfer, both tokens of an LP act, …) and the row's timestamp, or null to
+// leave the row untouched.
+export async function applyHistoricalUsd<T>(rows: T[], pick: (r: T) => HistPick): Promise<void> {
+  const picks = rows.map(r => {
+    const p = pick(r)
+    return p == null ? null : Array.isArray(p) ? (p.length ? p : null) : [p]
+  })
+  const pairs = picks.flatMap(p => p ?? []).map(leg => ({ assetId: leg.assetId, ts: leg.ts }))
   if (!pairs.length) return
   const closes = await historicalCloses(pairs)
   rows.forEach((r, i) => {
     const p = picks[i]
     if (!p) return
-    const close = closes.get(historicalPriceKey(p.assetId, p.ts))
-    const leg = exactUsdLeg(p.raw, p.decimals, close)
+    const legs = p.map(leg => exactUsdLeg(leg.raw, leg.decimals, closes.get(historicalPriceKey(leg.assetId, leg.ts))))
+    const priced = legs.every((leg): leg is ExactUsdLeg => leg != null) ? legs : null
     if (typeof r === 'object' && r != null) {
-      if (leg) exactHistoricalValues.set(r, [leg])
+      if (priced) exactHistoricalValues.set(r, priced)
       else exactHistoricalValues.delete(r)
     }
-    const amt = Number(p.raw) / 10 ** p.decimals
-    ;(r as { valueUsd: number | null }).valueUsd = leg != null && Number.isFinite(amt) ? amt * Number(leg.closeRaw) : null
+    const value = priced?.reduce((sum, leg) => sum + Number(leg.raw) / 10 ** leg.decimals * Number(leg.closeRaw), 0)
+    ;(r as { valueUsd: number | null }).valueUsd = value != null && Number.isFinite(value) ? value : null
   })
 }
 
@@ -9845,7 +9863,11 @@ async function getRecentV3Rows(
       const wanted = new Set(scope.accounts.flatMap(a => [a.toLowerCase(), evmAccountForm(a.toLowerCase()) ?? '']))
       rows = rows.filter(r => r.who != null && (wanted.has(r.who.accountId.toLowerCase()) || wanted.has(evmAccountForm(r.who.accountId.toLowerCase()) ?? '')))
     }
-    if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
+    // Every feed source values its own rows at block time before it filters them
+    // (getRecentLiquidity, getRecentTrades, … all do): the page-level pass its
+    // callers run is not a substitute, because the asset page merges sources
+    // without one and both the account and merged feeds filter on this value.
+    await applyHistoricalUsd(rows, activityHistPick)
     rows = rows.filter(r => activityRowMatchesFilters(r, { ...filters, token: undefined }) && activityRowMatchesAction(r, scope.action))
     return rows.slice(offset, want)
   })
@@ -17505,6 +17527,10 @@ export async function getPoolSwaps(poolId: number, members: number[], kind: stri
         linkBlock: r.block_height, linkIndex: r.extrinsic_index,
       }
     })
+    // The pool page shows the same swaps the feed and the block page do, so it
+    // values them the same way — at the event's own price, not today's.
+    await applyHistoricalUsd(swaps, activityHistPick)
+    return swaps
   })
 }
 
@@ -18020,7 +18046,14 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
                         : [votes]
     if (rows.length < want && saturationSources.some(source => source.length >= fetchN)) throw activityQueryTooBroad()
     const page = rows.slice(offset, offset + limit)
-    await applyXcmJourneys(page)
+    // Value the page at block time, as the global feed and the account feed do.
+    // The arms above build with current prices as a placeholder and only some of
+    // them (the XCM walkers, staking, bonds, OTC, intents, money market) correct
+    // it themselves, so without this the asset page showed its own trades,
+    // transfers, liquidity and reward claims at today's price — the same row the
+    // block page valued at the event's. Runs on the page, not the window: the
+    // filter pass above already valued the rows a USD floor had to judge.
+    await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page)])
     return page
   })
 }
