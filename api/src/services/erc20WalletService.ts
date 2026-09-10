@@ -8,11 +8,23 @@ import { reservedH160AccountId } from './addressIdentity.ts'
 // (`erc20_wallet_balances`) current so SQL consumers — the accounts list, the
 // holders list, asset totals, and account pages can price them like any other balance.
 //
-// HOLLAR's canonical supply lives in the contract, with separate Tokens-side
-// balances. GIGAHDX is excluded because the underlying staked HDX remains in the
-// holder's wallet; aTokens are supplied by money-market reserve reconstruction.
+// An `Erc20`-kind registry asset (`AssetType::Erc20`, bound to a contract through
+// its `AccountKey20` location) never touches orml_tokens: pallet_currencies routes
+// its transfers straight at the contract, so `account_asset_latest_balances` reads
+// every holder as zero. Each one therefore has to be listed here — and its contract
+// in the `erc20_transfer_deltas_mv` filter, which supplies the holder set this
+// refresh reads. GIGAHDX is excluded because the underlying staked HDX remains in
+// the holder's wallet; aTokens are supplied by money-market reserve reconstruction.
+//
+// This list is the source of truth, and two restatements must agree with it — the
+// MV's contract filter (`clickhouse/schema/003_materialized_views.sql`, a declarative
+// schema that cannot import TypeScript) and the asset-id list in
+// `public/services/accountBalances.ts`, which is outside the public API's import
+// allow-list. `api/tests/erc20WalletAssets.test.ts` pins both against this array, so
+// registering another `Erc20` asset is one edit here plus the two the test names.
 export const ERC20_WALLET_ASSETS: { assetId: number; contract: string }[] = [
-  { assetId: 222, contract: '0x531a654d1696ed52e7275a8cede955e82620f99a' },
+  { assetId: 222, contract: '0x531a654d1696ed52e7275a8cede955e82620f99a' }, // HOLLAR
+  { assetId: 1001354, contract: '0xa206d0959813f17c17c87147271c49065438648a' }, // aDOT-HOLLAR, the Gamma vault share
 ]
 export const ERC20_WALLET_ASSET_IDS = ERC20_WALLET_ASSETS.map(a => a.assetId)
 
@@ -75,7 +87,9 @@ export function walletBalanceRows(
 // Refresh candidates are every address that ever appeared in a Transfer log of
 // the backing contract (~1.2k for HOLLAR); each H160 is anchored to its
 // substrate account id via the alias table (falling back to the ETH-prefixed
-// AccountId32 form) so rows group with the account's other balances.
+// AccountId32 form) so rows group with the account's other balances. An asset
+// whose deltas have not been captured yet yields no candidates and is skipped,
+// so it keeps whatever rows it already has rather than being zeroed.
 async function refresh(): Promise<void> {
   for (const a of ERC20_WALLET_ASSETS) {
     const holderRes = await client.query({
