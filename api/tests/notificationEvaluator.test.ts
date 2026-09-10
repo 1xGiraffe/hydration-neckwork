@@ -9,6 +9,7 @@ import {
   renderDigest, renderMatch, resolveWindow, safetyIdentity,
   type ArmState, type BlockWindow, type ChainEventRow, type ChainExtrinsicRow, type ReferendumEventRow,
   type RuleMatch, type ThresholdInput, type ViewerTag,
+  recheckWindow,
 } from '../src/notifications/evaluator.ts'
 import { renderNotification } from '../src/notifications/render.ts'
 import { normalizeAddress } from '../src/services/addressIdentity.ts'
@@ -777,5 +778,29 @@ describe('OTC fills on the maker side', () => {
     expect(out.title).toContain('OTC fill by')
     expect(out.body).toContain('to')
     expect(out.url).toMatch(/\/otc-fill\/1050-e7$/)
+  })
+})
+
+describe('recheckWindow — a page-backed lane re-reads a trailing stretch', () => {
+  it('widens the window backwards without moving its top', () => {
+    // The activity feed is a page: a row is visible on it only once every source
+    // it is assembled from has it, so a row at the head can be one tick late.
+    expect(recheckWindow({ from: 1_000, to: 1_027 }, 150)).toEqual({ from: 850, to: 1_027 })
+    // Never below genesis, and a zero re-check is the old forward-only window.
+    expect(recheckWindow({ from: 10, to: 20 }, 150)).toEqual({ from: 0, to: 20 })
+    expect(recheckWindow({ from: 1_000, to: 1_027 }, 0)).toEqual({ from: 1_000, to: 1_027 })
+  })
+
+  it('re-delivers nothing: a match keeps its identity across the overlap', () => {
+    // The same row matched in two consecutive ticks yields the same identity, which
+    // the inbox key and the recent-id set collapse — that is what makes the overlap
+    // safe rather than noisy.
+    const row = { type: 'otc', blockHeight: 1_010, eventIndex: 16, valueUsd: 100 } as never
+    const rule = { ruleId: 'r1', accountId: '0x01', kind: 'account-activity', name: '', params: { target: { kind: 'address', address: '1abc' } }, channels: [], muted: false, cooldownS: 0, createdAt: '', updatedAt: '' } as never
+    const first = evaluateAccountActivity([row], [rule], recheckWindow({ from: 1_005, to: 1_012 }, 150))
+    const second = evaluateAccountActivity([row], [rule], recheckWindow({ from: 1_012, to: 1_040 }, 150))
+    expect(first).toHaveLength(1)
+    expect(second).toHaveLength(1)
+    expect(notificationIdFor('r1', first[0].identity)).toBe(notificationIdFor('r1', second[0].identity))
   })
 })
