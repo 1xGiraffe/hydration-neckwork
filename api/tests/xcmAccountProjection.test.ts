@@ -236,8 +236,10 @@ describe('the outbound XCM page reads its payload for one page of keys', () => {
   const body = functionBody('getRecentXcm').split('\n').filter(line => !line.trim().startsWith('//')).join('\n')
 
   it('selects the payload once, and bounds that read by the page keys when unscoped', () => {
-    expect(occurrences(body, 'args_json')).toBe(3) // the projection, its row type, the decode
-    expect(occurrences(body, 'FROM price_data.raw_xcm_activity')).toBe(3) // payload, keys, legacy pairs
+    // The decode and the legacy-pairs read live in buildOutboundXcmRows, which the
+    // block page shares with this page; what stays here is the page's own read.
+    expect(occurrences(body, 'args_json')).toBe(2) // the projection and its row type
+    expect(occurrences(body, 'FROM price_data.raw_xcm_activity')).toBe(2) // payload, keys
     expect(occurrences(body, '(block_height, event_index) IN (')).toBe(1)
     // The account-scoped page is already key-bounded through the account index, so it
     // keeps the single read rather than resolving the same keys twice.
@@ -259,7 +261,7 @@ describe('the outbound XCM page reads its payload for one page of keys', () => {
   // The cursor the deep walk pages from is the last returned row's (block, event index),
   // so the payload pass must not be able to return a row the key pass did not choose.
   it('keeps the payload pass on the same rows the key pass selected', () => {
-    expect(occurrences(body, "source_kind='event'")).toBe(2) // xcmRows, and the legacy-pairs read
+    expect(occurrences(body, "source_kind='event'")).toBe(1) // xcmRows, shared by both passes
     expect(occurrences(body, 'AND ${xcmRows}`')).toBe(1)
     expect(occurrences(body, 'eventIndex: last.event_index')).toBe(1)
     expect(occurrences(body, 'row => row.eventIndex ?? -1')).toBe(1)
@@ -377,5 +379,24 @@ describe('the three XCM materialized views cannot drift apart', () => {
     // The parent keeps its own key and its payload; the pair is not one table renamed.
     expect(tables).toContain('CREATE TABLE IF NOT EXISTS price_data.xcm_event_activity (`block_height` UInt32')
     expect(tables).toContain('ORDER BY (event_name, asset_id, block_height, event_index)')
+  })
+})
+
+// The row build is shared with the block page's hook arm (xcmOutSendRowsForBlocks), so
+// a send is one row set wherever it is read. These pin what moved with it.
+describe('the shared outbound row builder owns the decode and its companion reads', () => {
+  const builder = functionBody('buildOutboundXcmRows').split('\n').filter(line => !line.trim().startsWith('//')).join('\n')
+
+  it('holds the decode and the legacy-pairs read', () => {
+    expect(occurrences(builder, 'args_json')).toBe(1) // the decode (its row type is declared outside)
+    expect(occurrences(builder, "source_kind='event'")).toBe(1) // the legacy-pairs read
+    expect(occurrences(builder, 'FROM price_data.raw_xcm_activity')).toBe(1)
+  })
+
+  it('matches every leg to its own withdrawal', () => {
+    // One withdrawal per leg — an amount-keyed map lost a leg when a send carried two
+    // assets in the same amount (see xcmLegAssets).
+    expect(occurrences(builder, 'xcmLegAssets(parsed.amounts, available)')).toBe(1)
+    expect(occurrences(builder, 'wmap')).toBe(0)
   })
 })
