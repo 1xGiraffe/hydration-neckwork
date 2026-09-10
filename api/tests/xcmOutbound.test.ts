@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseOutboundXcm } from '../src/services/explorerService.ts'
+import { parseOutboundXcm, xcmLegAssets } from '../src/services/explorerService.ts'
 
 // Outbound XCM is represented by both the legacy XTokens event and the nested
 // pallet_xcm message shape.
@@ -79,5 +79,72 @@ describe('parseOutboundXcm', () => {
     expect(parseOutboundXcm({ ...SENT, origin: { parents: 0, interior: { __kind: 'Here' } } })).toBeNull()
     expect(parseOutboundXcm({})).toBeNull()
     expect(parseOutboundXcm(null)).toBeNull()
+  })
+})
+
+// The message states amounts; only the extrinsic's own withdrawals say which asset
+// each leg was. One withdrawal backs one leg — matching by amount alone lost a leg
+// whenever a send carried two assets in the same amount.
+describe('xcmLegAssets', () => {
+  const USDC = 22
+  const USDT = 10
+  const wd = (assetId: number, amount: string) => ({ assetId, amount })
+
+  it('gives two legs of the SAME amount their own asset each', () => {
+    // The Polkadot Treasury's standing payout: 5,000 USDC + 5,000 USDT to AssetHub,
+    // both legs 5000000000, which collapsed to one row carrying one asset.
+    expect(xcmLegAssets(['5000000000', '5000000000'], [
+      wd(USDC, '5000000000'),
+      wd(USDT, '5000000000'),
+    ])).toEqual([USDC, USDT])
+  })
+
+  it('matches legs of different amounts to their own withdrawals, in any order', () => {
+    expect(xcmLegAssets(['200', '100'], [wd(USDC, '100'), wd(USDT, '200')])).toEqual([USDT, USDC])
+  })
+
+  it('leaves a leg with no withdrawal left to claim unresolved', () => {
+    expect(xcmLegAssets(['100', '100'], [wd(USDC, '100')])).toEqual([USDC, null])
+    expect(xcmLegAssets(['100'], [])).toEqual([null])
+  })
+
+  it('does not let one withdrawal stand for legs of a different amount', () => {
+    expect(xcmLegAssets(['100'], [wd(USDC, '999')])).toEqual([null])
+  })
+})
+
+// XTokens names one transferred leg as the fee item, and it is recognised by its
+// AMOUNT — so it can only be told apart when that amount is unique among the legs.
+describe('parseOutboundXcm: multi-currency sends', () => {
+  const leg = (amount: string) => ({ id: {}, fun: { __kind: 'Fungible', value: amount } })
+  const send = (amounts: string[], feeAmount: string) => ({
+    sender: LEGACY_SENDER,
+    assets: amounts.map(leg),
+    fee: leg(feeAmount),
+    dest: { parents: 1, interior: { __kind: 'X2', value: [{ __kind: 'Parachain', value: 1000 }, { id: LEGACY_SENDER, __kind: 'AccountId32' }] } },
+  })
+
+  // The Polkadot Treasury pays AssetHub 5,000 USDC + 5,000 USDT: two legs, one
+  // amount. Folding them lost a leg, and calling either one the fee would book a
+  // $5,000 transfer as a delivery charge.
+  it('keeps both legs of an equal-amount pair and reports no fee', () => {
+    const parsed = parseOutboundXcm(send(['5000000000', '5000000000'], '5000000000'))
+    expect(parsed?.amounts).toEqual(['5000000000', '5000000000'])
+    expect(parsed?.fee).toBeNull()
+  })
+
+  // The MRL shape this rule was written for is untouched: distinct amounts, so the
+  // fee item is identifiable and stops being a transfer of its own.
+  it('still separates a fee leg whose amount is unique', () => {
+    const parsed = parseOutboundXcm(send(['1000000000000000000', '250000000'], '250000000'))
+    expect(parsed?.amounts).toEqual(['1000000000000000000'])
+    expect(parsed?.fee).toEqual({ amount: '250000000' })
+  })
+
+  // A single-leg send transfers and pays out of the same asset.
+  it('leaves a single leg as payload with no fee', () => {
+    const parsed = parseOutboundXcm(send(['777'], '777'))
+    expect(parsed?.amounts).toEqual(['777'])
+    expect(parsed?.fee).toBeNull()
   })
 })

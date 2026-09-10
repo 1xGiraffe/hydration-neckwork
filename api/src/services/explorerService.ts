@@ -10156,18 +10156,32 @@ export function parseOutboundXcm(argsRaw: unknown): ParsedOutboundXcm | null {
   if (!args || typeof args !== 'object') return null
 
   if (typeof args.sender === 'string') {
+    // Every leg the send names, INCLUDING two of the same amount. Folding equal
+    // amounts together lost a leg outright: the Polkadot Treasury pays AssetHub
+    // 5,000 USDC + 5,000 USDT (20 such sends), and the pair collapsed to one.
     const amounts: string[] = []
     for (const leg of Array.isArray(args.assets) ? args.assets : []) {
       const amount = leg?.fun?.value
-      if (amount && !amounts.includes(amount)) amounts.push(amount)
+      if (amount) amounts.push(amount)
     }
     // XTokens names one leg as the fee item. Beside another asset that leg is the
     // send's delivery fee (1 GLMR beside sUSDS on an MRL send, DOT beside USDT to Asset
     // Hub) and not a transfer of its own — 23,741 multi-asset sends rendered it as a
     // second cross-chain row. A single-leg send transfers and pays from one asset, so
     // it keeps its leg and reports no separate fee.
+    //
+    // The fee item is identified by its AMOUNT, so it is only identifiable when that
+    // amount is unique among the legs. Two legs of the same amount (the treasury's
+    // payout above) name no fee this can tell apart, and calling either one the fee
+    // books a $5,000 transfer as a delivery charge — so both stay payload and the send
+    // reports no fee, which is what it can honestly say. Measured over every XTokens
+    // send since block 13,000,000: 1,271 carry one leg, 40 carry the MRL shape this
+    // rule was written for (two legs, distinct amounts) and are unchanged, and 20 are
+    // the ambiguous pair.
     const feeAmount = args.fee?.fun?.value
-    const fee = amounts.length > 1 && typeof feeAmount === 'string' && amounts.includes(feeAmount) ? feeAmount : null
+    const feeIsIdentifiable = typeof feeAmount === 'string'
+      && amounts.filter(amount => amount === feeAmount).length === 1
+    const fee = amounts.length > 1 && feeIsIdentifiable ? feeAmount : null
     return { sender: args.sender, amounts: fee ? amounts.filter(a => a !== fee) : amounts, dest: xcmDestination(args), fee: fee ? { amount: fee } : null, transact: false }
   }
 
@@ -10401,6 +10415,125 @@ function outboundXcmRow(
   }
 }
 
+export interface XcmWithdrawnLeg { assetId: number; amount: string }
+/**
+ * Which asset each leg of an outbound send moved, matched against the withdrawals
+ * its own extrinsic emitted. The message states amounts; only the withdrawal says
+ * which registry asset each was (the multilocation's GeneralIndex is the
+ * DESTINATION chain's index, not ours).
+ *
+ * One withdrawal backs one leg. Matching by amount alone through a map keyed on it
+ * collapsed a send of two assets in the SAME amount — the Polkadot Treasury's
+ * 5,000 USDC + 5,000 USDT payout to AssetHub is the standing case, sent every ~45
+ * minutes — into a single entry, so one leg was lost and the survivor could carry
+ * the other leg's asset. Legs with no withdrawal left to claim stay null: the send
+ * says nothing about which asset they were.
+ */
+export function xcmLegAssets(
+  legAmounts: readonly string[],
+  withdrawals: readonly XcmWithdrawnLeg[],
+): (number | null)[] {
+  const byAmount = new Map<string, number[]>()
+  for (const withdrawal of withdrawals) {
+    const pooled = byAmount.get(withdrawal.amount)
+    if (pooled) pooled.push(withdrawal.assetId)
+    else byAmount.set(withdrawal.amount, [withdrawal.assetId])
+  }
+  return legAmounts.map(amount => byAmount.get(amount)?.shift() ?? null)
+}
+
+/** One outbound send event, as both the feed page and the block page read it. */
+interface OutboundXcmSendEvent {
+  block_height: number
+  ts: string
+  extrinsic_index: number | null
+  event_index: number
+  name: string
+  args_json: string
+}
+
+// Rows for a set of outbound send events. Shared by the windowed feed
+// (getRecentXcm) and the block page's hook arm, so a send is rendered the same way
+// wherever it is read — including the asset each leg moved, which only the
+// extrinsic's own withdrawals can say.
+async function buildOutboundXcmRows(
+  evs: OutboundXcmSendEvent[],
+  prices: Map<number, PriceInfo>,
+  tokenIds: number[] | undefined,
+): Promise<ActivityRow[]> {
+  // Bound-parameter chunks: a widened deep-walk page can carry tens of
+  // thousands of blocks, and an interpolated list would exceed max_query_size.
+  const blocks = [...new Set(evs.map(event => event.block_height))]
+  type WithdrawalRow = { block_height: number; extrinsic_index: number | null; cid: number; amount: string }
+  const withdrawals: WithdrawalRow[] = []
+  const legacyPairs: { block_height: number; extrinsic_index: number | null }[] = []
+  const blockChunks = await mapChunksConcurrently(blocks, 2_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const [wRes, legacyRes] = await Promise.all([
+      client.query({
+        query: `SELECT block_height, extrinsic_index,
+                  asset_id AS cid,
+                  amount AS amount
+                FROM ${xcmEventActivityTable()}
+                WHERE event_name='Currencies.Withdrawn' AND block_height IN {blocks:Array(UInt32)}
+                  ${assetIdFilterSql('asset_id', tokenIds)}`,
+        query_params: { blocks: chunk },
+        format: 'JSONEachRow',
+      }),
+      client.query({
+        query: `SELECT DISTINCT block_height, extrinsic_index
+                FROM price_data.raw_xcm_activity
+                WHERE block_height IN {blocks:Array(UInt32)} AND source_kind='event'
+                  AND name IN (${XCM_SENT_XTOKENS_EVENTS_SQL})`,
+        query_params: { blocks: chunk },
+        format: 'JSONEachRow',
+      }),
+    ])
+    return {
+      withdrawals: await wRes.json<WithdrawalRow>(),
+      legacy: await legacyRes.json<{ block_height: number; extrinsic_index: number | null }>(),
+    }
+  })
+  for (const chunk of blockChunks) {
+    withdrawals.push(...chunk.withdrawals)
+    legacyPairs.push(...chunk.legacy)
+  }
+  const withdrawalsByExtrinsic = new Map<string, XcmWithdrawnLeg[]>()
+  for (const withdrawal of withdrawals) {
+    const key = `${withdrawal.block_height}:${withdrawal.extrinsic_index}`
+    const pooled = withdrawalsByExtrinsic.get(key)
+    const leg = { assetId: withdrawal.cid, amount: withdrawal.amount }
+    if (pooled) pooled.push(leg)
+    else withdrawalsByExtrinsic.set(key, [leg])
+  }
+  // The rare extrinsic emitting both events yields one row set: the legacy
+  // event wins and the pallet_xcm mirror is suppressed.
+  const xtokensExts = new Set(legacyPairs.map(event => `${event.block_height}:${event.extrinsic_index}`))
+  const transactDests = transactDestinationsByExtrinsic(evs.filter(event => event.name === 'PolkadotXcm.Sent'))
+  const out: ActivityRow[] = []
+  for (const event of evs) {
+    if (event.name === 'PolkadotXcm.Sent' && xtokensExts.has(`${event.block_height}:${event.extrinsic_index}`)) continue
+    const parsed = parseOutboundXcm(safeJson(event.args_json))
+    if (!parsed) continue
+    const extKey = `${event.block_height}:${event.extrinsic_index}`
+    const available = withdrawalsByExtrinsic.get(extKey) ?? []
+    // A fee leg only NAMES a withdrawal — the single-leg Transact funding case
+    // reads its own payload amount as the fee — so it does not spend one.
+    const assetOf = (amount: string) => available.find(leg => leg.amount === amount)?.assetId
+    const fees = outboundXcmFeeLegs(parsed, assetOf, prices, parsed.dest.destParachainId != null && (transactDests.get(extKey)?.has(parsed.dest.destParachainId) ?? false))
+    const legAssets = xcmLegAssets(parsed.amounts, available)
+    // Every leg of one send keeps the SEND's event id, which is the identity the
+    // extrinsic page gives it too — anchoring a leg on its own withdrawal instead
+    // made the feed and the extrinsic page name the same send differently.
+    parsed.amounts.forEach((amount, index) => {
+      const assetId = legAssets[index]
+      if (assetId == null) return
+      out.push(outboundXcmRow(event, parsed.sender, assetId, amount, parsed.dest, prices, fees))
+    })
+  }
+  await applyHistoricalUsd(out, activityHistPick)
+  return out
+}
+
 // Outbound cross-chain (XCM) transfers as activity rows. `XTokens.TransferredAssets`
 // carries sender + dest parachain + per-asset amounts; the substrate asset_id is
 // recovered by matching each leg amount to the same-extrinsic Currencies.Withdrawn
@@ -10453,66 +10586,8 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
       const last = evs.at(-1)
       pageState = { scanned: evs.length, cursor: last ? { blockHeight: last.block_height, eventIndex: last.event_index } : null }
       if (!evs.length) return []
-      // Bound-parameter chunks: a widened deep-walk page can carry tens of
-      // thousands of blocks, and an interpolated list would exceed max_query_size.
-      const blocks = [...new Set(evs.map(event => event.block_height))]
-      type WithdrawalRow = { block_height: number; extrinsic_index: number | null; cid: number; amount: string }
-      const withdrawals: WithdrawalRow[] = []
-      const legacyPairs: { block_height: number; extrinsic_index: number | null }[] = []
-      const blockChunks = await mapChunksConcurrently(blocks, 2_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
-        const [wRes, legacyRes] = await Promise.all([
-          client.query({
-            query: `SELECT block_height, extrinsic_index,
-                      asset_id AS cid,
-                      amount AS amount
-                    FROM ${xcmEventActivityTable()}
-                    WHERE event_name='Currencies.Withdrawn' AND block_height IN {blocks:Array(UInt32)}
-                      ${assetIdFilterSql('asset_id', tokenIds)}`,
-            query_params: { blocks: chunk },
-            format: 'JSONEachRow',
-          }),
-          client.query({
-            query: `SELECT DISTINCT block_height, extrinsic_index
-                    FROM price_data.raw_xcm_activity
-                    WHERE block_height IN {blocks:Array(UInt32)} AND source_kind='event'
-                      AND name IN (${XCM_SENT_XTOKENS_EVENTS_SQL})`,
-            query_params: { blocks: chunk },
-            format: 'JSONEachRow',
-          }),
-        ])
-        return {
-          withdrawals: await wRes.json<WithdrawalRow>(),
-          legacy: await legacyRes.json<{ block_height: number; extrinsic_index: number | null }>(),
-        }
-      })
-      for (const chunk of blockChunks) {
-        withdrawals.push(...chunk.withdrawals)
-        legacyPairs.push(...chunk.legacy)
-      }
-      const wmap = new Map<string, number>()
-      for (const withdrawal of withdrawals) {
-        wmap.set(`${withdrawal.block_height}:${withdrawal.extrinsic_index}:${withdrawal.amount}`, withdrawal.cid)
-      }
-      // The rare extrinsic emitting both events yields one row set: the legacy
-      // event wins and the pallet_xcm mirror is suppressed.
-      const xtokensExts = new Set(legacyPairs.map(event => `${event.block_height}:${event.extrinsic_index}`))
-      const transactDests = transactDestinationsByExtrinsic(evs.filter(event => event.name === 'PolkadotXcm.Sent'))
-      const out: ActivityRow[] = []
-      for (const event of evs) {
-        if (event.name === 'PolkadotXcm.Sent' && xtokensExts.has(`${event.block_height}:${event.extrinsic_index}`)) continue
-        const parsed = parseOutboundXcm(safeJson(event.args_json))
-        if (!parsed) continue
-        const extKey = `${event.block_height}:${event.extrinsic_index}`
-        const assetOf = (amount: string) => wmap.get(`${extKey}:${amount}`)
-        const fees = outboundXcmFeeLegs(parsed, assetOf, prices, parsed.dest.destParachainId != null && (transactDests.get(extKey)?.has(parsed.dest.destParachainId) ?? false))
-        for (const amount of parsed.amounts) {
-          const assetId = assetOf(amount)
-          if (assetId == null) continue
-          out.push(outboundXcmRow(event, parsed.sender, assetId, amount, parsed.dest, prices, fees))
-        }
-      }
-      await applyHistoricalUsd(out, activityHistPick)
-      return out
+      const rows = await buildOutboundXcmRows(evs, prices, tokenIds)
+      return rows
     }
     const rows = await fetchFilteredDeep(
       tw,
@@ -10926,10 +11001,21 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
   }
   const rows: ActivityRow[] = []
   const seen = new Set<string>()
-  for (const w of await wdRes.json<{ block_height: number; event_index: number; extrinsic_index: number | null; who: string; asset_id: number; amount: string }>()) {
+  const withdrawalRows = await wdRes.json<{ block_height: number; event_index: number; extrinsic_index: number | null; who: string; asset_id: number; amount: string }>()
+  // This arm is for a remote pull — an inbound message that withdraws from a local
+  // account with NO local send event of its own. A hook-context send HAS one, and it
+  // states the destination and the beneficiary this arm cannot see, so the send owns
+  // its withdrawals and they are left out here. Without this both arms rendered the
+  // same movement: one row per withdrawal from here and one per leg from the send,
+  // and only the send's carried a destination — with the extra rows anchored on
+  // events the send's own page does not list, so they opened nothing.
+  const sendAmounts = await hookSendAmountsByBlock(
+    [...new Set(withdrawalRows.filter(w => w.extrinsic_index == null).map(w => w.block_height))])
+  for (const w of withdrawalRows) {
     const { who, amount, asset_id: cid } = w
     if (!who || !amount || amount === '0' || RESERVED_ACCOUNT_RE.test(who)) continue
     if (whoIn && !whoIn.has(who)) continue
+    if (w.extrinsic_index == null && sendAmounts.get(w.block_height)?.has(amount)) continue
     // Context-matched: a withdrawal pairs with the next barrier of its OWN execution
     // context — without this, a hook-context DCA withdrawal below an old inherent
     // barrier (or an old signed swap's withdrawal below nothing) would false-pair.
@@ -10951,6 +11037,57 @@ async function xcmOutRemoteRowsForBlocks(blocks: number[], prices: Map<number, P
     })
   }
   return rows.sort(compareActivityRowsNewestFirst)
+}
+
+// Local outbound sends dispatched OUTSIDE an extrinsic — a relay Transact executed
+// through a proxy is the standing case (the Polkadot Treasury pays AssetHub this
+// way every ~45 minutes). A signed send belongs to its extrinsic and is rendered by
+// getExtrinsicActivity, so only the hook-context ones are read here; they have no
+// extrinsic page and would otherwise reach the block page through no arm at all.
+//
+// Uses the same builder the feed does, so the send is one row set wherever it is
+// read, carrying the destination and beneficiary its message names.
+async function xcmOutSendRowsForBlocks(blocks: number[], prices: Map<number, PriceInfo>, whoIn?: Set<string>): Promise<ActivityRow[]> {
+  const list = sqlUIntList(blocks)
+  if (!list) return []
+  const res = await client.query({
+    query: `SELECT block_height, toString(block_timestamp) AS ts, extrinsic_index, event_index, name, args_json
+            FROM price_data.raw_xcm_activity
+            WHERE block_height IN (${list}) AND source_kind='event' AND event_index IS NOT NULL
+              AND extrinsic_index IS NULL AND name IN (${XCM_SENT_EVENTS_SQL})
+            ORDER BY block_height DESC, event_index DESC`,
+    format: 'JSONEachRow',
+  })
+  const evs = await res.json<OutboundXcmSendEvent>()
+  if (!evs.length) return []
+  const rows = await buildOutboundXcmRows(evs, prices, undefined)
+  return whoIn ? rows.filter(row => row.who != null && whoIn.has(row.who.accountId)) : rows
+}
+
+// The amounts each hook-context send in these blocks moved, per block — every leg
+// the message names plus its fee. A withdrawal matching one of them is that send's,
+// which is what keeps the remote-pull arm off a send that has a local event of its
+// own (see xcmOutRemoteRowsForBlocks).
+async function hookSendAmountsByBlock(blocks: number[]): Promise<Map<number, Set<string>>> {
+  const out = new Map<number, Set<string>>()
+  const list = sqlUIntList(blocks)
+  if (!list) return out
+  const res = await client.query({
+    query: `SELECT block_height, args_json
+            FROM price_data.raw_xcm_activity
+            WHERE block_height IN (${list}) AND source_kind='event' AND event_index IS NOT NULL
+              AND extrinsic_index IS NULL AND name IN (${XCM_SENT_EVENTS_SQL})`,
+    format: 'JSONEachRow',
+  })
+  for (const row of await res.json<{ block_height: number; args_json: string }>()) {
+    const parsed = parseOutboundXcm(safeJson(row.args_json))
+    if (!parsed) continue
+    const amounts = out.get(row.block_height) ?? new Set<string>()
+    for (const amount of parsed.amounts) amounts.add(amount)
+    if (parsed.fee) amounts.add(parsed.fee.amount)
+    out.set(row.block_height, amounts)
+  }
+  return out
 }
 
 // Chunked reads exist to keep each query's result under the client's 100k
@@ -17203,7 +17340,7 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
   const names = SWAP_EVENTS.map(n => `'${n}'`).join(',')
   const transferPlumbing = [...ammPoolAccounts(), ...(await mmReserveAccountIds())]
   const transferPlumbingList = transferPlumbing.length ? transferPlumbing.map(a => `'${a}'`).join(',') : "''"
-  const [swapRes, dcaRes, xcmInRows, xcmOutRemoteRows, stakingRes, transferRes, liquidityRes, mmRes, otcRes, bondRes, intentRes, intentMigratedRes] = await Promise.all([
+  const [swapRes, dcaRes, xcmInRows, xcmOutRemoteRows, xcmOutSendRows, stakingRes, transferRes, liquidityRes, mmRes, otcRes, bondRes, intentRes, intentMigratedRes] = await Promise.all([
     client.query({
       query: `SELECT event_index, event_name, args_json, toString(block_timestamp) AS ts
               FROM price_data.raw_events
@@ -17226,6 +17363,10 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
     }),
     xcmInRowsForBlocks([height], prices),
     xcmOutRemoteRowsForBlocks([height], prices),
+    // A send dispatched outside an extrinsic reaches the block page through no
+    // other arm: it has no extrinsic page, and the remote-pull arm above now
+    // leaves it alone because it has a local send event of its own.
+    xcmOutSendRowsForBlocks([height], prices),
     // Extrinsic-less staking (e.g. CollatorRewards.CollatorRewarded, paid from
     // on_initialize with no extrinsic) — same event list/suppression as
     // getRecentStaking (source of truth for staking's row shape/filters).
@@ -17407,6 +17548,7 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
 
   rows.push(...xcmInRows)
   rows.push(...xcmOutRemoteRows)
+  rows.push(...xcmOutSendRows)
 
   // Extrinsic-less staking — mirrors getRecentStaking's construction via the
   // shared stakingRowFromEvent helper.
