@@ -54,6 +54,14 @@ export function aggregateTradeVolumeRows(rows: TradeVolumeRow[]): TradeVolumeRow
       ...existing,
       ...sumVolumeFields(existing, row),
       trade_count: existing.trade_count + row.trade_count,
+      // The key is (asset, block, account) — the same key ClickHouse replaces on —
+      // so a merged row cannot carry two flags. One account holding both a
+      // principal and a counterparty side of the SAME asset in ONE block is the
+      // only way to get here (0 occurrences on chain: no block has ever carried
+      // two OTC fills). It resolves to principal, so the merged volume stays
+      // inside cross-account sums: over-counting the passive part is a bounded
+      // error, whereas calling the whole row passive would drop a real trade.
+      counterparty: (existing.counterparty ?? 0) === 1 && (row.counterparty ?? 0) === 1 ? 1 : 0,
     })
   }
   return [...byKey.values()]

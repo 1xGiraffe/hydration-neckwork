@@ -3,7 +3,8 @@ import type { ClickHouseSettings } from '@clickhouse/client'
 import { createClickHouseClient, type ClickHouseClient } from '../db/client.js'
 import type { PriceRow, TradeVolumeRow } from '../db/schema.js'
 import { rebuildOHLCForTimeRange } from '../ohlc/repair.js'
-import { ALL_SWAP_EVENT_NAMES, BROADCAST_SWAP_EVENT_NAMES, LEGACY_SWAP_EVENT_NAMES, decodeRawTrade, decodeRawUniswapV3Swap, type DecodedRawTrade, type RawTradeEventRow, type TradeAssetAmount } from './tradeEventDecoder.js'
+import { ALL_SWAP_EVENT_NAMES, BROADCAST_SWAP_EVENT_NAMES, LEGACY_SWAP_EVENT_NAMES, decodeRawTrade, decodeRawUniswapV3Swap, resolveRawOtcSides, type DecodedRawTrade, type RawTradeEventRow, type TradeAssetAmount } from './tradeEventDecoder.js'
+import { OTC_FILL_EVENT_NAMES } from '../blocks/otcCounterparty.js'
 import { EVM_LOG_EVENT_NAME, resolveEvmTokenAssetId, routedUniswapV3Extrinsics, type UniswapV3PoolIndex, type UniswapV3PoolTokens } from '../price/uniswapV3.js'
 import { aggregateTradeVolumeRows, decimalToScaledBigInt, formatDecimal128, sumBigIntStrings, sumDecimal128Strings, sumVolumeFields } from '../blocks/volumeMath.js'
 import { foldOmnipoolHubHops } from '../blocks/hubHops.js'
@@ -282,6 +283,25 @@ export function decodeTrade(row: RawEventRow): DecodedTrade | null {
  * block's events (src/blocks/hubHops.ts), so a repaired history books the hub
  * asset exactly as new blocks do.
  */
+const OTC_FILL_EVENT_SET = new Set<string>(OTC_FILL_EVENT_NAMES)
+
+/**
+ * The taker named by the OTC pallet's fill event sitting immediately before
+ * `row` — same block, `event_index - 1`. Null when the previous row is not that
+ * event, which leaves the fill booked as the Broadcast stated it.
+ */
+function otcTakerBefore(row: RawEventRow, previous: RawEventRow | undefined): string | null {
+  if (!previous || previous.block_height !== row.block_height) return null
+  if (!OTC_FILL_EVENT_SET.has(previous.event_name)) return null
+  if (row.event_index != null && previous.event_index != null && previous.event_index !== row.event_index - 1) return null
+  try {
+    const who = (JSON.parse(previous.args_json) as { who?: unknown }).who
+    return typeof who === 'string' && who.length > 0 ? who : null
+  } catch {
+    return null
+  }
+}
+
 export function decodeBlockTrades(
   rows: readonly RawEventRow[],
   uniswapV3Pools: UniswapV3PoolIndex = new Map(),
@@ -300,15 +320,25 @@ export function decodeBlockTrades(
     for (const trade of foldOmnipoolHubHops(trades, t => t.account)) out.push({ blockHeight: block, trade })
     slots = []
   }
+  // The row before the one being read. The rows arrive ordered by (block,
+  // event_index) and an OTC Broadcast fill's pallet event sits immediately ahead
+  // of it, which is the only thing naming the fill's taker (otcCounterparty.ts).
+  // The pallet event is not a swap event, so decodeTrade returns null for it and
+  // it never becomes a trade of its own.
+  let previous: RawEventRow | undefined
   for (const row of rows) {
+    const priorRow = previous
+    previous = row
     if (row.block_height !== block) { flush(); block = row.block_height }
     if (row.event_name === EVM_LOG_EVENT_NAME) {
       const swap = decodeRawUniswapV3Swap(row, uniswapV3Pools)
       if (swap) slots.push({ trade: swap, extrinsicIndex: row.extrinsic_index, fromPoolLog: true })
       continue
     }
-    const trade = decodeTrade(row)
-    if (trade && (trade.inputs.length > 0 || trade.outputs.length > 0)) slots.push({ trade, extrinsicIndex: row.extrinsic_index, fromPoolLog: false })
+    const decoded = decodeTrade(row)
+    if (!decoded || (decoded.inputs.length === 0 && decoded.outputs.length === 0)) continue
+    const trade = resolveRawOtcSides(decoded, otcTakerBefore(row, priorRow))
+    slots.push({ trade, extrinsicIndex: row.extrinsic_index, fromPoolLog: false })
   }
   flush()
   return out
@@ -486,6 +516,7 @@ export function rowsForTrade(
   const outputOriginalsByCanonical = originalsByCanonicalAsset(outputs)
   const inputOriginalsByCanonical = originalsByCanonicalAsset(inputs)
   const tradeRowsByAsset = new Map<number, TradeVolumeRow>()
+  const counterpartyRowsByAsset = new Map<number, TradeVolumeRow>()
   const priceRowsByAsset = new Map<number, PriceVolumeRow>()
 
   const priceRowForAsset = (assetId: number): PriceVolumeRow => {
@@ -497,24 +528,30 @@ export function rowsForTrade(
     return row
   }
 
-  const tradeRowForAsset = (assetId: number): TradeVolumeRow | null => {
-    if (!trade.account) return null
-    let row = tradeRowsByAsset.get(assetId)
+  const rowIn = (rows: Map<number, TradeVolumeRow>, account: string, assetId: number, mirrored: boolean): TradeVolumeRow => {
+    let row = rows.get(assetId)
     if (!row) {
       row = {
         asset_id: assetId,
         block_height: blockHeight,
-        account: trade.account,
+        account,
         native_volume_buy: '0',
         native_volume_sell: '0',
         usd_volume_buy: '0.000000000000',
         usd_volume_sell: '0.000000000000',
         trade_count: 1,
+        counterparty: mirrored ? 1 : 0,
       }
-      tradeRowsByAsset.set(assetId, row)
+      rows.set(assetId, row)
     }
     return row
   }
+  const tradeRowForAsset = (assetId: number): TradeVolumeRow | null =>
+    trade.account ? rowIn(tradeRowsByAsset, trade.account, assetId, false) : null
+  // The passive side of an OTC fill, booked with the legs mirrored (otcCounterparty.ts).
+  const counterpartyAccount = trade.counterparty && trade.counterparty !== trade.account ? trade.counterparty : null
+  const counterpartyRowForAsset = (assetId: number): TradeVolumeRow | null =>
+    counterpartyAccount ? rowIn(counterpartyRowsByAsset, counterpartyAccount, assetId, true) : null
 
   for (const input of inputs) {
     if (isCanonicalSelfConversion(input, outputOriginalsByCanonical)) continue
@@ -533,6 +570,11 @@ export function rowsForTrade(
     if (tradeRow) {
       tradeRow.native_volume_sell = sumBigIntStrings(tradeRow.native_volume_sell, input.amount.toString())
       tradeRow.usd_volume_sell = sumDecimal128Strings(tradeRow.usd_volume_sell, usdVolume)
+    }
+    const cpRow = counterpartyRowForAsset(input.canonicalAssetId)
+    if (cpRow) {
+      cpRow.native_volume_buy = sumBigIntStrings(cpRow.native_volume_buy, input.amount.toString())
+      cpRow.usd_volume_buy = sumDecimal128Strings(cpRow.usd_volume_buy, usdVolume)
     }
   }
 
@@ -554,10 +596,15 @@ export function rowsForTrade(
       tradeRow.native_volume_buy = sumBigIntStrings(tradeRow.native_volume_buy, output.amount.toString())
       tradeRow.usd_volume_buy = sumDecimal128Strings(tradeRow.usd_volume_buy, usdVolume)
     }
+    const cpRow = counterpartyRowForAsset(output.canonicalAssetId)
+    if (cpRow) {
+      cpRow.native_volume_sell = sumBigIntStrings(cpRow.native_volume_sell, output.amount.toString())
+      cpRow.usd_volume_sell = sumDecimal128Strings(cpRow.usd_volume_sell, usdVolume)
+    }
   }
 
   return {
-    tradeRows: [...tradeRowsByAsset.values()],
+    tradeRows: [...tradeRowsByAsset.values(), ...counterpartyRowsByAsset.values()],
     priceRows: [...priceRowsByAsset.values()],
     unpricedLegs,
   }
@@ -720,13 +767,17 @@ async function queryRawEvents(
     : ''
   const result = await client.query({
     query: `
-      SELECT block_height, event_name, args_json, extrinsic_index
+      SELECT block_height, event_name, args_json, extrinsic_index, event_index
       FROM price_data.raw_events FINAL
       WHERE block_height BETWEEN {from:UInt32} AND {to:UInt32}
         AND (
           (block_height < {unified_from:UInt32} AND event_name IN ({legacy_names:Array(String)}))
           OR
           (block_height >= {unified_from:UInt32} AND event_name IN ({broadcast_names:Array(String)}))
+          -- An OTC Broadcast fill is booked against the taker the pallet's own fill
+          -- event names, which sits at event_index - 1 (see otcCounterparty.ts). It
+          -- is not a swap event, so it has to be asked for explicitly.
+          OR event_name IN ({otc_fill_names:Array(String)})
           ${poolLogArm}
         )
       ORDER BY block_height, event_index
@@ -737,6 +788,7 @@ async function queryRawEvents(
       unified_from: unifiedSwapFromBlock,
       legacy_names: LEGACY_SWAP_EVENT_NAMES,
       broadcast_names: BROADCAST_SWAP_EVENT_NAMES,
+      otc_fill_names: OTC_FILL_EVENT_NAMES,
       evm_log: EVM_LOG_EVENT_NAME,
       pools: [...uniswapV3PoolAddresses],
     },
