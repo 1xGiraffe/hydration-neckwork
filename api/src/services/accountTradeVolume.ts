@@ -24,6 +24,9 @@ const BROADCAST_EVENTS = "'Broadcast.Swapped','Broadcast.Swapped2','Broadcast.Sw
 // every fill moves as one Currencies.Transferred in and one out.
 const ICE_MIN_BLOCK = 14_362_830
 const INTENT_FILL_EVENTS = "'Intent.IntentResolved','Intent.IntentResovedPartially','Intent.DcaTradeExecuted','Intent.DcaCompleted'"
+// The OTC pallet's fill events, which name a fill's TAKER as `who` — the only
+// thing that resolves an OTC Broadcast fill's two sides (see the `bcast` CTE).
+const OTC_FILL_EVENTS = "'OTC.Filled','OTC.PartiallyFilled'"
 const ICE_POT_ACCOUNT = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
 
 // Source for per-account trading volume: the de-duped net-trade model, whose
@@ -298,19 +301,66 @@ v3_direct AS (
 INSERT INTO ${targetTable}
   (account, block_height, trade_key, volume_usd, net_in_usd, net_out_usd, trade_count, computed_at)
 WITH${legacyLegs},${intentFills},${v3Direct},
+bcast AS (
+  SELECT e.block_height AS block_height, e.event_index AS event_index, e.block_timestamp AS block_time,
+         e.event_name AS event_name, e.args_json AS args_json, e.rid AS rid,
+         -- An OTC fill cannot be booked against its swapper: the legs are always
+         -- the TAKER's direction, while swapper names the order's MAKER in 620 of
+         -- the 796 fills on chain and the taker in the other 176. The pallet's own
+         -- fill event sits at event_index - 1 and names the taker as who; the taker
+         -- is always one of {swapper, filler}, so the maker is the other one. Same
+         -- rule as the live indexer and the repair script, which share it in
+         -- src/blocks/otcCounterparty.ts. An unresolvable fill (no sibling event in
+         -- this partition, or a taker that is neither account) keeps swapper, which
+         -- is how it was booked before.
+         multiIf(NOT e.is_otc, e.swapper,
+                 t.taker = e.swapper, e.swapper,
+                 t.taker = e.filler_acct, e.filler_acct,
+                 e.swapper) AS principal,
+         multiIf(NOT e.is_otc, '',
+                 t.taker = e.swapper, e.filler_acct,
+                 t.taker = e.filler_acct, e.swapper,
+                 '') AS passive
+  FROM (
+    SELECT block_height, event_index, block_timestamp, event_name, args_json, ${rid} AS rid,
+           JSONExtractString(args_json,'swapper') AS swapper,
+           JSONExtractString(args_json,'filler') AS filler_acct,
+           JSONExtractString(args_json,'fillerType','__kind') = 'OTC' AS is_otc
+    FROM price_data.raw_events FINAL
+    WHERE event_name IN (${BROADCAST_EVENTS}) AND block_height >= ${BROADCAST_MIN_BLOCK} AND ${pf}
+  ) e
+  LEFT JOIN (
+    SELECT block_height, event_index + 1 AS bc_index, JSONExtractString(args_json,'who') AS taker
+    FROM price_data.raw_events FINAL
+    WHERE event_name IN (${OTC_FILL_EVENTS}) AND ${pf}
+  ) t ON t.block_height = e.block_height AND t.bc_index = e.event_index
+),
 legs AS (
-  SELECT JSONExtractString(args_json,'swapper') AS account, block_height, ${bcastKey} AS trade_key,
-         block_timestamp AS block_time, JSONExtractInt(leg,'asset') AS asset_id,
+  SELECT principal AS account, block_height, ${bcastKey} AS trade_key,
+         block_time, JSONExtractInt(leg,'asset') AS asset_id,
          toDecimal256(${outAmount}, 0) AS samt
-  FROM (SELECT block_height, event_index, block_timestamp, event_name, args_json, ${rid} AS rid
-        FROM price_data.raw_events FINAL WHERE event_name IN (${BROADCAST_EVENTS}) AND block_height >= ${BROADCAST_MIN_BLOCK} AND ${pf})
+  FROM bcast
   ARRAY JOIN JSONExtractArrayRaw(args_json,'outputs') AS leg
   UNION ALL
-  SELECT JSONExtractString(args_json,'swapper'), block_height, ${bcastKey},
-         block_timestamp, JSONExtractInt(leg,'asset'), -toDecimal256(${inAmount}, 0)
-  FROM (SELECT block_height, event_index, block_timestamp, event_name, args_json, ${rid} AS rid
-        FROM price_data.raw_events FINAL WHERE event_name IN (${BROADCAST_EVENTS}) AND block_height >= ${BROADCAST_MIN_BLOCK} AND ${pf})
+  SELECT principal, block_height, ${bcastKey},
+         block_time, JSONExtractInt(leg,'asset'), -toDecimal256(${inAmount}, 0)
+  FROM bcast
   ARRAY JOIN JSONExtractArrayRaw(args_json,'inputs') AS leg
+  UNION ALL
+  -- The maker's mirror image of the same fill: it gave up what the order put OUT
+  -- and received what came IN. Only OTC resolves a passive side, so these two arms
+  -- are empty for every pool venue.
+  SELECT passive, block_height, ${bcastKey},
+         block_time, JSONExtractInt(leg,'asset'), -toDecimal256(${outAmount}, 0)
+  FROM bcast
+  ARRAY JOIN JSONExtractArrayRaw(args_json,'outputs') AS leg
+  WHERE passive != ''
+  UNION ALL
+  SELECT passive, block_height, ${bcastKey},
+         block_time, JSONExtractInt(leg,'asset'), toDecimal256(${inAmount}, 0)
+  FROM bcast
+  ARRAY JOIN JSONExtractArrayRaw(args_json,'inputs') AS leg
+  WHERE passive != ''
   UNION ALL
   SELECT who AS account, block_height, trade_key,
          block_timestamp, toUInt32(greatest(0, JSONExtractInt(args_json,'assetIn'))),

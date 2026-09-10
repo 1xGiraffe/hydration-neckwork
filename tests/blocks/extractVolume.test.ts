@@ -13,6 +13,8 @@ import type { PriceRow } from '../../src/db/schema.ts';
 import { isSwapEvent } from '../../src/registry/swapEvents.ts';
 import { sts, type RuntimeCtx } from '../../src/types/support.ts';
 import { broadcast } from '../../src/types/events.ts';
+import { readFile } from 'node:fs/promises'
+import { OTC_FILL_EVENT_NAMES } from '../../src/blocks/otcCounterparty.js'
 
 function createMockEvent(name: string, args: unknown) {
   const runtime = {
@@ -941,3 +943,200 @@ describe('extractTradeVolumeFromSwaps', () => {
     });
   });
 });
+
+describe('Uniswap v3 pool swaps in EVM.Log', () => {
+  // The aDOT/HOLLAR pool's first swap (block 14395782, extrinsic 4) exactly as
+  // the block stream carries it: HOLLAR in, aDOT out, to recipient 0x6e8967….
+  const POOL = '0x5c6208a3c316a801f8996750aa7b6f45fc988548';
+  const swapLog = {
+    log: {
+      address: POOL,
+      topics: [
+        '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67',
+        '0x0000000000000000000000005a79de848626994c4099640ef5c48fd65dae4159',
+        '0x0000000000000000000000006e896769ddecd994f63e5772218a820918e0ff6f',
+      ],
+      data: '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffe6dbabd300000000000000000000000000000000000000000000000000a411a5b06516450000000000000000000000000000000000002a5f9ddcd191e225a5b8b880afcb0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002d5f3',
+    },
+  };
+  const pools = new Map([[POOL, { token0AssetId: 1001, token1AssetId: 222 }]]);
+  const prices: PriceMap = new Map([[5, '1.180000000000'], [1001, '1.180000000000'], [222, '1.000000000000']]);
+  const decimals: AssetDecimals = new Map([[5, 10], [1001, 10], [222, 18]]);
+  const evmLog = (extrinsicIndex: number) => ({ ...createMockEvent('EVM.Log', swapLog), extrinsicIndex });
+  const routedFill = (extrinsicIndex: number) => ({
+    ...createMockEvent('Broadcast.Swapped3', {
+      swapper: '0x455448006e896769ddecd994f63e5772218a820918e0ff6f0000000000000000',
+      filler: '0x4554480069003a65189f6ed993d3bd3e2b74f1db39f405ce0000000000000000',
+      fillerType: { __kind: 'UniswapV3' },
+      operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 222, amount: 46181299507238469n }],
+      outputs: [{ asset: 1001, amount: 421811245n }],
+      fees: [],
+      operationStack: [],
+    }),
+    extrinsicIndex,
+  });
+
+  it('books a direct-EVM swap on a known pool as volume in both directions, canonicalised like any trade', () => {
+    const canonical = (id: number) => (id === 1001 ? 5 : id);
+    const rows = extractVolumeFromSwaps([evmLog(4)], 14395782, 443, prices, decimals, canonical, { uniswapV3Pools: pools });
+
+    expect(rows).toEqual([
+      expect.objectContaining({ asset_id: 222, native_volume_sell: '46181299507238469', usd_volume_sell: '0.046181299507' }),
+      expect.objectContaining({ asset_id: 5, native_volume_buy: '421811245', usd_volume_buy: '0.049773726910' }),
+    ]);
+
+    const accountRows = extractTradeVolumeFromSwaps([evmLog(4)], 14395782, 443, prices, decimals, canonical, { uniswapV3Pools: pools });
+    expect(accountRows.map(r => [r.asset_id, r.account, r.trade_count])).toEqual([
+      [222, '0x455448006e896769ddecd994f63e5772218a820918e0ff6f0000000000000000', 1],
+      [5, '0x455448006e896769ddecd994f63e5772218a820918e0ff6f0000000000000000', 1],
+    ]);
+  });
+
+  it('books a router-routed v3 hop once: the Broadcast fill counts, the pool log in the same extrinsic does not', () => {
+    const rows = extractVolumeFromSwaps([evmLog(4), routedFill(4)], 14395782, 443, prices, decimals, id => id, { uniswapV3Pools: pools });
+    expect(rows.map(r => [r.asset_id, r.native_volume_sell, r.native_volume_buy])).toEqual([
+      [222, '46181299507238469', '0'],
+      [1001, '0', '421811245'],
+    ]);
+
+    const accountRows = extractTradeVolumeFromSwaps([evmLog(4), routedFill(4)], 14395782, 443, prices, decimals, id => id, { uniswapV3Pools: pools });
+    expect(accountRows.map(r => r.trade_count)).toEqual([1, 1]);
+  });
+
+  it('keeps a direct swap when the routed fill belongs to a different extrinsic', () => {
+    const rows = extractVolumeFromSwaps([evmLog(3), routedFill(4)], 14395782, 443, prices, decimals, id => id, { uniswapV3Pools: pools });
+    // two trades, two rows each; the block's merge step sums them per asset
+    expect(mergePriceAndVolumeRows([], rows).map(r => [r.asset_id, r.native_volume_sell, r.native_volume_buy])).toEqual([
+      [222, '92362599014476938', '0'],
+      [1001, '0', '843622490'],
+    ]);
+  });
+
+  it('reads no pool logs without a pool index, on an unknown pool, or for a non-swap log', () => {
+    expect(extractVolumeFromSwaps([evmLog(4)], 14395782, 443, prices, decimals)).toEqual([]);
+    expect(extractVolumeFromSwaps([evmLog(4)], 14395782, 443, prices, decimals, id => id, { uniswapV3Pools: new Map() })).toEqual([]);
+    const otherPool = new Map([['0x1111111111111111111111111111111111111111', { token0AssetId: 1001, token1AssetId: 222 }]]);
+    expect(extractVolumeFromSwaps([evmLog(4)], 14395782, 443, prices, decimals, id => id, { uniswapV3Pools: otherPool })).toEqual([]);
+    const transfer = createMockEvent('EVM.Log', { log: { address: POOL, topics: ['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef', `0x${'0'.repeat(64)}`, `0x${'0'.repeat(64)}`], data: `0x${'0'.repeat(64)}` } });
+    expect(extractVolumeFromSwaps([transfer], 14395782, 443, prices, decimals, id => id, { uniswapV3Pools: pools })).toEqual([]);
+  });
+});
+
+// An OTC fill's Broadcast event is internally inconsistent, and booking it naively
+// puts the wrong account on the wrong side of a trade. Measured over every OTC fill
+// on chain (796, across Broadcast.Swapped/Swapped2/Swapped3):
+//
+//  * `inputs`/`outputs` are ALWAYS the ORDER's direction, which is the TAKER's:
+//    the order's input is what the taker pays, its output what the taker receives.
+//  * `swapper` names the order's MAKER in 620 of them and the taker in the other
+//    176 — the same two accounts swap roles between blocks — so the legs cannot be
+//    booked against `swapper`.
+//  * the taker is ALWAYS one of {swapper, filler} (0 of 796 name neither), and the
+//    `OTC.Filled`/`OTC.PartiallyFilled` sitting at exactly `event_index - 1`
+//    (796 of 796) says which. The maker is then the other one.
+//
+// A maker really did trade, so both counterparties are booked — the taker with the
+// legs as they stand, the maker with them mirrored. Only the taker's row counts
+// toward a candle's volume (`counterparty: 0`); the maker's carries `counterparty:
+// 1` so cross-account sums do not count the same tokens twice.
+describe('OTC fills book both counterparties on their true sides', () => {
+  const prices: PriceMap = new Map([
+    [0, '0.008000000000'],
+    [22, '1.000000000000'],
+  ]);
+  const decimals: AssetDecimals = new Map([
+    [0, 12],
+    [22, 6],
+  ]);
+
+  // Order 1587's shape: the maker reserved HDX (asset 0) and asked for USDC (22),
+  // so the order's input is USDC and its output HDX. The taker pays the USDC.
+  const otcFill = (who: string) => createMockEvent('OTC.PartiallyFilled', {
+    orderId: 1587, who, amountIn: 800000n, amountOut: 100000000000000n, fee: 100000000000n,
+  });
+  const broadcastFill = (swapper: string, filler: string) => createMockEvent('Broadcast.Swapped3', {
+    fillerType: { __kind: 'OTC', value: 1587 },
+    operation: { __kind: 'ExactIn' },
+    inputs: [{ asset: 22, amount: 800000n }],
+    outputs: [{ asset: 0, amount: 100000000000000n }],
+    fees: [], swapper, filler, operationStack: [],
+  });
+
+  const rowFor = (rows: ReturnType<typeof extractTradeVolumeFromSwaps>, account: string, assetId: number) =>
+    rows.find(row => row.account === account && row.asset_id === assetId);
+
+  // The 620-fill majority: `swapper` is the maker, so the legs belong to `filler`.
+  it('credits the taker with the legs when swapper is the maker', () => {
+    const rows = extractTradeVolumeFromSwaps(
+      [otcFill('taker'), broadcastFill('maker', 'taker')], 100, 323, prices, decimals,
+    );
+
+    // The taker paid USDC and received HDX.
+    expect(rowFor(rows, 'taker', 22)).toMatchObject({ native_volume_sell: '800000', native_volume_buy: '0', counterparty: 0 });
+    expect(rowFor(rows, 'taker', 0)).toMatchObject({ native_volume_buy: '100000000000000', native_volume_sell: '0', counterparty: 0 });
+    // The maker gave up the HDX and received the USDC — the mirror image, and
+    // flagged so a cross-account sum counts these tokens once.
+    expect(rowFor(rows, 'maker', 0)).toMatchObject({ native_volume_sell: '100000000000000', native_volume_buy: '0', counterparty: 1 });
+    expect(rowFor(rows, 'maker', 22)).toMatchObject({ native_volume_buy: '800000', native_volume_sell: '0', counterparty: 1 });
+  });
+
+  // The 176-fill remainder: `swapper` already IS the taker, so the legs stay put
+  // and the maker is `filler`. Same output as above — which is the point.
+  it('resolves the same sides when swapper is already the taker', () => {
+    const rows = extractTradeVolumeFromSwaps(
+      [otcFill('taker'), broadcastFill('taker', 'maker')], 100, 323, prices, decimals,
+    );
+
+    expect(rowFor(rows, 'taker', 22)).toMatchObject({ native_volume_sell: '800000', counterparty: 0 });
+    expect(rowFor(rows, 'taker', 0)).toMatchObject({ native_volume_buy: '100000000000000', counterparty: 0 });
+    expect(rowFor(rows, 'maker', 0)).toMatchObject({ native_volume_sell: '100000000000000', counterparty: 1 });
+    expect(rowFor(rows, 'maker', 22)).toMatchObject({ native_volume_buy: '800000', counterparty: 1 });
+  });
+
+  // The candle's own volume comes from the `prices` rows, so it must stay
+  // single-counted: one fill moved one lot of HDX, whatever its two sides.
+  it('leaves the candle volume rows single-counted', () => {
+    const rows = extractVolumeFromSwaps(
+      [otcFill('taker'), broadcastFill('maker', 'taker')], 100, 323, prices, decimals,
+    );
+
+    expect(rows).toHaveLength(2);
+    expect(rows.filter(row => row.asset_id === 0)).toHaveLength(1);
+    expect(rows.filter(row => row.asset_id === 22)).toHaveLength(1);
+    expect(rows.find(row => row.asset_id === 0)).toMatchObject({ native_volume_buy: '100000000000000' });
+    expect(rows.find(row => row.asset_id === 22)).toMatchObject({ native_volume_sell: '800000' });
+  });
+
+  // Without the sibling OTC event there is nothing that names the taker, so the
+  // trade stays booked exactly as before rather than guessing which side is which.
+  it('books only the swapper when the OTC event is not in the block', () => {
+    const rows = extractTradeVolumeFromSwaps([broadcastFill('maker', 'taker')], 100, 323, prices, decimals);
+
+    expect(rows.every(row => row.account === 'maker')).toBe(true);
+    expect(rows.every(row => (row.counterparty ?? 0) === 0)).toBe(true);
+  });
+
+  // A non-OTC fill is untouched: the pool is not an account and gets no row.
+  it('leaves a pool-venue fill with one account', () => {
+    const rows = extractTradeVolumeFromSwaps([createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Omnipool' }, operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 22, amount: 800000n }], outputs: [{ asset: 0, amount: 100000000000000n }],
+      fees: [], swapper: 'alice', filler: 'pool', operationStack: [],
+    })], 100, 323, prices, decimals);
+
+    expect([...new Set(rows.map(row => row.account))]).toEqual(['alice']);
+    expect(rows.every(row => (row.counterparty ?? 0) === 0)).toBe(true);
+  });
+});
+
+describe('the OTC side rule needs its source events subscribed', () => {
+  it('the processor fetches the OTC fill events the rule reads', async () => {
+    // The rule reads the pallet fill event sitting before the Broadcast fill. If the
+    // processor does not request it, `block.events` never holds it and every fill is
+    // booked against whichever account the Broadcast happened to name — the exact
+    // regression this pins, found live after the rule itself was already correct.
+    const source = await readFile(new URL('../../src/processor.ts', import.meta.url), 'utf8')
+    for (const name of OTC_FILL_EVENT_NAMES) expect(source).toContain(`'${name}'`)
+  })
+})
