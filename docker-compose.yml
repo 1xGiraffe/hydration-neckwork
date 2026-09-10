@@ -510,6 +510,11 @@ services:
     ports:
       - "3000:3000"
     environment:
+      # Per-group page/window logging for the notification lanes; off unless set.
+      - NOTIFICATIONS_DEBUG=${NOTIFICATIONS_DEBUG:-}
+      # One-off catch-up knob: how far behind the head a notification tick may look
+      # (default 600). Wide only for a deliberate replay after a lane lost a stretch.
+      - NOTIFICATIONS_MAX_WINDOW_BLOCKS=${NOTIFICATIONS_MAX_WINDOW_BLOCKS:-}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       # Live money-market reads use a Hydration RPC reachable from the container.
